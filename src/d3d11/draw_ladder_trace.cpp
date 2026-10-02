@@ -226,7 +226,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":1,"
+        "\"predicateFactVersion\":2,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -235,7 +235,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Predicate fact version 1 independently re-evaluates only DrawGateDisabledNone and EyeRangeSkip; whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
+        "\"predicateNote\":\"Predicate fact version 2 independently re-evaluates DrawGateDisabledNone, EyeRangeSkip, and the frozen 14a NightVisionClaim selector from source facts; whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
         "\"identityNote\":\"Resource identities are per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
@@ -319,6 +319,23 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                     "\"censusSkippedDelta\":%u}",
                     fact.censusSkippedDeltaKnown ? "true" : "false",
                     fact.censusSkippedDelta)) return false;
+            } else if (fact.kind == PredicateFactKind::NightVisionClaim) {
+                if (!writeFmt(writer,
+                    "{\"siteId\":%u,\"kind\":3,\"known\":\"%s\","
+                    "\"dispatchEnabled\":\"%s\",\"activeMaskKnown\":\"%s\","
+                    "\"activePluginMask\":\"%016llX\",\"candidateKnown\":\"%s\","
+                    "\"candidatePresent\":\"%s\",\"modeKnown\":\"%s\",\"mode\":%u,"
+                    "\"shapeReached\":\"%s\",\"shapeMatched\":\"%s\","
+                    "\"callbackReached\":\"%s\",\"callbackModeKnown\":\"%s\","
+                    "\"callbackMode\":%u,\"failedKnown\":\"%s\",\"failed\":\"%s\"}",
+                    fact.siteId, triName(fact.known), triName(fact.dispatchEnabled),
+                    triName(fact.activeMaskKnown),
+                    static_cast<unsigned long long>(fact.activePluginMask),
+                    triName(fact.candidateKnown), triName(fact.candidatePresent),
+                    triName(fact.modeKnown), fact.mode, triName(fact.shapeReached),
+                    triName(fact.shapeMatched), triName(fact.callbackReached),
+                    triName(fact.callbackModeKnown), fact.callbackMode,
+                    triName(fact.failedKnown), triName(fact.failed))) return false;
             } else {
                 return false;
             }
@@ -581,6 +598,7 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
         (fact.kind == PredicateFactKind::DrawGateWanted && fact.siteId != 3) ||
         (fact.kind == PredicateFactKind::EyeRangeSkip &&
          (fact.siteId != 49 || fact.rangeCount > 4)) ||
+        (fact.kind == PredicateFactKind::NightVisionClaim && fact.siteId != 50) ||
         (fact.kind == PredicateFactKind::DrawGateWanted &&
          ((fact.known == TriState::Yes && fact.gateWanted == TriState::Unknown) ||
           (fact.known == TriState::Unknown && fact.gateWanted != TriState::Unknown))) ||
@@ -589,8 +607,51 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
         (fact.kind == PredicateFactKind::EyeRangeSkip &&
          ((!fact.censusSkippedDeltaKnown && fact.censusSkippedDelta != 0) ||
           fact.censusSkippedDelta > 1)) ||
+        (fact.kind == PredicateFactKind::NightVisionClaim &&
+         (static_cast<std::uint8_t>(fact.dispatchEnabled) > 2 ||
+          fact.dispatchEnabled == TriState::Unknown ||
+          static_cast<std::uint8_t>(fact.activeMaskKnown) > 2 ||
+          static_cast<std::uint8_t>(fact.candidateKnown) > 2 ||
+          static_cast<std::uint8_t>(fact.candidatePresent) > 2 ||
+          static_cast<std::uint8_t>(fact.modeKnown) > 2 || fact.mode > 3 ||
+          (fact.modeKnown == TriState::Unknown && fact.mode != 0) ||
+          static_cast<std::uint8_t>(fact.shapeReached) > 2 ||
+          static_cast<std::uint8_t>(fact.shapeMatched) > 2 ||
+          static_cast<std::uint8_t>(fact.callbackReached) > 2 ||
+          static_cast<std::uint8_t>(fact.callbackModeKnown) > 2 ||
+          fact.callbackMode > 3 || static_cast<std::uint8_t>(fact.failedKnown) > 2 ||
+          static_cast<std::uint8_t>(fact.failed) > 2 ||
+          (fact.dispatchEnabled == TriState::No &&
+           (fact.activeMaskKnown != TriState::Unknown ||
+            fact.candidateKnown != TriState::Unknown ||
+            fact.shapeReached != TriState::No ||
+            fact.callbackReached != TriState::No)) ||
+          (fact.dispatchEnabled == TriState::Yes &&
+           (fact.activeMaskKnown != TriState::Yes ||
+            fact.candidateKnown != TriState::Yes ||
+            fact.candidatePresent == TriState::Unknown)) ||
+          (fact.candidatePresent == TriState::No &&
+           (fact.shapeReached != TriState::No ||
+            fact.callbackReached != TriState::No)) ||
+          (fact.candidatePresent == TriState::Yes && fact.detailsFinalized &&
+           (fact.shapeReached != TriState::Yes ||
+            fact.shapeMatched == TriState::Unknown ||
+            (fact.shapeMatched == TriState::No &&
+             fact.callbackReached != TriState::No) ||
+            (fact.shapeMatched == TriState::Yes &&
+             fact.callbackReached == TriState::No) ||
+            (fact.callbackReached == TriState::Yes &&
+             fact.callbackModeKnown != TriState::Yes) ||
+            (fact.callbackModeKnown == TriState::Yes &&
+             fact.callbackReached != TriState::Yes) ||
+            (fact.failedKnown == TriState::Yes &&
+             (fact.callbackReached != TriState::Yes ||
+              fact.failed == TriState::Unknown)) ||
+            (fact.failedKnown != TriState::Yes &&
+             fact.failed != TriState::Unknown))))) ||
         (fact.kind != PredicateFactKind::DrawGateWanted &&
-         fact.kind != PredicateFactKind::EyeRangeSkip)) {
+         fact.kind != PredicateFactKind::EyeRangeSkip &&
+         fact.kind != PredicateFactKind::NightVisionClaim)) {
         g_wasOverflowed = true;
         return;
     }
@@ -611,6 +672,47 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
     record.predicateFacts[record.predicateFactCount++] = fact;
 }
 
+void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized || fact.kind != PredicateFactKind::NightVisionClaim ||
+        fact.siteId != 50) { rejectInvalidToken(); return; }
+    for (std::uint8_t i = 0; i < record.predicateFactCount; ++i) {
+        PredicateFact& stored = record.predicateFacts[i];
+        if (stored.siteId != 50 || stored.kind != PredicateFactKind::NightVisionClaim)
+            continue;
+        if (stored.detailsFinalized || stored.candidatePresent != TriState::Yes ||
+            fact.shapeReached != TriState::Yes ||
+            (fact.shapeMatched != TriState::Yes && fact.shapeMatched != TriState::No) ||
+            (fact.shapeMatched == TriState::No &&
+             fact.callbackReached != TriState::No) ||
+            (fact.shapeMatched == TriState::Yes &&
+             fact.callbackReached == TriState::No) ||
+            (fact.callbackReached == TriState::Yes &&
+             fact.callbackModeKnown != TriState::Yes) ||
+            (fact.callbackModeKnown == TriState::Yes &&
+             fact.callbackReached != TriState::Yes) ||
+            (fact.failedKnown == TriState::Yes &&
+             (fact.callbackReached != TriState::Yes ||
+              fact.failed == TriState::Unknown)) ||
+            (fact.failedKnown != TriState::Yes &&
+             fact.failed != TriState::Unknown)) {
+            g_wasOverflowed = true;
+            return;
+        }
+        stored.shapeReached = fact.shapeReached;
+        stored.shapeMatched = fact.shapeMatched;
+        stored.callbackReached = fact.callbackReached;
+        stored.callbackModeKnown = fact.callbackModeKnown;
+        stored.callbackMode = fact.callbackMode;
+        stored.failedKnown = fact.failedKnown;
+        stored.failed = fact.failed;
+        stored.detailsFinalized = true;
+        return;
+    }
+    g_wasOverflowed = true;
+}
+
 void finishDraw(Token token, std::int16_t winnerSiteId,
                 std::int16_t verdictOrdinal) noexcept {
     if (!validToken(token)) { rejectInvalidToken(); return; }
@@ -618,10 +720,14 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
     if (record.finalized) { rejectInvalidToken(); return; }
     for (std::uint16_t i = 0; i < record.siteCount; ++i) {
         const std::uint16_t siteId = record.sites[i].id;
-        if (siteId != 3 && siteId != 49) continue;
+        if (siteId != 3 && siteId != 49 && siteId != 50) continue;
         bool found = false;
         for (std::uint8_t j = 0; j < record.predicateFactCount; ++j) {
-            if (record.predicateFacts[j].siteId == siteId) found = true;
+            if (record.predicateFacts[j].siteId == siteId) {
+                found = true;
+                if (siteId == 50 && !record.predicateFacts[j].detailsFinalized)
+                    g_wasOverflowed = true;
+            }
         }
         if (!found) g_wasOverflowed = true;
     }

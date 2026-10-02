@@ -244,7 +244,18 @@ void test(bool realistic){
     testOn=false;testPulse=false;nightVisionConfigure(Config::get());check(!nightVisionMatches('X',240,1),"both live settings Off bypass replacement");fixed=r.draw(true);
     check(fixed==stock,"live Off draws original pixels");
     testOn=realistic;testPulse=true;nightVisionConfigure(Config::get());check(nightVisionMatches('X',240,1),"live On reengages");
-    nightVisionShutdown();testFail=true;fixed=r.draw(true);check(fixed==stock&&!nightVisionMatches('X',240,1),"precompiled shader creation failure draws stock and stands down");testFail=false;
+    nightVisionShutdown();testFail=true;fixed=r.draw(true);check(fixed==stock&&!nightVisionMatches('X',240,1),"precompiled shader creation failure draws stock and stands down");
+    if(realistic){
+        const EdvrPluginOps* ops=cockpitVisualsPluginOps();
+        EdvrPluginClaimObservation observation{};
+        const uint32_t plain=ops->claimDraw(ops->state,"night-vision",'X',240,1);
+        const uint32_t observed=ops->claimDrawObserved(
+            ops->state,"night-vision",'X',240,1,&observation);
+        check(observed==plain&&observed==kPluginClaimNone&&
+                  observation.mode==3&&observation.failedKnown==1&&observation.failed==1,
+              "failed applicable realistic+pulse variant is observed without changing ordinary decline");
+    }
+    testFail=false;
     r.clean();
 }
 void geometryTest(){
@@ -388,6 +399,33 @@ void gateTest(){
         const bool acts=testOn||testPulse;
         check(nightVisionWantsDraws()==acts,"draw gate: night vision wants draws exactly when realistic or pulse stability is on");
         check(nightVisionMatches('X',240,1)==acts,"draw gate: a fix that can match a draw is one that wanted draws");
+        const EdvrPluginOps* ops=cockpitVisualsPluginOps();
+        check(ops&&ops->claimDraw&&ops->claimDrawObserved&&ops->traceMode,
+              "registered Night Vision ops expose ordinary claim and optional observation callbacks");
+        uint8_t observedMode=0xff;
+        check(ops->traceMode(ops->state,&observedMode)!=0&&observedMode==i,
+              "trace mode reports each configured raw switch combination");
+        EdvrPluginClaimObservation observation{};
+        const uint32_t plain=ops->claimDraw(ops->state,"night-vision",'X',240,1);
+        const uint32_t observed=ops->claimDrawObserved(
+            ops->state,"night-vision",'X',240,1,&observation);
+        check(observed==plain&&observed==(acts?kPluginClaimNightVision:kPluginClaimNone),
+              "observed claim returns the same decision as the ordinary production callback");
+        check(observation.mode==i&&observation.failedKnown==(i?1u:0u)&&
+                  observation.failed==0,
+              "observation distinguishes mode zero from known-clear applicable failure state");
+        state.failed[i]=true;
+        EdvrPluginClaimObservation failedObservation{};
+        const uint32_t failedPlain=ops->claimDraw(ops->state,"night-vision",'X',240,1);
+        const uint32_t failedObserved=ops->claimDrawObserved(
+            ops->state,"night-vision",'X',240,1,&failedObservation);
+        check(failedPlain==kPluginClaimNone&&failedObserved==failedPlain&&
+                  failedObservation.mode==i&&failedObservation.failedKnown==(i?1u:0u)&&
+                  failedObservation.failed==(i?1u:0u),
+              "each failed mode declines identically; mode zero does not consume its failure slot");
+        state.failed[i]=false;
+        check(ops->claimDrawObserved(ops->state,"night-vision",'X',240,1,nullptr)==plain,
+              "null observation preserves the ordinary production claim");
     }
     testOn=true;testPulse=true;nightVisionConfigure(Config::get());
 }

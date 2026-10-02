@@ -16,7 +16,7 @@ namespace edvr::draw_ladder_trace {
 constexpr std::uint32_t kMaxDraws = 65536;
 constexpr std::uint16_t kMaxSiteEventsPerDraw = 48;
 constexpr std::uint16_t kMaxActionEventsPerDraw = 32;
-constexpr std::uint8_t kMaxPredicateFactsPerDraw = 2;
+constexpr std::uint8_t kMaxPredicateFactsPerDraw = 3;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -93,6 +93,7 @@ enum class TriState : std::uint8_t {
 enum class PredicateFactKind : std::uint8_t {
     DrawGateWanted = 1,
     EyeRangeSkip = 2,
+    NightVisionClaim = 3,
 };
 
 struct PredicateRange final {
@@ -112,6 +113,24 @@ struct PredicateFact final {
     // input fact is valid but the mutation observation is unavailable.
     bool censusSkippedDeltaKnown = false;
     std::uint32_t censusSkippedDelta = 0;
+    // NightVisionClaim source inputs. Availability is explicit because the
+    // legacy ladder short-circuits before later stages on dispatch/candidate
+    // misses. The callback observation is sampled during its single call.
+    TriState dispatchEnabled = TriState::Unknown;
+    TriState activeMaskKnown = TriState::Unknown;
+    std::uint64_t activePluginMask = 0;
+    TriState candidateKnown = TriState::Unknown;
+    TriState candidatePresent = TriState::Unknown;
+    TriState modeKnown = TriState::Unknown;
+    std::uint8_t mode = 0;
+    TriState shapeReached = TriState::Unknown;
+    TriState shapeMatched = TriState::Unknown;
+    TriState callbackReached = TriState::Unknown;
+    TriState callbackModeKnown = TriState::Unknown;
+    std::uint8_t callbackMode = 0;
+    TriState failedKnown = TriState::Unknown;
+    TriState failed = TriState::Unknown;
+    bool detailsFinalized = false;  // internal capture validity; not serialized
 };
 
 // The census counter is uint64_t. Keep only the supported single-step delta
@@ -189,6 +208,7 @@ void appendAction(Token token, std::uint16_t id,
                   const draw_ladder::ActionRecord& action) noexcept;
 void recordForwardFacts(Token token, const ForwardFacts& facts) noexcept;
 void appendPredicateFact(Token token, const PredicateFact& fact) noexcept;
+void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept;
 void updateCandidates(Token token, std::uint64_t mask) noexcept;
 void updateRoute(Token token, draw_ladder::RouteId route,
                  draw_ladder::SequenceId sequence) noexcept;
@@ -245,6 +265,10 @@ struct TracePolicy final {
 
     inline void predicateFact(const PredicateFact& fact) noexcept {
         appendPredicateFact(token, fact);
+    }
+
+    inline void completePredicateFact(const PredicateFact& fact) noexcept {
+        completeNightVisionFact(token, fact);
     }
 };
 

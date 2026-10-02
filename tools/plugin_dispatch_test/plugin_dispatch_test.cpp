@@ -5,9 +5,11 @@
 #include "../../src/common/log.h"
 
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <type_traits>
 
 namespace edvr { uint32_t loggerNoteCalls = 0; }
 
@@ -28,6 +30,32 @@ constexpr edvr::plugins::dispatch::ShaderClaimKey kClaims[] = {
 };
 uint32_t checks = 0;
 
+// Frozen public prefix from before trace-only callbacks were appended.
+struct LegacyEdvrPluginOpsPrefix final {
+    uint32_t structSize;
+    uint32_t manifestIndex;
+    const char* manifestId;
+    const char* drawGateName;
+    const char* const* claimIds;
+    uint32_t claimCount;
+    void* state;
+    EdvrPluginConfigureFn configure;
+    EdvrPluginWantsDrawsFn wantsDraws;
+    EdvrPluginStartupHooksWantedFn startupHooksWanted;
+    EdvrPluginClaimDrawFn claimDraw;
+    EdvrPluginDrawFn begin;
+    EdvrPluginDrawFn end;
+    EdvrPluginShutdownFn shutdown;
+};
+static_assert(std::is_standard_layout<EdvrPluginOps>::value,
+              "plugin ops ABI must remain standard-layout");
+static_assert(sizeof(LegacyEdvrPluginOpsPrefix) ==
+                  offsetof(EdvrPluginOps, claimDrawObserved),
+              "trace-only callbacks must append after the exact legacy ops prefix");
+static_assert(offsetof(EdvrPluginOps, shutdown) ==
+                  offsetof(LegacyEdvrPluginOpsPrefix, shutdown),
+              "legacy shutdown callback offset must remain stable");
+
 struct RegistryState {
     bool wants = false;
     bool legacyWants = false;
@@ -36,6 +64,10 @@ struct RegistryState {
     uint32_t beginCalls = 0;
     uint32_t endCalls = 0;
     uint32_t shutdownCalls = 0;
+    uint32_t observedCalls = 0;
+    uint8_t traceMode = 3;
+    bool traceModeAvailable = true;
+    bool failed = false;
 };
 RegistryState registryState;
 const char* const kRegistryClaimIds[] = {"night-vision"};
@@ -80,6 +112,24 @@ void registryEnd(void* state, const char* claimId, ID3D11DeviceContext*) {
 void registryShutdown(void* state) {
     ++static_cast<RegistryState*>(state)->shutdownCalls;
 }
+uint32_t registryClaimObserved(void* state, const char* claimId, uint8_t kind,
+                               uint32_t count, uint32_t instances,
+                               EdvrPluginClaimObservation* observation) {
+    auto* s = static_cast<RegistryState*>(state);
+    ++s->observedCalls;
+    if (observation) {
+        observation->mode = s->traceMode;
+        observation->failedKnown = s->traceMode ? 1u : 0u;
+        observation->failed = s->traceMode && s->failed ? 1u : 0u;
+    }
+    return registryClaim(state, claimId, kind, count, instances);
+}
+uint32_t registryTraceMode(void* state, uint8_t* mode) {
+    auto* s = static_cast<RegistryState*>(state);
+    if (!mode || !s->traceModeAvailable) return 0;
+    *mode = s->traceMode;
+    return 1;
+}
 uint32_t legacyGate(void* state) {
     return static_cast<RegistryState*>(state)->legacyWants ? 1u : 0u;
 }
@@ -89,7 +139,8 @@ EdvrPluginOps registryOps() {
             "cockpit-visuals", "test.cockpit-visuals", kRegistryClaimIds, 1,
             &registryState, &registryConfigure, &registryWants,
             &registryStartupHooksWanted, &registryClaim,
-            &registryBegin, &registryEnd, &registryShutdown};
+            &registryBegin, &registryEnd, &registryShutdown,
+            &registryClaimObserved, &registryTraceMode};
 }
 
 bool oldShape(char kind, uint32_t count, uint32_t instances) {
@@ -230,6 +281,10 @@ void disabledAndCacheCases() {
 void registryLifecycle() {
     edvr::pluginRegistryShutdown();
     registryState = {};
+    uint8_t unregisteredMode = 0xff;
+    check(!edvr::pluginRegistryTraceMode(&unregisteredMode) &&
+              unregisteredMode == 0xff,
+          "unregistered module leaves raw trace mode unavailable");
     EdvrPluginOps ops = registryOps();
     EdvrPluginOps invalid = ops;
     invalid.structSize = 0;
@@ -291,6 +346,16 @@ void registryLifecycle() {
           "off-period canonical shader binds do not create plugin candidates");
     check(!edvr::pluginRegistryWantsDraws(&registryState),
           "named and plugin subscriptions both report off");
+    uint8_t rawMode = 0xff;
+    check(edvr::pluginRegistryTraceMode(&rawMode) && rawMode == registryState.traceMode,
+          "raw trace mode remains available while the cached candidate mask is empty");
+    EdvrPluginClaimObservation noCandidateObservation{};
+    noCandidateObservation.mode = 0xff;
+    const uint32_t noCandidateObserverCalls = registryState.observedCalls;
+    check(edvr::pluginRegistryResolveDrawObserved(0, 'X', 240, 1,
+                  &noCandidateObservation) == edvr::kPluginClaimNone &&
+              registryState.observedCalls == noCandidateObserverCalls,
+          "candidate miss skips the optional observer callback");
 
     using edvr::draw_interest::InterestId;
     using edvr::draw_interest::InterestMask;
@@ -367,15 +432,21 @@ void registryLifecycle() {
               (uint64_t{1} << edvr::plugins::kPluginCockpitVisuals),
           "config-on seeds a candidate from the already-bound canonical pair");
     const uint64_t candidates = edvr::pluginRegistryShaderCandidates();
+    EdvrPluginClaimObservation observation{};
     const auto claim = edvr::plugins::dispatch::resolveCandidate(
         candidates, edvr::plugins::kPluginCockpitVisuals, [&] {
             return edvr::plugins::dispatch::matchesShape(
                 kManifestNightVisionClaim.drawShape, 'X', 240, 1);
         }, [&] {
-            return edvr::pluginRegistryResolveDraw(candidates, 'X', 240, 1);
+            return edvr::pluginRegistryResolveDrawObserved(
+                candidates, 'X', 240, 1, &observation);
         });
-    check(claim == kNightVisionClaim && registryState.claimCalls == 1,
-          "candidate dispatch invokes the declared night-vision claim");
+    check(claim == kNightVisionClaim && registryState.claimCalls == 1 &&
+              registryState.observedCalls == 1,
+          "positive candidate invokes the observed claim callback exactly once");
+    check(observation.observed == 1 && observation.mode == registryState.traceMode &&
+              observation.failedKnown == 1 && observation.failed == 0,
+          "registry marks a consumed successful observation as known source facts");
     check(edvr::loggerNoteCalls == noteBaseline,
           "candidate shader bind and draw resolution only queue breadcrumbs");
     edvr::pluginRegistryReportActivity();
@@ -439,6 +510,34 @@ void registryLifecycle() {
     edvr::pluginRegistryShutdown();
     check(edvr::loggerNoteCalls == shutdownNoteBaseline + 2,
           "shutdown drains pending bind and draw breadcrumbs away from draw dispatch");
+
+    // A legacy-prefix ops record remains valid when the optional observation
+    // tail is absent. The normal claim may still resolve, but its source facts
+    // remain explicitly unsupported rather than being fabricated.
+    registryState = {};
+    EdvrPluginOps noObserver = registryOps();
+    noObserver.claimDrawObserved = nullptr;
+    noObserver.traceMode = nullptr;
+    check(edvr::pluginRegistryRegister(&noObserver),
+          "registry accepts ops with optional observation callbacks absent");
+    bool enabled = true;
+    edvr::pluginRegistryConfigure(&enabled);
+    edvr::bindingSetShader(edvr::BindSlot::Vs, reinterpret_cast<void*>(9), kVs);
+    edvr::bindingSetShader(edvr::BindSlot::Ps, reinterpret_cast<void*>(10), kPs);
+    uint8_t unsupportedMode = 0xff;
+    check(!edvr::pluginRegistryTraceMode(&unsupportedMode) && unsupportedMode == 0xff,
+          "missing trace-mode callback reports unavailable without fabricating a mode");
+    const uint64_t fallbackCandidates = edvr::pluginRegistryShaderCandidates();
+    EdvrPluginClaimObservation unsupportedObservation{};
+    const uint32_t fallbackClaim = edvr::pluginRegistryResolveDrawObserved(
+        fallbackCandidates, 'X', 240, 1, &unsupportedObservation);
+    check(fallbackClaim == kNightVisionClaim && registryState.claimCalls == 1 &&
+              registryState.observedCalls == 0,
+          "missing observer falls back to the ordinary claim callback");
+    check(unsupportedObservation.observed == 0 && unsupportedObservation.mode == 0 &&
+              unsupportedObservation.failedKnown == 0 && unsupportedObservation.failed == 0,
+          "ordinary fallback leaves trace-only observation explicitly unknown");
+    edvr::pluginRegistryShutdown();
 }
 }
 

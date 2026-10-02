@@ -17,6 +17,18 @@ typedef uint32_t (*EdvrPluginWantsDrawsFn)(void* state);
 typedef uint32_t (*EdvrPluginStartupHooksWantedFn)(void* config);
 typedef uint32_t (*EdvrPluginClaimDrawFn)(void* state, const char* claimId,
                                           uint8_t kind, uint32_t count, uint32_t instances);
+// Optional trace-only source observation. The claim callback populates this
+// during the same evaluation that returns its ordinary claim result.
+struct EdvrPluginClaimObservation {
+    uint8_t mode;
+    uint8_t failedKnown;
+    uint8_t failed;
+    uint8_t observed;
+};
+typedef uint32_t (*EdvrPluginClaimDrawObservedFn)(
+    void* state, const char* claimId, uint8_t kind, uint32_t count,
+    uint32_t instances, EdvrPluginClaimObservation* observation);
+typedef uint32_t (*EdvrPluginTraceModeFn)(void* state, uint8_t* mode);
 typedef void (*EdvrPluginConfigureFn)(void* config);
 typedef void (*EdvrPluginDrawFn)(void* state, const char* claimId,
                                  ID3D11DeviceContext* context);
@@ -37,7 +49,13 @@ struct EdvrPluginOps {
     EdvrPluginDrawFn begin;
     EdvrPluginDrawFn end;
     EdvrPluginShutdownFn shutdown;
+    // Appended so the existing callback offsets remain stable.
+    EdvrPluginClaimDrawObservedFn claimDrawObserved;
+    EdvrPluginTraceModeFn traceMode;
 };
+static_assert(offsetof(EdvrPluginOps, claimDrawObserved) >
+              offsetof(EdvrPluginOps, shutdown),
+              "trace-only callbacks must remain appended after the legacy ABI");
 
 typedef uint32_t (*EdvrLegacyDrawGateFn)(void* state);
 }
@@ -91,6 +109,11 @@ bool pluginRegistryConfigureDrawInterests(
 void pluginRegistryReportActivity();
 uint32_t pluginRegistryResolveDraw(uint64_t candidates, uint8_t kind,
                                    uint32_t count, uint32_t instances);
+uint32_t pluginRegistryResolveDrawObserved(
+    uint64_t candidates, uint8_t kind, uint32_t count, uint32_t instances,
+    EdvrPluginClaimObservation* observation);
+uint64_t pluginRegistryActivePluginMaskForTrace() noexcept;
+bool pluginRegistryTraceMode(uint8_t* mode) noexcept;
 void pluginRegistryBegin(uint32_t claim, ID3D11DeviceContext* context);
 void pluginRegistryEnd(uint32_t claim, ID3D11DeviceContext* context);
 bool pluginRegistryWantsDraws(void* legacyState);

@@ -932,6 +932,10 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     trace::DrawFacts facts{};
     facts.eyeDrawIndex = 1;
     facts.kind = static_cast<std::uint8_t>(kind);
+    if (terminal == ladder::SiteId::kNightVisionClaim) {
+        // The terminal-matrix NV row models the actual positive selector.
+        facts.kind = static_cast<std::uint8_t>('X');
+    }
     facts.route = route;
     facts.sequence = sequence;
     facts.count = 240;
@@ -946,6 +950,7 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     }
     facts.vsHash = 0xFCF7BD2896751D96ull;
     facts.psHash = 0xF786D34B5E118D5Eull;
+    facts.candidateMask = 1ull << 1;
     facts.vsIdentity = 1;
     facts.psIdentity = 2;
     facts.rtv0Identity = 3;
@@ -1001,6 +1006,34 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 fact.censusSkippedDelta = 1;
             }
             fact.censusSkippedDeltaKnown = true;
+            policy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kNightVisionClaim) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::NightVisionClaim;
+            fact.known = trace::TriState::Yes;
+            fact.dispatchEnabled = trace::TriState::Yes;
+            fact.activeMaskKnown = trace::TriState::Yes;
+            fact.activePluginMask = 1ull << 1;
+            fact.candidateKnown = trace::TriState::Yes;
+            fact.candidatePresent = trace::TriState::Yes;
+            fact.modeKnown = trace::TriState::Yes;
+            fact.mode = 2;
+            fact.shapeReached = trace::TriState::Yes;
+            if (terminal == ladder::SiteId::kNightVisionClaim) {
+                fact.shapeMatched = trace::TriState::Yes;
+                fact.callbackReached = trace::TriState::Yes;
+                fact.callbackModeKnown = trace::TriState::Yes;
+                fact.callbackMode = 2;
+                fact.failedKnown = trace::TriState::Yes;
+                fact.failed = trace::TriState::No;
+            } else {
+                // Matrix rows retain the historical invoked-site order, with
+                // a draw-kind miss before the NV callback is reached.
+                fact.shapeMatched = trace::TriState::No;
+                fact.callbackReached = trace::TriState::No;
+            }
+            fact.detailsFinalized = true;
             policy.predicateFact(fact);
         }
     }
@@ -1185,6 +1218,8 @@ bool traceWriterChecks(const char* rootArg) {
     trace::frameBegin({14});
     trace::DrawFacts vrDraw = draw;
     vrDraw.eyeDrawIndex = 2;
+    vrDraw.count = 239;  // Candidate pair is present, but NV draw shape misses.
+    vrDraw.candidateMask = 1ull << 1;
     vrDraw.route = ladder::RouteId::kVrEye;
     vrDraw.sequence = ladder::SequenceId::kVrEye;
     const trace::Token vrToken = trace::beginDraw(vrDraw);
@@ -1233,6 +1268,23 @@ bool traceWriterChecks(const char* rootArg) {
             fact.known = trace::TriState::Yes;
             fact.eyeDrawIndex = vrDraw.eyeDrawIndex;
             fact.censusSkippedDeltaKnown = true;
+            vrPolicy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kNightVisionClaim) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::NightVisionClaim;
+            fact.known = trace::TriState::Yes;
+            fact.dispatchEnabled = trace::TriState::Yes;
+            fact.activeMaskKnown = trace::TriState::Yes;
+            fact.activePluginMask = 1ull << 1;
+            fact.candidateKnown = trace::TriState::Yes;
+            fact.candidatePresent = trace::TriState::Yes;
+            fact.modeKnown = trace::TriState::Yes;
+            fact.mode = 2;
+            fact.shapeReached = trace::TriState::Yes;
+            fact.shapeMatched = trace::TriState::No;
+            fact.callbackReached = trace::TriState::No;
+            fact.detailsFinalized = true;
             vrPolicy.predicateFact(fact);
         }
     }
@@ -1509,6 +1561,23 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(missingPredicateStarted && missingPredicateToken.valid() &&
                 trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
                 "missing visited predicate fact invalidates the capture");
+
+    const std::string missingNightVisionDir = root + "\\missingnightvisionfact";
+    const bool missingNightVisionStarted = beginCapture(missingNightVisionDir,
+        "edvr_gfx_missing_night_vision_fact.log", 31);
+    trace::DrawFacts missingNightVisionDraw = draw;
+    missingNightVisionDraw.route = ladder::RouteId::kVrEye;
+    missingNightVisionDraw.sequence = ladder::SequenceId::kVrEye;
+    const trace::Token missingNightVisionToken = trace::beginDraw(missingNightVisionDraw);
+    trace::appendSite(missingNightVisionToken,
+        static_cast<std::uint16_t>(ladder::SiteId::kNightVisionClaim), 2,
+        5, 0, 0, -1);
+    trace::finishDraw(missingNightVisionToken,
+        static_cast<std::int16_t>(ladder::SiteId::kNightVisionClaim), -1);
+    trace::frameEnd(31);
+    ok &= check(missingNightVisionStarted && missingNightVisionToken.valid() &&
+                trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
+                "missing reached NightVisionClaim fact invalidates the capture");
 
     const std::string reloadInvalidDir = root + "\\reloadinvalid";
     const bool reloadInvalidStarted = beginCapture(reloadInvalidDir,

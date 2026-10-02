@@ -39,8 +39,8 @@
   4.1), the installer skips it and Elite stays on its stock VR path. Four
   changes first (section 10); no F8, AA, flash fix or Explorer Cam without
   the runtime; the first build needs a flight on a stock runtime.
-- **Next:** `03049f8d` passed all 123 validation jobs and clean promotion;
-  Steam's latest capture verifies that code version. Pimax OpenXR, 90 Hz,
+- **Next:** NV source facts pass all 128 validation jobs; clean promotion and
+  installation are next. Steam still has `03049f8d`. Pimax OpenXR, 90 Hz,
   4032x3898 per eye. Both captures were NV off: Sean forgot the NV toggle
   and held DLSS on for two minutes. The new NV guard lacks flight coverage.
   Production v2 replay passes 13,058 supported predicate comparisons across
@@ -1046,3 +1046,57 @@ checks. Receipt input SHA-256 is
 `a084fdad7453beb738eaff531625f4150f9f55c66e90324a66ca7aa9e89d6a94`;
 the log is `build/plugin-main-merge-full-build.log`. No merged build is
 installed yet; Steam remains on the validated `03049f8d` test candidate.
+
+### NV source facts and selector diagnostic, 2026-10-02
+
+The next schema-2 writer uses predicate-fact version 2 and adds site 50 to
+the two existing families. It records raw configured mode, the consumed
+callback mode/failure state, draw shape and the existing cached shader
+hashes. The independent reader freezes 14a's X/240/1 shape and literal
+VS `FCF7BD2896751D96` / PS `F786D34B5E118D5E` predicate. Candidate and active
+masks are consistency checks. Current NotEligible/Declined event staging
+is evaluated separately from 14a's boolean claim; 14a emitted no site events.
+A cached hash of zero is a determinate mismatch of that predicate, not a
+statement about the physical shader. Dispatch off with a matching pair and
+unavailable raw mode stays unreplayable. Whole-ladder equivalence stays false.
+
+The optional observed callback and mode getter are appended to the private
+C-compatible ops record. The ordinary callback offsets are pinned by a
+legacy-prefix test. Capture uses one initial fact and one completion;
+missing, duplicate, unfinished and malformed facts invalidate the recording.
+No new D3D queries, clocks or helper re-evaluation are added. The unarmed
+NoTrace/NoCpu classifier matches the saved reference exactly: 7,057 encoded
+bytes, 94 calls, 288-byte stack reservation and 1,636 instruction-offset rows,
+SHA-256 `2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40`.
+This is classifier proof only, not whole-hook or whole-module cost proof.
+
+Focused guarded validation passes 264,422 actual NV/WARP checks, including
+ordinary/observed claim parity in every mode and failed-mode behavior; 466
+registry checks; and the strict 44-draw writer matrix with 67 supported facts,
+18 of them NV, with zero mismatches or unavailable inputs. Python reader and
+flight-reader self-tests pass. The two actual `03049f8d` sidecars still pass
+their original two-family gate and explicitly report NV unavailable in fact
+version 1. Review caught an unintended unregistered-module getter dependency
+(isolated rig LNK2019) and inconsistent fixture candidate/stage fields; the
+corrected getter returns unavailable for absent ops, and explicit fixture
+inputs now agree with their recorded shader-gate and shape-miss paths.
+
+`draw_selector_cost_test` exercises the actual typed ladder with synthetic
+POD inputs, NoTrace/NoCpu, fixed 20-pair ABBA timing and an A/A noise control.
+Its functional checks require equal terminal verdicts and zero gated legacy
+handler invocations for all-off interests. The control forces those handlers
+eligible; its input-dependent decline work is synthetic. NV is a miss in the
+timed corpus. The action stream is deliberately empty. Numeric timing never
+fails the build and cannot replace old-classifier parity, module attribution
+or a flight performance comparison. It is a separate quiet runner label.
+
+The normal full build passes all 128 jobs: 121 pool jobs in 152.6 seconds
+and seven quiet jobs in 26.1 seconds, both production profiles, the 237-key
+contract and both installer checks. The log is
+`build/plugin-nv-facts-full-build.log`. Its full-pass receipt at
+`2026-10-02T23:55:10.586855+00:00` fingerprints source inputs
+`98b5435dc7d197a3e91a77d53c0e018e4623de0b6adbfe20e3b2bccda422f76a`.
+A production NV-on capture must show an independently replayed positive
+claim and actual API owner rows before the NV instrumentation flight gate
+closes. Repeatable CPU improvement, GPU non-regression and remaining
+predicate families stay open.

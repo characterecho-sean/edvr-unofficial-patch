@@ -1945,6 +1945,45 @@ struct VScreenDrawLadderVisitor {
     template <class SiteType>
     __forceinline bool eligible() {
         if constexpr (SiteType::shaderCandidateGated) {
+            if constexpr (TracePolicy::enabled &&
+                          SiteType::id == draw_ladder::SiteId::kNightVisionClaim) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(
+                    draw_ladder::SiteId::kNightVisionClaim);
+                fact.kind = draw_ladder_trace::PredicateFactKind::NightVisionClaim;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.dispatchEnabled = s->pluginDispatchEnabled
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                fact.modeKnown = pluginRegistryTraceMode(&fact.mode)
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::Unknown;
+                if (!s->pluginDispatchEnabled) {
+                    fact.candidateKnown = draw_ladder_trace::TriState::Unknown;
+                    fact.shapeReached = draw_ladder_trace::TriState::No;
+                    fact.callbackReached = draw_ladder_trace::TriState::No;
+                    fact.detailsFinalized = true;
+                    trace.predicateFact(fact);
+                    return false;
+                }
+                fact.activeMaskKnown = draw_ladder_trace::TriState::Yes;
+                fact.activePluginMask = pluginRegistryActivePluginMaskForTrace();
+                pluginCandidates = pluginRegistryShaderCandidates();
+                trace.candidates(pluginCandidates);
+                const bool hasCandidate = plugins::dispatch::hasCandidate(
+                    pluginCandidates, plugins::kPluginCockpitVisuals);
+                fact.candidateKnown = draw_ladder_trace::TriState::Yes;
+                fact.candidatePresent = hasCandidate
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                if (!hasCandidate) {
+                    fact.shapeReached = draw_ladder_trace::TriState::No;
+                    fact.callbackReached = draw_ladder_trace::TriState::No;
+                    fact.detailsFinalized = true;
+                }
+                trace.predicateFact(fact);
+                return hasCandidate;
+            }
             // Profile/config registration is cold and stable. Do not query the
             // published shader-pair candidate cache when the module is absent.
             if (!s->pluginDispatchEnabled) return false;
@@ -2367,14 +2406,58 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kNightVisionClaim) {
-            const uint32_t pluginClaim = plugins::dispatch::resolveCandidate(
-                pluginCandidates, plugins::kPluginCockpitVisuals, [&] {
-                    const auto& claim = plugins::kManifest[plugins::kPluginCockpitVisuals]
-                        .claims[plugins::kClaimCockpitVisualsNightVision];
-                    return plugins::dispatch::matchesShape(claim.drawShape,
-                        static_cast<uint8_t>(kind), count, instances);
-                }, [&] { return pluginRegistryResolveDraw(pluginCandidates,
-                    static_cast<uint8_t>(kind), count, instances); });
+            uint32_t pluginClaim = kPluginClaimNone;
+            if constexpr (TracePolicy::enabled) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::NightVisionClaim;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                pluginClaim = plugins::dispatch::resolveCandidate(
+                    pluginCandidates, plugins::kPluginCockpitVisuals, [&] {
+                        const auto& claim = plugins::kManifest[plugins::kPluginCockpitVisuals]
+                            .claims[plugins::kClaimCockpitVisualsNightVision];
+                        const bool matches = plugins::dispatch::matchesShape(claim.drawShape,
+                            static_cast<uint8_t>(kind), count, instances);
+                        fact.shapeReached = draw_ladder_trace::TriState::Yes;
+                        fact.shapeMatched = matches
+                            ? draw_ladder_trace::TriState::Yes
+                            : draw_ladder_trace::TriState::No;
+                        return matches;
+                    }, [&] {
+                        EdvrPluginClaimObservation observation{};
+                        const uint32_t claim = pluginRegistryResolveDrawObserved(
+                            pluginCandidates, static_cast<uint8_t>(kind), count,
+                            instances, &observation);
+                        fact.callbackReached = observation.observed
+                            ? draw_ladder_trace::TriState::Yes
+                            : draw_ladder_trace::TriState::Unknown;
+                        if (observation.observed) {
+                            fact.callbackModeKnown = draw_ladder_trace::TriState::Yes;
+                            fact.callbackMode = observation.mode;
+                            fact.failedKnown = observation.failedKnown
+                                ? draw_ladder_trace::TriState::Yes
+                                : draw_ladder_trace::TriState::Unknown;
+                            fact.failed = observation.failedKnown
+                                ? (observation.failed
+                                    ? draw_ladder_trace::TriState::Yes
+                                    : draw_ladder_trace::TriState::No)
+                                : draw_ladder_trace::TriState::Unknown;
+                        }
+                        return claim;
+                    });
+                if (fact.shapeMatched == draw_ladder_trace::TriState::No)
+                    fact.callbackReached = draw_ladder_trace::TriState::No;
+                trace.completePredicateFact(fact);
+            } else {
+                pluginClaim = plugins::dispatch::resolveCandidate(
+                    pluginCandidates, plugins::kPluginCockpitVisuals, [&] {
+                        const auto& claim = plugins::kManifest[plugins::kPluginCockpitVisuals]
+                            .claims[plugins::kClaimCockpitVisualsNightVision];
+                        return plugins::dispatch::matchesShape(claim.drawShape,
+                            static_cast<uint8_t>(kind), count, instances);
+                    }, [&] { return pluginRegistryResolveDraw(pluginCandidates,
+                        static_cast<uint8_t>(kind), count, instances); });
+            }
             if (pluginClaim == kPluginClaimNightVision) return claimed(id, DrawVerdict::kNightVision);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kRemlokHideSkip) {

@@ -326,6 +326,37 @@ uint32_t pluginRegistryResolveDraw(uint64_t candidates, uint8_t kind,
         : kPluginClaimNone;
 }
 
+uint32_t pluginRegistryResolveDrawObserved(
+    uint64_t candidates, uint8_t kind, uint32_t count, uint32_t instances,
+    EdvrPluginClaimObservation* observation) {
+    if (!plugins::dispatch::hasCandidate(candidates, plugins::kPluginCockpitVisuals))
+        return kPluginClaimNone;
+    if (!g_notedCandidateDraw) {
+        g_notedCandidateDraw = true;
+        g_pendingCandidateDrawReport = true;
+    }
+    const EdvrPluginOps* ops = g_plugins[plugins::kPluginCockpitVisuals];
+    if (!ops || !ops->claimDraw) return kPluginClaimNone;
+    if (observation) *observation = {};
+    if (ops->claimDrawObserved && observation) {
+        const uint32_t claim = ops->claimDrawObserved(
+            ops->state, kNightVisionClaimId, kind, count, instances, observation);
+        observation->observed = 1;
+        return claim;
+    }
+    return ops->claimDraw(ops->state, kNightVisionClaimId, kind, count, instances);
+}
+
+uint64_t pluginRegistryActivePluginMaskForTrace() noexcept {
+    return g_activePluginMask;
+}
+
+bool pluginRegistryTraceMode(uint8_t* mode) noexcept {
+    if (!mode) return false;
+    const EdvrPluginOps* ops = g_plugins[plugins::kPluginCockpitVisuals];
+    return ops && ops->traceMode && ops->traceMode(ops->state, mode) != 0;
+}
+
 void pluginRegistryBegin(uint32_t claim, ID3D11DeviceContext* context) {
     const EdvrPluginOps* ops = pluginForClaim(claim);
     if (ops && ops->begin) ops->begin(ops->state, kNightVisionClaimId, context);

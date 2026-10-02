@@ -299,6 +299,28 @@ uint32_t pluginClaimDraw(void*,const char* claimId,uint8_t kind,uint32_t count,u
     return nightVisionClaimEligible(static_cast<char>(kind),count,instances)
         ? kPluginClaimNightVision : kPluginClaimNone;
 }
+uint32_t pluginClaimDrawObserved(void*, const char* claimId, uint8_t kind,
+                                 uint32_t count, uint32_t instances,
+                                 EdvrPluginClaimObservation* observation) {
+    if (!claimId || std::strcmp(claimId, "night-vision") != 0)
+        return kPluginClaimNone;
+    (void)kind;
+    (void)count;
+    (void)instances;
+    const unsigned mode = variant();
+    const bool failed = mode != 0 && state.failed[mode];
+    if (observation) {
+        observation->mode = static_cast<uint8_t>(mode);
+        observation->failedKnown = mode != 0 ? 1u : 0u;
+        observation->failed = mode != 0 && failed ? 1u : 0u;
+    }
+    return mode != 0 && !failed ? kPluginClaimNightVision : kPluginClaimNone;
+}
+uint32_t pluginTraceMode(void*, uint8_t* mode) {
+    if (!mode) return 0;
+    *mode = static_cast<uint8_t>((enabled ? 1u : 0u) | (pulseEnabled ? 2u : 0u));
+    return 1;
+}
 void pluginBegin(void*,const char* claimId,ID3D11DeviceContext* context) {
     if (claimId && std::strcmp(claimId,"night-vision") == 0) nightVisionBegin(context);
 }
@@ -323,6 +345,8 @@ const EdvrPluginOps kCockpitVisualsOps = {
     &pluginBegin,
     &pluginEnd,
     &pluginShutdown,
+    &pluginClaimDrawObserved,
+    &pluginTraceMode,
 };
 }
 

@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 1
+PREDICATE_FACT_VERSION = 2
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -164,29 +164,172 @@ def _legacy14a_eye_range(fact):
              "subsite": 0, "verdict": -1}, 0)
 
 
-def _replay_predicate_facts(draw, label):
+def _legacy14a_night_vision(fact, draw):
+    """Frozen 14a boolean claim from mode/failure, shape, and binding hashes."""
+    if (draw["kind"] != ord("X") or draw["count"] != 240 or
+            draw["instances"] != 1 or draw["vsHash"].upper() != "FCF7BD2896751D96" or
+            draw["psHash"].upper() != "F786D34B5E118D5E"):
+        return False
+    mode = fact.get("callbackMode") if fact.get("callbackModeKnown") == "yes" else fact.get("mode")
+    mode_known = (fact.get("callbackModeKnown") == "yes" or
+                  fact.get("modeKnown") == "yes")
+    if not mode_known:
+        return None
+    if mode == 0:
+        return False
+    failed = fact.get("failed")
+    if fact.get("failedKnown") != "yes" or failed not in ("yes", "no"):
+        return None
+    return failed == "no"
+
+
+def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    if not isinstance(facts, list) or len(facts) > 2:
+    maximum = 3 if predicate_fact_version >= 2 else 2
+    if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    expected = {event["id"] for event in draw["sites"] if event["id"] in (3, 49)}
+    supported_ids = (3, 49, 50) if predicate_fact_version >= 2 else (3, 49)
+    expected = {event["id"] for event in draw["sites"] if event["id"] in supported_ids}
     by_site = {}
     for index, fact in enumerate(facts):
         fact_label = "%s.predicateFacts[%d]" % (label, index)
         if not isinstance(fact, dict):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
-        kind = _integer(fact.get("kind"), fact_label + ".kind", 1, 2)
+        kind = _integer(fact.get("kind"), fact_label + ".kind", 1, 3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        if ((site_id, kind) not in ((3, 1), (49, 2))):
+        if ((site_id, kind) not in ((3, 1), (49, 2), (50, 3))):
             raise TraceError(fact_label + " has an unsupported site/kind pair")
         known = fact.get("known")
         if known not in TRI_STATES:
             raise TraceError(fact_label + ".known is invalid")
         if known == "no":
             raise TraceError(fact_label + ".known must be yes or unknown")
-        if kind == 1:
+        if kind == 3:
+            cache_mismatches = 0
+            required = {"siteId", "kind", "known", "dispatchEnabled",
+                        "activeMaskKnown", "activePluginMask", "candidateKnown",
+                        "candidatePresent", "modeKnown", "mode", "shapeReached",
+                        "shapeMatched", "callbackReached", "callbackModeKnown",
+                        "callbackMode", "failedKnown", "failed"}
+            if set(fact) != required:
+                raise TraceError(fact_label + " has missing or unexpected night-vision fields")
+            tri_fields = ("dispatchEnabled", "activeMaskKnown", "candidateKnown",
+                          "candidatePresent", "modeKnown", "shapeReached",
+                          "shapeMatched", "callbackReached", "callbackModeKnown",
+                          "failedKnown", "failed")
+            if any(fact.get(key) not in TRI_STATES for key in tri_fields):
+                raise TraceError(fact_label + " has an invalid night-vision tri-state")
+            if fact["known"] != "yes" or fact["dispatchEnabled"] == "unknown":
+                raise TraceError(fact_label + " lacks the reached dispatch input")
+            active_mask = fact.get("activePluginMask")
+            if not isinstance(active_mask, str) or not re.match(r"^[0-9A-Fa-f]{16}$", active_mask):
+                raise TraceError(fact_label + ".activePluginMask must be sixteen hex digits")
+            active_mask = int(active_mask, 16)
+            mode = _integer(fact.get("mode"), fact_label + ".mode", 0, 3)
+            callback_mode = _integer(fact.get("callbackMode"), fact_label + ".callbackMode", 0, 3)
+            if fact["modeKnown"] == "unknown" and mode != 0:
+                raise TraceError(fact_label + " unknown mode must not carry a value")
+            if fact["callbackModeKnown"] == "unknown" and callback_mode != 0:
+                raise TraceError(fact_label + " unknown callback mode must not carry a value")
+            if fact["failedKnown"] == "unknown" and fact["failed"] != "unknown":
+                raise TraceError(fact_label + " unknown failure state must not carry a value")
+            if fact["dispatchEnabled"] == "no":
+                if (fact["activeMaskKnown"] != "unknown" or active_mask != 0 or
+                        fact["candidateKnown"] != "unknown" or
+                        fact["candidatePresent"] != "unknown" or
+                        fact["shapeReached"] != "no" or
+                        fact["shapeMatched"] != "unknown" or
+                        fact["callbackReached"] != "no" or
+                        fact["callbackModeKnown"] != "unknown" or
+                        fact["failedKnown"] != "unknown"):
+                    raise TraceError(fact_label + " dispatch short-circuit carries later-stage inputs")
+            else:
+                if (fact["activeMaskKnown"] != "yes" or
+                        fact["candidateKnown"] != "yes" or
+                        fact["candidatePresent"] == "unknown"):
+                    raise TraceError(fact_label + " lacks a required candidate-cache stage")
+                if fact["candidatePresent"] == "no":
+                    if (fact["shapeReached"] != "no" or
+                            fact["shapeMatched"] != "unknown" or
+                            fact["callbackReached"] != "no" or
+                            fact["callbackModeKnown"] != "unknown" or
+                            fact["failedKnown"] != "unknown"):
+                        raise TraceError(fact_label + " candidate miss carries later-stage inputs")
+                elif (fact["shapeReached"] != "yes" or
+                      fact["shapeMatched"] not in ("yes", "no")):
+                    raise TraceError(fact_label + " lacks the reached shape stage")
+                if fact["shapeMatched"] == "no" and fact["callbackReached"] != "no":
+                    raise TraceError(fact_label + " shape miss has an inconsistent callback stage")
+                if fact["shapeMatched"] == "yes":
+                    if fact["callbackReached"] == "no":
+                        raise TraceError(fact_label + " shape hit is missing its callback stage")
+                    if fact["callbackReached"] == "yes" and fact["callbackModeKnown"] != "yes":
+                        raise TraceError(fact_label + " callback lacks its consumed mode")
+                    if fact["callbackReached"] == "unknown" and (
+                            fact["callbackModeKnown"] != "unknown" or
+                            fact["failedKnown"] != "unknown"):
+                        raise TraceError(fact_label + " unknown callback carries outputs")
+                    if fact["callbackReached"] == "yes":
+                        if callback_mode == 0 and fact["failedKnown"] != "unknown":
+                            raise TraceError(fact_label + " mode zero must not read failure state")
+                        if callback_mode != 0 and fact["failedKnown"] not in ("yes", "unknown"):
+                            raise TraceError(fact_label + " nonzero mode lacks failure availability")
+            normalized = dict(fact)
+            expected_event = None
+            expected_delta = None
+            legacy_claim = _legacy14a_night_vision(normalized, draw)
+            active_known = (fact["dispatchEnabled"] == "no" or
+                            (fact["activeMaskKnown"] == "yes" and
+                             fact["modeKnown"] == "yes"))
+            if fact["dispatchEnabled"] == "no":
+                expected_event = {"id": 50, "kind": 2, "outcome": 5,
+                                  "flow": 0, "subsite": 0, "verdict": -1}
+            elif active_known:
+                expected_active = mode != 0
+                actual_active = bool(active_mask & (1 << 1))
+                pair_match = (draw["vsHash"].upper() == "FCF7BD2896751D96" and
+                              draw["psHash"].upper() == "F786D34B5E118D5E")
+                expected_candidate = expected_active and pair_match
+                cached_candidate = int(draw["candidateMask"], 16) & (1 << 1) != 0
+                if actual_active != expected_active or cached_candidate != expected_candidate:
+                    cache_mismatches += 1
+                if fact["candidatePresent"] != ("yes" if cached_candidate else "no"):
+                    cache_mismatches += 1
+                if not expected_candidate:
+                    if fact["shapeReached"] != "no":
+                        cache_mismatches += 1
+                    expected_event = {"id": 50, "kind": 2, "outcome": 5,
+                                      "flow": 0, "subsite": 0, "verdict": -1}
+                else:
+                    shape_match = (draw["kind"] == ord("X") and
+                                   draw["count"] == 240 and draw["instances"] == 1)
+                    if (fact["shapeReached"] != "yes" or
+                            fact["shapeMatched"] != ("yes" if shape_match else "no")):
+                        cache_mismatches += 1
+                    if not shape_match:
+                        expected_event = {"id": 50, "kind": 2, "outcome": 2,
+                                          "flow": 0, "subsite": 0, "verdict": -1}
+                    elif fact["callbackReached"] != "yes" or fact["callbackModeKnown"] != "yes":
+                        expected_event = None
+                    elif callback_mode != mode:
+                        cache_mismatches += 1
+                        expected_event = None
+                    elif legacy_claim is None:
+                        expected_event = None
+                    elif legacy_claim:
+                        expected_event = {"id": 50, "kind": 2, "outcome": 3,
+                                          "flow": 1, "subsite": 0, "verdict": 6}
+                    else:
+                        expected_event = {"id": 50, "kind": 2, "outcome": 2,
+                                          "flow": 0, "subsite": 0, "verdict": -1}
+            expected_delta = None
+            by_site[site_id] = (expected_event, expected_delta, True, 0,
+                                cache_mismatches,
+                                legacy_claim)
+        elif kind == 1:
             if set(fact) != {"siteId", "kind", "known", "gateWanted"}:
                 raise TraceError(fact_label + " has unexpected draw-gate fields")
             gate_wanted = fact.get("gateWanted")
@@ -240,26 +383,51 @@ def _replay_predicate_facts(draw, label):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        by_site[site_id] = (expected_event, expected_delta,
-                            fact.get("censusSkippedDeltaKnown", True),
-                            fact.get("censusSkippedDelta", 0))
+        if kind != 3:
+            by_site[site_id] = (expected_event, expected_delta,
+                                fact.get("censusSkippedDeltaKnown", True),
+                                fact.get("censusSkippedDelta", 0), 0, None)
     if set(by_site) != expected:
         raise TraceError(label + ".predicateFacts do not exactly cover visited supported sites")
     mismatches = 0
     unreplayable = 0
     mutation_unobserved = 0
     replayed = 0
+    nv_replayed = 0
+    nv_unreplayable = 0
+    nv_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
-                  observed_delta) in by_site.items():
-        if expected_event is None:
+                  observed_delta, cache_mismatches, legacy_claim) in by_site.items():
+        mismatches += cache_mismatches
+        site_unreplayable = expected_event is None or (
+            site_id == 50 and legacy_claim is None)
+        if site_unreplayable:
             unreplayable += 1
-            continue
         actual = next(event for event in draw["sites"] if event["id"] == site_id)
-        if any(actual[key] != expected_event[key]
-               for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
-            mismatches += 1
-        else:
-            replayed += 1
+        if expected_event is not None:
+            if any(actual[key] != expected_event[key]
+                   for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                mismatches += 1
+            else:
+                replayed += 1
+        if site_id == 50:
+            if site_unreplayable:
+                nv_unreplayable += 1
+                if cache_mismatches:
+                    nv_mismatches += 1
+            else:
+                nv_bad = cache_mismatches != 0
+                if expected_event is not None and any(
+                        actual[key] != expected_event[key]
+                        for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                    nv_bad = True
+                if (actual["outcome"] == 3) != legacy_claim:
+                    mismatches += 1
+                    nv_bad = True
+                if nv_bad:
+                    nv_mismatches += 1
+                else:
+                    nv_replayed += 1
         if site_id == 49 and expected_delta is not None:
             if not delta_known:
                 mutation_unobserved += 1
@@ -267,7 +435,11 @@ def _replay_predicate_facts(draw, label):
                 mismatches += 1
     return {"factCount": len(by_site), "replayed": replayed,
             "unreplayable": unreplayable, "mismatches": mismatches,
-            "mutationUnobserved": mutation_unobserved}
+            "mutationUnobserved": mutation_unobserved,
+            "nightVisionFacts": sum(1 for site_id in by_site if site_id == 50),
+            "nightVisionReplayed": nv_replayed,
+            "nightVisionUnreplayable": nv_unreplayable,
+            "nightVisionMismatches": nv_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -285,10 +457,13 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if data.get("predicateFactVersion") != PREDICATE_FACT_VERSION:
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
+        predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
         raise TraceError("schemaVersion 1 cannot declare predicate facts")
+    else:
+        predicate_fact_version = 0
     version = data.get("buildVersion")
     if not isinstance(version, str) or not version or len(version) > 128:
         raise TraceError("buildVersion is missing or invalid")
@@ -345,7 +520,10 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
     inferred_unvisited = 0
     predicate_replay = {"factCount": 0, "replayed": 0,
                         "unreplayable": 0, "mismatches": 0,
-                        "mutationUnobserved": 0}
+                        "mutationUnobserved": 0, "nightVisionFacts": 0,
+                        "nightVisionReplayed": 0,
+                        "nightVisionUnreplayable": 0,
+                        "nightVisionMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -479,7 +657,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
             raise TraceError(label + " final verdict differs from terminal site result")
 
         if schema_version == SCHEMA_VERSION:
-            replay = _replay_predicate_facts(draw, label)
+            replay = _replay_predicate_facts(draw, label, predicate_fact_version)
             for key in predicate_replay:
                 predicate_replay[key] += replay[key]
         elif "predicateFacts" in draw:
@@ -637,11 +815,21 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                     "unreplayable" if predicate_replay["unreplayable"] else
                     "mutation-unobserved" if predicate_replay["mutationUnobserved"] else
                     "no-supported-facts" if not predicate_replay["factCount"] else
-                    "supported-facts-replayed"), **predicate_replay)
+                    "supported-facts-replayed"),
+            predicateFactVersion=predicate_fact_version,
+            nightVisionStatus=("unavailable-v1" if predicate_fact_version < 2 else
+                               "not-visited" if not predicate_replay["nightVisionFacts"] else
+                               "mismatch" if predicate_replay["nightVisionMismatches"] else
+                               "unreplayable" if predicate_replay["nightVisionUnreplayable"] else
+                               "replayed"),
+            **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
              "unreplayable": 0,
-             "mismatches": 0, "mutationUnobserved": 0}),
+             "mismatches": 0, "mutationUnobserved": 0,
+             "predicateFactVersion": 0, "nightVisionStatus": "unavailable-v1",
+             "nightVisionFacts": 0, "nightVisionReplayed": 0,
+             "nightVisionUnreplayable": 0, "nightVisionMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -691,6 +879,13 @@ def format_summary(summary, sidecar_path=None):
     lines.append("  supported predicate facts: %s (%d selector matches, %d unreplayable, %d mismatch, %d mutation unobserved); whole-ladder equivalence remains false" %
                  (replay["status"], replay["replayed"], replay["unreplayable"],
                   replay["mismatches"], replay["mutationUnobserved"]))
+    if replay["nightVisionStatus"] == "unavailable-v1":
+        lines.append("  NightVisionClaim site 50: unavailable in predicate fact version 1")
+    else:
+        lines.append("  NightVisionClaim site 50: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay["nightVisionStatus"], replay["nightVisionFacts"],
+                      replay["nightVisionReplayed"], replay["nightVisionUnreplayable"],
+                      replay["nightVisionMismatches"]))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -712,7 +907,8 @@ def predicate_replay_gate_failure(summary):
 
 def _fixture():
     return {
-        "format": FORMAT, "schemaVersion": 2, "predicateFactVersion": 1,
+        "format": FORMAT, "schemaVersion": 2,
+        "predicateFactVersion": PREDICATE_FACT_VERSION,
         "buildVersion": "fixture",
         "buildStamp": "1234ABCD", "logFile": "edvr_gfx_20261001_010203.log",
         "semantics": {"equivalence": "observed-selector-and-action-order",
@@ -780,6 +976,13 @@ def self_test():
         return 1
     if predicate_replay_gate_failure(validate_trace(legacy_v1)) is not None:
         print("schemaVersion 1 historical capture failed the supported-fact gate")
+        return 1
+
+    legacy_v2_predicates = json.loads(json.dumps(base))
+    legacy_v2_predicates["predicateFactVersion"] = 1
+    if (validate_trace(legacy_v2_predicates)["predicateReplay"]["nightVisionStatus"] !=
+            "unavailable-v1"):
+        print("schemaVersion 2/factVersion 1 did not preserve historical NV-unavailable status")
         return 1
 
     no_op = json.loads(json.dumps(base))
@@ -894,12 +1097,26 @@ def self_test():
         draw["winnerSiteId"] = stop
         draw["verdict"] = TERMINAL_VERDICTS[stop]
         draw["forwardFacts"] = None
+        if stop == 50:
+            draw["vsHash"] = "FCF7BD2896751D96"
+            draw["psHash"] = "F786D34B5E118D5E"
+            draw["candidateMask"] = "%016X" % (1 << 1)
         draw["predicateFacts"] = [
             {"siteId": 3, "kind": 1, "known": "yes", "gateWanted": "yes"},
             {"siteId": 49, "kind": 2, "known": known,
              "eyeDrawIndex": eye_index, "ranges": ranges if known != "unknown" else [],
              "censusSkippedDeltaKnown": known != "unknown",
              "censusSkippedDelta": expected_delta if known != "unknown" else 0}]
+        if stop == 50:
+            draw["predicateFacts"].append({
+                "siteId": 50, "kind": 3, "known": "yes",
+                "dispatchEnabled": "yes", "activeMaskKnown": "yes",
+                "activePluginMask": "%016X" % (1 << 1),
+                "candidateKnown": "yes", "candidatePresent": "yes",
+                "modeKnown": "yes", "mode": 2, "shapeReached": "yes",
+                "shapeMatched": "yes", "callbackReached": "yes",
+                "callbackModeKnown": "yes", "callbackMode": 2,
+                "failedKnown": "yes", "failed": "no"})
         return trace
 
     try:
@@ -907,12 +1124,33 @@ def self_test():
             result = validate_trace(range_trace(eye_index, ranges, expected))
             if result["predicateReplay"]["mismatches"] or result["predicateReplay"]["unreplayable"]:
                 raise TraceError("known selector fixture did not replay completely")
+        failed_mode = range_trace(1, [], selector_cases[3][2])
+        failed_draw = failed_mode["draws"][0]
+        failed_nv = next(fact for fact in failed_draw["predicateFacts"]
+                         if fact["siteId"] == 50)
+        failed_nv["failed"] = "yes"
+        failed_draw["sites"][-1].update(outcome=2, flow=0, subsite=0, verdict=-1)
+        failed_draw["sites"].append({"id": 51, "kind": 2, "outcome": 3,
+                                     "flow": 1, "subsite": 0, "verdict": 2})
+        failed_draw.update(winnerSiteId=51, verdict=2)
+        failed_summary = validate_trace(failed_mode)
+        if (failed_summary["predicateReplay"]["nightVisionStatus"] != "replayed" or
+                predicate_replay_gate_failure(failed_summary) is not None):
+            raise TraceError("failed NV mode did not replay as a negative selector")
         unknown_result = validate_trace(range_trace(4, [], selector_cases[3][2], "unknown"))
         if unknown_result["predicateReplay"]["unreplayable"] != 1:
             raise TraceError("unknown range fact was coerced to configured-off")
         known_empty = validate_trace(range_trace(4, [], selector_cases[3][2]))
         if known_empty["predicateReplay"]["unreplayable"]:
             raise TraceError("known empty range table became unreplayable")
+        old_v2_site50 = range_trace(4, [], selector_cases[3][2])
+        old_v2_site50["predicateFactVersion"] = 1
+        old_v2_site50["draws"][0]["predicateFacts"] = [
+            fact for fact in old_v2_site50["draws"][0]["predicateFacts"]
+            if fact["siteId"] != 50]
+        old_v2_summary = validate_trace(old_v2_site50)
+        if old_v2_summary["predicateReplay"]["nightVisionStatus"] != "unavailable-v1":
+            raise TraceError("v2/factVersion1 site50 capture did not remain readable and NV-unavailable")
         gate_off = json.loads(json.dumps(vr))
         gate_off_draw = gate_off["draws"][0]
         gate_off_draw["sites"] = gate_off_draw["sites"][:3]
@@ -977,7 +1215,9 @@ def self_test():
     gated_sites = COMMON + EYE[:EYE.index(67) + 1]
     for site_id in gated_sites:
         kind = SITE_KINDS[site_id]
-        outcome = 5 if site_id in NOT_ELIGIBLE_SITES else (1 if kind == 1 else 2)
+        outcome = (1 if site_id == 3 else
+                   5 if site_id in NOT_ELIGIBLE_SITES else
+                   (1 if kind == 1 else 2))
         flow = 1 if site_id == 67 else 0
         verdict = 0 if site_id == 67 else -1
         if site_id == 67:
@@ -993,13 +1233,60 @@ def self_test():
         {"siteId": 3, "kind": 1, "known": "yes", "gateWanted": "yes"},
         {"siteId": 49, "kind": 2, "known": "yes", "eyeDrawIndex": 1,
          "ranges": [], "censusSkippedDeltaKnown": True,
-         "censusSkippedDelta": 0}]
+         "censusSkippedDelta": 0},
+        {"siteId": 50, "kind": 3, "known": "yes",
+         "dispatchEnabled": "yes", "activeMaskKnown": "yes",
+         "activePluginMask": "%016X" % (1 << 1),
+         "candidateKnown": "yes", "candidatePresent": "no",
+         "modeKnown": "yes", "mode": 2, "shapeReached": "no",
+         "shapeMatched": "unknown", "callbackReached": "no",
+         "callbackModeKnown": "unknown", "callbackMode": 0,
+         "failedKnown": "unknown", "failed": "unknown"}]
+    gated_draw["vsHash"] = "0000000000000000"
+    gated_draw["candidateMask"] = "0000000000000000"
     try:
         summary = validate_trace(gated_observers)
+        if (summary["predicateReplay"]["nightVisionStatus"] != "replayed" or
+                predicate_replay_gate_failure(summary) is not None):
+            raise TraceError("known shader-pair miss did not replay as a negative NV selector: %r" % summary["predicateReplay"])
         if summary["inferredUnvisitedSiteCount"] != len(COMMON + EYE) - len(gated_sites):
             raise TraceError("gated observer trace suffix was inferred incorrectly")
     except Exception as exc:
         print("draw-ladder typed NotEligible observer fixture rejected: %s" % exc)
+        return 1
+
+    dispatch_off_pair = json.loads(json.dumps(gated_observers))
+    dispatch_off_draw = dispatch_off_pair["draws"][0]
+    dispatch_off_fact = dispatch_off_draw["predicateFacts"][-1]
+    dispatch_off_fact.update(
+        dispatchEnabled="no", activeMaskKnown="unknown", activePluginMask="0000000000000000",
+        candidateKnown="unknown", candidatePresent="unknown", modeKnown="unknown", mode=0)
+    dispatch_off_draw["vsHash"] = "FCF7BD2896751D96"
+    dispatch_off_draw["psHash"] = "F786D34B5E118D5E"
+    dispatch_off_draw["candidateMask"] = "0000000000000000"
+    dispatch_off_summary = validate_trace(dispatch_off_pair)
+    if (dispatch_off_summary["predicateReplay"]["nightVisionStatus"] != "unreplayable" or
+            dispatch_off_summary["predicateReplay"]["nightVisionReplayed"] != 0):
+        print("dispatch-off exact-pair NV fact falsely proved frozen selector: %r" %
+              dispatch_off_summary["predicateReplay"])
+        return 1
+
+    dispatch_off_miss = json.loads(json.dumps(dispatch_off_pair))
+    dispatch_off_miss["draws"][0]["vsHash"] = "0000000000000000"
+    dispatch_off_miss_summary = validate_trace(dispatch_off_miss)
+    if (dispatch_off_miss_summary["predicateReplay"]["nightVisionStatus"] != "replayed" or
+            predicate_replay_gate_failure(dispatch_off_miss_summary) is not None):
+        print("dispatch-off known shader miss did not prove a negative frozen selector: %r" %
+              dispatch_off_miss_summary["predicateReplay"])
+        return 1
+    candidate_drift = json.loads(json.dumps(gated_observers))
+    drift_draw = candidate_drift["draws"][0]
+    drift_draw["vsHash"] = "FCF7BD2896751D96"
+    drift_draw["psHash"] = "F786D34B5E118D5E"
+    drift_result = validate_trace(candidate_drift)
+    if (drift_result["predicateReplay"]["nightVisionMismatches"] == 0 or
+            predicate_replay_gate_failure(drift_result) is None):
+        print("candidate cache bit was used as the NV selector oracle")
         return 1
     mandatory_observer_gated = json.loads(json.dumps(gated_observers))
     mandatory_observer_gated["draws"][0]["sites"][9]["outcome"] = 5
@@ -1225,7 +1512,10 @@ def self_test():
                 "status": status, "factCount": 1, "replayed": 0,
                 "unreplayable": int(status == "unreplayable"),
                 "mismatches": int(status == "mismatch"),
-                "mutationUnobserved": int(status == "mutation-unobserved")}
+                "mutationUnobserved": int(status == "mutation-unobserved"),
+                "predicateFactVersion": 0, "nightVisionStatus": "unavailable-v1",
+                "nightVisionFacts": 0, "nightVisionReplayed": 0,
+                "nightVisionUnreplayable": 0, "nightVisionMismatches": 0}
             read_trace = lambda *args, _summary=failing, **kwargs: ({}, _summary)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):

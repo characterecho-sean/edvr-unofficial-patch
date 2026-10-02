@@ -707,7 +707,7 @@ set "RUN_JOBS_ARGS="
 if defined EDVR_JOBS set "RUN_JOBS_ARGS=--jobs %EDVR_JOBS%"
 python tools\run_jobs.py --self-test || exit /b 1
 python tools\run_jobs.py --script "%ROOT%\build.bat" --times "%BUILD%\rig_times.json" ^
-    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test,stall_sampler_test,draw_ladder_test ^
+    --exe-dir "%BUILD%" --quiet native_timing_test,gpu_timing_test,gpu_census_test,vtable_test,stall_sampler_test,draw_ladder_test,draw_selector_cost_test ^
     --after openxr_module_test=openxr_exports_test ^
     %RUN_JOBS_ARGS% || exit /b 1
 
@@ -1491,6 +1491,22 @@ if errorlevel 1 ( echo [edvr] ERROR: plugin dispatch rig build failed & exit /b 
     echo [edvr] ERROR: plugin dispatch verdict replay failed
     exit /b 1
 )
+exit /b 0
+
+:rig_draw_selector_cost_test
+if "%EDVR_RIG_STEP%"=="run" goto draw_selector_cost_test_run
+echo [edvr] === draw_selector_cost_test.exe ===
+if not exist "%OBJ%\drawselectorcost" mkdir "%OBJ%\drawselectorcost"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /I"%GEN%" /Fo"%OBJ%\drawselectorcost"\ /Fe"%BUILD%\draw_selector_cost_test.exe" ^
+    "tools\draw_selector_cost_test\draw_selector_cost_test.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib
+if errorlevel 1 ( echo [edvr] ERROR: draw_selector_cost_test build failed & exit /b 1 )
+if "%EDVR_RIG_STEP%"=="build" exit /b 0
+:draw_selector_cost_test_run
+"%BUILD%\draw_selector_cost_test.exe" --dry-run || exit /b 1
+"%BUILD%\draw_selector_cost_test.exe" --self-test || exit /b 1
+"%BUILD%\draw_selector_cost_test.exe" || exit /b 1
 exit /b 0
 
 :rig_plugin_cost_test

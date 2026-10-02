@@ -10150,7 +10150,10 @@ def self_test():
                 "status": status, "factCount": 1, "replayed": 0,
                 "unreplayable": int(status == "unreplayable"),
                 "mismatches": int(status == "mismatch"),
-                "mutationUnobserved": int(status == "mutation-unobserved")}
+                "mutationUnobserved": int(status == "mutation-unobserved"),
+                "predicateFactVersion": 0, "nightVisionStatus": "unavailable-v1",
+                "nightVisionFacts": 0, "nightVisionReplayed": 0,
+                "nightVisionUnreplayable": 0, "nightVisionMismatches": 0}
             scenarios.append((status, failed_summary, 1, "gate failed"))
         original_read_trace = draw_ladder_replay.read_trace
         for label, summary, want, output_token in scenarios:
