@@ -8,6 +8,12 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 
 ## Status
 
+- **Nomad / vehicle cockpit gate fix (2026-10-02):** `lod_governor`'s cockpit
+  gate now covers fighters/SLVs (Status Flags bit 25 `InFighter`, including the
+  Nomad), SRVs (bit 26 `InSRV`), and taxis (Flags2 bit 1 `InTaxi`) in addition to
+  `OnFoot` (Flags2 bit 0). Previously, leaving foot and boarding the Nomad
+  resumed the governor and restored k to k_max (6.00), culling the player's
+  mothership on the pad. k is now held at 1 while in any external vehicle.
 - **Default OFF (2026-09-24, Sean):** the shipped and compiled default is now
   `game` (the game's own detail, nothing observed or changed); `auto` and
   `reduced` are opt-in. Everything below about `auto` still holds when chosen.
@@ -1015,3 +1021,49 @@ in-game detail slider at its default (s 1.0); then close to the buildings:
 6. As before: implausible 0, faults 0, disagreements 0, no `NOT ACTING`, no
    `STOOD DOWN`; in the headset, popping at the 0.25 steps and thinning at
    the larger k.
+
+## 10. The Nomad and external vehicle cockpit gate (2026-10-02)
+
+### The bug report
+Flight log `edvr-logs-20261002-134508` (`edvr_gfx_20261002_122550.log`):
+A commander landed at a settlement in their main ship, disembarked on foot, and
+boarded the Nomad (the ship-launched utility vehicle added in June 2026).
+Upon boarding the Nomad, their main ship sitting on the pad vanished.
+Toggling `fix.settlement_detail` in the graphics settings restored the ship.
+
+### Root cause
+The settlement detail governor scales `ctx+0x30` (`s`) by factor `k`
+(up to `k_max = 6.00`). When the player is inside the main ship cockpit, the
+cockpit model is drawn around the camera at ~0 m distance, while distant
+settlement structures have their distance evaluated with `s x k`.
+However, when the player is outside the mothership (on foot, in an SLF/Nomad,
+or in an SRV), the mothership is an external object in the world. Scaling `s`
+by `k = 6.00` multiplies the apparent distance of the mothership by 6.
+At a typical pad distance of 250 m, the engine evaluates the ship at 1500 m,
+which exceeds the model's `t0` LOD culling threshold, causing the engine to
+cull the player's own ship.
+
+The original cockpit gate checked only `OnFoot` (Status.json `Flags2` bit 0).
+When the player boarded the Nomad, `Flags2` dropped to 0 (`OnFoot` false) while
+`Flags` bit 25 (`InFighter`) became set. The governor treated `OnFoot == false`
+as returning aboard the mothership, immediately restoring `k = 6.00` in one
+step, causing the ship to disappear. Toggling the setting restored `k = 1.00`,
+bringing the ship back into view.
+
+### The fix
+1. `journal_watch`: Parse vehicle state flags from Status.json:
+   - `Flags` bit 24: `InMainShip` (`0x01000000u`)
+   - `Flags` bit 25: `InFighter` (`0x02000000u`, covers SLFs and SLVs like Nomad)
+   - `Flags` bit 26: `InSRV` (`0x04000000u`)
+   - `Flags2` bit 1: `InTaxi` (`0x00000002u`, Apex shuttles)
+   Publish accessors `journalInMainShip()`, `journalInFighter()`, `journalInSrv()`,
+   `journalInTaxi()`.
+2. `lod_governor`: Extend cockpit gate signal:
+   - `FrameSignals::isCockpitGateHeld()` returns true if `onFoot || inFighter || inSrv || inTaxi`.
+   - `Policy::update()` holds `k = 1.00` whenever `isCockpitGateHeld()` is true.
+   - Switching from on foot to Nomad maintains the hold (`held_` remains true),
+     preventing `k` from restoring while outside the main ship.
+   - Docking the Nomad back into the mothership clears the hold and restores
+     the pre-hold `k` aboard in one step.
+   - Log transitions cleanly between on-foot, vehicle, and cockpit states.
+

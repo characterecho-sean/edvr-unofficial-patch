@@ -100,11 +100,22 @@ struct Published {
     // length delay after StartJump.
     bool     fsdJumpKnown = false;
     bool     fsdJumpLive = false;
-    // Live Flags2 from Status.json: OnFoot is bit 0. `onFootKnown` is false
-    // whenever the file lacks a Flags2 field, which is exactly the menu and
-    // shutdown states -- Status then carries only "Flags":0.
+    // Live Flags2 from Status.json: OnFoot is bit 0, InTaxi is bit 1.
+    // `onFootKnown` is false whenever the file lacks a Flags2 field, which
+    // is exactly the menu and shutdown states -- Status then carries only
+    // "Flags":0.
     bool     onFootKnown = false;
     bool     onFoot = false;
+    bool     inTaxiKnown = false;
+    bool     inTaxi = false;
+    // Status Flags bit 24 (InMainShip), bit 25 (InFighter -- SLFs and SLVs
+    // including the Nomad), bit 26 (InSRV).
+    bool     inMainShipKnown = false;
+    bool     inMainShip = false;
+    bool     inFighterKnown = false;
+    bool     inFighter = false;
+    bool     inSrvKnown = false;
+    bool     inSrv = false;
     // GuiFocus from Status.json: 9 is the Full System Scanner. The game
     // states the MODE outright -- entry and exit by any path (keybind,
     // ESC, an interdiction yanking the player out of supercruise) all
@@ -129,6 +140,14 @@ struct Visible {
     std::atomic<bool>     fsdJumpLive{false};
     std::atomic<bool>     onFootKnown{false};
     std::atomic<bool>     onFoot{false};
+    std::atomic<bool>     inTaxiKnown{false};
+    std::atomic<bool>     inTaxi{false};
+    std::atomic<bool>     inMainShipKnown{false};
+    std::atomic<bool>     inMainShip{false};
+    std::atomic<bool>     inFighterKnown{false};
+    std::atomic<bool>     inFighter{false};
+    std::atomic<bool>     inSrvKnown{false};
+    std::atomic<bool>     inSrv{false};
     std::atomic<bool>     fssFocusKnown{false};
     std::atomic<bool>     fssFocus{false};
     std::atomic<uint32_t> guiFocus{0};
@@ -153,6 +172,14 @@ void applyPublished(const Published& p) {
     g_v.fsdJumpLive.store(p.fsdJumpLive, kRelaxed);
     g_v.onFootKnown.store(p.onFootKnown, kRelaxed);
     g_v.onFoot.store(p.onFoot, kRelaxed);
+    g_v.inTaxiKnown.store(p.inTaxiKnown, kRelaxed);
+    g_v.inTaxi.store(p.inTaxi, kRelaxed);
+    g_v.inMainShipKnown.store(p.inMainShipKnown, kRelaxed);
+    g_v.inMainShip.store(p.inMainShip, kRelaxed);
+    g_v.inFighterKnown.store(p.inFighterKnown, kRelaxed);
+    g_v.inFighter.store(p.inFighter, kRelaxed);
+    g_v.inSrvKnown.store(p.inSrvKnown, kRelaxed);
+    g_v.inSrv.store(p.inSrv, kRelaxed);
     g_v.fssFocusKnown.store(p.fssFocusKnown, kRelaxed);
     g_v.fssFocus.store(p.fssFocus, kRelaxed);
     g_v.guiFocus.store(p.guiFocus, kRelaxed);
@@ -409,6 +436,8 @@ void pollStatus(Session& s) {
         ++s.pub.statusSamples;
         s.pub.onFootKnown = sawFlags2;
         s.pub.onFoot = sawFlags2 && (flags2 & 0x01u) != 0;
+        s.pub.inTaxiKnown = sawFlags2;
+        s.pub.inTaxi = sawFlags2 && (flags2 & 0x02u) != 0;
         // Bit 30 of Flags: the FSD jump itself -- the tunnel, not the
         // countdown before it. The distinction is what scopes the witchspace
         // star fix off the forming-wormhole phase, where the game still
@@ -417,6 +446,13 @@ void pollStatus(Session& s) {
         s.pub.fsdJumpLive = sawFlags && (flags & 0x40000000u) != 0;
         s.pub.supercruiseKnown = sawFlags;
         s.pub.supercruise = sawFlags && (flags & 0x10u) != 0;
+        // Vehicle flags: bit 24 InMainShip, bit 25 InFighter (SLF/Nomad), bit 26 InSRV
+        s.pub.inMainShipKnown = sawFlags;
+        s.pub.inMainShip = sawFlags && (flags & 0x01000000u) != 0;
+        s.pub.inFighterKnown = sawFlags;
+        s.pub.inFighter = sawFlags && (flags & 0x02000000u) != 0;
+        s.pub.inSrvKnown = sawFlags;
+        s.pub.inSrv = sawFlags && (flags & 0x04000000u) != 0;
         const bool fss = sawGui && gui == 9;
         if (fss != s.pub.fssFocus) {
             Log::get().note(fss ? "status: GuiFocus 9 -- the game says the "
@@ -428,10 +464,18 @@ void pollStatus(Session& s) {
         s.pub.guiFocus = sawGui ? gui : 0;
     } else if (++s.statusMisses >= 3) {
         s.pub.onFootKnown = false;
+        s.pub.inTaxiKnown = false;
+        s.pub.inTaxi = false;
         s.pub.fsdJumpKnown = false;
         s.pub.fssFocusKnown = false;
         s.pub.fssFocus = false;
         s.pub.supercruiseKnown = false;
+        s.pub.inMainShipKnown = false;
+        s.pub.inMainShip = false;
+        s.pub.inFighterKnown = false;
+        s.pub.inFighter = false;
+        s.pub.inSrvKnown = false;
+        s.pub.inSrv = false;
     }
 }
 
@@ -944,6 +988,14 @@ bool journalInJumpTunnel() {
 }
 bool journalOnFootKnown() { return journalWatchActive() && peek(g_v.onFootKnown); }
 bool journalOnFoot() { return peek(g_v.onFoot); }
+bool journalInMainShipKnown() { return journalWatchActive() && peek(g_v.inMainShipKnown); }
+bool journalInMainShip() { return peek(g_v.inMainShip); }
+bool journalInFighterKnown() { return journalWatchActive() && peek(g_v.inFighterKnown); }
+bool journalInFighter() { return peek(g_v.inFighter); }
+bool journalInSrvKnown() { return journalWatchActive() && peek(g_v.inSrvKnown); }
+bool journalInSrv() { return peek(g_v.inSrv); }
+bool journalInTaxiKnown() { return journalWatchActive() && peek(g_v.inTaxiKnown); }
+bool journalInTaxi() { return peek(g_v.inTaxi); }
 uint32_t journalStatusSamples() { return peek(g_v.statusSamples); }
 
 void journalWatchShutdown() {

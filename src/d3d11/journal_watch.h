@@ -114,6 +114,18 @@ uint32_t journalEmbarks();
 bool journalOnFootKnown();
 bool journalOnFoot();
 
+// Vehicle and on-foot state from Status.json: Flags bit 24 (InMainShip),
+// bit 25 (InFighter -- SLFs and SLVs including the Nomad), bit 26 (InSRV);
+// Flags2 bit 1 (InTaxi -- Apex shuttles and dropships).
+bool journalInMainShipKnown();
+bool journalInMainShip();
+bool journalInFighterKnown();
+bool journalInFighter();
+bool journalInSrvKnown();
+bool journalInSrv();
+bool journalInTaxiKnown();
+bool journalInTaxi();
+
 // How many Status.json samples have been read. The gate uses it to require
 // an on-foot sample taken AFTER the panel stopped before arming keylessly:
 // boarding from the camera stops the panel while the previous sample still
