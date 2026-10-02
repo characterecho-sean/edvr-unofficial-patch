@@ -4,13 +4,17 @@
 from __future__ import print_function
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
 import sys
+import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+PREDICATE_FACT_VERSION = 1
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -111,6 +115,161 @@ class TraceError(ValueError):
     pass
 
 
+def _candidate_draw_gate(fact):
+    """Candidate pure selector from normalized DrawGateWanted input."""
+    if fact["known"] == "unknown":
+        return None
+    if fact["gateWanted"] == "no":
+        return {"id": 3, "kind": 3, "outcome": 4, "flow": 1,
+                "subsite": 0, "verdict": 0}
+    return {"id": 3, "kind": 3, "outcome": 1, "flow": 0,
+            "subsite": 0, "verdict": -1}
+
+
+def _legacy14a_draw_gate(fact):
+    """Frozen 14a7ff70 semantics: !drawGateWanted returns DrawVerdict::None."""
+    if fact["known"] == "unknown":
+        return None
+    if fact["gateWanted"] == "no":
+        return {"id": 3, "kind": 3, "outcome": 4, "flow": 1,
+                "subsite": 0, "verdict": 0}
+    return {"id": 3, "kind": 3, "outcome": 1, "flow": 0,
+            "subsite": 0, "verdict": -1}
+
+
+def _candidate_eye_range(fact):
+    """Candidate pure selector; return (site event, skipped counter delta)."""
+    if fact["known"] == "unknown":
+        return None
+    for index, (lo, hi) in enumerate(fact["ranges"]):
+        if fact["eyeDrawIndex"] >= lo and fact["eyeDrawIndex"] <= hi:
+            return ({"id": 49, "kind": 2, "outcome": 4, "flow": 1,
+                     "subsite": index, "verdict": 2}, 1)
+    return ({"id": 49, "kind": 2, "outcome": 2, "flow": 0,
+             "subsite": 0, "verdict": -1}, 0)
+
+
+def _legacy14a_eye_range(fact):
+    """Frozen 14a7ff70 inclusive loop, including first matching subsite."""
+    if fact["known"] == "unknown":
+        return None
+    i = 0
+    while i < len(fact["ranges"]):
+        lo, hi = fact["ranges"][i]
+        if fact["eyeDrawIndex"] >= lo and fact["eyeDrawIndex"] <= hi:
+            return ({"id": 49, "kind": 2, "outcome": 4, "flow": 1,
+                     "subsite": i, "verdict": 2}, 1)
+        i += 1
+    return ({"id": 49, "kind": 2, "outcome": 2, "flow": 0,
+             "subsite": 0, "verdict": -1}, 0)
+
+
+def _replay_predicate_facts(draw, label):
+    facts = draw.get("predicateFacts")
+    if not isinstance(facts, list) or len(facts) > 2:
+        raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
+                         (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
+    expected = {event["id"] for event in draw["sites"] if event["id"] in (3, 49)}
+    by_site = {}
+    for index, fact in enumerate(facts):
+        fact_label = "%s.predicateFacts[%d]" % (label, index)
+        if not isinstance(fact, dict):
+            raise TraceError(fact_label + " must be an object")
+        site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
+        kind = _integer(fact.get("kind"), fact_label + ".kind", 1, 2)
+        if site_id in by_site:
+            raise TraceError(fact_label + " duplicates a supported site fact")
+        if ((site_id, kind) not in ((3, 1), (49, 2))):
+            raise TraceError(fact_label + " has an unsupported site/kind pair")
+        known = fact.get("known")
+        if known not in TRI_STATES:
+            raise TraceError(fact_label + ".known is invalid")
+        if known == "no":
+            raise TraceError(fact_label + ".known must be yes or unknown")
+        if kind == 1:
+            if set(fact) != {"siteId", "kind", "known", "gateWanted"}:
+                raise TraceError(fact_label + " has unexpected draw-gate fields")
+            gate_wanted = fact.get("gateWanted")
+            if gate_wanted not in TRI_STATES:
+                raise TraceError(fact_label + ".gateWanted is invalid")
+            if (known == "yes") != (gate_wanted != "unknown"):
+                raise TraceError(fact_label + " gate input availability is inconsistent")
+            normalized = {"known": known, "gateWanted": gate_wanted}
+            candidate = _candidate_draw_gate(normalized)
+            legacy = _legacy14a_draw_gate(normalized)
+            if candidate != legacy:
+                raise TraceError(fact_label + " candidate differs from frozen 14a selector")
+            expected_event = candidate
+            expected_delta = None
+        else:
+            required = {"siteId", "kind", "known", "eyeDrawIndex", "ranges",
+                        "censusSkippedDeltaKnown", "censusSkippedDelta"}
+            if set(fact) != required:
+                raise TraceError(fact_label + " fields are missing or unexpected")
+            eye_index = _integer(fact.get("eyeDrawIndex"), fact_label + ".eyeDrawIndex")
+            ranges = fact.get("ranges")
+            if not isinstance(ranges, list) or len(ranges) > 4:
+                raise TraceError(fact_label + ".ranges must contain at most four ranges")
+            normalized_ranges = []
+            for ri, pair in enumerate(ranges):
+                if not isinstance(pair, list) or len(pair) != 2:
+                    raise TraceError("%s.ranges[%d] must be a pair" % (fact_label, ri))
+                lo = _integer(pair[0], "%s.ranges[%d].lo" % (fact_label, ri), 1)
+                hi = _integer(pair[1], "%s.ranges[%d].hi" % (fact_label, ri), 1)
+                if hi < lo:
+                    raise TraceError("%s.ranges[%d] is inverted" % (fact_label, ri))
+                normalized_ranges.append((lo, hi))
+            if known == "unknown" and ranges:
+                raise TraceError(fact_label + " unknown range table must not carry inputs")
+            normalized = {"known": known, "eyeDrawIndex": eye_index,
+                          "ranges": normalized_ranges}
+            candidate = _candidate_eye_range(normalized)
+            legacy = _legacy14a_eye_range(normalized)
+            if candidate != legacy:
+                raise TraceError(fact_label + " candidate differs from frozen 14a selector")
+            delta_known = fact.get("censusSkippedDeltaKnown")
+            if type(delta_known) is not bool:
+                raise TraceError(fact_label + ".censusSkippedDeltaKnown is invalid")
+            delta = _integer(fact.get("censusSkippedDelta"),
+                             fact_label + ".censusSkippedDelta")
+            if (not delta_known and delta != 0) or delta > 1:
+                raise TraceError(fact_label + " has invalid counter delta availability")
+            expected_delta = candidate[1] if candidate is not None else None
+            if expected_delta is not None and not delta_known:
+                # A valid input fact can be replayed even if its side effect
+                # observation is unavailable; report that separately below.
+                pass
+            expected_event = candidate[0] if candidate is not None else None
+        by_site[site_id] = (expected_event, expected_delta,
+                            fact.get("censusSkippedDeltaKnown", True),
+                            fact.get("censusSkippedDelta", 0))
+    if set(by_site) != expected:
+        raise TraceError(label + ".predicateFacts do not exactly cover visited supported sites")
+    mismatches = 0
+    unreplayable = 0
+    mutation_unobserved = 0
+    replayed = 0
+    for site_id, (expected_event, expected_delta, delta_known,
+                  observed_delta) in by_site.items():
+        if expected_event is None:
+            unreplayable += 1
+            continue
+        actual = next(event for event in draw["sites"] if event["id"] == site_id)
+        if any(actual[key] != expected_event[key]
+               for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+            mismatches += 1
+        else:
+            replayed += 1
+        if site_id == 49 and expected_delta is not None:
+            if not delta_known:
+                mutation_unobserved += 1
+            elif expected_delta != observed_delta:
+                mismatches += 1
+    return {"factCount": len(by_site), "replayed": replayed,
+            "unreplayable": unreplayable, "mismatches": mismatches,
+            "mutationUnobserved": mutation_unobserved}
+
+
 def _integer(value, label, low=0, high=0xffffffff):
     if type(value) is not int or value < low or value > high:
         raise TraceError("%s must be an integer in %d..%d" % (label, low, high))
@@ -122,8 +281,14 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("sidecar root must be an object")
     if data.get("format") != FORMAT:
         raise TraceError("unknown trace format")
-    if type(data.get("schemaVersion")) is not int or data["schemaVersion"] != SCHEMA_VERSION:
+    if type(data.get("schemaVersion")) is not int or data["schemaVersion"] not in (1, SCHEMA_VERSION):
         raise TraceError("unsupported schemaVersion")
+    schema_version = data["schemaVersion"]
+    if schema_version == SCHEMA_VERSION:
+        if data.get("predicateFactVersion") != PREDICATE_FACT_VERSION:
+            raise TraceError("unsupported predicateFactVersion")
+    elif "predicateFactVersion" in data:
+        raise TraceError("schemaVersion 1 cannot declare predicate facts")
     version = data.get("buildVersion")
     if not isinstance(version, str) or not version or len(version) > 128:
         raise TraceError("buildVersion is missing or invalid")
@@ -178,6 +343,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
     total_sites = 0
     total_actions = 0
     inferred_unvisited = 0
+    predicate_replay = {"factCount": 0, "replayed": 0,
+                        "unreplayable": 0, "mismatches": 0,
+                        "mutationUnobserved": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -272,8 +440,8 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
             verdict = _integer(event.get("verdict"), event_label + ".verdict", -1, 18)
             if outcome == 3 and site_kind != 2:
                 raise TraceError(event_label + " Claimed outcome requires a Claim site")
-            if outcome == 4 and site_kind != 3:
-                raise TraceError(event_label + " Exited outcome requires an Exit site")
+            if outcome == 4 and site_id not in TERMINAL_VERDICTS:
+                raise TraceError(event_label + " Exited outcome requires a terminal site")
             if outcome == 5 and site_id not in NOT_ELIGIBLE_SITES:
                 raise TraceError(event_label + " NotEligible outcome is not allowed for this site")
             if outcome in (3, 4):
@@ -309,6 +477,13 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
             raise TraceError(label + " terminal site verdict does not match its stable mapping")
         if terminal_verdict != verdict:
             raise TraceError(label + " final verdict differs from terminal site result")
+
+        if schema_version == SCHEMA_VERSION:
+            replay = _replay_predicate_facts(draw, label)
+            for key in predicate_replay:
+                predicate_replay[key] += replay[key]
+        elif "predicateFacts" in draw:
+            raise TraceError(label + " schemaVersion 1 cannot contain predicateFacts")
 
         if "forwardFacts" not in draw:
             raise TraceError(label + " must explicitly mark forwardFacts present or null")
@@ -457,6 +632,16 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         "inferredUnvisitedSiteCount": inferred_unvisited,
         "routeCounts": route_counts,
         "scope": scope,
+        "predicateReplay": (dict(
+            status=("mismatch" if predicate_replay["mismatches"] else
+                    "unreplayable" if predicate_replay["unreplayable"] else
+                    "mutation-unobserved" if predicate_replay["mutationUnobserved"] else
+                    "no-supported-facts" if not predicate_replay["factCount"] else
+                    "supported-facts-replayed"), **predicate_replay)
+            if schema_version == SCHEMA_VERSION else
+            {"status": "unavailable", "factCount": 0, "replayed": 0,
+             "unreplayable": 0,
+             "mismatches": 0, "mutationUnobserved": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -501,15 +686,34 @@ def format_summary(summary, sidecar_path=None):
              "  coverage: %s" % summary["scope"],
              "  inferred nonvisited suffix sites: %d (from route sequence after terminal; NotEligible is a reached event)" %
              summary["inferredUnvisitedSiteCount"],
-             "  recorded selector/action order is observed; predicate equivalence is not established (production replay uses the C++ selector rig)."]
+             "  recorded selector/action order is observed; whole-ladder predicate equivalence is not established."]
+    replay = summary["predicateReplay"]
+    lines.append("  supported predicate facts: %s (%d selector matches, %d unreplayable, %d mismatch, %d mutation unobserved); whole-ladder equivalence remains false" %
+                 (replay["status"], replay["replayed"], replay["unreplayable"],
+                  replay["mismatches"], replay["mutationUnobserved"]))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
 
 
+def predicate_replay_gate_failure(summary):
+    """Return why a supported-fact replay cannot pass its correctness gate."""
+    replay = summary.get("predicateReplay", {})
+    status = replay.get("status", "unavailable")
+    if status in ("mismatch", "unreplayable", "mutation-unobserved"):
+        return ("supported predicate replay %s (mismatches=%d, unreplayable=%d, "
+                "mutation unobserved=%d)" %
+                (status, replay.get("mismatches", 0), replay.get("unreplayable", 0),
+                 replay.get("mutationUnobserved", 0)))
+    # Schema 1 is a valid historical selector/order capture, but carries no
+    # predicate facts and cannot establish predicate parity.
+    return None
+
+
 def _fixture():
     return {
-        "format": FORMAT, "schemaVersion": 1, "buildVersion": "fixture",
+        "format": FORMAT, "schemaVersion": 2, "predicateFactVersion": 1,
+        "buildVersion": "fixture",
         "buildStamp": "1234ABCD", "logFile": "edvr_gfx_20261001_010203.log",
         "semantics": {"equivalence": "observed-selector-and-action-order",
                       "predicateEquivalence": False,
@@ -534,6 +738,7 @@ def _fixture():
                    "flags": 0,
                    "sites": [{"id": 72, "kind": 3, "outcome": 4, "flow": 1,
                               "subsite": 0, "verdict": 0}],
+                   "predicateFacts": [],
                    "winnerSiteId": 72, "verdict": 0,
                    "forwardFacts": None,
                    "actions": [
@@ -555,6 +760,7 @@ def _fixture():
 
 
 def self_test():
+    global read_trace
     base = _fixture()
     try:
         summary = validate_trace(base, "edvr_gfx_20261001_010203.log", "1234abcd")
@@ -562,6 +768,18 @@ def self_test():
             raise TraceError("flat capture was mislabelled")
     except Exception as exc:
         print("draw-ladder trace fixture rejected: %s" % exc)
+        return 1
+
+    legacy_v1 = json.loads(json.dumps(base))
+    legacy_v1["schemaVersion"] = 1
+    legacy_v1.pop("predicateFactVersion")
+    for legacy_draw in legacy_v1["draws"]:
+        legacy_draw.pop("predicateFacts")
+    if validate_trace(legacy_v1)["predicateReplay"]["status"] != "unavailable":
+        print("schemaVersion 1 did not report predicate parity unavailable")
+        return 1
+    if predicate_replay_gate_failure(validate_trace(legacy_v1)) is not None:
+        print("schemaVersion 1 historical capture failed the supported-fact gate")
         return 1
 
     no_op = json.loads(json.dumps(base))
@@ -588,6 +806,8 @@ def self_test():
         })
     d["winnerSiteId"] = 43
     d["verdict"] = 7
+    d["predicateFacts"] = [{"siteId": 3, "kind": 1, "known": "yes",
+                            "gateWanted": "yes"}]
     mask = (1 << 14) - 1
     d["forwardFacts"] = {
         "presentMask": mask, "verdictOrdinal": 7, "family": 3,
@@ -604,6 +824,152 @@ def self_test():
     except Exception as exc:
         print("draw-ladder VR trace fixture rejected: %s" % exc)
         return 1
+
+    # Independent input-driven selector fixtures: boundaries are inclusive,
+    # overlaps retain the first configured range index, and known-empty is
+    # distinct from an unknown/unreplayable range snapshot.
+    selector_cases = [
+        (1, [[1, 4]], ({"id": 49, "kind": 2, "outcome": 4, "flow": 1,
+                        "subsite": 0, "verdict": 2}, 1)),
+        (4, [[1, 4]], ({"id": 49, "kind": 2, "outcome": 4, "flow": 1,
+                        "subsite": 0, "verdict": 2}, 1)),
+        (6, [[1, 7], [5, 9]], ({"id": 49, "kind": 2, "outcome": 4, "flow": 1,
+                                "subsite": 0, "verdict": 2}, 1)),
+        (10, [], ({"id": 49, "kind": 2, "outcome": 2, "flow": 0,
+                   "subsite": 0, "verdict": -1}, 0)),
+    ]
+    for gate_wanted, expected in (
+            ("yes", {"id": 3, "kind": 3, "outcome": 1, "flow": 0,
+                     "subsite": 0, "verdict": -1}),
+            ("no", {"id": 3, "kind": 3, "outcome": 4, "flow": 1,
+                    "subsite": 0, "verdict": 0})):
+        gate_fact = {"known": "yes", "gateWanted": gate_wanted}
+        if (_candidate_draw_gate(gate_fact) != expected or
+                _legacy14a_draw_gate(gate_fact) != expected):
+            print("draw-ladder draw-gate selector fixture failed")
+            return 1
+    if (_candidate_draw_gate({"known": "unknown", "gateWanted": "unknown"}) is not None or
+            _legacy14a_draw_gate({"known": "unknown", "gateWanted": "unknown"}) is not None):
+        print("draw-ladder unknown draw-gate fixture was treated as off")
+        return 1
+    for eye_index, ranges, expected in selector_cases:
+        fact = {"known": "yes", "eyeDrawIndex": eye_index, "ranges": ranges}
+        if (_candidate_eye_range(fact) != expected or
+                _legacy14a_eye_range(fact) != expected):
+            print("draw-ladder predicate selector boundary fixture failed")
+            return 1
+    if (_candidate_eye_range({"known": "unknown", "eyeDrawIndex": 4, "ranges": []}) is not None or
+            _legacy14a_eye_range({"known": "unknown", "eyeDrawIndex": 4, "ranges": []}) is not None):
+        print("draw-ladder unknown predicate fixture was treated as off")
+        return 1
+
+    # The site-replay test constructs a real route prefix ending at either
+    # EyeRangeSkip or the following claim, so SiteEvent values are expectations.
+    def range_trace(eye_index, ranges, expected, known="yes"):
+        trace = json.loads(json.dumps(vr))
+        draw = trace["draws"][0]
+        ids = [1, 2, 3, 4, 5, 6, 7, 8, 40, 41, 42, 43, 44, 45, 71,
+               46, 47, 48, 49]
+        site49_event, expected_delta = expected
+        stop = 49 if site49_event["outcome"] == 4 else 50
+        if stop == 50:
+            ids.append(50)
+        draw["sites"] = []
+        for site_id in ids:
+            kind = SITE_KINDS[site_id]
+            if site_id == 3:
+                outcome, flow, subsite, verdict = 1, 0, 0, -1
+            elif site_id == 44:
+                outcome, flow, subsite, verdict = 5, 0, 0, -1
+            elif site_id == 49:
+                outcome, flow, subsite, verdict = (site49_event["outcome"],
+                    site49_event["flow"], site49_event["subsite"],
+                    site49_event["verdict"])
+            elif site_id == 50:
+                outcome, flow, subsite, verdict = 3, 1, 0, 6
+            else:
+                outcome, flow, subsite, verdict = (1 if kind == 1 else 2), 0, 0, -1
+            draw["sites"].append({"id": site_id, "kind": kind, "outcome": outcome,
+                                  "flow": flow, "subsite": subsite, "verdict": verdict})
+        draw["winnerSiteId"] = stop
+        draw["verdict"] = TERMINAL_VERDICTS[stop]
+        draw["forwardFacts"] = None
+        draw["predicateFacts"] = [
+            {"siteId": 3, "kind": 1, "known": "yes", "gateWanted": "yes"},
+            {"siteId": 49, "kind": 2, "known": known,
+             "eyeDrawIndex": eye_index, "ranges": ranges if known != "unknown" else [],
+             "censusSkippedDeltaKnown": known != "unknown",
+             "censusSkippedDelta": expected_delta if known != "unknown" else 0}]
+        return trace
+
+    try:
+        for eye_index, ranges, expected in selector_cases:
+            result = validate_trace(range_trace(eye_index, ranges, expected))
+            if result["predicateReplay"]["mismatches"] or result["predicateReplay"]["unreplayable"]:
+                raise TraceError("known selector fixture did not replay completely")
+        unknown_result = validate_trace(range_trace(4, [], selector_cases[3][2], "unknown"))
+        if unknown_result["predicateReplay"]["unreplayable"] != 1:
+            raise TraceError("unknown range fact was coerced to configured-off")
+        known_empty = validate_trace(range_trace(4, [], selector_cases[3][2]))
+        if known_empty["predicateReplay"]["unreplayable"]:
+            raise TraceError("known empty range table became unreplayable")
+        gate_off = json.loads(json.dumps(vr))
+        gate_off_draw = gate_off["draws"][0]
+        gate_off_draw["sites"] = gate_off_draw["sites"][:3]
+        gate_off_draw["sites"][-1].update(outcome=4, flow=1, subsite=0, verdict=0)
+        gate_off_draw.update(winnerSiteId=3, verdict=0, forwardFacts=None)
+        gate_off_draw["predicateFacts"] = [
+            {"siteId": 3, "kind": 1, "known": "yes", "gateWanted": "no"}]
+        if validate_trace(gate_off)["predicateReplay"]["mismatches"]:
+            raise TraceError("known disabled draw gate did not replay")
+        gate_unknown = json.loads(json.dumps(gate_off))
+        gate_unknown["draws"][0]["predicateFacts"] = [
+            {"siteId": 3, "kind": 1, "known": "unknown",
+             "gateWanted": "unknown"}]
+        if validate_trace(gate_unknown)["predicateReplay"]["unreplayable"] != 1:
+            raise TraceError("unknown draw gate was coerced to configured-off")
+        if predicate_replay_gate_failure(validate_trace(gate_unknown)) is None:
+            raise TraceError("unknown draw gate passed the replay gate")
+        mismatch = json.loads(json.dumps(gate_off))
+        mismatch["draws"][0]["predicateFacts"][0]["gateWanted"] = "yes"
+        if predicate_replay_gate_failure(validate_trace(mismatch)) is None:
+            raise TraceError("supported predicate mismatch passed the replay gate")
+        missing_mutation = range_trace(4, [[4, 4]], selector_cases[0][2])
+        missing_mutation["draws"][0]["predicateFacts"][-1]["censusSkippedDeltaKnown"] = False
+        missing_mutation["draws"][0]["predicateFacts"][-1]["censusSkippedDelta"] = 0
+        if predicate_replay_gate_failure(validate_trace(missing_mutation)) is None:
+            raise TraceError("unobserved selector mutation passed the replay gate")
+        duplicate = range_trace(4, [], selector_cases[3][2])
+        duplicate_fact = json.loads(json.dumps(
+            duplicate["draws"][0]["predicateFacts"][-1]))
+        duplicate["draws"][0]["predicateFacts"] = [duplicate_fact,
+                                                    json.loads(json.dumps(duplicate_fact))]
+        validate_trace(duplicate)
+        print("draw-ladder reader accepted a duplicate predicate fact")
+        return 1
+    except TraceError as exc:
+        if "duplicates a supported site fact" not in str(exc):
+            print("draw-ladder predicate replay fixture failed: %s (range test %s)" %
+                  (exc, (eye_index, ranges)))
+            return 1
+
+    strict_cases = []
+    missing_fact = json.loads(json.dumps(vr))
+    del missing_fact["draws"][0]["predicateFacts"]
+    strict_cases.append(("missing", missing_fact))
+    invalid_fact = json.loads(json.dumps(vr))
+    invalid_fact["draws"][0]["predicateFacts"][0]["gateWanted"] = "off"
+    strict_cases.append(("invalid", invalid_fact))
+    invalid_delta = range_trace(1, [[1, 4]], selector_cases[0][2])
+    invalid_delta["draws"][0]["predicateFacts"][-1]["censusSkippedDelta"] = 2
+    strict_cases.append(("oversized counter delta", invalid_delta))
+    for label, invalid_trace in strict_cases:
+        try:
+            validate_trace(invalid_trace)
+            print("draw-ladder reader accepted %s predicate fact" % label)
+            return 1
+        except TraceError:
+            pass
 
     gated_observers = json.loads(json.dumps(vr))
     gated_draw = gated_observers["draws"][0]
@@ -623,6 +989,11 @@ def self_test():
     gated_draw["winnerSiteId"] = 67
     gated_draw["verdict"] = 0
     gated_draw["forwardFacts"] = None
+    gated_draw["predicateFacts"] = [
+        {"siteId": 3, "kind": 1, "known": "yes", "gateWanted": "yes"},
+        {"siteId": 49, "kind": 2, "known": "yes", "eyeDrawIndex": 1,
+         "ranges": [], "censusSkippedDeltaKnown": True,
+         "censusSkippedDelta": 0}]
     try:
         summary = validate_trace(gated_observers)
         if summary["inferredUnvisitedSiteCount"] != len(COMMON + EYE) - len(gated_sites):
@@ -772,6 +1143,8 @@ def self_test():
             })
         draw["winnerSiteId"] = 43
         draw["verdict"] = 7
+        draw["predicateFacts"] = [{"siteId": 3, "kind": 1, "known": "yes",
+                                   "gateWanted": "yes"}]
         draw["sites"].reverse()
 
     def remove_reached_vr_site(data):
@@ -800,7 +1173,7 @@ def self_test():
         actions[1], actions[2] = actions[2], actions[1]
 
     mutations = [
-        ("schema", lambda d: d.update(schemaVersion=2)),
+        ("schema", lambda d: d.update(schemaVersion=3)),
         ("overflow", lambda d: d["footer"].update(overflow=True)),
         ("missing footer", lambda d: d.pop("footer")),
         ("unknown site", lambda d: d["draws"][0]["sites"][0].update(id=73)),
@@ -838,6 +1211,54 @@ def self_test():
             continue
         print("draw-ladder trace self-test accepted invalid %s" % name)
         return 1
+    # CLI gate and --expect-invalid remain distinct: parity failures reject a
+    # valid current-schema sidecar, while the legacy unavailable status passes.
+    cli_file = os.path.join(tempfile.gettempdir(), "edvr_draw_replay_cli_test.json")
+    with open(cli_file, "w", encoding="utf-8") as stream:
+        stream.write("{}")
+    original_read_trace = read_trace
+    try:
+        historical = validate_trace(legacy_v1)
+        for status in ("mismatch", "unreplayable", "mutation-unobserved"):
+            failing = dict(historical)
+            failing["predicateReplay"] = {
+                "status": status, "factCount": 1, "replayed": 0,
+                "unreplayable": int(status == "unreplayable"),
+                "mismatches": int(status == "mismatch"),
+                "mutationUnobserved": int(status == "mutation-unobserved")}
+            read_trace = lambda *args, _summary=failing, **kwargs: ({}, _summary)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["--file", cli_file, "--dry-run"])
+            if code != 1 or "predicate replay gate failed" not in output.getvalue():
+                print("draw-ladder CLI accepted %s predicate replay" % status)
+                return 1
+        read_trace = lambda *args, **kwargs: ({}, historical)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main(["--file", cli_file, "--dry-run"])
+        if code != 0 or "unavailable" not in output.getvalue():
+            print("draw-ladder CLI rejected historical v1 selector capture")
+            return 1
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--file", cli_file, "--dry-run", "--expect-invalid"])
+        if code != 1:
+            print("draw-ladder --expect-invalid treated a valid v1 trace as invalid")
+            return 1
+        def reject_trace(*args, **kwargs):
+            raise TraceError("fixture structural rejection")
+        read_trace = reject_trace
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--file", cli_file, "--dry-run", "--expect-invalid"])
+        if code != 0:
+            print("draw-ladder --expect-invalid semantics changed")
+            return 1
+    finally:
+        read_trace = original_read_trace
+        try:
+            os.remove(cli_file)
+        except OSError:
+            pass
     print("draw-ladder-replay self-test: ok")
     return 0
 
@@ -874,6 +1295,10 @@ def main(argv=None):
         print("[edvr] expected rejection failed: sidecar is valid")
         return 1
     print(format_summary(summary, os.path.abspath(args.file)))
+    gate_failure = predicate_replay_gate_failure(summary)
+    if gate_failure:
+        print("[edvr] predicate replay gate failed: %s" % gate_failure)
+        return 1
     if args.dry_run:
         print("  dry-run: no files or directories were written")
     return 0

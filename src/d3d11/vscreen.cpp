@@ -24,6 +24,7 @@
 #include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/plugin_cost.h"
 #include "../common/proxy.h"  // breadcrumbHeartbeat, the steady-state trail
 #include "../common/timing.h"
 #include "../common/vr_supersample_notice.h"   // Elite's Supersampling below 1, read from the measured render size
@@ -2040,7 +2041,17 @@ struct VScreenDrawLadderVisitor {
             t_compositeThisDraw = false;
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kDrawGateDisabledNone) {
-            if (!drawGateWanted()) return exited(id, DrawVerdict::kNone);
+            const bool gateWanted = drawGateWanted();
+            if constexpr (TracePolicy::enabled) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::DrawGateWanted;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.gateWanted = gateWanted ? draw_ladder_trace::TriState::Yes
+                                             : draw_ladder_trace::TriState::No;
+                trace.predicateFact(fact);
+            }
+            if (!gateWanted) return exited(id, DrawVerdict::kNone);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kParticleProbe) {
             if ((++s->bindAuditSeq & 1023u) == 0) bindingAudit(s, self);
@@ -2313,12 +2324,46 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kEyeRangeSkip) {
+            struct EmptyPredicatePayload final {};
+            struct TracePredicatePayload final {
+                draw_ladder_trace::PredicateFact fact{};
+                std::uint64_t censusSkippedBefore = 0;
+            };
+            using PredicatePayload = std::conditional_t<TracePolicy::enabled,
+                TracePredicatePayload, EmptyPredicatePayload>;
+            PredicatePayload payload{};
+            if constexpr (TracePolicy::enabled) {
+                payload.fact.siteId = static_cast<std::uint16_t>(id);
+                payload.fact.kind = draw_ladder_trace::PredicateFactKind::EyeRangeSkip;
+                payload.fact.known = draw_ladder_trace::TriState::Yes;
+                payload.fact.eyeDrawIndex = s->eyeDrawsThisFrame;
+                payload.fact.rangeCount = static_cast<std::uint8_t>(s->censusSkipRangeCount);
+                for (std::uint8_t i = 0; i < payload.fact.rangeCount && i < 4; ++i) {
+                    payload.fact.ranges[i].lo = s->censusSkipRange[i].lo;
+                    payload.fact.ranges[i].hi = s->censusSkipRange[i].hi;
+                }
+                payload.censusSkippedBefore = s->censusSkipped;
+            }
             for (uint32_t i = 0; i < s->censusSkipRangeCount; ++i) {
                 if (s->eyeDrawsThisFrame >= s->censusSkipRange[i].lo &&
                     s->eyeDrawsThisFrame <= s->censusSkipRange[i].hi) {
                     ++s->censusSkipped;
+                    if constexpr (TracePolicy::enabled) {
+                        payload.fact.censusSkippedDeltaKnown = true;
+                        payload.fact.censusSkippedDelta =
+                            draw_ladder_trace::boundedCensusSkippedDelta(
+                                payload.censusSkippedBefore, s->censusSkipped);
+                        trace.predicateFact(payload.fact);
+                    }
                     return exited(id, DrawVerdict::kSkip, static_cast<uint16_t>(i));
                 }
+            }
+            if constexpr (TracePolicy::enabled) {
+                payload.fact.censusSkippedDeltaKnown = true;
+                payload.fact.censusSkippedDelta =
+                    draw_ladder_trace::boundedCensusSkippedDelta(
+                        payload.censusSkippedBefore, s->censusSkipped);
+                trace.predicateFact(payload.fact);
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kNightVisionClaim) {
@@ -7559,6 +7604,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
                     draw_ladder_trace::statusName(draw_ladder_trace::status()));
     perfMonitorPluginCostConfigure(static_cast<uint8_t>(runtimeVrProfile()
         ? plugins::kProfileVr : plugins::kProfileFlat));
+    edvrPluginCostSetOwnerContext(ctx);
 
     Log::get().note("vScreen fixes installed: black void %s, panel distance %s, eye-draw "
                     "counting %s, hooking %s",

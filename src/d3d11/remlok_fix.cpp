@@ -9,7 +9,9 @@
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "../common/plugin_cost.h"
 #include "binding_shadow.h"
+#include "cockpit_cost_sites.h"
 
 namespace edvr {
 
@@ -75,6 +77,7 @@ bool g_cloneSourceIsDefault = false;
 // What begin set, for end to put back. engaged is the contract between the
 // two: end restores exactly what begin says it changed.
 bool                   g_engaged = false;
+bool                   g_costSample = false;
 bool                   g_vpEngaged = false;
 ID3D11RasterizerState* g_savedRS = nullptr;
 UINT                   g_savedRectCount = 0;
@@ -90,7 +93,8 @@ bool     g_cloneFailedNoted = false;
 // against the source pointer; a null source means the default state, whose
 // description is spelled out because there is no object to ask.
 ID3D11RasterizerState* cloneWithScissor(ID3D11DeviceContext* ctx,
-                                        ID3D11RasterizerState* source) {
+                                        ID3D11RasterizerState* source,
+                                        bool costSample) {
     if (g_clone && source == g_cloneSource &&
         (source || g_cloneSourceIsDefault)) {
         return g_clone;
@@ -107,6 +111,11 @@ ID3D11RasterizerState* cloneWithScissor(ID3D11DeviceContext* ctx,
     d.ScissorEnable = TRUE;
 
     ID3D11Device* dev = nullptr;
+    if (costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokGetDevice),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
     ID3D11RasterizerState* clone = nullptr;
@@ -260,26 +269,44 @@ RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
 }
 
 void remlokScissorBegin(ID3D11DeviceContext* ctx) {
+    g_costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     g_engaged = false;
 
     ID3D11RasterizerState* current = nullptr;
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsGetState),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->RSGetState(&current);   // AddRef'd when non-null
-    ID3D11RasterizerState* scissored = cloneWithScissor(ctx, current);
+    ID3D11RasterizerState* scissored = cloneWithScissor(ctx, current, g_costSample);
     if (!scissored) {
         if (current) current->Release();
+        g_costSample = false;
         return;   // the draw runs untouched, which stock already survives
     }
 
     UINT vpCount = 1;
     D3D11_VIEWPORT vp{};
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsGetViewportsCurrent),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->RSGetViewports(&vpCount, &vp);
     if (vpCount == 0 || vp.Width <= 0.0f) {
         if (current) current->Release();
+        g_costSample = false;
         return;
     }
 
     g_savedRS = current;   // keep the reference until end restores it
     g_savedRectCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsGetScissorRects),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->RSGetScissorRects(&g_savedRectCount, g_savedRects);
 
     // The substituted viewport, when a scale applies: the same centre, a
@@ -295,12 +322,22 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
     g_vpEngaged = false;
     if (scale < 0.999f) {
         g_savedVpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        if (g_costSample) {
+            edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                      cockpit_cost::id(cockpit_cost::Site::RemlokRsGetViewportsSaved),
+                                      static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+        }
         ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
         D3D11_VIEWPORT scaled = vp;
         scaled.Width = vp.Width * scale;
         scaled.Height = vp.Height * scale;
         scaled.TopLeftX = vp.TopLeftX + (vp.Width - scaled.Width) * 0.5f;
         scaled.TopLeftY = vp.TopLeftY + (vp.Height - scaled.Height) * 0.5f;
+        if (g_costSample) {
+            edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                      cockpit_cost::id(cockpit_cost::Site::RemlokRsSetViewportsApply),
+                                      static_cast<uint8_t>(plugin_cost::ApiClass::State));
+        }
         ctx->RSSetViewports(1, &scaled);
         g_vpEngaged = true;
         vp = scaled;   // the scissor below clips against what is drawn
@@ -325,7 +362,17 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
         r.left = x0;
         r.right = x0 + keep;
     }
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsSetScissorRectsApply),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->RSSetScissorRects(1, &r);
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsSetStateApply),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->RSSetState(scissored);
     g_engaged = true;
 
@@ -340,17 +387,34 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
 }
 
 void remlokScissorEnd(ID3D11DeviceContext* ctx) {
-    if (!g_engaged) return;
+    if (!g_engaged) { g_costSample = false; return; }
     g_engaged = false;
+    const bool costSample = g_costSample;
+    g_costSample = false;
+    if (costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsSetStateRestore),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->RSSetState(g_savedRS);
     if (g_savedRS) {
         g_savedRS->Release();
         g_savedRS = nullptr;
     }
+    if (costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsSetScissorRectsRestore),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->RSSetScissorRects(g_savedRectCount,
                            g_savedRectCount ? g_savedRects : nullptr);
     if (g_vpEngaged) {
         g_vpEngaged = false;
+        if (costSample) {
+            edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                      cockpit_cost::id(cockpit_cost::Site::RemlokRsSetViewportsRestore),
+                                      static_cast<uint8_t>(plugin_cost::ApiClass::State));
+        }
         ctx->RSSetViewports(g_savedVpCount,
                             g_savedVpCount ? g_savedVps : nullptr);
     }
@@ -359,6 +423,7 @@ void remlokScissorEnd(ID3D11DeviceContext* ctx) {
 void remlokFrameBoundary() { g_matchesThisFrame = 0; }
 
 void remlokShutdown() {
+    g_costSample = false;
     if (g_clone) {
         g_clone->Release();
         g_clone = nullptr;

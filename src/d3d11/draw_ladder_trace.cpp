@@ -36,9 +36,11 @@ struct DrawRecord final {
     SiteEvent sites[kMaxSiteEventsPerDraw]{};
     draw_ladder::ActionRecord actions[kMaxActionEventsPerDraw]{};
     std::uint16_t actionIds[kMaxActionEventsPerDraw]{};
+    PredicateFact predicateFacts[kMaxPredicateFactsPerDraw]{};
     ForwardFacts forwardFacts{};
     std::uint16_t siteCount = 0;
     std::uint16_t actionCount = 0;
+    std::uint8_t predicateFactCount = 0;
     std::int16_t winnerSiteId = -1;
     std::int16_t verdictOrdinal = -1;
     bool finalized = false;
@@ -223,7 +225,8 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     normalizeResourceIdentities();
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
-        "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":1,"
+        "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
+        "\"predicateFactVersion\":1,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -232,7 +235,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Recorded facts do not re-evaluate hidden resource predicates; no extra D3D queries or constant-buffer reads were performed.\","
+        "\"predicateNote\":\"Predicate fact version 1 independently re-evaluates only DrawGateDisabledNone and EyeRangeSkip; whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
         "\"identityNote\":\"Resource identities are per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
@@ -290,6 +293,35 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                 "{\"id\":%u,\"kind\":%u,\"outcome\":%u,\"flow\":%u,"
                 "\"subsite\":%u,\"verdict\":%d}",
                 e.id, e.kind, e.outcome, e.flow, e.subsite, e.verdict)) return false;
+        }
+        ok = writeText(writer, "],\"predicateFacts\":[");
+        if (!ok) return false;
+        for (std::uint8_t j = 0; j < r.predicateFactCount; ++j) {
+            const PredicateFact& fact = r.predicateFacts[j];
+            if (j && !writeText(writer, ",")) return false;
+            if (fact.kind == PredicateFactKind::DrawGateWanted) {
+                if (!writeFmt(writer,
+                    "{\"siteId\":%u,\"kind\":1,\"known\":\"%s\","
+                    "\"gateWanted\":\"%s\"}",
+                    fact.siteId, triName(fact.known), triName(fact.gateWanted))) return false;
+            } else if (fact.kind == PredicateFactKind::EyeRangeSkip) {
+                if (!writeFmt(writer,
+                    "{\"siteId\":%u,\"kind\":2,\"known\":\"%s\","
+                    "\"eyeDrawIndex\":%u,\"ranges\":[",
+                    fact.siteId, triName(fact.known), fact.eyeDrawIndex)) return false;
+                for (std::uint8_t k = 0; k < fact.rangeCount; ++k) {
+                    if (k && !writeText(writer, ",")) return false;
+                    if (!writeFmt(writer, "[%u,%u]", fact.ranges[k].lo,
+                                  fact.ranges[k].hi)) return false;
+                }
+                if (!writeFmt(writer,
+                    "],\"censusSkippedDeltaKnown\":%s,"
+                    "\"censusSkippedDelta\":%u}",
+                    fact.censusSkippedDeltaKnown ? "true" : "false",
+                    fact.censusSkippedDelta)) return false;
+            } else {
+                return false;
+            }
         }
         ok = writeFmt(writer,
             "],\"winnerSiteId\":%d,\"verdict\":%d,\"forwardFacts\":",
@@ -539,11 +571,67 @@ void recordForwardFacts(Token token, const ForwardFacts& facts) noexcept {
     record.hasForwardFacts = true;
 }
 
+void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized || record.predicateFactCount >= kMaxPredicateFactsPerDraw ||
+        static_cast<std::uint8_t>(fact.known) > static_cast<std::uint8_t>(TriState::Yes) ||
+        fact.known == TriState::No ||
+        static_cast<std::uint8_t>(fact.gateWanted) > static_cast<std::uint8_t>(TriState::Yes) ||
+        (fact.kind == PredicateFactKind::DrawGateWanted && fact.siteId != 3) ||
+        (fact.kind == PredicateFactKind::EyeRangeSkip &&
+         (fact.siteId != 49 || fact.rangeCount > 4)) ||
+        (fact.kind == PredicateFactKind::DrawGateWanted &&
+         ((fact.known == TriState::Yes && fact.gateWanted == TriState::Unknown) ||
+          (fact.known == TriState::Unknown && fact.gateWanted != TriState::Unknown))) ||
+        (fact.kind == PredicateFactKind::EyeRangeSkip &&
+         (fact.known == TriState::Unknown && fact.rangeCount != 0)) ||
+        (fact.kind == PredicateFactKind::EyeRangeSkip &&
+         ((!fact.censusSkippedDeltaKnown && fact.censusSkippedDelta != 0) ||
+          fact.censusSkippedDelta > 1)) ||
+        (fact.kind != PredicateFactKind::DrawGateWanted &&
+         fact.kind != PredicateFactKind::EyeRangeSkip)) {
+        g_wasOverflowed = true;
+        return;
+    }
+    for (std::uint8_t i = 0; i < record.predicateFactCount; ++i) {
+        if (record.predicateFacts[i].siteId == fact.siteId) {
+            g_wasOverflowed = true;
+            return;
+        }
+    }
+    if (fact.kind == PredicateFactKind::EyeRangeSkip) {
+        for (std::uint8_t i = 0; i < fact.rangeCount; ++i) {
+            if (fact.ranges[i].lo == 0 || fact.ranges[i].hi < fact.ranges[i].lo) {
+                g_wasOverflowed = true;
+                return;
+            }
+        }
+    }
+    record.predicateFacts[record.predicateFactCount++] = fact;
+}
+
 void finishDraw(Token token, std::int16_t winnerSiteId,
                 std::int16_t verdictOrdinal) noexcept {
     if (!validToken(token)) { rejectInvalidToken(); return; }
     DrawRecord& record = g_records[token.drawIndex];
     if (record.finalized) { rejectInvalidToken(); return; }
+    for (std::uint16_t i = 0; i < record.siteCount; ++i) {
+        const std::uint16_t siteId = record.sites[i].id;
+        if (siteId != 3 && siteId != 49) continue;
+        bool found = false;
+        for (std::uint8_t j = 0; j < record.predicateFactCount; ++j) {
+            if (record.predicateFacts[j].siteId == siteId) found = true;
+        }
+        if (!found) g_wasOverflowed = true;
+    }
+    for (std::uint8_t i = 0; i < record.predicateFactCount; ++i) {
+        bool visited = false;
+        for (std::uint16_t j = 0; j < record.siteCount; ++j) {
+            if (record.sites[j].id == record.predicateFacts[i].siteId) visited = true;
+        }
+        if (!visited) g_wasOverflowed = true;
+    }
     record.winnerSiteId = winnerSiteId;
     record.verdictOrdinal = verdictOrdinal;
     record.finalized = true;

@@ -16,6 +16,7 @@ namespace edvr::draw_ladder_trace {
 constexpr std::uint32_t kMaxDraws = 65536;
 constexpr std::uint16_t kMaxSiteEventsPerDraw = 48;
 constexpr std::uint16_t kMaxActionEventsPerDraw = 32;
+constexpr std::uint8_t kMaxPredicateFactsPerDraw = 2;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -86,6 +87,42 @@ enum class TriState : std::uint8_t {
     Yes = 2,
 };
 
+// Inputs for the small, independently re-evaluable predicate slice. These
+// facts are recorded only by TracePolicy at already-reached sites; expected
+// SiteEvents remain outputs and are never used as selector inputs.
+enum class PredicateFactKind : std::uint8_t {
+    DrawGateWanted = 1,
+    EyeRangeSkip = 2,
+};
+
+struct PredicateRange final {
+    std::uint32_t lo = 0;
+    std::uint32_t hi = 0;
+};
+
+struct PredicateFact final {
+    std::uint16_t siteId = 0;
+    PredicateFactKind kind = PredicateFactKind::DrawGateWanted;
+    TriState known = TriState::Unknown;
+    TriState gateWanted = TriState::Unknown;
+    std::uint8_t rangeCount = 0;
+    std::uint32_t eyeDrawIndex = 0;
+    PredicateRange ranges[4]{};
+    // EyeRangeSkip's observed post-increment counter delta. False means the
+    // input fact is valid but the mutation observation is unavailable.
+    bool censusSkippedDeltaKnown = false;
+    std::uint32_t censusSkippedDelta = 0;
+};
+
+// The census counter is uint64_t. Keep only the supported single-step delta
+// in the trace's uint32_t field; sentinel 2 intentionally trips its validator
+// for any other observed jump. Unsigned subtraction preserves a real wrap.
+constexpr std::uint32_t boundedCensusSkippedDelta(std::uint64_t before,
+                                                  std::uint64_t after) noexcept {
+    const std::uint64_t delta = after - before;
+    return delta <= 1 ? static_cast<std::uint32_t>(delta) : 2u;
+}
+
 // Each bit marks a decision field actually supplied by the caller. A clear
 // bit/Unknown value means the decision was not reached or was unavailable.
 enum ForwardFact : std::uint32_t {
@@ -151,6 +188,7 @@ void appendSite(Token token, std::uint16_t id, std::uint8_t kind,
 void appendAction(Token token, std::uint16_t id,
                   const draw_ladder::ActionRecord& action) noexcept;
 void recordForwardFacts(Token token, const ForwardFacts& facts) noexcept;
+void appendPredicateFact(Token token, const PredicateFact& fact) noexcept;
 void updateCandidates(Token token, std::uint64_t mask) noexcept;
 void updateRoute(Token token, draw_ladder::RouteId route,
                  draw_ladder::SequenceId sequence) noexcept;
@@ -203,6 +241,10 @@ struct TracePolicy final {
 
     inline void forward(const ForwardFacts& facts) noexcept {
         recordForwardFacts(token, facts);
+    }
+
+    inline void predicateFact(const PredicateFact& fact) noexcept {
+        appendPredicateFact(token, fact);
     }
 };
 

@@ -15,14 +15,21 @@ _Static_assert(offsetof(EdvrPluginCostWindowV1, owners) == 48, "window owner arr
 typedef uint8_t (*EdvrPluginCostFrameBoundaryFn)(uint32_t, uint8_t, uint8_t, uint8_t, uint8_t,
                                                  EdvrPluginCostWindowV1*);
 typedef uint8_t (*EdvrPluginCostApiSampleFrameFn)(void);
+typedef void (*EdvrPluginCostSetOwnerContextFn)(void*);
+typedef uint8_t (*EdvrPluginCostApiSampleContextFn)(const void*);
 
 int plugin_cost_header_c_smoke(void) {
     EdvrPluginCostWindowV1 window = {0};
     EdvrPluginCostFrameBoundaryFn frameBoundary = &edvrPluginCostFrameBoundary;
     EdvrPluginCostApiSampleFrameFn apiSampleFrame = &edvrPluginCostApiSampleFrame;
+    EdvrPluginCostSetOwnerContextFn setOwnerContext = &edvrPluginCostSetOwnerContext;
+    EdvrPluginCostApiSampleContextFn apiSampleContext = &edvrPluginCostApiSampleContext;
+    int contextToken = 0;
     edvrPluginCostConfigure(1u, 1000000u);
+    setOwnerContext(&contextToken);
     edvrPluginCostSetApiSampleFrame(1u);
     (void)apiSampleFrame();
+    (void)apiSampleContext(&contextToken);
     edvrPluginCostNoteSite(1u, 2u, 1u);
     edvrPluginCostNoteCpuTicks(1u, 2u, 3u);
     edvrPluginCostNoteD3dCall(1u, 2u, 3u);

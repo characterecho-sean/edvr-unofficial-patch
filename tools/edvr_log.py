@@ -415,6 +415,10 @@ def print_draw_ladder_report(log_path, version, stamp):
                 raise draw_ladder_replay.TraceError(
                     "sidecar version does not match the graphics log")
             print(draw_ladder_replay.format_summary(summary, sidecar))
+            gate_failure = draw_ladder_replay.predicate_replay_gate_failure(summary)
+            if gate_failure:
+                print("[edvr] predicate replay gate failed: %s" % gate_failure)
+                ok = False
         except draw_ladder_replay.TraceError as exc:
             print("[edvr] BUILD MISMATCH or invalid draw-ladder sidecar: %s" % exc)
             if "build stamp" in str(exc) or "version does not match" in str(exc):
@@ -8304,6 +8308,49 @@ def self_test():
     import draw_ladder_replay
     if draw_ladder_replay.self_test() != 0:
         ok = False
+    # Exercise the actual --draw-replay report return code: old schema remains
+    # readable, while unknown facts and supported mismatches fail closed.
+    import contextlib
+    import io
+    import shutil
+    replay_dir = tempfile.mkdtemp(prefix="edvr_draw_replay_gate_")
+    try:
+        log_path = os.path.join(replay_dir, "edvr_gfx_20261001_010203.log")
+        sidecar_path = os.path.join(
+            replay_dir, "edvr_gfx_20261001_010203.draw-ladder-12.json")
+        scenarios = []
+        legacy = draw_ladder_replay._fixture()
+        legacy["schemaVersion"] = 1
+        legacy.pop("predicateFactVersion")
+        for draw in legacy["draws"]:
+            draw.pop("predicateFacts")
+        legacy_summary = draw_ladder_replay.validate_trace(legacy)
+        scenarios.append(("legacy v1", legacy_summary, 0, "unavailable"))
+        for status in ("unreplayable", "mismatch", "mutation-unobserved"):
+            failed_summary = dict(legacy_summary)
+            failed_summary["predicateReplay"] = {
+                "status": status, "factCount": 1, "replayed": 0,
+                "unreplayable": int(status == "unreplayable"),
+                "mismatches": int(status == "mismatch"),
+                "mutationUnobserved": int(status == "mutation-unobserved")}
+            scenarios.append((status, failed_summary, 1, "gate failed"))
+        original_read_trace = draw_ladder_replay.read_trace
+        for label, summary, want, output_token in scenarios:
+            with open(sidecar_path, "w", encoding="utf-8") as stream:
+                stream.write("{}")
+            draw_ladder_replay.read_trace = lambda *args, _summary=summary, **kwargs: ({}, _summary)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                got = print_draw_ladder_report(log_path, "fixture", "1234ABCD")
+            if got != want or output_token not in output.getvalue():
+                print("--draw-replay %s -> %r, output %r" %
+                      (label, got, output.getvalue()))
+                ok = False
+        draw_ladder_replay.read_trace = original_read_trace
+    finally:
+        if 'original_read_trace' in locals():
+            draw_ladder_replay.read_trace = original_read_trace
+        shutil.rmtree(replay_dir, ignore_errors=True)
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1

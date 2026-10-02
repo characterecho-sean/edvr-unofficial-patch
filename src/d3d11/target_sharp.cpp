@@ -11,7 +11,9 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "../common/plugin_cost.h"
 #include "binding_shadow.h"
+#include "cockpit_cost_sites.h"
 #include "exposure_fix.h"   // lookupShaderHash
 #include "fsr_hlsl_gen.h"   // AMD's ffx_a.h and ffx_fsr1.h, as string chunks
 #include "shader_swap.h"
@@ -263,6 +265,7 @@ bool               g_psHadRcas = false;
 bool               g_psHadProbe = false;
 
 bool               g_engaged = false;
+bool               g_costSample = false;
 ID3D11PixelShader* g_displaced = nullptr;
 uint64_t           g_applied = 0;
 
@@ -443,6 +446,11 @@ bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // VSSetShader, so the shader is read off the context the way the census
     // reads it.
     ID3D11VertexShader* vs = nullptr;
+    if (edvrPluginCostApiSampleContext(ctx)) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::TargetVsGetShader),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->VSGetShader(&vs, nullptr, nullptr);
     if (!vs) return false;
     const uint64_t h = lookupShaderHash(vs);
@@ -451,13 +459,25 @@ bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
 }
 
 void targetSharpBegin(ID3D11DeviceContext* ctx) {
+    g_costSample = false;
     g_engaged = false;
     ID3D11PixelShader* ps = replacement(ctx);
     if (!ps) return;   // stock behaviour, which the log explained once
+    g_costSample = edvrPluginCostApiSampleContext(ctx) != 0;
 
     // The game's own pixel shader, off the context: binding_shadow does not
     // carry shaders, and PSSetShader is not hooked.
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::TargetPsGetShader),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->PSGetShader(&g_displaced, nullptr, nullptr);
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::TargetPsSetShaderApply),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->PSSetShader(ps, nullptr, 0);
     g_engaged = true;
 
@@ -469,16 +489,24 @@ void targetSharpBegin(ID3D11DeviceContext* ctx) {
 }
 
 void targetSharpEnd(ID3D11DeviceContext* ctx) {
-    if (!g_engaged) return;
+    if (!g_engaged) { g_costSample = false; return; }
     g_engaged = false;
+    const bool costSample = g_costSample;
+    g_costSample = false;
     ID3D11PixelShader* orig = g_displaced;
     g_displaced = nullptr;
     // Null restores an unbind, which is also the truth.
+    if (costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::TargetPsSetShaderRestore),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->PSSetShader(orig, nullptr, 0);
     if (orig) orig->Release();
 }
 
 void targetSharpShutdown() {
+    g_costSample = false;
     if (g_ps) {
         g_ps->Release();
         g_ps = nullptr;

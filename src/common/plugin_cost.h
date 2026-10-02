@@ -54,6 +54,13 @@ extern "C" {
 #endif
 void edvrPluginCostConfigure(uint8_t profileBit, uint64_t qpcFrequency) EDVR_PLUGIN_COST_NOEXCEPT;
 void edvrPluginCostShutdown(void) EDVR_PLUGIN_COST_NOEXCEPT;
+// Cold hook lifecycle. The vScreen owner registers its already-known
+// immediate context after hook commit and clears it after unhook. This does
+// not query D3D or enable sampling by itself.
+void edvrPluginCostSetOwnerContext(void* context) EDVR_PLUGIN_COST_NOEXCEPT;
+// Returns true only on the render-owner thread, for its registered immediate
+// context, during an enabled API-sample frame.
+uint8_t edvrPluginCostApiSampleContext(const void* context) EDVR_PLUGIN_COST_NOEXCEPT;
 void edvrPluginCostNoteSite(uint8_t owner, uint16_t siteId, uint8_t event) EDVR_PLUGIN_COST_NOEXCEPT;
 void edvrPluginCostNoteCpuTicks(uint8_t owner, uint16_t siteId, uint64_t ticks) EDVR_PLUGIN_COST_NOEXCEPT;
 void edvrPluginCostNoteD3dCall(uint8_t owner, uint16_t siteId, uint8_t apiClass) EDVR_PLUGIN_COST_NOEXCEPT;

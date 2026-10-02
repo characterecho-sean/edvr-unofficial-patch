@@ -13,21 +13,28 @@
 #include <vector>
 #include <string>
 #include <limits>
+#include <thread>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
 D3D_DRIVER_TYPE testDriver=D3D_DRIVER_TYPE_WARP;
 uint8_t nvApiSampleFlag=0;
 unsigned nvApiSampleReads=0;
 uint64_t nvApiCalls[10][39][5]{};
-extern "C" uint8_t edvrPluginCostApiSampleFrame(void) noexcept {
+ID3D11DeviceContext* nvApiOwnerContext=nullptr;
+std::thread::id nvApiOwnerThread;
+extern "C" uint8_t edvrPluginCostApiSampleContext(const void* context) noexcept {
     ++nvApiSampleReads;
-    return nvApiSampleFlag;
+    return context==nvApiOwnerContext && std::this_thread::get_id()==nvApiOwnerThread
+        ? nvApiSampleFlag : 0;
 }
 extern "C" void edvrPluginCostNoteD3dCall(uint8_t owner,uint16_t siteId,uint8_t apiClass) noexcept {
     if(owner<10 && siteId<39 && apiClass<5) ++nvApiCalls[owner][siteId][apiClass];
 }
 void resetNvApiNotes(uint8_t sample){
     nvApiSampleFlag=sample;nvApiSampleReads=0;std::memset(nvApiCalls,0,sizeof(nvApiCalls));
+}
+void registerNvApiOwner(ID3D11DeviceContext* context){
+    nvApiOwnerContext=context;nvApiOwnerThread=std::this_thread::get_id();
 }
 uint64_t nvApiSiteTotal(unsigned site){uint64_t n=0;for(unsigned c=0;c<5;++c)n+=nvApiCalls[1][site][c];return n;}
 uint64_t nvApiClassTotal(unsigned apiClass){uint64_t n=0;for(unsigned s=0;s<39;++s)n+=nvApiCalls[1][s][apiClass];return n;}
@@ -84,7 +91,7 @@ struct Rig {
     ComPtr<ID3D11PixelShader> stock;float c[333][4]{},n[12][4]{};
     Rig(){
         D3D_FEATURE_LEVEL fl;HRESULT h=D3D11CreateDevice(nullptr,testDriver,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
-        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,testDriver,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);
+        if(h==DXGI_ERROR_SDK_COMPONENT_MISSING)h=D3D11CreateDevice(nullptr,testDriver,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(h);dev.As(&queue);registerNvApiOwner(ctx.Get());
         // The grid is disabled in these fixtures, so the unused TEXCOORD
         // can come from the same position without changing the reference.
         auto vsCode=compile("struct O{float2 t:TEXCOORD4;float4 p:SV_Position;};O main(uint id:SV_VertexID){O o;o.p=float4(id==2?3:-1,id==1?3:-1,0,1);o.t=o.p.xy;return o;}","main","vs_5_0");
@@ -140,8 +147,8 @@ struct Rig {
 void test(bool realistic){
     testOn=realistic;testPulse=true;
     Rig r;check(nightVisionMatches('X',240,1),"exact night pair accepted");check(!nightVisionMatches('D',240,1)&&!nightVisionMatches('X',6,1)&&!nightVisionMatches('X',240,2),"unrelated draw shapes rejected");
-    // The profiler flag is read once only after GetType accepts the immediate
-    // context. Unsampled begin/end preserves the call path without collector
+    // The owner-context sample gate is read once only after GetType accepts
+    // the immediate context. Unsampled begin/end preserves the call path without collector
     // writes; sampled notes count each actual call, including both SRV slots.
     nightVisionShutdown();testOn=false;testPulse=true;nightVisionConfigure(Config::get());
     resetNvApiNotes(0);nightVisionBegin(r.ctx.Get());nightVisionEnd(r.ctx.Get());
@@ -154,6 +161,15 @@ void test(bool realistic){
           nvApiSiteTotal(38)==1&&nvApiTotal()==11,"sampled pulse begin/end notes exact direct calls and two SRV iterations");
     check(nvApiClassTotal(3)==9&&nvApiClassTotal(2)==2&&nvApiClassTotal(0)==0&&
           nvApiClassTotal(1)==0&&nvApiClassTotal(4)==0,"sampled pulse API categories reflect read queries and state calls only");
+    ComPtr<ID3D11PixelShader> beforeForeign;r.ctx->PSGetShader(&beforeForeign,nullptr,nullptr);
+    resetNvApiNotes(1);
+    std::thread foreignSameContext([&]{nightVisionBegin(r.ctx.Get());nightVisionEnd(r.ctx.Get());});
+    foreignSameContext.join();
+    ComPtr<ID3D11PixelShader> afterForeign;r.ctx->PSGetShader(&afterForeign,nullptr,nullptr);
+    check(nvApiSampleReads==1&&nvApiTotal()==0,
+          "same immediate-context pointer on a foreign thread is rejected by the owner sample gate");
+    check(afterForeign==beforeForeign,
+          "foreign-thread Night Vision begin/end still restores the existing pixel shader");
     // A bad settings buffer returns immediately after the three reached
     // context queries; no later resource, shader, or restoration site exists.
     r.ctx->PSSetConstantBuffers(2,1,r.camera.GetAddressOf());resetNvApiNotes(1);

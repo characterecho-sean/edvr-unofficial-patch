@@ -39,21 +39,21 @@
   4.1), the installer skips it and Elite stays on its stock VR path. Four
   changes first (section 10); no F8, AA, flash fix or Explorer Cam without
   the runtime; the first build needs a flight on a stock runtime.
-- **Next:** pilot `3f8dceec` and ladder/replay `d57600de` are pushed;
-  full validation passes both; pilot clean-version promotion passed. Candidate flight
-  completed and payload identity passed: Pimax Crystal Super / Pimax OpenXR, 90 Hz,
-  4032x3898 per eye. The carrier draw-hook mean is promising; on-foot DLSS
-  is close to baseline. Single buckets and an unlogged scene boundary do
-  not pass the repeatable improvement gate. Both builds engaged NV with
-  identical settings; Sean confirms the slight blur is the same on baseline.
-  Ruled out: migration introduced NV blur, because the verified baseline
-  comparison reproduces it. The longer performance baseline is captured;
-  Steam now has verified candidate `ee2628da` for the matching flight.
-  Continue Phase 1 disabled-interest and cost work before group migration;
-  shader-pair candidates stay cached, shape/state stay draw-time predicates.
-  Ladder/replay and disabled-interest snapshots pass all 121 jobs; trace-only
-  counters are removed. Sampled classifier CPU and direct NV call attribution
-  pass all 122 jobs; full module cost coverage remains open (section 11).
+- **Next:** candidate `ee2628da` passed all 122 validation jobs and its clean
+  promotion, and remains installed in Steam. The longer comparison flight
+  verifies Pimax Crystal Super / Pimax OpenXR, 90 Hz, 4032x3898 per eye.
+  Sean reports unchanged visuals. Three sampled hook comparisons are lower;
+  carrier AA off is higher and drifts upward. Workload/scene matching and
+  repeatable CPU improvement/GPU non-regression remain unresolved (section 11).
+  NumLock captured a valid 3,892-draw selector/action stream; full predicate
+  equivalence is still open. Actual NV API counts now have flight evidence.
+  Ruled out: migration introduced NV blur, because Sean's verified baseline
+  comparison reproduces it and the latest candidate looks the same.
+  Three reviewed Luna slices now pass all 123 full validation jobs: the
+  timed-draw denominator, Target/RemLok API coverage with an NV sampling
+  guard, and independent replay of two pure predicate families. Clean
+  promotion and production v2 capture remain next; all-module cost coverage
+  and remaining predicate families are open. No further group migration yet.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a
   stable ABI for first-party plugins (they ship with the core; freezing
@@ -799,11 +799,12 @@ five-byte jump: 7,057 bytes including that instruction. Earlier 7,052 was
 the last instruction's start offset.
 
 The final type-only CPU policy keeps the old trace/context/draw-argument ABI;
-an unused policy-reference parameter was removed before validation. Independent
-inspection of encoded `/FAcs` listings finds exactly the same 1,446 instruction
-records, 7,057-byte extent, 94 calls and 288-byte stack reservation as
-`b1c6edf6`; the encoded listing bytes match SHA-256
-`bee82ef5511ed48874d7d25b30bb345efb79a12213235dd8c5bdee44b6ebe2a0`.
+an unused policy-reference parameter was removed before validation. A later
+independent re-audit of saved and fresh `/FAcs` listings confirms matching
+7,057-byte bodies, 1,636 instruction-offset rows, 94 calls and a 288-byte
+stack reservation. The earlier instruction count and checksum were not
+supported by those artifacts. Concatenated encoded bytes match SHA-256
+`2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40`.
 The NoCpu classifier has no collector, clock, selector-helper or stack-cookie
 calls. Direct draw thunks grow by 40-50 bytes while retaining their call counts
 and stack reservations. These are codegen checks, not a flight result.
@@ -864,3 +865,114 @@ baseline order, with 90 seconds per scene/mode, followed by a separate
 60-second NV sample and one manual replay capture. Builds and GPU rigs stay
 idle during the comparison. Phase 1 performance and full replay gates remain
 open; no further group migration is accepted yet.
+
+### Candidate performance and replay flight, 2026-10-02
+
+`edvr_gfx_20261002_054152.log` passes the pinned `ee2628da` build check
+(`v0.18.0-5-gee2628da`, PE stamp `6ABF5388`). The paired runtime log is
+`edvr_openxr_20261002_054154_441_20312.log`, also the candidate. Runtime,
+headset, refresh, 2016x1949 input, 4032x3898 output, FOV and preset K match
+baseline. The loaded DLSS/driver version remains unlogged. Sean flew hangar
+off then DLSS, carrier DLSS then off, and finally cockpit NV with DLSS.
+He reports the visuals looked the same. Exclude startup, mode/scene
+transitions, the final NV period and the manual capture from comparisons.
+
+Clean sampled hook means are descriptive, not whole-CPU or percentile data:
+
+| User-labelled context | AA | Baseline ms/frame | Candidate ms/frame |
+|---|---|---:|---:|
+| On-foot hangar | off | 0.235 | 0.178 |
+| On-foot hangar | DLSS | 0.428 | 0.360 |
+| Aboard carrier | DLSS | 1.028 | 0.814 |
+| Aboard carrier | off | 0.343 | 0.374 |
+
+The carrier-off baseline here uses its four steadier windows (14400-19800),
+excluding the early 0.285 settling window. Candidate carrier-off windows
+are 0.332, 0.378, 0.382 and 0.404: the first matches baseline, then rises.
+Candidate carrier DLSS has only two clean windows. No per-window mean draw
+count exists, and the exact carrier/camera is not instrumented. This does
+not prove a code regression or permit dismissing the difference as noise.
+The native CPU/GPU percentiles include game/runtime work and use unequal
+completed-window counts; they cannot supply missing EDVR attribution.
+
+Direct EDVR GPU subtotal medians favor the candidate in the other three
+cells. Carrier off is 0.018-0.019 versus 0.012 ms/frame; this difference is
+entirely Core's `DoorMenu`, with two occurrences/frame in both flights.
+Uncertainty is unmeasured. Wrapped NV GPU time includes the whole game draw,
+and DLSS observes only seven of fourteen direct temporal-AA scopes. These
+partial observations do not pass GPU non-regression or calibrate budgets.
+
+NumLock, now mapped to `dump_draws`, produced armed/capturing/complete-written
+at 05:50:57.685-766. The strict sidecar reader validates frame 48665: 3,892
+draws, 129,458 site events, 12,100 action events; 762 offscreen and 3,130 eye
+draws, with two NV wins. This is selector/action-order evidence, not full
+predicate parity. The NV sample emits 452 State and 2,034 Read/Query calls
+across 113 sampled frames and ten actual annotated sites, proving the new
+API path ran. Those rows cover annotations only and have no baseline analogue.
+
+Open discriminators: more/different hook work needs a timed-draw denominator;
+added per-draw overhead needs same-workload normalized timing; the tiny
+`DoorMenu` GPU difference needs repeatable scope samples. Instrument these
+before requesting another comparison. Three Luna slices now extend the
+denominator, actual Target/RemLok API notes and independent source-fact
+replay for draw-gate and inclusive eye-range predicates. Full validation
+and production fact-capture evidence remain required; Phase 1 stays open.
+
+### Phase 1 evidence extensions, 2026-10-02 (validated)
+
+Three Luna implementation slices were reviewed together before the normal
+full build. All 123 jobs pass: 117 pool jobs in 153.4 seconds and six quiet
+jobs in 26.0 seconds, both production profiles and self-contained installers,
+and the 232-key config contract. The full-pass receipt at
+`2026-10-02T13:29:45.418299+00:00` fingerprints source inputs
+`8a321110800d436c98afe82328870bdd6bf607f17bda8cfeab415f195af2832e`.
+The build log is `build/plugin-architecture-phase1-evidence-build-3.log`.
+
+- Hook CPU now reports a weighted mean per actually timed draw and its
+  sample count, alongside the existing scaled per-frame mean/max. It reuses
+  existing clocks and preserves the frame-level clamp, sample stride and
+  forwarding boundaries; zero valid timed samples remain unavailable.
+- TargetSharp and RemLok annotate their actual context API calls with stable
+  source sites. Cold hook registration and a frame-boundary thread token
+  restrict sampling to the registered immediate context and render thread.
+  Review extended that guard to NV while preserving its existing `GetType`
+  rejection and rendering calls. The real Target/RemLok WARP rig passes
+  56 checks, including restores, declines and replacement failures. The NV
+  rig passes 264,397 checks, including a sequential foreign-thread call with
+  the same context pointer that restores state and emits no cost notes.
+- Trace schema 2 records the existing draw-gate scalar and inclusive eye-range
+  inputs, plus the observed skipped-counter delta. Separately coded frozen
+  `14a7ff70` predicates check only these two families. Unknown inputs differ
+  from Off and known-empty ranges. Writer checks reject missing, duplicate
+  or invalid visited facts. The C++ writer's terminal matrix produces 49
+  matching selector events, zero mismatches or unreplayable facts, and no
+  missing mutation observation; both strict readers accept it. CLI/build
+  gates now fail on supported predicate mismatch, unknown input or missing
+  mutation observation. Schema 1 remains valid historical selector/order
+  evidence with predicate status unavailable. Whole-ladder equivalence
+  remains false, and a production v2 capture is still required.
+
+Follow-up review caught a trace-only 32-bit snapshot of the 64-bit census
+counter. It now preserves the source width and bounds the 64-bit delta before
+narrowing; changes larger than one invalidate the capture. Tests cover high
+counter values, unsigned wraparound and invalid-delta rejection. The normal
+full build passes after this C++ correction. Its first repeat stopped at the
+final rig's stale-data guard: the previous passing run left new negative
+fixtures outside the runner's cleanup namespace. The fixture root now uses
+`draw_ladder_test-trace`; explicit cleanup includes the three new negative
+cases. Two consecutive guarded focused runs and the final full run pass and
+leave no stale root. The startup guard and dry-run file comparison remain.
+
+Two independent listing parsers confirm that the fresh `NoTrace, NoCpu`
+classifier remains byte-identical to its saved reference: 7,057 encoded bytes,
+94 calls and a 288-byte stack reservation, SHA-256 `2647f030...`. Neither trace
+fact tap adds work to that body. This proof covers the unarmed classifier
+specialization, not the whole draw path or historical `14a7ff70` performance.
+
+Cost counts cover annotated methods and classifier samples, not whole-plugin
+CPU/API/GPU costs; all nine manifest budgets remain unmeasured. An outcome-only
+schema-1 stream can measure traversal/gating policy overhead, but cannot
+reconstruct hidden predicates or serve as a historical whole-classifier
+performance baseline. The independent relative cost rig, remaining predicate
+facts, carrier-off comparison and GPU non-regression gate remain open. The
+validated extensions do not authorize Phase 2 migration or shipping.

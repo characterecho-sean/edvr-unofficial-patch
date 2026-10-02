@@ -1,6 +1,11 @@
 #include "../../src/common/plugin_cost.h"
 #include "plugin_manifest.inc"
+#include "../../src/d3d11/cockpit_cost_sites.h"
+#include "../../src/d3d11/draw_cpu_window.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -9,12 +14,59 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace pc = edvr::plugin_cost;
+
+std::string functionBody(const std::string& source, const std::string& signature);
 
 bool check(bool condition, const char* label) {
     if (!condition) std::printf("FAIL: %s\n", label);
     return condition;
+}
+
+bool drawCpuWindowChecks() {
+    bool ok = true;
+    edvr::draw_cpu::Window window;
+
+    // The per-draw numerator must use the existing frame-level clamp. If the
+    // first frame were clamped draw-by-draw, its 100/130 pair plus the second
+    // callback would incorrectly contribute 20 ticks instead of zero.
+    window.noteDraw(100);
+    window.noteDraw(20);
+    window.closeFrame(true, 120, 130);
+    window.noteDraw(50);
+    window.noteDraw(25);
+    window.closeFrame(true, 75, 30);
+    ok &= check(window.windowTimedDraws == 4 && window.windowOwnTicks == 45 &&
+                std::abs(window.meanMs(1000) - 11.25) < 1e-12,
+                "draw CPU window uses frame-level clamp and draw-weighted sample denominator");
+
+    // Invalid/unsampled frames discard their per-frame denominator and do not
+    // contaminate the valid window.
+    window.noteDraw(100);
+    window.closeFrame(false, 100, 0);
+    ok &= check(window.windowTimedDraws == 4 && window.windowOwnTicks == 45 &&
+                window.frameTimedDraws == 0,
+                "unsampled or invalid-frequency frames are excluded and reset per-frame state");
+
+    edvr::draw_cpu::Window zero;
+    zero.closeFrame(true, 0, 0);
+    ok &= check(!zero.hasTimedDraws(),
+                "no timed draw callbacks remains unavailable rather than measured zero");
+    zero.noteDraw(10);  // A valid sample whose entire interval was forwarded.
+    zero.closeFrame(true, 10, 10);
+    ok &= check(zero.hasTimedDraws() && zero.windowTimedDraws == 1 &&
+                zero.meanMs(1000) == 0.0,
+                "all-forwarded sample is measured zero with a nonzero denominator");
+
+    // This is the report-window boundary. Activity/config toggles are outside
+    // this fixed sampler and must not reset these stats; only report close does.
+    window.resetWindow();
+    ok &= check(!window.hasTimedDraws() && window.windowOwnTicks == 0 &&
+                window.frameTimedDraws == 0,
+                "report close clears the aggregate draw window");
+    return ok;
 }
 
 struct FakeClock final {
@@ -91,15 +143,18 @@ bool nightVisionAnnotationChecks() {
     bool inSiteEnum = false;
     const std::size_t getTypeCall = source.find("ctx->GetType()");
     const std::size_t immediateReturn = source.find("if(ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;");
-    const std::size_t sampleRead = source.find("state.costSample=edvrPluginCostApiSampleFrame()!=0;");
+    const std::size_t sampleRead = source.find("state.costSample=edvrPluginCostApiSampleContext(ctx)!=0;");
     const std::size_t getTypeNote = source.find("noteNvD3dCall<NvD3dCallSite::GetType>(plugin_cost::ApiClass::ReadQuery);");
     const std::size_t getTypeEnd = immediateReturn == std::string::npos
         ? std::string::npos : source.find(';', immediateReturn);
     ok &= check(getTypeCall != std::string::npos && immediateReturn <= getTypeCall &&
                 getTypeEnd != std::string::npos && getTypeCall < getTypeEnd &&
                 getTypeEnd < sampleRead && sampleRead < getTypeNote &&
+                source.find("edvrPluginCostApiSampleContext(ctx)", sampleRead +
+                    std::strlen("edvrPluginCostApiSampleContext(ctx)")) == std::string::npos &&
+                source.find("edvrPluginCostApiSampleFrame()") == std::string::npos &&
                 source.find("ctx->GetType()", getTypeCall + 1) == std::string::npos,
-                "GetType executes once; deferred rejection precedes the single API-sample read and conditional note");
+                "GetType executes once; deferred rejection precedes the owner-context sample gate and conditional note");
     while (std::getline(lines, line)) {
         if (line.find("enum class NvD3dCallSite") != std::string::npos) inSiteEnum = true;
         if (inSiteEnum && line.find("};") != std::string::npos) inSiteEnum = false;
@@ -174,6 +229,167 @@ bool nightVisionAnnotationChecks() {
     ok &= check(calls == 39 && usedSites.size() == calls && declaredSites.size() == 40 &&
                 declaredValues.size() == declaredSites.size(),
                 "first Night Vision API slice covers 39 direct calls with unique stable site IDs");
+    return ok;
+}
+
+std::string readSource(const char* path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return {};
+    return std::string((std::istreambuf_iterator<char>(input)),
+                       std::istreambuf_iterator<char>());
+}
+
+struct ExpectedApiSite {
+    const char* method;
+    const char* site;
+    const char* apiClass;
+    uint16_t id;
+};
+
+bool leafApiSourceChecks(const char* path, const ExpectedApiSite* expected,
+                         std::size_t expectedCount, const char* label) {
+    const std::string source = readSource(path);
+    if (source.empty()) return check(false, label);
+    bool ok = true;
+    std::set<std::string> seen;
+    std::size_t calls = 0;
+    std::size_t pos = 0;
+    while ((pos = source.find("ctx->", pos)) != std::string::npos) {
+        const std::size_t lineStart = source.rfind('\n', pos);
+        const std::size_t comment = source.rfind("//", pos);
+        if (comment != std::string::npos &&
+            (lineStart == std::string::npos || comment > lineStart)) {
+            pos += 5;
+            continue;
+        }
+        const std::size_t methodStart = pos + 5;
+        const std::size_t methodEnd = source.find('(', methodStart);
+        if (methodEnd == std::string::npos) break;
+        const std::string method = source.substr(methodStart, methodEnd - methodStart);
+        const ExpectedApiSite* match = calls < expectedCount ? &expected[calls] : nullptr;
+        ok &= check(match != nullptr, "leaf source has only the declared immediate-context API calls");
+        if (!match) { pos = methodEnd + 1; continue; }
+        ok &= check(method == match->method,
+                    "leaf immediate-context methods retain their pinned source order");
+        ++calls;
+
+        const std::size_t note = source.rfind("edvrPluginCostNoteD3dCall(", pos);
+        const std::size_t noteEnd = note == std::string::npos
+            ? std::string::npos : source.find(");", note);
+        const std::size_t site = note == std::string::npos
+            ? std::string::npos : source.find("cockpit_cost::Site::", note);
+        const std::size_t classPos = note == std::string::npos
+            ? std::string::npos : source.find("plugin_cost::ApiClass::", note);
+        const bool noteOrder = note != std::string::npos && noteEnd != std::string::npos &&
+            noteEnd < pos && source.find("edvrPluginCostNoteD3dCall(", note + 1) >= pos;
+        std::string between;
+        if (noteOrder) between = source.substr(noteEnd + 2, pos - noteEnd - 2);
+        between.erase(std::remove_if(between.begin(), between.end(),
+            [](unsigned char c) { return std::isspace(c) != 0; }), between.end());
+        // Notes are conditional; the closing brace is the only token between
+        // the note and the unconditional context call.
+        ok &= check(noteOrder && (between.empty() || between == "}"),
+                    "each leaf context call has its conditional note immediately before it");
+        if (noteOrder && site != std::string::npos && classPos != std::string::npos) {
+            const std::size_t siteEnd = source.find_first_of(") ,", site);
+            const std::size_t classEnd = source.find(')', classPos);
+            const std::string actualSite = source.substr(site + std::strlen("cockpit_cost::Site::"),
+                siteEnd - site - std::strlen("cockpit_cost::Site::"));
+            const std::string actualClass = source.substr(classPos + std::strlen("plugin_cost::ApiClass::"),
+                classEnd - classPos - std::strlen("plugin_cost::ApiClass::"));
+            ok &= check(actualSite == match->site && actualClass == match->apiClass,
+                        "leaf context call uses its pinned stable site and API class");
+            ok &= check(seen.insert(actualSite).second,
+                        "each leaf immediate-context source site has a unique ID");
+        } else {
+            ok &= check(false, "leaf context call has a parseable stable-site note");
+        }
+        pos = methodEnd + 1;
+    }
+    ok &= check(calls == expectedCount && seen.size() == expectedCount,
+                "leaf API coverage contains exactly the declared, unique source sites");
+    return ok;
+}
+
+bool targetSharpRemlokAnnotationChecks() {
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::TargetVsGetShader) == 64);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::TargetPsGetShader) == 65);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::TargetPsSetShaderApply) == 66);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::TargetPsSetShaderRestore) == 67);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokGetDevice) == 72);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsGetState) == 73);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsGetViewportsCurrent) == 74);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsGetScissorRects) == 75);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsGetViewportsSaved) == 76);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsSetViewportsApply) == 77);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsSetScissorRectsApply) == 78);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsSetStateApply) == 79);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsSetStateRestore) == 80);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsSetScissorRectsRestore) == 81);
+    static_assert(edvr::cockpit_cost::id(edvr::cockpit_cost::Site::RemlokRsSetViewportsRestore) == 82);
+    const ExpectedApiSite target[] = {
+        {"VSGetShader", "TargetVsGetShader", "ReadQuery", 64},
+        {"PSGetShader", "TargetPsGetShader", "ReadQuery", 65},
+        {"PSSetShader", "TargetPsSetShaderApply", "State", 66},
+        {"PSSetShader", "TargetPsSetShaderRestore", "State", 67},
+    };
+    const ExpectedApiSite remlok[] = {
+        {"GetDevice", "RemlokGetDevice", "ReadQuery", 72},
+        {"RSGetState", "RemlokRsGetState", "ReadQuery", 73},
+        {"RSGetViewports", "RemlokRsGetViewportsCurrent", "ReadQuery", 74},
+        {"RSGetScissorRects", "RemlokRsGetScissorRects", "ReadQuery", 75},
+        {"RSGetViewports", "RemlokRsGetViewportsSaved", "ReadQuery", 76},
+        {"RSSetViewports", "RemlokRsSetViewportsApply", "State", 77},
+        {"RSSetScissorRects", "RemlokRsSetScissorRectsApply", "State", 78},
+        {"RSSetState", "RemlokRsSetStateApply", "State", 79},
+        {"RSSetState", "RemlokRsSetStateRestore", "State", 80},
+        {"RSSetScissorRects", "RemlokRsSetScissorRectsRestore", "State", 81},
+        {"RSSetViewports", "RemlokRsSetViewportsRestore", "State", 82},
+    };
+    bool ok = true;
+    ok &= leafApiSourceChecks("src/d3d11/target_sharp.cpp", target,
+                              sizeof(target) / sizeof(target[0]),
+                              "TargetSharp source is available for direct API coverage verification");
+    ok &= leafApiSourceChecks("src/d3d11/remlok_fix.cpp", remlok,
+                              sizeof(remlok) / sizeof(remlok[0]),
+                              "RemLok source is available for direct API coverage verification");
+
+    const std::string sharp = readSource("src/d3d11/target_sharp.cpp");
+    const std::string rem = readSource("src/d3d11/remlok_fix.cpp");
+    const std::string probe = functionBody(sharp, "bool targetSharpOnEyeDraw(");
+    const std::string sharpBegin = functionBody(sharp, "void targetSharpBegin(");
+    const std::string sharpEnd = functionBody(sharp, "void targetSharpEnd(");
+    const std::string remBegin = functionBody(rem, "void remlokScissorBegin(");
+    const std::string remEnd = functionBody(rem, "void remlokScissorEnd(");
+    const std::string clone = functionBody(rem, "ID3D11RasterizerState* cloneWithScissor(");
+    ok &= check(probe.find("edvrPluginCostApiSampleContext(ctx)") < probe.find("ctx->VSGetShader") &&
+                probe.find("TargetVsGetShader") != std::string::npos,
+                "TargetSharp's existing shader probe samples and annotates at the actual query");
+    ok &= check(sharpBegin.find("if (!ps) return") < sharpBegin.find("edvrPluginCostApiSampleContext(ctx)") &&
+                sharpBegin.find("edvrPluginCostApiSampleContext(ctx)") < sharpBegin.find("ctx->PSGetShader") &&
+                sharpBegin.find("ctx->PSGetShader") < sharpBegin.find("ctx->PSSetShader"),
+                "TargetSharp captures sampling only after replacement succeeds and preserves query-before-set order");
+    const std::size_t sharpSavedSample = sharpEnd.find("const bool costSample = g_costSample;");
+    const std::size_t sharpClearSample = sharpEnd.find("g_costSample = false;", sharpSavedSample);
+    ok &= check(sharpSavedSample != std::string::npos && sharpClearSample != std::string::npos &&
+                sharpSavedSample < sharpClearSample && sharpClearSample < sharpEnd.find("ctx->PSSetShader"),
+                "TargetSharp carries the Begin sample into its matching restore then clears it");
+    const std::size_t remSample = remBegin.find("g_costSample = edvrPluginCostApiSampleContext(ctx) != 0;");
+    ok &= check(remSample != std::string::npos && remSample < remBegin.find("ctx->RSGetState"),
+                "RemLok captures the API sample before its first context query");
+    ok &= check(rem.find("bool costSample) {") != std::string::npos,
+                "RemLok carries its saved API-sample decision into the device-query helper");
+    ok &= check(clone.find("if (costSample)") < clone.find("ctx->GetDevice"),
+                "RemLok guards the conditional device query note by its saved sample");
+    std::string compactRemBegin = remBegin;
+    compactRemBegin.erase(std::remove_if(compactRemBegin.begin(), compactRemBegin.end(),
+        [](unsigned char c) { return std::isspace(c) != 0; }), compactRemBegin.end());
+    const std::size_t remSavedSample = remEnd.find("const bool costSample = g_costSample;");
+    const std::size_t remClearSample = remEnd.find("g_costSample = false;", remSavedSample);
+    ok &= check(compactRemBegin.find("g_costSample=false;return;") != std::string::npos &&
+                remSavedSample != std::string::npos && remClearSample != std::string::npos &&
+                remSavedSample < remClearSample && remClearSample < remEnd.find("ctx->RSSetState"),
+                "RemLok declines clear their sample and successful End carries it across all restores");
     return ok;
 }
 
@@ -270,6 +486,39 @@ bool collectorHotPathChecks() {
                     body.find("qpcNow") == std::string::npos,
                     "per-site cost notes remain fixed-memory with no logger, allocator, lock, or clock");
     }
+    const std::string apiGuard = functionBody(source,
+        "extern \"C\" uint8_t edvrPluginCostApiSampleContext(");
+    const std::string boundary = functionBody(source,
+        "extern \"C\" uint8_t edvrPluginCostFrameBoundary(");
+    const std::string registration = functionBody(source,
+        "extern \"C\" void edvrPluginCostSetOwnerContext(");
+    const std::string configure = functionBody(source,
+        "extern \"C\" void edvrPluginCostConfigure(");
+    const std::string shutdown = functionBody(source,
+        "extern \"C\" void edvrPluginCostShutdown(");
+    ok &= check(!apiGuard.empty() &&
+                apiGuard.find("g_ownerContext.load(std::memory_order_acquire) != context") <
+                    apiGuard.find("g_ownerThreadToken.load(std::memory_order_acquire)") &&
+                apiGuard.find("g_threadToken == 0") != std::string::npos &&
+                apiGuard.find("threadToken()") == std::string::npos &&
+                apiGuard.find("fetch_add") == std::string::npos &&
+                apiGuard.find("g_threadToken != owner") < apiGuard.find("return g_configured && g_apiSampleFrame"),
+                "sample getter checks context and existing TLS identity without allocating a foreign-thread token");
+    ok &= check(!boundary.empty() && boundary.find("const uintptr_t ownerToken = threadToken();") != std::string::npos &&
+                boundary.find("const uintptr_t previousOwner = g_ownerThreadToken.load(std::memory_order_relaxed);") != std::string::npos &&
+                boundary.find("if (previousOwner != ownerToken)") < boundary.find("g_ownerContext.load(std::memory_order_acquire)") &&
+                boundary.find("if (previousOwner != publishedOwner)") < boundary.find("g_ownerThreadToken.store(publishedOwner"),
+                "owner boundary uses one steady-state token load and accesses context/stores publication only on transfer");
+    ok &= check(!registration.empty() &&
+                registration.find("g_ownerThreadToken.store(0") <
+                    registration.find("g_ownerContext.store(context"),
+                "cold owner registration invalidates the old thread before publishing a context");
+    ok &= check(!configure.empty() && configure.find("g_ownerContext") == std::string::npos &&
+                configure.find("g_ownerThreadToken") == std::string::npos,
+                "collector reconfiguration preserves the cold context and owner-thread registration");
+    ok &= check(!shutdown.empty() && shutdown.find("g_ownerThreadToken.store(0") != std::string::npos &&
+                shutdown.find("g_ownerContext.store(nullptr") != std::string::npos,
+                "collector shutdown clears both owner-thread publication and registered context");
     return ok;
 }
 
@@ -295,14 +544,85 @@ bool collectorLifecycleChecks() {
     const std::size_t commit = install.find("if (!s.hook.commit())");
     const std::size_t failedReturn = install.find("return;", commit);
     const std::size_t configure = install.find("perfMonitorPluginCostConfigure(");
-    ok &= check(!install.empty() && commit < failedReturn && failedReturn < configure,
-                "collector configuration occurs only after successful vtable commit");
+    const std::size_t ownerContext = install.find("edvrPluginCostSetOwnerContext(ctx);");
+    ok &= check(!install.empty() && commit < failedReturn && failedReturn < configure &&
+                configure < ownerContext,
+                "collector config then registers the known owner context only after successful hook commit");
 
     const std::string shutdown = functionBody(screen, "void shutdownVScreenFixes(");
     const std::size_t uninstall = shutdown.find("g_state->hook.uninstall();");
     const std::size_t stop = shutdown.find("perfMonitorPluginCostShutdown();", uninstall);
     ok &= check(!shutdown.empty() && uninstall < stop,
-                "collector shutdown follows hook uninstall after callbacks are quiescent");
+                "collector shutdown follows hook uninstall and clears owner registration after callbacks quiesce");
+    return ok;
+}
+
+bool ownerContextChecks() {
+    bool ok = true;
+    EdvrPluginCostWindowV1 window{};
+    int ownerContext = 0;
+    int otherContext = 0;
+    edvrPluginCostShutdown();
+    edvrPluginCostConfigure(1u, 1000000u);
+    edvrPluginCostSetOwnerContext(&ownerContext);
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+                edvrPluginCostApiSampleContext(&otherContext) == 0,
+                "registered context alone does not sample before an owner frame boundary");
+
+    // Configuration discards its first close, but that existing boundary is
+    // still the owner-thread publication point and opens the next API sample.
+    ok &= check(edvrPluginCostFrameBoundary(1u, 0u, 0u, 1u, 0u, &window) == 0 &&
+                edvrPluginCostApiSampleContext(&ownerContext) == 1,
+                "owner frame boundary publishes render-thread identity before enabling the next sample");
+    edvrPluginCostConfigure(1u, 1000000u);
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
+                "collector reconfiguration preserves owner registration but closes API sampling");
+    edvrPluginCostSetApiSampleFrame(1u);
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1,
+                "collector reconfiguration preserves the published owner-thread identity");
+    edvrPluginCostConfigure(1u, 1000000u);
+    (void)edvrPluginCostFrameBoundary(2u, 0u, 0u, 1u, 0u, &window);
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1,
+                "the next owner boundary reopens sampling after configuration discards its first close");
+    edvrPluginCostSetApiSampleFrame(0u);
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
+                "owner context getter rejects a closed API-sample frame");
+    edvrPluginCostSetApiSampleFrame(1u);
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1,
+                "owner context getter accepts only the open API-sample frame");
+
+    std::atomic<uint8_t> foreignAccepted{0};
+    std::thread foreign([&] {
+        foreignAccepted.store(edvrPluginCostApiSampleContext(&ownerContext),
+                              std::memory_order_relaxed);
+    });
+    foreign.join();
+    ok &= check(foreignAccepted.load(std::memory_order_relaxed) == 0,
+                "a different thread with the same context pointer cannot use the owner sample flag");
+
+    // Simulate a quiescent owner transfer: registration clears publication,
+    // then the next owner-only boundary establishes the new thread token.
+    edvrPluginCostSetOwnerContext(&ownerContext);
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
+                "re-registering a context invalidates its previous owner-thread token");
+    std::atomic<uint8_t> newOwnerAccepted{0};
+    std::thread newOwner([&] {
+        EdvrPluginCostWindowV1 local{};
+        (void)edvrPluginCostFrameBoundary(3u, 0u, 0u, 1u, 0u, &local);
+        newOwnerAccepted.store(edvrPluginCostApiSampleContext(&ownerContext),
+                               std::memory_order_relaxed);
+    });
+    newOwner.join();
+    ok &= check(newOwnerAccepted.load(std::memory_order_relaxed) == 1 &&
+                edvrPluginCostApiSampleContext(&ownerContext) == 0,
+                "owner transfer accepts the new frame thread and rejects the previous thread");
+
+    edvrPluginCostSetOwnerContext(nullptr);
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
+                "clearing the owner context disables the API sample getter");
+    edvrPluginCostShutdown();
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
+                "collector shutdown clears owner context and thread publication");
     return ok;
 }
 
@@ -437,14 +757,61 @@ bool collectorChecks() {
     return ok;
 }
 
+bool drawCpuWindowProductionChecks() {
+    std::ifstream input("src/d3d11/perf_monitor.cpp", std::ios::binary);
+    std::ifstream screenInput("src/d3d11/vscreen.cpp", std::ios::binary);
+    if (!input || !screenInput)
+        return check(false, "draw CPU window production sources are available");
+    const std::string source((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    const std::string screen((std::istreambuf_iterator<char>(screenInput)), std::istreambuf_iterator<char>());
+    bool ok = true;
+
+    const std::string frame = functionBody(source, "void perfMonitorFrame(");
+    const std::string ticks = functionBody(source, "void perfMonitorDrawTicks(");
+    const std::string active = functionBody(source, "void perfMonitorSetActive(");
+    const std::string configure = functionBody(source, "void perfMonitorPluginCostConfigure(");
+    const std::size_t estimate = frame.find("(s.drawWholeTicks - s.drawRealTicks) *");
+    const std::size_t estimateStride = frame.find(
+        "static_cast<int64_t>(kPerfMonitorDrawTimeStride);");
+    const std::size_t closeValid = frame.find("s.drawCpuWindow.closeFrame(true, s.drawWholeTicks, s.drawRealTicks);");
+    const std::size_t report = frame.find("draw hook CPU: 1800-frame window ending");
+    const std::size_t reset = frame.find("s.drawCpuWindow.resetWindow();");
+    const std::size_t totalsReset = frame.find("s.drawWholeTicks = s.drawRealTicks = 0;");
+    ok &= check(!frame.empty() && estimate != std::string::npos &&
+                estimateStride != std::string::npos && estimate < estimateStride &&
+                closeValid != std::string::npos &&
+                estimate < closeValid && closeValid < report && report < reset && reset < totalsReset,
+                "existing scaled frame estimate is preserved and per-draw stats close/reset at the same report boundary");
+    ok &= check(frame.find("detail::g_perfMonitorSampleDraws && qpcFrequency() > 0") != std::string::npos &&
+                frame.find("s.drawCpuWindow.closeFrame(false, 0, 0);") != std::string::npos &&
+                frame.find("s.drawCpuWindow.closeFrame(false, 0, 0);") < totalsReset,
+                "unsampled or invalid-frequency frames discard their denominator");
+    ok &= check(!ticks.empty() && ticks.find("s.drawCpuWindow.noteDraw(wholeTicks);") != std::string::npos &&
+                ticks.find("s.drawCpuWindow.noteDraw(wholeTicks);") >
+                    ticks.find("if (realTicks > 0) g_s.drawRealTicks += realTicks;"),
+                "draw denominator comes only from existing timed callbacks");
+    ok &= check(!active.empty() && active.find("drawCpuWindow") == std::string::npos &&
+                !configure.empty() && configure.find("drawCpuWindow") == std::string::npos,
+                "monitor activity/configuration changes do not reset the always-on draw window");
+    ok &= check(screen.find("if (on) perfMonitorDrawTicks(qpcNow() - t0, real);") != std::string::npos,
+                "timed sample denominator uses the unchanged DrawClock selection and callbacks");
+    ok &= check(frame.find("per timed draw sample across %llu samples") != std::string::npos &&
+                frame.find("per-timed-draw mean unavailable (%llu valid timed draw samples)") != std::string::npos,
+                "report labels timed-draw mean and distinguishes no sample from measured zero");
+    return ok;
+}
+
 bool run(bool full) {
-    bool ok = policyChecks();
+    bool ok = policyChecks() && drawCpuWindowChecks();
     if (full) {
         ok &= collectorChecks();
         ok &= nightVisionAnnotationChecks();
+        ok &= targetSharpRemlokAnnotationChecks();
         ok &= productionCpuRouteChecks();
         ok &= collectorHotPathChecks();
         ok &= collectorLifecycleChecks();
+        ok &= ownerContextChecks();
+        ok &= drawCpuWindowProductionChecks();
         ok &= collectorLifecycleChecks();
     }
     std::puts(ok ? "plugin_cost_test: PASS" : "plugin_cost_test: FAILED");

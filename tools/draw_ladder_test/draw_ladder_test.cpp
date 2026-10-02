@@ -6,6 +6,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <windows.h>
 #include <vector>
@@ -87,7 +88,15 @@ struct ModelVisitor final {
         }
         if (id == ladder::SiteId::kDrawGateDisabledNone && scenario.drawGateOff) {
             return ladder::SiteResult::exited(
-                static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone), 2);
+                static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+        }
+        if (id == ladder::SiteId::kDrawGateDisabledNone) {
+            return ladder::SiteResult::observed();
+        }
+        if (id == ladder::SiteId::kEyeRangeSkip &&
+            id == scenario.exitAt) {
+            return ladder::SiteResult::exited(
+                static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
         }
         if (kind == ladder::SiteKind::Claim && id == scenario.claimAt) {
             return ladder::SiteResult::claimed(scenario.verdict);
@@ -566,6 +575,7 @@ constexpr ladder::SiteId kFrozenEye[] = {
 bool frozenShouldStop(const Scenario& s, ladder::SiteId id, ladder::SiteKind kind) {
     if (id == ladder::SiteId::kForeignContextNone && s.foreignOwner) return true;
     if (id == ladder::SiteId::kDrawGateDisabledNone && s.drawGateOff) return true;
+    if (id == ladder::SiteId::kEyeRangeSkip && id == s.exitAt) return true;
     if (kind == ladder::SiteKind::Claim && id == s.claimAt) return true;
     return kind == ladder::SiteKind::Exit && id == s.exitAt;
 }
@@ -915,6 +925,7 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     const auto terminalKind = frozenKind(terminal);
     if (terminal == ladder::SiteId::kForeignContextNone) scenario.foreignOwner = true;
     else if (terminal == ladder::SiteId::kDrawGateDisabledNone) scenario.drawGateOff = true;
+    else if (terminal == ladder::SiteId::kEyeRangeSkip) scenario.exitAt = terminal;
     else if (terminalKind == ladder::SiteKind::Claim) scenario.claimAt = terminal;
     else scenario.exitAt = terminal;
 
@@ -965,6 +976,33 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     }
     if (flow == ladder::Flow::Continue) {
         flow = runSequence(selectedSequence, visitor, interest, policy);
+    }
+    for (const auto visited : visitor.visited) {
+        if (visited == ladder::SiteId::kDrawGateDisabledNone) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::DrawGateWanted;
+            fact.known = trace::TriState::Yes;
+            fact.gateWanted = scenario.drawGateOff ? trace::TriState::No
+                                                   : trace::TriState::Yes;
+            policy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kEyeRangeSkip) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::EyeRangeSkip;
+            fact.known = trace::TriState::Yes;
+            fact.eyeDrawIndex = facts.eyeDrawIndex;
+            if (terminal == ladder::SiteId::kEyeRangeSkip) {
+                // Two overlapping ranges prove replay preserves the legacy
+                // first-match subsite (the selector result itself is subsite 0).
+                fact.rangeCount = 2;
+                fact.ranges[0] = {facts.eyeDrawIndex, facts.eyeDrawIndex};
+                fact.ranges[1] = {facts.eyeDrawIndex, facts.eyeDrawIndex};
+                fact.censusSkippedDelta = 1;
+            }
+            fact.censusSkippedDeltaKnown = true;
+            policy.predicateFact(fact);
+        }
     }
     const std::vector<ladder::SiteId> expected = includeCommon
         ? frozenWalkRanges(scenario, kFrozenCommon, 8, referenceTail, referenceTailCount)
@@ -1045,6 +1083,12 @@ bool traceWriterChecks(const char* rootArg) {
     namespace trace = edvr::draw_ladder_trace;
     const std::string root(rootArg);
     bool ok = true;
+    const auto counterMax = (std::numeric_limits<std::uint64_t>::max)();
+    ok &= check(trace::boundedCensusSkippedDelta(counterMax, counterMax) == 0 &&
+                trace::boundedCensusSkippedDelta(counterMax - 1, counterMax) == 1 &&
+                trace::boundedCensusSkippedDelta(counterMax, 0) == 1 &&
+                trace::boundedCensusSkippedDelta(100, 102) == 2,
+                "bounded census delta preserves high counts and one-step wrap");
     ok &= check(createDirectory(root), "create unique ignored-build scratch root");
     const std::string disabledDir = root + "\\disabled";
     DeleteFileA((disabledDir + "\\edvr_gfx_disabled.log").c_str());
@@ -1174,6 +1218,24 @@ bool traceWriterChecks(const char* rootArg) {
                 vrVisitor.handlerCalls[static_cast<std::uint16_t>(
                     ladder::SiteId::kPanelCurveObserve)] == 0,
                 "real writer fixture records masked observers without running their handlers");
+    for (const auto visited : vrVisitor.visited) {
+        if (visited == ladder::SiteId::kDrawGateDisabledNone) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::DrawGateWanted;
+            fact.known = trace::TriState::Yes;
+            fact.gateWanted = trace::TriState::Yes;
+            vrPolicy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kEyeRangeSkip) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::EyeRangeSkip;
+            fact.known = trace::TriState::Yes;
+            fact.eyeDrawIndex = vrDraw.eyeDrawIndex;
+            fact.censusSkippedDeltaKnown = true;
+            vrPolicy.predicateFact(fact);
+        }
+    }
     ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawEnd>(vrPolicy, [] {
         ladder::ActionRecord action;
         action.phase = ladder::ActionPhase::End;
@@ -1386,6 +1448,67 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(duplicateFactsStarted && duplicateFactsToken.valid() && trace::overflowed() &&
                 trace::status() == trace::Status::InvalidCapture,
                 "duplicate ForwardFacts append invalidates the capture");
+
+    const std::string duplicatePredicateDir = root + "\\duplicatepredicatefacts";
+    const bool duplicatePredicateStarted = beginCapture(duplicatePredicateDir,
+        "edvr_gfx_duplicate_predicate.log", 28);
+    const trace::Token duplicatePredicateToken = trace::beginDraw(finalizedFacts);
+    trace::PredicateFact predicateFact{};
+    predicateFact.siteId = static_cast<std::uint16_t>(ladder::SiteId::kDrawGateDisabledNone);
+    predicateFact.kind = trace::PredicateFactKind::DrawGateWanted;
+    predicateFact.known = trace::TriState::Yes;
+    predicateFact.gateWanted = trace::TriState::Yes;
+    trace::appendPredicateFact(duplicatePredicateToken, predicateFact);
+    trace::appendPredicateFact(duplicatePredicateToken, predicateFact);
+    trace::appendSite(duplicatePredicateToken, 72, 3, 4, 1, 0,
+        static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+    trace::finishDraw(duplicatePredicateToken, 72,
+        static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+    trace::frameEnd(28);
+    ok &= check(duplicatePredicateStarted && duplicatePredicateToken.valid() &&
+                trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
+                "duplicate predicate fact invalidates the capture");
+
+    const std::string invalidDeltaDir = root + "\\invalidcounterdelta";
+    const bool invalidDeltaStarted = beginCapture(invalidDeltaDir,
+        "edvr_gfx_invalid_counter_delta.log", 30);
+    const trace::Token invalidDeltaToken = trace::beginDraw(draw);
+    trace::PredicateFact invalidDeltaFact{};
+    invalidDeltaFact.siteId = static_cast<std::uint16_t>(ladder::SiteId::kEyeRangeSkip);
+    invalidDeltaFact.kind = trace::PredicateFactKind::EyeRangeSkip;
+    invalidDeltaFact.known = trace::TriState::Yes;
+    invalidDeltaFact.rangeCount = 1;
+    invalidDeltaFact.eyeDrawIndex = 1;
+    invalidDeltaFact.ranges[0] = {1, 1};
+    invalidDeltaFact.censusSkippedDeltaKnown = true;
+    invalidDeltaFact.censusSkippedDelta = trace::boundedCensusSkippedDelta(100, 102);
+    trace::appendPredicateFact(invalidDeltaToken, invalidDeltaFact);
+    const bool oversizedDeltaRejected = trace::overflowed();
+    trace::appendSite(invalidDeltaToken, 72, 3, 4, 1, 0,
+        static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+    trace::finishDraw(invalidDeltaToken, 72,
+        static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+    trace::frameEnd(30);
+    ok &= check(invalidDeltaStarted && invalidDeltaToken.valid() &&
+                oversizedDeltaRejected && trace::status() == trace::Status::InvalidCapture,
+                "out-of-range census delta is rejected before serialization");
+
+    const std::string missingPredicateDir = root + "\\missingpredicatefacts";
+    const bool missingPredicateStarted = beginCapture(missingPredicateDir,
+        "edvr_gfx_missing_predicate.log", 29);
+    trace::DrawFacts missingPredicateDraw = draw;
+    missingPredicateDraw.route = ladder::RouteId::kCommon;
+    missingPredicateDraw.sequence = ladder::SequenceId::kCommon;
+    const trace::Token missingPredicateToken = trace::beginDraw(missingPredicateDraw);
+    trace::appendSite(missingPredicateToken,
+        static_cast<std::uint16_t>(ladder::SiteId::kDrawGateDisabledNone), 3,
+        1, 0, 0, -1);
+    trace::finishDraw(missingPredicateToken,
+        static_cast<std::int16_t>(ladder::SiteId::kDrawGateDisabledNone), -1);
+    trace::frameEnd(29);
+    ok &= check(missingPredicateStarted && missingPredicateToken.valid() &&
+                trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
+                "missing visited predicate fact invalidates the capture");
 
     const std::string reloadInvalidDir = root + "\\reloadinvalid";
     const bool reloadInvalidStarted = beginCapture(reloadInvalidDir,

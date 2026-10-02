@@ -1,5 +1,6 @@
 #include "../common/plugin_cost.h"
 
+#include <atomic>
 #include <cmath>
 
 namespace {
@@ -43,6 +44,21 @@ bool g_configured = false;
 bool g_skipNextBoundary = false;
 bool g_apiSampleFrame = false;
 bool g_traceSuppressed = false;
+std::atomic<void*> g_ownerContext{nullptr};
+std::atomic<uintptr_t> g_ownerThreadToken{0};
+std::atomic<uintptr_t> g_nextThreadToken{1};
+thread_local uintptr_t g_threadToken = 0;
+
+uintptr_t threadToken() noexcept {
+    if (g_threadToken == 0) {
+        uintptr_t token = g_nextThreadToken.fetch_add(1, std::memory_order_relaxed);
+        // Zero is the unpublished sentinel. Exhaustion is not realistic, but
+        // keep wraparound from turning a thread into the sentinel owner.
+        if (token == 0) token = g_nextThreadToken.fetch_add(1, std::memory_order_relaxed);
+        g_threadToken = token;
+    }
+    return g_threadToken;
+}
 
 void clearFrame() noexcept {
     for (uint8_t i = 0; i < edvr::plugin_cost::kOwnerCount; ++i) g_frame[i] = {};
@@ -161,8 +177,31 @@ extern "C" void edvrPluginCostShutdown() noexcept {
     g_skipNextBoundary = false;
     g_apiSampleFrame = false;
     g_traceSuppressed = false;
+    g_ownerThreadToken.store(0, std::memory_order_release);
+    g_ownerContext.store(nullptr, std::memory_order_release);
     clearFrame();
     clearWindow();
+}
+
+extern "C" void edvrPluginCostSetOwnerContext(void* context) noexcept {
+    // Registration is cold and occurs after hook commit. Clear the published
+    // owner first so no thread can use an old render-thread token with a new
+    // context during a transfer or reinstall.
+    g_ownerThreadToken.store(0, std::memory_order_release);
+    g_ownerContext.store(context, std::memory_order_release);
+}
+
+extern "C" uint8_t edvrPluginCostApiSampleContext(const void* context) noexcept {
+    if (!context || g_ownerContext.load(std::memory_order_acquire) != context) return 0;
+    const uintptr_t owner = g_ownerThreadToken.load(std::memory_order_acquire);
+    // These context/owner checks use atomics. A foreign callback with the same
+    // context pointer but no owner TLS token returns before token allocation
+    // or reading the non-atomic sample flag; only frame-boundary code allocates
+    // TLS tokens.
+    if (owner == 0 || g_threadToken == 0 || g_threadToken != owner) return 0;
+    // Only the registered render-owner thread reaches this non-atomic frame
+    // flag; deferred/foreign contexts return above by pointer or TLS token.
+    return g_configured && g_apiSampleFrame ? 1u : 0u;
 }
 
 extern "C" void edvrPluginCostNoteSite(uint8_t owner, uint16_t siteId, uint8_t event) noexcept {
@@ -221,6 +260,18 @@ extern "C" uint8_t edvrPluginCostFrameBoundary(uint32_t frameNo,
     if (!g_configured) {
         g_apiSampleFrame = false;
         return false;
+    }
+    const uintptr_t ownerToken = threadToken();
+
+    // This existing owner-only frame boundary is the only place that
+    // publishes/reaffirms the current render thread. A context registration
+    // alone cannot make API notes eligible.
+    const uintptr_t previousOwner = g_ownerThreadToken.load(std::memory_order_relaxed);
+    if (previousOwner != ownerToken) {
+        const uintptr_t publishedOwner = g_ownerContext.load(std::memory_order_acquire)
+            ? ownerToken : 0;
+        if (previousOwner != publishedOwner)
+            g_ownerThreadToken.store(publishedOwner, std::memory_order_release);
     }
 
     const bool suppressed = traceSuppressed != 0 || g_traceSuppressed;

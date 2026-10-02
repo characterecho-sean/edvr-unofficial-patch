@@ -179,7 +179,7 @@ void nightVisionBegin(ID3D11DeviceContext* ctx){
     const unsigned mode=variant();
     if(!ctx || !mode || state.failed[mode] || state.engaged)return;
     if(ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
-    state.costSample=edvrPluginCostApiSampleFrame()!=0;
+    state.costSample=edvrPluginCostApiSampleContext(ctx)!=0;
     noteNvD3dCall<NvD3dCallSite::GetType>(plugin_cost::ApiClass::ReadQuery);
     // No readbacks or scene copies. Reject a
     // changed resource contract before compiling/binding the replacement.
