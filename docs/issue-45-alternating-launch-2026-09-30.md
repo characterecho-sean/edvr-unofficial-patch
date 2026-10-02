@@ -342,6 +342,9 @@ With the reporter's answers this names the cause without a further build.
    against `kGuidSysKeyboard`, `kGuidSysKeyboardEm`, and `kGuidSysKeyboardEm2`. Non-keyboard
    devices (such as the Logitech G29 force-feedback steering wheel using `jerry_forcefeedback_x64.dll`)
    are never passed to `captureKeyboard` or probed with `GetCapabilities`.
-2. Added `advanced.input_gate` toggle (default true). When off, DirectInput creation
-   hooking is bypassed completely.
-3. Extended `tools/input_gate_test/input_gate_test.cpp` to verify non-keyboard GUID bypass.
+2. Added `advanced.input_gate` toggle (default true), permitted in both VR and flat
+   profiles (`src/common/runtime_profile.h`), and documented under `[advanced]` in `edvr.ini`.
+   When off, DirectInput creation hooking is bypassed completely.
+3. Extended `tools/input_gate_test/input_gate_test.cpp` with a fresh unhooked device table
+   asserting that `GetCapabilities` is never invoked for non-keyboard GUIDs, and verified flat
+   profile default gating. Added flat profile scope assertions in `tools/config_test/config_test.cpp`.

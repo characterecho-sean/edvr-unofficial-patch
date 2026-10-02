@@ -1990,8 +1990,15 @@ int main(int argc, char** argv) {
             if (Config::get().getString("experimental.temporal_aa_before_post", "auto") == "auto")
                 ok("flat HDR route uses the auto default when the key is absent");
             else fail("flat HDR route default", "missing key was not auto");
+            if (Config::get().getBool("advanced.input_gate", true))
+                ok("flat input_gate uses true default when absent");
+            else fail("flat input_gate default", "missing key was not true");
         }
     }
+    Config::get().set("advanced.input_gate", "off");
+    expectBool("advanced.input_gate", false, "flat scope reads input_gate override off");
+    Config::get().set("advanced.input_gate", "on");
+    expectBool("advanced.input_gate", true, "flat scope reads input_gate override on");
     Config::get().set("experimental.temporal_aa_jitter", "on");
     if (Config::get().getString("experimental.temporal_aa_jitter", "off") == "on")
         ok("flat jitter reads explicit on");
