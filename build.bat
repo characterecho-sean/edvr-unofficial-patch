@@ -161,6 +161,7 @@ python tools\package_native.py --self-test || exit /b 1
 python tools\build_diff.py --self-test || exit /b 1
 python tools\build_receipt.py --self-test || exit /b 1
 python tools\build_lock.py --self-test || exit /b 1
+python tools\release_credits.py --self-test || exit /b 1
 python tools\flash_patch_residual.py --self-test || exit /b 1
 python tools\check_status_blocks.py --self-test || exit /b 1
 python tools\check_status_blocks.py || exit /b 1

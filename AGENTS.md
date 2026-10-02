@@ -55,7 +55,7 @@ session averaged 427k tokens per call and never compacted.
 
 ## The sanctioned tools
 
-These four operations go through `tools\`, and **only** through `tools\`.
+These five operations go through `tools\`, and **only** through `tools\`.
 Each was an ad-hoc one-liner retyped once a session for a month; the
 evidence is the dozens of backups in both game directories named six
 different ways, and a live `edvr.ini` a stray PowerShell anchor once
@@ -67,6 +67,12 @@ corrupted. Do not regenerate the one-liner — extend the script.
 | Check the install matches the build | `python tools\install_edvr.py --verify-only` | eyeballing timestamps |
 | Find and read a flight log | `python tools\edvr_log.py` (census aggregate: add `--tally vh [--frame N]`) | `Get-Content -Tail` + `Select-String` |
 | Reflow release notes or docs | `python tools\reflow_notes.py` | reflowing by hand or by regex |
+| Credit contributors in release notes | `python tools\release_credits.py --from <previous-tag> --thanks` | writing the credits from memory or ad-hoc `gh` queries |
+
+Every release's notes carry a `## Thanks` section built from
+`release_credits.py` and finished by hand: the tool lists who appears where
+and a person writes each sentence. People known only by an anonymised label
+("user 2", "the reporter") are not named without the maintainer's consent.
 
 ```bash
 python tools\install_edvr.py --target steam --dry-run
