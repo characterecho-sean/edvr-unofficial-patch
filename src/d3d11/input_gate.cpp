@@ -380,11 +380,12 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
                     // Swallow press, keep release event so the game does not leave button stuck down.
                     if (ev.dwData & 0x80) continue;
                 } else if (isPov) {
-                    // DirectInput POV hat unpressed is 0xFFFFFFFFu (-1).
-                    // Swallow pressed angles (dwData != 0xFFFFFFFFu), allow release (dwData == 0xFFFFFFFFu).
-                    if (ev.dwData != 0xFFFFFFFFu) continue;
+                    // DirectInput POV hat event: when MFD is focused (priv is true), swallow ALL POV events
+                    // (both pressed angles and release 0xFFFFFFFFu). filterDeviceState keeps state set to 0xFFFFFFFFu,
+                    // so passing 0xFFFFFFFFu through buffered data caused Elite to see a POV transition event.
+                    continue;
                 }
-                rgdod[kept++] = ev; // Keep release events and analog axis motion
+                rgdod[kept++] = ev; // Keep button release events and analog axis motion
             }
         } else {
             kept = before;
