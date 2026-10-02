@@ -1,5 +1,6 @@
 #pragma once
 #include "flat_mono_frame.h"
+#include <optional>
 
 namespace edvr {
 inline uint32_t flatRuntimeDepthReadFormat(uint32_t format) {
@@ -32,6 +33,10 @@ struct FlatRuntimeDraw {
     // The bridge verified the actual camera-independent format 9 image shaders
     // and their RT/DSV views. The model also checks the exact shader pair.
     bool imageSourceCameraIndependentVerified = false;
+    // Set only by the runtime, whose key.cameraHash is the camera table's flatCameraHash of these very
+    // camera bytes (flat_camera_table.h), so cameraCurrent's hash check on this draw's record is true by
+    // construction and is not recomputed. A replay leaves it false and keeps the check.
+    bool cameraHashTrusted = false;
     uint32_t instances = 1;
 };
 // Exact bytecode-qualified image filters, with a position/UV passthrough VS.
@@ -40,6 +45,10 @@ inline bool flatRuntimeCameraIndependentImageSourcePair(uint64_t vs, uint64_t ps
     return vs == 0xCFA91824129ECBBCull &&
         (ps == 0xFCFAD73924BF45B9ull || ps == 0x07B3F82100F29401ull);
 }
+// experimental.flat_per_draw_lean off (flat_runtime.cpp, read at every Present): flatRuntimeObserve makes
+// every draw's record up front again, as it always did. Only for measuring what the lean path saves; the
+// produced state is the same either way.
+inline bool g_flatRuntimeEagerRecord = false;
 enum class FlatRuntimeConflict : uint32_t {
     None, Viewport, MissingDepth, DepthMismatch, CameraChange,
     CameraProvenance, ExplicitWrite, ImageCopySource, MenuCopySource, SelectorLayout,
@@ -130,6 +139,19 @@ inline FlatContractRecord flatRuntimeRecord(const FlatRuntimeDraw& d, uint32_t q
     r.firstWriteSeq = r.lastWriteSeq = d.key.writeSeq;
     std::memcpy(r.camera, d.camera, sizeof(r.camera)); return r;
 }
+// sameCamera(a, flatRuntimeRecord(d, q, frame)) without making the record.
+inline bool flatRuntimeSameCamera(const FlatContractRecord& a, const FlatRuntimeDraw& d) {
+    return a.key.b1 == d.key.b1 && a.key.camera && d.key.camera &&
+        a.key.cameraHash == d.key.cameraHash &&
+        std::memcmp(a.camera, d.camera, kFlatCameraBytes) == 0;
+}
+// cameraCurrent(flatRuntimeRecord(d, q, frame), frame) without making the record: one draw at q >= 1 is
+// ordered, and its first and last write epoch and sequence are the draw's own.
+inline bool flatRuntimeCameraCurrent(const FlatRuntimeDraw& d, uint32_t q, uint64_t frame) {
+    const auto& k = d.key;
+    return q && k.b1 && k.camera && k.writeEpoch == frame && k.writeSeq && k.writeSeq <= q &&
+        (d.cameraHashTrusted || k.cameraHash == flatCameraHash(d.camera));
+}
 inline FlatRuntimeTarget* flatRuntimeTarget(FlatRuntimePrefix& p, const void* resource) {
     for (uint32_t i = 0; i < p.targetsUsed; ++i) if (p.targets[i].resource == resource) return &p.targets[i];
     if (!resource || p.targetsUsed == 128) { p.uncertain = true; return nullptr; }
@@ -193,7 +215,20 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
     using namespace flat_mono_detail;
     FlatMonoFrame out{}; out.frame = out.epoch = p.frame;
     const uint32_t q = ++p.sequence;
-    const auto current = flatRuntimeRecord(d, q, p.frame);
+    // The draw's record (about 1.2 KB) is made only where it is stored or a witness takes it: most draws
+    // only extend their target's record. The camera tests ask the draw directly (flatRuntimeSameCamera,
+    // flatRuntimeCameraCurrent), with the record's own answers.
+    std::optional<FlatContractRecord> made;
+    const auto current = [&]() -> const FlatContractRecord& {
+        if (!made) made.emplace(flatRuntimeRecord(d, q, p.frame));
+        return *made;
+    };
+    if (g_flatRuntimeEagerRecord) current();
+    // flatRuntimeBad with the record made only when it becomes the target's first witness.
+    const auto bad = [&](FlatRuntimeTarget& target, FlatRuntimeConflict cause, const FlatContractRecord& reference) {
+        if (target.firstBad.cause == FlatRuntimeConflict::None) flatRuntimeBad(target, cause, q, reference, current());
+        else target.hdrBad = true;
+    };
     const auto& k = d.key;
     const bool copy = k.vs == kCopyVs && k.ps == kCopyPs && k.color == p.output;
     if (copy) {
@@ -217,7 +252,7 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         }
         records[n++] = tone->tone;
         for (uint32_t i = 0; i < p.sourcesUsed; ++i) records[n++] = p.sources[i];
-        records[n++] = current;
+        records[n++] = current();
         // The frame contract's record fixture: the exact records the selector
         // ran on, delivered to the sink before selection.
         if (sink && sink->records && n <= sink->capacity) {
@@ -269,26 +304,25 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         if (!valid) {
             ++p.menuCopiesRefused;
             const bool firstConflict = t->firstBad.cause == FlatRuntimeConflict::None;
-            flatRuntimeBad(*t, FlatRuntimeConflict::MenuCopySource, q,
-                           source ? source->writes : t->writes, current);
+            bad(*t, FlatRuntimeConflict::MenuCopySource, source ? source->writes : t->writes);
             if (firstConflict && source && source->firstBad.cause != FlatRuntimeConflict::None)
                 t->firstBad = source->firstBad;
             // A rejected first copy is still a real write into this HDR target;
             // retain it so the final selector reports the original conflict.
-            if (!t->writes.draws) t->writes = current;
+            if (!t->writes.draws) t->writes = current();
             return out;
         }
         ++p.menuCopiesAccepted;
         // The destination comes into existence at this copy. Its scene and camera
         // provenance is inherited from the verified source, never from copy b1.
-        t->writes = current;
+        t->writes = current();
         t->writes.key.depth = source->writes.key.depth;
         t->writes.key.dsv = source->writes.key.dsv;
         t->writes.key.depthWidth = source->writes.key.depthWidth;
         t->writes.key.depthHeight = source->writes.key.depthHeight;
         t->writes.key.depthFormat = source->writes.key.depthFormat;
         t->writes.key.camera = nullptr;
-        t->tone = current;
+        t->tone = current();
         t->tone.key.depth = t->writes.key.depth;
         t->tone.key.dsv = t->writes.key.dsv;
         t->tone.key.depthWidth = t->writes.key.depthWidth;
@@ -333,8 +367,7 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         if (!valid) {
             ++p.imageCopiesRefused;
             const bool firstConflict = t->firstBad.cause == FlatRuntimeConflict::None;
-            flatRuntimeBad(*t, FlatRuntimeConflict::ImageCopySource, q,
-                           source ? source->writes : t->writes, current);
+            bad(*t, FlatRuntimeConflict::ImageCopySource, source ? source->writes : t->writes);
             if (firstConflict &&
                 source && source->firstBad.cause == FlatRuntimeConflict::ImageCopySource) {
                 t->firstBad.reference = source->firstBad.reference;
@@ -347,11 +380,11 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         return out;
     }
     if (k.format == 26) {
-        if (!hdrViewport(k, k.width, k.height)) flatRuntimeBad(*t, FlatRuntimeConflict::Viewport, q, t->writes, current);
+        if (!hdrViewport(k, k.width, k.height)) bad(*t, FlatRuntimeConflict::Viewport, t->writes);
         if (!k.depth || !k.dsv || k.depthWidth != k.width || k.depthHeight != k.height)
-            flatRuntimeBad(*t, FlatRuntimeConflict::MissingDepth, q, t->writes, current);
+            bad(*t, FlatRuntimeConflict::MissingDepth, t->writes);
         if (t->writes.draws && (t->writes.key.depth != k.depth || t->writes.key.dsv != k.dsv))
-            flatRuntimeBad(*t, FlatRuntimeConflict::DepthMismatch, q, t->writes, current);
+            bad(*t, FlatRuntimeConflict::DepthMismatch, t->writes);
         if (k.camera) {
             // Epic 20260925_122208: the first-person weapon pass (laser rifle
             // family) draws into the scene HDR/depth with its own qualified
@@ -362,13 +395,13 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
             // current colour.
             const bool secondCamera =
                 k.vs == 0x88DCF1164C640EC3ull && k.ps == 0x494506A63091DF8Cull;
-            if (t->hdrCamera && !sameCamera(t->tone, current) && !secondCamera)
-                flatRuntimeBad(*t, FlatRuntimeConflict::CameraChange, q, t->tone, current);
-            if (!cameraCurrent(current, p.frame))
-                flatRuntimeBad(*t, FlatRuntimeConflict::CameraProvenance, q, t->tone, current);
+            if (t->hdrCamera && !flatRuntimeSameCamera(t->tone, d) && !secondCamera)
+                bad(*t, FlatRuntimeConflict::CameraChange, t->tone);
+            if (!flatRuntimeCameraCurrent(d, q, p.frame))
+                bad(*t, FlatRuntimeConflict::CameraProvenance, t->tone);
             // Keep the first known camera draw separate from earlier HDR writes
             // without b1. Assigning its later write to those draws invents provenance.
-            if (!t->hdrCamera && !secondCamera) { t->tone = current; t->hdrCamera = true; }
+            if (!t->hdrCamera && !secondCamera) { t->tone = current(); t->hdrCamera = true; }
         }
     }
     if (t->writes.draws && t->writes.key.format == 26 &&
@@ -381,39 +414,38 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         t->hdrLayoutChanged = true;
     if (t->writes.draws && t->writes.key.format == 9 && k.format != 9) {
         t->imageSourceBad = true;
-        flatRuntimeBad(*t, FlatRuntimeConflict::ImageCopySource, q, t->writes, current);
+        bad(*t, FlatRuntimeConflict::ImageCopySource, t->writes);
     }
     if (k.format == 9) {
         const auto& first = t->writes;
         if (!k.depth || !k.dsv || !k.depthFormat ||
             k.depthWidth != k.width || k.depthHeight != k.height ||
             !fullViewport(k, k.width, k.height) ||
-            (!imageCameraIndependent && !cameraCurrent(current, p.frame)) ||
+            (!imageCameraIndependent && !flatRuntimeCameraCurrent(d, q, p.frame)) ||
             (first.draws && (first.key.format != k.format || first.key.width != k.width ||
                              first.key.height != k.height || first.key.depth != k.depth ||
                              first.key.dsv != k.dsv || first.key.depthFormat != k.depthFormat ||
                              first.key.depthWidth != k.depthWidth ||
                              first.key.depthHeight != k.depthHeight ||
                              (!imageCameraIndependent && t->imageHasCamera &&
-                              !sameCamera(t->tone, current))))) {
+                              !flatRuntimeSameCamera(t->tone, d))))) {
             t->imageSourceBad = true;
-            flatRuntimeBad(*t, FlatRuntimeConflict::ImageCopySource, q,
-                           t->imageHasCamera ? t->tone : first, current);
+            bad(*t, FlatRuntimeConflict::ImageCopySource, t->imageHasCamera ? t->tone : first);
         }
         if (!imageCameraIndependent && k.camera && !t->imageHasCamera) {
-            t->tone = current; t->imageHasCamera = true;
+            t->tone = current(); t->imageHasCamera = true;
         }
     }
-    if (!t->writes.draws) t->writes = current;
+    if (!t->writes.draws) t->writes = current();
     else { ++t->writes.draws; t->writes.last = q; t->writes.lastInstances = d.instances;
         if (k.camera) { t->writes.lastWriteEpoch = k.writeEpoch; t->writes.lastWriteSeq = k.writeSeq; } }
-    if (k.format != 9 && toneHdrSlot(k.vs, k.ps) != ~0u) { ++t->tones; t->tone = current; }
+    if (k.format != 9 && toneHdrSlot(k.vs, k.ps) != ~0u) { ++t->tones; t->tone = current(); }
     if (d.supported && k.depth && k.kind == kFlatContractPool) {
         FlatContractRecord* source = nullptr;
-        for (uint32_t i = 0; i < p.sourcesUsed; ++i) if (p.sources[i].key.depth == k.depth && sameCamera(p.sources[i], current)) { source = &p.sources[i]; break; }
+        for (uint32_t i = 0; i < p.sourcesUsed; ++i) if (p.sources[i].key.depth == k.depth && flatRuntimeSameCamera(p.sources[i], d)) { source = &p.sources[i]; break; }
         if (!source) {
             if (p.sourcesUsed == 32) p.uncertain = true;
-            else p.sources[p.sourcesUsed++] = current;
+            else p.sources[p.sourcesUsed++] = current();
         } else {
             if (!fullViewport(k, k.width, k.height) || source->key.dsv != k.dsv ||
                 source->key.width != k.width || source->key.height != k.height ||

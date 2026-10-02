@@ -291,6 +291,9 @@ struct State {
     // to observation until a refusal-free frame requalifies the contract;
     // it is never claimed as treated. See docs/design-flat-temporal-aa-2026-09-23.md.
     bool partialWanted = true;
+    // experimental.temporal_aa_engine_motion, read at every Present: off lets no draw continue a run of
+    // substituted producer draws, so the game draws with its own shaders and motion comes from depth and camera only.
+    bool engineMotionWanted = true;
     // The returned-to-observation state: set by a per-draw-local refusal,
     // cleared by a refusal-free frame. While set, frames run unjittered and
     // the copy-draw treatment is skipped; the contract observation that
@@ -2221,6 +2224,20 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         Log::get().note("flat coverage: observation ended by setting change at frame=%llu; per-frame attempts resume",
             (unsigned long long)frame);
     s.observing = observingAfterToggle; s.partialWanted = partialWanted;
+    // Engine motion's draw substitution: read live, same idiom. No history reset: a mover simply loses its exact
+    // motion from the next frame, as a draw the substitution declines does today.
+    const bool engineMotionWanted=Config::get().getBool("experimental.temporal_aa_engine_motion",true);
+    if (engineMotionWanted != s.engineMotionWanted)
+        Log::get().note("flat engine motion: experimental.temporal_aa_engine_motion=%s at frame=%llu",
+            engineMotionWanted ? "on" : "off", (unsigned long long)frame);
+    s.engineMotionWanted = engineMotionWanted;
+    // The per-draw reducer's lean path (flat_runtime_model.h): read live, same idiom. Off makes every draw's
+    // contract record up front again; the reducer's state is the same either way, only its cost differs.
+    const bool perDrawLean=Config::get().getBool("experimental.flat_per_draw_lean",true);
+    if (perDrawLean == g_flatRuntimeEagerRecord)
+        Log::get().note("flat per-draw lean: experimental.flat_per_draw_lean=%s at frame=%llu",
+            perDrawLean ? "on" : "off", (unsigned long long)frame);
+    g_flatRuntimeEagerRecord = !perDrawLean;
     // Local refusal's observation exit: a positively qualified handoff on a
     // completely covered frame (the same coverage trio phase.finish used
     // above) requalifies the contract and resumes warm-up. Empty, failed,
@@ -2923,7 +2940,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             flatcpu::Scope rows(flatcpu::kCameraRows);   // camera table lookup, rows copy and hash: a fresh lookup
             kept = &s.cameras.refresh(k.b1, b1Binding, s.prefix.frame);
         }
-        if (kept->have) { std::memcpy(d.camera, kept->rows, sizeof(d.camera)); k.camera = d.camera; k.cameraHash = kept->hash; k.writeEpoch = kept->epoch; k.writeSeq = kept->sequence; }
+        if (kept->have) { std::memcpy(d.camera, kept->rows, sizeof(d.camera)); k.camera = d.camera; k.cameraHash = kept->hash; d.cameraHashTrusted = true; k.writeEpoch = kept->epoch; k.writeSeq = kept->sequence; }
     }
     d.supported = engineVelocityPoolFamilyPair(k.vs, k.ps); d.instances = instances;
     // A draw that is not a pool-family draw cannot be a substituted producer: it sees the game's state, and so does
@@ -3042,7 +3059,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // flushing where the answer would be EDVR's. Two routes still read what is bound themselves, and so want the game's
     // state first: an F10 audit's captures (s.projectionFrames), and the legacy route's qualification of the projection
     // (qualifyProjection reads the shaders, the viewport and the constant buffers, and is skipped under Upstream).
-    const bool continuesRun = sourceCandidate && s.namedDepth == k.depth && s.namedConstants == k.b1 &&
+    const bool continuesRun = s.engineMotionWanted && sourceCandidate && s.namedDepth == k.depth && s.namedConstants == k.b1 &&
         std::memcmp(s.namedCamera, d.camera, sizeof(d.camera)) == 0;
     const bool coverageReads = s.projection && sceneExtent && k.color != s.prefix.output &&
         (k.format==9 || k.format==23 || k.format==26 || k.format==60) &&

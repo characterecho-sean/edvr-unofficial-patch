@@ -35,8 +35,12 @@ inline bool flatProjectionDrawUnchanged(uint64_t vs, uint64_t ps) {
            // color without scene-depth reconstruction or a camera matrix.
            (vs == 0xB553BB479B7C0B97ull && ps == 0x68ABCB9FEF6CA66Cull);
 }
+// The empty set, copied rather than constructed: the requests' patches have member initializers, so
+// constructing a set runs a constructor for each of its 24 patches, on every scene draw that asks.
+// The copy is a plain 1 KB memcpy with the same zero bytes.
+inline const FlatProjectionRecipes kFlatProjectionNoRecipes{};
 inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps) {
-    FlatProjectionRecipes result;
+    FlatProjectionRecipes result = kFlatProjectionNoRecipes;
     using S = FlatProjectionStage; using L = FlatProjectionPatchLayout;
     if (engine_velocity_family::supportedPair(vs,ps) || vs == 0x6041FD2D3D0164E1ull || vs == 0xBBAD1CA808E1E292ull)
         result.add(S::Vertex,1,L::ForwardColumns,270);
