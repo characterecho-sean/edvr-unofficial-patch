@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "sunglare_observation.h"
+
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -42,6 +44,15 @@ inline bool sunglareWorldActive() { return detail::g_sunglareWorld != 0; }
 inline bool sunglareProbeActive() { return detail::g_sunglareProbe; }
 SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
                                  uint32_t instances);
+// Trace-only twin of the site-61 outer gate and selector. It records each
+// source read as consumed and preserves the production short-circuit order.
+SunglareAction sunglareOnEyeDrawObserved(
+    char kind, uint32_t count, uint32_t instances,
+    SunglareSelectorObservation& observation);
+#if defined(EDVR_SUNGLARE_PREDICATE_TEST)
+void sunglarePredicateTestState(SunglareTraceMode mode, bool probe, int world,
+                               uint64_t lastSeenMs);
+#endif
 uint32_t sunglareKeep();
 
 // The wrap around a matched train draw: the world shader (fix.sun_glare
@@ -69,6 +80,7 @@ void sunglareDrawArgs(uint32_t instances, uint32_t startInstance);
 // shader reads through the b2 slot.
 void  sunglareSceneCb(void* cb);
 void* sunglareSceneCbTarget();
+void* sunglareSceneCbTargetRaw() noexcept;
 void  sunglareSceneRows(const void* data, uint32_t bytes);
 void  sunglareSceneDump(const void* data, uint32_t bytes);
 

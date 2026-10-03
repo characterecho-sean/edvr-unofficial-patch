@@ -94,8 +94,36 @@ void resolveBindConfigure(Config& cfg) {
     }
 }
 
-bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx) {
-    if (!detail::g_resolveBindOn || !ctx) return false;
+namespace {
+
+template <class T>
+void resolveBindObserve(ResolveBindRead<T>& read, const T& value) noexcept {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
+
+template <bool Observe>
+bool resolveBindOnEyeDrawImpl(ID3D11DeviceContext* ctx,
+                              ResolveBindHelperObservation* observation) {
+    ShadowMatch shadow = ShadowMatch::Unknown;
+    if constexpr (Observe) {
+        const bool wants = detail::g_resolveBindOn;
+        resolveBindObserve(observation->wants, wants);
+        if (!wants) return false;
+        const bool contextNonNull = ctx != nullptr;
+        resolveBindObserve(observation->contextNonNull, contextNonNull);
+        if (!contextNonNull) return false;
+        const bool hasShader = bindingGet(BindSlot::Ps) != nullptr;
+        const uint64_t hash = bindingShaderHash(BindSlot::Ps);
+        resolveBindObserve(observation->psPresent, hasShader);
+        resolveBindObserve(observation->psHash, hash);
+        shadow = shadowMatch(hasShader, hash);
+    } else {
+        if (!detail::g_resolveBindOn || !ctx) return false;
+        shadow = shadowMatch(bindingGet(BindSlot::Ps) != nullptr,
+                             bindingShaderHash(BindSlot::Ps));
+    }
 
     // beginPanelOverride calls this only after rejecting foreign contexts, so
     // these are the owner immediate context's bindings. The PS setter records
@@ -108,23 +136,68 @@ bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx) {
     // shader may be bound before its registry entry exists. Both cases must use
     // the real getter. A successful fallback lookup repairs this one slot so a
     // command-list invalidation costs one getter rather than every later draw.
-    const ShadowMatch shadow =
-        shadowMatch(bindingGet(BindSlot::Ps) != nullptr,
-                    bindingShaderHash(BindSlot::Ps));
     if (shadow != ShadowMatch::Unknown) return shadow == ShadowMatch::Yes;
 
     bool match = false;
-    guardedBudget(g_budget, [&] {
+    bool lambdaEntered = false;
+    const bool guardReturned = guardedBudget(g_budget, [&] {
+        if constexpr (Observe) lambdaEntered = true;
         ID3D11PixelShader* ps = nullptr;
+        if constexpr (Observe)
+            resolveBindObserve(observation->psGetReached, true);
         ctx->PSGetShader(&ps, nullptr, nullptr);
+        if constexpr (Observe) {
+            resolveBindObserve(observation->psGetCompleted, true);
+            resolveBindObserve(observation->shaderNonNull, ps != nullptr);
+        }
         if (ps) {
+            if constexpr (Observe)
+                resolveBindObserve(observation->lookupReached, true);
             const uint64_t hash = lookupShaderHash(ps);
-            if (hash) bindingSetShader(BindSlot::Ps, ps, hash);
+            if constexpr (Observe) {
+                resolveBindObserve(observation->lookupCompleted, true);
+                resolveBindObserve(observation->lookupHash, hash);
+            }
+            if (hash) {
+                if constexpr (Observe) {
+                    const bool beforePresent = bindingGet(BindSlot::Ps) != nullptr;
+                    const uint64_t beforeHash = bindingShaderHash(BindSlot::Ps);
+                    resolveBindObserve(observation->cacheBeforePresent, beforePresent);
+                    resolveBindObserve(observation->cacheBeforeHash, beforeHash);
+                }
+                bindingSetShader(BindSlot::Ps, ps, hash);
+                if constexpr (Observe) {
+                    const bool afterPresent = bindingGet(BindSlot::Ps) != nullptr;
+                    const uint64_t afterHash = bindingShaderHash(BindSlot::Ps);
+                    resolveBindObserve(observation->cacheAfterPresent, afterPresent);
+                    resolveBindObserve(observation->cacheAfterHash, afterHash);
+                }
+            }
             match = hash == kResolvePs;
+            if constexpr (Observe)
+                resolveBindObserve(observation->releaseReached, true);
             ps->Release();
+            if constexpr (Observe)
+                resolveBindObserve(observation->releaseCompleted, true);
         }
     });
+    if constexpr (Observe) {
+        resolveBindObserve(observation->lambdaEntered, lambdaEntered);
+        resolveBindObserve(observation->guardReturned, guardReturned);
+    }
     return match;
+}
+
+} // namespace
+
+bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx) {
+    return resolveBindOnEyeDrawImpl<false>(ctx, nullptr);
+}
+
+bool resolveBindOnEyeDrawObserved(
+    ID3D11DeviceContext* ctx,
+    ResolveBindHelperObservation& observation) {
+    return resolveBindOnEyeDrawImpl<true>(ctx, &observation);
 }
 
 void resolveBindBegin(ID3D11DeviceContext* ctx) {

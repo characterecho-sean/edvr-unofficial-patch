@@ -9,9 +9,9 @@
 // that this build cannot inline (/O2, no /GL). 658 innermost samples of the
 // 1349-frame window of 2026-09-22, the largest single entry in the profile.
 //
-// So the answer is sampled instead of recomputed. vScreenFrameBoundary walks
-// the full condition once a frame and stores it here; the draw path reads one
-// bool.
+// So the answer is sampled instead of recomputed. The plugin registry
+// aggregates its named subscribers at vScreenFrameBoundary and stores the
+// result here; the draw path reads one bool.
 //
 // THE DIRECTION THAT MATTERS
 //
@@ -33,7 +33,7 @@
 // because vScreenRefreshConfig re-samples the real condition after its
 // configure sweep rather than merely raising the flag.
 //
-// Raise it if you are not sure. That is the cheap mistake.
+// Raise it if a subscriber arms between boundaries. That is the cheap mistake.
 #pragma once
 
 #include <atomic>

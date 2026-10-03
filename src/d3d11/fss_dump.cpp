@@ -1,5 +1,6 @@
 #include "temporal_shader_bytecode.h"
 #include "fss_dump.h"
+#include "fss_dump_cost_sites.h"
 
 #include <cstdio>
 
@@ -399,15 +400,23 @@ void releaseAll() {
 // remember: 0 = no, 1 = into g_eyeTex (HDR), 2 = into g_ldrTex (LDR).
 void capture(ID3D11DeviceContext* ctx, uint32_t c, uint32_t e,
              int remember) {
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     ID3D11RenderTargetView* rtv = nullptr;
+    if (costSample) fss_dump_cost::note(fss_dump_cost::Site::OmGetRenderTargets,
+                                        plugin_cost::ApiClass::ReadQuery);
     ctx->OMGetRenderTargets(1, &rtv, nullptr);
     if (!rtv) return;
     ID3D11Resource* res = nullptr;
+    if (costSample) fss_dump_cost::note(fss_dump_cost::Site::RtvGetResource,
+                                        plugin_cost::ApiClass::ReadQuery);
     rtv->GetResource(&res);
     rtv->Release();
     if (!res) return;
 
     ID3D11Texture2D* tex = nullptr;
+    if (costSample) fss_dump_cost::note(
+        fss_dump_cost::Site::ResourceQueryTexture2D,
+        plugin_cost::ApiClass::ReadQuery);
     res->QueryInterface(__uuidof(ID3D11Texture2D),
                         reinterpret_cast<void**>(&tex));
     if (!tex) {
@@ -415,6 +424,8 @@ void capture(ID3D11DeviceContext* ctx, uint32_t c, uint32_t e,
         return;
     }
     D3D11_TEXTURE2D_DESC td{};
+    if (costSample) fss_dump_cost::note(fss_dump_cost::Site::TextureGetDesc,
+                                        plugin_cost::ApiClass::ReadQuery);
     tex->GetDesc(&td);
 
     Slot& s = g_slots[c][e];
@@ -425,6 +436,8 @@ void capture(ID3D11DeviceContext* ctx, uint32_t c, uint32_t e,
             s.staging = nullptr;
         }
         ID3D11Device* dev = nullptr;
+        if (costSample) fss_dump_cost::note(fss_dump_cost::Site::ContextGetDevice,
+                                            plugin_cost::ApiClass::ReadQuery);
         ctx->GetDevice(&dev);
         if (dev) {
             D3D11_TEXTURE2D_DESC sd = td;
@@ -433,6 +446,9 @@ void capture(ID3D11DeviceContext* ctx, uint32_t c, uint32_t e,
             sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             sd.MiscFlags = 0;
             sd.MipLevels = 1;
+            if (costSample) fss_dump_cost::note(
+                fss_dump_cost::Site::CreateStagingTexture,
+                plugin_cost::ApiClass::Work);
             dev->CreateTexture2D(&sd, nullptr, &s.staging);
             dev->Release();
         }
@@ -441,6 +457,8 @@ void capture(ID3D11DeviceContext* ctx, uint32_t c, uint32_t e,
         s.fmt = static_cast<uint32_t>(td.Format);
     }
     if (s.staging) {
+        if (costSample) fss_dump_cost::note(fss_dump_cost::Site::CopyToStaging,
+                                            plugin_cost::ApiClass::Transfer);
         ctx->CopyResource(s.staging, tex);
         s.srcPtr = res;
         s.filled = true;
@@ -461,11 +479,18 @@ void capture(ID3D11DeviceContext* ctx, uint32_t c, uint32_t e,
 void captureRemembered(ID3D11DeviceContext* ctx, ID3D11Resource* res,
                        uint32_t c, uint32_t e) {
     if (!res) return;
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     ID3D11Texture2D* tex = nullptr;
+    if (costSample) fss_dump_cost::note(
+        fss_dump_cost::Site::RememberedQueryTexture2D,
+        plugin_cost::ApiClass::ReadQuery);
     res->QueryInterface(__uuidof(ID3D11Texture2D),
                         reinterpret_cast<void**>(&tex));
     if (!tex) return;
     D3D11_TEXTURE2D_DESC td{};
+    if (costSample) fss_dump_cost::note(
+        fss_dump_cost::Site::RememberedTextureGetDesc,
+        plugin_cost::ApiClass::ReadQuery);
     tex->GetDesc(&td);
     Slot& s = g_slots[c][e];
     if (!s.staging || s.w != td.Width || s.h != td.Height ||
@@ -475,6 +500,9 @@ void captureRemembered(ID3D11DeviceContext* ctx, ID3D11Resource* res,
             s.staging = nullptr;
         }
         ID3D11Device* dev = nullptr;
+        if (costSample) fss_dump_cost::note(
+            fss_dump_cost::Site::RememberedContextGetDevice,
+            plugin_cost::ApiClass::ReadQuery);
         ctx->GetDevice(&dev);
         if (dev) {
             D3D11_TEXTURE2D_DESC sd = td;
@@ -483,6 +511,9 @@ void captureRemembered(ID3D11DeviceContext* ctx, ID3D11Resource* res,
             sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             sd.MiscFlags = 0;
             sd.MipLevels = 1;
+            if (costSample) fss_dump_cost::note(
+                fss_dump_cost::Site::RememberedCreateStagingTexture,
+                plugin_cost::ApiClass::Work);
             dev->CreateTexture2D(&sd, nullptr, &s.staging);
             dev->Release();
         }
@@ -491,6 +522,9 @@ void captureRemembered(ID3D11DeviceContext* ctx, ID3D11Resource* res,
         s.fmt = static_cast<uint32_t>(td.Format);
     }
     if (s.staging) {
+        if (costSample) fss_dump_cost::note(
+            fss_dump_cost::Site::RememberedCopyToStaging,
+            plugin_cost::ApiClass::Transfer);
         ctx->CopyResource(s.staging, tex);
         s.srcPtr = res;
         s.filled = true;
@@ -512,6 +546,7 @@ void captureResource(ID3D11DeviceContext* ctx, ID3D11Resource* res,
 }
 
 void writeOut(ID3D11DeviceContext* ctx, uint32_t pass) {
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     CreateDirectoryA("edvr_logs", nullptr);
     CreateDirectoryA("edvr_logs\\dumps", nullptr);
     for (uint32_t c = 0; c < kCheckpoints; ++c) {
@@ -519,6 +554,8 @@ void writeOut(ID3D11DeviceContext* ctx, uint32_t pass) {
             Slot& s = g_slots[c][e];
             if (!s.filled || !s.staging) continue;
             D3D11_MAPPED_SUBRESOURCE m{};
+            if (costSample) fss_dump_cost::note(fss_dump_cost::Site::MapReadback,
+                                                plugin_cost::ApiClass::Transfer);
             if (FAILED(ctx->Map(s.staging, 0, D3D11_MAP_READ, 0, &m)) ||
                 !m.pData) {
                 Log::get().note("fss dump: map failed for %s eye%u.",
@@ -548,6 +585,8 @@ void writeOut(ID3D11DeviceContext* ctx, uint32_t pass) {
             } else {
                 Log::get().note("fss dump: could not open %s.", path);
             }
+            if (costSample) fss_dump_cost::note(fss_dump_cost::Site::UnmapReadback,
+                                                plugin_cost::ApiClass::Transfer);
             ctx->Unmap(s.staging, 0);
             s.filled = false;
         }
@@ -610,6 +649,49 @@ void fssDumpConfigure(Config& cfg) {
     }
 }
 
+bool fssDumpDrawInterestConfigured() noexcept {
+    return detail::g_fssDumpFrame != 0 || detail::g_fssDumpSeriesWant != 0;
+}
+
+namespace {
+template <class T>
+void observeDumpRead(FssDumpRead<T>& read, T value) noexcept {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
+}  // namespace
+
+bool fssDumpWantsDrawsObserved(FssDumpWantsObservation& observed) noexcept {
+    const uint32_t frame = detail::g_fssDumpFrame;
+    observeDumpRead(observed.frame, frame);
+    bool framePending = false;
+    if (frame != 0) {
+        const bool done = detail::g_fssDumpDone;
+        observeDumpRead(observed.done, done);
+        framePending = !done;
+    }
+    if (framePending) return true;
+
+    const uint32_t seriesWant = detail::g_fssDumpSeriesWant;
+    observeDumpRead(observed.seriesWant, seriesWant);
+    if (seriesWant == 0) return false;
+    const bool seriesDone = detail::g_fssDumpSeriesDone;
+    observeDumpRead(observed.seriesDone, seriesDone);
+    return !seriesDone;
+}
+
+std::size_t fssDumpDrawInterestFilters(draw_interest::ShaderFilter* out,
+                                      std::size_t capacity) noexcept {
+    if (!fssDumpDrawInterestConfigured()) return 0;
+    constexpr uint64_t hashes[] = {kRingQuadHash, kCompositeHash, kTonemapHash};
+    for (std::size_t i = 0; out && i < 3 && i < capacity; ++i) {
+        out[i] = {draw_interest::InterestId::FssDump,
+                  draw_interest::HashFilter::Vertex, hashes[i], 0};
+    }
+    return 3;
+}
+
 bool fssDumpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                       uint32_t instances) {
     if (!fssDumpWantsDraws() || !ctx) return false;
@@ -638,6 +720,125 @@ bool fssDumpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     g_pendingEye = occ - 1;
     return true;
 }
+
+bool fssDumpOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                              uint32_t count, uint32_t instances,
+                              FssDumpHelperObservation& observed) {
+    if (!fssDumpWantsDrawsObserved(observed.wants)) return false;
+    const bool contextNonNull = ctx != nullptr;
+    observeDumpRead(observed.contextNonNull, contextNonNull);
+    if (!contextNonNull || kind != 'N' || instances != 1 ||
+        (count != 3 && count != 4 && count != 6)) return false;
+
+    uint64_t h = 0;
+    observed.guardCallReached = {true, true, true};
+    observed.callbackEntered = {true, true, false};
+    const bool guardReturned = guardedBudget(g_budget, [&] {
+        observed.callbackEntered = {true, true, true};
+        observed.callbackCompleted = {true, true, false};
+        ID3D11VertexShader* vs = nullptr;
+        observed.vsGetShaderReached = {true, true, true};
+        observed.vsGetShaderCompleted = {true, true, false};
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        observed.vsGetShaderCompleted = {true, true, true};
+        const bool shaderNonNull = vs != nullptr;
+        observeDumpRead(observed.shaderNonNull, shaderNonNull);
+        observed.lookupReached = {true, true, true};
+        observed.lookupCompleted = {true, true, false};
+        h = lookupShaderHash(vs);
+        observeDumpRead(observed.lookupHash, h);
+        observed.lookupCompleted = {true, true, true};
+        if (vs) {
+            observed.releaseReached = {true, true, true};
+            observed.releaseCompleted = {true, true, false};
+            vs->Release();
+            observed.releaseCompleted = {true, true, true};
+        }
+        observed.callbackCompleted = {true, true, true};
+    });
+    observeDumpRead(observed.guardReturned, guardReturned);
+    observeDumpRead(observed.hashAfterGuard, h);
+
+    const bool ring = (h == kRingQuadHash && count == 4);
+    const bool comp = (h == kCompositeHash && count == 6);
+    const bool tone = (h == kTonemapHash && count == 3);
+    if (!ring && !comp && !tone) return false;
+
+    uint8_t occ = 0;
+    if (ring) {
+        observeDumpRead(observed.counters.ringBefore, g_occRing);
+        occ = ++g_occRing;
+        observeDumpRead(observed.counters.ringAfter, g_occRing);
+    } else if (comp) {
+        observeDumpRead(observed.counters.compositeBefore, g_occComp);
+        occ = ++g_occComp;
+        observeDumpRead(observed.counters.compositeAfter, g_occComp);
+    } else {
+        observeDumpRead(observed.counters.tonemapBefore, g_occTone);
+        occ = ++g_occTone;
+        observeDumpRead(observed.counters.tonemapAfter, g_occTone);
+    }
+    if (occ > kEyes) return false;
+    const bool dumping = g_dumping;
+    observeDumpRead(observed.dumping, dumping);
+    if (!dumping) return false;
+    observeDumpRead(observed.pendingKindBefore, g_pendingKind);
+    observeDumpRead(observed.pendingEyeBefore, g_pendingEye);
+    g_pendingKind = ring ? 0 : (comp ? 1 : 2);
+    g_pendingEye = occ - 1;
+    observeDumpRead(observed.pendingKindAfter, g_pendingKind);
+    observeDumpRead(observed.pendingEyeAfter, g_pendingEye);
+    return true;
+}
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+FssDumpPredicateTestState fssDumpPredicateTestState() noexcept {
+    return {detail::g_fssDumpFrame, detail::g_fssDumpDone,
+            detail::g_fssDumpSeriesWant, detail::g_fssDumpSeriesDone,
+            g_dumping, g_occRing, g_occComp, g_occTone,
+            g_pendingKind, g_pendingEye};
+}
+
+void fssDumpPredicateTestSetState(
+    const FssDumpPredicateTestState& state) noexcept {
+    detail::g_fssDumpFrame = state.frame;
+    detail::g_fssDumpDone = state.done;
+    detail::g_fssDumpSeriesWant = state.seriesWant;
+    detail::g_fssDumpSeriesDone = state.seriesDone;
+    g_dumping = state.dumping;
+    g_occRing = state.ring;
+    g_occComp = state.composite;
+    g_occTone = state.tonemap;
+    g_pendingKind = state.pendingKind;
+    g_pendingEye = state.pendingEye;
+}
+#endif
+
+#if defined(EDVR_FSS_DUMP_API_TEST)
+FssDumpApiTestState fssDumpApiTestState() noexcept {
+    return {detail::g_fssDumpFrame, detail::g_fssDumpDone,
+            detail::g_fssDumpSeriesWant, detail::g_fssDumpSeriesDone,
+            g_dumping, g_dumpPass, g_bodyFrames, g_occRing, g_occComp,
+            g_occTone, g_occAccum, g_occOut, g_pendingKind, g_pendingEye};
+}
+
+void fssDumpApiTestSetState(const FssDumpApiTestState& state) noexcept {
+    detail::g_fssDumpFrame = state.frame;
+    detail::g_fssDumpDone = state.done;
+    detail::g_fssDumpSeriesWant = state.seriesWant;
+    detail::g_fssDumpSeriesDone = state.seriesDone;
+    g_dumping = state.dumping;
+    g_dumpPass = state.dumpPass;
+    g_bodyFrames = state.bodyFrames;
+    g_occRing = state.ring;
+    g_occComp = state.composite;
+    g_occTone = state.tonemap;
+    g_occAccum = state.accumulate;
+    g_occOut = state.output;
+    g_pendingKind = state.pendingKind;
+    g_pendingEye = state.pendingEye;
+}
+#endif
 
 void fssDumpBegin(ID3D11DeviceContext* ctx) {
     if (!ctx || !g_dumping || g_pendingKind == 2) return;

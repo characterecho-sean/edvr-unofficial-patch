@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include "../../d3d11/plugin_dispatch.h"
 struct ID3D11DeviceContext;
 namespace edvr {
 class Config;
@@ -24,9 +25,15 @@ inline bool nightVisionWantsDraws(){return detail::g_nightVisionOn;}
 // window). nightVisionMatches itself asks this same function, so the two
 // cannot drift.
 inline bool nightVisionShape(char kind,uint32_t count,uint32_t instances){
-    return kind=='X' && count==240 && instances==1;
+    constexpr const auto& claim = plugins::kManifest[plugins::kPluginCockpitVisuals]
+        .claims[plugins::kClaimCockpitVisualsNightVision];
+    return plugins::dispatch::matchesShape(claim.drawShape,
+                                           static_cast<uint8_t>(kind), count, instances);
 }
 bool nightVisionMatches(char kind,uint32_t count,uint32_t instances);
+// Registry path after the core has matched both the cached shader pair and
+// inline draw shape; checks only the remaining live variant/failure state.
+bool nightVisionClaimEligible(char kind,uint32_t count,uint32_t instances);
 void nightVisionBegin(ID3D11DeviceContext*);
 void nightVisionEnd(ID3D11DeviceContext*);
 void nightVisionShutdown();

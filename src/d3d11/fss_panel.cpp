@@ -7,6 +7,7 @@
 #include <d3d11.h>
 
 #include <string>
+#include <new>
 
 #include "../common/config.h"
 #include "../common/guard.h"
@@ -142,6 +143,21 @@ void fssPanelConfigure(Config& cfg) {
     if (g_factor != wasFactor) g_compileTried = false;
 }
 
+bool fssPanelDrawInterestConfigured() noexcept {
+    return detail::g_fssPanelEnabled;
+}
+
+std::size_t fssPanelDrawInterestFilters(draw_interest::ShaderFilter* out,
+                                       std::size_t capacity) noexcept {
+    if (!detail::g_fssPanelEnabled) return 0;
+    constexpr uint64_t hashes[] = {kColorHash, kPrepassHash};
+    for (std::size_t i = 0; out && i < 2 && i < capacity; ++i) {
+        out[i] = {draw_interest::InterestId::FssPanel,
+                  draw_interest::HashFilter::Vertex, hashes[i], 0};
+    }
+    return 2;
+}
+
 bool fssPanelOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances) {
     if (!detail::g_fssPanelEnabled || kind != 'X' || count != 6 || instances != 1 || !ctx) {
@@ -161,6 +177,75 @@ bool fssPanelOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     g_matchedHash = h;
     return true;
 }
+
+bool fssPanelOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                               uint32_t count, uint32_t instances,
+                               FssPanelObservation& observed) {
+    auto& h = observed.helper;
+    observed.matchedHashBefore = {true, true, g_matchedHash};
+    const auto finish = [&](bool matched) {
+        observed.matchedHashAfter = {true, true, g_matchedHash};
+        return matched;
+    };
+    const bool enabled = detail::g_fssPanelEnabled;
+    h.enabled = {true, true, enabled};
+    if (!enabled || kind != 'X' || count != 6 || instances != 1)
+        return finish(false);
+    h.contextNonNull = {true, true, ctx != nullptr};
+    if (!ctx) return finish(false);
+
+    uint64_t hash = 0;
+    bool callbackEntered = false;
+    bool vsGetShaderCompleted = false;
+    bool lookupReached = false;
+    bool lookupCompleted = false;
+    bool shaderNonNull = false;
+    bool releaseReached = false;
+    bool releaseCompleted = false;
+    bool callbackCompleted = false;
+    h.guardCallReached = {true, true, true};
+    const bool guardReturned = guardedBudget(g_budget, [&] {
+        callbackEntered = true;
+        ID3D11VertexShader* vs = nullptr;
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        vsGetShaderCompleted = true;
+        lookupReached = true;
+        hash = lookupShaderHash(vs);
+        lookupCompleted = true;
+        shaderNonNull = vs != nullptr;
+        if (vs) {
+            releaseReached = true;
+            vs->Release();
+            releaseCompleted = true;
+        }
+        callbackCompleted = true;
+    });
+    h.callbackEntered = {true, true, callbackEntered};
+    h.vsGetShaderCompleted = {true, true, vsGetShaderCompleted};
+    h.lookupReached = {true, true, lookupReached};
+    h.lookupCompleted = {true, true, lookupCompleted};
+    if (lookupCompleted) h.assignedHash = {true, true, hash};
+    if (lookupCompleted) h.shaderNonNull = {true, true, shaderNonNull};
+    h.releaseReached = {true, true, releaseReached};
+    h.releaseCompleted = {true, true, releaseCompleted};
+    h.callbackCompleted = {true, true, callbackCompleted};
+    h.guardReturned = {true, true, guardReturned};
+    h.hashAfterGuard = {true, true, hash};
+    if (hash != kColorHash && hash != kPrepassHash) return finish(false);
+    g_matchedHash = hash;
+    return finish(true);
+}
+
+#if defined(EDVR_FSS_PREDICATE_TEST)
+namespace fss_predicate_test {
+void setPanelEnabled(bool enabled) noexcept { detail::g_fssPanelEnabled = enabled; }
+void setPanelMatchedHash(uint64_t hash) noexcept { g_matchedHash = hash; }
+void resetPanelBudget(int remaining) noexcept {
+    g_budget.~FaultBudget();
+    new (&g_budget) FaultBudget("fssPanel", remaining);
+}
+}  // namespace fss_predicate_test
+#endif
 
 void fssPanelBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;

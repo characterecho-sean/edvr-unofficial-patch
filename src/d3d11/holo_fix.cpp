@@ -186,6 +186,108 @@ bool holoOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
     return true;
 }
 
+bool holoOnEyeDrawObserved(char kind, uint32_t count, uint32_t instances,
+                           holo_scrim_observation::HoloObservation* observation) {
+    using holo_scrim_observation::Tri;
+    using holo_scrim_observation::ResourceSource;
+    holo_scrim_observation::HoloObservation local{};
+    auto& out = observation ? *observation : local;
+    out = holo_scrim_observation::HoloObservation{};
+
+    // This trace-only path is called for every reached site, including outer
+    // gate declines, so its counter snapshots bracket every recorded outcome.
+    out.missedBefore = g_missed;
+    out.missNotedBefore = g_missNoted ? Tri::Yes : Tri::No;
+
+    auto finish = [&](bool matched) {
+        out.predicateResult = matched ? Tri::Yes : Tri::No;
+        out.missedAfter = g_missed;
+        out.missNotedAfter = g_missNoted ? Tri::Yes : Tri::No;
+        out.missedDelta = out.missedAfter - out.missedBefore;
+        out.missedDeltaKnown = true;
+        return matched;
+    };
+
+    const bool outerEnabled = detail::g_holoSteady;
+    out.gates.enabled = outerEnabled ? Tri::Yes : Tri::No;
+    if (!outerEnabled) return finish(false);
+
+    out.gates.shapeReached = Tri::Yes;
+    const bool outerShape = holoPatternShape(kind, count, instances);
+    out.gates.shapeMatched = outerShape ? Tri::Yes : Tri::No;
+    if (!outerShape) return finish(false);
+
+    out.gates.helperReached = Tri::Yes;
+    const bool helperEnabled = detail::g_holoSteady;
+    out.gates.helperEnabled = helperEnabled ? Tri::Yes : Tri::No;
+    if (!helperEnabled) return finish(false);
+    out.gates.helperShapeReached = Tri::Yes;
+    const bool helperShape = holoPatternShape(kind, count, instances);
+    out.gates.helperShapeMatched = helperShape ? Tri::Yes : Tri::No;
+    if (!helperShape) return finish(false);
+
+    // Keep the frozen Holo selector order and use only these existing resolves.
+    ResourceInfo pattern;
+    auto& patternObservation = out.pattern;
+    patternObservation.resolveReached = Tri::Yes;
+    const bool patternResolved = bindingResolve(bindingGet(BindSlot::PsSrv1), &pattern);
+    patternObservation.source = patternResolved
+        ? ResourceSource::FreshResolveSuccess : ResourceSource::FreshResolveFailure;
+    patternObservation.resolved = patternResolved ? Tri::Yes : Tri::No;
+    patternObservation.rawAvailable = patternResolved ? Tri::Yes : Tri::No;
+    patternObservation.texture2D = pattern.isTexture2D ? Tri::Yes : Tri::No;
+    if (patternResolved) {
+        patternObservation.a = pattern.a;
+        patternObservation.b = pattern.b;
+        patternObservation.fmt = pattern.fmt;
+    }
+    if (!patternResolved || !pattern.isTexture2D || pattern.a != kPatternW ||
+        pattern.b != kPatternH || pattern.fmt != kPatternFmt) {
+        return finish(false);
+    }
+
+    ResourceInfo depth;
+    auto& depthObservation = out.depth;
+    depthObservation.resolveReached = Tri::Yes;
+    const bool depthResolved = bindingResolve(bindingGet(BindSlot::PsSrv0), &depth);
+    depthObservation.source = depthResolved
+        ? ResourceSource::FreshResolveSuccess : ResourceSource::FreshResolveFailure;
+    depthObservation.resolved = depthResolved ? Tri::Yes : Tri::No;
+    depthObservation.rawAvailable = depthResolved ? Tri::Yes : Tri::No;
+    // bindingResolve initializes ResourceInfo before a failed resolve, so this
+    // known No is exactly what the later failure-counter guard consumes.
+    depthObservation.texture2D = depth.isTexture2D ? Tri::Yes : Tri::No;
+    if (depthResolved) {
+        depthObservation.a = depth.a;
+        depthObservation.b = depth.b;
+        depthObservation.fmt = depth.fmt;
+    }
+
+    bool eyeSized = false;
+    if (depthResolved && depth.isTexture2D) {
+        eyeSized = vScreenIsEyeSizedObserved(depth.a, depth.b, &out.eyeSize);
+    }
+    if (!depthResolved || !depth.isTexture2D || !eyeSized) {
+        if (!g_missNoted && depth.isTexture2D) {
+            uint32_t ew = 0, eh = 0;
+            const bool known = eyeTextureSize(&ew, &eh) && ew && eh;
+            if (++g_missed >= 60) {
+                g_missNoted = true;
+                Log::get().note(
+                    "holo pattern: %llu hologram-shaped draw(s) went by "
+                    "unrecognised because slot 0 was %ux%u and the eye %s. "
+                    "The pattern is the game's own for those frames, which is "
+                    "what the scan lines at the start of a loading screen "
+                    "are. Said once.",
+                    static_cast<unsigned long long>(g_missed), depth.a, depth.b,
+                    known ? "is a different size" : "was not published yet");
+            }
+        }
+        return finish(false);
+    }
+    return finish(true);
+}
+
 void holoBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;
     ID3D11ShaderResourceView* uniform = uniformSrv(ctx);
@@ -226,5 +328,12 @@ void holoShutdown() {
     }
     g_texLevel = 0xFFFFFFFFu;
 }
+
+#ifdef EDVR_HOLO_PREDICATE_TEST
+void holoPredicateSetCountersForTest(uint64_t missed, bool noted) {
+    g_missed = missed;
+    g_missNoted = noted;
+}
+#endif
 
 }  // namespace edvr

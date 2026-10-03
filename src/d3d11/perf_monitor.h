@@ -159,6 +159,12 @@ inline bool perfMonitorSampleDraws() { return detail::g_perfMonitorSampleDraws; 
 constexpr uint32_t kPerfMonitorDrawTimeStride = 64;
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks);
 
+// Fixed-memory plugin-cost collector lifecycle. Configure/reset it after the
+// vScreen hooks are successfully installed (and after config reload), then
+// shut it down only after those hooks are removed.
+void perfMonitorPluginCostConfigure(uint8_t profileBit);
+void perfMonitorPluginCostShutdown();
+
 // The runtime closed its timing context, so the session is over: the long-frame counts and the worst few
 // are written (docs/freeze-diagnostics-2026-10-01.md). Called from native_timing.cpp's close through
 // g_nativeTimingCloseObserver, never from DllMain's process-exit path (the other threads are dead there).

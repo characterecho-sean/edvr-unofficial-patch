@@ -1,4 +1,5 @@
 #include "draw_census.h"
+#include "draw_ladder_trace.h"
 
 #include <cstdio>   // _snprintf_s: the sampled-slot list is built before logging
 #include <cstdlib>  // _strtoui64: the CB watch's shader hash from config
@@ -727,6 +728,12 @@ void drawCensusRequest() {
         return;
     }
     detail::g_drawCensusPending = true;
+    // The ordered-ladder recorder is explicitly opt-in and captures only a
+    // complete owner frame after a manual census request. Automatic census
+    // triggers deliberately never arm it.
+    draw_ladder_trace::armManual();
+    Log::get().note("draw replay: manual arm status=%s",
+                    draw_ladder_trace::statusName(draw_ladder_trace::status()));
     // The hotkey lands inside a frame, after that frame's gate sample. The
     // census counts frames from here, so a gate that stayed false until the
     // next boundary would hand it an empty frame 1 (draw_gate.h).

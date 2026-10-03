@@ -17,12 +17,14 @@
 #include <cstdio>   // _snprintf_s, for the sizes list in the starvation line
 #include <cstdlib>  // strtoul, same parser
 #include <cstring>
+#include <type_traits>
 
 #include "../common/config.h"
 #include "../common/eye_sync.h"
 #include "../common/frame_flag.h"  // the eye-texture size, from the openvr half
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "../common/plugin_cost.h"
 #include "../common/proxy.h"  // breadcrumbHeartbeat, the steady-state trail
 #include "../common/timing.h"
 #include "../common/vr_supersample_notice.h"   // Elite's Supersampling below 1, read from the measured render size
@@ -33,9 +35,17 @@
 #include "panel_curve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
-#include "night_vision.h"
+#include "plugin_registry.h"
+#include "plugin_dispatch.h"
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
+#include "draw_ladder_trace.h"
+#include "basic_draw_observation.h"
+#include "forwarding_observation.h"
+#include "sunglare_nomination_observation.h"
+#include "eye_census_observation.h"
+#include "holo_scrim_observation.h"
+#include "offscreen_skip_selector.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
@@ -60,6 +70,7 @@
 #include "target_sharp.h"
 #include "wake_pulse.h"
 #include "scheduler_stack_probe.h"  // schedulerStackProbeShutdown
+#include "static_prop_gate.h"
 #include "ui_depth.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"
@@ -83,12 +94,16 @@
 #include "splash_dim.h"
 #include "quad_probe.h"
 #include "remlok_fix.h"
+#include "fss_outer_probe.h"
 #include "scrim_fix.h"
 #include "exposure_fix.h"
 #include "particle_fix.h"
 #include "sunglare_fix.h"
 #include "graphics_bridge.h"
 #include <intrin.h>
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+#include "../../tools/vscreen_predicate_test/vscreen_predicate_test.h"
+#endif
 
 namespace edvr {
 
@@ -98,6 +113,13 @@ namespace edvr {
 namespace detail {
 std::atomic<bool> g_drawGateWanted{true};
 }  // namespace detail
+
+template <class T>
+void setLoaderPanelRead(LoaderPanelRead<T>& read, T value) noexcept {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
 
 namespace {
 
@@ -345,6 +367,10 @@ typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandList)(ID3D11DeviceContext*,
 
 struct State {
     VTableHook hook;
+    // Owner-thread classifier settings epoch captured with each replay frame.
+    uint32_t classifierConfigEpoch = 0;
+    bool replayTraceEnabled = false;
+    bool replayTraceConfigPending = false;
 
     // The context these hooks were installed for. Identity only -- it is
     // compared, never dereferenced, and no reference is held on it.
@@ -355,6 +381,9 @@ struct State {
     // on those would attribute another context's draws to the panel and
     // corrupt state nobody can see is wrong. See vtable_hook.h.
     ID3D11DeviceContext* ownerCtx = nullptr;
+    // Profile-scoped module dispatch is absent entirely on flat/invalid
+    // installs, so their draw ladder avoids even reading the candidate mask.
+    bool pluginDispatchEnabled = false;
 
     PFN_SetConstantBuffers   realVSSetConstantBuffers = nullptr;
     PFN_SetConstantBuffers   realPSSetConstantBuffers = nullptr;  // flat diagnostic observer only
@@ -1555,6 +1584,26 @@ enum class DrawVerdict {
     kBackdrop
 };
 
+static_assert(static_cast<int>(DrawVerdict::kNone) == static_cast<int>(draw_ladder::VerdictOrdinal::kNone));
+static_assert(static_cast<int>(DrawVerdict::kPanel) == static_cast<int>(draw_ladder::VerdictOrdinal::kPanel));
+static_assert(static_cast<int>(DrawVerdict::kSkip) == static_cast<int>(draw_ladder::VerdictOrdinal::kSkip));
+static_assert(static_cast<int>(DrawVerdict::kRemlok) == static_cast<int>(draw_ladder::VerdictOrdinal::kRemlok));
+static_assert(static_cast<int>(DrawVerdict::kHolo) == static_cast<int>(draw_ladder::VerdictOrdinal::kHolo));
+static_assert(static_cast<int>(DrawVerdict::kTargetSharp) == static_cast<int>(draw_ladder::VerdictOrdinal::kTarget));
+static_assert(static_cast<int>(DrawVerdict::kNightVision) == static_cast<int>(draw_ladder::VerdictOrdinal::kNightVision));
+static_assert(static_cast<int>(DrawVerdict::kIntroPanel) == static_cast<int>(draw_ladder::VerdictOrdinal::kIntro));
+static_assert(static_cast<int>(DrawVerdict::kGlareClamp) == static_cast<int>(draw_ladder::VerdictOrdinal::kGlareClamp));
+static_assert(static_cast<int>(DrawVerdict::kGlareSteady) == static_cast<int>(draw_ladder::VerdictOrdinal::kSteady));
+static_assert(static_cast<int>(DrawVerdict::kParticle) == static_cast<int>(draw_ladder::VerdictOrdinal::kParticle));
+static_assert(static_cast<int>(DrawVerdict::kFssPanel) == static_cast<int>(draw_ladder::VerdictOrdinal::kFssPanel));
+static_assert(static_cast<int>(DrawVerdict::kFssReveal) == static_cast<int>(draw_ladder::VerdictOrdinal::kReveal));
+static_assert(static_cast<int>(DrawVerdict::kFssDump) == static_cast<int>(draw_ladder::VerdictOrdinal::kDump));
+static_assert(static_cast<int>(DrawVerdict::kResolveBind) == static_cast<int>(draw_ladder::VerdictOrdinal::kResolve));
+static_assert(static_cast<int>(DrawVerdict::kQuadSkip) == static_cast<int>(draw_ladder::VerdictOrdinal::kQuadSkip));
+static_assert(static_cast<int>(DrawVerdict::kLoaderPanel) == static_cast<int>(draw_ladder::VerdictOrdinal::kLoader));
+static_assert(static_cast<int>(DrawVerdict::kScrim) == static_cast<int>(draw_ladder::VerdictOrdinal::kScrim));
+static_assert(static_cast<int>(DrawVerdict::kBackdrop) == static_cast<int>(draw_ladder::VerdictOrdinal::kBackdrop));
+
 // THE SHADOW'S AUDIT (2026-09-09). The heat haze's skip went silent the
 // flight after the binding shadow replaced its VSGetShader -- 15:13, three
 // minutes beside a ship's drives, not one draw withheld; 14:52, the flight
@@ -1658,59 +1707,116 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
     return true;
 }
 
-// Does any feature still want to see draws?
-//
-// The forty-term subscriber condition that used to sit inline at the top of
-// beginPanelOverride, moved out whole and unchanged. It is called once per
-// frame from vScreenFrameBoundary and its answer is cached in
-// State::drawGateWanted; the long comment at the use site says why that is
-// safe and what one frame of lateness costs.
-//
-// Kept as one expression, in the original order, so that a future subscriber
-// is added HERE and nowhere else -- which is the mistake the use site's
-// comment records three times over. The wake pulse, night vision, the
-// witchspace starfield switch and the depth probe repeated it: each acts below
-// the gate (wakePulseSkips in the offscreen branch, nightVisionMatches on the
-// eye draw, witchspaceStarsSkip ahead of the eye gate, the depth probe's two
-// notes) and none was listed, so with every other subscriber off the gate
-// closed and they never ran. They are the last four terms.
-//
-// The depth probe's two rungs share ONE term. depthProbeWanted() is the first
-// rung's own test; the second rung's pre-check, depthProbeEyeDrawNeedsNote(),
-// is that same flag AND a per-view test, so it cannot pass while the flag is
-// false. depthProbeConfigure arms it for any fix.temporal_aa value but off, or
-// for advanced.eye_depth_capture alone. objectProbeWantsDraws() below covers a
-// recognised temporal mode, which is why this went unnoticed; it does not cover
-// an unrecognised value or the capture on its own.
-//
-// Two rungs below the gate are deliberately NOT listed: screenMotionLive() and
-// uiLayerCrispOn(). Each implies temporalModeEnabled(fix.temporal_aa), the same
-// expression objectProbeConfigure sets g_objectProbeOn from, which is
-// objectProbeWantsDraws() below, so neither can be true while the gate is shut.
-// Narrow that probe's on-condition and both belong here.
-bool drawGateSubscribed(State* s) {
-    return s->distanceEnabled || s->countForFlashFix ||
-        headOffsetGateWantsPanel() || s->censusSkipCount != 0 ||
-        s->censusSkipRangeCount != 0 || s->censusSkipOffCount != 0 ||
-        s->quadSkipArmed ||
-        s->censusAutoW != 0 || fssResActive() ||
-        fssPanelWantsDraws() || fssRevealWantsDraws() ||
-        fssDumpWantsDraws() ||
-        resolveBindWants() ||
-        remlokWantsDraws() || holoWantsDraws() || targetSharpWantsDraws() ||
-        uiDepthWantsDraws() ||
-        sunglareWantsDraws() ||
-        drawCensusArmed() ||
-        objectProbeWantsDraws() ||
-        panelCurveWants() || particleWantsDraws() || backdropWantsDraws() ||
-        scrimWantsDraws() || quadProbeWants() || loaderPanelWants() ||
-        introProbeWants() || introPanelWants() ||
-        wakePulseWantsDraws() || nightVisionWantsDraws() ||
-        witchspaceStarsHidden() || depthProbeWanted() ||
-        vscreenFootprintWanted() ||   // the footprint instrument (vscreen_footprint.h): it reads the 2D screen's composite
-        introCurveWants();            // the splash's surface strip (intro_curve.h): it acts in the eye branch, below this gate -- and panelCurveWants()
-                                      // above is the ON-FOOT strip's flag, which stands down on its own while this one does not
+// Each remaining legacy subscriber is registered by stable name with the
+// core registry. Night vision registers through its plugin ops independently.
+// Keep each adapter beside this table so no consumer is hidden in an unrelated
+// feature's aggregate predicate.
+#define EDVR_GATE_STATE(name, expression)                                      \
+    uint32_t drawGate_##name(void* opaque) {                                   \
+        State* s = static_cast<State*>(opaque);                               \
+        return (expression) ? 1u : 0u;                                        \
+    }
+#define EDVR_GATE_GLOBAL(name, expression)                                    \
+    uint32_t drawGate_##name(void* opaque) {                                  \
+        (void)opaque;                                                         \
+        return (expression) ? 1u : 0u;                                        \
+    }
+
+EDVR_GATE_STATE(panel_distance, s->distanceEnabled)
+EDVR_GATE_STATE(transition_flash_eye_count, s->countForFlashFix)
+EDVR_GATE_GLOBAL(head_offset, headOffsetGateWantsPanel())
+EDVR_GATE_STATE(census_skip_count, s->censusSkipCount != 0)
+EDVR_GATE_STATE(census_skip_ranges, s->censusSkipRangeCount != 0)
+EDVR_GATE_STATE(census_skip_off, s->censusSkipOffCount != 0)
+EDVR_GATE_STATE(census_quad_skip_armed, s->quadSkipArmed)
+EDVR_GATE_STATE(census_auto, s->censusAutoW != 0)
+EDVR_GATE_GLOBAL(fss_resolution, fssResActive())
+EDVR_GATE_GLOBAL(fss_panel, fssPanelWantsDraws())
+EDVR_GATE_GLOBAL(fss_reveal, fssRevealWantsDraws())
+EDVR_GATE_GLOBAL(fss_dump, fssDumpWantsDraws())
+EDVR_GATE_GLOBAL(resolve_bind, resolveBindWants())
+EDVR_GATE_GLOBAL(remlok, remlokWantsDraws())
+EDVR_GATE_GLOBAL(hologram_depth, holoWantsDraws())
+EDVR_GATE_GLOBAL(target_indicator, targetSharpWantsDraws())
+EDVR_GATE_GLOBAL(ui_depth, uiDepthWantsDraws())
+EDVR_GATE_GLOBAL(sun_glare, sunglareWantsDraws())
+EDVR_GATE_GLOBAL(draw_census, drawCensusArmed())
+EDVR_GATE_GLOBAL(object_probe, objectProbeWantsDraws())
+EDVR_GATE_GLOBAL(panel_curve, panelCurveWants())
+EDVR_GATE_GLOBAL(particles, particleWantsDraws())
+EDVR_GATE_GLOBAL(backdrop, backdropWantsDraws())
+EDVR_GATE_GLOBAL(scrim, scrimWantsDraws())
+EDVR_GATE_GLOBAL(quad_probe, quadProbeWants())
+EDVR_GATE_GLOBAL(loader_panel, loaderPanelWants())
+EDVR_GATE_GLOBAL(intro_probe, introProbeWants())
+EDVR_GATE_GLOBAL(intro_panel, introPanelWants())
+EDVR_GATE_GLOBAL(wake_pulse, wakePulseWantsDraws())
+EDVR_GATE_GLOBAL(witchspace_stars, witchspaceStarsHidden())
+EDVR_GATE_GLOBAL(depth_probe, depthProbeWanted())
+EDVR_GATE_GLOBAL(vscreen_footprint, vscreenFootprintWanted())
+EDVR_GATE_GLOBAL(intro_curve, introCurveWants())
+
+#undef EDVR_GATE_STATE
+#undef EDVR_GATE_GLOBAL
+
+struct LegacyDrawGateRegistration {
+    const char* name;
+    EdvrLegacyDrawGateFn predicate;
+    bool needsState;
+};
+constexpr LegacyDrawGateRegistration kLegacyDrawGateRegistrations[] = {
+    {"legacy.panel-distance", &drawGate_panel_distance, true},
+    {"legacy.transition-flash-eye-count", &drawGate_transition_flash_eye_count, true},
+    {"legacy.head-offset", &drawGate_head_offset, false},
+    {"legacy.census-skip-count", &drawGate_census_skip_count, true},
+    {"legacy.census-skip-ranges", &drawGate_census_skip_ranges, true},
+    {"legacy.census-skip-off", &drawGate_census_skip_off, true},
+    {"legacy.census-quad-skip-armed", &drawGate_census_quad_skip_armed, true},
+    {"legacy.census-auto", &drawGate_census_auto, true},
+    {"legacy.fss-resolution", &drawGate_fss_resolution, false},
+    {"legacy.fss-panel", &drawGate_fss_panel, false},
+    {"legacy.fss-reveal", &drawGate_fss_reveal, false},
+    {"legacy.fss-dump", &drawGate_fss_dump, false},
+    {"legacy.resolve-bind", &drawGate_resolve_bind, false},
+    {"legacy.remlok", &drawGate_remlok, false},
+    {"legacy.hologram-depth", &drawGate_hologram_depth, false},
+    {"legacy.target-indicator", &drawGate_target_indicator, false},
+    {"legacy.ui-depth", &drawGate_ui_depth, false},
+    {"legacy.sun-glare", &drawGate_sun_glare, false},
+    {"legacy.draw-census", &drawGate_draw_census, false},
+    {"legacy.object-probe", &drawGate_object_probe, false},
+    {"legacy.panel-curve", &drawGate_panel_curve, false},
+    {"legacy.particles", &drawGate_particles, false},
+    {"legacy.backdrop", &drawGate_backdrop, false},
+    {"legacy.scrim", &drawGate_scrim, false},
+    {"legacy.quad-probe", &drawGate_quad_probe, false},
+    {"legacy.loader-panel", &drawGate_loader_panel, false},
+    {"legacy.intro-probe", &drawGate_intro_probe, false},
+    {"legacy.intro-panel", &drawGate_intro_panel, false},
+    {"legacy.wake-pulse", &drawGate_wake_pulse, false},
+    {"legacy.witchspace-stars", &drawGate_witchspace_stars, false},
+    {"legacy.depth-probe", &drawGate_depth_probe, false},
+    {"legacy.vscreen-footprint", &drawGate_vscreen_footprint, false},
+    {"legacy.intro-curve", &drawGate_intro_curve, false},
+};
+
+bool registerLegacyDrawGates(State* state) {
+    bool ok = true;
+    for (const auto& registration : kLegacyDrawGateRegistrations) {
+        void* context = registration.needsState ? state : nullptr;
+        if (!pluginRegistryRegisterLegacyDrawGate(registration.name,
+                                                   registration.predicate,
+                                                   context)) {
+            Log::get().note("plugin registry: draw-gate subscription '%s' failed; gate forced open",
+                            registration.name);
+            pluginRegistrySetDrawGateFailOpen();
+            ok = false;
+        }
+    }
+    return ok;
 }
+
+bool drawGateSubscribed(State* s) { return pluginRegistryWantsDraws(s); }
 
 // The bound target's resolve, for the wake pulse, memoised on Rtv0's binding
 // generation -- the rtv0Eye pattern. The wake pulse needs the target's size
@@ -1813,931 +1919,1720 @@ void pixelProbeAfterEye(State* s, ID3D11DeviceContext* self, uint32_t count,
 // rather than stashed because a stash read the wrong draw's numbers once
 // (hookedDraw says); every other consumer of this function is indifferent
 // to them.
-DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
-                               UINT instances, const DrawArgs& args) {
-    State* s = g_state;
-    // A draw on somebody else's context is not our panel and not an eye draw.
-    // This one early return covers all four draw thunks, and it covers them
-    // where the counting actually happens rather than four times over.
-    // The glare clamp is per-draw state consumed by the DrawInstanced thunk
-    // after this function returns; reset FIRST -- before even the foreign-
-    // context return -- because every early return would otherwise leave the
-    // previous train draw's clamp armed for whatever instanced draw comes
-    // next.
-    // The FSS chrome tracker (fix.fss_arrival_mono): the scanner's screen
-    // is composited by two known world-quad pipelines every frame it is
-    // open -- including BEFORE a zoom, which is the whole point: the
-    // arrival-mono trigger needs "the player is in the scanner" at the
-    // moment the zoom's camera jump lands, and the body-layer gate opens
-    // ten frames too late. Cheap gate first, hash second, config off =
-    // free. The temporal pass asks too (temporalPassWantsFssChrome): the
-    // scanner's interface takes the head's path while the screen is up,
-    // and the stamp this tracker bumps is how the pass knows it is.
-    if ((s->fssHealOn || s->censusFssJump ||
-         temporalPassWantsFssChrome()) &&
-        kind == 'X' && count == 6) {
-        bool chromeMatched = false;
-        guardedBudget(g_panelCbBudget, [&] {
-            const uint64_t h = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
-            if (h != 0xA888D51024D9798Eull && h != 0xB018D143700AB803ull) {
-                return;
-            }
-            // The hash names the engine's GENERAL world-quad pipeline --
-            // the round-9 lesson, relearned in the field when the first
-            // tracker fired outside the scanner. What only the scanner
-            // does is sample its big chrome surface at slot 1: panel-
-            // scaled, well over UI size, never eye-sized.
-            ID3D11ShaderResourceView* srv = nullptr;
-            self->PSGetShaderResources(1, 1, &srv);
-            if (!srv) return;
-            ID3D11Resource* res = nullptr;
-            srv->GetResource(&res);
-            if (!res) {
-                srv->Release();
-                return;
-            }
-            ID3D11Texture2D* tex = nullptr;
-            res->QueryInterface(__uuidof(ID3D11Texture2D),
-                                reinterpret_cast<void**>(&tex));
-            D3D11_TEXTURE2D_DESC td{};
-            if (tex) {
-                tex->GetDesc(&td);
-                tex->Release();
-            }
-            if (tex && td.Width >= 2000 && td.Height >= 1000 &&
-                td.Height < td.Width) {
-                chromeMatched = true;
-                if (s->fssChromeFrame != s->frameNo) {
-                    s->fssChromeFrame = s->frameNo;
-                    bumpFssChromeStamp();
+struct LadderDecision {
+    DrawVerdict verdict = DrawVerdict::kNone;
+    draw_ladder::SiteId winner = draw_ladder::SiteId::kPanelTailNone;
+};
+
+template <class TracePolicy>
+struct VScreenDrawLadderVisitor {
+    State* s;
+    ID3D11DeviceContext* self;
+    char kind;
+    UINT count;
+    UINT instances;
+    const DrawArgs& args;
+    TracePolicy& trace;
+    uint32_t rtvGen = 0;
+    uint64_t pluginCandidates = 0;
+    draw_interest::InterestMask legacyInterestMask = 0;
+    RemlokAction remlokAction = RemlokAction::kNone;
+    SunglareAction glareAction = SunglareAction::kStock;
+    bool chromeMatched = false;
+    bool distanceAttemptFailed = false;
+    LadderDecision decision{};
+
+    VScreenDrawLadderVisitor(State* state, ID3D11DeviceContext* context,
+                             char drawKind, UINT drawCount, UINT drawInstances,
+                             const DrawArgs& drawArgs, TracePolicy& tracePolicy)
+        : s(state), self(context), kind(drawKind), count(drawCount),
+          instances(drawInstances), args(drawArgs), trace(tracePolicy) {}
+
+    draw_ladder::SiteResult claimed(draw_ladder::SiteId id, DrawVerdict v,
+                                    uint16_t subsite = 0) {
+        decision = {v, id};
+        return draw_ladder::SiteResult::claimed(static_cast<int16_t>(v), subsite);
+    }
+    draw_ladder::SiteResult exited(draw_ladder::SiteId id, DrawVerdict v,
+                                   uint16_t subsite = 0) {
+        decision = {v, id};
+        return draw_ladder::SiteResult::exited(static_cast<int16_t>(v), subsite);
+    }
+
+    template <class T>
+    static void observeSunglareRead(SunglareRead<T>& read, T value) {
+        read.reached = true;
+        read.known = true;
+        read.value = value;
+    }
+
+    template <class T>
+    static void observeFssRead(FssRead<T>& read, T value) {
+        read.reached = true;
+        read.known = true;
+        read.value = value;
+    }
+
+    template <class SiteType>
+    __forceinline bool eligible() {
+        if constexpr (SiteType::shaderCandidateGated) {
+            if constexpr (TracePolicy::enabled &&
+                          SiteType::id == draw_ladder::SiteId::kNightVisionClaim) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(
+                    draw_ladder::SiteId::kNightVisionClaim);
+                fact.kind = draw_ladder_trace::PredicateFactKind::NightVisionClaim;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.dispatchEnabled = s->pluginDispatchEnabled
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                fact.modeKnown = pluginRegistryTraceMode(&fact.mode)
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::Unknown;
+                if (!s->pluginDispatchEnabled) {
+                    fact.candidateKnown = draw_ladder_trace::TriState::Unknown;
+                    fact.shapeReached = draw_ladder_trace::TriState::No;
+                    fact.callbackReached = draw_ladder_trace::TriState::No;
+                    fact.detailsFinalized = true;
+                    trace.predicateFact(fact);
+                    return false;
                 }
-                // The chrome surface, handed to ui_depth with the view
-                // and resource still held (ui_depth.h says what for),
-                // before uiDepthOnEyeDraw sees this same draw.
-                if (uiDepthWantsDraws()) uiDepthLearnScannerChrome(self, h, srv, res);
-            }
-            res->Release();
-            srv->Release();
-        });
-        // The panel rect's per-draw pipeline (round 45f): every matched
-        // composite is handed to the rect deriver with its own draw args
-        // and its ordinal within the frame; once per engage the deriver
-        // classifies the whole family -- camera-centred records are the
-        // SCREEN (their union is the crop), far-out rotated records are
-        // scenery (the neon frame) and their ordinals land in a skip
-        // mask. Until a derivation publishes, nothing is skipped and the
-        // centred band crops -- both fail-safe.
-        if (chromeMatched && s->fssHealOn &&
-            deviceHookFssModeLatch()) {
-            if (s->fssChromeSkipFrame != s->frameNo) {
-                s->fssChromeSkipFrame = s->frameNo;
-                s->fssChromeSkipCount = 0;
-            }
-            const uint32_t ord = s->fssChromeSkipCount++;
-            fssPanelRectOnComposite(self, ord,
-                                    fssPanelRectStartInstance(),
-                                    fssPanelRectBaseVertex());
-            const uint32_t mask = fssPanelRectSkipMask();
-            if (ord < 32 && ((mask >> ord) & 1u)) {
-                if (!s->fssChromeSkipNoted) {
-                    s->fssChromeSkipNoted = true;
-                    Log::get().note(
-                        "fss panel rect: the derivation classified the "
-                        "scanner's scenery quads (mask 0x%X) and they are "
-                        "skipped while the screen is up. Said once.",
-                        mask);
+                fact.activeMaskKnown = draw_ladder_trace::TriState::Yes;
+                fact.activePluginMask = pluginRegistryActivePluginMaskForTrace();
+                pluginCandidates = pluginRegistryShaderCandidates();
+                trace.candidates(pluginCandidates);
+                const bool hasCandidate = plugins::dispatch::hasCandidate(
+                    pluginCandidates, plugins::kPluginCockpitVisuals);
+                fact.candidateKnown = draw_ladder_trace::TriState::Yes;
+                fact.candidatePresent = hasCandidate
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                if (!hasCandidate) {
+                    fact.shapeReached = draw_ladder_trace::TriState::No;
+                    fact.callbackReached = draw_ladder_trace::TriState::No;
+                    fact.detailsFinalized = true;
                 }
-                // A skip above the census calls is a draw the census never
-                // sees; the count says so on its end line.
-                if (drawCensusArmed()) drawCensusNoteUnseen('f');
-                return DrawVerdict::kSkip;
+                trace.predicateFact(fact);
+                return hasCandidate;
             }
-        }
-    }
-
-    s->glareClamp = 0;
-    if (foreignContext(self)) {
-        noteForeignDraw(self);
-        // Round seventeen: recorded before the decline, every token read
-        // off the calling context -- the owner shadow cannot describe a
-        // deferred context's bindings, and draws recorded here were the
-        // last draw class no census had ever carried.
-        if (drawCensusArmed()) {
-            drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0, args);
-        }
-        return DrawVerdict::kNone;
-    }
-    if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);
-    // Cleared before anything can set it, on every draw, so a substitution
-    // can never be attributed to a draw that did not ask for one.
-    s->curveThisDraw = false;
-    s->introCurveThisDraw = false;
-    t_uiDepthThisDraw = false;
-    t_compositeThisDraw = false;
-    // Counting eye draws is not part of the panel distance fix, even though it
-    // happens here.
-    //
-    // The transition-flash detector needs this count to tell a rendered scene
-    // from a menu, and it is the only place the count can be taken. It used to
-    // sit below the distanceEnabled test, so with panel_distance at its shipped
-    // default of 1.0 nothing counted, the count stayed 0, and the flash fix --
-    // which is on by default and asks the user to replace a file in their game
-    // install -- never withheld a single frame. It reported itself as armed
-    // throughout. Two features that have nothing to do with each other, and one
-    // silently switched the other off.
-    // Three subscribers now, and this early return has learned each one late.
-    //
-    // It predates both the flash fix and the head-offset gate, and each time it
-    // was the SAME bug: a feature whose only source of eye-draw and panel counts
-    // is this function, silently starved because two unrelated settings were
-    // off. The flash fix added countForFlashFix; the gate is the third, and it
-    // starves in the configuration a user reaches by turning the panel distance
-    // fix off and leaving the flash fix off -- the gate then sees zeros forever,
-    // never arms, and nothing anywhere says why.
-    //
-    // The install-time gate already asked headOffsetGateWantsPanel(); this
-    // per-draw one did not, so the hooks were installed and then fed nothing.
-    //
-    // The real fix is structural: counters this load-bearing belong in frame
-    // state that features subscribe to, not inside one fix's fast path, so the
-    // next feature cannot make this mistake a fourth time.
-    // The census and its skip probe are subscribers four and five, added the
-    // way the paragraph above says the next one should not be. The structural
-    // fix -- counters in frame state that features subscribe to -- is still
-    // owed; until it lands, both at least fail towards silence: unarmed and
-    // unset (the permanent state) they add nothing to this condition's
-    // answer, and the short-circuit means the census call is not even made
-    // while any ordinary subscriber is on.
-    //
-    // AND IT IS NOW SAMPLED ONCE PER FRAME, which is a step towards that owed
-    // structural fix rather than away from it. The condition is forty terms,
-    // nearly all of them a one-line getter in another .cpp -- and this build
-    // is /O2 with no /GL, so each is a real call. With the panel distance fix
-    // off, none of them short-circuits early and the whole chain was walked
-    // for every one of ~18k eye-pass draws a frame: 658 innermost samples of a
-    // 1349-frame window landed in this function, 0.49 ms a frame, the largest
-    // single entry in the 2026-09-22 caller-thread profile.
-    //
-    // Every term is a config flag, an arm flag or a latched probe state. None
-    // can change as a CONSEQUENCE of a draw, so the answer is constant across
-    // a frame; what it can do is change BETWEEN frames, and that is what the
-    // frame boundary re-reads. The cost of being one frame late is one frame
-    // of a probe arming or a census starting, which each run for hundreds.
-    // The cost of being one frame STALE-TRUE is a few micro-seconds of work
-    // nobody consumes, because every feature below still tests its own
-    // predicate. Stale-false is the only direction that can starve a feature,
-    // and it is bounded to the single frame in which that feature armed.
-    if (!drawGateWanted()) {
-        return DrawVerdict::kNone;
-    }
-
-    // The shadow's audit, one draw in 1024 (bindingAudit says).
-    if ((++s->bindAuditSeq & 1023u) == 0) bindingAudit(s, self);
-
-    // The particle probe sits ABOVE the eye-texture gate on purpose. On
-    // foot the world -- plumes included -- is drawn into the PANEL, which
-    // is deliberately not counted as an eye texture, so anything below the
-    // gate never sees a single particle draw in flat mode. The billboards
-    // take their basis from the game camera either way, which is why they
-    // swim when the mouse turns as well as when the head does, and a fix
-    // that only reached the stereo view would leave half the bug standing.
-    // particleProbeOn() is the callee's own first test, inline
-    // (particle_fix.h): with the probe off, its default, the call only
-    // returned.
-    if (particleProbeOn()) particleOnEyeDraw(self, kind, count, instances);
-
-    // The particle billboards, before the eye gate for the same reason the
-    // probe is: on foot they draw into the panel, and a fix that only ran
-    // for the stereo view would leave the flat view swimming.
-    //
-    // Visible substituted draws need their own census/ledger entry here,
-    // since the early return bypasses the normal recording below. Effects
-    // withheld entirely are instead counted by drawCensusNoteUnseen.
-    //
-    // particleOnDrawMayMatch (particle_fix.h) is the callee's own rejections
-    // ahead of its first effect -- shape, then the held vertex shader hash
-    // against the two transcriptions -- inline, so the draws that are not a
-    // billboard (nearly all of them) no longer make the call.
-    if (particleSteady() &&
-        particleOnDrawMayMatch(kind, count, instances,
-                               bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0) &&
-        particleOnDraw(self, kind, count, instances)) {
-        // This is still a visible draw. Capture the ORIGINAL shader and
-        // resources before particleBegin substitutes its vertex stage;
-        // otherwise the smoke that survives the drive switches is absent
-        // from both instruments used to identify it.
-        if (drawCensusArmed() || objectProbeLedgerActive()) {
-            const bool eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0));
-            if (drawCensusArmed()) drawCensusEarlyDraw(self, kind, count, instances, eye, args);
-            if (eye) objectProbeNoteEarlyDraw(self, kind, count, instances, args.startInstance,args.start,args.base);
-        }
-        return DrawVerdict::kParticle;
-    }
-
-    // The witchspace starfield, withheld only when the player has asked for
-    // it. Here beside the billboards because it is the same family and the
-    // same identification -- by shader hash, before the eye gate, since the
-    // jump tunnel draws into the panel on foot as well.
-    // witchspaceStarsHidden() is the callee's own first test, inline: with
-    // fix.witchspace_stars at its default (on), the call only returned false.
-    if (witchspaceStarsHidden() && witchspaceStarsSkip(self, kind, count, instances)) {
-        if (drawCensusArmed()) drawCensusNoteUnseen('w');
-        return DrawVerdict::kSkip;
-    }
-    const uint32_t rtvGen = bindingGeneration(BindSlot::Rtv0);
-    if (s->rtv0EyeGen != rtvGen) {
-        s->rtv0Cand = -1;
-        s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
-        s->rtv0EyeGen = rtvGen;
-    }
-    // The intro probe, ABOVE the eye gate and deliberately. Its subject is the
-    // startup sequence, and for the whole of the sequence's first phase there
-    // is no eye texture to be on the right side of a gate about: one eye's
-    // size arrives from the openvr half at the compositor's first Submit,
-    // seconds after the movie has already played flat. A probe below the gate
-    // would record nothing until after the thing it is measuring.
-    if (introProbeWants()) {
-        if (s->rtv0SizeGen != rtvGen) {
-            s->rtv0SizeGen = rtvGen;
-            ResourceInfo info;
-            if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) &&
-                info.isTexture2D) {
-                s->rtv0W = info.a;
-                s->rtv0H = info.b;
-            } else {
-                s->rtv0W = 0;
-                s->rtv0H = 0;
+            // Profile/config registration is cold and stable. Do not query the
+            // published shader-pair candidate cache when the module is absent.
+            if (!s->pluginDispatchEnabled) return false;
+            pluginCandidates = pluginRegistryShaderCandidates();
+            if constexpr (TracePolicy::enabled) trace.candidates(pluginCandidates);
+            return plugins::dispatch::hasCandidate(
+                pluginCandidates, plugins::kPluginCockpitVisuals);
+        } else if constexpr (SiteType::interestGated) {
+            // CommonSequence always precedes either branch sequence, and
+            // ParticleSubstitute is its first legacy-interest site. Read the
+            // published mask there only if the ordered ladder reaches it;
+            // later legacy sites use this local copy. The shared ladder pins
+            // that publication rung so new tags cannot silently move ahead
+            // of it. Night vision keeps its separate lazy candidate read.
+            if constexpr (std::is_same_v<SiteType,
+                                         draw_ladder::FirstLegacyInterestSite>) {
+                legacyInterestMask = pluginRegistryDrawInterestMask();
             }
-        }
-        introProbeOnDraw(s->rtv0W, s->rtv0H, s->rtv0Eye);
-    }
-    // The quad probe, ABOVE the eye gate since 2026-08-28.
-    //
-    // It lived in the offscreen branch because everything it had ever been
-    // aimed at -- the loader's widget panels -- is built in an interface
-    // surface. Then the intro flight named the draw that puts the intro
-    // movie in front of each eye: a 6-index quad (vh EF103A7CB4A8369A)
-    // straight INTO the eye texture, whose placement is not in a constant
-    // buffer at all but in the four vertices of its own 80-byte buffer.
-    // That is exactly the question this probe answers, and from inside the
-    // offscreen branch it could never have been asked -- a spec naming the
-    // eye's size matched nothing, silently.
-    //
-    // Still before every skip and re-issue below, which is the ordering rule
-    // that matters: a capture must describe what the GAME submitted rather
-    // than what a clip left.
-    if (quadProbeWants()) {
-        ResourceInfo info;
-        if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) &&
-            info.isTexture2D) {
-            quadProbeOnDraw(self, info.a, info.b, kind, count, instances,
-                            s->qsStartIndex, s->qsBaseVertex);
-        }
-    }
-    // Every draw's depth target, for the depth probe's census of where the
-    // game's depth actually goes (depth_probe.h): one pointer compare --
-    // and, while nothing arms the probe, not even the call (depthProbeWanted
-    // is the note's own first test, inline).
-    if (depthProbeWanted()) {
-        depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), s->rtv0Eye,
-                           bindingGet(BindSlot::Rtv0) == nullptr);
-    }
-    if (!s->rtv0Eye) {
-        if (screenMotionLive()) screenMotionSource(self,s->panelW?s->panelW:1920,s->panelH?s->panelH:1080);
-        // NOT an eye texture -- but it is still a DRAW, and where the draws
-        // are going is the entire question when the eye textures are getting
-        // almost none. Counted here rather than inside the recogniser,
-        // because the recogniser's answer is cached per binding and a count
-        // taken in there measures rebinds; see noteSceneCandidate.
-        if (s->rtv0Cand >= 0) {
-            State::SceneCandidate& c = s->cands[s->rtv0Cand];
-            ++c.thisFrame;
-            if (c.w == s->sceneW && c.h == s->sceneH) ++s->sceneDrawsThisFrame;
-        }
-        if(objectProbeLedgerActive()) {
-            objectProbeNoteGuiSourceDraw(self,kind,count,instances,args.startInstance,args.start,args.base);
-            ResourceInfo source;
-            if(bindingResolveProbe(bindingGet(BindSlot::Rtv0),&source) && source.isTexture2D &&
-               source.a==(s->panelW?s->panelW:1920) && source.b==(s->panelH?s->panelH:1080))
-                objectProbeNoteSourceDraw(self,kind,count,instances,args.startInstance,args.start,args.base);
-        }
-        // The census line for a draw that did NOT land in an eye texture,
-        // recorded only when advanced.census_offscreen asked for it. Before
-        // the skip probe below, for the same reason the eye form is: a census
-        // taken while probing must record what the game SUBMITTED.
-        //
-        // This is what an effect built offscreen and composited in looks like
-        // from here, and until 2026-08-24 it looked like nothing at all -- an
-        // FSS census showed 220 eye draws a frame while every body the player
-        // could see was being assembled somewhere this function had already
-        // returned from.
-        if (drawCensusWantsOffscreen() && drawCensusArmed()) {
-            drawCensusOffDraw(self, kind, count, instances, args);
-        }
-        // The interface's surfaces, learned where the GUI renderer draws
-        // them (ui_depth.h): one bool while off, one hash while a target is
-        // new. Before the returns below, because a surface is a surface
-        // whatever else this draw turns out to be.
-        if (uiDepthWantsDraws()) uiDepthNoteOffscreenDraw(self);
-        // (fix.ui_quality's surfaces keep their clock at the frame boundary,
-        // uiLayerFrameBoundary -> uiSurfacesFrameBoundary, not per draw.)
-        // The intro movie's YUV-to-RGB fill: a four-vertex draw with all
-        // three planes bound, into the surface the composite reads. It is
-        // what tells this frame apart from the splash's, which uses the
-        // very same composite a few seconds later (intro_panel.h). The
-        // slot-1 and slot-2 tests are shadow reads, so the cost while the
-        // fix is off is nothing at all.
-        //
-        // The intro probe reads the same draw, so its fill timing does not
-        // depend on any intro fix being on; introProbeWants is two bools.
-        // The draw's shape is asked FIRST: introPanelWants is a cross-TU call
-        // (intro_panel.cpp, /O2 without /GL) that was made for every draw here
-        // and at the composite below. All the terms are pure reads, so only
-        // the order changed.
-        if (kind == 'N' && count == 4 && (introPanelWants() || introProbeWants()) &&
-            bindingGet(BindSlot::PsSrv1) && bindingGet(BindSlot::PsSrv2)) {
-            ResourceInfo info;
-            if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
-                info.isTexture2D) {
-                introPanelNoteFill(info.a, info.b);
-                // And the skip's witness: with fix.intro_video = skip this
-                // fill is the movie playing despite the refusal.
-                introSkipNoteMovieDrew();
-                // And the probe's clock: first and last fill, timed.
-                introProbeNoteMovieFill();
-            }
-        }
-        // The menu backdrop (backdrop_fix.h), in the OFFSCREEN branch because
-        // the blit it matches never lands in an eye texture -- the eye
-        // composites sample its target later.
-        //
-        // BELOW the census line, and that position is the whole lesson. It
-        // first sat above the eye gate, so a matched draw returned before
-        // drawCensusOffDraw and the census stopped recording the one draw the
-        // investigation was about: the 06:16 capture showed no 16:9 BC1 at all
-        // while the fix was logging one a second earlier. The comment above
-        // this census call already said why -- a census taken while probing
-        // must record what the game SUBMITTED -- and the fix was written past
-        // it.
-        // Shape first, inline (backdrop_fix.h): the call per offscreen draw
-        // answered false on it, having touched nothing.
-        if (backdropBlitShape(kind, count, instances) &&
-            backdropOnDraw(self, kind, count, instances)) {
-            return DrawVerdict::kBackdrop;
-        }
-        // The resolution fix's draw-time backstop: if the game set the body
-        // layer's half-size viewport BEFORE binding the target, the set-time
-        // hook had nothing to match against and this draw would land in the
-        // bottom-left quarter of the inflated texture. Only draws into a
-        // tracked texture pay the viewport read -- six a frame in the FSS,
-        // none anywhere else.
-        if (fssResActive()) fssResScaleDrawViewport(self, s);
-        // The auto arm's trigger: a draw into the watched size after a quiet
-        // spell means a build just started, and the frames worth recording
-        // are the ones about to happen. Cached per binding generation (the
-        // rtv0Eye pattern above), so the cost while set is one resolve per
-        // rebind rather than per draw -- and nothing at all while the
-        // setting is empty, which is the shipped state.
-        if (s->censusAutoW) {
-            if (s->censusAutoGen != rtvGen) {
-                s->censusAutoGen = rtvGen;
-                ResourceInfo info;
-                s->censusAutoMatch =
-                    bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) &&
-                    info.isTexture2D && info.a == s->censusAutoW &&
-                    info.b == s->censusAutoH;
-            }
-            if (s->censusAutoMatch) {
-                const uint32_t quiet = s->frameNo - s->censusAutoLastHitFrame;
-                if (!drawCensusArmed() && quiet >= kCensusAutoQuietFrames &&
-                    s->censusAutoFired < kCensusAutoFireCap) {
-                    ++s->censusAutoFired;
-                    drawCensusAutoRequest();
-                    Log::get().note(
-                        "census auto: a draw landed in a %ux%u target after "
-                        "%u quiet frames -- census armed (%u of %u this "
-                        "session). It starts at the next frame edge and "
-                        "records offscreen draws regardless of "
-                        "census_offscreen.",
-                        s->censusAutoW, s->censusAutoH, quiet,
-                        s->censusAutoFired, kCensusAutoFireCap);
+            if constexpr (TracePolicy::enabled &&
+                          SiteType::id == draw_ladder::SiteId::kWitchspaceStarsSkip) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(SiteType::id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::WitchspaceStarsSkip;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.interestMaskKnown = draw_ladder_trace::TriState::Yes;
+                fact.legacyInterestMask = legacyInterestMask;
+                const bool interested = draw_interest::contains(
+                    legacyInterestMask, SiteType::interestId);
+                if (!interested) {
+                    // The frozen helper was staged out. These raw, cheap
+                    // inputs can still prove its short-circuit false cases;
+                    // no shader query is made when the helper did not run.
+                    fact.starsHelperReached = draw_ladder_trace::TriState::No;
+                    fact.hiddenKnown = draw_ladder_trace::TriState::Yes;
+                    fact.hidden = witchspaceStarsHidden()
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No;
+                    fact.contextKnown = draw_ladder_trace::TriState::Yes;
+                    fact.contextValid = self
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No;
+                    if (fact.hidden == draw_ladder_trace::TriState::Yes &&
+                        fact.contextValid == draw_ladder_trace::TriState::Yes) {
+                        fact.starsShapeReached = draw_ladder_trace::TriState::Yes;
+                        fact.starsShapeMatched =
+                            ((kind == 'X' || kind == 'N') && instances != 0 && count >= 6)
+                                ? draw_ladder_trace::TriState::Yes
+                                : draw_ladder_trace::TriState::No;
+                        if (fact.starsShapeMatched == draw_ladder_trace::TriState::Yes &&
+                            bindingGet(BindSlot::Vs)) {
+                            const std::uint64_t held = bindingShaderHash(BindSlot::Vs);
+                            if (held != 0) {
+                                fact.starsHashKnown = draw_ladder_trace::TriState::Yes;
+                                fact.starsHashSource = static_cast<std::uint8_t>(
+                                    WitchspaceStarsHashSource::kBindingShadow);
+                                fact.starsVsHash = held;
+                            }
+                        }
+                    }
+                    fact.detailsFinalized = true;
                 }
-                s->censusAutoLastHitFrame = s->frameNo;
+                trace.predicateFact(fact);
+                return interested;
             }
-        }
-        // The wake pulse (wake_pulse.h), beside the probe that found it and
-        // matched the same way: a draw shape into a target named by its
-        // proportion of the eye. A shipped fix rather than an instrument, so
-        // it is checked first and costs one bool when off.
-        // The target's size comes from rtv0Resolved: one resolve per binding
-        // generation instead of one per offscreen draw (it says what that
-        // trades, which is nothing a verdict here can see).
-        if (wakePulseWantsDraws()) {
-            const ResourceInfo* wp = rtv0Resolved(s);
-            if (wp && wp->isTexture2D &&
-                wakePulseSkips(self, kind, count, wp->a, wp->b,
-                               s->qsStartIndex, s->qsBaseVertex)) {
-                return DrawVerdict::kSkip;
-            }
-        }
-        // The offscreen probe: skip draws INTO a buffer named by its size.
-        // Resolved only while a spec is set -- the @ filters' unmemoised
-        // discipline. The counting above must see skipped draws too.
-        if (s->censusSkipOffCount) {
-            ResourceInfo info;
-            if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) &&
-                info.isTexture2D) {
-                for (uint32_t i = 0; i < s->censusSkipOffCount; ++i) {
-                    const State::OffSkip& o = s->censusSkipOff[i];
-                    if (info.a != o.w || info.b != o.h) continue;
-                    // kind 0 is the whole buffer, as this setting has always
-                    // meant; a spec narrows it to one draw shape.
-                    if (o.kind && (o.kind != kind || o.n != count)) continue;
-                    ++s->censusSkipped;
-                    return DrawVerdict::kSkip;
+            const bool interested = draw_interest::contains(
+                legacyInterestMask, SiteType::interestId);
+            if constexpr (TracePolicy::enabled &&
+                          SiteType::id == draw_ladder::SiteId::kTargetSharpClaim) {
+                if (!interested) {
+                    TargetSharpObservation fact{};
+                    trace.targetSharpFact(fact);
                 }
             }
-        }
-        // The loader dialog's backdrop. Every draw into an interface-sized
-        // surface is offered, because the fix works by POSITION in the
-        // frame's draw sequence: it needs the whole composition to know
-        // which draw is the full-view backdrop and where the box it
-        // collapses onto is. A bound PS slot-0 texture marks the draw as
-        // text rather than a solid -- the measurement needs to know, and
-        // presence is enough, so nothing is resolved.
-        //
-        // Gated to loader-shaped frames: the main menu is a rendered hangar
-        // with a dark layer of its own, a different one, and nothing here
-        // should reach it. kSceneEyeDraws is that boundary already measured
-        // for this module. Last frame's count, because this one is still
-        // being counted.
-        if (loaderPanelWants() && s->eyeDrawsLastFrame < kSceneEyeDraws) {
-            ResourceInfo info;
-            if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
-                info.isTexture2D && info.a >= 1024 && info.b >= 512 &&
-                loaderPanelOnDraw(self, kind, count, instances,
-                                  s->qsStartIndex, s->qsBaseVertex,
-                                  info.a, info.b,
-                                  bindingGet(BindSlot::PsSrv0) != nullptr)) {
-                return DrawVerdict::kLoaderPanel;
-            }
-        }
-        // The sub-draw probe: same target test as the offscreen skip above,
-        // plus the draw's own shape, and it re-issues rather than drops.
-        //
-        // Gated to LOADER-SHAPED frames. The main menu is a rendered hangar
-        // with its own dark layer -- a different one, which survived emptying
-        // the interface buffer -- and this fix has no business reaching it.
-        // kSceneEyeDraws is that boundary already measured for this module:
-        // menu-only sessions peak around 20-22 draws, a rendered scene clears
-        // 100. Last frame's count, because this one is still being counted.
-        if (s->quadSkipArmed && s->eyeDrawsLastFrame < kSceneEyeDraws &&
-            kind == s->quadSkip.kind && count == s->quadSkip.n) {
-            ResourceInfo info;
-            if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) &&
-                info.isTexture2D && info.a == s->quadSkip.w &&
-                info.b == s->quadSkip.h) {
-                return DrawVerdict::kQuadSkip;
-            }
-        }
-        // The body-layer gate, for the panel fix's mode stamp: is the bound
-        // target the BODY LAYER --
-        // eye/2-sized, or one of fss_res's inflated textures? Cached per
-        // binding generation, so the resolve runs for a handful of scanner
-        // draws and for nothing else in the game.
-        if (fssPanelWantsDraws() || fssRevealWantsDraws() ||
-            fssDumpWantsDraws()) {
-            if (s->fssBodyLayerGen != rtvGen) {
-                s->fssBodyLayerGen = rtvGen;
-                s->fssBodyLayerBound = false;
-                ResourceInfo info;
-                if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) &&
-                    info.isTexture2D) {
-                    if (fssResIsInflated(info.resource)) {
-                        s->fssBodyLayerBound = true;
+            if constexpr (TracePolicy::enabled &&
+                          (SiteType::id == draw_ladder::SiteId::kFssPanelClaim ||
+                           SiteType::id == draw_ladder::SiteId::kFssRevealClaim ||
+                           SiteType::id == draw_ladder::SiteId::kFssDumpClaim)) {
+                if (!interested) {
+                    if constexpr (SiteType::id == draw_ladder::SiteId::kFssDumpClaim) {
+                        FssDumpObservation fact{};
+                        trace.fssDumpFact(fact);
                     } else {
-                        uint32_t ew = 0, eh = 0;
-                        if (eyeTextureSize(&ew, &eh) &&
-                            (info.a == ew / 2 || info.a == (ew + 1) / 2) &&
-                            (info.b == eh / 2 || info.b == (eh + 1) / 2)) {
-                            s->fssBodyLayerBound = true;
+                        FssObservation fact{};
+                        fact.kind = SiteType::id == draw_ladder::SiteId::kFssPanelClaim
+                            ? FssTraceFactKind::kPanel : FssTraceFactKind::kReveal;
+                        fact.rawProbeReached = true;
+                        if constexpr (SiteType::id == draw_ladder::SiteId::kFssPanelClaim) {
+                            fssOuterProbePanel(fact.panel,
+                                [] { return detail::g_fssPanelEnabled; },
+                                [&] { return s->fssBodyFrame; },
+                                [&] { return s->frameNo; });
+                        } else {
+                            fssOuterProbeReveal(fact.reveal,
+                                [] { return detail::g_fssRevealSteady; },
+                                [] { return detail::g_fssRevealLockstep; },
+                                [&] { return s->fssBodyFrame; },
+                                [&] { return s->frameNo; },
+                                [&] { return s->fssJumpFrame; },
+                                [&] { return s->frameNo; },
+                                [] { return deviceHookFssModeLatch(); });
+                        }
+                        trace.fssFact(fact);
+                    }
+                }
+            }
+            return interested;
+        } else {
+            return true;
+        }
+    }
+
+    template <class SiteType>
+    __forceinline draw_ladder::SiteResult visit() {
+        using draw_ladder::SiteId;
+        using draw_ladder::SiteResult;
+        constexpr SiteId id = SiteType::id;
+
+        if constexpr (id == SiteId::kFssChromeSkip) {
+            // Kept before the foreign-context exit: the scanner chrome tracker
+            // has always observed the draw at this exact rung.
+            if ((s->fssHealOn || s->censusFssJump || temporalPassWantsFssChrome()) &&
+                kind == 'X' && count == 6) {
+                guardedBudget(g_panelCbBudget, [&] {
+                    const uint64_t h = bindingShaderHash(BindSlot::Vs);
+                    if (h != 0xA888D51024D9798Eull && h != 0xB018D143700AB803ull) return;
+                    ID3D11ShaderResourceView* srv = nullptr;
+                    self->PSGetShaderResources(1, 1, &srv);
+                    if (!srv) return;
+                    ID3D11Resource* res = nullptr;
+                    srv->GetResource(&res);
+                    if (!res) { srv->Release(); return; }
+                    ID3D11Texture2D* tex = nullptr;
+                    res->QueryInterface(__uuidof(ID3D11Texture2D),
+                                        reinterpret_cast<void**>(&tex));
+                    D3D11_TEXTURE2D_DESC td{};
+                    if (tex) { tex->GetDesc(&td); tex->Release(); }
+                    if (tex && td.Width >= 2000 && td.Height >= 1000 && td.Height < td.Width) {
+                        chromeMatched = true;
+                        if (s->fssChromeFrame != s->frameNo) {
+                            s->fssChromeFrame = s->frameNo;
+                            bumpFssChromeStamp();
+                        }
+                        if (uiDepthWantsDraws()) uiDepthLearnScannerChrome(self, h, srv, res);
+                    }
+                    res->Release();
+                    srv->Release();
+                });
+                if (chromeMatched && s->fssHealOn && deviceHookFssModeLatch()) {
+                    if (s->fssChromeSkipFrame != s->frameNo) {
+                        s->fssChromeSkipFrame = s->frameNo;
+                        s->fssChromeSkipCount = 0;
+                    }
+                    const uint32_t ord = s->fssChromeSkipCount++;
+                    fssPanelRectOnComposite(self, ord, fssPanelRectStartInstance(),
+                                            fssPanelRectBaseVertex());
+                    const uint32_t mask = fssPanelRectSkipMask();
+                    if (ord < 32 && ((mask >> ord) & 1u)) {
+                        if (!s->fssChromeSkipNoted) {
+                            s->fssChromeSkipNoted = true;
+                            Log::get().note("fss panel rect: the derivation classified the scanner's scenery quads (mask 0x%X) and they are skipped while the screen is up. Said once.", mask);
+                        }
+                        if (drawCensusArmed()) drawCensusNoteUnseen('f');
+                        return exited(id, DrawVerdict::kSkip);
+                    }
+                }
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kForeignContextNone) {
+            if constexpr (TracePolicy::enabled) {
+                trace.sunglareClampResetBefore = s->glareClamp;
+                trace.sunglareClampResetSeen = true;
+            }
+            s->glareClamp = 0;
+            if constexpr (TracePolicy::enabled) {
+                BasicDrawObservation fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = BasicDrawFactKind::kContext;
+                fact.context.contextIdentity = {
+                    true, true, reinterpret_cast<std::uintptr_t>(self)};
+                fact.context.ownerContextIdentity = {
+                    true, true, reinterpret_cast<std::uintptr_t>(s->ownerCtx)};
+                fact.context.glareClampBefore = {true, true, trace.sunglareClampResetBefore};
+                fact.context.glareClampAfter = {true, true, s->glareClamp};
+                const bool isForeign = foreignContext(self);
+                trace.sunglareClampResetAfter = s->glareClamp;
+                trace.basicFact(fact);
+                if (isForeign) {
+                    noteForeignDraw(self);
+                    if (drawCensusArmed())
+                        drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0, args);
+                    return exited(id, DrawVerdict::kNone);
+                }
+            } else if (foreignContext(self)) {
+                noteForeignDraw(self);
+                if (drawCensusArmed())
+                    drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0, args);
+                return exited(id, DrawVerdict::kNone);
+            }
+            if (flatTemporalCapturing()) flatTemporalDraw(self, count, instances);
+            s->curveThisDraw = false;
+            s->introCurveThisDraw = false;
+            t_uiDepthThisDraw = false;
+            t_compositeThisDraw = false;
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kDrawGateDisabledNone) {
+            const bool gateWanted = drawGateWanted();
+            if constexpr (TracePolicy::enabled) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::DrawGateWanted;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.gateWanted = gateWanted ? draw_ladder_trace::TriState::Yes
+                                             : draw_ladder_trace::TriState::No;
+                trace.predicateFact(fact);
+            }
+            if (!gateWanted) return exited(id, DrawVerdict::kNone);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kParticleProbe) {
+            if ((++s->bindAuditSeq & 1023u) == 0) bindingAudit(s, self);
+            if (particleProbeOn()) particleOnEyeDraw(self, kind, count, instances);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kParticleSubstitute) {
+            if (particleSteady() &&
+                particleOnDrawMayMatch(kind, count, instances,
+                    bindingGet(BindSlot::Vs) ? bindingShaderHash(BindSlot::Vs) : 0) &&
+                particleOnDraw(self, kind, count, instances)) {
+                if (drawCensusArmed() || objectProbeLedgerActive()) {
+                    const bool eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0));
+                    if (drawCensusArmed()) drawCensusEarlyDraw(self, kind, count, instances, eye, args);
+                    if (eye) objectProbeNoteEarlyDraw(self, kind, count, instances,
+                        args.startInstance, args.start, args.base);
+                }
+                return claimed(id, DrawVerdict::kParticle);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kWitchspaceStarsSkip) {
+            bool skipped = false;
+            if constexpr (TracePolicy::enabled) {
+                WitchspaceStarsObservation observation{};
+                skipped = witchspaceStarsSkipTraced(self, kind, count, instances,
+                                                    &observation);
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::WitchspaceStarsSkip;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.interestMaskKnown = draw_ladder_trace::TriState::Yes;
+                fact.legacyInterestMask = legacyInterestMask;
+                fact.starsHelperReached = draw_ladder_trace::TriState::Yes;
+                fact.hiddenKnown = draw_ladder_trace::TriState::Yes;
+                fact.hidden = observation.hidden
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                fact.contextKnown = observation.contextKnown
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.contextValid = observation.contextKnown
+                    ? (observation.contextValid
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No)
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.starsShapeReached = observation.shapeReached
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.starsShapeMatched = observation.shapeReached
+                    ? (observation.shapeMatched
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No)
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.starsHashKnown = observation.hashKnown
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.starsHashSource = static_cast<std::uint8_t>(observation.hashSource);
+                fact.starsVsHash = observation.vsHash;
+                fact.starsSkippedDeltaKnown = observation.skippedDeltaKnown;
+                fact.starsSkippedDelta = observation.skippedDelta;
+                fact.detailsFinalized = true;
+                trace.completeWitchspaceStarsPredicateFact(fact);
+            } else {
+                skipped = witchspaceStarsHidden() &&
+                          witchspaceStarsSkip(self, kind, count, instances);
+            }
+            if (skipped) {
+                if (drawCensusArmed()) drawCensusNoteUnseen('w');
+                return exited(id, DrawVerdict::kSkip);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kStateSnapshot) {
+            rtvGen = bindingGeneration(BindSlot::Rtv0);
+            if (s->rtv0EyeGen != rtvGen) {
+                s->rtv0Cand = -1;
+                s->rtv0Eye = targetIsEyeSized(bindingGet(BindSlot::Rtv0), &s->rtv0Cand);
+                s->rtv0EyeGen = rtvGen;
+            }
+            if (introProbeWants()) {
+                if (s->rtv0SizeGen != rtvGen) {
+                    s->rtv0SizeGen = rtvGen;
+                    ResourceInfo info;
+                    if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D) {
+                        s->rtv0W = info.a; s->rtv0H = info.b;
+                    } else { s->rtv0W = 0; s->rtv0H = 0; }
+                }
+                introProbeOnDraw(s->rtv0W, s->rtv0H, s->rtv0Eye);
+            }
+            if (quadProbeWants()) {
+                ResourceInfo info;
+                if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D)
+                    quadProbeOnDraw(self, info.a, info.b, kind, count, instances,
+                                    s->qsStartIndex, s->qsBaseVertex);
+            }
+            if (depthProbeWanted())
+                depthProbeNoteDraw(self, bindingGet(BindSlot::Dsv0), s->rtv0Eye,
+                                   bindingGet(BindSlot::Rtv0) == nullptr);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kRouteSelected) {
+            if constexpr (TracePolicy::enabled) {
+                trace.route(s->rtv0Eye ? draw_ladder::RouteId::kVrEye
+                                       : draw_ladder::RouteId::kOffscreen,
+                           s->rtv0Eye ? draw_ladder::SequenceId::kVrEye
+                                       : draw_ladder::SequenceId::kOffscreen);
+            }
+            return SiteResult::observed(static_cast<uint16_t>(s->rtv0Eye
+                ? draw_ladder::RouteId::kVrEye : draw_ladder::RouteId::kOffscreen));
+        } else if constexpr (id == SiteId::kOffscreenSubmittedDraw) {
+            if (screenMotionLive()) screenMotionSource(self, s->panelW ? s->panelW : 1920,
+                                                       s->panelH ? s->panelH : 1080);
+            if (s->rtv0Cand >= 0) {
+                State::SceneCandidate& c = s->cands[s->rtv0Cand];
+                ++c.thisFrame;
+                if (c.w == s->sceneW && c.h == s->sceneH) ++s->sceneDrawsThisFrame;
+            }
+            if (objectProbeLedgerActive()) {
+                objectProbeNoteGuiSourceDraw(self, kind, count, instances,
+                    args.startInstance, args.start, args.base);
+                ResourceInfo source;
+                if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &source) && source.isTexture2D &&
+                    source.a == (s->panelW ? s->panelW : 1920) &&
+                    source.b == (s->panelH ? s->panelH : 1080))
+                    objectProbeNoteSourceDraw(self, kind, count, instances,
+                        args.startInstance, args.start, args.base);
+            }
+            if (drawCensusWantsOffscreen() && drawCensusArmed())
+                drawCensusOffDraw(self, kind, count, instances, args);
+            if (uiDepthWantsDraws()) uiDepthNoteOffscreenDraw(self);
+            if (kind == 'N' && count == 4 && (introPanelWants() || introProbeWants()) &&
+                bindingGet(BindSlot::PsSrv1) && bindingGet(BindSlot::PsSrv2)) {
+                ResourceInfo info;
+                if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D) {
+                    introPanelNoteFill(info.a, info.b);
+                    introSkipNoteMovieDrew();
+                    introProbeNoteMovieFill();
+                }
+            }
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kOffscreenBackdropBlit) {
+            if (backdropBlitShape(kind, count, instances) &&
+                backdropOnDraw(self, kind, count, instances))
+                return claimed(id, DrawVerdict::kBackdrop);
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kOffscreenViewport) {
+            if (fssResActive()) fssResScaleDrawViewport(self, s);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kOffscreenAutoState) {
+            if (s->censusAutoW) {
+                if (s->censusAutoGen != rtvGen) {
+                    s->censusAutoGen = rtvGen;
+                    ResourceInfo info;
+                    s->censusAutoMatch = bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) &&
+                        info.isTexture2D && info.a == s->censusAutoW && info.b == s->censusAutoH;
+                }
+                if (s->censusAutoMatch) {
+                    const uint32_t quiet = s->frameNo - s->censusAutoLastHitFrame;
+                    if (!drawCensusArmed() && quiet >= kCensusAutoQuietFrames &&
+                        s->censusAutoFired < kCensusAutoFireCap) {
+                        ++s->censusAutoFired;
+                        drawCensusAutoRequest();
+                        Log::get().note("census auto: a draw landed in a %ux%u target after %u quiet frames -- census armed (%u of %u this session). It starts at the next frame edge and records offscreen draws regardless of advanced.census_offscreen.",
+                            s->censusAutoW, s->censusAutoH, quiet, s->censusAutoFired, kCensusAutoFireCap);
+                    }
+                    s->censusAutoLastHitFrame = s->frameNo;
+                }
+            }
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kOffscreenWakePulseSkip) {
+            if (wakePulseWantsDraws()) {
+                const ResourceInfo* wp = rtv0Resolved(s);
+                if (wp && wp->isTexture2D && wakePulseSkips(self, kind, count, wp->a, wp->b,
+                    s->qsStartIndex, s->qsBaseVertex)) return exited(id, DrawVerdict::kSkip);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kOffscreenCensusSkip) {
+            if constexpr (TracePolicy::enabled) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::OffscreenCensusSkip;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.quadArmed = draw_ladder_trace::TriState::Unknown;
+                fact.offscreenRuleCount = static_cast<std::uint8_t>(s->censusSkipOffCount);
+                for (std::uint8_t i = 0; i < fact.offscreenRuleCount; ++i) {
+                    const State::OffSkip& source = s->censusSkipOff[i];
+                    fact.offscreenRules[i] = {static_cast<std::uint8_t>(source.kind),
+                                              source.n, source.w, source.h};
+                }
+                fact.censusSkippedDeltaKnown = true;
+                const std::uint64_t censusSkippedBefore = s->censusSkipped;
+                if (s->censusSkipOffCount) {
+                    fact.offscreenProbeReached = draw_ladder_trace::TriState::Yes;
+                    ResourceInfo info{};
+                    const bool resolved = bindingResolveProbe(
+                        bindingGet(BindSlot::Rtv0), &info);
+                    fact.offscreenProbeResolved = resolved
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No;
+                    if (resolved) {
+                        fact.offscreenProbeTexture2D = info.isTexture2D
+                            ? draw_ladder_trace::TriState::Yes
+                            : draw_ladder_trace::TriState::No;
+                        if (info.isTexture2D) {
+                            fact.offscreenTargetW = info.a;
+                            fact.offscreenTargetH = info.b;
+                        }
+                    }
+                    if (resolved && edvr::matchingCensusRule(
+                            s->censusSkipOff, s->censusSkipOffCount,
+                            kind, count, info) >= 0) {
+                        ++s->censusSkipped;
+                        fact.censusSkippedDelta = draw_ladder_trace::boundedCensusSkippedDelta(
+                            censusSkippedBefore, s->censusSkipped);
+                        fact.detailsFinalized = true;
+                        trace.predicateFact(fact);
+                        return exited(id, DrawVerdict::kSkip);
+                    }
+                } else {
+                    fact.offscreenProbeReached = draw_ladder_trace::TriState::No;
+                }
+                fact.censusSkippedDelta = draw_ladder_trace::boundedCensusSkippedDelta(
+                    censusSkippedBefore, s->censusSkipped);
+                fact.detailsFinalized = true;
+                trace.predicateFact(fact);
+                return SiteResult::declined();
+            } else {
+                if (s->censusSkipOffCount) {
+                    ResourceInfo info;
+                    if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D) {
+                        for (uint32_t i = 0; i < s->censusSkipOffCount; ++i) {
+                            const State::OffSkip& o = s->censusSkipOff[i];
+                            if (info.a != o.w || info.b != o.h) continue;
+                            if (o.kind && (o.kind != kind || o.n != count)) continue;
+                            ++s->censusSkipped;
+                            return exited(id, DrawVerdict::kSkip);
+                        }
+                    }
+                }
+                return SiteResult::declined();
+            }
+        } else if constexpr (id == SiteId::kOffscreenLoaderPanel) {
+            if constexpr (TracePolicy::enabled) {
+                LoaderPanelObservation fact{};
+                bool selected = false;
+                const bool wants = loaderPanelWants();
+                setLoaderPanelRead(fact.outer.wants, wants);
+                if (wants) {
+                    const std::uint32_t eyeDraws = s->eyeDrawsLastFrame;
+                    setLoaderPanelRead(fact.outer.eyeDrawsLastFrame, eyeDraws);
+                    if (eyeDraws < kSceneEyeDraws) {
+                        ID3D11RenderTargetView* const rtv =
+                            static_cast<ID3D11RenderTargetView*>(bindingGet(BindSlot::Rtv0));
+                        setLoaderPanelRead(fact.outer.rtvPresent, rtv != nullptr);
+                        ResourceInfo info{};
+                        const bool resolved = bindingResolve(rtv, &info);
+                        setLoaderPanelRead(fact.outer.resolved, resolved);
+                        if (resolved) {
+                            const bool texture2D = info.isTexture2D;
+                            setLoaderPanelRead(fact.outer.isTexture2D, texture2D);
+                            if (texture2D) {
+                                const std::uint32_t width = info.a;
+                                setLoaderPanelRead(fact.outer.targetWidth, width);
+                                if (width >= 1024) {
+                                    const std::uint32_t height = info.b;
+                                    setLoaderPanelRead(fact.outer.targetHeight, height);
+                                    if (height >= 512) {
+                                        const std::uint32_t startIndex = s->qsStartIndex;
+                                        const std::int32_t baseVertex = s->qsBaseVertex;
+                                        setLoaderPanelRead(fact.outer.qsStartIndex, startIndex);
+                                        setLoaderPanelRead(fact.outer.qsBaseVertex, baseVertex);
+                                        void* const psSrv = bindingGet(BindSlot::PsSrv0);
+                                        const bool textured = psSrv != nullptr;
+                                        setLoaderPanelRead(fact.outer.textured, textured);
+                                        selected = loaderPanelOnDrawObserved(self, kind, count,
+                                            instances, startIndex, baseVertex, width, height,
+                                            textured, fact.helper);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                trace.loaderPanelFact(fact);
+                return selected ? claimed(id, DrawVerdict::kLoaderPanel)
+                                : SiteResult::declined();
+            } else {
+                if (loaderPanelWants() && s->eyeDrawsLastFrame < kSceneEyeDraws) {
+                    ResourceInfo info;
+                    if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D &&
+                        info.a >= 1024 && info.b >= 512 && loaderPanelOnDraw(self, kind, count, instances,
+                            s->qsStartIndex, s->qsBaseVertex, info.a, info.b,
+                            bindingGet(BindSlot::PsSrv0) != nullptr))
+                        return claimed(id, DrawVerdict::kLoaderPanel);
+                }
+                return SiteResult::declined();
+            }
+        } else if constexpr (id == SiteId::kOffscreenQuadSkip) {
+            if constexpr (TracePolicy::enabled) {
+                const bool probeReached = edvr::quadPrefixMatches(
+                    s->quadSkipArmed, s->eyeDrawsLastFrame, kSceneEyeDraws,
+                    kind, count, s->quadSkip);
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::OffscreenQuadSkip;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.offscreenRuleCount = 1;
+                fact.offscreenRules[0] = {
+                    static_cast<std::uint8_t>(s->quadSkip.kind), s->quadSkip.n,
+                    s->quadSkip.w, s->quadSkip.h};
+                fact.quadArmed = s->quadSkipArmed
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                fact.offscreenEyeDrawsLastFrame = s->eyeDrawsLastFrame;
+                fact.offscreenProbeReached = probeReached
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                SiteResult result = SiteResult::declined();
+                if (probeReached) {
+                    ResourceInfo info{};
+                    const bool resolved = bindingResolveProbe(
+                        bindingGet(BindSlot::Rtv0), &info);
+                    fact.offscreenProbeResolved = resolved
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No;
+                    if (resolved) {
+                        fact.offscreenProbeTexture2D = info.isTexture2D
+                            ? draw_ladder_trace::TriState::Yes
+                            : draw_ladder_trace::TriState::No;
+                        if (info.isTexture2D) {
+                            fact.offscreenTargetW = info.a;
+                            fact.offscreenTargetH = info.b;
+                        }
+                    }
+                    if (resolved && edvr::quadTargetMatches(info, s->quadSkip))
+                        result = claimed(id, DrawVerdict::kQuadSkip);
+                }
+                fact.detailsFinalized = true;
+                trace.predicateFact(fact);
+                return result;
+            } else {
+                if (s->quadSkipArmed && s->eyeDrawsLastFrame < kSceneEyeDraws &&
+                    kind == s->quadSkip.kind && count == s->quadSkip.n) {
+                    ResourceInfo info;
+                    if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D &&
+                        info.a == s->quadSkip.w && info.b == s->quadSkip.h)
+                        return claimed(id, DrawVerdict::kQuadSkip);
+                }
+                return SiteResult::declined();
+            }
+        } else if constexpr (id == SiteId::kOffscreenBodyLayerUpdate) {
+            if (fssPanelWantsDraws() || fssRevealWantsDraws() || fssDumpWantsDraws()) {
+                if (s->fssBodyLayerGen != rtvGen) {
+                    s->fssBodyLayerGen = rtvGen;
+                    s->fssBodyLayerBound = false;
+                    ResourceInfo info;
+                    if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D) {
+                        if (fssResIsInflated(info.resource)) s->fssBodyLayerBound = true;
+                        else {
+                            uint32_t ew = 0, eh = 0;
+                            if (eyeTextureSize(&ew, &eh) &&
+                                (info.a == ew / 2 || info.a == (ew + 1) / 2) &&
+                                (info.b == eh / 2 || info.b == (eh + 1) / 2))
+                                s->fssBodyLayerBound = true;
+                        }
+                    }
+                }
+                if (s->fssBodyLayerBound) s->fssBodyFrame = s->frameNo;
+            }
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kOffscreenFallthroughNone) {
+            return exited(id, DrawVerdict::kNone);
+        } else if constexpr (id == SiteId::kEyeDepthAndCount) {
+            ++s->eyeDrawsThisFrame;
+            void* const eyeDsv = bindingGet(BindSlot::Dsv0);
+            if (depthProbeEyeDrawNeedsNote(eyeDsv))
+                depthProbeNoteEyeDraw(self, eyeDsv, s->eyeDrawsThisFrame);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kEyeUiDepthProbe) {
+            if (uiDepthWantsDraws()) {
+                t_uiDepthThisDraw = uiDepthOnEyeDraw(self,
+                    {kind, count, instances, args.start, args.base, args.startInstance});
+                t_compositeThisDraw = uiDepthDrawSampledSurface();
+            }
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kEyeHoloDepthProbe) {
+            if (uiDepthHologramWantsDraws())
+                t_holoDepthThisDraw = uiDepthHologramOnEyeDraw(self);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kIntroPanelClaim) {
+            if (kind == 'X' && count == 6 && introPanelWants()) {
+                ResourceInfo srv;
+                if (bindingResolve(bindingGet(BindSlot::PsSrv0), &srv) && srv.isTexture2D &&
+                    introPanelOnComposite(self, kind, count, instances, srv.a, srv.b))
+                    return claimed(id, DrawVerdict::kIntroPanel);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kIntroCurveObserve) {
+            if (kind == 'X' && count == 6 && introCurveWants())
+                s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kSunglareNomination) {
+            if constexpr (TracePolicy::enabled) {
+                SunglareNominationObservation observed{};
+                const std::int32_t worldMode = detail::g_sunglareWorld;
+                observed.worldMode = {true, true, worldMode};
+                if (worldMode && count > 10000) {
+                    void* const cb = bindingGet(BindSlot::VsCb0);
+                    observed.boundCbIdentity = {
+                        true, true, reinterpret_cast<std::uintptr_t>(cb)};
+                    if (cb) {
+                        void* const nominated = s->sceneCbNominated;
+                        observed.nominatedBeforeIdentity = {
+                            true, true, reinterpret_cast<std::uintptr_t>(nominated)};
+                        if (cb != nominated) {
+                            ResourceInfo info;
+                            const bool resolved = bindingResolveResource(cb, &info);
+                            observed.resourceResolved = {true, true, resolved};
+                            if (resolved) {
+                                observed.isBuffer = {true, true, info.isBuffer};
+                                if (info.isBuffer) {
+                                    observed.byteWidth = {true, true, info.a};
+                                    if (info.a == 208) {
+                                        s->sceneCbNominated = cb;
+                                        sunglareSceneCb(cb);
+                                        observed.callbackInvoked = {true, true, true};
+                                        observed.nominatedAfterIdentity = {
+                                            true, true, reinterpret_cast<std::uintptr_t>(
+                                                s->sceneCbNominated)};
+                                        observed.callbackTargetAfterIdentity = {
+                                            true, true, reinterpret_cast<std::uintptr_t>(
+                                                sunglareSceneCbTargetRaw())};
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!observed.callbackInvoked.reached)
+                    observed.callbackInvoked = {true, true, false};
+                trace.sunglareNominationFact(observed);
+            } else {
+                if (sunglareWorldActive() && count > 10000) {
+                    void* cb = bindingGet(BindSlot::VsCb0);
+                    if (cb && cb != s->sceneCbNominated) {
+                        ResourceInfo info;
+                        if (bindingResolveResource(cb, &info) && info.isBuffer && info.a == 208) {
+                            s->sceneCbNominated = cb;
+                            sunglareSceneCb(cb);
                         }
                     }
                 }
             }
-            if (s->fssBodyLayerBound) {
-                // The scanner is drawing its body THIS frame -- the fact
-                // the panel fix's recognition is gated on. The body draws
-                // land before the eye composites in the frame, so the
-                // stamp is fresh by the time the composites ask.
-                s->fssBodyFrame = s->frameNo;
-            }
-        }
-        return DrawVerdict::kNone;
-    }
-    ++s->eyeDrawsThisFrame;
-    // (The temporal pass's camera latch used to fire at the frame's first
-    // eye draw here; since 2026-09-04 the depth probe fires it at the
-    // first draw into the scene pair's depth, which is the scene camera's
-    // by construction -- depth_probe.cpp says why.)
-    // The depth target this eye draw uses, for the depth probe -- one
-    // pointer compare unless it changed (depth_probe.h), and that compare is
-    // now made here, inline, before the call rather than inside it.
-    {
-        void* const eyeDsv = bindingGet(BindSlot::Dsv0);
-        if (depthProbeEyeDrawNeedsNote(eyeDsv))
-            depthProbeNoteEyeDraw(self, eyeDsv, s->eyeDrawsThisFrame);
-    }
-    // The interface's depth (ui_depth.h): a composite of a learned surface,
-    // or a named family drawn straight into the eye, writes its depth. A
-    // flag and not a verdict, so it composes with whatever claims the draw
-    // below; forwardWithVerdict's scope consumes it.
-    if (uiDepthWantsDraws()) {
-        t_uiDepthThisDraw = uiDepthOnEyeDraw(self,
-            {kind,count,instances,args.start,args.base,args.startInstance});
-        t_compositeThisDraw = uiDepthDrawSampledSurface();
-    }
-    // The generic hologram/icon depth pass (ui_depth.h): its own family
-    // list, checked independently of the classification above.
-    if (uiDepthHologramWantsDraws()) t_holoDepthThisDraw = uiDepthHologramOnEyeDraw(self);
-
-    // The intro movie's panel (intro_panel.h). First thing in the eye
-    // branch, because it must see the composite before any other fix
-    // claims that draw -- and because a draw it matches is forwarded
-    // normally, so nothing below it is denied its turn on a frame this
-    // does not match. Recognised by shape and by sampling the surface
-    // the movie was converted into THIS frame; the constants are then
-    // checked for a screen-space placement before anything is bound, so
-    // the splash and the menu refuse it by their own numbers.
-    // Shape first, then the cross-TU introPanelWants (pure reads, see the
-    // fill test above): the call was made for every eye draw.
-    if (kind == 'X' && count == 6 && introPanelWants()) {
-        ResourceInfo srv;
-        if (bindingResolve(bindingGet(BindSlot::PsSrv0), &srv) &&
-            srv.isTexture2D &&
-            introPanelOnComposite(self, kind, count, instances, srv.a,
-                                  srv.b)) {
-            return DrawVerdict::kIntroPanel;
-        }
-    }
-
-    // The splash's composite, and the main menu's loops: the same six-index draw through the movie's vertex shader with the GAME's own world-space
-    // placement (intro_curve.h). Recognised by shape, the VS and a one-shot copy of the game's constants, and drawn as the bent surface strip in
-    // forwardWithVerdict when fix.panel_curvature asks for it. Right AFTER the movie's claim above, so a draw the movie claims -- its placement is
-    // EDVR's own (intro_panel.h), drawn as its own strip -- is never asked; only the few settle frames before the movie has a placement of its
-    // own reach this, and its stock constants read screen-space and flat then, said once. It claims nothing: a flag, not a verdict, so it
-    // composes with kBackdrop's slot swap and the splash dim (and NOT curveThisDraw, which is the on-foot screen's and returns before both).
-    // Shape first, then introCurveWants(), which is one load at curvature 0 -- and then nothing below it runs.
-    if (kind == 'X' && count == 6 && introCurveWants()) {
-        s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);
-    }
-
-    // Nominate the scene camera for the world shader: a big eye-target
-    // draw's 208-byte constants are the engine-standard camera block
-    // with THIS eye's true rows -- the head-look clamp never touches
-    // them. Pointer-cached so the resolve runs once per change, not per
-    // draw.
-    if (sunglareWorldActive() && count > 10000) {
-        void* cb = bindingGet(BindSlot::VsCb0);
-        if (cb && cb != s->sceneCbNominated) {
-            ResourceInfo info;
-            if (bindingResolveResource(cb, &info) && info.isBuffer &&
-                info.a == 208) {
-                s->sceneCbNominated = cb;
-                sunglareSceneCb(cb);
-            }
-        }
-    }
-
-    // The census line for this draw, recorded while its bindings are certainly
-    // the ones it will run with. Armed is rare and brief; the cost of asking is
-    // one call and one bool.
-    if (drawCensusArmed()) {
-        drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);
-    }
-    // the crisp-HUD half of fix.ui_quality (ui_layer.h): admit the game's tonemap draw for its
-    // re-issue, which tonemaps the HDR HUD layer into the eye's 8-bit layer
-    // right after the draw's own issue (crispHudTonemapReissue below). One
-    // bool load while off (the default); while on, the 3-vertex prefilter
-    // and the structural admission run for a handful of full-screen draws a
-    // frame.
-    if (uiLayerCrispOn() && self == g_state->ownerCtx) {
-        uiLayerCrispNoteEyeDraw(self, kind, count, instances, args.startInstance);
-    }
-    // The pool probe (object_probe.h): one bool while off; a few t33 reads a
-    // frame until the pool is known, then one a second. The bool is now read
-    // HERE: objectProbeWantsDraws() is the callee's own first test, inline,
-    // and with the probe off the call per eye draw only returned (63
-    // innermost samples of the 1355-frame parked-5 window, all prologue,
-    // test and epilogue).
-    if (objectProbeWantsDraws())
-        objectProbeOnEyeDraw(self, kind, count, instances, args.startInstance,args.start,args.base);
-
-    // The suppression probe, after the census so a census taken while probing
-    // still records what the game SUBMITTED. Everything before this point is
-    // counting, which must see skipped draws too -- a probe that deflated the
-    // eye-draw count would stand the flash fix down as a side effect.
-    if (s->censusSkipCount) {
-        for (uint32_t i = 0; i < s->censusSkipCount; ++i) {
-            // A vs:HASH rule carries no kind and no count: it matches on
-            // the shader alone, which is the whole point of it. Reading
-            // the bound shader costs a VSGetShader per candidate draw and
-            // happens only while a probe spec is set.
-            if (s->censusSkip[i].vsHash) {
-                const uint64_t h = bindingShaderHash(BindSlot::Vs);   // the shadow's, set with the shader
-                if (h != s->censusSkip[i].vsHash) continue;
-                ++s->censusSkipped;
-                return DrawVerdict::kSkip;
-            }
-            const bool countHit =
-                s->censusSkip[i].nHi
-                    ? count >= s->censusSkip[i].n &&
-                          count <= s->censusSkip[i].nHi
-                    : count == s->censusSkip[i].n;
-            if (s->censusSkip[i].kind != kind || !countHit) {
-                continue;
-            }
-            // The chained @ filters: resolve what PS slots 0-3 sample, on
-            // the rare draws that got past kind+count. Unmemoised on
-            // purpose: this runs only while a probe spec is set, for a
-            // handful of draws a frame, and a stale memo here would skip
-            // the wrong draw. "@eye" means eye-sized -- the sprite-family
-            // test, valid on any headset without knowing its numbers.
-            bool srvOk = true;
-            for (int f = 0; f < 4 && srvOk; ++f) {
-                const State::SkipSpec::SrvFilter& sf = s->censusSkip[i].srv[f];
-                typedef State::SkipSpec::SrvFilter SF;
-                if (sf.mode == SF::kOff || sf.mode == SF::kAny) continue;
-                const BindSlot slot = static_cast<BindSlot>(
-                    static_cast<uint32_t>(BindSlot::PsSrv0) + f);
-                void* bound = bindingGet(slot);
-                if (sf.mode == SF::kNone) {
-                    srvOk = bound == nullptr;
-                    continue;
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kEyeCensusSubmitted) {
+            if (s->rtv0Eye && drawCensusArmed())
+                drawCensusEyeDraw(self, kind, count, instances, s->eyeDrawsThisFrame, args);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kUiCrispProbe) {
+            if (s->rtv0Eye && uiLayerCrispOn() && self == g_state->ownerCtx)
+                uiLayerCrispNoteEyeDraw(self, kind, count, instances, args.startInstance);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kObjectProbe) {
+            if (s->rtv0Eye && objectProbeWantsDraws())
+                objectProbeOnEyeDraw(self, kind, count, instances, args.startInstance,
+                                     args.start, args.base);
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kEyeCensusSkip) {
+            if constexpr (!TracePolicy::enabled) {
+                if (!s->censusSkipCount) return SiteResult::declined();
+                for (uint32_t i = 0; i < s->censusSkipCount; ++i) {
+                    if (s->censusSkip[i].vsHash) {
+                        const uint64_t h = bindingShaderHash(BindSlot::Vs);
+                        if (h != s->censusSkip[i].vsHash) continue;
+                        ++s->censusSkipped;
+                        return exited(id, DrawVerdict::kSkip, static_cast<uint16_t>(i));
+                    }
+                    const bool countHit = s->censusSkip[i].nHi
+                        ? count >= s->censusSkip[i].n && count <= s->censusSkip[i].nHi
+                        : count == s->censusSkip[i].n;
+                    if (s->censusSkip[i].kind != kind || !countHit) continue;
+                    bool srvOk = true;
+                    for (int f = 0; f < 4 && srvOk; ++f) {
+                        const State::SkipSpec::SrvFilter& sf = s->censusSkip[i].srv[f];
+                        typedef State::SkipSpec::SrvFilter SF;
+                        if (sf.mode == SF::kOff || sf.mode == SF::kAny) continue;
+                        const BindSlot slot = static_cast<BindSlot>(
+                            static_cast<uint32_t>(BindSlot::PsSrv0) + f);
+                        void* bound = bindingGet(slot);
+                        if (sf.mode == SF::kNone) { srvOk = bound == nullptr; continue; }
+                        ResourceInfo info;
+                        if (!bindingResolveProbe(bound, &info) || !info.isTexture2D) { srvOk = false; break; }
+                        if (sf.mode == SF::kEye) {
+                            uint32_t eyeW = 0, eyeH = 0;
+                            srvOk = eyeTextureSize(&eyeW, &eyeH) && info.a == eyeW && info.b == eyeH;
+                        } else srvOk = info.a == sf.w && info.b == sf.h;
+                    }
+                    if (!srvOk) continue;
+                    ++s->censusSkipped;
+                    return exited(id, DrawVerdict::kSkip, static_cast<uint16_t>(i));
                 }
-                ResourceInfo info;
-                if (!bindingResolveProbe(bound, &info) || !info.isTexture2D) {
-                    srvOk = false;
-                    break;
+                return SiteResult::declined();
+            } else {
+                EyeCensusObservation fact{};
+                auto setRead = [](auto& read, const auto& value) noexcept {
+                    read.reached = true;
+                    read.known = true;
+                    read.value = value;
+                };
+                const std::uint32_t countGate = s->censusSkipCount;
+                setRead(fact.skipCountGate, countGate);
+                if (!countGate) {
+                    trace.eyeCensusFact(fact);
+                    return SiteResult::declined();
                 }
-                if (sf.mode == SF::kEye) {
-                    uint32_t eyeW = 0, eyeH = 0;
-                    srvOk = eyeTextureSize(&eyeW, &eyeH) && info.a == eyeW &&
-                            info.b == eyeH;
-                } else {
-                    srvOk = info.a == sf.w && info.b == sf.h;
+                bool loopEnded = false;
+                for (std::uint32_t i = 0; i < 8; ++i) {
+                    const std::uint32_t loopCount = s->censusSkipCount;
+                    if (i >= loopCount) {
+                        setRead(fact.terminalLoopCount, loopCount);
+                        loopEnded = true;
+                        break;
+                    }
+                    auto& ruleFact = fact.rules[i];
+                    setRead(ruleFact.loopCount, loopCount);
+                    const State::SkipSpec& spec = s->censusSkip[i];
+                    const std::uint64_t vsHashGate = spec.vsHash;
+                    setRead(ruleFact.vsHashGate, vsHashGate);
+                    if (vsHashGate) {
+                        const std::uint64_t heldHash = bindingShaderHash(BindSlot::Vs);
+                        setRead(ruleFact.heldVsHash, heldHash);
+                        const std::uint64_t expectedHash = spec.vsHash;
+                        setRead(ruleFact.vsHashCompareExpected, expectedHash);
+                        if (heldHash != expectedHash) continue;
+                        const std::uint64_t before = s->censusSkipped;
+                        ++s->censusSkipped;
+                        const std::uint64_t after = s->censusSkipped;
+                        setRead(fact.censusSkippedBefore, before);
+                        setRead(fact.censusSkippedAfter, after);
+                        trace.eyeCensusFact(fact);
+                        return exited(id, DrawVerdict::kSkip, static_cast<std::uint16_t>(i));
+                    }
+
+                    const std::uint32_t countHighGate = spec.nHi;
+                    setRead(ruleFact.countHighGate, countHighGate);
+                    bool countHit = false;
+                    if (countHighGate) {
+                        const std::uint32_t minimum = spec.n;
+                        setRead(ruleFact.countMinimum, minimum);
+                        if (count >= minimum) {
+                            const std::uint32_t highBound = spec.nHi;
+                            setRead(ruleFact.countHighBound, highBound);
+                            countHit = count <= highBound;
+                        }
+                    } else {
+                        const std::uint32_t exactCount = spec.n;
+                        setRead(ruleFact.exactCount, exactCount);
+                        countHit = count == exactCount;
+                    }
+                    const std::uint8_t ruleKind = static_cast<std::uint8_t>(spec.kind);
+                    setRead(ruleFact.ruleKind, ruleKind);
+                    if (static_cast<char>(ruleKind) != kind || !countHit) continue;
+                    bool srvOk = true;
+                    for (int f = 0; f < 4 && srvOk; ++f) {
+                        const State::SkipSpec::SrvFilter& sf = spec.srv[f];
+                        using SF = State::SkipSpec::SrvFilter;
+                        auto& filterFact = ruleFact.filters[f];
+                        const std::uint8_t offMode = static_cast<std::uint8_t>(sf.mode);
+                        setRead(filterFact.modeOffGate, offMode);
+                        if (offMode == SF::kOff) continue;
+                        const std::uint8_t anyMode = static_cast<std::uint8_t>(sf.mode);
+                        setRead(filterFact.modeAnyGate, anyMode);
+                        if (anyMode == SF::kAny) continue;
+                        const BindSlot slot = static_cast<BindSlot>(
+                            static_cast<std::uint32_t>(BindSlot::PsSrv0) + f);
+                        void* const bound = bindingGet(slot);
+                        const bool boundNonNull = bound != nullptr;
+                        setRead(filterFact.boundNonNull, boundNonNull);
+                        const std::uint8_t noneMode = static_cast<std::uint8_t>(sf.mode);
+                        setRead(filterFact.modeAfterBound, noneMode);
+                        if (noneMode == SF::kNone) { srvOk = !boundNonNull; continue; }
+                        ResourceInfo info;
+                        const bool resolved = bindingResolveProbe(bound, &info);
+                        setRead(filterFact.resolved, resolved);
+                        if (!resolved) { srvOk = false; break; }
+                        const bool texture2D = info.isTexture2D;
+                        setRead(filterFact.isTexture2D, texture2D);
+                        if (!texture2D) { srvOk = false; break; }
+                        const std::uint8_t compareMode = static_cast<std::uint8_t>(sf.mode);
+                        setRead(filterFact.modeAfterResolve, compareMode);
+                        if (compareMode == SF::kEye) {
+                            std::uint32_t eyeW = 0, eyeH = 0;
+                            const bool eyeKnown = eyeTextureSize(&eyeW, &eyeH);
+                            setRead(filterFact.eyeSizeAvailable, eyeKnown);
+                            if (!eyeKnown) { srvOk = false; break; }
+                            const std::uint32_t targetW = info.a;
+                            setRead(filterFact.width, targetW);
+                            setRead(filterFact.eyeWidth, eyeW);
+                            if (targetW != eyeW) { srvOk = false; break; }
+                            const std::uint32_t targetH = info.b;
+                            setRead(filterFact.height, targetH);
+                            setRead(filterFact.eyeHeight, eyeH);
+                            srvOk = targetH == eyeH;
+                        } else {
+                            const std::uint32_t targetW = info.a;
+                            setRead(filterFact.width, targetW);
+                            const std::uint32_t configuredW = sf.w;
+                            setRead(filterFact.configuredWidth, configuredW);
+                            if (targetW != configuredW) { srvOk = false; break; }
+                            const std::uint32_t targetH = info.b;
+                            setRead(filterFact.height, targetH);
+                            const std::uint32_t configuredH = sf.h;
+                            setRead(filterFact.configuredHeight, configuredH);
+                            srvOk = targetH == configuredH;
+                        }
+                    }
+                    if (!srvOk) continue;
+                    const std::uint64_t before = s->censusSkipped;
+                    ++s->censusSkipped;
+                    const std::uint64_t after = s->censusSkipped;
+                    setRead(fact.censusSkippedBefore, before);
+                    setRead(fact.censusSkippedAfter, after);
+                    trace.eyeCensusFact(fact);
+                    return exited(id, DrawVerdict::kSkip, static_cast<std::uint16_t>(i));
+                }
+                if (!loopEnded) {
+                    const std::uint32_t terminalCount = s->censusSkipCount;
+                    setRead(fact.terminalLoopCount, terminalCount);
+                }
+                trace.eyeCensusFact(fact);
+                return SiteResult::declined();
+            }
+        } else if constexpr (id == SiteId::kEyeRangeSkip) {
+            struct EmptyPredicatePayload final {};
+            struct TracePredicatePayload final {
+                draw_ladder_trace::PredicateFact fact{};
+                std::uint64_t censusSkippedBefore = 0;
+            };
+            using PredicatePayload = std::conditional_t<TracePolicy::enabled,
+                TracePredicatePayload, EmptyPredicatePayload>;
+            PredicatePayload payload{};
+            if constexpr (TracePolicy::enabled) {
+                payload.fact.siteId = static_cast<std::uint16_t>(id);
+                payload.fact.kind = draw_ladder_trace::PredicateFactKind::EyeRangeSkip;
+                payload.fact.known = draw_ladder_trace::TriState::Yes;
+                payload.fact.eyeDrawIndex = s->eyeDrawsThisFrame;
+                payload.fact.rangeCount = static_cast<std::uint8_t>(s->censusSkipRangeCount);
+                for (std::uint8_t i = 0; i < payload.fact.rangeCount && i < 4; ++i) {
+                    payload.fact.ranges[i].lo = s->censusSkipRange[i].lo;
+                    payload.fact.ranges[i].hi = s->censusSkipRange[i].hi;
+                }
+                payload.censusSkippedBefore = s->censusSkipped;
+            }
+            for (uint32_t i = 0; i < s->censusSkipRangeCount; ++i) {
+                if (s->eyeDrawsThisFrame >= s->censusSkipRange[i].lo &&
+                    s->eyeDrawsThisFrame <= s->censusSkipRange[i].hi) {
+                    ++s->censusSkipped;
+                    if constexpr (TracePolicy::enabled) {
+                        payload.fact.censusSkippedDeltaKnown = true;
+                        payload.fact.censusSkippedDelta =
+                            draw_ladder_trace::boundedCensusSkippedDelta(
+                                payload.censusSkippedBefore, s->censusSkipped);
+                        trace.predicateFact(payload.fact);
+                    }
+                    return exited(id, DrawVerdict::kSkip, static_cast<uint16_t>(i));
                 }
             }
-            if (!srvOk) continue;
-            ++s->censusSkipped;
-            return DrawVerdict::kSkip;
-        }
-    }
-    // The bisection form: this draw's position in the frame, against the
-    // configured ranges. eyeDrawsThisFrame counts BOTH eyes through one
-    // frame, so a range can land on one eye's pass -- which is a feature: an
-    // eye-swapped overlay probed per eye says which pass draws what.
-    for (uint32_t i = 0; i < s->censusSkipRangeCount; ++i) {
-        if (s->eyeDrawsThisFrame >= s->censusSkipRange[i].lo &&
-            s->eyeDrawsThisFrame <= s->censusSkipRange[i].hi) {
-            ++s->censusSkipped;
-            return DrawVerdict::kSkip;
-        }
-    }
-
-    // Shape first, inline (night_vision.h): the match is pure, and the call
-    // per eye draw failed on this very test.
-    if(nightVisionShape(kind,count,instances) && nightVisionMatches(kind,count,instances))
-        return DrawVerdict::kNightVision;
-
-    // The RemLok overlay fix, after the probes so a census taken while it
-    // runs still records the draw the game submitted. The shape is asked
-    // first, inline (remlok_fix.h): any other shape comes back kNone.
-    if (remlokWantsDraws() && remlokOverlayShape(kind, count, instances)) {
-        const RemlokAction a = remlokOnEyeDraw(kind, count, instances);
-        if (a == RemlokAction::kHide) return DrawVerdict::kSkip;
-        if (a == RemlokAction::kScissor) return DrawVerdict::kRemlok;
-    }
-
-    // The loading hologram's pattern fix, same placement for the same reason.
-    // Shape first, inline (holo_fix.h), as for the RemLok overlay above.
-    if (holoWantsDraws() && holoPatternShape(kind, count, instances) &&
-        holoOnEyeDraw(kind, count, instances)) {
-        return DrawVerdict::kHolo;
-    }
-
-    // The target indicator's composite, recognised the same way and in the
-    // same place: shape, then what it samples, then its shader's hash.
-    if (targetSharpWantsDraws() &&
-        targetSharpOnEyeDraw(self, kind, count, instances)) {
-        return DrawVerdict::kTargetSharp;
-    }
-
-    // The loader dialog's dimming wash, recognised by what it samples -- and
-    // first by its shape, inline (scrim_fix.h), which turns away the quads
-    // and small draws before the call.
-    if (scrimWantsDraws() && scrimWashShape(kind, count, instances) &&
-        scrimOnEyeDraw(kind, count, instances)) {
-        return DrawVerdict::kScrim;
-    }
-
-    // The menu backdrop's COMPOSITE -- the eye-side half of backdrop_fix.
-    // The offscreen half above substitutes the still for the blit; this one
-    // substitutes it for the quad that lifts the blit's target into the eye,
-    // which is what actually bypasses the engine's downsample. Both wear the
-    // same verdict because both do the same thing: bind our bake into PS
-    // slot 0 for one draw and put the game's texture back after.
-    // The composite's shape first, inline (backdrop_fix.h): the call per eye
-    // draw failed on it (30 innermost samples of the parked-5 window).
-    if (backdropWantsDraws() && backdropCompositeShape(kind, count, instances) &&
-        backdropOnComposite(self, kind, count, instances)) {
-        return DrawVerdict::kBackdrop;
-    }
-
-    // The FSS panel composite pair, recognised by vertex-shader hash after
-    // the cheap kind/count gate -- and ONLY while the scanner's body layer
-    // drew within the last two frames. The hash names the engine's general
-    // world-quad pipeline, not the scanner: on 2026-08-25 the hash alone
-    // also matched the loading screen's text quad and moved it. The body
-    // layer is the one thing only the scanner draws.
-    if (fssPanelWantsDraws() && s->fssBodyFrame != 0 &&
-        s->frameNo - s->fssBodyFrame <= 2 &&
-        fssPanelOnEyeDraw(self, kind, count, instances)) {
-        return DrawVerdict::kFssPanel;
-    }
-
-    // The reveal sync. Same gate, same recognition shape.
-    // The reveal's gate covers the ARRIVAL as well as the void: the
-    // 2026-08-27 lockstep flight engaged byte-identical and the squares
-    // survived -- because the body gate opens at the arrival's END, and
-    // the squares live in the ~10 frames before it. The mode latch keeps
-    // the widened window inside the scanner (the loading screen draws
-    // none of this), and the zoom-start jump bounds it.
-    // The jump window before the mode latch: deviceHookFssModeLatch is a
-    // cross-TU call (device_hook.cpp) and a pure read, and it was being made
-    // for every eye draw outside the scanner. Same three terms, same answer.
-    if (fssRevealWantsDraws() &&
-        ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
-         (s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
-          deviceHookFssModeLatch())) &&
-        fssRevealOnEyeDraw(self, kind, count, instances)) {
-        if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
-        return DrawVerdict::kFssReveal;
-    }
-
-    // The eye-image dump (round twenty), so a dump session records the
-    // natural state -- run one at a time.
-    if (fssDumpWantsDraws() && s->fssBodyFrame != 0 &&
-        s->frameNo - s->fssBodyFrame <= 2 &&
-        fssDumpOnEyeDraw(self, kind, count, instances)) {
-        return DrawVerdict::kFssDump;
-    }
-
-    // The scanner-body fix's resolve (the black planet, 2026-08-30):
-    // recognised by its PIXEL shader hash, so it is asked LAST -- every fix
-    // above it that swaps a shader has already had its say.
-    // resolveBindShadowSaysNo (resolve_bind_fix.h) is the fix's own first
-    // answer from the shadow, inline: a held shader whose hash is not the
-    // resolve's is a false the call gives without touching anything.
-    if (resolveBindWants() &&
-        !resolveBindShadowSaysNo(bindingGet(BindSlot::Ps) != nullptr,
-                                 bindingShaderHash(BindSlot::Ps)) &&
-        resolveBindOnEyeDraw(self)) {
-        return DrawVerdict::kResolveBind;
-    }
-
-    // The sun-glare element train: off skips it, first:K clamps it, and the
-    // world shader draws whatever survives. The billboard loan is
-    // measurement -- its shadow feeds the world shader's telemetry, its
-    // buffer is never substituted for these draws. The clamp count rides
-    // glareClamp to the DrawInstanced thunk.
-    // The train's shape first, inline (sunglare_fix.h): for any other shape
-    // sunglareOnEyeDraw answers kStock and this block does nothing, and both
-    // calls -- sunglareWantsDraws is cross-TU too -- were made per eye draw.
-    if (sunglareTrainShape(kind, count, instances) && sunglareWantsDraws()) {
-        const SunglareAction a = sunglareOnEyeDraw(kind, count, instances);
-        if (a == SunglareAction::kSkip) return DrawVerdict::kSkip;
-        if (a != SunglareAction::kStock) {
-            if (a == SunglareAction::kClamp) s->glareClamp = sunglareKeep();
-            // The world shader needs no billboard shadow to RENDER --
-            // but its telemetry reads the sun position out of it, so the
-            // target-follow side effect still runs (return value moot).
-            if (sunglareWorldActive() || sunglareProbeActive()) {
-                // NO prefix clamp under the world shader. The record
-                // list is DYNAMIC -- elements enter and reorder with
-                // the game's head-look camera (the roster: i15 becomes
-                // i20 as the head crosses ~45 degrees), so "the first
-                // K" names different ELEMENTS frame to frame; that
-                // reorder crossing slot 0 was the whole disappearing-
-                // disc mystery. The shader selects by what each record
-                // IS instead; every instance must reach it.
-                s->glareClamp = 0;
-                billboardOnGlareDraw(count, instances);
-                return DrawVerdict::kGlareSteady;
+            if constexpr (TracePolicy::enabled) {
+                payload.fact.censusSkippedDeltaKnown = true;
+                payload.fact.censusSkippedDelta =
+                    draw_ladder_trace::boundedCensusSkippedDelta(
+                        payload.censusSkippedBefore, s->censusSkipped);
+                trace.predicateFact(payload.fact);
             }
-            if (s->glareClamp) return DrawVerdict::kGlareClamp;
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kNightVisionClaim) {
+            uint32_t pluginClaim = kPluginClaimNone;
+            if constexpr (TracePolicy::enabled) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::NightVisionClaim;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                pluginClaim = plugins::dispatch::resolveCandidate(
+                    pluginCandidates, plugins::kPluginCockpitVisuals, [&] {
+                        const auto& claim = plugins::kManifest[plugins::kPluginCockpitVisuals]
+                            .claims[plugins::kClaimCockpitVisualsNightVision];
+                        const bool matches = plugins::dispatch::matchesShape(claim.drawShape,
+                            static_cast<uint8_t>(kind), count, instances);
+                        fact.shapeReached = draw_ladder_trace::TriState::Yes;
+                        fact.shapeMatched = matches
+                            ? draw_ladder_trace::TriState::Yes
+                            : draw_ladder_trace::TriState::No;
+                        return matches;
+                    }, [&] {
+                        EdvrPluginClaimObservation observation{};
+                        const uint32_t claim = pluginRegistryResolveDrawObserved(
+                            pluginCandidates, static_cast<uint8_t>(kind), count,
+                            instances, &observation);
+                        fact.callbackReached = observation.observed
+                            ? draw_ladder_trace::TriState::Yes
+                            : draw_ladder_trace::TriState::Unknown;
+                        if (observation.observed) {
+                            fact.callbackModeKnown = draw_ladder_trace::TriState::Yes;
+                            fact.callbackMode = observation.mode;
+                            fact.failedKnown = observation.failedKnown
+                                ? draw_ladder_trace::TriState::Yes
+                                : draw_ladder_trace::TriState::Unknown;
+                            fact.failed = observation.failedKnown
+                                ? (observation.failed
+                                    ? draw_ladder_trace::TriState::Yes
+                                    : draw_ladder_trace::TriState::No)
+                                : draw_ladder_trace::TriState::Unknown;
+                        }
+                        return claim;
+                    });
+                if (fact.shapeMatched == draw_ladder_trace::TriState::No)
+                    fact.callbackReached = draw_ladder_trace::TriState::No;
+                trace.completePredicateFact(fact);
+            } else {
+                pluginClaim = plugins::dispatch::resolveCandidate(
+                    pluginCandidates, plugins::kPluginCockpitVisuals, [&] {
+                        const auto& claim = plugins::kManifest[plugins::kPluginCockpitVisuals]
+                            .claims[plugins::kClaimCockpitVisualsNightVision];
+                        return plugins::dispatch::matchesShape(claim.drawShape,
+                            static_cast<uint8_t>(kind), count, instances);
+                    }, [&] { return pluginRegistryResolveDraw(pluginCandidates,
+                        static_cast<uint8_t>(kind), count, instances); });
+            }
+            if (pluginClaim == kPluginClaimNightVision) return claimed(id, DrawVerdict::kNightVision);
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kRemlokHideSkip) {
+            if constexpr (TracePolicy::enabled) {
+                remlok_observation::Observation observed{};
+                const auto mode = detail::g_remlokMode;
+                observed.selector.outerMode = {true, true, static_cast<std::uint32_t>(mode)};
+                if (mode != detail::RemlokMode::kStock &&
+                    remlokOverlayShape(kind, count, instances))
+                    remlokAction = remlokOnEyeDrawObserved(kind, count, instances, observed);
+                trace.remlokFact(observed);
+                if (remlokAction == RemlokAction::kHide) return exited(id, DrawVerdict::kSkip);
+            } else {
+                if (remlokWantsDraws() && remlokOverlayShape(kind, count, instances)) {
+                    remlokAction = remlokOnEyeDraw(kind, count, instances);
+                    if (remlokAction == RemlokAction::kHide) return exited(id, DrawVerdict::kSkip);
+                }
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kRemlokScissorClaim) {
+            if (remlokAction == RemlokAction::kScissor) return claimed(id, DrawVerdict::kRemlok);
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kHoloClaim) {
+            if constexpr (TracePolicy::enabled) {
+                holo_scrim_observation::HoloObservation observed{};
+                const bool matches = holoOnEyeDrawObserved(kind, count, instances, &observed);
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::Holo53;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.holo = observed;
+                fact.detailsFinalized = true;
+                trace.predicateFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kHolo);
+            } else {
+                if (holoWantsDraws() && holoPatternShape(kind, count, instances) &&
+                    holoOnEyeDraw(kind, count, instances))
+                    return claimed(id, DrawVerdict::kHolo);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kTargetSharpClaim) {
+            if constexpr (TracePolicy::enabled) {
+                TargetSharpObservation observed{};
+                observed.handlerInvoked = true;
+                const bool outerWants = targetSharpWantsDrawsObserved(observed);
+                const bool matches = outerWants && targetSharpOnEyeDrawObserved(
+                    self, kind, count, instances, observed);
+                trace.targetSharpFact(observed);
+                if (matches) return claimed(id, DrawVerdict::kTargetSharp);
+            } else {
+                if (targetSharpWantsDraws() &&
+                    targetSharpOnEyeDraw(self, kind, count, instances))
+                    return claimed(id, DrawVerdict::kTargetSharp);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kScrimClaim) {
+            if constexpr (TracePolicy::enabled) {
+                holo_scrim_observation::ScrimObservation observed{};
+                const bool matches = scrimOnEyeDrawObserved(kind, count, instances, &observed);
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::Scrim55;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.scrim = observed;
+                fact.detailsFinalized = true;
+                trace.predicateFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kScrim);
+            } else {
+                if (scrimWantsDraws() && scrimWashShape(kind, count, instances) &&
+                    scrimOnEyeDraw(kind, count, instances))
+                    return claimed(id, DrawVerdict::kScrim);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kEyeBackdropComposite) {
+            if (backdropWantsDraws() && backdropCompositeShape(kind, count, instances) &&
+                backdropOnComposite(self, kind, count, instances)) return claimed(id, DrawVerdict::kBackdrop);
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kFssPanelClaim) {
+            if constexpr (TracePolicy::enabled) {
+                FssObservation fact{};
+                fact.kind = FssTraceFactKind::kPanel;
+                fact.handlerInvoked = true;
+                auto& observed = fact.panel;
+                bool matches = false;
+                const bool enabled = fssPanelWantsDraws();
+                observeFssRead(observed.outerEnabled, enabled);
+                if (enabled) {
+                    const std::uint32_t bodyFrame = s->fssBodyFrame;
+                    observeFssRead(observed.bodyFrame, bodyFrame);
+                    if (bodyFrame != 0) {
+                        const std::uint32_t frameNo = s->frameNo;
+                        observeFssRead(observed.frameNo, frameNo);
+                        if (frameNo - bodyFrame <= 2)
+                            matches = fssPanelOnEyeDrawObserved(
+                                self, kind, count, instances, observed);
+                    }
+                }
+                trace.fssFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kFssPanel);
+            } else {
+                if (fssPanelWantsDraws() && s->fssBodyFrame != 0 &&
+                    s->frameNo - s->fssBodyFrame <= 2 &&
+                    fssPanelOnEyeDraw(self, kind, count, instances))
+                    return claimed(id, DrawVerdict::kFssPanel);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kFssRevealClaim) {
+            if constexpr (TracePolicy::enabled) {
+                FssObservation fact{};
+                fact.kind = FssTraceFactKind::kReveal;
+                fact.handlerInvoked = true;
+                auto& observed = fact.reveal;
+                bool matches = false;
+                const bool steady = detail::g_fssRevealSteady;
+                observeFssRead(observed.outerSteady, steady);
+                bool lockstep = false;
+                if (!steady) {
+                    lockstep = detail::g_fssRevealLockstep;
+                    observeFssRead(observed.outerLockstep, lockstep);
+                }
+                if (steady || lockstep) {
+                    const std::uint32_t bodyFrame = s->fssBodyFrame;
+                    observeFssRead(observed.bodyFrame, bodyFrame);
+                    bool inWindow = false;
+                    if (bodyFrame != 0) {
+                        const std::uint32_t bodyFrameNo = s->frameNo;
+                        observeFssRead(observed.bodyFrameNo, bodyFrameNo);
+                        inWindow = bodyFrameNo - bodyFrame <= 2;
+                    }
+                    if (!inWindow) {
+                        const std::uint32_t jumpFrame = s->fssJumpFrame;
+                        observeFssRead(observed.jumpFrame, jumpFrame);
+                        if (jumpFrame != 0) {
+                            const std::uint32_t jumpFrameNo = s->frameNo;
+                            observeFssRead(observed.jumpFrameNo, jumpFrameNo);
+                            if (jumpFrameNo - jumpFrame <= 600) {
+                                const bool modeLatch = deviceHookFssModeLatch();
+                                observeFssRead(observed.modeLatch, modeLatch);
+                                inWindow = modeLatch;
+                            }
+                        }
+                    }
+                    if (inWindow) {
+                        matches = fssRevealOnEyeDrawObserved(
+                            self, kind, count, instances, observed);
+                        if (matches) {
+                            const bool arrivalOpen = s->fssArrivalOpen;
+                            observeFssRead(observed.arrivalOpen, arrivalOpen);
+                            if (arrivalOpen) {
+                                const std::uint32_t before = s->fssArrivalRecogs;
+                                observeFssRead(observed.arrivalBefore, before);
+                                ++s->fssArrivalRecogs;
+                                observeFssRead(observed.arrivalAfter,
+                                               s->fssArrivalRecogs);
+                            }
+                        }
+                    }
+                }
+                trace.fssFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kFssReveal);
+            } else {
+                if (fssRevealWantsDraws() &&
+                    ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
+                     (s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
+                      deviceHookFssModeLatch())) &&
+                    fssRevealOnEyeDraw(self, kind, count, instances)) {
+                    if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
+                    return claimed(id, DrawVerdict::kFssReveal);
+                }
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kFssDumpClaim) {
+            if constexpr (TracePolicy::enabled) {
+                FssDumpObservation fact{};
+                fact.handlerInvoked = true;
+                bool matches = false;
+                if (fssDumpWantsDrawsObserved(fact.outer.wants)) {
+                    const std::uint32_t bodyFrame = s->fssBodyFrame;
+                    fact.outer.bodyFrame = {true, true, bodyFrame};
+                    if (bodyFrame != 0) {
+                        const std::uint32_t frameNo = s->frameNo;
+                        fact.outer.frameNo = {true, true, frameNo};
+                        if (frameNo - bodyFrame <= 2)
+                            matches = fssDumpOnEyeDrawObserved(
+                                self, kind, count, instances, fact.helper);
+                    }
+                }
+                trace.fssDumpFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kFssDump);
+            } else {
+                if (fssDumpWantsDraws() && s->fssBodyFrame != 0 &&
+                    s->frameNo - s->fssBodyFrame <= 2 &&
+                    fssDumpOnEyeDraw(self, kind, count, instances))
+                    return claimed(id, DrawVerdict::kFssDump);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kResolveBindClaim) {
+            if constexpr (!TracePolicy::enabled) {
+                if (resolveBindWants() &&
+                    !resolveBindShadowSaysNo(bindingGet(BindSlot::Ps) != nullptr,
+                                             bindingShaderHash(BindSlot::Ps)) &&
+                    resolveBindOnEyeDraw(self))
+                    return claimed(id, DrawVerdict::kResolveBind);
+                return SiteResult::declined();
+            } else {
+                ResolveBindObservation fact{};
+                const bool wants = resolveBindWants();
+                fact.outer.wants = {true, true, wants};
+                if (!wants) {
+                    trace.resolveBindFact(fact);
+                    return SiteResult::declined();
+                }
+                const bool psPresent = bindingGet(BindSlot::Ps) != nullptr;
+                const uint64_t psHash = bindingShaderHash(BindSlot::Ps);
+                fact.outer.psPresent = {true, true, psPresent};
+                fact.outer.psHash = {true, true, psHash};
+                if (resolveBindShadowSaysNo(psPresent, psHash)) {
+                    trace.resolveBindFact(fact);
+                    return SiteResult::declined();
+                }
+                const bool matched = resolveBindOnEyeDrawObserved(self, fact.helper);
+                trace.resolveBindFact(fact);
+                if (matched) return claimed(id, DrawVerdict::kResolveBind);
+                return SiteResult::declined();
+            }
+        } else if constexpr (id == SiteId::kSunglareSkip) {
+            if constexpr (TracePolicy::enabled) {
+                SunglareObservation fact{};
+                fact.kind = SunglareTraceFactKind::kKind9;
+                if (trace.sunglareClampResetSeen) {
+                    observeSunglareRead(fact.common2ClampBefore,
+                                        trace.sunglareClampResetBefore);
+                    observeSunglareRead(fact.common2ClampAfter,
+                                        trace.sunglareClampResetAfter);
+                }
+                const uint32_t clampBefore = s->glareClamp;
+                observeSunglareRead(fact.site.clampBefore, clampBefore);
+                glareAction = sunglareOnEyeDrawObserved(
+                    kind, count, instances, fact.selector);
+                if (glareAction == SunglareAction::kClamp) {
+                    const uint32_t keep = sunglareKeep();
+                    s->glareClamp = keep;
+                }
+                const uint32_t clampAfter = s->glareClamp;
+                observeSunglareRead(fact.site.clampAfter, clampAfter);
+                trace.sunglareFact(fact);
+                if (glareAction == SunglareAction::kSkip)
+                    return exited(id, DrawVerdict::kSkip);
+            } else {
+                if (sunglareTrainShape(kind, count, instances) && sunglareWantsDraws()) {
+                    glareAction = sunglareOnEyeDraw(kind, count, instances);
+                    if (glareAction == SunglareAction::kSkip)
+                        return exited(id, DrawVerdict::kSkip);
+                    if (glareAction == SunglareAction::kClamp)
+                        s->glareClamp = sunglareKeep();
+                }
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kSunglareSteadyClaim) {
+            if constexpr (TracePolicy::enabled) {
+                SunglareObservation fact{};
+                fact.kind = SunglareTraceFactKind::kKind10;
+                const bool actionNotStock = glareAction != SunglareAction::kStock;
+                observeSunglareRead(fact.site.source61ActionNotStock,
+                                    actionNotStock);
+                bool gate = false;
+                if (actionNotStock) {
+                    const int world = detail::g_sunglareWorld;
+                    observeSunglareRead(fact.site.worldValue,
+                                        static_cast<int32_t>(world));
+                    gate = world != 0;
+                    if (!gate) {
+                        const bool probe = sunglareProbeActive();
+                        observeSunglareRead(fact.site.probeValue, probe);
+                        gate = probe;
+                    }
+                }
+                if (gate) {
+                    const uint32_t clampBefore = s->glareClamp;
+                    observeSunglareRead(fact.site.clampBefore, clampBefore);
+                    s->glareClamp = 0;
+                    const uint32_t clampAfter = s->glareClamp;
+                    observeSunglareRead(fact.site.clampAfter, clampAfter);
+                    billboardOnGlareDraw(count, instances);
+                    observeSunglareRead(fact.site.billboardReached, true);
+                    trace.sunglareFact(fact);
+                    return claimed(id, DrawVerdict::kGlareSteady);
+                }
+                trace.sunglareFact(fact);
+            } else {
+                if (glareAction != SunglareAction::kStock &&
+                    (sunglareWorldActive() || sunglareProbeActive())) {
+                    s->glareClamp = 0;
+                    billboardOnGlareDraw(count, instances);
+                    return claimed(id, DrawVerdict::kGlareSteady);
+                }
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kGlareClampClaim) {
+            if constexpr (TracePolicy::enabled) {
+                SunglareObservation fact{};
+                fact.kind = SunglareTraceFactKind::kKind11;
+                const bool actionNotStock = glareAction != SunglareAction::kStock;
+                observeSunglareRead(fact.site.source61ActionNotStock,
+                                    actionNotStock);
+                if (actionNotStock) {
+                    const uint32_t clamp = s->glareClamp;
+                    observeSunglareRead(fact.site.clampBefore, clamp);
+                    if (clamp) {
+                        trace.sunglareFact(fact);
+                        return claimed(id, DrawVerdict::kGlareClamp);
+                    }
+                }
+                trace.sunglareFact(fact);
+            } else {
+                if (glareAction != SunglareAction::kStock && s->glareClamp)
+                    return claimed(id, DrawVerdict::kGlareClamp);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kHeadOffsetObserve) {
+            if (headOffsetGateWantsPanel() && srv0IsPanelSized(s, kind, count))
+                ++s->panelCompositeDraws;
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kPanelCurveObserve) {
+            if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&
+                !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash))
+                s->curveThisDraw = true;
+            return SiteResult::observed();
+        } else if constexpr (id == SiteId::kEyeNoDistanceNone) {
+            if constexpr (TracePolicy::enabled) {
+                const bool distanceEnabled = s->distanceEnabled;
+                BasicDrawObservation fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = BasicDrawFactKind::kDistance;
+                fact.distance.distanceEnabled = {true, true, distanceEnabled};
+                trace.basicFact(fact);
+                if (!distanceEnabled)
+                    return exited(id, DrawVerdict::kNone);
+            } else if (!s->distanceEnabled) {
+                return exited(id, DrawVerdict::kNone);
+            }
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kPanelEligibilityNone) {
+            if (!srv0IsPanelSized(s, kind, count)) return exited(id, DrawVerdict::kNone, 1);
+            void* cb = bindingGet(BindSlot::VsCb0);
+            if (!cb) return exited(id, DrawVerdict::kNone, 2);
+            if (!s->compositeCb) { s->compositeCb = cb; return exited(id, DrawVerdict::kNone, 3); }
+            if (cb != s->compositeCb || s->shadowBytes == 0) return exited(id, DrawVerdict::kNone, 4);
+            if (static_cast<uint64_t>(s->distanceIndex) * 4ull + 4ull > s->shadowBytes)
+                return exited(id, DrawVerdict::kNone, 5);
+            const uint32_t bytes = s->shadowBytes;
+            if ((!s->ourCb || s->ourCbBytes != bytes) && !ensureOurCompositeCb(self, s, bytes))
+                return exited(id, DrawVerdict::kNone, 6);
+            return SiteResult::declined();
+        } else if constexpr (id == SiteId::kPanelDistanceClaim) {
+            if (!s->distanceEnabled) return SiteResult::declined();
+            const uint32_t bytes = s->shadowBytes;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (FAILED(s->realMap(self, s->ourCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
+                distanceAttemptFailed = true;
+                return SiteResult::declined(1);
+            }
+            memcpy(m.pData, s->shadow, bytes);
+            static_cast<float*>(m.pData)[s->distanceIndex] *= s->distanceScale;
+            s->realUnmap(self, s->ourCb, 0);
+            ID3D11Buffer* ours = s->ourCb;
+            s->realVSSetConstantBuffers(self, 0, 1, &ours);
+            if (++s->panelOverrides == 1) Log::get().note("vScreen: panel distance x%.3f applied", s->distanceScale);
+            return claimed(id, DrawVerdict::kPanel);
+        } else if constexpr (id == SiteId::kPanelTailNone) {
+            if (distanceAttemptFailed) return exited(id, DrawVerdict::kNone, 1);
+            return exited(id, DrawVerdict::kNone, 0);
+        } else {
+            return SiteResult::declined();
         }
     }
+};
 
-    // The head-offset gate's signal, recorded BEFORE the "does anything want to
-    // act" test below, and NOT conditional on the distance fix.
-    //
-    // This is an observation, not an intervention: it says the flat panel was
-    // on screen this frame. Putting it after the early return would tie one
-    // feature's inputs to another feature's setting, so turning the panel
-    // distance off would silently stop the head offset ever arming -- with
-    // every other part of it working and nothing saying why.
-    //
-    // srv0IsPanelSized memoises against the binding generation, so asking here
-    // and again below is one resolve per draw, not two. It is skipped entirely
-    // when the gate is off, because the answer costs a GetDesc and nothing
-    // wants it.
-    if (headOffsetGateWantsPanel() && srv0IsPanelSized(s, kind, count)) {
-        ++s->panelCompositeDraws;
+template <class TracePolicy, class CpuPolicy>
+LadderDecision beginPanelOverride(TracePolicy& trace, ID3D11DeviceContext* self,
+                                  char kind, UINT count, UINT instances,
+                                  const DrawArgs& args) {
+    CpuPolicy cpu;
+    VScreenDrawLadderVisitor<TracePolicy> visitor{g_state, self, kind, count,
+                                                  instances, args, trace};
+    if (draw_ladder::visitOrdered(draw_ladder::CommonSequence{}, visitor, visitor, trace, cpu) ==
+        draw_ladder::Flow::Stop) return visitor.decision;
+    if (!visitor.s->rtv0Eye) {
+        draw_ladder::visitOrdered(draw_ladder::OffscreenSequence{}, visitor, visitor, trace, cpu);
+    } else {
+        draw_ladder::visitOrdered(draw_ladder::EyeSequence{}, visitor, visitor, trace, cpu);
     }
-
-    // The curved screen, recognised here and acted on in forwardWithVerdict.
-    //
-    // ABOVE the distanceEnabled return for the same reason the capture above
-    // it is: panel_distance sits at its shipped 1.0 on most rigs, everything
-    // below that return is unreachable there, and a comfort feature that
-    // silently required an unrelated comfort feature to be switched on first
-    // would be this file's sixth instance of that bug.
-    //
-    // It sets a flag instead of returning a verdict because it has to compose
-    // with the distance fix, which returns kPanel for this very draw.
-    //
-    // NOT the intro composite (kIntroCompositeVsHash, intro_curve.h). The movie's and the splash's six-index composite samples a surface of the
-    // panel's size under a stock vscreen_res (1920x1080, the front end's own), this recognition is by size alone, and a substitution for it finds
-    // no SIZE in vertex slots 1..3 and stands the WHOLE on-foot curve down for the session. Those two surfaces are the surface strip's
-    // (introCurveThisDraw, forwardWithVerdict). The new term sits behind panelCurveWants(), so at curvature 0 nothing new is read.
-    if (panelCurveWants() && srv0IsPanelSized(s, kind, count) &&
-        !(kind == 'X' && count == 6 && bindingShaderHash(BindSlot::Vs) == kIntroCompositeVsHash)) {
-        s->curveThisDraw = true;
-    }
-
-    if (!s->distanceEnabled) return DrawVerdict::kNone;
-
-    // An eye-sized target is not enough on its own: in the cockpit hundreds of
-    // draws land in those textures and rebinding on all of them would corrupt
-    // the view. So this draw has to be the panel composite -- and it is
-    // recognised by WHAT IT READS, not by how many draws the frame made.
-    //
-    // The count was the old rule and it never worked on foot. In HMD Cinema Mode
-    // the composite is 2 draws into the eye textures and the count passed; on
-    // foot for real the helmet HUD is drawn into the eye textures too -- about
-    // 60 draws, and 1174 measured in one frame -- so it rejected every frame and
-    // the distance setting did nothing. It was verified in Cinema Mode, which
-    // shares this rendering path, and shipped.
-    //
-    // The composite reads the panel: a texture of exactly the size the game
-    // forces for that view mode. HUD draws read glyph sheets and atlases, so
-    // they are excluded however many of them there are.
-    if (!srv0IsPanelSized(s, kind, count)) return DrawVerdict::kNone;
-
-    void* cb = bindingGet(BindSlot::VsCb0);
-    if (!cb) return DrawVerdict::kNone;
-    if (!s->compositeCb) {
-        // Learn it now; its contents arrive with the next write, so the override
-        // starts a frame later rather than acting on data we do not have.
-        s->compositeCb = cb;
-        return DrawVerdict::kNone;
-    }
-    if (cb != s->compositeCb || s->shadowBytes == 0) return DrawVerdict::kNone;
-    // 64-bit, because the operands are not.
-    //
-    // panel_distance_index is read with strtol and cast to uint32_t, so a
-    // negative in the ini arrives as a huge positive: -1 becomes 0xFFFFFFFF,
-    // and 0xFFFFFFFF * 4u + 4u wraps to exactly 0. The check then passed and
-    // the write below went about 16 GB past a 256-byte buffer. edvr.ini invites
-    // the user to change this number if a game update moves the field, so it is
-    // reachable from a documented, hand-edited setting -- and nothing here is
-    // wrapped in guarded(), so it took the process down rather than degrading.
-    if (static_cast<uint64_t>(s->distanceIndex) * 4ull + 4ull > s->shadowBytes) {
-        return DrawVerdict::kNone;
-    }
-
-    const uint32_t bytes = s->shadowBytes;
-    if (!s->ourCb || s->ourCbBytes != bytes) {
-        if (!ensureOurCompositeCb(self, s, bytes)) return DrawVerdict::kNone;
-    }
-
-    D3D11_MAPPED_SUBRESOURCE m{};
-    if (FAILED(s->realMap(self, s->ourCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
-        return DrawVerdict::kNone;
-    }
-    memcpy(m.pData, s->shadow, bytes);
-    static_cast<float*>(m.pData)[s->distanceIndex] *= s->distanceScale;
-    s->realUnmap(self, s->ourCb, 0);
-
-    ID3D11Buffer* ours = s->ourCb;
-    s->realVSSetConstantBuffers(self, 0, 1, &ours);
-    if (++s->panelOverrides == 1) {
-        Log::get().note("vScreen: panel distance x%.3f applied", s->distanceScale);
-    }
-    return DrawVerdict::kPanel;
+    return visitor.decision;
 }
 
+draw_ladder::DrawCallKind drawCallKind(char kind) {
+    switch (kind) {
+        case 'D': return draw_ladder::DrawCallKind::Draw;
+        case 'I': return draw_ladder::DrawCallKind::DrawIndexed;
+        case 'N': return draw_ladder::DrawCallKind::DrawInstanced;
+        case 'A': return draw_ladder::DrawCallKind::Auto;
+        case 'Y': return draw_ladder::DrawCallKind::DrawInstancedIndirect;
+        case 'Z': return draw_ladder::DrawCallKind::DrawIndexedInstancedIndirect;
+        default: return draw_ladder::DrawCallKind::DrawIndexedInstanced;
+    }
+}
+
+DrawArgs actionDrawArgs(char kind, const DrawArgs& args, uint32_t indirectOffset = 0) {
+    DrawArgs result = args;
+    switch (kind) {
+        case 'D':
+        case 'N':
+            result.start = static_cast<uint32_t>(args.base);
+            result.base = 0;
+            break;
+        case 'Y':
+        case 'Z':
+            result.start = indirectOffset;
+            result.base = 0;
+            result.startInstance = 0;
+            break;
+        case 'A':
+            result = {};
+            break;
+        default:
+            break;
+    }
+    return result;
+}
+
+thread_local draw_ladder_trace::Token t_activeDrawReplayToken{};
+
+void noteNestedOriginalDraw(char kind, UINT count, UINT instances,
+                            const DrawArgs& args, uint16_t flags = 0,
+                            uint32_t indirectOffset = 0) {
+    const auto token = t_activeDrawReplayToken;
+    if (!token.valid()) return;
+    draw_ladder::ActionRecord record{};
+    record.phase = draw_ladder::ActionPhase::Issue;
+    record.outcome = draw_ladder::ActionOutcome::Applied;
+    record.call = drawCallKind(kind);
+    record.flags = flags;
+    record.issueCount = 1;
+    record.count = count;
+    record.instances = instances;
+    const DrawArgs issuedArgs = actionDrawArgs(kind, args, indirectOffset);
+    record.start = issuedArgs.start;
+    record.startInstance = issuedArgs.startInstance;
+    record.baseVertex = issuedArgs.base;
+    const draw_ladder::ActionId id = kind == 'A'
+        ? draw_ladder::ActionId::kAutoDraw
+        : (kind == 'Z' ? draw_ladder::ActionId::kDrawIndexedInstancedIndirect
+                       : (kind == 'Y' ? draw_ladder::ActionId::kDrawInstancedIndirect
+                                      : draw_ladder::ActionId::kOriginalDraw));
+    draw_ladder_trace::appendAction(token, static_cast<uint16_t>(id), record);
+}
+
+template <class TracePolicy, draw_ladder::ActionId Id>
+void ladderTraceAction(TracePolicy& trace,
+                       draw_ladder::ActionPhase phase,
+                       draw_ladder::ActionOutcome outcome, char kind,
+                       uint32_t count, uint32_t instances,
+                       const DrawArgs& args, uint16_t issueCount = 0,
+                       uint16_t flags = 0, uint32_t indirectOffset = 0) {
+    if constexpr (std::remove_reference_t<TracePolicy>::enabled) {
+        draw_ladder::ActionRecord record{};
+        record.phase = phase;
+        record.outcome = outcome;
+        record.call = drawCallKind(kind);
+        record.flags = flags;
+        record.issueCount = issueCount;
+        record.count = count;
+        record.instances = instances;
+        const DrawArgs issuedArgs = actionDrawArgs(kind, args, indirectOffset);
+        record.start = issuedArgs.start;
+        record.startInstance = issuedArgs.startInstance;
+        record.baseVertex = issuedArgs.base;
+        trace.template action<Id>(record);
+    }
+}
+
+template <class Work>
+LadderDecision withDrawLadderTrace(ID3D11DeviceContext* self, char kind,
+                                   UINT count, UINT instances,
+                                   const DrawArgs& args, bool cpuSample,
+                                   Work&& work) {
+    const bool isOwner = self == g_state->ownerCtx;
+    const bool replayActive = (isOwner || cpuSample) &&
+        draw_ladder_trace::drawLadderTraceCaptureActive();
+    const bool capturing = isOwner && replayActive;
+    const bool suppressCpu = cpuSample && replayActive;
+    if (suppressCpu) edvrPluginCostMarkTraceSuppressed();
+    if (capturing) {
+        draw_ladder_trace::DrawFacts facts{};
+        facts.eyeDrawIndex = g_state->eyeDrawsThisFrame;
+        facts.kind = static_cast<uint8_t>(kind);
+        facts.route = draw_ladder::RouteId::kCommon;
+        facts.sequence = draw_ladder::SequenceId::kCommon;
+        facts.count = count;
+        facts.instances = instances;
+        facts.args = args;
+        facts.vsHash = bindingShaderHash(BindSlot::Vs);
+        facts.psHash = bindingShaderHash(BindSlot::Ps);
+        facts.vsIdentity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Vs));
+        facts.psIdentity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Ps));
+        facts.rtv0Identity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Rtv0));
+        facts.dsv0Identity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Dsv0));
+        facts.rtv0Generation = bindingGeneration(BindSlot::Rtv0);
+        facts.dsv0Generation = bindingGeneration(BindSlot::Dsv0);
+        if (g_state->rtv0SizeGen == facts.rtv0Generation) {
+            facts.rtv0Width = g_state->rtv0W;
+            facts.rtv0Height = g_state->rtv0H;
+        }
+        facts.flags = (g_state->pluginDispatchEnabled ? 1u : 0u) |
+                      (g_state->distanceEnabled ? 2u : 0u) |
+                      (g_state->fssHealOn ? 4u : 0u) |
+                      (g_state->quadSkipArmed ? 8u : 0u);
+        const auto token = draw_ladder_trace::beginDraw(facts);
+        auto trace = draw_ladder_trace::makePolicy(token);
+        ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawBegin>(
+            trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args);
+        const auto previousToken = t_activeDrawReplayToken;
+        t_activeDrawReplayToken = token;
+        plugin_cost::NoCpu noCpu;
+        const LadderDecision result = work(trace, noCpu);
+        t_activeDrawReplayToken = previousToken;
+        ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawEnd>(
+            trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args);
+        draw_ladder_trace::finishDraw(token, static_cast<int16_t>(result.winner),
+                                      static_cast<int16_t>(result.verdict));
+        return result;
+    }
+    draw_ladder::NoTrace noTrace;
+    if (cpuSample && !suppressCpu) {
+        plugin_cost::SampledCpu<> sampledCpu;
+        return work(noTrace, sampledCpu);
+    }
+    plugin_cost::NoCpu noCpu;
+    return work(noTrace, noCpu);
+}
+
+template <class Work>
+void withFlatBypassTrace(ID3D11DeviceContext* self, char kind, UINT count,
+                         UINT instances, const DrawArgs& args, Work&& work,
+                         ID3D11Buffer* argumentBuffer = nullptr,
+                         UINT argumentOffset = 0,
+                         bool argumentBufferKnown = false,
+                         bool drawParametersKnown = true) {
+    if (self == g_state->ownerCtx && draw_ladder_trace::drawLadderTraceCaptureActive()) {
+        draw_ladder_trace::DrawFacts facts{};
+        facts.eyeDrawIndex = g_state->eyeDrawsThisFrame;
+        facts.kind = static_cast<uint8_t>(kind);
+        facts.route = draw_ladder::RouteId::kFlatRuntimeBypass;
+        facts.sequence = draw_ladder::SequenceId::kFlatRuntimeBypass;
+        facts.count = count;
+        facts.instances = instances;
+        facts.args = args;
+        facts.argumentBufferIdentity = reinterpret_cast<uintptr_t>(argumentBuffer);
+        facts.argumentByteOffset = argumentOffset;
+        facts.argumentBufferKnown = argumentBufferKnown;
+        facts.drawParametersKnown = drawParametersKnown;
+        facts.vsHash = bindingShaderHash(BindSlot::Vs);
+        facts.psHash = bindingShaderHash(BindSlot::Ps);
+        facts.vsIdentity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Vs));
+        facts.psIdentity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Ps));
+        facts.rtv0Identity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Rtv0));
+        facts.dsv0Identity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Dsv0));
+        facts.rtv0Generation = bindingGeneration(BindSlot::Rtv0);
+        facts.dsv0Generation = bindingGeneration(BindSlot::Dsv0);
+        const auto token = draw_ladder_trace::beginDraw(facts);
+        auto trace = draw_ladder_trace::makePolicy(token);
+        ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawBegin>(
+            trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 0, 0, argumentOffset);
+        const auto previousToken = t_activeDrawReplayToken;
+        t_activeDrawReplayToken = token;
+        const auto exit = draw_ladder::SiteResult::exited(0);
+        trace.template site<draw_ladder::SiteId::kFlatRuntimeBypass,
+                            draw_ladder::SiteKind::Exit>(exit);
+        work(trace);
+        t_activeDrawReplayToken = previousToken;
+        ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawEnd>(
+            trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 0, 0, argumentOffset);
+        draw_ladder_trace::finishDraw(token,
+            static_cast<int16_t>(draw_ladder::SiteId::kFlatRuntimeBypass), 0);
+        return;
+    }
+    draw_ladder::NoTrace noTrace;
+    work(noTrace);
+}
+
+template <draw_ladder::RouteId Route, draw_ladder::SequenceId Sequence,
+          draw_ladder::SiteId Site, draw_ladder::ActionId Action, class Work>
+void withCommandBypassTrace(ID3D11DeviceContext* self, char kind,
+                            uint32_t count, uint32_t instances,
+                            const DrawArgs& args, ID3D11Buffer* argumentBuffer,
+                            UINT argumentOffset, bool argumentBufferKnown,
+                            bool drawParametersKnown, uint16_t actionFlags,
+                            bool blocked, Work&& work) {
+    if (self == g_state->ownerCtx && draw_ladder_trace::drawLadderTraceCaptureActive()) {
+        draw_ladder_trace::DrawFacts facts{};
+        facts.eyeDrawIndex = g_state->eyeDrawsThisFrame;
+        facts.kind = static_cast<uint8_t>(kind);
+        facts.route = Route;
+        facts.sequence = Sequence;
+        facts.count = count;
+        facts.instances = instances;
+        facts.args = args;
+        facts.argumentBufferIdentity = reinterpret_cast<uintptr_t>(argumentBuffer);
+        facts.argumentByteOffset = argumentOffset;
+        facts.argumentBufferKnown = argumentBufferKnown;
+        facts.drawParametersKnown = drawParametersKnown;
+        facts.vsHash = bindingShaderHash(BindSlot::Vs);
+        facts.psHash = bindingShaderHash(BindSlot::Ps);
+        facts.vsIdentity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Vs));
+        facts.psIdentity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Ps));
+        facts.rtv0Identity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Rtv0));
+        facts.dsv0Identity = reinterpret_cast<uintptr_t>(bindingGet(BindSlot::Dsv0));
+        facts.rtv0Generation = bindingGeneration(BindSlot::Rtv0);
+        facts.dsv0Generation = bindingGeneration(BindSlot::Dsv0);
+        const auto token = draw_ladder_trace::beginDraw(facts);
+        auto trace = draw_ladder_trace::makePolicy(token);
+        ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawBegin>(
+            trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 0, 0, argumentOffset);
+        const auto previousToken = t_activeDrawReplayToken;
+        t_activeDrawReplayToken = token;
+        const auto exit = draw_ladder::SiteResult::exited(0, blocked ? 1 : 0);
+        trace.template site<Site, draw_ladder::SiteKind::Exit>(exit);
+        const bool issued = !blocked && work(trace);
+        if (!issued) {
+            ladderTraceAction<decltype(trace), Action>(
+                trace, draw_ladder::ActionPhase::Issue,
+                draw_ladder::ActionOutcome::Declined,
+                kind, count, instances, args, 0, actionFlags, argumentOffset);
+        }
+        t_activeDrawReplayToken = previousToken;
+        ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawEnd>(
+            trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 0, 0, argumentOffset);
+        draw_ladder_trace::finishDraw(token, static_cast<int16_t>(Site), 0);
+        return;
+    }
+    draw_ladder::NoTrace noTrace;
+    if (!blocked) work(noTrace);
+}
+
+template <draw_ladder::ActionId Action, class Work>
+void withInternalWorldBypass(ID3D11DeviceContext* self, char kind,
+                             uint32_t count, uint32_t instances,
+                             const DrawArgs& args, ID3D11Buffer* argumentBuffer,
+                             UINT argumentOffset, bool argumentBufferKnown,
+                             bool drawParametersKnown, uint16_t actionFlags,
+                             Work&& work) {
+    if (t_activeDrawReplayToken.valid()) {
+        work();
+        noteNestedOriginalDraw(kind, count, instances, args, actionFlags,
+                               argumentOffset);
+        return;
+    }
+    withCommandBypassTrace<draw_ladder::RouteId::kInternalWorldBypass,
+                           draw_ladder::SequenceId::kInternalWorldBypass,
+                           draw_ladder::SiteId::kInternalWorldBypass, Action>(
+        self, kind, count, instances, args, argumentBuffer, argumentOffset,
+        argumentBufferKnown, drawParametersKnown, actionFlags, false,
+        [&](auto& trace) {
+            work();
+            ladderTraceAction<decltype(trace), Action>(
+                trace, draw_ladder::ActionPhase::Issue,
+                draw_ladder::ActionOutcome::Applied, kind, count, instances,
+                args, 1, actionFlags, argumentOffset);
+            return true;
+        });
+}
 void endPanelOverride(ID3D11DeviceContext* self) {
     State* s = g_state;
     ID3D11Buffer* orig = static_cast<ID3D11Buffer*>(s->compositeCb);
@@ -3527,7 +4422,18 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
 // NOINLINE rather than __declspec(safebuffers): the cookie is protecting a
 // real array that a D3D call writes into, and it still does, here, where the
 // array is. Only the hot path is relieved of it.
-__declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
+template <class TracePolicy>
+void traceQuadIssue(TracePolicy& trace, UINT count, UINT instances, UINT start,
+                    INT baseVertex, UINT startInstance) {
+    DrawArgs args{}; args.start = start; args.base = baseVertex; args.startInstance = startInstance;
+    ladderTraceAction<TracePolicy, draw_ladder::ActionId::kReplaceDraw>(
+        trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+        'X', count, instances, args, 1);
+}
+
+template <class TracePolicy>
+__declspec(noinline) void forwardQuadSkip(TracePolicy& trace,
+                                          ID3D11DeviceContext* self) {
     State* s = g_state;
     const UINT total = s->qsIndexCount;
     const UINT cut0 = s->quadSkip.lo * 6;
@@ -3541,6 +4447,8 @@ __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
     //
     // 1. the quads before the range
     if (cut0 > 0 && cut0 <= total) {
+        traceQuadIssue(trace, cut0, s->qsInstances, s->qsStartIndex,
+                       s->qsBaseVertex, s->qsStartInstance);
         s->realDrawIndexedInstanced(self, cut0, s->qsInstances,
                                     s->qsStartIndex, s->qsBaseVertex,
                                     s->qsStartInstance);
@@ -3593,6 +4501,9 @@ __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
             box.bottom = static_cast<LONG>(cy + hh);
             self->RSSetScissorRects(1, &box);
             self->RSSetState(s->quadClipRs);
+            traceQuadIssue(trace, cut1 - cut0, s->qsInstances,
+                           s->qsStartIndex + cut0, s->qsBaseVertex,
+                           s->qsStartInstance);
             s->realDrawIndexedInstanced(self, cut1 - cut0, s->qsInstances,
                                         s->qsStartIndex + cut0,
                                         s->qsBaseVertex,
@@ -3604,11 +4515,13 @@ __declspec(noinline) void forwardQuadSkip(ID3D11DeviceContext* self) {
     }
     // 3. the quads after the range
     if (cut1 < total) {
+        traceQuadIssue(trace, total - cut1, s->qsInstances,
+                       s->qsStartIndex + cut1, s->qsBaseVertex,
+                       s->qsStartInstance);
         s->realDrawIndexedInstanced(self, total - cut1, s->qsInstances,
                                     s->qsStartIndex + cut1,
                                     s->qsBaseVertex, s->qsStartInstance);
     }
-    return;
 }
 
 // THE VERDICT'S OWN BEGIN AND END, for the draw that has one.
@@ -3637,7 +4550,7 @@ __declspec(noinline) void forwardVerdictBegin(ID3D11DeviceContext* self, DrawVer
     case DrawVerdict::kResolveBind:  resolveBindBegin(self); break;
     case DrawVerdict::kHolo:         holoBegin(self); break;
     case DrawVerdict::kTargetSharp:  targetSharpBegin(self); break;
-    case DrawVerdict::kNightVision:  nightVisionBegin(self); break;
+    case DrawVerdict::kNightVision:  pluginRegistryBegin(kPluginClaimNightVision,self); break;
     case DrawVerdict::kScrim:        scrimBegin(self); break;
     case DrawVerdict::kGlareSteady:  sunglareBegin(self); break;
     case DrawVerdict::kParticle:     particleBegin(self); break;
@@ -3652,7 +4565,7 @@ __declspec(noinline) void forwardVerdictEnd(ID3D11DeviceContext* self, DrawVerdi
     case DrawVerdict::kGlareSteady:  sunglareEnd(self); break;
     case DrawVerdict::kScrim:        scrimEnd(self); break;
     case DrawVerdict::kTargetSharp:  targetSharpEnd(self); break;
-    case DrawVerdict::kNightVision:  nightVisionEnd(self); break;
+    case DrawVerdict::kNightVision:  pluginRegistryEnd(kPluginClaimNightVision,self); break;
     case DrawVerdict::kHolo:         holoEnd(self); break;
     case DrawVerdict::kFssReveal:    fssRevealEnd(self); break;
     case DrawVerdict::kResolveBind:  resolveBindEnd(self); break;
@@ -3733,12 +4646,26 @@ __declspec(noinline) void pureDrawReissue(ID3D11DeviceContext* self, char kind, 
 // game's own. NOINLINE for the same reason pureDrawReissue is: at most two
 // admitted draws a frame while the crisp-HUD half is on, and the draw path must not
 // pay its frame for the rest.
-__declspec(noinline) void crispHudTonemapReissue(ID3D11DeviceContext* self, char kind, UINT count,
+template <class TracePolicy>
+__declspec(noinline) void crispHudTonemapReissue(TracePolicy& trace,
+                                                 ID3D11DeviceContext* self,
+                                                 char kind, UINT count,
                                                  UINT instances, const DrawArgs& args) {
-    if (uiLayerCrispToneBegin(self)) {
+    const bool began = uiLayerCrispToneBegin(self);
+    ladderTraceAction<TracePolicy, draw_ladder::ActionId::kCrispHudDraw>(
+        trace, draw_ladder::ActionPhase::Begin,
+        began ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+        kind, count, instances, args);
+    if (began) {
         GpuCensusScope census(self, GpuCensusSection::FrameUiLayerReissues);
         pureDrawReissue(self, kind, count, instances, args);
         uiLayerCrispToneEnd(self);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kCrispHudDraw>(
+            trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 1);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kCrispHudDraw>(
+            trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args);
     }
 }
 
@@ -3773,14 +4700,33 @@ __declspec(noinline) void footprintEyeDraw(ID3D11DeviceContext* self, float appl
     vscreenFootprintCompositeDraw(self, applied, static_cast<int>(baseVertex), static_cast<unsigned>(startInstance));
 }
 
-__declspec(noinline) void worldScreenReissue(ID3D11DeviceContext* self, char kind, UINT count,
-                                             UINT instances, const DrawArgs& args) {
-    if (uiLayerIssueBlocked()) return;
+template <class TracePolicy>
+__declspec(noinline) void worldScreenReissue(TracePolicy& trace,
+                                             ID3D11DeviceContext* self, char kind,
+                                             UINT count, UINT instances,
+                                             const DrawArgs& args) {
+    if (uiLayerIssueBlocked()) {
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
+            trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Declined,
+            kind, count, instances, args);
+        return;
+    }
     VrWorldInternalScope internal;
-    if (uiLayerWorldReissueBegin(self)) {
+    const bool began = uiLayerWorldReissueBegin(self);
+    ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
+        trace, draw_ladder::ActionPhase::Begin,
+        began ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+        kind, count, instances, args);
+    if (began) {
         GpuCensusScope census(self, GpuCensusSection::FrameWorldLayer);
         pureDrawReissue(self, kind, count, instances, args);
         uiLayerWorldReissueEnd(self);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
+            trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 1);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
+            trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args);
     }
 }
 
@@ -3790,14 +4736,45 @@ __declspec(noinline) void worldScreenReissue(ID3D11DeviceContext* self, char kin
 // curvature and any panel distance (the distance override's constants are still bound: the caller is inside beginPanelOverride's
 // bracket). Ready is asked BEFORE the layer's bracket is opened, so a draw that cannot be made never opens one; a draw that faults
 // after it closes the bracket without taking the eye (uiLayerWorldReissueEnd(.., false)) and the eye route serves it.
-__declspec(noinline) void worldScreenReissueCurved(ID3D11DeviceContext* self) {
-    if (uiLayerIssueBlocked()) return;
+template <class TracePolicy>
+__declspec(noinline) void worldScreenReissueCurved(TracePolicy& trace,
+                                                  ID3D11DeviceContext* self,
+                                                  char kind, UINT count,
+                                                  UINT instances,
+                                                  const DrawArgs& args) {
+    if (uiLayerIssueBlocked()) {
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
+            trace, draw_ladder::ActionPhase::Begin,
+            draw_ladder::ActionOutcome::Declined, kind, count, instances, args,
+            0);
+        return;
+    }
     VrWorldInternalScope internal;
-    if (!panelCurveReissueReady()) return;
-    if (uiLayerWorldReissueBegin(self)) {
+    if (!panelCurveReissueReady()) {
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
+            trace, draw_ladder::ActionPhase::Begin,
+            draw_ladder::ActionOutcome::Declined, kind, count, instances, args,
+            0);
+        return;
+    }
+    const bool began = uiLayerWorldReissueBegin(self);
+    ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
+        trace, draw_ladder::ActionPhase::Begin,
+        began ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+        kind, count, instances, args, 0);
+    if (began) {
         GpuCensusScope census(self, GpuCensusSection::FrameWorldLayer);
         const bool drawn = panelCurveReissue(self, g_state->realDrawIndexedInstanced);
         uiLayerWorldReissueEnd(self, drawn);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
+            trace, draw_ladder::ActionPhase::Issue,
+            drawn ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+            'X', 0, 0, DrawArgs{}, 0,
+            draw_ladder::kActionIssueCountUnknown |
+                draw_ladder::kActionGeneratedDrawArgsUnavailable);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(
+            trace, draw_ladder::ActionPhase::End,
+            draw_ladder::ActionOutcome::Applied, kind, count, instances, args);
     }
 }
 
@@ -3806,14 +4783,17 @@ __declspec(noinline) void worldScreenReissueCurved(ID3D11DeviceContext* self) {
 // quad the game bound -- the substitution has put the game's vertex buffer back -- so the screen's footprint is measured flat, which is
 // what the fit's m is defined at (the middle of the panel; vscreen_fit.h); (2) while the route owns the frame, screen motion's
 // recognition (its per-eye motion pass was skipped for the frame, as the flat tail skips it) and the route's re-issue of the strip.
-__declspec(noinline) void curvedScreenSwallowed(ID3D11DeviceContext* self, DrawVerdict v, UINT count, UINT instances,
+template <class TracePolicy>
+__declspec(noinline) void curvedScreenSwallowed(TracePolicy& trace,
+                                                ID3D11DeviceContext* self, DrawVerdict v,
+                                                UINT count, UINT instances,
                                                 const DrawArgs& args, bool routeOwns) {
     if (self != g_state->ownerCtx) return;
     if (g_state->rtv0Eye && count && instances && vscreenFootprintWanted())
         footprintEyeDraw(self, v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, args.base, args.startInstance);
     if (!routeOwns) return;
     if (screenMotionLive()) screenMotionRecognize();
-    worldScreenReissueCurved(self);
+    worldScreenReissueCurved(trace, self, 'X', count, instances, args);
 }
 
 // fix.ui_quality (ui_layer.h): which piece of the interface an owner draw is.
@@ -3891,17 +4871,41 @@ bool uiLayerVerdictForwards(DrawVerdict v) {
 // once more into the layer's per-channel transmittance, and a depth or
 // stencil write once more with no colour target, so the write lands in the
 // game's own buffer for the draws after it that test it.
-void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT instances,
+template <class TracePolicy>
+void uiLayerSecondIssues(TracePolicy& trace, ID3D11DeviceContext* self,
+                         char kind, UINT count, UINT instances,
                          const DrawArgs& args) {
     if (uiLayerIssueBlocked()) return;
     GpuCensusScope census(self, GpuCensusSection::FrameUiLayerReissues);
-    if (uiLayerMultiplyBegin(self)) {
+    const bool multiply = uiLayerMultiplyBegin(self);
+    ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSecondUiDraw>(
+        trace, draw_ladder::ActionPhase::Begin,
+        multiply ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+        kind, count, instances, args, 0, 1);
+    if (multiply) {
         pureDrawReissue(self, kind, count, instances, args);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSecondUiDraw>(
+            trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 1, 1);
         uiLayerEnd(self);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSecondUiDraw>(
+            trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 0, 1);
     }
-    if (uiLayerWriteBackBegin(self)) {
+    const bool writeBack = uiLayerWriteBackBegin(self);
+    ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSecondUiDraw>(
+        trace, draw_ladder::ActionPhase::Begin,
+        writeBack ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+        kind, count, instances, args, 0, 2);
+    if (writeBack) {
         pureDrawReissue(self, kind, count, instances, args);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSecondUiDraw>(
+            trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 1, 2);
         uiLayerWriteBackEnd(self);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSecondUiDraw>(
+            trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 0, 2);
     }
 }
 
@@ -3909,20 +4913,83 @@ void uiLayerSecondIssues(ID3D11DeviceContext* self, char kind, UINT count, UINT 
 // the real draw, the matching end. One function so the fifth verdict cannot
 // be added to three thunks and forgotten in the fourth -- kRemlok's plumbing
 // was pasted four times and this is the shape that stops the pattern.
-template <typename RealDraw>
-void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
+template <class TracePolicy>
+struct ForwardingInputsScope final {
+    TracePolicy& trace;
+    ForwardingObservation fact{};
+    explicit ForwardingInputsScope(TracePolicy& t, DrawVerdict verdict) noexcept : trace(t) {
+        if constexpr (TracePolicy::enabled)
+            fact.verdictOrdinal = {true, true, static_cast<std::int16_t>(verdict)};
+    }
+    ~ForwardingInputsScope() {
+        if constexpr (TracePolicy::enabled) trace.forwardInputs(fact);
+    }
+    template <class T>
+    void set(BasicDrawRead<T>& field, T value) noexcept {
+        if constexpr (TracePolicy::enabled) field = {true, true, value};
+    }
+    template <class T, class RawRead, class OriginalRead>
+    T read(BasicDrawRead<T>& field, RawRead&& rawRead, OriginalRead&& originalRead) {
+        if constexpr (TracePolicy::enabled) {
+            const T value = rawRead();
+            field = {true, true, value};
+            return value;
+        } else {
+            return originalRead();
+        }
+    }
+};
+
+// The default path must not acquire a nontrivial cleanup scope. An empty
+// user-defined destructor still makes MSVC duplicate surrounding RAII exits.
+template <>
+struct ForwardingInputsScope<draw_ladder::NoTrace> final {
+    ForwardingObservation fact{};
+    __forceinline explicit ForwardingInputsScope(draw_ladder::NoTrace&, DrawVerdict) noexcept {}
+    template <class T>
+    __forceinline void set(BasicDrawRead<T>&, T) noexcept {}
+    template <class T, class RawRead, class OriginalRead>
+    __forceinline T read(BasicDrawRead<T>&, RawRead&&, OriginalRead&& originalRead) {
+        return originalRead();
+    }
+};
+static_assert(std::is_trivially_destructible_v<ForwardingInputsScope<draw_ladder::NoTrace>>,
+              "NoTrace forwarding input scope must not add cleanup work");
+
+template <class TracePolicy, typename RealDraw>
+void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdict v,
                         char kind, UINT count, UINT instances, const DrawArgs& args, RealDraw&& draw) {
+    ForwardingInputsScope<TracePolicy> forwardInputs(trace, v);
     // Asked once. ownerCtx is written only at install (installVScreenFixes),
     // never by anything a draw can reach, so the answer cannot change between
     // the first use below and the last -- but g_state is a global the
     // compiler must reload across every call, and it was re-reading and
     // re-comparing it at each of a dozen sites per draw.
     const bool owner = self == g_state->ownerCtx;
-    if (owner && uiLayerIssueBlocked()) return;
+    if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedEntry,
+            [] { return detail::g_uiLayerIssueBlocked; },
+            [] { return uiLayerIssueBlocked(); })) {
+        if constexpr (TracePolicy::enabled) {
+            draw_ladder_trace::ForwardFacts facts{};
+            facts.presentMask = draw_ladder_trace::kForwardOwner |
+                                draw_ladder_trace::kForwardVerdict |
+                                draw_ladder_trace::kForwardIssueBlocked;
+            facts.owner = draw_ladder_trace::TriState::Yes;
+            facts.verdictOrdinal = static_cast<int16_t>(v);
+            facts.issueBlocked = draw_ladder_trace::TriState::Yes;
+            trace.forward(facts);
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,
+                kind, count, instances, args);
+        }
+        return;
+    }
     struct EffectCaptureScope {
         ID3D11DeviceContext* ctx;
         ~EffectCaptureScope(){if(ctx)objectProbeSourceDrawEnd(ctx);}
-    } effectCaptureScope{owner && objectProbeLedgerActive()?self:nullptr};
+    } effectCaptureScope{owner && forwardInputs.read(forwardInputs.fact.objectProbeLedgerOn,
+            [] { return detail::g_objectProbeLedgerOn; },
+            [] { return objectProbeLedgerActive(); }) ? self : nullptr};
     // Per-draw coverage classification is cleared on every exit, including
     // skips and fixes that draw their own geometry. The original draw keeps
     // its depth state; supported coverage is reissued into private depth below.
@@ -3946,11 +5013,20 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             // nothing armed to clean up.
         }
     } uiDepthScope(self);
+    forwardInputs.set(forwardInputs.fact.uiDepthThisDraw, uiDepthScope.on);
+    forwardInputs.set(forwardInputs.fact.holoDepthThisDraw, uiDepthScope.holoOn);
+    forwardInputs.set(forwardInputs.fact.compositeThisDraw, uiDepthScope.composite);
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
         // flag's lifetime inside the one call that set it.
+        if constexpr (TracePolicy::enabled)
+            forwardInputs.set(forwardInputs.fact.curveThisDrawBeforeSkipClear,
+                              g_state->curveThisDraw);
         g_state->curveThisDraw = false;
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
+            trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args);
         return;
     }
     // fix.ui_quality, the UI layer (ui_layer.h): decided once for this draw
@@ -3961,12 +5037,22 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // Off, this is one load; on, eye draws pay a generation compare and, on
     // the post-tonemap target only, the family rules.
     bool uiLayer = false;
+    bool familyEvaluated = false;
+    bool verdictForwardsEvaluated = false;
+    bool verdictForwards = false;
+    bool initialUiTakeEvaluated = false;
+    bool initialUiTake = false;
+    bool afterUiTakeEvaluated = false;
+    bool afterUiTake = false;
+    bool worldReissueEvaluated = false;
     struct SeedOutcomeScope {
         bool on, original = false, substituted = false, known = true, redirected = false;
         ~SeedOutcomeScope() {
             if (on) uiLayerSeedDrawOutcome(original, substituted, redirected, known);
         }
-    } seedOutcome{owner && uiLayerSeedDiagnostics()};
+    } seedOutcome{owner && forwardInputs.read(forwardInputs.fact.seedDiagnostics,
+            [] { return detail::g_uiSeedDiagnostics; },
+            [] { return uiLayerSeedDiagnostics(); })};
     // The VR world route's pending re-issue of THIS draw (ui_layer.h): held for this call and no longer, so a draw
     // that goes no further (swallowed, or never issued) cannot leave it for the next one.
     struct WorldReissueScope {
@@ -3982,9 +5068,26 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // (gpu_census.h), so the thunk's real-draw call can be timed as that section. Every
     // other issue through `draw` below passes None and is timed by its own section.
     auto observedDraw = [&](AlteredDraw altered) {
-        if (owner && uiLayerIssueBlocked()) return false;
-        if (stripIssued) return true;   // the strip was issued in its place: nothing more, and something was
+        if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,
+                [] { return detail::g_uiLayerIssueBlocked; },
+                [] { return uiLayerIssueBlocked(); })) {
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,
+                kind, count, instances, args);
+            return false;
+        }
+        if (stripIssued) {
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                kind, count, instances, args);
+            return true;   // the strip was issued in its place: nothing more, and something was
+        }
         const bool issued = draw(altered);
+        forwardInputs.set(forwardInputs.fact.originalCallReturned, issued);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kOriginalDraw>(
+            trace, draw_ladder::ActionPhase::Issue,
+            issued ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+            kind, count, instances, args, issued ? 1 : 0);
         if (seedOutcome.on) seedOutcome.original = seedOutcome.original || issued;
         return issued;
     };
@@ -3994,15 +5097,23 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // after-UI retry has had its say.
     bool compositeCounted = false;
     UiLayerFamily compositeFamily = UiLayerFamily::kNone;
-    if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
+    if (owner && forwardInputs.read(forwardInputs.fact.uiLayerLiveEyeGate,
+            [] { return detail::g_uiLayerLive; },
+            [] { return uiLayerLive(); }) && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
         const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
+        familyEvaluated = true;
         compositeCounted = uiDepthScope.composite;
         compositeFamily = uiFamily;
         if (uiFamily != UiLayerFamily::kNone) {
-            uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily), uiLayerVerdictForwards(v),
+            verdictForwards = uiLayerVerdictForwards(v);
+            verdictForwardsEvaluated = true;
+            initialUiTakeEvaluated = true;
+            uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily), verdictForwards,
                                     g_state->curveThisDraw);
+            initialUiTake = uiLayer;
             // The VR world route does not TAKE the 2D screen's composite: the game's draw is issued as it always
             // was and re-issued into the layer right after it (worldScreenReissue below).
+            worldReissueEvaluated = true;
             worldReissue.on = uiLayerWorldReissuePending();
             // The on-foot maps gate (ui_layer.h; experimental.on_foot_maps_sharp). While the layer TAKES the 2D screen's composite
             // the per-eye screen-motion calls at the tail of the game's draw stand aside (uiLayerRedirecting), and with them the
@@ -4013,7 +5124,9 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             if (uiLayer && uiFamily == UiLayerFamily::kScreen && uiLayerMapsOn() && screenMotionLive() && screenMotionRecognize())
                 uiLayerMapsNoteRecognised();
         }
-    } else if (owner && uiLayerLive() && v != DrawVerdict::kQuadSkip) {
+    } else if (owner && forwardInputs.read(forwardInputs.fact.uiLayerLiveFallbackGate,
+            [] { return detail::g_uiLayerLive; },
+            [] { return uiLayerLive(); }) && v != DrawVerdict::kQuadSkip) {
         // The two composites into a target vScreen does not call an eye's:
         // counted for the family census (one hash load a draw while live).
         const uint64_t vs = bindingShaderHash(BindSlot::Vs);
@@ -4033,21 +5146,33 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // shown to it: the tonemap READS the HDR target the HUD families were
     // taken from, which is exactly what the re-issue re-points -- not a post
     // pass to name.
-    if (!uiLayer && owner && uiLayerWatching() && !uiLayerCrispPending()) {
-        // rc-since-rc2 review F4: the retry preserves the original decision's
-        // exclusions -- the shader exclusion (ui_depth's list, as
-        // uiLayerFamilyOf reads it) and the held world-screen identity (the
-        // 2D screen's panel-sized SRV, as uiLayerDecide's kWorldScreen reads
-        // it) -- both lost when the kAfterUi family was taken on its own.
-        const bool afterExcluded = uiDepthIsExcluded(bindingShaderHash(BindSlot::Vs));
-        const bool afterPanelSized = srv0IsPanelSized(g_state, kind, count);
-        uiLayer = uiLayerNoteOther(self, count, uiLayerVerdictForwards(v), g_state->curveThisDraw,
-                                   afterExcluded, afterPanelSized, instances, static_cast<uint32_t>(v), kind);
-        // A draw the retry took is the layer's, not the route's to re-issue (the held screen's exclusion never
-        // lets it take a 2D screen composite; this keeps "taken AND re-issued" impossible by construction).
-        if (uiLayer && worldReissue.on) {
-            worldReissue.on = false;
-            uiLayerWorldReissueAbandon();
+    bool retryCrispPending = false;
+    bool retryCrispEvaluated = false;
+    if (!uiLayer && owner && forwardInputs.read(forwardInputs.fact.uiLayerWatchingGate,
+            [] { return detail::g_uiLayerWatching; },
+            [] { return uiLayerWatching(); })) {
+        retryCrispEvaluated = true;
+        retryCrispPending = uiLayerCrispPending();
+        if (!retryCrispPending) {
+            // rc-since-rc2 review F4: the retry preserves the original decision's
+            // exclusions -- the shader exclusion (ui_depth's list, as
+            // uiLayerFamilyOf reads it) and the held world-screen identity (the
+            // 2D screen's panel-sized SRV, as uiLayerDecide's kWorldScreen reads
+            // it) -- both lost when the kAfterUi family was taken on its own.
+            const bool afterExcluded = uiDepthIsExcluded(bindingShaderHash(BindSlot::Vs));
+            const bool afterPanelSized = srv0IsPanelSized(g_state, kind, count);
+            verdictForwards = uiLayerVerdictForwards(v);
+            verdictForwardsEvaluated = true;
+            afterUiTakeEvaluated = true;
+            uiLayer = uiLayerNoteOther(self, count, verdictForwards, g_state->curveThisDraw,
+                                       afterExcluded, afterPanelSized, instances, static_cast<uint32_t>(v), kind);
+            afterUiTake = uiLayer;
+            // A draw the retry took is the layer's, not the route's to re-issue (the held screen's exclusion never
+            // lets it take a 2D screen composite; this keeps "taken AND re-issued" impossible by construction).
+            if (uiLayer && worldReissue.on) {
+                worldReissue.on = false;
+                uiLayerWorldReissueAbandon();
+            }
         }
     }
     // The census of composites left in the scene, settled after BOTH takes (the
@@ -4063,6 +5188,62 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                                      static_cast<int>(compositeFamily));
         }
     }
+    if constexpr (TracePolicy::enabled) {
+        draw_ladder_trace::ForwardFacts facts{};
+        facts.presentMask = draw_ladder_trace::kForwardOwner |
+                            draw_ladder_trace::kForwardVerdict |
+                            draw_ladder_trace::kForwardCurveThisDraw |
+                            draw_ladder_trace::kForwardIntroCurveThisDraw |
+                            draw_ladder_trace::kForwardUiDepth |
+                            draw_ladder_trace::kForwardHoloDepth |
+                            draw_ladder_trace::kForwardComposite |
+                            draw_ladder_trace::kForwardIssueBlocked;
+        facts.owner = owner ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        facts.verdictOrdinal = static_cast<int16_t>(v);
+        facts.curveThisDraw = g_state->curveThisDraw
+            ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        facts.introCurveThisDraw = g_state->introCurveThisDraw
+            ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        facts.uiDepth = uiDepthScope.on
+            ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        facts.holoDepth = uiDepthScope.holoOn
+            ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        facts.composite = uiDepthScope.composite
+            ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        facts.issueBlocked = draw_ladder_trace::TriState::No;
+        if (verdictForwardsEvaluated) {
+            facts.presentMask |= draw_ladder_trace::kForwardVerdictForwards;
+            facts.verdictForwards = verdictForwards
+                ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        }
+        if (familyEvaluated) {
+            facts.presentMask |= draw_ladder_trace::kForwardFamily;
+            facts.familyAvailable = compositeFamily != UiLayerFamily::kNone
+                ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+            facts.family = static_cast<uint16_t>(compositeFamily);
+        }
+        if (initialUiTakeEvaluated) {
+            facts.presentMask |= draw_ladder_trace::kForwardInitialUiTake;
+            facts.initialUiTake = initialUiTake
+                ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        }
+        if (afterUiTakeEvaluated) {
+            facts.presentMask |= draw_ladder_trace::kForwardAfterUiTake;
+            facts.afterUiTake = afterUiTake
+                ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        }
+        if (worldReissueEvaluated) {
+            facts.presentMask |= draw_ladder_trace::kForwardWorldReissue;
+            facts.worldReissue = worldReissue.on
+                ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        }
+        if (retryCrispEvaluated) {
+            facts.presentMask |= draw_ladder_trace::kForwardCrispPending;
+            facts.crispPending = retryCrispPending
+                ? draw_ladder_trace::TriState::Yes : draw_ladder_trace::TriState::No;
+        }
+        trace.forward(facts);
+    }
     // The sub-draw probe, which also SWALLOWS the game's draw -- it re-issues
     // the surviving index ranges itself. Before the curve substitution
     // because both swallow, and two swallows would draw the quads twice.
@@ -4070,9 +5251,18 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     if (v == DrawVerdict::kLoaderPanel) {
         const bool layered = uiLayer && uiLayerBegin(self);
         if (seedOutcome.on && layered) seedOutcome.redirected = true;
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kReplaceDraw>(
+            trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Attempted,
+            kind, count, instances, args, 0, draw_ladder::kActionIssueCountUnknown);
         const bool swallowed = loaderPanelSubstitute(self, g_state->realDrawIndexedInstanced,
                                                      g_state->qsInstances,
                                                      g_state->qsStartInstance);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kReplaceDraw>(
+            trace, draw_ladder::ActionPhase::Issue,
+            swallowed ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+            'X', 0, 0, DrawArgs{}, 0,
+            draw_ladder::kActionIssueCountUnknown |
+                draw_ladder::kActionGeneratedDrawArgsUnavailable);
         if (seedOutcome.on) {
             seedOutcome.substituted = swallowed;
             seedOutcome.known = !swallowed; // substitute can withhold or issue geometry
@@ -4085,7 +5275,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             observedDraw(classifyAlteredDraw(owner, true, false, layered));
         if (layered) {
             uiLayerEnd(self);
-            if (issued) uiLayerSecondIssues(self, kind, count, instances, args);
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kUiLayerDraw>(
+                trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+                kind, count, instances, args);
+            if (issued) uiLayerSecondIssues(trace, self, kind, count, instances, args);
         }
         return;
     }
@@ -4094,19 +5287,33 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             seedOutcome.substituted = true;
             seedOutcome.known = false; // surviving ranges may issue zero or several commands
         }
-        forwardQuadSkip(self);
+        forwardQuadSkip(trace, self);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
+            trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args);
         return;
     }
     // The geometry substitution, which SWALLOWS the game's draw when it
     // succeeds and forwards it untouched when it does not -- so a failure
     // here is a flat screen, never a missing one.
-    if (g_state->curveThisDraw) {
+    if (forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,
+            [&] { return g_state->curveThisDraw; },
+            [&] { return g_state->curveThisDraw; })) {
         g_state->curveThisDraw = false;
         const bool layered = uiLayer && uiLayerBegin(self);
         if (seedOutcome.on && layered) seedOutcome.redirected = true;
         // The strip's own motion pass is the per-eye one the game's tail ends with, which the flat screen skips while the VR
         // world route owns the frame (worldReissue.on: the route's re-issue below makes the eye layer-only); so does this.
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kCurveStripDraw>(
+            trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Attempted,
+            kind, count, instances, args, 0, draw_ladder::kActionIssueCountUnknown);
         const bool swallowed = panelCurveSubstitute(self, g_state->realDrawIndexedInstanced, !worldReissue.on);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kCurveStripDraw>(
+            trace, draw_ladder::ActionPhase::Issue,
+            swallowed ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+            'X', 0, 0, DrawArgs{}, 0,
+            draw_ladder::kActionIssueCountUnknown |
+                draw_ladder::kActionGeneratedDrawArgsUnavailable);
         if (seedOutcome.on) {
             seedOutcome.substituted = swallowed;
             // A successful substitute issues its mesh and can issue the
@@ -4118,18 +5325,27 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             // The route's frame (worldReissue.on) re-issues the strip into the layer here, before the verdict's state is undone by
             // the caller (endPanelOverride): the placement the second issue needs is still bound. Not a taken draw: taken and
             // re-issued are exclusive (uiLayerDecide's plan is never made for a take).
-            curvedScreenSwallowed(self, v, count, instances, args, worldReissue.on);
+            curvedScreenSwallowed(trace, self, v, count, instances, args, worldReissue.on);
             return;
         }
     }
     // One compare for the ordinary draw; the switch for the one with a
     // verdict (forwardVerdictBegin says why this is the same ladder).
-    if (v != DrawVerdict::kNone) forwardVerdictBegin(self, v);
+    if (v != DrawVerdict::kNone) {
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kReplaceDraw>(
+            trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Attempted,
+            kind, count, instances, args, 0, static_cast<uint16_t>(v));
+        forwardVerdictBegin(self, v);
+    }
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
     // The layer's bracket goes innermost: after the verdict's own Begin (a
     // RemLok scissor, a slot swap) so the layer maps the state the draw is
     // actually issued with, and around nothing but the game's own draw.
     const bool layered = uiLayer && uiLayerBegin(self);
+    if (uiLayer) ladderTraceAction<TracePolicy, draw_ladder::ActionId::kUiLayerDraw>(
+        trace, draw_ladder::ActionPhase::Begin,
+        layered ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+        kind, count, instances, args);
     if (seedOutcome.on && layered) seedOutcome.redirected = true;
     // Which kind of altered draw the game's own draw is now (gpu_census.h): a pool-family
     // draw runs with EDVR's slot target and shaders bound (engineVelocityBeforeDraw ran
@@ -4137,8 +5353,16 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // other verdict inside its fix's state change. A handful of loads and compares on a
     // draw that is none of them.
     // A Verdict-class draw also carries the fix that wraps it (alteredFixOf): the census names each.
-    const AlteredDrawClass alteredClass = classifyAlteredDraw(owner, v == DrawVerdict::kNone,
-                                                              engineVelocityDrawSubstituted(), layered);
+    const AlteredDrawClass alteredClass = [&] {
+        if constexpr (TracePolicy::enabled) {
+            const int family = engine_velocity_detail::cache.family;
+            forwardInputs.set(forwardInputs.fact.engineVelocityCacheFamily, family);
+            return classifyAlteredDraw(owner, v == DrawVerdict::kNone, family >= 0, layered);
+        } else {
+            return classifyAlteredDraw(owner, v == DrawVerdict::kNone,
+                                       engineVelocityDrawSubstituted(), layered);
+        }
+    }();
     // THE SURFACE STRIP (docs\intro-video.md, 2026-10-01). With fix.panel_curvature above 0 the intro movie's composite (EDVR places its quad;
     // intro_panel.h) and the splash's (the game's own placement; intro_curve.h) are drawn as the bent strip IN THE PLACE of the game's flat quad.
     // Here and not in the on-foot branch above, which returns before the verdict's Begin: kBackdrop's slot swap is in place by now, and the splash
@@ -4151,7 +5375,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     float stripGain = 0.0f;
     int stripToward = 0;
     bool stripReverseU = false;
-    if ((v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw) && owner && panelCurveSurfaceWanted()) {
+    if ((v == DrawVerdict::kIntroPanel || forwardInputs.read(
+            forwardInputs.fact.introCurveThisDrawStripGate,
+            [&] { return g_state->introCurveThisDraw; },
+            [&] { return g_state->introCurveThisDraw; })) && owner && panelCurveSurfaceWanted()) {
         if (v == DrawVerdict::kIntroPanel) {
             // The movie: its quad is EDVR's, at the splash's half-width, with +z' toward the viewer.
             if (introPanelStripArmed()) {
@@ -4166,7 +5393,16 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             stripReverseU = introCurveReverseU();
         }
         if (stripToward != 0 && !uiLayerIssueBlocked()) {
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kCurveStripDraw>(
+                trace, draw_ladder::ActionPhase::Begin, draw_ladder::ActionOutcome::Attempted,
+                kind, count, instances, args, 0, draw_ladder::kActionIssueCountUnknown);
             stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kCurveStripDraw>(
+                trace, draw_ladder::ActionPhase::Issue,
+                stripIssued ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+                'X', 0, 0, DrawArgs{}, 0,
+                draw_ladder::kActionIssueCountUnknown |
+                    draw_ladder::kActionGeneratedDrawArgsUnavailable);
             if (seedOutcome.on && stripIssued) {
                 seedOutcome.substituted = true;
                 seedOutcome.known = false;   // the strip's mesh is not the game's draw: its original count is not the strip's
@@ -4177,7 +5413,10 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
                                                ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));
     if (layered) {
         uiLayerEnd(self);
-        if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kUiLayerDraw>(
+            trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args);
+        if (originalIssued) uiLayerSecondIssues(trace, self, kind, count, instances, args);
     }
     // the crisp-HUD half of fix.ui_quality: the game's tonemap draw, admitted in the eye-draw branch
     // while the HDR HUD layer holds this frame's HUD draws, is issued once
@@ -4185,25 +5424,39 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // eye's 8-bit layer, which the door's composite shows. AFTER the game's
     // own issue, so the picture is stock whether or not the re-issue runs;
     // one bool load for the ordinary draw.
-    if (originalIssued && uiLayerCrispPending()) {
-        crispHudTonemapReissue(self, kind, count, instances, args);
+    if (originalIssued && forwardInputs.read(forwardInputs.fact.crispPendingAfterOriginal,
+            [] { return detail::g_uiLayerCrispPending; },
+            [] { return uiLayerCrispPending(); })) {
+        crispHudTonemapReissue(trace, self, kind, count, instances, args);
     }
     // The VR world route: the 2D screen composite the layer did not take, issued above exactly as the game
     // always did, is issued once more into the eye's layer from the mipped, resolved screen (ui_layer.h). Before
     // the verdict's state is undone below: the placement state the second issue needs is still bound.
     if (worldReissue.on && originalIssued) {
-        worldScreenReissue(self, kind, count, instances, args);
+        worldScreenReissue(trace, self, kind, count, instances, args);
     }
     // A draw the UI layer took is not in the eye's colour at all, so the
     // interface depth below does not re-issue it: its depth and its
     // reactive mask exist to tell the upscaler about pixels the upscaler no
     // longer sees.
     if (effectCaptureScope.ctx) objectProbePanelDrawEnd(self);
-    if (owner && uiLayerIssueBlocked()) {
+    if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedAfterOriginal,
+            [] { return detail::g_uiLayerIssueBlocked; },
+            [] { return uiLayerIssueBlocked(); })) {
         // Begin failed with untrusted shader state: close existing brackets,
         // but issue neither the stock fallback nor any depth/motion replay.
-        if (v == DrawVerdict::kBackdrop) backdropEnd(self);
-        if (v != DrawVerdict::kNone) forwardVerdictEnd(self, v);
+        if (v == DrawVerdict::kBackdrop) {
+            backdropEnd(self);
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kBackdropEarlyEnd>(
+                trace, draw_ladder::ActionPhase::EarlyEnd, draw_ladder::ActionOutcome::Applied,
+                kind, count, instances, args);
+        }
+        if (v != DrawVerdict::kNone) {
+            forwardVerdictEnd(self, v);
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kReplaceDraw>(
+                trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+                kind, count, instances, args, 0, static_cast<uint16_t>(v));
+        }
         return;
     }
     // The interface's alpha-aware depth pass (ui_depth.h): a composite
@@ -4226,8 +5479,13 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // of 2026-09-07). splashDimBegin below has had this shape all along.
     if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {
         GpuCensusScope census(self, GpuCensusSection::FrameUiDepthCoverage);
-        if (uiDepthReissueBegin(self)) pureDrawReissue(self,kind,count,instances,args);
+        const bool began = uiDepthReissueBegin(self);
+        if (began) pureDrawReissue(self,kind,count,instances,args);
         uiDepthReissueEnd(self);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kDepthWriteDraw>(
+            trace, began ? draw_ladder::ActionPhase::Issue : draw_ladder::ActionPhase::Begin,
+            began ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+            kind, count, instances, args, began ? 1 : 0);
     }
     // The generic hologram/icon depth pass (ui_depth.h): the same draw twice
     // more, its light into a scratch target through its own blend, then its
@@ -4243,21 +5501,53 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // with the take on, not a pass failure).
     if (!layered && uiDepthScope.holoOn) {
         GpuCensusScope census(self, GpuCensusSection::FrameHologramPasses);
-        if (uiDepthHologramContributionBegin(self)) pureDrawReissue(self,kind,count,instances,args);
+        const bool contribution = uiDepthHologramContributionBegin(self);
+        if (contribution) pureDrawReissue(self,kind,count,instances,args);
         uiDepthHologramContributionEnd(self);
-        if (uiDepthHologramElementDepthBegin(self)) pureDrawReissue(self,kind,count,instances,args);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kHoloDepthDraw>(
+            trace, draw_ladder::ActionPhase::Issue,
+            contribution ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+            kind, count, instances, args, contribution ? 1 : 0, 1);
+        const bool element = uiDepthHologramElementDepthBegin(self);
+        if (element) pureDrawReissue(self,kind,count,instances,args);
         uiDepthHologramElementDepthEnd(self);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kHoloDepthDraw>(
+            trace, draw_ladder::ActionPhase::Issue,
+            element ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+            kind, count, instances, args, element ? 1 : 0, 2);
     }
     // uiDepthPlanetPending() is the function's own first test, inline: it
     // clears both flags and then declines unless one was set, so skipping it
     // when neither is set skips only the clearing of two false bools
     // (ui_depth.h). 44 innermost samples of the 2026-09-22 window.
-    if(owner && uiDepthPlanetPending() && uiDepthPlanetBegin(self)) {
+    const auto readPlanetPending = [&]() {
+        if constexpr (TracePolicy::enabled) {
+            bool pending = detail::g_uiDepthPlanetPending;
+            forwardInputs.set(forwardInputs.fact.planetPending, pending);
+            if (!pending) {
+                pending = detail::g_uiDepthPlanetSolarPending;
+                forwardInputs.set(forwardInputs.fact.planetSolarPending, pending);
+            }
+            return pending;
+        } else {
+            return uiDepthPlanetPending();
+        }
+    };
+    if(owner && readPlanetPending() && uiDepthPlanetBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FramePlanet);
-        pureDrawReissue(self,kind,count,instances,args);uiDepthPlanetEnd(self);
+        pureDrawReissue(self,kind,count,instances,args);
+        uiDepthPlanetEnd(self);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kDepthWriteDraw>(
+            trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 1, 3);
     }
     if (v != DrawVerdict::kNone) {
-        if (v == DrawVerdict::kBackdrop) backdropEnd(self);
+        if (v == DrawVerdict::kBackdrop) {
+            backdropEnd(self);
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kBackdropEarlyEnd>(
+                trace, draw_ladder::ActionPhase::EarlyEnd, draw_ladder::ActionOutcome::Applied,
+                kind, count, instances, args);
+        }
         // The splash screen's dim under the loader's dialogs (splash_dim.h):
         // the still's composite and the intro movie's composite are the two
         // draws that put the screen into the eye, and each is re-issued once
@@ -4268,14 +5558,31 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             splashDimBegin(self)) {
             // The dim is the same draw through the dark shader, so it follows the strip when the strip drew this one: the game's flat quad
             // would dim a rectangle over a screen whose edges have come nearer. A strip that fails here leaves the game's own draw.
-            if (!(stripIssued && panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced))) {
+            const bool stripDim = stripIssued && panelCurveSurfaceDraw(
+                self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);
+            bool dimIssued = stripDim;
+            if (!stripDim) {
                 draw(AlteredDrawClass::None);
+                dimIssued = true;
             }
             splashDimEnd(self);
+            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kBackdropDimDraw>(
+                trace, draw_ladder::ActionPhase::Issue,
+                dimIssued ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
+                stripDim ? 'X' : kind,
+                stripDim ? 0 : count,
+                stripDim ? 0 : instances,
+                stripDim ? DrawArgs{} : args,
+                stripDim ? 0 : (dimIssued ? 1 : 0),
+                stripDim ? (draw_ladder::kActionIssueCountUnknown |
+                            draw_ladder::kActionGeneratedDrawArgsUnavailable) : 0);
         }
         // Every other verdict's End, in the ladder's old order
         // (forwardVerdictEnd). kBackdrop has no case there: its End is above.
         forwardVerdictEnd(self, v);
+        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kReplaceDraw>(
+            trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
+            kind, count, instances, args, 0, static_cast<uint16_t>(v));
     }
 }
 
@@ -4365,61 +5672,100 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     ID3D11DeviceContext* self, ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
-        FlatRuntimeDrawScope flatDraw(self, 0, 'Z');
-        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
-        g_state->realDrawIndexedInstancedIndirect(self, args, off);
-        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+        withFlatBypassTrace(self, 'Z', 0, 0, DrawArgs{}, [&](auto& trace) {
+            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
+            FlatRuntimeDrawScope flatDraw(self, 0, 'Z');
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
+            g_state->realDrawIndexedInstancedIndirect(self, args, off);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawIndexedInstancedIndirect>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'Z', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable, off);
+        }, args, off, true, false);
         return;
     }
-    if (g_vrWorldInternal) { g_state->realDrawIndexedInstancedIndirect(self, args, off); return; }
-    if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
-    gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexedIndirect, self, static_cast<int>(self->GetType()));
-    noteStaleForward(kSlotDrawIndexedInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawIndexedInstancedIndirect),
-                     "DrawIndexedInstancedIndirect");
-    if (drawCensusArmed()) {
-        drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
+    if (g_vrWorldInternal) {
+        withInternalWorldBypass<draw_ladder::ActionId::kDrawIndexedInstancedIndirect>(
+            self, 'Z', 0, 0, DrawArgs{}, args, off, true, false,
+            draw_ladder::kActionGpuDrawArgsUnavailable,
+            [&] { g_state->realDrawIndexedInstancedIndirect(self, args, off); });
+        return;
     }
-    if (!foreignContext(self)) {
-        depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-        pixelProbeBefore(g_state, self);
-        if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
-    }
-    g_state->realDrawIndexedInstancedIndirect(self, args, off);
-    // Indirect: the GPU-side argument buffer means count/instances are not
-    // knowable here, the same reason drawCensusDrawDirect above logs 0,0.
-    if (!foreignContext(self)) pixelProbeAfterEye(g_state, self, 0, 0, true);
+    const bool blocked = self == g_state->ownerCtx && uiLayerIssueBlocked();
+    withCommandBypassTrace<draw_ladder::RouteId::kDrawIndexedInstancedIndirectBypass,
+                           draw_ladder::SequenceId::kDrawIndexedInstancedIndirectBypass,
+                           draw_ladder::SiteId::kDrawIndexedInstancedIndirectRuntimeBypass,
+                           draw_ladder::ActionId::kDrawIndexedInstancedIndirect>(
+        self, 'Z', 0, 0, DrawArgs{}, args, off, true, false,
+        draw_ladder::kActionGpuDrawArgsUnavailable, blocked, [&](auto& trace) {
+            gpuFrameCommand(self);
+            if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexedIndirect, self, static_cast<int>(self->GetType()));
+            noteStaleForward(kSlotDrawIndexedInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawIndexedInstancedIndirect),
+                             "DrawIndexedInstancedIndirect");
+            if (drawCensusArmed()) drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
+            if (!foreignContext(self)) {
+                depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
+                engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+                pixelProbeBefore(g_state, self);
+                if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+            }
+            g_state->realDrawIndexedInstancedIndirect(self, args, off);
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawIndexedInstancedIndirect>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'Z', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable, off);
+            // The GPU-side argument buffer leaves issued counts unknown.
+            if (!foreignContext(self)) pixelProbeAfterEye(g_state, self, 0, 0, true);
+            return true;
+        });
 }
 
 void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
                                                    ID3D11Buffer* args, UINT off) {
     if (runtimeFlatProfile()) {
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
-        FlatRuntimeDrawScope flatDraw(self, 0, 'Y');
-        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
-        g_state->realDrawInstancedIndirect(self, args, off);
-        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+        withFlatBypassTrace(self, 'Y', 0, 0, DrawArgs{}, [&](auto& trace) {
+            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
+            FlatRuntimeDrawScope flatDraw(self, 0, 'Y');
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
+            g_state->realDrawInstancedIndirect(self, args, off);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawInstancedIndirect>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'Y', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable, off);
+        }, args, off, true, false);
         return;
     }
-    if (g_vrWorldInternal) { g_state->realDrawInstancedIndirect(self, args, off); return; }
-    if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
-    gpuFrameCommand(self);
-    if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndirect, self, static_cast<int>(self->GetType()));
-    noteStaleForward(kSlotDrawInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawInstancedIndirect),
-                     "DrawInstancedIndirect");
-    if (drawCensusArmed()) {
-        drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
+    if (g_vrWorldInternal) {
+        withInternalWorldBypass<draw_ladder::ActionId::kDrawInstancedIndirect>(
+            self, 'Y', 0, 0, DrawArgs{}, args, off, true, false,
+            draw_ladder::kActionGpuDrawArgsUnavailable,
+            [&] { g_state->realDrawInstancedIndirect(self, args, off); });
+        return;
     }
-    if (!foreignContext(self)) {
-        depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-        pixelProbeBefore(g_state, self);
-        if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
-    }
-    g_state->realDrawInstancedIndirect(self, args, off);
-    if (!foreignContext(self)) pixelProbeAfterEye(g_state, self, 0, 0, true);
+    const bool blocked = self == g_state->ownerCtx && uiLayerIssueBlocked();
+    withCommandBypassTrace<draw_ladder::RouteId::kDrawInstancedIndirectBypass,
+                           draw_ladder::SequenceId::kDrawInstancedIndirectBypass,
+                           draw_ladder::SiteId::kDrawInstancedIndirectRuntimeBypass,
+                           draw_ladder::ActionId::kDrawInstancedIndirect>(
+        self, 'Y', 0, 0, DrawArgs{}, args, off, true, false,
+        draw_ladder::kActionGpuDrawArgsUnavailable, blocked, [&](auto& trace) {
+            gpuFrameCommand(self);
+            if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndirect, self, static_cast<int>(self->GetType()));
+            noteStaleForward(kSlotDrawInstancedIndirect, reinterpret_cast<const void*>(g_state->realDrawInstancedIndirect),
+                             "DrawInstancedIndirect");
+            if (drawCensusArmed()) drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
+            if (!foreignContext(self)) {
+                depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
+                engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+                pixelProbeBefore(g_state, self);
+                if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+            }
+            g_state->realDrawInstancedIndirect(self, args, off);
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawInstancedIndirect>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'Y', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable, off);
+            if (!foreignContext(self)) pixelProbeAfterEye(g_state, self, 0, 0, true);
+            return true;
+        });
 }
 
 void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
@@ -4640,13 +5986,21 @@ __declspec(noinline) void noteSceneInstancePool(ID3D11DeviceContext* self) {
 
 struct DrawClock {
     bool    on;
+    bool    cpuOn;
     int64_t t0;
     int64_t real = 0;
     bool forwarded = false;
-    DrawClock()
-        : on(perfMonitorSampleDraws() &&
-             (++t_drawClockOrdinal % kPerfMonitorDrawTimeStride) == 0),
-          t0(on ? qpcNow() : 0) {}
+    DrawClock() : on(false), cpuOn(false), t0(0) {
+        if (perfMonitorSampleDraws()) {
+            // One shared sampled-frame ordinal keeps the existing aggregate
+            // draw sample at offset 0 and places plugin-cost probes on the
+            // disjoint offset 32. Unsampled frames still do not advance it.
+            const uint32_t ordinal = ++t_drawClockOrdinal;
+            on = (ordinal % kPerfMonitorDrawTimeStride) == 0;
+            cpuOn = (ordinal % kPerfMonitorDrawTimeStride) == 32;
+        }
+        if (on) t0 = qpcNow();
+    }
     void realCall(int64_t start) {
         // Only the first call forwards the game's draw. Coverage reissues
         // are EDVR work; subtracting every call hid their CPU/driver cost.
@@ -4661,16 +6015,28 @@ struct DrawClock {
 void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT start) {
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDraw];
-        // Capture original game bindings before the temporal scope substitutes
-        // the engine-motion PS/MRT or the output-copy SRV.
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
-        FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
-        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
-        g_state->realDraw(self, count, start);
-        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+        DrawArgs args{}; args.base = static_cast<int32_t>(start);
+        withFlatBypassTrace(self, 'D', count, 1, args, [&](auto& trace) {
+            // Capture original game bindings before the temporal scope substitutes
+            // the engine-motion PS/MRT or the output-copy SRV.
+            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
+            FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            g_state->realDraw(self, count, start);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'D', count, 1, args, 1);
+        });
         return;
     }
-    if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
+    if (g_vrWorldInternal) {
+        DrawArgs args{}; args.base = static_cast<int32_t>(start);
+        withInternalWorldBypass<draw_ladder::ActionId::kOriginalDraw>(
+            self, 'D', count, 1, args, nullptr, 0, false, true, 0,
+            [&] { g_state->realDraw(self, count, start); });
+        return;
+    }   // the world route's own draw (vr_world_route.h)
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Draw, self, static_cast<int>(self->GetType()));
     DrawClock clock;
@@ -4680,50 +6046,97 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     if (quadProbeWants()) g_state->qsBaseVertex = static_cast<INT>(start);
     DrawArgs args;
     args.base = static_cast<int32_t>(start);
-    const DrawVerdict v = beginPanelOverride(self, 'D', count, 1, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
-    if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the VR world route's detector; at the tone, its resolve
-    forwardWithVerdict(self, v, 'D', count, 1, args, [&](AlteredDraw altered) {
-        const int64_t r0 = clock.on ? qpcNow() : 0;
-        {
-            GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
-            g_state->realDraw(self, count, start);
+    withDrawLadderTrace(self, 'D', count, 1, args,
+                        clock.cpuOn && g_state && self == g_state->ownerCtx,
+                        [&](auto& trace, auto& cpu) {
+        const LadderDecision decision = beginPanelOverride<
+            std::remove_reference_t<decltype(trace)>,
+            std::remove_reference_t<decltype(cpu)>>(trace, self, 'D', count, 1, args);
+        const DrawVerdict v = decision.verdict;
+        if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
+        if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+        forwardWithVerdict(trace, self, v, 'D', count, 1, args, [&](AlteredDraw altered) {
+            const int64_t r0 = clock.on ? qpcNow() : 0;
+            {
+                GpuCensusAlteredScope timed(self, altered);
+                g_state->realDraw(self, count, start);
+            }
+            if (clock.on) clock.realCall(r0);
+            return true;
+        });
+        if (v == DrawVerdict::kPanel) {
+            endPanelOverride(self);
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
+                trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
+                'D', count, 1, args);
         }
-        if (clock.on) clock.realCall(r0);
-        return true;
+        if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
+        return decision;
     });
-    if (v == DrawVerdict::kPanel) endPanelOverride(self);
-    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if (runtimeFlatProfile()) {
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
-        FlatRuntimeDrawScope flatDraw(self, 0, 'A');
-        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
-        g_state->realDrawAuto(self);
-        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+        withFlatBypassTrace(self, 'A', 0, 0, DrawArgs{}, [&](auto& trace) {
+            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
+            FlatRuntimeDrawScope flatDraw(self, 0, 'A');
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            g_state->realDrawAuto(self);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kAutoDraw>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'A', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable);
+        }, nullptr, 0, false, false);
         return;
     }
-    if (g_vrWorldInternal) { g_state->realDrawAuto(self); return; }
-    if (self == g_state->ownerCtx && uiLayerIssueBlocked()) return;
-    gpuFrameCommand(self);
-    if(self==g_state->ownerCtx)engineVelocityBeforeDraw(self,g_state->rtv0Eye);
-    if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
-    g_state->realDrawAuto(self);
+    if (g_vrWorldInternal) {
+        withInternalWorldBypass<draw_ladder::ActionId::kAutoDraw>(
+            self, 'A', 0, 0, DrawArgs{}, nullptr, 0, false, false,
+            draw_ladder::kActionGpuDrawArgsUnavailable,
+            [&] { g_state->realDrawAuto(self); });
+        return;
+    }
+    const bool blocked = self == g_state->ownerCtx && uiLayerIssueBlocked();
+    withCommandBypassTrace<draw_ladder::RouteId::kAutoBypass,
+                           draw_ladder::SequenceId::kAutoBypass,
+                           draw_ladder::SiteId::kAutoRuntimeBypass,
+                           draw_ladder::ActionId::kAutoDraw>(
+        self, 'A', 0, 0, DrawArgs{}, nullptr, 0, false, false,
+        draw_ladder::kActionGpuDrawArgsUnavailable, blocked, [&](auto& trace) {
+            gpuFrameCommand(self);
+            if (self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+            if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+            g_state->realDrawAuto(self);
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kAutoDraw>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'A', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable);
+            return true;
+        });
 }
 void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
                                          UINT startIndex, INT baseVertex) {
     if (runtimeFlatProfile()) {
         ++g_state->thunkHits[kHitDrawIndexed];
-        if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
-        FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
-        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
-        g_state->realDrawIndexed(self, count, startIndex, baseVertex);
-        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+        DrawArgs args{}; args.start = startIndex; args.base = baseVertex;
+        withFlatBypassTrace(self, 'I', count, 1, args, [&](auto& trace) {
+            if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
+            FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'I', count, 1, args, 1);
+        });
         return;
     }
-    if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
+    if (g_vrWorldInternal) {
+        DrawArgs args{}; args.start = startIndex; args.base = baseVertex;
+        withInternalWorldBypass<draw_ladder::ActionId::kOriginalDraw>(
+            self, 'I', count, 1, args, nullptr, 0, false, true, 0,
+            [&] { g_state->realDrawIndexed(self, count, startIndex, baseVertex); });
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexed, self, static_cast<int>(self->GetType()));
     DrawClock clock;
@@ -4734,36 +6147,61 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     DrawArgs args;
     args.start = startIndex;
     args.base = baseVertex;
-    const DrawVerdict v = beginPanelOverride(self, 'I', count, 1, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
-    if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
-    forwardWithVerdict(self, v, 'I', count, 1, args, [&](AlteredDraw altered) {
-        const int64_t r0 = clock.on ? qpcNow() : 0;
-        {
-            GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
-            g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+    withDrawLadderTrace(self, 'I', count, 1, args,
+                        clock.cpuOn && g_state && self == g_state->ownerCtx,
+                        [&](auto& trace, auto& cpu) {
+        const LadderDecision decision = beginPanelOverride<
+            std::remove_reference_t<decltype(trace)>,
+            std::remove_reference_t<decltype(cpu)>>(trace, self, 'I', count, 1, args);
+        const DrawVerdict v = decision.verdict;
+        if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
+        if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+        forwardWithVerdict(trace, self, v, 'I', count, 1, args, [&](AlteredDraw altered) {
+            const int64_t r0 = clock.on ? qpcNow() : 0;
+            {
+                GpuCensusAlteredScope timed(self, altered);
+                g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+            }
+            if (clock.on) clock.realCall(r0);
+            return true;
+        });
+        if (v == DrawVerdict::kPanel) {
+            endPanelOverride(self);
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
+                trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
+                'I', count, 1, args);
         }
-        if (clock.on) clock.realCall(r0);
-        return true;
+        if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
+        return decision;
     });
-    if (v == DrawVerdict::kPanel) endPanelOverride(self);
-    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, count, 1, false);
 }
 void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perInstance,
                                            UINT instances, UINT startVertex,
                                            UINT startInstance) {
     if (runtimeFlatProfile()) {
-        if (self == g_state->ownerCtx && flatTemporalCapturing())
-            flatTemporalDraw(self, perInstance, instances);
-        FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
-                                      static_cast<int32_t>(startVertex), startInstance);
-        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
-        g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
-        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+        DrawArgs args{}; args.base = static_cast<int32_t>(startVertex); args.startInstance = startInstance;
+        withFlatBypassTrace(self, 'N', perInstance, instances, args, [&](auto& trace) {
+            if (self == g_state->ownerCtx && flatTemporalCapturing())
+                flatTemporalDraw(self, perInstance, instances);
+            FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
+                                          static_cast<int32_t>(startVertex), startInstance);
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'N', perInstance, instances, args, 1);
+        });
         return;
     }
-    if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
+    if (g_vrWorldInternal) {
+        DrawArgs args{}; args.base = static_cast<int32_t>(startVertex); args.startInstance = startInstance;
+        withInternalWorldBypass<draw_ladder::ActionId::kOriginalDraw>(
+            self, 'N', perInstance, instances, args, nullptr, 0, false, true, 0,
+            [&] { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); });
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawInstanced, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawInstanced, reinterpret_cast<const void*>(g_state->realDrawInstanced),
@@ -4774,49 +6212,71 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     DrawArgs args;
     args.base = static_cast<int32_t>(startVertex);
     args.startInstance = startInstance;
-    const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
-    if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the tone is a DrawInstanced triangle: the route's trigger
-    // The draw's instance window, for the glare telemetry: the trains
-    // share one record buffer at different offsets, and which train a
-    // draw carries is only knowable from (start, count).
-    if (v == DrawVerdict::kGlareSteady) sunglareDrawArgs(instances, startInstance);
-    // The glare clamp only ever applies in this thunk -- the train is
-    // DrawInstanced -- so it lives here rather than in the shared tail,
-    // where three other thunks could never receive it.
-    const UINT drawn = g_state->glareClamp && g_state->glareClamp < instances
-                           ? g_state->glareClamp
-                           : instances;
-    forwardWithVerdict(self, v, 'N', perInstance, drawn, args, [&](AlteredDraw altered) {
-        const int64_t r0 = clock.on ? qpcNow() : 0;
-        {
-            GpuCensusAlteredScope timed(self, altered);   // the game's own draw, and only it (gpu_census.h)
-            g_state->realDrawInstanced(self, perInstance, drawn, startVertex,
-                                       startInstance);
+    withDrawLadderTrace(self, 'N', perInstance, instances, args,
+                        clock.cpuOn && g_state && self == g_state->ownerCtx,
+                        [&](auto& trace, auto& cpu) {
+        const LadderDecision decision = beginPanelOverride<
+            std::remove_reference_t<decltype(trace)>,
+            std::remove_reference_t<decltype(cpu)>>(trace, self, 'N', perInstance, instances, args);
+        const DrawVerdict v = decision.verdict;
+        if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
+        if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+        if (v == DrawVerdict::kGlareSteady) sunglareDrawArgs(instances, startInstance);
+        const UINT drawn = g_state->glareClamp && g_state->glareClamp < instances
+                               ? g_state->glareClamp : instances;
+        if (drawn != instances)
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kGlareInstanceClamp>(
+                trace, draw_ladder::ActionPhase::Clamp, draw_ladder::ActionOutcome::Applied,
+                'N', perInstance, drawn, args, 1,
+                static_cast<uint16_t>(std::min<UINT>(instances - drawn, 0xFFFFu)));
+        forwardWithVerdict(trace, self, v, 'N', perInstance, drawn, args, [&](AlteredDraw altered) {
+            const int64_t r0 = clock.on ? qpcNow() : 0;
+            {
+                GpuCensusAlteredScope timed(self, altered);
+                g_state->realDrawInstanced(self, perInstance, drawn, startVertex, startInstance);
+            }
+            if (clock.on) clock.realCall(r0);
+            return true;
+        });
+        if (v == DrawVerdict::kPanel) {
+            endPanelOverride(self);
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
+                trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
+                'N', perInstance, drawn, args);
         }
-        if (clock.on) clock.realCall(r0);
-        return true;
+        if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
+        return decision;
     });
-    if (v == DrawVerdict::kPanel) endPanelOverride(self);
-    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, drawn, false);
 }
 void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                                                   UINT perInstance, UINT instances,
                                                   UINT startIndex, INT baseVertex,
                                                   UINT startInstance) {
     if (runtimeFlatProfile()) {
-        if (self == g_state->ownerCtx && flatTemporalCapturing())
-            flatTemporalDraw(self, perInstance, instances);
-        FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
-                                      baseVertex, startInstance);
-        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
-        g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+        DrawArgs args{}; args.start = startIndex; args.base = baseVertex; args.startInstance = startInstance;
+        withFlatBypassTrace(self, 'X', perInstance, instances, args, [&](auto& trace) {
+            if (self == g_state->ownerCtx && flatTemporalCapturing())
+                flatTemporalDraw(self, perInstance, instances);
+            FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                           baseVertex, startInstance);
-        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
+                                              baseVertex, startInstance);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
+                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
+                'X', perInstance, instances, args, 1);
+        });
         return;
     }
-    if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }
+    if (g_vrWorldInternal) {
+        DrawArgs args{}; args.start = startIndex; args.base = baseVertex; args.startInstance = startInstance;
+        withInternalWorldBypass<draw_ladder::ActionId::kOriginalDraw>(
+            self, 'X', perInstance, instances, args, nullptr, 0, false, true, 0,
+            [&] { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); });
+        return;
+    }
     gpuFrameCommand(self);
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::DrawIndexedInstanced, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotDrawIndexedInstanced, reinterpret_cast<const void*>(g_state->realDrawIndexedInstanced),
@@ -4841,15 +6301,21 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.start = startIndex;
     args.base = baseVertex;
     args.startInstance = startInstance;
-    const DrawVerdict v = beginPanelOverride(self, 'X', perInstance, instances, args);
-    // Engine-record velocity (with fix.temporal_aa): four generation
-    // compares; the pool families' substituted shaders and MRT6 are bound
-    // only when the game has rebound something since the last look. After the
-    // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
-    if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
-    if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
-    forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
+    withDrawLadderTrace(self, 'X', perInstance, instances, args,
+                        clock.cpuOn && g_state && self == g_state->ownerCtx,
+                        [&](auto& trace, auto& cpu) {
+      const LadderDecision decision = beginPanelOverride<
+          std::remove_reference_t<decltype(trace)>,
+          std::remove_reference_t<decltype(cpu)>>(trace, self, 'X', perInstance, instances, args);
+      const DrawVerdict v = decision.verdict;
+      // Engine-record velocity (with fix.temporal_aa): four generation
+      // compares; the pool families' substituted shaders and MRT6 are bound
+      // only when the game has rebound something since the last look. After the
+      // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
+      if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+      if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
+      if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
+      forwardWithVerdict(trace, self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
         const int64_t r0 = clock.on ? qpcNow() : 0;
         {
             // The game's own draw, and only it (gpu_census.h): the weapon and screen motion
@@ -4934,16 +6400,21 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             }
         }
         return true;  // the original draw was issued
+      });
+      if (v == DrawVerdict::kPanel) {
+          endPanelOverride(self);
+          ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
+              trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
+              'X', perInstance, instances, args);
+      }
+      if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
+      if (g_state->introCurveThisDraw) {
+          g_state->introCurveThisDraw = false;
+          introCurveEndDraw();
+      }
+      if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, instances, false);
+      return decision;
     });
-    if (v == DrawVerdict::kPanel) endPanelOverride(self);
-    if (v == DrawVerdict::kIntroPanel) introPanelEndDraw(self);
-    // The splash's numbers are put away after the draw and the dim have used them (forwardWithVerdict), and the flag with them, on every way out of
-    // that call: it cannot outlive the draw that set it.
-    if (g_state->introCurveThisDraw) {
-        g_state->introCurveThisDraw = false;
-        introCurveEndDraw();
-    }
-    if (self == g_state->ownerCtx) pixelProbeAfterEye(g_state, self, perInstance, instances, false);
 }
 
 // Read panel_distance_index, refusing anything that cannot be a float index.
@@ -4967,6 +6438,666 @@ uint32_t readDistanceIndex(Config& cfg) {
 }
 
 }  // namespace
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+namespace {
+
+using VScreenContextTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kForeignContextNone, draw_ladder::SiteKind::Exit>;
+using VScreenDistanceTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kEyeNoDistanceNone, draw_ladder::SiteKind::Exit>;
+using VScreenEyeCensusTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kEyeCensusSkip, draw_ladder::SiteKind::Claim>;
+using VScreenResolveBindTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kResolveBindClaim, draw_ladder::SiteKind::Claim>;
+using VScreenLoaderPanelTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kOffscreenLoaderPanel, draw_ladder::SiteKind::Claim>;
+using VScreenFssDumpTestSite = draw_ladder::InterestGated<
+    draw_ladder::SiteId::kFssDumpClaim, draw_ladder::SiteKind::Claim,
+    draw_interest::InterestId::FssDump>;
+using VScreenTargetSharpTestSite = draw_ladder::InterestGated<
+    draw_ladder::SiteId::kTargetSharpClaim, draw_ladder::SiteKind::Claim,
+    draw_interest::InterestId::TargetSharp>;
+using VScreenSunglareNominationTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kSunglareNomination, draw_ladder::SiteKind::Observe>;
+State* g_eyeCensusTestState = nullptr;
+
+struct VScreenTestInterest final {};
+
+template <class Policy>
+struct VScreenTestTraceCapture final {
+    static constexpr bool enabled = Policy::enabled;
+    Policy& policy;
+    draw_ladder::SiteResult& result;
+
+    template <draw_ladder::SiteId Id, draw_ladder::SiteKind Kind,
+              class Payload>
+    void site(const Payload& payload) noexcept {
+        if constexpr (std::is_same_v<Payload, draw_ladder::SiteResult>)
+            result = payload;
+        policy.template site<Id, Kind>(payload);
+    }
+
+    void basicFact(const BasicDrawObservation& fact) noexcept {
+        policy.basicFact(fact);
+    }
+
+    void eyeCensusFact(const EyeCensusObservation& fact) noexcept {
+        policy.eyeCensusFact(fact);
+    }
+
+    void resolveBindFact(const ResolveBindObservation& fact) noexcept {
+        policy.resolveBindFact(fact);
+    }
+
+    void loaderPanelFact(const LoaderPanelObservation& fact) noexcept {
+        policy.loaderPanelFact(fact);
+    }
+
+    void fssDumpFact(const FssDumpObservation& fact) noexcept {
+        policy.fssDumpFact(fact);
+    }
+
+    void targetSharpFact(const TargetSharpObservation& fact) noexcept {
+        policy.targetSharpFact(fact);
+    }
+
+    void sunglareNominationFact(
+        const SunglareNominationObservation& fact) noexcept {
+        policy.sunglareNominationFact(fact);
+    }
+
+    void forwardInputs(const ForwardingObservation& fact) noexcept {
+        policy.forwardInputs(fact);
+    }
+};
+
+template <class SiteType, class TracePolicy>
+draw_ladder::SiteResult vScreenPredicateTestInvokeSite(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    if constexpr (TracePolicy::enabled) {
+        draw_ladder::SiteResult result{};
+        VScreenTestTraceCapture<TracePolicy> capture{trace, result};
+        VScreenTestInterest interest{};
+        plugin_cost::NoCpu cpu;
+        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
+        draw_ladder::visitOne<decltype(visitor), SiteType>(
+            flow, visitor, interest, capture, cpu);
+        return result;
+    } else {
+        return visitor.template visit<SiteType>();
+    }
+}
+
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, std::uint16_t siteId,
+    TracePolicy& trace) noexcept {
+    if (siteId == static_cast<std::uint16_t>(VScreenContextTestSite::id)) {
+        return vScreenPredicateTestInvokeSite<VScreenContextTestSite>(visitor, trace);
+    }
+    return vScreenPredicateTestInvokeSite<VScreenDistanceTestSite>(visitor, trace);
+}
+
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenEyeCensusPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    return vScreenPredicateTestInvokeSite<VScreenEyeCensusTestSite>(visitor, trace);
+}
+
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenResolveBindPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    return vScreenPredicateTestInvokeSite<VScreenResolveBindTestSite>(visitor, trace);
+}
+
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenLoaderPanelPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    return vScreenPredicateTestInvokeSite<VScreenLoaderPanelTestSite>(visitor, trace);
+}
+
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenFssDumpPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    if constexpr (TracePolicy::enabled) {
+        draw_ladder::SiteResult result{};
+        VScreenTestTraceCapture<TracePolicy> capture{trace, result};
+        plugin_cost::NoCpu cpu;
+        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
+        draw_ladder::visitOne<decltype(visitor), VScreenFssDumpTestSite>(
+            flow, visitor, visitor, capture, cpu);
+        return result;
+    } else {
+        if (!visitor.template eligible<VScreenFssDumpTestSite>())
+            return draw_ladder::SiteResult::notEligible();
+        return visitor.template visit<VScreenFssDumpTestSite>();
+    }
+}
+
+} // namespace
+
+bool vScreenPredicateTestVisit(
+    std::uint16_t siteId, ID3D11DeviceContext* context,
+    ID3D11DeviceContext* ownerContext, std::uint32_t glareClamp,
+    bool distanceEnabled, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || (siteId != static_cast<std::uint16_t>(VScreenContextTestSite::id) &&
+                    siteId != static_cast<std::uint16_t>(VScreenDistanceTestSite::id)))
+        return false;
+
+    static State fixture{};
+    fixture.ownerCtx = ownerContext;
+    fixture.glareClamp = glareClamp;
+    fixture.distanceEnabled = distanceEnabled;
+    fixture.foreignCount = 0;
+    fixture.foreignDraws = 0;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = 'N';
+    facts.count = 3;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        return false;
+    }
+
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, 'N', 3, 1, args, trace};
+        result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, 'N', 3, 1, args, trace};
+        result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
+    }
+    result->glareClampAfter = fixture.glareClamp;
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenFssDumpPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    std::uint32_t instances, std::uint32_t frameNo,
+    std::uint32_t fssBodyFrame, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result) return false;
+    static State fixture{};
+    fixture.ownerCtx = context;
+    fixture.frameNo = frameNo;
+    fixture.fssBodyFrame = fssBodyFrame;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = kind;
+    facts.count = count;
+    facts.instances = instances;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
+        g_state = priorState;
+        return false;
+    }
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
+        result->siteResult = vScreenFssDumpPredicateTestInvoke(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
+        result->siteResult = vScreenFssDumpPredicateTestInvoke(visitor, trace);
+    }
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenForwardingPredicateTestVisit(
+    ID3D11DeviceContext* context, bool traceEnabled,
+    const VScreenForwardingTestInput& input,
+    VScreenForwardingTestResult* result) noexcept {
+    if (!context || !result ||
+        (input.verdictOrdinal != static_cast<std::int16_t>(DrawVerdict::kNone) &&
+         input.verdictOrdinal != static_cast<std::int16_t>(DrawVerdict::kSkip))) return false;
+
+    static State fixture{};
+    fixture.ownerCtx = context;
+    fixture.rtv0Eye = nullptr;
+    fixture.curveThisDraw = input.curveThisDraw;
+    fixture.introCurveThisDraw = false;
+
+    State* const priorState = g_state;
+    const bool priorIssueBlocked = detail::g_uiLayerIssueBlocked;
+    const bool priorLedger = detail::g_objectProbeLedgerOn;
+    const bool priorSeedDiagnostics = detail::g_uiSeedDiagnostics;
+    const bool priorLayerLive = detail::g_uiLayerLive;
+    const bool priorLayerWatching = detail::g_uiLayerWatching;
+    const bool priorCrispPending = detail::g_uiLayerCrispPending;
+    const bool priorDepthPending = detail::g_uiDepthPlanetPending;
+    const bool priorSolarPending = detail::g_uiDepthPlanetSolarPending;
+    const auto priorDepthMode = detail::g_uiDepthMode;
+    const bool priorDepthOn = detail::g_uiDepthOn;
+    const bool priorDepthStoodDown = detail::g_uiDepthStoodDown;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorHoloDepth = t_holoDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    const int priorVelocityFamily = engine_velocity_detail::cache.family;
+
+    detail::g_uiLayerIssueBlocked = input.issueBlockedEntry;
+    detail::g_objectProbeLedgerOn = input.objectProbeLedgerOn;
+    detail::g_uiSeedDiagnostics = input.seedDiagnostics;
+    detail::g_uiLayerLive = input.uiLayerLive;
+    detail::g_uiLayerWatching = input.uiLayerWatching;
+    detail::g_uiLayerCrispPending = false;
+    detail::g_uiDepthPlanetPending = false;
+    detail::g_uiDepthPlanetSolarPending = false;
+    detail::g_uiDepthMode = detail::UiDepthMode::kNone;
+    detail::g_uiDepthOn = false;
+    detail::g_uiDepthStoodDown = false;
+    t_uiDepthThisDraw = input.uiDepthThisDraw;
+    t_holoDepthThisDraw = input.holoDepthThisDraw;
+    t_compositeThisDraw = input.compositeThisDraw;
+    engine_velocity_detail::cache.family = input.engineVelocityCacheFamily;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = static_cast<std::uint8_t>(input.kind);
+    facts.count = input.count;
+    facts.instances = input.instances;
+    facts.args = input.args;
+    if (traceEnabled) {
+        result->token = draw_ladder_trace::beginDraw(facts);
+        if (!result->token.valid()) {
+            g_state = priorState;
+            detail::g_uiLayerIssueBlocked = priorIssueBlocked;
+            detail::g_objectProbeLedgerOn = priorLedger;
+            detail::g_uiSeedDiagnostics = priorSeedDiagnostics;
+            detail::g_uiLayerLive = priorLayerLive;
+            detail::g_uiLayerWatching = priorLayerWatching;
+            detail::g_uiLayerCrispPending = priorCrispPending;
+            detail::g_uiDepthPlanetPending = priorDepthPending;
+            detail::g_uiDepthPlanetSolarPending = priorSolarPending;
+            detail::g_uiDepthMode = priorDepthMode;
+            detail::g_uiDepthOn = priorDepthOn;
+            detail::g_uiDepthStoodDown = priorDepthStoodDown;
+            t_uiDepthThisDraw = priorUiDepth;
+            t_holoDepthThisDraw = priorHoloDepth;
+            t_compositeThisDraw = priorComposite;
+            engine_velocity_detail::cache.family = priorVelocityFamily;
+            return false;
+        }
+    }
+
+    result->originalCalls = 0;
+    result->alteredClass = static_cast<std::uint8_t>(AlteredDrawClass::None);
+    result->callbackReturned = false;
+    const DrawArgs args = input.args;
+    const auto run = [&](auto& trace) {
+        forwardWithVerdict(trace, context, static_cast<DrawVerdict>(input.verdictOrdinal),
+            input.kind, input.count, input.instances, args, [&](AlteredDraw altered) {
+                ++result->originalCalls;
+                result->alteredClass = static_cast<std::uint8_t>(altered.cls);
+                if (input.changeIssueBlockedAfter)
+                    detail::g_uiLayerIssueBlocked = input.issueBlockedAfter;
+                if (input.changeCrispPendingAfter)
+                    detail::g_uiLayerCrispPending = input.crispPendingAfter;
+                if (input.changePlanetPendingAfter) {
+                    detail::g_uiDepthPlanetPending = input.planetPendingAfter;
+                    detail::g_uiDepthPlanetSolarPending = input.planetSolarPendingAfter;
+                }
+                result->callbackReturned = input.callbackReturns;
+                return input.callbackReturns;
+            });
+    };
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        run(trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        run(trace);
+    }
+
+    result->issueBlockedAfter = detail::g_uiLayerIssueBlocked;
+    result->crispPendingAfter = detail::g_uiLayerCrispPending;
+    result->planetPendingAfter = detail::g_uiDepthPlanetPending;
+    result->planetSolarPendingAfter = detail::g_uiDepthPlanetSolarPending;
+    result->curveThisDrawAfter = fixture.curveThisDraw;
+    result->engineVelocityCacheFamilyAfter = engine_velocity_detail::cache.family;
+    g_state = priorState;
+    detail::g_uiLayerIssueBlocked = priorIssueBlocked;
+    detail::g_objectProbeLedgerOn = priorLedger;
+    detail::g_uiSeedDiagnostics = priorSeedDiagnostics;
+    detail::g_uiLayerLive = priorLayerLive;
+    detail::g_uiLayerWatching = priorLayerWatching;
+    detail::g_uiLayerCrispPending = priorCrispPending;
+    detail::g_uiDepthPlanetPending = priorDepthPending;
+    detail::g_uiDepthPlanetSolarPending = priorSolarPending;
+    detail::g_uiDepthMode = priorDepthMode;
+    detail::g_uiDepthOn = priorDepthOn;
+    detail::g_uiDepthStoodDown = priorDepthStoodDown;
+    t_uiDepthThisDraw = priorUiDepth;
+    t_holoDepthThisDraw = priorHoloDepth;
+    t_compositeThisDraw = priorComposite;
+    engine_velocity_detail::cache.family = priorVelocityFamily;
+    return true;
+}
+
+bool vScreenEyeCensusPredicateTestMutate(
+    const VScreenEyeCensusTestMutation& mutation) noexcept {
+    State* const active = g_eyeCensusTestState;
+    if (!active || mutation.ruleIndex >= 8 || mutation.filterIndex >= 4 ||
+        (mutation.changeLoopCount && mutation.loopCount > 8)) return false;
+    if (mutation.changeFilter) {
+        auto& filter = active->censusSkip[mutation.ruleIndex].srv[mutation.filterIndex];
+        filter.mode = static_cast<State::SkipSpec::SrvFilter::Mode>(mutation.filter.mode);
+        filter.w = mutation.filter.width;
+        filter.h = mutation.filter.height;
+    }
+    if (mutation.changeLoopCount) active->censusSkipCount = mutation.loopCount;
+    if (mutation.changeCounter) active->censusSkipped = mutation.counter;
+    return true;
+}
+
+bool vScreenEyeCensusPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    const VScreenEyeCensusTestRule* rules, std::uint32_t ruleCount,
+    void* const psSrvs[4], std::uint64_t heldVsHash,
+    std::uint64_t censusSkippedSeed, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context || ruleCount > 8 || (ruleCount && !rules) || !psSrvs)
+        return false;
+
+    static State fixture{};
+    fixture.ownerCtx = context;
+    fixture.censusSkipCount = ruleCount;
+    fixture.censusSkipped = censusSkippedSeed;
+    for (std::uint32_t i = 0; i < 8; ++i) {
+        State::SkipSpec& dst = fixture.censusSkip[i];
+        if (i >= ruleCount) {
+            dst = {};
+            continue;
+        }
+        const VScreenEyeCensusTestRule& src = rules[i];
+        dst.kind = src.kind;
+        dst.n = src.count;
+        dst.nHi = src.countHigh;
+        dst.vsHash = src.vsHash;
+        for (std::uint32_t f = 0; f < 4; ++f) {
+            dst.srv[f].mode = static_cast<State::SkipSpec::SrvFilter::Mode>(src.filters[f].mode);
+            dst.srv[f].w = src.filters[f].width;
+            dst.srv[f].h = src.filters[f].height;
+        }
+    }
+
+    void* const priorSrvs[4] = {
+        bindingGet(BindSlot::PsSrv0), bindingGet(BindSlot::PsSrv1),
+        bindingGet(BindSlot::PsSrv2), bindingGet(BindSlot::PsSrv3)};
+    void* const priorVs = bindingGet(BindSlot::Vs);
+    const std::uint64_t priorVsHash = bindingShaderHash(BindSlot::Vs);
+    const auto restoreBindings = [&]() noexcept {
+        bindingSet(BindSlot::PsSrv0, priorSrvs[0]);
+        bindingSet(BindSlot::PsSrv1, priorSrvs[1]);
+        bindingSet(BindSlot::PsSrv2, priorSrvs[2]);
+        bindingSet(BindSlot::PsSrv3, priorSrvs[3]);
+        bindingSetShader(BindSlot::Vs, priorVs, priorVsHash);
+    };
+    bindingSet(BindSlot::PsSrv0, psSrvs[0]);
+    bindingSet(BindSlot::PsSrv1, psSrvs[1]);
+    bindingSet(BindSlot::PsSrv2, psSrvs[2]);
+    bindingSet(BindSlot::PsSrv3, psSrvs[3]);
+    bindingSetShader(BindSlot::Vs, nullptr, heldVsHash);
+
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = static_cast<std::uint8_t>(kind);
+    facts.count = count;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
+        restoreBindings();
+        return false;
+    }
+
+    State* const priorActive = g_eyeCensusTestState;
+    g_eyeCensusTestState = &fixture;
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenEyeCensusPredicateTestInvoke(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenEyeCensusPredicateTestInvoke(visitor, trace);
+    }
+    result->censusSkippedAfter = fixture.censusSkipped;
+    g_eyeCensusTestState = priorActive;
+    restoreBindings();
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenResolveBindPredicateTestVisit(
+    ID3D11DeviceContext* context, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context) return false;
+
+    static State fixture{};
+    fixture.ownerCtx = context;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = 'N';
+    facts.count = 3;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
+        return false;
+    }
+
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, 'N', 3, 1, args, trace};
+        result->siteResult = vScreenResolveBindPredicateTestInvoke(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, 'N', 3, 1, args, trace};
+        result->siteResult = vScreenResolveBindPredicateTestInvoke(visitor, trace);
+    }
+
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenLoaderPanelPredicateTestVisit(
+    ID3D11DeviceContext* context, void* renderTargetView,
+    std::uint32_t eyeDrawsLastFrame, std::uint32_t qsStartIndex,
+    std::int32_t qsBaseVertex, char kind, std::uint32_t count,
+    bool traceEnabled, VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context) return false;
+    static State fixture{};
+    fixture.ownerCtx = context;
+    fixture.eyeDrawsLastFrame = eyeDrawsLastFrame;
+    fixture.qsStartIndex = qsStartIndex;
+    fixture.qsBaseVertex = qsBaseVertex;
+    void* const priorRtv = bindingGet(BindSlot::Rtv0);
+    bindingSet(BindSlot::Rtv0, renderTargetView);
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = static_cast<std::uint8_t>(kind);
+    facts.count = count;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        bindingSet(BindSlot::Rtv0, priorRtv);
+        g_state = priorState;
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
+        return false;
+    }
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenLoaderPanelPredicateTestInvoke(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenLoaderPanelPredicateTestInvoke(visitor, trace);
+    }
+    bindingSet(BindSlot::Rtv0, priorRtv);
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenTargetSharpPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    std::uint32_t instances, std::uint32_t eyeW, std::uint32_t eyeH,
+    std::uint32_t renderW, std::uint32_t renderH, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context) return false;
+    State fixture{};
+    fixture.ownerCtx = context;
+    fixture.eyeW = eyeW;
+    fixture.eyeH = eyeH;
+    fixture.renderW = renderW;
+    fixture.renderH = renderH;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = kind;
+    facts.count = count;
+    facts.instances = instances;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        return false;
+    }
+
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
+        VScreenTestTraceCapture<draw_ladder_trace::TracePolicy> capture{
+            trace, result->siteResult};
+        plugin_cost::NoCpu cpu;
+        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
+        draw_ladder::visitOne<decltype(visitor), VScreenTargetSharpTestSite>(
+            flow, visitor, visitor, capture, cpu);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
+        if (visitor.template eligible<VScreenTargetSharpTestSite>())
+            result->siteResult = visitor.template visit<VScreenTargetSharpTestSite>();
+        else
+            result->siteResult = draw_ladder::SiteResult::notEligible();
+    }
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenSunglareNominationPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    void* nominatedBefore, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context) return false;
+    State fixture{};
+    fixture.ownerCtx = context;
+    fixture.sceneCbNominated = nominatedBefore;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = kind;
+    facts.count = count;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
+        g_state = priorState;
+        return false;
+    }
+
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenPredicateTestInvokeSite<
+            VScreenSunglareNominationTestSite>(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = visitor.template visit<VScreenSunglareNominationTestSite>();
+    }
+    result->sceneCbNominatedAfter = fixture.sceneCbNominated;
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+#endif
 
 bool vScreenPanelSize(uint32_t* width, uint32_t* height) {
     const State* s = g_state;
@@ -5471,12 +7602,75 @@ bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     return false;
 }
 
+bool vScreenIsEyeSizedObserved(
+    uint32_t w, uint32_t h,
+    holo_scrim_observation::EyeSizeObservation* observation) {
+    struct Getter final {
+        State* state;
+        bool statePresent() const noexcept { return state != nullptr; }
+        uint32_t eyeW() const noexcept { return state->eyeW; }
+        uint32_t eyeH() const noexcept { return state->eyeH; }
+        uint32_t renderW() const noexcept { return state->renderW; }
+        uint32_t renderH() const noexcept { return state->renderH; }
+    } getter{g_state};
+    return holo_scrim_observation::isEyeSizedObserved(
+        w, h, getter, observation);
+}
+
 // Elite's Supersampling below 1.0 as the sizes measure it (vr_supersample_notice.h): the measured render size and the eye's
 // in one word, 0 until the world is found rendered under kBelowPercent of the eye's width and height. Written once a
 // session on the frame thread where the render size is adopted, read by the menu on its own tick.
 static std::atomic<uint64_t> g_renderBelowEye{0};
 bool vScreenRenderBelowEye(uint32_t* renderW, uint32_t* renderH, uint32_t* eyeW, uint32_t* eyeH) {
     return vrss::unpack(g_renderBelowEye.load(std::memory_order_acquire), renderW, renderH, eyeW, eyeH);
+}
+
+static bool configureLegacyDrawInterests() {
+    using draw_interest::InterestId;
+    using draw_interest::ShaderFilter;
+    constexpr std::size_t kFilterCapacity = 16;
+    ShaderFilter filters[kFilterCapacity]{};
+    std::size_t filterCount = 0;
+    draw_interest::InterestMask configured = 0;
+    auto enable = [&](InterestId id, bool active) {
+        if (active) configured |= draw_interest::bit(id);
+    };
+    auto append = [&](auto getter) {
+        if (filterCount > kFilterCapacity) return false;
+        const std::size_t written = getter(filters + filterCount,
+                                           kFilterCapacity - filterCount);
+        if (written > kFilterCapacity - filterCount) {
+            filterCount = kFilterCapacity + 1;
+            return false;
+        }
+        filterCount += written;
+        return true;
+    };
+
+    enable(InterestId::TargetSharp, targetSharpDrawInterestConfigured());
+    enable(InterestId::WitchspaceStars, witchspaceStarsDrawInterestConfigured());
+    enable(InterestId::FssPanel, fssPanelDrawInterestConfigured());
+    enable(InterestId::FssReveal, fssRevealDrawInterestConfigured());
+    enable(InterestId::FssDump, fssDumpDrawInterestConfigured());
+    enable(InterestId::ParticleSubstitute, particleSubstituteDrawInterestConfigured());
+    enable(InterestId::IntroCurveObserve, introCurveDrawInterestConfigured());
+    enable(InterestId::PanelCurveObserve, panelCurveDrawInterestConfigured());
+
+    const bool filtersFit =
+        append(targetSharpDrawInterestFilters) &&
+        append(witchspaceStarsDrawInterestFilters) &&
+        append(fssPanelDrawInterestFilters) &&
+        append(fssRevealDrawInterestFilters) &&
+        append(fssDumpDrawInterestFilters) &&
+        append(particleSubstituteDrawInterestFilters);
+    const bool accepted = pluginRegistryConfigureDrawInterests(
+        configured, filtersFit ? filters : nullptr,
+        filtersFit ? filterCount : kFilterCapacity + 1);
+    if (!accepted) {
+        Log::get().note("vScreen: legacy draw-interest metadata rejected; "
+                        "configured predicates remain enabled without shader filtering.");
+    }
+    return accepted;
 }
 
 uint32_t vScreenEyeDrawsThisFrame() {
@@ -5491,6 +7685,14 @@ void vScreenRefreshConfig() {
     // Cheap: one GetFileAttributesEx, and only when the write time moved.
     const int64_t reloadT0 = qpcNow();
     if (!cfg.reloadIfChanged()) return;
+    ++s->classifierConfigEpoch;
+    s->replayTraceEnabled = cfg.getBool("advanced.draw_replay", false);
+    s->replayTraceConfigPending = true;
+    if (draw_ladder_trace::capturing()) {
+        draw_ladder_trace::invalidateActiveCapture();
+        Log::get().note("draw replay: capture invalidated by classifier config epoch=%u",
+                        s->classifierConfigEpoch);
+    }
     const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
     gpuFrameConfigure(gpuTimingEnabled);
     // A reload -- the parse of a 124 KB ini and every module's reconfigure,
@@ -5533,8 +7735,10 @@ void vScreenRefreshConfig() {
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
+    schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
+    staticPropGateConfigure(cfg.getBool("fix.static_prop_updates", false));
     screenMotionConfigure(cfg);
-    nightVisionConfigure(cfg);
+    pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -5581,6 +7785,7 @@ void vScreenRefreshConfig() {
     exposureConfigure(cfg);
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
+    configureLegacyDrawInterests();
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     lodGovernorConfigure(cfg);
@@ -5590,6 +7795,8 @@ void vScreenRefreshConfig() {
     // session -- and it cost a flight when fix.head_offset_gate did exactly
     // that.
     headOffsetGateConfigure();
+    perfMonitorPluginCostConfigure(static_cast<uint8_t>(runtimeVrProfile()
+        ? plugins::kProfileVr : plugins::kProfileFlat));
 
     if (wasVoid != s->blackVoid || wasScale != s->distanceScale) {
         Log::get().note("vScreen config reloaded: black void %s, panel distance x%.3f "
@@ -5760,6 +7967,9 @@ void introCurveNoteRetired() {
 }  // namespace
 
 void vScreenFrameBoundary() {
+    // Drain plugin breadcrumbs away from shader-bind and draw callbacks; the
+    // queued events remain visible without taking the logger lock on draws.
+    pluginRegistryReportActivity();
     // The quad probe's readback: a capture taken a few frames ago is decoded
     // here, where the copy has certainly executed and mapping cannot stall
     // the render thread mid-frame.
@@ -5839,6 +8049,29 @@ void vScreenFrameBoundary() {
     }
     State* s = g_state;
     if (!s) return;
+
+    // Close the capture only after the owner frame's draw thunks and their
+    // post-forward cleanup have completed. It is a no-op unless a manual
+    // census armed the explicitly enabled replay recorder.
+    const auto replayStatusBeforeEnd = draw_ladder_trace::status();
+    draw_ladder_trace::frameEnd(s->frameNo);
+    const auto replayStatusAfterEnd = draw_ladder_trace::status();
+    if (replayStatusAfterEnd != replayStatusBeforeEnd) {
+        Log::get().note("draw replay: frame-end status=%s",
+                        draw_ladder_trace::statusName(replayStatusAfterEnd));
+    }
+
+    // A config reload may happen during a captured frame. The writer owns
+    // fixed storage for that frame, so apply the new opt-in/path only after
+    // frameEnd has serialized and released it, before consuming another arm.
+    if (s->replayTraceConfigPending) {
+        draw_ladder_trace::configure(s->replayTraceEnabled,
+                                     Log::get().path().c_str());
+        s->replayTraceConfigPending = false;
+        Log::get().note("draw replay: config epoch=%u status=%s",
+                        s->classifierConfigEpoch,
+                        draw_ladder_trace::statusName(draw_ladder_trace::status()));
+    }
 
     // The intro probe's frame edge, first: it closes the frame's composition
     // and its timing, and both are about the frame that has just ENDED rather
@@ -6705,11 +8938,32 @@ void vScreenFrameBoundary() {
     s->sceneDrawsThisFrame = 0;
     ++s->frameNo;
 
-    // The draw path's subscriber gate for the frame about to start. Forty
-    // getters once a frame instead of forty per draw; draw_gate.h holds the
-    // reasoning, and the arming paths that can fire between two of these
-    // raise the gate themselves rather than waiting for the next one.
+    // Publish the gate for the frame about to start before snapshotting its
+    // latch. The frame record must describe the value draw hooks will read.
     drawGateSet(drawGateSubscribed(s));
+
+    // A manual arm is consumed here, after the preceding whole frame ended;
+    // this starts the next owner-context frame and keeps partial-frame
+    // requests out of the recorded stream.
+    draw_ladder_trace::FrameFacts replayFacts{};
+    replayFacts.frameNo = s->frameNo;
+    replayFacts.configEpoch = s->classifierConfigEpoch;
+    replayFacts.eyeDrawsThisFrame = s->eyeDrawsThisFrame;
+    replayFacts.eyeDrawsLastFrame = s->eyeDrawsLastFrame;
+    replayFacts.sceneDrawsThisFrame = s->sceneDrawsThisFrame;
+    replayFacts.stateFlags = (s->pluginDispatchEnabled ? 1u : 0u) |
+                             (runtimeFlatProfile() ? 2u : 0u) |
+                             (drawGateWanted() ? 4u : 0u);
+    replayFacts.sceneCounters[0] = s->eyeDrawsLastFrame;
+    replayFacts.sceneCounters[1] = s->sceneDrawsThisFrame;
+    replayFacts.sceneCounters[2] = s->panelCompositeDraws;
+    const auto replayStatusBeforeBegin = draw_ladder_trace::status();
+    draw_ladder_trace::frameBegin(replayFacts);
+    const auto replayStatusAfterBegin = draw_ladder_trace::status();
+    if (replayStatusAfterBegin != replayStatusBeforeBegin) {
+        Log::get().note("draw replay: frame-begin status=%s",
+                        draw_ladder_trace::statusName(replayStatusAfterBegin));
+    }
 
     // The steady-state breadcrumb. Rate-limits itself to one line every
     // log.breadcrumb_heartbeat_seconds (30 by default, 0 disables it); this
@@ -6726,6 +8980,20 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     headOffsetGateConfigure();
     const bool wantVoid = cfg.getBool("fix.black_void", true);
     const float scale = cfg.getFloat("fix.panel_distance", 1.0f);
+    // Register profile-supported modules before the dormant-hook check so
+    // their own config contract can request hooks without core duplicating
+    // plugin-owned setting names or defaults.
+    bool cockpitVisualsRegistered = false;
+    if (pluginRegistryProfileSupports(plugins::kPluginCockpitVisuals)) {
+        cockpitVisualsRegistered = pluginRegistryRegister(cockpitVisualsPluginOps());
+        if (!cockpitVisualsRegistered) {
+            Log::get().note("plugin registry: cockpit-visuals registration failed; module dispatch is unavailable");
+            pluginRegistrySetDrawGateFailOpen();
+        }
+    } else {
+        Log::get().note("plugin registry: cockpit-visuals skipped for installation profile %s",
+                        runtimeProfileName());
+    }
     // Install the hooks whenever EITHER fix could be wanted now or later. Both
     // are documented as changeable while the game runs, and a hook that was
     // never installed cannot be switched on by editing a file -- so returning
@@ -6741,6 +9009,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // because the frame counter it waits on also lives in here.
     if (!wantVoid && scale == 1.0f && !glitchFrameNeedsEyeDraws() &&
         !headOffsetGateWantsPanel() &&
+        !pluginRegistryWantsStartupHooks(&cfg) &&
         !cfg.getBool("advanced.app_gpu_timing", true) &&
         !cfg.getBool("advanced.panel_hooks_always", true)) {
         // The optional fixes are deliberately dormant, but native discovery
@@ -6748,6 +9017,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
         // one-shot install and does not create State, configure a fix, or bind
         // GPU timing. A failed vScreen install never reaches this branch, so
         // it cannot acquire a second ExecuteCommandList hook.
+        pluginRegistryShutdown();
         if (!g_vScreenInstallAttempted) {
             g_transportSelected = true;
             (void)graphicsBridgeInstallTransport(device, mode);
@@ -6760,7 +9030,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
 
     ID3D11DeviceContext* ctx = nullptr;
     device->GetImmediateContext(&ctx);
-    if (!ctx) return;
+    if (!ctx) { pluginRegistryShutdown(); return; }
 
     // The measured owner path supplies the canonical context and actual OS
     // thread. Timing failure never prevents installing the rendering fixes.
@@ -6768,6 +9038,9 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     gpuFrameBind(device, ctx, cfg.getBool("advanced.app_gpu_timing", true));
 
     g_state = new State();
+    g_state->classifierConfigEpoch = 1;
+    g_state->replayTraceEnabled = cfg.getBool("advanced.draw_replay", false);
+    g_state->pluginDispatchEnabled = cockpitVisualsRegistered;
     g_state->installMs = stampMs();
     g_state->windowStartMs = g_state->installMs;
     g_state->blackVoid = wantVoid;
@@ -6792,8 +9065,10 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     introUpscaleConfigure(cfg);
     sharpenPassConfigure(cfg);
     temporalPassConfigure(cfg);
+    schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
+    staticPropGateConfigure(cfg.getBool("fix.static_prop_updates", false));
     screenMotionConfigure(cfg);
-    nightVisionConfigure(cfg);
+    pluginRegistryConfigure(&cfg);
     depthProbeConfigure(cfg);
     backdropConfigure(cfg);
     fssPanelConfigure(cfg);
@@ -6824,6 +9099,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     exposureConfigure(cfg);
     panelCurveConfigure(cfg);
     particleConfigure(cfg);
+    configureLegacyDrawInterests();
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     lodGovernorConfigure(cfg);
@@ -6848,10 +9124,12 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
         // g_state back to null, not merely leaked. Leaving it set makes the
         // guard at the top of this function refuse a later attempt, and leaves
         // the periodic totals reporting on a fix that was never installed.
+        pluginRegistryShutdown();
         delete g_state;
         g_state = nullptr;
         return;
     }
+    (void)registerLegacyDrawGates(g_state);
 
     // The mechanism, decided once per device by the caller and shared with the
     // exposure hooks so the two agree about this one object. Between attach
@@ -6961,6 +9239,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
         Log::get().note("vScreen: vtable commit failed; not installing");
         s.hook.uninstall();
         ctx->Release();
+        pluginRegistryShutdown();
         delete g_state;
         g_state = nullptr;
         return;
@@ -6969,6 +9248,15 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     if (!executeHookInstalled || !graphicsBridgeRegisterOwner(device, ctx)) {
         Log::get().note("vScreen: private graphics bridge unavailable (owner already registered or identity check failed)");
     }
+
+    // The recorder is optional and can allocate a frame buffer. Do not create
+    // it for dormant hooks or an install that failed before the vtable commit.
+    draw_ladder_trace::configure(s.replayTraceEnabled, Log::get().path().c_str());
+    Log::get().note("draw replay: initial configure status=%s",
+                    draw_ladder_trace::statusName(draw_ladder_trace::status()));
+    perfMonitorPluginCostConfigure(static_cast<uint8_t>(runtimeVrProfile()
+        ? plugins::kProfileVr : plugins::kProfileFlat));
+    edvrPluginCostSetOwnerContext(ctx);
 
     Log::get().note("vScreen fixes installed: black void %s, panel distance %s, eye-draw "
                     "counting %s, hooking %s",
@@ -7099,7 +9387,18 @@ namespace edvr {
 
 void shutdownVScreenFixes() {
     graphicsBridgeUninstallTransport();
-    if (!g_state) return;
+    if (!g_state) {
+        perfMonitorPluginCostShutdown();
+        const draw_ladder_trace::ShutdownResult replay = draw_ladder_trace::shutdown();
+        if (replay.previousStatus != draw_ladder_trace::Status::Disabled ||
+            replay.discardedPendingArm || replay.discardedCapture) {
+            Log::get().note("draw replay: shutdown prior=%s pending-arm-discarded=%u capture-discarded=%u",
+                            draw_ladder_trace::statusName(replay.previousStatus),
+                            replay.discardedPendingArm ? 1u : 0u,
+                            replay.discardedCapture ? 1u : 0u);
+        }
+        return;
+    }
 
     // Disarm the write watch before anything else. Leaving a page of somebody
     // else's memory read-only after EDVR has gone is not a thing to do to a
@@ -7140,7 +9439,7 @@ void shutdownVScreenFixes() {
     uiDepthShutdown();
     uiLayerShutdown();
     screenMotionShutdown();
-    nightVisionShutdown();
+    pluginRegistryShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();
@@ -7171,6 +9470,12 @@ void shutdownVScreenFixes() {
     depthProbeShutdown();
     sharpenPassShutdown();
     g_state->hook.uninstall();
+    perfMonitorPluginCostShutdown();
+    const draw_ladder_trace::ShutdownResult replay = draw_ladder_trace::shutdown();
+    Log::get().note("draw replay: shutdown prior=%s pending-arm-discarded=%u capture-discarded=%u",
+                    draw_ladder_trace::statusName(replay.previousStatus),
+                    replay.discardedPendingArm ? 1u : 0u,
+                    replay.discardedCapture ? 1u : 0u);
     // After the hooks come off. This one is reached only through the draw
     // thunks (its WantsDraws/OnEyeDraw and verdict Begin/End) and the two
     // configure paths; no other module and no shutdown above calls it. So

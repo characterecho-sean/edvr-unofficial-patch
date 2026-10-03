@@ -1131,7 +1131,17 @@ void caseR12() {
         check(has(swallowed, "v == DrawVerdict::kPanel ? g_state->distanceScale : 1.0f, args.base, args.startInstance"),
               "R12f: and tells it the panel distance the draw's constants carry, with the draw's own base vertex and start instance");
         const std::string gate = functionBody(vs, "bool drawGateSubscribed(State* s) {");
-        check(has(gate, "vscreenFootprintWanted()"), "R12g: the draw gate lists the instrument (a subscriber that is not listed starves when nothing else is on)");
+        const std::string registration = functionBody(vs, "bool registerLegacyDrawGates(State* state) {");
+        const std::string frameBoundary = functionBody(vs, "void vScreenFrameBoundary() {");
+        check(has(vs, "EDVR_GATE_GLOBAL(vscreen_footprint, vscreenFootprintWanted())"),
+              "R12g: the footprint adapter exposes its arming predicate as a named gate subscription");
+        check(has(vs, "{\"legacy.vscreen-footprint\", &drawGate_vscreen_footprint, false}"),
+              "R12g: the registry table includes the footprint adapter under its stable subscription name");
+        check(has(registration, "pluginRegistryRegisterLegacyDrawGate(registration.name") &&
+                  count(vs, "(void)registerLegacyDrawGates(g_state);") == 1,
+              "R12g: vScreen publishes the named subscription table to the registry during installation");
+        check(has(gate, "pluginRegistryWantsDraws(s)") && has(frameBoundary, "drawGateSet(drawGateSubscribed(s));"),
+              "R12g: the frame gate consumes the registry aggregate, including registered plugin and legacy subscriptions");
         check(count(vs, "tkVScreenFootprint.run(") == 1 && before(vs, "tkVrCameraCensus.run(", "tkVScreenFootprint.run(") && before(vs, "tkVScreenFootprint.run(", "tkScreenMotion.run(") &&
                   has(vs, "EDVR_BOUNDARY_TICK(tkVScreenFootprint, \"vscreen_footprint\");"),
               "R12g: its frame-boundary tick is declared and run once, after the route's and the census's and before screen motion's");

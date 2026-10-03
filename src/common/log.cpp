@@ -201,6 +201,7 @@ bool Log::open(const std::wstring& dir, const wchar_t* tag) {
         return false;
     }
 
+    m_path = path;
     m_open = true;
     note("EDVR log -- unofficial VR fixes for Elite Dangerous: Odyssey");
     // The version names the git tag the DLL was built from, straight from
@@ -493,6 +494,7 @@ void Log::close() {
     }
     delete m_impl;
     m_impl = nullptr;
+    m_path.clear();
 }
 
 }  // namespace edvr

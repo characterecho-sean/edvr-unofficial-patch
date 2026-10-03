@@ -9,7 +9,9 @@
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
+#include "../common/plugin_cost.h"
 #include "binding_shadow.h"
+#include "cockpit_cost_sites.h"
 
 namespace edvr {
 
@@ -23,6 +25,10 @@ RemlokMode g_remlokMode = RemlokMode::kStock;
 
 namespace {
 using Mode = detail::RemlokMode;
+static_assert(static_cast<uint32_t>(Mode::kStock) == remlok_observation::kModeStock &&
+                  static_cast<uint32_t>(Mode::kOuter) == remlok_observation::kModeOuter &&
+                  static_cast<uint32_t>(Mode::kHide) == remlok_observation::kModeHide,
+              "RemLok raw mode values are part of the predicate observation schema");
 
 // The overlay's shape, exactly as the census measured and the field
 // suppression verified it (2026-08-19): a fullscreen triangle, one instance,
@@ -75,6 +81,7 @@ bool g_cloneSourceIsDefault = false;
 // What begin set, for end to put back. engaged is the contract between the
 // two: end restores exactly what begin says it changed.
 bool                   g_engaged = false;
+bool                   g_costSample = false;
 bool                   g_vpEngaged = false;
 ID3D11RasterizerState* g_savedRS = nullptr;
 UINT                   g_savedRectCount = 0;
@@ -90,7 +97,8 @@ bool     g_cloneFailedNoted = false;
 // against the source pointer; a null source means the default state, whose
 // description is spelled out because there is no object to ask.
 ID3D11RasterizerState* cloneWithScissor(ID3D11DeviceContext* ctx,
-                                        ID3D11RasterizerState* source) {
+                                        ID3D11RasterizerState* source,
+                                        bool costSample) {
     if (g_clone && source == g_cloneSource &&
         (source || g_cloneSourceIsDefault)) {
         return g_clone;
@@ -107,6 +115,11 @@ ID3D11RasterizerState* cloneWithScissor(ID3D11DeviceContext* ctx,
     d.ScissorEnable = TRUE;
 
     ID3D11Device* dev = nullptr;
+    if (costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokGetDevice),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->GetDevice(&dev);
     if (!dev) return nullptr;
     ID3D11RasterizerState* clone = nullptr;
@@ -232,54 +245,147 @@ float effectiveScale() {
 
 }  // namespace
 
-RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
-    if (detail::g_remlokMode == Mode::kStock) return RemlokAction::kNone;
-    if (!remlokOverlayShape(kind, count, instances)) {
-        return RemlokAction::kNone;
-    }
-    // The overlay binds no depth; scene and HUD draws do. Checked before the
-    // SRV resolve so the resolve only runs for depthless fullscreen
-    // triangles, which are a handful a frame.
-    if (bindingGet(BindSlot::Dsv0) != nullptr) return RemlokAction::kNone;
-    ResourceInfo info;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &info) ||
-        !info.isTexture2D || info.a != kSrvW || info.b != kSrvH) {
-        return RemlokAction::kNone;
+namespace {
+
+template <class T>
+remlok_observation::Read<T> knownRead(T value) noexcept {
+    return {true, true, value};
+}
+
+template <bool Observe>
+RemlokAction remlokOnEyeDrawImpl(
+    char kind, uint32_t count, uint32_t instances,
+    remlok_observation::Observation* observation) {
+    using namespace remlok_observation;
+    if constexpr (Observe) {
+        // outerMode belongs to the caller's legacy gate. Preserve the field it
+        // wrote while starting fresh helper and mutation reads for this call.
+        observation->helper = HelperObservation{};
+        observation->mutation = MutationObservation{};
+        observation->mutation.matchesBefore = knownRead(g_matchesThisFrame);
+        observation->mutation.hiddenBefore = knownRead(g_hidden);
+        observation->mutation.pendingRightBefore = knownRead(g_pendingRight);
     }
 
+    const auto finish = [&](RemlokAction action) {
+        if constexpr (Observe) {
+            observation->mutation.matchesAfter = knownRead(g_matchesThisFrame);
+            observation->mutation.hiddenAfter = knownRead(g_hidden);
+            observation->mutation.pendingRightAfter = knownRead(g_pendingRight);
+        }
+        return action;
+    };
+
+    const uint32_t modeBeforeGate = static_cast<uint32_t>(detail::g_remlokMode);
+    if constexpr (Observe)
+        observation->helper.modeBeforeGate = knownRead(modeBeforeGate);
+    if (modeBeforeGate == kModeStock) return finish(RemlokAction::kNone);
+    if (!remlokOverlayShape(kind, count, instances))
+        return finish(RemlokAction::kNone);
+
+    // The overlay binds no depth; scene and HUD draws do. Keep this read ahead
+    // of the SRV resolve, as it is in the production recognition path.
+    const bool dsvNonNull = bindingGet(BindSlot::Dsv0) != nullptr;
+    if constexpr (Observe)
+        observation->helper.dsvNonNull = knownRead(dsvNonNull);
+    if (dsvNonNull) return finish(RemlokAction::kNone);
+
+    ResourceInfo info;
+    const bool resolved = bindingResolve(bindingGet(BindSlot::PsSrv0), &info);
+    if constexpr (Observe)
+        observation->helper.resolved = knownRead(resolved);
+    if (!resolved) return finish(RemlokAction::kNone);
+
+    const bool isTexture2D = info.isTexture2D;
+    if constexpr (Observe)
+        observation->helper.isTexture2D = knownRead(isTexture2D);
+    if (!isTexture2D) return finish(RemlokAction::kNone);
+
+    const uint32_t width = info.a;
+    if constexpr (Observe)
+        observation->helper.width = knownRead(width);
+    if (width != kSrvW) return finish(RemlokAction::kNone);
+
+    const uint32_t height = info.b;
+    if constexpr (Observe)
+        observation->helper.height = knownRead(height);
+    if (height != kSrvH) return finish(RemlokAction::kNone);
+
+    if constexpr (Observe)
+        observation->mutation.matchesBefore = knownRead(g_matchesThisFrame);
     const uint32_t match = g_matchesThisFrame++;
-    if (detail::g_remlokMode == Mode::kHide) {
+    const uint32_t hideMode = static_cast<uint32_t>(detail::g_remlokMode);
+    if constexpr (Observe)
+        observation->helper.hideMode = knownRead(hideMode);
+    if (hideMode == kModeHide) {
+        if constexpr (Observe)
+            observation->mutation.hiddenBefore = knownRead(g_hidden);
         if (++g_hidden == 1) {
             Log::get().note("remlok lines: hidden (first overlay draw "
                             "suppressed this session).");
         }
-        return RemlokAction::kHide;
+        return finish(RemlokAction::kHide);
     }
-    g_pendingRight = ((match & 1u) != 0u) != g_swap;
-    return RemlokAction::kScissor;
+    const bool swap = g_swap;
+    if constexpr (Observe)
+        observation->helper.swap = knownRead(swap);
+    if constexpr (Observe)
+        observation->mutation.pendingRightBefore = knownRead(g_pendingRight);
+    g_pendingRight = ((match & 1u) != 0u) != swap;
+    return finish(RemlokAction::kScissor);
+}
+
+}  // namespace
+
+RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
+    return remlokOnEyeDrawImpl<false>(kind, count, instances, nullptr);
+}
+
+RemlokAction remlokOnEyeDrawObserved(
+    char kind, uint32_t count, uint32_t instances,
+    remlok_observation::Observation& observation) {
+    return remlokOnEyeDrawImpl<true>(kind, count, instances, &observation);
 }
 
 void remlokScissorBegin(ID3D11DeviceContext* ctx) {
+    g_costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     g_engaged = false;
 
     ID3D11RasterizerState* current = nullptr;
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsGetState),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->RSGetState(&current);   // AddRef'd when non-null
-    ID3D11RasterizerState* scissored = cloneWithScissor(ctx, current);
+    ID3D11RasterizerState* scissored = cloneWithScissor(ctx, current, g_costSample);
     if (!scissored) {
         if (current) current->Release();
+        g_costSample = false;
         return;   // the draw runs untouched, which stock already survives
     }
 
     UINT vpCount = 1;
     D3D11_VIEWPORT vp{};
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsGetViewportsCurrent),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->RSGetViewports(&vpCount, &vp);
     if (vpCount == 0 || vp.Width <= 0.0f) {
         if (current) current->Release();
+        g_costSample = false;
         return;
     }
 
     g_savedRS = current;   // keep the reference until end restores it
     g_savedRectCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsGetScissorRects),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+    }
     ctx->RSGetScissorRects(&g_savedRectCount, g_savedRects);
 
     // The substituted viewport, when a scale applies: the same centre, a
@@ -295,12 +401,22 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
     g_vpEngaged = false;
     if (scale < 0.999f) {
         g_savedVpCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        if (g_costSample) {
+            edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                      cockpit_cost::id(cockpit_cost::Site::RemlokRsGetViewportsSaved),
+                                      static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+        }
         ctx->RSGetViewports(&g_savedVpCount, g_savedVps);
         D3D11_VIEWPORT scaled = vp;
         scaled.Width = vp.Width * scale;
         scaled.Height = vp.Height * scale;
         scaled.TopLeftX = vp.TopLeftX + (vp.Width - scaled.Width) * 0.5f;
         scaled.TopLeftY = vp.TopLeftY + (vp.Height - scaled.Height) * 0.5f;
+        if (g_costSample) {
+            edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                      cockpit_cost::id(cockpit_cost::Site::RemlokRsSetViewportsApply),
+                                      static_cast<uint8_t>(plugin_cost::ApiClass::State));
+        }
         ctx->RSSetViewports(1, &scaled);
         g_vpEngaged = true;
         vp = scaled;   // the scissor below clips against what is drawn
@@ -325,7 +441,17 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
         r.left = x0;
         r.right = x0 + keep;
     }
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsSetScissorRectsApply),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->RSSetScissorRects(1, &r);
+    if (g_costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsSetStateApply),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->RSSetState(scissored);
     g_engaged = true;
 
@@ -340,17 +466,34 @@ void remlokScissorBegin(ID3D11DeviceContext* ctx) {
 }
 
 void remlokScissorEnd(ID3D11DeviceContext* ctx) {
-    if (!g_engaged) return;
+    if (!g_engaged) { g_costSample = false; return; }
     g_engaged = false;
+    const bool costSample = g_costSample;
+    g_costSample = false;
+    if (costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsSetStateRestore),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->RSSetState(g_savedRS);
     if (g_savedRS) {
         g_savedRS->Release();
         g_savedRS = nullptr;
     }
+    if (costSample) {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                  cockpit_cost::id(cockpit_cost::Site::RemlokRsSetScissorRectsRestore),
+                                  static_cast<uint8_t>(plugin_cost::ApiClass::State));
+    }
     ctx->RSSetScissorRects(g_savedRectCount,
                            g_savedRectCount ? g_savedRects : nullptr);
     if (g_vpEngaged) {
         g_vpEngaged = false;
+        if (costSample) {
+            edvrPluginCostNoteD3dCall(static_cast<uint8_t>(plugin_cost::Owner::CockpitVisuals),
+                                      cockpit_cost::id(cockpit_cost::Site::RemlokRsSetViewportsRestore),
+                                      static_cast<uint8_t>(plugin_cost::ApiClass::State));
+        }
         ctx->RSSetViewports(g_savedVpCount,
                             g_savedVpCount ? g_savedVps : nullptr);
     }
@@ -358,7 +501,29 @@ void remlokScissorEnd(ID3D11DeviceContext* ctx) {
 
 void remlokFrameBoundary() { g_matchesThisFrame = 0; }
 
+#if defined(EDVR_REMLOK_PREDICATE_TEST)
+void remlokPredicateTestSetMode(uint32_t mode) {
+    detail::g_remlokMode = static_cast<Mode>(mode);
+}
+
+void remlokPredicateTestSeed(uint32_t mode, bool swap, uint32_t matches,
+                             uint64_t hidden, bool pendingRight) {
+    detail::g_remlokMode = static_cast<Mode>(mode);
+    g_swap = swap;
+    g_matchesThisFrame = matches;
+    g_hidden = hidden;
+    g_pendingRight = pendingRight;
+}
+
+remlok_observation::MutationObservation remlokPredicateTestSnapshot() {
+    return {knownRead(g_matchesThisFrame), knownRead(g_matchesThisFrame),
+            knownRead(g_hidden), knownRead(g_hidden),
+            knownRead(g_pendingRight), knownRead(g_pendingRight)};
+}
+#endif
+
 void remlokShutdown() {
+    g_costSample = false;
     if (g_clone) {
         g_clone->Release();
         g_clone = nullptr;

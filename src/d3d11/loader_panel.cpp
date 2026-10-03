@@ -14,6 +14,7 @@
 #include "../common/intro_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "loader_panel_cost_sites.h"
 
 namespace edvr {
 
@@ -309,52 +310,116 @@ bool loaderPanelDimWanted() {
     return detail::g_loaderPanelOn && g_dimLive;
 }
 
-bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+namespace {
+
+template <class T>
+void observe(LoaderPanelRead<T>& read, T value) noexcept {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
+
+template <bool Observe>
+bool loaderPanelOnDrawImpl(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances, uint32_t startIndex, int baseVertex,
-                       uint32_t targetW, uint32_t targetH, bool textured) {
+                       uint32_t targetW, uint32_t targetH, bool textured,
+                       LoaderPanelHelperObservation* observation) {
     (void)instances;
-    if (!detail::g_loaderPanelOn || !ctx || kind != 'X' || count == 0) return false;
+    const bool wants = detail::g_loaderPanelOn;
+    if constexpr (Observe) observe(observation->wants, wants);
+    if (!wants) return false;
+    const bool contextNonNull = ctx != nullptr;
+    if constexpr (Observe) observe(observation->contextNonNull, contextNonNull);
+    if (!contextNonNull) return false;
+    if (kind != 'X' || count == 0) return false;
 
     // This draw's place in the frame's composition. The hash folds shape AND
     // target size, so a render-scale change reads as a new composition.
     const uint32_t p = g_seqLen;
+    if constexpr (Observe) observe(observation->sequence.position, p);
+    if constexpr (Observe) observe(observation->sequence.hashBeforeCount, g_hashAcc);
     g_hashAcc = (g_hashAcc ^ count) * 16777619u;
+    if constexpr (Observe) observe(observation->sequence.hashAfterCount, g_hashAcc);
+    if constexpr (Observe) observe(observation->sequence.hashBeforeWidth, g_hashAcc);
     g_hashAcc = (g_hashAcc ^ targetW) * 16777619u;
+    if constexpr (Observe) observe(observation->sequence.hashAfterWidth, g_hashAcc);
+    if constexpr (Observe) observe(observation->sequence.hashBeforeHeight, g_hashAcc);
     g_hashAcc = (g_hashAcc ^ targetH) * 16777619u;
+    if constexpr (Observe) observe(observation->sequence.hashAfterHeight, g_hashAcc);
     if (p < kMaxSeq) {
+        if constexpr (Observe) {
+            observe(observation->sequence.slotCount, count);
+            observe(observation->sequence.slotWidth, targetW);
+            observe(observation->sequence.slotHeight, targetH);
+            observe(observation->sequence.lenBefore, g_seqLen);
+        }
         g_seq[p].count = count;
         g_seq[p].w = targetW;
         g_seq[p].h = targetH;
         ++g_seqLen;
+        if constexpr (Observe) observe(observation->sequence.lenAfter, g_seqLen);
     }
 
     uint32_t ord = 0xFFFFFFFFu;
     bool firstPanel = false;
     if (count == kPanelIndices) {
+        if constexpr (Observe) observe(observation->panel.frameAnyBefore, g_frameAnyPanel);
         g_frameAnyPanel = true;
+        if constexpr (Observe) observe(observation->panel.frameAnyAfter, g_frameAnyPanel);
+        if constexpr (Observe) observe(observation->panel.frameFirstPanelDoneBefore, g_frameFirstPanelDone);
         firstPanel = !g_frameFirstPanelDone;
         g_frameFirstPanelDone = true;
-        if (g_chainOn && targetW == g_chainW && targetH == g_chainH) {
+        if constexpr (Observe) observe(observation->panel.frameFirstPanelDoneAfter, g_frameFirstPanelDone);
+        const bool chainOn = g_chainOn;
+        if constexpr (Observe) observe(observation->panel.chainOnBeforeCollection, chainOn);
+        if (chainOn) {
+            const uint32_t chainWidth = g_chainW;
+            if constexpr (Observe) observe(observation->panel.chainWidth, chainWidth);
+            if (targetW == chainWidth) {
+                const uint32_t chainHeight = g_chainH;
+                if constexpr (Observe) observe(observation->panel.chainHeight, chainHeight);
+                if (targetH == chainHeight) {
+                    if constexpr (Observe) observe(observation->panel.frameChainPanelBefore, g_frameChainPanel);
             g_frameChainPanel = true;
-            ord = g_panelOrdinal++;
+                    if constexpr (Observe) observe(observation->panel.frameChainPanelAfter, g_frameChainPanel);
+                    if constexpr (Observe) observe(observation->panel.panelOrdinalBefore, g_panelOrdinal);
+                    ord = g_panelOrdinal++;
+                    if constexpr (Observe) observe(observation->panel.panelOrdinalAfter, g_panelOrdinal);
+                }
+            }
         }
     }
+    if constexpr (Observe) observe(observation->panel.localOrdinal, ord);
 
     // Collection: capture this draw if the frame is being captured and the
     // draw is a solid quad batch -- text reads a texture; the panels this
     // module classifies read none. A qualifying draw that cannot be
     // captured -- capacity, an overlong frame -- poisons the collection.
-    if (g_collecting) {
+    const bool collecting = g_collecting;
+    if constexpr (Observe) observe(observation->collection.collecting, collecting);
+    if (collecting) {
         const bool qualifies = !textured && count % kIndicesPerQuad == 0;
-        if (qualifies && p < kMaxSeq && g_capCount < kMaxCaptures) {
+        if (qualifies && p < kMaxSeq) {
+            const uint32_t capCount = g_capCount;
+            if constexpr (Observe) observe(observation->collection.capCountGate, capCount);
+            if (capCount < kMaxCaptures) {
             bool stored = false;
-            guardedBudget(g_budget, [&] {
+            bool guardEntered = false;
+            const bool guardReturned = guardedBudget(g_budget, [&] {
+                guardEntered = true;
+                // Latch once for this admitted capture. Normal draw
+                // classification and every Release remain outside this slice.
+                const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
                 ID3D11Buffer* ib = nullptr;
                 DXGI_FORMAT ibFmt = DXGI_FORMAT_UNKNOWN;
                 UINT ibOff = 0;
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::IaGetIndexBuffer,
+                                                        plugin_cost::ApiClass::ReadQuery);
                 ctx->IAGetIndexBuffer(&ib, &ibFmt, &ibOff);
                 ID3D11Buffer* vb = nullptr;
                 UINT stride = 0, vbOff = 0;
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::IaGetVertexBuffers,
+                                                        plugin_cost::ApiClass::ReadQuery);
                 ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &vbOff);
                 if (!ib || !vb || stride == 0) {
                     if (ib) ib->Release();
@@ -365,6 +430,8 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     (ibFmt == DXGI_FORMAT_R16_UINT) ? 2u : 4u;
                 const UINT need = count * idxSize;
                 ID3D11Device* dev = nullptr;
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::ContextGetDevice,
+                                                        plugin_cost::ApiClass::ReadQuery);
                 ctx->GetDevice(&dev);
                 if (dev && g_ibFill + need <= kIbStageBytes) {
                     bool ok = true;
@@ -373,16 +440,22 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         sd.Usage = D3D11_USAGE_STAGING;
                         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                         sd.ByteWidth = kIbStageBytes;
+                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CreateIndexStage,
+                                                                plugin_cost::ApiClass::Work);
                         ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_ibStage));
                     }
                     if (ok && !g_vbStage) {
                         D3D11_BUFFER_DESC vd{};
+                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::VertexGetDesc,
+                                                                plugin_cost::ApiClass::ReadQuery);
                         vb->GetDesc(&vd);
                         D3D11_BUFFER_DESC sd{};
                         sd.Usage = D3D11_USAGE_STAGING;
                         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                         sd.ByteWidth = vd.ByteWidth > kVbStageCap ? kVbStageCap
                                                                   : vd.ByteWidth;
+                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CreateVertexStage,
+                                                                plugin_cost::ApiClass::Work);
                         ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_vbStage));
                         if (ok) {
                             // The whole buffer, once. Every draw this frame
@@ -393,6 +466,8 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                             D3D11_BOX all{};
                             all.right = sd.ByteWidth;
                             all.bottom = 1; all.back = 1;
+                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CopyVertexStage,
+                                                                    plugin_cost::ApiClass::Transfer);
                             ctx->CopySubresourceRegion(g_vbStage, 0, 0, 0, 0,
                                                        vb, 0, &all);
                             g_capVertexBytes = sd.ByteWidth;
@@ -404,6 +479,8 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         box.left = ibOff + startIndex * idxSize;
                         box.right = box.left + need;
                         box.bottom = 1; box.back = 1;
+                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CopyIndexStage,
+                                                                plugin_cost::ApiClass::Transfer);
                         ctx->CopySubresourceRegion(g_ibStage, 0, g_ibFill, 0, 0,
                                                    ib, 0, &box);
                         CapDraw& cd = g_caps[g_capCount];
@@ -418,21 +495,31 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         // as the vertex buffer.
                         if (count == kPanelIndices) {
                             ID3D11ShaderResourceView* srv = nullptr;
+                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::VsGetShaderResources,
+                                                                    plugin_cost::ApiClass::ReadQuery);
                             ctx->VSGetShaderResources(0, 1, &srv);
                             if (srv) {
                                 cd.vsSrv = srv;
                                 if (!g_srvStage) {
                                     ID3D11Resource* res = nullptr;
+                                    if (costSample) loader_panel_cost::note(loader_panel_cost::Site::SrvGetResource,
+                                                                            plugin_cost::ApiClass::ReadQuery);
                                     srv->GetResource(&res);
                                     if (res) {
                                         D3D11_RESOURCE_DIMENSION dim;
+                                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::ResourceGetType,
+                                                                                plugin_cost::ApiClass::ReadQuery);
                                         res->GetType(&dim);
                                         if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
                                             ID3D11Buffer* tbl =
                                                 static_cast<ID3D11Buffer*>(res);
                                             D3D11_BUFFER_DESC td{};
+                                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::TableGetDesc,
+                                                                                    plugin_cost::ApiClass::ReadQuery);
                                             tbl->GetDesc(&td);
                                             D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+                                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::SrvGetDesc,
+                                                                                    plugin_cost::ApiClass::ReadQuery);
                                             srv->GetDesc(&svd);
                                             if (svd.ViewDimension ==
                                                 D3D11_SRV_DIMENSION_BUFFEREX) {
@@ -451,11 +538,15 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                                                 td.ByteWidth > kSrvStageBytes
                                                     ? kSrvStageBytes
                                                     : td.ByteWidth;
+                                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CreateTableStage,
+                                                                                    plugin_cost::ApiClass::Work);
                                             if (SUCCEEDED(dev->CreateBuffer(
                                                     &sd, nullptr, &g_srvStage))) {
                                                 D3D11_BOX tb{};
                                                 tb.right = sd.ByteWidth;
                                                 tb.bottom = 1; tb.back = 1;
+                                                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CopyTableStage,
+                                                                                        plugin_cost::ApiClass::Transfer);
                                                 ctx->CopySubresourceRegion(
                                                     g_srvStage, 0, 0, 0, 0,
                                                     tbl, 0, &tb);
@@ -469,17 +560,23 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                             }
                             if (!g_cb2Stage) {
                                 ID3D11Buffer* cb = nullptr;
+                                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::VsGetConstantBuffers,
+                                                                        plugin_cost::ApiClass::ReadQuery);
                                 ctx->VSGetConstantBuffers(2, 1, &cb);
                                 if (cb) {
                                     D3D11_BUFFER_DESC sd{};
                                     sd.Usage = D3D11_USAGE_STAGING;
                                     sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                                     sd.ByteWidth = kCb2Bytes;
+                                    if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CreateConstantsStage,
+                                                                            plugin_cost::ApiClass::Work);
                                     if (SUCCEEDED(dev->CreateBuffer(
                                             &sd, nullptr, &g_cb2Stage))) {
                                         D3D11_BOX cbb{};
                                         cbb.right = kCb2Bytes;
                                         cbb.bottom = 1; cbb.back = 1;
+                                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CopyConstantsStage,
+                                                                                plugin_cost::ApiClass::Transfer);
                                         ctx->CopySubresourceRegion(
                                             g_cb2Stage, 0, 0, 0, 0, cb, 0,
                                             &cbb);
@@ -489,8 +586,12 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                                 }
                             }
                         }
+                        if constexpr (Observe) observe(observation->collection.capCountBeforeWrite, g_capCount);
                         ++g_capCount;
+                        if constexpr (Observe) observe(observation->collection.capCountAfterWrite, g_capCount);
+                        if constexpr (Observe) observe(observation->collection.ibFillBeforeWrite, g_ibFill);
                         g_ibFill += need;
+                        if constexpr (Observe) observe(observation->collection.ibFillAfterWrite, g_ibFill);
                         stored = true;
                     }
                 }
@@ -498,9 +599,25 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 ib->Release();
                 vb->Release();
             });
-            if (!stored) ++g_capDropped;
+            if constexpr (Observe) {
+                observe(observation->collection.guardEntered, guardEntered);
+                observe(observation->collection.guardReturned, guardReturned);
+                observation->collection.collectionMutationUnobserved = guardEntered;
+            }
+            if (!stored) {
+                if constexpr (Observe) observe(observation->collection.capDroppedBeforeWrite, g_capDropped);
+                ++g_capDropped;
+                if constexpr (Observe) observe(observation->collection.capDroppedAfterWrite, g_capDropped);
+            }
+            } else {
+                if constexpr (Observe) observe(observation->collection.capDroppedBeforeWrite, g_capDropped);
+                ++g_capDropped;
+                if constexpr (Observe) observe(observation->collection.capDroppedAfterWrite, g_capDropped);
+            }
         } else if (qualifies) {
+            if constexpr (Observe) observe(observation->collection.capDroppedBeforeWrite, g_capDropped);
             ++g_capDropped;
+            if constexpr (Observe) observe(observation->collection.capDroppedAfterWrite, g_capDropped);
         }
     }
 
@@ -508,28 +625,145 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // are swallowed EVERY frame -- fade-in, percent ticks and the dialog
     // switch included, because the ordinal is frame-local and needs no
     // composition match.
+    if constexpr (Observe) observe(observation->withhold.subArmBeforeClear, g_subArm);
     g_subArm = false;
+    if constexpr (Observe) observe(observation->withhold.subArmAfterClear, g_subArm);
     if (ord != 0xFFFFFFFFu) {
-        for (uint32_t i = 0; i < g_chainOrdCount; ++i) {
-            if (g_chainOrd[i] == ord) {
+        uint32_t i = 0;
+        for (;;) {
+            const uint32_t loopCount = g_chainOrdCount;
+            if (i == 0) {
+                if constexpr (Observe) observe(observation->withhold.chainOrdCountGate, loopCount);
+            }
+            if (i >= loopCount) {
+                if constexpr (Observe) observe(observation->withhold.terminalChainOrdCount, loopCount);
+                break;
+            }
+            if constexpr (Observe) {
+                if (i >= 4) {
+                    // Preserve the offending raw bound for recorder invalidation
+                    // without indexing beyond either physical four-slot array.
+                    observe(observation->withhold.terminalChainOrdCount, loopCount);
+                    return false;
+                }
+            }
+            if constexpr (Observe) observe(observation->withhold.chainScan[i].loopCount, loopCount);
+            const uint32_t chainOrd = g_chainOrd[i];
+            if constexpr (Observe) observe(observation->withhold.chainScan[i].chainOrd, chainOrd);
+            if (chainOrd == ord) {
+                if constexpr (Observe) observe(observation->withhold.subArmBeforeWithhold, g_subArm);
                 g_subArm = true;
+                if constexpr (Observe) observe(observation->withhold.subArmAfterWithhold, g_subArm);
+                if constexpr (Observe) observe(observation->withhold.frameWithheldBefore, g_frameWithheld);
                 g_frameWithheld = true;
+                if constexpr (Observe) observe(observation->withhold.frameWithheldAfter, g_frameWithheld);
+                if constexpr (Observe) observe(observation->withhold.dimLiveBefore, g_dimLive);
                 g_dimLive = true;
+                if constexpr (Observe) observe(observation->withhold.dimLiveAfter, g_dimLive);
                 return true;
             }
+            ++i;
         }
     }
     // Before the session's first verdict: the frame's first panel is
     // withheld on speculation, so the scrim never shows even while the
     // measurement that will confirm it is still in flight.
-    if (!g_specDone && !g_chainOn && !g_retired && firstPanel) {
+    const bool specDone = g_specDone;
+    if constexpr (Observe) observe(observation->withhold.specDoneGate, specDone);
+    bool chainOnSpec = false;
+    if (!specDone) {
+        chainOnSpec = g_chainOn;
+        if constexpr (Observe) observe(observation->withhold.chainOnSpecGate, chainOnSpec);
+    }
+    bool retired = false;
+    if (!specDone && !chainOnSpec) {
+        retired = g_retired;
+        if constexpr (Observe) observe(observation->withhold.retiredGate, retired);
+    }
+    if (!specDone && !chainOnSpec && !retired && firstPanel) {
+        if constexpr (Observe) observe(observation->withhold.subArmBeforeWithhold, g_subArm);
         g_subArm = true;
+        if constexpr (Observe) observe(observation->withhold.subArmAfterWithhold, g_subArm);
+        if constexpr (Observe) observe(observation->withhold.frameWithheldBefore, g_frameWithheld);
         g_frameWithheld = true;
+        if constexpr (Observe) observe(observation->withhold.frameWithheldAfter, g_frameWithheld);
+        if constexpr (Observe) observe(observation->withhold.dimLiveBefore, g_dimLive);
         g_dimLive = true;
+        if constexpr (Observe) observe(observation->withhold.dimLiveAfter, g_dimLive);
         return true;
     }
     return false;
 }
+
+} // namespace
+
+bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances, uint32_t startIndex, int baseVertex,
+                       uint32_t targetW, uint32_t targetH, bool textured) {
+    return loaderPanelOnDrawImpl<false>(ctx, kind, count, instances, startIndex,
+        baseVertex, targetW, targetH, textured, nullptr);
+}
+
+bool loaderPanelOnDrawObserved(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances, uint32_t startIndex, int baseVertex,
+                       uint32_t targetW, uint32_t targetH, bool textured,
+                       LoaderPanelHelperObservation& observation) {
+    return loaderPanelOnDrawImpl<true>(ctx, kind, count, instances, startIndex,
+        baseVertex, targetW, targetH, textured, &observation);
+}
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+// Explicit current-state fixtures only; these do not establish historical
+// learner provenance. Callback changes exercise the actual post-guard reads.
+void loaderPanelPredicateTestProgress(uint32_t sequencePosition,
+    uint32_t panelOrdinal, bool collecting, uint32_t captureCount,
+    uint32_t droppedCount) noexcept {
+    if (sequencePosition > kMaxSeq || captureCount > kMaxCaptures) return;
+    g_seqLen = sequencePosition;
+    g_panelOrdinal = panelOrdinal;
+    g_collecting = collecting;
+    g_capCount = captureCount;
+    g_capDropped = droppedCount;
+}
+void loaderPanelPredicateTestReentry(bool chainOn, bool specDone, bool retired,
+    uint32_t captureCount, uint32_t droppedCount) noexcept {
+    // A callback can continue into a capture write, so preserve its array bound.
+    if (captureCount >= kMaxCaptures) return;
+    g_chainOn = chainOn;
+    g_specDone = specDone;
+    g_retired = retired;
+    g_capCount = captureCount;
+    g_capDropped = droppedCount;
+}
+void loaderPanelPredicateTestSeed(bool enabled, bool chainOn, bool specDone,
+    bool retired, uint32_t chainWidth, uint32_t chainHeight,
+    const uint32_t* chainOrdinals, uint32_t chainOrdinalCount) noexcept {
+    if (chainOrdinalCount > kMaxScrims || (chainOrdinalCount && !chainOrdinals))
+        return;
+    detail::g_loaderPanelOn = enabled;
+    g_collecting = false;
+    g_capCount = 0;
+    g_capDropped = 0;
+    g_ibFill = 0;
+    g_seqLen = 0;
+    g_hashAcc = 2166136261u;
+    g_frameAnyPanel = false;
+    g_frameChainPanel = false;
+    g_frameFirstPanelDone = false;
+    g_subArm = false;
+    g_panelOrdinal = 0;
+    g_chainOn = chainOn;
+    g_chainW = chainWidth;
+    g_chainH = chainHeight;
+    g_chainOrdCount = chainOrdinalCount;
+    for (uint32_t i = 0; i < kMaxScrims; ++i)
+        g_chainOrd[i] = i < chainOrdinalCount ? chainOrdinals[i] : 0;
+    g_specDone = specDone;
+    g_retired = retired;
+    g_frameWithheld = false;
+    g_dimLive = false;
+}
+#endif
 
 bool loaderPanelSubstitute(ID3D11DeviceContext* ctx, PfnDrawIndexedInstanced draw,
                            uint32_t instances, uint32_t startInstance) {
@@ -600,18 +834,31 @@ bool tryAnalyze(ID3D11DeviceContext* ctx, bool allowWait) {
         }
         return true;
     }
+    // All prerequisites are satisfied and a pending capture is about to be
+    // read. One latch covers this Map/Unmap attempt prefix, including faults.
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     const UINT mapFlags = allowWait ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT;
     ID3D11Buffer* stages[4] = {g_ibStage, g_vbStage, g_srvStage, g_cb2Stage};
     D3D11_MAPPED_SUBRESOURCE maps[4] = {};
     for (int i = 0; i < 4; ++i) {
+        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::MapReadback,
+                                                plugin_cost::ApiClass::Transfer);
         const HRESULT hr =
             ctx->Map(stages[i], 0, D3D11_MAP_READ, mapFlags, &maps[i]);
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-            for (int j = 0; j < i; ++j) ctx->Unmap(stages[j], 0);
+            for (int j = 0; j < i; ++j) {
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::UnmapReadback,
+                                                        plugin_cost::ApiClass::Transfer);
+                ctx->Unmap(stages[j], 0);
+            }
             return false;   // not ready; poll again next frame
         }
         if (FAILED(hr) || !maps[i].pData) {
-            for (int j = 0; j < i; ++j) ctx->Unmap(stages[j], 0);
+            for (int j = 0; j < i; ++j) {
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::UnmapReadback,
+                                                        plugin_cost::ApiClass::Transfer);
+                ctx->Unmap(stages[j], 0);
+            }
             failOnce("the measurement could not be mapped");
             return true;
         }
@@ -623,7 +870,11 @@ bool tryAnalyze(ID3D11DeviceContext* ctx, bool allowWait) {
     memcpy(&flags, static_cast<const uint8_t*>(maps[3].pData) + 32, 4);
 
     auto unmapAll = [&] {
-        for (int i = 3; i >= 0; --i) ctx->Unmap(stages[i], 0);
+        for (int i = 3; i >= 0; --i) {
+            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::UnmapReadback,
+                                                    plugin_cost::ApiClass::Transfer);
+            ctx->Unmap(stages[i], 0);
+        }
     };
 
     // Per captured panel: the fill quad's bounds, the RGBA8 at offset 8,

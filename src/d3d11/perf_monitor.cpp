@@ -21,6 +21,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "../common/perf_math.h"
+#include "../common/plugin_cost.h"
 #include "../common/slow_test.h"
 #include "../common/timing.h"
 #include "../common/vtable_hook.h"  // vtableWatchDumpRecent, the flip timeline
@@ -36,6 +37,7 @@
 #include "native_perf_history.h"
 #include "native_benchmark_collector.h"
 #include "native_render_labels.h"
+#include "draw_cpu_window.h"
 #include "../common/native_render_settings.h"
 #include "../common/config.h"
 
@@ -47,7 +49,15 @@ namespace edvr {
 // sixteen. Set at the frame boundary, from the same expression as before.
 namespace detail {
 bool g_perfMonitorSampleDraws = false;
+bool g_pluginCostApiSampleFrame = false;
 }  // namespace detail
+
+static_assert(plugin_cost::kOwnerCount == plugins::kPluginIndexCount + 1,
+              "plugin-cost owner slots must follow the manifest plus Core");
+static_assert(sizeof(EdvrPluginCostOwnerV1) == 128,
+              "plugin-cost owner record is a fixed 128-byte POD");
+static_assert(sizeof(EdvrPluginCostWindowV1) == 1328,
+              "plugin-cost window record is a fixed 1328-byte POD");
 
 namespace {
 
@@ -183,6 +193,7 @@ struct State {
     double   drawWindowMs = 0.0;
     float    drawWindowMaxMs = 0.0f;
     uint32_t drawWindowSamples = 0;
+    draw_cpu::Window drawCpuWindow;
 
     // The Present block noted by the swapchain hook, for the frame about
     // to be ringed.
@@ -1113,6 +1124,20 @@ void perfMonitorFrame(ID3D11Device* dev) {
         s.nativeBenchmarkMetadataMs = 0;
         s.nativeBenchmarkMetadata = {};
     }
+    // Close the fixed-memory plugin-cost sample before resetting the existing
+    // draw totals or publishing the next frame's sample flags. The collector
+    // owns the trace-suppression latch set by the one selected draw in a replay
+    // frame; no trace query or logging is added to ordinary draw sites.
+    const bool nextSampleFrame = (s.frameNo % kDrawSampleEvery) == 0;
+    const bool closedCpuSampleFrame = detail::g_perfMonitorSampleDraws;
+    const bool closedApiSampleFrame = detail::g_pluginCostApiSampleFrame;
+    EdvrPluginCostWindowV1 pluginCostWindow{};
+    const bool pluginCostWindowReady = edvrPluginCostFrameBoundary(
+        s.frameNo, closedCpuSampleFrame ? 1u : 0u,
+        closedApiSampleFrame ? 1u : 0u, nextSampleFrame ? 1u : 0u, 0u,
+        &pluginCostWindow) != 0;
+    detail::g_pluginCostApiSampleFrame = nextSampleFrame;
+
     // EDVR's part: the events of the frame just ending.
     const uint32_t ev = s.events.exchange(0);
     f.events = static_cast<uint16_t>(ev & 0xFFFFu);
@@ -1132,20 +1157,103 @@ void perfMonitorFrame(ID3D11Device* dev) {
         s.drawWindowMs += s.drawsMsRunning;
         s.drawWindowMaxMs = std::max(s.drawWindowMaxMs, s.drawsMsRunning);
         ++s.drawWindowSamples;
+        s.drawCpuWindow.closeFrame(true, s.drawWholeTicks, s.drawRealTicks);
+    } else {
+        s.drawCpuWindow.closeFrame(false, 0, 0);
     }
     // Reuse the existing sampled clocks; do not time every draw just to
     // explain a settlement's many thousands of hook invocations. Average
     // only measured frames, never the held value copied into the ring.
     if (s.frameNo % 1800 == 0) {
-        Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); excludes forwarded game draw time, includes EDVR reissues; zero samples means unavailable. Each sampled frame's figure is estimated from every %uth draw, scaled by %u.",
-            s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
-            double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
-            unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride));
+        if (s.drawCpuWindow.hasTimedDraws() && qpcFrequency() > 0) {
+            Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); %.6f ms per timed draw sample across %llu samples; subtracts the first forwarding interval, including indexed-instanced weapon-motion reissue; includes later EDVR reissues; not total EDVR CPU. Frame totals estimate every %uth draw scaled by %u; per-draw mean uses the observed timed-sample denominator.",
+                s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
+                double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
+                s.drawCpuWindow.meanMs(static_cast<std::uint64_t>(qpcFrequency())),
+                static_cast<unsigned long long>(s.drawCpuWindow.windowTimedDraws),
+                unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride));
+        } else {
+            Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); per-timed-draw mean unavailable (%llu valid timed draw samples); subtracts the first forwarding interval, including indexed-instanced weapon-motion reissue; includes later EDVR reissues; not total EDVR CPU. Frame totals estimate every %uth draw scaled by %u.",
+                s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
+                double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
+                static_cast<unsigned long long>(s.drawCpuWindow.windowTimedDraws),
+                unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride));
+        }
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
+        s.drawCpuWindow.resetWindow();
+    }
+    if (pluginCostWindowReady) {
+        const auto countMaskBits = [](uint64_t bits) {
+            unsigned count = 0;
+            while (bits != 0) {
+                bits &= bits - 1;
+                ++count;
+            }
+            return count;
+        };
+        Log::get().note(
+            "plugin cost: window %u..%u (%u frames), profile 0x%X; CPU %llu sampled frames, %llu replay-suppressed; API %llu sampled frames. CPU rows cover timed draw-classifier handlers only (partial module coverage); API rows are annotated calls only. Missing rows mean no timed/annotated work was observed. Logical owner attribution does not report module selection or a numeric budget.",
+            pluginCostWindow.firstFrame, pluginCostWindow.lastFrame,
+            pluginCostWindow.windowFrames, pluginCostWindow.profileBit,
+            static_cast<unsigned long long>(pluginCostWindow.completedCpuSampleFrames),
+            static_cast<unsigned long long>(pluginCostWindow.cpuTraceSuppressedFrames),
+            static_cast<unsigned long long>(pluginCostWindow.completedApiSampleFrames));
+        for (unsigned i = 0; i < plugin_cost::kOwnerCount; ++i) {
+            const EdvrPluginCostOwnerV1& owner = pluginCostWindow.owners[i];
+            if (!owner.cpuObserved && !owner.apiObserved) continue;
+            const char* ownerName = i < plugins::kPluginCount
+                ? plugins::kManifest[i].id : "core";
+            const unsigned coveredCpuSites =
+                countMaskBits(owner.cpuSiteMask[0]) + countMaskBits(owner.cpuSiteMask[1]);
+            if (owner.cpuObserved) {
+                if (pluginCostWindow.completedCpuSampleFrames < 2) {
+                    Log::get().note(
+                        "plugin cost CPU: %s; %.4f ms mean per sampled frame (stddev unavailable; fewer than two sampled frames); confidence interval unavailable; %llu timed classifier-handler scopes, %u distinct reached site IDs; reached %llu, invoked %llu, not-eligible %llu. This is partial source coverage.",
+                        ownerName, owner.cpuMeanMs,
+                        static_cast<unsigned long long>(owner.cpuTimedScopes), coveredCpuSites,
+                        static_cast<unsigned long long>(owner.cpuReached),
+                        static_cast<unsigned long long>(owner.cpuInvoked),
+                        static_cast<unsigned long long>(owner.cpuNotEligible));
+                } else {
+                    Log::get().note(
+                        "plugin cost CPU: %s; %.4f ms mean per sampled frame (%.4f ms stddev); confidence interval unavailable; %llu timed classifier-handler scopes, %u distinct reached site IDs; reached %llu, invoked %llu, not-eligible %llu. This is partial source coverage.",
+                        ownerName, owner.cpuMeanMs, owner.cpuStdDevMs,
+                        static_cast<unsigned long long>(owner.cpuTimedScopes), coveredCpuSites,
+                        static_cast<unsigned long long>(owner.cpuReached),
+                        static_cast<unsigned long long>(owner.cpuInvoked),
+                        static_cast<unsigned long long>(owner.cpuNotEligible));
+                }
+            }
+            if (owner.apiObserved) {
+                const double apiSampleFrames = pluginCostWindow.completedApiSampleFrames != 0
+                    ? static_cast<double>(pluginCostWindow.completedApiSampleFrames) : 1.0;
+                Log::get().note(
+                    "plugin cost API: %s; work %llu (%.3f/sample frame), transfer %llu (%.3f/sample frame), state %llu (%.3f/sample frame), read/query %llu (%.3f/sample frame), instrumentation %llu (%.3f/sample frame); %u distinct annotated call-site IDs; raw calls across %llu sampled frames, annotated-call coverage only.",
+                    ownerName,
+                    static_cast<unsigned long long>(owner.apiCalls[0]),
+                    static_cast<double>(owner.apiCalls[0]) / apiSampleFrames,
+                    static_cast<unsigned long long>(owner.apiCalls[1]),
+                    static_cast<double>(owner.apiCalls[1]) / apiSampleFrames,
+                    static_cast<unsigned long long>(owner.apiCalls[2]),
+                    static_cast<double>(owner.apiCalls[2]) / apiSampleFrames,
+                    static_cast<unsigned long long>(owner.apiCalls[3]),
+                    static_cast<double>(owner.apiCalls[3]) / apiSampleFrames,
+                    static_cast<unsigned long long>(owner.apiCalls[4]),
+                    static_cast<double>(owner.apiCalls[4]) / apiSampleFrames,
+                    countMaskBits(owner.apiSiteMask[0]) + countMaskBits(owner.apiSiteMask[1]),
+                    static_cast<unsigned long long>(pluginCostWindow.completedApiSampleFrames));
+                Log::get().note(
+                    "plugin cost API sites: %s; IDs 0-63=0x%016llX, IDs 64-127=0x%016llX; %u distinct annotated call-site IDs. Word 0 covers IDs 0-63 and word 1 covers IDs 64-127; bits are indexed by stable site ID.",
+                    ownerName,
+                    static_cast<unsigned long long>(owner.apiSiteMask[0]),
+                    static_cast<unsigned long long>(owner.apiSiteMask[1]),
+                    countMaskBits(owner.apiSiteMask[0]) + countMaskBits(owner.apiSiteMask[1]));
+            }
+        }
     }
     f.cpuDrawsMs = s.drawsMsRunning;
     s.drawWholeTicks = s.drawRealTicks = 0;
-    detail::g_perfMonitorSampleDraws = (s.frameNo % kDrawSampleEvery) == 0;
+    detail::g_perfMonitorSampleDraws = nextSampleFrame;
     const DeviceCreates made = deviceCreatesTake();
     f.createTextures = made.textures;
     f.createBuffers = made.buffers;
@@ -1213,9 +1321,25 @@ void perfMonitorNotePresentWait(double ms) {
 
 // perfMonitorSampleDraws is inline in the header now (perf_monitor.h).
 
+void perfMonitorPluginCostConfigure(uint8_t profileBit) {
+    detail::g_pluginCostApiSampleFrame = false;
+    const int64_t frequency = qpcFrequency();
+    edvrPluginCostConfigure(profileBit,
+                            frequency > 0 ? static_cast<uint64_t>(frequency) : 0u);
+    Log::get().note(
+        "plugin cost: collector configured for profile 0x%X; sampled classifier handlers and annotated API calls only; rows require observed work.",
+        profileBit);
+}
+
+void perfMonitorPluginCostShutdown() {
+    edvrPluginCostShutdown();
+    detail::g_pluginCostApiSampleFrame = false;
+}
+
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks) {
     if (wholeTicks > 0) g_s.drawWholeTicks += wholeTicks;
     if (realTicks > 0) g_s.drawRealTicks += realTicks;
+    g_s.drawCpuWindow.noteDraw(wholeTicks);
 }
 
 void perfMonitorSetActive(bool active) {

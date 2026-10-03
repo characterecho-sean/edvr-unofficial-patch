@@ -16,6 +16,7 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -58,9 +59,187 @@ void Log::note(const char* fmt, ...) {
 #include "../../src/d3d11/gpu_census.cpp"
 
 namespace {
+using namespace edvr;
 unsigned g_checks = 0;
 void check(bool ok, const char* why) { ++g_checks; if (!ok) throw std::runtime_error(why); }
 void hr(HRESULT h) { check(h == S_OK, "D3D operation failed"); }
+
+struct ExpectedGpuOwner final {
+    GpuCensusSection section;
+    GpuCensusOwner owner;
+    GpuCensusAttribution attribution;
+    const char* sharedConsumer;
+};
+
+void ownershipMapAndAggregateCases() {
+    using O = GpuCensusOwner;
+    using A = GpuCensusAttribution;
+    const ExpectedGpuOwner expected[] = {
+        {GpuCensusSection::DoorTemporalWhole, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::DoorUpscaler, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::DoorMotionPrep, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::DoorHologramResolve, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::DoorUiResolve, O::TemporalAa, A::NestedBreakdown, ""},
+        {GpuCensusSection::DoorSharpen, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::DoorMenu, O::Core, A::Direct, ""},
+        {GpuCensusSection::DoorUiLayerComposite, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::DoorFssHeal, O::Scanners, A::Direct, ""},
+        {GpuCensusSection::FrameHologramPasses, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameUiDepthCoverage, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FramePlanet, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameScreenMotion, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameWeaponMotion, O::TemporalAa, A::Direct, "on-foot-panel"},
+        {GpuCensusSection::FrameEngineVelocity, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameUiLayerReissues, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameUiLayerHdrSeed, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameWorldResolve, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameWorldMips, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::FrameWorldLayer, O::TemporalAa, A::Direct, ""},
+        {GpuCensusSection::AlteredPoolFamily, O::TemporalAa, A::WrappedGameDraw, ""},
+        {GpuCensusSection::AlteredUiLayer, O::TemporalAa, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Panel), O::OnFootPanel, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Remlok), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Holo), O::Intro, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::TargetSharp), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::NightVision), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::IntroPanel), O::Intro, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::GlareClamp), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::GlareSteady), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Particle), O::CockpitVisuals, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::FssPanel), O::Scanners, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::FssReveal), O::Scanners, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::FssDump), O::Scanners, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::ResolveBind), O::Scanners, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Scrim), O::Intro, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Backdrop), O::Intro, A::WrappedGameDraw, ""},
+        {alteredFixSectionOf(AlteredFix::Unnamed), O::Core, A::WrappedGameDraw, ""},
+    };
+    static_assert(static_cast<uint8_t>(GpuCensusOwner::TemporalAa) == 0 &&
+                  static_cast<uint8_t>(GpuCensusOwner::CockpitVisuals) == 1 &&
+                  static_cast<uint8_t>(GpuCensusOwner::Exposure) == 2 &&
+                  static_cast<uint8_t>(GpuCensusOwner::Scanners) == 3 &&
+                  static_cast<uint8_t>(GpuCensusOwner::Intro) == 4 &&
+                  static_cast<uint8_t>(GpuCensusOwner::OnFootPanel) == 5 &&
+                  static_cast<uint8_t>(GpuCensusOwner::Comfort) == 6 &&
+                  static_cast<uint8_t>(GpuCensusOwner::Performance) == 7 &&
+                  static_cast<uint8_t>(GpuCensusOwner::Diagnostics) == 8 &&
+                  static_cast<uint8_t>(GpuCensusOwner::Core) == 9 &&
+                  static_cast<uint8_t>(GpuCensusOwner::Count) == 10,
+                  "logical owner IDs are stable");
+    static_assert(sizeof(expected) / sizeof(expected[0]) ==
+                  static_cast<size_t>(GpuCensusSection::Count),
+                  "the test pins every concrete census section exactly once");
+
+    bool seen[static_cast<size_t>(GpuCensusSection::Count)]{};
+    std::vector<GpuCensusOwnerObservation> observations;
+    observations.reserve(sizeof(expected) / sizeof(expected[0]));
+    double expectedTemporalMs = 0.0;
+    unsigned expectedTemporalDirect = 0;
+    bool weaponMotionShared = false;
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+        const auto& row = expected[i];
+        const size_t index = static_cast<size_t>(row.section);
+        check(index < static_cast<size_t>(GpuCensusSection::Count) && !seen[index],
+              "ownership golden rows are unique valid census sections");
+        seen[index] = true;
+        const GpuCensusOwnership actual = gpuCensusOwnership(row.section);
+        check(actual.owner == row.owner && actual.attribution == row.attribution &&
+                  actual.implementation == GpuCensusImplementation::Legacy &&
+                  std::strcmp(actual.sharedConsumer, row.sharedConsumer) == 0,
+              "production owner map matches the canonical owner/attribution row");
+        const double ms = static_cast<double>(index + 1) * 0.125;
+        observations.push_back({row.section, true, 2, ms});
+        if (row.owner == O::TemporalAa && row.attribution == A::Direct) {
+            ++expectedTemporalDirect;
+            expectedTemporalMs += ms;
+        }
+        if (row.section == GpuCensusSection::FrameWeaponMotion)
+            weaponMotionShared = row.owner == O::TemporalAa &&
+                                 std::strcmp(row.sharedConsumer, "on-foot-panel") == 0;
+    }
+    for (bool present : seen) check(present, "every concrete section has one pinned owner row");
+    const GpuCensusOwnership countSentinel = gpuCensusOwnership(GpuCensusSection::Count);
+    check(countSentinel.attribution == A::Unowned && countSentinel.owner == O::Core,
+          "Count sentinel is explicitly unowned and cannot create a cost bucket");
+    check(weaponMotionShared,
+          "weapon-motion GPU work remains temporal-aa with on-foot-panel as a shared consumer");
+
+    for (size_t ownerIndex = 0; ownerIndex < static_cast<size_t>(O::Count); ++ownerIndex) {
+        const auto owner = static_cast<O>(ownerIndex);
+        unsigned direct = 0;
+        double ms = 0.0;
+        for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+            if (expected[i].owner != owner || expected[i].attribution != A::Direct) continue;
+            ++direct;
+            const size_t section = static_cast<size_t>(expected[i].section);
+            ms += static_cast<double>(section + 1) * 0.125;
+        }
+        const GpuCensusOwnerSummary summary = aggregateGpuCensusOwner(
+            owner, observations.data(), observations.size());
+        check(summary.declaredDirectScopes == direct && summary.providedScopes == direct &&
+                  summary.occurredScopes == direct && summary.sampledScopes == direct &&
+                  summary.timestampSamples == direct * 2 && summary.hasGpuEstimate == (direct != 0) &&
+                  !summary.partial() && std::fabs(summary.msPerFrame - ms) < 1.0e-9,
+              "owner aggregate sums only observed direct scopes with sampled GPU data");
+    }
+
+    std::vector<GpuCensusOwnerObservation> duplicate = observations;
+    duplicate.push_back(observations.front());
+    const auto whole = aggregateGpuCensusOwner(O::TemporalAa, observations.data(), observations.size());
+    const auto deduplicated = aggregateGpuCensusOwner(O::TemporalAa, duplicate.data(), duplicate.size());
+    check(deduplicated.providedScopes == whole.providedScopes &&
+              deduplicated.timestampSamples == whole.timestampSamples &&
+              std::fabs(deduplicated.msPerFrame - whole.msPerFrame) < 1.0e-9,
+          "duplicate section observations cannot inflate an owner subtotal");
+
+    auto missing = observations;
+    missing.erase(std::remove_if(missing.begin(), missing.end(), [](const auto& row) {
+        return row.section == GpuCensusSection::FramePlanet;
+    }), missing.end());
+    const auto missingSummary = aggregateGpuCensusOwner(O::TemporalAa, missing.data(), missing.size());
+    check(missingSummary.declaredDirectScopes == expectedTemporalDirect &&
+              missingSummary.providedScopes + 1 == missingSummary.declaredDirectScopes &&
+              missingSummary.partial() && missingSummary.hasGpuEstimate,
+          "missing direct scopes lower coverage without becoming measured zeroes");
+
+    auto notOccurred = observations;
+    for (auto& row : notOccurred) if (row.section == GpuCensusSection::FramePlanet) {
+        row.occurred = false;
+        row.samples = 0;
+    }
+    const auto absentSummary = aggregateGpuCensusOwner(O::TemporalAa, notOccurred.data(), notOccurred.size());
+    check(absentSummary.providedScopes == absentSummary.declaredDirectScopes &&
+              absentSummary.occurredScopes + 1 == absentSummary.declaredDirectScopes &&
+              !absentSummary.partial() && absentSummary.hasGpuEstimate &&
+              absentSummary.msPerFrame < whole.msPerFrame,
+          "provided quiet scopes are complete evidence and contribute no fabricated cost");
+
+    auto untimed = observations;
+    for (auto& row : untimed) if (row.section == GpuCensusSection::FramePlanet) row.samples = 0;
+    const auto untimedSummary = aggregateGpuCensusOwner(O::TemporalAa, untimed.data(), untimed.size());
+    check(untimedSummary.occurredScopes == untimedSummary.declaredDirectScopes &&
+              untimedSummary.sampledScopes + 1 == untimedSummary.occurredScopes &&
+              untimedSummary.partial() && untimedSummary.hasGpuEstimate &&
+              untimedSummary.msPerFrame < whole.msPerFrame,
+          "an occurred but untimed scope lowers sampled coverage without adding an inferred estimate");
+
+    std::vector<GpuCensusOwnerObservation> noSamples;
+    for (const auto& row : expected) if (row.owner == O::TemporalAa && row.attribution == A::Direct)
+        noSamples.push_back({row.section, true, 0, 99.0});
+    const auto unmeasured = aggregateGpuCensusOwner(O::TemporalAa, noSamples.data(), noSamples.size());
+    check(unmeasured.providedScopes == unmeasured.declaredDirectScopes &&
+              unmeasured.occurredScopes == unmeasured.declaredDirectScopes &&
+              unmeasured.sampledScopes == 0 && unmeasured.timestampSamples == 0 &&
+              !unmeasured.hasGpuEstimate && unmeasured.msPerFrame == 0.0 &&
+              unmeasured.partial(),
+          "zero timer samples render as unmeasured, never as caller-supplied numeric GPU cost");
+
+    const auto noObservations = aggregateGpuCensusOwner(O::TemporalAa, nullptr, 0);
+    check(noObservations.providedScopes == 0 && noObservations.declaredDirectScopes == expectedTemporalDirect &&
+              noObservations.partial() && !noObservations.hasGpuEstimate &&
+              noObservations.msPerFrame == 0.0,
+          "missing owner observations expose static scope coverage and no fabricated estimate");
+}
 
 struct Runtime {
     decltype(&D3D11CreateDevice) create = edvr::systemD3D11CreateDevice();
@@ -432,6 +611,86 @@ void logFormatCase() {
           "log line: the game's share stays raw and negative when EDVR's corrected total exceeds R");
     check(g_lastLog.find("(census over the frame total)") != std::string::npos,
           "log line: EDVR's corrected total over R is flagged, not hidden");
+}
+
+void freshWindow(uint64_t start);
+const std::string* lineWith(const char* prefix);
+
+void logicalOwnerReportCases() {
+    using O = GpuCensusOwner;
+    const uint64_t start = GetTickCount64() - 30000;
+    freshWindow(start);
+    g_windowFrames = 100;
+
+    auto& whole = g_section[static_cast<size_t>(GpuCensusSection::DoorTemporalWhole)];
+    whole.occurrences = 2;
+    whole.sampler.totals.ms = 4.0;
+    whole.sampler.totals.samples = 2;
+    auto& nested = g_section[static_cast<size_t>(GpuCensusSection::DoorUpscaler)];
+    nested.occurrences = 2;
+    nested.sampler.totals.ms = 200.0;
+    nested.sampler.totals.samples = 2;
+    auto& menu = g_section[static_cast<size_t>(GpuCensusSection::DoorMenu)];
+    menu.occurrences = 1;
+    menu.sampler.totals.ms = 2.0;
+    menu.sampler.totals.samples = 2;
+    auto& wrappedRemlok = g_section[static_cast<size_t>(alteredFixSectionOf(AlteredFix::Remlok))];
+    wrappedRemlok.occurrences = 4;
+    wrappedRemlok.sampler.totals.ms = 800.0;
+    wrappedRemlok.sampler.totals.samples = 4;
+
+    logAndResetWindow(start + 30000);
+    const std::string* temporal = lineWith(
+        "EDVR GPU census, logical owner temporal-aa (legacy attribution, not module-selection status):");
+    const std::string* core = lineWith(
+        "EDVR GPU census, logical owner core (legacy attribution, not module-selection status):");
+    check(temporal && temporal->find("0.040 ms/frame; observed 1/14 declared direct scopes") != std::string::npos &&
+              temporal->find("timestamped 1/1 observed scopes (2 existing timer samples)") != std::string::npos &&
+              temporal->find("scope coverage observed scopes timestamped") != std::string::npos &&
+              temporal->find("not complete plugin GPU cost") != std::string::npos,
+          "logical TemporalAa row sums its direct whole scope once, excludes nested children, and distinguishes observed-scope timing from plugin completeness");
+    check(core && core->find("observed 1/1 declared direct scopes") != std::string::npos &&
+              core->find("timestamped 1/1 observed scopes (2 existing timer samples)") != std::string::npos &&
+              core->find("scope coverage observed scopes timestamped") != std::string::npos,
+          "the menu's direct GPU scope is reported in its separate Core owner row");
+    check(lineWith("EDVR GPU census, logical owner scanners") == nullptr &&
+              lineWith("EDVR GPU census, logical owner cockpit-visuals") == nullptr &&
+              lineWith("EDVR GPU census, logical owner on-foot-panel") == nullptr &&
+              lineWith("EDVR GPU census ownership note: FrameWeaponMotion") == nullptr,
+          "owners with only absent direct scopes or wrapped game draws produce no inactive rows");
+    check(temporal && temporal->find("CPU") == std::string::npos &&
+              temporal->find("API") == std::string::npos && core &&
+              core->find("CPU") == std::string::npos && core->find("API") == std::string::npos,
+          "owner reports state GPU evidence only and infer no per-plugin CPU or API count");
+
+    freshWindow(start);
+    g_windowFrames = 100;
+    auto& weapon = g_section[static_cast<size_t>(GpuCensusSection::FrameWeaponMotion)];
+    weapon.occurrences = 3;
+    weapon.sampler.totals.ms = 6.0;
+    weapon.sampler.totals.samples = 2;
+    logAndResetWindow(start + 30000);
+    const std::string* shared = lineWith("EDVR GPU census ownership note: FrameWeaponMotion");
+    const std::string* temporalWeapon = lineWith(
+        "EDVR GPU census, logical owner temporal-aa (legacy attribution, not module-selection status):");
+    check(shared && shared->find("reported once under temporal-aa; on-foot-panel consumes the service") != std::string::npos &&
+              shared->find("not split into a second cost row") != std::string::npos,
+          "shared weapon-motion scope identifies the second consumer without duplicating its owner cost");
+    check(temporalWeapon && temporalWeapon->find("observed 1/14 declared direct scopes") != std::string::npos &&
+              temporalWeapon->find("timestamped 1/1 observed scopes (2 existing timer samples)") != std::string::npos,
+          "weapon-motion GPU work is included once in TemporalAa only when that scope occurred");
+
+    freshWindow(start);
+    g_windowFrames = 100;
+    auto& scanner = g_section[static_cast<size_t>(GpuCensusSection::DoorFssHeal)];
+    scanner.occurrences = 2;
+    logAndResetWindow(start + 30000);
+    const std::string* unmeasuredScanner = lineWith(
+        "EDVR GPU census, logical owner scanners (legacy attribution, not module-selection status):");
+    check(unmeasuredScanner &&
+              unmeasuredScanner->find("GPU unmeasured; observed 1/1 declared direct scopes, timestamped 0/1 observed scopes; scope coverage partial, not complete plugin GPU cost.") != std::string::npos &&
+              unmeasuredScanner->find("0.000 ms/frame") == std::string::npos,
+          "an occurring direct owner with no timer samples gets an unmeasured partial row, never a numeric zero");
 }
 
 // ---- 5: the frame gap: fake spans with known GPU ticks, through the census's own intake ------------------
@@ -956,8 +1215,10 @@ void seedLineCases() {
     check(g_lastLog.find("in-frame 0.900 (") != std::string::npos && g_lastLog.find("EDVR ~0.900 ms/frame = door 0.000 (") != std::string::npos,
           "seed line: the seed is IN EDVR's in-frame total and in EDVR's total (0.700 + the planet's 0.200), not beside them");
     const int mainAt = indexOfLine("EDVR GPU census:");
-    check(mainAt >= 0 && indexOfLine(kSeedDetailPrefix) == mainAt + 1,
-          "seed line: its detail line follows the main line at once, before the altered draws' lines");
+    const int seedAt = indexOfLine(kSeedDetailPrefix);
+    const int alteredAt = indexOfLine("EDVR GPU census, Elite's own draws that EDVR alters");
+    check(mainAt >= 0 && seedAt == mainAt + 1 && alteredAt > seedAt,
+          "seed line: its detail follows the main line at once, before the altered draws' lines");
     const std::string* detail = lineWith(kSeedDetailPrefix);
     check(detail != nullptr &&
               detail->find(": 3.50 seeds a frame, 0.200 ms a seed (96 timed); target 5040x4870 D32_FLOAT_S8X24_UINT (196.4 MB), "
@@ -1209,9 +1470,11 @@ void lineLengths() {
 }
 
 void run() {
+    ownershipMapAndAggregateCases();
     estimatorMathCases();
     calibrationMathCases();
     logFormatCase();
+    logicalOwnerReportCases();
     gapCases();
     alteredClassCases();
     alteredLineCases();

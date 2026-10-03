@@ -2702,8 +2702,17 @@ void testFlatSubstitutionWiring() {
         std::ifstream in(path, std::ios::binary);
         return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     };
+    auto normalizeNewlines = [](std::string text) {
+        std::string normalized;
+        normalized.reserve(text.size());
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') continue;
+            normalized.push_back(text[i]);
+        }
+        return normalized;
+    };
     const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
-    const std::string vscreenCpp = slurp("src/d3d11/vscreen.cpp");
+    const std::string vscreenCpp = normalizeNewlines(slurp("src/d3d11/vscreen.cpp"));
     const std::string exposureCpp = slurp("src/d3d11/exposure_fix.cpp");
     const std::string deviceCpp = slurp("src/d3d11/device_hook.cpp");
     const std::string policyH = slurp("src/d3d11/flat_substitution.h");
@@ -2714,6 +2723,23 @@ void testFlatSubstitutionWiring() {
         for (size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1)) ++n;
         return n;
     };
+    const std::string mixedLineEndings =
+        "void STDMETHODCALLTYPE firstHook() {\r\n"
+        "    flatRuntimeSubstitution(self, FlatSubstEvent::kClear);\r\n"
+        "}\r\n"
+        "void STDMETHODCALLTYPE nextHook() {\r\n"
+        "    flatRuntimeSubstitution(self, FlatSubstEvent::kClear);\n"
+        "    flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);\r\n"
+        "}\n";
+    const std::string normalizedMixed = normalizeNewlines(mixedLineEndings);
+    const size_t firstStart = normalizedMixed.find("void STDMETHODCALLTYPE firstHook(");
+    const size_t firstEnd = normalizedMixed.find("\n}\n", firstStart);
+    const std::string firstBody = firstStart == std::string::npos || firstEnd == std::string::npos
+        ? std::string() : normalizedMixed.substr(firstStart, firstEnd - firstStart);
+    check(count(firstBody, "flatRuntimeSubstitution(self, FlatSubstEvent::kClear);") == 1,
+          "mixed CRLF/LF hook extraction stays scoped to the first hook");
+    check(count(firstBody, "flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);") == 0,
+          "mixed-line-ending extraction does not inherit the next hook's event");
     struct Pin { const std::string* text; const char* needle; unsigned times; const char* what; };
     const Pin pins[] = {
         // The runtime's own sites: what each says to the policy.

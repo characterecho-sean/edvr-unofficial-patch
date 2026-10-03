@@ -20,6 +20,7 @@
     python tools/edvr_log.py --target frontier --route-curve --expect-build HEAD
     python tools/edvr_log.py --target steam --map-bounce --expect-build HEAD
     python tools/edvr_log.py --target steam --freezes --expect-build HEAD
+    python tools/edvr_log.py --target steam --draw-replay --expect-build HEAD
     python tools/edvr_log.py --list
 
 This is the sanctioned replacement for `Get-Content <some path> -Tail 200 |
@@ -408,6 +409,85 @@ def version_line(text):
         if m:
             return line.strip(), m.group("ver"), None
     return None, None, None
+
+
+DLSS_RUNTIME_RE = re.compile(
+    r"^(?:\[[\d:.]+\]\s*)?(?P<line>dlss: runtime module\b.*)$")
+DLSS_RUNTIME_COMPLETE_RE = re.compile(
+    r"^dlss: runtime module loaded: path=.+ fileVersion="
+    r"\d+\.\d+\.\d+\.\d+$")
+
+
+def dlss_runtime_observation(text):
+    """Return the latest DLSS module observation and whether it is complete.
+
+    Older graphics logs have no such record; callers keep that distinct from
+    a current log that explicitly reports an unavailable module/version.
+    """
+    found = None
+    for raw_line in text.splitlines():
+        match = DLSS_RUNTIME_RE.match(raw_line)
+        if match:
+            found = match.group("line")
+    if found is None:
+        return None, None
+    return found, bool(DLSS_RUNTIME_COMPLETE_RE.match(found))
+
+
+def print_dlss_runtime_observation(text):
+    line, complete = dlss_runtime_observation(text)
+    if line is None:
+        print("[edvr] DLSS runtime: unavailable (record not present in this historical log)")
+    else:
+        detail = line[len("dlss: "):]
+        if complete:
+            print("[edvr] DLSS runtime: %s" % detail)
+        else:
+            # Preserve explicit unavailable details. A present but malformed
+            # or newer record is unavailable, never inferred.
+            print("[edvr] DLSS runtime: unavailable; %s" % detail)
+
+
+def print_draw_ladder_report(log_path, version, stamp):
+    """Read only sidecars whose basename is derived from this graphics log."""
+    import draw_ladder_replay
+
+    match = LOG_RE.match(os.path.basename(log_path))
+    if not match or match.group("tag").lower() != "gfx":
+        print("[edvr] --draw-replay requires a named edvr_gfx_*.log file.")
+        return 1
+
+    sidecars = draw_ladder_replay.discover_sidecars(log_path)
+    if not sidecars:
+        print("[edvr] no draw-ladder sidecar beside %s" % os.path.basename(log_path))
+        return 3
+    ok = True
+    # Bound output on sessions with many manual captures; filenames are still
+    # derived from the already-selected graphics log, never from JSON data.
+    for sidecar in sidecars[:16]:
+        try:
+            _, summary = draw_ladder_replay.read_trace(
+                sidecar, os.path.basename(log_path), stamp)
+            if version and summary["buildVersion"] != version:
+                raise draw_ladder_replay.TraceError(
+                    "sidecar version does not match the graphics log")
+            print(draw_ladder_replay.format_summary(summary, sidecar))
+            gate_failure = draw_ladder_replay.predicate_replay_gate_failure(summary)
+            if gate_failure:
+                print("[edvr] predicate replay gate failed: %s" % gate_failure)
+                ok = False
+        except draw_ladder_replay.TraceError as exc:
+            print("[edvr] BUILD MISMATCH or invalid draw-ladder sidecar: %s" % exc)
+            if "build stamp" in str(exc) or "version does not match" in str(exc):
+                return 2
+            ok = False
+        except (OSError, ValueError) as exc:
+            print("[edvr] draw-ladder sidecar rejected: %s" % exc)
+            ok = False
+    if len(sidecars) > 16:
+        print("[edvr] %d additional capture(s) omitted from this bounded report" %
+              (len(sidecars) - 16))
+    return 0 if ok else 1
 
 
 def describe_cmd(ref, root):
@@ -9392,7 +9472,10 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true",
                     help="list the logs found and stop")
     ap.add_argument("--version", action="store_true",
-                    help="print the log's version line and stop")
+                    help="print the log's build identity and graphics-log DLSS runtime observation, then stop")
+    ap.add_argument("--draw-replay", action="store_true",
+                    help="read the selected graphics log's derived draw-ladder sidecars; "
+                         "validates observed selector/action order, not hidden predicate parity")
     ap.add_argument("--expect-build", default=None,
                     help="a git ref (HEAD) or literal version; exit 2 if the "
                          "log was not written by that build")
@@ -9533,6 +9616,10 @@ def main(argv=None):
               "its runtime log itself; drop --tag %s." % args.tag)
         return 1
 
+    if args.draw_replay and args.tag.lower() != "gfx":
+        print("[edvr] --draw-replay reads sidecars associated with a graphics log; use --tag gfx.")
+        return 1
+
     native_dirs = None
     if args.file:
         path = os.path.abspath(args.file)
@@ -9598,7 +9685,13 @@ def main(argv=None):
             return 2
 
     if args.version:
+        selected = LOG_RE.match(os.path.basename(path))
+        if selected and selected.group("tag").lower() == "gfx":
+            print_dlss_runtime_observation(text)
         return 0
+
+    if args.draw_replay:
+        return print_draw_ladder_report(path, ver, stamp)
 
     if args.vscreen_fit:
         return print_vscreen_fit(text)
@@ -9764,6 +9857,23 @@ def self_test():
         print("version_line matched prose: %r" % ver3)
         ok = False
 
+    dlss_complete = ("[00:00:01.000] dlss: runtime module loaded: "
+                     "path=C:\\NVIDIA\\nvngx_dlss.dll fileVersion=3.7.0.12\n")
+    line, complete = dlss_runtime_observation(dlss_complete)
+    if not line or not complete or "fileVersion=3.7.0.12" not in line:
+        print("DLSS complete observation -> %r %r" % (line, complete))
+        ok = False
+    dlss_unavailable = ("[00:00:02.000] dlss: runtime module unavailable "
+                        "(nvngx_dlss.dll is not already loaded); actual file version unavailable\n")
+    line, complete = dlss_runtime_observation(dlss_unavailable)
+    if not line or complete:
+        print("DLSS explicit unavailable observation -> %r %r" % (line, complete))
+        ok = False
+    line, complete = dlss_runtime_observation("historical graphics log\n")
+    if line is not None or complete is not None:
+        print("DLSS absent historical observation -> %r %r" % (line, complete))
+        ok = False
+
     native = ("2026-09-13 14:01:42.659 UTC pid=1234 tid=5678 "
               "module_init,version=v0.16.2-77-gab80a6c-dirty,durable_log=1")
     native2 = native.replace("14:01:42.659", "14:01:43.001")
@@ -9813,9 +9923,13 @@ def self_test():
                 # With the timestamp prefix Log::note() really writes: a
                 # fixture without it is what hid a regex that matched
                 # nothing in the field.
+                observation = ("[00:00:01.000] dlss: runtime module loaded: "
+                               "path=C:\\NVIDIA\\nvngx_dlss.dll fileVersion=3.7.0.12\n"
+                               if stamp_s == "20260910_050000" else "")
                 f.write(("[00:00:00.001] version 0.14.1-93-gf78eba4 "
                          "(build 68C0A1F2) -- this DLL was linked "
                          "2026-09-09 20:34:39 UTC\n"
+                         + observation +
                          "[00:00:12.400] Stats[40] ships 3\n"
                          "[00:00:12.400] Stats[41] ships 0\n"
                          "[00:00:12.401] something else\n").encode("utf-8"))
@@ -9897,8 +10011,35 @@ def self_test():
         os.remove(newer_native)
 
         newest = os.path.join(logs, "edvr_gfx_20260910_050000.log")
-        if main(["--file", newest, "--version"]) != 0:
-            print("--version on a good log did not exit 0")
+        import contextlib
+        import io
+
+        def version_report(path):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["--file", path, "--version"])
+            return code, output.getvalue()
+
+        rc, output = version_report(newest)
+        if rc != 0 or "DLSS runtime: runtime module loaded:" not in output \
+                or "fileVersion=3.7.0.12" not in output:
+            print("--version did not report a complete DLSS observation (rc=%d):\n%s"
+                  % (rc, output))
+            ok = False
+        historical = os.path.join(logs, "edvr_gfx_20260910_040000.log")
+        rc, output = version_report(historical)
+        if rc != 0 or "unavailable (record not present in this historical log)" not in output:
+            print("--version did not label the absent historical observation (rc=%d):\n%s"
+                  % (rc, output))
+            ok = False
+        unavailable_path = os.path.join(tmp, "edvr_gfx_20260910_055900.log")
+        with open(unavailable_path, "wb") as f:
+            f.write(("[00:00:00.001] version 0.14.1-93-gf78eba4 (build 68C0A1F2)\n" +
+                     dlss_unavailable).encode("utf-8"))
+        rc, output = version_report(unavailable_path)
+        if rc != 0 or "DLSS runtime: unavailable; runtime module unavailable" not in output:
+            print("--version did not report explicit DLSS unavailability (rc=%d):\n%s"
+                  % (rc, output))
             ok = False
         # The exit code a caller keys off: 2, distinct from 1.
         rc = main(["--file", newest, "--expect-build",
@@ -10070,6 +10211,55 @@ def self_test():
         ok = False
     if not self_test_terrain_checkerboard():
         ok = False
+    import draw_ladder_replay
+    if draw_ladder_replay.self_test() != 0:
+        ok = False
+    # Exercise the actual --draw-replay report return code: old schema remains
+    # readable, while unknown facts and supported mismatches fail closed.
+    import contextlib
+    import io
+    import shutil
+    replay_dir = tempfile.mkdtemp(prefix="edvr_draw_replay_gate_")
+    try:
+        log_path = os.path.join(replay_dir, "edvr_gfx_20261001_010203.log")
+        sidecar_path = os.path.join(
+            replay_dir, "edvr_gfx_20261001_010203.draw-ladder-12.json")
+        scenarios = []
+        legacy = draw_ladder_replay._fixture()
+        legacy["schemaVersion"] = 1
+        legacy.pop("predicateFactVersion")
+        for draw in legacy["draws"]:
+            draw.pop("predicateFacts")
+        legacy_summary = draw_ladder_replay.validate_trace(legacy)
+        scenarios.append(("legacy v1", legacy_summary, 0, "unavailable"))
+        for status in ("unreplayable", "mismatch", "mutation-unobserved"):
+            failed_summary = dict(legacy_summary)
+            failed_summary["predicateReplay"] = {
+                "status": status, "factCount": 1, "replayed": 0,
+                "unreplayable": int(status == "unreplayable"),
+                "mismatches": int(status == "mismatch"),
+                "mutationUnobserved": int(status == "mutation-unobserved"),
+                "predicateFactVersion": 0, "nightVisionStatus": "unavailable-v1",
+                "nightVisionFacts": 0, "nightVisionReplayed": 0,
+                "nightVisionUnreplayable": 0, "nightVisionMismatches": 0}
+            scenarios.append((status, failed_summary, 1, "gate failed"))
+        original_read_trace = draw_ladder_replay.read_trace
+        for label, summary, want, output_token in scenarios:
+            with open(sidecar_path, "w", encoding="utf-8") as stream:
+                stream.write("{}")
+            draw_ladder_replay.read_trace = lambda *args, _summary=summary, **kwargs: ({}, _summary)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                got = print_draw_ladder_report(log_path, "fixture", "1234ABCD")
+            if got != want or output_token not in output.getvalue():
+                print("--draw-replay %s -> %r, output %r" %
+                      (label, got, output.getvalue()))
+                ok = False
+        draw_ladder_replay.read_trace = original_read_trace
+    finally:
+        if 'original_read_trace' in locals():
+            draw_ladder_replay.read_trace = original_read_trace
+        shutil.rmtree(replay_dir, ignore_errors=True)
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
@@ -10281,7 +10471,8 @@ def self_test_flat_upscale():
     else:
         fail("src\\common\\vr_supersample_notice.h is not where the self-test looks for it (%s)" % header)
     if os.path.isfile(vscreen):
-        if adopt_prefix.replace("%ux%u", "%ux%u") not in read_text(vscreen).replace("\"\n                \"", ""):
+        adoption_source = re.sub(r'"\r?\n[ \t]*"', "", read_text(vscreen))
+        if adopt_prefix not in adoption_source:
             fail("src\\d3d11\\vscreen.cpp's adoption line is not the text this reader parses")
     notice = ("[09:30:12.100] " + (notice_prefix % (2112, 2304, 75, 2816, 3072)) + "Elite's Supersampling is below 1 (an upscaler in the chain reads the same). EDVR's DLSS then upscales an "
               "image that is already upscaled, which softens the world and the holograms. Set Elite's Supersampling to 1 and raise HMD Image Quality instead: EDVR's DLSS upscales from that. "

@@ -343,6 +343,15 @@ static void noteCases(const std::wstring& scratch) {
         finish();
         return;
     }
+    const std::wstring openedPath = Log::get().path();
+    const std::wstring expectedPrefix = scratch + L"\\edvr_noteonce_";
+    if (openedPath.find(expectedPrefix) != 0 ||
+        openedPath.size() < expectedPrefix.size() + 4 ||
+        openedPath.substr(openedPath.size() - 4) != L".log") {
+        fail("note cases", "Log::path() did not return the exact collision-safe opened filename");
+    } else {
+        ok("Log::path() exposes the exact opened filename for adjacent artifacts");
+    }
     wrong += readRound(false);          // parse 1, log open
     if (!rewriteIni(scratch, second) || !cfg.reloadIfChanged()) {
         fail("note cases", "the second write did not reload");

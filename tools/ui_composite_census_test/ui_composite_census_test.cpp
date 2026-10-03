@@ -628,6 +628,7 @@ void pins() {
     const std::string math = readFile("src\\d3d11\\ui_layer_math.h");
     const std::string depth = readFile("src\\d3d11\\ui_depth.cpp");
     const std::string vsc = readFile("src\\d3d11\\vscreen.cpp");
+    const std::string ladder = readFile("src\\d3d11\\draw_ladder.h");
     const std::string layer = readFile("src\\d3d11\\ui_layer.cpp");
     check(!math.empty() && !depth.empty() && !vsc.empty() && !layer.empty(), "P0: the four sources are readable from the repo root");
 
@@ -708,23 +709,53 @@ void pins() {
     // P3: vscreen.cpp. The flag is cleared with the other per-draw flags, set right after the pass's own call (inside the pass's gate), taken and
     // cleared by the scope, and the census is settled once, AFTER both takes -- the family's and the after-UI retry's -- and before the loader
     // panel's and the curve's substitutions.
-    const std::string fwd = functionBody(vsc, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,");
-    const std::string beginOverride = functionBody(vsc, "DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,");
+    const std::string fwd = functionBody(vsc, "void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdict v,");
+    // Bind the effect to the actual typed eye-UI handler. A whole-file source
+    // match would let an unrelated function satisfy this pin.
+    const std::string visitor = functionBody(vsc, "__forceinline draw_ladder::SiteResult visit() {");
+    const auto siteHandler = [](const std::string& source, const char* site) {
+        const std::string compact = squeeze(source);
+        const std::string marker = squeeze(std::string("} else if constexpr (id == SiteId::") + site + ") {");
+        const size_t at = compact.find(marker);
+        if (at == std::string::npos) return std::string();
+        const size_t next = compact.find(squeeze("} else if constexpr (id == SiteId::"), at + marker.size());
+        return compact.substr(at, next == std::string::npos ? std::string::npos : next - at);
+    };
+    const std::string eyeUiHandler = siteHandler(visitor, "kEyeUiDepthProbe");
+    const std::string foreignHandler = siteHandler(visitor, "kForeignContextNone");
     // The count only READS: between its opening test and the substitutions that follow it, nothing is assigned to the draw's own state (the take, the
     // world re-issue), nothing is issued and nothing returns -- so with the setting off, or on, it can change no draw and no picture.
     const auto countOnlyReads = [](const std::string& body) {
         const size_t a = body.find(squeeze("if (compositeCounted) {"));
-        const size_t b = a == std::string::npos ? a : body.find(squeeze("if (v == DrawVerdict::kLoaderPanel) {"), a);
-        if (a == std::string::npos || b == std::string::npos) return false;
+        if (a == std::string::npos) return false;
+        const size_t open = body.find('{', a);
+        if (open == std::string::npos) return false;
+        int depth = 0;
+        size_t b = open;
+        for (; b < body.size(); ++b) {
+            if (body[b] == '{') ++depth;
+            else if (body[b] == '}' && --depth == 0) { ++b; break; }
+        }
+        if (depth != 0) return false;
         const std::string block = body.substr(a, b - a);
         return block.find("uiLayer=") == std::string::npos && block.find("worldReissue") == std::string::npos && block.find("draw(") == std::string::npos &&
                block.find("return") == std::string::npos && block.find("uiLayerBegin") == std::string::npos && block.find("g_state") == std::string::npos;
     };
-    const auto vsPlaces = [&countOnlyReads](const std::string& begin, const std::string& body) {
+    const auto eyeSequenceOrder = [&ladder] {
+        const size_t begin = ladder.find("using EyeSequence = Sequence<");
+        const size_t end = begin == std::string::npos ? begin : ladder.find(";", begin);
+        if (begin == std::string::npos || end == std::string::npos) return false;
+        const std::string eye = ladder.substr(begin, end - begin);
+        const size_t depth = eye.find("SiteId::kEyeDepthAndCount");
+        const size_t ui = eye.find("SiteId::kEyeUiDepthProbe");
+        const size_t holo = eye.find("SiteId::kEyeHoloDepthProbe");
+        return depth != std::string::npos && ui != std::string::npos && holo != std::string::npos && depth < ui && ui < holo;
+    };
+    const auto vsPlaces = [&countOnlyReads, &eyeSequenceOrder](const std::string& handler, const std::string& body) {
         return countOnlyReads(body) &&
-               inOrder(begin, {"t_uiDepthThisDraw = false;", "t_compositeThisDraw = false;", "if (!drawGateWanted()) {"}) &&
-               has(begin, "if (uiDepthWantsDraws()) { t_uiDepthThisDraw = uiDepthOnEyeDraw(") && has(begin, "t_compositeThisDraw = uiDepthDrawSampledSurface(); }") &&
-               countOf(begin, "t_compositeThisDraw=uiDepthDrawSampledSurface();") == 1 &&
+               eyeSequenceOrder() &&
+               inOrder(handler, {"if constexpr (id == SiteId::kEyeUiDepthProbe)", "if (uiDepthWantsDraws())", "t_uiDepthThisDraw = uiDepthOnEyeDraw(self,", "t_compositeThisDraw = uiDepthDrawSampledSurface();"}) &&
+               countOf(handler, "t_compositeThisDraw=uiDepthDrawSampledSurface();") == 1 &&
                has(body, "composite(t_compositeThisDraw)") && has(body, "t_compositeThisDraw = false;") &&
                inOrder(body, {"uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily)", "uiLayer = uiLayerNoteOther(", "if (compositeCounted) {",
                               "uiLayerNoteCompositeTaken();", "uiLayerNoteCompositeLeft(bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps),",
@@ -732,12 +763,12 @@ void pins() {
                has(body, "compositeCounted = uiDepthScope.composite;") && has(body, "compositeFamily = uiFamily;") &&
                countOf(body, "uiLayerNoteCompositeTaken();") == 1 && countOf(body, "uiLayerNoteCompositeLeft(") == 1;
     };
-    check(!fwd.empty() && !beginOverride.empty() && vsPlaces(beginOverride, fwd),
+    check(!fwd.empty() && !eyeUiHandler.empty() && has(foreignHandler, "t_compositeThisDraw = false;") && vsPlaces(eyeUiHandler, fwd),
           "P3: vscreen.cpp clears the composite flag with the other per-draw flags, sets it right after uiDepthOnEyeDraw, consumes it in the scope, and counts the composite "
           "once, after the family's take and the after-UI retry and before the substitutions");
     {
         const std::string taken = "uiLayerNoteCompositeTaken();";
-        std::string early = fwd, noLeft = fwd, extraTaken = fwd, notCleared = beginOverride, notSet = beginOverride, notConsumed = fwd, writes = fwd, returns = fwd;
+        std::string early = fwd, noLeft = fwd, extraTaken = fwd, notCleared = foreignHandler, notSet = eyeUiHandler, notConsumed = fwd, writes = fwd, returns = fwd;
         writes = edited(writes, "if (compositeCounted) {", "if (compositeCounted) { uiLayer = false;");
         returns = edited(returns, "uiLayerNoteCompositeTaken();", "uiLayerNoteCompositeTaken(); return;");
         // the count moved in front of the after-UI retry
@@ -747,9 +778,17 @@ void pins() {
         extraTaken = edited(extraTaken, taken.c_str(), "uiLayerNoteCompositeTaken(); uiLayerNoteCompositeTaken();");
         notCleared = edited(notCleared, "t_compositeThisDraw = false;", "");
         notSet = edited(notSet, "t_compositeThisDraw = uiDepthDrawSampledSurface();", "");
+        std::string movedSet = eyeUiHandler;
+        movedSet = edited(movedSet, "t_compositeThisDraw = uiDepthDrawSampledSurface();", "");
+        std::string movedVisitor = visitor;
+        movedVisitor = edited(movedVisitor, "t_compositeThisDraw = uiDepthDrawSampledSurface();", "");
+        movedVisitor = edited(movedVisitor, "} else if constexpr (id == SiteId::kEyeHoloDepthProbe) {", "} else if constexpr (id == SiteId::kEyeHoloDepthProbe) { t_compositeThisDraw = uiDepthDrawSampledSurface();");
+        const std::string otherHandler = siteHandler(movedVisitor, "kEyeUiDepthProbe");
+        const std::string holoHandler = siteHandler(movedVisitor, "kEyeHoloDepthProbe");
         notConsumed = edited(notConsumed, "composite(t_compositeThisDraw)", "composite(false)");
-        check(!vsPlaces(beginOverride, early) && !vsPlaces(beginOverride, noLeft) && !vsPlaces(beginOverride, extraTaken) && !vsPlaces(notCleared, fwd) &&
-                  !vsPlaces(notSet, fwd) && !vsPlaces(beginOverride, notConsumed) && !vsPlaces(beginOverride, writes) && !vsPlaces(beginOverride, returns),
+        check(!vsPlaces(eyeUiHandler, early) && !vsPlaces(eyeUiHandler, noLeft) && !vsPlaces(eyeUiHandler, extraTaken) && !has(notCleared, "t_compositeThisDraw = false;") &&
+                  !vsPlaces(notSet, fwd) && !vsPlaces(movedSet, fwd) && has(holoHandler, "t_compositeThisDraw=uiDepthDrawSampledSurface();") &&
+                  !vsPlaces(otherHandler, fwd) && !vsPlaces(eyeUiHandler, notConsumed) && !vsPlaces(eyeUiHandler, writes) && !vsPlaces(eyeUiHandler, returns),
               "P3 control: counted before the after-UI retry, with no left-composite call, with a second taken call, with the flag never cleared, never set, "
               "not consumed by the scope, with the count assigning the take or returning, the pin fails");
     }

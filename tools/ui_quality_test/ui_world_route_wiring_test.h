@@ -21,7 +21,13 @@ namespace worldroute {
 
 std::string readText(const char* path) {
     std::ifstream in(path, std::ios::binary);
-    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // Source files in this worktree may be CRLF while mutation anchors use
+    // explicit LF. Normalize once so the controls test source semantics rather
+    // than the checkout's line-ending convention.
+    for (size_t at = 0; (at = text.find("\r\n", at)) != std::string::npos; ++at)
+        text.replace(at, 2, "\n");
+    return text;
 }
 
 // The squeezed text of one top-level function, or "" (after a failed check).
@@ -114,24 +120,25 @@ std::vector<WirePin> layerCurvedPins(const std::string& text) {
 std::vector<WirePin> vscreenCurvedPins(const std::string& text) {
     std::vector<WirePin> pins;
     const std::string all = afterui::squeeze(text);
-    const std::string fwd = quietBody(text, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,");
-    const std::string curved = quietBody(text, "__declspec(noinline) void worldScreenReissueCurved(");
-    const std::string swallowed = quietBody(text, "__declspec(noinline) void curvedScreenSwallowed(");
-    const std::string flat = quietBody(text, "__declspec(noinline) void worldScreenReissue(");
+    const std::string fwd = quietBody(text, "void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdict v,");
+    const std::string curved = quietBody(text, "__declspec(noinline) void worldScreenReissueCurved(TracePolicy& trace,");
+    const std::string swallowed = quietBody(text, "__declspec(noinline) void curvedScreenSwallowed(TracePolicy& trace,");
+    const std::string flat = quietBody(text, "__declspec(noinline) void worldScreenReissue(TracePolicy& trace,");
     // forwardWithVerdict's curve branch: the substitution skips its own per-eye motion pass exactly when the route re-issues this draw, and a
     // swallowed draw goes to curvedScreenSwallowed with that same fact and returns, before the verdict's own Begin.
     pins.push_back({"curve-branch",
-                    inOrder(fwd, {"if(g_state->curveThisDraw){g_state->curveThisDraw=false;", "constboollayered=uiLayer&&uiLayerBegin(self);",
+                    inOrder(fwd, {"if(forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,[&]{returng_state->curveThisDraw;},[&]{returng_state->curveThisDraw;})){g_state->curveThisDraw=false;", "constboollayered=uiLayer&&uiLayerBegin(self);",
                                   "constboolswallowed=panelCurveSubstitute(self,g_state->realDrawIndexedInstanced,!worldReissue.on);",
-                                  "if(layered)uiLayerEnd(self);if(swallowed){curvedScreenSwallowed(self,v,count,instances,args,worldReissue.on);return;}",
-                                  "if(v!=DrawVerdict::kNone)forwardVerdictBegin(self,v);"}) &&
+                                  "if(layered)uiLayerEnd(self);if(swallowed){curvedScreenSwallowed(trace,self,v,count,instances,args,worldReissue.on);return;}",
+                                  "if(v!=DrawVerdict::kNone){", "forwardVerdictBegin(self,v);"}) &&
                         countOf(all, "panelCurveSubstitute(") == 1 && countOf(all, "curvedScreenSwallowed(") == 2,
                     "forwardWithVerdict's curve branch: the substitution is told to skip its motion pass when the route re-issues the draw (!worldReissue.on), and a swallowed "
                     "draw goes to curvedScreenSwallowed with that fact and returns, after the layer's End and before the verdict's Begin"});
     // The curved re-issue: the internal scope, then ready BEFORE the layer's bracket opens, the census scope, the strip through the ORIGINAL draw pointer, End told what happened.
     pins.push_back({"reissue-curved",
-                    inOrder(curved, {"if(uiLayerIssueBlocked())return;", "VrWorldInternalScopeinternal;", "if(!panelCurveReissueReady())return;",
-                                     "if(uiLayerWorldReissueBegin(self)){", "GpuCensusScopecensus(self,GpuCensusSection::FrameWorldLayer);",
+                    inOrder(curved, {"if(uiLayerIssueBlocked()){", "return;", "}VrWorldInternalScopeinternal;",
+                                      "if(!panelCurveReissueReady())", "return;", "}constboolbegan=uiLayerWorldReissueBegin(self);", "if(began){",
+                                     "GpuCensusScopecensus(self,GpuCensusSection::FrameWorldLayer);",
                                      "constbooldrawn=panelCurveReissue(self,g_state->realDrawIndexedInstanced);", "uiLayerWorldReissueEnd(self,drawn);"}) &&
                         countOf(curved, "uiLayerWorldReissueBegin(") == 1 && countOf(curved, "uiLayerWorldReissueEnd(") == 1 &&
                         countOf(all, "panelCurveReissue(") == 1 && countOf(all, "panelCurveReissueReady(") == 1,
@@ -142,19 +149,19 @@ std::vector<WirePin> vscreenCurvedPins(const std::string& text) {
                     inOrder(swallowed, {"if(self!=g_state->ownerCtx)return;",
                                         "if(g_state->rtv0Eye&&count&&instances&&vscreenFootprintWanted())footprintEyeDraw(self,"
                                         "v==DrawVerdict::kPanel?g_state->distanceScale:1.0f,args.base,args.startInstance);",
-                                        "if(!routeOwns)return;", "if(screenMotionLive())screenMotionRecognize();", "worldScreenReissueCurved(self);"}) &&
+                                        "if(!routeOwns)return;", "if(screenMotionLive())screenMotionRecognize();", "worldScreenReissueCurved(trace,self,'X',count,instances,args);"}) &&
                         countOf(swallowed, "footprintEyeDraw(") == 1 && countOf(swallowed, "screenMotionRecognize(") == 1 && countOf(swallowed, "worldScreenReissueCurved(") == 1,
                     "curvedScreenSwallowed: the owner context only; the footprint instrument only when it is armed (vscreenFootprintWanted); the recognition and the curved "
                     "re-issue only when the route owns the frame (routeOwns), in that order, once each"});
-    // The FLAT re-issue is untouched: its body is exactly what it was, and its one call site still follows the game's own issue and the crisp re-issue.
+    // The flat re-issue keeps its begin/issue/end behavior, and its call site still follows the game's own issue and the crisp re-issue.
     pins.push_back({"flat-unchanged",
-                    flat == "__declspec(noinline)voidworldScreenReissue(ID3D11DeviceContext*self,charkind,UINTcount,UINTinstances,constDrawArgs&args){"
-                            "if(uiLayerIssueBlocked())return;VrWorldInternalScopeinternal;if(uiLayerWorldReissueBegin(self)){"
-                            "GpuCensusScopecensus(self,GpuCensusSection::FrameWorldLayer);pureDrawReissue(self,kind,count,instances,args);uiLayerWorldReissueEnd(self);}}" &&
-                        has(fwd, "if(originalIssued&&uiLayerCrispPending()){crispHudTonemapReissue(self,kind,count,instances,args);}"
-                                 "if(worldReissue.on&&originalIssued){worldScreenReissue(self,kind,count,instances,args);}") &&
+                    inOrder(flat, {"if(uiLayerIssueBlocked()){", "return;", "}VrWorldInternalScopeinternal;", "constboolbegan=uiLayerWorldReissueBegin(self);",
+                                    "if(began){", "GpuCensusScopecensus(self,GpuCensusSection::FrameWorldLayer);",
+                                    "pureDrawReissue(self,kind,count,instances,args);", "uiLayerWorldReissueEnd(self);"}) &&
+                        has(fwd, "if(originalIssued&&forwardInputs.read(forwardInputs.fact.crispPendingAfterOriginal,[]{returndetail::g_uiLayerCrispPending;},[]{returnuiLayerCrispPending();})){crispHudTonemapReissue(trace,self,kind,count,instances,args);}"
+                                 "if(worldReissue.on&&originalIssued){worldScreenReissue(trace,self,kind,count,instances,args);}") &&
                         countOf(all, "worldScreenReissue(") == 2 && countOf(all, "uiLayerWorldReissueEnd(self);") == 1,
-                    "the flat re-issue is unchanged: worldScreenReissue's body is exactly what it was, and `if (worldReissue.on && originalIssued) worldScreenReissue(self, "
+                    "the flat re-issue keeps its original bracketed draw and `if (worldReissue.on && originalIssued) worldScreenReissue(trace, "
                     "kind, count, instances, args)` still follows the crisp re-issue, once"});
     // The recognition: the flat tail's, a taken 2D screen's behind the maps gate, and the curved screen's (behind routeOwns, above).
     pins.push_back({"recognition-places", countOf(all, "screenMotionRecognize()") == 3,
@@ -187,19 +194,21 @@ void testCurvedControls(const std::string& layerText, const std::string& vscreen
          "panelCurveSubstitute(self, g_state->realDrawIndexedInstanced);", "curve-branch"},
         {false, "the substitution skips its motion pass on the wrong frames", "panelCurveSubstitute(self, g_state->realDrawIndexedInstanced, !worldReissue.on);",
          "panelCurveSubstitute(self, g_state->realDrawIndexedInstanced, worldReissue.on);", "curve-branch"},
-        {false, "a swallowed draw no longer returns", "curvedScreenSwallowed(self, v, count, instances, args, worldReissue.on);\n            return;",
-         "curvedScreenSwallowed(self, v, count, instances, args, worldReissue.on);", "curve-branch"},
-        {false, "curvedScreenSwallowed is told the route owns every frame", "curvedScreenSwallowed(self, v, count, instances, args, worldReissue.on);",
-         "curvedScreenSwallowed(self, v, count, instances, args, true);", "curve-branch"},
+        {false, "a swallowed draw no longer returns", "curvedScreenSwallowed(trace, self, v, count, instances, args, worldReissue.on);\n            return;",
+         "curvedScreenSwallowed(trace, self, v, count, instances, args, worldReissue.on);", "curve-branch"},
+        {false, "curvedScreenSwallowed is told the route owns every frame", "curvedScreenSwallowed(trace, self, v, count, instances, args, worldReissue.on);",
+         "curvedScreenSwallowed(trace, self, v, count, instances, args, true);", "curve-branch"},
         {false, "the layer's End is not run before the swallowed draw", "        if (layered) uiLayerEnd(self);\n        if (swallowed) {\n", "        if (swallowed) {\n", "curve-branch"},
-        {false, "ready is asked after the layer's Begin",
-         "    if (!panelCurveReissueReady()) return;\n    if (uiLayerWorldReissueBegin(self)) {\n",
-         "    if (uiLayerWorldReissueBegin(self)) {\n        if (!panelCurveReissueReady()) return;\n", "reissue-curved"},
+        {false, "ready is bypassed before the layer's Begin", "if (!panelCurveReissueReady()) {", "if (true) {", "reissue-curved"},
+        {false, "the blocked world route falls through without returning", "            draw_ladder::ActionOutcome::Declined, kind, count, instances, args,\n            0);\n        return;\n    }\n    VrWorldInternalScope internal;",
+         "            draw_ladder::ActionOutcome::Declined, kind, count, instances, args,\n            0);\n    }\n    VrWorldInternalScope internal;", "reissue-curved"},
+        {false, "the ready refusal returns only after Begin", "    if (!panelCurveReissueReady()) {\n        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(\n            trace, draw_ladder::ActionPhase::Begin,\n            draw_ladder::ActionOutcome::Declined, kind, count, instances, args,\n            0);\n        return;\n    }\n    const bool began = uiLayerWorldReissueBegin(self);",
+         "    if (!panelCurveReissueReady()) {\n        ladderTraceAction<TracePolicy, draw_ladder::ActionId::kWorldRouteDraw>(\n            trace, draw_ladder::ActionPhase::Begin,\n            draw_ladder::ActionOutcome::Declined, kind, count, instances, args,\n            0);\n    }\n    const bool began = uiLayerWorldReissueBegin(self);\n    return;", "reissue-curved"},
         {false, "End is not told what the draw did", "uiLayerWorldReissueEnd(self, drawn);", "uiLayerWorldReissueEnd(self);", "reissue-curved"},
         {false, "End is told the draw landed whatever it did",
          "const bool drawn = panelCurveReissue(self, g_state->realDrawIndexedInstanced);\n        uiLayerWorldReissueEnd(self, drawn);",
          "panelCurveReissue(self, g_state->realDrawIndexedInstanced);\n        uiLayerWorldReissueEnd(self, true);", "reissue-curved"},
-        {false, "the curved re-issue runs outside the internal scope", "    VrWorldInternalScope internal;\n    if (!panelCurveReissueReady()) return;", "    if (!panelCurveReissueReady()) return;", "reissue-curved"},
+        {false, "the curved re-issue runs outside the internal scope", "    VrWorldInternalScope internal;\n    if (!panelCurveReissueReady()) {", "    if (!panelCurveReissueReady()) {", "reissue-curved"},
         {false, "the curved re-issue is not on the census",
          "        GpuCensusScope census(self, GpuCensusSection::FrameWorldLayer);\n        const bool drawn", "        const bool drawn", "reissue-curved"},
         {false, "the strip is drawn through another draw pointer", "panelCurveReissue(self, g_state->realDrawIndexedInstanced);", "panelCurveReissue(self, nullptr);", "reissue-curved"},
@@ -207,15 +216,16 @@ void testCurvedControls(const std::string& layerText, const std::string& vscreen
          "    if (screenMotionLive()) screenMotionRecognize();\n    if (!routeOwns) return;", "swallowed-gates"},
         {false, "the route's gate is gone", "    if (!routeOwns) return;\n", "", "swallowed-gates"},
         {false, "the footprint is called whether or not it is armed",
-         "    if (g_state->rtv0Eye && count && instances && vscreenFootprintWanted())\n        footprintEyeDraw(", "    if (g_state->rtv0Eye && count && instances)\n        footprintEyeDraw(", "swallowed-gates"},
+         "    if (g_state->rtv0Eye && count && instances && vscreenFootprintWanted())\n        footprintEyeDraw(",
+         "    if (g_state->rtv0Eye && count && instances)\n        footprintEyeDraw(", "swallowed-gates"},
         {false, "a deferred context is measured and re-issued too", "    if (self != g_state->ownerCtx) return;\n    if (g_state->rtv0Eye && count && instances",
          "    if (g_state->rtv0Eye && count && instances", "swallowed-gates"},
-        {false, "the flat re-issue's End is told something", "        pureDrawReissue(self, kind, count, instances, args);\n        uiLayerWorldReissueEnd(self);",
-         "        pureDrawReissue(self, kind, count, instances, args);\n        uiLayerWorldReissueEnd(self, true);", "flat-unchanged"},
-        {false, "the flat call site loses its originalIssued term", "    if (worldReissue.on && originalIssued) {\n        worldScreenReissue(self, kind, count, instances, args);",
-         "    if (worldReissue.on) {\n        worldScreenReissue(self, kind, count, instances, args);", "flat-unchanged"},
-        {false, "the flat call site calls the curved re-issue", "        worldScreenReissue(self, kind, count, instances, args);\n    }\n", "        worldScreenReissueCurved(self);\n    }\n", "flat-unchanged"},
-        {false, "a fourth place recognises", "    if (!panelCurveReissueReady()) return;\n", "    if (!panelCurveReissueReady()) return;\n    if (screenMotionLive()) screenMotionRecognize();\n", "recognition-places"},
+        {false, "the flat re-issue's End is told something", "uiLayerWorldReissueEnd(self);",
+         "uiLayerWorldReissueEnd(self, true);", "flat-unchanged"},
+        {false, "the flat call site loses its originalIssued term", "    if (worldReissue.on && originalIssued) {\n        worldScreenReissue(trace, self, kind, count, instances, args);",
+         "    if (worldReissue.on) {\n        worldScreenReissue(trace, self, kind, count, instances, args);", "flat-unchanged"},
+        {false, "the flat call site calls the curved re-issue", "        worldScreenReissue(trace, self, kind, count, instances, args);\n    }\n", "        worldScreenReissueCurved(trace, self, kind, count, instances, args);\n    }\n", "flat-unchanged"},
+        {false, "a fourth place recognises", "if (!panelCurveReissueReady()) {", "if (!panelCurveReissueReady()) { if (screenMotionLive()) screenMotionRecognize();", "recognition-places"},
     };
     for (const WireFlip& f : flips) {
         char label[360];
@@ -282,22 +292,23 @@ void testWiringVscreen() {
     const std::string text = readText("src/d3d11/vscreen.cpp");
     check(!text.empty(), "src/d3d11/vscreen.cpp is readable from the working directory");
     std::string missing;
-    const std::string reissue = bodyOf(text, "__declspec(noinline) void worldScreenReissue(", "worldScreenReissue");
-    reportOrder(inOrder(reissue, {"if(uiLayerIssueBlocked())return;", "VrWorldInternalScopeinternal;", "if(uiLayerWorldReissueBegin(self)){",
-                                  "GpuCensusScopecensus(self,GpuCensusSection::FrameWorldLayer);", "pureDrawReissue(self,kind,count,instances,args);",
+    const std::string reissue = bodyOf(text, "__declspec(noinline) void worldScreenReissue(TracePolicy& trace,", "worldScreenReissue");
+    reportOrder(inOrder(reissue, {"if(uiLayerIssueBlocked())", "VrWorldInternalScopeinternal;", "constboolbegan=uiLayerWorldReissueBegin(self);",
+                                  "if(began){", "GpuCensusScopecensus(self,GpuCensusSection::FrameWorldLayer);", "pureDrawReissue(self,kind,count,instances,args);",
                                   "uiLayerWorldReissueEnd(self);"},
                         &missing),
                 missing, "worldScreenReissue: the internal scope, Begin, the census scope (FrameWorldLayer), the game's draw once more, End");
-    const std::string fwd = bodyOf(text, "void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,", "forwardWithVerdict");
+    const std::string fwd = bodyOf(text, "void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdict v,", "forwardWithVerdict");
     reportOrder(inOrder(fwd, {"structWorldReissueScope{boolon=false;~WorldReissueScope(){if(on)uiLayerWorldReissueAbandon();}}worldReissue;",
                               "uiLayer=uiLayerDecide(self,static_cast<int>(uiFamily)", "worldReissue.on=uiLayerWorldReissuePending();",
                               "uiLayer=uiLayerNoteOther(", "if(uiLayer&&worldReissue.on){worldReissue.on=false;uiLayerWorldReissueAbandon();}",
-                              "constbooloriginalIssued=observedDraw(", "crispHudTonemapReissue(self,kind,count,instances,args);",
-                              "if(worldReissue.on&&originalIssued){worldScreenReissue(self,kind,count,instances,args);}", "forwardVerdictEnd(self,v);"},
+                              "constbooloriginalIssued=observedDraw(", "crispHudTonemapReissue(trace,self,kind,count,instances,args);",
+                              "if(worldReissue.on&&originalIssued){worldScreenReissue(trace,self,kind,count,instances,args);}", "forwardVerdictEnd(self,v);"},
                         &missing),
                 missing,
                 "forwardWithVerdict: the pending re-issue is scoped to the call, taken from the decision, dropped if the after-UI retry took the draw, issued after the game's own draw and the crisp re-issue, before the verdict is undone");
-    const std::string tail = bodyOf(text, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(", "hookedDrawIndexedInstanced");
+    const std::string tail = bodyOf(text, "void STDMETHODCALLTYPE hookedDrawIndexedInstanced(",
+                                    "hookedDrawIndexedInstanced");
     reportOrder(inOrder(tail, {"if(screenMotionLive()&&uiLayerWorldReissuePending())screenMotionRecognize();",
                                "if(screenMotionLive()&&!uiLayerRedirecting()&&!uiLayerWorldReissuePending()){", "screenMotionUiDraw(self,", "screenMotionDraw(self,"},
                         &missing),

@@ -186,6 +186,51 @@ Snapshot fixSnapshot(size_t i, uint64_t frames) noexcept {
     return snapshotOf(g_section[kAlteredFixFirst + i], g_section[kAlteredFixFirst], frames);
 }
 
+void logOwnerGpuSummaries(uint64_t frames) {
+    GpuCensusOwnerObservation observations[kSections] = {};
+    size_t count = 0;
+    bool weaponMotionObserved = false;
+    for (size_t i = 0; i < kSections; ++i) {
+        const auto section = static_cast<GpuCensusSection>(i);
+        if (gpuCensusOwnership(section).attribution != GpuCensusAttribution::Direct) continue;
+        const Snapshot sample = snapshotOf(g_section[i], frames);
+        if (section == GpuCensusSection::FrameWeaponMotion) weaponMotionObserved = sample.occurred;
+        observations[count++] = {section, sample.occurred, sample.samples, sample.msPerFrame};
+    }
+
+    for (uint8_t i = 0; i < static_cast<uint8_t>(GpuCensusOwner::Count); ++i) {
+        const auto owner = static_cast<GpuCensusOwner>(i);
+        const GpuCensusOwnerSummary summary = aggregateGpuCensusOwner(owner, observations, count);
+        // A quiet logical owner has no row. In particular, do not manufacture
+        // zero-cost entries for modules whose direct scope did not run.
+        if (!summary.occurredScopes) continue;
+        if (summary.hasGpuEstimate) {
+            Log::get().note(
+                "EDVR GPU census, logical owner %s (legacy attribution, not module-selection status): "
+                "estimated direct-scope subtotal %.3f ms/frame; observed %u/%u declared direct scopes, "
+                "timestamped %u/%u observed scopes (%u existing timer samples); scope coverage %s, not complete "
+                "plugin GPU cost.",
+                gpuCensusOwnerName(owner), summary.msPerFrame, summary.occurredScopes, summary.declaredDirectScopes,
+                summary.sampledScopes, summary.occurredScopes, summary.timestampSamples,
+                summary.partial() ? "partial" : "observed scopes timestamped");
+        } else {
+            Log::get().note(
+                "EDVR GPU census, logical owner %s (legacy attribution, not module-selection status): "
+                "GPU unmeasured; observed %u/%u declared direct scopes, timestamped 0/%u observed scopes; "
+                "scope coverage partial, not complete plugin GPU cost.",
+                gpuCensusOwnerName(owner), summary.occurredScopes, summary.declaredDirectScopes,
+                summary.occurredScopes);
+        }
+    }
+    const auto weapon = gpuCensusOwnership(GpuCensusSection::FrameWeaponMotion);
+    if (weaponMotionObserved && weapon.sharedConsumer[0]) {
+        Log::get().note(
+            "EDVR GPU census ownership note: FrameWeaponMotion is reported once under %s; %s consumes the "
+            "service and is not split into a second cost row.",
+            gpuCensusOwnerName(weapon.owner), weapon.sharedConsumer);
+    }
+}
+
 // The section the rotation's turn is for, and the calls per frame that decide its stride: for the
 // fix sections' shared turn that is every fix's, together.
 uint64_t turnOccurrences(GpuCensusSection owner) noexcept {
@@ -420,6 +465,7 @@ void logAndResetWindow(uint64_t now) {
     char gapDetail[1100];   // the stalls clause (gpu_frame_gap.h) made 900 too small by about a hundred characters
     formatGapDetail(gapDetail, sizeof(gapDetail), gap);
     Log::get().note("%s", gapDetail);
+    logOwnerGpuSummaries(frames);
 
     for (auto& st : g_section) {
         st.baseMs = st.sampler.totals.ms;

@@ -44,8 +44,6 @@
 #include "weapon_motion.h"
 #include "cs_stage_save.h"
 #include "engine_velocity.h"
-#include "scheduler_stack_probe.h"
-#include "static_prop_gate.h"
 #include "perf_monitor.h"
 #include "shader_swap.h"
 #include "gpu_timing.h"
@@ -6128,17 +6126,6 @@ void temporalPassConfigure(Config& cfg) {
     // diagnostic-only (applyEngineMotionDiagnostics, below the debug mode's
     // read).
     engineVelocityConfigure(engineMotionOn);
-    // The scheduler stack-capture probe (docs/engine-render-pipeline.md
-    // stage 0): read-only return-address signatures at the four
-    // scheduler-fed worker entries, naming the frame scheduler the vtable
-    // tables hide from static RE. Independent of the temporal pass fixes:
-    // it observes the engine, not the renderer, so it arms on its own key.
-    schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
-    // The static prop gate (docs/engine-render-performance-2026-09-19.md,
-    // 2026-09-21 design entry): change-gated render-data updates at the
-    // job-0 entry. Default off; Phase 1 build, the Phase-2 flight must show
-    // census draw-count equality before this can default on.
-    staticPropGateConfigure(cfg.getBool("fix.static_prop_updates", false));
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
     g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
     float c = cfg.getFloat("advanced.temporal_aa_history_sharp", 0.5f);

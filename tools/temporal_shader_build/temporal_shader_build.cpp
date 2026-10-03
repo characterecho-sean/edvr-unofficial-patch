@@ -18,7 +18,7 @@
 #include "../../src/d3d11/engine_velocity_primary_copy_shader.h"
 #include "../../src/d3d11/fixed_shader_source.h"
 #include "../../src/d3d11/ui_resolve.h"
-#include "../../src/d3d11/night_vision_shader.h"
+#include "../../src/plugins/cockpit_visuals/night_vision_shader.h"
 #include "../../src/d3d11/stellar_coverage.h"
 #include "../../src/openxr/stereo_shader_source.h"
 

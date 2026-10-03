@@ -44,6 +44,9 @@
 // down for the session and lets the game draw its own shader.
 #pragma once
 
+#include "draw_interest.h"
+#include "target_sharp_observation.h"
+
 #include <cstdint>
 
 struct ID3D11DeviceContext;
@@ -55,6 +58,9 @@ class Config;
 // Reads experimental.target_indicator (stock | sharp) and the shader pin
 // advanced.target_indicator_vs. Install and reload; live.
 void targetSharpConfigure(Config& cfg);
+bool targetSharpDrawInterestConfigured() noexcept;
+std::size_t targetSharpDrawInterestFilters(draw_interest::ShaderFilter* out,
+                                           std::size_t capacity) noexcept;
 
 // False in stock mode and once stood down, which keeps the draw path free.
 //
@@ -68,12 +74,18 @@ inline bool targetSharpWantsDraws() {
     return detail::g_targetSharpSharp && !detail::g_targetSharpFailed;
 }
 
+bool targetSharpWantsDrawsObserved(TargetSharpObservation& observation,
+                                   bool helper = false) noexcept;
+
 // Is this eye draw the indicator's composite? Shape first (6 indices, one
 // instance), then slot 0 being a non-eye-sized Texture2D with slots 1-3
 // unbound, then the vertex shader's content hash -- cheapest test first,
 // and the hash read last because it costs a VSGetShader.
 bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                           uint32_t instances);
+bool targetSharpOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                                  uint32_t count, uint32_t instances,
+                                  TargetSharpObservation& observation);
 
 // Around the real draw: bind the replacement pixel shader, put the game's
 // own back after. A begin that cannot compile degrades to the draw running
@@ -82,5 +94,11 @@ void targetSharpBegin(ID3D11DeviceContext* ctx);
 void targetSharpEnd(ID3D11DeviceContext* ctx);
 
 void targetSharpShutdown();
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+void targetSharpPredicateTestSeed(bool sharp, bool failed,
+                                  std::uint64_t configuredHash) noexcept;
+std::uint64_t targetSharpPredicateTestConfiguredHash() noexcept;
+#endif
 
 }  // namespace edvr

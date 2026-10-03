@@ -94,6 +94,21 @@ struct MetadataCache {
 MetadataCache g_washMetadata;
 MetadataCache g_uiMetadata;
 
+// Trace-only copy of raw descriptor scalars. The view pointer is an internal
+// cache key only and is never copied into an observation or selector input.
+struct TraceRawShadow final {
+    void* view = nullptr;
+    uint32_t generation = 0;
+    bool valid = false;
+    bool texture2D = false;
+    uint32_t a = 0;
+    uint32_t b = 0;
+    uint32_t fmt = 0;
+};
+
+TraceRawShadow g_washTraceShadow;
+TraceRawShadow g_uiTraceShadow;
+
 #ifdef EDVR_SCRIM_METADATA_TEST
 uint64_t g_metadataResolveCalls = 0;
 #endif
@@ -120,6 +135,77 @@ bool cachedMetadata(BindSlot slot, MetadataCache& cache, Predicate matches) {
 
     ResourceInfo info;
     if (!resolveMetadata(view, &info)) {
+        cache.view = view;
+        cache.generation = generation;
+        cache.known = false;
+        cache.matches = false;
+        return false;
+    }
+
+    cache.view = view;
+    cache.generation = generation;
+    cache.known = true;
+    cache.matches = matches(info);
+    return cache.matches;
+}
+
+template <typename Predicate>
+bool cachedMetadataObserved(BindSlot slot, MetadataCache& cache,
+                            TraceRawShadow& shadow,
+                            holo_scrim_observation::ResourceObservation& fact,
+                            Predicate matches) {
+    using holo_scrim_observation::Tri;
+    using holo_scrim_observation::ResourceSource;
+    void* const view = bindingGet(slot);
+    const uint32_t generation = bindingGeneration(slot);
+    if (cache.known && cache.view == view && cache.generation == generation) {
+        fact.resolveReached = Tri::No;
+        if (shadow.valid && shadow.view == view && shadow.generation == generation) {
+            fact.source = ResourceSource::RawShadowHit;
+            fact.resolved = Tri::Yes;
+            fact.rawAvailable = Tri::Yes;
+            fact.texture2D = shadow.texture2D ? Tri::Yes : Tri::No;
+            fact.a = shadow.a;
+            fact.b = shadow.b;
+            fact.fmt = shadow.fmt;
+        } else {
+            fact.source = ResourceSource::WarmCacheWithoutRawShadow;
+            fact.resolved = Tri::Unknown;
+            fact.rawAvailable = Tri::Unknown;
+            fact.texture2D = Tri::Unknown;
+        }
+        // This is the production selector's cache outcome. The recorded raw
+        // fact remains independently re-evaluable; a missing shadow does not
+        // turn cache.matches into a serialized selector input.
+        return cache.matches;
+    }
+
+    ResourceInfo info;
+    fact.resolveReached = Tri::Yes;
+    const bool resolved = resolveMetadata(view, &info);
+    fact.source = resolved ? ResourceSource::FreshResolveSuccess
+                           : ResourceSource::FreshResolveFailure;
+    fact.resolved = resolved ? Tri::Yes : Tri::No;
+    fact.rawAvailable = resolved ? Tri::Yes : Tri::No;
+    fact.texture2D = info.isTexture2D ? Tri::Yes : Tri::No;
+    if (resolved) {
+        fact.a = info.a;
+        fact.b = info.b;
+        fact.fmt = info.fmt;
+        shadow.view = view;
+        shadow.generation = generation;
+        shadow.valid = true;
+        shadow.texture2D = info.isTexture2D;
+        shadow.a = info.a;
+        shadow.b = info.b;
+        shadow.fmt = info.fmt;
+    } else {
+        // An observed failed resolver makes this identity's old raw shadow
+        // unusable; the ordinary cache still retries exactly as before.
+        shadow = TraceRawShadow{};
+    }
+
+    if (!resolved) {
         cache.view = view;
         cache.generation = generation;
         cache.known = false;
@@ -233,6 +319,53 @@ bool scrimOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
         return false;
     }
     return true;
+}
+
+bool scrimOnEyeDrawObserved(char kind, uint32_t count, uint32_t instances,
+                            holo_scrim_observation::ScrimObservation* observation) {
+    using holo_scrim_observation::Tri;
+    holo_scrim_observation::ScrimObservation local{};
+    auto& out = observation ? *observation : local;
+    out = holo_scrim_observation::ScrimObservation{};
+    auto finish = [&](bool matched) {
+        out.predicateResult = matched ? Tri::Yes : Tri::No;
+        return matched;
+    };
+
+    const bool outerEnabled = detail::g_scrimOn;
+    out.gates.enabled = outerEnabled ? Tri::Yes : Tri::No;
+    if (!outerEnabled) return finish(false);
+
+    out.gates.shapeReached = Tri::Yes;
+    const bool outerShape = scrimWashShape(kind, count, instances);
+    out.gates.shapeMatched = outerShape ? Tri::Yes : Tri::No;
+    if (!outerShape) return finish(false);
+
+    out.gates.helperReached = Tri::Yes;
+    const bool helperEnabled = detail::g_scrimOn;
+    out.gates.helperEnabled = helperEnabled ? Tri::Yes : Tri::No;
+    if (!helperEnabled) return finish(false);
+    out.gates.helperShapeReached = Tri::Yes;
+    const bool helperShape = scrimWashShape(kind, count, instances);
+    out.gates.helperShapeMatched = helperShape ? Tri::Yes : Tri::No;
+    if (!helperShape) return finish(false);
+
+    if (!cachedMetadataObserved(BindSlot::PsSrv0, g_washMetadata,
+                                g_washTraceShadow, out.wash,
+                                [](const ResourceInfo& wash) {
+                                    return wash.isTexture2D && wash.a == kWashW &&
+                                           wash.b == kWashH && isBc1(wash.fmt);
+                                })) {
+        return finish(false);
+    }
+    if (!cachedMetadataObserved(BindSlot::PsSrv1, g_uiMetadata,
+                                g_uiTraceShadow, out.ui,
+                                [](const ResourceInfo& ui) {
+                                    return ui.isTexture2D && ui.a >= kUiMinW;
+                                })) {
+        return finish(false);
+    }
+    return finish(true);
 }
 
 void scrimBegin(ID3D11DeviceContext* ctx) {

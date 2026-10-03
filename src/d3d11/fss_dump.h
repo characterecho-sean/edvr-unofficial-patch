@@ -19,6 +19,9 @@
 // raw pixels in edvr_logs\dumps\. Empty is off and the only shipped state.
 #pragma once
 
+#include "draw_interest.h"
+#include "fss_dump_observation.h"
+
 #include <cstdint>
 
 struct ID3D11DeviceContext;
@@ -28,6 +31,9 @@ namespace edvr {
 class Config;
 
 void fssDumpConfigure(Config& cfg);
+bool fssDumpDrawInterestConfigured() noexcept;
+std::size_t fssDumpDrawInterestFilters(draw_interest::ShaderFilter* out,
+                                      std::size_t capacity) noexcept;
 
 // One bool for the draw path's early-out set and the body-frame gate.
 //
@@ -52,6 +58,51 @@ __forceinline bool fssDumpWantsDraws() {
 // both the before and after images are captured.
 bool fssDumpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                       uint32_t instances);
+
+// Trace-only replay of the same claim selector. It records consumed source
+// values while preserving the production helper above for NoTrace draws.
+bool fssDumpWantsDrawsObserved(FssDumpWantsObservation& observed) noexcept;
+bool fssDumpOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                              uint32_t count, uint32_t instances,
+                              FssDumpHelperObservation& observed);
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+struct FssDumpPredicateTestState final {
+    std::uint32_t frame = 0;
+    bool done = false;
+    std::uint32_t seriesWant = 0;
+    bool seriesDone = false;
+    bool dumping = false;
+    std::uint8_t ring = 0;
+    std::uint8_t composite = 0;
+    std::uint8_t tonemap = 0;
+    std::uint32_t pendingKind = 0;
+    std::uint32_t pendingEye = 0;
+};
+FssDumpPredicateTestState fssDumpPredicateTestState() noexcept;
+void fssDumpPredicateTestSetState(const FssDumpPredicateTestState& state) noexcept;
+#endif
+
+#if defined(EDVR_FSS_DUMP_API_TEST)
+struct FssDumpApiTestState final {
+    std::uint32_t frame = 0;
+    bool done = false;
+    std::uint32_t seriesWant = 0;
+    bool seriesDone = false;
+    bool dumping = false;
+    std::uint32_t dumpPass = 0;
+    std::uint32_t bodyFrames = 0;
+    std::uint8_t ring = 0;
+    std::uint8_t composite = 0;
+    std::uint8_t tonemap = 0;
+    std::uint8_t accumulate = 0;
+    std::uint8_t output = 0;
+    std::uint32_t pendingKind = 0;
+    std::uint32_t pendingEye = 0;
+};
+FssDumpApiTestState fssDumpApiTestState() noexcept;
+void fssDumpApiTestSetState(const FssDumpApiTestState& state) noexcept;
+#endif
 
 void fssDumpBegin(ID3D11DeviceContext* ctx);
 void fssDumpEnd(ID3D11DeviceContext* ctx);

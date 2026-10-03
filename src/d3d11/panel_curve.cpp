@@ -850,6 +850,15 @@ bool panelCurveReissue(ID3D11DeviceContext* ctx, PanelCurveDrawFn draw) {
     return drawn;
 }
 
+bool introCurveDrawInterestConfigured() noexcept {
+    return detail::g_panelCurveCurvature > 0.0f;
+}
+
+bool panelCurveDrawInterestConfigured() noexcept {
+    return detail::g_panelCurveCurvature > 0.0f ||
+           detail::g_panelCurveSegments != detail::kDefaultSegments;
+}
+
 bool panelCurveSurfaceWanted() {
     return g_sWanted;
 }
