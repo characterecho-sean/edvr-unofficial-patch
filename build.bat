@@ -1855,6 +1855,30 @@ python tools\draw_ladder_replay.py --file ^
 python tools\draw_ladder_replay.py --file ^
     "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning\edvr_gfx_loader_panel_mutation_warning.draw-ladder-86.json" ^
     --expected-log edvr_gfx_loader_panel_mutation_warning.log --dry-run --expect-mutation-unobserved 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_missing\edvr_gfx_fss_dump_missing.draw-ladder-87.json" ^
+    --expected-log edvr_gfx_fss_dump_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate\edvr_gfx_fss_dump_duplicate.draw-ladder-88.json" ^
+    --expected-log edvr_gfx_fss_dump_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind\edvr_gfx_fss_dump_wrong_kind.draw-ladder-89.json" ^
+    --expected-log edvr_gfx_fss_dump_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read\edvr_gfx_fss_dump_bad_read.draw-ladder-90.json" ^
+    --expected-log edvr_gfx_fss_dump_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited\edvr_gfx_fss_dump_unvisited.draw-ladder-91.json" ^
+    --expected-log edvr_gfx_fss_dump_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_unknown\edvr_gfx_fss_dump_unknown.draw-ladder-92.json" ^
+    --expected-log edvr_gfx_fss_dump_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative\edvr_gfx_fss_dump_paths.draw-ladder-94.json" ^
+    --expected-log edvr_gfx_fss_dump_paths.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap\edvr_gfx_fss_dump_wrap.draw-ladder-95.json" ^
+    --expected-log edvr_gfx_fss_dump_wrap.log --dry-run || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -2070,6 +2094,24 @@ if exist "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative" rmdir "
 del /q "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning\edvr_gfx_loader_panel_mutation_warning.draw-ladder-86.json"
 del /q "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning\edvr_gfx_loader_panel_mutation_warning.log"
 if exist "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_missing\edvr_gfx_fss_dump_missing.log" "%BUILD%\draw_ladder_test-trace\fss_dump_missing\edvr_gfx_fss_dump_missing.draw-ladder-87.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_missing" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_missing"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate\edvr_gfx_fss_dump_duplicate.log" "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate\edvr_gfx_fss_dump_duplicate.draw-ladder-88.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind\edvr_gfx_fss_dump_wrong_kind.log" "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind\edvr_gfx_fss_dump_wrong_kind.draw-ladder-89.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_wrong_kind"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read\edvr_gfx_fss_dump_bad_read.log" "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read\edvr_gfx_fss_dump_bad_read.draw-ladder-90.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_bad_read"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited\edvr_gfx_fss_dump_unvisited.log" "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited\edvr_gfx_fss_dump_unvisited.draw-ladder-91.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_unknown\edvr_gfx_fss_dump_unknown.log" "%BUILD%\draw_ladder_test-trace\fss_dump_unknown\edvr_gfx_fss_dump_unknown.draw-ladder-92.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_unknown" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_pool_cap\edvr_gfx_fss_dump_pool.log"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_pool_cap"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative\edvr_gfx_fss_dump_paths.log" "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative\edvr_gfx_fss_dump_paths.draw-ladder-94.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative"
+del /q "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap\edvr_gfx_fss_dump_wrap.log" "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap\edvr_gfx_fss_dump_wrap.draw-ladder-95.json"
+if exist "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap"
 if exist "%BUILD%\draw_ladder_test-trace\disabled" rmdir "%BUILD%\draw_ladder_test-trace\disabled"
 if exist "%BUILD%\draw_ladder_test-trace\valid" rmdir "%BUILD%\draw_ladder_test-trace\valid"
 if exist "%BUILD%\draw_ladder_test-trace\terminalmatrix" rmdir "%BUILD%\draw_ladder_test-trace\terminalmatrix"
@@ -2396,18 +2438,18 @@ cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
     /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
     /Fo"%OBJ%\vscreenpredicate\\" ^
     "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
-    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp"
+    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\fss_dump.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
 > "%OBJ%\vscreenpredicate\production_objects.rsp" (
     for %%F in ("%OBJ%\d3d11\*.obj") do (
-        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" echo "%%~fF"
+        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="fss_dump.obj" echo "%%~fF"
     )
 )
 link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     /OUT:"%BUILD%\vscreen_predicate_test.exe" ^
     "%OBJ%\vscreenpredicate\vscreen_predicate_test.obj" ^
     "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
-    "%OBJ%\vscreenpredicate\loader_panel.obj" ^
+    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\fss_dump.obj" ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%

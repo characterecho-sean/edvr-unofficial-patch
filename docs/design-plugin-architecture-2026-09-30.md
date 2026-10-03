@@ -42,8 +42,8 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  bounded API owner costs are instrumented; twenty selectors pass
-  all 139 validation jobs. Enabled replay storage is measured at 461.1 MiB;
+  bounded API owner costs are instrumented; twenty-one selectors pass
+  all 139 validation jobs. Enabled replay storage is measured at 467.9 MiB;
   the default disabled path allocates none.
   Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
   The timed-draw denominator works; all-module cost coverage and repeatable
@@ -1907,3 +1907,53 @@ continuation-focused and UI-focused logs. Steam remains on verified 4350a281;
 this checkpoint was not installed. Remaining source predicates, independent
 forwarding, complete owner costs and matched CPU/GPU performance remain open
 before Phase 2.
+
+### FSS dump source replay, 2026-10-03 (validated)
+
+Predicate fact version 13 adds site 59, FssDumpClaim, as the twenty-first
+supported selector. The producer records both independent lazy wants
+expressions, the outer frame window, and the actual shader-query/guard prefix.
+Interest admission is derived from site 6's raw mask, rather than the handler
+marker. A reached NotEligible event carries unused source reads; the reader
+derives its production outcome independently.
+
+The reader derives ring, composite and tonemap families from the consumed hash
+and draw shape. It checks the selected byte counter's increment and pending
+kind/eye writes against before/after inputs. It preserves existing unsigned
+behavior: counter 255 increments to zero, allowing pending eye UINT_MAX. Null
+shader lookup is still reached and returns zero; a Release fault preserves a
+hash already assigned. Guard return is a consistency check because the
+production helper ignores it. Unknown mutation inputs remain unavailable and
+warn where writes could have happened. These facts do not establish cache
+provenance or prior counter history.
+
+The actual WARP harness compares the trace helper against the unchanged
+original helper from identical seeded scalar state. It covers all three
+families, counters 1/2/3/255, dumping off, lazy/window declines, unsigned frame
+wrap, null shader lookup, an assigned-hash Release fault, and natural
+exhaustion of the eight-fault budget. It does not invoke capture Begin/End for
+the UINT_MAX eye case. Registered shader metadata supplies current lookup
+inputs; this is not proof of production learner history.
+
+Native serialization and reader gates cover source-free mask exclusion,
+positive/negative selectors, counter wrap, missing/duplicate/unvisited facts,
+bad read domains, unknown inputs and pool exhaustion. The Python self-test pins
+the literal NotEligible production tuple, so comparing two copies of the same
+incorrect expected outcome cannot pass that check. The final ordered native run
+has zero mismatches and zero unavailable inputs in the known positive/negative
+and wrap fixtures.
+
+The fresh MSVC footprint probe measures a 200-byte FSS dump observation and a
+32,768-entry pool (6.25 MiB). DrawRecord grows from 3,912 to 3,920 bytes (0.5
+MiB across the draw capacity). Total enabled replay storage is 467.875 MiB
+excluding allocator overhead; disabled allocates none. The compiled NoTrace
+ladder still has the same 7,057 bytes, 1,636 instruction records, 94 ordered
+calls and 288-byte stack frame as the saved reference.
+
+Full validation passes all 139 jobs, including both production profiles, Python
+self-tests, actual native rigs and the self-contained installer. The log is
+build/plugin-predicate-v13-full-build.log. FocusWatch reports zero shown
+windows, consoles or foreground changes. This is a Phase 1 checkpoint:
+independent forwarding, complete owner cost coverage and the matched CPU
+improvement/GPU non-regression gates remain open. Steam continues to use
+verified 4350a281; no new flight was spent on this slice.

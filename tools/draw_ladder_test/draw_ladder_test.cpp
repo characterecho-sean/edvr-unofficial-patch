@@ -985,6 +985,60 @@ void loaderPanelRead(edvr::LoaderPanelRead<T>& read, T value) {
     read = {true, true, value};
 }
 
+template <class T>
+void fssDumpRead(edvr::FssDumpRead<T>& read, T value) {
+    read = {true, true, value};
+}
+
+edvr::FssDumpObservation fssDumpFact(bool selected = false, unsigned variant = 0,
+                                     std::uint32_t frameNo = 9) {
+    edvr::FssDumpObservation fact{};
+    fact.handlerInvoked = true;
+    auto& outer = fact.outer;
+    if (!selected && variant == 2) {
+        outer.wants.frame = {true, false, 0u};
+        return fact;
+    }
+    fssDumpRead(outer.wants.frame, selected ? frameNo : 0u);
+    if (selected) {
+        fssDumpRead(outer.wants.done, false);
+        fssDumpRead(outer.bodyFrame, frameNo);
+        fssDumpRead(outer.frameNo, frameNo);
+    } else {
+        fssDumpRead(outer.wants.seriesWant, 0u);
+    }
+    if (!selected) return fact;
+
+    auto& helper = fact.helper;
+    fssDumpRead(helper.wants.frame, frameNo);
+    fssDumpRead(helper.wants.done, false);
+    fssDumpRead(helper.contextNonNull, true);
+    fssDumpRead(helper.guardCallReached, true);
+    fssDumpRead(helper.callbackEntered, true);
+    fssDumpRead(helper.vsGetShaderReached, true);
+    fssDumpRead(helper.vsGetShaderCompleted, true);
+    fssDumpRead(helper.shaderNonNull, true);
+    fssDumpRead(helper.lookupReached, true);
+    fssDumpRead(helper.lookupCompleted, true);
+    constexpr std::uint64_t ringHash = 0x7E38A6AA1269C901ull;
+    fssDumpRead(helper.lookupHash, ringHash);
+    fssDumpRead(helper.releaseReached, true);
+    fssDumpRead(helper.releaseCompleted, true);
+    fssDumpRead(helper.callbackCompleted, true);
+    fssDumpRead(helper.guardReturned, true);
+    fssDumpRead(helper.hashAfterGuard, ringHash);
+    const bool wrap = variant == 3;
+    fssDumpRead(helper.counters.ringBefore, static_cast<std::uint8_t>(wrap ? 255 : 0));
+    fssDumpRead(helper.counters.ringAfter, static_cast<std::uint8_t>(wrap ? 0 : 1));
+    fssDumpRead(helper.dumping, true);
+    fssDumpRead(helper.pendingKindBefore, 0u);
+    fssDumpRead(helper.pendingKindAfter, 0u);
+    const auto pendingEyeSentinel = (std::numeric_limits<std::uint32_t>::max)();
+    fssDumpRead(helper.pendingEyeBefore, pendingEyeSentinel);
+    fssDumpRead(helper.pendingEyeAfter, wrap ? pendingEyeSentinel : 0u);
+    return fact;
+}
+
 std::uint32_t loaderPanelFold(std::uint32_t hash, std::uint32_t value) {
     return (hash ^ value) * 16777619u;
 }
@@ -1422,7 +1476,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        bool stagedFss = false, bool rawPanelEnabled = false,
                        unsigned basicCase = 0, unsigned eyeCensusCase = 0,
                        unsigned resolveBindCase = 0,
-                       unsigned loaderPanelCase = 0) {
+                       unsigned loaderPanelCase = 0,
+                       unsigned fssDumpCase = 0) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     const bool overflowBefore = trace::overflowed();
@@ -1491,6 +1546,10 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     } else if (terminal == ladder::SiteId::kOffscreenLoaderPanel) {
         facts.kind = static_cast<std::uint8_t>('X');
         facts.count = 30;
+    } else if (terminal == ladder::SiteId::kFssDumpClaim) {
+        facts.kind = static_cast<std::uint8_t>('N');
+        facts.count = 4;
+        facts.instances = 1;
     }
     if (facts.kind == 'D' || facts.kind == 'N') {
         facts.args.base = 17;
@@ -1713,6 +1772,11 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 terminal == ladder::SiteId::kOffscreenLoaderPanel,
                 loaderPanelCase);
             policy.loaderPanelFact(fact);
+        }
+        if (visited == ladder::SiteId::kFssDumpClaim) {
+            if (fssDumpCase != 1)
+                policy.fssDumpFact(fssDumpFact(
+                    terminal == ladder::SiteId::kFssDumpClaim, fssDumpCase, frameNo));
         }
         if (visited == ladder::SiteId::kFssPanelClaim) {
             policy.fssFact(fssFact(edvr::FssTraceFactKind::kPanel,
@@ -2046,6 +2110,12 @@ bool traceWriterChecks(const char* rootArg) {
     vrPolicy.basicFact(distanceFact(false));
     vrPolicy.eyeCensusFact(eyeCensusFact());
     vrPolicy.resolveBindFact(resolveBindFact());
+    const bool coldDumpInterested = draw_interest::contains(
+        vrInterest.publishedInterests, draw_interest::InterestId::FssDump);
+    edvr::FssDumpObservation coldDump = coldDumpInterested
+        ? fssDumpFact(false) : edvr::FssDumpObservation{};
+    coldDump.handlerInvoked = coldDumpInterested;
+    vrPolicy.fssDumpFact(coldDump);
     edvr::FssObservation coldPanel{};
     coldPanel.kind = edvr::FssTraceFactKind::kPanel;
     coldPanel.rawProbeReached = true;
@@ -2209,7 +2279,7 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
-                matrixJson.find("\"predicateFactVersion\":12") != std::string::npos &&
+                matrixJson.find("\"predicateFactVersion\":13") != std::string::npos &&
                 matrixJson.find("\"siteId\":25,\"kind\":19") != std::string::npos &&
                 matrixJson.find("\"siteId\":57,\"kind\":12") != std::string::npos &&
                 matrixJson.find("\"siteId\":58,\"kind\":13") != std::string::npos &&
@@ -2741,7 +2811,7 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":12") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":13") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&
@@ -3362,6 +3432,109 @@ bool traceWriterChecks(const char* rootArg) {
     trace::frameEnd(86);
     ok &= check(loaderMutationWritten && trace::status() == trace::Status::CompleteWritten,
                 "loader fact retains selector replay with an explicit opaque collection mutation");
+    trace::shutdown();
+
+    const auto dumpTerminal = [&](std::uint32_t frame, ladder::SiteId terminal,
+                                  unsigned factCase = 0) {
+        return writeTerminalCase(ladder::RouteId::kVrEye,
+            ladder::SequenceId::kVrEye, 'D', terminal, true,
+            kFrozenEye, 31, ladder::VrEyeSequence{}, 1, false, false,
+            edvr::SunglareTraceMode::kStock, false, false, 0, frame,
+            false, false, 0, 0, 0, 0, factCase);
+    };
+    const auto appendDumpSite = [](trace::Token token) {
+        trace::appendSite(token, 59, static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+            static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+            static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    };
+    const bool missingDumpStarted = beginFssCase(
+        "fss_dump_missing", "edvr_gfx_fss_dump_missing.log", 87);
+    const auto missingDumpToken = trace::beginDraw(fssMalformedDraw);
+    appendDumpSite(missingDumpToken);
+    finishFssCase(missingDumpToken, 87);
+    ok &= check(missingDumpStarted && trace::status() == trace::Status::InvalidCapture,
+                "visited site59 without its source fact invalidates the canonical draw");
+    trace::shutdown();
+
+    const auto dumpRejected = [&](const char* directory, const char* log,
+                                  std::uint32_t frame, unsigned badCase) {
+        const bool started = beginFssCase(directory, log, frame);
+        const auto token = trace::beginDraw(fssMalformedDraw);
+        appendDumpSite(token);
+        auto fact = fssDumpFact();
+        if (badCase == 1) fact.kind = 19;
+        if (badCase == 2) fact.outer.wants.frame = {false, true, 0u};
+        trace::appendFssDumpFact(token, fact);
+        if (badCase == 0) trace::appendFssDumpFact(token, fact);
+        const bool rejectedAtAppend = trace::overflowed();
+        finishFssCase(token, frame);
+        const bool rejected = started && rejectedAtAppend &&
+            trace::invalidationReason() == trace::CaptureInvalidation::Other;
+        trace::shutdown();
+        return rejected;
+    };
+    ok &= check(dumpRejected("fss_dump_duplicate", "edvr_gfx_fss_dump_duplicate.log", 88, 0),
+                "duplicate site59 fact is rejected at append");
+    ok &= check(dumpRejected("fss_dump_wrong_kind", "edvr_gfx_fss_dump_wrong_kind.log", 89, 1),
+                "site59 fact with a noncanonical kind is rejected at append");
+    ok &= check(dumpRejected("fss_dump_bad_read", "edvr_gfx_fss_dump_bad_read.log", 90, 2),
+                "known unreached site59 input is rejected at append");
+
+    const bool unvisitedDumpStarted = beginFssCase(
+        "fss_dump_unvisited", "edvr_gfx_fss_dump_unvisited.log", 91);
+    const auto unvisitedDumpToken = trace::beginDraw(fssMalformedDraw);
+    trace::appendFssDumpFact(unvisitedDumpToken, fssDumpFact());
+    const bool dumpAcceptedBeforeFinish = !trace::overflowed();
+    finishFssCase(unvisitedDumpToken, 91);
+    ok &= check(unvisitedDumpStarted && dumpAcceptedBeforeFinish && trace::overflowed() &&
+                    trace::invalidationReason() == trace::CaptureInvalidation::Other,
+                "site59 fact attached to a draw that did not visit the rung is rejected at finish");
+    trace::shutdown();
+
+    const bool unknownDumpStarted = beginFssCase(
+        "fss_dump_unknown", "edvr_gfx_fss_dump_unknown.log", 92);
+    const bool unknownDumpWritten = unknownDumpStarted && dumpTerminal(
+        92, ladder::SiteId::kEyeNoDistanceNone, 2);
+    trace::frameEnd(92);
+    ok &= check(unknownDumpWritten && trace::status() == trace::Status::CompleteWritten,
+                "reached but unknown site59 wants input serializes as unavailable");
+    trace::shutdown();
+
+    const bool dumpPoolStarted = beginFssCase(
+        "fss_dump_pool_cap", "edvr_gfx_fss_dump_pool.log", 93);
+    bool dumpPoolFilled = dumpPoolStarted;
+    trace::Token lastDumpToken{};
+    for (std::uint32_t i = 0; dumpPoolFilled && i < trace::kMaxFssDumpFacts; ++i) {
+        auto poolDraw = fssMalformedDraw;
+        poolDraw.eyeDrawIndex = i + 1;
+        lastDumpToken = trace::beginDraw(poolDraw);
+        if (!lastDumpToken.valid()) { dumpPoolFilled = false; break; }
+        trace::appendFssDumpFact(lastDumpToken, fssDumpFact());
+        if (trace::overflowed()) dumpPoolFilled = false;
+    }
+    if (dumpPoolFilled) trace::appendFssDumpFact(lastDumpToken, fssDumpFact());
+    ok &= check(dumpPoolFilled && trace::invalidationReason() ==
+                    trace::CaptureInvalidation::FssDumpIndexOverflow,
+                "FSS dump global fact pool overflow has its own invalidation reason");
+    trace::shutdown();
+
+    const bool dumpPathsStarted = beginFssCase(
+        "fss_dump_positive_negative", "edvr_gfx_fss_dump_paths.log", 94);
+    const bool dumpPathsWritten = dumpPathsStarted &&
+        dumpTerminal(94, ladder::SiteId::kFssDumpClaim) &&
+        dumpTerminal(94, ladder::SiteId::kEyeNoDistanceNone);
+    trace::frameEnd(94);
+    ok &= check(dumpPathsWritten && trace::status() == trace::Status::CompleteWritten,
+                "raw FSS dump positive and known negative paths serialize together");
+    trace::shutdown();
+
+    const bool dumpWrapStarted = beginFssCase(
+        "fss_dump_counter_wrap", "edvr_gfx_fss_dump_wrap.log", 95);
+    const bool dumpWrapWritten = dumpWrapStarted &&
+        dumpTerminal(95, ladder::SiteId::kFssDumpClaim, 3);
+    trace::frameEnd(95);
+    ok &= check(dumpWrapWritten && trace::status() == trace::Status::CompleteWritten,
+                "FSS dump counter wrap preserves unsigned pending-eye serialization");
     trace::shutdown();
     return ok;
 }

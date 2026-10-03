@@ -21,6 +21,8 @@
 #include "../../src/d3d11/eye_census_observation.h"
 #include "../../src/d3d11/loader_panel_observation.h"
 #include "../../src/d3d11/loader_panel.h"
+#include "../../src/d3d11/fss_dump.h"
+#include "../../src/d3d11/plugin_registry.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/vtable_hook.h"
 
@@ -81,6 +83,22 @@ bool readLoaderPanel(const edvr::VScreenPredicateTestResult& result,
            edvr::draw_ladder_trace::readLoaderPanelFactForTest(result.token, 0, fact);
 }
 
+bool readFssDump(const edvr::VScreenPredicateTestResult& result,
+                 edvr::FssDumpObservation* fact) {
+    return edvr::draw_ladder_trace::fssDumpFactCountForTest(result.token) == 1 &&
+           edvr::draw_ladder_trace::readFssDumpFactForTest(result.token, 0, fact);
+}
+
+template <class T, class U>
+bool fdRead(const edvr::FssDumpRead<T>& read, U expected) {
+    return read.reached && read.known && read.value == static_cast<T>(expected);
+}
+
+template <class T>
+bool fdSkipped(const edvr::FssDumpRead<T>& read) {
+    return !read.reached && !read.known && read.value == T{};
+}
+
 template <class T, class U>
 bool lpRead(const edvr::LoaderPanelRead<T>& read, U expected) {
     return read.reached && read.known && read.value == static_cast<T>(expected);
@@ -111,6 +129,40 @@ ComPtr<ID3DBlob> compileTestPixelShader() {
     if (FAILED(hr) && errors)
         std::fwrite(errors->GetBufferPointer(), 1, errors->GetBufferSize(), stderr);
     return SUCCEEDED(hr) ? code : ComPtr<ID3DBlob>{};
+}
+
+ComPtr<ID3DBlob> compileTestVertexShader(const char* source, const char* name) {
+    ComPtr<ID3DBlob> code;
+    ComPtr<ID3DBlob> errors;
+    const HRESULT hr = D3DCompile(source, std::strlen(source), name,
+        nullptr, nullptr, "main", "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0,
+        &code, &errors);
+    if (FAILED(hr) && errors)
+        std::fwrite(errors->GetBufferPointer(), 1, errors->GetBufferSize(), stderr);
+    return SUCCEEDED(hr) ? code : ComPtr<ID3DBlob>{};
+}
+
+using GetVertexShaderFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,
+    ID3D11VertexShader**, ID3D11ClassInstance**, UINT*);
+GetVertexShaderFn g_realGetVertexShader = nullptr;
+std::uint32_t g_getVertexShaderCalls = 0;
+bool g_faultGetVertexShader = false;
+void STDMETHODCALLTYPE testGetVertexShader(ID3D11DeviceContext* self,
+    ID3D11VertexShader** shader, ID3D11ClassInstance** instances, UINT* count) {
+    ++g_getVertexShaderCalls;
+    if (g_faultGetVertexShader)
+        RaiseException(0xE042ED94u, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    g_realGetVertexShader(self, shader, instances, count);
+}
+
+using VertexReleaseFn = ULONG(STDMETHODCALLTYPE*)(ID3D11VertexShader*);
+VertexReleaseFn g_realVertexRelease = nullptr;
+std::uint32_t g_vertexReleaseCalls = 0;
+ULONG STDMETHODCALLTYPE testVertexRelease(ID3D11VertexShader* self) {
+    ++g_vertexReleaseCalls;
+    const ULONG refs = g_realVertexRelease(self);
+    RaiseException(0xE042ED95u, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    return refs;
 }
 
 using GetResourceFn = void(STDMETHODCALLTYPE*)(ID3D11ShaderResourceView*, ID3D11Resource**);
@@ -248,6 +300,240 @@ bool hookGetPixelShader(edvr::VTableHook& hook, ID3D11DeviceContext* context) {
         !hook.commit()) return false;
     g_realGetPixelShader = reinterpret_cast<GetPixelShaderFn>(original);
     return true;
+}
+
+bool testFssDumpPredicate(ID3D11Device* device, ID3D11DeviceContext* context) {
+    constexpr std::uint64_t ringHash = 0x7E38A6AA1269C901ull;
+    constexpr std::uint64_t compositeHash = 0x953C8123AD8DC13Bull;
+    constexpr std::uint64_t tonemapHash = 0x2D78DC3FD2C0C543ull;
+    constexpr char ringSource[] =
+        "float4 main(uint id:SV_VertexID):SV_Position {"
+        "return float4((id==0)?-1:1,(id==1)?1:-1,0,1);}";
+    constexpr char compositeSource[] =
+        "float4 main(uint id:SV_VertexID):SV_Position {"
+        "return float4((id==0)?-1:1,(id==1)?1:-1,0.125,1);}";
+    constexpr char tonemapSource[] =
+        "float4 main(uint id:SV_VertexID):SV_Position {"
+        "return float4((id==0)?-1:1,(id==1)?1:-1,0.25,1);}";
+    const auto code = compileTestVertexShader(ringSource, "fss-dump-ring");
+    const auto compositeCode = compileTestVertexShader(compositeSource, "fss-dump-composite");
+    const auto tonemapCode = compileTestVertexShader(tonemapSource, "fss-dump-tonemap");
+    ComPtr<ID3D11VertexShader> shader;
+    ComPtr<ID3D11VertexShader> compositeShader;
+    ComPtr<ID3D11VertexShader> tonemapShader;
+    bool okay = check(code && SUCCEEDED(device->CreateVertexShader(
+                           code->GetBufferPointer(), code->GetBufferSize(),
+                           nullptr, &shader)) && shader,
+                     "WARP creates registered FSS dump vertex shader");
+    if (!shader) return false;
+    okay &= check(compositeCode && tonemapCode &&
+                      SUCCEEDED(device->CreateVertexShader(
+                         compositeCode->GetBufferPointer(), compositeCode->GetBufferSize(), nullptr,
+                         &compositeShader)) && compositeShader &&
+                      SUCCEEDED(device->CreateVertexShader(
+                         tonemapCode->GetBufferPointer(), tonemapCode->GetBufferSize(), nullptr,
+                         &tonemapShader)) && tonemapShader,
+                  "WARP creates real composite and tonemap FSS shaders");
+    edvr::registerShaderHash(shader.Get(), ringHash);
+    if (compositeShader) edvr::registerShaderHash(compositeShader.Get(), compositeHash);
+    if (tonemapShader) edvr::registerShaderHash(tonemapShader.Get(), tonemapHash);
+    context->VSSetShader(shader.Get(), nullptr, 0);
+    okay &= check(edvr::lookupShaderHash(shader.Get()) == ringHash,
+                  "production registry resolves the WARP FSS dump shader");
+
+    auto saved = edvr::fssDumpPredicateTestState();
+    const auto savedInterestMask = edvr::pluginRegistryDrawInterestMask();
+    edvr::FssDumpPredicateTestState seed{};
+    seed.frame = 1;
+    seed.pendingKind = 8;
+    seed.pendingEye = 9;
+    const auto mask = edvr::draw_interest::bit(
+        edvr::draw_interest::InterestId::FssDump);
+    edvr::pluginRegistryConfigureDrawInterests(mask, nullptr, 0);
+    edvr::VScreenPredicateTestResult result{};
+    edvr::FssDumpObservation fact{};
+
+    // uint32 frame subtraction and the repeated wants groups are source inputs.
+    edvr::fssDumpPredicateTestSetState(seed);
+    okay &= check(edvr::vScreenFssDumpPredicateTestVisit(
+                      context, 'N', 4, 1, 0, UINT32_MAX - 1, true, &result) &&
+                      result.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Declined &&
+                      readFssDump(result, &fact) && fact.handlerInvoked &&
+                      fdRead(fact.outer.frameNo, 0u) &&
+                      fdRead(fact.helper.lookupHash, ringHash) &&
+                      fdRead(fact.helper.counters.ringBefore, 0u) &&
+                      fdRead(fact.helper.counters.ringAfter, 1u) &&
+                      fdRead(fact.helper.dumping, false),
+                  "actual WARP visitor preserves age wrap and non-dump counter increment");
+    edvr::FssDumpPredicateTestState inactive{};
+    edvr::fssDumpPredicateTestSetState(inactive);
+    okay &= check(edvr::vScreenFssDumpPredicateTestVisit(
+                      context, 'N', 4, 1, 12, 10, true, &result) &&
+                      readFssDump(result, &fact) &&
+                      fdRead(fact.outer.wants.frame, 0u) &&
+                      fdRead(fact.outer.wants.seriesWant, 0u) &&
+                      fdSkipped(fact.outer.wants.done) &&
+                      fdSkipped(fact.outer.bodyFrame) &&
+                      fdSkipped(fact.helper.wants.frame),
+                  "site 59 preserves short-circuit outer gate and skips helper wants");
+    edvr::fssDumpPredicateTestSetState(seed);
+    okay &= check(edvr::vScreenFssDumpPredicateTestVisit(
+                      nullptr, 'N', 4, 1, 12, 10, true, &result) &&
+                      readFssDump(result, &fact) &&
+                      fdRead(fact.helper.contextNonNull, false) &&
+                      fdSkipped(fact.helper.guardCallReached),
+                  "null context stops before shader query");
+    edvr::pluginRegistryConfigureDrawInterests(0, nullptr, 0);
+    okay &= check(edvr::vScreenFssDumpPredicateTestVisit(
+                      context, 'N', 4, 1, 12, 10, true, &result) &&
+                      result.siteResult.outcome == edvr::draw_ladder::SiteOutcome::NotEligible &&
+                      readFssDump(result, &fact) && !fact.handlerInvoked &&
+                      fdSkipped(fact.outer.wants.frame) &&
+                      fdSkipped(fact.helper.wants.frame),
+                  "uninterested site emits one source-read-free fact");
+    edvr::pluginRegistryConfigureDrawInterests(mask, nullptr, 0);
+
+    // Each comparison starts from the identical scalar state and real WARP VS.
+    const auto compare = [&](ID3D11VertexShader* currentShader,
+                             std::uint32_t vertices,
+                             edvr::FssDumpPredicateTestState current,
+                             bool expectedClaim, const char* label) {
+        context->VSSetShader(currentShader, nullptr, 0);
+        edvr::fssDumpPredicateTestSetState(current);
+        edvr::VScreenPredicateTestResult traced{};
+        edvr::FssDumpObservation observed{};
+        const bool a = edvr::vScreenFssDumpPredicateTestVisit(
+            context, 'N', vertices, 1, 12, 10, true, &traced) && readFssDump(traced, &observed);
+        const auto afterA = edvr::fssDumpPredicateTestState();
+        edvr::fssDumpPredicateTestSetState(current);
+        edvr::VScreenPredicateTestResult plain{};
+        const bool b = edvr::vScreenFssDumpPredicateTestVisit(
+            context, 'N', vertices, 1, 12, 10, false, &plain);
+        const auto afterB = edvr::fssDumpPredicateTestState();
+        okay &= check(a && b &&
+                          ((traced.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Claimed) == expectedClaim) &&
+                          traced.siteResult.outcome == plain.siteResult.outcome &&
+                          afterA.frame == afterB.frame && afterA.done == afterB.done &&
+                          afterA.seriesWant == afterB.seriesWant &&
+                          afterA.seriesDone == afterB.seriesDone &&
+                          afterA.ring == afterB.ring &&
+                          afterA.composite == afterB.composite &&
+                          afterA.tonemap == afterB.tonemap &&
+                          afterA.pendingKind == afterB.pendingKind &&
+                          afterA.pendingEye == afterB.pendingEye &&
+                          afterA.dumping == afterB.dumping &&
+                          edvr::draw_ladder_trace::fssDumpFactCountForTest(plain.token) == 0,
+                      label);
+    };
+    seed.dumping = true;
+    compare(shader.Get(), 4, seed, true,
+            "trace/no-trace positive ring claim and pending writes agree");
+    seed.ring = 254;
+    compare(shader.Get(), 4, seed, false,
+            "trace/no-trace occurrence 255 declines identically");
+    seed.ring = 255;
+    compare(shader.Get(), 4, seed, true,
+            "trace/no-trace uint8 wrap claim agrees identically");
+    edvr::fssDumpPredicateTestSetState(seed);
+    okay &= check(edvr::vScreenFssDumpPredicateTestVisit(
+                      context, 'N', 4, 1, 12, 10, true, &result) &&
+                      readFssDump(result, &fact) &&
+                      fdRead(fact.helper.counters.ringAfter, 0u) &&
+                      fdRead(fact.helper.pendingEyeAfter, UINT32_MAX),
+                  "wrapped occurrence zero preserves the UINT32_MAX pending-eye value");
+    seed.ring = 0;
+    seed.composite = 0;
+    compare(compositeShader.Get(), 6, seed, true,
+            "trace/no-trace composite family claim agrees");
+    seed.composite = 0;
+    seed.tonemap = 0;
+    compare(tonemapShader.Get(), 3, seed, true,
+            "trace/no-trace tonemap family claim agrees");
+    seed.ring = 0;
+    seed.dumping = false;
+    compare(shader.Get(), 4, seed, false,
+            "trace/no-trace non-dump counter increment agrees");
+    context->VSSetShader(shader.Get(), nullptr, 0);
+
+    context->VSSetShader(nullptr, nullptr, 0);
+    seed.dumping = false;
+    seed.ring = 0;
+    edvr::fssDumpPredicateTestSetState(seed);
+    okay &= check(edvr::vScreenFssDumpPredicateTestVisit(
+                      context, 'N', 4, 1, 12, 10, true, &result) &&
+                      result.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Declined &&
+                      readFssDump(result, &fact) &&
+                      fdRead(fact.helper.shaderNonNull, false) &&
+                      fdRead(fact.helper.lookupReached, true) &&
+                      fdRead(fact.helper.lookupCompleted, true) &&
+                      fdRead(fact.helper.lookupHash, 0ull) &&
+                      fdSkipped(fact.helper.releaseReached) &&
+                      fdRead(fact.helper.guardReturned, true),
+                  "successful null VS getter still performs the raw zero-hash lookup");
+    context->VSSetShader(shader.Get(), nullptr, 0);
+
+    // Fault-budget state is deliberately not seeded. The post-hash Release
+    // fault consumes one production slot; seven real query faults consume the
+    // rest before the next call skips its lambda.
+    edvr::VTableHook releaseHook;
+    void* releaseOriginal = nullptr;
+    okay &= check(releaseHook.attach(shader.Get(), 16) &&
+                      releaseHook.setMode(edvr::HookMode::CopyVptr) &&
+                      releaseHook.replace(2,
+                          reinterpret_cast<void*>(&testVertexRelease),
+                          &releaseOriginal) && releaseHook.commit(),
+                  "typed WARP vertex shader Release hook installs");
+    g_realVertexRelease = reinterpret_cast<VertexReleaseFn>(releaseOriginal);
+    g_vertexReleaseCalls = 0;
+    seed.dumping = true;
+    seed.ring = 0;
+    edvr::fssDumpPredicateTestSetState(seed);
+    okay &= check(edvr::vScreenFssDumpPredicateTestVisit(
+                      context, 'N', 4, 1, 12, 10, true, &result) &&
+                      g_vertexReleaseCalls == 1 &&
+                      result.siteResult.outcome == edvr::draw_ladder::SiteOutcome::Claimed &&
+                      readFssDump(result, &fact) &&
+                      fdRead(fact.helper.lookupHash, ringHash) &&
+                      fdRead(fact.helper.releaseCompleted, false) &&
+                      fdRead(fact.helper.hashAfterGuard, ringHash) &&
+                      fdRead(fact.helper.guardReturned, false),
+                  "Release fault after real hash lookup preserves site 59 claim");
+    releaseHook.uninstall();
+    g_realVertexRelease = nullptr;
+
+    edvr::VTableHook hook;
+    void* original = nullptr;
+    okay &= check(hook.attach(context, 128) &&
+                      hook.setMode(edvr::HookMode::CopyVptr) &&
+                      hook.replace(76, reinterpret_cast<void*>(&testGetVertexShader),
+                                   &original) && hook.commit(),
+                  "typed WARP VSGetShader hook installs at verified slot 76");
+    g_realGetVertexShader = reinterpret_cast<GetVertexShaderFn>(original);
+    g_faultGetVertexShader = true;
+    for (int i = 0; i < 8; ++i) {
+        edvr::fssDumpPredicateTestSetState(seed);
+        const bool visited = edvr::vScreenFssDumpPredicateTestVisit(
+            context, 'N', 4, 1, 12, 10, true, &result);
+        const bool have = visited && readFssDump(result, &fact);
+        if (i < 7) {
+            okay &= check(have && fdRead(fact.helper.callbackEntered, true) &&
+                              fdRead(fact.helper.vsGetShaderCompleted, false) &&
+                              fdRead(fact.helper.guardReturned, false),
+                          "actual getter fault records attempted callback prefix");
+        } else {
+            okay &= check(have && fdRead(fact.helper.callbackEntered, false) &&
+                              fdSkipped(fact.helper.vsGetShaderReached) &&
+                              fdRead(fact.helper.guardReturned, false),
+                          "eighth query records denied callback after eight combined faults");
+        }
+    }
+    g_faultGetVertexShader = false;
+    hook.uninstall();
+    g_realGetVertexShader = nullptr;
+    edvr::fssDumpPredicateTestSetState(saved);
+    edvr::pluginRegistryConfigureDrawInterests(savedInterestMask, nullptr, 0);
+    context->VSSetShader(nullptr, nullptr, 0);
+    return okay;
 }
 
 } // namespace
@@ -1326,6 +1612,7 @@ int main(int argc, char** argv) {
             edvr::bindingSetShader(edvr::BindSlot::Ps, nullptr, 0);
         }
 
+        okay &= testFssDumpPredicate(device, immediate);
         for (std::uint32_t i = 0; i < 4; ++i)
             edvr::bindingSet(static_cast<edvr::BindSlot>(
                                  static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), nullptr);

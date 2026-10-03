@@ -2081,28 +2081,34 @@ struct VScreenDrawLadderVisitor {
                 legacyInterestMask, SiteType::interestId);
             if constexpr (TracePolicy::enabled &&
                           (SiteType::id == draw_ladder::SiteId::kFssPanelClaim ||
-                           SiteType::id == draw_ladder::SiteId::kFssRevealClaim)) {
+                           SiteType::id == draw_ladder::SiteId::kFssRevealClaim ||
+                           SiteType::id == draw_ladder::SiteId::kFssDumpClaim)) {
                 if (!interested) {
-                    FssObservation fact{};
-                    fact.kind = SiteType::id == draw_ladder::SiteId::kFssPanelClaim
-                        ? FssTraceFactKind::kPanel : FssTraceFactKind::kReveal;
-                    fact.rawProbeReached = true;
-                    if constexpr (SiteType::id == draw_ladder::SiteId::kFssPanelClaim) {
-                        fssOuterProbePanel(fact.panel,
-                            [] { return detail::g_fssPanelEnabled; },
-                            [&] { return s->fssBodyFrame; },
-                            [&] { return s->frameNo; });
+                    if constexpr (SiteType::id == draw_ladder::SiteId::kFssDumpClaim) {
+                        FssDumpObservation fact{};
+                        trace.fssDumpFact(fact);
                     } else {
-                        fssOuterProbeReveal(fact.reveal,
-                            [] { return detail::g_fssRevealSteady; },
-                            [] { return detail::g_fssRevealLockstep; },
-                            [&] { return s->fssBodyFrame; },
-                            [&] { return s->frameNo; },
-                            [&] { return s->fssJumpFrame; },
-                            [&] { return s->frameNo; },
-                            [] { return deviceHookFssModeLatch(); });
+                        FssObservation fact{};
+                        fact.kind = SiteType::id == draw_ladder::SiteId::kFssPanelClaim
+                            ? FssTraceFactKind::kPanel : FssTraceFactKind::kReveal;
+                        fact.rawProbeReached = true;
+                        if constexpr (SiteType::id == draw_ladder::SiteId::kFssPanelClaim) {
+                            fssOuterProbePanel(fact.panel,
+                                [] { return detail::g_fssPanelEnabled; },
+                                [&] { return s->fssBodyFrame; },
+                                [&] { return s->frameNo; });
+                        } else {
+                            fssOuterProbeReveal(fact.reveal,
+                                [] { return detail::g_fssRevealSteady; },
+                                [] { return detail::g_fssRevealLockstep; },
+                                [&] { return s->fssBodyFrame; },
+                                [&] { return s->frameNo; },
+                                [&] { return s->fssJumpFrame; },
+                                [&] { return s->frameNo; },
+                                [] { return deviceHookFssModeLatch(); });
+                        }
+                        trace.fssFact(fact);
                     }
-                    trace.fssFact(fact);
                 }
             }
             return interested;
@@ -3061,9 +3067,29 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kFssDumpClaim) {
-            if (fssDumpWantsDraws() && s->fssBodyFrame != 0 &&
-                s->frameNo - s->fssBodyFrame <= 2 && fssDumpOnEyeDraw(self, kind, count, instances))
-                return claimed(id, DrawVerdict::kFssDump);
+            if constexpr (TracePolicy::enabled) {
+                FssDumpObservation fact{};
+                fact.handlerInvoked = true;
+                bool matches = false;
+                if (fssDumpWantsDrawsObserved(fact.outer.wants)) {
+                    const std::uint32_t bodyFrame = s->fssBodyFrame;
+                    fact.outer.bodyFrame = {true, true, bodyFrame};
+                    if (bodyFrame != 0) {
+                        const std::uint32_t frameNo = s->frameNo;
+                        fact.outer.frameNo = {true, true, frameNo};
+                        if (frameNo - bodyFrame <= 2)
+                            matches = fssDumpOnEyeDrawObserved(
+                                self, kind, count, instances, fact.helper);
+                    }
+                }
+                trace.fssDumpFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kFssDump);
+            } else {
+                if (fssDumpWantsDraws() && s->fssBodyFrame != 0 &&
+                    s->frameNo - s->fssBodyFrame <= 2 &&
+                    fssDumpOnEyeDraw(self, kind, count, instances))
+                    return claimed(id, DrawVerdict::kFssDump);
+            }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kResolveBindClaim) {
             if constexpr (!TracePolicy::enabled) {
@@ -6246,6 +6272,9 @@ using VScreenResolveBindTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kResolveBindClaim, draw_ladder::SiteKind::Claim>;
 using VScreenLoaderPanelTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kOffscreenLoaderPanel, draw_ladder::SiteKind::Claim>;
+using VScreenFssDumpTestSite = draw_ladder::InterestGated<
+    draw_ladder::SiteId::kFssDumpClaim, draw_ladder::SiteKind::Claim,
+    draw_interest::InterestId::FssDump>;
 State* g_eyeCensusTestState = nullptr;
 
 struct VScreenTestInterest final {};
@@ -6278,6 +6307,10 @@ struct VScreenTestTraceCapture final {
 
     void loaderPanelFact(const LoaderPanelObservation& fact) noexcept {
         policy.loaderPanelFact(fact);
+    }
+
+    void fssDumpFact(const FssDumpObservation& fact) noexcept {
+        policy.fssDumpFact(fact);
     }
 };
 
@@ -6326,6 +6359,24 @@ draw_ladder::SiteResult vScreenLoaderPanelPredicateTestInvoke(
     return vScreenPredicateTestInvokeSite<VScreenLoaderPanelTestSite>(visitor, trace);
 }
 
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenFssDumpPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    if constexpr (TracePolicy::enabled) {
+        draw_ladder::SiteResult result{};
+        VScreenTestTraceCapture<TracePolicy> capture{trace, result};
+        plugin_cost::NoCpu cpu;
+        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
+        draw_ladder::visitOne<decltype(visitor), VScreenFssDumpTestSite>(
+            flow, visitor, visitor, capture, cpu);
+        return result;
+    } else {
+        if (!visitor.template eligible<VScreenFssDumpTestSite>())
+            return draw_ladder::SiteResult::notEligible();
+        return visitor.template visit<VScreenFssDumpTestSite>();
+    }
+}
+
 } // namespace
 
 bool vScreenPredicateTestVisit(
@@ -6371,6 +6422,50 @@ bool vScreenPredicateTestVisit(
         result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
     }
     result->glareClampAfter = fixture.glareClamp;
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenFssDumpPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    std::uint32_t instances, std::uint32_t frameNo,
+    std::uint32_t fssBodyFrame, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result) return false;
+    static State fixture{};
+    fixture.ownerCtx = context;
+    fixture.frameNo = frameNo;
+    fixture.fssBodyFrame = fssBodyFrame;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = kind;
+    facts.count = count;
+    facts.instances = instances;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        return false;
+    }
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
+        result->siteResult = vScreenFssDumpPredicateTestInvoke(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
+        result->siteResult = vScreenFssDumpPredicateTestInvoke(visitor, trace);
+    }
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;

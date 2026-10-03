@@ -614,6 +614,34 @@ bool fssDumpDrawInterestConfigured() noexcept {
     return detail::g_fssDumpFrame != 0 || detail::g_fssDumpSeriesWant != 0;
 }
 
+namespace {
+template <class T>
+void observeDumpRead(FssDumpRead<T>& read, T value) noexcept {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
+}  // namespace
+
+bool fssDumpWantsDrawsObserved(FssDumpWantsObservation& observed) noexcept {
+    const uint32_t frame = detail::g_fssDumpFrame;
+    observeDumpRead(observed.frame, frame);
+    bool framePending = false;
+    if (frame != 0) {
+        const bool done = detail::g_fssDumpDone;
+        observeDumpRead(observed.done, done);
+        framePending = !done;
+    }
+    if (framePending) return true;
+
+    const uint32_t seriesWant = detail::g_fssDumpSeriesWant;
+    observeDumpRead(observed.seriesWant, seriesWant);
+    if (seriesWant == 0) return false;
+    const bool seriesDone = detail::g_fssDumpSeriesDone;
+    observeDumpRead(observed.seriesDone, seriesDone);
+    return !seriesDone;
+}
+
 std::size_t fssDumpDrawInterestFilters(draw_interest::ShaderFilter* out,
                                       std::size_t capacity) noexcept {
     if (!fssDumpDrawInterestConfigured()) return 0;
@@ -653,6 +681,99 @@ bool fssDumpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     g_pendingEye = occ - 1;
     return true;
 }
+
+bool fssDumpOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                              uint32_t count, uint32_t instances,
+                              FssDumpHelperObservation& observed) {
+    if (!fssDumpWantsDrawsObserved(observed.wants)) return false;
+    const bool contextNonNull = ctx != nullptr;
+    observeDumpRead(observed.contextNonNull, contextNonNull);
+    if (!contextNonNull || kind != 'N' || instances != 1 ||
+        (count != 3 && count != 4 && count != 6)) return false;
+
+    uint64_t h = 0;
+    observed.guardCallReached = {true, true, true};
+    observed.callbackEntered = {true, true, false};
+    const bool guardReturned = guardedBudget(g_budget, [&] {
+        observed.callbackEntered = {true, true, true};
+        observed.callbackCompleted = {true, true, false};
+        ID3D11VertexShader* vs = nullptr;
+        observed.vsGetShaderReached = {true, true, true};
+        observed.vsGetShaderCompleted = {true, true, false};
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        observed.vsGetShaderCompleted = {true, true, true};
+        const bool shaderNonNull = vs != nullptr;
+        observeDumpRead(observed.shaderNonNull, shaderNonNull);
+        observed.lookupReached = {true, true, true};
+        observed.lookupCompleted = {true, true, false};
+        h = lookupShaderHash(vs);
+        observeDumpRead(observed.lookupHash, h);
+        observed.lookupCompleted = {true, true, true};
+        if (vs) {
+            observed.releaseReached = {true, true, true};
+            observed.releaseCompleted = {true, true, false};
+            vs->Release();
+            observed.releaseCompleted = {true, true, true};
+        }
+        observed.callbackCompleted = {true, true, true};
+    });
+    observeDumpRead(observed.guardReturned, guardReturned);
+    observeDumpRead(observed.hashAfterGuard, h);
+
+    const bool ring = (h == kRingQuadHash && count == 4);
+    const bool comp = (h == kCompositeHash && count == 6);
+    const bool tone = (h == kTonemapHash && count == 3);
+    if (!ring && !comp && !tone) return false;
+
+    uint8_t occ = 0;
+    if (ring) {
+        observeDumpRead(observed.counters.ringBefore, g_occRing);
+        occ = ++g_occRing;
+        observeDumpRead(observed.counters.ringAfter, g_occRing);
+    } else if (comp) {
+        observeDumpRead(observed.counters.compositeBefore, g_occComp);
+        occ = ++g_occComp;
+        observeDumpRead(observed.counters.compositeAfter, g_occComp);
+    } else {
+        observeDumpRead(observed.counters.tonemapBefore, g_occTone);
+        occ = ++g_occTone;
+        observeDumpRead(observed.counters.tonemapAfter, g_occTone);
+    }
+    if (occ > kEyes) return false;
+    const bool dumping = g_dumping;
+    observeDumpRead(observed.dumping, dumping);
+    if (!dumping) return false;
+    observeDumpRead(observed.pendingKindBefore, g_pendingKind);
+    observeDumpRead(observed.pendingEyeBefore, g_pendingEye);
+    g_pendingKind = ring ? 0 : (comp ? 1 : 2);
+    g_pendingEye = occ - 1;
+    observeDumpRead(observed.pendingKindAfter, g_pendingKind);
+    observeDumpRead(observed.pendingEyeAfter, g_pendingEye);
+    return true;
+}
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+FssDumpPredicateTestState fssDumpPredicateTestState() noexcept {
+    return {detail::g_fssDumpFrame, detail::g_fssDumpDone,
+            detail::g_fssDumpSeriesWant, detail::g_fssDumpSeriesDone,
+            g_dumping, g_occRing, g_occComp, g_occTone,
+            g_pendingKind, g_pendingEye};
+}
+
+void fssDumpPredicateTestSetState(
+    const FssDumpPredicateTestState& state) noexcept {
+    detail::g_fssDumpFrame = state.frame;
+    detail::g_fssDumpDone = state.done;
+    detail::g_fssDumpSeriesWant = state.seriesWant;
+    detail::g_fssDumpSeriesDone = state.seriesDone;
+    g_dumping = state.dumping;
+    g_occRing = state.ring;
+    g_occComp = state.composite;
+    g_occTone = state.tonemap;
+    g_pendingKind = state.pendingKind;
+    g_pendingEye = state.pendingEye;
+}
+#endif
 
 void fssDumpBegin(ID3D11DeviceContext* ctx) {
     if (!ctx || !g_dumping || g_pendingKind == 2) return;

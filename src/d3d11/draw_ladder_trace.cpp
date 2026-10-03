@@ -1,5 +1,6 @@
 #include "draw_ladder_trace.h"
 #include "fss_observation.h"
+#include "fss_dump_observation.h"
 
 #ifndef EDVR_VERSION_STRING
 #define EDVR_VERSION_STRING "unversioned test build"
@@ -46,6 +47,7 @@ struct DrawRecord final {
     std::uint32_t eyeCensusFactIndices[kMaxEyeCensusFactsPerDraw]{};
     std::uint32_t resolveBindFactIndices[kMaxResolveBindFactsPerDraw]{};
     std::uint32_t loaderPanelFactIndices[kMaxLoaderPanelFactsPerDraw]{};
+    std::uint32_t fssDumpFactIndices[kMaxFssDumpFactsPerDraw]{};
     ForwardFacts forwardFacts{};
     std::uint16_t siteCount = 0;
     std::uint16_t actionCount = 0;
@@ -57,6 +59,7 @@ struct DrawRecord final {
     std::uint8_t eyeCensusFactCount = 0;
     std::uint8_t resolveBindFactCount = 0;
     std::uint8_t loaderPanelFactCount = 0;
+    std::uint8_t fssDumpFactCount = 0;
     std::int16_t winnerSiteId = -1;
     std::int16_t verdictOrdinal = -1;
     bool finalized = false;
@@ -75,9 +78,11 @@ std::uint32_t g_basicFactCount = 0;
 EyeCensusObservation* g_eyeCensusFacts = nullptr;
 ResolveBindObservation* g_resolveBindFacts = nullptr;
 LoaderPanelObservation* g_loaderPanelFacts = nullptr;
+FssDumpObservation* g_fssDumpFacts = nullptr;
 std::uint32_t g_eyeCensusFactCount = 0;
 std::uint32_t g_resolveBindFactCount = 0;
 std::uint32_t g_loaderPanelFactCount = 0;
+std::uint32_t g_fssDumpFactCount = 0;
 std::uintptr_t* g_identities = nullptr;
 std::uint32_t g_drawCount = 0;
 std::uint32_t g_identityCount = 0;
@@ -99,6 +104,8 @@ bool g_resolveBindIndexOverflowed = false;
 bool g_loaderPanelIndexOverflowed = false;
 bool g_resolveBindPoolMissing = false;
 bool g_loaderPanelPoolMissing = false;
+bool g_fssDumpIndexOverflowed = false;
+bool g_fssDumpPoolMissing = false;
 bool g_remlokIndexOverflowed = false;
 bool g_remlokPoolMissing = false;
 bool g_lastWriteSucceeded = false;
@@ -857,6 +864,26 @@ bool validLoaderPanelFact(const LoaderPanelObservation& fact) noexcept {
     return true;
 }
 
+bool validFssDumpFact(const FssDumpObservation& fact) noexcept {
+    if (fact.siteId != 59 || fact.kind != 20) return false;
+    const auto validRead = [](const auto& r) { return !r.known || r.reached; };
+    const auto wants = [&](const FssDumpWantsObservation& w) {
+        return validRead(w.frame) && validRead(w.done) && validRead(w.seriesWant) && validRead(w.seriesDone);
+    };
+    const auto& h = fact.helper;
+    const auto& c = h.counters;
+    return wants(fact.outer.wants) && validRead(fact.outer.bodyFrame) && validRead(fact.outer.frameNo) &&
+        wants(h.wants) && validRead(h.contextNonNull) && validRead(h.guardCallReached) &&
+        validRead(h.callbackEntered) && validRead(h.vsGetShaderReached) && validRead(h.vsGetShaderCompleted) &&
+        validRead(h.shaderNonNull) && validRead(h.lookupReached) && validRead(h.lookupCompleted) &&
+        validRead(h.lookupHash) && validRead(h.releaseReached) && validRead(h.releaseCompleted) &&
+        validRead(h.callbackCompleted) && validRead(h.guardReturned) && validRead(h.hashAfterGuard) &&
+        validRead(h.dumping) && validRead(c.ringBefore) && validRead(c.ringAfter) &&
+        validRead(c.compositeBefore) && validRead(c.compositeAfter) && validRead(c.tonemapBefore) &&
+        validRead(c.tonemapAfter) && validRead(h.pendingKindBefore) && validRead(h.pendingKindAfter) &&
+        validRead(h.pendingEyeBefore) && validRead(h.pendingEyeAfter);
+}
+
 template <typename T>
 bool writeLoaderPanelRead(Writer& writer, const char* name,
                           const LoaderPanelRead<T>& read, bool& first) noexcept {
@@ -962,12 +989,78 @@ bool writeLoaderPanelFact(Writer& writer, const LoaderPanelObservation& fact) no
     return writeText(writer, "]}}}");
 }
 
+template <class T>
+bool writeFssDumpRead(Writer& writer, const char* name,
+                      const FssDumpRead<T>& read, bool& first) noexcept {
+    return writeFssRead(writer, name, FssRead<T>{read.reached, read.known, read.value}, first);
+}
+
+bool writeFssDumpFact(Writer& writer, const FssDumpObservation& f) noexcept {
+    if (!writeFmt(writer, "{\"siteId\":59,\"kind\":20,\"known\":\"yes\",\"handlerInvoked\":%s,\"outer\":{",
+                  f.handlerInvoked ? "true" : "false")) return false;
+    bool first = true;
+    const auto writeWants = [&](const char* prefix, const FssDumpWantsObservation& w, bool comma) {
+        return (!comma || writeText(writer, ",")) && writeFmt(writer, "\"%s\":{", prefix) &&
+            [&]() {
+                bool inner = true;
+                return writeFssDumpRead(writer, "frame", w.frame, inner) &&
+                    writeFssDumpRead(writer, "done", w.done, inner) &&
+                    writeFssDumpRead(writer, "seriesWant", w.seriesWant, inner) &&
+                    writeFssDumpRead(writer, "seriesDone", w.seriesDone, inner) &&
+                    writeText(writer, "}");
+            }();
+    };
+    if (!writeWants("wants", f.outer.wants, false)) return false;
+    first = false;
+    if (
+        !writeFssDumpRead(writer, "bodyFrame", f.outer.bodyFrame, first) ||
+        !writeFssDumpRead(writer, "frameNo", f.outer.frameNo, first) ||
+        !writeText(writer, "},\"helper\":{") || !writeWants("wants", f.helper.wants, false)) return false;
+    first = false;
+#define DUMP_READ(name, member) if (!writeFssDumpRead(writer, name, f.helper.member, first)) return false
+    DUMP_READ("contextNonNull", contextNonNull);
+    DUMP_READ("guardCallReached", guardCallReached);
+    DUMP_READ("callbackEntered", callbackEntered);
+    DUMP_READ("vsGetShaderReached", vsGetShaderReached);
+    DUMP_READ("vsGetShaderCompleted", vsGetShaderCompleted);
+    DUMP_READ("shaderNonNull", shaderNonNull);
+    DUMP_READ("lookupReached", lookupReached);
+    DUMP_READ("lookupCompleted", lookupCompleted);
+    DUMP_READ("lookupHash", lookupHash);
+    DUMP_READ("releaseReached", releaseReached);
+    DUMP_READ("releaseCompleted", releaseCompleted);
+    DUMP_READ("callbackCompleted", callbackCompleted);
+    DUMP_READ("guardReturned", guardReturned);
+    DUMP_READ("hashAfterGuard", hashAfterGuard);
+    DUMP_READ("dumping", dumping);
+#undef DUMP_READ
+    if (!writeText(writer, ",\"counters\":{")) return false;
+    first = true;
+#define DUMP_COUNTER(name, member) if (!writeFssDumpRead(writer, name, f.helper.counters.member, first)) return false
+    DUMP_COUNTER("ringBefore", ringBefore);
+    DUMP_COUNTER("ringAfter", ringAfter);
+    DUMP_COUNTER("compositeBefore", compositeBefore);
+    DUMP_COUNTER("compositeAfter", compositeAfter);
+    DUMP_COUNTER("tonemapBefore", tonemapBefore);
+    DUMP_COUNTER("tonemapAfter", tonemapAfter);
+#undef DUMP_COUNTER
+    if (!writeText(writer, "},")) return false;
+    first = true;
+#define DUMP_READ(name, member) if (!writeFssDumpRead(writer, name, f.helper.member, first)) return false
+    DUMP_READ("pendingKindBefore", pendingKindBefore);
+    DUMP_READ("pendingKindAfter", pendingKindAfter);
+    DUMP_READ("pendingEyeBefore", pendingEyeBefore);
+    DUMP_READ("pendingEyeAfter", pendingEyeAfter);
+#undef DUMP_READ
+    return writeText(writer, "}}");
+}
+
 bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     normalizeResourceIdentities();
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":12,"
+        "\"predicateFactVersion\":13,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -976,7 +1069,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Predicate fact version 12 independently re-evaluates the supported gate, stars, Holo, Scrim, NV, RemLok, FSS, Sunglare, context, distance, eye-census, resolve-binding and current-draw loader-panel predicates from raw consumed source facts. Observed helper outputs are consistency checks; cached matches and SiteEvents are not selector inputs. Whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
+        "\"predicateNote\":\"Predicate fact version 13 independently re-evaluates the supported gate, stars, Holo, Scrim, NV, RemLok, FSS, Sunglare, context, distance, eye-census, resolve-binding, current-draw loader-panel and FSS dump predicates from raw consumed source facts. Observed helper outputs are consistency checks; cached matches and SiteEvents are not selector inputs. Whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
         "\"identityNote\":\"Resource and context identities share per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
@@ -1224,6 +1317,14 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
             if (!g_loaderPanelFacts || r.loaderPanelFactIndices[j] >= g_loaderPanelFactCount ||
                 !writeLoaderPanelFact(writer, g_loaderPanelFacts[r.loaderPanelFactIndices[j]])) return false;
         }
+        if (r.fssDumpFactCount && (r.predicateFactCount || r.sunglareFactCount || r.fssFactCount ||
+            r.remlokFactCount || r.basicFactCount || r.eyeCensusFactCount || r.resolveBindFactCount ||
+            r.loaderPanelFactCount) && !writeText(writer, ",")) return false;
+        for (std::uint8_t j = 0; j < r.fssDumpFactCount; ++j) {
+            if (j && !writeText(writer, ",")) return false;
+            if (!g_fssDumpFacts || r.fssDumpFactIndices[j] >= g_fssDumpFactCount ||
+                !writeFssDumpFact(writer, g_fssDumpFacts[r.fssDumpFactIndices[j]])) return false;
+        }
         ok = writeFmt(writer,
             "],\"winnerSiteId\":%d,\"verdict\":%d,\"forwardFacts\":",
             r.winnerSiteId, r.verdictOrdinal);
@@ -1297,7 +1398,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     if (g_isCapturing) return;
     const bool wasEnabled = g_enabled.load(std::memory_order_acquire);
     if (!enabled && !wasEnabled && !g_records && !g_sunglareFacts &&
-        !g_fssFacts && !g_remlokFacts && !g_basicFacts && !g_eyeCensusFacts && !g_resolveBindFacts && !g_loaderPanelFacts && !g_identities) return;
+        !g_fssFacts && !g_remlokFacts && !g_basicFacts && !g_eyeCensusFacts && !g_resolveBindFacts && !g_loaderPanelFacts && !g_fssDumpFacts && !g_identities) return;
     if (enabled && wasEnabled && logFilePath && logFilePath[0]) {
         wchar_t oldPath[kPathChars]{};
         if (SUCCEEDED(StringCchCopyW(oldPath, kPathChars, g_directory)) &&
@@ -1326,6 +1427,8 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_eyeCensusPoolMissing = false;
     g_resolveBindPoolMissing = false;
     g_loaderPanelPoolMissing = false;
+    g_fssDumpIndexOverflowed = false;
+    g_fssDumpPoolMissing = false;
     g_lastWriteSucceeded = false;
     if (g_records) { delete[] g_records; g_records = nullptr; }
     if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
@@ -1335,6 +1438,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     if (g_eyeCensusFacts) { delete[] g_eyeCensusFacts; g_eyeCensusFacts = nullptr; }
     if (g_resolveBindFacts) { delete[] g_resolveBindFacts; g_resolveBindFacts = nullptr; }
     if (g_loaderPanelFacts) { delete[] g_loaderPanelFacts; g_loaderPanelFacts = nullptr; }
+    if (g_fssDumpFacts) { delete[] g_fssDumpFacts; g_fssDumpFacts = nullptr; }
     if (g_identities) { delete[] g_identities; g_identities = nullptr; }
     g_sunglareFactCount = 0;
     g_fssFactCount = 0;
@@ -1343,6 +1447,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_eyeCensusFactCount = 0;
     g_resolveBindFactCount = 0;
     g_loaderPanelFactCount = 0;
+    g_fssDumpFactCount = 0;
     g_directory[0] = L'\0';
     g_logFileName[0] = L'\0';
     g_logStem[0] = L'\0';
@@ -1359,9 +1464,10 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_eyeCensusFacts = new (std::nothrow) EyeCensusObservation[kMaxEyeCensusFacts];
     g_resolveBindFacts = new (std::nothrow) ResolveBindObservation[kMaxResolveBindFacts];
     g_loaderPanelFacts = new (std::nothrow) LoaderPanelObservation[kMaxLoaderPanelFacts];
+    g_fssDumpFacts = new (std::nothrow) FssDumpObservation[kMaxFssDumpFacts];
     g_identities = new (std::nothrow) std::uintptr_t[kIdentitySlots];
     if (!g_records || !g_sunglareFacts || !g_fssFacts || !g_remlokFacts || !g_basicFacts ||
-        !g_eyeCensusFacts || !g_resolveBindFacts || !g_loaderPanelFacts || !g_identities) {
+        !g_eyeCensusFacts || !g_resolveBindFacts || !g_loaderPanelFacts || !g_fssDumpFacts || !g_identities) {
         if (g_records) { delete[] g_records; g_records = nullptr; }
         if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
         if (g_fssFacts) { delete[] g_fssFacts; g_fssFacts = nullptr; }
@@ -1370,6 +1476,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
         if (g_eyeCensusFacts) { delete[] g_eyeCensusFacts; g_eyeCensusFacts = nullptr; }
         if (g_resolveBindFacts) { delete[] g_resolveBindFacts; g_resolveBindFacts = nullptr; }
         if (g_loaderPanelFacts) { delete[] g_loaderPanelFacts; g_loaderPanelFacts = nullptr; }
+        if (g_fssDumpFacts) { delete[] g_fssDumpFacts; g_fssDumpFacts = nullptr; }
         if (g_identities) { delete[] g_identities; g_identities = nullptr; }
         g_directory[0] = L'\0';
         g_logFileName[0] = L'\0';
@@ -1418,9 +1525,12 @@ ShutdownResult shutdown() noexcept {
     g_eyeCensusPoolMissing = false;
     g_resolveBindPoolMissing = false;
     g_loaderPanelPoolMissing = false;
+    g_fssDumpIndexOverflowed = false;
+    g_fssDumpPoolMissing = false;
     g_eyeCensusFactCount = 0;
     g_resolveBindFactCount = 0;
     g_loaderPanelFactCount = 0;
+    g_fssDumpFactCount = 0;
     if (g_records) {
         delete[] g_records;
         g_records = nullptr;
@@ -1452,6 +1562,10 @@ ShutdownResult shutdown() noexcept {
     if (g_loaderPanelFacts) {
         delete[] g_loaderPanelFacts;
         g_loaderPanelFacts = nullptr;
+    }
+    if (g_fssDumpFacts) {
+        delete[] g_fssDumpFacts;
+        g_fssDumpFacts = nullptr;
     }
     if (g_identities) {
         delete[] g_identities;
@@ -1493,12 +1607,15 @@ void frameBegin(const FrameFacts& facts) noexcept {
     g_eyeCensusFactCount = 0;
     g_resolveBindFactCount = 0;
     g_loaderPanelFactCount = 0;
+    g_fssDumpFactCount = 0;
     g_eyeCensusIndexOverflowed = false;
     g_resolveBindIndexOverflowed = false;
     g_loaderPanelIndexOverflowed = false;
     g_eyeCensusPoolMissing = false;
     g_resolveBindPoolMissing = false;
     g_loaderPanelPoolMissing = false;
+    g_fssDumpIndexOverflowed = false;
+    g_fssDumpPoolMissing = false;
     g_sunglareIndexOverflowed = false;
     g_sunglarePoolMissing = false;
     g_fssIndexOverflowed = false;
@@ -1778,7 +1895,7 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
     if (record.finalized || record.predicateFactCount >= kMaxPredicateFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
             record.fssFactCount + record.remlokFactCount + record.basicFactCount +
-            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount >= kMaxTotalPredicateFactsPerDraw ||
+            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount >= kMaxTotalPredicateFactsPerDraw ||
         static_cast<std::uint8_t>(fact.known) > static_cast<std::uint8_t>(TriState::Yes) ||
         fact.known == TriState::No ||
         static_cast<std::uint8_t>(fact.gateWanted) > static_cast<std::uint8_t>(TriState::Yes) ||
@@ -1903,7 +2020,7 @@ void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept {
     if (record.sunglareFactCount >= kMaxSunglareFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
             record.fssFactCount + record.remlokFactCount + record.basicFactCount +
-            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -2002,7 +2119,7 @@ void appendFssFact(Token token, const FssObservation& fact) noexcept {
     if (record.fssFactCount >= kMaxFssFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
             record.fssFactCount + record.remlokFactCount + record.basicFactCount +
-            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -2101,7 +2218,7 @@ void appendRemlokFact(Token token, const remlok_observation::Observation& fact) 
     }
     if (record.remlokFactCount >= kMaxRemlokFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -2136,7 +2253,7 @@ void appendBasicFact(Token token, const BasicDrawObservation& fact) noexcept {
     }
     if (record.basicFactCount >= kMaxBasicFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -2185,7 +2302,7 @@ void appendEyeCensusFact(Token token, const EyeCensusObservation& fact) noexcept
     }
     if (record.eyeCensusFactCount >= kMaxEyeCensusFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount >=
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount >=
             kMaxTotalPredicateFactsPerDraw || !validEyeCensusFact(fact)) {
         g_wasOverflowed = true;
         return;
@@ -2212,7 +2329,7 @@ void appendResolveBindFact(Token token, const ResolveBindObservation& fact) noex
     }
     if (record.resolveBindFactCount >= kMaxResolveBindFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount >=
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount >=
             kMaxTotalPredicateFactsPerDraw || !validResolveBindFact(fact)) {
         g_wasOverflowed = true;
         return;
@@ -2239,7 +2356,7 @@ void appendLoaderPanelFact(Token token, const LoaderPanelObservation& fact) noex
     }
     if (record.loaderPanelFactCount >= kMaxLoaderPanelFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount >=
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount >=
             kMaxTotalPredicateFactsPerDraw || !validLoaderPanelFact(fact)) {
         g_wasOverflowed = true;
         return;
@@ -2248,6 +2365,34 @@ void appendLoaderPanelFact(Token token, const LoaderPanelObservation& fact) noex
         if (record.predicateFacts[i].siteId == fact.siteId) { g_wasOverflowed = true; return; }
     g_loaderPanelFacts[g_loaderPanelFactCount] = fact;
     record.loaderPanelFactIndices[record.loaderPanelFactCount++] = g_loaderPanelFactCount++;
+}
+
+void appendFssDumpFact(Token token, const FssDumpObservation& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized) { rejectInvalidToken(); return; }
+    if (!g_fssDumpFacts) {
+        g_fssDumpPoolMissing = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (g_fssDumpFactCount >= kMaxFssDumpFacts) {
+        g_fssDumpIndexOverflowed = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (record.fssDumpFactCount >= kMaxFssDumpFactsPerDraw ||
+        record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount +
+            record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount >=
+            kMaxTotalPredicateFactsPerDraw || !validFssDumpFact(fact)) {
+        g_wasOverflowed = true;
+        return;
+    }
+    for (std::uint8_t i = 0; i < record.predicateFactCount; ++i)
+        if (record.predicateFacts[i].siteId == fact.siteId) { g_wasOverflowed = true; return; }
+    g_fssDumpFacts[g_fssDumpFactCount] = fact;
+    record.fssDumpFactIndices[record.fssDumpFactCount++] = g_fssDumpFactCount++;
 }
 
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
@@ -2300,6 +2445,19 @@ bool readBasicFactForTest(Token token, std::uint8_t ordinal, BasicDrawObservatio
     if (ordinal >= record.basicFactCount || record.basicFactIndices[ordinal] >= g_basicFactCount)
         return false;
     *out = g_basicFacts[record.basicFactIndices[ordinal]];
+    return true;
+}
+
+std::uint8_t fssDumpFactCountForTest(Token token) noexcept {
+    return validToken(token) ? g_records[token.drawIndex].fssDumpFactCount : 0;
+}
+
+bool readFssDumpFactForTest(Token token, std::uint8_t ordinal, FssDumpObservation* out) noexcept {
+    if (!out || !validToken(token) || !g_fssDumpFacts) return false;
+    const DrawRecord& record = g_records[token.drawIndex];
+    if (ordinal >= record.fssDumpFactCount || record.fssDumpFactIndices[ordinal] >= g_fssDumpFactCount)
+        return false;
+    *out = g_fssDumpFacts[record.fssDumpFactIndices[ordinal]];
     return true;
 }
 #endif
@@ -2559,6 +2717,27 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
             g_wasOverflowed = true;
         }
     }
+    bool fssDumpVisited = false;
+    for (std::uint16_t i = 0; i < record.siteCount; ++i) {
+        const SiteEvent& event = record.sites[i];
+        if (event.id != 59) continue;
+        fssDumpVisited = true;
+        const bool notEligible = event.outcome == static_cast<std::uint8_t>(
+            draw_ladder::SiteOutcome::NotEligible);
+        if (record.fssDumpFactCount == 1 && g_fssDumpFacts &&
+            record.fssDumpFactIndices[0] < g_fssDumpFactCount &&
+            g_fssDumpFacts[record.fssDumpFactIndices[0]].handlerInvoked == notEligible)
+            g_wasOverflowed = true;
+    }
+    if (fssDumpVisited && record.fssDumpFactCount != 1) g_wasOverflowed = true;
+    if (!fssDumpVisited && record.fssDumpFactCount) g_wasOverflowed = true;
+    for (std::uint8_t i = 0; i < record.fssDumpFactCount; ++i) {
+        if (!g_fssDumpFacts || record.fssDumpFactIndices[i] >= g_fssDumpFactCount) {
+            g_fssDumpPoolMissing = !g_fssDumpFacts;
+            g_fssDumpIndexOverflowed = g_fssDumpIndexOverflowed || !g_fssDumpPoolMissing;
+            g_wasOverflowed = true;
+        }
+    }
     record.winnerSiteId = winnerSiteId;
     record.verdictOrdinal = verdictOrdinal;
     record.finalized = true;
@@ -2618,6 +2797,8 @@ bool capturing() noexcept {
 }
 bool overflowed() noexcept { return g_wasOverflowed; }
 CaptureInvalidation invalidationReason() noexcept {
+    if (g_fssDumpPoolMissing) return CaptureInvalidation::FssDumpPoolMissing;
+    if (g_fssDumpIndexOverflowed) return CaptureInvalidation::FssDumpIndexOverflow;
     if (g_loaderPanelPoolMissing) return CaptureInvalidation::LoaderPanelPoolMissing;
     if (g_loaderPanelIndexOverflowed) return CaptureInvalidation::LoaderPanelIndexOverflow;
     if (g_resolveBindPoolMissing) return CaptureInvalidation::ResolveBindPoolMissing;

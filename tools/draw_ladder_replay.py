@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 12
+PREDICATE_FACT_VERSION = 13
 RESOLVE_BIND_PS_HASH = 0x7CECABDE34FFBE9E
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
@@ -1498,6 +1498,11 @@ class _LoaderPanelUnavailable(Exception):
     pass
 
 
+class _FssDumpUnavailable(Exception):
+    def __init__(self, mutation_unobserved=False):
+        self.mutation_unobserved = mutation_unobserved
+
+
 def _replay_loader_panel_fact(fact, draw, label):
     """Replay site25 from independent outer, helper, and post-collection reads."""
     required = {"siteId", "kind", "known", "outer", "helper"}
@@ -2763,13 +2768,291 @@ def _replay_scrim_fact(fact, draw, label):
     return expected_event, None, True, 0, observation_mismatches, expected_claim
 
 
+def _fss_dump_event(claimed):
+    return ({"id": 59, "kind": 2, "outcome": 3, "flow": 1,
+             "subsite": 0, "verdict": 13} if claimed else
+            {"id": 59, "kind": 2, "outcome": 2, "flow": 0,
+             "subsite": 0, "verdict": -1})
+
+
+def _replay_fss_dump_fact(fact, draw, label, fss_dump_interested):
+    """Replay site59 from lazy raw reads and the selector's post-guard hash."""
+    if set(fact) != {"siteId", "kind", "known", "handlerInvoked", "outer", "helper"}:
+        raise TraceError(label + " has missing or unexpected FSS-dump fields")
+    if (fact.get("siteId"), fact.get("kind"), fact.get("known")) != (59, 20, "yes"):
+        raise TraceError(label + " has mismatched FSS-dump site/kind/availability")
+    if type(fact.get("handlerInvoked")) is not bool:
+        raise TraceError(label + ".handlerInvoked must be a boolean")
+    u32 = 0xffffffff
+    outer_types = {
+        "wants": {"frame": (int, u32), "done": (bool, None),
+                  "seriesWant": (int, u32), "seriesDone": (bool, None)},
+        "bodyFrame": (int, u32), "frameNo": (int, u32),
+    }
+    helper_types = {
+        "wants": outer_types["wants"],
+        "contextNonNull": (bool, None), "guardCallReached": (bool, None),
+        "callbackEntered": (bool, None), "vsGetShaderReached": (bool, None),
+        "vsGetShaderCompleted": (bool, None), "shaderNonNull": (bool, None),
+        "lookupReached": (bool, None), "lookupCompleted": (bool, None),
+        "lookupHash": (int, 0xffffffffffffffff),
+        "releaseReached": (bool, None), "releaseCompleted": (bool, None),
+        "callbackCompleted": (bool, None), "guardReturned": (bool, None),
+        "hashAfterGuard": (int, 0xffffffffffffffff), "dumping": (bool, None),
+        "counters": {
+            "ringBefore": (int, 255), "ringAfter": (int, 255),
+            "compositeBefore": (int, 255), "compositeAfter": (int, 255),
+            "tonemapBefore": (int, 255), "tonemapAfter": (int, 255),
+        },
+        "pendingKindBefore": (int, u32), "pendingKindAfter": (int, u32),
+        "pendingEyeBefore": (int, u32), "pendingEyeAfter": (int, u32),
+    }
+
+    def parse_read(item, path, spec):
+        if not isinstance(item, dict) or set(item) != {"reached", "known", "value"}:
+            raise TraceError(path + " is malformed")
+        reached, known, value = item["reached"], item["known"], item["value"]
+        if type(reached) is not bool or type(known) is not bool:
+            raise TraceError(path + " availability must be boolean")
+        if known and not reached:
+            raise TraceError(path + " cannot be known before it is reached")
+        if not known:
+            if value is not None:
+                raise TraceError(path + " unknown value must be null")
+            return (reached, False, None)
+        typ, high = spec
+        if typ is bool:
+            if type(value) is not bool:
+                raise TraceError(path + ".value must be a boolean")
+        else:
+            _integer(value, path + ".value", 0, high)
+        return (reached, True, value)
+
+    def parse_group(obj, specs, path):
+        if not isinstance(obj, dict) or set(obj) != set(specs):
+            raise TraceError(path + " has missing or unexpected fields")
+        parsed = {}
+        for name, spec in specs.items():
+            field_path = path + "." + name
+            if isinstance(spec, dict):
+                parsed[name] = parse_group(obj[name], spec, field_path)
+            else:
+                parsed[name] = parse_read(obj[name], field_path, spec)
+        return parsed
+
+    outer = parse_group(fact.get("outer"), outer_types, label + ".outer")
+    helper = parse_group(fact.get("helper"), helper_types, label + ".helper")
+    if fss_dump_interested is None:
+        raise _FssDumpUnavailable()
+    if fact["handlerInvoked"] != fss_dump_interested:
+        raise TraceError(label + " handler marker disagrees with site6 raw interest mask")
+
+    def value(group, name, mutation_required=False):
+        read = group[name]
+        if not read[0]:
+            raise TraceError(label + "." + name + " was not reached when consumed")
+        if not read[1]:
+            raise _FssDumpUnavailable(mutation_required)
+        return read[2]
+
+    def unread(group, names, path):
+        for name in names:
+            read = group[name]
+            if isinstance(read, dict):
+                for nested_name, nested_read in read.items():
+                    if nested_read[0] or nested_read[1] or nested_read[2] is not None:
+                        raise TraceError(path + "." + name + "." + nested_name +
+                                         " was not consumed by the short-circuit path")
+                continue
+            if read[0] or read[1] or read[2] is not None:
+                raise TraceError(path + "." + name + " was not consumed by the short-circuit path")
+
+    def wants(group, path):
+        frame = value(group, "frame")
+        if frame != 0:
+            done = value(group, "done")
+        else:
+            unread(group, ("done",), path)
+            done = None
+        left = frame != 0 and not done
+        if left:
+            unread(group, ("seriesWant", "seriesDone"), path)
+            return True
+        series_want = value(group, "seriesWant")
+        if series_want != 0:
+            series_done = value(group, "seriesDone")
+        else:
+            unread(group, ("seriesDone",), path)
+            series_done = None
+        return series_want != 0 and not series_done
+
+    def check_unread_all(group, specs, path):
+        for name, spec in specs.items():
+            if isinstance(spec, dict):
+                check_unread_all(group[name], spec, path + "." + name)
+            elif group[name][0] or group[name][1] or group[name][2] is not None:
+                raise TraceError(path + "." + name + " is unexpectedly reached")
+
+    # The interest marker is consistency-only. The source of admission is the
+    # earlier raw site6 interest mask, and unentered site59 bodies stay empty.
+    if not fss_dump_interested:
+        if fact["handlerInvoked"]:
+            raise TraceError(label + " unselected FSS dump handler was marked invoked")
+        check_unread_all(outer, outer_types, label + ".outer")
+        check_unread_all(helper, helper_types, label + ".helper")
+        return {"id": 59, "kind": 2, "outcome": 5, "flow": 0,
+                "subsite": 0, "verdict": -1}, 0, False
+    if not fact["handlerInvoked"]:
+        raise TraceError(label + " selected FSS dump handler was not marked invoked")
+
+    outer_wants = wants(outer["wants"], label + ".outer.wants")
+    if not outer_wants:
+        unread(outer, ("bodyFrame", "frameNo"), label + ".outer")
+        check_unread_all(helper, helper_types, label + ".helper")
+        return _fss_dump_event(False), 0, False
+    body_frame = value(outer, "bodyFrame")
+    if body_frame == 0:
+        unread(outer, ("frameNo",), label + ".outer")
+        check_unread_all(helper, helper_types, label + ".helper")
+        return _fss_dump_event(False), 0, False
+    frame_no = value(outer, "frameNo")
+    if ((frame_no - body_frame) & u32) > 2:
+        check_unread_all(helper, helper_types, label + ".helper")
+        return _fss_dump_event(False), 0, False
+
+    helper_wants = wants(helper["wants"], label + ".helper.wants")
+    if not helper_wants:
+        unread(helper, ("contextNonNull", "guardCallReached", "callbackEntered",
+                        "vsGetShaderReached", "vsGetShaderCompleted", "shaderNonNull",
+                        "lookupReached", "lookupCompleted", "lookupHash", "releaseReached",
+                        "releaseCompleted", "callbackCompleted", "guardReturned",
+                        "hashAfterGuard", "dumping", "counters", "pendingKindBefore",
+                        "pendingKindAfter", "pendingEyeBefore", "pendingEyeAfter"), label + ".helper")
+        return _fss_dump_event(False), 0, False
+    context = value(helper, "contextNonNull")
+    if not context:
+        unread(helper, ("guardCallReached", "callbackEntered", "vsGetShaderReached",
+                        "vsGetShaderCompleted", "shaderNonNull", "lookupReached",
+                        "lookupCompleted", "lookupHash", "releaseReached", "releaseCompleted",
+                        "callbackCompleted", "guardReturned", "hashAfterGuard", "dumping",
+                        "counters", "pendingKindBefore", "pendingKindAfter", "pendingEyeBefore",
+                        "pendingEyeAfter"), label + ".helper")
+        return _fss_dump_event(False), 0, False
+    shape_ok = (draw["kind"] == ord("N") and draw["instances"] == 1 and
+                draw["count"] in (3, 4, 6))
+    if not shape_ok:
+        unread(helper, ("guardCallReached", "callbackEntered", "vsGetShaderReached",
+                        "vsGetShaderCompleted", "shaderNonNull", "lookupReached",
+                        "lookupCompleted", "lookupHash", "releaseReached", "releaseCompleted",
+                        "callbackCompleted", "guardReturned", "hashAfterGuard", "dumping",
+                        "counters", "pendingKindBefore", "pendingKindAfter", "pendingEyeBefore",
+                        "pendingEyeAfter"), label + ".helper")
+        return _fss_dump_event(False), 0, False
+
+    if value(helper, "guardCallReached") is not True:
+        raise TraceError(label + " guard call marker disagrees with consumed helper gates")
+    entered = value(helper, "callbackEntered")
+    lookup_hash = None
+    lookup_completed = False
+    expected_callback_completed = False
+    if not entered:
+        unread(helper, ("vsGetShaderReached", "vsGetShaderCompleted", "shaderNonNull",
+                        "lookupReached", "lookupCompleted", "lookupHash", "releaseReached",
+                        "releaseCompleted", "callbackCompleted"), label + ".helper")
+    else:
+        if value(helper, "vsGetShaderReached") is not True:
+            raise TraceError(label + " entered callback without reaching VSGetShader")
+        vs_completed = value(helper, "vsGetShaderCompleted")
+        if not vs_completed:
+            unread(helper, ("shaderNonNull", "lookupReached", "lookupCompleted", "lookupHash",
+                            "releaseReached", "releaseCompleted"), label + ".helper")
+        else:
+            shader_nonnull = value(helper, "shaderNonNull")
+            if value(helper, "lookupReached") is not True:
+                raise TraceError(label + " completed getter did not reach hash lookup")
+            lookup_completed = value(helper, "lookupCompleted")
+            if lookup_completed:
+                lookup_hash = value(helper, "lookupHash")
+                if not shader_nonnull:
+                    if lookup_hash != 0:
+                        raise TraceError(label + " null shader lookup must return zero")
+                    expected_callback_completed = True
+                    unread(helper, ("releaseReached", "releaseCompleted"), label + ".helper")
+                else:
+                    if value(helper, "releaseReached") is not True:
+                        raise TraceError(label + " completed lookup did not reach Release")
+                    release_completed = value(helper, "releaseCompleted")
+                    expected_callback_completed = release_completed
+            else:
+                unread(helper, ("lookupHash", "releaseReached", "releaseCompleted"),
+                       label + ".helper")
+        callback_completed = value(helper, "callbackCompleted")
+        if callback_completed != expected_callback_completed:
+            raise TraceError(label + " callback completion disagrees with nested query completion")
+    guard_returned = value(helper, "guardReturned")
+    if guard_returned != bool(entered and callback_completed):
+        raise TraceError(label + " guard result disagrees with callback completion")
+    hash_after = value(helper, "hashAfterGuard")
+    expected_hash = lookup_hash if lookup_completed else 0
+    if hash_after != expected_hash:
+        raise TraceError(label + " consumed post-guard hash disagrees with local assignment provenance")
+
+    family = None
+    if hash_after == 0x7E38A6AA1269C901 and draw["count"] == 4:
+        family = ("ring", 0, "ring")
+    elif hash_after == 0x953C8123AD8DC13B and draw["count"] == 6:
+        family = ("composite", 1, "composite")
+    elif hash_after == 0x2D78DC3FD2C0C543 and draw["count"] == 3:
+        family = ("tonemap", 2, "tonemap")
+    if family is None:
+        unread(helper, ("dumping", "counters", "pendingKindBefore", "pendingKindAfter",
+                        "pendingEyeBefore", "pendingEyeAfter"), label + ".helper")
+        return _fss_dump_event(False), 0, False
+
+    counter_key = family[0]
+    counters = helper["counters"]
+    selected = counter_key
+    before_name, after_name = selected + "Before", selected + "After"
+    before = value(counters, before_name, mutation_required=True)
+    after = value(counters, after_name, mutation_required=True)
+    expected_after = (before + 1) & 0xff
+    if after != expected_after:
+        raise TraceError(label + " selected category counter is not one uint8 increment")
+    other_names = [name for name in counters if name not in (before_name, after_name)]
+    unread(counters, other_names, label + ".helper.counters")
+    occurrence = after
+    if occurrence > 2:
+        unread(helper, ("dumping", "pendingKindBefore", "pendingKindAfter",
+                        "pendingEyeBefore", "pendingEyeAfter"), label + ".helper")
+        return _fss_dump_event(False), 0, False
+    dumping = value(helper, "dumping")
+    if not dumping:
+        unread(helper, ("pendingKindBefore", "pendingKindAfter", "pendingEyeBefore",
+                        "pendingEyeAfter"), label + ".helper")
+        return _fss_dump_event(False), 0, False
+
+    kind_before = value(helper, "pendingKindBefore", mutation_required=True)
+    kind_after = value(helper, "pendingKindAfter", mutation_required=True)
+    eye_before = value(helper, "pendingEyeBefore", mutation_required=True)
+    eye_after = value(helper, "pendingEyeAfter", mutation_required=True)
+    expected_eye = (occurrence - 1) & u32
+    if kind_after != family[1] or eye_after != expected_eye:
+        raise TraceError(label + " pending family/eye writes disagree with the derived category")
+    if kind_before == kind_after and eye_before == eye_after:
+        # Idempotent writes still count as a claim; values are source write
+        # checks and never select the result.
+        pass
+    return _fss_dump_event(True), 0, False
+
+
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 17 if predicate_fact_version >= 12 else 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 18 if predicate_fact_version >= 13 else 17 if predicate_fact_version >= 12 else 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 12 else
+    supported_ids = ((2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 13 else
+                     (2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 12 else
                      (2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 11 else
                      (2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 10 else
                      (2, 3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 9 else
@@ -2785,12 +3068,14 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     sunglare_action = None
     sunglare62_expected = None
     sunglare_mutation_missing = set()
+    fss_dump_interested = None
     for index, fact in enumerate(facts):
         fact_label = "%s.predicateFacts[%d]" % (label, index)
         if not isinstance(fact, dict):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        20 if predicate_fact_version >= 13 else
                         19 if predicate_fact_version >= 12 else
                         18 if predicate_fact_version >= 11 else
                         17 if predicate_fact_version >= 10 else
@@ -2805,6 +3090,8 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
         supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+                           (57, 12), (58, 13), (59, 20), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 13 else (
+            (2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 12 else (
             (2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 11 else (
@@ -2920,6 +3207,16 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                     _replay_loader_panel_fact(fact, draw, fact_label)
             except _LoaderPanelUnavailable:
                 event, fact_mismatches, fact_mutation_unobserved = None, 0, False
+            by_site[site_id] = (event, None, True, 0, fact_mismatches,
+                                fact_mutation_unobserved)
+        elif kind == 20:
+            if site_id != 59 or predicate_fact_version < 13:
+                raise TraceError(fact_label + " has unsupported FSS-dump fact")
+            try:
+                event, fact_mismatches, fact_mutation_unobserved = \
+                    _replay_fss_dump_fact(fact, draw, fact_label, fss_dump_interested)
+            except _FssDumpUnavailable as exc:
+                event, fact_mismatches, fact_mutation_unobserved = None, 0, exc.mutation_unobserved
             by_site[site_id] = (event, None, True, 0, fact_mismatches,
                                 fact_mutation_unobserved)
         elif kind == 14:
@@ -3076,6 +3373,8 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
         elif kind == 4:
             expected_event, expected_delta, delta_known, observed_delta, legacy_claim = \
                 _replay_witchspace_stars_fact(fact, draw, fact_label)
+            if site_id == 6:
+                fss_dump_interested = bool(int(fact["legacyInterestMask"], 16) & (1 << 4))
             by_site[site_id] = (expected_event, expected_delta, delta_known,
                                 observed_delta, 0, legacy_claim)
         elif kind == 5:
@@ -3152,7 +3451,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -3202,6 +3501,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     loader_panel_unreplayable = 0
     loader_panel_mismatches = 0
     loader_panel_mutation_unobserved = 0
+    fss_dump_replayed = 0
+    fss_dump_unreplayable = 0
+    fss_dump_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -3269,6 +3571,19 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             if legacy_claim:
                 mutation_unobserved += 1
                 loader_panel_mutation_unobserved += 1
+        if site_id == 59:
+            if site_unreplayable:
+                fss_dump_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                fss_dump_replayed += 1
+            else:
+                fss_dump_mismatches += 1
+            if cache_mismatches:
+                fss_dump_mismatches += cache_mismatches
+            if legacy_claim:
+                mutation_unobserved += 1
         if site_id in (61, 62, 63):
             if site_unreplayable:
                 sunglare_unreplayable += 1
@@ -3449,7 +3764,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "loaderPanelReplayed": loader_panel_replayed,
             "loaderPanelUnreplayable": loader_panel_unreplayable,
             "loaderPanelMismatches": loader_panel_mismatches,
-            "loaderPanelMutationUnobserved": loader_panel_mutation_unobserved}
+            "loaderPanelMutationUnobserved": loader_panel_mutation_unobserved,
+            "fssDumpFacts": sum(1 for site_id in by_site if site_id == 59),
+            "fssDumpReplayed": fss_dump_replayed,
+            "fssDumpUnreplayable": fss_dump_unreplayable,
+            "fssDumpMismatches": fss_dump_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -3467,7 +3786,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -3564,7 +3883,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "resolveBindUnreplayable": 0, "resolveBindMismatches": 0,
                         "loaderPanelFacts": 0, "loaderPanelReplayed": 0,
                         "loaderPanelUnreplayable": 0, "loaderPanelMismatches": 0,
-                        "loaderPanelMutationUnobserved": 0}
+                        "loaderPanelMutationUnobserved": 0,
+                        "fssDumpFacts": 0, "fssDumpReplayed": 0,
+                        "fssDumpUnreplayable": 0, "fssDumpMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -3924,6 +4245,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                                 "unreplayable" if predicate_replay["loaderPanelUnreplayable"] else
                                 "mutation-unobserved" if predicate_replay["loaderPanelMutationUnobserved"] else
                                 "replayed"),
+             fssDumpStatus=("unavailable-before-v13" if predicate_fact_version < 13 else
+                            "not-visited" if not predicate_replay["fssDumpFacts"] else
+                            "mismatch" if predicate_replay["fssDumpMismatches"] else
+                            "unreplayable" if predicate_replay["fssDumpUnreplayable"] else
+                            "replayed"),
              **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -3962,10 +4288,13 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
               "resolveBindStatus": "unavailable-before-v11",
               "resolveBindFacts": 0, "resolveBindReplayed": 0,
               "resolveBindUnreplayable": 0, "resolveBindMismatches": 0,
-              "loaderPanelStatus": "unavailable-before-v12",
-              "loaderPanelFacts": 0, "loaderPanelReplayed": 0,
-              "loaderPanelUnreplayable": 0, "loaderPanelMismatches": 0,
-              "loaderPanelMutationUnobserved": 0}),
+             "loaderPanelStatus": "unavailable-before-v12",
+             "loaderPanelFacts": 0, "loaderPanelReplayed": 0,
+             "loaderPanelUnreplayable": 0, "loaderPanelMismatches": 0,
+              "loaderPanelMutationUnobserved": 0,
+              "fssDumpStatus": "unavailable-before-v13",
+              "fssDumpFacts": 0, "fssDumpReplayed": 0,
+              "fssDumpUnreplayable": 0, "fssDumpMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -4106,6 +4435,13 @@ def format_summary(summary, sidecar_path=None):
                       replay.get("loaderPanelFacts", 0), replay.get("loaderPanelReplayed", 0),
                       replay.get("loaderPanelUnreplayable", 0), replay.get("loaderPanelMismatches", 0),
                       replay.get("loaderPanelMutationUnobserved", 0)))
+    if replay.get("predicateFactVersion", 0) < 13:
+        lines.append("  FssDumpClaim site 59: unavailable before predicate fact version 13")
+    else:
+        lines.append("  FssDumpClaim site 59: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay.get("fssDumpStatus", "not-visited"),
+                      replay.get("fssDumpFacts", 0), replay.get("fssDumpReplayed", 0),
+                      replay.get("fssDumpUnreplayable", 0), replay.get("fssDumpMismatches", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -7539,6 +7875,278 @@ def self_test():
               "sites": [_loader_panel_event(True)], "predicateFacts": []}
     if _replay_predicate_facts(lp_v11, "loader-v11-compat", 11)["loaderPanelFacts"]:
         print("predicate fact version 11 treated site25 as supported")
+        return 1
+
+    def dump_read(value=None):
+        return {"reached": True, "known": True, "value": value}
+
+    def dump_unread():
+        return {"reached": False, "known": False, "value": None}
+
+    def dump_wants(enabled=True):
+        if enabled:
+            return {"frame": dump_read(1), "done": dump_read(False),
+                    "seriesWant": dump_unread(), "seriesDone": dump_unread()}
+        return {"frame": dump_read(0), "done": dump_unread(),
+                "seriesWant": dump_read(0), "seriesDone": dump_unread()}
+
+    def dump_fact(shader_hash=0x7E38A6AA1269C901, counter_before=0,
+                  counter_after=None, dumping=True, release_ok=True,
+                  outer_wants=True, helper_wants=True):
+        if counter_after is None:
+            counter_after = (counter_before + 1) & 0xff
+        helper = {"wants": dump_wants(helper_wants),
+                  "contextNonNull": dump_read(True) if helper_wants else dump_unread(),
+                  "guardCallReached": dump_unread(), "callbackEntered": dump_unread(),
+                  "vsGetShaderReached": dump_unread(), "vsGetShaderCompleted": dump_unread(),
+                  "shaderNonNull": dump_unread(), "lookupReached": dump_unread(),
+                  "lookupCompleted": dump_unread(), "lookupHash": dump_unread(),
+                  "releaseReached": dump_unread(), "releaseCompleted": dump_unread(),
+                  "callbackCompleted": dump_unread(), "guardReturned": dump_unread(),
+                  "hashAfterGuard": dump_unread(), "dumping": dump_unread(),
+                  "counters": {name: dump_unread() for name in
+                               ("ringBefore", "ringAfter", "compositeBefore", "compositeAfter",
+                                "tonemapBefore", "tonemapAfter")},
+                  "pendingKindBefore": dump_unread(), "pendingKindAfter": dump_unread(),
+                  "pendingEyeBefore": dump_unread(), "pendingEyeAfter": dump_unread()}
+        outer = {"wants": dump_wants(outer_wants),
+                 "bodyFrame": dump_read(1) if outer_wants else dump_unread(),
+                 "frameNo": dump_read(2) if outer_wants else dump_unread()}
+        fact = {"siteId": 59, "kind": 20, "known": "yes", "handlerInvoked": True,
+                "outer": outer, "helper": helper}
+        if outer_wants and helper_wants:
+            helper.update({"guardCallReached": dump_read(True),
+                           "callbackEntered": dump_read(True),
+                           "vsGetShaderReached": dump_read(True),
+                           "vsGetShaderCompleted": dump_read(True),
+                           "shaderNonNull": dump_read(True),
+                           "lookupReached": dump_read(True),
+                           "lookupCompleted": dump_read(True),
+                           "lookupHash": dump_read(shader_hash),
+                           "releaseReached": dump_read(True),
+                           "releaseCompleted": dump_read(release_ok),
+                           "callbackCompleted": dump_read(release_ok),
+                           "guardReturned": dump_read(release_ok),
+                           "hashAfterGuard": dump_read(shader_hash),
+                           "dumping": dump_read(dumping) if counter_after <= 2 else dump_unread()})
+            counters = helper["counters"]
+            counters["ringBefore"] = dump_read(counter_before)
+            counters["ringAfter"] = dump_read(counter_after)
+            if dumping and counter_after <= 2:
+                helper.update({"pendingKindBefore": dump_read(8),
+                               "pendingKindAfter": dump_read(0),
+                               "pendingEyeBefore": dump_read(7),
+                               "pendingEyeAfter": dump_read((counter_after - 1) & 0xffffffff)})
+        return fact
+
+    dump_draw = {"kind": ord("N"), "count": 4, "instances": 1}
+    dump_claim = dump_fact()
+    if _replay_fss_dump_fact(dump_claim, dump_draw, "fss-dump-claim", True)[0] != \
+            _fss_dump_event(True):
+        print("FSS dump raw category did not replay a claim")
+        return 1
+    dump_release_fault = dump_fact(release_ok=False)
+    # The real helper calls lookupShaderHash even after a successful null VS
+    # getter; only Release is conditional on pointer presence.
+    dump_null = json.loads(json.dumps(dump_claim))
+    null_helper = dump_null["helper"]
+    null_helper["shaderNonNull"] = dump_read(False)
+    null_helper["lookupHash"] = dump_read(0)
+    null_helper["hashAfterGuard"] = dump_read(0)
+    for name in ("releaseReached", "releaseCompleted", "dumping", "pendingKindBefore",
+                 "pendingKindAfter", "pendingEyeBefore", "pendingEyeAfter"):
+        null_helper[name] = dump_unread()
+    null_helper["counters"] = {name: dump_unread() for name in null_helper["counters"]}
+    if _replay_fss_dump_fact(dump_null, dump_draw, "fss-dump-real-null-shader", True)[0] != \
+            _fss_dump_event(False):
+        print("FSS dump did not retain the consumed null-shader hash lookup")
+        return 1
+    dump_missing_lookup = json.loads(json.dumps(dump_null))
+    dump_missing_lookup["helper"]["lookupReached"] = dump_unread()
+    dump_forged_hash = json.loads(json.dumps(dump_null))
+    dump_forged_hash["helper"]["hashAfterGuard"] = dump_read(0x7E38A6AA1269C901)
+    dump_nonzero_null_lookup = json.loads(json.dumps(dump_null))
+    dump_nonzero_null_lookup["helper"]["lookupHash"] = dump_read(1)
+    for bad_dump in (dump_missing_lookup, dump_forged_hash, dump_nonzero_null_lookup):
+        try:
+            _replay_fss_dump_fact(bad_dump, dump_draw, "fss-dump-null-provenance", True)
+        except TraceError:
+            pass
+        else:
+            print("FSS dump accepted missing lookup or manufactured post-guard hash")
+            return 1
+    dump_unknown_null_lookup = json.loads(json.dumps(dump_null))
+    dump_unknown_null_lookup["helper"]["lookupHash"] = {
+        "reached": True, "known": False, "value": None}
+    try:
+        _replay_fss_dump_fact(dump_unknown_null_lookup, dump_draw,
+                              "fss-dump-unknown-null-lookup", True)
+    except _FssDumpUnavailable:
+        pass
+    else:
+        print("FSS dump manufactured zero from an unknown consumed null lookup")
+        return 1
+    dump_denied = json.loads(json.dumps(dump_null))
+    denied_helper = dump_denied["helper"]
+    denied_helper["callbackEntered"] = dump_read(False)
+    denied_helper["guardReturned"] = dump_read(False)
+    for name in ("vsGetShaderReached", "vsGetShaderCompleted", "shaderNonNull",
+                 "lookupReached", "lookupCompleted", "lookupHash", "callbackCompleted"):
+        denied_helper[name] = dump_unread()
+    if _replay_fss_dump_fact(dump_denied, dump_draw, "fss-dump-real-budget-denial", True)[0] != \
+            _fss_dump_event(False):
+        print("FSS dump rejected the real unused callback checkpoints on budget denial")
+        return 1
+    dump_getter_fault = json.loads(json.dumps(dump_null))
+    fault_helper = dump_getter_fault["helper"]
+    for name in ("vsGetShaderCompleted", "callbackCompleted", "guardReturned"):
+        fault_helper[name] = dump_read(False)
+    for name in ("shaderNonNull", "lookupReached", "lookupCompleted", "lookupHash"):
+        fault_helper[name] = dump_unread()
+    if _replay_fss_dump_fact(dump_getter_fault, dump_draw, "fss-dump-real-getter-fault", True)[0] != \
+            _fss_dump_event(False):
+        print("FSS dump rejected a real getter fault prefix")
+        return 1
+    if _replay_fss_dump_fact(dump_release_fault, dump_draw, "fss-dump-release-fault", True)[0] != \
+            _fss_dump_event(True):
+        print("FSS dump lost the raw hash assignment across a Release fault")
+        return 1
+    dump_wrap = dump_fact(counter_before=255, counter_after=0)
+    if _replay_fss_dump_fact(dump_wrap, dump_draw, "fss-dump-counter-wrap", True)[0] != \
+            _fss_dump_event(True) or dump_wrap["helper"]["pendingEyeAfter"]["value"] != 0xffffffff:
+        print("FSS dump did not preserve uint8 counter wrap / UINT32 pending-eye arithmetic")
+        return 1
+    dump_third = dump_fact(counter_before=2, counter_after=3)
+    if _replay_fss_dump_fact(dump_third, dump_draw, "fss-dump-third-occurrence", True)[0] != \
+            _fss_dump_event(False):
+        print("FSS dump did not decline the third category occurrence")
+        return 1
+    dump_off = dump_fact(dumping=False)
+    if _replay_fss_dump_fact(dump_off, dump_draw, "fss-dump-disabled", True)[0] != \
+            _fss_dump_event(False):
+        print("FSS dump did not decline after the counter write when dumping is disabled")
+        return 1
+    dump_mismatch = dump_fact(shader_hash=0x7E38A6AA1269C901)
+    dump_mismatch["helper"]["counters"]["ringAfter"] = dump_read(2)
+    try:
+        _replay_fss_dump_fact(dump_mismatch, dump_draw, "fss-dump-counter-delta", True)
+    except TraceError:
+        pass
+    else:
+        print("FSS dump accepted a counter delta that does not match the raw category")
+        return 1
+    dump_unknown = dump_fact()
+    dump_unknown["outer"]["wants"]["frame"] = {
+        "reached": True, "known": False, "value": None}
+    try:
+        _replay_fss_dump_fact(dump_unknown, dump_draw, "fss-dump-unknown-gate", True)
+    except _FssDumpUnavailable:
+        pass
+    else:
+        print("FSS dump converted an unknown lazy gate into a known selector result")
+        return 1
+    dump_cached = dump_fact()
+    dump_cached["helper"]["helperReturnedClaim"] = dump_read(True)
+    try:
+        _replay_fss_dump_fact(dump_cached, dump_draw, "fss-dump-cached-result", True)
+    except TraceError:
+        pass
+    else:
+        print("FSS dump accepted a serialized helper-result oracle")
+        return 1
+
+    dump_no_interest = dump_fact(outer_wants=False)
+    dump_no_interest["handlerInvoked"] = False
+    for group in (dump_no_interest["outer"], dump_no_interest["helper"]):
+        for key, item in group.items():
+            if key == "wants":
+                continue
+            if isinstance(item, dict) and set(item) == {"reached", "known", "value"}:
+                group[key] = dump_unread()
+    dump_no_interest["outer"]["wants"] = {
+        "frame": dump_unread(), "done": dump_unread(),
+        "seriesWant": dump_unread(), "seriesDone": dump_unread()}
+    dump_no_interest["helper"]["wants"] = {
+        "frame": dump_unread(), "done": dump_unread(),
+        "seriesWant": dump_unread(), "seriesDone": dump_unread()}
+    if _replay_fss_dump_fact(dump_no_interest, dump_draw, "fss-dump-not-eligible", False)[0] != \
+            {"id": 59, "kind": 2, "outcome": 5, "flow": 0,
+             "subsite": 0, "verdict": -1}:
+        print("FSS dump not-eligible fact did not replay the raw interest mask")
+        return 1
+
+    dump_site6 = {"siteId": 6, "kind": 4, "known": "yes",
+                  "interestMaskKnown": "yes", "legacyInterestMask": "%016X" % (1 << 4),
+                  "helperReached": "no", "hiddenKnown": "yes", "hidden": "no",
+                  "contextKnown": "yes", "contextValid": "no",
+                  "shapeReached": "unknown", "shapeMatched": "unknown",
+                  "hashKnown": "unknown", "hashSource": 0,
+                  "vsHash": "0000000000000000", "skippedDeltaKnown": False,
+                  "skippedDelta": 0}
+    dump_dispatch = {"kind": ord("N"), "count": 4, "instances": 1,
+                     "sites": [{"id": 6, "kind": 2, "outcome": 5, "flow": 0,
+                                "subsite": 0, "verdict": -1}, _fss_dump_event(True)],
+                     "predicateFacts": [dump_site6, dump_claim]}
+    dump_summary = _replay_predicate_facts(dump_dispatch, "fss-dump-dispatch", 13)
+    if dump_summary["fssDumpReplayed"] != 1 or dump_summary["fssDumpFacts"] != 1:
+        print("FSS dump aggregate did not derive site59 admission from site6 raw mask")
+        return 1
+    dump_excluded_dispatch = json.loads(json.dumps(dump_dispatch))
+    dump_excluded_dispatch["predicateFacts"][0]["legacyInterestMask"] = "0000000000000000"
+    dump_excluded_dispatch["predicateFacts"][1] = dump_no_interest
+    dump_excluded_dispatch["sites"][1] = {
+        "id": 59, "kind": 2, "outcome": 5, "flow": 0, "subsite": 0, "verdict": -1}
+    excluded_summary = _replay_predicate_facts(dump_excluded_dispatch,
+                                              "fss-dump-production-not-eligible", 13)
+    if (excluded_summary["fssDumpReplayed"] != 1 or
+            excluded_summary["fssDumpUnreplayable"] != 0 or
+            excluded_summary["mismatches"] != 0 or excluded_summary["mutationUnobserved"] != 0):
+        print("FSS dump aggregate changed raw-mask exclusion into a handler decline")
+        return 1
+    # Only independently established source mutation phases may add a warning.
+    for subgroup, field, warning in (("counters", "ringBefore", True),
+                                     ("counters", "ringAfter", True),
+                                     (None, "pendingKindBefore", True),
+                                     (None, "pendingEyeAfter", True),
+                                     (None, "lookupHash", False)):
+        unavailable_dispatch = json.loads(json.dumps(dump_dispatch))
+        unavailable_helper = unavailable_dispatch["predicateFacts"][1]["helper"]
+        destination = unavailable_helper[subgroup] if subgroup else unavailable_helper
+        destination[field] = {"reached": True, "known": False, "value": None}
+        unavailable_metrics = _replay_predicate_facts(unavailable_dispatch,
+                                                     "fss-dump-phase-unknown", 13)
+        if (unavailable_metrics["fssDumpUnreplayable"] != 1 or
+                unavailable_metrics["unreplayable"] != 1 or
+                unavailable_metrics["mutationUnobserved"] != int(warning) or
+                unavailable_metrics["mismatches"] != 0):
+            print("FSS dump unknown ledger lost its independently established mutation phase")
+            return 1
+    outer_unknown_dispatch = json.loads(json.dumps(dump_dispatch))
+    outer_unknown_dispatch["predicateFacts"][1]["outer"]["wants"]["frame"] = {
+        "reached": True, "known": False, "value": None}
+    outer_unknown_metrics = _replay_predicate_facts(outer_unknown_dispatch,
+                                                   "fss-dump-unknown-outer-phase", 13)
+    if (outer_unknown_metrics["unreplayable"] != 1 or
+            outer_unknown_metrics["mutationUnobserved"] != 0 or
+            outer_unknown_metrics["mismatches"] != 0):
+        print("FSS dump unknown outer selector manufactured a mutation warning")
+        return 1
+    missing_counter = json.loads(json.dumps(dump_claim))
+    missing_counter["helper"]["counters"]["ringAfter"] = dump_unread()
+    try:
+        _replay_fss_dump_fact(missing_counter, dump_draw, "fss-dump-missing-counter", True)
+    except TraceError:
+        pass
+    else:
+        print("FSS dump treated a missing consumed counter checkpoint as mere unavailability")
+        return 1
+
+    # Schema12 remains supported and initializes all schema13 metrics in empty
+    # and bypass traces; version13 adds one bounded fact slot for site59.
+    if _replay_predicate_facts({"kind": ord("D"), "count": 0, "instances": 1,
+                                "sites": [], "predicateFacts": []},
+                               "fss-dump-v12", 12)["fssDumpFacts"] != 0:
+        print("predicate fact version 12 claimed schema13 FSS dump support")
         return 1
     print("draw-ladder-replay self-test: ok")
     return 0
