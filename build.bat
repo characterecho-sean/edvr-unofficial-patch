@@ -849,10 +849,11 @@ REM The object-wrapping collision (issue #6), without needing ReShade. These
 REM cells were written against the copy-and-swap-vptr mechanism and FAILED on
 REM it, which is the only reason to believe them now.
 if not exist "%OBJ%\vtabletest" mkdir "%OBJ%\vtabletest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vtabletest"\ ^
     /DEDVR_VTABLE_TEST /Fe"%BUILD%\vtable_test.exe" "tools\vtable_test\vtable_test.cpp" ^
-    "src\d3d11\shader_swap.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
+    "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
@@ -875,7 +876,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
-    "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" ^
+    "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" "src\common\hotkey.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
@@ -1038,7 +1039,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" ^
     /Fo"%OBJ%\flat_sharpen_pass_test\\" /Fe"%BUILD%\flat_sharpen_pass_test.exe" ^
     "tools\flat_sharpen_test\flat_sharpen_pass_test.cpp" "src\d3d11\flat_sharpen.cpp" ^
-    "src\d3d11\sharpen_pass.cpp" "src\d3d11\shader_swap.cpp" ^
+    "src\d3d11\sharpen_pass.cpp" "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
@@ -1779,6 +1780,30 @@ python tools\draw_ladder_replay.py --file ^
 python tools\draw_ladder_replay.py --file ^
     "%BUILD%\draw_ladder_test-trace\basic_unknown\edvr_gfx_basic_unknown.draw-ladder-57.json" ^
     --expected-log edvr_gfx_basic_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_missing\edvr_gfx_eye_missing.draw-ladder-59.json" ^
+    --expected-log edvr_gfx_eye_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_duplicate\edvr_gfx_eye_duplicate.draw-ladder-60.json" ^
+    --expected-log edvr_gfx_eye_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind\edvr_gfx_eye_wrong_kind.draw-ladder-61.json" ^
+    --expected-log edvr_gfx_eye_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_bad_read\edvr_gfx_eye_bad_read.draw-ladder-62.json" ^
+    --expected-log edvr_gfx_eye_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity\edvr_gfx_eye_over_capacity.draw-ladder-63.json" ^
+    --expected-log edvr_gfx_eye_over_capacity.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_unvisited\edvr_gfx_eye_unvisited.draw-ladder-64.json" ^
+    --expected-log edvr_gfx_eye_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_unknown\edvr_gfx_eye_unknown.draw-ladder-65.json" ^
+    --expected-log edvr_gfx_eye_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\eye_census_positive\edvr_gfx_eye_positive.draw-ladder-67.json" ^
+    --expected-log edvr_gfx_eye_positive.log --dry-run || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -1913,6 +1938,32 @@ if exist "%BUILD%\draw_ladder_test-trace\basic_bad_read" rmdir "%BUILD%\draw_lad
 if exist "%BUILD%\draw_ladder_test-trace\basic_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\basic_unvisited"
 if exist "%BUILD%\draw_ladder_test-trace\basic_unknown" rmdir "%BUILD%\draw_ladder_test-trace\basic_unknown"
 if exist "%BUILD%\draw_ladder_test-trace\basic_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\basic_pool_cap"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_missing\edvr_gfx_eye_missing.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_missing\edvr_gfx_eye_missing.draw-ladder-59.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_missing" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_missing"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_duplicate\edvr_gfx_eye_duplicate.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_duplicate\edvr_gfx_eye_duplicate.draw-ladder-60.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind\edvr_gfx_eye_wrong_kind.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind\edvr_gfx_eye_wrong_kind.draw-ladder-61.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_wrong_kind"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_bad_read\edvr_gfx_eye_bad_read.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_bad_read\edvr_gfx_eye_bad_read.draw-ladder-62.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_bad_read"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity\edvr_gfx_eye_over_capacity.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity\edvr_gfx_eye_over_capacity.draw-ladder-63.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_over_capacity"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_unvisited\edvr_gfx_eye_unvisited.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_unvisited\edvr_gfx_eye_unvisited.draw-ladder-64.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_unknown\edvr_gfx_eye_unknown.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_unknown\edvr_gfx_eye_unknown.draw-ladder-65.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_unknown" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_pool\edvr_gfx_eye_pool.log"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_pool" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_pool"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_positive\edvr_gfx_eye_positive.log"
+del /q "%BUILD%\draw_ladder_test-trace\eye_census_positive\edvr_gfx_eye_positive.draw-ladder-67.json"
+if exist "%BUILD%\draw_ladder_test-trace\eye_census_positive" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_positive"
 if exist "%BUILD%\draw_ladder_test-trace\disabled" rmdir "%BUILD%\draw_ladder_test-trace\disabled"
 if exist "%BUILD%\draw_ladder_test-trace\valid" rmdir "%BUILD%\draw_ladder_test-trace\valid"
 if exist "%BUILD%\draw_ladder_test-trace\terminalmatrix" rmdir "%BUILD%\draw_ladder_test-trace\terminalmatrix"
@@ -2256,6 +2307,21 @@ link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test build failed & exit /b 1 )
 "%BUILD%\vscreen_predicate_test.exe" --dry-run || exit /b 1
 "%BUILD%\vscreen_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_shader_swap_api_test
+echo [edvr] === shared shader creation API attempts ===
+if not exist "%OBJ%\shaderswapapi" mkdir "%OBJ%\shaderswapapi"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\shaderswapapi\\" /Fe"%BUILD%\shader_swap_api_test.exe" ^
+    "tools\shader_swap_api_test\shader_swap_api_test.cpp" ^
+    "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: shader creation API test build failed & exit /b 1 )
+"%BUILD%\shader_swap_api_test.exe" --dry-run || exit /b 1
+"%BUILD%\shader_swap_api_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_splash_dim_api_test

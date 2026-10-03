@@ -172,16 +172,16 @@ bool verifyColdReport(const EdvrPluginCostWindowV1& report,
                 intro.apiCalls[static_cast<uint8_t>(pc::ApiClass::Transfer)] == 0 &&
                 intro.apiCalls[static_cast<uint8_t>(pc::ApiClass::Instrumentation)] == 0,
                 "cold SplashDim notes its two saved-state reads, blend GetDevice/Create, and four state calls");
-    ok &= check(core.apiCalls[static_cast<uint8_t>(pc::ApiClass::ReadQuery)] == 3 &&
-                core.apiCalls[static_cast<uint8_t>(pc::ApiClass::Work)] == 0 &&
+    ok &= check(core.apiCalls[static_cast<uint8_t>(pc::ApiClass::ReadQuery)] == 4 &&
+                core.apiCalls[static_cast<uint8_t>(pc::ApiClass::Work)] == 1 &&
                 core.apiCalls[static_cast<uint8_t>(pc::ApiClass::State)] == 0,
-                "cold view resolution counts the real GetResource/GetType/GetDesc query sequence");
+                "cold view resolution and precompiled PS helper count resolver queries plus shader creation");
     ok &= check(intro.apiSiteMask[0] == 0 &&
                 intro.apiSiteMask[1] == siteWord({83, 84, 85, 86, 87, 88, 89, 90}, 1),
                 "cold Intro coverage mask is exactly the eight annotated direct SplashDim sites");
     ok &= check(core.apiSiteMask[0] == 0 &&
-                core.apiSiteMask[1] == siteWord({112, 113, 115}, 1),
-                "cold Core coverage mask is exactly the three real texture-view resolver sites");
+                core.apiSiteMask[1] == siteWord({112, 113, 115, 120, 121}, 1),
+                "cold Core mask includes texture resolver and precompiled PS helper sites");
     return ok;
 }
 
@@ -220,16 +220,16 @@ bool verifyFaultReport(const EdvrPluginCostWindowV1& report,
                 intro.apiCalls[static_cast<uint8_t>(pc::ApiClass::Transfer)] == 0 &&
                 intro.apiCalls[static_cast<uint8_t>(pc::ApiClass::Instrumentation)] == 0,
                 "guarded fault keeps the completed cold setup and attempted PSGetShader prefix only");
-    ok &= check(core.apiCalls[static_cast<uint8_t>(pc::ApiClass::ReadQuery)] == 3 &&
-                core.apiCalls[static_cast<uint8_t>(pc::ApiClass::Work)] == 0 &&
+    ok &= check(core.apiCalls[static_cast<uint8_t>(pc::ApiClass::ReadQuery)] == 4 &&
+                core.apiCalls[static_cast<uint8_t>(pc::ApiClass::Work)] == 1 &&
                 core.apiCalls[static_cast<uint8_t>(pc::ApiClass::State)] == 0,
-                "guarded fault still records the three completed real resolver attempts");
+                "guarded fault report includes resolver attempts and the completed cold PS helper creation");
     ok &= check(intro.apiSiteMask[0] == 0 &&
                 intro.apiSiteMask[1] == siteWord({83, 89, 90}, 1),
                 "fault mask distinguishes blend setup and attempted PSGetShader from later state sites");
     ok &= check(core.apiSiteMask[0] == 0 &&
-                core.apiSiteMask[1] == siteWord({112, 113, 115}, 1),
-                "fault Core mask preserves the actual texture resolver prefix");
+                core.apiSiteMask[1] == siteWord({112, 113, 115, 120, 121}, 1),
+                "fault Core mask preserves resolver prefix and cold precompiled PS helper sites");
     return ok;
 }
 

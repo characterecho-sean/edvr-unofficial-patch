@@ -97,6 +97,10 @@ struct ModelVisitor final {
         if (id == ladder::SiteId::kDrawGateDisabledNone) {
             return ladder::SiteResult::observed();
         }
+        if (id == ladder::SiteId::kEyeCensusSkip && id == scenario.exitAt) {
+            return ladder::SiteResult::exited(
+                static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip), scenario.exitSubsite);
+        }
         if (id == ladder::SiteId::kEyeRangeSkip &&
             id == scenario.exitAt) {
             return ladder::SiteResult::exited(
@@ -597,6 +601,7 @@ bool frozenShouldStop(const Scenario& s, ladder::SiteId id, ladder::SiteKind kin
     if (id == ladder::SiteId::kEyeRangeSkip && id == s.exitAt) return true;
     if (id == ladder::SiteId::kWitchspaceStarsSkip && id == s.exitAt) return true;
     if (id == ladder::SiteId::kOffscreenCensusSkip && id == s.exitAt) return true;
+    if (id == ladder::SiteId::kEyeCensusSkip && id == s.exitAt) return true;
     if (kind == ladder::SiteKind::Claim && id == s.claimAt) return true;
     return kind == ladder::SiteKind::Exit && id == s.exitAt;
 }
@@ -941,6 +946,48 @@ void remlokRead(edvr::remlok_observation::Read<T>& read, T value) {
     read = {true, true, value};
 }
 
+edvr::EyeCensusObservation eyeCensusFact(bool matched = false, char kind = 'D',
+                                      std::uint32_t count = 240, unsigned variant = 0) {
+    edvr::EyeCensusObservation fact{};
+    fact.skipCountGate = {true, true, matched ? 1u : 0u};
+    if (!matched) return fact;
+    auto& rule = fact.rules[0];
+    rule.loopCount = {true, true, 1};
+    rule.vsHashGate = {true, true, 0};
+    rule.countHighGate = {true, true, 0};
+    rule.exactCount = {true, true, count};
+    rule.ruleKind = {true, true, static_cast<std::uint8_t>(kind)};
+    for (auto& filter : rule.filters) filter.modeOffGate = {true, true, 0};
+    fact.censusSkippedBefore = {true, true, 37};
+    fact.censusSkippedAfter = {true, true, 38};
+    if (variant == 3) {
+        fact.skipCountGate.value = 8;
+        for (unsigned i = 0; i < 8; ++i) {
+            fact.rules[i] = {};
+            fact.rules[i].loopCount = {true, true, 8};
+            fact.rules[i].vsHashGate = {true, true, 0x1111};
+            fact.rules[i].heldVsHash = {true, true, i == 7 ? 0x1111u : 0x2222u};
+            fact.rules[i].vsHashCompareExpected = {true, true, 0x1111};
+        }
+        fact.censusSkippedBefore.value = UINT64_MAX;
+        fact.censusSkippedAfter.value = 0;
+    } else if (variant == 4) {
+        auto& filter = rule.filters[0];
+        filter.modeOffGate = {true, true, 1};
+        filter.modeAnyGate = {true, true, 1};
+        filter.boundNonNull = {true, true, true};
+        filter.modeAfterBound = {true, true, 1};
+        filter.resolved = {true, true, true};
+        filter.isTexture2D = {true, true, true};
+        filter.modeAfterResolve = {true, true, 1};
+        filter.width = {true, true, 160};
+        filter.configuredWidth = {true, true, 160};
+        filter.height = {true, true, 560};
+        filter.configuredHeight = {true, true, 560};
+    }
+    return fact;
+}
+
 edvr::BasicDrawObservation contextFact(bool foreign = false, std::uint32_t clamp = 37) {
     edvr::BasicDrawObservation fact{};
     fact.siteId = 2;
@@ -1250,7 +1297,7 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        bool glareDamping = false, bool glareProbe = false,
                        int glareWorld = 0, std::uint32_t frameNo = 15,
                        bool stagedFss = false, bool rawPanelEnabled = false,
-                       unsigned basicCase = 0) {
+                       unsigned basicCase = 0, unsigned eyeCensusCase = 0) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     const bool overflowBefore = trace::overflowed();
@@ -1259,12 +1306,15 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     scenario.route = route;
     scenario.verdict = verdict;
     scenario.exitSubsite = blocked ? 1 : 0;
+    if (terminal == ladder::SiteId::kEyeCensusSkip && eyeCensusCase == 3)
+        scenario.exitSubsite = 7;
     const auto terminalKind = frozenKind(terminal);
     if (terminal == ladder::SiteId::kForeignContextNone) scenario.foreignOwner = true;
     else if (terminal == ladder::SiteId::kDrawGateDisabledNone) scenario.drawGateOff = true;
     else if (terminal == ladder::SiteId::kEyeRangeSkip ||
              terminal == ladder::SiteId::kWitchspaceStarsSkip ||
-             terminal == ladder::SiteId::kOffscreenCensusSkip) scenario.exitAt = terminal;
+             terminal == ladder::SiteId::kOffscreenCensusSkip ||
+             terminal == ladder::SiteId::kEyeCensusSkip) scenario.exitAt = terminal;
     else if (terminalKind == ladder::SiteKind::Claim) scenario.claimAt = terminal;
     else scenario.exitAt = terminal;
 
@@ -1518,6 +1568,12 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         }
         if (visited == ladder::SiteId::kEyeNoDistanceNone)
             policy.basicFact(distanceFact(terminal != ladder::SiteId::kEyeNoDistanceNone));
+        if (visited == ladder::SiteId::kEyeCensusSkip && eyeCensusCase != 1) {
+            auto fact = eyeCensusFact(terminal == ladder::SiteId::kEyeCensusSkip,
+                static_cast<char>(facts.kind), facts.count, eyeCensusCase);
+            if (eyeCensusCase == 2) fact.skipCountGate = {true, false, 0};
+            policy.eyeCensusFact(fact);
+        }
         if (visited == ladder::SiteId::kFssPanelClaim) {
             policy.fssFact(fssFact(edvr::FssTraceFactKind::kPanel,
                 terminal == ladder::SiteId::kFssPanelClaim, frameNo));
@@ -1848,6 +1904,7 @@ bool traceWriterChecks(const char* rootArg) {
     vrPolicy.remlokFact(remlokFact());
     vrPolicy.basicFact(contextFact());
     vrPolicy.basicFact(distanceFact(false));
+    vrPolicy.eyeCensusFact(eyeCensusFact());
     edvr::FssObservation coldPanel{};
     coldPanel.kind = edvr::FssTraceFactKind::kPanel;
     coldPanel.rawProbeReached = true;
@@ -2011,12 +2068,12 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
-                matrixJson.find("\"predicateFactVersion\":9") != std::string::npos &&
+                matrixJson.find("\"predicateFactVersion\":10") != std::string::npos &&
                 matrixJson.find("\"siteId\":57,\"kind\":12") != std::string::npos &&
                 matrixJson.find("\"siteId\":58,\"kind\":13") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":12144190660518967694}") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":10753612000489488699}") != std::string::npos,
-                "real writer records positive FSS panel and reveal source facts in canonical v9 predicateFacts");
+                "real writer records positive FSS panel and reveal source facts in canonical v10 predicateFacts");
 
     const std::string generatedInvalidDir = root + "\\generatedinvalid";
     DeleteFileA((generatedInvalidDir + "\\edvr_gfx_generated_invalid.draw-ladder-16.json").c_str());
@@ -2542,7 +2599,7 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":9") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&
@@ -2881,6 +2938,90 @@ bool traceWriterChecks(const char* rootArg) {
     if (basicPoolFilled) trace::appendBasicFact(lastBasicToken, contextFact());
     ok &= check(basicPoolFilled && trace::invalidationReason() == trace::CaptureInvalidation::BasicIndexOverflow,
                 "BasicDraw global pool overflow has its own invalidation reason");
+    trace::shutdown();
+
+    const auto eyeTerminal = [&](std::uint32_t frame, unsigned variant,
+                                 ladder::SiteId terminal) {
+        return writeTerminalCase(ladder::RouteId::kVrEye, ladder::SequenceId::kVrEye,
+            'D', terminal, true, kFrozenEye, sizeof(kFrozenEye) / sizeof(kFrozenEye[0]),
+            ladder::EyeSequence{}, 1, false, false, edvr::SunglareTraceMode::kStock,
+            false, false, 0, frame, false, false, 0, variant);
+    };
+    const bool missingEyeStarted = beginFssCase("eye_census_missing", "edvr_gfx_eye_missing.log", 59);
+    const bool missingEyeWritten = missingEyeStarted &&
+        eyeTerminal(59, 1, ladder::SiteId::kEyeNoDistanceNone);
+    trace::frameEnd(59);
+    ok &= check(missingEyeWritten && trace::status() == trace::Status::InvalidCapture,
+                "missing eye-census input invalidates the complete canonical frame");
+    trace::shutdown();
+
+    const auto eyeRejected = [&](const char* dir, const char* log,
+                                 std::uint32_t frame, unsigned badCase) {
+        const bool started = beginFssCase(dir, log, frame);
+        const auto token = trace::beginDraw(fssMalformedDraw);
+        auto fact = eyeCensusFact();
+        if (badCase == 1) fact.kind = 18;
+        if (badCase == 2) fact.skipCountGate.reached = false;
+        if (badCase == 3) fact.skipCountGate.value = 9;
+        trace::appendEyeCensusFact(token, fact);
+        if (badCase == 0) trace::appendEyeCensusFact(token, fact);
+        const bool rejectedAtAppend = trace::overflowed();
+        finishFssCase(token, frame);
+        const bool rejected = started && rejectedAtAppend &&
+            trace::invalidationReason() == trace::CaptureInvalidation::Other;
+        trace::shutdown();
+        return rejected;
+    };
+    ok &= check(eyeRejected("eye_census_duplicate", "edvr_gfx_eye_duplicate.log", 60, 0),
+                "duplicate eye-census source is rejected at append");
+    ok &= check(eyeRejected("eye_census_wrong_kind", "edvr_gfx_eye_wrong_kind.log", 61, 1),
+                "eye-census site/kind mismatch is rejected at append");
+    ok &= check(eyeRejected("eye_census_bad_read", "edvr_gfx_eye_bad_read.log", 62, 2),
+                "known unreached eye-census source is rejected at append");
+    ok &= check(eyeRejected("eye_census_over_capacity", "edvr_gfx_eye_over_capacity.log", 63, 3),
+                "eye-census rule count cannot exceed physical configuration capacity");
+
+    const bool unvisitedEyeStarted = beginFssCase("eye_census_unvisited", "edvr_gfx_eye_unvisited.log", 64);
+    const auto unvisitedEyeToken = trace::beginDraw(fssMalformedDraw);
+    trace::appendEyeCensusFact(unvisitedEyeToken, eyeCensusFact());
+    const bool eyeAcceptedBeforeFinish = !trace::overflowed();
+    finishFssCase(unvisitedEyeToken, 64);
+    ok &= check(unvisitedEyeStarted && eyeAcceptedBeforeFinish && trace::overflowed(),
+                "eye-census source for an unvisited site is rejected at finish");
+    trace::shutdown();
+
+    const bool unknownEyeStarted = beginFssCase("eye_census_unknown", "edvr_gfx_eye_unknown.log", 65);
+    const bool unknownEyeWritten = unknownEyeStarted &&
+        eyeTerminal(65, 2, ladder::SiteId::kEyeNoDistanceNone);
+    trace::frameEnd(65);
+    ok &= check(unknownEyeWritten && trace::status() == trace::Status::CompleteWritten,
+                "unknown consumed eye-census gate stays a valid unavailable predicate");
+    trace::shutdown();
+
+    const bool eyePoolStarted = beginFssCase("eye_census_pool", "edvr_gfx_eye_pool.log", 66);
+    bool eyePoolFilled = eyePoolStarted;
+    trace::Token lastEyeToken{};
+    for (std::uint32_t i = 0; eyePoolFilled && i < trace::kMaxEyeCensusFacts; ++i) {
+        auto poolDraw = fssMalformedDraw;
+        poolDraw.eyeDrawIndex = i + 1;
+        lastEyeToken = trace::beginDraw(poolDraw);
+        if (!lastEyeToken.valid()) { eyePoolFilled = false; break; }
+        trace::appendEyeCensusFact(lastEyeToken, eyeCensusFact());
+        if (trace::overflowed()) eyePoolFilled = false;
+    }
+    if (eyePoolFilled) trace::appendEyeCensusFact(lastEyeToken, eyeCensusFact());
+    ok &= check(eyePoolFilled && trace::invalidationReason() == trace::CaptureInvalidation::EyeCensusIndexOverflow,
+                "eye-census global pool overflow has its own invalidation reason");
+    trace::shutdown();
+
+    const bool positiveEyeStarted = beginFssCase("eye_census_positive", "edvr_gfx_eye_positive.log", 67);
+    const bool positiveEyeWritten = positiveEyeStarted &&
+        eyeTerminal(67, 0, ladder::SiteId::kEyeCensusSkip) &&
+        eyeTerminal(67, 3, ladder::SiteId::kEyeCensusSkip) &&
+        eyeTerminal(67, 4, ladder::SiteId::kEyeCensusSkip);
+    trace::frameEnd(67);
+    ok &= check(positiveEyeWritten && trace::status() == trace::Status::CompleteWritten,
+                "exact, late-rule wrapping hash and resource-size winners serialize independently");
     trace::shutdown();
     return ok;
 }

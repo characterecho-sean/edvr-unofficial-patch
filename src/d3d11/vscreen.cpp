@@ -41,6 +41,7 @@
 #include "draw_census.h"
 #include "draw_ladder_trace.h"
 #include "basic_draw_observation.h"
+#include "eye_census_observation.h"
 #include "holo_scrim_observation.h"
 #include "offscreen_skip_selector.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
@@ -2586,39 +2587,170 @@ struct VScreenDrawLadderVisitor {
                                      args.start, args.base);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kEyeCensusSkip) {
-            if (!s->censusSkipCount) return SiteResult::declined();
-            for (uint32_t i = 0; i < s->censusSkipCount; ++i) {
-                if (s->censusSkip[i].vsHash) {
-                    const uint64_t h = bindingShaderHash(BindSlot::Vs);
-                    if (h != s->censusSkip[i].vsHash) continue;
+            if constexpr (!TracePolicy::enabled) {
+                if (!s->censusSkipCount) return SiteResult::declined();
+                for (uint32_t i = 0; i < s->censusSkipCount; ++i) {
+                    if (s->censusSkip[i].vsHash) {
+                        const uint64_t h = bindingShaderHash(BindSlot::Vs);
+                        if (h != s->censusSkip[i].vsHash) continue;
+                        ++s->censusSkipped;
+                        return exited(id, DrawVerdict::kSkip, static_cast<uint16_t>(i));
+                    }
+                    const bool countHit = s->censusSkip[i].nHi
+                        ? count >= s->censusSkip[i].n && count <= s->censusSkip[i].nHi
+                        : count == s->censusSkip[i].n;
+                    if (s->censusSkip[i].kind != kind || !countHit) continue;
+                    bool srvOk = true;
+                    for (int f = 0; f < 4 && srvOk; ++f) {
+                        const State::SkipSpec::SrvFilter& sf = s->censusSkip[i].srv[f];
+                        typedef State::SkipSpec::SrvFilter SF;
+                        if (sf.mode == SF::kOff || sf.mode == SF::kAny) continue;
+                        const BindSlot slot = static_cast<BindSlot>(
+                            static_cast<uint32_t>(BindSlot::PsSrv0) + f);
+                        void* bound = bindingGet(slot);
+                        if (sf.mode == SF::kNone) { srvOk = bound == nullptr; continue; }
+                        ResourceInfo info;
+                        if (!bindingResolveProbe(bound, &info) || !info.isTexture2D) { srvOk = false; break; }
+                        if (sf.mode == SF::kEye) {
+                            uint32_t eyeW = 0, eyeH = 0;
+                            srvOk = eyeTextureSize(&eyeW, &eyeH) && info.a == eyeW && info.b == eyeH;
+                        } else srvOk = info.a == sf.w && info.b == sf.h;
+                    }
+                    if (!srvOk) continue;
                     ++s->censusSkipped;
                     return exited(id, DrawVerdict::kSkip, static_cast<uint16_t>(i));
                 }
-                const bool countHit = s->censusSkip[i].nHi
-                    ? count >= s->censusSkip[i].n && count <= s->censusSkip[i].nHi
-                    : count == s->censusSkip[i].n;
-                if (s->censusSkip[i].kind != kind || !countHit) continue;
-                bool srvOk = true;
-                for (int f = 0; f < 4 && srvOk; ++f) {
-                    const State::SkipSpec::SrvFilter& sf = s->censusSkip[i].srv[f];
-                    typedef State::SkipSpec::SrvFilter SF;
-                    if (sf.mode == SF::kOff || sf.mode == SF::kAny) continue;
-                    const BindSlot slot = static_cast<BindSlot>(
-                        static_cast<uint32_t>(BindSlot::PsSrv0) + f);
-                    void* bound = bindingGet(slot);
-                    if (sf.mode == SF::kNone) { srvOk = bound == nullptr; continue; }
-                    ResourceInfo info;
-                    if (!bindingResolveProbe(bound, &info) || !info.isTexture2D) { srvOk = false; break; }
-                    if (sf.mode == SF::kEye) {
-                        uint32_t eyeW = 0, eyeH = 0;
-                        srvOk = eyeTextureSize(&eyeW, &eyeH) && info.a == eyeW && info.b == eyeH;
-                    } else srvOk = info.a == sf.w && info.b == sf.h;
+                return SiteResult::declined();
+            } else {
+                EyeCensusObservation fact{};
+                auto setRead = [](auto& read, const auto& value) noexcept {
+                    read.reached = true;
+                    read.known = true;
+                    read.value = value;
+                };
+                const std::uint32_t countGate = s->censusSkipCount;
+                setRead(fact.skipCountGate, countGate);
+                if (!countGate) {
+                    trace.eyeCensusFact(fact);
+                    return SiteResult::declined();
                 }
-                if (!srvOk) continue;
-                ++s->censusSkipped;
-                return exited(id, DrawVerdict::kSkip, static_cast<uint16_t>(i));
+                bool loopEnded = false;
+                for (std::uint32_t i = 0; i < 8; ++i) {
+                    const std::uint32_t loopCount = s->censusSkipCount;
+                    if (i >= loopCount) {
+                        setRead(fact.terminalLoopCount, loopCount);
+                        loopEnded = true;
+                        break;
+                    }
+                    auto& ruleFact = fact.rules[i];
+                    setRead(ruleFact.loopCount, loopCount);
+                    const State::SkipSpec& spec = s->censusSkip[i];
+                    const std::uint64_t vsHashGate = spec.vsHash;
+                    setRead(ruleFact.vsHashGate, vsHashGate);
+                    if (vsHashGate) {
+                        const std::uint64_t heldHash = bindingShaderHash(BindSlot::Vs);
+                        setRead(ruleFact.heldVsHash, heldHash);
+                        const std::uint64_t expectedHash = spec.vsHash;
+                        setRead(ruleFact.vsHashCompareExpected, expectedHash);
+                        if (heldHash != expectedHash) continue;
+                        const std::uint64_t before = s->censusSkipped;
+                        ++s->censusSkipped;
+                        const std::uint64_t after = s->censusSkipped;
+                        setRead(fact.censusSkippedBefore, before);
+                        setRead(fact.censusSkippedAfter, after);
+                        trace.eyeCensusFact(fact);
+                        return exited(id, DrawVerdict::kSkip, static_cast<std::uint16_t>(i));
+                    }
+
+                    const std::uint32_t countHighGate = spec.nHi;
+                    setRead(ruleFact.countHighGate, countHighGate);
+                    bool countHit = false;
+                    if (countHighGate) {
+                        const std::uint32_t minimum = spec.n;
+                        setRead(ruleFact.countMinimum, minimum);
+                        if (count >= minimum) {
+                            const std::uint32_t highBound = spec.nHi;
+                            setRead(ruleFact.countHighBound, highBound);
+                            countHit = count <= highBound;
+                        }
+                    } else {
+                        const std::uint32_t exactCount = spec.n;
+                        setRead(ruleFact.exactCount, exactCount);
+                        countHit = count == exactCount;
+                    }
+                    const std::uint8_t ruleKind = static_cast<std::uint8_t>(spec.kind);
+                    setRead(ruleFact.ruleKind, ruleKind);
+                    if (static_cast<char>(ruleKind) != kind || !countHit) continue;
+                    bool srvOk = true;
+                    for (int f = 0; f < 4 && srvOk; ++f) {
+                        const State::SkipSpec::SrvFilter& sf = spec.srv[f];
+                        using SF = State::SkipSpec::SrvFilter;
+                        auto& filterFact = ruleFact.filters[f];
+                        const std::uint8_t offMode = static_cast<std::uint8_t>(sf.mode);
+                        setRead(filterFact.modeOffGate, offMode);
+                        if (offMode == SF::kOff) continue;
+                        const std::uint8_t anyMode = static_cast<std::uint8_t>(sf.mode);
+                        setRead(filterFact.modeAnyGate, anyMode);
+                        if (anyMode == SF::kAny) continue;
+                        const BindSlot slot = static_cast<BindSlot>(
+                            static_cast<std::uint32_t>(BindSlot::PsSrv0) + f);
+                        void* const bound = bindingGet(slot);
+                        const bool boundNonNull = bound != nullptr;
+                        setRead(filterFact.boundNonNull, boundNonNull);
+                        const std::uint8_t noneMode = static_cast<std::uint8_t>(sf.mode);
+                        setRead(filterFact.modeAfterBound, noneMode);
+                        if (noneMode == SF::kNone) { srvOk = !boundNonNull; continue; }
+                        ResourceInfo info;
+                        const bool resolved = bindingResolveProbe(bound, &info);
+                        setRead(filterFact.resolved, resolved);
+                        if (!resolved) { srvOk = false; break; }
+                        const bool texture2D = info.isTexture2D;
+                        setRead(filterFact.isTexture2D, texture2D);
+                        if (!texture2D) { srvOk = false; break; }
+                        const std::uint8_t compareMode = static_cast<std::uint8_t>(sf.mode);
+                        setRead(filterFact.modeAfterResolve, compareMode);
+                        if (compareMode == SF::kEye) {
+                            std::uint32_t eyeW = 0, eyeH = 0;
+                            const bool eyeKnown = eyeTextureSize(&eyeW, &eyeH);
+                            setRead(filterFact.eyeSizeAvailable, eyeKnown);
+                            if (!eyeKnown) { srvOk = false; break; }
+                            const std::uint32_t targetW = info.a;
+                            setRead(filterFact.width, targetW);
+                            setRead(filterFact.eyeWidth, eyeW);
+                            if (targetW != eyeW) { srvOk = false; break; }
+                            const std::uint32_t targetH = info.b;
+                            setRead(filterFact.height, targetH);
+                            setRead(filterFact.eyeHeight, eyeH);
+                            srvOk = targetH == eyeH;
+                        } else {
+                            const std::uint32_t targetW = info.a;
+                            setRead(filterFact.width, targetW);
+                            const std::uint32_t configuredW = sf.w;
+                            setRead(filterFact.configuredWidth, configuredW);
+                            if (targetW != configuredW) { srvOk = false; break; }
+                            const std::uint32_t targetH = info.b;
+                            setRead(filterFact.height, targetH);
+                            const std::uint32_t configuredH = sf.h;
+                            setRead(filterFact.configuredHeight, configuredH);
+                            srvOk = targetH == configuredH;
+                        }
+                    }
+                    if (!srvOk) continue;
+                    const std::uint64_t before = s->censusSkipped;
+                    ++s->censusSkipped;
+                    const std::uint64_t after = s->censusSkipped;
+                    setRead(fact.censusSkippedBefore, before);
+                    setRead(fact.censusSkippedAfter, after);
+                    trace.eyeCensusFact(fact);
+                    return exited(id, DrawVerdict::kSkip, static_cast<std::uint16_t>(i));
+                }
+                if (!loopEnded) {
+                    const std::uint32_t terminalCount = s->censusSkipCount;
+                    setRead(fact.terminalLoopCount, terminalCount);
+                }
+                trace.eyeCensusFact(fact);
+                return SiteResult::declined();
             }
-            return SiteResult::declined();
         } else if constexpr (id == SiteId::kEyeRangeSkip) {
             struct EmptyPredicatePayload final {};
             struct TracePredicatePayload final {
@@ -6032,6 +6164,9 @@ using VScreenContextTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kForeignContextNone, draw_ladder::SiteKind::Exit>;
 using VScreenDistanceTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeNoDistanceNone, draw_ladder::SiteKind::Exit>;
+using VScreenEyeCensusTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kEyeCensusSkip, draw_ladder::SiteKind::Claim>;
+State* g_eyeCensusTestState = nullptr;
 
 struct VScreenTestInterest final {};
 
@@ -6051,6 +6186,10 @@ struct VScreenTestTraceCapture final {
 
     void basicFact(const BasicDrawObservation& fact) noexcept {
         policy.basicFact(fact);
+    }
+
+    void eyeCensusFact(const EyeCensusObservation& fact) noexcept {
+        policy.eyeCensusFact(fact);
     }
 };
 
@@ -6079,6 +6218,12 @@ draw_ladder::SiteResult vScreenPredicateTestInvoke(
         return vScreenPredicateTestInvokeSite<VScreenContextTestSite>(visitor, trace);
     }
     return vScreenPredicateTestInvokeSite<VScreenDistanceTestSite>(visitor, trace);
+}
+
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenEyeCensusPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    return vScreenPredicateTestInvokeSite<VScreenEyeCensusTestSite>(visitor, trace);
 }
 
 } // namespace
@@ -6126,6 +6271,111 @@ bool vScreenPredicateTestVisit(
         result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
     }
     result->glareClampAfter = fixture.glareClamp;
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenEyeCensusPredicateTestMutate(
+    const VScreenEyeCensusTestMutation& mutation) noexcept {
+    State* const active = g_eyeCensusTestState;
+    if (!active || mutation.ruleIndex >= 8 || mutation.filterIndex >= 4 ||
+        (mutation.changeLoopCount && mutation.loopCount > 8)) return false;
+    if (mutation.changeFilter) {
+        auto& filter = active->censusSkip[mutation.ruleIndex].srv[mutation.filterIndex];
+        filter.mode = static_cast<State::SkipSpec::SrvFilter::Mode>(mutation.filter.mode);
+        filter.w = mutation.filter.width;
+        filter.h = mutation.filter.height;
+    }
+    if (mutation.changeLoopCount) active->censusSkipCount = mutation.loopCount;
+    if (mutation.changeCounter) active->censusSkipped = mutation.counter;
+    return true;
+}
+
+bool vScreenEyeCensusPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    const VScreenEyeCensusTestRule* rules, std::uint32_t ruleCount,
+    void* const psSrvs[4], std::uint64_t heldVsHash,
+    std::uint64_t censusSkippedSeed, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context || ruleCount > 8 || (ruleCount && !rules) || !psSrvs)
+        return false;
+
+    static State fixture{};
+    fixture.ownerCtx = context;
+    fixture.censusSkipCount = ruleCount;
+    fixture.censusSkipped = censusSkippedSeed;
+    for (std::uint32_t i = 0; i < 8; ++i) {
+        State::SkipSpec& dst = fixture.censusSkip[i];
+        if (i >= ruleCount) {
+            dst = {};
+            continue;
+        }
+        const VScreenEyeCensusTestRule& src = rules[i];
+        dst.kind = src.kind;
+        dst.n = src.count;
+        dst.nHi = src.countHigh;
+        dst.vsHash = src.vsHash;
+        for (std::uint32_t f = 0; f < 4; ++f) {
+            dst.srv[f].mode = static_cast<State::SkipSpec::SrvFilter::Mode>(src.filters[f].mode);
+            dst.srv[f].w = src.filters[f].width;
+            dst.srv[f].h = src.filters[f].height;
+        }
+    }
+
+    void* const priorSrvs[4] = {
+        bindingGet(BindSlot::PsSrv0), bindingGet(BindSlot::PsSrv1),
+        bindingGet(BindSlot::PsSrv2), bindingGet(BindSlot::PsSrv3)};
+    void* const priorVs = bindingGet(BindSlot::Vs);
+    const std::uint64_t priorVsHash = bindingShaderHash(BindSlot::Vs);
+    const auto restoreBindings = [&]() noexcept {
+        bindingSet(BindSlot::PsSrv0, priorSrvs[0]);
+        bindingSet(BindSlot::PsSrv1, priorSrvs[1]);
+        bindingSet(BindSlot::PsSrv2, priorSrvs[2]);
+        bindingSet(BindSlot::PsSrv3, priorSrvs[3]);
+        bindingSetShader(BindSlot::Vs, priorVs, priorVsHash);
+    };
+    bindingSet(BindSlot::PsSrv0, psSrvs[0]);
+    bindingSet(BindSlot::PsSrv1, psSrvs[1]);
+    bindingSet(BindSlot::PsSrv2, psSrvs[2]);
+    bindingSet(BindSlot::PsSrv3, psSrvs[3]);
+    bindingSetShader(BindSlot::Vs, nullptr, heldVsHash);
+
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = static_cast<std::uint8_t>(kind);
+    facts.count = count;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
+        restoreBindings();
+        return false;
+    }
+
+    State* const priorActive = g_eyeCensusTestState;
+    g_eyeCensusTestState = &fixture;
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenEyeCensusPredicateTestInvoke(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenEyeCensusPredicateTestInvoke(visitor, trace);
+    }
+    result->censusSkippedAfter = fixture.censusSkipped;
+    g_eyeCensusTestState = priorActive;
+    restoreBindings();
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;

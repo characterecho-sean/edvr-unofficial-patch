@@ -3,6 +3,7 @@
 #include "draw_census.h"
 #include "draw_ladder.h"
 #include "basic_draw_observation.h"
+#include "eye_census_observation.h"
 #include "holo_scrim_observation.h"
 #include "fss_observation.h"
 #include "remlok_observation.h"
@@ -30,9 +31,13 @@ constexpr std::uint8_t kMaxRemlokFactsPerDraw = 1;
 constexpr std::uint32_t kMaxRemlokFacts = kMaxDraws * kMaxRemlokFactsPerDraw;
 constexpr std::uint8_t kMaxBasicFactsPerDraw = 2;
 constexpr std::uint32_t kMaxBasicFacts = kMaxDraws * kMaxBasicFactsPerDraw;
+constexpr std::uint8_t kMaxEyeCensusFactsPerDraw = 1;
+// The larger, opt-in census grammar pool has its own explicit capture cap.
+constexpr std::uint32_t kMaxEyeCensusFacts = 32768;
 constexpr std::uint8_t kMaxTotalPredicateFactsPerDraw =
     kMaxPredicateFactsPerDraw + kMaxSunglareFactsPerDraw +
-    kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw + kMaxBasicFactsPerDraw;
+    kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw + kMaxBasicFactsPerDraw +
+    kMaxEyeCensusFactsPerDraw;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -58,6 +63,8 @@ enum class CaptureInvalidation : std::uint8_t {
     RemlokPoolMissing = 7,
     BasicIndexOverflow = 8,
     BasicPoolMissing = 9,
+    EyeCensusIndexOverflow = 10,
+    EyeCensusPoolMissing = 11,
 };
 
 // Returned by shutdown() so production can report whether an armed or partial
@@ -283,7 +290,10 @@ void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept;
 void appendFssFact(Token token, const FssObservation& fact) noexcept;
 void appendRemlokFact(Token token, const remlok_observation::Observation& fact) noexcept;
 void appendBasicFact(Token token, const BasicDrawObservation& fact) noexcept;
+void appendEyeCensusFact(Token token, const EyeCensusObservation& fact) noexcept;
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
+bool readEyeCensusFactForTest(Token token, std::uint8_t ordinal, EyeCensusObservation* out) noexcept;
+std::uint8_t eyeCensusFactCountForTest(Token token) noexcept;
 bool readBasicFactForTest(Token token, std::uint8_t ordinal, BasicDrawObservation* out) noexcept;
 std::uint8_t basicFactCountForTest(Token token) noexcept;
 #endif
@@ -373,6 +383,9 @@ struct TracePolicy final {
     }
     inline void basicFact(const BasicDrawObservation& fact) noexcept {
         appendBasicFact(token, fact);
+    }
+    inline void eyeCensusFact(const EyeCensusObservation& fact) noexcept {
+        appendEyeCensusFact(token, fact);
     }
 };
 

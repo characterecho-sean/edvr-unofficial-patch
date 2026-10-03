@@ -9,9 +9,37 @@
 
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/vscreen.h"
+#include "../../src/d3d11/binding_shadow.h"
 #include "../../src/d3d11/basic_draw_observation.h"
+#include "../../src/d3d11/eye_census_observation.h"
+#include "../../src/common/frame_flag.h"
+#include "../../src/common/vtable_hook.h"
 
 namespace {
+
+using GetResourceFn = void(STDMETHODCALLTYPE*)(ID3D11ShaderResourceView*, ID3D11Resource**);
+GetResourceFn g_originalGetResource = nullptr;
+std::uint32_t g_resourceAttempts = 0;
+bool g_injectResourceFault = false;
+bool g_mutationAccepted = false;
+const edvr::VScreenEyeCensusTestMutation* g_mutation = nullptr;
+void STDMETHODCALLTYPE observedGetResource(ID3D11ShaderResourceView* view,
+                                          ID3D11Resource** resource) {
+    ++g_resourceAttempts;
+    if (g_mutation)
+        g_mutationAccepted = edvr::vScreenEyeCensusPredicateTestMutate(*g_mutation);
+    if (g_injectResourceFault)
+        RaiseException(0xE042ED93u, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    g_originalGetResource(view, resource);
+}
+
+bool hookResource(edvr::VTableHook& hook, ID3D11ShaderResourceView* view) {
+    g_resourceAttempts = 0;
+    g_mutationAccepted = false;
+    return hook.attach(view, 9) && hook.setMode(edvr::HookMode::CopyVptr) &&
+        hook.replace(7, reinterpret_cast<void*>(&observedGetResource),
+                     reinterpret_cast<void**>(&g_originalGetResource)) && hook.commit();
+}
 
 bool check(bool condition, const char* message) {
     if (!condition) std::fprintf(stderr, "FAIL: %s\n", message);
@@ -56,6 +84,59 @@ bool armCapture(const std::wstring& path) {
     edvr::draw_ladder_trace::armManual();
     edvr::draw_ladder_trace::frameBegin({});
     return edvr::draw_ladder_trace::capturing();
+}
+
+bool readEyeCensus(const edvr::VScreenPredicateTestResult& result,
+                   edvr::EyeCensusObservation* fact) {
+    return edvr::draw_ladder_trace::eyeCensusFactCountForTest(result.token) == 1 &&
+           edvr::draw_ladder_trace::readEyeCensusFactForTest(result.token, 0, fact);
+}
+
+bool eyeRead(const edvr::EyeCensusRead<std::uint32_t>& value,
+             std::uint32_t expected) {
+    return value.reached && value.known && value.value == expected;
+}
+
+bool eyeRead(const edvr::EyeCensusRead<std::uint64_t>& value,
+             std::uint64_t expected) {
+    return value.reached && value.known && value.value == expected;
+}
+
+bool eyeRead(const edvr::EyeCensusRead<std::uint8_t>& value,
+             std::uint8_t expected) {
+    return value.reached && value.known && value.value == expected;
+}
+
+bool eyeRead(const edvr::EyeCensusRead<bool>& value, bool expected) {
+    return value.reached && value.known && value.value == expected;
+}
+
+template <class T>
+bool eyeSkipped(const edvr::EyeCensusRead<T>& value) {
+    return !value.reached && !value.known && value.value == T{};
+}
+
+bool visitCensus(ID3D11DeviceContext* context, char kind, std::uint32_t count,
+                 const edvr::VScreenEyeCensusTestRule* rules,
+                 std::uint32_t ruleCount, void* const srvs[4],
+                 std::uint64_t vsHash, std::uint64_t seed, bool traced,
+                 edvr::VScreenPredicateTestResult* result) {
+    void* priorSrvs[4]{};
+    for (std::uint32_t i = 0; i < 4; ++i)
+        priorSrvs[i] = edvr::bindingGet(static_cast<edvr::BindSlot>(
+            static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i));
+    void* const priorVs = edvr::bindingGet(edvr::BindSlot::Vs);
+    const std::uint64_t priorHash = edvr::bindingShaderHash(edvr::BindSlot::Vs);
+    bool okay = edvr::vScreenEyeCensusPredicateTestVisit(
+        context, kind, count, rules, ruleCount, srvs, vsHash, seed, traced, result);
+    for (std::uint32_t i = 0; i < 4; ++i)
+        okay &= check(edvr::bindingGet(static_cast<edvr::BindSlot>(
+                          static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i)) == priorSrvs[i],
+                      "EyeCensus seam restores prior SRV binding");
+    okay &= check(edvr::bindingGet(edvr::BindSlot::Vs) == priorVs &&
+                      edvr::bindingShaderHash(edvr::BindSlot::Vs) == priorHash,
+                  "EyeCensus seam restores prior VS identity and hash");
+    return okay;
 }
 
 } // namespace
@@ -210,6 +291,381 @@ int main(int argc, char** argv) {
                           result.siteResult.outcome == SiteOutcome::Declined &&
                           edvr::draw_ladder_trace::basicFactCountForTest(result.token) == 0,
                       "NoTrace enabled-distance specialization declines without facts");
+
+        constexpr std::uint8_t kFilterOff = 0;
+        constexpr std::uint8_t kFilterSize = 1;
+        constexpr std::uint8_t kFilterEye = 2;
+        constexpr std::uint8_t kFilterNone = 3;
+        constexpr std::uint8_t kFilterAny = 4;
+        ID3D11Texture2D* texture = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        ID3D11Buffer* buffer = nullptr;
+        ID3D11ShaderResourceView* bufferSrv = nullptr;
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = 64;
+        textureDesc.Height = 32;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = 1;
+        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        hr = device->CreateTexture2D(&textureDesc, nullptr, &texture);
+        okay &= check(SUCCEEDED(hr) && texture, "WARP creates real census SRV texture");
+        if (texture) {
+            hr = device->CreateShaderResourceView(texture, nullptr, &srv);
+            okay &= check(SUCCEEDED(hr) && srv, "WARP creates real census SRV view");
+        }
+        D3D11_BUFFER_DESC bufferDesc{};
+        bufferDesc.ByteWidth = 256;
+        bufferDesc.Usage = D3D11_USAGE_DEFAULT;
+        bufferDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        bufferDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        bufferDesc.StructureByteStride = 16;
+        hr = device->CreateBuffer(&bufferDesc, nullptr, &buffer);
+        okay &= check(SUCCEEDED(hr) && buffer, "WARP creates structured census buffer");
+        if (buffer) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC bufferViewDesc{};
+            bufferViewDesc.Format = DXGI_FORMAT_UNKNOWN;
+            bufferViewDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            bufferViewDesc.Buffer.FirstElement = 0;
+            bufferViewDesc.Buffer.NumElements = 16;
+            hr = device->CreateShaderResourceView(buffer, &bufferViewDesc, &bufferSrv);
+            okay &= check(SUCCEEDED(hr) && bufferSrv,
+                          "WARP creates typed structured-buffer SRV");
+        }
+        void* srvs[4] = {srv, nullptr, nullptr, nullptr};
+        edvr::VScreenPredicateTestResult eyeResult{};
+        edvr::VScreenEyeCensusTestRule rule{};
+        edvr::EyeCensusObservation eyeFact{};
+
+        okay &= check(visitCensus(immediate, 'N', 3, nullptr, 0, srvs, 0, 8, true,
+                                  &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Continue &&
+                          eyeResult.siteResult.outcome == SiteOutcome::Declined &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.skipCountGate, 0) &&
+                          eyeSkipped(eyeFact.terminalLoopCount) &&
+                          eyeSkipped(eyeFact.censusSkippedBefore) &&
+                          eyeResult.censusSkippedAfter == 8,
+                      "empty EyeCensus config records only its initial raw gate");
+
+        rule.kind = 'N';
+        rule.count = 2;
+        rule.countHigh = 4;
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0,
+                                  UINT64_MAX, true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Stop &&
+                          eyeResult.siteResult.outcome == SiteOutcome::Exited &&
+                          eyeResult.siteResult.subsite == 0 &&
+                          eyeResult.censusSkippedAfter == 0 &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].countHighGate, 4) &&
+                          eyeRead(eyeFact.rules[0].countMinimum, 2) &&
+                          eyeRead(eyeFact.rules[0].countHighBound, 4) &&
+                          eyeRead(eyeFact.rules[0].ruleKind, 'N') &&
+                          eyeRead(eyeFact.rules[0].filters[0].modeOffGate, kFilterOff) &&
+                          eyeRead(eyeFact.censusSkippedBefore, UINT64_MAX) &&
+                          eyeRead(eyeFact.censusSkippedAfter, 0),
+                      "count range match exits at subsite zero and records wrapping counter write");
+
+        rule = {};
+        rule.kind = 'N';
+        rule.count = 3;
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 20,
+                                  true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Stop &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].exactCount, 3) &&
+                          eyeSkipped(eyeFact.rules[0].countMinimum) &&
+                          eyeSkipped(eyeFact.rules[0].countHighBound),
+                      "exact count path consumes only its exact-count operand");
+
+        rule = {};
+        rule.kind = 'X';
+        rule.count = 3;
+        edvr::VScreenEyeCensusTestRule secondRule{};
+        secondRule.kind = 'N';
+        secondRule.count = 3;
+        edvr::VScreenEyeCensusTestRule orderedRules[2] = {rule, secondRule};
+        okay &= check(visitCensus(immediate, 'N', 3, orderedRules, 2, srvs, 0, 30,
+                                  true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Stop &&
+                          eyeResult.siteResult.subsite == 1 &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].ruleKind, 'X') &&
+                          eyeRead(eyeFact.rules[1].ruleKind, 'N') &&
+                          eyeSkipped(eyeFact.rules[2].loopCount),
+                      "rule order chooses the first matching entry and stops later reads");
+
+        rule = {};
+        rule.kind = 'N';
+        rule.count = 3;
+        rule.filters[0] = {kFilterSize, 64, 32};
+        okay &= check(srv && visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 1,
+                                         true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Stop &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].filters[0].resolved, true) &&
+                          eyeRead(eyeFact.rules[0].filters[0].isTexture2D, true) &&
+                          eyeRead(eyeFact.rules[0].filters[0].width, 64) &&
+                          eyeRead(eyeFact.rules[0].filters[0].configuredWidth, 64) &&
+                          eyeRead(eyeFact.rules[0].filters[0].height, 32) &&
+                          eyeRead(eyeFact.rules[0].filters[0].configuredHeight, 32),
+                      "size filter uses real WARP view dimensions and lazy operands");
+
+        rule.filters[0] = {kFilterSize, 63, 32};
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 1,
+                                  true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Continue &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].filters[0].width, 64) &&
+                          eyeRead(eyeFact.rules[0].filters[0].configuredWidth, 63) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].height) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].configuredHeight),
+                      "size mismatch short-circuits the height operands");
+
+        srvs[0] = bufferSrv;
+        rule.filters[0] = {kFilterSize, 256, 16};
+        okay &= check(bufferSrv && visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 1,
+                                               true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Continue &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].filters[0].resolved, true) &&
+                          eyeRead(eyeFact.rules[0].filters[0].isTexture2D, false) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].width),
+                      "real structured-buffer SRV resolves but fails the Texture2D filter");
+        srvs[0] = srv;
+
+        rule.filters[0] = {kFilterEye, 0, 0};
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 1,
+                                  true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Continue &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].filters[0].eyeSizeAvailable, false) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].eyeWidth) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].width),
+                      "eye filter reports an unavailable eye-size answer as a known decline");
+        edvr::announceEyeTextureSize(128, 64);
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 1,
+                                  true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Continue &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].filters[0].eyeSizeAvailable, true) &&
+                          eyeRead(eyeFact.rules[0].filters[0].eyeWidth, 128) &&
+                          eyeRead(eyeFact.rules[0].filters[0].width, 64) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].height),
+                      "eye-size mismatch short-circuits the height comparison");
+        edvr::announceEyeTextureSize(64, 32);
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 1,
+                                  true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Stop &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].filters[0].eyeSizeAvailable, true) &&
+                          eyeRead(eyeFact.rules[0].filters[0].eyeWidth, 64) &&
+                          eyeRead(eyeFact.rules[0].filters[0].eyeHeight, 32),
+                      "eye filter matches the published dimensions of the real WARP texture");
+
+        rule.filters[0] = {kFilterAny, 0, 0};
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 1,
+                                  true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Stop &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].filters[0].modeOffGate, kFilterAny) &&
+                          eyeRead(eyeFact.rules[0].filters[0].modeAnyGate, kFilterAny) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].boundNonNull),
+                      "Any filter short-circuits before binding access");
+
+        srvs[0] = nullptr;
+        rule.filters[0] = {kFilterNone, 0, 0};
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 1,
+                                  true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Stop &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].filters[0].boundNonNull, false) &&
+                          eyeRead(eyeFact.rules[0].filters[0].modeAfterBound, kFilterNone) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].resolved),
+                      "None filter matches an absent view without resolver calls");
+
+        srvs[0] = srv;
+        rule = {};
+        rule.kind = 'N';
+        rule.count = 3;
+        rule.vsHash = 0x1122334455667788ull;
+        rule.filters[0] = {kFilterSize, 999, 999};
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs,
+                                  rule.vsHash, 1, true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Stop &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].heldVsHash, rule.vsHash) &&
+                          eyeRead(eyeFact.rules[0].vsHashCompareExpected, rule.vsHash) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].modeOffGate),
+                      "matching VS hash bypasses every SRV filter");
+
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs,
+                                  0x8877665544332211ull, 1, true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Continue &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].heldVsHash, 0x8877665544332211ull) &&
+                          eyeSkipped(eyeFact.rules[0].countHighGate) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].modeOffGate),
+                      "VS hash mismatch declines that rule without falling through to SRV tests");
+
+        rule = {};
+        rule.kind = 'N';
+        rule.count = 3;
+        rule.filters[0] = {kFilterOff, 0, 0};
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 9,
+                                  false, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Stop &&
+                          eyeResult.censusSkippedAfter == 10 &&
+                          edvr::draw_ladder_trace::eyeCensusFactCountForTest(eyeResult.token) == 0,
+                      "NoTrace EyeCensus keeps the real skip and emits no cold-pool fact");
+
+        // Negative count paths consume kind after count, but no filter operands.
+        rule.count = 4;
+        rule.countHigh = 8;
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 4, true, &eyeResult) &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].countMinimum, 4) &&
+                          eyeSkipped(eyeFact.rules[0].countHighBound) &&
+                          eyeRead(eyeFact.rules[0].ruleKind, 'N') &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].modeOffGate) &&
+                          eyeRead(eyeFact.terminalLoopCount, 1),
+                      "range lower miss skips upper bound and all filters");
+        rule.count = 1;
+        rule.countHigh = 2;
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 4, true, &eyeResult) &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].countHighBound, 2) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].modeOffGate),
+                      "range upper miss consumes upper bound");
+        rule.countHigh = 0;
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 4, true, &eyeResult) &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].exactCount, 1) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].modeOffGate),
+                      "exact count miss skips filters");
+        edvr::VScreenEyeCensusTestRule eightRules[8]{};
+        for (auto& entry : eightRules) { entry.kind = 'N'; entry.count = 1; }
+        eightRules[7].count = 3;
+        okay &= check(visitCensus(immediate, 'N', 3, eightRules, 8, srvs, 0, 4, true, &eyeResult) &&
+                          eyeResult.siteResult.subsite == 7 &&
+                          eyeResult.siteResult.outcome == SiteOutcome::Exited &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[7].loopCount, 8) &&
+                          eyeSkipped(eyeFact.terminalLoopCount),
+                      "eighth rule wins without a terminal loop read");
+        eightRules[7].count = 1;
+        okay &= check(visitCensus(immediate, 'N', 3, eightRules, 8, srvs, 0, 4, true, &eyeResult) &&
+                          eyeResult.siteResult.outcome == SiteOutcome::Declined &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[7].loopCount, 8) &&
+                          eyeRead(eyeFact.terminalLoopCount, 8),
+                      "all eight misses preserve final consumed loop bound");
+
+        rule = {};
+        rule.kind = 'N'; rule.count = 3;
+        rule.filters[0] = {kFilterNone, 0, 0};
+        edvr::VScreenEyeCensusTestMutation mutation{};
+        {
+            edvr::VTableHook resourceHook;
+            okay &= check(srv && hookResource(resourceHook, srv), "hook real SRV GetResource slot seven");
+            okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 4, true, &eyeResult) &&
+                              eyeResult.siteResult.outcome == SiteOutcome::Declined &&
+                              readEyeCensus(eyeResult, &eyeFact) &&
+                              eyeRead(eyeFact.rules[0].filters[0].boundNonNull, true) &&
+                              eyeSkipped(eyeFact.rules[0].filters[0].resolved) &&
+                              g_resourceAttempts == 0,
+                          "None rejects a present real view without a query");
+
+            mutation.changeFilter = true;
+            mutation.filter = {kFilterSize, 64, 32};
+            mutation.changeCounter = true;
+            mutation.counter = UINT64_MAX;
+            g_mutation = &mutation;
+            rule.filters[0] = {kFilterEye, 999, 999};
+            okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 4, true, &eyeResult) &&
+                              g_resourceAttempts == 1 && g_mutationAccepted &&
+                              eyeResult.siteResult.outcome == SiteOutcome::Exited &&
+                              eyeResult.censusSkippedAfter == 0 && readEyeCensus(eyeResult, &eyeFact) &&
+                              eyeRead(eyeFact.rules[0].filters[0].modeOffGate, kFilterEye) &&
+                              eyeRead(eyeFact.rules[0].filters[0].modeAfterBound, kFilterEye) &&
+                              eyeRead(eyeFact.rules[0].filters[0].modeAfterResolve, kFilterSize) &&
+                              eyeRead(eyeFact.rules[0].filters[0].configuredWidth, 64) &&
+                              eyeRead(eyeFact.rules[0].filters[0].configuredHeight, 32) &&
+                              eyeSkipped(eyeFact.rules[0].filters[0].eyeSizeAvailable) &&
+                              eyeRead(eyeFact.censusSkippedBefore, UINT64_MAX) &&
+                              eyeRead(eyeFact.censusSkippedAfter, 0),
+                          "real COM reentry changes later mode dimensions and write-local counter");
+            resourceHook.uninstall();
+            g_mutation = nullptr;
+        }
+
+        {
+            edvr::VTableHook resourceHook;
+            okay &= check(hookResource(resourceHook, srv), "rehook real SRV for loop-count reentry");
+            mutation = {};
+            mutation.changeFilter = true; mutation.filter = {kFilterSize, 63, 32};
+            mutation.changeLoopCount = true; mutation.loopCount = 1;
+            g_mutation = &mutation;
+            orderedRules[0] = rule;
+            orderedRules[0].filters[0] = {kFilterSize, 64, 32};
+            orderedRules[1] = secondRule;
+            okay &= check(visitCensus(immediate, 'N', 3, orderedRules, 2, srvs, 0, 7, true, &eyeResult) &&
+                              g_resourceAttempts == 1 && g_mutationAccepted &&
+                              eyeResult.siteResult.outcome == SiteOutcome::Declined &&
+                              eyeResult.censusSkippedAfter == 7 && readEyeCensus(eyeResult, &eyeFact) &&
+                              eyeRead(eyeFact.skipCountGate, 2) && eyeRead(eyeFact.rules[0].loopCount, 2) &&
+                              eyeRead(eyeFact.rules[0].filters[0].configuredWidth, 63) &&
+                              eyeSkipped(eyeFact.rules[0].filters[0].height) &&
+                              eyeRead(eyeFact.terminalLoopCount, 1) && eyeSkipped(eyeFact.rules[1].loopCount),
+                          "COM reentry mutates exact width and next loop bound before next rule");
+            resourceHook.uninstall();
+            g_mutation = nullptr;
+        }
+
+        {
+            edvr::VTableHook resourceHook;
+            okay &= check(hookResource(resourceHook, srv), "rehook real SRV for fault parity");
+            g_injectResourceFault = true;
+            rule.filters[0] = {kFilterSize, 64, 32};
+            okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 4, true, &eyeResult) &&
+                              g_resourceAttempts == 1 && eyeResult.censusSkippedAfter == 4 &&
+                              eyeResult.siteResult.outcome == SiteOutcome::Declined &&
+                              readEyeCensus(eyeResult, &eyeFact) &&
+                              eyeRead(eyeFact.rules[0].filters[0].resolved, false) &&
+                              eyeSkipped(eyeFact.rules[0].filters[0].isTexture2D),
+                          "typed real-view fault records attempted query and known-false prefix");
+            okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 4, false, &eyeResult) &&
+                              g_resourceAttempts == 2 && eyeResult.censusSkippedAfter == 4 &&
+                              eyeResult.siteResult.outcome == SiteOutcome::Declined &&
+                              edvr::draw_ladder_trace::eyeCensusFactCountForTest(eyeResult.token) == 0,
+                          "NoTrace real-view fault has same query result and no observation");
+            resourceHook.uninstall();
+            g_injectResourceFault = false;
+        }
+
+        // One invalid view exercises the production guarded resolver's known-false prefix.
+        srvs[0] = reinterpret_cast<void*>(static_cast<std::uintptr_t>(1));
+        rule.filters[0] = {kFilterSize, 64, 32};
+        okay &= check(visitCensus(immediate, 'N', 3, &rule, 1, srvs, 0, 4,
+                                  true, &eyeResult) &&
+                          eyeResult.siteResult.flow == Flow::Continue &&
+                          readEyeCensus(eyeResult, &eyeFact) &&
+                          eyeRead(eyeFact.rules[0].filters[0].resolved, false) &&
+                          eyeSkipped(eyeFact.rules[0].filters[0].isTexture2D),
+                      "guarded real resolver fault is a known-false result with later reads skipped");
+
+        for (std::uint32_t i = 0; i < 4; ++i)
+            edvr::bindingSet(static_cast<edvr::BindSlot>(
+                                 static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), nullptr);
+        edvr::bindingSetShader(edvr::BindSlot::Vs, nullptr, 0);
+
+        if (srv) srv->Release();
+        if (bufferSrv) bufferSrv->Release();
+        if (buffer) buffer->Release();
+        if (texture) texture->Release();
     }
 
     if (deferred) deferred->Release();

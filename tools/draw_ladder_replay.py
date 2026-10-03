@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 9
+PREDICATE_FACT_VERSION = 10
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -1147,6 +1147,348 @@ def _replay_basic_draw_fact(fact, draw, label):
     return event, mismatch, mutation_unobserved
 
 
+class _EyeCensusUnavailable(Exception):
+    pass
+
+
+def _replay_eye_census_fact(fact, draw, label):
+    """Replay the independent site-48 rule loop from ordered reads."""
+    required = {"siteId", "kind", "known", "skipCountGate", "rules",
+                "terminalLoopCount", "mutation"}
+    if set(fact) != required or fact.get("known") != "yes":
+        raise TraceError(label + " has missing or unexpected EyeCensus fields")
+
+    def read(obj, name, path, value_type, maximum=None):
+        item = obj.get(name)
+        if not isinstance(item, dict) or set(item) != {"reached", "known", "value"}:
+            raise TraceError(path + "." + name + " is malformed")
+        reached, known, value = item["reached"], item["known"], item["value"]
+        if type(reached) is not bool or type(known) is not bool:
+            raise TraceError(path + "." + name + " availability must be boolean")
+        if known and not reached:
+            raise TraceError(path + "." + name + " cannot be known before it is reached")
+        if not known:
+            if value is not None:
+                raise TraceError(path + "." + name + " unknown value must be null")
+            return reached, False, None
+        if value_type is bool:
+            if type(value) is not bool:
+                raise TraceError(path + "." + name + " must contain a boolean")
+        else:
+            _integer(value, path + "." + name + ".value", 0,
+                     maximum if maximum is not None else 0xffffffff)
+        return reached, True, value
+
+    u8, u32, u64 = 0xff, 0xffffffff, 0xffffffffffffffff
+    def req(obj, name, path, value_type, maximum=None):
+        result = read(obj, name, path, value_type, maximum)
+        if not result[0]:
+            raise TraceError(path + "." + name + " was not reached when consumed")
+        if not result[1]:
+            raise _EyeCensusUnavailable()
+        return result[2]
+
+    def must_unread(obj, name, path, value_type, maximum=None):
+        result = read(obj, name, path, value_type, maximum)
+        if result[0]:
+            raise TraceError(path + "." + name + " was reached after a short circuit")
+
+    def validate_unvisited_rule(rule, ri):
+        rpath = "%s.rules[%d]" % (label, ri)
+        if not isinstance(rule, dict) or set(rule) != {
+                "loopCount", "vsHashGate", "heldVsHash", "vsHashCompareExpected",
+                "ruleKind", "countHighGate", "countMinimum", "countHighBound",
+                "exactCount", "filters"}:
+            raise TraceError(rpath + " has missing or unexpected fields")
+        for field, maximum in (("loopCount", u32), ("vsHashGate", u64),
+                               ("heldVsHash", u64), ("vsHashCompareExpected", u64),
+                               ("ruleKind", u8), ("countHighGate", u32),
+                               ("countMinimum", u32), ("countHighBound", u32),
+                               ("exactCount", u32)):
+            must_unread(rule, field, rpath, int, maximum)
+        filters = rule.get("filters")
+        if not isinstance(filters, list) or len(filters) != 4:
+            raise TraceError(rpath + ".filters must contain exactly four filters")
+        for fi, filt in enumerate(filters):
+            fpath = "%s.filters[%d]" % (rpath, fi)
+            if not isinstance(filt, dict) or set(filt) != {x[0] for x in _eye_filter_types(u8, u32)}:
+                raise TraceError(fpath + " has missing or unexpected fields")
+            for field, typ, maximum in _eye_filter_types(u8, u32):
+                must_unread(filt, field, fpath, typ, maximum)
+
+    # Validate the fixed wire envelope even when an early consumed value is
+    # unknown. Reach semantics below remain lazy; unknown does not imply false.
+    rule_types = (("loopCount", u32), ("vsHashGate", u64), ("heldVsHash", u64),
+                  ("vsHashCompareExpected", u64), ("ruleKind", u8),
+                  ("countHighGate", u32), ("countMinimum", u32),
+                  ("countHighBound", u32), ("exactCount", u32))
+    for field in ("skipCountGate", "terminalLoopCount"):
+        item = read(fact, field, label, int, u32)
+        if item[1] and item[2] > 8:
+            raise TraceError(label + "." + field + " exceeds the eight-rule capacity")
+    rules = fact.get("rules")
+    if not isinstance(rules, list) or len(rules) != 8:
+        raise TraceError(label + ".rules must contain exactly eight rules")
+    for ri, rule in enumerate(rules):
+        rpath = "%s.rules[%d]" % (label, ri)
+        if not isinstance(rule, dict) or set(rule) != {x[0] for x in rule_types} | {"filters"}:
+            raise TraceError(rpath + " has missing or unexpected fields")
+        for field, maximum in rule_types:
+            item = read(rule, field, rpath, int, maximum)
+            if field == "loopCount" and item[1] and item[2] > 8:
+                raise TraceError(rpath + ".loopCount exceeds the eight-rule capacity")
+        filters = rule["filters"]
+        if not isinstance(filters, list) or len(filters) != 4:
+            raise TraceError(rpath + ".filters must contain exactly four filters")
+        for fi, filt in enumerate(filters):
+            fpath = "%s.filters[%d]" % (rpath, fi)
+            if not isinstance(filt, dict) or set(filt) != {x[0] for x in _eye_filter_types(u8, u32)}:
+                raise TraceError(fpath + " has missing or unexpected fields")
+            for field, typ, maximum in _eye_filter_types(u8, u32):
+                read(filt, field, fpath, typ, maximum)
+    mutation = fact.get("mutation")
+    if not isinstance(mutation, dict) or set(mutation) != {"censusSkippedBefore", "censusSkippedAfter"}:
+        raise TraceError(label + ".mutation has missing or unexpected fields")
+    for field in mutation:
+        read(mutation, field, label + ".mutation", int, u64)
+
+    if req(fact, "skipCountGate", label, int, u32) == 0:
+        rules = fact.get("rules")
+        if not isinstance(rules, list) or len(rules) != 8:
+            raise TraceError(label + ".rules must contain exactly eight rules")
+        for ri, rule in enumerate(rules):
+            validate_unvisited_rule(rule, ri)
+        must_unread(fact, "terminalLoopCount", label, int, u32)
+        expected = _eye_site_event(False, 0)
+        delta = 0
+    else:
+        rules = fact.get("rules")
+        if not isinstance(rules, list) or len(rules) != 8:
+            raise TraceError(label + ".rules must contain exactly eight rules")
+        expected = None
+        delta = 0
+        terminal = None
+        loop_exit_index = 8
+        for ri, rule in enumerate(rules):
+            rpath = "%s.rules[%d]" % (label, ri)
+            if not isinstance(rule, dict) or set(rule) != {
+                    "loopCount", "vsHashGate", "heldVsHash", "vsHashCompareExpected",
+                    "ruleKind", "countHighGate", "countMinimum", "countHighBound",
+                    "exactCount", "filters"}:
+                raise TraceError(rpath + " has missing or unexpected fields")
+            loop_read = read(rule, "loopCount", rpath, int, u32)
+            if not loop_read[0]:
+                loop_exit_index = ri
+                validate_unvisited_rule(rule, ri)
+                for field, maximum in (("vsHashGate", u64), ("heldVsHash", u64),
+                                       ("vsHashCompareExpected", u64), ("ruleKind", u8),
+                                       ("countHighGate", u32), ("countMinimum", u32),
+                                       ("countHighBound", u32), ("exactCount", u32)):
+                    must_unread(rule, field, rpath, int, maximum)
+                for rest in range(ri + 1, 8):
+                    validate_unvisited_rule(rules[rest], rest)
+                break
+            if not loop_read[1]:
+                raise _EyeCensusUnavailable()
+            if loop_read[2] <= ri or loop_read[2] > 8:
+                raise TraceError(rpath + ".loopCount does not enter its observed iteration")
+            hash_gate = req(rule, "vsHashGate", rpath, int, u64)
+            if hash_gate:
+                held_hash = req(rule, "heldVsHash", rpath, int, u64)
+                expected_hash = req(rule, "vsHashCompareExpected", rpath, int, u64)
+                if held_hash == expected_hash:
+                    # Hash rules claim immediately. All later reads are forbidden.
+                    for field, maximum in (("ruleKind", u8), ("countHighGate", u32),
+                                           ("countMinimum", u32), ("countHighBound", u32),
+                                           ("exactCount", u32)):
+                        must_unread(rule, field, rpath, int, maximum)
+                    _eye_require_filters_unread(rule, rpath, u8, u32, must_unread)
+                    expected = _eye_site_event(True, ri)
+                    delta = 1
+                    terminal = ri
+                    for rest in range(ri + 1, 8):
+                        validate_unvisited_rule(rules[rest], rest)
+                    break
+                for field, maximum in (("ruleKind", u8), ("countHighGate", u32),
+                                       ("countMinimum", u32), ("countHighBound", u32),
+                                       ("exactCount", u32)):
+                    must_unread(rule, field, rpath, int, maximum)
+                _eye_require_filters_unread(rule, rpath, u8, u32, must_unread)
+                continue
+            must_unread(rule, "heldVsHash", rpath, int, u64)
+            must_unread(rule, "vsHashCompareExpected", rpath, int, u64)
+            count_high = req(rule, "countHighGate", rpath, int, u32)
+            if count_high:
+                minimum = req(rule, "countMinimum", rpath, int, u32)
+                if draw["count"] < minimum:
+                    must_unread(rule, "countHighBound", rpath, int, u32)
+                    must_unread(rule, "exactCount", rpath, int, u32)
+                    count_hit = False
+                else:
+                    high = req(rule, "countHighBound", rpath, int, u32)
+                    must_unread(rule, "exactCount", rpath, int, u32)
+                    count_hit = draw["count"] <= high
+            else:
+                must_unread(rule, "countMinimum", rpath, int, u32)
+                must_unread(rule, "countHighBound", rpath, int, u32)
+                exact = req(rule, "exactCount", rpath, int, u32)
+                count_hit = draw["count"] == exact
+            kind = req(rule, "ruleKind", rpath, int, u8)
+            if not count_hit or kind != draw["kind"]:
+                _eye_require_filters_unread(rule, rpath, u8, u32, must_unread)
+                continue
+            filters = rule.get("filters")
+            if not isinstance(filters, list) or len(filters) != 4:
+                raise TraceError(rpath + ".filters must contain exactly four filters")
+            rule_match = True
+            for fi, filt in enumerate(filters):
+                fpath = "%s.filters[%d]" % (rpath, fi)
+                if not isinstance(filt, dict) or set(filt) != {x[0] for x in _eye_filter_types(u8, u32)}:
+                    raise TraceError(fpath + " has missing or unexpected fields")
+                if not rule_match:
+                    for field, typ, maximum in _eye_filter_types(u8, u32):
+                        must_unread(filt, field, fpath, typ, maximum)
+                    continue
+                mode_off = req(filt, "modeOffGate", fpath, int, u8)
+                if mode_off == 0:
+                    _eye_filter_unread_after(filt, fpath, "modeAnyGate", u8, u32, must_unread)
+                    continue
+                mode_any = req(filt, "modeAnyGate", fpath, int, u8)
+                if mode_any == 4:
+                    _eye_filter_unread_after(filt, fpath, "boundNonNull", u8, u32, must_unread)
+                    continue
+                bound = req(filt, "boundNonNull", fpath, bool)
+                mode_bound = req(filt, "modeAfterBound", fpath, int, u8)
+                if mode_bound == 3:
+                    if bound:
+                        rule_match = False
+                    _eye_filter_unread_after(filt, fpath, "resolved", u8, u32, must_unread)
+                    continue
+                resolved = req(filt, "resolved", fpath, bool)
+                if not resolved:
+                    rule_match = False
+                    for field, typ, maximum in _eye_filter_types(u8, u32):
+                        if field in ("modeOffGate", "modeAnyGate", "boundNonNull", "modeAfterBound", "resolved"):
+                            continue
+                        must_unread(filt, field, fpath, typ, maximum)
+                    continue
+                texture = req(filt, "isTexture2D", fpath, bool)
+                if not texture:
+                    rule_match = False
+                    for field, typ, maximum in _eye_filter_types(u8, u32):
+                        if field in ("modeOffGate", "modeAnyGate", "boundNonNull", "modeAfterBound", "resolved", "isTexture2D"):
+                            continue
+                        must_unread(filt, field, fpath, typ, maximum)
+                    continue
+                mode_resolve = req(filt, "modeAfterResolve", fpath, int, u8)
+                if mode_resolve == 2:
+                    eye_available = req(filt, "eyeSizeAvailable", fpath, bool)
+                    if not eye_available:
+                        rule_match = False
+                        must_unread(filt, "width", fpath, int, u32)
+                        must_unread(filt, "height", fpath, int, u32)
+                        must_unread(filt, "eyeWidth", fpath, int, u32)
+                        must_unread(filt, "eyeHeight", fpath, int, u32)
+                    else:
+                        width = req(filt, "width", fpath, int, u32)
+                        eye_width = req(filt, "eyeWidth", fpath, int, u32)
+                        if width != eye_width:
+                            rule_match = False
+                            must_unread(filt, "height", fpath, int, u32)
+                            must_unread(filt, "eyeHeight", fpath, int, u32)
+                        else:
+                            height = req(filt, "height", fpath, int, u32)
+                            eye_height = req(filt, "eyeHeight", fpath, int, u32)
+                            if height != eye_height:
+                                rule_match = False
+                    for field in ("configuredWidth", "configuredHeight"):
+                        must_unread(filt, field, fpath, int, u32)
+                else:
+                    width = req(filt, "width", fpath, int, u32)
+                    configured_width = req(filt, "configuredWidth", fpath, int, u32)
+                    if width != configured_width:
+                        rule_match = False
+                        must_unread(filt, "height", fpath, int, u32)
+                        must_unread(filt, "configuredHeight", fpath, int, u32)
+                    else:
+                        height = req(filt, "height", fpath, int, u32)
+                        configured_height = req(filt, "configuredHeight", fpath, int, u32)
+                        if height != configured_height:
+                            rule_match = False
+                    must_unread(filt, "eyeSizeAvailable", fpath, bool)
+                    must_unread(filt, "eyeWidth", fpath, int, u32)
+                    must_unread(filt, "eyeHeight", fpath, int, u32)
+            if rule_match:
+                expected = _eye_site_event(True, ri)
+                delta = 1
+                terminal = ri
+                for rest in range(ri + 1, 8):
+                    validate_unvisited_rule(rules[rest], rest)
+                break
+        if expected is None:
+            terminal_count = req(fact, "terminalLoopCount", label, int, u32)
+            if terminal_count > 8:
+                raise TraceError(label + ".terminalLoopCount exceeds the eight-rule capacity")
+            if terminal_count > loop_exit_index:
+                raise TraceError(label + ".terminalLoopCount does not terminate the observed loop")
+            expected = _eye_site_event(False, 0)
+        else:
+            must_unread(fact, "terminalLoopCount", label, int, u32)
+
+    mutation = fact.get("mutation")
+    if not isinstance(mutation, dict) or set(mutation) != {"censusSkippedBefore", "censusSkippedAfter"}:
+        raise TraceError(label + ".mutation has missing or unexpected fields")
+    before = read(mutation, "censusSkippedBefore", label + ".mutation", int, u64)
+    after = read(mutation, "censusSkippedAfter", label + ".mutation", int, u64)
+    mutation_unobserved = False
+    mismatch = 0
+    if delta:
+        if not (before[0] and before[1] and after[0] and after[1]):
+            mutation_unobserved = True
+        elif after[2] != ((before[2] + 1) & u64):
+            mismatch += 1
+    elif before[0] or after[0]:
+        # A decline must not fabricate mutation observations.
+        raise TraceError(label + " declined EyeCensus fact carries mutation reads")
+    return expected, mismatch, mutation_unobserved
+
+
+def _eye_filter_types(u8, u32):
+    return [("modeOffGate", int, u8), ("modeAnyGate", int, u8),
+            ("boundNonNull", bool, None), ("modeAfterBound", int, u8),
+            ("resolved", bool, None), ("isTexture2D", bool, None),
+            ("width", int, u32), ("height", int, u32),
+            ("modeAfterResolve", int, u8), ("configuredWidth", int, u32),
+            ("configuredHeight", int, u32), ("eyeSizeAvailable", bool, None),
+            ("eyeWidth", int, u32), ("eyeHeight", int, u32)]
+
+
+def _eye_filter_unread_after(filt, path, first, u8, u32, must_unread):
+    types = _eye_filter_types(u8, u32)
+    start = next(i for i, entry in enumerate(types) if entry[0] == first)
+    for field, typ, maximum in types[start:]:
+        must_unread(filt, field, path, typ, maximum)
+
+
+def _eye_require_filters_unread(rule, path, u8, u32, must_unread):
+    filters = rule.get("filters")
+    if not isinstance(filters, list) or len(filters) != 4:
+        raise TraceError(path + ".filters must contain exactly four filters")
+    for fi, filt in enumerate(filters):
+        fpath = "%s.filters[%d]" % (path, fi)
+        if not isinstance(filt, dict) or set(filt) != {x[0] for x in _eye_filter_types(u8, u32)}:
+            raise TraceError(fpath + " has missing or unexpected fields")
+        for field, typ, maximum in _eye_filter_types(u8, u32):
+            must_unread(filt, field, fpath, typ, maximum)
+
+
+def _eye_site_event(claimed, subsite):
+    return ({"id": 48, "kind": 2, "outcome": 4, "flow": 1,
+             "subsite": subsite, "verdict": 2} if claimed else
+            {"id": 48, "kind": 2, "outcome": 2, "flow": 0,
+             "subsite": 0, "verdict": -1})
+
+
 def _candidate_witchspace_stars(fact, draw):
     """Candidate selector from raw helper inputs, independent of site output."""
     if fact["hiddenKnown"] != "yes":
@@ -1716,11 +2058,12 @@ def _replay_scrim_fact(fact, draw, label):
 
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((2, 3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 9 else
+    supported_ids = ((2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 10 else
+                     (2, 3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 9 else
                      (3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 8 else
                      (3, 6, 24, 26, 49, 50, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 7 else
                      (3, 6, 24, 26, 49, 50, 53, 55, 61, 62, 63) if predicate_fact_version >= 6 else
@@ -1739,6 +2082,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        17 if predicate_fact_version >= 10 else
                         16 if predicate_fact_version >= 9 else
                         14 if predicate_fact_version >= 8 else
                         13 if predicate_fact_version >= 7 else
@@ -1749,7 +2093,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                         3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+                           (57, 12), (58, 13), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 10 else (
+            (2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 9 else (
             (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                             (57, 12), (58, 13), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 8 else (
@@ -1831,6 +2177,16 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 _replay_basic_draw_fact(fact, draw, fact_label)
             by_site[site_id] = (event, None, not fact_mutation_unobserved,
                                 0, fact_mismatches, None)
+        elif kind == 17:
+            if site_id != 48 or predicate_fact_version < 10:
+                raise TraceError(fact_label + " has unsupported EyeCensus fact")
+            try:
+                event, fact_mismatches, fact_mutation_unobserved = \
+                    _replay_eye_census_fact(fact, draw, fact_label)
+            except _EyeCensusUnavailable:
+                event, fact_mismatches, fact_mutation_unobserved = None, 0, False
+            by_site[site_id] = (event, None, True, 0, fact_mismatches,
+                                fact_mutation_unobserved)
         elif kind == 14:
             if site_id != 51 or predicate_fact_version < 8:
                 raise TraceError(fact_label + " has unsupported RemLok fact")
@@ -2061,7 +2417,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -2101,6 +2457,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     basic_draw_replayed = 0
     basic_draw_unreplayable = 0
     basic_draw_mismatches = 0
+    eye_census_replayed = 0
+    eye_census_unreplayable = 0
+    eye_census_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -2127,6 +2486,19 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             if cache_mismatches:
                 basic_draw_mismatches += cache_mismatches
             if site_id == 2 and not delta_known:
+                mutation_unobserved += 1
+        if site_id == 48:
+            if site_unreplayable:
+                eye_census_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                eye_census_replayed += 1
+            else:
+                eye_census_mismatches += 1
+            if cache_mismatches:
+                eye_census_mismatches += cache_mismatches
+            if legacy_claim:
                 mutation_unobserved += 1
         if site_id in (61, 62, 63):
             if site_unreplayable:
@@ -2295,7 +2667,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "basicDrawFacts": sum(1 for site_id in by_site if site_id in (2, 67)),
             "basicDrawReplayed": basic_draw_replayed,
             "basicDrawUnreplayable": basic_draw_unreplayable,
-            "basicDrawMismatches": basic_draw_mismatches}
+            "basicDrawMismatches": basic_draw_mismatches,
+            "eyeCensusFacts": sum(1 for site_id in by_site if site_id == 48),
+            "eyeCensusReplayed": eye_census_replayed,
+            "eyeCensusUnreplayable": eye_census_unreplayable,
+            "eyeCensusMismatches": eye_census_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -2313,7 +2689,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -2403,7 +2779,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "remlokFacts": 0, "remlokReplayed": 0,
                         "remlokUnreplayable": 0, "remlokMismatches": 0,
                         "basicDrawFacts": 0, "basicDrawReplayed": 0,
-                        "basicDrawUnreplayable": 0, "basicDrawMismatches": 0}
+                        "basicDrawUnreplayable": 0, "basicDrawMismatches": 0,
+                        "eyeCensusFacts": 0, "eyeCensusReplayed": 0,
+                        "eyeCensusUnreplayable": 0, "eyeCensusMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -2747,6 +3125,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                               "mismatch" if predicate_replay["basicDrawMismatches"] else
                               "unreplayable" if predicate_replay["basicDrawUnreplayable"] else
                               "replayed"),
+             eyeCensusStatus=("unavailable-before-v10" if predicate_fact_version < 10 else
+                              "not-visited" if not predicate_replay["eyeCensusFacts"] else
+                              "mismatch" if predicate_replay["eyeCensusMismatches"] else
+                              "unreplayable" if predicate_replay["eyeCensusUnreplayable"] else
+                              "replayed"),
              **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -2778,7 +3161,10 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
               "remlokUnreplayable": 0, "remlokMismatches": 0,
               "basicDrawStatus": "unavailable-before-v9",
               "basicDrawFacts": 0, "basicDrawReplayed": 0,
-              "basicDrawUnreplayable": 0, "basicDrawMismatches": 0}),
+              "basicDrawUnreplayable": 0, "basicDrawMismatches": 0,
+              "eyeCensusStatus": "unavailable-before-v10",
+              "eyeCensusFacts": 0, "eyeCensusReplayed": 0,
+              "eyeCensusUnreplayable": 0, "eyeCensusMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -2897,6 +3283,13 @@ def format_summary(summary, sidecar_path=None):
                      (replay.get("basicDrawStatus", "not-visited"),
                       replay.get("basicDrawFacts", 0), replay.get("basicDrawReplayed", 0),
                       replay.get("basicDrawUnreplayable", 0), replay.get("basicDrawMismatches", 0)))
+    if replay.get("predicateFactVersion", 0) < 10:
+        lines.append("  EyeCensusSkip site 48: unavailable before predicate fact version 10")
+    else:
+        lines.append("  EyeCensusSkip site 48: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay.get("eyeCensusStatus", "not-visited"),
+                      replay.get("eyeCensusFacts", 0), replay.get("eyeCensusReplayed", 0),
+                      replay.get("eyeCensusUnreplayable", 0), replay.get("eyeCensusMismatches", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -5298,6 +5691,413 @@ def self_test():
     if v9_summary["basicDrawStatus"] != "replayed" or v9_summary["basicDrawReplayed"] != 1:
         print("predicate fact version 9 did not expose BasicDraw replay status")
         return 1
+
+    def eye_read(value=None, reached=False, known=False):
+        return {"reached": reached, "known": known,
+                "value": value if known else None}
+
+    eye_rule_fields = ("loopCount", "vsHashGate", "heldVsHash",
+                       "vsHashCompareExpected", "ruleKind", "countHighGate",
+                       "countMinimum", "countHighBound", "exactCount")
+    eye_filter_fields = ("modeOffGate", "modeAnyGate", "boundNonNull",
+                         "modeAfterBound", "resolved", "isTexture2D", "width",
+                         "height", "modeAfterResolve", "configuredWidth",
+                         "configuredHeight", "eyeSizeAvailable", "eyeWidth",
+                         "eyeHeight")
+
+    def eye_fact():
+        rules = []
+        for _ in range(8):
+            rule = {name: eye_read() for name in eye_rule_fields}
+            rule["filters"] = [{name: eye_read() for name in eye_filter_fields}
+                               for _ in range(4)]
+            rules.append(rule)
+        return {"siteId": 48, "kind": 17, "known": "yes",
+                "skipCountGate": eye_read(8, True, True), "rules": rules,
+                "terminalLoopCount": eye_read(),
+                "mutation": {"censusSkippedBefore": eye_read(),
+                             "censusSkippedAfter": eye_read()}}
+
+    def eye_set(obj, name, value):
+        obj[name] = eye_read(value, True, True)
+
+    def eye_expected(fact, count=17, kind=ord("N")):
+        return _replay_eye_census_fact(fact,
+                                      {"count": count, "kind": kind},
+                                      "eye-self-test")
+
+    eye_empty = eye_fact()
+    eye_empty["skipCountGate"] = eye_read(0, True, True)
+    if eye_expected(eye_empty)[0] != _eye_site_event(False, 0):
+        print("EyeCensus zero skip gate did not decline")
+        return 1
+
+    eye_hash = eye_fact()
+    rule = eye_hash["rules"][0]
+    eye_set(rule, "loopCount", 1)
+    eye_set(rule, "vsHashGate", 1)
+    eye_set(rule, "heldVsHash", 55)
+    eye_set(rule, "vsHashCompareExpected", 55)
+    eye_set(eye_hash["mutation"], "censusSkippedBefore", 0xffffffffffffffff)
+    eye_set(eye_hash["mutation"], "censusSkippedAfter", 0)
+    if eye_expected(eye_hash)[0] != _eye_site_event(True, 0):
+        print("EyeCensus hash hit did not claim before count and filter reads")
+        return 1
+    eye_hash["rules"][1]["loopCount"] = eye_read(0, True, True)
+    try:
+        eye_expected(eye_hash)
+    except TraceError:
+        pass
+    else:
+        print("EyeCensus hash hit accepted a later loop read")
+        return 1
+
+    eye_hash_miss = eye_fact()
+    rule = eye_hash_miss["rules"][0]
+    eye_set(rule, "loopCount", 1); eye_set(rule, "vsHashGate", 1)
+    eye_set(rule, "heldVsHash", 54); eye_set(rule, "vsHashCompareExpected", 55)
+    eye_set(eye_hash_miss, "terminalLoopCount", 1)
+    if eye_expected(eye_hash_miss)[0] != _eye_site_event(False, 0):
+        print("EyeCensus hash miss did not continue to the natural loop exit")
+        return 1
+
+    def eye_count_rule(fact, index=0, draw_count=17, rule_count=1,
+                       high_gate=0, minimum=None, high=None, exact=None,
+                       rule_kind=ord("N")):
+        rule = fact["rules"][index]
+        eye_set(rule, "loopCount", rule_count)
+        eye_set(rule, "vsHashGate", 0)
+        eye_set(rule, "countHighGate", high_gate)
+        if high_gate:
+            eye_set(rule, "countMinimum", minimum)
+            if draw_count >= minimum:
+                eye_set(rule, "countHighBound", high)
+        else:
+            eye_set(rule, "exactCount", exact if exact is not None else draw_count)
+        eye_set(rule, "ruleKind", rule_kind)
+        return rule
+
+    eye_zero_draw = eye_fact()
+    eye_count_rule(eye_zero_draw, draw_count=0, exact=17)
+    eye_set(eye_zero_draw, "terminalLoopCount", 1)
+    if eye_expected(eye_zero_draw, count=0)[0] != _eye_site_event(False, 0):
+        print("EyeCensus raw zero draw count did not replay a known negative")
+        return 1
+
+    eye_exact = eye_fact()
+    erule = eye_count_rule(eye_exact)
+    for filt in erule["filters"]:
+        eye_set(filt, "modeOffGate", 0)
+    eye_set(eye_exact["mutation"], "censusSkippedBefore", 0)
+    eye_set(eye_exact["mutation"], "censusSkippedAfter", 1)
+    if eye_expected(eye_exact)[0] != _eye_site_event(True, 0):
+        print("EyeCensus exact-count and four off filters did not claim")
+        return 1
+
+    eye_range_short = eye_fact()
+    erule = eye_count_rule(eye_range_short, high_gate=1, minimum=10, high=16)
+    eye_set(eye_range_short, "terminalLoopCount", 1)
+    if eye_expected(eye_range_short)[0] != _eye_site_event(False, 0):
+        print("EyeCensus high range miss did not stop before exact-count")
+        return 1
+
+    eye_kind_miss = eye_fact()
+    erule = eye_count_rule(eye_kind_miss, rule_kind=ord("D"))
+    eye_set(eye_kind_miss, "terminalLoopCount", 1)
+    if eye_expected(eye_kind_miss)[0] != _eye_site_event(False, 0):
+        print("EyeCensus kind mismatch did not decline after the count reads")
+        return 1
+
+    eye_filter_modes = eye_fact()
+    erule = eye_count_rule(eye_filter_modes)
+    f0, f1, f2, f3 = erule["filters"]
+    eye_set(f0, "modeOffGate", 0)
+    eye_set(f1, "modeOffGate", 1); eye_set(f1, "modeAnyGate", 4)
+    eye_set(f2, "modeOffGate", 1); eye_set(f2, "modeAnyGate", 2)
+    eye_set(f2, "boundNonNull", False); eye_set(f2, "modeAfterBound", 3)
+    eye_set(f3, "modeOffGate", 1); eye_set(f3, "modeAnyGate", 2)
+    eye_set(f3, "boundNonNull", True); eye_set(f3, "modeAfterBound", 2)
+    eye_set(f3, "resolved", True); eye_set(f3, "isTexture2D", True)
+    eye_set(f3, "width", 2048); eye_set(f3, "height", 2048)
+    eye_set(f3, "modeAfterResolve", 2); eye_set(f3, "eyeSizeAvailable", True)
+    eye_set(f3, "eyeWidth", 2048); eye_set(f3, "eyeHeight", 2048)
+    if eye_expected(eye_filter_modes)[0] != _eye_site_event(True, 0):
+        print("EyeCensus off, any, none, and eye-size filters failed")
+        return 1
+
+    eye_size_unavailable = eye_fact()
+    erule = eye_count_rule(eye_size_unavailable)
+    filt = erule["filters"][0]
+    for field, value in (("modeOffGate", 1), ("modeAnyGate", 2),
+                         ("boundNonNull", True), ("modeAfterBound", 2),
+                         ("resolved", True), ("isTexture2D", True),
+                         ("modeAfterResolve", 2), ("eyeSizeAvailable", False)):
+        eye_set(filt, field, value)
+    eye_set(eye_size_unavailable, "terminalLoopCount", 1)
+    if eye_expected(eye_size_unavailable)[0] != _eye_site_event(False, 0):
+        print("EyeCensus unavailable eye size did not short-circuit before dimensions")
+        return 1
+
+    eye_none_bound = eye_fact()
+    erule = eye_count_rule(eye_none_bound)
+    filt = erule["filters"][0]
+    eye_set(filt, "modeOffGate", 1); eye_set(filt, "modeAnyGate", 2)
+    eye_set(filt, "boundNonNull", True); eye_set(filt, "modeAfterBound", 3)
+    eye_set(eye_none_bound, "terminalLoopCount", 1)
+    if eye_expected(eye_none_bound)[0] != _eye_site_event(False, 0):
+        print("EyeCensus None mode accepted a non-null binding")
+        return 1
+
+    eye_resolver_false = eye_fact()
+    erule = eye_count_rule(eye_resolver_false)
+    filt = erule["filters"][0]
+    for field, value in (("modeOffGate", 1), ("modeAnyGate", 2),
+                         ("boundNonNull", True), ("modeAfterBound", 1),
+                         ("resolved", False)):
+        eye_set(filt, field, value)
+    eye_set(eye_resolver_false, "terminalLoopCount", 1)
+    if eye_expected(eye_resolver_false)[0] != _eye_site_event(False, 0):
+        print("EyeCensus known resolver failure did not replay as a miss")
+        return 1
+
+    eye_nontexture = eye_fact()
+    erule = eye_count_rule(eye_nontexture)
+    filt = erule["filters"][0]
+    for field, value in (("modeOffGate", 1), ("modeAnyGate", 2),
+                         ("boundNonNull", True), ("modeAfterBound", 1),
+                         ("resolved", True), ("isTexture2D", False)):
+        eye_set(filt, field, value)
+    eye_set(eye_nontexture, "terminalLoopCount", 1)
+    if eye_expected(eye_nontexture)[0] != _eye_site_event(False, 0):
+        print("EyeCensus non-texture resource did not replay as a miss")
+        return 1
+
+    eye_exact_width = eye_fact()
+    erule = eye_count_rule(eye_exact_width)
+    filt = erule["filters"][0]
+    for field, value in (("modeOffGate", 1), ("modeAnyGate", 2),
+                         ("boundNonNull", True), ("modeAfterBound", 1),
+                         ("resolved", True), ("isTexture2D", True),
+                         ("width", 1024),
+                         ("modeAfterResolve", 1), ("configuredWidth", 2048)):
+        eye_set(filt, field, value)
+    eye_set(eye_exact_width, "terminalLoopCount", 1)
+    if eye_expected(eye_exact_width)[0] != _eye_site_event(False, 0):
+        print("EyeCensus exact-width mismatch did not short-circuit before height")
+        return 1
+
+    eye_changed_bound = eye_fact()
+    eye_count_rule(eye_changed_bound, index=0, exact=0, rule_count=1)
+    eye_count_rule(eye_changed_bound, index=1, exact=17, rule_count=2)
+    for filt in eye_changed_bound["rules"][1]["filters"]:
+        eye_set(filt, "modeOffGate", 0)
+    if eye_expected(eye_changed_bound)[0] != _eye_site_event(True, 1):
+        print("EyeCensus per-iteration loop bound change did not reach rule one")
+        return 1
+
+    eye_order_seven = eye_fact()
+    for i in range(8):
+        count = i + 1
+        rule = eye_count_rule(eye_order_seven, index=i,
+                              exact=(0 if i < 7 else 17), rule_count=count)
+        if i == 7:
+            for filt in rule["filters"]:
+                eye_set(filt, "modeOffGate", 0)
+    if eye_expected(eye_order_seven)[0] != _eye_site_event(True, 7):
+        print("EyeCensus did not preserve winning subsite seven")
+        return 1
+
+    eye_unknown = eye_fact()
+    eye_unknown["skipCountGate"] = eye_read(None, True, False)
+    try:
+        eye_expected(eye_unknown)
+    except _EyeCensusUnavailable:
+        pass
+    else:
+        print("EyeCensus unknown consumed gate became a negative result")
+        return 1
+
+    eye_unknown_dispatch = {"kind": ord("N"), "count": 17,
+                             "sites": [_eye_site_event(False, 0)],
+                             "predicateFacts": [eye_unknown]}
+    unknown_eye_replay = _replay_predicate_facts(
+        eye_unknown_dispatch, "eye-unknown-dispatch", 10)
+    if (unknown_eye_replay["eyeCensusUnreplayable"] != 1 or
+            unknown_eye_replay["mutationUnobserved"] != 0):
+        print("EyeCensus lazy unknown incorrectly became a miss or mutation warning")
+        return 1
+
+    eye_null = json.loads(json.dumps(eye_resolver_false))
+    eye_set(eye_null["rules"][0]["filters"][0], "boundNonNull", False)
+    if eye_expected(eye_null)[0] != _eye_site_event(False, 0):
+        print("EyeCensus null view did not consume known-false resolver return")
+        return 1
+    eye_null["rules"][0]["filters"][0]["resolved"] = eye_read(None, True, False)
+    try:
+        eye_expected(eye_null)
+    except _EyeCensusUnavailable:
+        pass
+    else:
+        print("EyeCensus null view fabricated a negative from unknown resolver return")
+        return 1
+
+    eye_bad_shapes = []
+    bad = json.loads(json.dumps(eye_unknown)); bad["rules"] = []; eye_bad_shapes.append(bad)
+    bad = json.loads(json.dumps(eye_unknown)); bad["rules"][0]["filters"][0]["width"]["known"] = 1; eye_bad_shapes.append(bad)
+    bad = json.loads(json.dumps(eye_unknown)); eye_set(bad["rules"][7], "loopCount", 9); eye_bad_shapes.append(bad)
+    bad = json.loads(json.dumps(eye_unknown)); eye_set(bad, "skipCountGate", 9); eye_bad_shapes.append(bad)
+    bad = json.loads(json.dumps(eye_exact)); eye_set(bad["rules"][0], "heldVsHash", 0); eye_bad_shapes.append(bad)
+    bad = eye_fact(); eye_set(bad, "skipCountGate", 1); eye_set(bad, "terminalLoopCount", 0)
+    eye_set(bad["rules"][0]["filters"][0], "modeOffGate", 0); eye_bad_shapes.append(bad)
+    bad = json.loads(json.dumps(eye_unknown)); bad["rules"][7]["filters"][3]["extra"] = 1; eye_bad_shapes.append(bad)
+    for bad in eye_bad_shapes:
+        try:
+            eye_expected(bad)
+        except TraceError:
+            pass
+        else:
+            print("EyeCensus accepted malformed envelope or short-circuit reads")
+            return 1
+
+    eye_unknown_counter = json.loads(json.dumps(eye_exact))
+    eye_unknown_counter["mutation"]["censusSkippedAfter"] = eye_read(None, True, False)
+    counter_dispatch = {"kind": ord("N"), "count": 17,
+                        "sites": [_eye_site_event(True, 0)],
+                        "predicateFacts": [eye_unknown_counter]}
+    counter_replay = _replay_predicate_facts(counter_dispatch, "eye-unknown-counter", 10)
+    if (counter_replay["eyeCensusReplayed"] != 1 or
+            counter_replay["eyeCensusUnreplayable"] != 0 or
+            counter_replay["mutationUnobserved"] != 1):
+        print("EyeCensus known winner did not distinguish unavailable counter observation")
+        return 1
+
+    eye_dispatch = {"kind": ord("N"), "count": 17,
+                    "sites": [_eye_site_event(True, 0)],
+                    "predicateFacts": [eye_exact]}
+    eye_replay = _replay_predicate_facts(eye_dispatch, "eye-dispatch", 10)
+    if (eye_replay["eyeCensusFacts"] != 1 or
+            eye_replay["eyeCensusReplayed"] != 1 or
+            eye_replay["eyeCensusMismatches"] or
+            eye_replay["mutationUnobserved"]):
+        print("EyeCensus kind17 did not pass supported-fact replay")
+        return 1
+    full_eye_trace = json.loads(json.dumps(vr))
+    full_eye_trace["predicateFactVersion"] = 10
+    full_eye_draw = full_eye_trace["draws"][0]
+    full_eye_draw["sites"][-1].update(outcome=2, flow=0, verdict=-1)
+    for site_id in (44, 45, 71, 46, 47):
+        full_eye_draw["sites"].append({
+            "id": site_id, "kind": SITE_KINDS[site_id], "outcome": 1,
+            "flow": 0, "subsite": 0, "verdict": -1})
+    full_eye_draw["sites"].append(_eye_site_event(True, 0))
+    full_eye_draw["winnerSiteId"] = 48
+    full_eye_draw["verdict"] = 2
+    full_eye_draw["forwardFacts"]["verdictOrdinal"] = 2
+    full_eye_selector = eye_fact()
+    erule = eye_count_rule(full_eye_selector,
+                           exact=full_eye_draw["count"],
+                           rule_kind=full_eye_draw["kind"])
+    for filt in erule["filters"]:
+        eye_set(filt, "modeOffGate", 0)
+    eye_set(full_eye_selector["mutation"], "censusSkippedBefore", 7)
+    eye_set(full_eye_selector["mutation"], "censusSkippedAfter", 8)
+    full_eye_draw["predicateFacts"].append(full_eye_selector)
+    full_eye_draw["predicateFacts"].append(basic_context_fact())
+    full_eye_summary = validate_trace(full_eye_trace)["predicateReplay"]
+    if (full_eye_summary["eyeCensusStatus"] != "replayed" or
+            full_eye_summary["eyeCensusReplayed"] != 1):
+        print("schema10 did not expose EyeCensus status through full validation")
+        return 1
+    if (validate_trace(v9_basic)["predicateReplay"]["eyeCensusStatus"] !=
+            "unavailable-before-v10"):
+        print("schema9 did not report EyeCensus as unavailable")
+        return 1
+    eye_dispatch_v9 = {"kind": ord("N"), "count": 17,
+                       "sites": [_eye_site_event(True, 0)],
+                       "predicateFacts": []}
+    if _replay_predicate_facts(eye_dispatch_v9, "eye-v9-unavailable", 9)["factCount"]:
+        print("predicate fact version 9 treated site48 as supported")
+        return 1
+    eye_bad_fact = json.loads(json.dumps(eye_dispatch))
+    del eye_bad_fact["predicateFacts"][0]["skipCountGate"]
+    try:
+        _replay_predicate_facts(eye_bad_fact, "eye-missing-consumed-read", 10)
+    except TraceError:
+        pass
+    else:
+        print("EyeCensus accepted a missing consumed read")
+        return 1
+    eye_bad_fact = json.loads(json.dumps(eye_dispatch))
+    eye_bad_fact["predicateFacts"][0]["rules"] = []
+    try:
+        _replay_predicate_facts(eye_bad_fact, "eye-wrong-cardinality", 10)
+    except TraceError:
+        pass
+    else:
+        print("EyeCensus accepted a malformed fixed rule table")
+        return 1
+    eye_duplicate = json.loads(json.dumps(eye_dispatch))
+    eye_duplicate["predicateFacts"].append(json.loads(json.dumps(eye_exact)))
+    try:
+        _replay_predicate_facts(eye_duplicate, "eye-duplicate-fact", 10)
+    except TraceError:
+        pass
+    else:
+        print("EyeCensus accepted a duplicate site fact")
+        return 1
+
+    eye_bad_order = eye_fact()
+    eye_bad_order["rules"][0]["loopCount"] = eye_read(1, True, True)
+    eye_set(eye_bad_order["rules"][0], "vsHashGate", 0)
+    eye_set(eye_bad_order["rules"][0], "countHighGate", 0)
+    eye_set(eye_bad_order["rules"][0], "exactCount", 17)
+    eye_set(eye_bad_order["rules"][0], "ruleKind", ord("N"))
+    eye_set(eye_bad_order["rules"][0]["filters"][0], "modeOffGate", 1)
+    eye_set(eye_bad_order["rules"][0]["filters"][0], "modeAnyGate", 2)
+    eye_set(eye_bad_order["rules"][0]["filters"][0], "boundNonNull", True)
+    eye_set(eye_bad_order["rules"][0]["filters"][0], "modeAfterBound", 1)
+    eye_set(eye_bad_order["rules"][0]["filters"][0], "resolved", False)
+    eye_set(eye_bad_order["rules"][0]["filters"][0], "isTexture2D", False)
+    try:
+        eye_expected(eye_bad_order)
+    except TraceError:
+        pass
+    else:
+        print("EyeCensus accepted reads after resolver failure")
+        return 1
+
+    eye_mismatch = eye_fact()
+    eye_count_rule(eye_mismatch)
+    for filt in eye_mismatch["rules"][0]["filters"]:
+        eye_set(filt, "modeOffGate", 0)
+    eye_set(eye_mismatch["mutation"], "censusSkippedBefore", 100)
+    eye_set(eye_mismatch["mutation"], "censusSkippedAfter", 100)
+    if eye_expected(eye_mismatch)[1] != 1:
+        print("EyeCensus missed a recorded counter increment mismatch")
+        return 1
+
+    legacy_eye_trace = json.loads(json.dumps(earlier_exit))
+    legacy_eye_trace["predicateFacts"] = []
+    if _replay_predicate_facts(legacy_eye_trace, "eye-v9-compat", 9)["eyeCensusFacts"] != 0:
+        print("predicate fact version 9 fabricated EyeCensus coverage")
+        return 1
+    # Tuple slot six is a legacy claim boolean for these older fact types,
+    # but a mutation-availability flag for EyeCensus. Never conflate them.
+    positive_claims_v10 = (
+        (6, stars_trace(hidden="yes", hash_source=1,
+                        vs_hash="9AEC596A2B036EA6", claimed=True)),
+        (50, range_trace(10, [], selector_cases[3][2])),
+        (53, holo_positive), (55, scrim_positive))
+    for site_id, trace in positive_claims_v10:
+        draw = json.loads(json.dumps(trace["draws"][0]))
+        draw["sites"] = [event for event in draw["sites"] if event["id"] == site_id]
+        draw["predicateFacts"] = [fact for fact in draw["predicateFacts"]
+                                  if fact["siteId"] == site_id]
+        replay = _replay_predicate_facts(draw, "positive-claim-v10", 10)
+        if (replay["replayed"] != 1 or replay["unreplayable"] != 0 or
+                replay["mismatches"] != 0 or replay["mutationUnobserved"] != 0):
+            print("schema10 confused a known legacy claim with an unobserved mutation", site_id)
+            return 1
     print("draw-ladder-replay self-test: ok")
     return 0
 

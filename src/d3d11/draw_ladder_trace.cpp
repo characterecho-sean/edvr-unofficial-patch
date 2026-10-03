@@ -43,6 +43,7 @@ struct DrawRecord final {
     std::uint32_t fssFactIndices[kMaxFssFactsPerDraw]{};
     std::uint32_t remlokFactIndices[kMaxRemlokFactsPerDraw]{};
     std::uint32_t basicFactIndices[kMaxBasicFactsPerDraw]{};
+    std::uint32_t eyeCensusFactIndices[kMaxEyeCensusFactsPerDraw]{};
     ForwardFacts forwardFacts{};
     std::uint16_t siteCount = 0;
     std::uint16_t actionCount = 0;
@@ -51,6 +52,7 @@ struct DrawRecord final {
     std::uint8_t fssFactCount = 0;
     std::uint8_t remlokFactCount = 0;
     std::uint8_t basicFactCount = 0;
+    std::uint8_t eyeCensusFactCount = 0;
     std::int16_t winnerSiteId = -1;
     std::int16_t verdictOrdinal = -1;
     bool finalized = false;
@@ -66,6 +68,8 @@ remlok_observation::Observation* g_remlokFacts = nullptr;
 std::uint32_t g_remlokFactCount = 0;
 BasicDrawObservation* g_basicFacts = nullptr;
 std::uint32_t g_basicFactCount = 0;
+EyeCensusObservation* g_eyeCensusFacts = nullptr;
+std::uint32_t g_eyeCensusFactCount = 0;
 std::uintptr_t* g_identities = nullptr;
 std::uint32_t g_drawCount = 0;
 std::uint32_t g_identityCount = 0;
@@ -81,6 +85,8 @@ bool g_fssIndexOverflowed = false;
 bool g_fssPoolMissing = false;
 bool g_basicIndexOverflowed = false;
 bool g_basicPoolMissing = false;
+bool g_eyeCensusIndexOverflowed = false;
+bool g_eyeCensusPoolMissing = false;
 bool g_remlokIndexOverflowed = false;
 bool g_remlokPoolMissing = false;
 bool g_lastWriteSucceeded = false;
@@ -647,12 +653,111 @@ bool writeBasicFact(Writer& writer, const BasicDrawObservation& fact) noexcept {
            writeText(writer, "}}");
 }
 
+bool validEyeCensusFact(const EyeCensusObservation& fact) noexcept {
+    if (fact.siteId != 48 || fact.kind != 17) return false;
+    const auto validRead = [](const auto& read) { return !read.known || read.reached; };
+    const auto validCount = [&](const auto& read) {
+        return validRead(read) && (!read.known || read.value <= 8);
+    };
+    if (!validCount(fact.skipCountGate) || !validCount(fact.terminalLoopCount) ||
+        !validRead(fact.censusSkippedBefore) || !validRead(fact.censusSkippedAfter))
+        return false;
+    for (const auto& rule : fact.rules) {
+        if (!validCount(rule.loopCount) ||
+            !validRead(rule.vsHashGate) ||
+            !validRead(rule.heldVsHash) ||
+            !validRead(rule.vsHashCompareExpected) ||
+            !validRead(rule.ruleKind) ||
+            !validRead(rule.countHighGate) ||
+            !validRead(rule.countMinimum) ||
+            !validRead(rule.countHighBound) ||
+            !validRead(rule.exactCount)) return false;
+        for (const auto& filter : rule.filters) {
+            if (!validRead(filter.modeOffGate) ||
+                !validRead(filter.modeAnyGate) ||
+                !validRead(filter.boundNonNull) ||
+                !validRead(filter.modeAfterBound) ||
+                !validRead(filter.resolved) ||
+                !validRead(filter.isTexture2D) ||
+                !validRead(filter.width) ||
+                !validRead(filter.height) ||
+                !validRead(filter.modeAfterResolve) ||
+                !validRead(filter.configuredWidth) ||
+                !validRead(filter.configuredHeight) ||
+                !validRead(filter.eyeSizeAvailable) ||
+                !validRead(filter.eyeWidth) ||
+                !validRead(filter.eyeHeight)) return false;
+        }
+    }
+    return true;
+}
+
+template <typename T>
+bool writeEyeCensusRead(Writer& writer, const char* name,
+                       const EyeCensusRead<T>& read, bool& first) noexcept {
+    return writeFssRead(writer, name, FssRead<T>{read.reached, read.known, read.value}, first);
+}
+
+bool writeEyeCensusFact(Writer& writer, const EyeCensusObservation& fact) noexcept {
+    if (!writeFmt(writer, "{\"siteId\":%u,\"kind\":%u,\"known\":\"yes\",",
+                  fact.siteId, static_cast<unsigned>(fact.kind))) return false;
+    bool first = true;
+    if (!writeEyeCensusRead(writer, "skipCountGate", fact.skipCountGate, first) ||
+        !writeText(writer, ",\"rules\":[")) return false;
+    for (unsigned i = 0; i < 8; ++i) {
+        if (i && !writeText(writer, ",")) return false;
+        if (!writeText(writer, "{")) return false;
+        const auto& rule = fact.rules[i];
+        first = true;
+        if (!writeEyeCensusRead(writer, "loopCount", rule.loopCount, first) ||
+            !writeEyeCensusRead(writer, "vsHashGate", rule.vsHashGate, first) ||
+            !writeEyeCensusRead(writer, "heldVsHash", rule.heldVsHash, first) ||
+            !writeEyeCensusRead(writer, "vsHashCompareExpected", rule.vsHashCompareExpected, first) ||
+            !writeEyeCensusRead(writer, "ruleKind", rule.ruleKind, first) ||
+            !writeEyeCensusRead(writer, "countHighGate", rule.countHighGate, first) ||
+            !writeEyeCensusRead(writer, "countMinimum", rule.countMinimum, first) ||
+            !writeEyeCensusRead(writer, "countHighBound", rule.countHighBound, first) ||
+            !writeEyeCensusRead(writer, "exactCount", rule.exactCount, first) ||
+            !writeText(writer, ",\"filters\":[")) return false;
+        for (unsigned j = 0; j < 4; ++j) {
+            if (j && !writeText(writer, ",")) return false;
+            if (!writeText(writer, "{")) return false;
+            const auto& filter = rule.filters[j];
+            first = true;
+            if (!writeEyeCensusRead(writer, "modeOffGate", filter.modeOffGate, first) ||
+                !writeEyeCensusRead(writer, "modeAnyGate", filter.modeAnyGate, first) ||
+                !writeEyeCensusRead(writer, "boundNonNull", filter.boundNonNull, first) ||
+                !writeEyeCensusRead(writer, "modeAfterBound", filter.modeAfterBound, first) ||
+                !writeEyeCensusRead(writer, "resolved", filter.resolved, first) ||
+                !writeEyeCensusRead(writer, "isTexture2D", filter.isTexture2D, first) ||
+                !writeEyeCensusRead(writer, "width", filter.width, first) ||
+                !writeEyeCensusRead(writer, "height", filter.height, first) ||
+                !writeEyeCensusRead(writer, "modeAfterResolve", filter.modeAfterResolve, first) ||
+                !writeEyeCensusRead(writer, "configuredWidth", filter.configuredWidth, first) ||
+                !writeEyeCensusRead(writer, "configuredHeight", filter.configuredHeight, first) ||
+                !writeEyeCensusRead(writer, "eyeSizeAvailable", filter.eyeSizeAvailable, first) ||
+                !writeEyeCensusRead(writer, "eyeWidth", filter.eyeWidth, first) ||
+                !writeEyeCensusRead(writer, "eyeHeight", filter.eyeHeight, first) ||
+                !writeText(writer, "}")) return false;
+        }
+        if (!writeText(writer, "]}")) return false;
+    }
+    if (!writeText(writer, "],")) return false;
+    first = true;
+    if (!writeEyeCensusRead(writer, "terminalLoopCount", fact.terminalLoopCount, first) ||
+        !writeText(writer, ",\"mutation\":{")) return false;
+    first = true;
+    return writeEyeCensusRead(writer, "censusSkippedBefore", fact.censusSkippedBefore, first) &&
+           writeEyeCensusRead(writer, "censusSkippedAfter", fact.censusSkippedAfter, first) &&
+           writeText(writer, "}}");
+}
+
 bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     normalizeResourceIdentities();
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":9,"
+        "\"predicateFactVersion\":10,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -661,7 +766,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Predicate fact version 9 independently re-evaluates the supported gate, stars, Holo, Scrim, NV, RemLok, FSS, Sunglare, context and distance predicates from raw consumed source facts. Observed helper outputs are consistency checks; cached matches and SiteEvents are not selector inputs. Whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
+        "\"predicateNote\":\"Predicate fact version 10 independently re-evaluates the supported gate, stars, Holo, Scrim, NV, RemLok, FSS, Sunglare, context, distance and eye-census predicates from raw consumed source facts. Observed helper outputs are consistency checks; cached matches and SiteEvents are not selector inputs. Whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
         "\"identityNote\":\"Resource and context identities share per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
@@ -885,6 +990,14 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
             if (!g_basicFacts || r.basicFactIndices[j] >= g_basicFactCount ||
                 !writeBasicFact(writer, g_basicFacts[r.basicFactIndices[j]])) return false;
         }
+        if (r.eyeCensusFactCount && (r.predicateFactCount || r.sunglareFactCount ||
+            r.fssFactCount || r.remlokFactCount || r.basicFactCount) &&
+            !writeText(writer, ",")) return false;
+        for (std::uint8_t j = 0; j < r.eyeCensusFactCount; ++j) {
+            if (j && !writeText(writer, ",")) return false;
+            if (!g_eyeCensusFacts || r.eyeCensusFactIndices[j] >= g_eyeCensusFactCount ||
+                !writeEyeCensusFact(writer, g_eyeCensusFacts[r.eyeCensusFactIndices[j]])) return false;
+        }
         ok = writeFmt(writer,
             "],\"winnerSiteId\":%d,\"verdict\":%d,\"forwardFacts\":",
             r.winnerSiteId, r.verdictOrdinal);
@@ -958,7 +1071,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     if (g_isCapturing) return;
     const bool wasEnabled = g_enabled.load(std::memory_order_acquire);
     if (!enabled && !wasEnabled && !g_records && !g_sunglareFacts &&
-        !g_fssFacts && !g_remlokFacts && !g_basicFacts && !g_identities) return;
+        !g_fssFacts && !g_remlokFacts && !g_basicFacts && !g_eyeCensusFacts && !g_identities) return;
     if (enabled && wasEnabled && logFilePath && logFilePath[0]) {
         wchar_t oldPath[kPathChars]{};
         if (SUCCEEDED(StringCchCopyW(oldPath, kPathChars, g_directory)) &&
@@ -981,17 +1094,21 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_remlokPoolMissing = false;
     g_basicIndexOverflowed = false;
     g_basicPoolMissing = false;
+    g_eyeCensusIndexOverflowed = false;
+    g_eyeCensusPoolMissing = false;
     g_lastWriteSucceeded = false;
     if (g_records) { delete[] g_records; g_records = nullptr; }
     if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
     if (g_fssFacts) { delete[] g_fssFacts; g_fssFacts = nullptr; }
     if (g_remlokFacts) { delete[] g_remlokFacts; g_remlokFacts = nullptr; }
     if (g_basicFacts) { delete[] g_basicFacts; g_basicFacts = nullptr; }
+    if (g_eyeCensusFacts) { delete[] g_eyeCensusFacts; g_eyeCensusFacts = nullptr; }
     if (g_identities) { delete[] g_identities; g_identities = nullptr; }
     g_sunglareFactCount = 0;
     g_fssFactCount = 0;
     g_remlokFactCount = 0;
     g_basicFactCount = 0;
+    g_eyeCensusFactCount = 0;
     g_directory[0] = L'\0';
     g_logFileName[0] = L'\0';
     g_logStem[0] = L'\0';
@@ -1005,13 +1122,16 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_fssFacts = new (std::nothrow) FssObservation[kMaxFssFacts];
     g_remlokFacts = new (std::nothrow) remlok_observation::Observation[kMaxRemlokFacts];
     g_basicFacts = new (std::nothrow) BasicDrawObservation[kMaxBasicFacts];
+    g_eyeCensusFacts = new (std::nothrow) EyeCensusObservation[kMaxEyeCensusFacts];
     g_identities = new (std::nothrow) std::uintptr_t[kIdentitySlots];
-    if (!g_records || !g_sunglareFacts || !g_fssFacts || !g_remlokFacts || !g_basicFacts || !g_identities) {
+    if (!g_records || !g_sunglareFacts || !g_fssFacts || !g_remlokFacts || !g_basicFacts ||
+        !g_eyeCensusFacts || !g_identities) {
         if (g_records) { delete[] g_records; g_records = nullptr; }
         if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
         if (g_fssFacts) { delete[] g_fssFacts; g_fssFacts = nullptr; }
         if (g_remlokFacts) { delete[] g_remlokFacts; g_remlokFacts = nullptr; }
         if (g_basicFacts) { delete[] g_basicFacts; g_basicFacts = nullptr; }
+        if (g_eyeCensusFacts) { delete[] g_eyeCensusFacts; g_eyeCensusFacts = nullptr; }
         if (g_identities) { delete[] g_identities; g_identities = nullptr; }
         g_directory[0] = L'\0';
         g_logFileName[0] = L'\0';
@@ -1054,6 +1174,9 @@ ShutdownResult shutdown() noexcept {
     g_basicIndexOverflowed = false;
     g_basicPoolMissing = false;
     g_basicFactCount = 0;
+    g_eyeCensusIndexOverflowed = false;
+    g_eyeCensusPoolMissing = false;
+    g_eyeCensusFactCount = 0;
     if (g_records) {
         delete[] g_records;
         g_records = nullptr;
@@ -1073,6 +1196,10 @@ ShutdownResult shutdown() noexcept {
     if (g_basicFacts) {
         delete[] g_basicFacts;
         g_basicFacts = nullptr;
+    }
+    if (g_eyeCensusFacts) {
+        delete[] g_eyeCensusFacts;
+        g_eyeCensusFacts = nullptr;
     }
     if (g_identities) {
         delete[] g_identities;
@@ -1111,6 +1238,9 @@ void frameBegin(const FrameFacts& facts) noexcept {
     g_basicFactCount = 0;
     g_basicIndexOverflowed = false;
     g_basicPoolMissing = false;
+    g_eyeCensusFactCount = 0;
+    g_eyeCensusIndexOverflowed = false;
+    g_eyeCensusPoolMissing = false;
     g_sunglareIndexOverflowed = false;
     g_sunglarePoolMissing = false;
     g_fssIndexOverflowed = false;
@@ -1389,7 +1519,8 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
     DrawRecord& record = g_records[token.drawIndex];
     if (record.finalized || record.predicateFactCount >= kMaxPredicateFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
-            record.fssFactCount + record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw ||
+            record.fssFactCount + record.remlokFactCount + record.basicFactCount +
+            record.eyeCensusFactCount >= kMaxTotalPredicateFactsPerDraw ||
         static_cast<std::uint8_t>(fact.known) > static_cast<std::uint8_t>(TriState::Yes) ||
         fact.known == TriState::No ||
         static_cast<std::uint8_t>(fact.gateWanted) > static_cast<std::uint8_t>(TriState::Yes) ||
@@ -1513,7 +1644,8 @@ void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept {
     }
     if (record.sunglareFactCount >= kMaxSunglareFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
-            record.fssFactCount + record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.fssFactCount + record.remlokFactCount + record.basicFactCount +
+            record.eyeCensusFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -1611,7 +1743,8 @@ void appendFssFact(Token token, const FssObservation& fact) noexcept {
     }
     if (record.fssFactCount >= kMaxFssFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
-            record.fssFactCount + record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.fssFactCount + record.remlokFactCount + record.basicFactCount +
+            record.eyeCensusFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -1710,7 +1843,7 @@ void appendRemlokFact(Token token, const remlok_observation::Observation& fact) 
     }
     if (record.remlokFactCount >= kMaxRemlokFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -1745,7 +1878,7 @@ void appendBasicFact(Token token, const BasicDrawObservation& fact) noexcept {
     }
     if (record.basicFactCount >= kMaxBasicFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -1778,7 +1911,47 @@ void appendBasicFact(Token token, const BasicDrawObservation& fact) noexcept {
     record.basicFactIndices[record.basicFactCount++] = g_basicFactCount++;
 }
 
+void appendEyeCensusFact(Token token, const EyeCensusObservation& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized) { rejectInvalidToken(); return; }
+    if (!g_eyeCensusFacts) {
+        g_eyeCensusPoolMissing = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (g_eyeCensusFactCount >= kMaxEyeCensusFacts) {
+        g_eyeCensusIndexOverflowed = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (record.eyeCensusFactCount >= kMaxEyeCensusFactsPerDraw ||
+        record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount >=
+            kMaxTotalPredicateFactsPerDraw || !validEyeCensusFact(fact)) {
+        g_wasOverflowed = true;
+        return;
+    }
+    for (std::uint8_t i = 0; i < record.predicateFactCount; ++i)
+        if (record.predicateFacts[i].siteId == fact.siteId) { g_wasOverflowed = true; return; }
+    g_eyeCensusFacts[g_eyeCensusFactCount] = fact;
+    record.eyeCensusFactIndices[record.eyeCensusFactCount++] = g_eyeCensusFactCount++;
+}
+
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
+std::uint8_t eyeCensusFactCountForTest(Token token) noexcept {
+    return validToken(token) ? g_records[token.drawIndex].eyeCensusFactCount : 0;
+}
+
+bool readEyeCensusFactForTest(Token token, std::uint8_t ordinal, EyeCensusObservation* out) noexcept {
+    if (!out || !validToken(token) || !g_eyeCensusFacts) return false;
+    const DrawRecord& record = g_records[token.drawIndex];
+    if (ordinal >= record.eyeCensusFactCount ||
+        record.eyeCensusFactIndices[ordinal] >= g_eyeCensusFactCount) return false;
+    *out = g_eyeCensusFacts[record.eyeCensusFactIndices[ordinal]];
+    return true;
+}
+
 std::uint8_t basicFactCountForTest(Token token) noexcept {
     return validToken(token) ? g_records[token.drawIndex].basicFactCount : 0;
 }
@@ -2012,6 +2185,18 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
                 g_wasOverflowed = true;
         }
     }
+    bool eyeCensusVisited = false;
+    for (std::uint16_t i = 0; i < record.siteCount; ++i)
+        if (record.sites[i].id == 48) eyeCensusVisited = true;
+    if (eyeCensusVisited && record.eyeCensusFactCount != 1) g_wasOverflowed = true;
+    if (!eyeCensusVisited && record.eyeCensusFactCount) g_wasOverflowed = true;
+    for (std::uint8_t i = 0; i < record.eyeCensusFactCount; ++i) {
+        if (!g_eyeCensusFacts || record.eyeCensusFactIndices[i] >= g_eyeCensusFactCount) {
+            g_eyeCensusPoolMissing = !g_eyeCensusFacts;
+            g_eyeCensusIndexOverflowed = g_eyeCensusIndexOverflowed || !g_eyeCensusPoolMissing;
+            g_wasOverflowed = true;
+        }
+    }
     record.winnerSiteId = winnerSiteId;
     record.verdictOrdinal = verdictOrdinal;
     record.finalized = true;
@@ -2071,6 +2256,8 @@ bool capturing() noexcept {
 }
 bool overflowed() noexcept { return g_wasOverflowed; }
 CaptureInvalidation invalidationReason() noexcept {
+    if (g_eyeCensusPoolMissing) return CaptureInvalidation::EyeCensusPoolMissing;
+    if (g_eyeCensusIndexOverflowed) return CaptureInvalidation::EyeCensusIndexOverflow;
     if (g_basicPoolMissing) return CaptureInvalidation::BasicPoolMissing;
     if (g_basicIndexOverflowed) return CaptureInvalidation::BasicIndexOverflow;
     if (g_remlokPoolMissing) return CaptureInvalidation::RemlokPoolMissing;

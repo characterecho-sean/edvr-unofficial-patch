@@ -4,10 +4,8 @@
 
 - **State (2026-10-03):** implementation in progress on
   `codex/plugin-architecture`; do not merge to main until Sean is ready to ship.
-  Luna 6 agents review baseline segmentation and remaining implementation gates.
   This is Phase 1 of five; the review and remaining gates are in section 11.
-  This design extends draft PR #46 (Devin Nemec, "generic OpenXR addon and
-  plugin architecture") as its add-on tier (section 6).
+  The add-on tier extends draft PR #46 (section 6).
 - **Goal (Sean):** every fix and performance item belongs to one plugin,
   plugins group features logically, and the user picks which to install in
   the installer. A plugin that is not installed costs nothing.
@@ -44,7 +42,9 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  shared resolver cost passes 134 jobs; seventeen selectors pass 137 validation jobs.
+  shared resolver and shader API costs are instrumented; eighteen selectors pass
+  all 138 validation jobs. Enabled replay storage is measured at 442.25 MiB;
+  the default disabled path allocates none.
   Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
@@ -1676,3 +1676,88 @@ on 4350a281 with settings preserved. Seventeen selector sites now have scoped
 rig replay coverage. Whole-ladder replay, independent forwarding, complete
 owner costs and a matched CPU improvement/GPU non-regression comparison remain
 open before Phase 2.
+
+### Eye-census rules and shared shader costs, 2026-10-03
+
+Predicate-fact version 10 adds one kind-17 source fact at eye-census site 48.
+It records the raw initial count, each consumed loop bound and the natural
+terminal bound, up to eight rules and four filters per rule. A nonzero VS-hash
+rule compares the actual held hash against the later configured hash read and
+bypasses count and SRV filters on a match. Count rules preserve the range
+upper-bound and kind comparison order. Filters retain separate mode reads
+before and after resource resolution, including only the width and height
+operands actually consumed. Draw kind and count come from the existing
+immutable invocation facts. The independent reader derives Exited/Skip and the
+winning rule index, including zero, from those inputs. Recorded outcomes remain
+consistency checks.
+
+The two counter snapshots surround the actual uint64 increment, proving its
+local modulo wrap without attributing callback mutations to the enclosing draw.
+Declines have no counter-write observations. Unknown selector inputs remain
+unavailable; a known winner with an unavailable counter snapshot reports
+missing mutation evidence. The parser validates every envelope, cardinality,
+type and domain before a lazy unknown exit. Null non-None filters still consume
+the real resolver return, and skipped hash/filter reads cannot fabricate
+progress. Counts above the physical eight-rule capacity invalidate the capture;
+the trace's bounded loop does not establish behavior for corrupt or
+over-capacity state.
+
+The genuine visitor/System32-WARP rig covers all five filter modes, texture and
+structured-buffer resources, exact and ranged counts and their lazy misses,
+hash bypass and mismatch, rule seven, eight-rule termination, eye-size
+availability and mismatches, None with a present binding, and uint64 wrap.
+Typed GetResource callbacks count actual attempts and change later mode,
+configured dimensions, loop bounds and counter values. The resulting
+observations and persistent effects agree with those changes. Typed faults have
+Trace/NoTrace parity, and the macro seam restores prior bindings and shader
+identity/hash on success and failure. Each callback scenario uses a fresh hook
+because reusing a CopyVptr hook instance retained its mechanism state. No
+production hook behavior was changed.
+
+Ordered recorder fixtures add missing, duplicate, bad-kind, bad-envelope,
+over-capacity and unvisited facts; a valid capture with exactly one unknown
+eye-census input; and independent exact, late-hash wrapping and resource-size
+winners. The reader preserves versions 1-9 and whole-ladder equivalence remains
+false. Native acceptance caught a reader indentation regression that treated
+legacy successful Stars/NV/Holo/Scrim claims as missing mutation evidence. The
+unchanged terminal matrix passes with 271 selector matches and zero unavailable
+inputs, mismatches or mutation warnings after a scoped correction. Separate
+schema-10 regressions pin those four existing positive selectors; no gate was
+relaxed.
+
+The opt-in EyeCensus pool has 32,768 entries of 3,256 bytes, exactly 101.75
+MiB. Its overflow has a distinct invalidation reason and rejects the complete
+capture. DrawRecord grows by eight bytes to 3,904, adding 0.5 MiB. All enabled
+recorder pools total 442.25 MiB, excluding allocator overhead, versus 340.0 MiB
+at the preceding checkpoint. Default-disabled capture allocates none of them.
+The compiled NoTrace/NoCpu parent still matches the saved reference exactly:
+7,057 bytes, 1,636 listing records, 94 ordered calls and a 288-byte stack,
+SHA-256 2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40. No
+extra rendering query or clock was added to the predicate.
+
+Core-owned API sites 116-121 cover shared precompiled VS/CS/PS creation: each
+actual GetDevice attempt is ReadQuery, and each actual CreateShader attempt is
+Work. Sampling requires the registered owner context/thread and is latched
+after the original public-input guards. Notes precede the calls inside the
+original admitted fault guard. Releases and dynamic D3DCompile remain outside
+this bounded cohort. SplashDim's cold Core report now adds its helper's PS
+creation sites 120/121; warm reports add no creation work.
+
+The shared shader System32-WARP rig verifies successful VS/CS/PS and
+malformed-bytecode attempts, rejected null inputs, real effects in
+unsampled/deferred/worker calls without render-thread charges, and a typed
+GetDevice fault followed by recovery. It checks exact counts, masks and
+completed 1,800-frame denominators with the production fault guard. The
+SplashDim rig still passes 5,469 checks. Shader-creation faults, output
+publication or Release faults and exhausted shader budgets remain untested.
+Existing standalone shader-swap consumers now link the collector and generated
+declarations.
+
+Full validation passed all 138 jobs: 131 pooled jobs in 142.8 seconds and seven
+quiet jobs in 35.1 seconds. FocusWatch ran for 178 seconds with zero show,
+console or foreground events. Both production profiles, Python self-tests,
+native rigs and the self-contained installer passed; the config contract agrees
+on all 235 keys. Receipt input SHA-256 is
+01acde3591a91aed3020d1a41f30ce0a7fa7120989f0a3d3fa428a48e1aa9c91; log:
+build/plugin-predicate-v10-full-build.log. This is a validated Phase 1
+checkpoint, not whole-ladder equivalence or a performance acceptance result.
