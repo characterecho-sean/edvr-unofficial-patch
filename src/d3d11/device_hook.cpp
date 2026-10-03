@@ -7,6 +7,7 @@
 #include "../common/native_present_trace.h"
 
 #include "weapon_motion.h"
+#include "flat_overlay_layer.h"
 #include "input_gate.h"
 #include "focus_target.h"
 #include "oculus_route.h"
@@ -727,6 +728,8 @@ HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecod
         rememberFlatProbeShader('p', hash, bytecode, len);
         registerShaderHash(*out, hash);
         engineVelocityRememberPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
+        if (runtimeFlatProfile()) FlatOverlayLayer::rememberPixelShader(static_cast<ID3D11PixelShader*>(*out),
+            bytecode,static_cast<size_t>(len),linkage!=nullptr);
         uiLayerRememberHoloPs(static_cast<ID3D11PixelShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         if(hash==EyeDrawSnapshot::kVscreenPs || hash==EyeDrawSnapshot::kSpritePs || hash==EyeDrawSnapshot::kUnknownAPs || hash==EyeDrawSnapshot::kUnknownBPs || EyeDrawSnapshot::solarPixel(hash)) EyeDrawSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len));

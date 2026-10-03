@@ -85,7 +85,7 @@ struct State {
     bool refusalPending[4]={false,false,false,false};
     uint32_t refusalWidth[4]={0,0,0,0}, refusalHeight[4]={0,0,0,0};
     uint32_t refusalWrite=0;
-    Image color, depth[2], motion, rejection, expected, output[2];
+    Image color, rawOverlay, depth[2], motion, rejection, expected, output[2];
     uint32_t width=0, height=0, outWidth=0, outHeight=0, evalWidth=0, evalHeight=0, current=0;
     // The steady-detail depth check's previous depth (FlatMonoResolveFrame::steadyDetail). TAA keeps last frame's depth in depth[current^1]
     // already; the other backends keep none, so depth[1] is made on the first frame that asks, and while frames ask, the depth the
@@ -371,13 +371,13 @@ bool resources(const FlatMonoResolveFrame& f,const char** reason) {
        g.outHeight==f.outputHeight && g.mode==f.mode && g.hdr==f.hdr &&
        g.evalWidth==evalW && g.evalHeight==evalH)return true;
     ++stats.allocations;
-    g.color={};g.depth[0]={};g.depth[1]={};g.motion={};g.rejection={};g.expected={};g.output[0]={};g.output[1]={};
+    g.color={};g.rawOverlay={};g.depth[0]={};g.depth[1]={};g.motion={};g.rejection={};g.expected={};g.output[0]={};g.output[1]={};
     g.klass={};g.classWidth=g.classHeight=0;   // the refusal census's class texture is the render size: made again by a frame that asks
     g.width=g.height=g.outWidth=g.outHeight=0;g.evalWidth=g.evalHeight=0;g.current=0;g.depthLast=0;g.history=false;g.hdr=false;
     const bool taa=f.mode==FlatMonoResolveMode::Taa;
     // The images' names for the HDR route's crumbs: which of the private textures each creation is.
     const auto role=[&](const Image& i)->const char* {
-        return &i==&g.color?"color":&i==&g.depth[0]?"depth0":&i==&g.depth[1]?"depth1":&i==&g.motion?"motion":
+        return &i==&g.color?"color":&i==&g.rawOverlay?"overlay-raw":&i==&g.depth[0]?"depth0":&i==&g.depth[1]?"depth1":&i==&g.motion?"motion":
                &i==&g.rejection?"rejection":&i==&g.expected?"expected":&i==&g.output[0]?"output0":"output1";
     };
     auto make=[&](Image& out,DXGI_FORMAT format,bool output=false,bool writable=true) {
@@ -409,7 +409,7 @@ bool resources(const FlatMonoResolveFrame& f,const char** reason) {
 // `hdr`: the colour is the game's HDR scene target H itself (FlatMonoResolveFrame::hdr): an R11G11B10_FLOAT shader
 // view over an R11G11B10_FLOAT texture the game also renders into, because the result goes back through a render-target
 // view the resolver makes over it.
-bool inputTexture(ID3D11ShaderResourceView* view,uint32_t width,uint32_t height,bool color,ComPtr<ID3D11Texture2D>& out,bool hdr=false) {
+bool inputTexture(ID3D11ShaderResourceView* view,uint32_t width,uint32_t height,bool color,ComPtr<ID3D11Texture2D>& out,bool hdr=false,bool requireTarget=true) {
     if(!view)return false;
     D3D11_SHADER_RESOURCE_VIEW_DESC srv{};view->GetDesc(&srv);
     if(srv.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || srv.Texture2D.MostDetailedMip!=0 ||
@@ -422,7 +422,8 @@ bool inputTexture(ID3D11ShaderResourceView* view,uint32_t width,uint32_t height,
     if(FAILED(resource.As(&out)))return false;
     D3D11_TEXTURE2D_DESC desc{};out->GetDesc(&desc);
     ComPtr<ID3D11Device> device;out->GetDevice(device.GetAddressOf());
-    if(color && hdr && (desc.Format!=DXGI_FORMAT_R11G11B10_FLOAT || !(desc.BindFlags&D3D11_BIND_RENDER_TARGET)))return false;
+    if(color && hdr && (desc.Format!=DXGI_FORMAT_R11G11B10_FLOAT ||
+       (requireTarget && !(desc.BindFlags&D3D11_BIND_RENDER_TARGET))))return false;
     return device.Get()==g.device.Get() && desc.Width==width && desc.Height==height && desc.MipLevels==1 &&
         desc.ArraySize==1 && desc.SampleDesc.Count==1 && (desc.BindFlags&D3D11_BIND_SHADER_RESOURCE)!=0;
 }
@@ -582,7 +583,7 @@ void drawHdrTarget(ID3D11DeviceContext* context,ID3D11PixelShader* ps,uint32_t w
     }
     // Nothing of ours stays bound: the isolation guard's destructor clears the state once more before the game's returns.
     context->OMSetRenderTargets(0,nullptr,nullptr);
-    ID3D11ShaderResourceView* none[12]={};context->PSSetShaderResources(0,viewCount,none);   // twelve: the refusal view binds t11
+    ID3D11ShaderResourceView* none[13]={};context->PSSetShaderResources(0,viewCount,none);   // t12 is the optional late-overlay mask
 }
 // The backend's availability ask, where the asker is the HDR route: the first such ask of a session is the SDK's own
 // initialisation (NGX's, or AMD's), the first call into code that has never run on a DXMT device, so the crumbs bracket it.
@@ -749,10 +750,35 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(!initialize(device,context,reason))return false;
     if(hdr && !initializeHdr(device,reason))return false;
     pollRefusalCensus(context);   // the samples the GPU finished since the last call (nothing pending: one flag test per slot)
-    ComPtr<ID3D11Texture2D> color,depth;
+    ComPtr<ID3D11Texture2D> color,depth,cleanColor,overlayMask;
+    const bool overlay=f.cleanColor || f.overlayCoverage;
+    if(overlay && (!hdr || !f.cleanColor || !f.overlayCoverage))
+        return fail(reason,"flat-resolve-overlay-input-pair-incomplete");
     if(!inputTexture(f.color,f.renderWidth,f.renderHeight,true,color,hdr) ||
        !inputTexture(f.depth,f.renderWidth,f.renderHeight,false,depth))return fail(reason,"flat-resolve-input-view-mismatch");
+    if(overlay) {
+        if(!inputTexture(f.cleanColor,f.renderWidth,f.renderHeight,true,cleanColor,true,false) ||
+           cleanColor.Get()==color.Get())
+            return fail(reason,"flat-resolve-clean-HDR-view-mismatch");
+        D3D11_SHADER_RESOURCE_VIEW_DESC mv{};f.overlayCoverage->GetDesc(&mv);
+        ComPtr<ID3D11Resource> mr;f.overlayCoverage->GetResource(&mr);
+        if(!mr || FAILED(mr.As(&overlayMask)))
+            return fail(reason,"flat-resolve-overlay-mask-resource-mismatch");
+        D3D11_TEXTURE2D_DESC md{};overlayMask->GetDesc(&md);
+        ComPtr<ID3D11Device> maskDevice;overlayMask->GetDevice(&maskDevice);
+        if(mv.Format!=DXGI_FORMAT_R8_UNORM || mv.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D ||
+           mv.Texture2D.MostDetailedMip!=0 ||
+           (mv.Texture2D.MipLevels!=1 && mv.Texture2D.MipLevels!=UINT(-1)) ||
+           md.Format!=DXGI_FORMAT_R8_UNORM || md.Width!=f.renderWidth || md.Height!=f.renderHeight ||
+           md.MipLevels!=1 || md.ArraySize!=1 || md.SampleDesc.Count!=1 ||
+           !(md.BindFlags&D3D11_BIND_SHADER_RESOURCE) || maskDevice.Get()!=g.device.Get())
+            return fail(reason,"flat-resolve-overlay-mask-view-mismatch");
+    }
     if(!resources(f,reason))return false;
+    if(overlay && !g.rawOverlay.texture &&
+       !image(g.device.Get(),f.renderWidth,f.renderHeight,DXGI_FORMAT_R11G11B10_FLOAT,
+              g.rawOverlay,false,"overlay-raw"))
+        return fail(reason,"flat-resolve-overlay-raw-create-failed");
     // The render-target view over H exists before anything is written: a game texture the resolver cannot render into
     // refuses the frame while H is still the game's own.
     if(hdr && !hdrTargetView(color.Get(),reason))return false;
@@ -845,6 +871,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.route[0]=hdr?1u:0u;constants.route[1]=(hdr&&taa)?1u:0u;
     constants.route[2]=firstPersonMap?1u:0u;constants.route[3]=firstPersonMap?f.firstPersonPhaseMode:0u;
     constants.debug[0]=sampleNow?1u:0u;constants.debug[1]=paintNow?1u:0u;
+    constants.debug[2]=overlay?1u:0u;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
     constants.jitter[2]=f.previousJitterX;constants.jitter[3]=f.previousJitterY;
     // On a reset the previous rows ARE the current rows (above), so they carry the current phase.
@@ -855,7 +882,8 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         static_cast<unsigned>(colorDesc.Format),f.renderWidth,f.renderHeight);
     SpanGuard span(context);   // the GPU census's timestamp pair: this call's own dispatches and the backend
     context->UpdateSubresource(g.constants.Get(),0,nullptr,&constants,0,0);
-    context->CopyResource(g.color.texture.Get(),color.Get());
+    context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());
+    if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());
     if(hdr)++stats.hdrCopied;
     copyStep.close();
     HdrCrumbSpan prepStep(g_crumbOn,"prep","groups=%ux%u",(f.renderWidth+7)/8,(f.renderHeight+7)/8);
@@ -927,13 +955,15 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         // output, which has already made that choice. The state is our own, cleared at the top of the draw.
         if(paintNow) {
             // The refusal view: the same draw with the prep's class texture at t11, which the finish paints from.
-            ID3D11ShaderResourceView* paintViews[12]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
-                g.rejection.srv.Get(),nullptr,g.output[taa?index:0].srv.Get(),nullptr,nullptr,nullptr,g.klass.srv.Get()};
-            drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,paintViews,12);
+            ID3D11ShaderResourceView* paintViews[13]={overlay?g.rawOverlay.srv.Get():g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
+                g.rejection.srv.Get(),nullptr,g.output[taa?index:0].srv.Get(),nullptr,nullptr,nullptr,g.klass.srv.Get(),
+                overlay?f.overlayCoverage:nullptr};
+            drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,paintViews,13);
         } else {
-            ID3D11ShaderResourceView* views[8]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
-                g.rejection.srv.Get(),nullptr,g.output[taa?index:0].srv.Get()};
-            drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,8);
+            ID3D11ShaderResourceView* views[13]={overlay?g.rawOverlay.srv.Get():g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
+                g.rejection.srv.Get(),nullptr,g.output[taa?index:0].srv.Get(),nullptr,nullptr,nullptr,nullptr,
+                overlay?f.overlayCoverage:nullptr};
+            drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,overlay?13:8);
         }
     } else if(!taa) {
         // SDKs may alter every stage. Start our final composite from the isolated

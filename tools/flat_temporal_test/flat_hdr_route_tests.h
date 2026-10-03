@@ -5,6 +5,7 @@
 // writes a trace with only the named frames (how the fixtures of the four section-81 captures were cut).
 #pragma once
 #include "../../src/d3d11/flat_hdr_route.h"
+#include "../../src/d3d11/flat_camera_phase.h"
 #include "../../src/d3d11/flat_trace.h"
 #include "../../src/d3d11/hdr_backend_flags.h"
 #include "../../src/d3d11/flat_standdown.h"
@@ -69,6 +70,18 @@ inline bool readFile(const std::filesystem::path& path, std::vector<unsigned cha
     file.read(reinterpret_cast<char*>(bytes->data()), std::streamsize(bytes->size()));
     return static_cast<bool>(file);
 }
+inline bool replayOverlayMarker(edvr::FlatRuntimePrefix& prefix, const edvr::FlatTraceEvent& e) {
+    using namespace edvr;
+    if (e.kind == kFlatTraceEventOverlayFailed) {
+        flatRuntimeOverlayFailed(prefix,e.key.color);
+        return true;
+    }
+    if (e.kind == kFlatTraceEventOverlaySeal) {
+        flatRuntimeOverlaySeal(prefix,e.key.color);
+        return true;
+    }
+    return false;
+}
 
 inline FrameFacts replayFrame(const ParsedFrame& frame) {
     using namespace edvr;
@@ -94,6 +107,7 @@ inline FrameFacts replayFrame(const ParsedFrame& frame) {
         if (e.kind == kFlatTraceEventMarkUncertain) { prefix->uncertain = true; continue; }
         if (e.kind == kFlatTraceEventCameraCapture) { ++prefix->sequence; continue; }
         if (e.kind == kFlatTraceEventResolve) { ++f.resolveMarkers; f.markerEvent = i; f.markerReason = e.key.count; continue; }
+        if (replayOverlayMarker(*prefix,e)) continue;
         FlatRuntimeDraw d = flatTraceEventToDraw(e);
         if (e.flags & kFlatTraceForeignWork) prefix->uncertain = true;
         ++f.draws;
@@ -645,6 +659,132 @@ inline int flatHdrRouteTests() {
                "a second supported source depth under the same camera is ambiguous");
     }
 
+    // A protected divergent-camera draw may open a late overlay suffix, but
+    // every following HDR write must remain protected. The model must retain
+    // conflicts that occurred before the suffix opened.
+    {
+        auto late = [](Stream& s, bool protectedDraw) {
+            auto d = s.make(s.sc.h, s.sc.hDepth, s.sc.hW, s.sc.hH, 26,
+                            0x12345678, 0x87654321, true, false);
+            d.camera[0] ^= 1;
+            d.key.cameraHash = flatCameraHash(d.camera);
+            d.overlayProtected = protectedDraw;
+            s.draw(d);
+        };
+        auto target = [](const Stream& s) -> const FlatRuntimeTarget* {
+            for (uint32_t i = 0; i < s.prefix->targetsUsed; ++i)
+                if (s.prefix->targets[i].resource == s.sc.h) return &s.prefix->targets[i];
+            return nullptr;
+        };
+        Stream accepted; accepted.sceneDraws(2, 2); late(accepted, true);
+        const auto* a = target(accepted);
+        expect(a && a->overlayOpen && a->overlayDepth == accepted.sc.hDepth && !a->hdrBad,
+               "protected alternate-camera HDR draw opens a clean overlay suffix");
+        late(accepted, true);
+        a = target(accepted);
+        expect(a && a->overlayOpen && !a->hdrBad,
+               "a second protected draw may extend the same overlay suffix");
+        accepted.toneTrigger();
+        expect(accepted.select().selected(),
+               "the real HDR consumer selector admits a protected suffix with the original world camera");
+
+        Stream unprotected; unprotected.sceneDraws(2, 2); late(unprotected, true);
+        unprotected.draw(unprotected.make(unprotected.sc.h, unprotected.sc.hDepth,
+            unprotected.sc.hW, unprotected.sc.hH, 26, 0x44, 0x55, true, false));
+        const auto* u = target(unprotected);
+        expect(u && u->hdrBad && u->firstBad.cause == FlatRuntimeConflict::OverlaySuffix,
+               "unprotected later HDR draw makes the suffix sticky-bad");
+        unprotected.toneTrigger();
+        expect(unprotected.select().reason == FlatMonoReason::ConflictingHdr,
+               "unprotected suffix is refused by the actual HDR consumer selector");
+
+        Stream colorWrite; colorWrite.sceneDraws(2, 2); late(colorWrite, true);
+        colorWrite.write(colorWrite.sc.h);
+        const auto* c = target(colorWrite);
+        expect(c && c->hdrBad && c->firstBad.cause == FlatRuntimeConflict::ExplicitWrite,
+               "explicit HDR copy, clear, update, or map invalidates the suffix");
+        colorWrite.toneTrigger();
+        expect(colorWrite.select().reason == FlatMonoReason::ConflictingHdr,
+               "explicit HDR write is refused by the actual HDR consumer selector");
+
+        Stream depthWrite; depthWrite.sceneDraws(2, 2); late(depthWrite, true);
+        depthWrite.write(depthWrite.sc.hDepth);
+        const auto* z = target(depthWrite);
+        expect(z && z->hdrBad && z->firstBad.cause == FlatRuntimeConflict::OverlaySuffix,
+               "explicit scene-depth write invalidates the suffix");
+        depthWrite.toneTrigger();
+        expect(depthWrite.select().reason == FlatMonoReason::ConflictingHdr,
+               "scene-depth write is refused by the actual HDR consumer selector");
+
+        Stream drawDepth; drawDepth.sceneDraws(2, 2); late(drawDepth, true);
+        auto depthOnly = drawDepth.make(drawDepth.sc.h2, drawDepth.sc.hDepth,
+            drawDepth.sc.hW, drawDepth.sc.hH, 26, 0x51, 0x52, false, false);
+        depthOnly.effectiveDepthWrite = true;
+        drawDepth.draw(depthOnly);
+        z = target(drawDepth);
+        expect(z && z->hdrBad && z->firstBad.cause == FlatRuntimeConflict::OverlaySuffix,
+               "a different-color draw writing scene depth invalidates the suffix");
+        drawDepth.toneTrigger();
+        expect(drawDepth.select().reason == FlatMonoReason::ConflictingHdr,
+               "different-color scene-depth writer is refused by the HDR consumer selector");
+
+        Stream readOnlyDepth; readOnlyDepth.sceneDraws(2, 2); late(readOnlyDepth, true);
+        auto depthRead = readOnlyDepth.make(readOnlyDepth.sc.h2, readOnlyDepth.sc.hDepth,
+            readOnlyDepth.sc.hW, readOnlyDepth.sc.hH, 26, 0x51, 0x52, false, false);
+        depthRead.effectiveDepthWrite = false;
+        readOnlyDepth.draw(depthRead);
+        z = target(readOnlyDepth);
+        expect(z && !z->hdrBad,
+               "a depth-read-only draw on another target does not invent a scene-depth write");
+        readOnlyDepth.toneTrigger();
+        expect(readOnlyDepth.select().selected(),
+               "depth-read-only work leaves the original HDR consumer eligible");
+
+        Stream prior; prior.sceneDraws(2, 2); late(prior, false);
+        const auto* p = target(prior);
+        const auto first = p ? p->firstBad.cause : FlatRuntimeConflict::None;
+        late(prior, true);
+        p = target(prior);
+        expect(p && first == FlatRuntimeConflict::CameraChange && p->hdrBad &&
+               p->firstBad.cause == first && !p->overlayOpen,
+               "protection cannot erase an earlier camera conflict");
+        prior.toneTrigger();
+        expect(prior.select().reason == FlatMonoReason::ConflictingHdr,
+               "earlier camera conflict remains refused at the HDR consumer");
+    }
+
+    // The projection proof measures the uploaded rows, independently of VS/PS
+    // identity. Scale and near may differ, but both centres and the pose must
+    // agree with this frame's raster phase.
+    {
+        constexpr uint32_t w=3840, h=2160;
+        FlatProjectionJitter phase{};
+        expect(flatProjectionJitter(.25f,-.25f,w,h,phase),
+               "nonzero phase has a finite expected NDC shift");
+        float world[6][4]{}, overlay[6][4]{};
+        world[0][0]=1.2f;world[1][1]=1.5f;world[2][3]=1;
+        world[2][0]=phase.ndcX;world[2][1]=phase.ndcY;world[3][2]=.025f;
+        std::memcpy(overlay,world,sizeof(world));
+        overlay[0][0]=1.8f;overlay[1][1]=2.1f;overlay[3][2]=.0675f;
+        expect(flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "alternate FOV and near with the same nonzero phase and pose is admitted");
+        overlay[2][0]+=1.e-4f;
+        expect(!flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "off-centre alternate projection is refused");
+        overlay[2][0]=phase.ndcX;overlay[2][1]=0;
+        expect(!flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "unphased alternate projection is refused when the frame is jittered");
+        overlay[2][1]=phase.ndcY;overlay[4][0]=1;
+        expect(!flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "different camera pose is refused");
+        overlay[4][0]=0;overlay[2][3]=0;
+        expect(!flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "malformed forward row is refused");
+        overlay[2][3]=1;world[2][0]=overlay[2][0]=0;world[2][1]=overlay[2][1]=0;
+        expect(flatCameraCenteredPairAtPhase(world,overlay,0,0,w,h),
+               "centered zero-phase alternate projection is admitted");
+    }
+
     // ---- the latch: three treated frames with late writes turn the route off ------------------------------------
     {
         FlatHdrLatch latch;
@@ -937,6 +1077,72 @@ inline int flatHdrRouteTests() {
         bad = v3; bad.resize(bad.size() - 3);
         expect(!parseTrace(bad, &old), "a truncated v3 trace is refused");
         expect(sizeof(FlatTraceEventV3) == 472, "the EDVRFTR3 event layout is the 472 bytes the corpus was written with");
+    }
+
+    // The live trace has to preserve the protection and effective-write
+    // semantics. A replay that drops them could approve an unsafe suffix.
+    {
+        auto ring=std::make_unique<FlatTraceRing>();
+        Stream s;
+        auto recordFrame=[&](uint64_t frame,bool depthWriter) {
+            flatTraceBeginFrame(*ring,frame,s.sc.output,s.sc.outW,s.sc.outH,28);
+            flatTraceMark(*ring,kFlatTraceEventCameraCapture,nullptr);
+            auto world=s.make(s.sc.h,s.sc.hDepth,s.sc.hW,s.sc.hH,26,0xA1,0xB1,true,true);
+            world.key.writeEpoch=frame;
+            flatTraceRecord(*ring,world,false);
+            auto overlay=s.make(s.sc.h,s.sc.hDepth,s.sc.hW,s.sc.hH,26,0x1234,0x5678,true,false);
+            overlay.camera[0]^=1;overlay.key.cameraHash=flatCameraHash(overlay.camera);
+            overlay.key.writeEpoch=frame;
+            overlay.overlayProtected=true;overlay.effectiveStencilWrite=true;
+            flatTraceRecord(*ring,overlay,false);
+            if (depthWriter) {
+                auto z=s.make(s.sc.h2,s.sc.hDepth,s.sc.hW,s.sc.hH,26,0x51,0x52,false,false);
+                z.effectiveDepthWrite=true;
+                flatTraceRecord(*ring,z,false);
+                flatTraceMark(*ring,kFlatTraceEventOverlayFailed,s.sc.h);
+            } else {
+                flatTraceMark(*ring,kFlatTraceEventOverlaySeal,s.sc.h);
+                flatTraceMark(*ring,kFlatTraceEventWriteResource,s.sc.hDepth);
+            }
+        };
+        recordFrame(kFrame,true);
+        recordFrame(kFrame+1,false);
+        flatTraceBeginFrame(*ring,kFrame+2,s.sc.output,s.sc.outW,s.sc.outH,28);
+        std::vector<unsigned char> serialized;
+        flatTraceDump(*ring,[&](const void* data,uint32_t n) {
+            const auto* p=static_cast<const unsigned char*>(data);
+            serialized.insert(serialized.end(),p,p+n);return n;
+        });
+        std::vector<ParsedFrame> frames;
+        expect(parseTrace(serialized,&frames) && frames.size()==2,
+               "overlay semantic trace frames serialize and parse");
+        if (frames.size()==2) {
+            for (size_t fi=0;fi<2;++fi) {
+                FlatRuntimePrefix replay{};
+                replay.frame=frames[fi].header.frame;replay.output=s.sc.output;
+                replay.width=s.sc.outW;replay.height=s.sc.outH;replay.format=28;
+                bool protectedFlag=false,depthFlag=false,stencilFlag=false;
+                for (const auto& e:frames[fi].events) {
+                    if (e.kind==kFlatTraceEventCameraCapture) {++replay.sequence;continue;}
+                    if (e.kind==kFlatTraceEventWriteResource) {flatRuntimeWritten(replay,e.key.color);continue;}
+                    if (replayOverlayMarker(replay,e)) continue;
+                    auto d=flatTraceEventToDraw(e);
+                    protectedFlag|=d.overlayProtected;
+                    depthFlag|=d.effectiveDepthWrite;
+                    stencilFlag|=d.effectiveStencilWrite;
+                    flatRuntimeObserve(replay,d);
+                }
+                const FlatRuntimeTarget* hTarget=nullptr;
+                for (uint32_t i=0;i<replay.targetsUsed;++i)
+                    if(replay.targets[i].resource==s.sc.h) hTarget=&replay.targets[i];
+                expect(hTarget && protectedFlag && stencilFlag &&
+                       (fi==0 ? depthFlag && hTarget->hdrBad &&
+                           hTarget->firstBad.cause==FlatRuntimeConflict::OverlaySuffix
+                              : !depthFlag && !hTarget->hdrBad && !hTarget->overlayOpen),
+                       fi==0 ? "serialized depth writer and failure marker refuse overlay replay"
+                             : "serialized seal ends suffix before unrelated depth write");
+            }
+        }
     }
 
     // ---- the corpus: the detector over every captured frame, and the four captures of section 81 ----------------

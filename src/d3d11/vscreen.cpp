@@ -2981,11 +2981,18 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
                                             ID3D11UnorderedAccessView* const* uavs,
                                             const UINT* counts) {
     if (g_flatComputeInternal) { g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts); return; }
+    // A foreign deferred context cannot write the immediate target yet, but
+    // an eventual command list or undocumented cross-context path must not
+    // silently preserve the protected suffix.
+    flatRuntimeOverlayUavBind(self,uavCount,uavs);
     if (foreignContext(self)) {
         g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs,
                                     counts);
         return;
     }
+    // A pixel-shader UAV may write the protected HDR/depth resources even
+    // when RTV0 is null or points elsewhere. The suffix cannot prove such a
+    // write's ownership, including KEEP_RENDER_TARGETS_UNCHANGED binds.
     // D3D11_KEEP_RENDER_TARGETS_UNCHANGED asks for the UAVs to be set while the
     // render targets are left alone, so it says nothing about slot 0 and must
     // not be treated as a rebind. Spelled out rather than named: the SDK header

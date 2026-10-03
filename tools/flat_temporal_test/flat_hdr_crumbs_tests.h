@@ -361,8 +361,15 @@ inline int flatHdrCrumbWiringTests() {
     const std::string dlaa = slurp("src/d3d11/dlaa.cpp");
     const std::string fsr = slurp("src/d3d11/fsr3_engine.cpp");
     const std::string hook = slurp("src/d3d11/device_hook.cpp");
-    expect(!runtime.empty() && !resolve.empty() && !dlaa.empty() && !fsr.empty() && !hook.empty(),
+    const std::string vscreen = slurp("src/d3d11/vscreen.cpp");
+    expect(!runtime.empty() && !resolve.empty() && !dlaa.empty() && !fsr.empty() && !hook.empty() && !vscreen.empty(),
            "the runtime, resolver, backend and hook sources are readable from the repo root");
+    const std::string omUav = body(vscreen, "void STDMETHODCALLTYPE hookedOMSetRtvAndUav(");
+    ordered(omUav, {"flatRuntimeOverlayUavBind(self,uavCount,uavs);", "if (foreignContext(self))",
+                    "g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs,"},
+            "a PS UAV bind invalidates an open overlay suffix before the game's bind, including foreign and KEEP-target paths");
+    expect(vscreen.find("s.hook.replace(kSlotOMSetRtvAndUav, &hookedOMSetRtvAndUav,") != std::string::npos,
+           "the OM UAV hook with overlay suffix guard is installed");
 
     // -- the runtime's draw scope: admission first, the reach after the last decline that precedes the resolver --
     const std::string treat = body(runtime, "void FlatRuntimeDrawScope::treatHdr(");
@@ -415,10 +422,11 @@ inline int flatHdrCrumbWiringTests() {
     const std::string solve = body(resolve, "bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,");
     ordered(solve, {"CrumbScope crumbs(f.hdr);", "initialize(device,context,reason)", "initializeHdr(device,reason)", "resources(f,reason)",
                     "hdrTargetView(color.Get(),reason)", "Isolate isolated(", "backendAvailable(f.mode,device,reason)", "HdrCrumbSpan copyStep(",
-                    "SpanGuard span(context);", "context->CopyResource(g.color.texture.Get(),color.Get());", "copyStep.close();",
+                    "SpanGuard span(context);", "context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());",
+                    "if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());", "copyStep.close();",
                     "HdrCrumbSpan prepStep(", "context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);", "prepStep.close();",
                     "HdrCrumbSpan backendStep(", "ok=fsr3Evaluate(", "ok=dlaaEvaluate(", "backendStep.close();",
-                    "drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,8);"},
+                    "drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,overlay?13:8);"},
             "the resolve writes capture, copy, prep, backend and finish in the order it runs them, each crumb before its call");
     const std::string spatial = body(resolve, "bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,");
     ordered(spatial, {"CrumbScope crumbs(f.hdr);", "Isolate isolated(", "HdrCrumbSpan copyStep(", "context->CopyResource(g.color.texture.Get(),color.Get());",
@@ -489,7 +497,9 @@ inline int flatHdrCrumbWiringTests() {
     ordered(draw, {"\"finish-bind\"", "context->ClearState();", "context->OMSetRenderTargets(1,&rtv,nullptr);", "\"finish-draw\"", "context->Draw(3,0);",
                    "++stats.hdrFinished;"},
             "H's binding as the render target and the draw into it are two crumbed steps, in that order, and the draw is counted");
-    ordered(solve, {"context->CopyResource(g.color.texture.Get(),color.Get());", "if(hdr)++stats.hdrCopied;", "copyStep.close();",
+    ordered(solve, {"context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());",
+                    "if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());",
+                    "if(hdr)++stats.hdrCopied;", "copyStep.close();",
                     "context->CSSetShaderResources(0,11,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
                     "backendStep.close();", "if(hdr && ok)++stats.hdrBackend;", "if(!ok) {"},
             "the resolve counts its copy, prep and backend for the 5 s line as each completes");

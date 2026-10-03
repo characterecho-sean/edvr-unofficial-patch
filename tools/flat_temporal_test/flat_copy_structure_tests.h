@@ -60,6 +60,7 @@ inline CopyFacts replayCopy(const ParsedFrame& frame, const edvr::FlatCopyPolicy
         if (e.kind == kFlatTraceEventMarkUncertain) { prefix->uncertain = true; continue; }
         if (e.kind == kFlatTraceEventCameraCapture) { ++prefix->sequence; continue; }
         if (e.kind == kFlatTraceEventResolve) continue;
+        if (hdr_route_test::replayOverlayMarker(*prefix,e)) continue;
         if (hook) hook(e, hookContext);
         FlatRuntimeDraw d = flatTraceEventToDraw(e);
         if (e.flags & kFlatTraceForeignWork) prefix->uncertain = true;

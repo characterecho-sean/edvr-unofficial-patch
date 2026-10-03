@@ -37,6 +37,11 @@ struct FlatRuntimeDraw {
     // camera bytes (flat_camera_table.h), so cameraCurrent's hash check on this draw's record is true by
     // construction and is not recomputed. A replay leaves it false and keeps the check.
     bool cameraHashTrusted = false;
+    // A provisional late HDR overlay: the bridge must finish its private
+    // coverage draw or make this target bad before the HDR consumer selects it.
+    bool overlayProtected = false;
+    bool effectiveDepthWrite = false;
+    bool effectiveStencilWrite = false;
     uint32_t instances = 1;
 };
 // Exact bytecode-qualified image filters, with a position/UV passthrough VS.
@@ -48,7 +53,7 @@ inline bool flatRuntimeCameraIndependentImageSourcePair(uint64_t vs, uint64_t ps
 enum class FlatRuntimeConflict : uint32_t {
     None, Viewport, MissingDepth, DepthMismatch, CameraChange,
     CameraProvenance, ExplicitWrite, ImageCopySource, MenuCopySource, SelectorLayout,
-    SelectorCamera, SelectorCameraProvenance, Count
+    SelectorCamera, SelectorCameraProvenance, OverlaySuffix, Count
 };
 inline const char* flatRuntimeConflictName(FlatRuntimeConflict c) {
     switch (c) {
@@ -63,6 +68,7 @@ inline const char* flatRuntimeConflictName(FlatRuntimeConflict c) {
     case FlatRuntimeConflict::SelectorLayout: return "selector-hdr-layout";
     case FlatRuntimeConflict::SelectorCamera: return "selector-hdr-camera-conflict";
     case FlatRuntimeConflict::SelectorCameraProvenance: return "selector-hdr-camera-provenance";
+    case FlatRuntimeConflict::OverlaySuffix: return "unprotected-late-hdr-overlay-or-depth-write";
     default: return "none";
     }
 }
@@ -102,6 +108,8 @@ struct FlatRuntimeTarget {
     bool hdrBad = false, hdrCamera = false, hdrLayoutChanged = false, imageSourceBad = false;
     bool menuInherited = false;
     bool imageHasCamera = false;
+    bool overlayOpen = false;
+    const void* overlayDepth = nullptr;
     uint32_t tones = 0;
     FlatRuntimeWitness firstBad{};
 };
@@ -154,14 +162,37 @@ inline FlatRuntimeTarget* flatRuntimeTarget(FlatRuntimePrefix& p, const void* re
     auto& t = p.targets[p.targetsUsed++]; t.resource = resource; return &t;
 }
 inline void flatRuntimeWritten(FlatRuntimePrefix& p, const void* resource) {
-    for (uint32_t i = 0; i < p.targetsUsed; ++i) if (p.targets[i].resource == resource && p.targets[i].writes.draws) {
+    for (uint32_t i = 0; i < p.targetsUsed; ++i) {
         auto& t = p.targets[i];
+        if (t.overlayOpen && resource == t.overlayDepth) {
+            flatRuntimeBad(t, FlatRuntimeConflict::OverlaySuffix, p.sequence,
+                           t.tone, FlatContractRecord{});
+        }
+        if (t.resource != resource || !t.writes.draws) continue;
         flatRuntimeBad(t, FlatRuntimeConflict::ExplicitWrite, p.sequence,
                        t.writes, FlatContractRecord{});
         t.tones = 0;
         if (t.writes.key.format == 9) t.imageSourceBad = true;
     }
     for (uint32_t i = 0; i < p.sourcesUsed; ++i) if (p.sources[i].key.depth == resource) p.sources[i].key.camera = nullptr;
+}
+inline void flatRuntimeOverlayFailed(FlatRuntimePrefix& p, const void* resource = nullptr) {
+    for (uint32_t i = 0; i < p.targetsUsed; ++i) {
+        auto& t = p.targets[i];
+        if (t.overlayOpen && (!resource || t.resource == resource))
+            flatRuntimeBad(t, FlatRuntimeConflict::OverlaySuffix, p.sequence,
+                           t.tone, FlatContractRecord{});
+    }
+}
+inline bool flatRuntimeOverlaySeal(FlatRuntimePrefix& p, const void* resource) {
+    for(uint32_t i=0;i<p.targetsUsed;++i) {
+        auto& t=p.targets[i];
+        if(t.resource==resource && t.overlayOpen && !t.hdrBad) {
+            t.overlayOpen=false;
+            return true;
+        }
+    }
+    return false;
 }
 inline void flatRuntimeComputeWritten(FlatRuntimePrefix& p, const void* resource) {
     // Lighting may write the original scene HDR before the menu copy. An
@@ -177,6 +208,13 @@ inline void flatRuntimeComputeWritten(FlatRuntimePrefix& p, const void* resource
 // scope), shared with the trace replay: the completed handoff and its HDR
 // input refuse GPU writes after lighting's legitimate pre-tone window.
 inline void flatRuntimeDispatchObserveWritten(FlatRuntimePrefix& p, const void* resource) {
+    for (uint32_t i = 0; i < p.targetsUsed; ++i) {
+        const auto& t = p.targets[i];
+        if (t.overlayOpen && (t.resource == resource || t.overlayDepth == resource)) {
+            flatRuntimeOverlayFailed(p, t.resource);
+            break;
+        }
+    }
     flatRuntimeComputeWritten(p, resource);
     for (uint32_t i = 0; i < p.targetsUsed; ++i) {
         auto& target = p.targets[i];
@@ -275,8 +313,21 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         }
         return out;
     }
+    // A late scene-depth draw can invalidate the clean HDR snapshot even when
+    // it renders into a different colour target (or has no colour target).
+    // The runtime supplies the effective write state after the draw is bound.
+    for (uint32_t i = 0; i < p.targetsUsed; ++i) {
+        auto& suffix = p.targets[i];
+        if (suffix.overlayOpen && d.supported)
+            bad(suffix, FlatRuntimeConflict::OverlaySuffix, suffix.tone);
+        if (suffix.overlayOpen && (d.effectiveDepthWrite ||
+            (d.effectiveStencilWrite && !d.overlayProtected)) && k.depth == suffix.overlayDepth)
+            bad(suffix, FlatRuntimeConflict::OverlaySuffix, suffix.tone);
+    }
     if (!k.color) return out;
     auto* t = flatRuntimeTarget(p, k.color); if (!t) return out;
+    if (t->overlayOpen && !d.overlayProtected)
+        bad(*t, FlatRuntimeConflict::OverlaySuffix, t->tone);
     constexpr uint64_t kHdrImageCopyVs = 0xCFA91824129ECBBCull;
     constexpr uint64_t kHdrImageCopyPs = 0xDFCBA0EC70B03C9Bull;
     constexpr uint64_t kMenuCopyVs = 0xDEF19B035D5EDEDCull;
@@ -390,13 +441,20 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
             // current colour.
             const bool secondCamera =
                 k.vs == 0x88DCF1164C640EC3ull && k.ps == 0x494506A63091DF8Cull;
-            if (t->hdrCamera && !flatRuntimeSameCamera(t->tone, d) && !secondCamera)
+            const bool otherCamera = t->hdrCamera && !flatRuntimeSameCamera(t->tone, d);
+            const bool overlay = d.overlayProtected && otherCamera && !t->hdrBad &&
+                t->writes.draws && t->writes.key.format == 26 &&
+                k.depth == t->writes.key.depth && k.dsv == t->writes.key.dsv;
+            if (d.overlayProtected && !overlay)
+                bad(*t, FlatRuntimeConflict::OverlaySuffix, t->tone);
+            if (otherCamera && !secondCamera && !overlay)
                 bad(*t, FlatRuntimeConflict::CameraChange, t->tone);
             if (!flatRuntimeCameraCurrent(d, q, p.frame))
                 bad(*t, FlatRuntimeConflict::CameraProvenance, t->tone);
             // Keep the first known camera draw separate from earlier HDR writes
             // without b1. Assigning its later write to those draws invents provenance.
             if (!t->hdrCamera && !secondCamera) { t->tone = current(); t->hdrCamera = true; }
+            if (overlay) { t->overlayOpen = true; t->overlayDepth = k.depth; }
         }
     }
     if (t->writes.draws && t->writes.key.format == 26 &&

@@ -15,6 +15,7 @@
 #include "flat_live_phase.h"
 #include "flat_draw_capture.h"
 #include "flat_weapon_footprint.h"
+#include "flat_overlay_layer.h"
 #include "flat_pixel_capture_policy.h"
 #include "flat_local_reject.h"
 #include "flat_trace.h"
@@ -73,6 +74,7 @@ namespace {
 std::atomic<bool> nativeScale{false};
 std::atomic<uint64_t> mapBouncePresentEpoch{1};
 std::atomic<bool> foreignWork{false};
+std::atomic<bool> overlaySuffixActive{false};
 std::atomic<bool> projectionAuditRequested{false};
 template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
 // F10-only ingress audit. Keep the counters outside State: a draw on a foreign
@@ -173,6 +175,11 @@ struct View {
 struct State {
     FlatDrawCapture drawCapture;
     FlatWeaponFootprint weaponFootprint;
+    FlatOverlayLayer overlay;
+    bool overlayFailureNoted = false;
+    uint64_t overlayPlannedWindow = 0, overlayMarkedWindow = 0;
+    uint64_t overlayIsolatedWindow = 0, overlayRefusedWindow = 0;
+    std::map<std::string,uint64_t> overlayRefusalWindow;
     DWORD thread = 0; Ptr<ID3D11Device> device; Ptr<ID3D11DeviceContext> context;
     Ptr<ID3D11Texture2D> output, sceneDepth; Ptr<ID3D11ShaderResourceView> depthView;
     FlatRuntimePrefix prefix{}; CameraTable cameras;
@@ -1394,6 +1401,24 @@ const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecip
     return nullptr;
 }
 void reset() { auto& s = state(); s.havePrevious = false; FlatComputeInternalScope guard; flatMonoResolveInvalidateHistory(); }
+void overlayFail(State& s, const char* reason, const void* hdr = nullptr) {
+    if (s.overlayFailureNoted) return;
+    s.overlayFailureNoted = true;
+    overlaySuffixActive.store(false,std::memory_order_release);
+    ++s.overlayRefusedWindow;
+    ++s.overlayRefusalWindow[reason?reason:"overlay-suffix-refused"];
+    flatTraceMark(s.traceRing,kFlatTraceEventOverlayFailed,hdr);
+    s.overlay.invalidate(reason);
+    flatRuntimeOverlayFailed(s.prefix, hdr);
+    failPhase(s, reason ? reason : "overlay-suffix-refused");
+    reset();
+}
+bool overlayOpen(const State& s) {
+    if(!overlaySuffixActive.load(std::memory_order_relaxed))return false;
+    for (uint32_t i = 0; i < s.prefix.targetsUsed; ++i)
+        if (s.prefix.targets[i].overlayOpen) return true;
+    return false;
+}
 void refuse(State& s) {
     ++s.refused; ++s.refusedWindow[s.reason]; s.streak = 0; reset();
 }
@@ -1830,6 +1855,9 @@ void flatRuntimeResize() {
     // reference) is forgotten without touching a context that may be gone.
     flatRuntimeSubstitution(nullptr, FlatSubstEvent::kResize);
     auto& s = state(); FlatComputeInternalScope guard; s.drawCapture.cancel("resize-or-stop");
+    overlaySuffixActive.store(false,std::memory_order_release);
+    s.overlay.reset();
+    s.overlayFailureNoted=false;
     s.weaponFootprint.cancel("resize-or-stop");flatMonoResolveReset();
     // A reset (or the mode turned off) ends a stand-down: the new contract may well be
     // one the selector recognises, and every paused piece restarts with it.
@@ -2177,6 +2205,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     // The HDR route (flat_hdr_route.h): the frame that just ended is accounted, then the key is read for the frame that
     // starts now. Before the stand-down reads the frame's verdict, which the route may have added to.
+    if(overlayOpen(s)) overlayFail(s,"overlay-missing-HDR-consumer");
     hdrFrameEnd(s, frame);
     hdrReadKey(s, frame);
     const bool endedPaused = s.work == FlatWork::Paused;
@@ -2400,6 +2429,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // frames for an F10 dump instead of filling with empty ones.
     if (s.work != FlatWork::Paused) s.prefix = FlatRuntimePrefix{};
     s.prefix.frame = frame + 1;
+    s.overlay.beginFrame(frame + 1);
+    overlaySuffixActive.store(false,std::memory_order_release);
+    s.overlayFailureNoted = false;
     // Trace ring: seal the frame that just ended with the hash over every
     // copy outcome it produced, then reset the contract for the next frame. Through
     // Paused frames the contract is the last watched frame's, untouched, so sealing
@@ -2459,6 +2491,15 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.phase.currentX,s.phase.currentY,s.phase.previousX,s.phase.previousY,s.phase.warmFrames,
             (unsigned long long)s.jitteredFrames,(unsigned long long)s.jitterDraws,(unsigned long long)s.jitterDispatches,
             (unsigned long long)s.jitterRefusals,s.jitterReason,s.phase.previousAcceptedValid?1u:0u);
+        Log::get().note("flat late overlay 5s: planned-draws=%llu fully-marked-draws=%llu isolated-consumer-frames=%llu refused-frames=%llu reasons=%zu",
+            (unsigned long long)s.overlayPlannedWindow,(unsigned long long)s.overlayMarkedWindow,
+            (unsigned long long)s.overlayIsolatedWindow,(unsigned long long)s.overlayRefusedWindow,
+            s.overlayRefusalWindow.size());
+        for(const auto& entry:s.overlayRefusalWindow)
+            Log::get().note("flat late overlay refusal: reason=%s count=%llu",entry.first.c_str(),
+                (unsigned long long)entry.second);
+        s.overlayPlannedWindow=s.overlayMarkedWindow=s.overlayIsolatedWindow=s.overlayRefusedWindow=0;
+        s.overlayRefusalWindow.clear();
         // The camera injector's row bookkeeping, every window while a temporal mode runs
         // (the camera path is on with it; zeros included: an absent line is what "the
         // wiring never ran" looks like). The tripwire is cumulative on purpose -- once it
@@ -2592,6 +2633,11 @@ static EngineVelocityFlushCause flushCauseOf(FlatSubstEvent event) {
     }
 }
 void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event) {
+    if (overlaySuffixActive.load(std::memory_order_acquire) && owner() && overlayOpen(state()) &&
+        (event == FlatSubstEvent::kClear || event == FlatSubstEvent::kCopy ||
+         event == FlatSubstEvent::kResolve || event == FlatSubstEvent::kExecuteCommandList ||
+         event == FlatSubstEvent::kClearState))
+        overlayFail(state(), "overlay-unknown-write-or-command-list");
     // Nothing of engine motion's is bound over the game's: the common case, one load.
     if (!engineVelocityFlatPending()) return;
     if (!owner()) return;
@@ -2624,6 +2670,7 @@ void flatRuntimeConstantBuffers(UINT start, UINT count, ID3D11Buffer* const* buf
 }
 void flatRuntimeClearBindings() {
     if (owner()) {
+        if (overlayOpen(state())) overlayFail(state(), "overlay-clear-state");
         flatcpu::Scope tracker(flatcpu::kTrackers);
         state().viewportCount = 0; for (auto& u : state().uavs) u.Reset();
         // ClearState took engine motion's bound state with the game's: nothing left to put back, and nothing safe to touch.
@@ -2634,6 +2681,7 @@ void flatRuntimeUnknown() {
     if (!owner()) return;
     flatcpu::Scope tracker(flatcpu::kTrackers);
     auto& s = state();
+    if (overlayOpen(s)) overlayFail(s, "overlay-unknown-context-state");
     // The trackers lose what they knew in every mode; a Paused frame watches nothing
     // else, so no trace mark and no prefix or shadow to invalidate.
     s.viewportCount = 0; for (auto& u : s.uavs) u.Reset();
@@ -2641,6 +2689,16 @@ void flatRuntimeUnknown() {
     flatTraceMark(s.traceRing, kFlatTraceEventMarkUncertain, nullptr); s.prefix.uncertain = true;
     s.cameras.invalidateAll();
     if(s.projection) {s.projection->invalidateAll();failPhase(s,"unknown-context-state");}
+}
+void flatRuntimeOverlayUavBind(ID3D11DeviceContext* ctx, UINT count,
+                               ID3D11UnorderedAccessView* const* uavs) {
+    if(!overlaySuffixActive.load(std::memory_order_acquire) || !count || !uavs)return;
+    for(UINT i=0;i<count;++i)if(uavs[i]) {
+        if(!owner() || ctx!=state().context.Get())
+            foreignWork.store(true,std::memory_order_release);
+        else overlayFail(state(),"overlay-OM-UAV-bound");
+        return;
+    }
 }
 void flatRuntimeUavs(UINT start, UINT count, ID3D11UnorderedAccessView* const* views) {
     if (!owner() || state().work == FlatWork::Paused) return;
@@ -2689,6 +2747,12 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
     for (const auto& u : s.uavs) if (u) {
         { flatcpu::Scope trace(flatcpu::kTrace); flatTraceMark(s.traceRing, kFlatTraceEventDispatchWritten, u.Get()); }
         flatRuntimeDispatchObserveWritten(s.prefix, u.Get());
+        if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
+            const auto& t=s.prefix.targets[i];
+            if(t.overlayOpen && (t.resource==u.Get() || t.overlayDepth==u.Get())) {
+                overlayFail(s,"overlay-dispatch-write",t.resource); break;
+            }
+        }
         flatHdrObserveDispatchWrite(s.hdr, u.Get());   // a dispatch into the HDR target after the trigger is counted
     }
     if(s.prefix.uncertain && s.projection)failPhase(s,"compute-source-invalidated");
@@ -2699,6 +2763,14 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 // What a write to a resource does to the prefix model, the camera table and the shadows -- the
 // body flatRuntimeWritten, Map and Update share, timed by the caller's scope.
 static void resourceWritten(State& s, ID3D11Resource* res) {
+    if(overlayOpen(s) && res==s.namedConstants)
+        overlayFail(s,"overlay-scene-constants-written");
+    if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
+        const auto& t=s.prefix.targets[i];
+        if(t.overlayOpen && (t.resource==res || t.overlayDepth==res)) {
+            overlayFail(s,"overlay-explicit-resource-write",t.resource); break;
+        }
+    }
     { flatcpu::Scope trace(flatcpu::kTrace); flatTraceMark(s.traceRing, kFlatTraceEventWriteResource, res); }
     flatRuntimeWritten(s.prefix, res);
     flatHdrObserveExplicitWrite(s.hdr, res);   // a write into the HDR target after the route's trigger is counted
@@ -2803,6 +2875,12 @@ void flatRuntimeMap(ID3D11Resource* res, D3D11_MAP type, void* bytes) {
 void flatRuntimeUnmap(ID3D11Resource* res) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
+    if(overlayOpen(state()) && (res==state().namedConstants ||
+       [&] { for(uint32_t i=0;i<state().prefix.targetsUsed;++i) {
+           const auto& t=state().prefix.targets[i];
+           if(t.overlayOpen && (res==t.resource || res==t.overlayDepth))return true;
+       } return false; }()))
+        overlayFail(state(),"overlay-resource-unmapped");
     if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows); state().projection->observeUnmap(res); }
     if (auto* c = camera(res, false)) {
         if (c->mapped) { capture(*c, c->mapped); if (state().work == FlatWork::Full) cameraWitness(res); }
@@ -2981,7 +3059,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         const auto bind = static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot);
         k.srvView[slot] = bindingGet(bind); k.srvResource[slot] = view(bind, 2 + slot).resource;
     }
-    if (foreignWork.load(std::memory_order_acquire)) s.prefix.uncertain = true;
+    if (foreignWork.load(std::memory_order_acquire)) {
+        s.prefix.uncertain = true;
+        if(overlayOpen(s)) overlayFail(s,"overlay-foreign-work");
+    }
     {
         // The exact-shader verifications: each returns at once unless this draw is the copy it
         // names, and then reads the pipeline back from the context (shader, targets, view, viewport).
@@ -3010,6 +3091,72 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             k.vs,k.ps,conflict,k.cameraHash,d.camera,
             target?target->tone.key.cameraHash:0,target?target->tone.camera:nullptr);
     }
+    // Only a same-pose, same-raster-phase, camera-conflicting HDR draw may
+    // enter the protected late-colour suffix. All names below are the current
+    // draw's uploaded camera and live binding shadow, never a guessed weapon
+    // shader list. The model gets a provisional mark; the actual private MRT
+    // binding is verified immediately around the original draw below.
+    const FlatRuntimeTarget* overlayTarget=nullptr;
+    if(s.work==FlatWork::Full && s.hdrKey==FlatHdrKey::Auto && s.projection &&
+       s.jitterWanted && !s.phase.failed && s.frameCoverage &&
+       flatCameraInjectUpstreamOwns() && !foreignWork.load(std::memory_order_acquire) &&
+       !s.prefix.uncertain && !d.supported && !tone && !copy &&
+       k.format==26 && k.color && k.depth && k.dsv && k.camera &&
+       k.depth==s.namedDepth && flat_mono_detail::hdrViewport(k,k.width,k.height) &&
+       !flatHdrCouldConsume(s.hdr,k) &&
+       flatRuntimeCameraCurrent(d,s.prefix.sequence+1,s.prefix.frame)) {
+        for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
+            const auto& t=s.prefix.targets[i];
+            if(t.resource==k.color && t.hdrCamera && t.writes.draws && !t.hdrBad &&
+               !t.hdrLayoutChanged && !t.menuInherited && t.writes.key.format==26 &&
+               t.writes.key.depth==k.depth && t.writes.key.dsv==k.dsv &&
+               flat_mono_detail::cameraCurrent(t.tone,s.prefix.frame) &&
+               !flatRuntimeSameCamera(t.tone,d)) { overlayTarget=&t; break; }
+        }
+    }
+    // D3D's null depth-stencil state is the default depth-write state. Query
+    // only candidates or draws sharing a depth resource with an open suffix.
+    bool depthStateNeeded=overlayTarget!=nullptr;
+    if(k.depth && overlaySuffixActive.load(std::memory_order_relaxed))
+      for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+        if(s.prefix.targets[i].overlayOpen && s.prefix.targets[i].overlayDepth==k.depth)
+            depthStateNeeded=true;
+    D3D11_DEPTH_STENCIL_DESC effectiveDepth{};
+    effectiveDepth.DepthEnable=TRUE;
+    effectiveDepth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+    if(depthStateNeeded) {
+        FlatComputeInternalScope guard;
+        Ptr<ID3D11DepthStencilState> boundDepth;
+        UINT stencilRef=0;ctx->OMGetDepthStencilState(&boundDepth,&stencilRef);
+        if(boundDepth)boundDepth->GetDesc(&effectiveDepth);
+        d.effectiveDepthWrite=effectiveDepth.DepthEnable &&
+            effectiveDepth.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL;
+        d.effectiveStencilWrite=effectiveDepth.StencilEnable && effectiveDepth.StencilWriteMask!=0;
+    }
+    if(overlayTarget && !d.effectiveDepthWrite &&
+       (!d.effectiveStencilWrite || effectiveDepth.StencilWriteMask==0x04u) &&
+       (!nonzeroPhase(s) || s.phase.applied)) {
+        float worldRows[6][4]{},drawRows[6][4]{};
+        const bool shape=flat_mono_detail::cameraShape(overlayTarget->tone.camera,worldRows) &&
+            flat_mono_detail::cameraShape(d.camera,drawRows);
+        if(shape && flatCameraCenteredPairAtPhase(worldRows,drawRows,
+                s.phase.currentX,s.phase.currentY,k.width,k.height)) {
+            const auto pair=classifyFlatProjectionPair(s,k.vs,k.ps);
+            if((pair.vs==FlatVsProjectionClass::ForwardColumns ||
+                pair.vs==FlatVsProjectionClass::ForwardDp4) &&
+                pair.ps==FlatPsProjectionSafety::Clean) {
+                d.overlayProtected=true;
+                overlayPlanned=true;
+                ++s.overlayPlannedWindow;
+                overlayHdr=static_cast<ID3D11Texture2D*>(const_cast<void*>(k.color));
+                overlayDsv=static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv));
+            }
+        }
+    }
+    // A protected HDR suffix can only finish at the HDR consumer. The final
+    // LDR copy is never allowed to feed overlay-containing colour to a
+    // temporal backend if that consumer was absent or declined.
+    if(copy && overlayOpen(s)) overlayFail(s,"overlay-unsealed-at-final-copy");
     // Gate 1 consolidation: the copy draw's selection is produced as the
     // frame contract (identical decision), and every draw is recorded into
     // the trace ring for the reducer replay.
@@ -3019,6 +3166,22 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             ? flatRuntimeObserveContract(s.prefix, d, s.traceContract)
             : flatRuntimeObserve(s.prefix, d);
     }();
+    if(d.overlayProtected && !s.overlayFailureNoted) {
+        bool admitted=false;
+        for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+            if(s.prefix.targets[i].resource==overlayHdr &&
+               s.prefix.targets[i].overlayOpen && !s.prefix.targets[i].hdrBad)
+                admitted=true;
+        if(admitted) overlaySuffixActive.store(true,std::memory_order_release);
+        else { overlayPlanned=false; overlayHdr=nullptr; overlayDsv=nullptr; }
+    }
+    if(!s.overlayFailureNoted)for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
+        const auto& target=s.prefix.targets[i];
+        if(target.overlayOpen && target.hdrBad) {
+            overlayFail(s,"overlay-unprotected-suffix-draw",target.resource);
+            break;
+        }
+    }
     // The HDR route's trigger detector (flat_hdr_route.h, section 81), on every watched draw whatever the key says: rules
     // (i), (ii) and (iv) are comparisons on what this scope already holds, the four pixel-shader slots are read from the
     // binding shadow (no D3D call) only for the few draws that pass them, and with the key off nothing below acts on the
@@ -3549,6 +3712,30 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         !depthView(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)))) {
         decline("actual-hdr-binding-or-depth-view-refused"); return;
     }
+    bool protectedOverlay=false;
+    for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
+        auto& target=s.prefix.targets[i];
+        if(target.resource!=selected.hdr || !target.overlayOpen)continue;
+        Ptr<ID3D11Texture2D> hdrTexture;
+        if(FAILED(hdrResource.As(&hdrTexture)) ||
+           !s.overlay.ready(s.prefix.frame,hdrTexture.Get())) {
+            overlayFail(s,s.overlay.refusal()?s.overlay.refusal():"overlay-not-ready-at-consumer",selected.hdr);
+            decline("overlay-not-ready-at-consumer");
+            return;
+        }
+        // The protected suffix ends at this consumer. Later unrelated game
+        // clears/copies are outside it; ordinary post-consumer HDR writes are
+        // still guarded by the HDR route's existing write latch.
+        if(!flatRuntimeOverlaySeal(s.prefix,selected.hdr)) {
+            overlayFail(s,"overlay-seal-refused",selected.hdr);
+            decline("overlay-seal-refused");
+            return;
+        }
+        overlaySuffixActive.store(false,std::memory_order_release);
+        flatTraceMark(s.traceRing,kFlatTraceEventOverlaySeal,selected.hdr);
+        protectedOverlay=true;
+        break;
+    }
     if (nonzeroPhase(s) && !s.phase.applied) failPhase(s, "no-raster-application");
     s.reason = "hdr-route";
     // The spatial recovery, into H: the jitter resampled away, no history, no SDK. True when H now holds it.
@@ -3575,6 +3762,10 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return false;
     };
     FlatMonoResolveFrame f{}; f.color = hdrView.Get(); f.depth = s.depthView.Get(); f.hdr = true;
+    if(protectedOverlay) {
+        f.cleanColor=s.overlay.cleanHdrView();
+        f.overlayCoverage=s.overlay.coverageView();
+    }
     f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight;
     f.frame = s.prefix.frame; f.mode = s.engine;
@@ -3672,6 +3863,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return;
     }
     s.reason = nonzeroPhase(s) ? "treated-jittered-hdr" : "treated-zero-jitter-hdr";
+    if(protectedOverlay) ++s.overlayIsolatedWindow;
     s.previous = selected; s.previousColor = hdrResource; s.havePrevious = s.treated = s.hdrTreated = s.temporalAccepted = true;
     s.lastMs = now; ++s.accepted; ++s.hdrWindow.treated; s.hdrWindow.lastVerdict = s.reason;
     s.previousRowsX = f.rowsJitterX; s.previousRowsY = f.rowsJitterY;
@@ -3683,7 +3875,17 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     if (s.streak > s.longestStreak) s.longestStreak = s.streak;
 }
 void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
-    if(!weaponFootprintStarted||!ctx)return;
+    if(!ctx)return;
+    if(overlayPlanned) {
+        auto& s=state();
+        if(overlayStarted) overlayFail(s,"overlay-duplicate-begin",overlayHdr);
+        else {
+            const char* reason=nullptr;
+            overlayStarted=s.overlay.beginDraw(ctx,s.prefix.frame,overlayHdr,overlayDsv,&reason);
+            if(!overlayStarted) overlayFail(s,reason?reason:"overlay-private-MRT-refused",overlayHdr);
+        }
+    }
+    if(!weaponFootprintStarted)return;
     const uint32_t actualStart=(weaponDrawKind=='D'||weaponDrawKind=='N')?
         static_cast<uint32_t>(weaponDrawBase):weaponDrawStart;
     const int32_t actualBase=(weaponDrawKind=='D'||weaponDrawKind=='N')?0:weaponDrawBase;
@@ -3692,12 +3894,25 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         weaponDrawStartInstance,indirectArgs,indirectOffset);
 }
 void FlatRuntimeDrawScope::endActualDraw() {
+    if(overlayStarted&&ctx) {
+        state().overlay.endDraw(ctx);
+        overlayEnded=true;
+        overlayStarted=false;
+        if(const char* reason=state().overlay.refusal()) overlayFail(state(),reason,overlayHdr);
+        else ++state().overlayMarkedWindow;
+    }
     if(weaponFootprintStarted&&ctx)
         state().weaponFootprint.endActualDraw(ctx,state().prefix.frame,weaponFootprintSeq);
 }
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if (!ctx) return; FlatComputeInternalScope guard;
     flatcpu::Scope shell(flatcpu::kOther);
+    if(overlayStarted) {
+        state().overlay.endDraw(ctx);
+        overlayStarted=false;
+    }
+    if(overlayPlanned && !overlayEnded)
+        overlayFail(state(),"overlay-draw-scope-incomplete",overlayHdr);
     if(weaponFootprintStarted)
         state().weaponFootprint.endActualDraw(ctx,state().prefix.frame,weaponFootprintSeq,false);
     if(weaponFootprintStarted)state().weaponFootprint.after(ctx,state().prefix.frame,weaponFootprintSeq);

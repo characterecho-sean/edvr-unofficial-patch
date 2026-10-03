@@ -80,6 +80,8 @@ void flatRuntimeUnmap(ID3D11Resource*);
 void flatRuntimeUpdate(ID3D11Resource*, const void*, const D3D11_BOX*);
 void flatRuntimeWritten(ID3D11Resource*);
 void flatRuntimeUnknown();
+void flatRuntimeOverlayUavBind(ID3D11DeviceContext*, UINT count,
+                               ID3D11UnorderedAccessView* const*);
 void flatRuntimeArmProjectionAudit();
 void flatRuntimeCreateBuffer(ID3D11Buffer*, const void* initialData);
 void flatRuntimeClearBindings();
@@ -98,6 +100,9 @@ struct FlatRuntimeDrawScope {
     bool producer = false, replaced = false;
     bool drawCaptureStarted = false;
     bool weaponFootprintStarted = false;
+    bool overlayPlanned = false, overlayStarted = false, overlayEnded = false;
+    ID3D11Texture2D* overlayHdr = nullptr;
+    ID3D11DepthStencilView* overlayDsv = nullptr;
     uint32_t weaponFootprintSeq = 0;
     char weaponDrawKind = '?';
     uint32_t weaponDrawCount = 0, weaponDrawStart = 0, weaponDrawInstances = 0, weaponDrawStartInstance = 0;

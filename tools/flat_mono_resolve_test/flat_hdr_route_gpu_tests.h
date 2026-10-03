@@ -231,6 +231,106 @@ inline void hdrRouteGpuTests(ID3D11Device* device, ID3D11DeviceContext* context)
     ok = run(true);
     check(ok && observedHdr, "HDR route: DLAA is told HDR too (R = D)");
 
+    // The backend sees only the clean world image while the final HDR target
+    // takes the live game colour at covered source texels. The shader's four
+    // bilinear source taps apply coverage at a nonzero phase, for SDK and TAA.
+    {
+        const uint32_t cleanPixel=pack(20,30,40);
+        std::vector<uint32_t> cleanTexels(w*h,cleanPixel);
+        auto cleanTexture=texture(device,w,h,DXGI_FORMAT_R11G11B10_FLOAT,
+            D3D11_BIND_SHADER_RESOURCE,cleanTexels.data(),w*4);
+        auto cleanView=view(device,cleanTexture.Get());
+        std::vector<unsigned char> coverage(w*h,0);
+        coverage[8*w+8]=255;
+        auto coverageTexture=texture(device,w,h,DXGI_FORMAT_R8_UNORM,
+            D3D11_BIND_SHADER_RESOURCE,coverage.data(),w);
+        auto coverageView=view(device,coverageTexture.Get());
+        check(cleanView && coverageView,"HDR overlay: clean and private coverage views create");
+        if(cleanView && coverageView) {
+            f.cleanColor=cleanView.Get();f.overlayCoverage=coverageView.Get();
+            f.jitterX=f.previousJitterX=expectedJx=.25f;
+            f.jitterY=f.previousJitterY=expectedJy=-.25f;
+            std::memcpy(f.previousCamera,f.camera,sizeof(f.camera));
+            auto live=[&] { fill([&](UINT x,UINT y,double (&c)[3]) {
+                c[0]=20;c[1]=30;c[2]=40;
+                if(x==8 && y==8) {c[0]=200;c[1]=10;c[2]=10;}
+            }); };
+            auto composited=[&](const char* route) {
+                std::vector<uint32_t> got;
+                if(!readH(got)) {check(false,route);return;}
+                double marked[3]{},outside[3]{};
+                unpack(got[8*w+8],marked);unpack(got[2*w+2],outside);
+                bool fourTaps=true;
+                for(UINT y=8;y<=9;++y)for(UINT x=7;x<=8;++x) {
+                    double pixel[3]{};unpack(got[y*w+x],pixel);
+                    const double raw=bilinear(inR,x+f.jitterX,y+f.jitterY);
+                    fourTaps&=std::abs(pixel[0]-raw)<=1.5*ulp(raw,6) && pixel[0]>20;
+                }
+                check(fourTaps && marked[0]>100,
+                      "HDR overlay: all four nonzero-phase bilinear neighbors use aligned live colour");
+                if(f.mode==FlatMonoResolveMode::Taa)
+                    check(std::abs(outside[0]-20)<=ulp(20,6) && std::abs(outside[1]-30)<=ulp(30,6),
+                          "HDR overlay: TAA world outside coverage came from clean input");
+                else
+                    check(std::abs(outside[0])<1e-6 && std::abs(outside[1]-1)<.01,
+                          "HDR overlay: SDK world outside coverage came from backend result");
+            };
+            for(auto mode:{FlatMonoResolveMode::Dlaa,FlatMonoResolveMode::Fsr}) {
+                f.mode=mode;f.reset=false;++f.frame;live();run(true); // prime a new SDK mode's history
+                ++f.frame;live();observedBackendPixels=false;
+                backendCalls=0;
+                ok=run(true);
+                check(ok && !backendReset && backendCalls==1 && observedBackendPixels &&
+                      observedBackendCenter==cleanPixel && observedBackendOutside==cleanPixel,
+                      "HDR overlay: both SDKs receive clean world pixels, never live overlay pixels");
+                composited("HDR overlay SDK readback");
+            }
+            std::vector<unsigned char> none(w*h,0);
+            auto noCoverageTexture=texture(device,w,h,DXGI_FORMAT_R8_UNORM,
+                D3D11_BIND_SHADER_RESOURCE,none.data(),w);
+            auto noCoverageView=view(device,noCoverageTexture.Get());
+            check(noCoverageView!=nullptr,"HDR overlay: zero coverage control view creates");
+            if(noCoverageView) {
+                f.mode=FlatMonoResolveMode::Taa;f.reset=true;++f.frame;live();
+                f.overlayCoverage=noCoverageView.Get();
+                ok=run(true);
+                std::vector<uint32_t> zeroMaskOutput;readH(zeroMaskOutput);
+                double zeroCenter[3]{};
+                if(zeroMaskOutput.size()==w*h)unpack(zeroMaskOutput[8*w+8],zeroCenter);
+                check(ok && zeroMaskOutput.size()==w*h &&
+                      std::abs(zeroCenter[0]-20)<=ulp(20,6),
+                      "HDR overlay: TAA receives clean HDR, proven by zero-mask live-hot-pixel control");
+            }
+            f.overlayCoverage=coverageView.Get();
+            f.mode=FlatMonoResolveMode::Taa;f.reset=true;++f.frame;live();
+            ok=run(true);
+            check(ok,"HDR overlay: internal TAA accepts clean/live split");
+            composited("HDR overlay TAA readback");
+
+            // The next unmarked frame does not inherit a stale coverage mask.
+            f.cleanColor=nullptr;f.overlayCoverage=nullptr;
+            f.mode=FlatMonoResolveMode::Dlaa;f.reset=false;++f.frame;
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=20;c[1]=30;c[2]=40;});
+            run(true); // the previous TAA mode forces a reset of the SDK slot
+            ++f.frame;
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=20;c[1]=30;c[2]=40;});
+            ok=run(true);
+            std::vector<uint32_t> next;readH(next);
+            double center[3]{};if(next.size()==w*h)unpack(next[8*w+8],center);
+            check(ok && !backendReset && next.size()==w*h && center[0]<1e-6 && std::abs(center[1]-1)<.01,
+                  "HDR overlay: next unmarked frame uses backend world result at former overlay pixel");
+
+            // Supplying only half of the clean/raw contract must fail before
+            // the backend, preserving the actual game H bytes.
+            f.cleanColor=cleanView.Get();f.overlayCoverage=nullptr;++f.frame;live();
+            const auto liveHash=hHash();const int calls=backendCalls;
+            ok=run(false);
+            check(!ok && backendCalls==calls && hHash()==liveHash,
+                  "HDR overlay: missing coverage refuses without modifying game H or calling backend");
+            f.cleanColor=nullptr;f.overlayCoverage=nullptr;
+        }
+    }
+
     // ---- 4. EDVR's TAA: bounded-space accumulation -----------------------------------------------------------------
     // A still camera and a still scene, jitter zero: a hot pixel appears on the second frame. In c/(1+max3(c)) space the
     // history (100) and the new value (10000) are a hair apart, the 3x3 box holds the history, and the blend at .9

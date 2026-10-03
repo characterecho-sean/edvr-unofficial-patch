@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** shared route merged at `dacb7a56`; qualifications below remain open.
+- **State:** shared route merged at `dacb7a56`; overlay full build passed (97).
   Epic installed `v0.18.1-18-g83938927`, FLOWN. Latest analyzed log:
-  `v0.18.1-18-g83938927`; evidence is in sections 1-96.
+  `v0.18.1-18-g83938927`; evidence and implementation plan are in sections 1-97.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 96: real alternate-camera draw, 55k passing samples;
-  shared-path coverage/history isolation is being assessed before admission.
+- **Next:** section 97: full build passed; clean promotion and Epic install,
+  then one representative weapon test. This fix is not live-qualified yet.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9706,3 +9706,72 @@ weapon type, but shader substitution, blend preservation, raster phase and
 backend history semantics must be proven before admission changes. A reactive
 mask must not be assumed to guarantee zero history for every backend. No
 renderer, installed build or live setting changed during this analysis.
+
+## 97. Guarded shared late-overlay isolation (2026-10-03)
+
+Section 96 supplies enough evidence to implement the shared-path mechanism
+and prove it with automated GPU tests before another representative flight.
+The exact shader pair remains a diagnostic witness, never an admission list.
+No additional cropped capture or per-weapon live matrix is planned.
+
+Proposed contract: before the first supported alternate-camera, color-only
+HDR draw, retain clean pre-overlay HDR. Append a private coverage output to
+the original pixel shader while preserving its original outputs, clipping,
+depth/stencil tests and color blending. Union passing fragments across the
+late overlay suffix. Every later HDR writer before the consumer must satisfy
+that contract; an ordinary world write, copy, clear, unsupported shader or
+binding, or unproven raster phase keeps the existing frame refusal.
+
+The temporal backend receives clean pre-overlay color. The final HDR finish
+uses the game's post-overlay color under aligned coverage and resolved world
+color elsewhere. A reactive mask or a final current-color override alone is
+insufficient: opaque DLSS/FSR history could otherwise ingest the overlay and
+carry it into later frames. Keep raw post-overlay input and live HDR output
+separate from clean backend input, avoiding SRV/RTV feedback.
+
+Implemented, not installed or live-qualified. Targeted tests and full
+validation passed. No new config key or diagnostic removal. Missing or
+declined HDR consumers refuse before the final LDR copy can call a backend.
+The suffix seals at the ready HDR consumer; later HDR writers retain the
+existing post-consumer latch. PS UAV binds, depth/stencil or producer writes,
+unknown copies/clears and scene-camera writes fail closed while it is open.
+
+Initial environment: Windows Epic flat, upstream camera injection, centered
+same-pose alternate projections, single-sample R11G11B10 HDR, and a free
+private MRT slot 7. The latest capture is 3840x2160; installed DLSS is
+310.9.1. Legacy injection, off-center or unproven cameras and unsupported
+target layouts retain refusal. This scope does not qualify VR or Frontier.
+The coverage shader cache is bounded to 2048 structurally supported shaders
+and 32 MiB of patched bytecode; reaching a cap retains refusal. Overlay draws
+that produce engine-motion metadata also retain refusal, so clean color is
+never paired with motion written by the excluded overlay.
+Private clean HDR plus coverage allocations are capped at 128 MiB and reused
+across frames. The production R11 HDR route at 3840x2160 uses 41,472,000 bytes
+for these textures; exceeding the budget retains refusal.
+The resolver also retains a raw post-overlay R11 copy for feedback-free
+composition. Total additional active-overlay scratch is 74,649,600 bytes
+(about 71 MiB) at this size; ordinary frames do not create these allocations.
+
+Automated evidence: the WARP layer test marks 32/256 passing fragments after
+discard, depth and stencil rejection while original HDR and D24S8 bytes match
+an uninstrumented draw exactly. A second shader unions to 96 pixels; the next
+frame reuses the same private textures, refreshes clean color and clears old
+coverage. An alpha-zero draw marks all 256 pixels while HDR/depth/stencil stay
+byte-identical. Occupied MRT7, PS depth output, linkage, predication, OM UAV
+and unsupported conditional control flow refuse.
+
+Both SDK stubs receive clean 20/30/40 pixels where the game has 200/10/10.
+The final HDR composite matches the game's bilinear color at all four
+neighbors with phase (+0.25,-0.25), preserving resolved world elsewhere.
+TAA has covered and zero-mask clean-input controls. The next unmarked frame
+uses backend world output; an incomplete input pair preserves H and never
+calls the backend. Reducer and trace replay tests cover protected suffixes,
+later HDR/depth writes, retained prior conflicts, actual phase/pose mismatch,
+failure/seal markers and post-seal unrelated writes. Updated source wiring
+gates retain isolation and verify the distinct clean/raw copies.
+
+The 5s `flat late overlay` line reports planned and fully marked draws,
+isolated consumer frames and refusals. A route that never ran is distinct
+from one that completed. Its shader/target/blend binds are verified before
+the original draw; incomplete brackets retain refusal. No more diagnostic
+flight is required before installing the validated fix.

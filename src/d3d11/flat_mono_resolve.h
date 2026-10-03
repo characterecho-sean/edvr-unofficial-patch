@@ -147,6 +147,11 @@ struct FlatMonoResolveFrame {
     // is nothing for the caller to swap into a binding. False, the default, is the copy route and every byte of it
     // unchanged.
     bool hdr = false;
+    // Optional late-colour-overlay isolation. `color` remains the live HDR
+    // destination and raw post-overlay image. The backend and prep consume
+    // only cleanColor; finish composites raw colour under coverage.
+    ID3D11ShaderResourceView* cleanColor = nullptr;
+    ID3D11ShaderResourceView* overlayCoverage = nullptr;
     // The upscaler feature slot the backend evaluates on (dlaa.h, kUpscalerSlots; dlaa.cpp and fsr3_engine.cpp keep one
     // feature, one size key and one history per slot). 0 is the flat profile's and eye 0's -- the default, and every
     // caller before the VR world route. The VR world route passes 2 (vr_world_route.h, kVrWorldFeatureSlot), because its two

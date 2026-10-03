@@ -1380,6 +1380,7 @@ void testFrameContractTrace() {
                 if (e.kind == kFlatTraceEventMarkUncertain) { replay.uncertain = true; return; }
                 if (e.kind == kFlatTraceEventCameraCapture) { ++replay.sequence; return; }
                 if (e.kind == kFlatTraceEventResolve) { ++resolveMarkers; return; }
+                if (hdr_route_test::replayOverlayMarker(replay,e)) return;
                 FlatRuntimeDraw d = flatTraceEventToDraw(e);
                 // The traced writeEpoch/writeSeq are the online-resolved
                 // values; replaying them verbatim keeps the shared camera/
@@ -1503,6 +1504,7 @@ void testFrameContractCorpus() {
                 if (e.kind == kFlatTraceEventDispatchWritten) { flatRuntimeDispatchObserveWritten(replay, e.key.color); return; }
                 if (e.kind == kFlatTraceEventMarkUncertain) { replay.uncertain = true; return; }
                 if (e.kind == kFlatTraceEventCameraCapture) { ++replay.sequence; return; }
+                if (hdr_route_test::replayOverlayMarker(replay,e)) return;
                 FlatRuntimeDraw d = flatTraceEventToDraw(e);
                 if (e.flags & kFlatTraceForeignWork) replay.uncertain = true;
                 const bool copy = d.key.vs == flat_mono_detail::kCopyVs &&
@@ -1656,6 +1658,7 @@ int flatTraceCheck(const char* path) {
             if (e.kind == kFlatTraceEventMarkUncertain) { replay.uncertain = true; ++markers; return; }
             if (e.kind == kFlatTraceEventCameraCapture) { ++replay.sequence; ++markers; return; }
             if (e.kind == kFlatTraceEventResolve) { ++markers; return; }
+            if (hdr_route_test::replayOverlayMarker(replay,e)) { ++markers; return; }
             FlatRuntimeDraw d = flatTraceEventToDraw(e);
             if (e.flags & kFlatTraceForeignWork) replay.uncertain = true;
             const bool copy = d.key.vs == flat_mono_detail::kCopyVs &&
@@ -1778,6 +1781,7 @@ int flatTraceMigrate(const char* dirPath) {
                 if (e.kind == kFlatTraceEventDispatchWritten) { flatRuntimeDispatchObserveWritten(replay, e.key.color); continue; }
                 if (e.kind == kFlatTraceEventMarkUncertain) { replay.uncertain = true; continue; }
                 if (e.kind == kFlatTraceEventCameraCapture) { ++replay.sequence; continue; }
+                if (hdr_route_test::replayOverlayMarker(replay,e)) continue;
                 FlatRuntimeDraw d = flatTraceEventToDraw(e);
                 if (e.flags & kFlatTraceForeignWork) replay.uncertain = true;
                 const bool copy = d.key.vs == flat_mono_detail::kCopyVs &&
@@ -1854,6 +1858,7 @@ bool rekeyReplay(const std::vector<unsigned char>& bytes, bool (*table)(uint64_t
             if (e.kind == kFlatTraceEventDispatchWritten) { flatRuntimeDispatchObserveWritten(replay, e.key.color); return; }
             if (e.kind == kFlatTraceEventMarkUncertain) { replay.uncertain = true; return; }
             if (e.kind == kFlatTraceEventCameraCapture) { ++replay.sequence; return; }
+            if (hdr_route_test::replayOverlayMarker(replay,e)) return;
             FlatRuntimeDraw d = flatTraceEventToDraw(e);
             if (table) {
                 const bool recordedSupported = d.supported;

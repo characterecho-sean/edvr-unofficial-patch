@@ -28,6 +28,8 @@ constexpr uint32_t kFlatTraceEventCameraCapture = 4;
 // verdict (a FlatMonoReason value). A replay skips it: the reducer never sees it. The rig reads it to pin what
 // the live run decided against what the pure detector decides over the same draws.
 constexpr uint32_t kFlatTraceEventResolve = 5;
+constexpr uint32_t kFlatTraceEventOverlayFailed = 6;
+constexpr uint32_t kFlatTraceEventOverlaySeal = 7;
 
 // The EDVRFTR3 event, byte for byte: the corpus files are still this layout and are read through it.
 struct FlatTraceEventV3 {
@@ -59,6 +61,9 @@ constexpr uint32_t kFlatTraceImageSourceVerified = 1u << 4;
 constexpr uint32_t kFlatTraceForeignWork = 1u << 5;
 // The event's hdrSrv slots were read (the runtime resolved t0..t3 for this draw).
 constexpr uint32_t kFlatTraceHdrSrvKnown = 1u << 6;
+constexpr uint32_t kFlatTraceOverlayProtected = 1u << 7;
+constexpr uint32_t kFlatTraceDepthWrite = 1u << 8;
+constexpr uint32_t kFlatTraceStencilWrite = 1u << 9;
 
 inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool foreignWork) {
     FlatTraceEvent e{};
@@ -74,6 +79,9 @@ inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool fore
     e.flags |= d.menuHdrCopyVerified ? kFlatTraceMenuCopyVerified : 0;
     e.flags |= d.imageSourceCameraIndependentVerified ? kFlatTraceImageSourceVerified : 0;
     e.flags |= foreignWork ? kFlatTraceForeignWork : 0;
+    e.flags |= d.overlayProtected ? kFlatTraceOverlayProtected : 0;
+    e.flags |= d.effectiveDepthWrite ? kFlatTraceDepthWrite : 0;
+    e.flags |= d.effectiveStencilWrite ? kFlatTraceStencilWrite : 0;
     e.kind = kFlatTraceEventDraw;
     return e;
 }
@@ -107,6 +115,9 @@ inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
     d.hdrCopyVerified = (e.flags & kFlatTraceHdrCopyVerified) != 0;
     d.menuHdrCopyVerified = (e.flags & kFlatTraceMenuCopyVerified) != 0;
     d.imageSourceCameraIndependentVerified = (e.flags & kFlatTraceImageSourceVerified) != 0;
+    d.overlayProtected = (e.flags & kFlatTraceOverlayProtected) != 0;
+    d.effectiveDepthWrite = (e.flags & kFlatTraceDepthWrite) != 0;
+    d.effectiveStencilWrite = (e.flags & kFlatTraceStencilWrite) != 0;
     d.instances = e.instances;
     return d;
 }

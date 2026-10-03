@@ -81,6 +81,26 @@ inline bool flatCameraMeasureRowShift(const float (&rows)[6][4], double& ndcX, d
             static_cast<double>(rows[2][1]) * f2) / ff;
     return std::isfinite(ndcX) && std::isfinite(ndcY);
 }
+// A deliberately narrow same-phase proof for the late colour-overlay path.
+// Off-centre projections have an unknown built-in offset and are refused;
+// different FOV and near planes are allowed when the projected centre and
+// pose agree. Both inputs must be the uploaded rows of this same frame.
+inline bool flatCameraCenteredPairAtPhase(const float (&world)[6][4],
+                                          const float (&overlay)[6][4],
+                                          float pixelX, float pixelY,
+                                          uint32_t width, uint32_t height) {
+    FlatProjectionJitter expected{};
+    if (!flatProjectionJitter(pixelX, pixelY, width, height, expected) ||
+        std::memcmp(world[4], overlay[4], sizeof(world[4]) * 2) != 0) return false;
+    double wx = 0, wy = 0, ox = 0, oy = 0;
+    if (!flatCameraMeasureRowShift(world, wx, wy) ||
+        !flatCameraMeasureRowShift(overlay, ox, oy)) return false;
+    constexpr double tolerance = 2.0e-6;
+    return std::abs(wx - expected.ndcX) <= tolerance &&
+        std::abs(wy - expected.ndcY) <= tolerance &&
+        std::abs(ox - expected.ndcX) <= tolerance &&
+        std::abs(oy - expected.ndcY) <= tolerance;
+}
 
 enum class FlatCameraPairVerdict : uint8_t { Skipped, Consistent, Inconsistent };
 struct FlatCameraPairResult {

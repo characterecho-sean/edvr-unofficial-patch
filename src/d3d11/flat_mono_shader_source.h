@@ -34,6 +34,7 @@ Texture2D<float4> FirstPersonMotion : register(t9);   // prep only, bound when r
                                                       // xy previous minus current in render pixels, z depth, w 1 valid / 2 new / 0 none
 Texture2D<uint2> FirstPersonStencil : register(t10);  // prep only, bound when route.z != 0: the depth texture's stencil plane (.y)
 Texture2D<uint> ClassMap : register(t11);             // the census kernel's and the HDR finish's, bound only when debug.x or debug.y: the prep's class per pixel
+Texture2D<float> OverlayCoverage : register(t12);   // HDR finish only: fragments from protected late colour draws
 SamplerState LinearClamp : register(s0);
 RWTexture2D<float> OutDepth : register(u0);
 RWTexture2D<float2> OutMotion : register(u1);
@@ -335,6 +336,16 @@ float4 finishHdr(float4 pos:SV_Position):SV_Target {
         [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
             reject=max(reject,Rejection.Load(int3(clamp(q+int2(x,y),0,int2(size.xy)-1),0)));
         c=reject>0?Color.SampleLevel(LinearClamp,rasterUv,0).rgb:History.Load(int3(p,0)).rgb;
+    }
+    if(debug.z!=0) {
+        // The raw HDR sample is bilinear: any covered source texel among its
+        // four taps must bypass the clean-world temporal result. This also
+        // protects the one-pixel filtered edge of a late colour overlay.
+        int2 q=int2(floor(rasterUv*float2(size.xy)-.5));
+        float covered=0;
+        [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
+            covered=max(covered,OverlayCoverage.Load(int3(clamp(q+int2(x,y),0,int2(size.xy)-1),0)));
+        if(covered>0)c=Color.SampleLevel(LinearClamp,rasterUv,0).rgb;
     }
     if(debug.y!=0)c=refusalPaint(c,refusalClassAt(rasterUv));
     return float4(hdrRepresentable(c),1);
