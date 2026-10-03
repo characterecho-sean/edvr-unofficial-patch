@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-10-02):** implementation in progress on
+- **State (2026-10-03):** implementation in progress on
   `codex/plugin-architecture`; do not merge to main until Sean is ready to ship.
   Luna 6 agents review baseline segmentation and remaining implementation gates.
   This is Phase 1 of five; the review and remaining gates are in section 11.
@@ -44,14 +44,14 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  shared resolver cost passes 134 jobs; thirteen selectors have rig coverage.
-  Staged-out FSS inputs remain unavailable; whole-ladder equivalence stays open.
+  shared resolver cost passes 134 jobs; fifteen selectors pass 135 validation jobs.
+  Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
   Earlier matched NV visual checks ruled out migration-induced blur because
   verified `14a7ff70` reproduces it. Latest visual confirmation is pending.
-  Main `9361bc0d` is integrated; all 131 validation jobs pass. A new matched
-  control is needed; the latest installed-binary flight is not that comparison.
+  Main `9361bc0d` is integrated. A new matched control is needed;
+  the latest installed-binary flight is not that comparison.
   Temporary instrument key: `advanced.draw_replay` (off by default); propose
   removing it when this arc closes, subject to Scope control. No Phase 2 yet.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
@@ -1527,4 +1527,78 @@ build/plugin-binding-cost-full-build.log; receipt input SHA-256
 ad11e1e1bfa1d7b1d230b85c03995170221cca602743d7296642ac6ab971d488. Steam remains
 on 4350a281; no flight or promotion was requested for this slice. Whole-ladder
 replay, independent forwarding, complete costs and the matched CPU/GPU
+comparison remain open before Phase 2.
+
+
+### RemLok source facts and staged FSS probes, 2026-10-03
+
+Predicate-fact version 8 adds one cold kind-14 fact at RemLok predecessor site
+51; site 52 derives its scissor claim from the same raw fact. The inputs record
+both actual mode reads, the depth-view gate, resolver result/type/size, and the
+lazy swap read. A resolver failure is a known negative, while an absent
+consumed input stays unavailable. Raw uint32 mode values retain existing
+behavior: only Stock and Hide receive their special branches. Successful
+resource description followed by a guarded Release fault keeps the established
+successful result. No extra resource query, clock or per-draw allocation was
+added.
+
+The observed helper records actual match, hidden and pending-eye values before
+and after its mutations, including uint32 and uint64 wrapping. Matched-path
+before values are taken immediately before their corresponding writes; these
+snapshots do not establish cross-draw state continuity through possible COM
+reentry. The ordinary helper uses the same templated body with observation
+compiled out. The real WARP rig exercises shape, mode, depth,
+null/wrong-resource/size paths, parity/swap, frame reset, both wraps,
+budget/fault behavior and an actual mode change between reads. Its 43 shared
+resolver query attempts are checked in one completed API sample window. The rig
+aborts if unrelated scissor sizing is entered; headset tangents, cull guard and
+visual scissor sizing remain outside this recognition test.
+
+Version 8 also distinguishes actual FSS helper invocation from a raw staged-out
+outer probe. Pure probes consume the existing raw configuration, body/jump
+stamps, unsigned ages and mode latch lazily, with no helper execution or state
+mutation. A false raw outer predicate independently establishes a decline; a
+true predicate remains unavailable because the helper/hash inputs were not
+consumed. Older v7 empty NotEligible facts remain unavailable. The recorder
+rejects contradictory provenance and helper or mutation progress on a raw
+probe. Independent review corrected lazy unknown handling without converting
+missing inputs into fabricated counter predictions.
+
+Native recorder fixtures cover positive and declined RemLok outcomes,
+missing/duplicate/bad/unvisited facts, the global cold-pool cap and a complete
+ordered frame with exactly one unavailable staged-out FSS predicate. The Python
+parser preserves versions 1-7. The current reader accepts the three earlier
+production sidecars: 6,821 and 6,237 matches from v1, and 8,682 from v2, with
+zero mismatches or unobserved mutations. This does not prove the new facts have
+production-flight coverage.
+
+The compiled NoTrace/NoCpu parent draw body still has exactly 7,057 encoded
+bytes, 1,636 listing records, 94 ordered call targets and a 288-byte stack. It
+matches the saved reference byte-for-byte; SHA-256
+2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40. DrawRecord
+remains 3,888 bytes and FssObservation remains 296 bytes. RemLok adds a
+112-byte observation pool of 65,536 entries, exactly 7 MiB. Total enabled
+recorder pools become 330.5 MiB, excluding allocator overhead; all remain
+opt-in. This is diagnostic capture memory, not a performance improvement claim.
+
+Focused tests pass: RemLok 227 checks, FSS 518 checks and the ordered
+recorder/CLI suite, including 33 deliberately invalid sidecars and the
+expected-unavailable frame. Independent review and native validation repaired
+fixture COM declarations, unused link dependencies, an injected view left bound
+across cases and stale version checks. The full build's link-isolation gate
+caught the new rig's d3d11.lib import before accepting it; the rig now resolves
+System32 explicitly and checks the loaded module path.
+
+
+
+The System32-isolated RemLok rig passes 229 checks. The final full validation
+passed 128 pooled jobs (147.7 seconds) and seven
+quiet jobs (31.6 seconds), both DLL profiles, installer gates and all 235
+config keys. FocusWatch recorded zero shown windows, consoles or foreground
+changes in 179 seconds. Log: build/plugin-predicate-v8-full-build.log; receipt
+input SHA-256 8f86e0d017e74b9c1e8383d528bc9fed5b9ac760e771e327f6c91da1767d5703.
+Steam remains on 4350a281 with its settings preserved; no new flight or
+promotion was requested for this checkpoint. Fifteen selector sites now have
+scoped rig replay coverage. Whole-ladder replay, independent forwarding,
+complete owner costs and a matched CPU improvement/GPU non-regression
 comparison remain open before Phase 2.

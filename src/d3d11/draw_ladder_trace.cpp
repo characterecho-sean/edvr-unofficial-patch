@@ -41,12 +41,14 @@ struct DrawRecord final {
     PredicateFact predicateFacts[kMaxPredicateFactsPerDraw]{};
     std::uint32_t sunglareFactIndices[kMaxSunglareFactsPerDraw]{};
     std::uint32_t fssFactIndices[kMaxFssFactsPerDraw]{};
+    std::uint32_t remlokFactIndices[kMaxRemlokFactsPerDraw]{};
     ForwardFacts forwardFacts{};
     std::uint16_t siteCount = 0;
     std::uint16_t actionCount = 0;
     std::uint8_t predicateFactCount = 0;
     std::uint8_t sunglareFactCount = 0;
     std::uint8_t fssFactCount = 0;
+    std::uint8_t remlokFactCount = 0;
     std::int16_t winnerSiteId = -1;
     std::int16_t verdictOrdinal = -1;
     bool finalized = false;
@@ -58,6 +60,8 @@ SunglareObservation* g_sunglareFacts = nullptr;
 std::uint32_t g_sunglareFactCount = 0;
 FssObservation* g_fssFacts = nullptr;
 std::uint32_t g_fssFactCount = 0;
+remlok_observation::Observation* g_remlokFacts = nullptr;
+std::uint32_t g_remlokFactCount = 0;
 std::uintptr_t* g_identities = nullptr;
 std::uint32_t g_drawCount = 0;
 std::uint32_t g_identityCount = 0;
@@ -71,6 +75,8 @@ bool g_sunglareIndexOverflowed = false;
 bool g_sunglarePoolMissing = false;
 bool g_fssIndexOverflowed = false;
 bool g_fssPoolMissing = false;
+bool g_remlokIndexOverflowed = false;
+bool g_remlokPoolMissing = false;
 bool g_lastWriteSucceeded = false;
 std::atomic<bool> g_armPending{false};
 wchar_t g_directory[kPathChars]{};
@@ -391,8 +397,10 @@ bool writeFssFact(Writer& writer, const FssObservation& fact) noexcept {
     const bool panel = fact.kind == FssTraceFactKind::kPanel;
     const unsigned siteId = panel ? 57u : 58u;
     const unsigned kind = panel ? 12u : 13u;
-    if (!writeFmt(writer, "{\"siteId\":%u,\"kind\":%u,\"known\":\"yes\",\"selector\":{",
-                  siteId, kind)) return false;
+    if (!writeFmt(writer, "{\"siteId\":%u,\"kind\":%u,\"known\":\"yes\","
+                  "\"handlerInvoked\":%s,\"rawProbeReached\":%s,\"selector\":{",
+                  siteId, kind, fact.handlerInvoked ? "true" : "false",
+                  fact.rawProbeReached ? "true" : "false")) return false;
     bool first = true;
     if (panel) {
         const auto& p = fact.panel;
@@ -420,6 +428,41 @@ bool writeFssFact(Writer& writer, const FssObservation& fact) noexcept {
     return writeFssRead(writer, "arrivalOpen", p.arrivalOpen, first) &&
         writeFssRead(writer, "arrivalBefore", p.arrivalBefore, first) &&
         writeFssRead(writer, "arrivalAfter", p.arrivalAfter, first) &&
+        writeText(writer, "}}");
+}
+
+template <class T>
+bool writeRemlokRead(Writer& writer, const char* name,
+                     const remlok_observation::Read<T>& read, bool& first) noexcept {
+    const FssRead<T> value{read.reached, read.known, read.value};
+    return writeFssRead(writer, name, value, first);
+}
+
+bool writeRemlokFact(Writer& writer, const remlok_observation::Observation& fact) noexcept {
+    if (!writeText(writer, "{\"siteId\":51,\"kind\":14,\"known\":\"yes\",\"selector\":{"))
+        return false;
+    bool first = true;
+    if (!writeRemlokRead(writer, "outerMode", fact.selector.outerMode, first) ||
+        !writeText(writer, "},\"helper\":{")) return false;
+    first = true;
+    const auto& h = fact.helper;
+    if (!writeRemlokRead(writer, "modeBeforeGate", h.modeBeforeGate, first) ||
+        !writeRemlokRead(writer, "dsvNonNull", h.dsvNonNull, first) ||
+        !writeRemlokRead(writer, "resolved", h.resolved, first) ||
+        !writeRemlokRead(writer, "isTexture2D", h.isTexture2D, first) ||
+        !writeRemlokRead(writer, "width", h.width, first) ||
+        !writeRemlokRead(writer, "height", h.height, first) ||
+        !writeRemlokRead(writer, "hideMode", h.hideMode, first) ||
+        !writeRemlokRead(writer, "swap", h.swap, first) ||
+        !writeText(writer, "},\"mutation\":{")) return false;
+    first = true;
+    const auto& m = fact.mutation;
+    return writeRemlokRead(writer, "matchesBefore", m.matchesBefore, first) &&
+        writeRemlokRead(writer, "matchesAfter", m.matchesAfter, first) &&
+        writeRemlokRead(writer, "hiddenBefore", m.hiddenBefore, first) &&
+        writeRemlokRead(writer, "hiddenAfter", m.hiddenAfter, first) &&
+        writeRemlokRead(writer, "pendingRightBefore", m.pendingRightBefore, first) &&
+        writeRemlokRead(writer, "pendingRightAfter", m.pendingRightAfter, first) &&
         writeText(writer, "}}");
 }
 
@@ -565,7 +608,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":7,"
+        "\"predicateFactVersion\":8,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -782,6 +825,14 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
             if (!g_fssFacts || r.fssFactIndices[j] >= g_fssFactCount ||
                 !writeFssFact(writer, g_fssFacts[r.fssFactIndices[j]])) return false;
         }
+        if (r.remlokFactCount &&
+            (r.predicateFactCount || r.sunglareFactCount || r.fssFactCount) &&
+            !writeText(writer, ",")) return false;
+        for (std::uint8_t j = 0; j < r.remlokFactCount; ++j) {
+            if (j && !writeText(writer, ",")) return false;
+            if (!g_remlokFacts || r.remlokFactIndices[j] >= g_remlokFactCount ||
+                !writeRemlokFact(writer, g_remlokFacts[r.remlokFactIndices[j]])) return false;
+        }
         ok = writeFmt(writer,
             "],\"winnerSiteId\":%d,\"verdict\":%d,\"forwardFacts\":",
             r.winnerSiteId, r.verdictOrdinal);
@@ -855,7 +906,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     if (g_isCapturing) return;
     const bool wasEnabled = g_enabled.load(std::memory_order_acquire);
     if (!enabled && !wasEnabled && !g_records && !g_sunglareFacts &&
-        !g_fssFacts && !g_identities) return;
+        !g_fssFacts && !g_remlokFacts && !g_identities) return;
     if (enabled && wasEnabled && logFilePath && logFilePath[0]) {
         wchar_t oldPath[kPathChars]{};
         if (SUCCEEDED(StringCchCopyW(oldPath, kPathChars, g_directory)) &&
@@ -874,13 +925,17 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_sunglarePoolMissing = false;
     g_fssIndexOverflowed = false;
     g_fssPoolMissing = false;
+    g_remlokIndexOverflowed = false;
+    g_remlokPoolMissing = false;
     g_lastWriteSucceeded = false;
     if (g_records) { delete[] g_records; g_records = nullptr; }
     if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
     if (g_fssFacts) { delete[] g_fssFacts; g_fssFacts = nullptr; }
+    if (g_remlokFacts) { delete[] g_remlokFacts; g_remlokFacts = nullptr; }
     if (g_identities) { delete[] g_identities; g_identities = nullptr; }
     g_sunglareFactCount = 0;
     g_fssFactCount = 0;
+    g_remlokFactCount = 0;
     g_directory[0] = L'\0';
     g_logFileName[0] = L'\0';
     g_logStem[0] = L'\0';
@@ -892,11 +947,13 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_records = new (std::nothrow) DrawRecord[kMaxDraws];
     g_sunglareFacts = new (std::nothrow) SunglareObservation[kMaxSunglareFacts];
     g_fssFacts = new (std::nothrow) FssObservation[kMaxFssFacts];
+    g_remlokFacts = new (std::nothrow) remlok_observation::Observation[kMaxRemlokFacts];
     g_identities = new (std::nothrow) std::uintptr_t[kIdentitySlots];
-    if (!g_records || !g_sunglareFacts || !g_fssFacts || !g_identities) {
+    if (!g_records || !g_sunglareFacts || !g_fssFacts || !g_remlokFacts || !g_identities) {
         if (g_records) { delete[] g_records; g_records = nullptr; }
         if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
         if (g_fssFacts) { delete[] g_fssFacts; g_fssFacts = nullptr; }
+        if (g_remlokFacts) { delete[] g_remlokFacts; g_remlokFacts = nullptr; }
         if (g_identities) { delete[] g_identities; g_identities = nullptr; }
         g_directory[0] = L'\0';
         g_logFileName[0] = L'\0';
@@ -933,6 +990,9 @@ ShutdownResult shutdown() noexcept {
     g_sunglareFactCount = 0;
     g_fssFactCount = 0;
     g_frame = FrameFacts{};
+    g_remlokIndexOverflowed = false;
+    g_remlokPoolMissing = false;
+    g_remlokFactCount = 0;
     if (g_records) {
         delete[] g_records;
         g_records = nullptr;
@@ -944,6 +1004,10 @@ ShutdownResult shutdown() noexcept {
     if (g_fssFacts) {
         delete[] g_fssFacts;
         g_fssFacts = nullptr;
+    }
+    if (g_remlokFacts) {
+        delete[] g_remlokFacts;
+        g_remlokFacts = nullptr;
     }
     if (g_identities) {
         delete[] g_identities;
@@ -977,12 +1041,15 @@ void frameBegin(const FrameFacts& facts) noexcept {
     g_identityCount = 0;
     g_sunglareFactCount = 0;
     g_fssFactCount = 0;
+    g_remlokFactCount = 0;
     g_wasOverflowed = false;
     g_sunglareIndexOverflowed = false;
     g_sunglarePoolMissing = false;
     g_fssIndexOverflowed = false;
     g_fssPoolMissing = false;
     g_isCapturing = true;
+    g_remlokIndexOverflowed = false;
+    g_remlokPoolMissing = false;
     g_status.store(Status::Capturing, std::memory_order_relaxed);
     ++g_generation;
     if (g_generation == 0) ++g_generation;
@@ -1254,7 +1321,7 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
     DrawRecord& record = g_records[token.drawIndex];
     if (record.finalized || record.predicateFactCount >= kMaxPredicateFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
-            record.fssFactCount >= 11 ||
+            record.fssFactCount + record.remlokFactCount >= kMaxTotalPredicateFactsPerDraw ||
         static_cast<std::uint8_t>(fact.known) > static_cast<std::uint8_t>(TriState::Yes) ||
         fact.known == TriState::No ||
         static_cast<std::uint8_t>(fact.gateWanted) > static_cast<std::uint8_t>(TriState::Yes) ||
@@ -1378,7 +1445,7 @@ void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept {
     }
     if (record.sunglareFactCount >= kMaxSunglareFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
-            record.fssFactCount >= 11) {
+            record.fssFactCount + record.remlokFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -1476,13 +1543,32 @@ void appendFssFact(Token token, const FssObservation& fact) noexcept {
     }
     if (record.fssFactCount >= kMaxFssFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
-            record.fssFactCount >= 11) {
+            record.fssFactCount + record.remlokFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
     const std::uint16_t siteId = fact.kind == FssTraceFactKind::kPanel ? 57 :
                                  fact.kind == FssTraceFactKind::kReveal ? 58 : 0;
     if (!siteId) { g_wasOverflowed = true; return; }
+    if (fact.handlerInvoked == fact.rawProbeReached) { g_wasOverflowed = true; return; }
+    if (fact.rawProbeReached) {
+        const auto touched = [](const auto& read) { return read.reached || read.known; };
+        const auto& h = fact.kind == FssTraceFactKind::kPanel ? fact.panel.helper : fact.reveal.helper;
+        if (touched(h.enabled) || touched(h.steady) || touched(h.lockstep) ||
+            touched(h.contextNonNull) || touched(h.guardCallReached) || touched(h.callbackEntered) ||
+            touched(h.vsGetShaderCompleted) || touched(h.shaderNonNull) || touched(h.lookupReached) ||
+            touched(h.lookupCompleted) || touched(h.assignedHash) || touched(h.releaseReached) ||
+            touched(h.releaseCompleted) || touched(h.callbackCompleted) || touched(h.guardReturned) ||
+            touched(h.hashAfterGuard) ||
+            (fact.kind == FssTraceFactKind::kPanel &&
+             (touched(fact.panel.matchedHashBefore) || touched(fact.panel.matchedHashAfter))) ||
+            (fact.kind == FssTraceFactKind::kReveal &&
+             (touched(fact.reveal.arrivalOpen) || touched(fact.reveal.arrivalBefore) ||
+              touched(fact.reveal.arrivalAfter)))) {
+            g_wasOverflowed = true;
+            return;
+        }
+    }
     for (std::uint8_t i = 0; i < record.predicateFactCount; ++i)
         if (record.predicateFacts[i].siteId == siteId) { g_wasOverflowed = true; return; }
     for (std::uint8_t i = 0; i < record.sunglareFactCount; ++i) {
@@ -1542,6 +1628,41 @@ void appendFssFact(Token token, const FssObservation& fact) noexcept {
 #undef EDVR_VALID_FSS_READ
     g_fssFacts[g_fssFactCount] = fact;
     record.fssFactIndices[record.fssFactCount++] = g_fssFactCount++;
+}
+
+void appendRemlokFact(Token token, const remlok_observation::Observation& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized) { rejectInvalidToken(); return; }
+    if (!g_remlokFacts) { g_remlokPoolMissing = true; g_wasOverflowed = true; return; }
+    if (g_remlokFactCount >= kMaxRemlokFacts) {
+        g_remlokIndexOverflowed = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (record.remlokFactCount >= kMaxRemlokFactsPerDraw ||
+        record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
+            record.remlokFactCount >= kMaxTotalPredicateFactsPerDraw) {
+        g_wasOverflowed = true;
+        return;
+    }
+    for (std::uint8_t i = 0; i < record.predicateFactCount; ++i)
+        if (record.predicateFacts[i].siteId == 51) { g_wasOverflowed = true; return; }
+    const auto validRead = [](const auto& read) { return !read.known || read.reached; };
+#define EDVR_VALID_REMLOK_READ(r) if (!validRead(r)) { g_wasOverflowed = true; return; }
+    EDVR_VALID_REMLOK_READ(fact.selector.outerMode);
+    const auto& h = fact.helper;
+    EDVR_VALID_REMLOK_READ(h.modeBeforeGate); EDVR_VALID_REMLOK_READ(h.dsvNonNull);
+    EDVR_VALID_REMLOK_READ(h.resolved); EDVR_VALID_REMLOK_READ(h.isTexture2D);
+    EDVR_VALID_REMLOK_READ(h.width); EDVR_VALID_REMLOK_READ(h.height);
+    EDVR_VALID_REMLOK_READ(h.hideMode); EDVR_VALID_REMLOK_READ(h.swap);
+    const auto& m = fact.mutation;
+    EDVR_VALID_REMLOK_READ(m.matchesBefore); EDVR_VALID_REMLOK_READ(m.matchesAfter);
+    EDVR_VALID_REMLOK_READ(m.hiddenBefore); EDVR_VALID_REMLOK_READ(m.hiddenAfter);
+    EDVR_VALID_REMLOK_READ(m.pendingRightBefore); EDVR_VALID_REMLOK_READ(m.pendingRightAfter);
+#undef EDVR_VALID_REMLOK_READ
+    g_remlokFacts[g_remlokFactCount] = fact;
+    record.remlokFactIndices[record.remlokFactCount++] = g_remlokFactCount++;
 }
 
 void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept {
@@ -1658,6 +1779,8 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
     }
     for (std::uint16_t i = 0; i < record.siteCount; ++i) {
         const std::uint16_t siteId = record.sites[i].id;
+        if ((siteId == 51 || siteId == 52) && record.remlokFactCount != 1)
+            g_wasOverflowed = true;
         if (siteId == 57 || siteId == 58) {
             if (!g_fssFacts) {
                 g_fssPoolMissing = true;
@@ -1711,8 +1834,23 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
         const std::uint16_t siteId = fact.kind == FssTraceFactKind::kPanel ? 57 : 58;
         bool visited = false;
         for (std::uint16_t j = 0; j < record.siteCount; ++j)
-            if (record.sites[j].id == siteId) visited = true;
+            if (record.sites[j].id == siteId) {
+                visited = true;
+                const bool stagedOut = record.sites[j].outcome == static_cast<std::uint8_t>(
+                    draw_ladder::SiteOutcome::NotEligible);
+                if (fact.handlerInvoked == stagedOut || fact.rawProbeReached != stagedOut)
+                    g_wasOverflowed = true;
+            }
         if (!visited) g_wasOverflowed = true;
+    }
+    if (record.remlokFactCount) {
+        bool visited = false;
+        for (std::uint16_t j = 0; j < record.siteCount; ++j)
+            if (record.sites[j].id == 51) visited = true;
+        if (!visited) g_wasOverflowed = true;
+        for (std::uint8_t i = 0; i < record.remlokFactCount; ++i)
+            if (!g_remlokFacts || record.remlokFactIndices[i] >= g_remlokFactCount)
+                g_wasOverflowed = true;
     }
     record.winnerSiteId = winnerSiteId;
     record.verdictOrdinal = verdictOrdinal;
@@ -1773,6 +1911,8 @@ bool capturing() noexcept {
 }
 bool overflowed() noexcept { return g_wasOverflowed; }
 CaptureInvalidation invalidationReason() noexcept {
+    if (g_remlokPoolMissing) return CaptureInvalidation::RemlokPoolMissing;
+    if (g_remlokIndexOverflowed) return CaptureInvalidation::RemlokIndexOverflow;
     if (g_fssPoolMissing) return CaptureInvalidation::FssPoolMissing;
     if (g_fssIndexOverflowed) return CaptureInvalidation::FssIndexOverflow;
     if (g_sunglarePoolMissing) return CaptureInvalidation::SunglarePoolMissing;

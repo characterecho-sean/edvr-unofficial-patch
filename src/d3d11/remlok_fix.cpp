@@ -25,6 +25,10 @@ RemlokMode g_remlokMode = RemlokMode::kStock;
 
 namespace {
 using Mode = detail::RemlokMode;
+static_assert(static_cast<uint32_t>(Mode::kStock) == remlok_observation::kModeStock &&
+                  static_cast<uint32_t>(Mode::kOuter) == remlok_observation::kModeOuter &&
+                  static_cast<uint32_t>(Mode::kHide) == remlok_observation::kModeHide,
+              "RemLok raw mode values are part of the predicate observation schema");
 
 // The overlay's shape, exactly as the census measured and the field
 // suppression verified it (2026-08-19): a fullscreen triangle, one instance,
@@ -241,31 +245,106 @@ float effectiveScale() {
 
 }  // namespace
 
-RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
-    if (detail::g_remlokMode == Mode::kStock) return RemlokAction::kNone;
-    if (!remlokOverlayShape(kind, count, instances)) {
-        return RemlokAction::kNone;
-    }
-    // The overlay binds no depth; scene and HUD draws do. Checked before the
-    // SRV resolve so the resolve only runs for depthless fullscreen
-    // triangles, which are a handful a frame.
-    if (bindingGet(BindSlot::Dsv0) != nullptr) return RemlokAction::kNone;
-    ResourceInfo info;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &info) ||
-        !info.isTexture2D || info.a != kSrvW || info.b != kSrvH) {
-        return RemlokAction::kNone;
+namespace {
+
+template <class T>
+remlok_observation::Read<T> knownRead(T value) noexcept {
+    return {true, true, value};
+}
+
+template <bool Observe>
+RemlokAction remlokOnEyeDrawImpl(
+    char kind, uint32_t count, uint32_t instances,
+    remlok_observation::Observation* observation) {
+    using namespace remlok_observation;
+    if constexpr (Observe) {
+        // outerMode belongs to the caller's legacy gate. Preserve the field it
+        // wrote while starting fresh helper and mutation reads for this call.
+        observation->helper = HelperObservation{};
+        observation->mutation = MutationObservation{};
+        observation->mutation.matchesBefore = knownRead(g_matchesThisFrame);
+        observation->mutation.hiddenBefore = knownRead(g_hidden);
+        observation->mutation.pendingRightBefore = knownRead(g_pendingRight);
     }
 
+    const auto finish = [&](RemlokAction action) {
+        if constexpr (Observe) {
+            observation->mutation.matchesAfter = knownRead(g_matchesThisFrame);
+            observation->mutation.hiddenAfter = knownRead(g_hidden);
+            observation->mutation.pendingRightAfter = knownRead(g_pendingRight);
+        }
+        return action;
+    };
+
+    const uint32_t modeBeforeGate = static_cast<uint32_t>(detail::g_remlokMode);
+    if constexpr (Observe)
+        observation->helper.modeBeforeGate = knownRead(modeBeforeGate);
+    if (modeBeforeGate == kModeStock) return finish(RemlokAction::kNone);
+    if (!remlokOverlayShape(kind, count, instances))
+        return finish(RemlokAction::kNone);
+
+    // The overlay binds no depth; scene and HUD draws do. Keep this read ahead
+    // of the SRV resolve, as it is in the production recognition path.
+    const bool dsvNonNull = bindingGet(BindSlot::Dsv0) != nullptr;
+    if constexpr (Observe)
+        observation->helper.dsvNonNull = knownRead(dsvNonNull);
+    if (dsvNonNull) return finish(RemlokAction::kNone);
+
+    ResourceInfo info;
+    const bool resolved = bindingResolve(bindingGet(BindSlot::PsSrv0), &info);
+    if constexpr (Observe)
+        observation->helper.resolved = knownRead(resolved);
+    if (!resolved) return finish(RemlokAction::kNone);
+
+    const bool isTexture2D = info.isTexture2D;
+    if constexpr (Observe)
+        observation->helper.isTexture2D = knownRead(isTexture2D);
+    if (!isTexture2D) return finish(RemlokAction::kNone);
+
+    const uint32_t width = info.a;
+    if constexpr (Observe)
+        observation->helper.width = knownRead(width);
+    if (width != kSrvW) return finish(RemlokAction::kNone);
+
+    const uint32_t height = info.b;
+    if constexpr (Observe)
+        observation->helper.height = knownRead(height);
+    if (height != kSrvH) return finish(RemlokAction::kNone);
+
+    if constexpr (Observe)
+        observation->mutation.matchesBefore = knownRead(g_matchesThisFrame);
     const uint32_t match = g_matchesThisFrame++;
-    if (detail::g_remlokMode == Mode::kHide) {
+    const uint32_t hideMode = static_cast<uint32_t>(detail::g_remlokMode);
+    if constexpr (Observe)
+        observation->helper.hideMode = knownRead(hideMode);
+    if (hideMode == kModeHide) {
+        if constexpr (Observe)
+            observation->mutation.hiddenBefore = knownRead(g_hidden);
         if (++g_hidden == 1) {
             Log::get().note("remlok lines: hidden (first overlay draw "
                             "suppressed this session).");
         }
-        return RemlokAction::kHide;
+        return finish(RemlokAction::kHide);
     }
-    g_pendingRight = ((match & 1u) != 0u) != g_swap;
-    return RemlokAction::kScissor;
+    const bool swap = g_swap;
+    if constexpr (Observe)
+        observation->helper.swap = knownRead(swap);
+    if constexpr (Observe)
+        observation->mutation.pendingRightBefore = knownRead(g_pendingRight);
+    g_pendingRight = ((match & 1u) != 0u) != swap;
+    return finish(RemlokAction::kScissor);
+}
+
+}  // namespace
+
+RemlokAction remlokOnEyeDraw(char kind, uint32_t count, uint32_t instances) {
+    return remlokOnEyeDrawImpl<false>(kind, count, instances, nullptr);
+}
+
+RemlokAction remlokOnEyeDrawObserved(
+    char kind, uint32_t count, uint32_t instances,
+    remlok_observation::Observation& observation) {
+    return remlokOnEyeDrawImpl<true>(kind, count, instances, &observation);
 }
 
 void remlokScissorBegin(ID3D11DeviceContext* ctx) {
@@ -421,6 +500,27 @@ void remlokScissorEnd(ID3D11DeviceContext* ctx) {
 }
 
 void remlokFrameBoundary() { g_matchesThisFrame = 0; }
+
+#if defined(EDVR_REMLOK_PREDICATE_TEST)
+void remlokPredicateTestSetMode(uint32_t mode) {
+    detail::g_remlokMode = static_cast<Mode>(mode);
+}
+
+void remlokPredicateTestSeed(uint32_t mode, bool swap, uint32_t matches,
+                             uint64_t hidden, bool pendingRight) {
+    detail::g_remlokMode = static_cast<Mode>(mode);
+    g_swap = swap;
+    g_matchesThisFrame = matches;
+    g_hidden = hidden;
+    g_pendingRight = pendingRight;
+}
+
+remlok_observation::MutationObservation remlokPredicateTestSnapshot() {
+    return {knownRead(g_matchesThisFrame), knownRead(g_matchesThisFrame),
+            knownRead(g_hidden), knownRead(g_hidden),
+            knownRead(g_pendingRight), knownRead(g_pendingRight)};
+}
+#endif
 
 void remlokShutdown() {
     g_costSample = false;

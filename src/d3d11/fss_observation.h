@@ -63,6 +63,10 @@ struct FssRevealObservation {
 
 struct FssObservation {
     FssTraceFactKind kind = FssTraceFactKind::kPanel;
+    // True when the actual handler ran; rawProbeReached identifies the
+    // separate frozen outer-selector probe on an unvisited handler path.
+    bool handlerInvoked = false;
+    bool rawProbeReached = false;
     FssPanelObservation panel;
     FssRevealObservation reveal;
 };

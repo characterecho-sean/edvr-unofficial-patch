@@ -90,6 +90,7 @@
 #include "splash_dim.h"
 #include "quad_probe.h"
 #include "remlok_fix.h"
+#include "fss_outer_probe.h"
 #include "scrim_fix.h"
 #include "exposure_fix.h"
 #include "particle_fix.h"
@@ -2073,6 +2074,22 @@ struct VScreenDrawLadderVisitor {
                     FssObservation fact{};
                     fact.kind = SiteType::id == draw_ladder::SiteId::kFssPanelClaim
                         ? FssTraceFactKind::kPanel : FssTraceFactKind::kReveal;
+                    fact.rawProbeReached = true;
+                    if constexpr (SiteType::id == draw_ladder::SiteId::kFssPanelClaim) {
+                        fssOuterProbePanel(fact.panel,
+                            [] { return detail::g_fssPanelEnabled; },
+                            [&] { return s->fssBodyFrame; },
+                            [&] { return s->frameNo; });
+                    } else {
+                        fssOuterProbeReveal(fact.reveal,
+                            [] { return detail::g_fssRevealSteady; },
+                            [] { return detail::g_fssRevealLockstep; },
+                            [&] { return s->fssBodyFrame; },
+                            [&] { return s->frameNo; },
+                            [&] { return s->fssJumpFrame; },
+                            [&] { return s->frameNo; },
+                            [] { return deviceHookFssModeLatch(); });
+                    }
                     trace.fssFact(fact);
                 }
             }
@@ -2680,9 +2697,20 @@ struct VScreenDrawLadderVisitor {
             if (pluginClaim == kPluginClaimNightVision) return claimed(id, DrawVerdict::kNightVision);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kRemlokHideSkip) {
-            if (remlokWantsDraws() && remlokOverlayShape(kind, count, instances)) {
-                remlokAction = remlokOnEyeDraw(kind, count, instances);
+            if constexpr (TracePolicy::enabled) {
+                remlok_observation::Observation observed{};
+                const auto mode = detail::g_remlokMode;
+                observed.selector.outerMode = {true, true, static_cast<std::uint32_t>(mode)};
+                if (mode != detail::RemlokMode::kStock &&
+                    remlokOverlayShape(kind, count, instances))
+                    remlokAction = remlokOnEyeDrawObserved(kind, count, instances, observed);
+                trace.remlokFact(observed);
                 if (remlokAction == RemlokAction::kHide) return exited(id, DrawVerdict::kSkip);
+            } else {
+                if (remlokWantsDraws() && remlokOverlayShape(kind, count, instances)) {
+                    remlokAction = remlokOnEyeDraw(kind, count, instances);
+                    if (remlokAction == RemlokAction::kHide) return exited(id, DrawVerdict::kSkip);
+                }
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kRemlokScissorClaim) {
@@ -2736,6 +2764,7 @@ struct VScreenDrawLadderVisitor {
             if constexpr (TracePolicy::enabled) {
                 FssObservation fact{};
                 fact.kind = FssTraceFactKind::kPanel;
+                fact.handlerInvoked = true;
                 auto& observed = fact.panel;
                 bool matches = false;
                 const bool enabled = fssPanelWantsDraws();
@@ -2764,6 +2793,7 @@ struct VScreenDrawLadderVisitor {
             if constexpr (TracePolicy::enabled) {
                 FssObservation fact{};
                 fact.kind = FssTraceFactKind::kReveal;
+                fact.handlerInvoked = true;
                 auto& observed = fact.reveal;
                 bool matches = false;
                 const bool steady = detail::g_fssRevealSteady;

@@ -110,7 +110,8 @@ struct ModelVisitor final {
             return ladder::SiteResult::exited(
                 static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
         }
-        if (id == ladder::SiteId::kSunglareSkip && id == scenario.claimAt) {
+        if ((id == ladder::SiteId::kSunglareSkip || id == ladder::SiteId::kRemlokHideSkip) &&
+            id == scenario.claimAt) {
             return ladder::SiteResult::exited(
                 static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
         }
@@ -881,6 +882,7 @@ edvr::FssObservation fssFact(edvr::FssTraceFactKind kind, bool positive,
                              std::uint32_t frameNo) {
     edvr::FssObservation fact{};
     fact.kind = kind;
+    fact.handlerInvoked = true;
     if (kind == edvr::FssTraceFactKind::kPanel) {
         auto& p = fact.panel;
         fssRead(p.outerEnabled, positive);
@@ -929,6 +931,32 @@ edvr::FssObservation fssFact(edvr::FssTraceFactKind kind, bool positive,
     } else {
         fssRead(p.outerLockstep, false);
     }
+    return fact;
+}
+
+template <class T>
+void remlokRead(edvr::remlok_observation::Read<T>& read, T value) {
+    read = {true, true, value};
+}
+
+edvr::remlok_observation::Observation remlokFact(std::uint32_t mode = 0) {
+    edvr::remlok_observation::Observation fact{};
+    remlokRead(fact.selector.outerMode, mode);
+    if (mode == 0) return fact;
+    auto& h = fact.helper;
+    remlokRead(h.modeBeforeGate, mode);
+    remlokRead(h.dsvNonNull, false);
+    remlokRead(h.resolved, true);
+    remlokRead(h.isTexture2D, true);
+    remlokRead(h.width, 1024u);
+    remlokRead(h.height, 512u);
+    remlokRead(h.hideMode, mode);
+    if (mode != 2) remlokRead(h.swap, false);
+    auto& m = fact.mutation;
+    remlokRead(m.matchesBefore, 0u); remlokRead(m.matchesAfter, 1u);
+    remlokRead(m.hiddenBefore, 0ull);
+    remlokRead(m.hiddenAfter, mode == 2 ? 1ull : 0ull);
+    remlokRead(m.pendingRightBefore, false); remlokRead(m.pendingRightAfter, false);
     return fact;
 }
 
@@ -1199,7 +1227,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        bool blocked = false, bool malformedGenerated = false,
                        edvr::SunglareTraceMode glareMode = edvr::SunglareTraceMode::kStock,
                        bool glareDamping = false, bool glareProbe = false,
-                       int glareWorld = 0, std::uint32_t frameNo = 15) {
+                       int glareWorld = 0, std::uint32_t frameNo = 15,
+                       bool stagedFss = false, bool rawPanelEnabled = false) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     const bool overflowBefore = trace::overflowed();
@@ -1229,6 +1258,12 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     facts.count = 240;
     facts.instances = instances;
     if (kind == 'N') facts.count = 6;
+    if (terminal == ladder::SiteId::kRemlokHideSkip ||
+        terminal == ladder::SiteId::kRemlokScissorClaim) {
+        facts.kind = static_cast<std::uint8_t>('N');
+        facts.count = 3;
+        facts.instances = 1;
+    }
     if (terminal == ladder::SiteId::kSunglareSkip ||
         terminal == ladder::SiteId::kSunglareSteadyClaim) {
         facts.kind = static_cast<std::uint8_t>('N');
@@ -1296,6 +1331,9 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
 
     ModelVisitor visitor{scenario};
     CandidateInterest interest;
+    if (stagedFss)
+        interest.publishedInterests &= ~(draw_interest::bit(draw_interest::InterestId::FssPanel) |
+                                        draw_interest::bit(draw_interest::InterestId::FssReveal));
     ladder::Flow flow = ladder::Flow::Continue;
     if (includeCommon) {
         flow = runSequence(ladder::CommonSequence{}, visitor, interest, policy);
@@ -1446,6 +1484,11 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 static_cast<char>(facts.kind), facts.count, facts.instances,
                 glareMode, glareDamping, glareProbe, glareWorld));
         }
+        if (visited == ladder::SiteId::kRemlokHideSkip) {
+            const std::uint32_t sourceMode = terminal == ladder::SiteId::kRemlokHideSkip ? 2u
+                : terminal == ladder::SiteId::kRemlokScissorClaim ? 1u : 0u;
+            policy.remlokFact(remlokFact(sourceMode));
+        }
         if (visited == ladder::SiteId::kFssPanelClaim) {
             policy.fssFact(fssFact(edvr::FssTraceFactKind::kPanel,
                 terminal == ladder::SiteId::kFssPanelClaim, frameNo));
@@ -1454,9 +1497,32 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 terminal == ladder::SiteId::kFssRevealClaim, frameNo));
         }
     }
-    const std::vector<ladder::SiteId> expected = includeCommon
+    if (stagedFss) {
+        edvr::FssObservation panel{};
+        panel.kind = edvr::FssTraceFactKind::kPanel;
+        panel.rawProbeReached = true;
+        fssRead(panel.panel.outerEnabled, rawPanelEnabled);
+        if (rawPanelEnabled) {
+            fssRead(panel.panel.bodyFrame, frameNo);
+            fssRead(panel.panel.frameNo, frameNo);
+        }
+        policy.fssFact(panel);
+        edvr::FssObservation reveal{};
+        reveal.kind = edvr::FssTraceFactKind::kReveal;
+        reveal.rawProbeReached = true;
+        fssRead(reveal.reveal.outerSteady, false);
+        fssRead(reveal.reveal.outerLockstep, false);
+        policy.fssFact(reveal);
+    }
+    std::vector<ladder::SiteId> expected = includeCommon
         ? frozenWalkRanges(scenario, kFrozenCommon, 8, referenceTail, referenceTailCount)
         : frozenWalkRanges(scenario, referenceTail, referenceTailCount, nullptr, 0);
+    if (stagedFss) {
+        // Compare invoked mock helpers here. The policy still records both
+        // NotEligible sites; the reader checks that complete event sequence.
+        expected.erase(std::remove(expected.begin(), expected.end(), ladder::SiteId::kFssPanelClaim), expected.end());
+        expected.erase(std::remove(expected.begin(), expected.end(), ladder::SiteId::kFssRevealClaim), expected.end());
+    }
     const bool correct = flow == ladder::Flow::Stop && same(visitor.visited, expected) &&
         !visitor.visited.empty() && visitor.visited.back() == terminal &&
         policy.token.valid() && interest.legacyMaskLoads <= 1 &&
@@ -1748,13 +1814,19 @@ bool traceWriterChecks(const char* rootArg) {
     coldStars.contextValid = trace::TriState::No;
     coldStars.detailsFinalized = true;
     vrPolicy.predicateFact(coldStars);
-    // These typed sites were staged as NotEligible before their visitors;
-    // retain empty source payloads rather than inventing helper reads.
+    // This fixture independently declares both raw FSS modes off. Its cheap
+    // probes establish frozen declines even though cached interest staged out.
+    vrPolicy.remlokFact(remlokFact());
     edvr::FssObservation coldPanel{};
     coldPanel.kind = edvr::FssTraceFactKind::kPanel;
+    coldPanel.rawProbeReached = true;
+    fssRead(coldPanel.panel.outerEnabled, false);
     vrPolicy.fssFact(coldPanel);
     edvr::FssObservation coldReveal{};
     coldReveal.kind = edvr::FssTraceFactKind::kReveal;
+    coldReveal.rawProbeReached = true;
+    fssRead(coldReveal.reveal.outerSteady, false);
+    fssRead(coldReveal.reveal.outerLockstep, false);
     vrPolicy.fssFact(coldReveal);
     ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawEnd>(vrPolicy, [] {
         ladder::ActionRecord action;
@@ -1908,12 +1980,12 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
-                matrixJson.find("\"predicateFactVersion\":7") != std::string::npos &&
+                matrixJson.find("\"predicateFactVersion\":8") != std::string::npos &&
                 matrixJson.find("\"siteId\":57,\"kind\":12") != std::string::npos &&
                 matrixJson.find("\"siteId\":58,\"kind\":13") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":12144190660518967694}") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":10753612000489488699}") != std::string::npos,
-                "real writer records positive FSS panel and reveal source facts in canonical v7 predicateFacts");
+                "real writer records positive FSS panel and reveal source facts in canonical v8 predicateFacts");
 
     const std::string generatedInvalidDir = root + "\\generatedinvalid";
     DeleteFileA((generatedInvalidDir + "\\edvr_gfx_generated_invalid.draw-ladder-16.json").c_str());
@@ -2439,12 +2511,12 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":7") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":8") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&
                 sunglareJson.find("\"common2ClampAfter\":{\"reached\":true,\"known\":true,\"value\":0}") != std::string::npos,
-                "writer emits valid v7 facts for each visited Sunglare site with actual reset evidence");
+                "writer emits valid v8 facts for each visited Sunglare site with actual reset evidence");
     trace::DrawFacts sunglareMalformedDraw = draw;
     sunglareMalformedDraw.route = ladder::RouteId::kVrEye;
     sunglareMalformedDraw.sequence = ladder::SequenceId::kVrEye;
@@ -2657,6 +2729,57 @@ bool traceWriterChecks(const char* rootArg) {
     trace::shutdown();
     ok &= check(fssPoolCapReported,
                 "FSS global pool cap reports the distinct index-overflow invalidation");
+
+    const auto remCase = [&](const char* dir, const char* log, std::uint32_t frame,
+                             unsigned badCase) {
+        const bool started = beginFssCase(dir, log, frame);
+        const auto token = trace::beginDraw(fssMalformedDraw);
+        if (badCase != 3) appendFssSite(token, 51);
+        if (badCase != 0) {
+            auto fact = remlokFact();
+            if (badCase == 2) fact.selector.outerMode.reached = false;
+            trace::appendRemlokFact(token, fact);
+            if (badCase == 1) trace::appendRemlokFact(token, fact);
+        }
+        finishFssCase(token, frame);
+        const bool invalid = started && trace::invalidationReason() == trace::CaptureInvalidation::Other;
+        trace::shutdown();
+        return invalid;
+    };
+    ok &= check(remCase("remlok_missing_fact", "edvr_gfx_remlok_missing.log", 46, 0),
+                "missing RemLok predecessor fact invalidates capture");
+    ok &= check(remCase("remlok_duplicate_fact", "edvr_gfx_remlok_duplicate.log", 47, 1),
+                "duplicate RemLok fact exceeds its per-draw capacity");
+    ok &= check(remCase("remlok_bad_read", "edvr_gfx_remlok_bad_read.log", 48, 2),
+                "known but unreached RemLok source read invalidates capture");
+    ok &= check(remCase("remlok_unvisited", "edvr_gfx_remlok_unvisited.log", 49, 3),
+                "RemLok source fact for an unvisited predecessor invalidates capture");
+
+    const bool remPoolStarted = beginFssCase("remlok_pool_cap", "edvr_gfx_remlok_pool.log", 50);
+    bool remPoolFilled = remPoolStarted;
+    trace::Token lastRemToken{};
+    for (std::uint32_t i = 0; remPoolFilled && i < trace::kMaxDraws; ++i) {
+        auto poolDraw = fssMalformedDraw;
+        poolDraw.eyeDrawIndex = i + 1;
+        lastRemToken = trace::beginDraw(poolDraw);
+        if (!lastRemToken.valid()) { remPoolFilled = false; break; }
+        trace::appendRemlokFact(lastRemToken, remlokFact());
+        if (trace::overflowed()) remPoolFilled = false;
+    }
+    if (remPoolFilled) trace::appendRemlokFact(lastRemToken, remlokFact());
+    ok &= check(remPoolFilled && trace::invalidationReason() == trace::CaptureInvalidation::RemlokIndexOverflow,
+                "RemLok global pool overflow has a distinct invalidation reason");
+    trace::shutdown();
+
+    const bool probeStarted = beginFssCase("fss_probe_unknown", "edvr_gfx_fss_probe_unknown.log", 51);
+    const bool probeWritten = probeStarted && writeTerminalCase(ladder::RouteId::kVrEye,
+        ladder::SequenceId::kVrEye, 'N', ladder::SiteId::kPanelTailNone, true,
+        kFrozenEye, sizeof(kFrozenEye) / sizeof(kFrozenEye[0]), ladder::EyeSequence{},
+        1, false, false, edvr::SunglareTraceMode::kStock, false, false, 0, 51, true, true);
+    trace::frameEnd(51);
+    ok &= check(probeWritten && trace::status() == trace::Status::CompleteWritten,
+                "raw outer-true staged FSS source writes a valid unavailable-predicate sidecar");
+    trace::shutdown();
     return ok;
 }
 

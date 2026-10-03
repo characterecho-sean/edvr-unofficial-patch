@@ -1652,7 +1652,7 @@ python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     --expected-log edvr_gfx_trace_fixture.log --dry-run || exit /b 1
 python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.draw-ladder-14.json" ^
-    --expected-log edvr_gfx_trace_fixture.log --dry-run --expect-unreplayable 2 || exit /b 1
+    --expected-log edvr_gfx_trace_fixture.log --dry-run || exit /b 1
 python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     "%BUILD%\draw_ladder_test-trace\terminalmatrix\edvr_gfx_terminal_matrix.draw-ladder-15.json" ^
     --expected-log edvr_gfx_terminal_matrix.log --dry-run || exit /b 1
@@ -1746,6 +1746,21 @@ python "%ROOT%\tools\draw_ladder_replay.py" --file ^
 python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap\edvr_gfx_fss_per_draw.draw-ladder-44.json" ^
     --expected-log edvr_gfx_fss_per_draw.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\remlok_missing_fact\edvr_gfx_remlok_missing.draw-ladder-46.json" ^
+    --expected-log edvr_gfx_remlok_missing.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact\edvr_gfx_remlok_duplicate.draw-ladder-47.json" ^
+    --expected-log edvr_gfx_remlok_duplicate.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\remlok_bad_read\edvr_gfx_remlok_bad_read.draw-ladder-48.json" ^
+    --expected-log edvr_gfx_remlok_bad_read.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\remlok_unvisited\edvr_gfx_remlok_unvisited.draw-ladder-49.json" ^
+    --expected-log edvr_gfx_remlok_unvisited.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.draw-ladder-51.json" ^
+    --expected-log edvr_gfx_fss_probe_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -1836,13 +1851,30 @@ del /q "%BUILD%\draw_ladder_test-trace\fss_missing_fact\edvr_gfx_fss_missing.log
     "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact\edvr_gfx_fss_unfinished.draw-ladder-43.json" ^
     "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap\edvr_gfx_fss_per_draw.log" ^
     "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap\edvr_gfx_fss_per_draw.draw-ladder-44.json" ^
-    "%BUILD%\draw_ladder_test-trace\fss_pool_cap\edvr_gfx_fss_pool.log"
+    "%BUILD%\draw_ladder_test-trace\fss_pool_cap\edvr_gfx_fss_pool.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_missing_fact\edvr_gfx_remlok_missing.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_missing_fact\edvr_gfx_remlok_missing.draw-ladder-46.json" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact\edvr_gfx_remlok_duplicate.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact\edvr_gfx_remlok_duplicate.draw-ladder-47.json" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_bad_read\edvr_gfx_remlok_bad_read.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_bad_read\edvr_gfx_remlok_bad_read.draw-ladder-48.json" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_unvisited\edvr_gfx_remlok_unvisited.log" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_unvisited\edvr_gfx_remlok_unvisited.draw-ladder-49.json" ^
+    "%BUILD%\draw_ladder_test-trace\remlok_pool_cap\edvr_gfx_remlok_pool.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.draw-ladder-51.json"
 if exist "%BUILD%\draw_ladder_test-trace\fss_missing_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_missing_fact"
 if exist "%BUILD%\draw_ladder_test-trace\fss_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\fss_wrong_kind"
 if exist "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact"
 if exist "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact"
 if exist "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap" rmdir "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap"
 if exist "%BUILD%\draw_ladder_test-trace\fss_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\fss_pool_cap"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_missing_fact" rmdir "%BUILD%\draw_ladder_test-trace\remlok_missing_fact"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact" rmdir "%BUILD%\draw_ladder_test-trace\remlok_duplicate_fact"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\remlok_bad_read"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\remlok_unvisited"
+if exist "%BUILD%\draw_ladder_test-trace\remlok_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\remlok_pool_cap"
+if exist "%BUILD%\draw_ladder_test-trace\fss_probe_unknown" rmdir "%BUILD%\draw_ladder_test-trace\fss_probe_unknown"
 if exist "%BUILD%\draw_ladder_test-trace\disabled" rmdir "%BUILD%\draw_ladder_test-trace\disabled"
 if exist "%BUILD%\draw_ladder_test-trace\valid" rmdir "%BUILD%\draw_ladder_test-trace\valid"
 if exist "%BUILD%\draw_ladder_test-trace\terminalmatrix" rmdir "%BUILD%\draw_ladder_test-trace\terminalmatrix"
@@ -2154,6 +2186,22 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /link /INCREMENTAL:NO user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: scrim metadata test build failed & exit /b 1 )
 "%OBJ%\scrimmetadata\scrim_metadata_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_remlok_predicate_test
+echo [edvr] === remlok predicate and mutation regression ===
+if not exist "%OBJ%\remlokpredicate" mkdir "%OBJ%\remlokpredicate"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_REMLOK_PREDICATE_TEST ^
+    /Fo"%OBJ%\remlokpredicate\\" /Fe"%BUILD%\remlok_predicate_test.exe" ^
+    "tools\remlok_predicate_test\remlok_predicate_test.cpp" ^
+    "src\d3d11\remlok_fix.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: remlok predicate test build failed & exit /b 1 )
+"%BUILD%\remlok_predicate_test.exe" --dry-run || exit /b 1
+"%BUILD%\remlok_predicate_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_resolve_bind_test

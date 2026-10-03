@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "../../src/d3d11/fss_observation.h"
+#include "../../src/d3d11/fss_outer_probe.h"
 #include "../../src/d3d11/fss_panel.h"
 #include "../../src/d3d11/fss_reveal.h"
 #include "../../src/d3d11/shader_swap.h"
@@ -102,6 +103,189 @@ void initializeFakeCom() {
 uint64_t expectedHash(const CallState& s, bool budgetAvailable = true) {
     if (!budgetAvailable || !s.returnShader || s.faultGet || s.faultLookup) return 0;
     return s.hash;
+}
+
+template <class T>
+bool rawUnread(const edvr::FssRead<T>& read) {
+    return !read.reached && !read.known && read.value == T{};
+}
+
+bool rawHelperUntouched(const edvr::FssHelperObservation& h) {
+    return rawUnread(h.enabled) && rawUnread(h.steady) && rawUnread(h.lockstep) &&
+        rawUnread(h.contextNonNull) && rawUnread(h.guardCallReached) &&
+        rawUnread(h.callbackEntered) && rawUnread(h.vsGetShaderCompleted) &&
+        rawUnread(h.shaderNonNull) && rawUnread(h.lookupReached) &&
+        rawUnread(h.lookupCompleted) && rawUnread(h.assignedHash) &&
+        rawUnread(h.releaseReached) && rawUnread(h.releaseCompleted) &&
+        rawUnread(h.callbackCompleted) && rawUnread(h.guardReturned) &&
+        rawUnread(h.hashAfterGuard);
+}
+
+bool rawUntouched(const edvr::FssPanelObservation& o) {
+    return rawHelperUntouched(o.helper) && rawUnread(o.matchedHashBefore) &&
+        rawUnread(o.matchedHashAfter);
+}
+
+bool rawUntouched(const edvr::FssRevealObservation& o) {
+    return rawHelperUntouched(o.helper) && rawUnread(o.arrivalOpen) &&
+        rawUnread(o.arrivalBefore) && rawUnread(o.arrivalAfter);
+}
+
+void testRawOuterProbes() {
+    {
+        edvr::FssPanelObservation o{};
+        unsigned enabledReads = 0, bodyReads = 0, frameReads = 0;
+        const bool eligible = edvr::fssOuterProbePanel(
+            o, [&] { ++enabledReads; return false; },
+            [&] { ++bodyReads; return uint32_t(9); },
+            [&] { ++frameReads; return uint32_t(10); });
+        check(rawUntouched(o) && !eligible && enabledReads == 1 && bodyReads == 0 && frameReads == 0 &&
+              fact(o.outerEnabled, true, true, false) &&
+              !o.bodyFrame.reached && !o.frameNo.reached &&
+              !o.helper.guardCallReached.reached,
+              "panel raw probe preserves disabled lazy prefix without helper work");
+    }
+    {
+        edvr::FssPanelObservation o{};
+        unsigned bodyReads = 0, frameReads = 0;
+        const bool eligible = edvr::fssOuterProbePanel(
+            o, [] { return true; },
+            [&] { ++bodyReads; return uint32_t(0); },
+            [&] { ++frameReads; return uint32_t(2); });
+        check(rawUntouched(o) && !eligible && bodyReads == 1 && frameReads == 0 &&
+              fact(o.bodyFrame, true, true, uint32_t(0)) && !o.frameNo.reached,
+              "panel raw probe skips frame read for a zero body stamp");
+    }
+    {
+        edvr::FssPanelObservation o{};
+        const bool fresh = edvr::fssOuterProbePanel(
+            o, [] { return true; }, [] { return uint32_t(0xFFFFFFFEu); },
+            [] { return uint32_t(0); });
+        check(rawUntouched(o) && fresh && fact(o.frameNo, true, true, uint32_t(0)) &&
+              !o.helper.guardCallReached.reached,
+              "panel raw probe keeps uint32 wraparound age semantics");
+    }
+    {
+        edvr::FssPanelObservation o{};
+        const bool fresh = edvr::fssOuterProbePanel(
+            o, [] { return true; }, [] { return uint32_t(10); },
+            [] { return uint32_t(13); });
+        check(rawUntouched(o) && !fresh && fact(o.frameNo, true, true, uint32_t(13)),
+              "panel raw probe declines the first frame beyond the two-frame window");
+    }
+    {
+        edvr::FssRevealObservation o{};
+        unsigned lockstepReads = 0, bodyReads = 0, bodyNoReads = 0;
+        unsigned jumpReads = 0, jumpNoReads = 0, latchReads = 0;
+        const bool eligible = edvr::fssOuterProbeReveal(
+            o, [] { return false; }, [&] { ++lockstepReads; return false; },
+            [&] { ++bodyReads; return uint32_t(4); },
+            [&] { ++bodyNoReads; return uint32_t(4); },
+            [&] { ++jumpReads; return uint32_t(4); },
+            [&] { ++jumpNoReads; return uint32_t(4); },
+            [&] { ++latchReads; return true; });
+        check(rawUntouched(o) && !eligible && lockstepReads == 1 && bodyReads == 0 &&
+              bodyNoReads == 0 && jumpReads == 0 && jumpNoReads == 0 &&
+              latchReads == 0 && !o.bodyFrame.reached &&
+              !o.helper.guardCallReached.reached,
+              "reveal raw probe short-circuits disabled outer selector");
+    }
+    {
+        edvr::FssRevealObservation o{};
+        unsigned lockstepReads = 0, jumpReads = 0, latchReads = 0;
+        const bool eligible = edvr::fssOuterProbeReveal(
+            o, [] { return true; }, [&] { ++lockstepReads; return true; },
+            [] { return uint32_t(7); }, [] { return uint32_t(9); },
+            [&] { ++jumpReads; return uint32_t(8); },
+            [] { return uint32_t(9); },
+            [&] { ++latchReads; return true; });
+        check(rawUntouched(o) && eligible && lockstepReads == 0 && jumpReads == 0 &&
+              latchReads == 0 && fact(o.bodyFrameNo, true, true, uint32_t(9)) &&
+              !o.jumpFrame.reached,
+              "reveal raw probe takes fresh body path without jump or latch reads");
+    }
+    {
+        edvr::FssRevealObservation o{};
+        unsigned bodyNoReads = 0, latchReads = 0;
+        const bool eligible = edvr::fssOuterProbeReveal(
+            o, [] { return false; }, [] { return true; },
+            [] { return uint32_t(10); }, [&] { ++bodyNoReads; return uint32_t(20); },
+            [] { return uint32_t(0xFFFFFFFEu); },
+            [] { return uint32_t(0); },
+            [&] { ++latchReads; return true; });
+        check(rawUntouched(o) && eligible && bodyNoReads == 1 && latchReads == 1 &&
+              fact(o.outerLockstep, true, true, true) &&
+              fact(o.jumpFrameNo, true, true, uint32_t(0)) &&
+              fact(o.modeLatch, true, true, true) &&
+              !o.helper.guardCallReached.reached,
+              "reveal raw probe uses wrap-safe jump fallback and latch");
+    }
+    {
+        edvr::FssRevealObservation o{};
+        unsigned latchReads = 0, bodyNoReads = 0, jumpNoReads = 0;
+        const bool eligible = edvr::fssOuterProbeReveal(
+            o, [] { return true; }, [] { return false; },
+            [] { return uint32_t(4); }, [&] { ++bodyNoReads; return uint32_t(7); },
+            [] { return uint32_t(8); }, [&] { ++jumpNoReads; return uint32_t(609); },
+            [&] { ++latchReads; return true; });
+        check(rawUntouched(o) && !eligible && bodyNoReads == 1 && jumpNoReads == 1 &&
+              latchReads == 0 && rawUnread(o.modeLatch),
+              "reveal raw probe skips latch when jump age exceeds 600");
+    }
+    {
+        edvr::FssRevealObservation o{};
+        const bool eligible = edvr::fssOuterProbeReveal(
+            o, [] { return true; }, [] { return false; },
+            [] { return uint32_t(0); }, [] { return uint32_t(5); },
+            [] { return uint32_t(8); }, [] { return uint32_t(608); },
+            [] { return false; });
+        check(rawUntouched(o) && !eligible && fact(o.modeLatch, true, true, false),
+              "reveal raw probe declines a fresh jump when the mode latch is false");
+    }
+    {
+        edvr::FssRevealObservation o{};
+        unsigned bodyNoReads = 0, jumpReads = 0, jumpNoReads = 0, latchReads = 0;
+        const bool eligible = edvr::fssOuterProbeReveal(
+            o, [] { return false; }, [] { return true; },
+            [] { return uint32_t(0); }, [&] { ++bodyNoReads; return uint32_t(1); },
+            [&] { ++jumpReads; return uint32_t(0); },
+            [&] { ++jumpNoReads; return uint32_t(1); },
+            [&] { ++latchReads; return true; });
+        check(rawUntouched(o) && !eligible && bodyNoReads == 0 && jumpReads == 1 &&
+              jumpNoReads == 0 && latchReads == 0 && rawUnread(o.bodyFrameNo) &&
+              rawUnread(o.jumpFrameNo) && rawUnread(o.modeLatch),
+              "reveal zero body and jump stamps skip both age getters and latch");
+    }
+    {
+        edvr::FssRevealObservation o{};
+        unsigned lockstepReads = 0, jumpReads = 0, jumpNoReads = 0, latchReads = 0;
+        const bool eligible = edvr::fssOuterProbeReveal(
+            o, [] { return true; }, [&] { ++lockstepReads; return false; },
+            [] { return uint32_t(0xFFFFFFFEu); }, [] { return uint32_t(0); },
+            [&] { ++jumpReads; return uint32_t(1); },
+            [&] { ++jumpNoReads; return uint32_t(2); },
+            [&] { ++latchReads; return false; });
+        check(rawUntouched(o) && eligible && lockstepReads == 0 && jumpReads == 0 &&
+              jumpNoReads == 0 && latchReads == 0 &&
+              fact(o.bodyFrameNo, true, true, uint32_t(0)) && rawUnread(o.jumpFrame) &&
+              rawUnread(o.jumpFrameNo) && rawUnread(o.modeLatch),
+              "reveal wrapped two-frame body window skips lockstep and jump fallback");
+    }
+    for (const uint32_t age : {600u, 601u}) {
+        edvr::FssRevealObservation o{};
+        unsigned bodyNoReads = 0, jumpReads = 0, jumpNoReads = 0, latchReads = 0;
+        const bool eligible = edvr::fssOuterProbeReveal(
+            o, [] { return true; }, [] { return false; },
+            [] { return uint32_t(0); }, [&] { ++bodyNoReads; return uint32_t(1); },
+            [&] { ++jumpReads; return uint32_t(8); },
+            [&] { ++jumpNoReads; return uint32_t(8 + age); },
+            [&] { ++latchReads; return true; });
+        check(rawUntouched(o) && eligible == (age == 600) && bodyNoReads == 0 &&
+              jumpReads == 1 && jumpNoReads == 1 && latchReads == (age == 600 ? 1u : 0u) &&
+              rawUnread(o.bodyFrameNo) &&
+              (age == 600 ? fact(o.modeLatch, true, true, true) : rawUnread(o.modeLatch)),
+              "reveal 600-frame jump boundary reads latch and 601-frame boundary skips it");
+    }
 }
 
 ID3D11DeviceContext* fakeContext() {
@@ -776,6 +960,7 @@ void testIndependentParityMatrix() {
 
 void run() {
     initializeFakeCom();
+    testRawOuterProbes();
     testPanelInputsAndHashMutation();
     testPanelCallerAndShapeGates();
     testPanelFaultOrderingAndBudget();

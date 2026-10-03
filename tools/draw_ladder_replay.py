@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 7
+PREDICATE_FACT_VERSION = 8
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -557,7 +557,72 @@ def _fss_read_pair(obj, names, label, should_reach, value_type, maximum=None):
                                 value_type, maximum) for name in names}
 
 
-def _replay_fss_fact(fact, draw, label):
+def _replay_fss_outer_probe(selector, is_panel, label):
+    """Replay only the frozen selector inputs captured before a staged-out FSS handler."""
+    no, yes = False, True
+    u32 = 0xffffffff
+
+    def read(key, reached, value_type):
+        return _fss_set_read(selector, key, label + ".selector", reached,
+                             value_type, u32 if value_type is int else None,
+                             required_when_reached=False)
+
+    if is_panel:
+        outer = read("outerEnabled", yes, bool)
+        body = read("bodyFrame", outer[2] if outer[1] else None, int)
+        frame_reached = (no if outer[1] and not outer[2] else
+                         no if body[0] and body[1] and body[2] == 0 else
+                         yes if outer[1] and body[1] and body[2] != 0 else None)
+        frame = read("frameNo", frame_reached, int)
+        if outer[0] and not outer[1] or (outer[1] and not outer[2]):
+            return False if outer[1] else None
+        if not body[1]:
+            return None
+        if body[2] == 0:
+            return False
+        if not frame[1]:
+            return None
+        return ((frame[2] - body[2]) & u32) <= 2
+
+    steady = read("outerSteady", yes, bool)
+    lockstep = read("outerLockstep", (not steady[2]) if steady[1] else None, bool)
+    outer_wants = (True if steady[1] and steady[2] else
+                   lockstep[2] if steady[1] and not steady[2] and lockstep[1] else None)
+    body = read("bodyFrame", outer_wants, int)
+    body_frame_reached = (no if outer_wants is False else
+                          no if body[0] and body[1] and body[2] == 0 else
+                          yes if outer_wants is True and body[1] and body[2] != 0 else None)
+    body_frame = read("bodyFrameNo", body_frame_reached, int)
+    body_fresh = (False if body[1] and body[2] == 0 else
+                  ((body_frame[2] - body[2]) & u32) <= 2
+                  if body[1] and body[2] != 0 and body_frame[1] else None)
+    jump_reached = (False if outer_wants is False or body_fresh is True else
+                    True if outer_wants is True and body_fresh is False else None)
+    jump = read("jumpFrame", jump_reached, int)
+    jump_frame_reached = (False if jump_reached is False else
+                          False if jump[0] and jump[1] and jump[2] == 0 else
+                          True if jump_reached is True and jump[1] and jump[2] != 0 else None)
+    jump_frame = read("jumpFrameNo", jump_frame_reached, int)
+    jump_fresh = (False if jump[1] and jump[2] == 0 else
+                  ((jump_frame[2] - jump[2]) & u32) <= 600
+                  if jump[1] and jump[2] != 0 and jump_frame[1] else None)
+    latch_reached = (False if jump_fresh is False else
+                     True if jump_fresh is True else None)
+    latch = read("modeLatch", latch_reached, bool)
+    if outer_wants is False:
+        return False
+    if outer_wants is None:
+        return None
+    if body_fresh is True:
+        return True
+    if body_fresh is False and jump_fresh is False:
+        return False
+    if body_fresh is False and jump_fresh is True and latch[1]:
+        return latch[2]
+    return None
+
+
+def _replay_fss_fact(fact, draw, label, predicate_fact_version=7):
     site_id, kind = fact["siteId"], fact["kind"]
     is_panel = site_id == 57
     selector, helper, mutation = fact.get("selector"), fact.get("helper"), fact.get("mutation")
@@ -574,13 +639,46 @@ def _replay_fss_fact(fact, draw, label):
                       "guardReturned", "hashAfterGuard"}
     mutation_fields = ({"matchedHashBefore", "matchedHashAfter"} if is_panel else
                        {"arrivalOpen", "arrivalBefore", "arrivalAfter"})
-    if set(selector) != selector_fields or set(helper) != helper_fields or set(mutation) != mutation_fields:
+    provenance_fields = {"handlerInvoked", "rawProbeReached"} if predicate_fact_version >= 8 else set()
+    if (set(fact) != {"siteId", "kind", "known", "selector", "helper", "mutation"} | provenance_fields or
+            set(selector) != selector_fields or set(helper) != helper_fields or set(mutation) != mutation_fields):
         raise TraceError(label + " FSS payload has missing or unexpected fields")
 
     def is_skipped(envelope):
         return (isinstance(envelope, dict) and set(envelope) == {"reached", "known", "value"}
                 and envelope["reached"] is False and envelope["known"] is False
                 and envelope["value"] is None)
+
+    def group_skipped(group):
+        return all(is_skipped(envelope) for envelope in group.values())
+
+    if predicate_fact_version >= 8:
+        handler_invoked = fact.get("handlerInvoked")
+        raw_probe_reached = fact.get("rawProbeReached")
+        if type(handler_invoked) is not bool or type(raw_probe_reached) is not bool:
+            raise TraceError(label + " FSS provenance fields must be booleans")
+        if handler_invoked == raw_probe_reached:
+            raise TraceError(label + " FSS handler and raw outer probe provenance contradict")
+        if handler_invoked and group_skipped(selector) and group_skipped(helper) and group_skipped(mutation):
+            raise TraceError(label + " invoked FSS handler has no actual source reads")
+        if raw_probe_reached:
+            if not group_skipped(helper) or not group_skipped(mutation):
+                raise TraceError(label + " raw FSS probe carries helper or mutation progress")
+            outer_pass = _replay_fss_outer_probe(selector, is_panel, label)
+            if outer_pass is False:
+                event = {"id": site_id, "kind": 2, "outcome": 5,
+                         "flow": 0, "subsite": 0, "verdict": -1}
+                return event, 0, False, False
+            return None, 0, True, False
+        if not handler_invoked:
+            if not (group_skipped(selector) and group_skipped(helper) and group_skipped(mutation)):
+                raise TraceError(label + " FSS reads exist without handler or probe provenance")
+            actual = next((event for event in draw["sites"] if event["id"] == site_id), None)
+            not_eligible = {"id": site_id, "kind": 2, "outcome": 5,
+                            "flow": 0, "subsite": 0, "verdict": -1}
+            if actual != not_eligible:
+                raise TraceError(label + " empty FSS observations require an uninvoked NotEligible site")
+            return None, 0, True, False
 
     if all(is_skipped(envelope) for group in (selector, helper, mutation)
            for envelope in group.values()):
@@ -842,6 +940,139 @@ def _replay_fss_fact(fact, draw, label):
                  "flow": 1 if claim else 0, "subsite": 0,
                  "verdict": (11 if is_panel else 12) if claim else -1}
     return event, mismatch, unreplayable, mutation_unobserved
+
+
+def _replay_remlok_fact(fact, draw, label):
+    selector, helper, mutation = fact.get("selector"), fact.get("helper"), fact.get("mutation")
+    selector_fields = {"outerMode"}
+    helper_fields = {"modeBeforeGate", "dsvNonNull", "resolved", "isTexture2D",
+                     "width", "height", "hideMode", "swap"}
+    mutation_fields = {"matchesBefore", "matchesAfter", "hiddenBefore", "hiddenAfter",
+                       "pendingRightBefore", "pendingRightAfter"}
+    if (set(fact) != {"siteId", "kind", "known", "selector", "helper", "mutation"} or
+            not all(isinstance(group, dict) for group in (selector, helper, mutation)) or
+            set(selector) != selector_fields or set(helper) != helper_fields or
+            set(mutation) != mutation_fields):
+        raise TraceError(label + " RemLok payload has missing or unexpected fields")
+    if fact.get("known") != "yes":
+        raise TraceError(label + " RemLok fact availability must be yes; reads carry unknowns")
+
+    no, yes = False, True
+    u32, u64 = 0xffffffff, 0xffffffffffffffff
+    mismatch = 0
+    mutation_unobserved = False
+
+    def is_skipped(envelope):
+        return (isinstance(envelope, dict) and set(envelope) == {"reached", "known", "value"}
+                and envelope["reached"] is False and envelope["known"] is False
+                and envelope["value"] is None)
+
+    def read(group, key, reached, value_type, maximum, required=False):
+        obj = selector if group == "selector" else helper if group == "helper" else mutation
+        return _fss_set_read(obj, key, label + "." + group, reached,
+                             value_type, maximum, required_when_reached=required)
+
+    outer = read("selector", "outerMode", yes, int, u32)
+    shape = draw["kind"] == ord("N") and draw["count"] == 3 and draw["instances"] == 1
+    helper_call = (False if not shape else
+                   (outer[2] != 0) if outer[1] else None)
+
+    mode = read("helper", "modeBeforeGate", helper_call, int, u32)
+    active = (False if helper_call is False else
+              (mode[2] != 0) if mode[1] else None)
+    dsv = read("helper", "dsvNonNull", active, bool, None)
+    resolve_call = (False if active is False or (dsv[1] and dsv[2]) else
+                    True if active is True and dsv[1] and not dsv[2] else None)
+    resolved = read("helper", "resolved", resolve_call, bool, None)
+    type_call = (resolved[2] if resolved[1] else None) if resolve_call is not False else False
+    texture = read("helper", "isTexture2D", type_call, bool, None)
+    desc_call = (texture[2] if texture[1] else None) if type_call is not False else False
+    width = read("helper", "width", desc_call, int, u32)
+    height_call = False if desc_call is False else (width[2] == 1024 if width[1] else None)
+    height = read("helper", "height", height_call, int, u32)
+    dimensions_match = (width[2] == 1024 and height[2] == 512
+                        if desc_call is True and width[1] and height[1] else
+                        False if height_call is False else None)
+    mode_call = dimensions_match
+    hide_mode = read("helper", "hideMode", mode_call, int, u32)
+    swap_call = (False if dimensions_match is False or
+                 (hide_mode[1] and hide_mode[2] == 2) else
+                 True if dimensions_match is True and hide_mode[1] else None)
+    swap = read("helper", "swap", swap_call, bool, None)
+
+    match = dimensions_match is True
+    hide = match and hide_mode[1] and hide_mode[2] == 2
+    scissor = match and hide_mode[1] and hide_mode[2] != 2
+    undecided = dimensions_match is None or (match and not hide_mode[1])
+
+    before_matches = read("mutation", "matchesBefore", helper_call, int, u32)
+    after_matches = read("mutation", "matchesAfter", helper_call, int, u32)
+    before_hidden = read("mutation", "hiddenBefore", helper_call, int, u64)
+    after_hidden = read("mutation", "hiddenAfter", helper_call, int, u64)
+    before_pending = read("mutation", "pendingRightBefore", helper_call, bool, None)
+    after_pending = read("mutation", "pendingRightAfter", helper_call, bool, None)
+    mutation_reads = (before_matches, after_matches, before_hidden, after_hidden,
+                      before_pending, after_pending)
+    if helper_call is True and any(not value[0] or not value[1] for value in mutation_reads):
+        mutation_unobserved = True
+    if helper_call is True and all(value[0] and value[1] for value in mutation_reads):
+        if dimensions_match is not None and after_matches[2] != ((before_matches[2] + (1 if match else 0)) & u32):
+            mismatch += 1
+        hidden_trigger_known = dimensions_match is False or (match and hide_mode[1])
+        if hidden_trigger_known and after_hidden[2] != ((before_hidden[2] + (1 if hide else 0)) & u64):
+            mismatch += 1
+        expected_pending = before_pending[2]
+        if scissor and swap[1]:
+            expected_pending = ((before_matches[2] & 1) != 0) != swap[2]
+        pending_trigger_known = dimensions_match is False or hide or (scissor and swap[1])
+        if pending_trigger_known and after_pending[2] != expected_pending:
+            mismatch += 1
+        if dimensions_match is None or not hidden_trigger_known or not pending_trigger_known:
+            mutation_unobserved = True
+    if helper_call is True and scissor and not swap[1]:
+        mutation_unobserved = True
+
+    # Validate all present envelopes, including skipped stages, with strict
+    # bool/int types and the original field-specific widths.
+    for key in selector_fields:
+        read("selector", key, None, int, u32)
+    for key in helper_fields:
+        value_type = int if key in {"modeBeforeGate", "width", "height", "hideMode"} else bool
+        maximum = u32 if key in {"width", "height", "modeBeforeGate", "hideMode"} else None
+        read("helper", key, None, value_type, maximum)
+    for key in mutation_fields:
+        value_type = int if key in {"matchesBefore", "matchesAfter", "hiddenBefore", "hiddenAfter"} else bool
+        maximum = u32 if key.startswith("matches") else u64 if key.startswith("hidden") else None
+        read("mutation", key, None, value_type, maximum)
+
+    if helper_call is False:
+        if not all(is_skipped(value) for group in (helper, mutation) for value in group.values()):
+            raise TraceError(label + " skipped RemLok helper carries reads or mutations")
+    elif helper_call is None:
+        # A source mode that was actually read but unavailable makes the
+        # helper reach uncertain; preserve valid instrumentation either way.
+        pass
+
+    if helper_call is False or (mode[1] and mode[2] == 0) or (dsv[1] and dsv[2]) or \
+            (resolved[1] and not resolved[2]) or (texture[1] and not texture[2]) or \
+            dimensions_match is False:
+        hide = False
+        scissor = False
+        undecided = False
+    elif mode[0] and not mode[1] or (helper_call is None and not outer[1]):
+        undecided = True
+
+    if undecided:
+        return None, None, mismatch, mutation_unobserved
+    site51 = ({"id": 51, "kind": 2, "outcome": 4, "flow": 1,
+               "subsite": 0, "verdict": 2} if hide else
+              {"id": 51, "kind": 2, "outcome": 2, "flow": 0,
+               "subsite": 0, "verdict": -1})
+    site52 = (None if hide else
+              {"id": 52, "kind": 2, "outcome": 3 if scissor else 2,
+               "flow": 1 if scissor else 0, "subsite": 0,
+               "verdict": 3 if scissor else -1})
+    return site51, site52, mismatch, mutation_unobserved
 
 
 def _candidate_witchspace_stars(fact, draw):
@@ -1413,11 +1644,12 @@ def _replay_scrim_fact(fact, draw, label):
 
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((3, 6, 24, 26, 49, 50, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 7 else
+    supported_ids = ((3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 8 else
+                     (3, 6, 24, 26, 49, 50, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 7 else
                      (3, 6, 24, 26, 49, 50, 53, 55, 61, 62, 63) if predicate_fact_version >= 6 else
                      (3, 6, 24, 26, 49, 50, 53, 55) if predicate_fact_version >= 5 else
                      (3, 6, 24, 26, 49, 50) if predicate_fact_version >= 4 else
@@ -1434,6 +1666,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        14 if predicate_fact_version >= 8 else
                         13 if predicate_fact_version >= 7 else
                         11 if predicate_fact_version >= 6 else
                         8 if predicate_fact_version >= 5 else
@@ -1442,7 +1675,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                         3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        supported_pairs = ((3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
+        supported_pairs = ((3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+                           (57, 12), (58, 13), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 8 else (
+            (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
                            (53, 7), (55, 8), (57, 12), (58, 13), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 7 else (
             (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
                            (53, 7), (55, 8), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 6 else (
@@ -1453,6 +1688,8 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             (3, 1), (49, 2), (50, 3)) if predicate_fact_version >= 2 else ((3, 1), (49, 2))
         if (site_id, kind) not in supported_pairs:
             raise TraceError(fact_label + " has an unsupported site/kind pair")
+        if site_id == 52:
+            raise TraceError(fact_label + " derived RemLok site 52 cannot have a separate fact")
         known = fact.get("known")
         if known not in TRI_STATES:
             raise TraceError(fact_label + ".known is invalid")
@@ -1511,8 +1748,25 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                     event = None
             by_site[site_id] = (event, expected_delta,
                                 expected_delta is None, 0, cache_mismatches, None)
+        elif kind == 14:
+            if site_id != 51 or predicate_fact_version < 8:
+                raise TraceError(fact_label + " has unsupported RemLok fact")
+            event, derived, fact_mismatches, fact_mutation_unobserved = \
+                _replay_remlok_fact(fact, draw, fact_label)
+            by_site[site_id] = (event, None, True, 0, fact_mismatches,
+                                fact_mutation_unobserved)
+            if event is not None and event["outcome"] == 4:
+                if 52 in expected:
+                    raise TraceError(fact_label + " RemLok site 52 is reached after a terminal hide")
+            elif 52 in expected:
+                by_site[52] = (derived, None, True, 0, fact_mismatches, None)
+            elif derived is not None:
+                if 52 not in expected:
+                    raise TraceError(fact_label + " RemLok claim lacks its derived site 52 event")
         elif kind in (12, 13):
             required = {"siteId", "kind", "known", "selector", "helper", "mutation"}
+            if predicate_fact_version >= 8:
+                required |= {"handlerInvoked", "rawProbeReached"}
             if set(fact) != required:
                 raise TraceError(fact_label + " has missing or unexpected FSS fields")
             if known != "yes":
@@ -1520,7 +1774,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             if ((site_id, kind) != (57, 12) and (site_id, kind) != (58, 13)):
                 raise TraceError(fact_label + " has mismatched FSS site/kind")
             event, fact_mismatches, fact_unreplayable, fact_mutation_unobserved = \
-                _replay_fss_fact(fact, draw, fact_label)
+                _replay_fss_fact(fact, draw, fact_label, predicate_fact_version)
             by_site[site_id] = (event, None, True, 0, fact_mismatches,
                                 fact_mutation_unobserved)
         elif kind == 3:
@@ -1724,7 +1978,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -1758,6 +2012,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     fss_replayed = 0
     fss_unreplayable = 0
     fss_mismatches = 0
+    remlok_replayed = 0
+    remlok_unreplayable = 0
+    remlok_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -1797,6 +2054,19 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             if cache_mismatches:
                 fss_mismatches += cache_mismatches
             if legacy_claim:
+                mutation_unobserved += 1
+        if site_id in (51, 52):
+            if site_unreplayable:
+                remlok_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                remlok_replayed += 1
+            else:
+                remlok_mismatches += 1
+            if cache_mismatches:
+                remlok_mismatches += cache_mismatches
+            if site_id == 51 and legacy_claim:
                 mutation_unobserved += 1
         if site_id == 50:
             if site_unreplayable:
@@ -1918,7 +2188,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "fssFacts": sum(1 for site_id in by_site if site_id in (57, 58)),
             "fssReplayed": fss_replayed,
             "fssUnreplayable": fss_unreplayable,
-            "fssMismatches": fss_mismatches}
+            "fssMismatches": fss_mismatches,
+            "remlokFacts": sum(1 for site_id in by_site if site_id in (51, 52)),
+            "remlokReplayed": remlok_replayed,
+            "remlokUnreplayable": remlok_unreplayable,
+            "remlokMismatches": remlok_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -1936,7 +2210,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -2022,7 +2296,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "sunglareFacts": 0, "sunglareReplayed": 0,
                         "sunglareUnreplayable": 0, "sunglareMismatches": 0,
                         "fssFacts": 0, "fssReplayed": 0,
-                        "fssUnreplayable": 0, "fssMismatches": 0}
+                        "fssUnreplayable": 0, "fssMismatches": 0,
+                        "remlokFacts": 0, "remlokReplayed": 0,
+                        "remlokUnreplayable": 0, "remlokMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -2356,6 +2632,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                        "mismatch" if predicate_replay["fssMismatches"] else
                        "unreplayable" if predicate_replay["fssUnreplayable"] else
                        "replayed"),
+            remlokStatus=("unavailable-before-v8" if predicate_fact_version < 8 else
+                          "not-visited" if not predicate_replay["remlokFacts"] else
+                          "mismatch" if predicate_replay["remlokMismatches"] else
+                          "unreplayable" if predicate_replay["remlokUnreplayable"] else
+                          "replayed"),
             **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -2382,7 +2663,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
              "sunglareMismatches": 0,
              "fssStatus": "unavailable-v1", "fssFacts": 0,
              "fssReplayed": 0, "fssUnreplayable": 0,
-             "fssMismatches": 0}),
+             "fssMismatches": 0, "remlokStatus": "unavailable-before-v8",
+             "remlokFacts": 0, "remlokReplayed": 0,
+             "remlokUnreplayable": 0, "remlokMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -2487,6 +2770,13 @@ def format_summary(summary, sidecar_path=None):
                      (replay["fssStatus"], replay.get("fssFacts", 0),
                       replay.get("fssReplayed", 0), replay.get("fssUnreplayable", 0),
                       replay.get("fssMismatches", 0)))
+    if replay.get("predicateFactVersion", 0) < 8:
+        lines.append("  RemLok sites 51-52: unavailable before predicate fact version 8")
+    else:
+        lines.append("  RemLok sites 51-52: %s (%d event(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay["remlokStatus"], replay.get("remlokFacts", 0),
+                      replay.get("remlokReplayed", 0), replay.get("remlokUnreplayable", 0),
+                      replay.get("remlokMismatches", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -4136,6 +4426,71 @@ def self_test():
         return {"reached": reached, "known": known,
                 "value": value if reached and known else None}
 
+    def remlok_fact(outer_mode=1, mode_before_gate=1, dsv_nonnull=False,
+                    resolved=True, is_texture=True, width=1024, height=512,
+                    hide_mode=1, swap=False, matches_before=0, hidden_before=0,
+                    pending_before=False, shape=(ord("N"), 3, 1)):
+        helper_called = outer_mode != 0 and shape == (ord("N"), 3, 1)
+        dsv_read = helper_called and mode_before_gate != 0
+        resolve_read = dsv_read and not dsv_nonnull
+        type_read = resolve_read and resolved
+        desc_read = type_read and is_texture
+        matching_texture = desc_read and width == 1024 and height == 512
+        hide_read = matching_texture
+        swap_read = matching_texture and hide_mode != 2
+        helper = {
+            "modeBeforeGate": fr(mode_before_gate) if helper_called else fr(None, False, False),
+            "dsvNonNull": fr(dsv_nonnull) if dsv_read else fr(None, False, False),
+            "resolved": fr(resolved) if resolve_read else fr(None, False, False),
+            "isTexture2D": fr(is_texture) if type_read else fr(None, False, False),
+            "width": fr(width) if desc_read else fr(None, False, False),
+            "height": fr(height) if desc_read and width == 1024 else fr(None, False, False),
+            "hideMode": fr(hide_mode) if hide_read else fr(None, False, False),
+            "swap": fr(swap) if swap_read else fr(None, False, False),
+        }
+        if matching_texture:
+            matches_after = (matches_before + 1) & 0xffffffff
+        else:
+            matches_after = matches_before
+        hidden_after = ((hidden_before + 1) & 0xffffffffffffffff
+                        if matching_texture and hide_mode == 2 else hidden_before)
+        pending_after = (((matches_before & 1) != 0) != swap
+                         if matching_texture and hide_mode != 2 else pending_before)
+        mutation = {
+            "matchesBefore": fr(matches_before) if helper_called else fr(None, False, False),
+            "matchesAfter": fr(matches_after) if helper_called else fr(None, False, False),
+            "hiddenBefore": fr(hidden_before) if helper_called else fr(None, False, False),
+            "hiddenAfter": fr(hidden_after) if helper_called else fr(None, False, False),
+            "pendingRightBefore": fr(pending_before) if helper_called else fr(None, False, False),
+            "pendingRightAfter": fr(pending_after) if helper_called else fr(None, False, False),
+        }
+        return {"siteId": 51, "kind": 14, "known": "yes",
+                "selector": {"outerMode": fr(outer_mode)},
+                "helper": helper, "mutation": mutation}
+
+    def remlok_decline51():
+        return {"id": 51, "kind": 2, "outcome": 2, "flow": 0,
+                "subsite": 0, "verdict": -1}
+
+    def remlok_draw(fact, site52=None, shape=(ord("N"), 3, 1)):
+        events = [remlok_decline51()]
+        if site52 is None:
+            site52 = {"id": 52, "kind": 2, "outcome": 2, "flow": 0,
+                      "subsite": 0, "verdict": -1}
+        if site52:
+            events.append(site52)
+        return {"kind": shape[0], "count": shape[1], "instances": shape[2],
+                "sites": events, "predicateFacts": [fact]}
+
+    def fss_v8(fact, handler_invoked=True, raw_probe_reached=False):
+        result = json.loads(json.dumps(fact))
+        result["handlerInvoked"] = handler_invoked
+        result["rawProbeReached"] = raw_probe_reached
+        if raw_probe_reached and not handler_invoked:
+            for group in ("helper", "mutation"):
+                result[group] = {key: fr(None, False, False) for key in result[group]}
+        return result
+
     def fss_event(site_id, claim):
         return {"id": site_id, "kind": 2, "outcome": 3 if claim else 2,
                 "flow": 1 if claim else 0, "subsite": 0,
@@ -4502,6 +4857,173 @@ def self_test():
         else:
             print("draw-ladder FSS staged absence accepted numeric availability flags")
             return 1
+
+    # Version 8 carries explicit handler/probe provenance. The old v7 empty
+    # NotEligible fixture above remains unavailable, while a raw outer miss is
+    # independently replayable without consulting that event.
+    panel_v8 = fss_v8(panel_fact)
+    if _replay_predicate_facts(fss_draw(panel_v8), "fss-v8-handler", 8)["fssReplayed"] != 1:
+        print("draw-ladder FSS v8 invoked-handler provenance failed")
+        return 1
+    panel_raw_off = fss_v8(fss_panel_fact(outer=False), False, True)
+    panel_not_eligible = {"id": 57, "kind": 2, "outcome": 5,
+                          "flow": 0, "subsite": 0, "verdict": -1}
+    raw_off = _replay_predicate_facts(fss_draw(panel_raw_off, panel_not_eligible),
+                                      "fss-v8-raw-off", 8)
+    if raw_off["fssReplayed"] != 1 or raw_off["fssMismatches"]:
+        print("draw-ladder FSS v8 raw outer decline was not replayed")
+        return 1
+    wrong_raw_off = _replay_predicate_facts(fss_draw(panel_raw_off, fss_event(57, True)),
+                                            "fss-v8-raw-off-mutant", 8)
+    if not wrong_raw_off["fssMismatches"]:
+        print("draw-ladder FSS v8 used NotEligible output as selector input")
+        return 1
+    panel_raw_stale = fss_v8(fss_panel_fact(body=10, frame=13), False, True)
+    stale_decline = _replay_predicate_facts(
+        fss_draw(panel_raw_stale, panel_not_eligible), "fss-v8-raw-stale", 8)
+    if stale_decline["fssReplayed"] != 1 or stale_decline["fssMismatches"]:
+        print("draw-ladder FSS v8 raw age boundary failed")
+        return 1
+    panel_raw_on = fss_v8(panel_fact, False, True)
+    raw_on = _replay_predicate_facts(fss_draw(panel_raw_on, panel_not_eligible),
+                                     "fss-v8-raw-on", 8)
+    if raw_on["fssUnreplayable"] != 1 or raw_on["fssReplayed"] or raw_on["fssMismatches"]:
+        print("draw-ladder FSS v8 probed outer-true path invented helper evidence")
+        return 1
+    reveal_raw_off = fss_v8(fss_reveal_fact(outer_steady=False,
+                                             outer_lockstep=False), False, True)
+    reveal_not_eligible = {"id": 58, "kind": 2, "outcome": 5,
+                           "flow": 0, "subsite": 0, "verdict": -1}
+    if _replay_predicate_facts(fss_draw(reveal_raw_off, reveal_not_eligible),
+                               "fss-v8-reveal-off", 8)["fssReplayed"] != 1:
+        print("draw-ladder FSS v8 reveal short-circuit was not replayed")
+        return 1
+
+    malformed_v8 = []
+    contradictory = fss_v8(panel_fact, True, True)
+    malformed_v8.append(contradictory)
+    raw_progress = json.loads(json.dumps(panel_raw_off))
+    raw_progress["helper"]["callbackEntered"] = fr(False)
+    malformed_v8.append(raw_progress)
+    raw_mutation = json.loads(json.dumps(panel_raw_off))
+    raw_mutation["mutation"]["matchedHashAfter"] = fr(0)
+    malformed_v8.append(raw_mutation)
+    bad_bool = json.loads(json.dumps(panel_raw_off))
+    bad_bool["rawProbeReached"] = 1
+    malformed_v8.append(bad_bool)
+    missing_raw = json.loads(json.dumps(panel_raw_off))
+    missing_raw["selector"]["outerEnabled"] = fr(None, False, False)
+    malformed_v8.append(missing_raw)
+    for bad in malformed_v8:
+        try:
+            _replay_predicate_facts(fss_draw(bad, panel_not_eligible), "fss-v8-malformed", 8)
+        except TraceError:
+            pass
+        else:
+            print("draw-ladder FSS v8 accepted contradictory or malformed provenance")
+            return 1
+    empty_v8 = fss_v8(fss_panel_fact(outer=False), False, False)
+    try:
+        _replay_predicate_facts(fss_draw(empty_v8, panel_not_eligible), "fss-v8-empty", 8)
+    except TraceError:
+        pass
+    else:
+        print("draw-ladder FSS v8 accepted missing handler/probe provenance")
+        return 1
+
+    rem_swapped = remlok_fact(outer_mode=1, mode_before_gate=2, swap=True,
+                              matches_before=0xffffffff, pending_before=True)
+    rem_claim = {"id": 52, "kind": 2, "outcome": 3, "flow": 1,
+                 "subsite": 0, "verdict": 3}
+    rem_summary = _replay_predicate_facts(
+        remlok_draw(rem_swapped, rem_claim), "remlok-swapped-wrap", 8)
+    if (rem_summary["remlokReplayed"] != 2 or rem_summary["remlokMismatches"] or
+            rem_summary["remlokUnreplayable"]):
+        print("draw-ladder RemLok differing modes/parity wrap fixture failed")
+        return 1
+    rem_hide = remlok_fact(outer_mode=2, mode_before_gate=1, hide_mode=2,
+                           matches_before=0xffffffff, hidden_before=0xffffffffffffffff,
+                           pending_before=True)
+    rem_hide_event = {"id": 51, "kind": 2, "outcome": 4, "flow": 1,
+                      "subsite": 0, "verdict": 2}
+    rem_hide_summary = _replay_predicate_facts(
+        {"kind": ord("N"), "count": 3, "instances": 1,
+         "sites": [rem_hide_event], "predicateFacts": [rem_hide]},
+        "remlok-hide-wrap", 8)
+    if (rem_hide_summary["remlokReplayed"] != 1 or
+            rem_hide_summary["remlokMismatches"] or
+            rem_hide_summary["remlokUnreplayable"]):
+        print("draw-ladder RemLok hide/count wrap fixture failed")
+        return 1
+    for declined in (remlok_fact(outer_mode=1, dsv_nonnull=True),
+                     remlok_fact(outer_mode=1, resolved=False),
+                     remlok_fact(outer_mode=1, is_texture=False),
+                     remlok_fact(outer_mode=1, width=1023),
+                     remlok_fact(outer_mode=1, mode_before_gate=0)):
+        result = _replay_predicate_facts(remlok_draw(declined), "remlok-known-decline", 8)
+        if result["remlokReplayed"] != 2 or result["remlokMismatches"]:
+            print("draw-ladder RemLok known decline path failed")
+            return 1
+    rem_shape_miss = remlok_fact(outer_mode=1, shape=(ord("N"), 4, 1))
+    unknown_modes = remlok_fact(outer_mode=91, mode_before_gate=7, hide_mode=7)
+    unknown_result = _replay_predicate_facts(
+        remlok_draw(unknown_modes, rem_claim), "remlok-raw-mode-values", 8)
+    if unknown_result["remlokMismatches"] or unknown_result["remlokReplayed"] != 2:
+        print("draw-ladder RemLok raw uint32 mode values changed frozen semantics")
+        return 1
+    bad_height = remlok_fact(width=1023)
+    bad_height["helper"]["height"] = fr(512)
+    try:
+        _replay_predicate_facts(remlok_draw(bad_height), "remlok-height-after-width-miss", 8)
+    except TraceError:
+        pass
+    else:
+        print("draw-ladder RemLok read height after a width rejection")
+        return 1
+    if _replay_predicate_facts(remlok_draw(rem_shape_miss, shape=(ord("N"), 4, 1)),
+                               "remlok-shape-miss", 8)["remlokReplayed"] != 2:
+        print("draw-ladder RemLok shape short-circuit failed")
+        return 1
+    rem_bad_query = json.loads(json.dumps(remlok_fact(outer_mode=1, mode_before_gate=0)))
+    rem_bad_query["helper"]["dsvNonNull"] = fr(False)
+    try:
+        _replay_predicate_facts(remlok_draw(rem_bad_query), "remlok-read-past-gate", 8)
+    except TraceError:
+        pass
+    else:
+        print("draw-ladder RemLok accepted a query past the stock-mode gate")
+        return 1
+    rem_bad_mutation = json.loads(json.dumps(rem_swapped))
+    for unknown_key in ("width", "hideMode", "swap"):
+        partial_rem = json.loads(json.dumps(rem_swapped))
+        partial_rem["helper"][unknown_key] = fr(None, True, False)
+        partial_result = _replay_predicate_facts(
+            remlok_draw(partial_rem, rem_claim), "remlok-partial-" + unknown_key, 8)
+        if partial_result["remlokMismatches"] or not partial_result["mutationUnobserved"]:
+            print("draw-ladder RemLok unavailable trigger manufactured mutation evidence")
+            return 1
+    rem_bad_mutation["mutation"]["matchesAfter"] = fr(0xffffffff)
+    if not _replay_predicate_facts(remlok_draw(rem_bad_mutation, rem_claim),
+                                   "remlok-mutation", 8)["remlokMismatches"]:
+        print("draw-ladder RemLok counter mutation was not detected")
+        return 1
+    try:
+        _replay_predicate_facts({"kind": ord("N"), "count": 3, "instances": 1,
+                                 "sites": [rem_claim], "predicateFacts": []},
+                                "remlok-missing-predecessor", 8)
+    except TraceError:
+        pass
+    else:
+        print("draw-ladder RemLok derived site lacked its source fact")
+        return 1
+    try:
+        _replay_predicate_facts(remlok_draw(rem_swapped, rem_claim),
+                               "remlok-v7-unavailable", 7)
+    except TraceError:
+        pass
+    else:
+        print("draw-ladder predicate version 7 unexpectedly accepted RemLok kind 14")
+        return 1
     print("draw-ladder-replay self-test: ok")
     return 0
 

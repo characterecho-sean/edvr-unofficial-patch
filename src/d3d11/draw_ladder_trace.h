@@ -4,6 +4,7 @@
 #include "draw_ladder.h"
 #include "holo_scrim_observation.h"
 #include "fss_observation.h"
+#include "remlok_observation.h"
 #include "sunglare_observation.h"
 
 #include <atomic>
@@ -24,6 +25,11 @@ constexpr std::uint8_t kMaxSunglareFactsPerDraw = 3;
 constexpr std::uint32_t kMaxSunglareFacts = kMaxDraws * kMaxSunglareFactsPerDraw;
 constexpr std::uint8_t kMaxFssFactsPerDraw = 2;
 constexpr std::uint32_t kMaxFssFacts = kMaxDraws * kMaxFssFactsPerDraw;
+constexpr std::uint8_t kMaxRemlokFactsPerDraw = 1;
+constexpr std::uint32_t kMaxRemlokFacts = kMaxDraws * kMaxRemlokFactsPerDraw;
+constexpr std::uint8_t kMaxTotalPredicateFactsPerDraw =
+    kMaxPredicateFactsPerDraw + kMaxSunglareFactsPerDraw +
+    kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -45,6 +51,8 @@ enum class CaptureInvalidation : std::uint8_t {
     SunglarePoolMissing = 3,
     FssIndexOverflow = 4,
     FssPoolMissing = 5,
+    RemlokIndexOverflow = 6,
+    RemlokPoolMissing = 7,
 };
 
 // Returned by shutdown() so production can report whether an armed or partial
@@ -268,6 +276,7 @@ void recordForwardFacts(Token token, const ForwardFacts& facts) noexcept;
 void appendPredicateFact(Token token, const PredicateFact& fact) noexcept;
 void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept;
 void appendFssFact(Token token, const FssObservation& fact) noexcept;
+void appendRemlokFact(Token token, const remlok_observation::Observation& fact) noexcept;
 void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept;
 void completeWitchspaceStarsFact(Token token, const PredicateFact& fact) noexcept;
 void updateCandidates(Token token, std::uint64_t mask) noexcept;
@@ -348,6 +357,9 @@ struct TracePolicy final {
 
     inline void fssFact(const FssObservation& fact) noexcept {
         appendFssFact(token, fact);
+    }
+    inline void remlokFact(const remlok_observation::Observation& fact) noexcept {
+        appendRemlokFact(token, fact);
     }
 };
 
