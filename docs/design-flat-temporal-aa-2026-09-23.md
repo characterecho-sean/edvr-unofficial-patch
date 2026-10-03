@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** overlay corrections `90d0c3d8` FLOWN, still refuses weapon (99).
-  Epic installed `v0.18.1-23-g90d0c3d8`. Latest analyzed log is this build;
-  evidence and corrections are in sections 1-99.
+- **State:** resource correction `128fca02` BUILT, NOT FLOWN (99).
+  Epic installed `v0.18.1-25-g128fca02`. Latest analyzed log is the refusing
+  `v0.18.1-23-g90d0c3d8` build; evidence and corrections are in sections 1-99.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 99: precise resource checks implemented; full validation
-  passed. Commit, clean promotion and Epic install follow.
+- **Next:** section 99: same weapon drawn ten seconds, holstered ten seconds.
+  Check world AA and marked/isolated counters; F10 only if still defective.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9924,4 +9924,14 @@ protected HDR/depth and unknown refusal, all ten mutation-hook variants,
 Map/Unmap and foreign latch wiring, with removal/misrouting mutation controls.
 Full validation passed, including GPU rigs and installer gates, with receipt
 fingerprint `630ee203b04248f94eeeb2c642db9daac8a6ef285725281e226b5498269c9fd6`.
-Source is frozen; commit and clean promotion follow. No new install yet.
+Committed as `128fca02`, fast-forwarded main and verified the push. Clean
+DLL-only promotion passed. Epic flat installed and independently verified
+as `v0.18.1-25-g128fca02`; live `edvr-flat.ini` and `nvngx_dlss.dll` hashes
+are unchanged. The resource correction is BUILT, NOT FLOWN.
+
+Next representative test: same weapon drawn ten seconds, then holstered
+ten seconds. Check that world AA remains active and 5s marked/isolated
+counters advance; any relevant mutation refusal now names operation/role.
+F10 only if AA still turns off or another defect appears. No two-minute wait
+or weapon matrix is required. Verify the next log against the literal
+installed `v0.18.1-25-g128fca02`, not the later docs-only HEAD.
