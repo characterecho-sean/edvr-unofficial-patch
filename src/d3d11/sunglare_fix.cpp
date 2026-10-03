@@ -395,6 +395,113 @@ SunglareAction sunglareOnEyeDraw(char kind, uint32_t count,
     return SunglareAction::kMatch;
 }
 
+namespace {
+
+template <class T>
+void sunglareObservedRead(SunglareRead<T>& read, T value) {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
+
+SunglareTraceMode traceMode(Mode mode) {
+    return static_cast<SunglareTraceMode>(mode);
+}
+
+bool sunglareObservedWants(SunglareRead<SunglareTraceMode>& modeRead,
+                           SunglareRead<bool>& exposureRead,
+                           SunglareRead<bool>& probeRead,
+                           SunglareRead<bool>& resultRead) {
+    const Mode mode = g_mode;
+    sunglareObservedRead(modeRead, traceMode(mode));
+    bool result = true;
+    if (mode == Mode::kStock) {
+        const bool damping = exposureDampingActive();
+        sunglareObservedRead(exposureRead, damping);
+        result = damping;
+        if (!damping) {
+            const bool probe = detail::g_sunglareProbe;
+            sunglareObservedRead(probeRead, probe);
+            result = probe;
+        }
+    }
+    sunglareObservedRead(resultRead, result);
+    return result;
+}
+
+bool sunglareObservedTexture(BindSlot slot, SunglareTextureRead& observed) {
+    ResourceInfo info;
+    const bool resolved = bindingResolve(bindingGet(slot), &info);
+    sunglareObservedRead(observed.resolveOk, resolved);
+    if (!resolved) return false;
+    const bool texture2D = info.isTexture2D;
+    sunglareObservedRead(observed.isTexture2D, texture2D);
+    if (!texture2D) return false;
+    const uint32_t width = info.a;
+    sunglareObservedRead(observed.width, width);
+    if (width != kSheetW) return false;
+    const uint32_t height = info.b;
+    sunglareObservedRead(observed.height, height);
+    if (height != kSheetH) return false;
+    const uint32_t format = info.fmt;
+    sunglareObservedRead(observed.format, format);
+    return format == kSheetFmt;
+}
+
+}  // namespace
+
+SunglareAction sunglareOnEyeDrawObserved(
+    char kind, uint32_t count, uint32_t instances,
+    SunglareSelectorObservation& observation) {
+    const bool outerShape = sunglareTrainShape(kind, count, instances);
+    sunglareObservedRead(observation.outerTrainShape, outerShape);
+    if (!outerShape || !sunglareObservedWants(
+            observation.outerWantsMode, observation.outerExposureDamping,
+            observation.outerProbe, observation.outerWantsResult)) {
+        sunglareObservedRead(observation.action, SunglareTraceAction::kStock);
+        return SunglareAction::kStock;
+    }
+
+    if (!sunglareObservedWants(
+            observation.helperWantsMode, observation.helperExposureDamping,
+            observation.helperProbe, observation.helperWantsResult)) {
+        sunglareObservedRead(observation.action, SunglareTraceAction::kStock);
+        return SunglareAction::kStock;
+    }
+
+    const bool helperShape = sunglareTrainShape(kind, count, instances);
+    sunglareObservedRead(observation.helperTrainShape, helperShape);
+    if (!helperShape || !sunglareObservedTexture(BindSlot::PsSrv0, observation.ps0) ||
+        !sunglareObservedTexture(BindSlot::PsSrv1, observation.ps1)) {
+        sunglareObservedRead(observation.action, SunglareTraceAction::kStock);
+        return SunglareAction::kStock;
+    }
+
+    sunglareObservedRead(observation.lastSeenBeforeMs, g_lastSeenMs);
+    const uint64_t sample = nowMs();
+    sunglareObservedRead(observation.nowMs, sample);
+    g_lastSeenMs = sample;
+    sunglareObservedRead(observation.lastSeenAfterMs, g_lastSeenMs);
+    const Mode mode = g_mode;
+    sunglareObservedRead(observation.actionMode, traceMode(mode));
+    const SunglareAction action = mode == Mode::kOff
+        ? SunglareAction::kSkip : SunglareAction::kMatch;
+    sunglareObservedRead(observation.action,
+        action == SunglareAction::kSkip ? SunglareTraceAction::kSkip
+                                        : SunglareTraceAction::kMatch);
+    return action;
+}
+
+#if defined(EDVR_SUNGLARE_PREDICATE_TEST)
+void sunglarePredicateTestState(SunglareTraceMode mode, bool probe, int world,
+                               uint64_t lastSeenMs) {
+    g_mode = static_cast<Mode>(mode);
+    detail::g_sunglareProbe = probe;
+    detail::g_sunglareWorld = world;
+    g_lastSeenMs = lastSeenMs;
+}
+#endif
+
 uint32_t sunglareKeep() { return g_keep; }
 
 // The scene-CB follow: any big eye-target draw's 208-byte constants are

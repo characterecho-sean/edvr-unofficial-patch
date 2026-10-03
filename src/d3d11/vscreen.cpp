@@ -1944,6 +1944,13 @@ struct VScreenDrawLadderVisitor {
         return draw_ladder::SiteResult::exited(static_cast<int16_t>(v), subsite);
     }
 
+    template <class T>
+    static void observeSunglareRead(SunglareRead<T>& read, T value) {
+        read.reached = true;
+        read.known = true;
+        read.value = value;
+    }
+
     template <class SiteType>
     __forceinline bool eligible() {
         if constexpr (SiteType::shaderCandidateGated) {
@@ -2114,7 +2121,13 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kForeignContextNone) {
+            if constexpr (TracePolicy::enabled) {
+                trace.sunglareClampResetBefore = s->glareClamp;
+                trace.sunglareClampResetSeen = true;
+            }
             s->glareClamp = 0;
+            if constexpr (TracePolicy::enabled)
+                trace.sunglareClampResetAfter = s->glareClamp;
             if (foreignContext(self)) {
                 noteForeignDraw(self);
                 if (drawCensusArmed())
@@ -2727,23 +2740,98 @@ struct VScreenDrawLadderVisitor {
                 return claimed(id, DrawVerdict::kResolveBind);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kSunglareSkip) {
-            if (sunglareTrainShape(kind, count, instances) && sunglareWantsDraws()) {
-                glareAction = sunglareOnEyeDraw(kind, count, instances);
-                if (glareAction == SunglareAction::kSkip) return exited(id, DrawVerdict::kSkip);
-                if (glareAction == SunglareAction::kClamp) s->glareClamp = sunglareKeep();
+            if constexpr (TracePolicy::enabled) {
+                SunglareObservation fact{};
+                fact.kind = SunglareTraceFactKind::kKind9;
+                if (trace.sunglareClampResetSeen) {
+                    observeSunglareRead(fact.common2ClampBefore,
+                                        trace.sunglareClampResetBefore);
+                    observeSunglareRead(fact.common2ClampAfter,
+                                        trace.sunglareClampResetAfter);
+                }
+                const uint32_t clampBefore = s->glareClamp;
+                observeSunglareRead(fact.site.clampBefore, clampBefore);
+                glareAction = sunglareOnEyeDrawObserved(
+                    kind, count, instances, fact.selector);
+                if (glareAction == SunglareAction::kClamp) {
+                    const uint32_t keep = sunglareKeep();
+                    s->glareClamp = keep;
+                }
+                const uint32_t clampAfter = s->glareClamp;
+                observeSunglareRead(fact.site.clampAfter, clampAfter);
+                trace.sunglareFact(fact);
+                if (glareAction == SunglareAction::kSkip)
+                    return exited(id, DrawVerdict::kSkip);
+            } else {
+                if (sunglareTrainShape(kind, count, instances) && sunglareWantsDraws()) {
+                    glareAction = sunglareOnEyeDraw(kind, count, instances);
+                    if (glareAction == SunglareAction::kSkip)
+                        return exited(id, DrawVerdict::kSkip);
+                    if (glareAction == SunglareAction::kClamp)
+                        s->glareClamp = sunglareKeep();
+                }
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kSunglareSteadyClaim) {
-            if (glareAction != SunglareAction::kStock &&
-                (sunglareWorldActive() || sunglareProbeActive())) {
-                s->glareClamp = 0;
-                billboardOnGlareDraw(count, instances);
-                return claimed(id, DrawVerdict::kGlareSteady);
+            if constexpr (TracePolicy::enabled) {
+                SunglareObservation fact{};
+                fact.kind = SunglareTraceFactKind::kKind10;
+                const bool actionNotStock = glareAction != SunglareAction::kStock;
+                observeSunglareRead(fact.site.source61ActionNotStock,
+                                    actionNotStock);
+                bool gate = false;
+                if (actionNotStock) {
+                    const int world = detail::g_sunglareWorld;
+                    observeSunglareRead(fact.site.worldValue,
+                                        static_cast<int32_t>(world));
+                    gate = world != 0;
+                    if (!gate) {
+                        const bool probe = sunglareProbeActive();
+                        observeSunglareRead(fact.site.probeValue, probe);
+                        gate = probe;
+                    }
+                }
+                if (gate) {
+                    const uint32_t clampBefore = s->glareClamp;
+                    observeSunglareRead(fact.site.clampBefore, clampBefore);
+                    s->glareClamp = 0;
+                    const uint32_t clampAfter = s->glareClamp;
+                    observeSunglareRead(fact.site.clampAfter, clampAfter);
+                    billboardOnGlareDraw(count, instances);
+                    observeSunglareRead(fact.site.billboardReached, true);
+                    trace.sunglareFact(fact);
+                    return claimed(id, DrawVerdict::kGlareSteady);
+                }
+                trace.sunglareFact(fact);
+            } else {
+                if (glareAction != SunglareAction::kStock &&
+                    (sunglareWorldActive() || sunglareProbeActive())) {
+                    s->glareClamp = 0;
+                    billboardOnGlareDraw(count, instances);
+                    return claimed(id, DrawVerdict::kGlareSteady);
+                }
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kGlareClampClaim) {
-            if (glareAction != SunglareAction::kStock && s->glareClamp)
-                return claimed(id, DrawVerdict::kGlareClamp);
+            if constexpr (TracePolicy::enabled) {
+                SunglareObservation fact{};
+                fact.kind = SunglareTraceFactKind::kKind11;
+                const bool actionNotStock = glareAction != SunglareAction::kStock;
+                observeSunglareRead(fact.site.source61ActionNotStock,
+                                    actionNotStock);
+                if (actionNotStock) {
+                    const uint32_t clamp = s->glareClamp;
+                    observeSunglareRead(fact.site.clampBefore, clamp);
+                    if (clamp) {
+                        trace.sunglareFact(fact);
+                        return claimed(id, DrawVerdict::kGlareClamp);
+                    }
+                }
+                trace.sunglareFact(fact);
+            } else {
+                if (glareAction != SunglareAction::kStock && s->glareClamp)
+                    return claimed(id, DrawVerdict::kGlareClamp);
+            }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kHeadOffsetObserve) {
             if (headOffsetGateWantsPanel() && srv0IsPanelSized(s, kind, count))

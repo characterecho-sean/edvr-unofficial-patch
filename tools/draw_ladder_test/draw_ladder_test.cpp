@@ -1,6 +1,7 @@
 #include "../../src/d3d11/draw_ladder.h"
 #include "../../src/d3d11/draw_ladder_trace.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -106,6 +107,10 @@ struct ModelVisitor final {
         }
         if (id == ladder::SiteId::kOffscreenCensusSkip &&
             id == scenario.exitAt) {
+            return ladder::SiteResult::exited(
+                static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
+        }
+        if (id == ladder::SiteId::kSunglareSkip && id == scenario.claimAt) {
             return ladder::SiteResult::exited(
                 static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
         }
@@ -782,6 +787,89 @@ bool fileExists(const std::string& path) {
     return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+template <class T>
+void sunglareRead(edvr::SunglareRead<T>& read, T value) {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
+
+edvr::SunglareObservation sunglareFact(
+    edvr::SunglareTraceFactKind kind, char drawKind = 'N',
+    std::uint32_t drawCount = 6, std::uint32_t instances = 2,
+    edvr::SunglareTraceMode mode = edvr::SunglareTraceMode::kStock,
+    bool damping = false, bool probe = false, int world = 0) {
+    edvr::SunglareObservation fact{};
+    fact.kind = kind;
+    auto& s = fact.selector;
+    const bool shape = drawKind == 'N' && drawCount == 6 && instances >= 2;
+    sunglareRead(s.outerTrainShape, shape);
+    bool matched = shape;
+    const auto wants = [&](edvr::SunglareRead<edvr::SunglareTraceMode>& modeRead,
+                           edvr::SunglareRead<bool>& dampingRead,
+                           edvr::SunglareRead<bool>& probeRead,
+                           edvr::SunglareRead<bool>& resultRead) {
+        sunglareRead(modeRead, mode);
+        bool result = mode != edvr::SunglareTraceMode::kStock;
+        if (!result) {
+            sunglareRead(dampingRead, damping);
+            result = damping;
+            if (!result) {
+                sunglareRead(probeRead, probe);
+                result = probe;
+            }
+        }
+        sunglareRead(resultRead, result);
+        return result;
+    };
+    if (matched) matched = wants(s.outerWantsMode, s.outerExposureDamping,
+                                 s.outerProbe, s.outerWantsResult);
+    if (matched) matched = wants(s.helperWantsMode, s.helperExposureDamping,
+                                 s.helperProbe, s.helperWantsResult);
+    if (matched) {
+        sunglareRead(s.helperTrainShape, shape);
+        for (auto* texture : {&s.ps0, &s.ps1}) {
+            sunglareRead(texture->resolveOk, true);
+            sunglareRead(texture->isTexture2D, true);
+            sunglareRead(texture->width, 2048u);
+            sunglareRead(texture->height, 1024u);
+            sunglareRead(texture->format, 98u);
+        }
+        sunglareRead(s.lastSeenBeforeMs, 100ull);
+        sunglareRead(s.nowMs, 110ull);
+        sunglareRead(s.lastSeenAfterMs, 110ull);
+        sunglareRead(s.actionMode, mode);
+    }
+    const auto action = !matched ? edvr::SunglareTraceAction::kStock
+        : mode == edvr::SunglareTraceMode::kOff ? edvr::SunglareTraceAction::kSkip
+                                                : edvr::SunglareTraceAction::kMatch;
+    sunglareRead(s.action, action);
+    fact.site.source61ActionNotStock = {};
+    if (kind == edvr::SunglareTraceFactKind::kKind9) {
+        sunglareRead(fact.common2ClampBefore, 37u);
+        sunglareRead(fact.common2ClampAfter, 0u);
+        sunglareRead(fact.site.clampBefore, 0u);
+        sunglareRead(fact.site.clampAfter, 0u);
+    } else {
+        const bool actionNotStock = action != edvr::SunglareTraceAction::kStock;
+        sunglareRead(fact.site.source61ActionNotStock, actionNotStock);
+        if (kind == edvr::SunglareTraceFactKind::kKind10) {
+            if (actionNotStock) {
+                sunglareRead(fact.site.worldValue, world);
+                if (world == 0) sunglareRead(fact.site.probeValue, probe);
+                if (world != 0 || probe) {
+                    sunglareRead(fact.site.clampBefore, 0u);
+                    sunglareRead(fact.site.clampAfter, 0u);
+                    sunglareRead(fact.site.billboardReached, true);
+                }
+            }
+        } else if (actionNotStock) {
+            sunglareRead(fact.site.clampBefore, 0u);
+        }
+    }
+    return fact;
+}
+
 struct FlatBypassWriter final {
     template <class SiteType>
     ladder::SiteResult visit() {
@@ -1046,7 +1134,10 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        char kind, ladder::SiteId terminal, bool includeCommon,
                        const ladder::SiteId* referenceTail, std::size_t referenceTailCount,
                        SequenceType selectedSequence, std::uint32_t instances = 1,
-                       bool blocked = false, bool malformedGenerated = false) {
+                       bool blocked = false, bool malformedGenerated = false,
+                       edvr::SunglareTraceMode glareMode = edvr::SunglareTraceMode::kStock,
+                       bool glareDamping = false, bool glareProbe = false,
+                       int glareWorld = 0) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     if (verdict < 0) return false;
@@ -1074,6 +1165,13 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     facts.sequence = sequence;
     facts.count = 240;
     facts.instances = instances;
+    if (kind == 'N') facts.count = 6;
+    if (terminal == ladder::SiteId::kSunglareSkip ||
+        terminal == ladder::SiteId::kSunglareSteadyClaim) {
+        facts.kind = static_cast<std::uint8_t>('N');
+        facts.count = 6;
+        facts.instances = (std::max)(instances, 2u);
+    }
     if (terminal == ladder::SiteId::kHoloClaim) {
         facts.kind = static_cast<std::uint8_t>('X');
         facts.count = 6;
@@ -1261,6 +1359,19 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         } else if (visited == ladder::SiteId::kScrimClaim) {
             policy.predicateFact(makeScrimPredicateFact(visited, facts,
                 terminal == ladder::SiteId::kEyeBackdropComposite));
+        }
+        if (visited == ladder::SiteId::kSunglareSkip) {
+            policy.sunglareFact(sunglareFact(edvr::SunglareTraceFactKind::kKind9,
+                static_cast<char>(facts.kind), facts.count, facts.instances,
+                glareMode, glareDamping, glareProbe, glareWorld));
+        } else if (visited == ladder::SiteId::kSunglareSteadyClaim) {
+            policy.sunglareFact(sunglareFact(edvr::SunglareTraceFactKind::kKind10,
+                static_cast<char>(facts.kind), facts.count, facts.instances,
+                glareMode, glareDamping, glareProbe, glareWorld));
+        } else if (visited == ladder::SiteId::kGlareClampClaim) {
+            policy.sunglareFact(sunglareFact(edvr::SunglareTraceFactKind::kKind11,
+                static_cast<char>(facts.kind), facts.count, facts.instances,
+                glareMode, glareDamping, glareProbe, glareWorld));
         }
     }
     const std::vector<ladder::SiteId> expected = includeCommon
@@ -1528,6 +1639,16 @@ bool traceWriterChecks(const char* rootArg) {
         } else if (visited == ladder::SiteId::kScrimClaim) {
             vrPolicy.predicateFact(makeScrimPredicateFact(visited, vrDraw, true));
         }
+        if (visited == ladder::SiteId::kSunglareSkip) {
+            vrPolicy.sunglareFact(sunglareFact(edvr::SunglareTraceFactKind::kKind9,
+                static_cast<char>(vrDraw.kind), vrDraw.count, vrDraw.instances));
+        } else if (visited == ladder::SiteId::kSunglareSteadyClaim) {
+            vrPolicy.sunglareFact(sunglareFact(edvr::SunglareTraceFactKind::kKind10,
+                static_cast<char>(vrDraw.kind), vrDraw.count, vrDraw.instances));
+        } else if (visited == ladder::SiteId::kGlareClampClaim) {
+            vrPolicy.sunglareFact(sunglareFact(edvr::SunglareTraceFactKind::kKind11,
+                static_cast<char>(vrDraw.kind), vrDraw.count, vrDraw.instances));
+        }
     }
     // Site 6 is a reached trace event even when its interest gate prevents
     // ModelVisitor::visit. Record the fixture's cold inputs explicitly.
@@ -1613,17 +1734,31 @@ bool traceWriterChecks(const char* rootArg) {
         ladder::SiteId::kResolveBindClaim,
         ladder::SiteId::kSunglareSkip,
         ladder::SiteId::kSunglareSteadyClaim,
-        ladder::SiteId::kGlareClampClaim,
         ladder::SiteId::kEyeNoDistanceNone,
         ladder::SiteId::kPanelEligibilityNone,
         ladder::SiteId::kPanelDistanceClaim,
         ladder::SiteId::kPanelTailNone,
     };
     for (const auto terminal : eyeTerminals) {
+        const auto mode = terminal == ladder::SiteId::kSunglareSkip
+            ? edvr::SunglareTraceMode::kOff
+            : terminal == ladder::SiteId::kSunglareSteadyClaim
+                ? edvr::SunglareTraceMode::kRealistic
+                : edvr::SunglareTraceMode::kStock;
+        const int world = terminal == ladder::SiteId::kSunglareSteadyClaim ? 1 : 0;
         matrixOk &= writeTerminalCase(ladder::RouteId::kVrEye,
             ladder::SequenceId::kVrEye, 'D', terminal, true,
-            kFrozenEye, 31, ladder::VrEyeSequence{});
+            kFrozenEye, 31, ladder::VrEyeSequence{}, 1, false, false,
+            mode, false, false, world);
     }
+    matrixOk &= writeTerminalCase(ladder::RouteId::kVrEye,
+        ladder::SequenceId::kVrEye, 'N', ladder::SiteId::kSunglareSteadyClaim,
+        true, kFrozenEye, 31, ladder::VrEyeSequence{}, 2, false, false,
+        edvr::SunglareTraceMode::kRealistic, false, true, 0);
+    matrixOk &= writeTerminalCase(ladder::RouteId::kVrEye,
+        ladder::SequenceId::kVrEye, 'N', ladder::SiteId::kEyeNoDistanceNone,
+        true, kFrozenEye, 31, ladder::VrEyeSequence{}, 2, false, false,
+        edvr::SunglareTraceMode::kStock, true, false, 0);
     const ladder::SiteId oneSite[] = {ladder::SiteId::kFlatRuntimeBypass};
     matrixOk &= writeTerminalCase(ladder::RouteId::kFlatRuntimeBypass,
         ladder::SequenceId::kFlatRuntimeBypass, 'X', ladder::SiteId::kFlatRuntimeBypass,
@@ -2188,6 +2323,136 @@ bool traceWriterChecks(const char* rootArg) {
                 !trace::configured() && trace::status() == trace::Status::Disabled &&
                 !fileExists(armedShutdownDir + "\\edvr_gfx_armed_shutdown.draw-ladder-29.json"),
                 "cold shutdown clears a pending manual arm without creating a capture");
+
+    const std::string sunglareDir = root + "\\sunglarefacts";
+    const bool sunglareStarted = beginCapture(sunglareDir, "edvr_gfx_sunglare.log", 31);
+    const bool sunglareSequenceWritten = sunglareStarted && writeTerminalCase(
+        ladder::RouteId::kVrEye, ladder::SequenceId::kVrEye, 'N',
+        ladder::SiteId::kEyeNoDistanceNone, true, kFrozenEye, 31,
+        ladder::VrEyeSequence{}, 2, false, false,
+        edvr::SunglareTraceMode::kStock, true, false, 0);
+    trace::frameEnd(31);
+    const std::string sunglarePath = sunglareDir + "\\edvr_gfx_sunglare.draw-ladder-31.json";
+    std::ifstream sunglareFile(sunglarePath, std::ios::binary);
+    const std::string sunglareJson((std::istreambuf_iterator<char>(sunglareFile)),
+                                   std::istreambuf_iterator<char>());
+    ok &= check(sunglareStarted && sunglareSequenceWritten &&
+                trace::invalidationReason() == trace::CaptureInvalidation::None &&
+                fileExists(sunglarePath) &&
+                sunglareJson.find("\"predicateFactVersion\":6") != std::string::npos &&
+                sunglareJson.find("\"kind\":9") != std::string::npos &&
+                sunglareJson.find("\"kind\":10") != std::string::npos &&
+                sunglareJson.find("\"kind\":11") != std::string::npos &&
+                sunglareJson.find("\"common2ClampAfter\":{\"reached\":true,\"known\":true,\"value\":0}") != std::string::npos,
+                "writer emits valid v6 facts for each visited Sunglare site with actual reset evidence");
+    trace::DrawFacts sunglareMalformedDraw = draw;
+    sunglareMalformedDraw.route = ladder::RouteId::kVrEye;
+    sunglareMalformedDraw.sequence = ladder::SequenceId::kVrEye;
+    const auto malformedSunglareFact = [&](edvr::SunglareTraceFactKind kind) {
+        return sunglareFact(kind, static_cast<char>(sunglareMalformedDraw.kind),
+            sunglareMalformedDraw.count, sunglareMalformedDraw.instances);
+    };
+
+    const std::string sunglareMissingDir = root + "\\sunglare_missing_fact";
+    const bool sunglareMissingStarted = beginCapture(sunglareMissingDir,
+        "edvr_gfx_sunglare_missing.log", 32);
+    const trace::Token sunglareMissingToken = trace::beginDraw(sunglareMalformedDraw);
+    trace::appendSite(sunglareMissingToken, 61,
+        static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+        static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+        static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    trace::finishDraw(sunglareMissingToken, 72,
+        static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+    ok &= check(sunglareMissingStarted && sunglareMissingToken.valid() &&
+                trace::invalidationReason() == trace::CaptureInvalidation::Other,
+                "visited Sunglare site without its finalized fact has ordinary invalidation reason");
+    trace::frameEnd(32);
+
+    const std::string sunglareWrongKindDir = root + "\\sunglare_wrong_kind";
+    const bool sunglareWrongKindStarted = beginCapture(sunglareWrongKindDir,
+        "edvr_gfx_sunglare_wrong_kind.log", 33);
+    const trace::Token sunglareWrongKindToken = trace::beginDraw(sunglareMalformedDraw);
+    trace::appendSite(sunglareWrongKindToken, 61,
+        static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+        static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+        static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    trace::appendSunglareFact(sunglareWrongKindToken,
+        malformedSunglareFact(edvr::SunglareTraceFactKind::kKind11));
+    trace::finishDraw(sunglareWrongKindToken, 72,
+        static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+    ok &= check(sunglareWrongKindStarted && sunglareWrongKindToken.valid() &&
+                trace::invalidationReason() == trace::CaptureInvalidation::Other,
+                "wrong Sunglare fact kind for a visited rung invalidates with ordinary reason");
+    trace::frameEnd(33);
+
+    const std::string sunglareUnfinishedDir = root + "\\sunglare_unfinished_kind9";
+    const bool sunglareUnfinishedStarted = beginCapture(sunglareUnfinishedDir,
+        "edvr_gfx_sunglare_unfinished.log", 35);
+    const trace::Token sunglareUnfinishedToken = trace::beginDraw(sunglareMalformedDraw);
+    auto unfinishedKind9 = malformedSunglareFact(edvr::SunglareTraceFactKind::kKind9);
+    unfinishedKind9.selector.action = {};
+    trace::appendSunglareFact(sunglareUnfinishedToken, unfinishedKind9);
+    ok &= check(sunglareUnfinishedStarted && sunglareUnfinishedToken.valid() &&
+                trace::invalidationReason() == trace::CaptureInvalidation::Other,
+                "unfinished selector fact is rejected with ordinary invalidation reason");
+    trace::frameEnd(35);
+
+    const std::string sunglareDuplicateDir = root + "\\sunglare_duplicate_fact";
+    const bool sunglareDuplicateStarted = beginCapture(sunglareDuplicateDir,
+        "edvr_gfx_sunglare_duplicate.log", 34);
+    const trace::Token sunglareDuplicateToken = trace::beginDraw(sunglareMalformedDraw);
+    const auto duplicateKind9 = malformedSunglareFact(edvr::SunglareTraceFactKind::kKind9);
+    trace::appendSunglareFact(sunglareDuplicateToken, duplicateKind9);
+    trace::appendSunglareFact(sunglareDuplicateToken, duplicateKind9);
+    ok &= check(sunglareDuplicateStarted && sunglareDuplicateToken.valid() &&
+                trace::invalidationReason() == trace::CaptureInvalidation::Other,
+                "duplicate Sunglare fact invalidates with ordinary reason");
+    trace::frameEnd(34);
+
+    const std::string sunglarePerDrawDir = root + "\\sunglare_per_draw_cap";
+    const bool sunglarePerDrawStarted = beginCapture(sunglarePerDrawDir,
+        "edvr_gfx_sunglare_per_draw.log", 37);
+    const trace::Token sunglarePerDrawToken = trace::beginDraw(sunglareMalformedDraw);
+    trace::appendSunglareFact(sunglarePerDrawToken,
+        malformedSunglareFact(edvr::SunglareTraceFactKind::kKind9));
+    trace::appendSunglareFact(sunglarePerDrawToken,
+        malformedSunglareFact(edvr::SunglareTraceFactKind::kKind10));
+    trace::appendSunglareFact(sunglarePerDrawToken,
+        malformedSunglareFact(edvr::SunglareTraceFactKind::kKind11));
+    trace::appendSunglareFact(sunglarePerDrawToken,
+        malformedSunglareFact(edvr::SunglareTraceFactKind::kKind9));
+    ok &= check(sunglarePerDrawStarted && sunglarePerDrawToken.valid() &&
+                trace::invalidationReason() == trace::CaptureInvalidation::Other,
+                "Sunglare per-draw three-fact cap rejects the next append");
+    trace::frameEnd(37);
+
+    const std::string sunglarePoolDir = root + "\\sunglare_pool_cap";
+    const bool sunglarePoolStarted = beginCapture(sunglarePoolDir,
+        "edvr_gfx_sunglare_pool.log", 36);
+    bool poolReachedLimit = sunglarePoolStarted;
+    trace::Token lastPoolToken{};
+    for (std::uint32_t i = 0; poolReachedLimit && i < trace::kMaxDraws; ++i) {
+        trace::DrawFacts poolDraw = sunglareMalformedDraw;
+        poolDraw.eyeDrawIndex = i + 1;
+        const trace::Token poolToken = trace::beginDraw(poolDraw);
+        if (!poolToken.valid()) { poolReachedLimit = false; break; }
+        lastPoolToken = poolToken;
+        trace::appendSunglareFact(poolToken,
+            malformedSunglareFact(edvr::SunglareTraceFactKind::kKind9));
+        trace::appendSunglareFact(poolToken,
+            malformedSunglareFact(edvr::SunglareTraceFactKind::kKind10));
+        trace::appendSunglareFact(poolToken,
+            malformedSunglareFact(edvr::SunglareTraceFactKind::kKind11));
+        if (i + 1 < trace::kMaxDraws && trace::overflowed()) poolReachedLimit = false;
+    }
+    if (poolReachedLimit)
+        trace::appendSunglareFact(lastPoolToken,
+            malformedSunglareFact(edvr::SunglareTraceFactKind::kKind9));
+    const bool poolCapReported = poolReachedLimit && lastPoolToken.valid() &&
+        trace::invalidationReason() == trace::CaptureInvalidation::SunglareIndexOverflow;
+    trace::shutdown();
+    ok &= check(poolCapReported,
+                "Sunglare pool cap reports the distinct index-overflow invalidation");
     return ok;
 }
 

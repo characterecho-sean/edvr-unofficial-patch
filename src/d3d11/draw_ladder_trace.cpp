@@ -37,10 +37,12 @@ struct DrawRecord final {
     draw_ladder::ActionRecord actions[kMaxActionEventsPerDraw]{};
     std::uint16_t actionIds[kMaxActionEventsPerDraw]{};
     PredicateFact predicateFacts[kMaxPredicateFactsPerDraw]{};
+    std::uint32_t sunglareFactIndices[kMaxSunglareFactsPerDraw]{};
     ForwardFacts forwardFacts{};
     std::uint16_t siteCount = 0;
     std::uint16_t actionCount = 0;
     std::uint8_t predicateFactCount = 0;
+    std::uint8_t sunglareFactCount = 0;
     std::int16_t winnerSiteId = -1;
     std::int16_t verdictOrdinal = -1;
     bool finalized = false;
@@ -48,6 +50,8 @@ struct DrawRecord final {
 };
 
 DrawRecord* g_records = nullptr;
+SunglareObservation* g_sunglareFacts = nullptr;
+std::uint32_t g_sunglareFactCount = 0;
 std::uintptr_t* g_identities = nullptr;
 std::uint32_t g_drawCount = 0;
 std::uint32_t g_identityCount = 0;
@@ -57,6 +61,8 @@ std::atomic<bool> g_enabled{false};
 std::atomic<Status> g_status{Status::Disabled};
 bool g_isCapturing = false;
 bool g_wasOverflowed = false;
+bool g_sunglareIndexOverflowed = false;
+bool g_sunglarePoolMissing = false;
 bool g_lastWriteSucceeded = false;
 std::atomic<bool> g_armPending{false};
 wchar_t g_directory[kPathChars]{};
@@ -203,6 +209,129 @@ bool writeObservationGates(Writer& writer,
         observationTriName(gates.helperShapeMatched));
 }
 
+template <class T>
+bool writeSunglareReadValue(Writer& writer, const T& value) noexcept;
+
+template <>
+bool writeSunglareReadValue<bool>(Writer& writer, const bool& value) noexcept {
+    return writeText(writer, value ? "true" : "false");
+}
+
+template <>
+bool writeSunglareReadValue<std::uint32_t>(Writer& writer,
+                                            const std::uint32_t& value) noexcept {
+    return writeFmt(writer, "%u", value);
+}
+
+template <>
+bool writeSunglareReadValue<std::uint64_t>(Writer& writer,
+                                            const std::uint64_t& value) noexcept {
+    return writeFmt(writer, "%llu", static_cast<unsigned long long>(value));
+}
+
+template <>
+bool writeSunglareReadValue<std::int32_t>(Writer& writer,
+                                           const std::int32_t& value) noexcept {
+    return writeFmt(writer, "%d", value);
+}
+
+template <>
+bool writeSunglareReadValue<SunglareTraceMode>(
+    Writer& writer, const SunglareTraceMode& value) noexcept {
+    return writeFmt(writer, "%u", static_cast<unsigned>(value));
+}
+
+template <>
+bool writeSunglareReadValue<SunglareTraceAction>(
+    Writer& writer, const SunglareTraceAction& value) noexcept {
+    return writeFmt(writer, "%u", static_cast<unsigned>(value));
+}
+
+template <class T>
+bool writeSunglareRead(Writer& writer, const char* name,
+                       const SunglareRead<T>& read,
+                       bool& first) noexcept {
+    if (!first && !writeText(writer, ",")) return false;
+    first = false;
+    if (!writeFmt(writer, "\"%s\":{\"reached\":%s,\"known\":%s,\"value\":",
+                  name, read.reached ? "true" : "false",
+                  read.known ? "true" : "false")) return false;
+    if (!read.reached || !read.known) return writeText(writer, "null}");
+    return writeSunglareReadValue(writer, read.value) && writeText(writer, "}");
+}
+
+bool writeSunglareTexture(Writer& writer, const char* name,
+                          const SunglareTextureRead& texture,
+                          bool& first) noexcept {
+    if (!first && !writeText(writer, ",")) return false;
+    first = false;
+    if (!writeFmt(writer, "\"%s\":{", name)) return false;
+    bool fieldFirst = true;
+    return writeSunglareRead(writer, "resolveOk", texture.resolveOk, fieldFirst) &&
+        writeSunglareRead(writer, "isTexture2D", texture.isTexture2D, fieldFirst) &&
+        writeSunglareRead(writer, "width", texture.width, fieldFirst) &&
+        writeSunglareRead(writer, "height", texture.height, fieldFirst) &&
+        writeSunglareRead(writer, "format", texture.format, fieldFirst) &&
+        writeText(writer, "}");
+}
+
+bool writeSunglareSelector(Writer& writer,
+                           const SunglareSelectorObservation& selector) noexcept {
+    if (!writeText(writer, "{")) return false;
+    bool first = true;
+    // Each read is emitted through a tiny object wrapper so the nullable
+    // reached/known contract stays identical for every consumed source.
+    if (!writeSunglareRead(writer, "outerWantsMode", selector.outerWantsMode, first) ||
+        !writeSunglareRead(writer, "outerExposureDamping", selector.outerExposureDamping, first) ||
+        !writeSunglareRead(writer, "outerProbe", selector.outerProbe, first) ||
+        !writeSunglareRead(writer, "outerTrainShape", selector.outerTrainShape, first) ||
+        !writeSunglareRead(writer, "outerWantsResult", selector.outerWantsResult, first) ||
+        !writeSunglareRead(writer, "helperWantsMode", selector.helperWantsMode, first) ||
+        !writeSunglareRead(writer, "helperExposureDamping", selector.helperExposureDamping, first) ||
+        !writeSunglareRead(writer, "helperProbe", selector.helperProbe, first) ||
+        !writeSunglareRead(writer, "helperWantsResult", selector.helperWantsResult, first) ||
+        !writeSunglareRead(writer, "helperTrainShape", selector.helperTrainShape, first) ||
+        !writeSunglareTexture(writer, "ps0", selector.ps0, first) ||
+        !writeSunglareTexture(writer, "ps1", selector.ps1, first) ||
+        !writeSunglareRead(writer, "lastSeenBeforeMs", selector.lastSeenBeforeMs, first) ||
+        !writeSunglareRead(writer, "nowMs", selector.nowMs, first) ||
+        !writeSunglareRead(writer, "lastSeenAfterMs", selector.lastSeenAfterMs, first) ||
+        !writeSunglareRead(writer, "actionMode", selector.actionMode, first) ||
+        !writeSunglareRead(writer, "action", selector.action, first)) return false;
+    return writeText(writer, "}");
+}
+
+bool writeSunglareSite(Writer& writer,
+                       const SunglareSiteObservation& site) noexcept {
+    if (!writeText(writer, "{")) return false;
+    bool first = true;
+    return writeSunglareRead(writer, "source61ActionNotStock", site.source61ActionNotStock, first) &&
+        writeSunglareRead(writer, "worldValue", site.worldValue, first) &&
+        writeSunglareRead(writer, "probeValue", site.probeValue, first) &&
+        writeSunglareRead(writer, "clampBefore", site.clampBefore, first) &&
+        writeSunglareRead(writer, "clampAfter", site.clampAfter, first) &&
+        writeSunglareRead(writer, "billboardReached", site.billboardReached, first) &&
+        writeText(writer, "}");
+}
+
+bool writeSunglareFact(Writer& writer,
+                       const SunglareObservation& fact) noexcept {
+    const unsigned kind = static_cast<unsigned>(fact.kind);
+    const unsigned siteId = kind == 9 ? 61 : kind == 10 ? 62 : 63;
+    if (!writeFmt(writer, "{\"siteId\":%u,\"kind\":%u,\"known\":\"yes\"",
+                  siteId, kind)) return false;
+    if (kind == 9) {
+        if (!writeText(writer, ",\"selector\":") ||
+            !writeSunglareSelector(writer, fact.selector) ||
+            !writeText(writer, ",")) return false;
+        bool first = true;
+        if (!writeSunglareRead(writer, "common2ClampBefore", fact.common2ClampBefore, first) ||
+            !writeSunglareRead(writer, "common2ClampAfter", fact.common2ClampAfter, first)) return false;
+    }
+    return writeText(writer, ",\"site\":") && writeSunglareSite(writer, fact.site) &&
+           writeText(writer, "}");
+}
+
 bool writeResourceObservation(Writer& writer,
     const holo_scrim_observation::ResourceObservation& resource) noexcept {
     return writeFmt(writer,
@@ -345,7 +474,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":5,"
+        "\"predicateFactVersion\":6,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -354,7 +483,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Predicate fact version 5 independently re-evaluates DrawGateDisabledNone, EyeRangeSkip, the frozen 14a NightVisionClaim selector, WitchspaceStarsSkip site 6, offscreen census/quad skips, HoloClaim site 53, and ScrimClaim site 55 from raw consumed source facts; observed helper outputs are consistency checks, cached matches and SiteEvents are not selector inputs, and whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
+        "\"predicateNote\":\"Predicate fact version 6 independently re-evaluates kinds 1-8 from raw consumed source facts and adds Sunglare sites 61-63 with reached source reads and mutation observations; observed helper outputs are consistency checks, cached matches and SiteEvents are not selector inputs, and whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
         "\"identityNote\":\"Resource identities are per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
@@ -545,6 +674,15 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                 return false;
             }
         }
+        if (r.sunglareFactCount && r.predicateFactCount &&
+            !writeText(writer, ",")) return false;
+        for (std::uint8_t j = 0; j < r.sunglareFactCount; ++j) {
+            if (j && !writeText(writer, ",")) return false;
+            if (!g_sunglareFacts ||
+                r.sunglareFactIndices[j] >= g_sunglareFactCount ||
+                !writeSunglareFact(writer,
+                    g_sunglareFacts[r.sunglareFactIndices[j]])) return false;
+        }
         ok = writeFmt(writer,
             "],\"winnerSiteId\":%d,\"verdict\":%d,\"forwardFacts\":",
             r.winnerSiteId, r.verdictOrdinal);
@@ -617,7 +755,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     // never free the active fixed-capacity arrays mid-capture.
     if (g_isCapturing) return;
     const bool wasEnabled = g_enabled.load(std::memory_order_acquire);
-    if (!enabled && !wasEnabled && !g_records && !g_identities) return;
+    if (!enabled && !wasEnabled && !g_records && !g_sunglareFacts && !g_identities) return;
     if (enabled && wasEnabled && logFilePath && logFilePath[0]) {
         wchar_t oldPath[kPathChars]{};
         if (SUCCEEDED(StringCchCopyW(oldPath, kPathChars, g_directory)) &&
@@ -632,9 +770,13 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_status.store(enabled ? Status::PathInvalid : Status::Disabled,
                    std::memory_order_relaxed);
     g_wasOverflowed = false;
+    g_sunglareIndexOverflowed = false;
+    g_sunglarePoolMissing = false;
     g_lastWriteSucceeded = false;
     if (g_records) { delete[] g_records; g_records = nullptr; }
+    if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
     if (g_identities) { delete[] g_identities; g_identities = nullptr; }
+    g_sunglareFactCount = 0;
     g_directory[0] = L'\0';
     g_logFileName[0] = L'\0';
     g_logStem[0] = L'\0';
@@ -644,9 +786,11 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     // This is the only allocation site. It runs during cold initialization,
     // never from a hook or from an armed draw.
     g_records = new (std::nothrow) DrawRecord[kMaxDraws];
+    g_sunglareFacts = new (std::nothrow) SunglareObservation[kMaxSunglareFacts];
     g_identities = new (std::nothrow) std::uintptr_t[kIdentitySlots];
-    if (!g_records || !g_identities) {
+    if (!g_records || !g_sunglareFacts || !g_identities) {
         if (g_records) { delete[] g_records; g_records = nullptr; }
+        if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
         if (g_identities) { delete[] g_identities; g_identities = nullptr; }
         g_directory[0] = L'\0';
         g_logFileName[0] = L'\0';
@@ -673,13 +817,20 @@ ShutdownResult shutdown() noexcept {
     g_enabled.store(false, std::memory_order_release);
     g_isCapturing = false;
     g_wasOverflowed = false;
+    g_sunglareIndexOverflowed = false;
+    g_sunglarePoolMissing = false;
     g_lastWriteSucceeded = false;
     g_drawCount = 0;
     g_identityCount = 0;
+    g_sunglareFactCount = 0;
     g_frame = FrameFacts{};
     if (g_records) {
         delete[] g_records;
         g_records = nullptr;
+    }
+    if (g_sunglareFacts) {
+        delete[] g_sunglareFacts;
+        g_sunglareFacts = nullptr;
     }
     if (g_identities) {
         delete[] g_identities;
@@ -711,7 +862,10 @@ void frameBegin(const FrameFacts& facts) noexcept {
     g_frame = facts;
     g_drawCount = 0;
     g_identityCount = 0;
+    g_sunglareFactCount = 0;
     g_wasOverflowed = false;
+    g_sunglareIndexOverflowed = false;
+    g_sunglarePoolMissing = false;
     g_isCapturing = true;
     g_status.store(Status::Capturing, std::memory_order_relaxed);
     ++g_generation;
@@ -983,6 +1137,7 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
     if (!validToken(token)) { rejectInvalidToken(); return; }
     DrawRecord& record = g_records[token.drawIndex];
     if (record.finalized || record.predicateFactCount >= kMaxPredicateFactsPerDraw ||
+        record.predicateFactCount + record.sunglareFactCount >= 9 ||
         static_cast<std::uint8_t>(fact.known) > static_cast<std::uint8_t>(TriState::Yes) ||
         fact.known == TriState::No ||
         static_cast<std::uint8_t>(fact.gateWanted) > static_cast<std::uint8_t>(TriState::Yes) ||
@@ -1065,6 +1220,20 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
             return;
         }
     }
+    if (record.sunglareFactCount && !g_sunglareFacts) {
+        g_sunglarePoolMissing = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    for (std::uint8_t i = 0; i < record.sunglareFactCount; ++i) {
+        const unsigned kind = static_cast<unsigned>(
+            g_sunglareFacts[record.sunglareFactIndices[i]].kind);
+        const std::uint16_t siteId = static_cast<std::uint16_t>(kind + 52);
+        if (siteId == fact.siteId) {
+            g_wasOverflowed = true;
+            return;
+        }
+    }
     if (fact.kind == PredicateFactKind::EyeRangeSkip) {
         for (std::uint8_t i = 0; i < fact.rangeCount; ++i) {
             if (fact.ranges[i].lo == 0 || fact.ranges[i].hi < fact.ranges[i].lo) {
@@ -1074,6 +1243,107 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
         }
     }
     record.predicateFacts[record.predicateFactCount++] = fact;
+}
+
+void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized) { rejectInvalidToken(); return; }
+    if (!g_sunglareFacts) {
+        g_sunglarePoolMissing = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (g_sunglareFactCount >= kMaxSunglareFacts) {
+        g_sunglareIndexOverflowed = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (record.sunglareFactCount >= kMaxSunglareFactsPerDraw ||
+        record.predicateFactCount + record.sunglareFactCount >= 9) {
+        g_wasOverflowed = true;
+        return;
+    }
+    const unsigned kind = static_cast<unsigned>(fact.kind);
+    const std::uint16_t siteId = kind == 9 ? 61 : kind == 10 ? 62 : kind == 11 ? 63 : 0;
+    if (!siteId) { g_wasOverflowed = true; return; }
+    for (std::uint8_t i = 0; i < record.predicateFactCount; ++i) {
+        if (record.predicateFacts[i].siteId == siteId) {
+            g_wasOverflowed = true;
+            return;
+        }
+    }
+    for (std::uint8_t i = 0; i < record.sunglareFactCount; ++i) {
+        const SunglareObservation& old = g_sunglareFacts[record.sunglareFactIndices[i]];
+        if (old.kind == fact.kind) {
+            g_wasOverflowed = true;
+            return;
+        }
+    }
+    if (kind == 9) {
+        if (!fact.selector.action.reached || !fact.selector.action.known ||
+            fact.site.source61ActionNotStock.reached ||
+            !fact.common2ClampBefore.reached || !fact.common2ClampBefore.known ||
+            !fact.common2ClampAfter.reached || !fact.common2ClampAfter.known) {
+            g_wasOverflowed = true;
+            return;
+        }
+        if (fact.selector.action.value == SunglareTraceAction::kClamp ||
+            fact.common2ClampAfter.value != 0 ||
+            !fact.site.clampBefore.reached || !fact.site.clampBefore.known ||
+            fact.site.clampBefore.value != fact.common2ClampAfter.value ||
+            !fact.site.clampAfter.reached || !fact.site.clampAfter.known ||
+            fact.site.clampAfter.value != 0) {
+            g_wasOverflowed = true;
+            return;
+        }
+    } else {
+        const SunglareObservation* source61 = nullptr;
+        for (std::uint8_t i = 0; i < record.sunglareFactCount; ++i) {
+            const SunglareObservation& prior = g_sunglareFacts[record.sunglareFactIndices[i]];
+            if (prior.kind == SunglareTraceFactKind::kKind9) source61 = &prior;
+        }
+        if (!source61 || !source61->selector.action.reached ||
+            !source61->selector.action.known ||
+            !fact.site.source61ActionNotStock.reached ||
+            !fact.site.source61ActionNotStock.known ||
+            fact.site.source61ActionNotStock.value !=
+                (source61->selector.action.value != SunglareTraceAction::kStock)) {
+            g_wasOverflowed = true;
+            return;
+        }
+    }
+    const auto validRead = [](const auto& read) {
+        return !read.known || read.reached;
+    };
+#define EDVR_VALID_SUN_READ(read) if (!validRead(read)) { g_wasOverflowed = true; return; }
+    const SunglareSelectorObservation& s = fact.selector;
+    EDVR_VALID_SUN_READ(s.outerWantsMode); EDVR_VALID_SUN_READ(s.outerExposureDamping);
+    EDVR_VALID_SUN_READ(s.outerProbe); EDVR_VALID_SUN_READ(s.outerTrainShape);
+    EDVR_VALID_SUN_READ(s.outerWantsResult); EDVR_VALID_SUN_READ(s.helperWantsMode);
+    EDVR_VALID_SUN_READ(s.helperExposureDamping); EDVR_VALID_SUN_READ(s.helperProbe);
+    EDVR_VALID_SUN_READ(s.helperWantsResult); EDVR_VALID_SUN_READ(s.helperTrainShape);
+    EDVR_VALID_SUN_READ(s.ps0.resolveOk); EDVR_VALID_SUN_READ(s.ps0.isTexture2D);
+    EDVR_VALID_SUN_READ(s.ps0.width); EDVR_VALID_SUN_READ(s.ps0.height); EDVR_VALID_SUN_READ(s.ps0.format);
+    EDVR_VALID_SUN_READ(s.ps1.resolveOk); EDVR_VALID_SUN_READ(s.ps1.isTexture2D);
+    EDVR_VALID_SUN_READ(s.ps1.width); EDVR_VALID_SUN_READ(s.ps1.height); EDVR_VALID_SUN_READ(s.ps1.format);
+    EDVR_VALID_SUN_READ(s.lastSeenBeforeMs); EDVR_VALID_SUN_READ(s.nowMs);
+    EDVR_VALID_SUN_READ(s.lastSeenAfterMs); EDVR_VALID_SUN_READ(s.actionMode);
+    EDVR_VALID_SUN_READ(s.action); EDVR_VALID_SUN_READ(fact.common2ClampBefore);
+    EDVR_VALID_SUN_READ(fact.common2ClampAfter); EDVR_VALID_SUN_READ(fact.site.source61ActionNotStock);
+    EDVR_VALID_SUN_READ(fact.site.worldValue); EDVR_VALID_SUN_READ(fact.site.probeValue);
+    EDVR_VALID_SUN_READ(fact.site.clampBefore); EDVR_VALID_SUN_READ(fact.site.clampAfter);
+    EDVR_VALID_SUN_READ(fact.site.billboardReached);
+#undef EDVR_VALID_SUN_READ
+    if ((s.actionMode.known && static_cast<unsigned>(s.actionMode.value) > 3) ||
+        (s.outerWantsMode.known && static_cast<unsigned>(s.outerWantsMode.value) > 3) ||
+        (s.helperWantsMode.known && static_cast<unsigned>(s.helperWantsMode.value) > 3) ||
+        (s.action.known && static_cast<unsigned>(s.action.value) > 3)) {
+        g_wasOverflowed = true;
+        return;
+    }
+    g_sunglareFacts[g_sunglareFactCount] = fact;
+    record.sunglareFactIndices[record.sunglareFactCount++] = g_sunglareFactCount++;
 }
 
 void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept {
@@ -1188,6 +1458,38 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
         }
         if (!visited) g_wasOverflowed = true;
     }
+    for (std::uint16_t i = 0; i < record.siteCount; ++i) {
+        const std::uint16_t siteId = record.sites[i].id;
+        if (siteId < 61 || siteId > 63) continue;
+        bool found = false;
+        for (std::uint8_t j = 0; j < record.sunglareFactCount; ++j) {
+            if (g_sunglareFacts &&
+                record.sunglareFactIndices[j] < g_sunglareFactCount &&
+                static_cast<unsigned>(g_sunglareFacts[
+                    record.sunglareFactIndices[j]].kind) + 52 == siteId) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) g_wasOverflowed = true;
+    }
+    for (std::uint8_t i = 0; i < record.sunglareFactCount; ++i) {
+        if (!g_sunglareFacts ||
+            record.sunglareFactIndices[i] >= g_sunglareFactCount) {
+            g_sunglarePoolMissing = !g_sunglareFacts;
+            g_sunglareIndexOverflowed = g_sunglareIndexOverflowed ||
+                                        !g_sunglarePoolMissing;
+            g_wasOverflowed = true;
+            continue;
+        }
+        const std::uint16_t siteId = static_cast<std::uint16_t>(
+            static_cast<unsigned>(g_sunglareFacts[
+                record.sunglareFactIndices[i]].kind) + 52);
+        bool visited = false;
+        for (std::uint16_t j = 0; j < record.siteCount; ++j)
+            if (record.sites[j].id == siteId) visited = true;
+        if (!visited) g_wasOverflowed = true;
+    }
     record.winnerSiteId = winnerSiteId;
     record.verdictOrdinal = verdictOrdinal;
     record.finalized = true;
@@ -1246,6 +1548,11 @@ bool capturing() noexcept {
     return detail::g_captureActive.load(std::memory_order_relaxed);
 }
 bool overflowed() noexcept { return g_wasOverflowed; }
+CaptureInvalidation invalidationReason() noexcept {
+    if (g_sunglarePoolMissing) return CaptureInvalidation::SunglarePoolMissing;
+    if (g_sunglareIndexOverflowed) return CaptureInvalidation::SunglareIndexOverflow;
+    return g_wasOverflowed ? CaptureInvalidation::Other : CaptureInvalidation::None;
+}
 Status status() noexcept {
     if (detail::g_captureActive.load(std::memory_order_relaxed))
         return Status::Capturing;

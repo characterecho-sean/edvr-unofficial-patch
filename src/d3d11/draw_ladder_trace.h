@@ -3,6 +3,7 @@
 #include "draw_census.h"
 #include "draw_ladder.h"
 #include "holo_scrim_observation.h"
+#include "sunglare_observation.h"
 
 #include <atomic>
 #include <cstdint>
@@ -18,6 +19,8 @@ constexpr std::uint32_t kMaxDraws = 65536;
 constexpr std::uint16_t kMaxSiteEventsPerDraw = 48;
 constexpr std::uint16_t kMaxActionEventsPerDraw = 32;
 constexpr std::uint8_t kMaxPredicateFactsPerDraw = 6;
+constexpr std::uint8_t kMaxSunglareFactsPerDraw = 3;
+constexpr std::uint32_t kMaxSunglareFacts = kMaxDraws * kMaxSunglareFactsPerDraw;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -30,6 +33,13 @@ enum class Status : std::uint8_t {
     CompleteWritten = 6,
     InvalidCapture = 7,
     WriteFailed = 8,
+};
+
+enum class CaptureInvalidation : std::uint8_t {
+    None = 0,
+    Other = 1,
+    SunglareIndexOverflow = 2,
+    SunglarePoolMissing = 3,
 };
 
 // Returned by shutdown() so production can report whether an armed or partial
@@ -251,6 +261,7 @@ void appendAction(Token token, std::uint16_t id,
                   const draw_ladder::ActionRecord& action) noexcept;
 void recordForwardFacts(Token token, const ForwardFacts& facts) noexcept;
 void appendPredicateFact(Token token, const PredicateFact& fact) noexcept;
+void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept;
 void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept;
 void completeWitchspaceStarsFact(Token token, const PredicateFact& fact) noexcept;
 void updateCandidates(Token token, std::uint64_t mask) noexcept;
@@ -262,6 +273,7 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
 bool configured() noexcept;
 bool capturing() noexcept;
 bool overflowed() noexcept;
+CaptureInvalidation invalidationReason() noexcept;
 Status status() noexcept;
 const char* statusName(Status value) noexcept;
 
@@ -278,6 +290,11 @@ inline bool drawLadderTraceCaptureActive() noexcept {
 struct TracePolicy final {
     static constexpr bool enabled = true;
     Token token{};
+    // Per-draw snapshots exist only on the enabled trace policy, so the
+    // ordinary visitor retains its original layout and initialization.
+    std::uint32_t sunglareClampResetBefore = 0;
+    std::uint32_t sunglareClampResetAfter = 0;
+    bool sunglareClampResetSeen = false;
 
     template <draw_ladder::SiteId Id, draw_ladder::SiteKind Kind,
               class Payload>
@@ -317,6 +334,10 @@ struct TracePolicy final {
 
     inline void completeWitchspaceStarsPredicateFact(const PredicateFact& fact) noexcept {
         completeWitchspaceStarsFact(token, fact);
+    }
+
+    inline void sunglareFact(const SunglareObservation& fact) noexcept {
+        appendSunglareFact(token, fact);
     }
 };
 

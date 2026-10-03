@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 5
+PREDICATE_FACT_VERSION = 6
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -181,6 +181,337 @@ def _legacy14a_night_vision(fact, draw):
     if fact.get("failedKnown") != "yes" or failed not in ("yes", "no"):
         return None
     return failed == "no"
+
+
+def _sunglare_read(obj, name, label, value_type, maximum=None, minimum=0):
+    """Decode a typed read envelope without turning unavailable data into a guess."""
+    item = obj.get(name)
+    where = label + "." + name
+    if not isinstance(item, dict) or set(item) != {"reached", "known", "value"}:
+        raise TraceError(where + " must be a read envelope")
+    reached, known, value = item["reached"], item["known"], item["value"]
+    if type(reached) is not bool or type(known) is not bool:
+        raise TraceError(where + " has invalid reached/known flags")
+    if known and not reached:
+        raise TraceError(where + " is known although the read was skipped")
+    if not known:
+        if value is not None:
+            raise TraceError(where + " unavailable value must be null")
+        return reached, False, None
+    if value_type is bool:
+        valid = type(value) is bool
+    elif value_type is int:
+        valid = type(value) is int and value >= minimum and (maximum is None or value <= maximum)
+    else:
+        valid = type(value) is value_type
+    if not valid:
+        raise TraceError(where + " has an invalid value")
+    return reached, True, value
+
+
+def _sunglare_wants(obj, prefix, label, should_evaluate):
+    mode = _sunglare_read(obj, prefix + "Mode", label, int, 3)
+    stage = prefix[:-len("Wants")]
+    damping = _sunglare_read(obj, stage + "ExposureDamping", label, bool)
+    probe = _sunglare_read(obj, stage + "Probe", label, bool)
+    result = _sunglare_read(obj, prefix + "Result", label, bool)
+    if not should_evaluate:
+        if any(x[0] for x in (mode, damping, probe, result)):
+            raise TraceError(label + " short-circuited wants carries later reads")
+        return None, False, None
+    if not result[0]:
+        raise TraceError(label + "." + prefix + "Result must be observed")
+    if not mode[0]:
+        raise TraceError(label + "." + prefix + "Mode must be read")
+    if not mode[1]:
+        if probe[0] and not damping[0]:
+            raise TraceError(label + " probe read lacks preceding damping stage")
+        if damping[1] and damping[2] and probe[0]:
+            raise TraceError(label + " true damping must short-circuit probe")
+        if damping[1] and not damping[2] and not probe[0]:
+            raise TraceError(label + " false damping lacks probe stage")
+        return None, False, None
+    if mode[2] != 0:
+        if damping[0] or probe[0]:
+            raise TraceError(label + " non-stock wants short-circuit carries later reads")
+        expected = True
+    else:
+        if not damping[0]:
+            raise TraceError(label + " stock wants must read exposure damping")
+        if not damping[1]:
+            return 0, False, None
+        if damping[2]:
+            if probe[0]:
+                raise TraceError(label + " true damping must short-circuit probe")
+            expected = True
+        else:
+            if not probe[0]:
+                raise TraceError(label + " stock wants must read probe after damping is false")
+            if not probe[1]:
+                return 0, False, None
+            expected = probe[2]
+    if result[1] and result[2] != expected:
+        raise TraceError(label + "." + prefix + "Result disagrees with consumed inputs")
+    return mode[2], result[1], expected
+
+
+def _sunglare_selector(fact, draw, label):
+    selector = fact.get("selector")
+    if not isinstance(selector, dict):
+        raise TraceError(label + ".selector must be an object")
+    expected_selector_fields = {
+        "outerWantsMode", "outerExposureDamping", "outerProbe", "outerTrainShape", "outerWantsResult",
+        "helperWantsMode", "helperExposureDamping", "helperProbe", "helperWantsResult", "helperTrainShape",
+        "ps0", "ps1", "lastSeenBeforeMs", "nowMs", "lastSeenAfterMs", "actionMode", "action",
+    }
+    if set(selector) != expected_selector_fields:
+        raise TraceError(label + ".selector has missing or unexpected fields")
+    outer_shape = _sunglare_read(selector, "outerTrainShape", label + ".selector", bool)
+    shape_value = draw["kind"] == ord("N") and draw["count"] == 6 and draw["instances"] >= 2
+    if not outer_shape[0] or not outer_shape[1]:
+        raise TraceError(label + ".selector.outerTrainShape must be observed")
+    mismatch = int(outer_shape[2] != shape_value)
+    outer_value, outer_wants_known, outer_wants = _sunglare_wants(
+        selector, "outerWants", label + ".selector", shape_value)
+    helper_stage = (_sunglare_read(selector, "helperWantsMode",
+                                   label + ".selector", int, 3)[0] or
+                    _sunglare_read(selector, "helperWantsResult",
+                                   label + ".selector", bool)[0])
+    helper_called = shape_value and (outer_wants is True or
+                                     (outer_wants is None and helper_stage))
+    helper_value, helper_wants_known, helper_wants = _sunglare_wants(
+        selector, "helperWants", label + ".selector", helper_called)
+    helper_shape = _sunglare_read(selector, "helperTrainShape", label + ".selector", bool)
+    if not helper_called and helper_shape[0]:
+        raise TraceError(label + " skipped helper carries its shape read")
+    helper_shape_needed = helper_called and (helper_wants is True or
+                                             (helper_wants is None and helper_shape[0]))
+    if helper_called and helper_wants is False and helper_shape[0]:
+        raise TraceError(label + " short-circuited helper carries its shape read")
+    if helper_called and helper_wants is True and not helper_shape[0]:
+        raise TraceError(label + " helper wants lacks its shape stage")
+    if helper_shape_needed and helper_shape[1] and helper_shape[2] != shape_value:
+        mismatch += 1
+    descriptor_needed = helper_shape_needed and shape_value
+
+    def texture(slot, needed):
+        nonlocal mismatch
+        tex = selector.get(slot)
+        fields = ("resolveOk", "isTexture2D", "width", "height", "format")
+        if not isinstance(tex, dict) or set(tex) != set(fields):
+            raise TraceError(label + ".selector." + slot + " is malformed")
+        vals = [_sunglare_read(tex, field, label + ".selector." + slot,
+                               bool if field in ("resolveOk", "isTexture2D") else int,
+                               0xffffffff if field in ("width", "height", "format") else None)
+                for field in fields]
+        if any(vals[i][0] and not vals[i - 1][0] for i in range(1, len(vals))):
+            raise TraceError(label + " resource read lacks its preceding stage")
+        for index, accepted in enumerate((True, True, 2048, 1024)):
+            if vals[index][1] and vals[index][2] != accepted and any(
+                    later[0] for later in vals[index + 1:]):
+                raise TraceError(label + " resource miss carries later-stage reads")
+        if needed is False:
+            if any(v[0] for v in vals):
+                raise TraceError(label + " skipped matcher carries resource reads")
+            return False, True
+        if needed is None and not vals[0][0]:
+            if any(v[0] for v in vals[1:]):
+                raise TraceError(label + " skipped resolver carries descriptor reads")
+            return False, False
+        if not vals[0][0]:
+            raise TraceError(label + " reached matcher lacks resolver result")
+        if not vals[0][1]:
+            return False, False
+        if not vals[0][2]:
+            if any(v[0] for v in vals[1:]):
+                raise TraceError(label + " failed resolve carries descriptor reads")
+            return False, True
+        if not vals[1][0]:
+            raise TraceError(label + " successful resolve lacks texture type")
+        if not vals[1][1]:
+            return False, False
+        if not vals[1][2]:
+            if any(v[0] for v in vals[2:]):
+                raise TraceError(label + " non-texture carries dimensions")
+            return False, True
+        if not vals[2][0]:
+            raise TraceError(label + " texture lacks width")
+        if not vals[2][1]:
+            return False, False
+        if vals[2][2] != 2048:
+            if vals[3][0] or vals[4][0]:
+                raise TraceError(label + " width miss carries later descriptor reads")
+            return False, True
+        if not vals[3][0]:
+            raise TraceError(label + " width hit lacks height")
+        if not vals[3][1]:
+            return False, False
+        if vals[3][2] != 1024:
+            if vals[4][0]:
+                raise TraceError(label + " height miss carries format")
+            return False, True
+        if not vals[4][0]:
+            raise TraceError(label + " dimensions hit lack format")
+        if not vals[4][1]:
+            return False, False
+        return vals[4][2] == 98, True
+
+    ps0_match, ps0_known = texture("ps0", descriptor_needed)
+    ps1_needed = (False if not descriptor_needed else
+                  ps0_match if ps0_known else None)
+    ps1_match, ps1_known = texture("ps1", ps1_needed)
+    if not shape_value:
+        matched_known, matched = True, False
+    elif not outer_wants_known:
+        matched_known, matched = False, False
+    elif outer_wants is False:
+        matched_known, matched = True, False
+    elif not helper_wants_known:
+        matched_known, matched = False, False
+    elif helper_wants is False:
+        matched_known, matched = True, False
+    elif helper_shape_needed and not helper_shape[1]:
+        matched_known, matched = False, False
+    elif helper_shape_needed and not shape_value:
+        matched_known, matched = True, False
+    elif not ps0_known or not ps1_known:
+        matched_known, matched = False, False
+    else:
+        matched_known = True
+        matched = ps0_match and ps1_match
+    before = _sunglare_read(selector, "lastSeenBeforeMs", label + ".selector", int, 0xffffffffffffffff)
+    now = _sunglare_read(selector, "nowMs", label + ".selector", int, 0xffffffffffffffff)
+    after = _sunglare_read(selector, "lastSeenAfterMs", label + ".selector", int, 0xffffffffffffffff)
+    action_mode = _sunglare_read(selector, "actionMode", label + ".selector", int, 3)
+    action = _sunglare_read(selector, "action", label + ".selector", int, 3)
+    if not selector["ps1"]["format"]["reached"] and any(
+            value[0] for value in (before, now, after, action_mode)):
+        raise TraceError(label + " action/time stage lacks completed resource reads")
+    if not action[0]:
+        raise TraceError(label + ".selector.action must always record the returned action")
+    mutation_unobserved = matched and not all(x[0] and x[1] for x in (before, now, after))
+    if matched_known and not matched:
+        if any(x[0] for x in (before, now, after, action_mode)):
+            raise TraceError(label + " no-match selector carries action/time stages")
+        if action[1] and action[2] != 0:
+            mismatch += 1
+    if matched and before[1] and after[1] and now[1]:
+        expected_after = now[2]
+        if after[2] != expected_after:
+            mismatch += 1
+    elif matched:
+        mutation_unobserved = True
+    expected_action = 0
+    if matched:
+        if not action_mode[0] or not action_mode[1] or not action[1]:
+            matched_known = False
+        else:
+            expected_action = 1 if action_mode[2] == 1 else 3
+            if action[2] != expected_action:
+                mismatch += 1
+    elif not action[1]:
+        matched_known = False
+    return (expected_action if matched_known else None, mismatch,
+            helper_value if matched and matched_known else None, mutation_unobserved)
+
+
+def _replay_sunglare_site(fact, site_id, draw, label, source_action,
+                          common2_clamp_after=None):
+    site = fact.get("site")
+    if not isinstance(site, dict):
+        raise TraceError(label + ".site must be an object")
+    expected_keys = {"source61ActionNotStock", "worldValue", "probeValue",
+                     "clampBefore", "clampAfter", "billboardReached"}
+    if set(site) != expected_keys:
+        raise TraceError(label + ".site has missing or unexpected fields")
+    source = _sunglare_read(site, "source61ActionNotStock", label + ".site", bool)
+    clamp_before = _sunglare_read(site, "clampBefore", label + ".site", int, 0xffffffff)
+    clamp_after = _sunglare_read(site, "clampAfter", label + ".site", int, 0xffffffff)
+    billboard = _sunglare_read(site, "billboardReached", label + ".site", bool)
+    mismatch = 0
+    unreplayable = False
+    expected_claim = False
+    world = _sunglare_read(site, "worldValue", label + ".site", int, 0x7fffffff, -0x80000000)
+    probe = _sunglare_read(site, "probeValue", label + ".site", bool)
+    if site_id == 61:
+        if source[0] or world[0] or probe[0] or billboard[0]:
+            raise TraceError(label + " site61 carries later-rung observations")
+        if not all(x[0] and x[1] for x in (clamp_before, clamp_after)):
+            unreplayable = True
+        elif clamp_before[2] != common2_clamp_after or clamp_after[2] != clamp_before[2]:
+            mismatch += 1
+        if source_action is None:
+            unreplayable = True
+            return None, mismatch, unreplayable
+        if source_action == 1:
+            return {"id": 61, "kind": 2, "outcome": 4, "flow": 1,
+                    "subsite": 0, "verdict": 2}, mismatch, unreplayable
+        return {"id": 61, "kind": 2, "outcome": 2, "flow": 0,
+                "subsite": 0, "verdict": -1}, mismatch, unreplayable
+    if source[0] and source[1] and source_action is not None:
+        if source[2] != source_action:
+            mismatch += 1
+    else:
+        unreplayable = True
+    if site_id == 62:
+        predicate_known = source_action is False
+        if source_action is False:
+            if world[0] or probe[0]:
+                raise TraceError(label + " stock action must short-circuit site62 inputs")
+            expected_claim = False
+        elif source_action is True:
+            if not world[0]:
+                raise TraceError(label + " non-stock action must read world value")
+            if world[1] and world[2] != 0:
+                predicate_known = True
+                if probe[0]:
+                    raise TraceError(label + " nonzero world value must short-circuit probe")
+                expected_claim = True
+            elif world[1] and world[2] == 0:
+                if not probe[0]:
+                    raise TraceError(label + " zero world value must read probe")
+                if probe[1]:
+                    predicate_known = True
+                    expected_claim = probe[2]
+                else:
+                    unreplayable = True
+            else:
+                unreplayable = True
+        else:
+            unreplayable = True
+        if predicate_known and expected_claim:
+            if not all(x[0] and x[1] for x in (clamp_before, clamp_after, billboard)):
+                unreplayable = True
+        elif predicate_known and (clamp_before[0] or clamp_after[0] or billboard[0]):
+            raise TraceError(label + " declining site62 carries claim-only mutation reads")
+        if clamp_before[1] and clamp_before[2] != 0:
+            mismatch += 1
+        if clamp_after[1] and clamp_after[2] != 0:
+            mismatch += 1
+        if predicate_known and billboard[1] and billboard[2] != expected_claim:
+            mismatch += 1
+        return ({"id": site_id, "kind": 2, "outcome": 3 if expected_claim else 2,
+                 "flow": 1 if expected_claim else 0, "subsite": 0,
+                 "verdict": 9 if expected_claim else -1} if not unreplayable else None,
+                mismatch, unreplayable)
+    # Site63 is visited after a stock/Match decline. The frozen common2 reset
+    # and the absence of any production kClamp return make a positive claim
+    # unreachable; its observed clamp is evidence, never a selector input.
+    if source_action is True:
+        if not clamp_before[0]:
+            raise TraceError(label + " non-stock site63 lacks the reached clamp check")
+        if not clamp_before[1]:
+            unreplayable = True
+        elif clamp_before[2] != 0:
+            mismatch += 1
+    elif source_action is False and any(x[0] for x in (clamp_before, clamp_after, billboard)):
+        raise TraceError(label + " stock action cannot carry site63 clamp observations")
+    elif source_action is None and clamp_before[0]:
+        unreplayable = True
+    if clamp_after[0] or billboard[0] or world[0] or probe[0]:
+        raise TraceError(label + " site63 carries an impossible later-stage observation")
+    return {"id": site_id, "kind": 2, "outcome": 2, "flow": 0,
+            "subsite": 0, "verdict": -1}, mismatch, unreplayable
 
 
 def _candidate_witchspace_stars(fact, draw):
@@ -752,22 +1083,27 @@ def _replay_scrim_fact(fact, draw, label):
 
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((3, 6, 24, 26, 49, 50, 53, 55) if predicate_fact_version >= 5 else
+    supported_ids = ((3, 6, 24, 26, 49, 50, 53, 55, 61, 62, 63) if predicate_fact_version >= 6 else
+                     (3, 6, 24, 26, 49, 50, 53, 55) if predicate_fact_version >= 5 else
                      (3, 6, 24, 26, 49, 50) if predicate_fact_version >= 4 else
                      (3, 6, 49, 50) if predicate_fact_version >= 3 else
                      (3, 49, 50) if predicate_fact_version >= 2 else (3, 49))
     expected = {event["id"] for event in draw["sites"] if event["id"] in supported_ids}
     by_site = {}
+    sunglare_action = None
+    sunglare62_expected = None
+    sunglare_mutation_missing = set()
     for index, fact in enumerate(facts):
         fact_label = "%s.predicateFacts[%d]" % (label, index)
         if not isinstance(fact, dict):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        11 if predicate_fact_version >= 6 else
                         8 if predicate_fact_version >= 5 else
                         6 if predicate_fact_version >= 4 else
                         4 if predicate_fact_version >= 3 else
@@ -775,6 +1111,8 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
         supported_pairs = ((3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
+                           (53, 7), (55, 8), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 6 else (
+            (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
                            (53, 7), (55, 8)) if predicate_fact_version >= 5 else (
             (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3)) if predicate_fact_version >= 4 else (
             (3, 1), (6, 4), (49, 2), (50, 3)) if predicate_fact_version >= 3 else (
@@ -786,7 +1124,60 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + ".known is invalid")
         if known == "no":
             raise TraceError(fact_label + ".known must be yes or unknown")
-        if kind == 3:
+        if kind in (9, 10, 11):
+            required = {"siteId", "kind", "known", "site"}
+            if kind == 9:
+                required |= {"selector", "common2ClampBefore", "common2ClampAfter"}
+            if set(fact) != required:
+                raise TraceError(fact_label + " has missing or unexpected Sunglare fields")
+            cache_mismatches = 0
+            expected_delta = None
+            if kind == 9:
+                if site_id != 61:
+                    raise TraceError(fact_label + " has mismatched Sunglare source site")
+                sunglare_action, cache_mismatches, _, mutation_unobserved = _sunglare_selector(fact, draw, fact_label)
+                common2_clamp_after = None
+                for field in ("common2ClampBefore", "common2ClampAfter"):
+                    value = _sunglare_read(fact, field, fact_label, int, 0xffffffff)
+                    if not value[0] or not value[1]:
+                        raise TraceError(fact_label + " lacks the common2 clamp reset observation")
+                    if field == "common2ClampAfter" and value[2] != 0:
+                        cache_mismatches += 1
+                    if field == "common2ClampAfter":
+                        common2_clamp_after = value[2]
+                if mutation_unobserved:
+                    expected_delta = 0
+                    sunglare_mutation_missing.add(site_id)
+                event, site_mismatch, site_unreplayable = _replay_sunglare_site(
+                    fact, site_id, draw, fact_label, sunglare_action,
+                    common2_clamp_after)
+                cache_mismatches += site_mismatch
+                if site_unreplayable or mutation_unobserved:
+                    event = None
+            else:
+                if site_id not in (62, 63) or 61 not in by_site:
+                    raise TraceError(fact_label + " lacks preceding site61 source provenance")
+                if kind == 10 and site_id != 62 or kind == 11 and site_id != 63:
+                    raise TraceError(fact_label + " has mismatched Sunglare fact kind")
+                if sunglare_action == 1:
+                    raise TraceError(fact_label + " skip action makes the later Sunglare sites unreachable")
+                if site_id == 63 and 62 not in by_site:
+                    raise TraceError(fact_label + " lacks preceding site62 chain provenance")
+                source_action = (None if sunglare_action is None else sunglare_action != 0)
+                event, site_mismatch, site_unreplayable = _replay_sunglare_site(
+                    fact, site_id, draw, fact_label, source_action)
+                cache_mismatches += site_mismatch
+                if site_id == 62:
+                    sunglare62_expected = event
+                elif sunglare62_expected is not None and sunglare62_expected.get("outcome") == 3:
+                    raise TraceError(fact_label + " site63 is unreachable after site62 claims")
+                elif site_id == 63 and sunglare62_expected is None:
+                    site_unreplayable = True
+                if site_unreplayable:
+                    event = None
+            by_site[site_id] = (event, expected_delta,
+                                expected_delta is None, 0, cache_mismatches, None)
+        elif kind == 3:
             cache_mismatches = 0
             required = {"siteId", "kind", "known", "dispatchEnabled",
                         "activeMaskKnown", "activePluginMask", "candidateKnown",
@@ -987,7 +1378,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -1015,6 +1406,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     scrim_replayed = 0
     scrim_unreplayable = 0
     scrim_mismatches = 0
+    sunglare_replayed = 0
+    sunglare_unreplayable = 0
+    sunglare_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -1029,6 +1423,19 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 mismatches += 1
             else:
                 replayed += 1
+        if site_id in (61, 62, 63):
+            if site_unreplayable:
+                sunglare_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                sunglare_replayed += 1
+            else:
+                sunglare_mismatches += 1
+            if cache_mismatches:
+                sunglare_mismatches += cache_mismatches
+            if expected_delta is not None and not delta_known:
+                mutation_unobserved += 1
         if site_id == 50:
             if site_unreplayable:
                 nv_unreplayable += 1
@@ -1141,7 +1548,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "scrimFacts": sum(1 for site_id in by_site if site_id == 55),
             "scrimReplayed": scrim_replayed,
             "scrimUnreplayable": scrim_unreplayable,
-            "scrimMismatches": scrim_mismatches}
+            "scrimMismatches": scrim_mismatches,
+            "sunglareFacts": sum(1 for site_id in by_site if site_id in (61, 62, 63)),
+            "sunglareReplayed": sunglare_replayed,
+            "sunglareUnreplayable": sunglare_unreplayable,
+            "sunglareMismatches": sunglare_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -1159,7 +1570,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -1241,7 +1652,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "holoFacts": 0, "holoReplayed": 0,
                         "holoUnreplayable": 0, "holoMismatches": 0,
                         "scrimFacts": 0, "scrimReplayed": 0,
-                        "scrimUnreplayable": 0, "scrimMismatches": 0}
+                        "scrimUnreplayable": 0, "scrimMismatches": 0,
+                        "sunglareFacts": 0, "sunglareReplayed": 0,
+                        "sunglareUnreplayable": 0, "sunglareMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -1565,6 +1978,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                          "mismatch" if predicate_replay["scrimMismatches"] else
                          "unreplayable" if predicate_replay["scrimUnreplayable"] else
                          "replayed"),
+            sunglareStatus=("unavailable-v1-v5" if predicate_fact_version < 6 else
+                            "not-visited" if not predicate_replay["sunglareFacts"] else
+                            "mismatch" if predicate_replay["sunglareMismatches"] else
+                            "unreplayable" if predicate_replay["sunglareUnreplayable"] else
+                            "replayed"),
             **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -1585,7 +2003,10 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
              "holoStatus": "unavailable-v1-v4", "holoFacts": 0,
              "holoReplayed": 0, "holoUnreplayable": 0, "holoMismatches": 0,
              "scrimStatus": "unavailable-v1-v4", "scrimFacts": 0,
-             "scrimReplayed": 0, "scrimUnreplayable": 0, "scrimMismatches": 0}),
+             "scrimReplayed": 0, "scrimUnreplayable": 0, "scrimMismatches": 0,
+             "sunglareStatus": "unavailable-v1", "sunglareFacts": 0,
+             "sunglareReplayed": 0, "sunglareUnreplayable": 0,
+             "sunglareMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -1676,6 +2097,13 @@ def format_summary(summary, sidecar_path=None):
                          (label, replay[status_key], replay.get(facts_key, 0),
                           replay.get(replayed_key, 0), replay.get(unknown_key, 0),
                           replay.get(mismatch_key, 0)))
+    if replay.get("predicateFactVersion", 0) < 6:
+        lines.append("  Sunglare sites 61-63: unavailable before predicate fact version 6")
+    else:
+        lines.append("  Sunglare sites 61-63: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay["sunglareStatus"], replay.get("sunglareFacts", 0),
+                      replay.get("sunglareReplayed", 0), replay.get("sunglareUnreplayable", 0),
+                      replay.get("sunglareMismatches", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -1698,7 +2126,9 @@ def predicate_replay_gate_failure(summary):
 def _fixture():
     return {
         "format": FORMAT, "schemaVersion": 2,
-        "predicateFactVersion": PREDICATE_FACT_VERSION,
+        # Existing vectors exercise the v1-v5 reader contract. Dedicated v6
+        # Sunglare fixtures below opt in explicitly.
+        "predicateFactVersion": 5,
         "buildVersion": "fixture",
         "buildStamp": "1234ABCD", "logFile": "edvr_gfx_20261001_010203.log",
             "semantics": {"equivalence": "observed-selector-and-action-order",
@@ -3022,6 +3452,260 @@ def self_test():
             os.remove(cli_file)
         except OSError:
             pass
+
+    def sg_read(value=None, reached=True, known=True):
+        return {"reached": reached, "known": known,
+                "value": value if known else None}
+
+    def sg_unread():
+        return sg_read(None, False, False)
+
+    def sg_site(source=None, world=None, probe=None, before=None, after=None,
+                billboard=None):
+        return {
+            "source61ActionNotStock": sg_read(source) if source is not None else sg_unread(),
+            "worldValue": sg_read(world) if world is not None else sg_unread(),
+            "probeValue": sg_read(probe) if probe is not None else sg_unread(),
+            "clampBefore": sg_read(before) if before is not None else sg_unread(),
+            "clampAfter": sg_read(after) if after is not None else sg_unread(),
+            "billboardReached": sg_read(billboard) if billboard is not None else sg_unread(),
+        }
+
+    def sg_texture(match=True, width=2048, unknown_resolve=False):
+        if unknown_resolve:
+            return {"resolveOk": sg_read(None, True, False),
+                    "isTexture2D": sg_unread(), "width": sg_unread(),
+                    "height": sg_unread(), "format": sg_unread()}
+        if not match:
+            return {"resolveOk": sg_read(True), "isTexture2D": sg_read(True),
+                    "width": sg_read(width), "height": sg_unread(),
+                    "format": sg_unread()}
+        return {"resolveOk": sg_read(True), "isTexture2D": sg_read(True),
+                "width": sg_read(2048), "height": sg_read(1024),
+                "format": sg_read(98)}
+
+    def sg_selector(mode=2, match=True, unknown_resolve=False):
+        shape = sg_read(True)
+        if mode == 0:
+            outer = {"outerWantsMode": sg_read(0),
+                     "outerExposureDamping": sg_read(False),
+                     "outerProbe": sg_read(False),
+                     "outerWantsResult": sg_read(False)}
+            helper = {key: sg_unread() for key in (
+                "helperWantsMode", "helperExposureDamping", "helperProbe",
+                "helperWantsResult")}
+            helper["helperTrainShape"] = sg_unread()
+            ps0 = {k: sg_unread() for k in
+                   ("resolveOk", "isTexture2D", "width", "height", "format")}
+            ps1 = dict(ps0)
+            times = {k: sg_unread() for k in
+                     ("lastSeenBeforeMs", "nowMs", "lastSeenAfterMs", "actionMode")}
+            action = sg_read(0)
+        else:
+            outer = {"outerWantsMode": sg_read(mode),
+                     "outerExposureDamping": sg_unread(),
+                     "outerProbe": sg_unread(),
+                     "outerWantsResult": sg_read(True)}
+            helper = {"helperWantsMode": sg_read(mode),
+                      "helperExposureDamping": sg_unread(),
+                      "helperProbe": sg_unread(),
+                      "helperWantsResult": sg_read(True),
+                      "helperTrainShape": sg_read(True)}
+            ps0 = sg_texture(not (not match), 1024 if not match else 2048,
+                             unknown_resolve)
+            ps1 = (sg_texture() if match and not unknown_resolve else
+                   {k: sg_unread() for k in
+                    ("resolveOk", "isTexture2D", "width", "height", "format")})
+            if match and not unknown_resolve:
+                times = {"lastSeenBeforeMs": sg_read(0xffffffffffffffff),
+                         "nowMs": sg_read(1), "lastSeenAfterMs": sg_read(1),
+                         "actionMode": sg_read(mode)}
+                action = sg_read(3 if mode != 1 else 1)
+            elif unknown_resolve:
+                times = {k: sg_unread() for k in
+                         ("lastSeenBeforeMs", "nowMs", "lastSeenAfterMs", "actionMode")}
+                action = sg_read(0)
+            else:
+                times = {k: sg_unread() for k in
+                         ("lastSeenBeforeMs", "nowMs", "lastSeenAfterMs", "actionMode")}
+                action = sg_read(0)
+        return dict(outer, **helper, outerTrainShape=shape, ps0=ps0, ps1=ps1,
+                    **times, action=action)
+
+    def sg_fact(site_id, kind, site, selector=None, common_before=73,
+                common_after=0):
+        fact = {"siteId": site_id, "kind": kind, "known": "yes", "site": site}
+        if kind == 9:
+            fact["selector"] = selector
+            fact["common2ClampBefore"] = sg_read(common_before)
+            fact["common2ClampAfter"] = sg_read(common_after)
+        return fact
+
+    sg_draw = {"kind": ord("N"), "count": 6, "instances": 2,
+               "sites": [
+                   {"id": 61, "kind": 2, "outcome": 2, "flow": 0,
+                    "subsite": 0, "verdict": -1},
+                   {"id": 62, "kind": 2, "outcome": 2, "flow": 0,
+                    "subsite": 0, "verdict": -1},
+                   {"id": 63, "kind": 2, "outcome": 2, "flow": 0,
+                    "subsite": 0, "verdict": -1}],
+               "predicateFacts": [
+                   sg_fact(61, 9, sg_site(before=0, after=0),
+                           sg_selector()),
+                   sg_fact(62, 10, sg_site(source=True, world=0, probe=False)),
+                   sg_fact(63, 11, sg_site(source=True, before=0))]}
+    try:
+        sg_summary = _replay_predicate_facts(sg_draw, "fixture", 6)
+    except Exception as exc:
+        print("draw-ladder Sunglare positive fixture failed: %s" % exc)
+        return 1
+    if sg_summary["sunglareReplayed"] != 3 or sg_summary["sunglareMismatches"]:
+        print("draw-ladder Sunglare positive selector did not replay")
+        return 1
+
+    sg_stock = {"kind": ord("N"), "count": 6, "instances": 2,
+                "sites": [{"id": 61, "kind": 2, "outcome": 2, "flow": 0,
+                           "subsite": 0, "verdict": -1}],
+                "predicateFacts": [sg_fact(61, 9, sg_site(before=0, after=0),
+                                           sg_selector(mode=0))]}
+    if _replay_predicate_facts(sg_stock, "stock", 6)["sunglareReplayed"] != 1:
+        print("draw-ladder Sunglare Stock short-circuit did not replay")
+        return 1
+    sg_claim = json.loads(json.dumps(sg_draw))
+    sg_claim["sites"] = sg_claim["sites"][:2]
+    sg_claim["sites"][1].update(outcome=3, flow=1, verdict=9)
+    sg_claim["predicateFacts"] = sg_claim["predicateFacts"][:2]
+    sg_claim["predicateFacts"][1]["site"] = sg_site(
+        source=True, world=1, before=0, after=0, billboard=True)
+    if _replay_predicate_facts(sg_claim, "world-claim", 6)["sunglareReplayed"] != 2:
+        print("draw-ladder Sunglare world action cascade did not replay")
+        return 1
+    sg_short = json.loads(json.dumps(sg_stock))
+    sg_short["predicateFacts"][0]["selector"] = sg_selector(match=False)
+    if _replay_predicate_facts(sg_short, "resource-short", 6)["sunglareReplayed"] != 1:
+        print("draw-ladder Sunglare resource short-circuit did not replay")
+        return 1
+    sg_unknown = json.loads(json.dumps(sg_stock))
+    sg_unknown["predicateFacts"][0]["selector"] = sg_selector(unknown_resolve=True)
+    if _replay_predicate_facts(sg_unknown, "resource-unknown", 6)["sunglareUnreplayable"] != 1:
+        print("draw-ladder Sunglare unavailable resource was guessed")
+        return 1
+    # Every independently consumed selector input can be unavailable without
+    # making the recorded action/result an oracle. Keep later stages present
+    # to prove unknown inputs cannot be reconstructed from their outputs.
+    for field in ("outerWantsMode", "outerWantsResult", "helperWantsMode",
+                  "helperWantsResult", "actionMode", "action",
+                  "lastSeenBeforeMs", "nowMs", "lastSeenAfterMs"):
+        mutant = json.loads(json.dumps(sg_draw))
+        mutant["predicateFacts"][0]["selector"][field] = sg_read(None, True, False)
+        if not _replay_predicate_facts(mutant, "unknown-" + field, 6)["sunglareUnreplayable"]:
+            print("draw-ladder Sunglare guessed unavailable " + field)
+            return 1
+    for slot in ("ps0", "ps1"):
+        for field in ("resolveOk", "isTexture2D", "width", "height", "format"):
+            mutant = json.loads(json.dumps(sg_draw))
+            mutant["predicateFacts"][0]["selector"][slot][field] = sg_read(None, True, False)
+            if not _replay_predicate_facts(mutant, "unknown-texture", 6)["sunglareUnreplayable"]:
+                print("draw-ladder Sunglare guessed unavailable texture input")
+                return 1
+    for field in ("clampBefore", "clampAfter", "billboardReached"):
+        mutant = json.loads(json.dumps(sg_claim))
+        mutant["predicateFacts"][1]["site"][field] = sg_read(None, True, False)
+        if not _replay_predicate_facts(mutant, "unknown-claim-mutation", 6)["sunglareUnreplayable"]:
+            print("draw-ladder Sunglare accepted unavailable claim evidence")
+            return 1
+    sg_mode_change = json.loads(json.dumps(sg_stock))
+    sg_mode_change["predicateFacts"][0]["selector"] = sg_selector()
+    sg_mode_change["predicateFacts"][0]["selector"]["actionMode"] = sg_read(1)
+    sg_mode_change["predicateFacts"][0]["selector"]["action"] = sg_read(1)
+    sg_mode_change["sites"][0].update(outcome=4, flow=1, verdict=2)
+    mode_summary = _replay_predicate_facts(sg_mode_change, "post-stamp-mode", 6)
+    if mode_summary["sunglareReplayed"] != 1 or mode_summary["sunglareMismatches"]:
+        print("draw-ladder Sunglare ignored independent post-stamp mode")
+        return 1
+    for stage in ("outer", "helper"):
+        for damping, probe in ((True, False), (False, True)):
+            mutant = json.loads(json.dumps(sg_draw))
+            selector = mutant["predicateFacts"][0]["selector"]
+            selector[stage + "WantsMode"] = sg_read(0)
+            selector[stage + "ExposureDamping"] = sg_read(damping)
+            selector[stage + "Probe"] = sg_unread() if damping else sg_read(probe)
+            summary = _replay_predicate_facts(mutant, "lazy-wants", 6)
+            if summary["sunglareReplayed"] != 3 or summary["sunglareMismatches"]:
+                print("draw-ladder Sunglare lazy stock wants failed")
+                return 1
+            field = stage + ("ExposureDamping" if damping else "Probe")
+            selector[field] = sg_read(None, True, False)
+            if not _replay_predicate_facts(mutant, "unknown-wants", 6)["sunglareUnreplayable"]:
+                print("draw-ladder Sunglare guessed unavailable damping/probe")
+                return 1
+    for world in (-2147483648, -1, 2147483647):
+        mutant = json.loads(json.dumps(sg_claim))
+        mutant["predicateFacts"][1]["site"]["worldValue"] = sg_read(world)
+        summary = _replay_predicate_facts(mutant, "raw-world", 6)
+        if summary["sunglareReplayed"] != 2 or summary["sunglareMismatches"]:
+            print("draw-ladder Sunglare raw nonzero world truthiness failed")
+            return 1
+    sg_probe_claim = json.loads(json.dumps(sg_claim))
+    sg_probe_claim["predicateFacts"][1]["site"]["worldValue"] = sg_read(0)
+    sg_probe_claim["predicateFacts"][1]["site"]["probeValue"] = sg_read(True)
+    if _replay_predicate_facts(sg_probe_claim, "probe-claim", 6)["sunglareReplayed"] != 2:
+        print("draw-ladder Sunglare probe claim failed")
+        return 1
+    sg_unknown62 = json.loads(json.dumps(sg_draw))
+    sg_unknown62["predicateFacts"][1]["site"]["worldValue"] = sg_read(None, True, False)
+    if _replay_predicate_facts(sg_unknown62, "unknown62-suffix", 6)["sunglareUnreplayable"] != 2:
+        print("draw-ladder Sunglare site63 replayed without known site62 reachability")
+        return 1
+    for field in ("helperWantsMode", "helperWantsResult", "ps1"):
+        mutant = json.loads(json.dumps(sg_stock))
+        mutant["predicateFacts"][0]["selector"][field] = None
+        try:
+            _replay_predicate_facts(mutant, "malformed-envelope", 6)
+        except TraceError:
+            pass
+        else:
+            print("draw-ladder Sunglare accepted malformed envelope")
+            return 1
+    sg_missing_stage = json.loads(json.dumps(sg_draw))
+    sg_missing_stage["predicateFacts"][0]["selector"]["ps0"]["resolveOk"] = sg_read(None, True, False)
+    sg_missing_stage["predicateFacts"][0]["selector"]["ps0"]["isTexture2D"] = sg_unread()
+    try:
+        _replay_predicate_facts(sg_missing_stage, "missing-resource-stage", 6)
+    except TraceError:
+        pass
+    else:
+        print("draw-ladder Sunglare accepted a resource stage after skipped predecessor")
+        return 1
+    sg_time_mutation = json.loads(json.dumps(sg_draw))
+    sg_time_mutation["predicateFacts"][0]["selector"]["lastSeenAfterMs"]["value"] = 2
+    if not _replay_predicate_facts(sg_time_mutation, "time-mutation", 6)["sunglareMismatches"]:
+        print("draw-ladder Sunglare timestamp mutation was not detected")
+        return 1
+    sg_reset_mutation = json.loads(json.dumps(sg_draw))
+    sg_reset_mutation["predicateFacts"][0]["common2ClampAfter"]["value"] = 4
+    if not _replay_predicate_facts(sg_reset_mutation, "reset-mutation", 6)["sunglareMismatches"]:
+        print("draw-ladder Sunglare common2 reset mutation was not detected")
+        return 1
+    sg_site61_mutation = json.loads(json.dumps(sg_draw))
+    sg_site61_mutation["predicateFacts"][0]["site"]["clampAfter"]["value"] = 4
+    if not _replay_predicate_facts(sg_site61_mutation, "site61-mutation", 6)["sunglareMismatches"]:
+        print("draw-ladder Sunglare site61 clamp mutation was not detected")
+        return 1
+    sg_unreachable = json.loads(json.dumps(sg_draw))
+    sg_unreachable["sites"][2].update(outcome=3, flow=1, verdict=8)
+    if not _replay_predicate_facts(sg_unreachable, "site63-claim", 6)["sunglareMismatches"]:
+        print("draw-ladder Sunglare site63 production claim was accepted")
+        return 1
+    sg_invalid = json.loads(json.dumps(sg_stock))
+    sg_invalid["predicateFacts"][0]["selector"]["outerExposureDamping"] = sg_read(True)
+    try:
+        _replay_predicate_facts(sg_invalid, "bad-stage", 6)
+    except TraceError:
+        pass
+    else:
+        print("draw-ladder Sunglare accepted an invalid short-circuit read")
+        return 1
     print("draw-ladder-replay self-test: ok")
     return 0
 
