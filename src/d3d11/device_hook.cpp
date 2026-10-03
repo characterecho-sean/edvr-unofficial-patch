@@ -2645,7 +2645,7 @@ void hookDevice(ID3D11Device* device) {
     s.shaderDump = sentinelCfg.getBool("advanced.glare_shader_dump", false);
     s.shaderDumpDir = sentinelCfg.logDir() + L"\\shaders";
     if (runtimeFlatProfile())
-        Log::get().note("flat shader capture: armed targets=13 stages=VS,PS directory=%ls; watching successful creations, one attempt per exact stage/hash per device; absent attempted lines mean no capture attempt", s.shaderDumpDir.c_str());
+        Log::get().note("flat shader capture: armed targets=%u stages=VS,PS directory=%ls; watching successful creations, one attempt per exact stage/hash per device; absent attempted lines mean no capture attempt", unsigned(kFlatShaderCaptureCount), s.shaderDumpDir.c_str());
     if (s.shaderDump) {
         Log::get().note("shader dump ARMED: every vertex and pixel shader "
                         "the game creates is written to edvr_logs\\shaders "

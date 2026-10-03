@@ -4,7 +4,7 @@
 
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
-  log is build `v0.18.1-5-g743c5dc0`. Evidence is in sections 1-88.
+  log is build `v0.18.1-5-g743c5dc0`. Evidence is in sections 1-89.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 87: Coriolis native-scale FSR on/off comparison; section
-  88: HDR-compatible matched building ROI before another flight. Preserve
-  section 83's remaining qualification matrix and the open items below.
+- **Next:** section 89: diagnostic BUILT; rifle/effect capture before admission.
+  Section 87: Coriolis native-scale comparison; 88: HDR-compatible building ROI.
+  Preserve section 83's remaining qualification matrix and the open items below.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
   open. VR still needs regression tests; the concourse NPC observation on
@@ -9255,3 +9255,67 @@ The generic draw audit is not geometry evidence. No rendering cause or fix is
 qualified. Next discriminant: HDR-compatible color, depth, motion-vector,
 rejection and final-image samples at a matched building ROI across consecutive
 frames, before another flight; do not repeat F10 on this blind path.
+
+## 89. Weapon-visible DLAA refusal: two alternate camera pairs (2026-10-03)
+
+State: confirmed frame-selection refusal; shader roles need qualification.
+Sean reports a different supporter loses AA on unholstering a laser rifle
+and regains it on holstering. Bundle edvr-logs-20261003-154551.zip contains
+one graphics log (8340 lines), settings and breadcrumbs, no shaders/traces.
+Literal build v0.18.1, stamp 6AC026D1, linked 2026-10-02 21:49:05 UTC.
+edvr_log --expect-build HEAD accepts the v0.18.1 release prefix at source
+0fa51a88; this is not an exact source-commit identity proof. The exact
+weapon exception is unchanged between the release and current source.
+
+Flat mono, RTX 3050, 1920x1080, native-resolution NGX DLAA preset K; no
+headset/runtime in this path. Saved INI asks dlss, but NGX initialization
+and live warnings name DLAA. Selection remains requested during refusals;
+no evidence of an automatic menu mode change to Off. Earlier loading and
+post-chain intervals have separate no-3d-scene/no-known-tone-pass causes.
+
+At 15:43:24.111/35.156, firstBad hdr-camera-changed is exact pair
+025B4B9FF54622ED/46F92DC71BF8DFA5. At 15:43:45.156/55.156 it is
+9AEC596A2B036EA6/3789CA2062E196FB. Both compare against scene pair
+68DDDEF04D9894AF/06332CA168B6DA63. Same HDR RTV, DSV/depth identities,
+1920x1080 dimensions and current-frame b1 epochs; changed camera words
+are XY scale and near 0.025 -> 0.0675, with rows 274/275 unchanged.
+At 15:44:08.543 the window has 272 camera conflicts, streak=0, last=
+conflicting-hdr-target-or-camera. By 15:44:18.553 it accepts 300 history
+frames with no new refusals; final treated=40281/refused=3500, streak=4505.
+The log has no weapon-event timestamps, so onset/holster correlation comes
+from the supporter, not a recorded input event.
+
+Section 57 admits only 88DCF1164C640EC3/494506A63091DF8C as an alternate
+weapon camera. New 025B VS is listed as weapon/tool material, but this PS
+companion has no exact recipe (the known companion is C5A5C7E8216CB9AF).
+9AEC/3789 has an exact b1 ForwardColumns recipe, but its VS is a generic
+billboard/flare source also used by witchspace. A matching narrow camera
+alone does not prove that effect's ownership. Do not admit either from
+the reported weapon name or globally ignore changed cameras.
+
+Evidence gap: original F10 camera probe only observes the old rifle pair.
+F10 at 15:44:12/46/50 wrote three trace files on the user's machine; none
+is in the archive. Producer shader capture saved VS 025B, but the new PS
+and effect bytecode are not demonstrated. Global glare_shader_dump is
+refused by the flat profile allowlist; it is not a working capture path.
+
+Diagnostic implemented: extend bounded flat stage/hash capture and F10 cached
+shader requests to both new pairs; observe two distinct conflict frames
+per exact pair, keeping actual shader identity and CPU shadow checks.
+Per-pair budgets prevent the mesh from starving the effect capture; report
+zero-observation and partial/mismatched results as well as complete ones.
+No camera/renderer admission, config key or live setting changes. Next
+flight: restart on the diagnostic build, draw
+the rifle, F10 while the AA refusal is present, wait at least five seconds,
+then send the shader/trace folders together with the fresh flight log.
+
+Validation: absolute build.bat --jobs 2 passed all gates, including 117
+pooled and 5 quiet jobs, the new per-pair camera probe tests, 46 existing
+trace frame replays, the 234-key contract and installer resource checks.
+The sandboxed run stopped at run_jobs process-tree validation; the
+unchanged-source escalated run passed. Log:
+build/weapon_camera_diagnostic_full_build_escalated.log. Full-pass receipt
+inputs SHA256 20b1d95485cf1cfc7199de8ba96c84a3b5a7070df96c6fdbddaf35a5bc172783.
+Validated flat installer: v0.18.1-10-g00d4f738-dirty, 79570944 bytes,
+SHA256 43ACE66D4995B49DBFE4DF79E091441D6E5D3D297BFB733DFAB66F3825ECAA18.
+This is a diagnostic artifact, not a claimed rendering fix or flown change.

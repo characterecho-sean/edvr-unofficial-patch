@@ -9,6 +9,7 @@
 #include "../../src/d3d11/flat_trace.h"
 #include "../../src/d3d11/engine_velocity_families.h"
 #include "flat_shader_capture_tests.h"
+#include "flat_camera_probe_tests.h"
 #include "flat_projection_math_tests.h"
 #include "flat_projection_bindings_tests.h"
 #include "flat_projection_recipe_tests.h"
@@ -3009,6 +3010,7 @@ int main(int argc, char** argv) {
     testProjectionSlices();
     testDetailBudget();
     failures += flatShaderCaptureTests();
+    failures += flatCameraProbeTests();
     failures += flatProjectionMathTests();
     failures += flatProjectionBindingsTests();
     failures += flatProjectionRecipeTests();

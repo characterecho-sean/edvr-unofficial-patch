@@ -721,11 +721,20 @@ void reportProjection(State& s, const char* event) {
         (s.localSamples[i].closed[0]?1u:0u)+(s.localSamples[i].closed[1]?1u:0u),
         (unsigned long long)s.localSamples[i].firstFrame);
     const auto& copy=s.copyProvenance;
-    const auto& cameraProbe=s.cameraProbe;
-    Log::get().note("flat camera probe: event=%s observed=%llu conflicts=%llu attempts=%u complete=%u missing=%u actual-mismatch=%u first-frame=%llu last-frame=%llu result=%s; F10 only, two distinct conflict frames, CPU shadows only, no camera admission",
-        event,(unsigned long long)cameraProbe.observed,(unsigned long long)cameraProbe.conflicts,
-        cameraProbe.attempts,cameraProbe.complete,cameraProbe.missing,cameraProbe.actualMismatch,
-        (unsigned long long)cameraProbe.firstFrame,(unsigned long long)cameraProbe.lastFrame,cameraProbe.result());
+    uint64_t cameraObserved=0,cameraConflicts=0;
+    uint32_t cameraAttempts=0,cameraComplete=0,cameraMissing=0,cameraMismatch=0;
+    for(size_t i=0;i<kFlatCameraProbePairCount;++i) {
+        const auto& p=s.cameraProbe.pairs[i];const auto& key=kFlatCameraProbePairs[i];
+        cameraObserved+=p.observed;cameraConflicts+=p.conflicts;cameraAttempts+=p.attempts;
+        cameraComplete+=p.complete;cameraMissing+=p.missing;cameraMismatch+=p.actualMismatch;
+        Log::get().note("flat camera probe pair: event=%s pair=%u VS=%016llX PS=%016llX observed=%llu conflicts=%llu attempts=%u complete=%u missing=%u actual-mismatch=%u first-frame=%llu last-frame=%llu result=%s; F10 only, two distinct conflict frames per pair",
+            event,unsigned(i),(unsigned long long)key.vs,(unsigned long long)key.ps,
+            (unsigned long long)p.observed,(unsigned long long)p.conflicts,p.attempts,p.complete,p.missing,p.actualMismatch,
+            (unsigned long long)p.firstFrame,(unsigned long long)p.lastFrame,p.result());
+    }
+    Log::get().note("flat camera probe: event=%s observed=%llu conflicts=%llu attempts=%u complete=%u missing=%u actual-mismatch=%u pairs=%u; F10 only, CPU shadows only, no camera admission",
+        event,(unsigned long long)cameraObserved,(unsigned long long)cameraConflicts,
+        cameraAttempts,cameraComplete,cameraMissing,cameraMismatch,unsigned(kFlatCameraProbePairCount));
     reportUnknownProjection(s,event);
     Log::get().note("flat copy provenance capture: event=%s attempts=%u completed=%u missing-source-record=%u missing-destination-record=%u actual-shader-mismatch=%u rearmed-before-complete=%u first-frame=%llu result=%s; two distinct frames per F10 arm separated by at least 90 frames",
         event,copy.attempts,copy.completed,copy.missingSource,copy.missingDestination,
@@ -956,14 +965,14 @@ uint32_t captureCameraConflict(State& s, const FlatRuntimeDraw& draw) {
     // Run on the original game draw, before the observer records/refuses it and
     // before any private jitter or motion bindings. No per-draw work outside F10.
     const auto& k=draw.key;
-    if(!s.projectionFrames || k.vs!=0x88DCF1164C640EC3ull || k.ps!=0x494506A63091DF8Cull)return 0;
+    if(!s.projectionFrames || FlatCameraProbe::pairIndex(k.vs,k.ps)==kFlatCameraProbePairCount)return 0;
     const FlatRuntimeTarget* target=nullptr;
     for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
         if(s.prefix.targets[i].resource==k.color){target=&s.prefix.targets[i];break;}
     const bool conflict=k.format==26 && k.camera && target && target->hdrCamera &&
         std::memcmp(target->tone.camera,draw.camera,kFlatCameraBytes)!=0;
-    if(!s.cameraProbe.begin(true,k.vs,k.ps,s.prefix.frame,conflict))return 0;
-    const uint32_t attempt=s.cameraProbe.attempts;
+    const uint32_t attempt=s.cameraProbe.begin(true,k.vs,k.ps,s.prefix.frame,conflict);
+    if(!attempt)return 0;
     FlatComputeInternalScope internal;
     Ptr<ID3D11VertexShader> actualVs;Ptr<ID3D11PixelShader> actualPs;
     s.context->VSGetShader(&actualVs,nullptr,nullptr);s.context->PSGetShader(&actualPs,nullptr,nullptr);
@@ -1016,7 +1025,7 @@ uint32_t captureCameraConflict(State& s, const FlatRuntimeDraw& draw) {
         attempt,depthState.Get(),depthState?0u:1u,desc.DepthEnable?1u:0u,desc.DepthWriteMask,desc.DepthFunc,desc.StencilEnable?1u:0u,stencilRef,
         desc.StencilReadMask,desc.StencilWriteMask,desc.FrontFace.StencilFailOp,desc.FrontFace.StencilDepthFailOp,desc.FrontFace.StencilPassOp,desc.FrontFace.StencilFunc,
         desc.BackFace.StencilFailOp,desc.BackFace.StencilDepthFailOp,desc.BackFace.StencilPassOp,desc.BackFace.StencilFunc,complete?"complete":"partial");
-    s.cameraProbe.finish(complete,actualMatches);
+    s.cameraProbe.finish(attempt,complete,actualMatches);
     return attempt;
 }
 void captureLocalProjection(State& s, uint64_t vs, uint64_t ps) {
@@ -2300,6 +2309,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             // The gameplay HDR source rejected in the FSR conflict audit.
             // Its creation bytes identify whether camera-free admission is safe.
             captureFlatProbeShader('p',0x07B3F82100F29401ull);
+            // Both exact first-bad on-foot camera pairs: F10 requests cached
+            // creation bytes even if they predate this arm. Never admits a draw.
+            for(size_t i=1;i<kFlatCameraProbePairCount;++i){
+                captureFlatProbeShader('v',kFlatCameraProbePairs[i].vs);
+                captureFlatProbeShader('p',kFlatCameraProbePairs[i].ps);
+            }
             // Exact unknown scene pairs observed in build 0150638a. These
             // creation-cache probes run once per manual F10 arm, never per draw.
             constexpr uint64_t unknownVs[]={0xA1B7CFCD0BE7493Eull,0xCE24A73943632F55ull,
