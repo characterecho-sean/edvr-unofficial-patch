@@ -2,6 +2,7 @@
 
 #include "draw_census.h"
 #include "draw_ladder.h"
+#include "basic_draw_observation.h"
 #include "holo_scrim_observation.h"
 #include "fss_observation.h"
 #include "remlok_observation.h"
@@ -27,9 +28,11 @@ constexpr std::uint8_t kMaxFssFactsPerDraw = 2;
 constexpr std::uint32_t kMaxFssFacts = kMaxDraws * kMaxFssFactsPerDraw;
 constexpr std::uint8_t kMaxRemlokFactsPerDraw = 1;
 constexpr std::uint32_t kMaxRemlokFacts = kMaxDraws * kMaxRemlokFactsPerDraw;
+constexpr std::uint8_t kMaxBasicFactsPerDraw = 2;
+constexpr std::uint32_t kMaxBasicFacts = kMaxDraws * kMaxBasicFactsPerDraw;
 constexpr std::uint8_t kMaxTotalPredicateFactsPerDraw =
     kMaxPredicateFactsPerDraw + kMaxSunglareFactsPerDraw +
-    kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw;
+    kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw + kMaxBasicFactsPerDraw;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -53,6 +56,8 @@ enum class CaptureInvalidation : std::uint8_t {
     FssPoolMissing = 5,
     RemlokIndexOverflow = 6,
     RemlokPoolMissing = 7,
+    BasicIndexOverflow = 8,
+    BasicPoolMissing = 9,
 };
 
 // Returned by shutdown() so production can report whether an armed or partial
@@ -277,6 +282,11 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept;
 void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept;
 void appendFssFact(Token token, const FssObservation& fact) noexcept;
 void appendRemlokFact(Token token, const remlok_observation::Observation& fact) noexcept;
+void appendBasicFact(Token token, const BasicDrawObservation& fact) noexcept;
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+bool readBasicFactForTest(Token token, std::uint8_t ordinal, BasicDrawObservation* out) noexcept;
+std::uint8_t basicFactCountForTest(Token token) noexcept;
+#endif
 void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept;
 void completeWitchspaceStarsFact(Token token, const PredicateFact& fact) noexcept;
 void updateCandidates(Token token, std::uint64_t mask) noexcept;
@@ -360,6 +370,9 @@ struct TracePolicy final {
     }
     inline void remlokFact(const remlok_observation::Observation& fact) noexcept {
         appendRemlokFact(token, fact);
+    }
+    inline void basicFact(const BasicDrawObservation& fact) noexcept {
+        appendBasicFact(token, fact);
     }
 };
 

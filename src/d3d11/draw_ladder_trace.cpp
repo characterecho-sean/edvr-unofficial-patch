@@ -19,7 +19,7 @@
 namespace edvr::draw_ladder_trace {
 namespace {
 
-constexpr std::uint32_t kIdentitySlots = kMaxDraws * 6;
+constexpr std::uint32_t kIdentitySlots = kMaxDraws * 8;
 constexpr std::size_t kPathChars = 1024;
 constexpr std::size_t kNameChars = 260;
 
@@ -42,6 +42,7 @@ struct DrawRecord final {
     std::uint32_t sunglareFactIndices[kMaxSunglareFactsPerDraw]{};
     std::uint32_t fssFactIndices[kMaxFssFactsPerDraw]{};
     std::uint32_t remlokFactIndices[kMaxRemlokFactsPerDraw]{};
+    std::uint32_t basicFactIndices[kMaxBasicFactsPerDraw]{};
     ForwardFacts forwardFacts{};
     std::uint16_t siteCount = 0;
     std::uint16_t actionCount = 0;
@@ -49,6 +50,7 @@ struct DrawRecord final {
     std::uint8_t sunglareFactCount = 0;
     std::uint8_t fssFactCount = 0;
     std::uint8_t remlokFactCount = 0;
+    std::uint8_t basicFactCount = 0;
     std::int16_t winnerSiteId = -1;
     std::int16_t verdictOrdinal = -1;
     bool finalized = false;
@@ -62,6 +64,8 @@ FssObservation* g_fssFacts = nullptr;
 std::uint32_t g_fssFactCount = 0;
 remlok_observation::Observation* g_remlokFacts = nullptr;
 std::uint32_t g_remlokFactCount = 0;
+BasicDrawObservation* g_basicFacts = nullptr;
+std::uint32_t g_basicFactCount = 0;
 std::uintptr_t* g_identities = nullptr;
 std::uint32_t g_drawCount = 0;
 std::uint32_t g_identityCount = 0;
@@ -75,6 +79,8 @@ bool g_sunglareIndexOverflowed = false;
 bool g_sunglarePoolMissing = false;
 bool g_fssIndexOverflowed = false;
 bool g_fssPoolMissing = false;
+bool g_basicIndexOverflowed = false;
+bool g_basicPoolMissing = false;
 bool g_remlokIndexOverflowed = false;
 bool g_remlokPoolMissing = false;
 bool g_lastWriteSucceeded = false;
@@ -586,9 +592,22 @@ void normalizeResourceIdentities() noexcept {
     g_identityCount = 0;
     for (std::uint32_t i = 0; i < g_drawCount; ++i) {
         const DrawFacts& f = g_records[i].facts;
-        const std::uintptr_t values[6] = {
+        std::uintptr_t values[8] = {
             f.vsIdentity, f.psIdentity, f.rtv0Identity, f.dsv0Identity,
-            f.argumentBufferKnown ? f.argumentBufferIdentity : 0, 0};
+            f.argumentBufferKnown ? f.argumentBufferIdentity : 0, 0, 0, 0};
+        const DrawRecord& record = g_records[i];
+        for (std::uint8_t j = 0; j < record.basicFactCount; ++j) {
+            if (!g_basicFacts || record.basicFactIndices[j] >= g_basicFactCount) {
+                g_wasOverflowed = true;
+                continue;
+            }
+            const auto& fact = g_basicFacts[record.basicFactIndices[j]];
+            if (fact.kind != BasicDrawFactKind::kContext) continue;
+            if (fact.context.contextIdentity.reached && fact.context.contextIdentity.known)
+                values[6] = fact.context.contextIdentity.value;
+            if (fact.context.ownerContextIdentity.reached && fact.context.ownerContextIdentity.known)
+                values[7] = fact.context.ownerContextIdentity.value;
+        }
         for (std::uintptr_t value : values) {
             if (value == 0) continue;
             if (g_identityCount >= kIdentitySlots) {
@@ -603,12 +622,37 @@ void normalizeResourceIdentities() noexcept {
         std::unique(g_identities, g_identities + g_identityCount) - g_identities);
 }
 
+template <typename T>
+bool writeBasicRead(Writer& writer, const char* name,
+                    const BasicDrawRead<T>& read, bool& first) noexcept {
+    return writeFssRead(writer, name, FssRead<T>{read.reached, read.known, read.value}, first);
+}
+
+bool writeBasicFact(Writer& writer, const BasicDrawObservation& fact) noexcept {
+    if (!writeFmt(writer, "{\"siteId\":%u,\"kind\":%u,\"known\":\"yes\",\"context\":{",
+                  fact.siteId, static_cast<unsigned>(fact.kind))) return false;
+    bool first = true;
+    auto context = fact.context;
+    if (context.contextIdentity.known)
+        context.contextIdentity.value = resourceOrdinal(context.contextIdentity.value);
+    if (context.ownerContextIdentity.known)
+        context.ownerContextIdentity.value = resourceOrdinal(context.ownerContextIdentity.value);
+    if (!writeBasicRead(writer, "contextIdentity", context.contextIdentity, first) ||
+        !writeBasicRead(writer, "ownerContextIdentity", context.ownerContextIdentity, first) ||
+        !writeBasicRead(writer, "glareClampBefore", context.glareClampBefore, first) ||
+        !writeBasicRead(writer, "glareClampAfter", context.glareClampAfter, first) ||
+        !writeText(writer, "},\"distance\":{")) return false;
+    first = true;
+    return writeBasicRead(writer, "distanceEnabled", fact.distance.distanceEnabled, first) &&
+           writeText(writer, "}}");
+}
+
 bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     normalizeResourceIdentities();
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":8,"
+        "\"predicateFactVersion\":9,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -617,8 +661,8 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Predicate fact version 7 independently re-evaluates kinds 1-8 and FSS sites 57-58 from raw consumed source facts, plus Sunglare sites 61-63; observed helper outputs are consistency checks, cached matches and SiteEvents are not selector inputs, and whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
-        "\"identityNote\":\"Resource identities are per-capture ordinals; raw pointers are never serialized.\","
+        "\"predicateNote\":\"Predicate fact version 9 independently re-evaluates the supported gate, stars, Holo, Scrim, NV, RemLok, FSS, Sunglare, context and distance predicates from raw consumed source facts. Observed helper outputs are consistency checks; cached matches and SiteEvents are not selector inputs. Whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
+        "\"identityNote\":\"Resource and context identities share per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
         "\"action\":{\"generatedDrawArgsUnavailable\":8192,\"gpuDrawArgsUnavailable\":16384,\"issueCountUnknown\":32768},"
@@ -833,6 +877,14 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
             if (!g_remlokFacts || r.remlokFactIndices[j] >= g_remlokFactCount ||
                 !writeRemlokFact(writer, g_remlokFacts[r.remlokFactIndices[j]])) return false;
         }
+        if (r.basicFactCount &&
+            (r.predicateFactCount || r.sunglareFactCount || r.fssFactCount || r.remlokFactCount) &&
+            !writeText(writer, ",")) return false;
+        for (std::uint8_t j = 0; j < r.basicFactCount; ++j) {
+            if (j && !writeText(writer, ",")) return false;
+            if (!g_basicFacts || r.basicFactIndices[j] >= g_basicFactCount ||
+                !writeBasicFact(writer, g_basicFacts[r.basicFactIndices[j]])) return false;
+        }
         ok = writeFmt(writer,
             "],\"winnerSiteId\":%d,\"verdict\":%d,\"forwardFacts\":",
             r.winnerSiteId, r.verdictOrdinal);
@@ -906,7 +958,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     if (g_isCapturing) return;
     const bool wasEnabled = g_enabled.load(std::memory_order_acquire);
     if (!enabled && !wasEnabled && !g_records && !g_sunglareFacts &&
-        !g_fssFacts && !g_remlokFacts && !g_identities) return;
+        !g_fssFacts && !g_remlokFacts && !g_basicFacts && !g_identities) return;
     if (enabled && wasEnabled && logFilePath && logFilePath[0]) {
         wchar_t oldPath[kPathChars]{};
         if (SUCCEEDED(StringCchCopyW(oldPath, kPathChars, g_directory)) &&
@@ -927,15 +979,19 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_fssPoolMissing = false;
     g_remlokIndexOverflowed = false;
     g_remlokPoolMissing = false;
+    g_basicIndexOverflowed = false;
+    g_basicPoolMissing = false;
     g_lastWriteSucceeded = false;
     if (g_records) { delete[] g_records; g_records = nullptr; }
     if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
     if (g_fssFacts) { delete[] g_fssFacts; g_fssFacts = nullptr; }
     if (g_remlokFacts) { delete[] g_remlokFacts; g_remlokFacts = nullptr; }
+    if (g_basicFacts) { delete[] g_basicFacts; g_basicFacts = nullptr; }
     if (g_identities) { delete[] g_identities; g_identities = nullptr; }
     g_sunglareFactCount = 0;
     g_fssFactCount = 0;
     g_remlokFactCount = 0;
+    g_basicFactCount = 0;
     g_directory[0] = L'\0';
     g_logFileName[0] = L'\0';
     g_logStem[0] = L'\0';
@@ -948,12 +1004,14 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_sunglareFacts = new (std::nothrow) SunglareObservation[kMaxSunglareFacts];
     g_fssFacts = new (std::nothrow) FssObservation[kMaxFssFacts];
     g_remlokFacts = new (std::nothrow) remlok_observation::Observation[kMaxRemlokFacts];
+    g_basicFacts = new (std::nothrow) BasicDrawObservation[kMaxBasicFacts];
     g_identities = new (std::nothrow) std::uintptr_t[kIdentitySlots];
-    if (!g_records || !g_sunglareFacts || !g_fssFacts || !g_remlokFacts || !g_identities) {
+    if (!g_records || !g_sunglareFacts || !g_fssFacts || !g_remlokFacts || !g_basicFacts || !g_identities) {
         if (g_records) { delete[] g_records; g_records = nullptr; }
         if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
         if (g_fssFacts) { delete[] g_fssFacts; g_fssFacts = nullptr; }
         if (g_remlokFacts) { delete[] g_remlokFacts; g_remlokFacts = nullptr; }
+        if (g_basicFacts) { delete[] g_basicFacts; g_basicFacts = nullptr; }
         if (g_identities) { delete[] g_identities; g_identities = nullptr; }
         g_directory[0] = L'\0';
         g_logFileName[0] = L'\0';
@@ -993,6 +1051,9 @@ ShutdownResult shutdown() noexcept {
     g_remlokIndexOverflowed = false;
     g_remlokPoolMissing = false;
     g_remlokFactCount = 0;
+    g_basicIndexOverflowed = false;
+    g_basicPoolMissing = false;
+    g_basicFactCount = 0;
     if (g_records) {
         delete[] g_records;
         g_records = nullptr;
@@ -1008,6 +1069,10 @@ ShutdownResult shutdown() noexcept {
     if (g_remlokFacts) {
         delete[] g_remlokFacts;
         g_remlokFacts = nullptr;
+    }
+    if (g_basicFacts) {
+        delete[] g_basicFacts;
+        g_basicFacts = nullptr;
     }
     if (g_identities) {
         delete[] g_identities;
@@ -1043,6 +1108,9 @@ void frameBegin(const FrameFacts& facts) noexcept {
     g_fssFactCount = 0;
     g_remlokFactCount = 0;
     g_wasOverflowed = false;
+    g_basicFactCount = 0;
+    g_basicIndexOverflowed = false;
+    g_basicPoolMissing = false;
     g_sunglareIndexOverflowed = false;
     g_sunglarePoolMissing = false;
     g_fssIndexOverflowed = false;
@@ -1321,7 +1389,7 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
     DrawRecord& record = g_records[token.drawIndex];
     if (record.finalized || record.predicateFactCount >= kMaxPredicateFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
-            record.fssFactCount + record.remlokFactCount >= kMaxTotalPredicateFactsPerDraw ||
+            record.fssFactCount + record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw ||
         static_cast<std::uint8_t>(fact.known) > static_cast<std::uint8_t>(TriState::Yes) ||
         fact.known == TriState::No ||
         static_cast<std::uint8_t>(fact.gateWanted) > static_cast<std::uint8_t>(TriState::Yes) ||
@@ -1445,7 +1513,7 @@ void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept {
     }
     if (record.sunglareFactCount >= kMaxSunglareFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
-            record.fssFactCount + record.remlokFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.fssFactCount + record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -1543,7 +1611,7 @@ void appendFssFact(Token token, const FssObservation& fact) noexcept {
     }
     if (record.fssFactCount >= kMaxFssFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
-            record.fssFactCount + record.remlokFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.fssFactCount + record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -1642,7 +1710,7 @@ void appendRemlokFact(Token token, const remlok_observation::Observation& fact) 
     }
     if (record.remlokFactCount >= kMaxRemlokFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -1664,6 +1732,66 @@ void appendRemlokFact(Token token, const remlok_observation::Observation& fact) 
     g_remlokFacts[g_remlokFactCount] = fact;
     record.remlokFactIndices[record.remlokFactCount++] = g_remlokFactCount++;
 }
+
+void appendBasicFact(Token token, const BasicDrawObservation& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized) { rejectInvalidToken(); return; }
+    if (!g_basicFacts) { g_basicPoolMissing = true; g_wasOverflowed = true; return; }
+    if (g_basicFactCount >= kMaxBasicFacts) {
+        g_basicIndexOverflowed = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (record.basicFactCount >= kMaxBasicFactsPerDraw ||
+        record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
+            record.remlokFactCount + record.basicFactCount >= kMaxTotalPredicateFactsPerDraw) {
+        g_wasOverflowed = true;
+        return;
+    }
+    const bool context = fact.kind == BasicDrawFactKind::kContext && fact.siteId == 2;
+    const bool distance = fact.kind == BasicDrawFactKind::kDistance && fact.siteId == 67;
+    if (!context && !distance) { g_wasOverflowed = true; return; }
+    const auto validRead = [](const auto& read) { return !read.known || read.reached; };
+    const auto touched = [](const auto& read) { return read.reached || read.known; };
+    const auto& c = fact.context;
+    const auto& d = fact.distance;
+    if (!validRead(c.contextIdentity) || !validRead(c.ownerContextIdentity) ||
+        !validRead(c.glareClampBefore) || !validRead(c.glareClampAfter) ||
+        !validRead(d.distanceEnabled) ||
+        (context && touched(d.distanceEnabled)) ||
+        (distance && (touched(c.contextIdentity) || touched(c.ownerContextIdentity) ||
+                      touched(c.glareClampBefore) || touched(c.glareClampAfter)))) {
+        g_wasOverflowed = true;
+        return;
+    }
+    for (std::uint8_t i = 0; i < record.basicFactCount; ++i) {
+        if (!g_basicFacts || record.basicFactIndices[i] >= g_basicFactCount ||
+            g_basicFacts[record.basicFactIndices[i]].siteId == fact.siteId) {
+            g_wasOverflowed = true;
+            return;
+        }
+    }
+    for (std::uint8_t i = 0; i < record.predicateFactCount; ++i)
+        if (record.predicateFacts[i].siteId == fact.siteId) { g_wasOverflowed = true; return; }
+    g_basicFacts[g_basicFactCount] = fact;
+    record.basicFactIndices[record.basicFactCount++] = g_basicFactCount++;
+}
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+std::uint8_t basicFactCountForTest(Token token) noexcept {
+    return validToken(token) ? g_records[token.drawIndex].basicFactCount : 0;
+}
+
+bool readBasicFactForTest(Token token, std::uint8_t ordinal, BasicDrawObservation* out) noexcept {
+    if (!out || !validToken(token) || !g_basicFacts) return false;
+    const DrawRecord& record = g_records[token.drawIndex];
+    if (ordinal >= record.basicFactCount || record.basicFactIndices[ordinal] >= g_basicFactCount)
+        return false;
+    *out = g_basicFacts[record.basicFactIndices[ordinal]];
+    return true;
+}
+#endif
 
 void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept {
     if (!validToken(token)) { rejectInvalidToken(); return; }
@@ -1736,6 +1864,14 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
     if (record.finalized) { rejectInvalidToken(); return; }
     for (std::uint16_t i = 0; i < record.siteCount; ++i) {
         const std::uint16_t siteId = record.sites[i].id;
+        if (siteId == 2 || siteId == 67) {
+            bool found = false;
+            for (std::uint8_t j = 0; j < record.basicFactCount; ++j) {
+                if (g_basicFacts && record.basicFactIndices[j] < g_basicFactCount &&
+                    g_basicFacts[record.basicFactIndices[j]].siteId == siteId) found = true;
+            }
+            if (!found) g_wasOverflowed = true;
+        }
         if (siteId != 3 && siteId != 6 && siteId != 24 && siteId != 26 &&
             siteId != 49 && siteId != 50 && siteId != 53 && siteId != 55) continue;
         bool found = false;
@@ -1852,6 +1988,30 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
             if (!g_remlokFacts || record.remlokFactIndices[i] >= g_remlokFactCount)
                 g_wasOverflowed = true;
     }
+    for (std::uint8_t i = 0; i < record.basicFactCount; ++i) {
+        if (!g_basicFacts || record.basicFactIndices[i] >= g_basicFactCount) {
+            g_basicPoolMissing = !g_basicFacts;
+            g_basicIndexOverflowed = g_basicIndexOverflowed || !g_basicPoolMissing;
+            g_wasOverflowed = true;
+            continue;
+        }
+        const auto& fact = g_basicFacts[record.basicFactIndices[i]];
+        bool visited = false;
+        for (std::uint16_t j = 0; j < record.siteCount; ++j)
+            if (record.sites[j].id == fact.siteId) visited = true;
+        if (!visited) g_wasOverflowed = true;
+        if (fact.kind != BasicDrawFactKind::kContext) continue;
+        for (std::uint8_t j = 0; j < record.sunglareFactCount; ++j) {
+            if (!g_sunglareFacts || record.sunglareFactIndices[j] >= g_sunglareFactCount) continue;
+            const auto& sun = g_sunglareFacts[record.sunglareFactIndices[j]];
+            if (sun.kind != SunglareTraceFactKind::kKind9) continue;
+            if ((fact.context.glareClampBefore.known && sun.common2ClampBefore.known &&
+                 fact.context.glareClampBefore.value != sun.common2ClampBefore.value) ||
+                (fact.context.glareClampAfter.known && sun.common2ClampAfter.known &&
+                 fact.context.glareClampAfter.value != sun.common2ClampAfter.value))
+                g_wasOverflowed = true;
+        }
+    }
     record.winnerSiteId = winnerSiteId;
     record.verdictOrdinal = verdictOrdinal;
     record.finalized = true;
@@ -1911,6 +2071,8 @@ bool capturing() noexcept {
 }
 bool overflowed() noexcept { return g_wasOverflowed; }
 CaptureInvalidation invalidationReason() noexcept {
+    if (g_basicPoolMissing) return CaptureInvalidation::BasicPoolMissing;
+    if (g_basicIndexOverflowed) return CaptureInvalidation::BasicIndexOverflow;
     if (g_remlokPoolMissing) return CaptureInvalidation::RemlokPoolMissing;
     if (g_remlokIndexOverflowed) return CaptureInvalidation::RemlokIndexOverflow;
     if (g_fssPoolMissing) return CaptureInvalidation::FssPoolMissing;

@@ -1761,6 +1761,24 @@ python "%ROOT%\tools\draw_ladder_replay.py" --file ^
 python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.draw-ladder-51.json" ^
     --expected-log edvr_gfx_fss_probe_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_missing_fact\edvr_gfx_basic_missing.draw-ladder-52.json" ^
+    --expected-log edvr_gfx_basic_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact\edvr_gfx_basic_duplicate.draw-ladder-53.json" ^
+    --expected-log edvr_gfx_basic_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_wrong_kind\edvr_gfx_basic_wrong_kind.draw-ladder-54.json" ^
+    --expected-log edvr_gfx_basic_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_bad_read\edvr_gfx_basic_bad_read.draw-ladder-55.json" ^
+    --expected-log edvr_gfx_basic_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_unvisited\edvr_gfx_basic_unvisited.draw-ladder-56.json" ^
+    --expected-log edvr_gfx_basic_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\basic_unknown\edvr_gfx_basic_unknown.draw-ladder-57.json" ^
+    --expected-log edvr_gfx_basic_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -1862,7 +1880,20 @@ del /q "%BUILD%\draw_ladder_test-trace\fss_missing_fact\edvr_gfx_fss_missing.log
     "%BUILD%\draw_ladder_test-trace\remlok_unvisited\edvr_gfx_remlok_unvisited.draw-ladder-49.json" ^
     "%BUILD%\draw_ladder_test-trace\remlok_pool_cap\edvr_gfx_remlok_pool.log" ^
     "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.log" ^
-    "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.draw-ladder-51.json"
+    "%BUILD%\draw_ladder_test-trace\fss_probe_unknown\edvr_gfx_fss_probe_unknown.draw-ladder-51.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_missing_fact\edvr_gfx_basic_missing.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_missing_fact\edvr_gfx_basic_missing.draw-ladder-52.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact\edvr_gfx_basic_duplicate.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact\edvr_gfx_basic_duplicate.draw-ladder-53.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_wrong_kind\edvr_gfx_basic_wrong_kind.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_wrong_kind\edvr_gfx_basic_wrong_kind.draw-ladder-54.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_bad_read\edvr_gfx_basic_bad_read.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_bad_read\edvr_gfx_basic_bad_read.draw-ladder-55.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_unvisited\edvr_gfx_basic_unvisited.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_unvisited\edvr_gfx_basic_unvisited.draw-ladder-56.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_unknown\edvr_gfx_basic_unknown.log" ^
+    "%BUILD%\draw_ladder_test-trace\basic_unknown\edvr_gfx_basic_unknown.draw-ladder-57.json" ^
+    "%BUILD%\draw_ladder_test-trace\basic_pool_cap\edvr_gfx_basic_pool.log"
 if exist "%BUILD%\draw_ladder_test-trace\fss_missing_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_missing_fact"
 if exist "%BUILD%\draw_ladder_test-trace\fss_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\fss_wrong_kind"
 if exist "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact"
@@ -1875,6 +1906,13 @@ if exist "%BUILD%\draw_ladder_test-trace\remlok_bad_read" rmdir "%BUILD%\draw_la
 if exist "%BUILD%\draw_ladder_test-trace\remlok_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\remlok_unvisited"
 if exist "%BUILD%\draw_ladder_test-trace\remlok_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\remlok_pool_cap"
 if exist "%BUILD%\draw_ladder_test-trace\fss_probe_unknown" rmdir "%BUILD%\draw_ladder_test-trace\fss_probe_unknown"
+if exist "%BUILD%\draw_ladder_test-trace\basic_missing_fact" rmdir "%BUILD%\draw_ladder_test-trace\basic_missing_fact"
+if exist "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact" rmdir "%BUILD%\draw_ladder_test-trace\basic_duplicate_fact"
+if exist "%BUILD%\draw_ladder_test-trace\basic_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\basic_wrong_kind"
+if exist "%BUILD%\draw_ladder_test-trace\basic_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\basic_bad_read"
+if exist "%BUILD%\draw_ladder_test-trace\basic_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\basic_unvisited"
+if exist "%BUILD%\draw_ladder_test-trace\basic_unknown" rmdir "%BUILD%\draw_ladder_test-trace\basic_unknown"
+if exist "%BUILD%\draw_ladder_test-trace\basic_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\basic_pool_cap"
 if exist "%BUILD%\draw_ladder_test-trace\disabled" rmdir "%BUILD%\draw_ladder_test-trace\disabled"
 if exist "%BUILD%\draw_ladder_test-trace\valid" rmdir "%BUILD%\draw_ladder_test-trace\valid"
 if exist "%BUILD%\draw_ladder_test-trace\terminalmatrix" rmdir "%BUILD%\draw_ladder_test-trace\terminalmatrix"
@@ -2186,6 +2224,54 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /link /INCREMENTAL:NO user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: scrim metadata test build failed & exit /b 1 )
 "%OBJ%\scrimmetadata\scrim_metadata_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_vscreen_predicate_test
+echo [edvr] === actual VScreen predicate producer regression ===
+if not exist "%OBJ%\vscreenpredicate" mkdir "%OBJ%\vscreenpredicate"
+REM The actual visitor lives in the graphics module. Link this isolated EXE
+REM against the completed production object set, replacing just the two
+REM macro-test translation units. These inputs are built before the rig pool.
+if not exist "%OBJ%\d3d11\vscreen.obj" exit /b 1
+if not exist "%OBJ%\d3d11\draw_ladder_trace.obj" exit /b 1
+cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
+    /Fo"%OBJ%\vscreenpredicate\\" ^
+    "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
+    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp"
+if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
+> "%OBJ%\vscreenpredicate\production_objects.rsp" (
+    for %%F in ("%OBJ%\d3d11\*.obj") do (
+        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" echo "%%~fF"
+    )
+)
+link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
+    /OUT:"%BUILD%\vscreen_predicate_test.exe" ^
+    "%OBJ%\vscreenpredicate\vscreen_predicate_test.obj" ^
+    "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
+    @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
+    "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
+    kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
+if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test build failed & exit /b 1 )
+"%BUILD%\vscreen_predicate_test.exe" --dry-run || exit /b 1
+"%BUILD%\vscreen_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_splash_dim_api_test
+echo [edvr] === splash dim API owner and state regression ===
+if not exist "%OBJ%\splashdimapi" mkdir "%OBJ%\splashdimapi"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\splashdimapi\\" /Fe"%BUILD%\splash_dim_api_test.exe" ^
+    "tools\splash_dim_api_test\splash_dim_api_test.cpp" ^
+    "src\d3d11\splash_dim.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\d3d11\shader_swap.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: splash dim API test build failed & exit /b 1 )
+"%BUILD%\splash_dim_api_test.exe" --dry-run || exit /b 1
+"%BUILD%\splash_dim_api_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_remlok_predicate_test

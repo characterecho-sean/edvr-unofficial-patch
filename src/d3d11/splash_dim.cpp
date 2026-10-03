@@ -16,6 +16,7 @@
 #include "binding_shadow.h"
 #include "loader_panel.h"
 #include "shader_swap.h"
+#include "intro_cost_sites.h"
 
 namespace edvr {
 namespace {
@@ -47,6 +48,7 @@ ID3D11BlendState*    g_savedBlend = nullptr;
 FLOAT                g_savedFactor[4] = {};
 UINT                 g_savedMask = 0;
 bool                 g_engaged = false;
+bool                 g_costSample = false;
 
 void failOnce(const char* why) {
     static bool noted = false;
@@ -55,7 +57,7 @@ void failOnce(const char* why) {
     Log::get().note("splash dim: %s. The splash stays undimmed.", why);
 }
 
-bool ensureBuilt(ID3D11DeviceContext* ctx) {
+bool ensureBuilt(ID3D11DeviceContext* ctx, bool costSample) {
     if (!g_ps && !g_psTried) {
         g_psTried = true;
         g_ps = shaderSwapCreatePs(ctx, kSplashDimBytecode, sizeof(kSplashDimBytecode), "splash_dim_ps", "splash dim");
@@ -64,6 +66,10 @@ bool ensureBuilt(ID3D11DeviceContext* ctx) {
     if (g_ps && !g_blend && !g_blendTried) {
         g_blendTried = true;
         ID3D11Device* dev = nullptr;
+        if (costSample) {
+            intro_cost::note(intro_cost::Site::SplashBlendGetDevice,
+                             plugin_cost::ApiClass::ReadQuery);
+        }
         ctx->GetDevice(&dev);
         if (dev) {
             D3D11_BLEND_DESC bd{};
@@ -76,6 +82,10 @@ bool ensureBuilt(ID3D11DeviceContext* ctx) {
             bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
             bd.RenderTarget[0].RenderTargetWriteMask =
                 D3D11_COLOR_WRITE_ENABLE_ALL;
+            if (costSample) {
+                intro_cost::note(intro_cost::Site::SplashCreateBlendState,
+                                 plugin_cost::ApiClass::Work);
+            }
             if (FAILED(dev->CreateBlendState(&bd, &g_blend))) {
                 g_blend = nullptr;
                 failOnce("the blend state could not be created");
@@ -107,6 +117,7 @@ void splashDimConfigure(Config& cfg) {
 bool splashDimBegin(ID3D11DeviceContext* ctx) {
     if (!g_on || !ctx || g_engaged) return false;
     if (!loaderPanelDimWanted()) return false;
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
 
     // Only the EYE-side composite: the backdrop verdict also wraps the
     // offscreen half of the still's path.
@@ -121,14 +132,31 @@ bool splashDimBegin(ID3D11DeviceContext* ctx) {
 
     bool armed = false;
     guardedBudget(g_budget, [&] {
-        if (!ensureBuilt(ctx)) return;
+        if (!ensureBuilt(ctx, costSample)) return;
         g_savedInstCount = 16;
+        if (costSample) {
+            intro_cost::note(intro_cost::Site::SplashPsGetShader,
+                             plugin_cost::ApiClass::ReadQuery);
+        }
         ctx->PSGetShader(&g_savedPs, g_savedInst, &g_savedInstCount);
+        if (costSample) {
+            intro_cost::note(intro_cost::Site::SplashOmGetBlendState,
+                             plugin_cost::ApiClass::ReadQuery);
+        }
         ctx->OMGetBlendState(&g_savedBlend, g_savedFactor, &g_savedMask);
+        if (costSample) {
+            intro_cost::note(intro_cost::Site::SplashPsSetShaderApply,
+                             plugin_cost::ApiClass::State);
+        }
         ctx->PSSetShader(g_ps, nullptr, 0);
         const FLOAT factor[4] = {0, 0, 0, 0};
+        if (costSample) {
+            intro_cost::note(intro_cost::Site::SplashOmSetBlendStateApply,
+                             plugin_cost::ApiClass::State);
+        }
         ctx->OMSetBlendState(g_blend, factor, 0xFFFFFFFFu);
         g_engaged = true;
+        g_costSample = costSample;
         armed = true;
     });
     return armed;
@@ -136,12 +164,23 @@ bool splashDimBegin(ID3D11DeviceContext* ctx) {
 
 void splashDimEnd(ID3D11DeviceContext* ctx) {
     if (!ctx || !g_engaged) return;
+    const bool costSample = g_costSample &&
+                           edvrPluginCostApiSampleContext(ctx) != 0;
     g_engaged = false;
     guardedBudget(g_budget, [&] {
+        if (costSample) {
+            intro_cost::note(intro_cost::Site::SplashPsSetShaderRestore,
+                             plugin_cost::ApiClass::State);
+        }
         ctx->PSSetShader(g_savedPs, g_savedInstCount ? g_savedInst : nullptr,
                          g_savedInstCount);
+        if (costSample) {
+            intro_cost::note(intro_cost::Site::SplashOmSetBlendStateRestore,
+                             plugin_cost::ApiClass::State);
+        }
         ctx->OMSetBlendState(g_savedBlend, g_savedFactor, g_savedMask);
     });
+    g_costSample = false;
     if (g_savedPs) { g_savedPs->Release(); g_savedPs = nullptr; }
     for (UINT i = 0; i < g_savedInstCount; ++i) {
         if (g_savedInst[i]) { g_savedInst[i]->Release(); g_savedInst[i] = nullptr; }
@@ -156,6 +195,7 @@ void splashDimShutdown() {
     g_psTried = false;
     g_blendTried = false;
     g_engaged = false;
+    g_costSample = false;
 }
 
 }  // namespace edvr

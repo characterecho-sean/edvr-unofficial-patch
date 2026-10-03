@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 8
+PREDICATE_FACT_VERSION = 9
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -1075,6 +1075,78 @@ def _replay_remlok_fact(fact, draw, label):
     return site51, site52, mismatch, mutation_unobserved
 
 
+def _replay_basic_draw_fact(fact, draw, label):
+    """Replay the site-2 foreign-context guard or site-67 distance gate."""
+    required = {"siteId", "kind", "known", "context", "distance"}
+    if set(fact) != required or fact.get("known") != "yes":
+        raise TraceError(label + " has missing or unexpected BasicDraw fields")
+    site_id, kind = fact["siteId"], fact["kind"]
+    context = fact.get("context")
+    distance = fact.get("distance")
+    context_names = ("contextIdentity", "ownerContextIdentity",
+                     "glareClampBefore", "glareClampAfter")
+    if not isinstance(context, dict) or set(context) != set(context_names):
+        raise TraceError(label + ".context has missing or unexpected fields")
+    if not isinstance(distance, dict) or set(distance) != {"distanceEnabled"}:
+        raise TraceError(label + ".distance has missing or unexpected fields")
+
+    applicable_context = site_id == 2 and kind == 15
+    applicable_distance = site_id == 67 and kind == 16
+    if not (applicable_context or applicable_distance):
+        raise TraceError(label + " has a mismatched BasicDraw site/kind")
+
+    reads = {}
+    for name in context_names:
+        value_type = int
+        maximum = (1 << 64) - 1 if name in ("contextIdentity", "ownerContextIdentity") else 0xffffffff
+        read = _sunglare_read(context, name, label + ".context", value_type, maximum)
+        should_reach = applicable_context
+        if read[0] != should_reach:
+            raise TraceError(label + ".context." + name + " has inconsistent reachability")
+        reads[name] = read
+    distance_read = _sunglare_read(distance, "distanceEnabled", label + ".distance", bool)
+    if distance_read[0] != applicable_distance:
+        raise TraceError(label + ".distance.distanceEnabled has inconsistent reachability")
+
+    event = None
+    mismatch = 0
+    mutation_unobserved = False
+    if applicable_context:
+        self_identity = reads["contextIdentity"]
+        owner_identity = reads["ownerContextIdentity"]
+        before = reads["glareClampBefore"]
+        after = reads["glareClampAfter"]
+        if after[1] and after[2] != 0:
+            mismatch += 1
+        if not (before[1] and after[1]):
+            mutation_unobserved = True
+        # This is a consistency check only; site61 never supplies site2 inputs.
+        for source in draw.get("predicateFacts", []):
+            if (isinstance(source, dict) and source.get("siteId") == 61 and
+                    source.get("kind") == 9 and isinstance(source.get("common2ClampAfter"), dict)):
+                source_after = _sunglare_read(source, "common2ClampAfter", label + ".site61",
+                                               int, 0xffffffff)
+                if after[1] and source_after[1] and after[2] != source_after[2]:
+                    mismatch += 1
+                source_before = _sunglare_read(source, "common2ClampBefore", label + ".site61",
+                                                int, 0xffffffff)
+                if before[1] and source_before[1] and before[2] != source_before[2]:
+                    mismatch += 1
+                break
+        if self_identity[1] and owner_identity[1]:
+            foreign = self_identity[2] != owner_identity[2]
+            event = {"id": 2, "kind": 3, "outcome": 4 if foreign else 1,
+                     "flow": 1 if foreign else 0, "subsite": 0,
+                     "verdict": 0 if foreign else -1}
+    else:
+        enabled = distance_read[2] if distance_read[1] else None
+        if enabled is not None:
+            event = {"id": 67, "kind": 3, "outcome": 2 if enabled else 4,
+                     "flow": 0 if enabled else 1, "subsite": 0,
+                     "verdict": -1 if enabled else 0}
+    return event, mismatch, mutation_unobserved
+
+
 def _candidate_witchspace_stars(fact, draw):
     """Candidate selector from raw helper inputs, independent of site output."""
     if fact["hiddenKnown"] != "yes":
@@ -1644,11 +1716,12 @@ def _replay_scrim_fact(fact, draw, label):
 
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 8 else
+    supported_ids = ((2, 3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 9 else
+                     (3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 8 else
                      (3, 6, 24, 26, 49, 50, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 7 else
                      (3, 6, 24, 26, 49, 50, 53, 55, 61, 62, 63) if predicate_fact_version >= 6 else
                      (3, 6, 24, 26, 49, 50, 53, 55) if predicate_fact_version >= 5 else
@@ -1666,6 +1739,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        16 if predicate_fact_version >= 9 else
                         14 if predicate_fact_version >= 8 else
                         13 if predicate_fact_version >= 7 else
                         11 if predicate_fact_version >= 6 else
@@ -1675,8 +1749,10 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                         3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        supported_pairs = ((3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
-                           (57, 12), (58, 13), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 8 else (
+        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+                           (57, 12), (58, 13), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 9 else (
+            (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+                            (57, 12), (58, 13), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 8 else (
             (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
                            (53, 7), (55, 8), (57, 12), (58, 13), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 7 else (
             (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
@@ -1748,6 +1824,13 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                     event = None
             by_site[site_id] = (event, expected_delta,
                                 expected_delta is None, 0, cache_mismatches, None)
+        elif kind in (15, 16):
+            if predicate_fact_version < 9:
+                raise TraceError(fact_label + " has unsupported BasicDraw fact")
+            event, fact_mismatches, fact_mutation_unobserved = \
+                _replay_basic_draw_fact(fact, draw, fact_label)
+            by_site[site_id] = (event, None, not fact_mutation_unobserved,
+                                0, fact_mismatches, None)
         elif kind == 14:
             if site_id != 51 or predicate_fact_version < 8:
                 raise TraceError(fact_label + " has unsupported RemLok fact")
@@ -1978,7 +2061,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -2015,6 +2098,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     remlok_replayed = 0
     remlok_unreplayable = 0
     remlok_mismatches = 0
+    basic_draw_replayed = 0
+    basic_draw_unreplayable = 0
+    basic_draw_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -2029,6 +2115,19 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 mismatches += 1
             else:
                 replayed += 1
+        if site_id in (2, 67):
+            if site_unreplayable:
+                basic_draw_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                basic_draw_replayed += 1
+            else:
+                basic_draw_mismatches += 1
+            if cache_mismatches:
+                basic_draw_mismatches += cache_mismatches
+            if site_id == 2 and not delta_known:
+                mutation_unobserved += 1
         if site_id in (61, 62, 63):
             if site_unreplayable:
                 sunglare_unreplayable += 1
@@ -2192,7 +2291,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "remlokFacts": sum(1 for site_id in by_site if site_id in (51, 52)),
             "remlokReplayed": remlok_replayed,
             "remlokUnreplayable": remlok_unreplayable,
-            "remlokMismatches": remlok_mismatches}
+            "remlokMismatches": remlok_mismatches,
+            "basicDrawFacts": sum(1 for site_id in by_site if site_id in (2, 67)),
+            "basicDrawReplayed": basic_draw_replayed,
+            "basicDrawUnreplayable": basic_draw_unreplayable,
+            "basicDrawMismatches": basic_draw_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -2210,7 +2313,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -2298,7 +2401,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "fssFacts": 0, "fssReplayed": 0,
                         "fssUnreplayable": 0, "fssMismatches": 0,
                         "remlokFacts": 0, "remlokReplayed": 0,
-                        "remlokUnreplayable": 0, "remlokMismatches": 0}
+                        "remlokUnreplayable": 0, "remlokMismatches": 0,
+                        "basicDrawFacts": 0, "basicDrawReplayed": 0,
+                        "basicDrawUnreplayable": 0, "basicDrawMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -2632,12 +2737,17 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                        "mismatch" if predicate_replay["fssMismatches"] else
                        "unreplayable" if predicate_replay["fssUnreplayable"] else
                        "replayed"),
-            remlokStatus=("unavailable-before-v8" if predicate_fact_version < 8 else
-                          "not-visited" if not predicate_replay["remlokFacts"] else
-                          "mismatch" if predicate_replay["remlokMismatches"] else
-                          "unreplayable" if predicate_replay["remlokUnreplayable"] else
-                          "replayed"),
-            **predicate_replay)
+             remlokStatus=("unavailable-before-v8" if predicate_fact_version < 8 else
+                           "not-visited" if not predicate_replay["remlokFacts"] else
+                           "mismatch" if predicate_replay["remlokMismatches"] else
+                           "unreplayable" if predicate_replay["remlokUnreplayable"] else
+                           "replayed"),
+             basicDrawStatus=("unavailable-before-v9" if predicate_fact_version < 9 else
+                              "not-visited" if not predicate_replay["basicDrawFacts"] else
+                              "mismatch" if predicate_replay["basicDrawMismatches"] else
+                              "unreplayable" if predicate_replay["basicDrawUnreplayable"] else
+                              "replayed"),
+             **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
              "unreplayable": 0,
@@ -2663,9 +2773,12 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
              "sunglareMismatches": 0,
              "fssStatus": "unavailable-v1", "fssFacts": 0,
              "fssReplayed": 0, "fssUnreplayable": 0,
-             "fssMismatches": 0, "remlokStatus": "unavailable-before-v8",
-             "remlokFacts": 0, "remlokReplayed": 0,
-             "remlokUnreplayable": 0, "remlokMismatches": 0}),
+              "fssMismatches": 0, "remlokStatus": "unavailable-before-v8",
+              "remlokFacts": 0, "remlokReplayed": 0,
+              "remlokUnreplayable": 0, "remlokMismatches": 0,
+              "basicDrawStatus": "unavailable-before-v9",
+              "basicDrawFacts": 0, "basicDrawReplayed": 0,
+              "basicDrawUnreplayable": 0, "basicDrawMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -2777,6 +2890,13 @@ def format_summary(summary, sidecar_path=None):
                      (replay["remlokStatus"], replay.get("remlokFacts", 0),
                       replay.get("remlokReplayed", 0), replay.get("remlokUnreplayable", 0),
                       replay.get("remlokMismatches", 0)))
+    if replay.get("predicateFactVersion", 0) < 9:
+        lines.append("  BasicDraw sites 2 and 67: unavailable before predicate fact version 9")
+    else:
+        lines.append("  BasicDraw sites 2 and 67: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay.get("basicDrawStatus", "not-visited"),
+                      replay.get("basicDrawFacts", 0), replay.get("basicDrawReplayed", 0),
+                      replay.get("basicDrawUnreplayable", 0), replay.get("basicDrawMismatches", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -5023,6 +5143,160 @@ def self_test():
         pass
     else:
         print("draw-ladder predicate version 7 unexpectedly accepted RemLok kind 14")
+        return 1
+
+    def basic_read(value=None, reached=True, known=True):
+        return {"reached": reached, "known": known,
+                "value": value if known else None}
+
+    def basic_context_fact(self_id=0, owner_id=0, before=7, after=0,
+                           identity_known=True, reset_before_known=True,
+                           reset_after_known=True, distance_reached=False):
+        context = {
+            "contextIdentity": basic_read(self_id if identity_known else None, True, identity_known),
+            "ownerContextIdentity": basic_read(owner_id if identity_known else None, True, identity_known),
+            "glareClampBefore": basic_read(before if reset_before_known else None, True, reset_before_known),
+            "glareClampAfter": basic_read(after if reset_after_known else None, True, reset_after_known),
+        }
+        distance = {"distanceEnabled": basic_read(None, distance_reached, False)}
+        return {"siteId": 2, "kind": 15, "known": "yes",
+                "context": context, "distance": distance}
+
+    def basic_distance_fact(enabled=None, known=True, context_reached=False):
+        context = {name: basic_read(None, context_reached, False) for name in
+                   ("contextIdentity", "ownerContextIdentity",
+                    "glareClampBefore", "glareClampAfter")}
+        return {"siteId": 67, "kind": 16, "known": "yes",
+                "context": context,
+                "distance": {"distanceEnabled": basic_read(enabled if known else None,
+                                                            True, known)}}
+
+    def basic_draw(site_id, outcome, flow, verdict, fact):
+        return {"kind": ord("N"), "count": 1, "instances": 1,
+                "sites": [{"id": site_id, "kind": 3, "outcome": outcome,
+                           "flow": flow, "subsite": 0, "verdict": verdict}],
+                "predicateFacts": [fact]}
+
+    basic_equal = _replay_predicate_facts(
+        basic_draw(2, 1, 0, -1, basic_context_fact(0, 0)), "basic-equal", 9)
+    if (basic_equal["basicDrawReplayed"] != 1 or
+            basic_equal["basicDrawMismatches"] or basic_equal["mutationUnobserved"]):
+        print("BasicDraw site 2 failed equal/null identity replay")
+        return 1
+    basic_foreign = _replay_predicate_facts(
+        basic_draw(2, 4, 1, 0, basic_context_fact(10, 11)), "basic-foreign", 9)
+    if basic_foreign["basicDrawReplayed"] != 1:
+        print("BasicDraw site 2 failed foreign identity exit replay")
+        return 1
+    wrong_foreign = _replay_predicate_facts(
+        basic_draw(2, 1, 0, -1, basic_context_fact(10, 11)), "basic-wrong-outcome", 9)
+    if not wrong_foreign["basicDrawMismatches"]:
+        print("BasicDraw site 2 ignored an actual outcome mismatch")
+        return 1
+    bad_reset = _replay_predicate_facts(
+        basic_draw(2, 1, 0, -1, basic_context_fact(after=9)), "basic-reset-mismatch", 9)
+    if not bad_reset["mismatches"] or not bad_reset["basicDrawMismatches"]:
+        print("BasicDraw site 2 failed to report a nonzero clamp after reset")
+        return 1
+    unknown_reset = _replay_predicate_facts(
+        basic_draw(2, 1, 0, -1, basic_context_fact(reset_before_known=False)),
+        "basic-reset-unknown", 9)
+    if (unknown_reset["mutationUnobserved"] != 1 or
+            unknown_reset["basicDrawMismatches"]):
+        print("BasicDraw site 2 guessed unavailable reset evidence")
+        return 1
+    unknown_identity = _replay_predicate_facts(
+        basic_draw(2, 1, 0, -1,
+                   basic_context_fact(identity_known=False)),
+        "basic-identity-unknown", 9)
+    if unknown_identity["basicDrawUnreplayable"] != 1:
+        print("BasicDraw site 2 guessed unavailable context identity")
+        return 1
+    if (_replay_predicate_facts(
+            basic_draw(67, 2, 0, -1, basic_distance_fact(True)),
+            "basic-distance-on", 9)["basicDrawReplayed"] != 1 or
+            _replay_predicate_facts(
+                basic_draw(67, 4, 1, 0, basic_distance_fact(False)),
+                "basic-distance-off", 9)["basicDrawReplayed"] != 1):
+        print("BasicDraw site 67 failed enabled/disabled distance replay")
+        return 1
+    wrong_distance = _replay_predicate_facts(
+        basic_draw(67, 2, 0, -1, basic_distance_fact(False)),
+        "basic-distance-wrong-outcome", 9)
+    if not wrong_distance["basicDrawMismatches"]:
+        print("BasicDraw site 67 ignored an actual outcome mismatch")
+        return 1
+    unknown_distance = _replay_predicate_facts(
+        basic_draw(67, 2, 0, -1, basic_distance_fact(known=False)),
+        "basic-distance-unknown", 9)
+    if unknown_distance["basicDrawUnreplayable"] != 1:
+        print("BasicDraw site 67 guessed an unavailable distance read")
+        return 1
+
+    # A site61 reset fact may confirm site2's independent after-read, but it
+    # cannot provide the identity inputs used to predict site2.
+    cross_draw = json.loads(json.dumps(sg_stock))
+    cross_draw["sites"].insert(0, {"id": 2, "kind": 3, "outcome": 1,
+                                   "flow": 0, "subsite": 0, "verdict": -1})
+    cross_draw["predicateFacts"].append(basic_context_fact(after=1))
+    cross_reset = _replay_predicate_facts(cross_draw, "basic-cross-reset", 9)
+    if not cross_reset["basicDrawMismatches"]:
+        print("BasicDraw site 2 ignored an inconsistent Sunglare reset observation")
+        return 1
+
+    old_basic = {"kind": ord("N"), "count": 1, "instances": 1,
+                 "sites": [{"id": 2, "kind": 3, "outcome": 1, "flow": 0,
+                            "subsite": 0, "verdict": -1}],
+                 "predicateFacts": []}
+    if _replay_predicate_facts(old_basic, "basic-v8", 8)["factCount"] != 0:
+        print("predicate fact version 8 fabricated site-2 coverage")
+        return 1
+    earlier_exit = {"kind": ord("N"), "count": 1, "instances": 1,
+                    "sites": [{"id": 1, "kind": 2, "outcome": 4, "flow": 1,
+                               "subsite": 0, "verdict": 2}],
+                    "predicateFacts": []}
+    if _replay_predicate_facts(earlier_exit, "basic-prefix-absence", 9)["factCount"] != 0:
+        print("BasicDraw facts were required beyond an earlier terminal site")
+        return 1
+    try:
+        earlier_exit["predicateFacts"] = [basic_context_fact()]
+        _replay_predicate_facts(earlier_exit, "basic-unvisited-fact", 9)
+    except TraceError:
+        pass
+    else:
+        print("BasicDraw accepted a site-2 fact after an earlier terminal site")
+        return 1
+    malformed_unused = basic_distance_fact(True)
+    malformed_unused["context"]["contextIdentity"] = basic_read(1)
+    try:
+        _replay_predicate_facts(basic_draw(67, 2, 0, -1, malformed_unused),
+                                "basic-unused-group", 9)
+    except TraceError:
+        pass
+    else:
+        print("BasicDraw accepted a reached nonapplicable context read")
+        return 1
+    malformed_missing = basic_context_fact()
+    del malformed_missing["context"]["contextIdentity"]
+    try:
+        _replay_predicate_facts(basic_draw(2, 1, 0, -1, malformed_missing),
+                                "basic-missing-read", 9)
+    except TraceError:
+        pass
+    else:
+        print("BasicDraw accepted a missing consumed read")
+        return 1
+
+    # Exercise the complete reader status path with the existing valid route
+    # fixture so the version bump reports coverage without changing parity.
+    v9_basic = json.loads(json.dumps(vr))
+    v9_basic["predicateFactVersion"] = 9
+    v9_draw = v9_basic["draws"][0]
+    v9_draw["sites"][1].update(outcome=1, flow=0, verdict=-1)
+    v9_draw["predicateFacts"].append(basic_context_fact())
+    v9_summary = validate_trace(v9_basic)["predicateReplay"]
+    if v9_summary["basicDrawStatus"] != "replayed" or v9_summary["basicDrawReplayed"] != 1:
+        print("predicate fact version 9 did not expose BasicDraw replay status")
         return 1
     print("draw-ladder-replay self-test: ok")
     return 0

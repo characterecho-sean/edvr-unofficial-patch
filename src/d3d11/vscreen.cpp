@@ -40,6 +40,7 @@
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "draw_ladder_trace.h"
+#include "basic_draw_observation.h"
 #include "holo_scrim_observation.h"
 #include "offscreen_skip_selector.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
@@ -97,6 +98,9 @@
 #include "sunglare_fix.h"
 #include "graphics_bridge.h"
 #include <intrin.h>
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+#include "../../tools/vscreen_predicate_test/vscreen_predicate_test.h"
+#endif
 
 namespace edvr {
 
@@ -2161,9 +2165,26 @@ struct VScreenDrawLadderVisitor {
                 trace.sunglareClampResetSeen = true;
             }
             s->glareClamp = 0;
-            if constexpr (TracePolicy::enabled)
+            if constexpr (TracePolicy::enabled) {
+                BasicDrawObservation fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = BasicDrawFactKind::kContext;
+                fact.context.contextIdentity = {
+                    true, true, reinterpret_cast<std::uintptr_t>(self)};
+                fact.context.ownerContextIdentity = {
+                    true, true, reinterpret_cast<std::uintptr_t>(s->ownerCtx)};
+                fact.context.glareClampBefore = {true, true, trace.sunglareClampResetBefore};
+                fact.context.glareClampAfter = {true, true, s->glareClamp};
+                const bool isForeign = foreignContext(self);
                 trace.sunglareClampResetAfter = s->glareClamp;
-            if (foreignContext(self)) {
+                trace.basicFact(fact);
+                if (isForeign) {
+                    noteForeignDraw(self);
+                    if (drawCensusArmed())
+                        drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0, args);
+                    return exited(id, DrawVerdict::kNone);
+                }
+            } else if (foreignContext(self)) {
                 noteForeignDraw(self);
                 if (drawCensusArmed())
                     drawCensusDrawDirect(self, kind, count, instances, true, nullptr, 0, args);
@@ -2969,7 +2990,18 @@ struct VScreenDrawLadderVisitor {
                 s->curveThisDraw = true;
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kEyeNoDistanceNone) {
-            if (!s->distanceEnabled) return exited(id, DrawVerdict::kNone);
+            if constexpr (TracePolicy::enabled) {
+                const bool distanceEnabled = s->distanceEnabled;
+                BasicDrawObservation fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = BasicDrawFactKind::kDistance;
+                fact.distance.distanceEnabled = {true, true, distanceEnabled};
+                trace.basicFact(fact);
+                if (!distanceEnabled)
+                    return exited(id, DrawVerdict::kNone);
+            } else if (!s->distanceEnabled) {
+                return exited(id, DrawVerdict::kNone);
+            }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kPanelEligibilityNone) {
             if (!srv0IsPanelSized(s, kind, count)) return exited(id, DrawVerdict::kNone, 1);
@@ -5992,6 +6024,114 @@ uint32_t readDistanceIndex(Config& cfg) {
 }
 
 }  // namespace
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+namespace {
+
+using VScreenContextTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kForeignContextNone, draw_ladder::SiteKind::Exit>;
+using VScreenDistanceTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kEyeNoDistanceNone, draw_ladder::SiteKind::Exit>;
+
+struct VScreenTestInterest final {};
+
+template <class Policy>
+struct VScreenTestTraceCapture final {
+    static constexpr bool enabled = Policy::enabled;
+    Policy& policy;
+    draw_ladder::SiteResult& result;
+
+    template <draw_ladder::SiteId Id, draw_ladder::SiteKind Kind,
+              class Payload>
+    void site(const Payload& payload) noexcept {
+        if constexpr (std::is_same_v<Payload, draw_ladder::SiteResult>)
+            result = payload;
+        policy.template site<Id, Kind>(payload);
+    }
+
+    void basicFact(const BasicDrawObservation& fact) noexcept {
+        policy.basicFact(fact);
+    }
+};
+
+template <class SiteType, class TracePolicy>
+draw_ladder::SiteResult vScreenPredicateTestInvokeSite(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    if constexpr (TracePolicy::enabled) {
+        draw_ladder::SiteResult result{};
+        VScreenTestTraceCapture<TracePolicy> capture{trace, result};
+        VScreenTestInterest interest{};
+        plugin_cost::NoCpu cpu;
+        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
+        draw_ladder::visitOne<decltype(visitor), SiteType>(
+            flow, visitor, interest, capture, cpu);
+        return result;
+    } else {
+        return visitor.template visit<SiteType>();
+    }
+}
+
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, std::uint16_t siteId,
+    TracePolicy& trace) noexcept {
+    if (siteId == static_cast<std::uint16_t>(VScreenContextTestSite::id)) {
+        return vScreenPredicateTestInvokeSite<VScreenContextTestSite>(visitor, trace);
+    }
+    return vScreenPredicateTestInvokeSite<VScreenDistanceTestSite>(visitor, trace);
+}
+
+} // namespace
+
+bool vScreenPredicateTestVisit(
+    std::uint16_t siteId, ID3D11DeviceContext* context,
+    ID3D11DeviceContext* ownerContext, std::uint32_t glareClamp,
+    bool distanceEnabled, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || (siteId != static_cast<std::uint16_t>(VScreenContextTestSite::id) &&
+                    siteId != static_cast<std::uint16_t>(VScreenDistanceTestSite::id)))
+        return false;
+
+    static State fixture{};
+    fixture.ownerCtx = ownerContext;
+    fixture.glareClamp = glareClamp;
+    fixture.distanceEnabled = distanceEnabled;
+    fixture.foreignCount = 0;
+    fixture.foreignDraws = 0;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = 'N';
+    facts.count = 3;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        return false;
+    }
+
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, 'N', 3, 1, args, trace};
+        result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, 'N', 3, 1, args, trace};
+        result->siteResult = vScreenPredicateTestInvoke(visitor, siteId, trace);
+    }
+    result->glareClampAfter = fixture.glareClamp;
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+#endif
 
 bool vScreenPanelSize(uint32_t* width, uint32_t* height) {
     const State* s = g_state;

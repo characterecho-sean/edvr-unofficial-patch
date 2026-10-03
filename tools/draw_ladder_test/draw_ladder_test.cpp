@@ -86,8 +86,10 @@ struct ModelVisitor final {
         }
         if (id == ladder::SiteId::kForeignContextNone && scenario.foreignOwner) {
             return ladder::SiteResult::exited(
-                static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone), 1);
+                static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
         }
+        if (id == ladder::SiteId::kForeignContextNone)
+            return ladder::SiteResult::observed();
         if (id == ladder::SiteId::kDrawGateDisabledNone && scenario.drawGateOff) {
             return ladder::SiteResult::exited(
                 static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
@@ -939,6 +941,25 @@ void remlokRead(edvr::remlok_observation::Read<T>& read, T value) {
     read = {true, true, value};
 }
 
+edvr::BasicDrawObservation contextFact(bool foreign = false, std::uint32_t clamp = 37) {
+    edvr::BasicDrawObservation fact{};
+    fact.siteId = 2;
+    fact.kind = edvr::BasicDrawFactKind::kContext;
+    fact.context.contextIdentity = {true, true, foreign ? 0x2020u : 0x1010u};
+    fact.context.ownerContextIdentity = {true, true, 0x1010u};
+    fact.context.glareClampBefore = {true, true, clamp};
+    fact.context.glareClampAfter = {true, true, 0};
+    return fact;
+}
+
+edvr::BasicDrawObservation distanceFact(bool enabled) {
+    edvr::BasicDrawObservation fact{};
+    fact.siteId = 67;
+    fact.kind = edvr::BasicDrawFactKind::kDistance;
+    fact.distance.distanceEnabled = {true, true, enabled};
+    return fact;
+}
+
 edvr::remlok_observation::Observation remlokFact(std::uint32_t mode = 0) {
     edvr::remlok_observation::Observation fact{};
     remlokRead(fact.selector.outerMode, mode);
@@ -1228,7 +1249,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        edvr::SunglareTraceMode glareMode = edvr::SunglareTraceMode::kStock,
                        bool glareDamping = false, bool glareProbe = false,
                        int glareWorld = 0, std::uint32_t frameNo = 15,
-                       bool stagedFss = false, bool rawPanelEnabled = false) {
+                       bool stagedFss = false, bool rawPanelEnabled = false,
+                       unsigned basicCase = 0) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     const bool overflowBefore = trace::overflowed();
@@ -1489,6 +1511,13 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 : terminal == ladder::SiteId::kRemlokScissorClaim ? 1u : 0u;
             policy.remlokFact(remlokFact(sourceMode));
         }
+        if (visited == ladder::SiteId::kForeignContextNone && basicCase != 1) {
+            auto fact = contextFact(terminal == ladder::SiteId::kForeignContextNone);
+            if (basicCase == 2) fact.context.contextIdentity = {true, false, 0};
+            policy.basicFact(fact);
+        }
+        if (visited == ladder::SiteId::kEyeNoDistanceNone)
+            policy.basicFact(distanceFact(terminal != ladder::SiteId::kEyeNoDistanceNone));
         if (visited == ladder::SiteId::kFssPanelClaim) {
             policy.fssFact(fssFact(edvr::FssTraceFactKind::kPanel,
                 terminal == ladder::SiteId::kFssPanelClaim, frameNo));
@@ -1817,6 +1846,8 @@ bool traceWriterChecks(const char* rootArg) {
     // This fixture independently declares both raw FSS modes off. Its cheap
     // probes establish frozen declines even though cached interest staged out.
     vrPolicy.remlokFact(remlokFact());
+    vrPolicy.basicFact(contextFact());
+    vrPolicy.basicFact(distanceFact(false));
     edvr::FssObservation coldPanel{};
     coldPanel.kind = edvr::FssTraceFactKind::kPanel;
     coldPanel.rawProbeReached = true;
@@ -1980,12 +2011,12 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
-                matrixJson.find("\"predicateFactVersion\":8") != std::string::npos &&
+                matrixJson.find("\"predicateFactVersion\":9") != std::string::npos &&
                 matrixJson.find("\"siteId\":57,\"kind\":12") != std::string::npos &&
                 matrixJson.find("\"siteId\":58,\"kind\":13") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":12144190660518967694}") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":10753612000489488699}") != std::string::npos,
-                "real writer records positive FSS panel and reveal source facts in canonical v8 predicateFacts");
+                "real writer records positive FSS panel and reveal source facts in canonical v9 predicateFacts");
 
     const std::string generatedInvalidDir = root + "\\generatedinvalid";
     DeleteFileA((generatedInvalidDir + "\\edvr_gfx_generated_invalid.draw-ladder-16.json").c_str());
@@ -2511,12 +2542,12 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":8") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&
                 sunglareJson.find("\"common2ClampAfter\":{\"reached\":true,\"known\":true,\"value\":0}") != std::string::npos,
-                "writer emits valid v8 facts for each visited Sunglare site with actual reset evidence");
+                "writer emits valid v9 facts for each visited Sunglare site with actual reset evidence");
     trace::DrawFacts sunglareMalformedDraw = draw;
     sunglareMalformedDraw.route = ladder::RouteId::kVrEye;
     sunglareMalformedDraw.sequence = ladder::SequenceId::kVrEye;
@@ -2779,6 +2810,77 @@ bool traceWriterChecks(const char* rootArg) {
     trace::frameEnd(51);
     ok &= check(probeWritten && trace::status() == trace::Status::CompleteWritten,
                 "raw outer-true staged FSS source writes a valid unavailable-predicate sidecar");
+    trace::shutdown();
+
+    const bool missingBasicStarted = beginFssCase("basic_missing_fact", "edvr_gfx_basic_missing.log", 52);
+    const bool missingBasicWritten = missingBasicStarted && writeTerminalCase(
+        ladder::RouteId::kForeignOwner, ladder::SequenceId::kCommon, 'D',
+        ladder::SiteId::kForeignContextNone, false, kFrozenCommon, 8,
+        ladder::CommonSequence{}, 1, false, false, edvr::SunglareTraceMode::kStock,
+        false, false, 0, 52, false, false, 1);
+    trace::frameEnd(52);
+    ok &= check(missingBasicWritten && trace::status() == trace::Status::InvalidCapture,
+                "missing BasicDraw input invalidates a canonical foreign terminal frame");
+    trace::shutdown();
+
+    const auto basicRejected = [&](const char* dir, const char* log, std::uint32_t frame,
+                                   unsigned badCase) {
+        const bool started = beginFssCase(dir, log, frame);
+        const auto token = trace::beginDraw(fssMalformedDraw);
+        auto fact = contextFact();
+        if (badCase == 1) fact.kind = edvr::BasicDrawFactKind::kDistance;
+        if (badCase == 2) fact.context.contextIdentity.reached = false;
+        trace::appendBasicFact(token, fact);
+        if (badCase == 0) trace::appendBasicFact(token, fact);
+        const bool rejectedAtAppend = trace::overflowed();
+        finishFssCase(token, frame);
+        const bool rejected = started && rejectedAtAppend &&
+            trace::invalidationReason() == trace::CaptureInvalidation::Other;
+        trace::shutdown();
+        return rejected;
+    };
+    ok &= check(basicRejected("basic_duplicate_fact", "edvr_gfx_basic_duplicate.log", 53, 0),
+                "duplicate BasicDraw fact is rejected at append");
+    ok &= check(basicRejected("basic_wrong_kind", "edvr_gfx_basic_wrong_kind.log", 54, 1),
+                "BasicDraw site/kind mismatch is rejected at append");
+    ok &= check(basicRejected("basic_bad_read", "edvr_gfx_basic_bad_read.log", 55, 2),
+                "known unreached BasicDraw value is rejected at append");
+
+    const bool basicUnvisitedStarted = beginFssCase("basic_unvisited", "edvr_gfx_basic_unvisited.log", 56);
+    const auto basicUnvisitedToken = trace::beginDraw(fssMalformedDraw);
+    trace::appendBasicFact(basicUnvisitedToken, contextFact());
+    const bool acceptedBeforeFinish = !trace::overflowed();
+    finishFssCase(basicUnvisitedToken, 56);
+    ok &= check(basicUnvisitedStarted && acceptedBeforeFinish && trace::overflowed(),
+                "BasicDraw fact for an unvisited rung is rejected at finish");
+    trace::shutdown();
+
+    const bool basicUnknownStarted = beginFssCase("basic_unknown", "edvr_gfx_basic_unknown.log", 57);
+    const bool basicUnknownWritten = basicUnknownStarted && writeTerminalCase(
+        ladder::RouteId::kForeignOwner, ladder::SequenceId::kCommon, 'D',
+        ladder::SiteId::kForeignContextNone, false, kFrozenCommon, 8,
+        ladder::CommonSequence{}, 1, false, false, edvr::SunglareTraceMode::kStock,
+        false, false, 0, 57, false, false, 2);
+    trace::frameEnd(57);
+    ok &= check(basicUnknownWritten && trace::status() == trace::Status::CompleteWritten,
+                "unknown consumed context identity writes an unavailable canonical predicate");
+    trace::shutdown();
+
+    const bool basicPoolStarted = beginFssCase("basic_pool_cap", "edvr_gfx_basic_pool.log", 58);
+    bool basicPoolFilled = basicPoolStarted;
+    trace::Token lastBasicToken{};
+    for (std::uint32_t i = 0; basicPoolFilled && i < trace::kMaxDraws; ++i) {
+        auto poolDraw = fssMalformedDraw;
+        poolDraw.eyeDrawIndex = i + 1;
+        lastBasicToken = trace::beginDraw(poolDraw);
+        if (!lastBasicToken.valid()) { basicPoolFilled = false; break; }
+        trace::appendBasicFact(lastBasicToken, contextFact());
+        trace::appendBasicFact(lastBasicToken, distanceFact(false));
+        if (trace::overflowed()) basicPoolFilled = false;
+    }
+    if (basicPoolFilled) trace::appendBasicFact(lastBasicToken, contextFact());
+    ok &= check(basicPoolFilled && trace::invalidationReason() == trace::CaptureInvalidation::BasicIndexOverflow,
+                "BasicDraw global pool overflow has its own invalidation reason");
     trace::shutdown();
     return ok;
 }

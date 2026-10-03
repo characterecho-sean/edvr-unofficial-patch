@@ -44,7 +44,7 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  shared resolver cost passes 134 jobs; fifteen selectors pass 135 validation jobs.
+  shared resolver cost passes 134 jobs; seventeen selectors pass 137 validation jobs.
   Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
@@ -1602,3 +1602,77 @@ promotion was requested for this checkpoint. Fifteen selector sites now have
 scoped rig replay coverage. Whole-ladder replay, independent forwarding,
 complete owner costs and a matched CPU improvement/GPU non-regression
 comparison remain open before Phase 2.
+
+### Context and distance source facts, and Intro API costs, 2026-10-03
+
+Predicate-fact version 9 adds raw facts for owner-context site 2 and
+distance-enabled site 67. The context fact records the actual consumed context
+identities and glare-clamp reset before and after. Context identities share the
+existing resource ordinal domain; null is known zero and unavailable reads
+serialize null. The reader compares the identities independently and verifies
+the zero reset. The distance fact records the actual consumed enable flag.
+Neither fact uses the recorded SiteEvent outcome as its selector input.
+Versions 1-8 remain supported; whole-ladder predicate equivalence remains
+false.
+
+The genuine visitor rig runs the production visitor and TracePolicy into the
+real cold recorder pool, using System32 WARP immediate and deferred contexts.
+It covers owner and foreign context paths, distance enabled and disabled, and
+all four NoTrace counterparts without emitted facts. The rig links the
+completed production object set, replacing only its two macro-test translation
+units. A targeted startup review found no explicit file, worker or window
+startup before CLI handling; transitive vendor-library initializers were not
+exhaustively audited. The actual dry-run and guarded run passed with no focus
+events. The rig does not serialize its intentionally partial visit tokens as
+complete captures. Real null-context producer coverage and cross-draw state
+continuity are not claimed.
+
+Ruled out: pruning the isolated VScreen object with either /Gy or /GL/LTCG,
+because each link still had 520 unresolved production dependencies. Using the
+completed production dependencies avoids hundreds of service stubs and keeps
+the visitor genuine.
+
+Ordered native recorder fixtures cover missing, duplicate, wrong-kind,
+known-but-unreached and unvisited BasicDraw facts, the 131,072-entry pool cap
+and a complete frame with exactly one unavailable context input. All 38
+deliberately invalid sidecars are rejected, while the unavailable input stays
+unavailable without a fabricated mutation prediction. The current reader also
+accepts the three earlier production sidecars: 6,821 and 6,237 selector matches
+from version 1, and 8,682 from version 2, with zero mismatches or unobserved
+mutations. This is compatibility evidence, not a production capture of version
+9.
+
+The compiled NoTrace/NoCpu parent body still matches the saved reference: 7,057
+encoded bytes, 1,636 listing records, 94 ordered call targets and a 288-byte
+stack, SHA-256
+2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40. BasicDraw
+observations are 64 bytes, adding an 8 MiB pool. DrawRecord grows from 3,888 to
+3,896 bytes, adding 0.5 MiB, and the identity table adds 1 MiB. Enabled
+recorder pools total 340.0 MiB, excluding allocator overhead; default-disabled
+capture allocates none of these pools. No extra D3D query, clock or per-draw
+allocation was added to these predicates.
+
+Intro-owned SplashDim API sites 83-90 count six direct save/apply/restore state
+calls and the cold blend-state GetDevice and CreateBlendState attempts.
+ReadQuery, State and Work remain distinct. The active bracket carries its
+original sample eligibility through End, while null End and nested Begin
+preserve the bracket. Shared resolver queries stay Core-owned at sites 112-115.
+Shader-swap helper creation, Releases and the SplashDim CPU bracket remain
+outside this bounded cohort.
+
+The independent SplashDim System32-WARP rig passes 5,469 checks: exact cold and
+warm attempted counts and masks, completed 1,800-frame denominators including
+empty frames, declined and unsampled paths, real state restoration, nested
+Begin/null End and a typed real-context PSGetShader fault prefix. The fault
+case proves pre-mutation attempt accounting and subsequent recovery; partial
+setter/restore faults are not covered.
+
+The full validation passed 130 pooled jobs (152.5 seconds) and seven quiet jobs
+(32.6 seconds), both DLL profiles, installer gates and all 235 config keys.
+FocusWatch recorded zero shown windows, consoles or foreground changes in 185
+seconds. Log: build/plugin-predicate-v9-full-build.log; receipt input SHA-256
+9cedf0ee7d5c3b0e7e5e564e994ea8ebb5d7ee7e1be8d32f76f0aafb4d37ae6e. Steam remains
+on 4350a281 with settings preserved. Seventeen selector sites now have scoped
+rig replay coverage. Whole-ladder replay, independent forwarding, complete
+owner costs and a matched CPU improvement/GPU non-regression comparison remain
+open before Phase 2.
