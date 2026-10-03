@@ -28,7 +28,12 @@ inline int flatShaderCaptureTests() {
         check(!(attempted.fetch_or(bit) & bit), "first admission");
         check((attempted.fetch_or(bit) & bit) != 0, "duplicate refusal");
     }
-    check(all == 0x1fffu, "exact thirteen targets");
+    check(all == (uint32_t(1) << edvr::kFlatShaderCaptureCount) - 1u, "all exact targets");
+    check(edvr::kFlatShaderCaptureCount == 17, "four new on-foot shader stages included");
+    check(edvr::flatShaderCaptureBit(true, 'v', 0x025B4B9FF54622EDull) != 0, "new material VS");
+    check(edvr::flatShaderCaptureBit(true, 'p', 0x46F92DC71BF8DFA5ull) != 0, "new material PS");
+    check(edvr::flatShaderCaptureBit(true, 'v', 0x9AEC596A2B036EA6ull) != 0, "new effect VS");
+    check(edvr::flatShaderCaptureBit(true, 'p', 0x3789CA2062E196FBull) != 0, "new effect PS");
     check(!edvr::flatShaderCaptureBit(true, 'v', 0), "unknown refusal");
     check(!edvr::flatShaderCaptureBit(true, 'v', 0xEB5234DB6ADB491Dull), "already-audited refusal");
     check(!edvr::flatShaderCaptureBit(true, 'p', 0x7CECABDE34FFBE9Eull), "already-audited PS refusal");

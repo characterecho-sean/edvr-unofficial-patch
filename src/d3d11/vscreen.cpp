@@ -5625,7 +5625,10 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     // The depth probe learns which value the game clears an eye-draw
     // target to, which says which way its depth runs.
     if (!foreignContext(self)) {depthProbeNoteClear(dsv, depth);if(uiLayerWatching())uiLayerNoteDepthClear(dsv, flags, depth, stencil);}
-    if (!foreignContext(self) && flatRuntimeActive()) flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
+        flatRuntimeWeaponFootprintClear(dsv, flags, stencil);
+    }
     if (!foreignContext(self) && (flags & D3D11_CLEAR_DEPTH) && flatRuntimeActive()) { ResourceInfo info{}; if (bindingResolve(dsv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource)); }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearDepth(dsv, flags, depth);
     g_state->realClearDsv(self, dsv, flags, depth, stencil);
@@ -5665,7 +5668,9 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         withFlatBypassTrace(self, 'Z', 0, 0, DrawArgs{}, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
             FlatRuntimeDrawScope flatDraw(self, 0, 'Z');
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
             g_state->realDrawIndexedInstancedIndirect(self, args, off);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawIndexedInstancedIndirect>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'Z', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable, off);
@@ -5713,7 +5718,9 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         withFlatBypassTrace(self, 'Y', 0, 0, DrawArgs{}, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
             FlatRuntimeDrawScope flatDraw(self, 0, 'Y');
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
             g_state->realDrawInstancedIndirect(self, args, off);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawInstancedIndirect>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'Y', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable, off);
@@ -6007,7 +6014,9 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             // the engine-motion PS/MRT or the output-copy SRV.
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
             FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
             g_state->realDraw(self, count, start);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'D', count, 1, args, 1);
@@ -6064,7 +6073,9 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         withFlatBypassTrace(self, 'A', 0, 0, DrawArgs{}, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
             FlatRuntimeDrawScope flatDraw(self, 0, 'A');
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
             g_state->realDrawAuto(self);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kAutoDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'A', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable);
@@ -6103,7 +6114,9 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         withFlatBypassTrace(self, 'I', count, 1, args, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
             FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
             g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'I', count, 1, args, 1);
@@ -6166,7 +6179,9 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                 flatTemporalDraw(self, perInstance, instances);
             FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                           static_cast<int32_t>(startVertex), startInstance);
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
             g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'N', perInstance, instances, args, 1);
@@ -6238,8 +6253,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 flatTemporalDraw(self, perInstance, instances);
             FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                           baseVertex, startInstance);
+            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
             g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                               baseVertex, startInstance);
+            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'X', perInstance, instances, args, 1);

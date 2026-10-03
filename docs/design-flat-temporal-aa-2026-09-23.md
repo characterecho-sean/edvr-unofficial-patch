@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
-  the caveats below remain the open qualification record. Latest analyzed Epic
-  log is build `v0.18.1-5-g743c5dc0`. Evidence is in sections 1-88.
+- **State:** shared route merged at `dacb7a56`; qualifications below remain open.
+  Epic installed `v0.18.1-15-g06e9225c`, FLOWN. Latest analyzed log:
+  `v0.18.1-15-g06e9225c`; evidence is in sections 1-95.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,10 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 87: Coriolis native-scale FSR on/off comparison; section
-  88: HDR-compatible matched building ROI before another flight. Preserve
-  section 83's remaining qualification matrix and the open items below.
+- **Next:** section 95: full-width lower capture and scoped draw queries are
+  validated; next flight confirms contribution on the shared first-person path.
+  Quiet performance recovered; building shimmer is unqualified. Section 87:
+  native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
   open. VR still needs regression tests; the concourse NPC observation on
@@ -9255,3 +9256,399 @@ The generic draw audit is not geometry evidence. No rendering cause or fix is
 qualified. Next discriminant: HDR-compatible color, depth, motion-vector,
 rejection and final-image samples at a matched building ROI across consecutive
 frames, before another flight; do not repeat F10 on this blind path.
+
+## 89. Weapon-visible DLAA refusal: two alternate camera pairs (2026-10-03)
+
+State: confirmed frame-selection refusal; shader roles need qualification.
+Sean reports a different supporter loses AA on unholstering a laser rifle
+and regains it on holstering. Bundle edvr-logs-20261003-154551.zip contains
+one graphics log (8340 lines), settings and breadcrumbs, no shaders/traces.
+Literal build v0.18.1, stamp 6AC026D1, linked 2026-10-02 21:49:05 UTC.
+edvr_log --expect-build HEAD accepts the v0.18.1 release prefix at source
+0fa51a88; this is not an exact source-commit identity proof. The exact
+weapon exception is unchanged between the release and current source.
+
+Flat mono, RTX 3050, 1920x1080, native-resolution NGX DLAA preset K; no
+headset/runtime in this path. Saved INI asks dlss, but NGX initialization
+and live warnings name DLAA. Selection remains requested during refusals;
+no evidence of an automatic menu mode change to Off. Earlier loading and
+post-chain intervals have separate no-3d-scene/no-known-tone-pass causes.
+
+At 15:43:24.111/35.156, firstBad hdr-camera-changed is exact pair
+025B4B9FF54622ED/46F92DC71BF8DFA5. At 15:43:45.156/55.156 it is
+9AEC596A2B036EA6/3789CA2062E196FB. Both compare against scene pair
+68DDDEF04D9894AF/06332CA168B6DA63. Same HDR RTV, DSV/depth identities,
+1920x1080 dimensions and current-frame b1 epochs; changed camera words
+are XY scale and near 0.025 -> 0.0675, with rows 274/275 unchanged.
+At 15:44:08.543 the window has 272 camera conflicts, streak=0, last=
+conflicting-hdr-target-or-camera. By 15:44:18.553 it accepts 300 history
+frames with no new refusals; final treated=40281/refused=3500, streak=4505.
+The log has no weapon-event timestamps, so onset/holster correlation comes
+from the supporter, not a recorded input event.
+
+Section 57 admits only 88DCF1164C640EC3/494506A63091DF8C as an alternate
+weapon camera. New 025B VS is listed as weapon/tool material, but this PS
+companion has no exact recipe (the known companion is C5A5C7E8216CB9AF).
+9AEC/3789 has an exact b1 ForwardColumns recipe, but its VS is a generic
+billboard/flare source also used by witchspace. A matching narrow camera
+alone does not prove that effect's ownership. Do not admit either from
+the reported weapon name or globally ignore changed cameras.
+
+Evidence gap: original F10 camera probe only observes the old rifle pair.
+F10 at 15:44:12/46/50 wrote three trace files on the user's machine; none
+is in the archive. Producer shader capture saved VS 025B, but the new PS
+and effect bytecode are not demonstrated. Global glare_shader_dump is
+refused by the flat profile allowlist; it is not a working capture path.
+
+Diagnostic implemented: extend bounded flat stage/hash capture and F10 cached
+shader requests to both new pairs; observe two distinct conflict frames
+per exact pair, keeping actual shader identity and CPU shadow checks.
+Per-pair budgets prevent the mesh from starving the effect capture; report
+zero-observation and partial/mismatched results as well as complete ones.
+No camera/renderer admission, config key or live setting changes. Next
+flight: restart on the diagnostic build, draw
+the rifle, F10 while the AA refusal is present, wait at least five seconds,
+then send the shader/trace folders together with the fresh flight log.
+
+Validation: absolute build.bat --jobs 2 passed all gates, including 117
+pooled and 5 quiet jobs, the new per-pair camera probe tests, 46 existing
+trace frame replays, the 234-key contract and installer resource checks.
+The sandboxed run stopped at run_jobs process-tree validation; the
+unchanged-source escalated run passed. Log:
+build/weapon_camera_diagnostic_full_build_escalated.log. Full-pass receipt
+inputs SHA256 20b1d95485cf1cfc7199de8ba96c84a3b5a7070df96c6fdbddaf35a5bc172783.
+Validated flat installer: v0.18.1-10-g00d4f738-dirty, 79570944 bytes,
+SHA256 43ACE66D4995B49DBFE4DF79E091441D6E5D3D297BFB733DFAB66F3825ECAA18.
+This is a diagnostic artifact, not a claimed rendering fix or flown change.
+
+## 90. HDR building capture preparation (2026-10-03)
+
+Sean authorized the capture work after section 88. This changes diagnostics;
+the rendering cause remains unqualified. Target: Epic's Windows flat profile,
+native 3840x2160 NGX DLAA on the HDR route. No VR runtime or headset is involved
+in this evidence; this does not qualify the VR route or other DLSS versions.
+
+Discriminants for the next flight:
+
+- Missing or wrong object motion: a building window has non-sky depth, but its
+  engine slot/freshness, reconstructed motion or rejection disagrees with the
+  frame camera and the building's displacement. A sampled draw that changes
+  that window can identify its shader family; an omitted draw cannot.
+- An integration/history problem: building raw input remains steady while the
+  backend output changes excessively, with matching source identity, adjacent
+  live frames and valid motion. The finish result establishes whether the
+  backend fluctuation reaches the HDR image.
+- Aliasing already in the scene input: the same building detail fluctuates in
+  the pre-resolve color. Depth, motion and rejection distinguish missing
+  coverage from fine geometry or material detail; color alone cannot.
+- A later post-processing problem: the captured HDR finish is stable while the
+  visible final image shimmers. HDR capture is before tone mapping and cannot
+  prove the state of every later effect.
+
+Implemented; combined full validation passed. Ready for the Epic test:
+
+- HDR DLSS/DLAA pixel capture uses a centered region, at most 2048x1152. At
+  3840x2160 its origin is (896,504). Save color, prepared depth, emitted
+  motion, rejection, raw backend output, finished game HDR target, engine
+  slots, pool and scene constants. Preserve source coordinates and linear
+  radiance; the finished target is before tone mapping. Record the actual
+  refusal overlay and distinguish expected output-format quantization.
+- Queue a pair of live frames before readback; allow a second pair after the
+  spacing interval. Report frame adjacency rather than assuming it when a
+  resolve is refused. Keep the cumulative 384 MiB limit. Cropped engine replay
+  retains full render coordinates and is tested against full-frame replay.
+- Draw capture samples the selected depth's scene and motion candidates over
+  the frame, with at most 256 records per class and a 256 MiB limit. Eight
+  windows lie inside the central HDR region. First-eight and every-64th
+  admission uses complementary frame phases; pool snapshots are also spaced.
+  Explicit skip, quota and refusal counts make this partial coverage. An
+  omitted draw is not evidence of unchanged pixels or missing building motion.
+- WARP fixtures check two simultaneously pending HDR frames, source bytes,
+  nonzero region origins and retained engine inputs. The draw policy test
+  includes more than 15000 draws, late motion producers and saturated quotas.
+
+Next flight: keep the shimmering buildings in the center of the screen,
+press F10 while the effect is visible and keep flying for several seconds.
+Verify the new build first, then use the capture's exact region coordinates
+and frame identities. No new setting or rendering compensation is warranted
+by the previous log. FSR/TAA matched-pixel capture remains unsupported and now
+reports that explicitly instead of silently waiting for expiry.
+
+Validation on the pre-merge HDR capture tree: all 122 gates passed (`build/hdr-building-full-retry.log`),
+including the WARP capture fixtures, offline tools, config contract and actual
+installer-resource checks. DLSS SDK 310.9.1 verified against its pinned hash.
+The first sandboxed build stopped at the process-cleanup self-test and missed
+the cached SDK; an unsandboxed retry with the explicit SDK path passed.
+Combined camera-probe/HDR capture tree: all 122 gates passed again in
+`build/hdr-building-combined-full.log`, with full-build receipt digest
+`e0f45f9ec70a3a7e4c7e113ab5591e08d9f08b0652b40664e84a37338e9d9bfc`.
+Epic's installed DLSS 310.9.1 runtime matches the SDK's pinned SHA-256;
+preserve it and `edvr-flat.ini` for this test. The install-only clean-version
+promotion uses the matching receipt. No flight has qualified the new capture
+or the building-shimmer cause yet. Section 91 records the subsequent flight.
+
+## 91. Epic settlement flight: F10 discovery cost and HDR evidence (2026-10-03)
+
+Verified `edvr_gfx_20261003_075004.log` against installed
+`v0.18.1-12-g41b9838c` (6AC106D5), flat, native 3840x2160 DLAA. Sean reports
+poor settlement performance and took F10 in the cockpit and on foot. The
+existing motion switch had been on; previous verified 743c5dc0 windows also
+substituted about 12000 motion draws per frame. Its retirement does not explain
+a newly enabled motion path in these windows.
+
+F10 was at 07:53:28.160 and 07:54:01.736. Both pixel bursts completed 4/4,
+engine-complete, zero failures, 333490176 bytes each. Pixel work finished at
+07:53:29.603 and 07:54:02.788. Source regions visibly contain buildings;
+cockpit frame pairs are 185439/440 and 185455/456, on-foot pairs 186642/643
+and 186658/659. No additional flight is needed merely to repeat this capture.
+
+| Window | Present p50 | GPU frame p50 | Motion-wrapper D3D calls/frame |
+|---|---|---|---|
+| 06:35:05, prior 743c5dc0 flight, before F10 | 16.48 ms | 10.63 ms | 19185 |
+| 07:53:25, new flight, before F10 | 18.76 ms | 10.60 ms | 19856 |
+| 07:53:45, new flight, after F10 | 40.75 ms | 31.77 ms | 100505 |
+
+The new pre-F10 reducer is 0.511 ms / 16711 calls, about 31 ns/call; the
+prior reducer is 0.500 ms / 16341 calls, also about 31 ns/call. The views are
+not a controlled A/B, so the 16.48 versus 18.76 ms baseline difference does not
+prove a regression. There is no measured reducer regression here.
+
+Initial passive discovery completed at 07:50:47.932. Each F10 re-arms it for
+up to 120 s / 12000 useful frames. While it is active, source explicitly
+disables lazy motion batching and flushes substitution; the per-draw observer
+is also active. Discovery adds 3.357-6.784 ms per clocked frame in the sampled
+post-F10 windows; wrapper D3D calls rise fivefold for similar substituted draw
+counts (12445 before, 12315 after). GPU resolve remains about 0.99-1.01 ms.
+These are substantial diagnostic costs; the whole frame-time increase is not
+isolated causally. This behavior is unchanged between 743c5dc0 and 41b9838c.
+The log ends before discovery completes again, so no quiet post-F10 settlement
+window is available. Clocked CPU totals are sampled one frame in 16 and include
+an estimated profiling floor; they are not every frame's net EDVR cost.
+
+Ruled out: continuing HDR pixel copies as the cause of the 30-second slowdown,
+because both four-frame bursts finish within 1.5 s and their active paths stop.
+Performance comparison: stay in the same view, avoid another F10, and wait for
+`flat temporal: passive discovery complete` (up to two minutes after the last
+F10) before comparing frame times. Do not revert PR72 from these captures.
+
+On-foot building input has phase-dependent aliasing: adjacent scene-H preview
+change averages 4.68/255, whereas NGX output is 0.10/255 and finished H
+0.14/255. In cockpit same-phase frames 16 apart, a wall's input is nearly
+unchanged (0.005/255), but backend/final HDR changes about 2.15/255. This is
+temporal-output variation, not proof of the perceived shimmer's cause: F10
+re-arms state, intervening frames are unobserved, and H precedes tone mapping.
+Both positions are essentially static (emitted motion below 0.0005 px), so
+landing-motion correctness remains unqualified.
+
+Draw sessions are partial; the actual t33 pool is 5505024 bytes (336-byte
+stride, 16384 entries), exceeding the draw snapshot's 4194304-byte cap. The
+24/23 on-foot refusals, `t33-range-or-size`, are this diagnostic limit, not an
+invalid engine pool. Pixel capture retains the complete pool.
+
+Offline engine replay predicts far more stale/depth rejection than the actual
+GPU bytes because it omits the enabled steady-detail branch: the shader can
+accept a slot-depth mismatch using the camera term if previous depth confirms
+it. The capture omits that previous-depth texture and the actual steady flag;
+its replay only knows the distinct `static_scene` policy. Logs confirm steady
+depth checks ran, with zero skips. On-foot frame 186642 has 174526 valid-slot
+depth mismatches, of which the GPU accepts 174411; median absolute depth delta
+is 6.49e-8. Do not infer motion failure from replay's stale-branch counts.
+Exact per-pixel confirmation needs previous depth and the actual prep flags
+in the capture before a further diagnostic flight. Captured GPU rejection in
+the on-foot building region is about 0.019%; this alone does not validate motion.
+
+## 92. Weapon refusal reproduced; quiet performance recovers (2026-10-03)
+
+Verified `edvr_gfx_20261003_082043.log` against installed
+`v0.18.1-12-g41b9838c` (6AC106D5), Windows flat, native 3840x2160 DLAA.
+Sean drew a weapon, saw world AA turn off, F10 at 08:23:54.958, holstered
+during the two-minute wait, then took cockpit F10 at 08:26:07.549 and waited
+again. Weapon input timestamps themselves are not logged.
+
+Performance: final passive discovery completes at 08:28:07.568. Quiet HDR
+windows at 08:28:15.299/20.302/25.707 have zero declined frames and discovery
+0.000 ms. Present p50 is 15.66/15.65/15.95 ms (roughly 63-64 FPS by median
+frame time); GPU frame p50 10.46/10.31/10.56 ms, resolve 0.98/0.98/0.99 ms.
+Wrapper D3D calls are 19826/19820/19817 per frame, over approximately 12435
+substituted draws. This recovers section 91's pre-F10 submission regime and
+is comparable to the previous 743c5dc0 cockpit's 16.48 ms / 10.63 ms. The
+large sustained-looking slowdown after F10 is not present once discovery
+ends. These are not controlled pre/post-PR72 views; no reducer regression
+is established. CPU timings still use one-in-16 clocked frames and include
+profiling cost; GPU spans and Present quantiles have their own sample counts.
+
+Weapon diagnosis: exact VS `025B4B9FF54622ED` / PS `46F92DC71BF8DFA5`
+caused the first HDR camera conflict in frames 171619/171620. Draw sequences
+16773/16856 equal first-bad-seq, actual hashes match and HDR RTV, depth, DSV
+and named b1 identities are unchanged. Camera XY coefficients scale by
+1.231279 and near depth changes 0.025 -> 0.0675; pose rows 274/275 match
+byte-for-byte. This is an alternate projection at the same pose. Treatment
+stays at zero in the weapon interval, then resumes after the reported holster.
+
+Ruled out: a missing projection recipe as this frame's AA blocker, because
+the generic recipe is prepared on all 900 observed offending-pair draws and
+the reference reports canonical=900, unmatched=0. Adding an exact recipe
+alone would not remove the HDR ownership conflict.
+
+Shader bytecode now exists: pooled packed vertices, t33 stride336/t38 stride48,
+position through b1[270..273]; PS texture arrays t2/t3 and structured t1 stride96,
+color output, no SV_DEPTH. VS declares no b0, so an unbound b0 is expected;
+the older rifle probe's aggregate partial flag does not invalidate complete
+b1 and actual-shader evidence. Captured depth state has depth writes OFF,
+stencil REPLACE with ref/mask 0x04. The older qualified rifle pair writes
+depth; its strict-depth fallback does not qualify this color-only pass. The
+existing first-person resolver mask uses 0x10. Do not globally admit changed
+cameras or assume the 0x04 mark is exclusive and survives until resolve.
+
+The old 88DCF/494506 rifle pair is observed in the first audit but is not its
+first camera conflict; new 9AEC/3789 effect is never observed during this F10
+and remains unqualified. The cockpit has no offending 025B/46F pair.
+
+First F10 pixel arm expired with zero copies; draw arm expired after 900
+unqualified frames while selection stayed conflicting-hdr-target-or-camera.
+The camera/shader probe works during refusal, but matched HDR pixels do not.
+Next discriminant is passive before/after color and stencil footprint for this
+exact draw and stencil survival to resolve, captured even on a refused frame.
+If an exact-pair/state exclusion is supported, GPU tests must prove it prevents
+borrowing world-depth history over weapon color and retains refusals for
+mismatched hash/state. No rendering admission change is qualified yet.
+
+Cockpit pixel capture completes four frames 179362/363 and 179378/379, engine
+inputs intact. Its building region's same-phase final-H preview drift is
+0.179/255 (0.11% of pixels change at least 4/255), versus 2.285/255 (15.60%)
+in section 91's prior cockpit. Source-H drift is 0.009/255. This short,
+essentially static sample shows less backend variation; it does not prove
+shimmer gone during landing or after tone mapping. Known draw-pool and
+steady-depth replay limits in section 91 still apply. No build or live setting
+was changed for this analysis.
+
+## 93. Refused-frame weapon footprint capture (2026-10-03)
+
+Sean authorized the next instrument after section 92. Hypotheses to separate:
+the exact weapon draw marks newly changed color with stencil 0x04; the mark
+already belongs to other surfaces; a later clear or draw removes or expands
+it before the HDR consumer. Before/after color, depth and stencil, followed
+by pre-consumer and frame-end observations of the same resources, distinguish
+these cases. `night_vision.cpp` also recognizes stencil write mask 0x04 with
+REPLACE, so the bit alone is not evidence of exclusive weapon ownership.
+
+Implemented and validated: an independent F10 arm for VS
+`025B4B9FF54622ED` / PS `46F92DC71BF8DFA5`, including frames whose camera
+ownership refuses AA. Two bounded draw samples retain resource/state
+provenance. A lower-center ROI includes the held-weapon region; omissions
+outside the ROI remain explicit, and no observed change cannot exclude a
+footprint outside it. Depth-stencil uses a whole-resource typeless GPU mirror
+and shader extraction into compact depth/stencil planes; boxed partial
+depth-stencil copies are invalid. All pending allocations are budgeted.
+Offline analysis measures preexisting marks, changed color/depth and mark
+survival, without equating unchanged color with absence of raster coverage.
+
+No AA admission, masking, motion behavior or live setting changes are
+authorized by this evidence. Target is Windows flat Epic at native 3840x2160,
+DLAA with the installed DLSS runtime preserved; this instrument does not
+qualify VR. Next test after build/install: draw the weapon until world AA
+turns off, press F10 and keep it drawn through capture completion, then
+holster. Performance comparison still requires waiting for F10's existing
+two-minute passive discovery window to end. Full build and all gates passed;
+clean-commit DLL promotion passed. Epic flat installed and verified as
+`v0.18.1-15-g06e9225c` (code commit `06e9225c`). Live `edvr-flat.ini` and
+`nvngx_dlss.dll` SHA-256 values are unchanged. This build is NOT FLOWN.
+
+The WARP fixture uses the production snapshot/extraction path: 16 changed
+color pixels, no selected-draw depth change, 15 new stencil-0x04 marks,
+12 surviving to the consumer and none after the final stencil clear. Four
+unrelated depth pixels change later. Tests also verify game bindings survive
+capture, alias DSV clears are recorded, later-frame clears are excluded,
+wrong-pair/off-arm rejection, no-match expiry and a producer-emitted missing-
+consumer partial manifest. Both offline fixture gates and parser self-tests
+pass. These fixture results validate the instrument, not live AA admission.
+
+## 94. Live weapon capture: stencil 0x04 is already global (2026-10-03)
+
+Verified `edvr_gfx_20261003_092909.log` against installed
+`v0.18.1-15-g06e9225c` (6AC11E84), Windows flat Epic, 3840x2160, preserved
+DLSS 310.9.1. Sean completed the draw-weapon/F10/hold/holster test. F10 arms
+at 09:33:16.385; both four-stage captures complete by 09:33:16.830 with
+unsupported=0. Session is `flat_weapon_footprint/20261003_153316_385_54728_1`.
+Frames 105372/105374 each observe the exact pair once; their selected draw
+sequences 24219/23400 equal first-bad-seq. The HDR consumer four draws later
+reports `conflicting-hdr-target-or-camera` for both samples.
+
+Runtime treatment stays at 7168 through 09:33:20/25 while refused frames rise
+1859 -> 1990 and accepted history remains zero. By 09:33:30 treatment resumes
+(7229 treated, accepted-reset=1/history=60), then 09:33:35 adds 119 history
+frames without more refusal. Recovery between 09:33:25 and 30 is consistent
+with Sean's holster after the ten-second hold; the input itself is not logged.
+
+The lower-center ROI is x896..2943/y1008..2159, 2,359,296 pixels (28.44% of
+the target). Before/after color, depth and stencil changes are all zero in
+both samples, as are subsequent changes through the consumer and pre-Present
+snapshot. There are no recorded stencil clears. Every sampled pixel already
+has bit 0x04 before the exact draw and retains it; new marks=0. Raw stencil is
+only 0x04 or 0x14. The 0x14 region is lower-right and clipped by the ROI edge
+(x2199..2943/y1394..2159 in the first frame; x2203..2943/y1382..2159 in the
+second). It suggests existing first-person marking but does not prove this
+draw owns those pixels. Camera XY scale ratio remains approximately 1.231279,
+near depth 0.025 -> 0.0675 and pose rows match. State is depth GEQUAL with
+no depth writes, stencil ALWAYS/REPLACE, ref/write-mask=4 and read-mask=0.
+
+Ruled out: stencil 0x04 as an exclusive local weapon mask, because every
+sampled pixel carries it before the draw. No newly marked footprint exists
+here to test survival. Unchanged bytes cannot exclude off-ROI coverage,
+rejected fragments, disabled color writes or equal-value overwrites. No AA
+admission exception is qualified. Next discriminants are wider right-edge
+coverage and actual whole-draw contribution, including draw arguments,
+blend write mask, scissor and passed-sample evidence. These should separate
+the remaining causes in one capture rather than one flight per hypothesis.
+
+Passive discovery ends at 09:35:16.401. Clean windows at 09:35:26.025/31.042
+have discovery=0, Present p50 16.32/16.91 ms, GPU frame p50 11.15/11.28 ms
+and resolve 1.00/1.01 ms. HDR windows at 09:35:25.763/30.769 treat all
+295/286 frames with no local refusals (roughly 59/57 average FPS). Wrapper
+D3D calls are 25674/25679 per frame over approximately 14557 substituted
+draws, more geometry than section 92's cockpit. This establishes recovered
+late-flight performance, not a controlled PR72 comparison. No renderer,
+installed build or setting was changed during this analysis.
+
+## 95. Wider weapon capture and actual draw visibility (2026-10-03)
+
+Sean authorized the next instrument after section 94. Hypotheses and
+discriminants: color contribution outside the old ROI (full-width lower
+snapshots); a nonempty draw whose samples fail depth/stencil (draw arguments,
+pipeline work and zero passed samples); disabled color writes or unchanged
+overwrites (effective blend state and passed samples with no color change);
+empty or suppressed work (arguments, pipeline counters and predication).
+None of these alone establishes safe temporal history ownership.
+
+Implemented and validated: extend the existing F10 capture to full source
+width and the lower 1152 pixels, preserving the 384 MiB memory/disk guards
+and serial two-sample readback. At native 3840x2160 with R11 HDR this fits
+the budget and covers both horizontal edges. Record effective blend,
+rasterizer/scissor, topology, predication and draw arguments. Auto/indirect
+counts remain explicitly unknown when the original call does not provide
+them. Bracket only the real game draw with occlusion and pipeline-statistics
+queries; snapshot extraction runs outside that interval. Later Presents poll
+without flushing or waiting, and unavailable/failed/timeout data are distinct
+from a measured zero. Schema 2 retains offline support for schema 1 captures.
+
+Microsoft defines occlusion as samples passing depth/stencil, not color
+ownership; pipeline statistics separately report shader invocations:
+[D3D11 query types](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_query).
+Tests must distinguish visible, depth-rejected and color-write-disabled draws,
+include a right-edge contribution outside the old ROI, and prove extraction
+compute dispatches do not enter the selected draw's statistics. No AA
+admission change or new config key. Full build and all gates passed. Six
+right-edge WARP cases distinguish visible, depth-rejected, color-write-disabled
+and empty draws, plus unavailable/timed-out queries. They verify nested game
+occlusion queries retain their result and capture CS invocations stay outside
+the draw statistics. Existing complete/partial capture gates also pass.
+Clean promotion and Epic flat installation follow; preserve live settings
+and DLSS 310.9.1.
+
+Sean explicitly requires a solution that does not need him to test every
+weapon type. The exact shader pair is a diagnostic witness, not the final
+support boundary. The intended fix follows the shared first-person camera
+and render phase, with actual pixel/history ownership separated from the
+world. Automated GPU tests cover pass variants; a representative live test
+confirms the game route. Do not replace the current conflict with a growing
+per-weapon hash whitelist or assume global stencil 0x04 identifies weapons.

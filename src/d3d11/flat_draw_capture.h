@@ -17,6 +17,7 @@
 #include <map>
 #include "../common/config.h"
 #include "../common/log.h"
+#include "flat_draw_capture_policy.h"
 
 namespace edvr {
 bool captureFlatProbeShader(char stage,uint64_t hash);
@@ -25,8 +26,9 @@ class FlatDrawCapture {
     static constexpr unsigned kPoints=8, kWindow=16, kDrawCap=512, kFrames=2;
     static constexpr unsigned kChunkSlots=8192, kChunkCols=64;
     static constexpr uint64_t kByteCap=256ull*1024*1024;
-    inline static constexpr float uv_[kPoints][2]={{.08f,.70f},{.91f,.84f},{.50f,.37f},{.62f,.60f},
-                                             {.82f,.67f},{.35f,.40f},{.60f,.45f},{.90f,.74f}};
+    // All eight points overlap the centered HDR pixel ROI at 3840x2160.
+    inline static constexpr float uv_[kPoints][2]={{.30f,.62f},{.43f,.62f},{.57f,.62f},{.70f,.62f},
+                                             {.30f,.38f},{.43f,.38f},{.57f,.38f},{.70f,.38f}};
     struct Copy {
         unsigned rt=0, point=0, chunk=0, slot=0, x0=0,y0=0, format=0,bpp=0;
         bool after=false; const char* status="queued"; uint64_t offset=0; unsigned length=0;
@@ -64,6 +66,7 @@ class FlatDrawCapture {
         uint64_t allocation=0; };
     struct Frame {
         uint64_t number=0, startMs=0, bytesAllocated=0; unsigned width=0,height=0, drawsSeen=0, overflows=0, refusals=0,motionRefusals=0;
+        unsigned depthMatched=0; FlatDrawAdmission admission;
         const void* priorDepth=nullptr; const void* selectedDepth=nullptr; const void* selectedHdr=nullptr;
         bool qualified=false, identity=false; const char* reason="not-qualified";
         std::vector<Draw> draws; std::vector<Chunk> chunks;
@@ -161,6 +164,11 @@ class FlatDrawCapture {
         if(!p.bytes||p.bytes>4u*1024*1024||p.stride!=336||
            (uint64_t(p.first)+p.elements)*p.stride>p.bytes){p.reason="t33-range-or-size";++f.motionRefusals;return;}
         const unsigned family=d.vs==0x66DE2CADB1F4AE6Bull?0:1;
+        const unsigned quotaBefore=f.admission.poolQuotaSkipped[family];
+        if(!f.admission.considerPool(family)){
+            p.status="skipped";p.reason=f.admission.poolQuotaSkipped[family]>quotaBefore?"pool-quota-skip":"pool-stratified-skip";
+            return;
+        }
         if(f.poolSnapshots>=16||f.poolByFamily[family]>=8){p.reason="pool-snapshot-cap";++f.motionRefusals;return;}
         if(!reserve(f,p.bytes,true)){p.reason="byte-cap";return;}
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);D3D11_BUFFER_DESC sd=bd;
@@ -260,6 +268,17 @@ class FlatDrawCapture {
           <<"\",\"selected_hdr\":\""<<hex(f.selectedHdr)<<"\",\"qualified\":"<<(f.qualified?"true":"false")
           <<",\"identity_match\":"<<(f.identity?"true":"false")<<",\"draw_cap\":"<<kDrawCap
            <<",\"draws_seen\":"<<f.drawsSeen<<",\"draws_recorded\":"<<f.draws.size()
+           <<",\"selection\":{\"strategy\":\"depth-matched-stratified-v1\",\"stride\":"<<FlatDrawAdmission::kStride
+           <<",\"phase\":"<<(f.number&1?0:FlatDrawAdmission::kStride/2)<<",\"quota_per_class\":"<<FlatDrawAdmission::kQuota
+           <<",\"depth_matched\":"<<f.depthMatched<<",\"scene_eligible\":"<<f.admission.sceneEligible
+           <<",\"motion_eligible\":"<<f.admission.motionEligible<<",\"scene_recorded\":"<<f.admission.sceneRecorded
+           <<",\"motion_recorded\":"<<f.admission.motionRecorded<<",\"scene_skipped\":"<<f.admission.sceneSkipped
+           <<",\"motion_skipped\":"<<f.admission.motionSkipped<<",\"scene_quota_skipped\":"<<f.admission.sceneQuotaSkipped
+           <<",\"motion_quota_skipped\":"<<f.admission.motionQuotaSkipped
+           <<",\"pool_candidates\":["<<f.admission.poolCandidates[0]<<','<<f.admission.poolCandidates[1]
+           <<"],\"pool_selected\":["<<f.admission.poolSelected[0]<<','<<f.admission.poolSelected[1]
+           <<"],\"pool_skipped\":["<<f.admission.poolSkipped[0]<<','<<f.admission.poolSkipped[1]
+           <<"],\"pool_quota_skipped\":["<<f.admission.poolQuotaSkipped[0]<<','<<f.admission.poolQuotaSkipped[1]<<"]}"
            <<",\"overflow\":"<<f.overflows<<",\"refusals\":"<<f.refusals
            <<",\"motion_draws\":"<<motionDraws<<",\"motion_refusals\":"<<f.motionRefusals
            <<",\"motion_complete\":"<<(motionComplete?"true":"false")
@@ -315,15 +334,20 @@ class FlatDrawCapture {
         for(auto& d:f.draws){for(auto& c:d.copies)if(!std::strcmp(c.status,"queued")){c.status=unfinished;c.length=0;}
             for(auto& c:d.cb)if(!std::strcmp(c.status,"queued")){c.status=unfinished;c.length=0;}
             if(!std::strcmp(d.pool.status,"queued")){d.pool.status=unfinished;d.pool.length=0;}}
-        bool all=f.qualified&&f.identity&&!f.draws.empty()&&!f.overflows&&!f.refusals&&!f.readbackError&&!timedOut&&f.drawsSeen<=kDrawCap;
-        bool motionComplete=f.qualified&&f.identity&&!f.motionRefusals&&!f.motionReadbackError&&!timedOut;unsigned motionDraws=0;
+        bool all=f.qualified&&f.identity&&!f.draws.empty()&&!f.overflows&&!f.refusals&&!f.readbackError&&!timedOut&&
+            f.drawsSeen==f.draws.size();
+        bool motionComplete=f.qualified&&f.identity&&!f.motionRefusals&&!f.motionReadbackError&&!timedOut&&
+            !f.admission.motionSkipped&&!f.admission.motionQuotaSkipped;unsigned motionDraws=0;
         for(auto& d:f.draws){for(auto& c:d.copies)if(c.rt<4&&std::strcmp(c.status,"ok"))all=false;
             for(auto& c:d.cb)if(c.resource&&std::strcmp(c.status,"ok"))all=false;
             if(d.motionCandidate){++motionDraws;if(std::strcmp(d.motionStatus,"captured")||std::strcmp(d.pool.status,"ok"))motionComplete=false;
                 for(auto& c:d.copies)if(c.rt>=6&&std::strcmp(c.status,"ok"))motionComplete=false;}}
         if(!motionDraws)motionComplete=false;
         const char* status=all?"complete":f.qualified?"partial":"failed";
-        if(!std::strcmp(f.reason,"qualified"))f.reason=timedOut?"readback-timeout":all?"qualified":"copy-or-cap-refused";
+        if(!std::strcmp(f.reason,"qualified"))f.reason=timedOut?"readback-timeout":all?"qualified":
+            f.draws.empty()?"no-eligible-draws":
+            (f.refusals||f.motionRefusals||f.readbackError||f.motionReadbackError||f.overflows)?
+                "copy-or-cap-refused":"sampled-with-gaps";
         const std::wstring stem=directory_+L"\\frame_"+std::to_wstring(f.number);
         const std::string body=json(f,status,motionComplete,motionDraws);
         FILE* empty=nullptr;
@@ -333,8 +357,10 @@ class FlatDrawCapture {
         const std::wstring temporary=stem+L".json.tmp",manifest=stem+L".json";
         const bool files=write(temporary,body.data(),body.size())&&
             MoveFileExW(temporary.c_str(),manifest.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
-        Log::get().note("flat draw pixels: frame=%llu status=%s reason=%s draws=%u/%u copies=%llu cb-bytes=%llu motion=%u/%u refusals=%u pool-bytes=%llu files=%s directory=%ls",
+        Log::get().note("flat draw pixels: frame=%llu status=%s reason=%s draws=%u/%u scene=%u/%u skip=%u quota-skip=%u motion-eligible=%u recorded=%u skip=%u quota-skip=%u copies=%llu cb-bytes=%llu motion=%u/%u refusals=%u pool-bytes=%llu files=%s directory=%ls",
             (unsigned long long)f.number,status,f.reason,(unsigned)f.draws.size(),f.drawsSeen,
+            f.admission.sceneRecorded,f.admission.sceneEligible,f.admission.sceneSkipped,f.admission.sceneQuotaSkipped,
+            f.admission.motionEligible,f.admission.motionRecorded,f.admission.motionSkipped,f.admission.motionQuotaSkipped,
             (unsigned long long)f.pixelWritten,(unsigned long long)f.cbWritten,motionComplete?1u:0u,motionDraws,
             f.motionRefusals,(unsigned long long)f.poolWritten,files?"ok":"failed",directory_.c_str());
         if(!files)failed_=true;allocated_-=f.bytesAllocated;
@@ -352,7 +378,7 @@ public:
         _snwprintf_s(leaf,_TRUNCATE,L"%04u%02u%02u_%02u%02u%02u_%03u_%lu_%u",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,t.wMilliseconds,GetCurrentProcessId(),++serial_);
         const auto root=Config::get().logDir()+L"\\flat_draw_pixels";directory_=root+L"\\"+leaf;
         if(!ensureDirectory(Config::get().logDir())||!ensureDirectory(root)||!ensureDirectory(directory_)){armed_=false;Log::get().note("flat draw pixels: arm refused directory");return;}
-        Log::get().note("flat draw pixels: armed frame=%llu next-two-qualified-frames points=8 window=16 cap=512-draws/frame memory=256MiB expiry=900frames/30s directory=%ls",
+        Log::get().note("flat draw pixels: armed frame=%llu next-two-qualified-frames points=8 window=16 cap=512-draws/frame scene=256 motion=256 stride=64 complementary-phases memory=256MiB expiry=900frames/30s directory=%ls",
             (unsigned long long)frame,directory_.c_str());
     }
     void begin(uint64_t frame,const void* priorDepth,unsigned width,unsigned height) {
@@ -363,7 +389,7 @@ public:
         current_->width=width;current_->height=height;current_->startMs=GetTickCount64();current_->draws.reserve(kDrawCap);
     }
     bool before(ID3D11DeviceContext* ctx,unsigned instances,char kind,uint32_t count,uint32_t start,int32_t base,uint32_t startInstance,
-                uint64_t vs,uint64_t ps,const void* vsObject,const void* psObject) {
+                uint64_t vs,uint64_t ps,const void* vsObject,const void* psObject,bool motionEligible=false) {
         if(!active()||!ctx)return false;Frame& f=*current_;
         Ptr<ID3D11RenderTargetView> views[4];Ptr<ID3D11DepthStencilView> dsv;
         ID3D11RenderTargetView* raw[4]{};ctx->OMGetRenderTargets(4,raw,&dsv);
@@ -378,10 +404,22 @@ public:
                 vd.ViewDimension==D3D11_RTV_DIMENSION_TEXTURE2D&&vd.Texture2D.MipSlice==0&&bpp(td.Format)!=0;
         }
         if(!matched)return false;++f.drawsSeen;
-        if(f.draws.size()>=kDrawCap){++f.overflows;return false;}
+        Ptr<ID3D11Resource> depthResource;if(dsv)dsv->GetResource(&depthResource);
+        if(depthResource.Get()!=f.priorDepth)return false;
+        ++f.depthMatched;
+        Ptr<ID3D11DepthStencilState> depthState;UINT depthRef=0;
+        ctx->OMGetDepthStencilState(&depthState,&depthRef);
+        D3D11_DEPTH_STENCIL_DESC depthDesc{};
+        if(depthState)depthState->GetDesc(&depthDesc);
+        else {depthDesc.DepthEnable=TRUE;depthDesc.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;}
+        const bool scene=depthDesc.DepthEnable&&depthDesc.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL;
+        // A source candidate may be a depth-write-off decal. Keep a separate
+        // quota so it cannot be displaced by the scene's numerous opaque draws.
+        if(!scene&&!motionEligible)return false;
+        if(!f.admission.consider(motionEligible,f.number))return false;
         Draw d;d.q=f.drawsSeen;d.instances=instances;d.kind=kind;d.count=count;d.start=start;d.base=base;d.startInstance=startInstance;
         d.vs=vs;d.ps=ps;d.vsObject=vsObject;d.psObject=psObject;
-        d.dsv=dsv.Get();if(dsv){Ptr<ID3D11Resource> dr;dsv->GetResource(&dr);d.depthResource=dr.Get();
+        d.dsv=dsv.Get();if(dsv){Ptr<ID3D11Resource> dr=depthResource;d.depthResource=dr.Get();
             Ptr<ID3D11Texture2D> dt;if(dr&&SUCCEEDED(dr.As(&dt))){D3D11_TEXTURE2D_DESC td{};dt->GetDesc(&td);d.depthFormat=td.Format;}
             D3D11_DEPTH_STENCIL_VIEW_DESC vd{};dsv->GetDesc(&vd);d.depthViewFormat=vd.Format;}
         for(unsigned i=0;i<4;++i)d.rt[i]=rt[i];
@@ -413,6 +451,12 @@ public:
         ctx->VSGetShaderResources(33,1,&poolRaw);pool.Attach(poolRaw);
         d.motionPoolView=pool.Get();if(pool){Ptr<ID3D11Resource> pr;pool->GetResource(&pr);d.motionPool=pr.Get();}
         stagePool(ctx,f,d,pool.Get());
+        // A full-scene depth mirror is much more expensive than the sparse
+        // color windows. Only take it when this draw got a raw pool snapshot.
+        if(std::strcmp(d.pool.status,"queued")){
+            d.motionStatus=!std::strcmp(d.pool.status,"skipped")?"pool-sampled-out":"pool-unavailable";
+            return;
+        }
         if(!views[6]||!dsv||dsv.Get()!=d.dsv){++f.motionRefusals;return;}
         Ptr<ID3D11Resource> slotResource;views[6]->GetResource(&slotResource);
         Ptr<ID3D11Texture2D> slot;if(!slotResource||FAILED(slotResource.As(&slot))){++f.motionRefusals;return;}

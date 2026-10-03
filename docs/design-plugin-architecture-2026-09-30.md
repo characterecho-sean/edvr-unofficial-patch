@@ -49,7 +49,7 @@
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
   Verified `14a7ff70` reproduces the pre-existing NV blur.
-  Main `00d4f738` is integrated; `83938927` is reviewed for integration.
+  Main `83938927` is integrated; the combined tree passes all 142 jobs.
   A symmetric matched control is prepared but still needs validation;
   the latest installed-binary flight is not that comparison.
   Temporary instrument key: `advanced.draw_replay` (off by default); propose
@@ -2212,3 +2212,46 @@ coverage, repeatable CPU improvement beyond noise and direct GPU
 non-regression remain open. The next useful cost slice is repeated on-foot
 panel CB apply/restore; broad temporal and mixed menu ownership need
 separate review.
+
+### Main integration and symmetric control preparation, 2026-10-03
+
+Main revision `83938927e3488b693cb85e3375541f6b3e5bc0b6` is integrated into
+the plugin branch after checkpoint `67e26af7`. The source delta is flat-mode
+capture diagnostics. All seven draw-hook conflicts preserve feature
+trace/action records while main's footprint begin/end calls bracket the real
+flat draw, including indirect buffer/offset arguments. The build conflict
+retains both sides' gates. This integration does not merge the plugin branch
+into main.
+
+The combined source passes all 142 full validation jobs: 135 pooled jobs in
+168.4 seconds and seven quiet jobs in 50.4 seconds. Production profiles,
+Python self-tests, native rigs, the 235-key config contract and
+self-contained installer checks pass; FocusWatch reports no shown window,
+console or foreground move to the build tree in 219 seconds. Receipt input
+SHA256: `ab027b6b4466114903cf2fe95e0c27ed609941a9c04ff168032bcc32b7db61fd`.
+Fresh merged-source assembly retains the prior 7057-byte NoTrace/NoCpu
+classifier and all eight 2782-byte NoTrace forwarding bodies, with unchanged
+byte/ordered-call hashes. Build label: `v0.18.1-39-g67e26af7-dirty`.
+
+The draw-hook CPU log now states its actual scope in both report branches:
+subtract the first forwarding interval, including indexed-instanced
+weapon-motion reissue, include later EDVR reissues, and exclude any claim of
+total EDVR CPU. The numerical fields, prefix, sampling and calculations are
+unchanged; the production source gate checks both truthful suffixes.
+
+The isolated `codex/plugin-performance-control-20261003` checkout starts
+from the same main revision. It carries only the five timed-draw denominator
+regions and helper from `03049f8d`, the same corrected scope text, and the
+identical mapped-DLSS reporter plus cold creation insertion. A
+dependency-free control rig tests the same meaningful denominator cases and
+source wiring, with immediate no-read/no-write dry-run. Actual helper/test
+bytes and call-site context match; all three ignored dependency trees match
+path/size/SHA with no missing, extra or nested files. It is undergoing its
+own full validation. Control acceptance and clean promotion are still
+required before installation.
+
+Steam remains on 4350a281. Its current `advanced.draw_replay = on` setting
+allocates opt-in diagnostic pools, so Sean has been asked to change only
+that value to `off` before the matched production timing runs. No new flight
+is requested until a concrete promoted control is verified. Remaining Phase
+1 coverage/performance gates and the Phase 2 hold are unchanged.

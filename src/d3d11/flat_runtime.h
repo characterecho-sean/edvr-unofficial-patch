@@ -83,6 +83,9 @@ void flatRuntimeUnknown();
 void flatRuntimeArmProjectionAudit();
 void flatRuntimeCreateBuffer(ID3D11Buffer*, const void* initialData);
 void flatRuntimeClearBindings();
+// F10-only retained DSV clear chronology; called before the real clear.
+void flatRuntimeWeaponFootprintClear(ID3D11DepthStencilView*, UINT clearFlags, UINT8 stencil);
+void flatRuntimeWeaponFootprintBeforePresent(IDXGISwapChain*, UINT flags);
 // A hooked call of the kind flat_substitution.h names has come, or the frame is ending: put the game's state back where
 // engine motion's substitution is still bound (a lazy run of substituted producer draws), or forget it (the context
 // lost its state). Every hook of that kind calls this before its real call; a load and a compare when nothing of EDVR's
@@ -94,11 +97,18 @@ struct FlatRuntimeDrawScope {
     bool gameHadTarget6 = false;   // the game's own slot 6 was occupied under a substituted draw
     bool producer = false, replaced = false;
     bool drawCaptureStarted = false;
+    bool weaponFootprintStarted = false;
+    uint32_t weaponFootprintSeq = 0;
+    char weaponDrawKind = '?';
+    uint32_t weaponDrawCount = 0, weaponDrawStart = 0, weaponDrawInstances = 0, weaponDrawStartInstance = 0;
+    int32_t weaponDrawBase = 0;
     std::optional<FlatProjectionBindingScope> projection;
     FlatRuntimeDrawScope(ID3D11DeviceContext*, uint32_t instances,
                          char kind='?', uint32_t count=0, uint32_t start=0,
                          int32_t base=0, uint32_t startInstance=0);
     ~FlatRuntimeDrawScope();
+    void beginActualDraw(ID3D11Buffer* indirectArgs=nullptr, UINT indirectOffset=0);
+    void endActualDraw();
     bool recover(const char* reason);
     // The HDR route's treatment at its trigger draw (flat_hdr_route.h, design section 81): the resolve of the game's HDR
     // scene target H, written back into H, before the game's pass that reads it. `srvSlot` is the pixel-shader slot that

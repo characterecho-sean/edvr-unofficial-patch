@@ -43,6 +43,7 @@ std::vector<uint64_t> motionHashLog; // one entry per backend call, in call orde
 // the resolver logged ("flat resolve: first-person ..."): the world route's two new seams.
 std::vector<int> backendSlots;
 std::vector<std::string> firstPersonLines;
+std::vector<std::string> weaponFootprintLines;
 uint32_t observedInW=0,observedInH=0,observedOutW=0,observedOutH=0;
 // What the stub backends were handed on the HDR route (section 81): the flag and the formats of the textures it names.
 bool observedHdr=false;DXGI_FORMAT observedColourFormat=DXGI_FORMAT_UNKNOWN,observedOutFormat=DXGI_FORMAT_UNKNOWN;
@@ -151,11 +152,20 @@ void Log::note(const char* fmt,...) {
     if(std::strncmp(line,prefix,sizeof(prefix)-1)==0)resetEvents.emplace_back(line);
     else if(std::strncmp(line,firstPersonPrefix,sizeof(firstPersonPrefix)-1)==0)firstPersonLines.emplace_back(line);
     else if(std::strncmp(line,isolationPrefix,sizeof(isolationPrefix)-1)==0)isolationLines.emplace_back(line);
+    else if(std::strncmp(line,"flat weapon footprint:",22)==0)weaponFootprintLines.emplace_back(line);
 }
 // Stand-in for src\common\proxy.cpp's breadcrumb(): the route's crumbs land here so the rig can read the trail back.
 void breadcrumb(const char* stage) {if(stage)crumbLines.emplace_back(stage);}
 bool ensureDirectory(const std::wstring& path) {return CreateDirectoryW(path.c_str(),nullptr) || GetLastError()==ERROR_ALREADY_EXISTS;}
 thread_local bool g_flatComputeInternal = false;
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* context,const void* bytecode,size_t size,
+                                         const char*,const char*) {
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    context->GetDevice(&device);
+    ID3D11ComputeShader* shader=nullptr;
+    if(device)device->CreateComputeShader(bytecode,size,nullptr,&shader);
+    return shader;
+}
 bool dlaaAvailable(ID3D11Device*,const char**){return true;}
 bool fsr3Available(ID3D11Device*,const char**){return true;}
 bool dlaaEvaluate(ID3D11DeviceContext* c,int slot,ID3D11Texture2D* colour,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
@@ -181,6 +191,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_projection_runtime_tests.h"
 #include "flat_pixel_capture_gpu_tests.h"
 #include "flat_draw_capture_gpu_tests.h"
+#include "flat_weapon_footprint_gpu_tests.h"
 #include "flat_hdr_route_gpu_tests.h"
 #include "flat_resolve_fixture.h"
 #include "flat_upscaler_slot_gpu_tests.h"
@@ -772,6 +783,7 @@ int main(int argc,char** argv) {
     context->ClearState();
     failures+=flatPixelCaptureGpuTests(device.Get(),context.Get());
     failures+=flatDrawCaptureGpuTests(device.Get(),context.Get());
+    failures+=flatWeaponFootprintGpuTests(device.Get(),context.Get());
     // The HDR route's resolver half (design section 81): before the D3D message check below, so its draws are held to it.
     hdrRouteGpuTests(device.Get(),context.Get());
     // The VR world route's seams (section 82): the third upscaler slot, the first-person map and stencil in the prep, and the phase term

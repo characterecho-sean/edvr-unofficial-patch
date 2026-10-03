@@ -1166,14 +1166,14 @@ void perfMonitorFrame(ID3D11Device* dev) {
     // only measured frames, never the held value copied into the ring.
     if (s.frameNo % 1800 == 0) {
         if (s.drawCpuWindow.hasTimedDraws() && qpcFrequency() > 0) {
-            Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); %.6f ms per timed draw sample across %llu samples; excludes forwarded game draw time, includes EDVR reissues. Frame totals estimate every %uth draw scaled by %u; per-draw mean uses the observed timed-sample denominator.",
+            Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); %.6f ms per timed draw sample across %llu samples; subtracts the first forwarding interval, including indexed-instanced weapon-motion reissue; includes later EDVR reissues; not total EDVR CPU. Frame totals estimate every %uth draw scaled by %u; per-draw mean uses the observed timed-sample denominator.",
                 s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
                 double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
                 s.drawCpuWindow.meanMs(static_cast<std::uint64_t>(qpcFrequency())),
                 static_cast<unsigned long long>(s.drawCpuWindow.windowTimedDraws),
                 unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride));
         } else {
-            Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); per-timed-draw mean unavailable (%llu valid timed draw samples); excludes forwarded game draw time, includes EDVR reissues. Frame totals estimate every %uth draw scaled by %u.",
+            Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); per-timed-draw mean unavailable (%llu valid timed draw samples); subtracts the first forwarding interval, including indexed-instanced weapon-motion reissue; includes later EDVR reissues; not total EDVR CPU. Frame totals estimate every %uth draw scaled by %u.",
                 s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
                 double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
                 static_cast<unsigned long long>(s.drawCpuWindow.windowTimedDraws),

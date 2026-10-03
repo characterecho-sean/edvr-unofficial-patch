@@ -894,8 +894,13 @@ bool drawCpuWindowProductionChecks() {
                 "monitor activity/configuration changes do not reset the always-on draw window");
     ok &= check(screen.find("if (on) perfMonitorDrawTicks(qpcNow() - t0, real);") != std::string::npos,
                 "timed sample denominator uses the unchanged DrawClock selection and callbacks");
+    const std::string scopeText = "subtracts the first forwarding interval, including indexed-instanced weapon-motion reissue; includes later EDVR reissues; not total EDVR CPU";
+    const std::size_t scopeFirst = frame.find(scopeText);
     ok &= check(frame.find("per timed draw sample across %llu samples") != std::string::npos &&
-                frame.find("per-timed-draw mean unavailable (%llu valid timed draw samples)") != std::string::npos,
+                frame.find("per-timed-draw mean unavailable (%llu valid timed draw samples)") != std::string::npos &&
+                scopeFirst != std::string::npos &&
+                frame.find(scopeText, scopeFirst + scopeText.size()) != std::string::npos &&
+                frame.find("excludes forwarded game draw time, includes EDVR reissues") == std::string::npos,
                 "report labels timed-draw mean and distinguishes no sample from measured zero");
     return ok;
 }

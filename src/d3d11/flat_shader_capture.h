@@ -22,6 +22,10 @@ inline constexpr FlatShaderCaptureKey kFlatShaderCaptureKeys[] = {
     {'p', 0x4E4FF61E8A08FC7Eull}, {'p', 0x94676B1FD0DF150Full},
     {'p', 0xBA65C50BBA1ECCBBull}, {'p', 0xE54F2A902E5631F6ull},
     {'p', 0xFEE777E92850B390ull},
+    // 2026-10-03 flat on-foot camera conflicts: capture both exact shader
+    // pairs before considering any change to HDR camera admission.
+    {'v', 0x025B4B9FF54622EDull}, {'p', 0x46F92DC71BF8DFA5ull},
+    {'v', 0x9AEC596A2B036EA6ull}, {'p', 0x3789CA2062E196FBull},
 };
 inline constexpr size_t kFlatShaderCaptureCount =
     sizeof(kFlatShaderCaptureKeys) / sizeof(kFlatShaderCaptureKeys[0]);
@@ -31,6 +35,6 @@ inline constexpr uint32_t flatShaderCaptureBit(bool flat, char stage, uint64_t h
             return uint32_t(1) << i;
     return 0;
 }
-static_assert(kFlatShaderCaptureCount == 13 && kFlatShaderCaptureCount <= 32,
+static_assert(kFlatShaderCaptureCount == 17 && kFlatShaderCaptureCount <= 32,
               "bounded capture mask must cover the exact missing shader set");
 } // namespace edvr

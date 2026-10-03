@@ -165,6 +165,86 @@ inline int flatPixelCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
     check(!capture.active(),"frame boundary expires arm even with no qualified resolve");
     capture.arm(924);capture.cancel();
     check(!capture.active(),"resize/stop cancel clears diagnostic");
+    {   // A small HDR route fixture forces a nonzero ROI origin without a 4K WARP allocation.
+        // Two captures are queued before either readback is polled: the second is genuinely
+        // the next live frame, and the game's final H changes between them.
+        constexpr UINT hw=17,hh=5,cw=9,ch=3,cx=4,cy=1;
+        const DXGI_FORMAT hf[]={DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R32_FLOAT,
+            DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R16G16B16A16_FLOAT,
+            DXGI_FORMAT_R11G11B10_FLOAT};
+        const UINT hb[]={4,4,4,1,8,4};
+        std::array<std::vector<unsigned char>,6> hp;
+        std::array<ComPtr<ID3D11Texture2D>,6> ht;
+        ID3D11Texture2D* hs[6]{};
+        for(unsigned i=0;i<6;++i) {
+            hp[i].resize(hw*hh*hb[i]);
+            for(unsigned y=0;y<hh;++y)for(unsigned x=0;x<hw;++x) {
+                unsigned char* dst=hp[i].data()+(y*hw+x)*hb[i];
+                if(i==0 || i==5) {
+                    // Red is 1+small mantissa; green 2; blue .5. Final has a
+                    // different mantissa, proving H was captured after the draw.
+                    const uint32_t bits=((14u<<5)<<22) | ((16u<<6)<<11) | ((15u<<6)+(i==5?16u:0u)+x+y);
+                    std::memcpy(dst,&bits,4);
+                } else if(i==1) {
+                    const float z=.01f+float(y)*.01f;std::memcpy(dst,&z,4);
+                } else if(i==3)dst[0]=x%2?255:0;
+                else if(i==4) {
+                    const uint16_t half[4]={0x3c00,0x4000,0x3800,0x3c00};std::memcpy(dst,half,8);
+                }
+            }
+            D3D11_TEXTURE2D_DESC d{};d.Width=hw;d.Height=hh;d.ArraySize=d.MipLevels=1;
+            d.SampleDesc.Count=1;d.Format=hf[i];d.Usage=D3D11_USAGE_DEFAULT;
+            D3D11_SUBRESOURCE_DATA init{};init.pSysMem=hp[i].data();init.SysMemPitch=hw*hb[i];
+            check(SUCCEEDED(device->CreateTexture2D(&d,&init,&ht[i])),"HDR route source texture created");
+            hs[i]=ht[i].Get();
+        }
+        std::vector<float> hslots(hw*hh*2,0);
+        D3D11_TEXTURE2D_DESC sd{};sd.Width=hw;sd.Height=hh;sd.ArraySize=sd.MipLevels=1;
+        sd.SampleDesc.Count=1;sd.Format=DXGI_FORMAT_R32G32_FLOAT;sd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA si{};si.pSysMem=hslots.data();si.SysMemPitch=hw*8;
+        ComPtr<ID3D11Texture2D> st;ComPtr<ID3D11ShaderResourceView> sv;
+        check(SUCCEEDED(device->CreateTexture2D(&sd,&si,&st)) &&
+            SUCCEEDED(device->CreateShaderResourceView(st.Get(),nullptr,&sv)),"HDR cropped engine slot texture created");
+        if(!st || !sv || !hs[0] || !hs[5])return captureFailures;
+        edvr::FlatMonoResolveFrame hf1=frame;hf1.hdr=true;hf1.frame=101;hf1.mode=edvr::FlatMonoResolveMode::Dlaa;
+        hf1.renderWidth=hf1.outputWidth=hw;hf1.renderHeight=hf1.outputHeight=hh;
+        hf1.engine={sv.Get(),poolView.Get(),nowBuffer.Get(),previousBuffer.Get()};
+        edvr::FlatPixelCapture hcap;hcap.arm(100);const fs::path hdir=hcap.directory();
+        hcap.capture(device,context,hf1,false,hs,false,cw,ch);
+        std::vector<unsigned char> final2=hp[5];
+        for(unsigned y=0;y<hh;++y)for(unsigned x=0;x<hw;++x) {
+            uint32_t bits=0;std::memcpy(&bits,final2.data()+(y*hw+x)*4,4);bits+=5;
+            std::memcpy(final2.data()+(y*hw+x)*4,&bits,4);
+        }
+        context->UpdateSubresource(ht[5].Get(),0,nullptr,final2.data(),hw*4,0);
+        hf1.frame=102;hcap.capture(device,context,hf1,false,hs,false,cw,ch);
+        check(hcap.active(),"HDR route accepts two consecutive queued captures");
+        context->Flush();
+        for(unsigned attempt=0;attempt<240 && (!fs::exists(hdir/L"frame_101.json") || !fs::exists(hdir/L"frame_102.json"));++attempt)
+            {hcap.poll(context,103);Sleep(1);}
+        check(fs::exists(hdir/L"frame_101.json") && fs::exists(hdir/L"frame_102.json"),
+              "two pending HDR readbacks publish consecutive manifests");
+        for(unsigned frameNo=101;frameNo<=102;++frameNo) {
+            const auto sourceFinal=frameNo==101?hp[5]:final2;
+            for(unsigned i=0;i<6;++i) {
+                const auto& source=i==5?sourceFinal:hp[i];
+                std::vector<unsigned char> expected(cw*ch*hb[i]);
+                for(unsigned y=0;y<ch;++y)
+                    std::memcpy(expected.data()+y*cw*hb[i],source.data()+((cy+y)*hw+cx)*hb[i],cw*hb[i]);
+                std::ifstream file(hdir/(std::string("frame_")+std::to_string(frameNo)+"_"+names[i]+".bin"),std::ios::binary);
+                const std::vector<unsigned char> actual((std::istreambuf_iterator<char>(file)),std::istreambuf_iterator<char>());
+                check(actual==expected,"HDR format bytes and nonzero ROI origin match their frame's source");
+            }
+            std::ifstream mf(hdir/(std::string("frame_")+std::to_string(frameNo)+".json"),std::ios::binary);
+            const std::string body((std::istreambuf_iterator<char>(mf)),std::istreambuf_iterator<char>());
+            check(body.find("\"route\":\"hdr\"")!=std::string::npos &&
+                  body.find("\"capture_roi\":{\"x\":4,\"y\":1,\"width\":9,\"height\":3}")!=std::string::npos &&
+                  body.find("\"final_provenance\":\"scene-H-after-finish-before-tonemap\"")!=std::string::npos &&
+                  body.find("\"complete\":true")!=std::string::npos,
+                  "HDR manifest identifies ROI, final target provenance and retained engine evidence");
+        }
+        hcap.cancel();
+    }
     const auto after=edvr::flatMonoResolveStats();
     check(before.acceptedResets==after.acceptedResets && before.acceptedContinues==after.acceptedContinues &&
         before.fullResets==after.fullResets && before.invalidations==after.invalidations,"manual diagnostic never changes temporal history");

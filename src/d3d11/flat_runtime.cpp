@@ -14,6 +14,7 @@
 #include "flat_camera_phase.h"
 #include "flat_live_phase.h"
 #include "flat_draw_capture.h"
+#include "flat_weapon_footprint.h"
 #include "flat_pixel_capture_policy.h"
 #include "flat_local_reject.h"
 #include "flat_trace.h"
@@ -171,6 +172,7 @@ struct View {
 };
 struct State {
     FlatDrawCapture drawCapture;
+    FlatWeaponFootprint weaponFootprint;
     DWORD thread = 0; Ptr<ID3D11Device> device; Ptr<ID3D11DeviceContext> context;
     Ptr<ID3D11Texture2D> output, sceneDepth; Ptr<ID3D11ShaderResourceView> depthView;
     FlatRuntimePrefix prefix{}; CameraTable cameras;
@@ -721,11 +723,20 @@ void reportProjection(State& s, const char* event) {
         (s.localSamples[i].closed[0]?1u:0u)+(s.localSamples[i].closed[1]?1u:0u),
         (unsigned long long)s.localSamples[i].firstFrame);
     const auto& copy=s.copyProvenance;
-    const auto& cameraProbe=s.cameraProbe;
-    Log::get().note("flat camera probe: event=%s observed=%llu conflicts=%llu attempts=%u complete=%u missing=%u actual-mismatch=%u first-frame=%llu last-frame=%llu result=%s; F10 only, two distinct conflict frames, CPU shadows only, no camera admission",
-        event,(unsigned long long)cameraProbe.observed,(unsigned long long)cameraProbe.conflicts,
-        cameraProbe.attempts,cameraProbe.complete,cameraProbe.missing,cameraProbe.actualMismatch,
-        (unsigned long long)cameraProbe.firstFrame,(unsigned long long)cameraProbe.lastFrame,cameraProbe.result());
+    uint64_t cameraObserved=0,cameraConflicts=0;
+    uint32_t cameraAttempts=0,cameraComplete=0,cameraMissing=0,cameraMismatch=0;
+    for(size_t i=0;i<kFlatCameraProbePairCount;++i) {
+        const auto& p=s.cameraProbe.pairs[i];const auto& key=kFlatCameraProbePairs[i];
+        cameraObserved+=p.observed;cameraConflicts+=p.conflicts;cameraAttempts+=p.attempts;
+        cameraComplete+=p.complete;cameraMissing+=p.missing;cameraMismatch+=p.actualMismatch;
+        Log::get().note("flat camera probe pair: event=%s pair=%u VS=%016llX PS=%016llX observed=%llu conflicts=%llu attempts=%u complete=%u missing=%u actual-mismatch=%u first-frame=%llu last-frame=%llu result=%s; F10 only, two distinct conflict frames per pair",
+            event,unsigned(i),(unsigned long long)key.vs,(unsigned long long)key.ps,
+            (unsigned long long)p.observed,(unsigned long long)p.conflicts,p.attempts,p.complete,p.missing,p.actualMismatch,
+            (unsigned long long)p.firstFrame,(unsigned long long)p.lastFrame,p.result());
+    }
+    Log::get().note("flat camera probe: event=%s observed=%llu conflicts=%llu attempts=%u complete=%u missing=%u actual-mismatch=%u pairs=%u; F10 only, CPU shadows only, no camera admission",
+        event,(unsigned long long)cameraObserved,(unsigned long long)cameraConflicts,
+        cameraAttempts,cameraComplete,cameraMissing,cameraMismatch,unsigned(kFlatCameraProbePairCount));
     reportUnknownProjection(s,event);
     Log::get().note("flat copy provenance capture: event=%s attempts=%u completed=%u missing-source-record=%u missing-destination-record=%u actual-shader-mismatch=%u rearmed-before-complete=%u first-frame=%llu result=%s; two distinct frames per F10 arm separated by at least 90 frames",
         event,copy.attempts,copy.completed,copy.missingSource,copy.missingDestination,
@@ -956,14 +967,14 @@ uint32_t captureCameraConflict(State& s, const FlatRuntimeDraw& draw) {
     // Run on the original game draw, before the observer records/refuses it and
     // before any private jitter or motion bindings. No per-draw work outside F10.
     const auto& k=draw.key;
-    if(!s.projectionFrames || k.vs!=0x88DCF1164C640EC3ull || k.ps!=0x494506A63091DF8Cull)return 0;
+    if(!s.projectionFrames || FlatCameraProbe::pairIndex(k.vs,k.ps)==kFlatCameraProbePairCount)return 0;
     const FlatRuntimeTarget* target=nullptr;
     for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
         if(s.prefix.targets[i].resource==k.color){target=&s.prefix.targets[i];break;}
     const bool conflict=k.format==26 && k.camera && target && target->hdrCamera &&
         std::memcmp(target->tone.camera,draw.camera,kFlatCameraBytes)!=0;
-    if(!s.cameraProbe.begin(true,k.vs,k.ps,s.prefix.frame,conflict))return 0;
-    const uint32_t attempt=s.cameraProbe.attempts;
+    const uint32_t attempt=s.cameraProbe.begin(true,k.vs,k.ps,s.prefix.frame,conflict);
+    if(!attempt)return 0;
     FlatComputeInternalScope internal;
     Ptr<ID3D11VertexShader> actualVs;Ptr<ID3D11PixelShader> actualPs;
     s.context->VSGetShader(&actualVs,nullptr,nullptr);s.context->PSGetShader(&actualPs,nullptr,nullptr);
@@ -1016,7 +1027,7 @@ uint32_t captureCameraConflict(State& s, const FlatRuntimeDraw& draw) {
         attempt,depthState.Get(),depthState?0u:1u,desc.DepthEnable?1u:0u,desc.DepthWriteMask,desc.DepthFunc,desc.StencilEnable?1u:0u,stencilRef,
         desc.StencilReadMask,desc.StencilWriteMask,desc.FrontFace.StencilFailOp,desc.FrontFace.StencilDepthFailOp,desc.FrontFace.StencilPassOp,desc.FrontFace.StencilFunc,
         desc.BackFace.StencilFailOp,desc.BackFace.StencilDepthFailOp,desc.BackFace.StencilPassOp,desc.BackFace.StencilFunc,complete?"complete":"partial");
-    s.cameraProbe.finish(complete,actualMatches);
+    s.cameraProbe.finish(attempt,complete,actualMatches);
     return attempt;
 }
 void captureLocalProjection(State& s, uint64_t vs, uint64_t ps) {
@@ -1818,7 +1829,8 @@ void flatRuntimeResize() {
     // The swap chain or the device went: engine motion's bound state (the game's render targets among it, held by
     // reference) is forgotten without touching a context that may be gone.
     flatRuntimeSubstitution(nullptr, FlatSubstEvent::kResize);
-    auto& s = state(); FlatComputeInternalScope guard; s.drawCapture.cancel("resize-or-stop"); flatMonoResolveReset();
+    auto& s = state(); FlatComputeInternalScope guard; s.drawCapture.cancel("resize-or-stop");
+    s.weaponFootprint.cancel("resize-or-stop");flatMonoResolveReset();
     // A reset (or the mode turned off) ends a stand-down: the new contract may well be
     // one the selector recognises, and every paused piece restarts with it.
     endStandDown(s, s.prefix.frame, "the swap chain or device was reset, or the mode was turned off");
@@ -2061,6 +2073,16 @@ static FlatMonoFrame copyAdmit(State& s, const FlatRuntimeDraw& d, const FlatMon
     return out;
 }
 
+void flatRuntimeWeaponFootprintClear(ID3D11DepthStencilView* dsv,UINT flags,UINT8 stencil) {
+    auto& s=state();if(!s.weaponFootprint.active()||!owner())return;
+    s.weaponFootprint.clear(dsv,flags,stencil,s.prefix.sequence);
+}
+void flatRuntimeWeaponFootprintBeforePresent(IDXGISwapChain* swap,UINT flags) {
+    if(!swap||(flags&DXGI_PRESENT_TEST))return;
+    auto& s=state();if(!s.weaponFootprint.active()||!owner())return;
+    FlatComputeInternalScope guard;
+    s.weaponFootprint.beforePresent(s.context.Get(),s.prefix.frame,s.prefix.sequence);
+}
 void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {
     if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;
     auto& s = state(); if (s.thread && !owner()) return;
@@ -2197,6 +2219,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // it, and it ran at a nonzero phase unless the jitter is off on purpose. The two frames after an
     // F10 arm were neither, and their constants carry no phase (2026-09-29).
     s.drawCapture.present(s.context.Get(),frame,flatCaptureFrameLive(flatMonoResolveLastReset(),s.frameHadPhase,s.jitterWanted));
+    s.weaponFootprint.present(s.context.Get(),frame,s.prefix.sequence);
     flatMonoResolvePollPixels(s.context.Get(),frame);
     if(s.phase.applied)++s.jitteredFrames;
     s.phase.finish(s.temporalAccepted && SUCCEEDED(hr),s.frameCoverage && !s.prefix.uncertain && !foreignWork.load(std::memory_order_acquire));
@@ -2257,6 +2280,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         syncEngine();
         flatMonoResolveArmPixels(frame);
         s.drawCapture.arm(frame);
+        s.weaponFootprint.arm(frame);
         if(s.projectionFrames)reportProjection(s,"rearmed");
         else if(s.unknownProjectionPairsUsed || s.unknownProjectionCaptureOverflow)
             reportUnknownProjection(s,"manual-rearm");
@@ -2300,6 +2324,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             // The gameplay HDR source rejected in the FSR conflict audit.
             // Its creation bytes identify whether camera-free admission is safe.
             captureFlatProbeShader('p',0x07B3F82100F29401ull);
+            // Both exact first-bad on-foot camera pairs: F10 requests cached
+            // creation bytes even if they predate this arm. Never admits a draw.
+            for(size_t i=1;i<kFlatCameraProbePairCount;++i){
+                captureFlatProbeShader('v',kFlatCameraProbePairs[i].vs);
+                captureFlatProbeShader('p',kFlatCameraProbePairs[i].ps);
+            }
             // Exact unknown scene pairs observed in build 0150638a. These
             // creation-cache probes run once per manual F10 arm, never per draw.
             constexpr uint64_t unknownVs[]={0xA1B7CFCD0BE7493Eull,0xCE24A73943632F55ull,
@@ -2850,7 +2880,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if (s.work == FlatWork::Paused) return;
     if (auditing) ingress.accepted.fetch_add(1, std::memory_order_relaxed);
     flatcpu::Scope shell(flatcpu::kOther);   // the scope's own time; the named families below are carved out of it
-    ctx = context; FlatRuntimeDraw d{}; auto& k = d.key;
+    ctx = context;
+    weaponDrawKind=kind;weaponDrawCount=count;weaponDrawStart=start;weaponDrawBase=base;
+    weaponDrawInstances=instances;weaponDrawStartInstance=startInstance;
+    FlatRuntimeDraw d{}; auto& k = d.key;
     // Lazy substitution (engine_velocity.h): engine motion's state may still be bound from the producer draw before this
     // one, and stays bound only while nothing that could see it runs. A diagnostic capture reads the context, so with
     // one armed the game's state goes back at once and every producer draw restores after itself, as it always did.
@@ -2934,8 +2967,15 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     const bool copy = k.vs == flat_mono_detail::kCopyVs && k.ps == flat_mono_detail::kCopyPs && k.color == s.prefix.output;
     if(!copy && s.drawCapture.active()) {
         FlatComputeInternalScope guard;
+        // This repeats the later source predicate only while F10 is armed, so
+        // admission can reserve samples for late motion producers before the
+        // private MRT6 substitution. The later predicate remains authoritative.
+        const bool motionEligible=d.supported && k.camera && k.depth &&
+            flatContractKind(false,k.color,k.depth,k.width,k.height,k.format==9?26:k.format,
+                s.prefix.width,s.prefix.height,false)==kFlatContractScreen &&
+            (k.format==23||k.format==26)&&flat_mono_detail::fullViewport(k,k.width,k.height);
         drawCaptureStarted=s.drawCapture.before(ctx,instances,kind,count,start,base,startInstance,
-            k.vs,k.ps,bindingGet(BindSlot::Vs),bindingGet(BindSlot::Ps));
+            k.vs,k.ps,bindingGet(BindSlot::Vs),bindingGet(BindSlot::Ps),motionEligible);
     }
     if (tone || copy) for (uint32_t slot = 0; slot < 2; ++slot) {
         const auto bind = static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot);
@@ -2958,6 +2998,18 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         flatcpu::Scope checks(flatcpu::kCopyChecks);   // F10-only unless it is the camera-conflict draw
         return captureCameraConflict(s,d);
     }();
+    if(s.weaponFootprint.active() && k.vs==0x025B4B9FF54622EDull &&
+       k.ps==0x46F92DC71BF8DFA5ull) {
+        const FlatRuntimeTarget* target=nullptr;
+        for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+            if(s.prefix.targets[i].resource==k.color){target=&s.prefix.targets[i];break;}
+        const bool conflict=k.format==26&&k.camera&&target&&target->hdrCamera&&
+            std::memcmp(target->tone.camera,d.camera,kFlatCameraBytes)!=0;
+        weaponFootprintSeq=s.prefix.sequence+1;
+        weaponFootprintStarted=s.weaponFootprint.before(ctx,s.prefix.frame,weaponFootprintSeq,
+            k.vs,k.ps,conflict,k.cameraHash,d.camera,
+            target?target->tone.key.cameraHash:0,target?target->tone.camera:nullptr);
+    }
     // Gate 1 consolidation: the copy draw's selection is produced as the
     // frame contract (identical decision), and every draw is recorded into
     // the trace ring for the reducer replay.
@@ -2996,6 +3048,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             witness.cause==FlatRuntimeConflict::CameraChange && witness.sequence==s.prefix.sequence?1u:0u);
         break;
     }
+    if(weaponFootprintStarted)for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+        if(s.prefix.targets[i].resource==k.color){
+            const auto& bad=s.prefix.targets[i].firstBad;
+            s.weaponFootprint.confirm(s.prefix.frame,weaponFootprintSeq,bad.sequence,flatRuntimeConflictName(bad.cause));
+            break;
+        }
     s.hdrCopiesAccepted+=s.prefix.imageCopiesAccepted-oldImageAccepted;
     s.hdrCopiesRefused+=s.prefix.imageCopiesRefused-oldImageRefused;
     s.menuCopiesAccepted+=s.prefix.menuCopiesAccepted-oldMenuAccepted;
@@ -3019,6 +3077,15 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // The HDR route's selection at its trigger (and, with the key auto, its verdict into the stand-down): a Probe frame
     // runs it too, so a probe that finds the route's consumer ends the stand-down, as a probe that selects a copy does.
     if (hdrTrigger) { flatcpu::Scope hdrScope(flatcpu::kHdrRoute); hdrSelectAtTrigger(s); }
+    if(hdrTrigger && s.weaponFootprint.tracking(s.prefix.frame)) {
+        uint32_t firstBadSeq=0;
+        for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+            if(s.prefix.targets[i].resource==s.weaponFootprint.colorResource()){
+                firstBadSeq=s.prefix.targets[i].firstBad.sequence;break;}
+        s.weaponFootprint.consumer(ctx,s.prefix.frame,s.prefix.sequence,s.hdr.trigger.hdr,
+            s.hdr.trigger.vs,s.hdr.trigger.ps,s.hdr.trigger.srvSlot,
+            s.hdrSelected.selected()?"selected":flatMonoReasonName(s.hdrSelected.reason),firstBadSeq);
+    }
     // A Probe frame is the contract observation above and nothing else: the prefix model
     // and the selector, on the same inputs an active frame gives them. No coverage, no
     // projection readiness, no source naming or substitution, no resolve. A copy draw the
@@ -3615,9 +3682,25 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     else { ++s.acceptedHistoryWindow; ++s.streak; }
     if (s.streak > s.longestStreak) s.longestStreak = s.streak;
 }
+void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
+    if(!weaponFootprintStarted||!ctx)return;
+    const uint32_t actualStart=(weaponDrawKind=='D'||weaponDrawKind=='N')?
+        static_cast<uint32_t>(weaponDrawBase):weaponDrawStart;
+    const int32_t actualBase=(weaponDrawKind=='D'||weaponDrawKind=='N')?0:weaponDrawBase;
+    state().weaponFootprint.beginActualDraw(ctx,state().prefix.frame,weaponFootprintSeq,
+        weaponDrawKind,weaponDrawCount,actualStart,actualBase,weaponDrawInstances,
+        weaponDrawStartInstance,indirectArgs,indirectOffset);
+}
+void FlatRuntimeDrawScope::endActualDraw() {
+    if(weaponFootprintStarted&&ctx)
+        state().weaponFootprint.endActualDraw(ctx,state().prefix.frame,weaponFootprintSeq);
+}
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if (!ctx) return; FlatComputeInternalScope guard;
     flatcpu::Scope shell(flatcpu::kOther);
+    if(weaponFootprintStarted)
+        state().weaponFootprint.endActualDraw(ctx,state().prefix.frame,weaponFootprintSeq,false);
+    if(weaponFootprintStarted)state().weaponFootprint.after(ctx,state().prefix.frame,weaponFootprintSeq);
     if(drawCaptureStarted)state().drawCapture.after(ctx);
     {
         flatcpu::Scope jitter(flatcpu::kProjection);   // the binding scope's restore

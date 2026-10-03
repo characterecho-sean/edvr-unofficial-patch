@@ -1322,6 +1322,14 @@ if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit 
 "%BUILD%\flat_mono_resolve_test.exe" --self-test || exit /b 1
 python "tools\flat_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
 python "tools\flat_draw_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-partial-fixture" --verify-partial-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-visible-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-depth_rejected-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-color_disabled-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-zero_count-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-query_unavailable-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-query_timeout-fixture" --verify-fixture || exit /b 1
 exit /b 0
 
 :rig_c2_derive_test
@@ -3476,6 +3484,10 @@ python "tools\flat_draw_pixels.py" --self-test || (
     echo [edvr] ERROR: the flat draw pixel analyzer failed its own test
     exit /b 1
 )
+python "tools\flat_weapon_pixels.py" --self-test || (
+    echo [edvr] ERROR: the flat weapon footprint analyzer failed its own test
+    exit /b 1
+)
 
 echo [edvr] === install self-test ===
 REM The tool that puts a build next to the game. Its --dry-run must write
@@ -4075,6 +4087,7 @@ if errorlevel 1 ( echo [edvr] ERROR: UI hologram test build failed & exit /b 1 )
 "%OBJ%\uiholo\ui_holo_test.exe" --dry-run || exit /b 1
 "%OBJ%\uiholo\ui_holo_test.exe" --self-test || exit /b 1
 exit /b 0
+
 
 :rig_fss_dump_api_test
 echo [edvr] === FSS dump capture/readback API owner regression ===

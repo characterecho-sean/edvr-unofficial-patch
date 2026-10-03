@@ -483,4 +483,24 @@ void main(uint3 id : SV_DispatchThreadID) {
 
 }
 
+// Manual F10 diagnostic: extract both planes from a full-subresource copy of
+// the game's depth/stencil texture.  The original DSV is never sampled while
+// bound, and no boxed copy is issued on a depth/stencil resource.
+namespace weapon_footprint {
+constexpr char kExtractCsHlsl[] = R"HLSL(
+Texture2D<float> SourceDepth : register(t0);
+Texture2D<uint2> SourceStencil : register(t1);
+RWTexture2D<float> OutDepth : register(u0);
+RWTexture2D<uint> OutStencil : register(u1);
+cbuffer Region : register(b0) { uint2 origin; uint2 extent; };
+[numthreads(16, 16, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= extent.x || id.y >= extent.y) return;
+    uint2 p = origin + id.xy;
+    OutDepth[id.xy] = SourceDepth.Load(int3(p, 0));
+    OutStencil[id.xy] = SourceStencil.Load(int3(p, 0)).y & 255u;
+}
+)HLSL";
+}
+
 } }

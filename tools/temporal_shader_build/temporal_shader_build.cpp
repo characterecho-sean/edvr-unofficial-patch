@@ -516,7 +516,7 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 55 && coreLegacy.size() == coreFixed.size(), "all fixed shader contracts including diagnostic variants are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 56 && coreLegacy.size() + 1 == coreFixed.size(), "all original fixed shader contracts and the weapon footprint diagnostic are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -546,6 +546,10 @@ static void selfTest() {
                 "generated payload reflects its original shader stage and SM5 contract");
         }
     }
+    check(!std::strcmp(coreFixed.back().symbol, "kWeaponFootprintBytecode") &&
+          compile(compiler.fn, coreFixed.back().alternate, coreFixed.back(), true) &&
+          coreFixed.back().bytes.size() > 4 && !std::memcmp(coreFixed.back().bytes.data(), "DXBC", 4),
+          "the weapon footprint shader compiles as a distinct fixed diagnostic variant");
 
     // The native runtime's stereo shaders (src/openxr/stereo_shader_source.h): four variants from two texts, held to the four D3DCompile calls they replace. The
     // contracts below are written independently of stereoVariants(): the source names, entries, profiles and flag word of src/openxr/d3d11_stereo.cpp at
