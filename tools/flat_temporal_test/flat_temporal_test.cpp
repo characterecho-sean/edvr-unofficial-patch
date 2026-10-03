@@ -3090,6 +3090,84 @@ void testFlatOverlayMutationWiring() {
           "scene-b1 updates and unmaps use camera tracking rather than blanket overlay refusal");
 }
 
+void testFlatHdrSourceWitnessWiring() {
+    auto slurp=[](const char* path) {
+        std::ifstream in(path,std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
+    };
+    const std::string route=slurp("src/d3d11/flat_hdr_route.h");
+    const std::string runtime=slurp("src/d3d11/flat_runtime.cpp");
+    check(!route.empty() && !runtime.empty(),"HDR source witness sources are readable");
+    const auto segment=[](const std::string& source,const char* from,const char* to) {
+        const size_t first=source.find(from);
+        const size_t last=first==std::string::npos?std::string::npos:source.find(to,first);
+        return first==std::string::npos||last==std::string::npos?
+            std::string():source.substr(first,last-first);
+    };
+    const std::string selector=segment(route,
+        "out = flatSelectHdrFrame(in, f.trigger.hdr, consumerSeq, gate);",
+        "if (out.reason == FlatMonoReason::ConflictingHdr) {");
+    const auto selectorValid=[](const std::string& s) {
+        const size_t selected=s.find("out = flatSelectHdrFrame(in, f.trigger.hdr, consumerSeq, gate);"),
+            gate=s.find("out.reason == FlatMonoReason::AmbiguousSource && sourceSink",selected),
+            call=s.find("sourceSink(in, f.trigger.hdr, consumerSeq, sourceSinkUser);",gate);
+        return selected!=std::string::npos && gate!=std::string::npos &&
+            call!=std::string::npos && selected<gate && gate<call;
+    };
+    check(selectorValid(selector),"only the actual AmbiguousSource selector verdict calls the live-record sink before return");
+    std::string noSink=selector;
+    const std::string sinkCall="sourceSink(in, f.trigger.hdr, consumerSeq, sourceSinkUser);";
+    if(noSink.find(sinkCall)!=std::string::npos)
+        noSink.erase(noSink.find(sinkCall),sinkCall.size());
+    check(!selectorValid(noSink),"mutation control: a short-circuited source witness fails the gate");
+
+    const std::string selection=segment(runtime,"static void hdrSelectAtTrigger(State& s) {",
+        "const bool autoKey = s.hdrKey == FlatHdrKey::Auto;");
+    const auto selectionValid=[](const std::string& s) {
+        const size_t eligible=s.find("overlayOpen(s) && s.overlay.markedDraws()!=0"),
+            sample=s.find("flatHdrShouldSampleAmbiguousSource(",eligible),
+            callback=s.find("witnessSample?hdrAmbiguousSourceReport:nullptr",sample),
+            verdict=s.find("sel.reason==FlatMonoReason::AmbiguousSource",callback);
+        return eligible!=std::string::npos && sample!=std::string::npos &&
+            callback!=std::string::npos && verdict!=std::string::npos &&
+            eligible<sample && sample<callback && callback<verdict;
+    };
+    check(selectionValid(selection),"marked open overlays reach the bounded witness callback through the actual selector");
+    std::string noCallback=selection;
+    const std::string callback="witnessSample?hdrAmbiguousSourceReport:nullptr";
+    if(noCallback.find(callback)!=std::string::npos)
+        noCallback.erase(noCallback.find(callback),callback.size());
+    check(!selectionValid(noCallback),"mutation control: an unconnected runtime callback fails the gate");
+
+    const std::string report=segment(runtime,"static void hdrAmbiguousSourceReport(",
+        "// At the trigger draw, in the draw scope:");
+    const auto reportValid=[](const std::string& s) {
+        const size_t missing=s.find("result=missing-H-reference"),
+            header=s.find("result=source-camera-or-depth-not-unique"),
+            loop=s.find("for(uint32_t i=0;i<count;++i) {",header),
+            record=s.find("flat HDR source witness record:",loop),
+            completed=s.rfind("++s.sourceWitnessCaptured;");
+        return missing!=std::string::npos && header!=std::string::npos &&
+            loop!=std::string::npos && record!=std::string::npos &&
+            completed!=std::string::npos && header<loop && loop<record && record<completed &&
+            s.find("H-extent=")!=std::string::npos &&
+            s.find("H-depth-fmt=")!=std::string::npos &&
+            s.find("H-key-write=")!=std::string::npos &&
+            s.find("key-write=")!=std::string::npos &&
+            s.find("flatHdrSourceFacts(in,i,",loop)!=std::string::npos &&
+            s.find("if(!f.eligible)continue;",loop)!=std::string::npos;
+    };
+    check(reportValid(report),"the witness logs a missing reference or every eligible source before spending its sample");
+    std::string noRecord=report;
+    const std::string recordLine="flat HDR source witness record:";
+    if(noRecord.find(recordLine)!=std::string::npos)
+        noRecord.erase(noRecord.find(recordLine),recordLine.size());
+    check(!reportValid(noRecord),"mutation control: losing per-source output fails the gate");
+    check(runtime.find("flat HDR source witness 5s: enabled=1 limit=2 captured=")!=std::string::npos &&
+          runtime.find("second-earliest=")!=std::string::npos,
+          "the five-second report exposes whether automatic evidence was enabled and whether either sample completed");
+}
+
 void testFlatWrapperNoteWiring() {
     auto slurp = [](const char* path) {
         std::ifstream in(path, std::ios::binary);
@@ -3298,6 +3376,7 @@ int main(int argc, char** argv) {
     testFlatSubstitutionWiring();
     testFlatOverlayDrawThunkWiring();
     testFlatOverlayMutationWiring();
+    testFlatHdrSourceWitnessWiring();
     failures += flatWrapperNoteTests();
     testFlatWrapperNoteWiring();
     failures += flatQueryCutTests();

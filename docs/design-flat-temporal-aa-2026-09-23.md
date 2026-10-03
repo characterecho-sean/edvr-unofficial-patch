@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** resource correction `128fca02` BUILT, NOT FLOWN (99).
-  Epic installed `v0.18.1-25-g128fca02`. Latest analyzed log is the refusing
-  `v0.18.1-23-g90d0c3d8` build; evidence and corrections are in sections 1-99.
+- **State:** resource correction `128fca02` FLOWN, weapon still refuses (100).
+  Epic installed `v0.18.1-25-g128fca02`. Latest analyzed log is this build;
+  evidence and corrections are in sections 1-100.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 99: same weapon drawn ten seconds, holstered ten seconds.
-  Check world AA and marked/isolated counters; F10 only if still defective.
+- **Next:** section 100: bounded automatic selector witness, two failing
+  weapon frames. Full validation passed; commit/promotion/install follow.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9935,3 +9935,67 @@ counters advance; any relevant mutation refusal now names operation/role.
 F10 only if AA still turns off or another defect appears. No two-minute wait
 or weapon matrix is required. Verify the next log against the literal
 installed `v0.18.1-25-g128fca02`, not the later docs-only HEAD.
+
+## 100. HDR source ambiguity after protected draws (2026-10-03)
+
+Verified `edvr_gfx_20261003_115819.log` against installed
+`v0.18.1-25-g128fca02` (6AC141F7), linked 17:57:11 UTC. Sean drew the same
+weapon, took F10, waited ten seconds, then holstered ten seconds. At
+12:00:35: planned=360, fully-marked=360, isolated=0, refused=360. The sole
+layer reason is `overlay-unsealed-at-final-copy`; the earlier HDR consumer
+selection is `source-camera-or-depth-not-unique` on all 360 frames. No
+resource mutation or old constant-upload refusal appears. The transition
+windows each isolate five frames; holstered 12:00:55 treats all 156 frames.
+F10 completes frames 46126/46128 with zero unsupported captures.
+
+Ruled out: coarse resource mutation guards still block the protected suffix,
+because all those reasons disappear on the verified new build. The final
+copy's unsealed refusal is downstream of the HDR source-selector ambiguity,
+not the first cause. Identify which source records conflict and why before
+editing uniqueness rules. Real second-world source/depth or a mismatched
+world camera must still refuse. No new diagnostic flight requested yet.
+
+Source audit: the protected VS025B/PS46F pair is not an engine-supported
+Pool pair; only supported Pool draws enter `prefix.sources`. Ruled out:
+the protected draw directly adds a competing motion source. HDR ambiguity
+can arise from a supported source on H's depth with mismatched DSV/camera,
+or an alternate supported depth using H's camera. The manifest retains H
+and depth through consumer, with first_bad_seq=0; that does not identify
+the offending source record. Five transition frames prove the isolation
+route can complete, not that source uniqueness is safe to relax. Keep the
+existing two-world-depth and different-camera refusal tests.
+
+The complete VS88DC/PS4945 camera probe is also an unsupported HDR weapon
+pass, not a Pool motion source, so neither captured weapon pair supplies the
+missing source identity. Existing data cannot distinguish same-depth layout/
+DSV mismatch, same-depth camera mismatch, or alternate-depth matching-world
+camera. Do not ship a uniqueness exception on this missing evidence.
+
+Implement a bounded automatic witness at the actual HDR selector input:
+two Screen records plus at most 32 Pool sources. On two overlay-open
+AmbiguousSource frames separated by at least 60 frame indices, report the
+H reference and all supported same-extent Pool records, each branch flag,
+first culprit, resources/views/formats, VS/PS, copied camera rows, hashes
+and sequence/write provenance. No F10 dependency, extra key, temporal-policy
+change or prolonged wait. Include an enabled/limit/report summary so a dead
+instrument cannot masquerade as successful qualification. Full validation,
+commit, clean promotion and Epic install precede the next short run.
+
+The witness is implemented as a synchronous callback from the actual
+34-record route wrapper only after AmbiguousSource. It reads live local
+record copies before they expire; no dangling camera pointers are retained.
+Runtime sampling requires an open marked overlay, reports before spending
+the two-frame budget, and exposes enabled/captured/eligible/ambiguous totals
+in the 5s log. All eligible source records are enumerated, including records
+after the first offender; the first branch respects the selector's two-pass
+order. Re-read helper, runtime/report fields and tests; declarations and
+format arguments match. Rendering selection and refusal policy are unchanged.
+
+Targeted flat_temporal_test passes (17 traces, 46/46 replay frames), with
+wrong-camera, wrong-DSV and true second-world-depth refusal fixtures,
+unsupported filtering, selected-frame silence, callback wiring, full fields,
+all-record enumeration and sampler/order checks. Full validation passed,
+including GPU rigs and installer gates, with receipt fingerprint
+`0285c441be41d192768ed3f9ded4e4d65fabf5a3a090cdb542a048ff513160d9`.
+Source is frozen; commit and clean promotion follow. No diagnostic binary
+installed yet.

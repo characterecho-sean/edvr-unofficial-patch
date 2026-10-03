@@ -181,6 +181,9 @@ struct State {
     uint64_t overlayIsolatedWindow = 0, overlayRefusedWindow = 0;
     std::map<std::string,uint64_t> overlayRefusalWindow;
     std::map<std::string,uint64_t> overlayMutationWindow;
+    uint64_t sourceWitnessFirstFrame = 0;
+    uint32_t sourceWitnessCaptured = 0;
+    uint64_t sourceWitnessEligibleWindow = 0, sourceWitnessAmbiguousWindow = 0;
     DWORD thread = 0; Ptr<ID3D11Device> device; Ptr<ID3D11DeviceContext> context;
     Ptr<ID3D11Texture2D> output, sceneDepth; Ptr<ID3D11ShaderResourceView> depthView;
     FlatRuntimePrefix prefix{}; CameraTable cameras;
@@ -2034,11 +2037,89 @@ static void hdrFrameEnd(State& s, uint64_t frame) {
         }
     }
 }
+// Called synchronously by the actual HDR selector before its 34 local records
+// expire. Every eligible source is reported, including ones after the first
+// refusal, so one session distinguishes a second depth from camera/layout.
+static void hdrAmbiguousSourceReport(const FlatMonoFrameInput& in, const void* hdrResource,
+                                     uint32_t consumerSeq, void* user) {
+    auto& s=*static_cast<State*>(user);
+    const FlatContractRecord* hdr=nullptr,*hdrCamera=nullptr;
+    uint32_t hdrLast=0;
+    const uint32_t count=in.worldCount+in.handoffCount;
+    for(uint32_t i=0;i<count;++i) {
+        const auto& r=flat_mono_detail::record(in,i);
+        if(r.key.color!=hdrResource)continue;
+        hdr=&r;
+        if(r.last>hdrLast)hdrLast=r.last;
+        if(r.key.camera && (!hdrCamera || r.first<hdrCamera->first))hdrCamera=&r;
+    }
+    if(!hdr || !hdrCamera) {
+        Log::get().note("flat HDR source witness: frame=%llu result=missing-H-reference records=%u",
+            (unsigned long long)s.prefix.frame,count);
+        if(!s.sourceWitnessCaptured)s.sourceWitnessFirstFrame=s.prefix.frame;
+        ++s.sourceWitnessCaptured;
+        return;
+    }
+    uint32_t eligible=0,firstIndex=~0u;
+    FlatHdrSourceIssue firstIssue=FlatHdrSourceIssue::None;
+    for(uint32_t i=0;i<count;++i) {
+        const auto f=flatHdrSourceFacts(in,i,*hdr,*hdrCamera,hdr->key.width,hdr->key.height,consumerSeq,hdrLast);
+        if(!f.eligible)continue;
+        ++eligible;
+        if(firstIssue==FlatHdrSourceIssue::None && f.sameDepth &&
+           (f.issue==FlatHdrSourceIssue::SameDepthLayout || f.issue==FlatHdrSourceIssue::SameDepthCamera)) {
+            firstIndex=i;firstIssue=f.issue;
+        }
+    }
+    if(firstIssue==FlatHdrSourceIssue::None)for(uint32_t i=0;i<count;++i) {
+        const auto f=flatHdrSourceFacts(in,i,*hdr,*hdrCamera,hdr->key.width,hdr->key.height,consumerSeq,hdrLast);
+        if(f.issue==FlatHdrSourceIssue::SecondDepthSameCamera) {
+            firstIndex=i;firstIssue=f.issue;break;
+        }
+    }
+    char worldRows[24*9+1]{};
+    hexWords(hdrCamera->camera,24,worldRows,sizeof(worldRows));
+    Log::get().note("flat HDR source witness: frame=%llu seq=%u result=source-camera-or-depth-not-unique records=%u eligible-pool=%u first-index=%u first-branch=%s H=%p H-extent=%ux%u H-depth=%p H-dsv=%p H-depth-fmt=%u H-b1=%p H-camera=%016llX H-key-write=%llu/%u H-first=%u H-last=%u H-camera-first=%u H-camera-last=%u H-rows270-275=%s",
+        (unsigned long long)s.prefix.frame,consumerSeq,count,eligible,firstIndex,
+        flatHdrSourceIssueName(firstIssue),hdrResource,hdr->key.width,hdr->key.height,
+        hdr->key.depth,hdr->key.dsv,hdr->key.depthFormat,
+        hdrCamera->key.b1,(unsigned long long)hdrCamera->key.cameraHash,
+        (unsigned long long)hdr->key.writeEpoch,hdr->key.writeSeq,
+        hdr->first,hdrLast,hdrCamera->first,hdrCamera->last,worldRows);
+    for(uint32_t i=0;i<count;++i) {
+        const auto f=flatHdrSourceFacts(in,i,*hdr,*hdrCamera,hdr->key.width,hdr->key.height,consumerSeq,hdrLast);
+        if(!f.eligible)continue;
+        const auto& r=flat_mono_detail::record(in,i);const auto& k=r.key;
+        char rows[24*9+1]{};hexWords(r.camera,24,rows,sizeof(rows));
+        Log::get().note("flat HDR source witness record: frame=%llu index=%u branch=%s same-depth=%u layout=%u current=%u viewport=%u same-camera=%u order=%u VS=%016llX PS=%016llX color=%p rtv=%p fmt=%u depth=%p dsv=%p depth-fmt=%u extent=%ux%u depth-extent=%ux%u b1=%p camera-present=%u camera-hash=%016llX key-write=%llu/%u draws=%u first=%u last=%u first-write=%llu/%u last-write=%llu/%u rows270-275=%s",
+            (unsigned long long)s.prefix.frame,i,flatHdrSourceIssueName(f.issue),
+            f.sameDepth?1u:0u,f.layoutValid?1u:0u,f.current?1u:0u,
+            f.fullViewport?1u:0u,f.sameCamera?1u:0u,f.orderValid?1u:0u,
+            (unsigned long long)k.vs,(unsigned long long)k.ps,k.color,k.rtv,k.format,
+            k.depth,k.dsv,k.depthFormat,k.width,k.height,k.depthWidth,k.depthHeight,
+            k.b1,k.camera?1u:0u,(unsigned long long)k.cameraHash,
+            (unsigned long long)k.writeEpoch,k.writeSeq,r.draws,r.first,r.last,
+            (unsigned long long)r.firstWriteEpoch,r.firstWriteSeq,
+            (unsigned long long)r.lastWriteEpoch,r.lastWriteSeq,rows);
+    }
+    // Mark completion only after the report, so a dead/short-circuited path
+    // cannot spend the two-frame budget without producing a witness.
+    if(!s.sourceWitnessCaptured)s.sourceWitnessFirstFrame=s.prefix.frame;
+    ++s.sourceWitnessCaptured;
+}
 // At the trigger draw, in the draw scope: the route's selection over the prefix so far, its verdict into the stand-down
 // (key auto only: with it off the route decides nothing), the window token, the once-a-session trigger line and the
 // trace's resolve marker. The treatment itself follows in FlatRuntimeDrawScope::treatHdr.
 static void hdrSelectAtTrigger(State& s) {
-    const FlatMonoFrame sel = s.hdrSelected = flatSelectHdrRoute(s.prefix, s.hdr, [](uint64_t, uint64_t) { return true; });
+    const bool witnessEligible=overlayOpen(s) && s.overlay.markedDraws()!=0;
+    if(witnessEligible)++s.sourceWitnessEligibleWindow;
+    const bool witnessSample=witnessEligible && flatHdrShouldSampleAmbiguousSource(
+        s.prefix.frame,s.sourceWitnessFirstFrame,s.sourceWitnessCaptured);
+    const FlatMonoFrame sel = s.hdrSelected = flatSelectHdrRoute(s.prefix, s.hdr,
+        [](uint64_t, uint64_t) { return true; },
+        witnessSample?hdrAmbiguousSourceReport:nullptr,witnessSample?&s:nullptr);
+    if(witnessEligible && sel.reason==FlatMonoReason::AmbiguousSource)
+        ++s.sourceWitnessAmbiguousWindow;
     const bool autoKey = s.hdrKey == FlatHdrKey::Auto;
     s.hdrWindow.lastVerdict = sel.selected() ? "selected" : flatMonoReasonName(sel.reason);
     s.hdrWindow.noteSelection(s.hdrWindow.lastVerdict);   // the key off's answer: what the selector says at each trigger
@@ -2502,9 +2583,15 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         for(const auto& entry:s.overlayMutationWindow)
             Log::get().note("flat late overlay mutation refusal: %s count=%llu",entry.first.c_str(),
                 (unsigned long long)entry.second);
+        Log::get().note("flat HDR source witness 5s: enabled=1 limit=2 captured=%u first-frame=%llu second-earliest=%llu eligible=%llu ambiguous=%llu; automatic on marked overlay ambiguity, no F10",
+            s.sourceWitnessCaptured,(unsigned long long)s.sourceWitnessFirstFrame,
+            (unsigned long long)(s.sourceWitnessFirstFrame?s.sourceWitnessFirstFrame+60:0),
+            (unsigned long long)s.sourceWitnessEligibleWindow,
+            (unsigned long long)s.sourceWitnessAmbiguousWindow);
         s.overlayPlannedWindow=s.overlayMarkedWindow=s.overlayIsolatedWindow=s.overlayRefusedWindow=0;
         s.overlayRefusalWindow.clear();
         s.overlayMutationWindow.clear();
+        s.sourceWitnessEligibleWindow=s.sourceWitnessAmbiguousWindow=0;
         // The camera injector's row bookkeeping, every window while a temporal mode runs
         // (the camera path is on with it; zeros included: an absent line is what "the
         // wiring never ran" looks like). The tripwire is cumulative on purpose -- once it

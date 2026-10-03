@@ -779,6 +779,104 @@ inline int flatHdrRouteTests() {
                "earlier camera conflict remains refused at the HDR consumer");
     }
 
+    // The automatic ambiguity witness sees the exact 34-record input while it
+    // is alive, including every source after the first offender. It must
+    // classify the selector's real branches without changing its verdict.
+    {
+        struct Witness {
+            uint32_t calls = 0, records = 0, eligible = 0;
+            const void* hdr = nullptr;
+            std::vector<FlatHdrSourceIssue> issues;
+        };
+        const auto sink=+[](const FlatMonoFrameInput& in,const void* hdr,uint32_t consumer,void* user) {
+            auto& w=*static_cast<Witness*>(user);
+            ++w.calls;w.records=in.worldCount+in.handoffCount;w.hdr=hdr;
+            if(in.worldCount<2)return;
+            const auto& h=in.world[0];const auto& camera=in.world[1];
+            for(uint32_t i=0;i<w.records;++i) {
+                const auto facts=flatHdrSourceFacts(in,i,h,camera,h.key.width,h.key.height,
+                                                    consumer,h.last);
+                if(facts.eligible) {++w.eligible;w.issues.push_back(facts.issue);}
+            }
+        };
+        const auto supported=+[](uint64_t,uint64_t){return true;};
+        Stream normal;normal.sceneDraws(2,2);normal.toneTrigger();
+        Witness none{};
+        expect(flatSelectHdrRoute(*normal.prefix,normal.hdr,supported,sink,&none).selected() &&
+               none.calls==0,
+               "a selected frame never emits an AmbiguousSource witness");
+
+        Stream cameraMix;cameraMix.sceneDraws(2,2);
+        auto secondCamera=cameraMix.make(cameraMix.sc.h2,cameraMix.sc.hDepth,
+            cameraMix.sc.hW,cameraMix.sc.hH,26,0xA1,0xB1,true,true);
+        secondCamera.camera[0]^=1;
+        secondCamera.key.cameraHash=flatCameraHash(secondCamera.camera);
+        cameraMix.draw(secondCamera);cameraMix.toneTrigger();
+        Witness cameras{};
+        const auto cameraVerdict=flatSelectHdrRoute(*cameraMix.prefix,cameraMix.hdr,supported,sink,&cameras);
+        expect(cameraVerdict.reason==FlatMonoReason::AmbiguousSource && cameras.calls==1 &&
+               cameras.hdr==cameraMix.sc.h && cameras.records==4 && cameras.eligible==2 &&
+               cameras.issues.size()==2 && cameras.issues[0]==FlatHdrSourceIssue::None &&
+               cameras.issues[1]==FlatHdrSourceIssue::SameDepthCamera,
+               "one wrong-camera pool source is identified after the valid source; all records are reported");
+
+        Stream depthMix;depthMix.sceneDraws(2,2);
+        depthMix.draw(depthMix.make(depthMix.sc.h2,depthMix.sc.h2Depth,
+            depthMix.sc.hW,depthMix.sc.hH,26,0xA1,0xB1,true,true));
+        depthMix.toneTrigger();
+        Witness depths{};
+        const auto depthVerdict=flatSelectHdrRoute(*depthMix.prefix,depthMix.hdr,supported,sink,&depths);
+        expect(depthVerdict.reason==FlatMonoReason::AmbiguousSource && depths.calls==1 &&
+               depths.eligible==2 && depths.issues.size()==2 &&
+               depths.issues[0]==FlatHdrSourceIssue::None &&
+               depths.issues[1]==FlatHdrSourceIssue::SecondDepthSameCamera,
+               "a genuine second world depth still refuses and names the second-depth branch");
+
+        auto world=cameraMix.make(cameraMix.sc.h,cameraMix.sc.hDepth,
+            cameraMix.sc.hW,cameraMix.sc.hH,26,0xA1,0xB1,true,true);
+        auto other=cameraMix.make(cameraMix.sc.h2,cameraMix.sc.hDepth,
+            cameraMix.sc.hW,cameraMix.sc.hH,26,0xA2,0xB2,true,true);
+        FlatContractRecord baseline=flatRuntimeRecord(world,2,kFrame);
+        FlatContractRecord source=flatRuntimeRecord(other,3,kFrame);
+        baseline.key.kind=source.key.kind=kFlatContractPool;
+        FlatMonoFrameInput input{};input.world=&source;input.worldCount=1;
+        input.frame=input.epoch=kFrame;input.supportedPair=supported;
+        source.key.dsv=tok(0x7777);
+        expect(flatHdrSourceFacts(input,0,baseline,baseline,cameraMix.sc.hW,cameraMix.sc.hH,10,8).issue==
+                   FlatHdrSourceIssue::SameDepthLayout,
+               "same-depth wrong DSV is reported as layout ambiguity before camera comparison");
+        FlatContractRecord records[4]{};
+        const FlatRuntimeTarget* hTarget=nullptr;
+        for(uint32_t i=0;i<normal.prefix->targetsUsed;++i)
+            if(normal.prefix->targets[i].resource==normal.sc.h)hTarget=&normal.prefix->targets[i];
+        if(hTarget) {
+            records[0]=hTarget->writes;records[0].key.camera=nullptr;
+            records[0].key.kind=kFlatContractScreen;
+            records[1]=hTarget->tone;records[1].key.kind=kFlatContractScreen;
+            records[2]=baseline;records[3]=source;
+            input.world=records;input.worldCount=4;
+            input.output=normal.sc.output;input.outputWidth=normal.sc.outW;
+            input.outputHeight=normal.sc.outH;input.outputFormat=28;
+            expect(flatSelectHdrFrame(input,normal.sc.h,normal.hdr.trigger.sequence).reason==
+                       FlatMonoReason::AmbiguousSource,
+                   "the actual selector refuses a supported same-depth wrong-DSV source");
+        } else expect(false,"the HDR target exists for the selector-layout fixture");
+        source.key.dsv=baseline.key.dsv;
+        source.key.vs=0xBAD;
+        input.supportedPair=+[](uint64_t vs,uint64_t){return vs!=0xBAD;};
+        records[3]=source;
+        expect(!flatHdrSourceFacts(input,3,baseline,baseline,cameraMix.sc.hW,cameraMix.sc.hH,10,8).eligible &&
+               flatSelectHdrFrame(input,normal.sc.h,normal.hdr.trigger.sequence).selected(),
+               "an unsupported pool pair is filtered from the source witness");
+        expect(flatHdrShouldSampleAmbiguousSource(100,0,0) &&
+               !flatHdrShouldSampleAmbiguousSource(0,0,0) &&
+               !flatHdrShouldSampleAmbiguousSource(159,100,1) &&
+               flatHdrShouldSampleAmbiguousSource(160,100,1) &&
+               !flatHdrShouldSampleAmbiguousSource(99,100,1) &&
+               !flatHdrShouldSampleAmbiguousSource(220,100,2),
+               "automatic witness captures at most twice with a 60-frame separation");
+    }
+
     // The projection proof measures the uploaded rows, independently of VS/PS
     // identity. Scale and near may differ, but both centres and the pose must
     // agree with this frame's raster phase.

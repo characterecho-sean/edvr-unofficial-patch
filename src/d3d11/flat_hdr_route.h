@@ -202,6 +202,60 @@ inline FlatHdrFrameVerdict flatHdrFrameVerdict(const FlatHdrFrame& f) {
 // admission by structure (flat_copy_structure.h, section 83) is the one that serves it: the game's own final copy scales R
 // to D, so any uniform R from half to twice D works there (RenderSize otherwise, with the measured sizes).
 enum class FlatHdrExtentGate : uint8_t { RenderAtLeastOutput, UniformHalfToDouble };
+enum class FlatHdrSourceIssue : uint8_t {
+    None, SameDepthLayout, InvalidProvenance, SameDepthCamera,
+    WrongOrder, SecondDepthSameCamera
+};
+inline const char* flatHdrSourceIssueName(FlatHdrSourceIssue issue) {
+    switch (issue) {
+    case FlatHdrSourceIssue::SameDepthLayout: return "same-depth-layout";
+    case FlatHdrSourceIssue::InvalidProvenance: return "invalid-provenance";
+    case FlatHdrSourceIssue::SameDepthCamera: return "same-depth-camera";
+    case FlatHdrSourceIssue::WrongOrder: return "wrong-order";
+    case FlatHdrSourceIssue::SecondDepthSameCamera: return "second-depth-same-camera";
+    default: return "none";
+    }
+}
+struct FlatHdrSourceFacts {
+    bool eligible = false, sameDepth = false, layoutValid = false;
+    bool current = false, fullViewport = false, sameCamera = false, orderValid = false;
+    FlatHdrSourceIssue issue = FlatHdrSourceIssue::None;
+};
+// Diagnose the selector's exact Pool candidates, using the same 34-record
+// input and branch order. This reports evidence only; it never admits a source.
+inline FlatHdrSourceFacts flatHdrSourceFacts(const FlatMonoFrameInput& in, uint32_t index,
+    const FlatContractRecord& hdr, const FlatContractRecord& hdrCamera,
+    uint32_t width, uint32_t height, uint32_t consumerSeq, uint32_t hdrLast) {
+    using namespace flat_mono_detail;
+    FlatHdrSourceFacts f{};
+    if (index >= in.worldCount + in.handoffCount || !in.supportedPair) return f;
+    const auto& r=record(in,index); const auto& k=r.key;
+    if (k.kind != kFlatContractPool || k.width != width || k.height != height ||
+        !in.supportedPair(k.vs,k.ps)) return f;
+    f.eligible=true;
+    f.sameDepth=k.depth==hdr.key.depth;
+    f.layoutValid=k.color && k.rtv && k.dsv==hdr.key.dsv &&
+        k.depthFormat==hdr.key.depthFormat && k.depthWidth==width && k.depthHeight==height;
+    f.current=cameraCurrent(r,in.epoch);
+    f.fullViewport=fullViewport(k,width,height);
+    f.sameCamera=sameCamera(r,hdrCamera);
+    f.orderValid=r.last<consumerSeq && r.first<=hdrLast;
+    if(f.sameDepth) {
+        if(!f.layoutValid) f.issue=FlatHdrSourceIssue::SameDepthLayout;
+        else if(!f.current || !f.fullViewport) f.issue=FlatHdrSourceIssue::InvalidProvenance;
+        else if(!f.sameCamera) f.issue=FlatHdrSourceIssue::SameDepthCamera;
+        else if(!f.orderValid) f.issue=FlatHdrSourceIssue::WrongOrder;
+    } else if(k.depth && f.current && f.sameCamera) {
+        f.issue=FlatHdrSourceIssue::SecondDepthSameCamera;
+    }
+    return f;
+}
+inline bool flatHdrShouldSampleAmbiguousSource(uint64_t frame, uint64_t firstFrame,
+                                               uint32_t captured) {
+    return frame && (captured == 0 ||
+        (captured == 1 && frame > firstFrame && frame - firstFrame >= 60));
+}
+using FlatHdrAmbiguousSourceSink = void(*)(const FlatMonoFrameInput&, const void*, uint32_t, void*);
 // flatSelectMonoFrame's sibling, run at the trigger over the records so far: H and its camera, the
 // supported pool sources, one depth, one camera hash, in order, without the tone and copy requirements
 // and with the extent gate R >= D. A refusal keeps the selector's own reason; the copy route is then
@@ -322,7 +376,8 @@ inline FlatMonoFrame flatSelectHdrFrame(const FlatMonoFrameInput& in, const void
 // A conflict the model recorded on H is kept as the witness, as the copy route keeps it.
 inline FlatMonoFrame flatSelectHdrRouteAt(FlatRuntimePrefix& p, const FlatHdrFrame& f,
                                           bool (*supportedPair)(uint64_t, uint64_t), uint32_t consumerSeq,
-                                          FlatHdrExtentGate gate) {
+                                          FlatHdrExtentGate gate,
+                                          FlatHdrAmbiguousSourceSink sourceSink = nullptr, void* sourceSinkUser = nullptr) {
     using namespace flat_mono_detail;
     FlatMonoFrame out{}; out.frame = out.epoch = p.frame;
     if (!f.triggered) { out.reason = FlatMonoReason::NoHdrConsumer; return out; }
@@ -343,6 +398,8 @@ inline FlatMonoFrame flatSelectHdrRouteAt(FlatRuntimePrefix& p, const FlatHdrFra
     in.output = p.output; in.outputWidth = p.width; in.outputHeight = p.height; in.outputFormat = p.format;
     in.frame = in.epoch = p.frame; in.supportedPair = supportedPair;
     out = flatSelectHdrFrame(in, f.trigger.hdr, consumerSeq, gate);
+    if (out.reason == FlatMonoReason::AmbiguousSource && sourceSink)
+        sourceSink(in, f.trigger.hdr, consumerSeq, sourceSinkUser);
     if (out.reason == FlatMonoReason::ConflictingHdr) {
         auto& wit = p.selectedConflict;
         wit.hdr = target->resource; wit.sequence = target->hdrCamera ? target->tone.first : target->writes.first;
@@ -357,8 +414,10 @@ inline FlatMonoFrame flatSelectHdrRouteAt(FlatRuntimePrefix& p, const FlatHdrFra
 }
 // The route's own selection, at its trigger: every H draw and source before the trigger draw, R >= D.
 inline FlatMonoFrame flatSelectHdrRoute(FlatRuntimePrefix& p, const FlatHdrFrame& f,
-                                        bool (*supportedPair)(uint64_t, uint64_t)) {
-    return flatSelectHdrRouteAt(p, f, supportedPair, f.trigger.sequence, FlatHdrExtentGate::RenderAtLeastOutput);
+                                        bool (*supportedPair)(uint64_t, uint64_t),
+                                        FlatHdrAmbiguousSourceSink sourceSink = nullptr, void* sourceSinkUser = nullptr) {
+    return flatSelectHdrRouteAt(p, f, supportedPair, f.trigger.sequence,
+                                FlatHdrExtentGate::RenderAtLeastOutput, sourceSink, sourceSinkUser);
 }
 
 // ---- the route's gate ----------------------------------------------------------------------------
