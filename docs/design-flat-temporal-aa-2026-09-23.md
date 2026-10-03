@@ -3,8 +3,8 @@
 ## Status
 
 - **State:** shared route merged at `dacb7a56`; qualifications below remain open.
-  Epic installed `v0.18.1-18-g83938927`, NOT FLOWN. Latest analyzed log:
-  `v0.18.1-15-g06e9225c`; evidence is in sections 1-95.
+  Epic installed `v0.18.1-18-g83938927`, FLOWN. Latest analyzed log:
+  `v0.18.1-18-g83938927`; evidence is in sections 1-96.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 95: full-width lower capture and scoped draw queries are
-  validated; next flight confirms contribution on the shared first-person path.
+- **Next:** section 96: real alternate-camera draw, 55k passing samples;
+  shared-path coverage/history isolation is being assessed before admission.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9657,3 +9657,52 @@ and render phase, with actual pixel/history ownership separated from the
 world. Automated GPU tests cover pass variants; a representative live test
 confirms the game route. Do not replace the current conflict with a growing
 per-weapon hash whitelist or assume global stencil 0x04 identifies weapons.
+
+## 96. Real draw confirmed; lower image stays unchanged (2026-10-03)
+
+Verified `edvr_gfx_20261003_101515.log` against installed
+`v0.18.1-18-g83938927` (6AC12887), Windows flat Epic, 3840x2160. Sean
+completed the weapon diagnostic. F10 arms at 10:19:57.869; both four-stage
+captures finish by 10:19:58.339, unsupported=0. Session is
+`flat_weapon_footprint/20261003_161957_869_59304_1`, frames 66718/66720.
+Each frame allocates 315129856 bytes. No two-minute performance wait is
+needed for these captures; this analysis makes no new performance comparison.
+
+Exact draw: DrawIndexedInstanced, six indices starting 6623712, base vertex
+3096903, one instance starting 37036. Triangle-list statistics report two
+IA primitives, four VS invocations and two clipper primitives. Whole-draw
+occlusion and PS invocation counts are 55365/55236, with CS invocations=0.
+Both queries and explicit brackets complete successfully. Cull=BACK,
+scissor disabled, predication unbound, sample mask all, RTV0 write mask=15
+and blending enabled. This is a real two-triangle material draw; the record
+does not establish that it is the weapon mesh itself.
+
+Ruled out: empty draw, whole-draw depth rejection and a disabled RTV0 write
+mask, because nonzero primitives/samples/PS work and write mask 15 are
+measured. These do not rule out a no-op blend or sampled zero alpha. The saved
+PS outputs o0.xyzw; t3's scalar supplies alpha and multiplies RGB, so shader
+execution is not by itself proof of visible color changes.
+
+ROI now spans x0..3839/y1008..2159, 4,423,680 pixels (53.33% of the frame).
+Color/depth/stencil changes remain zero before/after and through the consumer
+and pre-Present snapshot in both frames; there are no recorded clears.
+Stencil 0x04 preexists on every sampled pixel. Bit 0x10 preexists on
+480726/477369 lower-right pixels, bounding boxes x2190..3397/y1392..2159
+and x2188..3393/y1396..2159, and is unchanged. Thus the selected draw has no
+measured effect on that known lower first-person region. The upper 1008
+rows remain unsampled; passing samples cannot identify their location.
+
+The alternate camera still has XY scale ratio approximately 1.231279,
+near depth 0.0675 versus reference 0.025 and identical pose rows. It writes
+no depth and replaces stencil 0x04. First-bad sequences 14797/14793 equal
+the selected draws. Consumers four draws later report
+`conflicting-hdr-target-or-camera`. No simple ignore/whitelist exception is
+qualified, and stencil 0x04 remains ruled out as an exclusive marker.
+
+The intended shared-path design remains actual per-draw coverage with local
+history isolation, validated by automated pass-variant tests. Conservative
+coverage can include equal-color/transparent fragments without depending on
+weapon type, but shader substitution, blend preservation, raster phase and
+backend history semantics must be proven before admission changes. A reactive
+mask must not be assumed to guarantee zero history for every backend. No
+renderer, installed build or live setting changed during this analysis.
