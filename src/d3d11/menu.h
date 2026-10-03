@@ -76,3 +76,9 @@ void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, vo
 void menuShutdown();
 
 }  // namespace edvr
+
+#include "../../include/edvr_plugin_api.h"
+
+extern "C" {
+__declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting);
+}

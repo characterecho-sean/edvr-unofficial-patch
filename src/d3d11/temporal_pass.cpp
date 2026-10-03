@@ -5416,6 +5416,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 ID3D11UnorderedAccessView* duav[3] = {e.prColourUav, e.prDepthUav, e.prMvUav};
                                 ID3D11ShaderResourceView* nullD3[3] = {};
                                 ID3D11UnorderedAccessView* nullDu[3] = {};
+                                ID3D11RenderTargetView* nullRtv[8] = {};
+                                ctx->OMSetRenderTargets(8, nullRtv, nullptr);
                                 ctx->CSSetShaderResources(0, 3, nullD3);
                                 ctx->CSSetUnorderedAccessViews(0, 3, nullDu, nullptr);
                                 ctx->CSSetShader(g_csDown, nullptr, 0);

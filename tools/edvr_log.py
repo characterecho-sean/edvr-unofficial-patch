@@ -11911,11 +11911,11 @@ def self_test_camera_census():
             or "not enough calls logged to say" in out:
         fail("an older log's roles were not read from its calls:\n%s" % out)
     # The route tokens on ONE line (the first wording of the route's format), and tokens missing from a window.
-    lines = text.split("\n")
+    lines = text.splitlines()
     merged, i = [], 0
     while i < len(lines):
         if "vr world route 5s:" in lines[i] and i + 1 < len(lines) and "vr world route inject 5s:" in lines[i + 1]:
-            inject_tokens = lines[i + 1].split("vr world route inject 5s: ", 1)[1]
+            inject_tokens = lines[i + 1].split("vr world route inject 5s: ", 1)[1].strip()
             merged.append(lines[i].replace(" last-trigger=", " " + inject_tokens + " last-trigger=", 1))
             i += 2
         else:
