@@ -42,8 +42,8 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  shared resolver and shader API costs are instrumented; eighteen selectors pass
-  all 138 validation jobs. Enabled replay storage is measured at 442.25 MiB;
+  bounded API owner costs are instrumented; nineteen selectors pass
+  all 139 validation jobs. Enabled replay storage is measured at 448.0 MiB;
   the default disabled path allocates none.
   Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
   The timed-draw denominator works; all-module cost coverage and repeatable
@@ -1761,3 +1761,86 @@ on all 235 keys. Receipt input SHA-256 is
 01acde3591a91aed3020d1a41f30ce0a7fa7120989f0a3d3fa428a48e1aa9c91; log:
 build/plugin-predicate-v10-full-build.log. This is a validated Phase 1
 checkpoint, not whole-ladder equivalence or a performance acceptance result.
+
+### Resolve-binding inputs and loader staging costs, 2026-10-03
+
+Schema 11 adds raw facts for ungated EyeSequence site 60, ResolveBindClaim.
+Each reached site emits one pointer-free kind-18 observation. The selector
+records the outer enable, PS presence and PS hash reads, then the helper's
+independently repeated enable, context and shadow reads in their consumed
+order. Cached positive and negative paths consume no getter fields. Null or
+zero-hash shadows remain unknown to the cache and enter the existing guarded
+fallback; a completed null shader or zero lookup is a known negative.
+
+Fallback facts record lambda admission, PSGetShader/lookup/Release entry and
+completion, the raw lookup hash, and the guarded return. Match starts false;
+replay derives its later assignment from this prefix. A Release fault after
+assignment preserves a positive claim, while a prior getter fault and denied
+budget retain false. Cache presence/hash snapshots bracket only the actual
+nonzero-hash binding repair. Both fields are read even when the pointer is
+absent, and before/after callbacks impose no invented continuity requirement.
+The independent reader was corrected when review found it rejected that
+legitimate absent-pointer hash read; producer-shaped and adversarial fixtures
+now pin it. Whole-ladder predicate equivalence remains false.
+
+The genuine System32-WARP visitor rig invokes the actual site and production
+helper with real registered and unregistered pixel shaders. It verifies outer
+off, cached No/Yes without getters, null and zero-hash fallbacks, successful
+repair, a typed PSGetShader fault and recovery, Release-fault positive
+retention and recovery, and admission denial after the eight-fault budget is
+exhausted. The selector harness does not run the separate vertex-buffer lending
+actions. Typed callbacks and the real fault guard establish prefixes;
+fabricated helper results are not replay inputs. The existing action rig
+remains a separate gate.
+
+The cold recorder has a dedicated 32,768-fact pool, mandatory visited-site
+coverage and separate overflow/missing-pool invalidation. Native writer
+fixtures 68-76 cover missing, duplicate, wrong-kind, malformed reached/known,
+unvisited, unknown, capacity, cached/fallback/Release-fault positives and five
+negative paths. All strict CLI checks pass: positive fixture 39 selector
+matches and negative fixture 85 matches, with no unavailable inputs, mismatches
+or mutation warnings; the intentional unknown fixture reports exactly one
+unavailable selector. The original terminal matrix and schema 1-10
+compatibility remain validated. Unknown is never treated as a default negative.
+
+Native sizeof measurement is 168 bytes per ResolveBind observation, 5.25 MiB
+for its pool, and 3,912 bytes per DrawRecord. Enabled replay storage totals
+448.0 MiB, excluding allocator overhead; the default disabled path allocates
+none. The NoTrace/NoCpu draw listing remains exactly the saved reference: 7,057
+bytes, 1,636 listing records, 94 ordered call targets and 288-byte stack. Bytes
+SHA-256: 2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40.
+Call-target SHA-256:
+e14ff11cac25c3cc7d00d08da6d3423512d2280c6d78e00c8d58dfa66c792f38. These
+measurements do not establish complete module costs or a flight gain.
+
+Intro-owned API sites 91-110 now count the loader-panel staging lifecycle.
+Notes precede actual calls inside the existing guards; one sample latch follows
+capture/readback admission. Ten queries are ReadQuery, four CreateBuffer calls
+are Work, and four copies plus four Map/Unmap pairs are Transfer. Releases and
+classification outside this lifecycle remain excluded. The actual System32 WARP
+rig checks a complete 10/4/12 report, a first-Map fault with 10/4/5 attempted
+calls and a separate 0/0/8 recovery, a three-query GetDevice fault followed by
+successful cold capture, exact owner masks and 1,800 completed sample frames.
+Worker staging allocations occur with zero Intro charges. Deferred testing
+observes the actual IA getters and distinguishes their admitted prefix from
+successful staging. A real command list alone is not staging evidence.
+
+Review corrected the rig's IA getter slots to 79/80 and its fixture lifecycle:
+texturing prevents staging capture but does not cancel the original speculative
+withhold, and a real disabled tick closes the previous frame before a new
+fixture. Production semantics were preserved. The rig uses production COM,
+fault guard, capture and analysis; the default-only configuration/log boundary
+is excluded from its claim. Map HRESULT/partial-prefix cleanup,
+Unmap/CreateBuffer faults and gameplay draw classification remain untested by
+this cost cohort. Focused native logs: build/plugin-predicate-v11-focused.log
+and build/plugin-loader-v11-focused.log; final loader rig PASS, zero failures.
+
+Full validation passed all 139 jobs: 132 pooled jobs in 146.9 seconds and seven
+quiet jobs in 37.7 seconds. FocusWatch ran for 185 seconds with zero show,
+console or foreground events. Both production profiles, Python self-tests,
+native rigs, the 235-key config contract and self-contained installer checks
+passed. Receipt input SHA-256 is
+9a78021079084a0bb7909702aa8dfd56433e3adf7a9e04ec6d774f81462d20b6; log:
+build/plugin-predicate-v11-full-build.log. This remains Phase 1; independent
+forwarding, remaining predicate and owner cost coverage, matched CPU
+improvement and direct GPU non-regression remain open.

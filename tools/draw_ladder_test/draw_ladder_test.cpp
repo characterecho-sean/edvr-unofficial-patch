@@ -946,6 +946,40 @@ void remlokRead(edvr::remlok_observation::Read<T>& read, T value) {
     read = {true, true, value};
 }
 
+edvr::ResolveBindObservation resolveBindFact(bool matched = false, unsigned variant = 0) {
+    edvr::ResolveBindObservation fact{};
+    constexpr std::uint64_t resolveHash = 0x7CECABDE34FFBE9EULL;
+    fact.outer.wants = {true, true, matched || variant >= 3};
+    if (!fact.outer.wants.value) return fact;
+    fact.outer.psPresent = {true, true, variant < 3 || variant == 8};
+    fact.outer.psHash = {true, true, variant == 8 ? 1234ULL : variant < 3 ? resolveHash : 0ULL};
+    if (variant == 8) return fact;
+    fact.helper.wants = {true, true, true};
+    fact.helper.contextNonNull = {true, true, true};
+    fact.helper.psPresent = fact.outer.psPresent;
+    fact.helper.psHash = fact.outer.psHash;
+    if (variant < 3) return fact;
+    fact.helper.lambdaEntered = {true, true, variant != 7};
+    fact.helper.guardReturned = {true, true, variant == 3 || variant == 5};
+    if (variant == 7) return fact;
+    fact.helper.psGetReached = {true, true, true};
+    if (variant == 6) return fact;
+    fact.helper.psGetCompleted = {true, true, true};
+    fact.helper.shaderNonNull = {true, true, true};
+    fact.helper.lookupReached = {true, true, true};
+    fact.helper.lookupCompleted = {true, true, true};
+    fact.helper.lookupHash = {true, true, variant == 5 ? 0ULL : resolveHash};
+    if (fact.helper.lookupHash.value) {
+        fact.helper.cacheBeforePresent = {true, true, false};
+        fact.helper.cacheBeforeHash = {true, true, 0};
+        fact.helper.cacheAfterPresent = {true, true, true};
+        fact.helper.cacheAfterHash = {true, true, resolveHash};
+    }
+    fact.helper.releaseReached = {true, true, true};
+    if (variant != 4) fact.helper.releaseCompleted = {true, true, true};
+    return fact;
+}
+
 edvr::EyeCensusObservation eyeCensusFact(bool matched = false, char kind = 'D',
                                       std::uint32_t count = 240, unsigned variant = 0) {
     edvr::EyeCensusObservation fact{};
@@ -1297,7 +1331,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        bool glareDamping = false, bool glareProbe = false,
                        int glareWorld = 0, std::uint32_t frameNo = 15,
                        bool stagedFss = false, bool rawPanelEnabled = false,
-                       unsigned basicCase = 0, unsigned eyeCensusCase = 0) {
+                       unsigned basicCase = 0, unsigned eyeCensusCase = 0,
+                       unsigned resolveBindCase = 0) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     const bool overflowBefore = trace::overflowed();
@@ -1573,6 +1608,12 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 static_cast<char>(facts.kind), facts.count, eyeCensusCase);
             if (eyeCensusCase == 2) fact.skipCountGate = {true, false, 0};
             policy.eyeCensusFact(fact);
+        }
+        if (visited == ladder::SiteId::kResolveBindClaim && resolveBindCase != 1) {
+            auto fact = resolveBindFact(terminal == ladder::SiteId::kResolveBindClaim,
+                resolveBindCase);
+            if (resolveBindCase == 2) fact.outer.wants = {true, false, false};
+            policy.resolveBindFact(fact);
         }
         if (visited == ladder::SiteId::kFssPanelClaim) {
             policy.fssFact(fssFact(edvr::FssTraceFactKind::kPanel,
@@ -1905,6 +1946,7 @@ bool traceWriterChecks(const char* rootArg) {
     vrPolicy.basicFact(contextFact());
     vrPolicy.basicFact(distanceFact(false));
     vrPolicy.eyeCensusFact(eyeCensusFact());
+    vrPolicy.resolveBindFact(resolveBindFact());
     edvr::FssObservation coldPanel{};
     coldPanel.kind = edvr::FssTraceFactKind::kPanel;
     coldPanel.rawProbeReached = true;
@@ -2068,7 +2110,7 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
-                matrixJson.find("\"predicateFactVersion\":10") != std::string::npos &&
+                matrixJson.find("\"predicateFactVersion\":11") != std::string::npos &&
                 matrixJson.find("\"siteId\":57,\"kind\":12") != std::string::npos &&
                 matrixJson.find("\"siteId\":58,\"kind\":13") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":12144190660518967694}") != std::string::npos &&
@@ -2599,7 +2641,7 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":10") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":11") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&
@@ -3022,6 +3064,96 @@ bool traceWriterChecks(const char* rootArg) {
     trace::frameEnd(67);
     ok &= check(positiveEyeWritten && trace::status() == trace::Status::CompleteWritten,
                 "exact, late-rule wrapping hash and resource-size winners serialize independently");
+    trace::shutdown();
+    const auto resolveTerminal = [&](std::uint32_t frame, unsigned variant,
+                                     ladder::SiteId terminal) {
+        return writeTerminalCase(ladder::RouteId::kVrEye, ladder::SequenceId::kVrEye,
+            'D', terminal, true, kFrozenEye, sizeof(kFrozenEye) / sizeof(kFrozenEye[0]),
+            ladder::EyeSequence{}, 1, false, false, edvr::SunglareTraceMode::kStock,
+            false, false, 0, frame, false, false, 0, 0, variant);
+    };
+    const bool missingResolveStarted = beginFssCase("resolve_bind_missing", "edvr_gfx_resolve_missing.log", 68);
+    const bool missingResolveWritten = missingResolveStarted &&
+        resolveTerminal(68, 1, ladder::SiteId::kEyeNoDistanceNone);
+    trace::frameEnd(68);
+    ok &= check(missingResolveWritten && trace::status() == trace::Status::InvalidCapture,
+                "missing resolve-binding input invalidates the complete canonical frame");
+    trace::shutdown();
+
+    const auto resolveRejected = [&](const char* dir, const char* log,
+                                     std::uint32_t frame, unsigned badCase) {
+        const bool started = beginFssCase(dir, log, frame);
+        const auto token = trace::beginDraw(fssMalformedDraw);
+        auto fact = resolveBindFact();
+        if (badCase == 1) fact.kind = 17;
+        if (badCase == 2) fact.outer.wants.reached = false;
+        trace::appendResolveBindFact(token, fact);
+        if (badCase == 0) trace::appendResolveBindFact(token, fact);
+        const bool rejectedAtAppend = trace::overflowed();
+        finishFssCase(token, frame);
+        const bool rejected = started && rejectedAtAppend &&
+            trace::invalidationReason() == trace::CaptureInvalidation::Other;
+        trace::shutdown();
+        return rejected;
+    };
+    ok &= check(resolveRejected("resolve_bind_duplicate", "edvr_gfx_resolve_duplicate.log", 69, 0),
+                "duplicate resolve-binding source is rejected at append");
+    ok &= check(resolveRejected("resolve_bind_wrong_kind", "edvr_gfx_resolve_wrong_kind.log", 70, 1),
+                "resolve-binding site/kind mismatch is rejected at append");
+    ok &= check(resolveRejected("resolve_bind_bad_read", "edvr_gfx_resolve_bad_read.log", 71, 2),
+                "known resolve-binding input with unreached flag is rejected at append");
+
+    const bool unvisitedResolveStarted = beginFssCase("resolve_bind_unvisited", "edvr_gfx_resolve_unvisited.log", 72);
+    const auto unvisitedResolveToken = trace::beginDraw(fssMalformedDraw);
+    trace::appendResolveBindFact(unvisitedResolveToken, resolveBindFact());
+    finishFssCase(unvisitedResolveToken, 72);
+    ok &= check(unvisitedResolveStarted && trace::status() == trace::Status::InvalidCapture,
+                "unvisited resolve-binding input is rejected at finish");
+    trace::shutdown();
+
+    const bool unknownResolveStarted = beginFssCase("resolve_bind_unknown", "edvr_gfx_resolve_unknown.log", 73);
+    const bool unknownResolveWritten = unknownResolveStarted &&
+        resolveTerminal(73, 2, ladder::SiteId::kEyeNoDistanceNone);
+    trace::frameEnd(73);
+    ok &= check(unknownResolveWritten && trace::status() == trace::Status::CompleteWritten,
+                "unknown reached resolve-binding input serializes as unavailable, never a default");
+    trace::shutdown();
+
+    const bool resolvePoolStarted = beginFssCase("resolve_bind_pool", "edvr_gfx_resolve_pool.log", 74);
+    bool resolvePoolFilled = resolvePoolStarted;
+    trace::Token lastResolveToken{};
+    for (std::uint32_t i = 0; resolvePoolFilled && i < trace::kMaxResolveBindFacts; ++i) {
+        lastResolveToken = trace::beginDraw(fssMalformedDraw);
+        resolvePoolFilled = lastResolveToken.valid();
+        if (!resolvePoolFilled) break;
+        trace::appendResolveBindFact(lastResolveToken, resolveBindFact());
+        resolvePoolFilled = !trace::overflowed();
+    }
+    if (resolvePoolFilled) trace::appendResolveBindFact(lastResolveToken, resolveBindFact());
+    ok &= check(resolvePoolFilled && trace::invalidationReason() == trace::CaptureInvalidation::ResolveBindIndexOverflow,
+                "resolve-binding global pool overflow has its own invalidation reason");
+    trace::shutdown();
+
+    const bool positiveResolveStarted = beginFssCase("resolve_bind_positive", "edvr_gfx_resolve_positive.log", 75);
+    const bool positiveResolveWritten = positiveResolveStarted &&
+        resolveTerminal(75, 0, ladder::SiteId::kResolveBindClaim) &&
+        resolveTerminal(75, 3, ladder::SiteId::kResolveBindClaim) &&
+        resolveTerminal(75, 4, ladder::SiteId::kResolveBindClaim);
+    trace::frameEnd(75);
+    ok &= check(positiveResolveWritten && trace::status() == trace::Status::CompleteWritten,
+                "cached, fallback and Release-fault resolve winners serialize independently");
+    trace::shutdown();
+
+    const bool negativeResolveStarted = beginFssCase("resolve_bind_negative", "edvr_gfx_resolve_negative.log", 76);
+    const bool negativeResolveWritten = negativeResolveStarted &&
+        resolveTerminal(76, 0, ladder::SiteId::kEyeNoDistanceNone) &&
+        resolveTerminal(76, 5, ladder::SiteId::kEyeNoDistanceNone) &&
+        resolveTerminal(76, 6, ladder::SiteId::kEyeNoDistanceNone) &&
+        resolveTerminal(76, 7, ladder::SiteId::kEyeNoDistanceNone) &&
+        resolveTerminal(76, 8, ladder::SiteId::kEyeNoDistanceNone);
+    trace::frameEnd(76);
+    ok &= check(negativeResolveWritten && trace::status() == trace::Status::CompleteWritten,
+                "disabled, zero lookup, getter-fault, denied-budget and cached nonmatch paths serialize");
     trace::shutdown();
     return ok;
 }

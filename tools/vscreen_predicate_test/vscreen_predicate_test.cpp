@@ -1,21 +1,79 @@
 #include "vscreen_predicate_test.h"
 
 #include <d3d11.h>
+#include <d3dcompiler.h>
 #include <windows.h>
+#include <wrl/client.h>
 
 #include <cstdio>
 #include <cstring>
 #include <string>
 
 #include "../../src/common/system_d3d11.h"
+#include "../../src/common/config.h"
 #include "../../src/d3d11/vscreen.h"
 #include "../../src/d3d11/binding_shadow.h"
+#include "../../src/d3d11/resolve_bind_fix.h"
+#include "../../src/d3d11/exposure_fix.h"
 #include "../../src/d3d11/basic_draw_observation.h"
 #include "../../src/d3d11/eye_census_observation.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/vtable_hook.h"
 
 namespace {
+
+using Microsoft::WRL::ComPtr;
+using GetPixelShaderFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,
+    ID3D11PixelShader**, ID3D11ClassInstance**, UINT*);
+GetPixelShaderFn g_realGetPixelShader = nullptr;
+std::uint32_t g_getPixelShaderCalls = 0;
+bool g_faultGetPixelShader = false;
+using ReleaseFn = ULONG(STDMETHODCALLTYPE*)(ID3D11PixelShader*);
+ReleaseFn g_realShaderRelease = nullptr;
+std::uint32_t g_releaseCalls = 0;
+
+void STDMETHODCALLTYPE testGetPixelShader(ID3D11DeviceContext* self,
+    ID3D11PixelShader** shader, ID3D11ClassInstance** instances, UINT* count) {
+    ++g_getPixelShaderCalls;
+    if (g_faultGetPixelShader)
+        RaiseException(0xE042ED94u, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    g_realGetPixelShader(self, shader, instances, count);
+}
+
+ULONG STDMETHODCALLTYPE testShaderRelease(ID3D11PixelShader* self) {
+    ++g_releaseCalls;
+    const ULONG refs = g_realShaderRelease(self);
+    RaiseException(0xE042ED95u, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    return refs;
+}
+
+bool readResolveBind(const edvr::VScreenPredicateTestResult& result,
+                     edvr::ResolveBindObservation* fact) {
+    return edvr::draw_ladder_trace::resolveBindFactCountForTest(result.token) == 1 &&
+           edvr::draw_ladder_trace::readResolveBindFactForTest(result.token, 0, fact);
+}
+
+template <class T, class U>
+bool rbRead(const edvr::ResolveBindRead<T>& read, U expected) {
+    return read.reached && read.known && read.value == static_cast<T>(expected);
+}
+
+template <class T>
+bool rbSkipped(const edvr::ResolveBindRead<T>& read) {
+    return !read.reached && !read.known && read.value == T{};
+}
+
+ComPtr<ID3DBlob> compileTestPixelShader() {
+    constexpr char source[] = "float4 main():SV_Target{return float4(1,0,0,1);}";
+    ComPtr<ID3DBlob> code;
+    ComPtr<ID3DBlob> errors;
+    const HRESULT hr = D3DCompile(source, sizeof(source) - 1, "vscreen-resolve-bind",
+        nullptr, nullptr, "main", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0,
+        &code, &errors);
+    if (FAILED(hr) && errors)
+        std::fwrite(errors->GetBufferPointer(), 1, errors->GetBufferSize(), stderr);
+    return SUCCEEDED(hr) ? code : ComPtr<ID3DBlob>{};
+}
 
 using GetResourceFn = void(STDMETHODCALLTYPE*)(ID3D11ShaderResourceView*, ID3D11Resource**);
 GetResourceFn g_originalGetResource = nullptr;
@@ -137,6 +195,21 @@ bool visitCensus(ID3D11DeviceContext* context, char kind, std::uint32_t count,
                       edvr::bindingShaderHash(edvr::BindSlot::Vs) == priorHash,
                   "EyeCensus seam restores prior VS identity and hash");
     return okay;
+}
+
+bool visitResolveBind(ID3D11DeviceContext* context, bool traced,
+                      edvr::VScreenPredicateTestResult* result) {
+    return edvr::vScreenResolveBindPredicateTestVisit(context, traced, result);
+}
+
+bool hookGetPixelShader(edvr::VTableHook& hook, ID3D11DeviceContext* context) {
+    g_getPixelShaderCalls = 0;
+    void* original = nullptr;
+    if (!hook.attach(context, 128) || !hook.setMode(edvr::HookMode::CopyVptr) ||
+        !hook.replace(74, reinterpret_cast<void*>(&testGetPixelShader), &original) ||
+        !hook.commit()) return false;
+    g_realGetPixelShader = reinterpret_cast<GetPixelShaderFn>(original);
+    return true;
 }
 
 } // namespace
@@ -656,6 +729,215 @@ int main(int argc, char** argv) {
                           eyeRead(eyeFact.rules[0].filters[0].resolved, false) &&
                           eyeSkipped(eyeFact.rules[0].filters[0].isTexture2D),
                       "guarded real resolver fault is a known-false result with later reads skipped");
+
+        // Drive site 60 through the real visitor and helper. Hash lookups use
+        // the production registry, populated with real WARP shaders.
+        edvr::installExposureFix(device, edvr::HookMode::CopyVptr);
+        const auto shaderCode = compileTestPixelShader();
+        ComPtr<ID3D11PixelShader> resolveShader;
+        ComPtr<ID3D11PixelShader> unknownShader;
+        okay &= check(shaderCode && SUCCEEDED(device->CreatePixelShader(
+                          shaderCode->GetBufferPointer(), shaderCode->GetBufferSize(),
+                          nullptr, &resolveShader)) && resolveShader,
+                      "WARP creates the real resolve-claim shader");
+        okay &= check(shaderCode && SUCCEEDED(device->CreatePixelShader(
+                          shaderCode->GetBufferPointer(), shaderCode->GetBufferSize(),
+                          nullptr, &unknownShader)) && unknownShader,
+                      "WARP creates an unregistered fallback shader");
+        if (resolveShader && unknownShader) {
+            edvr::registerShaderHash(resolveShader.Get(), edvr::detail::kResolveBindPs);
+            okay &= check(edvr::lookupShaderHash(resolveShader.Get()) ==
+                              edvr::detail::kResolveBindPs,
+                          "production shader registry returns the registered WARP hash");
+            edvr::Config& config = edvr::Config::get();
+            const std::string previousScannerBody = config.getString("fix.scanner_body", "on");
+            void* const previousPsShadow = edvr::bindingGet(edvr::BindSlot::Ps);
+            const std::uint64_t previousPsHash =
+                edvr::bindingShaderHash(edvr::BindSlot::Ps);
+            ID3D11PixelShader* previousActualPs = nullptr;
+            immediate->PSGetShader(&previousActualPs, nullptr, nullptr);
+            config.set("fix.scanner_body", "off");
+            edvr::resolveBindConfigure(config);
+            edvr::bindingSetShader(edvr::BindSlot::Ps, nullptr, 0);
+            immediate->PSSetShader(nullptr, nullptr, 0);
+
+            edvr::VScreenPredicateTestResult resolveResult{};
+            edvr::ResolveBindObservation resolveFact{};
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              resolveResult.siteResult.flow == Flow::Continue &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Declined &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.outer.wants, false) &&
+                              rbSkipped(resolveFact.outer.psPresent) &&
+                              rbSkipped(resolveFact.helper.wants),
+                          "fix-off claim records only the consumed outer gate");
+
+            config.set("fix.scanner_body", "on");
+            edvr::resolveBindConfigure(config);
+            edvr::VTableHook psGetHook;
+            okay &= check(hookGetPixelShader(psGetHook, immediate),
+                          "typed context hook counts real PSGetShader calls");
+            immediate->PSSetShader(unknownShader.Get(), nullptr, 0);
+            edvr::bindingSetShader(edvr::BindSlot::Ps, unknownShader.Get(), 1);
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              g_getPixelShaderCalls == 0 &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Declined &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.outer.psPresent, true) &&
+                              rbRead(resolveFact.outer.psHash, 1) &&
+                              rbSkipped(resolveFact.helper.wants),
+                          "known non-resolve shadow skips helper and COM fallback");
+
+            immediate->PSSetShader(resolveShader.Get(), nullptr, 0);
+            edvr::bindingSetShader(edvr::BindSlot::Ps, resolveShader.Get(),
+                                   edvr::detail::kResolveBindPs);
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              g_getPixelShaderCalls == 0 &&
+                              resolveResult.siteResult.flow == Flow::Stop &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.helper.wants, true) &&
+                              rbRead(resolveFact.helper.psHash, edvr::detail::kResolveBindPs) &&
+                              rbSkipped(resolveFact.helper.lambdaEntered),
+                          "known resolve hash claims through the actual site without getter");
+            okay &= check(visitResolveBind(immediate, false, &resolveResult) &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              edvr::draw_ladder_trace::resolveBindFactCountForTest(
+                                  resolveResult.token) == 0,
+                          "NoTrace specialization makes the same cached claim without a fact");
+
+            immediate->PSSetShader(nullptr, nullptr, 0);
+            edvr::bindingSetShader(edvr::BindSlot::Ps, nullptr, 0);
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              g_getPixelShaderCalls == 1 &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Declined &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.helper.lambdaEntered, true) &&
+                              rbRead(resolveFact.helper.psGetReached, true) &&
+                              rbRead(resolveFact.helper.psGetCompleted, true) &&
+                              rbRead(resolveFact.helper.shaderNonNull, false) &&
+                              rbSkipped(resolveFact.helper.lookupReached) &&
+                              rbRead(resolveFact.helper.guardReturned, true),
+                          "unknown null binding completes real PSGetShader and declines");
+
+            immediate->PSSetShader(unknownShader.Get(), nullptr, 0);
+            edvr::bindingSetShader(edvr::BindSlot::Ps, unknownShader.Get(), 0);
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              g_getPixelShaderCalls == 2 &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Declined &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.helper.shaderNonNull, true) &&
+                              rbRead(resolveFact.helper.lookupCompleted, true) &&
+                              rbRead(resolveFact.helper.lookupHash, 0) &&
+                              rbRead(resolveFact.helper.releaseCompleted, true) &&
+                              rbSkipped(resolveFact.helper.cacheBeforePresent),
+                          "unregistered real shader has completed zero lookup and no cache repair");
+
+            // The zero-shadow fallback learns the registered shader through
+            // PSGetShader, updates the actual shadow, and claims this draw.
+            immediate->PSSetShader(resolveShader.Get(), nullptr, 0);
+            edvr::bindingSetShader(edvr::BindSlot::Ps, resolveShader.Get(), 0);
+            g_getPixelShaderCalls = 0;
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              g_getPixelShaderCalls == 1 &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.helper.psGetCompleted, true) &&
+                              rbRead(resolveFact.helper.lookupHash,
+                                     edvr::detail::kResolveBindPs) &&
+                              rbRead(resolveFact.helper.cacheBeforePresent, true) &&
+                              rbRead(resolveFact.helper.cacheBeforeHash, 0) &&
+                              rbRead(resolveFact.helper.cacheAfterPresent, true) &&
+                              rbRead(resolveFact.helper.cacheAfterHash,
+                                     edvr::detail::kResolveBindPs),
+                          "real fallback lookup repairs the shadow and claims");
+            edvr::bindingSetShader(edvr::BindSlot::Ps, resolveShader.Get(), 0);
+            g_getPixelShaderCalls = 0;
+            g_faultGetPixelShader = true;
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              g_getPixelShaderCalls == 1 &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Declined &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.helper.lambdaEntered, true) &&
+                              rbRead(resolveFact.helper.psGetReached, true) &&
+                              rbSkipped(resolveFact.helper.psGetCompleted) &&
+                              rbRead(resolveFact.helper.guardReturned, false),
+                          "typed PSGetShader fault records its attempted prefix");
+            g_faultGetPixelShader = false;
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              g_getPixelShaderCalls == 2 &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.helper.lookupHash,
+                                     edvr::detail::kResolveBindPs),
+                          "claim recovers after the real getter fault");
+
+            // Make the shadow unknown again. The helper assigns its positive
+            // match before Release, so this real post-query fault preserves it.
+            edvr::bindingSetShader(edvr::BindSlot::Ps, resolveShader.Get(), 0);
+            edvr::VTableHook releaseHook;
+            void* releaseOriginal = nullptr;
+            okay &= check(releaseHook.attach(resolveShader.Get(), 16) &&
+                              releaseHook.setMode(edvr::HookMode::CopyVptr) &&
+                              releaseHook.replace(2,
+                                  reinterpret_cast<void*>(&testShaderRelease),
+                                  &releaseOriginal) && releaseHook.commit(),
+                          "typed shader Release hook injects the post-match fault");
+            g_realShaderRelease = reinterpret_cast<ReleaseFn>(releaseOriginal);
+            g_releaseCalls = 0;
+            g_getPixelShaderCalls = 0;
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              g_getPixelShaderCalls == 1 &&
+                              g_releaseCalls == 1 &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.helper.lookupHash,
+                                     edvr::detail::kResolveBindPs) &&
+                              rbRead(resolveFact.helper.releaseReached, true) &&
+                              rbSkipped(resolveFact.helper.releaseCompleted) &&
+                              rbRead(resolveFact.helper.guardReturned, false),
+                          "Release fault after lookup preserves the positive claim");
+            releaseHook.uninstall();
+            g_realShaderRelease = nullptr;
+            okay &= check(visitResolveBind(immediate, true, &resolveResult) &&
+                              resolveResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              readResolveBind(resolveResult, &resolveFact) &&
+                              rbRead(resolveFact.helper.wants, true) &&
+                              rbSkipped(resolveFact.helper.lambdaEntered),
+                          "repaired positive shadow recovers after Release fault");
+
+            // A non-null invalid COM context consumes the remaining helper
+            // fault budget. The first six calls enter the guarded callback;
+            // the next is denied before PSGetShader.
+            auto* const invalidContext = reinterpret_cast<ID3D11DeviceContext*>(
+                static_cast<std::uintptr_t>(1));
+            edvr::bindingSetShader(edvr::BindSlot::Ps, nullptr, 0);
+            for (int i = 0; i < 7; ++i) {
+                const bool invoked = visitResolveBind(invalidContext, true, &resolveResult);
+                bool haveFact = invoked && readResolveBind(resolveResult, &resolveFact);
+                if (i < 6) {
+                    okay &= check(haveFact &&
+                                      rbRead(resolveFact.helper.lambdaEntered, true) &&
+                                      rbRead(resolveFact.helper.psGetReached, true) &&
+                                      rbSkipped(resolveFact.helper.psGetCompleted) &&
+                                      rbRead(resolveFact.helper.guardReturned, false),
+                                  "invalid typed context faults within admitted budget");
+                } else {
+                    okay &= check(haveFact &&
+                                      rbRead(resolveFact.helper.lambdaEntered, false) &&
+                                      rbSkipped(resolveFact.helper.psGetReached) &&
+                                      rbRead(resolveFact.helper.guardReturned, false),
+                                  "exhausted helper budget records a denied callback");
+                }
+            }
+            psGetHook.uninstall();
+            immediate->PSSetShader(previousActualPs, nullptr, 0);
+            edvr::bindingSetShader(edvr::BindSlot::Ps, previousPsShadow, previousPsHash);
+            if (previousActualPs) previousActualPs->Release();
+            config.set("fix.scanner_body", previousScannerBody.c_str());
+            edvr::resolveBindConfigure(config);
+            edvr::bindingSetShader(edvr::BindSlot::Ps, nullptr, 0);
+        }
 
         for (std::uint32_t i = 0; i < 4; ++i)
             edvr::bindingSet(static_cast<edvr::BindSlot>(

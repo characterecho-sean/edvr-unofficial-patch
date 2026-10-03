@@ -3013,11 +3013,34 @@ struct VScreenDrawLadderVisitor {
                 return claimed(id, DrawVerdict::kFssDump);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kResolveBindClaim) {
-            if (resolveBindWants() &&
-                !resolveBindShadowSaysNo(bindingGet(BindSlot::Ps) != nullptr,
-                                         bindingShaderHash(BindSlot::Ps)) && resolveBindOnEyeDraw(self))
-                return claimed(id, DrawVerdict::kResolveBind);
-            return SiteResult::declined();
+            if constexpr (!TracePolicy::enabled) {
+                if (resolveBindWants() &&
+                    !resolveBindShadowSaysNo(bindingGet(BindSlot::Ps) != nullptr,
+                                             bindingShaderHash(BindSlot::Ps)) &&
+                    resolveBindOnEyeDraw(self))
+                    return claimed(id, DrawVerdict::kResolveBind);
+                return SiteResult::declined();
+            } else {
+                ResolveBindObservation fact{};
+                const bool wants = resolveBindWants();
+                fact.outer.wants = {true, true, wants};
+                if (!wants) {
+                    trace.resolveBindFact(fact);
+                    return SiteResult::declined();
+                }
+                const bool psPresent = bindingGet(BindSlot::Ps) != nullptr;
+                const uint64_t psHash = bindingShaderHash(BindSlot::Ps);
+                fact.outer.psPresent = {true, true, psPresent};
+                fact.outer.psHash = {true, true, psHash};
+                if (resolveBindShadowSaysNo(psPresent, psHash)) {
+                    trace.resolveBindFact(fact);
+                    return SiteResult::declined();
+                }
+                const bool matched = resolveBindOnEyeDrawObserved(self, fact.helper);
+                trace.resolveBindFact(fact);
+                if (matched) return claimed(id, DrawVerdict::kResolveBind);
+                return SiteResult::declined();
+            }
         } else if constexpr (id == SiteId::kSunglareSkip) {
             if constexpr (TracePolicy::enabled) {
                 SunglareObservation fact{};
@@ -6166,6 +6189,8 @@ using VScreenDistanceTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeNoDistanceNone, draw_ladder::SiteKind::Exit>;
 using VScreenEyeCensusTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeCensusSkip, draw_ladder::SiteKind::Claim>;
+using VScreenResolveBindTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kResolveBindClaim, draw_ladder::SiteKind::Claim>;
 State* g_eyeCensusTestState = nullptr;
 
 struct VScreenTestInterest final {};
@@ -6190,6 +6215,10 @@ struct VScreenTestTraceCapture final {
 
     void eyeCensusFact(const EyeCensusObservation& fact) noexcept {
         policy.eyeCensusFact(fact);
+    }
+
+    void resolveBindFact(const ResolveBindObservation& fact) noexcept {
+        policy.resolveBindFact(fact);
     }
 };
 
@@ -6224,6 +6253,12 @@ template <class TracePolicy>
 draw_ladder::SiteResult vScreenEyeCensusPredicateTestInvoke(
     VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
     return vScreenPredicateTestInvokeSite<VScreenEyeCensusTestSite>(visitor, trace);
+}
+
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenResolveBindPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    return vScreenPredicateTestInvokeSite<VScreenResolveBindTestSite>(visitor, trace);
 }
 
 } // namespace
@@ -6376,6 +6411,49 @@ bool vScreenEyeCensusPredicateTestVisit(
     result->censusSkippedAfter = fixture.censusSkipped;
     g_eyeCensusTestState = priorActive;
     restoreBindings();
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenResolveBindPredicateTestVisit(
+    ID3D11DeviceContext* context, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context) return false;
+
+    static State fixture{};
+    fixture.ownerCtx = context;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = 'N';
+    facts.count = 3;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
+        return false;
+    }
+
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, 'N', 3, 1, args, trace};
+        result->siteResult = vScreenResolveBindPredicateTestInvoke(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, 'N', 3, 1, args, trace};
+        result->siteResult = vScreenResolveBindPredicateTestInvoke(visitor, trace);
+    }
+
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;

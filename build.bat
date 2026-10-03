@@ -1804,6 +1804,30 @@ python tools\draw_ladder_replay.py --file ^
 python tools\draw_ladder_replay.py --file ^
     "%BUILD%\draw_ladder_test-trace\eye_census_positive\edvr_gfx_eye_positive.draw-ladder-67.json" ^
     --expected-log edvr_gfx_eye_positive.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_missing\edvr_gfx_resolve_missing.draw-ladder-68.json" ^
+    --expected-log edvr_gfx_resolve_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate\edvr_gfx_resolve_duplicate.draw-ladder-69.json" ^
+    --expected-log edvr_gfx_resolve_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind\edvr_gfx_resolve_wrong_kind.draw-ladder-70.json" ^
+    --expected-log edvr_gfx_resolve_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read\edvr_gfx_resolve_bad_read.draw-ladder-71.json" ^
+    --expected-log edvr_gfx_resolve_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited\edvr_gfx_resolve_unvisited.draw-ladder-72.json" ^
+    --expected-log edvr_gfx_resolve_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown\edvr_gfx_resolve_unknown.draw-ladder-73.json" ^
+    --expected-log edvr_gfx_resolve_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_positive\edvr_gfx_resolve_positive.draw-ladder-75.json" ^
+    --expected-log edvr_gfx_resolve_positive.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\resolve_bind_negative\edvr_gfx_resolve_negative.draw-ladder-76.json" ^
+    --expected-log edvr_gfx_resolve_negative.log --dry-run || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -1964,6 +1988,32 @@ if exist "%BUILD%\draw_ladder_test-trace\eye_census_pool" rmdir "%BUILD%\draw_la
 del /q "%BUILD%\draw_ladder_test-trace\eye_census_positive\edvr_gfx_eye_positive.log"
 del /q "%BUILD%\draw_ladder_test-trace\eye_census_positive\edvr_gfx_eye_positive.draw-ladder-67.json"
 if exist "%BUILD%\draw_ladder_test-trace\eye_census_positive" rmdir "%BUILD%\draw_ladder_test-trace\eye_census_positive"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_missing\edvr_gfx_resolve_missing.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_missing\edvr_gfx_resolve_missing.draw-ladder-68.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_missing" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_missing"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate\edvr_gfx_resolve_duplicate.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate\edvr_gfx_resolve_duplicate.draw-ladder-69.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind\edvr_gfx_resolve_wrong_kind.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind\edvr_gfx_resolve_wrong_kind.draw-ladder-70.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_wrong_kind"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read\edvr_gfx_resolve_bad_read.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read\edvr_gfx_resolve_bad_read.draw-ladder-71.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_bad_read"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited\edvr_gfx_resolve_unvisited.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited\edvr_gfx_resolve_unvisited.draw-ladder-72.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown\edvr_gfx_resolve_unknown.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown\edvr_gfx_resolve_unknown.draw-ladder-73.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_pool\edvr_gfx_resolve_pool.log"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_pool" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_pool"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_positive\edvr_gfx_resolve_positive.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_positive\edvr_gfx_resolve_positive.draw-ladder-75.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_positive" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_positive"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_negative\edvr_gfx_resolve_negative.log"
+del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_negative\edvr_gfx_resolve_negative.draw-ladder-76.json"
+if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_negative" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_negative"
 if exist "%BUILD%\draw_ladder_test-trace\disabled" rmdir "%BUILD%\draw_ladder_test-trace\disabled"
 if exist "%BUILD%\draw_ladder_test-trace\valid" rmdir "%BUILD%\draw_ladder_test-trace\valid"
 if exist "%BUILD%\draw_ladder_test-trace\terminalmatrix" rmdir "%BUILD%\draw_ladder_test-trace\terminalmatrix"
@@ -2307,6 +2357,23 @@ link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test build failed & exit /b 1 )
 "%BUILD%\vscreen_predicate_test.exe" --dry-run || exit /b 1
 "%BUILD%\vscreen_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_loader_panel_api_test
+echo [edvr] === loader-panel staging API owner regression ===
+if not exist "%OBJ%\loaderpanelapi" mkdir "%OBJ%\loaderpanelapi"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\loaderpanelapi\\" /Fe"%BUILD%\loader_panel_api_test.exe" ^
+    "tools\loader_panel_api_test\loader_panel_api_test.cpp" ^
+    "src\d3d11\loader_panel.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\guard.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: loader-panel API test build failed & exit /b 1 )
+"%BUILD%\loader_panel_api_test.exe" --dry-run || exit /b 1
+"%BUILD%\loader_panel_api_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_shader_swap_api_test

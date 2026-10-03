@@ -45,6 +45,8 @@
 
 #include <cstdint>
 
+#include "resolve_bind_observation.h"
+
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -90,6 +92,8 @@ inline bool resolveBindShadowSaysNo(bool hasShader, uint64_t hash) {
     return detail::resolveBindShadowMatch(hasShader, hash) == detail::ResolveBindShadow::No;
 }
 bool resolveBindOnEyeDraw(ID3D11DeviceContext* ctx);
+bool resolveBindOnEyeDrawObserved(ID3D11DeviceContext* ctx,
+                                 ResolveBindHelperObservation& observation);
 
 // Around the matched draw: cache the vertex buffer if one is bound; lend
 // the cached one if not. End restores the empty binding only when Begin

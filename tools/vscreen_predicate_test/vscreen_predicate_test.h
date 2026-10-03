@@ -6,6 +6,7 @@
 
 #include "../../src/d3d11/draw_ladder_trace.h"
 #include "../../src/d3d11/eye_census_observation.h"
+#include "../../src/d3d11/resolve_bind_observation.h"
 
 struct ID3D11DeviceContext;
 
@@ -61,6 +62,10 @@ bool vScreenEyeCensusPredicateTestVisit(
     const VScreenEyeCensusTestRule* rules, std::uint32_t ruleCount,
     void* const psSrvs[4], std::uint64_t heldVsHash,
     std::uint64_t censusSkippedSeed, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept;
+
+bool vScreenResolveBindPredicateTestVisit(
+    ID3D11DeviceContext* context, bool traceEnabled,
     VScreenPredicateTestResult* result) noexcept;
 
 } // namespace edvr

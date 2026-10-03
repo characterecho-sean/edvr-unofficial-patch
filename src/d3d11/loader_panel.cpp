@@ -14,6 +14,7 @@
 #include "../common/intro_mode.h"
 #include "../common/guard.h"
 #include "../common/log.h"
+#include "loader_panel_cost_sites.h"
 
 namespace edvr {
 
@@ -349,12 +350,19 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         if (qualifies && p < kMaxSeq && g_capCount < kMaxCaptures) {
             bool stored = false;
             guardedBudget(g_budget, [&] {
+                // Latch once for this admitted capture. Normal draw
+                // classification and every Release remain outside this slice.
+                const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
                 ID3D11Buffer* ib = nullptr;
                 DXGI_FORMAT ibFmt = DXGI_FORMAT_UNKNOWN;
                 UINT ibOff = 0;
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::IaGetIndexBuffer,
+                                                        plugin_cost::ApiClass::ReadQuery);
                 ctx->IAGetIndexBuffer(&ib, &ibFmt, &ibOff);
                 ID3D11Buffer* vb = nullptr;
                 UINT stride = 0, vbOff = 0;
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::IaGetVertexBuffers,
+                                                        plugin_cost::ApiClass::ReadQuery);
                 ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &vbOff);
                 if (!ib || !vb || stride == 0) {
                     if (ib) ib->Release();
@@ -365,6 +373,8 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                     (ibFmt == DXGI_FORMAT_R16_UINT) ? 2u : 4u;
                 const UINT need = count * idxSize;
                 ID3D11Device* dev = nullptr;
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::ContextGetDevice,
+                                                        plugin_cost::ApiClass::ReadQuery);
                 ctx->GetDevice(&dev);
                 if (dev && g_ibFill + need <= kIbStageBytes) {
                     bool ok = true;
@@ -373,16 +383,22 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         sd.Usage = D3D11_USAGE_STAGING;
                         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                         sd.ByteWidth = kIbStageBytes;
+                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CreateIndexStage,
+                                                                plugin_cost::ApiClass::Work);
                         ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_ibStage));
                     }
                     if (ok && !g_vbStage) {
                         D3D11_BUFFER_DESC vd{};
+                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::VertexGetDesc,
+                                                                plugin_cost::ApiClass::ReadQuery);
                         vb->GetDesc(&vd);
                         D3D11_BUFFER_DESC sd{};
                         sd.Usage = D3D11_USAGE_STAGING;
                         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                         sd.ByteWidth = vd.ByteWidth > kVbStageCap ? kVbStageCap
                                                                   : vd.ByteWidth;
+                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CreateVertexStage,
+                                                                plugin_cost::ApiClass::Work);
                         ok = SUCCEEDED(dev->CreateBuffer(&sd, nullptr, &g_vbStage));
                         if (ok) {
                             // The whole buffer, once. Every draw this frame
@@ -393,6 +409,8 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                             D3D11_BOX all{};
                             all.right = sd.ByteWidth;
                             all.bottom = 1; all.back = 1;
+                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CopyVertexStage,
+                                                                    plugin_cost::ApiClass::Transfer);
                             ctx->CopySubresourceRegion(g_vbStage, 0, 0, 0, 0,
                                                        vb, 0, &all);
                             g_capVertexBytes = sd.ByteWidth;
@@ -404,6 +422,8 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         box.left = ibOff + startIndex * idxSize;
                         box.right = box.left + need;
                         box.bottom = 1; box.back = 1;
+                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CopyIndexStage,
+                                                                plugin_cost::ApiClass::Transfer);
                         ctx->CopySubresourceRegion(g_ibStage, 0, g_ibFill, 0, 0,
                                                    ib, 0, &box);
                         CapDraw& cd = g_caps[g_capCount];
@@ -418,21 +438,31 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         // as the vertex buffer.
                         if (count == kPanelIndices) {
                             ID3D11ShaderResourceView* srv = nullptr;
+                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::VsGetShaderResources,
+                                                                    plugin_cost::ApiClass::ReadQuery);
                             ctx->VSGetShaderResources(0, 1, &srv);
                             if (srv) {
                                 cd.vsSrv = srv;
                                 if (!g_srvStage) {
                                     ID3D11Resource* res = nullptr;
+                                    if (costSample) loader_panel_cost::note(loader_panel_cost::Site::SrvGetResource,
+                                                                            plugin_cost::ApiClass::ReadQuery);
                                     srv->GetResource(&res);
                                     if (res) {
                                         D3D11_RESOURCE_DIMENSION dim;
+                                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::ResourceGetType,
+                                                                                plugin_cost::ApiClass::ReadQuery);
                                         res->GetType(&dim);
                                         if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
                                             ID3D11Buffer* tbl =
                                                 static_cast<ID3D11Buffer*>(res);
                                             D3D11_BUFFER_DESC td{};
+                                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::TableGetDesc,
+                                                                                    plugin_cost::ApiClass::ReadQuery);
                                             tbl->GetDesc(&td);
                                             D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+                                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::SrvGetDesc,
+                                                                                    plugin_cost::ApiClass::ReadQuery);
                                             srv->GetDesc(&svd);
                                             if (svd.ViewDimension ==
                                                 D3D11_SRV_DIMENSION_BUFFEREX) {
@@ -451,11 +481,15 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                                                 td.ByteWidth > kSrvStageBytes
                                                     ? kSrvStageBytes
                                                     : td.ByteWidth;
+                                            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CreateTableStage,
+                                                                                    plugin_cost::ApiClass::Work);
                                             if (SUCCEEDED(dev->CreateBuffer(
                                                     &sd, nullptr, &g_srvStage))) {
                                                 D3D11_BOX tb{};
                                                 tb.right = sd.ByteWidth;
                                                 tb.bottom = 1; tb.back = 1;
+                                                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CopyTableStage,
+                                                                                        plugin_cost::ApiClass::Transfer);
                                                 ctx->CopySubresourceRegion(
                                                     g_srvStage, 0, 0, 0, 0,
                                                     tbl, 0, &tb);
@@ -469,17 +503,23 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                             }
                             if (!g_cb2Stage) {
                                 ID3D11Buffer* cb = nullptr;
+                                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::VsGetConstantBuffers,
+                                                                        plugin_cost::ApiClass::ReadQuery);
                                 ctx->VSGetConstantBuffers(2, 1, &cb);
                                 if (cb) {
                                     D3D11_BUFFER_DESC sd{};
                                     sd.Usage = D3D11_USAGE_STAGING;
                                     sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
                                     sd.ByteWidth = kCb2Bytes;
+                                    if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CreateConstantsStage,
+                                                                            plugin_cost::ApiClass::Work);
                                     if (SUCCEEDED(dev->CreateBuffer(
                                             &sd, nullptr, &g_cb2Stage))) {
                                         D3D11_BOX cbb{};
                                         cbb.right = kCb2Bytes;
                                         cbb.bottom = 1; cbb.back = 1;
+                                        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::CopyConstantsStage,
+                                                                                plugin_cost::ApiClass::Transfer);
                                         ctx->CopySubresourceRegion(
                                             g_cb2Stage, 0, 0, 0, 0, cb, 0,
                                             &cbb);
@@ -600,18 +640,31 @@ bool tryAnalyze(ID3D11DeviceContext* ctx, bool allowWait) {
         }
         return true;
     }
+    // All prerequisites are satisfied and a pending capture is about to be
+    // read. One latch covers this Map/Unmap attempt prefix, including faults.
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     const UINT mapFlags = allowWait ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT;
     ID3D11Buffer* stages[4] = {g_ibStage, g_vbStage, g_srvStage, g_cb2Stage};
     D3D11_MAPPED_SUBRESOURCE maps[4] = {};
     for (int i = 0; i < 4; ++i) {
+        if (costSample) loader_panel_cost::note(loader_panel_cost::Site::MapReadback,
+                                                plugin_cost::ApiClass::Transfer);
         const HRESULT hr =
             ctx->Map(stages[i], 0, D3D11_MAP_READ, mapFlags, &maps[i]);
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-            for (int j = 0; j < i; ++j) ctx->Unmap(stages[j], 0);
+            for (int j = 0; j < i; ++j) {
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::UnmapReadback,
+                                                        plugin_cost::ApiClass::Transfer);
+                ctx->Unmap(stages[j], 0);
+            }
             return false;   // not ready; poll again next frame
         }
         if (FAILED(hr) || !maps[i].pData) {
-            for (int j = 0; j < i; ++j) ctx->Unmap(stages[j], 0);
+            for (int j = 0; j < i; ++j) {
+                if (costSample) loader_panel_cost::note(loader_panel_cost::Site::UnmapReadback,
+                                                        plugin_cost::ApiClass::Transfer);
+                ctx->Unmap(stages[j], 0);
+            }
             failOnce("the measurement could not be mapped");
             return true;
         }
@@ -623,7 +676,11 @@ bool tryAnalyze(ID3D11DeviceContext* ctx, bool allowWait) {
     memcpy(&flags, static_cast<const uint8_t*>(maps[3].pData) + 32, 4);
 
     auto unmapAll = [&] {
-        for (int i = 3; i >= 0; --i) ctx->Unmap(stages[i], 0);
+        for (int i = 3; i >= 0; --i) {
+            if (costSample) loader_panel_cost::note(loader_panel_cost::Site::UnmapReadback,
+                                                    plugin_cost::ApiClass::Transfer);
+            ctx->Unmap(stages[i], 0);
+        }
     };
 
     // Per captured panel: the fill quad's bounds, the RGBA8 at offset 8,

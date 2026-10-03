@@ -14,7 +14,8 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 10
+PREDICATE_FACT_VERSION = 11
+RESOLVE_BIND_PS_HASH = 0x7CECABDE34FFBE9E
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -1489,6 +1490,218 @@ def _eye_site_event(claimed, subsite):
              "subsite": 0, "verdict": -1})
 
 
+class _ResolveBindUnavailable(Exception):
+    pass
+
+
+def _replay_resolve_bind_fact(fact, label):
+    """Replay site60 from independent outer, shadow, callback, and repair reads."""
+    required = {"siteId", "kind", "known", "outer", "helper"}
+    if set(fact) != required or fact.get("known") != "yes":
+        raise TraceError(label + " has missing or unexpected ResolveBind fields")
+    u64 = 0xffffffffffffffff
+    read_types = {
+        "outer": {"wants": bool, "psPresent": bool, "psHash": int},
+        "helper": {
+            "wants": bool, "contextNonNull": bool, "psPresent": bool,
+            "psHash": int, "lambdaEntered": bool, "psGetReached": bool,
+            "psGetCompleted": bool, "shaderNonNull": bool,
+            "lookupReached": bool, "lookupCompleted": bool,
+            "lookupHash": int, "cacheBeforePresent": bool,
+            "cacheBeforeHash": int, "cacheAfterPresent": bool,
+            "cacheAfterHash": int, "releaseReached": bool,
+            "releaseCompleted": bool, "guardReturned": bool,
+        },
+    }
+    groups = {}
+    for group_name, expected in read_types.items():
+        group = fact.get(group_name)
+        if not isinstance(group, dict) or set(group) != set(expected):
+            raise TraceError(label + "." + group_name + " has missing or unexpected fields")
+        values = {}
+        for name, value_type in expected.items():
+            item = group.get(name)
+            path = label + "." + group_name + "." + name
+            if not isinstance(item, dict) or set(item) != {"reached", "known", "value"}:
+                raise TraceError(path + " is malformed")
+            reached, known, value = item["reached"], item["known"], item["value"]
+            if type(reached) is not bool or type(known) is not bool:
+                raise TraceError(path + " availability must be boolean")
+            if known and not reached:
+                raise TraceError(path + " cannot be known before it is reached")
+            if not known:
+                if value is not None:
+                    raise TraceError(path + " unknown value must be null")
+                values[name] = (reached, False, None)
+            else:
+                if value_type is bool:
+                    if type(value) is not bool:
+                        raise TraceError(path + " must contain a boolean")
+                else:
+                    _integer(value, path + ".value", 0, u64)
+                values[name] = (reached, True, value)
+        groups[group_name] = values
+
+    def consumed(group, name):
+        value = groups[group][name]
+        if not value[0]:
+            raise TraceError(label + "." + group + "." + name + " was not reached when consumed")
+        if not value[1]:
+            raise _ResolveBindUnavailable()
+        return value[2]
+
+    def unread(group, name):
+        value = groups[group][name]
+        if value[0]:
+            raise TraceError(label + "." + group + "." + name + " was reached after a short circuit")
+
+    def unread_group(group, names):
+        for name in names:
+            unread(group, name)
+
+    outer_fields = ("psPresent", "psHash")
+    helper_fields = tuple(read_types["helper"])
+    outer_wants = consumed("outer", "wants")
+    if not outer_wants:
+        unread_group("outer", outer_fields)
+        unread_group("helper", helper_fields)
+        return _resolve_bind_event(False), 0, False
+
+    outer_present = consumed("outer", "psPresent")
+    outer_hash = consumed("outer", "psHash")
+    outer_known_shadow = outer_present and outer_hash != 0
+    if outer_known_shadow and outer_hash != RESOLVE_BIND_PS_HASH:
+        unread_group("helper", helper_fields)
+        return _resolve_bind_event(False), 0, False
+
+    # Outer and helper snapshots are separate reads; COM reentry may change them.
+    helper_wants = consumed("helper", "wants")
+    if not helper_wants:
+        unread_group("helper", helper_fields[1:])
+        return _resolve_bind_event(False), 0, False
+    context_non_null = consumed("helper", "contextNonNull")
+    if not context_non_null:
+        unread_group("helper", helper_fields[2:])
+        return _resolve_bind_event(False), 0, False
+    helper_present = consumed("helper", "psPresent")
+    helper_hash = consumed("helper", "psHash")
+    helper_known_shadow = helper_present and helper_hash != 0
+    if helper_known_shadow:
+        unread_group("helper", helper_fields[4:])
+        return _resolve_bind_event(helper_hash == RESOLVE_BIND_PS_HASH), 0, False
+
+    lambda_entered = consumed("helper", "lambdaEntered")
+    guard_returned = consumed("helper", "guardReturned")
+    if not lambda_entered:
+        if guard_returned:
+            raise TraceError(label + " denied fallback lambda cannot report a returned guard")
+        unread_group("helper", helper_fields[5:-1])
+        return _resolve_bind_event(False), 0, False
+
+    if not consumed("helper", "psGetReached"):
+        raise TraceError(label + " entered fallback lambda without reaching PSGetShader")
+    ps_get_completed = groups["helper"]["psGetCompleted"]
+    if not ps_get_completed[0]:
+        if guard_returned:
+            raise TraceError(label + " PSGetShader fault cannot return through guardedBudget")
+        unread_group("helper", helper_fields[7:-1])
+        return _resolve_bind_event(False), 0, False
+    if not ps_get_completed[1]:
+        raise _ResolveBindUnavailable()
+    if ps_get_completed[2] is not True:
+        raise TraceError(label + " PSGetShader completion marker is invalid")
+    shader_non_null = consumed("helper", "shaderNonNull")
+    if not shader_non_null:
+        unread_group("helper", helper_fields[8:-1])
+        if not guard_returned:
+            raise TraceError(label + " null PSGetShader result has no later guarded fault")
+        return _resolve_bind_event(False), 0, False
+
+    if not consumed("helper", "lookupReached"):
+        raise TraceError(label + " nonnull shader did not reach lookupShaderHash")
+    lookup_completed = groups["helper"]["lookupCompleted"]
+    if not lookup_completed[0]:
+        unread_group("helper", helper_fields[10:-1])
+        if guard_returned:
+            raise TraceError(label + " lookup fault cannot return through guardedBudget")
+        return _resolve_bind_event(False), 0, False
+    if not lookup_completed[1]:
+        raise _ResolveBindUnavailable()
+    if lookup_completed[2] is not True:
+        raise TraceError(label + " lookup completion marker is invalid")
+    lookup_hash = consumed("helper", "lookupHash")
+    mismatch = 0
+    mutation_unobserved = False
+    repair_completed = False
+    if lookup_hash:
+        before_present_read = groups["helper"]["cacheBeforePresent"]
+        after_present_read = groups["helper"]["cacheAfterPresent"]
+        before_hash_read = groups["helper"]["cacheBeforeHash"]
+        after_hash_read = groups["helper"]["cacheAfterHash"]
+
+        def cache_snapshot(present_read, hash_read, name):
+            # The producer reads both operands unconditionally around repair;
+            # an absent pointer may retain a nonzero raw shadow hash.
+            if not all(item[0] and item[1] for item in (present_read, hash_read)):
+                return None
+            return (present_read[2], hash_read[2])
+
+        before_snapshot = cache_snapshot(before_present_read, before_hash_read,
+                                         "cacheBefore")
+        after_snapshot = cache_snapshot(after_present_read, after_hash_read,
+                                        "cacheAfter")
+        repair_completed = after_snapshot is not None
+        if before_snapshot is None or after_snapshot is None:
+            mutation_unobserved = True
+        if after_snapshot is not None and after_snapshot != (True, lookup_hash):
+            mismatch += 1
+    else:
+        unread_group("helper", ("cacheBeforePresent", "cacheBeforeHash",
+                                "cacheAfterPresent", "cacheAfterHash"))
+
+    release_reached = groups["helper"]["releaseReached"]
+    release_completed = groups["helper"]["releaseCompleted"]
+    if release_reached[0] and not release_reached[1]:
+        raise _ResolveBindUnavailable()
+    if release_reached[0]:
+        if release_reached[2] is not True:
+            raise TraceError(label + " Release reached marker is invalid")
+        if release_completed[0] and not release_completed[1]:
+            raise _ResolveBindUnavailable()
+        if not release_completed[0]:
+            if guard_returned:
+                raise TraceError(label + " Release fault cannot return through guardedBudget")
+        elif not release_completed[1] or release_completed[2] is not True:
+            raise TraceError(label + " Release completion marker is invalid")
+        elif not guard_returned:
+            raise TraceError(label + " completed Release must return through guardedBudget")
+    else:
+        unread("helper", "releaseCompleted")
+        if lookup_hash == 0:
+            raise TraceError(label + " successful zero-hash lookup did not reach Release")
+        if repair_completed:
+            raise TraceError(label + " completed cache repair did not reach Release")
+        if guard_returned:
+            raise TraceError(label + " missing Release after nonnull PS violates fallback order")
+
+    # A successful lookup with a nonzero hash assigns match after the repair
+    # returns and before Release. Release faults therefore preserve that result.
+    assigned = bool(lookup_hash and release_reached[0])
+    if lookup_hash and not release_reached[0]:
+        # Repair did not finish, so the initialized false value survives.
+        if not repair_completed:
+            mutation_unobserved = True
+    return _resolve_bind_event(lookup_hash == RESOLVE_BIND_PS_HASH if assigned else False), \
+        mismatch, mutation_unobserved
+
+
+def _resolve_bind_event(claimed):
+    return ({"id": 60, "kind": 2, "outcome": 3, "flow": 1,
+             "subsite": 0, "verdict": 14} if claimed else
+            {"id": 60, "kind": 2, "outcome": 2, "flow": 0,
+             "subsite": 0, "verdict": -1})
+
+
 def _candidate_witchspace_stars(fact, draw):
     """Candidate selector from raw helper inputs, independent of site output."""
     if fact["hiddenKnown"] != "yes":
@@ -2058,11 +2271,12 @@ def _replay_scrim_fact(fact, draw, label):
 
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 10 else
+    supported_ids = ((2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 11 else
+                     (2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 10 else
                      (2, 3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 9 else
                      (3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 8 else
                      (3, 6, 24, 26, 49, 50, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 7 else
@@ -2082,6 +2296,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        18 if predicate_fact_version >= 11 else
                         17 if predicate_fact_version >= 10 else
                         16 if predicate_fact_version >= 9 else
                         14 if predicate_fact_version >= 8 else
@@ -2094,6 +2309,8 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
         supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+                           (57, 12), (58, 13), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 11 else (
+            (2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 10 else (
             (2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 9 else (
@@ -2184,6 +2401,16 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 event, fact_mismatches, fact_mutation_unobserved = \
                     _replay_eye_census_fact(fact, draw, fact_label)
             except _EyeCensusUnavailable:
+                event, fact_mismatches, fact_mutation_unobserved = None, 0, False
+            by_site[site_id] = (event, None, True, 0, fact_mismatches,
+                                fact_mutation_unobserved)
+        elif kind == 18:
+            if site_id != 60 or predicate_fact_version < 11:
+                raise TraceError(fact_label + " has unsupported ResolveBind fact")
+            try:
+                event, fact_mismatches, fact_mutation_unobserved = \
+                    _replay_resolve_bind_fact(fact, fact_label)
+            except _ResolveBindUnavailable:
                 event, fact_mismatches, fact_mutation_unobserved = None, 0, False
             by_site[site_id] = (event, None, True, 0, fact_mismatches,
                                 fact_mutation_unobserved)
@@ -2417,7 +2644,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -2460,6 +2687,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     eye_census_replayed = 0
     eye_census_unreplayable = 0
     eye_census_mismatches = 0
+    resolve_bind_replayed = 0
+    resolve_bind_unreplayable = 0
+    resolve_bind_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -2498,6 +2728,19 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 eye_census_mismatches += 1
             if cache_mismatches:
                 eye_census_mismatches += cache_mismatches
+            if legacy_claim:
+                mutation_unobserved += 1
+        if site_id == 60:
+            if site_unreplayable:
+                resolve_bind_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                resolve_bind_replayed += 1
+            else:
+                resolve_bind_mismatches += 1
+            if cache_mismatches:
+                resolve_bind_mismatches += cache_mismatches
             if legacy_claim:
                 mutation_unobserved += 1
         if site_id in (61, 62, 63):
@@ -2671,7 +2914,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "eyeCensusFacts": sum(1 for site_id in by_site if site_id == 48),
             "eyeCensusReplayed": eye_census_replayed,
             "eyeCensusUnreplayable": eye_census_unreplayable,
-            "eyeCensusMismatches": eye_census_mismatches}
+            "eyeCensusMismatches": eye_census_mismatches,
+            "resolveBindFacts": sum(1 for site_id in by_site if site_id == 60),
+            "resolveBindReplayed": resolve_bind_replayed,
+            "resolveBindUnreplayable": resolve_bind_unreplayable,
+            "resolveBindMismatches": resolve_bind_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -2689,7 +2936,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -2781,7 +3028,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "basicDrawFacts": 0, "basicDrawReplayed": 0,
                         "basicDrawUnreplayable": 0, "basicDrawMismatches": 0,
                         "eyeCensusFacts": 0, "eyeCensusReplayed": 0,
-                        "eyeCensusUnreplayable": 0, "eyeCensusMismatches": 0}
+                        "eyeCensusUnreplayable": 0, "eyeCensusMismatches": 0,
+                        "resolveBindFacts": 0, "resolveBindReplayed": 0,
+                        "resolveBindUnreplayable": 0, "resolveBindMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -3130,6 +3379,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                               "mismatch" if predicate_replay["eyeCensusMismatches"] else
                               "unreplayable" if predicate_replay["eyeCensusUnreplayable"] else
                               "replayed"),
+             resolveBindStatus=("unavailable-before-v11" if predicate_fact_version < 11 else
+                                "not-visited" if not predicate_replay["resolveBindFacts"] else
+                                "mismatch" if predicate_replay["resolveBindMismatches"] else
+                                "unreplayable" if predicate_replay["resolveBindUnreplayable"] else
+                                "replayed"),
              **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -3164,7 +3418,10 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
               "basicDrawUnreplayable": 0, "basicDrawMismatches": 0,
               "eyeCensusStatus": "unavailable-before-v10",
               "eyeCensusFacts": 0, "eyeCensusReplayed": 0,
-              "eyeCensusUnreplayable": 0, "eyeCensusMismatches": 0}),
+              "eyeCensusUnreplayable": 0, "eyeCensusMismatches": 0,
+              "resolveBindStatus": "unavailable-before-v11",
+              "resolveBindFacts": 0, "resolveBindReplayed": 0,
+              "resolveBindUnreplayable": 0, "resolveBindMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -3290,6 +3547,13 @@ def format_summary(summary, sidecar_path=None):
                      (replay.get("eyeCensusStatus", "not-visited"),
                       replay.get("eyeCensusFacts", 0), replay.get("eyeCensusReplayed", 0),
                       replay.get("eyeCensusUnreplayable", 0), replay.get("eyeCensusMismatches", 0)))
+    if replay.get("predicateFactVersion", 0) < 11:
+        lines.append("  ResolveBindClaim site 60: unavailable before predicate fact version 11")
+    else:
+        lines.append("  ResolveBindClaim site 60: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay.get("resolveBindStatus", "not-visited"),
+                      replay.get("resolveBindFacts", 0), replay.get("resolveBindReplayed", 0),
+                      replay.get("resolveBindUnreplayable", 0), replay.get("resolveBindMismatches", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -6081,6 +6345,271 @@ def self_test():
     if _replay_predicate_facts(legacy_eye_trace, "eye-v9-compat", 9)["eyeCensusFacts"] != 0:
         print("predicate fact version 9 fabricated EyeCensus coverage")
         return 1
+
+    def rb_read(value=None, reached=False, known=False):
+        return {"reached": reached, "known": known,
+                "value": value if known else None}
+
+    rb_outer_fields = ("wants", "psPresent", "psHash")
+    rb_helper_fields = (
+        "wants", "contextNonNull", "psPresent", "psHash", "lambdaEntered",
+        "psGetReached", "psGetCompleted", "shaderNonNull", "lookupReached",
+        "lookupCompleted", "lookupHash", "cacheBeforePresent",
+        "cacheBeforeHash", "cacheAfterPresent", "cacheAfterHash",
+        "releaseReached", "releaseCompleted", "guardReturned")
+
+    def rb_fact():
+        return {"siteId": 60, "kind": 18, "known": "yes",
+                "outer": {name: rb_read() for name in rb_outer_fields},
+                "helper": {name: rb_read() for name in rb_helper_fields}}
+
+    def rb_set(fact, group, name, value):
+        fact[group][name] = rb_read(value, True, True)
+
+    def rb_default_fallback():
+        fact = rb_fact()
+        for name, value in (("wants", True), ("psPresent", False), ("psHash", 0)):
+            rb_set(fact, "outer", name, value)
+        for name, value in (("wants", True), ("contextNonNull", True),
+                            ("psPresent", False), ("psHash", 0)):
+            rb_set(fact, "helper", name, value)
+        return fact
+
+    def rb_fallback_entered(fact, guard_returned):
+        rb_set(fact, "helper", "lambdaEntered", True)
+        rb_set(fact, "helper", "guardReturned", guard_returned)
+        rb_set(fact, "helper", "psGetReached", True)
+
+    rb_outer_off = rb_fact()
+    rb_set(rb_outer_off, "outer", "wants", False)
+    if _replay_resolve_bind_fact(rb_outer_off, "resolve-outer-off")[0] != _resolve_bind_event(False):
+        print("ResolveBind outer gate off did not short-circuit")
+        return 1
+
+    rb_outer_no = rb_fact()
+    for name, value in (("wants", True), ("psPresent", True),
+                        ("psHash", RESOLVE_BIND_PS_HASH ^ 1)):
+        rb_set(rb_outer_no, "outer", name, value)
+    if _replay_resolve_bind_fact(rb_outer_no, "resolve-outer-no")[0] != _resolve_bind_event(False):
+        print("ResolveBind known outer shadow miss did not decline")
+        return 1
+
+    rb_reentry = rb_fact()
+    for name, value in (("wants", True), ("psPresent", True),
+                        ("psHash", RESOLVE_BIND_PS_HASH)):
+        rb_set(rb_reentry, "outer", name, value)
+    rb_set(rb_reentry, "helper", "wants", False)
+    if _replay_resolve_bind_fact(rb_reentry, "resolve-reentry-off")[0] != _resolve_bind_event(False):
+        print("ResolveBind failed independent repeated wants replay")
+        return 1
+
+    rb_inner_yes = rb_default_fallback()
+    rb_set(rb_inner_yes, "helper", "psPresent", True)
+    rb_set(rb_inner_yes, "helper", "psHash", RESOLVE_BIND_PS_HASH)
+    if _replay_resolve_bind_fact(rb_inner_yes, "resolve-inner-yes")[0] != _resolve_bind_event(True):
+        print("ResolveBind inner cached match did not claim")
+        return 1
+
+    rb_inner_no = rb_default_fallback()
+    rb_set(rb_inner_no, "helper", "psPresent", True)
+    rb_set(rb_inner_no, "helper", "psHash", RESOLVE_BIND_PS_HASH ^ 2)
+    if _replay_resolve_bind_fact(rb_inner_no, "resolve-inner-no")[0] != _resolve_bind_event(False):
+        print("ResolveBind inner cached miss did not decline")
+        return 1
+
+    rb_null_context = rb_fact()
+    for name, value in (("wants", True), ("psPresent", False), ("psHash", 0)):
+        rb_set(rb_null_context, "outer", name, value)
+    rb_set(rb_null_context, "helper", "wants", True)
+    rb_set(rb_null_context, "helper", "contextNonNull", False)
+    if _replay_resolve_bind_fact(rb_null_context, "resolve-null-context")[0] != _resolve_bind_event(False):
+        print("ResolveBind null context reached helper inputs")
+        return 1
+
+    rb_denied = rb_default_fallback()
+    rb_set(rb_denied, "helper", "lambdaEntered", False)
+    rb_set(rb_denied, "helper", "guardReturned", False)
+    if _replay_resolve_bind_fact(rb_denied, "resolve-budget-denied")[0] != _resolve_bind_event(False):
+        print("ResolveBind denied fallback budget did not preserve initialized miss")
+        return 1
+
+    rb_ps_fault = rb_default_fallback()
+    rb_fallback_entered(rb_ps_fault, False)
+    if _replay_resolve_bind_fact(rb_ps_fault, "resolve-psget-fault")[0] != _resolve_bind_event(False):
+        print("ResolveBind PSGet fault did not preserve initialized miss")
+        return 1
+
+    rb_null_ps = rb_default_fallback()
+    rb_fallback_entered(rb_null_ps, True)
+    for name, value in (("psGetCompleted", True), ("shaderNonNull", False)):
+        rb_set(rb_null_ps, "helper", name, value)
+    if _replay_resolve_bind_fact(rb_null_ps, "resolve-null-ps")[0] != _resolve_bind_event(False):
+        print("ResolveBind null shader did not replay as a known miss")
+        return 1
+
+    rb_lookup_fault = rb_default_fallback()
+    rb_fallback_entered(rb_lookup_fault, False)
+    for name, value in (("psGetCompleted", True), ("shaderNonNull", True),
+                        ("lookupReached", True)):
+        rb_set(rb_lookup_fault, "helper", name, value)
+    if _replay_resolve_bind_fact(rb_lookup_fault, "resolve-lookup-fault")[0] != _resolve_bind_event(False):
+        print("ResolveBind lookup fault did not preserve initialized miss")
+        return 1
+
+    rb_lookup_zero = rb_default_fallback()
+    rb_fallback_entered(rb_lookup_zero, True)
+    for name, value in (("psGetCompleted", True), ("shaderNonNull", True),
+                        ("lookupReached", True), ("lookupCompleted", True),
+                        ("lookupHash", 0), ("releaseReached", True),
+                        ("releaseCompleted", True)):
+        rb_set(rb_lookup_zero, "helper", name, value)
+    if _replay_resolve_bind_fact(rb_lookup_zero, "resolve-lookup-zero")[0] != _resolve_bind_event(False):
+        print("ResolveBind successful zero lookup was not a known miss")
+        return 1
+
+    def rb_nonzero_fallback(hash_value, release_complete=True,
+                            include_cache=True):
+        fact = rb_default_fallback()
+        rb_fallback_entered(fact, release_complete)
+        for name, value in (("psGetCompleted", True), ("shaderNonNull", True),
+                            ("lookupReached", True), ("lookupCompleted", True),
+                            ("lookupHash", hash_value)):
+            rb_set(fact, "helper", name, value)
+        if include_cache:
+            for name, value in (("cacheBeforePresent", False),
+                                ("cacheBeforeHash", 0),
+                                ("cacheAfterPresent", True),
+                                ("cacheAfterHash", hash_value)):
+                rb_set(fact, "helper", name, value)
+        rb_set(fact, "helper", "releaseReached", True)
+        if release_complete:
+            rb_set(fact, "helper", "releaseCompleted", True)
+        return fact
+
+    rb_fallback_hit = rb_nonzero_fallback(RESOLVE_BIND_PS_HASH)
+    if _replay_resolve_bind_fact(rb_fallback_hit, "resolve-fallback-hit") != (_resolve_bind_event(True), 0, False):
+        print("ResolveBind nonzero matching fallback did not claim")
+        return 1
+
+    rb_absent_nonzero = json.loads(json.dumps(rb_fallback_hit))
+    rb_set(rb_absent_nonzero, "helper", "cacheBeforeHash", RESOLVE_BIND_PS_HASH ^ 7)
+    if _replay_resolve_bind_fact(rb_absent_nonzero, "resolve-absent-nonzero") != (_resolve_bind_event(True), 0, False):
+        print("ResolveBind discarded an unconditional hash snapshot for absent shadow")
+        return 1
+    rb_absent_unknown = json.loads(json.dumps(rb_fallback_hit))
+    rb_absent_unknown["helper"]["cacheBeforeHash"] = rb_read(None, True, False)
+    if _replay_resolve_bind_fact(rb_absent_unknown, "resolve-absent-unknown") != (_resolve_bind_event(True), 0, True):
+        print("ResolveBind treated unknown absent-shadow hash as observed repair")
+        return 1
+    rb_after_absent = json.loads(json.dumps(rb_fallback_hit))
+    rb_set(rb_after_absent, "helper", "cacheAfterPresent", False)
+    if _replay_resolve_bind_fact(rb_after_absent, "resolve-after-absent") != (_resolve_bind_event(True), 1, False):
+        print("ResolveBind failed to flag observed cache repair mismatch")
+        return 1
+
+    rb_release_fault = rb_nonzero_fallback(RESOLVE_BIND_PS_HASH, False)
+    if _replay_resolve_bind_fact(rb_release_fault, "resolve-release-fault")[0] != _resolve_bind_event(True):
+        print("ResolveBind Release fault erased an already assigned match")
+        return 1
+
+    rb_fallback_miss = rb_nonzero_fallback(RESOLVE_BIND_PS_HASH ^ 4)
+    if _replay_resolve_bind_fact(rb_fallback_miss, "resolve-fallback-miss")[0] != _resolve_bind_event(False):
+        print("ResolveBind nonmatching fallback hash did not decline")
+        return 1
+
+    rb_repair_fault = rb_default_fallback()
+    rb_fallback_entered(rb_repair_fault, False)
+    for name, value in (("psGetCompleted", True), ("shaderNonNull", True),
+                        ("lookupReached", True), ("lookupCompleted", True),
+                        ("lookupHash", RESOLVE_BIND_PS_HASH),
+                        ("cacheBeforePresent", False)):
+        rb_set(rb_repair_fault, "helper", name, value)
+    repair_fault = _replay_resolve_bind_fact(rb_repair_fault, "resolve-repair-fault")
+    if repair_fault != (_resolve_bind_event(False), 0, True):
+        print("ResolveBind repair fault did not preserve initialized miss and unobserved boundary")
+        return 1
+
+    rb_missing_cache = rb_nonzero_fallback(RESOLVE_BIND_PS_HASH,
+                                           include_cache=False)
+    missing_cache = _replay_resolve_bind_fact(rb_missing_cache,
+                                              "resolve-missing-cache")
+    if missing_cache[0] != _resolve_bind_event(True) or not missing_cache[2]:
+        print("ResolveBind missing repair boundary altered selector replay")
+        return 1
+
+    rb_unknown = rb_default_fallback()
+    rb_unknown["outer"]["wants"] = rb_read(None, True, False)
+    try:
+        _replay_resolve_bind_fact(rb_unknown, "resolve-unknown-input")
+    except _ResolveBindUnavailable:
+        pass
+    else:
+        print("ResolveBind unknown consumed input became a negative result")
+        return 1
+
+    rb_dispatch = {"kind": ord("N"), "count": 17,
+                   "sites": [_resolve_bind_event(True)],
+                   "predicateFacts": [rb_fallback_hit]}
+    rb_replay = _replay_predicate_facts(rb_dispatch, "resolve-dispatch", 11)
+    if (rb_replay["resolveBindFacts"] != 1 or
+            rb_replay["resolveBindReplayed"] != 1 or
+            rb_replay["resolveBindMismatches"] or
+            rb_replay["mutationUnobserved"]):
+        print("ResolveBind kind18 did not pass supported-fact replay")
+        return 1
+
+    rb_hidden = {"kind": ord("N"), "count": 17,
+                 "sites": [_resolve_bind_event(False)],
+                 "predicateFacts": [json.loads(json.dumps(rb_outer_off))]}
+    rb_hidden["predicateFacts"][0]["helper"]["releaseCompleted"] = rb_read(True, True, True)
+    try:
+        _replay_predicate_facts(rb_hidden, "resolve-hidden-read", 11)
+    except TraceError:
+        pass
+    else:
+        print("ResolveBind accepted a hidden Release read after an unreached release")
+        return 1
+
+    malformed_resolve_bind = []
+    rb_missing_field = json.loads(json.dumps(rb_outer_off))
+    del rb_missing_field["helper"]["guardReturned"]
+    malformed_resolve_bind.append(rb_missing_field)
+    rb_extra_field = json.loads(json.dumps(rb_outer_off))
+    rb_extra_field["helper"]["shadowMatch"] = rb_read()
+    malformed_resolve_bind.append(rb_extra_field)
+    rb_bad_boolean = json.loads(json.dumps(rb_outer_off))
+    rb_bad_boolean["outer"]["wants"] = rb_read(1, True, True)
+    malformed_resolve_bind.append(rb_bad_boolean)
+    rb_bad_integer = json.loads(json.dumps(rb_outer_off))
+    rb_bad_integer["outer"]["psHash"] = rb_read(True, True, True)
+    malformed_resolve_bind.append(rb_bad_integer)
+    rb_bad_read = json.loads(json.dumps(rb_outer_off))
+    rb_bad_read["outer"]["wants"] = {"reached": 1, "known": False, "value": None}
+    malformed_resolve_bind.append(rb_bad_read)
+    for malformed in malformed_resolve_bind:
+        try:
+            _replay_resolve_bind_fact(malformed, "resolve-malformed-shape")
+        except TraceError:
+            pass
+        else:
+            print("ResolveBind accepted a malformed read shape or hidden field")
+            return 1
+
+    rb_duplicate = json.loads(json.dumps(rb_dispatch))
+    rb_duplicate["predicateFacts"].append(json.loads(json.dumps(rb_fallback_hit)))
+    try:
+        _replay_predicate_facts(rb_duplicate, "resolve-duplicate", 11)
+    except TraceError:
+        pass
+    else:
+        print("ResolveBind accepted duplicate site60 facts")
+        return 1
+    rb_v10_trace = {"kind": ord("N"), "count": 17,
+                    "sites": [_resolve_bind_event(True)], "predicateFacts": []}
+    if _replay_predicate_facts(rb_v10_trace, "resolve-v10-compat", 10)["factCount"]:
+        print("predicate fact version 10 treated ResolveBind as supported")
+        return 1
+
     # Tuple slot six is a legacy claim boolean for these older fact types,
     # but a mutation-availability flag for EyeCensus. Never conflate them.
     positive_claims_v10 = (
