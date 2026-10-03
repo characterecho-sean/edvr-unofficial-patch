@@ -50,7 +50,7 @@
   CPU improvement/GPU non-regression remain unresolved (section 11).
   Earlier matched NV visual checks ruled out migration-induced blur because
   verified `14a7ff70` reproduces it. Latest visual confirmation is pending.
-  Main `9361bc0d` is integrated. A new matched control is needed;
+  Main `00d4f738` is integrated. A new matched control is needed;
   the latest installed-binary flight is not that comparison.
   Temporary instrument key: `advanced.draw_replay` (off by default); propose
   removing it when this arc closes, subject to Scope control. No Phase 2 yet.

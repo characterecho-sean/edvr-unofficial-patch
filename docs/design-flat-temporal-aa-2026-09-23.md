@@ -4,8 +4,7 @@
 
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
-  build `743c5dc0`. The chronology (26-77) is verbatim in Status detail below;
-  the evidence is in sections 1-86.
+  log is build `v0.18.1-5-g743c5dc0`. Evidence is in sections 1-88.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,11 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 85: all three supporters confirm working after updating.
-  User2 also log-confirmed. Then 83: SS 0.75/0.85, bloom/DoF, mismatched
-  resolution, TAA at 1.25, game AA, VR at 0.85. HDR flew (81); FSR reported
-  working (85). TAA at R = D and ReShade still to fly. Then open items above.
-  Existing evidence does not justify ignoring the alternate projection.
+- **Next:** section 87: Coriolis native-scale FSR on/off comparison; section
+  88: HDR-compatible matched building ROI before another flight. Preserve
+  section 83's remaining qualification matrix and the open items below.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
   open. VR still needs regression tests; the concourse NPC observation on
@@ -58,7 +55,8 @@
   identical). ROOT CAUSE of the VR hills shimmer, ruled in: Elite's terrain
   checkerboard rendering (halves distant terrain's horizontal samples; turning
   it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
-- **Compatibility:** detail below. **PR72 A/B switches:** retired 2026-10-02; on fixed (section 86).
+- **Compatibility:** detail below. **PR72 A/B switches:** retired with `on`
+  fixed (section 86). Landing-time building shimmer is unqualified (section 88).
 
 ## Status detail (moved out of Status 2026-09-29)
 
@@ -9158,3 +9156,102 @@ the 234-key config contract, production DLLs and installer resource checks.
 The first eight-job run timed out in `flat_mono_resolve_test` at 180 s;
 the unchanged-source retry passed that rig in 28.6 s. Both build logs are
 retained under `build/retire-flat-ab-switches-full*.log`.
+
+## 87. Supporter Coriolis blur with flat FSR at half scale (2026-10-03)
+
+State: investigating visual quality, not a repeat of section 85's refusal.
+Bundle `edvr-logs-20261003-142110.zip` contains two graphics logs, settings
+and breadcrumbs; no images, flat pixel captures, eye runs or trace blobs.
+Both logs report v0.18.1, stamp 6AC026D1, linked 2026-10-02 21:49:05 UTC.
+Exact HEAD check mismatches this release against our later branch. The
+v0.18.1 tag is d4c6da4f; this is not the old rc.4 refusal build. Later flat
+changes include reducer measurement/lean work; mismatch alone does not
+establish that updating fixes the blur.
+
+Environment: flat, NVIDIA GeForce RTX 4090, FSR 3.1.2, no real_dll chain.
+No headset/runtime dependency in this flat report. EDVR requests FSR,
+render_sharpness=0.0; model k is saved but is not an FSR model selection.
+DisplaySettings says 1920x1080 at 144 Hz. Custom.4.4 has AAMode=0,
+SSAAMultiplier=0.500000, BlurEnabled=false, DOFEnabled=0 and BloomQuality=0.
+Earlier saved presets differ; backend dimensions independently confirm the
+scale: at 13:52:57.781, FSR context 960x540 -> 1920x1080. Thus the game
+supplies one quarter of the output pixel count. Low input detail is a
+specific softness hypothesis, not proof of a station motion defect.
+
+At 14:21:10, treated=132561, refused=1118, last=treated-jittered, backend
+failures=0. Jitter/history are live; the nearby five-second window accepts
+history on 323 frames with no reset. Cumulative history losses earlier do
+not establish persistent resets during the reported blur. The separate HDR
+route declines at hdr-route-needs-render-at-least-output (960x540 target/HDR
+versus 1920x1080 output), while the other route treats with FSR normally.
+ruled out: sustained AA stand-down like section 85, because this capture
+has continuous treated frames and successful backend initialization.
+
+F10 completed around 14:21:00: three projection pairs/six saved shader
+stages, but no completed exact camera/copy capture. Engine unkeyed sample
+binds/distinct are zero; this does not measure per-pixel station ownership.
+Existing flat matched-pixel capture is gated to non-HDR DLSS/DLAA in
+flat_mono_resolve.cpp, so asking for F10 alone cannot produce FSR's matched
+raw/output/motion evidence. The prior Coriolis brace ownership finding came
+from VR eye captures; its private-pool repair still awaits visual validation
+in the kinematic arc. Neither establishes this flat report's cause.
+
+Next comparison: same station with FSR retained, Supersampling 1.0, ship
+and view still; distinguish whole-image softness from trails on rotating
+station surfaces. If motion-only smearing persists at native scale, obtain
+a short visual comparison before choosing motion instrumentation. No source,
+live settings, build or installation changed for this investigation.
+
+### Supplied station screenshot (2026-10-03)
+
+Sean supplies codex-clipboard-b3869ad7-77a5-4aff-ac39-e2511798f725.png,
+a 1920x1080 cockpit view of Ray Gateway. Station face/panel detail appears
+smeared, with comparatively crisp cockpit edges and HUD text. This raises
+the priority of station-specific temporal/motion behavior, but does not
+prove bad vectors: HUD and scene can use different rendering paths, and
+the screenshot's active scale/mode/time are not independently captured.
+There is no temporal sequence showing whether marks trail the rotation.
+The earlier log's half-scale input remains a confounder, not a sufficient
+diagnosis of this localized appearance. No hypothesis is ruled out by this
+single screenshot.
+
+Refined comparison: set game Supersampling 1.0, keep ship/view still at
+this station, compare FSR with F8 Off at the same scale. If native-scale
+station detail clears with temporal AA off, that isolates temporal
+processing as a contributor; it does not yet identify motion vectors,
+history rejection or reconstruction as the faulty stage. A short clip of
+both modes while the station rotates is more useful than another log alone.
+
+## 88. Epic building shimmer: F10 remains HDR-blind (2026-10-03)
+
+Sean reports shimmer on settlement buildings while landing. The verified Epic
+log, `edvr_gfx_20261003_062849.log`, is `v0.18.1-5-g743c5dc0`, installation
+profile flat. At F10 the flat runtime was DLSS mode with NGX DLAA active at
+3840x2160. This is not VR evidence.
+
+F10 at 06:35:07.463 opened pixel-capture session
+`20261003_123507_462_60972_1`; it expired at 06:35:16.458 with copied=0,
+completed=0, failed=0, bytes=0; it saved no pixel frames. The separate
+draw-capture session `20261003_123507_463_60972_1` saved manifests for frames
+206197/206198. Both have `qualified=true`, `identity_match=true`, status
+`partial`, reason `copy-or-cap-refused`: 512/15337 and 512/15334 draws were
+recorded, with overflow 14825/14822. Within those bounded draws,
+`motion_draws=0` and `motion_complete=false`. The only identified changed
+16x16 sample was point `(3456,1598)` at q172/173, VS `BFE51414CC3024B4` /
+PS `DB79AE788E049DFD`. Section 49 identifies that pair as the non-pool
+cockpit shell; these samples do not identify a building draw.
+
+In installed source snapshot `build/pr68-container/pr68-merge-validation`,
+`flat_mono_resolve.cpp:950-954` gates pixel capture on `!hdr && (DLSS || DLAA)`;
+the capture header also excludes `R11G11B10_FLOAT`. The active HDR route was
+native at 3840x2160, so removing only the gate would still not capture these
+frames. Ruled out: GPU readback failure as the reason no pixel frames were
+queued; HDR bypassed the copy queue. This does not explain the shimmer.
+
+In the two pre-F10 five-second windows, the HDR route treated 301 and 295
+frames. Local projection refused 0 with row/pair mismatch=0; these frame-level
+counts do not establish correct building motion.
+The generic draw audit is not geometry evidence. No rendering cause or fix is
+qualified. Next discriminant: HDR-compatible color, depth, motion-vector,
+rejection and final-image samples at a matched building ROI across consecutive
+frames, before another flight; do not repeat F10 on this blind path.
