@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** shared route merged at `dacb7a56`; overlay full build passed (97).
-  Epic installed `v0.18.1-18-g83938927`, FLOWN. Latest analyzed log:
+- **State:** shared route merged at `dacb7a56`; overlay fix `087501bb` (97).
+  Epic installed `v0.18.1-21-g087501bb`, NOT FLOWN. Latest analyzed log:
   `v0.18.1-18-g83938927`; evidence and implementation plan are in sections 1-97.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 97: full build passed; clean promotion and Epic install,
-  then one representative weapon test. This fix is not live-qualified yet.
+- **Next:** section 97: full build/promotion/install passed. Draw the same
+  weapon for ten seconds, then holster for ten; verify world AA and route logs.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9729,7 +9729,7 @@ insufficient: opaque DLSS/FSR history could otherwise ingest the overlay and
 carry it into later frames. Keep raw post-overlay input and live HDR output
 separate from clean backend input, avoiding SRV/RTV feedback.
 
-Implemented, not installed or live-qualified. Targeted tests and full
+Implemented and installed, not live-qualified. Targeted tests and full
 validation passed. No new config key or diagnostic removal. Missing or
 declined HDR consumers refuse before the final LDR copy can call a backend.
 The suffix seals at the ready HDR consumer; later HDR writers retain the
@@ -9775,3 +9775,17 @@ isolated consumer frames and refusals. A route that never ran is distinct
 from one that completed. Its shader/target/blend binds are verified before
 the original draw; incomplete brackets retain refusal. No more diagnostic
 flight is required before installing the validated fix.
+
+Full validation passed with receipt fingerprint
+`76efe4d51af3882ae8aed6212be5c1aa7cc480c3b5020ee46aa515e410d38506`.
+Committed as `087501bb`, fast-forwarded main and verified the push. Clean
+DLL-only promotion passed. Epic flat installed and verified as
+`v0.18.1-21-g087501bb`; live `edvr-flat.ini` and `nvngx_dlss.dll` hashes are
+unchanged. This fix is BUILT, NOT FLOWN.
+
+Next representative test: reproduce with the same weapon, hold it drawn ten
+seconds, then holster for ten. Check that world AA remains active and that
+`flat late overlay 5s` reports fully marked draws and isolated consumers.
+Take F10 if world AA still turns off or another visual defect appears. A
+two-minute wait is only needed for a performance comparison, not this test.
+No per-weapon test matrix and no new diagnostic flight before this install.
