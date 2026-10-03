@@ -26,7 +26,20 @@ inline int flatOverlayLayerGpuTests(ID3D11Device* device, ID3D11DeviceContext* c
     auto occupiedBytes = compile("float4 main():SV_Target7 {return 1;}", "ps_5_0");
     auto depthBytes = compile("struct O {float4 c:SV_Target;float d:SV_Depth;};"
         "O main(){O o;o.c=1;o.d=.5;return o;}", "ps_5_0");
-    if (!vsBytes || !psBytes || !variantBytes || !neutralBytes || !linkedBytes || !occupiedBytes || !depthBytes) return failures;
+    auto structuredBytes = compile("StructuredBuffer<float4> source:register(t1);"
+        "float4 main(float4 p:SV_Position):SV_Target {float4 c;"
+        "[branch] if(p.x<8)c=source[0];else c=source[1];return c;}", "ps_5_0");
+    auto rawBytes = compile("ByteAddressBuffer source:register(t1);"
+        "float4 main(float4 p:SV_Position):SV_Target {uint4 v;"
+        "[branch] if(p.x<8)v=source.Load4(0);else v=source.Load4(16);return asfloat(v);}", "ps_5_0");
+    auto structuredWriteBytes = compile("RWStructuredBuffer<uint4> target:register(u1);"
+        "float4 main():SV_Target {target[0]=uint4(1,2,3,4);return 1;}", "ps_5_0");
+    auto rawWriteBytes = compile("RWByteAddressBuffer target:register(u1);"
+        "float4 main():SV_Target {target.Store(0,1);return 1;}", "ps_5_0");
+    auto atomicBytes = compile("RWByteAddressBuffer target:register(u1);"
+        "float4 main():SV_Target {uint old;target.InterlockedAdd(0,1,old);return old;}", "ps_5_0");
+    if (!vsBytes || !psBytes || !variantBytes || !neutralBytes || !linkedBytes || !occupiedBytes || !depthBytes ||
+        !structuredBytes || !rawBytes || !structuredWriteBytes || !rawWriteBytes || !atomicBytes) return failures;
     std::vector<BYTE> patched;
     std::string patchWhy;
     expect(edvr::flatOverlayPatchPs(psBytes->GetBufferPointer(), psBytes->GetBufferSize(), patched, patchWhy) &&
@@ -35,6 +48,29 @@ inline int flatOverlayLayerGpuTests(ID3D11Device* device, ID3D11DeviceContext* c
                                      patched, patchWhy) && patched.empty(), "existing MRT7 is refused");
     expect(!edvr::flatOverlayPatchPs(depthBytes->GetBufferPointer(), depthBytes->GetBufferSize(),
                                      patched, patchWhy) && patched.empty(), "depth-writing PS is refused");
+    auto hasOpcode=[](ID3DBlob* blob,uint32_t opcode) {
+        const auto parsed=edvr::dxbc_container::parseContainer(blob->GetBufferPointer(),blob->GetBufferSize(),0x50u);
+        for(const auto& chunk:parsed)if(chunk.tag==0x58454853u || chunk.tag==0x52444853u) {
+            std::vector<uint32_t> words(chunk.bytes.size()/4);
+            std::memcpy(words.data(),chunk.bytes.data(),chunk.bytes.size());
+            for(size_t at=2;at<words.size();at+=edvr::dxbc_container::instructionLength(words,at))
+                if((words[at]&0x7ffu)==opcode)return true;
+        }
+        return false;
+    };
+    expect(hasOpcode(structuredBytes.Get(),162) && hasOpcode(structuredBytes.Get(),167) &&
+           hasOpcode(structuredBytes.Get(),31) &&
+           edvr::flatOverlayPatchPs(structuredBytes->GetBufferPointer(),structuredBytes->GetBufferSize(),patched,patchWhy),
+           "branched structured SRV declaration and load are patchable");
+    expect(hasOpcode(rawBytes.Get(),161) && hasOpcode(rawBytes.Get(),165) &&
+           edvr::flatOverlayPatchPs(rawBytes->GetBufferPointer(),rawBytes->GetBufferSize(),patched,patchWhy),
+           "branched raw SRV declaration and load are patchable");
+    expect(!edvr::flatOverlayPatchPs(structuredWriteBytes->GetBufferPointer(),structuredWriteBytes->GetBufferSize(),
+           patched,patchWhy) && patched.empty(),"structured UAV write is refused");
+    expect(!edvr::flatOverlayPatchPs(rawWriteBytes->GetBufferPointer(),rawWriteBytes->GetBufferSize(),
+           patched,patchWhy) && patched.empty(),"raw UAV write is refused");
+    expect(!edvr::flatOverlayPatchPs(atomicBytes->GetBufferPointer(),atomicBytes->GetBufferSize(),
+           patched,patchWhy) && patched.empty(),"UAV atomic is refused");
     auto chunks=edvr::dxbc_container::parseContainer(psBytes->GetBufferPointer(),psBytes->GetBufferSize(),0x50u);
     bool conditionalReturn=false;
     for(auto& chunk:chunks)if(chunk.tag==0x58454853u || chunk.tag==0x52444853u) {
@@ -272,6 +308,80 @@ inline int flatOverlayLayerGpuTests(ID3D11Device* device, ID3D11DeviceContext* c
            bytes(instrumented.Get(),4)==neutralBefore &&
            bytes(instrumentedDepth.Get(),4)==neutralDepthBefore,
            "alpha-zero draw marks every passing fragment despite byte-identical HDR/depth/stencil");
+
+    // The captured late PS uses read-only structured loads behind IF/ELSE.
+    // Raw SRV loads are the adjacent legal shape. Compare real raster output
+    // against the unmodified PS, not just the rewritten DXBC's structure.
+    ComPtr<ID3D11PixelShader> structuredPs, rawPs;
+    expect(SUCCEEDED(device->CreatePixelShader(structuredBytes->GetBufferPointer(),
+           structuredBytes->GetBufferSize(),nullptr,&structuredPs)) &&
+           SUCCEEDED(device->CreatePixelShader(rawBytes->GetBufferPointer(),
+           rawBytes->GetBufferSize(),nullptr,&rawPs)),
+           "read-only structured and raw PS variants create");
+    const float values[8]={.75f,.125f,.25f,1,.125f,.75f,.25f,1};
+    D3D11_SUBRESOURCE_DATA bufferInit{};bufferInit.pSysMem=values;
+    D3D11_BUFFER_DESC bufferDesc{};
+    bufferDesc.ByteWidth=sizeof(values);bufferDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+    bufferDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    bufferDesc.StructureByteStride=16;
+    ComPtr<ID3D11Buffer> structuredBuffer, rawBuffer;
+    ComPtr<ID3D11ShaderResourceView> structuredSrv, rawSrv;
+    D3D11_SHADER_RESOURCE_VIEW_DESC structuredView{};
+    structuredView.Format=DXGI_FORMAT_UNKNOWN;
+    structuredView.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;
+    structuredView.Buffer.NumElements=2;
+    expect(SUCCEEDED(device->CreateBuffer(&bufferDesc,&bufferInit,&structuredBuffer)) &&
+           SUCCEEDED(device->CreateShaderResourceView(structuredBuffer.Get(),&structuredView,&structuredSrv)),
+           "structured SRV fixture creates");
+    bufferDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+    bufferDesc.StructureByteStride=0;
+    D3D11_SHADER_RESOURCE_VIEW_DESC rawView{};
+    rawView.Format=DXGI_FORMAT_R32_TYPELESS;
+    rawView.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;
+    rawView.BufferEx.NumElements=8;
+    rawView.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
+    expect(SUCCEEDED(device->CreateBuffer(&bufferDesc,&bufferInit,&rawBuffer)) &&
+           SUCCEEDED(device->CreateShaderResourceView(rawBuffer.Get(),&rawView,&rawSrv)),
+           "raw byte-address SRV fixture creates");
+    if(structuredPs && rawPs && structuredSrv && rawSrv) {
+        edvr::FlatOverlayLayer::rememberPixelShader(structuredPs.Get(),structuredBytes->GetBufferPointer(),
+            structuredBytes->GetBufferSize(),false);
+        edvr::FlatOverlayLayer::rememberPixelShader(rawPs.Get(),rawBytes->GetBufferPointer(),
+            rawBytes->GetBufferSize(),false);
+        struct ReadCase {ID3D11PixelShader* shader;ID3D11ShaderResourceView* srv;uint64_t frame;};
+        const ReadCase cases[]={{structuredPs.Get(),structuredSrv.Get(),30},
+                                {rawPs.Get(),rawSrv.Get(),31}};
+        for(const auto& read:cases) {
+            context->ClearRenderTargetView(baselineRtv.Get(),clear);
+            context->ClearRenderTargetView(instrumentedRtv.Get(),clear);
+            context->ClearDepthStencilView(baselineDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,3);
+            context->ClearDepthStencilView(instrumentedDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,3);
+            bind(baselineRtv.Get(),baselineDsv.Get(),read.shader);
+            context->OMSetDepthStencilState(readOnlyState.Get(),3);
+            ID3D11ShaderResourceView* srv=read.srv;
+            context->PSSetShaderResources(1,1,&srv);
+            context->Draw(3,0);
+            bind(instrumentedRtv.Get(),instrumentedDsv.Get(),read.shader);
+            context->OMSetDepthStencilState(readOnlyState.Get(),3);
+            context->PSSetShaderResources(1,1,&srv);
+            edvr::FlatOverlayLayer readLayer;
+            readLayer.beginFrame(read.frame);
+            const bool began=readLayer.beginDraw(context,read.frame,instrumented.Get(),instrumentedDsv.Get(),&reason);
+            expect(began,"read-only buffer PS binds private MRT7");
+            if(began) {context->Draw(3,0);readLayer.endDraw(context);}
+            ComPtr<ID3D11Resource> readCoverage;
+            if(readLayer.coverageView())readLayer.coverageView()->GetResource(&readCoverage);
+            ComPtr<ID3D11Texture2D> readMask;if(readCoverage)readCoverage.As(&readMask);
+            const auto marks=readMask?bytes(readMask.Get(),1):std::vector<BYTE>{};
+            UINT count=0;for(BYTE v:marks)count+=v==255;
+            expect(readLayer.ready(read.frame,instrumented.Get()) && count==w*h &&
+                   bytes(baseline.Get(),4)==bytes(instrumented.Get(),4) &&
+                   bytes(baselineDepth.Get(),4)==bytes(instrumentedDepth.Get(),4),
+                   "read-only buffer shader keeps original raster colour/depth/stencil and exports coverage");
+        }
+        ID3D11ShaderResourceView* none=nullptr;
+        context->PSSetShaderResources(1,1,&none);
+    }
 
     // A linked shader and occupied MRT7 are closed-world refusals; no draw is
     // silently reclassified as protected when the private target cannot bind.

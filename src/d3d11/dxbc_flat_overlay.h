@@ -4,6 +4,7 @@
 // original instructions and outputs are copied byte for byte. A fragment
 // discarded by the original shader never reaches the added MOV before RET.
 #include "dxbc_container.h"
+#include "flat_shader_classifier.h" // shared bounds-checked DXBC operand decoder
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -55,17 +56,65 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
                 out.push_back(in[0]);
                 out.push_back(0);
                 bool declared = false, returned = false, executable = false;
+                // A read-only structured/raw SRV may feed conditional colour
+                // math. Keep that control flow intact and add the coverage
+                // write only at one unconditional, top-level terminal RET.
+                std::vector<bool> elseSeen;
                 for (size_t at = 2; at < in.size();) {
                     const uint32_t op = in[at] & 0x7ffu;
                     const uint32_t length = instructionLength(in, at);
-                    // Branches, calls and conditional returns need a separate
-                    // control-flow proof. Keep this patch deliberately narrow.
-                    if ((op >= 2 && op <= 9) || (op >= 18 && op <= 23) ||
-                        op == 31 || op == 48 || op == 58 || op == 63 || op == 76 ||
-                        op == 120)
+                    if (returned) throw std::runtime_error("instructions after terminal PS return");
+                    // Only balanced IF/ELSE/ENDIF is admitted. Loops, jumps,
+                    // calls and conditional returns cannot establish that
+                    // every surviving fragment reaches the coverage write.
+                    if ((op >= 2 && op <= 9) || (op >= 19 && op <= 20) ||
+                        (op >= 22 && op <= 23) || op == 48 || op == 58 ||
+                        op == 63 || op == 76 || op == 120)
                         throw std::runtime_error("unsupported PS control flow or declaration");
-                    if (op >= 143) throw std::runtime_error("unsupported PS UAV/structured operation");
-                    const bool declaration = (op >= 88 && op <= 106) || op == 53;
+                    if (op == 31) {
+                        if (elseSeen.size() >= 64) throw std::runtime_error("PS IF nesting limit");
+                        elseSeen.push_back(false);
+                    } else if (op == 18) {
+                        if (elseSeen.empty() || elseSeen.back())
+                            throw std::runtime_error("unbalanced PS ELSE");
+                        elseSeen.back() = true;
+                    } else if (op == 21) {
+                        if (elseSeen.empty()) throw std::runtime_error("unbalanced PS ENDIF");
+                        elseSeen.pop_back();
+                    }
+                    // Shader Model 5: DCL_RESOURCE_RAW/STRUCTURED are SRV
+                    // declarations; LD_RAW/STRUCTURED read them. All UAV
+                    // declarations, stores, atomics and other SM5 opcodes
+                    // retain the original fail-closed path.
+                    const bool readOnlySm5 = op == 161 || op == 162 || op == 165 || op == 167;
+                    if (op >= 143 && !readOnlySm5)
+                        throw std::runtime_error("unsupported PS UAV/structured operation");
+                    if (op == 165 || op == 167) {
+                        // Both LD_RAW and LD_STRUCTURED can name an SRV (t#)
+                        // or a UAV (u#). Inspect the actual final resource
+                        // operand, including extended opcode/operand tokens
+                        // and relative-index payloads, before admitting it.
+                        size_t operandAt = at + 1;
+                        uint32_t extended = in[at];
+                        while (extended & 0x80000000u) {
+                            if (operandAt >= at + length)
+                                throw std::runtime_error("structured load opcode extension");
+                            extended = in[operandAt++];
+                        }
+                        const unsigned operandCount = op == 165 ? 3u : 4u;
+                        flat_shader_classifier_detail::Operand resource;
+                        for (unsigned i = 0; i < operandCount; ++i) {
+                            flat_shader_classifier_detail::Operand parsed;
+                            if (!flat_shader_classifier_detail::parseOperand(in, operandAt, parsed) ||
+                                operandAt > at + length)
+                                throw std::runtime_error("structured load operand bounds");
+                            if (i + 1 == operandCount) resource = parsed;
+                        }
+                        if (operandAt != at + length ||
+                            resource.type != flat_shader_classifier_detail::kOperandResource)
+                            throw std::runtime_error("structured load is not SRV read");
+                    }
+                    const bool declaration = (op >= 88 && op <= 106) || op == 53 || op == 161 || op == 162;
                     if (!declaration) executable = true;
                     if (op >= 101 && op <= 103) {
                         if (length < 3) throw std::runtime_error("output declaration");
@@ -80,6 +129,8 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
                         declared = true;
                     }
                     if (op == 62) { // RET: only surviving fragments execute this tail.
+                        if (!elseSeen.empty() || at + length != in.size())
+                            throw std::runtime_error("PS return not terminal and top-level");
                         const uint32_t mark[] = {0x05000036u, 0x00102012u, kFlatOverlayTarget,
                                                  0x00004001u, 0x3f800000u};
                         out.insert(out.end(), mark, mark + 5);
@@ -88,7 +139,8 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
                     out.insert(out.end(), in.begin() + at, in.begin() + at + length);
                     at += length;
                 }
-                if (!declared || !returned) throw std::runtime_error("PS has no unconditional return");
+                if (!declared || !returned || !elseSeen.empty())
+                    throw std::runtime_error("PS has no terminal unconditional return");
                 out[1] = static_cast<uint32_t>(out.size());
                 chunk.bytes.resize(out.size() * 4);
                 std::memcpy(chunk.bytes.data(), out.data(), chunk.bytes.size());

@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** shared route merged at `dacb7a56`; overlay fix `087501bb` (97).
-  Epic installed `v0.18.1-21-g087501bb`, NOT FLOWN. Latest analyzed log:
-  `v0.18.1-18-g83938927`; evidence and implementation plan are in sections 1-97.
+- **State:** overlay fix `087501bb` FLOWN, still refuses the weapon (98).
+  Epic installed `v0.18.1-21-g087501bb`. Latest analyzed log is this build;
+  evidence and implementation plan are in sections 1-98.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 97: full build/promotion/install passed. Draw the same
-  weapon for ten seconds, then holster for ten; verify world AA and route logs.
+- **Next:** section 98 fixes normal-draw activation and captured PS admission.
+  Full validation passed; commit, clean promotion and Epic install follow.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9789,3 +9789,61 @@ seconds, then holster for ten. Check that world AA remains active and that
 Take F10 if world AA still turns off or another visual defect appears. A
 two-minute wait is only needed for a performance comparison, not this test.
 No per-weapon test matrix and no new diagnostic flight before this install.
+
+## 98. Live route activation failure (2026-10-03)
+
+Verified `edvr_gfx_20261003_110718.log` against installed
+`v0.18.1-21-g087501bb` (6AC13580), linked 17:04 UTC. Sean reports world AA
+still turns off with the same weapon. Representative 5s window at 11:10:49:
+planned-draws=417, fully-marked-draws=0, isolated-consumer-frames=0,
+refused-frames=417, reason `overlay-draw-scope-incomplete`. Holstered windows
+return to treated HDR/history, including a 744-frame streak at 11:11:24.
+
+Ruled out: the camera/phase admission never runs, because the live plan
+counter increments on hundreds of draws per window. The actual coverage
+bracket does not run on those ordinary draws: all seven flat draw thunks
+still gate begin/end solely on `weaponFootprintStarted`. That ties the real
+fix to the F10 instrument and leaves `overlayPlanned` unexecuted. Correct
+the call-site gate and test every original draw bracket with F10 unarmed.
+
+A second measured refusal appears only when F10 arms the bracket:
+`unsupported PS UAV/structured operation`, twice in the 11:11:09 and
+11:11:39 windows. The exact diagnostic pair's captures complete at
+11:11:37.783/37.955, so this is not a readback timeout. Inspect its saved
+bytecode and authoritative opcodes before allowing any operation. A safe
+SRV structured read and a UAV write need different treatment; retain UAV,
+atomic and unknown-control-flow refusal. No additional flight is needed to
+distinguish these two implementation failures.
+
+Saved `edvr_logs/shaders/ps_46F92DC71BF8DFA5.dxbc` disassembly confirms
+`dcl_resource_structured t1, 96` and `ld_structured` from t1, no UAV
+declaration, store or atomic operation. Its opcodes 162/167 were rejected by
+the patcher's blanket `op >= 143` guard. It also has balanced IF/ELSE/ENDIF
+(31/18/21) and one terminal top-level RET, which the initial flow guard
+would reject next. Microsoft DirectX-Headers confirms the opcode mapping.
+The correction admits validated raw/structured SRV reads and balanced
+branches with one final top-level return; UAV operands, stores, atomics,
+early returns, loops, calls and malformed flow remain refused. Test the
+captured PS's actual patched shader creation before another live flight.
+
+Implemented normal-draw activation through one shared policy: footprint OR
+planned overlay. Regression tests cover all four input cases and all seven
+begin/original-draw/end hook branches, with removal, ordering and indirect
+offset mutation controls. They fail the old diagnostic-only wiring.
+Targeted temporal self-tests pass. WARP tests pass for read-only structured
+and raw SRV loads with balanced branches, preserving original color/depth/
+stencil and marking coverage. UAV stores/writes/atomics and unsafe return
+flow remain refused, including actual SRV-versus-UAV load operand checks.
+The exact captured 2008-byte PS patches to 2076 bytes and WARP creates it
+successfully. Full validation passed, including the GPU rigs and installer
+gates, with receipt fingerprint
+`4cb7f4dc02591042e3c501aec845e7d912784ace9b592e7ad4856a2833941467`.
+No new binary installed yet; commit and clean promotion follow.
+
+Read-only suffix audit finds no additional confirmed blocker. F10 trace
+dumps at frames 56778/58972 contain zero frames/events (16-byte headers,
+four skipped slots). The frame-58973 manifest identifies selected seq 17735
+and consumer 17739 with the same H/depth, but has no draw records for the
+three intervening sequences. Their writer roles remain unknown; runtime
+suffix checks must still prove them in the representative test. Do not
+assume the snapshot ROI establishes their ownership or waive those checks.

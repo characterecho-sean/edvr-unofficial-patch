@@ -32,6 +32,7 @@
 #include "flat_hdr_route_tests.h"
 #include "flat_copy_structure_tests.h"
 #include "flat_hdr_crumbs_tests.h"
+#include "../../src/d3d11/flat_runtime.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -2841,6 +2842,77 @@ void testFlatSubstitutionWiring() {
 // The graphics-wrapper note's wiring (flat_wrapper_note.h holds the decision and the words, and the rig above them):
 // the hook-mode probe names the file and publishes it once, and the panel draws the note from that name only in the
 // flat profile, and logs the first time. A source scan with removal controls.
+void testFlatOverlayDrawThunkWiring() {
+    using edvr::flatRuntimeNeedsActualDraw;
+    check(!flatRuntimeNeedsActualDraw(false,false) &&
+          flatRuntimeNeedsActualDraw(true,false) &&
+          flatRuntimeNeedsActualDraw(false,true) &&
+          flatRuntimeNeedsActualDraw(true,true),
+          "actual-draw policy: idle is skipped, footprint and overlay each run, both run once");
+    std::ifstream source("src/d3d11/vscreen.cpp",std::ios::binary);
+    const std::string code((std::istreambuf_iterator<char>(source)),std::istreambuf_iterator<char>());
+    check(!code.empty(),"the seven flat draw thunks are readable for bracket verification");
+    auto compact=[](const std::string& in) {
+        std::string out;out.reserve(in.size());
+        for(char c:in)if(c!=' ' && c!='\r' && c!='\n' && c!='\t')out+=c;
+        return out;
+    };
+    auto count=[](const std::string& s,const std::string& token) {
+        unsigned n=0;for(size_t at=s.find(token);at!=std::string::npos;at=s.find(token,at+token.size()))++n;
+        return n;
+    };
+    struct Thunk {const char* name;char kind;const char* beginArgs;const char* real;};
+    const Thunk thunks[]={
+        {"hookedDraw",'D',"","g_state->realDraw(self,count,start);"},
+        {"hookedDrawIndexed",'I',"","g_state->realDrawIndexed(self,count,startIndex,baseVertex);"},
+        {"hookedDrawInstanced",'N',"","g_state->realDrawInstanced(self,perInstance,instances,startVertex,startInstance);"},
+        {"hookedDrawIndexedInstanced",'X',"","g_state->realDrawIndexedInstanced(self,perInstance,instances,startIndex,baseVertex,startInstance);"},
+        {"hookedDrawAuto",'A',"","g_state->realDrawAuto(self);"},
+        {"hookedDrawInstancedIndirect",'Y',"args,off","g_state->realDrawInstancedIndirect(self,args,off);"},
+        {"hookedDrawIndexedInstancedIndirect",'Z',"args,off","g_state->realDrawIndexedInstancedIndirect(self,args,off);"},
+    };
+    const std::string guard="if(flatDraw.needsActualDraw())";
+    const std::string end=guard+"flatDraw.endActualDraw();";
+    auto valid=[&](const std::string& flat,const Thunk& t) {
+        const std::string begin=guard+"flatDraw.beginActualDraw("+t.beginArgs+");";
+        const size_t scope=flat.find("FlatRuntimeDrawScopeflatDraw(self,");
+        const size_t before=flat.find(begin),real=flat.find(t.real),after=flat.find(end);
+        return flat.find("if(runtimeFlatProfile()){")!=std::string::npos &&
+            scope!=std::string::npos && before!=std::string::npos && real!=std::string::npos &&
+            after!=std::string::npos && scope<before && before<real && real<after &&
+            flat.find(std::string("'")+t.kind+"'",scope)<before &&
+            count(flat,guard)==2 && count(flat,"flatDraw.beginActualDraw(")==1 &&
+            count(flat,"flatDraw.endActualDraw();")==1 &&
+            flat.find("weaponFootprintStarted")==std::string::npos;
+    };
+    for(const auto& t:thunks) {
+        const std::string signature=std::string("void STDMETHODCALLTYPE ")+t.name+"(";
+        const size_t start=code.find(signature);
+        const size_t stop=start==std::string::npos?std::string::npos:code.find("if (g_vrWorldInternal)",start);
+        const std::string flat=(start!=std::string::npos && stop!=std::string::npos)
+            ? compact(code.substr(start,stop-start)):std::string();
+        if(!valid(flat,t))std::printf("overlay draw thunk failed: %s\n",t.name);
+        check(valid(flat,t),"each flat thunk guards begin -> exact real draw -> end with the shared policy");
+        if(!valid(flat,t))continue;
+        std::string missingGuard=flat;
+        missingGuard.erase(missingGuard.find(guard),guard.size());
+        check(!valid(missingGuard,t),"draw-bracket control: removing either guard fails");
+        std::string badOrder=flat;
+        const std::string begin=guard+"flatDraw.beginActualDraw("+t.beginArgs+");";
+        const size_t call=badOrder.find(t.real),endAt=badOrder.find(end);
+        badOrder.replace(endAt,end.size(),t.real);
+        badOrder.replace(call,t.real[0]?std::strlen(t.real):0,end);
+        check(!valid(badOrder,t),"draw-bracket control: moving end before the real draw fails");
+        if(t.beginArgs[0]) {
+            std::string badOffset=flat;
+            const size_t at=badOffset.find("flatDraw.beginActualDraw(args,off)");
+            badOffset.replace(at,std::strlen("flatDraw.beginActualDraw(args,off)"),
+                              "flatDraw.beginActualDraw(args,0)");
+            check(!valid(badOffset,t),"indirect draw control: losing the argument-buffer offset fails");
+        }
+    }
+}
+
 void testFlatWrapperNoteWiring() {
     auto slurp = [](const char* path) {
         std::ifstream in(path, std::ios::binary);
@@ -3047,6 +3119,7 @@ int main(int argc, char** argv) {
     failures += flatCameraTableTests();
     testFlatCameraTableWiring();
     testFlatSubstitutionWiring();
+    testFlatOverlayDrawThunkWiring();
     failures += flatWrapperNoteTests();
     testFlatWrapperNoteWiring();
     failures += flatQueryCutTests();
