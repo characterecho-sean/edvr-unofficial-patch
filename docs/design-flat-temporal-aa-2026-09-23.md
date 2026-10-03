@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
-  the caveats below remain the open qualification record. Latest analyzed Epic
-  log is build `v0.18.1-12-g41b9838c`. Evidence is in sections 1-93.
+- **State:** shared route merged at `dacb7a56`; qualifications below remain open.
+  Epic installed `v0.18.1-15-g06e9225c`, NOT FLOWN. Latest analyzed log:
+  `v0.18.1-12-g41b9838c`; evidence is in sections 1-93.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -9550,7 +9550,9 @@ qualify VR. Next test after build/install: draw the weapon until world AA
 turns off, press F10 and keep it drawn through capture completion, then
 holster. Performance comparison still requires waiting for F10's existing
 two-minute passive discovery window to end. Full build and all gates passed;
-clean-commit DLL promotion and Epic installation follow.
+clean-commit DLL promotion passed. Epic flat installed and verified as
+`v0.18.1-15-g06e9225c` (code commit `06e9225c`). Live `edvr-flat.ini` and
+`nvngx_dlss.dll` SHA-256 values are unchanged. This build is NOT FLOWN.
 
 The WARP fixture uses the production snapshot/extraction path: 16 changed
 color pixels, no selected-draw depth change, 15 new stencil-0x04 marks,
