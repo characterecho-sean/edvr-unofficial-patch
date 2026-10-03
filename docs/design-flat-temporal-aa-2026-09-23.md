@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** resource correction `128fca02` FLOWN, weapon still refuses (100).
-  Epic installed `v0.18.1-25-g128fca02`. Latest analyzed log is this build;
-  evidence and corrections are in sections 1-100.
+- **State:** source witness `aca86106` BUILT, NOT FLOWN (100).
+  Epic installed `v0.18.1-27-gaca86106`. Latest analyzed log is the refusing
+  `v0.18.1-25-g128fca02` build; evidence and corrections are in sections 1-100.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 100: bounded automatic selector witness, two failing
-  weapon frames. Full validation passed; commit/promotion/install follow.
+- **Next:** section 100: same weapon drawn ten seconds, holstered ten seconds.
+  Automatic selector witness needs no F10. Source uniqueness is unchanged.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9997,5 +9997,14 @@ unsupported filtering, selected-frame silence, callback wiring, full fields,
 all-record enumeration and sampler/order checks. Full validation passed,
 including GPU rigs and installer gates, with receipt fingerprint
 `0285c441be41d192768ed3f9ded4e4d65fabf5a3a090cdb542a048ff513160d9`.
-Source is frozen; commit and clean promotion follow. No diagnostic binary
-installed yet.
+Committed as `aca86106`, fast-forwarded main and verified the push. Clean
+DLL-only promotion passed. Epic flat installed and independently verified
+as `v0.18.1-27-gaca86106`; live `edvr-flat.ini` and `nvngx_dlss.dll` hashes
+are unchanged. The automatic diagnostic is BUILT, NOT FLOWN; it changes no
+source-selection rule and the remaining AA refusal is still open.
+
+Next short diagnostic: same weapon drawn ten seconds, then holstered ten
+seconds. No F10 or two-minute wait is required. The report captures two
+failing frames automatically and enumerates their supported source records.
+Verify the next log against the literal installed `v0.18.1-27-gaca86106`,
+not the later docs-only HEAD.
