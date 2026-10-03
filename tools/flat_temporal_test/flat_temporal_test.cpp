@@ -2913,6 +2913,183 @@ void testFlatOverlayDrawThunkWiring() {
     }
 }
 
+// A mutation during the snapshot-to-consumer suffix is classified by the
+// destination resource, not by the API verb. Pin the policy and every context
+// hook together: an unrelated clear/copy/resolve must not silently become a
+// blanket refusal, while a missing view identity must remain fail-closed.
+void testFlatOverlayMutationWiring() {
+    using namespace edvr;
+    using Role = FlatOverlayMutationRole;
+    const void* h = reinterpret_cast<const void*>(0x1000);
+    const void* depth = reinterpret_cast<const void*>(0x2000);
+    const void* other = reinterpret_cast<const void*>(0x3000);
+    check(flatRuntimeOverlayMutationRole(h,h,depth)==Role::Hdr &&
+          flatRuntimeOverlayMutationRole(depth,h,depth)==Role::Depth &&
+          flatRuntimeOverlayMutationRole(other,h,depth)==Role::Unrelated &&
+          flatRuntimeOverlayMutationRole(nullptr,h,depth)==Role::Unknown,
+          "overlay mutation roles distinguish HDR, depth, unrelated, and unknown destinations");
+    auto slurp=[](const char* path) {
+        std::ifstream in(path,std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
+    };
+    const std::string vscreen=slurp("src/d3d11/vscreen.cpp");
+    const std::string runtime=slurp("src/d3d11/flat_runtime.cpp");
+    check(!vscreen.empty() && !runtime.empty(),"overlay mutation hook sources are readable");
+    auto compact=[](const std::string& in) {
+        std::string out;out.reserve(in.size());
+        for(char c:in)if(c!=' ' && c!='\r' && c!='\n' && c!='\t')out+=c;
+        return out;
+    };
+    auto bodyOf=[](const std::string& code,const std::string& signature) {
+        const size_t first=code.find(signature);
+        const size_t last=first==std::string::npos?std::string::npos:code.find("\n}\n",first);
+        return first==std::string::npos||last==std::string::npos?
+            std::string():code.substr(first,last-first);
+    };
+    struct Hook {const char* name;const char* dest;const char* type;const char* op;const char* real;};
+    const Hook hooks[]={
+        {"hookedClearRtv","rtv","View","ClearRtv","realClearRtv("},
+        {"hookedClearDsv","dsv","View","ClearDsv","realClearDsv("},
+        {"hookedClearUavUint","uav","View","ClearUav","realClearUavUint("},
+        {"hookedClearUavFloat","uav","View","ClearUav","realClearUavFloat("},
+        {"hookedGenerateMips","srv","View","GenerateMips","realGenerateMips("},
+        {"hookedCopyResource","dst","Resource","CopyResource","realCopyResource("},
+        {"hookedCopySubresourceRegion","dst","Resource","CopyRegion","realCopySubresourceRegion("},
+        {"hookedCopyStructureCount","dst","Resource","CopyStructureCount","realCopyStructureCount("},
+        {"hookedUpdateSubresource","dst","Resource","UpdateSubresource","realUpdateSubresource("},
+        {"hookedResolveSubresource","dst","Resource","Resolve","realResolveSubresource("},
+    };
+    for(const auto& hook:hooks) {
+        const std::string raw=bodyOf(vscreen,std::string("void STDMETHODCALLTYPE ")+hook.name+"(");
+        const std::string body=compact(raw);
+        const std::string call=std::string("flatRuntimeOverlay")+hook.type+
+            "Mutation("+hook.dest+",FlatOverlayMutationOp::"+hook.op+");";
+        const auto valid=[&](const std::string& text) {
+            const size_t gate=text.find("flatRuntimeActive()"),mut=text.find(call);
+            const size_t real=text.rfind(hook.real);
+            const std::string foreignCall="flatRuntimeOverlayForeignMutation();";
+            const size_t foreign=text.find(foreignCall);
+            return !text.empty() && gate!=std::string::npos && mut!=std::string::npos &&
+                real!=std::string::npos && foreign!=std::string::npos &&
+                text.find("foreignContext(self)")!=std::string::npos &&
+                gate<mut && mut<real && foreign<real &&
+                text.find(call,mut+call.size())==std::string::npos &&
+                text.find(foreignCall,foreign+foreignCall.size())==std::string::npos;
+        };
+        if(!valid(body))std::printf("overlay mutation hook failed: %s\n",hook.name);
+        check(valid(body),"each known mutator reports its exact destination/view before the real call");
+        if(!valid(body))continue;
+        std::string removed=body;removed.erase(removed.find(call),call.size());
+        check(!valid(removed),"mutation control: omitting destination observation fails");
+        std::string noForeign=body;
+        const std::string foreignCall="flatRuntimeOverlayForeignMutation();";
+        noForeign.erase(noForeign.find(foreignCall),foreignCall.size());
+        check(!valid(noForeign),"mutation control: losing foreign-context invalidation fails");
+        std::string wrong=body;
+        wrong.replace(wrong.find(call),call.size(),std::string("flatRuntimeOverlay")+hook.type+
+            "Mutation(nullptr,FlatOverlayMutationOp::"+hook.op+");");
+        check(!valid(wrong),"mutation control: replacing a known destination with unknown fails");
+    }
+    const std::string map=compact(bodyOf(vscreen,"HRESULT STDMETHODCALLTYPE hookedMap("));
+    const std::string unmapHook=compact(bodyOf(vscreen,"void STDMETHODCALLTYPE hookedUnmap("));
+    const auto mapValid=[](const std::string& text) {
+        const size_t branch=text.find("if(foreignContext(self)){"),
+            real=text.find("realMap(self,res,sub,type,flags,mapped);",branch),
+            success=text.find("type!=D3D11_MAP_READ&&SUCCEEDED(hr)&&flatRuntimeActive()",real),
+            latch=text.find("flatRuntimeOverlayForeignMutation();",success),
+            done=text.find("returnhr;",latch);
+        return branch!=std::string::npos && real!=std::string::npos &&
+            success!=std::string::npos && latch!=std::string::npos && done!=std::string::npos &&
+            branch<real && real<success && success<latch && latch<done;
+    };
+    check(mapValid(map),"successful foreign write Map latches before the caller can write; READ Map does not");
+    std::string noMapLatch=map;
+    const std::string latchCall="flatRuntimeOverlayForeignMutation();";
+    if(noMapLatch.find(latchCall)!=std::string::npos)
+        noMapLatch.erase(noMapLatch.find(latchCall),latchCall.size());
+    check(!mapValid(noMapLatch),"mutation control: losing foreign Map latch fails");
+    const auto unmapValid=[](const std::string& text) {
+        const size_t branch=text.find("if(foreignContext(self)){"),
+            latch=text.find("flatRuntimeOverlayForeignMutation();",branch),
+            real=text.find("realUnmap(self,res,sub);",branch);
+        return branch!=std::string::npos && latch!=std::string::npos &&
+            real!=std::string::npos && branch<latch && latch<real &&
+            text.find("if(flatRuntimeActive())"+std::string("flatRuntimeOverlayForeignMutation();"),branch)!=std::string::npos;
+    };
+    check(unmapValid(unmapHook),"foreign Unmap conservatively latches before releasing the mapping");
+    std::string noUnmapLatch=unmapHook;
+    if(noUnmapLatch.find(latchCall)!=std::string::npos)
+        noUnmapLatch.erase(noUnmapLatch.find(latchCall),latchCall.size());
+    check(!unmapValid(noUnmapLatch),"mutation control: losing foreign Unmap latch fails");
+    const std::string ownerMap="if(mapData0&&flatRuntimeActive()){if(type!=D3D11_MAP_READ)"
+        "flatRuntimeOverlayResourceMutation(res,FlatOverlayMutationOp::Map);"
+        "flatRuntimeMap(res,type,mapped->pData);}";
+    const std::string ownerUnmap="if(flatRuntimeActive()){"
+        "flatRuntimeOverlayResourceMutation(res,FlatOverlayMutationOp::Unmap);"
+        "flatRuntimeUnmap(res);}";
+    const auto ownerValid=[&](const std::string& m,const std::string& u) {
+        return m.find(ownerMap)!=std::string::npos && u.find(ownerUnmap)!=std::string::npos;
+    };
+    check(ownerValid(map,unmapHook),
+          "owner write Map and Unmap classify the exact resource before camera tracking");
+    std::string noOwnerMap=map;
+    const std::string ownerMapCall="flatRuntimeOverlayResourceMutation(res,FlatOverlayMutationOp::Map);";
+    if(noOwnerMap.find(ownerMapCall)!=std::string::npos)
+        noOwnerMap.erase(noOwnerMap.find(ownerMapCall),ownerMapCall.size());
+    check(!ownerValid(noOwnerMap,unmapHook),
+          "mutation control: removing owner Map provenance fails the source contract");
+    const std::string subst=compact(bodyOf(runtime,"void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event)"));
+    const size_t pending=subst.find("if(!engineVelocityFlatPending())return;");
+    const std::string suffix=pending==std::string::npos?std::string():subst.substr(0,pending);
+    const auto safeSubstitution=[](const std::string& text) {
+        const auto hasEvent=[&](const char* name) {
+            const std::string needle=std::string("event==FlatSubstEvent::")+name;
+            for(size_t at=text.find(needle);at!=std::string::npos;at=text.find(needle,at+needle.size())) {
+                const size_t next=at+needle.size();
+                if(next==text.size() || !(text[next]=='_' ||
+                   (text[next]>='A' && text[next]<='Z') ||
+                   (text[next]>='a' && text[next]<='z') ||
+                   (text[next]>='0' && text[next]<='9')))return true;
+            }
+            return false;
+        };
+        return hasEvent("kExecuteCommandList") && hasEvent("kClearState") &&
+            !hasEvent("kClear") && !hasEvent("kCopy") && !hasEvent("kResolve");
+    };
+    check(safeSubstitution(suffix),"only an unknown command list or ClearState causes substitution's blanket overlay refusal");
+    check(!safeSubstitution(suffix+"event==FlatSubstEvent::kCopy"),
+          "mutation control: restoring a blanket copy refusal fails");
+    const std::string view=compact(bodyOf(runtime,"void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op)"));
+    check(view.find("if(view)view->GetResource(&resource);")!=std::string::npos &&
+          view.find("flatRuntimeOverlayResourceMutation(resource.Get(),op);")!=std::string::npos,
+          "view mutations resolve the actual underlying resource and pass null through when unresolved");
+    const std::string resource=compact(bodyOf(runtime,"void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMutationOp op)"));
+    check(resource.find("flatRuntimeOverlayMutationRole(resource,t.resource,t.overlayDepth)")!=std::string::npos &&
+          resource.find("if(role==FlatOverlayMutationRole::Unrelated)return;")!=std::string::npos &&
+          resource.find("overlayFail(s,")!=std::string::npos,
+          "unrelated resources leave the suffix open; HDR, depth and unknown destinations fail closed");
+    const std::string foreign=compact(bodyOf(runtime,"void flatRuntimeOverlayForeignMutation()"));
+    check(foreign.find("foreignWork.store(true,std::memory_order_release);")!=std::string::npos &&
+          foreign.find("if(owner()&&overlayOpen(state()))overlayFail(state(),\"overlay-foreign-mutation\");")!=std::string::npos,
+          "a foreign mutator latches uncertainty for the owner and fails immediately when called on it");
+    const size_t treat=runtime.find("void FlatRuntimeDrawScope::treatHdr(");
+    const size_t acquire=treat==std::string::npos?std::string::npos:
+        runtime.find("overlayOpen(s) && foreignWork.load(std::memory_order_acquire)",treat);
+    const size_t refuse=acquire==std::string::npos?std::string::npos:
+        runtime.find("decline(\"overlay-foreign-mutation\"); return;",acquire);
+    const size_t backend=treat==std::string::npos?std::string::npos:
+        runtime.find("flatMonoResolve(s.device.Get(), ctx, f,",treat);
+    check(treat!=std::string::npos && acquire!=std::string::npos &&
+          refuse!=std::string::npos && backend!=std::string::npos &&
+          treat<acquire && acquire<refuse && refuse<backend,
+          "the HDR consumer acquires the foreign-mutation latch and declines before backend evaluation");
+    const std::string writes=compact(bodyOf(runtime,"static void resourceWritten(State& s, ID3D11Resource* res)"));
+    const std::string unmap=compact(bodyOf(runtime,"void flatRuntimeUnmap(ID3D11Resource* res)"));
+    check(writes.find("overlay-scene-constants-written")==std::string::npos &&
+          unmap.find("res==state().namedConstants")==std::string::npos,
+          "scene-b1 updates and unmaps use camera tracking rather than blanket overlay refusal");
+}
+
 void testFlatWrapperNoteWiring() {
     auto slurp = [](const char* path) {
         std::ifstream in(path, std::ios::binary);
@@ -3120,6 +3297,7 @@ int main(int argc, char** argv) {
     testFlatCameraTableWiring();
     testFlatSubstitutionWiring();
     testFlatOverlayDrawThunkWiring();
+    testFlatOverlayMutationWiring();
     failures += flatWrapperNoteTests();
     testFlatWrapperNoteWiring();
     failures += flatQueryCutTests();

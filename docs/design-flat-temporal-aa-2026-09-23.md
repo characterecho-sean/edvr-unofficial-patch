@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** overlay corrections `90d0c3d8` BUILT, NOT FLOWN (98).
-  Epic installed `v0.18.1-23-g90d0c3d8`. Latest analyzed log is the refusing
-  `v0.18.1-21-g087501bb` build; evidence and corrections are in sections 1-98.
+- **State:** overlay corrections `90d0c3d8` FLOWN, still refuses weapon (99).
+  Epic installed `v0.18.1-23-g90d0c3d8`. Latest analyzed log is this build;
+  evidence and corrections are in sections 1-99.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 98: same weapon drawn ten seconds, holstered ten seconds.
-  Check world AA and marked/isolated counters; F10 only if still defective.
+- **Next:** section 99: precise resource checks implemented; full validation
+  passed. Commit, clean promotion and Epic install follow.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9856,3 +9856,72 @@ ten seconds. Check world AA and the 5s fully marked/isolated counters. No
 two-minute wait or weapon matrix is required; take F10 only if AA still
 turns off or another visual defect appears. Verify the next log against
 the literal installed `v0.18.1-23-g90d0c3d8`, not the later docs-only HEAD.
+
+## 99. Marked weapon, later resource refusals (2026-10-03)
+
+Verified `edvr_gfx_20261003_113932.log` against installed
+`v0.18.1-23-g90d0c3d8` (6AC13A91), linked 17:25:37 UTC. Sean reports the
+same weapon still disables world AA and took F10. At 11:42:07: planned=305,
+fully-marked=305, isolated-consumer-frames=0, refused-frames=305, with
+`overlay-scene-constants-written` 194 and
+`overlay-unknown-write-or-command-list` 111. F10 completes frames 48487 and
+48489, with two complete captures and zero unsupported captures.
+
+Ruled out: the ordinary-draw coverage bracket never runs or the captured
+weapon PS cannot be patched, because every planned draw is now fully marked
+outside F10 as well as during it. The failure occurs later in the suffix.
+Trace the specific operation and affected resource before changing either
+refusal: constants can change future draw interpretation, while a generic
+copy/clear hook may know its destination. Retain true HDR/depth writes and
+unknown command-list refusal. No additional flight requested yet.
+
+Source audit confirms the constant-upload refusal is `res==namedConstants`,
+not a write to H or scene depth. World rows are already copied into
+`namedCamera`, target/selector records and resolve `f.camera`. Engine source
+rows and scene/previous GPU inputs are private snapshots. Subsequent camera
+uploads cannot mutate them; later draws and engine producers retain their
+own admission checks. The specific log reason therefore confirms a stale
+blanket invalidation rather than loss of those saved inputs.
+
+The second reason is emitted for every kCopy/kClear/kResolve substitution,
+including known-destination UpdateSubresource before destination inspection.
+It does not establish a write to protected H/depth. Correct it by checking
+known destinations/views at all mutation hooks while preserving substitution
+flush semantics, null lookup refusal, actual H/depth writes, command lists,
+unknown context state and future-draw admission. The log does not identify
+which mutation subtype ran; resource-aware refusal will still reject any
+actual protected write without requiring another diagnostic first. Add
+policy and hook-integration regressions that fail this blanket wiring.
+
+The new complete captures cover lower-1152 rows at 3840x2160. Both frames
+show zero HDR/depth/stencil changes in that ROI across before/after selected
+draw, pre-consumer and pre-Present, despite about 55k selected PS invocations.
+There are 146/20 sequences between selected draw and consumer; the F10 trace
+again has no events (16-byte header, four skipped slots). This capture does
+not prove full-frame suffix safety: upper rows and private coverage are not
+captured. The correction therefore depends on explicit resource identity
+and owned snapshot semantics, not absence of changes in this ROI. Retain
+runtime checks and operation/role refusal diagnostics for remaining writes.
+
+Implemented typed destination roles and resource/view mutation helpers.
+Known clears, copies, updates, mip generation, resolves and Map/Unmap
+compare their actual destination with every open suffix H/depth; unrelated
+resources pass, null/unresolved identities refuse. Scene-b1 uploads still
+invalidate camera/projection tracking for future draws but no longer discard
+owned snapshots. Engine substitution flush semantics are unchanged. Unknown
+command lists and context resets still refuse. Foreign/wrong-thread
+mutations latch uncertainty during the suffix; the HDR consumer acquires
+that latch before backend evaluation.
+
+Resource failures increment the operation/role counter before the first
+failure closes the suffix. The existing 5s report prints and resets those
+counters beside marked/isolated/refused counts. Dead instrumentation is
+therefore distinguishable from a successful path. Re-read changed runtime,
+header, hooks and tests; no declaration/order or duplicate log defect found.
+Targeted flat_temporal_test build passes (17 traces, 46/46 replay frames).
+New tests exercise unrelated buffer writes through the actual consumer,
+protected HDR/depth and unknown refusal, all ten mutation-hook variants,
+Map/Unmap and foreign latch wiring, with removal/misrouting mutation controls.
+Full validation passed, including GPU rigs and installer gates, with receipt
+fingerprint `630ee203b04248f94eeeb2c642db9daac8a6ef285725281e226b5498269c9fd6`.
+Source is frozen; commit and clean promotion follow. No new install yet.

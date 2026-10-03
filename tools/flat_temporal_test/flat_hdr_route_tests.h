@@ -688,6 +688,32 @@ inline int flatHdrRouteTests() {
         expect(accepted.select().selected(),
                "the real HDR consumer selector admits a protected suffix with the original world camera");
 
+        Stream unrelated; unrelated.sceneDraws(2, 2); late(unrelated, true);
+        // Clear, copy, resolve, UpdateSubresource and Map all report their
+        // destination resource to the reducer. Writes to separate resources
+        // cannot change the protected H or its scene depth. A scene constant
+        // buffer update is likewise safe only while the later draw's measured
+        // camera and phase still pass the ordinary checks.
+        unrelated.write(unrelated.sc.copyOfH);
+        unrelated.write(unrelated.sc.b1);
+        unrelated.dispatch(unrelated.sc.h2);
+        late(unrelated, true);
+        const auto* n = target(unrelated);
+        expect(n && n->overlayOpen && !n->hdrBad,
+               "unrelated writes and a scene-CB update leave a verified protected suffix open");
+        unrelated.toneTrigger();
+        expect(unrelated.select().selected(),
+               "unrelated writes still admit the real HDR consumer with the frozen world camera");
+
+        Stream unknown; unknown.sceneDraws(2, 2); late(unknown, true);
+        flatRuntimeOverlayFailed(*unknown.prefix, nullptr);
+        const auto* q = target(unknown);
+        expect(q && q->hdrBad && q->firstBad.cause == FlatRuntimeConflict::OverlaySuffix,
+               "an unknown write or command list invalidates an open suffix");
+        unknown.toneTrigger();
+        expect(unknown.select().reason == FlatMonoReason::ConflictingHdr,
+               "the actual HDR consumer refuses an unknown suffix mutation");
+
         Stream unprotected; unprotected.sceneDraws(2, 2); late(unprotected, true);
         unprotected.draw(unprotected.make(unprotected.sc.h, unprotected.sc.hDepth,
             unprotected.sc.hW, unprotected.sc.hH, 26, 0x44, 0x55, true, false));

@@ -180,6 +180,7 @@ struct State {
     uint64_t overlayPlannedWindow = 0, overlayMarkedWindow = 0;
     uint64_t overlayIsolatedWindow = 0, overlayRefusedWindow = 0;
     std::map<std::string,uint64_t> overlayRefusalWindow;
+    std::map<std::string,uint64_t> overlayMutationWindow;
     DWORD thread = 0; Ptr<ID3D11Device> device; Ptr<ID3D11DeviceContext> context;
     Ptr<ID3D11Texture2D> output, sceneDepth; Ptr<ID3D11ShaderResourceView> depthView;
     FlatRuntimePrefix prefix{}; CameraTable cameras;
@@ -2498,8 +2499,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         for(const auto& entry:s.overlayRefusalWindow)
             Log::get().note("flat late overlay refusal: reason=%s count=%llu",entry.first.c_str(),
                 (unsigned long long)entry.second);
+        for(const auto& entry:s.overlayMutationWindow)
+            Log::get().note("flat late overlay mutation refusal: %s count=%llu",entry.first.c_str(),
+                (unsigned long long)entry.second);
         s.overlayPlannedWindow=s.overlayMarkedWindow=s.overlayIsolatedWindow=s.overlayRefusedWindow=0;
         s.overlayRefusalWindow.clear();
+        s.overlayMutationWindow.clear();
         // The camera injector's row bookkeeping, every window while a temporal mode runs
         // (the camera path is on with it; zeros included: an absent line is what "the
         // wiring never ran" looks like). The tripwire is cumulative on purpose -- once it
@@ -2634,9 +2639,7 @@ static EngineVelocityFlushCause flushCauseOf(FlatSubstEvent event) {
 }
 void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event) {
     if (overlaySuffixActive.load(std::memory_order_acquire) && owner() && overlayOpen(state()) &&
-        (event == FlatSubstEvent::kClear || event == FlatSubstEvent::kCopy ||
-         event == FlatSubstEvent::kResolve || event == FlatSubstEvent::kExecuteCommandList ||
-         event == FlatSubstEvent::kClearState))
+        (event == FlatSubstEvent::kExecuteCommandList || event == FlatSubstEvent::kClearState))
         overlayFail(state(), "overlay-unknown-write-or-command-list");
     // Nothing of engine motion's is bound over the game's: the common case, one load.
     if (!engineVelocityFlatPending()) return;
@@ -2763,8 +2766,6 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 // What a write to a resource does to the prefix model, the camera table and the shadows -- the
 // body flatRuntimeWritten, Map and Update share, timed by the caller's scope.
 static void resourceWritten(State& s, ID3D11Resource* res) {
-    if(overlayOpen(s) && res==s.namedConstants)
-        overlayFail(s,"overlay-scene-constants-written");
     if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
         const auto& t=s.prefix.targets[i];
         if(t.overlayOpen && (t.resource==res || t.overlayDepth==res)) {
@@ -2781,6 +2782,62 @@ void flatRuntimeWritten(ID3D11Resource* res) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);   // prefix target and source lookup, camera lookup
     resourceWritten(state(), res);
+}
+namespace {
+const char* overlayMutationOpName(FlatOverlayMutationOp op) {
+    switch (op) {
+    case FlatOverlayMutationOp::Map: return "Map";
+    case FlatOverlayMutationOp::Unmap: return "Unmap";
+    case FlatOverlayMutationOp::ClearRtv: return "ClearRtv";
+    case FlatOverlayMutationOp::ClearDsv: return "ClearDsv";
+    case FlatOverlayMutationOp::ClearUav: return "ClearUav";
+    case FlatOverlayMutationOp::GenerateMips: return "GenerateMips";
+    case FlatOverlayMutationOp::CopyResource: return "CopyResource";
+    case FlatOverlayMutationOp::CopyRegion: return "CopyRegion";
+    case FlatOverlayMutationOp::CopyStructureCount: return "CopyStructureCount";
+    case FlatOverlayMutationOp::UpdateSubresource: return "UpdateSubresource";
+    case FlatOverlayMutationOp::Resolve: return "Resolve";
+    }
+    return "UnknownOp";
+}
+const char* overlayMutationRoleName(FlatOverlayMutationRole role) {
+    switch (role) {
+    case FlatOverlayMutationRole::Hdr: return "hdr";
+    case FlatOverlayMutationRole::Depth: return "depth";
+    case FlatOverlayMutationRole::Unknown: return "unknown";
+    default: return "unrelated";
+    }
+}
+}
+void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMutationOp op) {
+    if (!overlaySuffixActive.load(std::memory_order_acquire)) return;
+    if (!owner()) { foreignWork.store(true,std::memory_order_release); return; }
+    auto& s=state();
+    if (!overlayOpen(s)) return;
+    FlatOverlayMutationRole role=resource ? FlatOverlayMutationRole::Unrelated : FlatOverlayMutationRole::Unknown;
+    const void* protectedHdr=nullptr;
+    if (resource) for (uint32_t i=0;i<s.prefix.targetsUsed;++i) {
+        const auto& t=s.prefix.targets[i];
+        if (!t.overlayOpen) continue;
+        role=flatRuntimeOverlayMutationRole(resource,t.resource,t.overlayDepth);
+        if (role!=FlatOverlayMutationRole::Unrelated) { protectedHdr=t.resource; break; }
+    }
+    if (role==FlatOverlayMutationRole::Unrelated) return;
+    ++s.overlayMutationWindow[std::string("op=")+overlayMutationOpName(op)+" role="+overlayMutationRoleName(role)];
+    overlayFail(s,role==FlatOverlayMutationRole::Unknown ?
+        "overlay-unresolved-resource-write" : "overlay-explicit-resource-write",protectedHdr);
+}
+void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op) {
+    if (!overlaySuffixActive.load(std::memory_order_acquire)) return;
+    if (!owner()) { foreignWork.store(true,std::memory_order_release); return; }
+    Ptr<ID3D11Resource> resource;
+    if (view) view->GetResource(&resource);
+    flatRuntimeOverlayResourceMutation(resource.Get(),op);
+}
+void flatRuntimeOverlayForeignMutation() {
+    if (!overlaySuffixActive.load(std::memory_order_acquire)) return;
+    foreignWork.store(true,std::memory_order_release);
+    if (owner() && overlayOpen(state())) overlayFail(state(),"overlay-foreign-mutation");
 }
 void flatRuntimeMapBouncePreMap(ID3D11Resource* resource) {
     mapBounce().preMap(reinterpret_cast<uintptr_t>(resource));
@@ -2875,12 +2932,6 @@ void flatRuntimeMap(ID3D11Resource* res, D3D11_MAP type, void* bytes) {
 void flatRuntimeUnmap(ID3D11Resource* res) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
-    if(overlayOpen(state()) && (res==state().namedConstants ||
-       [&] { for(uint32_t i=0;i<state().prefix.targetsUsed;++i) {
-           const auto& t=state().prefix.targets[i];
-           if(t.overlayOpen && (res==t.resource || res==t.overlayDepth))return true;
-       } return false; }()))
-        overlayFail(state(),"overlay-resource-unmapped");
     if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows); state().projection->observeUnmap(res); }
     if (auto* c = camera(res, false)) {
         if (c->mapped) { capture(*c, c->mapped); if (state().work == FlatWork::Full) cameraWitness(res); }
@@ -3696,6 +3747,10 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     if (s.hdrLatch.tripped) { decline("latched-off"); return; }
     if (s.observing) { decline("returned-to-observation"); return; }
     if (s.treated) { decline("already-treated-this-frame"); return; }
+    if (overlayOpen(s) && foreignWork.load(std::memory_order_acquire)) {
+        overlayFail(s,"overlay-foreign-mutation",selected.hdr);
+        decline("overlay-foreign-mutation"); return;
+    }
     if (selected.depth != s.namedDepth || selected.sceneConstants != s.namedConstants) {
         decline("producer-source-identity-mismatch"); return;
     }
