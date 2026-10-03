@@ -3,7 +3,7 @@
 ## Status
 
 - **State:** shared route merged at `dacb7a56`; qualifications below remain open.
-  Epic installed `v0.18.1-15-g06e9225c`, FLOWN. Latest analyzed log:
+  Epic installed `v0.18.1-18-g83938927`, NOT FLOWN. Latest analyzed log:
   `v0.18.1-15-g06e9225c`; evidence is in sections 1-95.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
@@ -9642,8 +9642,13 @@ right-edge WARP cases distinguish visible, depth-rejected, color-write-disabled
 and empty draws, plus unavailable/timed-out queries. They verify nested game
 occlusion queries retain their result and capture CS invocations stay outside
 the draw statistics. Existing complete/partial capture gates also pass.
-Clean promotion and Epic flat installation follow; preserve live settings
-and DLSS 310.9.1.
+Clean promotion passed; Epic flat installed and verified as
+`v0.18.1-18-g83938927` (code commit `83938927`). Live `edvr-flat.ini` and
+`nvngx_dlss.dll` hashes remain unchanged. This diagnostic build is NOT FLOWN.
+
+Next test uses the same weapon that reproduced the conflict: draw it until
+world AA turns off, F10, hold it drawn ten seconds, then holster. Wait two
+minutes before comparing performance. No per-weapon live test matrix.
 
 Sean explicitly requires a solution that does not need him to test every
 weapon type. The exact shader pair is a diagnostic witness, not the final
