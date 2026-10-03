@@ -39,8 +39,8 @@
   4.1), the installer skips it and Elite stays on its stock VR path. Four
   changes first (section 10); no F8, AA, flash fix or Explorer Cam without
   the runtime; the first build needs a flight on a stock runtime.
-- **Next:** NV source facts pass all 128 validation jobs; clean promotion and
-  installation are next. Steam still has `03049f8d`. Pimax OpenXR, 90 Hz,
+- **Next:** `4350a281` passes all 128 validation jobs and clean promotion;
+  installed and verified in Steam with settings preserved. Pimax OpenXR, 90 Hz,
   4032x3898 per eye. Both captures were NV off: Sean forgot the NV toggle
   and held DLSS on for two minutes. The new NV guard lacks flight coverage.
   Production v2 replay passes 13,058 supported predicate comparisons across
@@ -1100,3 +1100,20 @@ A production NV-on capture must show an independently replayed positive
 claim and actual API owner rows before the NV instrumentation flight gate
 closes. Repeatable CPU improvement, GPU non-regression and remaining
 predicate families stay open.
+
+The validated source is committed and pushed as `4350a281`. Receipt-guarded
+DLL promotion passes at clean version `v0.18.1-15-g4350a281`; the authorized
+Steam install and a separate payload/profile verification pass. The personal
+INI remains SHA-256
+`C09ED2FB598BDEE1CD14AED5638EC034236E289242CFAF640264F691713DA684`.
+The elevated install resolved `c:\steam`, whereas the ordinary Steam alias
+resolved `C:\Steam`. Startup-config byte comparison rejects that casing
+difference; verification with the exact installed target spelling passes.
+No config was edited to compensate. The installer built by the full build
+retains its earlier dirty version; the clean promotion prepares test DLLs.
+
+The requested next flight is a stationary carrier cockpit view, Pimax OpenXR
+at 4032x3898, DLSS on and game NV visibly on for 90 seconds, then one NumLock
+capture and exit. Read its logs against `4350a281`, not a later docs-only HEAD.
+Its purpose is the positive NV predicate and render-thread API guard evidence;
+it cannot by itself establish whole-ladder parity or a performance baseline.
