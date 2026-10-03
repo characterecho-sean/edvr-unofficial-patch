@@ -40,6 +40,7 @@
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "draw_ladder_trace.h"
+#include "offscreen_skip_selector.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
@@ -2311,19 +2312,70 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kOffscreenCensusSkip) {
-            if (s->censusSkipOffCount) {
-                ResourceInfo info;
-                if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D) {
-                    for (uint32_t i = 0; i < s->censusSkipOffCount; ++i) {
-                        const State::OffSkip& o = s->censusSkipOff[i];
-                        if (info.a != o.w || info.b != o.h) continue;
-                        if (o.kind && (o.kind != kind || o.n != count)) continue;
+            if constexpr (TracePolicy::enabled) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::OffscreenCensusSkip;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.quadArmed = draw_ladder_trace::TriState::Unknown;
+                fact.offscreenRuleCount = static_cast<std::uint8_t>(s->censusSkipOffCount);
+                for (std::uint8_t i = 0; i < fact.offscreenRuleCount; ++i) {
+                    const State::OffSkip& source = s->censusSkipOff[i];
+                    fact.offscreenRules[i] = {static_cast<std::uint8_t>(source.kind),
+                                              source.n, source.w, source.h};
+                }
+                fact.censusSkippedDeltaKnown = true;
+                const std::uint64_t censusSkippedBefore = s->censusSkipped;
+                if (s->censusSkipOffCount) {
+                    fact.offscreenProbeReached = draw_ladder_trace::TriState::Yes;
+                    ResourceInfo info{};
+                    const bool resolved = bindingResolveProbe(
+                        bindingGet(BindSlot::Rtv0), &info);
+                    fact.offscreenProbeResolved = resolved
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No;
+                    if (resolved) {
+                        fact.offscreenProbeTexture2D = info.isTexture2D
+                            ? draw_ladder_trace::TriState::Yes
+                            : draw_ladder_trace::TriState::No;
+                        if (info.isTexture2D) {
+                            fact.offscreenTargetW = info.a;
+                            fact.offscreenTargetH = info.b;
+                        }
+                    }
+                    if (resolved && edvr::matchingCensusRule(
+                            s->censusSkipOff, s->censusSkipOffCount,
+                            kind, count, info) >= 0) {
                         ++s->censusSkipped;
+                        fact.censusSkippedDelta = draw_ladder_trace::boundedCensusSkippedDelta(
+                            censusSkippedBefore, s->censusSkipped);
+                        fact.detailsFinalized = true;
+                        trace.predicateFact(fact);
                         return exited(id, DrawVerdict::kSkip);
                     }
+                } else {
+                    fact.offscreenProbeReached = draw_ladder_trace::TriState::No;
                 }
+                fact.censusSkippedDelta = draw_ladder_trace::boundedCensusSkippedDelta(
+                    censusSkippedBefore, s->censusSkipped);
+                fact.detailsFinalized = true;
+                trace.predicateFact(fact);
+                return SiteResult::declined();
+            } else {
+                if (s->censusSkipOffCount) {
+                    ResourceInfo info;
+                    if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D) {
+                        for (uint32_t i = 0; i < s->censusSkipOffCount; ++i) {
+                            const State::OffSkip& o = s->censusSkipOff[i];
+                            if (info.a != o.w || info.b != o.h) continue;
+                            if (o.kind && (o.kind != kind || o.n != count)) continue;
+                            ++s->censusSkipped;
+                            return exited(id, DrawVerdict::kSkip);
+                        }
+                    }
+                }
+                return SiteResult::declined();
             }
-            return SiteResult::declined();
         } else if constexpr (id == SiteId::kOffscreenLoaderPanel) {
             if (loaderPanelWants() && s->eyeDrawsLastFrame < kSceneEyeDraws) {
                 ResourceInfo info;
@@ -2335,14 +2387,58 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kOffscreenQuadSkip) {
-            if (s->quadSkipArmed && s->eyeDrawsLastFrame < kSceneEyeDraws &&
-                kind == s->quadSkip.kind && count == s->quadSkip.n) {
-                ResourceInfo info;
-                if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D &&
-                    info.a == s->quadSkip.w && info.b == s->quadSkip.h)
-                    return claimed(id, DrawVerdict::kQuadSkip);
+            if constexpr (TracePolicy::enabled) {
+                const bool probeReached = edvr::quadPrefixMatches(
+                    s->quadSkipArmed, s->eyeDrawsLastFrame, kSceneEyeDraws,
+                    kind, count, s->quadSkip);
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::OffscreenQuadSkip;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.offscreenRuleCount = 1;
+                fact.offscreenRules[0] = {
+                    static_cast<std::uint8_t>(s->quadSkip.kind), s->quadSkip.n,
+                    s->quadSkip.w, s->quadSkip.h};
+                fact.quadArmed = s->quadSkipArmed
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                fact.offscreenEyeDrawsLastFrame = s->eyeDrawsLastFrame;
+                fact.offscreenProbeReached = probeReached
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                SiteResult result = SiteResult::declined();
+                if (probeReached) {
+                    ResourceInfo info{};
+                    const bool resolved = bindingResolveProbe(
+                        bindingGet(BindSlot::Rtv0), &info);
+                    fact.offscreenProbeResolved = resolved
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No;
+                    if (resolved) {
+                        fact.offscreenProbeTexture2D = info.isTexture2D
+                            ? draw_ladder_trace::TriState::Yes
+                            : draw_ladder_trace::TriState::No;
+                        if (info.isTexture2D) {
+                            fact.offscreenTargetW = info.a;
+                            fact.offscreenTargetH = info.b;
+                        }
+                    }
+                    if (resolved && edvr::quadTargetMatches(info, s->quadSkip))
+                        result = claimed(id, DrawVerdict::kQuadSkip);
+                }
+                fact.detailsFinalized = true;
+                trace.predicateFact(fact);
+                return result;
+            } else {
+                if (s->quadSkipArmed && s->eyeDrawsLastFrame < kSceneEyeDraws &&
+                    kind == s->quadSkip.kind && count == s->quadSkip.n) {
+                    ResourceInfo info;
+                    if (bindingResolveProbe(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D &&
+                        info.a == s->quadSkip.w && info.b == s->quadSkip.h)
+                        return claimed(id, DrawVerdict::kQuadSkip);
+                }
+                return SiteResult::declined();
             }
-            return SiteResult::declined();
         } else if constexpr (id == SiteId::kOffscreenBodyLayerUpdate) {
             if (fssPanelWantsDraws() || fssRevealWantsDraws() || fssDumpWantsDraws()) {
                 if (s->fssBodyLayerGen != rtvGen) {

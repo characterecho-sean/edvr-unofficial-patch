@@ -1552,6 +1552,19 @@ if errorlevel 1 ( echo [edvr] ERROR: witchspace stars test build failed & exit /
 "%BUILD%\witchspace_stars_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_offscreen_skip_test
+echo [edvr] === offscreen_skip_test.exe ===
+if not exist "%OBJ%\offscreenskip" mkdir "%OBJ%\offscreenskip"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\offscreenskip\\" /Fe"%BUILD%\offscreen_skip_test.exe" ^
+    "tools\offscreen_skip_test\offscreen_skip_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: offscreen skip test build failed & exit /b 1 )
+"%BUILD%\offscreen_skip_test.exe" --dry-run || exit /b 1
+"%BUILD%\offscreen_skip_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_cockpit_api_test
 echo [edvr] === cockpit_api_test.exe ===
 if not exist "%OBJ%\cockpitapi" mkdir "%OBJ%\cockpitapi"
@@ -1624,6 +1637,12 @@ python "%ROOT%\tools\draw_ladder_replay.py" --file ^
 python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars\edvr_gfx_unfinished_witchspace_stars.draw-ladder-32.json" ^
     --expected-log edvr_gfx_unfinished_witchspace_stars.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts\edvr_gfx_missing_offscreen_facts.draw-ladder-34.json" ^
+    --expected-log edvr_gfx_missing_offscreen_facts.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact\edvr_gfx_unfinished_offscreen_fact.draw-ladder-35.json" ^
+    --expected-log edvr_gfx_unfinished_offscreen_fact.log --dry-run --expect-invalid || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -1657,6 +1676,10 @@ del /q "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.log" ^
     "%BUILD%\draw_ladder_test-trace\missingnightvisionfact\edvr_gfx_missing_night_vision_fact.draw-ladder-31.json" ^
     "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars\edvr_gfx_unfinished_witchspace_stars.log" ^
     "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars\edvr_gfx_unfinished_witchspace_stars.draw-ladder-32.json" ^
+    "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts\edvr_gfx_missing_offscreen_facts.log" ^
+    "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts\edvr_gfx_missing_offscreen_facts.draw-ladder-34.json" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact\edvr_gfx_unfinished_offscreen_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact\edvr_gfx_unfinished_offscreen_fact.draw-ladder-35.json" ^
     "%BUILD%\draw_ladder_test-trace\siteoverflow\edvr_gfx_site.log" ^
     "%BUILD%\draw_ladder_test-trace\siteoverflow\edvr_gfx_site.draw-ladder-20.json" ^
     "%BUILD%\draw_ladder_test-trace\actionoverflow\edvr_gfx_action.log" ^
@@ -1679,6 +1702,8 @@ if exist "%BUILD%\draw_ladder_test-trace\missingpredicatefacts" rmdir "%BUILD%\d
 if exist "%BUILD%\draw_ladder_test-trace\invalidcounterdelta" rmdir "%BUILD%\draw_ladder_test-trace\invalidcounterdelta"
 if exist "%BUILD%\draw_ladder_test-trace\missingnightvisionfact" rmdir "%BUILD%\draw_ladder_test-trace\missingnightvisionfact"
 if exist "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars"
+if exist "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts" rmdir "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts"
+if exist "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact"
 if exist "%BUILD%\draw_ladder_test-trace\siteoverflow" rmdir "%BUILD%\draw_ladder_test-trace\siteoverflow"
 if exist "%BUILD%\draw_ladder_test-trace\actionoverflow" rmdir "%BUILD%\draw_ladder_test-trace\actionoverflow"
 if exist "%BUILD%\draw_ladder_test-trace\unfinished" rmdir "%BUILD%\draw_ladder_test-trace\unfinished"

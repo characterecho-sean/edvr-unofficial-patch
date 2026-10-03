@@ -95,11 +95,20 @@ enum class PredicateFactKind : std::uint8_t {
     EyeRangeSkip = 2,
     NightVisionClaim = 3,
     WitchspaceStarsSkip = 4,
+    OffscreenCensusSkip = 5,
+    OffscreenQuadSkip = 6,
 };
 
 struct PredicateRange final {
     std::uint32_t lo = 0;
     std::uint32_t hi = 0;
+};
+
+struct PredicateOffscreenRule final {
+    std::uint8_t kind = 0;
+    std::uint32_t count = 0;
+    std::uint32_t w = 0;
+    std::uint32_t h = 0;
 };
 
 struct PredicateFact final {
@@ -148,6 +157,17 @@ struct PredicateFact final {
     std::uint64_t starsVsHash = 0;
     bool starsSkippedDeltaKnown = false;
     std::uint32_t starsSkippedDelta = 0;
+    // Offscreen skip selectors. Site 24 snapshots its ordered configured
+    // census rules; site 26 snapshots one configured quad target/rule.
+    std::uint8_t offscreenRuleCount = 0;
+    PredicateOffscreenRule offscreenRules[4]{};
+    TriState quadArmed = TriState::Unknown;
+    std::uint32_t offscreenEyeDrawsLastFrame = 0;
+    TriState offscreenProbeReached = TriState::Unknown;
+    TriState offscreenProbeResolved = TriState::Unknown;
+    TriState offscreenProbeTexture2D = TriState::Unknown;
+    std::uint32_t offscreenTargetW = 0;
+    std::uint32_t offscreenTargetH = 0;
     bool detailsFinalized = false;  // internal capture validity; not serialized
 };
 

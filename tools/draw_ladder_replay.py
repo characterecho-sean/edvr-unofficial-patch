@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 3
+PREDICATE_FACT_VERSION = 4
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -340,13 +340,153 @@ def _replay_witchspace_stars_fact(fact, draw, label):
     return expected_event, expected_delta, delta_known, delta, legacy
 
 
+def _offscreen_rules(fact, label, expected_count, allow_zero_dimensions=False,
+                     quad_armed=None):
+    count = _integer(fact.get("offscreenRuleCount"),
+                     label + ".offscreenRuleCount", 0, 4)
+    rules = fact.get("offscreenRules")
+    if count != expected_count or not isinstance(rules, list) or len(rules) != count:
+        raise TraceError(label + " offscreen rule count/list is inconsistent")
+    normalized = []
+    for index, rule in enumerate(rules):
+        rule_label = "%s.offscreenRules[%d]" % (label, index)
+        if not isinstance(rule, dict) or set(rule) != {"kind", "count", "w", "h"}:
+            raise TraceError(rule_label + " must contain exactly kind/count/w/h")
+        kind = _integer(rule.get("kind"), rule_label + ".kind", 0, 255)
+        n = _integer(rule.get("count"), rule_label + ".count")
+        width = _integer(rule.get("w"), rule_label + ".w",
+                         0 if allow_zero_dimensions else 1)
+        height = _integer(rule.get("h"), rule_label + ".h",
+                          0 if allow_zero_dimensions else 1)
+        allowed_kinds = (0, ord("D"), ord("I"), ord("N"), ord("X"))
+        if kind not in allowed_kinds:
+            raise TraceError(rule_label + ".kind is outside the config parser domain")
+        if kind == 0 and n != 0:
+            raise TraceError(rule_label + " wildcard kind requires the parser's zero count")
+        if quad_armed is True and (kind == 0 or n == 0 or width == 0 or height == 0):
+            raise TraceError(rule_label + " armed quad rule lacks valid dimensions/kind/count")
+        if quad_armed is False and (kind != 0 or n != 0 or width != 0 or height != 0):
+            raise TraceError(rule_label + " unarmed quad must preserve the zero-initialized raw rule")
+        normalized.append({
+            "kind": kind,
+            "count": n, "w": width, "h": height,
+        })
+    return normalized
+
+
+def _offscreen_probe(fact, label, should_reach):
+    tri_fields = ("offscreenProbeReached", "offscreenProbeResolved",
+                  "offscreenProbeTexture2D")
+    if any(fact.get(name) not in TRI_STATES for name in tri_fields):
+        raise TraceError(label + " has an invalid offscreen probe tri-state")
+    reached = fact["offscreenProbeReached"]
+    resolved = fact["offscreenProbeResolved"]
+    texture = fact["offscreenProbeTexture2D"]
+    width = _integer(fact.get("offscreenTargetW"), label + ".offscreenTargetW")
+    height = _integer(fact.get("offscreenTargetH"), label + ".offscreenTargetH")
+    if reached != ("yes" if should_reach else "no"):
+        raise TraceError(label + " probe reachability disagrees with earlier gates")
+    if not should_reach:
+        if resolved != "unknown" or texture != "unknown" or width != 0 or height != 0:
+            raise TraceError(label + " skipped probe carries resolution outputs")
+        return False, 0, 0
+    if resolved == "unknown":
+        raise TraceError(label + " reached probe lacks its resolution result")
+    if resolved == "no":
+        if texture != "unknown" or width != 0 or height != 0:
+            raise TraceError(label + " failed resolution carries target outputs")
+        return False, 0, 0
+    if texture not in ("yes", "no"):
+        raise TraceError(label + " resolved probe lacks its texture type")
+    if texture == "yes" and (width == 0 or height == 0):
+        raise TraceError(label + " resolved texture has invalid dimensions")
+    if texture == "no" and (width != 0 or height != 0):
+        raise TraceError(label + " non-texture target carries dimensions")
+    return texture == "yes", width, height
+
+
+def _replay_offscreen_census_fact(fact, draw, label):
+    required = {"siteId", "kind", "known", "offscreenRuleCount", "offscreenRules",
+                "quadArmed", "offscreenEyeDrawsLastFrame",
+                "offscreenProbeReached", "offscreenProbeResolved",
+                "offscreenProbeTexture2D", "offscreenTargetW", "offscreenTargetH",
+                "censusSkippedDeltaKnown", "censusSkippedDelta"}
+    if set(fact) != required:
+        raise TraceError(label + " has missing or unexpected offscreen-census fields")
+    if fact["known"] != "yes":
+        raise TraceError(label + " lacks offscreen census inputs")
+    if (fact["quadArmed"] != "unknown" or
+            _integer(fact["offscreenEyeDrawsLastFrame"],
+                     label + ".offscreenEyeDrawsLastFrame") != 0):
+        raise TraceError(label + " census fact carries quad-only inputs")
+    rules = _offscreen_rules(fact, label, fact["offscreenRuleCount"])
+    if len(rules) > 4:
+        raise TraceError(label + " exceeds the bounded offscreen rule table")
+    texture2d, width, height = _offscreen_probe(fact, label, bool(rules))
+    matched = False
+    if texture2d:
+        for rule in rules:
+            if width != rule["w"] or height != rule["h"]:
+                continue
+            if rule["kind"] and (rule["kind"] != draw["kind"] or
+                                  rule["count"] != draw["count"]):
+                continue
+            matched = True
+            break
+    expected_event = ({"id": 24, "kind": 2, "outcome": 4, "flow": 1,
+                       "subsite": 0, "verdict": 2}
+                      if matched else
+                      {"id": 24, "kind": 2, "outcome": 2, "flow": 0,
+                       "subsite": 0, "verdict": -1})
+    delta_known = fact.get("censusSkippedDeltaKnown")
+    if type(delta_known) is not bool:
+        raise TraceError(label + ".censusSkippedDeltaKnown is invalid")
+    delta = _integer(fact.get("censusSkippedDelta"), label + ".censusSkippedDelta", 0, 1)
+    if not delta_known and delta != 0:
+        raise TraceError(label + " unknown census mutation carries a value")
+    return expected_event, (1 if matched else 0), delta_known, delta, None
+
+
+def _replay_offscreen_quad_fact(fact, draw, label):
+    required = {"siteId", "kind", "known", "offscreenRuleCount", "offscreenRules",
+                "quadArmed", "offscreenEyeDrawsLastFrame",
+                "offscreenProbeReached", "offscreenProbeResolved",
+                "offscreenProbeTexture2D", "offscreenTargetW", "offscreenTargetH",
+                "censusSkippedDeltaKnown", "censusSkippedDelta"}
+    if set(fact) != required:
+        raise TraceError(label + " has missing or unexpected offscreen-quad fields")
+    if fact["known"] != "yes" or fact.get("quadArmed") not in ("yes", "no"):
+        raise TraceError(label + " lacks its quad configuration inputs")
+    if (fact["censusSkippedDeltaKnown"] is not False or
+            _integer(fact["censusSkippedDelta"], label + ".censusSkippedDelta") != 0):
+        raise TraceError(label + " quad fact carries census-only mutation")
+    armed = fact["quadArmed"] == "yes"
+    rules = _offscreen_rules(fact, label, 1,
+                             allow_zero_dimensions=not armed,
+                             quad_armed=armed)
+    rule = rules[0]
+    eye_draws = _integer(fact.get("offscreenEyeDrawsLastFrame"),
+                         label + ".offscreenEyeDrawsLastFrame")
+    prefix = (fact["quadArmed"] == "yes" and eye_draws < 100 and
+              draw["kind"] == rule["kind"] and draw["count"] == rule["count"])
+    texture2d, width, height = _offscreen_probe(fact, label, prefix)
+    claimed = prefix and texture2d and width == rule["w"] and height == rule["h"]
+    expected_event = ({"id": 26, "kind": 2, "outcome": 3, "flow": 1,
+                       "subsite": 0, "verdict": 15}
+                      if claimed else
+                      {"id": 26, "kind": 2, "outcome": 2, "flow": 0,
+                       "subsite": 0, "verdict": -1})
+    return expected_event, None, True, 0, None
+
+
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
     maximum = 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((3, 6, 49, 50) if predicate_fact_version >= 3 else
+    supported_ids = ((3, 6, 24, 26, 49, 50) if predicate_fact_version >= 4 else
+                     (3, 6, 49, 50) if predicate_fact_version >= 3 else
                      (3, 49, 50) if predicate_fact_version >= 2 else (3, 49))
     expected = {event["id"] for event in draw["sites"] if event["id"] in supported_ids}
     by_site = {}
@@ -356,11 +496,13 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        6 if predicate_fact_version >= 4 else
                         4 if predicate_fact_version >= 3 else
                         3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        supported_pairs = ((3, 1), (6, 4), (49, 2), (50, 3)) if predicate_fact_version >= 3 else (
+        supported_pairs = ((3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3)) if predicate_fact_version >= 4 else (
+            (3, 1), (6, 4), (49, 2), (50, 3)) if predicate_fact_version >= 3 else (
             (3, 1), (49, 2), (50, 3)) if predicate_fact_version >= 2 else ((3, 1), (49, 2))
         if (site_id, kind) not in supported_pairs:
             raise TraceError(fact_label + " has an unsupported site/kind pair")
@@ -496,6 +638,16 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 _replay_witchspace_stars_fact(fact, draw, fact_label)
             by_site[site_id] = (expected_event, expected_delta, delta_known,
                                 observed_delta, 0, legacy_claim)
+        elif kind == 5:
+            expected_event, expected_delta, delta_known, observed_delta, _ = \
+                _replay_offscreen_census_fact(fact, draw, fact_label)
+            by_site[site_id] = (expected_event, expected_delta, delta_known,
+                                observed_delta, 0, None)
+        elif kind == 6:
+            expected_event, expected_delta, delta_known, observed_delta, _ = \
+                _replay_offscreen_quad_fact(fact, draw, fact_label)
+            by_site[site_id] = (expected_event, expected_delta, delta_known,
+                                observed_delta, 0, None)
         elif kind == 1:
             if set(fact) != {"siteId", "kind", "known", "gateWanted"}:
                 raise TraceError(fact_label + " has unexpected draw-gate fields")
@@ -550,7 +702,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4):
+        if kind not in (3, 4, 5, 6):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -566,6 +718,12 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     stars_replayed = 0
     stars_unreplayable = 0
     stars_mismatches = 0
+    census_replayed = 0
+    census_unreplayable = 0
+    census_mismatches = 0
+    quad_replayed = 0
+    quad_unreplayable = 0
+    quad_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -618,6 +776,30 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 mutation_unobserved += 1
             elif expected_delta != observed_delta:
                 mismatches += 1
+        if site_id == 24:
+            if site_unreplayable:
+                census_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                census_replayed += 1
+            else:
+                census_mismatches += 1
+            if expected_delta is not None:
+                if not delta_known:
+                    mutation_unobserved += 1
+                elif expected_delta != observed_delta:
+                    mismatches += 1
+                    census_mismatches += 1
+        if site_id == 26:
+            if site_unreplayable:
+                quad_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                quad_replayed += 1
+            else:
+                quad_mismatches += 1
     return {"factCount": len(by_site), "replayed": replayed,
             "unreplayable": unreplayable, "mismatches": mismatches,
             "mutationUnobserved": mutation_unobserved,
@@ -628,7 +810,15 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "witchspaceStarsFacts": sum(1 for site_id in by_site if site_id == 6),
             "witchspaceStarsReplayed": stars_replayed,
             "witchspaceStarsUnreplayable": stars_unreplayable,
-            "witchspaceStarsMismatches": stars_mismatches}
+            "witchspaceStarsMismatches": stars_mismatches,
+            "offscreenCensusFacts": sum(1 for site_id in by_site if site_id == 24),
+            "offscreenCensusReplayed": census_replayed,
+            "offscreenCensusUnreplayable": census_unreplayable,
+            "offscreenCensusMismatches": census_mismatches,
+            "offscreenQuadFacts": sum(1 for site_id in by_site if site_id == 26),
+            "offscreenQuadReplayed": quad_replayed,
+            "offscreenQuadUnreplayable": quad_unreplayable,
+            "offscreenQuadMismatches": quad_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -646,7 +836,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -716,7 +906,15 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "witchspaceStarsFacts": 0,
                         "witchspaceStarsReplayed": 0,
                         "witchspaceStarsUnreplayable": 0,
-                        "witchspaceStarsMismatches": 0}
+                        "witchspaceStarsMismatches": 0,
+                        "offscreenCensusFacts": 0,
+                        "offscreenCensusReplayed": 0,
+                        "offscreenCensusUnreplayable": 0,
+                        "offscreenCensusMismatches": 0,
+                        "offscreenQuadFacts": 0,
+                        "offscreenQuadReplayed": 0,
+                        "offscreenQuadUnreplayable": 0,
+                        "offscreenQuadMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -1020,6 +1218,16 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                                    "mismatch" if predicate_replay["witchspaceStarsMismatches"] else
                                    "unreplayable" if predicate_replay["witchspaceStarsUnreplayable"] else
                                    "replayed"),
+            offscreenCensusStatus=("unavailable-v1-v3" if predicate_fact_version < 4 else
+                                   "not-visited" if not predicate_replay["offscreenCensusFacts"] else
+                                   "mismatch" if predicate_replay["offscreenCensusMismatches"] else
+                                   "unreplayable" if predicate_replay["offscreenCensusUnreplayable"] else
+                                   "replayed"),
+            offscreenQuadStatus=("unavailable-v1-v3" if predicate_fact_version < 4 else
+                                 "not-visited" if not predicate_replay["offscreenQuadFacts"] else
+                                 "mismatch" if predicate_replay["offscreenQuadMismatches"] else
+                                 "unreplayable" if predicate_replay["offscreenQuadUnreplayable"] else
+                                 "replayed"),
             **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -1030,7 +1238,13 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
              "nightVisionUnreplayable": 0, "nightVisionMismatches": 0,
              "witchspaceStarsStatus": "unavailable-v1-or-v2",
              "witchspaceStarsFacts": 0, "witchspaceStarsReplayed": 0,
-             "witchspaceStarsUnreplayable": 0, "witchspaceStarsMismatches": 0}),
+             "witchspaceStarsUnreplayable": 0, "witchspaceStarsMismatches": 0,
+             "offscreenCensusStatus": "unavailable-v1-v3",
+             "offscreenCensusFacts": 0, "offscreenCensusReplayed": 0,
+             "offscreenCensusUnreplayable": 0, "offscreenCensusMismatches": 0,
+             "offscreenQuadStatus": "unavailable-v1-v3",
+             "offscreenQuadFacts": 0, "offscreenQuadReplayed": 0,
+             "offscreenQuadUnreplayable": 0, "offscreenQuadMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -1095,6 +1309,20 @@ def format_summary(summary, sidecar_path=None):
                       replay.get("witchspaceStarsReplayed", 0),
                       replay.get("witchspaceStarsUnreplayable", 0),
                       replay.get("witchspaceStarsMismatches", 0)))
+    for status_key, facts_key, replayed_key, unknown_key, mismatch_key, label in (
+            ("offscreenCensusStatus", "offscreenCensusFacts", "offscreenCensusReplayed",
+             "offscreenCensusUnreplayable", "offscreenCensusMismatches",
+             "OffscreenCensusSkip site 24"),
+            ("offscreenQuadStatus", "offscreenQuadFacts", "offscreenQuadReplayed",
+             "offscreenQuadUnreplayable", "offscreenQuadMismatches",
+             "OffscreenQuadSkip site 26")):
+        if replay.get(status_key, "unavailable-v1-v3") == "unavailable-v1-v3":
+            lines.append("  %s: unavailable before predicate fact version 4" % label)
+        else:
+            lines.append("  %s: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                         (label, replay[status_key], replay.get(facts_key, 0),
+                          replay.get(replayed_key, 0), replay.get(unknown_key, 0),
+                          replay.get(mismatch_key, 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -1389,6 +1617,96 @@ def self_test():
             event.update(outcome=2, flow=0, subsite=0, verdict=-1)
         return trace
 
+    def offscreen_census_fact(rules, resolved="yes", texture="yes",
+                              width=640, height=480, delta=0,
+                              delta_known=True):
+        reached = bool(rules)
+        return {"siteId": 24, "kind": 5, "known": "yes",
+                "offscreenRuleCount": len(rules), "offscreenRules": rules,
+                "quadArmed": "unknown", "offscreenEyeDrawsLastFrame": 0,
+                "offscreenProbeReached": "yes" if reached else "no",
+                "offscreenProbeResolved": resolved if reached else "unknown",
+                "offscreenProbeTexture2D": texture if reached and resolved == "yes" else "unknown",
+                "offscreenTargetW": width if reached and resolved == "yes" and texture == "yes" else 0,
+                "offscreenTargetH": height if reached and resolved == "yes" and texture == "yes" else 0,
+                "censusSkippedDeltaKnown": delta_known,
+                "censusSkippedDelta": delta if delta_known else 0}
+
+    def offscreen_quad_fact(rule, draw_kind, draw_count, armed="yes", eye_draws=0,
+                            resolved="yes", texture="yes", width=640,
+                            height=480):
+        reached = (armed == "yes" and eye_draws < 100 and
+                   draw_kind == rule["kind"] and draw_count == rule["count"])
+        return {"siteId": 26, "kind": 6, "known": "yes",
+                "offscreenRuleCount": 1, "offscreenRules": [rule],
+                "quadArmed": armed,
+                "offscreenEyeDrawsLastFrame": eye_draws,
+                "offscreenProbeReached": "yes" if reached else "no",
+                "offscreenProbeResolved": resolved if reached else "unknown",
+                "offscreenProbeTexture2D": texture if reached and resolved == "yes" else "unknown",
+                "offscreenTargetW": width if reached and resolved == "yes" and texture == "yes" else 0,
+                "offscreenTargetH": height if reached and resolved == "yes" and texture == "yes" else 0,
+                "censusSkippedDeltaKnown": False, "censusSkippedDelta": 0}
+
+    def offscreen_trace(terminal, kind="X", count=6, rules=None,
+                        probe_resolved="yes", texture="yes", width=640,
+                        height=480, delta=None, quad_rule=None, armed="yes",
+                        eye_draws=0):
+        trace = json.loads(json.dumps(vr))
+        draw = trace["draws"][0]
+        draw["route"] = 4
+        draw["sequence"] = 2
+        draw["kind"] = ord(kind)
+        draw["command"] = DRAW_COMMANDS[ord(kind)]
+        draw["count"] = count
+        common_events = [event for event in draw["sites"] if event["id"] in COMMON]
+        # The shared VR source fixture has a declined gate event, but this
+        # offscreen case supplies gateWanted=yes and must observe that site.
+        next(event for event in common_events if event["id"] == 3)["outcome"] = 1
+        offscreen_ids = [70, 22, 20, 21, 23]
+        if terminal == 24:
+            offscreen_ids.append(24)
+        elif terminal == 26:
+            offscreen_ids.extend((24, 25, 26))
+        else:
+            offscreen_ids.extend((24, 25, 26, 27, 28))
+        events = list(common_events)
+        for site_id in offscreen_ids:
+            final = site_id == terminal
+            outcome = (4 if site_id in (24, 28) else 3) if final else (
+                1 if SITE_KINDS[site_id] == 1 else 2)
+            events.append({"id": site_id, "kind": SITE_KINDS[site_id],
+                           "outcome": outcome, "flow": 1 if final else 0,
+                           "subsite": 0, "verdict":
+                               (TERMINAL_VERDICTS[site_id] if final else -1)})
+        draw["sites"] = events
+        draw["winnerSiteId"] = terminal
+        draw["verdict"] = TERMINAL_VERDICTS[terminal]
+        draw["forwardFacts"] = None
+        if rules is None:
+            rules = [{"kind": ord("X"), "count": count, "w": 640, "h": 480}]
+        facts = [fact for fact in draw["predicateFacts"] if fact["siteId"] in (3, 6)]
+        if delta is None:
+            delta = int(terminal == 24 and bool(rules) and
+                        probe_resolved == "yes" and texture == "yes" and
+                        any(width == rule["w"] and height == rule["h"] and
+                            (rule["kind"] == 0 or
+                             (rule["kind"] == draw["kind"] and rule["count"] == count))
+                            for rule in rules))
+        facts.append(offscreen_census_fact(
+            rules, probe_resolved, texture, width, height,
+            delta if terminal == 24 else 0))
+        if terminal in (26, 28):
+            if quad_rule is None:
+                quad_rule = {"kind": draw["kind"], "count": count,
+                             "w": width, "h": height}
+            facts.append(offscreen_quad_fact(quad_rule, draw["kind"], count,
+                                             armed, eye_draws,
+                                             probe_resolved, texture,
+                                             width, height))
+        draw["predicateFacts"] = facts
+        return trace
+
     try:
         for eye_index, ranges, expected in selector_cases:
             result = validate_trace(range_trace(eye_index, ranges, expected))
@@ -1431,6 +1749,146 @@ def self_test():
                 old_fact_v2_summary["predicateReplay"]["witchspaceStarsStatus"] !=
                 "unavailable-v1-or-v2"):
             raise TraceError("predicate fact version 2 capture did not retain NV and report site 6 unavailable")
+        old_fact_v3 = offscreen_trace(24)
+        old_fact_v3["predicateFactVersion"] = 3
+        old_fact_v3["draws"][0]["predicateFacts"] = [
+            fact for fact in old_fact_v3["draws"][0]["predicateFacts"]
+            if fact["siteId"] in (3, 6)]
+        old_fact_v3_summary = validate_trace(old_fact_v3)
+        if (old_fact_v3_summary["predicateReplay"]["witchspaceStarsStatus"] != "replayed" or
+                old_fact_v3_summary["predicateReplay"]["offscreenCensusStatus"] !=
+                "unavailable-v1-v3"):
+            raise TraceError("predicate fact version 3 compatibility lost Stars or claimed offscreen facts")
+
+        census_rules = [
+            {"kind": ord("N"), "count": 6, "w": 640, "h": 480},
+            {"kind": 0, "count": 0, "w": 640, "h": 480},
+        ]
+        census_match = offscreen_trace(24, rules=census_rules, delta=1)
+        census_summary = validate_trace(census_match)
+        census_replay = census_summary["predicateReplay"]
+        if (census_replay["offscreenCensusStatus"] != "replayed" or
+                census_replay["offscreenCensusReplayed"] != 1 or
+                census_replay["mutationUnobserved"] != 0 or
+                predicate_replay_gate_failure(census_summary) is not None):
+            raise TraceError("offscreen census wildcard/ordered-rule claim did not replay: %r sites=%r" %
+                             (census_replay, census_match["draws"][0]["sites"]))
+
+        census_zero = offscreen_trace(26, rules=[])
+        if (validate_trace(census_zero)["predicateReplay"]["offscreenCensusStatus"] != "replayed" or
+                next(fact for fact in census_zero["draws"][0]["predicateFacts"]
+                     if fact["siteId"] == 24)["offscreenProbeReached"] != "no"):
+            raise TraceError("zero-rule offscreen census did not record a skipped probe distinctly")
+        census_unresolved = offscreen_trace(28, rules=[
+            {"kind": ord("X"), "count": 6, "w": 640, "h": 480}],
+            probe_resolved="no", delta=0, quad_rule={"kind": ord("D"), "count": 8,
+                                                         "w": 2, "h": 2})
+        if validate_trace(census_unresolved)["predicateReplay"]["offscreenCensusStatus"] != "replayed":
+            raise TraceError("failed offscreen resource resolution was confused with a skipped probe")
+        census_nontexture = offscreen_trace(28, rules=[
+            {"kind": ord("X"), "count": 6, "w": 640, "h": 480}],
+            texture="no", delta=0, quad_rule={"kind": ord("D"), "count": 8,
+                                                "w": 2, "h": 2})
+        if validate_trace(census_nontexture)["predicateReplay"]["offscreenCensusStatus"] != "replayed":
+            raise TraceError("non-texture offscreen probe was not a known selector miss")
+        census_kind_zero = offscreen_trace(28, rules=[
+            {"kind": ord("X"), "count": 0, "w": 640, "h": 480}],
+            quad_rule={"kind": 0, "count": 0, "w": 0, "h": 0}, armed="no")
+        if validate_trace(census_kind_zero)["predicateReplay"]["offscreenCensusStatus"] != "replayed":
+            raise TraceError("parser-valid KIND:0 census rule was rejected or matched a six-index draw")
+
+        quad_rule = {"kind": ord("X"), "count": 6, "w": 640, "h": 480}
+        quad_match = offscreen_trace(26, rules=[], quad_rule=quad_rule)
+        quad_summary = validate_trace(quad_match)
+        if (quad_summary["predicateReplay"]["offscreenQuadStatus"] != "replayed" or
+                quad_summary["predicateReplay"]["offscreenQuadReplayed"] != 1 or
+                quad_summary["predicateReplay"]["factCount"] != 4):
+            raise TraceError("offscreen quad did not replay the maximum four-fact canonical path")
+        quad_before_cutoff = offscreen_trace(26, rules=[], quad_rule=quad_rule,
+                                             eye_draws=99)
+        if validate_trace(quad_before_cutoff)["predicateReplay"]["offscreenQuadStatus"] != "replayed":
+            raise TraceError("quad did not claim at the last pre-scene draw count")
+
+        quad_unarmed = offscreen_trace(28, rules=[], quad_rule={
+            "kind": 0, "count": 0, "w": 0, "h": 0}, armed="no")
+        if validate_trace(quad_unarmed)["predicateReplay"]["offscreenQuadStatus"] != "replayed":
+            raise TraceError("unarmed quad raw-zero configuration did not replay")
+        quad_cutoff = offscreen_trace(28, rules=[], quad_rule=quad_rule, eye_draws=100)
+        if (validate_trace(quad_cutoff)["predicateReplay"]["offscreenQuadStatus"] != "replayed" or
+                quad_cutoff["draws"][0]["predicateFacts"][-1]["offscreenProbeReached"] != "no"):
+            raise TraceError("quad's exact eye-draw cutoff failed to short-circuit")
+        quad_shape_miss = offscreen_trace(28, kind="D", count=8, rules=[],
+                                          quad_rule=quad_rule)
+        if validate_trace(quad_shape_miss)["predicateReplay"]["offscreenQuadStatus"] != "replayed":
+            raise TraceError("quad kind/count miss did not skip its resource probe")
+        quad_probe_failed = offscreen_trace(28, rules=[], quad_rule=quad_rule,
+                                            probe_resolved="no")
+        if validate_trace(quad_probe_failed)["predicateReplay"]["offscreenQuadStatus"] != "replayed":
+            raise TraceError("quad failed resource resolution did not replay as a known miss")
+        quad_nontexture = offscreen_trace(28, rules=[], quad_rule=quad_rule,
+                                          texture="no")
+        if validate_trace(quad_nontexture)["predicateReplay"]["offscreenQuadStatus"] != "replayed":
+            raise TraceError("quad non-texture result did not replay as a known miss")
+        quad_dimension_miss = offscreen_trace(28, rules=[], quad_rule=quad_rule,
+                                              width=641)
+        if validate_trace(quad_dimension_miss)["predicateReplay"]["offscreenQuadStatus"] != "replayed":
+            raise TraceError("quad target-dimension mismatch did not replay")
+
+        census_mutation = json.loads(json.dumps(census_match))
+        census_mutation_fact = next(fact for fact in census_mutation["draws"][0]["predicateFacts"]
+                                    if fact["siteId"] == 24)
+        census_mutation_fact["censusSkippedDelta"] = 0
+        census_mutation_summary = validate_trace(census_mutation)
+        if (census_mutation_summary["predicateReplay"]["offscreenCensusMismatches"] == 0 or
+                predicate_replay_gate_failure(census_mutation_summary) is None):
+            raise TraceError("offscreen census mutation mismatch passed the gate")
+        quad_mutation = json.loads(json.dumps(quad_match))
+        quad_mutation["draws"][0]["predicateFacts"][-1]["offscreenTargetW"] = 639
+        quad_mutation_summary = validate_trace(quad_mutation)
+        if (quad_mutation_summary["predicateReplay"]["offscreenQuadMismatches"] == 0 or
+                predicate_replay_gate_failure(quad_mutation_summary) is None):
+            raise TraceError("offscreen quad fact/output disagreement passed the gate")
+
+        for malformed_fact in (
+                {"offscreenRuleCount": 5},
+                {"offscreenRules": [{"kind": ord("Q"), "count": 1, "w": 1, "h": 1}]},
+                {"offscreenRules": [{"kind": 0, "count": 1, "w": 1, "h": 1}]},
+                {"offscreenRules": [{"kind": ord("X"), "count": 1, "w": 0, "h": 1}]},
+                {"offscreenProbeResolved": "unknown"},
+                {"offscreenProbeTexture2D": "unknown"},
+                {"offscreenTargetW": 0},
+                {"offscreenProbeTexture2D": "no", "offscreenTargetW": 640},
+                {"offscreenProbeReached": "no"},):
+            malformed = json.loads(json.dumps(census_match))
+            malformed_fact_target = next(fact for fact in malformed["draws"][0]["predicateFacts"]
+                                         if fact["siteId"] == 24)
+            malformed_fact_target.update(malformed_fact)
+            try:
+                validate_trace(malformed)
+            except TraceError:
+                continue
+            raise TraceError("malformed offscreen census stage/config was accepted: %r" % malformed_fact)
+
+        missing_offscreen = json.loads(json.dumps(quad_match))
+        missing_offscreen["draws"][0]["predicateFacts"] = [
+            fact for fact in missing_offscreen["draws"][0]["predicateFacts"]
+            if fact["siteId"] != 24]
+        try:
+            validate_trace(missing_offscreen)
+        except TraceError:
+            pass
+        else:
+            raise TraceError("visited site 24 without its v4 predicate fact was accepted")
+        duplicate_offscreen = json.loads(json.dumps(quad_match))
+        duplicate_offscreen["draws"][0]["predicateFacts"].append(
+            next(fact for fact in duplicate_offscreen["draws"][0]["predicateFacts"]
+                 if fact["siteId"] == 26))
+        try:
+            validate_trace(duplicate_offscreen)
+        except TraceError:
+            pass
+        else:
+            raise TraceError("duplicate offscreen predicate fact was accepted")
         stars_cases = [
             (stars_trace(hidden="no"), "replayed"),
             (stars_trace(hidden="yes", context_valid="no"), "replayed"),

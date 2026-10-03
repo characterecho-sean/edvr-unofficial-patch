@@ -103,6 +103,11 @@ struct ModelVisitor final {
             return ladder::SiteResult::exited(
                 static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
         }
+        if (id == ladder::SiteId::kOffscreenCensusSkip &&
+            id == scenario.exitAt) {
+            return ladder::SiteResult::exited(
+                static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
+        }
         if (kind == ladder::SiteKind::Claim && id == scenario.claimAt) {
             return ladder::SiteResult::claimed(scenario.verdict);
         }
@@ -582,6 +587,7 @@ bool frozenShouldStop(const Scenario& s, ladder::SiteId id, ladder::SiteKind kin
     if (id == ladder::SiteId::kDrawGateDisabledNone && s.drawGateOff) return true;
     if (id == ladder::SiteId::kEyeRangeSkip && id == s.exitAt) return true;
     if (id == ladder::SiteId::kWitchspaceStarsSkip && id == s.exitAt) return true;
+    if (id == ladder::SiteId::kOffscreenCensusSkip && id == s.exitAt) return true;
     if (kind == ladder::SiteKind::Claim && id == s.claimAt) return true;
     return kind == ladder::SiteKind::Exit && id == s.exitAt;
 }
@@ -932,7 +938,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     if (terminal == ladder::SiteId::kForeignContextNone) scenario.foreignOwner = true;
     else if (terminal == ladder::SiteId::kDrawGateDisabledNone) scenario.drawGateOff = true;
     else if (terminal == ladder::SiteId::kEyeRangeSkip ||
-             terminal == ladder::SiteId::kWitchspaceStarsSkip) scenario.exitAt = terminal;
+             terminal == ladder::SiteId::kWitchspaceStarsSkip ||
+             terminal == ladder::SiteId::kOffscreenCensusSkip) scenario.exitAt = terminal;
     else if (terminalKind == ladder::SiteKind::Claim) scenario.claimAt = terminal;
     else scenario.exitAt = terminal;
 
@@ -1067,6 +1074,51 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 // a draw-kind miss before the NV callback is reached.
                 fact.shapeMatched = trace::TriState::No;
                 fact.callbackReached = trace::TriState::No;
+            }
+            fact.detailsFinalized = true;
+            policy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kOffscreenCensusSkip) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::OffscreenCensusSkip;
+            fact.known = trace::TriState::Yes;
+            fact.quadArmed = trace::TriState::Unknown;
+            const bool match = terminal == ladder::SiteId::kOffscreenCensusSkip;
+            fact.offscreenRuleCount = match ? 2 : 1;
+            fact.offscreenRules[0] = {
+                static_cast<std::uint8_t>('D'), match ? facts.count : 0,
+                match ? facts.rtv0Width : facts.rtv0Width + 1,
+                facts.rtv0Height};
+            if (match) fact.offscreenRules[1] = fact.offscreenRules[0];
+            fact.offscreenProbeReached = trace::TriState::Yes;
+            fact.offscreenProbeResolved = trace::TriState::Yes;
+            fact.offscreenProbeTexture2D = trace::TriState::Yes;
+            fact.offscreenTargetW = facts.rtv0Width;
+            fact.offscreenTargetH = facts.rtv0Height;
+            fact.censusSkippedDeltaKnown = true;
+            fact.censusSkippedDelta = match ? 1 : 0;
+            fact.detailsFinalized = true;
+            policy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kOffscreenQuadSkip) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::OffscreenQuadSkip;
+            fact.known = trace::TriState::Yes;
+            const bool match = terminal == ladder::SiteId::kOffscreenQuadSkip;
+            fact.offscreenRuleCount = 1;
+            fact.quadArmed = match ? trace::TriState::Yes : trace::TriState::No;
+            fact.offscreenEyeDrawsLastFrame = 0;
+            if (match) {
+                fact.offscreenRules[0] = {
+                    static_cast<std::uint8_t>('D'), facts.count,
+                    facts.rtv0Width, facts.rtv0Height};
+                fact.offscreenProbeReached = trace::TriState::Yes;
+                fact.offscreenProbeResolved = trace::TriState::Yes;
+                fact.offscreenProbeTexture2D = trace::TriState::Yes;
+                fact.offscreenTargetW = facts.rtv0Width;
+                fact.offscreenTargetH = facts.rtv0Height;
+            } else {
+                fact.offscreenProbeReached = trace::TriState::No;
             }
             fact.detailsFinalized = true;
             policy.predicateFact(fact);
@@ -1641,6 +1693,59 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(missingNightVisionStarted && missingNightVisionToken.valid() &&
                 trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
                 "missing reached NightVisionClaim fact invalidates the capture");
+
+    const std::string missingOffscreenDir = root + "\\missingoffscreenfacts";
+    const bool missingOffscreenStarted = beginCapture(missingOffscreenDir,
+        "edvr_gfx_missing_offscreen_facts.log", 34);
+    trace::DrawFacts missingOffscreenDraw = draw;
+    missingOffscreenDraw.route = ladder::RouteId::kOffscreen;
+    missingOffscreenDraw.sequence = ladder::SequenceId::kOffscreen;
+    const trace::Token missingCensusToken = trace::beginDraw(missingOffscreenDraw);
+    trace::appendSite(missingCensusToken,
+        static_cast<std::uint16_t>(ladder::SiteId::kOffscreenCensusSkip),
+        static_cast<std::uint8_t>(ladder::SiteKind::Exit),
+        static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+        static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    trace::finishDraw(missingCensusToken,
+        static_cast<std::int16_t>(ladder::SiteId::kOffscreenCensusSkip), -1);
+    const trace::Token missingQuadToken = trace::beginDraw(missingOffscreenDraw);
+    trace::appendSite(missingQuadToken,
+        static_cast<std::uint16_t>(ladder::SiteId::kOffscreenQuadSkip),
+        static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+        static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+        static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    trace::finishDraw(missingQuadToken,
+        static_cast<std::int16_t>(ladder::SiteId::kOffscreenQuadSkip), -1);
+    trace::frameEnd(34);
+    ok &= check(missingOffscreenStarted && missingCensusToken.valid() &&
+                missingQuadToken.valid() && trace::overflowed() &&
+                trace::status() == trace::Status::InvalidCapture,
+                "missing site 24 or 26 source fact invalidates the capture");
+
+    const std::string unfinishedOffscreenDir = root + "\\unfinishedoffscreenfact";
+    const bool unfinishedOffscreenStarted = beginCapture(unfinishedOffscreenDir,
+        "edvr_gfx_unfinished_offscreen_fact.log", 35);
+    const trace::Token unfinishedOffscreenToken = trace::beginDraw(missingOffscreenDraw);
+    trace::PredicateFact unfinishedOffscreenFact{};
+    unfinishedOffscreenFact.siteId = static_cast<std::uint16_t>(
+        ladder::SiteId::kOffscreenQuadSkip);
+    unfinishedOffscreenFact.kind = trace::PredicateFactKind::OffscreenQuadSkip;
+    unfinishedOffscreenFact.known = trace::TriState::Yes;
+    unfinishedOffscreenFact.offscreenRuleCount = 1;
+    unfinishedOffscreenFact.quadArmed = trace::TriState::No;
+    unfinishedOffscreenFact.offscreenProbeReached = trace::TriState::No;
+    trace::appendPredicateFact(unfinishedOffscreenToken, unfinishedOffscreenFact);
+    trace::appendSite(unfinishedOffscreenToken,
+        static_cast<std::uint16_t>(ladder::SiteId::kOffscreenQuadSkip),
+        static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+        static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+        static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    trace::finishDraw(unfinishedOffscreenToken,
+        static_cast<std::int16_t>(ladder::SiteId::kOffscreenQuadSkip), -1);
+    trace::frameEnd(35);
+    ok &= check(unfinishedOffscreenStarted && unfinishedOffscreenToken.valid() &&
+                trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
+                "unfinished site 26 source fact invalidates the capture");
 
     const std::string unfinishedStarsDir = root + "\\unfinishedwitchspacestars";
     const bool unfinishedStarsStarted = beginCapture(unfinishedStarsDir,

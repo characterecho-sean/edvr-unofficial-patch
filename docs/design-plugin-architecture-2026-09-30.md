@@ -44,8 +44,8 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  exact API masks are absent from that flight. Site 6 and cost notes pass all
-  130 jobs. Whole-ladder equivalence stays open; Steam stays on `4350a281`.
+  six families have rig coverage; offscreen facts pass all 131 validation jobs.
+  Whole-ladder equivalence stays open; Steam stays on `4350a281`.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
   Earlier matched NV visual checks ruled out migration-induced blur because
@@ -1207,3 +1207,54 @@ foreground change. Receipt UTC is `2026-10-03T01:15:19.034091+00:00`, input
 SHA-256 `d06382c4056f60fbad234330ab5aeebbc7e43d976ef456d8015600c47654dc7d`;
 log: `build/plugin-stars-cost-full-build.log`. Steam remains on the verified
 `4350a281` flight build. No new production capture or performance win is claimed.
+
+### Offscreen predicate source facts, 2026-10-02
+
+Predicate-fact version 4 adds offscreen census skip (site 24) and quad skip
+(site 26). Both independently replay frozen `14a7ff70` raw configuration and
+existing RTV probe results. Census rules preserve target size, optional draw
+kind/count and configured order; KIND:0 remains valid. Quad selection preserves
+its armed flag, prior eye draw count, literal threshold 100, draw shape and
+target size. Probe failure is a known decline; a skipped probe carries unknown
+resolution fields. No extra D3D query, clock or allocation supplies these
+facts. The four-fact cap remains sufficient because offscreen and eye routes
+cannot co-occur: common sites 3/6 precede either 24/26 or 49/50.
+
+Integration checks caught shared-field and rule-name disagreements between
+writer and reader, a wrong boolean mutation expectation, and a matrix terminal
+that modeled site 24 as Claimed. An attempted reader change to match that
+fixture was rejected and reverted: the production site returns Exited=4,
+Skip=2, subsite 0. The fixture was corrected, and a higher-tier agent
+independently reviewed the frozen source, schema and oracle before rerunning
+validation. Site 26 remains Claimed=3, QuadSkip=15. No selector or strict gate
+was weakened.
+
+The corrected matrix has 44 draws and 101 supported matches, including census
+4/4 and quad 2/2, with no unavailable inputs, mismatches or unobserved
+mutations. The armed-production pure helpers pass 19 literal-vector checks,
+including KIND:0, ordered matches and the 99/100 boundary. Their probe-count
+wrapper is synthetic; it does not spy on production COM calls. Strict
+missing/unfinished writer fixtures, dry-run filesystem checks and CLI
+rejection/cleanup pass. Pinned production v1/v2 captures still replay; v3
+compatibility has synthetic coverage only. No production v4 capture or
+forwarding-equivalence claim is made.
+
+The initial pure-helper extraction changed ordinary classifier code generation
+by one byte despite retaining its 94 calls. Restoring the two original NoTrace
+bodies removes that measurement confound. Fresh guarded NoTrace/NoCpu assembly
+again has 7,057 bytes, 1,636 listing records, 94 ordered calls and a 288-byte
+stack. Byte SHA-256 is
+`2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40`; ordered
+call-target SHA-256 is
+`e14ff11cac25c3cc7d00d08da6d3423512d2280c6d78e00c8d58dfa66c792f38`. Focus
+guards are clean. Full validation passes; Steam remains on `4350a281`.
+
+The normal build passed 124 pooled jobs (144.7 seconds) and seven quiet jobs
+(26.7 seconds), both production profiles and installers, and the 237-key config
+contract. FocusWatch saw no shown window, console or foreground change. Receipt
+UTC is `2026-10-03T01:55:23.307215+00:00`, input SHA-256
+`0029289deeee1a848abc8faaf4fa63881c6c347bd1c3f45714e065ab7fcd1675`;
+log: `build/plugin-offscreen-facts-full-build.log`. Remaining families,
+independent forwarding inputs, all-module cost coverage and matched performance
+comparison still gate Phase 2. A larger supported slice is being prepared
+before another headset capture.

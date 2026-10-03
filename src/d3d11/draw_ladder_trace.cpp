@@ -226,7 +226,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":3,"
+        "\"predicateFactVersion\":4,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -235,7 +235,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Predicate fact version 3 independently re-evaluates DrawGateDisabledNone, EyeRangeSkip, the frozen 14a NightVisionClaim selector, and WitchspaceStarsSkip site 6 from consumed source facts; whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
+        "\"predicateNote\":\"Predicate fact version 4 independently re-evaluates DrawGateDisabledNone, EyeRangeSkip, the frozen 14a NightVisionClaim selector, WitchspaceStarsSkip site 6, and offscreen census/quad skips from consumed source facts; whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
         "\"identityNote\":\"Resource identities are per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
@@ -355,6 +355,37 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                     static_cast<unsigned long long>(fact.starsVsHash),
                     fact.starsSkippedDeltaKnown ? "true" : "false",
                     fact.starsSkippedDelta)) return false;
+            } else if (fact.kind == PredicateFactKind::OffscreenCensusSkip ||
+                       fact.kind == PredicateFactKind::OffscreenQuadSkip) {
+                if (!writeFmt(writer,
+                    "{\"siteId\":%u,\"kind\":%u,\"known\":\"%s\","
+                    "\"offscreenRuleCount\":%u,\"offscreenRules\":[",
+                    fact.siteId, static_cast<unsigned>(fact.kind),
+                    triName(fact.known), fact.offscreenRuleCount)) return false;
+                for (std::uint8_t k = 0; k < fact.offscreenRuleCount; ++k) {
+                    const PredicateOffscreenRule& rule = fact.offscreenRules[k];
+                    if (k && !writeText(writer, ",")) return false;
+                    if (!writeFmt(writer,
+                        "{\"kind\":%u,\"count\":%u,\"w\":%u,\"h\":%u}",
+                        static_cast<unsigned>(rule.kind), rule.count,
+                        rule.w, rule.h)) return false;
+                }
+                if (!writeFmt(writer,
+                    "],\"quadArmed\":\"%s\","
+                    "\"offscreenEyeDrawsLastFrame\":%u,"
+                    "\"offscreenProbeReached\":\"%s\","
+                    "\"offscreenProbeResolved\":\"%s\","
+                    "\"offscreenProbeTexture2D\":\"%s\","
+                    "\"offscreenTargetW\":%u,\"offscreenTargetH\":%u,"
+                    "\"censusSkippedDeltaKnown\":%s,"
+                    "\"censusSkippedDelta\":%u}",
+                    triName(fact.quadArmed), fact.offscreenEyeDrawsLastFrame,
+                    triName(fact.offscreenProbeReached),
+                    triName(fact.offscreenProbeResolved),
+                    triName(fact.offscreenProbeTexture2D),
+                    fact.offscreenTargetW, fact.offscreenTargetH,
+                    fact.censusSkippedDeltaKnown ? "true" : "false",
+                    fact.censusSkippedDelta)) return false;
             } else {
                 return false;
             }
@@ -705,6 +736,92 @@ bool validWitchspaceFact(const PredicateFact& f) noexcept {
         f.starsHashKnown == TriState::Yes && f.starsHashSource >= 1 &&
         f.starsSkippedDelta <= 1;
 }
+
+bool validOffscreenFact(const PredicateFact& f) noexcept {
+    const auto validTri = [](TriState value) noexcept {
+        return static_cast<std::uint8_t>(value) <=
+               static_cast<std::uint8_t>(TriState::Yes);
+    };
+    if (f.known != TriState::Yes || !f.detailsFinalized ||
+        f.offscreenRuleCount > 4 ||
+        !validTri(f.quadArmed) || !validTri(f.offscreenProbeReached) ||
+        !validTri(f.offscreenProbeResolved) ||
+        !validTri(f.offscreenProbeTexture2D) ||
+        (!f.censusSkippedDeltaKnown && f.censusSkippedDelta != 0) ||
+        f.censusSkippedDelta > 1) return false;
+    for (std::uint8_t i = 0; i < f.offscreenRuleCount; ++i) {
+        const PredicateOffscreenRule& rule = f.offscreenRules[i];
+        const bool validKind = rule.kind == 0 || rule.kind == 'D' ||
+            rule.kind == 'I' || rule.kind == 'N' || rule.kind == 'X';
+        const bool zeroUnarmedQuadRule =
+            f.kind == PredicateFactKind::OffscreenQuadSkip &&
+            f.quadArmed == TriState::No && i == 0 &&
+            !rule.kind && !rule.count && !rule.w && !rule.h;
+        if (!validKind || (!zeroUnarmedQuadRule && (!rule.w || !rule.h)) ||
+            (rule.kind == 0 && rule.count != 0)) return false;
+    }
+    for (std::uint8_t i = f.offscreenRuleCount; i < 4; ++i) {
+        const PredicateOffscreenRule& rule = f.offscreenRules[i];
+        if (rule.kind || rule.count || rule.w || rule.h) return false;
+    }
+
+    if (f.kind == PredicateFactKind::OffscreenCensusSkip) {
+        if (f.siteId != 24 || f.quadArmed != TriState::Unknown ||
+            f.offscreenEyeDrawsLastFrame != 0 ||
+            !f.censusSkippedDeltaKnown ||
+            f.offscreenProbeReached != (f.offscreenRuleCount
+                ? TriState::Yes : TriState::No)) return false;
+        if (f.offscreenProbeReached == TriState::No) {
+            return f.offscreenProbeResolved == TriState::Unknown &&
+                f.offscreenProbeTexture2D == TriState::Unknown &&
+                f.offscreenTargetW == 0 && f.offscreenTargetH == 0 &&
+                f.censusSkippedDelta == 0;
+        }
+        if (f.offscreenProbeResolved == TriState::No) {
+            return f.offscreenProbeTexture2D == TriState::Unknown &&
+                f.offscreenTargetW == 0 && f.offscreenTargetH == 0 &&
+                f.censusSkippedDelta == 0;
+        }
+        if (f.offscreenProbeResolved != TriState::Yes ||
+            (f.offscreenProbeTexture2D != TriState::Yes &&
+             f.offscreenProbeTexture2D != TriState::No)) return false;
+        if (f.offscreenProbeTexture2D == TriState::No &&
+            (f.offscreenTargetW != 0 || f.offscreenTargetH != 0)) return false;
+        if (f.offscreenProbeTexture2D == TriState::Yes &&
+            (!f.offscreenTargetW || !f.offscreenTargetH)) return false;
+        return true;
+    }
+
+    if (f.kind == PredicateFactKind::OffscreenQuadSkip) {
+        if (f.siteId != 26 || f.offscreenRuleCount != 1 ||
+            (f.quadArmed != TriState::No && f.quadArmed != TriState::Yes) ||
+            f.censusSkippedDeltaKnown || f.censusSkippedDelta != 0) return false;
+        const PredicateOffscreenRule& rule = f.offscreenRules[0];
+        if (f.quadArmed == TriState::No &&
+            (rule.kind || rule.count || rule.w || rule.h)) return false;
+        if (f.quadArmed == TriState::Yes &&
+            (!rule.kind || !rule.count || !rule.w || !rule.h)) return false;
+        if (f.offscreenProbeReached == TriState::No) {
+            return f.offscreenProbeResolved == TriState::Unknown &&
+                f.offscreenProbeTexture2D == TriState::Unknown &&
+                f.offscreenTargetW == 0 && f.offscreenTargetH == 0;
+        }
+        if (f.offscreenProbeReached != TriState::Yes) return false;
+        if (f.offscreenProbeResolved == TriState::No) {
+            return f.offscreenProbeTexture2D == TriState::Unknown &&
+                f.offscreenTargetW == 0 && f.offscreenTargetH == 0;
+        }
+        if (f.offscreenProbeResolved != TriState::Yes ||
+            (f.offscreenProbeTexture2D != TriState::Yes &&
+             f.offscreenProbeTexture2D != TriState::No)) return false;
+        if (f.offscreenProbeTexture2D == TriState::No &&
+            (f.offscreenTargetW != 0 || f.offscreenTargetH != 0)) return false;
+        if (f.offscreenProbeTexture2D == TriState::Yes &&
+            (!f.offscreenTargetW || !f.offscreenTargetH)) return false;
+        return true;
+    }
+    return false;
+}
 }  // namespace
 
 void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
@@ -720,6 +837,9 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
         (fact.kind == PredicateFactKind::NightVisionClaim && fact.siteId != 50) ||
         (fact.kind == PredicateFactKind::WitchspaceStarsSkip &&
          !validWitchspaceFact(fact)) ||
+        ((fact.kind == PredicateFactKind::OffscreenCensusSkip ||
+          fact.kind == PredicateFactKind::OffscreenQuadSkip) &&
+         !validOffscreenFact(fact)) ||
         (fact.kind == PredicateFactKind::DrawGateWanted &&
          ((fact.known == TriState::Yes && fact.gateWanted == TriState::Unknown) ||
           (fact.known == TriState::Unknown && fact.gateWanted != TriState::Unknown))) ||
@@ -772,8 +892,10 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
              fact.failed != TriState::Unknown))))) ||
         (fact.kind != PredicateFactKind::DrawGateWanted &&
         fact.kind != PredicateFactKind::EyeRangeSkip &&
-         fact.kind != PredicateFactKind::NightVisionClaim &&
-         fact.kind != PredicateFactKind::WitchspaceStarsSkip)) {
+        fact.kind != PredicateFactKind::NightVisionClaim &&
+         fact.kind != PredicateFactKind::WitchspaceStarsSkip &&
+         fact.kind != PredicateFactKind::OffscreenCensusSkip &&
+         fact.kind != PredicateFactKind::OffscreenQuadSkip)) {
         g_wasOverflowed = true;
         return;
     }
@@ -865,12 +987,13 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
     if (record.finalized) { rejectInvalidToken(); return; }
     for (std::uint16_t i = 0; i < record.siteCount; ++i) {
         const std::uint16_t siteId = record.sites[i].id;
-        if (siteId != 3 && siteId != 6 && siteId != 49 && siteId != 50) continue;
+        if (siteId != 3 && siteId != 6 && siteId != 24 && siteId != 26 &&
+            siteId != 49 && siteId != 50) continue;
         bool found = false;
         for (std::uint8_t j = 0; j < record.predicateFactCount; ++j) {
             if (record.predicateFacts[j].siteId == siteId) {
                 found = true;
-                if ((siteId == 6 || siteId == 50) &&
+                if ((siteId == 6 || siteId == 24 || siteId == 26 || siteId == 50) &&
                     !record.predicateFacts[j].detailsFinalized)
                     g_wasOverflowed = true;
             }
