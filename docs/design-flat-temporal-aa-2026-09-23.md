@@ -33,7 +33,7 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 87: flat FSR Coriolis blur, SS 0.5; native-scale comparison.
+- **Next:** section 87: Coriolis screenshot; native-scale FSR on/off comparison.
   Section 85's three supporters confirm working. Then 83: SS 0.75/0.85, bloom/DoF, mismatched
   resolution, TAA at 1.25, game AA, VR at 0.85. HDR flew (81); FSR reported
   working (85). TAA at R = D and ReShade still to fly. Then open items above.
@@ -9203,3 +9203,23 @@ and view still; distinguish whole-image softness from trails on rotating
 station surfaces. If motion-only smearing persists at native scale, obtain
 a short visual comparison before choosing motion instrumentation. No source,
 live settings, build or installation changed for this investigation.
+
+### Supplied station screenshot (2026-10-03)
+
+Sean supplies codex-clipboard-b3869ad7-77a5-4aff-ac39-e2511798f725.png,
+a 1920x1080 cockpit view of Ray Gateway. Station face/panel detail appears
+smeared, with comparatively crisp cockpit edges and HUD text. This raises
+the priority of station-specific temporal/motion behavior, but does not
+prove bad vectors: HUD and scene can use different rendering paths, and
+the screenshot's active scale/mode/time are not independently captured.
+There is no temporal sequence showing whether marks trail the rotation.
+The earlier log's half-scale input remains a confounder, not a sufficient
+diagnosis of this localized appearance. No hypothesis is ruled out by this
+single screenshot.
+
+Refined comparison: set game Supersampling 1.0, keep ship/view still at
+this station, compare FSR with F8 Off at the same scale. If native-scale
+station detail clears with temporal AA off, that isolates temporal
+processing as a contributor; it does not yet identify motion vectors,
+history rejection or reconstruction as the faulty stage. A short clip of
+both modes while the station rotates is more useful than another log alone.
