@@ -41,17 +41,17 @@
   the runtime; the first build needs a flight on a stock runtime.
 - **Next:** `4350a281` passes all 128 validation jobs and clean promotion;
   installed and verified in Steam with settings preserved. Pimax OpenXR, 90 Hz,
-  4032x3898 per eye. Both captures were NV off: Sean forgot the NV toggle
-  and held DLSS on for two minutes. The new NV guard lacks flight coverage.
-  Production v2 replay passes 13,058 supported predicate comparisons across
-  two captures, with no missing inputs, mismatches or unobserved mutations.
-  These cover draw-gate and eye-range predicates; full equivalence stays open.
+  4032x3898 per eye. The latest NV-on flight matches that build and replays
+  8,682 facts, including two positive pulse-only NV claims, with no missing
+  inputs, mismatches or unobserved mutations. API owner counters are nonzero;
+  exact API site masks are not reported yet. Three predicate families pass;
+  whole-ladder equivalence stays open. Site 6 and cost coverage are next.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
   Earlier matched NV visual checks ruled out migration-induced blur because
   verified `14a7ff70` reproduces it. Latest visual confirmation is pending.
   Main `743c5dc0` is integrated at Sean's request; all 126 validation jobs
-  pass. Pre-merge flights cannot validate the merged binary's performance.
+  pass. The latest merged-binary flight is not a matched performance comparison.
   Temporary instrument key: `advanced.draw_replay` (off by default); propose
   removing it when this arc closes, subject to Scope control. No Phase 2 yet.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
@@ -1117,3 +1117,45 @@ at 4032x3898, DLSS on and game NV visibly on for 90 seconds, then one NumLock
 capture and exit. Read its logs against `4350a281`, not a later docs-only HEAD.
 Its purpose is the positive NV predicate and render-thread API guard evidence;
 it cannot by itself establish whole-ladder parity or a performance baseline.
+
+### Positive NV production capture, 2026-10-02
+
+Sean completed the requested NV-on hold and capture. The sanctioned reader
+verifies `edvr_gfx_20261002_180854.log` as clean `4350a281`, PE `6AC045AC`,
+and pairs `edvr_openxr_20261002_180855_933_42728.log` at the same version.
+Pimax Crystal Super / Pimax OpenXR is 90 Hz, EDVR output 4032x3898 and NV
+input 2016x1949, DLSS preset K. The loaded DLSS version remains unreported.
+The runtime closes cleanly: owner joined, cleanup complete, retained zero,
+exception zero; Elite is no longer running.
+
+Frame 25492 contains 3,590 draws, 112,926 site events and 11,305 actions.
+Fact version 2 replays all 8,682 supported facts with zero unavailable inputs,
+mismatches or unobserved mutations. Its 2,546 NV facts comprise two claims,
+2,544 NotEligible and zero declines. Both claims match the frozen literal
+shader pair and X/240/1 shape; callback mode is 2 and failed is false. Mode 2
+means stock appearance with pulse stability on, not experimental realistic
+appearance. Candidate and active masks agree with independently derived
+selectors; neither supplies the selector oracle. Whole-ladder equivalence
+remains false.
+
+NV engages at 18:12:06.477. Stable API windows ending 18:12:48.794,
+18:13:09.982 and 18:13:31.173 report four state and eighteen read/query calls
+per sampled frame for cockpit-visuals, across ten annotated call-site IDs.
+This is positive owner-level sampling evidence consistent with two pulse-only
+NV draws. The log gives the number of IDs, not their mask; it does not directly
+separate NV from TargetSharp/RemLok sites. Source and WARP evidence cover that
+wiring, and the next reporting slice will publish the existing mask words.
+
+Those windows show partial cockpit classifier CPU at 0.308-0.327 ms per
+sampled frame. Draw-hook CPU is 1.279-1.299 ms per sampled frame, or roughly
+0.333-0.362 microseconds per timed draw. This is a single flight, not a
+matched baseline or repeatability pass. The old baseline has no timed-draw
+denominator, so it cannot retroactively supply this comparison. Latest visual
+confirmation is pending; the earlier verified baseline reproduces the NV blur.
+
+Next Phase 1 slices run in parallel: site 6 source facts, completed-window API
+mask reporting, and bounded Exposure damper API attribution. The site 6 trace
+must observe the actual fallback VS hash when the binding shadow is absent or
+zero; repeating its query or treating cached zero as a known miss is invalid.
+Exposure coverage requires an actual-production-path rig before acceptance.
+No Phase 2 migration starts until the open replay and performance gates pass.
