@@ -23,6 +23,8 @@
 #include "../../src/d3d11/loader_panel.h"
 #include "../../src/d3d11/fss_dump.h"
 #include "../../src/d3d11/target_sharp.h"
+#include "../../src/d3d11/sunglare_fix.h"
+#include "../../src/d3d11/sunglare_nomination_observation.h"
 #include "../../src/d3d11/plugin_registry.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/vtable_hook.h"
@@ -94,6 +96,13 @@ bool readTargetSharp(const edvr::VScreenPredicateTestResult& result,
                      edvr::TargetSharpObservation* fact) {
     return edvr::draw_ladder_trace::targetSharpFactCountForTest(result.token) == 1 &&
            edvr::draw_ladder_trace::readTargetSharpFactForTest(result.token, 0, fact);
+}
+
+bool readSunglareNomination(const edvr::VScreenPredicateTestResult& result,
+                            edvr::SunglareNominationObservation* fact) {
+    return edvr::draw_ladder_trace::sunglareNominationFactCountForTest(result.token) == 1 &&
+           edvr::draw_ladder_trace::readSunglareNominationFactForTest(
+               result.token, 0, fact);
 }
 
 bool readForwarding(const edvr::VScreenForwardingTestResult& result,
@@ -243,6 +252,58 @@ bool hookResource(edvr::VTableHook& hook, ID3D11ShaderResourceView* view) {
                      reinterpret_cast<void**>(&g_originalGetResource)) && hook.commit();
 }
 
+using ResourceGetTypeFn = void(STDMETHODCALLTYPE*)(ID3D11Resource*,
+                                                   D3D11_RESOURCE_DIMENSION*);
+using BufferGetDescFn = void(STDMETHODCALLTYPE*)(ID3D11Buffer*, D3D11_BUFFER_DESC*);
+using TextureGetDescFn = void(STDMETHODCALLTYPE*)(ID3D11Texture2D*, D3D11_TEXTURE2D_DESC*);
+ResourceGetTypeFn g_realResourceGetType = nullptr;
+BufferGetDescFn g_realBufferGetDesc = nullptr;
+TextureGetDescFn g_realTextureGetDesc = nullptr;
+std::uint32_t g_nominationGetTypeCalls = 0;
+std::uint32_t g_nominationGetDescCalls = 0;
+bool g_nominationTypeFault = false;
+
+void STDMETHODCALLTYPE nominationGetType(ID3D11Resource* self,
+                                           D3D11_RESOURCE_DIMENSION* dimension) {
+    ++g_nominationGetTypeCalls;
+    if (g_nominationTypeFault)
+        RaiseException(0xE042ED96u, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    g_realResourceGetType(self, dimension);
+}
+
+void STDMETHODCALLTYPE nominationGetBufferDesc(ID3D11Buffer* self,
+                                                D3D11_BUFFER_DESC* desc) {
+    ++g_nominationGetDescCalls;
+    g_realBufferGetDesc(self, desc);
+}
+
+void STDMETHODCALLTYPE nominationGetTextureDesc(ID3D11Texture2D* self,
+                                                  D3D11_TEXTURE2D_DESC* desc) {
+    ++g_nominationGetDescCalls;
+    g_realTextureGetDesc(self, desc);
+}
+
+bool hookNominationResource(edvr::VTableHook& hook, ID3D11Resource* resource,
+                            bool texture) {
+    g_nominationGetTypeCalls = 0;
+    g_nominationGetDescCalls = 0;
+    // ID3D11Resource contributes GetType(7), SetEvictionPriority(8) and
+    // GetEvictionPriority(9); Buffer/Texture2D GetDesc is therefore slot 10.
+    if (!hook.attach(resource, 11) || !hook.setMode(edvr::HookMode::CopyVptr) ||
+        !hook.replace(7, reinterpret_cast<void*>(&nominationGetType),
+                      reinterpret_cast<void**>(&g_realResourceGetType)))
+        return false;
+    if (texture) {
+        if (!hook.replace(10, reinterpret_cast<void*>(&nominationGetTextureDesc),
+                          reinterpret_cast<void**>(&g_realTextureGetDesc)))
+            return false;
+    } else if (!hook.replace(10, reinterpret_cast<void*>(&nominationGetBufferDesc),
+                             reinterpret_cast<void**>(&g_realBufferGetDesc))) {
+        return false;
+    }
+    return hook.commit();
+}
+
 bool check(bool condition, const char* message) {
     if (!condition) std::fprintf(stderr, "FAIL: %s\n", message);
     return condition;
@@ -261,6 +322,11 @@ bool checkRead(const edvr::BasicDrawRead<std::uintptr_t>& read,
 
 bool checkRead(const edvr::BasicDrawRead<std::uint32_t>& read,
                std::uint32_t expected) {
+    return read.reached && read.known && read.value == expected;
+}
+
+bool checkRead(const edvr::BasicDrawRead<std::int32_t>& read,
+               std::int32_t expected) {
     return read.reached && read.known && read.value == expected;
 }
 
@@ -587,6 +653,279 @@ bool testFssDumpPredicate(ID3D11Device* device, ID3D11DeviceContext* context) {
     edvr::fssDumpPredicateTestSetState(saved);
     edvr::pluginRegistryConfigureDrawInterests(savedInterestMask, nullptr, 0);
     context->VSSetShader(nullptr, nullptr, 0);
+    return okay;
+}
+
+bool testSunglareNomination(ID3D11Device* device, ID3D11DeviceContext* context) {
+    using namespace edvr;
+    bool okay = true;
+    const int savedWorld = detail::g_sunglareWorld;
+    const auto savedTypeCalls = g_nominationGetTypeCalls;
+    const auto savedDescCalls = g_nominationGetDescCalls;
+    const bool savedTypeFault = g_nominationTypeFault;
+    const auto savedGetType = g_realResourceGetType;
+    const auto savedBufferDesc = g_realBufferGetDesc;
+    const auto savedTextureDesc = g_realTextureGetDesc;
+    void* const savedTarget = sunglareSceneCbTargetRaw();
+    void* const savedShadow = bindingGet(BindSlot::VsCb0);
+    ID3D11Buffer* savedActual = nullptr;
+    context->VSGetConstantBuffers(0, 1, &savedActual);
+    const auto visit = [&](ID3D11Buffer* buffer, std::uint32_t count,
+                           void* nominatedBefore, bool traced,
+                           VScreenPredicateTestResult* result) {
+        context->VSSetConstantBuffers(0, 1, &buffer);
+        bindingSet(BindSlot::VsCb0, buffer);
+        return vScreenSunglareNominationPredicateTestVisit(
+            context, 'X', count, nominatedBefore, traced, result);
+    };
+    const auto makeBuffer = [&](UINT bytes, ComPtr<ID3D11Buffer>& out) {
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = bytes;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &out)) && out;
+    };
+    ComPtr<ID3D11Buffer> cb208, cb192, cb224;
+    okay &= check(makeBuffer(208, cb208), "WARP creates a 208-byte scene constant buffer");
+    okay &= check(makeBuffer(192, cb192), "WARP creates a 192-byte negative constant buffer");
+    okay &= check(makeBuffer(224, cb224), "WARP creates a 224-byte negative constant buffer");
+    if (cb208 && cb192 && cb224) {
+        VTableHook hook208, hook192, hook224;
+        const bool hooked208 = hookNominationResource(
+            hook208, static_cast<ID3D11Resource*>(cb208.Get()), false);
+        const bool hooked192 = hookNominationResource(
+            hook192, static_cast<ID3D11Resource*>(cb192.Get()), false);
+        const bool hooked224 = hookNominationResource(
+            hook224, static_cast<ID3D11Resource*>(cb224.Get()), false);
+        okay &= check(hooked208 && hooked192 && hooked224,
+                      "WARP hooks actual CB GetType/GetDesc resolver calls");
+        const auto runPair = [&](ID3D11Buffer* buffer, std::uint32_t count,
+                                 int world, void* nominated,
+                                 bool expectedCallback, std::uint32_t expectedBytes,
+                                 const char* label) {
+            detail::g_sunglareWorld = world;
+            void* const callbackBefore = sunglareSceneCbTargetRaw();
+            VScreenPredicateTestResult traced{}, plain{};
+            SunglareNominationObservation fact{};
+            g_nominationGetTypeCalls = g_nominationGetDescCalls = 0;
+            const bool tracedOk = visit(buffer, count, nominated, true, &traced) &&
+                                  readSunglareNomination(traced, &fact);
+            const auto tracedTypeCalls = g_nominationGetTypeCalls;
+            const auto tracedDescCalls = g_nominationGetDescCalls;
+            void* const callbackAfterTrace = sunglareSceneCbTargetRaw();
+            sunglareSceneCb(callbackBefore);
+            g_nominationGetTypeCalls = g_nominationGetDescCalls = 0;
+            const bool plainOk = visit(buffer, count, nominated, false, &plain);
+            const auto plainTypeCalls = g_nominationGetTypeCalls;
+            const auto plainDescCalls = g_nominationGetDescCalls;
+            void* const callbackAfterPlain = sunglareSceneCbTargetRaw();
+            const std::uint32_t expectedResolverCalls =
+                world && count > 10000 && buffer && buffer != nominated ? 1u : 0u;
+            const bool pairOkay = tracedOk && plainOk &&
+                              traced.siteResult.outcome == plain.siteResult.outcome &&
+                              traced.siteResult.outcome == draw_ladder::SiteOutcome::Observed &&
+                              fact.siteId == 45 && fact.kind == 22 &&
+                              checkRead(fact.worldMode, static_cast<std::int32_t>(world)) &&
+                              checkRead(fact.callbackInvoked, expectedCallback) &&
+                              tracedTypeCalls == expectedResolverCalls &&
+                              plainTypeCalls == expectedResolverCalls &&
+                              tracedDescCalls == (expectedBytes ? 1u : 0u) &&
+                              plainDescCalls == (expectedBytes ? 1u : 0u) &&
+                              callbackAfterTrace == (expectedCallback ? buffer : callbackBefore) &&
+                              callbackAfterPlain == (expectedCallback ? buffer : callbackBefore) &&
+                              traced.sceneCbNominatedAfter ==
+                                  (expectedCallback ? buffer : nominated) &&
+                              plain.sceneCbNominatedAfter ==
+                                  (expectedCallback ? buffer : nominated) &&
+                              draw_ladder_trace::sunglareNominationFactCountForTest(
+                                  plain.token) == 0;
+            okay &= check(pairOkay, label);
+            if (!pairOkay) {
+                std::fprintf(stderr,
+                    "nomination query prefix: trace=%d plain=%d; GetType=%u/%u expected=%u; GetDesc=%u/%u expected=%u\n",
+                    tracedOk, plainOk, tracedTypeCalls, plainTypeCalls,
+                    expectedResolverCalls, tracedDescCalls, plainDescCalls,
+                    expectedBytes ? 1u : 0u);
+                std::fprintf(stderr,
+                    "nomination mutation: nominated=%p/%p expected=%p; target=%p/%p expected=%p\n",
+                    traced.sceneCbNominatedAfter, plain.sceneCbNominatedAfter,
+                    expectedCallback ? static_cast<void*>(buffer) : nominated,
+                    callbackAfterTrace, callbackAfterPlain,
+                    expectedCallback ? static_cast<void*>(buffer) : callbackBefore);
+            }
+            if (world && count > 10000) {
+                okay &= check(checkRead(fact.boundCbIdentity,
+                                        reinterpret_cast<std::uintptr_t>(buffer)) &&
+                                  bindingGet(BindSlot::VsCb0) == buffer,
+                              "site 45 records the actual bound CB identity");
+                if (buffer) {
+                    okay &= check(checkRead(fact.nominatedBeforeIdentity,
+                                            reinterpret_cast<std::uintptr_t>(nominated)),
+                                  "macro-seeded nomination history is read only for a nonnull CB");
+                } else {
+                    okay &= check(!fact.nominatedBeforeIdentity.reached &&
+                                      !fact.resourceResolved.reached &&
+                                      !fact.isBuffer.reached && !fact.byteWidth.reached,
+                                  "null CB stops before prior nomination and resolver reads");
+                }
+                if (expectedBytes) {
+                    okay &= check(checkRead(fact.resourceResolved, true) &&
+                                      checkRead(fact.isBuffer, true) &&
+                                      checkRead(fact.byteWidth, expectedBytes),
+                                  "site 45 records the resolver's actual buffer type and size");
+                }
+            }
+            if (!world || count <= 10000) {
+                okay &= check(!fact.boundCbIdentity.reached &&
+                                  !fact.nominatedBeforeIdentity.reached &&
+                                  !fact.resourceResolved.reached &&
+                                  !fact.isBuffer.reached && !fact.byteWidth.reached,
+                              "world/count prefix preserves downstream lazy reads");
+            }
+            if (buffer == nominated && world && count > 10000) {
+                okay &= check(!fact.resourceResolved.reached && !fact.isBuffer.reached &&
+                                  !fact.byteWidth.reached,
+                              "same identity preserves resolver and size laziness");
+            }
+            if (expectedCallback) {
+                okay &= check(checkRead(fact.nominatedAfterIdentity,
+                                        reinterpret_cast<std::uintptr_t>(buffer)) &&
+                                  checkRead(fact.callbackTargetAfterIdentity,
+                                        reinterpret_cast<std::uintptr_t>(buffer)),
+                              "successful nomination records actual callback mutation state");
+            } else {
+                okay &= check(!fact.nominatedAfterIdentity.reached &&
+                                  !fact.callbackTargetAfterIdentity.reached,
+                              "non-mutating paths leave callback mutation suffix unread");
+            }
+        };
+
+        // The accepted path uses the actual bound WARP CB and production resolver.
+        runPair(cb208.Get(), 10001, 1, nullptr, true, 208,
+                "Trace and NoTrace agree on the actual 208-byte nomination");
+        runPair(cb208.Get(), 10001, -1, nullptr, true, 208,
+                "negative nonzero signed world mode still admits nomination");
+        // Count/world gates, same-pointer identity and wrong sizes stop at their source prefix.
+        runPair(cb208.Get(), 10000, 1, nullptr, false, 0,
+                "count 10000 leaves the binding and resolver suffix lazy");
+        runPair(cb208.Get(), 10001, 0, nullptr, false, 0,
+                "world mode zero leaves all downstream source reads lazy");
+        runPair(cb208.Get(), 10001, 1, cb208.Get(), false, 0,
+                "already nominated CB skips resource resolution");
+        runPair(nullptr, 10001, 1, nullptr, false, 0,
+                "null actual CB records presence and skips nomination/resolution suffix");
+        runPair(cb192.Get(), 10001, 1, nullptr, false, 192,
+                "192-byte WARP CB resolves but does not nominate");
+        runPair(cb224.Get(), 10001, 1, nullptr, false, 224,
+                "224-byte WARP CB resolves but does not nominate");
+
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = textureDesc.Height = 32;
+        textureDesc.MipLevels = textureDesc.ArraySize = 1;
+        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> trackedTexture;
+        const bool haveTrackedTexture = SUCCEEDED(device->CreateTexture2D(
+            &textureDesc, nullptr, &trackedTexture)) && trackedTexture;
+        okay &= check(haveTrackedTexture,
+                      "WARP creates a texture for the manually seeded shadow-type negative");
+        if (haveTrackedTexture) {
+            VTableHook textureHook;
+            const bool textureHooked = hookNominationResource(
+                textureHook, static_cast<ID3D11Resource*>(trackedTexture.Get()), true);
+            ID3D11Buffer* const nullBuffer = nullptr;
+            context->VSSetConstantBuffers(0, 1, &nullBuffer);
+            bindingSet(BindSlot::VsCb0, trackedTexture.Get());
+            detail::g_sunglareWorld = 1;
+            VScreenPredicateTestResult textureTrace{}, texturePlain{};
+            SunglareNominationObservation textureFact{};
+            const auto typeCalls = g_nominationGetTypeCalls;
+            const auto descCalls = g_nominationGetDescCalls;
+            g_nominationGetTypeCalls = g_nominationGetDescCalls = 0;
+            const bool textureTraceOk = vScreenSunglareNominationPredicateTestVisit(
+                context, 'X', 10001, nullptr, true, &textureTrace) &&
+                readSunglareNomination(textureTrace, &textureFact);
+            const auto traceTypeCalls = g_nominationGetTypeCalls;
+            const auto traceDescCalls = g_nominationGetDescCalls;
+            void* const textureTargetBeforePlain = sunglareSceneCbTargetRaw();
+            g_nominationGetTypeCalls = g_nominationGetDescCalls = 0;
+            const bool texturePlainOk = vScreenSunglareNominationPredicateTestVisit(
+                context, 'X', 10001, nullptr, false, &texturePlain);
+            const auto plainTypeCalls = g_nominationGetTypeCalls;
+            const auto plainDescCalls = g_nominationGetDescCalls;
+            okay &= check(textureHooked && textureTraceOk && texturePlainOk &&
+                              checkRead(textureFact.boundCbIdentity,
+                                  reinterpret_cast<std::uintptr_t>(trackedTexture.Get())) &&
+                              checkRead(textureFact.resourceResolved, true) &&
+                              checkRead(textureFact.isBuffer, false) &&
+                              !textureFact.byteWidth.reached &&
+                              checkRead(textureFact.callbackInvoked, false) &&
+                              !textureFact.nominatedAfterIdentity.reached &&
+                              traceTypeCalls == 1 && plainTypeCalls == 1 &&
+                              traceDescCalls == 1 && plainDescCalls == 1 &&
+                              textureTrace.sceneCbNominatedAfter == nullptr &&
+                              texturePlain.sceneCbNominatedAfter == nullptr &&
+                              sunglareSceneCbTargetRaw() == textureTargetBeforePlain &&
+                              draw_ladder_trace::sunglareNominationFactCountForTest(
+                                  texturePlain.token) == 0,
+                          "manually seeded tracked texture shadow is a non-buffer negative, not an actual CB binding");
+            textureHook.uninstall();
+            g_nominationGetTypeCalls = typeCalls;
+            g_nominationGetDescCalls = descCalls;
+        }
+        detail::g_sunglareWorld = 1;
+        VScreenPredicateTestResult unresolved{};
+        SunglareNominationObservation unresolvedFact{};
+        sunglareSceneCb(savedTarget);
+        g_nominationTypeFault = true;
+        g_nominationGetTypeCalls = g_nominationGetDescCalls = 0;
+        const bool unresolvedVisited = visit(cb208.Get(), 10001, nullptr, true, &unresolved) &&
+            readSunglareNomination(unresolved, &unresolvedFact);
+        const auto unresolvedTraceTypeCalls = g_nominationGetTypeCalls;
+        const auto unresolvedTraceDescCalls = g_nominationGetDescCalls;
+        void* const unresolvedTargetAfterTrace = sunglareSceneCbTargetRaw();
+        sunglareSceneCb(savedTarget);
+        g_nominationGetTypeCalls = g_nominationGetDescCalls = 0;
+        VScreenPredicateTestResult unresolvedPlain{};
+        const bool unresolvedPlainVisited = visit(
+            cb208.Get(), 10001, nullptr, false, &unresolvedPlain);
+        const auto unresolvedPlainTypeCalls = g_nominationGetTypeCalls;
+        const auto unresolvedPlainDescCalls = g_nominationGetDescCalls;
+        void* const unresolvedTargetAfterPlain = sunglareSceneCbTargetRaw();
+        g_nominationTypeFault = false;
+        okay &= check(unresolvedVisited && unresolvedPlainVisited &&
+                          checkRead(unresolvedFact.resourceResolved, false) &&
+                          !unresolvedFact.isBuffer.reached &&
+                          !unresolvedFact.byteWidth.reached &&
+                          checkRead(unresolvedFact.callbackInvoked, false) &&
+                          unresolvedTraceTypeCalls == 1 &&
+                          unresolvedPlainTypeCalls == 1 &&
+                          unresolvedTraceDescCalls == 0 &&
+                          unresolvedPlainDescCalls == 0 &&
+                          unresolved.sceneCbNominatedAfter == nullptr &&
+                          unresolvedPlain.sceneCbNominatedAfter == nullptr &&
+                          unresolvedTargetAfterTrace == savedTarget &&
+                          unresolvedTargetAfterPlain == savedTarget &&
+                          draw_ladder_trace::sunglareNominationFactCountForTest(
+                              unresolvedPlain.token) == 0,
+                      "Trace/NoTrace GetType fault preserves prefix, query count, and non-mutation");
+        hook208.uninstall();
+        hook192.uninstall();
+        hook224.uninstall();
+    }
+    detail::g_sunglareWorld = savedWorld;
+    g_nominationGetTypeCalls = savedTypeCalls;
+    g_nominationGetDescCalls = savedDescCalls;
+    g_nominationTypeFault = savedTypeFault;
+    g_realResourceGetType = savedGetType;
+    g_realBufferGetDesc = savedBufferDesc;
+    g_realTextureGetDesc = savedTextureDesc;
+    sunglareSceneCb(savedTarget);
+    context->VSSetConstantBuffers(0, 1, &savedActual);
+    bindingSet(BindSlot::VsCb0, savedShadow);
+    if (savedActual) savedActual->Release();
     return okay;
 }
 
@@ -2278,6 +2617,7 @@ int main(int argc, char** argv) {
         }
 
         okay &= testFssDumpPredicate(device, immediate);
+        okay &= testSunglareNomination(device, immediate);
         for (std::uint32_t i = 0; i < 4; ++i)
             edvr::bindingSet(static_cast<edvr::BindSlot>(
                                  static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), nullptr);

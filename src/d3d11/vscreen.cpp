@@ -42,6 +42,7 @@
 #include "draw_ladder_trace.h"
 #include "basic_draw_observation.h"
 #include "forwarding_observation.h"
+#include "sunglare_nomination_observation.h"
 #include "eye_census_observation.h"
 #include "holo_scrim_observation.h"
 #include "offscreen_skip_selector.h"
@@ -2629,13 +2630,54 @@ struct VScreenDrawLadderVisitor {
                 s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);
             return SiteResult::observed();
         } else if constexpr (id == SiteId::kSunglareNomination) {
-            if (sunglareWorldActive() && count > 10000) {
-                void* cb = bindingGet(BindSlot::VsCb0);
-                if (cb && cb != s->sceneCbNominated) {
-                    ResourceInfo info;
-                    if (bindingResolveResource(cb, &info) && info.isBuffer && info.a == 208) {
-                        s->sceneCbNominated = cb;
-                        sunglareSceneCb(cb);
+            if constexpr (TracePolicy::enabled) {
+                SunglareNominationObservation observed{};
+                const std::int32_t worldMode = detail::g_sunglareWorld;
+                observed.worldMode = {true, true, worldMode};
+                if (worldMode && count > 10000) {
+                    void* const cb = bindingGet(BindSlot::VsCb0);
+                    observed.boundCbIdentity = {
+                        true, true, reinterpret_cast<std::uintptr_t>(cb)};
+                    if (cb) {
+                        void* const nominated = s->sceneCbNominated;
+                        observed.nominatedBeforeIdentity = {
+                            true, true, reinterpret_cast<std::uintptr_t>(nominated)};
+                        if (cb != nominated) {
+                            ResourceInfo info;
+                            const bool resolved = bindingResolveResource(cb, &info);
+                            observed.resourceResolved = {true, true, resolved};
+                            if (resolved) {
+                                observed.isBuffer = {true, true, info.isBuffer};
+                                if (info.isBuffer) {
+                                    observed.byteWidth = {true, true, info.a};
+                                    if (info.a == 208) {
+                                        s->sceneCbNominated = cb;
+                                        sunglareSceneCb(cb);
+                                        observed.callbackInvoked = {true, true, true};
+                                        observed.nominatedAfterIdentity = {
+                                            true, true, reinterpret_cast<std::uintptr_t>(
+                                                s->sceneCbNominated)};
+                                        observed.callbackTargetAfterIdentity = {
+                                            true, true, reinterpret_cast<std::uintptr_t>(
+                                                sunglareSceneCbTargetRaw())};
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!observed.callbackInvoked.reached)
+                    observed.callbackInvoked = {true, true, false};
+                trace.sunglareNominationFact(observed);
+            } else {
+                if (sunglareWorldActive() && count > 10000) {
+                    void* cb = bindingGet(BindSlot::VsCb0);
+                    if (cb && cb != s->sceneCbNominated) {
+                        ResourceInfo info;
+                        if (bindingResolveResource(cb, &info) && info.isBuffer && info.a == 208) {
+                            s->sceneCbNominated = cb;
+                            sunglareSceneCb(cb);
+                        }
                     }
                 }
             }
@@ -6392,6 +6434,8 @@ using VScreenFssDumpTestSite = draw_ladder::InterestGated<
 using VScreenTargetSharpTestSite = draw_ladder::InterestGated<
     draw_ladder::SiteId::kTargetSharpClaim, draw_ladder::SiteKind::Claim,
     draw_interest::InterestId::TargetSharp>;
+using VScreenSunglareNominationTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kSunglareNomination, draw_ladder::SiteKind::Observe>;
 State* g_eyeCensusTestState = nullptr;
 
 struct VScreenTestInterest final {};
@@ -6432,6 +6476,11 @@ struct VScreenTestTraceCapture final {
 
     void targetSharpFact(const TargetSharpObservation& fact) noexcept {
         policy.targetSharpFact(fact);
+    }
+
+    void sunglareNominationFact(
+        const SunglareNominationObservation& fact) noexcept {
+        policy.sunglareNominationFact(fact);
     }
 
     void forwardInputs(const ForwardingObservation& fact) noexcept {
@@ -6574,6 +6623,8 @@ bool vScreenFssDumpPredicateTestVisit(
     facts.instances = instances;
     result->token = draw_ladder_trace::beginDraw(facts);
     if (!result->token.valid()) {
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
         g_state = priorState;
         return false;
     }
@@ -6972,6 +7023,51 @@ bool vScreenTargetSharpPredicateTestVisit(
         else
             result->siteResult = draw_ladder::SiteResult::notEligible();
     }
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenSunglareNominationPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    void* nominatedBefore, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context) return false;
+    State fixture{};
+    fixture.ownerCtx = context;
+    fixture.sceneCbNominated = nominatedBefore;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = kind;
+    facts.count = count;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
+        g_state = priorState;
+        return false;
+    }
+
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenPredicateTestInvokeSite<
+            VScreenSunglareNominationTestSite>(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = visitor.template visit<VScreenSunglareNominationTestSite>();
+    }
+    result->sceneCbNominatedAfter = fixture.sceneCbNominated;
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;

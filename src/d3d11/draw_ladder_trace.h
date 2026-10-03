@@ -13,6 +13,7 @@
 #include "remlok_observation.h"
 #include "sunglare_observation.h"
 #include "target_sharp_observation.h"
+#include "sunglare_nomination_observation.h"
 
 #include <atomic>
 #include <cstdint>
@@ -47,13 +48,16 @@ constexpr std::uint8_t kMaxFssDumpFactsPerDraw = 1;
 constexpr std::uint32_t kMaxFssDumpFacts = 32768;
 constexpr std::uint8_t kMaxTargetSharpFactsPerDraw = 1;
 constexpr std::uint32_t kMaxTargetSharpFacts = 32768;
+constexpr std::uint8_t kMaxSunglareNominationFactsPerDraw = 1;
+constexpr std::uint32_t kMaxSunglareNominationFacts = 32768;
 constexpr std::uint8_t kMaxForwardingFactsPerDraw = 1;
 constexpr std::uint32_t kMaxForwardingFacts = kMaxDraws;
 constexpr std::uint8_t kMaxTotalPredicateFactsPerDraw =
     kMaxPredicateFactsPerDraw + kMaxSunglareFactsPerDraw +
     kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw + kMaxBasicFactsPerDraw +
     kMaxEyeCensusFactsPerDraw + kMaxResolveBindFactsPerDraw + kMaxLoaderPanelFactsPerDraw +
-    kMaxFssDumpFactsPerDraw + kMaxTargetSharpFactsPerDraw;
+    kMaxFssDumpFactsPerDraw + kMaxTargetSharpFactsPerDraw +
+    kMaxSunglareNominationFactsPerDraw;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -91,6 +95,8 @@ enum class CaptureInvalidation : std::uint8_t {
     ForwardingPoolMissing = 19,
     TargetSharpIndexOverflow = 20,
     TargetSharpPoolMissing = 21,
+    SunglareNominationIndexOverflow = 22,
+    SunglareNominationPoolMissing = 23,
 };
 
 // Returned by shutdown() so production can report whether an armed or partial
@@ -322,6 +328,12 @@ void appendLoaderPanelFact(Token token, const LoaderPanelObservation& fact) noex
 void appendFssDumpFact(Token token, const FssDumpObservation& fact) noexcept;
 void appendForwardingFact(Token token, const ForwardingObservation& fact) noexcept;
 void appendTargetSharpFact(Token token, const TargetSharpObservation& fact) noexcept;
+void appendSunglareNominationFact(Token token,
+                                 const SunglareNominationObservation& fact) noexcept;
+bool readSunglareNominationFactForTest(
+    Token token, std::uint8_t ordinal,
+    SunglareNominationObservation* out) noexcept;
+std::uint8_t sunglareNominationFactCountForTest(Token token) noexcept;
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
 bool readEyeCensusFactForTest(Token token, std::uint8_t ordinal, EyeCensusObservation* out) noexcept;
 std::uint8_t eyeCensusFactCountForTest(Token token) noexcept;
@@ -445,6 +457,10 @@ struct TracePolicy final {
     }
     inline void targetSharpFact(const TargetSharpObservation& fact) noexcept {
         appendTargetSharpFact(token, fact);
+    }
+    inline void sunglareNominationFact(
+        const SunglareNominationObservation& fact) noexcept {
+        appendSunglareNominationFact(token, fact);
     }
 };
 

@@ -80,6 +80,7 @@ void sunglareDrawArgs(uint32_t instances, uint32_t startInstance);
 // shader reads through the b2 slot.
 void  sunglareSceneCb(void* cb);
 void* sunglareSceneCbTarget();
+void* sunglareSceneCbTargetRaw() noexcept;
 void  sunglareSceneRows(const void* data, uint32_t bytes);
 void  sunglareSceneDump(const void* data, uint32_t bytes);
 

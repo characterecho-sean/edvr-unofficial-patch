@@ -11,6 +11,7 @@
 #include "../../src/d3d11/fss_dump_observation.h"
 #include "../../src/d3d11/forwarding_observation.h"
 #include "../../src/d3d11/target_sharp_observation.h"
+#include "../../src/d3d11/sunglare_nomination_observation.h"
 
 struct ID3D11DeviceContext;
 
@@ -21,6 +22,7 @@ struct VScreenPredicateTestResult final {
     draw_ladder::SiteResult siteResult{};
     std::uint32_t glareClampAfter = 0;
     std::uint64_t censusSkippedAfter = 0;
+    void* sceneCbNominatedAfter = nullptr;
 };
 
 struct VScreenForwardingTestInput final {
@@ -132,6 +134,11 @@ bool vScreenTargetSharpPredicateTestVisit(
     ID3D11DeviceContext* context, char kind, std::uint32_t count,
     std::uint32_t instances, std::uint32_t eyeW, std::uint32_t eyeH,
     std::uint32_t renderW, std::uint32_t renderH, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept;
+
+bool vScreenSunglareNominationPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    void* nominatedBefore, bool traceEnabled,
     VScreenPredicateTestResult* result) noexcept;
 
 } // namespace edvr

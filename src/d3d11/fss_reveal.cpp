@@ -14,6 +14,7 @@
 #include "../common/guard.h"
 #include "../common/log.h"
 #include "exposure_fix.h"   // lookupShaderHash
+#include "fss_reveal_cost_sites.h"
 
 namespace edvr {
 
@@ -94,10 +95,23 @@ uint64_t g_applied = 0;
 bool     g_engagedNoted = false;
 
 FaultBudget g_budget("fssReveal", 8);
+ID3D11DeviceContext* g_costPairContext = nullptr;
+bool g_costPairSampled = false;
+
+void clearCostPair() noexcept {
+    g_costPairContext = nullptr;
+    g_costPairSampled = false;
+}
+
+inline void noteApi(bool sampled, fss_reveal_cost::Site site,
+                    plugin_cost::ApiClass apiClass) noexcept {
+    if (sampled) fss_reveal_cost::note(site, apiClass);
+}
 
 }  // namespace
 
 void fssRevealConfigure(Config& cfg) {
+    clearCostPair();
     const bool wasSteady = detail::g_fssRevealSteady;
     // ONE key for the whole black-squares fix (src/common/eye_sync.h);
     // this module serves its composite half.
@@ -273,9 +287,13 @@ void resetRevealBudget(int remaining) noexcept {
 #endif
 
 void fssRevealBegin(ID3D11DeviceContext* ctx) {
+    clearCostPair();
     g_engaged = false;
     g_lsBound = false;
     if (!ctx || (!detail::g_fssRevealSteady && !detail::g_fssRevealLockstep)) return;
+    g_costPairContext = ctx;
+    g_costPairSampled = edvrPluginCostApiSampleContext(ctx) != 0;
+    const bool costSampled = g_costPairSampled;
     guardedBudget(g_budget, [&] {
         ++g_occurrence;
 
@@ -285,6 +303,8 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
             // shader's declaration. A relearn after the game recreates it
             // costs one frame of stock, the ourCb lifecycle's bargain.
             ID3D11Buffer* b1 = nullptr;
+            noteApi(costSampled, fss_reveal_cost::Site::LearnGetPsCb,
+                    plugin_cost::ApiClass::ReadQuery);
             ctx->PSGetConstantBuffers(1, 1, &b1);
             if (b1 != g_sceneCb) {
                 g_sceneCb = b1;
@@ -292,6 +312,8 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                 g_shadowValid = false;
                 if (b1) {
                     D3D11_BUFFER_DESC d{};
+                    noteApi(costSampled, fss_reveal_cost::Site::LearnBufferGetDesc,
+                            plugin_cost::ApiClass::ReadQuery);
                     b1->GetDesc(&d);
                     if (d.ByteWidth >= kSceneBlockMin &&
                         d.ByteWidth <= kSceneBlockMax) {
@@ -335,23 +357,33 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                 // Freeze THIS draw's four content textures. All four or
                 // none: a partial freeze is a new per-eye split.
                 ID3D11ShaderResourceView* srv[4] = {};
+                noteApi(costSampled, fss_reveal_cost::Site::CaptureGetPsSrvs,
+                        plugin_cost::ApiClass::ReadQuery);
                 ctx->PSGetShaderResources(0, 4, srv);
                 ID3D11Device* dev = nullptr;
+                noteApi(costSampled, fss_reveal_cost::Site::CaptureContextGetDevice,
+                        plugin_cost::ApiClass::ReadQuery);
                 ctx->GetDevice(&dev);
                 bool all = dev != nullptr;
                 for (int i = 0; i < 4 && all; ++i) {
                     g_lsHave[i] = false;
                     if (!srv[i]) continue;   // an unbound slot stays unbound
                     ID3D11Resource* res = nullptr;
+                    noteApi(costSampled, fss_reveal_cost::Site::CaptureSrvGetResource,
+                            plugin_cost::ApiClass::ReadQuery);
                     srv[i]->GetResource(&res);
                     ID3D11Texture2D* tex = nullptr;
                     if (res) {
+                        noteApi(costSampled, fss_reveal_cost::Site::CaptureQueryTexture2D,
+                                plugin_cost::ApiClass::ReadQuery);
                         res->QueryInterface(__uuidof(ID3D11Texture2D),
                                             reinterpret_cast<void**>(&tex));
                         res->Release();
                     }
                     if (!tex) { all = false; break; }
                     D3D11_TEXTURE2D_DESC d{};
+                    noteApi(costSampled, fss_reveal_cost::Site::CaptureTextureGetDesc,
+                            plugin_cost::ApiClass::ReadQuery);
                     tex->GetDesc(&d);
                     if (d.SampleDesc.Count != 1) {
                         tex->Release();
@@ -374,11 +406,22 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                         cd.CPUAccessFlags = 0;
                         cd.MiscFlags = 0;
                         D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                        noteApi(costSampled, fss_reveal_cost::Site::CaptureSrvGetDesc,
+                                plugin_cost::ApiClass::ReadQuery);
                         srv[i]->GetDesc(&vd);
-                        if (FAILED(dev->CreateTexture2D(&cd, nullptr,
-                                                        &g_lsTex[i])) ||
-                            FAILED(dev->CreateShaderResourceView(
-                                g_lsTex[i], &vd, &g_lsView[i]))) {
+                        noteApi(costSampled, fss_reveal_cost::Site::CreateTexture2D,
+                                plugin_cost::ApiClass::Work);
+                        const HRESULT textureHr = dev->CreateTexture2D(
+                            &cd, nullptr, &g_lsTex[i]);
+                        HRESULT viewHr = E_FAIL;
+                        if (SUCCEEDED(textureHr)) {
+                            noteApi(costSampled,
+                                    fss_reveal_cost::Site::CreateShaderResourceView,
+                                    plugin_cost::ApiClass::Work);
+                            viewHr = dev->CreateShaderResourceView(
+                                g_lsTex[i], &vd, &g_lsView[i]);
+                        }
+                        if (FAILED(textureHr) || FAILED(viewHr)) {
                             if (g_lsTex[i]) {
                                 g_lsTex[i]->Release();
                                 g_lsTex[i] = nullptr;
@@ -390,6 +433,8 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                         }
                         g_lsDesc[i] = d;
                     }
+                    noteApi(costSampled, fss_reveal_cost::Site::CopyResource,
+                            plugin_cost::ApiClass::Transfer);
                     ctx->CopyResource(g_lsTex[i], tex);
                     tex->Release();
                     g_lsHave[i] = true;
@@ -422,6 +467,8 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                 if (g_lsHave[i]) { any = true; break; }
             }
             if (any) {
+                noteApi(costSampled, fss_reveal_cost::Site::ApplyGetPsSrvs,
+                        plugin_cost::ApiClass::ReadQuery);
                 ctx->PSGetShaderResources(0, 4, g_lsDisplaced);
                 ID3D11ShaderResourceView* set[4] = {
                     g_lsHave[0] ? g_lsView[0] : g_lsDisplaced[0],
@@ -429,6 +476,8 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                     g_lsHave[2] ? g_lsView[2] : g_lsDisplaced[2],
                     g_lsHave[3] ? g_lsView[3] : g_lsDisplaced[3],
                 };
+                noteApi(costSampled, fss_reveal_cost::Site::ApplySetPsSrvs,
+                        plugin_cost::ApiClass::State);
                 ctx->PSSetShaderResources(0, 4, set);
                 g_lsBound = true;
                 if (!g_lsNoted) {
@@ -450,6 +499,8 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
                 g_ourCb = nullptr;
             }
             ID3D11Device* dev = nullptr;
+            noteApi(costSampled, fss_reveal_cost::Site::ApplyContextGetDevice,
+                    plugin_cost::ApiClass::ReadQuery);
             ctx->GetDevice(&dev);
             if (!dev) return;
             D3D11_BUFFER_DESC bd{};
@@ -457,6 +508,8 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
             bd.Usage = D3D11_USAGE_DYNAMIC;
             bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            noteApi(costSampled, fss_reveal_cost::Site::CreateSceneBuffer,
+                    plugin_cost::ApiClass::Work);
             dev->CreateBuffer(&bd, nullptr, &g_ourCb);
             dev->Release();
             if (!g_ourCb) {
@@ -472,15 +525,23 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
         }
 
         D3D11_MAPPED_SUBRESOURCE m{};
+        noteApi(costSampled, fss_reveal_cost::Site::MapSceneBuffer,
+                plugin_cost::ApiClass::Transfer);
         if (FAILED(ctx->Map(g_ourCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) ||
             !m.pData) {
             return;
         }
         memcpy(m.pData, g_snapshot, g_sceneCbBytes);
+        noteApi(costSampled, fss_reveal_cost::Site::UnmapSceneBuffer,
+                plugin_cost::ApiClass::Transfer);
         ctx->Unmap(g_ourCb, 0);
 
+        noteApi(costSampled, fss_reveal_cost::Site::ApplyGetPsCb,
+                plugin_cost::ApiClass::ReadQuery);
         ctx->PSGetConstantBuffers(1, 1, &g_displaced);
         ID3D11Buffer* ours = g_ourCb;
+        noteApi(costSampled, fss_reveal_cost::Site::ApplySetPsCb,
+                plugin_cost::ApiClass::State);
         ctx->PSSetConstantBuffers(1, 1, &ours);
         g_engaged = true;
         ++g_applied;
@@ -495,8 +556,12 @@ void fssRevealBegin(ID3D11DeviceContext* ctx) {
 }
 
 void fssRevealEnd(ID3D11DeviceContext* ctx) {
+    const bool costSampled = ctx && g_costPairSampled &&
+                             ctx == g_costPairContext;
     if (g_lsBound && ctx) {
         g_lsBound = false;
+        noteApi(costSampled, fss_reveal_cost::Site::RestorePsSrvs,
+                plugin_cost::ApiClass::State);
         ctx->PSSetShaderResources(0, 4, g_lsDisplaced);
         for (int i = 0; i < 4; ++i) {
             if (g_lsDisplaced[i]) {
@@ -505,18 +570,26 @@ void fssRevealEnd(ID3D11DeviceContext* ctx) {
             }
         }
     }
-    if (!g_engaged || !ctx) return;
-    g_engaged = false;
-    ctx->PSSetConstantBuffers(1, 1, &g_displaced);
-    if (g_displaced) {
-        g_displaced->Release();
-        g_displaced = nullptr;
+    if (g_engaged && ctx) {
+        g_engaged = false;
+        noteApi(costSampled, fss_reveal_cost::Site::RestorePsCb,
+                plugin_cost::ApiClass::State);
+        ctx->PSSetConstantBuffers(1, 1, &g_displaced);
+        if (g_displaced) {
+            g_displaced->Release();
+            g_displaced = nullptr;
+        }
     }
+    clearCostPair();
 }
 
-void fssRevealFrameBoundary() { g_occurrence = 0; }
+void fssRevealFrameBoundary() {
+    g_occurrence = 0;
+    clearCostPair();
+}
 
 void fssRevealShutdown() {
+    clearCostPair();
     if (g_ourCb) {
         g_ourCb->Release();
         g_ourCb = nullptr;

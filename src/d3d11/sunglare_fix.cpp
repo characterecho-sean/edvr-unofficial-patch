@@ -518,6 +518,10 @@ void* sunglareSceneCbTarget() {
     return detail::g_sunglareWorld ? g_sceneCbTarget : nullptr;
 }
 
+void* sunglareSceneCbTargetRaw() noexcept {
+    return g_sceneCbTarget;
+}
+
 // One whole-buffer binary dump of the big scene-constants block (the
 // glare shader's own cb1, by size), to be matched desk-side against the
 // clamped rows -- nearly equal at level head -- so the true camera's

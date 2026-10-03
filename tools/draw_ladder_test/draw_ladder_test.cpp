@@ -1513,7 +1513,9 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        unsigned fssDumpCase = 0,
                        unsigned forwardingCase = 0,
                        bool scrimWashIsBuffer = false,
-                       unsigned targetSharpCase = 0) {
+                       unsigned targetSharpCase = 0,
+                       unsigned sunglareNominationCase = 0,
+                       std::uint32_t countOverride = 0) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     const bool overflowBefore = trace::overflowed();
@@ -1587,6 +1589,7 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         facts.count = 4;
         facts.instances = 1;
     }
+    if (countOverride) facts.count = countOverride;
     if (facts.kind == 'D' || facts.kind == 'N') {
         facts.args.base = 17;
         facts.args.startInstance = facts.kind == 'N' ? 5 : 0;
@@ -1652,6 +1655,29 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     }
     for (const auto visited : visitor.visited) {
         const bool overflowBeforeFact = trace::overflowed();
+        if (visited == ladder::SiteId::kSunglareNomination) {
+            edvr::SunglareNominationObservation observed{};
+            observed.worldMode = sunglareNominationCase == 3
+                ? edvr::BasicDrawRead<std::int32_t>{true, false, 0}
+                : edvr::BasicDrawRead<std::int32_t>{true, true,
+                    sunglareNominationCase ? 1 : 0};
+            observed.callbackInvoked = {true, true, false};
+            if (sunglareNominationCase == 1 || sunglareNominationCase == 4) {
+                observed.boundCbIdentity = {true, true, 0xA11u};
+                observed.nominatedBeforeIdentity = {true, true, 0xB22u};
+                if (sunglareNominationCase == 1) {
+                    observed.resourceResolved = {true, true, false};
+                } else {
+                    observed.resourceResolved = {true, true, true};
+                    observed.isBuffer = {true, true, true};
+                    observed.byteWidth = {true, true, 208};
+                    observed.callbackInvoked = {true, true, true};
+                    observed.nominatedAfterIdentity = {true, true, 0xA11u};
+                    observed.callbackTargetAfterIdentity = {true, true, 0xA11u};
+                }
+            }
+            policy.sunglareNominationFact(observed);
+        }
         if (visited == ladder::SiteId::kDrawGateDisabledNone) {
             trace::PredicateFact fact{};
             fact.siteId = static_cast<std::uint16_t>(visited);
@@ -2162,6 +2188,12 @@ bool traceWriterChecks(const char* rootArg) {
                     ladder::SiteId::kPanelCurveObserve)] == 0,
                 "real writer fixture records masked observers without running their handlers");
     for (const auto visited : vrVisitor.visited) {
+        if (visited == ladder::SiteId::kSunglareNomination) {
+            edvr::SunglareNominationObservation nomination{};
+            nomination.worldMode = {true, true, 0};
+            nomination.callbackInvoked = {true, true, false};
+            vrPolicy.sunglareNominationFact(nomination);
+        }
         if (visited == ladder::SiteId::kDrawGateDisabledNone) {
             trace::PredicateFact fact{};
             fact.siteId = static_cast<std::uint16_t>(visited);
@@ -2407,7 +2439,8 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
-                matrixJson.find("\"predicateFactVersion\":14") != std::string::npos &&
+                matrixJson.find("\"predicateFactVersion\":15") != std::string::npos &&
+                matrixJson.find("\"siteId\":45,\"kind\":22,\"known\":\"yes\",\"inputs\":") != std::string::npos &&
                 matrixJson.find("\"forwardInputVersion\":1") != std::string::npos &&
                 matrixJson.find("\"siteId\":54,\"kind\":21,\"known\":\"yes\",\"handlerInvoked\":true") != std::string::npos &&
                 matrixJson.find("\"forwardInputsReached\":false,\"forwardInputs\":null") != std::string::npos &&
@@ -2439,16 +2472,16 @@ bool traceWriterChecks(const char* rootArg) {
     };
     ok &= check(writeTargetSharpFixture("positive", 101,
                     ladder::SiteId::kTargetSharpClaim, 0),
-                "schema14 canonical TargetSharp positive fixture writes frame 101");
+                "schema15 canonical TargetSharp positive fixture writes frame 101");
     ok &= check(writeTargetSharpFixture("lazydecline", 102,
                     ladder::SiteId::kScrimClaim, 1),
-                "schema14 canonical TargetSharp lazy gate decline writes frame 102");
+                "schema15 canonical TargetSharp lazy gate decline writes frame 102");
     ok &= check(writeTargetSharpFixture("noteligible", 103,
                     ladder::SiteId::kScrimClaim, 2),
-                "schema14 canonical TargetSharp not-eligible observation writes frame 103");
+                "schema15 canonical TargetSharp not-eligible observation writes frame 103");
     ok &= check(writeTargetSharpFixture("unknown", 104,
                     ladder::SiteId::kScrimClaim, 3),
-                "schema14 canonical TargetSharp reached-unknown input writes frame 104");
+                "schema15 canonical TargetSharp reached-unknown input writes frame 104");
 
     const auto targetSharpInvalidCapture = [&](const char* leaf, std::uint32_t frameNo,
         unsigned mode, unsigned appendMode) {
@@ -2532,6 +2565,105 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(targetSharpGlobalTokensValid && trace::overflowed() &&
                 trace::status() == trace::Status::InvalidCapture,
                 "TargetSharp global pool exhaustion invalidates at its fixed cap");
+
+    const auto writeSunglareNominationFixture = [&](const char* leaf,
+        std::uint32_t frameNo, unsigned mode) {
+        const std::string directory = root + "\\sunglare_nomination_" + leaf;
+        const std::string logLeaf = std::string("edvr_gfx_sungnom_") + leaf + ".log";
+        const bool started = beginCapture(directory, logLeaf.c_str(), frameNo);
+        if (!started) return false;
+        const bool written = writeTerminalCase(
+            ladder::RouteId::kVrEye, ladder::SequenceId::kVrEye, 'X',
+            ladder::SiteId::kScrimClaim, true, kFrozenEye, 31,
+            ladder::VrEyeSequence{}, 1, false, false,
+            edvr::SunglareTraceMode::kStock, false, false, 0, frameNo,
+            false, false, 0, 0, 0, 0, 0, 0, false, 0,
+            mode, mode == 2 ? 10000u : 10001u);
+        trace::frameEnd(frameNo);
+        const std::string sidecar = directory + "\\edvr_gfx_sungnom_" + leaf +
+            ".draw-ladder-" + std::to_string(frameNo) + ".json";
+        return written && trace::status() == trace::Status::CompleteWritten && fileExists(sidecar);
+    };
+    ok &= check(writeSunglareNominationFixture("positive", 111, 4),
+                "schema15 Sunglare nomination positive source fact writes frame 111");
+    ok &= check(writeSunglareNominationFixture("lazydecline", 112, 1),
+                "schema15 Sunglare nomination lazy resolve decline writes frame 112");
+    ok &= check(writeSunglareNominationFixture("cutoff", 113, 2),
+                "schema15 Sunglare nomination count cutoff preserves skipped suffix");
+    ok &= check(writeSunglareNominationFixture("unknown", 114, 3),
+                "schema15 Sunglare nomination reached-unknown mode writes frame 114");
+
+    const auto writeSunglareNominationInvalid = [&](const char* leaf,
+        std::uint32_t frameNo, unsigned mode) {
+        const std::string directory = root + "\\sunglare_nomination_" + leaf;
+        const std::string logLeaf = std::string("edvr_gfx_sungnom_") + leaf + ".log";
+        const bool started = beginCapture(directory, logLeaf.c_str(), frameNo);
+        if (!started) return false;
+        trace::DrawFacts facts{};
+        facts.kind = 'X'; facts.count = 10001; facts.instances = 1;
+        facts.route = ladder::RouteId::kVrEye;
+        facts.sequence = ladder::SequenceId::kVrEye;
+        const trace::Token token = trace::beginDraw(facts);
+        if (!token.valid()) return false;
+        if (mode != 3)
+            trace::appendSite(token, 45,
+                static_cast<std::uint8_t>(ladder::SiteKind::Observe),
+                static_cast<std::uint8_t>(ladder::SiteOutcome::Observed),
+                static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+        edvr::SunglareNominationObservation observed{};
+        observed.worldMode = {true, true, 0};
+        observed.callbackInvoked = {true, true, false};
+        if (mode == 2) observed.siteId = 46;
+        if (mode != 0) trace::appendSunglareNominationFact(token, observed);
+        if (mode == 1 || mode == 4) trace::appendSunglareNominationFact(token, observed);
+        trace::finishDraw(token, -1, -1);
+        trace::frameEnd(frameNo);
+        const std::string sidecar = directory + "\\edvr_gfx_sungnom_" + leaf +
+            ".draw-ladder-" + std::to_string(frameNo) + ".json";
+        return trace::status() == trace::Status::InvalidCapture && fileExists(sidecar);
+    };
+    ok &= check(writeSunglareNominationInvalid("missing", 115, 0),
+                "site45 reached without a fact emits an invalid sidecar");
+    ok &= check(writeSunglareNominationInvalid("duplicate", 116, 1),
+                "duplicate site45 fact emits an invalid sidecar");
+    ok &= check(writeSunglareNominationInvalid("malformed", 117, 2),
+                "malformed site45 source identity emits an invalid sidecar");
+    ok &= check(writeSunglareNominationInvalid("unvisited", 118, 3),
+                "unvisited site45 fact emits an invalid sidecar");
+    ok &= check(writeSunglareNominationInvalid("perdrawcap", 119, 4),
+                "site45 per-draw fact cap emits an invalid sidecar");
+    const std::string sunglareNominationOverflowDir =
+        root + "\\sunglare_nomination_globaloverflow";
+    const bool sunglareNominationOverflowStarted = beginCapture(
+        sunglareNominationOverflowDir, "edvr_gfx_sungnom_globaloverflow.log", 120);
+    bool sunglareNominationOverflowTokensValid = sunglareNominationOverflowStarted;
+    trace::DrawFacts sunglareNominationOverflowDraw{};
+    sunglareNominationOverflowDraw.kind = 'X';
+    sunglareNominationOverflowDraw.count = 10000;
+    sunglareNominationOverflowDraw.instances = 1;
+    sunglareNominationOverflowDraw.route = ladder::RouteId::kVrEye;
+    sunglareNominationOverflowDraw.sequence = ladder::SequenceId::kVrEye;
+    edvr::SunglareNominationObservation sunglareNominationNoop{};
+    sunglareNominationNoop.worldMode = {true, true, 0};
+    sunglareNominationNoop.callbackInvoked = {true, true, false};
+    for (std::uint32_t i = 0; i <= trace::kMaxSunglareNominationFacts; ++i) {
+        const trace::Token token = trace::beginDraw(sunglareNominationOverflowDraw);
+        if (!token.valid()) { sunglareNominationOverflowTokensValid = false; break; }
+        trace::appendSite(token, 45,
+            static_cast<std::uint8_t>(ladder::SiteKind::Observe),
+            static_cast<std::uint8_t>(ladder::SiteOutcome::Observed),
+            static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+        trace::appendSunglareNominationFact(token, sunglareNominationNoop);
+        trace::finishDraw(token, -1, -1);
+    }
+    trace::frameEnd(120);
+    const std::string sunglareNominationOverflowSidecar =
+        sunglareNominationOverflowDir +
+        "\\edvr_gfx_sungnom_globaloverflow.draw-ladder-120.json";
+    ok &= check(sunglareNominationOverflowTokensValid && trace::overflowed() &&
+                trace::status() == trace::Status::InvalidCapture &&
+                fileExists(sunglareNominationOverflowSidecar),
+                "site45 global pool exhaustion emits an invalid sidecar at its fixed cap");
 
     const std::string generatedInvalidDir = root + "\\generatedinvalid";
     DeleteFileA((generatedInvalidDir + "\\edvr_gfx_generated_invalid.draw-ladder-16.json").c_str());
@@ -3057,7 +3189,7 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":14") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":15") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&

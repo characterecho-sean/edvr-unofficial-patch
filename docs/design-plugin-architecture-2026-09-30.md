@@ -42,15 +42,15 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  bounded API owner costs are instrumented; twenty-two selectors and local
-  None/Skip forwarding checks pass all 140 validation jobs. Enabled replay
-  storage is measured at 476.6 MiB; the default disabled path allocates none.
+  bounded API owner costs are instrumented; twenty-three selectors and local
+  None/Skip forwarding checks pass all 142 validation jobs. Enabled replay
+  storage is measured at 482.4 MiB; the default disabled path allocates none.
   Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
-  Earlier matched NV visual checks ruled out migration-induced blur because
-  verified `14a7ff70` reproduces it. Latest visual confirmation is pending.
-  Main `00d4f738` is integrated. A new matched control is needed;
+  Verified `14a7ff70` reproduces the pre-existing NV blur.
+  Main `00d4f738` is integrated; `83938927` is reviewed for integration.
+  A symmetric matched control is prepared but still needs validation;
   the latest installed-binary flight is not that comparison.
   Temporary instrument key: `advanced.draw_replay` (off by default); propose
   removing it when this arc closes, subject to Scope control. No Phase 2 yet.
@@ -2112,3 +2112,103 @@ winning-verdict effects and callback work, all-module API/CPU coverage, matched
 CPU gain beyond noise and direct GPU non-regression remain open. The next
 bounded source slice is Sunglare nomination site 45; the next default-module
 API slice is FSS Reveal Begin/End. Phase 2 and shipping remain gated.
+
+### Sunglare nomination sources and FSS reveal costs, 2026-10-03 (validated)
+
+Predicate fact version 15 adds the unconditional Sunglare nomination
+observer at site 45, the twenty-third supported selector. Its raw inputs are
+signed world mode, the classification count, actual VS CB0 identity, prior
+local nomination identity, guarded resource resolution, buffer type and byte
+width. Callback occurrence and the two post-callback identities are checked
+as mutation consistency, never used to derive the expected decision. All
+four pointer values serialize only as capture-local ordinals, including
+contradictory post-callback values. Null is ordinal zero. The reader
+enforces each immediate lazy parent even when another input is unknown; an
+unknown source remains unavailable. Historical versions 1-14 keep this
+observer unavailable.
+
+The System32 WARP rig uses the real visitor, actual bound buffers of
+192/208/224 bytes, null binding, count 10000/10001, world zero/negative, and
+seeded prior nomination. A real guarded GetType fault remains active through
+both Trace and NoTrace calls; no budget is reset. The non-buffer case is
+explicitly synthetic shadow state because the actual constant-buffer binding
+cannot accept a texture. Local nomination history is seeded per fixture, so
+these checks do not prove cross-draw learner continuity. Callback/local
+state agree and existing resolver query counts are preserved.
+
+Canonical frames 111-114 cover positive nomination, unresolved lazy decline,
+cutoff and unknown world input. Frames 115-120 invalidate missing,
+duplicate, malformed, unvisited, per-draw-cap and global-overflow captures.
+Full canonical prefixes and existing forwarding-v1 CLI gates remain active.
+Negative reader self-tests independently cover malformed lazy inputs. Writer
+fault fixtures may also fail canonical-prefix validation; they are not
+claimed as independent raw-predicate negative proofs.
+
+Fresh compiled NoTrace/NoCpu comparison retains 7057 bytes, 1636 instruction
+records, 94 calls and a 288-byte stack; byte SHA256 is
+`2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40`. All
+eight NoTrace forwarding bodies retain 2782 bytes, 756 records, 71 calls and
+a 176-byte stack against the validated forwarding-v1 baseline. The MSVC size
+probe measures a 104-byte observation and a 32768-entry pool of 3.25 MiB.
+DrawRecord grows from 3928 to 3936 bytes and the identity pool grows from 4
+to 6 MiB. Generic PredicateFact remains 376 bytes. Total retained payload is
+482.375 MiB excluding allocator overhead; disabled replay allocates none.
+
+FSS Reveal Begin/End now attribute direct attempted API calls to Scanners at
+sites 53-73. Begin samples once after admission; End uses the matching
+context's latched decision, with lifecycle clearing. The production
+learning/shadow path, guarded budget, rendering and references are
+preserved. The real WARP rig passes 64 checks: cold texture capture 9
+ReadQuery/2 Work/1 Transfer/2 State; cold CB creation with warm textures
+9/1/3/4; fully warm 8/0/3/4. Steady CB capture is cold 3/1/2/2 and warm
+2/0/2/2. Exact masks, actual copied pixels and written CB bytes, bound-state
+restoration, HRESULT/null failure prefixes, sample/context/thread filtering
+and lifecycle cases pass. Shader lookup is a zero-hash boundary shim in this
+cost rig; selector and whole-game equivalence are outside its scope.
+
+The cold DLSS creation path now reports the actual already-loaded
+`nvngx_dlss.dll` path and mapped RT_VERSION/1 fixed file version, with a
+temporary module reference. It never loads an absent runtime, reopens a disk
+path for version data, polls on evaluation or retains a reference. Complete
+path/version or explicit unavailability is logged after the existing NGX
+duration sample and deduplicated. Identical path/version/HMODULE
+unload/reload transitions between observations are indistinguishable. The
+native rig passes 26 checks using mapped kernel32 resources, a real
+no-version fixture, malformed/unaligned resource copies and actual-module
+report transitions. `edvr_log.py --version` reports this observation from
+the same build-verified graphics log; historical missing records are
+unavailable.
+
+Acceptance repairs were confined to tests/build integration: real
+buffer/texture GetDesc is vtable slot 10, not 8; ordinary canonical fixtures
+explicitly seed known world zero; the frame-14 fixture now includes
+nomination input. NewBegin cost testing retains its first sampled frame and
+re-enables the collector before End to independently test the new unsampled
+latch. An all-unsampled window closes and publishes zero throughout all 1800
+frames. The full build exposed the older FSS predicate rig's missing actual
+collector link. Generated no-version fixture libraries now stay under
+ignored build output.
+
+The final absolute-path full build passed all 142 jobs: 135 pooled jobs in
+222.0 seconds and seven quiet jobs in 58.3 seconds. Production profiles,
+Python self-tests, native rigs, the 235-key config contract and
+self-contained installer checks passed. FocusWatch recorded no shown window,
+console or foreground move to the build tree in 280 seconds. Full-build
+receipt input SHA256:
+`2fd1013e1c1edfea8b1eca1398b0c9291dac9d7764340180829b32a4bec4b5e9`. Build
+label: `v0.18.1-38-g6475e38f-dirty`.
+
+Steam remains on verified 4350a281 with settings preserved. No new build is
+installed for this checkpoint. Main-based control preparation uses pinned
+83938927 and only the timed-draw denominator plus the same mapped-DLSS
+reporter; it still needs its own full build and clean promotion. The metric
+is hook time minus its first forwarding interval, whose indexed-instanced
+interval can include a weapon-motion reissue; it is not total EDVR CPU. The
+original frame offset zero and per-thread draw stride are preserved. Section
+11 permits scoped NV pilot comparisons; section 8 adds missing feature
+fixtures per Phase 2 group. This does not waive Phase 1 acceptance or
+authorize Phase 2. Whole-ladder predicates/actions, remaining module API/CPU
+coverage, repeatable CPU improvement beyond noise and direct GPU
+non-regression remain open. The next useful cost slice is repeated on-foot
+panel CB apply/restore; broad temporal and mixed menu ownership need
+separate review.

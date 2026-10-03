@@ -411,6 +411,43 @@ def version_line(text):
     return None, None, None
 
 
+DLSS_RUNTIME_RE = re.compile(
+    r"^(?:\[[\d:.]+\]\s*)?(?P<line>dlss: runtime module\b.*)$")
+DLSS_RUNTIME_COMPLETE_RE = re.compile(
+    r"^dlss: runtime module loaded: path=.+ fileVersion="
+    r"\d+\.\d+\.\d+\.\d+$")
+
+
+def dlss_runtime_observation(text):
+    """Return the latest DLSS module observation and whether it is complete.
+
+    Older graphics logs have no such record; callers keep that distinct from
+    a current log that explicitly reports an unavailable module/version.
+    """
+    found = None
+    for raw_line in text.splitlines():
+        match = DLSS_RUNTIME_RE.match(raw_line)
+        if match:
+            found = match.group("line")
+    if found is None:
+        return None, None
+    return found, bool(DLSS_RUNTIME_COMPLETE_RE.match(found))
+
+
+def print_dlss_runtime_observation(text):
+    line, complete = dlss_runtime_observation(text)
+    if line is None:
+        print("[edvr] DLSS runtime: unavailable (record not present in this historical log)")
+    else:
+        detail = line[len("dlss: "):]
+        if complete:
+            print("[edvr] DLSS runtime: %s" % detail)
+        else:
+            # Preserve explicit unavailable details. A present but malformed
+            # or newer record is unavailable, never inferred.
+            print("[edvr] DLSS runtime: unavailable; %s" % detail)
+
+
 def print_draw_ladder_report(log_path, version, stamp):
     """Read only sidecars whose basename is derived from this graphics log."""
     import draw_ladder_replay
@@ -9435,7 +9472,7 @@ def main(argv=None):
     ap.add_argument("--list", action="store_true",
                     help="list the logs found and stop")
     ap.add_argument("--version", action="store_true",
-                    help="print the log's version line and stop")
+                    help="print the log's build identity and graphics-log DLSS runtime observation, then stop")
     ap.add_argument("--draw-replay", action="store_true",
                     help="read the selected graphics log's derived draw-ladder sidecars; "
                          "validates observed selector/action order, not hidden predicate parity")
@@ -9648,6 +9685,9 @@ def main(argv=None):
             return 2
 
     if args.version:
+        selected = LOG_RE.match(os.path.basename(path))
+        if selected and selected.group("tag").lower() == "gfx":
+            print_dlss_runtime_observation(text)
         return 0
 
     if args.draw_replay:
@@ -9817,6 +9857,23 @@ def self_test():
         print("version_line matched prose: %r" % ver3)
         ok = False
 
+    dlss_complete = ("[00:00:01.000] dlss: runtime module loaded: "
+                     "path=C:\\NVIDIA\\nvngx_dlss.dll fileVersion=3.7.0.12\n")
+    line, complete = dlss_runtime_observation(dlss_complete)
+    if not line or not complete or "fileVersion=3.7.0.12" not in line:
+        print("DLSS complete observation -> %r %r" % (line, complete))
+        ok = False
+    dlss_unavailable = ("[00:00:02.000] dlss: runtime module unavailable "
+                        "(nvngx_dlss.dll is not already loaded); actual file version unavailable\n")
+    line, complete = dlss_runtime_observation(dlss_unavailable)
+    if not line or complete:
+        print("DLSS explicit unavailable observation -> %r %r" % (line, complete))
+        ok = False
+    line, complete = dlss_runtime_observation("historical graphics log\n")
+    if line is not None or complete is not None:
+        print("DLSS absent historical observation -> %r %r" % (line, complete))
+        ok = False
+
     native = ("2026-09-13 14:01:42.659 UTC pid=1234 tid=5678 "
               "module_init,version=v0.16.2-77-gab80a6c-dirty,durable_log=1")
     native2 = native.replace("14:01:42.659", "14:01:43.001")
@@ -9866,9 +9923,13 @@ def self_test():
                 # With the timestamp prefix Log::note() really writes: a
                 # fixture without it is what hid a regex that matched
                 # nothing in the field.
+                observation = ("[00:00:01.000] dlss: runtime module loaded: "
+                               "path=C:\\NVIDIA\\nvngx_dlss.dll fileVersion=3.7.0.12\n"
+                               if stamp_s == "20260910_050000" else "")
                 f.write(("[00:00:00.001] version 0.14.1-93-gf78eba4 "
                          "(build 68C0A1F2) -- this DLL was linked "
                          "2026-09-09 20:34:39 UTC\n"
+                         + observation +
                          "[00:00:12.400] Stats[40] ships 3\n"
                          "[00:00:12.400] Stats[41] ships 0\n"
                          "[00:00:12.401] something else\n").encode("utf-8"))
@@ -9950,8 +10011,35 @@ def self_test():
         os.remove(newer_native)
 
         newest = os.path.join(logs, "edvr_gfx_20260910_050000.log")
-        if main(["--file", newest, "--version"]) != 0:
-            print("--version on a good log did not exit 0")
+        import contextlib
+        import io
+
+        def version_report(path):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["--file", path, "--version"])
+            return code, output.getvalue()
+
+        rc, output = version_report(newest)
+        if rc != 0 or "DLSS runtime: runtime module loaded:" not in output \
+                or "fileVersion=3.7.0.12" not in output:
+            print("--version did not report a complete DLSS observation (rc=%d):\n%s"
+                  % (rc, output))
+            ok = False
+        historical = os.path.join(logs, "edvr_gfx_20260910_040000.log")
+        rc, output = version_report(historical)
+        if rc != 0 or "unavailable (record not present in this historical log)" not in output:
+            print("--version did not label the absent historical observation (rc=%d):\n%s"
+                  % (rc, output))
+            ok = False
+        unavailable_path = os.path.join(tmp, "edvr_gfx_20260910_055900.log")
+        with open(unavailable_path, "wb") as f:
+            f.write(("[00:00:00.001] version 0.14.1-93-gf78eba4 (build 68C0A1F2)\n" +
+                     dlss_unavailable).encode("utf-8"))
+        rc, output = version_report(unavailable_path)
+        if rc != 0 or "DLSS runtime: unavailable; runtime module unavailable" not in output:
+            print("--version did not report explicit DLSS unavailability (rc=%d):\n%s"
+                  % (rc, output))
             ok = False
         # The exit code a caller keys off: 2, distinct from 1.
         rc = main(["--file", newest, "--expect-build",

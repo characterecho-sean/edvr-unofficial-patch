@@ -578,6 +578,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
+    "src\d3d11\dlss_runtime_info.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\flat_sharpen.cpp" ^
@@ -1577,7 +1578,7 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
     /DEDVR_BINDING_SHADOW_EXTERNAL /DEDVR_FSS_PREDICATE_TEST ^
     /Fo"%OBJ%\fsspredicate\\" /Fe"%BUILD%\fss_predicate_test.exe" ^
     "tools\fss_predicate_test\fss_predicate_test.cpp" ^
-    "src\d3d11\fss_panel.cpp" "src\d3d11\fss_reveal.cpp" ^
+    "src\d3d11\fss_panel.cpp" "src\d3d11\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" ^
     "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
@@ -1894,13 +1895,6 @@ python tools\draw_ladder_replay.py --file ^
 python tools\draw_ladder_replay.py --file ^
     "%BUILD%\draw_ladder_test-trace\forward_unknown\edvr_gfx_forward_unknown.draw-ladder-100.json" ^
     --expected-log edvr_gfx_forward_unknown.log --dry-run --expect-forward-unavailable 1 || exit /b 1
-dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
-fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
-    "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
-    echo [edvr] ERROR: draw ladder reader dry-run changed scratch directory entries
-    exit /b 1
-)
-del /q "%BUILD%\draw_ladder_trace_files_before.txt" "%BUILD%\draw_ladder_trace_files_after.txt"
 python tools\draw_ladder_replay.py --file ^
     "%BUILD%\draw_ladder_test-trace\targetsharp_positive\edvr_gfx_targetsharp_positive.draw-ladder-101.json" ^
     --expected-log edvr_gfx_targetsharp_positive.log --dry-run || exit /b 1
@@ -1931,6 +1925,63 @@ python tools\draw_ladder_replay.py --file ^
 python tools\draw_ladder_replay.py --file ^
     "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow\edvr_gfx_targetsharp_globaloverflow.draw-ladder-110.json" ^
     --expected-log edvr_gfx_targetsharp_globaloverflow.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive\edvr_gfx_sungnom_positive.draw-ladder-111.json" ^
+    --expected-log edvr_gfx_sungnom_positive.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline\edvr_gfx_sungnom_lazydecline.draw-ladder-112.json" ^
+    --expected-log edvr_gfx_sungnom_lazydecline.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff\edvr_gfx_sungnom_cutoff.draw-ladder-113.json" ^
+    --expected-log edvr_gfx_sungnom_cutoff.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown\edvr_gfx_sungnom_unknown.draw-ladder-114.json" ^
+    --expected-log edvr_gfx_sungnom_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing\edvr_gfx_sungnom_missing.draw-ladder-115.json" ^
+    --expected-log edvr_gfx_sungnom_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate\edvr_gfx_sungnom_duplicate.draw-ladder-116.json" ^
+    --expected-log edvr_gfx_sungnom_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed\edvr_gfx_sungnom_malformed.draw-ladder-117.json" ^
+    --expected-log edvr_gfx_sungnom_malformed.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited\edvr_gfx_sungnom_unvisited.draw-ladder-118.json" ^
+    --expected-log edvr_gfx_sungnom_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap\edvr_gfx_sungnom_perdrawcap.draw-ladder-119.json" ^
+    --expected-log edvr_gfx_sungnom_perdrawcap.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow\edvr_gfx_sungnom_globaloverflow.draw-ladder-120.json" ^
+    --expected-log edvr_gfx_sungnom_globaloverflow.log --dry-run --expect-invalid || exit /b 1
+dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
+fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
+    "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
+    echo [edvr] ERROR: draw ladder reader dry-run changed scratch directory entries
+    exit /b 1
+)
+del /q "%BUILD%\draw_ladder_trace_files_before.txt" "%BUILD%\draw_ladder_trace_files_after.txt"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive\edvr_gfx_sungnom_positive.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive\edvr_gfx_sungnom_positive.draw-ladder-111.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_positive"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline\edvr_gfx_sungnom_lazydecline.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline\edvr_gfx_sungnom_lazydecline.draw-ladder-112.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_lazydecline"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff\edvr_gfx_sungnom_cutoff.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff\edvr_gfx_sungnom_cutoff.draw-ladder-113.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_cutoff"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown\edvr_gfx_sungnom_unknown.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown\edvr_gfx_sungnom_unknown.draw-ladder-114.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing\edvr_gfx_sungnom_missing.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing\edvr_gfx_sungnom_missing.draw-ladder-115.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_missing"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate\edvr_gfx_sungnom_duplicate.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate\edvr_gfx_sungnom_duplicate.draw-ladder-116.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed\edvr_gfx_sungnom_malformed.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed\edvr_gfx_sungnom_malformed.draw-ladder-117.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_malformed"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited\edvr_gfx_sungnom_unvisited.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited\edvr_gfx_sungnom_unvisited.draw-ladder-118.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap\edvr_gfx_sungnom_perdrawcap.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap\edvr_gfx_sungnom_perdrawcap.draw-ladder-119.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_perdrawcap"
+del /q "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow\edvr_gfx_sungnom_globaloverflow.log" "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow\edvr_gfx_sungnom_globaloverflow.draw-ladder-120.json"
+if exist "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_nomination_globaloverflow"
 del /q "%BUILD%\draw_ladder_test-trace\targetsharp_positive\edvr_gfx_targetsharp_positive.log" "%BUILD%\draw_ladder_test-trace\targetsharp_positive\edvr_gfx_targetsharp_positive.draw-ladder-101.json"
 if exist "%BUILD%\draw_ladder_test-trace\targetsharp_positive" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_positive"
 del /q "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline\edvr_gfx_targetsharp_lazydecline.log" "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline\edvr_gfx_targetsharp_lazydecline.draw-ladder-102.json"
@@ -2519,18 +2570,18 @@ cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
     /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
     /Fo"%OBJ%\vscreenpredicate\\" ^
     "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
-    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\fss_dump.cpp" "src\d3d11\target_sharp.cpp"
+    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\fss_dump.cpp" "src\d3d11\target_sharp.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
 > "%OBJ%\vscreenpredicate\production_objects.rsp" (
     for %%F in ("%OBJ%\d3d11\*.obj") do (
-        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="fss_dump.obj" if /I not "%%~nxF"=="target_sharp.obj" echo "%%~fF"
+        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="fss_dump.obj" if /I not "%%~nxF"=="target_sharp.obj" if /I not "%%~nxF"=="sunglare_fix.obj" echo "%%~fF"
     )
 )
 link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     /OUT:"%BUILD%\vscreen_predicate_test.exe" ^
     "%OBJ%\vscreenpredicate\vscreen_predicate_test.obj" ^
     "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
-    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\fss_dump.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" ^
+    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\fss_dump.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" "%OBJ%\vscreenpredicate\sunglare_fix.obj" ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
@@ -4040,4 +4091,40 @@ cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: FSS dump API test build failed & exit /b 1 )
 "%BUILD%\fss_dump_api_test.exe" --dry-run || exit /b 1
 "%BUILD%\fss_dump_api_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_fss_reveal_api_test
+echo [edvr] === FSS Reveal Begin/End API owner regression ===
+if not exist "%OBJ%\fssrevealapi" mkdir "%OBJ%\fssrevealapi"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\fssrevealapi\\" /Fe"%BUILD%\fss_reveal_api_test.exe" ^
+    "tools\fss_reveal_api_test\fss_reveal_api_test.cpp" ^
+    "src\d3d11\fss_reveal.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: FSS Reveal API test build failed & exit /b 1 )
+"%BUILD%\fss_reveal_api_test.exe" --dry-run || exit /b 1
+"%BUILD%\fss_reveal_api_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_dlss_runtime_info_test
+echo [edvr] === mapped DLSS runtime metadata regression ===
+if not exist "%OBJ%\dlssruntimeinfo" mkdir "%OBJ%\dlssruntimeinfo"
+cl.exe /nologo /LD /O2 /MT /std:c++17 /EHsc /W4 ^
+    /Fo"%OBJ%\dlssruntimeinfo\\" ^
+    "tools\dlss_runtime_info_test\no_version_module.cpp" ^
+    /link /INCREMENTAL:NO /OUT:"%BUILD%\dlss_no_version_fixture.dll" /IMPLIB:"%OBJ%\dlssruntimeinfo\no_version_module.lib"
+if errorlevel 1 ( echo [edvr] ERROR: DLSS no-version fixture build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_DLSS_RUNTIME_INFO_TEST ^
+    /Fo"%OBJ%\dlssruntimeinfo\\" /Fe"%BUILD%\dlss_runtime_info_test.exe" ^
+    "tools\dlss_runtime_info_test\dlss_runtime_info_test.cpp" ^
+    "src\d3d11\dlss_runtime_info.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: DLSS runtime info test build failed & exit /b 1 )
+"%BUILD%\dlss_runtime_info_test.exe" --dry-run || exit /b 1
+"%BUILD%\dlss_runtime_info_test.exe" --self-test "%BUILD%\dlss_no_version_fixture.dll" || exit /b 1
 exit /b 0

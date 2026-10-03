@@ -21,7 +21,9 @@
 namespace edvr::draw_ladder_trace {
 namespace {
 
-constexpr std::uint32_t kIdentitySlots = kMaxDraws * 8;
+// Five draw identities, two context identities, and four independently
+// observed Sunglare callback/binding identities can reach normalization per draw.
+constexpr std::uint32_t kIdentitySlots = kMaxDraws * 12;
 constexpr std::size_t kPathChars = 1024;
 constexpr std::size_t kNameChars = 260;
 
@@ -51,6 +53,7 @@ struct DrawRecord final {
     std::uint32_t fssDumpFactIndices[kMaxFssDumpFactsPerDraw]{};
     std::uint32_t forwardingFactIndices[kMaxForwardingFactsPerDraw]{};
     std::uint32_t targetSharpFactIndices[kMaxTargetSharpFactsPerDraw]{};
+    std::uint32_t sunglareNominationFactIndices[kMaxSunglareNominationFactsPerDraw]{};
     ForwardFacts forwardFacts{};
     std::uint16_t siteCount = 0;
     std::uint16_t actionCount = 0;
@@ -65,6 +68,7 @@ struct DrawRecord final {
     std::uint8_t fssDumpFactCount = 0;
     std::uint8_t forwardingFactCount = 0;
     std::uint8_t targetSharpFactCount = 0;
+    std::uint8_t sunglareNominationFactCount = 0;
     std::int16_t winnerSiteId = -1;
     std::int16_t verdictOrdinal = -1;
     bool finalized = false;
@@ -87,12 +91,14 @@ LoaderPanelObservation* g_loaderPanelFacts = nullptr;
 FssDumpObservation* g_fssDumpFacts = nullptr;
 ForwardingObservation* g_forwardingFacts = nullptr;
 TargetSharpObservation* g_targetSharpFacts = nullptr;
+SunglareNominationObservation* g_sunglareNominationFacts = nullptr;
 std::uint32_t g_eyeCensusFactCount = 0;
 std::uint32_t g_resolveBindFactCount = 0;
 std::uint32_t g_loaderPanelFactCount = 0;
 std::uint32_t g_fssDumpFactCount = 0;
 std::uint32_t g_forwardingFactCount = 0;
 std::uint32_t g_targetSharpFactCount = 0;
+std::uint32_t g_sunglareNominationFactCount = 0;
 std::uintptr_t* g_identities = nullptr;
 std::uint32_t g_drawCount = 0;
 std::uint32_t g_identityCount = 0;
@@ -120,6 +126,8 @@ bool g_forwardingIndexOverflowed = false;
 bool g_forwardingPoolMissing = false;
 bool g_targetSharpIndexOverflowed = false;
 bool g_targetSharpPoolMissing = false;
+bool g_sunglareNominationIndexOverflowed = false;
+bool g_sunglareNominationPoolMissing = false;
 bool g_remlokIndexOverflowed = false;
 bool g_remlokPoolMissing = false;
 bool g_lastWriteSucceeded = false;
@@ -631,9 +639,10 @@ void normalizeResourceIdentities() noexcept {
     g_identityCount = 0;
     for (std::uint32_t i = 0; i < g_drawCount; ++i) {
         const DrawFacts& f = g_records[i].facts;
-        std::uintptr_t values[8] = {
+        std::uintptr_t values[12] = {
             f.vsIdentity, f.psIdentity, f.rtv0Identity, f.dsv0Identity,
-            f.argumentBufferKnown ? f.argumentBufferIdentity : 0, 0, 0, 0};
+            f.argumentBufferKnown ? f.argumentBufferIdentity : 0, 0, 0, 0,
+            0, 0, 0, 0};
         const DrawRecord& record = g_records[i];
         for (std::uint8_t j = 0; j < record.basicFactCount; ++j) {
             if (!g_basicFacts || record.basicFactIndices[j] >= g_basicFactCount) {
@@ -646,6 +655,22 @@ void normalizeResourceIdentities() noexcept {
                 values[6] = fact.context.contextIdentity.value;
             if (fact.context.ownerContextIdentity.reached && fact.context.ownerContextIdentity.known)
                 values[7] = fact.context.ownerContextIdentity.value;
+        }
+        for (std::uint8_t j = 0; j < record.sunglareNominationFactCount; ++j) {
+            if (!g_sunglareNominationFacts ||
+                record.sunglareNominationFactIndices[j] >= g_sunglareNominationFactCount) {
+                g_wasOverflowed = true;
+                continue;
+            }
+            const auto& fact = g_sunglareNominationFacts[record.sunglareNominationFactIndices[j]];
+            if (fact.boundCbIdentity.reached && fact.boundCbIdentity.known)
+                values[8] = fact.boundCbIdentity.value;
+            if (fact.nominatedBeforeIdentity.reached && fact.nominatedBeforeIdentity.known)
+                values[9] = fact.nominatedBeforeIdentity.value;
+            if (fact.nominatedAfterIdentity.reached && fact.nominatedAfterIdentity.known)
+                values[10] = fact.nominatedAfterIdentity.value;
+            if (fact.callbackTargetAfterIdentity.reached && fact.callbackTargetAfterIdentity.known)
+                values[11] = fact.callbackTargetAfterIdentity.value;
         }
         for (std::uintptr_t value : values) {
             if (value == 0) continue;
@@ -703,6 +728,35 @@ bool writeTargetSharpFact(Writer& writer,
 #undef TARGET_READ
     return writeText(writer, "},\"eyeSize\":") &&
         writeEyeSizeObservation(writer, fact.eyeSize) && writeText(writer, "}");
+}
+
+bool writeSunglareNominationFact(Writer& writer,
+                                 const SunglareNominationObservation& fact) noexcept {
+    if (!writeFmt(writer,
+            "{\"siteId\":%u,\"kind\":%u,\"known\":\"yes\",\"inputs\":{",
+            fact.siteId, static_cast<unsigned>(fact.kind))) return false;
+    SunglareNominationObservation normalized = fact;
+    auto normalize = [](BasicDrawRead<std::uintptr_t>& read) noexcept {
+        if (read.reached && read.known) read.value = resourceOrdinal(read.value);
+    };
+    normalize(normalized.boundCbIdentity);
+    normalize(normalized.nominatedBeforeIdentity);
+    normalize(normalized.nominatedAfterIdentity);
+    normalize(normalized.callbackTargetAfterIdentity);
+    bool first = true;
+#define SUNGLARE_NOMINATION_READ(name) \
+    if (!writeBasicRead(writer, #name, normalized.name, first)) return false
+    SUNGLARE_NOMINATION_READ(worldMode);
+    SUNGLARE_NOMINATION_READ(boundCbIdentity);
+    SUNGLARE_NOMINATION_READ(nominatedBeforeIdentity);
+    SUNGLARE_NOMINATION_READ(resourceResolved);
+    SUNGLARE_NOMINATION_READ(isBuffer);
+    SUNGLARE_NOMINATION_READ(byteWidth);
+    SUNGLARE_NOMINATION_READ(callbackInvoked);
+    SUNGLARE_NOMINATION_READ(nominatedAfterIdentity);
+    SUNGLARE_NOMINATION_READ(callbackTargetAfterIdentity);
+#undef SUNGLARE_NOMINATION_READ
+    return writeText(writer, "}}");
 }
 
 bool writeBasicFact(Writer& writer, const BasicDrawObservation& fact) noexcept {
@@ -1155,7 +1209,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":14,"
+        "\"predicateFactVersion\":15,"
         "\"forwardInputVersion\":1,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
@@ -1165,7 +1219,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Predicate fact version 14 independently re-evaluates the supported gate, stars, Holo, Scrim, NV, RemLok, FSS, Sunglare, context, distance, eye-census, resolve-binding, current-draw loader-panel, FSS dump and TargetSharp predicates from raw consumed source facts. Observed helper outputs are consistency checks; cached matches and SiteEvents are not selector inputs. Whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
+        "\"predicateNote\":\"Predicate fact version 15 independently re-evaluates the supported gate, stars, Holo, Scrim, NV, RemLok, FSS, Sunglare, context, distance, eye-census, resolve-binding, current-draw loader-panel, FSS dump, TargetSharp and Sunglare nomination predicates from raw consumed source facts. Observed helper outputs are consistency checks; cached matches and SiteEvents are not selector inputs. Whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
         "\"identityNote\":\"Resource and context identities share per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
@@ -1433,6 +1487,18 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                 !writeTargetSharpFact(writer,
                     g_targetSharpFacts[r.targetSharpFactIndices[j]])) return false;
         }
+        if (r.sunglareNominationFactCount &&
+            (r.predicateFactCount || r.sunglareFactCount || r.fssFactCount ||
+             r.remlokFactCount || r.basicFactCount || r.eyeCensusFactCount ||
+             r.resolveBindFactCount || r.loaderPanelFactCount || r.fssDumpFactCount ||
+             r.targetSharpFactCount) && !writeText(writer, ",")) return false;
+        for (std::uint8_t j = 0; j < r.sunglareNominationFactCount; ++j) {
+            if (j && !writeText(writer, ",")) return false;
+            if (!g_sunglareNominationFacts ||
+                r.sunglareNominationFactIndices[j] >= g_sunglareNominationFactCount ||
+                !writeSunglareNominationFact(writer,
+                    g_sunglareNominationFacts[r.sunglareNominationFactIndices[j]])) return false;
+        }
         ok = writeFmt(writer,
             "],\"winnerSiteId\":%d,\"verdict\":%d,\"forwardFacts\":",
             r.winnerSiteId, r.verdictOrdinal);
@@ -1517,7 +1583,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     if (g_isCapturing) return;
     const bool wasEnabled = g_enabled.load(std::memory_order_acquire);
     if (!enabled && !wasEnabled && !g_records && !g_sunglareFacts &&
-        !g_fssFacts && !g_remlokFacts && !g_basicFacts && !g_eyeCensusFacts && !g_resolveBindFacts && !g_loaderPanelFacts && !g_fssDumpFacts && !g_forwardingFacts && !g_targetSharpFacts && !g_identities) return;
+        !g_fssFacts && !g_remlokFacts && !g_basicFacts && !g_eyeCensusFacts && !g_resolveBindFacts && !g_loaderPanelFacts && !g_fssDumpFacts && !g_forwardingFacts && !g_targetSharpFacts && !g_sunglareNominationFacts && !g_identities) return;
     if (enabled && wasEnabled && logFilePath && logFilePath[0]) {
         wchar_t oldPath[kPathChars]{};
         if (SUCCEEDED(StringCchCopyW(oldPath, kPathChars, g_directory)) &&
@@ -1552,6 +1618,8 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_forwardingPoolMissing = false;
     g_targetSharpIndexOverflowed = false;
     g_targetSharpPoolMissing = false;
+    g_sunglareNominationIndexOverflowed = false;
+    g_sunglareNominationPoolMissing = false;
     g_lastWriteSucceeded = false;
     if (g_records) { delete[] g_records; g_records = nullptr; }
     if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
@@ -1564,6 +1632,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     if (g_fssDumpFacts) { delete[] g_fssDumpFacts; g_fssDumpFacts = nullptr; }
     if (g_forwardingFacts) { delete[] g_forwardingFacts; g_forwardingFacts = nullptr; }
     if (g_targetSharpFacts) { delete[] g_targetSharpFacts; g_targetSharpFacts = nullptr; }
+    if (g_sunglareNominationFacts) { delete[] g_sunglareNominationFacts; g_sunglareNominationFacts = nullptr; }
     if (g_identities) { delete[] g_identities; g_identities = nullptr; }
     g_sunglareFactCount = 0;
     g_fssFactCount = 0;
@@ -1575,6 +1644,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_fssDumpFactCount = 0;
     g_forwardingFactCount = 0;
     g_targetSharpFactCount = 0;
+    g_sunglareNominationFactCount = 0;
     g_directory[0] = L'\0';
     g_logFileName[0] = L'\0';
     g_logStem[0] = L'\0';
@@ -1594,10 +1664,13 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_fssDumpFacts = new (std::nothrow) FssDumpObservation[kMaxFssDumpFacts];
     g_forwardingFacts = new (std::nothrow) ForwardingObservation[kMaxForwardingFacts];
     g_targetSharpFacts = new (std::nothrow) TargetSharpObservation[kMaxTargetSharpFacts];
+    g_sunglareNominationFacts = new (std::nothrow)
+        SunglareNominationObservation[kMaxSunglareNominationFacts];
     g_identities = new (std::nothrow) std::uintptr_t[kIdentitySlots];
     if (!g_records || !g_sunglareFacts || !g_fssFacts || !g_remlokFacts || !g_basicFacts ||
         !g_eyeCensusFacts || !g_resolveBindFacts || !g_loaderPanelFacts || !g_fssDumpFacts ||
-        !g_forwardingFacts || !g_targetSharpFacts || !g_identities) {
+        !g_forwardingFacts || !g_targetSharpFacts ||
+        !g_sunglareNominationFacts || !g_identities) {
         if (g_records) { delete[] g_records; g_records = nullptr; }
         if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
         if (g_fssFacts) { delete[] g_fssFacts; g_fssFacts = nullptr; }
@@ -1609,6 +1682,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
         if (g_fssDumpFacts) { delete[] g_fssDumpFacts; g_fssDumpFacts = nullptr; }
         if (g_forwardingFacts) { delete[] g_forwardingFacts; g_forwardingFacts = nullptr; }
         if (g_targetSharpFacts) { delete[] g_targetSharpFacts; g_targetSharpFacts = nullptr; }
+        if (g_sunglareNominationFacts) { delete[] g_sunglareNominationFacts; g_sunglareNominationFacts = nullptr; }
         if (g_identities) { delete[] g_identities; g_identities = nullptr; }
         g_directory[0] = L'\0';
         g_logFileName[0] = L'\0';
@@ -1663,12 +1737,15 @@ ShutdownResult shutdown() noexcept {
     g_forwardingPoolMissing = false;
     g_targetSharpIndexOverflowed = false;
     g_targetSharpPoolMissing = false;
+    g_sunglareNominationIndexOverflowed = false;
+    g_sunglareNominationPoolMissing = false;
     g_eyeCensusFactCount = 0;
     g_resolveBindFactCount = 0;
     g_loaderPanelFactCount = 0;
     g_fssDumpFactCount = 0;
     g_forwardingFactCount = 0;
     g_targetSharpFactCount = 0;
+    g_sunglareNominationFactCount = 0;
     if (g_records) {
         delete[] g_records;
         g_records = nullptr;
@@ -1713,6 +1790,10 @@ ShutdownResult shutdown() noexcept {
         delete[] g_targetSharpFacts;
         g_targetSharpFacts = nullptr;
     }
+    if (g_sunglareNominationFacts) {
+        delete[] g_sunglareNominationFacts;
+        g_sunglareNominationFacts = nullptr;
+    }
     if (g_identities) {
         delete[] g_identities;
         g_identities = nullptr;
@@ -1756,6 +1837,7 @@ void frameBegin(const FrameFacts& facts) noexcept {
     g_fssDumpFactCount = 0;
     g_forwardingFactCount = 0;
     g_targetSharpFactCount = 0;
+    g_sunglareNominationFactCount = 0;
     g_eyeCensusIndexOverflowed = false;
     g_resolveBindIndexOverflowed = false;
     g_loaderPanelIndexOverflowed = false;
@@ -1768,6 +1850,8 @@ void frameBegin(const FrameFacts& facts) noexcept {
     g_forwardingPoolMissing = false;
     g_targetSharpIndexOverflowed = false;
     g_targetSharpPoolMissing = false;
+    g_sunglareNominationIndexOverflowed = false;
+    g_sunglareNominationPoolMissing = false;
     g_sunglareIndexOverflowed = false;
     g_sunglarePoolMissing = false;
     g_fssIndexOverflowed = false;
@@ -2047,7 +2131,7 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
     if (record.finalized || record.predicateFactCount >= kMaxPredicateFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
             record.fssFactCount + record.remlokFactCount + record.basicFactCount +
-            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount >= kMaxTotalPredicateFactsPerDraw ||
+            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >= kMaxTotalPredicateFactsPerDraw ||
         static_cast<std::uint8_t>(fact.known) > static_cast<std::uint8_t>(TriState::Yes) ||
         fact.known == TriState::No ||
         static_cast<std::uint8_t>(fact.gateWanted) > static_cast<std::uint8_t>(TriState::Yes) ||
@@ -2172,7 +2256,7 @@ void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept {
     if (record.sunglareFactCount >= kMaxSunglareFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
             record.fssFactCount + record.remlokFactCount + record.basicFactCount +
-            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -2271,7 +2355,7 @@ void appendFssFact(Token token, const FssObservation& fact) noexcept {
     if (record.fssFactCount >= kMaxFssFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount +
             record.fssFactCount + record.remlokFactCount + record.basicFactCount +
-            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -2370,7 +2454,7 @@ void appendRemlokFact(Token token, const remlok_observation::Observation& fact) 
     }
     if (record.remlokFactCount >= kMaxRemlokFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -2405,7 +2489,7 @@ void appendBasicFact(Token token, const BasicDrawObservation& fact) noexcept {
     }
     if (record.basicFactCount >= kMaxBasicFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount >= kMaxTotalPredicateFactsPerDraw) {
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >= kMaxTotalPredicateFactsPerDraw) {
         g_wasOverflowed = true;
         return;
     }
@@ -2454,7 +2538,7 @@ void appendEyeCensusFact(Token token, const EyeCensusObservation& fact) noexcept
     }
     if (record.eyeCensusFactCount >= kMaxEyeCensusFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount >=
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >=
             kMaxTotalPredicateFactsPerDraw || !validEyeCensusFact(fact)) {
         g_wasOverflowed = true;
         return;
@@ -2481,7 +2565,7 @@ void appendResolveBindFact(Token token, const ResolveBindObservation& fact) noex
     }
     if (record.resolveBindFactCount >= kMaxResolveBindFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount >=
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >=
             kMaxTotalPredicateFactsPerDraw || !validResolveBindFact(fact)) {
         g_wasOverflowed = true;
         return;
@@ -2508,7 +2592,7 @@ void appendLoaderPanelFact(Token token, const LoaderPanelObservation& fact) noex
     }
     if (record.loaderPanelFactCount >= kMaxLoaderPanelFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
-            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount >=
+            record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount + record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >=
             kMaxTotalPredicateFactsPerDraw || !validLoaderPanelFact(fact)) {
         g_wasOverflowed = true;
         return;
@@ -2536,7 +2620,7 @@ void appendFssDumpFact(Token token, const FssDumpObservation& fact) noexcept {
     if (record.fssDumpFactCount >= kMaxFssDumpFactsPerDraw ||
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
             record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount +
-            record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount >=
+            record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >=
             kMaxTotalPredicateFactsPerDraw || !validFssDumpFact(fact)) {
         g_wasOverflowed = true;
         return;
@@ -2696,7 +2780,7 @@ void appendTargetSharpFact(Token token,
         record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
             record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount +
             record.resolveBindFactCount + record.loaderPanelFactCount +
-            record.fssDumpFactCount + record.targetSharpFactCount >=
+            record.fssDumpFactCount + record.targetSharpFactCount + record.sunglareNominationFactCount >=
             kMaxTotalPredicateFactsPerDraw || !validTargetSharpFact(fact, record.facts)) {
         g_wasOverflowed = true;
         return;
@@ -2710,6 +2794,151 @@ void appendTargetSharpFact(Token token,
     }
     g_targetSharpFacts[g_targetSharpFactCount] = fact;
     record.targetSharpFactIndices[record.targetSharpFactCount++] = g_targetSharpFactCount++;
+}
+
+namespace {
+template <class T>
+bool validSunglareNominationRead(const BasicDrawRead<T>& read) noexcept {
+    return (!read.known || read.reached) &&
+        ((read.reached && read.known) || read.value == T{});
+}
+
+bool validSunglareNominationFact(const SunglareNominationObservation& f,
+                                 const DrawFacts& draw) noexcept {
+    if (f.siteId != 45 || f.kind != 22 ||
+        !validSunglareNominationRead(f.worldMode) ||
+        !validSunglareNominationRead(f.boundCbIdentity) ||
+        !validSunglareNominationRead(f.nominatedBeforeIdentity) ||
+        !validSunglareNominationRead(f.resourceResolved) ||
+        !validSunglareNominationRead(f.isBuffer) ||
+        !validSunglareNominationRead(f.byteWidth) ||
+        !validSunglareNominationRead(f.callbackInvoked) ||
+        !validSunglareNominationRead(f.nominatedAfterIdentity) ||
+        !validSunglareNominationRead(f.callbackTargetAfterIdentity) ||
+        !f.worldMode.reached || !f.callbackInvoked.reached) return false;
+    const auto validPostShape = [&](bool callbackKnown, bool callback) noexcept {
+        if (callbackKnown && f.callbackInvoked.known &&
+            f.callbackInvoked.value != callback) return false;
+        if (!f.callbackInvoked.known)
+            return f.nominatedAfterIdentity.reached == f.callbackTargetAfterIdentity.reached;
+        return f.callbackInvoked.value
+            ? f.nominatedAfterIdentity.reached && f.callbackTargetAfterIdentity.reached
+            : !f.nominatedAfterIdentity.reached && !f.callbackTargetAfterIdentity.reached;
+    };
+    if ((draw.count <= 10000 || (f.worldMode.known && f.worldMode.value == 0)) &&
+        (f.boundCbIdentity.reached || f.nominatedBeforeIdentity.reached ||
+         f.resourceResolved.reached || f.isBuffer.reached || f.byteWidth.reached)) return false;
+    if ((f.nominatedBeforeIdentity.reached && !f.boundCbIdentity.reached) ||
+        (f.resourceResolved.reached && !f.nominatedBeforeIdentity.reached) ||
+        (f.isBuffer.reached && !f.resourceResolved.reached) ||
+        (f.byteWidth.reached && !f.isBuffer.reached)) return false;
+    if ((f.boundCbIdentity.reached && f.boundCbIdentity.known &&
+         f.boundCbIdentity.value == 0 && f.nominatedBeforeIdentity.reached) ||
+        (f.boundCbIdentity.known && f.nominatedBeforeIdentity.known &&
+         f.boundCbIdentity.value == f.nominatedBeforeIdentity.value &&
+         (f.resourceResolved.reached || f.isBuffer.reached || f.byteWidth.reached)) ||
+        (f.resourceResolved.reached && f.resourceResolved.known &&
+         !f.resourceResolved.value && (f.isBuffer.reached || f.byteWidth.reached)) ||
+        (f.isBuffer.reached && f.isBuffer.known && !f.isBuffer.value && f.byteWidth.reached))
+        return false;
+    if (!f.worldMode.known) {
+        if (draw.count <= 10000)
+            return !f.boundCbIdentity.reached && !f.nominatedBeforeIdentity.reached &&
+                !f.resourceResolved.reached && !f.isBuffer.reached &&
+                !f.byteWidth.reached && !f.nominatedAfterIdentity.reached &&
+                !f.callbackTargetAfterIdentity.reached && validPostShape(true, false);
+        return validPostShape(false, false);
+    }
+    const bool candidate = f.worldMode.value != 0 && draw.count > 10000;
+    if (!candidate) {
+        return !f.boundCbIdentity.reached && !f.nominatedBeforeIdentity.reached &&
+            !f.resourceResolved.reached && !f.isBuffer.reached &&
+            !f.byteWidth.reached && validPostShape(true, false);
+    }
+    if (!f.boundCbIdentity.reached) return false;
+    if (!f.boundCbIdentity.known) {
+        return validPostShape(false, false);
+    }
+    if (f.boundCbIdentity.value == 0) {
+        return !f.nominatedBeforeIdentity.reached && !f.resourceResolved.reached &&
+            !f.isBuffer.reached && !f.byteWidth.reached && validPostShape(true, false);
+    }
+    if (!f.nominatedBeforeIdentity.reached) return false;
+    if (!f.nominatedBeforeIdentity.known) {
+        return validPostShape(false, false);
+    }
+    if (f.boundCbIdentity.value == f.nominatedBeforeIdentity.value) {
+        return !f.resourceResolved.reached && !f.isBuffer.reached && !f.byteWidth.reached &&
+            validPostShape(true, false);
+    }
+    if (!f.resourceResolved.reached) return false;
+    if (!f.resourceResolved.known) {
+        return validPostShape(false, false);
+    }
+    if (!f.resourceResolved.value) {
+        return !f.isBuffer.reached && !f.byteWidth.reached &&
+            validPostShape(true, false);
+    }
+    if (!f.isBuffer.reached) return false;
+    if (!f.isBuffer.known) {
+        return validPostShape(false, false);
+    }
+    if (!f.isBuffer.value) {
+        return !f.byteWidth.reached && validPostShape(true, false);
+    }
+    if (!f.byteWidth.reached) return false;
+    const bool callback = f.byteWidth.known && f.byteWidth.value == 208;
+    return validPostShape(f.byteWidth.known, callback);
+}
+}  // namespace
+
+void appendSunglareNominationFact(Token token,
+                                 const SunglareNominationObservation& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized) { rejectInvalidToken(); return; }
+    if (!g_sunglareNominationFacts) {
+        g_sunglareNominationPoolMissing = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (g_sunglareNominationFactCount >= kMaxSunglareNominationFacts ||
+        record.sunglareNominationFactCount >= kMaxSunglareNominationFactsPerDraw) {
+        g_sunglareNominationIndexOverflowed = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (record.predicateFactCount + record.sunglareFactCount + record.fssFactCount +
+        record.remlokFactCount + record.basicFactCount + record.eyeCensusFactCount +
+        record.resolveBindFactCount + record.loaderPanelFactCount + record.fssDumpFactCount +
+        record.targetSharpFactCount + record.sunglareNominationFactCount >=
+        kMaxTotalPredicateFactsPerDraw || !validSunglareNominationFact(fact, record.facts)) {
+        g_wasOverflowed = true;
+        return;
+    }
+    if (record.sunglareNominationFactCount) {
+        g_wasOverflowed = true;
+        return;
+    }
+    g_sunglareNominationFacts[g_sunglareNominationFactCount] = fact;
+    record.sunglareNominationFactIndices[record.sunglareNominationFactCount++] =
+        g_sunglareNominationFactCount++;
+}
+
+std::uint8_t sunglareNominationFactCountForTest(Token token) noexcept {
+    return validToken(token) ? g_records[token.drawIndex].sunglareNominationFactCount : 0;
+}
+
+bool readSunglareNominationFactForTest(
+    Token token, std::uint8_t ordinal,
+    SunglareNominationObservation* out) noexcept {
+    if (!out || !validToken(token) || !g_sunglareNominationFacts) return false;
+    const DrawRecord& record = g_records[token.drawIndex];
+    if (ordinal >= record.sunglareNominationFactCount ||
+        record.sunglareNominationFactIndices[ordinal] >= g_sunglareNominationFactCount)
+        return false;
+    *out = g_sunglareNominationFacts[record.sunglareNominationFactIndices[ordinal]];
+    return true;
 }
 
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
@@ -2978,6 +3207,32 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
             g_wasOverflowed = true;
         }
     }
+    std::uint8_t sunglareNominationEventCount = 0;
+    for (std::uint16_t i = 0; i < record.siteCount; ++i) {
+        const SiteEvent& event = record.sites[i];
+        if (event.id != 45) continue;
+        ++sunglareNominationEventCount;
+        if (event.kind != static_cast<std::uint8_t>(draw_ladder::SiteKind::Observe) ||
+            event.subsite != 0 ||
+            event.outcome != static_cast<std::uint8_t>(draw_ladder::SiteOutcome::Observed) ||
+            event.flow != static_cast<std::uint8_t>(draw_ladder::Flow::Continue) ||
+            event.verdict != -1) g_wasOverflowed = true;
+    }
+    if (sunglareNominationEventCount > 1 ||
+        record.sunglareNominationFactCount != sunglareNominationEventCount)
+        g_wasOverflowed = true;
+    for (std::uint8_t i = 0; i < record.sunglareNominationFactCount; ++i) {
+        if (!g_sunglareNominationFacts ||
+            record.sunglareNominationFactIndices[i] >= g_sunglareNominationFactCount ||
+            !validSunglareNominationFact(
+                g_sunglareNominationFacts[record.sunglareNominationFactIndices[i]],
+                record.facts)) {
+            g_sunglareNominationPoolMissing = !g_sunglareNominationFacts;
+            g_sunglareNominationIndexOverflowed =
+                g_sunglareNominationIndexOverflowed || !g_sunglareNominationPoolMissing;
+            g_wasOverflowed = true;
+        }
+    }
     for (std::uint16_t i = 0; i < record.siteCount; ++i) {
         const std::uint16_t siteId = record.sites[i].id;
         if ((siteId == 51 || siteId == 52) && record.remlokFactCount != 1)
@@ -3204,6 +3459,8 @@ bool capturing() noexcept {
 }
 bool overflowed() noexcept { return g_wasOverflowed; }
 CaptureInvalidation invalidationReason() noexcept {
+    if (g_sunglareNominationPoolMissing) return CaptureInvalidation::SunglareNominationPoolMissing;
+    if (g_sunglareNominationIndexOverflowed) return CaptureInvalidation::SunglareNominationIndexOverflow;
     if (g_targetSharpPoolMissing) return CaptureInvalidation::TargetSharpPoolMissing;
     if (g_targetSharpIndexOverflowed) return CaptureInvalidation::TargetSharpIndexOverflow;
     if (g_forwardingPoolMissing) return CaptureInvalidation::ForwardingPoolMissing;

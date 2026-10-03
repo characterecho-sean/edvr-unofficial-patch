@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 14
+PREDICATE_FACT_VERSION = 15
 RESOLVE_BIND_PS_HASH = 0x7CECABDE34FFBE9E
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
@@ -3217,13 +3217,134 @@ def _target_sharp_fact(fact, draw, label, admitted):
     return value("queriedShaderHash") == value("configuredShaderHash"), eye_mismatch
 
 
+def _sunglare_nomination_fact(fact, draw, label):
+    names = ("worldMode", "boundCbIdentity", "nominatedBeforeIdentity",
+             "resourceResolved", "isBuffer", "byteWidth", "callbackInvoked",
+             "nominatedAfterIdentity", "callbackTargetAfterIdentity")
+    if (set(fact) != {"siteId", "kind", "known", "inputs"} or
+            (fact.get("siteId"), fact.get("kind"), fact.get("known")) != (45, 22, "yes")):
+        raise TraceError(label + " has missing or unexpected Sunglare nomination fields")
+    inputs = fact["inputs"]
+    if not isinstance(inputs, dict) or set(inputs) != set(names):
+        raise TraceError(label + ".inputs has missing or unexpected raw reads")
+    domains = {name: (bool, None) for name in names}
+    domains["worldMode"] = (int, 0x7fffffff)
+    domains["byteWidth"] = (int, 0xffffffff)
+    for name in ("boundCbIdentity", "nominatedBeforeIdentity",
+                 "nominatedAfterIdentity", "callbackTargetAfterIdentity"):
+        domains[name] = (int, 12 * MAX_DRAWS)
+    reads = {name: _sunglare_read(inputs, name, label + ".inputs", typ, high,
+                                  -0x80000000 if name == "worldMode" else 0)
+             for name, (typ, high) in domains.items()}
+
+    def value(name):
+        reached, known, val = reads[name]
+        return val if reached and known else None
+
+    def unread(*fields):
+        for name in fields:
+            reached, known, _ = reads[name]
+            if reached or known:
+                raise TraceError(label + ".inputs." + name + " violates lazy read order")
+
+    if not reads["worldMode"][0] or not reads["callbackInvoked"][0]:
+        raise TraceError(label + " lacks unconditional mode or callback-marker read")
+    mode = value("worldMode")
+    if draw["count"] <= 10000 or mode == 0:
+        unread("boundCbIdentity", "nominatedBeforeIdentity", "resourceResolved",
+               "isBuffer", "byteWidth")
+    if ((reads["nominatedBeforeIdentity"][0] and not reads["boundCbIdentity"][0]) or
+            (reads["resourceResolved"][0] and not reads["nominatedBeforeIdentity"][0]) or
+            (reads["isBuffer"][0] and not reads["resourceResolved"][0]) or
+            (reads["byteWidth"][0] and not reads["isBuffer"][0])):
+        raise TraceError(label + " has a source read without its immediate lazy predecessor")
+    bound_value = value("boundCbIdentity")
+    before_value = value("nominatedBeforeIdentity")
+    resolved_value = value("resourceResolved")
+    buffer_value = value("isBuffer")
+    if ((bound_value == 0 and reads["nominatedBeforeIdentity"][0]) or
+            (bound_value is not None and before_value is not None and bound_value == before_value and
+             any(reads[name][0] for name in ("resourceResolved", "isBuffer", "byteWidth"))) or
+            (resolved_value is False and any(reads[name][0] for name in ("isBuffer", "byteWidth"))) or
+            (buffer_value is False and reads["byteWidth"][0])):
+        raise TraceError(label + " has a source read after a known short circuit")
+    eligible = mode is not None and mode != 0 and draw["count"] > 10000
+    suffix = names[1:6]
+    if mode is False or (mode is not None and mode == 0) or draw["count"] <= 10000:
+        unread(*suffix)
+    elif mode is not None and mode != 0 and not reads["boundCbIdentity"][0]:
+        raise TraceError(label + " nomination candidate lacks bound-CB identity")
+    elif reads["boundCbIdentity"][0]:
+        bound = value("boundCbIdentity")
+        if bound == 0:
+            unread("nominatedBeforeIdentity", "resourceResolved", "isBuffer", "byteWidth")
+        elif bound is not None and not reads["nominatedBeforeIdentity"][0]:
+            raise TraceError(label + " non-null binding lacks prior nomination identity")
+        elif value("nominatedBeforeIdentity") == bound and bound is not None:
+            unread("resourceResolved", "isBuffer", "byteWidth")
+        elif value("nominatedBeforeIdentity") is not None and not reads["resourceResolved"][0]:
+            raise TraceError(label + " changed binding lacks resource-resolution result")
+        if bound is None and any(reads[name][0] for name in
+                                 ("resourceResolved", "isBuffer", "byteWidth")) and not reads["nominatedBeforeIdentity"][0]:
+            raise TraceError(label + " unknown binding continued without prior nomination read")
+        if value("resourceResolved") is False:
+            unread("isBuffer", "byteWidth")
+        elif value("resourceResolved") is True and not reads["isBuffer"][0]:
+            raise TraceError(label + " resolved resource lacks buffer classification")
+        if value("isBuffer") is False:
+            unread("byteWidth")
+        elif value("isBuffer") is True and not reads["byteWidth"][0]:
+            raise TraceError(label + " buffer resource lacks byte width")
+
+    unavailable = (not reads["callbackInvoked"][1] or any(
+        reads[n][0] and not reads[n][1] for n in
+        ("worldMode", "boundCbIdentity", "nominatedBeforeIdentity",
+         "resourceResolved", "isBuffer", "byteWidth")))
+
+    # An unknown reached value can decide whether the selector proceeds. Keep
+    # the observation unavailable instead of treating its zero placeholder as false.
+    callback = False
+    if mode is not None and mode != 0 and draw["count"] > 10000:
+        bound = value("boundCbIdentity")
+        before = value("nominatedBeforeIdentity")
+        resolved = value("resourceResolved")
+        is_buffer = value("isBuffer")
+        width = value("byteWidth")
+        callback = bool(bound and before is not None and bound != before and
+                        resolved is True and is_buffer is True and width == 208)
+    marker = value("callbackInvoked")
+    mismatches = 0
+    if marker is not None and not unavailable and marker != callback:
+        mismatches += 1
+    after = value("nominatedAfterIdentity")
+    target = value("callbackTargetAfterIdentity")
+    after_observed = (marker is True or
+        (marker is None and (reads["nominatedAfterIdentity"][0] or
+                             reads["callbackTargetAfterIdentity"][0])))
+    if callback or after_observed:
+        if not reads["nominatedAfterIdentity"][0] or not reads["callbackTargetAfterIdentity"][0]:
+            raise TraceError(label + " invoked callback lacks post-mutation identities")
+        if after is None or target is None:
+            unavailable = True
+        else:
+            bound = value("boundCbIdentity")
+            if callback and bound is not None and (after != bound or target != bound):
+                mismatches += 1
+    else:
+        unread("nominatedAfterIdentity", "callbackTargetAfterIdentity")
+    expected_event = {"id": 45, "kind": 1, "outcome": 1, "flow": 0,
+                      "subsite": 0, "verdict": -1}
+    return expected_event, mismatches, unavailable
+
+
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 19 if predicate_fact_version >= 14 else 18 if predicate_fact_version >= 13 else 17 if predicate_fact_version >= 12 else 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 20 if predicate_fact_version >= 15 else 19 if predicate_fact_version >= 14 else 18 if predicate_fact_version >= 13 else 17 if predicate_fact_version >= 12 else 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 14 else
+    supported_ids = ((2, 3, 6, 24, 25, 26, 45, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 15 else
+                     (2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 14 else
                      (2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 13 else
                      (2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 12 else
                      (2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 11 else
@@ -3244,12 +3365,14 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     fss_dump_interested = None
     target_sharp_interested = None
     target_sharp_facts = 0
+    sunglare_nomination_facts = 0
     for index, fact in enumerate(facts):
         fact_label = "%s.predicateFacts[%d]" % (label, index)
         if not isinstance(fact, dict):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        22 if predicate_fact_version >= 15 else
                         21 if predicate_fact_version >= 14 else
                         20 if predicate_fact_version >= 13 else
                         19 if predicate_fact_version >= 12 else
@@ -3265,7 +3388,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                         3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (54, 21), (55, 8),
+        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (45, 22), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (54, 21), (55, 8),
+                           (57, 12), (58, 13), (59, 20), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 15 else (
+            (2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (54, 21), (55, 8),
                            (57, 12), (58, 13), (59, 20), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 14 else (
             (2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (59, 20), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 13 else (
@@ -3397,6 +3522,15 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 event, fact_mismatches, fact_mutation_unobserved = None, 0, exc.mutation_unobserved
             by_site[site_id] = (event, None, True, 0, fact_mismatches,
                                 fact_mutation_unobserved)
+        elif kind == 22:
+            if site_id != 45 or predicate_fact_version < 15:
+                raise TraceError(fact_label + " has unsupported Sunglare nomination fact")
+            event, fact_mismatches, fact_unavailable = \
+                _sunglare_nomination_fact(fact, draw, fact_label)
+            expected_event = event
+            by_site[site_id] = (event, None, not fact_unavailable, 0,
+                                fact_mismatches, None)
+            sunglare_nomination_facts += 1
         elif kind == 21:
             if site_id != 54 or predicate_fact_version < 14:
                 raise TraceError(fact_label + " has unsupported TargetSharp fact")
@@ -3648,7 +3782,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -3713,11 +3847,15 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     target_sharp_unreplayable = 0
     target_sharp_mismatches = 0
     target_sharp_not_eligible = int(target_event is not None and target_event["outcome"] == 5)
+    sunglare_nomination_replayed = 0
+    sunglare_nomination_unreplayable = 0
+    sunglare_nomination_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
         site_unreplayable = expected_event is None or (
-            site_id in (6, 50) and legacy_claim is None)
+            site_id in (6, 50) and legacy_claim is None) or (
+            site_id == 45 and not delta_known)
         if site_unreplayable:
             unreplayable += 1
         actual = next(event for event in draw["sites"] if event["id"] == site_id)
@@ -3803,6 +3941,16 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             else:
                 target_sharp_mismatches += 1
             target_sharp_mismatches += cache_mismatches
+        if site_id == 45:
+            if site_unreplayable:
+                sunglare_nomination_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                sunglare_nomination_replayed += 1
+            else:
+                sunglare_nomination_mismatches += 1
+            sunglare_nomination_mismatches += cache_mismatches
         if site_id in (61, 62, 63):
             if site_unreplayable:
                 sunglare_unreplayable += 1
@@ -3992,7 +4140,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "targetSharpReplayed": target_sharp_replayed,
             "targetSharpUnreplayable": target_sharp_unreplayable,
             "targetSharpMismatches": target_sharp_mismatches,
-            "targetSharpNotEligible": target_sharp_not_eligible}
+            "targetSharpNotEligible": target_sharp_not_eligible,
+            "sunglareNominationFacts": sunglare_nomination_facts,
+            "sunglareNominationReplayed": sunglare_nomination_replayed,
+            "sunglareNominationUnreplayable": sunglare_nomination_unreplayable,
+            "sunglareNominationMismatches": sunglare_nomination_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -4258,7 +4410,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
         forward_input_version = data.get("forwardInputVersion", 0)
@@ -4366,7 +4518,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "fssDumpUnreplayable": 0, "fssDumpMismatches": 0,
                         "targetSharpFacts": 0, "targetSharpReplayed": 0,
                         "targetSharpUnreplayable": 0, "targetSharpMismatches": 0,
-                        "targetSharpNotEligible": 0}
+                        "targetSharpNotEligible": 0,
+                        "sunglareNominationFacts": 0,
+                        "sunglareNominationReplayed": 0,
+                        "sunglareNominationUnreplayable": 0,
+                        "sunglareNominationMismatches": 0}
     forward_replay = {"factCount": 0, "replayed": 0, "unavailable": 0,
                       "mismatches": 0, "eligible": 0, "expectedActions": 0,
                       "observedActionMismatches": 0, "forwardFactsMismatches": 0,
@@ -4808,6 +4964,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                                 "not-eligible" if predicate_replay["targetSharpNotEligible"] and
                                                    not predicate_replay["targetSharpReplayed"] else
                                 "replayed"),
+             sunglareNominationStatus=("unavailable-before-v15" if predicate_fact_version < 15 else
+                                       "not-visited" if not predicate_replay["sunglareNominationFacts"] else
+                                       "mismatch" if predicate_replay["sunglareNominationMismatches"] else
+                                       "unreplayable" if predicate_replay["sunglareNominationUnreplayable"] else
+                                       "replayed"),
              **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -4856,7 +5017,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
              "targetSharpStatus": "unavailable-before-v14",
              "targetSharpFacts": 0, "targetSharpReplayed": 0,
              "targetSharpUnreplayable": 0, "targetSharpMismatches": 0,
-             "targetSharpNotEligible": 0}),
+             "targetSharpNotEligible": 0,
+             "sunglareNominationStatus": "unavailable-before-v15",
+             "sunglareNominationFacts": 0, "sunglareNominationReplayed": 0,
+             "sunglareNominationUnreplayable": 0,
+             "sunglareNominationMismatches": 0}),
         "forwardReplay": dict(
             status=("unavailable" if forward_input_version == 0 else
                     "mismatch" if forward_replay["mismatches"] else
@@ -5029,6 +5194,15 @@ def format_summary(summary, sidecar_path=None):
                      (replay.get("fssDumpStatus", "not-visited"),
                       replay.get("fssDumpFacts", 0), replay.get("fssDumpReplayed", 0),
                       replay.get("fssDumpUnreplayable", 0), replay.get("fssDumpMismatches", 0)))
+    if replay.get("predicateFactVersion", 0) < 15:
+        lines.append("  Sunglare nomination site 45: unavailable before predicate fact version 15")
+    else:
+        lines.append("  Sunglare nomination site 45: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay.get("sunglareNominationStatus", "not-visited"),
+                      replay.get("sunglareNominationFacts", 0),
+                      replay.get("sunglareNominationReplayed", 0),
+                      replay.get("sunglareNominationUnreplayable", 0),
+                      replay.get("sunglareNominationMismatches", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -9342,6 +9516,98 @@ def self_test():
                                    "targetsharp-legacy", old_version).get("targetSharpFacts") != 0:
             print("legacy predicate schema claimed TargetSharp availability")
             return 1
+    nominal_draw = {"kind": ord("X"), "count": 10001, "instances": 1}
+    nomination = {
+        "siteId": 45, "kind": 22, "known": "yes",
+        "inputs": {
+            "worldMode": {"reached": True, "known": True, "value": 1},
+            "boundCbIdentity": {"reached": True, "known": True, "value": 2},
+            "nominatedBeforeIdentity": {"reached": True, "known": True, "value": 1},
+            "resourceResolved": {"reached": True, "known": True, "value": True},
+            "isBuffer": {"reached": True, "known": True, "value": True},
+            "byteWidth": {"reached": True, "known": True, "value": 208},
+            "callbackInvoked": {"reached": True, "known": True, "value": True},
+            "nominatedAfterIdentity": {"reached": True, "known": True, "value": 2},
+            "callbackTargetAfterIdentity": {"reached": True, "known": True, "value": 2},
+        },
+    }
+    nomination_event, nomination_mismatch, nomination_unavailable = \
+        _sunglare_nomination_fact(nomination, nominal_draw, "sungnom-positive")
+    if nomination_event["id"] != 45 or nomination_mismatch or nomination_unavailable:
+        print("Sunglare nomination positive raw inputs did not replay")
+        return 1
+    nomination_trace_draw = dict(nominal_draw, sites=[nomination_event],
+                                predicateFacts=[nomination])
+    nomination_summary = _replay_predicate_facts(
+        nomination_trace_draw, "sungnom-trace", 15)
+    if (nomination_summary["sunglareNominationFacts"] != 1 or
+            nomination_summary["sunglareNominationReplayed"] != 1 or
+            nomination_summary["sunglareNominationMismatches"]):
+        print("Sunglare nomination schema15 fact did not join the observed site")
+        return 1
+    empty_v15 = _fixture()
+    empty_v15["predicateFactVersion"] = 15
+    empty_v15["draws"] = []
+    empty_v15["footer"]["drawCount"] = 0
+    try:
+        empty_v15_summary = validate_trace(empty_v15)
+    except TraceError as exc:
+        print("Sunglare nomination empty schema15 trace failed: %s" % exc)
+        return 1
+    if empty_v15_summary["predicateReplay"]["sunglareNominationFacts"] != 0:
+        print("Sunglare nomination empty schema15 trace reported unexpected facts")
+        return 1
+    cutoff = json.loads(json.dumps(nomination))
+    cutoff_draw = dict(nominal_draw, count=10000)
+    for name in ("boundCbIdentity", "nominatedBeforeIdentity", "resourceResolved",
+                 "isBuffer", "byteWidth", "nominatedAfterIdentity", "callbackTargetAfterIdentity"):
+        cutoff["inputs"][name] = {"reached": False, "known": False, "value": None}
+    cutoff["inputs"]["callbackInvoked"] = {"reached": True, "known": True, "value": False}
+    _sunglare_nomination_fact(cutoff, cutoff_draw, "sungnom-cutoff")
+    malformed_cutoff = json.loads(json.dumps(cutoff))
+    malformed_cutoff["inputs"]["resourceResolved"] = {"reached": True, "known": False, "value": None}
+    try:
+        _sunglare_nomination_fact(malformed_cutoff, cutoff_draw, "sungnom-bad-cutoff")
+    except TraceError:
+        pass
+    else:
+        print("Sunglare nomination cutoff accepted a consumed unknown suffix")
+        return 1
+    unknown_mode = json.loads(json.dumps(cutoff))
+    unknown_mode_draw = dict(nominal_draw)
+    unknown_mode["inputs"]["worldMode"] = {"reached": True, "known": False, "value": None}
+    _, _, unknown_unavailable = _sunglare_nomination_fact(
+        unknown_mode, unknown_mode_draw, "sungnom-unknown")
+    if not unknown_unavailable:
+        print("Sunglare nomination unknown mode was guessed")
+        return 1
+    for malformed_prefix in (unknown_mode, nomination):
+        mutant = json.loads(json.dumps(malformed_prefix))
+        if malformed_prefix is unknown_mode:
+            mutant["inputs"]["resourceResolved"] = {
+                "reached": True, "known": True, "value": True}
+        else:
+            mutant["inputs"]["nominatedBeforeIdentity"] = {
+                "reached": True, "known": False, "value": None}
+            mutant["inputs"]["resourceResolved"] = {
+                "reached": False, "known": False, "value": None}
+            mutant["inputs"]["isBuffer"] = {
+                "reached": True, "known": True, "value": False}
+        try:
+            _sunglare_nomination_fact(mutant, nominal_draw, "sungnom-orphan-read")
+        except TraceError:
+            continue
+        print("Sunglare nomination accepted a read without its lazy predecessor")
+        return 1
+    unknown_event = {"id": 45, "kind": 1, "outcome": 1, "flow": 0,
+                     "subsite": 0, "verdict": -1}
+    unknown_summary = _replay_predicate_facts(
+        dict(unknown_mode_draw, sites=[unknown_event], predicateFacts=[unknown_mode]),
+        "sungnom-unknown-trace", 15)
+    if (unknown_summary["sunglareNominationUnreplayable"] != 1 or
+            unknown_summary["sunglareNominationReplayed"]):
+        print("Sunglare nomination reached-unknown mode was not reported unavailable")
+        return 1
     print("draw-ladder-replay self-test: ok")
     return 0
 
