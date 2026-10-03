@@ -37,23 +37,19 @@
   4.1), the installer skips it and Elite stays on its stock VR path. Four
   changes first (section 10); no F8, AA, flash fix or Explorer Cam without
   the runtime; the first build needs a flight on a stock runtime.
-- **Next:** `4350a281` passes all 128 validation jobs and clean promotion;
-  installed and verified in Steam with settings preserved. Pimax OpenXR, 90 Hz,
-  4032x3898 per eye. The latest NV-on flight matches that build and replays
-  8,682 facts, including two positive pulse-only NV claims, with no missing
-  inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  bounded API owner costs are instrumented; twenty-three selectors and local
-  None/Skip forwarding checks pass all 142 validation jobs. Enabled replay
-  storage is measured at 482.4 MiB; the default disabled path allocates none.
-  Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
-  The timed-draw denominator works; all-module cost coverage and repeatable
-  CPU improvement/GPU non-regression remain unresolved (section 11).
-  Verified `14a7ff70` reproduces the pre-existing NV blur.
-  Main `83938927` is integrated; the combined tree passes all 142 jobs.
-  A symmetric matched control is prepared but still needs validation;
-  the latest installed-binary flight is not that comparison.
-  Temporary instrument key: `advanced.draw_replay` (off by default); propose
-  removing it when this arc closes, subject to Scope control. No Phase 2 yet.
+- **Next:** Steam has verified control `373198c1` (124 full-build jobs and
+  clean promotion); candidate `ecdda1d9` passes 142 jobs and clean
+  promotion, ready for the paired test. Pimax OpenXR, 90 Hz, 4032x3898 per
+  eye. Replay is off and the personal INI hash is preserved. Twenty-three
+  supported selectors and local None/Skip forwarding checks pass;
+  whole-ladder/actions and remaining module API/CPU coverage stay open.
+  Enabled replay retains 482.4 MiB; disabled replay allocates none. Earlier
+  NV blur is reproduced by `14a7ff70`. Main `83938927` is integrated. Next
+  flight: stationary hangar/carrier AA off/on and carrier DLSS+NV, two
+  minutes per hold; no draw dump. Matched CPU improvement beyond noise and
+  direct GPU non-regression remain unresolved (section 11). Temporary key:
+  `advanced.draw_replay` (off); removal requires Scope control. No Phase 2
+  or shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a
   stable ABI for first-party plugins (they ship with the core; freezing
@@ -2255,3 +2251,61 @@ allocates opt-in diagnostic pools, so Sean has been asked to change only
 that value to `off` before the matched production timing runs. No new flight
 is requested until a concrete promoted control is verified. Remaining Phase
 1 coverage/performance gates and the Phase 2 hold are unchanged.
+
+### Validated matched control ready in Steam, 2026-10-03
+
+Control `373198c16538609638a8c1df622800e288a448e7` is pushed on
+`codex/plugin-performance-control-20261003`. Its final full validation
+passed all 124 jobs: 119 pooled jobs in 159.3 seconds and five quiet jobs in
+23.4 seconds. Production profiles, Python self-tests, native rigs, the
+234-key contract and self-contained installer checks pass. FocusWatch
+reports no shown window, console or foreground move to the build tree in 183
+seconds. Receipt input SHA256:
+`556b1a90bf51565b9ee32a678aaf159e4513c1b0128e68b2c5604ef9fc0a4939`. The full
+build was stamped `v0.18.1-18-g83938927-dirty`; the clean receipt-verified
+promotion is `v0.18.1-19-g373198c1`.
+
+The initial nested-control run failed 13 native bootstrap assertions because
+package discovery uses exactly two parents above the loaded module directory
+for `d3d11.dll`. From `build/perf-control-main839/build`, that found the
+outer feature build's valid proxy, triggering
+`module_configuration,source=packaged-default` before the fixture's explicit
+configuration. Changing CWD would not change the module-derived path. The
+intact control was moved to ignored `build/control-scratch/main839`, whose
+derived graphics path `build/control-scratch/d3d11.dll` is absent. No
+production or test source was changed; the next complete build passed.
+
+Ruled out: broken control runtime source, because the exact discovered outer
+proxy caused early packaged-default configuration and source-identical
+validation passed after path isolation.
+
+Candidate `ecdda1d9492256d527b34c7e4d9b529392b396c0` passed clean promotion
+as `v0.18.1-48-gecdda1d9`, using the matching 142-job full receipt. A prior
+promotion attempt was refused by another build's global lock even though its
+shell exit code was zero. It was rejected from the actual log, and the retry
+requires the explicit DLL-only success marker. No blocked build is treated
+as a successful promotion.
+
+The sanctioned Steam installation of control `373198c1` passed dry-run,
+transactional installation and `--verify-only`. Existing DLSS was preserved;
+both builds will observe its mapped version in the fresh log. Sean changed
+only the replay setting to off; the installer preserved the resulting
+personal INI SHA256
+`EC41FF141C496A4783B38EA46AF79D5E78E817A8A9F241A0193040CAA25B1015`. Native
+receipt backup: `edvr_native_receipt.json.pre-373198c1-20261003-111452.bak`.
+The running game detected during installation was Epic; the target-specific
+guard confirmed Steam was stopped and Epic was not modified.
+
+The next scoped matched baseline uses the same Pimax OpenXR environment at
+90 Hz and 4032x3898 per eye: stationary on-foot hangar AA off, hangar DLSS
+on, carrier AA off, carrier DLSS on, then carrier DLSS+night vision, two
+minutes per hold after menus close and the mode settles. No NumLock draw
+dump. The prior verified flight's 1800-frame reports span about 20-24
+seconds, so each hold should contain several completed windows; transition
+windows are excluded from comparison. The first fresh-log check is
+build373198c1, then actual loaded DLSS, render dimensions, workload/sample
+counts and direct GPU sections. A candidate comparison and any narrowly
+needed repeat remain pending. Per-timed-draw CPU is the declared
+hook-minus-first-forwarding interval; it does not establish total EDVR CPU
+or full GPU/module coverage. Phase 1 acceptance, Phase 2 and shipping stay
+open.
