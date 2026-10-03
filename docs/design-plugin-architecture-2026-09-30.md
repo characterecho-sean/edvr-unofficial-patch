@@ -44,7 +44,7 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  thirteen selector sites have rig coverage; FSS passes all 134 validation jobs.
+  shared resolver cost passes 134 jobs; thirteen selectors have rig coverage.
   Staged-out FSS inputs remain unavailable; whole-ladder equivalence stays open.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
@@ -1474,7 +1474,7 @@ The first full build stopped after 111 of 134 jobs because Windows could not
 find the existing cockpit API batch label. The label was present and unchanged,
 with an LF-only ending in a mixed CRLF/LF batch. Canonical CRLF normalization
 and a corrected focused-wrapper environment allowed its unchanged 56 checks to
-pass. Full validation is being repeated; no cockpit source was changed.
+pass. The full build was repeated after that check; no cockpit source was changed.
 
 The full retry passed 127 pooled jobs (154.2 seconds) and seven quiet jobs
 (30.6 seconds), both production profiles and installers, the 235-key contract
@@ -1491,3 +1491,40 @@ excludes Release and cannot establish which immediate/deferred context supplied
 a resource. Configuration, shutdown, frame boundaries and ownership transfer
 retain the serialized collector lifecycle contract; worker/runtime and other
 module costs remain separate coverage gaps.
+
+### Shared binding resolver query cost, 2026-10-02 (validated)
+
+Sites 112-115 annotate the shared resolver's existing GetResource, GetType,
+Buffer GetDesc and Texture2D GetDesc attempts as Core ReadQuery work. One
+sampling decision inside each admitted guard checks atomic context
+registration, published owner identity and existing TLS before reading frame
+flags. It never allocates a thread token. Null arguments and exhausted budgets
+bypass it. Releases remain outside the measured set; query order and the
+established successful-description result after a Release fault are preserved.
+
+This metric means annotated shared resolver attempts on the registered owner
+thread. The resolver has no context argument, so the metric cannot prove
+immediate/deferred context identity. Collector lifecycle and owner transfer
+remain serialized. The new sampler adds work even in unsampled frames; no zero
+CPU overhead or complete module-cost claim is made. Report V1 layout and its
+completed-frame denominator are unchanged.
+
+The real WARP resolver rig covers texture and buffer views, unsupported types,
+null GetResource, raw resources, injected GetDesc and Release faults with
+callback counts, stale pointers, independent fix/probe budgets and their spent
+paths. Its completed report contains 38 attempts (16 GetResource, 14 GetType, 2
+Buffer GetDesc, 6 Texture2D GetDesc), only mask bits 112-115, and one sampled
+API frame. Collector tests also complete a mixed window with two sampled empty
+frames, retain both foreign-thread/transfer checks, and compile the new C ABI.
+Independent review repaired an inert Release test and a double-close before
+native acceptance.
+
+Five affected focused rigs passed. The full build passed 127 pooled jobs (144.9
+seconds) and seven quiet jobs (30.6 seconds), both DLL profiles, installer
+gates and all 235 config keys. FocusWatch recorded zero shown windows, consoles
+or foreground changes in 176 seconds. Log:
+build/plugin-binding-cost-full-build.log; receipt input SHA-256
+ad11e1e1bfa1d7b1d230b85c03995170221cca602743d7296642ac6ab971d488. Steam remains
+on 4350a281; no flight or promotion was requested for this slice. Whole-ladder
+replay, independent forwarding, complete costs and the matched CPU/GPU
+comparison remain open before Phase 2.

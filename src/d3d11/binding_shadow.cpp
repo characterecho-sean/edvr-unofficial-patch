@@ -1,4 +1,5 @@
 #include "binding_shadow.h"
+#include "binding_cost_sites.h"
 
 #include <windows.h>
 
@@ -62,11 +63,13 @@ Slot& slotOf(BindSlot s) { return detail::g_bindingSlots[static_cast<size_t>(s)]
 // stack-smash fast-fail, which SEH cannot catch, and it brought the process
 // down on the first frame the one time a copy of this probe was written
 // without it.
-bool describeResource(ID3D11Resource* res, ResourceInfo* out) {
+bool describeResource(ID3D11Resource* res, ResourceInfo* out, bool costSample) {
     D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    if (costSample) binding_cost::note(binding_cost::Site::GetType);
     res->GetType(&dim);
     if (dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
         D3D11_BUFFER_DESC d{};
+        if (costSample) binding_cost::note(binding_cost::Site::BufferGetDesc);
         static_cast<ID3D11Buffer*>(res)->GetDesc(&d);
         out->isBuffer = true;
         out->a = d.ByteWidth;
@@ -75,6 +78,7 @@ bool describeResource(ID3D11Resource* res, ResourceInfo* out) {
     }
     if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
         D3D11_TEXTURE2D_DESC d{};
+        if (costSample) binding_cost::note(binding_cost::Site::Texture2DGetDesc);
         static_cast<ID3D11Texture2D*>(res)->GetDesc(&d);
         out->isTexture2D = true;
         out->a = d.Width;
@@ -133,10 +137,12 @@ bool resolveView(FaultBudget& budget, void* view, ResourceInfo* out) {
 
     bool ok = false;
     guardedBudget(budget, [&] {
+        const bool costSample = edvrPluginCostApiSampleOwnerThread() != 0;
         ID3D11Resource* res = nullptr;
+        if (costSample) binding_cost::note(binding_cost::Site::GetResource);
         static_cast<ID3D11View*>(view)->GetResource(&res);
         if (!res) return;
-        ok = describeResource(res, out);
+        ok = describeResource(res, out, costSample);
         // Identity only, recorded before the Release on purpose: the pointer
         // is what connects a view to the resource behind it, and the context
         // still holds its own reference to anything reachable through a live
@@ -163,7 +169,8 @@ bool resolveResource(FaultBudget& budget, void* resource, ResourceInfo* out) {
         // is the resource, and the caller owns whatever reference it arrived
         // with. That also means this one has no leak to document -- the
         // bargain the view resolver strikes above does not arise here.
-        ok = describeResource(static_cast<ID3D11Resource*>(resource), out);
+        const bool costSample = edvrPluginCostApiSampleOwnerThread() != 0;
+        ok = describeResource(static_cast<ID3D11Resource*>(resource), out, costSample);
         out->resource = resource;
     });
     return ok;

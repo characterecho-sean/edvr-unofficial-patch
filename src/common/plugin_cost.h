@@ -61,6 +61,10 @@ void edvrPluginCostSetOwnerContext(void* context) EDVR_PLUGIN_COST_NOEXCEPT;
 // Returns true only on the render-owner thread, for its registered immediate
 // context, during an enabled API-sample frame.
 uint8_t edvrPluginCostApiSampleContext(const void* context) EDVR_PLUGIN_COST_NOEXCEPT;
+// Sampling gate for annotated shared binding resolver queries. It relies on
+// the collector's serialized lifecycle and does not prove immediate/deferred
+// context identity because the resolver API has no context argument.
+uint8_t edvrPluginCostApiSampleOwnerThread(void) EDVR_PLUGIN_COST_NOEXCEPT;
 void edvrPluginCostNoteSite(uint8_t owner, uint16_t siteId, uint8_t event) EDVR_PLUGIN_COST_NOEXCEPT;
 void edvrPluginCostNoteCpuTicks(uint8_t owner, uint16_t siteId, uint64_t ticks) EDVR_PLUGIN_COST_NOEXCEPT;
 void edvrPluginCostNoteD3dCall(uint8_t owner, uint16_t siteId, uint8_t apiClass) EDVR_PLUGIN_COST_NOEXCEPT;

@@ -1,6 +1,7 @@
 #include "../../src/common/plugin_cost.h"
 #include "plugin_manifest.inc"
 #include "../../src/d3d11/cockpit_cost_sites.h"
+#include "../../src/d3d11/binding_cost_sites.h"
 #include "../../src/d3d11/draw_cpu_window.h"
 
 #include <algorithm>
@@ -102,6 +103,12 @@ void policyScope(uint64_t& handlers) {
 
 bool policyChecks() {
     bool ok = true;
+    static_assert(edvr::binding_cost::id(edvr::binding_cost::Site::GetResource) == 112);
+    static_assert(edvr::binding_cost::id(edvr::binding_cost::Site::GetType) == 113);
+    static_assert(edvr::binding_cost::id(edvr::binding_cost::Site::BufferGetDesc) == 114);
+    static_assert(edvr::binding_cost::id(edvr::binding_cost::Site::Texture2DGetDesc) == 115);
+    static_assert(static_cast<uint8_t>(pc::Owner::Core) == 9);
+    static_assert(static_cast<uint8_t>(pc::ApiClass::ReadQuery) == 3);
     static_assert(static_cast<uint8_t>(pc::Owner::TemporalAa) == edvr::plugins::kPluginTemporalAa);
     static_assert(static_cast<uint8_t>(pc::Owner::CockpitVisuals) == edvr::plugins::kPluginCockpitVisuals);
     static_assert(static_cast<uint8_t>(pc::Owner::Exposure) == edvr::plugins::kPluginExposure);
@@ -111,7 +118,6 @@ bool policyChecks() {
     static_assert(static_cast<uint8_t>(pc::Owner::Comfort) == edvr::plugins::kPluginComfort);
     static_assert(static_cast<uint8_t>(pc::Owner::Performance) == edvr::plugins::kPluginPerformance);
     static_assert(static_cast<uint8_t>(pc::Owner::Diagnostics) == edvr::plugins::kPluginDiagnostics);
-    static_assert(static_cast<uint8_t>(pc::Owner::Core) == 9);
 
     uint64_t handlers = 0;
     pc::NoCpu::template note<pc::Owner::CockpitVisuals, 7>(pc::SiteEvent::Reached);
@@ -488,6 +494,8 @@ bool collectorHotPathChecks() {
     }
     const std::string apiGuard = functionBody(source,
         "extern \"C\" uint8_t edvrPluginCostApiSampleContext(");
+    const std::string ownerGuard = functionBody(source,
+        "extern \"C\" uint8_t edvrPluginCostApiSampleOwnerThread(");
     const std::string boundary = functionBody(source,
         "extern \"C\" uint8_t edvrPluginCostFrameBoundary(");
     const std::string registration = functionBody(source,
@@ -504,6 +512,14 @@ bool collectorHotPathChecks() {
                 apiGuard.find("fetch_add") == std::string::npos &&
                 apiGuard.find("g_threadToken != owner") < apiGuard.find("return g_configured && g_apiSampleFrame"),
                 "sample getter checks context and existing TLS identity without allocating a foreign-thread token");
+    ok &= check(!ownerGuard.empty() &&
+                ownerGuard.find("g_ownerContext.load(std::memory_order_acquire) == nullptr") <
+                    ownerGuard.find("g_ownerThreadToken.load(std::memory_order_acquire)") &&
+                ownerGuard.find("g_threadToken == 0") != std::string::npos &&
+                ownerGuard.find("threadToken()") == std::string::npos &&
+                ownerGuard.find("fetch_add") == std::string::npos &&
+                ownerGuard.find("g_threadToken != owner") < ownerGuard.find("return g_configured && g_apiSampleFrame"),
+                "owner-thread getter checks atomic registration and existing TLS before sample flags without allocating identity");
     ok &= check(!boundary.empty() && boundary.find("const uintptr_t ownerToken = threadToken();") != std::string::npos &&
                 boundary.find("const uintptr_t previousOwner = g_ownerThreadToken.load(std::memory_order_relaxed);") != std::string::npos &&
                 boundary.find("if (previousOwner != ownerToken)") < boundary.find("g_ownerContext.load(std::memory_order_acquire)") &&
@@ -564,18 +580,23 @@ bool ownerContextChecks() {
     int otherContext = 0;
     edvrPluginCostShutdown();
     edvrPluginCostConfigure(1u, 1000000u);
+    ok &= check(edvrPluginCostApiSampleOwnerThread() == 0,
+                "owner-thread getter rejects an unregistered collector during bootstrap");
     edvrPluginCostSetOwnerContext(&ownerContext);
     ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
-                edvrPluginCostApiSampleContext(&otherContext) == 0,
+                edvrPluginCostApiSampleContext(&otherContext) == 0 &&
+                edvrPluginCostApiSampleOwnerThread() == 0,
                 "registered context alone does not sample before an owner frame boundary");
 
     // Configuration discards its first close, but that existing boundary is
     // still the owner-thread publication point and opens the next API sample.
     ok &= check(edvrPluginCostFrameBoundary(1u, 0u, 0u, 1u, 0u, &window) == 0 &&
-                edvrPluginCostApiSampleContext(&ownerContext) == 1,
+                edvrPluginCostApiSampleContext(&ownerContext) == 1 &&
+                edvrPluginCostApiSampleOwnerThread() == 1,
                 "owner frame boundary publishes render-thread identity before enabling the next sample");
     edvrPluginCostConfigure(1u, 1000000u);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+                edvrPluginCostApiSampleOwnerThread() == 0,
                 "collector reconfiguration preserves owner registration but closes API sampling");
     edvrPluginCostSetApiSampleFrame(1u);
     ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1,
@@ -585,19 +606,31 @@ bool ownerContextChecks() {
     ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1,
                 "the next owner boundary reopens sampling after configuration discards its first close");
     edvrPluginCostSetApiSampleFrame(0u);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
-                "owner context getter rejects a closed API-sample frame");
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+                edvrPluginCostApiSampleOwnerThread() == 0,
+                "both sample getters reject a closed API-sample frame");
+    // The next frame remains closed when its next-sample flag is zero.
+    // A non-report boundary does not populate window; denominator coverage
+    // below uses a complete mixed sampled/unsampled window instead.
+    (void)edvrPluginCostFrameBoundary(4u, 0u, 0u, 0u, 0u, &window);
+    ok &= check(edvrPluginCostApiSampleOwnerThread() == 0,
+                "closed API frame leaves owner-thread sampling disabled");
     edvrPluginCostSetApiSampleFrame(1u);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1,
-                "owner context getter accepts only the open API-sample frame");
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1 &&
+                edvrPluginCostApiSampleOwnerThread() == 1,
+                "owner getters accept only the open API-sample frame");
 
     std::atomic<uint8_t> foreignAccepted{0};
+    std::atomic<uint8_t> foreignContextAccepted{0};
     std::thread foreign([&] {
-        foreignAccepted.store(edvrPluginCostApiSampleContext(&ownerContext),
+        foreignContextAccepted.store(edvrPluginCostApiSampleContext(&ownerContext),
+                                     std::memory_order_relaxed);
+        foreignAccepted.store(edvrPluginCostApiSampleOwnerThread(),
                               std::memory_order_relaxed);
     });
     foreign.join();
-    ok &= check(foreignAccepted.load(std::memory_order_relaxed) == 0,
+    ok &= check(foreignAccepted.load(std::memory_order_relaxed) == 0 &&
+                foreignContextAccepted.load(std::memory_order_relaxed) == 0,
                 "a different thread with the same context pointer cannot use the owner sample flag");
 
     // Simulate a quiescent owner transfer: registration clears publication,
@@ -606,22 +639,42 @@ bool ownerContextChecks() {
     ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
                 "re-registering a context invalidates its previous owner-thread token");
     std::atomic<uint8_t> newOwnerAccepted{0};
+    std::atomic<uint8_t> newOwnerContextAccepted{0};
     std::thread newOwner([&] {
         EdvrPluginCostWindowV1 local{};
         (void)edvrPluginCostFrameBoundary(3u, 0u, 0u, 1u, 0u, &local);
-        newOwnerAccepted.store(edvrPluginCostApiSampleContext(&ownerContext),
+        newOwnerContextAccepted.store(edvrPluginCostApiSampleContext(&ownerContext),
+                                      std::memory_order_relaxed);
+        newOwnerAccepted.store(edvrPluginCostApiSampleOwnerThread(),
                                std::memory_order_relaxed);
     });
     newOwner.join();
     ok &= check(newOwnerAccepted.load(std::memory_order_relaxed) == 1 &&
-                edvrPluginCostApiSampleContext(&ownerContext) == 0,
+                newOwnerContextAccepted.load(std::memory_order_relaxed) == 1 &&
+                edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+                edvrPluginCostApiSampleOwnerThread() == 0,
                 "owner transfer accepts the new frame thread and rejects the previous thread");
 
     edvrPluginCostSetOwnerContext(nullptr);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+                edvrPluginCostApiSampleOwnerThread() == 0,
                 "clearing the owner context disables the API sample getter");
+    edvrPluginCostConfigure(1u, 1000000u);
+    edvrPluginCostSetOwnerContext(&ownerContext);
+    (void)edvrPluginCostFrameBoundary(0u, 0u, 0u, 1u, 0u, &window);
+    bool completed = false;
+    for (uint32_t frame = 1; frame <= pc::kWindowFrameCount; ++frame) {
+        const uint8_t sampled = frame == 1 || frame == 3 ? 1u : 0u;
+        const uint8_t nextSample = frame == 2 ? 1u : 0u;
+        completed = edvrPluginCostFrameBoundary(frame, 0u, sampled, nextSample, 0u, &window) != 0;
+        ok &= check(completed == (frame == pc::kWindowFrameCount),
+                    "mixed API window reports only at its final boundary");
+    }
+    ok &= check(completed && window.completedApiSampleFrames == 2,
+                "complete API report counts sampled empty frames and excludes unsampled frames");
     edvrPluginCostShutdown();
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
+    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+                edvrPluginCostApiSampleOwnerThread() == 0,
                 "collector shutdown clears owner context and thread publication");
     return ok;
 }

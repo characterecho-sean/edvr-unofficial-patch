@@ -204,6 +204,15 @@ extern "C" uint8_t edvrPluginCostApiSampleContext(const void* context) noexcept 
     return g_configured && g_apiSampleFrame ? 1u : 0u;
 }
 
+extern "C" uint8_t edvrPluginCostApiSampleOwnerThread() noexcept {
+    if (g_ownerContext.load(std::memory_order_acquire) == nullptr) return 0;
+    const uintptr_t owner = g_ownerThreadToken.load(std::memory_order_acquire);
+    // Do not allocate/publish TLS identity from a query path. Only frame-boundary
+    // code establishes it; foreign threads return before non-atomic state reads.
+    if (owner == 0 || g_threadToken == 0 || g_threadToken != owner) return 0;
+    return g_configured && g_apiSampleFrame ? 1u : 0u;
+}
+
 extern "C" void edvrPluginCostNoteSite(uint8_t owner, uint16_t siteId, uint8_t event) noexcept {
     if (!g_configured || !validOwnerSite(owner, siteId)) return;
     const auto value = static_cast<edvr::plugin_cost::SiteEvent>(event);

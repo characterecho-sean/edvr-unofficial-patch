@@ -1299,7 +1299,7 @@ if not exist "%OBJ%\vrworldroutegpu" mkdir "%OBJ%\vrworldroutegpu"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\vrworldroutegpu\\" ^
     /Fe"%BUILD%\vr_world_route_gpu_test.exe" "tools\vr_world_route_gpu_test\vr_world_route_gpu_test.cpp" ^
-    "src\d3d11\vr_world_route.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\flat_mono_resolve.cpp" ^
+    "src\d3d11\vr_world_route.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\d3d11\flat_mono_resolve.cpp" ^
     "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib version.lib
@@ -1484,7 +1484,7 @@ if not exist "%OBJ%\plugindispatch" mkdir "%OBJ%\plugindispatch"
 cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\plugindispatch\\" ^
     /Fe"%BUILD%\plugin_dispatch_test.exe" "tools\plugin_dispatch_test\plugin_dispatch_test.cpp" ^
-    "src\d3d11\plugin_registry.cpp" "src\d3d11\binding_shadow.cpp" "src\common\guard.cpp" ^
+    "src\d3d11\plugin_registry.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: plugin dispatch rig build failed & exit /b 1 )
 "%BUILD%\plugin_dispatch_test.exe" --self-test || (
@@ -2143,11 +2143,11 @@ exit /b 0
 :rig_scrim_metadata_test
 echo [edvr] === scrim metadata cache regression ===
 if not exist "%OBJ%\scrimmetadata" mkdir "%OBJ%\scrimmetadata"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DEDVR_SCRIM_METADATA_TEST ^
     /Fo"%OBJ%\scrimmetadata\\" /Fe"%OBJ%\scrimmetadata\scrim_metadata_test.exe" ^
     "tools\scrim_metadata_test\scrim_metadata_test.cpp" ^
-    "src\d3d11\scrim_fix.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\d3d11\scrim_fix.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
     "src\common\guard.cpp" ^
@@ -2159,11 +2159,11 @@ exit /b 0
 :rig_resolve_bind_test
 echo [edvr] === resolve bind shadow regression ===
 if not exist "%OBJ%\resolvebind" mkdir "%OBJ%\resolvebind"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
     /Fo"%OBJ%\resolvebind\\" /Fe"%OBJ%\resolvebind\resolve_bind_test.exe" ^
     "tools\resolve_bind_test\resolve_bind_test.cpp" ^
-    "src\d3d11\resolve_bind_fix.cpp" "src\d3d11\binding_shadow.cpp" ^
+    "src\d3d11\resolve_bind_fix.cpp" "src\d3d11\binding_shadow.cpp" "src\d3d11\plugin_cost.cpp" ^
     "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" ^
     "src\common\guard.cpp" ^

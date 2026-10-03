@@ -67,7 +67,7 @@ RIGS = {
         # the production source the mutations edit is the second of these; it is replaced by the edited copy
         "sources": ["tools\\vr_world_route_gpu_test\\vr_world_route_gpu_test.cpp", "src\\d3d11\\vr_world_route.cpp", "src\\d3d11\\binding_shadow.cpp",
                     "src\\d3d11\\flat_mono_resolve.cpp", "src\\d3d11\\flat_projection_scope.cpp", "src\\d3d11\\flat_projection_runtime.cpp",
-                    "src\\common\\config.cpp", "src\\common\\proxy.cpp", "src\\common\\guard.cpp"],
+                    "src\\d3d11\\plugin_cost.cpp", "src\\common\\config.cpp", "src\\common\\proxy.cpp", "src\\common\\guard.cpp"],
         "libs": ["dxgi.lib", "d3dcompiler.lib", "user32.lib", "version.lib"],
         "include_gen": True,
     },

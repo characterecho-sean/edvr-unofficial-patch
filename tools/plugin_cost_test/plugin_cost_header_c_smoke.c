@@ -17,6 +17,7 @@ typedef uint8_t (*EdvrPluginCostFrameBoundaryFn)(uint32_t, uint8_t, uint8_t, uin
 typedef uint8_t (*EdvrPluginCostApiSampleFrameFn)(void);
 typedef void (*EdvrPluginCostSetOwnerContextFn)(void*);
 typedef uint8_t (*EdvrPluginCostApiSampleContextFn)(const void*);
+typedef uint8_t (*EdvrPluginCostApiSampleOwnerThreadFn)(void);
 
 int plugin_cost_header_c_smoke(void) {
     EdvrPluginCostWindowV1 window = {0};
@@ -24,12 +25,14 @@ int plugin_cost_header_c_smoke(void) {
     EdvrPluginCostApiSampleFrameFn apiSampleFrame = &edvrPluginCostApiSampleFrame;
     EdvrPluginCostSetOwnerContextFn setOwnerContext = &edvrPluginCostSetOwnerContext;
     EdvrPluginCostApiSampleContextFn apiSampleContext = &edvrPluginCostApiSampleContext;
+    EdvrPluginCostApiSampleOwnerThreadFn apiSampleOwnerThread = &edvrPluginCostApiSampleOwnerThread;
     int contextToken = 0;
     edvrPluginCostConfigure(1u, 1000000u);
     setOwnerContext(&contextToken);
     edvrPluginCostSetApiSampleFrame(1u);
     (void)apiSampleFrame();
     (void)apiSampleContext(&contextToken);
+    (void)apiSampleOwnerThread();
     edvrPluginCostNoteSite(1u, 2u, 1u);
     edvrPluginCostNoteCpuTicks(1u, 2u, 3u);
     edvrPluginCostNoteD3dCall(1u, 2u, 3u);
