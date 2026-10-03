@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** overlay fix `087501bb` FLOWN, still refuses the weapon (98).
-  Epic installed `v0.18.1-21-g087501bb`. Latest analyzed log is this build;
-  evidence and implementation plan are in sections 1-98.
+- **State:** overlay corrections `90d0c3d8` BUILT, NOT FLOWN (98).
+  Epic installed `v0.18.1-23-g90d0c3d8`. Latest analyzed log is the refusing
+  `v0.18.1-21-g087501bb` build; evidence and corrections are in sections 1-98.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 98 fixes normal-draw activation and captured PS admission.
-  Full validation passed; commit, clean promotion and Epic install follow.
+- **Next:** section 98: same weapon drawn ten seconds, holstered ten seconds.
+  Check world AA and marked/isolated counters; F10 only if still defective.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9838,7 +9838,10 @@ The exact captured 2008-byte PS patches to 2076 bytes and WARP creates it
 successfully. Full validation passed, including the GPU rigs and installer
 gates, with receipt fingerprint
 `4cb7f4dc02591042e3c501aec845e7d912784ace9b592e7ad4856a2833941467`.
-No new binary installed yet; commit and clean promotion follow.
+Committed as `90d0c3d8`, fast-forwarded main and verified the push. Clean
+DLL-only promotion passed. Epic flat installed and independently verified
+as `v0.18.1-23-g90d0c3d8`; live `edvr-flat.ini` and `nvngx_dlss.dll` hashes
+are unchanged. These corrections are BUILT, NOT FLOWN.
 
 Read-only suffix audit finds no additional confirmed blocker. F10 trace
 dumps at frames 56778/58972 contain zero frames/events (16-byte headers,
@@ -9847,3 +9850,9 @@ and consumer 17739 with the same H/depth, but has no draw records for the
 three intervening sequences. Their writer roles remain unknown; runtime
 suffix checks must still prove them in the representative test. Do not
 assume the snapshot ROI establishes their ownership or waive those checks.
+
+Next representative test: same weapon drawn ten seconds, then holstered
+ten seconds. Check world AA and the 5s fully marked/isolated counters. No
+two-minute wait or weapon matrix is required; take F10 only if AA still
+turns off or another visual defect appears. Verify the next log against
+the literal installed `v0.18.1-23-g90d0c3d8`, not the later docs-only HEAD.
