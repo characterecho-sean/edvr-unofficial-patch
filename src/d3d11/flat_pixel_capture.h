@@ -3,9 +3,11 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <deque>
 #include <string>
 #include <vector>
 #ifndef EDVR_VERSION_STRING
@@ -25,16 +27,22 @@ class FlatPixelCapture {
         uint32_t stride=0;
         std::string filename;
     };
+    struct Sample {
+        std::array<Item,10> items{};
+        unsigned used=0;
+        bool enginePresent[4]={};
+        FlatMonoResolveFrame frame{};
+        uint64_t copiedMs=0;
+        bool refusalPainted=false;
+        uint32_t roiX=0,roiY=0,roiWidth=0,roiHeight=0;
+    };
     FlatPixelCapturePolicy policy_;
-    std::array<Item,10> items_{};
-    unsigned used_=0;
-    bool enginePresent_[4]={};
+    std::deque<Sample> pending_;
     std::wstring directory_;
-    FlatMonoResolveFrame frame_{};
     unsigned serial_=0;
     static constexpr const char* names_[6]={"color","depth","motion","rejection","raw","final"};
     static std::wstring wide(const std::string& s) { return std::wstring(s.begin(),s.end()); }
-    void release() { items_={};frame_={};used_=0;for(auto& present:enginePresent_)present=false; }
+    void release() { pending_.clear(); }
     static std::string cameraJson(const float (&camera)[6][4]) {
         for(const auto& row:camera)for(float value:row)if(!std::isfinite(value))return "null";
         std::string out="[";
@@ -54,7 +62,7 @@ class FlatPixelCapture {
         Log::get().note("flat pixels: summary status=%s copied=%u completed=%u failed=%u bytes=%llu pending=%u directory=%ls",
             reason,policy_.copied,policy_.completed,policy_.failed,
             static_cast<unsigned long long>(policy_.bytes),policy_.pending?1u:0u,directory_.c_str());
-        policy_.active=false;policy_.pending=false;release();
+        policy_.active=false;policy_.pending=false;policy_.pendingCount=0;release();
     }
     static bool write(const std::wstring& path,const void* data,size_t bytes) {
         FILE* file=nullptr;
@@ -64,14 +72,15 @@ class FlatPixelCapture {
     }
     void fail(const char* reason) {
         Log::get().note("flat pixels: failed frame=%llu reason=%s",
-            static_cast<unsigned long long>(policy_.copyFrame),reason);
-        policy_.finish(false);release();
-        if(policy_.copied>=FlatPixelCapturePolicy::maxSamples)stop("complete-with-failures");
+            static_cast<unsigned long long>(pending_.empty()?policy_.copyFrame:pending_.front().frame.frame),reason);
+        policy_.finish(false);if(!pending_.empty())pending_.pop_front();
+        if(policy_.copied>=FlatPixelCapturePolicy::maxSamples && pending_.empty())stop("complete-with-failures");
     }
 public:
     bool active() const { return policy_.active; }
     const std::wstring& directory() const { return directory_; }
     void cancel() { stop("cancelled-resize-or-stop"); }
+    void unsupported(const char* reason) { stop(reason); }
     void arm(uint64_t frame) {
         stop("rearmed");directory_.clear();policy_.arm(frame,GetTickCount64());
         SYSTEMTIME now{};GetSystemTime(&now);wchar_t leaf[128]{};
@@ -83,17 +92,21 @@ public:
         if(!ensureDirectory(Config::get().logDir()) || !ensureDirectory(root) || !ensureDirectory(directory_)) {
             stop("failed-directory");return;
         }
-        Log::get().note("flat pixels: armed frame=%llu samples=4 first=next-live-frame second=+%u then spacing=%u byte-cap=%llu timeout-frames=900 timeout-ms=30000 directory=%ls; native matched DLSS/DLAA textures, no rendering changes; a reset frame is never a sample",
-            static_cast<unsigned long long>(frame),FlatPixelCapturePolicy::secondSpacing,FlatPixelCapturePolicy::laterSpacing,
+        Log::get().note("flat pixels: armed frame=%llu samples=4 two adjacent live pairs separated by %u frames byte-cap=%llu timeout-frames=900 timeout-ms=30000 directory=%ls; native matched DLSS/DLAA textures, HDR ROI centered 2048x1152 max, no rendering changes; a reset frame is never a sample",
+            static_cast<unsigned long long>(frame),FlatPixelCapturePolicy::laterSpacing,
             static_cast<unsigned long long>(FlatPixelCapturePolicy::maxBytes),directory_.c_str());
     }
     void poll(ID3D11DeviceContext* context,uint64_t frame) {
         if(!policy_.active)return;
         const uint64_t now=GetTickCount64();
-        if(policy_.pendingExpired(frame,now))fail("expired-readback");
+        if(!pending_.empty() && (frame<pending_.front().frame.frame || now<pending_.front().copiedMs ||
+           frame-pending_.front().frame.frame>=120 || now-pending_.front().copiedMs>=5000))fail("expired-readback");
         if(!policy_.active)return;
         if(policy_.expired(frame,now)) {stop("expired-arm");return;}
-        if(!policy_.pending || !context)return;
+        if(pending_.empty() || !context)return;
+        auto& sample=pending_.front();
+        auto& items_=sample.items;const unsigned used_=sample.used;
+        const auto& frame_=sample.frame;const auto& enginePresent_=sample.enginePresent;
         std::array<D3D11_MAPPED_SUBRESOURCE,10> maps{};
         unsigned mapped=0;HRESULT hr=S_OK;
         for(;mapped<used_;++mapped) {
@@ -127,16 +140,21 @@ public:
         if(!packed) {fail("pack-failed");return;}
         bool ok=true;
         for(unsigned i=0;i<used_ && ok;++i)ok=write(directory_+L"\\"+wide(items_[i].filename),payload[i].data(),payload[i].size());
-        char header[1280]{};
+        char header[1600]{};
         // rows_jitter: the raster phase the camera ROWS carry (2026-09-29; nonzero only under the
         // upstream camera injector), so a replay removes it as the shader does instead of guessing.
         // static_scene: the frame took the 3D main menu's stale-slot policy (FlatMonoResolveFrame::staticScene).
-        std::snprintf(header,sizeof(header),"{\n\"version\":2,\"frame_id\":%llu,\"mode\":\"%s\",\"configured_dlss_preset\":%u,\"reset\":%s,\"jitter\":[%.9g,%.9g],\"previous_jitter\":[%.9g,%.9g],\"rows_jitter\":[%.9g,%.9g],\"previous_rows_jitter\":[%.9g,%.9g],\"static_scene\":%s,\"render_width\":%u,\"render_height\":%u,\"output_width\":%u,\"output_height\":%u,\"binary_version\":\"%s\",\"binary_compiled\":\"%s %s\",\"textures\":[\n",
-            static_cast<unsigned long long>(frame_.frame),frame_.mode==FlatMonoResolveMode::Dlaa?"dlaa":"dlss",frame_.configuredDlssPreset,frame_.reset?"true":"false",
+        std::snprintf(header,sizeof(header),"{\n\"version\":2,\"frame_id\":%llu,\"mode\":\"%s\",\"configured_dlss_preset\":%u,\"reset\":%s,\"refusal_overlay\":%s,\"jitter\":[%.9g,%.9g],\"previous_jitter\":[%.9g,%.9g],\"rows_jitter\":[%.9g,%.9g],\"previous_rows_jitter\":[%.9g,%.9g],\"static_scene\":%s,\"route\":\"%s\",\"capture_roi\":{\"x\":%u,\"y\":%u,\"width\":%u,\"height\":%u},\"color_provenance\":\"%s\",\"raw_provenance\":\"%s\",\"final_provenance\":\"%s\",\"render_width\":%u,\"render_height\":%u,\"output_width\":%u,\"output_height\":%u,\"display_width\":%u,\"display_height\":%u,\"binary_version\":\"%s\",\"binary_compiled\":\"%s %s\",\"textures\":[\n",
+            static_cast<unsigned long long>(frame_.frame),frame_.mode==FlatMonoResolveMode::Dlaa?"dlaa":"dlss",frame_.configuredDlssPreset,frame_.reset?"true":"false",sample.refusalPainted?"true":"false",
             frame_.jitterX,frame_.jitterY,frame_.previousJitterX,frame_.previousJitterY,
             frame_.rowsJitterX,frame_.rowsJitterY,frame_.previousRowsJitterX,frame_.previousRowsJitterY,
-            frame_.staticScene?"true":"false",
-            frame_.renderWidth,frame_.renderHeight,frame_.outputWidth,frame_.outputHeight,EDVR_VERSION_STRING,__DATE__,__TIME__);
+            frame_.staticScene?"true":"false",frame_.hdr?"hdr":"sdr",sample.roiX,sample.roiY,sample.roiWidth,sample.roiHeight,
+            frame_.hdr?"private-copy-of-scene-H-before-resolve":"private-color-copy",
+            frame_.hdr?"ngx-fp16-output0":"ngx-rgba8-output0",
+            frame_.hdr?"scene-H-after-finish-before-tonemap":"private-finish-output1",
+            frame_.renderWidth,frame_.renderHeight,frame_.hdr?frame_.renderWidth:frame_.outputWidth,
+            frame_.hdr?frame_.renderHeight:frame_.outputHeight,frame_.outputWidth,frame_.outputHeight,
+            EDVR_VERSION_STRING,__DATE__,__TIME__);
         std::string manifest=header;
         for(unsigned i=0;i<used_;++i) {
             const auto& item=items_[i];char row[512]{};
@@ -169,26 +187,45 @@ public:
         if(ok)ok=MoveFileExW((manifestPath+L".tmp").c_str(),manifestPath.c_str(),0)!=FALSE;
         if(!ok) {fail("write-failed");return;}
         Log::get().note("flat pixels: completed frame=%llu resources=%u engine-complete=%u directory=%ls",static_cast<unsigned long long>(frame_.frame),used_,complete?1u:0u,directory_.c_str());
-        policy_.finish(true);release();
-        if(policy_.copied>=FlatPixelCapturePolicy::maxSamples)stop("complete");
+        policy_.finish(true);pending_.pop_front();
+        if(policy_.copied>=FlatPixelCapturePolicy::maxSamples && pending_.empty())stop("complete");
     }
-    void capture(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& frame,bool reset,ID3D11Texture2D* const* textures) {
+    void capture(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& frame,bool reset,ID3D11Texture2D* const* textures,
+                 bool refusalPainted=false,uint32_t roiLimitWidth=2048,uint32_t roiLimitHeight=1152) {
         // A reset frame is not a sample (2026-09-29): the frame two after an F10 arm was one, at
         // phase (0,0) with no history, and said nothing about the running image.
         if(!policy_.due(frame.frame,!reset))return;
         const uint64_t now=GetTickCount64();
         if(policy_.expired(frame.frame,now)) {stop("expired-arm");return;}
+        Sample sample{};
+        auto& items_=sample.items;auto& used_=sample.used;auto& enginePresent_=sample.enginePresent;
+        const bool hdr=frame.hdr;
+        sample.roiWidth=hdr?(std::min)(frame.renderWidth,roiLimitWidth):frame.renderWidth;
+        sample.roiHeight=hdr?(std::min)(frame.renderHeight,roiLimitHeight):frame.renderHeight;
+        if(!sample.roiWidth || !sample.roiHeight) {stop("unsupported-empty-roi");return;}
+        sample.roiX=hdr?(frame.renderWidth-sample.roiWidth)/2:0;
+        sample.roiY=hdr?(frame.renderHeight-sample.roiHeight)/2:0;
         uint64_t bytes=0;
         std::array<Microsoft::WRL::ComPtr<ID3D11Resource>,10> sources;
         auto addTexture=[&](const char* name,ID3D11Texture2D* texture,const D3D11_SHADER_RESOURCE_VIEW_DESC* view=nullptr) {
             if(!texture || used_>=items_.size())return false;
             auto& item=items_[used_];texture->GetDesc(&item.desc);const auto& d=item.desc;
-            const uint32_t bpp=d.Format==DXGI_FORMAT_R8_UNORM?1:(d.Format==DXGI_FORMAT_R32G32_FLOAT?8:4);
+            const uint32_t bpp=d.Format==DXGI_FORMAT_R8_UNORM?1:
+                (d.Format==DXGI_FORMAT_R32G32_FLOAT || d.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?8:4);
             const bool format=d.Format==DXGI_FORMAT_R8_UNORM || d.Format==DXGI_FORMAT_R32_FLOAT ||
                 d.Format==DXGI_FORMAT_R16G16_FLOAT || d.Format==DXGI_FORMAT_R8G8B8A8_UNORM ||
-                d.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || d.Format==DXGI_FORMAT_R32G32_FLOAT;
+                d.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || d.Format==DXGI_FORMAT_R32G32_FLOAT ||
+                d.Format==DXGI_FORMAT_R11G11B10_FLOAT || d.Format==DXGI_FORMAT_R16G16B16A16_FLOAT;
             if(!format || !d.Width || !d.Height || d.Width>16384 || d.Height>16384 || d.MipLevels!=1 || d.ArraySize!=1 || d.SampleDesc.Count!=1)return false;
-            item.stride=d.Width*bpp;item.name=name;bytes+=uint64_t(item.stride)*d.Height;
+            if(hdr) {
+                const DXGI_FORMAT expected=used_==6?DXGI_FORMAT_R32G32_FLOAT:
+                    used_==0||used_==5?DXGI_FORMAT_R11G11B10_FLOAT:
+                    used_==1?DXGI_FORMAT_R32_FLOAT:used_==2?DXGI_FORMAT_R16G16_FLOAT:
+                    used_==3?DXGI_FORMAT_R8_UNORM:DXGI_FORMAT_R16G16B16A16_FLOAT;
+                if(d.Format!=expected || d.Width!=frame.renderWidth || d.Height!=frame.renderHeight)return false;
+                item.desc.Width=sample.roiWidth;item.desc.Height=sample.roiHeight;
+            }
+            item.stride=item.desc.Width*bpp;item.name=name;bytes+=uint64_t(item.stride)*item.desc.Height;
             if(view) {item.hasView=true;item.view=*view;}
             sources[used_++]=texture;return true;
         };
@@ -205,7 +242,7 @@ public:
             } else if(!(d.BindFlags&D3D11_BIND_CONSTANT_BUFFER) || d.ByteWidth<276*16 || d.ByteWidth%16)return false;
             item.isBuffer=true;item.name=name;bytes+=d.ByteWidth;sources[used_++]=buffer;return true;
         };
-        for(unsigned i=0;i<6;++i)if(!addTexture(names_[i],textures[i])) {stop("failed-source-format");return;}
+        for(unsigned i=0;i<6;++i)if(!addTexture(names_[i],textures[i])) {stop(hdr?"failed-hdr-source-format-or-grid":"failed-source-format");return;}
         enginePresent_[0]=frame.engine.slots!=nullptr;enginePresent_[1]=frame.engine.pool!=nullptr;
         enginePresent_[2]=frame.engine.sceneNow!=nullptr;enginePresent_[3]=frame.engine.scenePrev!=nullptr;
         if(frame.engine.slots) {
@@ -238,13 +275,20 @@ public:
                 auto d=item.desc;d.Usage=D3D11_USAGE_STAGING;d.BindFlags=d.MiscFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
                 Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;hr=device->CreateTexture2D(&d,nullptr,&staging);item.stage=staging;
             }
-            if(FAILED(hr)) {fail("staging-create-failed");return;}
+            if(FAILED(hr)) {stop("staging-create-failed");return;}
             item.filename="frame_"+std::to_string(frame.frame)+"_"+item.name+".bin";
         }
-        frame_=frame;frame_.reset=reset;
+        sample.frame=frame;sample.frame.reset=reset;sample.copiedMs=now;sample.refusalPainted=hdr&&refusalPainted;
         // Do not retain borrowed game pointers in diagnostic state.
-        frame_.color=frame_.depth=nullptr;frame_.engine={};
-        for(unsigned i=0;i<used_;++i)context->CopyResource(items_[i].stage.Get(),sources[i].Get());
+        sample.frame.color=sample.frame.depth=nullptr;sample.frame.engine={};
+        sample.frame.firstPersonMotion=sample.frame.firstPersonStencil=nullptr;
+        for(unsigned i=0;i<used_;++i) {
+            if(hdr && !items_[i].isBuffer) {
+                D3D11_BOX box{sample.roiX,sample.roiY,0,sample.roiX+sample.roiWidth,sample.roiY+sample.roiHeight,1};
+                context->CopySubresourceRegion(items_[i].stage.Get(),0,0,0,0,sources[i].Get(),0,&box);
+            } else context->CopyResource(items_[i].stage.Get(),sources[i].Get());
+        }
+        pending_.push_back(std::move(sample));
         Log::get().note("flat pixels: copied frame=%llu resources=%u bytes=%llu sample=%u",static_cast<unsigned long long>(frame.frame),used_,static_cast<unsigned long long>(bytes),policy_.copied);
     }
 };

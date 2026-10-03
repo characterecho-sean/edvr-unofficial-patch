@@ -35,6 +35,19 @@ TEXTURES = {
     "raw": (28, 4, "output"),         # DLSS R8G8B8A8_UNORM
     "final": (27, 4, "output"),       # R8G8B8A8_TYPELESS, RGBA8 bytes
 }
+HDR_TEXTURES = {
+    "color": (26, 4, "render"),     # R11G11B10_FLOAT scene H copied before resolve
+    "depth": (41, 4, "render"),
+    "motion": (34, 4, "render"),
+    "rejection": (61, 1, "render"),
+    "raw": (10, 8, "output"),      # R16G16B16A16_FLOAT NGX output
+    "final": (26, 4, "output"),   # scene H after finish, before tone pass
+}
+HDR_PROVENANCE = {
+    "color_provenance": "private-copy-of-scene-H-before-resolve",
+    "raw_provenance": "ngx-fp16-output0",
+    "final_provenance": "scene-H-after-finish-before-tonemap",
+}
 SLOTS = (16, 8, "render")          # DXGI_FORMAT_R32G32_FLOAT
 MAX_POOL_BYTES = 64 * 1024 * 1024
 MAX_SCENE_BYTES = 64 * 1024
@@ -131,6 +144,30 @@ def load_manifest(path):
     rh = _integer(manifest.get("render_height"), "render_height", 1, MAX_DIMENSION)
     ow = _integer(manifest.get("output_width"), "output_width", 1, MAX_DIMENSION)
     oh = _integer(manifest.get("output_height"), "output_height", 1, MAX_DIMENSION)
+    route = manifest.get("route", "sdr")
+    if route not in ("sdr", "hdr") or (route == "hdr" and version != 2):
+        raise CaptureError(f"{path}: unsupported capture route")
+    layout = HDR_TEXTURES if route == "hdr" else TEXTURES
+    roi = None
+    if route == "hdr":
+        if (ow, oh) != (rw, rh):
+            raise CaptureError(f"{path}: HDR output grid must equal render grid")
+        for key, expected in HDR_PROVENANCE.items():
+            if manifest.get(key) != expected:
+                raise CaptureError(f"{path}: unsupported HDR {key}")
+        display = (_integer(manifest.get("display_width"), "display_width", 1, rw),
+                   _integer(manifest.get("display_height"), "display_height", 1, rh))
+        value = manifest.get("capture_roi")
+        if not isinstance(value, dict):
+            raise CaptureError(f"{path}: HDR capture_roi is required")
+        roi = {key: _integer(value.get(key), f"capture_roi.{key}", 0 if key in ("x", "y") else 1, MAX_DIMENSION)
+               for key in ("x", "y", "width", "height")}
+        if roi["x"] + roi["width"] > rw or roi["y"] + roi["height"] > rh:
+            raise CaptureError(f"{path}: HDR capture_roi exceeds source grid")
+        if type(manifest.get("refusal_overlay")) is not bool:
+            raise CaptureError(f"{path}: HDR refusal_overlay must be a boolean")
+    else:
+        display = (ow, oh)
     records = manifest.get("textures")
     if not isinstance(records, list) or len(records) not in ((6,) if version == 1 else (6, 7)):
         raise CaptureError(f"{path}: expected six textures and optional slots")
@@ -140,10 +177,12 @@ def load_manifest(path):
         if not isinstance(record, dict):
             raise CaptureError(f"{path}: texture record must be an object")
         name = record.get("name")
-        if not isinstance(name, str) or name not in ({**TEXTURES, "slots": SLOTS} if version == 2 else TEXTURES) or name in found:
+        if not isinstance(name, str) or name not in ({**layout, "slots": SLOTS} if version == 2 else layout) or name in found:
             raise CaptureError(f"{path}: unknown or duplicate texture name {name!r}")
-        fmt, bpp, grid = SLOTS if name == "slots" else TEXTURES[name]
+        fmt, bpp, grid = SLOTS if name == "slots" else layout[name]
         width, height = (rw, rh) if grid == "render" else (ow, oh)
+        if route == "hdr":
+            width, height = roi["width"], roi["height"]
         filename = record.get("filename")
         if not isinstance(filename, str) or not re.fullmatch(r"frame_\d+_[a-z]+\.bin", filename):
             raise CaptureError(f"{path}: unsafe texture filename {filename!r}")
@@ -173,8 +212,8 @@ def load_manifest(path):
         total_size += actual
         if total_size > MAX_CAPTURE_BYTES:
             raise CaptureError(f"{path}: capture exceeds {MAX_CAPTURE_BYTES} bytes")
-    if set(found) != set(TEXTURES):
-        if set(found) != set(TEXTURES) | ({"slots"} if "slots" in found else set()):
+    if set(found) != set(layout):
+        if set(found) != set(layout) | ({"slots"} if "slots" in found else set()):
             raise CaptureError(f"{path}: missing texture record")
     buffers = {}
     engine = None
@@ -240,16 +279,20 @@ def load_manifest(path):
         "binary_compiled": manifest.get("binary_compiled"),
         "configured_dlss_preset": preset,
         "render_width": rw, "render_height": rh,
-        "output_width": ow, "output_height": oh, "textures": found,
+        "output_width": ow, "output_height": oh, "display_width": display[0], "display_height": display[1],
+        "route": route, "capture_roi": roi, "layout": layout, "textures": found,
+        "refusal_overlay": manifest.get("refusal_overlay", False),
         "total_bytes": total_size, "buffers": buffers, "engine": engine,
         "camera": camera, "previous_camera": previous_camera,
     }
 
 
 def _open_texture(meta, name):
-    width = meta["render_width"] if TEXTURES[name][2] == "render" else meta["output_width"]
-    height = meta["render_height"] if TEXTURES[name][2] == "render" else meta["output_height"]
-    channels = TEXTURES[name][1]
+    width = meta["render_width"] if meta["layout"][name][2] == "render" else meta["output_width"]
+    height = meta["render_height"] if meta["layout"][name][2] == "render" else meta["output_height"]
+    if meta["capture_roi"] and meta["route"] == "hdr":
+        width, height = meta["capture_roi"]["width"], meta["capture_roi"]["height"]
+    channels = meta["layout"][name][1]
     shape = (height, width) if channels == 1 else (height, width, channels)
     return np.memmap(meta["textures"][name], mode="r", dtype=np.uint8, shape=shape)
 
@@ -281,12 +324,102 @@ def _mask_row(rejection, geometry, y):
             (rejection[y1, x0] != 0) | (rejection[y1, x1] != 0))
 
 
+def _hdr_rgb(meta, name):
+    pixels = _open_texture(meta, name)
+    if name == "raw":
+        return pixels.view("<f2").reshape((*pixels.shape[:2], 4))[:, :, :3].astype(np.float32)
+    packed = pixels.view("<u4").reshape(pixels.shape[:2])
+    def channel(shift, mantissa_bits):
+        bits = (packed >> shift) & ((1 << (mantissa_bits + 5)) - 1)
+        exponent = (bits >> mantissa_bits).astype(np.int32)
+        mantissa = (bits & ((1 << mantissa_bits) - 1)).astype(np.float32)
+        value = np.ldexp(np.where(exponent == 0, mantissa / (1 << mantissa_bits),
+                                  1 + mantissa / (1 << mantissa_bits)),
+                         np.where(exponent == 0, -14, exponent - 15))
+        return np.where(exponent == 31, np.where(mantissa == 0, np.inf, np.nan), value)
+    return np.stack((channel(0, 6), channel(11, 6), channel(22, 5)), axis=2)
+
+
+def _hdr_mask_row(meta, rejection, y):
+    roi = meta["capture_roi"]
+    x = np.arange(roi["width"], dtype=np.float32) + roi["x"]
+    gy = y + roi["y"]
+    jx, jy = meta["jitter"]
+    qx = np.floor(x + np.float32(jx)).astype(np.int32)
+    qy = int(math.floor(gy + jy))
+    valid_x = (qx >= roi["x"]) & (qx + 1 < roi["x"] + roi["width"])
+    valid_y = qy >= roi["y"] and qy + 1 < roi["y"] + roi["height"]
+    x0 = np.clip(qx - roi["x"], 0, roi["width"] - 1)
+    x1 = np.clip(qx + 1 - roi["x"], 0, roi["width"] - 1)
+    y0 = min(max(qy - roi["y"], 0), roi["height"] - 1)
+    y1 = min(max(qy + 1 - roi["y"], 0), roi["height"] - 1)
+    mask = ((rejection[y0, x0] != 0) | (rejection[y0, x1] != 0) |
+            (rejection[y1, x0] != 0) | (rejection[y1, x1] != 0))
+    return mask, valid_x & valid_y
+
+
+def _analyze_hdr(meta, rois=None, unjitter=True, static_scene=None):
+    rejection = _open_texture(meta, "rejection")
+    raw, final = _hdr_rgb(meta, "raw"), _hdr_rgb(meta, "final")
+    groups = {label: {"pixels": 0, "different_pixels": 0,
+                      "max_channel_difference": 0.0, "sum_channel_difference": 0.0}
+              for label in ("rejected", "accepted")}
+    excluded = 0
+    for y in range(meta["capture_roi"]["height"]):
+        mask, valid = _hdr_mask_row(meta, rejection, y)
+        excluded += int(np.count_nonzero(~valid))
+        diff = np.abs(raw[y] - final[y])
+        for label, selector in (("rejected", mask & valid), ("accepted", ~mask & valid)):
+            count = int(np.count_nonzero(selector))
+            group = groups[label]
+            group["pixels"] += count
+            if count:
+                selected = diff[selector]
+                group["different_pixels"] += int(np.count_nonzero(np.any(selected != 0, axis=1)))
+                group["max_channel_difference"] = max(group["max_channel_difference"], float(np.nanmax(selected)))
+                group["sum_channel_difference"] += float(np.nansum(selected, dtype=np.float64))
+    for group in groups.values():
+        count = group.pop("sum_channel_difference")
+        group["mean_channel_difference"] = count / (group["pixels"] * 3) if group["pixels"] else None
+    total = sum(group["pixels"] for group in groups.values())
+    from flat_pixels_engine import analyze as analyze_engine
+    roi = meta["capture_roi"]
+    requested = rois if rois else [("captured", (roi["x"], roi["y"], roi["width"], roi["height"]))]
+    try:
+        engine_analysis = analyze_engine(meta, requested, unjitter, static_scene)
+    except ValueError as exc:
+        raise CaptureError(str(exc)) from exc
+    return {"manifest": str(meta["path"]), "frame_id": meta["frame_id"], "mode": meta["mode"],
+            "route": "hdr", "reset": meta["reset"], "capture_roi": meta["capture_roi"],
+            "render_size": [meta["render_width"], meta["render_height"]],
+            "display_size": [meta["display_width"], meta["display_height"]],
+            "color_provenance": HDR_PROVENANCE["color_provenance"],
+            "raw_provenance": HDR_PROVENANCE["raw_provenance"],
+            "final_provenance": HDR_PROVENANCE["final_provenance"],
+            "binary_version": meta["binary_version"], "binary_compiled": meta["binary_compiled"],
+            "configured_dlss_preset": meta["configured_dlss_preset"],
+            "jitter": meta["jitter"], "previous_jitter": meta["previous_jitter"],
+            "input_rejection_pixels": int(np.count_nonzero(rejection)),
+            "output_rejection_pixels": groups["rejected"]["pixels"],
+            "output_rejection_percent": 100 * groups["rejected"]["pixels"] / total if total else None,
+            "edge_excluded_pixels": excluded,
+            "difference_channels": "linear HDR RGB radiance, absolute decoded float difference",
+            "difference_note": ("refusal overlay painted into final; raw/final differences are not ordinary finish comparisons"
+                                if meta["refusal_overlay"] else
+                                "raw fp16 versus finished R11G11B10 includes format quantization; rejected pixels display sampled input rather than backend raw"),
+            "refusal_overlay": meta["refusal_overlay"],
+            "engine_analysis": engine_analysis,
+            "rejected": groups["rejected"], "accepted": groups["accepted"]}
+
+
 def analyze(meta, rois=None, unjitter=True, static_scene=None):
     """`static_scene` None replays the frame as the capture declares its stale-slot policy;
     True/False forces it (flat_pixels_engine.analyze). The rejection statistics below are
     what the GPU produced and do not change with it."""
     if np is None:
         raise CaptureError("NumPy is required for capture analysis")
+    if meta["route"] == "hdr":
+        return _analyze_hdr(meta, rois, unjitter, static_scene)
     rejection = _open_texture(meta, "rejection")
     raw = _open_texture(meta, "raw")
     final = _open_texture(meta, "final")
@@ -342,17 +475,32 @@ STABILITY_MAX_GAP = 8      # frames between the two live samples of a pair
 STABILITY_VISIBLE = 4      # a change of 4/255 or more in any colour channel is a visible change
 
 
+def _preview_hdr(rgb):
+    # Display aid only; statistics and bin files retain linear radiance above 1.
+    linear = np.nan_to_num(rgb.astype(np.float32), nan=0.0, posinf=65024.0)
+    mapped = np.maximum(linear, 0) / (1 + np.maximum(linear, 0))
+    return np.rint(np.power(mapped, 1 / 2.2) * 255).clip(0, 255).astype(np.uint8)
+
+
 def _stability_pair(earlier, later):
     """Change between the FINAL images of two live frames, split by the later frame's
     rejection footprint (the pixels the resolver shows as the raw jittered colour)."""
-    first, second = _open_texture(earlier, "final"), _open_texture(later, "final")
+    hdr = later["route"] == "hdr"
+    first, second = ((_hdr_rgb(earlier, "final"), _hdr_rgb(later, "final")) if hdr else
+                     (_open_texture(earlier, "final"), _open_texture(later, "final")))
     rejection = _open_texture(later, "rejection")
-    geometry = _mask_geometry(later)
+    geometry = None if hdr else _mask_geometry(later)
     groups = {"rejected": [0, 0, 0], "accepted": [0, 0, 0]}   # pixels, sum of change, visible pixels
-    for y in range(later["output_height"]):
-        mask = _mask_row(rejection, geometry, y)
-        change = np.abs(first[y, :, :3].astype(np.int16) - second[y, :, :3].astype(np.int16)).max(axis=1)
+    linear_change = {"rejected": [0.0, 0.0], "accepted": [0.0, 0.0]}
+    height = later["capture_roi"]["height"] if hdr else later["output_height"]
+    for y in range(height):
+        mask, valid = _hdr_mask_row(later, rejection, y) if hdr else (_mask_row(rejection, geometry, y), None)
+        a, b = (_preview_hdr(first[y]), _preview_hdr(second[y])) if hdr else (first[y], second[y])
+        change = np.abs(a[:, :3].astype(np.int16) - b[:, :3].astype(np.int16)).max(axis=1)
+        radiance_change = np.abs(first[y] - second[y]).max(axis=1) if hdr else None
         for label, selector in (("rejected", mask), ("accepted", ~mask)):
+            if valid is not None:
+                selector = selector & valid
             count = int(np.count_nonzero(selector))
             if count:
                 selected = change[selector]
@@ -360,13 +508,26 @@ def _stability_pair(earlier, later):
                 group[0] += count
                 group[1] += int(selected.sum(dtype=np.int64))
                 group[2] += int(np.count_nonzero(selected >= STABILITY_VISIBLE))
+                if hdr:
+                    changes = radiance_change[selector]
+                    linear_change[label][0] += float(np.nansum(changes, dtype=np.float64))
+                    linear_change[label][1] = max(linear_change[label][1], float(np.nanmax(changes)))
     total = [sum(group[i] for group in groups.values()) for i in range(3)]
     report = {"frames": [earlier["frame_id"], later["frame_id"]],
-              "frame_gap": later["frame_id"] - earlier["frame_id"]}
+              "frame_gap": later["frame_id"] - earlier["frame_id"],
+              "route": later["route"]}
     for label, group in (("rejected", groups["rejected"]), ("accepted", groups["accepted"]), ("all", total)):
         report[label] = {"pixels": group[0],
                          "mean_change_of_255": group[1] / group[0] if group[0] else None,
                          "visible_change_percent": 100 * group[2] / group[0] if group[0] else None}
+        if hdr:
+            rad = ([sum(linear_change[k][0] for k in ("rejected", "accepted")),
+                    max(linear_change[k][1] for k in ("rejected", "accepted"))] if label == "all"
+                   else linear_change[label])
+            report[label]["mean_linear_radiance_change"] = rad[0] / group[0] if group[0] else None
+            report[label]["max_linear_radiance_change"] = rad[1]
+    if hdr:
+        report["preview_metric"] = "Reinhard tone map then gamma 1/2.2, RGB 0..255; linear radiance change also reported"
     return report
 
 
@@ -391,11 +552,14 @@ def stability(manifests):
             gap = later["frame_id"] - earlier["frame_id"]
             same_grids = all(earlier[k] == later[k] for k in
                              ("render_width", "render_height", "output_width", "output_height"))
+            same_grids = same_grids and earlier["route"] == later["route"] and earlier["capture_roi"] == later["capture_roi"]
             if 0 < gap <= STABILITY_MAX_GAP and same_grids:
                 report["pairs"].append(_stability_pair(earlier, later))
     if not report["pairs"]:
         report["status"] = (f"needs two live frames of one session at most {STABILITY_MAX_GAP} frames "
                             "apart: a reset frame is not one")
+    report["consecutive_pair_status"] = ("present" if any(p["frame_gap"] == 1 for p in report["pairs"])
+                                         else "absent: no two adjacent live frames with the same capture ROI")
     return report
 
 
@@ -427,6 +591,38 @@ def write_png(path, width, height, rows):
 
 
 def write_previews(meta, directory):
+    if meta["route"] == "hdr":
+        rejection = _open_texture(meta, "rejection")
+        decoded = {name: _hdr_rgb(meta, name) for name in ("color", "raw", "final")}
+        width, height = meta["capture_roi"]["width"], meta["capture_roi"]["height"]
+        for name, rgb in decoded.items():
+            def rows(image=rgb):
+                for y in range(height):
+                    row = np.empty((width, 4), dtype=np.uint8)
+                    row[:, :3] = _preview_hdr(image[y])
+                    row[:, 3] = 255
+                    yield row.tobytes()
+            write_png(directory / f"{name}.png", width, height, rows())
+        def overlay_rows():
+            for y in range(height):
+                row = np.empty((width, 4), dtype=np.uint8)
+                row[:, :3] = _preview_hdr(decoded["final"][y])
+                mask, valid = _hdr_mask_row(meta, rejection, y)
+                selected = mask & valid
+                row[selected, 0] = ((row[selected, 0].astype(np.uint16) + 255) // 2).astype(np.uint8)
+                row[selected, 1:3] //= 2
+                row[:, 3] = 255
+                yield row.tobytes()
+        def difference_rows():
+            for y in range(height):
+                diff = np.abs(decoded["raw"][y] - decoded["final"][y])
+                row = np.empty((width, 4), dtype=np.uint8)
+                row[:, :3] = _preview_hdr(diff * 8)
+                row[:, 3] = 255
+                yield row.tobytes()
+        write_png(directory / "rejection_overlay.png", width, height, overlay_rows())
+        write_png(directory / "raw_final_diff_x8.png", width, height, difference_rows())
+        return
     rejection = _open_texture(meta, "rejection")
     raw = _open_texture(meta, "raw")
     final = _open_texture(meta, "final")
@@ -475,7 +671,8 @@ def run(capture_dir, output=None, dry_run=False, rois=None, static_scene=None):
     manifests = [load_manifest(p) for p in _manifest_paths(capture_dir)]
     results = [analyze(m, rois, static_scene=static_scene) for m in manifests]
     summary = {"frames": results, "stability": stability(manifests),
-               "preview_scale": "absolute RGBA difference x8; alpha difference copied into RGB"}
+               "preview_scale": ("HDR: decoded linear RGB radiance, difference x8 then Reinhard/gamma preview; "
+                                 "SDR: absolute RGBA difference x8, alpha difference copied into RGB")}
     if output is not None:
         summary["output"] = str(output)
         summary["dry_run"] = dry_run
@@ -905,6 +1102,7 @@ def self_test():
             pass
         _self_test_rows_jitter(root)
         _self_test_stability(root)
+        _self_test_hdr(root)
     print("flat_pixels self-test passed")
 
 
@@ -937,6 +1135,78 @@ def _synthetic_capture(session, frame, rw, rh, ow, oh, *, reset=False, jitter=(0
     path = session / f"frame_{frame}.json"
     path.write_text(json.dumps(manifest), encoding="utf-8")
     return path
+
+
+def _self_test_hdr(root):
+    session = root / "hdr_route"
+    session.mkdir()
+    rw, rh = 5, 4
+    roi = {"x": 1, "y": 1, "width": 3, "height": 2}
+    packed_one = ((14 << 5) << 22) | ((16 << 6) << 11) | (15 << 6)
+    packed_four = ((14 << 5) << 22) | ((16 << 6) << 11) | (17 << 6)
+    camera = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1],
+              [0, 0, .025, 0], [0, 0, 1, 0], [1, 0, 0, 0]]
+    def make(frame, final_bits):
+        contents = {"color": struct.pack("<I", packed_one) * 6,
+                    "depth": struct.pack("<f", .01) * 6,
+                    "motion": bytes(6 * 4), "rejection": bytes([255] * 6),
+                    "raw": struct.pack("<eeee", 1, 2, .5, 1) * 6,
+                    "final": struct.pack("<I", final_bits) * 6}
+        records = []
+        for name, (fmt, bpp, _) in HDR_TEXTURES.items():
+            filename = f"frame_{frame}_{name}.bin"
+            (session / filename).write_bytes(contents[name])
+            records.append({"name": name, "filename": filename, "dxgi_format": fmt,
+                            "width": 3, "height": 2, "row_stride": 3 * bpp,
+                            "byte_size": 6 * bpp})
+        manifest = {"version": 2, "frame_id": frame, "mode": "dlaa", "reset": False,
+                    "route": "hdr", "capture_roi": roi, "refusal_overlay": False,
+                    **HDR_PROVENANCE, "jitter": [0, 0], "previous_jitter": [0, 0],
+                    "render_width": rw, "render_height": rh, "output_width": rw, "output_height": rh,
+                    "display_width": rw, "display_height": rh, "textures": records,
+                    "camera": camera, "previous_camera": camera,
+                    "engine": {"complete": False, "status": "absent-or-partial", "slots_present": False,
+                               "pool_present": False, "scene_now_present": False, "scene_previous_present": False},
+                    "buffers": []}
+        path = session / f"frame_{frame}.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+    first, second = make(50, packed_one), make(51, packed_four)
+    meta = load_manifest(first)
+    assert meta["route"] == "hdr" and meta["capture_roi"] == roi
+    pixels = _hdr_rgb(meta, "color")
+    assert np.allclose(pixels[0, 0], [1, 2, .5])
+    result = analyze(meta)
+    assert result["route"] == "hdr" and result["output_rejection_pixels"] == 2
+    assert result["edge_excluded_pixels"] == 4 and result["rejected"]["pixels"] == 2
+    assert result["engine_analysis"]["rois"][0]["xywh"] == [1, 1, 3, 2]
+    pair = stability([meta, load_manifest(second)])
+    assert pair["consecutive_pair_status"] == "present" and pair["pairs"][0]["route"] == "hdr"
+    assert pair["pairs"][0]["all"]["mean_linear_radiance_change"] > 1
+    previews = root / "hdr_previews"
+    run(session, previews, dry_run=True)
+    assert not previews.exists()
+    run(session, previews)
+    assert (previews / session.name / "frame_50" / "final.png").is_file()
+    malformed = json.loads(second.read_text(encoding="utf-8"))
+    malformed["textures"][0]["dxgi_format"] = 28
+    second.write_text(json.dumps(malformed), encoding="utf-8")
+    try:
+        load_manifest(second)
+        raise AssertionError("HDR color accepted as SDR format")
+    except CaptureError:
+        pass
+    # R11/G11/B10 channel boundaries, including smallest subnormals and
+    # largest finite values, are decoded in linear radiance without clipping.
+    for bits, expected in ((1 | (1 << 11) | (1 << 22), [2**-20, 2**-20, 2**-19]),
+                           ((30 << 6 | 63) | ((30 << 6 | 63) << 11) |
+                            ((30 << 5 | 31) << 22), [65024, 65024, 64512])):
+        (session / "frame_50_color.bin").write_bytes(struct.pack("<I", bits) * 6)
+        assert np.allclose(_hdr_rgb(meta, "color")[0, 0], expected, rtol=0, atol=1e-6)
+    inf_bits = (31 << 6) | ((31 << 6 | 1) << 11)
+    (session / "frame_50_color.bin").write_bytes(struct.pack("<I", inf_bits) * 6)
+    decoded = _hdr_rgb(meta, "color")[0, 0]
+    assert np.isinf(decoded[0]) and np.isnan(decoded[1])
 
 
 def _self_test_rows_jitter(root):

@@ -217,6 +217,9 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
     declared_static = bool(meta.get("static_scene", False))
     static = declared_static if static_scene is None else bool(static_scene)
     rw, rh = meta["render_width"], meta["render_height"]
+    capture = meta.get("capture_roi") if meta.get("route") == "hdr" else None
+    cx, cy = (capture["x"], capture["y"]) if capture else (0, 0)
+    cw, ch = (capture["width"], capture["height"]) if capture else (rw, rh)
     now = np.asarray(meta["camera"], dtype=np.float32)
     old = np.asarray(meta["previous_camera"] or meta["camera"], dtype=np.float32)
     ndc_now = np.zeros(2, dtype=np.float32)
@@ -233,14 +236,14 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
             rows_source = source_now if source_now == source_old else f"{source_now}/{source_old}"
         now = unjitter_rows(now, ndc_now)
         old = unjitter_rows(old, ndc_old)
-    depth = np.memmap(meta["textures"]["depth"], mode="r", dtype="<f4", shape=(rh, rw))
-    emitted = np.memmap(meta["textures"]["motion"], mode="r", dtype="<f2", shape=(rh, rw, 2))
-    rejection = np.memmap(meta["textures"]["rejection"], mode="r", dtype=np.uint8, shape=(rh, rw))
+    depth = np.memmap(meta["textures"]["depth"], mode="r", dtype="<f4", shape=(ch, cw))
+    emitted = np.memmap(meta["textures"]["motion"], mode="r", dtype="<f2", shape=(ch, cw, 2))
+    rejection = np.memmap(meta["textures"]["rejection"], mode="r", dtype=np.uint8, shape=(ch, cw))
     complete = meta["engine"]["complete"]
     slots = pool = scene_now = scene_old = None
     first = count = pool_stride = 0
     if complete:
-        slots = np.memmap(meta["textures"]["slots"], mode="r", dtype="<f4", shape=(rh, rw, 2))
+        slots = np.memmap(meta["textures"]["slots"], mode="r", dtype="<f4", shape=(ch, cw, 2))
         path, record = meta["buffers"]["pool"]
         pool_stride = record["stride"]
         if pool_stride == 336:
@@ -255,14 +258,15 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
                                   ndc_old, first=270)
     result = []
     for label, (x, y, width, height) in rois:
-        if x + width > rw or y + height > rh:
-            raise ValueError(f"ROI {label} exceeds {rw}x{rh} render pixels")
+        if x < cx or y < cy or x + width > cx + cw or y + height > cy + ch:
+            raise ValueError(f"ROI {label} exceeds captured area ({cx},{cy},{cw},{ch})")
         step = max(1, math.ceil(math.sqrt(width * height / 8192)))
         counts, slots_used, errors = {}, set(), {"engine": [], "camera": [], "rejected": []}
         reject_mismatch = 0
         for py in range(y, y + height, step):
             for px in range(x, x + width, step):
-                z = np.float32(depth[py, px])
+                ix, iy = px - cx, py - cy
+                z = np.float32(depth[iy, ix])
                 size = np.asarray([rw, rh], dtype=np.float32)
                 raw_uv = ((np.asarray([px, py], dtype=np.float32) + .5) / size -
                           np.asarray(meta["jitter"], dtype=np.float32) / size)
@@ -272,7 +276,7 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
                 elif not complete:
                     branch = "camera_engine_incomplete"
                 else:
-                    code_f, slot_z = slots[py, px]
+                    code_f, slot_z = slots[iy, ix]
                     depth_stale = bool(np.asarray(z).view(np.uint32) != np.asarray(slot_z).view(np.uint32))
                     # The shader's order (engineBefore): sky and the out-of-range sentinel refuse
                     # first; then a slot the pixel's own depth disagrees with -- refused, or the
@@ -328,9 +332,9 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
                         branch = "rejected_output"
                     motion = np.zeros(2, dtype=np.float32)
                 counts[branch] = counts.get(branch, 0) + 1
-                reject_mismatch += bool(branch.startswith("rejected")) != bool(rejection[py, px])
+                reject_mismatch += bool(branch.startswith("rejected")) != bool(rejection[iy, ix])
                 bucket = "engine" if branch == "engine_joined" else "rejected" if branch.startswith("rejected") else "camera"
-                observed = emitted[py, px].astype(np.float32)
+                observed = emitted[iy, ix].astype(np.float32)
                 errors[bucket].append((float(np.linalg.norm(motion - observed)), float(np.linalg.norm(observed))))
         comparisons = {}
         for bucket, pairs in errors.items():
@@ -421,6 +425,80 @@ def self_test():
     before = camera_before(camera_now, camera_old, uv, np.float32(.5))
     assert np.linalg.norm(motion_from_before(before, uv, 100, 100)) > 1
     jitter_self_test()
+    crop_replay_self_test()
+
+
+def crop_replay_self_test():
+    """A cropped HDR capture must replay the same full-grid pixels as an uncropped one."""
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    rw, rh = 12, 9
+    roi = (3, 2, 6, 5)
+    camera = np.zeros((6, 4), dtype=np.float32)
+    camera[0, 0] = 1
+    camera[1, 1] = -1
+    camera[2, 3] = 1
+    camera[3, 2] = 1
+    previous = camera.copy()
+    previous[0, 0] *= np.float32(1.03)
+    previous[5, 0] += np.float32(.2)
+    scene_now = np.zeros((277, 4), dtype=np.float32)
+    scene_old = np.zeros((277, 4), dtype=np.float32)
+    scene_now[270:276] = camera
+    scene_old[270:276] = previous
+    stamp = 91
+    scene_now[276, 0] = np.uint32(stamp).view(np.float32)
+    scene_old[276, 0] = np.uint32(stamp).view(np.float32)
+    pool = np.zeros((2, 21, 4), dtype=np.uint32)
+    record = pool[1]
+    one = np.float32(1).view(np.uint32)
+    record[0, 1] = record[19, 1] = one
+    record[0, 2:4] = record[19, 2:4] = [32767 | (32767 << 16), (65534 << 16) | 32767]
+    record[1, :3] = record[18, 1:4] = np.asarray([0, 0, 2], dtype=np.float32).view(np.uint32)
+    record[18, 0] = 0x7FC0ED01 ^ marker_hash_stamped(record, stamp)
+    depth = np.full((rh, rw), .5, dtype="<f4")
+    slots = np.zeros((rh, rw, 2), dtype="<f4")
+    slots[:, :, 0] = 3
+    slots[:, :, 1] = depth
+    motion = np.zeros((rh, rw, 2), dtype="<f2")
+    rejection = np.zeros((rh, rw), dtype=np.uint8)
+    textures = {"depth": depth, "slots": slots, "motion": motion, "rejection": rejection}
+
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        buffers = {}
+        for name, values in (("pool", pool), ("scene_now", scene_now), ("scene_previous", scene_old)):
+            path = root / f"{name}.bin"
+            path.write_bytes(values.tobytes())
+            buffers[name] = (path, {"stride": 336, "first_element": 0, "num_elements": 2} if name == "pool" else {})
+
+        def fixture(crop):
+            paths = {}
+            for name, values in textures.items():
+                source = values[roi[1]:roi[1] + roi[3], roi[0]:roi[0] + roi[2]] if crop else values
+                path = root / f"{name}_{'crop' if crop else 'full'}.bin"
+                path.write_bytes(source.tobytes())
+                paths[name] = path
+            return {"route": "hdr" if crop else "sdr", "capture_roi":
+                    dict(zip(("x", "y", "width", "height"), roi)) if crop else None,
+                    "render_width": rw, "render_height": rh, "camera": camera.tolist(),
+                    "previous_camera": previous.tolist(), "jitter": [0, 0],
+                    "previous_jitter": [0, 0], "rows_jitter": [0, 0],
+                    "previous_rows_jitter": [0, 0], "reset": False, "static_scene": False,
+                    "textures": paths, "buffers": buffers, "engine": {"complete": True}}
+
+        window = [("building", roi)]
+        full = analyze(fixture(False), window)
+        cropped = analyze(fixture(True), window)
+        assert full == cropped, "cropped replay differs from the full-grid replay at identical source pixels"
+        assert cropped["rois"][0]["branch_counts"].get("engine_joined") == roi[2] * roi[3], cropped["rois"][0]["branch_counts"]
+        try:
+            analyze(fixture(True), [("outside", (roi[0] - 1, roi[1], 1, 1))])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("cropped replay admitted pixels outside the captured source region")
 
 
 def synthetic_camera(rw=2880, rh=1620):

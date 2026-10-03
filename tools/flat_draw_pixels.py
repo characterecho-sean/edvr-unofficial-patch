@@ -164,6 +164,39 @@ def load_frame(path):
         raise CaptureError("draws_recorded exceeds draws_seen")
     if status == "complete" and recorded != seen:
         raise CaptureError("complete frame has unrecorded matching draws")
+    selection = manifest.get("selection")
+    if selection is not None:
+        if not isinstance(selection, dict) or selection.get("strategy") != "depth-matched-stratified-v1":
+            raise CaptureError("invalid draw selection strategy")
+        stride = integer(selection.get("stride"), "selection.stride", 1, 1024)
+        phase = integer(selection.get("phase"), "selection.phase", 0, stride - 1)
+        quota = integer(selection.get("quota_per_class"), "selection.quota_per_class", 1, cap)
+        counts = {name: integer(selection.get(name), "selection." + name, 0, seen)
+                  for name in ("depth_matched", "scene_eligible", "motion_eligible",
+                               "scene_recorded", "motion_recorded", "scene_skipped", "motion_skipped",
+                               "scene_quota_skipped", "motion_quota_skipped")}
+        pools = {}
+        for name in ("pool_candidates", "pool_selected", "pool_skipped", "pool_quota_skipped"):
+            raw = selection.get(name)
+            if not isinstance(raw, list) or len(raw) != 2:
+                raise CaptureError("selection." + name + " must contain two family counts")
+            pools[name] = [integer(value, "selection." + name, 0, seen) for value in raw]
+        if (counts["depth_matched"] > seen or
+                counts["scene_eligible"] + counts["motion_eligible"] > counts["depth_matched"] or
+                counts["scene_recorded"] + counts["motion_recorded"] != recorded or
+                any(counts[k + "_eligible"] != counts[k + "_recorded"] +
+                    counts[k + "_skipped"] + counts[k + "_quota_skipped"] for k in ("scene", "motion")) or
+                counts["scene_recorded"] > quota or counts["motion_recorded"] > quota or
+                (status == "complete" and recorded != seen) or
+                (motion_complete and (counts["motion_skipped"] or counts["motion_quota_skipped"]))):
+            raise CaptureError("draw selection counts disagree")
+        if (sum(pools["pool_candidates"]) > counts["motion_recorded"] or
+                any(pools["pool_candidates"][i] != pools["pool_selected"][i] +
+                    pools["pool_skipped"][i] + pools["pool_quota_skipped"][i] or
+                    pools["pool_selected"][i] > 8 for i in range(2))):
+            raise CaptureError("pool selection counts disagree")
+        selection = {"strategy": selection["strategy"], "stride": stride, "phase": phase,
+                     "quota_per_class": quota, **counts, **pools}
     pixels_path = path.with_name(f"frame_{frame}_pixels.bin")
     cb_path = path.with_name(f"frame_{frame}_cb.bin")
     if manifest.get("pixels_file") != pixels_path.name or manifest.get("cb_file") != cb_path.name:
@@ -252,7 +285,8 @@ def load_frame(path):
                 raise CaptureError("expected motion requires a source candidate")
             motion_status = short_text(motion.get("status"), "motion.status")
             if motion_status not in ("not-requested", "producer-declined", "unavailable", "captured",
-                                     "depth-mirror-unavailable", "view-or-mirror-changed"):
+                                     "depth-mirror-unavailable", "view-or-mirror-changed",
+                                     "pool-sampled-out", "pool-unavailable"):
                 raise CaptureError("invalid motion status")
             if ((motion_status == "not-requested") != (not motion["expected"] and not motion["candidate"]) or
                     (motion_status == "producer-declined") != (motion["candidate"] and not motion["expected"])):
@@ -518,8 +552,9 @@ def load_frame(path):
             "motion_refusals": motion_refusals, "motion_complete": motion_complete,
             "render_size": [width, height], "points": points,
             "draws_seen": seen, "draws_recorded": recorded, "overflow": overflow,
+            "selection": selection,
             "changes": changes, "motion_windows": motion_windows, "unknown_pairs": unknown,
-            "interpretation": "Changes are native render-target bytes before and after a draw; final visible owner and cross-frame draw identity are not inferred."}
+            "interpretation": "Changes are native render-target bytes before and after a sampled draw. Omitted draws, final visible owner, and cross-frame draw identity are not inferred."}
 
 
 def run(capture_dir, output=None, dry_run=False):
@@ -574,7 +609,8 @@ def verify_fixture(root):
         pixel_bytes = (directory / f"frame_{number}_pixels.bin").read_bytes()
         if len(pixel_bytes) != 8 * 2 * WINDOW * WINDOW * 4:
             raise CaptureError("fixture does not contain all eight native before/after windows")
-        expected_changes = {"rt0/point0": (256, 512), "rt0/point5": (6, 12)}
+        expected_changes = {"rt0/point0": (136, 272), "rt0/point1": (20, 40),
+                            "rt0/point4": (25, 50)}
         actual = {key: [(item["q"], item["changed_pixels"], item["changed_bytes"])
                         for item in values] for key, values in frame["changes"].items()}
         expected = {key: [(1, pixels, byte_count)] for key, (pixels, byte_count) in expected_changes.items()}
@@ -595,15 +631,15 @@ def verify_fixture(root):
             raise CaptureError("motion fixture lacks point0 underlay/decal chronology")
         underlay, decal = rows[1], rows[2]
         if (underlay["before_codes"] != {"invalid": 256} or
-                underlay["after_codes"] != {"7": 256} or
-                underlay["after_exact_depth"] != 256 or
-                underlay["slot_changed_pixels"] != 256 or
-                underlay["dsv_changed_pixels"] != 256 or
-                decal["before_codes"] != {"7": 256} or
-                decal["after_codes"] != {"7": 256} or
-                decal["before_exact_depth"] != 256 or
+                underlay["after_codes"] != {"7": 136, "invalid": 120} or
+                underlay["after_exact_depth"] != 136 or
+                underlay["slot_changed_pixels"] != 136 or
+                underlay["dsv_changed_pixels"] != 136 or
+                decal["before_codes"] != {"7": 136, "invalid": 120} or
+                decal["after_codes"] != {"7": 136, "invalid": 120} or
+                decal["before_exact_depth"] != 136 or
                 decal["after_exact_depth"] != 0 or
-                decal["slot_changed_pixels"] != 256 or
+                decal["slot_changed_pixels"] != 136 or
                 decal["dsv_changed_pixels"] != 0):
             raise CaptureError("motion fixture slot/depth transitions differ from GPU expectation")
         first_hash = underlay["pool_record_sha256"].get("3")
@@ -790,6 +826,24 @@ def self_test():
         assert row["dsv_changed_pixels"] == 0 and row["before_codes"] == {"7": 256}
         expected_hash = hashlib.sha256(pool_bytes[3*336:4*336]).hexdigest()
         assert row["pool_record_sha256"] == {"3": expected_hash}
+        newer["selection"] = {"strategy": "depth-matched-stratified-v1", "stride": 64,
+                              "phase": 0, "quota_per_class": 256, "depth_matched": 1,
+                              "scene_eligible": 0, "motion_eligible": 1,
+                              "scene_recorded": 0, "motion_recorded": 1,
+                              "scene_skipped": 0, "motion_skipped": 0,
+                              "scene_quota_skipped": 0, "motion_quota_skipped": 0,
+                              "pool_candidates": [0, 1], "pool_selected": [0, 1],
+                              "pool_skipped": [0, 0], "pool_quota_skipped": [0, 0]}
+        second_path.write_text(json.dumps(newer), encoding="utf-8")
+        assert load_frame(second_path)["selection"]["motion_recorded"] == 1
+        newer["selection"]["motion_skipped"] = 1
+        second_path.write_text(json.dumps(newer), encoding="utf-8")
+        try:
+            load_frame(second_path)
+            raise AssertionError("inconsistent sampled motion counts accepted")
+        except CaptureError:
+            pass
+        newer["selection"]["motion_skipped"] = 0
         newer_draw["motion"]["pool"]["offset"] = len(pool_bytes) - 1
         second_path.write_text(json.dumps(newer), encoding="utf-8")
         try:

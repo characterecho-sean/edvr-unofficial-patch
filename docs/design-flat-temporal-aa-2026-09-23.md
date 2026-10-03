@@ -4,7 +4,7 @@
 
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
-  log is build `v0.18.1-5-g743c5dc0`. Evidence is in sections 1-89.
+  log is build `v0.18.1-5-g743c5dc0`. Evidence is in sections 1-90.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,10 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 89: diagnostic BUILT; rifle/effect capture before admission.
-  Section 87: Coriolis native-scale comparison; 88: HDR-compatible building ROI.
-  Preserve section 83's remaining qualification matrix and the open items below.
+- **Next:** section 89: on-foot rifle/effect diagnostic BUILT, capture before
+  admission; section 90: HDR building capture BUILT, position structures in the
+  center and take F10 during landing. Section 87: Coriolis native-scale FSR
+  comparison. Preserve section 83's remaining matrix and open items below.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
   open. VR still needs regression tests; the concourse NPC observation on
@@ -9319,3 +9320,69 @@ inputs SHA256 20b1d95485cf1cfc7199de8ba96c84a3b5a7070df96c6fdbddaf35a5bc172783.
 Validated flat installer: v0.18.1-10-g00d4f738-dirty, 79570944 bytes,
 SHA256 43ACE66D4995B49DBFE4DF79E091441D6E5D3D297BFB733DFAB66F3825ECAA18.
 This is a diagnostic artifact, not a claimed rendering fix or flown change.
+
+## 90. HDR building capture preparation (2026-10-03)
+
+Sean authorized the capture work after section 88. This changes diagnostics;
+the rendering cause remains unqualified. Target: Epic's Windows flat profile,
+native 3840x2160 NGX DLAA on the HDR route. No VR runtime or headset is involved
+in this evidence; this does not qualify the VR route or other DLSS versions.
+
+Discriminants for the next flight:
+
+- Missing or wrong object motion: a building window has non-sky depth, but its
+  engine slot/freshness, reconstructed motion or rejection disagrees with the
+  frame camera and the building's displacement. A sampled draw that changes
+  that window can identify its shader family; an omitted draw cannot.
+- An integration/history problem: building raw input remains steady while the
+  backend output changes excessively, with matching source identity, adjacent
+  live frames and valid motion. The finish result establishes whether the
+  backend fluctuation reaches the HDR image.
+- Aliasing already in the scene input: the same building detail fluctuates in
+  the pre-resolve color. Depth, motion and rejection distinguish missing
+  coverage from fine geometry or material detail; color alone cannot.
+- A later post-processing problem: the captured HDR finish is stable while the
+  visible final image shimmers. HDR capture is before tone mapping and cannot
+  prove the state of every later effect.
+
+Implemented; combined full validation passed. Ready for the Epic test:
+
+- HDR DLSS/DLAA pixel capture uses a centered region, at most 2048x1152. At
+  3840x2160 its origin is (896,504). Save color, prepared depth, emitted
+  motion, rejection, raw backend output, finished game HDR target, engine
+  slots, pool and scene constants. Preserve source coordinates and linear
+  radiance; the finished target is before tone mapping. Record the actual
+  refusal overlay and distinguish expected output-format quantization.
+- Queue a pair of live frames before readback; allow a second pair after the
+  spacing interval. Report frame adjacency rather than assuming it when a
+  resolve is refused. Keep the cumulative 384 MiB limit. Cropped engine replay
+  retains full render coordinates and is tested against full-frame replay.
+- Draw capture samples the selected depth's scene and motion candidates over
+  the frame, with at most 256 records per class and a 256 MiB limit. Eight
+  windows lie inside the central HDR region. First-eight and every-64th
+  admission uses complementary frame phases; pool snapshots are also spaced.
+  Explicit skip, quota and refusal counts make this partial coverage. An
+  omitted draw is not evidence of unchanged pixels or missing building motion.
+- WARP fixtures check two simultaneously pending HDR frames, source bytes,
+  nonzero region origins and retained engine inputs. The draw policy test
+  includes more than 15000 draws, late motion producers and saturated quotas.
+
+Next flight: keep the shimmering buildings in the center of the screen,
+press F10 while the effect is visible and keep flying for several seconds.
+Verify the new build first, then use the capture's exact region coordinates
+and frame identities. No new setting or rendering compensation is warranted
+by the previous log. FSR/TAA matched-pixel capture remains unsupported and now
+reports that explicitly instead of silently waiting for expiry.
+
+Validation on the pre-merge HDR capture tree: all 122 gates passed (`build/hdr-building-full-retry.log`),
+including the WARP capture fixtures, offline tools, config contract and actual
+installer-resource checks. DLSS SDK 310.9.1 verified against its pinned hash.
+The first sandboxed build stopped at the process-cleanup self-test and missed
+the cached SDK; an unsandboxed retry with the explicit SDK path passed.
+Combined camera-probe/HDR capture tree: all 122 gates passed again in
+`build/hdr-building-combined-full.log`, with full-build receipt digest
+`e0f45f9ec70a3a7e4c7e113ab5591e08d9f08b0652b40664e84a37338e9d9bfc`.
+Epic's installed DLSS 310.9.1 runtime matches the SDK's pinned SHA-256;
+preserve it and `edvr-flat.ini` for this test. The install-only clean-version
+promotion uses the matching receipt. No flight has qualified the new capture
+or the building-shimmer cause yet.

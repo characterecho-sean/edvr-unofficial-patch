@@ -14,6 +14,34 @@ inline int flatDrawCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* con
     namespace fs=std::filesystem;
     using Microsoft::WRL::ComPtr;
     int bad=0;auto ck=[&](bool ok,const char* why){if(!ok){std::printf("FAIL: flat draw capture %s\n",why);++bad;}};
+    // Exercise the exact production admission policy with a flight-sized
+    // chronology. A late source candidate must still have reserved capacity.
+    {
+        edvr::FlatDrawAdmission policy;
+        bool lateScene=false,lateMotion=false;
+        for(unsigned q=1;q<=15337;++q){
+            if(q==15001)lateMotion=policy.consider(true,501);
+            else if(policy.consider(false,501)&&q>15000)lateScene=true;
+        }
+        ck(lateScene&&lateMotion&&policy.sceneEligible==15336&&
+           policy.sceneRecorded<=edvr::FlatDrawAdmission::kQuota&&policy.motionRecorded==1,
+           "15k chronology retains late scene samples and the late motion candidate");
+        edvr::FlatDrawAdmission even;
+        for(unsigned q=1;q<=15337;++q)even.consider(false,502);
+        ck(even.sceneRecorded<=edvr::FlatDrawAdmission::kQuota&&
+           even.sceneRecorded+policy.sceneRecorded>450,
+           "complementary frame phases retain bounded broad coverage");
+        edvr::FlatDrawAdmission saturated;
+        for(unsigned q=1;q<=20000;++q)saturated.consider(true,501);
+        ck(saturated.motionRecorded==edvr::FlatDrawAdmission::kQuota&&
+           saturated.motionQuotaSkipped>0&&saturated.sceneRecorded==0,
+           "motion quota reports selected draws omitted after saturation");
+        bool latePool=false;
+        for(unsigned i=1;i<=240;++i)if(saturated.considerPool(0)&&i>200)latePool=true;
+        ck(latePool&&saturated.poolSelected[0]==8&&saturated.poolCandidates[0]==240&&
+           saturated.poolSkipped[0]==232,
+           "pool snapshots include late producers and remain at eight per family");
+    }
     constexpr UINT W=64,H=64;
     D3D11_TEXTURE2D_DESC td{};td.Width=W;td.Height=H;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
     td.Format=DXGI_FORMAT_R8G8B8A8_UNORM;td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
@@ -132,9 +160,8 @@ inline int flatDrawCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* con
     }
     cap.arm(200);cap.cancel("test-cancel");ck(!cap.active(),"rearm/cancel clears capture");
     edvr::FlatDrawCapture idle;idle.arm(300);idle.present(context,1201);ck(!idle.active(),"900-frame expiry stops idle arm");
-    // Exercise the 512 draw cap without issuing 513 real raster draws. The
-    // unsupported native format gives each candidate an explicit refusal,
-    // so the cap path stays cheap and cannot accidentally look complete.
+    // The GPU path follows the same sparse policy. Unsupported native format
+    // makes each admitted draw an explicit copy refusal without raster work.
     D3D11_TEXTURE2D_DESC unsupportedDesc{};unsupportedDesc.Width=W;unsupportedDesc.Height=H;
     unsupportedDesc.MipLevels=unsupportedDesc.ArraySize=unsupportedDesc.SampleDesc.Count=1;
     unsupportedDesc.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;unsupportedDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
@@ -147,14 +174,16 @@ inline int flatDrawCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* con
         edvr::FlatDrawCapture capped;capped.arm(400);const auto capDir=fs::path(capped.directory());capped.begin(401,depth.Get(),W,H);
         unsigned accepted=0;for(unsigned i=0;i<513;++i){if(capped.before(context,1,'D',3,0,0,0,1,2,vs.Get(),ps.Get())){
             ++accepted;capped.after(context);}}
-        ck(accepted==512,"candidate cap rejects draw 513");
+        ck(accepted==16,"sparse admission does not stop at the first 512 draws");
         capped.qualify(401,depth.Get(),unsupported.Get(),W,H);capped.present(context,401);
         std::ifstream capJson(capDir/L"frame_401.json",std::ios::binary);
         const std::string capBody((std::istreambuf_iterator<char>(capJson)),std::istreambuf_iterator<char>());
         ck(capBody.find("\"status\":\"partial\"")!=std::string::npos&&
             capBody.find("\"draws_seen\":513")!=std::string::npos&&
-            capBody.find("\"draws_recorded\":512")!=std::string::npos&&
-            capBody.find("\"overflow\":1")!=std::string::npos,"cap reports partial and exact omitted draw");
+            capBody.find("\"draws_recorded\":16")!=std::string::npos&&
+            capBody.find("\"scene_eligible\":513")!=std::string::npos&&
+            capBody.find("\"scene_skipped\":497")!=std::string::npos,
+            "manifest reports sparse omissions separately from copy refusals");
         capped.cancel("test-end");
     }
     // Use the game's native depth/slot formats in a second fixture. Each frame
@@ -237,7 +266,7 @@ inline int flatDrawCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* con
                     ck(motion.before(context,1,'D',3,0,0,0,
                         decal?0xBBE58E40FE88EC80ull:0x66DE2CADB1F4AE6Bull,
                         decal?0xDB3E8D20CF53FBC0ull:0x864F1F949851B8DEull,
-                        decal?decalVs.Get():underlayVs.Get(),decal?decalPs.Get():underlayPs.Get()),
+                        decal?decalVs.Get():underlayVs.Get(),decal?decalPs.Get():underlayPs.Get(),true),
                         "native motion draw recorded before substitution");
                     context->OMSetRenderTargets(7,scene,nativeDsv.Get());
                     motion.motionBefore(context,true,true);

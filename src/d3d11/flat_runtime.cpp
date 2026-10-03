@@ -2949,8 +2949,15 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     const bool copy = k.vs == flat_mono_detail::kCopyVs && k.ps == flat_mono_detail::kCopyPs && k.color == s.prefix.output;
     if(!copy && s.drawCapture.active()) {
         FlatComputeInternalScope guard;
+        // This repeats the later source predicate only while F10 is armed, so
+        // admission can reserve samples for late motion producers before the
+        // private MRT6 substitution. The later predicate remains authoritative.
+        const bool motionEligible=d.supported && k.camera && k.depth &&
+            flatContractKind(false,k.color,k.depth,k.width,k.height,k.format==9?26:k.format,
+                s.prefix.width,s.prefix.height,false)==kFlatContractScreen &&
+            (k.format==23||k.format==26)&&flat_mono_detail::fullViewport(k,k.width,k.height);
         drawCaptureStarted=s.drawCapture.before(ctx,instances,kind,count,start,base,startInstance,
-            k.vs,k.ps,bindingGet(BindSlot::Vs),bindingGet(BindSlot::Ps));
+            k.vs,k.ps,bindingGet(BindSlot::Vs),bindingGet(BindSlot::Ps),motionEligible);
     }
     if (tone || copy) for (uint32_t slot = 0; slot < 2; ++slot) {
         const auto bind = static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot);

@@ -947,10 +947,14 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         ID3D11UnorderedAccessView* out=g.output[1].uav.Get();context->CSSetUnorderedAccessViews(4,1,&out,nullptr);
         context->CSSetShader(g.finish.Get(),nullptr,0);context->Dispatch((evalW+7)/8,(evalH+7)/8,1);
     }
-    if(!hdr && pixels.active() && (f.mode==FlatMonoResolveMode::Dlss || f.mode==FlatMonoResolveMode::Dlaa)) {
-        ID3D11Texture2D* textures[]={g.color.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),
-            g.rejection.texture.Get(),g.output[0].texture.Get(),g.output[1].texture.Get()};
-        try { pixels.capture(device,context,f,reset,textures); } catch(...) { pixels.cancel(); }
+    if(pixels.active()) {
+        if(f.mode!=FlatMonoResolveMode::Dlss && f.mode!=FlatMonoResolveMode::Dlaa)
+            pixels.unsupported("unsupported-route-requires-dlss-or-dlaa");
+        else {
+            ID3D11Texture2D* textures[]={g.color.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),
+                g.rejection.texture.Get(),g.output[0].texture.Get(),hdr?color.Get():g.output[1].texture.Get()};
+            try { pixels.capture(device,context,f,reset,textures,paintNow); } catch(...) { pixels.cancel(); }
+        }
     }
     g.history=true;g.lastFrame=f.frame;g.current=index^1;g.inputFormat=colorDesc.Format;
     if(!taa)g.depthLast=depthIndex;   // the image the next asking frame reads as last frame's depth (0 while no frame asks)
