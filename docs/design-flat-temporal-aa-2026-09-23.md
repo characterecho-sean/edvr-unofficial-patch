@@ -4,8 +4,8 @@
 
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
-  build `d0898e1b`. The chronology (26-77) is verbatim in Status detail below;
-  the evidence is in sections 1-85.
+  build `743c5dc0`. The chronology (26-77) is verbatim in Status detail below;
+  the evidence is in sections 1-86.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -58,7 +58,7 @@
   identical). ROOT CAUSE of the VR hills shimmer, ruled in: Elite's terrain
   checkerboard rendering (halves distant terrain's horizontal samples; turning
   it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
-- **Compatibility decision, environment:** moved to Status detail 2026-10-01.
+- **Compatibility:** detail below. **PR72 A/B switches:** retired 2026-10-02; on fixed (section 86).
 
 ## Status detail (moved out of Status 2026-09-29)
 
@@ -9118,3 +9118,43 @@ well. This closes the third support case by user confirmation; no updated
 flight log was supplied. The old capture establishes the rc.4 selector
 refusal, but does not identify which newer routing change resolved it.
 All three supporters now report working. No further flight requested.
+
+## 86. Retire the flat per-draw and engine-motion A/B switches (2026-10-02)
+
+Decision: remove `experimental.flat_per_draw_lean` and
+`experimental.temporal_aa_engine_motion` from the config template, flat
+profile allowlist and runtime reads. Keep both former `on` paths: make a
+contract record only when the reducer needs it, and continue substituting
+eligible pool-family producer draws for exact engine-record motion. Existing
+entries in a player's INI become inert; no live INI is changed by this edit.
+
+Arturbac's [discussion #71](https://github.com/characterecho-sean/edvr-unofficial-patch/discussions/71)
+measured a post-discovery lean on/off/on saving of about 3.3 percentage
+points of the Render thread, or about 0.9 ms per frame, with no visible FPS
+gain (34-37 fps either way). On the same GE-Proton11-6/DXVK, RX 7900 XTX,
+Zen 4 on-foot settlement, disabling engine-motion substitution saved about
+2-3 ms GPU time, but gives moving objects depth-and-camera motion instead
+of their exact engine-record motion. The latter is a quality tradeoff, not
+an equivalent rendering path. These numbers do not qualify VR or Windows.
+
+The later Epic flight log `edvr_gfx_20261002_162645.log` (build
+`v0.18.1-5-g743c5dc0`) completed discovery at 16:28:46.579. In its
+16:28:51-16:29:36 window, weighted contract reduction was 0.1220 ms for
+3,881 calls, or 31.44 ns per call. The earlier Windows baseline build
+`v0.18.0-29-g31f8aee7` completed discovery at 10:04:04.322; its
+10:04:09-10:05:29 window was 0.1400 ms for 2,373 calls, or 59.01 ns
+per call. That is about 47% less time per reducer call in these sampled
+windows. The scenes and AA modes differ (DLAA versus FSR), and the later
+run had a 90 fps cap; this comparison does not prove an FPS gain or isolate
+the lean change as its sole cause.
+
+Sean's native test found the engine-motion `off` path slightly faster but
+lost accurate motion vectors. He chose exact object motion and authorized
+retiring both temporary switches with their `on` behavior fixed. No new
+test flight is claimed for this key removal.
+
+Validation: the absolute `build.bat --jobs 4` passed all 122 test jobs,
+the 234-key config contract, production DLLs and installer resource checks.
+The first eight-job run timed out in `flat_mono_resolve_test` at 180 s;
+the unchanged-source retry passed that rig in 28.6 s. Both build logs are
+retained under `build/retire-flat-ab-switches-full*.log`.
