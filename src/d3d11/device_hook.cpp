@@ -1720,6 +1720,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         flatTemporalBeforePresent(self, g_state->frameCounter, flags);
     if (runtimeFlatProfile()) flatRuntimeBeforePresent();
     if (runtimeFlatProfile()) menuFlatBeforePresent(self, flags);
+    if (runtimeFlatProfile()) flatRuntimeWeaponFootprintBeforePresent(self, flags);
     // The flat HDR route's crash-safe breadcrumbs (flat_hdr_crumbs.h): for the first frames that reach the resolver, the
     // real Present is bracketed, its result and the device's removed reason written. Both crumbs fall outside the clock
     // reads below, which time the call alone. The gate is one relaxed load.

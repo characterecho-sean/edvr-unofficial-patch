@@ -4318,7 +4318,10 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     // The depth probe learns which value the game clears an eye-draw
     // target to, which says which way its depth runs.
     if (!foreignContext(self)) {depthProbeNoteClear(dsv, depth);if(uiLayerWatching())uiLayerNoteDepthClear(dsv, flags, depth, stencil);}
-    if (!foreignContext(self) && flatRuntimeActive()) flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
+        flatRuntimeWeaponFootprintClear(dsv, flags, stencil);
+    }
     if (!foreignContext(self) && (flags & D3D11_CLEAR_DEPTH) && flatRuntimeActive()) { ResourceInfo info{}; if (bindingResolve(dsv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource)); }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearDepth(dsv, flags, depth);
     g_state->realClearDsv(self, dsv, flags, depth, stencil);

@@ -23,6 +23,7 @@ static std::vector<Variant> extraVariants() { return {
     {"kSunglareNoGateBytecode","sunglare_world_vs","main",sunNoGate,{},false,edvr::kSunglareWorldVS,"vs_5_0"},
     {"kSunglareAllWorldBytecode","sunglare_world_vs","main",sunAllWorld,{},false,edvr::kSunglareWorldVS,"vs_5_0"},
     {"kSunglareAllFlatBytecode","sunglare_world_vs","main",sunAllFlat,{},false,edvr::kSunglareWorldVS,"vs_5_0"},
+    {"kWeaponFootprintBytecode","weapon_footprint_cs","main",nullptr,{},false,edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl,"cs_5_0"},
 }; }
 static std::vector<LegacyContract> extraLegacyContracts() { return {
     {"backdrop deband","main","cs_5_0",nullptr,0x6D209E9C37D3C19Bull},

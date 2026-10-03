@@ -4,7 +4,7 @@
 
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
-  log is build `v0.18.1-12-g41b9838c`. Evidence is in sections 1-92.
+  log is build `v0.18.1-12-g41b9838c`. Evidence is in sections 1-93.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,7 +32,7 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 92: weapon conflict CONFIRMED; capture its color/stencil
+- **Next:** section 93: weapon conflict CONFIRMED; capture its color/stencil
   footprint while AA refuses before admission. Quiet cockpit performance
   recovered; building shimmer remains unqualified. Section 87: native FSR
   comparison. Preserve section 83's remaining matrix and open items below.
@@ -9521,3 +9521,42 @@ essentially static sample shows less backend variation; it does not prove
 shimmer gone during landing or after tone mapping. Known draw-pool and
 steady-depth replay limits in section 91 still apply. No build or live setting
 was changed for this analysis.
+
+## 93. Refused-frame weapon footprint capture (2026-10-03)
+
+Sean authorized the next instrument after section 92. Hypotheses to separate:
+the exact weapon draw marks newly changed color with stencil 0x04; the mark
+already belongs to other surfaces; a later clear or draw removes or expands
+it before the HDR consumer. Before/after color, depth and stencil, followed
+by pre-consumer and frame-end observations of the same resources, distinguish
+these cases. `night_vision.cpp` also recognizes stencil write mask 0x04 with
+REPLACE, so the bit alone is not evidence of exclusive weapon ownership.
+
+Implemented and validated: an independent F10 arm for VS
+`025B4B9FF54622ED` / PS `46F92DC71BF8DFA5`, including frames whose camera
+ownership refuses AA. Two bounded draw samples retain resource/state
+provenance. A lower-center ROI includes the held-weapon region; omissions
+outside the ROI remain explicit, and no observed change cannot exclude a
+footprint outside it. Depth-stencil uses a whole-resource typeless GPU mirror
+and shader extraction into compact depth/stencil planes; boxed partial
+depth-stencil copies are invalid. All pending allocations are budgeted.
+Offline analysis measures preexisting marks, changed color/depth and mark
+survival, without equating unchanged color with absence of raster coverage.
+
+No AA admission, masking, motion behavior or live setting changes are
+authorized by this evidence. Target is Windows flat Epic at native 3840x2160,
+DLAA with the installed DLSS runtime preserved; this instrument does not
+qualify VR. Next test after build/install: draw the weapon until world AA
+turns off, press F10 and keep it drawn through capture completion, then
+holster. Performance comparison still requires waiting for F10's existing
+two-minute passive discovery window to end. Full build and all gates passed;
+clean-commit DLL promotion and Epic installation follow.
+
+The WARP fixture uses the production snapshot/extraction path: 16 changed
+color pixels, no selected-draw depth change, 15 new stencil-0x04 marks,
+12 surviving to the consumer and none after the final stencil clear. Four
+unrelated depth pixels change later. Tests also verify game bindings survive
+capture, alias DSV clears are recorded, later-frame clears are excluded,
+wrong-pair/off-arm rejection, no-match expiry and a producer-emitted missing-
+consumer partial manifest. Both offline fixture gates and parser self-tests
+pass. These fixture results validate the instrument, not live AA admission.
