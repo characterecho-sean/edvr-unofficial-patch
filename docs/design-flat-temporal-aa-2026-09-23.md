@@ -4,8 +4,7 @@
 
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
-  build `743c5dc0`. The chronology (26-77) is verbatim in Status detail below;
-  the evidence is in sections 1-87.
+  log is build `v0.18.1-5-g743c5dc0`. Evidence is in sections 1-88.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,11 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 87: Coriolis screenshot; native-scale FSR on/off comparison.
-  Section 85's three supporters confirm working. Then 83: SS 0.75/0.85, bloom/DoF, mismatched
-  resolution, TAA at 1.25, game AA, VR at 0.85. HDR flew (81); FSR reported
-  working (85). TAA at R = D and ReShade still to fly. Then open items above.
-  Existing evidence does not justify ignoring the alternate projection.
+- **Next:** section 87: Coriolis native-scale FSR on/off comparison; section
+  88: HDR-compatible matched building ROI before another flight. Preserve
+  section 83's remaining qualification matrix and the open items below.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
   open. VR still needs regression tests; the concourse NPC observation on
@@ -58,7 +55,8 @@
   identical). ROOT CAUSE of the VR hills shimmer, ruled in: Elite's terrain
   checkerboard rendering (halves distant terrain's horizontal samples; turning
   it off fixed it). EDVR now says so in VR (BUILT, NOT FLOWN).
-- **Compatibility:** detail below. **PR72 A/B switches:** retired 2026-10-02; on fixed (section 86).
+- **Compatibility:** detail below. **PR72 A/B switches:** retired with `on`
+  fixed (section 86). Landing-time building shimmer is unqualified (section 88).
 
 ## Status detail (moved out of Status 2026-09-29)
 
@@ -9223,3 +9221,37 @@ station detail clears with temporal AA off, that isolates temporal
 processing as a contributor; it does not yet identify motion vectors,
 history rejection or reconstruction as the faulty stage. A short clip of
 both modes while the station rotates is more useful than another log alone.
+
+## 88. Epic building shimmer: F10 remains HDR-blind (2026-10-03)
+
+Sean reports shimmer on settlement buildings while landing. The verified Epic
+log, `edvr_gfx_20261003_062849.log`, is `v0.18.1-5-g743c5dc0`, installation
+profile flat. At F10 the flat runtime was DLSS mode with NGX DLAA active at
+3840x2160. This is not VR evidence.
+
+F10 at 06:35:07.463 opened pixel-capture session
+`20261003_123507_462_60972_1`; it expired at 06:35:16.458 with copied=0,
+completed=0, failed=0, bytes=0; it saved no pixel frames. The separate
+draw-capture session `20261003_123507_463_60972_1` saved manifests for frames
+206197/206198. Both have `qualified=true`, `identity_match=true`, status
+`partial`, reason `copy-or-cap-refused`: 512/15337 and 512/15334 draws were
+recorded, with overflow 14825/14822. Within those bounded draws,
+`motion_draws=0` and `motion_complete=false`. The only identified changed
+16x16 sample was point `(3456,1598)` at q172/173, VS `BFE51414CC3024B4` /
+PS `DB79AE788E049DFD`. Section 49 identifies that pair as the non-pool
+cockpit shell; these samples do not identify a building draw.
+
+In installed source snapshot `build/pr68-container/pr68-merge-validation`,
+`flat_mono_resolve.cpp:950-954` gates pixel capture on `!hdr && (DLSS || DLAA)`;
+the capture header also excludes `R11G11B10_FLOAT`. The active HDR route was
+native at 3840x2160, so removing only the gate would still not capture these
+frames. Ruled out: GPU readback failure as the reason no pixel frames were
+queued; HDR bypassed the copy queue. This does not explain the shimmer.
+
+In the two pre-F10 five-second windows, the HDR route treated 301 and 295
+frames. Local projection refused 0 with row/pair mismatch=0; these frame-level
+counts do not establish correct building motion.
+The generic draw audit is not geometry evidence. No rendering cause or fix is
+qualified. Next discriminant: HDR-compatible color, depth, motion-vector,
+rejection and final-image samples at a matched building ROI across consecutive
+frames, before another flight; do not repeat F10 on this blind path.
