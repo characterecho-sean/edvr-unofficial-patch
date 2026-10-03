@@ -2,63 +2,58 @@
 
 ## Status
 
-*Written 2026-10-02, instruments added the same day. Update whenever this doc changes.*
+*Written 2026-10-02; lock 2 added 2026-10-03. Update whenever this doc changes.*
 
-- **State:** one field log read; not reproduced; no fix. The stall is inside the vendor
-  runtime's `xrEndFrame`; what it waits on is not in our logs. The four diagnostic
-  instruments below are BUILT (branch `claude/slow-regime-tools`, full build green), not
-  merged, not installed, not flown. Waiting on the user and on a flight with them.
-- **Report:** on foot, walking to the boarding circle, the headset image locks while the
-  game carries on at a much lower frame rate on the mirror. Twice since v0.18.0 (once at a
-  settlement, once on a station). Quest 3 through Virtual Desktop's OpenXR runtime (VDXR
-  1.0.10) at 72 Hz, RTX 4070 Ti 12 GB, HMD Quality 0.50 with DLSS Performance (1261x1196
-  per eye to 2522x2392), `fix.vscreen_res_width = 2880`, the on-foot route and maps at
-  their defaults, `fix.weapon_stability = 1` (deferred pacing on foot).
-- **What the log shows:** from 11:14:38.1 the game ran at exactly 10.0 fps until the user
-  quit about a minute later. Every frame's second Submit waited about 83 ms (6 display
-  periods) inside VDXR's `xrEndFrame`, and EDVR's copy into VD's swapchain took up to 79 ms
-  on the GPU clock (`native_producer_gpu` p95 75.6 ms; normally 0.04). Every call returned
-  success, EDVR's own CPU cost stayed about 0.35 ms a frame, and the route treated every
-  frame. The previous session's breadcrumbs end on the same plateau (300 frames in 30.08
-  s), with no process exit.
-- **Reading:** VD is holding the game back: it keeps its swapchain images, so our copy
-  and `xrEndFrame` wait. The same fixed 100 ms cadence in both sessions looks more like a
-  throttle than a slow GPU.
+- **State:** two locks read; lock 2 was caught by the new instruments (v0.18.1 ships
+  them). Both are a hard 10 Hz limit inside the vendor runtime's `xrEndFrame`. No fix.
+  Next: the user's on-foot flight with `fix.weapon_stability = 0`.
+- **Report:** on foot near the ship, the headset image locks while the game carries on at
+  a much lower frame rate on the mirror. Quest 3 through VDXR 1.0.10 at 72 Hz, RTX 4070 Ti
+  12 GB, route and maps at their defaults, `fix.weapon_stability = 1`. Lock 1: v0.18.0,
+  2026-10-02 11:14:38, HMD Quality 0.50, a heavy scene sliding from 72 to 26 fps. Lock 2:
+  v0.18.1, 2026-10-03 08:59:22, HMD Quality 0.75, `openxr_resolution` 2100 wide, a light
+  scene at a flat 72 fps, 21 s after disembarking.
+- **What the logs show:** a step into exactly 10 fps until the user quits. Over 174
+  consecutive frames of both locks the gap between `xrEndFrame` returns never fell under
+  99.8 ms; the hold is 100 ms minus the game's own work (r = -0.92) and drops to 1.1 ms
+  after a 141.6 ms game stall. That is a 100 ms timer or fallback in the vendor, not a
+  throughput limit. Lock 2: our copy 0.43 ms, our work 0.11 ms, swapchain calls about 0,
+  session FOCUSED, no vendor event, VRAM 74% of the budget. Both locks: on foot, deferred
+  pacing with a synchronous end frame, the route owning.
 - **Ruled out:**
-  - ruled out: the route or on-foot maps holding a stale panel, because the route treated
-    every frame through the lock with no event at the onset, and a stale panel cannot
-    lower the game's own Present rate;
-  - ruled out: per-frame churn from the panel auto-fit, because the width is explicit
-    (2880), every size stayed constant, and no DLSS feature was created after 10:58:35;
-  - ruled out: EDVR blocking the render thread, because EDVR's CPU time stayed about
-    0.35 ms a frame with no file I/O, lock or fence wait, and the sampler's samples name
-    the game, the NVIDIA driver and NGX;
-  - ruled out: device loss, because no DXGI, removal or XR-loss line exists and the exit
-    was orderly;
-  - ruled out: a performance-level hint to VDXR (`XR_EXT_performance_settings`), because
-    EDVR already enables it wherever offered and VDXR reports `extension=absent`.
-- **Open:** (A) VD's stream backed up (encoder, network or headset decoder) and VD
-  throttles the app; (B) GPU memory pressure on a 12 GB card in a heavy on-foot scene
-  (on foot, v0.18.0 holds the route's DLAA feature and buffers beside the idle eye
-  features, and VD composites a quad layer); (C) deferred pacing (no overlapped end frame)
-  interacting with VDXR. Nothing logged separates them.
-- **Blind spot: CLOSED for the next flight (detection only; the cause stays open).** 100 ms
-  frames sit under the 250 ms FREEZE line and the 150 ms stall sampler, so v0.18.0's
-  `--freezes` printed PASS. The new build writes a SLOW line naming the owner; `--freezes`
-  says SLOW (exit 4), never PASS, when the vendor runtime or EDVR holds the frames, and
-  INFO (a load) or WARN (the game's scenes, or no named owner) when the game does. For a
-  v0.18.0 log it reconstructs: the user's bundle reads 11:14:38.1 to 11:15:35.2, 9.9 fps
-  of 72 Hz, held by the vendor runtime's `xrEndFrame` (82.7 ms of each 100.6 ms frame).
-  Census: no regime in Sean's 12 newest Frontier logs (section below).
-- **Instruments built (section below; diagnostics only):** `vram:` lines, the vendor's
-  events, every `xrEndFrame` of 3 periods or more, sustained slow frames with the owner,
-  the VRAM figures and a `context=`; each with an armed line; test key `advanced.slow_test_ms`.
-- **Next:** from the user, the previous session's log pair (does its last `xr_end_frame`
-  read about 83 ms too?); the VD version and settings (codec, bitrate, Synchronous
-  Spacewarp), what the headset showed, and whether restarting VD's stream recovers it;
-  then one flight with the new build (test plan: `docs\freeze-diagnostics-2026-10-01.md`),
-  and `nvidia-smi` logging once a second. If it recurs on foot, an A/B with
-  `experimental.temporal_aa_on_foot_world = off` and `experimental.on_foot_maps_sharp = off`.
+  - ruled out: a stale route or maps panel, because the route treated every frame of lock
+    1 and a stale panel cannot lower the game's own Present rate;
+  - ruled out: auto-fit churn, because the width was explicit and every size constant;
+  - ruled out: EDVR blocking the render thread, because its own time stayed 0.1-0.35 ms a
+    frame with no file I/O, lock or fence wait;
+  - ruled out: device loss, because no DXGI, removal or XR-loss line exists and both exits
+    were orderly;
+  - ruled out: VD holding our swapchain images, and EDVR's 100 ms handoff timeout, because
+    lock 2's acquire, wait and release took about 0 ms, the copy 0.23 ms, and the hold sits
+    inside `xrEndFrame` (lock 1's copy p95 of 75.6 ms was not the hold);
+  - ruled out: graphics memory pressure in the game's process, because lock 2 peaked at
+    74% of the budget with nothing demoted and no jump (VD's own process is not in it);
+  - ruled out: a session state or focus change, because VD sent no event around lock 2;
+  - ruled out: a heavy scene as the trigger, because lock 2 came at a flat 72 fps;
+  - ruled out: `XR_EXT_performance_settings` as a lever, because VDXR does not offer it.
+- **Open:** (A) VD's stream backed up (encoder, network or headset decoder) and VDXR paces
+  the app at 10 Hz; (C) deferred pacing with VDXR: 2 of 2 locks under it over about 9.5
+  min of deferred pacing, 0 in about 31 min of runtime pacing, confounded with the route;
+  (D) the headset or link stopped consuming frames and VDXR keeps the app alive at 10 Hz.
+- **Next:** the user, 20-30 min on foot with `fix.weapon_stability = 0` (live, F8), nothing
+  else changed. A lock with `pacing=runtime path=overlapped` refutes (C), and the route
+  goes off next; no lock supports (C) (flip it back to confirm), and EDVR would own a
+  mitigation. If it locks: don't quit; note whether the picture is head- or world-locked,
+  whether VD's menu answers, whether it recovers. Ask for VD's versions, codec, bitrate,
+  Synchronous Spacewarp and the performance overlay.
+- **Reader fixes, not built:** lock 2's STOP (runtime cycle 56969, 320 ms, no FREEZE line)
+  is a false alarm: 95 ms of it was vendor-held before the Present, so the Present gap was
+  about 231 ms; expect a FREEZE only when the cycle minus the second submit reaches 250 ms.
+  The startup WARN (6 fps for 7 s) was a load the detector called `scene` by frame count
+  (5.0 of its 7.0 s had no layers); weight the context by time.
+- **Instruments (section below):** on main 521d625b, shipped in v0.18.1: `vram:` lines,
+  vendor events, long `xrEndFrame` episodes, slow regimes with their owner, VRAM and
+  context; test key `advanced.slow_test_ms`.
 
 ## The instruments (2026-10-02)
 
@@ -189,3 +184,28 @@ Bundle `edvr-logs-20261002-111610.zip`, v0.18.0 (build 6ABED11D). The graphics l
 - Not attributed: in the slow state, every sampled frame creates a texture of about
   64.5 MiB (4096x4096 at 4 bytes). The same signature appears in the cockpit with the
   route off (11:08 to 11:11), so it is the game's.
+
+## Evidence, lock 2 (2026-10-03, v0.18.1)
+
+Bundle `edvr-logs-20261003-090033.zip`, v0.18.1 (build 6AC026D1), session 08:44:44 to
+08:59:51 local; the runtime log stamps UTC, one hour behind. `--freezes` reads SLOW from
+08:59:22.5 to 08:59:50.5, held by the vendor runtime's `xrEndFrame`.
+
+- 08:58:39.5 to 08:58:40.7 and 08:59:00.5: VDXR's predicted period switched to 27.78 ms
+  (half rate), first in a GPU-bound ship phase at about 41 fps (game GPU 16-17.6 ms), then
+  in the disembark loads (game stalls of 188, 252 and 155 ms).
+- 08:58:56.5 the journal's Disembark; 08:59:00.874 the route OWNS (frame 61271);
+  08:59:01.040 Status.json on foot; 08:59:01.062 pacing turbo, the session's only pacing
+  change. Then 72.0 fps flat, game GPU 8.6-10.4 ms, EDVR 3.56 ms a frame, the period
+  steady at 13.889 ms.
+- 08:59:22.007, the onset: a runtime cycle of 102.1 ms with the second submit at 91.3 ms,
+  after a window reading `xr_end_frame` 1.61/1.78 ms (p50/max). The episode line: 88.3 ms,
+  6.36 periods, path synchronous, pacing deferred, FOCUSED for 875.6 s, should_render 1,
+  copy 0.23 ms. EDVR logged no event in the 10 s before.
+- 08:59:22 to 08:59:50: 285 of 290 calls slow, p50 87.8 ms, max 89.4 ms; the gap between
+  `xrEndFrame` returns 100.0 ms at p5. VRAM 7655 MB at 08:58:52, 8306 at 08:59:23.1, 8267
+  at 08:59:27.5, against a budget of 11228 MB on every line; non-local at most 128 MB.
+- 08:59:46.258 the route releases; 08:59:51.14 an orderly shutdown; Status.json clears at
+  08:59:52.03. The user quit 29 s after the onset.
+- Again not attributed: one texture creation of about 64.6 MB in every sampled frame of
+  the lock (5 of 5 here, 11 of 11 in lock 1).
