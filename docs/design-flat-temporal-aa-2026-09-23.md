@@ -4,7 +4,7 @@
 
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
-  log is build `v0.18.1-12-g41b9838c`. Evidence is in sections 1-91.
+  log is build `v0.18.1-12-g41b9838c`. Evidence is in sections 1-92.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 89: on-foot rifle/effect diagnostic BUILT, capture before
-  admission; sections 90-91: HDR building capture FLOWN, shimmer unqualified;
-  performance needs a window after F10 discovery ends. Section 87: native FSR
+- **Next:** section 92: weapon conflict CONFIRMED; capture its color/stencil
+  footprint while AA refuses before admission. Quiet cockpit performance
+  recovered; building shimmer remains unqualified. Section 87: native FSR
   comparison. Preserve section 83's remaining matrix and open items below.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
@@ -9456,3 +9456,68 @@ is 6.49e-8. Do not infer motion failure from replay's stale-branch counts.
 Exact per-pixel confirmation needs previous depth and the actual prep flags
 in the capture before a further diagnostic flight. Captured GPU rejection in
 the on-foot building region is about 0.019%; this alone does not validate motion.
+
+## 92. Weapon refusal reproduced; quiet performance recovers (2026-10-03)
+
+Verified `edvr_gfx_20261003_082043.log` against installed
+`v0.18.1-12-g41b9838c` (6AC106D5), Windows flat, native 3840x2160 DLAA.
+Sean drew a weapon, saw world AA turn off, F10 at 08:23:54.958, holstered
+during the two-minute wait, then took cockpit F10 at 08:26:07.549 and waited
+again. Weapon input timestamps themselves are not logged.
+
+Performance: final passive discovery completes at 08:28:07.568. Quiet HDR
+windows at 08:28:15.299/20.302/25.707 have zero declined frames and discovery
+0.000 ms. Present p50 is 15.66/15.65/15.95 ms (roughly 63-64 FPS by median
+frame time); GPU frame p50 10.46/10.31/10.56 ms, resolve 0.98/0.98/0.99 ms.
+Wrapper D3D calls are 19826/19820/19817 per frame, over approximately 12435
+substituted draws. This recovers section 91's pre-F10 submission regime and
+is comparable to the previous 743c5dc0 cockpit's 16.48 ms / 10.63 ms. The
+large sustained-looking slowdown after F10 is not present once discovery
+ends. These are not controlled pre/post-PR72 views; no reducer regression
+is established. CPU timings still use one-in-16 clocked frames and include
+profiling cost; GPU spans and Present quantiles have their own sample counts.
+
+Weapon diagnosis: exact VS `025B4B9FF54622ED` / PS `46F92DC71BF8DFA5`
+caused the first HDR camera conflict in frames 171619/171620. Draw sequences
+16773/16856 equal first-bad-seq, actual hashes match and HDR RTV, depth, DSV
+and named b1 identities are unchanged. Camera XY coefficients scale by
+1.231279 and near depth changes 0.025 -> 0.0675; pose rows 274/275 match
+byte-for-byte. This is an alternate projection at the same pose. Treatment
+stays at zero in the weapon interval, then resumes after the reported holster.
+
+Ruled out: a missing projection recipe as this frame's AA blocker, because
+the generic recipe is prepared on all 900 observed offending-pair draws and
+the reference reports canonical=900, unmatched=0. Adding an exact recipe
+alone would not remove the HDR ownership conflict.
+
+Shader bytecode now exists: pooled packed vertices, t33 stride336/t38 stride48,
+position through b1[270..273]; PS texture arrays t2/t3 and structured t1 stride96,
+color output, no SV_DEPTH. VS declares no b0, so an unbound b0 is expected;
+the older rifle probe's aggregate partial flag does not invalidate complete
+b1 and actual-shader evidence. Captured depth state has depth writes OFF,
+stencil REPLACE with ref/mask 0x04. The older qualified rifle pair writes
+depth; its strict-depth fallback does not qualify this color-only pass. The
+existing first-person resolver mask uses 0x10. Do not globally admit changed
+cameras or assume the 0x04 mark is exclusive and survives until resolve.
+
+The old 88DCF/494506 rifle pair is observed in the first audit but is not its
+first camera conflict; new 9AEC/3789 effect is never observed during this F10
+and remains unqualified. The cockpit has no offending 025B/46F pair.
+
+First F10 pixel arm expired with zero copies; draw arm expired after 900
+unqualified frames while selection stayed conflicting-hdr-target-or-camera.
+The camera/shader probe works during refusal, but matched HDR pixels do not.
+Next discriminant is passive before/after color and stencil footprint for this
+exact draw and stencil survival to resolve, captured even on a refused frame.
+If an exact-pair/state exclusion is supported, GPU tests must prove it prevents
+borrowing world-depth history over weapon color and retains refusals for
+mismatched hash/state. No rendering admission change is qualified yet.
+
+Cockpit pixel capture completes four frames 179362/363 and 179378/379, engine
+inputs intact. Its building region's same-phase final-H preview drift is
+0.179/255 (0.11% of pixels change at least 4/255), versus 2.285/255 (15.60%)
+in section 91's prior cockpit. Source-H drift is 0.009/255. This short,
+essentially static sample shows less backend variation; it does not prove
+shimmer gone during landing or after tone mapping. Known draw-pool and
+steady-depth replay limits in section 91 still apply. No build or live setting
+was changed for this analysis.
