@@ -178,6 +178,125 @@ const char* triName(TriState value) noexcept {
     }
 }
 
+const char* observationTriName(holo_scrim_observation::Tri value) noexcept {
+    using holo_scrim_observation::Tri;
+    switch (value) {
+    case Tri::No: return "no";
+    case Tri::Yes: return "yes";
+    default: return "unknown";
+    }
+}
+
+bool writeObservationGates(Writer& writer,
+    const holo_scrim_observation::Gates& gates) noexcept {
+    return writeFmt(writer,
+        "{\"enabled\":\"%s\",\"shapeReached\":\"%s\","
+        "\"shapeMatched\":\"%s\",\"helperReached\":\"%s\","
+        "\"helperEnabled\":\"%s\",\"helperShapeReached\":\"%s\","
+        "\"helperShapeMatched\":\"%s\"}",
+        observationTriName(gates.enabled),
+        observationTriName(gates.shapeReached),
+        observationTriName(gates.shapeMatched),
+        observationTriName(gates.helperReached),
+        observationTriName(gates.helperEnabled),
+        observationTriName(gates.helperShapeReached),
+        observationTriName(gates.helperShapeMatched));
+}
+
+bool writeResourceObservation(Writer& writer,
+    const holo_scrim_observation::ResourceObservation& resource) noexcept {
+    return writeFmt(writer,
+        "{\"source\":%u,\"resolveReached\":\"%s\","
+        "\"resolved\":\"%s\",\"rawAvailable\":\"%s\","
+        "\"texture2D\":\"%s\",\"a\":%u,\"b\":%u,\"fmt\":%u}",
+        static_cast<unsigned>(resource.source),
+        observationTriName(resource.resolveReached),
+        observationTriName(resource.resolved),
+        observationTriName(resource.rawAvailable),
+        observationTriName(resource.texture2D), resource.a, resource.b,
+        resource.fmt);
+}
+
+bool writeEyeSizeObservation(Writer& writer,
+    const holo_scrim_observation::EyeSizeObservation& eye) noexcept {
+    return writeFmt(writer,
+        "{\"reached\":\"%s\",\"statePresent\":\"%s\","
+        "\"result\":\"%s\",\"readMask\":%u,\"depthW\":%u,"
+        "\"depthH\":%u,\"eyeW\":%u,\"eyeH\":%u,"
+        "\"renderW\":%u,\"renderH\":%u}",
+        observationTriName(eye.reached),
+        observationTriName(eye.statePresent),
+        observationTriName(eye.result), static_cast<unsigned>(eye.readMask),
+        eye.depthW, eye.depthH, eye.eyeW, eye.eyeH, eye.renderW, eye.renderH);
+}
+
+bool validObservationTri(holo_scrim_observation::Tri value) noexcept {
+    return static_cast<std::uint8_t>(value) <=
+           static_cast<std::uint8_t>(holo_scrim_observation::Tri::Yes);
+}
+
+bool validObservationGates(
+    const holo_scrim_observation::Gates& gates) noexcept {
+    return validObservationTri(gates.enabled) &&
+        validObservationTri(gates.shapeReached) &&
+        validObservationTri(gates.shapeMatched) &&
+        validObservationTri(gates.helperReached) &&
+        validObservationTri(gates.helperEnabled) &&
+        validObservationTri(gates.helperShapeReached) &&
+        validObservationTri(gates.helperShapeMatched);
+}
+
+bool validResourceObservation(
+    const holo_scrim_observation::ResourceObservation& resource) noexcept {
+    using holo_scrim_observation::ResourceSource;
+    return static_cast<std::uint8_t>(resource.source) <=
+            static_cast<std::uint8_t>(ResourceSource::WarmCacheWithoutRawShadow) &&
+        validObservationTri(resource.resolveReached) &&
+        validObservationTri(resource.resolved) &&
+        validObservationTri(resource.rawAvailable) &&
+        validObservationTri(resource.texture2D) &&
+        (resource.rawAvailable == holo_scrim_observation::Tri::Yes ||
+         (resource.a == 0 && resource.b == 0 && resource.fmt == 0));
+}
+
+bool validEyeSizeObservation(
+    const holo_scrim_observation::EyeSizeObservation& eye) noexcept {
+    return validObservationTri(eye.reached) &&
+        validObservationTri(eye.statePresent) &&
+        validObservationTri(eye.result) && (eye.readMask & 0xC0u) == 0;
+}
+
+bool validHoloScrimFact(const PredicateFact& fact) noexcept {
+    using namespace holo_scrim_observation;
+    if (fact.known != TriState::Yes) return false;
+    if (fact.kind == PredicateFactKind::Holo53) {
+        const HoloObservation& observation = fact.holo;
+        return fact.siteId == 53 && validObservationGates(observation.gates) &&
+            validResourceObservation(observation.pattern) &&
+            validResourceObservation(observation.depth) &&
+            validEyeSizeObservation(observation.eyeSize) &&
+            validObservationTri(observation.predicateResult) &&
+            validObservationTri(observation.missNotedBefore) &&
+            validObservationTri(observation.missNotedAfter) &&
+            (observation.missedDeltaKnown || observation.missedDelta == 0) &&
+            observation.missedDelta == observation.missedAfter - observation.missedBefore &&
+            (!fact.detailsFinalized ||
+             (observation.predicateResult == Tri::Yes ||
+              observation.predicateResult == Tri::No));
+    }
+    if (fact.kind == PredicateFactKind::Scrim55) {
+        const ScrimObservation& observation = fact.scrim;
+        return fact.siteId == 55 && validObservationGates(observation.gates) &&
+            validResourceObservation(observation.wash) &&
+            validResourceObservation(observation.ui) &&
+            validObservationTri(observation.predicateResult) &&
+            (!fact.detailsFinalized ||
+             observation.predicateResult == Tri::Yes ||
+             observation.predicateResult == Tri::No);
+    }
+    return false;
+}
+
 const char* commandName(std::uint8_t kind) noexcept {
     switch (kind) {
     case 'D': return "draw";
@@ -226,7 +345,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":4,"
+        "\"predicateFactVersion\":5,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -235,7 +354,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Predicate fact version 4 independently re-evaluates DrawGateDisabledNone, EyeRangeSkip, the frozen 14a NightVisionClaim selector, WitchspaceStarsSkip site 6, and offscreen census/quad skips from consumed source facts; whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
+        "\"predicateNote\":\"Predicate fact version 5 independently re-evaluates DrawGateDisabledNone, EyeRangeSkip, the frozen 14a NightVisionClaim selector, WitchspaceStarsSkip site 6, offscreen census/quad skips, HoloClaim site 53, and ScrimClaim site 55 from raw consumed source facts; observed helper outputs are consistency checks, cached matches and SiteEvents are not selector inputs, and whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
         "\"identityNote\":\"Resource identities are per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
@@ -386,6 +505,42 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                     fact.offscreenTargetW, fact.offscreenTargetH,
                     fact.censusSkippedDeltaKnown ? "true" : "false",
                     fact.censusSkippedDelta)) return false;
+            } else if (fact.kind == PredicateFactKind::Holo53) {
+                const holo_scrim_observation::HoloObservation& observed = fact.holo;
+                if (!writeFmt(writer,
+                    "{\"siteId\":53,\"kind\":7,\"known\":\"%s\",\"gates\":",
+                    triName(fact.known)) ||
+                    !writeObservationGates(writer, observed.gates) ||
+                    !writeText(writer, ",\"pattern\":") ||
+                    !writeResourceObservation(writer, observed.pattern) ||
+                    !writeText(writer, ",\"depth\":") ||
+                    !writeResourceObservation(writer, observed.depth) ||
+                    !writeText(writer, ",\"eyeSize\":") ||
+                    !writeEyeSizeObservation(writer, observed.eyeSize) ||
+                    !writeFmt(writer,
+                        ",\"predicateResult\":\"%s\",\"missedBefore\":%llu,"
+                        "\"missedAfter\":%llu,\"missNotedBefore\":\"%s\","
+                        "\"missNotedAfter\":\"%s\",\"missedDeltaKnown\":%s,"
+                        "\"missedDelta\":%llu}",
+                        observationTriName(observed.predicateResult),
+                        static_cast<unsigned long long>(observed.missedBefore),
+                        static_cast<unsigned long long>(observed.missedAfter),
+                        observationTriName(observed.missNotedBefore),
+                        observationTriName(observed.missNotedAfter),
+                        observed.missedDeltaKnown ? "true" : "false",
+                        static_cast<unsigned long long>(observed.missedDelta))) return false;
+            } else if (fact.kind == PredicateFactKind::Scrim55) {
+                const holo_scrim_observation::ScrimObservation& observed = fact.scrim;
+                if (!writeFmt(writer,
+                    "{\"siteId\":55,\"kind\":8,\"known\":\"%s\",\"gates\":",
+                    triName(fact.known)) ||
+                    !writeObservationGates(writer, observed.gates) ||
+                    !writeText(writer, ",\"wash\":") ||
+                    !writeResourceObservation(writer, observed.wash) ||
+                    !writeText(writer, ",\"ui\":") ||
+                    !writeResourceObservation(writer, observed.ui) ||
+                    !writeFmt(writer, ",\"predicateResult\":\"%s\"}",
+                        observationTriName(observed.predicateResult))) return false;
             } else {
                 return false;
             }
@@ -840,6 +995,9 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
         ((fact.kind == PredicateFactKind::OffscreenCensusSkip ||
           fact.kind == PredicateFactKind::OffscreenQuadSkip) &&
          !validOffscreenFact(fact)) ||
+        ((fact.kind == PredicateFactKind::Holo53 ||
+          fact.kind == PredicateFactKind::Scrim55) &&
+         !validHoloScrimFact(fact)) ||
         (fact.kind == PredicateFactKind::DrawGateWanted &&
          ((fact.known == TriState::Yes && fact.gateWanted == TriState::Unknown) ||
           (fact.known == TriState::Unknown && fact.gateWanted != TriState::Unknown))) ||
@@ -895,7 +1053,9 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
         fact.kind != PredicateFactKind::NightVisionClaim &&
          fact.kind != PredicateFactKind::WitchspaceStarsSkip &&
          fact.kind != PredicateFactKind::OffscreenCensusSkip &&
-         fact.kind != PredicateFactKind::OffscreenQuadSkip)) {
+         fact.kind != PredicateFactKind::OffscreenQuadSkip &&
+         fact.kind != PredicateFactKind::Holo53 &&
+         fact.kind != PredicateFactKind::Scrim55)) {
         g_wasOverflowed = true;
         return;
     }
@@ -988,14 +1148,35 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
     for (std::uint16_t i = 0; i < record.siteCount; ++i) {
         const std::uint16_t siteId = record.sites[i].id;
         if (siteId != 3 && siteId != 6 && siteId != 24 && siteId != 26 &&
-            siteId != 49 && siteId != 50) continue;
+            siteId != 49 && siteId != 50 && siteId != 53 && siteId != 55) continue;
         bool found = false;
         for (std::uint8_t j = 0; j < record.predicateFactCount; ++j) {
             if (record.predicateFacts[j].siteId == siteId) {
                 found = true;
-                if ((siteId == 6 || siteId == 24 || siteId == 26 || siteId == 50) &&
+                if ((siteId == 6 || siteId == 24 || siteId == 26 || siteId == 50 ||
+                     siteId == 53 || siteId == 55) &&
                     !record.predicateFacts[j].detailsFinalized)
                     g_wasOverflowed = true;
+                if (siteId == 53 || siteId == 55) {
+                    const SiteEvent& event = record.sites[i];
+                    const PredicateFact& fact = record.predicateFacts[j];
+                    const auto result = siteId == 53 ? fact.holo.predicateResult
+                                                     : fact.scrim.predicateResult;
+                    const bool claimed = result == holo_scrim_observation::Tri::Yes;
+                    const std::int16_t expectedVerdict = siteId == 53 ? 4 : 17;
+                    if (event.kind != static_cast<std::uint8_t>(draw_ladder::SiteKind::Claim) ||
+                        event.subsite != 0 ||
+                        event.outcome != static_cast<std::uint8_t>(claimed
+                            ? draw_ladder::SiteOutcome::Claimed
+                            : draw_ladder::SiteOutcome::Declined) ||
+                        event.flow != static_cast<std::uint8_t>(claimed
+                            ? draw_ladder::Flow::Stop
+                            : draw_ladder::Flow::Continue) ||
+                        event.verdict != (claimed ? expectedVerdict : -1) ||
+                        (claimed && (winnerSiteId != static_cast<std::int16_t>(siteId) ||
+                                     verdictOrdinal != expectedVerdict)))
+                        g_wasOverflowed = true;
+                }
             }
         }
         if (!found) g_wasOverflowed = true;

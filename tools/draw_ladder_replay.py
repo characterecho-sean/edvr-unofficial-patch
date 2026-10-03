@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 4
+PREDICATE_FACT_VERSION = 5
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -479,13 +479,285 @@ def _replay_offscreen_quad_fact(fact, draw, label):
     return expected_event, None, True, 0, None
 
 
+def _tri(fact, key, label):
+    value = fact.get(key)
+    if value not in TRI_STATES:
+        raise TraceError(label + "." + key + " is an invalid tri-state")
+    return value
+
+
+def _resource_observation(fact, label, reached, expected_match):
+    """Validate one lazy resource stage and independently evaluate its raw descriptor."""
+    required = {"source", "resolveReached", "resolved", "rawAvailable",
+                "texture2D", "a", "b", "fmt"}
+    if not isinstance(fact, dict) or set(fact) != required:
+        raise TraceError(label + " has missing or unexpected resource fields")
+    source = _integer(fact.get("source"), label + ".source", 0, 4)
+    resolve_reached = _tri(fact, "resolveReached", label)
+    resolved = _tri(fact, "resolved", label)
+    raw_available = _tri(fact, "rawAvailable", label)
+    texture = _tri(fact, "texture2D", label)
+    a = _integer(fact.get("a"), label + ".a")
+    b = _integer(fact.get("b"), label + ".b")
+    fmt = _integer(fact.get("fmt"), label + ".fmt")
+    if not reached:
+        if (source != 0 or resolve_reached != "unknown" or resolved != "unknown" or
+                raw_available != "unknown" or texture != "unknown" or a or b or fmt):
+            raise TraceError(label + " skipped resource stage carries inputs or outputs")
+        return "not-reached"
+    if source == 0:
+        raise TraceError(label + " reached resource stage is marked not reached")
+    if source in (1, 2):
+        if resolve_reached != "yes":
+            raise TraceError(label + " fresh resolver stage lacks its attempted call")
+        if source == 1:
+            if resolved != "yes" or raw_available != "yes" or texture not in ("yes", "no"):
+                raise TraceError(label + " successful resolve lacks raw descriptor availability")
+        elif (resolved != "no" or raw_available != "no" or texture != "no" or
+              a or b or fmt):
+            raise TraceError(label + " failed resolve carries descriptor data")
+    elif source == 3:
+        if (resolve_reached != "no" or resolved != "yes" or raw_available != "yes" or
+                texture not in ("yes", "no")):
+            raise TraceError(label + " raw-shadow hit has inconsistent availability")
+    else:
+        if (resolve_reached != "no" or resolved != "unknown" or
+                raw_available != "unknown" or texture != "unknown" or a or b or fmt):
+            raise TraceError(label + " warm cache without raw shadow exposes cached output")
+        return None
+    if texture == "yes":
+        return expected_match(a, b, fmt)
+    return False
+
+
+def _holo_eye_size(fact, depth_w, depth_h, label):
+    required = {"reached", "statePresent", "result", "readMask", "depthW", "depthH",
+                "eyeW", "eyeH", "renderW", "renderH"}
+    if not isinstance(fact, dict) or set(fact) != required:
+        raise TraceError(label + " has missing or unexpected eye-size fields")
+    reached = _tri(fact, "reached", label)
+    state = _tri(fact, "statePresent", label)
+    result = _tri(fact, "result", label)
+    mask = _integer(fact.get("readMask"), label + ".readMask", 0, 63)
+    values = {name: _integer(fact.get(name), label + "." + name)
+              for name in ("depthW", "depthH", "eyeW", "eyeH", "renderW", "renderH")}
+    if reached == "unknown":
+        if state != "unknown" or result != "unknown" or mask or any(values.values()):
+            raise TraceError(label + " skipped eye-size test carries inputs or outputs")
+        return None, False
+    if reached != "yes":
+        raise TraceError(label + " reached must be yes or unknown")
+    if state == "unknown" or result == "unknown":
+        raise TraceError(label + " reached eye-size test lacks observed availability")
+    if state == "no":
+        expected_mask = 0
+        expected_result = "no"
+    else:
+        expected_mask = 1
+        expected_result = "no"
+        w = depth_w
+        h = depth_h
+        if w:
+            expected_mask |= 2
+            if h:
+                expected_mask |= 4
+                eye_w = values["eyeW"]
+                if eye_w and abs(w - eye_w) <= 2:
+                    expected_mask |= 8
+                    if abs(h - values["eyeH"]) <= 2:
+                        expected_result = "yes"
+                if expected_result != "yes":
+                    expected_mask |= 16
+                    render_w = values["renderW"]
+                    if render_w and abs(w - render_w) <= 2:
+                        expected_mask |= 32
+                        if abs(h - values["renderH"]) <= 2:
+                            expected_result = "yes"
+    if ((mask & 1 and values["depthW"] != depth_w) or
+            (mask & 2 and values["depthH"] != depth_h)):
+        raise TraceError(label + " depth dimensions differ from the reached resource")
+    consumed_bits = (1, 2, 4, 8, 16, 32)
+    consumed_names = ("depthW", "depthH", "eyeW", "eyeH", "renderW", "renderH")
+    for bit, name in zip(consumed_bits, consumed_names):
+        if not (expected_mask & bit) and values[name] != 0:
+            raise TraceError(label + " has an unconsumed dimension input")
+    if mask != expected_mask:
+        raise TraceError(label + " dimension read mask disagrees with short-circuit order")
+    return expected_result == "yes", result != expected_result
+
+
+def _replay_holo_fact(fact, draw, label):
+    required = {"siteId", "kind", "known", "gates", "pattern", "depth", "eyeSize",
+                "predicateResult", "missedBefore", "missedAfter", "missNotedBefore",
+                "missNotedAfter", "missedDeltaKnown", "missedDelta"}
+    if set(fact) != required or fact.get("known") != "yes":
+        raise TraceError(label + " has missing Holo fields or unavailable input facts")
+    gates = fact.get("gates")
+    gate_fields = {"enabled", "shapeReached", "shapeMatched", "helperReached",
+                   "helperEnabled", "helperShapeReached", "helperShapeMatched"}
+    if not isinstance(gates, dict) or set(gates) != gate_fields:
+        raise TraceError(label + ".gates has missing or unexpected fields")
+    g = {key: _tri(gates, key, label + ".gates") for key in gate_fields}
+    if g["enabled"] == "unknown":
+        raise TraceError(label + " outer Holo gate is unavailable")
+    outer_shape = draw["kind"] == ord("X") and draw["count"] == 6 and draw["instances"] == 1
+    if g["shapeReached"] != ("yes" if g["enabled"] == "yes" else "unknown"):
+        raise TraceError(label + " outer shape reachability disagrees with enabled gate")
+    if g["shapeReached"] == "yes" and g["shapeMatched"] != ("yes" if outer_shape else "no"):
+        raise TraceError(label + " outer shape result disagrees with draw inputs")
+    if g["shapeReached"] == "unknown" and g["shapeMatched"] != "unknown":
+        raise TraceError(label + " skipped outer shape carries a result")
+    helper_reached = g["enabled"] == "yes" and outer_shape
+    if g["helperReached"] != ("yes" if helper_reached else "unknown"):
+        raise TraceError(label + " helper reachability disagrees with outer short circuit")
+    if not helper_reached:
+        if any(g[k] != "unknown" for k in ("helperEnabled", "helperShapeReached", "helperShapeMatched")):
+            raise TraceError(label + " skipped helper carries later gate values")
+    else:
+        if g["helperEnabled"] == "unknown":
+            raise TraceError(label + " reached helper lacks its internal enabled state")
+        helper_shape_reached = g["helperEnabled"] == "yes"
+        if g["helperShapeReached"] != ("yes" if helper_shape_reached else "unknown"):
+            raise TraceError(label + " helper shape reachability disagrees with its gate")
+        if helper_shape_reached and g["helperShapeMatched"] != ("yes" if outer_shape else "no"):
+            raise TraceError(label + " helper shape result disagrees with draw inputs")
+        if not helper_shape_reached and g["helperShapeMatched"] != "unknown":
+            raise TraceError(label + " skipped helper shape carries a result")
+    should_pattern = helper_reached and g["helperEnabled"] == "yes" and outer_shape
+    if should_pattern and fact.get("pattern", {}).get("source") not in (1, 2):
+        raise TraceError(label + ".pattern must use a fresh resolver observation")
+    pattern_result = _resource_observation(
+        fact.get("pattern"), label + ".pattern", should_pattern,
+        lambda a, b, fmt: a == 256 and b == 256 and fmt == 70)
+    pattern_match = pattern_result is True
+    should_depth = should_pattern and pattern_match
+    if should_depth and fact.get("depth", {}).get("source") not in (1, 2):
+        raise TraceError(label + ".depth must use a fresh resolver observation")
+    depth_result = _resource_observation(
+        fact.get("depth"), label + ".depth", should_depth, lambda a, b, fmt: True)
+    depth_texture = depth_result is True
+    eye_reached = should_depth and depth_texture
+    if eye_reached:
+        eye_result, eye_mismatch = _holo_eye_size(
+            fact.get("eyeSize"), fact["depth"].get("a"), fact["depth"].get("b"),
+            label + ".eyeSize")
+        if eye_result is None:
+            raise TraceError(label + " reached eye-size test lacks its input observation")
+    else:
+        eye_result, eye_mismatch = _holo_eye_size(
+            fact.get("eyeSize"), 0, 0, label + ".eyeSize")
+        if eye_result is not None:
+            raise TraceError(label + " eye-size test was recorded before depth Texture2D passed")
+    replayable = (pattern_result != None and
+                  (not should_depth or depth_result != None))
+    if not replayable:
+        expected_claim = None
+    else:
+        expected_claim = bool(should_depth and depth_texture and eye_result)
+    pred = _tri(fact, "predicateResult", label)
+    if pred == "unknown":
+        raise TraceError(label + " lacks observed Holo result")
+    observation_mismatches = int(eye_mismatch)
+    if expected_claim is not None and pred != ("yes" if expected_claim else "no"):
+        observation_mismatches += 1
+
+    before = _integer(fact.get("missedBefore"), label + ".missedBefore", 0, (1 << 64) - 1)
+    after = _integer(fact.get("missedAfter"), label + ".missedAfter", 0, (1 << 64) - 1)
+    noted_before = _tri(fact, "missNotedBefore", label)
+    noted_after = _tri(fact, "missNotedAfter", label)
+    delta_known = fact.get("missedDeltaKnown")
+    if type(delta_known) is not bool:
+        raise TraceError(label + ".missedDeltaKnown must be boolean")
+    delta = _integer(fact.get("missedDelta"), label + ".missedDelta", 0, 1)
+    should_increment = (expected_claim is False and should_depth and depth_texture and
+                        eye_result is False and noted_before == "no")
+    if noted_before not in ("yes", "no") or not delta_known:
+        raise TraceError(label + " lacks complete Holo mutation snapshots")
+    expected_delta = 1 if should_increment else 0
+    expected_after = (before + expected_delta) & ((1 << 64) - 1)
+    expected_noted_after = ("yes" if noted_before == "yes" or
+                            (should_increment and expected_after >= 60) else "no")
+    if (delta != expected_delta or after != expected_after or
+            noted_after != expected_noted_after):
+        observation_mismatches += 1
+    expected_event = None if expected_claim is None else (
+        {"id": 53, "kind": 2, "outcome": 3, "flow": 1,
+         "subsite": 0, "verdict": 4} if expected_claim else
+        {"id": 53, "kind": 2, "outcome": 2, "flow": 0,
+         "subsite": 0, "verdict": -1})
+    return expected_event, None, True, 0, observation_mismatches, expected_claim
+
+
+def _replay_scrim_fact(fact, draw, label):
+    required = {"siteId", "kind", "known", "gates", "wash", "ui", "predicateResult"}
+    if set(fact) != required or fact.get("known") != "yes":
+        raise TraceError(label + " has missing Scrim fields or unavailable input facts")
+    gates = fact.get("gates")
+    gate_fields = {"enabled", "shapeReached", "shapeMatched", "helperReached",
+                   "helperEnabled", "helperShapeReached", "helperShapeMatched"}
+    if not isinstance(gates, dict) or set(gates) != gate_fields:
+        raise TraceError(label + ".gates has missing or unexpected fields")
+    g = {key: _tri(gates, key, label + ".gates") for key in gate_fields}
+    if g["enabled"] == "unknown":
+        raise TraceError(label + " outer Scrim gate is unavailable")
+    outer_shape = draw["kind"] == ord("X") and draw["instances"] == 1 and draw["count"] >= 100
+    if g["shapeReached"] != ("yes" if g["enabled"] == "yes" else "unknown"):
+        raise TraceError(label + " outer shape reachability disagrees with enabled gate")
+    if g["shapeReached"] == "yes" and g["shapeMatched"] != ("yes" if outer_shape else "no"):
+        raise TraceError(label + " outer shape result disagrees with draw inputs")
+    if g["shapeReached"] == "unknown" and g["shapeMatched"] != "unknown":
+        raise TraceError(label + " skipped outer shape carries a result")
+    helper_reached = g["enabled"] == "yes" and outer_shape
+    if g["helperReached"] != ("yes" if helper_reached else "unknown"):
+        raise TraceError(label + " helper reachability disagrees with outer short circuit")
+    if not helper_reached:
+        if any(g[k] != "unknown" for k in ("helperEnabled", "helperShapeReached", "helperShapeMatched")):
+            raise TraceError(label + " skipped helper carries later gate values")
+    else:
+        if g["helperEnabled"] == "unknown":
+            raise TraceError(label + " reached helper lacks its internal enabled state")
+        helper_shape_reached = g["helperEnabled"] == "yes"
+        if g["helperShapeReached"] != ("yes" if helper_shape_reached else "unknown"):
+            raise TraceError(label + " helper shape reachability disagrees with its gate")
+        if helper_shape_reached and g["helperShapeMatched"] != ("yes" if outer_shape else "no"):
+            raise TraceError(label + " helper shape result disagrees with draw inputs")
+        if not helper_shape_reached and g["helperShapeMatched"] != "unknown":
+            raise TraceError(label + " skipped helper shape carries a result")
+    should_wash = helper_reached and g["helperEnabled"] == "yes" and outer_shape
+    wash = _resource_observation(fact.get("wash"), label + ".wash", should_wash,
+                                 lambda a, b, fmt: a == 16 and b == 16 and
+                                 fmt in (70, 71, 72))
+    should_ui = should_wash and wash is True
+    if wash is None:
+        # A warm cache can have matched without publishing raw wash inputs.
+        # Validate the observed UI stage, but never infer a wash predicate
+        # from its reachability or promote this path to replayable.
+        should_ui = fact.get("ui", {}).get("source") != 0
+    ui = _resource_observation(fact.get("ui"), label + ".ui", should_ui,
+                               lambda a, b, fmt: a >= 1024)
+    replayable = wash != None and (not should_ui or ui != None)
+    expected_claim = None if not replayable else bool(should_ui and ui is True)
+    pred = _tri(fact, "predicateResult", label)
+    if pred == "unknown":
+        raise TraceError(label + " lacks observed Scrim result")
+    observation_mismatches = int(expected_claim is not None and
+                                 pred != ("yes" if expected_claim else "no"))
+    expected_event = None if expected_claim is None else (
+        {"id": 55, "kind": 2, "outcome": 3, "flow": 1,
+         "subsite": 0, "verdict": 17} if expected_claim else
+        {"id": 55, "kind": 2, "outcome": 2, "flow": 0,
+         "subsite": 0, "verdict": -1})
+    return expected_event, None, True, 0, observation_mismatches, expected_claim
+
+
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((3, 6, 24, 26, 49, 50) if predicate_fact_version >= 4 else
+    supported_ids = ((3, 6, 24, 26, 49, 50, 53, 55) if predicate_fact_version >= 5 else
+                     (3, 6, 24, 26, 49, 50) if predicate_fact_version >= 4 else
                      (3, 6, 49, 50) if predicate_fact_version >= 3 else
                      (3, 49, 50) if predicate_fact_version >= 2 else (3, 49))
     expected = {event["id"] for event in draw["sites"] if event["id"] in supported_ids}
@@ -496,12 +768,15 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        8 if predicate_fact_version >= 5 else
                         6 if predicate_fact_version >= 4 else
                         4 if predicate_fact_version >= 3 else
                         3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        supported_pairs = ((3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3)) if predicate_fact_version >= 4 else (
+        supported_pairs = ((3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
+                           (53, 7), (55, 8)) if predicate_fact_version >= 5 else (
+            (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3)) if predicate_fact_version >= 4 else (
             (3, 1), (6, 4), (49, 2), (50, 3)) if predicate_fact_version >= 3 else (
             (3, 1), (49, 2), (50, 3)) if predicate_fact_version >= 2 else ((3, 1), (49, 2))
         if (site_id, kind) not in supported_pairs:
@@ -648,6 +923,16 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 _replay_offscreen_quad_fact(fact, draw, fact_label)
             by_site[site_id] = (expected_event, expected_delta, delta_known,
                                 observed_delta, 0, None)
+        elif kind == 7:
+            expected_event, expected_delta, delta_known, observed_delta, fact_mismatches, legacy_claim = \
+                _replay_holo_fact(fact, draw, fact_label)
+            by_site[site_id] = (expected_event, expected_delta, delta_known,
+                                observed_delta, fact_mismatches, legacy_claim)
+        elif kind == 8:
+            expected_event, expected_delta, delta_known, observed_delta, fact_mismatches, legacy_claim = \
+                _replay_scrim_fact(fact, draw, fact_label)
+            by_site[site_id] = (expected_event, expected_delta, delta_known,
+                                observed_delta, fact_mismatches, legacy_claim)
         elif kind == 1:
             if set(fact) != {"siteId", "kind", "known", "gateWanted"}:
                 raise TraceError(fact_label + " has unexpected draw-gate fields")
@@ -702,7 +987,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6):
+        if kind not in (3, 4, 5, 6, 7, 8):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -724,6 +1009,12 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     quad_replayed = 0
     quad_unreplayable = 0
     quad_mismatches = 0
+    holo_replayed = 0
+    holo_unreplayable = 0
+    holo_mismatches = 0
+    scrim_replayed = 0
+    scrim_unreplayable = 0
+    scrim_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -800,6 +1091,30 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 quad_replayed += 1
             else:
                 quad_mismatches += 1
+        if site_id in (53, 55):
+            replay_counter = "holo" if site_id == 53 else "scrim"
+            if site_unreplayable:
+                if replay_counter == "holo":
+                    holo_unreplayable += 1
+                else:
+                    scrim_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                if replay_counter == "holo":
+                    holo_replayed += 1
+                else:
+                    scrim_replayed += 1
+            else:
+                if replay_counter == "holo":
+                    holo_mismatches += 1
+                else:
+                    scrim_mismatches += 1
+            if cache_mismatches:
+                if replay_counter == "holo":
+                    holo_mismatches += cache_mismatches
+                else:
+                    scrim_mismatches += cache_mismatches
     return {"factCount": len(by_site), "replayed": replayed,
             "unreplayable": unreplayable, "mismatches": mismatches,
             "mutationUnobserved": mutation_unobserved,
@@ -818,7 +1133,15 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "offscreenQuadFacts": sum(1 for site_id in by_site if site_id == 26),
             "offscreenQuadReplayed": quad_replayed,
             "offscreenQuadUnreplayable": quad_unreplayable,
-            "offscreenQuadMismatches": quad_mismatches}
+            "offscreenQuadMismatches": quad_mismatches,
+            "holoFacts": sum(1 for site_id in by_site if site_id == 53),
+            "holoReplayed": holo_replayed,
+            "holoUnreplayable": holo_unreplayable,
+            "holoMismatches": holo_mismatches,
+            "scrimFacts": sum(1 for site_id in by_site if site_id == 55),
+            "scrimReplayed": scrim_replayed,
+            "scrimUnreplayable": scrim_unreplayable,
+            "scrimMismatches": scrim_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -836,7 +1159,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -914,7 +1237,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "offscreenQuadFacts": 0,
                         "offscreenQuadReplayed": 0,
                         "offscreenQuadUnreplayable": 0,
-                        "offscreenQuadMismatches": 0}
+                        "offscreenQuadMismatches": 0,
+                        "holoFacts": 0, "holoReplayed": 0,
+                        "holoUnreplayable": 0, "holoMismatches": 0,
+                        "scrimFacts": 0, "scrimReplayed": 0,
+                        "scrimUnreplayable": 0, "scrimMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -1228,6 +1555,16 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                                  "mismatch" if predicate_replay["offscreenQuadMismatches"] else
                                  "unreplayable" if predicate_replay["offscreenQuadUnreplayable"] else
                                  "replayed"),
+            holoStatus=("unavailable-v1-v4" if predicate_fact_version < 5 else
+                        "not-visited" if not predicate_replay["holoFacts"] else
+                        "mismatch" if predicate_replay["holoMismatches"] else
+                        "unreplayable" if predicate_replay["holoUnreplayable"] else
+                        "replayed"),
+            scrimStatus=("unavailable-v1-v4" if predicate_fact_version < 5 else
+                         "not-visited" if not predicate_replay["scrimFacts"] else
+                         "mismatch" if predicate_replay["scrimMismatches"] else
+                         "unreplayable" if predicate_replay["scrimUnreplayable"] else
+                         "replayed"),
             **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -1244,7 +1581,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
              "offscreenCensusUnreplayable": 0, "offscreenCensusMismatches": 0,
              "offscreenQuadStatus": "unavailable-v1-v3",
              "offscreenQuadFacts": 0, "offscreenQuadReplayed": 0,
-             "offscreenQuadUnreplayable": 0, "offscreenQuadMismatches": 0}),
+             "offscreenQuadUnreplayable": 0, "offscreenQuadMismatches": 0,
+             "holoStatus": "unavailable-v1-v4", "holoFacts": 0,
+             "holoReplayed": 0, "holoUnreplayable": 0, "holoMismatches": 0,
+             "scrimStatus": "unavailable-v1-v4", "scrimFacts": 0,
+             "scrimReplayed": 0, "scrimUnreplayable": 0, "scrimMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -1318,6 +1659,18 @@ def format_summary(summary, sidecar_path=None):
              "OffscreenQuadSkip site 26")):
         if replay.get(status_key, "unavailable-v1-v3") == "unavailable-v1-v3":
             lines.append("  %s: unavailable before predicate fact version 4" % label)
+        else:
+            lines.append("  %s: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                         (label, replay[status_key], replay.get(facts_key, 0),
+                          replay.get(replayed_key, 0), replay.get(unknown_key, 0),
+                          replay.get(mismatch_key, 0)))
+    for status_key, facts_key, replayed_key, unknown_key, mismatch_key, label in (
+            ("holoStatus", "holoFacts", "holoReplayed", "holoUnreplayable",
+             "holoMismatches", "Holo claim site 53"),
+            ("scrimStatus", "scrimFacts", "scrimReplayed", "scrimUnreplayable",
+             "scrimMismatches", "Scrim claim site 55")):
+        if replay.get(status_key, "unavailable-v1-v4") == "unavailable-v1-v4":
+            lines.append("  %s: unavailable before predicate fact version 5" % label)
         else:
             lines.append("  %s: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
                          (label, replay[status_key], replay.get(facts_key, 0),
@@ -1570,6 +1923,301 @@ def self_test():
                 "callbackModeKnown": "yes", "callbackMode": 2,
                 "failedKnown": "yes", "failed": "no"})
         return trace
+
+    def resource_fact(source=0, texture="unknown", a=0, b=0, fmt=0):
+        if source == 0:
+            return {"source": 0, "resolveReached": "unknown", "resolved": "unknown",
+                    "rawAvailable": "unknown", "texture2D": "unknown",
+                    "a": 0, "b": 0, "fmt": 0}
+        if source == 1:
+            return {"source": 1, "resolveReached": "yes", "resolved": "yes",
+                    "rawAvailable": "yes", "texture2D": texture,
+                    "a": a, "b": b, "fmt": fmt}
+        if source == 2:
+            return {"source": 2, "resolveReached": "yes", "resolved": "no",
+                    "rawAvailable": "no", "texture2D": "no",
+                    "a": 0, "b": 0, "fmt": 0}
+        if source == 4:
+            return {"source": 4, "resolveReached": "no", "resolved": "unknown",
+                    "rawAvailable": "unknown", "texture2D": "unknown",
+                    "a": 0, "b": 0, "fmt": 0}
+        return {"source": 3, "resolveReached": "no", "resolved": "yes",
+                "rawAvailable": "yes", "texture2D": texture,
+                "a": a, "b": b, "fmt": fmt}
+
+    def eye_fact(depth_w, depth_h, mode="match"):
+        if mode == "state-absent":
+            return {"reached": "yes", "statePresent": "no", "result": "no",
+                    "readMask": 0, "depthW": 0, "depthH": 0,
+                    "eyeW": 0, "eyeH": 0, "renderW": 0, "renderH": 0}
+        if mode == "match":
+            return {"reached": "yes", "statePresent": "yes", "result": "yes",
+                    "readMask": 15, "depthW": depth_w, "depthH": depth_h,
+                    "eyeW": depth_w, "eyeH": depth_h, "renderW": 0, "renderH": 0}
+        if mode == "plus-two":
+            return {"reached": "yes", "statePresent": "yes", "result": "yes",
+                    "readMask": 15, "depthW": depth_w, "depthH": depth_h,
+                    "eyeW": depth_w + 2, "eyeH": depth_h + 2,
+                    "renderW": 0, "renderH": 0}
+        if mode == "minus-two":
+            return {"reached": "yes", "statePresent": "yes", "result": "yes",
+                    "readMask": 15, "depthW": depth_w, "depthH": depth_h,
+                    "eyeW": depth_w - 2, "eyeH": depth_h - 2,
+                    "renderW": 0, "renderH": 0}
+        if mode == "zero-eye-height":
+            return {"reached": "yes", "statePresent": "yes", "result": "no",
+                    "readMask": 31, "depthW": depth_w, "depthH": depth_h,
+                    "eyeW": depth_w, "eyeH": 0, "renderW": 0, "renderH": 0}
+        if mode == "plus-three":
+            return {"reached": "yes", "statePresent": "yes", "result": "no",
+                    "readMask": 23, "depthW": depth_w, "depthH": depth_h,
+                    "eyeW": depth_w + 3, "eyeH": 0, "renderW": 0, "renderH": 0}
+        return {"reached": "unknown", "statePresent": "unknown", "result": "unknown",
+                "readMask": 0, "depthW": 0, "depthH": 0,
+                "eyeW": 0, "eyeH": 0, "renderW": 0, "renderH": 0}
+
+    def holo_fact(draw, enabled=True, pattern_source=1, pattern_fmt=70,
+                  depth_source=1, eye_mode="match", before=0, noted=False):
+        shape = draw["kind"] == ord("X") and draw["count"] == 6 and draw["instances"] == 1
+        helper = enabled and shape
+        helper_enabled = enabled if helper else None
+        pattern_reached = helper and helper_enabled
+        pattern = resource_fact(pattern_source, "yes", 256, 256, pattern_fmt) if pattern_reached else resource_fact()
+        pattern_match = (pattern_source == 1 and pattern_fmt == 70)
+        depth_reached = pattern_reached and pattern_match
+        depth = resource_fact(depth_source, "yes", 2000, 2000, 28) if depth_reached and depth_source == 1 else (
+            resource_fact(2) if depth_reached else resource_fact())
+        depth_match = depth_reached and depth_source == 1
+        eye = eye_fact(2000, 2000, eye_mode) if depth_match else eye_fact(0, 0, "skip")
+        eye_yes = eye_mode in ("match", "plus-two", "minus-two")
+        predicate = bool(depth_match and eye_yes)
+        noted_before = "yes" if noted else "no"
+        increment = bool(depth_match and not eye_yes and not noted)
+        after = (before + int(increment)) & ((1 << 64) - 1)
+        noted_after = "yes" if noted or (increment and after >= 60) else "no"
+        return {"siteId": 53, "kind": 7, "known": "yes",
+                "gates": {
+                    "enabled": "yes" if enabled else "no",
+                    "shapeReached": "yes" if enabled else "unknown",
+                    "shapeMatched": ("yes" if shape else "no") if enabled else "unknown",
+                    "helperReached": "yes" if helper else "unknown",
+                    "helperEnabled": "yes" if helper_enabled else "unknown",
+                    "helperShapeReached": "yes" if helper_enabled else "unknown",
+                    "helperShapeMatched": ("yes" if shape else "no") if helper_enabled else "unknown"},
+                "pattern": pattern, "depth": depth, "eyeSize": eye,
+                "predicateResult": "yes" if predicate else "no",
+                "missedBefore": before, "missedAfter": after,
+                "missNotedBefore": noted_before, "missNotedAfter": noted_after,
+                "missedDeltaKnown": True, "missedDelta": int(increment)}
+
+    def scrim_fact(draw, enabled=True, wash_source=1, wash_width=16,
+                   wash_height=16, wash_fmt=71, ui_source=1, ui_width=2048):
+        shape = draw["kind"] == ord("X") and draw["instances"] == 1 and draw["count"] >= 100
+        helper = enabled and shape
+        wash_reached = helper
+        wash = resource_fact(wash_source, "yes", wash_width, wash_height, wash_fmt) if wash_reached and wash_source in (1, 3) else (
+            resource_fact(wash_source) if wash_reached else resource_fact())
+        wash_match = wash_reached and wash_source in (1, 3) and wash_width == 16 and wash_height == 16 and wash_fmt in (70, 71, 72)
+        ui_reached = wash_match
+        ui = resource_fact(ui_source, "yes", ui_width, 1080, 28) if ui_reached and ui_source in (1, 3) else (
+            resource_fact(ui_source) if ui_reached else resource_fact())
+        predicate = bool(ui_reached and ui_source in (1, 3) and ui_width >= 1024)
+        helper_enabled = enabled if helper else None
+        return {"siteId": 55, "kind": 8, "known": "yes",
+                "gates": {
+                    "enabled": "yes" if enabled else "no",
+                    "shapeReached": "yes" if enabled else "unknown",
+                    "shapeMatched": ("yes" if shape else "no") if enabled else "unknown",
+                    "helperReached": "yes" if helper else "unknown",
+                    "helperEnabled": "yes" if helper_enabled else "unknown",
+                    "helperShapeReached": "yes" if helper_enabled else "unknown",
+                    "helperShapeMatched": ("yes" if shape else "no") if helper_enabled else "unknown"},
+                "wash": wash, "ui": ui,
+                "predicateResult": "yes" if predicate else "no"}
+
+    def holo_scrim_trace(target, draw_kind="X", draw_count=6, holo=None, scrim=None,
+                         holo_options=None, scrim_options=None):
+        decline49 = {"id": 49, "kind": 2, "outcome": 2, "flow": 0,
+                     "subsite": 0, "verdict": -1}
+        trace = range_trace(1, [], (decline49, 0))
+        draw = trace["draws"][0]
+        draw["route"], draw["sequence"] = 6, 4
+        draw["kind"], draw["command"] = ord(draw_kind), DRAW_COMMANDS[ord(draw_kind)]
+        draw["count"], draw["instances"] = draw_count, 1
+        draw["vsHash"], draw["psHash"], draw["candidateMask"] = (
+            "0000000000000000", "0000000000000000", "0000000000000000")
+        nv = next(f for f in draw["predicateFacts"] if f["siteId"] == 50)
+        nv.update(activePluginMask="0000000000000000", mode=0,
+                  candidatePresent="no", shapeReached="no", shapeMatched="unknown",
+                  callbackReached="no", callbackModeKnown="unknown", callbackMode=0,
+                  failedKnown="unknown", failed="unknown")
+        sites = []
+        for site_id in COMMON + EYE[:EYE.index(target) + 1]:
+            site_kind = SITE_KINDS[site_id]
+            if site_id == target:
+                outcome, flow, subsite, verdict = 3, 1, 0, TERMINAL_VERDICTS[site_id]
+            elif site_id == 50:
+                outcome, flow, subsite, verdict = 5, 0, 0, -1
+            elif site_id in NOT_ELIGIBLE_SITES:
+                outcome, flow, subsite, verdict = 5, 0, 0, -1
+            elif site_kind == 1:
+                outcome, flow, subsite, verdict = 1, 0, 0, -1
+            else:
+                outcome, flow, subsite, verdict = 2, 0, 0, -1
+            sites.append({"id": site_id, "kind": site_kind, "outcome": outcome,
+                          "flow": flow, "subsite": subsite, "verdict": verdict})
+        facts = draw["predicateFacts"]
+        if 53 in [site["id"] for site in sites]:
+            fact = holo if holo is not None else holo_fact(draw, **(holo_options or {}))
+            facts.append(fact)
+            site = next(s for s in sites if s["id"] == 53)
+            if fact["predicateResult"] == "yes":
+                site.update(outcome=3, flow=1, verdict=4)
+                target = 53
+                sites = sites[:sites.index(site) + 1]
+        if 55 in [site["id"] for site in sites]:
+            fact = scrim if scrim is not None else scrim_fact(draw, **(scrim_options or {}))
+            facts.append(fact)
+            site = next(s for s in sites if s["id"] == 55)
+            if fact["predicateResult"] == "yes":
+                site.update(outcome=3, flow=1, verdict=17)
+                target = 55
+        if target not in [s["id"] for s in sites]:
+            sites.extend({"id": site_id, "kind": SITE_KINDS[site_id],
+                          "outcome": (1 if SITE_KINDS[site_id] == 1 else 2),
+                          "flow": 0, "subsite": 0, "verdict": -1}
+                         for site_id in EYE[EYE.index(sites[-1]["id"]) + 1:EYE.index(target) + 1])
+        sites = sites[:next(i for i, site in enumerate(sites) if site["id"] == target) + 1]
+        draw["sites"] = sites
+        draw["winnerSiteId"] = target
+        draw["verdict"] = TERMINAL_VERDICTS[target]
+        draw["predicateFacts"] = facts
+        draw["forwardFacts"] = None
+        return trace
+
+    holo_positive = holo_scrim_trace(53)
+    holo_positive_summary = validate_trace(holo_positive)
+    if (holo_positive_summary["predicateReplay"]["holoStatus"] != "replayed" or
+            holo_positive_summary["predicateReplay"]["holoReplayed"] != 1 or
+            holo_positive_summary["predicateReplay"]["factCount"] != 5):
+        print("Holo exact resource/eye-size claim did not replay")
+        return 1
+
+    holo_boundary = validate_trace(holo_scrim_trace(53, holo_options={"eye_mode": "plus-two"}))
+    holo_negative_boundary = validate_trace(holo_scrim_trace(
+        53, holo_options={"eye_mode": "minus-two"}))
+    if (holo_boundary["predicateReplay"]["holoStatus"] != "replayed" or
+            holo_negative_boundary["predicateReplay"]["holoStatus"] != "replayed"):
+        print("Holo inclusive positive/negative two eye-size boundary did not replay")
+        return 1
+
+    holo_miss = holo_scrim_trace(56, holo_options={"eye_mode": "zero-eye-height", "before": 59})
+    holo_miss_summary = validate_trace(holo_miss)
+    miss_fact = next(f for f in holo_miss["draws"][0]["predicateFacts"] if f["siteId"] == 53)
+    if (holo_miss_summary["predicateReplay"]["holoStatus"] != "replayed" or
+            miss_fact["missedBefore"] != 59 or miss_fact["missedAfter"] != 60 or
+            miss_fact["missNotedAfter"] != "yes"):
+        print("Holo zero-height short circuit or 59-to-60 counter mutation did not replay")
+        return 1
+
+    holo_wrap = holo_scrim_trace(56, holo_options={"eye_mode": "plus-three",
+                                                   "before": (1 << 64) - 1})
+    wrap_summary = validate_trace(holo_wrap)
+    wrap_fact = next(f for f in holo_wrap["draws"][0]["predicateFacts"] if f["siteId"] == 53)
+    if (wrap_summary["predicateReplay"]["holoStatus"] != "replayed" or
+            wrap_fact["missedAfter"] != 0 or wrap_fact["missNotedAfter"] != "no"):
+        print("Holo uint64 miss counter wrap did not replay")
+        return 1
+
+    holo_state_absent = validate_trace(holo_scrim_trace(
+        56, holo_options={"eye_mode": "state-absent"}))
+    if holo_state_absent["predicateReplay"]["holoStatus"] != "replayed":
+        print("Holo absent-state early return did not replay")
+        return 1
+
+    holo_pattern_miss = validate_trace(holo_scrim_trace(
+        56, holo_options={"pattern_fmt": 71}))
+    holo_depth_failure = validate_trace(holo_scrim_trace(
+        56, holo_options={"depth_source": 2}))
+    if (holo_pattern_miss["predicateReplay"]["holoStatus"] != "replayed" or
+            holo_depth_failure["predicateReplay"]["holoStatus"] != "replayed"):
+        print("Holo pattern/depth failures did not preserve lazy short circuits")
+        return 1
+
+    scrim_positive = holo_scrim_trace(55, draw_count=120)
+    scrim_summary = validate_trace(scrim_positive)
+    if (scrim_summary["predicateReplay"]["scrimStatus"] != "replayed" or
+            scrim_summary["predicateReplay"]["scrimReplayed"] != 1 or
+            scrim_summary["predicateReplay"]["factCount"] != 6):
+        print("Scrim ordered wash/UI selector did not replay the six-fact path")
+        return 1
+
+    scrim_failed_resolve = validate_trace(holo_scrim_trace(
+        56, draw_count=120, scrim_options={"wash_source": 2}))
+    scrim_raw_shadow = validate_trace(holo_scrim_trace(
+        55, draw_count=120, scrim_options={"wash_source": 3}))
+    scrim_ui_failure = validate_trace(holo_scrim_trace(
+        56, draw_count=120, scrim_options={"ui_source": 2}))
+    if (scrim_failed_resolve["predicateReplay"]["scrimStatus"] != "replayed" or
+            scrim_raw_shadow["predicateReplay"]["scrimStatus"] != "replayed" or
+            scrim_ui_failure["predicateReplay"]["scrimStatus"] != "replayed"):
+        print("Scrim fresh resolve failure was not treated as a known selector miss")
+        return 1
+
+    scrim_warm_cache = validate_trace(holo_scrim_trace(
+        56, draw_count=120, scrim_options={"wash_source": 4}))
+    if scrim_warm_cache["predicateReplay"]["scrimStatus"] != "unreplayable":
+        print("Scrim warm cache without raw descriptor was treated as replayable")
+        return 1
+
+    scrim_warm_claim = json.loads(json.dumps(scrim_positive))
+    next(f for f in scrim_warm_claim["draws"][0]["predicateFacts"]
+         if f["siteId"] == 55)["wash"] = resource_fact(4)
+    if validate_trace(scrim_warm_claim)["predicateReplay"]["scrimStatus"] != "unreplayable":
+        print("Scrim warm wash cache with reached UI was treated as replayable")
+        return 1
+
+    holo_observation_mutation = json.loads(json.dumps(holo_positive))
+    holo_obs = next(f for f in holo_observation_mutation["draws"][0]["predicateFacts"]
+                    if f["siteId"] == 53)
+    holo_obs["eyeSize"]["result"] = "no"
+    if validate_trace(holo_observation_mutation)["predicateReplay"]["holoMismatches"] == 0:
+        print("Holo observed eye-size result mutation was not detected")
+        return 1
+
+    holo_mutation = json.loads(json.dumps(holo_miss))
+    holo_obs = next(f for f in holo_mutation["draws"][0]["predicateFacts"]
+                    if f["siteId"] == 53)
+    holo_obs["missedAfter"] = 61
+    if validate_trace(holo_mutation)["predicateReplay"]["holoMismatches"] == 0:
+        print("Holo counter after-value mutation was not detected")
+        return 1
+
+    for label, edit in (
+            ("missing Holo fact", lambda d: d["predicateFacts"].pop()),
+            ("duplicate Holo fact", lambda d: d["predicateFacts"].append(
+                json.loads(json.dumps(next(f for f in d["predicateFacts"] if f["siteId"] == 53))))),
+            ("unfinished Holo stages", lambda d: d["predicateFacts"][-1].pop("eyeSize")),
+            ("missing reached eye-size inputs", lambda d: next(
+                f for f in d["predicateFacts"] if f["siteId"] == 53).__setitem__(
+                    "eyeSize", {"reached": "unknown", "statePresent": "unknown",
+                                "result": "unknown", "readMask": 0,
+                                "depthW": 0, "depthH": 0, "eyeW": 0, "eyeH": 0,
+                                "renderW": 0, "renderH": 0}))):
+        malformed = json.loads(json.dumps(holo_positive))
+        edit(malformed["draws"][0])
+        try:
+            validate_trace(malformed)
+        except TraceError:
+            continue
+        print("Holo/Scrim strict facts accepted %s" % label)
+        return 1
+
+    historical_v4 = json.loads(json.dumps(base))
+    historical_v4["predicateFactVersion"] = 4
+    if validate_trace(historical_v4)["predicateReplay"]["holoStatus"] != "unavailable-v1-v4":
+        print("predicate fact version 4 did not remain compatible after v5")
+        return 1
 
     def stars_trace(interested=True, kind="X", count=6, instances=1,
                     hidden="yes", context_valid="yes", hash_known=True,
@@ -2026,6 +2674,8 @@ def self_test():
             pass
 
     gated_observers = json.loads(json.dumps(vr))
+    # This observer-only fixture predates raw Holo/Scrim facts.
+    gated_observers["predicateFactVersion"] = 4
     gated_draw = gated_observers["draws"][0]
     gated_draw["sites"] = []
     gated_sites = COMMON + EYE[:EYE.index(67) + 1]

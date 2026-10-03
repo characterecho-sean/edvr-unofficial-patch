@@ -12,6 +12,7 @@
 #include <vector>
 
 namespace ladder = edvr::draw_ladder;
+namespace trace = edvr::draw_ladder_trace;
 namespace draw_interest = edvr::draw_interest;
 namespace plugin_cost = edvr::plugin_cost;
 
@@ -921,6 +922,125 @@ void appendTestIssue(TracePolicy& policy, ladder::DrawCallKind call,
     });
 }
 
+trace::PredicateFact makeHoloPredicateFact(
+    ladder::SiteId site, const trace::DrawFacts& draw,
+    bool patternIsBuffer = false) {
+    using namespace edvr::holo_scrim_observation;
+    trace::PredicateFact fact{};
+    fact.siteId = static_cast<std::uint16_t>(site);
+    fact.kind = trace::PredicateFactKind::Holo53;
+    fact.known = trace::TriState::Yes;
+    fact.detailsFinalized = true;
+    HoloObservation& observed = fact.holo;
+    const bool shape = draw.kind == static_cast<std::uint8_t>('X') && draw.count == 6 &&
+                       draw.instances == 1;
+    observed.gates.enabled = Tri::Yes;
+    observed.gates.shapeReached = Tri::Yes;
+    observed.gates.shapeMatched = shape ? Tri::Yes : Tri::No;
+    observed.gates.helperReached = shape ? Tri::Yes : Tri::Unknown;
+    if (shape) {
+        observed.gates.helperEnabled = Tri::Yes;
+        observed.gates.helperShapeReached = Tri::Yes;
+        observed.gates.helperShapeMatched = Tri::Yes;
+    }
+    observed.missNotedBefore = Tri::No;
+    observed.missNotedAfter = Tri::No;
+    observed.missedDeltaKnown = true;
+    if (shape) {
+        const auto resource = [](std::uint32_t w, std::uint32_t h,
+                                 std::uint32_t fmt) {
+            ResourceObservation result{};
+            result.source = ResourceSource::FreshResolveSuccess;
+            result.resolveReached = Tri::Yes;
+            result.resolved = Tri::Yes;
+            result.rawAvailable = Tri::Yes;
+            result.texture2D = Tri::Yes;
+            result.a = w;
+            result.b = h;
+            result.fmt = fmt;
+            return result;
+        };
+        if (patternIsBuffer) {
+            observed.pattern = resource(4096, 2, 0);
+            observed.pattern.texture2D = Tri::No;
+        } else {
+            observed.pattern = resource(256, 256, 70);
+            observed.depth = resource(2048, 2048, 40);
+            observed.eyeSize.reached = Tri::Yes;
+            observed.eyeSize.statePresent = Tri::Yes;
+            observed.eyeSize.result = Tri::Yes;
+            observed.eyeSize.readMask = kDepthWidthRead | kDepthHeightRead |
+                                        kEyeWidthRead | kEyeHeightRead;
+            observed.eyeSize.depthW = 2048;
+            observed.eyeSize.depthH = 2048;
+            observed.eyeSize.eyeW = 2048;
+            observed.eyeSize.eyeH = 2048;
+        }
+    }
+    const bool patternMatches = observed.pattern.texture2D == Tri::Yes &&
+        observed.pattern.a == 256 && observed.pattern.b == 256 &&
+        observed.pattern.fmt == 70;
+    const bool depthMatches = observed.depth.texture2D == Tri::Yes &&
+        observed.eyeSize.result == Tri::Yes;
+    observed.predicateResult = observed.gates.enabled == Tri::Yes && shape &&
+        observed.gates.helperEnabled == Tri::Yes && patternMatches && depthMatches
+        ? Tri::Yes : Tri::No;
+    return fact;
+}
+
+trace::PredicateFact makeScrimPredicateFact(
+    ladder::SiteId site, const trace::DrawFacts& draw,
+    bool washIsBuffer = false) {
+    using namespace edvr::holo_scrim_observation;
+    trace::PredicateFact fact{};
+    fact.siteId = static_cast<std::uint16_t>(site);
+    fact.kind = trace::PredicateFactKind::Scrim55;
+    fact.known = trace::TriState::Yes;
+    fact.detailsFinalized = true;
+    ScrimObservation& observed = fact.scrim;
+    const bool shape = draw.kind == static_cast<std::uint8_t>('X') &&
+                       draw.count >= 100 && draw.instances == 1;
+    observed.gates.enabled = Tri::Yes;
+    observed.gates.shapeReached = Tri::Yes;
+    observed.gates.shapeMatched = shape ? Tri::Yes : Tri::No;
+    observed.gates.helperReached = shape ? Tri::Yes : Tri::Unknown;
+    if (shape) {
+        observed.gates.helperEnabled = Tri::Yes;
+        observed.gates.helperShapeReached = Tri::Yes;
+        observed.gates.helperShapeMatched = Tri::Yes;
+    }
+    if (shape) {
+        const auto resource = [](std::uint32_t w, std::uint32_t h,
+                                 std::uint32_t fmt) {
+            ResourceObservation result{};
+            result.source = ResourceSource::FreshResolveSuccess;
+            result.resolveReached = Tri::Yes;
+            result.resolved = Tri::Yes;
+            result.rawAvailable = Tri::Yes;
+            result.texture2D = Tri::Yes;
+            result.a = w;
+            result.b = h;
+            result.fmt = fmt;
+            return result;
+        };
+        if (washIsBuffer) {
+            observed.wash = resource(4096, 2, 0);
+            observed.wash.texture2D = Tri::No;
+        } else {
+            observed.wash = resource(16, 16, 71);
+            observed.ui = resource(2048, 2048, 40);
+        }
+    }
+    const bool washMatches = observed.wash.texture2D == Tri::Yes &&
+        observed.wash.a == 16 && observed.wash.b == 16 &&
+        (observed.wash.fmt == 70 || observed.wash.fmt == 71 || observed.wash.fmt == 72);
+    const bool uiMatches = observed.ui.texture2D == Tri::Yes && observed.ui.a >= 1024;
+    observed.predicateResult = observed.gates.enabled == Tri::Yes && shape &&
+        observed.gates.helperEnabled == Tri::Yes && washMatches && uiMatches
+        ? Tri::Yes : Tri::No;
+    return fact;
+}
+
 template <class SequenceType>
 bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        char kind, ladder::SiteId terminal, bool includeCommon,
@@ -954,13 +1074,26 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     facts.sequence = sequence;
     facts.count = 240;
     facts.instances = instances;
-    if (kind == 'D' || kind == 'N') {
+    if (terminal == ladder::SiteId::kHoloClaim) {
+        facts.kind = static_cast<std::uint8_t>('X');
+        facts.count = 6;
+    } else if (terminal == ladder::SiteId::kTargetSharpClaim) {
+        facts.kind = static_cast<std::uint8_t>('X');
+        facts.count = 6;
+    } else if (terminal == ladder::SiteId::kScrimClaim) {
+        facts.kind = static_cast<std::uint8_t>('X');
+        facts.count = 120;
+    } else if (terminal == ladder::SiteId::kEyeBackdropComposite) {
+        facts.kind = static_cast<std::uint8_t>('X');
+        facts.count = 120;
+    }
+    if (facts.kind == 'D' || facts.kind == 'N') {
         facts.args.base = 17;
-        facts.args.startInstance = kind == 'N' ? 5 : 0;
-    } else if (kind == 'I' || kind == 'X') {
+        facts.args.startInstance = facts.kind == 'N' ? 5 : 0;
+    } else if (facts.kind == 'I' || facts.kind == 'X') {
         facts.args.start = 23;
         facts.args.base = -7;
-        facts.args.startInstance = kind == 'X' ? 5 : 0;
+        facts.args.startInstance = facts.kind == 'X' ? 5 : 0;
     }
     facts.vsHash = 0xFCF7BD2896751D96ull;
     facts.psHash = 0xF786D34B5E118D5Eull;
@@ -975,8 +1108,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     facts.dsv0Identity = 4;
     facts.rtv0Width = 2400;
     facts.rtv0Height = 2400;
-    if (kind == 'A' || kind == 'Z' || kind == 'Y') facts.drawParametersKnown = false;
-    if (kind == 'Z' || kind == 'Y') {
+    if (facts.kind == 'A' || facts.kind == 'Z' || facts.kind == 'Y') facts.drawParametersKnown = false;
+    if (facts.kind == 'Z' || facts.kind == 'Y') {
         facts.argumentBufferIdentity = static_cast<std::uintptr_t>(0xA11E);
         facts.argumentByteOffset = 128;
         facts.argumentBufferKnown = true;
@@ -1122,6 +1255,12 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
             }
             fact.detailsFinalized = true;
             policy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kHoloClaim) {
+            policy.predicateFact(makeHoloPredicateFact(visited, facts,
+                terminal == ladder::SiteId::kTargetSharpClaim));
+        } else if (visited == ladder::SiteId::kScrimClaim) {
+            policy.predicateFact(makeScrimPredicateFact(visited, facts,
+                terminal == ladder::SiteId::kEyeBackdropComposite));
         }
     }
     const std::vector<ladder::SiteId> expected = includeCommon
@@ -1384,6 +1523,10 @@ bool traceWriterChecks(const char* rootArg) {
             fact.callbackReached = trace::TriState::No;
             fact.detailsFinalized = true;
             vrPolicy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kHoloClaim) {
+            vrPolicy.predicateFact(makeHoloPredicateFact(visited, vrDraw));
+        } else if (visited == ladder::SiteId::kScrimClaim) {
+            vrPolicy.predicateFact(makeScrimPredicateFact(visited, vrDraw, true));
         }
     }
     // Site 6 is a reached trace event even when its interest gate prevents
@@ -1722,6 +1865,180 @@ bool traceWriterChecks(const char* rootArg) {
                 trace::status() == trace::Status::InvalidCapture,
                 "missing site 24 or 26 source fact invalidates the capture");
 
+    const auto checkHoloScrimFactFailure = [&](const char* directoryLeaf,
+        const char* logLeaf, std::uint32_t frameNo, ladder::SiteId site,
+        bool appendUnfinished) {
+        const std::string directory = root + "\\" + directoryLeaf;
+        const bool started = beginCapture(directory, logLeaf, frameNo);
+        trace::DrawFacts drawFacts = draw;
+        drawFacts.route = ladder::RouteId::kVrEye;
+        drawFacts.sequence = ladder::SequenceId::kVrEye;
+        const trace::Token token = trace::beginDraw(drawFacts);
+        if (appendUnfinished) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(site);
+            fact.kind = site == ladder::SiteId::kHoloClaim
+                ? trace::PredicateFactKind::Holo53
+                : trace::PredicateFactKind::Scrim55;
+            fact.known = trace::TriState::Yes;
+            trace::appendPredicateFact(token, fact);
+        }
+        trace::appendSite(token, static_cast<std::uint16_t>(site),
+            static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+            static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+            static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+        trace::finishDraw(token, static_cast<std::int16_t>(site), -1);
+        trace::frameEnd(frameNo);
+        std::string sidecarLeaf(logLeaf);
+        const std::size_t extension = sidecarLeaf.rfind(".log");
+        if (extension != std::string::npos) sidecarLeaf.resize(extension);
+        sidecarLeaf += ".draw-ladder-" + std::to_string(frameNo) + ".json";
+        return started && token.valid() && trace::overflowed() &&
+               trace::status() == trace::Status::InvalidCapture &&
+               fileExists(directory + "\\" + sidecarLeaf);
+    };
+    ok &= check(checkHoloScrimFactFailure("missingholo53fact",
+                "edvr_gfx_missing_holo53_fact.log", 41,
+                ladder::SiteId::kHoloClaim, false),
+                "missing reached Holo53 source fact invalidates capture");
+    ok &= check(checkHoloScrimFactFailure("missingscrim55fact",
+                "edvr_gfx_missing_scrim55_fact.log", 42,
+                ladder::SiteId::kScrimClaim, false),
+                "missing reached Scrim55 source fact invalidates capture");
+    ok &= check(checkHoloScrimFactFailure("unfinishedholo53fact",
+                "edvr_gfx_unfinished_holo53_fact.log", 43,
+                ladder::SiteId::kHoloClaim, true),
+                "unfinished Holo53 source fact invalidates capture");
+    ok &= check(checkHoloScrimFactFailure("unfinishedscrim55fact",
+                "edvr_gfx_unfinished_scrim55_fact.log", 44,
+                ladder::SiteId::kScrimClaim, true),
+                "unfinished Scrim55 source fact invalidates capture");
+
+    const std::string wrongHoloKindDir = root + "\\wrongholo53kind";
+    const bool wrongHoloKindStarted = beginCapture(wrongHoloKindDir,
+        "edvr_gfx_wrong_holo53_kind.log", 45);
+    const trace::Token wrongHoloKindToken = trace::beginDraw(draw);
+    trace::PredicateFact wrongHoloKind = makeHoloPredicateFact(
+        ladder::SiteId::kHoloClaim, draw);
+    wrongHoloKind.siteId = static_cast<std::uint16_t>(ladder::SiteId::kScrimClaim);
+    trace::appendPredicateFact(wrongHoloKindToken, wrongHoloKind);
+    const bool wrongHoloKindRejected = trace::overflowed();
+    trace::appendSite(wrongHoloKindToken,
+        static_cast<std::uint16_t>(ladder::SiteId::kScrimClaim),
+        static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+        static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+        static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    trace::finishDraw(wrongHoloKindToken,
+        static_cast<std::int16_t>(ladder::SiteId::kScrimClaim), -1);
+    trace::frameEnd(45);
+    ok &= check(wrongHoloKindStarted && wrongHoloKindToken.valid() &&
+                wrongHoloKindRejected && trace::status() == trace::Status::InvalidCapture,
+                "Holo53 fact on site 55 is rejected");
+
+    const std::string duplicateHoloDir = root + "\\duplicateholo53fact";
+    const bool duplicateHoloStarted = beginCapture(duplicateHoloDir,
+        "edvr_gfx_duplicate_holo53_fact.log", 46);
+    trace::DrawFacts duplicateHoloDraw = draw;
+    duplicateHoloDraw.kind = static_cast<std::uint8_t>('D');
+    duplicateHoloDraw.count = 240;
+    const trace::Token duplicateHoloToken = trace::beginDraw(duplicateHoloDraw);
+    const trace::PredicateFact duplicateHoloFact = makeHoloPredicateFact(
+        ladder::SiteId::kHoloClaim, duplicateHoloDraw);
+    trace::appendPredicateFact(duplicateHoloToken, duplicateHoloFact);
+    trace::appendPredicateFact(duplicateHoloToken, duplicateHoloFact);
+    trace::appendSite(duplicateHoloToken,
+        static_cast<std::uint16_t>(ladder::SiteId::kHoloClaim),
+        static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+        static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+        static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    trace::finishDraw(duplicateHoloToken,
+        static_cast<std::int16_t>(ladder::SiteId::kHoloClaim), -1);
+    trace::frameEnd(46);
+    ok &= check(duplicateHoloStarted && duplicateHoloToken.valid() &&
+                trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
+                "duplicate Holo53 facts invalidate capture");
+
+    const std::string factCapDir = root + "\\factcapoverflow";
+    const bool factCapStarted = beginCapture(factCapDir,
+        "edvr_gfx_fact_cap_overflow.log", 47);
+    trace::DrawFacts factCapDraw = draw;
+    factCapDraw.kind = static_cast<std::uint8_t>('D');
+    factCapDraw.count = 240;
+    factCapDraw.instances = 1;
+    const trace::Token factCapToken = trace::beginDraw(factCapDraw);
+    auto appendCapSite = [&](std::uint16_t site) {
+        trace::appendSite(factCapToken, site,
+            static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+            static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+            static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    };
+    trace::PredicateFact capGate{};
+    capGate.siteId = static_cast<std::uint16_t>(ladder::SiteId::kDrawGateDisabledNone);
+    capGate.kind = trace::PredicateFactKind::DrawGateWanted;
+    capGate.known = trace::TriState::Yes;
+    capGate.gateWanted = trace::TriState::Yes;
+    trace::appendPredicateFact(factCapToken, capGate);
+    appendCapSite(capGate.siteId);
+
+    trace::PredicateFact capRange{};
+    capRange.siteId = static_cast<std::uint16_t>(ladder::SiteId::kEyeRangeSkip);
+    capRange.kind = trace::PredicateFactKind::EyeRangeSkip;
+    capRange.known = trace::TriState::Yes;
+    capRange.eyeDrawIndex = 1;
+    capRange.censusSkippedDeltaKnown = true;
+    trace::appendPredicateFact(factCapToken, capRange);
+    appendCapSite(capRange.siteId);
+
+    trace::PredicateFact capNv{};
+    capNv.siteId = static_cast<std::uint16_t>(ladder::SiteId::kNightVisionClaim);
+    capNv.kind = trace::PredicateFactKind::NightVisionClaim;
+    capNv.known = trace::TriState::Yes;
+    capNv.dispatchEnabled = trace::TriState::No;
+    capNv.shapeReached = trace::TriState::No;
+    capNv.callbackReached = trace::TriState::No;
+    capNv.detailsFinalized = true;
+    trace::appendPredicateFact(factCapToken, capNv);
+    appendCapSite(capNv.siteId);
+
+    trace::PredicateFact capStars{};
+    capStars.siteId = static_cast<std::uint16_t>(ladder::SiteId::kWitchspaceStarsSkip);
+    capStars.kind = trace::PredicateFactKind::WitchspaceStarsSkip;
+    capStars.known = trace::TriState::Yes;
+    capStars.interestMaskKnown = trace::TriState::Yes;
+    capStars.legacyInterestMask = 1ull << 1;
+    capStars.starsHelperReached = trace::TriState::Yes;
+    capStars.hiddenKnown = trace::TriState::Yes;
+    capStars.hidden = trace::TriState::No;
+    capStars.starsSkippedDeltaKnown = true;
+    capStars.detailsFinalized = true;
+    trace::appendPredicateFact(factCapToken, capStars);
+    appendCapSite(capStars.siteId);
+
+    trace::appendPredicateFact(factCapToken,
+        makeHoloPredicateFact(ladder::SiteId::kHoloClaim, factCapDraw));
+    appendCapSite(static_cast<std::uint16_t>(ladder::SiteId::kHoloClaim));
+    trace::appendPredicateFact(factCapToken,
+        makeScrimPredicateFact(ladder::SiteId::kScrimClaim, factCapDraw));
+    appendCapSite(static_cast<std::uint16_t>(ladder::SiteId::kScrimClaim));
+    const bool sixFactsFit = !trace::overflowed();
+
+    trace::PredicateFact capSeventh{};
+    capSeventh.siteId = static_cast<std::uint16_t>(ladder::SiteId::kOffscreenQuadSkip);
+    capSeventh.kind = trace::PredicateFactKind::OffscreenQuadSkip;
+    capSeventh.known = trace::TriState::Yes;
+    capSeventh.offscreenRuleCount = 1;
+    capSeventh.quadArmed = trace::TriState::No;
+    capSeventh.offscreenProbeReached = trace::TriState::No;
+    capSeventh.detailsFinalized = true;
+    trace::appendPredicateFact(factCapToken, capSeventh);
+    appendCapSite(capSeventh.siteId);
+    trace::finishDraw(factCapToken,
+        static_cast<std::int16_t>(ladder::SiteId::kOffscreenQuadSkip), -1);
+    trace::frameEnd(47);
+    ok &= check(factCapStarted && factCapToken.valid() && sixFactsFit &&
+                trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
+                "six predicate facts fit and the seventh invalidates capture");
+
     const std::string unfinishedOffscreenDir = root + "\\unfinishedoffscreenfact";
     const bool unfinishedOffscreenStarted = beginCapture(unfinishedOffscreenDir,
         "edvr_gfx_unfinished_offscreen_fact.log", 35);
@@ -1892,6 +2209,7 @@ static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kPanel) == 1);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip) == 2);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kRemlok) == 3);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kHolo) == 4);
+static_assert(trace::kMaxPredicateFactsPerDraw == 6);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kTarget) == 5);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kNightVision) == 6);
 static_assert(static_cast<std::int16_t>(ladder::VerdictOrdinal::kIntro) == 7);

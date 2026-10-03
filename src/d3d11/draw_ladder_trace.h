@@ -2,6 +2,7 @@
 
 #include "draw_census.h"
 #include "draw_ladder.h"
+#include "holo_scrim_observation.h"
 
 #include <atomic>
 #include <cstdint>
@@ -16,7 +17,7 @@ namespace edvr::draw_ladder_trace {
 constexpr std::uint32_t kMaxDraws = 65536;
 constexpr std::uint16_t kMaxSiteEventsPerDraw = 48;
 constexpr std::uint16_t kMaxActionEventsPerDraw = 32;
-constexpr std::uint8_t kMaxPredicateFactsPerDraw = 4;
+constexpr std::uint8_t kMaxPredicateFactsPerDraw = 6;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -97,6 +98,8 @@ enum class PredicateFactKind : std::uint8_t {
     WitchspaceStarsSkip = 4,
     OffscreenCensusSkip = 5,
     OffscreenQuadSkip = 6,
+    Holo53 = 7,
+    Scrim55 = 8,
 };
 
 struct PredicateRange final {
@@ -168,6 +171,8 @@ struct PredicateFact final {
     TriState offscreenProbeTexture2D = TriState::Unknown;
     std::uint32_t offscreenTargetW = 0;
     std::uint32_t offscreenTargetH = 0;
+    holo_scrim_observation::HoloObservation holo{};
+    holo_scrim_observation::ScrimObservation scrim{};
     bool detailsFinalized = false;  // internal capture validity; not serialized
 };
 

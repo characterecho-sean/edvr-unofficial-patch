@@ -68,6 +68,8 @@
 
 #include <cstdint>
 
+#include "holo_scrim_observation.h"
+
 struct ID3D11DeviceContext;
 
 namespace edvr {
@@ -103,6 +105,11 @@ inline bool scrimWashShape(char kind, uint32_t count, uint32_t instances) {
     return kind == 'X' && instances == 1 && count >= 100;
 }
 bool scrimOnEyeDraw(char kind, uint32_t count, uint32_t instances);
+
+// Trace-only parity path. It observes only metadata from the resolve already
+// required by the selector or a same-generation trace shadow.
+bool scrimOnEyeDrawObserved(char kind, uint32_t count, uint32_t instances,
+                            holo_scrim_observation::ScrimObservation* observation);
 
 // Around the real draw: bind the uniform into PS slot 0, restore the game's
 // texture after. End is safe to call when Begin did nothing.

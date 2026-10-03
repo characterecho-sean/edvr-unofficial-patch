@@ -44,7 +44,7 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  six families have rig coverage; offscreen facts pass all 131 validation jobs.
+  eight families have rig coverage; Holo/Scrim facts pass all 132 validation jobs.
   Whole-ladder equivalence stays open; Steam stays on `4350a281`.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
@@ -1287,3 +1287,71 @@ timed-draw instrumentation. The older control and the latest NV source-fact
 capture cannot establish this comparison. Phase 1 replay, forwarding and
 complete cost gates remain open; Holo/Scrim source-fact work is next. No Phase
 2 or shipping authorization follows from this merge.
+
+### Holo and Scrim source facts, 2026-10-02
+
+Predicate-fact version 5 adds Holo (site 53, kind 7) and Scrim (site 55, kind
+8). The eye path now permits six facts: common 3/6, eye 49/50 and Holo/Scrim.
+Offscreen 24/26 remain an alternate route. Both selectors independently replay
+frozen `14a7ff70` enabled flags, draw shape and resource descriptors. Holo
+preserves pattern then depth resolution and the exact lazy eye/render-size
+comparison, including the two-pixel allowance and zero height acceptance where
+the original permits it. Its counter and noted flag are captured before and
+after every outcome, including early declines. Scrim preserves wash then UI
+resolution and the existing cache. A separate trace-only descriptor shadow
+reuses an already-issued resolve by view/generation; a warm cache without raw
+shadow remains unavailable. No additional D3D query, clock or draw allocation
+supplies these facts.
+
+Review escalated the failed Luna reader check to the next tier: an unrelated
+historical observer fixture needed an explicit v4 version. Further review
+rejected missing inputs for a reached Holo eye-size test and allowed
+structurally valid UI observations after a raw-unavailable Scrim wash while
+keeping that selector unreplayable. Expected selectors use raw inputs; observed
+shape/result fields and cached match booleans never replace them. Native
+acceptance corrected a lazy-read mask, two fixture member names, frame 14's
+omitted source facts and Scrim fixture counts from 240 to 120, preserving the
+existing NV shape-miss prefix. No production predicate or strict coverage gate
+was weakened.
+
+The actual Holo helper rig passes with synthetic binding-resolver/state seams
+and an independent frozen eye-size reference; the observed accessor uses the
+production pure selector with lazy getters. The Scrim WARP rig passes actual
+helper/cache resolve checks, including fresh failures and retry, raw-shadow
+reuse and unavailable warm hits. These do not establish whole forwarding or
+production v5 capture coverage. The C++ matrix has 44 draws, 685 sites and 102
+actions: 129 supported matches, Holo 15/15, Scrim 13/13 and NV 18/18, with no
+unavailable facts, mismatches or unobserved mutations. Frame 14 has six
+matches. Missing/unfinished, wrong-site/kind, duplicate and seventh-fact
+overflow fixtures are rejected, with explicit CLI checks and cleanup in the
+build.
+
+Ordinary Holo/Scrim helpers are unchanged against the frozen source. Guarded
+NoTrace/NoCpu assembly still has 7,057 bytes, 1,636 listing records, 94 ordered
+calls and a 288-byte stack; its byte and call-target hashes exactly match the
+offscreen entry above. Pinned actual v1/v2 captures retain 8,682 and
+6,821/6,237 matches with no mismatches, unavailable supported facts or
+unobserved mutations. Holo/Scrim correctly remain unavailable in older formats;
+synthetic v3-v5 compatibility is covered.
+
+MSVC x64 sizing measures PredicateFact 216 to 376 bytes and DrawRecord 2,472 to
+3,864 bytes. With 65,536 records and the unchanged identity table, enabled
+replay diagnostics reserve 157.5 to 244.5 MiB, an 87 MiB increase excluding
+allocator overhead. Default-disabled configuration allocates no capture buffer;
+enabling allocates during initialization, and disabling releases it. This
+bounded diagnostic cost is recorded rather than attributed to an unselected
+plugin or to per-draw allocation. Steam remains on `4350a281`; no new flight is
+requested for this individual slice. Whole-ladder replay, independent
+forwarding, complete cost coverage and matched performance remain open before
+Phase 2.
+
+The normal build passed 125 pooled jobs (148.5 seconds) and seven quiet jobs
+(27.9 seconds), both production profiles and installers, and the 235-key
+contract. All 19 expected-invalid CLI checks pass; explicit fixture cleanup
+reports no nonempty-directory warning. FocusWatch recorded no shown window,
+console or foreground change. Receipt UTC is
+`2026-10-03T03:10:41.956163+00:00`, input SHA-256
+`635cc08e5af6889770838de7a5dfdd12ff6b47d0c3dfa046c607468c06468889`; log:
+`build/plugin-holo-scrim-full-build.log`. The validated source tree is
+committed before any later install-only promotion. No v5 production flight or
+whole performance improvement is claimed.

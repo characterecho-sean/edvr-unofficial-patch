@@ -1552,6 +1552,22 @@ if errorlevel 1 ( echo [edvr] ERROR: witchspace stars test build failed & exit /
 "%BUILD%\witchspace_stars_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_holo_predicate_test
+echo [edvr] === holo_predicate_test.exe ===
+if not exist "%OBJ%\holopredicate" mkdir "%OBJ%\holopredicate"
+cl.exe /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_BINDING_SHADOW_EXTERNAL /DEDVR_HOLO_PREDICATE_TEST ^
+    /Fo"%OBJ%\holopredicate\\" /Fe"%BUILD%\holo_predicate_test.exe" ^
+    "tools\holo_predicate_test\holo_predicate_test.cpp" "src\d3d11\holo_fix.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" ^
+    "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: holo predicate test build failed & exit /b 1 )
+"%BUILD%\holo_predicate_test.exe" --dry-run || exit /b 1
+"%BUILD%\holo_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_offscreen_skip_test
 echo [edvr] === offscreen_skip_test.exe ===
 if not exist "%OBJ%\offscreenskip" mkdir "%OBJ%\offscreenskip"
@@ -1643,6 +1659,27 @@ python "%ROOT%\tools\draw_ladder_replay.py" --file ^
 python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact\edvr_gfx_unfinished_offscreen_fact.draw-ladder-35.json" ^
     --expected-log edvr_gfx_unfinished_offscreen_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\missingholo53fact\edvr_gfx_missing_holo53_fact.draw-ladder-41.json" ^
+    --expected-log edvr_gfx_missing_holo53_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\missingscrim55fact\edvr_gfx_missing_scrim55_fact.draw-ladder-42.json" ^
+    --expected-log edvr_gfx_missing_scrim55_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact\edvr_gfx_unfinished_holo53_fact.draw-ladder-43.json" ^
+    --expected-log edvr_gfx_unfinished_holo53_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact\edvr_gfx_unfinished_scrim55_fact.draw-ladder-44.json" ^
+    --expected-log edvr_gfx_unfinished_scrim55_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\wrongholo53kind\edvr_gfx_wrong_holo53_kind.draw-ladder-45.json" ^
+    --expected-log edvr_gfx_wrong_holo53_kind.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\duplicateholo53fact\edvr_gfx_duplicate_holo53_fact.draw-ladder-46.json" ^
+    --expected-log edvr_gfx_duplicate_holo53_fact.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\factcapoverflow\edvr_gfx_fact_cap_overflow.draw-ladder-47.json" ^
+    --expected-log edvr_gfx_fact_cap_overflow.log --dry-run --expect-invalid || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -1680,6 +1717,20 @@ del /q "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.log" ^
     "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts\edvr_gfx_missing_offscreen_facts.draw-ladder-34.json" ^
     "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact\edvr_gfx_unfinished_offscreen_fact.log" ^
     "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact\edvr_gfx_unfinished_offscreen_fact.draw-ladder-35.json" ^
+    "%BUILD%\draw_ladder_test-trace\missingholo53fact\edvr_gfx_missing_holo53_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\missingholo53fact\edvr_gfx_missing_holo53_fact.draw-ladder-41.json" ^
+    "%BUILD%\draw_ladder_test-trace\missingscrim55fact\edvr_gfx_missing_scrim55_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\missingscrim55fact\edvr_gfx_missing_scrim55_fact.draw-ladder-42.json" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact\edvr_gfx_unfinished_holo53_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact\edvr_gfx_unfinished_holo53_fact.draw-ladder-43.json" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact\edvr_gfx_unfinished_scrim55_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact\edvr_gfx_unfinished_scrim55_fact.draw-ladder-44.json" ^
+    "%BUILD%\draw_ladder_test-trace\wrongholo53kind\edvr_gfx_wrong_holo53_kind.log" ^
+    "%BUILD%\draw_ladder_test-trace\wrongholo53kind\edvr_gfx_wrong_holo53_kind.draw-ladder-45.json" ^
+    "%BUILD%\draw_ladder_test-trace\duplicateholo53fact\edvr_gfx_duplicate_holo53_fact.log" ^
+    "%BUILD%\draw_ladder_test-trace\duplicateholo53fact\edvr_gfx_duplicate_holo53_fact.draw-ladder-46.json" ^
+    "%BUILD%\draw_ladder_test-trace\factcapoverflow\edvr_gfx_fact_cap_overflow.log" ^
+    "%BUILD%\draw_ladder_test-trace\factcapoverflow\edvr_gfx_fact_cap_overflow.draw-ladder-47.json" ^
     "%BUILD%\draw_ladder_test-trace\siteoverflow\edvr_gfx_site.log" ^
     "%BUILD%\draw_ladder_test-trace\siteoverflow\edvr_gfx_site.draw-ladder-20.json" ^
     "%BUILD%\draw_ladder_test-trace\actionoverflow\edvr_gfx_action.log" ^
@@ -1704,6 +1755,13 @@ if exist "%BUILD%\draw_ladder_test-trace\missingnightvisionfact" rmdir "%BUILD%\
 if exist "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedwitchspacestars"
 if exist "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts" rmdir "%BUILD%\draw_ladder_test-trace\missingoffscreenfacts"
 if exist "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedoffscreenfact"
+if exist "%BUILD%\draw_ladder_test-trace\missingholo53fact" rmdir "%BUILD%\draw_ladder_test-trace\missingholo53fact"
+if exist "%BUILD%\draw_ladder_test-trace\missingscrim55fact" rmdir "%BUILD%\draw_ladder_test-trace\missingscrim55fact"
+if exist "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedholo53fact"
+if exist "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact" rmdir "%BUILD%\draw_ladder_test-trace\unfinishedscrim55fact"
+if exist "%BUILD%\draw_ladder_test-trace\wrongholo53kind" rmdir "%BUILD%\draw_ladder_test-trace\wrongholo53kind"
+if exist "%BUILD%\draw_ladder_test-trace\duplicateholo53fact" rmdir "%BUILD%\draw_ladder_test-trace\duplicateholo53fact"
+if exist "%BUILD%\draw_ladder_test-trace\factcapoverflow" rmdir "%BUILD%\draw_ladder_test-trace\factcapoverflow"
 if exist "%BUILD%\draw_ladder_test-trace\siteoverflow" rmdir "%BUILD%\draw_ladder_test-trace\siteoverflow"
 if exist "%BUILD%\draw_ladder_test-trace\actionoverflow" rmdir "%BUILD%\draw_ladder_test-trace\actionoverflow"
 if exist "%BUILD%\draw_ladder_test-trace\unfinished" rmdir "%BUILD%\draw_ladder_test-trace\unfinished"

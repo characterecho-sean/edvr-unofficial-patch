@@ -40,6 +40,7 @@
 #include "device_hook.h"  // contextHookModeFor
 #include "draw_census.h"
 #include "draw_ladder_trace.h"
+#include "holo_scrim_observation.h"
 #include "offscreen_skip_selector.h"
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
@@ -2657,16 +2658,44 @@ struct VScreenDrawLadderVisitor {
             if (remlokAction == RemlokAction::kScissor) return claimed(id, DrawVerdict::kRemlok);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kHoloClaim) {
-            if (holoWantsDraws() && holoPatternShape(kind, count, instances) &&
-                holoOnEyeDraw(kind, count, instances)) return claimed(id, DrawVerdict::kHolo);
+            if constexpr (TracePolicy::enabled) {
+                holo_scrim_observation::HoloObservation observed{};
+                const bool matches = holoOnEyeDrawObserved(kind, count, instances, &observed);
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::Holo53;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.holo = observed;
+                fact.detailsFinalized = true;
+                trace.predicateFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kHolo);
+            } else {
+                if (holoWantsDraws() && holoPatternShape(kind, count, instances) &&
+                    holoOnEyeDraw(kind, count, instances))
+                    return claimed(id, DrawVerdict::kHolo);
+            }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kTargetSharpClaim) {
             if (targetSharpWantsDraws() && targetSharpOnEyeDraw(self, kind, count, instances))
                 return claimed(id, DrawVerdict::kTargetSharp);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kScrimClaim) {
-            if (scrimWantsDraws() && scrimWashShape(kind, count, instances) &&
-                scrimOnEyeDraw(kind, count, instances)) return claimed(id, DrawVerdict::kScrim);
+            if constexpr (TracePolicy::enabled) {
+                holo_scrim_observation::ScrimObservation observed{};
+                const bool matches = scrimOnEyeDrawObserved(kind, count, instances, &observed);
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::Scrim55;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.scrim = observed;
+                fact.detailsFinalized = true;
+                trace.predicateFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kScrim);
+            } else {
+                if (scrimWantsDraws() && scrimWashShape(kind, count, instances) &&
+                    scrimOnEyeDraw(kind, count, instances))
+                    return claimed(id, DrawVerdict::kScrim);
+            }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kEyeBackdropComposite) {
             if (backdropWantsDraws() && backdropCompositeShape(kind, count, instances) &&
@@ -6251,6 +6280,21 @@ bool vScreenIsEyeSized(uint32_t w, uint32_t h) {
     if (s->eyeW && near2(w, s->eyeW) && near2(h, s->eyeH)) return true;
     if (s->renderW && near2(w, s->renderW) && near2(h, s->renderH)) return true;
     return false;
+}
+
+bool vScreenIsEyeSizedObserved(
+    uint32_t w, uint32_t h,
+    holo_scrim_observation::EyeSizeObservation* observation) {
+    struct Getter final {
+        State* state;
+        bool statePresent() const noexcept { return state != nullptr; }
+        uint32_t eyeW() const noexcept { return state->eyeW; }
+        uint32_t eyeH() const noexcept { return state->eyeH; }
+        uint32_t renderW() const noexcept { return state->renderW; }
+        uint32_t renderH() const noexcept { return state->renderH; }
+    } getter{g_state};
+    return holo_scrim_observation::isEyeSizedObserved(
+        w, h, getter, observation);
 }
 
 // Elite's Supersampling below 1.0 as the sizes measure it (vr_supersample_notice.h): the measured render size and the eye's

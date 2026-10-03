@@ -272,6 +272,71 @@ int main() {
         edvr::scrimShutdown();
         check(edvr::scrimOnEyeDraw('X', 5760, 1), "post-shutdown metadata recovers");
         check(calls() == 19, "shutdown clears metadata cache");
+
+        // The selector cache can be warm from a NoTrace call before the first
+        // observed call. Its cached verdict must not masquerade as raw input.
+        edvr::holo_scrim_observation::ScrimObservation observed{};
+        check(edvr::scrimOnEyeDrawObserved('X', 5760, 1, &observed),
+              "observed warm cache retains the production verdict");
+        check(observed.wash.source ==
+                  edvr::holo_scrim_observation::ResourceSource::WarmCacheWithoutRawShadow &&
+                  observed.ui.source ==
+                  edvr::holo_scrim_observation::ResourceSource::WarmCacheWithoutRawShadow &&
+                  observed.predicateResult == edvr::holo_scrim_observation::Tri::Yes &&
+                  calls() == 19,
+              "warm cache without trace raw shadow is explicitly unknown and query-free");
+
+        // A known frame boundary invalidates the ordinary cache. The next
+        // observed call records existing resolve results; following cache hits
+        // can use only that independently captured scalar shadow.
+        edvr::bindingFrameBoundary();
+        observed = edvr::holo_scrim_observation::ScrimObservation{};
+        check(edvr::scrimOnEyeDrawObserved('X', 5760, 1, &observed),
+              "fresh observed resolves recognize the scrim");
+        check(observed.wash.source ==
+                  edvr::holo_scrim_observation::ResourceSource::FreshResolveSuccess &&
+                  observed.ui.source ==
+                  edvr::holo_scrim_observation::ResourceSource::FreshResolveSuccess &&
+                  observed.wash.rawAvailable == edvr::holo_scrim_observation::Tri::Yes &&
+                  observed.wash.a == 16 && observed.wash.b == 16 &&
+                  observed.wash.fmt == DXGI_FORMAT_BC1_UNORM && calls() == 21,
+              "fresh observations preserve raw descriptors from the production resolves");
+        observed = edvr::holo_scrim_observation::ScrimObservation{};
+        check(edvr::scrimOnEyeDrawObserved('X', 5760, 1, &observed),
+              "raw shadow hit retains scrim recognition");
+        check(observed.wash.source ==
+                  edvr::holo_scrim_observation::ResourceSource::RawShadowHit &&
+                  observed.ui.source ==
+                  edvr::holo_scrim_observation::ResourceSource::RawShadowHit &&
+                  observed.wash.a == 16 && observed.ui.a == 2048 && calls() == 21,
+              "raw shadow hits are query-free and still expose raw descriptor scalars");
+
+        // A fresh failed resolver is known false, not unavailable; the next
+        // call retries exactly as the unchanged ordinary cache does.
+        bindSrv(context.Get(), 0, retryWash.Get());
+        edvr::scrimMetadataResetResolveCallsForTest();
+        g_failNextGetResource = true;
+        observed = edvr::holo_scrim_observation::ScrimObservation{};
+        check(!edvr::scrimOnEyeDrawObserved('X', 5760, 1, &observed),
+              "observed failed resolve declines");
+        check(observed.wash.source ==
+                  edvr::holo_scrim_observation::ResourceSource::FreshResolveFailure &&
+                  observed.wash.resolved == edvr::holo_scrim_observation::Tri::No &&
+                  observed.wash.rawAvailable == edvr::holo_scrim_observation::Tri::No &&
+                  observed.wash.texture2D == edvr::holo_scrim_observation::Tri::No &&
+                  observed.ui.source ==
+                  edvr::holo_scrim_observation::ResourceSource::NotReached && calls() == 1,
+              "failed resolve is known false and short-circuits slot 1");
+        observed = edvr::holo_scrim_observation::ScrimObservation{};
+        check(edvr::scrimOnEyeDrawObserved('X', 5760, 1, &observed),
+              "same-generation observed failure retries and recovers");
+        check(observed.wash.source ==
+                  edvr::holo_scrim_observation::ResourceSource::FreshResolveSuccess &&
+                  observed.ui.source ==
+                  edvr::holo_scrim_observation::ResourceSource::RawShadowHit &&
+                  calls() == 2,
+              "retry reuses only slot 1 raw shadow and resolves failed slot 0 once");
+
         edvr::scrimShutdown();
         edvr::bindingForgetAll();
         std::puts("scrim_metadata_test PASS");
