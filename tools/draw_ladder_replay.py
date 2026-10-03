@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 11
+PREDICATE_FACT_VERSION = 12
 RESOLVE_BIND_PS_HASH = 0x7CECABDE34FFBE9E
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
@@ -1494,6 +1494,500 @@ class _ResolveBindUnavailable(Exception):
     pass
 
 
+class _LoaderPanelUnavailable(Exception):
+    pass
+
+
+def _replay_loader_panel_fact(fact, draw, label):
+    """Replay site25 from independent outer, helper, and post-collection reads."""
+    required = {"siteId", "kind", "known", "outer", "helper"}
+    if set(fact) != required or fact.get("known") != "yes":
+        raise TraceError(label + " has missing or unexpected LoaderPanel fields")
+    if (fact.get("siteId"), fact.get("kind")) != (25, 19):
+        raise TraceError(label + " has mismatched LoaderPanel site/kind")
+
+    u32 = 0xffffffff
+    i32 = 0x7fffffff
+    outer_types = {
+        "wants": bool, "eyeDrawsLastFrame": int, "rtvPresent": bool,
+        "resolved": bool, "isTexture2D": bool, "targetWidth": int,
+        "targetHeight": int, "qsStartIndex": int, "qsBaseVertex": int,
+        "textured": bool,
+    }
+    sequence_types = {name: int for name in (
+        "position", "hashBeforeCount", "hashAfterCount", "hashBeforeWidth",
+        "hashAfterWidth", "hashBeforeHeight", "hashAfterHeight", "slotCount",
+        "slotWidth", "slotHeight", "lenBefore", "lenAfter")}
+    panel_types = {
+        "frameAnyBefore": bool, "frameAnyAfter": bool,
+        "frameFirstPanelDoneBefore": bool, "frameFirstPanelDoneAfter": bool,
+        "chainOnBeforeCollection": bool, "chainWidth": int, "chainHeight": int,
+        "frameChainPanelBefore": bool, "frameChainPanelAfter": bool,
+        "panelOrdinalBefore": int, "panelOrdinalAfter": int, "localOrdinal": int,
+    }
+    collection_types = {
+        "collecting": bool, "capCountGate": int, "guardEntered": bool,
+        "guardReturned": bool, "capCountBeforeWrite": int, "capCountAfterWrite": int,
+        "ibFillBeforeWrite": int, "ibFillAfterWrite": int,
+        "capDroppedBeforeWrite": int, "capDroppedAfterWrite": int,
+    }
+    withhold_types = {
+        "subArmBeforeClear": bool, "subArmAfterClear": bool,
+        "subArmBeforeWithhold": bool, "subArmAfterWithhold": bool,
+        "chainOrdCountGate": int, "terminalChainOrdCount": int,
+        "specDoneGate": bool, "chainOnSpecGate": bool, "retiredGate": bool,
+        "frameWithheldBefore": bool, "frameWithheldAfter": bool,
+        "dimLiveBefore": bool, "dimLiveAfter": bool,
+    }
+
+    def parse_group(obj, expected, path):
+        if not isinstance(obj, dict) or set(obj) != set(expected):
+            raise TraceError(path + " has missing or unexpected fields")
+        values = {}
+        for name, value_type in expected.items():
+            item = obj.get(name)
+            item_path = path + "." + name
+            if not isinstance(item, dict) or set(item) != {"reached", "known", "value"}:
+                raise TraceError(item_path + " is malformed")
+            reached, known, value = item["reached"], item["known"], item["value"]
+            if type(reached) is not bool or type(known) is not bool:
+                raise TraceError(item_path + " availability must be boolean")
+            if known and not reached:
+                raise TraceError(item_path + " cannot be known before it is reached")
+            if not known:
+                if value is not None:
+                    raise TraceError(item_path + " unknown value must be null")
+                values[name] = (reached, False, None)
+                continue
+            if value_type is bool:
+                if type(value) is not bool:
+                    raise TraceError(item_path + " must contain a boolean")
+            elif value_type is int:
+                low, high = (-i32 - 1, i32) if name == "qsBaseVertex" else (0, u32)
+                if path.endswith("sequence") and name in ("position", "lenBefore", "lenAfter"):
+                    high = 48
+                elif path.endswith("collection"):
+                    if name in ("capCountGate", "capCountAfterWrite"):
+                        high = 24
+                    elif name == "capCountBeforeWrite":
+                        high = 23
+                elif path.endswith("withhold") and name in ("chainOrdCountGate", "terminalChainOrdCount"):
+                    high = 4
+                elif ".chainScan[" in path and name == "loopCount":
+                    high = 4
+                _integer(value, item_path + ".value", low, high)
+            values[name] = (reached, True, value)
+        return values
+
+    outer_obj = fact.get("outer")
+    helper_obj = fact.get("helper")
+    if not isinstance(outer_obj, dict) or set(outer_obj) != set(outer_types):
+        raise TraceError(label + ".outer has missing or unexpected fields")
+    if not isinstance(helper_obj, dict) or set(helper_obj) != {
+            "wants", "contextNonNull", "sequence", "panel", "collection", "withhold"}:
+        raise TraceError(label + ".helper has missing or unexpected fields")
+    outer = parse_group(outer_obj, outer_types, label + ".outer")
+    helper_wants = parse_group({"wants": helper_obj["wants"]}, {"wants": bool},
+                               label + ".helper")
+    helper_context = parse_group({"contextNonNull": helper_obj["contextNonNull"]},
+                                 {"contextNonNull": bool}, label + ".helper")
+    sequence = parse_group(helper_obj.get("sequence"), sequence_types,
+                           label + ".helper.sequence")
+    panel = parse_group(helper_obj.get("panel"), panel_types,
+                        label + ".helper.panel")
+    collection_obj = helper_obj.get("collection")
+    if not isinstance(collection_obj, dict) or set(collection_obj) != \
+            set(collection_types) | {"collectionMutationUnobserved"}:
+        raise TraceError(label + ".helper.collection has missing or unexpected fields")
+    collection = parse_group({k: collection_obj[k] for k in collection_types},
+                             collection_types, label + ".helper.collection")
+    if type(collection_obj["collectionMutationUnobserved"]) is not bool:
+        raise TraceError(label + ".helper.collection.collectionMutationUnobserved must be boolean")
+    withhold_obj = helper_obj.get("withhold")
+    withhold_expected = set(withhold_types) | {"chainScan"}
+    if not isinstance(withhold_obj, dict) or set(withhold_obj) != withhold_expected:
+        raise TraceError(label + ".helper.withhold has missing or unexpected fields")
+    withhold = parse_group({k: withhold_obj[k] for k in withhold_types},
+                           withhold_types, label + ".helper.withhold")
+    chain_scan = withhold_obj["chainScan"]
+    if not isinstance(chain_scan, list) or len(chain_scan) != 4:
+        raise TraceError(label + ".helper.withhold.chainScan must contain exactly four slots")
+    chain_reads = []
+    for index, entry in enumerate(chain_scan):
+        parsed = parse_group(entry, {"loopCount": int, "chainOrd": int},
+                             label + ".helper.withhold.chainScan[%d]" % index)
+        chain_reads.append(parsed)
+
+    def consumed(group, name, path):
+        item = group[name]
+        if not item[0]:
+            raise TraceError(path + " was not reached when consumed")
+        if not item[1]:
+            raise _LoaderPanelUnavailable()
+        return item[2]
+
+    def unread(group, names, path):
+        for name in names:
+            if group[name][0]:
+                raise TraceError(path + "." + name + " was reached after a short circuit")
+
+    def unread_nested(groups):
+        for group, names, path in groups:
+            unread(group, names, path)
+
+    outer_names = tuple(outer_types)
+    helper_root_names = ("wants", "contextNonNull")
+    sequence_names = tuple(sequence_types)
+    panel_names = tuple(panel_types)
+    collection_names = tuple(collection_types)
+    withhold_names = tuple(withhold_types)
+    helper_path = label + ".helper"
+    all_helper_unread = [(helper_wants, ("wants",), helper_path),
+                         (helper_context, ("contextNonNull",), helper_path),
+                         (sequence, sequence_names, helper_path + ".sequence"),
+                         (panel, panel_names, helper_path + ".panel"),
+                         (collection, collection_names, helper_path + ".collection"),
+                         (withhold, withhold_names, helper_path + ".withhold")]
+    # Every fixed chain read must also remain absent when the selector never enters.
+    def require_chain_unread():
+        for index, entry in enumerate(chain_reads):
+            unread(entry, ("loopCount", "chainOrd"),
+                   helper_path + ".withhold.chainScan[%d]" % index)
+
+    def require_no_collection_status():
+        if collection_obj["collectionMutationUnobserved"]:
+            raise TraceError(helper_path + ".collection reports opaque work before an admitted capture")
+
+    def decline_outer_after(fields):
+        unread(outer, fields, label + ".outer")
+        unread_nested(all_helper_unread)
+        require_chain_unread()
+        require_no_collection_status()
+        return _loader_panel_event(False), 0, False
+
+    try:
+        if not consumed(outer, "wants", label + ".outer.wants"):
+            return decline_outer_after(outer_names[1:])
+        eye_count = consumed(outer, "eyeDrawsLastFrame", label + ".outer.eyeDrawsLastFrame")
+        if eye_count >= 100:
+            return decline_outer_after(outer_names[2:])
+        # Pointer presence is provenance only. The source predicate calls
+        # bindingResolve even when the binding lookup returns null.
+        consumed(outer, "rtvPresent", label + ".outer.rtvPresent")
+        if not consumed(outer, "resolved", label + ".outer.resolved"):
+            return decline_outer_after(outer_names[4:])
+        if not consumed(outer, "isTexture2D", label + ".outer.isTexture2D"):
+            return decline_outer_after(outer_names[5:])
+        target_width = consumed(outer, "targetWidth", label + ".outer.targetWidth")
+        if target_width < 1024:
+            return decline_outer_after(outer_names[6:])
+        target_height = consumed(outer, "targetHeight", label + ".outer.targetHeight")
+        if target_height < 512:
+            return decline_outer_after(outer_names[7:])
+        start_index = consumed(outer, "qsStartIndex", label + ".outer.qsStartIndex")
+        base_vertex = consumed(outer, "qsBaseVertex", label + ".outer.qsBaseVertex")
+        textured = consumed(outer, "textured", label + ".outer.textured")
+
+        helper_wants_value = consumed(helper_wants, "wants", helper_path + ".wants")
+        if not helper_wants_value:
+            unread(helper_context, ("contextNonNull",), helper_path)
+            unread_nested([(sequence, sequence_names, helper_path + ".sequence"),
+                           (panel, panel_names, helper_path + ".panel"),
+                           (collection, collection_names, helper_path + ".collection"),
+                           (withhold, withhold_names, helper_path + ".withhold")])
+            require_chain_unread()
+            require_no_collection_status()
+            return _loader_panel_event(False), 0, False
+        context_non_null = consumed(helper_context, "contextNonNull", helper_path + ".contextNonNull")
+        if not context_non_null:
+            unread_nested([(sequence, sequence_names, helper_path + ".sequence"),
+                           (panel, panel_names, helper_path + ".panel"),
+                           (collection, collection_names, helper_path + ".collection"),
+                           (withhold, withhold_names, helper_path + ".withhold")])
+            require_chain_unread()
+            require_no_collection_status()
+            return _loader_panel_event(False), 0, False
+        if draw["kind"] != ord("X") or draw["count"] == 0:
+            unread_nested([(sequence, sequence_names, helper_path + ".sequence"),
+                           (panel, panel_names, helper_path + ".panel"),
+                           (collection, collection_names, helper_path + ".collection"),
+                           (withhold, withhold_names, helper_path + ".withhold")])
+            require_chain_unread()
+            require_no_collection_status()
+            return _loader_panel_event(False), 0, False
+
+        # Sequence composition is deterministic from the immutable draw facts and
+        # the actual target dimensions passed to the helper.
+        pos = consumed(sequence, "position", helper_path + ".sequence.position")
+        hashes = ("hashBeforeCount", "hashAfterCount", "hashBeforeWidth",
+                  "hashAfterWidth", "hashBeforeHeight", "hashAfterHeight")
+        h = {name: consumed(sequence, name, helper_path + ".sequence." + name)
+             for name in hashes}
+        expected_hash_count = ((h["hashBeforeCount"] ^ draw["count"]) * 16777619) & u32
+        expected_hash_width = ((h["hashAfterCount"] ^ target_width) * 16777619) & u32
+        expected_hash_height = ((h["hashAfterWidth"] ^ target_height) * 16777619) & u32
+        mismatches = 0
+        if (h["hashAfterCount"] != expected_hash_count or
+                h["hashBeforeWidth"] != h["hashAfterCount"] or
+                h["hashAfterWidth"] != expected_hash_width or
+                h["hashBeforeHeight"] != h["hashAfterWidth"] or
+                h["hashAfterHeight"] != expected_hash_height):
+            mismatches += 1
+        if pos < 48:
+            slot_count = consumed(sequence, "slotCount", helper_path + ".sequence.slotCount")
+            slot_width = consumed(sequence, "slotWidth", helper_path + ".sequence.slotWidth")
+            slot_height = consumed(sequence, "slotHeight", helper_path + ".sequence.slotHeight")
+            before_len = consumed(sequence, "lenBefore", helper_path + ".sequence.lenBefore")
+            after_len = consumed(sequence, "lenAfter", helper_path + ".sequence.lenAfter")
+            if before_len != pos:
+                mismatches += 1
+            if (slot_count != draw["count"] or slot_width != target_width or
+                    slot_height != target_height or after_len != before_len + 1):
+                mismatches += 1
+        else:
+            unread(sequence, ("slotCount", "slotWidth", "slotHeight", "lenBefore", "lenAfter"),
+                   helper_path + ".sequence")
+
+        first_panel = False
+        local_ordinal = u32
+        if draw["count"] == 30:
+            any_before = consumed(panel, "frameAnyBefore", helper_path + ".panel.frameAnyBefore")
+            any_after = consumed(panel, "frameAnyAfter", helper_path + ".panel.frameAnyAfter")
+            first_done_before = consumed(panel, "frameFirstPanelDoneBefore",
+                                         helper_path + ".panel.frameFirstPanelDoneBefore")
+            first_panel = not first_done_before
+            first_done_after = consumed(panel, "frameFirstPanelDoneAfter",
+                                         helper_path + ".panel.frameFirstPanelDoneAfter")
+            if not (any_after and first_done_after):
+                mismatches += 1
+            if any_before and not any_after:
+                mismatches += 1
+            if first_done_after is not True:
+                mismatches += 1
+            chain_on = consumed(panel, "chainOnBeforeCollection",
+                                helper_path + ".panel.chainOnBeforeCollection")
+            if chain_on:
+                chain_width = consumed(panel, "chainWidth", helper_path + ".panel.chainWidth")
+                if target_width == chain_width:
+                    chain_height = consumed(panel, "chainHeight", helper_path + ".panel.chainHeight")
+                else:
+                    chain_height = None
+                    unread(panel, ("chainHeight",), helper_path + ".panel")
+                if chain_height is not None and target_height == chain_height:
+                    frame_chain_before = consumed(panel, "frameChainPanelBefore",
+                                                  helper_path + ".panel.frameChainPanelBefore")
+                    frame_chain_after = consumed(panel, "frameChainPanelAfter",
+                                                 helper_path + ".panel.frameChainPanelAfter")
+                    local_ordinal = consumed(panel, "panelOrdinalBefore",
+                                             helper_path + ".panel.panelOrdinalBefore")
+                    panel_ord_after = consumed(panel, "panelOrdinalAfter",
+                                               helper_path + ".panel.panelOrdinalAfter")
+                    if panel_ord_after != ((local_ordinal + 1) & u32):
+                        mismatches += 1
+                    if not frame_chain_after:
+                        mismatches += 1
+                else:
+                    unread(panel, ("frameChainPanelBefore", "frameChainPanelAfter",
+                                   "panelOrdinalBefore", "panelOrdinalAfter"), helper_path + ".panel")
+            else:
+                unread(panel, ("chainWidth", "chainHeight", "frameChainPanelBefore",
+                               "frameChainPanelAfter", "panelOrdinalBefore", "panelOrdinalAfter"),
+                       helper_path + ".panel")
+        else:
+            unread(panel, ("frameAnyBefore", "frameAnyAfter", "frameFirstPanelDoneBefore",
+                           "frameFirstPanelDoneAfter", "chainOnBeforeCollection", "chainWidth",
+                           "chainHeight", "frameChainPanelBefore", "frameChainPanelAfter",
+                           "panelOrdinalBefore", "panelOrdinalAfter"), helper_path + ".panel")
+        observed_local = consumed(panel, "localOrdinal", helper_path + ".panel.localOrdinal")
+        if observed_local != local_ordinal:
+            mismatches += 1
+
+        collecting = consumed(collection, "collecting", helper_path + ".collection.collecting")
+        qualifies = (not textured and draw["count"] % 6 == 0)
+        drop_names = ("capDroppedBeforeWrite", "capDroppedAfterWrite")
+        write_names = ("capCountBeforeWrite", "capCountAfterWrite",
+                       "ibFillBeforeWrite", "ibFillAfterWrite")
+        if not collecting or not qualifies:
+            unread(collection, ("capCountGate", "guardEntered", "guardReturned") +
+                   write_names + drop_names, helper_path + ".collection")
+        else:
+            drop_expected = False
+            if pos < 48:
+                cap_count = consumed(collection, "capCountGate", helper_path + ".collection.capCountGate")
+                if cap_count < 24:
+                    guard_entered = consumed(collection, "guardEntered", helper_path + ".collection.guardEntered")
+                    guard_returned = consumed(collection, "guardReturned", helper_path + ".collection.guardReturned")
+                    if not guard_entered and guard_returned:
+                        mismatches += 1
+                    writes_reached = [collection[name][0] for name in write_names]
+                    if any(writes_reached) and not all(writes_reached):
+                        raise TraceError(helper_path + ".collection has a partial write checkpoint")
+                    if all(writes_reached):
+                        if not guard_entered:
+                            raise TraceError(helper_path + ".collection writes outside an entered callback")
+                        before_cap = consumed(collection, "capCountBeforeWrite", helper_path + ".collection.capCountBeforeWrite")
+                        after_cap = consumed(collection, "capCountAfterWrite", helper_path + ".collection.capCountAfterWrite")
+                        before_fill = consumed(collection, "ibFillBeforeWrite", helper_path + ".collection.ibFillBeforeWrite")
+                        after_fill = consumed(collection, "ibFillAfterWrite", helper_path + ".collection.ibFillAfterWrite")
+                        if after_cap != before_cap + 1:
+                            mismatches += 1
+                        # Both need and the persisted fill are UINT in the source.
+                        expected_fills = {((before_fill + ((draw["count"] * size) & u32)) & u32)
+                                          for size in (2, 4)}
+                        if after_fill not in expected_fills:
+                            mismatches += 1
+                        if any(collection[name][0] for name in drop_names):
+                            raise TraceError(helper_path + ".collection records a drop alongside a stored draw")
+                    else:
+                        unread(collection, write_names, helper_path + ".collection")
+                        drop_expected = True
+                else:
+                    unread(collection, ("guardEntered", "guardReturned") + write_names,
+                           helper_path + ".collection")
+                    drop_expected = True
+            else:
+                unread(collection, ("capCountGate", "guardEntered", "guardReturned") + write_names,
+                       helper_path + ".collection")
+                drop_expected = True
+            if drop_expected:
+                before_drop = consumed(collection, "capDroppedBeforeWrite", helper_path + ".collection.capDroppedBeforeWrite")
+                after_drop = consumed(collection, "capDroppedAfterWrite", helper_path + ".collection.capDroppedAfterWrite")
+                if after_drop != ((before_drop + 1) & u32):
+                    mismatches += 1
+            else:
+                unread(collection, drop_names, helper_path + ".collection")
+        collection_mutation_unobserved = collection_obj["collectionMutationUnobserved"]
+        guard_entered_read = collection["guardEntered"]
+        if guard_entered_read[0] and guard_entered_read[1] and \
+                collection_mutation_unobserved != guard_entered_read[2]:
+            raise TraceError(helper_path + ".collection mutation status disagrees with guard entry")
+        if collection_mutation_unobserved and not (guard_entered_read[0] and guard_entered_read[1] and guard_entered_read[2]):
+            raise TraceError(helper_path + ".collection marks opaque work outside an admitted capture")
+
+        # After the potentially reentrant collection callback, the helper reads
+        # the live chain and intro state again. Repeated chain bounds are retained.
+        sub_before_clear = consumed(withhold, "subArmBeforeClear", helper_path + ".withhold.subArmBeforeClear")
+        sub_after_clear = consumed(withhold, "subArmAfterClear", helper_path + ".withhold.subArmAfterClear")
+        if sub_after_clear:
+            mismatches += 1
+        scan_hit = False
+        if local_ordinal != u32:
+            first_bound = consumed(withhold, "chainOrdCountGate", helper_path + ".withhold.chainOrdCountGate")
+            if first_bound > 4:
+                raise TraceError(helper_path + " chain ordinal count exceeds fixed capacity four")
+            i = 0
+            terminal_seen = False
+            if first_bound == 0:
+                terminal_count = consumed(withhold, "terminalChainOrdCount",
+                                          helper_path + ".withhold.terminalChainOrdCount")
+                if terminal_count != first_bound:
+                    mismatches += 1
+                terminal_seen = True
+                require_chain_unread()
+            else:
+                while i < 4:
+                    slot = chain_reads[i]
+                    slot_path = helper_path + ".withhold.chainScan[%d]" % i
+                    if i == 0:
+                        bound = first_bound
+                    elif slot["loopCount"][0]:
+                        bound = consumed(slot, "loopCount", slot_path + ".loopCount")
+                    else:
+                        terminal_count = consumed(withhold, "terminalChainOrdCount",
+                                                  helper_path + ".withhold.terminalChainOrdCount")
+                        if terminal_count > 4:
+                            raise TraceError(helper_path + " terminal chain bound exceeds fixed capacity four")
+                        if terminal_count > i:
+                            raise TraceError(helper_path + " terminal bound continues beyond an unrecorded slot")
+                        for j in range(i, 4):
+                            unread(chain_reads[j], ("loopCount", "chainOrd"),
+                                   helper_path + ".withhold.chainScan[%d]" % j)
+                        terminal_seen = True
+                        break
+                    if bound > 4:
+                        raise TraceError(helper_path + " repeated chain bound exceeds fixed capacity four")
+                    if bound <= i:
+                        raise TraceError(helper_path + " recorded chain slot lies beyond its loop bound")
+                    if i == 0:
+                        recorded_bound = consumed(slot, "loopCount", slot_path + ".loopCount")
+                        if recorded_bound != bound:
+                            mismatches += 1
+                    ordinal = consumed(slot, "chainOrd", slot_path + ".chainOrd")
+                    if ordinal == local_ordinal:
+                        scan_hit = True
+                        i += 1
+                        break
+                    i += 1
+                if scan_hit:
+                    for j in range(i, 4):
+                        unread(chain_reads[j], ("loopCount", "chainOrd"),
+                               helper_path + ".withhold.chainScan[%d]" % j)
+                    unread(withhold, ("terminalChainOrdCount",), helper_path + ".withhold")
+                elif i == 4:
+                    terminal_count = consumed(withhold, "terminalChainOrdCount",
+                                              helper_path + ".withhold.terminalChainOrdCount")
+                    if terminal_count > 4:
+                        raise TraceError(helper_path + " terminal chain bound exceeds fixed capacity four")
+                    terminal_seen = True
+                elif not terminal_seen:
+                    raise TraceError(helper_path + " chain scan ended without a terminal bound")
+        else:
+            unread(withhold, ("chainOrdCountGate", "terminalChainOrdCount"), helper_path + ".withhold")
+            require_chain_unread()
+        if scan_hit:
+            sub_before_withhold = consumed(withhold, "subArmBeforeWithhold",
+                                           helper_path + ".withhold.subArmBeforeWithhold")
+            if sub_before_withhold:
+                mismatches += 1
+            unread(withhold, ("specDoneGate", "chainOnSpecGate", "retiredGate"), helper_path + ".withhold")
+            claim = True
+        else:
+            spec_done = consumed(withhold, "specDoneGate", helper_path + ".withhold.specDoneGate")
+            if spec_done:
+                unread(withhold, ("chainOnSpecGate", "retiredGate"), helper_path + ".withhold")
+                claim = False
+            else:
+                chain_on_spec = consumed(withhold, "chainOnSpecGate", helper_path + ".withhold.chainOnSpecGate")
+                if chain_on_spec:
+                    unread(withhold, ("retiredGate",), helper_path + ".withhold")
+                    claim = False
+                else:
+                    retired = consumed(withhold, "retiredGate", helper_path + ".withhold.retiredGate")
+                    claim = not retired and first_panel
+        if claim:
+            if not scan_hit:
+                sub_before_withhold = consumed(withhold, "subArmBeforeWithhold",
+                                               helper_path + ".withhold.subArmBeforeWithhold")
+                if sub_before_withhold:
+                    mismatches += 1
+            sub_after_withhold = consumed(withhold, "subArmAfterWithhold",
+                                          helper_path + ".withhold.subArmAfterWithhold")
+            if not sub_after_withhold:
+                mismatches += 1
+            frame_withheld_before = consumed(withhold, "frameWithheldBefore",
+                                             helper_path + ".withhold.frameWithheldBefore")
+            frame_withheld_after = consumed(withhold, "frameWithheldAfter",
+                                            helper_path + ".withhold.frameWithheldAfter")
+            dim_live_before = consumed(withhold, "dimLiveBefore", helper_path + ".withhold.dimLiveBefore")
+            dim_live_after = consumed(withhold, "dimLiveAfter", helper_path + ".withhold.dimLiveAfter")
+            if not frame_withheld_after or not dim_live_after:
+                mismatches += 1
+        else:
+            unread(withhold, ("subArmBeforeWithhold", "subArmAfterWithhold",
+                              "frameWithheldBefore", "frameWithheldAfter",
+                              "dimLiveBefore", "dimLiveAfter"), helper_path + ".withhold")
+        return _loader_panel_event(claim), mismatches, collection_mutation_unobserved
+    except _LoaderPanelUnavailable:
+        return None, 0, collection_obj["collectionMutationUnobserved"]
+
+
+def _loader_panel_event(claimed):
+    return ({"id": 25, "kind": 2, "outcome": 3, "flow": 1,
+             "subsite": 0, "verdict": 16} if claimed else
+            {"id": 25, "kind": 2, "outcome": 2, "flow": 0,
+             "subsite": 0, "verdict": -1})
+
+
 def _replay_resolve_bind_fact(fact, label):
     """Replay site60 from independent outer, shadow, callback, and repair reads."""
     required = {"siteId", "kind", "known", "outer", "helper"}
@@ -2271,11 +2765,12 @@ def _replay_scrim_fact(fact, draw, label):
 
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 17 if predicate_fact_version >= 12 else 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 11 else
+    supported_ids = ((2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 12 else
+                     (2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 11 else
                      (2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 10 else
                      (2, 3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 9 else
                      (3, 6, 24, 26, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 8 else
@@ -2296,6 +2791,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        19 if predicate_fact_version >= 12 else
                         18 if predicate_fact_version >= 11 else
                         17 if predicate_fact_version >= 10 else
                         16 if predicate_fact_version >= 9 else
@@ -2308,7 +2804,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                         3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+                           (57, 12), (58, 13), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 12 else (
+            (2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 11 else (
             (2, 15), (3, 1), (6, 4), (24, 5), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 10 else (
@@ -2411,6 +2909,16 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 event, fact_mismatches, fact_mutation_unobserved = \
                     _replay_resolve_bind_fact(fact, fact_label)
             except _ResolveBindUnavailable:
+                event, fact_mismatches, fact_mutation_unobserved = None, 0, False
+            by_site[site_id] = (event, None, True, 0, fact_mismatches,
+                                fact_mutation_unobserved)
+        elif kind == 19:
+            if site_id != 25 or predicate_fact_version < 12:
+                raise TraceError(fact_label + " has unsupported LoaderPanel fact")
+            try:
+                event, fact_mismatches, fact_mutation_unobserved = \
+                    _replay_loader_panel_fact(fact, draw, fact_label)
+            except _LoaderPanelUnavailable:
                 event, fact_mismatches, fact_mutation_unobserved = None, 0, False
             by_site[site_id] = (event, None, True, 0, fact_mismatches,
                                 fact_mutation_unobserved)
@@ -2644,7 +3152,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -2690,6 +3198,10 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     resolve_bind_replayed = 0
     resolve_bind_unreplayable = 0
     resolve_bind_mismatches = 0
+    loader_panel_replayed = 0
+    loader_panel_unreplayable = 0
+    loader_panel_mismatches = 0
+    loader_panel_mutation_unobserved = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -2743,6 +3255,20 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 resolve_bind_mismatches += cache_mismatches
             if legacy_claim:
                 mutation_unobserved += 1
+        if site_id == 25:
+            if site_unreplayable:
+                loader_panel_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                loader_panel_replayed += 1
+            else:
+                loader_panel_mismatches += 1
+            if cache_mismatches:
+                loader_panel_mismatches += cache_mismatches
+            if legacy_claim:
+                mutation_unobserved += 1
+                loader_panel_mutation_unobserved += 1
         if site_id in (61, 62, 63):
             if site_unreplayable:
                 sunglare_unreplayable += 1
@@ -2918,7 +3444,12 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "resolveBindFacts": sum(1 for site_id in by_site if site_id == 60),
             "resolveBindReplayed": resolve_bind_replayed,
             "resolveBindUnreplayable": resolve_bind_unreplayable,
-            "resolveBindMismatches": resolve_bind_mismatches}
+            "resolveBindMismatches": resolve_bind_mismatches,
+            "loaderPanelFacts": sum(1 for site_id in by_site if site_id == 25),
+            "loaderPanelReplayed": loader_panel_replayed,
+            "loaderPanelUnreplayable": loader_panel_unreplayable,
+            "loaderPanelMismatches": loader_panel_mismatches,
+            "loaderPanelMutationUnobserved": loader_panel_mutation_unobserved}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -2936,7 +3467,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -3030,7 +3561,10 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "eyeCensusFacts": 0, "eyeCensusReplayed": 0,
                         "eyeCensusUnreplayable": 0, "eyeCensusMismatches": 0,
                         "resolveBindFacts": 0, "resolveBindReplayed": 0,
-                        "resolveBindUnreplayable": 0, "resolveBindMismatches": 0}
+                        "resolveBindUnreplayable": 0, "resolveBindMismatches": 0,
+                        "loaderPanelFacts": 0, "loaderPanelReplayed": 0,
+                        "loaderPanelUnreplayable": 0, "loaderPanelMismatches": 0,
+                        "loaderPanelMutationUnobserved": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -3384,6 +3918,12 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                                 "mismatch" if predicate_replay["resolveBindMismatches"] else
                                 "unreplayable" if predicate_replay["resolveBindUnreplayable"] else
                                 "replayed"),
+             loaderPanelStatus=("unavailable-before-v12" if predicate_fact_version < 12 else
+                                "not-visited" if not predicate_replay["loaderPanelFacts"] else
+                                "mismatch" if predicate_replay["loaderPanelMismatches"] else
+                                "unreplayable" if predicate_replay["loaderPanelUnreplayable"] else
+                                "mutation-unobserved" if predicate_replay["loaderPanelMutationUnobserved"] else
+                                "replayed"),
              **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -3421,7 +3961,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
               "eyeCensusUnreplayable": 0, "eyeCensusMismatches": 0,
               "resolveBindStatus": "unavailable-before-v11",
               "resolveBindFacts": 0, "resolveBindReplayed": 0,
-              "resolveBindUnreplayable": 0, "resolveBindMismatches": 0}),
+              "resolveBindUnreplayable": 0, "resolveBindMismatches": 0,
+              "loaderPanelStatus": "unavailable-before-v12",
+              "loaderPanelFacts": 0, "loaderPanelReplayed": 0,
+              "loaderPanelUnreplayable": 0, "loaderPanelMismatches": 0,
+              "loaderPanelMutationUnobserved": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -3554,6 +4098,14 @@ def format_summary(summary, sidecar_path=None):
                      (replay.get("resolveBindStatus", "not-visited"),
                       replay.get("resolveBindFacts", 0), replay.get("resolveBindReplayed", 0),
                       replay.get("resolveBindUnreplayable", 0), replay.get("resolveBindMismatches", 0)))
+    if replay.get("predicateFactVersion", 0) < 12:
+        lines.append("  OffscreenLoaderPanel site 25: unavailable before predicate fact version 12")
+    else:
+        lines.append("  OffscreenLoaderPanel site 25: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch, %d mutation-unobserved)" %
+                     (replay.get("loaderPanelStatus", "not-visited"),
+                      replay.get("loaderPanelFacts", 0), replay.get("loaderPanelReplayed", 0),
+                      replay.get("loaderPanelUnreplayable", 0), replay.get("loaderPanelMismatches", 0),
+                      replay.get("loaderPanelMutationUnobserved", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -3637,6 +4189,28 @@ def self_test():
         return 1
 
     legacy_v1 = json.loads(json.dumps(base))
+    # Native schema12 captures may have no LoaderPanel visit at all, including
+    # an initial empty frame or a bypass-only frame. All aggregate keys still
+    # exist before any per-draw accumulation or version-specific status read.
+    loader_metric_names = ("loaderPanelFacts", "loaderPanelReplayed",
+                          "loaderPanelUnreplayable", "loaderPanelMismatches",
+                          "loaderPanelMutationUnobserved")
+    for version in (1, 11, 12):
+        no_loader = json.loads(json.dumps(base))
+        no_loader["predicateFactVersion"] = version
+        for empty in (False, True):
+            candidate = json.loads(json.dumps(no_loader))
+            if empty:
+                candidate["draws"] = []
+                candidate["footer"]["drawCount"] = 0
+            no_loader_replay = validate_trace(candidate)["predicateReplay"]
+            if any(no_loader_replay[name] != 0 for name in loader_metric_names):
+                print("no-loader capture lacks zeroed LoaderPanel aggregate metrics")
+                return 1
+            expected_status = "unavailable-before-v12" if version < 12 else "not-visited"
+            if no_loader_replay["loaderPanelStatus"] != expected_status:
+                print("no-loader capture has an incorrect version-specific LoaderPanel status")
+                return 1
     v7_bypass = json.loads(json.dumps(base))
     v7_bypass["predicateFactVersion"] = 7
     v7_replay = validate_trace(v7_bypass)["predicateReplay"]
@@ -4934,9 +5508,58 @@ def self_test():
                     continue
             print("expected unavailable-fact CLI accepted invalid arguments")
             return 1
+        mutation_args = ["--file", cli_file, "--dry-run",
+                         "--expect-mutation-unobserved", "1"]
+        read_trace = reject_trace
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(mutation_args)
+        if code != 1:
+            print("mutation-unobserved expectation accepted a structurally rejected trace")
+            return 1
+        mutation_clean = json.loads(json.dumps(historical))
+        mutation_clean["predicateReplay"].update(
+            status="mutation-unobserved", unreplayable=0, mismatches=0,
+            mutationUnobserved=1, loaderPanelFacts=1, loaderPanelReplayed=1,
+            loaderPanelUnreplayable=0, loaderPanelMismatches=0,
+            loaderPanelMutationUnobserved=1)
+        read_trace = lambda *args, **kwargs: ({}, mutation_clean)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main(mutation_args)
+        if (code != 0 or "exactly 1 mutation-unobserved" not in output.getvalue() or
+                "predicate equivalence remains false" not in output.getvalue()):
+            print("mutation-unobserved expectation rejected a known selector or claimed equivalence")
+            return 1
+        for field, value in (("mutationUnobserved", 2),
+                             ("loaderPanelMutationUnobserved", 2),
+                             ("unreplayable", 1), ("loaderPanelUnreplayable", 1),
+                             ("mismatches", 1), ("loaderPanelMismatches", 1)):
+            bad_mutation = json.loads(json.dumps(mutation_clean))
+            bad_mutation["predicateReplay"][field] = value
+            read_trace = lambda *args, _summary=bad_mutation, **kwargs: ({}, _summary)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(mutation_args)
+            if code != 1:
+                print("mutation-unobserved expectation accepted an incorrect count or unavailable/mismatched selector")
+                return 1
+        for invalid_args in (
+                ["--expect-mutation-unobserved", "0", "--dry-run"],
+                ["--expect-mutation-unobserved", "-1", "--dry-run"],
+                ["--expect-mutation-unobserved", "x", "--dry-run"],
+                ["--expect-mutation-unobserved", "1"],
+                ["--expect-mutation-unobserved", "1", "--dry-run", "--expect-invalid"],
+                ["--expect-mutation-unobserved", "1", "--dry-run", "--expect-unreplayable", "1"]):
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    main(["--file", cli_file] + invalid_args)
+            except SystemExit as exc:
+                if exc.code == 2:
+                    continue
+            print("mutation-unobserved CLI accepted invalid arguments")
+            return 1
         with open(cli_file, "r", encoding="utf-8") as stream:
             if stream.read() != "{}":
-                print("fixture assertion rewrote its input")
+                print("fixture expectation rewrote its input")
                 return 1
     finally:
         read_trace = original_read_trace
@@ -6627,6 +7250,296 @@ def self_test():
                 replay["mismatches"] != 0 or replay["mutationUnobserved"] != 0):
             print("schema10 confused a known legacy claim with an unobserved mutation", site_id)
             return 1
+
+    def lp_read(value=None, reached=False, known=False):
+        return {"reached": reached, "known": known, "value": value}
+
+    def lp_set(group, name, value):
+        group[name] = lp_read(value, True, True)
+
+    def lp_unread(group, names):
+        for name in names:
+            group[name] = lp_read()
+
+    lp_outer_names = ("wants", "eyeDrawsLastFrame", "rtvPresent", "resolved",
+                      "isTexture2D", "targetWidth", "targetHeight", "qsStartIndex",
+                      "qsBaseVertex", "textured")
+    lp_sequence_names = ("position", "hashBeforeCount", "hashAfterCount",
+                         "hashBeforeWidth", "hashAfterWidth", "hashBeforeHeight",
+                         "hashAfterHeight", "slotCount", "slotWidth", "slotHeight",
+                         "lenBefore", "lenAfter")
+    lp_panel_names = ("frameAnyBefore", "frameAnyAfter", "frameFirstPanelDoneBefore",
+                      "frameFirstPanelDoneAfter", "chainOnBeforeCollection", "chainWidth",
+                      "chainHeight", "frameChainPanelBefore", "frameChainPanelAfter",
+                      "panelOrdinalBefore", "panelOrdinalAfter", "localOrdinal")
+    lp_collection_names = ("collecting", "capCountGate", "guardEntered", "guardReturned",
+                           "capCountBeforeWrite", "capCountAfterWrite", "ibFillBeforeWrite",
+                           "ibFillAfterWrite", "capDroppedBeforeWrite", "capDroppedAfterWrite")
+    lp_withhold_names = ("subArmBeforeClear", "subArmAfterClear", "subArmBeforeWithhold",
+                         "subArmAfterWithhold", "chainOrdCountGate", "terminalChainOrdCount",
+                         "specDoneGate", "chainOnSpecGate", "retiredGate", "frameWithheldBefore",
+                         "frameWithheldAfter", "dimLiveBefore", "dimLiveAfter")
+
+    def loader_panel_fact(claim=True, collection_warning=True, first_panel=False):
+        outer = {name: lp_read() for name in lp_outer_names}
+        for name, value in (("wants", True), ("eyeDrawsLastFrame", 0), ("rtvPresent", True),
+                            ("resolved", True), ("isTexture2D", True), ("targetWidth", 1024),
+                            ("targetHeight", 512), ("qsStartIndex", 13), ("qsBaseVertex", -7),
+                            ("textured", False)):
+            lp_set(outer, name, value)
+        seq = {name: lp_read() for name in lp_sequence_names}
+        h0 = 0xfffffff0
+        h1 = ((h0 ^ 30) * 16777619) & 0xffffffff
+        h2 = ((h1 ^ 1024) * 16777619) & 0xffffffff
+        h3 = ((h2 ^ 512) * 16777619) & 0xffffffff
+        for name, value in (("position", 0), ("hashBeforeCount", h0), ("hashAfterCount", h1),
+                            ("hashBeforeWidth", h1), ("hashAfterWidth", h2),
+                            ("hashBeforeHeight", h2), ("hashAfterHeight", h3),
+                            ("slotCount", 30), ("slotWidth", 1024), ("slotHeight", 512),
+                            ("lenBefore", 0), ("lenAfter", 1)):
+            lp_set(seq, name, value)
+        panel = {name: lp_read() for name in lp_panel_names}
+        for name, value in (("frameAnyBefore", first_panel), ("frameAnyAfter", True),
+                            ("frameFirstPanelDoneBefore", not first_panel),
+                            ("frameFirstPanelDoneAfter", True), ("chainOnBeforeCollection", claim),
+                            ("localOrdinal", 2 if claim else 0xffffffff)):
+            lp_set(panel, name, value)
+        if claim:
+            for name, value in (("chainWidth", 1024), ("chainHeight", 512),
+                                ("frameChainPanelBefore", False), ("frameChainPanelAfter", True),
+                                ("panelOrdinalBefore", 2), ("panelOrdinalAfter", 3)):
+                lp_set(panel, name, value)
+        collection = {name: lp_read() for name in lp_collection_names}
+        lp_set(collection, "collecting", collection_warning)
+        if collection_warning:
+            for name, value in (("capCountGate", 0), ("guardEntered", True),
+                                ("guardReturned", True), ("capDroppedBeforeWrite", 8),
+                                ("capDroppedAfterWrite", 9)):
+                lp_set(collection, name, value)
+        withhold = {name: lp_read() for name in lp_withhold_names}
+        lp_set(withhold, "subArmBeforeClear", True)
+        lp_set(withhold, "subArmAfterClear", False)
+        chain_scan = [{"loopCount": lp_read(), "chainOrd": lp_read()} for _ in range(4)]
+        if claim:
+            lp_set(withhold, "chainOrdCountGate", 1)
+            lp_set(chain_scan[0], "loopCount", 1)
+            lp_set(chain_scan[0], "chainOrd", 2)
+            lp_set(withhold, "subArmBeforeWithhold", False)
+            lp_set(withhold, "subArmAfterWithhold", True)
+            lp_set(withhold, "frameWithheldBefore", False)
+            lp_set(withhold, "frameWithheldAfter", True)
+            lp_set(withhold, "dimLiveBefore", False)
+            lp_set(withhold, "dimLiveAfter", True)
+        else:
+            lp_set(withhold, "specDoneGate", True)
+        return {"siteId": 25, "kind": 19, "known": "yes", "outer": outer,
+                "helper": {"wants": lp_read(True, True, True),
+                           "contextNonNull": lp_read(True, True, True),
+                           "sequence": seq, "panel": panel,
+                           "collection": dict(collection,
+                               collectionMutationUnobserved=collection_warning),
+                           "withhold": dict(withhold, chainScan=chain_scan)}}
+
+    lp_draw = {"kind": ord("X"), "count": 30, "instances": 1}
+    lp_positive = loader_panel_fact()
+    if _replay_loader_panel_fact(lp_positive, lp_draw, "loader-positive") != \
+            (_loader_panel_event(True), 0, True):
+        print("LoaderPanel raw chain ordinal did not replay independently with an opaque collection warning")
+        return 1
+    lp_dispatch = {"kind": ord("X"), "count": 30, "instances": 1,
+                   "sites": [_loader_panel_event(True)], "predicateFacts": [lp_positive]}
+    lp_replay = _replay_predicate_facts(lp_dispatch, "loader-dispatch", 12)
+    if (lp_replay["loaderPanelReplayed"] != 1 or lp_replay["loaderPanelUnreplayable"] != 0 or
+            lp_replay["loaderPanelMismatches"] != 0 or
+            lp_replay["loaderPanelMutationUnobserved"] != 1 or
+            lp_replay["mutationUnobserved"] != 1):
+        print("LoaderPanel selector replay did not separate the collection-mutation warning")
+        return 1
+    lp_false = loader_panel_fact(claim=False, collection_warning=False)
+    if _replay_loader_panel_fact(lp_false, lp_draw, "loader-known-miss") != \
+            (_loader_panel_event(False), 0, False):
+        print("LoaderPanel known first-verdict miss did not replay as a decline")
+        return 1
+    # SiteEvents are outputs only: changing one cannot change the raw selector result.
+    lp_wrong_output = json.loads(json.dumps(lp_dispatch))
+    lp_wrong_output["sites"] = [_loader_panel_event(False)]
+    lp_mismatch = _replay_predicate_facts(lp_wrong_output, "loader-output-check", 12)
+    if lp_mismatch["loaderPanelReplayed"] != 0 or lp_mismatch["loaderPanelMismatches"] != 1:
+        print("LoaderPanel used its observed SiteEvent as a selector input")
+        return 1
+    # A cap-full collection drops the qualifying draw but cannot alter the withhold decision.
+    lp_cap = loader_panel_fact(collection_warning=False)
+    lp_col = lp_cap["helper"]["collection"]
+    lp_set(lp_col, "collecting", True)
+    lp_set(lp_col, "capCountGate", 24)
+    lp_set(lp_col, "capDroppedBeforeWrite", 2)
+    lp_set(lp_col, "capDroppedAfterWrite", 3)
+    if _replay_loader_panel_fact(lp_cap, lp_draw, "loader-cap-full") != \
+            (_loader_panel_event(True), 0, False):
+        print("LoaderPanel cap-full collection changed the independent selector")
+        return 1
+    # Outer range gates short-circuit lazily; 1023 does not consume target height or helper reads.
+    lp_range = loader_panel_fact()
+    for name in lp_outer_names[6:]:
+        lp_range["outer"][name] = lp_read()
+    lp_set(lp_range["outer"], "targetWidth", 1023)
+    lp_range["helper"]["wants"] = lp_read()
+    lp_range["helper"]["contextNonNull"] = lp_read()
+    lp_unread(lp_range["helper"]["sequence"], lp_sequence_names)
+    lp_unread(lp_range["helper"]["panel"], lp_panel_names)
+    lp_unread(lp_range["helper"]["collection"], lp_collection_names)
+    lp_range["helper"]["collection"]["collectionMutationUnobserved"] = False
+    lp_unread(lp_range["helper"]["withhold"], lp_withhold_names)
+    lp_range["helper"]["withhold"]["chainScan"] = [
+        {"loopCount": lp_read(), "chainOrd": lp_read()} for _ in range(4)]
+    if _replay_loader_panel_fact(lp_range, lp_draw, "loader-width-range")[0] != _loader_panel_event(False):
+        print("LoaderPanel accepted a target below the 1024-pixel gate")
+        return 1
+    lp_outer_off = json.loads(json.dumps(lp_positive))
+    lp_set(lp_outer_off["outer"], "wants", False)
+    lp_unread(lp_outer_off["outer"], lp_outer_names[1:])
+    lp_outer_off["helper"]["wants"] = lp_read()
+    lp_outer_off["helper"]["contextNonNull"] = lp_read()
+    lp_unread(lp_outer_off["helper"]["sequence"], lp_sequence_names)
+    lp_unread(lp_outer_off["helper"]["panel"], lp_panel_names)
+    lp_unread(lp_outer_off["helper"]["collection"], lp_collection_names)
+    lp_outer_off["helper"]["collection"]["collectionMutationUnobserved"] = False
+    lp_unread(lp_outer_off["helper"]["withhold"], lp_withhold_names)
+    lp_outer_off["helper"]["withhold"]["chainScan"] = [
+        {"loopCount": lp_read(), "chainOrd": lp_read()} for _ in range(4)]
+    if _replay_loader_panel_fact(lp_outer_off, lp_draw, "loader-outer-off")[0] != _loader_panel_event(False):
+        print("LoaderPanel outer-off short circuit did not decline")
+        return 1
+    # COM reentry may change the post-collection chain between repeated bound reads.
+    lp_reentry = json.loads(json.dumps(lp_positive))
+    lp_set(lp_reentry["helper"]["withhold"]["chainScan"][0], "chainOrd", 99)
+    lp_set(lp_reentry["helper"]["withhold"], "terminalChainOrdCount", 0)
+    lp_set(lp_reentry["helper"]["withhold"], "specDoneGate", False)
+    lp_set(lp_reentry["helper"]["withhold"], "chainOnSpecGate", False)
+    lp_set(lp_reentry["helper"]["withhold"], "retiredGate", False)
+    lp_set(lp_reentry["helper"]["withhold"], "subArmBeforeWithhold", False)
+    lp_set(lp_reentry["helper"]["withhold"], "subArmAfterWithhold", True)
+    lp_set(lp_reentry["helper"]["panel"], "frameFirstPanelDoneBefore", False)
+    lp_set(lp_reentry["helper"]["withhold"], "frameWithheldBefore", False)
+    lp_set(lp_reentry["helper"]["withhold"], "frameWithheldAfter", True)
+    lp_set(lp_reentry["helper"]["withhold"], "dimLiveBefore", False)
+    lp_set(lp_reentry["helper"]["withhold"], "dimLiveAfter", True)
+    if _replay_loader_panel_fact(lp_reentry, lp_draw, "loader-reentry") != \
+            (_loader_panel_event(True), 0, True):
+        print("LoaderPanel did not replay from post-collection reentry reads")
+        return 1
+    lp_bad = json.loads(json.dumps(lp_positive))
+    lp_bad["helper"]["withhold"]["chainScan"] = lp_bad["helper"]["withhold"]["chainScan"][:3]
+    try:
+        _replay_loader_panel_fact(lp_bad, lp_draw, "loader-short-chain-array")
+    except TraceError:
+        pass
+    else:
+        print("LoaderPanel accepted a truncated fixed chain array")
+        return 1
+    lp_bad = json.loads(json.dumps(lp_positive))
+    lp_bad["helper"]["withhold"]["chainOrdCountGate"] = lp_read(5, True, True)
+    try:
+        _replay_loader_panel_fact(lp_bad, lp_draw, "loader-chain-bound")
+    except TraceError:
+        pass
+    else:
+        print("LoaderPanel accepted a chain count outside its fixed capacity")
+        return 1
+    lp_unknown = json.loads(json.dumps(lp_positive))
+    lp_unknown["outer"]["wants"] = lp_read(None, True, False)
+    lp_unknown["helper"]["sequence"]["extra"] = lp_read(1, True, True)
+    try:
+        _replay_loader_panel_fact(lp_unknown, lp_draw, "loader-unknown-gate-shape")
+    except TraceError:
+        pass
+    else:
+        print("LoaderPanel unknown outer gate hid an invalid nested read envelope")
+        return 1
+    lp_bad_height = loader_panel_fact(claim=False, collection_warning=False)
+    lp_set(lp_bad_height["helper"]["panel"], "chainOnBeforeCollection", True)
+    lp_set(lp_bad_height["helper"]["panel"], "chainWidth", 2048)
+    lp_set(lp_bad_height["helper"]["panel"], "chainHeight", 512)
+    try:
+        _replay_loader_panel_fact(lp_bad_height, lp_draw, "loader-unconsumed-height")
+    except TraceError:
+        pass
+    else:
+        print("LoaderPanel accepted height after a failed width gate")
+        return 1
+
+    # Writes can finish before a later Release fault; callback admission is
+    # required, successful guard completion is not a stored-draw oracle.
+    lp_stored = loader_panel_fact()
+    stored_collection = lp_stored["helper"]["collection"]
+    for name in ("capDroppedBeforeWrite", "capDroppedAfterWrite"):
+        stored_collection[name] = lp_read()
+    for name, value in (("capCountBeforeWrite", 23), ("capCountAfterWrite", 24),
+                        ("ibFillBeforeWrite", 0), ("ibFillAfterWrite", 60),
+                        ("guardReturned", False)):
+        lp_set(stored_collection, name, value)
+    if _replay_loader_panel_fact(lp_stored, lp_draw, "loader-late-release-fault") != \
+            (_loader_panel_event(True), 0, True):
+        print("LoaderPanel rejected completed writes before a later guard fault")
+        return 1
+    lp_no_entry = json.loads(json.dumps(lp_stored))
+    lp_set(lp_no_entry["helper"]["collection"], "guardEntered", False)
+    lp_no_entry["helper"]["collection"]["collectionMutationUnobserved"] = False
+    try:
+        _replay_loader_panel_fact(lp_no_entry, lp_draw, "loader-writes-without-entry")
+    except TraceError:
+        pass
+    else:
+        print("LoaderPanel accepted capture writes without callback entry")
+        return 1
+    lp_budget_skip = loader_panel_fact()
+    skipped_collection = lp_budget_skip["helper"]["collection"]
+    lp_set(skipped_collection, "guardEntered", False)
+    lp_set(skipped_collection, "guardReturned", False)
+    skipped_collection["collectionMutationUnobserved"] = False
+    lp_set(skipped_collection, "capDroppedBeforeWrite", 0)
+    lp_set(skipped_collection, "capDroppedAfterWrite", 1)
+    if _replay_loader_panel_fact(lp_budget_skip, lp_draw, "loader-budget-skip-drop") != \
+            (_loader_panel_event(True), 0, False):
+        print("LoaderPanel lost legal outer drop mutation after a skipped callback")
+        return 1
+
+    # A large nonpanel count divisible by six has a genuinely small wrapped
+    # 32-bit-index byte requirement; derive it from raw count, not output.
+    lp_large_draw = dict(lp_draw, count=1073741826)
+    lp_large = loader_panel_fact(claim=False)
+    large_seq = lp_large["helper"]["sequence"]
+    h0 = large_seq["hashBeforeCount"]["value"]
+    h1 = ((h0 ^ lp_large_draw["count"]) * 16777619) & 0xffffffff
+    h2 = ((h1 ^ 1024) * 16777619) & 0xffffffff
+    h3 = ((h2 ^ 512) * 16777619) & 0xffffffff
+    for name, value in (("hashAfterCount", h1), ("hashBeforeWidth", h1),
+                        ("hashAfterWidth", h2), ("hashBeforeHeight", h2),
+                        ("hashAfterHeight", h3), ("slotCount", lp_large_draw["count"])):
+        lp_set(large_seq, name, value)
+    for name in lp_panel_names:
+        lp_large["helper"]["panel"][name] = lp_read()
+    lp_set(lp_large["helper"]["panel"], "localOrdinal", 0xffffffff)
+    large_collection = lp_large["helper"]["collection"]
+    for name in ("capDroppedBeforeWrite", "capDroppedAfterWrite"):
+        large_collection[name] = lp_read()
+    for name, value in (("capCountBeforeWrite", 0), ("capCountAfterWrite", 1),
+                        ("ibFillBeforeWrite", 0), ("ibFillAfterWrite", 8)):
+        lp_set(large_collection, name, value)
+    if _replay_loader_panel_fact(lp_large, lp_large_draw, "loader-wrapped-byte-count") != \
+            (_loader_panel_event(False), 0, True):
+        print("LoaderPanel did not preserve UINT byte-count arithmetic")
+        return 1
+    lp_set(large_collection, "ibFillAfterWrite", 9)
+    if _replay_loader_panel_fact(lp_large, lp_large_draw, "loader-invalid-byte-count")[1] != 1:
+        print("LoaderPanel accepted a byte-count delta unsupported by either index width")
+        return 1
+    # Version 11 remains readable and cannot claim the new site is supported.
+    lp_v11 = {"kind": ord("X"), "count": 30, "instances": 1,
+              "sites": [_loader_panel_event(True)], "predicateFacts": []}
+    if _replay_predicate_facts(lp_v11, "loader-v11-compat", 11)["loaderPanelFacts"]:
+        print("predicate fact version 11 treated site25 as supported")
+        return 1
     print("draw-ladder-replay self-test: ok")
     return 0
 
@@ -6642,6 +7555,8 @@ def main(argv=None):
                         help="succeed only if this sidecar is rejected (requires --dry-run)")
     parser.add_argument("--expect-unreplayable", type=int, metavar="COUNT",
                         help="assert exactly COUNT unavailable fixture facts with no mismatches or unobserved mutations (requires --dry-run)")
+    parser.add_argument("--expect-mutation-unobserved", type=int, metavar="COUNT",
+                        help="assert exactly COUNT known LoaderPanel selector mutation warnings with no unavailable predicates or selector mismatches (requires --dry-run)")
     parser.add_argument("--self-test", action="store_true", help="run fixture checks and exit")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -6657,6 +7572,13 @@ def main(argv=None):
             parser.error("--expect-unreplayable requires --dry-run")
         if args.expect_invalid:
             parser.error("--expect-unreplayable cannot be combined with --expect-invalid")
+    if args.expect_mutation_unobserved is not None:
+        if args.expect_mutation_unobserved <= 0:
+            parser.error("--expect-mutation-unobserved requires a positive count")
+        if not args.dry_run:
+            parser.error("--expect-mutation-unobserved requires --dry-run")
+        if args.expect_invalid or args.expect_unreplayable is not None:
+            parser.error("--expect-mutation-unobserved cannot be combined with --expect-invalid or --expect-unreplayable")
     try:
         _, summary = read_trace(args.file, args.expected_log, args.expected_build_stamp)
     except OSError as exc:
@@ -6679,6 +7601,20 @@ def main(argv=None):
             print("[edvr] expected unavailable-fact count or clean consistency checks failed")
             return 1
         print("[edvr] fixture expectation confirmed: exactly %d unreplayable facts; predicate equivalence remains unestablished" % args.expect_unreplayable)
+        print("  dry-run: no files or directories were written")
+        return 0
+    if args.expect_mutation_unobserved is not None:
+        replay = summary["predicateReplay"]
+        expected_count = args.expect_mutation_unobserved
+        if (replay.get("mutationUnobserved") != expected_count or
+                replay.get("loaderPanelMutationUnobserved") != expected_count or
+                replay.get("unreplayable") != 0 or replay.get("mismatches") != 0 or
+                replay.get("loaderPanelUnreplayable") != 0 or
+                replay.get("loaderPanelMismatches") != 0 or
+                replay.get("loaderPanelReplayed", 0) < expected_count):
+            print("[edvr] expected mutation-warning count or known-selector replay checks failed")
+            return 1
+        print("[edvr] fixture expectation confirmed: exactly %d mutation-unobserved warning(s) on known LoaderPanel selectors; predicate equivalence remains false" % expected_count)
         print("  dry-run: no files or directories were written")
         return 0
     gate_failure = predicate_replay_gate_failure(summary)

@@ -5,6 +5,7 @@
 #include "basic_draw_observation.h"
 #include "eye_census_observation.h"
 #include "resolve_bind_observation.h"
+#include "loader_panel_observation.h"
 #include "holo_scrim_observation.h"
 #include "fss_observation.h"
 #include "remlok_observation.h"
@@ -37,10 +38,12 @@ constexpr std::uint8_t kMaxEyeCensusFactsPerDraw = 1;
 constexpr std::uint32_t kMaxEyeCensusFacts = 32768;
 constexpr std::uint8_t kMaxResolveBindFactsPerDraw = 1;
 constexpr std::uint32_t kMaxResolveBindFacts = 32768;
+constexpr std::uint8_t kMaxLoaderPanelFactsPerDraw = 1;
+constexpr std::uint32_t kMaxLoaderPanelFacts = 32768;
 constexpr std::uint8_t kMaxTotalPredicateFactsPerDraw =
     kMaxPredicateFactsPerDraw + kMaxSunglareFactsPerDraw +
     kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw + kMaxBasicFactsPerDraw +
-    kMaxEyeCensusFactsPerDraw + kMaxResolveBindFactsPerDraw;
+    kMaxEyeCensusFactsPerDraw + kMaxResolveBindFactsPerDraw + kMaxLoaderPanelFactsPerDraw;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -70,6 +73,8 @@ enum class CaptureInvalidation : std::uint8_t {
     EyeCensusPoolMissing = 11,
     ResolveBindIndexOverflow = 12,
     ResolveBindPoolMissing = 13,
+    LoaderPanelIndexOverflow = 14,
+    LoaderPanelPoolMissing = 15,
 };
 
 // Returned by shutdown() so production can report whether an armed or partial
@@ -297,11 +302,14 @@ void appendRemlokFact(Token token, const remlok_observation::Observation& fact) 
 void appendBasicFact(Token token, const BasicDrawObservation& fact) noexcept;
 void appendEyeCensusFact(Token token, const EyeCensusObservation& fact) noexcept;
 void appendResolveBindFact(Token token, const ResolveBindObservation& fact) noexcept;
+void appendLoaderPanelFact(Token token, const LoaderPanelObservation& fact) noexcept;
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
 bool readEyeCensusFactForTest(Token token, std::uint8_t ordinal, EyeCensusObservation* out) noexcept;
 std::uint8_t eyeCensusFactCountForTest(Token token) noexcept;
 bool readResolveBindFactForTest(Token token, std::uint8_t ordinal, ResolveBindObservation* out) noexcept;
 std::uint8_t resolveBindFactCountForTest(Token token) noexcept;
+bool readLoaderPanelFactForTest(Token token, std::uint8_t ordinal, LoaderPanelObservation* out) noexcept;
+std::uint8_t loaderPanelFactCountForTest(Token token) noexcept;
 bool readBasicFactForTest(Token token, std::uint8_t ordinal, BasicDrawObservation* out) noexcept;
 std::uint8_t basicFactCountForTest(Token token) noexcept;
 #endif
@@ -397,6 +405,9 @@ struct TracePolicy final {
     }
     inline void resolveBindFact(const ResolveBindObservation& fact) noexcept {
         appendResolveBindFact(token, fact);
+    }
+    inline void loaderPanelFact(const LoaderPanelObservation& fact) noexcept {
+        appendLoaderPanelFact(token, fact);
     }
 };
 

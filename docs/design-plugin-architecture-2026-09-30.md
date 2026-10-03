@@ -42,8 +42,8 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  bounded API owner costs are instrumented; nineteen selectors pass
-  all 139 validation jobs. Enabled replay storage is measured at 448.0 MiB;
+  bounded API owner costs are instrumented; twenty selectors pass
+  all 139 validation jobs. Enabled replay storage is measured at 461.1 MiB;
   the default disabled path allocates none.
   Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
   The timed-draw denominator works; all-module cost coverage and repeatable
@@ -1844,3 +1844,66 @@ passed. Receipt input SHA-256 is
 build/plugin-predicate-v11-full-build.log. This remains Phase 1; independent
 forwarding, remaining predicate and owner cost coverage, matched CPU
 improvement and direct GPU non-regression remain open.
+
+### Loading-panel inputs and UI state costs, 2026-10-03 (validated)
+
+Predicate fact version 12 adds site 25, OffscreenLoaderPanel. The pointer-free
+fact records lazy outer gates, sequence folds and bounded writes, first-panel
+and chain state, collection admission and immediate write checkpoints, and the
+freshly consumed chain/speculative-withhold inputs after collection. The reader
+derives the claim from those inputs; no helper return or category boolean
+supplies the answer. It preserves unsigned folds, ordinal and drop wraparound,
+signed base vertex, and the sentinel that suppresses a chain scan. Opaque
+collection work still carries a mutation warning even when narrow scalar writes
+replay. Resource capture, learned-cache history and cross-draw state provenance
+remain unresolved; whole-ladder equivalence stays false.
+
+The genuine System32-WARP visitor rig verifies first/second speculative panels,
+lazy target and draw-shape refusals, sequence positions 47/48, the fourth chain
+entry, ordinal wrap, textured capture exclusion, and real typed
+IAGetIndexBuffer callback re-entry and SEH. Successful re-entry changes the
+capture index before its write; the fact records the immediate 23-to-24 write
+and later classification flags. Fault re-entry verifies drop-counter wrap. Six
+actual callback faults exhaust the production budget; the next visit skips the
+getter, records its drop increment, and has no opaque-work warning. NoTrace
+also exercises a real fault with zero observations. The trace-only physical
+chain bound retains invalid raw input without indexing past four slots; the
+NoTrace specialization excludes that diagnostic branch.
+
+Native writer fixtures 77-86 cover missing, duplicate, wrong-kind, malformed,
+unvisited, unknown, over-capacity, global pool overflow, both selector paths
+and an explicit collection warning. Strict CLI checks pass: the positive and
+negative fixture has 11 selector matches, zero unavailable inputs, mismatches
+or warnings. The collection fixture has five known matches and exactly one
+warning. Unknown remains unavailable. Empty/bypass captures and schema 1-11
+compatibility pass. Review repaired lazy-height validation, callback write
+admission, exact UINT arithmetic and empty-capture metric initialization.
+
+Native sizeof measurement is 420 bytes per LoaderPanel observation, a 13.125
+MiB pool, and unchanged 3,912-byte DrawRecords. Enabled replay storage totals
+461.125 MiB excluding allocator overhead; disabled allocates none. The compiled
+NoTrace/NoCpu draw body remains byte-identical to the saved reference: 7,057
+bytes, 1,636 records, 94 ordered calls and a 288-byte stack. Bytes SHA-256:
+2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40.
+
+Core-owned API sites 83-96 count the UI layer state save/apply/restore
+transaction at real getter and direct/raw setter boundaries. The sample latch
+follows Begin admission and survives cleanup before being cleared. The whole
+production UI layer WARP rig passes 641 checks, including exact 6 ReadQuery/8
+State totals, coverage mask 0x1FFF80000, 1,800 completed sample frames, state
+restoration, declined/unsampled paths, worker/deferred exclusion, a typed
+third-getter fault with 3 ReadQuery/0 State attempts, and recovery through the
+existing configuration rearm. Shared shader, depth-seeding, clear and cold
+blend-cache work stay outside this bounded cohort. The rig uses the real guard
+and WARP multithread protection.
+
+Full validation passed 139 jobs: 132 pooled in 147.2 seconds and seven quiet in
+40.2 seconds. FocusWatch observed zero show, console or foreground events over
+187 seconds. Both production profiles, Python/native gates, 235 config keys and
+the self-contained installer passed. Receipt input SHA-256:
+99942fa35be3d7772c9316c138cb4b11dd7b68b0aa1fde8d241fc3f4bc31ebba. Logs:
+build/plugin-predicate-v12-full-build.log and the v12 focused,
+continuation-focused and UI-focused logs. Steam remains on verified 4350a281;
+this checkpoint was not installed. Remaining source predicates, independent
+forwarding, complete owner costs and matched CPU/GPU performance remain open
+before Phase 2.

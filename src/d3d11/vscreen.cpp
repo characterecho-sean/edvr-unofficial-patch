@@ -112,6 +112,13 @@ namespace detail {
 std::atomic<bool> g_drawGateWanted{true};
 }  // namespace detail
 
+template <class T>
+void setLoaderPanelRead(LoaderPanelRead<T>& read, T value) noexcept {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
+
 namespace {
 
 // nullptr invalidates every cached input (command-list execution); otherwise
@@ -2448,15 +2455,61 @@ struct VScreenDrawLadderVisitor {
                 return SiteResult::declined();
             }
         } else if constexpr (id == SiteId::kOffscreenLoaderPanel) {
-            if (loaderPanelWants() && s->eyeDrawsLastFrame < kSceneEyeDraws) {
-                ResourceInfo info;
-                if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D &&
-                    info.a >= 1024 && info.b >= 512 && loaderPanelOnDraw(self, kind, count, instances,
-                        s->qsStartIndex, s->qsBaseVertex, info.a, info.b,
-                        bindingGet(BindSlot::PsSrv0) != nullptr))
-                    return claimed(id, DrawVerdict::kLoaderPanel);
+            if constexpr (TracePolicy::enabled) {
+                LoaderPanelObservation fact{};
+                bool selected = false;
+                const bool wants = loaderPanelWants();
+                setLoaderPanelRead(fact.outer.wants, wants);
+                if (wants) {
+                    const std::uint32_t eyeDraws = s->eyeDrawsLastFrame;
+                    setLoaderPanelRead(fact.outer.eyeDrawsLastFrame, eyeDraws);
+                    if (eyeDraws < kSceneEyeDraws) {
+                        ID3D11RenderTargetView* const rtv =
+                            static_cast<ID3D11RenderTargetView*>(bindingGet(BindSlot::Rtv0));
+                        setLoaderPanelRead(fact.outer.rtvPresent, rtv != nullptr);
+                        ResourceInfo info{};
+                        const bool resolved = bindingResolve(rtv, &info);
+                        setLoaderPanelRead(fact.outer.resolved, resolved);
+                        if (resolved) {
+                            const bool texture2D = info.isTexture2D;
+                            setLoaderPanelRead(fact.outer.isTexture2D, texture2D);
+                            if (texture2D) {
+                                const std::uint32_t width = info.a;
+                                setLoaderPanelRead(fact.outer.targetWidth, width);
+                                if (width >= 1024) {
+                                    const std::uint32_t height = info.b;
+                                    setLoaderPanelRead(fact.outer.targetHeight, height);
+                                    if (height >= 512) {
+                                        const std::uint32_t startIndex = s->qsStartIndex;
+                                        const std::int32_t baseVertex = s->qsBaseVertex;
+                                        setLoaderPanelRead(fact.outer.qsStartIndex, startIndex);
+                                        setLoaderPanelRead(fact.outer.qsBaseVertex, baseVertex);
+                                        void* const psSrv = bindingGet(BindSlot::PsSrv0);
+                                        const bool textured = psSrv != nullptr;
+                                        setLoaderPanelRead(fact.outer.textured, textured);
+                                        selected = loaderPanelOnDrawObserved(self, kind, count,
+                                            instances, startIndex, baseVertex, width, height,
+                                            textured, fact.helper);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                trace.loaderPanelFact(fact);
+                return selected ? claimed(id, DrawVerdict::kLoaderPanel)
+                                : SiteResult::declined();
+            } else {
+                if (loaderPanelWants() && s->eyeDrawsLastFrame < kSceneEyeDraws) {
+                    ResourceInfo info;
+                    if (bindingResolve(bindingGet(BindSlot::Rtv0), &info) && info.isTexture2D &&
+                        info.a >= 1024 && info.b >= 512 && loaderPanelOnDraw(self, kind, count, instances,
+                            s->qsStartIndex, s->qsBaseVertex, info.a, info.b,
+                            bindingGet(BindSlot::PsSrv0) != nullptr))
+                        return claimed(id, DrawVerdict::kLoaderPanel);
+                }
+                return SiteResult::declined();
             }
-            return SiteResult::declined();
         } else if constexpr (id == SiteId::kOffscreenQuadSkip) {
             if constexpr (TracePolicy::enabled) {
                 const bool probeReached = edvr::quadPrefixMatches(
@@ -6191,6 +6244,8 @@ using VScreenEyeCensusTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kEyeCensusSkip, draw_ladder::SiteKind::Claim>;
 using VScreenResolveBindTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kResolveBindClaim, draw_ladder::SiteKind::Claim>;
+using VScreenLoaderPanelTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kOffscreenLoaderPanel, draw_ladder::SiteKind::Claim>;
 State* g_eyeCensusTestState = nullptr;
 
 struct VScreenTestInterest final {};
@@ -6219,6 +6274,10 @@ struct VScreenTestTraceCapture final {
 
     void resolveBindFact(const ResolveBindObservation& fact) noexcept {
         policy.resolveBindFact(fact);
+    }
+
+    void loaderPanelFact(const LoaderPanelObservation& fact) noexcept {
+        policy.loaderPanelFact(fact);
     }
 };
 
@@ -6259,6 +6318,12 @@ template <class TracePolicy>
 draw_ladder::SiteResult vScreenResolveBindPredicateTestInvoke(
     VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
     return vScreenPredicateTestInvokeSite<VScreenResolveBindTestSite>(visitor, trace);
+}
+
+template <class TracePolicy>
+draw_ladder::SiteResult vScreenLoaderPanelPredicateTestInvoke(
+    VScreenDrawLadderVisitor<TracePolicy>& visitor, TracePolicy& trace) noexcept {
+    return vScreenPredicateTestInvokeSite<VScreenLoaderPanelTestSite>(visitor, trace);
 }
 
 } // namespace
@@ -6454,6 +6519,54 @@ bool vScreenResolveBindPredicateTestVisit(
         result->siteResult = vScreenResolveBindPredicateTestInvoke(visitor, trace);
     }
 
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenLoaderPanelPredicateTestVisit(
+    ID3D11DeviceContext* context, void* renderTargetView,
+    std::uint32_t eyeDrawsLastFrame, std::uint32_t qsStartIndex,
+    std::int32_t qsBaseVertex, char kind, std::uint32_t count,
+    bool traceEnabled, VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context) return false;
+    static State fixture{};
+    fixture.ownerCtx = context;
+    fixture.eyeDrawsLastFrame = eyeDrawsLastFrame;
+    fixture.qsStartIndex = qsStartIndex;
+    fixture.qsBaseVertex = qsBaseVertex;
+    void* const priorRtv = bindingGet(BindSlot::Rtv0);
+    bindingSet(BindSlot::Rtv0, renderTargetView);
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = static_cast<std::uint8_t>(kind);
+    facts.count = count;
+    facts.instances = 1;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        bindingSet(BindSlot::Rtv0, priorRtv);
+        g_state = priorState;
+        t_uiDepthThisDraw = priorUiDepth;
+        t_compositeThisDraw = priorComposite;
+        return false;
+    }
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenLoaderPanelPredicateTestInvoke(visitor, trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, 1, args, trace};
+        result->siteResult = vScreenLoaderPanelPredicateTestInvoke(visitor, trace);
+    }
+    bindingSet(BindSlot::Rtv0, priorRtv);
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;

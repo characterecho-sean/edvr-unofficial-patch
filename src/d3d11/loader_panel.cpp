@@ -310,46 +310,103 @@ bool loaderPanelDimWanted() {
     return detail::g_loaderPanelOn && g_dimLive;
 }
 
-bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+namespace {
+
+template <class T>
+void observe(LoaderPanelRead<T>& read, T value) noexcept {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
+
+template <bool Observe>
+bool loaderPanelOnDrawImpl(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances, uint32_t startIndex, int baseVertex,
-                       uint32_t targetW, uint32_t targetH, bool textured) {
+                       uint32_t targetW, uint32_t targetH, bool textured,
+                       LoaderPanelHelperObservation* observation) {
     (void)instances;
-    if (!detail::g_loaderPanelOn || !ctx || kind != 'X' || count == 0) return false;
+    const bool wants = detail::g_loaderPanelOn;
+    if constexpr (Observe) observe(observation->wants, wants);
+    if (!wants) return false;
+    const bool contextNonNull = ctx != nullptr;
+    if constexpr (Observe) observe(observation->contextNonNull, contextNonNull);
+    if (!contextNonNull) return false;
+    if (kind != 'X' || count == 0) return false;
 
     // This draw's place in the frame's composition. The hash folds shape AND
     // target size, so a render-scale change reads as a new composition.
     const uint32_t p = g_seqLen;
+    if constexpr (Observe) observe(observation->sequence.position, p);
+    if constexpr (Observe) observe(observation->sequence.hashBeforeCount, g_hashAcc);
     g_hashAcc = (g_hashAcc ^ count) * 16777619u;
+    if constexpr (Observe) observe(observation->sequence.hashAfterCount, g_hashAcc);
+    if constexpr (Observe) observe(observation->sequence.hashBeforeWidth, g_hashAcc);
     g_hashAcc = (g_hashAcc ^ targetW) * 16777619u;
+    if constexpr (Observe) observe(observation->sequence.hashAfterWidth, g_hashAcc);
+    if constexpr (Observe) observe(observation->sequence.hashBeforeHeight, g_hashAcc);
     g_hashAcc = (g_hashAcc ^ targetH) * 16777619u;
+    if constexpr (Observe) observe(observation->sequence.hashAfterHeight, g_hashAcc);
     if (p < kMaxSeq) {
+        if constexpr (Observe) {
+            observe(observation->sequence.slotCount, count);
+            observe(observation->sequence.slotWidth, targetW);
+            observe(observation->sequence.slotHeight, targetH);
+            observe(observation->sequence.lenBefore, g_seqLen);
+        }
         g_seq[p].count = count;
         g_seq[p].w = targetW;
         g_seq[p].h = targetH;
         ++g_seqLen;
+        if constexpr (Observe) observe(observation->sequence.lenAfter, g_seqLen);
     }
 
     uint32_t ord = 0xFFFFFFFFu;
     bool firstPanel = false;
     if (count == kPanelIndices) {
+        if constexpr (Observe) observe(observation->panel.frameAnyBefore, g_frameAnyPanel);
         g_frameAnyPanel = true;
+        if constexpr (Observe) observe(observation->panel.frameAnyAfter, g_frameAnyPanel);
+        if constexpr (Observe) observe(observation->panel.frameFirstPanelDoneBefore, g_frameFirstPanelDone);
         firstPanel = !g_frameFirstPanelDone;
         g_frameFirstPanelDone = true;
-        if (g_chainOn && targetW == g_chainW && targetH == g_chainH) {
+        if constexpr (Observe) observe(observation->panel.frameFirstPanelDoneAfter, g_frameFirstPanelDone);
+        const bool chainOn = g_chainOn;
+        if constexpr (Observe) observe(observation->panel.chainOnBeforeCollection, chainOn);
+        if (chainOn) {
+            const uint32_t chainWidth = g_chainW;
+            if constexpr (Observe) observe(observation->panel.chainWidth, chainWidth);
+            if (targetW == chainWidth) {
+                const uint32_t chainHeight = g_chainH;
+                if constexpr (Observe) observe(observation->panel.chainHeight, chainHeight);
+                if (targetH == chainHeight) {
+                    if constexpr (Observe) observe(observation->panel.frameChainPanelBefore, g_frameChainPanel);
             g_frameChainPanel = true;
-            ord = g_panelOrdinal++;
+                    if constexpr (Observe) observe(observation->panel.frameChainPanelAfter, g_frameChainPanel);
+                    if constexpr (Observe) observe(observation->panel.panelOrdinalBefore, g_panelOrdinal);
+                    ord = g_panelOrdinal++;
+                    if constexpr (Observe) observe(observation->panel.panelOrdinalAfter, g_panelOrdinal);
+                }
+            }
         }
     }
+    if constexpr (Observe) observe(observation->panel.localOrdinal, ord);
 
     // Collection: capture this draw if the frame is being captured and the
     // draw is a solid quad batch -- text reads a texture; the panels this
     // module classifies read none. A qualifying draw that cannot be
     // captured -- capacity, an overlong frame -- poisons the collection.
-    if (g_collecting) {
+    const bool collecting = g_collecting;
+    if constexpr (Observe) observe(observation->collection.collecting, collecting);
+    if (collecting) {
         const bool qualifies = !textured && count % kIndicesPerQuad == 0;
-        if (qualifies && p < kMaxSeq && g_capCount < kMaxCaptures) {
+        if (qualifies && p < kMaxSeq) {
+            const uint32_t capCount = g_capCount;
+            if constexpr (Observe) observe(observation->collection.capCountGate, capCount);
+            if (capCount < kMaxCaptures) {
             bool stored = false;
-            guardedBudget(g_budget, [&] {
+            bool guardEntered = false;
+            const bool guardReturned = guardedBudget(g_budget, [&] {
+                guardEntered = true;
                 // Latch once for this admitted capture. Normal draw
                 // classification and every Release remain outside this slice.
                 const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
@@ -529,8 +586,12 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                                 }
                             }
                         }
+                        if constexpr (Observe) observe(observation->collection.capCountBeforeWrite, g_capCount);
                         ++g_capCount;
+                        if constexpr (Observe) observe(observation->collection.capCountAfterWrite, g_capCount);
+                        if constexpr (Observe) observe(observation->collection.ibFillBeforeWrite, g_ibFill);
                         g_ibFill += need;
+                        if constexpr (Observe) observe(observation->collection.ibFillAfterWrite, g_ibFill);
                         stored = true;
                     }
                 }
@@ -538,9 +599,25 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                 ib->Release();
                 vb->Release();
             });
-            if (!stored) ++g_capDropped;
+            if constexpr (Observe) {
+                observe(observation->collection.guardEntered, guardEntered);
+                observe(observation->collection.guardReturned, guardReturned);
+                observation->collection.collectionMutationUnobserved = guardEntered;
+            }
+            if (!stored) {
+                if constexpr (Observe) observe(observation->collection.capDroppedBeforeWrite, g_capDropped);
+                ++g_capDropped;
+                if constexpr (Observe) observe(observation->collection.capDroppedAfterWrite, g_capDropped);
+            }
+            } else {
+                if constexpr (Observe) observe(observation->collection.capDroppedBeforeWrite, g_capDropped);
+                ++g_capDropped;
+                if constexpr (Observe) observe(observation->collection.capDroppedAfterWrite, g_capDropped);
+            }
         } else if (qualifies) {
+            if constexpr (Observe) observe(observation->collection.capDroppedBeforeWrite, g_capDropped);
             ++g_capDropped;
+            if constexpr (Observe) observe(observation->collection.capDroppedAfterWrite, g_capDropped);
         }
     }
 
@@ -548,28 +625,145 @@ bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // are swallowed EVERY frame -- fade-in, percent ticks and the dialog
     // switch included, because the ordinal is frame-local and needs no
     // composition match.
+    if constexpr (Observe) observe(observation->withhold.subArmBeforeClear, g_subArm);
     g_subArm = false;
+    if constexpr (Observe) observe(observation->withhold.subArmAfterClear, g_subArm);
     if (ord != 0xFFFFFFFFu) {
-        for (uint32_t i = 0; i < g_chainOrdCount; ++i) {
-            if (g_chainOrd[i] == ord) {
+        uint32_t i = 0;
+        for (;;) {
+            const uint32_t loopCount = g_chainOrdCount;
+            if (i == 0) {
+                if constexpr (Observe) observe(observation->withhold.chainOrdCountGate, loopCount);
+            }
+            if (i >= loopCount) {
+                if constexpr (Observe) observe(observation->withhold.terminalChainOrdCount, loopCount);
+                break;
+            }
+            if constexpr (Observe) {
+                if (i >= 4) {
+                    // Preserve the offending raw bound for recorder invalidation
+                    // without indexing beyond either physical four-slot array.
+                    observe(observation->withhold.terminalChainOrdCount, loopCount);
+                    return false;
+                }
+            }
+            if constexpr (Observe) observe(observation->withhold.chainScan[i].loopCount, loopCount);
+            const uint32_t chainOrd = g_chainOrd[i];
+            if constexpr (Observe) observe(observation->withhold.chainScan[i].chainOrd, chainOrd);
+            if (chainOrd == ord) {
+                if constexpr (Observe) observe(observation->withhold.subArmBeforeWithhold, g_subArm);
                 g_subArm = true;
+                if constexpr (Observe) observe(observation->withhold.subArmAfterWithhold, g_subArm);
+                if constexpr (Observe) observe(observation->withhold.frameWithheldBefore, g_frameWithheld);
                 g_frameWithheld = true;
+                if constexpr (Observe) observe(observation->withhold.frameWithheldAfter, g_frameWithheld);
+                if constexpr (Observe) observe(observation->withhold.dimLiveBefore, g_dimLive);
                 g_dimLive = true;
+                if constexpr (Observe) observe(observation->withhold.dimLiveAfter, g_dimLive);
                 return true;
             }
+            ++i;
         }
     }
     // Before the session's first verdict: the frame's first panel is
     // withheld on speculation, so the scrim never shows even while the
     // measurement that will confirm it is still in flight.
-    if (!g_specDone && !g_chainOn && !g_retired && firstPanel) {
+    const bool specDone = g_specDone;
+    if constexpr (Observe) observe(observation->withhold.specDoneGate, specDone);
+    bool chainOnSpec = false;
+    if (!specDone) {
+        chainOnSpec = g_chainOn;
+        if constexpr (Observe) observe(observation->withhold.chainOnSpecGate, chainOnSpec);
+    }
+    bool retired = false;
+    if (!specDone && !chainOnSpec) {
+        retired = g_retired;
+        if constexpr (Observe) observe(observation->withhold.retiredGate, retired);
+    }
+    if (!specDone && !chainOnSpec && !retired && firstPanel) {
+        if constexpr (Observe) observe(observation->withhold.subArmBeforeWithhold, g_subArm);
         g_subArm = true;
+        if constexpr (Observe) observe(observation->withhold.subArmAfterWithhold, g_subArm);
+        if constexpr (Observe) observe(observation->withhold.frameWithheldBefore, g_frameWithheld);
         g_frameWithheld = true;
+        if constexpr (Observe) observe(observation->withhold.frameWithheldAfter, g_frameWithheld);
+        if constexpr (Observe) observe(observation->withhold.dimLiveBefore, g_dimLive);
         g_dimLive = true;
+        if constexpr (Observe) observe(observation->withhold.dimLiveAfter, g_dimLive);
         return true;
     }
     return false;
 }
+
+} // namespace
+
+bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances, uint32_t startIndex, int baseVertex,
+                       uint32_t targetW, uint32_t targetH, bool textured) {
+    return loaderPanelOnDrawImpl<false>(ctx, kind, count, instances, startIndex,
+        baseVertex, targetW, targetH, textured, nullptr);
+}
+
+bool loaderPanelOnDrawObserved(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances, uint32_t startIndex, int baseVertex,
+                       uint32_t targetW, uint32_t targetH, bool textured,
+                       LoaderPanelHelperObservation& observation) {
+    return loaderPanelOnDrawImpl<true>(ctx, kind, count, instances, startIndex,
+        baseVertex, targetW, targetH, textured, &observation);
+}
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+// Explicit current-state fixtures only; these do not establish historical
+// learner provenance. Callback changes exercise the actual post-guard reads.
+void loaderPanelPredicateTestProgress(uint32_t sequencePosition,
+    uint32_t panelOrdinal, bool collecting, uint32_t captureCount,
+    uint32_t droppedCount) noexcept {
+    if (sequencePosition > kMaxSeq || captureCount > kMaxCaptures) return;
+    g_seqLen = sequencePosition;
+    g_panelOrdinal = panelOrdinal;
+    g_collecting = collecting;
+    g_capCount = captureCount;
+    g_capDropped = droppedCount;
+}
+void loaderPanelPredicateTestReentry(bool chainOn, bool specDone, bool retired,
+    uint32_t captureCount, uint32_t droppedCount) noexcept {
+    // A callback can continue into a capture write, so preserve its array bound.
+    if (captureCount >= kMaxCaptures) return;
+    g_chainOn = chainOn;
+    g_specDone = specDone;
+    g_retired = retired;
+    g_capCount = captureCount;
+    g_capDropped = droppedCount;
+}
+void loaderPanelPredicateTestSeed(bool enabled, bool chainOn, bool specDone,
+    bool retired, uint32_t chainWidth, uint32_t chainHeight,
+    const uint32_t* chainOrdinals, uint32_t chainOrdinalCount) noexcept {
+    if (chainOrdinalCount > kMaxScrims || (chainOrdinalCount && !chainOrdinals))
+        return;
+    detail::g_loaderPanelOn = enabled;
+    g_collecting = false;
+    g_capCount = 0;
+    g_capDropped = 0;
+    g_ibFill = 0;
+    g_seqLen = 0;
+    g_hashAcc = 2166136261u;
+    g_frameAnyPanel = false;
+    g_frameChainPanel = false;
+    g_frameFirstPanelDone = false;
+    g_subArm = false;
+    g_panelOrdinal = 0;
+    g_chainOn = chainOn;
+    g_chainW = chainWidth;
+    g_chainH = chainHeight;
+    g_chainOrdCount = chainOrdinalCount;
+    for (uint32_t i = 0; i < kMaxScrims; ++i)
+        g_chainOrd[i] = i < chainOrdinalCount ? chainOrdinals[i] : 0;
+    g_specDone = specDone;
+    g_retired = retired;
+    g_frameWithheld = false;
+    g_dimLive = false;
+}
+#endif
 
 bool loaderPanelSubstitute(ID3D11DeviceContext* ctx, PfnDrawIndexedInstanced draw,
                            uint32_t instances, uint32_t startInstance) {

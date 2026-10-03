@@ -7,6 +7,7 @@
 #include "../../src/d3d11/draw_ladder_trace.h"
 #include "../../src/d3d11/eye_census_observation.h"
 #include "../../src/d3d11/resolve_bind_observation.h"
+#include "../../src/d3d11/loader_panel_observation.h"
 
 struct ID3D11DeviceContext;
 
@@ -67,5 +68,11 @@ bool vScreenEyeCensusPredicateTestVisit(
 bool vScreenResolveBindPredicateTestVisit(
     ID3D11DeviceContext* context, bool traceEnabled,
     VScreenPredicateTestResult* result) noexcept;
+
+bool vScreenLoaderPanelPredicateTestVisit(
+    ID3D11DeviceContext* context, void* renderTargetView,
+    std::uint32_t eyeDrawsLastFrame, std::uint32_t qsStartIndex,
+    std::int32_t qsBaseVertex, char kind, std::uint32_t count,
+    bool traceEnabled, VScreenPredicateTestResult* result) noexcept;
 
 } // namespace edvr

@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
+#include <initializer_list>
 
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/config.h"
@@ -17,10 +19,30 @@
 #include "../../src/d3d11/exposure_fix.h"
 #include "../../src/d3d11/basic_draw_observation.h"
 #include "../../src/d3d11/eye_census_observation.h"
+#include "../../src/d3d11/loader_panel_observation.h"
+#include "../../src/d3d11/loader_panel.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/vtable_hook.h"
 
 namespace {
+using LoaderGetIndexFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Buffer**,
+                                                 DXGI_FORMAT*, UINT*);
+LoaderGetIndexFn g_loaderGetIndex = nullptr;
+std::uint32_t g_loaderQueryAttempts = 0;
+std::uint32_t g_loaderInjectedFaults = 0;
+bool g_loaderFault = false;
+bool g_loaderRetired = false;
+void STDMETHODCALLTYPE loaderReentryGetIndex(ID3D11DeviceContext* context,
+    ID3D11Buffer** buffer, DXGI_FORMAT* format, UINT* offset) {
+    ++g_loaderQueryAttempts;
+    edvr::loaderPanelPredicateTestReentry(!g_loaderRetired, false, g_loaderRetired,
+                                         23, UINT32_MAX);
+    if (g_loaderFault) {
+        ++g_loaderInjectedFaults;
+        RaiseException(0xE042ED94u, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    }
+    g_loaderGetIndex(context, buffer, format, offset);
+}
 
 using Microsoft::WRL::ComPtr;
 using GetPixelShaderFn = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*,
@@ -51,6 +73,22 @@ bool readResolveBind(const edvr::VScreenPredicateTestResult& result,
                      edvr::ResolveBindObservation* fact) {
     return edvr::draw_ladder_trace::resolveBindFactCountForTest(result.token) == 1 &&
            edvr::draw_ladder_trace::readResolveBindFactForTest(result.token, 0, fact);
+}
+
+bool readLoaderPanel(const edvr::VScreenPredicateTestResult& result,
+                     edvr::LoaderPanelObservation* fact) {
+    return edvr::draw_ladder_trace::loaderPanelFactCountForTest(result.token) == 1 &&
+           edvr::draw_ladder_trace::readLoaderPanelFactForTest(result.token, 0, fact);
+}
+
+template <class T, class U>
+bool lpRead(const edvr::LoaderPanelRead<T>& read, U expected) {
+    return read.reached && read.known && read.value == static_cast<T>(expected);
+}
+
+template <class T>
+bool lpSkipped(const edvr::LoaderPanelRead<T>& read) {
+    return !read.reached && !read.known && read.value == T{};
 }
 
 template <class T, class U>
@@ -271,6 +309,355 @@ int main(int argc, char** argv) {
 
     if (immediate && deferred) {
         using namespace edvr::draw_ladder;
+        ID3D11Texture2D* loaderTarget = nullptr;
+        ID3D11RenderTargetView* loaderRtv = nullptr;
+        D3D11_TEXTURE2D_DESC loaderTargetDesc{};
+        loaderTargetDesc.Width = 1024;
+        loaderTargetDesc.Height = 512;
+        loaderTargetDesc.MipLevels = 1;
+        loaderTargetDesc.ArraySize = 1;
+        loaderTargetDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        loaderTargetDesc.SampleDesc.Count = 1;
+        loaderTargetDesc.Usage = D3D11_USAGE_DEFAULT;
+        loaderTargetDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        hr = device->CreateTexture2D(&loaderTargetDesc, nullptr, &loaderTarget);
+        okay &= check(SUCCEEDED(hr) && loaderTarget,
+                      "WARP creates a real 1024x512 loader target texture");
+        if (loaderTarget) {
+            hr = device->CreateRenderTargetView(loaderTarget, nullptr, &loaderRtv);
+            okay &= check(SUCCEEDED(hr) && loaderRtv,
+                          "WARP creates a real RTV for the loader target");
+        }
+        if (loaderRtv) {
+            const std::uint32_t chainOrdinals[] = {0};
+            edvr::loaderPanelPredicateTestSeed(true, true, true, false,
+                1024, 512, chainOrdinals, 1);
+            edvr::VScreenPredicateTestResult loaderResult{};
+            okay &= check(edvr::vScreenLoaderPanelPredicateTestVisit(
+                immediate, loaderRtv, 0, 7, -3, 'X', 30, true, &loaderResult),
+                "site 25 trace visitor resolves a real WARP loader RTV");
+            okay &= check(loaderResult.siteResult.flow == Flow::Stop &&
+                              loaderResult.siteResult.outcome == SiteOutcome::Claimed,
+                          "verified chain ordinal produces the actual loader-panel claim");
+            edvr::LoaderPanelObservation loaderFact{};
+            okay &= check(readLoaderPanel(loaderResult, &loaderFact),
+                          "site 25 appends one fact through the real cold trace pool");
+            okay &= check(loaderFact.siteId == 25 && loaderFact.kind == 19 &&
+                              lpRead(loaderFact.outer.wants, true) &&
+                              lpRead(loaderFact.outer.eyeDrawsLastFrame, 0) &&
+                              lpRead(loaderFact.outer.rtvPresent, true) &&
+                              lpRead(loaderFact.outer.resolved, true) &&
+                              lpRead(loaderFact.outer.isTexture2D, true) &&
+                              lpRead(loaderFact.outer.targetWidth, 1024) &&
+                              lpRead(loaderFact.outer.targetHeight, 512) &&
+                              lpRead(loaderFact.outer.qsStartIndex, 7) &&
+                              lpRead(loaderFact.outer.qsBaseVertex, -3) &&
+                              lpRead(loaderFact.helper.withhold.chainOrdCountGate, 1) &&
+                              lpRead(loaderFact.helper.withhold.chainScan[0].chainOrd, 0) &&
+                              lpRead(loaderFact.helper.withhold.frameWithheldAfter, true) &&
+                              lpRead(loaderFact.helper.withhold.dimLiveAfter, true),
+                          "fact records actual resolver, ordinal scan, and withhold writes");
+
+            edvr::loaderPanelPredicateTestSeed(true, true, true, false,
+                2048, 1024, chainOrdinals, 1);
+            edvr::VScreenPredicateTestResult loaderNegative{};
+            okay &= check(edvr::vScreenLoaderPanelPredicateTestVisit(
+                immediate, loaderRtv, 0, 0, 0, 'X', 30, true, &loaderNegative) &&
+                    loaderNegative.siteResult.flow == Flow::Continue &&
+                    loaderNegative.siteResult.outcome == SiteOutcome::Declined,
+                "real target with nonmatching chain dimensions declines");
+            okay &= check(readLoaderPanel(loaderNegative, &loaderFact) &&
+                              lpRead(loaderFact.helper.panel.chainWidth, 2048) &&
+                              lpRead(loaderFact.helper.withhold.specDoneGate, true) &&
+                              lpSkipped(loaderFact.helper.withhold.chainOnSpecGate),
+                          "negative fact preserves dimension failure and lazy speculation gates");
+
+            edvr::VScreenPredicateTestResult loaderOuterDecline{};
+            okay &= check(edvr::vScreenLoaderPanelPredicateTestVisit(
+                immediate, loaderRtv, 100, 0, 0, 'X', 30, true, &loaderOuterDecline) &&
+                    loaderOuterDecline.siteResult.flow == Flow::Continue &&
+                    loaderOuterDecline.siteResult.outcome == SiteOutcome::Declined,
+                "scene threshold declines before the real RTV resolver");
+            okay &= check(readLoaderPanel(loaderOuterDecline, &loaderFact) &&
+                              lpRead(loaderFact.outer.wants, true) &&
+                              lpRead(loaderFact.outer.eyeDrawsLastFrame, 100) &&
+                              lpSkipped(loaderFact.outer.rtvPresent) &&
+                              lpSkipped(loaderFact.outer.resolved) &&
+                              lpSkipped(loaderFact.helper.wants),
+                          "threshold fact leaves resolver and helper inputs unread");
+
+            edvr::loaderPanelPredicateTestSeed(true, true, true, false,
+                1024, 512, chainOrdinals, 1);
+            edvr::VScreenPredicateTestResult loaderNoTrace{};
+            okay &= check(edvr::vScreenLoaderPanelPredicateTestVisit(
+                immediate, loaderRtv, 0, 7, -3, 'X', 30, false, &loaderNoTrace) &&
+                    loaderNoTrace.siteResult.flow == Flow::Stop &&
+                    loaderNoTrace.siteResult.outcome == SiteOutcome::Claimed &&
+                    edvr::draw_ladder_trace::loaderPanelFactCountForTest(loaderNoTrace.token) == 0,
+                "NoTrace site 25 preserves the claim without capturing a fact");
+            edvr::loaderPanelPredicateTestSeed(false, false, false, false,
+                0, 0, nullptr, 0);
+
+            const auto loaderVisit = [&](void* target, bool traced = true) {
+                return edvr::vScreenLoaderPanelPredicateTestVisit(immediate, target,
+                    0, 0, 0, 'X', 30, traced, &loaderResult) &&
+                    (!traced || readLoaderPanel(loaderResult, &loaderFact));
+            };
+            const auto seedSpeculative = [&]() {
+                edvr::loaderPanelShutdown();
+                edvr::loaderPanelPredicateTestSeed(true, false, false, false,
+                    0, 0, nullptr, 0);
+            };
+            seedSpeculative();
+            okay &= check(loaderVisit(loaderRtv) &&
+                              loaderResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              lpRead(loaderFact.helper.panel.frameFirstPanelDoneBefore, false) &&
+                              lpRead(loaderFact.helper.withhold.specDoneGate, false) &&
+                              lpRead(loaderFact.helper.withhold.chainOnSpecGate, false) &&
+                              lpRead(loaderFact.helper.withhold.retiredGate, false),
+                          "actual first panel speculates without a seeded learned chain");
+            okay &= check(loaderVisit(loaderRtv) &&
+                              loaderResult.siteResult.outcome == SiteOutcome::Declined &&
+                              lpRead(loaderFact.helper.panel.frameFirstPanelDoneBefore, true) &&
+                              lpRead(loaderFact.helper.withhold.subArmAfterClear, false) &&
+                              lpSkipped(loaderFact.helper.withhold.frameWithheldAfter),
+                          "second actual panel in the frame does not speculate");
+
+            seedSpeculative();
+            okay &= check(loaderVisit(nullptr) &&
+                              loaderResult.siteResult.outcome == SiteOutcome::Declined &&
+                              lpRead(loaderFact.outer.rtvPresent, false) &&
+                              lpRead(loaderFact.outer.resolved, false) &&
+                              lpSkipped(loaderFact.outer.isTexture2D) &&
+                              lpSkipped(loaderFact.helper.wants),
+                          "null RTV consumes the real resolver failure and skips type/helper");
+            Microsoft::WRL::ComPtr<ID3D11Buffer> renderBuffer;
+            Microsoft::WRL::ComPtr<ID3D11RenderTargetView> bufferTarget;
+            D3D11_BUFFER_DESC renderBufferDesc{};
+            renderBufferDesc.ByteWidth = 64;
+            renderBufferDesc.Usage = D3D11_USAGE_DEFAULT;
+            renderBufferDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+            D3D11_RENDER_TARGET_VIEW_DESC bufferTargetDesc{};
+            bufferTargetDesc.Format = DXGI_FORMAT_R32_FLOAT;
+            bufferTargetDesc.ViewDimension = D3D11_RTV_DIMENSION_BUFFER;
+            bufferTargetDesc.Buffer.NumElements = 16;
+            const bool madeBufferTarget = SUCCEEDED(device->CreateBuffer(&renderBufferDesc, nullptr, &renderBuffer)) &&
+                SUCCEEDED(device->CreateRenderTargetView(renderBuffer.Get(), &bufferTargetDesc, &bufferTarget));
+            okay &= check(madeBufferTarget && loaderVisit(bufferTarget.Get()) &&
+                              loaderResult.siteResult.outcome == SiteOutcome::Declined &&
+                              lpRead(loaderFact.outer.resolved, true) &&
+                              lpRead(loaderFact.outer.isTexture2D, false) &&
+                              lpSkipped(loaderFact.outer.targetWidth) && lpSkipped(loaderFact.helper.wants),
+                          "real buffer RTV resolves but short-circuits the Texture2D gate");
+            for (const auto dims : {std::pair<UINT, UINT>{1023, 512}, {1024, 511}}) {
+                D3D11_TEXTURE2D_DESC smallDesc = loaderTargetDesc;
+                smallDesc.Width = dims.first; smallDesc.Height = dims.second;
+                Microsoft::WRL::ComPtr<ID3D11Texture2D> smallTexture;
+                Microsoft::WRL::ComPtr<ID3D11RenderTargetView> smallRtv;
+                const bool made = SUCCEEDED(device->CreateTexture2D(&smallDesc, nullptr, &smallTexture)) &&
+                    SUCCEEDED(device->CreateRenderTargetView(smallTexture.Get(), nullptr, &smallRtv));
+                okay &= check(made && loaderVisit(smallRtv.Get()) &&
+                                  loaderResult.siteResult.outcome == SiteOutcome::Declined &&
+                                  lpRead(loaderFact.outer.targetWidth, dims.first) &&
+                                  (dims.first < 1024 ? lpSkipped(loaderFact.outer.targetHeight) :
+                                      lpRead(loaderFact.outer.targetHeight, dims.second)) &&
+                                  lpSkipped(loaderFact.helper.wants),
+                              "actual undersized RTV preserves lazy width/height gates");
+            }
+            for (const std::uint32_t position : {47u, 48u}) {
+                seedSpeculative();
+                edvr::loaderPanelPredicateTestProgress(position, 0, false, 0, 0);
+                okay &= check(loaderVisit(loaderRtv) &&
+                                  loaderResult.siteResult.outcome == SiteOutcome::Claimed &&
+                                  lpRead(loaderFact.helper.sequence.position, position) &&
+                                  (position == 47 ? lpRead(loaderFact.helper.sequence.lenAfter, 48) :
+                                      lpSkipped(loaderFact.helper.sequence.lenAfter)),
+                              "sequence physical boundary controls append without changing speculation");
+            }
+            for (const auto shape : {std::pair<char, UINT>{'N', 30}, {'X', 0}}) {
+                seedSpeculative();
+                okay &= check(edvr::vScreenLoaderPanelPredicateTestVisit(immediate, loaderRtv,
+                                  0, 0, 0, shape.first, shape.second, true, &loaderResult) &&
+                                  readLoaderPanel(loaderResult, &loaderFact) &&
+                                  loaderResult.siteResult.outcome == SiteOutcome::Declined &&
+                                  lpRead(loaderFact.helper.wants, true) &&
+                                  lpRead(loaderFact.helper.contextNonNull, true) &&
+                                  lpSkipped(loaderFact.helper.sequence.position),
+                              "actual helper kind/count guard skips composition and mutation");
+            }
+            const std::uint32_t lateOrdinals[4] = {9, 10, 11, 2};
+            edvr::loaderPanelPredicateTestSeed(true, true, true, false, 1024, 512, lateOrdinals, 4);
+            edvr::loaderPanelPredicateTestProgress(0, 2, false, 0, 0);
+            okay &= check(loaderVisit(loaderRtv) &&
+                              loaderResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              lpRead(loaderFact.helper.withhold.chainScan[3].chainOrd, 2) &&
+                              lpRead(loaderFact.helper.withhold.chainScan[0].loopCount, 4) &&
+                              lpRead(loaderFact.helper.withhold.chainOrdCountGate, 4) &&
+                              lpSkipped(loaderFact.helper.withhold.terminalChainOrdCount),
+                          "fourth raw learned-cache ordinal produces the actual claim");
+            edvr::loaderPanelPredicateTestSeed(true, true, true, false, 1024, 512, lateOrdinals, 4);
+            edvr::loaderPanelPredicateTestProgress(0, UINT32_MAX, false, 0, 0);
+            okay &= check(loaderVisit(loaderRtv) &&
+                              loaderResult.siteResult.outcome == SiteOutcome::Declined &&
+                              lpRead(loaderFact.helper.panel.panelOrdinalBefore, UINT32_MAX) &&
+                              lpRead(loaderFact.helper.panel.panelOrdinalAfter, 0) &&
+                              lpRead(loaderFact.helper.panel.localOrdinal, UINT32_MAX) &&
+                              lpSkipped(loaderFact.helper.withhold.chainOrdCountGate),
+                          "ordinal wraps but its consumed sentinel suppresses the chain scan");
+
+            // Real IA buffers make the forwarded collection callback complete;
+            // this exercises capture checkpoints, not the historical learner.
+            Microsoft::WRL::ComPtr<ID3D11Buffer> loaderIb, loaderVb;
+            D3D11_BUFFER_DESC inputDesc{};
+            inputDesc.ByteWidth = 64; inputDesc.Usage = D3D11_USAGE_DEFAULT;
+            inputDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+            bool madeInputs = SUCCEEDED(device->CreateBuffer(&inputDesc, nullptr, &loaderIb));
+            inputDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            madeInputs &= SUCCEEDED(device->CreateBuffer(&inputDesc, nullptr, &loaderVb));
+            okay &= check(madeInputs, "real loader collection IA buffers exist");
+            Microsoft::WRL::ComPtr<ID3D11Buffer> priorLoaderIb, priorLoaderVb;
+            DXGI_FORMAT priorLoaderFormat = DXGI_FORMAT_UNKNOWN;
+            UINT priorLoaderIndexOffset = 0, priorLoaderStride = 0, priorLoaderVertexOffset = 0;
+            immediate->IAGetIndexBuffer(&priorLoaderIb, &priorLoaderFormat, &priorLoaderIndexOffset);
+            immediate->IAGetVertexBuffers(0, 1, &priorLoaderVb, &priorLoaderStride, &priorLoaderVertexOffset);
+            immediate->IASetIndexBuffer(loaderIb.Get(), DXGI_FORMAT_R16_UINT, 0);
+            ID3D11Buffer* loaderVertex = loaderVb.Get();
+            const UINT loaderStride = 8, loaderOffset = 0;
+            immediate->IASetVertexBuffers(0, 1, &loaderVertex, &loaderStride, &loaderOffset);
+            for (const bool fault : {false, true}) {
+                seedSpeculative();
+                edvr::loaderPanelPredicateTestProgress(0, 0, true, 0, 0);
+                edvr::VTableHook queryHook;
+                g_loaderQueryAttempts = 0;
+                g_loaderFault = fault; g_loaderRetired = fault;
+                const bool hooked = queryHook.attach(immediate, 128) &&
+                    queryHook.setMode(edvr::HookMode::CopyVptr) &&
+                    queryHook.replace(80, reinterpret_cast<void*>(&loaderReentryGetIndex),
+                        reinterpret_cast<void**>(&g_loaderGetIndex)) && queryHook.commit();
+                okay &= check(hooked, "typed actual IAGetIndexBuffer slot80 callback installed");
+                const bool visited = loaderVisit(loaderRtv);
+                queryHook.uninstall();
+                okay &= check(visited && g_loaderQueryAttempts == 1 &&
+                                  loaderResult.siteResult.outcome == SiteOutcome::Declined &&
+                                  lpRead(loaderFact.helper.collection.capCountGate, 0) &&
+                                  lpRead(loaderFact.helper.collection.guardEntered, true) &&
+                                  lpRead(loaderFact.helper.collection.guardReturned, !fault) &&
+                                  loaderFact.helper.collection.collectionMutationUnobserved &&
+                                  lpRead(loaderFact.helper.withhold.chainOnSpecGate, !fault) &&
+                                  (fault ? lpRead(loaderFact.helper.withhold.retiredGate, true) :
+                                      lpSkipped(loaderFact.helper.withhold.retiredGate)),
+                              "actual collection reentry/fault controls freshly consumed classification flags");
+                okay &= check(fault ?
+                    (lpRead(loaderFact.helper.collection.capDroppedBeforeWrite, UINT32_MAX) &&
+                     lpRead(loaderFact.helper.collection.capDroppedAfterWrite, 0) &&
+                     lpSkipped(loaderFact.helper.collection.capCountBeforeWrite)) :
+                    (lpRead(loaderFact.helper.collection.capCountBeforeWrite, 23) &&
+                     lpRead(loaderFact.helper.collection.capCountAfterWrite, 24) &&
+                     lpRead(loaderFact.helper.collection.ibFillBeforeWrite, 0) &&
+                     lpRead(loaderFact.helper.collection.ibFillAfterWrite, 60) &&
+                     lpSkipped(loaderFact.helper.collection.capDroppedBeforeWrite)),
+                    "capture ledger observes immediate write-local values after actual COM callback");
+            }
+            seedSpeculative();
+            edvr::loaderPanelPredicateTestProgress(0, 0, true, 0, 0);
+            {
+                edvr::VTableHook faultHook;
+                g_loaderQueryAttempts = 0;
+                g_loaderFault = true; g_loaderRetired = true;
+                const bool hooked = faultHook.attach(immediate, 128) &&
+                    faultHook.setMode(edvr::HookMode::CopyVptr) &&
+                    faultHook.replace(80, reinterpret_cast<void*>(&loaderReentryGetIndex),
+                        reinterpret_cast<void**>(&g_loaderGetIndex)) && faultHook.commit();
+                okay &= check(hooked, "fresh actual IA hook for NoTrace collection fault");
+                const bool visited = loaderVisit(loaderRtv, false);
+                faultHook.uninstall();
+                okay &= check(visited && g_loaderQueryAttempts == 1 &&
+                                  loaderResult.siteResult.outcome == SiteOutcome::Declined &&
+                                  edvr::draw_ladder_trace::loaderPanelFactCountForTest(loaderResult.token) == 0,
+                              "NoTrace actual collection fault preserves decline without observation");
+            }
+            g_loaderFault = false;
+            seedSpeculative();
+            edvr::loaderPanelPredicateTestProgress(0, 0, true, 24, UINT32_MAX);
+            okay &= check(loaderVisit(loaderRtv) &&
+                              lpRead(loaderFact.helper.collection.capCountGate, 24) &&
+                              lpSkipped(loaderFact.helper.collection.guardEntered) &&
+                              lpRead(loaderFact.helper.collection.capDroppedAfterWrite, 0) &&
+                              !loaderFact.helper.collection.collectionMutationUnobserved,
+                          "capture capacity rejects before the callback and wraps the real drop counter");
+            seedSpeculative();
+            edvr::loaderPanelPredicateTestProgress(48, 0, true, 0, 0);
+            okay &= check(loaderVisit(loaderRtv) &&
+                              lpSkipped(loaderFact.helper.collection.capCountGate) &&
+                              lpSkipped(loaderFact.helper.collection.guardEntered) &&
+                              lpRead(loaderFact.helper.collection.capDroppedAfterWrite, 1),
+                          "overlong sequence excludes collection before capacity read");
+            seedSpeculative();
+            edvr::loaderPanelPredicateTestProgress(0, 0, true, 0, 0);
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> loaderTextureView;
+            const bool madeTextureView = SUCCEEDED(device->CreateShaderResourceView(
+                loaderTarget, nullptr, &loaderTextureView));
+            okay &= check(madeTextureView, "real typed loader texture view exists");
+            void* const priorTextureBinding = edvr::bindingGet(edvr::BindSlot::PsSrv0);
+            edvr::bindingSet(edvr::BindSlot::PsSrv0, loaderTextureView.Get());
+            const bool texturedVisit = loaderVisit(loaderRtv);
+            edvr::bindingSet(edvr::BindSlot::PsSrv0, priorTextureBinding);
+            okay &= check(texturedVisit && loaderResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              lpRead(loaderFact.outer.textured, true) &&
+                              lpSkipped(loaderFact.helper.collection.capCountGate) &&
+                              lpSkipped(loaderFact.helper.collection.guardEntered) &&
+                              lpSkipped(loaderFact.helper.collection.capDroppedAfterWrite),
+                          "raw nonnull texture binding excludes collection but preserves first-panel speculation");
+            // Last LoaderPanel scenario: exhaust its real six-fault lifetime
+            // budget, without resetting or modifying the budget in the seam.
+            while (g_loaderInjectedFaults < 6) {
+                seedSpeculative();
+                edvr::loaderPanelPredicateTestProgress(0, 0, true, 0, 0);
+                edvr::VTableHook exhaustionHook;
+                g_loaderQueryAttempts = 0;
+                g_loaderFault = true; g_loaderRetired = true;
+                const bool hooked = exhaustionHook.attach(immediate, 128) &&
+                    exhaustionHook.setMode(edvr::HookMode::CopyVptr) &&
+                    exhaustionHook.replace(80, reinterpret_cast<void*>(&loaderReentryGetIndex),
+                        reinterpret_cast<void**>(&g_loaderGetIndex)) && exhaustionHook.commit();
+                okay &= check(hooked, "fresh real IA hook for lifetime budget exhaustion");
+                const bool visited = loaderVisit(loaderRtv);
+                exhaustionHook.uninstall();
+                const bool injected = visited && g_loaderQueryAttempts == 1 &&
+                    lpRead(loaderFact.helper.collection.guardEntered, true) &&
+                    lpRead(loaderFact.helper.collection.guardReturned, false);
+                okay &= check(injected, "actual typed collection faults consume the real budget");
+                if (!injected) break; // fail boundedly if admission was lost early
+            }
+            seedSpeculative();
+            edvr::loaderPanelPredicateTestProgress(0, 0, true, 0, 0);
+            {
+                edvr::VTableHook skippedHook;
+                g_loaderQueryAttempts = 0;
+                const bool hooked = skippedHook.attach(immediate, 128) &&
+                    skippedHook.setMode(edvr::HookMode::CopyVptr) &&
+                    skippedHook.replace(80, reinterpret_cast<void*>(&loaderReentryGetIndex),
+                        reinterpret_cast<void**>(&g_loaderGetIndex)) && skippedHook.commit();
+                okay &= check(hooked, "real IA hook observes exhausted-budget skip");
+                const bool visited = loaderVisit(loaderRtv);
+                skippedHook.uninstall();
+                okay &= check(visited && g_loaderInjectedFaults == 6 && g_loaderQueryAttempts == 0 &&
+                                  lpRead(loaderFact.helper.collection.guardEntered, false) &&
+                                  lpRead(loaderFact.helper.collection.guardReturned, false) &&
+                                  lpRead(loaderFact.helper.collection.capDroppedBeforeWrite, 0) &&
+                                  lpRead(loaderFact.helper.collection.capDroppedAfterWrite, 1) &&
+                                  !loaderFact.helper.collection.collectionMutationUnobserved,
+                              "six real faults exclude seventh callback but retain outer drop mutation");
+            }
+            g_loaderFault = false;
+            edvr::loaderPanelShutdown();
+            edvr::loaderPanelPredicateTestSeed(false, false, false, false, 0, 0, nullptr, 0);
+            immediate->IASetIndexBuffer(priorLoaderIb.Get(), priorLoaderFormat, priorLoaderIndexOffset);
+            ID3D11Buffer* priorLoaderVertex = priorLoaderVb.Get();
+            immediate->IASetVertexBuffers(0, 1, &priorLoaderVertex, &priorLoaderStride, &priorLoaderVertexOffset);
+        }
+        if (loaderRtv) loaderRtv->Release();
+        if (loaderTarget) loaderTarget->Release();
         constexpr auto contextSite = static_cast<std::uint16_t>(SiteId::kForeignContextNone);
         constexpr auto distanceSite = static_cast<std::uint16_t>(SiteId::kEyeNoDistanceNone);
 

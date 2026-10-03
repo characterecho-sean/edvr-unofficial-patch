@@ -87,6 +87,8 @@
 // flight. docs/loading-panel-handoff.md carries the full evidence trail.
 #pragma once
 
+#include "loader_panel_observation.h"
+
 #include <cstdint>
 
 struct ID3D11DeviceContext;
@@ -121,6 +123,20 @@ bool loaderPanelDimWanted();
 bool loaderPanelOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances, uint32_t startIndex, int baseVertex,
                        uint32_t targetW, uint32_t targetH, bool textured);
+bool loaderPanelOnDrawObserved(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                       uint32_t instances, uint32_t startIndex, int baseVertex,
+                       uint32_t targetW, uint32_t targetH, bool textured,
+                       LoaderPanelHelperObservation& observation);
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+void loaderPanelPredicateTestSeed(bool enabled, bool chainOn, bool specDone,
+    bool retired, uint32_t chainWidth, uint32_t chainHeight,
+    const uint32_t* chainOrdinals, uint32_t chainOrdinalCount) noexcept;
+void loaderPanelPredicateTestProgress(uint32_t sequencePosition,
+    uint32_t panelOrdinal, bool collecting, uint32_t captureCount,
+    uint32_t droppedCount) noexcept;
+void loaderPanelPredicateTestReentry(bool chainOn, bool specDone, bool retired,
+    uint32_t captureCount, uint32_t droppedCount) noexcept;
+#endif
 
 // Swallow the backdrop's draw and re-issue it from the collapsed geometry.
 // False means nothing was drawn and the caller must draw stock -- the state

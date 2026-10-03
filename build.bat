@@ -1828,6 +1828,33 @@ python tools\draw_ladder_replay.py --file ^
 python tools\draw_ladder_replay.py --file ^
     "%BUILD%\draw_ladder_test-trace\resolve_bind_negative\edvr_gfx_resolve_negative.draw-ladder-76.json" ^
     --expected-log edvr_gfx_resolve_negative.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_missing\edvr_gfx_loader_panel_missing.draw-ladder-77.json" ^
+    --expected-log edvr_gfx_loader_panel_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate\edvr_gfx_loader_panel_duplicate.draw-ladder-78.json" ^
+    --expected-log edvr_gfx_loader_panel_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind\edvr_gfx_loader_panel_wrong_kind.draw-ladder-79.json" ^
+    --expected-log edvr_gfx_loader_panel_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read\edvr_gfx_loader_panel_bad_read.draw-ladder-80.json" ^
+    --expected-log edvr_gfx_loader_panel_bad_read.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited\edvr_gfx_loader_panel_unvisited.draw-ladder-81.json" ^
+    --expected-log edvr_gfx_loader_panel_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_unknown\edvr_gfx_loader_panel_unknown.draw-ladder-82.json" ^
+    --expected-log edvr_gfx_loader_panel_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity\edvr_gfx_loader_panel_chain_over_capacity.draw-ladder-83.json" ^
+    --expected-log edvr_gfx_loader_panel_chain_over_capacity.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative\edvr_gfx_loader_panel_paths.draw-ladder-85.json" ^
+    --expected-log edvr_gfx_loader_panel_paths.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning\edvr_gfx_loader_panel_mutation_warning.draw-ladder-86.json" ^
+    --expected-log edvr_gfx_loader_panel_mutation_warning.log --dry-run --expect-mutation-unobserved 1 || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -2014,6 +2041,35 @@ if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_positive" rmdir "%BUILD%\d
 del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_negative\edvr_gfx_resolve_negative.log"
 del /q "%BUILD%\draw_ladder_test-trace\resolve_bind_negative\edvr_gfx_resolve_negative.draw-ladder-76.json"
 if exist "%BUILD%\draw_ladder_test-trace\resolve_bind_negative" rmdir "%BUILD%\draw_ladder_test-trace\resolve_bind_negative"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_missing\edvr_gfx_loader_panel_missing.draw-ladder-77.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_missing\edvr_gfx_loader_panel_missing.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_missing" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_missing"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate\edvr_gfx_loader_panel_duplicate.draw-ladder-78.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate\edvr_gfx_loader_panel_duplicate.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind\edvr_gfx_loader_panel_wrong_kind.draw-ladder-79.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind\edvr_gfx_loader_panel_wrong_kind.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_wrong_kind"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read\edvr_gfx_loader_panel_bad_read.draw-ladder-80.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read\edvr_gfx_loader_panel_bad_read.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_bad_read"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited\edvr_gfx_loader_panel_unvisited.draw-ladder-81.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited\edvr_gfx_loader_panel_unvisited.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_unknown\edvr_gfx_loader_panel_unknown.draw-ladder-82.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_unknown\edvr_gfx_loader_panel_unknown.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_unknown" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity\edvr_gfx_loader_panel_chain_over_capacity.draw-ladder-83.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity\edvr_gfx_loader_panel_chain_over_capacity.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_chain_over_capacity"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_pool_cap\edvr_gfx_loader_panel_pool_cap.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_pool_cap"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative\edvr_gfx_loader_panel_paths.draw-ladder-85.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative\edvr_gfx_loader_panel_paths.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_positive_negative"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning\edvr_gfx_loader_panel_mutation_warning.draw-ladder-86.json"
+del /q "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning\edvr_gfx_loader_panel_mutation_warning.log"
+if exist "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning" rmdir "%BUILD%\draw_ladder_test-trace\loader_panel_mutation_warning"
 if exist "%BUILD%\draw_ladder_test-trace\disabled" rmdir "%BUILD%\draw_ladder_test-trace\disabled"
 if exist "%BUILD%\draw_ladder_test-trace\valid" rmdir "%BUILD%\draw_ladder_test-trace\valid"
 if exist "%BUILD%\draw_ladder_test-trace\terminalmatrix" rmdir "%BUILD%\draw_ladder_test-trace\terminalmatrix"
@@ -2331,7 +2387,7 @@ exit /b 0
 echo [edvr] === actual VScreen predicate producer regression ===
 if not exist "%OBJ%\vscreenpredicate" mkdir "%OBJ%\vscreenpredicate"
 REM The actual visitor lives in the graphics module. Link this isolated EXE
-REM against the completed production object set, replacing just the two
+REM against the completed production object set, replacing the three
 REM macro-test translation units. These inputs are built before the rig pool.
 if not exist "%OBJ%\d3d11\vscreen.obj" exit /b 1
 if not exist "%OBJ%\d3d11\draw_ladder_trace.obj" exit /b 1
@@ -2340,17 +2396,18 @@ cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
     /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
     /Fo"%OBJ%\vscreenpredicate\\" ^
     "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
-    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp"
+    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
 > "%OBJ%\vscreenpredicate\production_objects.rsp" (
     for %%F in ("%OBJ%\d3d11\*.obj") do (
-        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" echo "%%~fF"
+        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" echo "%%~fF"
     )
 )
 link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     /OUT:"%BUILD%\vscreen_predicate_test.exe" ^
     "%OBJ%\vscreenpredicate\vscreen_predicate_test.obj" ^
     "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
+    "%OBJ%\vscreenpredicate\loader_panel.obj" ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
@@ -3627,6 +3684,7 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
     /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\uilayerworld\\" /Fe"%OBJ%\uilayerworld\ui_layer_world_test.exe" ^
     "tools\ui_layer_world_test\ui_layer_world_test.cpp" "src\d3d11\ui_layer.cpp" ^
+    "src\d3d11\plugin_cost.cpp" "src\common\vtable_hook.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     /link /INCREMENTAL:NO d3dcompiler.lib user32.lib

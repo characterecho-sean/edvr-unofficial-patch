@@ -980,6 +980,95 @@ edvr::ResolveBindObservation resolveBindFact(bool matched = false, unsigned vari
     return fact;
 }
 
+template <class T>
+void loaderPanelRead(edvr::LoaderPanelRead<T>& read, T value) {
+    read = {true, true, value};
+}
+
+std::uint32_t loaderPanelFold(std::uint32_t hash, std::uint32_t value) {
+    return (hash ^ value) * 16777619u;
+}
+
+edvr::LoaderPanelObservation loaderPanelFact(bool selected = false,
+                                               unsigned variant = 0) {
+    edvr::LoaderPanelObservation fact{};
+    loaderPanelRead(fact.outer.wants, variant == 2 ? false : selected);
+    if (variant == 2) {
+        fact.outer.wants.known = false;
+        return fact;
+    }
+    if (variant == 0 && !selected) return fact;
+
+    loaderPanelRead(fact.outer.eyeDrawsLastFrame, 0u);
+    loaderPanelRead(fact.outer.rtvPresent, true);
+    loaderPanelRead(fact.outer.resolved, true);
+    loaderPanelRead(fact.outer.isTexture2D, true);
+    loaderPanelRead(fact.outer.targetWidth, 2400u);
+    loaderPanelRead(fact.outer.targetHeight, 2400u);
+    loaderPanelRead(fact.outer.qsStartIndex, 23u);
+    loaderPanelRead(fact.outer.qsBaseVertex, -7);
+    loaderPanelRead(fact.outer.textured, false);
+
+    auto& helper = fact.helper;
+    loaderPanelRead(helper.wants, true);
+    loaderPanelRead(helper.contextNonNull, true);
+    auto& seq = helper.sequence;
+    std::uint32_t hash = 2166136261u;
+    loaderPanelRead(seq.position, 0u);
+    loaderPanelRead(seq.hashBeforeCount, hash);
+    hash = loaderPanelFold(hash, 30u);
+    loaderPanelRead(seq.hashAfterCount, hash);
+    loaderPanelRead(seq.hashBeforeWidth, hash);
+    hash = loaderPanelFold(hash, 2400u);
+    loaderPanelRead(seq.hashAfterWidth, hash);
+    loaderPanelRead(seq.hashBeforeHeight, hash);
+    hash = loaderPanelFold(hash, 2400u);
+    loaderPanelRead(seq.hashAfterHeight, hash);
+    loaderPanelRead(seq.slotCount, 30u);
+    loaderPanelRead(seq.slotWidth, 2400u);
+    loaderPanelRead(seq.slotHeight, 2400u);
+    loaderPanelRead(seq.lenBefore, 0u);
+    loaderPanelRead(seq.lenAfter, 1u);
+
+    auto& panel = helper.panel;
+    loaderPanelRead(panel.frameAnyBefore, false);
+    loaderPanelRead(panel.frameAnyAfter, true);
+    loaderPanelRead(panel.frameFirstPanelDoneBefore, false);
+    loaderPanelRead(panel.frameFirstPanelDoneAfter, true);
+    loaderPanelRead(panel.chainOnBeforeCollection, false);
+    loaderPanelRead(panel.localOrdinal, (std::numeric_limits<std::uint32_t>::max)());
+
+    auto& collection = helper.collection;
+    loaderPanelRead(collection.collecting, false);
+
+    auto& withhold = helper.withhold;
+    loaderPanelRead(withhold.subArmBeforeClear, false);
+    loaderPanelRead(withhold.subArmAfterClear, false);
+    loaderPanelRead(withhold.specDoneGate, false);
+    loaderPanelRead(withhold.chainOnSpecGate, false);
+    loaderPanelRead(withhold.retiredGate, false);
+    loaderPanelRead(withhold.subArmBeforeWithhold, false);
+    loaderPanelRead(withhold.subArmAfterWithhold, true);
+    loaderPanelRead(withhold.frameWithheldBefore, false);
+    loaderPanelRead(withhold.frameWithheldAfter, true);
+    loaderPanelRead(withhold.dimLiveBefore, false);
+    loaderPanelRead(withhold.dimLiveAfter, true);
+
+    if (variant == 3) {
+        loaderPanelRead(collection.collecting, true);
+        loaderPanelRead(collection.capCountGate, 0u);
+        loaderPanelRead(collection.guardEntered, true);
+        loaderPanelRead(collection.guardReturned, true);
+        loaderPanelRead(collection.capDroppedBeforeWrite, 0u);
+        loaderPanelRead(collection.capDroppedAfterWrite, 1u);
+        collection.collectionMutationUnobserved = true;
+    } else if (variant == 4) {
+        loaderPanelRead(withhold.chainOrdCountGate, 5u);
+        loaderPanelRead(withhold.terminalChainOrdCount, 5u);
+    }
+    return fact;
+}
+
 edvr::EyeCensusObservation eyeCensusFact(bool matched = false, char kind = 'D',
                                       std::uint32_t count = 240, unsigned variant = 0) {
     edvr::EyeCensusObservation fact{};
@@ -1332,7 +1421,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        int glareWorld = 0, std::uint32_t frameNo = 15,
                        bool stagedFss = false, bool rawPanelEnabled = false,
                        unsigned basicCase = 0, unsigned eyeCensusCase = 0,
-                       unsigned resolveBindCase = 0) {
+                       unsigned resolveBindCase = 0,
+                       unsigned loaderPanelCase = 0) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     const bool overflowBefore = trace::overflowed();
@@ -1398,6 +1488,9 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     } else if (terminal == ladder::SiteId::kEyeBackdropComposite) {
         facts.kind = static_cast<std::uint8_t>('X');
         facts.count = 120;
+    } else if (terminal == ladder::SiteId::kOffscreenLoaderPanel) {
+        facts.kind = static_cast<std::uint8_t>('X');
+        facts.count = 30;
     }
     if (facts.kind == 'D' || facts.kind == 'N') {
         facts.args.base = 17;
@@ -1614,6 +1707,12 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 resolveBindCase);
             if (resolveBindCase == 2) fact.outer.wants = {true, false, false};
             policy.resolveBindFact(fact);
+        }
+        if (visited == ladder::SiteId::kOffscreenLoaderPanel && loaderPanelCase != 1) {
+            auto fact = loaderPanelFact(
+                terminal == ladder::SiteId::kOffscreenLoaderPanel,
+                loaderPanelCase);
+            policy.loaderPanelFact(fact);
         }
         if (visited == ladder::SiteId::kFssPanelClaim) {
             policy.fssFact(fssFact(edvr::FssTraceFactKind::kPanel,
@@ -2110,7 +2209,8 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
-                matrixJson.find("\"predicateFactVersion\":11") != std::string::npos &&
+                matrixJson.find("\"predicateFactVersion\":12") != std::string::npos &&
+                matrixJson.find("\"siteId\":25,\"kind\":19") != std::string::npos &&
                 matrixJson.find("\"siteId\":57,\"kind\":12") != std::string::npos &&
                 matrixJson.find("\"siteId\":58,\"kind\":13") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":12144190660518967694}") != std::string::npos &&
@@ -2641,7 +2741,7 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":11") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":12") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&
@@ -3154,6 +3254,114 @@ bool traceWriterChecks(const char* rootArg) {
     trace::frameEnd(76);
     ok &= check(negativeResolveWritten && trace::status() == trace::Status::CompleteWritten,
                 "disabled, zero lookup, getter-fault, denied-budget and cached nonmatch paths serialize");
+    trace::shutdown();
+
+    const auto loaderTerminal = [&](std::uint32_t frame, ladder::SiteId terminal,
+                                    unsigned factCase) {
+        return writeTerminalCase(ladder::RouteId::kOffscreen,
+            ladder::SequenceId::kOffscreen, 'D', terminal, true,
+            kFrozenOffscreen, 10, ladder::OffscreenSequence{}, 1, false, false,
+            edvr::SunglareTraceMode::kStock, false, false, 0, frame,
+            false, false, 0, 0, 0, factCase);
+    };
+
+    const bool missingLoaderStarted = beginFssCase(
+        "loader_panel_missing", "edvr_gfx_loader_panel_missing.log", 77);
+    const bool missingLoaderWritten = missingLoaderStarted && loaderTerminal(
+        77, ladder::SiteId::kOffscreenFallthroughNone, 1);
+    trace::frameEnd(77);
+    ok &= check(missingLoaderWritten && trace::status() == trace::Status::InvalidCapture,
+                "visited site25 without its source fact invalidates the canonical draw");
+    trace::shutdown();
+
+    const auto loaderRejected = [&](const char* directory, const char* log,
+                                    std::uint32_t frame, unsigned badCase) {
+        const bool started = beginFssCase(directory, log, frame);
+        const auto token = trace::beginDraw(fssMalformedDraw);
+        auto fact = loaderPanelFact();
+        if (badCase == 1) fact.kind = 18;
+        if (badCase == 2) fact.outer.wants.reached = false;
+        trace::appendLoaderPanelFact(token, fact);
+        if (badCase == 0) trace::appendLoaderPanelFact(token, fact);
+        const bool rejectedAtAppend = trace::overflowed();
+        finishFssCase(token, frame);
+        const bool rejected = started && rejectedAtAppend &&
+            trace::invalidationReason() == trace::CaptureInvalidation::Other;
+        trace::shutdown();
+        return rejected;
+    };
+    ok &= check(loaderRejected("loader_panel_duplicate", "edvr_gfx_loader_panel_duplicate.log", 78, 0),
+                "duplicate site25 fact is rejected at append");
+    ok &= check(loaderRejected("loader_panel_wrong_kind", "edvr_gfx_loader_panel_wrong_kind.log", 79, 1),
+                "site25 fact with a noncanonical kind is rejected at append");
+    ok &= check(loaderRejected("loader_panel_bad_read", "edvr_gfx_loader_panel_bad_read.log", 80, 2),
+                "known unreached site25 input is rejected at append");
+
+    const bool unvisitedLoaderStarted = beginFssCase(
+        "loader_panel_unvisited", "edvr_gfx_loader_panel_unvisited.log", 81);
+    const auto unvisitedLoaderToken = trace::beginDraw(fssMalformedDraw);
+    trace::appendLoaderPanelFact(unvisitedLoaderToken, loaderPanelFact());
+    const bool loaderAcceptedBeforeFinish = !trace::overflowed();
+    finishFssCase(unvisitedLoaderToken, 81);
+    ok &= check(unvisitedLoaderStarted && loaderAcceptedBeforeFinish && trace::overflowed() &&
+                    trace::invalidationReason() == trace::CaptureInvalidation::Other,
+                "site25 fact attached to a draw that did not visit the rung is rejected at finish");
+    trace::shutdown();
+
+    const bool unknownLoaderStarted = beginFssCase(
+        "loader_panel_unknown", "edvr_gfx_loader_panel_unknown.log", 82);
+    const bool unknownLoaderWritten = unknownLoaderStarted && loaderTerminal(
+        82, ladder::SiteId::kOffscreenFallthroughNone, 2);
+    trace::frameEnd(82);
+    ok &= check(unknownLoaderWritten && trace::status() == trace::Status::CompleteWritten,
+                "reached but unknown loader wants input remains a valid unavailable fact");
+    trace::shutdown();
+
+    const bool oversizedLoaderStarted = beginFssCase(
+        "loader_panel_chain_over_capacity", "edvr_gfx_loader_panel_chain_over_capacity.log", 83);
+    const bool oversizedLoaderAdded = oversizedLoaderStarted && loaderTerminal(
+        83, ladder::SiteId::kOffscreenLoaderPanel, 4);
+    trace::frameEnd(83);
+    ok &= check(oversizedLoaderAdded && trace::status() == trace::Status::InvalidCapture &&
+                    trace::invalidationReason() == trace::CaptureInvalidation::Other,
+                "loader chain ordinal count beyond its fixed array is rejected");
+    trace::shutdown();
+
+    const bool loaderPoolStarted = beginFssCase(
+        "loader_panel_pool_cap", "edvr_gfx_loader_panel_pool_cap.log", 84);
+    bool loaderPoolFilled = loaderPoolStarted;
+    trace::Token lastLoaderToken{};
+    for (std::uint32_t i = 0; loaderPoolFilled && i < trace::kMaxLoaderPanelFacts; ++i) {
+        auto poolDraw = fssMalformedDraw;
+        poolDraw.eyeDrawIndex = i + 1;
+        lastLoaderToken = trace::beginDraw(poolDraw);
+        if (!lastLoaderToken.valid()) { loaderPoolFilled = false; break; }
+        trace::appendLoaderPanelFact(lastLoaderToken, loaderPanelFact());
+        if (trace::overflowed()) loaderPoolFilled = false;
+    }
+    if (loaderPoolFilled) trace::appendLoaderPanelFact(lastLoaderToken, loaderPanelFact());
+    ok &= check(loaderPoolFilled && trace::invalidationReason() ==
+                    trace::CaptureInvalidation::LoaderPanelIndexOverflow,
+                "loader-panel global fact pool overflow has its own invalidation reason");
+    trace::shutdown();
+
+    const bool loaderPathsStarted = beginFssCase(
+        "loader_panel_positive_negative", "edvr_gfx_loader_panel_paths.log", 85);
+    const bool loaderPathsWritten = loaderPathsStarted &&
+        loaderTerminal(85, ladder::SiteId::kOffscreenLoaderPanel, 0) &&
+        loaderTerminal(85, ladder::SiteId::kOffscreenFallthroughNone, 0);
+    trace::frameEnd(85);
+    ok &= check(loaderPathsWritten && trace::status() == trace::Status::CompleteWritten,
+                "raw positive speculation and known negative loader paths serialize together");
+    trace::shutdown();
+
+    const bool loaderMutationStarted = beginFssCase(
+        "loader_panel_mutation_warning", "edvr_gfx_loader_panel_mutation_warning.log", 86);
+    const bool loaderMutationWritten = loaderMutationStarted && loaderTerminal(
+        86, ladder::SiteId::kOffscreenLoaderPanel, 3);
+    trace::frameEnd(86);
+    ok &= check(loaderMutationWritten && trace::status() == trace::Status::CompleteWritten,
+                "loader fact retains selector replay with an explicit opaque collection mutation");
     trace::shutdown();
     return ok;
 }
