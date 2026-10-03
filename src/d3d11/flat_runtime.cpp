@@ -2880,7 +2880,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if (s.work == FlatWork::Paused) return;
     if (auditing) ingress.accepted.fetch_add(1, std::memory_order_relaxed);
     flatcpu::Scope shell(flatcpu::kOther);   // the scope's own time; the named families below are carved out of it
-    ctx = context; FlatRuntimeDraw d{}; auto& k = d.key;
+    ctx = context;
+    weaponDrawKind=kind;weaponDrawCount=count;weaponDrawStart=start;weaponDrawBase=base;
+    weaponDrawInstances=instances;weaponDrawStartInstance=startInstance;
+    FlatRuntimeDraw d{}; auto& k = d.key;
     // Lazy substitution (engine_velocity.h): engine motion's state may still be bound from the producer draw before this
     // one, and stays bound only while nothing that could see it runs. A diagnostic capture reads the context, so with
     // one armed the game's state goes back at once and every producer draw restores after itself, as it always did.
@@ -3679,9 +3682,24 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     else { ++s.acceptedHistoryWindow; ++s.streak; }
     if (s.streak > s.longestStreak) s.longestStreak = s.streak;
 }
+void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
+    if(!weaponFootprintStarted||!ctx)return;
+    const uint32_t actualStart=(weaponDrawKind=='D'||weaponDrawKind=='N')?
+        static_cast<uint32_t>(weaponDrawBase):weaponDrawStart;
+    const int32_t actualBase=(weaponDrawKind=='D'||weaponDrawKind=='N')?0:weaponDrawBase;
+    state().weaponFootprint.beginActualDraw(ctx,state().prefix.frame,weaponFootprintSeq,
+        weaponDrawKind,weaponDrawCount,actualStart,actualBase,weaponDrawInstances,
+        weaponDrawStartInstance,indirectArgs,indirectOffset);
+}
+void FlatRuntimeDrawScope::endActualDraw() {
+    if(weaponFootprintStarted&&ctx)
+        state().weaponFootprint.endActualDraw(ctx,state().prefix.frame,weaponFootprintSeq);
+}
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if (!ctx) return; FlatComputeInternalScope guard;
     flatcpu::Scope shell(flatcpu::kOther);
+    if(weaponFootprintStarted)
+        state().weaponFootprint.endActualDraw(ctx,state().prefix.frame,weaponFootprintSeq,false);
     if(weaponFootprintStarted)state().weaponFootprint.after(ctx,state().prefix.frame,weaponFootprintSeq);
     if(drawCaptureStarted)state().drawCapture.after(ctx);
     {

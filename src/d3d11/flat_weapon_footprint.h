@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iomanip>
+#include <initializer_list>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -50,6 +51,31 @@ class FlatWeaponFootprint {
         Plane color,depth,stencil;
     };
     struct Clear { uint32_t sequence=0,flags=0,stencil=0; const void* view=nullptr; };
+    struct DrawState {
+        const char* kind="unknown";
+        bool argumentsKnown=false;
+        uint32_t count=0,start=0,instances=0,startInstance=0;
+        int32_t base=0;
+        const void* indirectBuffer=nullptr;uint32_t indirectOffset=0;
+        uint32_t topology=0,sampleMask=~0u,scissorCount=0;
+        D3D11_BLEND_DESC blend{};D3D11_RASTERIZER_DESC raster{};
+        D3D11_RECT scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+        Ptr<ID3D11Predicate> predicate;bool predicateValue=false;
+        const void* effectiveRtv=nullptr,*effectiveDsv=nullptr;
+    };
+    struct QueryResult {
+        Ptr<ID3D11Query> query;
+        const char* status="unavailable",*reason="draw-not-bracketed";
+        uint32_t hr=0;
+        uint64_t samples=0;
+        D3D11_QUERY_DATA_PIPELINE_STATISTICS stats{};
+    };
+    struct Visibility {
+        const char* status="unavailable",*reason="draw-not-bracketed";
+        bool began=false,ended=false,valid=false;
+        uint32_t beginSeq=0,endSeq=0,polls=0;
+        QueryResult occlusion,pipeline;
+    };
     struct Frame {
         uint64_t number=0,startedMs=0,allocation=0;
         uint32_t drawSeq=0,drawCountExact=0,consumerSeq=0,consumerSlot=~0u,firstBadSeq=0;
@@ -76,6 +102,7 @@ class FlatWeaponFootprint {
         Ptr<ID3D11ShaderResourceView> depthSrv,stencilSrv;
         Ptr<ID3D11UnorderedAccessView> depthUav,stencilUav;
         Stage stages[kStages];
+        DrawState drawState;Visibility visibility;
         std::vector<Clear> clears;
         uint32_t clearOverflow=0;
     };
@@ -86,9 +113,19 @@ class FlatWeaponFootprint {
     uint64_t armFrame_=0,armMs_=0,diskBudget_=0;
     uint32_t serial_=0,completed_=0,attempts_=0,unsupported_=0;
     bool armed_=false,failed_=false;
+#ifdef EDVR_WEAPON_FOOTPRINT_TEST
+    std::string fixtureCase_;
+    bool forceQueryUnavailable_=false,forceQueryPending_=false;
+#endif
 
     static std::string ptr(const void* p) { char b[32]{};std::snprintf(b,sizeof(b),"0x%llX",static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(p)));return b; }
     static std::string hash(uint64_t v) { char b[20]{};std::snprintf(b,sizeof(b),"%016llX",static_cast<unsigned long long>(v));return b; }
+    static const char* drawKind(char kind) {
+        switch(kind){case 'D':return "Draw";case 'I':return "DrawIndexed";
+        case 'N':return "DrawInstanced";case 'X':return "DrawIndexedInstanced";
+        case 'A':return "DrawAuto";case 'Y':return "DrawInstancedIndirect";
+        case 'Z':return "DrawIndexedInstancedIndirect";default:return "unknown";}
+    }
     static bool write(const std::wstring& path,const void* data,size_t n) {
         FILE* f=nullptr;if(_wfopen_s(&f,path.c_str(),L"wb")||!f)return false;
         const bool ok=std::fwrite(data,1,n,f)==n;return std::fclose(f)==0&&ok;
@@ -101,6 +138,45 @@ class FlatWeaponFootprint {
         case DXGI_FORMAT_R16G16B16A16_FLOAT:return 8;
         default:return 0;
         }
+    }
+    static void captureDrawState(ID3D11DeviceContext* ctx,DrawState& d,char kind,
+                                 uint32_t count,uint32_t start,int32_t base,uint32_t instances,
+                                 uint32_t startInstance,ID3D11Buffer* indirectBuffer,uint32_t indirectOffset) {
+        d.kind=drawKind(kind);d.argumentsKnown=kind=='D'||kind=='I'||kind=='N'||kind=='X';
+        d.count=count;d.start=start;d.base=base;d.instances=instances;d.startInstance=startInstance;
+        d.indirectBuffer=indirectBuffer;d.indirectOffset=indirectOffset;
+        D3D11_PRIMITIVE_TOPOLOGY topology{};ctx->IAGetPrimitiveTopology(&topology);d.topology=topology;
+        Ptr<ID3D11BlendState> blend;FLOAT factors[4]{};UINT mask=~0u;
+        ctx->OMGetBlendState(&blend,factors,&mask);d.sampleMask=mask;
+        if(blend)blend->GetDesc(&d.blend);
+        else for(auto& target:d.blend.RenderTarget)target.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        Ptr<ID3D11RasterizerState> raster;ctx->RSGetState(&raster);
+        if(raster)raster->GetDesc(&d.raster);
+        else {d.raster.FillMode=D3D11_FILL_SOLID;d.raster.CullMode=D3D11_CULL_BACK;
+              d.raster.DepthClipEnable=TRUE;}
+        UINT n=D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        ctx->RSGetScissorRects(&n,d.scissors);d.scissorCount=n;
+        BOOL value=FALSE;ctx->GetPredication(&d.predicate,&value);d.predicateValue=value!=FALSE;
+        Ptr<ID3D11RenderTargetView> rt;Ptr<ID3D11DepthStencilView> ds;
+        ctx->OMGetRenderTargets(1,&rt,&ds);d.effectiveRtv=rt.Get();d.effectiveDsv=ds.Get();
+    }
+    static void queryBegin(ID3D11DeviceContext* ctx,QueryResult& q,D3D11_QUERY kind) {
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        if(!dev){q.status="unavailable";q.reason="device-unavailable";return;}
+        D3D11_QUERY_DESC desc{};desc.Query=kind;
+        const HRESULT hr=dev->CreateQuery(&desc,&q.query);q.hr=static_cast<uint32_t>(hr);
+        if(FAILED(hr)||!q.query){q.status="unavailable";q.reason="create-query-failed";return;}
+        ctx->Begin(q.query.Get());q.status="pending";q.reason="query-pending";
+    }
+    static void queryPoll(ID3D11DeviceContext* ctx,QueryResult& q,bool pipeline,bool forcePending) {
+        if(std::strcmp(q.status,"pending")||!q.query)return;
+        if(forcePending){q.hr=S_FALSE;return;}
+        const HRESULT hr=pipeline?
+            ctx->GetData(q.query.Get(),&q.stats,sizeof(q.stats),D3D11_ASYNC_GETDATA_DONOTFLUSH):
+            ctx->GetData(q.query.Get(),&q.samples,sizeof(q.samples),D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        q.hr=static_cast<uint32_t>(hr);
+        if(hr==S_OK){q.status="complete";q.reason="";}
+        else if(hr!=S_FALSE){q.status="failed";q.reason="get-data-failed";}
     }
     bool reserve(Frame& f,uint64_t n) {
         if(n>kCap||f.allocation>kCap-n)return false;
@@ -222,9 +298,10 @@ class FlatWeaponFootprint {
         return true;
     }
     std::string json(const Frame& f) const {
-        std::ostringstream o;o<<"{\"schema\":1,\"build\":\""<<EDVR_VERSION_STRING<<"\",\"frame\":"<<f.number
+        std::ostringstream o;o<<"{\"schema\":2,\"build\":\""<<EDVR_VERSION_STRING<<"\",\"frame\":"<<f.number
 #ifdef EDVR_WEAPON_FOOTPRINT_TEST
-         <<",\"fixture_kind\":\"flat_weapon_gpu_v1\""
+         <<",\"fixture_kind\":\""<<(fixtureCase_.empty()?"flat_weapon_gpu_v1":"flat_weapon_gpu_v2")
+         <<"\",\"fixture_case\":\""<<fixtureCase_<<"\""
 #endif
          <<",\"status\":\""<<f.status<<"\",\"reason\":\""<<f.reason<<"\",\"vs\":\""<<hash(kVs)
          <<"\",\"ps\":\""<<hash(kPs)<<"\",\"camera_hash\":\""<<hash(f.cameraHash)
@@ -255,7 +332,44 @@ class FlatWeaponFootprint {
         o<<",\"consumer\":{\"draw_seq\":"<<f.consumerSeq<<",\"source_resource\":\""<<ptr(f.colorResource.Get())
          <<"\",\"found\":"<<(f.consumerFound?"true":"false")<<",\"phase\":\"before_draw\",\"vs\":\""
          <<hash(f.consumerVs)<<"\",\"ps\":\""<<hash(f.consumerPs)<<"\",\"srv_slot\":"<<f.consumerSlot
-         <<",\"verdict\":\""<<f.consumerVerdict<<"\",\"first_bad_seq\":"<<f.firstBadSeq<<"},\"clears\":[";
+         <<",\"verdict\":\""<<f.consumerVerdict<<"\",\"first_bad_seq\":"<<f.firstBadSeq<<"}";
+        const auto& d=f.drawState;const auto& v=f.visibility;
+        o<<",\"draw_state\":{\"kind\":\""<<d.kind<<"\",\"arguments_known\":"<<(d.argumentsKnown?"true":"false");
+        const auto arg=[&](const char* name,int64_t value){o<<",\""<<name<<"\":";if(d.argumentsKnown)o<<value;else o<<"null";};
+        arg("count",d.count);arg("start",d.start);arg("base",d.base);arg("instances",d.instances);arg("start_instance",d.startInstance);
+        o<<",\"indirect_buffer\":";
+        if(d.indirectBuffer)o<<"\""<<ptr(d.indirectBuffer)<<"\"";else o<<"null";
+        o<<",\"indirect_offset\":";if(d.indirectBuffer)o<<d.indirectOffset;else o<<"null";
+        o<<",\"topology\":"<<d.topology<<",\"effective_rtv\":\""<<ptr(d.effectiveRtv)
+         <<"\",\"effective_dsv\":\""<<ptr(d.effectiveDsv)<<"\",\"blend\":{\"alpha_to_coverage\":"
+         <<(d.blend.AlphaToCoverageEnable?"true":"false")<<",\"independent\":"
+         <<(d.blend.IndependentBlendEnable?"true":"false")<<",\"sample_mask\":"<<d.sampleMask<<",\"write_masks\":[";
+        for(unsigned i=0;i<8;++i){if(i)o<<",";o<<static_cast<unsigned>(d.blend.RenderTarget[i].RenderTargetWriteMask);}o<<"],\"blend_enable\":[";
+        for(unsigned i=0;i<8;++i){if(i)o<<",";o<<(d.blend.RenderTarget[i].BlendEnable?"true":"false");}o<<"]}";
+        o<<",\"raster\":{\"cull\":"<<d.raster.CullMode<<",\"scissor_enable\":"
+         <<(d.raster.ScissorEnable?"true":"false")<<",\"depth_bias\":"<<d.raster.DepthBias
+         <<",\"slope_bias\":"<<d.raster.SlopeScaledDepthBias<<",\"scissors\":[";
+        for(unsigned i=0;i<d.scissorCount;++i){if(i)o<<",";const auto& r=d.scissors[i];o<<"{\"left\":"<<r.left
+            <<",\"top\":"<<r.top<<",\"right\":"<<r.right<<",\"bottom\":"<<r.bottom<<"}";}o<<"]}";
+        o<<",\"predication\":{\"bound\":"<<(d.predicate?"true":"false")<<",\"pointer\":\""
+         <<ptr(d.predicate.Get())<<"\",\"value\":"<<(d.predicateValue?"true":"false")<<"}}";
+        o<<",\"visibility\":{\"scope\":\"original_exact_draw\",\"status\":\""<<v.status
+         <<"\",\"reason\":\""<<v.reason<<"\",\"draw_seq\":"<<f.drawSeq<<",\"begin_seq\":";
+        if(v.began)o<<v.beginSeq;else o<<"null";
+        o<<",\"end_seq\":";if(v.ended)o<<v.endSeq;else o<<"null";
+        const auto& q=v.occlusion;o<<",\"occlusion\":{\"status\":\""<<q.status<<"\",\"reason\":\""
+            <<q.reason<<"\",\"hr\":"<<q.hr<<",\"samples_passed\":";
+        if(!std::strcmp(q.status,"complete"))o<<q.samples;else o<<"null";
+        const auto& p=v.pipeline;o<<"},\"pipeline_statistics\":{\"status\":\""<<p.status
+            <<"\",\"reason\":\""<<p.reason<<"\",\"hr\":"<<p.hr;
+        const char* statNames[]={"ia_vertices","ia_primitives","vs_invocations","gs_invocations","gs_primitives",
+            "c_invocations","c_primitives","ps_invocations","hs_invocations","ds_invocations","cs_invocations"};
+        const uint64_t statValues[]={p.stats.IAVertices,p.stats.IAPrimitives,p.stats.VSInvocations,p.stats.GSInvocations,
+            p.stats.GSPrimitives,p.stats.CInvocations,p.stats.CPrimitives,p.stats.PSInvocations,p.stats.HSInvocations,
+            p.stats.DSInvocations,p.stats.CSInvocations};
+        for(unsigned i=0;i<11;++i){o<<",\""<<statNames[i]<<"\":";
+            if(!std::strcmp(p.status,"complete"))o<<statValues[i];else o<<"null";}
+        o<<"}},\"clears\":[";
         for(size_t i=0;i<f.clears.size();++i){if(i)o<<",";const auto& c=f.clears[i];o<<"{\"draw_seq\":"<<c.sequence
             <<",\"flags\":"<<c.flags<<",\"stencil\":"<<c.stencil<<",\"view\":\""<<ptr(c.view)<<"\"}";}
         o<<"],\"clear_overflow\":"<<f.clearOverflow<<",\"stages\":[";
@@ -274,6 +388,11 @@ class FlatWeaponFootprint {
         o<<"]}";return o.str();
     }
     void finish(Frame& f,const char* forced=nullptr) {
+        for(QueryResult* q:{&f.visibility.occlusion,&f.visibility.pipeline})
+            if(!std::strcmp(q->status,"pending")){
+                q->status=forced&&std::strcmp(forced,"readback-timeout")?"failed":"timeout";
+                q->reason=forced&&std::strcmp(forced,"readback-timeout")?forced:"get-data-timeout";
+            }
         for(auto& s:f.stages){
             if(!std::strcmp(s.status,"queued")){s.status="partial";s.reason=forced?forced:"readback-incomplete";}
             Plane* planes[]={&s.color,&s.depth,&s.stencil};
@@ -321,13 +440,16 @@ public:
         const auto root=Config::get().logDir()+L"\\flat_weapon_footprint";directory_=root+L"\\"+leaf;
         if(!ensureDirectory(Config::get().logDir())||!ensureDirectory(root)||!ensureDirectory(directory_)){
             armed_=false;Log::get().note("flat weapon footprint: arm refused directory");return;}
-        Log::get().note("flat weapon footprint: armed frame=%llu exact-VS=%016llX exact-PS=%016llX conflict-only=1 frames=2 cap=384MiB expiry=900frames/30s roi=lower-center-2048x1152 directory=%ls",
+        Log::get().note("flat weapon footprint: armed frame=%llu exact-VS=%016llX exact-PS=%016llX conflict-only=1 frames=2 gpu-cap=384MiB cumulative-disk-cap=384MiB expiry=900frames/30s roi=full-width-lower-1152 directory=%ls",
             static_cast<unsigned long long>(frame),static_cast<unsigned long long>(kVs),static_cast<unsigned long long>(kPs),directory_.c_str());
     }
 #ifdef EDVR_WEAPON_FOOTPRINT_TEST
-    void armForTest(uint64_t frame,const std::wstring& directory) {
-        arm(frame);directory_=directory;
+    void armForTest(uint64_t frame,const std::wstring& directory,const char* fixtureCase="") {
+        arm(frame);directory_=directory;fixtureCase_=fixtureCase?fixtureCase:"";
         if(!ensureDirectory(directory_)){armed_=false;Log::get().note("flat weapon footprint: test directory unavailable");}
+    }
+    void setQueryTestMode(bool unavailable,bool pending) {
+        forceQueryUnavailable_=unavailable;forceQueryPending_=pending;
     }
 #endif
     bool before(ID3D11DeviceContext* ctx,uint64_t frame,uint32_t sequence,uint64_t vs,uint64_t ps,
@@ -367,13 +489,22 @@ public:
         frame_.reset(new Frame);Frame& f=*frame_;
         f.allocation=1024*1024; // conservative shader, views, CB and metadata overhead
         f.number=frame;f.startedMs=GetTickCount64();f.drawSeq=sequence;f.drawCountExact=1;
-        f.width=cd.Width;f.height=cd.Height;f.roiW=(std::min)(2048u,cd.Width);f.roiH=(std::min)(1152u,cd.Height);
-        f.roiX=(cd.Width-f.roiW)/2;f.roiY=cd.Height-f.roiH;
+        f.width=cd.Width;f.height=cd.Height;f.roiW=cd.Width;f.roiH=(std::min)(1152u,cd.Height);
+        f.roiX=0;f.roiY=cd.Height-f.roiH;
+        const uint64_t pixels=uint64_t(f.roiW)*f.roiH;
+        const uint64_t estimatedGpu=f.allocation+uint64_t(dd.Width)*dd.Height*8+
+            pixels*8+kStages*pixels*(colorBpp(cd.Format)+8);
+        if(estimatedGpu>kCap){
+            Log::get().note("flat weapon footprint: frame=%llu refused gpu-cap estimated=%llu limit=%llu source=%ux%u color-bpp=%u",
+                static_cast<unsigned long long>(frame),static_cast<unsigned long long>(estimatedGpu),
+                static_cast<unsigned long long>(kCap),cd.Width,cd.Height,colorBpp(cd.Format));
+            frame_.reset();failed_=true;cancel("gpu-cap");return false;
+        }
         const uint64_t estimatedOutput=uint64_t(f.roiW)*f.roiH*(colorBpp(cd.Format)+5)*kStages+16384;
         if(estimatedOutput>kCap||diskBudget_>kCap-estimatedOutput){
             Log::get().note("flat weapon footprint: frame=%llu refused disk-cap estimated=%llu previous=%llu",
                 static_cast<unsigned long long>(frame),static_cast<unsigned long long>(estimatedOutput),static_cast<unsigned long long>(diskBudget_));
-            frame_.reset();failed_=true;return false;
+            frame_.reset();failed_=true;cancel("disk-cap");return false;
         }
         f.colorFormat=cd.Format;f.depthFormat=dd.Format;f.depthViewFormat=dv.Format;
         for(unsigned i=0;i<kStages;++i){
@@ -408,6 +539,29 @@ public:
         if(!tracking(frame)||frame_->drawSeq!=sequence||frame_->afterDone)return;
         frame_->afterDone=true;snapshot(ctx,*frame_,1,sequence);
     }
+    void beginActualDraw(ID3D11DeviceContext* ctx,uint64_t frame,uint32_t sequence,char kind,
+                         uint32_t count,uint32_t start,int32_t base,uint32_t instances,uint32_t startInstance,
+                         ID3D11Buffer* indirectBuffer=nullptr,uint32_t indirectOffset=0) {
+        if(!tracking(frame)||!ctx||frame_->drawSeq!=sequence||frame_->visibility.began||frame_->ended)return;
+        FlatComputeInternalScope internal;
+        Frame& f=*frame_;auto& v=f.visibility;
+        captureDrawState(ctx,f.drawState,kind,count,start,base,instances,startInstance,indirectBuffer,indirectOffset);
+        v.began=true;v.beginSeq=sequence;v.status="unavailable";v.reason="end-not-seen";
+#ifdef EDVR_WEAPON_FOOTPRINT_TEST
+        if(forceQueryUnavailable_){v.occlusion.reason=v.pipeline.reason="test-forced-unavailable";return;}
+#endif
+        queryBegin(ctx,v.occlusion,D3D11_QUERY_OCCLUSION);
+        queryBegin(ctx,v.pipeline,D3D11_QUERY_PIPELINE_STATISTICS);
+    }
+    void endActualDraw(ID3D11DeviceContext* ctx,uint64_t frame,uint32_t sequence,bool explicitEnd=true) {
+        if(!tracking(frame)||!ctx||frame_->drawSeq!=sequence)return;
+        auto& v=frame_->visibility;if(!v.began||v.ended)return;
+        FlatComputeInternalScope internal;
+        if(v.occlusion.query)ctx->End(v.occlusion.query.Get());
+        if(v.pipeline.query)ctx->End(v.pipeline.query.Get());
+        v.ended=true;v.endSeq=sequence;v.valid=explicitEnd&&v.beginSeq==sequence;
+        v.status=v.valid?"complete":"failed";v.reason=v.valid?"":"destructor-fallback-or-sequence-mismatch";
+    }
     void confirm(uint64_t frame,uint32_t sequence,uint32_t firstBadSeq,const char* cause) {
         if(!tracking(frame)||frame_->drawSeq!=sequence)return;
         frame_->firstBadSeq=firstBadSeq;frame_->firstBadCause=cause?cause:"unavailable";
@@ -434,19 +588,38 @@ public:
     void present(ID3D11DeviceContext* ctx,uint64_t completedFrame,uint32_t sequence) {
         if(!armed_)return;
         const uint64_t now=GetTickCount64();
+        if(frame_&&frame_->ended&&!ctx){cancel("readback-context-unavailable");return;}
         if(frame_&&frame_->ended){
             bool waiting=false;
             for(unsigned i=0;i<kStages;++i){auto& s=frame_->stages[i];if(std::strcmp(s.status,"queued"))continue;
+                bool stageWaiting=false;
                 Plane* planes[]={&s.color,&s.depth,&s.stencil};const char* names[]={"color","depth","stencil"};
                 for(unsigned j=0;j<3;++j){Plane& p=*planes[j];if(std::strcmp(p.status,"queued"))continue;
                     p.file="frame_"+std::to_string(frame_->number)+"_"+kNames[i]+"_"+names[j]+".bin";
                     const std::wstring path=directory_+L"\\"+std::wstring(p.file.begin(),p.file.end());
-                    if(!readPlane(ctx,p,path,frame_->roiW,frame_->roiH,j==2))waiting=true;
+                    if(!readPlane(ctx,p,path,frame_->roiW,frame_->roiH,j==2)){waiting=true;stageWaiting=true;}
                 }
-                if(!waiting){s.status=std::strcmp(s.color.status,"complete")||std::strcmp(s.depth.status,"complete")||
+                if(!stageWaiting){s.status=std::strcmp(s.color.status,"complete")||std::strcmp(s.depth.status,"complete")||
                     std::strcmp(s.stencil.status,"complete")?"failed":"complete";s.reason=std::strcmp(s.status,"complete")?"readback-failed":"";}
             }
-            if(!waiting||now-frame_->startedMs>5000){finish(*frame_,waiting?"readback-timeout":nullptr);frame_.reset();}
+            auto& v=frame_->visibility;
+            if(v.ended){
+                ++v.polls;
+                bool forcePending=false;
+#ifdef EDVR_WEAPON_FOOTPRINT_TEST
+                forcePending=forceQueryPending_;
+#endif
+                queryPoll(ctx,v.occlusion,false,forcePending);
+                queryPoll(ctx,v.pipeline,true,forcePending);
+                if(v.polls>=120||now-frame_->startedMs>=5000){
+                    for(QueryResult* q:{&v.occlusion,&v.pipeline})if(!std::strcmp(q->status,"pending")){
+                        q->status="timeout";q->reason="get-data-timeout";
+                    }
+                }
+            }
+            const bool queryWaiting=!std::strcmp(v.occlusion.status,"pending")||!std::strcmp(v.pipeline.status,"pending");
+            const bool timedOut=now-frame_->startedMs>=5000||v.polls>=120;
+            if((!waiting&&!queryWaiting)||timedOut){finish(*frame_,waiting?"readback-timeout":nullptr);frame_.reset();}
         }
         if(completed_>=2){cancel(failed_?"complete-with-failures":"complete");return;}
         if(completedFrame>=armFrame_+900||now-armMs_>=30000)cancel(completed_?"arm-expired-after-sample":"arm-expired-no-match");

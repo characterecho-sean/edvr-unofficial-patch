@@ -4,7 +4,7 @@
 
 - **State:** shared route merged at `dacb7a56`; qualifications below remain open.
   Epic installed `v0.18.1-15-g06e9225c`, FLOWN. Latest analyzed log:
-  `v0.18.1-15-g06e9225c`; evidence is in sections 1-94.
+  `v0.18.1-15-g06e9225c`; evidence is in sections 1-95.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 94: stencil 0x04 is global in the sampled weapon region;
-  wider coverage and actual draw contribution are needed before admission.
+- **Next:** section 95: full-width lower capture and scoped draw queries are
+  validated; next flight confirms contribution on the shared first-person path.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -9609,3 +9609,46 @@ D3D calls are 25674/25679 per frame over approximately 14557 substituted
 draws, more geometry than section 92's cockpit. This establishes recovered
 late-flight performance, not a controlled PR72 comparison. No renderer,
 installed build or setting was changed during this analysis.
+
+## 95. Wider weapon capture and actual draw visibility (2026-10-03)
+
+Sean authorized the next instrument after section 94. Hypotheses and
+discriminants: color contribution outside the old ROI (full-width lower
+snapshots); a nonempty draw whose samples fail depth/stencil (draw arguments,
+pipeline work and zero passed samples); disabled color writes or unchanged
+overwrites (effective blend state and passed samples with no color change);
+empty or suppressed work (arguments, pipeline counters and predication).
+None of these alone establishes safe temporal history ownership.
+
+Implemented and validated: extend the existing F10 capture to full source
+width and the lower 1152 pixels, preserving the 384 MiB memory/disk guards
+and serial two-sample readback. At native 3840x2160 with R11 HDR this fits
+the budget and covers both horizontal edges. Record effective blend,
+rasterizer/scissor, topology, predication and draw arguments. Auto/indirect
+counts remain explicitly unknown when the original call does not provide
+them. Bracket only the real game draw with occlusion and pipeline-statistics
+queries; snapshot extraction runs outside that interval. Later Presents poll
+without flushing or waiting, and unavailable/failed/timeout data are distinct
+from a measured zero. Schema 2 retains offline support for schema 1 captures.
+
+Microsoft defines occlusion as samples passing depth/stencil, not color
+ownership; pipeline statistics separately report shader invocations:
+[D3D11 query types](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ne-d3d11-d3d11_query).
+Tests must distinguish visible, depth-rejected and color-write-disabled draws,
+include a right-edge contribution outside the old ROI, and prove extraction
+compute dispatches do not enter the selected draw's statistics. No AA
+admission change or new config key. Full build and all gates passed. Six
+right-edge WARP cases distinguish visible, depth-rejected, color-write-disabled
+and empty draws, plus unavailable/timed-out queries. They verify nested game
+occlusion queries retain their result and capture CS invocations stay outside
+the draw statistics. Existing complete/partial capture gates also pass.
+Clean promotion and Epic flat installation follow; preserve live settings
+and DLSS 310.9.1.
+
+Sean explicitly requires a solution that does not need him to test every
+weapon type. The exact shader pair is a diagnostic witness, not the final
+support boundary. The intended fix follows the shared first-person camera
+and render phase, with actual pixel/history ownership separated from the
+world. Automated GPU tests cover pass variants; a representative live test
+confirms the game route. Do not replace the current conflict with a growing
+per-weapon hash whitelist or assume global stencil 0x04 identifies weapons.

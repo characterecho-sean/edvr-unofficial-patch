@@ -99,11 +99,16 @@ struct FlatRuntimeDrawScope {
     bool drawCaptureStarted = false;
     bool weaponFootprintStarted = false;
     uint32_t weaponFootprintSeq = 0;
+    char weaponDrawKind = '?';
+    uint32_t weaponDrawCount = 0, weaponDrawStart = 0, weaponDrawInstances = 0, weaponDrawStartInstance = 0;
+    int32_t weaponDrawBase = 0;
     std::optional<FlatProjectionBindingScope> projection;
     FlatRuntimeDrawScope(ID3D11DeviceContext*, uint32_t instances,
                          char kind='?', uint32_t count=0, uint32_t start=0,
                          int32_t base=0, uint32_t startInstance=0);
     ~FlatRuntimeDrawScope();
+    void beginActualDraw(ID3D11Buffer* indirectArgs=nullptr, UINT indirectOffset=0);
+    void endActualDraw();
     bool recover(const char* reason);
     // The HDR route's treatment at its trigger draw (flat_hdr_route.h, design section 81): the resolve of the game's HDR
     // scene target H, written back into H, before the game's pass that reads it. `srvSlot` is the pixel-shader slot that

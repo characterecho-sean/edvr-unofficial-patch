@@ -182,7 +182,10 @@ inline int flatWeaponFootprintGpuTests(ID3D11Device* device, ID3D11DeviceContext
 
     // The observed weapon pass writes color and stencil bit 4, but not depth.
     context->OMSetBlendState(nullptr, nullptr, 0xffffffffu);
-    scissor(2, 2, 6, 6); context->Draw(3, 0);
+    scissor(2, 2, 6, 6);
+    capture.beginActualDraw(context,101,10,'D',3,0,0,1,0);
+    context->Draw(3, 0);
+    capture.endActualDraw(context,101,10);
     capture.after(context, 101, 10);
     check(statePreserved(), "after snapshot preserves render and compute state");
     // A later pass overwrites part of the mark and changes depth elsewhere.
@@ -269,7 +272,10 @@ inline int flatWeaponFootprintGpuTests(ID3D11Device* device, ID3D11DeviceContext
     check(partial.before(context, 201, 50, weaponVs, weaponPs, true, 0x5678,
           reinterpret_cast<const unsigned char*>(camera)), "missing-consumer pre-draw captured");
     context->OMSetBlendState(nullptr, nullptr, 0xffffffffu);
-    scissor(2, 2, 6, 6); context->Draw(3, 0);
+    scissor(2, 2, 6, 6);
+    partial.beginActualDraw(context,201,50,'D',3,0,0,1,0);
+    context->Draw(3, 0);
+    partial.endActualDraw(context,201,50);
     partial.after(context, 201, 50);
     partial.beforePresent(context, 201, 60);
     partial.present(context, 201, 60);
@@ -299,6 +305,185 @@ inline int flatWeaponFootprintGpuTests(ID3D11Device* device, ID3D11DeviceContext
           [](const std::string& line) { return line.find("summary status=arm-expired-no-match") != std::string::npos; }),
           "no-match expiry writes a distinct diagnostic summary");
     check(!fs::exists(noMatchRoot / L"frame_300.json"), "no-match expiry does not fabricate a capture frame");
+
+    // A right-edge draw must be inside the new full-width lower ROI. The old
+    // centered 2048-wide ROI on this 2304-wide source ended at x2175 and
+    // would miss the known selected pixels at x2240..2243 entirely.
+    constexpr UINT wideWidth = 2304, wideHeight = 64;
+    D3D11_TEXTURE2D_DESC wideDesc{};
+    wideDesc.Width = wideWidth; wideDesc.Height = wideHeight;
+    wideDesc.MipLevels = wideDesc.ArraySize = wideDesc.SampleDesc.Count = 1;
+    wideDesc.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+    wideDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> wideColor;
+    ComPtr<ID3D11RenderTargetView> wideRtv;
+    check(SUCCEEDED(device->CreateTexture2D(&wideDesc, nullptr, &wideColor)) &&
+          SUCCEEDED(device->CreateRenderTargetView(wideColor.Get(), nullptr, &wideRtv)),
+          "wide HDR source target");
+    wideDesc.Format = DXGI_FORMAT_R32G8X24_TYPELESS;
+    wideDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    ComPtr<ID3D11Texture2D> wideDepth;
+    ComPtr<ID3D11DepthStencilView> wideDsv;
+    check(SUCCEEDED(device->CreateTexture2D(&wideDesc, nullptr, &wideDepth)) &&
+          SUCCEEDED(device->CreateDepthStencilView(wideDepth.Get(), &dsvDesc, &wideDsv)),
+          "wide depth-stencil target");
+    auto rejectDesc = markDesc;
+    rejectDesc.DepthFunc = D3D11_COMPARISON_GREATER;
+    ComPtr<ID3D11DepthStencilState> rejectState;
+    check(SUCCEEDED(device->CreateDepthStencilState(&rejectDesc, &rejectState)),
+          "depth-rejected stencil state");
+    if (!wideColor || !wideRtv || !wideDepth || !wideDsv || !rejectState) return failures;
+    ComPtr<ID3D11Resource> wideColorResource;
+    wideRtv->GetResource(&wideColorResource);
+    auto wideStatePreserved = [&](ID3D11DepthStencilState* expectedDepth,
+                                  ID3D11BlendState* expectedBlend) {
+        ID3D11RenderTargetView* gotRt=nullptr;
+        ID3D11DepthStencilView* gotDsv=nullptr;
+        ID3D11DepthStencilState* gotDepth=nullptr;
+        ID3D11BlendState* gotBlend=nullptr;
+        ID3D11RasterizerState* gotRaster=nullptr;
+        ID3D11ComputeShader* gotCs=nullptr;
+        ID3D11VertexShader* gotVs=nullptr;
+        ID3D11PixelShader* gotPs=nullptr;
+        ID3D11ShaderResourceView* gotSrvs[2]{};
+        ID3D11UnorderedAccessView* gotUavs[2]{};
+        ID3D11Buffer* gotCb=nullptr;
+        UINT ref=0, mask=0; FLOAT factors[4]{};
+        context->OMGetRenderTargets(1,&gotRt,&gotDsv);
+        context->OMGetDepthStencilState(&gotDepth,&ref);
+        context->OMGetBlendState(&gotBlend,factors,&mask);
+        context->RSGetState(&gotRaster);
+        context->VSGetShader(&gotVs,nullptr,nullptr);
+        context->PSGetShader(&gotPs,nullptr,nullptr);
+        context->CSGetShader(&gotCs,nullptr,nullptr);
+        context->CSGetShaderResources(0,2,gotSrvs);
+        context->CSGetUnorderedAccessViews(0,2,gotUavs);
+        context->CSGetConstantBuffers(0,1,&gotCb);
+        UINT nv=1, ns=1; D3D11_VIEWPORT gotViewport{}; D3D11_RECT gotScissor{};
+        context->RSGetViewports(&nv,&gotViewport);
+        context->RSGetScissorRects(&ns,&gotScissor);
+        const bool good=gotRt==wideRtv.Get() && gotDsv==wideDsv.Get() &&
+            gotDepth==expectedDepth && ref==4 && gotBlend==expectedBlend && mask==0xffffffffu &&
+            gotRaster==raster.Get() && gotVs==vs.Get() && gotPs==ps.Get() && gotCs==cs.Get() &&
+            gotSrvs[0]==csSrv.Get() && gotSrvs[1]==csSrv.Get() &&
+            gotUavs[0]==csUavs[0].Get() && gotUavs[1]==csUavs[1].Get() && gotCb==csCb.Get() &&
+            nv==1 && gotViewport.Width==float(wideWidth) && gotViewport.Height==float(wideHeight) &&
+            ns==1 && gotScissor.left==2240 && gotScissor.right==2244 &&
+            gotScissor.top==2 && gotScissor.bottom==6;
+        for (auto* p : {static_cast<IUnknown*>(gotRt),static_cast<IUnknown*>(gotDsv),
+                        static_cast<IUnknown*>(gotDepth),static_cast<IUnknown*>(gotBlend),
+                        static_cast<IUnknown*>(gotRaster),static_cast<IUnknown*>(gotVs),
+                        static_cast<IUnknown*>(gotPs),static_cast<IUnknown*>(gotCs),
+                        static_cast<IUnknown*>(gotSrvs[0]),static_cast<IUnknown*>(gotSrvs[1]),
+                        static_cast<IUnknown*>(gotUavs[0]),static_cast<IUnknown*>(gotUavs[1]),
+                        static_cast<IUnknown*>(gotCb)}) if(p)p->Release();
+        return good;
+    };
+    D3D11_QUERY_DESC outerDesc{};outerDesc.Query=D3D11_QUERY_OCCLUSION;
+    ComPtr<ID3D11Query> outerQuery;
+    check(SUCCEEDED(device->CreateQuery(&outerDesc,&outerQuery)),"game-like outer occlusion query");
+    if(!outerQuery)return failures;
+    struct WideCase {const char* name; UINT frame; ID3D11DepthStencilState* depth; UINT drawCount;
+                     bool colorWrites; bool changedColor; bool changedStencil; UINT passingSamples;
+                     bool queryUnavailable; bool queryPending;};
+    const WideCase wideCases[] = {
+        {"visible",501,markState.Get(),3,true,true,true,16,false,false},
+        {"depth_rejected",601,rejectState.Get(),3,true,false,false,0,false,false},
+        {"color_disabled",701,markState.Get(),3,false,false,true,16,false,false},
+        {"zero_count",801,markState.Get(),0,true,false,false,0,false,false},
+        {"query_unavailable",901,markState.Get(),3,true,true,true,16,true,false},
+        {"query_timeout",1001,markState.Get(),3,true,true,true,16,false,true},
+    };
+    for (const auto& scenario : wideCases) {
+        const fs::path caseRoot=fs::path(exe).parent_path() /
+            (std::wstring(L"flat-weapon-wide-")+std::wstring(scenario.name,scenario.name+std::strlen(scenario.name))+L"-fixture");
+        fs::create_directories(caseRoot,fileError);
+        check(!fileError,"wide fixture output directory");
+        const std::wstring stem=L"frame_"+std::to_wstring(scenario.frame);
+        for(const auto& item:fs::directory_iterator(caseRoot))
+            if(item.is_regular_file() && item.path().filename().wstring().find(stem)==0)
+                fs::remove(item.path(),fileError);
+        context->ClearRenderTargetView(wideRtv.Get(),clearColor);
+        context->ClearDepthStencilView(wideDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,0);
+        ID3D11RenderTargetView* wideTarget=wideRtv.Get();
+        context->OMSetRenderTargets(1,&wideTarget,wideDsv.Get());
+        context->RSSetState(raster.Get());
+        D3D11_VIEWPORT wideViewport{};
+        wideViewport.Width=float(wideWidth);wideViewport.Height=float(wideHeight);wideViewport.MaxDepth=1;
+        context->RSSetViewports(1,&wideViewport);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs.Get(),nullptr,0);context->PSSetShader(ps.Get(),nullptr,0);
+        context->CSSetShader(cs.Get(),nullptr,0);
+        context->CSSetShaderResources(0,2,savedSrvs);
+        context->CSSetUnorderedAccessViews(0,2,savedUavs,nullptr);
+        context->CSSetConstantBuffers(0,1,&savedCb);
+        context->OMSetDepthStencilState(markState.Get(),4);
+        context->OMSetBlendState(noColor.Get(),nullptr,0xffffffffu);
+        scissor(1,1,3,3);context->Draw(3,0);
+        context->OMSetDepthStencilState(scenario.depth,4);
+        context->OMSetBlendState(scenario.colorWrites?nullptr:noColor.Get(),nullptr,0xffffffffu);
+        scissor(2240,2,2244,6);
+        edvr::FlatWeaponFootprint wide;
+        wide.armForTest(scenario.frame-1,caseRoot.wstring(),scenario.name);
+        wide.setQueryTestMode(scenario.queryUnavailable,scenario.queryPending);
+        context->Begin(outerQuery.Get());
+        check(wide.before(context,scenario.frame,10,weaponVs,weaponPs,true,0x9999,
+              reinterpret_cast<const unsigned char*>(camera)),"wide selected pre-draw snapshot");
+        check(wideStatePreserved(scenario.depth,scenario.colorWrites?nullptr:noColor.Get()),
+              "wide pre-draw capture restores game pipeline state");
+        wide.beginActualDraw(context,scenario.frame,10,'D',scenario.drawCount,0,0,1,0);
+        context->Draw(scenario.drawCount,0);
+        wide.endActualDraw(context,scenario.frame,10);
+        wide.after(context,scenario.frame,10);
+        context->End(outerQuery.Get());
+        check(wideStatePreserved(scenario.depth,scenario.colorWrites?nullptr:noColor.Get()),
+              "wide query and post-draw capture restore game pipeline state");
+        wide.consumer(context,scenario.frame,20,wideColorResource.Get());
+        check(wideStatePreserved(scenario.depth,scenario.colorWrites?nullptr:noColor.Get()),
+              "wide consumer snapshot restores game pipeline state");
+        wide.beforePresent(context,scenario.frame,30);
+        check(wideStatePreserved(scenario.depth,scenario.colorWrites?nullptr:noColor.Get()),
+              "wide end-frame snapshot restores game pipeline state");
+        wide.present(context,scenario.frame,30);
+        context->Flush();
+        const auto wideManifest=caseRoot/(stem+L".json");
+        for(unsigned attempt=0;attempt<1000&&!fs::exists(wideManifest);++attempt){
+            wide.present(context,scenario.frame+1+attempt,30);Sleep(1);
+        }
+        check(fs::exists(wideManifest),"wide manifest and query results committed");
+        if(fs::exists(wideManifest) && (scenario.queryUnavailable || scenario.queryPending)){
+            std::ifstream manifestStream(wideManifest,std::ios::binary);
+            const std::string manifest((std::istreambuf_iterator<char>(manifestStream)),std::istreambuf_iterator<char>());
+            const char* status=scenario.queryUnavailable?"unavailable":"timeout";
+            check(manifest.find(std::string("\"occlusion\":{\"status\":\"")+status+"\"")!=std::string::npos &&
+                  manifest.find(std::string("\"pipeline_statistics\":{\"status\":\"")+status+"\"")!=std::string::npos,
+                  "forced query failure remains explicitly unavailable or timed out");
+        }
+        UINT64 outerSamples=~UINT64(0);HRESULT outerStatus=S_FALSE;
+        for(unsigned attempt=0;attempt<1000&&outerStatus==S_FALSE;++attempt){
+            outerStatus=context->GetData(outerQuery.Get(),&outerSamples,sizeof(outerSamples),D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            if(outerStatus==S_FALSE)Sleep(1);
+        }
+        check(outerStatus==S_OK && outerSamples==scenario.passingSamples,
+              "nested game occlusion query retains its exact passed-sample count");
+        auto readWide=[&](const wchar_t* stage,const wchar_t* plane){
+            const auto filename=stem+L"_"+stage+L"_"+plane+L".bin";
+            std::ifstream stream(caseRoot/filename,std::ios::binary);
+            return std::vector<unsigned char>((std::istreambuf_iterator<char>(stream)),std::istreambuf_iterator<char>());
+        };
+        const auto colorBefore=readWide(L"before",L"color"),colorAfter=readWide(L"after",L"color");
+        const auto stencilBefore=readWide(L"before",L"stencil"),stencilAfter=readWide(L"after",L"stencil");
+        const size_t pixel=size_t(3)*wideWidth+2241;
+        check(colorBefore.size()==size_t(wideWidth)*wideHeight*4 && colorAfter.size()==colorBefore.size() &&
+              stencilBefore.size()==size_t(wideWidth)*wideHeight && stencilAfter.size()==stencilBefore.size(),
+              "full-width lower ROI has packed native planes");
+        if(colorBefore.size()==size_t(wideWidth)*wideHeight*4 && colorAfter.size()==colorBefore.size())
+            check((std::memcmp(colorBefore.data()+pixel*4,colorAfter.data()+pixel*4,4)!=0)==scenario.changedColor,
+                  "right-edge color footprint matches draw case");
+        if(stencilBefore.size()==size_t(wideWidth)*wideHeight && stencilAfter.size()==stencilBefore.size())
+            check((bool(stencilAfter[pixel]&4)&&!bool(stencilBefore[pixel]&4))==scenario.changedStencil,
+                  "right-edge stencil footprint matches draw case");
+    }
     context->ClearState();
     return failures;
 }

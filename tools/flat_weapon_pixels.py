@@ -19,16 +19,23 @@ import tempfile
 
 MAX_MANIFEST = 256 * 1024
 MAX_PLANE = 128 * 1024 * 1024
-MAX_PIXELS = 4 * 1024 * 1024
+MAX_PIXELS = 8 * 1024 * 1024
 MAX_SESSION_BYTES = 384 * 1024 * 1024
 HEX64 = re.compile(r"[0-9A-F]{16}\Z")
 FRAME = re.compile(r"frame_([0-9]+)\.json\Z")
 SAFE_FILE = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 STAGES = ("before", "after", "hdr_consumer", "end_frame")
 STATES = ("complete", "partial", "failed")
-COLOR_BPP = {26: 4, 10: 8, 28: 4}  # R11G11B10_FLOAT, RGBA16_FLOAT, RGBA8_UNORM
+COLOR_BPP = {26: 4, 10: 8, 28: 4, 29: 4, 87: 4}
+# R11G11B10_FLOAT, RGBA16_FLOAT, RGBA8_UNORM/(SRGB), BGRA8_UNORM.
 DEPTH_FORMAT = 41  # R32_FLOAT mirror of R32G8X24_TYPELESS
 STENCIL_FORMAT = 62  # R8_UINT mirror
+QUERY_STATES = ("complete", "unavailable", "failed", "timeout")
+PIPELINE_FIELDS = ("ia_vertices", "ia_primitives", "vs_invocations", "gs_invocations",
+                   "gs_primitives", "c_invocations", "c_primitives", "ps_invocations",
+                   "hs_invocations", "ds_invocations", "cs_invocations")
+DRAW_KINDS = ("Draw", "DrawIndexed", "DrawInstanced", "DrawIndexedInstanced",
+              "DrawAuto", "DrawIndexedInstancedIndirect", "DrawInstancedIndirect")
 
 
 class CaptureError(ValueError):
@@ -73,7 +80,8 @@ def plane_format(v, name):
         return v
     if isinstance(v, str):
         names = {"R11G11B10_FLOAT": 26, "R16G16B16A16_FLOAT": 10,
-                 "R8G8B8A8_UNORM": 28, "R32_FLOAT": 41, "R8_UINT": 62}
+                 "R8G8B8A8_UNORM": 28, "R8G8B8A8_UNORM_SRGB": 29,
+                 "B8G8R8A8_UNORM": 87, "R32_FLOAT": 41, "R8_UINT": 62}
         names.update({"R32G8X24_TYPELESS": 19, "D32_FLOAT_S8X24_UINT": 20,
                       "R32_FLOAT_X8X24_TYPELESS": 21})
         if v in names:
@@ -98,6 +106,126 @@ def _camera_rows(rows, name):
         raise CaptureError(f"{name} must be six finite float4 rows")
 
 
+def _finite_number(value, name, low=-1e9, high=1e9):
+    if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
+        raise CaptureError(f"{name} must be a bounded finite number")
+    return value
+
+
+def _boolean(value, name):
+    if type(value) is not bool:
+        raise CaptureError(f"{name} must be boolean")
+    return value
+
+
+def _schema2_draw_state(data):
+    draw = data.get("draw_state")
+    if not isinstance(draw, dict) or draw.get("kind") not in DRAW_KINDS:
+        raise CaptureError("schema 2 draw_state has unknown D3D draw kind")
+    known = _boolean(draw.get("arguments_known"), "draw_state.arguments_known")
+    if known == (draw["kind"] in ("DrawAuto", "DrawIndexedInstancedIndirect", "DrawInstancedIndirect")):
+        raise CaptureError("draw kind disagrees with argument availability")
+    for key in ("count", "start", "base", "instances", "start_instance"):
+        value = draw.get(key)
+        if known:
+            integer(value, "draw_state." + key, -2**31 if key == "base" else 0,
+                    2**31 - 1 if key == "base" else 2**32 - 1)
+        elif value is not None:
+            raise CaptureError(f"draw_state.{key} must be null for unknown draw arguments")
+    integer(draw.get("topology"), "draw_state.topology", 0, 64)
+    for key in ("effective_rtv", "effective_dsv"):
+        if resource(draw.get(key), "draw_state." + key) != resource(
+                data["rtv" if key == "effective_rtv" else "dsv"], key):
+            raise CaptureError(f"draw_state.{key} differs from the selected draw target")
+    blend = draw.get("blend")
+    if not isinstance(blend, dict):
+        raise CaptureError("draw_state.blend must be an object")
+    for key in ("alpha_to_coverage", "independent"):
+        _boolean(blend.get(key), "draw_state.blend." + key)
+    integer(blend.get("sample_mask"), "draw_state.blend.sample_mask", 0, 2**32 - 1)
+    for key, validator in (("write_masks", lambda v, n: integer(v, n, 0, 15)),
+                           ("blend_enable", _boolean)):
+        values = blend.get(key)
+        if not isinstance(values, list) or len(values) != 8:
+            raise CaptureError(f"draw_state.blend.{key} must have eight targets")
+        for i, value in enumerate(values):
+            validator(value, f"draw_state.blend.{key}[{i}]")
+    raster = draw.get("raster")
+    if not isinstance(raster, dict):
+        raise CaptureError("draw_state.raster must be an object")
+    integer(raster.get("cull"), "draw_state.raster.cull", 1, 3)
+    _boolean(raster.get("scissor_enable"), "draw_state.raster.scissor_enable")
+    scissors = raster.get("scissors")
+    if not isinstance(scissors, list) or len(scissors) > 16:
+        raise CaptureError("draw_state.raster.scissors must be a bounded list")
+    for i, rect in enumerate(scissors):
+        if not isinstance(rect, dict):
+            raise CaptureError(f"draw_state.raster.scissors[{i}] must be an object")
+        edges = {key: integer(rect.get(key), f"scissors[{i}].{key}", -2**31, 2**31 - 1)
+                 for key in ("left", "top", "right", "bottom")}
+        if edges["right"] < edges["left"] or edges["bottom"] < edges["top"]:
+            raise CaptureError("scissor rectangle has negative extent")
+    integer(raster.get("depth_bias"), "draw_state.raster.depth_bias", -2**31, 2**31 - 1)
+    _finite_number(raster.get("slope_bias"), "draw_state.raster.slope_bias", -1e6, 1e6)
+    pred = draw.get("predication")
+    if not isinstance(pred, dict):
+        raise CaptureError("draw_state.predication must be an object")
+    bound = _boolean(pred.get("bound"), "draw_state.predication.bound")
+    pointer = resource(pred.get("pointer"), "draw_state.predication.pointer")
+    _boolean(pred.get("value"), "draw_state.predication.value")
+    if bound != (pointer != 0):
+        raise CaptureError("predication bound flag disagrees with pointer")
+    indirect = draw.get("indirect_buffer")
+    indirect_offset = draw.get("indirect_offset")
+    if "Indirect" in draw["kind"]:
+        if resource(indirect, "draw_state.indirect_buffer") == 0:
+            raise CaptureError("indirect draw lacks arguments buffer")
+        integer(indirect_offset, "draw_state.indirect_offset", 0, 2**32 - 1)
+    elif indirect is not None or indirect_offset is not None:
+        raise CaptureError("direct draw has an indirect arguments buffer")
+
+
+def _schema2_query(query, name, fields):
+    if not isinstance(query, dict) or query.get("status") not in QUERY_STATES:
+        raise CaptureError(f"{name} has invalid query status")
+    status = query["status"]
+    integer(query.get("hr"), name + ".hr", 0, 2**32 - 1)
+    reason = short_text(query.get("reason"), name + ".reason")
+    if (status == "complete" and reason) or (status != "complete" and not reason):
+        raise CaptureError(f"{name} query status/reason disagree")
+    for field in fields:
+        value = query.get(field)
+        if status == "complete":
+            integer(value, name + "." + field, 0, 2**64 - 1)
+        elif value is not None:
+            raise CaptureError(f"{name}.{field} must be null when query is {status}")
+
+
+def _schema2_visibility(data):
+    visibility = data.get("visibility")
+    if not isinstance(visibility, dict) or visibility.get("scope") != "original_exact_draw":
+        raise CaptureError("schema 2 visibility must cover the original exact draw")
+    if integer(visibility.get("draw_seq"), "visibility.draw_seq") != data["draw_seq"]:
+        raise CaptureError("visibility draw identity differs from captured draw")
+    status = visibility.get("status")
+    if status not in QUERY_STATES:
+        raise CaptureError("visibility bracket status is invalid")
+    reason = short_text(visibility.get("reason"), "visibility.reason")
+    if (status == "complete" and reason) or (status != "complete" and not reason):
+        raise CaptureError("visibility bracket status/reason disagree")
+    for key in ("begin_seq", "end_seq"):
+        seq = visibility.get(key)
+        if seq is not None and integer(seq, "visibility." + key) != data["draw_seq"]:
+            raise CaptureError("visibility bracket sequence differs from captured draw")
+        if status == "complete" and seq is None:
+            raise CaptureError("complete visibility bracket lacks begin or end")
+    _schema2_query(visibility.get("occlusion"), "visibility.occlusion", ("samples_passed",))
+    _schema2_query(visibility.get("pipeline_statistics"), "visibility.pipeline_statistics", PIPELINE_FIELDS)
+    if status != "complete" and (visibility["occlusion"]["status"] == "complete" or
+                                  visibility["pipeline_statistics"]["status"] == "complete"):
+        raise CaptureError("incomplete bracket cannot have complete query results")
+
+
 def _read_manifest(path):
     if path.stat().st_size > MAX_MANIFEST:
         raise CaptureError(f"{path}: manifest exceeds {MAX_MANIFEST} bytes")
@@ -106,7 +234,7 @@ def _read_manifest(path):
                           parse_constant=lambda x: (_ for _ in ()).throw(CaptureError(f"nonfinite JSON value: {x}")))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise CaptureError(f"cannot read {path}: {exc}") from exc
-    if not isinstance(data, dict) or data.get("schema") != 1 or type(data.get("schema")) is not int:
+    if not isinstance(data, dict) or data.get("schema") not in (1, 2) or type(data.get("schema")) is not int:
         raise CaptureError(f"{path}: unsupported manifest schema")
     frame = integer(data.get("frame"), "frame")
     match = FRAME.fullmatch(path.name)
@@ -278,6 +406,9 @@ def _read_manifest(path):
             raise CaptureError(f"{name}: complete stage lacks a plane")
     if data["status"] == "complete" and any(s["status"] != "complete" for s in stages):
         raise CaptureError("complete capture has an incomplete stage")
+    if data["schema"] == 2:
+        _schema2_draw_state(data)
+        _schema2_visibility(data)
     return data, images
 
 
@@ -362,7 +493,7 @@ def _linear_difference(before, after, fmt, pixels):
 def analyze(path):
     manifest, images = _read_manifest(path)
     roi = manifest["roi"]
-    result = {"build": manifest["build"], "frame": manifest["frame"], "status": manifest["status"],
+    result = {"schema": manifest["schema"], "build": manifest["build"], "frame": manifest["frame"], "status": manifest["status"],
               "reason": manifest["reason"], "draw_seq": manifest["draw_seq"],
               "draw_count_exact": manifest["draw_count_exact"],
               "shader_pair": {"vs": manifest["vs"], "ps": manifest["ps"]},
@@ -383,7 +514,10 @@ def analyze(path):
                          "roi": roi,
                          "roi_coverage_fraction": (roi["width"] * roi["height"] /
                                                    (manifest["source_width"] * manifest["source_height"]))},
-              "stages_complete": [s for s in STAGES if len(images[s]) == 3]}
+               "stages_complete": [s for s in STAGES if len(images[s]) == 3]}
+    if manifest["schema"] == 2:
+        result["draw_state"] = manifest["draw_state"]
+        result["visibility"] = manifest["visibility"]
     if all(len(images[s]) == 3 for s in STAGES[:2]):
         fmt = plane_format(manifest["color_format"], "color_format")
         bpp = COLOR_BPP[fmt]
@@ -408,6 +542,10 @@ def analyze(path):
         "The end_frame snapshot is taken before Present from a retained resource; it is not proof of displayed pixel ownership.",
         "ROI covers only the reported source coordinates; changes and marks outside it were not sampled.",
         "One selected draw per frame is captured; draw_count_exact may exceed one. Final visible ownership and temporal history safety are unproven."]
+    if manifest["schema"] == 2:
+        result["limits"].extend([
+            "Occlusion samples count the whole draw, not the sampled ROI or final color ownership.",
+            "PS invocations prove shader execution, not a surviving color output; unavailable or timed-out queries are unknown, not zero."])
     return result, manifest, images
 
 
@@ -429,7 +567,13 @@ def _linear_rgb(data, fmt, i):
                 _r11((bits >> 22) & 1023, 5))
     if fmt == 10:
         return struct.unpack_from("<eee", data, i*8)
-    return tuple(v/255 for v in data[i*4:i*4+3])
+    channels = data[i*4:i*4+3]
+    if fmt == 87:
+        channels = channels[::-1]
+    rgb = tuple(v/255 for v in channels)
+    if fmt == 29:
+        return tuple(v/12.92 if v <= 0.04045 else ((v+0.055)/1.055)**2.4 for v in rgb)
+    return rgb
 
 
 def _linear_pfm(data, fmt, width, height):
@@ -467,7 +611,50 @@ def manifests(directory):
     return paths
 
 
+def _verify_wide_fixture(report, manifest):
+    cases = {
+        "visible": (501, 16, 20, 16, 1, 16, True, "complete"),
+        "depth_rejected": (601, 0, 4, 0, 1, 0, False, "complete"),
+        "color_disabled": (701, 0, 20, 16, 1, 16, True, "complete"),
+        "zero_count": (801, 0, 4, 0, 0, 0, False, "complete"),
+        "query_unavailable": (901, 16, 20, 16, None, None, False, "unavailable"),
+        "query_timeout": (1001, 16, 20, 16, None, None, False, "timeout"),
+    }
+    case = manifest.get("fixture_case")
+    if manifest.get("fixture_kind") != "flat_weapon_gpu_v2" or case not in cases:
+        raise CaptureError("unknown wide GPU fixture identity")
+    frame, color, bit4_after, added, primitives, samples, ps_required, query_status = cases[case]
+    counts = report.get("counts", {})
+    source = report["source"]
+    roi = source["roi"]
+    visibility = report.get("visibility", {})
+    occlusion = visibility.get("occlusion", {})
+    pipeline = visibility.get("pipeline_statistics", {})
+    draw = report.get("draw_state", {})
+    ps = pipeline.get("ps_invocations")
+    if (report["schema"] != 2 or report["frame"] != frame or
+            source["width"] != 2304 or source["height"] != 64 or
+            (roi["x"], roi["y"], roi["width"], roi["height"]) != (0, 0, 2304, 64) or
+            report.get("pixels_sampled") != 2304 * 64 or
+            counts.get("color_changed") != color or counts.get("depth_changed") != 0 or
+            counts.get("bit4_before") != 4 or counts.get("bit4_after") != bit4_after or
+            counts.get("bit4_added") != added or
+            counts.get("bit4_before_outside_color_change") != 4 or
+            visibility.get("status") != "complete" or
+            occlusion.get("status") != query_status or occlusion.get("samples_passed") != samples or
+            pipeline.get("status") != query_status or pipeline.get("ia_primitives") != primitives or
+            pipeline.get("cs_invocations") != (0 if query_status == "complete" else None) or
+            (ps_required and (type(ps) is not int or ps <= 0)) or
+            (case == "zero_count" and ps != 0) or
+            (case == "zero_count" and draw.get("count") != 0) or
+            (case == "color_disabled" and draw.get("blend", {}).get("write_masks", [None])[0] != 0) or
+            (case != "color_disabled" and draw.get("blend", {}).get("write_masks", [None])[0] == 0)):
+        raise CaptureError(f"wide GPU fixture {case} disagrees with known draw/visibility footprint")
+
+
 def self_test():
+    assert _linear_rgb(bytes((0, 0, 255, 255)), 87, 0) == (1.0, 0.0, 0.0)
+    assert abs(_linear_rgb(bytes((128, 0, 0, 255)), 29, 0)[0] - 0.21586) < 0.0001
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         w, h = 3, 2
@@ -563,7 +750,58 @@ def self_test():
                 pass
             else:
                 raise AssertionError(f"accepted malformed capture: {mutate}")
-        data = before; write()
+        v2 = json.loads(json.dumps(before))
+        v2["schema"] = 2
+        v2["draw_state"] = {
+            "kind": "Draw", "arguments_known": True, "count": 3, "start": 0,
+            "base": 0, "instances": 1, "start_instance": 0, "topology": 4,
+            "indirect_buffer": None, "indirect_offset": None,
+            "effective_rtv": "0xC", "effective_dsv": "0xD",
+            "blend": {"alpha_to_coverage": False, "independent": False,
+                      "sample_mask": 0xffffffff, "write_masks": [15] * 8,
+                      "blend_enable": [False] * 8},
+            "raster": {"cull": 1, "scissor_enable": True,
+                       "scissors": [{"left": 0, "top": 0, "right": 3, "bottom": 2}],
+                       "depth_bias": 0, "slope_bias": 0.0},
+            "predication": {"bound": False, "pointer": "0x0", "value": False}}
+        v2["visibility"] = {
+            "scope": "original_exact_draw", "status": "complete", "reason": "",
+            "draw_seq": 19, "begin_seq": 19, "end_seq": 19,
+            "occlusion": {"status": "complete", "samples_passed": 2, "hr": 0, "reason": ""},
+            "pipeline_statistics": {"status": "complete", "hr": 0, "reason": "",
+                                    **{key: (2 if key == "ps_invocations" else 0)
+                                       for key in PIPELINE_FIELDS}}}
+        data = v2; write()
+        assert analyze(path)[0]["visibility"]["occlusion"]["samples_passed"] == 2
+        v2_mutants = [lambda d: d["visibility"].update(begin_seq=18),
+                      lambda d: d["visibility"]["occlusion"].update(status="timeout", reason="timeout"),
+                      lambda d: d["visibility"].update(status="unavailable", reason="no-bracket"),
+                      lambda d: d["draw_state"]["blend"]["write_masks"].__setitem__(0, 16),
+                      lambda d: d["draw_state"]["raster"]["scissors"][0].update(right=-1),
+                      lambda d: d["draw_state"]["predication"].update(pointer="0x1")]
+        for mutate in v2_mutants:
+            data = json.loads(json.dumps(v2)); mutate(data); write()
+            try:
+                analyze(path)
+            except CaptureError:
+                pass
+            else:
+                raise AssertionError(f"accepted malformed schema 2 capture: {mutate}")
+        data = json.loads(json.dumps(v2))
+        data["visibility"]["occlusion"].update(status="timeout", samples_passed=None,
+                                                hr=1, reason="readback-timeout")
+        write()
+        timed_out = analyze(path)[0]["visibility"]["occlusion"]
+        assert timed_out["samples_passed"] is None and timed_out["status"] == "timeout"
+        data = json.loads(json.dumps(v2))
+        data["draw_state"]["count"] = 0
+        data["visibility"]["occlusion"]["samples_passed"] = 0
+        for key in PIPELINE_FIELDS:
+            data["visibility"]["pipeline_statistics"][key] = 0
+        write()
+        zero = analyze(path)[0]["visibility"]
+        assert zero["occlusion"]["samples_passed"] == 0
+        assert zero["pipeline_statistics"]["ia_primitives"] == 0
         names_before = set(root.iterdir())
         results = run(root, output_previews=root / "previews", dry_run=True)
         assert len(results) == 1 and names_before == set(root.iterdir())
@@ -587,18 +825,21 @@ def run(capture, output_previews=None, dry_run=False, verify_fixture=False,
                                not report.get("counts")):
             raise CaptureError("GPU fixture lacks a complete four-stage capture")
         if verify_fixture:
-            expected = {"color_changed": 16, "depth_changed": 0,
-                        "bit4_before": 4, "bit4_after": 19, "bit4_added": 15,
-                        "bit4_before_outside_color_change": 3,
-                        "color_changed_with_preexisting_bit4": 1,
-                        "added_bit4_at_consumer": 12, "added_bit4_at_end_frame": 0}
-            if (manifest.get("fixture_kind") != "flat_weapon_gpu_v1" or
-                    report["pixels_sampled"] != 4096 or
-                    any(report["counts"].get(k) != v for k, v in expected.items()) or
-                    report["transitions"]["after_to_hdr_consumer"]["depth_changed"] != 4 or
-                    report["transitions"]["hdr_consumer_to_end_frame"]["depth_changed"] != 0 or
-                    report["transitions"]["hdr_consumer_to_end_frame"]["bit4_lost"] != 15):
-                raise CaptureError("GPU fixture does not match the known color/depth/stencil footprint")
+            if manifest.get("fixture_kind") == "flat_weapon_gpu_v2":
+                _verify_wide_fixture(report, manifest)
+            else:
+                expected = {"color_changed": 16, "depth_changed": 0,
+                            "bit4_before": 4, "bit4_after": 19, "bit4_added": 15,
+                            "bit4_before_outside_color_change": 3,
+                            "color_changed_with_preexisting_bit4": 1,
+                            "added_bit4_at_consumer": 12, "added_bit4_at_end_frame": 0}
+                if (manifest.get("fixture_kind") != "flat_weapon_gpu_v1" or
+                        report["pixels_sampled"] != 4096 or
+                        any(report["counts"].get(k) != v for k, v in expected.items()) or
+                        report["transitions"]["after_to_hdr_consumer"]["depth_changed"] != 4 or
+                        report["transitions"]["hdr_consumer_to_end_frame"]["depth_changed"] != 0 or
+                        report["transitions"]["hdr_consumer_to_end_frame"]["bit4_lost"] != 15):
+                    raise CaptureError("GPU fixture does not match the known color/depth/stencil footprint")
         if verify_partial_fixture:
             expected = {"color_changed": 16, "depth_changed": 0,
                         "bit4_before": 4, "bit4_after": 19, "bit4_added": 15,

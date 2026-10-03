@@ -4360,7 +4360,9 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         FlatRuntimeDrawScope flatDraw(self, 0, 'Z');
+        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
         g_state->realDrawIndexedInstancedIndirect(self, args, off);
+        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstancedIndirect(self, args, off); return; }
@@ -4389,7 +4391,9 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         FlatRuntimeDrawScope flatDraw(self, 0, 'Y');
+        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
         g_state->realDrawInstancedIndirect(self, args, off);
+        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstancedIndirect(self, args, off); return; }
@@ -4654,7 +4658,9 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
         // the engine-motion PS/MRT or the output-copy SRV.
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
         FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
+        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
         g_state->realDraw(self, count, start);
+        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
         return;
     }
     if (g_vrWorldInternal) { g_state->realDraw(self, count, start); return; }   // the world route's own draw (vr_world_route.h)
@@ -4687,7 +4693,9 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
     if (runtimeFlatProfile()) {
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
         FlatRuntimeDrawScope flatDraw(self, 0, 'A');
+        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
         g_state->realDrawAuto(self);
+        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawAuto(self); return; }
@@ -4703,7 +4711,9 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         ++g_state->thunkHits[kHitDrawIndexed];
         if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
         FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
+        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
         g_state->realDrawIndexed(self, count, startIndex, baseVertex);
+        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexed(self, count, startIndex, baseVertex); return; }
@@ -4741,7 +4751,9 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             flatTemporalDraw(self, perInstance, instances);
         FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                       static_cast<int32_t>(startVertex), startInstance);
+        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
         g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
+        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance); return; }
@@ -4791,8 +4803,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
             flatTemporalDraw(self, perInstance, instances);
         FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                       baseVertex, startInstance);
+        if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
         g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                           baseVertex, startInstance);
+        if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
         return;
     }
     if (g_vrWorldInternal) { g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex, baseVertex, startInstance); return; }

@@ -1303,6 +1303,12 @@ python "tools\flat_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || e
 python "tools\flat_draw_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
 python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-fixture" --verify-fixture || exit /b 1
 python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-partial-fixture" --verify-partial-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-visible-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-depth_rejected-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-color_disabled-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-zero_count-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-query_unavailable-fixture" --verify-fixture || exit /b 1
+python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-wide-query_timeout-fixture" --verify-fixture || exit /b 1
 exit /b 0
 
 :rig_c2_derive_test
