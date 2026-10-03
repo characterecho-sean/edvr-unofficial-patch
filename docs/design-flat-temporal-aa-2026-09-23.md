@@ -4,7 +4,7 @@
 
 - **State:** merged to main at `dacb7a56` (2026-09-25) after Sean's go-ahead;
   the caveats below remain the open qualification record. Latest analyzed Epic
-  log is build `v0.18.1-5-g743c5dc0`. Evidence is in sections 1-90.
+  log is build `v0.18.1-12-g41b9838c`. Evidence is in sections 1-91.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,8 +33,8 @@
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
 - **Next:** section 89: on-foot rifle/effect diagnostic BUILT, capture before
-  admission; section 90: HDR building capture BUILT, position structures in the
-  center and take F10 during landing. Section 87: Coriolis native-scale FSR
+  admission; sections 90-91: HDR building capture FLOWN, shimmer unqualified;
+  performance needs a window after F10 discovery ends. Section 87: native FSR
   comparison. Preserve section 83's remaining matrix and open items below.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
@@ -9385,4 +9385,74 @@ Combined camera-probe/HDR capture tree: all 122 gates passed again in
 Epic's installed DLSS 310.9.1 runtime matches the SDK's pinned SHA-256;
 preserve it and `edvr-flat.ini` for this test. The install-only clean-version
 promotion uses the matching receipt. No flight has qualified the new capture
-or the building-shimmer cause yet.
+or the building-shimmer cause yet. Section 91 records the subsequent flight.
+
+## 91. Epic settlement flight: F10 discovery cost and HDR evidence (2026-10-03)
+
+Verified `edvr_gfx_20261003_075004.log` against installed
+`v0.18.1-12-g41b9838c` (6AC106D5), flat, native 3840x2160 DLAA. Sean reports
+poor settlement performance and took F10 in the cockpit and on foot. The
+existing motion switch had been on; previous verified 743c5dc0 windows also
+substituted about 12000 motion draws per frame. Its retirement does not explain
+a newly enabled motion path in these windows.
+
+F10 was at 07:53:28.160 and 07:54:01.736. Both pixel bursts completed 4/4,
+engine-complete, zero failures, 333490176 bytes each. Pixel work finished at
+07:53:29.603 and 07:54:02.788. Source regions visibly contain buildings;
+cockpit frame pairs are 185439/440 and 185455/456, on-foot pairs 186642/643
+and 186658/659. No additional flight is needed merely to repeat this capture.
+
+| Window | Present p50 | GPU frame p50 | Motion-wrapper D3D calls/frame |
+|---|---|---|---|
+| 06:35:05, prior 743c5dc0 flight, before F10 | 16.48 ms | 10.63 ms | 19185 |
+| 07:53:25, new flight, before F10 | 18.76 ms | 10.60 ms | 19856 |
+| 07:53:45, new flight, after F10 | 40.75 ms | 31.77 ms | 100505 |
+
+The new pre-F10 reducer is 0.511 ms / 16711 calls, about 31 ns/call; the
+prior reducer is 0.500 ms / 16341 calls, also about 31 ns/call. The views are
+not a controlled A/B, so the 16.48 versus 18.76 ms baseline difference does not
+prove a regression. There is no measured reducer regression here.
+
+Initial passive discovery completed at 07:50:47.932. Each F10 re-arms it for
+up to 120 s / 12000 useful frames. While it is active, source explicitly
+disables lazy motion batching and flushes substitution; the per-draw observer
+is also active. Discovery adds 3.357-6.784 ms per clocked frame in the sampled
+post-F10 windows; wrapper D3D calls rise fivefold for similar substituted draw
+counts (12445 before, 12315 after). GPU resolve remains about 0.99-1.01 ms.
+These are substantial diagnostic costs; the whole frame-time increase is not
+isolated causally. This behavior is unchanged between 743c5dc0 and 41b9838c.
+The log ends before discovery completes again, so no quiet post-F10 settlement
+window is available. Clocked CPU totals are sampled one frame in 16 and include
+an estimated profiling floor; they are not every frame's net EDVR cost.
+
+Ruled out: continuing HDR pixel copies as the cause of the 30-second slowdown,
+because both four-frame bursts finish within 1.5 s and their active paths stop.
+Performance comparison: stay in the same view, avoid another F10, and wait for
+`flat temporal: passive discovery complete` (up to two minutes after the last
+F10) before comparing frame times. Do not revert PR72 from these captures.
+
+On-foot building input has phase-dependent aliasing: adjacent scene-H preview
+change averages 4.68/255, whereas NGX output is 0.10/255 and finished H
+0.14/255. In cockpit same-phase frames 16 apart, a wall's input is nearly
+unchanged (0.005/255), but backend/final HDR changes about 2.15/255. This is
+temporal-output variation, not proof of the perceived shimmer's cause: F10
+re-arms state, intervening frames are unobserved, and H precedes tone mapping.
+Both positions are essentially static (emitted motion below 0.0005 px), so
+landing-motion correctness remains unqualified.
+
+Draw sessions are partial; the actual t33 pool is 5505024 bytes (336-byte
+stride, 16384 entries), exceeding the draw snapshot's 4194304-byte cap. The
+24/23 on-foot refusals, `t33-range-or-size`, are this diagnostic limit, not an
+invalid engine pool. Pixel capture retains the complete pool.
+
+Offline engine replay predicts far more stale/depth rejection than the actual
+GPU bytes because it omits the enabled steady-detail branch: the shader can
+accept a slot-depth mismatch using the camera term if previous depth confirms
+it. The capture omits that previous-depth texture and the actual steady flag;
+its replay only knows the distinct `static_scene` policy. Logs confirm steady
+depth checks ran, with zero skips. On-foot frame 186642 has 174526 valid-slot
+depth mismatches, of which the GPU accepts 174411; median absolute depth delta
+is 6.49e-8. Do not infer motion failure from replay's stale-branch counts.
+Exact per-pixel confirmation needs previous depth and the actual prep flags
+in the capture before a further diagnostic flight. Captured GPU rejection in
+the on-foot building region is about 0.019%; this alone does not validate motion.
