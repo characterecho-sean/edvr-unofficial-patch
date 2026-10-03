@@ -3,8 +3,8 @@
 ## Status
 
 - **State:** shared route merged at `dacb7a56`; qualifications below remain open.
-  Epic installed `v0.18.1-15-g06e9225c`, NOT FLOWN. Latest analyzed log:
-  `v0.18.1-12-g41b9838c`; evidence is in sections 1-93.
+  Epic installed `v0.18.1-15-g06e9225c`, FLOWN. Latest analyzed log:
+  `v0.18.1-15-g06e9225c`; evidence is in sections 1-94.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,10 +32,10 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 93: weapon conflict CONFIRMED; capture its color/stencil
-  footprint while AA refuses before admission. Quiet cockpit performance
-  recovered; building shimmer remains unqualified. Section 87: native FSR
-  comparison. Preserve section 83's remaining matrix and open items below.
+- **Next:** section 94: stencil 0x04 is global in the sampled weapon region;
+  wider coverage and actual draw contribution are needed before admission.
+  Quiet performance recovered; building shimmer is unqualified. Section 87:
+  native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
   open. VR still needs regression tests; the concourse NPC observation on
@@ -9562,3 +9562,50 @@ capture, alias DSV clears are recorded, later-frame clears are excluded,
 wrong-pair/off-arm rejection, no-match expiry and a producer-emitted missing-
 consumer partial manifest. Both offline fixture gates and parser self-tests
 pass. These fixture results validate the instrument, not live AA admission.
+
+## 94. Live weapon capture: stencil 0x04 is already global (2026-10-03)
+
+Verified `edvr_gfx_20261003_092909.log` against installed
+`v0.18.1-15-g06e9225c` (6AC11E84), Windows flat Epic, 3840x2160, preserved
+DLSS 310.9.1. Sean completed the draw-weapon/F10/hold/holster test. F10 arms
+at 09:33:16.385; both four-stage captures complete by 09:33:16.830 with
+unsupported=0. Session is `flat_weapon_footprint/20261003_153316_385_54728_1`.
+Frames 105372/105374 each observe the exact pair once; their selected draw
+sequences 24219/23400 equal first-bad-seq. The HDR consumer four draws later
+reports `conflicting-hdr-target-or-camera` for both samples.
+
+Runtime treatment stays at 7168 through 09:33:20/25 while refused frames rise
+1859 -> 1990 and accepted history remains zero. By 09:33:30 treatment resumes
+(7229 treated, accepted-reset=1/history=60), then 09:33:35 adds 119 history
+frames without more refusal. Recovery between 09:33:25 and 30 is consistent
+with Sean's holster after the ten-second hold; the input itself is not logged.
+
+The lower-center ROI is x896..2943/y1008..2159, 2,359,296 pixels (28.44% of
+the target). Before/after color, depth and stencil changes are all zero in
+both samples, as are subsequent changes through the consumer and pre-Present
+snapshot. There are no recorded stencil clears. Every sampled pixel already
+has bit 0x04 before the exact draw and retains it; new marks=0. Raw stencil is
+only 0x04 or 0x14. The 0x14 region is lower-right and clipped by the ROI edge
+(x2199..2943/y1394..2159 in the first frame; x2203..2943/y1382..2159 in the
+second). It suggests existing first-person marking but does not prove this
+draw owns those pixels. Camera XY scale ratio remains approximately 1.231279,
+near depth 0.025 -> 0.0675 and pose rows match. State is depth GEQUAL with
+no depth writes, stencil ALWAYS/REPLACE, ref/write-mask=4 and read-mask=0.
+
+Ruled out: stencil 0x04 as an exclusive local weapon mask, because every
+sampled pixel carries it before the draw. No newly marked footprint exists
+here to test survival. Unchanged bytes cannot exclude off-ROI coverage,
+rejected fragments, disabled color writes or equal-value overwrites. No AA
+admission exception is qualified. Next discriminants are wider right-edge
+coverage and actual whole-draw contribution, including draw arguments,
+blend write mask, scissor and passed-sample evidence. These should separate
+the remaining causes in one capture rather than one flight per hypothesis.
+
+Passive discovery ends at 09:35:16.401. Clean windows at 09:35:26.025/31.042
+have discovery=0, Present p50 16.32/16.91 ms, GPU frame p50 11.15/11.28 ms
+and resolve 1.00/1.01 ms. HDR windows at 09:35:25.763/30.769 treat all
+295/286 frames with no local refusals (roughly 59/57 average FPS). Wrapper
+D3D calls are 25674/25679 per frame over approximately 14557 substituted
+draws, more geometry than section 92's cockpit. This establishes recovered
+late-flight performance, not a controlled PR72 comparison. No renderer,
+installed build or setting was changed during this analysis.
