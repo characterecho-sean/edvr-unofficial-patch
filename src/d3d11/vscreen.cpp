@@ -41,6 +41,7 @@
 #include "draw_census.h"
 #include "draw_ladder_trace.h"
 #include "basic_draw_observation.h"
+#include "forwarding_observation.h"
 #include "eye_census_observation.h"
 #include "holo_scrim_observation.h"
 #include "offscreen_skip_selector.h"
@@ -4845,16 +4846,62 @@ void uiLayerSecondIssues(TracePolicy& trace, ID3D11DeviceContext* self,
 // the real draw, the matching end. One function so the fifth verdict cannot
 // be added to three thunks and forgotten in the fourth -- kRemlok's plumbing
 // was pasted four times and this is the shape that stops the pattern.
+template <class TracePolicy>
+struct ForwardingInputsScope final {
+    TracePolicy& trace;
+    ForwardingObservation fact{};
+    explicit ForwardingInputsScope(TracePolicy& t, DrawVerdict verdict) noexcept : trace(t) {
+        if constexpr (TracePolicy::enabled)
+            fact.verdictOrdinal = {true, true, static_cast<std::int16_t>(verdict)};
+    }
+    ~ForwardingInputsScope() {
+        if constexpr (TracePolicy::enabled) trace.forwardInputs(fact);
+    }
+    template <class T>
+    void set(BasicDrawRead<T>& field, T value) noexcept {
+        if constexpr (TracePolicy::enabled) field = {true, true, value};
+    }
+    template <class T, class RawRead, class OriginalRead>
+    T read(BasicDrawRead<T>& field, RawRead&& rawRead, OriginalRead&& originalRead) {
+        if constexpr (TracePolicy::enabled) {
+            const T value = rawRead();
+            field = {true, true, value};
+            return value;
+        } else {
+            return originalRead();
+        }
+    }
+};
+
+// The default path must not acquire a nontrivial cleanup scope. An empty
+// user-defined destructor still makes MSVC duplicate surrounding RAII exits.
+template <>
+struct ForwardingInputsScope<draw_ladder::NoTrace> final {
+    ForwardingObservation fact{};
+    __forceinline explicit ForwardingInputsScope(draw_ladder::NoTrace&, DrawVerdict) noexcept {}
+    template <class T>
+    __forceinline void set(BasicDrawRead<T>&, T) noexcept {}
+    template <class T, class RawRead, class OriginalRead>
+    __forceinline T read(BasicDrawRead<T>&, RawRead&&, OriginalRead&& originalRead) {
+        return originalRead();
+    }
+};
+static_assert(std::is_trivially_destructible_v<ForwardingInputsScope<draw_ladder::NoTrace>>,
+              "NoTrace forwarding input scope must not add cleanup work");
+
 template <class TracePolicy, typename RealDraw>
 void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdict v,
                         char kind, UINT count, UINT instances, const DrawArgs& args, RealDraw&& draw) {
+    ForwardingInputsScope<TracePolicy> forwardInputs(trace, v);
     // Asked once. ownerCtx is written only at install (installVScreenFixes),
     // never by anything a draw can reach, so the answer cannot change between
     // the first use below and the last -- but g_state is a global the
     // compiler must reload across every call, and it was re-reading and
     // re-comparing it at each of a dozen sites per draw.
     const bool owner = self == g_state->ownerCtx;
-    if (owner && uiLayerIssueBlocked()) {
+    if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedEntry,
+            [] { return detail::g_uiLayerIssueBlocked; },
+            [] { return uiLayerIssueBlocked(); })) {
         if constexpr (TracePolicy::enabled) {
             draw_ladder_trace::ForwardFacts facts{};
             facts.presentMask = draw_ladder_trace::kForwardOwner |
@@ -4873,7 +4920,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     struct EffectCaptureScope {
         ID3D11DeviceContext* ctx;
         ~EffectCaptureScope(){if(ctx)objectProbeSourceDrawEnd(ctx);}
-    } effectCaptureScope{owner && objectProbeLedgerActive()?self:nullptr};
+    } effectCaptureScope{owner && forwardInputs.read(forwardInputs.fact.objectProbeLedgerOn,
+            [] { return detail::g_objectProbeLedgerOn; },
+            [] { return objectProbeLedgerActive(); }) ? self : nullptr};
     // Per-draw coverage classification is cleared on every exit, including
     // skips and fixes that draw their own geometry. The original draw keeps
     // its depth state; supported coverage is reissued into private depth below.
@@ -4897,10 +4946,16 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
             // nothing armed to clean up.
         }
     } uiDepthScope(self);
+    forwardInputs.set(forwardInputs.fact.uiDepthThisDraw, uiDepthScope.on);
+    forwardInputs.set(forwardInputs.fact.holoDepthThisDraw, uiDepthScope.holoOn);
+    forwardInputs.set(forwardInputs.fact.compositeThisDraw, uiDepthScope.composite);
     if (v == DrawVerdict::kSkip) {
         // A skipped draw is not drawn at all, so there is nothing to replace.
         // Clearing here rather than trusting the next draw to do it keeps the
         // flag's lifetime inside the one call that set it.
+        if constexpr (TracePolicy::enabled)
+            forwardInputs.set(forwardInputs.fact.curveThisDrawBeforeSkipClear,
+                              g_state->curveThisDraw);
         g_state->curveThisDraw = false;
         ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
             trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
@@ -4928,7 +4983,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
         ~SeedOutcomeScope() {
             if (on) uiLayerSeedDrawOutcome(original, substituted, redirected, known);
         }
-    } seedOutcome{owner && uiLayerSeedDiagnostics()};
+    } seedOutcome{owner && forwardInputs.read(forwardInputs.fact.seedDiagnostics,
+            [] { return detail::g_uiSeedDiagnostics; },
+            [] { return uiLayerSeedDiagnostics(); })};
     // The VR world route's pending re-issue of THIS draw (ui_layer.h): held for this call and no longer, so a draw
     // that goes no further (swallowed, or never issued) cannot leave it for the next one.
     struct WorldReissueScope {
@@ -4944,7 +5001,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // (gpu_census.h), so the thunk's real-draw call can be timed as that section. Every
     // other issue through `draw` below passes None and is timed by its own section.
     auto observedDraw = [&](AlteredDraw altered) {
-        if (owner && uiLayerIssueBlocked()) {
+        if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,
+                [] { return detail::g_uiLayerIssueBlocked; },
+                [] { return uiLayerIssueBlocked(); })) {
             ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,
                 kind, count, instances, args);
@@ -4957,6 +5016,7 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
             return true;   // the strip was issued in its place: nothing more, and something was
         }
         const bool issued = draw(altered);
+        forwardInputs.set(forwardInputs.fact.originalCallReturned, issued);
         ladderTraceAction<TracePolicy, draw_ladder::ActionId::kOriginalDraw>(
             trace, draw_ladder::ActionPhase::Issue,
             issued ? draw_ladder::ActionOutcome::Applied : draw_ladder::ActionOutcome::Declined,
@@ -4970,7 +5030,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // after-UI retry has had its say.
     bool compositeCounted = false;
     UiLayerFamily compositeFamily = UiLayerFamily::kNone;
-    if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
+    if (owner && forwardInputs.read(forwardInputs.fact.uiLayerLiveEyeGate,
+            [] { return detail::g_uiLayerLive; },
+            [] { return uiLayerLive(); }) && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
         const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
         familyEvaluated = true;
         compositeCounted = uiDepthScope.composite;
@@ -4995,7 +5057,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
             if (uiLayer && uiFamily == UiLayerFamily::kScreen && uiLayerMapsOn() && screenMotionLive() && screenMotionRecognize())
                 uiLayerMapsNoteRecognised();
         }
-    } else if (owner && uiLayerLive() && v != DrawVerdict::kQuadSkip) {
+    } else if (owner && forwardInputs.read(forwardInputs.fact.uiLayerLiveFallbackGate,
+            [] { return detail::g_uiLayerLive; },
+            [] { return uiLayerLive(); }) && v != DrawVerdict::kQuadSkip) {
         // The two composites into a target vScreen does not call an eye's:
         // counted for the family census (one hash load a draw while live).
         const uint64_t vs = bindingShaderHash(BindSlot::Vs);
@@ -5017,7 +5081,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // pass to name.
     bool retryCrispPending = false;
     bool retryCrispEvaluated = false;
-    if (!uiLayer && owner && uiLayerWatching()) {
+    if (!uiLayer && owner && forwardInputs.read(forwardInputs.fact.uiLayerWatchingGate,
+            [] { return detail::g_uiLayerWatching; },
+            [] { return uiLayerWatching(); })) {
         retryCrispEvaluated = true;
         retryCrispPending = uiLayerCrispPending();
         if (!retryCrispPending) {
@@ -5163,7 +5229,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // The geometry substitution, which SWALLOWS the game's draw when it
     // succeeds and forwards it untouched when it does not -- so a failure
     // here is a flat screen, never a missing one.
-    if (g_state->curveThisDraw) {
+    if (forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,
+            [&] { return g_state->curveThisDraw; },
+            [&] { return g_state->curveThisDraw; })) {
         g_state->curveThisDraw = false;
         const bool layered = uiLayer && uiLayerBegin(self);
         if (seedOutcome.on && layered) seedOutcome.redirected = true;
@@ -5218,8 +5286,16 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // other verdict inside its fix's state change. A handful of loads and compares on a
     // draw that is none of them.
     // A Verdict-class draw also carries the fix that wraps it (alteredFixOf): the census names each.
-    const AlteredDrawClass alteredClass = classifyAlteredDraw(owner, v == DrawVerdict::kNone,
-                                                              engineVelocityDrawSubstituted(), layered);
+    const AlteredDrawClass alteredClass = [&] {
+        if constexpr (TracePolicy::enabled) {
+            const int family = engine_velocity_detail::cache.family;
+            forwardInputs.set(forwardInputs.fact.engineVelocityCacheFamily, family);
+            return classifyAlteredDraw(owner, v == DrawVerdict::kNone, family >= 0, layered);
+        } else {
+            return classifyAlteredDraw(owner, v == DrawVerdict::kNone,
+                                       engineVelocityDrawSubstituted(), layered);
+        }
+    }();
     // THE SURFACE STRIP (docs\intro-video.md, 2026-10-01). With fix.panel_curvature above 0 the intro movie's composite (EDVR places its quad;
     // intro_panel.h) and the splash's (the game's own placement; intro_curve.h) are drawn as the bent strip IN THE PLACE of the game's flat quad.
     // Here and not in the on-foot branch above, which returns before the verdict's Begin: kBackdrop's slot swap is in place by now, and the splash
@@ -5232,7 +5308,10 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     float stripGain = 0.0f;
     int stripToward = 0;
     bool stripReverseU = false;
-    if ((v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw) && owner && panelCurveSurfaceWanted()) {
+    if ((v == DrawVerdict::kIntroPanel || forwardInputs.read(
+            forwardInputs.fact.introCurveThisDrawStripGate,
+            [&] { return g_state->introCurveThisDraw; },
+            [&] { return g_state->introCurveThisDraw; })) && owner && panelCurveSurfaceWanted()) {
         if (v == DrawVerdict::kIntroPanel) {
             // The movie: its quad is EDVR's, at the splash's half-width, with +z' toward the viewer.
             if (introPanelStripArmed()) {
@@ -5278,7 +5357,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // eye's 8-bit layer, which the door's composite shows. AFTER the game's
     // own issue, so the picture is stock whether or not the re-issue runs;
     // one bool load for the ordinary draw.
-    if (originalIssued && uiLayerCrispPending()) {
+    if (originalIssued && forwardInputs.read(forwardInputs.fact.crispPendingAfterOriginal,
+            [] { return detail::g_uiLayerCrispPending; },
+            [] { return uiLayerCrispPending(); })) {
         crispHudTonemapReissue(trace, self, kind, count, instances, args);
     }
     // The VR world route: the 2D screen composite the layer did not take, issued above exactly as the game
@@ -5292,7 +5373,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // reactive mask exist to tell the upscaler about pixels the upscaler no
     // longer sees.
     if (effectCaptureScope.ctx) objectProbePanelDrawEnd(self);
-    if (owner && uiLayerIssueBlocked()) {
+    if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedAfterOriginal,
+            [] { return detail::g_uiLayerIssueBlocked; },
+            [] { return uiLayerIssueBlocked(); })) {
         // Begin failed with untrusted shader state: close existing brackets,
         // but issue neither the stock fallback nor any depth/motion replay.
         if (v == DrawVerdict::kBackdrop) {
@@ -5370,7 +5453,20 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // clears both flags and then declines unless one was set, so skipping it
     // when neither is set skips only the clearing of two false bools
     // (ui_depth.h). 44 innermost samples of the 2026-09-22 window.
-    if(owner && uiDepthPlanetPending() && uiDepthPlanetBegin(self)) {
+    const auto readPlanetPending = [&]() {
+        if constexpr (TracePolicy::enabled) {
+            bool pending = detail::g_uiDepthPlanetPending;
+            forwardInputs.set(forwardInputs.fact.planetPending, pending);
+            if (!pending) {
+                pending = detail::g_uiDepthPlanetSolarPending;
+                forwardInputs.set(forwardInputs.fact.planetSolarPending, pending);
+            }
+            return pending;
+        } else {
+            return uiDepthPlanetPending();
+        }
+    };
+    if(owner && readPlanetPending() && uiDepthPlanetBegin(self)) {
         GpuCensusScope census(self, GpuCensusSection::FramePlanet);
         pureDrawReissue(self,kind,count,instances,args);
         uiDepthPlanetEnd(self);
@@ -6312,6 +6408,10 @@ struct VScreenTestTraceCapture final {
     void fssDumpFact(const FssDumpObservation& fact) noexcept {
         policy.fssDumpFact(fact);
     }
+
+    void forwardInputs(const ForwardingObservation& fact) noexcept {
+        policy.forwardInputs(fact);
+    }
 };
 
 template <class SiteType, class TracePolicy>
@@ -6469,6 +6569,136 @@ bool vScreenFssDumpPredicateTestVisit(
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;
+    return true;
+}
+
+bool vScreenForwardingPredicateTestVisit(
+    ID3D11DeviceContext* context, bool traceEnabled,
+    const VScreenForwardingTestInput& input,
+    VScreenForwardingTestResult* result) noexcept {
+    if (!context || !result ||
+        (input.verdictOrdinal != static_cast<std::int16_t>(DrawVerdict::kNone) &&
+         input.verdictOrdinal != static_cast<std::int16_t>(DrawVerdict::kSkip))) return false;
+
+    static State fixture{};
+    fixture.ownerCtx = context;
+    fixture.rtv0Eye = nullptr;
+    fixture.curveThisDraw = input.curveThisDraw;
+    fixture.introCurveThisDraw = false;
+
+    State* const priorState = g_state;
+    const bool priorIssueBlocked = detail::g_uiLayerIssueBlocked;
+    const bool priorLedger = detail::g_objectProbeLedgerOn;
+    const bool priorSeedDiagnostics = detail::g_uiSeedDiagnostics;
+    const bool priorLayerLive = detail::g_uiLayerLive;
+    const bool priorLayerWatching = detail::g_uiLayerWatching;
+    const bool priorCrispPending = detail::g_uiLayerCrispPending;
+    const bool priorDepthPending = detail::g_uiDepthPlanetPending;
+    const bool priorSolarPending = detail::g_uiDepthPlanetSolarPending;
+    const auto priorDepthMode = detail::g_uiDepthMode;
+    const bool priorDepthOn = detail::g_uiDepthOn;
+    const bool priorDepthStoodDown = detail::g_uiDepthStoodDown;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorHoloDepth = t_holoDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    const int priorVelocityFamily = engine_velocity_detail::cache.family;
+
+    detail::g_uiLayerIssueBlocked = input.issueBlockedEntry;
+    detail::g_objectProbeLedgerOn = input.objectProbeLedgerOn;
+    detail::g_uiSeedDiagnostics = input.seedDiagnostics;
+    detail::g_uiLayerLive = input.uiLayerLive;
+    detail::g_uiLayerWatching = input.uiLayerWatching;
+    detail::g_uiLayerCrispPending = false;
+    detail::g_uiDepthPlanetPending = false;
+    detail::g_uiDepthPlanetSolarPending = false;
+    detail::g_uiDepthMode = detail::UiDepthMode::kNone;
+    detail::g_uiDepthOn = false;
+    detail::g_uiDepthStoodDown = false;
+    t_uiDepthThisDraw = input.uiDepthThisDraw;
+    t_holoDepthThisDraw = input.holoDepthThisDraw;
+    t_compositeThisDraw = input.compositeThisDraw;
+    engine_velocity_detail::cache.family = input.engineVelocityCacheFamily;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = static_cast<std::uint8_t>(input.kind);
+    facts.count = input.count;
+    facts.instances = input.instances;
+    facts.args = input.args;
+    if (traceEnabled) {
+        result->token = draw_ladder_trace::beginDraw(facts);
+        if (!result->token.valid()) {
+            g_state = priorState;
+            detail::g_uiLayerIssueBlocked = priorIssueBlocked;
+            detail::g_objectProbeLedgerOn = priorLedger;
+            detail::g_uiSeedDiagnostics = priorSeedDiagnostics;
+            detail::g_uiLayerLive = priorLayerLive;
+            detail::g_uiLayerWatching = priorLayerWatching;
+            detail::g_uiLayerCrispPending = priorCrispPending;
+            detail::g_uiDepthPlanetPending = priorDepthPending;
+            detail::g_uiDepthPlanetSolarPending = priorSolarPending;
+            detail::g_uiDepthMode = priorDepthMode;
+            detail::g_uiDepthOn = priorDepthOn;
+            detail::g_uiDepthStoodDown = priorDepthStoodDown;
+            t_uiDepthThisDraw = priorUiDepth;
+            t_holoDepthThisDraw = priorHoloDepth;
+            t_compositeThisDraw = priorComposite;
+            engine_velocity_detail::cache.family = priorVelocityFamily;
+            return false;
+        }
+    }
+
+    result->originalCalls = 0;
+    result->alteredClass = static_cast<std::uint8_t>(AlteredDrawClass::None);
+    result->callbackReturned = false;
+    const DrawArgs args = input.args;
+    const auto run = [&](auto& trace) {
+        forwardWithVerdict(trace, context, static_cast<DrawVerdict>(input.verdictOrdinal),
+            input.kind, input.count, input.instances, args, [&](AlteredDraw altered) {
+                ++result->originalCalls;
+                result->alteredClass = static_cast<std::uint8_t>(altered.cls);
+                if (input.changeIssueBlockedAfter)
+                    detail::g_uiLayerIssueBlocked = input.issueBlockedAfter;
+                if (input.changeCrispPendingAfter)
+                    detail::g_uiLayerCrispPending = input.crispPendingAfter;
+                if (input.changePlanetPendingAfter) {
+                    detail::g_uiDepthPlanetPending = input.planetPendingAfter;
+                    detail::g_uiDepthPlanetSolarPending = input.planetSolarPendingAfter;
+                }
+                result->callbackReturned = input.callbackReturns;
+                return input.callbackReturns;
+            });
+    };
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        run(trace);
+    } else {
+        draw_ladder::NoTrace trace;
+        run(trace);
+    }
+
+    result->issueBlockedAfter = detail::g_uiLayerIssueBlocked;
+    result->crispPendingAfter = detail::g_uiLayerCrispPending;
+    result->planetPendingAfter = detail::g_uiDepthPlanetPending;
+    result->planetSolarPendingAfter = detail::g_uiDepthPlanetSolarPending;
+    result->curveThisDrawAfter = fixture.curveThisDraw;
+    result->engineVelocityCacheFamilyAfter = engine_velocity_detail::cache.family;
+    g_state = priorState;
+    detail::g_uiLayerIssueBlocked = priorIssueBlocked;
+    detail::g_objectProbeLedgerOn = priorLedger;
+    detail::g_uiSeedDiagnostics = priorSeedDiagnostics;
+    detail::g_uiLayerLive = priorLayerLive;
+    detail::g_uiLayerWatching = priorLayerWatching;
+    detail::g_uiLayerCrispPending = priorCrispPending;
+    detail::g_uiDepthPlanetPending = priorDepthPending;
+    detail::g_uiDepthPlanetSolarPending = priorSolarPending;
+    detail::g_uiDepthMode = priorDepthMode;
+    detail::g_uiDepthOn = priorDepthOn;
+    detail::g_uiDepthStoodDown = priorDepthStoodDown;
+    t_uiDepthThisDraw = priorUiDepth;
+    t_holoDepthThisDraw = priorHoloDepth;
+    t_compositeThisDraw = priorComposite;
+    engine_velocity_detail::cache.family = priorVelocityFamily;
     return true;
 }
 

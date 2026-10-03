@@ -89,6 +89,53 @@ bool readFssDump(const edvr::VScreenPredicateTestResult& result,
            edvr::draw_ladder_trace::readFssDumpFactForTest(result.token, 0, fact);
 }
 
+bool readForwarding(const edvr::VScreenForwardingTestResult& result,
+                    edvr::ForwardingObservation* fact) {
+    return edvr::draw_ladder_trace::forwardingFactCountForTest(result.token) == 1 &&
+           edvr::draw_ladder_trace::readForwardingFactForTest(result.token, 0, fact);
+}
+
+template <class T, class U>
+bool fwRead(const edvr::BasicDrawRead<T>& read, U expected) {
+    return read.reached && read.known && read.value == static_cast<T>(expected);
+}
+
+template <class T>
+bool fwSkipped(const edvr::BasicDrawRead<T>& read) {
+    return !read.reached && !read.known && read.value == T{};
+}
+
+bool checkForwardAction(const edvr::VScreenForwardingTestResult& result,
+                        const edvr::VScreenForwardingTestInput& input,
+                        std::uint16_t expectedId,
+                        edvr::draw_ladder::ActionOutcome expectedOutcome,
+                        std::uint16_t expectedIssueCount) {
+    using namespace edvr::draw_ladder;
+    if (edvr::draw_ladder_trace::actionCountForTest(result.token) != 1) return false;
+    std::uint16_t actionId = 0;
+    ActionRecord actual{};
+    if (!edvr::draw_ladder_trace::readActionForTest(result.token, 0, &actionId, &actual)) return false;
+    DrawCallKind call{};
+    switch (input.kind) {
+    case 'D': call = DrawCallKind::Draw; break;
+    case 'I': call = DrawCallKind::DrawIndexed; break;
+    case 'N': call = DrawCallKind::DrawInstanced; break;
+    case 'X': call = DrawCallKind::DrawIndexedInstanced; break;
+    default: return false;
+    }
+    std::uint32_t start = input.args.start;
+    std::int32_t base = input.args.base;
+    if (input.kind == 'D' || input.kind == 'N') {
+        start = static_cast<std::uint32_t>(input.args.base);
+        base = 0;
+    }
+    return actionId == expectedId && actual.phase == ActionPhase::Issue &&
+        actual.outcome == expectedOutcome && actual.call == call && actual.flags == 0 &&
+        actual.issueCount == expectedIssueCount && actual.count == input.count &&
+        actual.instances == input.instances && actual.start == start &&
+        actual.startInstance == input.args.startInstance && actual.baseVertex == base;
+}
+
 template <class T, class U>
 bool fdRead(const edvr::FssDumpRead<T>& read, U expected) {
     return read.reached && read.known && read.value == static_cast<T>(expected);
@@ -595,6 +642,265 @@ int main(int argc, char** argv) {
 
     if (immediate && deferred) {
         using namespace edvr::draw_ladder;
+        // Local action-scope check only: the production forwardWithVerdict
+        // receives a real WARP context and an injected thunk boundary. The
+        // external caller's real draw implementation is intentionally not run.
+        const auto runForwardingPair = [&](const edvr::VScreenForwardingTestInput& input,
+                                           const char* label,
+                                           std::uint32_t expectedCalls,
+                                           std::uint8_t expectedClass) {
+            edvr::VScreenForwardingTestResult traced{}, plain{};
+            const bool tracedOk = edvr::vScreenForwardingPredicateTestVisit(
+                immediate, true, input, &traced);
+            const bool plainOk = edvr::vScreenForwardingPredicateTestVisit(
+                immediate, false, input, &plain);
+            okay &= check(tracedOk && plainOk, label);
+            okay &= check(traced.originalCalls == expectedCalls &&
+                              plain.originalCalls == expectedCalls &&
+                              traced.alteredClass == expectedClass &&
+                              plain.alteredClass == expectedClass &&
+                              traced.callbackReturned == plain.callbackReturned,
+                          "actual WARP forwarder preserves injected callback/class between Trace and NoTrace");
+            okay &= check(edvr::draw_ladder_trace::forwardingFactCountForTest(plain.token) == 0,
+                          "NoTrace forwarder appends no forwarding fact");
+            okay &= check(traced.issueBlockedAfter == plain.issueBlockedAfter &&
+                              traced.crispPendingAfter == plain.crispPendingAfter &&
+                              traced.planetPendingAfter == plain.planetPendingAfter &&
+                              traced.planetSolarPendingAfter == plain.planetSolarPendingAfter &&
+                              traced.curveThisDrawAfter == plain.curveThisDrawAfter &&
+                              traced.engineVelocityCacheFamilyAfter == plain.engineVelocityCacheFamilyAfter,
+                          "actual WARP forwarder restores identical seeded scalar state in Trace and NoTrace");
+            return traced;
+        };
+
+        edvr::VScreenForwardingTestInput forwardNone{};
+        forwardNone.kind = 'X';
+        forwardNone.count = 37;
+        forwardNone.instances = 4;
+        forwardNone.args = {12, -7, 11};
+        forwardNone.engineVelocityCacheFamily = -1;
+        auto forwardNoneResult = runForwardingPair(forwardNone,
+            "actual WARP kNone forwarder executes with injected thunk", 1, 0);
+        okay &= check(checkForwardAction(forwardNoneResult, forwardNone,
+                              static_cast<std::uint16_t>(ActionId::kOriginalDraw),
+                              ActionOutcome::Applied, 1),
+                      "kNone action has exact X tuple, Applied outcome, and one known issue");
+        edvr::ForwardingObservation forwardFact{};
+        okay &= check(readForwarding(forwardNoneResult, &forwardFact),
+                      "kNone appends one actual forwardInputs fact to the cold trace pool");
+        okay &= check(forwardFact.kind == 1 && forwardFact.version == 1 &&
+                          fwRead(forwardFact.verdictOrdinal, 0) &&
+                          fwRead(forwardFact.issueBlockedEntry, false) &&
+                          fwRead(forwardFact.objectProbeLedgerOn, false) &&
+                          fwRead(forwardFact.uiDepthThisDraw, false) &&
+                          fwRead(forwardFact.holoDepthThisDraw, false) &&
+                          fwRead(forwardFact.compositeThisDraw, false) &&
+                          fwSkipped(forwardFact.curveThisDrawBeforeSkipClear) &&
+                          fwRead(forwardFact.seedDiagnostics, false) &&
+                          fwRead(forwardFact.uiLayerLiveEyeGate, false) &&
+                          fwRead(forwardFact.uiLayerLiveFallbackGate, false) &&
+                          fwRead(forwardFact.uiLayerWatchingGate, false) &&
+                          fwRead(forwardFact.curveThisDrawCurveGate, false) &&
+                          fwRead(forwardFact.engineVelocityCacheFamily, -1) &&
+                          fwRead(forwardFact.introCurveThisDrawStripGate, false) &&
+                          fwRead(forwardFact.issueBlockedBeforeOriginal, false) &&
+                          fwRead(forwardFact.originalCallReturned, true) &&
+                          fwRead(forwardFact.crispPendingAfterOriginal, false) &&
+                          fwRead(forwardFact.issueBlockedAfterOriginal, false) &&
+                          fwRead(forwardFact.planetPending, false) &&
+                          fwRead(forwardFact.planetSolarPending, false),
+                      "kNone fact is the hand-expected lazy raw checkpoint sequence");
+
+        edvr::VScreenForwardingTestInput forwardNoneDeclined = forwardNone;
+        forwardNoneDeclined.engineVelocityCacheFamily = 0;
+        forwardNoneDeclined.callbackReturns = false;
+        auto declinedResult = runForwardingPair(forwardNoneDeclined,
+            "actual WARP kNone records a declined injected thunk", 1, 1);
+        okay &= check(checkForwardAction(declinedResult, forwardNoneDeclined,
+                              static_cast<std::uint16_t>(ActionId::kOriginalDraw),
+                              ActionOutcome::Declined, 0),
+                      "callback-false action preserves exact X tuple with zero issues");
+        edvr::ForwardingObservation declinedFact{};
+        okay &= check(readForwarding(declinedResult, &declinedFact) &&
+                          fwRead(declinedFact.engineVelocityCacheFamily, 0) &&
+                          fwRead(declinedFact.originalCallReturned, false) &&
+                          fwSkipped(declinedFact.crispPendingAfterOriginal) &&
+                          fwRead(declinedFact.issueBlockedAfterOriginal, false) &&
+                          fwRead(declinedFact.planetPending, false) &&
+                          fwRead(declinedFact.planetSolarPending, false),
+                      "declined callback lazily skips crisp but continues to blocked and planet gates");
+
+        edvr::VScreenForwardingTestInput forwardSkip{};
+        forwardSkip.verdictOrdinal = 2;
+        forwardSkip.kind = 'I';
+        forwardSkip.count = 23;
+        forwardSkip.instances = 1;
+        forwardSkip.args = {13, -8, 0};
+        auto forwardSkipResult = runForwardingPair(forwardSkip,
+            "actual WARP kSkip forwards no callback", 0, 0);
+        okay &= check(checkForwardAction(forwardSkipResult, forwardSkip,
+                              static_cast<std::uint16_t>(ActionId::kSwallowOriginal),
+                              ActionOutcome::Applied, 0),
+                      "kSkip action has exact I tuple and no original issue");
+        edvr::ForwardingObservation skipFact{};
+        okay &= check(readForwarding(forwardSkipResult, &skipFact) &&
+                          fwRead(skipFact.verdictOrdinal, 2) &&
+                          fwRead(skipFact.issueBlockedEntry, false) &&
+                          fwRead(skipFact.objectProbeLedgerOn, false) &&
+                          fwRead(skipFact.curveThisDrawBeforeSkipClear, false) &&
+                          fwSkipped(skipFact.seedDiagnostics) &&
+                          fwSkipped(skipFact.uiLayerLiveEyeGate) &&
+                          fwSkipped(skipFact.originalCallReturned) &&
+                          !forwardSkipResult.curveThisDrawAfter,
+                      "kSkip records pre-clear mutation input then preserves every later lazy checkpoint");
+
+        const auto checkKindTuple = [&](char kind, std::uint32_t count,
+                                        std::uint32_t instances, edvr::DrawArgs args,
+                                        const char* label) {
+            edvr::VScreenForwardingTestInput input{};
+            input.kind = kind;
+            input.count = count;
+            input.instances = instances;
+            input.args = args;
+            const auto result = runForwardingPair(input, label, 1, 0);
+            okay &= check(checkForwardAction(result, input,
+                                  static_cast<std::uint16_t>(ActionId::kOriginalDraw),
+                                  ActionOutcome::Applied, 1),
+                          "production original action serializes the expected draw tuple");
+        };
+        checkKindTuple('D', 29, 1, {91, 27, 5},
+                       "actual WARP kNone Draw thunk boundary is injected");
+        checkKindTuple('I', 31, 1, {13, -7, 9},
+                       "actual WARP kNone DrawIndexed thunk boundary is injected");
+        checkKindTuple('N', 35, 4, {89, 12, 11},
+                       "actual WARP kNone DrawInstanced tuple is injected");
+        const auto checkUnsignedBaseEdge = [&](char kind, std::int32_t base,
+                                                std::uint32_t expectedStart,
+                                                std::uint32_t instances,
+                                                const char* label) {
+            edvr::VScreenForwardingTestInput input{};
+            input.kind = kind;
+            input.count = 17;
+            input.instances = instances;
+            input.args = {0, base, 6};
+            const auto result = runForwardingPair(input, label, 1, 0);
+            using namespace edvr::draw_ladder;
+            std::uint16_t actionId = 0;
+            ActionRecord actual{};
+            const bool read = edvr::draw_ladder_trace::readActionForTest(
+                result.token, 0, &actionId, &actual);
+            const DrawCallKind call = kind == 'D' ? DrawCallKind::Draw
+                                                   : DrawCallKind::DrawInstanced;
+            okay &= check(edvr::draw_ladder_trace::actionCountForTest(result.token) == 1 &&
+                              read && actionId == static_cast<std::uint16_t>(ActionId::kOriginalDraw) &&
+                              actual.phase == ActionPhase::Issue &&
+                              actual.outcome == ActionOutcome::Applied &&
+                              actual.issueCount == 1 && actual.call == call &&
+                              actual.flags == 0 && actual.count == 17 &&
+                              actual.instances == instances &&
+                              actual.start == expectedStart &&
+                              actual.startInstance == 6 && actual.baseVertex == 0,
+                          "literal D/N action record preserves modulo-2^32 base conversion");
+        };
+        checkUnsignedBaseEdge('D', (-2147483647 - 1), 0x80000000u, 1,
+                              "actual WARP Draw records INT32_MIN base as unsigned start");
+        checkUnsignedBaseEdge('D', -1, 0xFFFFFFFFu, 1,
+                              "actual WARP Draw records -1 base as unsigned start");
+        checkUnsignedBaseEdge('N', (-2147483647 - 1), 0x80000000u, 4,
+                              "actual WARP DrawInstanced records INT32_MIN base as unsigned start");
+        checkUnsignedBaseEdge('N', -1, 0xFFFFFFFFu, 4,
+                              "actual WARP DrawInstanced records -1 base as unsigned start");
+
+        edvr::VScreenForwardingTestInput forwardSkipWithCurve = forwardSkip;
+        forwardSkipWithCurve.curveThisDraw = true;
+        auto skipCurveResult = runForwardingPair(forwardSkipWithCurve,
+            "actual WARP kSkip clears an armed curve marker", 0, 0);
+        edvr::ForwardingObservation skipCurveFact{};
+        okay &= check(readForwarding(skipCurveResult, &skipCurveFact) &&
+                          fwRead(skipCurveFact.curveThisDrawBeforeSkipClear, true) &&
+                          !skipCurveResult.curveThisDrawAfter &&
+                          fwSkipped(skipCurveFact.seedDiagnostics),
+                      "skip curve mutation is observed but outside the supported replay domain");
+
+        edvr::VScreenForwardingTestInput forwardBlocked{};
+        forwardBlocked.issueBlockedEntry = true;
+        auto blockedResult = runForwardingPair(forwardBlocked,
+            "actual WARP blocked entry takes early-return path", 0, 0);
+        okay &= check(checkForwardAction(blockedResult, forwardBlocked,
+                              static_cast<std::uint16_t>(ActionId::kSwallowOriginal),
+                              ActionOutcome::Declined, 0),
+                      "blocked early return emits one declined swallow action with exact tuple");
+        edvr::ForwardingObservation blockedFact{};
+        okay &= check(readForwarding(blockedResult, &blockedFact) &&
+                          fwRead(blockedFact.issueBlockedEntry, true) &&
+                          fwSkipped(blockedFact.objectProbeLedgerOn) &&
+                          fwSkipped(blockedFact.uiDepthThisDraw) &&
+                          fwSkipped(blockedFact.seedDiagnostics) &&
+                          fwSkipped(blockedFact.originalCallReturned),
+                      "blocked entry leaves scope inputs genuinely unreached");
+
+        edvr::VScreenForwardingTestInput forwardLedger{};
+        forwardLedger.objectProbeLedgerOn = true;
+        auto ledgerResult = runForwardingPair(forwardLedger,
+            "actual WARP active ledger remains outside the supported plan", 1, 0);
+        edvr::ForwardingObservation ledgerFact{};
+        okay &= check(readForwarding(ledgerResult, &ledgerFact) &&
+                          fwRead(ledgerFact.objectProbeLedgerOn, true) &&
+                          fwRead(ledgerFact.originalCallReturned, true),
+                      "active owner ledger is recorded as an unsupported raw gate");
+
+        edvr::VScreenForwardingTestInput forwardCrisp{};
+        forwardCrisp.changeCrispPendingAfter = true;
+        forwardCrisp.crispPendingAfter = true;
+        auto crispResult = runForwardingPair(forwardCrisp,
+            "actual WARP callback mutates crisp-pending checkpoint", 1, 0);
+        edvr::ForwardingObservation crispFact{};
+        okay &= check(readForwarding(crispResult, &crispFact) &&
+                          fwRead(crispFact.crispPendingAfterOriginal, true) &&
+                          !crispResult.crispPendingAfter,
+                      "crisp gate records true before its safe no-pending decline clears it");
+
+        edvr::VScreenForwardingTestInput forwardPostBlocked{};
+        forwardPostBlocked.changeIssueBlockedAfter = true;
+        forwardPostBlocked.issueBlockedAfter = true;
+        forwardPostBlocked.changePlanetPendingAfter = true;
+        forwardPostBlocked.planetPendingAfter = true;
+        auto postBlockedResult = runForwardingPair(forwardPostBlocked,
+            "actual WARP callback mutates post-original issue block", 1, 0);
+        edvr::ForwardingObservation postBlockedFact{};
+        okay &= check(readForwarding(postBlockedResult, &postBlockedFact) &&
+                          fwRead(postBlockedFact.issueBlockedAfterOriginal, true) &&
+                          fwSkipped(postBlockedFact.planetPending) &&
+                          fwSkipped(postBlockedFact.planetSolarPending),
+                      "post-original block ends lazily before planet checkpoints");
+
+        edvr::VScreenForwardingTestInput forwardPlanetPrimary{};
+        forwardPlanetPrimary.changePlanetPendingAfter = true;
+        forwardPlanetPrimary.planetPendingAfter = true;
+        forwardPlanetPrimary.planetSolarPendingAfter = true;
+        auto primaryPlanetResult = runForwardingPair(forwardPlanetPrimary,
+            "actual WARP callback mutates primary planet pending checkpoint", 1, 0);
+        edvr::ForwardingObservation primaryPlanetFact{};
+        okay &= check(readForwarding(primaryPlanetResult, &primaryPlanetFact) &&
+                          fwRead(primaryPlanetFact.planetPending, true) &&
+                          fwSkipped(primaryPlanetFact.planetSolarPending) &&
+                          !primaryPlanetResult.planetPendingAfter &&
+                          !primaryPlanetResult.planetSolarPendingAfter,
+                      "primary pending short-circuits solar read and inactive-depth helper clears both");
+
+        edvr::VScreenForwardingTestInput forwardPlanet{};
+        forwardPlanet.changePlanetPendingAfter = true;
+        forwardPlanet.planetSolarPendingAfter = true;
+        auto planetResult = runForwardingPair(forwardPlanet,
+            "actual WARP callback mutates solar pending checkpoint", 1, 0);
+        edvr::ForwardingObservation planetFact{};
+        okay &= check(readForwarding(planetResult, &planetFact) &&
+                          fwRead(planetFact.planetPending, false) &&
+                          fwRead(planetFact.planetSolarPending, true) &&
+                          !planetResult.planetPendingAfter &&
+                          !planetResult.planetSolarPendingAfter,
+                      "solar pending is lazily consumed and cleared by inactive-depth decline");
+
         ID3D11Texture2D* loaderTarget = nullptr;
         ID3D11RenderTargetView* loaderRtv = nullptr;
         D3D11_TEXTURE2D_DESC loaderTargetDesc{};

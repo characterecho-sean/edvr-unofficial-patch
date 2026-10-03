@@ -450,7 +450,10 @@ void pins() {
     }
     const std::string fwd = functionBody(vs, "void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdict v,");
     check(inOrder(fwd, {"uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily)", "worldReissue.on = uiLayerWorldReissuePending();",
-                        "screenMotionRecognize()", "uiLayer = uiLayerNoteOther(", "if (g_state->curveThisDraw) {", "const bool layered = uiLayer && uiLayerBegin(self);"}),
+                        "screenMotionRecognize()", "uiLayer = uiLayerNoteOther(",
+                        "if (forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,"
+                        "[&] { return g_state->curveThisDraw; }, [&] { return g_state->curveThisDraw; })) {",
+                        "const bool layered = uiLayer && uiLayerBegin(self);"}),
           "P4b: the recognition sits right after the decision and before the curved screen's substitution and the draw's own issue, so the curved screen is covered");
 
     // P5: the naming. Told once, at the one place screen motion names the source.

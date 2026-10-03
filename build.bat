@@ -1879,6 +1879,21 @@ python tools\draw_ladder_replay.py --file ^
 python tools\draw_ladder_replay.py --file ^
     "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap\edvr_gfx_fss_dump_wrap.draw-ladder-95.json" ^
     --expected-log edvr_gfx_fss_dump_wrap.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_none_applied\edvr_gfx_forward_none_applied.draw-ladder-96.json" ^
+    --expected-log edvr_gfx_forward_none_applied.log --dry-run --expect-forward-replayed 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_none_declined\edvr_gfx_forward_none_declined.draw-ladder-97.json" ^
+    --expected-log edvr_gfx_forward_none_declined.log --dry-run --expect-forward-replayed 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_skip\edvr_gfx_forward_skip.draw-ladder-98.json" ^
+    --expected-log edvr_gfx_forward_skip.log --dry-run --expect-forward-replayed 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_unavailable\edvr_gfx_forward_unavailable.draw-ladder-99.json" ^
+    --expected-log edvr_gfx_forward_unavailable.log --dry-run --expect-forward-unavailable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\forward_unknown\edvr_gfx_forward_unknown.draw-ladder-100.json" ^
+    --expected-log edvr_gfx_forward_unknown.log --dry-run --expect-forward-unavailable 1 || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -2112,6 +2127,22 @@ del /q "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative\edvr_gfx_fss_d
 if exist "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_positive_negative"
 del /q "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap\edvr_gfx_fss_dump_wrap.log" "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap\edvr_gfx_fss_dump_wrap.draw-ladder-95.json"
 if exist "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap" rmdir "%BUILD%\draw_ladder_test-trace\fss_dump_counter_wrap"
+del /q "%BUILD%\draw_ladder_test-trace\forward_none_applied\edvr_gfx_forward_none_applied.log" "%BUILD%\draw_ladder_test-trace\forward_none_applied\edvr_gfx_forward_none_applied.draw-ladder-96.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_none_applied" rmdir "%BUILD%\draw_ladder_test-trace\forward_none_applied"
+del /q "%BUILD%\draw_ladder_test-trace\forward_none_declined\edvr_gfx_forward_none_declined.log" "%BUILD%\draw_ladder_test-trace\forward_none_declined\edvr_gfx_forward_none_declined.draw-ladder-97.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_none_declined" rmdir "%BUILD%\draw_ladder_test-trace\forward_none_declined"
+del /q "%BUILD%\draw_ladder_test-trace\forward_skip\edvr_gfx_forward_skip.log" "%BUILD%\draw_ladder_test-trace\forward_skip\edvr_gfx_forward_skip.draw-ladder-98.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_skip" rmdir "%BUILD%\draw_ladder_test-trace\forward_skip"
+del /q "%BUILD%\draw_ladder_test-trace\forward_unavailable\edvr_gfx_forward_unavailable.log" "%BUILD%\draw_ladder_test-trace\forward_unavailable\edvr_gfx_forward_unavailable.draw-ladder-99.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_unavailable" rmdir "%BUILD%\draw_ladder_test-trace\forward_unavailable"
+del /q "%BUILD%\draw_ladder_test-trace\forward_unknown\edvr_gfx_forward_unknown.log" "%BUILD%\draw_ladder_test-trace\forward_unknown\edvr_gfx_forward_unknown.draw-ladder-100.json"
+if exist "%BUILD%\draw_ladder_test-trace\forward_unknown" rmdir "%BUILD%\draw_ladder_test-trace\forward_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\forward_duplicate\edvr_gfx_forward_duplicate.log"
+if exist "%BUILD%\draw_ladder_test-trace\forward_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\forward_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\forward_malformed\edvr_gfx_forward_malformed.log"
+if exist "%BUILD%\draw_ladder_test-trace\forward_malformed" rmdir "%BUILD%\draw_ladder_test-trace\forward_malformed"
+del /q "%BUILD%\draw_ladder_test-trace\forward_pool_overflow\edvr_gfx_forward_pool_overflow.log"
+if exist "%BUILD%\draw_ladder_test-trace\forward_pool_overflow" rmdir "%BUILD%\draw_ladder_test-trace\forward_pool_overflow"
 if exist "%BUILD%\draw_ladder_test-trace\disabled" rmdir "%BUILD%\draw_ladder_test-trace\disabled"
 if exist "%BUILD%\draw_ladder_test-trace\valid" rmdir "%BUILD%\draw_ladder_test-trace\valid"
 if exist "%BUILD%\draw_ladder_test-trace\terminalmatrix" rmdir "%BUILD%\draw_ladder_test-trace\terminalmatrix"

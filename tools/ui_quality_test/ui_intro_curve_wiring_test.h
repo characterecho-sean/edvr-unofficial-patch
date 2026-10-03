@@ -39,7 +39,7 @@ const char* const kSet = "if(kind=='X'&&count==6&&introCurveWants())s->introCurv
 const char* const kEnd = "if(g_state->introCurveThisDraw){g_state->introCurveThisDraw=false;introCurveEndDraw();}";
 const char* const kGuard =
     "if(panelCurveWants()&&srv0IsPanelSized(s,kind,count)&&!(kind=='X'&&count==6&&bindingShaderHash(BindSlot::Vs)==kIntroCompositeVsHash))s->curveThisDraw=true;";
-const char* const kCandidate = "if((v==DrawVerdict::kIntroPanel||g_state->introCurveThisDraw)&&owner&&panelCurveSurfaceWanted()){";
+const char* const kCandidate = "if((v==DrawVerdict::kIntroPanel||forwardInputs.read(forwardInputs.fact.introCurveThisDrawStripGate,[&]{returng_state->introCurveThisDraw;},[&]{returng_state->introCurveThisDraw;}))&&owner&&panelCurveSurfaceWanted()){";
 const char* const kNumbers =
     "if(v==DrawVerdict::kIntroPanel){if(introPanelStripArmed()){stripGain=introPanelStripGain();stripToward=1;stripReverseU=introPanelStripReverseU();}}"
     "else{stripGain=introCurveGain();stripToward=introCurveToward();stripReverseU=introCurveReverseU();}";
@@ -47,7 +47,7 @@ const char* const kStripCall =
     "if(stripToward!=0&&!uiLayerIssueBlocked()){";
 const char* const kObserved =
     "constbooloriginalIssued=observedDraw(alteredClass==AlteredDrawClass::Verdict?AlteredDraw(alteredClass,alteredFixOf(v)):AlteredDraw(alteredClass));";
-const char* const kLambda = "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&uiLayerIssueBlocked()){";
+const char* const kLambda = "autoobservedDraw=[&](AlteredDrawaltered){if(owner&&forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,[]{returndetail::g_uiLayerIssueBlocked;},[]{returnuiLayerIssueBlocked();})){";
 const char* const kDim =
     "constboolstripDim=stripIssued&&panelCurveSurfaceDraw(self,stripGain,stripToward,stripReverseU,g_state->realDrawIndexedInstanced);"
     "booldimIssued=stripDim;if(!stripDim){draw(AlteredDrawClass::None);dimIssued=true;}splashDimEnd(self);";
@@ -149,7 +149,7 @@ std::vector<WirePin> wiringPins(const std::string& text, const std::string& ladd
     pins.push_back({"unarmed-text",
                     has(fwd, kObserved) && has(fwd, kLambda) && has(fwd, kDim) &&
                         has(fwd, "if((v==DrawVerdict::kBackdrop||v==DrawVerdict::kIntroPanel)&&splashDimBegin(self)){") &&
-                        inOrder(fwd, {"autoobservedDraw=[&](AlteredDrawaltered){", "if(owner&&uiLayerIssueBlocked()){",
+                        inOrder(fwd, {"autoobservedDraw=[&](AlteredDrawaltered){", "if(owner&&forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,[]{returndetail::g_uiLayerIssueBlocked;},[]{returnuiLayerIssueBlocked();})){",
                                        "returnfalse;}", "if(stripIssued){", "returntrue;", "constboolissued=draw(altered);"}),
                     "intro curve wiring [unarmed-text]: `const bool originalIssued = observedDraw(...)` is the text it was, the lambda only gains `if (stripIssued) return true;` "
                     "after its refusal, and the dim still draws the game's own `draw(AlteredDrawClass::None)` when the strip did not draw"});
@@ -229,7 +229,9 @@ const char* const kRawTick = R"x(        tkIntroCurve.run([&] {
 const char* const kRawSkipTick = "        tkIntroSkip.run([&] {\n";
 const char* const kRawMovieComment = "    // The intro movie's panel (intro_panel.h). First thing in the eye\n";
 const char* const kRawCensusLine = "    // The census line for this draw, recorded while its bindings are certainly\n";
-const char* const kRawObservedEarly = R"x(        if (owner && uiLayerIssueBlocked()) {
+const char* const kRawObservedEarly = R"x(        if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,
+                [] { return detail::g_uiLayerIssueBlocked; },
+                [] { return uiLayerIssueBlocked(); })) {
             ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,
                 kind, count, instances, args);
@@ -248,7 +250,9 @@ const char* const kRawObservedEarlyBad = R"x(        if (stripIssued) {
                 kind, count, instances, args);
             return true;   // the strip was issued in its place: nothing more, and something was
         }
-        if (owner && uiLayerIssueBlocked()) {
+        if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,
+                [] { return detail::g_uiLayerIssueBlocked; },
+                [] { return uiLayerIssueBlocked(); })) {
             ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,
                 kind, count, instances, args);

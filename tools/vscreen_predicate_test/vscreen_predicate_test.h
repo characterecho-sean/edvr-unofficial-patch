@@ -9,6 +9,7 @@
 #include "../../src/d3d11/resolve_bind_observation.h"
 #include "../../src/d3d11/loader_panel_observation.h"
 #include "../../src/d3d11/fss_dump_observation.h"
+#include "../../src/d3d11/forwarding_observation.h"
 
 struct ID3D11DeviceContext;
 
@@ -19,6 +20,45 @@ struct VScreenPredicateTestResult final {
     draw_ladder::SiteResult siteResult{};
     std::uint32_t glareClampAfter = 0;
     std::uint64_t censusSkippedAfter = 0;
+};
+
+struct VScreenForwardingTestInput final {
+    std::int16_t verdictOrdinal = 0;
+    char kind = 'N';
+    std::uint32_t count = 3;
+    std::uint32_t instances = 1;
+    edvr::DrawArgs args{};
+    std::int32_t engineVelocityCacheFamily = -1;
+    bool issueBlockedEntry = false;
+    bool objectProbeLedgerOn = false;
+    bool uiDepthThisDraw = false;
+    bool holoDepthThisDraw = false;
+    bool compositeThisDraw = false;
+    bool curveThisDraw = false;
+    bool seedDiagnostics = false;
+    bool uiLayerLive = false;
+    bool uiLayerWatching = false;
+    bool callbackReturns = true;
+    bool changeIssueBlockedAfter = false;
+    bool issueBlockedAfter = false;
+    bool changeCrispPendingAfter = false;
+    bool crispPendingAfter = false;
+    bool changePlanetPendingAfter = false;
+    bool planetPendingAfter = false;
+    bool planetSolarPendingAfter = false;
+};
+
+struct VScreenForwardingTestResult final {
+    draw_ladder_trace::Token token{};
+    std::uint32_t originalCalls = 0;
+    std::uint8_t alteredClass = 0;
+    bool callbackReturned = false;
+    bool issueBlockedAfter = false;
+    bool crispPendingAfter = false;
+    bool planetPendingAfter = false;
+    bool planetSolarPendingAfter = false;
+    bool curveThisDrawAfter = false;
+    std::int32_t engineVelocityCacheFamilyAfter = -1;
 };
 
 struct VScreenEyeCensusTestFilter final {
@@ -81,5 +121,10 @@ bool vScreenFssDumpPredicateTestVisit(
     std::uint32_t instances, std::uint32_t frameNo,
     std::uint32_t fssBodyFrame, bool traceEnabled,
     VScreenPredicateTestResult* result) noexcept;
+
+bool vScreenForwardingPredicateTestVisit(
+    ID3D11DeviceContext* context, bool traceEnabled,
+    const VScreenForwardingTestInput& input,
+    VScreenForwardingTestResult* result) noexcept;
 
 } // namespace edvr

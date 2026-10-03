@@ -7,6 +7,7 @@
 #include "resolve_bind_observation.h"
 #include "loader_panel_observation.h"
 #include "fss_dump_observation.h"
+#include "forwarding_observation.h"
 #include "holo_scrim_observation.h"
 #include "fss_observation.h"
 #include "remlok_observation.h"
@@ -43,6 +44,8 @@ constexpr std::uint8_t kMaxLoaderPanelFactsPerDraw = 1;
 constexpr std::uint32_t kMaxLoaderPanelFacts = 32768;
 constexpr std::uint8_t kMaxFssDumpFactsPerDraw = 1;
 constexpr std::uint32_t kMaxFssDumpFacts = 32768;
+constexpr std::uint8_t kMaxForwardingFactsPerDraw = 1;
+constexpr std::uint32_t kMaxForwardingFacts = kMaxDraws;
 constexpr std::uint8_t kMaxTotalPredicateFactsPerDraw =
     kMaxPredicateFactsPerDraw + kMaxSunglareFactsPerDraw +
     kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw + kMaxBasicFactsPerDraw +
@@ -81,6 +84,8 @@ enum class CaptureInvalidation : std::uint8_t {
     LoaderPanelPoolMissing = 15,
     FssDumpIndexOverflow = 16,
     FssDumpPoolMissing = 17,
+    ForwardingIndexOverflow = 18,
+    ForwardingPoolMissing = 19,
 };
 
 // Returned by shutdown() so production can report whether an armed or partial
@@ -310,6 +315,7 @@ void appendEyeCensusFact(Token token, const EyeCensusObservation& fact) noexcept
 void appendResolveBindFact(Token token, const ResolveBindObservation& fact) noexcept;
 void appendLoaderPanelFact(Token token, const LoaderPanelObservation& fact) noexcept;
 void appendFssDumpFact(Token token, const FssDumpObservation& fact) noexcept;
+void appendForwardingFact(Token token, const ForwardingObservation& fact) noexcept;
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
 bool readEyeCensusFactForTest(Token token, std::uint8_t ordinal, EyeCensusObservation* out) noexcept;
 std::uint8_t eyeCensusFactCountForTest(Token token) noexcept;
@@ -321,6 +327,11 @@ bool readBasicFactForTest(Token token, std::uint8_t ordinal, BasicDrawObservatio
 std::uint8_t basicFactCountForTest(Token token) noexcept;
 bool readFssDumpFactForTest(Token token, std::uint8_t ordinal, FssDumpObservation* out) noexcept;
 std::uint8_t fssDumpFactCountForTest(Token token) noexcept;
+bool readForwardingFactForTest(Token token, std::uint8_t ordinal, ForwardingObservation* out) noexcept;
+std::uint8_t forwardingFactCountForTest(Token token) noexcept;
+std::uint16_t actionCountForTest(Token token) noexcept;
+bool readActionForTest(Token token, std::uint16_t ordinal, std::uint16_t* actionId,
+                       draw_ladder::ActionRecord* out) noexcept;
 #endif
 void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept;
 void completeWitchspaceStarsFact(Token token, const PredicateFact& fact) noexcept;
@@ -420,6 +431,9 @@ struct TracePolicy final {
     }
     inline void fssDumpFact(const FssDumpObservation& fact) noexcept {
         appendFssDumpFact(token, fact);
+    }
+    inline void forwardInputs(const ForwardingObservation& fact) noexcept {
+        appendForwardingFact(token, fact);
     }
 };
 

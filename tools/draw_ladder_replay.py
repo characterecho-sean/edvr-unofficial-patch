@@ -3777,6 +3777,254 @@ def _integer(value, label, low=0, high=0xffffffff):
     return value
 
 
+_FORWARD_INPUT_READS = {
+    "verdictOrdinal": (-0x8000, 0x7fff),
+    "issueBlockedEntry": bool, "objectProbeLedgerOn": bool,
+    "uiDepthThisDraw": bool, "holoDepthThisDraw": bool,
+    "compositeThisDraw": bool, "curveThisDrawBeforeSkipClear": bool,
+    "seedDiagnostics": bool, "uiLayerLiveEyeGate": bool,
+    "uiLayerLiveFallbackGate": bool, "uiLayerWatchingGate": bool,
+    "curveThisDrawCurveGate": bool,
+    "engineVelocityCacheFamily": (-0x80000000, 0x7fffffff),
+    "introCurveThisDrawStripGate": bool,
+    "issueBlockedBeforeOriginal": bool, "originalCallReturned": bool,
+    "crispPendingAfterOriginal": bool, "issueBlockedAfterOriginal": bool,
+    "planetPending": bool, "planetSolarPending": bool,
+}
+
+
+def _forward_read(fact, name, label):
+    read = fact.get(name)
+    if not isinstance(read, dict) or set(read) != {"reached", "known", "value"}:
+        raise TraceError(label + "." + name + " must be a raw read envelope")
+    reached, known, value = read["reached"], read["known"], read["value"]
+    if type(reached) is not bool or type(known) is not bool or (known and not reached):
+        raise TraceError(label + "." + name + " has invalid reached/known markers")
+    if not known:
+        if value is not None:
+            raise TraceError(label + "." + name + " unknown value must be null")
+        return reached, False, None
+    domain = _FORWARD_INPUT_READS[name]
+    if domain is bool:
+        if type(value) is not bool:
+            raise TraceError(label + "." + name + " must contain a boolean")
+    else:
+        if type(value) is not int or value < domain[0] or value > domain[1]:
+            raise TraceError(label + "." + name + " is outside its source domain")
+    return reached, True, value
+
+
+def _replay_forward_inputs(observation, draw, label):
+    """Derive the supported None/Skip forwarder-local action from raw inputs.
+
+    This deliberately does not model nested D3D work performed by the real
+    draw callback, nor the complete hook/selector ladder.
+    """
+    if not isinstance(observation, dict):
+        return {"status": "unavailable", "reason": "missing observation", "mismatches": 0}
+    expected_keys = {"kind", "version"} | set(_FORWARD_INPUT_READS)
+    if set(observation) != expected_keys:
+        raise TraceError(label + " has missing or unexpected ForwardingObservation fields")
+    if (type(observation.get("kind")) is not int or observation["kind"] != 1 or
+            type(observation.get("version")) is not int or observation["version"] != 1):
+        raise TraceError(label + " has an unsupported ForwardingObservation kind/version")
+    reads = {name: _forward_read(observation, name, label)
+             for name in _FORWARD_INPUT_READS}
+
+    # Resolve owner solely from site 2's BasicDraw raw context identities.
+    owner = None
+    for fact in draw.get("predicateFacts", []):
+        if isinstance(fact, dict) and fact.get("siteId") == 2 and fact.get("kind") == 15:
+            context = fact.get("context")
+            if isinstance(context, dict):
+                self_read = _sunglare_read(context, "contextIdentity", label + ".site2", int,
+                                            (1 << 64) - 1)
+                owner_read = _sunglare_read(context, "ownerContextIdentity", label + ".site2", int,
+                                             (1 << 64) - 1)
+                if self_read[0] and self_read[1] and owner_read[0] and owner_read[1]:
+                    owner = self_read[2] == owner_read[2]
+            break
+    if owner is None:
+        return {"status": "unavailable", "reason": "site-2 owner identities unavailable",
+                "mismatches": 0}
+
+    def expect_reached(name, expected):
+        if reads[name][0] != expected:
+            raise TraceError(label + "." + name + " reachability disagrees with forwarding source order")
+
+    expect_reached("verdictOrdinal", True)
+    if not reads["verdictOrdinal"][1]:
+        return {"status": "unavailable", "reason": "verdict ordinal unknown", "mismatches": 0}
+    ordinal = reads["verdictOrdinal"][2]
+    if ordinal not in (0, 2):
+        return {"status": "unavailable", "reason": "unsupported verdict ordinal",
+                "mismatches": 0, "verdictOrdinal": ordinal}
+    if draw.get("route") not in (4, 6) or draw.get("kind") not in (
+            ord("D"), ord("I"), ord("N"), ord("X")):
+        return {"status": "unavailable", "reason": "unsupported route or draw command",
+                "mismatches": 0, "verdictOrdinal": ordinal}
+
+    expect_reached("issueBlockedEntry", owner)
+    blocked_entry = reads["issueBlockedEntry"]
+    if owner and blocked_entry[1] and blocked_entry[2]:
+        # This early swallow is outside the supported all-side-work-off slice.
+        return {"status": "unavailable", "reason": "issue-blocked entry path",
+                "mismatches": 0, "verdictOrdinal": ordinal}
+    if owner and not blocked_entry[1]:
+        return {"status": "unavailable", "reason": "issue-blocked entry unknown",
+                "mismatches": 0, "verdictOrdinal": ordinal}
+    expect_reached("objectProbeLedgerOn", owner)
+    object_gate = reads["objectProbeLedgerOn"]
+    if owner and (not object_gate[1] or object_gate[2]):
+        return {"status": "unavailable", "reason": "object-probe ledger active or unknown",
+                "mismatches": 0, "verdictOrdinal": ordinal}
+
+    for name in ("uiDepthThisDraw", "holoDepthThisDraw", "compositeThisDraw"):
+        expect_reached(name, True)
+        if not reads[name][1] or reads[name][2]:
+            return {"status": "unavailable", "reason": "depth/composite side-work active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+
+    if not owner:
+        return {"status": "unavailable", "reason": "foreign-context forwarding is outside supported scope",
+                "mismatches": 0, "verdictOrdinal": ordinal}
+
+    expected_actions = None
+    if ordinal == 2:
+        expect_reached("curveThisDrawBeforeSkipClear", True)
+        if not reads["curveThisDrawBeforeSkipClear"][1]:
+            return {"status": "unavailable", "reason": "skip curve flag unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        if reads["curveThisDrawBeforeSkipClear"][2]:
+            return {"status": "unavailable", "reason": "skip curve-clear mutation outside supported scope",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        for name in ("seedDiagnostics", "uiLayerLiveEyeGate", "uiLayerLiveFallbackGate",
+                     "uiLayerWatchingGate", "curveThisDrawCurveGate", "engineVelocityCacheFamily",
+                     "introCurveThisDrawStripGate", "issueBlockedBeforeOriginal",
+                     "originalCallReturned", "crispPendingAfterOriginal",
+                     "issueBlockedAfterOriginal", "planetPending", "planetSolarPending"):
+            expect_reached(name, False)
+        expected_actions = _forward_draw_envelope(draw) + [
+            _forward_action(3, 2, 2, draw, 0)] + _forward_draw_end(draw)
+        return {"status": "eligible", "expectedActions": expected_actions,
+                "mismatches": 0, "verdictOrdinal": ordinal, "owner": owner,
+                "skipCurveClear": reads["curveThisDrawBeforeSkipClear"][2],
+                "terminalProof": "unavailable", "alteredDrawClass": "not-classified"}
+    else:
+        expect_reached("curveThisDrawBeforeSkipClear", False)
+        expect_reached("seedDiagnostics", owner)
+        if owner and (not reads["seedDiagnostics"][1] or reads["seedDiagnostics"][2]):
+            return {"status": "unavailable", "reason": "seed diagnostics active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("uiLayerLiveEyeGate", owner)
+        eye_live = reads["uiLayerLiveEyeGate"]
+        if owner and not eye_live[1]:
+            return {"status": "unavailable", "reason": "live eye gate unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        if owner and eye_live[2]:
+            return {"status": "unavailable", "reason": "live eye gate active",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        ui_layer = False
+        expect_reached("uiLayerLiveFallbackGate", owner and not ui_layer)
+        fallback = reads["uiLayerLiveFallbackGate"]
+        if owner and not ui_layer and (not fallback[1] or fallback[2]):
+            return {"status": "unavailable", "reason": "live fallback gate active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("uiLayerWatchingGate", owner and not ui_layer)
+        watching = reads["uiLayerWatchingGate"]
+        if owner and not ui_layer and (not watching[1] or watching[2]):
+            return {"status": "unavailable", "reason": "UI watching gate active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("curveThisDrawCurveGate", True)
+        curve = reads["curveThisDrawCurveGate"]
+        if not curve[1] or curve[2]:
+            return {"status": "unavailable", "reason": "curve substitution active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("engineVelocityCacheFamily", True)
+        family = reads["engineVelocityCacheFamily"]
+        if not family[1]:
+            return {"status": "unavailable", "reason": "engine velocity family unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("introCurveThisDrawStripGate", True)
+        strip = reads["introCurveThisDrawStripGate"]
+        if not strip[1] or strip[2]:
+            return {"status": "unavailable", "reason": "intro strip active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("issueBlockedBeforeOriginal", owner)
+        before = reads["issueBlockedBeforeOriginal"]
+        if owner and (not before[1] or before[2]):
+            return {"status": "unavailable", "reason": "pre-original issue block active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("originalCallReturned", True)
+        callback = reads["originalCallReturned"]
+        if not callback[1]:
+            return {"status": "unavailable", "reason": "external callback result unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("crispPendingAfterOriginal", callback[2])
+        crisp = reads["crispPendingAfterOriginal"]
+        if callback[2] and (not crisp[1] or crisp[2]):
+            return {"status": "unavailable", "reason": "crisp reissue active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("issueBlockedAfterOriginal", owner)
+        after = reads["issueBlockedAfterOriginal"]
+        if owner and not after[1]:
+            return {"status": "unavailable", "reason": "post-original issue block active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        if owner and after[2]:
+            expect_reached("planetPending", False)
+            expect_reached("planetSolarPending", False)
+            return {"status": "unavailable", "reason": "post-original issue block active",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("planetPending", owner)
+        planet = reads["planetPending"]
+        if owner and not planet[1]:
+            return {"status": "unavailable", "reason": "planet side-work active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expect_reached("planetSolarPending", owner and not planet[2])
+        if owner and planet[2]:
+            return {"status": "unavailable", "reason": "planet side-work active",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        solar = reads["planetSolarPending"]
+        if owner and (not solar[1] or solar[2]):
+            return {"status": "unavailable", "reason": "solar planet side-work active or unknown",
+                    "mismatches": 0, "verdictOrdinal": ordinal}
+        expected_actions = _forward_draw_envelope(draw) + [
+            _forward_original_action(draw, callback[2])] + _forward_draw_end(draw)
+        return {"status": "eligible", "expectedActions": expected_actions,
+                "mismatches": 0, "verdictOrdinal": ordinal,
+                "callbackReturned": callback[2], "engineVelocityCacheFamily": family[2],
+                "owner": owner, "terminalProof": "unavailable",
+                "alteredDrawClass": "pool-family" if family[2] >= 0 else "none"}
+    return {"status": "eligible", "expectedActions": expected_actions,
+            "mismatches": 0, "verdictOrdinal": ordinal,
+            "terminalProof": "unavailable"}
+
+
+def _forward_action(action_id, phase, outcome, draw, issue_count):
+    call = {ord("D"): 1, ord("I"): 2, ord("N"): 3, ord("X"): 4}.get(draw["kind"])
+    if call is None:
+        raise TraceError("forwarding-local replay requires a direct draw command")
+    start = (draw["args"]["base"] & 0xffffffff) if draw["kind"] in (ord("D"), ord("N")) else draw["args"]["start"]
+    base_vertex = 0 if draw["kind"] in (ord("D"), ord("N")) else draw["args"]["base"]
+    return {"id": action_id, "phase": phase, "outcome": outcome, "call": call,
+            "flags": 0, "issueCount": issue_count, "issueCountKnown": True,
+            "count": draw["count"], "instances": draw["instances"],
+            "start": start, "startInstance": draw["args"]["startInstance"],
+            "baseVertex": base_vertex}
+
+
+def _forward_draw_envelope(draw):
+    return [_forward_action(1, 1, 2, draw, 0)]
+
+
+def _forward_original_action(draw, returned):
+    return _forward_action(2, 2, 2 if returned else 3, draw, 1 if returned else 0)
+
+
+def _forward_draw_end(draw):
+    return [_forward_action(17, 3, 2, draw, 0)]
+
+
 def validate_trace(data, expected_log=None, expected_build_stamp=None):
     if not isinstance(data, dict):
         raise TraceError("sidecar root must be an object")
@@ -3789,10 +4037,16 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
-    elif "predicateFactVersion" in data:
-        raise TraceError("schemaVersion 1 cannot declare predicate facts")
+        forward_input_version = data.get("forwardInputVersion", 0)
+        if type(forward_input_version) is not int or forward_input_version not in (0, 1):
+            raise TraceError("unsupported forwardInputVersion")
+    elif "predicateFactVersion" in data or "forwardInputVersion" in data:
+        raise TraceError("schemaVersion 1 cannot declare predicate or forwarding inputs")
     else:
         predicate_fact_version = 0
+        forward_input_version = 0
+    if forward_input_version and schema_version != SCHEMA_VERSION:
+        raise TraceError("schemaVersion 1 cannot declare forwarding inputs")
     version = data.get("buildVersion")
     if not isinstance(version, str) or not version or len(version) > 128:
         raise TraceError("buildVersion is missing or invalid")
@@ -3886,6 +4140,15 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "loaderPanelMutationUnobserved": 0,
                         "fssDumpFacts": 0, "fssDumpReplayed": 0,
                         "fssDumpUnreplayable": 0, "fssDumpMismatches": 0}
+    forward_replay = {"factCount": 0, "replayed": 0, "unavailable": 0,
+                      "mismatches": 0, "eligible": 0, "expectedActions": 0,
+                      "observedActionMismatches": 0, "forwardFactsMismatches": 0,
+                      "terminalProofAvailable": 0, "terminalProofUnavailable": 0,
+                      "externalCallbackInvocations": 0,
+                      "externalCallbackWorkUnobserved": 0, "originalActionIssues": 0,
+                      "poolFamilyDraws": 0,
+                      "alteredDrawClassCounts": {"none": 0, "pool-family": 0,
+                                                 "not-classified": 0}}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -4025,6 +4288,17 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         elif "predicateFacts" in draw:
             raise TraceError(label + " schemaVersion 1 cannot contain predicateFacts")
 
+        forwarding_observation = None
+        if forward_input_version == 1:
+            if "forwardInputsReached" not in draw or type(draw["forwardInputsReached"]) is not bool:
+                raise TraceError(label + ".forwardInputsReached must be present in forwarding-input version 1")
+            if "forwardInputs" not in draw:
+                raise TraceError(label + " is missing the required forwardInputs key")
+            forwarding_observation = draw["forwardInputs"]
+            if draw["forwardInputsReached"] != (forwarding_observation is not None):
+                raise TraceError(label + " forwarding-input reached marker disagrees with fact cardinality")
+            if forwarding_observation is not None and not isinstance(forwarding_observation, dict):
+                raise TraceError(label + ".forwardInputs must be an object or null")
         if "forwardFacts" not in draw:
             raise TraceError(label + " must explicitly mark forwardFacts present or null")
         facts = draw["forwardFacts"]
@@ -4037,7 +4311,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
             verdict_bit = FLAG_BITS["forwardFacts"]["verdict"]
             if bool(present & verdict_bit) != (facts_verdict != -1):
                 raise TraceError(label + ".forwardFacts verdict availability disagrees with mask")
-            if present & verdict_bit and facts_verdict != verdict:
+            if present & verdict_bit and facts_verdict != verdict and forward_input_version != 1:
                 raise TraceError(label + ".forwardFacts verdict differs from final draw verdict")
             for field, bit in FORWARD_TRI_FIELDS.items():
                 value = facts.get(field)
@@ -4135,12 +4409,62 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                                        ord("Y"): 20}.get(kind)
             if expected_command_action and original["id"] != expected_command_action:
                 raise TraceError(label + " bypass action ID does not match command")
-        if facts is not None and facts.get("issueBlocked") == "yes":
+        if facts is not None and facts.get("issueBlocked") == "yes" and forward_input_version != 1:
             blocked = [action for action in actions
                        if action["id"] == 3 and action["phase"] == 2]
             if (len(blocked) != 1 or blocked[0]["outcome"] != 3 or
                     blocked[0]["issueCount"] != 0 or not blocked[0]["issueCountKnown"]):
                 raise TraceError(label + " issueBlocked fact lacks its declined swallow action")
+
+        if forward_input_version == 1:
+            forward_replay["factCount"] += int(forwarding_observation is not None)
+            local = _replay_forward_inputs(forwarding_observation, draw,
+                                           label + ".forwardInputs")
+            if local["status"] == "unavailable":
+                forward_replay["unavailable"] += 1
+            else:
+                forward_replay["eligible"] += 1
+                forward_replay["replayed"] += 1
+                forward_replay["expectedActions"] += len(local["expectedActions"])
+                expected_actions = local["expectedActions"]
+                forward_replay["alteredDrawClassCounts"][local["alteredDrawClass"]] += 1
+                if actions != expected_actions:
+                    forward_replay["mismatches"] += 1
+                    forward_replay["observedActionMismatches"] += 1
+                if local.get("terminalProof") == "available":
+                    forward_replay["terminalProofAvailable"] += 1
+                    if local["verdictOrdinal"] != local["terminalVerdict"]:
+                        forward_replay["mismatches"] += 1
+                else:
+                    forward_replay["terminalProofUnavailable"] += 1
+                if "callbackReturned" in local:
+                    forward_replay["externalCallbackInvocations"] += 1
+                    forward_replay["externalCallbackWorkUnobserved"] += 1
+                    forward_replay["originalActionIssues"] += int(local["callbackReturned"])
+                if local.get("engineVelocityCacheFamily", -1) >= 0:
+                    forward_replay["poolFamilyDraws"] += 1
+                if (facts is not None and local.get("verdictOrdinal") is not None):
+                    fwd_mismatch = False
+                    if present & FLAG_BITS["forwardFacts"]["verdict"]:
+                        fwd_mismatch |= facts_verdict != local["verdictOrdinal"]
+                    if present & FLAG_BITS["forwardFacts"]["owner"]:
+                        fwd_mismatch |= facts["owner"] != ("yes" if local.get("owner") else "no")
+                    raw_fact_fields = {
+                        "uiDepth": "uiDepthThisDraw", "holoDepth": "holoDepthThisDraw",
+                        "composite": "compositeThisDraw",
+                    }
+                    for field, raw_name in raw_fact_fields.items():
+                        if (present & FLAG_BITS["forwardFacts"][field] and
+                                local.get("status") == "eligible"):
+                            raw_value = _forward_read(forwarding_observation, raw_name,
+                                                      label + ".forwardInputs")
+                            if raw_value[1]:
+                                fwd_mismatch |= facts[field] != ("yes" if raw_value[2] else "no")
+                    if facts.get("issueBlocked") == "yes":
+                        fwd_mismatch = True
+                    if fwd_mismatch:
+                        forward_replay["mismatches"] += 1
+                        forward_replay["forwardFactsMismatches"] += 1
 
     footer = data.get("footer")
     if not isinstance(footer, dict):
@@ -4294,7 +4618,16 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
               "loaderPanelMutationUnobserved": 0,
               "fssDumpStatus": "unavailable-before-v13",
               "fssDumpFacts": 0, "fssDumpReplayed": 0,
-              "fssDumpUnreplayable": 0, "fssDumpMismatches": 0}),
+             "fssDumpUnreplayable": 0, "fssDumpMismatches": 0}),
+        "forwardReplay": dict(
+            status=("unavailable" if forward_input_version == 0 else
+                    "mismatch" if forward_replay["mismatches"] else
+                    "unavailable" if forward_replay["unavailable"] else
+                    "replayed" if forward_replay["replayed"] else "not-visited"),
+            forwardInputVersion=forward_input_version,
+            localScope="forwarder-local None/Skip action envelope only",
+            wholeForwardingEquivalence=False,
+            **forward_replay),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -4344,6 +4677,22 @@ def format_summary(summary, sidecar_path=None):
     lines.append("  supported predicate facts: %s (%d selector matches, %d unreplayable, %d mismatch, %d mutation unobserved); whole-ladder equivalence remains false" %
                  (replay["status"], replay["replayed"], replay["unreplayable"],
                   replay["mismatches"], replay["mutationUnobserved"]))
+    forward = summary.get("forwardReplay", {"status": "unavailable", "forwardInputVersion": 0,
+                                             "replayed": 0, "unavailable": 0,
+                                             "mismatches": 0, "externalCallbackInvocations": 0,
+                                             "externalCallbackWorkUnobserved": 0,
+                                             "originalActionIssues": 0,
+                                             "terminalProofUnavailable": 0})
+    lines.append("  forwarding inputs v%d: %s (%d local plans, %d unavailable, %d mismatch); terminal proof unavailable for %d plan(s); full forwarding equivalence remains false; original callback invoked %d time(s), %d original action issue(s), nested callback work unobserved on %d invocation(s)" %
+                 (forward["forwardInputVersion"], forward["status"], forward["replayed"],
+                  forward["unavailable"], forward["mismatches"], forward.get("terminalProofUnavailable", 0),
+                  forward.get("externalCallbackInvocations", 0), forward.get("originalActionIssues", 0),
+                  forward.get("externalCallbackWorkUnobserved", 0)))
+    classes = forward.get("alteredDrawClassCounts", {})
+    if classes:
+        lines.append("  forwarding-local altered draw classes (not action claims): none %d, pool-family %d, not-classified %d" %
+                     (classes.get("none", 0), classes.get("pool-family", 0),
+                      classes.get("not-classified", 0)))
     if replay["nightVisionStatus"] == "unavailable-v1":
         lines.append("  NightVisionClaim site 50: unavailable in predicate fact version 1")
     else:
@@ -5893,6 +6242,93 @@ def self_test():
                     continue
             print("mutation-unobserved CLI accepted invalid arguments")
             return 1
+        forward_summary = dict(historical)
+        forward_summary["forwardReplay"] = {
+            "forwardInputVersion": 1, "replayed": 1, "unavailable": 0,
+            "mismatches": 0, "externalCallbackWorkUnobserved": 1,
+            "status": "replayed", "wholeForwardingEquivalence": False}
+        read_trace = lambda *args, **kwargs: ({}, forward_summary)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main(["--file", cli_file, "--dry-run", "--expect-forward-replayed", "1"])
+        if code != 0 or "exactly 1 forwarding-local plans replayed" not in output.getvalue():
+            print("forwarding replay CLI assertion rejected its exact known-plan count")
+            return 1
+        unavailable_summary = dict(historical)
+        unavailable_summary["forwardReplay"] = dict(
+            forward_summary["forwardReplay"], replayed=0, unavailable=1,
+            status="unavailable")
+        read_trace = lambda *args, **kwargs: ({}, unavailable_summary)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main(["--file", cli_file, "--dry-run", "--expect-forward-unavailable", "1"])
+        if code != 0 or "exactly 1 forwarding observation(s) unavailable" not in output.getvalue():
+            print("forwarding replay CLI did not distinguish unavailable from malformed input")
+            return 1
+        # Forwarding count assertions cannot waive supported predicate failures.
+        # Guard all filesystem entry points used by this tool while exercising
+        # the dry-run CLI, so a rejected assertion cannot quietly write output.
+        from unittest.mock import patch
+        for option, clean in (("--expect-forward-replayed", forward_summary),
+                              ("--expect-forward-unavailable", unavailable_summary)):
+            for status, field in (("mismatch", "mismatches"),
+                                  ("unreplayable", "unreplayable"),
+                                  ("mutation-unobserved", "mutationUnobserved")):
+                failed_forward = json.loads(json.dumps(clean))
+                failed_forward["predicateReplay"].update(
+                    status=status, mismatches=0, unreplayable=0, mutationUnobserved=0)
+                failed_forward["predicateReplay"][field] = 1
+                read_trace = lambda *args, _summary=failed_forward, **kwargs: ({}, _summary)
+                output = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(output), \
+                            patch("builtins.open", side_effect=AssertionError("dry-run opened a file")), \
+                            patch("os.mkdir", side_effect=AssertionError("dry-run created a directory")), \
+                            patch("os.makedirs", side_effect=AssertionError("dry-run created directories")):
+                        code = main(["--file", cli_file, "--dry-run", option, "1"])
+                except AssertionError as exc:
+                    print("forwarding expectation dry-run changed the filesystem: %s" % exc)
+                    return 1
+                if (code != 1 or "predicate replay gate failed" not in output.getvalue() or
+                        "fixture expectation confirmed" in output.getvalue()):
+                    print("%s bypassed supported predicate %s" % (option, status))
+                    return 1
+        bad_forward_summary = dict(forward_summary)
+        bad_forward_summary["forwardReplay"] = dict(
+            forward_summary["forwardReplay"], replayed=0, unavailable=1)
+        read_trace = lambda *args, **kwargs: ({}, bad_forward_summary)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--file", cli_file, "--dry-run", "--expect-forward-replayed", "1"])
+        if code != 1:
+            print("forwarding replay CLI accepted a missing expected plan")
+            return 1
+        mismatch_summary = dict(forward_summary)
+        mismatch_summary["forwardReplay"] = dict(
+            forward_summary["forwardReplay"], mismatches=1,
+            status="mismatch")
+        read_trace = lambda *args, **kwargs: ({}, mismatch_summary)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--file", cli_file, "--dry-run"])
+        if code != 1:
+            print("default forwarding CLI accepted a local replay mismatch")
+            return 1
+        for invalid_args in (
+                ["--expect-forward-replayed", "0", "--dry-run"],
+                ["--expect-forward-replayed", "x", "--dry-run"],
+                ["--expect-forward-replayed", "1"],
+                ["--expect-forward-replayed", "1", "--dry-run", "--expect-invalid"],
+                ["--expect-forward-replayed", "1", "--dry-run", "--expect-unreplayable", "1"],
+                ["--expect-forward-replayed", "1", "--dry-run", "--expect-forward-unavailable", "1"],
+                ["--expect-forward-unavailable", "-1", "--dry-run"],
+                ["--expect-forward-unavailable", "1", "--dry-run", "--expect-mutation-unobserved", "1"]):
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    main(["--file", cli_file] + invalid_args)
+            except SystemExit as exc:
+                if exc.code == 2:
+                    continue
+            print("forwarding replay CLI accepted invalid arguments")
+            return 1
         with open(cli_file, "r", encoding="utf-8") as stream:
             if stream.read() != "{}":
                 print("fixture expectation rewrote its input")
@@ -6792,6 +7228,302 @@ def self_test():
                 "sites": [{"id": site_id, "kind": 3, "outcome": outcome,
                            "flow": flow, "subsite": 0, "verdict": verdict}],
                 "predicateFacts": [fact]}
+
+    def forward_observation(ordinal, callback=True, family=-1):
+        names = set(_FORWARD_INPUT_READS)
+        fact = {"kind": 1, "version": 1}
+        for name in names:
+            fact[name] = basic_read(None, False, False)
+        def put(name, value):
+            fact[name] = basic_read(value)
+        put("verdictOrdinal", ordinal)
+        put("issueBlockedEntry", False)
+        put("objectProbeLedgerOn", False)
+        put("uiDepthThisDraw", False)
+        put("holoDepthThisDraw", False)
+        put("compositeThisDraw", False)
+        if ordinal == 2:
+            put("curveThisDrawBeforeSkipClear", False)
+            return fact
+        put("seedDiagnostics", False)
+        put("uiLayerLiveEyeGate", False)
+        put("uiLayerLiveFallbackGate", False)
+        put("uiLayerWatchingGate", False)
+        put("curveThisDrawCurveGate", False)
+        put("engineVelocityCacheFamily", family)
+        put("introCurveThisDrawStripGate", False)
+        put("issueBlockedBeforeOriginal", False)
+        put("originalCallReturned", callback)
+        if callback:
+            put("crispPendingAfterOriginal", False)
+        put("issueBlockedAfterOriginal", False)
+        put("planetPending", False)
+        put("planetSolarPending", False)
+        return fact
+
+    def forward_trace(ordinal, callback=True, family=-1):
+        trace = json.loads(json.dumps(stars_trace(claimed=True) if ordinal == 2 else vr))
+        trace["predicateFactVersion"] = 13
+        trace["forwardInputVersion"] = 1
+        draw = trace["draws"][0]
+        draw["predicateFacts"] = [fact for fact in draw["predicateFacts"]
+                                  if fact.get("siteId") != 2]
+        draw["predicateFacts"].append(basic_context_fact(0, 0))
+        for event in draw["sites"]:
+            if event["id"] == 2:
+                event.update(outcome=1, flow=0, verdict=-1)
+        draw["forwardFacts"] = None
+        draw["forwardInputsReached"] = True
+        draw["forwardInputs"] = forward_observation(ordinal, callback, family)
+        expected = (_forward_draw_envelope(draw) +
+                    ([_forward_action(3, 2, 2, draw, 0)] if ordinal == 2 else
+                     [_forward_original_action(draw, callback)]) +
+                    _forward_draw_end(draw))
+        draw["actions"] = expected
+        return trace
+
+    # Forward-input replay has an independent raw plan and treats serialized
+    # actions/ForwardFacts only as comparison targets.
+    for ordinal, callback, family in ((0, True, -1), (0, False, 0), (2, True, -1)):
+        forward_fixture = forward_trace(ordinal, callback, family)
+        forward_result = validate_trace(forward_fixture)["forwardReplay"]
+        if (forward_result["replayed"] != 1 or forward_result["unavailable"] or
+                forward_result["mismatches"] or forward_result["wholeForwardingEquivalence"]):
+            print("forwarding-local None/Skip fixture failed independent replay: %r" % forward_result)
+            return 1
+    def literal_forward_action(action_id, phase, outcome, draw_call, issues,
+                               count, instances, start, start_instance, base_vertex):
+        return {"id": action_id, "phase": phase, "outcome": outcome,
+                "call": draw_call, "flags": 0, "issueCount": issues,
+                "issueCountKnown": True, "count": count, "instances": instances,
+                "start": start, "startInstance": start_instance,
+                "baseVertex": base_vertex}
+    for draw_kind, draw_call, action_start, action_base in (
+            (ord("D"), 1, 27, 0), (ord("I"), 2, 89, 12),
+            (ord("N"), 3, 12, 0), (ord("X"), 4, 89, 12)):
+        tuple_fixture = forward_trace(0)
+        tuple_draw = tuple_fixture["draws"][0]
+        tuple_draw.update(kind=draw_kind, command=DRAW_COMMANDS[draw_kind],
+                          count=6, instances=4)
+        tuple_draw["args"] = {"start": 89, "base": 27 if draw_kind == ord("D") else
+                               (12 if draw_kind == ord("N") else 12),
+                               "startInstance": 11}
+        # Explicit per-command expected tuples, independent of _forward_action.
+        expected_tuple_actions = [
+            literal_forward_action(1, 1, 2, draw_call, 0, 6, 4,
+                                   action_start, 11, action_base),
+            literal_forward_action(2, 2, 2, draw_call, 1, 6, 4,
+                                   action_start, 11, action_base),
+            literal_forward_action(17, 3, 2, draw_call, 0, 6, 4,
+                                   action_start, 11, action_base)]
+        tuple_draw["actions"] = expected_tuple_actions
+        tuple_result = validate_trace(tuple_fixture)["forwardReplay"]
+        if tuple_result["replayed"] != 1 or tuple_result["mismatches"]:
+            print("forwarding replay mismatched literal normalized %s argument tuples" %
+                  chr(draw_kind))
+            return 1
+    for signed_base, unsigned_start in ((-2147483648, 0x80000000), (-1, 0xffffffff)):
+        for draw_kind, draw_call in ((ord("D"), 1), (ord("I"), 2),
+                                     (ord("N"), 3), (ord("X"), 4)):
+            for returned in (True, False):
+                edge_fixture = forward_trace(0, returned)
+                edge_draw = edge_fixture["draws"][0]
+                edge_draw.update(kind=draw_kind, command=DRAW_COMMANDS[draw_kind],
+                                 count=6, instances=4)
+                edge_draw["args"] = {"start": 89, "base": signed_base, "startInstance": 11}
+                # The nonindexed UINT StartVertexLocation survives its signed
+                # DrawFacts carrier; indexed BaseVertexLocation stays signed.
+                expected_start = unsigned_start if draw_kind in (ord("D"), ord("N")) else 89
+                expected_base = 0 if draw_kind in (ord("D"), ord("N")) else signed_base
+                edge_draw["actions"] = [
+                    literal_forward_action(1, 1, 2, draw_call, 0, 6, 4,
+                                           expected_start, 11, expected_base),
+                    literal_forward_action(2, 2, 2 if returned else 3, draw_call,
+                                           1 if returned else 0, 6, 4,
+                                           expected_start, 11, expected_base),
+                    literal_forward_action(17, 3, 2, draw_call, 0, 6, 4,
+                                           expected_start, 11, expected_base)]
+                edge_result = validate_trace(edge_fixture)["forwardReplay"]
+                if edge_result["replayed"] != 1 or edge_result["mismatches"]:
+                    print("forwarding replay lost signed/unsigned command argument bits")
+                    return 1
+    changed_action = forward_trace(0, False)
+    changed_action["draws"][0]["actions"][1]["outcome"] = 2
+    changed_action["draws"][0]["actions"][1]["issueCount"] = 1
+    if not validate_trace(changed_action)["forwardReplay"]["observedActionMismatches"]:
+        print("forwarding replay let a valid action mutation alter its expected plan")
+        return 1
+    changed_facts = forward_trace(0, True)
+    changed_facts["draws"][0]["forwardFacts"] = {
+        "presentMask": 3, "verdictOrdinal": 7, "family": 0,
+        "familyAvailable": "unknown", "owner": "no", "verdictForwards": "unknown",
+        "initialUiTake": "unknown", "afterUiTake": "unknown", "worldReissue": "unknown",
+        "curveThisDraw": "unknown", "introCurveThisDraw": "unknown", "uiDepth": "unknown",
+        "holoDepth": "unknown", "composite": "unknown", "crispPending": "unknown",
+        "issueBlocked": "unknown"}
+    if not validate_trace(changed_facts)["forwardReplay"]["forwardFactsMismatches"]:
+        print("forwarding replay let a valid ForwardFacts mutation alter its expected plan")
+        return 1
+    changed_depth_fact = forward_trace(0, True)
+    changed_depth_fact["draws"][0]["forwardFacts"] = {
+        "presentMask": 1 << 9, "verdictOrdinal": -1, "family": 0,
+        "familyAvailable": "unknown", "owner": "unknown", "verdictForwards": "unknown",
+        "initialUiTake": "unknown", "afterUiTake": "unknown", "worldReissue": "unknown",
+        "curveThisDraw": "unknown", "introCurveThisDraw": "unknown", "uiDepth": "yes",
+        "holoDepth": "unknown", "composite": "unknown", "crispPending": "unknown",
+        "issueBlocked": "unknown"}
+    if not validate_trace(changed_depth_fact)["forwardReplay"]["forwardFactsMismatches"]:
+        print("forwarding replay ignored a valid depth-field ForwardFacts mutation")
+        return 1
+    if validate_trace(forward_trace(0, True, -1))["forwardReplay"]["poolFamilyDraws"] != 0 or \
+            validate_trace(forward_trace(0, True, 0))["forwardReplay"]["poolFamilyDraws"] != 1:
+        print("forwarding replay conflated engine-velocity family -1 and family 0")
+        return 1
+    family_edge = forward_trace(0, True, 0x7fffffff)
+    if (validate_trace(family_edge)["forwardReplay"]["poolFamilyDraws"] != 1 or
+            validate_trace(forward_trace(0, True, -0x80000000))["forwardReplay"]["poolFamilyDraws"] != 0):
+        print("forwarding replay did not preserve the full signed engine-family domain")
+        return 1
+    other_verdict = forward_trace(0)
+    other_verdict["draws"][0]["forwardInputs"]["verdictOrdinal"] = basic_read(19)
+    if validate_trace(other_verdict)["forwardReplay"]["unavailable"] != 1:
+        print("writer-valid non-None/Skip verdict was not explicit unavailable")
+        return 1
+    lazy_skip = forward_trace(2)
+    lazy_skip["draws"][0]["forwardInputs"]["seedDiagnostics"] = basic_read(False)
+    try:
+        validate_trace(lazy_skip)
+    except TraceError:
+        pass
+    else:
+        print("forwarding Skip path accepted a None-only seed read")
+        return 1
+    missing_input = forward_trace(0)
+    del missing_input["draws"][0]["forwardInputs"]
+    try:
+        validate_trace(missing_input)
+    except TraceError:
+        pass
+    else:
+        print("forwarding v1 accepted a missing input key as an unavailable observation")
+        return 1
+    unknown_family = forward_trace(0)
+    unknown_family["draws"][0]["forwardInputs"]["engineVelocityCacheFamily"] = basic_read(None, True, False)
+    unknown_family_result = validate_trace(unknown_family)["forwardReplay"]
+    if unknown_family_result["unavailable"] != 1 or unknown_family_result["mismatches"]:
+        print("unknown forwarding family was not distinguished from mismatch")
+        return 1
+    repeated_live = forward_trace(0)
+    repeated_live["draws"][0]["forwardInputs"]["uiLayerLiveFallbackGate"] = basic_read(True)
+    repeated_live_result = validate_trace(repeated_live)["forwardReplay"]
+    if repeated_live_result["unavailable"] != 1 or repeated_live_result["mismatches"]:
+        print("forwarding reader compared separate live-gate reads as if cached")
+        return 1
+    post_callback_gate = forward_trace(0)
+    post_callback_gate["draws"][0]["forwardInputs"]["issueBlockedAfterOriginal"] = basic_read(True)
+    post_callback_gate["draws"][0]["forwardInputs"]["planetPending"] = basic_read(None, False, False)
+    post_callback_gate["draws"][0]["forwardInputs"]["planetSolarPending"] = basic_read(None, False, False)
+    post_callback_result = validate_trace(post_callback_gate)["forwardReplay"]
+    if post_callback_result["unavailable"] != 1 or post_callback_result["mismatches"]:
+        print("forwarding reader treated post-callback gates as cached pre-callback reads")
+        return 1
+    active_planet = forward_trace(0)
+    active_planet["draws"][0]["forwardInputs"]["planetPending"] = basic_read(True)
+    active_planet["draws"][0]["forwardInputs"]["planetSolarPending"] = basic_read(None, False, False)
+    active_planet_result = validate_trace(active_planet)["forwardReplay"]
+    if active_planet_result["unavailable"] != 1 or active_planet_result["mismatches"]:
+        print("active callback-time planet work was not marked unavailable")
+        return 1
+    illegal_planet_or_read = forward_trace(0)
+    illegal_planet_or_read["draws"][0]["forwardInputs"]["planetPending"] = basic_read(True)
+    illegal_planet_or_read["draws"][0]["forwardInputs"]["planetSolarPending"] = basic_read(False)
+    try:
+        validate_trace(illegal_planet_or_read)
+    except TraceError:
+        pass
+    else:
+        print("forwarding reader accepted a solar-pending read short-circuited by planet-pending")
+        return 1
+    null_forward = forward_trace(0)
+    null_forward["draws"][0].update(forwardInputs=None, forwardInputsReached=False)
+    null_forward_result = validate_trace(null_forward)["forwardReplay"]
+    if null_forward_result["unavailable"] != 1 or null_forward_result["mismatches"]:
+        print("explicit null forwarding observation was not reported as unavailable")
+        return 1
+    malformed_marker = forward_trace(0)
+    malformed_marker["draws"][0].update(forwardInputs=None, forwardInputsReached=True)
+    try:
+        validate_trace(malformed_marker)
+    except TraceError:
+        pass
+    else:
+        print("forwarding reached marker accepted a missing fact")
+        return 1
+    for field, value in (("kind", True), ("version", True)):
+        malformed_kind = forward_trace(0)
+        malformed_kind["draws"][0]["forwardInputs"][field] = value
+        try:
+            validate_trace(malformed_kind)
+        except TraceError:
+            pass
+        else:
+            print("forwarding reader accepted boolean %s as integer one" % field)
+            return 1
+    foreign_raw = forward_observation(0)
+    for name in ("issueBlockedEntry", "objectProbeLedgerOn", "seedDiagnostics",
+                 "uiLayerLiveEyeGate", "uiLayerLiveFallbackGate", "uiLayerWatchingGate",
+                 "issueBlockedBeforeOriginal", "issueBlockedAfterOriginal",
+                 "planetPending", "planetSolarPending"):
+        foreign_raw[name] = basic_read(None, False, False)
+    foreign_draw = json.loads(json.dumps(forward_trace(0)["draws"][0]))
+    foreign_draw["predicateFacts"] = [basic_context_fact(10, 11)]
+    foreign_result = _replay_forward_inputs(foreign_raw, foreign_draw, "forward-foreign")
+    if foreign_result["status"] != "unavailable":
+        print("foreign-context forwarding was included in owner-context replay scope")
+        return 1
+    skip_curve_true = forward_trace(2)
+    skip_curve_true["draws"][0]["forwardInputs"]["curveThisDrawBeforeSkipClear"] = basic_read(True)
+    if validate_trace(skip_curve_true)["forwardReplay"]["unavailable"] != 1:
+        print("Skip with a true curve-clear mutation was replayed outside the bounded scope")
+        return 1
+    explicit_legacy_header = json.loads(json.dumps(legacy_v1))
+    explicit_legacy_header["forwardInputVersion"] = 1
+    try:
+        validate_trace(explicit_legacy_header)
+    except TraceError:
+        pass
+    else:
+        print("schemaVersion 1 accepted a forwarding-input version header")
+        return 1
+    for old_forward_version in range(1, 14):
+        old_forward = _fixture()
+        old_forward["predicateFactVersion"] = old_forward_version
+        old_forward.pop("forwardInputVersion", None)
+        old_forward_summary = validate_trace(old_forward)["forwardReplay"]
+        if (old_forward_summary["forwardInputVersion"] != 0 or
+                old_forward_summary["status"] != "unavailable"):
+            print("legacy predicate version %d inferred forwarding inputs" % old_forward_version)
+            return 1
+    empty_forward = _fixture()
+    empty_forward.update(predicateFactVersion=13, forwardInputVersion=1)
+    empty_forward["draws"] = []
+    empty_forward["footer"]["drawCount"] = 0
+    empty_forward_result = validate_trace(empty_forward)["forwardReplay"]
+    if (empty_forward_result["replayed"] or empty_forward_result["unavailable"] or
+            empty_forward_result["mismatches"] or empty_forward_result["status"] != "not-visited"):
+        print("empty forwarding-input capture lacks zeroed replay defaults")
+        return 1
+    mixed_forward = forward_trace(0)
+    second_draw = json.loads(json.dumps(mixed_forward["draws"][0]))
+    second_draw.update(index=1, forwardInputs=None, forwardInputsReached=False)
+    mixed_forward["draws"].append(second_draw)
+    mixed_forward["footer"]["drawCount"] = 2
+    mixed_forward_result = validate_trace(mixed_forward)["forwardReplay"]
+    if (mixed_forward_result["replayed"] != 1 or
+            mixed_forward_result["unavailable"] != 1 or
+            mixed_forward_result["mismatches"]):
+        print("mixed known/null forwarding observations lost independent status counts")
+        return 1
 
     basic_equal = _replay_predicate_facts(
         basic_draw(2, 1, 0, -1, basic_context_fact(0, 0)), "basic-equal", 9)
@@ -8165,6 +8897,10 @@ def main(argv=None):
                         help="assert exactly COUNT unavailable fixture facts with no mismatches or unobserved mutations (requires --dry-run)")
     parser.add_argument("--expect-mutation-unobserved", type=int, metavar="COUNT",
                         help="assert exactly COUNT known LoaderPanel selector mutation warnings with no unavailable predicates or selector mismatches (requires --dry-run)")
+    parser.add_argument("--expect-forward-replayed", type=int, metavar="COUNT",
+                        help="assert exactly COUNT independently replayed forwarding-local plans and no unavailable plans or mismatches (requires --dry-run)")
+    parser.add_argument("--expect-forward-unavailable", type=int, metavar="COUNT",
+                        help="assert exactly COUNT unavailable forwarding observations and no mismatches (requires --dry-run)")
     parser.add_argument("--self-test", action="store_true", help="run fixture checks and exit")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -8187,6 +8923,18 @@ def main(argv=None):
             parser.error("--expect-mutation-unobserved requires --dry-run")
         if args.expect_invalid or args.expect_unreplayable is not None:
             parser.error("--expect-mutation-unobserved cannot be combined with --expect-invalid or --expect-unreplayable")
+    if args.expect_forward_replayed is not None or args.expect_forward_unavailable is not None:
+        for value, option in ((args.expect_forward_replayed, "--expect-forward-replayed"),
+                              (args.expect_forward_unavailable, "--expect-forward-unavailable")):
+            if value is not None and value <= 0:
+                parser.error(option + " requires a positive count")
+        if args.expect_forward_replayed is not None and args.expect_forward_unavailable is not None:
+            parser.error("forward replay expectations cannot be combined")
+        if not args.dry_run:
+            parser.error("forward replay expectations require --dry-run")
+        if (args.expect_invalid or args.expect_unreplayable is not None or
+                args.expect_mutation_unobserved is not None):
+            parser.error("forward replay expectations cannot be combined with other fixture expectations")
     try:
         _, summary = read_trace(args.file, args.expected_log, args.expected_build_stamp)
     except OSError as exc:
@@ -8225,9 +8973,34 @@ def main(argv=None):
         print("[edvr] fixture expectation confirmed: exactly %d mutation-unobserved warning(s) on known LoaderPanel selectors; predicate equivalence remains false" % expected_count)
         print("  dry-run: no files or directories were written")
         return 0
+    # Only the explicit predicate expectation modes above may accept their
+    # declared unavailable facts or mutation warnings. Forwarding assertions
+    # must still pass the normal supported-predicate correctness gate.
     gate_failure = predicate_replay_gate_failure(summary)
     if gate_failure:
         print("[edvr] predicate replay gate failed: %s" % gate_failure)
+        return 1
+    if args.expect_forward_replayed is not None:
+        replay = summary["forwardReplay"]
+        if (replay["replayed"] != args.expect_forward_replayed or
+                replay["unavailable"] != 0 or replay["mismatches"] != 0):
+            print("[edvr] expected forwarding replay count or clean local comparisons failed")
+            return 1
+        print("[edvr] fixture expectation confirmed: exactly %d forwarding-local plans replayed; whole forwarding equivalence remains false" % args.expect_forward_replayed)
+        print("  dry-run: no files or directories were written")
+        return 0
+    if args.expect_forward_unavailable is not None:
+        replay = summary["forwardReplay"]
+        if (replay["unavailable"] != args.expect_forward_unavailable or
+                replay["mismatches"] != 0):
+            print("[edvr] expected forwarding unavailable count or clean local comparisons failed")
+            return 1
+        print("[edvr] fixture expectation confirmed: exactly %d forwarding observation(s) unavailable" % args.expect_forward_unavailable)
+        print("  dry-run: no files or directories were written")
+        return 0
+    if summary["forwardReplay"]["mismatches"]:
+        print("[edvr] forwarding replay gate failed: %d local mismatch(es)" %
+              summary["forwardReplay"]["mismatches"])
         return 1
     if args.dry_run:
         print("  dry-run: no files or directories were written")

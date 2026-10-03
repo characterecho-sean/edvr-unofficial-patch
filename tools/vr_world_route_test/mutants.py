@@ -138,7 +138,11 @@ W_MOVIE_ARMED = "            if (introPanelStripArmed()) {\n"
 W_MOVIE_REVERSE = "                stripReverseU = introPanelStripReverseU();\n"
 W_REFUSAL = ("        if (owner && uiLayerIssueBlocked()) return false;\n"
              "        if (stripIssued) return true;   // the strip was issued in its place: nothing more, and something was\n")
-W_CANDIDATE = "if ((v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw) && owner && panelCurveSurfaceWanted()) {"
+W_INTRO_GATE = ("forwardInputs.read(\n"
+                "            forwardInputs.fact.introCurveThisDrawStripGate,\n"
+                "            [&] { return g_state->introCurveThisDraw; },\n"
+                "            [&] { return g_state->introCurveThisDraw; })")
+W_CANDIDATE = "if ((v == DrawVerdict::kIntroPanel || " + W_INTRO_GATE + ") && owner && panelCurveSurfaceWanted()) {"
 W_STRIP_CALL = "stripIssued = panelCurveSurfaceDraw(self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);"
 W_TICK = ("        tkIntroCurve.run([&] {\n            const bool sceneFrame = g_state->eyeDrawsLastFrame >= kSceneEyeDraws;\n"
           "            introCurveTick(g_state->ownerCtx, sceneFrame);\n            if (sceneFrame) introCurveNoteRetired();\n        });\n")
@@ -373,8 +377,8 @@ MUTANTS = [
            "the splash dim's re-issue of the strip passes a constant u direction"),
     wiring("iw-site-reverse-starts-true", "strip-site", [(W_REVERSE_DECL, "    bool stripReverseU = true;\n")], "an unarmed draw's u direction starts as against x"),
     wiring("iw-unarmed-early-return-first", "unarmed-text",
-           [("if (owner && uiLayerIssueBlocked()) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,\n                kind, count, instances, args);\n            return false;\n        }\n        if (stripIssued) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,\n                kind, count, instances, args);\n            return true;   // the strip was issued in its place: nothing more, and something was\n        }",
-             "if (stripIssued) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,\n                kind, count, instances, args);\n            return true;   // the strip was issued in its place: nothing more, and something was\n        }\n        if (owner && uiLayerIssueBlocked()) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,\n                kind, count, instances, args);\n            return false;\n        }")],
+           [("if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,\n                [] { return detail::g_uiLayerIssueBlocked; },\n                [] { return uiLayerIssueBlocked(); })) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,\n                kind, count, instances, args);\n            return false;\n        }\n        if (stripIssued) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,\n                kind, count, instances, args);\n            return true;   // the strip was issued in its place: nothing more, and something was\n        }",
+             "if (stripIssued) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,\n                kind, count, instances, args);\n            return true;   // the strip was issued in its place: nothing more, and something was\n        }\n        if (owner && forwardInputs.read(forwardInputs.fact.issueBlockedBeforeOriginal,\n                [] { return detail::g_uiLayerIssueBlocked; },\n                [] { return uiLayerIssueBlocked(); })) {\n            ladderTraceAction<TracePolicy, draw_ladder::ActionId::kSwallowOriginal>(\n                trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Declined,\n                kind, count, instances, args);\n            return false;\n        }")],
            "the strip early-return now precedes the layer's refusal"),
     wiring("iw-unarmed-no-early-return", "unarmed-text", [("if (stripIssued) {", "if (false) {")],
            "the game's own draw is issued a second time over the strip"),
@@ -386,7 +390,7 @@ MUTANTS = [
              "const bool stripDim = panelCurveSurfaceDraw(\n                self, stripGain, stripToward, stripReverseU, g_state->realDrawIndexedInstanced);")],
            "the dim draws the strip even when the main draw's strip did not draw"),
     wiring("iw-candidate-asks-first", "candidate",
-           [(W_CANDIDATE, "if (panelCurveSurfaceWanted() && (v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw) && owner) {")],
+           [(W_CANDIDATE, "if (panelCurveSurfaceWanted() && (v == DrawVerdict::kIntroPanel || " + W_INTRO_GATE + ") && owner) {")],
            "every draw pays the cross-TU question"),
     wiring("iw-candidate-every-draw", "candidate", [(W_CANDIDATE, "if (owner && panelCurveSurfaceWanted()) {")], "every draw is a candidate for the strip"),
     wiring("iw-args-movie-gain", "strip-args", [("stripGain = introPanelStripGain();", "stripGain = introCurveGain();")], "the movie is drawn at the splash's gain"),
@@ -420,8 +424,8 @@ MUTANTS = [
              "        s->introCurveThisDraw = introCurveOnComposite(self, kind, count, instances);\n        s->curveThisDraw = s->introCurveThisDraw;\n")],
            "the splash's strip rides the on-foot flag, whose branch returns before the verdict's Begin and the dim"),
     wiring("iw-onfoot-flag-read", "not-on-foot-flag",
-           [("(v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw) && owner",
-             "(v == DrawVerdict::kIntroPanel || g_state->introCurveThisDraw || g_state->curveThisDraw) && owner")],
+           [(W_CANDIDATE, W_CANDIDATE.replace("return g_state->introCurveThisDraw;",
+                                            "return g_state->introCurveThisDraw || g_state->curveThisDraw;"))],
            "the strip's site also reads the on-foot flag"),
     wiring("iw-tick-missing", "tick", [(W_TICK, "")], "the recogniser is never ticked: it never retires"),
     wiring("iw-tick-no-scene", "tick", [("introCurveTick(g_state->ownerCtx, sceneFrame);", "introCurveTick(g_state->ownerCtx, false);")], "the tick is told no scene"),

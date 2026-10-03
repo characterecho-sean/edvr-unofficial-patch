@@ -127,7 +127,7 @@ std::vector<WirePin> vscreenCurvedPins(const std::string& text) {
     // forwardWithVerdict's curve branch: the substitution skips its own per-eye motion pass exactly when the route re-issues this draw, and a
     // swallowed draw goes to curvedScreenSwallowed with that same fact and returns, before the verdict's own Begin.
     pins.push_back({"curve-branch",
-                    inOrder(fwd, {"if(g_state->curveThisDraw){g_state->curveThisDraw=false;", "constboollayered=uiLayer&&uiLayerBegin(self);",
+                    inOrder(fwd, {"if(forwardInputs.read(forwardInputs.fact.curveThisDrawCurveGate,[&]{returng_state->curveThisDraw;},[&]{returng_state->curveThisDraw;})){g_state->curveThisDraw=false;", "constboollayered=uiLayer&&uiLayerBegin(self);",
                                   "constboolswallowed=panelCurveSubstitute(self,g_state->realDrawIndexedInstanced,!worldReissue.on);",
                                   "if(layered)uiLayerEnd(self);if(swallowed){curvedScreenSwallowed(trace,self,v,count,instances,args,worldReissue.on);return;}",
                                   "if(v!=DrawVerdict::kNone){", "forwardVerdictBegin(self,v);"}) &&
@@ -158,7 +158,7 @@ std::vector<WirePin> vscreenCurvedPins(const std::string& text) {
                     inOrder(flat, {"if(uiLayerIssueBlocked()){", "return;", "}VrWorldInternalScopeinternal;", "constboolbegan=uiLayerWorldReissueBegin(self);",
                                     "if(began){", "GpuCensusScopecensus(self,GpuCensusSection::FrameWorldLayer);",
                                     "pureDrawReissue(self,kind,count,instances,args);", "uiLayerWorldReissueEnd(self);"}) &&
-                        has(fwd, "if(originalIssued&&uiLayerCrispPending()){crispHudTonemapReissue(trace,self,kind,count,instances,args);}"
+                        has(fwd, "if(originalIssued&&forwardInputs.read(forwardInputs.fact.crispPendingAfterOriginal,[]{returndetail::g_uiLayerCrispPending;},[]{returnuiLayerCrispPending();})){crispHudTonemapReissue(trace,self,kind,count,instances,args);}"
                                  "if(worldReissue.on&&originalIssued){worldScreenReissue(trace,self,kind,count,instances,args);}") &&
                         countOf(all, "worldScreenReissue(") == 2 && countOf(all, "uiLayerWorldReissueEnd(self);") == 1,
                     "the flat re-issue keeps its original bracketed draw and `if (worldReissue.on && originalIssued) worldScreenReissue(trace, "

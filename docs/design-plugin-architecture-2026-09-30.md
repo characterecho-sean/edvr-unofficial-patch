@@ -42,9 +42,9 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  bounded API owner costs are instrumented; twenty-one selectors pass
-  all 139 validation jobs. Enabled replay storage is measured at 467.9 MiB;
-  the default disabled path allocates none.
+  bounded API owner costs are instrumented; twenty-one selectors and local
+  None/Skip forwarding checks pass all 139 validation jobs. Enabled replay
+  storage is measured at 472.9 MiB; the default disabled path allocates none.
   Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
@@ -1957,3 +1957,78 @@ windows, consoles or foreground changes. This is a Phase 1 checkpoint:
 independent forwarding, complete owner cost coverage and the matched CPU
 improvement/GPU non-regression gates remain open. Steam continues to use
 verified 4350a281; no new flight was spent on this slice.
+
+### Forwarding inputs v1, 2026-10-03 (validated)
+
+Predicate facts remain at version 13. A separate `forwardInputVersion: 1`
+records raw inputs consumed by `forwardWithVerdict`, including its verdict
+parameter, repeated lazy UI/issue gates, captured depth flags, raw engine cache
+family, actual callback result and the post-callback reads. The pointer-free
+observation reuses site 2's normalized context identities and `DrawFacts`; no
+extra context query or identity slots were added.
+
+The reader independently derives the local original/skip action plan for
+owner-context `None` and `Skip` draws with every relevant side-work gate known
+false. It preserves short circuits, separate repeated reads and signed source
+domains. A skip that actually clears an armed curve flag is unavailable because
+that mutation is outside this slice. Other verdicts, foreign contexts, active
+or unknown side work, missing entry and missing inputs are explicitly
+unavailable. Normalized D/N start vertices use the source's unsigned cast,
+including `INT_MIN` and `-1`; indexed base vertices remain signed. Recorded
+actions and forwarding facts are comparisons, never inputs to the expected
+plan.
+
+This is a local forwarder check. The real callback can perform additional work,
+including the X thunk's motion reissues. Its actual returned boolean is an
+external input; callback-internal D3D work is unobserved. The report keeps
+terminal proof unavailable and whole forwarding equivalence false.
+
+The production WARP harness calls the actual forwarder with an injected
+callback and compares Trace/NoTrace callback count, classification and selected
+scalar state. It covers None/Skip, blocked entry, active ledger, callback
+failure, repeated post-callback gates and lazy planet OR reads. Exact typed
+action tuples cover D/I/N/X and literal unsigned edge cases; NoTrace records no
+observations. Native canonical writer/reader fixtures cover applied/declined
+originals, skip, missing entry, unknown input, duplicate/malformed append and
+cold-pool overflow. Forwarding count CLI assertions must also pass the existing
+predicate gate; regressions reject predicate mismatches, unavailable facts and
+mutation warnings without any filesystem writes. The new ordinary fixtures
+record a real NV shape hit and a consumed failed-mode state, rather than
+contradicting `DrawFacts`.
+
+Review caught 14 additional NoTrace calls caused by an empty nontrivial
+observer destructor. A trivially destructible specialization removes that
+cleanup scope. The original draw-ladder visitor remains byte-identical: 7,057
+bytes, 1,636 records, 94 ordered calls and a 288-byte stack allocation. The
+eight forwarder bodies are not byte-identical: each is 2,782 bytes and 756
+records versus 2,790/758, with the same 71 ordered calls and 176-byte stack
+allocation. Inspection traced the reduction to two redundant zero extensions
+(seven bytes) and one padding byte. Direct packing in `edx` already clears its
+upper bits. There are no additional calls, reads or branches in this compiled
+comparison; it does not establish flight timing.
+
+The fresh MSVC footprint probe measures a 72-byte forwarding observation,
+65,536 slots (4.5 MiB) and DrawRecord growth from 3,920 to 3,928 bytes (0.5
+MiB). Enabled replay storage totals 472.875 MiB, excluding allocator overhead.
+The disabled default still allocates no replay pools. Append marks entry before
+validation, and missing-pool/overflow failures invalidate the capture rather
+than masquerading as an unvisited forwarder.
+
+The focused production/WARP, ordered canonical replay, NoTrace compilation and
+footprint gates passed in 34 seconds with no window shown, console opened or
+foreground move. The full build passed all 139 jobs: 132 pooled jobs in 154.8
+seconds and seven quiet jobs in 45.2 seconds. Both production profiles, the
+235-key config contract and the self-contained installer passed. FocusWatch
+observed no shown window, opened console or foreground move to the build tree
+in 200 seconds. The source receipt is
+`679dd5d4b9f1a3a723127ca6dc606c7d78dd2ab87ee4820f90c4b96be6586cd2`
+(`v0.18.1-31-g4a624a92-dirty`).
+
+Legacy UI/intro and on-foot maps source-order pins were updated to the
+observed-read expressions. The checks retain the original recognition, refusal,
+curve/strip and reissue order. The focused quality rig passes 3,218 checks, the
+maps rig passes 80 checks, and all 50 deliberately broken wiring variants are
+caught by named checks. Mutation anchor self-tests pass for all 96 world-route
+and 53 maps variants. No Steam build was installed and no additional flight was
+requested. Remaining predicate/forwarding/state coverage, all-module costs and
+matched CPU/GPU performance remain open before any Phase 2 migration.

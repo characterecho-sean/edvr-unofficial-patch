@@ -1477,7 +1477,9 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        unsigned basicCase = 0, unsigned eyeCensusCase = 0,
                        unsigned resolveBindCase = 0,
                        unsigned loaderPanelCase = 0,
-                       unsigned fssDumpCase = 0) {
+                       unsigned fssDumpCase = 0,
+                       unsigned forwardingCase = 0,
+                       bool scrimWashIsBuffer = false) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     const bool overflowBefore = trace::overflowed();
@@ -1581,10 +1583,21 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     const trace::Token token = trace::beginDraw(facts);
     if (!token.valid()) return false;
     auto policy = trace::makePolicy(token);
-    ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawBegin>(policy, [] {
+    const bool normalizedForwardEnvelope = forwardingCase != 0 || scrimWashIsBuffer;
+    const auto fillForwardTuple = [&](ladder::ActionRecord& action) {
+        action.call = directCallKind(static_cast<char>(facts.kind));
+        action.count = facts.count;
+        action.instances = facts.instances;
+        action.start = facts.kind == 'D' || facts.kind == 'N'
+            ? static_cast<std::uint32_t>(facts.args.base) : facts.args.start;
+        action.startInstance = facts.args.startInstance;
+        action.baseVertex = facts.kind == 'D' || facts.kind == 'N' ? 0 : facts.args.base;
+    };
+    ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawBegin>(policy, [&] {
         ladder::ActionRecord action;
         action.phase = ladder::ActionPhase::Begin;
         action.outcome = ladder::ActionOutcome::Applied;
+        if (normalizedForwardEnvelope) fillForwardTuple(action);
         return action;
     });
 
@@ -1601,6 +1614,7 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         flow = runSequence(selectedSequence, visitor, interest, policy);
     }
     for (const auto visited : visitor.visited) {
+        const bool overflowBeforeFact = trace::overflowed();
         if (visited == ladder::SiteId::kDrawGateDisabledNone) {
             trace::PredicateFact fact{};
             fact.siteId = static_cast<std::uint16_t>(visited);
@@ -1662,13 +1676,17 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
             fact.modeKnown = trace::TriState::Yes;
             fact.mode = 2;
             fact.shapeReached = trace::TriState::Yes;
-            if (terminal == ladder::SiteId::kNightVisionClaim) {
+            if (terminal == ladder::SiteId::kNightVisionClaim || normalizedForwardEnvelope) {
                 fact.shapeMatched = trace::TriState::Yes;
                 fact.callbackReached = trace::TriState::Yes;
                 fact.callbackModeKnown = trace::TriState::Yes;
                 fact.callbackMode = 2;
                 fact.failedKnown = trace::TriState::Yes;
-                fact.failed = trace::TriState::No;
+                // The forward-only X/240/1 fixtures match the real NV shape.
+                // A consumed failed-mode state independently declines NV;
+                // recording a shape miss here would contradict DrawFacts.
+                fact.failed = normalizedForwardEnvelope && terminal != ladder::SiteId::kNightVisionClaim
+                    ? trace::TriState::Yes : trace::TriState::No;
             } else {
                 // Matrix rows retain the historical invoked-site order, with
                 // a draw-kind miss before the NV callback is reached.
@@ -1728,7 +1746,7 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 terminal == ladder::SiteId::kFssPanelClaim));
         } else if (visited == ladder::SiteId::kScrimClaim) {
             policy.predicateFact(makeScrimPredicateFact(visited, facts,
-                terminal == ladder::SiteId::kEyeBackdropComposite));
+                terminal == ladder::SiteId::kEyeBackdropComposite || scrimWashIsBuffer));
         }
         if (visited == ladder::SiteId::kSunglareSkip) {
             policy.sunglareFact(sunglareFact(edvr::SunglareTraceFactKind::kKind9,
@@ -1785,6 +1803,10 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
             policy.fssFact(fssFact(edvr::FssTraceFactKind::kReveal,
                 terminal == ladder::SiteId::kFssRevealClaim, frameNo));
         }
+        if (!overflowBeforeFact && trace::overflowed())
+            std::printf("terminal fixture raw-fact invalidation: terminal=%u frame=%u factSite=%u reason=%u\n",
+                static_cast<unsigned>(terminal), frameNo, static_cast<unsigned>(visited),
+                static_cast<unsigned>(trace::invalidationReason()));
     }
     if (stagedFss) {
         edvr::FssObservation panel{};
@@ -1875,6 +1897,51 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         appendTestIssue<ladder::ActionId::kOriginalDraw>(policy,
             directCallKind(kind), 0, instances);
     }
+    if (forwardingCase) {
+        edvr::ForwardingObservation fact{};
+        const bool skip = forwardingCase == 3;
+        const bool callbackReturned = forwardingCase != 2;
+        fact.verdictOrdinal = {true, true, static_cast<std::int16_t>(
+            skip ? ladder::VerdictOrdinal::kSkip : ladder::VerdictOrdinal::kNone)};
+        if (forwardingCase == 4) fact.verdictOrdinal.known = false;
+        fact.issueBlockedEntry = {true, true, false};
+        fact.objectProbeLedgerOn = {true, true, false};
+        fact.uiDepthThisDraw = {true, true, false};
+        fact.holoDepthThisDraw = {true, true, false};
+        fact.compositeThisDraw = {true, true, false};
+        if (skip) fact.curveThisDrawBeforeSkipClear = {true, true, false};
+        if (!skip) {
+            fact.seedDiagnostics = {true, true, false};
+            fact.uiLayerLiveEyeGate = {true, true, false};
+            fact.uiLayerLiveFallbackGate = {true, true, false};
+            fact.uiLayerWatchingGate = {true, true, false};
+            fact.curveThisDrawCurveGate = {true, true, false};
+            fact.engineVelocityCacheFamily = {true, true, -1};
+            fact.introCurveThisDrawStripGate = {true, true, false};
+            fact.issueBlockedBeforeOriginal = {true, true, false};
+            fact.originalCallReturned = {true, true, callbackReturned};
+            if (callbackReturned)
+                fact.crispPendingAfterOriginal = {true, true, false};
+            fact.issueBlockedAfterOriginal = {true, true, false};
+            fact.planetPending = {true, true, false};
+            fact.planetSolarPending = {true, true, false};
+        }
+        policy.forwardInputs(fact);
+        if (skip) {
+            appendTestIssue<ladder::ActionId::kSwallowOriginal>(policy,
+                directCallKind(kind), 0, instances, ladder::ActionOutcome::Applied, 0);
+        } else {
+            ladder::recordAction<trace::TracePolicy, ladder::ActionId::kOriginalDraw>(policy, [&] {
+                ladder::ActionRecord action;
+                action.phase = ladder::ActionPhase::Issue;
+                action.outcome = callbackReturned ? ladder::ActionOutcome::Applied
+                                                  : ladder::ActionOutcome::Declined;
+                action.issueCount = callbackReturned ? 1 : 0;
+                fillForwardTuple(action);
+                return action;
+            });
+        }
+    }
     if (terminal == ladder::SiteId::kIntroPanelClaim) {
         // A forwardQuadSkip-style replacement and a generated curve strip share one draw envelope.
         appendTestIssue<ladder::ActionId::kReplaceDraw>(policy,
@@ -1885,13 +1952,19 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 (malformedGenerated ? 0 : ladder::kActionGeneratedDrawArgsUnavailable), 0,
             ladder::ActionOutcome::Applied, 0);
     }
-    ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawEnd>(policy, [] {
+    ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawEnd>(policy, [&] {
         ladder::ActionRecord action;
         action.phase = ladder::ActionPhase::End;
         action.outcome = ladder::ActionOutcome::Applied;
+        if (normalizedForwardEnvelope) fillForwardTuple(action);
         return action;
     });
+    const bool overflowBeforeFinish = trace::overflowed();
     trace::finishDraw(token, static_cast<std::int16_t>(terminal), verdict);
+    if (!overflowBeforeFinish && trace::overflowed())
+        std::printf("terminal fixture finalization invalidation: terminal=%u frame=%u reason=%u\n",
+            static_cast<unsigned>(terminal), frameNo,
+            static_cast<unsigned>(trace::invalidationReason()));
     if (!overflowBefore && trace::overflowed())
         std::printf("terminal fixture first invalidation: terminal=%u route=%u\n",
                     static_cast<unsigned>(terminal), static_cast<unsigned>(route));
@@ -2280,6 +2353,8 @@ bool traceWriterChecks(const char* rootArg) {
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
                 matrixJson.find("\"predicateFactVersion\":13") != std::string::npos &&
+                matrixJson.find("\"forwardInputVersion\":1") != std::string::npos &&
+                matrixJson.find("\"forwardInputsReached\":false,\"forwardInputs\":null") != std::string::npos &&
                 matrixJson.find("\"siteId\":25,\"kind\":19") != std::string::npos &&
                 matrixJson.find("\"siteId\":57,\"kind\":12") != std::string::npos &&
                 matrixJson.find("\"siteId\":58,\"kind\":13") != std::string::npos &&
@@ -3535,6 +3610,94 @@ bool traceWriterChecks(const char* rootArg) {
     trace::frameEnd(95);
     ok &= check(dumpWrapWritten && trace::status() == trace::Status::CompleteWritten,
                 "FSS dump counter wrap preserves unsigned pending-eye serialization");
+    trace::shutdown();
+
+    const auto writeForwardCase = [&](const char* directory, const char* log,
+                                      std::uint32_t frame, ladder::SiteId terminal,
+                                      unsigned forwardCase) {
+        const bool started = beginCapture(root + "\\" + directory, log, frame);
+        const bool written = started && writeTerminalCase(
+            ladder::RouteId::kVrEye, ladder::SequenceId::kVrEye, 'X', terminal, true,
+            kFrozenEye, sizeof(kFrozenEye) / sizeof(kFrozenEye[0]),
+            ladder::EyeSequence{}, 1, false, false, edvr::SunglareTraceMode::kStock,
+            false, false, 0, frame, false, false, 0, 0, 0, 0, 0, forwardCase,
+            true); // Raw nontexture wash declines Scrim for this X/240/1 draw.
+        trace::frameEnd(frame);
+        const bool complete = written && trace::status() == trace::Status::CompleteWritten;
+        trace::shutdown();
+        return complete;
+    };
+    ok &= check(writeForwardCase("forward_none_applied", "edvr_gfx_forward_none_applied.log",
+                    96, ladder::SiteId::kEyeNoDistanceNone, 1),
+                "forward input None with a returned callback serializes a supported action plan");
+    ok &= check(writeForwardCase("forward_none_declined", "edvr_gfx_forward_none_declined.log",
+                    97, ladder::SiteId::kEyeNoDistanceNone, 2),
+                "forward input None with a declined callback serializes a supported action plan");
+    ok &= check(writeForwardCase("forward_skip", "edvr_gfx_forward_skip.log",
+                    98, ladder::SiteId::kEyeCensusSkip, 3),
+                "forward input Skip serializes a supported swallow action plan");
+    ok &= check(writeForwardCase("forward_unavailable", "edvr_gfx_forward_unavailable.log",
+                    99, ladder::SiteId::kEyeNoDistanceNone, 0),
+                "draw without forwarding entry retains explicit unavailable inputs");
+    ok &= check(writeForwardCase("forward_unknown", "edvr_gfx_forward_unknown.log",
+                    100, ladder::SiteId::kEyeNoDistanceNone, 4),
+                "reached unknown forwarding input remains unavailable to replay");
+
+    const auto beginForwardMalformed = [&](const char* directory) {
+        return beginCapture(root + "\\" + directory, "edvr_gfx_forward_malformed.log", 101);
+    };
+    const auto malformedForwardRejected = [&](unsigned malformedKind) {
+        const bool started = beginForwardMalformed("forward_malformed");
+        trace::DrawFacts malformedDraw{};
+        malformedDraw.eyeDrawIndex = 1;
+        malformedDraw.route = ladder::RouteId::kVrEye;
+        malformedDraw.sequence = ladder::SequenceId::kVrEye;
+        const auto token = trace::beginDraw(malformedDraw);
+        edvr::ForwardingObservation malformed{};
+        malformed.verdictOrdinal = {true, true, 0};
+        if (malformedKind == 1) malformed.kind = 99;
+        if (malformedKind == 2) malformed.version = 99;
+        if (malformedKind == 3) malformed.issueBlockedEntry = {false, true, false};
+        trace::appendForwardingFact(token, malformed);
+        const bool rejected = trace::overflowed() && trace::invalidationReason() ==
+            trace::CaptureInvalidation::Other;
+        trace::shutdown();
+        return started && token.valid() && rejected;
+    };
+    ok &= check(malformedForwardRejected(1), "unknown forwarding observation kind is rejected");
+    ok &= check(malformedForwardRejected(2), "unknown forwarding observation version is rejected");
+    ok &= check(malformedForwardRejected(3), "known forwarding read without reached flag is rejected");
+
+    const bool duplicateForwardStarted = beginCapture(
+        root + "\\forward_duplicate", "edvr_gfx_forward_duplicate.log", 102);
+    trace::DrawFacts duplicateForwardDraw{};
+    duplicateForwardDraw.eyeDrawIndex = 1;
+    const auto duplicateForwardToken = trace::beginDraw(duplicateForwardDraw);
+    edvr::ForwardingObservation duplicateForwardFact{};
+    duplicateForwardFact.verdictOrdinal = {true, true, 0};
+    trace::appendForwardingFact(duplicateForwardToken, duplicateForwardFact);
+    trace::appendForwardingFact(duplicateForwardToken, duplicateForwardFact);
+    ok &= check(duplicateForwardStarted && duplicateForwardToken.valid() &&
+                    trace::invalidationReason() == trace::CaptureInvalidation::ForwardingIndexOverflow,
+                "a second forwarding fact on one draw trips the dedicated per-draw cap");
+    trace::shutdown();
+
+    const bool forwardPoolStarted = beginCapture(
+        root + "\\forward_pool_overflow", "edvr_gfx_forward_pool_overflow.log", 103);
+    bool forwardPoolFilled = forwardPoolStarted;
+    trace::Token lastForwardToken{};
+    for (std::uint32_t i = 0; forwardPoolFilled && i < trace::kMaxForwardingFacts; ++i) {
+        trace::DrawFacts poolDraw{};
+        poolDraw.eyeDrawIndex = i + 1;
+        lastForwardToken = trace::beginDraw(poolDraw);
+        if (!lastForwardToken.valid()) { forwardPoolFilled = false; break; }
+        trace::appendForwardingFact(lastForwardToken, duplicateForwardFact);
+        if (trace::overflowed()) forwardPoolFilled = false;
+    }
+    if (forwardPoolFilled) trace::appendForwardingFact(lastForwardToken, duplicateForwardFact);
+    ok &= check(forwardPoolFilled && trace::invalidationReason() ==
+                    trace::CaptureInvalidation::ForwardingIndexOverflow,
+                "the full forwarding pool rejects one extra append with its own invalidation");
     trace::shutdown();
     return ok;
 }

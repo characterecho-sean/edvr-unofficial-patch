@@ -48,6 +48,7 @@ struct DrawRecord final {
     std::uint32_t resolveBindFactIndices[kMaxResolveBindFactsPerDraw]{};
     std::uint32_t loaderPanelFactIndices[kMaxLoaderPanelFactsPerDraw]{};
     std::uint32_t fssDumpFactIndices[kMaxFssDumpFactsPerDraw]{};
+    std::uint32_t forwardingFactIndices[kMaxForwardingFactsPerDraw]{};
     ForwardFacts forwardFacts{};
     std::uint16_t siteCount = 0;
     std::uint16_t actionCount = 0;
@@ -60,10 +61,12 @@ struct DrawRecord final {
     std::uint8_t resolveBindFactCount = 0;
     std::uint8_t loaderPanelFactCount = 0;
     std::uint8_t fssDumpFactCount = 0;
+    std::uint8_t forwardingFactCount = 0;
     std::int16_t winnerSiteId = -1;
     std::int16_t verdictOrdinal = -1;
     bool finalized = false;
     bool hasForwardFacts = false;
+    bool forwardingInputReached = false;
 };
 
 DrawRecord* g_records = nullptr;
@@ -79,10 +82,12 @@ EyeCensusObservation* g_eyeCensusFacts = nullptr;
 ResolveBindObservation* g_resolveBindFacts = nullptr;
 LoaderPanelObservation* g_loaderPanelFacts = nullptr;
 FssDumpObservation* g_fssDumpFacts = nullptr;
+ForwardingObservation* g_forwardingFacts = nullptr;
 std::uint32_t g_eyeCensusFactCount = 0;
 std::uint32_t g_resolveBindFactCount = 0;
 std::uint32_t g_loaderPanelFactCount = 0;
 std::uint32_t g_fssDumpFactCount = 0;
+std::uint32_t g_forwardingFactCount = 0;
 std::uintptr_t* g_identities = nullptr;
 std::uint32_t g_drawCount = 0;
 std::uint32_t g_identityCount = 0;
@@ -106,6 +111,8 @@ bool g_resolveBindPoolMissing = false;
 bool g_loaderPanelPoolMissing = false;
 bool g_fssDumpIndexOverflowed = false;
 bool g_fssDumpPoolMissing = false;
+bool g_forwardingIndexOverflowed = false;
+bool g_forwardingPoolMissing = false;
 bool g_remlokIndexOverflowed = false;
 bool g_remlokPoolMissing = false;
 bool g_lastWriteSucceeded = false;
@@ -650,7 +657,17 @@ void normalizeResourceIdentities() noexcept {
 template <typename T>
 bool writeBasicRead(Writer& writer, const char* name,
                     const BasicDrawRead<T>& read, bool& first) noexcept {
-    return writeFssRead(writer, name, FssRead<T>{read.reached, read.known, read.value}, first);
+    if constexpr (std::is_signed<T>::value) {
+        if (!first && !writeText(writer, ",")) return false;
+        first = false;
+        if (!writeFmt(writer, "\"%s\":{\"reached\":%s,\"known\":%s,\"value\":",
+                      name, read.reached ? "true" : "false",
+                      read.known ? "true" : "false")) return false;
+        if (!read.reached || !read.known) return writeText(writer, "null}");
+        return writeFmt(writer, "%lld}", static_cast<long long>(read.value));
+    } else {
+        return writeFssRead(writer, name, FssRead<T>{read.reached, read.known, read.value}, first);
+    }
 }
 
 bool writeBasicFact(Writer& writer, const BasicDrawObservation& fact) noexcept {
@@ -1055,12 +1072,56 @@ bool writeFssDumpFact(Writer& writer, const FssDumpObservation& f) noexcept {
     return writeText(writer, "}}");
 }
 
+bool validForwardingFact(const ForwardingObservation& fact) noexcept {
+    if (fact.kind != 1 || fact.version != 1) return false;
+    const auto validRead = [](const auto& r) { return !r.known || r.reached; };
+    return validRead(fact.verdictOrdinal) && validRead(fact.issueBlockedEntry) &&
+        validRead(fact.objectProbeLedgerOn) && validRead(fact.uiDepthThisDraw) &&
+        validRead(fact.holoDepthThisDraw) && validRead(fact.compositeThisDraw) &&
+        validRead(fact.curveThisDrawBeforeSkipClear) && validRead(fact.seedDiagnostics) &&
+        validRead(fact.uiLayerLiveEyeGate) && validRead(fact.uiLayerLiveFallbackGate) &&
+        validRead(fact.uiLayerWatchingGate) && validRead(fact.curveThisDrawCurveGate) &&
+        validRead(fact.engineVelocityCacheFamily) && validRead(fact.introCurveThisDrawStripGate) &&
+        validRead(fact.issueBlockedBeforeOriginal) && validRead(fact.originalCallReturned) &&
+        validRead(fact.crispPendingAfterOriginal) && validRead(fact.issueBlockedAfterOriginal) &&
+        validRead(fact.planetPending) && validRead(fact.planetSolarPending);
+}
+
+bool writeForwardingFact(Writer& writer, const ForwardingObservation& fact) noexcept {
+    if (!writeFmt(writer, "{\"kind\":%u,\"version\":%u,", fact.kind, fact.version)) return false;
+    bool first = true;
+#define FORWARD_READ(name) if (!writeBasicRead(writer, #name, fact.name, first)) return false
+    FORWARD_READ(verdictOrdinal);
+    FORWARD_READ(issueBlockedEntry);
+    FORWARD_READ(objectProbeLedgerOn);
+    FORWARD_READ(uiDepthThisDraw);
+    FORWARD_READ(holoDepthThisDraw);
+    FORWARD_READ(compositeThisDraw);
+    FORWARD_READ(curveThisDrawBeforeSkipClear);
+    FORWARD_READ(seedDiagnostics);
+    FORWARD_READ(uiLayerLiveEyeGate);
+    FORWARD_READ(uiLayerLiveFallbackGate);
+    FORWARD_READ(uiLayerWatchingGate);
+    FORWARD_READ(curveThisDrawCurveGate);
+    FORWARD_READ(engineVelocityCacheFamily);
+    FORWARD_READ(introCurveThisDrawStripGate);
+    FORWARD_READ(issueBlockedBeforeOriginal);
+    FORWARD_READ(originalCallReturned);
+    FORWARD_READ(crispPendingAfterOriginal);
+    FORWARD_READ(issueBlockedAfterOriginal);
+    FORWARD_READ(planetPending);
+    FORWARD_READ(planetSolarPending);
+#undef FORWARD_READ
+    return writeText(writer, "}");
+}
+
 bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     normalizeResourceIdentities();
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
         "\"predicateFactVersion\":13,"
+        "\"forwardInputVersion\":1,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -1330,7 +1391,8 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
             r.winnerSiteId, r.verdictOrdinal);
         if (!ok) return false;
         if (!r.hasForwardFacts) {
-            if (!writeText(writer, "null,\"actions\":[")) return false;
+            if (!writeFmt(writer, "null,\"forwardInputsReached\":%s,\"forwardInputs\":",
+                    r.forwardingInputReached ? "true" : "false")) return false;
         } else {
             const ForwardFacts& d = r.forwardFacts;
             ok = writeFmt(writer,
@@ -1342,7 +1404,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                 "\"introCurveThisDraw\":\"%s\",\"uiDepth\":\"%s\","
                 "\"holoDepth\":\"%s\",\"composite\":\"%s\","
                 "\"crispPending\":\"%s\",\"issueBlocked\":\"%s\"},"
-                "\"actions\":[",
+                "\"forwardInputsReached\":%s,\"forwardInputs\":",
                 d.presentMask, d.verdictOrdinal, d.family,
                 triName(d.familyAvailable), triName(d.owner),
                 triName(d.verdictForwards),
@@ -1350,8 +1412,18 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                 triName(d.worldReissue), triName(d.curveThisDraw),
                 triName(d.introCurveThisDraw), triName(d.uiDepth),
                 triName(d.holoDepth), triName(d.composite),
-                triName(d.crispPending), triName(d.issueBlocked));
+                triName(d.crispPending), triName(d.issueBlocked),
+                r.forwardingInputReached ? "true" : "false");
             if (!ok) return false;
+        }
+        if (r.forwardingFactCount > 1) return false;
+        if (!r.forwardingFactCount) {
+            if (!writeText(writer, "null,\"actions\":[")) return false;
+        } else {
+            const std::uint32_t index = r.forwardingFactIndices[0];
+            if (!g_forwardingFacts || index >= g_forwardingFactCount ||
+                !writeForwardingFact(writer, g_forwardingFacts[index]) ||
+                !writeText(writer, ",\"actions\":[")) return false;
         }
         for (std::uint16_t j = 0; j < r.actionCount; ++j) {
             const draw_ladder::ActionRecord& a = r.actions[j];
@@ -1398,7 +1470,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     if (g_isCapturing) return;
     const bool wasEnabled = g_enabled.load(std::memory_order_acquire);
     if (!enabled && !wasEnabled && !g_records && !g_sunglareFacts &&
-        !g_fssFacts && !g_remlokFacts && !g_basicFacts && !g_eyeCensusFacts && !g_resolveBindFacts && !g_loaderPanelFacts && !g_fssDumpFacts && !g_identities) return;
+        !g_fssFacts && !g_remlokFacts && !g_basicFacts && !g_eyeCensusFacts && !g_resolveBindFacts && !g_loaderPanelFacts && !g_fssDumpFacts && !g_forwardingFacts && !g_identities) return;
     if (enabled && wasEnabled && logFilePath && logFilePath[0]) {
         wchar_t oldPath[kPathChars]{};
         if (SUCCEEDED(StringCchCopyW(oldPath, kPathChars, g_directory)) &&
@@ -1429,6 +1501,8 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_loaderPanelPoolMissing = false;
     g_fssDumpIndexOverflowed = false;
     g_fssDumpPoolMissing = false;
+    g_forwardingIndexOverflowed = false;
+    g_forwardingPoolMissing = false;
     g_lastWriteSucceeded = false;
     if (g_records) { delete[] g_records; g_records = nullptr; }
     if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
@@ -1439,6 +1513,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     if (g_resolveBindFacts) { delete[] g_resolveBindFacts; g_resolveBindFacts = nullptr; }
     if (g_loaderPanelFacts) { delete[] g_loaderPanelFacts; g_loaderPanelFacts = nullptr; }
     if (g_fssDumpFacts) { delete[] g_fssDumpFacts; g_fssDumpFacts = nullptr; }
+    if (g_forwardingFacts) { delete[] g_forwardingFacts; g_forwardingFacts = nullptr; }
     if (g_identities) { delete[] g_identities; g_identities = nullptr; }
     g_sunglareFactCount = 0;
     g_fssFactCount = 0;
@@ -1448,6 +1523,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_resolveBindFactCount = 0;
     g_loaderPanelFactCount = 0;
     g_fssDumpFactCount = 0;
+    g_forwardingFactCount = 0;
     g_directory[0] = L'\0';
     g_logFileName[0] = L'\0';
     g_logStem[0] = L'\0';
@@ -1465,9 +1541,11 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
     g_resolveBindFacts = new (std::nothrow) ResolveBindObservation[kMaxResolveBindFacts];
     g_loaderPanelFacts = new (std::nothrow) LoaderPanelObservation[kMaxLoaderPanelFacts];
     g_fssDumpFacts = new (std::nothrow) FssDumpObservation[kMaxFssDumpFacts];
+    g_forwardingFacts = new (std::nothrow) ForwardingObservation[kMaxForwardingFacts];
     g_identities = new (std::nothrow) std::uintptr_t[kIdentitySlots];
     if (!g_records || !g_sunglareFacts || !g_fssFacts || !g_remlokFacts || !g_basicFacts ||
-        !g_eyeCensusFacts || !g_resolveBindFacts || !g_loaderPanelFacts || !g_fssDumpFacts || !g_identities) {
+        !g_eyeCensusFacts || !g_resolveBindFacts || !g_loaderPanelFacts || !g_fssDumpFacts ||
+        !g_forwardingFacts || !g_identities) {
         if (g_records) { delete[] g_records; g_records = nullptr; }
         if (g_sunglareFacts) { delete[] g_sunglareFacts; g_sunglareFacts = nullptr; }
         if (g_fssFacts) { delete[] g_fssFacts; g_fssFacts = nullptr; }
@@ -1477,6 +1555,7 @@ void configure(bool enabled, const wchar_t* logFilePath) noexcept {
         if (g_resolveBindFacts) { delete[] g_resolveBindFacts; g_resolveBindFacts = nullptr; }
         if (g_loaderPanelFacts) { delete[] g_loaderPanelFacts; g_loaderPanelFacts = nullptr; }
         if (g_fssDumpFacts) { delete[] g_fssDumpFacts; g_fssDumpFacts = nullptr; }
+        if (g_forwardingFacts) { delete[] g_forwardingFacts; g_forwardingFacts = nullptr; }
         if (g_identities) { delete[] g_identities; g_identities = nullptr; }
         g_directory[0] = L'\0';
         g_logFileName[0] = L'\0';
@@ -1527,10 +1606,13 @@ ShutdownResult shutdown() noexcept {
     g_loaderPanelPoolMissing = false;
     g_fssDumpIndexOverflowed = false;
     g_fssDumpPoolMissing = false;
+    g_forwardingIndexOverflowed = false;
+    g_forwardingPoolMissing = false;
     g_eyeCensusFactCount = 0;
     g_resolveBindFactCount = 0;
     g_loaderPanelFactCount = 0;
     g_fssDumpFactCount = 0;
+    g_forwardingFactCount = 0;
     if (g_records) {
         delete[] g_records;
         g_records = nullptr;
@@ -1566,6 +1648,10 @@ ShutdownResult shutdown() noexcept {
     if (g_fssDumpFacts) {
         delete[] g_fssDumpFacts;
         g_fssDumpFacts = nullptr;
+    }
+    if (g_forwardingFacts) {
+        delete[] g_forwardingFacts;
+        g_forwardingFacts = nullptr;
     }
     if (g_identities) {
         delete[] g_identities;
@@ -1608,6 +1694,7 @@ void frameBegin(const FrameFacts& facts) noexcept {
     g_resolveBindFactCount = 0;
     g_loaderPanelFactCount = 0;
     g_fssDumpFactCount = 0;
+    g_forwardingFactCount = 0;
     g_eyeCensusIndexOverflowed = false;
     g_resolveBindIndexOverflowed = false;
     g_loaderPanelIndexOverflowed = false;
@@ -1616,6 +1703,8 @@ void frameBegin(const FrameFacts& facts) noexcept {
     g_loaderPanelPoolMissing = false;
     g_fssDumpIndexOverflowed = false;
     g_fssDumpPoolMissing = false;
+    g_forwardingIndexOverflowed = false;
+    g_forwardingPoolMissing = false;
     g_sunglareIndexOverflowed = false;
     g_sunglarePoolMissing = false;
     g_fssIndexOverflowed = false;
@@ -2395,6 +2484,36 @@ void appendFssDumpFact(Token token, const FssDumpObservation& fact) noexcept {
     record.fssDumpFactIndices[record.fssDumpFactCount++] = g_fssDumpFactCount++;
 }
 
+void appendForwardingFact(Token token, const ForwardingObservation& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized) { rejectInvalidToken(); return; }
+    // This marker is set before pool or shape checks so a failed append can
+    // never masquerade as a draw that did not enter forwardWithVerdict.
+    record.forwardingInputReached = true;
+    if (!g_forwardingFacts) {
+        g_forwardingPoolMissing = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (g_forwardingFactCount >= kMaxForwardingFacts) {
+        g_forwardingIndexOverflowed = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (record.forwardingFactCount >= kMaxForwardingFactsPerDraw) {
+        g_forwardingIndexOverflowed = true;
+        g_wasOverflowed = true;
+        return;
+    }
+    if (!validForwardingFact(fact)) {
+        g_wasOverflowed = true;
+        return;
+    }
+    g_forwardingFacts[g_forwardingFactCount] = fact;
+    record.forwardingFactIndices[record.forwardingFactCount++] = g_forwardingFactCount++;
+}
+
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
 std::uint8_t eyeCensusFactCountForTest(Token token) noexcept {
     return validToken(token) ? g_records[token.drawIndex].eyeCensusFactCount : 0;
@@ -2458,6 +2577,32 @@ bool readFssDumpFactForTest(Token token, std::uint8_t ordinal, FssDumpObservatio
     if (ordinal >= record.fssDumpFactCount || record.fssDumpFactIndices[ordinal] >= g_fssDumpFactCount)
         return false;
     *out = g_fssDumpFacts[record.fssDumpFactIndices[ordinal]];
+    return true;
+}
+
+std::uint8_t forwardingFactCountForTest(Token token) noexcept {
+    return validToken(token) ? g_records[token.drawIndex].forwardingFactCount : 0;
+}
+
+bool readForwardingFactForTest(Token token, std::uint8_t ordinal, ForwardingObservation* out) noexcept {
+    if (!out || !validToken(token) || !g_forwardingFacts) return false;
+    const DrawRecord& record = g_records[token.drawIndex];
+    if (ordinal >= record.forwardingFactCount ||
+        record.forwardingFactIndices[ordinal] >= g_forwardingFactCount) return false;
+    *out = g_forwardingFacts[record.forwardingFactIndices[ordinal]];
+    return true;
+}
+std::uint16_t actionCountForTest(Token token) noexcept {
+    return validToken(token) ? g_records[token.drawIndex].actionCount : 0;
+}
+
+bool readActionForTest(Token token, std::uint16_t ordinal, std::uint16_t* actionId,
+                       draw_ladder::ActionRecord* out) noexcept {
+    if (!actionId || !out || !validToken(token)) return false;
+    const DrawRecord& record = g_records[token.drawIndex];
+    if (ordinal >= record.actionCount) return false;
+    *actionId = record.actionIds[ordinal];
+    *out = record.actions[ordinal];
     return true;
 }
 #endif
@@ -2738,6 +2883,17 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
             g_wasOverflowed = true;
         }
     }
+    if (record.forwardingInputReached && record.forwardingFactCount != 1)
+        g_wasOverflowed = true;
+    if (!record.forwardingInputReached && record.forwardingFactCount)
+        g_wasOverflowed = true;
+    for (std::uint8_t i = 0; i < record.forwardingFactCount; ++i) {
+        if (!g_forwardingFacts || record.forwardingFactIndices[i] >= g_forwardingFactCount) {
+            g_forwardingPoolMissing = !g_forwardingFacts;
+            g_forwardingIndexOverflowed = g_forwardingIndexOverflowed || !g_forwardingPoolMissing;
+            g_wasOverflowed = true;
+        }
+    }
     record.winnerSiteId = winnerSiteId;
     record.verdictOrdinal = verdictOrdinal;
     record.finalized = true;
@@ -2797,6 +2953,8 @@ bool capturing() noexcept {
 }
 bool overflowed() noexcept { return g_wasOverflowed; }
 CaptureInvalidation invalidationReason() noexcept {
+    if (g_forwardingPoolMissing) return CaptureInvalidation::ForwardingPoolMissing;
+    if (g_forwardingIndexOverflowed) return CaptureInvalidation::ForwardingIndexOverflow;
     if (g_fssDumpPoolMissing) return CaptureInvalidation::FssDumpPoolMissing;
     if (g_fssDumpIndexOverflowed) return CaptureInvalidation::FssDumpIndexOverflow;
     if (g_loaderPanelPoolMissing) return CaptureInvalidation::LoaderPanelPoolMissing;
