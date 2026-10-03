@@ -31,6 +31,7 @@ namespace {
 unsigned g_failed = 0;
 unsigned g_checks = 0;
 unsigned g_compileCalls = 0;
+unsigned g_observedEyeSizeCalls = 0;
 bool g_compileFails = false;
 bool g_sharp = true;
 std::string g_remlokMode = "outer";
@@ -394,6 +395,19 @@ uint64_t lookupShaderHash(void* shader) {
 bool vScreenIsEyeSized(uint32_t width, uint32_t height) {
     return width >= 3000 && height >= 2000;
 }
+bool vScreenIsEyeSizedObserved(
+    uint32_t width, uint32_t height,
+    holo_scrim_observation::EyeSizeObservation* observation) {
+    ++g_observedEyeSizeCalls;
+    const bool result = vScreenIsEyeSized(width, height);
+    if (observation) {
+        // This cost fixture has only a coarse cutoff, not vScreen's state
+        // and near-two size predicate. Leave selector inputs unavailable;
+        // the real observed helper is covered by the vScreen WARP rig.
+        *observation = {};
+    }
+    return result;
+}
 bool eyeTangents(float*, float*) { return false; }
 uint32_t cullGuardStatePacked() { return 0; }
 
@@ -452,6 +466,8 @@ int main(int argc, char** argv) {
                                          vs.Get(), stock.Get(), replacement.Get(),
                                          rasterizer.Get());
     ok &= targetFailureCheck(immediate.Get(), vs.Get(), stock.Get());
+    ok &= check(g_observedEyeSizeCalls == 0,
+                "default-path API-cost checks never invoke the trace-only eye-size bridge");
     edvr::targetSharpShutdown();
     edvr::remlokShutdown();
     edvrPluginCostShutdown();

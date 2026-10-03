@@ -422,9 +422,27 @@ std::size_t targetSharpDrawInterestFilters(draw_interest::ShaderFilter* out,
     return 1;
 }
 
-bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
-                          uint32_t instances) {
-    if (!targetSharpWantsDraws()) return false;
+template <bool Observe>
+bool targetSharpWantsDrawsImpl(TargetSharpObservation* observation, bool helper) noexcept {
+    const bool sharp = detail::g_targetSharpSharp;
+    if constexpr (Observe) {
+        auto& read = helper ? observation->helperSharp : observation->outerSharp;
+        read = {true, true, sharp};
+    }
+    if (!sharp) return false;
+    const bool failed = detail::g_targetSharpFailed;
+    if constexpr (Observe) {
+        auto& read = helper ? observation->helperFailed : observation->outerFailed;
+        read = {true, true, failed};
+    }
+    return !failed;
+}
+
+template <bool Observe>
+bool targetSharpOnEyeDrawImpl(ID3D11DeviceContext* ctx, char kind,
+                              uint32_t count, uint32_t instances,
+                              TargetSharpObservation* observation) {
+    if (!targetSharpWantsDrawsImpl<Observe>(observation, true)) return false;
     if (kind != kKind || count != kIndices || instances != kInstances) {
         return false;
     }
@@ -432,14 +450,44 @@ bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     // Eye-sized by vScreen's answer rather than an equality, the lesson
     // holo_fix paid for on a rig with a render scale.
     ResourceInfo surf;
-    if (!bindingResolve(bindingGet(BindSlot::PsSrv0), &surf) ||
-        !surf.isTexture2D || vScreenIsEyeSized(surf.a, surf.b)) {
+    void* const srv0 = bindingGet(BindSlot::PsSrv0);
+    if constexpr (Observe)
+        observation->srv0Present = {true, true, srv0 != nullptr};
+    const bool resolved = bindingResolve(srv0, &surf);
+    if constexpr (Observe)
+        observation->srv0Resolved = {true, true, resolved};
+    if (!resolved) return false;
+    if constexpr (Observe)
+        observation->srv0Texture2D = {true, true, surf.isTexture2D};
+    if (!surf.isTexture2D) return false;
+    if constexpr (Observe) {
+        observation->srv0Width = {true, true, surf.a};
+        observation->srv0Height = {true, true, surf.b};
+    }
+    bool eyeSized = false;
+    if constexpr (Observe) {
+        eyeSized = vScreenIsEyeSizedObserved(surf.a, surf.b,
+                                             &observation->eyeSize);
+    } else {
+        eyeSized = vScreenIsEyeSized(surf.a, surf.b);
+    }
+    if (eyeSized) {
         return false;
     }
     // Slots 1-3 unbound. The composite reads one texture and nothing else,
     // which is most of what separates it from every other textured quad.
-    if (bindingGet(BindSlot::PsSrv1) || bindingGet(BindSlot::PsSrv2) ||
-        bindingGet(BindSlot::PsSrv3)) {
+    void* const srv1 = bindingGet(BindSlot::PsSrv1);
+    if constexpr (Observe)
+        observation->aux1Present = {true, true, srv1 != nullptr};
+    if (srv1) return false;
+    void* const srv2 = bindingGet(BindSlot::PsSrv2);
+    if constexpr (Observe)
+        observation->aux2Present = {true, true, srv2 != nullptr};
+    if (srv2) return false;
+    void* const srv3 = bindingGet(BindSlot::PsSrv3);
+    if constexpr (Observe)
+        observation->aux3Present = {true, true, srv3 != nullptr};
+    if (srv3) {
         return false;
     }
     // The clincher, and last because it costs a call: nothing hooks
@@ -452,11 +500,48 @@ bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                                   static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
     }
     ctx->VSGetShader(&vs, nullptr, nullptr);
+    if constexpr (Observe)
+        observation->vsPresent = {true, true, vs != nullptr};
     if (!vs) return false;
     const uint64_t h = lookupShaderHash(vs);
     vs->Release();
-    return h == g_vsHash;
+    const uint64_t configuredHash = g_vsHash;
+    if constexpr (Observe) {
+        observation->queriedShaderHash = {true, true, h};
+        observation->configuredShaderHash = {true, true, configuredHash};
+    }
+    return h == configuredHash;
 }
+
+bool targetSharpWantsDrawsObserved(TargetSharpObservation& observation,
+                                   bool helper) noexcept {
+    return targetSharpWantsDrawsImpl<true>(&observation, helper);
+}
+
+bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
+                          uint32_t instances) {
+    return targetSharpOnEyeDrawImpl<false>(ctx, kind, count, instances, nullptr);
+}
+
+bool targetSharpOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                                  uint32_t count, uint32_t instances,
+                                  TargetSharpObservation& observation) {
+    return targetSharpOnEyeDrawImpl<true>(ctx, kind, count, instances,
+                                          &observation);
+}
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+void targetSharpPredicateTestSeed(bool sharp, bool failed,
+                                  std::uint64_t configuredHash) noexcept {
+    detail::g_targetSharpSharp = sharp;
+    detail::g_targetSharpFailed = failed;
+    g_vsHash = configuredHash;
+}
+
+std::uint64_t targetSharpPredicateTestConfiguredHash() noexcept {
+    return g_vsHash;
+}
+#endif
 
 void targetSharpBegin(ID3D11DeviceContext* ctx) {
     g_costSample = false;

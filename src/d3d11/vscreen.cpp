@@ -2081,6 +2081,13 @@ struct VScreenDrawLadderVisitor {
             const bool interested = draw_interest::contains(
                 legacyInterestMask, SiteType::interestId);
             if constexpr (TracePolicy::enabled &&
+                          SiteType::id == draw_ladder::SiteId::kTargetSharpClaim) {
+                if (!interested) {
+                    TargetSharpObservation fact{};
+                    trace.targetSharpFact(fact);
+                }
+            }
+            if constexpr (TracePolicy::enabled &&
                           (SiteType::id == draw_ladder::SiteId::kFssPanelClaim ||
                            SiteType::id == draw_ladder::SiteId::kFssRevealClaim ||
                            SiteType::id == draw_ladder::SiteId::kFssDumpClaim)) {
@@ -2948,8 +2955,19 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kTargetSharpClaim) {
-            if (targetSharpWantsDraws() && targetSharpOnEyeDraw(self, kind, count, instances))
-                return claimed(id, DrawVerdict::kTargetSharp);
+            if constexpr (TracePolicy::enabled) {
+                TargetSharpObservation observed{};
+                observed.handlerInvoked = true;
+                const bool outerWants = targetSharpWantsDrawsObserved(observed);
+                const bool matches = outerWants && targetSharpOnEyeDrawObserved(
+                    self, kind, count, instances, observed);
+                trace.targetSharpFact(observed);
+                if (matches) return claimed(id, DrawVerdict::kTargetSharp);
+            } else {
+                if (targetSharpWantsDraws() &&
+                    targetSharpOnEyeDraw(self, kind, count, instances))
+                    return claimed(id, DrawVerdict::kTargetSharp);
+            }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kScrimClaim) {
             if constexpr (TracePolicy::enabled) {
@@ -6371,6 +6389,9 @@ using VScreenLoaderPanelTestSite = draw_ladder::Site<
 using VScreenFssDumpTestSite = draw_ladder::InterestGated<
     draw_ladder::SiteId::kFssDumpClaim, draw_ladder::SiteKind::Claim,
     draw_interest::InterestId::FssDump>;
+using VScreenTargetSharpTestSite = draw_ladder::InterestGated<
+    draw_ladder::SiteId::kTargetSharpClaim, draw_ladder::SiteKind::Claim,
+    draw_interest::InterestId::TargetSharp>;
 State* g_eyeCensusTestState = nullptr;
 
 struct VScreenTestInterest final {};
@@ -6407,6 +6428,10 @@ struct VScreenTestTraceCapture final {
 
     void fssDumpFact(const FssDumpObservation& fact) noexcept {
         policy.fssDumpFact(fact);
+    }
+
+    void targetSharpFact(const TargetSharpObservation& fact) noexcept {
+        policy.targetSharpFact(fact);
     }
 
     void forwardInputs(const ForwardingObservation& fact) noexcept {
@@ -6892,6 +6917,61 @@ bool vScreenLoaderPanelPredicateTestVisit(
         result->siteResult = vScreenLoaderPanelPredicateTestInvoke(visitor, trace);
     }
     bindingSet(BindSlot::Rtv0, priorRtv);
+    t_uiDepthThisDraw = priorUiDepth;
+    t_compositeThisDraw = priorComposite;
+    g_state = priorState;
+    return true;
+}
+
+bool vScreenTargetSharpPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    std::uint32_t instances, std::uint32_t eyeW, std::uint32_t eyeH,
+    std::uint32_t renderW, std::uint32_t renderH, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept {
+    if (!result || !context) return false;
+    State fixture{};
+    fixture.ownerCtx = context;
+    fixture.eyeW = eyeW;
+    fixture.eyeH = eyeH;
+    fixture.renderW = renderW;
+    fixture.renderH = renderH;
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    g_state = &fixture;
+
+    draw_ladder_trace::DrawFacts facts{};
+    facts.kind = kind;
+    facts.count = count;
+    facts.instances = instances;
+    result->token = draw_ladder_trace::beginDraw(facts);
+    if (!result->token.valid()) {
+        g_state = priorState;
+        return false;
+    }
+
+    const DrawArgs args{};
+    if (traceEnabled) {
+        auto trace = draw_ladder_trace::makePolicy(result->token);
+        VScreenDrawLadderVisitor<draw_ladder_trace::TracePolicy> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
+        VScreenTestTraceCapture<draw_ladder_trace::TracePolicy> capture{
+            trace, result->siteResult};
+        plugin_cost::NoCpu cpu;
+        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
+        draw_ladder::visitOne<decltype(visitor), VScreenTargetSharpTestSite>(
+            flow, visitor, visitor, capture, cpu);
+    } else {
+        draw_ladder::NoTrace trace;
+        VScreenDrawLadderVisitor<draw_ladder::NoTrace> visitor{
+            &fixture, context, kind, count, instances, args, trace};
+        visitor.legacyInterestMask = pluginRegistryDrawInterestMask();
+        if (visitor.template eligible<VScreenTargetSharpTestSite>())
+            result->siteResult = visitor.template visit<VScreenTargetSharpTestSite>();
+        else
+            result->siteResult = draw_ladder::SiteResult::notEligible();
+    }
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;

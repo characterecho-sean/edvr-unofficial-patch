@@ -22,6 +22,7 @@
 #include "../../src/d3d11/loader_panel_observation.h"
 #include "../../src/d3d11/loader_panel.h"
 #include "../../src/d3d11/fss_dump.h"
+#include "../../src/d3d11/target_sharp.h"
 #include "../../src/d3d11/plugin_registry.h"
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/vtable_hook.h"
@@ -87,6 +88,12 @@ bool readFssDump(const edvr::VScreenPredicateTestResult& result,
                  edvr::FssDumpObservation* fact) {
     return edvr::draw_ladder_trace::fssDumpFactCountForTest(result.token) == 1 &&
            edvr::draw_ladder_trace::readFssDumpFactForTest(result.token, 0, fact);
+}
+
+bool readTargetSharp(const edvr::VScreenPredicateTestResult& result,
+                     edvr::TargetSharpObservation* fact) {
+    return edvr::draw_ladder_trace::targetSharpFactCountForTest(result.token) == 1 &&
+           edvr::draw_ladder_trace::readTargetSharpFactForTest(result.token, 0, fact);
 }
 
 bool readForwarding(const edvr::VScreenForwardingTestResult& result,
@@ -1709,9 +1716,361 @@ int main(int argc, char** argv) {
                           eyeSkipped(eyeFact.rules[0].filters[0].isTexture2D),
                       "guarded real resolver fault is a known-false result with later reads skipped");
 
+        // The exposure installation owns the production shader registry. It
+        // must exist before TargetSharp, resolve, and FSS register WARP shaders.
+        edvr::installExposureFix(device, edvr::HookMode::CopyVptr);
+
+        // Drive TargetSharp site 54 through the production visitor/helper on
+        // WARP resources. The visitor receives the actual published interest
+        // mask; these bounded visits do not claim full-ladder coverage.
+        {
+            constexpr std::uint64_t kTargetHash = 0x5453484152500001ull;
+            constexpr std::uint64_t kWrongHash = 0x5453484152500002ull;
+            const auto savedInterest = edvr::pluginRegistryDrawInterestMask();
+            const bool savedSharp = edvr::detail::g_targetSharpSharp;
+            const bool savedFailed = edvr::detail::g_targetSharpFailed;
+            const auto savedHash = edvr::targetSharpPredicateTestConfiguredHash();
+            const auto savedResourceAttempts = g_resourceAttempts;
+            const auto savedVertexShaderCalls = g_getVertexShaderCalls;
+            const bool savedResourceFault = g_injectResourceFault;
+            const auto savedSrvMask = edvr::draw_interest::bit(
+                edvr::draw_interest::InterestId::TargetSharp);
+            void* priorShadow[4]{};
+            ID3D11ShaderResourceView* priorActualSrvs[4]{};
+            for (std::uint32_t i = 0; i < 4; ++i) {
+                priorShadow[i] = edvr::bindingGet(static_cast<edvr::BindSlot>(
+                    static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i));
+            }
+            immediate->PSGetShaderResources(0, 4, priorActualSrvs);
+            ID3D11VertexShader* priorActualVs = nullptr;
+            immediate->VSGetShader(&priorActualVs, nullptr, nullptr);
+
+            const char* vsSource =
+                "struct O { float4 p : SV_Position; };\n"
+                "O main(uint id : SV_VertexID) { O o; "
+                "o.p=float4((id==0)?0.0:1.0,0.0,0.0,1.0); return o; }\n";
+            const auto vsCode = compileTestVertexShader(vsSource, "target-sharp-warp");
+            const char* unknownVsSource =
+                "struct O { float4 p : SV_Position; };\n"
+                "O main(uint id : SV_VertexID) { O o; "
+                "o.p=float4(0.0,(id==0)?0.0:1.0,0.0,1.0); return o; }\n";
+            const auto unknownVsCode = compileTestVertexShader(
+                unknownVsSource, "target-sharp-warp-unknown");
+            ComPtr<ID3D11VertexShader> targetVs;
+            ComPtr<ID3D11VertexShader> unknownVs;
+            okay &= check(vsCode && SUCCEEDED(device->CreateVertexShader(
+                              vsCode->GetBufferPointer(), vsCode->GetBufferSize(),
+                              nullptr, &targetVs)) && targetVs,
+                          "WARP creates real TargetSharp vertex shader");
+            okay &= check(unknownVsCode && SUCCEEDED(device->CreateVertexShader(
+                              unknownVsCode->GetBufferPointer(), unknownVsCode->GetBufferSize(),
+                              nullptr, &unknownVs)) && unknownVs,
+                          "WARP creates unregistered TargetSharp vertex shader");
+            if (targetVs) {
+                edvr::registerShaderHash(targetVs.Get(), kTargetHash);
+                okay &= check(edvr::lookupShaderHash(targetVs.Get()) == kTargetHash,
+                              "production registry returns TargetSharp WARP hash");
+            }
+
+            edvr::VTableHook vsGetHook;
+            void* originalVsGet = nullptr;
+            bool hookReady = vsGetHook.attach(immediate, 128) &&
+                vsGetHook.setMode(edvr::HookMode::CopyVptr) &&
+                vsGetHook.replace(76, reinterpret_cast<void*>(&testGetVertexShader),
+                                  &originalVsGet) && vsGetHook.commit();
+            okay &= check(hookReady, "TargetSharp WARP VSGetShader counter installs");
+            if (hookReady) g_realGetVertexShader =
+                reinterpret_cast<GetVertexShaderFn>(originalVsGet);
+            edvr::VTableHook targetResourceHook;
+            const bool resourceHookReady = srv && hookResource(targetResourceHook, srv);
+            okay &= check(resourceHookReady,
+                          "TargetSharp WARP GetResource query counter installs");
+
+            if (srv) immediate->PSSetShaderResources(0, 1, &srv);
+            for (std::uint32_t i = 0; i < 4; ++i)
+                edvr::bindingSet(static_cast<edvr::BindSlot>(
+                    static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i),
+                    i == 0 ? srv : nullptr);
+            if (targetVs) immediate->VSSetShader(targetVs.Get(), nullptr, 0);
+            {
+                ComPtr<ID3D11VertexShader> actualTargetVs;
+                immediate->VSGetShader(&actualTargetVs, nullptr, nullptr);
+                okay &= check(actualTargetVs && actualTargetVs.Get() == targetVs.Get() &&
+                                  edvr::lookupShaderHash(actualTargetVs.Get()) == kTargetHash,
+                              "actual WARP VSGetShader returns the registered TargetSharp shader");
+            }
+            edvr::pluginRegistryConfigureDrawInterests(savedSrvMask, nullptr, 0);
+            edvr::targetSharpPredicateTestSeed(true, false, kTargetHash);
+
+            auto visitTarget = [&](char kind, std::uint32_t count,
+                                   std::uint32_t eyeW, std::uint32_t eyeH,
+                                   std::uint32_t renderW, std::uint32_t renderH,
+                                   bool traced,
+                                   edvr::VScreenPredicateTestResult* out) {
+                return edvr::vScreenTargetSharpPredicateTestVisit(
+                    immediate, kind, count, 1, eyeW, eyeH, renderW, renderH,
+                    traced, out);
+            };
+            edvr::VScreenPredicateTestResult targetResult{};
+            edvr::TargetSharpObservation targetFact{};
+            if (hookReady) g_getVertexShaderCalls = 0;
+            g_resourceAttempts = 0;
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              targetResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              targetFact.siteId == 54 && targetFact.kind == 21 &&
+                              targetFact.handlerInvoked &&
+                              fwRead(targetFact.outerSharp, true) &&
+                              fwRead(targetFact.outerFailed, false) &&
+                              fwRead(targetFact.helperSharp, true) &&
+                              fwRead(targetFact.helperFailed, false) &&
+                              fwRead(targetFact.srv0Present, true) &&
+                              fwRead(targetFact.srv0Resolved, true) &&
+                              fwRead(targetFact.srv0Texture2D, true) &&
+                              fwRead(targetFact.srv0Width, 64) &&
+                              fwRead(targetFact.srv0Height, 32) &&
+                              targetFact.eyeSize.result ==
+                                  edvr::holo_scrim_observation::Tri::No &&
+                              fwRead(targetFact.aux1Present, false) &&
+                              fwRead(targetFact.aux2Present, false) &&
+                              fwRead(targetFact.aux3Present, false) &&
+                              fwRead(targetFact.vsPresent, true) &&
+                              fwRead(targetFact.queriedShaderHash, kTargetHash) &&
+                              fwRead(targetFact.configuredShaderHash, kTargetHash) &&
+                              (!hookReady || g_getVertexShaderCalls == 1) &&
+                              (!resourceHookReady || g_resourceAttempts == 1),
+                          "WARP TargetSharp success records actual SRV, eye, and registered VS inputs");
+            if (hookReady) g_getVertexShaderCalls = 0;
+            g_resourceAttempts = 0;
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, false,
+                                      &targetResult) &&
+                              targetResult.siteResult.outcome == SiteOutcome::Claimed &&
+                              (!hookReady || g_getVertexShaderCalls == 1) &&
+                              (!resourceHookReady || g_resourceAttempts == 1),
+                          "TargetSharp NoTrace shares the same WARP selector and query counts");
+
+            edvr::pluginRegistryConfigureDrawInterests(0, nullptr, 0);
+            if (hookReady) g_getVertexShaderCalls = 0;
+            g_resourceAttempts = 0;
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              targetResult.siteResult.outcome == SiteOutcome::NotEligible &&
+                              (!hookReady || g_getVertexShaderCalls == 0) &&
+                              (!resourceHookReady || g_resourceAttempts == 0) &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              targetFact.siteId == 54 && targetFact.kind == 21 &&
+                              !targetFact.handlerInvoked &&
+                              fwSkipped(targetFact.outerSharp) &&
+                              fwSkipped(targetFact.outerFailed) &&
+                              fwSkipped(targetFact.helperSharp) &&
+                              fwSkipped(targetFact.helperFailed) &&
+                              fwSkipped(targetFact.srv0Present) &&
+                              fwSkipped(targetFact.srv0Resolved) &&
+                              targetFact.eyeSize.reached ==
+                                  edvr::holo_scrim_observation::Tri::Unknown,
+                          "published mask off records a default NotEligible fact without input reads");
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, false,
+                                      &targetResult) &&
+                              targetResult.siteResult.outcome == SiteOutcome::NotEligible &&
+                              edvr::draw_ladder_trace::targetSharpFactCountForTest(
+                                  targetResult.token) == 0,
+                          "NoTrace mask-off visit remains unrecorded");
+
+            edvr::pluginRegistryConfigureDrawInterests(savedSrvMask, nullptr, 0);
+            edvr::targetSharpPredicateTestSeed(false, false, kTargetHash);
+            if (hookReady) g_getVertexShaderCalls = 0;
+            g_resourceAttempts = 0;
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              targetResult.siteResult.outcome == SiteOutcome::Declined &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              fwRead(targetFact.outerSharp, false) &&
+                              fwSkipped(targetFact.outerFailed) &&
+                              fwSkipped(targetFact.helperSharp) &&
+                              fwSkipped(targetFact.srv0Present) &&
+                              (!hookReady || g_getVertexShaderCalls == 0) &&
+                              (!resourceHookReady || g_resourceAttempts == 0),
+                          "outer stock gate short-circuits all helper and D3D reads");
+
+            edvr::targetSharpPredicateTestSeed(true, true, kTargetHash);
+            if (hookReady) g_getVertexShaderCalls = 0;
+            g_resourceAttempts = 0;
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              fwRead(targetFact.outerSharp, true) &&
+                              fwRead(targetFact.outerFailed, true) &&
+                              fwSkipped(targetFact.helperSharp) &&
+                              fwSkipped(targetFact.srv0Present) &&
+                              (!resourceHookReady || g_resourceAttempts == 0),
+                          "outer failed gate keeps the helper suffix lazy");
+
+            edvr::targetSharpPredicateTestSeed(true, false, kTargetHash);
+            if (hookReady) g_getVertexShaderCalls = 0;
+            g_resourceAttempts = 0;
+            okay &= check(visitTarget('X', 5, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              fwRead(targetFact.helperSharp, true) &&
+                              fwSkipped(targetFact.srv0Present),
+                          "draw-shape rejection leaves all binding reads skipped");
+
+            edvr::bindingSet(edvr::BindSlot::PsSrv0, nullptr);
+            ID3D11ShaderResourceView* nullTargetSrv = nullptr;
+            immediate->PSSetShaderResources(0, 1, &nullTargetSrv);
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              fwRead(targetFact.srv0Present, false) &&
+                              fwRead(targetFact.srv0Resolved, false) &&
+                              fwSkipped(targetFact.srv0Texture2D) &&
+                              targetFact.eyeSize.reached ==
+                                  edvr::holo_scrim_observation::Tri::Unknown &&
+                              fwSkipped(targetFact.aux1Present) &&
+                              fwSkipped(targetFact.vsPresent),
+                          "null slot zero still reaches production resolver and stops suffix");
+
+            if (resourceHookReady) {
+                immediate->PSSetShaderResources(0, 1, &srv);
+                edvr::bindingSet(edvr::BindSlot::PsSrv0, srv);
+                g_resourceAttempts = 0;
+                g_injectResourceFault = true;
+                okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                          &targetResult) &&
+                                  g_resourceAttempts == 1 &&
+                                  readTargetSharp(targetResult, &targetFact) &&
+                                  fwRead(targetFact.srv0Present, true) &&
+                                  fwRead(targetFact.srv0Resolved, false) &&
+                                  fwSkipped(targetFact.srv0Texture2D) &&
+                                  fwSkipped(targetFact.aux1Present) &&
+                                  fwSkipped(targetFact.vsPresent),
+                              "guarded WARP GetResource fault records unresolved prefix and skips suffix");
+                g_resourceAttempts = 0;
+                okay &= check(visitTarget('X', 6, 100, 80, 0, 0, false,
+                                          &targetResult) &&
+                                  g_resourceAttempts == 1 &&
+                                  targetResult.siteResult.outcome == SiteOutcome::Declined &&
+                                  edvr::draw_ladder_trace::targetSharpFactCountForTest(
+                                      targetResult.token) == 0,
+                              "NoTrace resolver fault preserves one query and emits no fact");
+                g_injectResourceFault = false;
+            }
+
+            if (bufferSrv) {
+                immediate->PSSetShaderResources(0, 1, &bufferSrv);
+                edvr::bindingSet(edvr::BindSlot::PsSrv0, bufferSrv);
+                okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                          &targetResult) &&
+                                  readTargetSharp(targetResult, &targetFact) &&
+                                  fwRead(targetFact.srv0Resolved, true) &&
+                                  fwRead(targetFact.srv0Texture2D, false) &&
+                                  fwSkipped(targetFact.srv0Width) &&
+                                  targetFact.eyeSize.reached ==
+                                      edvr::holo_scrim_observation::Tri::Unknown &&
+                                  targetFact.eyeSize.statePresent ==
+                                      edvr::holo_scrim_observation::Tri::Unknown &&
+                                  fwSkipped(targetFact.aux1Present),
+                              "real WARP buffer SRV stops before Texture2D dimensions and eye state");
+            }
+            if (srv) {
+                immediate->PSSetShaderResources(0, 1, &srv);
+                edvr::bindingSet(edvr::BindSlot::PsSrv0, srv);
+                okay &= check(visitTarget('X', 6, 64, 32, 0, 0, true,
+                                          &targetResult) &&
+                                  readTargetSharp(targetResult, &targetFact) &&
+                                  targetFact.eyeSize.result ==
+                                      edvr::holo_scrim_observation::Tri::Yes &&
+                                  fwSkipped(targetFact.aux1Present) &&
+                                  fwSkipped(targetFact.vsPresent),
+                              "eye-sized WARP surface exits before auxiliary slots and shader query");
+                okay &= check(visitTarget('X', 6, 100, 80, 64, 32, true,
+                                          &targetResult) &&
+                                  readTargetSharp(targetResult, &targetFact) &&
+                                  targetFact.eyeSize.result ==
+                                      edvr::holo_scrim_observation::Tri::Yes,
+                              "render-sized WARP surface uses the observed render dimension path");
+            }
+
+            if (srv && hookReady) {
+                for (std::uint32_t slot = 1; slot <= 3; ++slot) {
+                    immediate->PSSetShaderResources(slot, 1, &srv);
+                    edvr::bindingSet(static_cast<edvr::BindSlot>(
+                        static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + slot), srv);
+                    g_getVertexShaderCalls = 0;
+                    okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                              &targetResult) &&
+                                      readTargetSharp(targetResult, &targetFact) &&
+                                      targetFact.eyeSize.result ==
+                                          edvr::holo_scrim_observation::Tri::No &&
+                                      (!hookReady || g_getVertexShaderCalls == 0) &&
+                                      (slot == 1
+                                          ? fwRead(targetFact.aux1Present, true) &&
+                                            fwSkipped(targetFact.aux2Present)
+                                          : slot == 2
+                                              ? fwRead(targetFact.aux1Present, false) &&
+                                                fwRead(targetFact.aux2Present, true) &&
+                                                fwSkipped(targetFact.aux3Present)
+                                              : fwRead(targetFact.aux1Present, false) &&
+                                                fwRead(targetFact.aux2Present, false) &&
+                                                fwRead(targetFact.aux3Present, true)),
+                                  "each occupied auxiliary SRV exits at its lazy slot read");
+                    immediate->PSSetShaderResources(slot, 1, &nullTargetSrv);
+                    edvr::bindingSet(static_cast<edvr::BindSlot>(
+                        static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + slot), nullptr);
+                }
+            }
+
+            immediate->VSSetShader(nullptr, nullptr, 0);
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              fwRead(targetFact.vsPresent, false) &&
+                              fwSkipped(targetFact.queriedShaderHash) &&
+                              fwSkipped(targetFact.configuredShaderHash),
+                          "null actual vertex shader leaves hash reads skipped");
+            if (unknownVs) immediate->VSSetShader(unknownVs.Get(), nullptr, 0);
+            edvr::targetSharpPredicateTestSeed(true, false, kWrongHash);
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              fwRead(targetFact.vsPresent, true) &&
+                              fwRead(targetFact.queriedShaderHash, 0) &&
+                              fwRead(targetFact.configuredShaderHash, kWrongHash) &&
+                              targetResult.siteResult.outcome == SiteOutcome::Declined,
+                          "unregistered real WARP VS resolves to raw zero and mismatches configured pin");
+            if (targetVs) immediate->VSSetShader(targetVs.Get(), nullptr, 0);
+            okay &= check(visitTarget('X', 6, 100, 80, 0, 0, true,
+                                      &targetResult) &&
+                              readTargetSharp(targetResult, &targetFact) &&
+                              fwRead(targetFact.vsPresent, true) &&
+                              fwRead(targetFact.queriedShaderHash, kTargetHash) &&
+                              fwRead(targetFact.configuredShaderHash, kWrongHash) &&
+                              targetResult.siteResult.outcome == SiteOutcome::Declined,
+                          "registered real WARP hash mismatches the configured pin");
+
+            if (hookReady) {
+                vsGetHook.uninstall();
+                g_realGetVertexShader = nullptr;
+            }
+            if (resourceHookReady) targetResourceHook.uninstall();
+            immediate->VSSetShader(priorActualVs, nullptr, 0);
+            if (priorActualVs) priorActualVs->Release();
+            immediate->PSSetShaderResources(0, 4, priorActualSrvs);
+            for (std::uint32_t i = 0; i < 4; ++i) {
+                edvr::bindingSet(static_cast<edvr::BindSlot>(
+                    static_cast<std::uint32_t>(edvr::BindSlot::PsSrv0) + i), priorShadow[i]);
+                if (priorActualSrvs[i]) priorActualSrvs[i]->Release();
+            }
+            edvr::pluginRegistryConfigureDrawInterests(savedInterest, nullptr, 0);
+            edvr::targetSharpPredicateTestSeed(savedSharp, savedFailed, savedHash);
+            g_resourceAttempts = savedResourceAttempts;
+            g_getVertexShaderCalls = savedVertexShaderCalls;
+            g_injectResourceFault = savedResourceFault;
+        }
+
         // Drive site 60 through the real visitor and helper. Hash lookups use
         // the production registry, populated with real WARP shaders.
-        edvr::installExposureFix(device, edvr::HookMode::CopyVptr);
         const auto shaderCode = compileTestPixelShader();
         ComPtr<ID3D11PixelShader> resolveShader;
         ComPtr<ID3D11PixelShader> unknownShader;

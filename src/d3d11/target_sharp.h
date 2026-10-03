@@ -45,6 +45,7 @@
 #pragma once
 
 #include "draw_interest.h"
+#include "target_sharp_observation.h"
 
 #include <cstdint>
 
@@ -73,12 +74,18 @@ inline bool targetSharpWantsDraws() {
     return detail::g_targetSharpSharp && !detail::g_targetSharpFailed;
 }
 
+bool targetSharpWantsDrawsObserved(TargetSharpObservation& observation,
+                                   bool helper = false) noexcept;
+
 // Is this eye draw the indicator's composite? Shape first (6 indices, one
 // instance), then slot 0 being a non-eye-sized Texture2D with slots 1-3
 // unbound, then the vertex shader's content hash -- cheapest test first,
 // and the hash read last because it costs a VSGetShader.
 bool targetSharpOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                           uint32_t instances);
+bool targetSharpOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                                  uint32_t count, uint32_t instances,
+                                  TargetSharpObservation& observation);
 
 // Around the real draw: bind the replacement pixel shader, put the game's
 // own back after. A begin that cannot compile degrades to the draw running
@@ -87,5 +94,11 @@ void targetSharpBegin(ID3D11DeviceContext* ctx);
 void targetSharpEnd(ID3D11DeviceContext* ctx);
 
 void targetSharpShutdown();
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+void targetSharpPredicateTestSeed(bool sharp, bool failed,
+                                  std::uint64_t configuredHash) noexcept;
+std::uint64_t targetSharpPredicateTestConfiguredHash() noexcept;
+#endif
 
 }  // namespace edvr

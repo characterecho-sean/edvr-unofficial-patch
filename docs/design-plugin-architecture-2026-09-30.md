@@ -42,9 +42,9 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  bounded API owner costs are instrumented; twenty-one selectors and local
-  None/Skip forwarding checks pass all 139 validation jobs. Enabled replay
-  storage is measured at 472.9 MiB; the default disabled path allocates none.
+  bounded API owner costs are instrumented; twenty-two selectors and local
+  None/Skip forwarding checks pass all 140 validation jobs. Enabled replay
+  storage is measured at 476.6 MiB; the default disabled path allocates none.
   Staged-out FSS outer-false inputs are now recorded; outer-true stays unavailable.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
@@ -2032,3 +2032,83 @@ caught by named checks. Mutation anchor self-tests pass for all 96 world-route
 and 53 maps variants. No Steam build was installed and no additional flight was
 requested. Remaining predicate/forwarding/state coverage, all-module costs and
 matched CPU/GPU performance remain open before any Phase 2 migration.
+
+### TargetSharp source facts and FSS dump costs, 2026-10-03 (validated)
+
+Predicate fact version 14 adds TargetSharp site 54, the twenty-second supported
+selector. Its typed observation records the independently consumed outer and
+helper sharp/failed flags, actual SRV0 presence/resolution/type/dimensions, the
+existing lazy eye-size helper reads, short-circuit SRV1-3 presence, actual
+VSGetShader presence, registry lookup hash and configured private shader pin.
+No cached match or recorded verdict supplies the expected selector. Hash zero
+remains a known source value. Admission is independently derived from site 6's
+raw interest bit 0; a reached NotEligible visit records one default observation
+with no handler or source reads. This does not add whole-ladder equivalence.
+
+The real vScreen WARP rig exercises the actual site, published interest mask,
+tracked resource resolver, real SRVs/buffers and shaders, production shader
+registry, private configured pin, lazy eye/render dimensions and auxiliary
+slots. Trace and NoTrace retain the same outcomes and existing query counts.
+The guarded resolver fault remains enabled through both parity calls; no fault
+budget is reset. These bounded visits do not substitute for a complete flight.
+
+Canonical writer frames 101-104 cover positive, lazy failed-gate decline,
+NotEligible and reached-unknown input; the last is explicitly unreplayable.
+Frames 105-110 cover missing/duplicate/malformed/unvisited facts, the per-draw
+cap and 32,769 draws against the 32,768 global pool cap. Invalid captures emit
+explicit incomplete/truncated/overflow sidecars, matching the existing writer
+contract; reader invalidation is checked. Python negative controls reject
+malformed read envelopes, skipped eye metadata with consumed fields, a resolved
+null SRV0, missing required gate reads and raw-input contradictions. Historical
+predicate versions 1-13 remain valid with TargetSharp unavailable. Existing
+predicate and forwarding CLI gates remain active.
+
+Fresh compiled comparisons against saved production inputs confirm:
+
+- TargetSharp's public default path and false observation specialization each
+  retain 293 bytes, 71 instruction records, seven calls and a 64-byte stack.
+  SHA256: 0677240616ffc13379cc6f153c92796842ac1d3a6dc93c5d7cc1a9d838d2614c.
+- The NoTrace/NoCpu visitor retains 7,057 bytes, 1,636 records, 94 calls and a
+  288-byte stack, with the same saved byte and ordered-call hashes.
+- All eight NoTrace forwarding bodies match the validated forwarding-v1
+  baseline: 2,782 bytes, 756 records, 71 calls and a 176-byte stack each.
+
+The fresh MSVC footprint probe measures TargetSharpObservation at 120 bytes;
+its 32,768-entry cold pool adds 3.75 MiB. Generic PredicateFact remains 376
+bytes and DrawRecord remains 3,928 bytes. Total retained payload is 476.625
+MiB, excluding allocator overhead; disabled replay allocates none.
+
+FSS dump capture/captureRemembered/writeOut now attribute direct API attempts
+to Scanners at stable sites 39-52. Each helper samples the actual owner context
+once; notes immediately precede the attempted calls. The real System32 WARP rig
+passes 57 checks: cold 8 ReadQuery/2 Work/6 Transfer, warm 6/0/6, exact
+coverage masks, read/work/Map failure prefixes, null Map data, state/byte
+preservation, and no notes for unsampled/deferred/worker calls. Series capture
+and series write, predicate shader queries and owner CPU coverage are outside
+this slice. API counts do not establish a performance improvement.
+
+The first full run stopped at the old TargetSharp source pin, which inspected
+the new thin wrapper rather than the shared query implementation. The repaired
+gate pins sample/note/query order, both wrapper routes, missing-symbol checks
+and bypass negative controls. The next full run found the standalone cockpit
+rig's missing observed eye bridge. Function packaging and dead-code flags did
+not resolve that direct-object dependency; those flags were restored. The
+fixture bridge preserves its coarse cutoff, declares production eye metadata
+unavailable and asserts zero calls from all default-path cost cases. The real
+vScreen rig supplies observed-path coverage; cockpit passes 57 checks.
+
+The final absolute-path full build passed all 140 jobs: 133 pooled jobs in
+145.6 seconds and seven quiet jobs in 47.0 seconds. Both production profiles,
+Python self-tests, native rigs, the 235-key config contract and self-contained
+installer checks passed. FocusWatch recorded no shown window, console or
+foreground move to the build tree in 193 seconds (one unrelated raw show
+event). Full-build receipt input SHA256:
+`e66de417eb067f1f0b780707e6b28f15154b9ba5f2dedbd22fdbaeeefa37008a`. Build
+label: `v0.18.1-37-gf2305990-dirty`.
+
+Steam remains on verified 4350a281 with settings preserved. No new build was
+installed and no flight was requested for this slice. Whole-ladder predicates,
+winning-verdict effects and callback work, all-module API/CPU coverage, matched
+CPU gain beyond noise and direct GPU non-regression remain open. The next
+bounded source slice is Sunglare nomination site 45; the next default-module
+API slice is FSS Reveal Begin/End. Phase 2 and shipping remain gated.

@@ -1464,6 +1464,39 @@ trace::PredicateFact makeScrimPredicateFact(
     return fact;
 }
 
+edvr::TargetSharpObservation targetSharpObservationForTest(unsigned mode) {
+    edvr::TargetSharpObservation fact{};
+    if (mode == 2) return fact;  // reached site, no interest bit, no handler/raw reads
+    fact.handlerInvoked = true;
+    if (mode == 3) {
+        fact.outerSharp = {true, false, false};
+        return fact;
+    }
+    fact.outerSharp = {true, true, true};
+    if (mode == 1) {
+        fact.outerFailed = {true, true, true};
+        return fact;
+    }
+    fact.outerFailed = {true, true, false};
+    fact.helperSharp = {true, true, true};
+    fact.helperFailed = {true, true, false};
+    fact.srv0Present = {true, true, true};
+    fact.srv0Resolved = {true, true, true};
+    fact.srv0Texture2D = {true, true, true};
+    fact.srv0Width = {true, true, 2048};
+    fact.srv0Height = {true, true, 1024};
+    fact.eyeSize.reached = edvr::holo_scrim_observation::Tri::Yes;
+    fact.eyeSize.statePresent = edvr::holo_scrim_observation::Tri::No;
+    fact.eyeSize.result = edvr::holo_scrim_observation::Tri::No;
+    fact.aux1Present = {true, true, false};
+    fact.aux2Present = {true, true, false};
+    fact.aux3Present = {true, true, false};
+    fact.vsPresent = {true, true, true};
+    fact.queriedShaderHash = {true, true, 0};
+    fact.configuredShaderHash = {true, true, 0};
+    return fact;
+}
+
 template <class SequenceType>
 bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        char kind, ladder::SiteId terminal, bool includeCommon,
@@ -1479,7 +1512,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        unsigned loaderPanelCase = 0,
                        unsigned fssDumpCase = 0,
                        unsigned forwardingCase = 0,
-                       bool scrimWashIsBuffer = false) {
+                       bool scrimWashIsBuffer = false,
+                       unsigned targetSharpCase = 0) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
     const bool overflowBefore = trace::overflowed();
@@ -1603,6 +1637,9 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
 
     ModelVisitor visitor{scenario};
     CandidateInterest interest;
+    if (targetSharpCase == 2)
+        interest.publishedInterests &= ~draw_interest::bit(
+            draw_interest::InterestId::TargetSharp);
     if (stagedFss)
         interest.publishedInterests &= ~(draw_interest::bit(draw_interest::InterestId::FssPanel) |
                                         draw_interest::bit(draw_interest::InterestId::FssReveal));
@@ -1645,7 +1682,7 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
             fact.kind = trace::PredicateFactKind::WitchspaceStarsSkip;
             fact.known = trace::TriState::Yes;
             fact.interestMaskKnown = trace::TriState::Yes;
-            fact.legacyInterestMask = (1ull << draw_interest::kInterestCount) - 1ull;
+            fact.legacyInterestMask = interest.publishedInterests;
             fact.starsHelperReached = trace::TriState::Yes;
             fact.hiddenKnown = trace::TriState::Yes;
             fact.hidden = terminal == ladder::SiteId::kWitchspaceStarsSkip
@@ -1796,6 +1833,11 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 policy.fssDumpFact(fssDumpFact(
                     terminal == ladder::SiteId::kFssDumpClaim, fssDumpCase, frameNo));
         }
+        if (visited == ladder::SiteId::kTargetSharpClaim) {
+            const unsigned observationCase = targetSharpCase ? targetSharpCase :
+                terminal == ladder::SiteId::kTargetSharpClaim ? 0u : 1u;
+            policy.targetSharpFact(targetSharpObservationForTest(observationCase));
+        }
         if (visited == ladder::SiteId::kFssPanelClaim) {
             policy.fssFact(fssFact(edvr::FssTraceFactKind::kPanel,
                 terminal == ladder::SiteId::kFssPanelClaim, frameNo));
@@ -1808,6 +1850,10 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                 static_cast<unsigned>(terminal), frameNo, static_cast<unsigned>(visited),
                 static_cast<unsigned>(trace::invalidationReason()));
     }
+    // InterestGated records NotEligible without invoking MockVisitor. Its one
+    // empty raw fact therefore belongs here, outside the invoked-helper loop.
+    if (targetSharpCase == 2)
+        policy.targetSharpFact(targetSharpObservationForTest(2));
     if (stagedFss) {
         edvr::FssObservation panel{};
         panel.kind = edvr::FssTraceFactKind::kPanel;
@@ -1834,6 +1880,9 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         expected.erase(std::remove(expected.begin(), expected.end(), ladder::SiteId::kFssPanelClaim), expected.end());
         expected.erase(std::remove(expected.begin(), expected.end(), ladder::SiteId::kFssRevealClaim), expected.end());
     }
+    if (targetSharpCase == 2)
+        expected.erase(std::remove(expected.begin(), expected.end(),
+                                   ladder::SiteId::kTargetSharpClaim), expected.end());
     const bool correct = flow == ladder::Flow::Stop && same(visitor.visited, expected) &&
         !visitor.visited.empty() && visitor.visited.back() == terminal &&
         policy.token.valid() && interest.legacyMaskLoads <= 1 &&
@@ -2189,6 +2238,12 @@ bool traceWriterChecks(const char* rootArg) {
         ? fssDumpFact(false) : edvr::FssDumpObservation{};
     coldDump.handlerInvoked = coldDumpInterested;
     vrPolicy.fssDumpFact(coldDump);
+    // Use the same raw admission mask published in the site6 fact. An
+    // uninterested site records an empty fact without invoking the helper.
+    const bool coldTargetInterested = draw_interest::contains(
+        coldStars.legacyInterestMask, draw_interest::InterestId::TargetSharp);
+    vrPolicy.targetSharpFact(targetSharpObservationForTest(
+        coldTargetInterested ? 1u : 2u));
     edvr::FssObservation coldPanel{};
     coldPanel.kind = edvr::FssTraceFactKind::kPanel;
     coldPanel.rawProbeReached = true;
@@ -2352,8 +2407,9 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
                     "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
-                matrixJson.find("\"predicateFactVersion\":13") != std::string::npos &&
+                matrixJson.find("\"predicateFactVersion\":14") != std::string::npos &&
                 matrixJson.find("\"forwardInputVersion\":1") != std::string::npos &&
+                matrixJson.find("\"siteId\":54,\"kind\":21,\"known\":\"yes\",\"handlerInvoked\":true") != std::string::npos &&
                 matrixJson.find("\"forwardInputsReached\":false,\"forwardInputs\":null") != std::string::npos &&
                 matrixJson.find("\"siteId\":25,\"kind\":19") != std::string::npos &&
                 matrixJson.find("\"siteId\":57,\"kind\":12") != std::string::npos &&
@@ -2361,6 +2417,121 @@ bool traceWriterChecks(const char* rootArg) {
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":12144190660518967694}") != std::string::npos &&
                 matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":10753612000489488699}") != std::string::npos,
                 "real writer records positive FSS panel and reveal source facts in canonical v10 predicateFacts");
+
+    const auto writeTargetSharpFixture = [&](const char* leaf, std::uint32_t frameNo,
+        ladder::SiteId terminal, unsigned observationCase) {
+        const std::string directory = root + "\\targetsharp_" + leaf;
+        const std::string logLeaf = std::string("edvr_gfx_targetsharp_") + leaf + ".log";
+        DeleteFileA((directory + "\\" + std::string("edvr_gfx_targetsharp_") + leaf +
+            ".draw-ladder-" + std::to_string(frameNo) + ".json").c_str());
+        const bool started = beginCapture(directory, logLeaf.c_str(), frameNo);
+        const bool written = started && writeTerminalCase(
+            ladder::RouteId::kVrEye, ladder::SequenceId::kVrEye, 'X', terminal,
+            true, kFrozenEye, 31, ladder::VrEyeSequence{}, 1, false, false,
+            edvr::SunglareTraceMode::kStock, false, false, 0, frameNo,
+            false, false, 0, 0, 0, 0, 0, 0, false, observationCase);
+        trace::frameEnd(frameNo);
+        const std::string sidecar = directory + "\\" +
+            std::string("edvr_gfx_targetsharp_") + leaf + ".draw-ladder-" +
+            std::to_string(frameNo) + ".json";
+        return started && written && trace::status() == trace::Status::CompleteWritten &&
+            fileExists(sidecar);
+    };
+    ok &= check(writeTargetSharpFixture("positive", 101,
+                    ladder::SiteId::kTargetSharpClaim, 0),
+                "schema14 canonical TargetSharp positive fixture writes frame 101");
+    ok &= check(writeTargetSharpFixture("lazydecline", 102,
+                    ladder::SiteId::kScrimClaim, 1),
+                "schema14 canonical TargetSharp lazy gate decline writes frame 102");
+    ok &= check(writeTargetSharpFixture("noteligible", 103,
+                    ladder::SiteId::kScrimClaim, 2),
+                "schema14 canonical TargetSharp not-eligible observation writes frame 103");
+    ok &= check(writeTargetSharpFixture("unknown", 104,
+                    ladder::SiteId::kScrimClaim, 3),
+                "schema14 canonical TargetSharp reached-unknown input writes frame 104");
+
+    const auto targetSharpInvalidCapture = [&](const char* leaf, std::uint32_t frameNo,
+        unsigned mode, unsigned appendMode) {
+        const std::string directory = root + "\\targetsharp_" + leaf;
+        const std::string logLeaf = std::string("edvr_gfx_targetsharp_") + leaf + ".log";
+        DeleteFileA((directory + "\\" + std::string("edvr_gfx_targetsharp_") + leaf +
+            ".draw-ladder-" + std::to_string(frameNo) + ".json").c_str());
+        const bool started = beginCapture(directory, logLeaf.c_str(), frameNo);
+        trace::DrawFacts facts = draw;
+        facts.kind = 'X'; facts.count = 6; facts.instances = 1;
+        facts.route = ladder::RouteId::kVrEye;
+        facts.sequence = ladder::SequenceId::kVrEye;
+        const trace::Token token = trace::beginDraw(facts);
+        if (!started || !token.valid()) return false;
+        auto observation = targetSharpObservationForTest(mode);
+        if (appendMode == 6) observation.outerFailed = {};
+        if (appendMode == 7) observation.helperFailed = {};
+        if (appendMode != 2) {
+            if (appendMode == 3) observation.siteId = 55;
+            trace::appendTargetSharpFact(token, observation);
+        }
+        if (appendMode == 1 || appendMode == 4)
+            trace::appendTargetSharpFact(token, observation);
+        const bool unvisited = appendMode == 5;
+        if (unvisited) {
+            trace::appendSite(token, 72,
+                static_cast<std::uint8_t>(ladder::SiteKind::Observe),
+                static_cast<std::uint8_t>(ladder::SiteOutcome::Exited),
+                static_cast<std::uint8_t>(ladder::Flow::Stop), 0, -1);
+            trace::finishDraw(token, 72, -1);
+        } else {
+            const auto outcome = mode == 2 ? ladder::SiteOutcome::NotEligible
+                                            : ladder::SiteOutcome::Declined;
+            trace::appendSite(token, 54,
+                static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+                static_cast<std::uint8_t>(outcome),
+                static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+            trace::finishDraw(token, 54, -1);
+        }
+        trace::frameEnd(frameNo);
+        return trace::status() == trace::Status::InvalidCapture;
+    };
+    ok &= check(targetSharpInvalidCapture("missing", 105, 1, 2),
+                "TargetSharp reached site without a fact invalidates the capture");
+    ok &= check(targetSharpInvalidCapture("duplicate", 106, 1, 1),
+                "duplicate TargetSharp fact invalidates the capture");
+    ok &= check(targetSharpInvalidCapture("malformed", 107, 1, 3),
+                "malformed TargetSharp domain invalidates the capture");
+    ok &= check(targetSharpInvalidCapture("malformed", 107, 1, 6),
+                "TargetSharp known outer gate requires its lazy failed read");
+    ok &= check(targetSharpInvalidCapture("malformed", 107, 0, 7),
+                "TargetSharp known helper gate requires its lazy failed read");
+    ok &= check(targetSharpInvalidCapture("unvisited", 108, 1, 5),
+                "unvisited TargetSharp fact invalidates the capture");
+    ok &= check(targetSharpInvalidCapture("perdrawcap", 109, 1, 4),
+                "TargetSharp per-draw fact cap invalidates the capture");
+
+    const std::string targetSharpGlobalDir = root + "\\targetsharp_globaloverflow";
+    DeleteFileA((targetSharpGlobalDir +
+        "\\edvr_gfx_targetsharp_globaloverflow.draw-ladder-110.json").c_str());
+    const bool targetSharpGlobalStarted = beginCapture(targetSharpGlobalDir,
+        "edvr_gfx_targetsharp_globaloverflow.log", 110);
+    bool targetSharpGlobalTokensValid = targetSharpGlobalStarted;
+    trace::DrawFacts targetSharpGlobalDraw = draw;
+    targetSharpGlobalDraw.kind = 'X'; targetSharpGlobalDraw.count = 6;
+    targetSharpGlobalDraw.instances = 1;
+    targetSharpGlobalDraw.route = ladder::RouteId::kVrEye;
+    targetSharpGlobalDraw.sequence = ladder::SequenceId::kVrEye;
+    const auto noInterestFact = targetSharpObservationForTest(2);
+    for (std::uint32_t i = 0; i <= trace::kMaxTargetSharpFacts; ++i) {
+        const trace::Token token = trace::beginDraw(targetSharpGlobalDraw);
+        if (!token.valid()) { targetSharpGlobalTokensValid = false; break; }
+        trace::appendSite(token, 54,
+            static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+            static_cast<std::uint8_t>(ladder::SiteOutcome::NotEligible),
+            static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+        trace::appendTargetSharpFact(token, noInterestFact);
+        trace::finishDraw(token, 54, -1);
+    }
+    trace::frameEnd(110);
+    ok &= check(targetSharpGlobalTokensValid && trace::overflowed() &&
+                trace::status() == trace::Status::InvalidCapture,
+                "TargetSharp global pool exhaustion invalidates at its fixed cap");
 
     const std::string generatedInvalidDir = root + "\\generatedinvalid";
     DeleteFileA((generatedInvalidDir + "\\edvr_gfx_generated_invalid.draw-ladder-16.json").c_str());
@@ -2886,7 +3057,7 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":13") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":14") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&

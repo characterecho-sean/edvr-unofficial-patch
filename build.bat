@@ -1901,6 +1901,56 @@ fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     exit /b 1
 )
 del /q "%BUILD%\draw_ladder_trace_files_before.txt" "%BUILD%\draw_ladder_trace_files_after.txt"
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_positive\edvr_gfx_targetsharp_positive.draw-ladder-101.json" ^
+    --expected-log edvr_gfx_targetsharp_positive.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline\edvr_gfx_targetsharp_lazydecline.draw-ladder-102.json" ^
+    --expected-log edvr_gfx_targetsharp_lazydecline.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible\edvr_gfx_targetsharp_noteligible.draw-ladder-103.json" ^
+    --expected-log edvr_gfx_targetsharp_noteligible.log --dry-run || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_unknown\edvr_gfx_targetsharp_unknown.draw-ladder-104.json" ^
+    --expected-log edvr_gfx_targetsharp_unknown.log --dry-run --expect-unreplayable 1 || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_missing\edvr_gfx_targetsharp_missing.draw-ladder-105.json" ^
+    --expected-log edvr_gfx_targetsharp_missing.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate\edvr_gfx_targetsharp_duplicate.draw-ladder-106.json" ^
+    --expected-log edvr_gfx_targetsharp_duplicate.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_malformed\edvr_gfx_targetsharp_malformed.draw-ladder-107.json" ^
+    --expected-log edvr_gfx_targetsharp_malformed.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited\edvr_gfx_targetsharp_unvisited.draw-ladder-108.json" ^
+    --expected-log edvr_gfx_targetsharp_unvisited.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap\edvr_gfx_targetsharp_perdrawcap.draw-ladder-109.json" ^
+    --expected-log edvr_gfx_targetsharp_perdrawcap.log --dry-run --expect-invalid || exit /b 1
+python tools\draw_ladder_replay.py --file ^
+    "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow\edvr_gfx_targetsharp_globaloverflow.draw-ladder-110.json" ^
+    --expected-log edvr_gfx_targetsharp_globaloverflow.log --dry-run --expect-invalid || exit /b 1
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_positive\edvr_gfx_targetsharp_positive.log" "%BUILD%\draw_ladder_test-trace\targetsharp_positive\edvr_gfx_targetsharp_positive.draw-ladder-101.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_positive" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_positive"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline\edvr_gfx_targetsharp_lazydecline.log" "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline\edvr_gfx_targetsharp_lazydecline.draw-ladder-102.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_lazydecline"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible\edvr_gfx_targetsharp_noteligible.log" "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible\edvr_gfx_targetsharp_noteligible.draw-ladder-103.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_noteligible"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_unknown\edvr_gfx_targetsharp_unknown.log" "%BUILD%\draw_ladder_test-trace\targetsharp_unknown\edvr_gfx_targetsharp_unknown.draw-ladder-104.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_unknown" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_unknown"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_missing\edvr_gfx_targetsharp_missing.log" "%BUILD%\draw_ladder_test-trace\targetsharp_missing\edvr_gfx_targetsharp_missing.draw-ladder-105.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_missing" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_missing"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate\edvr_gfx_targetsharp_duplicate.log" "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate\edvr_gfx_targetsharp_duplicate.draw-ladder-106.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_duplicate"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_malformed\edvr_gfx_targetsharp_malformed.log" "%BUILD%\draw_ladder_test-trace\targetsharp_malformed\edvr_gfx_targetsharp_malformed.draw-ladder-107.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_malformed" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_malformed"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited\edvr_gfx_targetsharp_unvisited.log" "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited\edvr_gfx_targetsharp_unvisited.draw-ladder-108.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_unvisited"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap\edvr_gfx_targetsharp_perdrawcap.log" "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap\edvr_gfx_targetsharp_perdrawcap.draw-ladder-109.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_perdrawcap"
+del /q "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow\edvr_gfx_targetsharp_globaloverflow.log" "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow\edvr_gfx_targetsharp_globaloverflow.draw-ladder-110.json"
+if exist "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow" rmdir "%BUILD%\draw_ladder_test-trace\targetsharp_globaloverflow"
 del /q "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.log" ^
     "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_newer_decoy.log" ^
     "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.draw-ladder-12.json" ^
@@ -2460,7 +2510,7 @@ exit /b 0
 echo [edvr] === actual VScreen predicate producer regression ===
 if not exist "%OBJ%\vscreenpredicate" mkdir "%OBJ%\vscreenpredicate"
 REM The actual visitor lives in the graphics module. Link this isolated EXE
-REM against the completed production object set, replacing the three
+REM against the completed production object set, replacing the
 REM macro-test translation units. These inputs are built before the rig pool.
 if not exist "%OBJ%\d3d11\vscreen.obj" exit /b 1
 if not exist "%OBJ%\d3d11\draw_ladder_trace.obj" exit /b 1
@@ -2469,18 +2519,18 @@ cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
     /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
     /Fo"%OBJ%\vscreenpredicate\\" ^
     "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
-    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\fss_dump.cpp"
+    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\fss_dump.cpp" "src\d3d11\target_sharp.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
 > "%OBJ%\vscreenpredicate\production_objects.rsp" (
     for %%F in ("%OBJ%\d3d11\*.obj") do (
-        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="fss_dump.obj" echo "%%~fF"
+        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="fss_dump.obj" if /I not "%%~nxF"=="target_sharp.obj" echo "%%~fF"
     )
 )
 link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     /OUT:"%BUILD%\vscreen_predicate_test.exe" ^
     "%OBJ%\vscreenpredicate\vscreen_predicate_test.obj" ^
     "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
-    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\fss_dump.obj" ^
+    "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\fss_dump.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^
     kernel32.lib user32.lib gdi32.lib version.lib d3dcompiler.lib %NGXLIB% %FSRLIB%
@@ -3973,4 +4023,21 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: UI hologram test build failed & exit /b 1 )
 "%OBJ%\uiholo\ui_holo_test.exe" --dry-run || exit /b 1
 "%OBJ%\uiholo\ui_holo_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_fss_dump_api_test
+echo [edvr] === FSS dump capture/readback API owner regression ===
+if not exist "%OBJ%\fssdumpapi" mkdir "%OBJ%\fssdumpapi"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_FSS_DUMP_API_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" ^
+    /Fo"%OBJ%\fssdumpapi\\" /Fe"%BUILD%\fss_dump_api_test.exe" ^
+    "tools\fss_dump_api_test\fss_dump_api_test.cpp" ^
+    "src\d3d11\fss_dump.cpp" "src\d3d11\plugin_cost.cpp" ^
+    "src\common\guard.cpp" ^
+    "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: FSS dump API test build failed & exit /b 1 )
+"%BUILD%\fss_dump_api_test.exe" --dry-run || exit /b 1
+"%BUILD%\fss_dump_api_test.exe" --self-test || exit /b 1
 exit /b 0

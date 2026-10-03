@@ -362,39 +362,81 @@ bool targetSharpRemlokAnnotationChecks() {
 
     const std::string sharp = readSource("src/d3d11/target_sharp.cpp");
     const std::string rem = readSource("src/d3d11/remlok_fix.cpp");
-    const std::string probe = functionBody(sharp, "bool targetSharpOnEyeDraw(");
+    const std::string probe = functionBody(sharp, "bool targetSharpOnEyeDrawImpl(");
+    const std::string sharpDefault = functionBody(sharp, "bool targetSharpOnEyeDraw(");
+    const std::string sharpObserved = functionBody(sharp, "bool targetSharpOnEyeDrawObserved(");
     const std::string sharpBegin = functionBody(sharp, "void targetSharpBegin(");
     const std::string sharpEnd = functionBody(sharp, "void targetSharpEnd(");
     const std::string remBegin = functionBody(rem, "void remlokScissorBegin(");
     const std::string remEnd = functionBody(rem, "void remlokScissorEnd(");
     const std::string clone = functionBody(rem, "ID3D11RasterizerState* cloneWithScissor(");
-    ok &= check(probe.find("edvrPluginCostApiSampleContext(ctx)") < probe.find("ctx->VSGetShader") &&
-                probe.find("TargetVsGetShader") != std::string::npos,
+    const std::size_t probeSample = probe.find("edvrPluginCostApiSampleContext(ctx)");
+    const std::size_t probeNote = probe.find("edvrPluginCostNoteD3dCall(", probeSample);
+    const std::size_t probeSite = probe.find("cockpit_cost::Site::TargetVsGetShader", probeNote);
+    const std::size_t probeQuery = probe.find("ctx->VSGetShader(");
+    ok &= check(!probe.empty() && probeSample != std::string::npos &&
+                probeNote != std::string::npos && probeSite != std::string::npos &&
+                probeQuery != std::string::npos && probeSample < probeNote &&
+                probeNote < probeSite && probeSite < probeQuery,
                 "TargetSharp's existing shader probe samples and annotates at the actual query");
-    ok &= check(sharpBegin.find("if (!ps) return") < sharpBegin.find("edvrPluginCostApiSampleContext(ctx)") &&
-                sharpBegin.find("edvrPluginCostApiSampleContext(ctx)") < sharpBegin.find("ctx->PSGetShader") &&
-                sharpBegin.find("ctx->PSGetShader") < sharpBegin.find("ctx->PSSetShader"),
+    const auto compact = [](std::string body) {
+        body.erase(std::remove_if(body.begin(), body.end(),
+            [](unsigned char c) { return std::isspace(c) != 0; }), body.end());
+        return body;
+    };
+    const auto wrappersRouteToProbe = [&](const std::string& defaultBody,
+                                          const std::string& observedBody) {
+        return compact(defaultBody) ==
+                   "{returntargetSharpOnEyeDrawImpl<false>(ctx,kind,count,instances,nullptr);}" &&
+               compact(observedBody) ==
+                   "{returntargetSharpOnEyeDrawImpl<true>(ctx,kind,count,instances,&observation);}";
+    };
+    ok &= check(wrappersRouteToProbe(sharpDefault, sharpObserved),
+                "TargetSharp default and observed entry points both return the shared annotated probe result");
+    ok &= check(!wrappersRouteToProbe(
+                    "{targetSharpOnEyeDrawImpl<false>(ctx,kind,count,instances,nullptr);return false;}",
+                    sharpObserved) &&
+                !wrappersRouteToProbe(sharpDefault, "{return false;}"),
+                "TargetSharp source pin rejects either wrapper bypassing the shared probe result");
+    const std::size_t sharpNoReplacement = sharpBegin.find("if (!ps) return");
+    const std::size_t sharpBeginSample = sharpBegin.find("edvrPluginCostApiSampleContext(ctx)");
+    const std::size_t sharpGet = sharpBegin.find("ctx->PSGetShader");
+    const std::size_t sharpSet = sharpBegin.find("ctx->PSSetShader");
+    ok &= check(sharpNoReplacement != std::string::npos &&
+                sharpBeginSample != std::string::npos && sharpGet != std::string::npos &&
+                sharpSet != std::string::npos &&
+                sharpNoReplacement < sharpBeginSample && sharpBeginSample < sharpGet &&
+                sharpGet < sharpSet,
                 "TargetSharp captures sampling only after replacement succeeds and preserves query-before-set order");
     const std::size_t sharpSavedSample = sharpEnd.find("const bool costSample = g_costSample;");
     const std::size_t sharpClearSample = sharpEnd.find("g_costSample = false;", sharpSavedSample);
+    const std::size_t sharpRestore = sharpEnd.find("ctx->PSSetShader");
     ok &= check(sharpSavedSample != std::string::npos && sharpClearSample != std::string::npos &&
-                sharpSavedSample < sharpClearSample && sharpClearSample < sharpEnd.find("ctx->PSSetShader"),
+                sharpRestore != std::string::npos &&
+                sharpSavedSample < sharpClearSample && sharpClearSample < sharpRestore,
                 "TargetSharp carries the Begin sample into its matching restore then clears it");
     const std::size_t remSample = remBegin.find("g_costSample = edvrPluginCostApiSampleContext(ctx) != 0;");
-    ok &= check(remSample != std::string::npos && remSample < remBegin.find("ctx->RSGetState"),
+    const std::size_t remGetState = remBegin.find("ctx->RSGetState");
+    ok &= check(remSample != std::string::npos && remGetState != std::string::npos &&
+                remSample < remGetState,
                 "RemLok captures the API sample before its first context query");
     ok &= check(rem.find("bool costSample) {") != std::string::npos,
                 "RemLok carries its saved API-sample decision into the device-query helper");
-    ok &= check(clone.find("if (costSample)") < clone.find("ctx->GetDevice"),
+    const std::size_t cloneGuard = clone.find("if (costSample)");
+    const std::size_t cloneGetDevice = clone.find("ctx->GetDevice");
+    ok &= check(cloneGuard != std::string::npos && cloneGetDevice != std::string::npos &&
+                cloneGuard < cloneGetDevice,
                 "RemLok guards the conditional device query note by its saved sample");
     std::string compactRemBegin = remBegin;
     compactRemBegin.erase(std::remove_if(compactRemBegin.begin(), compactRemBegin.end(),
         [](unsigned char c) { return std::isspace(c) != 0; }), compactRemBegin.end());
     const std::size_t remSavedSample = remEnd.find("const bool costSample = g_costSample;");
     const std::size_t remClearSample = remEnd.find("g_costSample = false;", remSavedSample);
+    const std::size_t remRestore = remEnd.find("ctx->RSSetState");
     ok &= check(compactRemBegin.find("g_costSample=false;return;") != std::string::npos &&
                 remSavedSample != std::string::npos && remClearSample != std::string::npos &&
-                remSavedSample < remClearSample && remClearSample < remEnd.find("ctx->RSSetState"),
+                remRestore != std::string::npos &&
+                remSavedSample < remClearSample && remClearSample < remRestore,
                 "RemLok declines clear their sample and successful End carries it across all restores");
     return ok;
 }

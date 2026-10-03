@@ -10,6 +10,7 @@
 #include "../../src/d3d11/loader_panel_observation.h"
 #include "../../src/d3d11/fss_dump_observation.h"
 #include "../../src/d3d11/forwarding_observation.h"
+#include "../../src/d3d11/target_sharp_observation.h"
 
 struct ID3D11DeviceContext;
 
@@ -126,5 +127,11 @@ bool vScreenForwardingPredicateTestVisit(
     ID3D11DeviceContext* context, bool traceEnabled,
     const VScreenForwardingTestInput& input,
     VScreenForwardingTestResult* result) noexcept;
+
+bool vScreenTargetSharpPredicateTestVisit(
+    ID3D11DeviceContext* context, char kind, std::uint32_t count,
+    std::uint32_t instances, std::uint32_t eyeW, std::uint32_t eyeH,
+    std::uint32_t renderW, std::uint32_t renderH, bool traceEnabled,
+    VScreenPredicateTestResult* result) noexcept;
 
 } // namespace edvr

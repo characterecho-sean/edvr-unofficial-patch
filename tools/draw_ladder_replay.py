@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 13
+PREDICATE_FACT_VERSION = 14
 RESOLVE_BIND_PS_HASH = 0x7CECABDE34FFBE9E
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
@@ -3045,13 +3045,186 @@ def _replay_fss_dump_fact(fact, draw, label, fss_dump_interested):
     return _fss_dump_event(True), 0, False
 
 
+def _target_sharp_fact(fact, draw, label, admitted):
+    required = {"siteId", "kind", "known", "handlerInvoked", "inputs", "eyeSize"}
+    if set(fact) != required or (fact.get("siteId"), fact.get("kind"), fact.get("known")) != (54, 21, "yes"):
+        raise TraceError(label + " has missing or unexpected TargetSharp fields")
+    if type(fact.get("handlerInvoked")) is not bool:
+        raise TraceError(label + ".handlerInvoked disagrees with reached TargetSharp handler")
+    inputs = fact.get("inputs")
+    names = ("outerSharp", "outerFailed", "helperSharp", "helperFailed",
+             "srv0Present", "srv0Resolved", "srv0Texture2D", "srv0Width", "srv0Height",
+             "aux1Present", "aux2Present", "aux3Present", "vsPresent",
+             "queriedShaderHash", "configuredShaderHash")
+    if not isinstance(inputs, dict) or set(inputs) != set(names):
+        raise TraceError(label + ".inputs has missing or unexpected raw reads")
+    domains = {name: (bool, None) for name in names}
+    for name in ("srv0Width", "srv0Height"):
+        domains[name] = (int, 0xffffffff)
+    for name in ("queriedShaderHash", "configuredShaderHash"):
+        domains[name] = (int, 0xffffffffffffffff)
+    reads = {}
+    for name, (typ, high) in domains.items():
+        reads[name] = _sunglare_read(inputs, name, label + ".inputs", typ, high)
+    eye = fact.get("eyeSize")
+    if not isinstance(eye, dict):
+        raise TraceError(label + ".eyeSize must be an object")
+
+    def validate_unvisited_eye(width=0, height=0):
+        sized, mismatch = _holo_eye_size(eye, width, height, label + ".eyeSize")
+        if sized is not None:
+            raise TraceError(label + " reached eye-size helper before its raw dimensions")
+        return mismatch
+
+    if admitted is False:
+        if fact["handlerInvoked"]:
+            raise TraceError(label + " was recorded although site6 interest bit0 did not admit TargetSharp")
+        if any(reached or known for reached, known, _ in reads.values()):
+            raise TraceError(label + " not-eligible observation contains consumed raw inputs")
+        validate_unvisited_eye()
+        return None, False
+    if admitted is not True or not fact["handlerInvoked"]:
+        raise TraceError(label + ".handlerInvoked disagrees with reached TargetSharp handler")
+    if not reads["outerSharp"][0]:
+        raise TraceError(label + " invoked handler lacks its first outer sharp read")
+
+    def value(name):
+        read = reads[name]
+        return read[2] if read[1] else None
+
+    def unread(*fields):
+        for name in fields:
+            reached, known, _ = reads[name]
+            if reached or known:
+                raise TraceError(label + ".inputs." + name + " violates lazy read order")
+
+    tail = names[4:]
+    after_srv0 = names[9:]
+    if value("outerSharp") is None:
+        unread("outerFailed", "helperSharp", "helperFailed", *tail)
+        validate_unvisited_eye()
+        return None, False
+    if value("outerSharp") is False:
+        unread("outerFailed", "helperSharp", "helperFailed", *tail)
+        validate_unvisited_eye()
+        return False, False
+    if not reads["outerFailed"][0]:
+        raise TraceError(label + " sharp outer gate lacks its lazy failed read")
+    if value("outerFailed") is None:
+        unread("helperSharp", "helperFailed", *tail)
+        validate_unvisited_eye()
+        return None, False
+    if value("outerFailed"):
+        unread("helperSharp", "helperFailed", *tail)
+        validate_unvisited_eye()
+        return False, False
+    if not reads["helperSharp"][0]:
+        raise TraceError(label + " admitted outer gate lacks helper sharp read")
+    if value("helperSharp") is None:
+        unread("helperFailed", *tail)
+        validate_unvisited_eye()
+        return None, False
+    if not value("helperSharp"):
+        unread("helperFailed", *tail)
+        validate_unvisited_eye()
+        return False, False
+    if not reads["helperFailed"][0]:
+        raise TraceError(label + " helper sharp gate lacks its lazy failed read")
+    if value("helperFailed") is None:
+        unread(*tail)
+        validate_unvisited_eye()
+        return None, False
+    if value("helperFailed"):
+        unread(*tail)
+        validate_unvisited_eye()
+        return False, False
+    if (draw["kind"], draw["count"], draw["instances"]) != (ord("X"), 6, 1):
+        unread(*tail)
+        validate_unvisited_eye()
+        return False, False
+
+    for name in ("srv0Present", "srv0Resolved"):
+        if not reads[name][0]:
+            raise TraceError(label + " eligible helper lacks " + name)
+        if value(name) is None:
+            unread("srv0Texture2D", "srv0Width", "srv0Height", *after_srv0)
+            validate_unvisited_eye()
+            return None, False
+    if value("srv0Present") is False and value("srv0Resolved") is True:
+        raise TraceError(label + " resolves a null srv0")
+    if value("srv0Resolved") is False:
+        unread("srv0Texture2D", "srv0Width", "srv0Height", *after_srv0)
+        validate_unvisited_eye()
+        return False, False
+    if not reads["srv0Texture2D"][0]:
+        raise TraceError(label + " resolved srv0 lacks texture type")
+    if value("srv0Texture2D") is None:
+        unread("srv0Width", "srv0Height", *after_srv0)
+        validate_unvisited_eye()
+        return None, False
+    if value("srv0Texture2D") is False:
+        unread("srv0Width", "srv0Height", *after_srv0)
+        validate_unvisited_eye()
+        return False, False
+    for name in ("srv0Width", "srv0Height"):
+        if not reads[name][0]:
+            raise TraceError(label + " Texture2D srv0 lacks dimensions")
+        if value(name) is None:
+            unread("aux1Present", "aux2Present", "aux3Present", "vsPresent",
+                   "queriedShaderHash", "configuredShaderHash")
+            validate_unvisited_eye()
+            return None, False
+    if value("srv0Width") is None or value("srv0Height") is None:
+        _holo_eye_size(eye, value("srv0Width") or 0,
+                       value("srv0Height") or 0, label + ".eyeSize")
+        return None, False
+    eye_sized, eye_mismatch = _holo_eye_size(eye, value("srv0Width"),
+                                             value("srv0Height"), label + ".eyeSize")
+    if eye_sized is None:
+        unread("aux1Present", "aux2Present", "aux3Present", "vsPresent",
+               "queriedShaderHash", "configuredShaderHash")
+        return None, eye_mismatch
+    if eye_sized:
+        unread("aux1Present", "aux2Present", "aux3Present", "vsPresent",
+               "queriedShaderHash", "configuredShaderHash")
+        return False, eye_mismatch
+    later_aux = (("aux2Present", "aux3Present"),
+                 ("aux3Present",), ())
+    for index, name in enumerate(("aux1Present", "aux2Present", "aux3Present")):
+        if not reads[name][0]:
+            raise TraceError(label + " non-eye srv0 lacks " + name)
+        if value(name) is None:
+            unread(*later_aux[index], "vsPresent", "queriedShaderHash",
+                   "configuredShaderHash")
+            return None, eye_mismatch
+        if value(name):
+            unread(*later_aux[index], "vsPresent", "queriedShaderHash",
+                   "configuredShaderHash")
+            return False, eye_mismatch
+    if not reads["vsPresent"][0]:
+        raise TraceError(label + " empty auxiliary slots lack VS presence read")
+    if value("vsPresent") is None:
+        unread("queriedShaderHash", "configuredShaderHash")
+        return None, eye_mismatch
+    if not value("vsPresent"):
+        unread("queriedShaderHash", "configuredShaderHash")
+        return False, eye_mismatch
+    for name in ("queriedShaderHash", "configuredShaderHash"):
+        if not reads[name][0]:
+            raise TraceError(label + " present VS lacks consumed shader hash")
+        if value(name) is None:
+            return None, eye_mismatch
+    return value("queriedShaderHash") == value("configuredShaderHash"), eye_mismatch
+
+
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 18 if predicate_fact_version >= 13 else 17 if predicate_fact_version >= 12 else 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 19 if predicate_fact_version >= 14 else 18 if predicate_fact_version >= 13 else 17 if predicate_fact_version >= 12 else 16 if predicate_fact_version >= 11 else 15 if predicate_fact_version >= 10 else 14 if predicate_fact_version >= 9 else 12 if predicate_fact_version >= 8 else 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 13 else
+    supported_ids = ((2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 14 else
+                     (2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 59, 60, 61, 62, 63, 67) if predicate_fact_version >= 13 else
                      (2, 3, 6, 24, 25, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 12 else
                      (2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 60, 61, 62, 63, 67) if predicate_fact_version >= 11 else
                      (2, 3, 6, 24, 26, 48, 49, 50, 51, 52, 53, 55, 57, 58, 61, 62, 63, 67) if predicate_fact_version >= 10 else
@@ -3069,12 +3242,15 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     sunglare62_expected = None
     sunglare_mutation_missing = set()
     fss_dump_interested = None
+    target_sharp_interested = None
+    target_sharp_facts = 0
     for index, fact in enumerate(facts):
         fact_label = "%s.predicateFacts[%d]" % (label, index)
         if not isinstance(fact, dict):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        21 if predicate_fact_version >= 14 else
                         20 if predicate_fact_version >= 13 else
                         19 if predicate_fact_version >= 12 else
                         18 if predicate_fact_version >= 11 else
@@ -3089,7 +3265,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                         3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
+        supported_pairs = ((2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (54, 21), (55, 8),
+                           (57, 12), (58, 13), (59, 20), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 14 else (
+            (2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (59, 20), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 13 else (
             (2, 15), (3, 1), (6, 4), (24, 5), (25, 19), (26, 6), (48, 17), (49, 2), (50, 3), (51, 14), (53, 7), (55, 8),
                            (57, 12), (58, 13), (60, 18), (61, 9), (62, 10), (63, 11), (67, 16)) if predicate_fact_version >= 12 else (
@@ -3219,6 +3397,23 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 event, fact_mismatches, fact_mutation_unobserved = None, 0, exc.mutation_unobserved
             by_site[site_id] = (event, None, True, 0, fact_mismatches,
                                 fact_mutation_unobserved)
+        elif kind == 21:
+            if site_id != 54 or predicate_fact_version < 14:
+                raise TraceError(fact_label + " has unsupported TargetSharp fact")
+            if target_sharp_interested is None:
+                raise TraceError(fact_label + " lacks preceding site6 admission source")
+            expected_claim, fact_mismatches = _target_sharp_fact(
+                fact, draw, fact_label, target_sharp_interested)
+            expected_event = (None if expected_claim is None and fact["handlerInvoked"] else
+                {"id": 54, "kind": 2, "outcome": 3, "flow": 1,
+                 "subsite": 0, "verdict": 5} if expected_claim else
+                {"id": 54, "kind": 2, "outcome": 5, "flow": 0,
+                 "subsite": 0, "verdict": -1} if not fact["handlerInvoked"] else
+                {"id": 54, "kind": 2, "outcome": 2, "flow": 0,
+                 "subsite": 0, "verdict": -1})
+            by_site[site_id] = (expected_event, None, True, 0,
+                                fact_mismatches, expected_claim)
+            target_sharp_facts += 1
         elif kind == 14:
             if site_id != 51 or predicate_fact_version < 8:
                 raise TraceError(fact_label + " has unsupported RemLok fact")
@@ -3374,7 +3569,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             expected_event, expected_delta, delta_known, observed_delta, legacy_claim = \
                 _replay_witchspace_stars_fact(fact, draw, fact_label)
             if site_id == 6:
-                fss_dump_interested = bool(int(fact["legacyInterestMask"], 16) & (1 << 4))
+                interest_mask = int(fact["legacyInterestMask"], 16)
+                fss_dump_interested = bool(interest_mask & (1 << 4))
+                target_sharp_interested = bool(interest_mask & 1)
             by_site[site_id] = (expected_event, expected_delta, delta_known,
                                 observed_delta, 0, legacy_claim)
         elif kind == 5:
@@ -3451,12 +3648,20 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
     if set(by_site) != expected:
         raise TraceError(label + ".predicateFacts do not exactly cover visited supported sites")
+    target_event = next((event for event in draw["sites"] if event["id"] == 54), None)
+    if target_event is not None:
+        if target_sharp_interested is None:
+            raise TraceError(label + " site54 lacks site6 admission provenance")
+        if not target_sharp_interested and target_event["outcome"] != 5:
+            raise TraceError(label + " TargetSharp site was invoked without interest bit0")
+        if target_sharp_interested and target_event["outcome"] == 5:
+            raise TraceError(label + " admitted TargetSharp site is marked not eligible")
     mismatches = 0
     unreplayable = 0
     mutation_unobserved = 0
@@ -3504,6 +3709,10 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     fss_dump_replayed = 0
     fss_dump_unreplayable = 0
     fss_dump_mismatches = 0
+    target_sharp_replayed = 0
+    target_sharp_unreplayable = 0
+    target_sharp_mismatches = 0
+    target_sharp_not_eligible = int(target_event is not None and target_event["outcome"] == 5)
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -3584,6 +3793,16 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 fss_dump_mismatches += cache_mismatches
             if legacy_claim:
                 mutation_unobserved += 1
+        if site_id == 54:
+            if site_unreplayable:
+                target_sharp_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                target_sharp_replayed += 1
+            else:
+                target_sharp_mismatches += 1
+            target_sharp_mismatches += cache_mismatches
         if site_id in (61, 62, 63):
             if site_unreplayable:
                 sunglare_unreplayable += 1
@@ -3768,7 +3987,12 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "fssDumpFacts": sum(1 for site_id in by_site if site_id == 59),
             "fssDumpReplayed": fss_dump_replayed,
             "fssDumpUnreplayable": fss_dump_unreplayable,
-            "fssDumpMismatches": fss_dump_mismatches}
+            "fssDumpMismatches": fss_dump_mismatches,
+            "targetSharpFacts": target_sharp_facts,
+            "targetSharpReplayed": target_sharp_replayed,
+            "targetSharpUnreplayable": target_sharp_unreplayable,
+            "targetSharpMismatches": target_sharp_mismatches,
+            "targetSharpNotEligible": target_sharp_not_eligible}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -4034,7 +4258,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
         forward_input_version = data.get("forwardInputVersion", 0)
@@ -4139,7 +4363,10 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "loaderPanelUnreplayable": 0, "loaderPanelMismatches": 0,
                         "loaderPanelMutationUnobserved": 0,
                         "fssDumpFacts": 0, "fssDumpReplayed": 0,
-                        "fssDumpUnreplayable": 0, "fssDumpMismatches": 0}
+                        "fssDumpUnreplayable": 0, "fssDumpMismatches": 0,
+                        "targetSharpFacts": 0, "targetSharpReplayed": 0,
+                        "targetSharpUnreplayable": 0, "targetSharpMismatches": 0,
+                        "targetSharpNotEligible": 0}
     forward_replay = {"factCount": 0, "replayed": 0, "unavailable": 0,
                       "mismatches": 0, "eligible": 0, "expectedActions": 0,
                       "observedActionMismatches": 0, "forwardFactsMismatches": 0,
@@ -4574,6 +4801,13 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                             "mismatch" if predicate_replay["fssDumpMismatches"] else
                             "unreplayable" if predicate_replay["fssDumpUnreplayable"] else
                             "replayed"),
+             targetSharpStatus=("unavailable-before-v14" if predicate_fact_version < 14 else
+                                "not-visited" if not predicate_replay["targetSharpFacts"] else
+                                "mismatch" if predicate_replay["targetSharpMismatches"] else
+                                "unreplayable" if predicate_replay["targetSharpUnreplayable"] else
+                                "not-eligible" if predicate_replay["targetSharpNotEligible"] and
+                                                   not predicate_replay["targetSharpReplayed"] else
+                                "replayed"),
              **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -4618,7 +4852,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
               "loaderPanelMutationUnobserved": 0,
               "fssDumpStatus": "unavailable-before-v13",
               "fssDumpFacts": 0, "fssDumpReplayed": 0,
-             "fssDumpUnreplayable": 0, "fssDumpMismatches": 0}),
+             "fssDumpUnreplayable": 0, "fssDumpMismatches": 0,
+             "targetSharpStatus": "unavailable-before-v14",
+             "targetSharpFacts": 0, "targetSharpReplayed": 0,
+             "targetSharpUnreplayable": 0, "targetSharpMismatches": 0,
+             "targetSharpNotEligible": 0}),
         "forwardReplay": dict(
             status=("unavailable" if forward_input_version == 0 else
                     "mismatch" if forward_replay["mismatches"] else
@@ -8880,6 +9118,230 @@ def self_test():
                                "fss-dump-v12", 12)["fssDumpFacts"] != 0:
         print("predicate fact version 12 claimed schema13 FSS dump support")
         return 1
+
+    def target_sharp_positive():
+        raw_names = ("outerSharp", "outerFailed", "helperSharp", "helperFailed",
+                     "srv0Present", "srv0Resolved", "srv0Texture2D", "srv0Width",
+                     "srv0Height", "aux1Present", "aux2Present", "aux3Present",
+                     "vsPresent", "queriedShaderHash", "configuredShaderHash")
+        values = {"outerSharp": True, "outerFailed": False,
+                  "helperSharp": True, "helperFailed": False,
+                  "srv0Present": True, "srv0Resolved": True,
+                  "srv0Texture2D": True, "srv0Width": 2048,
+                  "srv0Height": 1024, "aux1Present": False,
+                  "aux2Present": False, "aux3Present": False,
+                  "vsPresent": True, "queriedShaderHash": 0,
+                  "configuredShaderHash": 0}
+        return {"siteId": 54, "kind": 21, "known": "yes",
+                "handlerInvoked": True,
+                "inputs": {name: {"reached": True, "known": True,
+                                   "value": values[name]} for name in raw_names},
+                "eyeSize": {"reached": "yes", "statePresent": "no",
+                            "result": "no", "readMask": 0,
+                            "depthW": 0, "depthH": 0, "eyeW": 0,
+                            "eyeH": 0, "renderW": 0, "renderH": 0}}
+
+    target_draw = {"kind": ord("X"), "count": 6, "instances": 1}
+    target = target_sharp_positive()
+    target_claim, target_eye_mismatch = _target_sharp_fact(
+        target, target_draw, "targetsharp-positive", True)
+    if target_claim is not True or target_eye_mismatch:
+        print("TargetSharp positive raw inputs did not derive the zero-hash claim")
+        return 1
+    target_site6 = json.loads(json.dumps(dump_site6))
+    target_site6["legacyInterestMask"] = "%016X" % 1
+    target_site6["interestMaskKnown"] = "yes"
+    target_claim_event = {"id": 54, "kind": 2, "outcome": 3,
+                          "flow": 1, "subsite": 0, "verdict": 5}
+    target_dispatch = {"kind": ord("X"), "count": 6, "instances": 1,
+                       "sites": [{"id": 6, "kind": 2, "outcome": 5,
+                                  "flow": 0, "subsite": 0, "verdict": -1},
+                                 target_claim_event],
+                       "predicateFacts": [target_site6, target]}
+    target_summary = _replay_predicate_facts(target_dispatch,
+                                            "targetsharp-v14-positive", 14)
+    if (target_summary["targetSharpFacts"] != 1 or
+            target_summary["targetSharpReplayed"] != 1 or
+            target_summary["targetSharpMismatches"] or
+            target_summary["targetSharpUnreplayable"] or
+            target_summary["mismatches"]):
+        print("TargetSharp v14 did not replay admission and claim from raw inputs")
+        return 1
+    lazy_decline = {"siteId": 54, "kind": 21, "known": "yes",
+                    "handlerInvoked": True, "inputs": {
+                        name: {"reached": False, "known": False, "value": None}
+                        for name in target["inputs"]},
+                    "eyeSize": {"reached": "unknown", "statePresent": "unknown",
+                                "result": "unknown", "readMask": 0,
+                                "depthW": 0, "depthH": 0, "eyeW": 0,
+                                "eyeH": 0, "renderW": 0, "renderH": 0}}
+    lazy_decline["inputs"]["outerSharp"] = {"reached": True, "known": True,
+                                               "value": True}
+    lazy_decline["inputs"]["outerFailed"] = {"reached": True, "known": True,
+                                                "value": True}
+    if _target_sharp_fact(lazy_decline, target_draw,
+                          "targetsharp-lazy-decline", True) != (False, False):
+        print("TargetSharp lazy failed-gate decline did not preserve raw short-circuit order")
+        return 1
+    target_lazy_dispatch = json.loads(json.dumps(target_dispatch))
+    target_lazy_dispatch["sites"][1] = {"id": 54, "kind": 2, "outcome": 2,
+                                        "flow": 0, "subsite": 0, "verdict": -1}
+    target_lazy_dispatch["predicateFacts"][1] = lazy_decline
+    target_lazy_summary = _replay_predicate_facts(
+        target_lazy_dispatch, "targetsharp-v14-lazy-decline", 14)
+    if (target_lazy_summary["targetSharpReplayed"] != 1 or
+            target_lazy_summary["targetSharpMismatches"] or
+            target_lazy_summary["mismatches"]):
+        print("TargetSharp lazy failed-gate did not replay its Declined event")
+        return 1
+    target_noteligible = {"siteId": 54, "kind": 21, "known": "yes",
+                          "handlerInvoked": False,
+                          "inputs": {name: {"reached": False, "known": False,
+                                             "value": None} for name in target["inputs"]},
+                          "eyeSize": {"reached": "unknown", "statePresent": "unknown",
+                                      "result": "unknown", "readMask": 0,
+                                      "depthW": 0, "depthH": 0, "eyeW": 0,
+                                      "eyeH": 0, "renderW": 0, "renderH": 0}}
+    if _target_sharp_fact(target_noteligible, target_draw,
+                          "targetsharp-noteligible", False) != (None, False):
+        print("TargetSharp not-eligible observation was not independently represented")
+        return 1
+    target_off_site6 = json.loads(json.dumps(target_site6))
+    target_off_site6["legacyInterestMask"] = "%016X" % 0
+    target_off_event = {"id": 54, "kind": 2, "outcome": 5,
+                        "flow": 0, "subsite": 0, "verdict": -1}
+    target_off_dispatch = {"kind": ord("X"), "count": 6, "instances": 1,
+                           "sites": [target_dispatch["sites"][0], target_off_event],
+                           "predicateFacts": [target_off_site6, target_noteligible]}
+    target_off_summary = _replay_predicate_facts(
+        target_off_dispatch, "targetsharp-v14-noteligible", 14)
+    if (target_off_summary["targetSharpFacts"] != 1 or
+            target_off_summary["targetSharpNotEligible"] != 1 or
+            target_off_summary["targetSharpReplayed"] != 1 or
+            target_off_summary["mismatches"]):
+        print("TargetSharp v14 not-eligible trace lost independent mask evidence")
+        return 1
+    bad_noteligible = json.loads(json.dumps(target_noteligible))
+    bad_noteligible["inputs"]["outerSharp"] = {
+        "reached": False, "known": True, "value": None}
+    try:
+        _target_sharp_fact(bad_noteligible, target_draw,
+                           "targetsharp-noteligible-malformed", False)
+    except TraceError:
+        pass
+    else:
+        print("TargetSharp NotEligible accepted malformed unread-read envelope")
+        return 1
+    bad_skipped_eye = json.loads(json.dumps(lazy_decline))
+    bad_skipped_eye["inputs"]["outerSharp"]["value"] = False
+    bad_skipped_eye["inputs"]["outerFailed"] = {
+        "reached": False, "known": False, "value": None}
+    bad_skipped_eye["eyeSize"]["depthW"] = 8
+    try:
+        _target_sharp_fact(bad_skipped_eye, target_draw,
+                           "targetsharp-skipped-eye-mutant", True)
+    except TraceError:
+        pass
+    else:
+        print("TargetSharp lazy decline accepted consumed dimensions in skipped eye helper")
+        return 1
+    unknown_target = json.loads(json.dumps(lazy_decline))
+    for name in unknown_target["inputs"]:
+        unknown_target["inputs"][name] = {
+            "reached": False, "known": False, "value": None}
+    unknown_target["inputs"]["outerSharp"] = {
+        "reached": True, "known": False, "value": None}
+    missing_outer_target = json.loads(json.dumps(unknown_target))
+    missing_outer_target["inputs"]["outerSharp"]["reached"] = False
+    try:
+        _target_sharp_fact(missing_outer_target, target_draw,
+                           "targetsharp-missing-first-read", True)
+    except TraceError:
+        pass
+    else:
+        print("TargetSharp invoked handler accepted an unconsumed first read")
+        return 1
+    if _target_sharp_fact(unknown_target, target_draw,
+                          "targetsharp-unknown", True) != (None, False):
+        print("TargetSharp reached-unknown input became a selector result")
+        return 1
+    target_unknown_dispatch = json.loads(json.dumps(target_lazy_dispatch))
+    target_unknown_dispatch["predicateFacts"][1] = unknown_target
+    unknown_summary = _replay_predicate_facts(
+        target_unknown_dispatch, "targetsharp-v14-unknown", 14)
+    if (unknown_summary["targetSharpUnreplayable"] != 1 or
+            unknown_summary["targetSharpReplayed"] or
+            unknown_summary["targetSharpMismatches"]):
+        print("TargetSharp reached-unknown input was not reported as unavailable")
+        return 1
+    target_mutations = []
+    shape_miss = json.loads(json.dumps(target))
+    shape_miss_draw = {"kind": ord("N"), "count": 6, "instances": 1}
+    for name in target["inputs"]:
+        shape_miss["inputs"][name] = {"reached": False, "known": False,
+                                       "value": None}
+    shape_miss["eyeSize"] = {"reached": "unknown", "statePresent": "unknown",
+                              "result": "unknown", "readMask": 0,
+                              "depthW": 0, "depthH": 0, "eyeW": 0,
+                              "eyeH": 0, "renderW": 0, "renderH": 0}
+    for name, value in (("outerSharp", True), ("outerFailed", False),
+                        ("helperSharp", True), ("helperFailed", False)):
+        shape_miss["inputs"][name] = {"reached": True, "known": True,
+                                      "value": value}
+    target_mutations.append((shape_miss, shape_miss_draw))
+    for name, value in (("outerSharp", False), ("outerFailed", True),
+                        ("helperSharp", False), ("helperFailed", True),
+                        ("srv0Present", False), ("srv0Resolved", False),
+                        ("srv0Texture2D", False), ("aux1Present", True),
+                        ("aux2Present", True), ("aux3Present", True),
+                        ("vsPresent", False), ("queriedShaderHash", 1),
+                        ("configuredShaderHash", 1)):
+        mutant = json.loads(json.dumps(target))
+        mutant["inputs"][name]["value"] = value
+        target_mutations.append((mutant, target_draw))
+    eye_mutant = json.loads(json.dumps(target))
+    eye_mutant["eyeSize"]["result"] = "yes"
+    target_mutations.append((eye_mutant, target_draw))
+    dimension_mutant = json.loads(json.dumps(target))
+    dimension_mutant["eyeSize"].update({"reached": "yes", "statePresent": "yes",
+                                       "result": "no", "readMask": 31,
+                                       "depthW": 2048, "depthH": 1024,
+                                       "eyeW": 1920, "eyeH": 0,
+                                       "renderW": 1920, "renderH": 0})
+    dimension_mutant["inputs"]["srv0Width"]["value"] = 1920
+    dimension_mutant["eyeSize"].update({"result": "yes", "readMask": 15,
+                                        "depthW": 1920, "eyeW": 1920,
+                                        "eyeH": 1024})
+    for name in ("aux1Present", "aux2Present", "aux3Present", "vsPresent",
+                 "queriedShaderHash", "configuredShaderHash"):
+        dimension_mutant["inputs"][name] = {"reached": False, "known": False,
+                                              "value": None}
+    target_mutations.append((dimension_mutant, target_draw))
+    for mutant, mutant_draw in target_mutations:
+        try:
+            derived, eye_mismatch = _target_sharp_fact(
+                mutant, mutant_draw, "targetsharp-mutant", True)
+        except TraceError:
+            continue
+        if derived is True and not eye_mismatch:
+            print("TargetSharp mutation retained a claimed selector without evidence")
+            return 1
+    try:
+        null_resolve = json.loads(json.dumps(target))
+        null_resolve["inputs"]["srv0Present"]["value"] = False
+        _target_sharp_fact(null_resolve, target_draw, "targetsharp-null-resolve", True)
+    except TraceError:
+        pass
+    else:
+        print("TargetSharp accepted a resolved null SRV0")
+        return 1
+    for old_version in range(1, 14):
+        if _replay_predicate_facts({"kind": ord("D"), "count": 0,
+                                    "instances": 1, "sites": [],
+                                    "predicateFacts": []},
+                                   "targetsharp-legacy", old_version).get("targetSharpFacts") != 0:
+            print("legacy predicate schema claimed TargetSharp availability")
+            return 1
     print("draw-ladder-replay self-test: ok")
     return 0
 

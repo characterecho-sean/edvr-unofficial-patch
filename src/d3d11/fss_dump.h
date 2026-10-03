@@ -83,6 +83,27 @@ FssDumpPredicateTestState fssDumpPredicateTestState() noexcept;
 void fssDumpPredicateTestSetState(const FssDumpPredicateTestState& state) noexcept;
 #endif
 
+#if defined(EDVR_FSS_DUMP_API_TEST)
+struct FssDumpApiTestState final {
+    std::uint32_t frame = 0;
+    bool done = false;
+    std::uint32_t seriesWant = 0;
+    bool seriesDone = false;
+    bool dumping = false;
+    std::uint32_t dumpPass = 0;
+    std::uint32_t bodyFrames = 0;
+    std::uint8_t ring = 0;
+    std::uint8_t composite = 0;
+    std::uint8_t tonemap = 0;
+    std::uint8_t accumulate = 0;
+    std::uint8_t output = 0;
+    std::uint32_t pendingKind = 0;
+    std::uint32_t pendingEye = 0;
+};
+FssDumpApiTestState fssDumpApiTestState() noexcept;
+void fssDumpApiTestSetState(const FssDumpApiTestState& state) noexcept;
+#endif
+
 void fssDumpBegin(ID3D11DeviceContext* ctx);
 void fssDumpEnd(ID3D11DeviceContext* ctx);
 

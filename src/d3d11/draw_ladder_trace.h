@@ -12,6 +12,7 @@
 #include "fss_observation.h"
 #include "remlok_observation.h"
 #include "sunglare_observation.h"
+#include "target_sharp_observation.h"
 
 #include <atomic>
 #include <cstdint>
@@ -44,13 +45,15 @@ constexpr std::uint8_t kMaxLoaderPanelFactsPerDraw = 1;
 constexpr std::uint32_t kMaxLoaderPanelFacts = 32768;
 constexpr std::uint8_t kMaxFssDumpFactsPerDraw = 1;
 constexpr std::uint32_t kMaxFssDumpFacts = 32768;
+constexpr std::uint8_t kMaxTargetSharpFactsPerDraw = 1;
+constexpr std::uint32_t kMaxTargetSharpFacts = 32768;
 constexpr std::uint8_t kMaxForwardingFactsPerDraw = 1;
 constexpr std::uint32_t kMaxForwardingFacts = kMaxDraws;
 constexpr std::uint8_t kMaxTotalPredicateFactsPerDraw =
     kMaxPredicateFactsPerDraw + kMaxSunglareFactsPerDraw +
     kMaxFssFactsPerDraw + kMaxRemlokFactsPerDraw + kMaxBasicFactsPerDraw +
     kMaxEyeCensusFactsPerDraw + kMaxResolveBindFactsPerDraw + kMaxLoaderPanelFactsPerDraw +
-    kMaxFssDumpFactsPerDraw;
+    kMaxFssDumpFactsPerDraw + kMaxTargetSharpFactsPerDraw;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -86,6 +89,8 @@ enum class CaptureInvalidation : std::uint8_t {
     FssDumpPoolMissing = 17,
     ForwardingIndexOverflow = 18,
     ForwardingPoolMissing = 19,
+    TargetSharpIndexOverflow = 20,
+    TargetSharpPoolMissing = 21,
 };
 
 // Returned by shutdown() so production can report whether an armed or partial
@@ -316,6 +321,7 @@ void appendResolveBindFact(Token token, const ResolveBindObservation& fact) noex
 void appendLoaderPanelFact(Token token, const LoaderPanelObservation& fact) noexcept;
 void appendFssDumpFact(Token token, const FssDumpObservation& fact) noexcept;
 void appendForwardingFact(Token token, const ForwardingObservation& fact) noexcept;
+void appendTargetSharpFact(Token token, const TargetSharpObservation& fact) noexcept;
 #if defined(EDVR_VSCREEN_PREDICATE_TEST)
 bool readEyeCensusFactForTest(Token token, std::uint8_t ordinal, EyeCensusObservation* out) noexcept;
 std::uint8_t eyeCensusFactCountForTest(Token token) noexcept;
@@ -329,6 +335,8 @@ bool readFssDumpFactForTest(Token token, std::uint8_t ordinal, FssDumpObservatio
 std::uint8_t fssDumpFactCountForTest(Token token) noexcept;
 bool readForwardingFactForTest(Token token, std::uint8_t ordinal, ForwardingObservation* out) noexcept;
 std::uint8_t forwardingFactCountForTest(Token token) noexcept;
+bool readTargetSharpFactForTest(Token token, std::uint8_t ordinal, TargetSharpObservation* out) noexcept;
+std::uint8_t targetSharpFactCountForTest(Token token) noexcept;
 std::uint16_t actionCountForTest(Token token) noexcept;
 bool readActionForTest(Token token, std::uint16_t ordinal, std::uint16_t* actionId,
                        draw_ladder::ActionRecord* out) noexcept;
@@ -434,6 +442,9 @@ struct TracePolicy final {
     }
     inline void forwardInputs(const ForwardingObservation& fact) noexcept {
         appendForwardingFact(token, fact);
+    }
+    inline void targetSharpFact(const TargetSharpObservation& fact) noexcept {
+        appendTargetSharpFact(token, fact);
     }
 };
 
