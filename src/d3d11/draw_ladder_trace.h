@@ -16,7 +16,7 @@ namespace edvr::draw_ladder_trace {
 constexpr std::uint32_t kMaxDraws = 65536;
 constexpr std::uint16_t kMaxSiteEventsPerDraw = 48;
 constexpr std::uint16_t kMaxActionEventsPerDraw = 32;
-constexpr std::uint8_t kMaxPredicateFactsPerDraw = 3;
+constexpr std::uint8_t kMaxPredicateFactsPerDraw = 4;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -94,6 +94,7 @@ enum class PredicateFactKind : std::uint8_t {
     DrawGateWanted = 1,
     EyeRangeSkip = 2,
     NightVisionClaim = 3,
+    WitchspaceStarsSkip = 4,
 };
 
 struct PredicateRange final {
@@ -130,6 +131,23 @@ struct PredicateFact final {
     std::uint8_t callbackMode = 0;
     TriState failedKnown = TriState::Unknown;
     TriState failed = TriState::Unknown;
+    // WitchspaceStarsSkip source inputs and the observed single-call hash.
+    // The cached interest mask validates whether the ladder staged the site;
+    // it is not used as the frozen helper's selector oracle.
+    TriState interestMaskKnown = TriState::Unknown;
+    std::uint64_t legacyInterestMask = 0;
+    TriState starsHelperReached = TriState::Unknown;
+    TriState hiddenKnown = TriState::Unknown;
+    TriState hidden = TriState::Unknown;
+    TriState contextKnown = TriState::Unknown;
+    TriState contextValid = TriState::Unknown;
+    TriState starsShapeReached = TriState::Unknown;
+    TriState starsShapeMatched = TriState::Unknown;
+    TriState starsHashKnown = TriState::Unknown;
+    std::uint8_t starsHashSource = 0;
+    std::uint64_t starsVsHash = 0;
+    bool starsSkippedDeltaKnown = false;
+    std::uint32_t starsSkippedDelta = 0;
     bool detailsFinalized = false;  // internal capture validity; not serialized
 };
 
@@ -209,6 +227,7 @@ void appendAction(Token token, std::uint16_t id,
 void recordForwardFacts(Token token, const ForwardFacts& facts) noexcept;
 void appendPredicateFact(Token token, const PredicateFact& fact) noexcept;
 void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept;
+void completeWitchspaceStarsFact(Token token, const PredicateFact& fact) noexcept;
 void updateCandidates(Token token, std::uint64_t mask) noexcept;
 void updateRoute(Token token, draw_ladder::RouteId route,
                  draw_ladder::SequenceId sequence) noexcept;
@@ -269,6 +288,10 @@ struct TracePolicy final {
 
     inline void completePredicateFact(const PredicateFact& fact) noexcept {
         completeNightVisionFact(token, fact);
+    }
+
+    inline void completeWitchspaceStarsPredicateFact(const PredicateFact& fact) noexcept {
+        completeWitchspaceStarsFact(token, fact);
     }
 };
 

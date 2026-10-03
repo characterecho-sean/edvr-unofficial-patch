@@ -2002,6 +2002,52 @@ struct VScreenDrawLadderVisitor {
                                          draw_ladder::FirstLegacyInterestSite>) {
                 legacyInterestMask = pluginRegistryDrawInterestMask();
             }
+            if constexpr (TracePolicy::enabled &&
+                          SiteType::id == draw_ladder::SiteId::kWitchspaceStarsSkip) {
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(SiteType::id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::WitchspaceStarsSkip;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.interestMaskKnown = draw_ladder_trace::TriState::Yes;
+                fact.legacyInterestMask = legacyInterestMask;
+                const bool interested = draw_interest::contains(
+                    legacyInterestMask, SiteType::interestId);
+                if (!interested) {
+                    // The frozen helper was staged out. These raw, cheap
+                    // inputs can still prove its short-circuit false cases;
+                    // no shader query is made when the helper did not run.
+                    fact.starsHelperReached = draw_ladder_trace::TriState::No;
+                    fact.hiddenKnown = draw_ladder_trace::TriState::Yes;
+                    fact.hidden = witchspaceStarsHidden()
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No;
+                    fact.contextKnown = draw_ladder_trace::TriState::Yes;
+                    fact.contextValid = self
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No;
+                    if (fact.hidden == draw_ladder_trace::TriState::Yes &&
+                        fact.contextValid == draw_ladder_trace::TriState::Yes) {
+                        fact.starsShapeReached = draw_ladder_trace::TriState::Yes;
+                        fact.starsShapeMatched =
+                            ((kind == 'X' || kind == 'N') && instances != 0 && count >= 6)
+                                ? draw_ladder_trace::TriState::Yes
+                                : draw_ladder_trace::TriState::No;
+                        if (fact.starsShapeMatched == draw_ladder_trace::TriState::Yes &&
+                            bindingGet(BindSlot::Vs)) {
+                            const std::uint64_t held = bindingShaderHash(BindSlot::Vs);
+                            if (held != 0) {
+                                fact.starsHashKnown = draw_ladder_trace::TriState::Yes;
+                                fact.starsHashSource = static_cast<std::uint8_t>(
+                                    WitchspaceStarsHashSource::kBindingShadow);
+                                fact.starsVsHash = held;
+                            }
+                        }
+                    }
+                    fact.detailsFinalized = true;
+                }
+                trace.predicateFact(fact);
+                return interested;
+            }
             return draw_interest::contains(legacyInterestMask,
                                            SiteType::interestId);
         } else {
@@ -2111,7 +2157,52 @@ struct VScreenDrawLadderVisitor {
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kWitchspaceStarsSkip) {
-            if (witchspaceStarsHidden() && witchspaceStarsSkip(self, kind, count, instances)) {
+            bool skipped = false;
+            if constexpr (TracePolicy::enabled) {
+                WitchspaceStarsObservation observation{};
+                skipped = witchspaceStarsSkipTraced(self, kind, count, instances,
+                                                    &observation);
+                draw_ladder_trace::PredicateFact fact{};
+                fact.siteId = static_cast<std::uint16_t>(id);
+                fact.kind = draw_ladder_trace::PredicateFactKind::WitchspaceStarsSkip;
+                fact.known = draw_ladder_trace::TriState::Yes;
+                fact.interestMaskKnown = draw_ladder_trace::TriState::Yes;
+                fact.legacyInterestMask = legacyInterestMask;
+                fact.starsHelperReached = draw_ladder_trace::TriState::Yes;
+                fact.hiddenKnown = draw_ladder_trace::TriState::Yes;
+                fact.hidden = observation.hidden
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::No;
+                fact.contextKnown = observation.contextKnown
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.contextValid = observation.contextKnown
+                    ? (observation.contextValid
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No)
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.starsShapeReached = observation.shapeReached
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.starsShapeMatched = observation.shapeReached
+                    ? (observation.shapeMatched
+                        ? draw_ladder_trace::TriState::Yes
+                        : draw_ladder_trace::TriState::No)
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.starsHashKnown = observation.hashKnown
+                    ? draw_ladder_trace::TriState::Yes
+                    : draw_ladder_trace::TriState::Unknown;
+                fact.starsHashSource = static_cast<std::uint8_t>(observation.hashSource);
+                fact.starsVsHash = observation.vsHash;
+                fact.starsSkippedDeltaKnown = observation.skippedDeltaKnown;
+                fact.starsSkippedDelta = observation.skippedDelta;
+                fact.detailsFinalized = true;
+                trace.completeWitchspaceStarsPredicateFact(fact);
+            } else {
+                skipped = witchspaceStarsHidden() &&
+                          witchspaceStarsSkip(self, kind, count, instances);
+            }
+            if (skipped) {
                 if (drawCensusArmed()) drawCensusNoteUnseen('w');
                 return exited(id, DrawVerdict::kSkip);
             }

@@ -44,8 +44,8 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  exact API site masks are not reported yet. Three predicate families pass;
-  whole-ladder equivalence stays open. Site 6 and cost coverage are next.
+  exact API masks are absent from that flight. Site 6 and cost notes pass all
+  130 jobs. Whole-ladder equivalence stays open; Steam stays on `4350a281`.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
   Earlier matched NV visual checks ruled out migration-induced blur because
@@ -1159,3 +1159,51 @@ must observe the actual fallback VS hash when the binding shadow is absent or
 zero; repeating its query or treating cached zero as a known miss is invalid.
 Exposure coverage requires an actual-production-path rig before acceptance.
 No Phase 2 migration starts until the open replay and performance gates pass.
+
+### Stars source facts and bounded API coverage, 2026-10-02
+
+Predicate-fact version 3 adds Witchspace Stars site 6. Its independent reader
+uses the frozen `14a7ff70` hidden flag, context, X/N shape, count/instances and
+consumed VS hash `9AEC596A2B036EA6`. Interest masks only check staging
+consistency. The armed helper reports its existing binding-shadow or
+VSGetShader fallback input without repeating the query. A staged-out helper can
+prove cheap false cases; a missing fallback input stays unavailable. The
+observed skipped-counter delta must agree with the independent selector. The
+ordinary helper and its call path retain their previous behavior.
+
+The focused writer/reader matrix passes 44 draws and 95 supported matches,
+including 28 Stars and 18 NV facts, with no unavailable inputs, mismatches or
+unobserved mutations. Initial failures caught fixture defects: NV defaults
+overwrote the Stars hash, the expected terminal order omitted the Stars exit,
+and the VR-None fixture omitted its cold NotEligible fact. These were repaired
+without changing the production selector or weakening the reader. The actual
+ordinary and traced Stars helpers pass 116 parity checks, including fallback
+query/lookup/release counts and exactly-once counter changes. Version 1/2
+historical captures still replay; they provide no production site 6 proof.
+
+Exposure attribution covers only the damper's six direct-context API sites, IDs
+96-101. Notes count issued calls, including a failed Map attempt, rather than
+eligible paths. A WARP rig runs the actual production function and State
+through a narrow test-only compile seam. Its 31 checks cover declines, readback
+creation/copy, Map success/failure, Unmap, both writes and sampling guards.
+This verifies attribution; it does not test damping numerics or complete
+Exposure coverage. Completed-window reports now publish both existing API mask
+words, and the collector rig checks a high-word ID.
+
+The guarded NoTrace/NoCpu body remains byte-identical to the saved reference:
+7,057 bytes, 94 calls, 288-byte stack, SHA-256
+`2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40`. This bounds
+the ordinary-path change; it is not a performance comparison with `14a7ff70`.
+Full validation passes. Its first attempt compiled the production DLLs,
+then the import safety scanner rejected the Stars rig's unneeded
+`/NODEFAULTLIB:d3d11.lib` token. The safety gate stays intact. Focused native
+runs overlapped despite their build locks; the coordinator serialized the
+remaining native checks before starting full validation.
+
+The normal build passed 123 pooled jobs (153.7 seconds) and seven quiet jobs
+(26.4 seconds), both production profiles, both self-contained installers and
+the 237-key config contract. FocusWatch saw no shown window, opened console or
+foreground change. Receipt UTC is `2026-10-03T01:15:19.034091+00:00`, input
+SHA-256 `d06382c4056f60fbad234330ab5aeebbc7e43d976ef456d8015600c47654dc7d`;
+log: `build/plugin-stars-cost-full-build.log`. Steam remains on the verified
+`4350a281` flight build. No new production capture or performance win is claimed.

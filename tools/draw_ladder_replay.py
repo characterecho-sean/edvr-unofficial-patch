@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 2
+PREDICATE_FACT_VERSION = 3
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -183,13 +183,171 @@ def _legacy14a_night_vision(fact, draw):
     return failed == "no"
 
 
+def _candidate_witchspace_stars(fact, draw):
+    """Candidate selector from raw helper inputs, independent of site output."""
+    if fact["hiddenKnown"] != "yes":
+        return None
+    if fact["hidden"] == "no":
+        return False
+    if fact["contextKnown"] != "yes":
+        return None
+    if fact["contextValid"] == "no":
+        return False
+    if fact["shapeReached"] != "yes":
+        return None
+    if (draw["kind"] not in (ord("X"), ord("N")) or
+            draw["instances"] == 0 or draw["count"] < 6):
+        return False
+    if fact["hashKnown"] != "yes":
+        return None
+    return fact["vsHash"].upper() == "9AEC596A2B036EA6"
+
+
+def _legacy14a_witchspace_stars(fact, draw):
+    """Frozen 14a helper semantics; zero/absent shadow uses captured fallback."""
+    if fact["hiddenKnown"] != "yes":
+        return None
+    if fact["hidden"] != "yes":
+        return False
+    if fact["contextKnown"] != "yes":
+        return None
+    if fact["contextValid"] != "yes":
+        return False
+    if fact["shapeReached"] != "yes":
+        return None
+    if (draw["kind"] != ord("X") and draw["kind"] != ord("N")):
+        return False
+    if draw["instances"] == 0 or draw["count"] < 6:
+        return False
+    if fact["hashKnown"] != "yes":
+        return None
+    return fact["vsHash"].upper() == "9AEC596A2B036EA6"
+
+
+def _replay_witchspace_stars_fact(fact, draw, label):
+    required = {"siteId", "kind", "known", "interestMaskKnown", "legacyInterestMask",
+                "helperReached", "hiddenKnown", "hidden", "contextKnown", "contextValid",
+                "shapeReached", "shapeMatched", "hashKnown", "hashSource", "vsHash",
+                "skippedDeltaKnown", "skippedDelta"}
+    if set(fact) != required:
+        raise TraceError(label + " has missing or unexpected witchspace-star fields")
+    tri_fields = ("interestMaskKnown", "helperReached", "hiddenKnown", "hidden",
+                  "contextKnown", "contextValid", "shapeReached", "shapeMatched",
+                  "hashKnown")
+    if any(fact.get(key) not in TRI_STATES for key in tri_fields):
+        raise TraceError(label + " has an invalid witchspace-star tri-state")
+    if fact["known"] != "yes" or fact["interestMaskKnown"] != "yes":
+        raise TraceError(label + " lacks the reached interest-mask input")
+    mask_text = fact["legacyInterestMask"]
+    if not isinstance(mask_text, str) or not re.match(r"^[0-9A-Fa-f]{16}$", mask_text):
+        raise TraceError(label + ".legacyInterestMask must be sixteen hex digits")
+    mask = int(mask_text, 16)
+    if mask >> 8:
+        raise TraceError(label + " legacy interest mask carries unknown IDs")
+    interested = bool(mask & (1 << 1))
+    if fact["helperReached"] != ("yes" if interested else "no"):
+        raise TraceError(label + " helper stage disagrees with the consumed interest mask")
+    hash_source = _integer(fact.get("hashSource"), label + ".hashSource", 0, 3)
+    hash_text = fact.get("vsHash")
+    if not isinstance(hash_text, str) or not re.match(r"^[0-9A-Fa-f]{16}$", hash_text):
+        raise TraceError(label + ".vsHash must be sixteen hex digits")
+    hash_known = fact["hashKnown"] == "yes"
+    if hash_known != (hash_source != 0) or (not hash_known and int(hash_text, 16) != 0):
+        raise TraceError(label + " hash availability/source/value disagree")
+    if hash_known and (hash_source not in (1, 2, 3)):
+        raise TraceError(label + " has an invalid consumed hash source")
+    if ((hash_source == 1 and int(hash_text, 16) == 0) or
+            (hash_source == 2 and int(hash_text, 16) != 0)):
+        raise TraceError(label + " hash source is inconsistent with its consumed value")
+    if not interested and hash_known and hash_source != 1:
+        raise TraceError(label + " an uninvoked helper cannot claim a fallback hash")
+    delta_known = fact.get("skippedDeltaKnown")
+    if type(delta_known) is not bool:
+        raise TraceError(label + ".skippedDeltaKnown is invalid")
+    delta = _integer(fact.get("skippedDelta"), label + ".skippedDelta", 0, 1)
+    if not interested and (delta_known or delta != 0):
+        raise TraceError(label + " an uninvoked helper cannot report a counter delta")
+
+    hidden_known = fact["hiddenKnown"] == "yes"
+    hidden = fact["hidden"]
+    context_known = fact["contextKnown"] == "yes"
+    context_valid = fact["contextValid"]
+    shape_reached = fact["shapeReached"] == "yes"
+    shape_matched = fact["shapeMatched"]
+    if not hidden_known and hidden != "unknown":
+        raise TraceError(label + " unknown hidden state carries a value")
+    if hidden_known and hidden not in ("yes", "no"):
+        raise TraceError(label + " known hidden state lacks its boolean value")
+    if not context_known and context_valid != "unknown":
+        raise TraceError(label + " unknown context validity carries a value")
+    if context_known and context_valid not in ("yes", "no"):
+        raise TraceError(label + " known context validity is missing")
+    if not shape_reached and shape_matched != "unknown":
+        raise TraceError(label + " unreached shape carries a value")
+    if fact["shapeReached"] == "no":
+        raise TraceError(label + " shape stage cannot be explicitly marked unreached")
+    if shape_reached:
+        if hidden != "yes" or context_valid != "yes":
+            raise TraceError(label + " shape was recorded before hidden/context gates passed")
+        expected_shape = (draw["kind"] in (ord("X"), ord("N")) and
+                          draw["instances"] > 0 and draw["count"] >= 6)
+        if shape_matched != ("yes" if expected_shape else "no"):
+            raise TraceError(label + " captured shape disagrees with draw inputs")
+    if interested:
+        if not delta_known:
+            raise TraceError(label + " invoked helper lacks its counter mutation observation")
+        if not hidden_known or hidden not in ("yes", "no"):
+            raise TraceError(label + " invoked helper lacks the consumed hidden flag")
+        if hidden == "no" and (context_known or shape_reached or hash_known):
+            raise TraceError(label + " hidden short-circuit carries later helper inputs")
+        if hidden == "yes" and not context_known:
+            raise TraceError(label + " hidden helper stage lacks context validity")
+        if context_valid == "no" and (shape_reached or hash_known):
+            raise TraceError(label + " null-context short-circuit carries later inputs")
+        if context_valid == "yes" and not shape_reached:
+            raise TraceError(label + " valid context lacks the consumed shape inputs")
+        if shape_reached and shape_matched == "no" and hash_known:
+            raise TraceError(label + " shape miss carries a VS hash")
+        if shape_reached and shape_matched == "yes" and not hash_known:
+            raise TraceError(label + " matched shape lacks the consumed VS hash")
+    else:
+        if not hidden_known or not context_known:
+            raise TraceError(label + " staged-out site lacks cheap hidden/context facts")
+        if hidden == "yes" and context_valid == "yes" and not shape_reached:
+            raise TraceError(label + " staged-out site lacks the counterfactual shape inputs")
+        if hash_known and not (hidden == "yes" and context_valid == "yes" and
+                               shape_reached and shape_matched == "yes" and
+                               hash_source == 1):
+            raise TraceError(label + " staged-out hash was not consumed before eligibility")
+
+    normalized = dict(fact)
+    normalized["vsHash"] = hash_text
+    candidate = _candidate_witchspace_stars(normalized, draw)
+    legacy = _legacy14a_witchspace_stars(normalized, draw)
+    if candidate != legacy:
+        raise TraceError(label + " candidate differs from frozen 14a selector")
+    if interested:
+        expected_event = None if legacy is None else (
+            {"id": 6, "kind": 2, "outcome": 4, "flow": 1,
+             "subsite": 0, "verdict": 2} if legacy else
+            {"id": 6, "kind": 2, "outcome": 2, "flow": 0,
+             "subsite": 0, "verdict": -1})
+        expected_delta = (1 if legacy else 0) if legacy is not None else None
+    else:
+        expected_event = {"id": 6, "kind": 2, "outcome": 5,
+                          "flow": 0, "subsite": 0, "verdict": -1}
+        expected_delta = None
+    return expected_event, expected_delta, delta_known, delta, legacy
+
+
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 3 if predicate_fact_version >= 2 else 2
+    maximum = 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = (3, 49, 50) if predicate_fact_version >= 2 else (3, 49)
+    supported_ids = ((3, 6, 49, 50) if predicate_fact_version >= 3 else
+                     (3, 49, 50) if predicate_fact_version >= 2 else (3, 49))
     expected = {event["id"] for event in draw["sites"] if event["id"] in supported_ids}
     by_site = {}
     for index, fact in enumerate(facts):
@@ -197,10 +355,14 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
         if not isinstance(fact, dict):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
-        kind = _integer(fact.get("kind"), fact_label + ".kind", 1, 3 if predicate_fact_version >= 2 else 2)
+        kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        4 if predicate_fact_version >= 3 else
+                        3 if predicate_fact_version >= 2 else 2)
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
-        if ((site_id, kind) not in ((3, 1), (49, 2), (50, 3))):
+        supported_pairs = ((3, 1), (6, 4), (49, 2), (50, 3)) if predicate_fact_version >= 3 else (
+            (3, 1), (49, 2), (50, 3)) if predicate_fact_version >= 2 else ((3, 1), (49, 2))
+        if (site_id, kind) not in supported_pairs:
             raise TraceError(fact_label + " has an unsupported site/kind pair")
         known = fact.get("known")
         if known not in TRI_STATES:
@@ -329,6 +491,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             by_site[site_id] = (expected_event, expected_delta, True, 0,
                                 cache_mismatches,
                                 legacy_claim)
+        elif kind == 4:
+            expected_event, expected_delta, delta_known, observed_delta, legacy_claim = \
+                _replay_witchspace_stars_fact(fact, draw, fact_label)
+            by_site[site_id] = (expected_event, expected_delta, delta_known,
+                                observed_delta, 0, legacy_claim)
         elif kind == 1:
             if set(fact) != {"siteId", "kind", "known", "gateWanted"}:
                 raise TraceError(fact_label + " has unexpected draw-gate fields")
@@ -383,7 +550,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind != 3:
+        if kind not in (3, 4):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -396,11 +563,14 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     nv_replayed = 0
     nv_unreplayable = 0
     nv_mismatches = 0
+    stars_replayed = 0
+    stars_unreplayable = 0
+    stars_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
         site_unreplayable = expected_event is None or (
-            site_id == 50 and legacy_claim is None)
+            site_id in (6, 50) and legacy_claim is None)
         if site_unreplayable:
             unreplayable += 1
         actual = next(event for event in draw["sites"] if event["id"] == site_id)
@@ -428,6 +598,21 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                     nv_mismatches += 1
                 else:
                     nv_replayed += 1
+        if site_id == 6:
+            if site_unreplayable:
+                stars_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                stars_replayed += 1
+            else:
+                stars_mismatches += 1
+            if expected_delta is not None:
+                if not delta_known:
+                    mutation_unobserved += 1
+                elif expected_delta != observed_delta:
+                    mismatches += 1
+                    stars_mismatches += 1
         if site_id == 49 and expected_delta is not None:
             if not delta_known:
                 mutation_unobserved += 1
@@ -439,7 +624,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "nightVisionFacts": sum(1 for site_id in by_site if site_id == 50),
             "nightVisionReplayed": nv_replayed,
             "nightVisionUnreplayable": nv_unreplayable,
-            "nightVisionMismatches": nv_mismatches}
+            "nightVisionMismatches": nv_mismatches,
+            "witchspaceStarsFacts": sum(1 for site_id in by_site if site_id == 6),
+            "witchspaceStarsReplayed": stars_replayed,
+            "witchspaceStarsUnreplayable": stars_unreplayable,
+            "witchspaceStarsMismatches": stars_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -457,7 +646,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -523,7 +712,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "mutationUnobserved": 0, "nightVisionFacts": 0,
                         "nightVisionReplayed": 0,
                         "nightVisionUnreplayable": 0,
-                        "nightVisionMismatches": 0}
+                        "nightVisionMismatches": 0,
+                        "witchspaceStarsFacts": 0,
+                        "witchspaceStarsReplayed": 0,
+                        "witchspaceStarsUnreplayable": 0,
+                        "witchspaceStarsMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -822,6 +1015,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                                "mismatch" if predicate_replay["nightVisionMismatches"] else
                                "unreplayable" if predicate_replay["nightVisionUnreplayable"] else
                                "replayed"),
+            witchspaceStarsStatus=("unavailable-v1-or-v2" if predicate_fact_version < 3 else
+                                   "not-visited" if not predicate_replay["witchspaceStarsFacts"] else
+                                   "mismatch" if predicate_replay["witchspaceStarsMismatches"] else
+                                   "unreplayable" if predicate_replay["witchspaceStarsUnreplayable"] else
+                                   "replayed"),
             **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -829,7 +1027,10 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
              "mismatches": 0, "mutationUnobserved": 0,
              "predicateFactVersion": 0, "nightVisionStatus": "unavailable-v1",
              "nightVisionFacts": 0, "nightVisionReplayed": 0,
-             "nightVisionUnreplayable": 0, "nightVisionMismatches": 0}),
+             "nightVisionUnreplayable": 0, "nightVisionMismatches": 0,
+             "witchspaceStarsStatus": "unavailable-v1-or-v2",
+             "witchspaceStarsFacts": 0, "witchspaceStarsReplayed": 0,
+             "witchspaceStarsUnreplayable": 0, "witchspaceStarsMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -886,6 +1087,14 @@ def format_summary(summary, sidecar_path=None):
                      (replay["nightVisionStatus"], replay["nightVisionFacts"],
                       replay["nightVisionReplayed"], replay["nightVisionUnreplayable"],
                       replay["nightVisionMismatches"]))
+    if replay.get("witchspaceStarsStatus", "unavailable-v1-or-v2") == "unavailable-v1-or-v2":
+        lines.append("  WitchspaceStarsSkip site 6: unavailable before predicate fact version 3")
+    else:
+        lines.append("  WitchspaceStarsSkip site 6: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay["witchspaceStarsStatus"], replay.get("witchspaceStarsFacts", 0),
+                      replay.get("witchspaceStarsReplayed", 0),
+                      replay.get("witchspaceStarsUnreplayable", 0),
+                      replay.get("witchspaceStarsMismatches", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -911,9 +1120,9 @@ def _fixture():
         "predicateFactVersion": PREDICATE_FACT_VERSION,
         "buildVersion": "fixture",
         "buildStamp": "1234ABCD", "logFile": "edvr_gfx_20261001_010203.log",
-        "semantics": {"equivalence": "observed-selector-and-action-order",
+            "semantics": {"equivalence": "observed-selector-and-action-order",
                       "predicateEquivalence": False,
-                      "predicateNote": "hidden predicates are not reevaluated",
+                      "predicateNote": "only declared fact families are independently replayed",
                       "identityNote": "opaque ordinals", "flagBits": FLAG_BITS},
         "frame": {"frameNo": 12, "completedFrameNo": 12, "configEpoch": 1,
                   "eyeDrawsThisFrame": 1, "eyeDrawsLastFrame": 0,
@@ -1010,7 +1219,15 @@ def self_test():
     d["winnerSiteId"] = 43
     d["verdict"] = 7
     d["predicateFacts"] = [{"siteId": 3, "kind": 1, "known": "yes",
-                            "gateWanted": "yes"}]
+                            "gateWanted": "yes"}, {
+        "siteId": 6, "kind": 4, "known": "yes", "interestMaskKnown": "yes",
+        "legacyInterestMask": "%016X" % (1 << 1), "helperReached": "yes",
+        "hiddenKnown": "yes", "hidden": "no", "contextKnown": "unknown",
+        "contextValid": "unknown", "shapeReached": "unknown",
+        "shapeMatched": "unknown", "hashKnown": "unknown", "hashSource": 0,
+        "vsHash": "0000000000000000", "skippedDeltaKnown": True,
+        "skippedDelta": 0,
+    }]
     mask = (1 << 14) - 1
     d["forwardFacts"] = {
         "presentMask": mask, "verdictOrdinal": 7, "family": 3,
@@ -1103,6 +1320,13 @@ def self_test():
             draw["candidateMask"] = "%016X" % (1 << 1)
         draw["predicateFacts"] = [
             {"siteId": 3, "kind": 1, "known": "yes", "gateWanted": "yes"},
+            {"siteId": 6, "kind": 4, "known": "yes", "interestMaskKnown": "yes",
+             "legacyInterestMask": "%016X" % (1 << 1), "helperReached": "yes",
+             "hiddenKnown": "yes", "hidden": "no", "contextKnown": "unknown",
+             "contextValid": "unknown", "shapeReached": "unknown",
+             "shapeMatched": "unknown", "hashKnown": "unknown", "hashSource": 0,
+             "vsHash": "0000000000000000", "skippedDeltaKnown": True,
+             "skippedDelta": 0},
             {"siteId": 49, "kind": 2, "known": known,
              "eyeDrawIndex": eye_index, "ranges": ranges if known != "unknown" else [],
              "censusSkippedDeltaKnown": known != "unknown",
@@ -1117,6 +1341,52 @@ def self_test():
                 "shapeMatched": "yes", "callbackReached": "yes",
                 "callbackModeKnown": "yes", "callbackMode": 2,
                 "failedKnown": "yes", "failed": "no"})
+        return trace
+
+    def stars_trace(interested=True, kind="X", count=6, instances=1,
+                    hidden="yes", context_valid="yes", hash_known=True,
+                    hash_source=3, vs_hash="0000000000000000", claimed=False):
+        trace = json.loads(json.dumps(vr))
+        draw = trace["draws"][0]
+        draw["kind"] = ord(kind)
+        draw["command"] = DRAW_COMMANDS[ord(kind)]
+        draw["count"] = count
+        draw["instances"] = instances
+        shape_match = (kind in ("X", "N") and instances > 0 and count >= 6)
+        fact = {
+            "siteId": 6, "kind": 4, "known": "yes", "interestMaskKnown": "yes",
+            "legacyInterestMask": "%016X" % ((1 << 1) if interested else 0),
+            "helperReached": "yes" if interested else "no",
+            "hiddenKnown": "yes", "hidden": hidden,
+            "contextKnown": "yes" if hidden == "yes" else
+                ("yes" if not interested else "unknown"),
+            "contextValid": context_valid if hidden == "yes" else
+                ("yes" if not interested else "unknown"),
+            "shapeReached": "yes" if hidden == "yes" and context_valid == "yes" else "unknown",
+            "shapeMatched": ("yes" if shape_match else "no")
+                if hidden == "yes" and context_valid == "yes" else "unknown",
+            "hashKnown": "yes" if hash_known and hidden == "yes" and
+                context_valid == "yes" and shape_match else "unknown",
+            "hashSource": hash_source if hash_known and hidden == "yes" and
+                context_valid == "yes" and shape_match else 0,
+            "vsHash": vs_hash if hash_known and hidden == "yes" and
+                context_valid == "yes" and shape_match else "0000000000000000",
+            "skippedDeltaKnown": interested,
+            "skippedDelta": int(claimed) if interested else 0,
+        }
+        draw["predicateFacts"] = [f for f in draw["predicateFacts"] if f["siteId"] != 6]
+        draw["predicateFacts"].append(fact)
+        event = next(site for site in draw["sites"] if site["id"] == 6)
+        if not interested:
+            event.update(outcome=5, flow=0, subsite=0, verdict=-1)
+        elif claimed:
+            event.update(outcome=4, flow=1, subsite=0, verdict=2)
+            draw["sites"] = draw["sites"][:draw["sites"].index(event) + 1]
+            draw["winnerSiteId"] = 6
+            draw["verdict"] = 2
+            draw["forwardFacts"] = None
+        else:
+            event.update(outcome=2, flow=0, subsite=0, verdict=-1)
         return trace
 
     try:
@@ -1147,10 +1417,98 @@ def self_test():
         old_v2_site50["predicateFactVersion"] = 1
         old_v2_site50["draws"][0]["predicateFacts"] = [
             fact for fact in old_v2_site50["draws"][0]["predicateFacts"]
-            if fact["siteId"] != 50]
+            if fact["siteId"] not in (6, 50)]
         old_v2_summary = validate_trace(old_v2_site50)
         if old_v2_summary["predicateReplay"]["nightVisionStatus"] != "unavailable-v1":
             raise TraceError("v2/factVersion1 site50 capture did not remain readable and NV-unavailable")
+        old_fact_v2 = range_trace(4, [], selector_cases[3][2])
+        old_fact_v2["predicateFactVersion"] = 2
+        old_fact_v2["draws"][0]["predicateFacts"] = [
+            fact for fact in old_fact_v2["draws"][0]["predicateFacts"]
+            if fact["siteId"] != 6]
+        old_fact_v2_summary = validate_trace(old_fact_v2)
+        if (old_fact_v2_summary["predicateReplay"]["nightVisionStatus"] != "replayed" or
+                old_fact_v2_summary["predicateReplay"]["witchspaceStarsStatus"] !=
+                "unavailable-v1-or-v2"):
+            raise TraceError("predicate fact version 2 capture did not retain NV and report site 6 unavailable")
+        stars_cases = [
+            (stars_trace(hidden="no"), "replayed"),
+            (stars_trace(hidden="yes", context_valid="no"), "replayed"),
+            (stars_trace(kind="D", hidden="yes"), "replayed"),
+            (stars_trace(count=5, hidden="yes"), "replayed"),
+            (stars_trace(kind="N", instances=0, hidden="yes"), "replayed"),
+            (stars_trace(hidden="yes", hash_source=3,
+                         vs_hash="0000000000000000"), "replayed"),
+            (stars_trace(hidden="yes", hash_source=2,
+                         vs_hash="0000000000000000"), "replayed"),
+            # The cached binding hash is zero, so the helper falls back; only
+            # this captured lookup result can independently prove the hit.
+            (stars_trace(hidden="yes", hash_source=3,
+                         vs_hash="9AEC596A2B036EA6", claimed=True), "replayed"),
+            (stars_trace(kind="N", hidden="yes", hash_source=3,
+                         vs_hash="9AEC596A2B036EA6", claimed=True), "replayed"),
+            (stars_trace(hidden="yes", hash_source=1,
+                         vs_hash="9AEC596A2B036EA6", claimed=True), "replayed"),
+            # Interest is staging only. A known cached miss replays the false
+            # selector; an uncaptured fallback cannot be coerced into a miss.
+            (stars_trace(interested=False, hidden="no"), "replayed"),
+            (stars_trace(interested=False, hidden="yes", hash_known=True,
+                         hash_source=1, vs_hash="0000000000000001"), "replayed"),
+            (stars_trace(interested=False, hidden="yes", hash_known=False), "unreplayable"),
+        ]
+        for star_trace, expected_status in stars_cases:
+            star_summary = validate_trace(star_trace)["predicateReplay"]
+            if star_summary["witchspaceStarsStatus"] != expected_status:
+                raise TraceError("witchspace-star selector fixture did not report %s: %r" %
+                                 (expected_status, star_summary))
+        stars_claim_mismatch = stars_trace(hidden="yes", hash_source=1,
+                                           vs_hash="9AEC596A2B036EA6")
+        stars_claim_mismatch_summary = validate_trace(stars_claim_mismatch)
+        if (stars_claim_mismatch_summary["predicateReplay"]["witchspaceStarsStatus"] != "mismatch" or
+                predicate_replay_gate_failure(stars_claim_mismatch_summary) is None):
+            raise TraceError("witchspace-star selector mismatch passed replay gate")
+        mutation_mismatch = stars_trace(hidden="yes", hash_source=1,
+                                       vs_hash="9AEC596A2B036EA6", claimed=True)
+        mutation_mismatch["draws"][0]["predicateFacts"][-1]["skippedDelta"] = 0
+        mutation_summary = validate_trace(mutation_mismatch)
+        if (mutation_summary["predicateReplay"]["witchspaceStarsStatus"] != "mismatch" or
+                predicate_replay_gate_failure(mutation_summary) is None):
+            raise TraceError("witchspace-star skipped-counter mismatch passed replay gate")
+        for bad_key, bad_value in (("hidden", "unknown"),
+                                   ("hashSource", 1),
+                                   ("hashSource", 2)):
+            malformed = stars_trace(hidden="yes", hash_source=1,
+                                    vs_hash="0000000000000001")
+            malformed["draws"][0]["predicateFacts"][-1][bad_key] = bad_value
+            if bad_key == "hashSource" and bad_value == 1:
+                malformed["draws"][0]["predicateFacts"][-1]["vsHash"] = "0000000000000000"
+            elif bad_key == "hashSource" and bad_value == 2:
+                malformed["draws"][0]["predicateFacts"][-1]["vsHash"] = "0000000000000001"
+            try:
+                validate_trace(malformed)
+            except TraceError:
+                continue
+            raise TraceError("malformed witchspace-star input provenance was accepted")
+        missing_stars = json.loads(json.dumps(vr))
+        missing_stars["draws"][0]["predicateFacts"] = [
+            fact for fact in missing_stars["draws"][0]["predicateFacts"]
+            if fact["siteId"] != 6]
+        try:
+            validate_trace(missing_stars)
+        except TraceError:
+            pass
+        else:
+            raise TraceError("visited WitchspaceStars site without its v3 fact was accepted")
+        duplicate_stars = json.loads(json.dumps(vr))
+        duplicate_stars["draws"][0]["predicateFacts"].append(
+            next(fact for fact in duplicate_stars["draws"][0]["predicateFacts"]
+                 if fact["siteId"] == 6))
+        try:
+            validate_trace(duplicate_stars)
+        except TraceError:
+            pass
+        else:
+            raise TraceError("duplicate WitchspaceStars site facts were accepted")
         gate_off = json.loads(json.dumps(vr))
         gate_off_draw = gate_off["draws"][0]
         gate_off_draw["sites"] = gate_off_draw["sites"][:3]
@@ -1231,6 +1589,13 @@ def self_test():
     gated_draw["forwardFacts"] = None
     gated_draw["predicateFacts"] = [
         {"siteId": 3, "kind": 1, "known": "yes", "gateWanted": "yes"},
+        {"siteId": 6, "kind": 4, "known": "yes", "interestMaskKnown": "yes",
+         "legacyInterestMask": "0000000000000000", "helperReached": "no",
+         "hiddenKnown": "yes", "hidden": "no", "contextKnown": "yes",
+         "contextValid": "no", "shapeReached": "unknown",
+         "shapeMatched": "unknown", "hashKnown": "unknown", "hashSource": 0,
+         "vsHash": "0000000000000000", "skippedDeltaKnown": False,
+         "skippedDelta": 0},
         {"siteId": 49, "kind": 2, "known": "yes", "eyeDrawIndex": 1,
          "ranges": [], "censusSkippedDeltaKnown": True,
          "censusSkippedDelta": 0},

@@ -1242,6 +1242,12 @@ void perfMonitorFrame(ID3D11Device* dev) {
                     static_cast<double>(owner.apiCalls[4]) / apiSampleFrames,
                     countMaskBits(owner.apiSiteMask[0]) + countMaskBits(owner.apiSiteMask[1]),
                     static_cast<unsigned long long>(pluginCostWindow.completedApiSampleFrames));
+                Log::get().note(
+                    "plugin cost API sites: %s; IDs 0-63=0x%016llX, IDs 64-127=0x%016llX; %u distinct annotated call-site IDs. Word 0 covers IDs 0-63 and word 1 covers IDs 64-127; bits are indexed by stable site ID.",
+                    ownerName,
+                    static_cast<unsigned long long>(owner.apiSiteMask[0]),
+                    static_cast<unsigned long long>(owner.apiSiteMask[1]),
+                    countMaskBits(owner.apiSiteMask[0]) + countMaskBits(owner.apiSiteMask[1]));
             }
         }
     }

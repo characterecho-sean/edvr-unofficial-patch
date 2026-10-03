@@ -23,6 +23,7 @@
 #include "flat_temporal.h"  // flat discovery and capture-only dispatch forwarding
 #include "vr_world_route.h"  // g_vrWorldInternal: the VR world route's own dispatches pass straight through
 #include "../common/runtime_profile.h"
+#include "../common/plugin_cost.h"
 #include "gpu_frame_timing.h"
 #include "fss_dump.h"     // the reconstruction bracket, round 30
                           // writers through THIS module's Dispatch hook,
@@ -32,6 +33,36 @@
 
 namespace edvr {
 namespace {
+
+// Direct-context API sites owned by the exposure damper. Keep these outside
+// the NV and CockpitVisuals ranges in the shared fixed coverage mask.
+enum class ExposureApiSite : uint16_t {
+    DampGetDevice = 96,
+    DampCopyReadback = 97,
+    DampMapReadback = 98,
+    DampUnmapReadback = 99,
+    DampWriteFirstEye = 100,
+    DampWriteSecondEye = 101,
+};
+
+constexpr uint16_t exposureApiSite(ExposureApiSite site) noexcept {
+    return static_cast<uint16_t>(site);
+}
+static_assert(exposureApiSite(ExposureApiSite::DampGetDevice) == 96 &&
+              exposureApiSite(ExposureApiSite::DampWriteSecondEye) == 101 &&
+              exposureApiSite(ExposureApiSite::DampWriteSecondEye) <
+                  EDVR_PLUGIN_COST_MAX_SITE_ID &&
+              exposureApiSite(ExposureApiSite::DampGetDevice) <
+                  exposureApiSite(ExposureApiSite::DampCopyReadback) &&
+              exposureApiSite(ExposureApiSite::DampCopyReadback) <
+                  exposureApiSite(ExposureApiSite::DampMapReadback) &&
+              exposureApiSite(ExposureApiSite::DampMapReadback) <
+                  exposureApiSite(ExposureApiSite::DampUnmapReadback) &&
+              exposureApiSite(ExposureApiSite::DampUnmapReadback) <
+                  exposureApiSite(ExposureApiSite::DampWriteFirstEye) &&
+              exposureApiSite(ExposureApiSite::DampWriteFirstEye) <
+                  exposureApiSite(ExposureApiSite::DampWriteSecondEye),
+              "Exposure API site IDs are stable and unique.");
 
 // ID3D11DeviceContext vtable indices.
 //
@@ -332,6 +363,7 @@ BindSlot uavSlot(uint32_t i) {
     return static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::CsUav0) + i);
 }
 
+#if !defined(EDVR_EXPOSURE_DAMP_TEST)
 uint64_t hashOf(void* shader) {
     if (!shader || !g_state || !g_state->lockReady) return 0;
     uint64_t out = 0;
@@ -414,6 +446,8 @@ void shareExposure(ID3D11DeviceContext* ctx, ID3D11UnorderedAccessView* const* f
 // queue this frame's strip readback, consume last frame's, filter, and
 // write the damped strip over both eyes' copies -- after the passes,
 // before the tonemaps at frame end that read it.
+#endif  // !EDVR_EXPOSURE_DAMP_TEST
+
 void exposureDamp(ID3D11DeviceContext* ctx,
                   ID3D11UnorderedAccessView* firstEyeStrip) {
     State* s = g_state;
@@ -471,8 +505,18 @@ void exposureDamp(ID3D11DeviceContext* ctx,
         return;
     }
 
+    // Sample only after the damper's early declines. The false path adds one
+    // existing owner/context/frame check per eligible invocation and no D3D
+    // queries, clocks, or allocations.
+    const bool costSample = edvrPluginCostApiSampleContext(ctx) != 0;
     if (!s->dampStaging[0]) {
         ID3D11Device* dev = nullptr;
+        if (costSample) {
+            edvrPluginCostNoteD3dCall(
+                static_cast<uint8_t>(plugin_cost::Owner::Exposure),
+                exposureApiSite(ExposureApiSite::DampGetDevice),
+                static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+        }
         ctx->GetDevice(&dev);
         if (!dev) {
             resB->Release();
@@ -500,16 +544,34 @@ void exposureDamp(ID3D11DeviceContext* ctx,
     // freshly derived parameters, so the filter runs on the measurement
     // and never chews its own output.
     const int prev = s->dampCur ^ 1;
+    if (costSample) {
+        edvrPluginCostNoteD3dCall(
+            static_cast<uint8_t>(plugin_cost::Owner::Exposure),
+            exposureApiSite(ExposureApiSite::DampCopyReadback),
+            static_cast<uint8_t>(plugin_cost::ApiClass::Transfer));
+    }
     ctx->CopyResource(s->dampStaging[s->dampCur], resB);
     s->dampCur ^= 1;
 
     if (s->dampPrevValid) {
         D3D11_MAPPED_SUBRESOURCE m{};
+        if (costSample) {
+            edvrPluginCostNoteD3dCall(
+                static_cast<uint8_t>(plugin_cost::Owner::Exposure),
+                exposureApiSite(ExposureApiSite::DampMapReadback),
+                static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
+        }
         if (SUCCEEDED(ctx->Map(s->dampStaging[prev], 0, D3D11_MAP_READ, 0,
                                &m)) &&
             m.pData) {
             float raw[kStripW];
             memcpy(raw, m.pData, sizeof(raw));
+            if (costSample) {
+                edvrPluginCostNoteD3dCall(
+                    static_cast<uint8_t>(plugin_cost::Owner::Exposure),
+                    exposureApiSite(ExposureApiSite::DampUnmapReadback),
+                    static_cast<uint8_t>(plugin_cost::ApiClass::Transfer));
+            }
             ctx->Unmap(s->dampStaging[prev], 0);
 
             bool sane = raw[kDampGainTexel] > kDampGainFloor;
@@ -575,9 +637,21 @@ void exposureDamp(ID3D11DeviceContext* ctx,
                 }
                 const UINT pitch = kStripW * 4;
                 if (resA) {
+                    if (costSample) {
+                        edvrPluginCostNoteD3dCall(
+                            static_cast<uint8_t>(plugin_cost::Owner::Exposure),
+                            exposureApiSite(ExposureApiSite::DampWriteFirstEye),
+                            static_cast<uint8_t>(plugin_cost::ApiClass::Transfer));
+                    }
                     ctx->UpdateSubresource(resA, 0, nullptr, out, pitch, 0);
                 }
                 if (resB != resA) {
+                    if (costSample) {
+                        edvrPluginCostNoteD3dCall(
+                            static_cast<uint8_t>(plugin_cost::Owner::Exposure),
+                            exposureApiSite(ExposureApiSite::DampWriteSecondEye),
+                            static_cast<uint8_t>(plugin_cost::ApiClass::Transfer));
+                    }
                     ctx->UpdateSubresource(resB, 0, nullptr, out, pitch, 0);
                 }
                 ++s->dampWrites;
@@ -601,6 +675,7 @@ void exposureDamp(ID3D11DeviceContext* ctx,
     resB->Release();
 }
 
+#if !defined(EDVR_EXPOSURE_DAMP_TEST)
 // Does the bound UAV set look like per-eye exposure state?
 //
 // Slot 0 is a small structured buffer holding the luminance range; slot 1 is a
@@ -1490,4 +1565,7 @@ void shutdownExposureFix() {
     }
 }
 
+#else
+}  // namespace
+#endif  // !EDVR_EXPOSURE_DAMP_TEST
 }  // namespace edvr

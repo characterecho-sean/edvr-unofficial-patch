@@ -70,6 +70,31 @@ inline bool witchspaceStarsHidden() { return detail::g_particleHideStars; }
 bool witchspaceStarsSkip(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                          uint32_t instances);
 
+// Trace-only observation of the same helper evaluation. The ordinary draw
+// path continues to call witchspaceStarsSkip above; this result exposes only
+// inputs already consumed by the armed path, including a fallback VS hash.
+enum class WitchspaceStarsHashSource : std::uint8_t {
+    kUnknown = 0,
+    kBindingShadow = 1,
+    kFallbackNoShader = 2,
+    kFallbackShaderLookup = 3,
+};
+struct WitchspaceStarsObservation final {
+    bool hidden = false;
+    bool contextKnown = false;
+    bool contextValid = false;
+    bool shapeReached = false;
+    bool shapeMatched = false;
+    bool hashKnown = false;
+    WitchspaceStarsHashSource hashSource = WitchspaceStarsHashSource::kUnknown;
+    std::uint64_t vsHash = 0;
+    bool skippedDeltaKnown = false;
+    std::uint32_t skippedDelta = 0;
+};
+bool witchspaceStarsSkipTraced(ID3D11DeviceContext* ctx, char kind,
+                               uint32_t count, uint32_t instances,
+                               WitchspaceStarsObservation* observation);
+
 // The matched draw, for the verdict chain: this draw is a particle
 // billboard AND a substitute is ready to bind.
 bool particleOnDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,

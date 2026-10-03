@@ -688,6 +688,9 @@ bool collectorChecks() {
                                       static_cast<uint8_t>(pc::ApiClass::State));
             edvrPluginCostNoteD3dCall(static_cast<uint8_t>(pc::Owner::CockpitVisuals), 24,
                                       static_cast<uint8_t>(pc::ApiClass::Instrumentation));
+            // Pin the high API-site word used by the completed-window report.
+            edvrPluginCostNoteD3dCall(static_cast<uint8_t>(pc::Owner::CockpitVisuals), 72,
+                                      static_cast<uint8_t>(pc::ApiClass::State));
         }
 
         completed = edvrPluginCostFrameBoundary(frame, cpu ? 1 : 0, 1, 1, 0, &window);
@@ -719,12 +722,13 @@ bool collectorChecks() {
     ok &= check(cockpit.apiObserved == 1 && cockpit.apiCalls[static_cast<uint8_t>(pc::ApiClass::ReadQuery)] == 2 &&
                 cockpit.apiCalls[static_cast<uint8_t>(pc::ApiClass::Work)] == 1 &&
                 cockpit.apiCalls[static_cast<uint8_t>(pc::ApiClass::Transfer)] == 1 &&
-                cockpit.apiCalls[static_cast<uint8_t>(pc::ApiClass::State)] == 1 &&
+                cockpit.apiCalls[static_cast<uint8_t>(pc::ApiClass::State)] == 2 &&
                 cockpit.apiCalls[static_cast<uint8_t>(pc::ApiClass::Instrumentation)] == 1 &&
                 cockpit.apiSiteMask[0] == ((uint64_t{1} << 20) | (uint64_t{1} << 21) |
                                            (uint64_t{1} << 22) | (uint64_t{1} << 23) |
-                                           (uint64_t{1} << 24)),
-                "API calls are counted once without CPU sampling scale");
+                                           (uint64_t{1} << 24)) &&
+                cockpit.apiSiteMask[1] == (uint64_t{1} << (72 - 64)),
+                "API calls are counted once without CPU sampling scale and aggregate site IDs across both mask words");
 
     // A separate configured window with no owner activity must not invent a
     // zero row. A reached-only owner is observed even when measured ticks are 0.

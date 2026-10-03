@@ -98,6 +98,11 @@ struct ModelVisitor final {
             return ladder::SiteResult::exited(
                 static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
         }
+        if (id == ladder::SiteId::kWitchspaceStarsSkip &&
+            id == scenario.exitAt) {
+            return ladder::SiteResult::exited(
+                static_cast<std::int16_t>(ladder::VerdictOrdinal::kSkip));
+        }
         if (kind == ladder::SiteKind::Claim && id == scenario.claimAt) {
             return ladder::SiteResult::claimed(scenario.verdict);
         }
@@ -576,6 +581,7 @@ bool frozenShouldStop(const Scenario& s, ladder::SiteId id, ladder::SiteKind kin
     if (id == ladder::SiteId::kForeignContextNone && s.foreignOwner) return true;
     if (id == ladder::SiteId::kDrawGateDisabledNone && s.drawGateOff) return true;
     if (id == ladder::SiteId::kEyeRangeSkip && id == s.exitAt) return true;
+    if (id == ladder::SiteId::kWitchspaceStarsSkip && id == s.exitAt) return true;
     if (kind == ladder::SiteKind::Claim && id == s.claimAt) return true;
     return kind == ladder::SiteKind::Exit && id == s.exitAt;
 }
@@ -925,7 +931,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     const auto terminalKind = frozenKind(terminal);
     if (terminal == ladder::SiteId::kForeignContextNone) scenario.foreignOwner = true;
     else if (terminal == ladder::SiteId::kDrawGateDisabledNone) scenario.drawGateOff = true;
-    else if (terminal == ladder::SiteId::kEyeRangeSkip) scenario.exitAt = terminal;
+    else if (terminal == ladder::SiteId::kEyeRangeSkip ||
+             terminal == ladder::SiteId::kWitchspaceStarsSkip) scenario.exitAt = terminal;
     else if (terminalKind == ladder::SiteKind::Claim) scenario.claimAt = terminal;
     else scenario.exitAt = terminal;
 
@@ -950,6 +957,10 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
     }
     facts.vsHash = 0xFCF7BD2896751D96ull;
     facts.psHash = 0xF786D34B5E118D5Eull;
+    if (terminal == ladder::SiteId::kWitchspaceStarsSkip) {
+        facts.kind = static_cast<std::uint8_t>('X');
+        facts.vsHash = 0x9AEC596A2B036EA6ull;
+    }
     facts.candidateMask = 1ull << 1;
     facts.vsIdentity = 1;
     facts.psIdentity = 2;
@@ -1007,6 +1018,30 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
             }
             fact.censusSkippedDeltaKnown = true;
             policy.predicateFact(fact);
+        } else if (visited == ladder::SiteId::kWitchspaceStarsSkip) {
+            trace::PredicateFact fact{};
+            fact.siteId = static_cast<std::uint16_t>(visited);
+            fact.kind = trace::PredicateFactKind::WitchspaceStarsSkip;
+            fact.known = trace::TriState::Yes;
+            fact.interestMaskKnown = trace::TriState::Yes;
+            fact.legacyInterestMask = (1ull << draw_interest::kInterestCount) - 1ull;
+            fact.starsHelperReached = trace::TriState::Yes;
+            fact.hiddenKnown = trace::TriState::Yes;
+            fact.hidden = terminal == ladder::SiteId::kWitchspaceStarsSkip
+                ? trace::TriState::Yes : trace::TriState::No;
+            if (fact.hidden == trace::TriState::Yes) {
+                fact.contextKnown = trace::TriState::Yes;
+                fact.contextValid = trace::TriState::Yes;
+                fact.starsShapeReached = trace::TriState::Yes;
+                fact.starsShapeMatched = trace::TriState::Yes;
+                fact.starsHashKnown = trace::TriState::Yes;
+                fact.starsHashSource = 1;
+                fact.starsVsHash = facts.vsHash;
+            }
+            fact.starsSkippedDeltaKnown = true;
+            fact.starsSkippedDelta = fact.hidden == trace::TriState::Yes ? 1 : 0;
+            fact.detailsFinalized = true;
+            policy.predicateFact(fact);
         } else if (visited == ladder::SiteId::kNightVisionClaim) {
             trace::PredicateFact fact{};
             fact.siteId = static_cast<std::uint16_t>(visited);
@@ -1044,6 +1079,17 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         !visitor.visited.empty() && visitor.visited.back() == terminal &&
         policy.token.valid() && interest.legacyMaskLoads <= 1 &&
         interest.candidateQueries <= 1 && interest.candidateLoads <= 1;
+    if (!correct) {
+        std::printf("terminal fixture mismatch: terminal=%u route=%u flow=%u "
+                    "visited=%zu expected=%zu last=%u maskLoads=%u candidateQueries=%u "
+                    "candidateLoads=%u\n",
+                    static_cast<unsigned>(terminal), static_cast<unsigned>(route),
+                    static_cast<unsigned>(flow), visitor.visited.size(), expected.size(),
+                    visitor.visited.empty() ? 0u :
+                        static_cast<unsigned>(visitor.visited.back()),
+                    interest.legacyMaskLoads, interest.candidateQueries,
+                    interest.candidateLoads);
+    }
     if (route == ladder::RouteId::kFlatRuntimeBypass) {
         if (kind == 'A') {
             appendTestIssue<ladder::ActionId::kAutoDraw>(policy,
@@ -1288,6 +1334,21 @@ bool traceWriterChecks(const char* rootArg) {
             vrPolicy.predicateFact(fact);
         }
     }
+    // Site 6 is a reached trace event even when its interest gate prevents
+    // ModelVisitor::visit. Record the fixture's cold inputs explicitly.
+    trace::PredicateFact coldStars{};
+    coldStars.siteId = static_cast<std::uint16_t>(ladder::SiteId::kWitchspaceStarsSkip);
+    coldStars.kind = trace::PredicateFactKind::WitchspaceStarsSkip;
+    coldStars.known = trace::TriState::Yes;
+    coldStars.interestMaskKnown = trace::TriState::Yes;
+    coldStars.legacyInterestMask = vrInterest.publishedInterests;
+    coldStars.starsHelperReached = trace::TriState::No;
+    coldStars.hiddenKnown = trace::TriState::Yes;
+    coldStars.hidden = trace::TriState::No;
+    coldStars.contextKnown = trace::TriState::Yes;
+    coldStars.contextValid = trace::TriState::No;
+    coldStars.detailsFinalized = true;
+    vrPolicy.predicateFact(coldStars);
     ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawEnd>(vrPolicy, [] {
         ladder::ActionRecord action;
         action.phase = ladder::ActionPhase::End;
@@ -1316,7 +1377,9 @@ bool traceWriterChecks(const char* rootArg) {
         const auto route = foreign ? ladder::RouteId::kForeignOwner
             : gate ? ladder::RouteId::kDrawGateOff : ladder::RouteId::kCommon;
         matrixOk &= writeTerminalCase(route,
-            ladder::SequenceId::kCommon, 'D', terminal, false,
+            ladder::SequenceId::kCommon,
+            terminal == ladder::SiteId::kWitchspaceStarsSkip ? 'X' : 'D',
+            terminal, false,
             kFrozenCommon, 8, ladder::CommonSequence{});
     };
     addCommon(ladder::SiteId::kForeignContextNone, true, false);
@@ -1578,6 +1641,31 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(missingNightVisionStarted && missingNightVisionToken.valid() &&
                 trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
                 "missing reached NightVisionClaim fact invalidates the capture");
+
+    const std::string unfinishedStarsDir = root + "\\unfinishedwitchspacestars";
+    const bool unfinishedStarsStarted = beginCapture(unfinishedStarsDir,
+        "edvr_gfx_unfinished_witchspace_stars.log", 32);
+    trace::DrawFacts unfinishedStarsDraw = draw;
+    unfinishedStarsDraw.route = ladder::RouteId::kCommon;
+    unfinishedStarsDraw.sequence = ladder::SequenceId::kCommon;
+    const trace::Token unfinishedStarsToken = trace::beginDraw(unfinishedStarsDraw);
+    trace::PredicateFact unfinishedStarsFact{};
+    unfinishedStarsFact.siteId = static_cast<std::uint16_t>(
+        ladder::SiteId::kWitchspaceStarsSkip);
+    unfinishedStarsFact.kind = trace::PredicateFactKind::WitchspaceStarsSkip;
+    unfinishedStarsFact.known = trace::TriState::Yes;
+    unfinishedStarsFact.interestMaskKnown = trace::TriState::Yes;
+    unfinishedStarsFact.legacyInterestMask = 1ull << 1;
+    trace::appendPredicateFact(unfinishedStarsToken, unfinishedStarsFact);
+    trace::appendSite(unfinishedStarsToken,
+        static_cast<std::uint16_t>(ladder::SiteId::kWitchspaceStarsSkip), 2,
+        2, 0, 0, -1);
+    trace::finishDraw(unfinishedStarsToken,
+        static_cast<std::int16_t>(ladder::SiteId::kWitchspaceStarsSkip), -1);
+    trace::frameEnd(32);
+    ok &= check(unfinishedStarsStarted && unfinishedStarsToken.valid() &&
+                trace::overflowed() && trace::status() == trace::Status::InvalidCapture,
+                "unfinished reached WitchspaceStars fact invalidates the capture");
 
     const std::string reloadInvalidDir = root + "\\reloadinvalid";
     const bool reloadInvalidStarted = beginCapture(reloadInvalidDir,

@@ -226,7 +226,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     const std::uint32_t stamp = moduleBuildStamp();
     bool ok = writeText(writer,
         "{\"format\":\"edvr.draw-ladder-trace\",\"schemaVersion\":2,"
-        "\"predicateFactVersion\":2,"
+        "\"predicateFactVersion\":3,"
         "\"buildVersion\":\"");
     ok = ok && writeText(writer, EDVR_VERSION_STRING);
     ok = ok && writeFmt(writer,
@@ -235,7 +235,7 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
     ok = ok && writeText(writer,
         "\"equivalence\":\"observed-selector-and-action-order\","
         "\"predicateEquivalence\":false,"
-        "\"predicateNote\":\"Predicate fact version 2 independently re-evaluates DrawGateDisabledNone, EyeRangeSkip, and the frozen 14a NightVisionClaim selector from source facts; whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
+        "\"predicateNote\":\"Predicate fact version 3 independently re-evaluates DrawGateDisabledNone, EyeRangeSkip, the frozen 14a NightVisionClaim selector, and WitchspaceStarsSkip site 6 from consumed source facts; whole-ladder predicate equivalence is not established. No extra D3D queries or constant-buffer reads were performed.\","
         "\"identityNote\":\"Resource identities are per-capture ordinals; raw pointers are never serialized.\","
         "\"flagBits\":{\"frame\":{\"pluginDispatch\":1,\"runtimeFlat\":2,\"drawGateSubscribed\":4},"
         "\"draw\":{\"pluginDispatchEnabled\":1,\"distanceEnabled\":2,\"fssHealOn\":4,\"quadSkipArmed\":8},"
@@ -336,6 +336,25 @@ bool writeTrace(Writer& writer, std::uint32_t completedFrameNo) noexcept {
                     triName(fact.shapeMatched), triName(fact.callbackReached),
                     triName(fact.callbackModeKnown), fact.callbackMode,
                     triName(fact.failedKnown), triName(fact.failed))) return false;
+            } else if (fact.kind == PredicateFactKind::WitchspaceStarsSkip) {
+                if (!writeFmt(writer,
+                    "{\"siteId\":%u,\"kind\":4,\"known\":\"%s\","
+                    "\"interestMaskKnown\":\"%s\",\"legacyInterestMask\":\"%016llX\","
+                    "\"helperReached\":\"%s\",\"hiddenKnown\":\"%s\",\"hidden\":\"%s\","
+                    "\"contextKnown\":\"%s\",\"contextValid\":\"%s\","
+                    "\"shapeReached\":\"%s\",\"shapeMatched\":\"%s\","
+                    "\"hashKnown\":\"%s\",\"hashSource\":%u,\"vsHash\":\"%016llX\","
+                    "\"skippedDeltaKnown\":%s,\"skippedDelta\":%u}",
+                    fact.siteId, triName(fact.known), triName(fact.interestMaskKnown),
+                    static_cast<unsigned long long>(fact.legacyInterestMask),
+                    triName(fact.starsHelperReached),
+                    triName(fact.hiddenKnown), triName(fact.hidden),
+                    triName(fact.contextKnown), triName(fact.contextValid),
+                    triName(fact.starsShapeReached), triName(fact.starsShapeMatched),
+                    triName(fact.starsHashKnown), fact.starsHashSource,
+                    static_cast<unsigned long long>(fact.starsVsHash),
+                    fact.starsSkippedDeltaKnown ? "true" : "false",
+                    fact.starsSkippedDelta)) return false;
             } else {
                 return false;
             }
@@ -588,6 +607,106 @@ void recordForwardFacts(Token token, const ForwardFacts& facts) noexcept {
     record.hasForwardFacts = true;
 }
 
+namespace {
+bool validWitchspaceFact(const PredicateFact& f) noexcept {
+    const auto validTri = [](TriState value) noexcept {
+        return static_cast<std::uint8_t>(value) <=
+               static_cast<std::uint8_t>(TriState::Yes);
+    };
+    if (f.siteId != 6 || f.known != TriState::Yes ||
+        f.interestMaskKnown != TriState::Yes ||
+        (f.legacyInterestMask >> 8) != 0 ||
+        !validTri(f.starsHelperReached) ||
+        !validTri(f.hiddenKnown) || !validTri(f.hidden) ||
+        !validTri(f.contextKnown) || !validTri(f.contextValid) ||
+        !validTri(f.starsShapeReached) || !validTri(f.starsShapeMatched) ||
+        !validTri(f.starsHashKnown) || f.starsHashSource > 3 ||
+        (!f.starsSkippedDeltaKnown && f.starsSkippedDelta != 0) ||
+        f.starsSkippedDelta > 1) return false;
+    if ((f.hiddenKnown == TriState::Yes &&
+         f.hidden != TriState::Yes && f.hidden != TriState::No) ||
+        (f.hiddenKnown == TriState::Unknown && f.hidden != TriState::Unknown) ||
+        (f.contextKnown == TriState::Yes &&
+         f.contextValid != TriState::Yes && f.contextValid != TriState::No) ||
+        (f.contextKnown == TriState::Unknown &&
+         f.contextValid != TriState::Unknown) ||
+        f.starsShapeReached == TriState::No ||
+        (f.starsShapeReached == TriState::Unknown &&
+         f.starsShapeMatched != TriState::Unknown) ||
+        (f.starsShapeReached == TriState::Yes &&
+         f.starsShapeMatched != TriState::Yes && f.starsShapeMatched != TriState::No))
+        return false;
+    if ((f.starsHashKnown == TriState::Unknown &&
+         (f.starsHashSource != 0 || f.starsVsHash != 0)) ||
+        (f.starsHashKnown == TriState::Yes && f.starsHashSource == 1 &&
+         f.starsVsHash == 0) ||
+        (f.starsHashKnown == TriState::Yes && f.starsHashSource == 2 &&
+         f.starsVsHash != 0)) return false;
+    const bool interested = (f.legacyInterestMask & (1ull << 1)) != 0;
+    if (!interested) {
+        const bool priorMiss = f.hidden == TriState::No ||
+                               f.contextValid == TriState::No ||
+                               f.starsShapeMatched == TriState::No;
+        const bool shapeExpected = f.hidden == TriState::Yes &&
+                                  f.contextValid == TriState::Yes;
+        const bool cachedHashKnown = f.starsHashKnown == TriState::Yes &&
+            f.starsHashSource == 1 && f.starsVsHash != 0;
+        const bool hashUnavailable = f.starsHashKnown == TriState::Unknown &&
+            f.starsHashSource == 0 && f.starsVsHash == 0;
+        return f.detailsFinalized && f.starsHelperReached == TriState::No &&
+            f.hiddenKnown == TriState::Yes &&
+            f.contextKnown == TriState::Yes &&
+            ((shapeExpected && f.starsShapeReached == TriState::Yes &&
+              (f.starsShapeMatched == TriState::Yes ||
+               f.starsShapeMatched == TriState::No)) ||
+             (!shapeExpected && f.starsShapeReached == TriState::Unknown &&
+              f.starsShapeMatched == TriState::Unknown)) &&
+            (priorMiss || f.starsShapeMatched == TriState::Yes) &&
+            (!cachedHashKnown || (shapeExpected &&
+                                  f.starsShapeMatched == TriState::Yes)) &&
+            (hashUnavailable || (f.starsShapeMatched == TriState::Yes &&
+                                 cachedHashKnown)) &&
+            !f.starsSkippedDeltaKnown;
+    }
+    if (!f.detailsFinalized) {
+        return f.starsHelperReached == TriState::Unknown &&
+            f.hiddenKnown == TriState::Unknown && f.hidden == TriState::Unknown &&
+            f.contextKnown == TriState::Unknown && f.contextValid == TriState::Unknown &&
+            f.starsShapeReached == TriState::Unknown &&
+            f.starsShapeMatched == TriState::Unknown &&
+            f.starsHashKnown == TriState::Unknown && f.starsHashSource == 0 &&
+            f.starsVsHash == 0 && !f.starsSkippedDeltaKnown;
+    }
+    if (f.starsHelperReached != TriState::Yes ||
+        f.hiddenKnown != TriState::Yes ||
+        !f.starsSkippedDeltaKnown) return false;
+    if (f.hidden == TriState::No) {
+        return f.contextKnown == TriState::Unknown &&
+            f.contextValid == TriState::Unknown &&
+            f.starsShapeReached == TriState::Unknown &&
+            f.starsShapeMatched == TriState::Unknown &&
+            f.starsHashKnown == TriState::Unknown && f.starsHashSource == 0 &&
+            f.starsVsHash == 0 && f.starsSkippedDelta == 0;
+    }
+    if (f.contextKnown != TriState::Yes) return false;
+    if (f.contextValid == TriState::No) {
+        return f.starsShapeReached == TriState::Unknown &&
+            f.starsShapeMatched == TriState::Unknown &&
+            f.starsHashKnown == TriState::Unknown && f.starsHashSource == 0 &&
+            f.starsVsHash == 0 && f.starsSkippedDelta == 0;
+    }
+    if (f.contextValid != TriState::Yes ||
+        f.starsShapeReached != TriState::Yes) return false;
+    if (f.starsShapeMatched == TriState::No) {
+        return f.starsHashKnown == TriState::Unknown && f.starsHashSource == 0 &&
+            f.starsVsHash == 0 && f.starsSkippedDelta == 0;
+    }
+    return f.starsShapeMatched == TriState::Yes &&
+        f.starsHashKnown == TriState::Yes && f.starsHashSource >= 1 &&
+        f.starsSkippedDelta <= 1;
+}
+}  // namespace
+
 void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
     if (!validToken(token)) { rejectInvalidToken(); return; }
     DrawRecord& record = g_records[token.drawIndex];
@@ -599,6 +718,8 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
         (fact.kind == PredicateFactKind::EyeRangeSkip &&
          (fact.siteId != 49 || fact.rangeCount > 4)) ||
         (fact.kind == PredicateFactKind::NightVisionClaim && fact.siteId != 50) ||
+        (fact.kind == PredicateFactKind::WitchspaceStarsSkip &&
+         !validWitchspaceFact(fact)) ||
         (fact.kind == PredicateFactKind::DrawGateWanted &&
          ((fact.known == TriState::Yes && fact.gateWanted == TriState::Unknown) ||
           (fact.known == TriState::Unknown && fact.gateWanted != TriState::Unknown))) ||
@@ -650,8 +771,9 @@ void appendPredicateFact(Token token, const PredicateFact& fact) noexcept {
             (fact.failedKnown != TriState::Yes &&
              fact.failed != TriState::Unknown))))) ||
         (fact.kind != PredicateFactKind::DrawGateWanted &&
-         fact.kind != PredicateFactKind::EyeRangeSkip &&
-         fact.kind != PredicateFactKind::NightVisionClaim)) {
+        fact.kind != PredicateFactKind::EyeRangeSkip &&
+         fact.kind != PredicateFactKind::NightVisionClaim &&
+         fact.kind != PredicateFactKind::WitchspaceStarsSkip)) {
         g_wasOverflowed = true;
         return;
     }
@@ -713,6 +835,29 @@ void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept {
     g_wasOverflowed = true;
 }
 
+void completeWitchspaceStarsFact(Token token, const PredicateFact& fact) noexcept {
+    if (!validToken(token)) { rejectInvalidToken(); return; }
+    DrawRecord& record = g_records[token.drawIndex];
+    if (record.finalized || fact.kind != PredicateFactKind::WitchspaceStarsSkip ||
+        !validWitchspaceFact(fact) || !fact.detailsFinalized) {
+        rejectInvalidToken(); return;
+    }
+    for (std::uint8_t i = 0; i < record.predicateFactCount; ++i) {
+        PredicateFact& stored = record.predicateFacts[i];
+        if (stored.siteId != 6 || stored.kind != PredicateFactKind::WitchspaceStarsSkip)
+            continue;
+        if (stored.detailsFinalized ||
+            stored.legacyInterestMask != fact.legacyInterestMask ||
+            (stored.legacyInterestMask & (1ull << 1)) == 0) {
+            g_wasOverflowed = true;
+            return;
+        }
+        stored = fact;
+        return;
+    }
+    g_wasOverflowed = true;
+}
+
 void finishDraw(Token token, std::int16_t winnerSiteId,
                 std::int16_t verdictOrdinal) noexcept {
     if (!validToken(token)) { rejectInvalidToken(); return; }
@@ -720,12 +865,13 @@ void finishDraw(Token token, std::int16_t winnerSiteId,
     if (record.finalized) { rejectInvalidToken(); return; }
     for (std::uint16_t i = 0; i < record.siteCount; ++i) {
         const std::uint16_t siteId = record.sites[i].id;
-        if (siteId != 3 && siteId != 49 && siteId != 50) continue;
+        if (siteId != 3 && siteId != 6 && siteId != 49 && siteId != 50) continue;
         bool found = false;
         for (std::uint8_t j = 0; j < record.predicateFactCount; ++j) {
             if (record.predicateFacts[j].siteId == siteId) {
                 found = true;
-                if (siteId == 50 && !record.predicateFacts[j].detailsFinalized)
+                if ((siteId == 6 || siteId == 50) &&
+                    !record.predicateFacts[j].detailsFinalized)
                     g_wasOverflowed = true;
             }
         }
