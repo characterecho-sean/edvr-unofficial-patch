@@ -45,10 +45,6 @@ inline bool flatRuntimeCameraIndependentImageSourcePair(uint64_t vs, uint64_t ps
     return vs == 0xCFA91824129ECBBCull &&
         (ps == 0xFCFAD73924BF45B9ull || ps == 0x07B3F82100F29401ull);
 }
-// experimental.flat_per_draw_lean off (flat_runtime.cpp, read at every Present): flatRuntimeObserve makes
-// every draw's record up front again, as it always did. Only for measuring what the lean path saves; the
-// produced state is the same either way.
-inline bool g_flatRuntimeEagerRecord = false;
 enum class FlatRuntimeConflict : uint32_t {
     None, Viewport, MissingDepth, DepthMismatch, CameraChange,
     CameraProvenance, ExplicitWrite, ImageCopySource, MenuCopySource, SelectorLayout,
@@ -223,7 +219,6 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         if (!made) made.emplace(flatRuntimeRecord(d, q, p.frame));
         return *made;
     };
-    if (g_flatRuntimeEagerRecord) current();
     // flatRuntimeBad with the record made only when it becomes the target's first witness.
     const auto bad = [&](FlatRuntimeTarget& target, FlatRuntimeConflict cause, const FlatContractRecord& reference) {
         if (target.firstBad.cause == FlatRuntimeConflict::None) flatRuntimeBad(target, cause, q, reference, current());

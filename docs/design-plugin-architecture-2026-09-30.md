@@ -50,8 +50,8 @@
   CPU improvement/GPU non-regression remain unresolved (section 11).
   Earlier matched NV visual checks ruled out migration-induced blur because
   verified `14a7ff70` reproduces it. Latest visual confirmation is pending.
-  Main `743c5dc0` is integrated at Sean's request; all 126 validation jobs
-  pass. The latest merged-binary flight is not a matched performance comparison.
+  Main `9361bc0d` is integrated; all 131 validation jobs pass. A new matched
+  control is needed; the latest installed-binary flight is not that comparison.
   Temporary instrument key: `advanced.draw_replay` (off by default); propose
   removing it when this arc closes, subject to Scope control. No Phase 2 yet.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
@@ -1258,3 +1258,32 @@ log: `build/plugin-offscreen-facts-full-build.log`. Remaining families,
 independent forwarding inputs, all-module cost coverage and matched performance
 comparison still gate Phase 2. A larger supported slice is being prepared
 before another headset capture.
+
+### Main integration, 2026-10-02
+
+Main `9361bc0d` is integrated into the feature branch at Sean's request; the
+feature branch remains unmerged to main. Upstream permanently keeps exact
+object motion and lazy draw-record construction and retires the two
+experimental measurement switches `experimental.temporal_aa_engine_motion` and
+`experimental.flat_per_draw_lean`. The temporal-aa manifest drops only those
+retired ownership entries; all nine plugins own the remaining 235 config keys.
+Historical measurements above retain their original source/config context. Live
+Steam settings and its installed `4350a281` build are unchanged.
+
+The first full attempt failed the unchanged terrain-checkerboard T5c
+config-reload assertion. An isolated guarded rerun passed all 188 checks and
+102 mutations without a source edit. Its replacement return is unchecked and
+failure output lacks observed version/state/toast details, so the first
+failure's cause is unresolved; no terrain behavior fix is inferred. The full
+retry passed 124 pooled jobs (141.7 seconds) and seven quiet jobs (26.6
+seconds), both production profiles and installers, and the 235-key contract.
+FocusWatch recorded no shown window, console or foreground change. Receipt UTC
+is `2026-10-03T02:24:14.451545+00:00`, input SHA-256
+`796fae12729e33074ccd34145810b793e1f98cb614c80505ab641fdb1d57d9db`; log:
+`build/plugin-main-9361-retry-full-build.log`.
+
+Future matched performance comparisons need a `9361bc0d` control with symmetric
+timed-draw instrumentation. The older control and the latest NV source-fact
+capture cannot establish this comparison. Phase 1 replay, forwarding and
+complete cost gates remain open; Holo/Scrim source-fact work is next. No Phase
+2 or shipping authorization follows from this merge.
