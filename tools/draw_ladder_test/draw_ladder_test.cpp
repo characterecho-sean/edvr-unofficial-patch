@@ -870,6 +870,68 @@ edvr::SunglareObservation sunglareFact(
     return fact;
 }
 
+template <class T>
+void fssRead(edvr::FssRead<T>& read, T value) {
+    read.reached = true;
+    read.known = true;
+    read.value = value;
+}
+
+edvr::FssObservation fssFact(edvr::FssTraceFactKind kind, bool positive,
+                             std::uint32_t frameNo) {
+    edvr::FssObservation fact{};
+    fact.kind = kind;
+    if (kind == edvr::FssTraceFactKind::kPanel) {
+        auto& p = fact.panel;
+        fssRead(p.outerEnabled, positive);
+        if (positive) {
+            fssRead(p.bodyFrame, frameNo);
+            fssRead(p.frameNo, frameNo);
+            fssRead(p.helper.enabled, true);
+            fssRead(p.helper.contextNonNull, true);
+            fssRead(p.helper.guardCallReached, true);
+            fssRead(p.helper.callbackEntered, true);
+            fssRead(p.helper.vsGetShaderCompleted, true);
+            fssRead(p.helper.lookupReached, true);
+            fssRead(p.helper.lookupCompleted, true);
+            fssRead(p.helper.assignedHash, 0xA888D51024D9798Eull);
+            fssRead(p.helper.shaderNonNull, true);
+            fssRead(p.helper.releaseReached, true);
+            fssRead(p.helper.releaseCompleted, true);
+            fssRead(p.helper.callbackCompleted, true);
+            fssRead(p.helper.guardReturned, true);
+            fssRead(p.helper.hashAfterGuard, 0xA888D51024D9798Eull);
+            fssRead(p.matchedHashBefore, 0ull);
+            fssRead(p.matchedHashAfter, 0xA888D51024D9798Eull);
+        }
+        return fact;
+    }
+    auto& p = fact.reveal;
+    fssRead(p.outerSteady, positive);
+    if (positive) {
+        fssRead(p.bodyFrame, frameNo);
+        fssRead(p.bodyFrameNo, frameNo);
+        fssRead(p.helper.steady, true);
+        fssRead(p.helper.contextNonNull, true);
+        fssRead(p.helper.guardCallReached, true);
+        fssRead(p.helper.callbackEntered, true);
+        fssRead(p.helper.vsGetShaderCompleted, true);
+        fssRead(p.helper.lookupReached, true);
+        fssRead(p.helper.lookupCompleted, true);
+        fssRead(p.helper.assignedHash, 0x953C8123AD8DC13Bull);
+        fssRead(p.helper.shaderNonNull, true);
+        fssRead(p.helper.releaseReached, true);
+        fssRead(p.helper.releaseCompleted, true);
+        fssRead(p.helper.callbackCompleted, true);
+        fssRead(p.helper.guardReturned, true);
+        fssRead(p.helper.hashAfterGuard, 0x953C8123AD8DC13Bull);
+        fssRead(p.arrivalOpen, false);
+    } else {
+        fssRead(p.outerLockstep, false);
+    }
+    return fact;
+}
+
 struct FlatBypassWriter final {
     template <class SiteType>
     ladder::SiteResult visit() {
@@ -1137,9 +1199,10 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
                        bool blocked = false, bool malformedGenerated = false,
                        edvr::SunglareTraceMode glareMode = edvr::SunglareTraceMode::kStock,
                        bool glareDamping = false, bool glareProbe = false,
-                       int glareWorld = 0) {
+                       int glareWorld = 0, std::uint32_t frameNo = 15) {
     namespace trace = edvr::draw_ladder_trace;
     const std::int16_t verdict = expectedTerminalVerdict(terminal);
+    const bool overflowBefore = trace::overflowed();
     if (verdict < 0) return false;
     Scenario scenario;
     scenario.route = route;
@@ -1171,6 +1234,15 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         facts.kind = static_cast<std::uint8_t>('N');
         facts.count = 6;
         facts.instances = (std::max)(instances, 2u);
+    }
+    if (terminal == ladder::SiteId::kFssPanelClaim) {
+        facts.kind = static_cast<std::uint8_t>('X');
+        facts.count = 6;
+        facts.instances = 1;
+    } else if (terminal == ladder::SiteId::kFssRevealClaim) {
+        facts.kind = static_cast<std::uint8_t>('N');
+        facts.count = 6;
+        facts.instances = 1;
     }
     if (terminal == ladder::SiteId::kHoloClaim) {
         facts.kind = static_cast<std::uint8_t>('X');
@@ -1355,7 +1427,8 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
             policy.predicateFact(fact);
         } else if (visited == ladder::SiteId::kHoloClaim) {
             policy.predicateFact(makeHoloPredicateFact(visited, facts,
-                terminal == ladder::SiteId::kTargetSharpClaim));
+                terminal == ladder::SiteId::kTargetSharpClaim ||
+                terminal == ladder::SiteId::kFssPanelClaim));
         } else if (visited == ladder::SiteId::kScrimClaim) {
             policy.predicateFact(makeScrimPredicateFact(visited, facts,
                 terminal == ladder::SiteId::kEyeBackdropComposite));
@@ -1372,6 +1445,13 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
             policy.sunglareFact(sunglareFact(edvr::SunglareTraceFactKind::kKind11,
                 static_cast<char>(facts.kind), facts.count, facts.instances,
                 glareMode, glareDamping, glareProbe, glareWorld));
+        }
+        if (visited == ladder::SiteId::kFssPanelClaim) {
+            policy.fssFact(fssFact(edvr::FssTraceFactKind::kPanel,
+                terminal == ladder::SiteId::kFssPanelClaim, frameNo));
+        } else if (visited == ladder::SiteId::kFssRevealClaim) {
+            policy.fssFact(fssFact(edvr::FssTraceFactKind::kReveal,
+                terminal == ladder::SiteId::kFssRevealClaim, frameNo));
         }
     }
     const std::vector<ladder::SiteId> expected = includeCommon
@@ -1457,6 +1537,9 @@ bool writeTerminalCase(ladder::RouteId route, ladder::SequenceId sequence,
         return action;
     });
     trace::finishDraw(token, static_cast<std::int16_t>(terminal), verdict);
+    if (!overflowBefore && trace::overflowed())
+        std::printf("terminal fixture first invalidation: terminal=%u route=%u\n",
+                    static_cast<unsigned>(terminal), static_cast<unsigned>(route));
     return correct;
 }
 
@@ -1665,6 +1748,14 @@ bool traceWriterChecks(const char* rootArg) {
     coldStars.contextValid = trace::TriState::No;
     coldStars.detailsFinalized = true;
     vrPolicy.predicateFact(coldStars);
+    // These typed sites were staged as NotEligible before their visitors;
+    // retain empty source payloads rather than inventing helper reads.
+    edvr::FssObservation coldPanel{};
+    coldPanel.kind = edvr::FssTraceFactKind::kPanel;
+    vrPolicy.fssFact(coldPanel);
+    edvr::FssObservation coldReveal{};
+    coldReveal.kind = edvr::FssTraceFactKind::kReveal;
+    vrPolicy.fssFact(coldReveal);
     ladder::recordAction<trace::TracePolicy, ladder::ActionId::kDrawEnd>(vrPolicy, [] {
         ladder::ActionRecord action;
         action.phase = ladder::ActionPhase::End;
@@ -1810,10 +1901,19 @@ bool traceWriterChecks(const char* rootArg) {
         ladder::SiteId::kInternalWorldBypass, false, internalSite, 1,
         ladder::InternalWorldBypassSequence{});
     trace::frameEnd(15);
+    std::ifstream matrixFile(matrixDir + "\\edvr_gfx_terminal_matrix.draw-ladder-15.json",
+                             std::ios::binary);
+    const std::string matrixJson((std::istreambuf_iterator<char>(matrixFile)),
+                                 std::istreambuf_iterator<char>());
     ok &= check(matrixOk && trace::status() == trace::Status::CompleteWritten &&
                 fileExists(matrixDir +
-                    "\\edvr_gfx_terminal_matrix.draw-ladder-15.json"),
-                "real writer records every terminal site against frozen legacy order");
+                    "\\edvr_gfx_terminal_matrix.draw-ladder-15.json") &&
+                matrixJson.find("\"predicateFactVersion\":7") != std::string::npos &&
+                matrixJson.find("\"siteId\":57,\"kind\":12") != std::string::npos &&
+                matrixJson.find("\"siteId\":58,\"kind\":13") != std::string::npos &&
+                matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":12144190660518967694}") != std::string::npos &&
+                matrixJson.find("\"assignedHash\":{\"reached\":true,\"known\":true,\"value\":10753612000489488699}") != std::string::npos,
+                "real writer records positive FSS panel and reveal source facts in canonical v7 predicateFacts");
 
     const std::string generatedInvalidDir = root + "\\generatedinvalid";
     DeleteFileA((generatedInvalidDir + "\\edvr_gfx_generated_invalid.draw-ladder-16.json").c_str());
@@ -2330,7 +2430,7 @@ bool traceWriterChecks(const char* rootArg) {
         ladder::RouteId::kVrEye, ladder::SequenceId::kVrEye, 'N',
         ladder::SiteId::kEyeNoDistanceNone, true, kFrozenEye, 31,
         ladder::VrEyeSequence{}, 2, false, false,
-        edvr::SunglareTraceMode::kStock, true, false, 0);
+        edvr::SunglareTraceMode::kStock, true, false, 0, 31);
     trace::frameEnd(31);
     const std::string sunglarePath = sunglareDir + "\\edvr_gfx_sunglare.draw-ladder-31.json";
     std::ifstream sunglareFile(sunglarePath, std::ios::binary);
@@ -2339,12 +2439,12 @@ bool traceWriterChecks(const char* rootArg) {
     ok &= check(sunglareStarted && sunglareSequenceWritten &&
                 trace::invalidationReason() == trace::CaptureInvalidation::None &&
                 fileExists(sunglarePath) &&
-                sunglareJson.find("\"predicateFactVersion\":6") != std::string::npos &&
+                sunglareJson.find("\"predicateFactVersion\":7") != std::string::npos &&
                 sunglareJson.find("\"kind\":9") != std::string::npos &&
                 sunglareJson.find("\"kind\":10") != std::string::npos &&
                 sunglareJson.find("\"kind\":11") != std::string::npos &&
                 sunglareJson.find("\"common2ClampAfter\":{\"reached\":true,\"known\":true,\"value\":0}") != std::string::npos,
-                "writer emits valid v6 facts for each visited Sunglare site with actual reset evidence");
+                "writer emits valid v7 facts for each visited Sunglare site with actual reset evidence");
     trace::DrawFacts sunglareMalformedDraw = draw;
     sunglareMalformedDraw.route = ladder::RouteId::kVrEye;
     sunglareMalformedDraw.sequence = ladder::SequenceId::kVrEye;
@@ -2453,6 +2553,110 @@ bool traceWriterChecks(const char* rootArg) {
     trace::shutdown();
     ok &= check(poolCapReported,
                 "Sunglare pool cap reports the distinct index-overflow invalidation");
+
+    trace::DrawFacts fssMalformedDraw = sunglareMalformedDraw;
+    const auto beginFssCase = [&](const char* directory, const char* log,
+                                  std::uint32_t frame) {
+        const std::string path = root + "\\" + directory;
+        return beginCapture(path, log, frame);
+    };
+    const auto appendFssSite = [](trace::Token token, std::uint16_t site) {
+        trace::appendSite(token, site,
+            static_cast<std::uint8_t>(ladder::SiteKind::Claim),
+            static_cast<std::uint8_t>(ladder::SiteOutcome::Declined),
+            static_cast<std::uint8_t>(ladder::Flow::Continue), 0, -1);
+    };
+    const auto finishFssCase = [](trace::Token token, std::uint32_t frame) {
+        trace::finishDraw(token, 72,
+            static_cast<std::int16_t>(ladder::VerdictOrdinal::kNone));
+        trace::frameEnd(frame);
+    };
+
+    bool fssMissingStarted = beginFssCase("fss_missing_fact",
+        "edvr_gfx_fss_missing.log", 40);
+    auto fssMissingToken = trace::beginDraw(fssMalformedDraw);
+    appendFssSite(fssMissingToken, 57);
+    finishFssCase(fssMissingToken, 40);
+    ok &= check(fssMissingStarted && trace::invalidationReason() ==
+                trace::CaptureInvalidation::Other,
+                "visited FSS rung without its source fact invalidates capture");
+
+    bool fssWrongStarted = beginFssCase("fss_wrong_kind",
+        "edvr_gfx_fss_wrong_kind.log", 41);
+    auto fssWrongToken = trace::beginDraw(fssMalformedDraw);
+    appendFssSite(fssWrongToken, 57);
+    edvr::FssObservation fssWrong{};
+    fssWrong.kind = static_cast<edvr::FssTraceFactKind>(99);
+    trace::appendFssFact(fssWrongToken, fssWrong);
+    finishFssCase(fssWrongToken, 41);
+    ok &= check(fssWrongStarted && trace::invalidationReason() ==
+                trace::CaptureInvalidation::Other,
+                "wrong FSS kind invalidates capture");
+
+    bool fssDuplicateStarted = beginFssCase("fss_duplicate_fact",
+        "edvr_gfx_fss_duplicate.log", 42);
+    auto fssDuplicateToken = trace::beginDraw(fssMalformedDraw);
+    trace::appendFssFact(fssDuplicateToken,
+        fssFact(edvr::FssTraceFactKind::kPanel, false, 42));
+    trace::appendFssFact(fssDuplicateToken,
+        fssFact(edvr::FssTraceFactKind::kPanel, false, 42));
+    finishFssCase(fssDuplicateToken, 42);
+    ok &= check(fssDuplicateStarted && trace::invalidationReason() ==
+                trace::CaptureInvalidation::Other,
+                "duplicate FSS fact invalidates capture");
+
+    bool fssUnfinishedStarted = beginFssCase("fss_unfinished_fact",
+        "edvr_gfx_fss_unfinished.log", 43);
+    auto fssUnfinishedToken = trace::beginDraw(fssMalformedDraw);
+    edvr::FssObservation fssUnfinished{};
+    fssUnfinished.panel.outerEnabled = {false, true, false};
+    trace::appendFssFact(fssUnfinishedToken, fssUnfinished);
+    finishFssCase(fssUnfinishedToken, 43);
+    ok &= check(fssUnfinishedStarted && trace::invalidationReason() ==
+                trace::CaptureInvalidation::Other,
+                "unreached FSS read marked known invalidates capture");
+
+    bool fssPerDrawStarted = beginFssCase("fss_per_draw_cap",
+        "edvr_gfx_fss_per_draw.log", 44);
+    auto fssPerDrawToken = trace::beginDraw(fssMalformedDraw);
+    trace::appendFssFact(fssPerDrawToken,
+        fssFact(edvr::FssTraceFactKind::kPanel, false, 44));
+    trace::appendFssFact(fssPerDrawToken,
+        fssFact(edvr::FssTraceFactKind::kReveal, false, 44));
+    trace::appendFssFact(fssPerDrawToken,
+        fssFact(edvr::FssTraceFactKind::kPanel, false, 44));
+    finishFssCase(fssPerDrawToken, 44);
+    const std::string fssPerDrawPath = root +
+        "\\fss_per_draw_cap\\edvr_gfx_fss_per_draw.draw-ladder-44.json";
+    ok &= check(fssPerDrawStarted && trace::invalidationReason() ==
+                trace::CaptureInvalidation::Other && fileExists(fssPerDrawPath),
+                "FSS per-draw cap writes an invalid sidecar for the reader gate");
+    trace::shutdown();
+
+    bool fssPoolStarted = beginFssCase("fss_pool_cap",
+        "edvr_gfx_fss_pool.log", 45);
+    bool fssPoolReachedLimit = fssPoolStarted;
+    trace::Token lastFssPoolToken{};
+    for (std::uint32_t i = 0; fssPoolReachedLimit && i < trace::kMaxDraws; ++i) {
+        trace::DrawFacts poolDraw = fssMalformedDraw;
+        poolDraw.eyeDrawIndex = i + 1;
+        const trace::Token poolToken = trace::beginDraw(poolDraw);
+        if (!poolToken.valid()) { fssPoolReachedLimit = false; break; }
+        lastFssPoolToken = poolToken;
+        trace::appendFssFact(poolToken,
+            fssFact(edvr::FssTraceFactKind::kPanel, false, 45));
+        trace::appendFssFact(poolToken,
+            fssFact(edvr::FssTraceFactKind::kReveal, false, 45));
+        if (i + 1 < trace::kMaxDraws && trace::overflowed()) fssPoolReachedLimit = false;
+    }
+    if (fssPoolReachedLimit)
+        trace::appendFssFact(lastFssPoolToken,
+            fssFact(edvr::FssTraceFactKind::kPanel, false, 45));
+    const bool fssPoolCapReported = fssPoolReachedLimit && lastFssPoolToken.valid() &&
+        trace::invalidationReason() == trace::CaptureInvalidation::FssIndexOverflow;
+    trace::shutdown();
+    ok &= check(fssPoolCapReported,
+                "FSS global pool cap reports the distinct index-overflow invalidation");
     return ok;
 }
 

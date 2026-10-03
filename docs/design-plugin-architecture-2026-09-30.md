@@ -44,8 +44,8 @@
   4032x3898 per eye. The latest NV-on flight matches that build and replays
   8,682 facts, including two positive pulse-only NV claims, with no missing
   inputs, mismatches or unobserved mutations. API owner counters are nonzero;
-  eleven selector sites have rig coverage; Sunglare facts pass all 133 validation jobs.
-  Whole-ladder equivalence stays open; Steam stays on `4350a281`.
+  thirteen selector sites have rig coverage; FSS passes all 134 validation jobs.
+  Staged-out FSS inputs remain unavailable; whole-ladder equivalence stays open.
   The timed-draw denominator works; all-module cost coverage and repeatable
   CPU improvement/GPU non-regression remain unresolved (section 11).
   Earlier matched NV visual checks ruled out migration-induced blur because
@@ -1409,3 +1409,85 @@ production flight or whole-ladder performance result is claimed. Independent
 forwarding, complete cost coverage and the matched comparison against
 integrated main `9361bc0d` remain gates before Phase 2. FSS sites 57/58 are the
 next source-fact slice; Common1 requires its own broader review.
+
+### FSS panel and reveal source facts, 2026-10-02 (validated)
+
+Predicate-fact version 7 adds sites 57/58, kinds 12/13, to the canonical
+predicate-facts array. The combined cap is eleven, with a separate two-fact
+per-draw cold pool. Caller and helper flags remain independent raw reads;
+body/jump frame reads preserve lazy unsigned subtraction and wrap. Panel
+captures actual matched-hash state before and after every invoked helper.
+Reveal reads arrival-open independently after recognition and records the
+actual uint32 counter mutation only when open. Capture adds no D3D query, clock
+or draw allocation; ordinary helpers remain unchanged against frozen
+`14a7ff70`.
+
+Both frozen helpers initialize a local hash to zero and ignore the guard's
+boolean return. Budget exhaustion or a fault before lookup assignment leaves a
+concrete zero decline. Registry absence and null shader also return zero. A
+Release fault after a matching assignment still claims. Capture distinguishes
+callback/getter/lookup/assignment/release progress; progress, guard result and
+post-guard hash are consistency observations, not selector oracles. The
+independent reader derives the effective hash from initialization plus the raw
+completed assignment.
+
+Root review repaired a missing false context observation, a panel after-state
+copied before invocation, and duplicate flag reads. Failed Luna Python checks
+escalated to the next tier, which repaired lazy body/jump availability and
+added unknown-source, malformed-stage, mutation and output-oracle mutants. The
+Luna native draft assumed the wrong COM slot. The next tier replaced it with
+SDK-typed vtables; its compile failure escalated again, and the top tier
+disabled SDK C++ descriptor helpers only in that C-interface test translation
+unit. Further checks corrected a wrapped-age fixture, a missing factory frame
+argument, an unreachable FSS row whose earlier Holo would claim, and missing
+reader accumulator fields. No predicate or coverage gate was weakened.
+
+The production-linked rig passes 505 checks, including real guard faults and
+the post-assignment Release claim. The 45-draw matrix replays 178 facts,
+including 23 FSS, with zero unavailable facts, mismatches or unobserved
+mutations. Sunglare frame 31 replays eleven facts, two FSS, with zero errors.
+All 29 wired malformed CLI captures are rejected; per-draw overflow emits an
+invalid sidecar, and the distinct global 131,072-slot cap is checked natively.
+Focused cleanup reports no nonempty-directory warning.
+
+The zero-interest frame 14 is explicitly limited: nine matches and two empty
+FSS NotEligible payloads, both unavailable, with no mismatch or unobserved
+mutation. A skipped event never proves the frozen selector would decline. The
+default reader exits 1 for this fixture. Its fixture expectation uses
+`--dry-run --expect-unreplayable 2`, requiring that exact count and zero other
+errors; malformed captures, wrong counts and incompatible arguments fail.
+Complete staged-out FSS replay still needs explicit invocation provenance and
+separately named cheap-source facts, plus validated shadow/hash provenance
+where the original would query. No successful whole-ladder result is claimed.
+
+NoTrace/NoCpu remains exactly 7,057 bytes, 1,636 listing records, 94 ordered
+calls and a 288-byte stack, with unchanged byte and call-target hashes. MSVC
+x64 measures PredicateFact 376 bytes unchanged, DrawRecord 3,872 to 3,888
+bytes, and FssObservation 296 bytes. The new pool reserves 37 MiB; record
+growth adds 1 MiB. Enabled replay reservation grows from 285.5 to 323.5 MiB,
+excluding allocator overhead. Default-disabled configuration returns before
+allocation. Pinned production predicate v1/v2 captures retain 6,821/6,237 and
+8,682 matches with zero supported errors; FSS remains unavailable in those
+older formats. Steam remains on `4350a281`.
+
+The first full build stopped after 111 of 134 jobs because Windows could not
+find the existing cockpit API batch label. The label was present and unchanged,
+with an LF-only ending in a mixed CRLF/LF batch. Canonical CRLF normalization
+and a corrected focused-wrapper environment allowed its unchanged 56 checks to
+pass. Full validation is being repeated; no cockpit source was changed.
+
+The full retry passed 127 pooled jobs (154.2 seconds) and seven quiet jobs
+(30.6 seconds), both production profiles and installers, the 235-key contract
+and all 29 expected-invalid CLI checks. FocusWatch recorded zero shown windows,
+consoles or foreground changes over 185 seconds. Receipt UTC is
+`2026-10-03T05:31:13.099293+00:00`, input SHA-256
+`bf93bad6f4905d69d9d9ab66e19be6c2f5f4c115c7a05c3ccfa3cd816c16c246`; log:
+`build/plugin-fss-full-build-retry.log`.
+
+Whole-ladder source coverage, independent forwarding and the matched
+performance gate remain open before Phase 2. The next cost slice counts
+annotated shared resolver query attempts on the registered owner thread. It
+excludes Release and cannot establish which immediate/deferred context supplied
+a resource. Configuration, shutdown, frame boundaries and ownership transfer
+retain the serialized collector lifecycle contract; worker/runtime and other
+module costs remain separate coverage gaps.

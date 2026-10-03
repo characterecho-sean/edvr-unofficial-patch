@@ -7,6 +7,7 @@
 #include <d3d11.h>
 
 #include <string>
+#include <new>
 
 #include "../common/config.h"
 #include "../common/eye_sync.h"
@@ -199,6 +200,77 @@ bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     });
     return h == kCompositeHash;
 }
+
+bool fssRevealOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                                uint32_t count, uint32_t instances,
+                                FssRevealObservation& observed) {
+    auto& h = observed.helper;
+    const bool steady = detail::g_fssRevealSteady;
+    h.steady = {true, true, steady};
+    bool lockstep = false;
+    if (!steady) {
+        lockstep = detail::g_fssRevealLockstep;
+        h.lockstep = {true, true, lockstep};
+    }
+    if ((!steady && !lockstep) ||
+        kind != 'N' || count != 6 || instances != 1) {
+        return false;
+    }
+    h.contextNonNull = {true, true, ctx != nullptr};
+    if (!ctx) return false;
+
+    uint64_t hash = 0;
+    bool callbackEntered = false;
+    bool vsGetShaderCompleted = false;
+    bool lookupReached = false;
+    bool lookupCompleted = false;
+    bool shaderNonNull = false;
+    bool releaseReached = false;
+    bool releaseCompleted = false;
+    bool callbackCompleted = false;
+    h.guardCallReached = {true, true, true};
+    const bool guardReturned = guardedBudget(g_budget, [&] {
+        callbackEntered = true;
+        ID3D11VertexShader* vs = nullptr;
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        vsGetShaderCompleted = true;
+        lookupReached = true;
+        hash = lookupShaderHash(vs);
+        lookupCompleted = true;
+        shaderNonNull = vs != nullptr;
+        if (vs) {
+            releaseReached = true;
+            vs->Release();
+            releaseCompleted = true;
+        }
+        callbackCompleted = true;
+    });
+    h.callbackEntered = {true, true, callbackEntered};
+    h.vsGetShaderCompleted = {true, true, vsGetShaderCompleted};
+    h.lookupReached = {true, true, lookupReached};
+    h.lookupCompleted = {true, true, lookupCompleted};
+    if (lookupCompleted) h.assignedHash = {true, true, hash};
+    if (lookupCompleted) h.shaderNonNull = {true, true, shaderNonNull};
+    h.releaseReached = {true, true, releaseReached};
+    h.releaseCompleted = {true, true, releaseCompleted};
+    h.callbackCompleted = {true, true, callbackCompleted};
+    h.guardReturned = {true, true, guardReturned};
+    h.hashAfterGuard = {true, true, hash};
+    return hash == kCompositeHash;
+}
+
+#if defined(EDVR_FSS_PREDICATE_TEST)
+namespace fss_predicate_test {
+void setRevealModes(bool steady, bool lockstep) noexcept {
+    detail::g_fssRevealSteady = steady;
+    detail::g_fssRevealLockstep = lockstep;
+}
+void resetRevealBudget(int remaining) noexcept {
+    g_budget.~FaultBudget();
+    new (&g_budget) FaultBudget("fssReveal", remaining);
+}
+}  // namespace fss_predicate_test
+#endif
 
 void fssRevealBegin(ID3D11DeviceContext* ctx) {
     g_engaged = false;

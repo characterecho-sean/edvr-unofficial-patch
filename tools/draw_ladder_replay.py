@@ -14,7 +14,7 @@ import tempfile
 
 FORMAT = "edvr.draw-ladder-trace"
 SCHEMA_VERSION = 2
-PREDICATE_FACT_VERSION = 6
+PREDICATE_FACT_VERSION = 7
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 MAX_DRAWS = 65536
 MAX_SITE_EVENTS = 48
@@ -512,6 +512,336 @@ def _replay_sunglare_site(fact, site_id, draw, label, source_action,
         raise TraceError(label + " site63 carries an impossible later-stage observation")
     return {"id": site_id, "kind": 2, "outcome": 2, "flow": 0,
             "subsite": 0, "verdict": -1}, mismatch, unreplayable
+
+
+def _fss_read(obj, key, label, value_type, maximum=None):
+    envelope = obj.get(key)
+    if not isinstance(envelope, dict) or set(envelope) != {"reached", "known", "value"}:
+        raise TraceError(label + "." + key + " must be a read envelope")
+    reached = envelope["reached"]
+    known = envelope["known"]
+    value = envelope["value"]
+    if type(reached) is not bool or type(known) is not bool:
+        raise TraceError(label + "." + key + " has invalid availability flags")
+    if not reached or not known:
+        if value is not None:
+            raise TraceError(label + "." + key + " unavailable value must be null")
+        if known and not reached:
+            raise TraceError(label + "." + key + " skipped read cannot be known")
+        return reached, known, None
+    if value_type is bool:
+        if type(value) is not bool:
+            raise TraceError(label + "." + key + " value must be boolean")
+    elif value_type is int:
+        if type(value) is not int or value < 0 or value > maximum:
+            raise TraceError(label + "." + key + " integer is out of range")
+    else:
+        raise TraceError(label + "." + key + " has unsupported reader type")
+    return reached, known, value
+
+
+def _fss_set_read(obj, key, label, should_reach, value_type, maximum=None,
+                  required_when_reached=True):
+    value = _fss_read(obj, key, label, value_type, maximum)
+    if should_reach is False and value[0]:
+        raise TraceError(label + "." + key + " was read past a short circuit")
+    if should_reach is True and not value[0]:
+        raise TraceError(label + "." + key + " is missing a reached source read")
+    if required_when_reached and value[0] and not value[1]:
+        raise TraceError(label + "." + key + " is unavailable")
+    return value
+
+
+def _fss_read_pair(obj, names, label, should_reach, value_type, maximum=None):
+    return {name: _fss_set_read(obj, name, label, should_reach.get(name),
+                                value_type, maximum) for name in names}
+
+
+def _replay_fss_fact(fact, draw, label):
+    site_id, kind = fact["siteId"], fact["kind"]
+    is_panel = site_id == 57
+    selector, helper, mutation = fact.get("selector"), fact.get("helper"), fact.get("mutation")
+    if not all(isinstance(item, dict) for item in (selector, helper, mutation)):
+        raise TraceError(label + " FSS selector/helper/mutation must be objects")
+    selector_fields = ({"outerEnabled", "bodyFrame", "frameNo"} if is_panel else
+                       {"outerSteady", "outerLockstep", "bodyFrame", "bodyFrameNo",
+                        "jumpFrame", "jumpFrameNo", "modeLatch"})
+    helper_fields = (({"enabled", "contextNonNull"}) if is_panel else
+                     {"steady", "lockstep", "contextNonNull"})
+    helper_fields |= {"guardCallReached", "callbackEntered", "vsGetShaderCompleted",
+                      "shaderNonNull", "lookupReached", "lookupCompleted", "assignedHash",
+                      "releaseReached", "releaseCompleted", "callbackCompleted",
+                      "guardReturned", "hashAfterGuard"}
+    mutation_fields = ({"matchedHashBefore", "matchedHashAfter"} if is_panel else
+                       {"arrivalOpen", "arrivalBefore", "arrivalAfter"})
+    if set(selector) != selector_fields or set(helper) != helper_fields or set(mutation) != mutation_fields:
+        raise TraceError(label + " FSS payload has missing or unexpected fields")
+
+    def is_skipped(envelope):
+        return (isinstance(envelope, dict) and set(envelope) == {"reached", "known", "value"}
+                and envelope["reached"] is False and envelope["known"] is False
+                and envelope["value"] is None)
+
+    if all(is_skipped(envelope) for group in (selector, helper, mutation)
+           for envelope in group.values()):
+        actual = next((event for event in draw["sites"] if event["id"] == site_id), None)
+        not_eligible = {"id": site_id, "kind": 2, "outcome": 5,
+                        "flow": 0, "subsite": 0, "verdict": -1}
+        if actual != not_eligible:
+            raise TraceError(label + " empty FSS observations require an uninvoked NotEligible site")
+        # Dispatch explains the absence of observations. It supplies no raw
+        # frozen-selector inputs, so this cannot establish a known decline.
+        return None, 0, True, False
+
+    mismatch = 0
+    unreplayable = False
+    mutation_unobserved = False
+    yes = True
+    no = False
+    u32 = 0xffffffff
+    u64 = 0xffffffffffffffff
+    tuple_match = (draw["kind"] == (ord("X") if is_panel else ord("N")) and
+                   draw["count"] == 6 and draw["instances"] == 1)
+
+    def read(group, key, reached, value_type, maximum=None, required=False):
+        nonlocal unreplayable
+        obj = selector if group == "selector" else helper if group == "helper" else mutation
+        result = _fss_set_read(obj, key, label + "." + group, reached,
+                              value_type, maximum, required)
+        if reached is None or (result[0] and not result[1]):
+            unreplayable = True
+        return result
+
+    if is_panel:
+        outer = read("selector", "outerEnabled", yes, bool)
+        body = read("selector", "bodyFrame", outer[2] if outer[1] else None, int, u32)
+        frame = read("selector", "frameNo", False if outer[2] is False else (body[2] != 0) if body[1] else None,
+                     int, u32)
+        body_fresh = None
+        if outer[1]:
+            if not outer[2] or (body[1] and body[2] == 0):
+                body_fresh = False
+            elif body[1] and frame[1]:
+                body_fresh = ((frame[2] - body[2]) & u32) <= 2
+        outer_pass = (False if outer[1] and not outer[2] else
+                      body_fresh if outer[1] else None)
+        helper_call = outer_pass
+    else:
+        steady = read("selector", "outerSteady", yes, bool)
+        lockstep = read("selector", "outerLockstep",
+                        (not steady[2]) if steady[1] else None, bool)
+        outer_wants = (steady[2] or lockstep[2]) if steady[1] and (steady[2] or lockstep[1]) else None
+        body = read("selector", "bodyFrame", outer_wants, int, u32)
+        body_frame = read("selector", "bodyFrameNo",
+                          False if outer_wants is False else (body[2] != 0) if body[1] else None, int, u32)
+        body_fresh = None
+        if body[1] and body[2] == 0:
+            body_fresh = False
+        elif body[1] and body_frame[1]:
+            body_fresh = ((body_frame[2] - body[2]) & u32) <= 2
+        jump = read("selector", "jumpFrame",
+                     False if outer_wants is False else (not body_fresh) if body_fresh is not None else None, int, u32)
+        jump_frame_reached = (False if outer_wants is False or body_fresh is True else
+                              False if jump[0] and jump[1] and jump[2] == 0 else
+                              True if jump[0] and jump[1] and jump[2] != 0 else None)
+        jump_frame = read("selector", "jumpFrameNo", jump_frame_reached, int, u32)
+        jump_fresh = None
+        if jump[1] and jump[2] == 0:
+            jump_fresh = False
+        elif jump[1] and jump_frame[1]:
+            jump_fresh = ((jump_frame[2] - jump[2]) & u32) <= 600
+        latch = read("selector", "modeLatch",
+                     False if outer_wants is False or body_fresh is True else jump_fresh if jump_fresh is not None else None, bool)
+        if body_fresh is True:
+            outer_pass = True
+        elif body_fresh is False and jump_fresh is False:
+            outer_pass = False
+        elif body_fresh is False and jump_fresh is True and latch[1]:
+            outer_pass = latch[2]
+        else:
+            outer_pass = None
+        if outer_wants is False:
+            outer_pass = False
+        elif outer_wants is None:
+            outer_pass = None
+        helper_call = outer_pass
+
+    helper_invoked = helper_call
+    if helper_call is None:
+        if is_panel:
+            read("helper", "enabled", None, bool)
+        else:
+            hsteady = read("helper", "steady", None, bool)
+            read("helper", "lockstep",
+                 (not hsteady[2]) if hsteady[1] else None, bool)
+        read("helper", "contextNonNull", None, bool)
+        helper_call = None
+        expected_hash = None
+        unreplayable = True
+    elif helper_call is False:
+        for key, typ, maximum in (("enabled" if is_panel else "steady", bool, None),
+                                  ("contextNonNull", bool, None)):
+            read("helper", key, no, typ, maximum)
+        if not is_panel:
+            read("helper", "lockstep", no, bool)
+        expected_hash = None
+    else:
+        if is_panel:
+            enabled = read("helper", "enabled", yes, bool)
+            helper_wants = enabled[2] if enabled[1] else None
+        else:
+            hsteady = read("helper", "steady", yes, bool)
+            hlock = read("helper", "lockstep",
+                         (not hsteady[2]) if hsteady[1] else None, bool)
+            helper_wants = ((hsteady[2] or hlock[2]) if hsteady[1] and
+                            (hsteady[2] or hlock[1]) else None)
+        if helper_wants is False:
+            read("helper", "contextNonNull", no, bool)
+            helper_call = False
+        else:
+            if not tuple_match:
+                read("helper", "contextNonNull", no, bool)
+                helper_call = False
+            else:
+                context = read("helper", "contextNonNull",
+                               yes if helper_wants is True else None, bool)
+                helper_call = context[2] if context[1] else None
+        if helper_call is None:
+            unreplayable = True
+        if helper_call is False:
+            expected_hash = None
+        elif helper_call is True:
+            if not is_panel:
+                # lockstep was already consumed only when steady was false.
+                pass
+            guard_call = read("helper", "guardCallReached", yes, bool)
+            if guard_call[1] and not guard_call[2]:
+                raise TraceError(label + " eligible helper skipped its guarded call")
+            statuses = ("callbackEntered", "vsGetShaderCompleted", "lookupReached",
+                        "lookupCompleted", "releaseReached", "releaseCompleted",
+                        "callbackCompleted")
+            state = {name: read("helper", name, yes, bool) for name in statuses}
+            callback = state["callbackEntered"][2]
+            vs_done = state["vsGetShaderCompleted"][2]
+            lookup_reached = state["lookupReached"][2]
+            lookup_done = state["lookupCompleted"][2]
+            release_reached = state["releaseReached"][2]
+            release_done = state["releaseCompleted"][2]
+            callback_done = state["callbackCompleted"][2]
+            assigned = read("helper", "assignedHash", lookup_done, int, u64)
+            shader = read("helper", "shaderNonNull", lookup_done, bool)
+            if callback is False and any(x is True for x in (vs_done, lookup_reached, lookup_done,
+                                     release_reached, release_done, callback_done)):
+                raise TraceError(label + " FSS callback progress lacks entry")
+            if callback is True and vs_done is False and any(x is True for x in (lookup_reached, lookup_done,
+                                                  release_reached, release_done,
+                                                  callback_done)):
+                raise TraceError(label + " FSS lookup progress lacks VS result")
+            if vs_done is True and lookup_reached is False:
+                raise TraceError(label + " completed VS read lacks lookup")
+            if lookup_reached is False and any(x is True for x in (lookup_done, release_reached, release_done)):
+                raise TraceError(label + " FSS release/lookup stages are out of order")
+            if lookup_done is True and lookup_reached is False:
+                raise TraceError(label + " completed lookup lacks lookup stage")
+            if lookup_done is True and shader[1] and release_reached is not None and release_reached != shader[2]:
+                raise TraceError(label + " Release stage disagrees with shader pointer")
+            if release_done is True and release_reached is False:
+                raise TraceError(label + " completed Release lacks a Release call")
+            if callback_done is True and (lookup_done is False or (release_reached is True and release_done is False)):
+                raise TraceError(label + " callback completion disagrees with stages")
+            if release_reached is True and release_done is True and callback_done is False:
+                raise TraceError(label + " successful Release lacks callback completion")
+            if lookup_done is True and shader[2] is False and callback_done is False:
+                raise TraceError(label + " null shader cannot fault in the skipped Release")
+            expected_hash = (assigned[2] if lookup_done is True and assigned[1] else
+                             0 if state["lookupCompleted"][1] and lookup_done is False else None)
+            if expected_hash is None:
+                unreplayable = True
+            guard_returned = read("helper", "guardReturned", yes, bool)
+            hash_after = read("helper", "hashAfterGuard", yes, int, u64)
+            # These postguard fields check instrumentation consistency only.
+            if guard_returned[1] and callback_done is not None and guard_returned[2] != callback_done:
+                mismatch += 1
+            if hash_after[1] and expected_hash is not None and hash_after[2] != expected_hash:
+                mismatch += 1
+        else:
+            expected_hash = None
+
+    if helper_call is False:
+        read("helper", "guardCallReached", no, bool)
+        for key in ("callbackEntered", "vsGetShaderCompleted", "lookupReached",
+                    "lookupCompleted", "releaseReached", "releaseCompleted",
+                    "callbackCompleted", "guardReturned"):
+            read("helper", key, no, bool)
+        read("helper", "assignedHash", no, int, u64)
+        read("helper", "shaderNonNull", no, bool)
+        read("helper", "hashAfterGuard", no, int, u64)
+
+    claim = None
+    if helper_call is not False and expected_hash is not None:
+        targets = (0xA888D51024D9798E, 0xB018D143700AB803) if is_panel else (0x953C8123AD8DC13B,)
+        claim = expected_hash in targets
+    elif helper_call is False:
+        claim = False
+    if claim is None:
+        unreplayable = True
+
+    if is_panel:
+        before = read("mutation", "matchedHashBefore", helper_invoked, int, u64)
+        after = read("mutation", "matchedHashAfter", helper_invoked, int, u64)
+        if helper_invoked is not False:
+            if not before[1] or not after[1]:
+                mutation_unobserved = True
+            elif claim is not None:
+                expected_after = expected_hash if claim else before[2]
+                if after[2] != expected_after:
+                    mismatch += 1
+    else:
+        arrival = read("mutation", "arrivalOpen", claim, bool)
+        if claim is None:
+            read("mutation", "arrivalBefore", None, int, u32)
+            read("mutation", "arrivalAfter", None, int, u32)
+        elif claim:
+            if not arrival[1]:
+                unreplayable = True
+            elif arrival[2]:
+                before = read("mutation", "arrivalBefore", yes, int, u32)
+                after = read("mutation", "arrivalAfter", yes, int, u32)
+                if not before[1] or not after[1]:
+                    mutation_unobserved = True
+                elif after[2] != ((before[2] + 1) & u32):
+                    mismatch += 1
+            else:
+                read("mutation", "arrivalBefore", no, int, u32)
+                read("mutation", "arrivalAfter", no, int, u32)
+        else:
+            read("mutation", "arrivalBefore", no, int, u32)
+            read("mutation", "arrivalAfter", no, int, u32)
+
+    # Validate every serialized envelope, including the values at stages whose
+    # reads were skipped. The branch checks above own selector reachability.
+    for group, obj, fields in (("selector", selector, selector_fields),
+                               ("helper", helper, helper_fields),
+                               ("mutation", mutation, mutation_fields)):
+        for key in fields:
+            if group == "selector":
+                maximum = u64 if key.endswith("Ms") else u32
+                value_type = bool if key in {"outerEnabled", "outerSteady", "outerLockstep", "modeLatch"} else int
+            elif group == "helper":
+                maximum = u64 if key in ("assignedHash", "hashAfterGuard") else None
+                value_type = int if key in ("assignedHash", "hashAfterGuard") else bool
+            else:
+                maximum = u64 if key.startswith("matchedHash") else u32
+                value_type = int if key != "arrivalOpen" else bool
+            _fss_read(obj, key, label + "." + group, value_type, maximum)
+
+    if unreplayable:
+        event = None
+    else:
+        event = {"id": site_id, "kind": 2, "outcome": 3 if claim else 2,
+                 "flow": 1 if claim else 0, "subsite": 0,
+                 "verdict": (11 if is_panel else 12) if claim else -1}
+    return event, mismatch, unreplayable, mutation_unobserved
 
 
 def _candidate_witchspace_stars(fact, draw):
@@ -1083,11 +1413,12 @@ def _replay_scrim_fact(fact, draw, label):
 
 def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     facts = draw.get("predicateFacts")
-    maximum = 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
+    maximum = 11 if predicate_fact_version >= 7 else 9 if predicate_fact_version >= 6 else 6 if predicate_fact_version >= 5 else 4 if predicate_fact_version >= 3 else 3 if predicate_fact_version >= 2 else 2
     if not isinstance(facts, list) or len(facts) > maximum:
         raise TraceError(label + ".predicateFacts must be a bounded array (type %s, count %s)" %
                          (type(facts).__name__, len(facts) if isinstance(facts, list) else "n/a"))
-    supported_ids = ((3, 6, 24, 26, 49, 50, 53, 55, 61, 62, 63) if predicate_fact_version >= 6 else
+    supported_ids = ((3, 6, 24, 26, 49, 50, 53, 55, 57, 58, 61, 62, 63) if predicate_fact_version >= 7 else
+                     (3, 6, 24, 26, 49, 50, 53, 55, 61, 62, 63) if predicate_fact_version >= 6 else
                      (3, 6, 24, 26, 49, 50, 53, 55) if predicate_fact_version >= 5 else
                      (3, 6, 24, 26, 49, 50) if predicate_fact_version >= 4 else
                      (3, 6, 49, 50) if predicate_fact_version >= 3 else
@@ -1103,6 +1434,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             raise TraceError(fact_label + " must be an object")
         site_id = _integer(fact.get("siteId"), fact_label + ".siteId", 1, 76)
         kind = _integer(fact.get("kind"), fact_label + ".kind", 1,
+                        13 if predicate_fact_version >= 7 else
                         11 if predicate_fact_version >= 6 else
                         8 if predicate_fact_version >= 5 else
                         6 if predicate_fact_version >= 4 else
@@ -1111,6 +1443,8 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
         if site_id in by_site:
             raise TraceError(fact_label + " duplicates a supported site fact")
         supported_pairs = ((3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
+                           (53, 7), (55, 8), (57, 12), (58, 13), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 7 else (
+            (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
                            (53, 7), (55, 8), (61, 9), (62, 10), (63, 11)) if predicate_fact_version >= 6 else (
             (3, 1), (6, 4), (24, 5), (26, 6), (49, 2), (50, 3),
                            (53, 7), (55, 8)) if predicate_fact_version >= 5 else (
@@ -1177,6 +1511,18 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                     event = None
             by_site[site_id] = (event, expected_delta,
                                 expected_delta is None, 0, cache_mismatches, None)
+        elif kind in (12, 13):
+            required = {"siteId", "kind", "known", "selector", "helper", "mutation"}
+            if set(fact) != required:
+                raise TraceError(fact_label + " has missing or unexpected FSS fields")
+            if known != "yes":
+                raise TraceError(fact_label + " FSS fact availability must be yes; individual reads carry unknowns")
+            if ((site_id, kind) != (57, 12) and (site_id, kind) != (58, 13)):
+                raise TraceError(fact_label + " has mismatched FSS site/kind")
+            event, fact_mismatches, fact_unreplayable, fact_mutation_unobserved = \
+                _replay_fss_fact(fact, draw, fact_label)
+            by_site[site_id] = (event, None, True, 0, fact_mismatches,
+                                fact_mutation_unobserved)
         elif kind == 3:
             cache_mismatches = 0
             required = {"siteId", "kind", "known", "dispatchEnabled",
@@ -1378,7 +1724,7 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
                 # observation is unavailable; report that separately below.
                 pass
             expected_event = candidate[0] if candidate is not None else None
-        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11):
+        if kind not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13):
             by_site[site_id] = (expected_event, expected_delta,
                                 fact.get("censusSkippedDeltaKnown", True),
                                 fact.get("censusSkippedDelta", 0), 0, None)
@@ -1409,6 +1755,9 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
     sunglare_replayed = 0
     sunglare_unreplayable = 0
     sunglare_mismatches = 0
+    fss_replayed = 0
+    fss_unreplayable = 0
+    fss_mismatches = 0
     for site_id, (expected_event, expected_delta, delta_known,
                   observed_delta, cache_mismatches, legacy_claim) in by_site.items():
         mismatches += cache_mismatches
@@ -1435,6 +1784,19 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             if cache_mismatches:
                 sunglare_mismatches += cache_mismatches
             if expected_delta is not None and not delta_known:
+                mutation_unobserved += 1
+        if site_id in (57, 58):
+            if site_unreplayable:
+                fss_unreplayable += 1
+            elif expected_event is not None and not any(
+                    actual[key] != expected_event[key]
+                    for key in ("id", "kind", "outcome", "flow", "subsite", "verdict")):
+                fss_replayed += 1
+            else:
+                fss_mismatches += 1
+            if cache_mismatches:
+                fss_mismatches += cache_mismatches
+            if legacy_claim:
                 mutation_unobserved += 1
         if site_id == 50:
             if site_unreplayable:
@@ -1552,7 +1914,11 @@ def _replay_predicate_facts(draw, label, predicate_fact_version=1):
             "sunglareFacts": sum(1 for site_id in by_site if site_id in (61, 62, 63)),
             "sunglareReplayed": sunglare_replayed,
             "sunglareUnreplayable": sunglare_unreplayable,
-            "sunglareMismatches": sunglare_mismatches}
+            "sunglareMismatches": sunglare_mismatches,
+            "fssFacts": sum(1 for site_id in by_site if site_id in (57, 58)),
+            "fssReplayed": fss_replayed,
+            "fssUnreplayable": fss_unreplayable,
+            "fssMismatches": fss_mismatches}
 
 
 def _integer(value, label, low=0, high=0xffffffff):
@@ -1570,7 +1936,7 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
         raise TraceError("unsupported schemaVersion")
     schema_version = data["schemaVersion"]
     if schema_version == SCHEMA_VERSION:
-        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, PREDICATE_FACT_VERSION):
+        if type(data.get("predicateFactVersion")) is not int or data["predicateFactVersion"] not in (1, 2, 3, 4, 5, 6, PREDICATE_FACT_VERSION):
             raise TraceError("unsupported predicateFactVersion")
         predicate_fact_version = data["predicateFactVersion"]
     elif "predicateFactVersion" in data:
@@ -1654,7 +2020,9 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                         "scrimFacts": 0, "scrimReplayed": 0,
                         "scrimUnreplayable": 0, "scrimMismatches": 0,
                         "sunglareFacts": 0, "sunglareReplayed": 0,
-                        "sunglareUnreplayable": 0, "sunglareMismatches": 0}
+                        "sunglareUnreplayable": 0, "sunglareMismatches": 0,
+                        "fssFacts": 0, "fssReplayed": 0,
+                        "fssUnreplayable": 0, "fssMismatches": 0}
     for index, draw in enumerate(draws):
         label = "draws[%d]" % index
         if not isinstance(draw, dict):
@@ -1983,6 +2351,11 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
                             "mismatch" if predicate_replay["sunglareMismatches"] else
                             "unreplayable" if predicate_replay["sunglareUnreplayable"] else
                             "replayed"),
+            fssStatus=("unavailable-v1-v6" if predicate_fact_version < 7 else
+                       "not-visited" if not predicate_replay["fssFacts"] else
+                       "mismatch" if predicate_replay["fssMismatches"] else
+                       "unreplayable" if predicate_replay["fssUnreplayable"] else
+                       "replayed"),
             **predicate_replay)
             if schema_version == SCHEMA_VERSION else
             {"status": "unavailable", "factCount": 0, "replayed": 0,
@@ -2006,7 +2379,10 @@ def validate_trace(data, expected_log=None, expected_build_stamp=None):
              "scrimReplayed": 0, "scrimUnreplayable": 0, "scrimMismatches": 0,
              "sunglareStatus": "unavailable-v1", "sunglareFacts": 0,
              "sunglareReplayed": 0, "sunglareUnreplayable": 0,
-             "sunglareMismatches": 0}),
+             "sunglareMismatches": 0,
+             "fssStatus": "unavailable-v1", "fssFacts": 0,
+             "fssReplayed": 0, "fssUnreplayable": 0,
+             "fssMismatches": 0}),
         "buildVersion": version,
         "buildStamp": stamp.upper(),
         "logFile": log_name,
@@ -2104,6 +2480,13 @@ def format_summary(summary, sidecar_path=None):
                      (replay["sunglareStatus"], replay.get("sunglareFacts", 0),
                       replay.get("sunglareReplayed", 0), replay.get("sunglareUnreplayable", 0),
                       replay.get("sunglareMismatches", 0)))
+    if replay.get("predicateFactVersion", 0) < 7:
+        lines.append("  FSS sites 57-58: unavailable before predicate fact version 7")
+    else:
+        lines.append("  FSS sites 57-58: %s (%d fact(s), %d replayed, %d unreplayable, %d mismatch)" %
+                     (replay["fssStatus"], replay.get("fssFacts", 0),
+                      replay.get("fssReplayed", 0), replay.get("fssUnreplayable", 0),
+                      replay.get("fssMismatches", 0)))
     if sidecar_path:
         lines.insert(0, "[edvr] draw-ladder sidecar: %s" % sidecar_path)
     return "\n".join(lines)
@@ -2187,6 +2570,12 @@ def self_test():
         return 1
 
     legacy_v1 = json.loads(json.dumps(base))
+    v7_bypass = json.loads(json.dumps(base))
+    v7_bypass["predicateFactVersion"] = 7
+    v7_replay = validate_trace(v7_bypass)["predicateReplay"]
+    if v7_replay["fssStatus"] != "not-visited" or v7_replay["fssFacts"] != 0:
+        print("v7 bypass did not initialize empty FSS summary counters")
+        return 1
     legacy_v1["schemaVersion"] = 1
     legacy_v1.pop("predicateFactVersion")
     for legacy_draw in legacy_v1["draws"]:
@@ -3446,6 +3835,42 @@ def self_test():
         if code != 0:
             print("draw-ladder --expect-invalid semantics changed")
             return 1
+        expect_args = ["--file", cli_file, "--dry-run", "--expect-unreplayable", "2"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = main(expect_args)
+        if code != 1:
+            print("expected unavailable facts accepted a structurally invalid capture")
+            return 1
+        for count, mismatches, mutations, expected in (
+                (2, 0, 0, 0), (1, 0, 0, 1), (3, 0, 0, 1),
+                (2, 1, 0, 1), (2, 0, 1, 1)):
+            limited = json.loads(json.dumps(historical))
+            limited["predicateReplay"].update(status="unreplayable", unreplayable=count,
+                mismatches=mismatches, mutationUnobserved=mutations)
+            read_trace = lambda *args, _summary=limited, **kwargs: ({}, _summary)
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(expect_args)
+            if code != expected:
+                print("expected unavailable-fact fixture gate accepted incorrect counts or failed consistency")
+                return 1
+        for invalid_args in (
+                ["--expect-unreplayable", "0", "--dry-run"],
+                ["--expect-unreplayable", "-1", "--dry-run"],
+                ["--expect-unreplayable", "x", "--dry-run"],
+                ["--expect-unreplayable", "2"],
+                ["--expect-unreplayable", "2", "--dry-run", "--expect-invalid"]):
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    main(["--file", cli_file] + invalid_args)
+            except SystemExit as exc:
+                if exc.code == 2:
+                    continue
+            print("expected unavailable-fact CLI accepted invalid arguments")
+            return 1
+        with open(cli_file, "r", encoding="utf-8") as stream:
+            if stream.read() != "{}":
+                print("fixture assertion rewrote its input")
+                return 1
     finally:
         read_trace = original_read_trace
         try:
@@ -3706,6 +4131,377 @@ def self_test():
     else:
         print("draw-ladder Sunglare accepted an invalid short-circuit read")
         return 1
+
+    def fr(value=None, reached=True, known=True):
+        return {"reached": reached, "known": known,
+                "value": value if reached and known else None}
+
+    def fss_event(site_id, claim):
+        return {"id": site_id, "kind": 2, "outcome": 3 if claim else 2,
+                "flow": 1 if claim else 0, "subsite": 0,
+                "verdict": (11 if site_id == 57 else 12) if claim else -1}
+
+    def fss_helper(hash_value=None, entered=True, vs_done=True,
+                   lookup_reached=True, lookup_done=True, shader=True,
+                   release=True, release_done=True, callback_done=True,
+                   guard_returned=True, after=None):
+        helper = {"guardCallReached": fr(True)}
+        helper.update({"callbackEntered": fr(entered),
+                       "vsGetShaderCompleted": fr(vs_done),
+                       "lookupReached": fr(lookup_reached),
+                       "lookupCompleted": fr(lookup_done),
+                       "releaseReached": fr(release),
+                       "releaseCompleted": fr(release_done),
+                       "callbackCompleted": fr(callback_done),
+                       "guardReturned": fr(guard_returned),
+                       "hashAfterGuard": fr((hash_value or 0) if after is None else after)})
+        helper["assignedHash"] = fr(hash_value) if lookup_done else fr(None, False, False)
+        helper["shaderNonNull"] = fr(shader) if lookup_done else fr(None, False, False)
+        return helper
+
+    def fss_panel_fact(outer=True, body=10, frame=12, helper_enabled=True,
+                       context=True, helper=None, matched_before=0,
+                       matched_after=None):
+        fact = {"siteId": 57, "kind": 12, "known": "yes",
+                "selector": {"outerEnabled": fr(outer),
+                             "bodyFrame": fr(body) if outer else fr(None, False, False),
+                             "frameNo": fr(frame) if outer and body else fr(None, False, False)},
+                "helper": {"enabled": fr(helper_enabled) if outer and body and ((frame - body) & 0xffffffff) <= 2 else fr(None, False, False),
+                           "contextNonNull": fr(context) if outer and body and ((frame - body) & 0xffffffff) <= 2 and helper_enabled else fr(None, False, False)},
+                "mutation": {"matchedHashBefore": fr(matched_before) if outer and body and ((frame - body) & 0xffffffff) <= 2 else fr(None, False, False),
+                             "matchedHashAfter": fr(matched_before if matched_after is None else matched_after) if outer and body and ((frame - body) & 0xffffffff) <= 2 else fr(None, False, False)}}
+        if body == 0:
+            fact["selector"]["frameNo"] = fr(None, False, False)
+        stages = ("guardCallReached", "callbackEntered", "vsGetShaderCompleted",
+                  "shaderNonNull", "lookupReached", "lookupCompleted", "assignedHash",
+                  "releaseReached", "releaseCompleted", "callbackCompleted",
+                  "guardReturned", "hashAfterGuard")
+        if helper is None:
+            if outer and body and ((frame - body) & 0xffffffff) <= 2 and helper_enabled and context:
+                hash_value = 0xA888D51024D9798E
+                helper = fss_helper(hash_value)
+            else:
+                helper = {key: fr(None, False, False) for key in stages}
+        fact["helper"].update(helper)
+        return fact
+
+    def fss_reveal_fact(body=10, body_frame=12, jump=0, jump_frame=0,
+                        outer_steady=True, outer_lockstep=False, latch=False,
+                        helper_steady=True, helper_lockstep=False,
+                        context=True, helper=None, arrival=True,
+                        arrival_before=0, arrival_after=1):
+        sel = {"outerSteady": fr(outer_steady),
+               "outerLockstep": fr(outer_lockstep) if not outer_steady else fr(None, False, False),
+               "bodyFrame": fr(body) if (outer_steady or outer_lockstep) else fr(None, False, False),
+               "bodyFrameNo": fr(body_frame) if (outer_steady or outer_lockstep) and body else fr(None, False, False),
+               "jumpFrame": fr(jump) if (outer_steady or outer_lockstep) and (not body or ((body_frame - body) & 0xffffffff) > 2) else fr(None, False, False),
+               "jumpFrameNo": fr(jump_frame) if (outer_steady or outer_lockstep) and jump and (not body or ((body_frame - body) & 0xffffffff) > 2) else fr(None, False, False),
+               "modeLatch": fr(latch) if (outer_steady or outer_lockstep) and jump and ((jump_frame - jump) & 0xffffffff) <= 600 and (not body or ((body_frame - body) & 0xffffffff) > 2) else fr(None, False, False)}
+        helper_gate = ((outer_steady or outer_lockstep) and
+                       ((body and ((body_frame - body) & 0xffffffff) <= 2) or
+                        (jump and ((jump_frame - jump) & 0xffffffff) <= 600 and latch)))
+        stages = ("guardCallReached", "callbackEntered", "vsGetShaderCompleted",
+                  "shaderNonNull", "lookupReached", "lookupCompleted", "assignedHash",
+                  "releaseReached", "releaseCompleted", "callbackCompleted",
+                  "guardReturned", "hashAfterGuard")
+        h = {"steady": fr(helper_steady) if helper_gate else fr(None, False, False),
+             "lockstep": fr(helper_lockstep) if helper_gate and not helper_steady else fr(None, False, False),
+             "contextNonNull": fr(context) if helper_gate and (helper_steady or helper_lockstep) else fr(None, False, False)}
+        if helper is None:
+            helper = fss_helper(0x953C8123AD8DC13B) if helper_gate and context and (helper_steady or helper_lockstep) else {key: fr(None, False, False) for key in stages}
+        h.update(helper)
+        lookup_completed = helper.get("lookupCompleted", fr(False))["value"]
+        assigned_hash = helper.get("assignedHash", fr(0))["value"]
+        recognized = helper_gate and context and (helper_steady or helper_lockstep) and lookup_completed and assigned_hash == 0x953C8123AD8DC13B
+        mutation = {"arrivalOpen": fr(arrival) if recognized else fr(None, False, False),
+                    "arrivalBefore": fr(arrival_before) if arrival and recognized else fr(None, False, False),
+                    "arrivalAfter": fr(arrival_after) if arrival and recognized else fr(None, False, False)}
+        return {"siteId": 58, "kind": 13, "known": "yes",
+                "selector": sel, "helper": h, "mutation": mutation}
+
+    def fss_draw(fact, event=None):
+        site_id = fact["siteId"]
+        draw = {"kind": ord("X") if site_id == 57 else ord("N"),
+                "count": 6, "instances": 1,
+                "sites": [event or fss_event(site_id, True)],
+                "predicateFacts": [fact]}
+        return draw
+
+    panel_hash = 0xA888D51024D9798E
+    panel_fact = fss_panel_fact(matched_after=panel_hash)
+    panel_summary = _replay_predicate_facts(fss_draw(panel_fact), "fss-panel", 7)
+    if panel_summary["fssReplayed"] != 1 or panel_summary["fssMismatches"]:
+        print("draw-ladder FSS panel positive fixture failed")
+        return 1
+    reveal_fact = fss_reveal_fact()
+    reveal_summary = _replay_predicate_facts(fss_draw(reveal_fact), "fss-reveal", 7)
+    if reveal_summary["fssReplayed"] != 1 or reveal_summary["fssMismatches"]:
+        print("draw-ladder FSS reveal body positive fixture failed")
+        return 1
+    jump_fact = fss_reveal_fact(body=0, jump=100, jump_frame=700,
+                                outer_steady=False, outer_lockstep=True,
+                                latch=True, helper_steady=False,
+                                helper_lockstep=True, arrival_before=0xffffffff,
+                                arrival_after=0)
+    jump_summary = _replay_predicate_facts(fss_draw(jump_fact), "fss-jump", 7)
+    if jump_summary["fssReplayed"] != 1 or jump_summary["fssMismatches"]:
+        print("draw-ladder FSS reveal jump/wrap fixture failed")
+        return 1
+
+    panel_off = fss_panel_fact(outer=False)
+    if _replay_predicate_facts(fss_draw(panel_off, fss_event(57, False)),
+                               "fss-panel-off", 7)["fssReplayed"] != 1:
+        print("draw-ladder FSS panel outer gate short circuit failed")
+        return 1
+    reveal_off = fss_reveal_fact(body=0, jump=0, outer_steady=False,
+                                 outer_lockstep=False, helper_steady=False,
+                                 helper_lockstep=False)
+    if _replay_predicate_facts(fss_draw(reveal_off, fss_event(58, False)),
+                               "fss-reveal-off", 7)["fssReplayed"] != 1:
+        print("draw-ladder FSS reveal OR short circuit failed")
+        return 1
+
+    for body, frame, claim in ((10, 12, True), (10, 13, False),
+                               (0, 12, False), (0xffffffff, 1, True)):
+        fact = fss_panel_fact(body=body, frame=frame,
+                              matched_after=panel_hash if claim else 0)
+        result = _replay_predicate_facts(fss_draw(fact, fss_event(57, claim)),
+                                         "fss-body-boundary", 7)
+        if result["fssMismatches"] or result["fssReplayed"] != 1:
+            print("draw-ladder FSS body-age boundary fixture failed")
+            return 1
+    for jump_age, claim in ((600, True), (601, False)):
+        fact = fss_reveal_fact(body=0, jump=100, jump_frame=100 + jump_age,
+                               outer_steady=False, outer_lockstep=True,
+                               latch=True, helper_steady=False,
+                               helper_lockstep=True, arrival=False)
+        result = _replay_predicate_facts(fss_draw(fact, fss_event(58, claim)),
+                                         "fss-jump-boundary", 7)
+        if result["fssMismatches"] or result["fssReplayed"] != 1:
+            print("draw-ladder FSS jump-age boundary fixture failed")
+            return 1
+
+    dead_helper = fss_helper(entered=False, vs_done=False, lookup_reached=False,
+                             lookup_done=False, shader=False, release=False,
+                             release_done=False, callback_done=False,
+                             guard_returned=False, after=0)
+    dead_fact = fss_panel_fact(helper=dead_helper, matched_after=0)
+    dead_result = _replay_predicate_facts(fss_draw(dead_fact, fss_event(57, False)),
+                                          "fss-budget-dead", 7)
+    if dead_result["fssReplayed"] != 1 or dead_result["fssMismatches"]:
+        print("draw-ladder FSS dead-budget zero-h fixture failed")
+        return 1
+    getter_fault = fss_helper(entered=True, vs_done=False, lookup_reached=False,
+                              lookup_done=False, shader=False, release=False,
+                              release_done=False, callback_done=False,
+                              guard_returned=False, after=0)
+    getter_fact = fss_panel_fact(helper=getter_fault, matched_after=0)
+    if _replay_predicate_facts(fss_draw(getter_fact, fss_event(57, False)),
+                               "fss-getter-fault", 7)["fssReplayed"] != 1:
+        print("draw-ladder FSS getter-fault fixture failed")
+        return 1
+    lookup_fault = fss_helper(0, entered=True, vs_done=True,
+                              lookup_reached=True, lookup_done=False, shader=False,
+                              release=False, release_done=False, callback_done=False,
+                              guard_returned=False, after=0)
+    lookup_fact = fss_panel_fact(helper=lookup_fault, matched_after=0)
+    if _replay_predicate_facts(fss_draw(lookup_fact, fss_event(57, False)),
+                               "fss-lookup-fault", 7)["fssReplayed"] != 1:
+        print("draw-ladder FSS lookup-fault fixture failed")
+        return 1
+    release_fault_hash = 0xB018D143700AB803
+    release_fault = fss_helper(release_fault_hash, release_done=False,
+                               callback_done=False, guard_returned=False,
+                               after=release_fault_hash)
+    release_fact = fss_panel_fact(helper=release_fault,
+                                  matched_after=release_fault_hash)
+    if _replay_predicate_facts(fss_draw(release_fact), "fss-release-fault", 7)["fssReplayed"] != 1:
+        print("draw-ladder FSS post-assignment Release fault was not replayed")
+        return 1
+
+    changed_panel_mutation = json.loads(json.dumps(panel_fact))
+    changed_panel_mutation["mutation"]["matchedHashAfter"] = fr(0)
+    if not _replay_predicate_facts(fss_draw(changed_panel_mutation),
+                                   "fss-panel-mutation", 7)["fssMismatches"]:
+        print("draw-ladder FSS matched-hash mutation was not checked")
+        return 1
+    changed_arrival = json.loads(json.dumps(reveal_fact))
+    changed_arrival["mutation"]["arrivalAfter"] = fr(2)
+    if not _replay_predicate_facts(fss_draw(changed_arrival),
+                                   "fss-arrival-mutation", 7)["fssMismatches"]:
+        print("draw-ladder FSS arrival counter mutation was not checked")
+        return 1
+
+    unknown_fact = fss_panel_fact()
+    unknown_fact["selector"]["outerEnabled"] = fr(None, True, False)
+    unknown_fact["selector"]["bodyFrame"] = fr(None, False, False)
+    unknown_fact["selector"]["frameNo"] = fr(None, False, False)
+    unknown_fact["helper"] = {key: fr(None, False, False) for key in
+                               ("enabled", "contextNonNull", "guardCallReached",
+                                "callbackEntered", "vsGetShaderCompleted", "shaderNonNull",
+                                "lookupReached", "lookupCompleted", "assignedHash",
+                                "releaseReached", "releaseCompleted", "callbackCompleted",
+                                "guardReturned", "hashAfterGuard")}
+    unknown_fact["mutation"] = {key: fr(None, False, False)
+                                 for key in ("matchedHashBefore", "matchedHashAfter")}
+    unknown_result = _replay_predicate_facts(fss_draw(unknown_fact), "fss-unknown", 7)
+    if unknown_result["fssUnreplayable"] != 1 or unknown_result["fssReplayed"]:
+        print("draw-ladder FSS unknown source was inferred from observed result")
+        return 1
+    unknown_hash = json.loads(json.dumps(panel_fact))
+    unknown_hash["helper"]["lookupCompleted"] = fr(None, True, False)
+    unknown_hash["helper"]["assignedHash"] = fr(None, False, False)
+    unknown_hash["helper"]["shaderNonNull"] = fr(None, False, False)
+    unknown_hash["helper"]["releaseReached"] = fr(False)
+    unknown_hash["helper"]["releaseCompleted"] = fr(False)
+    unknown_hash["helper"]["callbackCompleted"] = fr(False)
+    unknown_hash["helper"]["guardReturned"] = fr(False)
+    unknown_hash["helper"]["hashAfterGuard"] = fr(panel_hash)
+    unknown_hash["mutation"]["matchedHashAfter"] = fr(panel_hash)
+    unknown_hash_result = _replay_predicate_facts(fss_draw(unknown_hash),
+                                                  "fss-unknown-hash", 7)
+    if unknown_hash_result["fssUnreplayable"] != 1 or unknown_hash_result["fssReplayed"]:
+        print("draw-ladder FSS unknown lookup assignment was inferred from result")
+        return 1
+
+    # Concrete registry zero and null shader are known negatives. A late
+    # Release fault leaves the assigned hash intact, including on reveal.
+    for shader in (False, True):
+        zero_helper = fss_helper(0, shader=shader, release=shader,
+                                 release_done=shader)
+        for site_id in (57, 58):
+            zero_fact = (fss_panel_fact(helper=zero_helper, matched_before=123,
+                                         matched_after=123) if site_id == 57 else
+                         fss_reveal_fact(helper=zero_helper))
+            result = _replay_predicate_facts(
+                fss_draw(zero_fact, fss_event(site_id, False)), "fss-known-zero", 7)
+            if result["fssReplayed"] != 1 or result["fssMismatches"]:
+                print("draw-ladder FSS concrete zero was not a known decline")
+                return 1
+    late_reveal = fss_reveal_fact(helper=fss_helper(
+        0x953C8123AD8DC13B, release_done=False, callback_done=False,
+        guard_returned=False), arrival_before=0xffffffff, arrival_after=0)
+    result = _replay_predicate_facts(fss_draw(late_reveal), "fss-late-reveal", 7)
+    if result["fssReplayed"] != 1 or result["fssMismatches"]:
+        print("draw-ladder FSS late Release fault lost reveal claim/arrival wrap")
+        return 1
+    for fact in (fss_panel_fact(helper_enabled=False, matched_before=17,
+                                 matched_after=17),
+                 fss_panel_fact(context=False, matched_before=17,
+                                 matched_after=17),
+                 fss_reveal_fact(helper_steady=False, helper_lockstep=False),
+                 fss_reveal_fact(context=False),
+                 fss_reveal_fact(body=0, jump=1, jump_frame=601, latch=False)):
+        result = _replay_predicate_facts(fss_draw(fact, fss_event(fact["siteId"], False)),
+                                         "fss-helper-decline", 7)
+        if result["fssReplayed"] != 1 or result["fssMismatches"]:
+            print("draw-ladder FSS helper/latch short circuit failed")
+            return 1
+    # Every unavailable consumed raw source remains unknown even if all
+    # observed outputs continue to assert the original positive claim.
+    for base in (panel_fact, reveal_fact):
+        for group in ("selector", "helper", "mutation"):
+            for key, envelope in base[group].items():
+                if not envelope["reached"]:
+                    continue
+                unavailable = json.loads(json.dumps(base))
+                unavailable[group][key] = fr(None, True, False)
+                result = _replay_predicate_facts(fss_draw(unavailable), "fss-unavailable-read", 7)
+                if result["fssUnreplayable"] != 1 or result["fssReplayed"]:
+                    print("draw-ladder FSS unavailable read was guessed: %s.%s" % (group, key))
+                    return 1
+    malformed_fss = []
+    for group, key, value in (
+            ("selector", "outerEnabled", {"reached": False, "known": True, "value": None}),
+            ("selector", "bodyFrame", fr(-1)),
+            ("selector", "frameNo", fr(0x100000000)),
+            ("helper", "assignedHash", fr(0x10000000000000000)),
+            ("helper", "callbackEntered", fr(False)),
+            ("helper", "lookupReached", fr(False)),
+            ("helper", "releaseReached", fr(False)),
+            ("helper", "shaderNonNull", fr(False)),
+            ("helper", "callbackEntered", {"reached": True, "known": False, "value": False})):
+        bad = json.loads(json.dumps(panel_fact)); bad[group][key] = value
+        malformed_fss.append(bad)
+    bad = json.loads(json.dumps(reveal_fact)); bad["selector"]["jumpFrame"] = fr(100)
+    malformed_fss.append(bad)
+    bad = json.loads(json.dumps(panel_off)); bad["selector"]["bodyFrame"] = fr(0)
+    malformed_fss.append(bad)
+    bad = json.loads(json.dumps(panel_fact)); bad["known"] = "unknown"
+    malformed_fss.append(bad)
+    bad = json.loads(json.dumps(dead_fact)); bad["helper"]["assignedHash"] = fr(0)
+    malformed_fss.append(bad)
+    for bad in malformed_fss:
+        try:
+            _replay_predicate_facts(fss_draw(bad), "fss-malformed", 7)
+        except TraceError:
+            pass
+        else:
+            print("draw-ladder FSS accepted malformed availability/lazy/progress facts")
+            return 1
+    for group, key, value in (("helper", "hashAfterGuard", fr(0)),
+                              ("helper", "guardReturned", fr(False)),
+                              ("mutation", "matchedHashAfter", fr(0))):
+        changed = json.loads(json.dumps(panel_fact)); changed[group][key] = value
+        result = _replay_predicate_facts(fss_draw(changed), "fss-evidence-mutant", 7)
+        if result["fssReplayed"] != 1 or not result["fssMismatches"]:
+            print("draw-ladder FSS postguard/mutation evidence became an oracle")
+            return 1
+    wrong_event = _replay_predicate_facts(fss_draw(panel_fact, fss_event(57, False)),
+                                          "fss-event-mutant", 7)
+    independently_expected, _, _, _ = _replay_fss_fact(panel_fact, fss_draw(panel_fact), "fss-independent")
+    if independently_expected != fss_event(57, True) or not wrong_event["fssMismatches"]:
+        print("draw-ladder FSS event output became an oracle")
+        return 1
+    bad_release_prefix = json.loads(json.dumps(release_fact))
+    bad_release_prefix["helper"]["releaseCompleted"] = fr(True)
+    try:
+        _replay_predicate_facts(fss_draw(bad_release_prefix), "fss-bad-prefix", 7)
+    except TraceError:
+        pass
+    else:
+        print("draw-ladder FSS accepted invalid helper stage prefix")
+        return 1
+    old_v6 = json.loads(json.dumps(sg_stock))
+    if _replay_predicate_facts(old_v6, "old-v6", 6)["sunglareReplayed"] != 1:
+        print("draw-ladder FSS reader regressed v6 compatibility")
+        return 1
+    for base in (panel_fact, reveal_fact):
+        empty = json.loads(json.dumps(base))
+        for group in ("selector", "helper", "mutation"):
+            empty[group] = {key: fr(None, False, False) for key in empty[group]}
+        not_eligible = {"id": empty["siteId"], "kind": 2, "outcome": 5,
+                        "flow": 0, "subsite": 0, "verdict": -1}
+        result = _replay_predicate_facts(fss_draw(empty, not_eligible), "fss-empty-noteligible", 7)
+        if result["fssUnreplayable"] != 1 or result["fssReplayed"] or result["fssMismatches"]:
+            print("draw-ladder FSS staged absence became a known selector result")
+            return 1
+        for event in (fss_event(empty["siteId"], True), fss_event(empty["siteId"], False)):
+            try:
+                _replay_predicate_facts(fss_draw(empty, event), "fss-empty-handler", 7)
+            except TraceError:
+                pass
+            else:
+                print("draw-ladder FSS accepted unfinished invoked-handler observations")
+                return 1
+        partial = json.loads(json.dumps(empty))
+        del partial["helper"]["lookupCompleted"]
+        try:
+            _replay_predicate_facts(fss_draw(partial, not_eligible), "fss-missing-staged-field", 7)
+        except TraceError:
+            pass
+        else:
+            print("draw-ladder FSS staged absence weakened exact payload coverage")
+            return 1
+        malformed = json.loads(json.dumps(empty))
+        next(iter(malformed["helper"].values()))["known"] = 0
+        try:
+            _replay_predicate_facts(fss_draw(malformed, not_eligible), "fss-staged-numeric-flag", 7)
+        except TraceError:
+            pass
+        else:
+            print("draw-ladder FSS staged absence accepted numeric availability flags")
+            return 1
     print("draw-ladder-replay self-test: ok")
     return 0
 
@@ -3719,6 +4515,8 @@ def main(argv=None):
                         help="validate and report only; writes nothing")
     parser.add_argument("--expect-invalid", action="store_true",
                         help="succeed only if this sidecar is rejected (requires --dry-run)")
+    parser.add_argument("--expect-unreplayable", type=int, metavar="COUNT",
+                        help="assert exactly COUNT unavailable fixture facts with no mismatches or unobserved mutations (requires --dry-run)")
     parser.add_argument("--self-test", action="store_true", help="run fixture checks and exit")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -3727,6 +4525,13 @@ def main(argv=None):
         parser.error("--file is required unless --self-test is used")
     if args.expect_invalid and not args.dry_run:
         parser.error("--expect-invalid requires --dry-run")
+    if args.expect_unreplayable is not None:
+        if args.expect_unreplayable <= 0:
+            parser.error("--expect-unreplayable requires a positive count")
+        if not args.dry_run:
+            parser.error("--expect-unreplayable requires --dry-run")
+        if args.expect_invalid:
+            parser.error("--expect-unreplayable cannot be combined with --expect-invalid")
     try:
         _, summary = read_trace(args.file, args.expected_log, args.expected_build_stamp)
     except OSError as exc:
@@ -3742,6 +4547,15 @@ def main(argv=None):
         print("[edvr] expected rejection failed: sidecar is valid")
         return 1
     print(format_summary(summary, os.path.abspath(args.file)))
+    if args.expect_unreplayable is not None:
+        replay = summary["predicateReplay"]
+        if (replay["unreplayable"] != args.expect_unreplayable or
+                replay["mismatches"] != 0 or replay["mutationUnobserved"] != 0):
+            print("[edvr] expected unavailable-fact count or clean consistency checks failed")
+            return 1
+        print("[edvr] fixture expectation confirmed: exactly %d unreplayable facts; predicate equivalence remains unestablished" % args.expect_unreplayable)
+        print("  dry-run: no files or directories were written")
+        return 0
     gate_failure = predicate_replay_gate_failure(summary)
     if gate_failure:
         print("[edvr] predicate replay gate failed: %s" % gate_failure)

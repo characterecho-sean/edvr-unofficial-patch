@@ -52,6 +52,7 @@
 #pragma once
 
 #include "draw_interest.h"
+#include "fss_observation.h"
 
 #include <cstdint>
 
@@ -91,6 +92,17 @@ void fssRevealNoteUpdate(void* resource, const void* data);
 // (N n=6 i=1 + vh 953C8123AD8DC13B). True wraps the draw in Begin/End.
 bool fssRevealOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                         uint32_t instances);
+// TracePolicy twin; ordinary callers retain the frozen helper above.
+bool fssRevealOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                                uint32_t count, uint32_t instances,
+                                FssRevealObservation& observed);
+
+#if defined(EDVR_FSS_PREDICATE_TEST)
+namespace fss_predicate_test {
+void setRevealModes(bool steady, bool lockstep) noexcept;
+void resetRevealBudget(int remaining = 8) noexcept;
+}
+#endif
 
 // Occurrence 1: the PS b1 buffer is learned and its shadow snapshotted;
 // lockstep also freezes the draw's four content textures. Occurrence 2:

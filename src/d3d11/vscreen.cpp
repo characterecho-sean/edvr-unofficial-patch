@@ -1951,6 +1951,13 @@ struct VScreenDrawLadderVisitor {
         read.value = value;
     }
 
+    template <class T>
+    static void observeFssRead(FssRead<T>& read, T value) {
+        read.reached = true;
+        read.known = true;
+        read.value = value;
+    }
+
     template <class SiteType>
     __forceinline bool eligible() {
         if constexpr (SiteType::shaderCandidateGated) {
@@ -2057,8 +2064,19 @@ struct VScreenDrawLadderVisitor {
                 trace.predicateFact(fact);
                 return interested;
             }
-            return draw_interest::contains(legacyInterestMask,
-                                           SiteType::interestId);
+            const bool interested = draw_interest::contains(
+                legacyInterestMask, SiteType::interestId);
+            if constexpr (TracePolicy::enabled &&
+                          (SiteType::id == draw_ladder::SiteId::kFssPanelClaim ||
+                           SiteType::id == draw_ladder::SiteId::kFssRevealClaim)) {
+                if (!interested) {
+                    FssObservation fact{};
+                    fact.kind = SiteType::id == draw_ladder::SiteId::kFssPanelClaim
+                        ? FssTraceFactKind::kPanel : FssTraceFactKind::kReveal;
+                    trace.fssFact(fact);
+                }
+            }
+            return interested;
         } else {
             return true;
         }
@@ -2715,17 +2733,95 @@ struct VScreenDrawLadderVisitor {
                 backdropOnComposite(self, kind, count, instances)) return claimed(id, DrawVerdict::kBackdrop);
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kFssPanelClaim) {
-            if (fssPanelWantsDraws() && s->fssBodyFrame != 0 &&
-                s->frameNo - s->fssBodyFrame <= 2 && fssPanelOnEyeDraw(self, kind, count, instances))
-                return claimed(id, DrawVerdict::kFssPanel);
+            if constexpr (TracePolicy::enabled) {
+                FssObservation fact{};
+                fact.kind = FssTraceFactKind::kPanel;
+                auto& observed = fact.panel;
+                bool matches = false;
+                const bool enabled = fssPanelWantsDraws();
+                observeFssRead(observed.outerEnabled, enabled);
+                if (enabled) {
+                    const std::uint32_t bodyFrame = s->fssBodyFrame;
+                    observeFssRead(observed.bodyFrame, bodyFrame);
+                    if (bodyFrame != 0) {
+                        const std::uint32_t frameNo = s->frameNo;
+                        observeFssRead(observed.frameNo, frameNo);
+                        if (frameNo - bodyFrame <= 2)
+                            matches = fssPanelOnEyeDrawObserved(
+                                self, kind, count, instances, observed);
+                    }
+                }
+                trace.fssFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kFssPanel);
+            } else {
+                if (fssPanelWantsDraws() && s->fssBodyFrame != 0 &&
+                    s->frameNo - s->fssBodyFrame <= 2 &&
+                    fssPanelOnEyeDraw(self, kind, count, instances))
+                    return claimed(id, DrawVerdict::kFssPanel);
+            }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kFssRevealClaim) {
-            if (fssRevealWantsDraws() &&
-                ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
-                 (s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
-                  deviceHookFssModeLatch())) && fssRevealOnEyeDraw(self, kind, count, instances)) {
-                if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
-                return claimed(id, DrawVerdict::kFssReveal);
+            if constexpr (TracePolicy::enabled) {
+                FssObservation fact{};
+                fact.kind = FssTraceFactKind::kReveal;
+                auto& observed = fact.reveal;
+                bool matches = false;
+                const bool steady = detail::g_fssRevealSteady;
+                observeFssRead(observed.outerSteady, steady);
+                bool lockstep = false;
+                if (!steady) {
+                    lockstep = detail::g_fssRevealLockstep;
+                    observeFssRead(observed.outerLockstep, lockstep);
+                }
+                if (steady || lockstep) {
+                    const std::uint32_t bodyFrame = s->fssBodyFrame;
+                    observeFssRead(observed.bodyFrame, bodyFrame);
+                    bool inWindow = false;
+                    if (bodyFrame != 0) {
+                        const std::uint32_t bodyFrameNo = s->frameNo;
+                        observeFssRead(observed.bodyFrameNo, bodyFrameNo);
+                        inWindow = bodyFrameNo - bodyFrame <= 2;
+                    }
+                    if (!inWindow) {
+                        const std::uint32_t jumpFrame = s->fssJumpFrame;
+                        observeFssRead(observed.jumpFrame, jumpFrame);
+                        if (jumpFrame != 0) {
+                            const std::uint32_t jumpFrameNo = s->frameNo;
+                            observeFssRead(observed.jumpFrameNo, jumpFrameNo);
+                            if (jumpFrameNo - jumpFrame <= 600) {
+                                const bool modeLatch = deviceHookFssModeLatch();
+                                observeFssRead(observed.modeLatch, modeLatch);
+                                inWindow = modeLatch;
+                            }
+                        }
+                    }
+                    if (inWindow) {
+                        matches = fssRevealOnEyeDrawObserved(
+                            self, kind, count, instances, observed);
+                        if (matches) {
+                            const bool arrivalOpen = s->fssArrivalOpen;
+                            observeFssRead(observed.arrivalOpen, arrivalOpen);
+                            if (arrivalOpen) {
+                                const std::uint32_t before = s->fssArrivalRecogs;
+                                observeFssRead(observed.arrivalBefore, before);
+                                ++s->fssArrivalRecogs;
+                                observeFssRead(observed.arrivalAfter,
+                                               s->fssArrivalRecogs);
+                            }
+                        }
+                    }
+                }
+                trace.fssFact(fact);
+                if (matches) return claimed(id, DrawVerdict::kFssReveal);
+            } else {
+                if (fssRevealWantsDraws() &&
+                    ((s->fssBodyFrame != 0 && s->frameNo - s->fssBodyFrame <= 2) ||
+                     (s->fssJumpFrame != 0 && s->frameNo - s->fssJumpFrame <= 600 &&
+                      deviceHookFssModeLatch())) &&
+                    fssRevealOnEyeDraw(self, kind, count, instances)) {
+                    if (s->fssArrivalOpen) ++s->fssArrivalRecogs;
+                    return claimed(id, DrawVerdict::kFssReveal);
+                }
             }
             return SiteResult::declined();
         } else if constexpr (id == SiteId::kFssDumpClaim) {

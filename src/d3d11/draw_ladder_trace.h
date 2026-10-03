@@ -3,6 +3,7 @@
 #include "draw_census.h"
 #include "draw_ladder.h"
 #include "holo_scrim_observation.h"
+#include "fss_observation.h"
 #include "sunglare_observation.h"
 
 #include <atomic>
@@ -21,6 +22,8 @@ constexpr std::uint16_t kMaxActionEventsPerDraw = 32;
 constexpr std::uint8_t kMaxPredicateFactsPerDraw = 6;
 constexpr std::uint8_t kMaxSunglareFactsPerDraw = 3;
 constexpr std::uint32_t kMaxSunglareFacts = kMaxDraws * kMaxSunglareFactsPerDraw;
+constexpr std::uint8_t kMaxFssFactsPerDraw = 2;
+constexpr std::uint32_t kMaxFssFacts = kMaxDraws * kMaxFssFactsPerDraw;
 static_assert(kMaxDraws >= 17180, "replay capacity must cover the documented on-foot frame");
 
 enum class Status : std::uint8_t {
@@ -40,6 +43,8 @@ enum class CaptureInvalidation : std::uint8_t {
     Other = 1,
     SunglareIndexOverflow = 2,
     SunglarePoolMissing = 3,
+    FssIndexOverflow = 4,
+    FssPoolMissing = 5,
 };
 
 // Returned by shutdown() so production can report whether an armed or partial
@@ -262,6 +267,7 @@ void appendAction(Token token, std::uint16_t id,
 void recordForwardFacts(Token token, const ForwardFacts& facts) noexcept;
 void appendPredicateFact(Token token, const PredicateFact& fact) noexcept;
 void appendSunglareFact(Token token, const SunglareObservation& fact) noexcept;
+void appendFssFact(Token token, const FssObservation& fact) noexcept;
 void completeNightVisionFact(Token token, const PredicateFact& fact) noexcept;
 void completeWitchspaceStarsFact(Token token, const PredicateFact& fact) noexcept;
 void updateCandidates(Token token, std::uint64_t mask) noexcept;
@@ -338,6 +344,10 @@ struct TracePolicy final {
 
     inline void sunglareFact(const SunglareObservation& fact) noexcept {
         appendSunglareFact(token, fact);
+    }
+
+    inline void fssFact(const FssObservation& fact) noexcept {
+        appendFssFact(token, fact);
     }
 };
 

@@ -34,6 +34,7 @@
 #pragma once
 
 #include "draw_interest.h"
+#include "fss_observation.h"
 
 #include <cstdint>
 
@@ -64,6 +65,19 @@ inline bool fssPanelWantsDraws() { return detail::g_fssPanelEnabled; }
 // begin; true means wrap the draw in fssPanelBegin/End.
 bool fssPanelOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
                        uint32_t instances);
+// TracePolicy twin. The ordinary entry point above remains the production
+// NoTrace path; this records only values consumed by the same selector.
+bool fssPanelOnEyeDrawObserved(ID3D11DeviceContext* ctx, char kind,
+                               uint32_t count, uint32_t instances,
+                               FssPanelObservation& observed);
+
+#if defined(EDVR_FSS_PREDICATE_TEST)
+namespace fss_predicate_test {
+void setPanelEnabled(bool enabled) noexcept;
+void setPanelMatchedHash(uint64_t hash) noexcept;
+void resetPanelBudget(int remaining = 8) noexcept;
+}
+#endif
 
 // Swap in the replacement for the matched shader / restore the game's.
 void fssPanelBegin(ID3D11DeviceContext* ctx);

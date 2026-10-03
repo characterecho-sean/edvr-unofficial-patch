@@ -1568,6 +1568,23 @@ if errorlevel 1 ( echo [edvr] ERROR: holo predicate test build failed & exit /b 
 "%BUILD%\holo_predicate_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_fss_predicate_test
+echo [edvr] === fss_predicate_test.exe ===
+if not exist "%OBJ%\fsspredicate" mkdir "%OBJ%\fsspredicate"
+cl.exe /I"%GEN%" /nologo /O2 /Gy /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_BINDING_SHADOW_EXTERNAL /DEDVR_FSS_PREDICATE_TEST ^
+    /Fo"%OBJ%\fsspredicate\\" /Fe"%BUILD%\fss_predicate_test.exe" ^
+    "tools\fss_predicate_test\fss_predicate_test.cpp" ^
+    "src\d3d11\fss_panel.cpp" "src\d3d11\fss_reveal.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\proxy.cpp" ^
+    "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO /OPT:REF user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: FSS predicate test build failed & exit /b 1 )
+"%BUILD%\fss_predicate_test.exe" --dry-run || exit /b 1
+"%BUILD%\fss_predicate_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_sunglare_predicate_test
 echo [edvr] === sunglare_predicate_test.exe ===
 if not exist "%OBJ%\sunglarepredicate" mkdir "%OBJ%\sunglarepredicate"
@@ -1635,7 +1652,7 @@ python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     --expected-log edvr_gfx_trace_fixture.log --dry-run || exit /b 1
 python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     "%BUILD%\draw_ladder_test-trace\valid\edvr_gfx_trace_fixture.draw-ladder-14.json" ^
-    --expected-log edvr_gfx_trace_fixture.log --dry-run || exit /b 1
+    --expected-log edvr_gfx_trace_fixture.log --dry-run --expect-unreplayable 2 || exit /b 1
 python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     "%BUILD%\draw_ladder_test-trace\terminalmatrix\edvr_gfx_terminal_matrix.draw-ladder-15.json" ^
     --expected-log edvr_gfx_terminal_matrix.log --dry-run || exit /b 1
@@ -1714,6 +1731,21 @@ python "%ROOT%\tools\draw_ladder_replay.py" --file ^
 python "%ROOT%\tools\draw_ladder_replay.py" --file ^
     "%BUILD%\draw_ladder_test-trace\sunglare_per_draw_cap\edvr_gfx_sunglare_per_draw.draw-ladder-37.json" ^
     --expected-log edvr_gfx_sunglare_per_draw.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_missing_fact\edvr_gfx_fss_missing.draw-ladder-40.json" ^
+    --expected-log edvr_gfx_fss_missing.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_wrong_kind\edvr_gfx_fss_wrong_kind.draw-ladder-41.json" ^
+    --expected-log edvr_gfx_fss_wrong_kind.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact\edvr_gfx_fss_duplicate.draw-ladder-42.json" ^
+    --expected-log edvr_gfx_fss_duplicate.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact\edvr_gfx_fss_unfinished.draw-ladder-43.json" ^
+    --expected-log edvr_gfx_fss_unfinished.log --dry-run --expect-invalid || exit /b 1
+python "%ROOT%\tools\draw_ladder_replay.py" --file ^
+    "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap\edvr_gfx_fss_per_draw.draw-ladder-44.json" ^
+    --expected-log edvr_gfx_fss_per_draw.log --dry-run --expect-invalid || exit /b 1
 dir /s /b "%BUILD%\draw_ladder_test-trace" > "%BUILD%\draw_ladder_trace_files_after.txt"
 fc /b "%BUILD%\draw_ladder_trace_files_before.txt" ^
     "%BUILD%\draw_ladder_trace_files_after.txt" >nul || (
@@ -1794,6 +1826,23 @@ if exist "%BUILD%\draw_ladder_test-trace\sunglare_duplicate_fact" rmdir "%BUILD%
 if exist "%BUILD%\draw_ladder_test-trace\sunglare_unfinished_kind9" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_unfinished_kind9"
 if exist "%BUILD%\draw_ladder_test-trace\sunglare_per_draw_cap" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_per_draw_cap"
 if exist "%BUILD%\draw_ladder_test-trace\sunglare_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\sunglare_pool_cap"
+del /q "%BUILD%\draw_ladder_test-trace\fss_missing_fact\edvr_gfx_fss_missing.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_missing_fact\edvr_gfx_fss_missing.draw-ladder-40.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_wrong_kind\edvr_gfx_fss_wrong_kind.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_wrong_kind\edvr_gfx_fss_wrong_kind.draw-ladder-41.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact\edvr_gfx_fss_duplicate.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact\edvr_gfx_fss_duplicate.draw-ladder-42.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact\edvr_gfx_fss_unfinished.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact\edvr_gfx_fss_unfinished.draw-ladder-43.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap\edvr_gfx_fss_per_draw.log" ^
+    "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap\edvr_gfx_fss_per_draw.draw-ladder-44.json" ^
+    "%BUILD%\draw_ladder_test-trace\fss_pool_cap\edvr_gfx_fss_pool.log"
+if exist "%BUILD%\draw_ladder_test-trace\fss_missing_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_missing_fact"
+if exist "%BUILD%\draw_ladder_test-trace\fss_wrong_kind" rmdir "%BUILD%\draw_ladder_test-trace\fss_wrong_kind"
+if exist "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_duplicate_fact"
+if exist "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact" rmdir "%BUILD%\draw_ladder_test-trace\fss_unfinished_fact"
+if exist "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap" rmdir "%BUILD%\draw_ladder_test-trace\fss_per_draw_cap"
+if exist "%BUILD%\draw_ladder_test-trace\fss_pool_cap" rmdir "%BUILD%\draw_ladder_test-trace\fss_pool_cap"
 if exist "%BUILD%\draw_ladder_test-trace\disabled" rmdir "%BUILD%\draw_ladder_test-trace\disabled"
 if exist "%BUILD%\draw_ladder_test-trace\valid" rmdir "%BUILD%\draw_ladder_test-trace\valid"
 if exist "%BUILD%\draw_ladder_test-trace\terminalmatrix" rmdir "%BUILD%\draw_ladder_test-trace\terminalmatrix"
