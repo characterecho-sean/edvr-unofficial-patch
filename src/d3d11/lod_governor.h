@@ -237,6 +237,10 @@ enum class WorkSource : uint8_t { None, Caller, App };
 struct FrameSignals {
     uint32_t records = 0;       // builder calls since the last boundary
     bool onFoot = false;        // Status.json says on foot (journalOnFootKnown && journalOnFoot)
+    bool inFighter = false;     // Status.json says in fighter / SLV (Nomad) (Flags bit 25)
+    bool inSrv = false;         // Status.json says in SRV (Flags bit 26)
+    bool inTaxi = false;        // Status.json says in taxi (Flags2 bit 1)
+    bool isCockpitGateHeld() const noexcept { return onFoot || inFighter || inSrv || inTaxi; }
     Work work = Work::None;     // Valid only for a NEW sequence captured within 2 s
     WorkSource source = WorkSource::None;   // set with every new sample, valid or not
     bool callerAbsent = false;  // a version 5 frame without valid caller work (Work::Invalid)
@@ -520,11 +524,11 @@ private:
     uint64_t inertSinceMs_ = 0;
     double testedAtHold_ = 0;
     uint32_t inertHolds_ = 0, retries_ = 0, rearms_ = 0;
-    // On foot: the k in force when the hold began (0: none pending), and
+    // Cockpit gate: the k in force when the hold began (0: none pending), and
     // when the hold ended -- a frame with 200 records within 5 s of it
     // restores that k in one step.
-    bool onFoot_ = false;
-    int footSteps_ = 0;
+    bool held_ = false;
+    int heldSteps_ = 0;
     uint64_t boardedMs_ = 0;
 };
 
