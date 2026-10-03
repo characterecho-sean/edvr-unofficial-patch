@@ -18,6 +18,7 @@
 #include "perf_monitor.h"   // the feature's creation is an event with a duration
 #include "gpu_timing.h"
 #include "gpu_adapter_name.h"  // adapterName -- shared with fsr3_engine.cpp
+#include "dlss_runtime_info.h"
 
 #ifdef EDVR_HAVE_NGX
 // NVIDIA's SDK, as shipped: nvsdk_ngx.h declares the D3D11 entry points,
@@ -492,6 +493,10 @@ bool ensureFeature(ID3D11DeviceContext* ctx, int eye, uint32_t w, uint32_t h,
             if (reason) *reason = g_reason;
             return false;
         }
+        // This cold diagnostic runs only after a real feature was created and
+        // after createMs was sampled above; it does not probe the runtime on
+        // evaluation or change the creation duration.
+        dlss_runtime_info::reportAfterSuccessfulFeatureCreation();
         f.w = w;
         f.h = h;
         f.outW = outW;

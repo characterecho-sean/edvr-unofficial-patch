@@ -560,6 +560,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\dlaa.cpp" ^
+    "src\d3d11\dlss_runtime_info.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
     "src\d3d11\flat_sharpen.cpp" ^
@@ -3172,4 +3173,39 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: UI hologram test build failed & exit /b 1 )
 "%OBJ%\uiholo\ui_holo_test.exe" --dry-run || exit /b 1
 "%OBJ%\uiholo\ui_holo_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_dlss_runtime_info_test
+echo [edvr] === mapped DLSS runtime metadata regression ===
+if not exist "%OBJ%\dlssruntimeinfo" mkdir "%OBJ%\dlssruntimeinfo"
+cl.exe /nologo /LD /O2 /MT /std:c++17 /EHsc /W4 ^
+    /Fo"%OBJ%\dlssruntimeinfo\\" ^
+    "tools\dlss_runtime_info_test\no_version_module.cpp" ^
+    /link /INCREMENTAL:NO /OUT:"%BUILD%\dlss_no_version_fixture.dll" /IMPLIB:"%OBJ%\dlssruntimeinfo\no_version_module.lib"
+if errorlevel 1 ( echo [edvr] ERROR: DLSS no-version fixture build failed & exit /b 1 )
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /DEDVR_DLSS_RUNTIME_INFO_TEST ^
+    /Fo"%OBJ%\dlssruntimeinfo\\" /Fe"%BUILD%\dlss_runtime_info_test.exe" ^
+    "tools\dlss_runtime_info_test\dlss_runtime_info_test.cpp" ^
+    "src\d3d11\dlss_runtime_info.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: DLSS runtime info test build failed & exit /b 1 )
+"%BUILD%\dlss_runtime_info_test.exe" --dry-run || exit /b 1
+"%BUILD%\dlss_runtime_info_test.exe" --self-test "%BUILD%\dlss_no_version_fixture.dll" || exit /b 1
+exit /b 0
+
+
+
+:rig_draw_cpu_window_control_test
+echo [edvr] === symmetric control timed-draw denominator ===
+if not exist "%OBJ%\drawcpucontrol" mkdir "%OBJ%\drawcpucontrol"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /I"src\d3d11" ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\drawcpucontrol\\" /Fe"%BUILD%\draw_cpu_window_control_test.exe" ^
+    "tools\draw_cpu_window_control_test\draw_cpu_window_control_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: control denominator test build failed & exit /b 1 )
+"%BUILD%\draw_cpu_window_control_test.exe" --dry-run || exit /b 1
+"%BUILD%\draw_cpu_window_control_test.exe" --self-test "src\d3d11\perf_monitor.cpp" "src\d3d11\perf_monitor.h" "src\d3d11\vscreen.cpp" || exit /b 1
 exit /b 0

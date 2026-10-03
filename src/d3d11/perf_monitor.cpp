@@ -36,6 +36,7 @@
 #include "native_perf_history.h"
 #include "native_benchmark_collector.h"
 #include "native_render_labels.h"
+#include "draw_cpu_window.h"
 #include "../common/native_render_settings.h"
 #include "../common/config.h"
 
@@ -183,6 +184,7 @@ struct State {
     double   drawWindowMs = 0.0;
     float    drawWindowMaxMs = 0.0f;
     uint32_t drawWindowSamples = 0;
+    draw_cpu::Window drawCpuWindow;
 
     // The Present block noted by the swapchain hook, for the frame about
     // to be ringed.
@@ -1132,16 +1134,30 @@ void perfMonitorFrame(ID3D11Device* dev) {
         s.drawWindowMs += s.drawsMsRunning;
         s.drawWindowMaxMs = std::max(s.drawWindowMaxMs, s.drawsMsRunning);
         ++s.drawWindowSamples;
+        s.drawCpuWindow.closeFrame(true, s.drawWholeTicks, s.drawRealTicks);
+    } else {
+        s.drawCpuWindow.closeFrame(false, 0, 0);
     }
     // Reuse the existing sampled clocks; do not time every draw just to
     // explain a settlement's many thousands of hook invocations. Average
     // only measured frames, never the held value copied into the ring.
     if (s.frameNo % 1800 == 0) {
-        Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); excludes forwarded game draw time, includes EDVR reissues; zero samples means unavailable. Each sampled frame's figure is estimated from every %uth draw, scaled by %u.",
-            s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
-            double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
-            unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride));
+        if (s.drawCpuWindow.hasTimedDraws() && qpcFrequency() > 0) {
+            Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); %.6f ms per timed draw sample across %llu samples; subtracts the first forwarding interval, including indexed-instanced weapon-motion reissue; includes later EDVR reissues; not total EDVR CPU. Frame totals estimate every %uth draw scaled by %u; per-draw mean uses the observed timed-sample denominator.",
+                s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
+                double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
+                s.drawCpuWindow.meanMs(static_cast<std::uint64_t>(qpcFrequency())),
+                static_cast<unsigned long long>(s.drawCpuWindow.windowTimedDraws),
+                unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride));
+        } else {
+            Log::get().note("draw hook CPU: 1800-frame window ending %u; %.3f ms/sampled frame mean, %.3f ms max, %u sampled frames (one in %u); per-timed-draw mean unavailable (%llu valid timed draw samples); subtracts the first forwarding interval, including indexed-instanced weapon-motion reissue; includes later EDVR reissues; not total EDVR CPU. Frame totals estimate every %uth draw scaled by %u.",
+                s.frameNo, s.drawWindowSamples ? s.drawWindowMs / s.drawWindowSamples : 0.0,
+                double(s.drawWindowMaxMs), s.drawWindowSamples, unsigned(kDrawSampleEvery),
+                static_cast<unsigned long long>(s.drawCpuWindow.windowTimedDraws),
+                unsigned(kPerfMonitorDrawTimeStride), unsigned(kPerfMonitorDrawTimeStride));
+        }
         s.drawWindowMs = 0.0; s.drawWindowMaxMs = 0.0f; s.drawWindowSamples = 0;
+        s.drawCpuWindow.resetWindow();
     }
     f.cpuDrawsMs = s.drawsMsRunning;
     s.drawWholeTicks = s.drawRealTicks = 0;
@@ -1216,6 +1232,7 @@ void perfMonitorNotePresentWait(double ms) {
 void perfMonitorDrawTicks(int64_t wholeTicks, int64_t realTicks) {
     if (wholeTicks > 0) g_s.drawWholeTicks += wholeTicks;
     if (realTicks > 0) g_s.drawRealTicks += realTicks;
+    g_s.drawCpuWindow.noteDraw(wholeTicks);
 }
 
 void perfMonitorSetActive(bool active) {
