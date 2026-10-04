@@ -186,11 +186,27 @@ struct State {
     bool untrustedUnknown = false;
     struct UnclassifiedPool {
         const void* depth = nullptr;
+        const void* color = nullptr, *b1 = nullptr;
+        uint64_t vs = 0, ps = 0, cameraHash = 0, writeEpoch = 0;
+        uint32_t firstSeq = 0, writeSeq = 0, width = 0, height = 0;
         bool hasCamera = false;
         unsigned char camera[kFlatCameraBytes]{};
     } unclassifiedPool[64]{};
+    UnclassifiedPool unclassifiedOverflowFirst{};
     uint32_t unclassifiedPoolUsed = 0;
     bool unclassifiedPoolOverflow = false;
+    struct UntrustedNomineeDiagnostic {
+        uint64_t vs = 0, ps = 0;
+        uint32_t bits = 0;
+    } untrustedNomineeDiagnostics[32]{};
+    uint32_t untrustedNomineeDiagnosticsUsed = 0, untrustedNomineeDiagnosticsDropped = 0;
+    bool untrustedStickyDiagnostic[2]{};
+    struct UnclassifiedConsumerDiagnostic {
+        uint64_t vs = 0, ps = 0;
+        uint32_t bits = 0;
+    } unclassifiedConsumerDiagnostics[16]{};
+    uint32_t unclassifiedConsumerDiagnosticsUsed = 0, unclassifiedConsumerDiagnosticsDropped = 0;
+    bool unclassifiedOverflowLogged = false;
     uint64_t untrustedAccepted = 0, untrustedRefused = 0, untrustedTreated = 0;
     uint32_t untrustedLines = 0;
     bool overlayFailureNoted = false;
@@ -2151,18 +2167,56 @@ static void hdrSelectAtTrigger(State& s) {
         [](uint64_t, uint64_t) { return true; },
         witnessSample?hdrAmbiguousSourceReport:nullptr,witnessSample?&s:nullptr,
         qualifiedUntrustedSource,&s);
-    if(s.untrusted.active() && sel.selected()) {
+    if(sel.selected()) {
         if(s.unclassifiedPoolOverflow) {
-            s.untrustedUnknown=true;
-            s.untrusted.invalidate("unclassified-source-table-overflow");
+            const auto& first=s.unclassifiedOverflowFirst;
+            if(!s.unclassifiedOverflowLogged) {
+                s.unclassifiedOverflowLogged=true;
+                Log::get().note("flat unclassified source table overflow at selected H: frame=%llu first-seq=%u VS=%016llX PS=%016llX color=%p depth=%p H-depth=%p b1=%p camera=%016llX has-camera=%u write=%llu/%u extent=%ux%u",
+                    (unsigned long long)s.prefix.frame,first.firstSeq,
+                    (unsigned long long)first.vs,(unsigned long long)first.ps,
+                    first.color,first.depth,sel.depth,first.b1,
+                    (unsigned long long)first.cameraHash,first.hasCamera?1u:0u,
+                    (unsigned long long)first.writeEpoch,first.writeSeq,first.width,first.height);
+            }
+            if(s.untrusted.active()) {
+                s.untrustedUnknown=true;
+                s.untrusted.invalidate("unclassified-source-table-overflow");
+            }
         }
         for(uint32_t i=0;i<s.unclassifiedPoolUsed;++i) {
             const auto& unknown=s.unclassifiedPool[i];
             if(unknown.depth!=sel.depth)continue;
-            if(!unknown.hasCamera ||
-               std::memcmp(unknown.camera,sel.camera,kFlatCameraBytes)!=0) {
-                s.untrustedUnknown=true;
-                s.untrusted.invalidate("unclassified-same-depth-source");
+            const bool sameCamera=unknown.hasCamera &&
+                std::memcmp(unknown.camera,sel.camera,kFlatCameraBytes)==0;
+            if(!sameCamera) {
+                const uint32_t bits=(unknown.hasCamera?1u:0u)|(unknown.depth==sel.depth?2u:0u);
+                bool distinct=true;
+                for(uint32_t j=0;j<s.unclassifiedConsumerDiagnosticsUsed;++j) {
+                    const auto& seen=s.unclassifiedConsumerDiagnostics[j];
+                    if(seen.vs==unknown.vs && seen.ps==unknown.ps && seen.bits==bits) {distinct=false;break;}
+                }
+                if(distinct && s.unclassifiedConsumerDiagnosticsUsed<16) {
+                    auto& seen=s.unclassifiedConsumerDiagnostics[s.unclassifiedConsumerDiagnosticsUsed++];
+                    seen.vs=unknown.vs;seen.ps=unknown.ps;seen.bits=bits;
+                    float alternate[6][4]{};
+                    const bool shape=unknown.hasCamera && flat_mono_detail::cameraShape(unknown.camera,alternate);
+                    const bool phase=shape && flatCameraCenteredPairAtPhase(sel.camera,alternate,
+                        s.phase.currentX,s.phase.currentY,sel.renderWidth,sel.renderHeight);
+                    Log::get().note("flat unclassified source at selected H: frame=%llu first-seq=%u VS=%016llX PS=%016llX color=%p depth=%p H-depth=%p b1=%p H-b1=%p camera=%016llX H-camera=%016llX has-camera=%u shape=%u phase-pair=%u near=%.9g H-near=%.9g write=%llu/%u extent=%ux%u H-extent=%ux%u",
+                        (unsigned long long)s.prefix.frame,unknown.firstSeq,
+                        (unsigned long long)unknown.vs,(unsigned long long)unknown.ps,
+                        unknown.color,unknown.depth,sel.depth,unknown.b1,sel.sceneConstants,
+                        (unsigned long long)unknown.cameraHash,(unsigned long long)sel.cameraHash,
+                        unknown.hasCamera?1u:0u,shape?1u:0u,phase?1u:0u,
+                        shape?alternate[3][2]:0.0f,sel.nearPlane,
+                        (unsigned long long)unknown.writeEpoch,unknown.writeSeq,
+                        unknown.width,unknown.height,sel.renderWidth,sel.renderHeight);
+                } else if(distinct)++s.unclassifiedConsumerDiagnosticsDropped;
+                if(s.untrusted.active()) {
+                    s.untrustedUnknown=true;
+                    s.untrusted.invalidate("unclassified-same-depth-source");
+                }
                 break;
             }
         }
@@ -2278,12 +2332,14 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     auto& s = state(); if (s.thread && !owner()) return;
     if(frame && frame%300==0 &&
        (s.untrustedAccepted || s.untrustedRefused || s.untrustedTreated)) {
-        Log::get().note("flat untrusted camera coverage summary: frame=%llu selected=%llu capture-refused=%llu actually-treated=%llu configured=%s effective-last=%s last-draws=%u last-ready=%u last-unknown=%u last-selector=%s last-failure=%s",
+        Log::get().note("flat untrusted camera coverage summary: frame=%llu selected=%llu capture-refused=%llu actually-treated=%llu configured=%s effective-last=%s last-draws=%u last-ready=%u last-unknown=%u nominee-witnesses=%u nominee-dropped=%u unclassified-witnesses=%u unclassified-dropped=%u last-selector=%s last-failure=%s",
             (unsigned long long)frame,(unsigned long long)s.untrustedAccepted,
             (unsigned long long)s.untrustedRefused,(unsigned long long)s.untrustedTreated,
             flatMonoResolveModeName(s.engine),
             flatMonoResolveModeName(s.hdrSelected.mixedCamera?FlatMonoResolveMode::Taa:s.engine),
             s.untrusted.drawCount(),s.untrusted.view()?1u:0u,s.untrustedUnknown?1u:0u,
+            s.untrustedNomineeDiagnosticsUsed,s.untrustedNomineeDiagnosticsDropped,
+            s.unclassifiedConsumerDiagnosticsUsed,s.unclassifiedConsumerDiagnosticsDropped,
             flatMonoReasonName(s.hdrSelected.reason),
             s.untrusted.failure()?s.untrusted.failure():"none");
         s.untrustedAccepted=s.untrustedRefused=s.untrustedTreated=0;
@@ -3525,10 +3581,25 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             }
         }
         if(!seen) {
-            if(s.unclassifiedPoolUsed==64)s.unclassifiedPoolOverflow=true;
+            if(s.unclassifiedPoolUsed==64) {
+                if(!s.unclassifiedPoolOverflow) {
+                    auto& entry=s.unclassifiedOverflowFirst;
+                    entry={};entry.depth=k.depth;entry.color=k.color;entry.b1=k.b1;
+                    entry.vs=k.vs;entry.ps=k.ps;entry.cameraHash=k.cameraHash;
+                    entry.writeEpoch=k.writeEpoch;entry.writeSeq=k.writeSeq;
+                    entry.firstSeq=s.prefix.sequence;entry.width=k.width;entry.height=k.height;
+                    entry.hasCamera=k.camera!=nullptr;
+                    if(k.camera)std::memcpy(entry.camera,k.camera,kFlatCameraBytes);
+                }
+                s.unclassifiedPoolOverflow=true;
+            }
             else {
                 auto& entry=s.unclassifiedPool[s.unclassifiedPoolUsed++];
                 entry.depth=k.depth;entry.hasCamera=k.camera!=nullptr;
+                entry.color=k.color;entry.b1=k.b1;entry.vs=k.vs;entry.ps=k.ps;
+                entry.cameraHash=k.cameraHash;entry.writeEpoch=k.writeEpoch;
+                entry.firstSeq=s.prefix.sequence;entry.writeSeq=k.writeSeq;
+                entry.width=k.width;entry.height=k.height;
                 if(k.camera)std::memcpy(entry.camera,k.camera,kFlatCameraBytes);
             }
         }
@@ -3544,8 +3615,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         // An unsupported alternate can be absent from the prefix's supported
         // source table. Latch it independently so the selector cannot treat
         // an apparently complete union as the entire mixed-camera scene.
-        if(!d.supported || !flat_mono_detail::fullViewport(k,k.width,k.height) ||
-           !flatRuntimeCameraCurrent(d,s.prefix.sequence+1,s.prefix.frame)) {
+        const bool preWorld=!s.namedDepth;
+        const bool fullViewport=flat_mono_detail::fullViewport(k,k.width,k.height);
+        const bool current=flatRuntimeCameraCurrent(d,s.prefix.sequence+1,s.prefix.frame);
+        const bool priorFailure=s.untrusted.failure()!=nullptr;
+        if(!d.supported || !fullViewport || !current) {
             s.untrustedUnknown=true;
             s.untrusted.invalidate("untrusted-alternate-unqualified");
         } else {
@@ -3560,6 +3634,49 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 k.vs,k.ps,d.camera);
             if(untrustedPlanned)untrustedCoverageActive.store(true,std::memory_order_release);
             else s.untrustedUnknown=true;
+        }
+        // Diagnostic only. Keep the first distinct shader/outcome signatures
+        // across frames and reserve one line for a good draw blocked by an
+        // earlier sticky failure. No context queries or per-draw row hashing.
+        const uint32_t bits=(preWorld?1u:0u)|(d.supported?2u:0u)|
+            (fullViewport?4u:0u)|(current?8u:0u)|
+            (priorFailure?16u:0u)|(untrustedPlanned?32u:0u);
+        const uint32_t stickyRole=preWorld?0u:1u;
+        const bool stickyGood=d.supported && fullViewport && current &&
+            priorFailure && !untrustedPlanned && !s.untrustedStickyDiagnostic[stickyRole];
+        bool distinct=true;
+        for(uint32_t i=0;i<s.untrustedNomineeDiagnosticsUsed;++i) {
+            const auto& seen=s.untrustedNomineeDiagnostics[i];
+            if(seen.vs==k.vs && seen.ps==k.ps && seen.bits==bits) {distinct=false;break;}
+        }
+        if(stickyGood)s.untrustedStickyDiagnostic[stickyRole]=true;
+        const bool emit=distinct && s.untrustedNomineeDiagnosticsUsed<32;
+        if(emit) {
+            auto& seen=s.untrustedNomineeDiagnostics[s.untrustedNomineeDiagnosticsUsed++];
+            seen.vs=k.vs;seen.ps=k.ps;seen.bits=bits;
+        } else if(distinct)++s.untrustedNomineeDiagnosticsDropped;
+        if(emit || stickyGood) {
+            float nearValue=0,namedNear=0;
+            std::memcpy(&nearValue,d.camera+(3*4+2)*sizeof(float),sizeof(float));
+            if(!preWorld)std::memcpy(&namedNear,s.namedCamera+(3*4+2)*sizeof(float),sizeof(float));
+            float drawRows[6][4]{},namedRows[6][4]{};
+            const bool drawShape=flat_mono_detail::cameraShape(d.camera,drawRows);
+            const bool namedShape=!preWorld && flat_mono_detail::cameraShape(s.namedCamera,namedRows);
+            const bool phasePair=drawShape && namedShape &&
+                flatCameraCenteredPairAtPhase(namedRows,drawRows,s.phase.currentX,s.phase.currentY,k.width,k.height);
+            Log::get().note("flat untrusted nominee: frame=%llu seq=%u check-q=%u VS=%016llX PS=%016llX role=%s supported=%u viewport=%u current=%u prior-failure=%u planned=%u color=%p depth=%p dsv=%p named-depth=%p b1=%p named-b1=%p camera=%016llX named-camera=%016llX draw-shape=%u named-shape=%u phase-pair=%u phase=(%.9g,%.9g) near=%.9g named-near=%.9g write=%llu/%u viewport-rect=%u:(%.1f,%.1f,%.1f,%.1f,%.2f,%.2f) extent=%ux%u failure=%s",
+                (unsigned long long)s.prefix.frame,s.prefix.sequence,s.prefix.sequence+1,
+                (unsigned long long)k.vs,(unsigned long long)k.ps,preWorld?"pre-world-family":"post-name-mismatch",
+                d.supported?1u:0u,fullViewport?1u:0u,current?1u:0u,
+                priorFailure?1u:0u,untrustedPlanned?1u:0u,k.color,k.depth,k.dsv,s.namedDepth,
+                k.b1,s.namedConstants,(unsigned long long)k.cameraHash,
+                (unsigned long long)(preWorld?0:flatCameraHash(s.namedCamera)),
+                drawShape?1u:0u,namedShape?1u:0u,phasePair?1u:0u,
+                s.phase.currentX,s.phase.currentY,
+                nearValue,namedNear,(unsigned long long)k.writeEpoch,k.writeSeq,
+                k.viewportCount,k.viewport[0],k.viewport[1],k.viewport[2],k.viewport[3],
+                k.viewport[4],k.viewport[5],k.width,k.height,
+                s.untrusted.failure()?s.untrusted.failure():"none");
         }
     }
     if(s.untrusted.active() && !s.untrusted.finished() &&

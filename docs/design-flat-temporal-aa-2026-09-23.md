@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** section 102's coverage/domain TAA fix INSTALLED, NOT FLOWN; full gate
-  passed. Diagnostic33 (101): covered 0 / 1020; survivors lack stencil16.
+- **State:** section 102 fix FLOWN, world AA still turns off. Capture refused
+  before any draw; domain-aware TAA did not run. See the latest entry in 102.
   Epic flat now has `v0.18.1-36-gb38eff13`; settings and DLSS preserved.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: one Epic
-  native-size test: same weapon drawn 10 seconds, holstered 10 seconds, no F10.
-  World AA should remain active; no diagnostic-only flight or stencil heuristic.
+- **Next:** section 102: build/install bounded nominee and consumer diagnostics.
+  One short run distinguishes unsupported pair, camera/viewport failure, sticky
+  prior refusal and unclassified source; no ownership relaxation or weapon matrix.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10381,3 +10381,44 @@ show selected and actually-treated mixed frames with effective TAA, and the
 configured backend should return after holstering. A selection without actual
 treatment or a capture refusal is distinguishable in those summaries. This
 tests the runtime integration; the GPU rigs do not claim a successful flight.
+
+### 2026-10-04: capture admission refused before TAA
+
+Sean flew the installed version and reported world AA still turns off.
+Verified log `edvr_gfx_20261004_153808.log`: `v0.18.1-36-gb38eff13`, build
+`6AC2C633`, linked 21:33:39 UTC. From frame41394 at 15:40:07.969, coverage
+reports draws0/ready0/unknown1, `untrusted-alternate-unqualified`. Every mixed
+coverage summary has selected0/actually-treated0. The fallback never ran.
+
+Ruled out: bad domain-TAA accumulation as this flight's cause, because no frame
+reached that path; capture admission failed first. The guard combines
+supported pair, full viewport and current camera checks, so its reason alone
+does not identify the failed condition. Source witnesses at frames42347/42407
+show the same early AACFDCF2FB9AD809/CF534B32F491561A pair current1/viewport1,
+layout1, matching world depth, with three/seven draws respectively. Investigate
+nomination scope and guard call order before weakening any ownership check.
+
+The existing camera validator accepts writeSeq <= drawSeq; passing sequence+1
+is not an equality failure. The runtime can nominate unsupported same-depth
+draws whose camera bytes differ from the first named source. The failure also
+appears while holstered AA is treated, so the failed candidate need not be the
+early measured weapon source. The current log cannot distinguish:
+
+- unsupported nominee: supported0, with its VS/PS and naming stage;
+- camera freshness/hash failure: current0, write epoch/sequence/hash evidence;
+- viewport failure: viewport0 with actual extent/range;
+- earlier sticky failure: valid nominee, plan refused with prior failure;
+- unclassified consumer: captured union, unknown same-depth source differs
+  from the authoritative HDR camera, or the bounded source table overflowed.
+
+Collect all five together in bounded automatic logs before changing production
+admission. No shader whitelist, settings change, forced F10 or per-weapon run.
+
+The bounded diagnostic is implemented: 32 ordinary distinct nominee signatures,
+one reserved valid-but-sticky report per pre-world/post-name role, 16 consumer
+source signatures and a first-overflow identity. Reports execute independently
+of successful capture, include camera-shape/phase comparisons and actual draw
+sequence, and summaries expose witness/drop counts. No capture policy changes.
+The absolute-path full build passed all gates with exit 0; receipt fingerprint
+`ff4fe85eee85f373000d844bc120e9a471a8052b1f96e9eb35544eb244b42d19`.
+Clean-commit promotion and Epic installation are pending.
