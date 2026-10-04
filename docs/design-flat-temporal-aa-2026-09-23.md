@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** per-draw diagnostic33 FLOWN on Epic (101), both counts measured.
-  One early draw per sample: covered 0 / 1020, survivors lack stencil16.
-  Installed/latest `v0.18.1-33-g2657c1f4`; AA fix remains open.
+- **State:** section 102's coverage/domain TAA fix BUILT, NOT FLOWN; full gate
+  passed. Diagnostic33 (101): covered 0 / 1020; survivors lack stencil16.
+  Epic still has `v0.18.1-33-g2657c1f4` pending clean-commit promotion.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 101: audit generic foreground ownership/history handling
-  against the measured small contributor and late HDR isolation. No new flight
-  requested yet. Final depth equality remains non-exclusive ownership evidence.
+- **Next:** section 102: promote/install the validated source, then one Epic
+  native-size test: same weapon drawn 10 seconds, holstered 10 seconds, no F10.
+  World AA should remain active; no diagnostic-only flight or stencil heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10317,3 +10317,55 @@ the source conflict, measure the same subset or investigate the derivative
 seal refusal. The next validation flight should exercise implemented generic
 handling rather than another speculative marker heuristic. AA fix still open;
 no C++ or installed-package change from this flight analysis.
+
+## 102. Preserve world AA with conservative camera-domain exclusion (2026-10-04)
+
+Sean authorized implementation after the measured section101 flight. The
+required property is a trusted subset of world pixels, not an exclusive final
+owner for every pixel. A persistent R8 MRT7 mask unions passing fragments of
+every qualified alternate-camera contributor. Later world overdraw may retain
+a mark: that sacrifices AA locally but cannot assign world motion/history to
+foreground. The original shader still draws once with its depth/stencil and
+color behavior. Clear once per frame; no per-draw full-size copy or dispatch.
+
+The consumer must prove all conflicting source records were captured, with
+current camera/phase/pose, shared depth, native render/output extent and valid
+HDR lineage. Unknown writers, capture/state failure, mutation or a missing
+record preserve refusal. Existing late HDR isolation is retained. Its suffix
+forbids depth writes, so the clean color snapshot and final depth plane still
+match; no additional depth copy is necessary.
+
+SDK history has no proven per-pixel camera-domain reset. Modern NGX presets
+ignore the available bias-current-color mask (`dlaa.cpp`); AMD documents FSR
+reactivity as reducing history influence rather than removing it. Qualified
+mixed-camera frames therefore use EDVR TAA internally, with foreground current
+color. Single-camera frames retain the configured backend, with history reset
+on transition. No INI key, setting change, per-weapon table or VR change.
+
+TAA checks all four current bilinear taps against the untrusted union and
+writes current color/domain0 when any tap is untrusted. Valid world output gets
+domain1 even if this frame cannot reuse history for another reason. All four
+previous bilinear taps must be domain1 before history is sampled, in addition
+to existing depth/motion/rejection checks. The current 3x3 clamp omits untrusted
+neighbors. Output-domain ping-pong follows color/depth history and is reset on
+entry/exit, resize, failure and mode transition; even a configured TAA mode
+must reset on coverage-presence changes. Null coverage preserves existing
+never-mixed and VR arithmetic. Foreground uses no world near/FOV or motion, so
+its raw depth need not be converted for this current-color-only treatment.
+
+Environment: Epic flat, native3840x2160 from the verified section101 flight;
+no VR runtime/headset dependency. Initial admission requires native-size HDR.
+Tests must exercise the actual capture and TAA shaders: original rendering
+preserved, stencil16 cleared, equal-depth world overdraw remains conservatively
+marked, every current/previous bilinear tap checked, coincident-depth history
+refused, world history retained outside coverage, late overlay preserved and
+entry/exit reset exactly once. Targeted validation passes: generated shader
+contracts, resolver syntax, the WARP resolver rig and the temporal policy rig.
+The production capture test retains its 105-pixel union across an equal-depth
+world pass and a second captured draw, with original color/depth/stencil bytes
+preserved. Missing records, unknown mutation and the 128-draw cap fail closed.
+Both same-mode history transitions reset once, then world history resumes.
+The absolute-path full build completed with exit 0 and all gates passed.
+Receipt input fingerprint:
+`a316677aaf53f275b41c228c4d01e961d2b3cd48508705d4f5036644cf69dd56`.
+Installed package remains diagnostic33 pending clean-commit promotion.

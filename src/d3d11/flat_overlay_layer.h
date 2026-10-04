@@ -262,7 +262,8 @@ public:
     }
     bool beginDraw(ID3D11DeviceContext* ctx,uint64_t frame,ID3D11Texture2D* hdr,
                     ID3D11DepthStencilView* expectedDsv,const char** reason=nullptr,
-                    bool diagnosticTypelessPool=false,bool diagnosticCoverageOnly=false) {
+                    bool diagnosticTypelessPool=false,bool diagnosticCoverageOnly=false,
+                    bool persistentCoverage=false) {
         if (reason) *reason=nullptr;
         if (!ctx || !hdr || !expectedDsv || !frame || frame_!=frame) return refuse("draw-frame-or-source",reason);
         if (!refusal_.empty()) return refuse(refusal_.c_str(),reason);
@@ -323,7 +324,7 @@ public:
         Ptr<ID3D11PixelShader> patched=patchedShader(dev.Get(),game.ps.Get(),shaderWhy);
         if (!patched) return refuse(shaderWhy.c_str(),reason);
         if (!ensureResources(dev.Get(),hdr,hd,viewFormat,diagnosticCoverageOnly,reason)) return false;
-        if (!completedDraws_ || diagnosticCoverageOnly) {
+        if (!completedDraws_ || (diagnosticCoverageOnly && !persistentCoverage)) {
             const FLOAT zero[4]{};
             ctx->ClearRenderTargetView(coverageRtv_.Get(),zero);
             if (!diagnosticCoverageOnly) ctx->CopyResource(clean_.Get(),hdr);

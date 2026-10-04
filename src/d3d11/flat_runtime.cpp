@@ -16,6 +16,7 @@
 #include "flat_draw_capture.h"
 #include "flat_weapon_footprint.h"
 #include "flat_overlay_layer.h"
+#include "flat_untrusted_coverage.h"
 #include "flat_foreground_probe.h"
 #include "flat_pixel_capture_policy.h"
 #include "flat_local_reject.h"
@@ -78,6 +79,7 @@ std::atomic<uint64_t> mapBouncePresentEpoch{1};
 std::atomic<bool> foreignWork{false};
 std::atomic<bool> overlaySuffixActive{false};
 std::atomic<bool> foregroundProbeActive{false};
+std::atomic<bool> untrustedCoverageActive{false};
 std::atomic<bool> projectionAuditRequested{false};
 template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
 // F10-only ingress audit. Keep the counters outside State: a draw on a foreign
@@ -180,6 +182,17 @@ struct State {
     FlatWeaponFootprint weaponFootprint;
     FlatOverlayLayer overlay;
     FlatForegroundProbe foreground;
+    FlatUntrustedCoverage untrusted;
+    bool untrustedUnknown = false;
+    struct UnclassifiedPool {
+        const void* depth = nullptr;
+        bool hasCamera = false;
+        unsigned char camera[kFlatCameraBytes]{};
+    } unclassifiedPool[64]{};
+    uint32_t unclassifiedPoolUsed = 0;
+    bool unclassifiedPoolOverflow = false;
+    uint64_t untrustedAccepted = 0, untrustedRefused = 0, untrustedTreated = 0;
+    uint32_t untrustedLines = 0;
     bool overlayFailureNoted = false;
     uint64_t overlayPlannedWindow = 0, overlayMarkedWindow = 0;
     uint64_t overlayIsolatedWindow = 0, overlayRefusedWindow = 0;
@@ -1866,7 +1879,11 @@ void flatRuntimeResize() {
     overlaySuffixActive.store(false,std::memory_order_release);
     s.overlay.reset();
     s.foreground.reset();
+    s.untrusted.reset();
+    s.untrustedUnknown=false;
+    s.unclassifiedPoolUsed=0;s.unclassifiedPoolOverflow=false;
     foregroundProbeActive.store(false,std::memory_order_release);
+    untrustedCoverageActive.store(false,std::memory_order_release);
     s.overlayFailureNoted=false;
     s.weaponFootprint.cancel("resize-or-stop");flatMonoResolveReset();
     // A reset (or the mode turned off) ends a stand-down: the new contract may well be
@@ -2119,14 +2136,50 @@ static void hdrAmbiguousSourceReport(const FlatMonoFrameInput& in, const void* h
 // At the trigger draw, in the draw scope: the route's selection over the prefix so far, its verdict into the stand-down
 // (key auto only: with it off the route decides nothing), the window token, the once-a-session trigger line and the
 // trace's resolve marker. The treatment itself follows in FlatRuntimeDrawScope::treatHdr.
+static bool qualifiedUntrustedSource(const FlatContractRecord& record,
+                                     const unsigned char* worldCamera,void* user) {
+    auto* s=static_cast<State*>(user);
+    return s && s->untrusted.qualifies(record,worldCamera,
+                                       s->phase.currentX,s->phase.currentY);
+}
 static void hdrSelectAtTrigger(State& s) {
     const bool witnessEligible=overlayOpen(s) && s.overlay.markedDraws()!=0;
     if(witnessEligible)++s.sourceWitnessEligibleWindow;
     const bool witnessSample=witnessEligible && flatHdrShouldSampleAmbiguousSource(
         s.prefix.frame,s.sourceWitnessFirstFrame,s.sourceWitnessCaptured);
-    const FlatMonoFrame sel = s.hdrSelected = flatSelectHdrRoute(s.prefix, s.hdr,
+    FlatMonoFrame sel = flatSelectHdrRoute(s.prefix, s.hdr,
         [](uint64_t, uint64_t) { return true; },
-        witnessSample?hdrAmbiguousSourceReport:nullptr,witnessSample?&s:nullptr);
+        witnessSample?hdrAmbiguousSourceReport:nullptr,witnessSample?&s:nullptr,
+        qualifiedUntrustedSource,&s);
+    if(s.untrusted.active() && sel.selected()) {
+        if(s.unclassifiedPoolOverflow) {
+            s.untrustedUnknown=true;
+            s.untrusted.invalidate("unclassified-source-table-overflow");
+        }
+        for(uint32_t i=0;i<s.unclassifiedPoolUsed;++i) {
+            const auto& unknown=s.unclassifiedPool[i];
+            if(unknown.depth!=sel.depth)continue;
+            if(!unknown.hasCamera ||
+               std::memcmp(unknown.camera,sel.camera,kFlatCameraBytes)!=0) {
+                s.untrustedUnknown=true;
+                s.untrusted.invalidate("unclassified-same-depth-source");
+                break;
+            }
+        }
+    }
+    if(s.untrustedUnknown && sel.selected())sel.reason=FlatMonoReason::AmbiguousSource;
+    s.hdrSelected=sel;
+    s.untrusted.consumer();
+    untrustedCoverageActive.store(false,std::memory_order_release);
+    if(s.untrusted.active() || s.untrustedUnknown) {
+        if(sel.selected() && sel.mixedCamera)++s.untrustedAccepted;
+        else ++s.untrustedRefused;
+        if(s.untrustedLines++<16)
+            Log::get().note("flat untrusted camera coverage: frame=%llu draws=%u ready=%u unknown=%u mixed=%u selector=%s failure=%s; union marks original passing fragments even after world overdraw",
+                (unsigned long long)s.prefix.frame,s.untrusted.drawCount(),s.untrusted.view()?1u:0u,
+                s.untrustedUnknown?1u:0u,sel.mixedCamera?1u:0u,flatMonoReasonName(sel.reason),
+                s.untrusted.failure()?s.untrusted.failure():"none");
+    }
     // Passive foreground evidence runs even when the selector rightly refuses
     // the mixed-camera source. Use the same H target and camera record the
     // selector just saw; no later copy or treatment path can shadow it.
@@ -2156,7 +2209,8 @@ static void hdrSelectAtTrigger(State& s) {
         // it; those are the copy's, by its whitelist or by its structure). Its refusals add nothing: merged as themselves they
         // outrank the copy stage's structural one, and at R < D every frame the copy route refuses would read as transient, so
         // the stand-down and the F8 warning would never start.
-        const FlatFrameSeen routeSeen = flatHdrTriggerSeen(sel, s.engine);
+        const FlatFrameSeen routeSeen = flatHdrTriggerSeen(sel,
+            sel.mixedCamera?FlatMonoResolveMode::Taa:s.engine);
         if (routeSeen == FlatFrameSeen::Treatable) { s.frameSeen = FlatFrameSeen::Treatable; s.frameReason = sel.reason; }
     }
     {
@@ -2222,6 +2276,18 @@ void flatRuntimeWeaponFootprintBeforePresent(IDXGISwapChain* swap,UINT flags) {
 void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT flags) {
     if (!runtimeFlatProfile() || !swap || (flags & DXGI_PRESENT_TEST)) return;
     auto& s = state(); if (s.thread && !owner()) return;
+    if(frame && frame%300==0 &&
+       (s.untrustedAccepted || s.untrustedRefused || s.untrustedTreated)) {
+        Log::get().note("flat untrusted camera coverage summary: frame=%llu selected=%llu capture-refused=%llu actually-treated=%llu configured=%s effective-last=%s last-draws=%u last-ready=%u last-unknown=%u last-selector=%s last-failure=%s",
+            (unsigned long long)frame,(unsigned long long)s.untrustedAccepted,
+            (unsigned long long)s.untrustedRefused,(unsigned long long)s.untrustedTreated,
+            flatMonoResolveModeName(s.engine),
+            flatMonoResolveModeName(s.hdrSelected.mixedCamera?FlatMonoResolveMode::Taa:s.engine),
+            s.untrusted.drawCount(),s.untrusted.view()?1u:0u,s.untrustedUnknown?1u:0u,
+            flatMonoReasonName(s.hdrSelected.reason),
+            s.untrusted.failure()?s.untrusted.failure():"none");
+        s.untrustedAccepted=s.untrustedRefused=s.untrustedTreated=0;
+    }
     if (drawIngressAudit.active.load(std::memory_order_acquire) &&
         drawIngressAudit.framesLeft && --drawIngressAudit.framesLeft == 0)
         reportDrawIngress("complete");
@@ -2540,6 +2606,10 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if (s.work != FlatWork::Paused) s.prefix = FlatRuntimePrefix{};
     s.prefix.frame = frame + 1;
     s.overlay.beginFrame(frame + 1);
+    s.untrusted.beginFrame(frame + 1);
+    s.untrustedUnknown=false;
+    s.unclassifiedPoolUsed=0;s.unclassifiedPoolOverflow=false;
+    untrustedCoverageActive.store(false,std::memory_order_release);
     overlaySuffixActive.store(false,std::memory_order_release);
     s.overlayFailureNoted = false;
     // Trace ring: seal the frame that just ended with the hash over every
@@ -2884,6 +2954,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 // What a write to a resource does to the prefix model, the camera table and the shadows -- the
 // body flatRuntimeWritten, Map and Update share, timed by the caller's scope.
 static void resourceWritten(State& s, ID3D11Resource* res) {
+    if(s.untrusted.active())s.untrusted.noteMutation(res);
     if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
         const auto& t=s.prefix.targets[i];
         if(t.overlayOpen && (t.resource==res || t.overlayDepth==res)) {
@@ -2928,6 +2999,10 @@ const char* overlayMutationRoleName(FlatOverlayMutationRole role) {
 }
 }
 void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMutationOp op) {
+    if(untrustedCoverageActive.load(std::memory_order_acquire)) {
+        if(!owner())foreignWork.store(true,std::memory_order_release);
+        else state().untrusted.noteMutation(resource);
+    }
     if(foregroundProbeActive.load(std::memory_order_acquire)) {
         if(!owner())foreignWork.store(true,std::memory_order_release);
         else if(resource)state().foreground.noteDepthMutation(resource);
@@ -2952,7 +3027,8 @@ void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMut
 }
 void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op) {
     if (!overlaySuffixActive.load(std::memory_order_acquire) &&
-        !foregroundProbeActive.load(std::memory_order_acquire)) return;
+        !foregroundProbeActive.load(std::memory_order_acquire) &&
+        !untrustedCoverageActive.load(std::memory_order_acquire)) return;
     if (!owner()) { foreignWork.store(true,std::memory_order_release); return; }
     Ptr<ID3D11Resource> resource;
     if (view) view->GetResource(&resource);
@@ -2960,8 +3036,11 @@ void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op) 
 }
 void flatRuntimeOverlayForeignMutation() {
     if (!overlaySuffixActive.load(std::memory_order_acquire) &&
-        !foregroundProbeActive.load(std::memory_order_acquire)) return;
+        !foregroundProbeActive.load(std::memory_order_acquire) &&
+        !untrustedCoverageActive.load(std::memory_order_acquire)) return;
     foreignWork.store(true,std::memory_order_release);
+    if(owner() && untrustedCoverageActive.load(std::memory_order_relaxed))
+        state().untrusted.invalidate("untrusted-foreign-mutation");
     if(owner() && foregroundProbeActive.load(std::memory_order_relaxed))state().foreground.noteForeign();
     if (owner() && overlayOpen(state())) overlayFail(state(),"overlay-foreign-mutation");
 }
@@ -3434,6 +3513,59 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // FP16 image intermediates use the same scene-size predicate; their
     // producer admission remains separate from the format-23/26 motion source.
     const bool sceneExtent = flatContractKind(false, k.color, k.depth, k.width, k.height, k.format==9?26:k.format, s.prefix.width, s.prefix.height, false) == kFlatContractScreen;
+    if(s.work==FlatWork::Full && s.hdrKey==FlatHdrKey::Auto && s.jitterWanted &&
+       !s.untrusted.finished() && !d.supported && k.format==23 && sceneExtent &&
+       k.color && k.depth) {
+        bool seen=false;
+        for(uint32_t i=0;i<s.unclassifiedPoolUsed;++i) {
+            const auto& prior=s.unclassifiedPool[i];
+            if(prior.depth==k.depth && prior.hasCamera==(k.camera!=nullptr) &&
+               (!k.camera || std::memcmp(prior.camera,k.camera,kFlatCameraBytes)==0)) {
+                seen=true;break;
+            }
+        }
+        if(!seen) {
+            if(s.unclassifiedPoolUsed==64)s.unclassifiedPoolOverflow=true;
+            else {
+                auto& entry=s.unclassifiedPool[s.unclassifiedPoolUsed++];
+                entry.depth=k.depth;entry.hasCamera=k.camera!=nullptr;
+                if(k.camera)std::memcpy(entry.camera,k.camera,kFlatCameraBytes);
+            }
+        }
+    }
+    const bool alternateNominee=s.work==FlatWork::Full && s.hdrKey==FlatHdrKey::Auto &&
+        !s.untrusted.finished() &&
+        s.jitterWanted && k.format==23 && sceneExtent &&
+        k.depth && k.dsv && k.color && k.camera &&
+        ((!s.namedDepth && weaponMotionFamilyVs(k.vs)) ||
+         (s.namedDepth==k.depth &&
+          std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))!=0));
+    if(alternateNominee) {
+        // An unsupported alternate can be absent from the prefix's supported
+        // source table. Latch it independently so the selector cannot treat
+        // an apparently complete union as the entire mixed-camera scene.
+        if(!d.supported || !flat_mono_detail::fullViewport(k,k.width,k.height) ||
+           !flatRuntimeCameraCurrent(d,s.prefix.sequence+1,s.prefix.frame)) {
+            s.untrustedUnknown=true;
+            s.untrusted.invalidate("untrusted-alternate-unqualified");
+        } else {
+            // The prior world producer may have left MRT6 and a substituted
+            // PS bound lazily. Restore the game's state before MRT7 snapshots
+            // its PS, blend and render-target binding.
+            flatRuntimeSubstitution(context,FlatSubstEvent::kOtherDraw);
+            untrustedPlanned=s.untrusted.plan(s.prefix.frame,s.prefix.sequence,
+                static_cast<ID3D11Texture2D*>(const_cast<void*>(k.color)),
+                static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),
+                static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv)),
+                k.vs,k.ps,d.camera);
+            if(untrustedPlanned)untrustedCoverageActive.store(true,std::memory_order_release);
+            else s.untrustedUnknown=true;
+        }
+    }
+    if(s.untrusted.active() && !s.untrusted.finished() &&
+       k.format==23 && sceneExtent && k.color &&
+       k.depth==s.untrusted.depth() && !d.supported && !k.camera)
+        s.untrustedUnknown=true;
     const bool foregroundCandidate=d.supported && weaponMotionFamilyVs(k.vs) && k.camera && k.depth &&
         k.kind==kFlatContractPool && k.format==23 && sceneExtent &&
         flat_mono_detail::fullViewport(k,k.width,k.height);
@@ -3462,7 +3594,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         std::memcpy(evidence.camera,d.camera,sizeof(evidence.camera));
         evidence.phaseX=s.phase.currentX;evidence.phaseY=s.phase.currentY;
     }
-    if(foregroundCandidate) {
+    if(foregroundCandidate && !alternateNominee) {
         foregroundPlanned=s.foreground.plan(s.prefix.frame,s.prefix.sequence,
             static_cast<ID3D11Texture2D*>(const_cast<void*>(k.color)),
             static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),
@@ -3889,16 +4021,17 @@ bool FlatRuntimeDrawScope::recover(const char* temporalReason) {
 // its own, and counts as the refusal it is; if even that fails H is still the game's and the frame is declined.
 void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvSlot) {
     auto& s = state();
+    const FlatMonoResolveMode effectiveMode=selected.mixedCamera?FlatMonoResolveMode::Taa:s.engine;
     // Crash-safe breadcrumbs (flat_hdr_crumbs.h, edvr_breadcrumbs.txt): the route took this frame. The first frames that
     // reach the resolver write a crumb before and after every step from here to the frame's Present, so a session that
     // ends inside the treatment names the step; after the third, this is one compare. They change nothing the route does.
-    hdrCrumbAdmit(s.prefix.frame, flatMonoResolveModeName(s.engine));
+    hdrCrumbAdmit(s.prefix.frame, flatMonoResolveModeName(effectiveMode));
     ++s.hdrWindow.steps.admitted;
     // The frame reaches the resolver at most once, whichever call takes it (the census counts it once, the crumbs number it).
     bool reachedCounted = false;
     const auto reach = [&](const char* step) {
         if (!reachedCounted) { reachedCounted = true; ++s.hdrWindow.steps.reached; }
-        hdrCrumbReach(s.prefix.frame, flatMonoResolveModeName(s.engine), step);
+        hdrCrumbReach(s.prefix.frame, flatMonoResolveModeName(effectiveMode), step);
     };
     const auto decline = [&](const char* why) {
         s.hdrWindow.lastVerdict = why; ++s.hdrWindow.declined;
@@ -3919,7 +4052,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     if (selected.depth != s.namedDepth || selected.sceneConstants != s.namedConstants) {
         decline("producer-source-identity-mismatch"); return;
     }
-    if (!flatHdrRouteEvaluatesAtRender(s.engine, selected.renderWidth, selected.renderHeight,
+    if (!flatHdrRouteEvaluatesAtRender(effectiveMode, selected.renderWidth, selected.renderHeight,
                                        selected.outputWidth, selected.outputHeight)) {
         decline("route-does-not-evaluate-at-render-size"); return;
     }
@@ -3982,13 +4115,19 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return false;
     };
     FlatMonoResolveFrame f{}; f.color = hdrView.Get(); f.depth = s.depthView.Get(); f.hdr = true;
+    if(selected.mixedCamera) {
+        f.untrustedCameraCoverage=s.untrusted.view();
+        if(!f.untrustedCameraCoverage) {
+            decline("untrusted-camera-coverage-unavailable");return;
+        }
+    }
     if(protectedOverlay) {
         f.cleanColor=s.overlay.cleanHdrView();
         f.overlayCoverage=s.overlay.coverageView();
     }
     f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight;
-    f.frame = s.prefix.frame; f.mode = s.engine;
+    f.frame = s.prefix.frame; f.mode = effectiveMode;
     nativeScale.store(true, std::memory_order_release);   // the route's gate is R >= D
     f.configuredDlssPreset = s.preset;
     f.staticScene = flatFrameThroughMenuCopy(s.prefix, selected.hdr);
@@ -4084,6 +4223,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     }
     s.reason = nonzeroPhase(s) ? "treated-jittered-hdr" : "treated-zero-jitter-hdr";
     if(protectedOverlay) ++s.overlayIsolatedWindow;
+    if(selected.mixedCamera)++s.untrustedTreated;
     s.previous = selected; s.previousColor = hdrResource; s.havePrevious = s.treated = s.hdrTreated = s.temporalAccepted = true;
     s.lastMs = now; ++s.accepted; ++s.hdrWindow.treated; s.hdrWindow.lastVerdict = s.reason;
     s.previousRowsX = f.rowsJitterX; s.previousRowsY = f.rowsJitterY;
@@ -4096,6 +4236,10 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
 }
 void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
     if(!ctx)return;
+    if(untrustedPlanned) {
+        untrustedStarted=state().untrusted.beginDraw(ctx,state().prefix.frame);
+        if(!untrustedStarted)state().untrustedUnknown=true;
+    }
     if(foregroundPlanned) foregroundStarted=state().foreground.beginDraw(ctx,state().prefix.frame);
     if(overlayPlanned) {
         auto& s=state();
@@ -4115,6 +4259,11 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         weaponDrawStartInstance,indirectArgs,indirectOffset);
 }
 void FlatRuntimeDrawScope::endActualDraw() {
+    if(untrustedStarted&&ctx) {
+        state().untrusted.endDraw(ctx);
+        untrustedEnded=true;untrustedStarted=false;
+        if(state().untrusted.failure())state().untrustedUnknown=true;
+    }
     if(foregroundPlanned&&ctx) {
         state().foreground.endDraw(ctx);
         foregroundEnded=true;foregroundStarted=false;
@@ -4132,6 +4281,8 @@ void FlatRuntimeDrawScope::endActualDraw() {
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if (!ctx) return; FlatComputeInternalScope guard;
     flatcpu::Scope shell(flatcpu::kOther);
+    if(untrustedStarted) {state().untrusted.endDraw(ctx,false);untrustedStarted=false;}
+    if(untrustedPlanned && !untrustedEnded)state().untrustedUnknown=true;
     if(foregroundStarted) {state().foreground.endDraw(ctx,false);foregroundStarted=false;}
     if(foregroundPlanned && !foregroundEnded)state().foreground.noteScopeIncomplete();
     if(overlayStarted) {

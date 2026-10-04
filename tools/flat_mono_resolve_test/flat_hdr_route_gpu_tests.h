@@ -331,6 +331,152 @@ inline void hdrRouteGpuTests(ID3D11Device* device, ID3D11DeviceContext* context)
         }
     }
 
+    // The flat mixed-camera route keeps a conservative R8 fragment union.
+    // Identical depth cannot make a prior alternate-camera colour world
+    // history. Exercise the actual prep/TAA/finish bytecode with colour that
+    // exposes a false history accept: 64/192 checker now, uniform 128 before.
+    {
+        std::vector<unsigned char> mask(w*h,0);
+        auto maskTexture=texture(device,w,h,DXGI_FORMAT_R8_UNORM,
+            D3D11_BIND_SHADER_RESOURCE,mask.data(),w);
+        auto maskView=view(device,maskTexture.Get());
+        check(maskTexture && maskView,"mixed-camera R8 union view creates");
+        if(maskTexture && maskView) {
+            auto uploadMask=[&](int x,int y) {
+                std::fill(mask.begin(),mask.end(),static_cast<unsigned char>(0));
+                if(x>=0 && y>=0)mask[UINT(y)*w+UINT(x)]=255;
+                context->UpdateSubresource(maskTexture.Get(),0,nullptr,mask.data(),w,0);
+            };
+            int caseId=0;
+            auto pair=[&](int prevX,int prevY,int nowX,int nowY,bool fractionalMotion,bool fractionalCurrent) {
+                edvr::flatMonoResolveReset();
+                camera(f.camera);camera(f.previousCamera);
+                f.mode=FlatMonoResolveMode::Taa;f.hdr=true;
+                f.cleanColor=nullptr;f.overlayCoverage=nullptr;
+                f.untrustedCameraCoverage=maskView.Get();
+                f.frame=50000+UINT64(++caseId)*3;f.reset=true;
+                f.jitterX=f.jitterY=f.previousJitterX=f.previousJitterY=0;
+                expectedJx=expectedJy=0;
+                uploadMask(prevX,prevY);
+                fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});
+                const bool prime=run(true);
+                ++f.frame;f.reset=false;
+                std::memcpy(f.previousCamera,f.camera,sizeof(f.camera));
+                if(fractionalMotion) {
+                    // The fixture camera maps +/-0.078125 world units to a
+                    // quarter render pixel at z=.01, x/y in opposite signs.
+                    f.camera[5][0]=.078125f;f.camera[5][1]=-.078125f;
+                }
+                if(fractionalCurrent) {
+                    f.jitterX=f.jitterY=expectedJx=expectedJy=.25f;
+                }
+                uploadMask(nowX,nowY);
+                fill([&](UINT x,UINT y,double (&c)[3]) {
+                    c[0]=c[1]=c[2]=((x+y)&1)?192:64;
+                });
+                const bool resolved=run(true);
+                std::vector<uint32_t> got;readH(got);
+                double pixel[3]{};
+                if(got.size()==w*h)unpack(got[8*w+8],pixel);
+                check(prime && resolved && got.size()==w*h,
+                      "mixed-camera two-frame TAA fixture resolves");
+                return pixel[0];
+            };
+            const double oldWorld=pair(-1,-1,-1,-1,true,false);
+            check(oldWorld>90 && oldWorld<130,
+                  "mixed-camera all-world control accepts equal-depth history");
+            bool previousFour=true;
+            for(int y=0;y<2;++y)for(int x=0;x<2;++x) {
+                // Each mark affects exactly one of the four prior output
+                // domains sampled at previous=(8.25,8.25) pixels.
+                const double pixel=pair(8+2*x,8+2*y,-1,-1,true,false);
+                previousFour &= std::abs(pixel-64)<=1.5;
+            }
+            check(previousFour,"mixed-camera every previous bilinear domain tap vetoes equal-depth world history");
+            const double currentWorld=pair(-1,-1,-1,-1,false,true);
+            check(currentWorld>118 && currentWorld<133,
+                  "mixed-camera current four-tap control accepts world history");
+            bool currentFour=true;
+            for(int y=0;y<2;++y)for(int x=0;x<2;++x) {
+                const double pixel=pair(-1,-1,8+x,8+y,false,true);
+                currentFour &= std::abs(pixel-112)<=2;
+            }
+            check(currentFour,"mixed-camera each current bilinear coverage tap uses current HDR colour");
+
+            auto clampCase=[&](bool markHotNeighbor) {
+                edvr::flatMonoResolveReset();camera(f.camera);camera(f.previousCamera);
+                f.mode=FlatMonoResolveMode::Taa;f.untrustedCameraCoverage=maskView.Get();
+                f.jitterX=f.jitterY=f.previousJitterX=f.previousJitterY=0;
+                expectedJx=expectedJy=0;f.frame=58000+(markHotNeighbor?3:0);f.reset=true;
+                uploadMask(-1,-1);
+                fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+                ++f.frame;f.reset=false;uploadMask(markHotNeighbor?7:-1,markHotNeighbor?7:-1);
+                fill([&](UINT x,UINT y,double (&c)[3]) {
+                    c[0]=c[1]=c[2]=(x==7 && y==7)?192:64;
+                });
+                run(true);std::vector<uint32_t> got;readH(got);double pixel[3]{};
+                if(got.size()==w*h)unpack(got[8*w+8],pixel);
+                return pixel[0];
+            };
+            const double wideClamp=clampCase(false),worldClamp=clampCase(true);
+            check(wideClamp>90 && std::abs(worldClamp-64)<=1.5,
+                  "mixed-camera untrusted 3x3 neighbor cannot widen world history clamp");
+
+            // An SDK must never consume this union, and neither an SDK
+            // refusal nor an invalid view may alter the game's HDR bytes.
+            uploadMask(8,8);f.mode=FlatMonoResolveMode::Dlss;++f.frame;
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=12;c[1]=24;c[2]=36;});
+            const uint64_t beforeRefusal=hHash();const int beforeCalls=backendCalls;
+            const char* refusal=nullptr;const bool sdk=run(false,&refusal);
+            check(!sdk && refusal && std::strstr(refusal,"untrusted-coverage-requires-native-HDR-TAA") &&
+                  backendCalls==beforeCalls && hHash()==beforeRefusal,
+                  "mixed-camera SDK request refuses before backend or HDR write");
+            f.mode=FlatMonoResolveMode::Taa;
+            auto wrongTexture=texture(device,w,h,DXGI_FORMAT_R8_UINT,
+                D3D11_BIND_SHADER_RESOURCE,mask.data(),w);
+            auto wrongView=view(device,wrongTexture.Get());
+            if(wrongView) {
+                f.untrustedCameraCoverage=wrongView.Get();++f.frame;
+                const uint64_t beforeInvalid=hHash();refusal=nullptr;
+                const bool invalid=run(false,&refusal);
+                check(!invalid && refusal && std::strstr(refusal,"untrusted-coverage-view-mismatch") &&
+                      hHash()==beforeInvalid,
+                      "mixed-camera unfit mask refuses without altering game HDR");
+            }
+
+            // This edge occurs when the configured engine already is TAA:
+            // the mixed->single transition keeps its mode, so it must reset
+            // once and then resume accumulation on the second single frame.
+            edvr::flatMonoResolveReset();camera(f.camera);camera(f.previousCamera);
+            f.mode=FlatMonoResolveMode::Taa;f.untrustedCameraCoverage=maskView.Get();
+            f.frame=61000;f.reset=true;f.jitterX=f.jitterY=f.previousJitterX=f.previousJitterY=0;
+            expectedJx=expectedJy=0;uploadMask(8,8);
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+            f.untrustedCameraCoverage=nullptr;f.reset=false;++f.frame;uploadMask(-1,-1);
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+            const bool exitReset=edvr::flatMonoResolveStats().lastReset;
+            ++f.frame;
+            fill([&](UINT x,UINT y,double (&c)[3]) {c[0]=c[1]=c[2]=((x+y)&1)?192:64;});
+            run(true);std::vector<uint32_t> resumed;readH(resumed);double resumedPixel[3]{};
+            if(resumed.size()==w*h)unpack(resumed[8*w+8],resumedPixel);
+            check(exitReset && !edvr::flatMonoResolveStats().lastReset && resumedPixel[0]>90,
+                  "mixed-camera to same-mode single-camera resets once, then resumes world TAA");
+            edvr::flatMonoResolveReset();camera(f.camera);camera(f.previousCamera);
+            f.untrustedCameraCoverage=nullptr;f.frame=62000;f.reset=true;
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+            f.untrustedCameraCoverage=maskView.Get();++f.frame;f.reset=false;uploadMask(-1,-1);
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+            const bool entryReset=edvr::flatMonoResolveStats().lastReset;
+            ++f.frame;
+            fill([&](UINT x,UINT y,double (&c)[3]) {c[0]=c[1]=c[2]=((x+y)&1)?192:64;});
+            run(true);std::vector<uint32_t> continued;readH(continued);double continuedPixel[3]{};
+            if(continued.size()==w*h)unpack(continued[8*w+8],continuedPixel);
+            check(entryReset && !edvr::flatMonoResolveStats().lastReset && continuedPixel[0]>90,
+                  "same-mode single-camera to mixed-camera resets once, then continues world history");
+            f.untrustedCameraCoverage=nullptr;
+        }
+    }
+
     // ---- 4. EDVR's TAA: bounded-space accumulation -----------------------------------------------------------------
     // A still camera and a still scene, jitter zero: a hot pixel appears on the second frame. In c/(1+max3(c)) space the
     // history (100) and the new value (10000) are a hair apart, the 3x3 box holds the history, and the blend at .9

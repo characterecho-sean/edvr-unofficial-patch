@@ -819,6 +819,77 @@ inline int flatHdrRouteTests() {
                cameras.issues.size()==2 && cameras.issues[0]==FlatHdrSourceIssue::None &&
                cameras.issues[1]==FlatHdrSourceIssue::SameDepthCamera,
                "one wrong-camera pool source is identified after the valid source; all records are reported");
+        struct Qualified {uint32_t calls=0,allow=0;};
+        const auto qualify=+[](const FlatContractRecord& record,const unsigned char* worldCamera,void* user)->bool {
+            auto& q=*static_cast<Qualified*>(user);
+            ++q.calls;
+            return record.key.camera && worldCamera && q.calls<=q.allow;
+        };
+        Stream qualifiedMix;qualifiedMix.sceneDraws(2,2);
+        auto qualifiedDraw=qualifiedMix.make(qualifiedMix.sc.h2,qualifiedMix.sc.hDepth,
+            qualifiedMix.sc.hW,qualifiedMix.sc.hH,26,0xA1,0xB1,true,true);
+        qualifiedDraw.camera[0]^=1;qualifiedDraw.key.cameraHash=flatCameraHash(qualifiedDraw.camera);
+        qualifiedMix.draw(qualifiedDraw);
+        qualifiedMix.draw(qualifiedMix.make(qualifiedMix.sc.h,qualifiedMix.sc.hDepth,
+            qualifiedMix.sc.hW,qualifiedMix.sc.hH,26,0xA2,0xB2,true,false));
+        qualifiedMix.toneTrigger();
+        Qualified denied{0,0};
+        const auto deniedVerdict=flatSelectHdrRoute(*qualifiedMix.prefix,qualifiedMix.hdr,supported,
+                                                    nullptr,nullptr,qualify,&denied);
+        expect(deniedVerdict.reason==FlatMonoReason::AmbiguousSource && denied.calls==1,
+               "an alternate-camera record remains ambiguous when qualification refuses it");
+        Qualified accepted{0,1};
+        const auto qualifiedVerdict=flatSelectHdrRoute(*qualifiedMix.prefix,qualifiedMix.hdr,supported,
+                                                       nullptr,nullptr,qualify,&accepted);
+        if(!qualifiedVerdict.selected() || !qualifiedVerdict.mixedCamera || accepted.calls!=1)
+            std::printf("info: qualified single reason=%s mixed=%u calls=%u\n",
+                flatMonoReasonName(qualifiedVerdict.reason),qualifiedVerdict.mixedCamera?1u:0u,accepted.calls);
+        expect(qualifiedVerdict.selected() && qualifiedVerdict.mixedCamera && accepted.calls==1 &&
+               qualifiedVerdict.hdr==qualifiedMix.sc.h,
+               "one qualified alternate-camera source selects a mixed frame without renaming world H");
+
+        Stream twoAlternates;twoAlternates.sceneDraws(2,2);
+        auto alternateA=twoAlternates.make(twoAlternates.sc.h2,twoAlternates.sc.hDepth,
+            twoAlternates.sc.hW,twoAlternates.sc.hH,26,0xA1,0xB1,true,true);
+        alternateA.camera[0]^=1;alternateA.key.cameraHash=flatCameraHash(alternateA.camera);
+        twoAlternates.draw(alternateA);
+        auto alternateB=twoAlternates.make(twoAlternates.sc.h2,twoAlternates.sc.hDepth,
+            twoAlternates.sc.hW,twoAlternates.sc.hH,26,0xA1,0xB1,true,true);
+        alternateB.camera[0]^=2;alternateB.key.cameraHash=flatCameraHash(alternateB.camera);
+        twoAlternates.draw(alternateB);
+        twoAlternates.draw(twoAlternates.make(twoAlternates.sc.h,twoAlternates.sc.hDepth,
+            twoAlternates.sc.hW,twoAlternates.sc.hH,26,0xA2,0xB2,true,false));
+        twoAlternates.toneTrigger();
+        Qualified partial{0,1};
+        const auto partialVerdict=flatSelectHdrRoute(*twoAlternates.prefix,twoAlternates.hdr,supported,
+                                                    nullptr,nullptr,qualify,&partial);
+        if(partialVerdict.reason!=FlatMonoReason::AmbiguousSource || partial.calls!=2)
+            std::printf("info: qualified partial reason=%s calls=%u\n",
+                flatMonoReasonName(partialVerdict.reason),partial.calls);
+        expect(partialVerdict.reason==FlatMonoReason::AmbiguousSource && partial.calls==2,
+               "all alternate-camera records must qualify; accepting only the first still refuses");
+        Qualified complete{0,2};
+        const auto completeVerdict=flatSelectHdrRoute(*twoAlternates.prefix,twoAlternates.hdr,supported,
+                                                     nullptr,nullptr,qualify,&complete);
+        if(!completeVerdict.selected() || !completeVerdict.mixedCamera || complete.calls!=2)
+            std::printf("info: qualified complete reason=%s mixed=%u calls=%u\n",
+                flatMonoReasonName(completeVerdict.reason),completeVerdict.mixedCamera?1u:0u,complete.calls);
+        expect(completeVerdict.selected() && completeVerdict.mixedCamera && complete.calls==2,
+               "each qualified alternate-camera source is checked before mixed selection");
+        Stream unsupportedAlternate;unsupportedAlternate.sceneDraws(2,2);
+        auto unsupportedDraw=unsupportedAlternate.make(unsupportedAlternate.sc.h2,unsupportedAlternate.sc.hDepth,
+            unsupportedAlternate.sc.hW,unsupportedAlternate.sc.hH,26,0xA1,0xBAD,true,true);
+        unsupportedDraw.camera[0]^=1;unsupportedDraw.key.cameraHash=flatCameraHash(unsupportedDraw.camera);
+        unsupportedAlternate.draw(unsupportedDraw);
+        unsupportedAlternate.draw(unsupportedAlternate.make(unsupportedAlternate.sc.h,unsupportedAlternate.sc.hDepth,
+            unsupportedAlternate.sc.hW,unsupportedAlternate.sc.hH,26,0xA2,0xB2,true,false));
+        unsupportedAlternate.toneTrigger();
+        Qualified noUnsupported{0,1};
+        const auto supportedExceptBad=+[](uint64_t,uint64_t ps){return ps!=0xBAD;};
+        const auto unsupportedVerdict=flatSelectHdrRoute(*unsupportedAlternate.prefix,unsupportedAlternate.hdr,
+            supportedExceptBad,nullptr,nullptr,qualify,&noUnsupported);
+        expect(unsupportedVerdict.reason==FlatMonoReason::AmbiguousSource && noUnsupported.calls==0,
+               "an unsupported alternate-camera writer cannot inherit another draw's qualification");
 
         Stream depthMix;depthMix.sceneDraws(2,2);
         depthMix.draw(depthMix.make(depthMix.sc.h2,depthMix.sc.h2Depth,
@@ -1495,7 +1566,9 @@ inline int flatHdrRouteTests() {
         expect(!runtime.empty() && !menu.empty(), "the runtime and menu sources are readable from the repo root");
         expect(count(runtime, "Config::get().getString(\"experimental.temporal_aa_before_post\", \"auto\")") == 1,
                "the route's key falls back to auto when the file has no line");
-        expect(count(runtime, "flatHdrTriggerSeen(sel, s.engine)") == 1 && count(runtime, "flatFrameSeenFor(") == 1 &&
+        expect(count(runtime, "flatHdrTriggerSeen(sel,") == 1 &&
+                   count(runtime, "sel.mixedCamera?FlatMonoResolveMode::Taa:s.engine);") == 1 &&
+                   count(runtime, "flatFrameSeenFor(") == 1 &&
                    count(runtime, "if (routeSeen == FlatFrameSeen::Treatable) { s.frameSeen = FlatFrameSeen::Treatable;") == 1,
                "the route adds to a frame's stand-down verdict through flatHdrTriggerSeen only; the copy stage is the one other caller of flatFrameSeenFor");
         // The F8 supersampling advice (the game rendering below the output) is gone (section 83: below 1.0 is served by the

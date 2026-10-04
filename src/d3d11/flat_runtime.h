@@ -108,8 +108,9 @@ void flatRuntimeWeaponFootprintBeforePresent(IDXGISwapChain*, UINT flags);
 // lost its state). Every hook of that kind calls this before its real call; a load and a compare when nothing of EDVR's
 // is bound, which is nearly always.
 void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event);
-inline bool flatRuntimeNeedsActualDraw(bool footprintStarted, bool overlayPlanned, bool foregroundPlanned=false) {
-    return footprintStarted || overlayPlanned || foregroundPlanned;
+inline bool flatRuntimeNeedsActualDraw(bool footprintStarted, bool overlayPlanned, bool foregroundPlanned=false,
+                                       bool untrustedPlanned=false) {
+    return footprintStarted || overlayPlanned || foregroundPlanned || untrustedPlanned;
 }
 struct FlatRuntimeDrawScope {
     ID3D11DeviceContext* ctx = nullptr;
@@ -120,7 +121,9 @@ struct FlatRuntimeDrawScope {
     bool weaponFootprintStarted = false;
     bool overlayPlanned = false, overlayStarted = false, overlayEnded = false;
     bool foregroundPlanned = false, foregroundStarted = false, foregroundEnded = false;
-    bool needsActualDraw() const { return flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned, foregroundPlanned); }
+    bool untrustedPlanned = false, untrustedStarted = false, untrustedEnded = false;
+    bool needsActualDraw() const { return flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
+                                                                     foregroundPlanned, untrustedPlanned); }
     ID3D11Texture2D* overlayHdr = nullptr;
     ID3D11DepthStencilView* overlayDsv = nullptr;
     uint32_t weaponFootprintSeq = 0;

@@ -67,6 +67,11 @@ struct FlatMonoFrameInput {
     uint32_t droppedSmallCb = 0, unknownLists = 0;
     uint64_t foreignCalls = 0;
     bool (*supportedPair)(uint64_t, uint64_t) = nullptr;
+    // HDR only: a caller may certify that every draw of an alternate-camera
+    // same-depth Pool record wrote its original passing fragments to a
+    // conservative untrusted-camera coverage map.
+    bool (*qualifiedAlternate)(const FlatContractRecord&, const unsigned char*, void*) = nullptr;
+    void* qualifiedAlternateUser = nullptr;
 };
 
 struct FlatMonoFrame {
@@ -84,6 +89,7 @@ struct FlatMonoFrame {
     uint32_t sourceFirst = 0, sourceLast = 0, hdrFirst = 0, hdrLast = 0;
     uint32_t toneSequence = 0, copySequence = 0, firstLaterOutput = 0;
     uint32_t supportedDraws = 0, unsupportedDraws = 0;
+    bool mixedCamera = false;
     bool selected() const { return reason == FlatMonoReason::Selected; }
 };
 

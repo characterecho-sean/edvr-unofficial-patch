@@ -1,6 +1,7 @@
 #pragma once
 #include "../../src/d3d11/flat_foreground_ownership.h"
 #include "../../src/d3d11/flat_overlay_layer.h"
+#include "../../src/d3d11/flat_untrusted_coverage.h"
 
 inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) {
     using Microsoft::WRL::ComPtr;
@@ -360,6 +361,104 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
           counts.survivingMarked16==0 && counts.survivingUnmarked==25 &&
           counts.overwritten==80 && counts.totalStencil16==0,
           "missing current stencil is distinct from missing foreground coverage or depth overwrite");
+
+    // The production conservative union brackets the original game draws.
+    // A world draw later passes at exactly the first foreground's encoded Z;
+    // that cannot erase the camera ambiguity, even though depth is equal.
+    {
+        float worldRows[6][4]{};camera(worldRows);
+        float alternateRows[6][4]{};std::memcpy(alternateRows,worldRows,sizeof(worldRows));
+        alternateRows[3][2]=.0675f;
+        const auto* alternateBytes=reinterpret_cast<const unsigned char*>(alternateRows);
+        const auto* worldBytes=reinterpret_cast<const unsigned char*>(worldRows);
+        edvr::FlatUntrustedCoverage unionCapture;
+        unionCapture.beginFrame(42);
+        context->ClearRenderTargetView(baselineRtv.Get(),clear);
+        context->ClearRenderTargetView(liveRtv.Get(),clear);
+        context->ClearDepthStencilView(baselineDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,0);
+        context->ClearDepthStencilView(liveDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,0);
+        bind(baselineRtv.Get(),baselineDsv.Get());context->Draw(3,0);
+        bind(liveRtv.Get(),liveDsv.Get());
+        const bool firstPlanned=unionCapture.plan(42,10,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                                                  0x11,0x22,alternateBytes);
+        const bool firstBegan=firstPlanned && unionCapture.beginDraw(context,42);
+        if(firstBegan){context->Draw(3,0);unionCapture.endDraw(context);}
+        auto capturedMask=[&]() {
+            ComPtr<ID3D11Resource> resource;
+            if(unionCapture.view())unionCapture.view()->GetResource(&resource);
+            ComPtr<ID3D11Texture2D> texture;if(resource)resource.As(&texture);
+            return texture?readTex(texture.Get(),1):std::vector<BYTE>{};
+        };
+        const auto firstMask=capturedMask(),firstDepth=readTex(liveDepth.Get(),8);
+        UINT firstMarked=0;for(BYTE v:firstMask)firstMarked+=v==255;
+        check(firstBegan && firstMarked==90 && firstMask.size()==w*h,
+              "production union marks only original-PS fragments passing discard and depth");
+
+        // The world draw uses the same z=.5 vertex shader and LESS_EQUAL
+        // depth state. No blend proves it really rasterized into both targets.
+        bind(baselineRtv.Get(),baselineDsv.Get());
+        context->PSSetShader(secondPs.Get(),nullptr,0);
+        context->OMSetBlendState(nullptr,nullptr,~0u);context->Draw(3,0);
+        bind(liveRtv.Get(),liveDsv.Get());
+        context->PSSetShader(secondPs.Get(),nullptr,0);
+        context->OMSetBlendState(nullptr,nullptr,~0u);context->Draw(3,0);
+        const auto afterWorldMask=capturedMask(),afterWorldDepth=readTex(liveDepth.Get(),8);
+        const auto afterWorldColor=readTex(liveColor.Get(),4);
+        UINT retained=0;for(BYTE v:afterWorldMask)retained+=v==255;
+        const size_t ownedPixel=(size_t(4)*w+4)*8;
+        check(retained==90 && afterWorldMask==firstMask &&
+              firstDepth.size()==size_t(w)*h*8 && afterWorldDepth.size()==firstDepth.size() &&
+              std::memcmp(firstDepth.data()+ownedPixel,afterWorldDepth.data()+ownedPixel,8)==0 &&
+              afterWorldColor.size()==size_t(w)*h*4 && afterWorldColor[(size_t(4)*w+4)*4]!=0,
+              "equal-depth world overdraw rasterizes yet conservatively retains the first camera mark");
+
+        bind(baselineRtv.Get(),baselineDsv.Get());
+        context->VSSetShader(secondVs.Get(),nullptr,0);
+        context->PSSetShader(secondPs.Get(),nullptr,0);
+        context->RSSetScissorRects(1,&secondRect);context->Draw(3,0);
+        bind(liveRtv.Get(),liveDsv.Get());
+        context->VSSetShader(secondVs.Get(),nullptr,0);
+        context->PSSetShader(secondPs.Get(),nullptr,0);
+        context->RSSetScissorRects(1,&secondRect);
+        const bool nextPlanned=unionCapture.plan(42,12,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                                                 0x33,0x44,alternateBytes);
+        const bool nextBegan=nextPlanned && unionCapture.beginDraw(context,42);
+        if(nextBegan){context->Draw(3,0);unionCapture.endDraw(context);}
+        const auto allMask=capturedMask();UINT allMarked=0;for(BYTE v:allMask)allMarked+=v==255;
+        check(nextBegan && allMask.size()==w*h && allMarked==105 &&
+              allMask[8*w+8]==255 && allMask[w+1]==255,
+              "production union retains first-camera pixels and adds the second 25-fragment draw");
+        check(readTex(baselineColor.Get(),4)==readTex(liveColor.Get(),4) &&
+              readTex(baselineDepth.Get(),8)==readTex(liveDepth.Get(),8),
+              "production union preserves original color, depth, and stencil bytes across both draws");
+
+        edvr::FlatContractRecord represented{};
+        represented.key.color=liveColor.Get();represented.key.depth=liveDepth.Get();
+        represented.key.dsv=liveDsv.Get();represented.key.width=w;represented.key.height=h;
+        represented.key.vs=0x11;represented.key.ps=0x22;
+        std::memcpy(represented.camera,alternateBytes,sizeof(represented.camera));
+        represented.key.camera=represented.camera;
+        represented.first=represented.last=10;represented.draws=1;
+        check(unionCapture.qualifies(represented,worldBytes,0,0),
+              "production selector can certify the exact completed alternate-camera draw");
+        represented.draws=2;
+        check(!unionCapture.qualifies(represented,worldBytes,0,0),
+              "selector refuses a coalesced record with an uncaptured draw");
+        represented.draws=1;
+        unionCapture.noteMutation(nullptr);
+        check(!unionCapture.view() && !unionCapture.qualifies(represented,worldBytes,0,0),
+              "unknown writer invalidates the union and closes qualification");
+
+        edvr::FlatUntrustedCoverage capped;capped.beginFrame(43);
+        bool within=true;
+        for(uint32_t i=0;i<128;++i)
+            within &= capped.plan(43,i+1,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                                  0x11,0x22,alternateBytes);
+        const bool over=capped.plan(43,129,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                                    0x11,0x22,alternateBytes);
+        check(within && !over && capped.failure() && !capped.view(),
+              "production union record cap fails closed instead of dropping a draw");
+    }
     context->ClearState();
     return failures;
 }

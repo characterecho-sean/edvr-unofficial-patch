@@ -85,7 +85,7 @@ struct State {
     bool refusalPending[4]={false,false,false,false};
     uint32_t refusalWidth[4]={0,0,0,0}, refusalHeight[4]={0,0,0,0};
     uint32_t refusalWrite=0;
-    Image color, rawOverlay, depth[2], motion, rejection, expected, output[2];
+    Image color, rawOverlay, depth[2], motion, rejection, expected, output[2], outputDomain[2];
     uint32_t width=0, height=0, outWidth=0, outHeight=0, evalWidth=0, evalHeight=0, current=0;
     // The steady-detail depth check's previous depth (FlatMonoResolveFrame::steadyDetail). TAA keeps last frame's depth in depth[current^1]
     // already; the other backends keep none, so depth[1] is made on the first frame that asks, and while frames ask, the depth the
@@ -95,6 +95,7 @@ struct State {
     FlatMonoResolveMode mode=FlatMonoResolveMode::Taa;
     bool hdr=false;   // the resources below are the HDR route's (an HDR input copy, fp16 outputs)
     bool history=false;
+    bool untrustedCoverageLast=false;
     DXGI_FORMAT inputFormat=DXGI_FORMAT_UNKNOWN;
 };
 // Explicit owner-thread cleanup only: releasing driver objects from a static
@@ -372,6 +373,7 @@ bool resources(const FlatMonoResolveFrame& f,const char** reason) {
        g.evalWidth==evalW && g.evalHeight==evalH)return true;
     ++stats.allocations;
     g.color={};g.rawOverlay={};g.depth[0]={};g.depth[1]={};g.motion={};g.rejection={};g.expected={};g.output[0]={};g.output[1]={};
+    g.outputDomain[0]={};g.outputDomain[1]={};g.untrustedCoverageLast=false;
     g.klass={};g.classWidth=g.classHeight=0;   // the refusal census's class texture is the render size: made again by a frame that asks
     g.width=g.height=g.outWidth=g.outHeight=0;g.evalWidth=g.evalHeight=0;g.current=0;g.depthLast=0;g.history=false;g.hdr=false;
     const bool taa=f.mode==FlatMonoResolveMode::Taa;
@@ -446,6 +448,15 @@ bool ensureSecondDepth(uint32_t width,uint32_t height) {
     g.depth[1]={};
     if(!image(g.device.Get(),width,height,DXGI_FORMAT_R32_FLOAT,g.depth[1],true,"depth1")) {g.depth[1]={};return false;}
     return true;
+}
+// Only a flat mixed-camera TAA frame needs output-domain history. These two
+// images follow output[2]'s ping-pong index and resource-size key.
+bool ensureOutputDomains(uint32_t width,uint32_t height) {
+    if(g.outputDomain[0].srv && g.outputDomain[0].uav &&
+       g.outputDomain[1].srv && g.outputDomain[1].uav)return true;
+    g.outputDomain[0]={};g.outputDomain[1]={};
+    return image(g.device.Get(),width,height,DXGI_FORMAT_R8_UNORM,g.outputDomain[0],true,"output-domain0") &&
+           image(g.device.Get(),width,height,DXGI_FORMAT_R8_UNORM,g.outputDomain[1],true,"output-domain1");
 }
 // The counting pass, its counter buffer (16 stripes of 16 counters, raw, UAV) and the four-slot staging ring the sums are read
 // back from.
@@ -747,10 +758,14 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     const bool hdr=f.hdr;
     if(hdr && (evalW!=f.renderWidth || evalH!=f.renderHeight || f.renderWidth<f.outputWidth || f.renderHeight<f.outputHeight))
         return fail(reason,"flat-resolve-hdr-requires-render-size-evaluation");
+    const bool untrusted=f.untrustedCameraCoverage!=nullptr;
+    if(untrusted && (!hdr || f.mode!=FlatMonoResolveMode::Taa ||
+                     f.outputWidth!=f.renderWidth || f.outputHeight!=f.renderHeight))
+        return fail(reason,"flat-resolve-untrusted-coverage-requires-native-HDR-TAA");
     if(!initialize(device,context,reason))return false;
     if(hdr && !initializeHdr(device,reason))return false;
     pollRefusalCensus(context);   // the samples the GPU finished since the last call (nothing pending: one flag test per slot)
-    ComPtr<ID3D11Texture2D> color,depth,cleanColor,overlayMask;
+    ComPtr<ID3D11Texture2D> color,depth,cleanColor,overlayMask,untrustedMask;
     const bool overlay=f.cleanColor || f.overlayCoverage;
     if(overlay && (!hdr || !f.cleanColor || !f.overlayCoverage))
         return fail(reason,"flat-resolve-overlay-input-pair-incomplete");
@@ -774,7 +789,24 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
            !(md.BindFlags&D3D11_BIND_SHADER_RESOURCE) || maskDevice.Get()!=g.device.Get())
             return fail(reason,"flat-resolve-overlay-mask-view-mismatch");
     }
+    if(untrusted) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC uv{};f.untrustedCameraCoverage->GetDesc(&uv);
+        ComPtr<ID3D11Resource> resource;f.untrustedCameraCoverage->GetResource(&resource);
+        if(!resource || FAILED(resource.As(&untrustedMask)))
+            return fail(reason,"flat-resolve-untrusted-coverage-resource-mismatch");
+        D3D11_TEXTURE2D_DESC md{};untrustedMask->GetDesc(&md);
+        ComPtr<ID3D11Device> maskDevice;untrustedMask->GetDevice(&maskDevice);
+        if(uv.Format!=DXGI_FORMAT_R8_UNORM || uv.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D ||
+           uv.Texture2D.MostDetailedMip!=0 ||
+           (uv.Texture2D.MipLevels!=1 && uv.Texture2D.MipLevels!=UINT(-1)) ||
+           md.Format!=DXGI_FORMAT_R8_UNORM || md.Width!=f.renderWidth || md.Height!=f.renderHeight ||
+           md.MipLevels!=1 || md.ArraySize!=1 || md.SampleDesc.Count!=1 ||
+           !(md.BindFlags&D3D11_BIND_SHADER_RESOURCE) || maskDevice.Get()!=g.device.Get())
+            return fail(reason,"flat-resolve-untrusted-coverage-view-mismatch");
+    }
     if(!resources(f,reason))return false;
+    if(untrusted && !ensureOutputDomains(f.outputWidth,f.outputHeight))
+        return fail(reason,"flat-resolve-output-domain-create-failed");
     if(overlay && !g.rawOverlay.texture &&
        !image(g.device.Get(),f.renderWidth,f.renderHeight,DXGI_FORMAT_R11G11B10_FLOAT,
               g.rawOverlay,false,"overlay-raw"))
@@ -785,12 +817,13 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     const bool taa=f.mode==FlatMonoResolveMode::Taa;
     D3D11_SHADER_RESOURCE_VIEW_DESC colorDesc{};f.color->GetDesc(&colorDesc);
     const bool requestedReset=f.reset, lostHistory=!g.history, frameGap=f.frame!=g.lastFrame+1;
+    const bool coverageTransition=g.history && untrusted!=g.untrustedCoverageLast;
     const bool invalidPreviousCamera=!cameraValid(f.previousCamera);
     const bool formatChange=g.inputFormat!=colorDesc.Format;
     bool cameraCut=false;
     if(!requestedReset && !lostHistory && !frameGap && !invalidPreviousCamera && !formatChange)
         for(unsigned i=0;i<3;++i)if(std::abs(f.camera[5][i]-f.previousCamera[5][i])>50)cameraCut=true;
-    const bool reset=requestedReset || lostHistory || frameGap || invalidPreviousCamera || formatChange || cameraCut;
+    const bool reset=requestedReset || lostHistory || frameGap || invalidPreviousCamera || formatChange || cameraCut || coverageTransition;
     stats.lastReset=reset;
     const bool engine=f.engine.slots && f.engine.pool && f.engine.sceneNow && f.engine.scenePrev;
     if(!reset && !engine)return fail(reason,"flat-resolve-engine-source-views-unavailable");
@@ -872,6 +905,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.route[2]=firstPersonMap?1u:0u;constants.route[3]=firstPersonMap?f.firstPersonPhaseMode:0u;
     constants.debug[0]=sampleNow?1u:0u;constants.debug[1]=paintNow?1u:0u;
     constants.debug[2]=overlay?1u:0u;
+    constants.debug[3]=untrusted?1u:0u;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
     constants.jitter[2]=f.previousJitterX;constants.jitter[3]=f.previousJitterY;
     // On a reset the previous rows ARE the current rows (above), so they carry the current phase.
@@ -893,16 +927,17 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // and the prep's too, but only on a frame whose steady-detail check runs (last frame's depth). t9 and t10 are the first-person map and
     // stencil, null unless the pair was accepted above.
     ID3D11ShaderResourceView* prepViews[]={g.color.srv.Get(),f.depth,f.engine.slots,f.engine.pool,
-        nullptr,nullptr,nullptr,nullptr,depthCheck?g.depth[prevDepthIndex].srv.Get():nullptr,firstPersonMap,firstPersonStencil};
-    context->CSSetShaderResources(0,11,prepViews);
+        nullptr,nullptr,nullptr,nullptr,depthCheck?g.depth[prevDepthIndex].srv.Get():nullptr,firstPersonMap,firstPersonStencil,
+        nullptr,nullptr,f.untrustedCameraCoverage};
+    context->CSSetShaderResources(0,14,prepViews);
     // u5 is the refusal census's class texture, bound only on a frame that samples or paints (u4 is the later kernels' OutColor).
     ID3D11UnorderedAccessView* prepOutputs[]={g.depth[depthIndex].uav.Get(),g.motion.uav.Get(),g.rejection.uav.Get(),g.expected.uav.Get(),
         nullptr,needClass?g.klass.uav.Get():nullptr};
     context->CSSetUnorderedAccessViews(0,needClass?6:4,prepOutputs,nullptr);
     context->CSSetShader(g.prep.Get(),nullptr,0);
     context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
-    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[11]={};
-    context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,11,nullViews);
+    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[14]={};
+    context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,14,nullViews);
     if(hdr)++stats.hdrPrepped;
     prepStep.close();
     if(sampleNow) {
@@ -930,9 +965,15 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         flatcpu::Scope backendScope(flatcpu::kBackend);   // the backend evaluation: NGX, FSR3, or the TAA dispatch
     if(taa) {
         ID3D11ShaderResourceView* views[]={g.color.srv.Get(),nullptr,nullptr,nullptr,g.motion.srv.Get(),
-            g.rejection.srv.Get(),g.expected.srv.Get(),g.output[index^1].srv.Get(),g.depth[index^1].srv.Get()};
-        context->CSSetShaderResources(0,9,views);
+            g.rejection.srv.Get(),g.expected.srv.Get(),g.output[index^1].srv.Get(),g.depth[index^1].srv.Get(),
+            nullptr,nullptr,nullptr,nullptr,f.untrustedCameraCoverage,
+            untrusted?g.outputDomain[index^1].srv.Get():nullptr};
+        context->CSSetShaderResources(0,untrusted?15:9,views);
         ID3D11UnorderedAccessView* out=g.output[index].uav.Get();context->CSSetUnorderedAccessViews(4,1,&out,nullptr);
+        if(untrusted) {
+            ID3D11UnorderedAccessView* domain=g.outputDomain[index].uav.Get();
+            context->CSSetUnorderedAccessViews(7,1,&domain,nullptr);
+        }
         ID3D11SamplerState* sampler=g.sampler.Get();context->CSSetSamplers(0,1,&sampler);
         context->CSSetShader(g.taa.Get(),nullptr,0);context->Dispatch((f.outputWidth+7)/8,(f.outputHeight+7)/8,1);
     } else if(f.mode==FlatMonoResolveMode::Fsr) {
@@ -987,6 +1028,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         }
     }
     g.history=true;g.lastFrame=f.frame;g.current=index^1;g.inputFormat=colorDesc.Format;
+    g.untrustedCoverageLast=untrusted;
     if(!taa)g.depthLast=depthIndex;   // the image the next asking frame reads as last frame's depth (0 while no frame asks)
     if(reset) {
         ++stats.acceptedResets;stats.currentContinueRun=0;

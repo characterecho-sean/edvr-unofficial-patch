@@ -333,13 +333,26 @@ inline FlatMonoFrame flatSelectHdrFrame(const FlatMonoFrameInput& in, const void
         const auto& r = record(in, i);
         const auto& k = r.key;
         if (k.kind != kFlatContractPool || k.width != w || k.height != h || k.depth != hdr->key.depth) continue;
-        if (!in.supportedPair(k.vs, k.ps)) { out.unsupportedDraws += r.draws; continue; }
+        if (!in.supportedPair(k.vs, k.ps)) {
+            // An unsupported same-depth writer with a different camera has
+            // no qualified coverage export; it cannot silently disappear
+            // from the source census when another writer made the frame mixed.
+            if (in.qualifiedAlternate && k.camera && cameraCurrent(r,in.epoch) &&
+                !sameCamera(r,*hdrCamera))
+                return refuse(FlatMonoReason::AmbiguousSource);
+            out.unsupportedDraws += r.draws; continue;
+        }
         if (!k.color || !k.rtv || k.dsv != hdr->key.dsv || k.depthFormat != hdr->key.depthFormat ||
             k.depthWidth != w || k.depthHeight != h)
             return refuse(FlatMonoReason::AmbiguousSource);
         if (!cameraCurrent(r, in.epoch) || !fullViewport(k, w, h))
             return refuse(FlatMonoReason::InvalidSource);
-        if (!sameCamera(r, *hdrCamera)) return refuse(FlatMonoReason::AmbiguousSource);
+        if (!sameCamera(r, *hdrCamera)) {
+            if (!in.qualifiedAlternate ||
+                !in.qualifiedAlternate(r,hdrCamera->camera,in.qualifiedAlternateUser))
+                return refuse(FlatMonoReason::AmbiguousSource);
+            out.mixedCamera = true;
+        }
         if (r.last >= consumerSeq || r.first > hdrLast) return refuse(FlatMonoReason::WrongOrder);
         out.supportedDraws += r.draws;
         if (!sourceFirst || r.first < sourceFirst) sourceFirst = r.first;
@@ -377,7 +390,9 @@ inline FlatMonoFrame flatSelectHdrFrame(const FlatMonoFrameInput& in, const void
 inline FlatMonoFrame flatSelectHdrRouteAt(FlatRuntimePrefix& p, const FlatHdrFrame& f,
                                           bool (*supportedPair)(uint64_t, uint64_t), uint32_t consumerSeq,
                                           FlatHdrExtentGate gate,
-                                          FlatHdrAmbiguousSourceSink sourceSink = nullptr, void* sourceSinkUser = nullptr) {
+                                          FlatHdrAmbiguousSourceSink sourceSink = nullptr, void* sourceSinkUser = nullptr,
+                                          bool (*qualifiedAlternate)(const FlatContractRecord&,const unsigned char*,void*) = nullptr,
+                                          void* qualifiedAlternateUser = nullptr) {
     using namespace flat_mono_detail;
     FlatMonoFrame out{}; out.frame = out.epoch = p.frame;
     if (!f.triggered) { out.reason = FlatMonoReason::NoHdrConsumer; return out; }
@@ -397,6 +412,8 @@ inline FlatMonoFrame flatSelectHdrRouteAt(FlatRuntimePrefix& p, const FlatHdrFra
     FlatMonoFrameInput in{}; in.world = records; in.worldCount = n;
     in.output = p.output; in.outputWidth = p.width; in.outputHeight = p.height; in.outputFormat = p.format;
     in.frame = in.epoch = p.frame; in.supportedPair = supportedPair;
+    in.qualifiedAlternate = qualifiedAlternate;
+    in.qualifiedAlternateUser = qualifiedAlternateUser;
     out = flatSelectHdrFrame(in, f.trigger.hdr, consumerSeq, gate);
     if (out.reason == FlatMonoReason::AmbiguousSource && sourceSink)
         sourceSink(in, f.trigger.hdr, consumerSeq, sourceSinkUser);
@@ -415,9 +432,12 @@ inline FlatMonoFrame flatSelectHdrRouteAt(FlatRuntimePrefix& p, const FlatHdrFra
 // The route's own selection, at its trigger: every H draw and source before the trigger draw, R >= D.
 inline FlatMonoFrame flatSelectHdrRoute(FlatRuntimePrefix& p, const FlatHdrFrame& f,
                                         bool (*supportedPair)(uint64_t, uint64_t),
-                                        FlatHdrAmbiguousSourceSink sourceSink = nullptr, void* sourceSinkUser = nullptr) {
+                                        FlatHdrAmbiguousSourceSink sourceSink = nullptr, void* sourceSinkUser = nullptr,
+                                        bool (*qualifiedAlternate)(const FlatContractRecord&,const unsigned char*,void*) = nullptr,
+                                        void* qualifiedAlternateUser = nullptr) {
     return flatSelectHdrRouteAt(p, f, supportedPair, f.trigger.sequence,
-                                FlatHdrExtentGate::RenderAtLeastOutput, sourceSink, sourceSinkUser);
+                                FlatHdrExtentGate::RenderAtLeastOutput, sourceSink, sourceSinkUser,
+                                qualifiedAlternate, qualifiedAlternateUser);
 }
 
 // ---- the route's gate ----------------------------------------------------------------------------

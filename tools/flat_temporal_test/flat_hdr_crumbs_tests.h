@@ -373,8 +373,9 @@ inline int flatHdrCrumbWiringTests() {
 
     // -- the runtime's draw scope: admission first, the reach after the last decline that precedes the resolver --
     const std::string treat = body(runtime, "void FlatRuntimeDrawScope::treatHdr(");
-    ordered(treat, {"auto& s = state();", "hdrCrumbAdmit(s.prefix.frame, flatMonoResolveModeName(s.engine));", "++s.hdrWindow.steps.admitted;",
-                    "const auto reach = [&](const char* step) {", "hdrCrumbReach(s.prefix.frame, flatMonoResolveModeName(s.engine), step);",
+    ordered(treat, {"auto& s = state();", "const FlatMonoResolveMode effectiveMode=selected.mixedCamera?FlatMonoResolveMode::Taa:s.engine;",
+                    "hdrCrumbAdmit(s.prefix.frame, flatMonoResolveModeName(effectiveMode));", "++s.hdrWindow.steps.admitted;",
+                    "const auto reach = [&](const char* step) {", "hdrCrumbReach(s.prefix.frame, flatMonoResolveModeName(effectiveMode), step);",
                     "const auto decline = [&](const char* why) {", "hdrCrumbDeclined(why);", "if (s.hdrLatch.tripped) { decline(\"latched-off\"); return; }"},
             "treatHdr admits the frame before any decline, counts it, and every decline writes its reason");
     ordered(treat, {"const auto recoverHdr = [&]", "reach(\"spatial-recovery\");", "failPhase(s, temporalReason);", "flatMonoResolveSpatialFallback("},
@@ -500,7 +501,7 @@ inline int flatHdrCrumbWiringTests() {
     ordered(solve, {"context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());",
                     "if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());",
                     "if(hdr)++stats.hdrCopied;", "copyStep.close();",
-                    "context->CSSetShaderResources(0,11,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
+                    "context->CSSetShaderResources(0,14,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
                     "backendStep.close();", "if(hdr && ok)++stats.hdrBackend;", "if(!ok) {"},
             "the resolve counts its copy, prep and backend for the 5 s line as each completes");
     ordered(spatial, {"context->CopyResource(g.color.texture.Get(),color.Get());", "if(hdr)++stats.hdrCopied;"},

@@ -15,9 +15,8 @@ cbuffer Mono : register(b0) {
                  // stencil (t10) are bound and valid (section 82, prep only); w: with z, the first-person phase mode (0 the map's
                  // vector as given, 1 the two phases' difference is added to it, any other value rejects attached pixels' history).
                  // All zero on the copy route without them.
-    uint4 debug; // x: this frame samples the refusal census (prep writes the class texture, the census kernel counts it), y: this frame
-                 // paints the refusal view (prep writes the class texture, the HDR finish paints from it). Both zero on every frame that
-                 // asks for neither, and the flat profile never asks: the prep's arithmetic and its outputs are then what they were.
+    uint4 debug; // x/y: refusal census/view, z: late overlay. w: flat HDR TAA has a conservative alternate-camera
+                 // fragment union at t13 and output-domain history at t14/u7. Zero leaves the old shader path unchanged.
 };
 cbuffer EngineNow : register(b1) { float4 EN[277]; };   // EN[276].x: the frame stamp
 cbuffer EngineBefore : register(b2) { float4 EB[276]; };
@@ -35,6 +34,8 @@ Texture2D<float4> FirstPersonMotion : register(t9);   // prep only, bound when r
 Texture2D<uint2> FirstPersonStencil : register(t10);  // prep only, bound when route.z != 0: the depth texture's stencil plane (.y)
 Texture2D<uint> ClassMap : register(t11);             // the census kernel's and the HDR finish's, bound only when debug.x or debug.y: the prep's class per pixel
 Texture2D<float> OverlayCoverage : register(t12);   // HDR finish only: fragments from protected late colour draws
+Texture2D<float> UntrustedCameraCoverage : register(t13); // prep/TAA only: conservative R8_UNORM fragment union
+Texture2D<float> HistoryOutputDomain : register(t14);    // TAA only: last output's trusted-world sampling footprint
 SamplerState LinearClamp : register(s0);
 RWTexture2D<float> OutDepth : register(u0);
 RWTexture2D<float2> OutMotion : register(u1);
@@ -43,6 +44,7 @@ RWTexture2D<float> OutExpected : register(u3);
 RWTexture2D<float4> OutColor : register(u4);
 RWTexture2D<uint> OutClass : register(u5);            // prep only, bound when debug.x or debug.y: what the pixel is and whether its history was refused
 RWByteAddressBuffer RefusalCounts : register(u6);     // the census kernel's: 16 stripes of 16 counters (flat_mono_refusal.h)
+RWTexture2D<float> OutOutputDomain : register(u7);    // TAA only: 1 when all current colour taps are trusted world
 
 // The pixel classes (flat_mono_refusal.h kFlatMonoClass*, which tools\flat_mono_resolve_test holds these to). Bit 7 of the byte the prep
 // writes says its history was refused.
@@ -159,8 +161,14 @@ void prep(uint3 id:SV_DispatchThreadID) {
     // history, and NEVER the engine or camera term below: the weapon is not world geometry, and the camera term at its depth
     // and field of view would be wrong (a screen-fixed weapon ghosting in turns). Without the inputs route.z is zero and both
     // views are unbound, so no pixel is attached and the branch below is the code that was here before.
+    bool untrusted=false;
+    if(debug.w!=0)untrusted=UntrustedCameraCoverage.Load(int3(q,0))>0;
     bool attached=route.z!=0 && (FirstPersonStencil.Load(int3(q,0)).y&16)!=0;
-    if(attached) {
+    if(untrusted) {
+        // A later world draw may have overwritten the same encoded depth.
+        // Coverage remains a conservative camera-ambiguity veto.
+        cls=kClassMasked;
+    } else if(attached) {
         float4 m=FirstPersonMotion.Load(int3(q,0));
         // The previous position in render pixels. Leaving the frame is disocclusion, not something to extrapolate.
         float2 prevPx=float2(q)+.5+m.xy;
@@ -246,17 +254,42 @@ void taa(uint3 id:SV_DispatchThreadID) {
     float4 current=Color.SampleLevel(LinearClamp,rasterUv,0);
     float2 previous=uv+Motion.Load(int3(q,0))/float2(size.xy);
     float weight=0;
+    if(debug.w!=0) {
+        // Match the four texels read by Color.SampleLevel at the current
+        // raster position, including the sampler's edge clamp. One marked
+        // source tap makes the whole output pixel untrusted.
+        int2 base=int2(floor(rasterUv*float2(size.xy)-.5));
+        bool world=true;
+        [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
+            if(UntrustedCameraCoverage.Load(int3(clamp(base+int2(x,y),0,int2(size.xy)-1),0))>0)world=false;
+        OutOutputDomain[id.xy]=world?1:0;
+        if(!world) {OutColor[id.xy]=current;return;}
+    }
     if(flags.x==0 && Rejection.Load(int3(q,0))==0 && all(previous>=0) && all(previous<=1)) {
         int2 oldQ=clamp(int2(previous*float2(size.xy)+jitter.zw),0,int2(size.xy)-1);
         float was=HistoryDepth.Load(int3(oldQ,0)), predicted=ExpectedDepth.Load(int3(q,0));
         if(abs(was-predicted)<=max(1e-6,predicted*.01))weight=.9;
+    }
+    if(weight!=0 && debug.w!=0) {
+        // History uses linear filtering on the output grid. Depth's one
+        // matching texel cannot authorize a different camera in any of its
+        // four colour taps, even when both cameras wrote identical depth.
+        int2 base=int2(floor(previous*float2(size.zw)-.5));
+        [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
+            if(HistoryOutputDomain.Load(int3(clamp(base+int2(x,y),0,int2(size.zw)-1),0))<.5)weight=0;
     }
     if(weight==0) {OutColor[id.xy]=current;return;}
     bool hdr=route.x!=0;
     float3 cur=hdr?hdrCompress(current.rgb):current.rgb;
     float3 lo=cur,hi=cur;
     [unroll]for(int y=-1;y<=1;++y)[unroll]for(int x=-1;x<=1;++x) {
-        float3 value=Color.Load(int3(clamp(q+int2(x,y),0,int2(size.xy)-1),0)).rgb;
+        int2 neighbor=clamp(q+int2(x,y),0,int2(size.xy)-1);
+        if(debug.w!=0) {
+            // Do not let a bright alternate-camera fragment widen the world
+            // colour clamp and admit unrelated history.
+            if(UntrustedCameraCoverage.Load(int3(neighbor,0))>0)continue;
+        }
+        float3 value=Color.Load(int3(neighbor,0)).rgb;
         if(hdr)value=hdrCompress(value);
         lo=min(lo,value);hi=max(hi,value);
     }

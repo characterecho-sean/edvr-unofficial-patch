@@ -152,6 +152,12 @@ struct FlatMonoResolveFrame {
     // only cleanColor; finish composites raw colour under coverage.
     ID3D11ShaderResourceView* cleanColor = nullptr;
     ID3D11ShaderResourceView* overlayCoverage = nullptr;
+    // Conservative union of fragments rendered through a qualified alternate
+    // camera on the flat HDR route. The mask is R8_UNORM at render size and
+    // remains marked after later draws, even when they write identical depth.
+    // A marked footprint uses current colour; only EDVR's native-size HDR TAA
+    // accepts this input. Null keeps the existing resolver path unchanged.
+    ID3D11ShaderResourceView* untrustedCameraCoverage = nullptr;
     // The upscaler feature slot the backend evaluates on (dlaa.h, kUpscalerSlots; dlaa.cpp and fsr3_engine.cpp keep one
     // feature, one size key and one history per slot). 0 is the flat profile's and eye 0's -- the default, and every
     // caller before the VR world route. The VR world route passes 2 (vr_world_route.h, kVrWorldFeatureSlot), because its two
