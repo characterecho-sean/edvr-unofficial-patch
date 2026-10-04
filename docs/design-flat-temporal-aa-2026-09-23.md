@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** world naming confirmed; probe arming31 FLOWN on Epic (101).
-  Both samples are partial. Per-draw replacement passes the full build;
-  installed/latest `v0.18.1-31-g2b8f5475`. AA fix open (101).
+- **State:** per-draw diagnostic33 INSTALLED on Epic, NOT FLOWN (101).
+  World naming confirmed; latest log31 samples partial. Full gates passed.
+  Installed `v0.18.1-33-g2657c1f4`; AA fix remains open.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 101: full gate, clean promotion and Epic install of the
-  per-draw diagnostic, then the same weapon drawn 10s/holstered 10s, no F10.
+- **Next:** section 101: same weapon drawn 10s/holstered 10s, no F10.
+  Check the next Epic log against `v0.18.1-33-g2657c1f4` before reading counts.
   Compare measured survival/stencil with chronology; equality is not ownership.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10244,5 +10244,14 @@ generator self-test and runtime syntax compilation passed.
 Full absolute-path build passed all gates, including production DLLs, Python
 self-tests, GPU/test rigs and self-contained installer resource checks. Receipt
 input fingerprint: `ae977748c6961e0af59443086295929dff7a2c9800313771fb9665c7a6525886`.
-Not installed or flown yet; promote the clean commit and install only the flat
-package on Epic, preserving its INI and DLSS.
+The full gate preceded clean-commit promotion and Epic installation below.
+
+Install completed: code commit `2657c1f4` fast-forwarded to main and pushed;
+clean receipt-guarded DLL-only promotion passed, then the sanctioned installer
+dry-run, install and verify-only all passed for Epic's flat package. Live DLL
+ProductVersion/FileVersion: `v0.18.1-33-g2657c1f4`. Flat INI and DLSS SHA256
+match the pre-install snapshot exactly; Frontier/VR was not installed.
+INSTALLED, NOT FLOWN. The AA refusal remains during this measurement. Next:
+the same weapon drawn for 10 seconds, then holstered for 10 seconds, no F10.
+Read measured versus unavailable counts, every eligible draw's merge status
+and the intervening chronology before changing AA admission.
