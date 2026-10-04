@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** v43 FLOWN: unsupported-only mixed AA treats; weapon still refuses.
-  Combined first-failure diagnostic validated, reviewed and installed, NOT
-  FLOWN. Section 102; Epic `v0.18.1-45-g0f20f4e9`.
+- **State:** v45 FLOWN: empty-output alpha PS B40B blocks weapon capture.
+  Generic correction reviewed and full-gate validated; install next, NOT FLOWN.
+  Section 102; Epic currently `v0.18.1-45-g0f20f4e9`.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: restart Epic; draw weapon, press F10 once, wait 15s,
-  holster for 10s, then exit. Combined bucket/qualification diagnostic installed.
+- **Next:** section 102: clean promotion and Epic install of the
+  empty-output PS correction, then drawn/holstered AA and coverage validation.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10733,3 +10733,65 @@ flat install and separate `--verify-only` passed. Installed ProductVersion
 the failure without changing AA admission. Restart Epic, draw the same weapon,
 press F10 once, wait 15s, holster for 10s, then exit. Read the next flight
 against this literal installed version after the documentation-only commit.
+
+### 2026-10-04: v45 identifies the first weapon-camera failure
+
+Verified `edvr_gfx_20261004_172835.log`, installed
+`v0.18.1-45-g0f20f4e9`, build `6AC2E095`, linked 23:26:13 UTC. At
+frame42878 q4923 and frame42938 q5187, the first alternate bucket failure is
+VS `F516BF0201303B87` / PS `B40B0462256E31C2`, begin `no colour output`.
+Actual PS matches the nominee; current, viewport, H DSV, shape and phase all
+pass, global failure none. Observed15/37 draws have completed0; supported
+AACF qualification has matching resources/camera but ready0 and receipts0/5
+or0/7. Thus the first failed capture prevents later weapon receipts.
+
+Ruled out: the weapon's first failed draw has a null, untracked or mismatched
+PS, because the physical nonnull PS is known and exactly matches B40B.
+Saved PS disassembly proves an empty output signature, optional cb2-controlled
+texture alpha test and `discard_z`, followed by a terminal `ret`; no explicit
+depth, coverage, stencil or UAV output. The existing patcher rejects empty
+signatures before it can append its private coverage export. A general pure
+empty-output extension can retain those instructions and alpha/depth effects;
+skipping the draw would lose the depth ownership evidence. Offline regression
+must compare original color/depth/stencil and private surviving-fragment mask,
+including alpha enable/disable and subsequent supported-camera qualification.
+
+Astra independently confirmed B40B and that F516 projects via cb1[270..273].
+Compiled SV_Target7 and Elite's color signatures use OSGN systemValue0;
+retain that representation for empty signatures. The new empty-output case
+must refuse forced early depth/stencil (opcode106 flag0x2000): otherwise
+discarded fragments could write depth before reaching the coverage export.
+B40B has only refactoringAllowed. Existing colored-shader admission is outside
+this correction's scope; explicit depth/coverage/stencil/UAV guards remain.
+
+F10 at17:31:00 armed frame42954. Its trace dump has frames0/events0,
+skipped-slots4. Draw pixels retry unqualified weapon frames42955..43314,
+then save partial frames43369/43370 at17:31:15 under
+`flat_draw_pixels/20261004_233100_014_60168_1`, with copy/cap refusals.
+The independent first-failure reports, saved exact shader and camera bytes
+are sufficient for this correction despite the absent whole-frame replay.
+Summary frame43200 treats0/refuses300; frame43500 treats134/refuses166;
+frame43800 treats300/refuses0. Recovery is consistent with holstering;
+the input event itself is not logged. Next flight should test actual coverage
+and treatment after the offline regression, not add another instrument.
+
+Generic correction implemented: empty original OSGN can gain private MRT7,
+with original instructions unchanged; forced early depth/stencil is rejected
+only for this new case after both chunks are parsed. Shader creation caches
+the patch; no new per-draw query or setting. Astra reviewed production and
+implemented WARP regressions using the exact 384-byte B40B shader, whose
+EDVR hash is asserted. Alpha off/mixed/all-pass/all-discard, depth and stencil
+rejection with stencil writes, exact original color/full depth-stencil bytes
+and restored bindings pass. Empty alternate then unsupported material then
+AACF has complete receipts and H qualification; equal-depth world overdraw
+retains conservative coverage. Forced early and reversed chunk order,
+explicit depth/coverage, UAV and unsupported control flow refusal pass.
+Old no-output refusal fixtures now use explicitly unsupported SV_Depth.
+Targeted absolute mono build exit0; sources frozen and final full gate running
+(`build/flat-empty-output-full.log`). NOT FLOWN; admission is structural,
+with no weapon identity or shader hash list.
+
+Final full build passed all gates, exit0, source tree frozen:
+`build/flat-empty-output-full.log`; receipt
+`d7bad299440972c707bfc3dfcd8336091061369a32438424b4d84513ba63411f`.
+Commit, clean receipt-guarded promotion, main push and Epic flat install next.

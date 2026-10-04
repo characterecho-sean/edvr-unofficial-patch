@@ -2,6 +2,7 @@
 #include "../../src/d3d11/flat_foreground_ownership.h"
 #include "../../src/d3d11/flat_overlay_layer.h"
 #include "../../src/d3d11/flat_untrusted_coverage.h"
+#include "flat_empty_output_gpu_tests.h"
 
 inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) {
     using Microsoft::WRL::ComPtr;
@@ -30,12 +31,12 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         "float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};"
         "return float4(p[id],.4,1);}","main","vs_5_0");
     const auto secondPsCode=compile("float4 main():SV_Target {return float4(1,0,0,0);}","main","ps_5_0");
-    const auto zeroOutputPsCode=compile("void main(){}","main","ps_5_0");
+    const auto explicitDepthPsCode=compile("float main():SV_Depth{return .5;}","main","ps_5_0");
     if(!vsCode || !psCode || !csCode || !mergeCode || !secondVsCode ||
-       !secondPsCode || !zeroOutputPsCode)return failures;
+       !secondPsCode || !explicitDepthPsCode)return failures;
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11VertexShader> secondVs;
-    ComPtr<ID3D11PixelShader> ps,secondPs,zeroOutputPs;
+    ComPtr<ID3D11PixelShader> ps,secondPs,explicitDepthPs;
     ComPtr<ID3D11ComputeShader> cs,mergeCs;
     check(SUCCEEDED(device->CreateVertexShader(vsCode->GetBufferPointer(),vsCode->GetBufferSize(),nullptr,&vs)) &&
           SUCCEEDED(device->CreatePixelShader(psCode->GetBufferPointer(),psCode->GetBufferSize(),nullptr,&ps)) &&
@@ -43,12 +44,12 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
           SUCCEEDED(device->CreateComputeShader(mergeCode->GetBufferPointer(),mergeCode->GetBufferSize(),nullptr,&mergeCs)) &&
           SUCCEEDED(device->CreateVertexShader(secondVsCode->GetBufferPointer(),secondVsCode->GetBufferSize(),nullptr,&secondVs)) &&
           SUCCEEDED(device->CreatePixelShader(secondPsCode->GetBufferPointer(),secondPsCode->GetBufferSize(),nullptr,&secondPs)) &&
-          SUCCEEDED(device->CreatePixelShader(zeroOutputPsCode->GetBufferPointer(),zeroOutputPsCode->GetBufferSize(),nullptr,&zeroOutputPs)),
+          SUCCEEDED(device->CreatePixelShader(explicitDepthPsCode->GetBufferPointer(),explicitDepthPsCode->GetBufferSize(),nullptr,&explicitDepthPs)),
           "raster and actual ownership compute shaders create");
-    if(!vs || !ps || !cs || !mergeCs || !secondVs || !secondPs || !zeroOutputPs)return failures;
+    if(!vs || !ps || !cs || !mergeCs || !secondVs || !secondPs || !explicitDepthPs)return failures;
     edvr::FlatOverlayLayer::rememberPixelShader(ps.Get(),psCode->GetBufferPointer(),psCode->GetBufferSize(),false);
     edvr::FlatOverlayLayer::rememberPixelShader(secondPs.Get(),secondPsCode->GetBufferPointer(),secondPsCode->GetBufferSize(),false);
-    edvr::FlatOverlayLayer::rememberPixelShader(zeroOutputPs.Get(),zeroOutputPsCode->GetBufferPointer(),zeroOutputPsCode->GetBufferSize(),false);
+    edvr::FlatOverlayLayer::rememberPixelShader(explicitDepthPs.Get(),explicitDepthPsCode->GetBufferPointer(),explicitDepthPsCode->GetBufferSize(),false);
 
     D3D11_TEXTURE2D_DESC colorDesc{};
     colorDesc.Width=w;colorDesc.Height=h;colorDesc.MipLevels=colorDesc.ArraySize=colorDesc.SampleDesc.Count=1;
@@ -593,7 +594,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         // The v40 ordering starts with an H-camera draw whose original PS is
         // null. It must fail only its own bucket; later unsupported material
         // draws and AACF must still form a complete alternate mask. The second
-        // case starts with a real shader that has no colour output, so MRT7
+        // case starts with a real shader that has non-colour PS output, so MRT7
         // patching itself fails before another null-PS world draw.
         struct Submitted { bool observed=false, nominee=false, planned=false, began=false; };
         auto submit=[&](edvr::FlatUntrustedCoverage& capture,
@@ -670,10 +671,10 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
             clearPair();
             const auto firstWorld=submit(capture,observed,used,frame,1,worldBytes,
                 0xEB5234DB6ADB491Dull,scenario?0xABCDEF01ull:0ull,
-                vs.Get(),scenario?zeroOutputPs.Get():nullptr,full,false);
+                vs.Get(),scenario?explicitDepthPs.Get():nullptr,full,false);
             const char* firstFailure=capture.failure();
             const bool worldFailedAsExpected=firstFailure &&
-                std::strstr(firstFailure,scenario?"no colour output":"shader-identity");
+                std::strstr(firstFailure,scenario?"non-colour PS output":"shader-identity");
             Submitted secondWorld{};
             if(scenario)secondWorld=submit(capture,observed,used,frame,2,worldBytes,
                 0xEB5234DB6ADB491Dull,0,vs.Get(),nullptr,full,false);
@@ -707,7 +708,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
                   !edvr::flatUntrustedObservationAccounted(observed[0],capture) &&
                   mask.size()==w*h && marked==105 && mask[4*w+4]==255 &&
                   sameOriginal(),
-                  scenario?"zero-output then null H-camera shader failures leave complete alternate coverage":
+                  scenario?"explicit-depth then null H-camera shader failures leave complete alternate coverage":
                            "world-first null PS is bucket-local and all alternate originals remain accounted");
             const auto omitted=submit(capture,observed,used,frame,7,alternateBytes,
                 0x7B0DC42D383F694Cull,0x0DF03E64DF9DBEF1ull,
@@ -724,7 +725,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
             uint32_t used=0;clearPair();
             const auto bad=submit(capture,observed,used,frame,1,alternateBytes,
                 0x7B0DC42D383F694Cull,failing?0xABCDEF01ull:0ull,
-                vs.Get(),failing?zeroOutputPs.Get():nullptr,full,false);
+                vs.Get(),failing?explicitDepthPs.Get():nullptr,full,false);
             const auto good=submit(capture,observed,used,frame,2,alternateBytes,
                 0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
                 secondVs.Get(),secondPs.Get(),secondRect,true);
@@ -732,7 +733,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
                   !capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0) &&
                   !edvr::flatUntrustedObservationAccounted(observed[0],capture) &&
                   sameOriginal(),
-                  failing?"zero-output alternate shader failure refuses treatment":
+                  failing?"explicit-depth alternate shader failure refuses treatment":
                           "null-PS alternate shader failure refuses treatment");
         }
         {
@@ -762,7 +763,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
             capture.diagnosePlanShader(context,1,[](void*) {return uint64_t(0);});
             const auto alternateFailure=submit(capture,observed,used,80,2,alternateBytes,
                 0x7B0DC42D383F694Cull,0xABCDEF01ull,
-                secondVs.Get(),zeroOutputPs.Get(),secondRect,false);
+                secondVs.Get(),explicitDepthPs.Get(),secondRect,false);
             const auto supported=submit(capture,observed,used,80,3,alternateBytes,
                 0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
                 secondVs.Get(),secondPs.Get(),secondRect,true);
@@ -806,14 +807,14 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
                   alternateReport.phasePair &&
                   alternateReport.firstFailure.sequence==2 &&
                   std::strcmp(alternateReport.firstFailure.stage,"begin")==0 &&
-                  alternateReport.firstFailure.reason.find("no colour output")!=std::string::npos &&
+                  alternateReport.firstFailure.reason.find("non-colour PS output")!=std::string::npos &&
                   alternateReport.firstFailure.ps==0xABCDEF01ull &&
                   alternateReport.firstFailure.pending==1 &&
                   alternateReport.firstFailure.completed==0 &&
                   alternateReport.firstFailure.actualPsRead &&
-                  alternateReport.firstFailure.actualPsObject==zeroOutputPs.Get() &&
+                  alternateReport.firstFailure.actualPsObject==explicitDepthPs.Get() &&
                   alternateReport.firstFailure.actualPs==
-                      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(zeroOutputPs.Get())) &&
+                      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(explicitDepthPs.Get())) &&
                   alternateReport.firstFailure.current && alternateReport.firstFailure.viewport &&
                   alternateReport.firstFailure.writeEpoch==80 &&
                   qualification.hIdentity && qualification.uniqueAlternate &&
@@ -831,7 +832,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         }
         {
             edvr::FlatUntrustedCoverage capture;capture.beginFrame(81);
-            context->PSSetShader(zeroOutputPs.Get(),nullptr,0);
+            context->PSSetShader(explicitDepthPs.Get(),nullptr,0);
             check(!capture.plan(81,1,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
                   0xEB5234DB6ADB491Dull,0,worldBytes),
                   "an untracked nonnull shader still fails nominal shader identity");
@@ -840,7 +841,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
             capture.diagnosePlanShader(context,1,[](void*) {return uint64_t(0);});
             const auto report=capture.diagnoseBucket(0,liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
             check(report.firstFailure.actualPsRead &&
-                  report.firstFailure.actualPsObject==zeroOutputPs.Get() &&
+                  report.firstFailure.actualPsObject==explicitDepthPs.Get() &&
                   report.firstFailure.actualPs==0,
                   "first plan failure distinguishes an untracked nonnull shader from null and preserves its first snapshot");
         }
@@ -864,5 +865,5 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         }
     }
     context->ClearState();
-    return failures;
+    return failures+flatEmptyOutputGpuTests(device,context);
 }

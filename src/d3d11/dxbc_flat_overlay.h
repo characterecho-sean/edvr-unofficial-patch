@@ -19,12 +19,14 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
     reason.clear();
     try {
         auto chunks = parseContainer(bytecode, bytes, 0x00000050u);
-        bool outputSignature = false, program = false, colorOutput = false;
+        bool outputSignature = false, program = false;
+        bool emptyOutput = false, forceEarlyDepthStencil = false;
         for (auto& chunk : chunks) {
             if (chunk.tag == 0x4e47534fu) { // OSGN
                 if (outputSignature) throw std::runtime_error("duplicate output signature");
                 outputSignature = true;
                 auto elements = parseSignature(chunk.bytes);
+                emptyOutput = elements.empty();
                 uint32_t targetSystemValue = 0;
                 for (const auto& e : elements) {
                     if (!equalName(e.name, "SV_TARGET"))
@@ -33,9 +35,8 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
                         throw std::runtime_error("private MRT7 occupied");
                     if (e.componentType != 3) throw std::runtime_error("non-float colour output");
                     targetSystemValue = e.systemValue;
-                    colorOutput = true;
                 }
-                if (!colorOutput) throw std::runtime_error("no colour output");
+                // Empty alpha/depth-only passes can still mark surviving fragments.
                 SignatureElement coverage;
                 coverage.name = "SV_TARGET";
                 coverage.semanticIndex = kFlatOverlayTarget;
@@ -63,6 +64,8 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
                 for (size_t at = 2; at < in.size();) {
                     const uint32_t op = in[at] & 0x7ffu;
                     const uint32_t length = instructionLength(in, at);
+                    if (op == 106 && (in[at] & 0x2000u))
+                        forceEarlyDepthStencil = true;
                     if (returned) throw std::runtime_error("instructions after terminal PS return");
                     // Only balanced IF/ELSE/ENDIF is admitted. Loops, jumps,
                     // calls and conditional returns cannot establish that
@@ -147,6 +150,10 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
             }
         }
         if (!outputSignature || !program) throw std::runtime_error("missing PS signature or program");
+        // Check after parsing the program so either DXBC chunk order is handled.
+        // Forced early depth can write depth for fragments later discarded before the mark.
+        if (emptyOutput && forceEarlyDepthStencil)
+            throw std::runtime_error("empty output with forced early depth/stencil");
         patched = makeContainer(chunks);
         return true;
     } catch (const std::exception& e) {
