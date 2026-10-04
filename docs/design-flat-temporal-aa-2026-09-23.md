@@ -4,7 +4,8 @@
 
 - **State:** culprit identified; naming correction and ownership probe BUILT,
   NOT FLOWN (101). Source witness `aca86106` FLOWN.
-  Epic installed `v0.18.1-27-gaca86106`. Latest analyzed log is this build;
+  Epic installed `v0.18.1-29-g40c3a1c7`; latest analyzed log is
+  `v0.18.1-27-gaca86106`;
   evidence and corrections are in sections 1-101.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
@@ -33,8 +34,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 101: correct world-source naming and measure early pixel
-  ownership at HDR consumer. Keep mixed-camera AA refusal until qualified.
+- **Next:** section 101: Epic flat, same weapon drawn for 10 seconds, then
+  holstered for 10 seconds; no F10. Validate `v0.18.1-29-g40c3a1c7` and read
+  automatic ownership counters plus named-same-H. Keep AA refusal until qualified.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10084,3 +10086,19 @@ the gate now validates both distinct diagnostics, including ownership CS
 8x8x1 and t0-t3/u0/b0 bindings. The complete build was then rerun successfully.
 This build has not flown. No AA admission,
 configuration, or VR behavior change is included.
+
+Committed and pushed `40c3a1c7` to main. Receipt-guarded `--dll-only` promotion
+passed from the clean tree. Installed `v0.18.1-29-g40c3a1c7` to Epic flat at
+14:05 MDT using `install_edvr.py`; dry-run wrote nothing, install and
+`--verify-only` passed, and the installed DLL ProductVersion is this version.
+Backup tag `flat-foreground-40c3a1c7`, stamp `20261004-140552`.
+`edvr-flat.ini` SHA256 remains
+`1696ADFC572CBA74668C56A60AAD09FDFDD64B1FC947B6759B68925E4EE2DDC1`;
+DLSS SHA256 remains
+`3975567B8943C53ACCE397F2B72380092F84F162D00B0D2C7D08A1025C563983`.
+No INI or DLSS install flag was used. Frontier was not installed.
+NOT FLOWN: reproduce with the same weapon for 10 seconds drawn, then
+10 seconds holstered, no F10. Verify the literal installed version rather
+than documentation HEAD. Read both automatic ownership reports, missing-stage
+statuses, named-same-H and engine-source counts; do not interpret zero partial
+counts or exact depth alone as exclusive first-person ownership.
