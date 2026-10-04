@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** v40 FLOWN, still refuses weapon mixed AA. Astra review proves
-  a null-PS world draw globally poisons capture before its bucket can be
-  excluded. Section 102; scoped correction reviewed, full gate PASS; install next.
+- **State:** Astra-reviewed failure-scope correction INSTALLED, NOT FLOWN
+  on Epic as `v0.18.1-43-g8afc3e01`. Full gate and clean promotion PASS.
+  Section 102; v40 proved the null-PS world draw globally poisoned capture.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: commit/promote the validated bucket-local failure
-  correction and install on Epic, then one drawn/holstered 10-second run.
+- **Next:** section 102: restart Epic, same weapon drawn 10 seconds, then
+  holstered 10 seconds; no F10. Verify mixed treatment and mask occupancy.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10614,3 +10614,19 @@ Receipt input hash:
 `b436a93920cf67991456283f9f84afbac91793cef968d883640c6ea96af42112`.
 Log: `build/flat-bucket-local-failure-full.log`. Commit, clean-version DLL
 promotion and Epic flat installation are next; v40 is still installed.
+
+Commit `8afc3e01` merged to main, pushed and confirmed at `origin/main`.
+Receipt-guarded absolute-path `build.bat --dll-only` passed. Epic flat
+installation passed dry run, installation and separate `--verify-only`;
+installed product version is `v0.18.1-43-g8afc3e01`. Fresh pre-install SHA256
+comparison confirms `edvr-flat.ini` and `nvngx_dlss.dll` unchanged. No
+`edvr.ini` was present; Frontier was not installed.
+
+INSTALLED, NOT FLOWN. Next: restart Epic, same weapon drawn 10 seconds and
+holstered 10 seconds, no F10. Expected: H discards the exact world-camera
+shader failures, selected/actually-treated become nonzero, and mixed TAA
+keeps world AA active. The existing mask-occupancy report will measure the
+alternate union after successful treatment. Remaining visual/coverage
+uncertainty is explicitly unqualified until this flight. Verify the next log
+against the literal installed version above; the installation-journal commit
+does not change DLL behavior or require another promotion.
