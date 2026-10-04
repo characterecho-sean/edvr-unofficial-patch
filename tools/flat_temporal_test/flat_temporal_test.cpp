@@ -3232,8 +3232,11 @@ void testFlatForegroundOwnershipWiring() {
           "foreground hook, probe and generated shader registry are readable");
     check(variants.find("\"kFlatForegroundOwnershipBytecode\"")!=std::string::npos &&
           variants.find("edvr::kFlatForegroundOwnershipCs,\"cs_5_0\"")!=std::string::npos &&
-          probe.find("CreateComputeShader(kFlatForegroundOwnershipBytecode")!=std::string::npos,
-          "the production compute shader is generated from the same HLSL the WARP rig executes");
+          variants.find("\"kFlatForegroundMergeBytecode\"")!=std::string::npos &&
+          variants.find("edvr::kFlatForegroundMergeCs,\"cs_5_0\"")!=std::string::npos &&
+          probe.find("CreateComputeShader(kFlatForegroundOwnershipBytecode")!=std::string::npos &&
+          probe.find("CreateComputeShader(kFlatForegroundMergeBytecode")!=std::string::npos,
+          "production merge and ownership shaders are generated from the same HLSL the WARP rig executes");
     const size_t planned=runtime.find("foregroundPlanned=s.foreground.plan("),
         begun=runtime.find("foregroundStarted=state().foreground.beginDraw("),
         ended=runtime.find("state().foreground.endDraw(ctx);"),
@@ -3251,17 +3254,23 @@ void testFlatForegroundOwnershipWiring() {
           policy.find("firstReportedFrame + 60")!=std::string::npos &&
           probe.find("++reported_;")!=std::string::npos &&
           probe.find("if(!consumerSeen_")!=std::string::npos &&
-          probe.find("report(\"partial\")")!=std::string::npos &&
+          probe.find("report(\"partial-unavailable\")")!=std::string::npos &&
+          probe.find("report(failure_.empty()?\"complete\":\"partial-measured\",&c)")!=std::string::npos &&
           probe.find("D3D11_MAP_FLAG_DO_NOT_WAIT")!=std::string::npos &&
           probe.find("ctx->CopyResource(staging_.Get(),counters_.Get());")!=std::string::npos,
           "two-frame budget and failure report survive async GPU readback without a CPU wait");
     check(probe.find("SkipAfterWorld){++lateSkipped_;return false;")!=std::string::npos &&
           probe.find("late-skipped=%u")!=std::string::npos &&
           probe.find("cohort-continued-after-world-source")!=std::string::npos &&
-          probe.find("interleaved-shared-depth-draw")!=std::string::npos,
-          "late candidates skip before allocation; an interleaved depth writer is partial evidence");
-    for(const char* reason : {"world-source-predicated-depth-clone", "consumer-stream-output-bound",
-                              "no-world-depth-clone", "consumer-depth-identity", "no-HDR-consumer",
+          probe.find("eligible-draw-subset-only")!=std::string::npos &&
+          probe.find("uint64_t(width_)*height_*14u>kMemoryLimit")!=std::string::npos &&
+          probe.find("layer_.beginDraw(ctx,frame,color_.Get(),dsv_.Get(),&reason,true,true)")!=std::string::npos &&
+          probe.find("ctx->CopyResource(cohortDepth_.Get(),depth_.Get());")!=std::string::npos &&
+          probe.find("ctx->CSSetShader(mergeShader_.Get(),nullptr,0);")!=std::string::npos &&
+          probe.find("ID3D11ShaderResourceView* views[4]={unionCoverageView_.Get(),ownerDepthView_.Get()")!=std::string::npos,
+          "late candidates skip, per-draw masks merge immediate depth within budget, and consumer reads the union and owner depth");
+    for(const char* reason : {"merge-predication-bound", "consumer-stream-output-bound",
+                              "no-world-source", "consumer-depth-identity", "no-HDR-consumer",
                               "readback-timeout"})
         check(probe.find(reason)!=std::string::npos,
               "each unavailable ownership observation has a named failure status");

@@ -24,16 +24,26 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
     const auto psCode=compile("float4 main(float4 p:SV_Position):SV_Target {"
         "if(p.x<3) discard; return float4(1,0,0,0);}","main","ps_5_0");
     const auto csCode=compile(edvr::kFlatForegroundOwnershipCs,"main","cs_5_0");
-    if(!vsCode || !psCode || !csCode)return failures;
+    const auto mergeCode=compile(edvr::kFlatForegroundMergeCs,"main","cs_5_0");
+    const auto secondVsCode=compile("float4 main(uint id:SV_VertexID):SV_Position {"
+        "float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};"
+        "return float4(p[id],.4,1);}","main","vs_5_0");
+    const auto secondPsCode=compile("float4 main():SV_Target {return float4(1,0,0,0);}","main","ps_5_0");
+    if(!vsCode || !psCode || !csCode || !mergeCode || !secondVsCode || !secondPsCode)return failures;
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps;
-    ComPtr<ID3D11ComputeShader> cs;
+    ComPtr<ID3D11VertexShader> secondVs;
+    ComPtr<ID3D11PixelShader> ps,secondPs;
+    ComPtr<ID3D11ComputeShader> cs,mergeCs;
     check(SUCCEEDED(device->CreateVertexShader(vsCode->GetBufferPointer(),vsCode->GetBufferSize(),nullptr,&vs)) &&
           SUCCEEDED(device->CreatePixelShader(psCode->GetBufferPointer(),psCode->GetBufferSize(),nullptr,&ps)) &&
-          SUCCEEDED(device->CreateComputeShader(csCode->GetBufferPointer(),csCode->GetBufferSize(),nullptr,&cs)),
+          SUCCEEDED(device->CreateComputeShader(csCode->GetBufferPointer(),csCode->GetBufferSize(),nullptr,&cs)) &&
+          SUCCEEDED(device->CreateComputeShader(mergeCode->GetBufferPointer(),mergeCode->GetBufferSize(),nullptr,&mergeCs)) &&
+          SUCCEEDED(device->CreateVertexShader(secondVsCode->GetBufferPointer(),secondVsCode->GetBufferSize(),nullptr,&secondVs)) &&
+          SUCCEEDED(device->CreatePixelShader(secondPsCode->GetBufferPointer(),secondPsCode->GetBufferSize(),nullptr,&secondPs)),
           "raster and actual ownership compute shaders create");
-    if(!vs || !ps || !cs)return failures;
+    if(!vs || !ps || !cs || !mergeCs || !secondVs || !secondPs)return failures;
     edvr::FlatOverlayLayer::rememberPixelShader(ps.Get(),psCode->GetBufferPointer(),psCode->GetBufferSize(),false);
+    edvr::FlatOverlayLayer::rememberPixelShader(secondPs.Get(),secondPsCode->GetBufferPointer(),secondPsCode->GetBufferSize(),false);
 
     D3D11_TEXTURE2D_DESC colorDesc{};
     colorDesc.Width=w;colorDesc.Height=h;colorDesc.MipLevels=colorDesc.ArraySize=colorDesc.SampleDesc.Count=1;
@@ -103,7 +113,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
           "game depth state");
     D3D11_RASTERIZER_DESC rasterDesc{};
     rasterDesc.FillMode=D3D11_FILL_SOLID;rasterDesc.CullMode=D3D11_CULL_NONE;
-    rasterDesc.DepthClipEnable=TRUE;
+    rasterDesc.DepthClipEnable=TRUE;rasterDesc.ScissorEnable=TRUE;
     ComPtr<ID3D11RasterizerState> raster;
     check(SUCCEEDED(device->CreateRasterizerState(&rasterDesc,&raster)),
           "game rasterizer for both original draws");
@@ -114,12 +124,14 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
     context->ClearDepthStencilView(baselineDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,0);
     context->ClearDepthStencilView(liveDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,0);
     D3D11_VIEWPORT viewport{};viewport.Width=float(w);viewport.Height=float(h);viewport.MaxDepth=1;
+    D3D11_RECT full{0,0,LONG(w),LONG(h)};
     auto bind=[&](ID3D11RenderTargetView* rtv,ID3D11DepthStencilView* dsv) {
         context->OMSetRenderTargets(1,&rtv,dsv);
         context->OMSetBlendState(blend.Get(),nullptr,~0u);
         context->OMSetDepthStencilState(depthState.Get(),0);
         context->RSSetState(raster.Get());
         context->RSSetViewports(1,&viewport);
+        context->RSSetScissorRects(1,&full);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->VSSetShader(vs.Get(),nullptr,0);
         context->PSSetShader(ps.Get(),nullptr,0);
@@ -159,11 +171,12 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
     bind(liveRtv.Get(),liveDsv.Get());
     edvr::FlatOverlayLayer probe;
     probe.beginFrame(1);
-    const bool began=probe.beginDraw(context,1,liveColor.Get(),liveDsv.Get(),&reason,true);
+    const bool began=probe.beginDraw(context,1,liveColor.Get(),liveDsv.Get(),&reason,true,true);
     check(began,"diagnostic admits format-23 pool with its format-24 RTV");
     if(began) { context->Draw(3,0); probe.endDraw(context); }
-    check(probe.ready(1,liveColor.Get()) && probe.markedDraws()==1,
-          "actual original draw exports private coverage");
+    check(probe.coverageReady(1,liveColor.Get()) && !probe.ready(1,liveColor.Get()) &&
+          !probe.cleanHdr() && !probe.cleanHdrView() && probe.markedDraws()==1,
+          "coverage-only diagnostic exports the original draw without allocating a clean pool copy");
     ComPtr<ID3D11PixelShader> afterPs;context->PSGetShader(&afterPs,nullptr,nullptr);
     ComPtr<ID3D11BlendState> afterBlend;FLOAT factors[4]{};UINT sampleMask=0;
     context->OMGetBlendState(&afterBlend,factors,&sampleMask);
@@ -186,6 +199,48 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
     D3D11_SUBRESOURCE_DATA cbInit{};cbInit.pSysMem=&extent;
     ComPtr<ID3D11Buffer> extentCb;
     check(SUCCEEDED(device->CreateBuffer(&cbDesc,&cbInit,&extentCb)),"odd extent constant buffer");
+    D3D11_TEXTURE2D_DESC ownerDesc{};
+    ownerDesc.Width=w;ownerDesc.Height=h;
+    ownerDesc.MipLevels=ownerDesc.ArraySize=ownerDesc.SampleDesc.Count=1;
+    ownerDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+    std::vector<BYTE> emptyMask(size_t(w)*h,0);
+    std::vector<float> emptyDepth(size_t(w)*h,1.0f);
+    D3D11_SUBRESOURCE_DATA maskInit{};maskInit.pSysMem=emptyMask.data();maskInit.SysMemPitch=w;
+    D3D11_SUBRESOURCE_DATA ownerInit{};ownerInit.pSysMem=emptyDepth.data();ownerInit.SysMemPitch=w*sizeof(float);
+    ComPtr<ID3D11Texture2D> unionMask,ownerDepth;
+    ownerDesc.Format=DXGI_FORMAT_R8_UNORM;
+    const bool maskMade=SUCCEEDED(device->CreateTexture2D(&ownerDesc,&maskInit,&unionMask));
+    ownerDesc.Format=DXGI_FORMAT_R32_FLOAT;
+    const bool depthMade=SUCCEEDED(device->CreateTexture2D(&ownerDesc,&ownerInit,&ownerDepth));
+    check(maskMade && depthMade,"persistent union and last-foreground owner depth create");
+    ComPtr<ID3D11ShaderResourceView> unionView,ownerView;
+    ComPtr<ID3D11UnorderedAccessView> unionUav,ownerUav;
+    if(unionMask && ownerDepth)
+        check(SUCCEEDED(device->CreateShaderResourceView(unionMask.Get(),nullptr,&unionView)) &&
+              SUCCEEDED(device->CreateShaderResourceView(ownerDepth.Get(),nullptr,&ownerView)) &&
+              SUCCEEDED(device->CreateUnorderedAccessView(unionMask.Get(),nullptr,&unionUav)) &&
+              SUCCEEDED(device->CreateUnorderedAccessView(ownerDepth.Get(),nullptr,&ownerUav)),
+              "persistent typed SRVs and UAVs create");
+    if(!extentCb || !unionView || !ownerView || !unionUav || !ownerUav)return failures;
+    auto merge=[&](ID3D11ShaderResourceView* currentMask) {
+        ID3D11ShaderResourceView* inputs[2]={currentMask,cohortView.Get()};
+        ID3D11UnorderedAccessView* outputs[2]={unionUav.Get(),ownerUav.Get()};
+        ID3D11Buffer* params=extentCb.Get();
+        context->OMSetRenderTargets(0,nullptr,nullptr);
+        context->CSSetShader(mergeCs.Get(),nullptr,0);
+        context->CSSetShaderResources(0,2,inputs);
+        context->CSSetUnorderedAccessViews(0,2,outputs,nullptr);
+        context->CSSetConstantBuffers(0,1,&params);
+        context->Dispatch((w+7)/8,(h+7)/8,1);
+        ID3D11ShaderResourceView* noInputs[2]{};
+        ID3D11UnorderedAccessView* noOutputs[2]{};
+        ID3D11Buffer* noParams=nullptr;
+        context->CSSetShaderResources(0,2,noInputs);
+        context->CSSetUnorderedAccessViews(0,2,noOutputs,nullptr);
+        context->CSSetConstantBuffers(0,1,&noParams);
+        context->CSSetShader(nullptr,nullptr,0);
+    };
+    merge(probe.coverageView());
     auto count=[&]() {
         edvr::FlatForegroundOwnershipCounts result{};
         D3D11_BUFFER_DESC bd{};
@@ -203,8 +258,8 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         bd.MiscFlags=0;bd.StructureByteStride=0;
         good=good && SUCCEEDED(device->CreateBuffer(&bd,nullptr,&staging));
         check(good,"eight-counter UAV and readback create");
-        if(!good || !extentCb || !probe.coverageView())return result;
-        ID3D11ShaderResourceView* inputs[4]={probe.coverageView(),cohortView.Get(),
+        if(!good)return result;
+        ID3D11ShaderResourceView* inputs[4]={unionView.Get(),ownerView.Get(),
                                              liveDepthView.Get(),liveStencilView.Get()};
         ID3D11UnorderedAccessView* output=uav.Get();
         ID3D11Buffer* params=extentCb.Get();
@@ -245,6 +300,66 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
           counts.survivingMarked16==0 && counts.survivingUnmarked==0 && counts.overwritten==90 &&
           counts.markedWithoutSurvivingCoverage==w*h && counts.totalStencil16==w*h,
           "later world depth overwrite does not turn stale stencil into surviving ownership");
+
+    // A world pass overwrites the shared depth between two foreground draws.
+    // The second original draw covers a 5x5 square: 15 new pixels, 10 that
+    // overlap the first draw. Its immediate depth copy must replace only those
+    // 25 owner depths; the first draw's other 80 owner depths must survive.
+    context->ClearDepthStencilView(baselineDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.6f,16);
+    context->ClearDepthStencilView(liveDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.6f,16);
+    const D3D11_RECT secondRect{0,0,5,5};
+    bind(baselineRtv.Get(),baselineDsv.Get());
+    context->VSSetShader(secondVs.Get(),nullptr,0);
+    context->PSSetShader(secondPs.Get(),nullptr,0);
+    context->RSSetScissorRects(1,&secondRect);
+    context->Draw(3,0);
+    bind(liveRtv.Get(),liveDsv.Get());
+    context->VSSetShader(secondVs.Get(),nullptr,0);
+    context->PSSetShader(secondPs.Get(),nullptr,0);
+    context->RSSetScissorRects(1,&secondRect);
+    const bool secondBegan=probe.beginDraw(context,1,liveColor.Get(),liveDsv.Get(),&reason,true,true);
+    check(secondBegan,"same-frame second original foreground draw reuses private MRT7");
+    if(secondBegan){context->Draw(3,0);probe.endDraw(context);}
+    check(probe.coverageReady(1,liveColor.Get()) && !probe.ready(1,liveColor.Get()) &&
+          !probe.cleanHdr() && !probe.cleanHdrView() && probe.markedDraws()==2,
+          "same coverage-only object clears its mask for the second draw without a clean pool copy");
+    check(readTex(baselineColor.Get(),4)==readTex(liveColor.Get(),4) &&
+          readTex(baselineDepth.Get(),8)==readTex(liveDepth.Get(),8),
+          "second diagnostic draw preserves the original color, depth, and stencil bytes");
+    context->OMSetRenderTargets(0,nullptr,nullptr);
+    context->CopyResource(cohortDepth.Get(),liveDepth.Get());
+    merge(probe.coverageView());
+    ComPtr<ID3D11Resource> secondMaskResource;
+    if(probe.coverageView())probe.coverageView()->GetResource(&secondMaskResource);
+    ComPtr<ID3D11Texture2D> secondMask;
+    if(secondMaskResource)secondMaskResource.As(&secondMask);
+    const auto secondMaskBytes=secondMask?readTex(secondMask.Get(),1):std::vector<BYTE>{};
+    UINT secondCovered=0;for(BYTE v:secondMaskBytes)secondCovered+=v==255;
+    check(secondMaskBytes.size()==w*h && secondCovered==25,
+          "the second mask is actual raster coverage, including both overlap and new pixels");
+    const auto unionBytes=readTex(unionMask.Get(),1), ownerBytes=readTex(ownerDepth.Get(),4);
+    UINT unionCovered=0;for(BYTE v:unionBytes)unionCovered+=v==255;
+    auto ownerAt=[&](UINT x,UINT y) {
+        float value=0;
+        if(ownerBytes.size()==size_t(w)*h*4)
+            std::memcpy(&value,ownerBytes.data()+(size_t(y)*w+x)*4,4);
+        return value;
+    };
+    check(unionBytes.size()==w*h && unionCovered==105 &&
+          unionBytes[w+1]==255 && unionBytes[w+4]==255 && unionBytes[8*w+8]==255 && unionBytes[8*w+1]==0 &&
+          ownerAt(1,1)==.4f && ownerAt(4,1)==.4f && ownerAt(8,8)==.5f,
+          "per-pixel merge retains old owner depth and replaces overlap with the last foreground draw");
+    counts=count();
+    check(counts.total==w*h && counts.covered==105 && counts.survivingExactDepth==25 &&
+          counts.survivingMarked16==25 && counts.survivingUnmarked==0 && counts.overwritten==80 &&
+          counts.markedWithoutSurvivingCoverage==92 && counts.totalStencil16==w*h,
+          "counter shader sees second owner survive and first owner overwritten after interleaved world writes");
+    context->ClearDepthStencilView(liveDsv.Get(),D3D11_CLEAR_STENCIL,.6f,0);
+    counts=count();
+    check(counts.covered==105 && counts.survivingExactDepth==25 &&
+          counts.survivingMarked16==0 && counts.survivingUnmarked==25 &&
+          counts.overwritten==80 && counts.totalStencil16==0,
+          "missing current stencil is distinct from missing foreground coverage or depth overwrite");
     context->ClearState();
     return failures;
 }

@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** world naming confirmed on `v0.18.1-29-g40c3a1c7` (101).
-  Epic `v0.18.1-31-g2b8f5475` installed; probe arming correction NOT FLOWN.
-  Probe29 spent both samples on loading draws. Evidence/corrections: 1-101.
+- **State:** world naming confirmed; probe arming31 FLOWN on Epic (101).
+  Both samples are partial. Per-draw replacement passes the full build;
+  installed/latest `v0.18.1-31-g2b8f5475`. AA fix open (101).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 101: Epic flat, same weapon drawn10s then holstered10s,
-  no F10. Verify `v0.18.1-31-g2b8f5475`, late-skipped and both ownership
-  reports. Keep AA refusal until foreground depth/motion/history is qualified.
+- **Next:** section 101: full gate, clean promotion and Epic install of the
+  per-draw diagnostic, then the same weapon drawn 10s/holstered 10s, no F10.
+  Compare measured survival/stencil with chronology; equality is not ownership.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10152,3 +10152,97 @@ install. NOT FLOWN. Next repeat10s drawn/10s holstered, no F10; verify the
 literal installed version and check late-skipped plus both complete/partial
 ownership reports. AA switching off remains expected while admission is closed;
 this build repairs evidence collection, not the unresolved foreground path.
+
+### 2026-10-04: arming corrected; early cohort has intervening depth writers
+
+Verified `edvr_gfx_20261004_142246.log`, `v0.18.1-31-g2b8f5475`, build
+6AC2B53A, linked20:21:14 UTC. Both samples now arm during the actual weapon
+reproduction at14:25:15/16, frames45214/45274; 238778 late loading candidates
+were skipped without spending the budget. Both witnesses name exactly the H
+world camera (`named-same-H=1`), and early AACF/CF projection near0.0675 still
+differs from world0.025. AA refuses while drawn and recovers after holstering.
+
+Frame45214: first5266, last5268, world5274, consumer20616, marked3/planned3;
+three intervening same-depth state-enabled depth/stencil writers. Frame45274:
+first4957, last4965, world4981, consumer21155, marked3/planned7; fifteen gap
+writers. Both report depth-write-all1, stencil-replace16=0, full-viewport1,
+same-phase1, no explicit mutations/clears or foreign work. The first latched
+`interleaved-shared-depth-draw` failure prevents further marking and dispatch;
+all pixel counters are unavailable partial values, not measured zeros.
+
+Ruled out: late loading consumes the probe's budget after the arming fix,
+because reported0 survives loading and samples arm only at the reproduction.
+Ruled out: the tracked early foreground forms one uninterrupted call sequence
+before named world source, because both samples contain intervening draws
+bound to shared depth. This makes an after-cohort clone insufficient to
+attribute surviving pixels to the tracked draws. The combined state report
+also does not certify the VR first-person stencil-replace16 producer contract;
+it does not prove that every foreground pixel lacks stencil16 at the consumer.
+Audit immediate per-draw passing coverage/depth capture and the omitted writer
+states before another flight; retain AA refusal and avoid a per-weapon whitelist.
+
+The later state-query audit qualifies the gap counters: noteSameDepthDraw was
+called before the lazy engine-motion flush decision, so a pending substitution
+could leave EDVR's OM state bound at the query. These counters therefore do not
+certify the next game's depth/stencil operations. Query pre-world gap chronology
+after restoring the game's state; do not force a flush across all later world
+draws just for diagnostic aggregates. The intervening call sequence and the
+probe's sticky failure are confirmed; actual fragment writes remain unmeasured.
+
+The producer audit narrows the finding: `stencil-replace16=0` is ANDed across
+the cohort, so at least one marked draw fails the existing VR producer gate;
+it does not identify which draw or prove all consumer pixels lack that bit.
+`X` is DrawIndexedInstanced; the logged24-index, one-instance draw passes only
+the count/instance gate. Flat exits its hook before `weaponMotionDraw`, so
+there is no existing producer map to reuse. History safety is required even
+for EDVR TAA: current-frame rejection alone does not tag stored foreground
+history against a later world pixel with coincident encoded depth. FSR and
+DLSS also remain unqualified with shared raw depth and one world near/FOV.
+
+Implement a bounded per-draw measurement: fresh private R8 passing mask for
+each eligible original draw, immediate shared-depth copy after that draw,
+GPU merge only those passing pixels into persistent union/owner-depth maps.
+Intervening draws cannot replace the saved owner-depth values. Compare those
+values with actual consumer depth/stencil; retain exact-depth equality's
+explicit non-exclusive limitation. Record capped per-draw and pre-world gap
+chronology with shader/camera/DS state, and distinguish measured partial counts
+from unavailable counts. Coverage-only diagnostic mode skips the unused clean
+Pool-color copy, allowing mask1 + union1 + owner-depth4 + depth-copy8 bytes per
+pixel (14 B/px, about111 MiB at4K) under the existing128 MiB bound. Max two
+frames,60-frame separation, no F10/key; AA selection and temporal history are
+unchanged. Tests must execute the canonical merge shader with intervening
+depth writes and verify original color/depth/stencil and context restoration.
+
+Sean reports drawing the weapon in VR keeps world AA active. The code paths
+explain the visible difference: screen_motion excludes the first-person family
+when naming VR world source; vr_world_route has optional weapon motion/stencil
+inputs and does not use flat's supported-source camera-uniqueness rejection.
+The flat hook exits before the VR weapon producer. Corrected flat world naming
+therefore restores engine production but not the separate HDR admission guard.
+This is a reported VR observation, not a new VR log qualification; no VR install
+or VR behavior is changed in the per-draw diagnostic.
+
+Per-draw implementation audit: each eligible draw uses a fresh passing mask,
+runs the original draw once, restores its layer state, copies depth immediately
+and merges under saved/restored context state. Only pre-world gaps on the exact
+shared depth resource force lazy-state restoration before querying game state;
+later draws only increment a resource-identity counter, explicitly unobserved
+for DS state. Capped chronology includes both faces' stencil functions and all
+operations. Predication/stream output and read-only depth have named refusals;
+failed/subset captures cannot appear as complete measurements. No AA admission
+or backend history policy changed.
+
+Targeted WARP test: two real raster draws reuse the same coverage-only layer in
+one frame, with an intervening depth write. The second mask is 25 pixels (105
+would expose a missed clear), persistent union 105, final surviving 25 and
+overwritten 80. Overlap takes the second draw's depth; untouched pixels retain
+the first draw's depth. Original color/depth/stencil match the uninstrumented
+baseline, and no clean HDR texture/view is allocated. Shader reflection retains
+the merge's 8x8 group, t0/t1, u0/u1 and b0 slots. Targeted mono and temporal rigs,
+generator self-test and runtime syntax compilation passed.
+
+Full absolute-path build passed all gates, including production DLLs, Python
+self-tests, GPU/test rigs and self-contained installer resource checks. Receipt
+input fingerprint: `ae977748c6961e0af59443086295929dff7a2c9800313771fb9665c7a6525886`.
+Not installed or flown yet; promote the clean commit and install only the flat
+package on Epic, preserving its INI and DLSS.

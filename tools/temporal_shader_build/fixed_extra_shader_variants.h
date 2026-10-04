@@ -25,6 +25,7 @@ static std::vector<Variant> extraVariants() { return {
     {"kSunglareAllWorldBytecode","sunglare_world_vs","main",sunAllWorld,{},false,edvr::kSunglareWorldVS,"vs_5_0"},
     {"kSunglareAllFlatBytecode","sunglare_world_vs","main",sunAllFlat,{},false,edvr::kSunglareWorldVS,"vs_5_0"},
     {"kFlatForegroundOwnershipBytecode","flat_foreground_ownership_cs","main",nullptr,{},false,edvr::kFlatForegroundOwnershipCs,"cs_5_0"},
+    {"kFlatForegroundMergeBytecode","flat_foreground_merge_cs","main",nullptr,{},false,edvr::kFlatForegroundMergeCs,"cs_5_0"},
     {"kWeaponFootprintBytecode","weapon_footprint_cs","main",nullptr,{},false,edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl,"cs_5_0"},
 }; }
 static std::vector<LegacyContract> extraLegacyContracts() { return {

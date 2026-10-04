@@ -3448,13 +3448,21 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         s.namedDepth=k.depth;s.namedConstants=k.b1;std::memcpy(s.namedCamera,d.camera,sizeof(d.camera));
         engineVelocityNoteSource(static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),static_cast<ID3D11Buffer*>(const_cast<void*>(k.b1)));
     }
-    if(foregroundCandidate) {
-        FlatForegroundProbe::Draw evidence{};
+    const bool foregroundGap=s.foreground.needsPreWorldState(
+        static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)));
+    FlatForegroundProbe::Draw evidence{};
+    if(foregroundCandidate || foregroundGap) {
         evidence.vs=k.vs;evidence.ps=k.ps;evidence.kind=kind;evidence.count=count;
+        evidence.seq=s.prefix.sequence;evidence.targetKind=static_cast<uint32_t>(k.kind);
+        evidence.format=k.format;evidence.cameraHash=k.cameraHash;
+        evidence.supported=d.supported;evidence.family=weaponMotionFamilyVs(k.vs);
+        evidence.fullViewport=flat_mono_detail::fullViewport(k,k.width,k.height);
         evidence.start=start;evidence.base=base;evidence.instances=instances;
         evidence.startInstance=startInstance;
         std::memcpy(evidence.camera,d.camera,sizeof(evidence.camera));
         evidence.phaseX=s.phase.currentX;evidence.phaseY=s.phase.currentY;
+    }
+    if(foregroundCandidate) {
         foregroundPlanned=s.foreground.plan(s.prefix.frame,s.prefix.sequence,
             static_cast<ID3D11Texture2D*>(const_cast<void*>(k.color)),
             static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),
@@ -3465,8 +3473,6 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         s.foreground.worldSource(ctx,s.prefix.frame,s.prefix.sequence,
             static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),
             static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv)));
-    if(s.foreground.active() && !foregroundCandidate)
-        s.foreground.noteSameDepthDraw(ctx,static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),false);
     // A pool-family draw sees the game's state too, unless it can only continue a run of substituted producer draws (the
     // one whose camera, depth and constants this frame's naming holds) AND nothing below reads the context for it. What
     // the coverage classification asks the context in the ordinary (Upstream) route it answers from the binding shadow
@@ -3480,6 +3486,14 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         (k.format==9 || k.format==23 || k.format==26 || k.format==60) &&
         (s.projectionFrames != 0 || !flatCameraInjectUpstreamOwns());
     if (d.supported && (!continuesRun || coverageReads)) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
+    if(s.foreground.active() && !foregroundCandidate) {
+        if(foregroundGap) {
+            // A lazy producer run can still have EDVR's substitute state
+            // bound. Restore the game before querying only pre-world gaps.
+            flatRuntimeSubstitution(context,FlatSubstEvent::kOtherDraw);
+            s.foreground.noteSameDepthDraw(ctx,static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),evidence);
+        } else s.foreground.noteAfterWorldDraw(static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)));
+    }
     if(s.projection) {
         if(s.projectionFrames)++s.projectionDraws;
         if(sceneExtent && k.color!=s.prefix.output && (k.format==9 || k.format==23 || k.format==26 || k.format==60)) {
@@ -4118,7 +4132,7 @@ void FlatRuntimeDrawScope::endActualDraw() {
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if (!ctx) return; FlatComputeInternalScope guard;
     flatcpu::Scope shell(flatcpu::kOther);
-    if(foregroundStarted) {state().foreground.endDraw(ctx);foregroundStarted=false;}
+    if(foregroundStarted) {state().foreground.endDraw(ctx,false);foregroundStarted=false;}
     if(foregroundPlanned && !foregroundEnded)state().foreground.noteScopeIncomplete();
     if(overlayStarted) {
         state().overlay.endDraw(ctx);

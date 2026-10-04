@@ -516,8 +516,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 57 && coreLegacy.size() + 2 == coreFixed.size(),
-          "all original fixed shader contracts and both bounded diagnostics are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 58 && coreLegacy.size() + 3 == coreFixed.size(),
+          "all original fixed shader contracts and three bounded diagnostics are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -549,9 +549,10 @@ static void selfTest() {
     }
     const struct {const char* symbol;const char* name;const char* source;} diagnostics[] = {
         {"kFlatForegroundOwnershipBytecode","flat_foreground_ownership_cs",edvr::kFlatForegroundOwnershipCs},
+        {"kFlatForegroundMergeBytecode","flat_foreground_merge_cs",edvr::kFlatForegroundMergeCs},
         {"kWeaponFootprintBytecode","weapon_footprint_cs",edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl},
     };
-    for(size_t i=0;i<2;++i) {
+    for(size_t i=0;i<3;++i) {
         auto& diagnostic=coreFixed[coreLegacy.size()+i];
         check(!std::strcmp(diagnostic.symbol,diagnostics[i].symbol) &&
               !std::strcmp(diagnostic.sourceName,diagnostics[i].name) &&
@@ -561,26 +562,32 @@ static void selfTest() {
         check(compile(compiler.fn,diagnostic.alternate,diagnostic,true) &&
               diagnostic.bytes.size()>4 && !std::memcmp(diagnostic.bytes.data(),"DXBC",4),
               "each diagnostic compiles to a fixed DXBC payload");
-        if(i==0 && reflect && !diagnostic.bytes.empty()) {
+        if(i<2 && reflect && !diagnostic.bytes.empty()) {
             ComPtr<ID3D11ShaderReflection> reflection;
             const HRESULT hr=reflect(diagnostic.bytes.data(),diagnostic.bytes.size(),
                 __uuidof(ID3D11ShaderReflection),reinterpret_cast<void**>(reflection.GetAddressOf()));
             UINT x=0,y=0,z=0;
             const bool group=SUCCEEDED(hr) && reflection &&
                 reflection->GetThreadGroupSize(&x,&y,&z)==64 && x==8 && y==8 && z==1;
-            check(group,"foreground ownership payload keeps its bounded 8x8 compute group");
+            check(group,"foreground diagnostic payload keeps its bounded 8x8 compute group");
             struct Binding {const char* name;D3D_SHADER_INPUT_TYPE type;UINT slot;};
-            const Binding bindings[]={{"Coverage",D3D_SIT_TEXTURE,0},
-                {"CohortDepth",D3D_SIT_TEXTURE,1},{"ConsumerDepth",D3D_SIT_TEXTURE,2},
+            const Binding ownership[]={{"Coverage",D3D_SIT_TEXTURE,0},
+                {"OwnerDepth",D3D_SIT_TEXTURE,1},{"ConsumerDepth",D3D_SIT_TEXTURE,2},
                 {"ConsumerStencil",D3D_SIT_TEXTURE,3},{"Counters",D3D_SIT_UAV_RWSTRUCTURED,0},
                 {"Extent",D3D_SIT_CBUFFER,0}};
+            const Binding merge[]={{"CurrentMask",D3D_SIT_TEXTURE,0},
+                {"ImmediateDepth",D3D_SIT_TEXTURE,1},{"CoverageUnion",D3D_SIT_UAV_RWTYPED,0},
+                {"OwnerDepth",D3D_SIT_UAV_RWTYPED,1},{"Extent",D3D_SIT_CBUFFER,0}};
             bool bound=reflection!=nullptr;
-            if(reflection)for(const auto& expected:bindings) {
+            const Binding* bindings=i==0?ownership:merge;
+            const size_t bindingCount=i==0?sizeof(ownership)/sizeof(ownership[0]):sizeof(merge)/sizeof(merge[0]);
+            if(reflection)for(size_t j=0;j<bindingCount;++j) {
+                const auto& expected=bindings[j];
                 D3D11_SHADER_INPUT_BIND_DESC desc{};
                 bound &= SUCCEEDED(reflection->GetResourceBindingDescByName(expected.name,&desc)) &&
                     desc.Type==expected.type && desc.BindPoint==expected.slot && desc.BindCount==1;
             }
-            check(bound,"foreground ownership payload reads the four measured planes and writes eight counters at the fixed slots");
+            check(bound,"foreground diagnostic payload retains its measured inputs and outputs at fixed slots");
         }
     }
 
