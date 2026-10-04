@@ -33,6 +33,7 @@
 #include "flat_copy_structure_tests.h"
 #include "flat_hdr_crumbs_tests.h"
 #include "../../src/d3d11/flat_runtime.h"
+#include "../../src/d3d11/flat_foreground_probe_policy.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -3194,14 +3195,40 @@ void testFlatHdrSourceWitnessWiring() {
 }
 
 void testFlatForegroundOwnershipWiring() {
+    using edvr::flatForegroundPlanDecision;
+    using Decision=edvr::FlatForegroundPlanDecision;
+    const auto gate=[](uint64_t frame,bool resources,bool active,bool pending,
+                       bool named,bool seen,uint32_t reported,uint64_t first) {
+        return flatForegroundPlanDecision(frame,resources,active,pending,named,seen,reported,first);
+    };
+    uint32_t reports=0;uint64_t firstReport=0;
+    check(gate(36302,true,false,false,true,false,reports,firstReport)==Decision::SkipAfterWorld &&
+          gate(36362,true,false,false,true,false,reports,firstReport)==Decision::SkipAfterWorld &&
+          reports==0 && firstReport==0 &&
+          gate(44390,true,false,false,false,false,reports,firstReport)==Decision::Start,
+          "late loading draws do not arm or spend either early-cohort sample");
+    firstReport=44390;++reports;
+    check(gate(44449,true,false,false,false,false,reports,firstReport)==Decision::Skip &&
+          gate(44450,true,false,false,false,false,reports,firstReport)==Decision::Start,
+          "the second eligible sample starts only at the 60-frame boundary");
+    ++reports;
+    check(gate(44550,true,false,false,false,false,reports,firstReport)==Decision::Skip &&
+          gate(44390,true,false,true,false,false,0,0)==Decision::Skip &&
+          gate(44390,false,false,false,false,false,0,0)==Decision::Skip,
+          "pending readback, missing resources and completed budget cannot arm");
+    check(gate(44390,true,true,false,false,false,0,0)==Decision::Extend &&
+          gate(44390,true,true,false,true,false,0,0)==Decision::RejectActiveAfterWorld &&
+          gate(44390,true,true,false,false,true,0,0)==Decision::RejectActiveAfterWorld,
+          "an early cohort may extend only until the first world source");
     auto slurp=[](const char* path) {
         std::ifstream in(path,std::ios::binary);
         return std::string((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
     };
     const std::string runtime=slurp("src/d3d11/flat_runtime.cpp");
     const std::string probe=slurp("src/d3d11/flat_foreground_probe.h");
+    const std::string policy=slurp("src/d3d11/flat_foreground_probe_policy.h");
     const std::string variants=slurp("tools/temporal_shader_build/fixed_extra_shader_variants.h");
-    check(!runtime.empty() && !probe.empty() && !variants.empty(),
+    check(!runtime.empty() && !probe.empty() && !policy.empty() && !variants.empty(),
           "foreground hook, probe and generated shader registry are readable");
     check(variants.find("\"kFlatForegroundOwnershipBytecode\"")!=std::string::npos &&
           variants.find("edvr::kFlatForegroundOwnershipCs,\"cs_5_0\"")!=std::string::npos &&
@@ -3220,13 +3247,19 @@ void testFlatForegroundOwnershipWiring() {
           runtime.find("foregroundPlanned && !foregroundEnded")!=std::string::npos,
           "the hook plans, brackets, observes the world and consumer, polls and reports incomplete scopes");
     check(probe.find("kLimit=2,kSeparation=60")!=std::string::npos &&
-          probe.find("reported_>=kLimit")!=std::string::npos &&
+          policy.find("reported >= 2")!=std::string::npos &&
+          policy.find("firstReportedFrame + 60")!=std::string::npos &&
           probe.find("++reported_;")!=std::string::npos &&
           probe.find("if(!consumerSeen_")!=std::string::npos &&
           probe.find("report(\"partial\")")!=std::string::npos &&
           probe.find("D3D11_MAP_FLAG_DO_NOT_WAIT")!=std::string::npos &&
           probe.find("ctx->CopyResource(staging_.Get(),counters_.Get());")!=std::string::npos,
           "two-frame budget and failure report survive async GPU readback without a CPU wait");
+    check(probe.find("SkipAfterWorld){++lateSkipped_;return false;")!=std::string::npos &&
+          probe.find("late-skipped=%u")!=std::string::npos &&
+          probe.find("cohort-continued-after-world-source")!=std::string::npos &&
+          probe.find("interleaved-shared-depth-draw")!=std::string::npos,
+          "late candidates skip before allocation; an interleaved depth writer is partial evidence");
     for(const char* reason : {"world-source-predicated-depth-clone", "consumer-stream-output-bound",
                               "no-world-depth-clone", "consumer-depth-identity", "no-HDR-consumer",
                               "readback-timeout"})

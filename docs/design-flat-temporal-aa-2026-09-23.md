@@ -2,11 +2,8 @@
 
 ## Status
 
-- **State:** culprit identified; naming correction and ownership probe BUILT,
-  NOT FLOWN (101). Source witness `aca86106` FLOWN.
-  Epic installed `v0.18.1-29-g40c3a1c7`; latest analyzed log is
-  `v0.18.1-27-gaca86106`;
-  evidence and corrections are in sections 1-101.
+- **State:** `v0.18.1-29-g40c3a1c7` installed and FLOWN. World naming confirmed;
+  probe spent both samples on loading draws. Evidence/corrections: 1-101.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -34,9 +31,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 101: Epic flat, same weapon drawn for 10 seconds, then
-  holstered for 10 seconds; no F10. Validate `v0.18.1-29-g40c3a1c7` and read
-  automatic ownership counters plus named-same-H. Keep AA refusal until qualified.
+- **Next:** section 101: fix probe arming so already-named-world loading draws
+  cannot consume the early-cohort sample budget. No further flight requested
+  until that regression is checked. Keep AA refusal until qualified.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10102,3 +10099,45 @@ NOT FLOWN: reproduce with the same weapon for 10 seconds drawn, then
 than documentation HEAD. Read both automatic ownership reports, missing-stage
 statuses, named-same-H and engine-source counts; do not interpret zero partial
 counts or exact depth alone as exclusive first-person ownership.
+
+### 2026-10-04: world naming confirmed; probe budget spent before reproduction
+
+Verified `edvr_gfx_20261004_140803.log` against `v0.18.1-29-g40c3a1c7`,
+build 6AC2B17A, linked 20:05:14 UTC. Sean repeated 10 seconds drawn then
+10 seconds holstered; AA still switched off. Source witnesses at frames
+44390/44450 both have `named-same-H=1`: corrected world camera, depth and b1
+match the actual H reference. Early AACF/CF still has near0.0675 against
+world0.025, and source uniqueness still refuses as designed. Late overlay
+marking succeeds throughout; refusal clears after holstering.
+During the 14:10:19 refusing window the engine wrapper reports 9943.9
+substituted draws/frame and GPU resolve zero timed calls, confirming motion
+production is active while the mixed-camera selector declines AA.
+
+Ruled out: remaining weapon refusal is caused by the old foreground-first
+world naming, because both new witnesses name exactly the H world camera.
+Foreground depth/motion/history handling remains unqualified.
+
+Instrumentation failure: loading frames36302/36362 armed at seq64/102,
+reported `partial reason=foreground-after-world-source`, draws0, same-phase1,
+and consumed both samples before the actual reproduction at frame44390.
+All pixel counters are unavailable, not measured zeros. The arming routine
+already detects the ineligible already-named-world condition, but records it
+as an active failed sample instead of declining to arm. Correct that bounded
+eligibility path and test that skipped loading draws leave both samples for
+the later early cohort. No AA admission relaxation or new rendering hypothesis
+is justified by these partial reports.
+
+Corrected the production arming gate: an idle after-world candidate increments
+`late-skipped` and returns before activation, allocation, coverage or reports.
+An active cohort extending after world source is explicitly partial, as is an
+interleaved shared-depth depth/stencil writer before the snapshot. The selector
+and temporal behavior are unchanged. The temporal rig directly replays the
+observed loading frames36302/36362, then eligible44390/44450; skipped candidates
+preserve both samples, frame44449 is too early, pending/missing-resource/budget
+gates remain closed and post-world extension is refused.
+
+Full validation passed 2026-10-04 at 14:19 MDT, all DLL/rig/installer gates.
+Receipt inputs SHA256: `fa0ca37638bd2a74c94690811fa70627ed9e911e7f303059c317803eac896883`.
+The first attempt stopped at the investigation's 62-line Status block, which
+was shortened; the full build was rerun successfully. Arming correction NOT
+FLOWN. No INI, DLSS, VR or AA admission change.

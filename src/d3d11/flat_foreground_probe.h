@@ -4,6 +4,7 @@
 // MRT records passing fragments; none of these observations admits a temporal
 // frame or changes the selector's mixed-camera refusal.
 #include "flat_overlay_layer.h"
+#include "flat_foreground_probe_policy.h"
 #include "flat_foreground_ownership.h"
 #include "flat_camera_phase.h"
 #include "flat_context_state.h"
@@ -39,7 +40,7 @@ private:
     Ptr<ID3D11UnorderedAccessView> counterUav_;
     uint64_t frame_=0,firstFrame_=0;
     uint32_t reported_=0,firstSeq_=0,lastSeq_=0,worldSeq_=0,consumerSeq_=0;
-    uint32_t width_=0,height_=0,planned_=0,draws_=0,polls_=0;
+    uint32_t width_=0,height_=0,planned_=0,draws_=0,polls_=0,lateSkipped_=0;
     uint32_t depthDrawsBeforeWorld_=0,stencilDrawsBeforeWorld_=0;
     uint32_t depthDrawsAfterWorld_=0,stencilDrawsAfterWorld_=0;
     uint32_t depthMutations_=0,stencilClears_=0;
@@ -117,9 +118,14 @@ public:
     uint32_t reported() const {return reported_;}
     bool plan(uint64_t frame,uint32_t seq,ID3D11Texture2D* color,ID3D11Texture2D* depth,
               ID3D11DepthStencilView* dsv,const Draw& draw,bool worldAlreadyNamed=false) {
-        if(!frame || !color || !depth || !dsv || pending_ || reported_>=kLimit ||
-           (reported_ && frame<firstFrame_+kSeparation))return false;
-        if(!active_) {
+        const auto decision=flatForegroundPlanDecision(frame,color&&depth&&dsv,active_,pending_,
+            worldAlreadyNamed,worldSeen_,reported_,firstFrame_);
+        if(decision==FlatForegroundPlanDecision::Skip)return false;
+        if(decision==FlatForegroundPlanDecision::SkipAfterWorld){++lateSkipped_;return false;}
+        if(decision==FlatForegroundPlanDecision::RejectActiveAfterWorld){
+            fail("cohort-continued-after-world-source");return false;
+        }
+        if(decision==FlatForegroundPlanDecision::Start) {
             firstSeq_=lastSeq_=worldSeq_=consumerSeq_=0;
             width_=height_=planned_=draws_=polls_=0;
             depthDrawsBeforeWorld_=stencilDrawsBeforeWorld_=0;
@@ -131,7 +137,6 @@ public:
             color_=color;depth_=depth;dsv_=dsv;
             D3D11_TEXTURE2D_DESC d{};color->GetDesc(&d);width_=d.Width;height_=d.Height;
             if(uint64_t(width_)*height_*13u>kMemoryLimit)fail("probe-combined-memory-budget");
-            if(worldAlreadyNamed)fail("foreground-after-world-source");
             layer_.beginFrame(frame);
             Log::get().note("flat foreground ownership: armed frame=%llu seq=%u limit=2 second-earliest=%llu; automatic first-person Pool cohort, no F10, selector remains strict",
                 (unsigned long long)frame,seq,(unsigned long long)(firstFrame_?firstFrame_+kSeparation:0));
@@ -166,7 +171,10 @@ public:
         if(!active_ || !ctx || depth!=depth_.Get() || cohort || consumerSeen_)return;
         bool dw=false,sw=false;depthState(ctx,&dw,&sw);
         if(worldSeen_) {depthDrawsAfterWorld_+=dw;stencilDrawsAfterWorld_+=sw;}
-        else {depthDrawsBeforeWorld_+=dw;stencilDrawsBeforeWorld_+=sw;}
+        else {
+            depthDrawsBeforeWorld_+=dw;stencilDrawsBeforeWorld_+=sw;
+            if(draws_ && (dw||sw))fail("interleaved-shared-depth-draw");
+        }
     }
     void noteDepthMutation(ID3D11Resource* resource,bool stencilClear=false) {
         if(!active_ || resource!=depth_.Get() || consumerSeen_)return;
@@ -245,8 +253,8 @@ public:
         fail(hr==DXGI_ERROR_WAS_STILL_DRAWING?"readback-timeout":"readback-map-failed");report("failed");
     }
     void logStatus() const {
-        Log::get().note("flat foreground ownership 5s: enabled=1 limit=2 reported=%u active=%u frame=%llu marked=%u world=%u consumer=%u pending=%u polls=%u reason=%s; no F10, zero covered is measured only in a complete report",
-            reported_,active_?1u:0u,(unsigned long long)frame_,layer_.markedDraws(),worldSeen_?1u:0u,
+        Log::get().note("flat foreground ownership 5s: enabled=1 limit=2 reported=%u late-skipped=%u active=%u frame=%llu marked=%u world=%u consumer=%u pending=%u polls=%u reason=%s; no F10, zero covered is measured only in a complete report",
+            reported_,lateSkipped_,active_?1u:0u,(unsigned long long)frame_,layer_.markedDraws(),worldSeen_?1u:0u,
             consumerSeen_?1u:0u,pending_?1u:0u,polls_,failure_.empty()?"none":failure_.c_str());
     }
     void reset() {releaseGpu();active_=drawOpen_=worldSeen_=consumerSeen_=pending_=false;}
