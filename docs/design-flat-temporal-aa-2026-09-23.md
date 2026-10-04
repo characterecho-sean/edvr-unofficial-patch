@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** section 102 fix FLOWN, world AA still turns off. Capture refused
-  before any draw; domain-aware TAA did not run. See the latest entry in 102.
-  Epic flat now has `v0.18.1-36-gb38eff13`; settings and DLSS preserved.
+- **State:** section 102 fix FLOWN, world AA turns off; capture blocked before
+  TAA. Epic diagnostic `v0.18.1-38-gb32db53e` INSTALLED, NOT FLOWN.
+  Failed flight and combined discriminants: latest entry in 102; settings intact.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: build/install bounded nominee and consumer diagnostics.
-  One short run distinguishes unsupported pair, camera/viewport failure, sticky
-  prior refusal and unclassified source; no ownership relaxation or weapon matrix.
+- **Next:** section 102: restart Epic, same weapon drawn 10 seconds, holstered
+  10 seconds, no F10. Read the nominee and consumer reports against literal v38;
+  AA may still turn off. No admission relaxation or per-weapon test matrix.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10421,4 +10421,11 @@ of successful capture, include camera-shape/phase comparisons and actual draw
 sequence, and summaries expose witness/drop counts. No capture policy changes.
 The absolute-path full build passed all gates with exit 0; receipt fingerprint
 `ff4fe85eee85f373000d844bc120e9a471a8052b1f96e9eb35544eb244b42d19`.
-Clean-commit promotion and Epic installation are pending.
+Diagnostic code commit `b32db53e92bd6dd46d25cef08189f50ba8bfd77d` is pushed
+to main. Clean, receipt-guarded DLL-only promotion passed, followed by Epic flat
+installation and separate `--verify-only`. File/product version is
+`v0.18.1-38-gb32db53e`; `edvr-flat.ini` and `nvngx_dlss.dll` hashes are
+unchanged. The diagnostic is INSTALLED, NOT FLOWN, with v36 rendering behavior.
+Next: same weapon drawn 10 seconds, holstered 10 seconds, no F10. AA may still
+turn off; the report must identify the failing nominee/check and any valid
+draw blocked by it before production admission changes.
