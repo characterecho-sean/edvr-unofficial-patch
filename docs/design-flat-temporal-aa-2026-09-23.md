@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** per-draw diagnostic33 INSTALLED on Epic, NOT FLOWN (101).
-  World naming confirmed; latest log31 samples partial. Full gates passed.
-  Installed `v0.18.1-33-g2657c1f4`; AA fix remains open.
+- **State:** per-draw diagnostic33 FLOWN on Epic (101), both counts measured.
+  One early draw per sample: covered 0 / 1020, survivors lack stencil16.
+  Installed/latest `v0.18.1-33-g2657c1f4`; AA fix remains open.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 101: same weapon drawn 10s/holstered 10s, no F10.
-  Check the next Epic log against `v0.18.1-33-g2657c1f4` before reading counts.
-  Compare measured survival/stencil with chronology; equality is not ownership.
+- **Next:** section 101: audit generic foreground ownership/history handling
+  against the measured small contributor and late HDR isolation. No new flight
+  requested yet. Final depth equality remains non-exclusive ownership evidence.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10255,3 +10255,65 @@ INSTALLED, NOT FLOWN. The AA refusal remains during this measurement. Next:
 the same weapon drawn for 10 seconds, then holstered for 10 seconds, no F10.
 Read measured versus unavailable counts, every eligible draw's merge status
 and the intervening chronology before changing AA admission.
+
+### 2026-10-04: per-draw measurements obtained; stencil16 is incomplete
+
+Verified `edvr_gfx_20261004_145317.log`, `v0.18.1-33-g2657c1f4`, build
+`6AC2BC1C`, linked 20:50:36 UTC. Samples at 14:55:26/27, frames45724/45784,
+both report `complete counts=measured`: planned/drawn/merged 1/1/1, one F event,
+no G events or chronology overflow. First coverage0; second coverage1020,
+surviving-exact-depth1020, surviving-marked16=0, surviving-unmarked1020,
+overwritten0. Second consumer has497800 stencil16 pixels elsewhere. These are
+measurements of the nominated draw, not proof that all weapon pixels were
+captured. The 24-index AACF/CF draw has near0.0675, while the named H/world
+camera uses0.025. HDR witnesses identify exactly this one mismatching Pool
+record and1402/1449 matching world-source draws, `named-same-H=1`.
+
+Both F events: writable depth, GREATER_EQUAL, stencil ALWAYS/REPLACE on both
+faces, ref5, write-mask21 (bits0/2/4). This deliberately clears bit16 while
+writing the low bits; a generic foreground classifier cannot assume every
+first-person contribution uses the VR producer's stencil16 convention.
+
+Ruled out: the sampled second draw's final depth differs from its immediate
+captured depth, because all1020 covered pixels compare exactly and overwritten
+is0. Equal bits still do not prove exclusive final ownership; later writers
+may write identical depth. The first sample's zero coverage does not explain
+why that original draw had no passing samples. No same-depth pre-world gaps
+were observed; after-world1966/2009 same-DS draws have unobserved DS state.
+`foreign=1` with `reason=none` needs a boundary audit: active persists through
+asynchronous readback and `noteForeign` currently accepts post-consumer work.
+
+AA timeline: 14:55:23 selects/treats379/379; 14:55:33 refuses350/350 for
+`source-camera-or-depth-not-unique`; 14:55:38 refuses183/treats163; 14:55:43
+treats366/366 with zero late-overlay draws after holstering. Late overlays are
+fully marked but remain unsealed during rejection. Code seals only inside an
+admitted HDR treatment, so the later `overlay-unsealed-at-final-copy` can be a
+consequence of the earlier source conflict, not an independent uncovered draw.
+Audit final contributor ownership and temporal history before changing that
+admission. No additional flight requested from this result yet.
+
+Read-only code audit resolves both reporting questions. `noteForeign` accepts
+work after `consumerSeen_` while readback keeps `active_` true; consumer checks
+would have latched `foreign-work-during-probe` if foreign work preceded the
+measurement. Thus these reports' `foreign=1 reason=none` is post-consumer
+pollution, not evidence against the measured counts. Nomination is faithful:
+the independent HDR witness has exactly the one eligible AACF/CF record in
+each frame, so planned1 is not lost capture. The late overlay refusal counts
+139/350/183 match source ambiguity; the selector refuses before treatment,
+which is the only place that seals the protected HDR suffix. No independent
+uncovered late writer is evidenced here.
+
+The engine slot/depth map is not a foreground ownership channel. The flat
+producer runs only for world `continuesRun` candidates, excluding AACF, and
+the prep shader takes the world-camera term when a slot is absent. Extending
+stencil16 or ignoring the AACF record would therefore misclassify its pixels.
+Implementation boundary: final per-pixel world/foreground/unknown provenance
+must follow every relevant original writer in order, with unknown writers and
+explicit mutations refused. A prior-frame domain must prevent world history
+from inheriting foreground at coincident depth. FSR/DLSS additionally need a
+qualified depth/projection and history contract; one current-frame mask does
+not establish that. No further diagnostic-only flight is required to repeat
+the source conflict, measure the same subset or investigate the derivative
+seal refusal. The next validation flight should exercise implemented generic
+handling rather than another speculative marker heuristic. AA fix still open;
+no C++ or installed-package change from this flight analysis.
