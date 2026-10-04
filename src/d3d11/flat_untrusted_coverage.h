@@ -1,128 +1,353 @@
 #pragma once
 
-// Conservative coverage of raster fragments from a camera other than H's
-// world camera. The original PS writes MRT7 after its own discard and the
-// game's depth/stencil tests. The mask is cleared once per frame and ORed by
-// subsequent draws; a later world overdraw deliberately does not erase it.
+// Conservative original-fragment coverage, kept separately for at most two
+// camera/resource domains until H identifies the world camera. World-camera
+// and unrelated-depth buckets are discarded at that consumer. Each bucket is
+// cleared once; later overdraw cannot erase an alternate fragment's mark.
 #include "flat_overlay_layer.h"
 #include "flat_mono_frame.h"
 #include "flat_camera_phase.h"
+#include "flat_runtime_model.h"
+#include "../common/log.h"
 #include <array>
 #include <cstring>
 #include <string>
 
 namespace edvr {
+struct FlatUntrustedNomination {
+    bool candidate = false;
+    bool preWorld = false;
+    bool fullViewport = false;
+    bool current = false;
+    bool admissible() const { return candidate && fullViewport && current; }
+};
+
+// The runtime and its WARP regression use this one decision. A motion-source
+// shader whitelist cannot determine colour ownership: unsupported original
+// pixel shaders may draw the same camera domain before the world is named.
+inline FlatUntrustedNomination flatUntrustedNomination(
+    const FlatRuntimeDraw& draw,const void* namedDepth,
+    const unsigned char* namedCamera,bool sceneExtent,bool enabled,
+    uint32_t sequence,uint64_t frame,bool namesWorldSource=false) {
+    FlatUntrustedNomination out{};
+    const auto& k=draw.key;
+    out.preWorld=!namedDepth;
+    out.candidate=enabled && !namesWorldSource && k.format==23 && sceneExtent && k.color &&
+        k.depth && k.dsv && k.camera &&
+        (out.preWorld || (namedDepth==k.depth && namedCamera &&
+                          std::memcmp(namedCamera,draw.camera,kFlatCameraBytes)!=0));
+    if(out.candidate) {
+        out.fullViewport=flat_mono_detail::fullViewport(k,k.width,k.height);
+        out.current=flatRuntimeCameraCurrent(draw,sequence,frame);
+    }
+    return out;
+}
+
+inline bool flatUntrustedProvenCameraIndependent(const FlatShaderPairClassification& pair) {
+    return pair.vs==FlatVsProjectionClass::InertNoCB &&
+        pair.ps==FlatPsProjectionSafety::Clean;
+}
+
 class FlatUntrustedCoverage {
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
+    static constexpr uint32_t kBuckets = 2;
+    static constexpr uint32_t kMaxDraws = 128;
     struct Draw {
-        const void* color = nullptr;
-        const void* depth = nullptr;
-        const void* dsv = nullptr;
         uint64_t vs = 0, ps = 0;
         uint32_t sequence = 0;
-        unsigned char camera[kFlatCameraBytes]{};
         bool completed = false;
     };
-    static constexpr uint32_t kMaxDraws = 128;
-    FlatOverlayLayer layer_;
-    std::array<Draw,kMaxDraws> draws_{};
-    Ptr<ID3D11Texture2D> color_, depth_;
-    Ptr<ID3D11DepthStencilView> dsv_;
+    struct Bucket {
+        FlatOverlayLayer layer;
+        std::array<Draw,kMaxDraws> draws{};
+        Ptr<ID3D11Texture2D> color, depth;
+        Ptr<ID3D11DepthStencilView> dsv;
+        unsigned char camera[kFlatCameraBytes]{};
+        uint32_t width = 0, height = 0, count = 0;
+        std::string failure;
+        void reset() {
+            layer.reset(); color.Reset(); depth.Reset(); dsv.Reset();
+            width=height=count=0; failure.clear();
+        }
+        void beginFrame(uint64_t frame) {
+            layer.beginFrame(frame); color.Reset(); depth.Reset(); dsv.Reset();
+            width=height=count=0; failure.clear();
+        }
+    } buckets_[kBuckets];
     uint64_t frame_ = 0;
-    uint32_t count_ = 0, open_ = kMaxDraws;
-    uint32_t width_ = 0, height_ = 0;
+    uint32_t used_ = 0, planned_ = kBuckets, open_ = kBuckets, selected_ = kBuckets;
     bool consumerSeen_ = false;
-    std::string failure_;
+    std::string globalFailure_, selectionFailure_;
+    struct MaskSample {
+        Ptr<ID3D11Texture2D> stage;
+        uint64_t frame = 0;
+        uint32_t width = 0, height = 0, polls = 0;
+        bool reported = false;
+    } samples_[2];
+    static const char* sampleName(bool supportedAlternate) {
+        return supportedAlternate?"supported-alternate":"unsupported-only";
+    }
+    void sampleUnavailable(uint32_t index,const char* reason) {
+        auto& sample=samples_[index];
+        if(sample.reported)return;
+        Log::get().note("flat untrusted mask occupancy: category=%s frame=%llu status=unavailable reason=%s; one sample per category, no GPU wait",
+            sampleName(index!=0),(unsigned long long)sample.frame,reason?reason:"unknown");
+        sample.stage.Reset();sample.reported=true;
+    }
+
+    void bucketFailure(uint32_t index,const char* reason) {
+        if(index<used_ && buckets_[index].failure.empty())
+            buckets_[index].failure=reason?reason:"untrusted-bucket-invalid";
+    }
+    // Called only after H's authoritative camera exists. A failed world bucket
+    // is immaterial, but two different non-world buckets cannot share one SRV.
+    uint32_t alternateBucket(const void* depth,const void* dsv,
+                             const unsigned char* worldBytes,float phaseX,float phaseY,
+                             const char** reason) const {
+        if(reason)*reason=nullptr;
+        if(!worldBytes || !depth || !dsv || !globalFailure_.empty()) {
+            if(reason)*reason=globalFailure_.empty()?"untrusted-H-identity":globalFailure_.c_str();
+            return kBuckets;
+        }
+        float world[6][4]{};
+        if(!flat_mono_detail::cameraShape(worldBytes,world)) {
+            if(reason)*reason="untrusted-H-camera-shape";
+            return kBuckets;
+        }
+        uint32_t chosen=kBuckets;
+        for(uint32_t i=0;i<used_;++i) {
+            const Bucket& b=buckets_[i];
+            if(b.depth.Get()!=depth)continue;
+            if(std::memcmp(b.camera,worldBytes,kFlatCameraBytes)==0)continue;
+            if(chosen!=kBuckets) {
+                if(reason)*reason="multiple-untrusted-camera-buckets";
+                return kBuckets;
+            }
+            chosen=i;
+        }
+        if(chosen==kBuckets)return kBuckets;
+        const Bucket& b=buckets_[chosen];
+        if(b.dsv.Get()!=dsv || !b.count || !b.failure.empty() ||
+           !b.layer.coverageReady(frame_,b.color.Get())) {
+            if(reason)*reason=b.failure.empty()?"untrusted-bucket-incomplete":b.failure.c_str();
+            return kBuckets;
+        }
+        float alternate[6][4]{};
+        if(!flat_mono_detail::cameraShape(b.camera,alternate) ||
+           !flatCameraCenteredPairAtPhase(world,alternate,phaseX,phaseY,b.width,b.height)) {
+            if(reason)*reason="untrusted-camera-pose-or-phase";
+            return kBuckets;
+        }
+        for(uint32_t i=0;i<b.count;++i)if(!b.draws[i].completed) {
+            if(reason)*reason="untrusted-draw-incomplete";
+            return kBuckets;
+        }
+        return chosen;
+    }
 public:
     void reset() {
-        layer_.reset(); color_.Reset(); depth_.Reset(); dsv_.Reset();
-        frame_=0; count_=0; open_=kMaxDraws; width_=height_=0; consumerSeen_=false; failure_.clear();
+        for(uint32_t i=0;i<2;++i)if(samples_[i].stage)
+            sampleUnavailable(i,"resize-before-readback");
+        for(auto& b:buckets_)b.reset();
+        frame_=0;used_=0;planned_=open_=selected_=kBuckets;consumerSeen_=false;
+        globalFailure_.clear();selectionFailure_.clear();
     }
     void beginFrame(uint64_t frame) {
         if(frame_==frame)return;
-        layer_.beginFrame(frame); color_.Reset(); depth_.Reset(); dsv_.Reset();
-        frame_=frame; count_=0; open_=kMaxDraws; width_=height_=0; consumerSeen_=false; failure_.clear();
+        for(auto& b:buckets_)b.beginFrame(frame);
+        frame_=frame;used_=0;planned_=open_=selected_=kBuckets;consumerSeen_=false;
+        globalFailure_.clear();selectionFailure_.clear();
     }
     void invalidate(const char* reason) {
-        if(consumerSeen_)return;
-        if(failure_.empty())failure_=reason?reason:"untrusted-coverage-invalid";
+        if(!consumerSeen_ && globalFailure_.empty())
+            globalFailure_=reason?reason:"untrusted-coverage-invalid";
     }
     void noteMutation(ID3D11Resource* resource) {
-        if(!consumerSeen_ && count_ && (!resource || resource==depth_.Get() || resource==color_.Get()))
-            invalidate("untrusted-source-explicit-mutation");
+        if(consumerSeen_ || !used_)return;
+        if(!resource) {invalidate("untrusted-source-unknown-mutation");return;}
+        for(uint32_t i=0;i<used_;++i)
+            if(resource==buckets_[i].depth.Get() || resource==buckets_[i].color.Get())
+                bucketFailure(i,"untrusted-source-explicit-mutation");
     }
     void consumer() { consumerSeen_=true; }
-    bool active() const { return count_!=0; }
+    bool active() const { return used_!=0; }
     bool finished() const { return consumerSeen_; }
+    bool observesDepth(const void* depth) const {
+        for(uint32_t i=0;i<used_;++i)if(buckets_[i].depth.Get()==depth)return true;
+        return false;
+    }
     bool plan(uint64_t frame,uint32_t sequence,ID3D11Texture2D* color,
               ID3D11Texture2D* depth,ID3D11DepthStencilView* dsv,
-              uint64_t vs,uint64_t ps,const unsigned char* camera) {
-        if(frame!=frame_ || !color || !depth || !dsv || !camera || !sequence || !vs || !ps) {
+              uint64_t vs,uint64_t ps,const unsigned char* camera,bool admissible=true) {
+        planned_=kBuckets;
+        if(frame!=frame_ || consumerSeen_ || !color || !depth || !dsv || !camera ||
+           !sequence || !vs || !ps || !globalFailure_.empty()) {
             invalidate("untrusted-source-identity");return false;
         }
-        if(!count_) {
+        uint32_t index=0;
+        for(;index<used_;++index) {
+            const Bucket& b=buckets_[index];
+            if(b.color.Get()==color && b.depth.Get()==depth && b.dsv.Get()==dsv &&
+               std::memcmp(b.camera,camera,kFlatCameraBytes)==0)break;
+        }
+        if(index==used_) {
+            if(used_==kBuckets) {invalidate("untrusted-camera-bucket-cap");return false;}
+            Bucket& b=buckets_[used_++];
+            b.color=color;b.depth=depth;b.dsv=dsv;
+            std::memcpy(b.camera,camera,sizeof(b.camera));
             D3D11_TEXTURE2D_DESC cd{},dd{};color->GetDesc(&cd);depth->GetDesc(&dd);
+            b.width=cd.Width;b.height=cd.Height;
             if(!cd.Width || !cd.Height || cd.Width!=dd.Width || cd.Height!=dd.Height ||
                cd.SampleDesc.Count!=1 || dd.SampleDesc.Count!=1 ||
-               uint64_t(cd.Width)*cd.Height>128ull*1024*1024) {
-                invalidate("untrusted-source-shape");return false;
-            }
-            color_=color;depth_=depth;dsv_=dsv;width_=cd.Width;height_=cd.Height;
+               uint64_t(cd.Width)*cd.Height>128ull*1024*1024)
+                bucketFailure(index,"untrusted-source-shape");
         }
-        if(color_.Get()!=color || depth_.Get()!=depth || dsv_.Get()!=dsv ||
-           count_>=kMaxDraws || !failure_.empty()) {
-            invalidate("untrusted-source-resource-or-cap");return false;
-        }
-        Draw& draw=draws_[count_++];draw={};
-        draw.color=color;draw.depth=depth;draw.dsv=dsv;draw.vs=vs;draw.ps=ps;
-        draw.sequence=sequence;std::memcpy(draw.camera,camera,sizeof(draw.camera));
+        Bucket& b=buckets_[index];
+        if(!admissible)bucketFailure(index,"untrusted-alternate-unqualified");
+        if(b.count>=kMaxDraws)bucketFailure(index,"untrusted-bucket-draw-cap");
+        if(!b.failure.empty())return false;
+        Draw& draw=b.draws[b.count++];draw={};
+        draw.vs=vs;draw.ps=ps;draw.sequence=sequence;
+        planned_=index;
         return true;
     }
     bool beginDraw(ID3D11DeviceContext* ctx,uint64_t frame) {
-        if(!ctx || frame!=frame_ || !count_ || open_!=kMaxDraws || !failure_.empty())return false;
+        if(!ctx || frame!=frame_ || planned_>=used_ || open_!=kBuckets ||
+           !globalFailure_.empty())return false;
+        Bucket& b=buckets_[planned_];
+        if(!b.failure.empty())return false;
         const char* reason=nullptr;
-        if(!layer_.beginDraw(ctx,frame,color_.Get(),dsv_.Get(),&reason,true,true,true)) {
-            invalidate(reason?reason:"untrusted-private-MRT-refused");return false;
+        if(!b.layer.beginDraw(ctx,frame,b.color.Get(),b.dsv.Get(),&reason,true,true,true)) {
+            bucketFailure(planned_,reason?reason:"untrusted-private-MRT-refused");return false;
         }
-        open_=count_-1;
+        open_=planned_;planned_=kBuckets;
         return true;
     }
     void endDraw(ID3D11DeviceContext* ctx,bool completed=true) {
-        if(open_==kMaxDraws)return;
-        layer_.endDraw(ctx);
-        if(completed && ctx && !layer_.refusal())draws_[open_].completed=true;
-        else invalidate("untrusted-draw-incomplete");
-        open_=kMaxDraws;
+        if(open_==kBuckets)return;
+        Bucket& b=buckets_[open_];
+        b.layer.endDraw(ctx);
+        if(completed && ctx && !b.layer.refusal())b.draws[b.count-1].completed=true;
+        else bucketFailure(open_,"untrusted-draw-incomplete");
+        open_=kBuckets;
+    }
+    void abandon() {
+        if(planned_<used_)bucketFailure(planned_,"untrusted-draw-scope-incomplete");
+        planned_=kBuckets;
     }
     bool qualifies(const FlatContractRecord& record,const unsigned char* worldBytes,
                    float phaseX,float phaseY) const {
         const auto& k=record.key;
-        if(!frame_ || !count_ || !failure_.empty() || open_!=kMaxDraws ||
-           k.depth!=depth_.Get() || k.dsv!=dsv_.Get() ||
-           k.width!=width_ || k.height!=height_ || !k.camera || !worldBytes ||
-           !layer_.coverageReady(frame_,color_.Get()))return false;
-        float world[6][4]{},alternate[6][4]{};
-        if(!flat_mono_detail::cameraShape(worldBytes,world) ||
-           !flat_mono_detail::cameraShape(k.camera,alternate) ||
-           !flatCameraCenteredPairAtPhase(world,alternate,phaseX,phaseY,width_,height_))return false;
+        const char* reason=nullptr;
+        const uint32_t index=alternateBucket(k.depth,k.dsv,worldBytes,phaseX,phaseY,&reason);
+        if(index==kBuckets || !k.camera)return false;
+        const Bucket& b=buckets_[index];
+        if(b.color.Get()!=k.color || b.width!=k.width || b.height!=k.height ||
+           std::memcmp(b.camera,record.camera,kFlatCameraBytes)!=0)return false;
         uint32_t matching=0;
-        for(uint32_t i=0;i<count_;++i) {
-            const Draw& draw=draws_[i];
-            if(draw.sequence<record.first || draw.sequence>record.last ||
-               draw.color!=k.color || draw.depth!=k.depth || draw.dsv!=k.dsv ||
-               draw.vs!=k.vs || draw.ps!=k.ps ||
-               std::memcmp(draw.camera,k.camera,sizeof(draw.camera))!=0)continue;
-            if(!draw.completed)return false;
-            ++matching;
+        for(uint32_t i=0;i<b.count;++i) {
+            const Draw& draw=b.draws[i];
+            if(draw.sequence>=record.first && draw.sequence<=record.last &&
+               draw.vs==k.vs && draw.ps==k.ps)++matching;
         }
         return matching==record.draws;
     }
-    ID3D11ShaderResourceView* view() const {
-        return failure_.empty() && open_==kMaxDraws &&
-            layer_.coverageReady(frame_,color_.Get())?layer_.coverageView():nullptr;
+    // The runtime compares these original-game-draw receipts with every
+    // observed native scene draw in a non-world camera/depth group.
+    uint32_t completedDraws(const void* depth,const unsigned char* camera) const {
+        if(!camera)return 0;
+        uint32_t count=0;
+        for(uint32_t i=0;i<used_;++i) {
+            const Bucket& b=buckets_[i];
+            if(b.depth.Get()!=depth || std::memcmp(b.camera,camera,kFlatCameraBytes)!=0)continue;
+            for(uint32_t j=0;j<b.count;++j)if(b.draws[j].completed)++count;
+        }
+        return count;
     }
-    const char* failure() const { return failure_.empty()?nullptr:failure_.c_str(); }
-    uint32_t drawCount() const { return count_; }
-    ID3D11Texture2D* depth() const { return depth_.Get(); }
+    bool select(const void* depth,const void* dsv,const unsigned char* worldBytes,
+                float phaseX,float phaseY) {
+        selected_=kBuckets;selectionFailure_.clear();
+        const char* reason=nullptr;
+        const uint32_t index=alternateBucket(depth,dsv,worldBytes,phaseX,phaseY,&reason);
+        if(index==kBuckets) {
+            if(reason)selectionFailure_=reason;
+            return false;
+        }
+        selected_=index;
+        return true;
+    }
+    bool mixed() const { return selected_<used_; }
+    void sampleMask(ID3D11DeviceContext* ctx,bool supportedAlternate) {
+        const uint32_t index=supportedAlternate?1u:0u;
+        auto& sample=samples_[index];
+        if(sample.reported || sample.stage)return;
+        sample.frame=frame_;
+        if(!ctx || !view()) {sampleUnavailable(index,"treated-coverage-unavailable");return;}
+        FlatComputeInternalScope internal;
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        ID3D11Texture2D* source=buckets_[selected_].layer.coverageTexture();
+        if(!dev || !source) {sampleUnavailable(index,"source-or-device-unavailable");return;}
+        D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
+        if(desc.Format!=DXGI_FORMAT_R8_UNORM || desc.MipLevels!=1 || desc.ArraySize!=1 ||
+           desc.SampleDesc.Count!=1 || !desc.Width || !desc.Height) {
+            sampleUnavailable(index,"coverage-shape-unavailable");return;
+        }
+        sample.width=desc.Width;sample.height=desc.Height;
+        desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;
+        desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;desc.MiscFlags=0;
+        if(FAILED(dev->CreateTexture2D(&desc,nullptr,&sample.stage))) {
+            sampleUnavailable(index,"staging-create-failed");return;
+        }
+        ctx->CopyResource(sample.stage.Get(),source);
+        Log::get().note("flat untrusted mask occupancy: category=%s frame=%llu status=queued extent=%ux%u readback=nonblocking",
+            sampleName(supportedAlternate),(unsigned long long)frame_,sample.width,sample.height);
+    }
+    void pollMask(ID3D11DeviceContext* ctx) {
+        if(!ctx)return;
+        for(uint32_t i=0;i<2;++i) {
+            auto& sample=samples_[i];
+            if(!sample.stage || sample.reported)continue;
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            FlatComputeInternalScope internal;
+            const HRESULT hr=ctx->Map(sample.stage.Get(),0,D3D11_MAP_READ,
+                                      D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
+            if(SUCCEEDED(hr)) {
+                uint64_t marked=0;
+                for(uint32_t y=0;y<sample.height;++y) {
+                    const auto* row=static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch;
+                    for(uint32_t x=0;x<sample.width;++x)marked+=row[x]!=0;
+                }
+                ctx->Unmap(sample.stage.Get(),0);
+                Log::get().note("flat untrusted mask occupancy: category=%s frame=%llu status=measured marked=%llu total=%llu fraction=%.6f; conservative original-fragment union",
+                    sampleName(i!=0),(unsigned long long)sample.frame,
+                    (unsigned long long)marked,
+                    (unsigned long long)(uint64_t(sample.width)*sample.height),
+                    double(marked)/double(uint64_t(sample.width)*sample.height));
+                sample.stage.Reset();sample.reported=true;
+            } else if(hr==DXGI_ERROR_WAS_STILL_DRAWING && ++sample.polls<120) {
+                continue;
+            } else sampleUnavailable(i,hr==DXGI_ERROR_WAS_STILL_DRAWING?
+                "readback-timeout":"readback-map-failed");
+        }
+    }
+    ID3D11ShaderResourceView* view() const {
+        if(!globalFailure_.empty() || selected_>=used_)return nullptr;
+        const Bucket& b=buckets_[selected_];
+        return b.failure.empty() && b.layer.coverageReady(frame_,b.color.Get())?
+            b.layer.coverageView():nullptr;
+    }
+    const char* failure() const {
+        if(!globalFailure_.empty())return globalFailure_.c_str();
+        if(!selectionFailure_.empty())return selectionFailure_.c_str();
+        if(selected_<used_)return buckets_[selected_].failure.empty()?
+            nullptr:buckets_[selected_].failure.c_str();
+        if(!consumerSeen_)for(uint32_t i=0;i<used_;++i)
+            if(!buckets_[i].failure.empty())return buckets_[i].failure.c_str();
+        return nullptr;
+    }
+    uint32_t drawCount() const {
+        uint32_t count=0;for(uint32_t i=0;i<used_;++i)count+=buckets_[i].count;
+        return count;
+    }
 };
 } // namespace edvr

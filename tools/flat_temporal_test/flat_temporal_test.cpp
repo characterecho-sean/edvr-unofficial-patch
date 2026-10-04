@@ -3276,6 +3276,26 @@ void testFlatForegroundOwnershipWiring() {
               "each unavailable ownership observation has a named failure status");
 }
 
+void testFlatUntrustedCameraWiring() {
+    std::ifstream in("src/d3d11/flat_runtime.cpp",std::ios::binary);
+    const std::string runtime((std::istreambuf_iterator<char>(in)),{});
+    const size_t nomination=runtime.find("const auto alternate=flatUntrustedNomination(d,s.namedDepth,");
+    const size_t plan=runtime.find("untrustedPlanned=s.untrusted.plan(");
+    const size_t completed=runtime.find("s.untrusted.completedDraws(sel.depth,unknown.camera)");
+    const size_t comparison=runtime.find("if(unknown.hasCamera && completed!=unknown.draws)");
+    const size_t select=runtime.find("s.untrusted.select(sel.depth,sel.dsv,worldBytes,");
+    check(nomination!=std::string::npos && plan!=std::string::npos &&
+          nomination<plan && runtime.find("const bool alternateNominee=alternate.candidate && !inertSource;")!=std::string::npos,
+          "the actual draw constructor uses shared broad nomination before planning its MRT7 bracket");
+    check(completed!=std::string::npos && comparison!=std::string::npos &&
+          completed<comparison && comparison<select,
+          "selected H compares every alternate depth-camera observation with completed original draw receipts");
+    check(runtime.find("if(alternateObserved || sel.mixedCamera)")!=std::string::npos &&
+          runtime.find("if(!s.untrustedUnknown)sel.mixedCamera=true;")!=std::string::npos &&
+          runtime.find("selected.mixedCamera?FlatMonoResolveMode::Taa:s.engine")!=std::string::npos,
+          "an unsupported-only certified alternate is routed through mixed-camera TAA");
+}
+
 void testFlatWrapperNoteWiring() {
     auto slurp = [](const char* path) {
         std::ifstream in(path, std::ios::binary);
@@ -3486,6 +3506,7 @@ int main(int argc, char** argv) {
     testFlatOverlayMutationWiring();
     testFlatHdrSourceWitnessWiring();
     testFlatForegroundOwnershipWiring();
+    testFlatUntrustedCameraWiring();
     failures += flatWrapperNoteTests();
     testFlatWrapperNoteWiring();
     failures += flatQueryCutTests();

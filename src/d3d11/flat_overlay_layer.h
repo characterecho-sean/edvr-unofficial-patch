@@ -382,6 +382,7 @@ public:
     ID3D11Texture2D* cleanHdr() const { return clean_.Get(); }
     ID3D11ShaderResourceView* cleanHdrView() const { return cleanView_.Get(); }
     ID3D11ShaderResourceView* coverageView() const { return coverageView_.Get(); }
+    ID3D11Texture2D* coverageTexture() const { return coverage_.Get(); }
     const char* refusal() const { return refusal_.empty()?nullptr:refusal_.c_str(); }
     uint32_t markedDraws() const { return completedDraws_; }
 };

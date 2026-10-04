@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** section 102 fix FLOWN, world AA turns off; capture blocked before
-  TAA. Epic diagnostic `v0.18.1-38-gb32db53e` INSTALLED, NOT FLOWN.
-  Failed flight and combined discriminants: latest entry in 102; settings intact.
+- **State:** v38 diagnostic FLOWN: unsupported early first-person materials
+  poison coverage before the known weapon draw. Complete camera-domain capture
+  is implemented; the full build passes, clean promotion/install next (section 102).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: restart Epic, same weapon drawn 10 seconds, holstered
-  10 seconds, no F10. Read the nominee and consumer reports against literal v38;
-  AA may still turn off. No admission relaxation or per-weapon test matrix.
+- **Next:** section 102: promote and install the validated complete
+  camera-domain capture. Same weapon drawn 10 seconds, holstered 10 seconds,
+  no F10; check treatment and mask occupancy. No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10429,3 +10429,82 @@ unchanged. The diagnostic is INSTALLED, NOT FLOWN, with v36 rendering behavior.
 Next: same weapon drawn 10 seconds, holstered 10 seconds, no F10. AA may still
 turn off; the report must identify the failing nominee/check and any valid
 draw blocked by it before production admission changes.
+
+### 2026-10-04: shader-support gate is the measured blocker
+
+Verified `edvr_gfx_20261004_155725.log`: `v0.18.1-38-gb32db53e`, build
+`6AC2CB1B`, linked 21:54:35 UTC. Sean still observes world AA turning off.
+Frame44358 q1631 nominates VS7B0DC42D383F694C/PS0DF03E64DF9DBEF1 before world
+naming: supported0, viewport1, current1, near0.0675. This sets the first sticky
+`untrusted-alternate-unqualified` failure. The consumer identifies an earlier
+unclassified CFCA8FFC6B058630/8A08FF781272C5F6 draw at q1630 with the same
+depth/camera, phase-pair1, near0.0675 versus authoritative world near0.025.
+
+At frame45026 q4530, 8B589D25B2A0ADDC/7268762D11A610F2 again reports
+supported0/viewport1/current1 before naming. The following AACFDCF2FB9AD809/
+CF534B32F491561A draw at q4531 reports all three checks1, prior-failure1 and
+planned0. Coverage and mixed TAA never run; periodic selected/treated stay0.
+
+Ruled out: stale camera or viewport mismatch as this capture failure, because
+both predicates are1 on the first failing nominees. The measured blocker is
+the world-motion supported-pair gate and its sticky effect on later valid
+draws. Adding those shader hashes is not a general solution: the first
+unclassified source even uses a VS outside the pre-world family nomination.
+Coverage must include every alternate-camera contributor and exclude the
+authoritative world domain, independently of the world-motion recipe list.
+Original passing-fragment coverage can veto history without reconstructing
+foreground motion. Establish that complete boundary before implementation.
+
+Implementation boundary: two bounded camera/color/depth/DSV buckets capture
+structurally eligible native-size format23 draws before world naming, without
+the motion-pair or VS-family list. After naming, capture same-depth camera
+mismatches. At the authoritative HDR consumer discard world-camera buckets,
+require exactly one complete alternate bucket and verify its current pose/phase
+and every observed unsupported draw as well as the supported source records.
+An unsupported-only alternate bucket must also select domain-aware TAA. More
+domains, missing capture, relevant patch/state failure, mutation or overflow
+refuse. A world bucket's failure can be ignored only when it matches the
+authoritative world camera; its pixels never enter the alternate mask.
+
+Two R8 planes cost about16.6MB at Epic native3840x2160, reused across frames;
+one alternate SRV is borrowed, with no mask-combine pass or per-draw full-size
+copies. Generic original-PS MRT7 export remains the actual patch/binding gate.
+The regression must call the runtime's shared nomination decision, then replay
+unknown CFCA, unsupported material variants, AACF and world selection. It must
+exclude world coverage, refuse a missing variant and test unsupported-only
+mixed treatment. Holstering need not return the SDK if first-person material
+draws still form a real alternate-camera domain; single-camera frames do.
+
+### 2026-10-04: complete camera-domain capture implemented
+
+The shared runtime nomination rule now includes unsupported material pairs
+and unclassified geometry. Only the classifier's proven projection-independent
+VS InertNoCB plus PS Clean combination is exempt. The first world-naming draw
+is excluded because EDVR substitutes its motion shader; earlier world-camera
+coverage is discarded at H. Each relevant alternate draw needs a completed
+original-fragment receipt, including unsupported-only camera domains.
+
+Certification now reads the supported record's frozen camera bytes. Its key's
+camera pointer was only a presence marker pointing into a later-changing draw
+scope. A regression mutates that producer scope after freezing the record.
+
+Targeted mono WARP and temporal policy regressions pass: actual shared
+nomination, unsupported variants followed by AACF, world bucket exclusion,
+original color/depth/stencil preservation, persistent coverage through equal-
+depth world overdraw, missing receipts, unsupported-only treatment and domain
+overflow. All four exact Epic v38 pixel shader blobs and their production MRT7
+patches also pass WARP CreatePixelShader; no game bytecode is tracked.
+
+CFCA's actual vertex shader projects geometry through cb0 rather than the b1
+lens. Coverage is conservative; a new occupancy report distinguishes a local
+foreground veto from a mask covering too much of the scene. After a successful
+mixed resolve, one unsupported-only and one supported-alternate sample may
+copy the R8 mask to staging. Later Presents poll with DO_NOT_WAIT, with explicit
+unavailable/timeout reporting. This diagnostic never changes admission and
+uses no per-weapon hashes. Log prefix: `flat untrusted mask occupancy:`.
+
+Full absolute-path `build.bat --jobs 4` passed all gates, including GPU rigs,
+quiet serial reruns and installer-resource validation. Receipt input hash:
+`be79e2d20ba260224f36d70db4c90b273c6a97e65e58123d9c915c0906531bd9`.
+Log: `build/flat-complete-camera-domain-full.log`. Clean-version promotion and
+Epic installation are next. INI, DLSS and VR behavior remain untouched.

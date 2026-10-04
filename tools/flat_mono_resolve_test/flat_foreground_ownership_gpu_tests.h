@@ -373,16 +373,62 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         const auto* worldBytes=reinterpret_cast<const unsigned char*>(worldRows);
         edvr::FlatUntrustedCoverage unionCapture;
         unionCapture.beginFrame(42);
+        auto nomination=[&](uint32_t seq,uint64_t vsHash,uint64_t psHash,
+                            const unsigned char* cameraBytes,bool supported,
+                            const void* namedDepth=nullptr,bool namesWorldSource=false) {
+            edvr::FlatRuntimeDraw draw{};
+            auto& k=draw.key;
+            k.color=liveColor.Get();k.depth=liveDepth.Get();k.dsv=liveDsv.Get();
+            k.format=23;k.width=w;k.height=h;k.vs=vsHash;k.ps=psHash;
+            k.b1=liveColor.Get();k.viewportCount=1;
+            k.viewport[2]=float(w);k.viewport[3]=float(h);k.viewport[5]=1;
+            k.writeEpoch=42;k.writeSeq=1;
+            std::memcpy(draw.camera,cameraBytes,sizeof(draw.camera));
+            k.camera=draw.camera;k.cameraHash=edvr::flatCameraHash(draw.camera);
+            draw.supported=supported;
+            return edvr::flatUntrustedNomination(draw,namedDepth,worldBytes,true,true,seq,42,
+                                                  namesWorldSource);
+        };
+        const auto cfca=nomination(10,0xCFCA8FFC6B058630ull,0x8A08FF781272C5F6ull,
+                                   alternateBytes,false);
+        const auto sevenB=nomination(12,0x7B0DC42D383F694Cull,0x0DF03E64DF9DBEF1ull,
+                                     alternateBytes,false);
+        const auto eightB=nomination(13,0x8B589D25B2A0ADDCull,0x7268762D11A610F2ull,
+                                     alternateBytes,false);
+        const auto aacf=nomination(14,0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                                   alternateBytes,true);
+        const auto worldNomination=nomination(11,0xEB5234DB6ADB491Dull,0x22,
+                                              worldBytes,true);
+        check(cfca.admissible() && sevenB.admissible() && eightB.admissible() &&
+              aacf.admissible() && worldNomination.admissible() &&
+              cfca.preWorld && sevenB.preWorld && eightB.preWorld &&
+              !nomination(15,0xCFCA8FFC6B058630ull,0x8A08FF781272C5F6ull,
+                          worldBytes,false,liveDepth.Get()).candidate,
+              "the constructor's shared nomination admits unsupported pre-world geometry and a world-camera bucket without admitting a post-name world draw");
+        check(!nomination(11,0xEB5234DB6ADB491Dull,0x22,worldBytes,true,
+                          nullptr,true).candidate,
+              "the first supported world source is named and observed without competing with its MRT6 substitution");
+        edvr::FlatShaderPairClassification inertPair{};
+        inertPair.vs=edvr::FlatVsProjectionClass::InertNoCB;
+        inertPair.ps=edvr::FlatPsProjectionSafety::Clean;
+        check(edvr::flatUntrustedProvenCameraIndependent(inertPair),
+              "proven camera-independent scene shaders need no alternate-camera capture");
+        inertPair.vs=edvr::FlatVsProjectionClass::Unclassified;
+        check(!edvr::flatUntrustedProvenCameraIndependent(inertPair),
+              "unknown projection shaders remain capture candidates");
         context->ClearRenderTargetView(baselineRtv.Get(),clear);
         context->ClearRenderTargetView(liveRtv.Get(),clear);
         context->ClearDepthStencilView(baselineDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,0);
         context->ClearDepthStencilView(liveDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,0);
         bind(baselineRtv.Get(),baselineDsv.Get());context->Draw(3,0);
         bind(liveRtv.Get(),liveDsv.Get());
-        const bool firstPlanned=unionCapture.plan(42,10,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
-                                                  0x11,0x22,alternateBytes);
+        const bool firstPlanned=cfca.admissible() &&
+            unionCapture.plan(42,10,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                              0xCFCA8FFC6B058630ull,0x8A08FF781272C5F6ull,
+                              alternateBytes,cfca.admissible());
         const bool firstBegan=firstPlanned && unionCapture.beginDraw(context,42);
         if(firstBegan){context->Draw(3,0);unionCapture.endDraw(context);}
+        const bool firstSelected=unionCapture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
         auto capturedMask=[&]() {
             ComPtr<ID3D11Resource> resource;
             if(unionCapture.view())unionCapture.view()->GetResource(&resource);
@@ -391,7 +437,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         };
         const auto firstMask=capturedMask(),firstDepth=readTex(liveDepth.Get(),8);
         UINT firstMarked=0;for(BYTE v:firstMask)firstMarked+=v==255;
-        check(firstBegan && firstMarked==90 && firstMask.size()==w*h,
+        check(firstBegan && firstSelected && firstMarked==90 && firstMask.size()==w*h,
               "production union marks only original-PS fragments passing discard and depth");
 
         // The world draw uses the same z=.5 vertex shader and LESS_EQUAL
@@ -401,12 +447,18 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         context->OMSetBlendState(nullptr,nullptr,~0u);context->Draw(3,0);
         bind(liveRtv.Get(),liveDsv.Get());
         context->PSSetShader(secondPs.Get(),nullptr,0);
-        context->OMSetBlendState(nullptr,nullptr,~0u);context->Draw(3,0);
+        context->OMSetBlendState(nullptr,nullptr,~0u);
+        const bool worldPlanned=worldNomination.admissible() &&
+            unionCapture.plan(42,11,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                              0xEB5234DB6ADB491Dull,0x22,worldBytes,
+                              worldNomination.admissible());
+        const bool worldBegan=worldPlanned && unionCapture.beginDraw(context,42);
+        if(worldBegan){context->Draw(3,0);unionCapture.endDraw(context);}
         const auto afterWorldMask=capturedMask(),afterWorldDepth=readTex(liveDepth.Get(),8);
         const auto afterWorldColor=readTex(liveColor.Get(),4);
         UINT retained=0;for(BYTE v:afterWorldMask)retained+=v==255;
         const size_t ownedPixel=(size_t(4)*w+4)*8;
-        check(retained==90 && afterWorldMask==firstMask &&
+        check(worldBegan && retained==90 && afterWorldMask==firstMask &&
               firstDepth.size()==size_t(w)*h*8 && afterWorldDepth.size()==firstDepth.size() &&
               std::memcmp(firstDepth.data()+ownedPixel,afterWorldDepth.data()+ownedPixel,8)==0 &&
               afterWorldColor.size()==size_t(w)*h*4 && afterWorldColor[(size_t(4)*w+4)*4]!=0,
@@ -420,14 +472,48 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         context->VSSetShader(secondVs.Get(),nullptr,0);
         context->PSSetShader(secondPs.Get(),nullptr,0);
         context->RSSetScissorRects(1,&secondRect);
-        const bool nextPlanned=unionCapture.plan(42,12,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
-                                                 0x33,0x44,alternateBytes);
+        const bool nextPlanned=sevenB.admissible() &&
+            unionCapture.plan(42,12,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                              0x7B0DC42D383F694Cull,0x0DF03E64DF9DBEF1ull,
+                              alternateBytes,sevenB.admissible());
         const bool nextBegan=nextPlanned && unionCapture.beginDraw(context,42);
         if(nextBegan){context->Draw(3,0);unionCapture.endDraw(context);}
+        bind(baselineRtv.Get(),baselineDsv.Get());
+        context->VSSetShader(secondVs.Get(),nullptr,0);
+        context->PSSetShader(secondPs.Get(),nullptr,0);
+        context->RSSetScissorRects(1,&secondRect);context->Draw(3,0);
+        bind(liveRtv.Get(),liveDsv.Get());
+        context->VSSetShader(secondVs.Get(),nullptr,0);
+        context->PSSetShader(secondPs.Get(),nullptr,0);
+        context->RSSetScissorRects(1,&secondRect);
+        const bool eighthPlanned=eightB.admissible() &&
+            unionCapture.plan(42,13,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                              0x8B589D25B2A0ADDCull,0x7268762D11A610F2ull,
+                              alternateBytes,eightB.admissible());
+        const bool eighthBegan=eighthPlanned && unionCapture.beginDraw(context,42);
+        if(eighthBegan){context->Draw(3,0);unionCapture.endDraw(context);}
+        bind(baselineRtv.Get(),baselineDsv.Get());
+        context->VSSetShader(secondVs.Get(),nullptr,0);
+        context->PSSetShader(secondPs.Get(),nullptr,0);
+        context->RSSetScissorRects(1,&secondRect);context->Draw(3,0);
+        bind(liveRtv.Get(),liveDsv.Get());
+        context->VSSetShader(secondVs.Get(),nullptr,0);
+        context->PSSetShader(secondPs.Get(),nullptr,0);
+        context->RSSetScissorRects(1,&secondRect);
+        const bool aacfPlanned=aacf.admissible() &&
+            unionCapture.plan(42,14,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                              0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                              alternateBytes,aacf.admissible());
+        const bool aacfBegan=aacfPlanned && unionCapture.beginDraw(context,42);
+        if(aacfBegan){context->Draw(3,0);unionCapture.endDraw(context);}
+        const bool selected=unionCapture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
         const auto allMask=capturedMask();UINT allMarked=0;for(BYTE v:allMask)allMarked+=v==255;
-        check(nextBegan && allMask.size()==w*h && allMarked==105 &&
+        check(nextBegan && eighthBegan && aacfBegan && selected && unionCapture.mixed() &&
+              unionCapture.completedDraws(liveDepth.Get(),alternateBytes)==4 &&
+              unionCapture.completedDraws(liveDepth.Get(),worldBytes)==1 &&
+              allMask.size()==w*h && allMarked==105 &&
               allMask[8*w+8]==255 && allMask[w+1]==255,
-              "production union retains first-camera pixels and adds the second 25-fragment draw");
+              "production union selects all four alternate-camera fragments and excludes the pre-world world-camera bucket");
         check(readTex(baselineColor.Get(),4)==readTex(liveColor.Get(),4) &&
               readTex(baselineDepth.Get(),8)==readTex(liveDepth.Get(),8),
               "production union preserves original color, depth, and stencil bytes across both draws");
@@ -435,16 +521,25 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         edvr::FlatContractRecord represented{};
         represented.key.color=liveColor.Get();represented.key.depth=liveDepth.Get();
         represented.key.dsv=liveDsv.Get();represented.key.width=w;represented.key.height=h;
-        represented.key.vs=0x11;represented.key.ps=0x22;
+        represented.key.vs=0xCFCA8FFC6B058630ull;
+        represented.key.ps=0x8A08FF781272C5F6ull;
         std::memcpy(represented.camera,alternateBytes,sizeof(represented.camera));
         represented.key.camera=represented.camera;
         represented.first=represented.last=10;represented.draws=1;
         check(unionCapture.qualifies(represented,worldBytes,0,0),
               "production selector can certify the exact completed alternate-camera draw");
+        unsigned char recycledProducerCamera[edvr::kFlatCameraBytes]{};
+        std::memcpy(recycledProducerCamera,alternateBytes,sizeof(recycledProducerCamera));
+        represented.key.camera=recycledProducerCamera;
+        std::memcpy(recycledProducerCamera,worldBytes,sizeof(recycledProducerCamera));
+        check(unionCapture.qualifies(represented,worldBytes,0,0),
+              "qualification uses the record's frozen camera bytes after the producer buffer changes");
         represented.draws=2;
         check(!unionCapture.qualifies(represented,worldBytes,0,0),
               "selector refuses a coalesced record with an uncaptured draw");
         represented.draws=1;
+        check(unionCapture.completedDraws(liveDepth.Get(),alternateBytes)!=5,
+              "an observed but unbracketed unsupported variant cannot match completed receipts");
         unionCapture.noteMutation(nullptr);
         check(!unionCapture.view() && !unionCapture.qualifies(represented,worldBytes,0,0),
               "unknown writer invalidates the union and closes qualification");
@@ -453,11 +548,43 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         bool within=true;
         for(uint32_t i=0;i<128;++i)
             within &= capped.plan(43,i+1,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
-                                  0x11,0x22,alternateBytes);
+                                  0x11,0x22,alternateBytes,true);
         const bool over=capped.plan(43,129,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
-                                    0x11,0x22,alternateBytes);
+                                    0x11,0x22,alternateBytes,true);
         check(within && !over && capped.failure() && !capped.view(),
               "production union record cap fails closed instead of dropping a draw");
+
+        // A frame with no supported AACF record can still be mixed: an
+        // unsupported pre-world draw was captured, and H later names the
+        // other camera. A failed H-camera bucket cannot contaminate its mask.
+        edvr::FlatUntrustedCoverage unsupportedOnly;
+        unsupportedOnly.beginFrame(44);
+        bind(liveRtv.Get(),liveDsv.Get());
+        const bool unknownPlanned=unsupportedOnly.plan(
+            44,20,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+            0x7B0DC42D383F694Cull,0x0DF03E64DF9DBEF1ull,
+            alternateBytes,sevenB.admissible());
+        const bool unknownBegan=unknownPlanned && unsupportedOnly.beginDraw(context,44);
+        if(unknownBegan){context->Draw(3,0);unsupportedOnly.endDraw(context);}
+        const bool failedWorldPlan=unsupportedOnly.plan(
+            44,21,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+            0xEB5234DB6ADB491Dull,0x22,worldBytes,false);
+        const bool unknownSelected=unsupportedOnly.select(liveDepth.Get(),liveDsv.Get(),
+                                                            worldBytes,0,0);
+        check(unknownBegan && !failedWorldPlan && unknownSelected &&
+              unsupportedOnly.mixed() && unsupportedOnly.view() &&
+              unsupportedOnly.completedDraws(liveDepth.Get(),alternateBytes)==1,
+              "unsupported-only alternate selects its passing-fragment mask despite a failed world-camera bucket");
+        float thirdRows[6][4]{};
+        std::memcpy(thirdRows,alternateRows,sizeof(thirdRows));
+        thirdRows[3][2]=.09f;
+        const auto* thirdBytes=reinterpret_cast<const unsigned char*>(thirdRows);
+        const bool thirdPlanned=unsupportedOnly.plan(
+            44,22,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+            0x8B589D25B2A0ADDCull,0x7268762D11A610F2ull,
+            thirdBytes,true);
+        check(!thirdPlanned && unsupportedOnly.failure() && !unsupportedOnly.view(),
+              "a third camera bucket exceeds the bounded mask budget and refuses treatment");
     }
     context->ClearState();
     return failures;
