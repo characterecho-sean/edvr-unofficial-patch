@@ -1,6 +1,7 @@
 #pragma once
 // Build-only registry and independent original call contracts.
 #include "../../src/d3d11/fixed_extra_shader_source.h"
+#include "../../src/d3d11/flat_foreground_ownership.h"
 static const D3D_SHADER_MACRO sunNoGate[]={{"NOGATE","1"},{nullptr,nullptr}};
 static const D3D_SHADER_MACRO sunAllWorld[]={{"ALLWORLD","1"},{nullptr,nullptr}};
 static const D3D_SHADER_MACRO sunAllFlat[]={{"ALLFLAT","1"},{nullptr,nullptr}};
@@ -23,6 +24,7 @@ static std::vector<Variant> extraVariants() { return {
     {"kSunglareNoGateBytecode","sunglare_world_vs","main",sunNoGate,{},false,edvr::kSunglareWorldVS,"vs_5_0"},
     {"kSunglareAllWorldBytecode","sunglare_world_vs","main",sunAllWorld,{},false,edvr::kSunglareWorldVS,"vs_5_0"},
     {"kSunglareAllFlatBytecode","sunglare_world_vs","main",sunAllFlat,{},false,edvr::kSunglareWorldVS,"vs_5_0"},
+    {"kFlatForegroundOwnershipBytecode","flat_foreground_ownership_cs","main",nullptr,{},false,edvr::kFlatForegroundOwnershipCs,"cs_5_0"},
     {"kWeaponFootprintBytecode","weapon_footprint_cs","main",nullptr,{},false,edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl,"cs_5_0"},
 }; }
 static std::vector<LegacyContract> extraLegacyContracts() { return {

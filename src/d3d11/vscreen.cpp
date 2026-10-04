@@ -3204,6 +3204,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ExecuteList, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     if (foreignContext(self)) {
+        if (flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
         engineVelocityResourceUnknown(nullptr);
         s->realExecuteCommandList(self, list, restoreContextState);
         return;

@@ -2,9 +2,10 @@
 
 ## Status
 
-- **State:** source witness `aca86106` BUILT, NOT FLOWN (100).
-  Epic installed `v0.18.1-27-gaca86106`. Latest analyzed log is the refusing
-  `v0.18.1-25-g128fca02` build; evidence and corrections are in sections 1-100.
+- **State:** culprit identified; naming correction and ownership probe BUILT,
+  NOT FLOWN (101). Source witness `aca86106` FLOWN.
+  Epic installed `v0.18.1-27-gaca86106`. Latest analyzed log is this build;
+  evidence and corrections are in sections 1-101.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +33,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 100: same weapon drawn ten seconds, holstered ten seconds.
-  Automatic selector witness needs no F10. Source uniqueness is unchanged.
+- **Next:** section 101: correct world-source naming and measure early pixel
+  ownership at HDR consumer. Keep mixed-camera AA refusal until qualified.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10008,3 +10009,78 @@ seconds. No F10 or two-minute wait is required. The report captures two
 failing frames automatically and enumerates their supported source records.
 Verify the next log against the literal installed `v0.18.1-27-gaca86106`,
 not the later docs-only HEAD.
+
+## 101. Early foreground motion source identified (2026-10-04)
+
+Verified `edvr_gfx_20261004_132943.log` against installed
+`v0.18.1-27-gaca86106` (6AC14625), linked 2026-10-03 18:15:01 UTC. Both
+automatic witnesses completed, frames 44789 and 44849. First offending
+record index 2 is `same-depth-camera`, VS AACFDCF2FB9AD809 / PS
+CF534B32F491561A, seven draws, same 3840x2160 Pool color (fmt23), depth,
+DSV and b1 as the valid world source and H reference. Layout/current/
+viewport/order all pass. Position and orientation rows 4/5 match exactly;
+projection scale differs and near is 0.0675 versus world 0.025.
+
+Frame 44789: foreground source seq 4506-4513, key write 4504; valid world
+source EB5234DB6ADB491D / CB9F297EFF264251 spans 4529-15056, 9555 draws,
+key write 4528; H camera names seq15663. Frame44849 repeats the pattern:
+seven foreground draws, then 9596 matching-world draws. This is not a
+second depth or DSV mismatch and not stale source provenance.
+
+Ruled out: the selector's culprit is an unrelated second-world-depth source,
+because both witnesses show same depth/DSV and identical pose, with only
+foreground projection/near different. The exact early supported source is
+now known. Do not simply ignore it: shared-depth writes and engine-motion
+records must remain consistent with the world resolver's depth convention
+and clean history. Audit foreground depth/motion ownership and measured
+projection relation before editing admission; no new flight requested yet.
+
+The engine-motion audit confirms first-source ownership is not harmless:
+flat naming takes the first supported full-viewport fmt23/26 candidate and
+`continuesRun` gates the actual producer by that copied camera. Naming the
+early foreground camera can therefore skip all later world MRT6 work. The
+established screen-motion path excludes `weaponMotionFamilyVs`, including
+the measured AACF source; align flat world naming with this semantic rule.
+Keep HDR source ambiguity refusal until foreground ownership is qualified.
+
+The optional VR first-person map/stencil contract cannot yet justify flat
+admission. No early draw DS/stencil/arguments are in the witness. A missing
+map drops the pair and exposes world-camera fallback; alternate near depth
+must not borrow that history. For opaque backends, raw output/rejection alone
+also does not prove internal history safety. Late HDR bit0x04 is separate
+from first-person bit0x10 and its lower-half capture proves neither early
+cohort ownership nor surviving marks.
+
+Implement world-source naming correction plus one bounded diagnostic of the
+early cohort: actual producer state, conservative passing-fragment coverage
+from the original PS, depth after the cohort and current depth/stencil at HDR
+consumer. Count surviving marked/unmarked fragments, overwritten fragments
+and marks lacking tracked ownership; include intervening stencil mutations,
+world/engine camera identity and every missing-stage status. Max two frames,
+automatic, no F10/key. No selector or opaque backend admission relaxation.
+This collects the remaining qualification evidence together in one short run.
+
+Implemented the existing first-person-family exclusion for world naming only;
+the selector still refuses AACF's alternate projection. The automatic probe
+brackets all seven draw thunks, exports private MRT7 coverage from the original
+PS without replay, clones shared depth before the first world draw, and compares
+the depth/stencil planes at the selector's actual H consumer. Readback is eight
+uints, asynchronous, at most two frames separated by 60 frames; combined private
+resources are bounded to 128 MiB. Missing stages, predication, active stream
+output and unknown work have explicit status rather than a false zero count.
+
+The WARP fixture initially measured zero coverage because its full-screen
+triangle was culled. Explicit no-cull state on both original and instrumented
+draws corrected the fixture without changing the production counter shader.
+The independent 13x9 geometry discards three columns: total 117, covered 90.
+Counts then prove 90 surviving unmarked pixels, 90 marked survivors with 27
+unowned marks, and after depth overwrite zero survivors with 90 overwritten
+pixels. Original color/depth/stencil bytes match the uninstrumented draw.
+Full validation passed 2026-10-04 at 14:03 MDT, including both targeted rigs,
+shader compilation/reflection, the complete rig suite and installer gates.
+Receipt inputs SHA256: `3898af9b73634a9d24ed970faa3a972e68e7669f01e4297b548117ca23c01acf`.
+The first full attempt stopped at the old single-diagnostic registry count;
+the gate now validates both distinct diagnostics, including ownership CS
+8x8x1 and t0-t3/u0/b0 bindings. The complete build was then rerun successfully.
+This build has not flown. No AA admission,
+configuration, or VR behavior change is included.

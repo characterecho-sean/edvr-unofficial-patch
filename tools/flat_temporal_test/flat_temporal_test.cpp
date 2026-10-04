@@ -759,6 +759,13 @@ void testMonoFrameSelection() {
         "coalesced last draw also requires preceding write provenance");
     reject([](auto& f) { f.rows[5][0] += 1; MonoFixture::setCamera(f.world[0], f.rows); }, FlatMonoReason::AmbiguousSource,
         "supported source under a different camera cannot be silently ignored");
+    reject([](auto& f) {
+        // AACF/CF is a qualified motion pair, but its alternate first-person
+        // projection cannot become the world camera or silently pass selection.
+        f.rows[3][2] = .0675f;
+        MonoFixture::setCamera(f.world[4], f.rows);
+    }, FlatMonoReason::AmbiguousSource,
+        "qualified early weapon family with alternate projection still refuses source admission");
     reject([](auto& f) { f.world[21] = f.world[0]; f.world[21].key.depth = MonoFixture::token(0xD900);
         f.world[21].key.dsv = MonoFixture::token(0xD901); f.input.worldCount = 22; }, FlatMonoReason::AmbiguousSource,
         "same screen camera naming another depth is ambiguous");
@@ -2847,8 +2854,10 @@ void testFlatOverlayDrawThunkWiring() {
     check(!flatRuntimeNeedsActualDraw(false,false) &&
           flatRuntimeNeedsActualDraw(true,false) &&
           flatRuntimeNeedsActualDraw(false,true) &&
-          flatRuntimeNeedsActualDraw(true,true),
-          "actual-draw policy: idle is skipped, footprint and overlay each run, both run once");
+          flatRuntimeNeedsActualDraw(true,true) &&
+          flatRuntimeNeedsActualDraw(false,false,true) &&
+          !flatRuntimeNeedsActualDraw(false,false,false),
+          "actual-draw policy: foreground diagnostic also brackets the exact game draw");
     std::ifstream source("src/d3d11/vscreen.cpp",std::ios::binary);
     const std::string code((std::istreambuf_iterator<char>(source)),std::istreambuf_iterator<char>());
     check(!code.empty(),"the seven flat draw thunks are readable for bracket verification");
@@ -3166,6 +3175,63 @@ void testFlatHdrSourceWitnessWiring() {
     check(runtime.find("flat HDR source witness 5s: enabled=1 limit=2 captured=")!=std::string::npos &&
           runtime.find("second-earliest=")!=std::string::npos,
           "the five-second report exposes whether automatic evidence was enabled and whether either sample completed");
+    const std::string naming=segment(runtime,
+        "const bool sourceCandidate=", "if(sourceCandidate && !s.namedDepth)");
+    check(naming.find("d.supported && !weaponMotionFamilyVs(k.vs) && k.camera && k.depth && sceneExtent")!=std::string::npos,
+          "world source naming excludes the existing first-person motion family before binding a depth and camera");
+    std::string unguarded=naming;
+    const std::string familyGuard="!weaponMotionFamilyVs(k.vs) && ";
+    if(unguarded.find(familyGuard)!=std::string::npos)
+        unguarded.erase(unguarded.find(familyGuard),familyGuard.size());
+    check(unguarded.find("d.supported && !weaponMotionFamilyVs(k.vs)")==std::string::npos,
+          "mutation control: removing the family guard no longer qualifies world naming");
+    check(report.find("named-depth=")!=std::string::npos &&
+          report.find("named-b1=")!=std::string::npos &&
+          report.find("named-camera=")!=std::string::npos &&
+          report.find("named-same-H=")!=std::string::npos &&
+          report.find("s.namedDepth==hdr->key.depth")!=std::string::npos,
+          "the automatic source witness compares named world identity with the actual HDR world");
+}
+
+void testFlatForegroundOwnershipWiring() {
+    auto slurp=[](const char* path) {
+        std::ifstream in(path,std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)),std::istreambuf_iterator<char>());
+    };
+    const std::string runtime=slurp("src/d3d11/flat_runtime.cpp");
+    const std::string probe=slurp("src/d3d11/flat_foreground_probe.h");
+    const std::string variants=slurp("tools/temporal_shader_build/fixed_extra_shader_variants.h");
+    check(!runtime.empty() && !probe.empty() && !variants.empty(),
+          "foreground hook, probe and generated shader registry are readable");
+    check(variants.find("\"kFlatForegroundOwnershipBytecode\"")!=std::string::npos &&
+          variants.find("edvr::kFlatForegroundOwnershipCs,\"cs_5_0\"")!=std::string::npos &&
+          probe.find("CreateComputeShader(kFlatForegroundOwnershipBytecode")!=std::string::npos,
+          "the production compute shader is generated from the same HLSL the WARP rig executes");
+    const size_t planned=runtime.find("foregroundPlanned=s.foreground.plan("),
+        begun=runtime.find("foregroundStarted=state().foreground.beginDraw("),
+        ended=runtime.find("state().foreground.endDraw(ctx);"),
+        world=runtime.find("s.foreground.worldSource("),
+        consumer=runtime.find("s.foreground.consumer("),
+        present=runtime.find("s.foreground.present("),
+        status=runtime.find("s.foreground.logStatus();");
+    check(planned!=std::string::npos && begun!=std::string::npos && ended!=std::string::npos &&
+          world!=std::string::npos && consumer!=std::string::npos &&
+          present!=std::string::npos && status!=std::string::npos &&
+          runtime.find("foregroundPlanned && !foregroundEnded")!=std::string::npos,
+          "the hook plans, brackets, observes the world and consumer, polls and reports incomplete scopes");
+    check(probe.find("kLimit=2,kSeparation=60")!=std::string::npos &&
+          probe.find("reported_>=kLimit")!=std::string::npos &&
+          probe.find("++reported_;")!=std::string::npos &&
+          probe.find("if(!consumerSeen_")!=std::string::npos &&
+          probe.find("report(\"partial\")")!=std::string::npos &&
+          probe.find("D3D11_MAP_FLAG_DO_NOT_WAIT")!=std::string::npos &&
+          probe.find("ctx->CopyResource(staging_.Get(),counters_.Get());")!=std::string::npos,
+          "two-frame budget and failure report survive async GPU readback without a CPU wait");
+    for(const char* reason : {"world-source-predicated-depth-clone", "consumer-stream-output-bound",
+                              "no-world-depth-clone", "consumer-depth-identity", "no-HDR-consumer",
+                              "readback-timeout"})
+        check(probe.find(reason)!=std::string::npos,
+              "each unavailable ownership observation has a named failure status");
 }
 
 void testFlatWrapperNoteWiring() {
@@ -3377,6 +3443,7 @@ int main(int argc, char** argv) {
     testFlatOverlayDrawThunkWiring();
     testFlatOverlayMutationWiring();
     testFlatHdrSourceWitnessWiring();
+    testFlatForegroundOwnershipWiring();
     failures += flatWrapperNoteTests();
     testFlatWrapperNoteWiring();
     failures += flatQueryCutTests();

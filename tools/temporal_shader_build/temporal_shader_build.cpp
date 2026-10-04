@@ -516,7 +516,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 56 && coreLegacy.size() + 1 == coreFixed.size(), "all original fixed shader contracts and the weapon footprint diagnostic are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 57 && coreLegacy.size() + 2 == coreFixed.size(),
+          "all original fixed shader contracts and both bounded diagnostics are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -546,10 +547,42 @@ static void selfTest() {
                 "generated payload reflects its original shader stage and SM5 contract");
         }
     }
-    check(!std::strcmp(coreFixed.back().symbol, "kWeaponFootprintBytecode") &&
-          compile(compiler.fn, coreFixed.back().alternate, coreFixed.back(), true) &&
-          coreFixed.back().bytes.size() > 4 && !std::memcmp(coreFixed.back().bytes.data(), "DXBC", 4),
-          "the weapon footprint shader compiles as a distinct fixed diagnostic variant");
+    const struct {const char* symbol;const char* name;const char* source;} diagnostics[] = {
+        {"kFlatForegroundOwnershipBytecode","flat_foreground_ownership_cs",edvr::kFlatForegroundOwnershipCs},
+        {"kWeaponFootprintBytecode","weapon_footprint_cs",edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl},
+    };
+    for(size_t i=0;i<2;++i) {
+        auto& diagnostic=coreFixed[coreLegacy.size()+i];
+        check(!std::strcmp(diagnostic.symbol,diagnostics[i].symbol) &&
+              !std::strcmp(diagnostic.sourceName,diagnostics[i].name) &&
+              !std::strcmp(diagnostic.entry,"main") && !std::strcmp(diagnostic.profile,"cs_5_0") &&
+              diagnostic.alternate==diagnostics[i].source && diagnostic.macros==nullptr,
+              "each diagnostic has its distinct generated symbol and exact source/stage contract");
+        check(compile(compiler.fn,diagnostic.alternate,diagnostic,true) &&
+              diagnostic.bytes.size()>4 && !std::memcmp(diagnostic.bytes.data(),"DXBC",4),
+              "each diagnostic compiles to a fixed DXBC payload");
+        if(i==0 && reflect && !diagnostic.bytes.empty()) {
+            ComPtr<ID3D11ShaderReflection> reflection;
+            const HRESULT hr=reflect(diagnostic.bytes.data(),diagnostic.bytes.size(),
+                __uuidof(ID3D11ShaderReflection),reinterpret_cast<void**>(reflection.GetAddressOf()));
+            UINT x=0,y=0,z=0;
+            const bool group=SUCCEEDED(hr) && reflection &&
+                reflection->GetThreadGroupSize(&x,&y,&z)==64 && x==8 && y==8 && z==1;
+            check(group,"foreground ownership payload keeps its bounded 8x8 compute group");
+            struct Binding {const char* name;D3D_SHADER_INPUT_TYPE type;UINT slot;};
+            const Binding bindings[]={{"Coverage",D3D_SIT_TEXTURE,0},
+                {"CohortDepth",D3D_SIT_TEXTURE,1},{"ConsumerDepth",D3D_SIT_TEXTURE,2},
+                {"ConsumerStencil",D3D_SIT_TEXTURE,3},{"Counters",D3D_SIT_UAV_RWSTRUCTURED,0},
+                {"Extent",D3D_SIT_CBUFFER,0}};
+            bool bound=reflection!=nullptr;
+            if(reflection)for(const auto& expected:bindings) {
+                D3D11_SHADER_INPUT_BIND_DESC desc{};
+                bound &= SUCCEEDED(reflection->GetResourceBindingDescByName(expected.name,&desc)) &&
+                    desc.Type==expected.type && desc.BindPoint==expected.slot && desc.BindCount==1;
+            }
+            check(bound,"foreground ownership payload reads the four measured planes and writes eight counters at the fixed slots");
+        }
+    }
 
     // The native runtime's stereo shaders (src/openxr/stereo_shader_source.h): four variants from two texts, held to the four D3DCompile calls they replace. The
     // contracts below are written independently of stereoVariants(): the source names, entries, profiles and flag word of src/openxr/d3d11_stereo.cpp at

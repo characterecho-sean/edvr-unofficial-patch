@@ -167,7 +167,7 @@ class FlatOverlayLayer {
         return out;
     }
     bool ensureResources(ID3D11Device* dev, ID3D11Texture2D* hdr, const D3D11_TEXTURE2D_DESC& source,
-                         const char** reason) {
+                         DXGI_FORMAT viewFormat, const char** reason) {
         if (cleanSource_ && cleanSource_.Get()!=hdr) return refuse("HDR-resource-changed",reason);
         if (clean_ && (!cleanView_ || !coverage_ || !coverageRtv_ || !coverageView_)) releaseResources();
         if (clean_ && (resourceWidth_!=source.Width || resourceHeight_!=source.Height || resourceFormat_!=source.Format)) {
@@ -180,7 +180,7 @@ class FlatOverlayLayer {
         cd.CPUAccessFlags=0; cd.MiscFlags=0; cd.Usage=D3D11_USAGE_DEFAULT;
         if (FAILED(dev->CreateTexture2D(&cd,nullptr,&clean_))) { releaseResources(); return refuse("clean-HDR-create",reason); }
         D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
-        sd.Format=source.Format; sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels=1;
+        sd.Format=viewFormat; sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels=1;
         if (FAILED(dev->CreateShaderResourceView(clean_.Get(),&sd,&cleanView_))) { releaseResources(); return refuse("clean-HDR-SRV-create",reason); }
         D3D11_TEXTURE2D_DESC md=cd;
         md.Format=DXGI_FORMAT_R8_UNORM; md.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
@@ -254,7 +254,8 @@ public:
         blends_.clear(); device_.Reset();
     }
     bool beginDraw(ID3D11DeviceContext* ctx,uint64_t frame,ID3D11Texture2D* hdr,
-                   ID3D11DepthStencilView* expectedDsv,const char** reason=nullptr) {
+                   ID3D11DepthStencilView* expectedDsv,const char** reason=nullptr,
+                   bool diagnosticTypelessPool=false) {
         if (reason) *reason=nullptr;
         if (!ctx || !hdr || !expectedDsv || !frame || frame_!=frame) return refuse("draw-frame-or-source",reason);
         if (!refusal_.empty()) return refuse(refusal_.c_str(),reason);
@@ -273,8 +274,13 @@ public:
         if (!hd.Width || !hd.Height || hd.MipLevels!=1 || hd.ArraySize!=1 || hd.SampleDesc.Count!=1 ||
             !(hd.BindFlags&D3D11_BIND_RENDER_TARGET) || hd.Usage!=D3D11_USAGE_DEFAULT)
             return refuse("unsupported-HDR-shape",reason);
+        // The foreground *diagnostic* observes the game's typeless format-23
+        // pool target through its typed format-24 RTV/SRV. This option never
+        // widens the production late-HDR overlay admission policy.
+        const bool poolProbe=diagnosticTypelessPool && hd.Format==DXGI_FORMAT_R10G10B10A2_TYPELESS;
+        const DXGI_FORMAT viewFormat=poolProbe?DXGI_FORMAT_R10G10B10A2_UNORM:hd.Format;
         const uint64_t colorBytes=hd.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?8u:
-            (hd.Format==DXGI_FORMAT_R11G11B10_FLOAT || hd.Format==DXGI_FORMAT_R8G8B8A8_UNORM?4u:0u);
+            (hd.Format==DXGI_FORMAT_R11G11B10_FLOAT || hd.Format==DXGI_FORMAT_R8G8B8A8_UNORM || poolProbe?4u:0u);
         if (!colorBytes) return refuse("unsupported-HDR-format",reason);
         if (uint64_t(hd.Width)*hd.Height*(colorBytes+1u)>128ull*1024*1024)
             return refuse("overlay-resource-budget",reason);
@@ -289,7 +295,7 @@ public:
         Ptr<ID3D11Resource> boundColor;game.rtv[0]->GetResource(&boundColor);
         if (boundColor.Get()!=hdr) return refuse("HDR-RTV-resource-mismatch",reason);
         D3D11_RENDER_TARGET_VIEW_DESC hdrView{}; game.rtv[0]->GetDesc(&hdrView);
-        if (hdrView.Format!=hd.Format) return refuse("HDR-RTV-format-mismatch",reason);
+        if (hdrView.Format!=viewFormat) return refuse("HDR-RTV-format-mismatch",reason);
         for (auto& view:game.rtv) if (!sameViewSize(view.Get(),hd.Width,hd.Height))
             return refuse("MRT-size-or-view-mismatch",reason);
         if (!sameDepthSize(game.dsv.Get(),hd.Width,hd.Height)) return refuse("DSV-size-or-view-mismatch",reason);
@@ -308,7 +314,7 @@ public:
         std::string shaderWhy;
         Ptr<ID3D11PixelShader> patched=patchedShader(dev.Get(),game.ps.Get(),shaderWhy);
         if (!patched) return refuse(shaderWhy.c_str(),reason);
-        if (!ensureResources(dev.Get(),hdr,hd,reason)) return false;
+        if (!ensureResources(dev.Get(),hdr,hd,viewFormat,reason)) return false;
         if (!completedDraws_) {
             const FLOAT zero[4]{};
             ctx->ClearRenderTargetView(coverageRtv_.Get(),zero);
