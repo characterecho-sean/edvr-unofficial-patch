@@ -3298,6 +3298,34 @@ void testFlatUntrustedCameraWiring() {
           runtime.find("if(!s.untrustedUnknown)sel.mixedCamera=true;")!=std::string::npos &&
           runtime.find("selected.mixedCamera?FlatMonoResolveMode::Taa:s.engine")!=std::string::npos,
           "an unsupported-only certified alternate is routed through mixed-camera TAA");
+    const size_t callback=runtime.find("static bool qualifiedUntrustedSource(");
+    const size_t callbackProof=runtime.find("s->untrustedQualificationCalled=true;",callback);
+    const size_t callbackRefusal=runtime.find("if(!qualified)s->untrustedQualificationFailed=true;",callback);
+    const size_t route=runtime.find("qualifiedUntrustedSource,&s);",callback);
+    const size_t report=runtime.find("reportUntrustedAtH(s,sel);",route);
+    const size_t stored=runtime.find("s.hdrSelected=sel;",report);
+    const size_t consumer=runtime.find("s.untrusted.consumer();",report);
+    check(callback!=std::string::npos && callbackProof!=std::string::npos &&
+          callbackRefusal!=std::string::npos && route!=std::string::npos &&
+          report!=std::string::npos && stored!=std::string::npos &&
+          consumer!=std::string::npos && callback<callbackProof &&
+          callbackProof<callbackRefusal && callbackRefusal<route &&
+          route<report && report<stored && stored<consumer,
+          "the selector's supported-alternate callback records its refusal and H reports it before consumer sealing even when route selection fails");
+    const size_t reporter=runtime.find("static void reportUntrustedAtH(State& s,const FlatMonoFrame& sel) {");
+    const size_t reporterEnd=runtime.find("static void hdrSelectAtTrigger(State& s) {",reporter);
+    const std::string audit=reporter!=std::string::npos && reporterEnd!=std::string::npos?
+        runtime.substr(reporter,reporterEnd-reporter):std::string();
+    check(audit.find("hFrozen?target->tone.camera:nullptr")!=std::string::npos &&
+          audit.find("const bool refused=!sel.selected() || s.untrustedUnknown;")!=std::string::npos &&
+          audit.find("s.untrusted.diagnoseBucket(i,hDepth,hDsv,hCamera,")!=std::string::npos &&
+          audit.find("if(b.alternate && !b.firstFailure.reason.empty())")!=std::string::npos &&
+          audit.find("supportedAlternate=supportedAlternate || s.untrustedQualificationCalled;")!=std::string::npos &&
+          audit.find("supportedAlternate && refused,stage.c_str(),reason.c_str()")!=std::string::npos &&
+          audit.find("flat untrusted H bucket:")!=std::string::npos &&
+          audit.find("flat untrusted H qualification:")!=std::string::npos &&
+          audit.find("flat untrusted H first unaccounted:")!=std::string::npos,
+          "a refused route uses frozen H to report both bucket origins, the selected alternate reason, qualification and receipt gap within the shared budget");
 }
 
 void testFlatWrapperNoteWiring() {

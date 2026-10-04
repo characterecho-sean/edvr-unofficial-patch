@@ -625,10 +625,19 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
             draw.supported=supported;
             const auto nominee=edvr::flatUntrustedNomination(
                 draw,nullptr,nullptr,true,true,seq,frame);
+            edvr::FlatUntrustedDrawDiagnostic provenance{};
+            provenance.cameraHash=key.cameraHash;
+            provenance.writeEpoch=key.writeEpoch;
+            provenance.writeSeq=key.writeSeq;
+            provenance.current=nominee.current;
+            provenance.viewport=nominee.fullViewport;
             const bool planned=bracket && nominee.admissible() &&
                 capture.plan(frame,seq,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
-                             vsHash,psHash,cameraBytes,nominee.admissible());
-            const bool began=planned && capture.beginDraw(context,frame);
+                             vsHash,psHash,cameraBytes,nominee.admissible(),&provenance);
+            const bool began=planned && capture.beginDraw(context,frame,
+                [](void* shader)->uint64_t {
+                    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(shader));
+                });
             if(planned && !began)capture.abandon();
             context->Draw(3,0);
             if(began)capture.endDraw(context);
@@ -743,6 +752,115 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
                   !capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0) &&
                   sameOriginal(),
                   "a failed near-world bucket with camera bytes different from H remains an alternate and refuses");
+        }
+        {
+            edvr::FlatUntrustedCoverage capture;capture.beginFrame(80);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;clearPair();
+            const auto worldFailure=submit(capture,observed,used,80,1,worldBytes,
+                0xEB5234DB6ADB491Dull,0,vs.Get(),nullptr,full,false);
+            capture.diagnosePlanShader(context,1,[](void*) {return uint64_t(0);});
+            const auto alternateFailure=submit(capture,observed,used,80,2,alternateBytes,
+                0x7B0DC42D383F694Cull,0xABCDEF01ull,
+                secondVs.Get(),zeroOutputPs.Get(),secondRect,false);
+            const auto supported=submit(capture,observed,used,80,3,alternateBytes,
+                0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                secondVs.Get(),secondPs.Get(),secondRect,true);
+            edvr::FlatContractRecord supportedRecord{};
+            supportedRecord.key.color=liveColor.Get();
+            supportedRecord.key.depth=liveDepth.Get();
+            supportedRecord.key.dsv=liveDsv.Get();
+            supportedRecord.key.width=w;supportedRecord.key.height=h;
+            supportedRecord.key.vs=0xAACFDCF2FB9AD809ull;
+            supportedRecord.key.ps=0xCF534B32F491561Aull;
+            std::memcpy(supportedRecord.camera,alternateBytes,sizeof(supportedRecord.camera));
+            supportedRecord.key.camera=supportedRecord.camera;
+            supportedRecord.first=supportedRecord.last=3;supportedRecord.draws=1;
+            edvr::FlatUntrustedQualification qualification{};
+            const bool qualified=capture.qualifies(
+                supportedRecord,worldBytes,0,0,&qualification);
+            const bool selected=capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
+            capture.consumer();
+            const auto worldReport=capture.diagnoseBucket(
+                0,liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
+            const auto alternateReport=capture.diagnoseBucket(
+                1,liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
+            check(worldFailure.observed && worldFailure.nominee && !worldFailure.began &&
+                  alternateFailure.observed && alternateFailure.nominee &&
+                  alternateFailure.planned && !alternateFailure.began &&
+                  supported.observed && supported.nominee && !supported.began &&
+                  used==2 && observed[0].draws==1 && observed[1].draws==2 &&
+                  !qualified && !selected && !capture.view() && sameOriginal(),
+                  "world-first null PS and alternate patch failure both execute originals but refuse the supported record");
+            check(worldReport.used && worldReport.world && !worldReport.alternate &&
+                  worldReport.firstFailure.sequence==1 &&
+                  std::strcmp(worldReport.firstFailure.stage,"plan")==0 &&
+                  worldReport.firstFailure.reason=="untrusted-source-shader-identity" &&
+                  worldReport.firstFailure.ps==0 &&
+                  worldReport.firstFailure.actualPsRead &&
+                  !worldReport.firstFailure.actualPsObject && !worldReport.firstFailure.actualPs &&
+                  worldReport.firstFailure.pending==0 &&
+                  worldReport.firstFailure.completed==0 &&
+                  alternateReport.used && alternateReport.alternate && !alternateReport.world &&
+                  alternateReport.dsvMatch && alternateReport.cameraShape &&
+                  alternateReport.phasePair &&
+                  alternateReport.firstFailure.sequence==2 &&
+                  std::strcmp(alternateReport.firstFailure.stage,"begin")==0 &&
+                  alternateReport.firstFailure.reason.find("no colour output")!=std::string::npos &&
+                  alternateReport.firstFailure.ps==0xABCDEF01ull &&
+                  alternateReport.firstFailure.pending==1 &&
+                  alternateReport.firstFailure.completed==0 &&
+                  alternateReport.firstFailure.actualPsRead &&
+                  alternateReport.firstFailure.actualPsObject==zeroOutputPs.Get() &&
+                  alternateReport.firstFailure.actualPs==
+                      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(zeroOutputPs.Get())) &&
+                  alternateReport.firstFailure.current && alternateReport.firstFailure.viewport &&
+                  alternateReport.firstFailure.writeEpoch==80 &&
+                  qualification.hIdentity && qualification.uniqueAlternate &&
+                  qualification.dsvMatch && qualification.countPresent &&
+                  !qualification.ready && !qualification.bucketValid &&
+                  qualification.expected==1 && qualification.matching==0 &&
+                  qualification.first==supportedRecord.first && qualification.last==supportedRecord.last &&
+                  std::memcmp(worldReport.camera,worldBytes,edvr::kFlatCameraBytes)==0 &&
+                  std::memcmp(alternateReport.camera,alternateBytes,edvr::kFlatCameraBytes)==0 &&
+                  std::memcmp(qualification.recordCamera,supportedRecord.camera,edvr::kFlatCameraBytes)==0 &&
+                  std::strcmp(qualification.reason,
+                              alternateReport.firstFailure.reason.c_str())==0 &&
+                  !capture.globalFailure(),
+                  "consumer diagnosis retains the alternate patcher's first reason and origin despite an earlier world-bucket failure");
+        }
+        {
+            edvr::FlatUntrustedCoverage capture;capture.beginFrame(81);
+            context->PSSetShader(zeroOutputPs.Get(),nullptr,0);
+            check(!capture.plan(81,1,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                  0xEB5234DB6ADB491Dull,0,worldBytes),
+                  "an untracked nonnull shader still fails nominal shader identity");
+            capture.diagnosePlanShader(context,1,[](void*) {return uint64_t(0);});
+            context->PSSetShader(nullptr,nullptr,0);
+            capture.diagnosePlanShader(context,1,[](void*) {return uint64_t(0);});
+            const auto report=capture.diagnoseBucket(0,liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
+            check(report.firstFailure.actualPsRead &&
+                  report.firstFailure.actualPsObject==zeroOutputPs.Get() &&
+                  report.firstFailure.actualPs==0,
+                  "first plan failure distinguishes an untracked nonnull shader from null and preserves its first snapshot");
+        }
+        {
+            edvr::FlatUntrustedDiagnosticBudget budget;
+            check(!budget.take(100,false,nullptr,nullptr) &&
+                  !budget.firstSupported() && budget.emitted()==0 && budget.dropped()==0,
+                  "a holstered successful frame does not spend a supported-alternate refusal report");
+            const bool ordinary=budget.take(101,false,"plan","world-null");
+            const bool first=budget.take(102,true,"begin","alternate-no-color-output");
+            const bool early=budget.take(161,true,"begin","alternate-no-color-output");
+            const bool second=budget.take(162,true,"begin","alternate-no-color-output");
+            const bool late=budget.take(222,true,"other","new-alternate-reason");
+            const bool duplicate=budget.take(223,false,"plan","world-null");
+            const bool newOrdinary=budget.take(224,false,"begin","world-null");
+            check(ordinary && first && !early && second && !late &&
+                  !duplicate && newOrdinary && budget.firstSupported() &&
+                  budget.secondSupported() && budget.emitted()==4 &&
+                  budget.dropped()==3,
+                  "two supported-refusal reports require 60 frames and do not fall through to the distinct ordinary budget");
         }
     }
     context->ClearState();

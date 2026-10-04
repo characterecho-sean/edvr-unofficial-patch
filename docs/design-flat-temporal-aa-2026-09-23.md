@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** Astra-reviewed failure-scope correction INSTALLED, NOT FLOWN
-  on Epic as `v0.18.1-43-g8afc3e01`. Full gate and clean promotion PASS.
-  Section 102; v40 proved the null-PS world draw globally poisoned capture.
+- **State:** v43 FLOWN: unsupported-only mixed AA treats; weapon still refuses.
+  Combined first-failure diagnostic validated and reviewed, NOT FLOWN; install
+  next. Section 102; Epic currently `v0.18.1-43-g8afc3e01`.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: restart Epic, same weapon drawn 10 seconds, then
-  holstered 10 seconds; no F10. Verify mixed treatment and mask occupancy.
+- **Next:** section 102: install the combined bucket-failure/qualification
+  diagnostic, then one F10 with weapon drawn for 15s and holstered for 10s.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10630,3 +10630,97 @@ alternate union after successful treatment. Remaining visual/coverage
 uncertainty is explicitly unqualified until this flight. Verify the next log
 against the literal installed version above; the installation-journal commit
 does not change DLL behavior or require another promotion.
+
+### 2026-10-04: v43 admits unsupported-only capture; weapon still refuses
+
+Sean reports AA still disengages with the weapon drawn. Verified
+`edvr_gfx_20261004_165257.log`: `v0.18.1-43-g8afc3e01`, build `6AC2D869`,
+linked 22:51:21 UTC. Frame44050 q1806/1807 CFCA/7B now plan despite an earlier
+world-null-PS bucket failure. H reports observed4/completed4, ready1, unknown0,
+mixed1, failure none. Summaries frames44400/44700 select and actually treat300
+frames with no refusals. Unsupported-only mask sample frame44052 measures
+marked0/8294400; this is a completed zero readback, not an absent instrument.
+
+At 16:55:08.560 frame44945 q4788 (8B/7268) and q4789 (AACF/CF) both plan0.
+The supported AACF witness has five draws q4789..4793; frame45005 has seven
+draws q4973..4981, both current/viewport/order1 and same H depth/DSV/extent.
+Summaries frames45300/45600 show selected0/actually-treated0, refused300,
+last-draws1/ready0/unknown0, selector source-camera-or-depth-not-unique and
+last-failure none. Runtime treatment stops at1256 during 16:55:12/17 and
+resumes after 16:55:22, consistent with drawing/holstering; input not logged.
+The terminal late-HDR-overlay/depth conflict is downstream of source refusal.
+
+Ruled out: v40's global world-null-PS poisoning persists, because v43 captures
+all four alternate draws and treats before the weapon appears. Weapon mask
+overcoverage is not measured: that supported-alternate path never treats.
+
+Astra traced a reporting gap: nonzero/admissible weapon draws with plan0 and
+no surviving global failure imply a pre-existing local failure in their
+identified camera bucket. Pre-consumer failure() returns the first bucket's
+failure, which can instead be the world's `no colour output`; qualifies()
+discards the alternateBucket reason, H then skips select(), and consumer()
+hides unselected local failures. Thus the first failing alternate draw and
+predicate are not identifiable from this log. Actual PS binding of the later
+8B/AACF draws cannot explain their refusal: their beginDraw is never reached.
+Review existing dumps first; if insufficient, instrument first failure origin,
+qualification checks and actual patch/state failures together in one run.
+
+Astra completed the evidence review: existing creation-time shader dumps do
+not recover the first failure's dynamic camera/order. No trace dump or armed
+projection audit occurs in this flight, and the old foreground probe reports
+active0/reported0 throughout the drawn interval. A rendering fix is therefore
+not yet justified. An early alternate null-PS/depth-only draw is plausible,
+not proven.
+
+The next build is diagnostic only: retain each bucket's first failure origin
+and all record-qualification predicates, actual PS identity on begin failures,
+and report world/alternate roles against H even when selection fails. Reserve
+two supported-alternate refusal reports (second at least60 frames later),
+separate from holstered success; retain reasons after consumer completion and
+count emitted/dropped diagnostics. Tests must prove distinct failed-bucket
+provenance, refusal-report emission and reason survival. No admission change,
+settings key, per-weapon table or GPU wait. One run measures the remaining
+competing boundaries together; do not silently bypass depth-only effects.
+
+Sean asks whether F10 can speed diagnosis and explain the problem fully.
+Capture audit: the v43 F10 draw/pixel path only finalizes two qualified
+successfully treated frames, with sparse pixel windows and stride/quota
+sampling; failed weapon frames are discarded. Its independent always-on trace
+does retain observed draw keys and frozen camera bytes, but only the last
+three completed frames fit, each capped at4096 events; truncated frames are
+omitted. Neither path retains private MRT7 capture failure/receipt details.
+Thus existing F10 can complement the diagnostic, not recover its missing
+first failure reliably. Do not increase trace quotas or rewrite capture
+admission in this change. The bounded failure report also requests cached
+creation bytecode of the first failed nominee and actual PS, so one combined
+run supplies the data for offline reproduction rather than another guessed
+rendering fix. Next capture: draw weapon, press F10 once, wait15s, holster10s.
+
+Combined diagnostic implemented and independently reviewed by Astra with no
+admission changes or blockers. Targeted mono WARP and temporal-policy rigs
+pass: two distinct failed buckets retain the alternate reason after consumer,
+supported refusal reporting reaches H, original outputs match, and the sample
+budget survives holstered success and enforces the60-frame interval. Actual
+PS object identity is separate from fingerprint, so an untracked shader is
+not reported absent. Failure-only binding queries see original/restored state.
+Bounded emitted reports also retain raw frozen H, bucket and qualification-
+record rows (maximum384 bytes), with record first/last sequences; the updated
+WARP checks assert these snapshots match owned camera bytes. No GPU work was
+added for those rows. Sources frozen; full gate next.
+
+The first full gate passed (receipt2489b11d), but the final data audit found
+one material gap before installation: shader hash0 means absent OR untracked
+nonnull PS (`lookupShaderHash` and the binding hook explicitly handle both).
+The original diagnostic sampled physical PS only at begin failure, so a plan
+shader-identity failure could still require another flight. It now snapshots
+physical PS only on that bucket's first matching shader-identity plan failure,
+under InternalScope after the existing restore/plan path; sticky and valid
+plans add no queries. A regression distinguishes null from nonnull unknown
+hash and proves repeated attempts cannot overwrite the first snapshot.
+No admission change. Updated sources frozen; full gate rerun required.
+
+Final full gate passed: `build/flat-first-failure-diagnostic-full-final.log`,
+exit0, all gates passed; receipt `1be12b21ebe757920894f400e81bd7899c4c825617ea87c0351118ef03e8a131`.
+Astra approved the final plan-failure PS snapshot and its regression, with
+no blocker or admission change. This receipt supersedes the first full gate;
+commit, clean DLL promotion and verified Epic flat install next.

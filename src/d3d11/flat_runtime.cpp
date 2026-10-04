@@ -185,6 +185,11 @@ struct State {
     FlatUntrustedCoverage untrusted;
     bool untrustedUnknown = false;
     bool untrustedSupportedAlternate = false;
+    FlatUntrustedQualification untrustedQualification{};
+    bool untrustedQualificationCalled = false;
+    bool untrustedQualificationFailed = false;
+    std::string untrustedLastQualification = "not-called";
+    FlatUntrustedDiagnosticBudget untrustedDiagnosticBudget;
     FlatUntrustedObservedCamera unclassifiedPool[64]{};
     FlatUntrustedObservedCamera unclassifiedOverflowFirst{};
     uint32_t unclassifiedPoolUsed = 0;
@@ -1893,6 +1898,8 @@ void flatRuntimeResize() {
     s.untrusted.reset();
     s.untrustedUnknown=false;
     s.untrustedSupportedAlternate=false;
+    s.untrustedQualification={};s.untrustedQualificationCalled=false;
+    s.untrustedQualificationFailed=false;
     s.unclassifiedPoolUsed=0;s.unclassifiedPoolOverflow=false;
     foregroundProbeActive.store(false,std::memory_order_release);
     untrustedCoverageActive.store(false,std::memory_order_release);
@@ -2151,8 +2158,146 @@ static void hdrAmbiguousSourceReport(const FlatMonoFrameInput& in, const void* h
 static bool qualifiedUntrustedSource(const FlatContractRecord& record,
                                      const unsigned char* worldCamera,void* user) {
     auto* s=static_cast<State*>(user);
-    return s && s->untrusted.qualifies(record,worldCamera,
-                                       s->phase.currentX,s->phase.currentY);
+    if(!s)return false;
+    FlatUntrustedQualification diagnostic{};
+    const bool qualified=s->untrusted.qualifies(record,worldCamera,
+        s->phase.currentX,s->phase.currentY,&diagnostic);
+    s->untrustedQualificationCalled=true;
+    if(!s->untrustedQualificationFailed) {
+        s->untrustedQualification=diagnostic;
+        s->untrustedLastQualification=diagnostic.reason?diagnostic.reason:"unknown";
+    }
+    if(!qualified)s->untrustedQualificationFailed=true;
+    return qualified;
+}
+// Diagnostic only. The selector may refuse before it returns a FlatMonoFrame
+// identity, so use the trigger's frozen H target to explain both camera buckets.
+// This never calls select(), changes a receipt, or affects route admission.
+static void reportUntrustedAtH(State& s,const FlatMonoFrame& sel) {
+    const FlatRuntimeTarget* target=nullptr;
+    for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
+        if(s.prefix.targets[i].resource==s.hdr.trigger.hdr) {target=&s.prefix.targets[i];break;}
+    float frozenHRows[6][4]{};
+    const bool hFrozen=target && target->hdrCamera && !target->hdrBad &&
+        !target->hdrLayoutChanged && target->writes.key.format==26 &&
+        flat_mono_detail::cameraCurrent(target->tone,s.prefix.frame) &&
+        target->writes.key.depth && target->writes.key.dsv &&
+        flat_mono_detail::cameraShape(target->tone.camera,frozenHRows);
+    const void* hDepth=sel.selected()?sel.depth:hFrozen?target->writes.key.depth:nullptr;
+    const void* hDsv=sel.selected()?sel.dsv:hFrozen?target->writes.key.dsv:nullptr;
+    const unsigned char* hCamera=sel.selected()?
+        reinterpret_cast<const unsigned char*>(sel.camera):hFrozen?target->tone.camera:nullptr;
+    bool supportedAlternate=false;
+    if(hCamera && hDepth)for(uint32_t i=0;i<s.prefix.sourcesUsed;++i) {
+        const auto& r=s.prefix.sources[i];
+        if(r.key.kind==kFlatContractPool && r.key.depth==hDepth && r.key.camera &&
+           engineVelocityPoolFamilyPair(r.key.vs,r.key.ps) &&
+           std::memcmp(r.camera,hCamera,kFlatCameraBytes)!=0) {
+            supportedAlternate=true;break;
+        }
+    }
+    supportedAlternate=supportedAlternate || s.untrustedQualificationCalled;
+    const bool refused=!sel.selected() || s.untrustedUnknown;
+    if(!refused || (!s.untrusted.active() && !supportedAlternate &&
+                    !s.untrustedQualificationFailed))return;
+    std::string stage="selector",reason=flatMonoReasonName(sel.reason);
+    for(uint32_t i=0;i<s.untrusted.bucketCount();++i) {
+        const auto b=s.untrusted.diagnoseBucket(i,hDepth,hDsv,hCamera,
+            s.phase.currentX,s.phase.currentY);
+        if(b.alternate && !b.firstFailure.reason.empty()) {
+            stage=b.firstFailure.stage;reason=b.firstFailure.reason;break;
+        }
+    }
+    if(stage=="selector" && s.untrustedQualificationFailed) {
+        stage="qualification";
+        reason=s.untrustedLastQualification;
+    }
+    if(!s.untrustedDiagnosticBudget.take(s.prefix.frame,
+        supportedAlternate && refused,stage.c_str(),reason.c_str()))return;
+    uint32_t observed=0,completed=0,groups=0,missing=0;
+    const FlatUntrustedObservedCamera* firstGap=nullptr;
+    uint32_t firstGapCompleted=0;
+    if(hDepth && hCamera)for(uint32_t i=0;i<s.unclassifiedPoolUsed;++i) {
+        const auto& group=s.unclassifiedPool[i];
+        if(group.depth!=hDepth ||
+           (group.hasCamera && std::memcmp(group.camera,hCamera,kFlatCameraBytes)==0))continue;
+        ++groups;observed+=group.draws;
+        uint32_t count=0;
+        const bool accounted=flatUntrustedObservationAccounted(group,s.untrusted,&count);
+        completed+=count;
+        if(!group.hasCamera)++missing;
+        if(!accounted && !firstGap) {firstGap=&group;firstGapCompleted=count;}
+    }
+    Log::get().note("flat untrusted H audit: frame=%llu route=%s h-identified=%u h-depth=%p h-dsv=%p h-camera=%016llX supported-alternate=%u stage=%s reason=%s buckets=%u observed=%u completed=%u groups=%u missing-camera=%u overflow=%u global=%s",
+        (unsigned long long)s.prefix.frame,flatMonoReasonName(sel.reason),
+        sel.selected() || hFrozen?1u:0u,
+        hDepth,hDsv,(unsigned long long)(sel.selected()?sel.cameraHash:
+            hFrozen?target->tone.key.cameraHash:0),supportedAlternate?1u:0u,
+        stage.c_str(),reason.c_str(),s.untrusted.bucketCount(),observed,completed,
+        groups,missing,s.unclassifiedPoolOverflow?1u:0u,
+        s.untrusted.globalFailure()?s.untrusted.globalFailure():"none");
+    char hRows[24*9+1]{};
+    if(hCamera)hexWords(hCamera,24,hRows,sizeof(hRows));
+    Log::get().note("flat untrusted H camera rows: frame=%llu present=%u rows270-275=%s",
+        (unsigned long long)s.prefix.frame,hCamera?1u:0u,hCamera?hRows:"unavailable");
+    for(uint32_t i=0;i<s.untrusted.bucketCount();++i) {
+        const auto b=s.untrusted.diagnoseBucket(i,hDepth,hDsv,hCamera,
+            s.phase.currentX,s.phase.currentY);
+        const auto& f=b.firstFailure;
+        Log::get().note("flat untrusted H bucket: frame=%llu index=%u role=%s color=%p depth=%p dsv=%p camera=%016llX h-dsv-match=%u pending=%u completed=%u ready=%u shape=%u phase=%u first-stage=%s first-reason=%s first-frame=%llu first-q=%u first-vs=%016llX first-ps=%016llX first-color=%p first-depth=%p first-dsv=%p first-write=%llu/%u first-current=%u first-viewport=%u actual-ps-read=%u actual-ps-object=%p actual-ps-hash=%016llX actual-hash-known=%u actual-match=%u first-pending=%u first-completed=%u",
+            (unsigned long long)s.prefix.frame,i,b.world?"world-exact":b.alternate?"alternate":
+            b.unrelatedDepth?"unrelated-depth":"H-unknown",b.color,b.depth,b.dsv,
+            (unsigned long long)b.cameraHash,b.dsvMatch?1u:0u,b.pending,b.completed,
+            b.ready?1u:0u,b.cameraShape?1u:0u,b.phasePair?1u:0u,
+            f.stage,f.reason.empty()?"none":f.reason.c_str(),
+            (unsigned long long)f.frame,f.sequence,
+            (unsigned long long)f.vs,(unsigned long long)f.ps,
+            f.color,f.depth,f.dsv,
+            (unsigned long long)f.writeEpoch,f.writeSeq,f.current?1u:0u,
+            f.viewport?1u:0u,f.actualPsRead?1u:0u,f.actualPsObject,
+            (unsigned long long)f.actualPs,
+            f.actualPs?1u:0u,
+            f.actualPsRead && f.actualPs && f.actualPs==f.ps?1u:0u,
+            f.pending,f.completed);
+        char bucketRows[24*9+1]{};hexWords(b.camera,24,bucketRows,sizeof(bucketRows));
+        Log::get().note("flat untrusted H bucket rows: frame=%llu index=%u rows270-275=%s",
+            (unsigned long long)s.prefix.frame,i,bucketRows);
+        if(!f.reason.empty()) {
+            const bool vsSaved=f.vs && captureFlatProbeShader('v',f.vs);
+            const bool psSaved=f.ps && captureFlatProbeShader('p',f.ps);
+            const bool actualSaved=f.actualPsRead && f.actualPs &&
+                captureFlatProbeShader('p',f.actualPs);
+            Log::get().note("flat untrusted H shader bytes: frame=%llu bucket=%u VS=%016llX saved=%u missing=%u absent=%u PS=%016llX saved=%u missing=%u absent=%u actualPS=%016llX read=%u present=%u hash-known=%u saved=%u missing=%u absent=%u",
+                (unsigned long long)s.prefix.frame,i,(unsigned long long)f.vs,vsSaved?1u:0u,
+                f.vs && !vsSaved?1u:0u,f.vs?0u:1u,
+                (unsigned long long)f.ps,psSaved?1u:0u,f.ps && !psSaved?1u:0u,f.ps?0u:1u,
+                (unsigned long long)f.actualPs,f.actualPsRead?1u:0u,
+                f.actualPsObject?1u:0u,f.actualPs?1u:0u,actualSaved?1u:0u,
+                f.actualPsRead && f.actualPs && !actualSaved?1u:0u,
+                f.actualPsRead && !f.actualPsObject?1u:0u);
+        }
+    }
+    const auto& q=s.untrustedQualification;
+    Log::get().note("flat untrusted H qualification: frame=%llu called=%u reason=%s VS=%016llX PS=%016llX H=%u unique=%u dsv=%u count=%u ready=%u bucket=%u shape=%u phase=%u record-camera=%u color=%u extent=%u frozen-camera=%u receipts=%u/%u",
+        (unsigned long long)s.prefix.frame,s.untrustedQualificationCalled?1u:0u,
+        s.untrustedQualificationCalled?s.untrustedLastQualification.c_str():"not-called",
+        (unsigned long long)q.vs,(unsigned long long)q.ps,q.hIdentity?1u:0u,
+        q.uniqueAlternate?1u:0u,q.dsvMatch?1u:0u,q.countPresent?1u:0u,
+        q.ready?1u:0u,q.bucketValid?1u:0u,q.cameraShape?1u:0u,q.phasePair?1u:0u,
+        q.recordCameraPresent?1u:0u,q.recordColor?1u:0u,q.recordExtent?1u:0u,
+        q.frozenCamera?1u:0u,q.matching,q.expected);
+    char recordRows[24*9+1]{};
+    if(q.recordCameraPresent)hexWords(q.recordCamera,24,recordRows,sizeof(recordRows));
+    Log::get().note("flat untrusted H record rows: frame=%llu present=%u first-q=%u last-q=%u rows270-275=%s",
+        (unsigned long long)s.prefix.frame,q.recordCameraPresent?1u:0u,q.first,q.last,
+        q.recordCameraPresent?recordRows:"unavailable");
+    if(firstGap)Log::get().note("flat untrusted H first unaccounted: frame=%llu q=%u VS=%016llX PS=%016llX color=%p depth=%p dsv=%p camera=%016llX has-camera=%u write=%llu/%u observed=%u completed=%u",
+        (unsigned long long)s.prefix.frame,firstGap->firstSeq,
+        (unsigned long long)firstGap->vs,(unsigned long long)firstGap->ps,
+        firstGap->color,firstGap->depth,firstGap->dsv,
+        (unsigned long long)firstGap->cameraHash,firstGap->hasCamera?1u:0u,
+        (unsigned long long)firstGap->writeEpoch,firstGap->writeSeq,
+        firstGap->draws,firstGapCompleted);
 }
 static void hdrSelectAtTrigger(State& s) {
     const bool witnessEligible=overlayOpen(s) && s.overlay.markedDraws()!=0;
@@ -2237,6 +2382,7 @@ static void hdrSelectAtTrigger(State& s) {
         }
     }
     if(s.untrustedUnknown && sel.selected())sel.reason=FlatMonoReason::AmbiguousSource;
+    reportUntrustedAtH(s,sel);
     s.hdrSelected=sel;
     s.untrusted.consumer();
     untrustedCoverageActive.store(false,std::memory_order_release);
@@ -2349,7 +2495,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.untrusted.pollMask(s.context.Get());
     if(frame && frame%300==0 &&
        (s.untrustedAccepted || s.untrustedRefused || s.untrustedTreated || s.untrustedWorldExcluded)) {
-        Log::get().note("flat untrusted camera coverage summary: frame=%llu selected=%llu capture-refused=%llu world-excluded=%llu actually-treated=%llu configured=%s effective-last=%s last-draws=%u last-ready=%u last-unknown=%u nominee-witnesses=%u nominee-dropped=%u unclassified-witnesses=%u unclassified-dropped=%u last-selector=%s last-failure=%s",
+        Log::get().note("flat untrusted camera coverage summary: frame=%llu selected=%llu capture-refused=%llu world-excluded=%llu actually-treated=%llu configured=%s effective-last=%s last-draws=%u last-ready=%u last-unknown=%u nominee-witnesses=%u nominee-dropped=%u unclassified-witnesses=%u unclassified-dropped=%u last-selector=%s last-failure=%s audit-emitted=%u audit-dropped=%u supported-first=%u supported-second=%u last-qualification=%s",
             (unsigned long long)frame,(unsigned long long)s.untrustedAccepted,
             (unsigned long long)s.untrustedRefused,(unsigned long long)s.untrustedWorldExcluded,
             (unsigned long long)s.untrustedTreated,
@@ -2359,7 +2505,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.untrustedNomineeDiagnosticsUsed,s.untrustedNomineeDiagnosticsDropped,
             s.unclassifiedConsumerDiagnosticsUsed,s.unclassifiedConsumerDiagnosticsDropped,
             flatMonoReasonName(s.hdrSelected.reason),
-            s.untrusted.failure()?s.untrusted.failure():"none");
+             s.untrusted.failure()?s.untrusted.failure():"none",
+             s.untrustedDiagnosticBudget.emitted(),s.untrustedDiagnosticBudget.dropped(),
+             s.untrustedDiagnosticBudget.firstSupported()?1u:0u,
+             s.untrustedDiagnosticBudget.secondSupported()?1u:0u,
+             s.untrustedLastQualification.c_str());
         s.untrustedAccepted=s.untrustedRefused=s.untrustedTreated=s.untrustedWorldExcluded=0;
     }
     if (drawIngressAudit.active.load(std::memory_order_acquire) &&
@@ -2683,6 +2833,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.untrusted.beginFrame(frame + 1);
     s.untrustedUnknown=false;
     s.untrustedSupportedAlternate=false;
+    s.untrustedQualification={};s.untrustedQualificationCalled=false;
+    s.untrustedQualificationFailed=false;
     s.unclassifiedPoolUsed=0;s.unclassifiedPoolOverflow=false;
     untrustedCoverageActive.store(false,std::memory_order_release);
     overlaySuffixActive.store(false,std::memory_order_release);
@@ -3637,11 +3789,19 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // its PS, blend and render-target binding.
             flatRuntimeSubstitution(context,FlatSubstEvent::kOtherDraw);
         }
+        FlatUntrustedDrawDiagnostic nomineeDiagnostic{};
+        nomineeDiagnostic.cameraHash=k.cameraHash;
+        nomineeDiagnostic.writeEpoch=k.writeEpoch;
+        nomineeDiagnostic.writeSeq=k.writeSeq;
+        nomineeDiagnostic.current=current;
+        nomineeDiagnostic.viewport=fullViewport;
         untrustedPlanned=s.untrusted.plan(s.prefix.frame,s.prefix.sequence,
             static_cast<ID3D11Texture2D*>(const_cast<void*>(k.color)),
             static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),
             static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv)),
-            k.vs,k.ps,d.camera,alternate.admissible());
+            k.vs,k.ps,d.camera,alternate.admissible(),&nomineeDiagnostic);
+        if(!untrustedPlanned)s.untrusted.diagnosePlanShader(context,s.prefix.sequence,
+            [](void* shader) { return lookupShaderHash(shader); });
         if(untrustedPlanned)untrustedCoverageActive.store(true,std::memory_order_release);
         // Diagnostic only. Keep the first distinct shader/outcome signatures
         // across frames and reserve one line for a good draw blocked by an
@@ -4361,7 +4521,8 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
 void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
     if(!ctx)return;
     if(untrustedPlanned) {
-        untrustedStarted=state().untrusted.beginDraw(ctx,state().prefix.frame);
+        untrustedStarted=state().untrusted.beginDraw(ctx,state().prefix.frame,
+            [](void* shader) { return lookupShaderHash(shader); });
     }
     if(foregroundPlanned) foregroundStarted=state().foreground.beginDraw(ctx,state().prefix.frame);
     if(overlayPlanned) {

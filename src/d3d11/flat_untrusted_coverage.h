@@ -80,6 +80,66 @@ inline FlatUntrustedObservedCamera* flatUntrustedObserveCamera(
     return &entry;
 }
 
+struct FlatUntrustedDrawDiagnostic {
+    uint64_t frame=0, vs=0, ps=0, cameraHash=0, writeEpoch=0, actualPs=0;
+    uint32_t sequence=0, writeSeq=0, pending=0, completed=0;
+    const void* color=nullptr, *depth=nullptr, *dsv=nullptr, *actualPsObject=nullptr;
+    bool current=false, viewport=false, actualPsRead=false;
+    const char* stage="none";
+    std::string reason;
+};
+
+struct FlatUntrustedBucketDiagnostic {
+    bool used=false, world=false, alternate=false, unrelatedDepth=false;
+    bool dsvMatch=false, ready=false, cameraShape=false, phasePair=false;
+    uint32_t pending=0, completed=0;
+    uint64_t cameraHash=0;
+    const void* color=nullptr, *depth=nullptr, *dsv=nullptr;
+    unsigned char camera[kFlatCameraBytes]{};
+    FlatUntrustedDrawDiagnostic firstFailure{};
+};
+
+struct FlatUntrustedQualification {
+    const char* reason="not-checked";
+    bool hIdentity=false, uniqueAlternate=false, dsvMatch=false;
+    bool countPresent=false, ready=false, bucketValid=false;
+    bool cameraShape=false, phasePair=false, recordCameraPresent=false;
+    bool recordColor=false, recordExtent=false, frozenCamera=false;
+    uint32_t expected=0, matching=0, first=0, last=0;
+    uint64_t vs=0, ps=0;
+    unsigned char recordCamera[kFlatCameraBytes]{};
+};
+
+class FlatUntrustedDiagnosticBudget {
+    struct Signature { std::string stage,reason; } ordinary_[6];
+    uint32_t ordinaryUsed_=0, emitted_=0, dropped_=0;
+    uint64_t firstSupported_=0;
+    bool secondSupported_=false;
+public:
+    bool take(uint64_t frame,bool supportedAlternateRefusal,
+              const char* stage,const char* reason) {
+        if(supportedAlternateRefusal) {
+            if(!firstSupported_) {firstSupported_=frame;++emitted_;return true;}
+            if(!secondSupported_ && frame>=firstSupported_+60) {
+                secondSupported_=true;++emitted_;return true;
+            }
+            ++dropped_;return false;
+        }
+        if(!reason || !*reason)return false;
+        for(uint32_t i=0;i<ordinaryUsed_;++i)
+            if(ordinary_[i].stage==(stage?stage:"") && ordinary_[i].reason==reason) {
+                ++dropped_;return false;
+            }
+        if(ordinaryUsed_==6) {++dropped_;return false;}
+        ordinary_[ordinaryUsed_++]={stage?stage:"",reason};
+        ++emitted_;return true;
+    }
+    uint32_t emitted() const {return emitted_;}
+    uint32_t dropped() const {return dropped_;}
+    bool firstSupported() const {return firstSupported_!=0;}
+    bool secondSupported() const {return secondSupported_;}
+};
+
 class FlatUntrustedCoverage {
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
     static constexpr uint32_t kBuckets = 2;
@@ -97,13 +157,14 @@ class FlatUntrustedCoverage {
         unsigned char camera[kFlatCameraBytes]{};
         uint32_t width = 0, height = 0, count = 0;
         std::string failure;
+        FlatUntrustedDrawDiagnostic nominee{}, firstFailure{};
         void reset() {
             layer.reset(); color.Reset(); depth.Reset(); dsv.Reset();
-            width=height=count=0; failure.clear();
+            width=height=count=0; failure.clear();nominee={};firstFailure={};
         }
         void beginFrame(uint64_t frame) {
             layer.beginFrame(frame); color.Reset(); depth.Reset(); dsv.Reset();
-            width=height=count=0; failure.clear();
+            width=height=count=0; failure.clear();nominee={};firstFailure={};
         }
     } buckets_[kBuckets];
     uint64_t frame_ = 0;
@@ -127,9 +188,26 @@ class FlatUntrustedCoverage {
         sample.stage.Reset();sample.reported=true;
     }
 
-    void bucketFailure(uint32_t index,const char* reason) {
-        if(index<used_ && buckets_[index].failure.empty())
-            buckets_[index].failure=reason?reason:"untrusted-bucket-invalid";
+    void recordFirstFailure(uint32_t index,const char* stage,const char* reason,
+                            uint64_t actualPs=0,const void* actualPsObject=nullptr,
+                            bool actualPsRead=false) {
+        if(index>=used_ || !buckets_[index].firstFailure.reason.empty())return;
+        auto& b=buckets_[index];
+        b.firstFailure=b.nominee;
+        b.firstFailure.stage=stage?stage:"unknown";
+        b.firstFailure.reason=reason?reason:"untrusted-bucket-invalid";
+        b.firstFailure.pending=b.count;
+        for(uint32_t i=0;i<b.count;++i)if(b.draws[i].completed)++b.firstFailure.completed;
+        b.firstFailure.actualPs=actualPs;
+        b.firstFailure.actualPsObject=actualPsObject;
+        b.firstFailure.actualPsRead=actualPsRead;
+    }
+    void bucketFailure(uint32_t index,const char* stage,const char* reason,
+                       uint64_t actualPs=0,const void* actualPsObject=nullptr,
+                       bool actualPsRead=false) {
+        if(index>=used_ || !buckets_[index].failure.empty())return;
+        recordFirstFailure(index,stage,reason,actualPs,actualPsObject,actualPsRead);
+        buckets_[index].failure=reason?reason:"untrusted-bucket-invalid";
     }
     // Called only after H's authoritative camera exists. A failed world bucket
     // is immaterial, but two different non-world buckets cannot share one SRV.
@@ -199,7 +277,7 @@ public:
         if(!resource) {invalidate("untrusted-source-unknown-mutation");return;}
         for(uint32_t i=0;i<used_;++i)
             if(resource==buckets_[i].depth.Get() || resource==buckets_[i].color.Get())
-                bucketFailure(i,"untrusted-source-explicit-mutation");
+                bucketFailure(i,"mutation","untrusted-source-explicit-mutation");
     }
     void consumer() { consumerSeen_=true; }
     bool active() const { return used_!=0; }
@@ -209,8 +287,9 @@ public:
         return false;
     }
     bool plan(uint64_t frame,uint32_t sequence,ID3D11Texture2D* color,
-              ID3D11Texture2D* depth,ID3D11DepthStencilView* dsv,
-              uint64_t vs,uint64_t ps,const unsigned char* camera,bool admissible=true) {
+               ID3D11Texture2D* depth,ID3D11DepthStencilView* dsv,
+               uint64_t vs,uint64_t ps,const unsigned char* camera,bool admissible=true,
+               const FlatUntrustedDrawDiagnostic* diagnostic=nullptr) {
         planned_=kBuckets;
         if(frame!=frame_ || consumerSeen_ || !color || !depth || !dsv || !camera ||
            !sequence || !globalFailure_.empty()) {
@@ -222,36 +301,69 @@ public:
             if(b.color.Get()==color && b.depth.Get()==depth && b.dsv.Get()==dsv &&
                std::memcmp(b.camera,camera,kFlatCameraBytes)==0)break;
         }
-        if(index==used_) {
+        const bool created=index==used_;
+        if(created) {
             if(used_==kBuckets) {invalidate("untrusted-camera-bucket-cap");return false;}
             Bucket& b=buckets_[used_++];
             b.color=color;b.depth=depth;b.dsv=dsv;
             std::memcpy(b.camera,camera,sizeof(b.camera));
+        }
+        Bucket& b=buckets_[index];
+        b.nominee=diagnostic?*diagnostic:FlatUntrustedDrawDiagnostic{};
+        b.nominee.frame=frame;b.nominee.sequence=sequence;
+        b.nominee.vs=vs;b.nominee.ps=ps;
+        b.nominee.color=color;b.nominee.depth=depth;b.nominee.dsv=dsv;
+        if(created) {
             D3D11_TEXTURE2D_DESC cd{},dd{};color->GetDesc(&cd);depth->GetDesc(&dd);
             b.width=cd.Width;b.height=cd.Height;
             if(!cd.Width || !cd.Height || cd.Width!=dd.Width || cd.Height!=dd.Height ||
-               cd.SampleDesc.Count!=1 || dd.SampleDesc.Count!=1 ||
-               uint64_t(cd.Width)*cd.Height>128ull*1024*1024)
-                bucketFailure(index,"untrusted-source-shape");
+                cd.SampleDesc.Count!=1 || dd.SampleDesc.Count!=1 ||
+                uint64_t(cd.Width)*cd.Height>128ull*1024*1024)
+                bucketFailure(index,"plan","untrusted-source-shape");
         }
-        Bucket& b=buckets_[index];
-        if(!vs || !ps)bucketFailure(index,"untrusted-source-shader-identity");
-        if(!admissible)bucketFailure(index,"untrusted-alternate-unqualified");
-        if(b.count>=kMaxDraws)bucketFailure(index,"untrusted-bucket-draw-cap");
+        if(!vs || !ps)bucketFailure(index,"plan","untrusted-source-shader-identity");
+        if(!admissible)bucketFailure(index,"plan","untrusted-alternate-unqualified");
+        if(b.count>=kMaxDraws)bucketFailure(index,"plan","untrusted-bucket-draw-cap");
         if(!b.failure.empty())return false;
         Draw& draw=b.draws[b.count++];draw={};
         draw.vs=vs;draw.ps=ps;draw.sequence=sequence;
         planned_=index;
         return true;
     }
-    bool beginDraw(ID3D11DeviceContext* ctx,uint64_t frame) {
+    void diagnosePlanShader(ID3D11DeviceContext* ctx,uint32_t sequence,
+                            uint64_t (*shaderHash)(void*)) {
+        if(!ctx || !shaderHash)return;
+        for(uint32_t i=0;i<used_;++i) {
+            auto& failure=buckets_[i].firstFailure;
+            if(failure.sequence!=sequence || failure.actualPsRead ||
+               std::strcmp(failure.stage,"plan")!=0 ||
+               failure.reason!="untrusted-source-shader-identity")continue;
+            Ptr<ID3D11PixelShader> actual;
+            {FlatComputeInternalScope internal;ctx->PSGetShader(&actual,nullptr,nullptr);}
+            failure.actualPsObject=actual.Get();
+            failure.actualPs=shaderHash(actual.Get());
+            failure.actualPsRead=true;
+            return;
+        }
+    }
+    bool beginDraw(ID3D11DeviceContext* ctx,uint64_t frame,
+                   uint64_t (*shaderHash)(void*)=nullptr) {
         if(!ctx || frame!=frame_ || planned_>=used_ || open_!=kBuckets ||
-           !globalFailure_.empty())return false;
+           !globalFailure_.empty()) {
+            if(planned_<used_)recordFirstFailure(planned_,"begin","untrusted-begin-precondition");
+            return false;
+        }
         Bucket& b=buckets_[planned_];
         if(!b.failure.empty())return false;
         const char* reason=nullptr;
         if(!b.layer.beginDraw(ctx,frame,b.color.Get(),b.dsv.Get(),&reason,true,true,true)) {
-            bucketFailure(planned_,reason?reason:"untrusted-private-MRT-refused");return false;
+            Ptr<ID3D11PixelShader> originalPs;
+            // Every failure inside beginDraw occurs before replacement or after
+            // its restore, so this failure-only read sees the original binding.
+            {FlatComputeInternalScope internal;ctx->PSGetShader(&originalPs,nullptr,nullptr);}
+            bucketFailure(planned_,"begin",reason?reason:"untrusted-private-MRT-refused",
+                shaderHash?shaderHash(originalPs.Get()):0,originalPs.Get(),true);
+            return false;
         }
         open_=planned_;planned_=kBuckets;
         return true;
@@ -261,28 +373,98 @@ public:
         Bucket& b=buckets_[open_];
         b.layer.endDraw(ctx);
         if(completed && ctx && !b.layer.refusal())b.draws[b.count-1].completed=true;
-        else bucketFailure(open_,"untrusted-draw-incomplete");
+        else bucketFailure(open_,"end",b.layer.refusal()?b.layer.refusal():"untrusted-draw-incomplete");
         open_=kBuckets;
     }
     void abandon() {
-        if(planned_<used_)bucketFailure(planned_,"untrusted-draw-scope-incomplete");
+        if(planned_<used_)bucketFailure(planned_,"abandon","untrusted-draw-scope-incomplete");
         planned_=kBuckets;
     }
+    FlatUntrustedBucketDiagnostic diagnoseBucket(uint32_t index,const void* hDepth,
+        const void* hDsv,const unsigned char* hCamera,float phaseX,float phaseY) const {
+        FlatUntrustedBucketDiagnostic out{};
+        if(index>=used_)return out;
+        const Bucket& b=buckets_[index];
+        out.used=true;out.color=b.color.Get();out.depth=b.depth.Get();out.dsv=b.dsv.Get();
+        std::memcpy(out.camera,b.camera,kFlatCameraBytes);
+        out.cameraHash=b.nominee.cameraHash;out.pending=b.count;
+        for(uint32_t i=0;i<b.count;++i)if(b.draws[i].completed)++out.completed;
+        out.unrelatedDepth=!hDepth || b.depth.Get()!=hDepth;
+        out.world=!out.unrelatedDepth && hCamera &&
+            std::memcmp(b.camera,hCamera,kFlatCameraBytes)==0;
+        out.alternate=!out.unrelatedDepth && hCamera && !out.world;
+        out.dsvMatch=hDsv && b.dsv.Get()==hDsv;
+        out.ready=b.layer.coverageReady(frame_,b.color.Get());
+        float world[6][4]{},alternate[6][4]{};
+        out.cameraShape=hCamera && flat_mono_detail::cameraShape(hCamera,world) &&
+            flat_mono_detail::cameraShape(b.camera,alternate);
+        out.phasePair=out.cameraShape && flatCameraCenteredPairAtPhase(
+            world,alternate,phaseX,phaseY,b.width,b.height);
+        out.firstFailure=b.firstFailure;
+        return out;
+    }
+    uint32_t bucketCount() const {return used_;}
+    const char* globalFailure() const {return globalFailure_.empty()?nullptr:globalFailure_.c_str();}
     bool qualifies(const FlatContractRecord& record,const unsigned char* worldBytes,
-                   float phaseX,float phaseY) const {
+                    float phaseX,float phaseY,FlatUntrustedQualification* diagnostic=nullptr) const {
         const auto& k=record.key;
+        if(diagnostic) {
+            *diagnostic={};
+            diagnostic->hIdentity=worldBytes && k.depth && k.dsv;
+            diagnostic->recordCameraPresent=k.camera!=nullptr;
+            diagnostic->expected=record.draws;
+            diagnostic->vs=k.vs;diagnostic->ps=k.ps;
+            diagnostic->first=record.first;diagnostic->last=record.last;
+            if(k.camera)std::memcpy(diagnostic->recordCamera,record.camera,kFlatCameraBytes);
+            uint32_t candidate=kBuckets,found=0;
+            for(uint32_t i=0;i<used_;++i)if(buckets_[i].depth.Get()==k.depth &&
+                worldBytes && std::memcmp(buckets_[i].camera,worldBytes,kFlatCameraBytes)!=0) {
+                candidate=i;++found;
+            }
+            diagnostic->uniqueAlternate=found==1;
+            if(found==1) {
+                const Bucket& b=buckets_[candidate];
+                diagnostic->dsvMatch=b.dsv.Get()==k.dsv;
+                diagnostic->countPresent=b.count!=0;
+                diagnostic->ready=b.layer.coverageReady(frame_,b.color.Get());
+                diagnostic->bucketValid=b.failure.empty();
+                diagnostic->recordColor=b.color.Get()==k.color;
+                diagnostic->recordExtent=b.width==k.width && b.height==k.height;
+                diagnostic->frozenCamera=k.camera &&
+                    std::memcmp(b.camera,record.camera,kFlatCameraBytes)==0;
+                float world[6][4]{},alternate[6][4]{};
+                diagnostic->cameraShape=flat_mono_detail::cameraShape(worldBytes,world) &&
+                    flat_mono_detail::cameraShape(b.camera,alternate);
+                diagnostic->phasePair=diagnostic->cameraShape &&
+                    flatCameraCenteredPairAtPhase(world,alternate,phaseX,phaseY,b.width,b.height);
+                for(uint32_t i=0;i<b.count;++i) {
+                    const Draw& draw=b.draws[i];
+                    if(draw.sequence>=record.first && draw.sequence<=record.last &&
+                       draw.vs==k.vs && draw.ps==k.ps)++diagnostic->matching;
+                }
+            }
+        }
         const char* reason=nullptr;
         const uint32_t index=alternateBucket(k.depth,k.dsv,worldBytes,phaseX,phaseY,&reason);
-        if(index==kBuckets || !k.camera)return false;
+        if(index==kBuckets || !k.camera) {
+            if(diagnostic)diagnostic->reason=reason?reason:
+                (!k.camera?"record-camera-missing":"no-alternate-bucket");
+            return false;
+        }
         const Bucket& b=buckets_[index];
         if(b.color.Get()!=k.color || b.width!=k.width || b.height!=k.height ||
-           std::memcmp(b.camera,record.camera,kFlatCameraBytes)!=0)return false;
+            std::memcmp(b.camera,record.camera,kFlatCameraBytes)!=0) {
+            if(diagnostic)diagnostic->reason="record-color-extent-or-frozen-camera";
+            return false;
+        }
         uint32_t matching=0;
         for(uint32_t i=0;i<b.count;++i) {
             const Draw& draw=b.draws[i];
             if(draw.sequence>=record.first && draw.sequence<=record.last &&
                draw.vs==k.vs && draw.ps==k.ps)++matching;
         }
+        if(diagnostic)diagnostic->reason=matching==record.draws?
+            "qualified":"record-draw-receipts";
         return matching==record.draws;
     }
     // The runtime compares these original-game-draw receipts with every
