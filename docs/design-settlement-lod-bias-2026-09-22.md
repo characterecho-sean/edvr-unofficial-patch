@@ -8,33 +8,23 @@ flown once, refined, shipped as the default). Capture: eye run 165433
 
 ## Status
 
-- **Nomad / vehicle cockpit gate fix (2026-10-02):** `lod_governor`'s cockpit
-  gate now covers fighters/SLVs (Status Flags bit 25 `InFighter`, including the
-  Nomad), SRVs (bit 26 `InSRV`), and taxis (Flags2 bit 1 `InTaxi`) in addition to
-  `OnFoot` (Flags2 bit 0). Previously, leaving foot and boarding the Nomad
-  resumed the governor and restored k to k_max (6.00), culling the player's
-  mothership on the pad. k is now held at 1 while in any external vehicle.
-- **Default OFF (2026-09-24, Sean):** the shipped and compiled default is now
-  `game` (the game's own detail, nothing observed or changed); `auto` and
-  `reduced` are opt-in. Everything below about `auto` still holds when chosen.
-- **State (2026-09-23):** `fix.settlement_detail` SHIPS as a fix, default
-  `auto` (live in edvr.ini, F8 Performance page), k_max 6.0 (1..8), cockpit
-  only (k = 1 on foot). Refinement 4b and the review's fixes (section 9 part
-  (6)) FLEW at 07:15 (6d34ffd5): a decision a second on cycles with FRESH
-  timing; misses classed GPU-bound / unexplained / the CPU's; up while a
-  tenth are the CPU's (0.25 at a quarter or > 1 ms over); a kick after 10 s,
-  a trial (07:15: failed, 3.15 restored); down trials undone within 10 s;
-  back aboard the k from before (07:15: 3.90). Since, NOT FLOWN: a step's
-  benefit judged only on a stable scene, on the parts tested and passed and
-  the caller work; the ceiling's outcome against the k = 1 baseline of the
-  same view, both ends printed. Flight list and review pointer: see Status
-  detail below.
+- **Entity culling exemption (Ships, NPCs, Mobs) (2026-10-04):** Settlement detail
+  culling exclusively targets environment objects. Ships, NPCs, and Mobs are
+  exempt regardless of distance or culling state (`isEntityExemptFromCulling`,
+  `isObjectEligibleForCulling`). In acting mode, `lodGovernorPartObserver` restores
+  the pass verdict at unscaled $s_{\text{game}}$ for any exempt entity rejected at $s \cdot k$.
+- **Nomad / vehicle cockpit gate fix (2026-10-02):** Cockpit gate covers fighters/SLVs
+  (bit 25 `InFighter`), SRVs (bit 26 `InSRV`), and taxis (Flags2 bit 1 `InTaxi`) beside
+  `OnFoot` (Flags2 bit 0), holding $k = 1$ outside the mothership.
+- **Default OFF (2026-09-24, Sean):** Shipped default is `game` (game detail, inert);
+  `auto` and `reduced` are opt-in.
+- **State (2026-09-23):** `fix.settlement_detail` SHIPS as fix, default `auto`, k_max 6.0
+  (1..8), cockpit only ($k = 1$ on foot/in vehicles). 07:15 flight (6d34ffd5) verified
+  fresh-timing 1 Hz decisions, kick/trial down, and aboard restoration.
 - **Site and mechanism** (decomp_42B3FC0 + .rdata): FUN_1442B3FC0 passes a
-  part in a view iff (1) screen size `0.5*(A*d + B) <= r` -- A = view
-  +0x550 = 1/fy (0.000834297 here), B = +0x560 = 0 for the eyes; (2) the
-  frustum (FUN_1404F4E10); (3) `f = A*(d - r)*s + B <= t0`, s = ctx+0x30,
-  t0 the first float of the part's 0x80-byte LOD table. The LOD nibble is
-  the first i with f <= t[i+1].
+  part in a view iff (1) screen size `0.5*(A*d + B) <= r`; (2) frustum
+  (FUN_1404F4E10); (3) `f = A*(d - r)*s + B <= t0`, s = ctx+0x30.
+  The LOD nibble is the first i with f <= t[i+1].
 - **Reproduction:** (1)+(2) exact over all 109,291 rows; 8,355 engine
   rejects pass both: class (3), the unrecorded table. One monotone table
   per model fits (3,511 models, 0 conflicts); no global one does.
@@ -1066,4 +1056,43 @@ bringing the ship back into view.
    - Docking the Nomad back into the mothership clears the hold and restores
      the pre-hold `k` aboard in one step.
    - Log transitions cleanly between on-foot, vehicle, and cockpit states.
+
+## 11. Entity culling exemption: Ships, NPCs, and Mobs (2026-10-04)
+
+### Problem specification & root cause
+The settlement detail culling implementation (`fix.settlement_detail`) adjusts
+the render context's global LOD distance scale `ctx+0x30` (`s`) by factor `k`
+(up to 6.00x). In Frontier's Odyssey engine, the part test `FUN_1442B3FC0` and
+record test `FUN_144308B30` evaluate apparent distance as $f = A \cdot (d - r) \cdot s + B \le t_0$.
+When `s` was scaled across the context, all objects evaluated under that context
+were treated as culling candidates without filtering exclusively for environment
+details. As a result, when a player operated an external vessel (SRV, Nomad,
+Scorpion, Rhino) or moved away from their parked ship near a settlement, the
+ship's apparent distance $(d - r) \cdot s$ exceeded the model's LOD cutoff $t_0$,
+causing the player's ship (as well as NPCs and mobs) to be culled from view.
+
+### Architectural patch
+1. `src/d3d11/lod_governor.h`:
+   - Added `EntityKind` classification (`Environment`, `Ship`, `Npc`, `Mob`).
+   - Implemented `isEntityExemptFromCulling(EntityKind kind)` ensuring Ships, NPCs,
+     and Mobs are unconditionally exempt from culling.
+   - Implemented `isObjectEligibleForCulling(EntityKind kind, float distance, float radius)`:
+     exclusively targets environment objects; non-environment entities return false
+     regardless of distance or culling state.
+   - Implemented `classifyEntity(float radius, float tableT0)` to discriminate large
+     ship structures ($r \ge 12.0\text{m}$) and non-environment actors from settlement clutter.
+   - Updated `shadowPart` to bypass culling drop logic for exempt entities.
+2. `src/d3d11/lod_governor.cpp`:
+   - In `shadowRecord`: Integrated `isObjectEligibleForCulling` check, preventing
+     records of exempt entities from being marked as wouldFail / dropped.
+   - In `lodGovernorPartObserver`: When acting at $k > 1.0$ and a part test evaluates
+     an exempt entity that was rejected under magnified $s \cdot k$, the observer evaluates
+     the part against the unscaled game scale $s_{\text{game}}$. If it passes at normal
+     distance, the observer writes `passed = 1` and the unscaled LOD index back into
+     the builder's output struct (`out`), preventing the engine from culling the ship,
+     NPC, or mob.
+3. `tools/lod_governor_test/lod_governor_test.cpp`:
+   - Added comprehensive test assertions for `isEntityExemptFromCulling` and `isObjectEligibleForCulling`.
+   - Verified that an exempt ship part rejected at magnified scale $s \cdot k$ is correctly
+     restored to `passed = 1` in `lodGovernorPartObserver`.
 

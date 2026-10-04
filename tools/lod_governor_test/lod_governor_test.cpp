@@ -1136,6 +1136,28 @@ void caseObservers() {
     mark();
     lodGovernorPartObserver(reinterpret_cast<uintptr_t>(hole), f.outAt(), f.view[0], true);
     check(delta(cPartFaults) == 1 && delta(cParts) == 1, "part: a wild block is a fault, not a crash");
+    // Entity culling exemption checks: Ships, NPCs, and Mobs must NEVER be culled under any circumstances.
+    check(lodgov::isEntityExemptFromCulling(lodgov::EntityKind::Ship), "entity: Ship is exempt from culling");
+    check(lodgov::isEntityExemptFromCulling(lodgov::EntityKind::Npc), "entity: NPC is exempt from culling");
+    check(lodgov::isEntityExemptFromCulling(lodgov::EntityKind::Mob), "entity: Mob is exempt from culling");
+    check(!lodgov::isEntityExemptFromCulling(lodgov::EntityKind::Environment), "entity: Environment is not exempt");
+    check(!lodgov::isObjectEligibleForCulling(lodgov::EntityKind::Ship, 100.0f, 25.0f),
+          "eligibility: Ship is not eligible for culling regardless of distance");
+    check(!lodgov::isObjectEligibleForCulling(lodgov::EntityKind::Npc, 50.0f, 1.0f),
+          "eligibility: NPC is not eligible for culling regardless of distance");
+    check(!lodgov::isObjectEligibleForCulling(lodgov::EntityKind::Mob, 80.0f, 3.0f),
+          "eligibility: Mob is not eligible for culling regardless of distance");
+    check(lodgov::isObjectEligibleForCulling(lodgov::EntityKind::Environment, 100.0f, 1.0f),
+          "eligibility: Environment objects are eligible for culling");
+    // When a Ship's part is rejected by scaled LOD during acting, the observer restores pass = 1.
+    put(f.sphere, 0, 20.0f);   // Ship radius (>= 12.0m)
+    f.setOut(0, 0);            // Engine rejected at scaled s
+    mark();
+    lodGovernorPartObserver(f.items(), f.outAt(), f.view[0], true);
+    uint8_t restoredPass = 0;
+    std::memcpy(&restoredPass, reinterpret_cast<const void*>(f.outAt() + 4), 1);
+    check(restoredPass == 1, "part: exempt Ship part rejected at scaled s is restored to pass = 1 at sGame");
+    put(f.sphere, 0, 1.0f);    // Restore environment radius
     // The record test.
     setK(1.0f);
     mark();

@@ -975,6 +975,11 @@ bool shadowRecord(uintptr_t ctx, uintptr_t nibbles, uint32_t eyes, float k, Reco
             o->tableRange = true;
             return true;
         }
+        const lodgov::EntityKind entityKind = lodgov::classifyEntity(radius, table.t[0]);
+        if (!lodgov::isObjectEligibleForCulling(entityKind, 0.0f, radius)) {
+            // Ships, NPCs, and Mobs are explicitly exempt from culling regardless of distance or culling state.
+            return true;
+        }
         const uint32_t eyeBit[2] = {eyes & 0xFFu, (eyes >> 8) & 0xFFu};
         uint64_t eyeMask = 0;
         for (uint32_t e = 0; e < 2; ++e)
@@ -2320,6 +2325,24 @@ void lodGovernorPartObserver(uintptr_t items, uintptr_t out, uintptr_t view, boo
     in.sGame = gameScaleFor(ctx, in.s);
     const uint32_t base = cPartBase + classOf(in.bit) * kPartFields;
     bump(s, base + pSeen);
+    const lodgov::EntityKind entityKind = lodgov::classifyEntity(in.sphere[0], in.table.t[0]);
+    const bool isExempt = lodgov::isEntityExemptFromCulling(entityKind);
+    if (!in.enginePass && isExempt) {
+        // Ships, NPCs, and Mobs are explicitly exempt from culling regardless of distance or culling state.
+        // If the part would pass at the normal unscaled game scale (sGame), restore the pass verdict.
+        const float d = lodgov::engineDistance(in.centre, in.cam);
+        uint32_t gameLod = 0;
+        if (lodgov::screenSizePasses(in.A, d, in.B, in.sphere[0]) &&
+            lodgov::lodPick(in.table, lodgov::lodDistance(in.A, d, in.sphere[0], in.sGame, in.B), &gameLod)) {
+            __try {
+                *reinterpret_cast<uint32_t*>(out) = gameLod;
+                *reinterpret_cast<uint8_t*>(out + 4) = 1;
+                in.enginePass = true;
+                in.engineLod = gameLod;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+    }
     if (in.enginePass) bump(s, base + pPassed);
     const lodgov::PartOutcome o = lodgov::shadowPart(in, currentK());
     if (o.acting) bump(s, base + pActing);
