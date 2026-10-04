@@ -2,8 +2,9 @@
 
 ## Status
 
-- **State:** `v0.18.1-29-g40c3a1c7` installed and FLOWN. World naming confirmed;
-  probe spent both samples on loading draws. Evidence/corrections: 1-101.
+- **State:** world naming confirmed on `v0.18.1-29-g40c3a1c7` (101).
+  Epic `v0.18.1-31-g2b8f5475` installed; probe arming correction NOT FLOWN.
+  Probe29 spent both samples on loading draws. Evidence/corrections: 1-101.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -31,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 101: fix probe arming so already-named-world loading draws
-  cannot consume the early-cohort sample budget. No further flight requested
-  until that regression is checked. Keep AA refusal until qualified.
+- **Next:** section 101: Epic flat, same weapon drawn10s then holstered10s,
+  no F10. Verify `v0.18.1-31-g2b8f5475`, late-skipped and both ownership
+  reports. Keep AA refusal until foreground depth/motion/history is qualified.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10141,3 +10142,13 @@ Receipt inputs SHA256: `fa0ca37638bd2a74c94690811fa70627ed9e911e7f303059c317803e
 The first attempt stopped at the investigation's 62-line Status block, which
 was shortened; the full build was rerun successfully. Arming correction NOT
 FLOWN. No INI, DLSS, VR or AA admission change.
+
+Pushed code `2b8f5475` to main. Clean-tree receipt-guarded `--dll-only`
+promotion passed. Installed and verified Epic flat `v0.18.1-31-g2b8f5475`
+at 14:21 MDT; dry-run wrote nothing. Backup tag `flat-probe-arming-2b8f5475`,
+stamp `20261004-142144`. DLL ProductVersion verified; settings and DLSS
+hashes match the pre-install snapshot, no INI/DLSS install flags, no Frontier
+install. NOT FLOWN. Next repeat10s drawn/10s holstered, no F10; verify the
+literal installed version and check late-skipped plus both complete/partial
+ownership reports. AA switching off remains expected while admission is closed;
+this build repairs evidence collection, not the unresolved foreground path.
