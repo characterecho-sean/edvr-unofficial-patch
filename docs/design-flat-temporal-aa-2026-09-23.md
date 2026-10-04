@@ -3,8 +3,8 @@
 ## Status
 
 - **State:** v43 FLOWN: unsupported-only mixed AA treats; weapon still refuses.
-  Combined first-failure diagnostic validated and reviewed, NOT FLOWN; install
-  next. Section 102; Epic currently `v0.18.1-43-g8afc3e01`.
+  Combined first-failure diagnostic validated, reviewed and installed, NOT
+  FLOWN. Section 102; Epic `v0.18.1-45-g0f20f4e9`.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: install the combined bucket-failure/qualification
-  diagnostic, then one F10 with weapon drawn for 15s and holstered for 10s.
+- **Next:** section 102: restart Epic; draw weapon, press F10 once, wait 15s,
+  holster for 10s, then exit. Combined bucket/qualification diagnostic installed.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10724,3 +10724,12 @@ exit0, all gates passed; receipt `1be12b21ebe757920894f400e81bd7899c4c825617ea87
 Astra approved the final plan-failure PS snapshot and its regression, with
 no blocker or admission change. This receipt supersedes the first full gate;
 commit, clean DLL promotion and verified Epic flat install next.
+
+Diagnostic code `0f20f4e9` merged to main and pushed. Clean receipt-guarded
+promotion passed (`build/flat-first-failure-diagnostic-promotion.log`); Epic
+flat install and separate `--verify-only` passed. Installed ProductVersion
+`v0.18.1-45-g0f20f4e9`. SHA256 confirms live `edvr-flat.ini` and
+`nvngx_dlss.dll` unchanged. No Frontier install. NOT FLOWN; this build records
+the failure without changing AA admission. Restart Epic, draw the same weapon,
+press F10 once, wait 15s, holster for 10s, then exit. Read the next flight
+against this literal installed version after the documentation-only commit.
