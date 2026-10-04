@@ -3,8 +3,8 @@
 ## Status
 
 - **State:** v45 FLOWN: empty-output alpha PS B40B blocks weapon capture.
-  Generic correction reviewed and full-gate validated; install next, NOT FLOWN.
-  Section 102; Epic currently `v0.18.1-45-g0f20f4e9`.
+  Generic correction reviewed, full-gate validated and installed, NOT FLOWN.
+  Section 102; Epic `v0.18.1-47-gab74d281`.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: clean promotion and Epic install of the
-  empty-output PS correction, then drawn/holstered AA and coverage validation.
+- **Next:** section 102: restart Epic; weapon drawn 15s, holstered 10s; verify
+  world AA remains engaged. F10 if it still drops, then exit for log analysis.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10795,3 +10795,12 @@ Final full build passed all gates, exit0, source tree frozen:
 `build/flat-empty-output-full.log`; receipt
 `d7bad299440972c707bfc3dfcd8336091061369a32438424b4d84513ba63411f`.
 Commit, clean receipt-guarded promotion, main push and Epic flat install next.
+
+Fix code `ab74d281` merged to main and pushed. Clean DLL promotion passed,
+exit0 (`build/flat-empty-output-promotion.log`); sanctioned Epic flat install
+and separate verification passed. Installed version `v0.18.1-47-gab74d281`.
+Live flat INI and DLSS SHA256 match pre-install snapshots; Frontier untouched.
+NOT FLOWN. Restart Epic; hold the same weapon drawn for 15s, holster for 10s,
+then exit. If world AA still disengages, take F10 while drawn; otherwise the
+automatic capture/coverage and treatment counters suffice. Match the next
+flight to this literal installed version after the documentation-only commit.
