@@ -48,6 +48,38 @@ inline bool flatUntrustedProvenCameraIndependent(const FlatShaderPairClassificat
         pair.ps==FlatPsProjectionSafety::Clean;
 }
 
+struct FlatUntrustedObservedCamera {
+    const void* depth = nullptr;
+    const void* color = nullptr, *b1 = nullptr;
+    const void* dsv = nullptr;
+    uint64_t vs = 0, ps = 0, cameraHash = 0, writeEpoch = 0;
+    uint32_t firstSeq = 0, writeSeq = 0, width = 0, height = 0, draws = 0;
+    bool hasCamera = false;
+    unsigned char camera[kFlatCameraBytes]{};
+};
+
+// The same aggregation used by H's consumer is exercised by the WARP
+// regression. A missing camera is its own group and remains unaccountable.
+inline FlatUntrustedObservedCamera* flatUntrustedObserveCamera(
+    FlatUntrustedObservedCamera* entries,uint32_t capacity,uint32_t& used,
+    const void* depth,const unsigned char* camera,bool* inserted=nullptr) {
+    if(inserted)*inserted=false;
+    for(uint32_t i=0;i<used;++i) {
+        auto& prior=entries[i];
+        if(prior.depth==depth && prior.hasCamera==(camera!=nullptr) &&
+           (!camera || std::memcmp(prior.camera,camera,kFlatCameraBytes)==0)) {
+            ++prior.draws;
+            return &prior;
+        }
+    }
+    if(used==capacity)return nullptr;
+    auto& entry=entries[used++];
+    entry={};entry.depth=depth;entry.hasCamera=camera!=nullptr;entry.draws=1;
+    if(camera)std::memcpy(entry.camera,camera,kFlatCameraBytes);
+    if(inserted)*inserted=true;
+    return &entry;
+}
+
 class FlatUntrustedCoverage {
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
     static constexpr uint32_t kBuckets = 2;
@@ -181,7 +213,7 @@ public:
               uint64_t vs,uint64_t ps,const unsigned char* camera,bool admissible=true) {
         planned_=kBuckets;
         if(frame!=frame_ || consumerSeen_ || !color || !depth || !dsv || !camera ||
-           !sequence || !vs || !ps || !globalFailure_.empty()) {
+           !sequence || !globalFailure_.empty()) {
             invalidate("untrusted-source-identity");return false;
         }
         uint32_t index=0;
@@ -203,6 +235,7 @@ public:
                 bucketFailure(index,"untrusted-source-shape");
         }
         Bucket& b=buckets_[index];
+        if(!vs || !ps)bucketFailure(index,"untrusted-source-shader-identity");
         if(!admissible)bucketFailure(index,"untrusted-alternate-unqualified");
         if(b.count>=kMaxDraws)bucketFailure(index,"untrusted-bucket-draw-cap");
         if(!b.failure.empty())return false;
@@ -350,4 +383,13 @@ public:
         return count;
     }
 };
+
+inline bool flatUntrustedObservationAccounted(
+    const FlatUntrustedObservedCamera& observed,
+    const FlatUntrustedCoverage& capture,uint32_t* completed=nullptr) {
+    const uint32_t count=observed.hasCamera?
+        capture.completedDraws(observed.depth,observed.camera):0;
+    if(completed)*completed=count;
+    return observed.hasCamera && count==observed.draws;
+}
 } // namespace edvr

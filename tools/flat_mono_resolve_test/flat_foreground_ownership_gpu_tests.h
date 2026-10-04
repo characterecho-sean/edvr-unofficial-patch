@@ -30,21 +30,25 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
         "float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};"
         "return float4(p[id],.4,1);}","main","vs_5_0");
     const auto secondPsCode=compile("float4 main():SV_Target {return float4(1,0,0,0);}","main","ps_5_0");
-    if(!vsCode || !psCode || !csCode || !mergeCode || !secondVsCode || !secondPsCode)return failures;
+    const auto zeroOutputPsCode=compile("void main(){}","main","ps_5_0");
+    if(!vsCode || !psCode || !csCode || !mergeCode || !secondVsCode ||
+       !secondPsCode || !zeroOutputPsCode)return failures;
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11VertexShader> secondVs;
-    ComPtr<ID3D11PixelShader> ps,secondPs;
+    ComPtr<ID3D11PixelShader> ps,secondPs,zeroOutputPs;
     ComPtr<ID3D11ComputeShader> cs,mergeCs;
     check(SUCCEEDED(device->CreateVertexShader(vsCode->GetBufferPointer(),vsCode->GetBufferSize(),nullptr,&vs)) &&
           SUCCEEDED(device->CreatePixelShader(psCode->GetBufferPointer(),psCode->GetBufferSize(),nullptr,&ps)) &&
           SUCCEEDED(device->CreateComputeShader(csCode->GetBufferPointer(),csCode->GetBufferSize(),nullptr,&cs)) &&
           SUCCEEDED(device->CreateComputeShader(mergeCode->GetBufferPointer(),mergeCode->GetBufferSize(),nullptr,&mergeCs)) &&
           SUCCEEDED(device->CreateVertexShader(secondVsCode->GetBufferPointer(),secondVsCode->GetBufferSize(),nullptr,&secondVs)) &&
-          SUCCEEDED(device->CreatePixelShader(secondPsCode->GetBufferPointer(),secondPsCode->GetBufferSize(),nullptr,&secondPs)),
+          SUCCEEDED(device->CreatePixelShader(secondPsCode->GetBufferPointer(),secondPsCode->GetBufferSize(),nullptr,&secondPs)) &&
+          SUCCEEDED(device->CreatePixelShader(zeroOutputPsCode->GetBufferPointer(),zeroOutputPsCode->GetBufferSize(),nullptr,&zeroOutputPs)),
           "raster and actual ownership compute shaders create");
-    if(!vs || !ps || !cs || !mergeCs || !secondVs || !secondPs)return failures;
+    if(!vs || !ps || !cs || !mergeCs || !secondVs || !secondPs || !zeroOutputPs)return failures;
     edvr::FlatOverlayLayer::rememberPixelShader(ps.Get(),psCode->GetBufferPointer(),psCode->GetBufferSize(),false);
     edvr::FlatOverlayLayer::rememberPixelShader(secondPs.Get(),secondPsCode->GetBufferPointer(),secondPsCode->GetBufferSize(),false);
+    edvr::FlatOverlayLayer::rememberPixelShader(zeroOutputPs.Get(),zeroOutputPsCode->GetBufferPointer(),zeroOutputPsCode->GetBufferSize(),false);
 
     D3D11_TEXTURE2D_DESC colorDesc{};
     colorDesc.Width=w;colorDesc.Height=h;colorDesc.MipLevels=colorDesc.ArraySize=colorDesc.SampleDesc.Count=1;
@@ -585,6 +589,161 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
             thirdBytes,true);
         check(!thirdPlanned && unsupportedOnly.failure() && !unsupportedOnly.view(),
               "a third camera bucket exceeds the bounded mask budget and refuses treatment");
+
+        // The v40 ordering starts with an H-camera draw whose original PS is
+        // null. It must fail only its own bucket; later unsupported material
+        // draws and AACF must still form a complete alternate mask. The second
+        // case starts with a real shader that has no colour output, so MRT7
+        // patching itself fails before another null-PS world draw.
+        struct Submitted { bool observed=false, nominee=false, planned=false, began=false; };
+        auto submit=[&](edvr::FlatUntrustedCoverage& capture,
+                        edvr::FlatUntrustedObservedCamera* observed,uint32_t& used,
+                        uint64_t frame,uint32_t seq,const unsigned char* cameraBytes,
+                        uint64_t vsHash,uint64_t psHash,ID3D11VertexShader* gameVs,
+                        ID3D11PixelShader* gamePs,const D3D11_RECT& scissor,
+                        bool supported,bool bracket=true) {
+            bind(baselineRtv.Get(),baselineDsv.Get());
+            context->VSSetShader(gameVs,nullptr,0);
+            context->PSSetShader(gamePs,nullptr,0);
+            context->RSSetScissorRects(1,&scissor);
+            context->Draw(3,0);
+            bind(liveRtv.Get(),liveDsv.Get());
+            context->VSSetShader(gameVs,nullptr,0);
+            context->PSSetShader(gamePs,nullptr,0);
+            context->RSSetScissorRects(1,&scissor);
+            const bool seen=edvr::flatUntrustedObserveCamera(
+                observed,4,used,liveDepth.Get(),cameraBytes)!=nullptr;
+            edvr::FlatRuntimeDraw draw{};
+            auto& key=draw.key;
+            key.color=liveColor.Get();key.depth=liveDepth.Get();key.dsv=liveDsv.Get();
+            key.format=23;key.width=w;key.height=h;key.vs=vsHash;key.ps=psHash;
+            key.b1=liveColor.Get();key.viewportCount=1;
+            key.viewport[2]=float(w);key.viewport[3]=float(h);key.viewport[5]=1;
+            key.writeEpoch=frame;key.writeSeq=1;
+            std::memcpy(draw.camera,cameraBytes,sizeof(draw.camera));
+            key.camera=draw.camera;key.cameraHash=edvr::flatCameraHash(draw.camera);
+            draw.supported=supported;
+            const auto nominee=edvr::flatUntrustedNomination(
+                draw,nullptr,nullptr,true,true,seq,frame);
+            const bool planned=bracket && nominee.admissible() &&
+                capture.plan(frame,seq,liveColor.Get(),liveDepth.Get(),liveDsv.Get(),
+                             vsHash,psHash,cameraBytes,nominee.admissible());
+            const bool began=planned && capture.beginDraw(context,frame);
+            if(planned && !began)capture.abandon();
+            context->Draw(3,0);
+            if(began)capture.endDraw(context);
+            return Submitted{seen,nominee.admissible(),planned,began};
+        };
+        auto clearPair=[&]() {
+            context->ClearRenderTargetView(baselineRtv.Get(),clear);
+            context->ClearRenderTargetView(liveRtv.Get(),clear);
+            context->ClearDepthStencilView(baselineDsv.Get(),
+                D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,0);
+            context->ClearDepthStencilView(liveDsv.Get(),
+                D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,0);
+        };
+        auto sameOriginal=[&]() {
+            const auto baseColor=readTex(baselineColor.Get(),4);
+            const auto seenColor=readTex(liveColor.Get(),4);
+            const auto baseDepth=readTex(baselineDepth.Get(),8);
+            const auto seenDepth=readTex(liveDepth.Get(),8);
+            return baseColor.size()==size_t(w)*h*4 &&
+                seenColor.size()==baseColor.size() &&
+                baseDepth.size()==size_t(w)*h*8 &&
+                seenDepth.size()==baseDepth.size() &&
+                baseColor==seenColor && baseDepth==seenDepth;
+        };
+        for(uint32_t scenario=0;scenario<2;++scenario) {
+            const uint64_t frame=50+scenario;
+            edvr::FlatUntrustedCoverage capture;capture.beginFrame(frame);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;
+            clearPair();
+            const auto firstWorld=submit(capture,observed,used,frame,1,worldBytes,
+                0xEB5234DB6ADB491Dull,scenario?0xABCDEF01ull:0ull,
+                vs.Get(),scenario?zeroOutputPs.Get():nullptr,full,false);
+            const char* firstFailure=capture.failure();
+            const bool worldFailedAsExpected=firstFailure &&
+                std::strstr(firstFailure,scenario?"no colour output":"shader-identity");
+            Submitted secondWorld{};
+            if(scenario)secondWorld=submit(capture,observed,used,frame,2,worldBytes,
+                0xEB5234DB6ADB491Dull,0,vs.Get(),nullptr,full,false);
+            const auto cfcaDraw=submit(capture,observed,used,frame,3,alternateBytes,
+                0xCFCA8FFC6B058630ull,0x8A08FF781272C5F6ull,
+                vs.Get(),ps.Get(),full,false);
+            const auto sevenDraw=submit(capture,observed,used,frame,4,alternateBytes,
+                0x7B0DC42D383F694Cull,0x0DF03E64DF9DBEF1ull,
+                secondVs.Get(),secondPs.Get(),secondRect,false);
+            const auto eightDraw=submit(capture,observed,used,frame,5,alternateBytes,
+                0x8B589D25B2A0ADDCull,0x7268762D11A610F2ull,
+                secondVs.Get(),secondPs.Get(),secondRect,false);
+            const auto aacfDraw=submit(capture,observed,used,frame,6,alternateBytes,
+                0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                secondVs.Get(),secondPs.Get(),secondRect,true);
+            const bool accepted=capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
+            ComPtr<ID3D11Resource> maskResource;
+            if(capture.view())capture.view()->GetResource(&maskResource);
+            ComPtr<ID3D11Texture2D> maskTexture;
+            if(maskResource)maskResource.As(&maskTexture);
+            const auto mask=maskTexture?readTex(maskTexture.Get(),1):std::vector<BYTE>{};
+            UINT marked=0;for(BYTE pixel:mask)marked+=pixel==255;
+            uint32_t completed=~0u;
+            const bool alternateAccounted=used==2 &&
+                edvr::flatUntrustedObservationAccounted(observed[1],capture,&completed);
+            check(firstWorld.observed && firstWorld.nominee && !firstWorld.began &&
+                  worldFailedAsExpected && (!scenario || (secondWorld.observed &&
+                  secondWorld.nominee && !secondWorld.began)) &&
+                  cfcaDraw.began && sevenDraw.began && eightDraw.began && aacfDraw.began &&
+                  accepted && capture.mixed() && alternateAccounted && completed==4 &&
+                  !edvr::flatUntrustedObservationAccounted(observed[0],capture) &&
+                  mask.size()==w*h && marked==105 && mask[4*w+4]==255 &&
+                  sameOriginal(),
+                  scenario?"zero-output then null H-camera shader failures leave complete alternate coverage":
+                           "world-first null PS is bucket-local and all alternate originals remain accounted");
+            const auto omitted=submit(capture,observed,used,frame,7,alternateBytes,
+                0x7B0DC42D383F694Cull,0x0DF03E64DF9DBEF1ull,
+                secondVs.Get(),secondPs.Get(),secondRect,false,false);
+            check(omitted.observed && !omitted.planned &&
+                  !edvr::flatUntrustedObservationAccounted(observed[1],capture,&completed) &&
+                  observed[1].draws==5 && completed==4 && sameOriginal(),
+                  "an actual unbracketed alternate draw fails the shared observation-to-receipt comparison");
+        }
+        for(uint32_t failing=0;failing<2;++failing) {
+            const uint64_t frame=60+failing;
+            edvr::FlatUntrustedCoverage capture;capture.beginFrame(frame);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;clearPair();
+            const auto bad=submit(capture,observed,used,frame,1,alternateBytes,
+                0x7B0DC42D383F694Cull,failing?0xABCDEF01ull:0ull,
+                vs.Get(),failing?zeroOutputPs.Get():nullptr,full,false);
+            const auto good=submit(capture,observed,used,frame,2,alternateBytes,
+                0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                secondVs.Get(),secondPs.Get(),secondRect,true);
+            check(bad.nominee && !bad.began && good.nominee && !good.began &&
+                  !capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0) &&
+                  !edvr::flatUntrustedObservationAccounted(observed[0],capture) &&
+                  sameOriginal(),
+                  failing?"zero-output alternate shader failure refuses treatment":
+                          "null-PS alternate shader failure refuses treatment");
+        }
+        {
+            float worldLikeRows[6][4]{};
+            std::memcpy(worldLikeRows,worldRows,sizeof(worldLikeRows));
+            worldLikeRows[3][2]=.0252f;
+            const auto* worldLikeBytes=reinterpret_cast<const unsigned char*>(worldLikeRows);
+            edvr::FlatUntrustedCoverage capture;capture.beginFrame(70);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;clearPair();
+            const auto bad=submit(capture,observed,used,70,1,worldLikeBytes,
+                0xEB5234DB6ADB491Dull,0,vs.Get(),nullptr,full,false);
+            const auto alternate=submit(capture,observed,used,70,2,alternateBytes,
+                0x7B0DC42D383F694Cull,0x0DF03E64DF9DBEF1ull,
+                vs.Get(),ps.Get(),full,false);
+            check(bad.nominee && !bad.began && alternate.began && used==2 &&
+                  !capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0) &&
+                  sameOriginal(),
+                  "a failed near-world bucket with camera bytes different from H remains an alternate and refuses");
+        }
     }
     context->ClearState();
     return failures;

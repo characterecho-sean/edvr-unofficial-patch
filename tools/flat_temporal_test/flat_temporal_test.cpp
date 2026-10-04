@@ -3281,14 +3281,18 @@ void testFlatUntrustedCameraWiring() {
     const std::string runtime((std::istreambuf_iterator<char>(in)),{});
     const size_t nomination=runtime.find("const auto alternate=flatUntrustedNomination(d,s.namedDepth,");
     const size_t plan=runtime.find("untrustedPlanned=s.untrusted.plan(");
-    const size_t completed=runtime.find("s.untrusted.completedDraws(sel.depth,unknown.camera)");
-    const size_t comparison=runtime.find("if(unknown.hasCamera && completed!=unknown.draws)");
+    const size_t observed=runtime.find("auto* observed=flatUntrustedObserveCamera(s.unclassifiedPool,64,");
+    const size_t accounted=runtime.find("const bool accounted=flatUntrustedObservationAccounted(");
+    const size_t comparison=runtime.find("if(unknown.hasCamera && !accounted)");
     const size_t select=runtime.find("s.untrusted.select(sel.depth,sel.dsv,worldBytes,");
     check(nomination!=std::string::npos && plan!=std::string::npos &&
-          nomination<plan && runtime.find("const bool alternateNominee=alternate.candidate && !inertSource;")!=std::string::npos,
+          nomination<plan && observed<plan &&
+          runtime.find("const bool alternateNominee=alternate.candidate && !inertSource;")!=std::string::npos,
           "the actual draw constructor uses shared broad nomination before planning its MRT7 bracket");
-    check(completed!=std::string::npos && comparison!=std::string::npos &&
-          completed<comparison && comparison<select,
+    check(accounted!=std::string::npos && comparison!=std::string::npos &&
+          accounted<comparison && comparison<select &&
+          runtime.find("if(unknown.depth!=sel.depth)continue;")!=std::string::npos &&
+          runtime.find("if(!sameCamera) {")!=std::string::npos,
           "selected H compares every alternate depth-camera observation with completed original draw receipts");
     check(runtime.find("if(alternateObserved || sel.mixedCamera)")!=std::string::npos &&
           runtime.find("if(!s.untrustedUnknown)sel.mixedCamera=true;")!=std::string::npos &&

@@ -185,16 +185,8 @@ struct State {
     FlatUntrustedCoverage untrusted;
     bool untrustedUnknown = false;
     bool untrustedSupportedAlternate = false;
-    struct UnclassifiedPool {
-        const void* depth = nullptr;
-        const void* color = nullptr, *b1 = nullptr;
-        const void* dsv = nullptr;
-        uint64_t vs = 0, ps = 0, cameraHash = 0, writeEpoch = 0;
-        uint32_t firstSeq = 0, writeSeq = 0, width = 0, height = 0, draws = 0;
-        bool hasCamera = false;
-        unsigned char camera[kFlatCameraBytes]{};
-    } unclassifiedPool[64]{};
-    UnclassifiedPool unclassifiedOverflowFirst{};
+    FlatUntrustedObservedCamera unclassifiedPool[64]{};
+    FlatUntrustedObservedCamera unclassifiedOverflowFirst{};
     uint32_t unclassifiedPoolUsed = 0;
     bool unclassifiedPoolOverflow = false;
     struct UntrustedNomineeDiagnostic {
@@ -2199,11 +2191,12 @@ static void hdrSelectAtTrigger(State& s) {
             if(!sameCamera) {
                 if(!unknown.hasCamera)missingCamera=true;
                 else alternateObserved=true;
-                const uint32_t completed=unknown.hasCamera?
-                    s.untrusted.completedDraws(sel.depth,unknown.camera):0;
+                uint32_t completed=0;
+                const bool accounted=flatUntrustedObservationAccounted(
+                    unknown,s.untrusted,&completed);
                 const uint32_t bits=(unknown.hasCamera?1u:0u)|
                     (unknown.depth==sel.depth?2u:0u)|
-                    (unknown.hasCamera && completed==unknown.draws?4u:0u);
+                    (accounted?4u:0u);
                 bool distinct=true;
                 for(uint32_t j=0;j<s.unclassifiedConsumerDiagnosticsUsed;++j) {
                     const auto& seen=s.unclassifiedConsumerDiagnostics[j];
@@ -2227,7 +2220,7 @@ static void hdrSelectAtTrigger(State& s) {
                         (unsigned long long)unknown.writeEpoch,unknown.writeSeq,
                         unknown.width,unknown.height,sel.renderWidth,sel.renderHeight);
                 } else if(distinct)++s.unclassifiedConsumerDiagnosticsDropped;
-                if(unknown.hasCamera && completed!=unknown.draws) {
+                if(unknown.hasCamera && !accounted) {
                     s.untrustedUnknown=true;
                     s.untrusted.invalidate("unaccounted-alternate-source-draw");
                 }
@@ -3607,36 +3600,26 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if(s.work==FlatWork::Full && s.hdrKey==FlatHdrKey::Auto && s.jitterWanted &&
        !s.untrusted.finished() && !inertSource && k.format==23 && sceneExtent &&
        k.color && k.depth) {
-        bool seen=false;
-        for(uint32_t i=0;i<s.unclassifiedPoolUsed;++i) {
-            auto& prior=s.unclassifiedPool[i];
-            if(prior.depth==k.depth && prior.hasCamera==(k.camera!=nullptr) &&
-                (!k.camera || std::memcmp(prior.camera,k.camera,kFlatCameraBytes)==0)) {
-                ++prior.draws;seen=true;break;
-            }
-        }
-        if(!seen) {
-            if(s.unclassifiedPoolUsed==64) {
-                if(!s.unclassifiedPoolOverflow) {
-                    auto& entry=s.unclassifiedOverflowFirst;
-                    entry={};entry.depth=k.depth;entry.color=k.color;entry.b1=k.b1;entry.dsv=k.dsv;
-                    entry.vs=k.vs;entry.ps=k.ps;entry.cameraHash=k.cameraHash;
-                    entry.writeEpoch=k.writeEpoch;entry.writeSeq=k.writeSeq;
-                    entry.firstSeq=s.prefix.sequence;entry.width=k.width;entry.height=k.height;entry.draws=1;
-                    entry.hasCamera=k.camera!=nullptr;
-                    if(k.camera)std::memcpy(entry.camera,k.camera,kFlatCameraBytes);
-                }
-                s.unclassifiedPoolOverflow=true;
-            }
-            else {
-                auto& entry=s.unclassifiedPool[s.unclassifiedPoolUsed++];
-                entry.depth=k.depth;entry.hasCamera=k.camera!=nullptr;
-                entry.color=k.color;entry.b1=k.b1;entry.dsv=k.dsv;entry.vs=k.vs;entry.ps=k.ps;
-                entry.cameraHash=k.cameraHash;entry.writeEpoch=k.writeEpoch;
-                entry.firstSeq=s.prefix.sequence;entry.writeSeq=k.writeSeq;
-                entry.width=k.width;entry.height=k.height;entry.draws=1;
+        bool inserted=false;
+        auto* observed=flatUntrustedObserveCamera(s.unclassifiedPool,64,
+            s.unclassifiedPoolUsed,k.depth,k.camera,&inserted);
+        if(!observed) {
+            if(!s.unclassifiedPoolOverflow) {
+                auto& entry=s.unclassifiedOverflowFirst;
+                entry={};entry.depth=k.depth;entry.color=k.color;entry.b1=k.b1;entry.dsv=k.dsv;
+                entry.vs=k.vs;entry.ps=k.ps;entry.cameraHash=k.cameraHash;
+                entry.writeEpoch=k.writeEpoch;entry.writeSeq=k.writeSeq;
+                entry.firstSeq=s.prefix.sequence;entry.width=k.width;entry.height=k.height;entry.draws=1;
+                entry.hasCamera=k.camera!=nullptr;
                 if(k.camera)std::memcpy(entry.camera,k.camera,kFlatCameraBytes);
             }
+            s.unclassifiedPoolOverflow=true;
+        } else if(inserted) {
+            auto& entry=*observed;
+            entry.color=k.color;entry.b1=k.b1;entry.dsv=k.dsv;entry.vs=k.vs;entry.ps=k.ps;
+            entry.cameraHash=k.cameraHash;entry.writeEpoch=k.writeEpoch;
+            entry.firstSeq=s.prefix.sequence;entry.writeSeq=k.writeSeq;
+            entry.width=k.width;entry.height=k.height;
         }
     }
     const bool alternateNominee=alternate.candidate && !inertSource;

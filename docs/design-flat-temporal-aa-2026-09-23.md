@@ -4,7 +4,7 @@
 
 - **State:** v40 FLOWN, still refuses weapon mixed AA. Astra review proves
   a null-PS world draw globally poisons capture before its bucket can be
-  excluded. Section 102; Epic `v0.18.1-40-g129cbb13`; review complete.
+  excluded. Section 102; scoped correction reviewed, full gate PASS; install next.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: scope identifiable shader failures to their camera
-  bucket and regress the actual world-first null-PS order plus production
-  accounting before another flight. No per-weapon table or near heuristic.
+- **Next:** section 102: commit/promote the validated bucket-local failure
+  correction and install on Epic, then one drawn/holstered 10-second run.
+  No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10583,3 +10583,34 @@ refuses; a nominal world bucket not matching H still refuses; missing receipt
 still refuses; original color/depth/stencil remain intact. Then one same-
 weapon flight measures treatment and existing occupancy together. Astra made
 no source edits, build or installation; the installed v40 remains current.
+
+Sean authorized implementation after the review. Correction scope: known
+camera/resource shader failures remain local to that bucket; unassignable
+identity and capacity failures remain global. Regress the measured ordering
+through the shared runtime nomination and observation-accounting code, then
+full build, clean commit promotion and Epic flat installation. The installed
+v40 remains current until those gates pass; no extra flight is requested yet.
+
+Production correction implemented: `plan` first validates assignable identity,
+then finds/creates the resource/camera bucket. Null VS/PS is now a local
+`untrusted-source-shader-identity` failure. Exact H world-camera exclusion
+precedes inspection of that bucket's failure; alternate failures remain
+ineligible. Global identity and capacity refusal and the patcher are unchanged.
+Runtime observation aggregation and completed-receipt comparison now call the
+same helpers used by the regression rather than a copied counting model.
+Astra's final production/regression audit found no blocker. Targeted mono
+WARP and temporal-policy rigs pass. New tests exercise the actual shared
+nomination, observation aggregation and receipt comparison, including the
+null-PS world-first order and a real no-color-output world shader followed
+by null PS. Both preserve the full 105-pixel alternate union and original
+color/depth/stencil. Alternate shader failures, H camera mismatch and an
+actual unbracketed alternate draw refuse; that missing draw reports observed5
+versus completed4. Readback size checks prevent empty-equals-empty false
+passes. Sources frozen; full build is the next gate.
+
+Full absolute-path `build.bat --jobs 4` passed all gates, including complete
+GPU/policy rigs, quiet serial reruns and installer-resource validation.
+Receipt input hash:
+`b436a93920cf67991456283f9f84afbac91793cef968d883640c6ea96af42112`.
+Log: `build/flat-bucket-local-failure-full.log`. Commit, clean-version DLL
+promotion and Epic flat installation are next; v40 is still installed.
