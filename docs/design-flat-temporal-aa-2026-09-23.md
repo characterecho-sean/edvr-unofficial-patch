@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** complete camera-domain capture INSTALLED, NOT FLOWN on Epic as
-  `v0.18.1-40-g129cbb13`; full gate and clean promotion pass. v38 proved
-  unsupported early materials blocked treatment. Section 102; settings intact.
+- **State:** v40 FLOWN, still refuses weapon mixed AA. Astra review proves
+  a null-PS world draw globally poisons capture before its bucket can be
+  excluded. Section 102; Epic `v0.18.1-40-g129cbb13`; review complete.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: fly the installed complete camera-domain capture.
-  Same weapon drawn 10 seconds, holstered 10 seconds,
-  no F10; check treatment and mask occupancy. No per-weapon table or near heuristic.
+- **Next:** section 102: scope identifiable shader failures to their camera
+  bucket and regress the actual world-first null-PS order plus production
+  accounting before another flight. No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10524,3 +10524,62 @@ identify the remaining boundary. If treatment runs but AA looks absent, mask
 occupancy tests conservative overcoverage in the same flight. The configured
 SDK resumes on single-camera frames; holstering alone need not remove every
 alternate first-person material draw.
+
+### 2026-10-04: v40 still refuses; independent Astra review
+
+Sean reports world AA still turns off when the weapon is drawn. Verified
+`edvr_gfx_20261004_162843.log`: `v0.18.1-40-g129cbb13`, build `6AC2D263`,
+linked 22:25:39 UTC. At 16:30:50.427 frame44845, the CFCA/8A08 alternate
+scene source reports observed4/completed0, matching H depth and valid camera
+shape/phase. Coverage reports draws0/ready0/unknown1/mixed0, selector
+`source-camera-or-depth-not-unique`, failure `untrusted-source-identity`.
+
+At 16:30:59.247 frame45463, the AACF/CF supported alternate record has six
+draws q4610..4615; the world EB5234/CB9F record has 9485 draws. Subsequent
+coverage summaries at frames45600/45900 remain selected0/actually-treated0,
+last-draws1/ready0/unknown0, failure `untrusted-source-identity`. There are no
+mask-occupancy entries: successful mixed treatment, which queues those
+samples, was never reached.
+
+Ruled out: removing the motion-pair nomination gate alone is sufficient,
+because v40 still fails original-fragment capture's source-identity guard.
+Mask overcoverage and TAA accumulation remain untested; this run fails before
+either executes. An independent Astra agent is reviewing the exact predicate,
+runtime ordering, resource state and whether the synthetic rigs cover them.
+No new fix, install or test flight is requested during that review.
+
+Independent Astra review completed. The first blocker is proven at
+16:30:50.412 frame44845 q1593: PS=0, valid viewport/current identity, camera
+`262106EADACB94DA`. H in the same frame has exactly those world-camera bytes.
+`FlatUntrustedCoverage::plan` rejects `!ps` as a global source-identity failure
+before assigning a bucket; `alternateBucket` rejects that global flag before
+it can discard the exact world bucket. Alternate CFCA/7B draws then report
+prior-failure1/planned0. This violates the implemented failure-scope boundary.
+
+Frame44967 q1820 demonstrates the intended behavior for a non-null shader:
+F516/B40B world draw plans, the next nominee reports `no colour output`, and
+that patch failure is bucket-local. A following null-PS draw q1823 upgrades
+the failure to global. The existing regression instead captured the alternate
+first, then failed a nonzero-hash world bucket with admissible=false; it did
+not exercise the observed shader guard or ordering and runtime source counts.
+
+The weapon rendering transition is around 16:30:59 frame45458. Runtime
+treatment stays at1340 through 16:31:09 and resumes by 16:31:14, consistent
+with Sean's drawn/holstered test. Input actions themselves are not logged.
+Mixed selected/actually-treated remain0 throughout; mask overcoverage and
+domain-aware TAA remain unqualified in the game.
+
+Recommended correction: keep identifiable shader failures in their known
+resource/camera bucket, retain observation counts, and discard the failure
+only after exact H world-camera matching. Preserve global failures for
+unassignable identities and overflow. Do not blanket-skip null PS or zero-
+color-output draws: they may still change depth/stencil; alternate-domain
+uncaptured effects must continue refusing. Keep the generic patcher unchanged.
+
+Required regressions use shared production nomination and accounting: world
+null PS first, unsupported alternate variants, AACF, H; real zero-output PS
+followed by null PS; either shader failure in the alternate domain still
+refuses; a nominal world bucket not matching H still refuses; missing receipt
+still refuses; original color/depth/stencil remain intact. Then one same-
+weapon flight measures treatment and existing occupancy together. Astra made
+no source edits, build or installation; the installed v40 remains current.
