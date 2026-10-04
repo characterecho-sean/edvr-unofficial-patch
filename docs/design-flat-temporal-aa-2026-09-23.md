@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** v38 diagnostic FLOWN: unsupported early first-person materials
-  poison coverage before the known weapon draw. Complete camera-domain capture
-  is implemented; the full build passes, clean promotion/install next (section 102).
+- **State:** complete camera-domain capture INSTALLED, NOT FLOWN on Epic as
+  `v0.18.1-40-g129cbb13`; full gate and clean promotion pass. v38 proved
+  unsupported early materials blocked treatment. Section 102; settings intact.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: promote and install the validated complete
-  camera-domain capture. Same weapon drawn 10 seconds, holstered 10 seconds,
+- **Next:** section 102: fly the installed complete camera-domain capture.
+  Same weapon drawn 10 seconds, holstered 10 seconds,
   no F10; check treatment and mask occupancy. No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10508,3 +10508,19 @@ quiet serial reruns and installer-resource validation. Receipt input hash:
 `be79e2d20ba260224f36d70db4c90b273c6a97e65e58123d9c915c0906531bd9`.
 Log: `build/flat-complete-camera-domain-full.log`. Clean-version promotion and
 Epic installation are next. INI, DLSS and VR behavior remain untouched.
+
+Commit `129cbb13` merged to main, pushed and confirmed at `origin/main`.
+Receipt-guarded absolute-path `build.bat --dll-only` passed; production DLLs
+carry `v0.18.1-40-g129cbb13`. Epic flat installation passed its dry run,
+installation and separate `--verify-only`. The installed product version
+matches; `edvr-flat.ini` and `nvngx_dlss.dll` SHA256 hashes match the fresh
+pre-install snapshot. No `edvr.ini` was present. Frontier was not installed.
+
+INSTALLED, NOT FLOWN. Next: restart Epic, same weapon drawn 10 seconds then
+holstered 10 seconds, no F10. Expected: world AA continues through the draw.
+Inspect selected/actually-treated and mask-occupancy measured fraction. If
+treatment still refuses, the completed/observed counts and capture failure
+identify the remaining boundary. If treatment runs but AA looks absent, mask
+occupancy tests conservative overcoverage in the same flight. The configured
+SDK resumes on single-camera frames; holstering alone need not remove every
+alternate first-person material draw.
