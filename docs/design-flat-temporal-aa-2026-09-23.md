@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** section 102's coverage/domain TAA fix BUILT, NOT FLOWN; full gate
+- **State:** section 102's coverage/domain TAA fix INSTALLED, NOT FLOWN; full gate
   passed. Diagnostic33 (101): covered 0 / 1020; survivors lack stencil16.
-  Epic still has `v0.18.1-33-g2657c1f4` pending clean-commit promotion.
+  Epic flat now has `v0.18.1-36-gb38eff13`; settings and DLSS preserved.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,7 +32,7 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: promote/install the validated source, then one Epic
+- **Next:** section 102: one Epic
   native-size test: same weapon drawn 10 seconds, holstered 10 seconds, no F10.
   World AA should remain active; no diagnostic-only flight or stencil heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
@@ -10368,4 +10368,16 @@ Both same-mode history transitions reset once, then world history resumes.
 The absolute-path full build completed with exit 0 and all gates passed.
 Receipt input fingerprint:
 `a316677aaf53f275b41c228c4d01e961d2b3cd48508705d4f5036644cf69dd56`.
-Installed package remains diagnostic33 pending clean-commit promotion.
+Code commit `b38eff130a6146cf79420f2a22c4ebe151897845` is pushed to main.
+The clean, receipt-guarded DLL-only promotion passed; Epic flat installation
+and a separate `--verify-only` passed. Installed DLL file/product version is
+`v0.18.1-36-gb38eff13`. The pre-install `edvr-flat.ini` and `nvngx_dlss.dll`
+SHA-256 values are unchanged. Frontier/VR installation was not changed.
+
+INSTALLED, NOT FLOWN. Next: restart Epic, use the same native-size scene and
+weapon, hold it drawn 10 seconds and holstered 10 seconds; no F10 needed.
+World AA should remain active while drawn. Automatic coverage summaries must
+show selected and actually-treated mixed frames with effective TAA, and the
+configured backend should return after holstering. A selection without actual
+treatment or a capture refusal is distinguishable in those summaries. This
+tests the runtime integration; the GPU rigs do not claim a successful flight.
