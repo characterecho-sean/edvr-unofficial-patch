@@ -228,7 +228,7 @@ inline int flatCpuTests() {
             "coverage 0.000 ms (calls 0.0) + projection readiness 0.000 ms (calls 0.0) + cb shadows 0.000 ms (calls 0.0) + "
             "camera witness 0.030 ms (calls 3.0) + engine motion draw wrapper 0.000 ms (calls 0.0) + resolve 0.000 ms (calls 0.0) + "
             "backend 0.000 ms (calls 0.0) + discovery 0.000 ms (calls 0.0) + state trackers 0.000 ms (calls 0.0) + "
-            "hdr route 0.000 ms (calls 0.0) + camera inject 0.000 ms (calls 0.0) + engine motion hooks 0.000 ms (calls 0.0)";
+            "hdr route 0.000 ms (calls 0.0) + foreground capture 0.000 ms (calls 0.0) + camera inject 0.000 ms (calls 0.0) + engine motion hooks 0.000 ms (calls 0.0)";
         expect(std::string(lines.line[0]).compare(0, promised.size(), promised) == 0,
                "the first line has the promised shape, in the promised order, with the figures the frames spent");
         expect(has(text, "camera witness 10.00 us/write (" + std::to_string(3u * K) + " writes clocked)"),

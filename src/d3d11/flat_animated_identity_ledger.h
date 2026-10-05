@@ -21,6 +21,39 @@ public:
         uint64_t instanceEpoch=0, poolEpoch=0;
         const char* refusal=nullptr;
     };
+    // Diagnostic ordering only. No field in this receipt certifies identity;
+    // lookup still requires bytes from a witnessed CPU publication.
+    struct PoolReceipt {
+        const void* resource=nullptr;
+        uint64_t firstDemand=0,lastDemand=0,lastPublication=0,slotDemand=0;
+        uint64_t publicationEpoch=0;
+        unsigned requestedAtPublication=0,requestedNow=0;
+        unsigned publications=0,slotEvictions=0,resourceEvictions=0,receiptEvictions=0;
+        uint32_t slot=0,lastEvictedSlot=0;
+        bool resident=false,rowObserved=false,slotRedemanded=false;
+    };
+    // Call for complete writes to a structurally matching pool before it is
+    // demanded. This records ordering without reading or retaining any bytes.
+    void notePoolPublication(const void* resource,unsigned byteWidth) {
+        if(!resource || !byteWidth || byteWidth%poolStride || byteWidth/poolStride>maxPoolRows)return;
+        auto& r=receiptFor(resource);r.lastPublication=++eventSequence_;++r.publications;
+        const Entry* e=findIn(pools_,resource);
+        r.publicationEpoch=e && e->valid?e->epoch:0;
+        r.requestedAtPublication=e?unsigned(e->requestedRows.size()):0;
+    }
+    PoolReceipt poolReceipt(const void* resource,uint32_t slot) const {
+        PoolReceipt out{};out.resource=resource;out.slot=slot;
+        for(const auto& r:poolReceipts_)if(r.resource==resource){out=r;break;}
+        out.slot=slot;out.resourceEvictions=resourceEvictions_;out.receiptEvictions=receiptEvictions_;
+        const Entry* e=findIn(pools_,resource);
+        if(e){out.resident=true;out.requestedNow=unsigned(e->requestedRows.size());
+            out.rowObserved=e->valid && slot<e->rows.size() &&
+                (!e->sparsePool || (slot<e->rowValid.size() && e->rowValid[slot]));
+            for(size_t i=0;i<e->requestedRows.size();++i)if(e->requestedRows[i]==slot){
+                out.slotDemand=e->requestedSeq[i];out.slotRedemanded=e->requestedRedemanded[i]!=0;break;}
+        }
+        return out;
+    }
     bool demandInstances(const void* resource,unsigned byteWidth) {
         return demand(instances_,resource,byteWidth,0,maxInstanceBytes);
     }
@@ -64,8 +97,10 @@ public:
         for(auto& e:instances_)if(e.resource==resource)e=Entry{};
         for(auto& e:pools_)if(e.resource==resource)e=Entry{};
         for(auto& e:mutations_)if(e.resource==resource)e=Mutation{};
+        for(auto& r:poolReceipts_)if(r.resource==resource)r=PoolReceipt{};
     }
-    void reset(){for(auto& e:instances_)e=Entry{};for(auto& e:pools_)e=Entry{};for(auto& e:mutations_)e=Mutation{};}
+    void reset(){for(auto& e:instances_)e=Entry{};for(auto& e:pools_)e=Entry{};for(auto& e:mutations_)e=Mutation{};
+        for(auto& r:poolReceipts_)r=PoolReceipt{};eventSequence_=0;resourceEvictions_=receiptEvictions_=nextReceipt_=0;}
     // Demand only actual inputs of a qualified foreground draw. Hooks notify
     // every mutation of watched inputs, including bone/other SRVs which need
     // no CPU shadow. Zero means unknown/evicted and cannot certify equivalence.
@@ -95,8 +130,16 @@ public:
         if(slot>=e->rows.size())return false;
         if(!e->sparsePool){e->sparsePool=true;e->rowValid.resize(e->rows.size());makeInvalid(*e);}
         for(unsigned requested:e->requestedRows)if(requested==slot)return true;
-        if(e->requestedRows.size()==64){e->rowValid[e->requestedRows.front()]=0;e->requestedRows.erase(e->requestedRows.begin());}
-        e->requestedRows.push_back(slot);e->rowValid[slot]=0;return true;
+        auto& r=receiptFor(resource);
+        if(e->requestedRows.size()==64){r.lastEvictedSlot=e->requestedRows.front();++r.slotEvictions;
+            e->rowValid[r.lastEvictedSlot]=0;e->requestedRows.erase(e->requestedRows.begin());
+            e->requestedSeq.erase(e->requestedSeq.begin());e->requestedRedemanded.erase(e->requestedRedemanded.begin());}
+        const uint64_t sequence=++eventSequence_;
+        const unsigned char bit=static_cast<unsigned char>(1u<<(slot&7));
+        const bool redemanded=(e->seenBits[slot>>3]&bit)!=0;
+        e->seenBits[slot>>3]|=bit;e->requestedRows.push_back(slot);e->requestedSeq.push_back(sequence);
+        e->requestedRedemanded.push_back(redemanded?1:0);
+        r.lastDemand=sequence;e->rowValid[slot]=0;return true;
     }
     bool lookup(const void* instanceResource,uint64_t instanceByteOffset,const void* poolResource,Identity& out) const {
         out=Identity{};
@@ -125,7 +168,8 @@ private:
         uint64_t epoch=0,touch=0;bool valid=false,pendingMap=false;
         D3D11_MAP mapKind=D3D11_MAP_READ;
         std::vector<unsigned char> bytes;std::vector<Row> rows;
-        bool sparsePool=false;std::vector<unsigned char> rowValid;std::vector<unsigned> requestedRows;
+        bool sparsePool=false;std::vector<unsigned char> rowValid,seenBits,requestedRedemanded;
+        std::vector<unsigned> requestedRows;std::vector<uint64_t> requestedSeq;
     };
     template<size_t N> static const Entry* findIn(const std::array<Entry,N>& entries,const void* resource) {
         if(!resource)return nullptr;for(const auto& e:entries)if(e.resource==resource)return &e;return nullptr;
@@ -144,10 +188,14 @@ private:
         for(auto& e:entries)if(e.resource==resource){selected=&e;break;}
         if(selected && selected->byteWidth==byteWidth && selected->stride==stride){selected->touch=++clock_;demandMutation(resource);return true;}
         if(!selected)for(auto& e:entries)if(!e.resource){selected=&e;break;}
-        if(!selected){selected=&entries[0];for(auto& e:entries)if(e.touch<selected->touch)selected=&e;}
+        if(!selected){selected=&entries[0];for(auto& e:entries)if(e.touch<selected->touch)selected=&e;
+            if(stride && selected->resource)++resourceEvictions_;}
         *selected=Entry{};selected->resource=resource;selected->byteWidth=byteWidth;selected->stride=stride;
         selected->touch=++clock_;selected->epoch=++epoch_;demandMutation(resource);
-        if(stride)selected->rows.resize(byteWidth/stride);else selected->bytes.resize(byteWidth);
+        if(stride){selected->rows.resize(byteWidth/stride);selected->seenBits.resize((byteWidth/stride+7)/8);
+            auto& r=receiptFor(resource);r.lastDemand=++eventSequence_;
+            if(!r.firstDemand)r.firstDemand=r.lastDemand;}
+        else selected->bytes.resize(byteWidth);
         return true;
     }
     void makeInvalid(Entry& e){if(e.resource){e.valid=false;e.pendingMap=false;e.epoch=++epoch_;}}
@@ -160,11 +208,21 @@ private:
                 for(unsigned i:e.requestedRows){readRow(i);e.rowValid[i]=1;}}
             else for(size_t i=0;i<e.rows.size();++i)readRow(i);
         } else std::memcpy(e.bytes.data(),data,e.byteWidth);
-        e.epoch=++epoch_;e.touch=++clock_;e.valid=true;return true;
+        e.epoch=++epoch_;e.touch=++clock_;e.valid=true;
+        if(e.stride)notePoolPublication(e.resource,e.byteWidth);
+        return true;
+    }
+    PoolReceipt& receiptFor(const void* resource) {
+        for(auto& r:poolReceipts_)if(r.resource==resource)return r;
+        for(auto& r:poolReceipts_)if(!r.resource){r.resource=resource;return r;}
+        auto& r=poolReceipts_[nextReceipt_++%poolReceipts_.size()];++receiptEvictions_;r=PoolReceipt{};r.resource=resource;return r;
     }
     std::array<Entry,maxInstanceBuffers> instances_;
     std::array<Entry,maxPoolBuffers> pools_;
     std::array<Mutation,maxMutationResources> mutations_;
     uint64_t epoch_=0,clock_=0;
+    std::array<PoolReceipt,8> poolReceipts_{};
+    uint64_t eventSequence_=0;
+    unsigned resourceEvictions_=0,receiptEvictions_=0,nextReceipt_=0;
 };
 } // namespace edvr

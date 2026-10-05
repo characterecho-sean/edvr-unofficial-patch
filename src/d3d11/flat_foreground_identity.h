@@ -17,6 +17,7 @@ class FlatForegroundIdentity {
         const void* bytes=nullptr;
         UINT size=0;
         bool discard=false;
+        bool watched=false,candidatePool=false;
     };
     FlatAnimatedIdentityLedger ledger_;
     std::array<Mapped,6> mapped_{};
@@ -38,19 +39,28 @@ public:
     void reset() {ledger_.reset();for(auto& m:mapped_)m={};for(auto& e:instances_)e={};for(auto& e:pools_)e={};clock_=0;}
     void written(ID3D11Resource* resource) {ledger_.invalidate(resource);}
     void map(ID3D11Resource* resource,D3D11_MAP kind,const void* bytes) {
-        if(!ledger_.beginMap(resource,kind))return;
+        const bool watched=ledger_.beginMap(resource,kind);
         Ptr<ID3D11Buffer> buffer;
         if(!resource || FAILED(resource->QueryInterface(IID_PPV_ARGS(&buffer))))return;
         D3D11_BUFFER_DESC desc{};buffer->GetDesc(&desc);
+        const bool candidatePool=desc.StructureByteStride==FlatAnimatedIdentityLedger::poolStride &&
+            desc.ByteWidth && desc.ByteWidth%FlatAnimatedIdentityLedger::poolStride==0 &&
+            desc.ByteWidth/FlatAnimatedIdentityLedger::poolStride<=FlatAnimatedIdentityLedger::maxPoolRows &&
+            (desc.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)!=0;
+        if(!watched && !candidatePool)return;
         for(auto& m:mapped_)if(!m.resource || m.resource.Get()==resource) {
             m.resource=resource;m.bytes=bytes;m.size=desc.ByteWidth;
-            m.discard=kind==D3D11_MAP_WRITE_DISCARD || kind==D3D11_MAP_WRITE || kind==D3D11_MAP_WRITE_NO_OVERWRITE;return;
+            m.discard=kind==D3D11_MAP_WRITE_DISCARD || kind==D3D11_MAP_WRITE || kind==D3D11_MAP_WRITE_NO_OVERWRITE;
+            m.watched=watched;m.candidatePool=candidatePool;return;
         }
         ledger_.invalidate(resource);
     }
     void unmap(ID3D11Resource* resource) {
         for(auto& m:mapped_)if(m.resource.Get()==resource) {
-            ledger_.endMap(resource,m.bytes,m.size,m.discard);m={};return;
+            const bool published=m.watched && ledger_.endMap(resource,m.bytes,m.size,m.discard);
+            if(m.candidatePool && m.discard && m.bytes && !published)
+                ledger_.notePoolPublication(resource,m.size);
+            m={};return;
         }
     }
     void update(ID3D11Resource* resource,const void* bytes,const D3D11_BOX* box) {
@@ -58,8 +68,14 @@ public:
         if(!resource || FAILED(resource->QueryInterface(IID_PPV_ARGS(&buffer))))return;
         D3D11_BUFFER_DESC desc{};buffer->GetDesc(&desc);
         if(!box || (box->left==0 && box->right==desc.ByteWidth &&
-                    box->top==0 && box->bottom==1 && box->front==0 && box->back==1))
-            ledger_.publishWhole(resource,bytes,desc.ByteWidth);
+                    box->top==0 && box->bottom==1 && box->front==0 && box->back==1)) {
+            const bool published=ledger_.publishWhole(resource,bytes,desc.ByteWidth);
+            if(!published && bytes && desc.StructureByteStride==FlatAnimatedIdentityLedger::poolStride &&
+               desc.ByteWidth && desc.ByteWidth%FlatAnimatedIdentityLedger::poolStride==0 &&
+               desc.ByteWidth/FlatAnimatedIdentityLedger::poolStride<=FlatAnimatedIdentityLedger::maxPoolRows &&
+               (desc.MiscFlags&D3D11_RESOURCE_MISC_BUFFER_STRUCTURED)!=0)
+                ledger_.notePoolPublication(resource,desc.ByteWidth);
+        }
         else ledger_.invalidate(resource);
     }
     bool demandAndLookup(ID3D11DeviceContext* ctx,UINT startInstance,Identity& identity) {

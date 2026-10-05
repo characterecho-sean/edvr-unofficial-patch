@@ -63,6 +63,15 @@ inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* con
         check(backendCalls==before+1 && !backendReset && observedMotion==1.75f && observedMotionY==-.5f &&
               observedDepth==.0025f && observedReject==0,
               "all SDK modes receive real foreground motion and canonical depth without TAA");
+        map[4*center]=map[4*center+1]=0;map[4*center+3]=2;
+        context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
+        ++f.frame;f.foregroundFrame=f.frame;const int ambiguousCalls=backendCalls;
+        resolve(true,"ambiguous foreground history keeps configured SDK engaged");
+        check(backendCalls==ambiguousCalls+1 && !backendReset && observedDepth==.0025f &&
+              observedMotion==0 && observedMotionY==0 && observedReject==255,
+              "GPU ambiguity rejects only history and retains canonical depth without whole-frame reset or TAA");
+        map[4*center]=1.75f;map[4*center+1]=-.5f;map[4*center+3]=1;
+        context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
         // Conservative footprints can include world overdraw. Final ownership
         // controls SDK prep: identical-depth world marker defeats old motion.
         markers[2*center]=0;context->UpdateSubresource(slots.Get(),0,nullptr,markers.data(),w*8,0);

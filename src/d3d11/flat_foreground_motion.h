@@ -1,6 +1,7 @@
 #pragma once
 #include "animated_vertex_history.h"
 #include "flat_animated_identity_ledger.h"
+#include <d3d11_1.h>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -23,12 +24,17 @@ public:
         unsigned writerToken=0;
         FlatAnimatedIdentityLedger::Identity identity;
         Certificate certificate;
+        bool gpuIdentity=false;
     };
     struct Output {
         Ptr<ID3D11ShaderResourceView> motion;
         bool qualified=false,resetRequired=false;
         unsigned frame=0;float depthNear=0;const char* refusal=nullptr;
     };
+    struct CaptureStats {
+        uint64_t attempts=0,gpuAttempts=0,submitted=0,preflightRefused=0,warmedAfterRefusal=0;
+    };
+    const CaptureStats& stats() const{return stats_;}
     void reset(){*this=FlatForegroundMotion{};}
     void beginFrame(unsigned frame) {
         if(frame==frame_)return;
@@ -47,29 +53,44 @@ public:
         else if(before!=current_.size())fail("foreground-captured-geometry-written");
     }
     bool capture(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
-                 unsigned start,int base,unsigned startInstance,unsigned frame,const Inputs& inputs) {
-        beginFrame(frame);Draw d;d.inputs=inputs;
-        if(!ctx){fail("foreground-missing-context");return false;}
-        if(!inputs.writerToken || inputs.writerToken>0xffffffu){fail("foreground-writer-token-unavailable");return false;}
-        if(!count || count%3 || count>AnimatedVertexHistory::maxVertices){fail("foreground-primitive-bound");return false;}
+                  unsigned start,int base,unsigned startInstance,unsigned frame,const Inputs& inputs) {
+        beginFrame(frame);++stats_.attempts;Draw d;d.inputs=inputs;
+        auto reject=[&](const char* reason){++stats_.preflightRefused;fail(reason);return false;};
+        if(!ctx)return reject("foreground-missing-context");
+        if(!inputs.writerToken || inputs.writerToken>0xffffffu)return reject("foreground-writer-token-unavailable");
+        if(!count || count%3 || count>AnimatedVertexHistory::maxVertices)return reject("foreground-primitive-bound");
+        // An unidentified draw cannot match any later draw's authoritative
+        // identity. Do not submit SO just to retain an unusable history record.
+        // Other sticky frame failures still permit valid next-frame warming.
+        d.identityKnown=(inputs.gpuIdentity || (!inputs.identity.refusal && inputs.identity.instanceEpoch &&
+            inputs.identity.poolEpoch && inputs.identity.slot<=0x7ffffeu)) &&
+            std::isfinite(inputs.camera[3][2]) && inputs.camera[3][2]>0 &&
+            std::isfinite(inputs.phaseX) && std::isfinite(inputs.phaseY);
+        if(!d.identityKnown)return reject(inputs.identity.refusal?inputs.identity.refusal:"foreground-identity-or-camera");
         Ptr<ID3D11VertexShader> activeVs;UINT classCount=0;ctx->VSGetShader(&activeVs,nullptr,&classCount);
-        if(classCount){fail("foreground-dynamic-VS-linkage");return false;}
-        if(d.inputs.certificate.constants.size()>65536 || d.inputs.certificate.resourceCount>128){
-            d.inputs.certificate=Certificate{};fail("foreground-certificate-bound");}
-        if(current_.size()>=AnimatedVertexHistory::maxRecords){fail("foreground-draw-bound");return false;}
+        if(classCount)return reject("foreground-dynamic-VS-linkage");
+        if(!inputs.gpuIdentity && (d.inputs.certificate.constants.size()>65536 || d.inputs.certificate.resourceCount>128)){
+            return reject("foreground-certificate-bound");}
+        if(current_.size()>=AnimatedVertexHistory::maxRecords)return reject("foreground-draw-bound");
+        const bool warming=refusal_!=nullptr;++stats_.gpuAttempts;
         if(!history_.capture(ctx,draw,count,instances,start,base,startInstance,frame,d.capture,true)){
             fail(d.capture.refusal);return false;}
+        ++stats_.submitted;if(warming)++stats_.warmedAfterRefusal;
         ctx->RSGetState(&d.raster);UINT n=1;ctx->RSGetViewports(&n,&d.viewport);
         d.scissorCount=16;ctx->RSGetScissorRects(&d.scissorCount,d.scissors.data());
-        if(!inputs.identity.refusal && inputs.identity.instanceEpoch && inputs.identity.poolEpoch &&
-           inputs.identity.slot<=0x7ffffeu && std::isfinite(inputs.camera[3][2]) && inputs.camera[3][2]>0 &&
-           std::isfinite(inputs.phaseX) && std::isfinite(inputs.phaseY))d.identityKnown=true;
-        else fail(inputs.identity.refusal?inputs.identity.refusal:"foreground-identity-or-camera");
         for(const auto& old:previous_) {
-            if(!d.identityKnown || !old.identityKnown || !sameIdentity(d.inputs.identity,old.inputs.identity) ||
-               !samePool(d.capture,old.capture) || d.inputs.camera[3][2]!=old.inputs.camera[3][2])continue;
+            if(!d.identityKnown || !old.identityKnown || !samePool(d.capture,old.capture) ||
+               d.inputs.camera[3][2]!=old.inputs.camera[3][2] ||
+               (inputs.gpuIdentity && !old.inputs.gpuIdentity))continue;
+            if(!inputs.gpuIdentity && !sameIdentity(d.inputs.identity,old.inputs.identity))continue;
             for(unsigned i=0;i<d.capture.candidateCount;++i)if(d.capture.previousPositions[i].Get()==old.capture.currentPositions.Get()) {
-                if(!d.oldPositions){d.oldPositions=d.capture.previousPositions[i];d.oldIdentity=d.capture.previousIdentity[i];d.oldInputs=old.inputs;}
+                if(inputs.gpuIdentity) {
+                    if(d.priorCount<d.priors.size()) {
+                        auto& prior=d.priors[d.priorCount++];prior.positions=d.capture.previousPositions[i];
+                        prior.identity=d.capture.previousIdentity[i];prior.index=old.capture.instanceIndex;
+                        prior.phaseX=old.inputs.phaseX;prior.phaseY=old.inputs.phaseY;
+                    }
+                } else if(!d.oldPositions){d.oldPositions=d.capture.previousPositions[i];d.oldIdentity=d.capture.previousIdentity[i];d.oldInputs=old.inputs;}
                 else if(!equivalent(d.oldInputs,old.inputs)){d.ambiguous=true;fail("foreground-ambiguous-prior-inputs");}
             }
         }
@@ -100,7 +121,9 @@ public:
             if(d.viewport.TopLeftX || d.viewport.TopLeftY || d.viewport.Width!=float(width) || d.viewport.Height!=float(height) ||
                d.viewport.MinDepth!=0 || d.viewport.MaxDepth!=1)return refuse("foreground-viewport");
             commonNear=(std::min)(commonNear,d.inputs.camera[3][2]);
-            if(!d.oldPositions)out.resetRequired=true;
+            // GPU class-2 samples reject first-seen/ambiguous history locally.
+            // Only the legacy CPU adapter needs this whole-frame request.
+            if(!d.inputs.gpuIdentity && !d.oldPositions)out.resetRequired=true;
         }
         if(!initialize(ctx,width,height))return refuse("foreground-map-create");
         if(previousNear_ && previousNear_!=commonNear)out.resetRequired=true;
@@ -109,18 +132,23 @@ public:
         // every binding touched here, including all eight OM render targets.
         Ptr<ID3D11VertexShader> oldVs;Ptr<ID3D11PixelShader> oldPs;Ptr<ID3D11InputLayout> oldLayout;
         Ptr<ID3D11RasterizerState> oldRaster;Ptr<ID3D11BlendState> oldBlend;Ptr<ID3D11DepthStencilState> oldDepth;
-        Ptr<ID3D11Buffer> oldVsCb,oldPsCb;UINT oldRef=0,oldMask=0;float oldFactors[4]{};
+        Ptr<ID3D11Buffer> oldVsCb,oldPsCb;UINT oldVsFirst=0,oldVsCount=4096,oldPsFirst=0,oldPsCount=4096;
+        Ptr<ID3D11DeviceContext1> context1;ctx->QueryInterface(IID_PPV_ARGS(&context1));
+        UINT oldRef=0,oldMask=0;float oldFactors[4]{};
         ID3D11RenderTargetView* oldTargets[8]{};ID3D11DepthStencilView* oldDsv=nullptr;
-        ID3D11ShaderResourceView* oldVsViews[5]{},*oldPsViews[2]{};D3D11_PRIMITIVE_TOPOLOGY oldTopology;
+        ID3D11ShaderResourceView* oldVsViews[15]{},*oldPsViews[2]{};D3D11_PRIMITIVE_TOPOLOGY oldTopology;
         D3D11_VIEWPORT oldViewport[16]{};UINT oldViewportCount=16;D3D11_RECT oldScissors[16]{};UINT oldScissorCount=16;
         ctx->VSGetShader(&oldVs,nullptr,nullptr);ctx->PSGetShader(&oldPs,nullptr,nullptr);ctx->IAGetInputLayout(&oldLayout);
         ctx->RSGetState(&oldRaster);ctx->OMGetBlendState(&oldBlend,oldFactors,&oldMask);ctx->OMGetDepthStencilState(&oldDepth,&oldRef);
-        ctx->VSGetConstantBuffers(0,1,&oldVsCb);ctx->PSGetConstantBuffers(0,1,&oldPsCb);
-        ctx->VSGetShaderResources(0,5,oldVsViews);ctx->PSGetShaderResources(0,2,oldPsViews);
+        if(context1){context1->VSGetConstantBuffers1(0,1,&oldVsCb,&oldVsFirst,&oldVsCount);
+            context1->PSGetConstantBuffers1(0,1,&oldPsCb,&oldPsFirst,&oldPsCount);}
+        else {ctx->VSGetConstantBuffers(0,1,&oldVsCb);ctx->PSGetConstantBuffers(0,1,&oldPsCb);}
+        ctx->VSGetShaderResources(0,15,oldVsViews);ctx->PSGetShaderResources(0,2,oldPsViews);
         ctx->OMGetRenderTargets(8,oldTargets,&oldDsv);ctx->IAGetPrimitiveTopology(&oldTopology);
         ctx->RSGetViewports(&oldViewportCount,oldViewport);ctx->RSGetScissorRects(&oldScissorCount,oldScissors);
         ctx->OMSetRenderTargets(1,target_.GetAddressOf(),nullptr);ctx->OMSetBlendState(blend_.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(depth_.Get(),0);
-        float zero[4]{};ctx->ClearRenderTargetView(target_.Get(),zero);
+        const bool gpuFrame=std::any_of(current_.begin(),current_.end(),[](const Draw& d){return d.inputs.gpuIdentity;});
+        float empty[4]={0,0,gpuFrame?-1.0f:0.0f,0};ctx->ClearRenderTargetView(target_.Get(),empty);
         ctx->VSSetShader(vs_.Get(),nullptr,0);ctx->PSSetShader(ps_.Get(),nullptr,0);ctx->IASetInputLayout(nullptr);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->VSSetConstantBuffers(0,1,settings_.GetAddressOf());ctx->PSSetConstantBuffers(0,1,settings_.GetAddressOf());
@@ -130,28 +158,43 @@ public:
             c.previousPhaseDepth[0]=d.oldInputs.phaseX;c.previousPhaseDepth[1]=d.oldInputs.phaseY;c.previousPhaseDepth[2]=commonNear;
             c.expected[0]=d.inputs.identity.slot;c.expected[1]=d.inputs.identity.skeleton;c.expected[2]=d.inputs.identity.allocation;c.expected[3]=d.oldPositions?1u:2u;
             c.provenance[0]=d.inputs.writerToken;
+            c.identityMode[0]=d.inputs.gpuIdentity?1u:0u;c.identityMode[1]=d.priorCount;
+            for(unsigned i=0;i<d.priorCount;++i){c.priorPhase[i][0]=d.priors[i].phaseX;c.priorPhase[i][1]=d.priors[i].phaseY;}
             ctx->UpdateSubresource(settings_.Get(),0,nullptr,&c,0,0);
-            ID3D11ShaderResourceView* vsViews[5]={d.capture.currentPositions.Get(),d.oldPositions.Get(),d.capture.currentIdentity.Get(),d.oldIdentity.Get(),d.capture.instanceIndex.Get()};
-            ctx->VSSetShaderResources(0,5,vsViews);ctx->RSSetState(d.raster.Get());ctx->RSSetViewports(1,&d.viewport);ctx->RSSetScissorRects(d.scissorCount,d.scissors.data());
+            ID3D11ShaderResourceView* vsViews[15]{};
+            vsViews[0]=d.capture.currentPositions.Get();
+            if(d.inputs.gpuIdentity){for(unsigned i=0;i<d.priorCount;++i){vsViews[1+i]=d.priors[i].positions.Get();
+                    vsViews[6+i]=d.priors[i].identity.Get();vsViews[11+i]=d.priors[i].index.Get();}
+                vsViews[5]=d.capture.currentIdentity.Get();vsViews[10]=d.capture.instanceIndex.Get();}
+            else {vsViews[1]=d.oldPositions.Get();vsViews[5]=d.capture.currentIdentity.Get();
+                vsViews[6]=d.oldIdentity.Get();vsViews[10]=d.capture.instanceIndex.Get();}
+            ctx->VSSetShaderResources(0,15,vsViews);ctx->RSSetState(d.raster.Get());ctx->RSSetViewports(1,&d.viewport);ctx->RSSetScissorRects(d.scissorCount,d.scissors.data());
             ctx->Draw(d.capture.geometry.count,0);
         }
-        ID3D11ShaderResourceView* nullVs[5]{},*nullPs[2]{};ctx->VSSetShaderResources(0,5,nullVs);ctx->PSSetShaderResources(0,2,nullPs);
+        ID3D11ShaderResourceView* nullVs[15]{},*nullPs[2]{};ctx->VSSetShaderResources(0,15,nullVs);ctx->PSSetShaderResources(0,2,nullPs);
         ctx->OMSetRenderTargets(8,oldTargets,oldDsv);ctx->OMSetBlendState(oldBlend.Get(),oldFactors,oldMask);ctx->OMSetDepthStencilState(oldDepth.Get(),oldRef);
         ctx->VSSetShader(oldVs.Get(),nullptr,0);ctx->PSSetShader(oldPs.Get(),nullptr,0);ctx->IASetInputLayout(oldLayout.Get());ctx->IASetPrimitiveTopology(oldTopology);
-        ctx->VSSetConstantBuffers(0,1,&oldVsCb);ctx->PSSetConstantBuffers(0,1,&oldPsCb);ctx->VSSetShaderResources(0,5,oldVsViews);ctx->PSSetShaderResources(0,2,oldPsViews);
+        if(context1){context1->VSSetConstantBuffers1(0,1,oldVsCb.GetAddressOf(),&oldVsFirst,&oldVsCount);
+            context1->PSSetConstantBuffers1(0,1,oldPsCb.GetAddressOf(),&oldPsFirst,&oldPsCount);}
+        else {ctx->VSSetConstantBuffers(0,1,&oldVsCb);ctx->PSSetConstantBuffers(0,1,&oldPsCb);}
+        ctx->VSSetShaderResources(0,15,oldVsViews);ctx->PSSetShaderResources(0,2,oldPsViews);
         ctx->RSSetState(oldRaster.Get());ctx->RSSetViewports(oldViewportCount,oldViewport);ctx->RSSetScissorRects(oldScissorCount,oldScissors);
         for(auto* p:oldTargets)if(p)p->Release();if(oldDsv)oldDsv->Release();
         for(auto* p:oldVsViews)if(p)p->Release();for(auto* p:oldPsViews)if(p)p->Release();
         out.motion=view_;out.qualified=true;out.depthNear=commonNear;return true;
     }
 private:
+    CaptureStats stats_{};
     struct Draw {
         AnimatedVertexHistory::Capture capture;Inputs inputs,oldInputs;
+        struct Prior {Ptr<ID3D11ShaderResourceView> positions,identity,index;float phaseX=0,phaseY=0;};
+        std::array<Prior,4> priors{};unsigned priorCount=0;
         Ptr<ID3D11ShaderResourceView> oldPositions,oldIdentity;Ptr<ID3D11RasterizerState> raster;
         D3D11_VIEWPORT viewport{};std::array<D3D11_RECT,16> scissors{};UINT scissorCount=0;
         bool identityKnown=false,ambiguous=false;
     };
-    struct Settings {float extentPhase[4]{},previousPhaseDepth[4]{};uint32_t expected[4]{},provenance[4]{};};
+    struct Settings {float extentPhase[4]{},previousPhaseDepth[4]{};uint32_t expected[4]{},provenance[4]{};
+        float priorPhase[4][4]{};uint32_t identityMode[4]{};};
     static bool sameIdentity(const FlatAnimatedIdentityLedger::Identity& a,const FlatAnimatedIdentityLedger::Identity& b) {
         return a.slot==b.slot && a.skeleton==b.skeleton && a.allocation==b.allocation;
     }

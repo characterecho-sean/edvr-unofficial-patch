@@ -286,10 +286,15 @@ struct Eye {
 // Eyes 0 and 1, and the on-foot source (kEngineVelocitySourceEye): the same
 // eye-frame rules for a pass into the source's depth.
 Eye g_eyes[3];
-// Slot ownership can start before world naming. Scene/pool snapshots retain
-// their original world-only lifecycle and do not use this frame stamp.
-uint32_t g_flatMarkerFrame=~0u;
-Ptr<ID3D11Texture2D> g_flatMarkerDepth;
+// Marker ownership can start before world naming, on more than one depth in
+// the same present frame. Scene/pool snapshots keep their world-only lifecycle.
+struct FlatMarkerPlane {
+    Ptr<ID3D11Texture2D> depth, slots;
+    Ptr<ID3D11RenderTargetView> rtv;
+    Ptr<ID3D11ShaderResourceView> srv;
+    uint32_t frame=~0u;
+};
+std::array<FlatMarkerPlane,4> g_flatMarkerPlanes;
 struct FlatDomainSaved {
     Ptr<ID3D11DeviceContext> context;
     Ptr<ID3D11VertexShader> vs;
@@ -858,7 +863,10 @@ void readTargets(ID3D11DeviceContext* ctx, TargetRead* out) {
     ctx->OMGetRenderTargets(8, out->rtv, &out->dsv);
     engineVelocityNoteStateCalls(1);
     ID3D11RenderTargetView*& six = out->rtv[kEngineVelocityTarget];
-    if (six && six == g_eyes[kEngineVelocitySourceEye].slotsRtv.Get()) {
+    bool ours=six && six == g_eyes[kEngineVelocitySourceEye].slotsRtv.Get();
+    if(six && runtimeFlatProfile())for(const auto& plane:g_flatMarkerPlanes)
+        if(six==plane.rtv.Get()){ours=true;break;}
+    if (ours) {
         six->Release();
         six = nullptr;
         out->ourMrt6 = true;
@@ -954,12 +962,57 @@ void invalidate(Eye& e, Invalid why) {
 }
 
 // --- The eye pass --------------------------------------------------------------
+FlatMarkerPlane* flatMarkerPlane(ID3D11DeviceContext* ctx, ID3D11Texture2D* depth) {
+    if(!ctx || !depth)return nullptr;
+    D3D11_TEXTURE2D_DESC dd{};depth->GetDesc(&dd);
+    if(dd.SampleDesc.Count!=1 || dd.ArraySize!=1){++g_draw.depthUnsupported;return nullptr;}
+    const uint32_t frame=frameNow();
+    FlatMarkerPlane* plane=nullptr;
+    for(auto& entry:g_flatMarkerPlanes)if(entry.depth.Get()==depth){plane=&entry;break;}
+    if(!plane) {
+        for(auto& entry:g_flatMarkerPlanes)if(!entry.depth){plane=&entry;break;}
+        if(!plane)for(auto& entry:g_flatMarkerPlanes)
+            if(entry.frame!=frame && entry.depth!=g_sourceDepth &&
+               entry.depth!=g_eyes[kEngineVelocitySourceEye].depth){plane=&entry;break;}
+        // A current-frame marker, or either source-depth pin, is never evicted.
+        if(!plane)return nullptr;
+        *plane=FlatMarkerPlane{};
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width=dd.Width;d.Height=dd.Height;d.MipLevels=1;d.ArraySize=1;d.SampleDesc.Count=1;
+        d.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;d.Usage=D3D11_USAGE_DEFAULT;
+        d.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        if(FAILED(dev->CreateTexture2D(&d,nullptr,&plane->slots)) ||
+           FAILED(dev->CreateRenderTargetView(plane->slots.Get(),nullptr,&plane->rtv)) ||
+           FAILED(dev->CreateShaderResourceView(plane->slots.Get(),nullptr,&plane->srv))) {
+            *plane=FlatMarkerPlane{};++g_draw.createFailed;return nullptr;
+        }
+        plane->depth=depth;
+    }
+    if(plane->frame!=frame) {
+        const float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(plane->rtv.Get(),empty);
+        plane->frame=frame;
+    }
+    return plane;
+}
+
 bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* depth) {
     D3D11_TEXTURE2D_DESC dd{};
     depth->GetDesc(&dd);
     // A single-sample, single-slice scene depth only: MRT6 must match the
     // pass's depth target exactly or the runtime drops the game's draw.
     if (dd.SampleDesc.Count != 1 || dd.ArraySize != 1) { ++g_draw.depthUnsupported; return false; }
+    if(runtimeFlatProfile() && eye==kEngineVelocitySourceEye) {
+        FlatMarkerPlane* plane=flatMarkerPlane(ctx,depth);
+        if(!plane)return false;
+        if(e.depth.Get()!=depth || e.slots!=plane->slots) {
+            e.overlayBase.Reset();e.overlayBaseSrv.Reset();e.overlayGroup=false;
+            e.gameMark.Reset();e.gameMarkSrv.Reset();e.gameMarkFrame=~0u;
+            e.depth=depth;e.slots=plane->slots;e.slotsRtv=plane->rtv;e.slotsSrv=plane->srv;
+            e.width=dd.Width;e.height=dd.Height;e.slotFormat=DXGI_FORMAT_R32G32B32A32_FLOAT;
+        }
+        return true;
+    }
     const DXGI_FORMAT slotFormat=runtimeFlatProfile() && eye==kEngineVelocitySourceEye?
         DXGI_FORMAT_R32G32B32A32_FLOAT:DXGI_FORMAT_R32G32_FLOAT;
     if (e.depth.Get() == depth && e.slots && e.width == dd.Width && e.height == dd.Height && e.slotFormat==slotFormat) return true;
@@ -1520,9 +1573,9 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             // The census (issue #38): the eye-frame's clear, its own span --
             // a separate call site from the snapshot below, not merged with it.
             GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
-            if(!runtimeFlatProfile() || g_flatMarkerFrame!=frame || g_flatMarkerDepth.Get()!=depthTex.Get())
-                ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
-            if(runtimeFlatProfile()){g_flatMarkerFrame=frame;g_flatMarkerDepth=depthTex;}
+            // The flat plane was cleared on its first use this frame. A
+            // pre-world foreign marker must survive the source's first draw.
+            if(!runtimeFlatProfile())ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
             engineVelocityNoteStateCalls(1);
         }
         endCapture(ctx, clearTimer);
@@ -2008,7 +2061,8 @@ void releasePrimaryPoolsLocked() {
 }
 
 void clearLocked() {
-    g_flatDomainSaved={};g_flatDomainShaders.clear();g_flatDomainTokenBuffer.Reset();g_flatMarkerFrame=~0u;g_flatMarkerDepth.Reset();
+    g_flatDomainSaved={};g_flatDomainShaders.clear();g_flatDomainTokenBuffer.Reset();
+    for(auto& plane:g_flatMarkerPlanes)plane=FlatMarkerPlane{};
     releasePrimaryPoolsLocked();
     for (auto& e : g_eyes) e = Eye{};
     g_sourceDepth.Reset();
@@ -2261,13 +2315,8 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
     ctx->OMGetBlendState(&saved.blend,saved.factor,&saved.sampleMask);
     const char* blendReason=nullptr;ID3D11BlendState* blend=derivedBlendFor(ctx,saved.blend.Get(),&blendReason,true);
     if(!blend)return fail(blendReason?blendReason:"flat-domain-blend");
-    Eye& e=g_eyes[kEngineVelocitySourceEye];const auto frame=frameNow();
-    if(g_flatMarkerFrame==frame && g_flatMarkerDepth.Get()!=depth)return fail("flat-domain-multiple-depths");
-    if(!ensureSlots(ctx,e,kEngineVelocitySourceEye,depth))return fail("flat-domain-slot-allocation");
-    if(g_flatMarkerFrame!=frame) {
-        const float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(e.slotsRtv.Get(),empty);
-        g_flatMarkerFrame=frame;g_flatMarkerDepth=depth;
-    }
+    FlatMarkerPlane* plane=flatMarkerPlane(ctx,depth);
+    if(!plane)return fail("flat-domain-slot-allocation");
     if(domain==FlatEngineDomain::ForeignPool) {
         if(shader->tokenSlot>=D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT)
             return fail("flat-domain-token-slot-unavailable");
@@ -2283,14 +2332,14 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
         const float token[4]={float(writerToken),0,0,0};ctx->UpdateSubresource(g_flatDomainTokenBuffer.Get(),0,nullptr,token,0,0);
         ID3D11Buffer* buffer=g_flatDomainTokenBuffer.Get();ctx->PSSetConstantBuffers(saved.tokenSlot,1,&buffer);
     }
-    targets[kEngineVelocityTarget]=e.slotsRtv.Get();
+    targets[kEngineVelocityTarget]=plane->rtv.Get();
     vScreenSetRenderTargetsRaw(ctx,8,targets,saved.depth.Get());
     vScreenOMSetBlendStateRaw(ctx,blend,saved.factor,saved.sampleMask);
     if(shader->patchedVs)vScreenVSSetShaderRaw(ctx,shader->patchedVs.Get(),nullptr,0);
     vScreenPSSetShaderRaw(ctx,shader->patchedPs.Get(),nullptr,0);
     g_flatDomainSaved=std::move(saved);
     ID3D11RenderTargetView* verified[8]{};ctx->OMGetRenderTargets(8,verified,nullptr);
-    bool bound=verified[kEngineVelocityTarget]==e.slotsRtv.Get();
+    bool bound=verified[kEngineVelocityTarget]==plane->rtv.Get();
     for(unsigned i=0;i<8;++i)if(i!=kEngineVelocityTarget && verified[i]!=g_flatDomainSaved.targets[i].Get())bound=false;
     Ptr<ID3D11PixelShader> heldPs;ctx->PSGetShader(&heldPs,nullptr,nullptr);
     if(heldPs!=shader->patchedPs)bound=false;
@@ -2318,9 +2367,11 @@ void engineVelocityFlatDomainEndDraw(ID3D11DeviceContext* ctx) {
 }
 bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth,ID3D11ShaderResourceView** out) {
     if(out)*out=nullptr;std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    auto& e=g_eyes[kEngineVelocitySourceEye];
-    if(!out || g_flatMarkerFrame!=frameNow() || g_flatMarkerDepth.Get()!=depth || e.depth.Get()!=depth || !e.slotsSrv)return false;
-    *out=e.slotsSrv.Get();(*out)->AddRef();return true;
+    if(!out || !depth)return false;
+    for(const auto& plane:g_flatMarkerPlanes)if(plane.depth.Get()==depth && plane.frame==frameNow() && plane.srv) {
+        *out=plane.srv.Get();(*out)->AddRef();return true;
+    }
+    return false;
 }
 
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6) {

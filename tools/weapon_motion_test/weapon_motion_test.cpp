@@ -38,11 +38,15 @@ ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* c,const char* s,si
 
 }
 using namespace edvr;
-void __stdcall issue(ID3D11DeviceContext* c,unsigned n,unsigned instances,unsigned start,int base,unsigned si){c->DrawIndexedInstanced(n,instances,start,base,si);}
+unsigned issuedDraws=0;
+void __stdcall issue(ID3D11DeviceContext* c,unsigned n,unsigned instances,unsigned start,int base,unsigned si){++issuedDraws;c->DrawIndexedInstanced(n,instances,start,base,si);}
 struct F4 {double x,y,z,w;};
 struct Pose {float mouse=0,projection=1,nearBone=0,farBone=0,clip=.025f,skeleton=92,pad[2]{};};
 F4 vertex(int i,Pose p){const double x=i==0||i==3?-.6:.6,y=i<2?-.6:.6,t=i<2?0:1;double z=1+t*.25;return {(x+p.mouse+p.nearBone*(1-t)+p.farBone*t)*p.projection,y,p.clip,z};}
+#include "flat_gpu_identity_tests.h"
+#include "flat_identity_receipt_tests.h"
 int main(int argc,char** argv){
+ check(flatIdentityReceiptTests()==0,"identity receipt regressions pass");
  const UINT W=128,H=96;ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> ctx;D3D_FEATURE_LEVEL fl;
  const auto driver=argc>1&&!strcmp(argv[1],"--hardware")?D3D_DRIVER_TYPE_HARDWARE:D3D_DRIVER_TYPE_WARP;
  auto made=D3D11CreateDevice(nullptr,driver,nullptr,D3D11_CREATE_DEVICE_DEBUG,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);
@@ -319,6 +323,53 @@ int main(int argc,char** argv){
         !output.qualified && !output.motion,"world-only H still refuses an uncertified writer");
  }
  Pose foreignOld{.1f,1,0,0,.025f,740},foreignNow{.2f,1,0,0,.025f,740};
+ {
+  FlatForegroundMotion rejected;auto badInputs=flatInputs;
+  badInputs.identity.refusal="identity-pool-slot-unobserved";
+  finalRaster(foreignOld);const unsigned before=issuedDraws;
+  check(!rejected.capture(ctx.Get(),issue,9,1,0,0,0,594,badInputs),"unknown identity refuses capture");
+  check(issuedDraws==before,"unknown identity submits no GPU draw and cannot warm usable next-frame identity");
+  check(rejected.stats().attempts==1 && rejected.stats().preflightRefused==1 && !rejected.stats().gpuAttempts && !rejected.stats().submitted,
+        "preflight receipt separates rejected attempts from GPU submissions");
+  rejected.beginFrame(595);badInputs=flatInputs;badInputs.camera[3][2]=0;
+  check(!rejected.capture(ctx.Get(),issue,9,1,0,0,0,595,badInputs) && issuedDraws==before,
+        "missing camera submits no GPU draw");
+ }
+ {
+  FlatForegroundMotion warming;warming.beginFrame(596);warming.fail("uncertified-other-writer");
+  finalRaster(foreignOld);
+  check(!warming.capture(ctx.Get(),issue,9,1,0,0,0,596,flatInputs),"sticky refusal retains its qualification refusal");
+  check(warming.stats().gpuAttempts==1 && warming.stats().submitted==1 && warming.stats().warmedAfterRefusal==1,
+        "successful GPU warming remains counted despite refused frame");
+  finalRaster(foreignNow);
+  check(warming.capture(ctx.Get(),issue,9,1,0,0,0,597,flatInputs) &&
+        warming.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,597,W,H,flatOutput) && !flatOutput.resetRequired,
+        "valid refused-frame capture warms exact identity motion for the next frame");
+  const auto pixels=readFloatMap(flatOutput.motion.Get());unsigned matched=0;
+  for(unsigned i=0;i<W*H;++i)if(pixels[4*i+3]==1)++matched;
+  check(matched>2000,"refused-frame warming supplies real matched GPU history");
+ }
+ {
+  ComPtr<ID3D11PixelShader> gpuMarkers[3][2];
+  auto rangedCb=buffer(nullptr,1024,D3D11_BIND_CONSTANT_BUFFER);
+  ComPtr<ID3D11DeviceContext1> rangedContext;ctx.As(&rangedContext);
+  for(unsigned slot=0;slot<3;++slot)for(unsigned writer=1;writer<=2;++writer) {
+   const std::string source="float4 main(float4 p:SV_Position,uint primitive:SV_PrimitiveID):SV_Target{return float4(-"+
+       std::to_string(slot*2+3)+",p.z,float(primitive),"+std::to_string(writer)+");}";
+   auto code=compile(source.c_str(),"ps_5_0");hr(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&gpuMarkers[slot][writer-1]));
+  }
+  auto gpuRaster=[&](Pose pose,unsigned slot,unsigned writer) {
+   bind(pose,false);unsigned ids[4]={slot,526606,0,0};ctx->UpdateSubresource(instance.Get(),0,nullptr,ids,0,0);
+   ID3D11ShaderResourceView* untouched[15];for(auto& view:untouched)view=poolView.Get();ctx->VSSetShaderResources(0,15,untouched);
+   if(rangedContext){UINT first=16,count=16;rangedContext->VSSetConstantBuffers1(0,1,rangedCb.GetAddressOf(),&first,&count);
+       first=32;rangedContext->PSSetConstantBuffers1(0,1,rangedCb.GetAddressOf(),&first,&count);}
+   float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(ownerTarget.Get(),empty);
+   ctx->OMSetRenderTargets(1,ownerTarget.GetAddressOf(),dsv.Get());ctx->PSSetShader(gpuMarkers[slot][writer-1].Get(),nullptr,0);
+   issue(ctx.Get(),9,1,0,0,0);
+  };
+  flatGpuIdentityTests(ctx.Get(),ownerView.Get(),rawDepthView.Get(),W,H,flatInputs,worldCamera,
+                       foreignOld,foreignNow,gpuRaster,readFloatMap,pool.Get(),poolData);
+ }
  finalRaster(foreignOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,600,flatInputs),"flat captures a new foreign identity before H");
  check(flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,600,W,H,flatOutput) && flatOutput.resetRequired && flatOutput.depthNear==.025f,"new geometry requests one reset and common near spans foreign/world");
  auto flatPixels=readFloatMap(flatOutput.motion.Get());unsigned flatCovered=0;

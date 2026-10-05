@@ -322,6 +322,61 @@ float4 main(Input i,uint primitive:SV_PrimitiveID):SV_Target0 {
             h.check(selected>0,"coincident original discard passing footprint nonempty");
         }
     }
+    // A pre-world marker on one DSV must survive a second DSV in the same
+    // present frame. The later named source producer must share the second
+    // plane without clearing the foreign tuple already written there.
+    {
+        const auto depthA=game.sourceDepth;
+        D3D11_TEXTURE2D_DESC desc{};depthA->GetDesc(&desc);
+        ComPtr<ID3D11Texture2D> depthB;ComPtr<ID3D11DepthStencilView> dsvB;
+        h.check(SUCCEEDED(h.device->CreateTexture2D(&desc,nullptr,&depthB)) &&
+                SUCCEEDED(h.device->CreateDepthStencilView(depthB.Get(),nullptr,&dsvB)),
+                "two-DSV marker fixture creates second depth");
+        if(depthB && dsvB) {
+            game.beginFrame();game.sourcePass(0);game.setVs(vs.Get(),lifecycle_tests::kVsHash);game.setPs(nullptr,0);
+            const char* whyA=nullptr;
+            const bool markedA=engineVelocityFlatDomainBeginDraw(h.context,depthA.Get(),code->GetBufferPointer(),code->GetBufferSize(),
+                nullptr,0,FlatEngineDomain::World,&whyA,false,1,2);
+            h.check(markedA,whyA?whyA:"first DSV marker admitted");
+            if(markedA){h.context->DrawInstanced(4,1,0,0);engineVelocityFlatDomainEndDraw(h.context);}
+            ComPtr<ID3D11ShaderResourceView> ownerA;
+            h.check(engineVelocityFlatDomainSlots(depthA.Get(),&ownerA),"first DSV marker retrievable before second");
+            game.sourceDepth=depthB;game.sourceDsv=dsvB;game.sourcePass(0);game.setVs(vs.Get(),lifecycle_tests::kVsHash);game.setPs(nullptr,0);
+            const char* whyB=nullptr;
+            const bool markedB=engineVelocityFlatDomainBeginDraw(h.context,depthB.Get(),code->GetBufferPointer(),code->GetBufferSize(),
+                nullptr,0,FlatEngineDomain::ForeignPool,&whyB,false,1,2);
+            h.check(markedB,whyB?whyB:"second DSV foreign marker admitted in same frame");
+            if(markedB){h.context->DrawInstanced(4,1,0,0);engineVelocityFlatDomainEndDraw(h.context);}
+            ComPtr<ID3D11ShaderResourceView> ownerB;
+            h.check(engineVelocityFlatDomainSlots(depthB.Get(),&ownerB),"second DSV marker retrievable before world producer");
+            ComPtr<ID3D11ShaderResourceView> ownerAAgain;
+            h.check(engineVelocityFlatDomainSlots(depthA.Get(),&ownerAAgain) && ownerAAgain==ownerA,
+                "first DSV marker remains retrievable after second");
+            auto pixels=[&](ID3D11ShaderResourceView* owner){
+                ComPtr<ID3D11Resource> resource;if(owner)owner->GetResource(&resource);
+                UINT width=0;return resource?lifecycle_tests::readTexture(h,resource.Get(),4,&width):std::vector<float>{};
+            };
+            const auto beforeA=pixels(ownerA.Get()),beforeB=pixels(ownerB.Get());
+            unsigned worldA=0,foreignB=0;
+            for(size_t i=0;i<beforeA.size()/4;++i)worldA+=beforeA[i*4]==0.f;
+            for(size_t i=0;i<beforeB.size()/4;++i)foreignB+=beforeB[i*4]==-13.f;
+            h.check(worldA>0 && foreignB>0,"different DSVs contain their own original marker tuples");
+            game.writeScene(game.sceneA.Get(),game.rows[0]);
+            engineVelocityNoteSource(depthB.Get(),game.sceneA.Get());
+            game.setVs();game.setPs(game.ps.Get(),lifecycle_tests::kPsHash);
+            game.sourceDraw(9);
+            ComPtr<ID3D11ShaderResourceView> afterA,afterB;
+            h.check(engineVelocityFlatDomainSlots(depthA.Get(),&afterA) &&
+                    engineVelocityFlatDomainSlots(depthB.Get(),&afterB) && afterA==ownerA && afterB==ownerB,
+                    "world producer keeps both DSV planes available by exact depth");
+            const auto finalA=pixels(afterA.Get()),finalB=pixels(afterB.Get());
+            h.check(finalA==beforeA,"world producer on second DSV preserves first DSV marker bytes");
+            unsigned preservedForeign=0;
+            for(size_t i=0;i<beforeB.size()/4 && i<finalB.size()/4;++i)
+                if(beforeB[i*4]==-13.f && std::memcmp(&beforeB[i*4],&finalB[i*4],4*sizeof(float))==0)++preservedForeign;
+            h.check(preservedForeign==foreignB,"world producer does not clear prior foreign tuples on its DSV");
+        }
+    }
     engineVelocityConfigure(false);h.context->ClearState();g_runtimeProfile=previous;
 }
 } // namespace flat_domain_tests

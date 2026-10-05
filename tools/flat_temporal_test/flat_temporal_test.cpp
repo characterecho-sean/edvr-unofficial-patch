@@ -16,6 +16,7 @@
 #include "flat_projection_recipe_tests.h"
 #include "flat_shader_classifier_tests.h"
 #include "flat_domain_admission_tests.h"
+#include "flat_domain_depth_route_tests.h"
 #include "flat_projection_viewport_tests.h"
 #include "flat_projection_ownership_tests.h"
 #include "flat_compute_tests.h"
@@ -3738,6 +3739,7 @@ int main(int argc, char** argv) {
     failures += flatProjectionRecipeTests();
     failures += flatShaderClassifierTests();
     failures += flatDomainAdmissionTests();
+    failures += flatDomainDepthRouteTests();
     failures += flatProjectionOwnershipTests();
     failures += flatComputeTests();
     failures += flatLightingTests();

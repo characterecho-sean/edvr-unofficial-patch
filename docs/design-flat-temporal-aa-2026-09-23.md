@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** c145d97d FLOWN; TAA treats frames, SDK H qualifies 0/2474 (103).
-  Astra: depth/identity blockers; NumLock meets three frames; cost remains open.
+- **State:** per-DSV/GPU-identity repair BUILT, NOT FLOWN (103).
+  Marker isolation and full validation pass; hardware cost stays open.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,8 +33,8 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** offline depth-selection and publication-before-demand tests (103).
-  No flight selected. Retain 102's color-clear fix; no per-weapon table.
+- **Next:** clean promotion and Epic DLAA/FSR holstered/plasma test (103).
+  Retain 102's color-clear fix; no per-weapon table; preserve Epic settings.
   Building shimmer is unqualified. Preserve 87's native FSR comparison and
   section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -11846,3 +11846,166 @@ proof, add weapon-specific allowlists, or downgrade configured SDK AA to TAA.
 Next work is offline regression and identity evidence design. No new fix,
 build, install or test flight was requested as part of this review; Epic
 remains on c145d97d.
+
+### 2026-10-05: selected-depth isolation and authoritative GPU identity
+
+State: implemented, focused regressions pass, full validation pending. The
+c145d97d flight remains the last hardware evidence. No performance improvement
+or SDK engagement is claimed until the new build flies.
+
+The depth repair keeps four bounded, persistent DSV candidates. Each has its
+own original-writer failures, motion history, provisional null camera
+witnesses, HDR/color resources and phase/state proof. Only the exact depth
+chosen by the existing H boundary qualifies. The prior selected depth is pinned
+across the next frame so an early unrelated native-sized pass cannot evict its
+history. A missing selected candidate or its capacity overflow still refuses;
+an unknown writer on the actual selected scene still refuses. Selected H
+receipts now name frame, depth pointer, candidate count/cap and
+missing/overflow state. Failures on unrelated DSVs no longer poison the
+selected one.
+
+The route regression reproduces the q1 unrelated failure before scene selection
+and proves the selected scene can qualify while an unknown writer on that
+selected scene cannot. Audit found a separate hole:
+`flatRuntimeWritten(prefix,nullptr)` does not set `prefix.uncertain`. A null
+mutation before the first DSV candidate therefore needed an explicit
+frame-level refusal, now checked at H and covered offline. Foreign-thread
+mutation continues to set `foreignWork` and refuse at H. Per-DSV geometry
+mutation handling retains existing invalidation and unknown-write rules.
+
+The sparse CPU ledger probe reproduces `identity-pool-slot-unobserved` when a
+newly encountered slot is requested after publication. It still cannot
+establish whether ordering, slot rotation, row eviction or resource churn
+caused the flown failures. The repair removes all of those CPU row-cache
+dependencies from live SDK admission instead of guessing one. It shares VR's
+existing `AnimatedVertexHistory` GPU capture: actual original VS positions,
+current/previous skeleton and allocation, and an exact retained instance-index
+scalar. There is no GPU readback, whole-pool CPU scan or weapon-specific
+selector. The shared VR shaders and scheduling are unchanged; the new adapter
+and shaders are flat-only.
+
+CPU matching retains same-pool, same-geometry history candidates; the GPU
+compares the exact slot, skeleton and allocation. A unique match uses its
+actual previous positions and stored prior raster phase. Multiple matches
+coalesce only when every previous triangle position is bitwise identical and
+its prior phase agrees. Otherwise the map carries actual canonical current
+depth with class 2, rejecting that pixel's history. It does not guess a
+previous pose or veto world SDK AA. Missing current GPU identity likewise
+cannot borrow prior history. Unrepresentable slots or invalid positions remain
+invalid coverage. Original final-owner slot/depth/primitive/writer and
+raw-depth checks remain intact. High-bit raw instance metadata is a remaining
+boundary: the shared identity CS reads raw index, so those records
+conservatively reject history rather than infer a masked identity.
+
+The live path no longer queries/copies fourteen VS constant buffers and 128 VS
+SRVs for a CPU input certificate on each foreign draw, and no longer tracks
+sparse CPU identity uploads at every Map/Unmap. Exact GPU position agreement is
+a sufficient duplicate-motion proof. The bounded ledger receipt support remains
+exercised by offline tests. No config keys were added or removed. Performance
+remains unmeasured on hardware; the CPU census has a separate `foreground
+capture` family, and capture receipts separate attempts, GPU attempts,
+completed submissions, preflight refusals and useful warming after another
+frame refusal.
+
+The original performance regression failed before the repair because an
+unidentified draw still submitted an original-VS GPU capture. Preflight now
+rejects unusable CPU-mode identities/cameras before SO; GPU-mode capture
+instead uses the actual GPU identity witness. Valid captures continue warming
+history after unrelated sticky frame failures, because the next frame can use
+them. The offline test proves that preserving this warming supplies real
+previous motion, not repeated reset.
+
+Focused WARP passed 146,618 checks after shader regeneration. Added actual GPU
+cases cover unavailable CPU rows/certificates, first-seen and changing slots,
+allocation reuse, identical and differing duplicate poses, differing prior
+phases, out-of-range GPU identity, canonical-depth rejection and exact
+restoration of all fifteen touched VS SRVs and Context1 VS/PS CB0 ranges.
+Existing primitive/draw discard, stencil, world-only H and CPU fixture tests
+continue to pass. The SDK prep rig additionally checks DLAA, DLSS and FSR all
+keep their backend engaged on class-2 ambiguity, preserve canonical depth,
+reject only the affected pixel's history and avoid a whole-frame reset or TAA
+substitution. Full build and clean promotion remain required.
+
+Environment for the next test: flat Epic, native 3840x2160, DLSS 310.9.1,
+preserved `edvr-flat.ini`. The per-DSV table has four entries; each original-VS
+history retains its existing 64-record/32-MiB limits. VR
+runtime/headset/per-eye behavior is not newly qualified. Ordinary NumLock
+retains the already-proven three-useful-frame/one-second bound; startup
+discovery still has its separate 120-second budget. One short holstered/plasma
+comparison with configured DLAA or FSR and one NumLock is sufficient to inspect
+backend engagement and selected-depth/foreground-capture receipts; no
+per-weapon matrix is requested.
+
+### 2026-10-05: Astra completion review and additional offline gates
+
+Astra's second review found two concrete gaps before installation. Runtime
+per-DSV isolation did not extend to `engine_velocity.cpp`: a global marker
+depth/frame still rejected a second admitted DSV, and retrieval exposed only
+one plane. A marker on A followed by a foreign/null pre-world draw on selected
+B could still sticky-fail B. The old q1 camera-less flight does not prove A
+stamped any marker; this is a source-proven correctness gap in the new
+implementation. The new regression must exercise actual A/B GPU markers, exact
+DSV lookup and ordinary world-source aliasing without clearing pre-world
+evidence, rather than just the route table. Marker-layer completion is in
+progress.
+
+Ruled out: runtime candidate isolation alone completes per-DSV ownership,
+because the producer/retrieval layer still had a global depth latch. Preserve
+the chosen DSV's complete original-writer proof through the actual ownership
+plane.
+
+The GPU adapter also requested a whole SDK reset for `priorCount == 0`, despite
+class 2 already rejecting new geometry's history locally. The new warm-world
+regression failed that condition on the previous code. GPU mode now leaves
+first-seen history rejection local; the legacy CPU fixture mode retains its
+established initial-history reset. A real common-near convention transition
+still resets once and settles on the following frame. The focused original-VS
+WARP rig now passes 157,476 checks, including warm world, first-seen GPU
+geometry, actual near transition, canonical depth and state restoration. Logs:
+`build/foreground-local-reset-before.log` and
+`build/foreground-local-reset-after.log`.
+
+The first full build compiled both production DLLs, then failed `run_jobs.py`'s
+Windows process-tree self-test. A ping grandchild survived timeout cleanup and
+held its heartbeat file; this was a sandbox process-termination limitation, not
+a rendering regression. The isolated self-test passes with escalated execution.
+The full gate must run again under that execution context after the marker
+source is frozen. No receipt, clean promotion or installation is claimed from
+the failed build. No flight is requested while these offline gaps remain open.
+
+Both Astra completion findings now have failing-before/passing-after
+regressions. The marker layer uses four cached per-DSV RGBA ownership planes,
+each cleared once per frame, with source-depth pins and conservative capacity
+refusal. Ordinary flat source production aliases its exact cached plane; it
+neither replaces nor clears earlier foreign ownership. Internal MRT6
+recognition includes every cached plane so lazy source restoration cannot
+mistake a previous plane for the game's own MRT6. The actual two-depth GPU test
+failed `flat-domain-multiple-depths` on old code and passes after the repair: A
+and B remain separately retrievable, B retains original foreign tuples through
+a later named B world draw, and A's bytes are unchanged. Focused production
+marker WARP rig passes 15,223 checks. Logs: `build/engine-marker-red.log` and
+`build/engine-marker-green.log`. Shared VR RG32 eye/source production keeps its
+profile-specific lifecycle; only flat ownership uses the new four-plane cache.
+
+The full escalated build is rerunning against this frozen source and the
+157,476-check local-reset GPU adapter regression. Hardware SDK engagement and
+frame time remain unqualified until the installed build is tested.
+
+### 2026-10-05: full validation passed, clean promotion next
+
+The full escalated absolute-path build completed with exit 0 against the frozen
+repair. Both production DLLs, the 117-job rig pool, five quiet jobs, config
+contract and self-contained installer/resource checks passed.
+`build/full_build_receipt.json` records `full-pass` with input fingerprint
+`c0d7b0b9b34552d4e6e2b947f3ffc287cfbc0b3dce373b5a7284c40a1f16d0c1`; the log is
+`build/flat-gpu-identity-depth-full.log`. This supersedes the earlier failed
+process-tree gate.
+
+Commit this same source, push main, then use the receipt-guarded DLL-only
+promotion and sanctioned Epic flat installer. Preserve the live flat INI and
+DLSS runtime. The next hardware check is configured DLAA or FSR with the weapon
+holstered, then one plasma weapon drawn for about ten seconds each and one
+lightweight NumLock. No complete flight or weapon inventory is needed. Hardware
+backend engagement and frame time are still unqualified; the offline
+regressions demonstrate the corrected failure paths rather than a measured
+performance gain.
