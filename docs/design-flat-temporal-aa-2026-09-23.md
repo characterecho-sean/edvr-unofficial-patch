@@ -4,7 +4,7 @@
 
 - **State:** color-clear weapon-AA fault CLOSED (102); plasma refusal OPEN (103).
   Supporter v0.18.2 logs confirm late-overlay dual-source-blend refusals.
-  Color-clear correction stays qualified; blend-state diagnostic BUILT.
+  Epic diagnostic `v0.18.2-1-ga2e406c5` installed; section 102 fix qualified.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -11070,3 +11070,21 @@ passed: 117 parallel jobs and five quiet jobs, mono resolve PASS, config
 contract234/234, both installer resource checks and all final gates. Receipt
 fingerprint11609745426ba8bd3305e8344465bc1360b045121e2a7aa86dadebc825c9cd95
 matches the validated source. Commit/promotion/install follow this gate.
+
+Validated source committed as a2e406c5, fast-forwarded main and pushed;
+origin/main confirmed the exact commit. Clean --dll-only promotion verified
+the receipt and passed. Sanctioned exact-path Epic flat dry-run, install and
+verify-only passed; root repeated verification. ProductVersion is
+`v0.18.2-1-ga2e406c5`. Backup receipt:
+`edvr_flat_receipt.json.pre-plasma-overlay-a2e406c5-20261005-052320.bak`.
+Flat settings and DLSS SHA256 match the pre-install baseline; edvr.ini stays
+absent. Frontier was not installed.
+
+Next flight: launch Epic, draw one plasma weapon, and once world AA disengages
+wait five seconds before F10. Keep it drawn another five seconds, then exit.
+Read against literal installed v0.18.2-1-ga2e406c5 after this doc commit.
+Check armed/ready, samples1/captured, the actual blend sample/target rows and
+paired refusal counts. samples0/no-dual-source-sample is a distinct result,
+not evidence that a fix worked. This is measurement only; guard behavior
+still refuses the original unsupported case. No two-minute wait or per-weapon
+matrix required.
