@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** v47 FLOWN: B40B captures; later mutation remains unidentified.
-  Section 102; mutation/F10 diagnostic FULL VALIDATION PASSED, pending install.
-  Epic currently `v0.18.1-47-gab74d281`.
+- **State:** v47 FLOWN: B40B capture qualified; later mutation unidentified.
+  Section 102; diagnostic validated and installed, NOT FLOWN.
+  Epic `v0.18.1-49-g5698007f` installed and verified.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: retain mutation payloads and a complete F10 trace;
-  distinguish stencil-only clear, depth clear, color write, copy and update.
+- **Next:** section 102: restart Epic; same weapon, F10,10s drawn/10s holstered,
+  then exit. Identify mutation from retained payloads and complete frame trace.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10868,3 +10868,19 @@ inputs SHA256 `0ce1cffb78b6b9e78fb7d773b22d835f492b67cf33b6457fad4a9d8f0fd7d6de`
 An earlier direct run_jobs invocation failed its missing parent build environment
 before either affected rig ran; it supplied no test evidence. Validation came
 from the full build, with no source changes during it. Diagnostic NOT FLOWN.
+
+Validated source committed as `5698007f`, fast-forwarded to main and pushed;
+origin/main confirmed that exact commit. Clean --dll-only promotion verified
+the full-build receipt and exited0. Sanctioned Epic --profile flat dry-run,
+real install and --verify-only all exited0; installed DLL ProductVersion is
+`v0.18.1-49-g5698007f`. Receipt backup
+`edvr_flat_receipt.json.pre-flat-mutation-context-5698007f-20261004-182850.bak`.
+Root repeated verification: flat payload/profile match, exact SHA256 of live
+edvr-flat.ini and nvngx_dlss.dll unchanged, edvr.ini remains absent. Frontier
+not installed. Bind the next log to this literal version after doc-only commit.
+
+Next flight: restart Epic, draw the same weapon, press F10 while AA is refused,
+hold10s, holster10s, then exit. No two-minute wait or per-weapon testing required.
+This build changes evidence collection, so world AA may still refuse. Use the
+actual mutation operation/flags/payload and later nominee reports to select
+the rendering fix; do not infer it from the preceding draw or an empty trace.
