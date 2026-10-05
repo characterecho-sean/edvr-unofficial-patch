@@ -15,6 +15,7 @@
 #include "flat_projection_bindings_tests.h"
 #include "flat_projection_recipe_tests.h"
 #include "flat_shader_classifier_tests.h"
+#include "flat_domain_admission_tests.h"
 #include "flat_projection_viewport_tests.h"
 #include "flat_projection_ownership_tests.h"
 #include "flat_compute_tests.h"
@@ -2748,6 +2749,18 @@ void testFlatWitnessWiring() {
     check(requests.take()==FlatCaptureTier::Full, "explicit full upgrades a pending general report");
     requests.request(false);
     check(requests.take()==FlatCaptureTier::General, "a later independent ordinary press remains general");
+    const auto general = flatCaptureBudget(FlatCaptureTier::General);
+    const auto full = flatCaptureBudget(FlatCaptureTier::Full);
+    check(general.milliseconds==1000 && general.usefulFrames==3,
+          "ordinary shader reports bound driver observers to three useful frames or one second");
+    check(!edvr::flatCaptureExpired(100,1099,2,general.milliseconds,general.usefulFrames) &&
+          edvr::flatCaptureExpired(100,1099,3,general.milliseconds,general.usefulFrames),
+          "the general report stops at its third sampled frame even at high frame rates");
+    check(edvr::flatCaptureExpired(100,1100,0,general.milliseconds,general.usefulFrames),
+          "a paused or no-draw general report still expires after one second");
+    check(full.milliseconds==120000 && full.usefulFrames==12000 &&
+          !edvr::flatCaptureExpired(100,1100,3,full.milliseconds,full.usefulFrames),
+          "explicit full capture retains the long diagnostic window");
     auto slurp = [](const char* path) {
         std::ifstream in(path, std::ios::binary);
         return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -2799,6 +2812,16 @@ void testFlatWitnessWiring() {
         check(fullBody.find(arm)!=std::string::npos, "all manual bulk exporters/preparation remain inside explicit full tier");
     const std::string temporalCpp=slurp("src/d3d11/flat_temporal.cpp");
     const std::string hookCpp=slurp("src/d3d11/device_hook.cpp");
+    check(temporalCpp.find("g.captureBudget = flatCaptureBudget(full ? FlatCaptureTier::Full : FlatCaptureTier::General);")!=std::string::npos,
+          "the real key path selects the general or full collection budget");
+    const size_t beforePresent=temporalCpp.find("void flatTemporalBeforePresent(");
+    const size_t pausedDeadline=temporalCpp.find("flatCaptureExpired(g.startedMs, nowMs(), g.usefulFrames,",beforePresent);
+    const size_t observerGate=temporalCpp.find("if (!flatTemporalCapturing() || !swap) return;",beforePresent);
+    check(beforePresent!=std::string::npos && pausedDeadline>beforePresent && pausedDeadline<observerGate &&
+          temporalCpp.find("finishDiscovery(frame);",pausedDeadline)<observerGate,
+          "the owner Present deadline closes collection before the paused observer gate");
+    check(count(temporalCpp,"flat temporal: passive discovery complete;")==1,
+          "normal and paused completion use one final-report path");
     check(temporalCpp.find("g.projectionManual = full;")!=std::string::npos &&
           temporalCpp.find("if (full) flatComputeArm(device, g.presents);")!=std::string::npos &&
           temporalCpp.find("flatRuntimeArmProjectionAudit(full);")!=std::string::npos,
@@ -3714,6 +3737,7 @@ int main(int argc, char** argv) {
     failures += flatProjectionBindingsTests();
     failures += flatProjectionRecipeTests();
     failures += flatShaderClassifierTests();
+    failures += flatDomainAdmissionTests();
     failures += flatProjectionOwnershipTests();
     failures += flatComputeTests();
     failures += flatLightingTests();

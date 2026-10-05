@@ -22,6 +22,21 @@ float2 main(Input input):SV_Target6 {
     return float2(owner,input.position.z);
 }
 )HLSL";
+// No original PS exists on this path, so b13 is available for the bounded
+// frame-local draw token. Native primitive identity distinguishes coincident
+// triangles within that actual draw.
+constexpr char kFlatNullForeignProvenanceMarkerPs[]=R"HLSL(
+cbuffer Writer : register(b13) { float4 writer; };
+struct Input {
+    float4 position:SV_Position;
+    nointerpolation uint slot:EDVRPOOLSLOT;
+    uint primitive:SV_PrimitiveID;
+};
+float4 main(Input input):SV_Target6 {
+    float owner=input.slot<=0x7ffffe?-(float)(2*input.slot+3):-2;
+    return float4(owner,input.position.z,float(input.primitive),writer.x);
+}
+)HLSL";
 constexpr char kFlatNullPoolMarkerPs[]=R"HLSL(
 struct Input {
     float4 position:SV_Position;

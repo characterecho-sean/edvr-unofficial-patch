@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cstdint>
 
 enum class FlatCaptureTier : unsigned { None, General, Full };
 
@@ -20,3 +21,14 @@ public:
 };
 
 inline bool flatCaptureBulk(FlatCaptureTier tier) { return tier == FlatCaptureTier::Full; }
+
+struct FlatCaptureBudget {
+    uint64_t milliseconds;
+    uint32_t usefulFrames;
+};
+
+// Ordinary reports sample the problem already on screen. Keeping the observers
+// running for two minutes costs driver/state work even without bulk exports.
+inline FlatCaptureBudget flatCaptureBudget(FlatCaptureTier tier) {
+    return tier == FlatCaptureTier::General ? FlatCaptureBudget{1000, 3} : FlatCaptureBudget{120000, 12000};
+}

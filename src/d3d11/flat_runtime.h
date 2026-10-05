@@ -131,8 +131,15 @@ struct FlatRuntimeDrawScope {
     bool untrustedPlanned = false, untrustedStarted = false, untrustedEnded = false;
     bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
     bool domainProtectedOverlay=false;
+    bool domainPendingWorldNull=false;
+    bool domainHdrWriter=false;
     ID3D11Texture2D* domainDepth=nullptr;
     uint64_t domainVs=0,domainPs=0;
+    uint64_t domainCameraHash=0;
+    uint64_t domainCbEpoch=0;
+    uint32_t domainCbGeneration=0;
+    unsigned domainWriterToken=0;
+    unsigned domainFormat=0;
     unsigned domainWidth=0,domainHeight=0;
     float domainCamera[6][4]{};
     bool needsActualDraw() const { return drawPacket || domainPlanned || flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,

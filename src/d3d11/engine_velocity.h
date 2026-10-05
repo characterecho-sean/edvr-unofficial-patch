@@ -270,7 +270,8 @@ inline bool engineVelocityFlatPending() noexcept {
 enum class FlatEngineDomain { ForeignPool, WorldPool, World };
 bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext*, ID3D11Texture2D* depth,
     const void* vsBytes, size_t vsSize, const void* psBytes, size_t psSize,
-    FlatEngineDomain domain, const char** reason, bool coverage=false);
+    FlatEngineDomain domain, const char** reason, bool coverage=false,
+    unsigned writerToken=0,unsigned primitiveCount=0);
 void engineVelocityFlatDomainEndDraw(ID3D11DeviceContext*);
 bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth, ID3D11ShaderResourceView** out);
 

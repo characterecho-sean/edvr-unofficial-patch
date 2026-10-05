@@ -20,6 +20,7 @@ public:
     };
     struct Inputs {
         float camera[6][4]{};float phaseX=0,phaseY=0;
+        unsigned writerToken=0;
         FlatAnimatedIdentityLedger::Identity identity;
         Certificate certificate;
     };
@@ -49,6 +50,8 @@ public:
                  unsigned start,int base,unsigned startInstance,unsigned frame,const Inputs& inputs) {
         beginFrame(frame);Draw d;d.inputs=inputs;
         if(!ctx){fail("foreground-missing-context");return false;}
+        if(!inputs.writerToken || inputs.writerToken>0xffffffu){fail("foreground-writer-token-unavailable");return false;}
+        if(!count || count%3 || count>AnimatedVertexHistory::maxVertices){fail("foreground-primitive-bound");return false;}
         Ptr<ID3D11VertexShader> activeVs;UINT classCount=0;ctx->VSGetShader(&activeVs,nullptr,&classCount);
         if(classCount){fail("foreground-dynamic-VS-linkage");return false;}
         if(d.inputs.certificate.constants.size()>65536 || d.inputs.certificate.resourceCount>128){
@@ -126,6 +129,7 @@ public:
             Settings c{};c.extentPhase[0]=float(width);c.extentPhase[1]=float(height);c.extentPhase[2]=d.inputs.phaseX;c.extentPhase[3]=d.inputs.phaseY;
             c.previousPhaseDepth[0]=d.oldInputs.phaseX;c.previousPhaseDepth[1]=d.oldInputs.phaseY;c.previousPhaseDepth[2]=commonNear;
             c.expected[0]=d.inputs.identity.slot;c.expected[1]=d.inputs.identity.skeleton;c.expected[2]=d.inputs.identity.allocation;c.expected[3]=d.oldPositions?1u:2u;
+            c.provenance[0]=d.inputs.writerToken;
             ctx->UpdateSubresource(settings_.Get(),0,nullptr,&c,0,0);
             ID3D11ShaderResourceView* vsViews[5]={d.capture.currentPositions.Get(),d.oldPositions.Get(),d.capture.currentIdentity.Get(),d.oldIdentity.Get(),d.capture.instanceIndex.Get()};
             ctx->VSSetShaderResources(0,5,vsViews);ctx->RSSetState(d.raster.Get());ctx->RSSetViewports(1,&d.viewport);ctx->RSSetScissorRects(d.scissorCount,d.scissors.data());
@@ -147,7 +151,7 @@ private:
         D3D11_VIEWPORT viewport{};std::array<D3D11_RECT,16> scissors{};UINT scissorCount=0;
         bool identityKnown=false,ambiguous=false;
     };
-    struct Settings {float extentPhase[4]{},previousPhaseDepth[4]{};uint32_t expected[4]{};};
+    struct Settings {float extentPhase[4]{},previousPhaseDepth[4]{};uint32_t expected[4]{},provenance[4]{};};
     static bool sameIdentity(const FlatAnimatedIdentityLedger::Identity& a,const FlatAnimatedIdentityLedger::Identity& b) {
         return a.slot==b.slot && a.skeleton==b.skeleton && a.allocation==b.allocation;
     }
@@ -157,7 +161,7 @@ private:
     static bool textureExtent(ID3D11ShaderResourceView* view,unsigned width,unsigned height,bool owner) {
         D3D11_SHADER_RESOURCE_VIEW_DESC v{};view->GetDesc(&v);
         if(v.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || v.Texture2D.MostDetailedMip ||
-           (owner?v.Format!=DXGI_FORMAT_R32G32_FLOAT:
+           (owner?v.Format!=DXGI_FORMAT_R32G32B32A32_FLOAT:
              (v.Format!=DXGI_FORMAT_R32_FLOAT && v.Format!=DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS)))return false;
         Ptr<ID3D11Resource> resource;view->GetResource(&resource);Ptr<ID3D11Texture2D> texture;
         if(FAILED(resource.As(&texture)))return false;D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);

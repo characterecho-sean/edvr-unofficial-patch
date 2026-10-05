@@ -72,7 +72,32 @@ int main(int argc,char** argv){
   check(!accepts(.375f,-.25f,.0675f),"phase witness pins actual bound near convention");
   constants[272][0]+=.02f;ctx->UpdateSubresource(phaseBuffer.Get(),0,nullptr,constants,0,0);
   check(!accepts(.375f,-.25f,.025f),"unknown off-center projection cannot certify common phase");
+  // The recorded CFCA8 shader projects through four DP4 rows at VS b0[4].
+  // Its near and phase must be read there, independently of the scene's b1.
+  float dp4Constants[8][4]{};
+  constants[272][0]=jitter.ndcX;
+  for(unsigned r=0;r<4;++r)for(unsigned c=0;c<4;++c)dp4Constants[4+r][c]=constants[270+c][r];
+  auto dp4Buffer=buffer(dp4Constants,sizeof(dp4Constants),D3D11_BIND_CONSTANT_BUFFER);
+  ctx->VSSetConstantBuffers(0,1,dp4Buffer.GetAddressOf());
+  auto dp4Accepts=[&](float x,float y,float nearPlane){
+   ComPtr<ID3D11Buffer> actual;ctx->VSGetConstantBuffers(0,1,&actual);check(actual==dp4Buffer,"DP4 witness reads actual bound b0");
+   D3D11_BUFFER_DESC d{};actual->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+   ComPtr<ID3D11Buffer> staging;hr(dev->CreateBuffer(&d,nullptr,&staging));ctx->CopyResource(staging.Get(),actual.Get());
+   D3D11_MAPPED_SUBRESOURCE mapped{};hr(ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped));
+   float rows[4][4]{};std::memcpy(rows,static_cast<const unsigned char*>(mapped.pData)+4*16,sizeof(rows));ctx->Unmap(staging.Get(),0);
+   return flatForegroundProjectionRowsCarryPhase(rows,FlatProjectionPatchLayout::ForwardDp4,x,y,W,H,nearPlane);
+  };
+  check(dp4Accepts(.375f,-.25f,.025f),"actual nonzero DP4 b0 phase and clip near accepted");
+  check(!dp4Accepts(0,0,.025f),"DP4 actual nonzero phase rejects zero claim");
+  check(!dp4Accepts(.375f,-.25f,.0675f),"DP4 actual near rejects scene near stand-in");
+  dp4Constants[6][0]=.25f;ctx->UpdateSubresource(dp4Buffer.Get(),0,nullptr,dp4Constants,0,0);
+  check(!dp4Accepts(.375f,-.25f,.025f),"DP4 world transform changing clip Z refuses constant near");
+  dp4Constants[6][0]=0;dp4Constants[4][2]+=.02f;ctx->UpdateSubresource(dp4Buffer.Get(),0,nullptr,dp4Constants,0,0);
+  check(!dp4Accepts(.375f,-.25f,.025f),"DP4 native off-center matrix refuses common phase");
+  dp4Constants[4][2]=0;dp4Constants[5][2]=0;ctx->UpdateSubresource(dp4Buffer.Get(),0,nullptr,dp4Constants,0,0);
+  check(dp4Accepts(0,0,.025f),"actual zero phase DP4 rows accepted");
   ID3D11Buffer* none=nullptr;ctx->VSSetConstantBuffers(1,1,&none);
+  ctx->VSSetConstantBuffers(0,1,&none);
  }
  D3D11_TEXTURE2D_DESC td{};td.Width=W;td.Height=H;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R32G8X24_TYPELESS;td.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
  ComPtr<ID3D11Texture2D> depth,colour;hr(dev->CreateTexture2D(&td,nullptr,&depth));D3D11_DEPTH_STENCIL_VIEW_DESC dd{};dd.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;dd.Format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
@@ -255,20 +280,44 @@ int main(int argc,char** argv){
  // depth. The H adapter must retain animated correspondence across refusals
  // and exclude equal-depth world overdraw using that final owner.
  D3D11_TEXTURE2D_DESC ownerDesc{};ownerDesc.Width=W;ownerDesc.Height=H;ownerDesc.MipLevels=ownerDesc.ArraySize=ownerDesc.SampleDesc.Count=1;
- ownerDesc.Format=DXGI_FORMAT_R32G32_FLOAT;ownerDesc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+ ownerDesc.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;ownerDesc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
  ComPtr<ID3D11Texture2D> ownerTexture;ComPtr<ID3D11RenderTargetView> ownerTarget;ComPtr<ID3D11ShaderResourceView> ownerView,rawDepthView;
  hr(dev->CreateTexture2D(&ownerDesc,nullptr,&ownerTexture));hr(dev->CreateRenderTargetView(ownerTexture.Get(),nullptr,&ownerTarget));hr(dev->CreateShaderResourceView(ownerTexture.Get(),nullptr,&ownerView));
  D3D11_SHADER_RESOURCE_VIEW_DESC depthViewDesc{};depthViewDesc.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;depthViewDesc.Format=DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;depthViewDesc.Texture2D.MipLevels=1;
  hr(dev->CreateShaderResourceView(depth.Get(),&depthViewDesc,&rawDepthView));
- auto foreignMarkerCode=compile("float2 main(float4 p:SV_Position):SV_Target{return float2(-5,p.z);}","ps_5_0");ComPtr<ID3D11PixelShader> foreignMarker;
+ auto foreignMarkerCode=compile("float4 main(float4 p:SV_Position,uint primitive:SV_PrimitiveID):SV_Target{return float4(-5,p.z,float(primitive),1);}","ps_5_0");ComPtr<ID3D11PixelShader> foreignMarker;
  hr(dev->CreatePixelShader(foreignMarkerCode->GetBufferPointer(),foreignMarkerCode->GetBufferSize(),nullptr,&foreignMarker));
  auto finalRaster=[&](Pose pose){bind(pose,false);float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(ownerTarget.Get(),empty);ctx->OMSetRenderTargets(1,ownerTarget.GetAddressOf(),dsv.Get());ctx->PSSetShader(foreignMarker.Get(),nullptr,0);issue(ctx.Get(),9,1,0,0,0);};
  auto readFloatMap=[&](ID3D11ShaderResourceView* view){ComPtr<ID3D11Resource> res;view->GetResource(&res);ComPtr<ID3D11Texture2D> texture;hr(res.As(&texture));D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
   ComPtr<ID3D11Texture2D> staging;hr(dev->CreateTexture2D(&d,nullptr,&staging));ctx->CopyResource(staging.Get(),texture.Get());D3D11_MAPPED_SUBRESOURCE m{};hr(ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&m));std::vector<float> pixels(W*H*4);
   for(unsigned y=0;y<H;++y)std::memcpy(pixels.data()+y*W*4,static_cast<unsigned char*>(m.pData)+y*m.RowPitch,W*16);ctx->Unmap(staging.Get(),0);return pixels;};
  FlatForegroundMotion flat;FlatForegroundMotion::Inputs flatInputs;FlatForegroundMotion::Output flatOutput;
- flatInputs.camera[3][2]=.025f;flatInputs.identity={1,740,1631,1,1,nullptr};
+ flatInputs.camera[3][2]=.025f;flatInputs.identity={1,740,1631,1,1,nullptr};flatInputs.writerToken=1;
  float worldCamera[6][4]{};worldCamera[3][2]=.0675f;
+ {
+  FlatForegroundMotion worldOnly;FlatForegroundMotion::Output output;
+  float owner[4]={3,.5f,0,0};ctx->ClearRenderTargetView(ownerTarget.Get(),owner);
+  ctx->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.5f,0);
+  worldOnly.beginFrame(590);
+  check(worldOnly.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,590,W,H,output) &&
+        output.qualified && output.motion && output.depthNear==worldCamera[3][2] && !output.resetRequired,
+        "fresh world-only H qualifies without any SO captures");
+  auto pixels=readFloatMap(output.motion.Get());
+  check(std::all_of(pixels.begin(),pixels.end(),[](float value){return value==0;}),
+        "world-only H emits a native empty foreground map");
+  worldOnly.beginFrame(591);
+  check(worldOnly.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,591,W,H,output) &&
+        !output.resetRequired,"steady world-only H does not reset every frame");
+  float nearerCamera[6][4]{};nearerCamera[3][2]=.025f;worldOnly.beginFrame(592);
+  check(worldOnly.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),nearerCamera,592,W,H,output) &&
+        output.resetRequired,"world-only common near transition requests one reset");
+  worldOnly.beginFrame(593);
+  check(worldOnly.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),nearerCamera,593,W,H,output) &&
+        !output.resetRequired,"world-only near transition settles without repeated resets");
+  worldOnly.fail("unknown-world-writer");
+  check(!worldOnly.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),nearerCamera,593,W,H,output) &&
+        !output.qualified && !output.motion,"world-only H still refuses an uncertified writer");
+ }
  Pose foreignOld{.1f,1,0,0,.025f,740},foreignNow{.2f,1,0,0,.025f,740};
  finalRaster(foreignOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,600,flatInputs),"flat captures a new foreign identity before H");
  check(flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,600,W,H,flatOutput) && flatOutput.resetRequired && flatOutput.depthNear==.025f,"new geometry requests one reset and common near spans foreign/world");
@@ -351,6 +400,73 @@ int main(int argc,char** argv){
   float directionX=(float(i%W)+.5f-W*.5f)>0?1.f:-1.f,directionY=(float(i/W)+.5f-H*.5f)>0?1.f:-1.f;
   check(flatPixels[i*4]==directionX*65504 && flatPixels[i*4+1]==directionY*65504,"actual infinite previous projection saturates its true direction without inventing zero motion");}
  check(infiniteProjection>2000,"true eye-plane previous projection remains actual matched history");
+ // Two current triangles coincide exactly, while their captured old bone
+ // transforms differ. The original material discards the later primitive;
+ // rerasterizing its VS alone must never replace the surviving motion.
+ {
+  const float coincidentVertices[]={-.6f,-.6f,1,0,.6f,-.6f,1,0,.6f,.6f,1,0,
+                                   -.6f,-.6f,1,1,.6f,-.6f,1,1,.6f,.6f,1,1};
+  const UINT coincidentIndices[]={0,1,2,3,4,5};
+  auto cvb=buffer(coincidentVertices,sizeof(coincidentVertices),D3D11_BIND_VERTEX_BUFFER);
+  auto cib=buffer(coincidentIndices,sizeof(coincidentIndices),D3D11_BIND_INDEX_BUFFER);
+  auto materialCode=compile("cbuffer Stamp:register(b13){float token,discardPrimitive,discardAll,pad;} float4 main(float4 p:SV_Position,uint primitive:SV_PrimitiveID):SV_Target{if(discardAll!=0 || (discardPrimitive!=0 && primitive==1))discard;return float4(-5,p.z,float(primitive),token);}","ps_5_0");
+  ComPtr<ID3D11PixelShader> material;hr(dev->CreatePixelShader(materialCode->GetBufferPointer(),materialCode->GetBufferSize(),nullptr,&material));
+  auto stamp=buffer(nullptr,16,D3D11_BIND_CONSTANT_BUFFER);
+  auto setup=[&](bool prior){
+   bind(foreignOld,false);UINT stride=16,offset=0;ID3D11Buffer* v=cvb.Get();ctx->IASetVertexBuffers(1,1,&v,&stride,&offset);
+   ctx->IASetIndexBuffer(cib.Get(),DXGI_FORMAT_R32_UINT,0);
+   const float transforms[8]={prior?-.12f:0,0,0,0,prior?.12f:0,0,0,0};ctx->UpdateSubresource(bones.Get(),0,nullptr,transforms,0,0);
+   const float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(ownerTarget.Get(),empty);
+   ctx->OMSetRenderTargets(1,ownerTarget.GetAddressOf(),dsv.Get());ctx->PSSetShader(material.Get(),nullptr,0);ctx->PSSetConstantBuffers(13,1,stamp.GetAddressOf());
+  };
+  auto original=[&](unsigned token,unsigned count,unsigned start,bool discardPrimitive,bool discardAll){
+   const float settings[4]={float(token),discardPrimitive?1.f:0.f,discardAll?1.f:0.f,0};ctx->UpdateSubresource(stamp.Get(),0,nullptr,settings,0,0);
+   issue(ctx.Get(),count,1,start,0,0);
+  };
+  auto expectedSurvivor=[&](const char* message){
+   auto pixels=readFloatMap(flatOutput.motion.Get());unsigned covered=0;
+   for(unsigned i=0;i<W*H;++i)if(pixels[i*4+3]==1){++covered;check(std::fabs(pixels[i*4]+.12f*W*.5f)<1.f/256 && std::fabs(pixels[i*4+1])<1.f/256,message);}
+   check(covered>1000,"coincident material retains substantial matched coverage");
+  };
+  flat.reset();flatInputs.phaseX=flatInputs.phaseY=0;flatInputs.writerToken=1;
+  setup(true);original(1,6,0,true,false);check(flat.capture(ctx.Get(),issue,6,1,0,0,0,1000,flatInputs),"capture both actual prior primitive positions");
+  setup(false);original(1,6,0,true,false);check(flat.capture(ctx.Get(),issue,6,1,0,0,0,1001,flatInputs) && flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,1001,W,H,flatOutput),"original discard plus final primitive receipt qualifies H");
+  expectedSurvivor("discarded coincident primitive cannot overwrite surviving animated motion");
+  // The second original draw starts its own primitive numbering at zero.
+  // Only the writer token distinguishes these coincident same-slot draws.
+  flat.reset();setup(true);original(1,3,0,false,false);flatInputs.writerToken=1;
+  check(flat.capture(ctx.Get(),issue,3,1,0,0,0,1010,flatInputs),"first draw captures its real prior pose");
+  original(2,3,3,false,true);flatInputs.writerToken=2;
+  check(flat.capture(ctx.Get(),issue,3,1,3,0,0,1010,flatInputs),"discarded second draw retains independent prior geometry");
+  setup(false);original(1,3,0,false,false);flatInputs.writerToken=1;
+  check(flat.capture(ctx.Get(),issue,3,1,0,0,0,1011,flatInputs),"first current draw publishes surviving writer token");
+  original(2,3,3,false,true);flatInputs.writerToken=2;
+  check(flat.capture(ctx.Get(),issue,3,1,3,0,0,1011,flatInputs) && flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,1011,W,H,flatOutput),"different writer tokens qualify coincident cross-draw H");
+  expectedSurvivor("discarded coincident draw cannot replace another writer's motion");
+  D3D11_DEPTH_STENCIL_DESC conditionalDesc=ds;
+  conditionalDesc.StencilReadMask=255;
+  conditionalDesc.FrontFace.StencilFunc=conditionalDesc.BackFace.StencilFunc=D3D11_COMPARISON_EQUAL;
+  ComPtr<ID3D11DepthStencilState> conditional;hr(dev->CreateDepthStencilState(&conditionalDesc,&conditional));
+  for(unsigned pass=0;pass<2;++pass) {
+   flat.reset();setup(true);flatInputs.writerToken=1;original(1,3,0,false,false);
+   check(flat.capture(ctx.Get(),issue,3,1,0,0,0,1020+pass*2,flatInputs),"conditional case retains first prior pose");
+   flatInputs.writerToken=2;original(2,3,3,false,false);
+   check(flat.capture(ctx.Get(),issue,3,1,3,0,0,1020+pass*2,flatInputs),"conditional case retains second prior pose");
+   setup(false);ctx->OMSetDepthStencilState(conditional.Get(),21);flatInputs.writerToken=1;original(1,3,0,false,false);
+   check(flat.capture(ctx.Get(),issue,3,1,0,0,0,1021+pass*2,flatInputs),"original conditional stencil writes first passing tuple");
+   ctx->OMSetDepthStencilState(conditional.Get(),pass?21:22);flatInputs.writerToken=2;original(2,3,3,false,false);
+   check(flat.capture(ctx.Get(),issue,3,1,3,0,0,1021+pass*2,flatInputs) &&
+         flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,1021+pass*2,W,H,flatOutput),
+         "H uses final tuple without rerunning original conditional stencil");
+   auto pixels=readFloatMap(flatOutput.motion.Get());unsigned covered=0;
+   for(unsigned i=0;i<W*H;++i)if(pixels[i*4+3]==1){++covered;
+    check(std::fabs(pixels[i*4]-(pass?.12f:-.12f)*W*.5f)<1.f/256,
+          "conditional stencil selects motion from the actual passing original writer");}
+   check(covered>1000,"conditional stencil tuple preserves substantial coverage");
+   ComPtr<ID3D11DepthStencilState> restored;UINT reference=0;ctx->OMGetDepthStencilState(&restored,&reference);
+   check(restored==conditional && reference==(pass?21u:22u),"H restores actual conditional stencil state and reference");
+  }
+ }
  ctx->ClearState();
  if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T n=0;queue->GetMessage(i,nullptr,&n);std::vector<char> bytes(n);auto* m=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());hr(queue->GetMessage(i,m,&n));if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"no D3D warnings/errors");}}
  std::printf("weapon motion: %u checks passed (%s)\n",checks,driver==D3D_DRIVER_TYPE_WARP?"WARP":"hardware");

@@ -6,6 +6,7 @@
 #include "flat_compute_model.h"
 #include "flat_cpu.h"
 #include "flat_runtime.h"
+#include "flat_capture_policy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -49,8 +50,6 @@ constexpr uint32_t kMenuCopies = 4;
 constexpr uint64_t kMenuCopyVs = 0xDEF19B035D5EDEDCull;
 constexpr uint64_t kMenuCopyPs = 0xDED8796049C7BB4Aull;
 constexpr uint32_t kCbBytes = kFlatCbExemplarBytes;
-constexpr uint64_t kCaptureMs = 120000;
-constexpr uint32_t kMaxUsefulFrames = 12000;
 constexpr uint64_t kReportMs = 5000;
 
 struct View {
@@ -131,6 +130,7 @@ struct MenuCopy {
 struct State {
     ID3D11Device* device = nullptr;  // identity only
     uint64_t startedMs = 0, nextReportMs = 0;
+    FlatCaptureBudget captureBudget{};
     uint32_t presents = 0, rejectedPresents = 0, testPresents = 0;
     uint32_t serial = 0, usefulFrames = 0, framesWithDepth = 0, framesToOutput = 0;
     uint64_t epoch = 1;
@@ -844,6 +844,12 @@ void clearFrame() {
     std::memset(g.sampledSrv, 0, sizeof(g.sampledSrv));
 }
 
+void finishDiscovery(uint64_t frame) {
+    report(frame, "final");
+    detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
+    Log::get().note("flat temporal: passive discovery complete; flat runtime treatment continues independently and reports its own results");
+}
+
 }  // namespace
 
 void flatTemporalStart(ID3D11Device* device) {
@@ -856,8 +862,9 @@ void flatTemporalStart(ID3D11Device* device) {
     std::memset(&g, 0, sizeof(g));
     g.epoch = 1;
     g.device = device;
+    g.captureBudget = flatCaptureBudget(FlatCaptureTier::Full);
     g_waitingForPresent.store(true, std::memory_order_release);
-    Log::get().note("flat temporal: passive discovery armed, awaiting first owned Present thread; then at most 120 s / 12000 useful frames (all Presents counted separately). Requested=%s; treatment is reported separately by flat runtime",
+    Log::get().note("flat temporal: passive discovery armed, awaiting first owned Present thread; the trigger's collection budget is reported at that boundary. Requested=%s; treatment is reported separately by flat runtime",
                     Config::get().requestedTemporalMode().c_str());
 }
 
@@ -869,12 +876,13 @@ void flatTemporalArm(bool full) {
     ID3D11Device* device = g.device;
     detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
     flatTemporalStart(device);
+    g.captureBudget = flatCaptureBudget(full ? FlatCaptureTier::Full : FlatCaptureTier::General);
     g.projectionDetailsRemaining = 2;
     g.menuCopyReportsLeft = 2;
     g.projectionManual = full;
     if (full) flatComputeArm(device, g.presents);
     flatRuntimeArmProjectionAudit(full);
-    Log::get().note("flat temporal: dump_draws started a fresh bounded desktop discovery window tier=%s; general reports shader/state/routing/refusals, Shift+key requests full capture (slow, large)", full ? "full" : "general");
+    Log::get().note("flat temporal: dump_draws started a fresh bounded desktop discovery window tier=%s limit=%llu-ms/%u-useful-frames; general reports shader/state/routing/refusals, Shift+key requests full capture (slow, large)", full ? "full" : "general", static_cast<unsigned long long>(g.captureBudget.milliseconds), g.captureBudget.usefulFrames);
 }
 
 void flatTemporalStop() {
@@ -897,9 +905,19 @@ void flatTemporalBeforePresent(IDXGISwapChain* swap, uint64_t frame, UINT flags)
         detail::g_flatTemporalOwnerThread.store(thread, std::memory_order_release);
         g.startedMs = nowMs();
         g.nextReportMs = g.startedMs + kReportMs;
-        Log::get().note("flat temporal: first owned Present on thread %lu; warmup draws before this boundary were not observed; discovery now active",
-                        static_cast<unsigned long>(thread));
+        Log::get().note("flat temporal: first owned Present on thread %lu; warmup draws before this boundary were not observed; discovery now active limit=%llu-ms/%u-useful-frames",
+                        static_cast<unsigned long>(thread), static_cast<unsigned long long>(g.captureBudget.milliseconds), g.captureBudget.usefulFrames);
         detail::g_flatTemporalCapturing.store(true, std::memory_order_release);
+    }
+    // The deadline closes even a paused/no-draw window. The ordinary observer
+    // gate below would otherwise leave the collection armed indefinitely.
+    if (detail::g_flatTemporalCapturing.load(std::memory_order_acquire) &&
+        detail::g_flatTemporalOwnerThread.load(std::memory_order_acquire) == GetCurrentThreadId() &&
+        flatCaptureExpired(g.startedMs, nowMs(), g.usefulFrames,
+                           g.captureBudget.milliseconds, g.captureBudget.usefulFrames)) {
+        finishDiscovery(frame);
+        clearFrame();
+        return;
     }
     if (!flatTemporalCapturing() || !swap) return;
     ++g.serial;
@@ -942,20 +960,18 @@ void flatTemporalAfterPresent(uint64_t frame, HRESULT result, UINT flags) {
     if (frameDepth) ++g.framesWithDepth;
     if (outputDraws) ++g.framesToOutput;
     const bool deadline = flatCaptureExpired(g.startedMs, now, g.usefulFrames,
-                                             kCaptureMs, kMaxUsefulFrames);
+                                             g.captureBudget.milliseconds, g.captureBudget.usefulFrames);
     if (flatComputeCandidate()) {
         FlatMonoFrame mono{};
         if (result == S_OK && !(flags & DXGI_PRESENT_TEST)) mono = printMonoInput(frame);
         flatComputeFinish(frame, mono);
         printMenuCopies(frame);
     }
-    if (g.presents == 1 || now >= g.nextReportMs || deadline) {
-        report(frame, deadline ? "final" : "sample");
-        g.nextReportMs = now + kReportMs;
-    }
     if (deadline) {
-        detail::g_flatTemporalCapturing.store(false, std::memory_order_release);
-        Log::get().note("flat temporal: passive discovery complete; flat runtime treatment continues independently and reports its own results");
+        finishDiscovery(frame);
+    } else if (g.presents == 1 || now >= g.nextReportMs) {
+        report(frame, "sample");
+        g.nextReportMs = now + kReportMs;
     }
     clearFrame();
     if (!deadline && result == S_OK && !(flags & DXGI_PRESENT_TEST))

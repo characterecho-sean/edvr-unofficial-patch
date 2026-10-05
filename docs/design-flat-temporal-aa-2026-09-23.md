@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** TAA works; shared flat SDK path still refuses in flight (103).
-  Geometry/full-build tests pass, but live foreground intake captures no draws.
+- **State:** flat SDK admission/provenance repair BUILT, NOT FLOWN (103).
+  Full validation passes; foreign tuple and world-only H pass the GPU rigs.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** reproduce foreign admission offline from the recorded pairs/prepasses.
+- **Next:** Epic native DLAA/FSR, holstered then plasma drawn; NumLock once.
   Retain section 102's qualified color-clear fix; no per-weapon table (103).
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -11643,3 +11643,108 @@ structural foreign geometry support, and retain bounded first-failure evidence.
 Do not remove the SDK safety guard or ask for another flight before this
 boundary is tested. This analysis changes no renderer or installed settings;
 the installed code remains `6ab6acff`.
+
+### 2026-10-05: admission repair and ordinary NumLock cost
+
+Sean confirms SDK AA also appears disengaged while holstered, and ordinary
+NumLock causes a sustained frame-rate dip. The same verified flight shows
+discovery CPU cost near zero at 14:32:59, then about 5.2 ms/frame after the
+14:33:01 general trigger. The draw wrapper rises from about 1.5 to 6.9 ms/frame.
+General requests exclude bulk exporters, but still restart the old 120-second
+passive observer window. The repair limits ordinary reports to three useful
+frames or one second, with wall-clock expiry before the paused observer gate;
+explicit full capture retains its existing longer window. No new config key.
+
+Admission hypotheses and discriminators, before the next build:
+
+- Old pair membership blocks structurally valid foreign geometry. Actual
+  AACF/CAD1 creation bytes derive the pool ABI and produce valid foreign-only
+  and combined MRT6/MRT7 pixel shaders on WARP. All 156 original executable
+  instructions remain byte-identical and ordered; this is not pixel parity.
+- Pre-world null prepasses need provisional world-camera proof. Actual
+  84F6/ACE405 VS bytes end in B1 rows270..273 projected to o0; the generic
+  classifier rejects their split coefficient temporaries. A pending receipt
+  must match the subsequently named world camera/depth/extent in the same frame
+  before H admission, or refuse. Shape alone does not establish the camera.
+- CFCA8 uses actual CB0 rows4..7 DP4 projection. B1 phase alone is insufficient;
+  the new helper checks the actual ranged/private CB0 publication, finite
+  canonical near and measured raster phase. Focused WARP checks pass (105,557).
+- Recorded native HDR writers EC813/B765 and 983979/350735 are projected pool
+  material meshes, not fullscreen GBuffer shading. They need exact final-color
+  ownership treatment, original discard/coverage semantics and actual draw
+  state; a generic read-only lighting exemption would be unsupported.
+
+Ruled out: small output files mean cheap NumLock, because the ordinary window
+keeps driver/state observers running and the measured CPU cost remains high.
+Ruled out: those HDR material passes merely shade the existing GBuffer, because
+their actual shaders sample mesh UV material textures and lack that screen-depth
+reconstruction proof. The temporary CAD1 dummy-resource harness crashes even
+with the original unpatched PS; it cannot establish color parity. No flight is
+requested while these production admission boundaries remain untested offline.
+
+The structural planner caches proofs from original creation bytes and validates
+the actual ranged projection publication before recording foreign motion or
+provisional null ownership. The final H boundary must match every provisional
+null camera/depth/extent/phase witness and the separately recorded HDR target.
+Known world producers reuse checked bindings without extra per-draw CB queries.
+A compact first-failure record retains frame, draw sequence, VS/PS, format,
+camera, depth, stage and reason for ordinary NumLock reports.
+
+World HDR markers share the original material PS (including discard) and the
+original depth/stencil state: `engineVelocityFlatDomainBeginDraw` only changes
+the marker target, derived blend and shader bindings. Conditional stencil thus
+selects original color and world marker together. The new primitive/writer
+tuple also certifies surviving foreign stencil coverage; legacy markers without
+that provenance retain their refusal. HDR depth must write or
+test EQUAL, and color must be opaque with complete RGB writes. The old packet
+contains the HDR shader bytes but not their live descriptors; runtime admission
+must check them, and raw shader proof alone is not flight qualification.
+
+The full recorded-nominee audit found additional real same-DSV writers before
+building: two nonnull depth-only PSs were rejected by the legacy color-output
+requirement; nonpool World markers demanded an identity they do not consume;
+72BDD's exact VS projection was unnecessarily tied to one companion PS. The
+flat-only marker and independent VS proof paths address these without changing
+legacy VR derivative behavior.
+
+Ruled out: the old world-pair gate alone explains all SDK refusal, because
+recorded foreign 7B0DC/0DF0, 8B589D/7268, 114AF/A175 and F516/B40B draws use the
+same selected DSV but near .0675 versus world .025 and have real PS discard.
+The existing RG32F owner stores pool identity and depth, insufficient to select
+the original surviving primitive among coincident triangles or different draws
+of the same pool identity. The discard guard correctly refuses this ambiguity.
+
+The next proof uses flat-only RGBA32F ownership: retain pool/depth in xy and add
+exact primitive and frame-local writer identity in zw. The original material
+raster stamps both after its own discard/depth/stencil tests; H replay must match
+all four fields. Triangle-list, one-instance and no-GS/HS/DS restrictions preserve
+indexed invocation order through the position capture. A verified free private
+PS constant slot publishes the writer identity and is restored after the draw;
+missing slots, identity overflow and unsupported shape refuse. VR retains its
+RG32F allocation and original derivative bytes. Required offline negatives are
+coincident primitives and separate same-slot/depth draws with different motion.
+
+The shared WARP rig now passes 114,044 checks with RGBA ownership. Its real
+indexed material discards the later of two coincident same-slot/depth triangles
+whose previous bone poses differ; H retains the surviving primitive's motion.
+A separate same-primitive cross-draw case discards writer 2 and retains writer
+1's motion. Conditional-stencil EQUAL selects the actual surviving writer;
+replay with stencil disabled still recovers its motion from the tuple and
+restores original stencil state/reference. Fresh world-only H, native extents
+and common-near transitions also pass. The production marker rig passes 15,201
+checks, including original RGB/depth bytes and exact ranged PS CB restoration.
+All 14 recorded nominees prove world admission, and every pool foreign shader
+creates with provenance on WARP. Generator reflection/hash/dry-run tests and all
+three capture-reader Python self-tests pass.
+
+Full absolute-path `build.bat --jobs 4` passed on 2026-10-05 at 21:57 UTC:
+production DLLs, all 122 jobs, config/exports, self-contained installer payload
+checks and the fresh full-build receipt. Receipt inputs are
+`eaf7d1f47f90b162bd22fccdb744c2c327cac235da228544f05f3c45ab007646`.
+Log: `build/flat-provenance-numlock-full.log`. No flight or hardware frame-rate
+claim yet. Epic flat settings and DLSS 310.9.1 remain the test environment;
+the wider owner plane applies to flat, while VR keeps its original RG32 format.
+Native HDR still requires render extent at least output extent; scaled-HDR
+support is a separate route, and unknown/incomplete writers still refuse with
+the first-failure receipt. Ordinary NumLock expires at three useful frames or
+one second; Shift+key retains explicit full capture.

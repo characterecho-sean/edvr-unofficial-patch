@@ -6,7 +6,7 @@ Buffer<float4> Before:register(t1);
 StructuredBuffer<uint4> Identity:register(t2);
 StructuredBuffer<uint4> PreviousIdentity:register(t3);
 Buffer<uint> InstanceIndex:register(t4);
-cbuffer Settings:register(b0){float4 extentPhase;float4 previousPhaseDepth;uint4 expected;}
+cbuffer Settings:register(b0){float4 extentPhase;float4 previousPhaseDepth;uint4 expected;uint4 provenance;}
 struct O{float4 p:SV_Position;float4 old:TEXCOORD0;nointerpolation uint valid:TEXCOORD1;nointerpolation float actualNear:TEXCOORD2;};
 bool validPosition(float4 p){return all(isfinite(p)) && p.z>0;}
 O main(uint id:SV_VertexID){
@@ -22,13 +22,14 @@ O main(uint id:SV_VertexID){
 }
 )HLSL";
 inline constexpr char kFlatForegroundMotionPs[]=R"HLSL(
-Texture2D<float2> FinalOwner:register(t0);
+Texture2D<float4> FinalOwner:register(t0);
 Texture2D<float> RawDepth:register(t1);
-cbuffer Settings:register(b0){float4 extentPhase;float4 previousPhaseDepth;uint4 expected;}
-float4 main(float4 p:SV_Position,float4 old:TEXCOORD0,nointerpolation uint valid:TEXCOORD1,nointerpolation float actualNear:TEXCOORD2):SV_Target{
- int2 q=int2(p.xy);float2 owner=FinalOwner.Load(int3(q,0));
+cbuffer Settings:register(b0){float4 extentPhase;float4 previousPhaseDepth;uint4 expected;uint4 provenance;}
+float4 main(float4 p:SV_Position,float4 old:TEXCOORD0,nointerpolation uint valid:TEXCOORD1,nointerpolation float actualNear:TEXCOORD2,uint primitive:SV_PrimitiveID):SV_Target{
+ int2 q=int2(p.xy);float4 owner=FinalOwner.Load(int3(q,0));
  float marker=-float(expected.x*2+3);
  if(asuint(owner.x)!=asuint(marker) || asuint(owner.y)!=asuint(p.z) ||
+    asuint(owner.z)!=asuint(float(primitive)) || asuint(owner.w)!=asuint(float(provenance.x)) ||
     asuint(RawDepth.Load(int3(q,0)))!=asuint(owner.y))discard;
  float canonical=p.z*previousPhaseDepth.z/actualNear;
  if(!valid || !isfinite(canonical) || canonical<0 || canonical>1)return 0;

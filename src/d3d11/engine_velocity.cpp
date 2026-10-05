@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -185,6 +186,7 @@ struct BlendEntry {
     Ptr<ID3D11BlendState> game;
     Ptr<ID3D11BlendState> derived;
     const char* refused = nullptr;
+    bool flatProvenance=false;
 };
 std::vector<BlendEntry> g_blends;
 constexpr size_t kBlendCap = 64;
@@ -240,6 +242,7 @@ const char* const kInvalidNames[kInvalidCount] = {
 struct Eye {
     Ptr<ID3D11Texture2D> depth;          // the scene depth this eye's slot target matches
     Ptr<ID3D11Texture2D> slots;
+    DXGI_FORMAT slotFormat=DXGI_FORMAT_UNKNOWN;
     Ptr<ID3D11RenderTargetView> slotsRtv;
     Ptr<ID3D11ShaderResourceView> slotsSrv;
     Ptr<ID3D11Texture2D> overlayBase;
@@ -294,6 +297,9 @@ struct FlatDomainSaved {
     Ptr<ID3D11BlendState> blend;
     Ptr<ID3D11RenderTargetView> targets[8];
     Ptr<ID3D11DepthStencilView> depth;
+    Ptr<ID3D11DeviceContext1> rangedContext;
+    Ptr<ID3D11Buffer> tokenOriginal;
+    UINT tokenSlot=~0u,tokenFirst=0,tokenCount=0;
     FLOAT factor[4]{};UINT sampleMask=~0u;
 };
 FlatDomainSaved g_flatDomainSaved;
@@ -302,8 +308,10 @@ struct FlatDomainShader {
     Ptr<ID3D11PixelShader> originalPs,patchedPs;
     FlatEngineDomain domain=FlatEngineDomain::World;
     bool coverage=false;
+    unsigned tokenSlot=~0u;
 };
 std::vector<FlatDomainShader> g_flatDomainShaders;
+Ptr<ID3D11Buffer> g_flatDomainTokenBuffer;
 
 static_assert(kEngineVelocitySourceEye == 2 && kWatchSlots == 6, "one watch pair per eye, the source's last");
 // The on-foot source's depth as screen_motion last named it, and the present
@@ -745,15 +753,23 @@ bool snapshotOverlayBase(ID3D11DeviceContext* ctx, Eye& e) {
 }
 
 // The derived blend state for the game's current one (null = the default).
-ID3D11BlendState* derivedBlendFor(ID3D11DeviceContext* ctx, ID3D11BlendState* game, const char** refused) {
+ID3D11BlendState* derivedBlendFor(ID3D11DeviceContext* ctx, ID3D11BlendState* game, const char** refused,bool flatProvenance=false) {
     for (const auto& b : g_blends)
-        if (b.game.Get() == game) { *refused = b.refused; return b.derived.Get(); }
+        if (b.game.Get() == game && b.flatProvenance==flatProvenance) { *refused = b.refused; return b.derived.Get(); }
     if (g_blends.size() >= kBlendCap) g_blends.clear();   // g_bound holds its own references
     Ptr<ID3D11Device> dev;
     ctx->GetDevice(&dev);
     BlendEntry entry;
     entry.game = game;
+    entry.flatProvenance=flatProvenance;
     entry.derived = engineVelocityCreateDerivedBlend(dev.Get(), game, &entry.refused);
+    if(flatProvenance && entry.derived) {
+        D3D11_BLEND_DESC d{};entry.derived->GetDesc(&d);
+        d.RenderTarget[kEngineVelocityTarget].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        Ptr<ID3D11BlendState> complete;
+        if(FAILED(dev->CreateBlendState(&d,&complete))){entry.derived.Reset();entry.refused="flat-domain-provenance-blend-create";}
+        else entry.derived=std::move(complete);
+    }
     g_blends.push_back(entry);
     *refused = entry.refused;
     return entry.derived.Get();
@@ -944,7 +960,9 @@ bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* dep
     // A single-sample, single-slice scene depth only: MRT6 must match the
     // pass's depth target exactly or the runtime drops the game's draw.
     if (dd.SampleDesc.Count != 1 || dd.ArraySize != 1) { ++g_draw.depthUnsupported; return false; }
-    if (e.depth.Get() == depth && e.slots && e.width == dd.Width && e.height == dd.Height) return true;
+    const DXGI_FORMAT slotFormat=runtimeFlatProfile() && eye==kEngineVelocitySourceEye?
+        DXGI_FORMAT_R32G32B32A32_FLOAT:DXGI_FORMAT_R32G32_FLOAT;
+    if (e.depth.Get() == depth && e.slots && e.width == dd.Width && e.height == dd.Height && e.slotFormat==slotFormat) return true;
     const void* wasDepth = e.depth.Get();
     const unsigned wasW = e.width, wasH = e.height;
     e.slots.Reset(); e.slotsRtv.Reset(); e.slotsSrv.Reset();
@@ -956,7 +974,7 @@ bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* dep
     e.depth = depth; e.width = dd.Width; e.height = dd.Height;
     D3D11_TEXTURE2D_DESC d{};
     d.Width = dd.Width; d.Height = dd.Height; d.MipLevels = 1; d.ArraySize = 1; d.SampleDesc.Count = 1;
-    d.Format = DXGI_FORMAT_R32G32_FLOAT;
+    d.Format = slotFormat;e.slotFormat=slotFormat;
     d.Usage = D3D11_USAGE_DEFAULT;
     d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     Ptr<ID3D11Device> dev;
@@ -1990,7 +2008,7 @@ void releasePrimaryPoolsLocked() {
 }
 
 void clearLocked() {
-    g_flatDomainSaved={};g_flatDomainShaders.clear();g_flatMarkerFrame=~0u;g_flatMarkerDepth.Reset();
+    g_flatDomainSaved={};g_flatDomainShaders.clear();g_flatDomainTokenBuffer.Reset();g_flatMarkerFrame=~0u;g_flatMarkerDepth.Reset();
     releasePrimaryPoolsLocked();
     for (auto& e : g_eyes) e = Eye{};
     g_sourceDepth.Reset();
@@ -2147,12 +2165,16 @@ void engineVelocityAfterFlatDraw(ID3D11DeviceContext* ctx) {
 // whatever puts state back takes it.
 bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D* depth,
     const void* vsBytes,size_t vsSize,const void* psBytes,size_t psSize,
-    FlatEngineDomain domain,const char** reason,bool coverage) {
+    FlatEngineDomain domain,const char** reason,bool coverage,unsigned writerToken,unsigned primitiveCount) {
     const bool pool=domain!=FlatEngineDomain::World;
     auto fail=[&](const char* why){if(reason)*reason=why;return false;};
     if(reason)*reason=nullptr;
     if(!runtimeFlatProfile() || !ctx || !depth ||
        ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return fail("flat-domain-invalid-input");
+    if(domain==FlatEngineDomain::ForeignPool) {
+        if(!writerToken || writerToken>0xffffffu)return fail("flat-domain-writer-token-unavailable");
+        if(!primitiveCount || primitiveCount>0xffffffu)return fail("flat-domain-primitive-overflow");
+    }
     engineVelocityFlatFlush(ctx,EngineVelocityFlushCause::kOtherDraw);
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if(g_flatDomainSaved.context)return fail("flat-domain-nested-bracket");
@@ -2166,12 +2188,6 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
         for(const auto& chunk:chunks)if(chunk.tag==dxbc_engine_velocity_detail::kTagOsgn)
             for(const auto& output:dxbc_engine_velocity_detail::parseSignature(chunk.bytes))
                 if(output.systemValue && output.systemValue!=64)return fail("flat-domain-depth-or-coverage-output");
-        if(domain==FlatEngineDomain::ForeignPool)for(const auto& chunk:chunks)
-            if(dxbc_engine_velocity_detail::isProgram(chunk.tag)) {
-                const auto words=dxbc_engine_velocity_detail::programWords(chunk.bytes);
-                for(size_t at=2;at<words.size();at+=dxbc_engine_velocity_detail::instructionLength(words,at))
-                    if((words[at]&0x7ffu)==13)return fail("flat-domain-foreign-discard-provenance");
-            }
     } catch(...) {return fail("flat-domain-output-signature");}
     Ptr<ID3D11GeometryShader> gs;Ptr<ID3D11HullShader> hs;Ptr<ID3D11DomainShader> ds;
     ctx->GSGetShader(&gs,nullptr,nullptr);ctx->HSGetShader(&hs,nullptr,nullptr);ctx->DSGetShader(&ds,nullptr,nullptr);
@@ -2214,17 +2230,19 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
         } else {inputs.positionRegister=30;inputs.identityRegister=31;inputs.identityComponent=0;}
         FlatDomainShader entry;entry.originalVs=saved.vs;entry.originalPs=saved.ps;entry.domain=domain;entry.coverage=coverage;
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);std::vector<BYTE> bytes;
-        const auto kind=domain==FlatEngineDomain::ForeignPool?dxbc_engine_velocity_detail::FlatMarkerKind::ForeignPool:
-            domain==FlatEngineDomain::WorldPool?dxbc_engine_velocity_detail::FlatMarkerKind::None:dxbc_engine_velocity_detail::FlatMarkerKind::World;
+        const auto kind=domain==FlatEngineDomain::ForeignPool?dxbc_engine_velocity_detail::FlatMarkerKind::ForeignPoolProvenance:
+            domain==FlatEngineDomain::WorldPool?dxbc_engine_velocity_detail::FlatMarkerKind::WorldPool:dxbc_engine_velocity_detail::FlatMarkerKind::World;
         if(saved.ps) {
-            if(!engineVelocityPatchPs(psBytes,psSize,inputs,bytes,why,false,kind))return fail("flat-domain-PS-proof");
+            if(!engineVelocityPatchPs(psBytes,psSize,inputs,bytes,why,false,kind,
+                domain==FlatEngineDomain::ForeignPool?&entry.tokenSlot:nullptr))return fail("flat-domain-PS-proof");
         } else {
-            const BYTE* code=domain==FlatEngineDomain::ForeignPool?kFlatNullForeignMarkerPsBytecode:
+            const BYTE* code=domain==FlatEngineDomain::ForeignPool?kFlatNullForeignProvenanceMarkerPsBytecode:
                 domain==FlatEngineDomain::WorldPool?kFlatNullPoolMarkerPsBytecode:kFlatNullWorldMarkerPsBytecode;
-            const size_t size=domain==FlatEngineDomain::ForeignPool?sizeof(kFlatNullForeignMarkerPsBytecode):
+            const size_t size=domain==FlatEngineDomain::ForeignPool?sizeof(kFlatNullForeignProvenanceMarkerPsBytecode):
                 domain==FlatEngineDomain::WorldPool?sizeof(kFlatNullPoolMarkerPsBytecode):sizeof(kFlatNullWorldMarkerPsBytecode);
             if(pool)bytes=dxbc_engine_velocity_detail::relocateNullPoolInput(code,size,inputs.identityRegister);
             else bytes.assign(code,code+size);
+            if(domain==FlatEngineDomain::ForeignPool)entry.tokenSlot=13;
         }
         if(coverage) {
             std::vector<BYTE> combined;
@@ -2241,7 +2259,7 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
         g_flatDomainShaders.push_back(std::move(entry));shader=g_flatDomainShaders.end()-1;
     }
     ctx->OMGetBlendState(&saved.blend,saved.factor,&saved.sampleMask);
-    const char* blendReason=nullptr;ID3D11BlendState* blend=derivedBlendFor(ctx,saved.blend.Get(),&blendReason);
+    const char* blendReason=nullptr;ID3D11BlendState* blend=derivedBlendFor(ctx,saved.blend.Get(),&blendReason,true);
     if(!blend)return fail(blendReason?blendReason:"flat-domain-blend");
     Eye& e=g_eyes[kEngineVelocitySourceEye];const auto frame=frameNow();
     if(g_flatMarkerFrame==frame && g_flatMarkerDepth.Get()!=depth)return fail("flat-domain-multiple-depths");
@@ -2249,6 +2267,21 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
     if(g_flatMarkerFrame!=frame) {
         const float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(e.slotsRtv.Get(),empty);
         g_flatMarkerFrame=frame;g_flatMarkerDepth=depth;
+    }
+    if(domain==FlatEngineDomain::ForeignPool) {
+        if(shader->tokenSlot>=D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT)
+            return fail("flat-domain-token-slot-unavailable");
+        if(!g_flatDomainTokenBuffer) {
+            Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);D3D11_BUFFER_DESC d{};
+            d.ByteWidth=16;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+            if(FAILED(dev->CreateBuffer(&d,nullptr,&g_flatDomainTokenBuffer)))return fail("flat-domain-token-buffer-allocation");
+        }
+        saved.tokenSlot=shader->tokenSlot;
+        ctx->QueryInterface(IID_PPV_ARGS(&saved.rangedContext));
+        if(saved.rangedContext)saved.rangedContext->PSGetConstantBuffers1(saved.tokenSlot,1,&saved.tokenOriginal,&saved.tokenFirst,&saved.tokenCount);
+        else ctx->PSGetConstantBuffers(saved.tokenSlot,1,&saved.tokenOriginal);
+        const float token[4]={float(writerToken),0,0,0};ctx->UpdateSubresource(g_flatDomainTokenBuffer.Get(),0,nullptr,token,0,0);
+        ID3D11Buffer* buffer=g_flatDomainTokenBuffer.Get();ctx->PSSetConstantBuffers(saved.tokenSlot,1,&buffer);
     }
     targets[kEngineVelocityTarget]=e.slotsRtv.Get();
     vScreenSetRenderTargetsRaw(ctx,8,targets,saved.depth.Get());
@@ -2261,6 +2294,10 @@ bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D*
     for(unsigned i=0;i<8;++i)if(i!=kEngineVelocityTarget && verified[i]!=g_flatDomainSaved.targets[i].Get())bound=false;
     Ptr<ID3D11PixelShader> heldPs;ctx->PSGetShader(&heldPs,nullptr,nullptr);
     if(heldPs!=shader->patchedPs)bound=false;
+    if(g_flatDomainSaved.tokenSlot!=~0u) {
+        Ptr<ID3D11Buffer> tokenBound;ctx->PSGetConstantBuffers(g_flatDomainSaved.tokenSlot,1,&tokenBound);
+        if(tokenBound!=g_flatDomainTokenBuffer)bound=false;
+    }
     for(auto* view:verified)if(view)view->Release();
     if(!bound){engineVelocityFlatDomainEndDraw(ctx);return fail("flat-domain-slot-bind-refused");}
     return true;
@@ -2272,6 +2309,11 @@ void engineVelocityFlatDomainEndDraw(ID3D11DeviceContext* ctx) {
     ID3D11RenderTargetView* targets[8]{};for(unsigned i=0;i<8;++i)targets[i]=s.targets[i].Get();
     vScreenPSSetShaderRaw(ctx,s.ps.Get(),nullptr,0);vScreenVSSetShaderRaw(ctx,s.vs.Get(),nullptr,0);
     vScreenOMSetBlendStateRaw(ctx,s.blend.Get(),s.factor,s.sampleMask);vScreenSetRenderTargetsRaw(ctx,8,targets,s.depth.Get());
+    if(s.tokenSlot!=~0u) {
+        ID3D11Buffer* original=s.tokenOriginal.Get();
+        if(s.rangedContext)s.rangedContext->PSSetConstantBuffers1(s.tokenSlot,1,&original,&s.tokenFirst,&s.tokenCount);
+        else ctx->PSSetConstantBuffers(s.tokenSlot,1,&original);
+    }
     s={};cache=DrawCache{};
 }
 bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth,ID3D11ShaderResourceView** out) {

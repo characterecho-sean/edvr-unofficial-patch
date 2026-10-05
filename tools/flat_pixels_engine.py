@@ -243,7 +243,7 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
     slots = pool = scene_now = scene_old = None
     first = count = pool_stride = 0
     if complete:
-        slots = np.memmap(meta["textures"]["slots"], mode="r", dtype="<f4", shape=(ch, cw, 2))
+        slots = np.memmap(meta["textures"]["slots"], mode="r", dtype="<f4", shape=(ch, cw, meta.get("slots_components", 2)))
         path, record = meta["buffers"]["pool"]
         pool_stride = record["stride"]
         if pool_stride == 336:
@@ -276,7 +276,7 @@ def analyze(meta, rois, unjitter=True, static_scene=None):
                 elif not complete:
                     branch = "camera_engine_incomplete"
                 else:
-                    code_f, slot_z = slots[iy, ix]
+                    code_f, slot_z = slots[iy, ix, :2]
                     depth_stale = bool(np.asarray(z).view(np.uint32) != np.asarray(slot_z).view(np.uint32))
                     # The shader's order (engineBefore): sky and the out-of-range sentinel refuse
                     # first; then a slot the pixel's own depth disagrees with -- refused, or the

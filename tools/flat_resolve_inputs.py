@@ -86,8 +86,8 @@ def sample(path):
                 raise ValueError('engine scene buffer mismatch')
         elif name not in BUFFERS and status in ('complete', 'queued', 'budget-cap'):
             fmt = t['resource_format']
-            allowed = {16} if name == 'slots' else {61} if 'coverage' in name else {19, 39, 44} if name == 'depth' else {26}
-            bpp = 1 if fmt == 61 else 8 if fmt in (19,16) else 4
+            allowed = {16, 2} if name == 'slots' else {61} if 'coverage' in name else {19, 39, 44} if name == 'depth' else {26}
+            bpp = 16 if fmt == 2 else 1 if fmt == 61 else 8 if fmt in (19,16) else 4
             srv = {19: 21, 39: 41, 44: 46}.get(fmt, fmt)
             if fmt not in allowed or t['srv_format'] != srv or (t['width'], t['height']) != (w, h) or t['row_stride'] != w*bpp or size != w*h*bpp or t['srv_dimension'] != 4:
                 raise ValueError('full-plane file layout/format mismatch')
@@ -169,6 +169,14 @@ def self_test():
             try: inspect(p)
             except (ValueError, OSError): pass
             else: raise AssertionError('corrupt evidence accepted')
+        slot = next(t for t in m['textures'] if t['name'] == 'slots')
+        legacy = dict(slot);slot.update(resource_format=2, srv_format=2, row_stride=32, byte_size=64)
+        payload = bytes(range(64));(root/slot['files'][0]).write_bytes(payload);slot['crc32'] = zlib.crc32(payload)
+        p.write_text(json.dumps(m));assert inspect(p)[0]['complete']
+        for field, value in (('row_stride',16), ('byte_size',32), ('srv_format',16), ('resource_format',6)):
+            original = slot[field];slot[field] = value;reject();slot[field] = original
+        (root/slot['files'][0]).write_bytes(payload[:-1]);reject()
+        slot.clear();slot.update(legacy);(root/slot['files'][0]).write_bytes(bytes(32))
         m['textures'][0]['files'] = ['../escape'];reject();m = json.loads(saved)
         m['textures'][0]['status'] = 'queued';reject();m = json.loads(saved)
         f = root/m['textures'][0]['files'][0];original = f.read_bytes();f.write_bytes(b'1'*len(original));reject();f.write_bytes(original)

@@ -219,8 +219,8 @@ public:
             if(!resource || FAILED(resource.As(&texture))) {ok=false;continue;}
             sources[i]=resource;
             texture->GetDesc(&item.desc);Microsoft::WRL::ComPtr<ID3D11Device> owner;texture->GetDevice(&owner);
-            uint32_t bpp=i==5?8u:i>=3?1u:i==1?(item.desc.Format==DXGI_FORMAT_R32G8X24_TYPELESS?8u:4u):4u;
-            const bool format=i==5?item.desc.Format==DXGI_FORMAT_R32G32_FLOAT:i>=3?item.desc.Format==DXGI_FORMAT_R8_UNORM:i==1?(item.desc.Format==DXGI_FORMAT_R32G8X24_TYPELESS || item.desc.Format==DXGI_FORMAT_R32_TYPELESS || item.desc.Format==DXGI_FORMAT_R24G8_TYPELESS):item.desc.Format==DXGI_FORMAT_R11G11B10_FLOAT;
+            uint32_t bpp=i==5?(item.desc.Format==DXGI_FORMAT_R32G32B32A32_FLOAT?16u:8u):i>=3?1u:i==1?(item.desc.Format==DXGI_FORMAT_R32G8X24_TYPELESS?8u:4u):4u;
+            const bool format=i==5?(item.desc.Format==DXGI_FORMAT_R32G32_FLOAT || item.desc.Format==DXGI_FORMAT_R32G32B32A32_FLOAT):i>=3?item.desc.Format==DXGI_FORMAT_R8_UNORM:i==1?(item.desc.Format==DXGI_FORMAT_R32G8X24_TYPELESS || item.desc.Format==DXGI_FORMAT_R32_TYPELESS || item.desc.Format==DXGI_FORMAT_R24G8_TYPELESS):item.desc.Format==DXGI_FORMAT_R11G11B10_FLOAT;
             const auto viewFormat=i==1?(item.desc.Format==DXGI_FORMAT_R32G8X24_TYPELESS?DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:item.desc.Format==DXGI_FORMAT_R24G8_TYPELESS?DXGI_FORMAT_R24_UNORM_X8_TYPELESS:DXGI_FORMAT_R32_FLOAT):item.desc.Format;
             if(owner.Get()!=device || !format || item.desc.Width!=s.renderW || item.desc.Height!=s.renderH ||
                item.desc.MipLevels!=1 || item.desc.ArraySize!=1 || item.desc.SampleDesc.Count!=1 ||

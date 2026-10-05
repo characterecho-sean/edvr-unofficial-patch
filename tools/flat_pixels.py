@@ -49,6 +49,7 @@ HDR_PROVENANCE = {
     "final_provenance": "scene-H-after-finish-before-tonemap",
 }
 SLOTS = (16, 8, "render")          # DXGI_FORMAT_R32G32_FLOAT
+SLOTS_RGBA = (2, 16, "render")     # DXGI_FORMAT_R32G32B32A32_FLOAT
 MAX_POOL_BYTES = 64 * 1024 * 1024
 MAX_SCENE_BYTES = 64 * 1024
 
@@ -179,7 +180,7 @@ def load_manifest(path):
         name = record.get("name")
         if not isinstance(name, str) or name not in ({**layout, "slots": SLOTS} if version == 2 else layout) or name in found:
             raise CaptureError(f"{path}: unknown or duplicate texture name {name!r}")
-        fmt, bpp, grid = SLOTS if name == "slots" else layout[name]
+        fmt, bpp, grid = (SLOTS_RGBA if record.get("dxgi_format") == 2 else SLOTS) if name == "slots" else layout[name]
         width, height = (rw, rh) if grid == "render" else (ow, oh)
         if route == "hdr":
             width, height = roi["width"], roi["height"]
@@ -194,7 +195,7 @@ def load_manifest(path):
             if type(record.get(key)) is not int or record[key] != expected:
                 raise CaptureError(f"{path}: {name}.{key} must equal {expected}")
         if name == "slots":
-            for key, expected in (("srv_format", 16), ("srv_dimension", 4),
+            for key, expected in (("srv_format", fmt), ("srv_dimension", 4),
                                   ("most_detailed_mip", 0)):
                 if record.get(key) != expected:
                     raise CaptureError(f"{path}: slots.{key} must equal {expected}")
@@ -281,6 +282,7 @@ def load_manifest(path):
         "render_width": rw, "render_height": rh,
         "output_width": ow, "output_height": oh, "display_width": display[0], "display_height": display[1],
         "route": route, "capture_roi": roi, "layout": layout, "textures": found,
+        "slots_components": next((4 if r["dxgi_format"] == 2 else 2 for r in records if r["name"] == "slots"), 0),
         "refusal_overlay": manifest.get("refusal_overlay", False),
         "total_bytes": total_size, "buffers": buffers, "engine": engine,
         "camera": camera, "previous_camera": previous_camera,
@@ -983,6 +985,26 @@ def self_test():
         assert branches["rejected_masked_record"] == 1 and branches["rejected_corrupt_code"] == 1
         assert branches["rejected_stale_or_depth"] == 1 and branches["camera_no_slot"] == 1
         assert "camera_stale_static" not in branches and complete_meta["static_scene"] is False
+        rgba = np.concatenate((slots, np.full((rh, rw, 2), [7, 19], dtype="<f4")), axis=2)
+        rgba_manifest = json.loads(json.dumps(complete))
+        rgba_record = next(r for r in rgba_manifest["textures"] if r["name"] == "slots")
+        rgba_record.update(dxgi_format=2, srv_format=2, row_stride=rw*16, byte_size=rw*rh*16)
+        (v2_session / "frame_7_slots.bin").write_bytes(rgba.tobytes());v2_path.write_text(json.dumps(rgba_manifest))
+        rgba_meta = load_manifest(v2_path)
+        assert rgba_meta["slots_components"] == 4
+        assert analyze(rgba_meta, [("whole", (0, 0, rw, rh))])["engine_analysis"]["rois"][0]["branch_counts"] == branches
+        assert np.array_equal(np.fromfile(rgba_meta["textures"]["slots"], dtype="<f4").reshape(rh, rw, 4)[:, :, 2:], rgba[:, :, 2:])
+        for field, wrong in (("row_stride", rw*8), ("byte_size", rw*rh*8), ("srv_format",16), ("dxgi_format",6)):
+            original = rgba_record[field];rgba_record[field] = wrong;v2_path.write_text(json.dumps(rgba_manifest))
+            try: load_manifest(v2_path)
+            except CaptureError: pass
+            else: raise AssertionError("invalid RGBA ownership layout accepted")
+            rgba_record[field] = original
+        (v2_session / "frame_7_slots.bin").write_bytes(rgba.tobytes()[:-1]);v2_path.write_text(json.dumps(rgba_manifest))
+        try: load_manifest(v2_path)
+        except CaptureError: pass
+        else: raise AssertionError("truncated RGBA ownership plane accepted")
+        (v2_session / "frame_7_slots.bin").write_bytes(slots.tobytes());v2_path.write_text(json.dumps(complete))
         # The 3D main menu's stale-slot policy (2026-09-29): the twin of flags.w in the prep shader.
         # The stale pixel (1,1) takes the camera term and nothing else moves; the capture's own flag
         # drives it, a replay override can force it either way, and a capture without the field is off.

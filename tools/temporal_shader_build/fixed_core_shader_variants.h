@@ -43,6 +43,7 @@ static std::vector<Variant> foregroundVariants() {
         {"kFlatForegroundMotionPsBytecode", "flat foreground motion", "main", nullptr, {}, false, edvr::kFlatForegroundMotionPs, "ps_5_0"},
         {"kFlatNullWorldMarkerPsBytecode", "flat null world marker", "main", nullptr, {}, false, edvr::kFlatNullWorldMarkerPs, "ps_5_0"},
         {"kFlatNullForeignMarkerPsBytecode", "flat null foreign marker", "main", nullptr, {}, false, edvr::kFlatNullForeignMarkerPs, "ps_5_0"},
+        {"kFlatNullForeignProvenanceMarkerPsBytecode", "flat null foreign provenance marker", "main", nullptr, {}, false, edvr::kFlatNullForeignProvenanceMarkerPs, "ps_5_0"},
         {"kFlatNullPoolMarkerPsBytecode", "flat null pool marker", "main", nullptr, {}, false, edvr::kFlatNullPoolMarkerPs, "ps_5_0"},
     };
 }

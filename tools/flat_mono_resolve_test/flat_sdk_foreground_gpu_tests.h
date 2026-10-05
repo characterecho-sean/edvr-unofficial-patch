@@ -35,6 +35,26 @@ inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* con
     };
     expectedJx=expectedJy=0;
     for(auto mode:{FlatMonoResolveMode::Dlaa,FlatMonoResolveMode::Dlss,FlatMonoResolveMode::Fsr}) {
+        // A holstered frame still requires the planner's complete ownership
+        // certificate, even though its actual H foreground map is empty.
+        const auto mixedMap=map;
+        markers[2*center]=0;std::fill(map.begin(),map.end(),0);
+        context->UpdateSubresource(slots.Get(),0,nullptr,markers.data(),w*8,0);
+        context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
+        flatMonoResolveReset();f.mode=mode;f.frame=69000+UINT(mode)*10;
+        f.foregroundFrame=f.frame;f.foregroundRequired=true;f.foregroundQualified=true;
+        f.untrustedCameraCoverage=nullptr;f.reset=true;
+        resolve(true,"configured SDK accepts required certified world-only frame");
+        ++f.frame;f.foregroundFrame=f.frame;f.reset=false;
+        const int worldOnlyCalls=backendCalls;
+        resolve(true,"configured SDK continues required empty foreground map");
+        check(backendCalls==worldOnlyCalls+1 && !backendReset && observedDepth==.01f &&
+              observedMotion==0 && observedMotionY==0 && observedReject==0,
+              "holstered world-only frame reaches configured SDK with sane world inputs and no TAA");
+        map=mixedMap;markers[2*center]=-3;
+        context->UpdateSubresource(slots.Get(),0,nullptr,markers.data(),w*8,0);
+        context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
+        f.foregroundRequired=false;f.untrustedCameraCoverage=maskView.Get();
         flatMonoResolveReset();f.mode=mode;f.frame=70000+UINT(mode)*10;f.foregroundFrame=f.frame;f.reset=true;
         resolve(true,"SDK foreground reset contract accepted");
         ++f.frame;f.foregroundFrame=f.frame;f.reset=false;

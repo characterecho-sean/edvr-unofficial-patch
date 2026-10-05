@@ -520,8 +520,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 63 && coreLegacy.size() + 8 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics and five flat foreground shaders are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 64 && coreLegacy.size() + 9 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics and six flat foreground shaders are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -600,6 +600,7 @@ static void selfTest() {
         {"kFlatForegroundMotionPsBytecode","flat foreground motion",edvr::kFlatForegroundMotionPs,"ps_5_0"},
         {"kFlatNullWorldMarkerPsBytecode","flat null world marker",edvr::kFlatNullWorldMarkerPs,"ps_5_0"},
         {"kFlatNullForeignMarkerPsBytecode","flat null foreign marker",edvr::kFlatNullForeignMarkerPs,"ps_5_0"},
+        {"kFlatNullForeignProvenanceMarkerPsBytecode","flat null foreign provenance marker",edvr::kFlatNullForeignProvenanceMarkerPs,"ps_5_0"},
         {"kFlatNullPoolMarkerPsBytecode","flat null pool marker",edvr::kFlatNullPoolMarkerPs,"ps_5_0"},
     };
     for(size_t i=0;i<5;++i) {

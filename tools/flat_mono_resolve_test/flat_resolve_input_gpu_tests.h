@@ -12,7 +12,7 @@ inline int flatResolveInputGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
     auto expect=[&](bool ok,const char* what) {if(!ok) {std::printf("FAIL: resolve inputs %s\n",what);++failed;}};
     constexpr UINT width=16,height=12;
     std::array<std::vector<uint8_t>,9> bytes;
-    const UINT bpp[]={4,8,4,1,1,8};
+    const UINT bpp[]={4,8,4,1,1,16};
     for(unsigned i=0;i<6;++i) {
         bytes[i].resize(width*height*bpp[i]);
         for(size_t j=0;j<bytes[i].size();++j)bytes[i][j]=uint8_t(j*13+i*7);
@@ -21,7 +21,7 @@ inline int flatResolveInputGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
     for(unsigned i=3;i<5;++i) {
         std::fill(bytes[i].begin(),bytes[i].end(),uint8_t(0));bytes[i][0]=255;bytes[i].back()=128;bytes[i][width+3]=1;
     }
-    const DXGI_FORMAT formats[]={DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R32G8X24_TYPELESS,DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R32G32_FLOAT};
+    const DXGI_FORMAT formats[]={DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R32G8X24_TYPELESS,DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R32G32B32A32_FLOAT};
     std::array<ComPtr<ID3D11Texture2D>,6> textures;
     std::array<ComPtr<ID3D11ShaderResourceView>,6> views;
     for(unsigned i=0;i<textures.size();++i) {
@@ -85,6 +85,7 @@ inline int flatResolveInputGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
     const auto body=text(folder/"inputs_frame_60000_1.json");
     expect(body.find("\"stage\":\"prebackend\"")!=std::string::npos && body.find("\"backend_status\":\"not-run\"")!=std::string::npos && body.find("\"complete\":true")!=std::string::npos && body.find("\"reset\":true")!=std::string::npos,"manifest describes input evidence, not a backend result, including reset");
     expect(body.find("\"static_scene\":true")!=std::string::npos && body.find("\"steady_detail\":true")!=std::string::npos && body.find("\"previous_rows_jitter\":[0.125,0]")!=std::string::npos && body.find("\"first_element\":1")!=std::string::npos,"prep flags, previous row phase and full pool view range remain attributable");
+    expect(body.find("\"resource_format\":2")!=std::string::npos && body.find("\"row_stride\":256")!=std::string::npos,"RGBA ownership snapshot accounts all four float components exactly");
     ++f.frame;capture.capture(device,context,f);++f.frame;capture.capture(device,context,f);
     for(unsigned n=0;n<200 && capture.active();++n) {capture.poll(context,f.frame);Sleep(1);}
     expect(!capture.active() && capture.copyOperations()==18 && !fs::exists(folder/"inputs_frame_60002_3.json"),"two bounded attempts stop after pending work completes");
