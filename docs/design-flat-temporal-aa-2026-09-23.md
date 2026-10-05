@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** weapon replay/TAA works; shared flat SDK path qualified offline (103).
-  Geometry, phase, mono regression and full-build gates pass; BUILT, NOT FLOWN.
+- **State:** TAA works; shared flat SDK path still refuses in flight (103).
+  Geometry/full-build tests pass, but live foreground intake captures no draws.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** push and verified Epic test install, then one plasma draw/holster test.
+- **Next:** reproduce foreign admission offline from the recorded pairs/prepasses.
   Retain section 102's qualified color-clear fix; no per-weapon table (103).
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -11598,3 +11598,48 @@ The full-pass receipt was written at 2026-10-05 20:21:15 UTC, input fingerprint
 Source is frozen for commit and clean-version promotion. BUILT, NOT FLOWN;
 the next qualification is one plasma draw/holster transition in the configured
 DLAA/DLSS/FSR mode, with ordinary NumLock if the backend refuses.
+
+### 2026-10-05: first shared-history flight still refuses SDK AA
+
+Verified Epic `edvr_gfx_20261005_142842.log`: `v0.18.2-9-g6ab6acff`,
+build `6AC4080F`, linked 20:26:55 UTC. Sean reports weapon-drawn AA disengagement
+or aliasing with DLAA/DLSS/FSR, while TAA continues. NumLock at 14:33:01 starts
+the bounded general report. At 14:33:24 the foreground report has 1,384 H
+attempts, zero qualified, zero foreign-seen/captured, and
+`last-refusal=foreground-unknown-original-writer`. The resolve reports
+`flat-resolve-foreground-contract-unqualified`. TAA has repeated 300/300
+actually-treated windows at frames 54000, 54300 and 54600; the later DLSS
+windows have zero completed treatment. A separate 2880x1620-to-3840x2160
+interval also hits `hdr-route-needs-render-at-least-output`; the native-size
+foreground refusal remains after that interval.
+
+TAA's own kernel rejects history locally using current and prior camera-domain
+masks. It displays current color in ambiguous weapon-covered pixels and still
+accumulates qualified world pixels. The SDK adapter instead requires qualified
+foreground geometry/history and a common depth convention for mixed-camera H;
+failure refuses evaluation, and spatial recovery supplies current-frame color.
+This is an adapter admission difference, not evidence that SDK AA cannot work
+with weapons.
+
+The intake is connected, but its constructor still requires the old world
+family-pair admission (`d.supported=engineVelocityPoolFamilyPair`), or a known
+family null prepass. Unknown pairs refuse before the new foreground counters.
+For example, frame 50069/q2358 has VS AACFDCF2FB9AD809 and PS CAD1F585EDDC5641,
+valid current camera/full viewport, alternate near .0675, and `supported=0`.
+The old family table explicitly excludes this PS. Same-depth unknown null-PS
+prepasses are also reported. The aggregate refusal does not identify the first
+blocking draw; retain that limit rather than claiming one precise culprit.
+
+Ruled out: a disconnected wrapper or wrong-depth-only latch, because H attempts
+are counted only when the watched depth equals the selected H depth, and the
+existing MRT6 producer still runs about 10,300 substituted draws/frame. Its
+draws intentionally do not increment the new non-producer world-marker counter.
+Ruled out: offline geometry parity alone proves live foreground admission,
+because this verified flight never captures an admitted foreign draw.
+
+Next: exercise the production admission planner offline with these recorded
+pairs and null prepasses, distinguish original world-family support from
+structural foreign geometry support, and retain bounded first-failure evidence.
+Do not remove the SDK safety guard or ask for another flight before this
+boundary is tested. This analysis changes no renderer or installed settings;
+the installed code remains `6ab6acff`.
