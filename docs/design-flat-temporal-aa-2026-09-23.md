@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** v49 FLOWN: pool color clear invalidates completed weapon coverage.
-  Section 102; narrow correction validated, installed, NOT FLOWN.
+- **State:** weapon/world-AA disengagement CLOSED; v51 FLOWN across weapons.
+  Section 102; color-clear correction flight-qualified, capture refusals zero.
   Epic `v0.18.1-51-g30ced747` installed and verified.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: restart Epic; draw same weapon, F10 while drawn,
-  hold10s, holster10s, exit; confirm world AA and complete later draw receipts.
+- **Next:** section 102 needs no further weapon-validation flight. Retain the
+  installed fix; other open image-quality/runtime items below remain separate.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10963,3 +10963,24 @@ drawn and10s holstered, then exit. Check that world AA stays engaged and that
 post-clear alternate captures/receipts complete through H. If still refused,
 use the preserved first-failure and later nominee diagnostics; do not assume
 the color-clear policy failed. No two-minute wait or per-weapon checklist.
+
+### 2026-10-04: v51 confirmation across several weapons
+
+Sean reports the fix worked, then tested several weapons and world AA stayed
+engaged. Verified edvr_gfx_20261004_200720.log against literal installed
+`v0.18.1-51-g30ced747`, build6AC2F925, linked2026-10-05 01:11:01UTC.
+Frames52200..56400 sampled windows report selected300/actually-treated300,
+capture-refused0, ready1, failure none and qualification qualified. Alternate
+draw counts change through4,34,28,32,37 while treatment continues. The previous
+all-refused weapon interval is absent. Later windows return to the ordinary
+world path (world-excluded300, effective DLSS), not a coverage refusal.
+
+In the mixed-camera windows configured DLSS uses effective TAA; this confirms
+AA engagement, not DLSS execution in those windows or a performance gain.
+No F10/H audit is present in this flight, and inputs/weapon names are not logged;
+associate the multi-weapon result with Sean's report rather than inventing a
+per-weapon timeline. Together with v49's explicit clear and complete trace,
+the unchanged safety checks and WARP regressions, this flight qualifies the
+scoped color-clear fix. Close the weapon/world-AA disengagement investigation;
+no further weapon-by-weapon test required. Other rendering/runtime arcs remain
+open as listed in Status. Keep diagnostics available for a future distinct fault.
