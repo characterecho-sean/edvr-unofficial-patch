@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** per-DSV/GPU-identity repair BUILT, NOT FLOWN (103).
-  Marker isolation and full validation pass; hardware cost stays open.
+- **State:** 4bb67d35 FLOWN: TAA works; configured SDK AA still refuses (103).
+  GPU identity runs; inert-draw planning and history budget now block.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** clean promotion and Epic DLAA/FSR holstered/plasma test (103).
+- **Next:** bounded draw-state and history-demand receipts together (103).
   Retain 102's color-clear fix; no per-weapon table; preserve Epic settings.
   Building shimmer is unqualified. Preserve 87's native FSR comparison and
   section 83's remaining matrix and open items.
@@ -12009,3 +12009,66 @@ lightweight NumLock. No complete flight or weapon inventory is needed. Hardware
 backend engagement and frame time are still unqualified; the offline
 regressions demonstrate the corrected failure paths rather than a measured
 performance gain.
+
+### 2026-10-05: 4bb67d35 flight still refuses configured SDK AA
+
+Sean reports good TAA and apparent AA-off output with DLAA. The sanctioned log
+tool verifies Epic `edvr_gfx_20261005_171647.log` as `v0.18.2-13-g4bb67d35`,
+build `6AC42EC9`, linked 23:12:09 UTC. The visible SDK summaries call the
+configured mode `dlss`; retain this naming distinction when interpreting the UI
+report.
+
+At 17:19:43.335 the runtime reports 2,401 H attempts, zero qualified, 112,669
+actual GPU-identity submissions and zero marker refusals. The first selected-H
+failure is planning `foreground-original-projection-unproven`, VS
+`FC1193AFFC596F74`, PS `258B95AC99520C1F`, format 23, camera present, and exact
+selected depth `000001FF7B33B160`. There are three candidates against the
+four-slot cap with no overflow. Repeated samples name the same shader pair and
+refusal. At 17:19:48.326 a later selected-H sample instead names
+`history-budget`, VS `F516BF0201303B87`, PS `B40B0462256E31C2`, with 2,516 H
+attempts and still none qualified.
+
+Ruled out: repairing GPU identity acquisition and per-DSV marker isolation
+alone restores this scene, because this verified build submits actual GPU
+identity, reports no marker refusal or candidate overflow, and still qualifies
+no H. This does not prove every identity match or candidate is valid. The prior
+implementation defects remain independently covered by offline regressions.
+
+Open discriminators: projection-proof parsing/classification versus genuinely
+unsupported original clip construction, confirmed by the actual refused VS
+bytecode and planner fields; retained history-record pressure versus legitimate
+within-frame demand, confirmed by the bounded key/record lifecycle and budget
+accounting. No guard relaxation, guessed motion or budget increase follows from
+the refusal strings alone. Trace both paths offline before proposing another
+build or asking for another capture.
+
+Offline conclusion: the actual captured Epic VS `FC1193AFFC596F74` contains
+only an input-position move to `SV_Position` and return, with no camera
+constant reads. Its actual PS `258B95AC99520C1F` writes zero to target 0.
+`flat_projection_recipes.h` already recognizes this exact pair as unchanged.
+The SDK ownership planner instead requires a forward projection before any
+ownership classification, and refuses it. Ruled out: a missing
+perspective-projection parser pattern for this pair, because its actual
+bytecode contains no projection. Historical per-object-motion censuses identify
+a fullscreen stencil stamp, including depth-disabled cases. They do not
+establish the current Epic blend/depth/stencil state; do not invent a
+projection recipe or unconditionally ignore this pair.
+
+The GPU history helper has 64 records and 32 MiB bounds and retires records
+untouched for more than two frames. Thus a permanent never-retired record leak
+is not established. Before a world source is named, the planner treats
+structurally proven pool draws as foreign and captures them; legitimate
+current/previous demand, transient geometry churn, and provisional world
+captures can consume the bounded pool. Current logs omit the record/byte usage
+and camera-domain demand at the refusing draw, so no budget increase or
+scheduling change is justified yet.
+
+Next diagnostic should record both missing receipts together: original bound
+target masks, depth enable/write/function and stencil state/reference for the
+first refused draw; and active record/byte counts plus
+current/previous/provisional capture demand for history refusals. Use bounded
+first-failure summaries, independent of large manual exports, and test logging
+through the production failure/report path offline. The verified flight already
+proves zero SDK H qualification; no second flight is needed to re-establish
+that symptom. Installed graphics remain `4bb67d35`; this entry changes
+documentation only.
