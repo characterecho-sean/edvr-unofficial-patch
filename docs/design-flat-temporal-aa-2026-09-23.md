@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** flat SDK admission/provenance repair BUILT, NOT FLOWN (103).
-  Full validation passes; foreign tuple and world-only H pass the GPU rigs.
+- **State:** c145d97d FLOWN; TAA treats frames, SDK H qualifies 0/2474 (103).
+  Astra: depth/identity blockers; NumLock meets three frames; cost remains open.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,10 +33,10 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** Epic native DLAA/FSR, holstered then plasma drawn; NumLock once.
-  Retain section 102's qualified color-clear fix; no per-weapon table (103).
-  Quiet performance recovered; building shimmer is unqualified. Section 87:
-  native FSR comparison. Preserve section 83's remaining matrix and open items.
+- **Next:** offline depth-selection and publication-before-demand tests (103).
+  No flight selected. Retain 102's color-clear fix; no per-weapon table.
+  Building shimmer is unqualified. Preserve 87's native FSR comparison and
+  section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
   open. VR still needs regression tests; the concourse NPC observation on
@@ -11748,3 +11748,101 @@ Native HDR still requires render extent at least output extent; scaled-HDR
 support is a separate route, and unknown/incomplete writers still refuse with
 the first-failure receipt. Ordinary NumLock expires at three useful frames or
 one second; Shift+key retains explicit full capture.
+
+### 2026-10-05: five-mode report and Astra review of c145d97d
+
+State: FLOWN, SDK qualification still refuses. Sean reports five NumLocks: AA
+off, TAA, DLAA, FSR, and DLAA with a plasma weapon drawn. The sanctioned log
+reader verifies Epic log `edvr_gfx_20261005_160625.log` against installed
+commit `c145d97d`: version `v0.18.2-11-gc145d97d`, build `6AC41EBB`.
+Environment: flat Epic, native 3840x2160, installed DLSS 310.9.1; no VR
+runtime/headset/per-eye qualification in this flight. Actual requested modes in
+the log are `on`, `dlss` and `fsr`; no `off` or literal `dlaa` transition is
+recorded. Treat the NVIDIA windows as Sean's DLAA-labelled tests, not proof
+that that intended rendering mode ran.
+
+Four manual general captures are recorded. Each reports the
+1000-ms/3-useful-frame budget and completes at three useful frames. Four
+Presents include the initial ownership boundary, not four populated frames.
+
+| Requested test | NumLock time | Final time | Useful frames | Elapsed from key |
+|---|---|---|---|---|
+| TAA | 16:09:00.194 | 16:09:00.283 | 3 | 89 ms |
+| NVIDIA/DLAA-labelled | 16:09:08.692 | 16:09:08.782 | 3 | 90 ms |
+| FSR | 16:09:21.977 | 16:09:22.074 | 3 | 97 ms |
+| NVIDIA/plasma drawn | 16:09:58.035 | 16:09:58.153 | 3 | 118 ms |
+
+The reported AA-off press is absent; this log alone does not distinguish a
+missing key event from a mode/ownership issue. Startup discovery is separate:
+16:06:27.265 through 16:08:27.265, its existing 120-second budget, 887 useful
+frames. Continuing five-second reports after manual completion are ordinary
+runtime reporting. Manual discovery is no longer collecting for seconds, but
+that does not dismiss the reported persistent slowdown. In the final windows,
+`discovery=0.000 ms/frame` while the EDVR CPU receipt remains 12.54-12.72
+ms/frame. This flight does not isolate the stream-output capture cost or prove
+that NumLock caused the remaining production overhead. Every capture also
+reports relevant-observation truncation; bounded output does not imply a
+complete draw record.
+
+TAA treats frames (1069 treated by 16:09:02.331). The holstered NVIDIA and FSR
+windows then leave treated count at 1311 with zero backend calls. After a brief
+additional TAA interval, the final NVIDIA count remains 1442. Final HDR
+receipts have 230-238 triggers per reporting window and zero prepared/backend
+calls, reason `flat-resolve-foreground-contract-unqualified`. Across the
+flight: `marker-refused=0`, `identity-known=42528`,
+`identity-unpublished=49649`, `certificate-missing=92084`, `H-attempts=2474`,
+`H-qualified=0`. These are cumulative totals, not per-mode comparisons. The old
+marker gate is passed; the SDK contract is still refused before backend
+evaluation.
+
+Ruled out: c145d97d's structural admission and primitive/writer provenance are
+sufficient to engage SDK AA, because original markers now run without marker
+refusal but all 2474 H attempts fail. Ruled out: the short manual NumLock
+budget runs beyond three useful frames in this flight, because all four
+recorded manual windows finish at three in 89-118 ms. The unrecorded fifth
+press remains unresolved. Pool rotation is not established by
+`identity-pool-slot-unobserved` alone.
+
+Astra independently reviewed `9d59690d..c145d97d` and the verified flight.
+Findings:
+
+1. **P1, premature scene-depth selection.** `flat_runtime.cpp:4313-4315` binds
+   `foregroundDomainDepth` to the first scene/native-sized DSV before proving
+   camera, format, shader or selected H membership. Any later different
+   candidate fails the whole frame. The final plasma capture supplies the
+   trigger: frame 50915, q1, format 27, camera 0, VS `04873C8813207261`, PS
+   `EF37E1BB2C09B26E`, DSV `000002207D606460`, reason
+   `foreground-original-camera-unavailable`. Earlier scene identity refusals
+   name `0000021D5FFF83A0`. The log lacks a paired selected-H DSV witness for
+   that same frame, so it establishes the premature latch and failure, not the
+   identity of every actual scene DSV. Keep candidate evidence by depth until
+   existing scene/H selection chooses its resource; unknown writers on the
+   chosen resource must still refuse. Offline regression: unrelated
+   native-sized pass before a valid scene, plus an unknown writer on the
+   selected scene.
+2. **P1, identity acquisition never settles.** `flat_foreground_identity.h:83`
+   demands the pool row after learning the actual instance index at draw time.
+   `flat_animated_identity_ledger.h:93-99` makes a newly demanded slot
+   unobserved and only later publication can populate it. Scene draws
+   repeatedly report `identity-pool-slot-unobserved`, including holstered
+   NVIDIA and FSR. Existing tests demand before publication. They do not cover
+   publication-before-demand with changing slots. Discriminate ordering, slot
+   rotation and the 64-row eviction limit using actual pool/instance identity,
+   slot, demand/eviction event, publication epoch/sequence, and requested rows
+   at publication; do not choose the repair from the refusal string alone. Keep
+   authoritative identity validation.
+3. **P2, capture work survives sticky refusal.** `flat_runtime.cpp:5157-5160`
+   still calls foreground capture after failed identity, and
+   `flat_foreground_motion.h:76` appends the captured draw before returning
+   `!refusal_`. The `captured` counter therefore counts successful returns, not
+   all actual GPU captures. Separate attempts/completions/cost and necessary
+   next-frame history warming from work that cannot benefit either frame. This
+   source path can waste work, but the current flight does not attribute its
+   milliseconds.
+
+Astra found no concrete defect in primitive/writer stamping or preservation of
+original discard within the admitted draw shape. Do not replace that ownership
+proof, add weapon-specific allowlists, or downgrade configured SDK AA to TAA.
+Next work is offline regression and identity evidence design. No new fix,
+build, install or test flight was requested as part of this review; Epic
+remains on c145d97d.
