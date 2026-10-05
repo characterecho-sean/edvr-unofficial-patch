@@ -16,6 +16,11 @@
 #include <vector>
 
 namespace edvr {
+struct FlatOverlayShaderDiagnostic {
+    bool read=false,eligible=false,created=false;
+    const void* object=nullptr;
+    std::string reason;
+};
 class FlatOverlayLayer {
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
     struct Shader {
@@ -236,6 +241,25 @@ public:
     ~FlatOverlayLayer(){ restore(); }
     FlatOverlayLayer(const FlatOverlayLayer&)=delete;
     FlatOverlayLayer& operator=(const FlatOverlayLayer&)=delete;
+    // Read existing creation metadata only: never create a shader or change
+    // registry/admission state. Caller supplies the live original binding.
+    static FlatOverlayShaderDiagnostic diagnosePixelShader(ID3D11PixelShader* original) {
+        FlatOverlayShaderDiagnostic out;out.read=true;out.object=original;
+        if(!original) {out.reason="null-PS";return out;}
+        {
+            auto& r=registry();std::lock_guard<std::mutex> lock(r.mutex);
+            const auto it=r.shaders.find(original);
+            if(it!=r.shaders.end()) {
+                out.eligible=true;out.created=it->second.patched!=nullptr;
+                out.reason="retained-patch-bytecode";return out;
+            }
+        }
+        char noted[96]{};UINT n=sizeof(noted);
+        if(SUCCEEDED(original->GetPrivateData(reasonKey(),&n,noted)) && n && n<=sizeof(noted)) {
+            noted[sizeof(noted)-1]=0;out.reason=noted;
+        } else out.reason="PS bytecode not retained";
+        return out;
+    }
     static void rememberPixelShader(ID3D11PixelShader* shader,const void* bytecode,size_t bytes,bool linked) {
         if (creatingPatched() || !shader || !bytecode || !bytes || bytes>1024u*1024u) return;
         if (linked) { markShaderReason(shader,"PS class linkage"); return; }

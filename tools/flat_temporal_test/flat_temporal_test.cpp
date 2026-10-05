@@ -1406,6 +1406,133 @@ void testFrameContractTrace() {
               resolveMarkers == 1 && copiesAfterResolve == 1 && rc.copies[0].selected(),
               "resolve marker before final copy is parsed but does not change selected contract or draw order");
     }
+
+    // The weapon path can exceed the old slot without producing a frame
+    // contract. Keep a mixed refused frame complete and replayable.
+    auto ring = std::make_unique<FlatTraceRing>();
+    auto online = std::make_unique<FlatRuntimePrefix>();
+    auto replay = std::make_unique<FlatRuntimePrefix>();
+    flatTraceBeginFrame(*ring, 9001, MonoFixture::token(0x9001), 3840, 2160, 28);
+    online->frame = replay->frame = 9001;
+    online->output = replay->output = MonoFixture::token(0x9001);
+    online->width = replay->width = 3840; online->height = replay->height = 2160;
+    online->format = replay->format = 28;
+    constexpr uint32_t mixedEvents = 20000;
+    for (uint32_t i = 0; i < mixedEvents; ++i) {
+        switch (i % 6) {
+        case 0: {
+            FlatRuntimeDraw d{};
+            d.key.color = MonoFixture::token(0x9100 + i % 3);
+            d.key.depth = MonoFixture::token(0x9200);
+            d.key.rtv = MonoFixture::token(0x9300);
+            d.key.dsv = MonoFixture::token(0x9400);
+            d.key.sequence = i; d.key.width = 3840; d.key.height = 2160; d.key.format = 28;
+            flatTraceRecord(*ring, d, false);
+            flatRuntimeObserve(*online, d);
+            break;
+        }
+        case 1: {
+            const void* resource = MonoFixture::token(0x9100 + i % 3);
+            flatTraceMark(*ring, kFlatTraceEventWriteResource, resource);
+            flatRuntimeWritten(*online, resource);
+            break;
+        }
+        case 2: {
+            const void* resource = MonoFixture::token(0x9100 + i % 3);
+            flatTraceMark(*ring, kFlatTraceEventDispatchWritten, resource);
+            flatRuntimeDispatchObserveWritten(*online, resource);
+            break;
+        }
+        case 3:
+            flatTraceMark(*ring, kFlatTraceEventMarkUncertain, nullptr);
+            online->uncertain = true;
+            break;
+        case 4:
+            flatTraceMark(*ring, kFlatTraceEventCameraCapture, nullptr);
+            ++online->sequence;
+            break;
+        default:
+            flatTraceResolve(*ring, MonoFixture::token(0x9500), 11, 12, i,
+                             static_cast<uint32_t>(FlatMonoReason::NoHdrConsumer));
+            break;
+        }
+    }
+    flatTraceSeal(*ring, false, 0);
+    const auto mixedSlot = ring->slot;
+    flatTraceBeginFrame(*ring, 9002, MonoFixture::token(0x9001), 3840, 2160, 28);
+    const FlatTraceStats mixedStats = flatTraceStats(*ring);
+    check(ring->headers[mixedSlot].eventCount == mixedEvents && !ring->headers[mixedSlot].truncated &&
+          ring->attempted[mixedSlot] == mixedEvents && mixedStats.capacity == kFlatTraceEventsPerFrame &&
+          mixedStats.peakAttempted == mixedEvents && mixedStats.overflowSlots == 0,
+          "mixed 20k-event refused frame stays within capacity and reports its attempted count");
+    std::vector<unsigned char> mixedBytes;
+    flatTraceDump(*ring, [&](const void* data, uint32_t n) {
+        const auto* p = static_cast<const unsigned char*>(data);
+        mixedBytes.insert(mixedBytes.end(), p, p + n); return n;
+    });
+    uint32_t mixedFrames = 0, mixedRead = 0;
+    FlatTraceFrameHeader mixedHeader{};
+    const bool mixedParsed = flatTraceParse(mixedBytes.data(), mixedBytes.size(),
+        [&](const FlatTraceFrameHeader& h) {
+            ++mixedFrames; mixedHeader = h;
+            replay->frame = h.frame; replay->output = h.output;
+            replay->width = h.width; replay->height = h.height; replay->format = h.format;
+        },
+        [&](const FlatTraceEvent& e) {
+            ++mixedRead;
+            if (e.kind == kFlatTraceEventWriteResource) flatRuntimeWritten(*replay, e.key.color);
+            else if (e.kind == kFlatTraceEventDispatchWritten) flatRuntimeDispatchObserveWritten(*replay, e.key.color);
+            else if (e.kind == kFlatTraceEventMarkUncertain) replay->uncertain = true;
+            else if (e.kind == kFlatTraceEventCameraCapture) ++replay->sequence;
+            else if (e.kind == kFlatTraceEventResolve) { /* diagnostic marker only */ }
+            else flatRuntimeObserve(*replay, flatTraceEventToDraw(e));
+        });
+    bool mixedStateMatches = online->sequence == replay->sequence &&
+        online->targetsUsed == replay->targetsUsed && online->uncertain == replay->uncertain &&
+        online->copies == replay->copies && online->imageCopiesAccepted == replay->imageCopiesAccepted &&
+        online->imageCopiesRefused == replay->imageCopiesRefused &&
+        online->menuCopiesAccepted == replay->menuCopiesAccepted &&
+        online->menuCopiesRefused == replay->menuCopiesRefused;
+    for (uint32_t i = 0; mixedStateMatches && i < online->targetsUsed; ++i)
+        mixedStateMatches = online->targets[i].resource == replay->targets[i].resource &&
+            online->targets[i].hdrBad == replay->targets[i].hdrBad &&
+            online->targets[i].tones == replay->targets[i].tones;
+    check(mixedParsed && mixedFrames == 1 && mixedRead == mixedEvents && mixedHeader.frame == 9001 &&
+          mixedHeader.eventCount == mixedEvents && !mixedHeader.truncated && !mixedHeader.produced &&
+          mixedHeader.contractHash == 0 && mixedStateMatches,
+          "20k mixed draw/write/camera/resolve events dump and replay with reducer state preserved");
+
+    ring.reset(); online.reset(); replay.reset();
+    std::vector<unsigned char>().swap(mixedBytes);
+    auto full = std::make_unique<FlatTraceRing>();
+    flatTraceBeginFrame(*full, 9100, MonoFixture::token(0x9100), 3840, 2160, 28);
+    for (uint32_t i = 0; i < kFlatTraceEventsPerFrame; ++i)
+        flatTraceMark(*full, kFlatTraceEventMarkUncertain, nullptr);
+    FlatTraceStats fullStats = flatTraceStats(*full);
+    check(full->headers[full->slot].eventCount == kFlatTraceEventsPerFrame &&
+          full->attempted[full->slot] == kFlatTraceEventsPerFrame &&
+          !full->headers[full->slot].truncated && fullStats.peakAttempted == kFlatTraceEventsPerFrame &&
+          fullStats.overflowSlots == 0,
+          "exact trace capacity is retained without truncation");
+    const uint32_t overflowSlot = full->slot;
+    flatTraceMark(*full, kFlatTraceEventMarkUncertain, nullptr);
+    fullStats = flatTraceStats(*full);
+    check(full->headers[overflowSlot].eventCount == kFlatTraceEventsPerFrame &&
+          full->headers[overflowSlot].truncated && full->attempted[overflowSlot] == kFlatTraceEventsPerFrame + 1 &&
+          fullStats.peakAttempted == kFlatTraceEventsPerFrame + 1 && fullStats.overflowSlots == 1,
+          "one event past capacity is counted and truncates only its frame");
+    flatTraceBeginFrame(*full, 9101, MonoFixture::token(0x9100), 3840, 2160, 28);
+    uint32_t dumpedFrames = 99;
+    flatTraceDump(*full, [&](const void* data, uint32_t n) {
+        if (n >= sizeof(FlatTraceHeader)) {
+            FlatTraceHeader h{}; std::memcpy(&h, data, sizeof(h)); dumpedFrames = h.frameCount;
+        }
+        return n;
+    });
+    check(dumpedFrames == 0, "trace dump skips a truncated completed frame");
+    for (uint32_t i = 0; i < kFlatTraceFrames - 1; ++i)
+        flatTraceBeginFrame(*full, 9102 + i, MonoFixture::token(0x9100), 3840, 2160, 28);
+    check(full->attempted[overflowSlot] == 0, "reused trace slot resets its nonserialized attempt counter");
 }
 
 // Committed corpus: every trace replays to its recorded contract hashes.
@@ -2973,32 +3100,33 @@ void testFlatOverlayMutationWiring() {
         const std::string raw=bodyOf(vscreen,std::string("void STDMETHODCALLTYPE ")+hook.name+"(");
         const std::string body=compact(raw);
         const std::string call=std::string("flatRuntimeOverlay")+hook.type+
-            "Mutation("+hook.dest+",FlatOverlayMutationOp::"+hook.op+");";
+            "Mutation("+hook.dest+",FlatOverlayMutationOp::"+hook.op;
         const auto valid=[&](const std::string& text) {
             const size_t gate=text.find("flatRuntimeActive()"),mut=text.find(call);
             const size_t real=text.rfind(hook.real);
             const std::string foreignCall="flatRuntimeOverlayForeignMutation();";
             const size_t foreign=text.find(foreignCall);
+            const size_t end=mut==std::string::npos?std::string::npos:mut+call.size();
             return !text.empty() && gate!=std::string::npos && mut!=std::string::npos &&
                 real!=std::string::npos && foreign!=std::string::npos &&
                 text.find("foreignContext(self)")!=std::string::npos &&
                 gate<mut && mut<real && foreign<real &&
-                text.find(call,mut+call.size())==std::string::npos &&
+                end<text.size() && (text[end]==')' || text[end]==',') &&
+                text.find(call,end)==std::string::npos &&
                 text.find(foreignCall,foreign+foreignCall.size())==std::string::npos;
         };
         if(!valid(body))std::printf("overlay mutation hook failed: %s\n",hook.name);
         check(valid(body),"each known mutator reports its exact destination/view before the real call");
         if(!valid(body))continue;
-        std::string removed=body;removed.erase(removed.find(call),call.size());
-        check(!valid(removed),"mutation control: omitting destination observation fails");
+        std::string wrong=body;
+        const size_t destination=wrong.find(call)+std::strlen("flatRuntimeOverlay");
+        wrong.replace(destination+std::strlen(hook.type)+std::strlen("Mutation("),
+            std::strlen(hook.dest),"nullptr");
+        check(!valid(wrong),"mutation control: replacing a known destination with unknown fails");
         std::string noForeign=body;
         const std::string foreignCall="flatRuntimeOverlayForeignMutation();";
         noForeign.erase(noForeign.find(foreignCall),foreignCall.size());
         check(!valid(noForeign),"mutation control: losing foreign-context invalidation fails");
-        std::string wrong=body;
-        wrong.replace(wrong.find(call),call.size(),std::string("flatRuntimeOverlay")+hook.type+
-            "Mutation(nullptr,FlatOverlayMutationOp::"+hook.op+");");
-        check(!valid(wrong),"mutation control: replacing a known destination with unknown fails");
     }
     const std::string map=compact(bodyOf(vscreen,"HRESULT STDMETHODCALLTYPE hookedMap("));
     const std::string unmapHook=compact(bodyOf(vscreen,"void STDMETHODCALLTYPE hookedUnmap("));
@@ -3031,19 +3159,29 @@ void testFlatOverlayMutationWiring() {
     if(noUnmapLatch.find(latchCall)!=std::string::npos)
         noUnmapLatch.erase(noUnmapLatch.find(latchCall),latchCall.size());
     check(!unmapValid(noUnmapLatch),"mutation control: losing foreign Unmap latch fails");
-    const std::string ownerMap="if(mapData0&&flatRuntimeActive()){if(type!=D3D11_MAP_READ)"
-        "flatRuntimeOverlayResourceMutation(res,FlatOverlayMutationOp::Map);"
-        "flatRuntimeMap(res,type,mapped->pData);}";
-    const std::string ownerUnmap="if(flatRuntimeActive()){"
-        "flatRuntimeOverlayResourceMutation(res,FlatOverlayMutationOp::Unmap);"
-        "flatRuntimeUnmap(res);}";
+    const std::string ownerMapCall="flatRuntimeOverlayResourceMutation(res,FlatOverlayMutationOp::Map,detail);";
+    const std::string ownerUnmapCall="flatRuntimeOverlayResourceMutation(res,FlatOverlayMutationOp::Unmap,detail);";
     const auto ownerValid=[&](const std::string& m,const std::string& u) {
-        return m.find(ownerMap)!=std::string::npos && u.find(ownerUnmap)!=std::string::npos;
+        const size_t mapGate=m.find("if(mapData0&&flatRuntimeActive()){");
+        const size_t mapRead=m.find("if(type!=D3D11_MAP_READ){",mapGate);
+        const size_t mapPayload=m.find("detail.known=FlatMutationDetails::MapType|FlatMutationDetails::Flags|FlatMutationDetails::DstSub|FlatMutationDetails::RowPitch|FlatMutationDetails::DepthPitch;",mapRead);
+        const size_t mapMutation=m.find(ownerMapCall,mapPayload);
+        const size_t mapTrack=m.find("flatRuntimeMap(res,type,mapped->pData);",mapMutation);
+        const size_t unmapGate=u.find("if(flatRuntimeActive()){");
+        const size_t unmapPayload=u.find("detail.known=FlatMutationDetails::DstSub;",unmapGate);
+        const size_t unmapMutation=u.find(ownerUnmapCall,unmapPayload);
+        const size_t unmapTrack=u.find("flatRuntimeUnmap(res);",unmapMutation);
+        return mapGate!=std::string::npos && mapRead!=std::string::npos &&
+            mapPayload!=std::string::npos && mapMutation!=std::string::npos &&
+            mapTrack!=std::string::npos && mapGate<mapRead && mapRead<mapPayload &&
+            mapPayload<mapMutation && mapMutation<mapTrack &&
+            unmapGate!=std::string::npos && unmapPayload!=std::string::npos &&
+            unmapMutation!=std::string::npos && unmapTrack!=std::string::npos &&
+            unmapGate<unmapPayload && unmapPayload<unmapMutation && unmapMutation<unmapTrack;
     };
     check(ownerValid(map,unmapHook),
           "owner write Map and Unmap classify the exact resource before camera tracking");
     std::string noOwnerMap=map;
-    const std::string ownerMapCall="flatRuntimeOverlayResourceMutation(res,FlatOverlayMutationOp::Map);";
     if(noOwnerMap.find(ownerMapCall)!=std::string::npos)
         noOwnerMap.erase(noOwnerMap.find(ownerMapCall),ownerMapCall.size());
     check(!ownerValid(noOwnerMap,unmapHook),
@@ -3069,15 +3207,17 @@ void testFlatOverlayMutationWiring() {
     check(safeSubstitution(suffix),"only an unknown command list or ClearState causes substitution's blanket overlay refusal");
     check(!safeSubstitution(suffix+"event==FlatSubstEvent::kCopy"),
           "mutation control: restoring a blanket copy refusal fails");
-    const std::string view=compact(bodyOf(runtime,"void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op)"));
+    const std::string view=compact(bodyOf(runtime,"void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op,"));
     check(view.find("if(view)view->GetResource(&resource);")!=std::string::npos &&
-          view.find("flatRuntimeOverlayResourceMutation(resource.Get(),op);")!=std::string::npos,
-          "view mutations resolve the actual underlying resource and pass null through when unresolved");
-    const std::string resource=compact(bodyOf(runtime,"void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMutationOp op)"));
+          view.find("payload.view=view;payload.known|=FlatMutationDetails::View;")!=std::string::npos &&
+          view.find("flatRuntimeOverlayResourceMutation(resource.Get(),op,payload);")!=std::string::npos,
+          "view mutations resolve the actual resource and retain the view payload while passing null through unresolved");
+    const std::string resource=compact(bodyOf(runtime,"void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMutationOp op,"));
     check(resource.find("flatRuntimeOverlayMutationRole(resource,t.resource,t.overlayDepth)")!=std::string::npos &&
           resource.find("if(role==FlatOverlayMutationRole::Unrelated)return;")!=std::string::npos &&
+          resource.find("state().untrusted.noteMutation(resource,payload,state().prefix.sequence);")!=std::string::npos &&
           resource.find("overlayFail(s,")!=std::string::npos,
-          "unrelated resources leave the suffix open; HDR, depth and unknown destinations fail closed");
+          "unrelated resources leave the suffix open; relevant payloads are retained and unknown destinations fail closed");
     const std::string foreign=compact(bodyOf(runtime,"void flatRuntimeOverlayForeignMutation()"));
     check(foreign.find("foreignWork.store(true,std::memory_order_release);")!=std::string::npos &&
           foreign.find("if(owner()&&overlayOpen(state()))overlayFail(state(),\"overlay-foreign-mutation\");")!=std::string::npos,

@@ -50,6 +50,23 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
     edvr::FlatOverlayLayer::rememberPixelShader(ps.Get(),psCode->GetBufferPointer(),psCode->GetBufferSize(),false);
     edvr::FlatOverlayLayer::rememberPixelShader(secondPs.Get(),secondPsCode->GetBufferPointer(),secondPsCode->GetBufferSize(),false);
     edvr::FlatOverlayLayer::rememberPixelShader(explicitDepthPs.Get(),explicitDepthPsCode->GetBufferPointer(),explicitDepthPsCode->GetBufferSize(),false);
+    ComPtr<ID3D11PixelShader> unregisteredPs;
+    check(SUCCEEDED(device->CreatePixelShader(psCode->GetBufferPointer(),psCode->GetBufferSize(),
+                                               nullptr,&unregisteredPs)),
+          "unregistered metadata fixture shader creates");
+    const auto patchableMetadata=edvr::FlatOverlayLayer::diagnosePixelShader(ps.Get());
+    const auto rejectedMetadata=edvr::FlatOverlayLayer::diagnosePixelShader(explicitDepthPs.Get());
+    const auto unknownMetadata=edvr::FlatOverlayLayer::diagnosePixelShader(unregisteredPs.Get());
+    const auto nullMetadata=edvr::FlatOverlayLayer::diagnosePixelShader(nullptr);
+    check(patchableMetadata.read && patchableMetadata.eligible && !patchableMetadata.created &&
+          patchableMetadata.object==ps.Get() && rejectedMetadata.read && !rejectedMetadata.eligible &&
+          !rejectedMetadata.created && rejectedMetadata.object==explicitDepthPs.Get() &&
+          rejectedMetadata.reason.find("non-colour PS output")!=std::string::npos &&
+          unknownMetadata.read && !unknownMetadata.eligible && !unknownMetadata.created &&
+          unknownMetadata.object==unregisteredPs.Get() &&
+          unknownMetadata.reason=="PS bytecode not retained" && nullMetadata.read &&
+          !nullMetadata.eligible && nullMetadata.reason=="null-PS",
+          "read-only shader metadata separates patchable, explicit-depth, unregistered and null PS without creating patches");
 
     D3D11_TEXTURE2D_DESC colorDesc{};
     colorDesc.Width=w;colorDesc.Height=h;colorDesc.MipLevels=colorDesc.ArraySize=colorDesc.SampleDesc.Count=1;
@@ -829,6 +846,165 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
                               alternateReport.firstFailure.reason.c_str())==0 &&
                   !capture.globalFailure(),
                   "consumer diagnosis retains the alternate patcher's first reason and origin despite an earlier world-bucket failure");
+        }
+        {
+            edvr::FlatUntrustedCoverage capture;capture.beginFrame(82);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;clearPair();
+            const auto alternate=submit(capture,observed,used,82,1,alternateBytes,
+                0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                secondVs.Get(),secondPs.Get(),secondRect,true);
+            const bool selected=capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
+            auto stencilOnly=edvr::FlatMutationDetails::clearDepth(
+                D3D11_CLEAR_STENCIL,.8f,0x35u);
+            stencilOnly.view=liveDsv.Get();
+            stencilOnly.known|=edvr::FlatMutationDetails::View;
+            capture.noteMutation(liveDepth.Get(),stencilOnly,2);
+            const auto* first=capture.mutationDiagnostic(0,0);
+            check(alternate.began && used==1 && selected && !capture.view() &&
+                  capture.failure() && std::strcmp(capture.failure(),
+                      "untrusted-source-explicit-mutation")==0 && first &&
+                  first->details.op==edvr::FlatOverlayMutationOp::ClearDsv &&
+                  std::strcmp(first->details.entry,"ClearDepthStencilView")==0 &&
+                  first->details.known==(edvr::FlatMutationDetails::View|
+                      edvr::FlatMutationDetails::Flags|edvr::FlatMutationDetails::Depth|
+                      edvr::FlatMutationDetails::Stencil) &&
+                  first->details.view==liveDsv.Get() && first->details.flags==D3D11_CLEAR_STENCIL &&
+                  first->details.depth==.8f && first->details.stencil==0x35u &&
+                  first->resource==liveDepth.Get() && !first->color && first->depth &&
+                  first->afterSequence==2 && first->nominee.sequence==1 &&
+                  first->nominee.vs==0xAACFDCF2FB9AD809ull &&
+                  first->nominee.ps==0xCF534B32F491561Aull && first->pending==1 &&
+                  first->completed==1 && first->ready && !first->planned && !first->open &&
+                  !first->consumer && sameOriginal(),
+                  "stencil-only clear retains the completed alternate nominee and exact post-draw payload while refusing coverage");
+
+            capture.noteMutation(liveDepth.Get(),stencilOnly,3);
+            auto depthOnly=edvr::FlatMutationDetails::clearDepth(D3D11_CLEAR_DEPTH,.45f,0);
+            depthOnly.view=liveDsv.Get();depthOnly.known|=edvr::FlatMutationDetails::View;
+            capture.noteMutation(liveDepth.Get(),depthOnly,4);
+            D3D11_BOX copyBox{1,2,0,8,7,1};
+            auto copy=edvr::FlatMutationDetails::transfer(
+                edvr::FlatOverlayMutationOp::CopyRegion,"CopySubresourceRegion",
+                baselineDepth.Get(),2,3,&copyBox,4,5,0);
+            capture.noteMutation(liveDepth.Get(),copy,5);
+            copyBox.left=11;copyBox.right=12;copyBox.top=13;copyBox.bottom=14;
+            BYTE updateSource=0;
+            D3D11_BOX updateBox{2,3,0,9,8,1};
+            auto update=edvr::FlatMutationDetails::transfer(
+                edvr::FlatOverlayMutationOp::UpdateSubresource,"UpdateSubresource",
+                &updateSource,0,4,&updateBox);
+            capture.noteMutation(liveDepth.Get(),update,6);
+            updateBox.left=21;updateBox.right=22;updateBox.top=23;updateBox.bottom=24;
+            const auto* repeated=capture.mutationDiagnostic(0,0);
+            const auto* depthEvent=capture.mutationDiagnostic(0,1);
+            const auto* copyEvent=capture.mutationDiagnostic(0,2);
+            const auto* updateEvent=capture.mutationDiagnostic(0,3);
+            check(capture.mutationCount(0)==4 && capture.mutationClassCount(0)==3 &&
+                  capture.mutationClassDropped(0)==0 && repeated && repeated->count==2 &&
+                  repeated->ordinal==1 && repeated->afterSequence==2 &&
+                  repeated->details.stencil==0x35u && depthEvent && depthEvent->count==1 &&
+                  depthEvent->details.flags==D3D11_CLEAR_DEPTH && depthEvent->details.depth==.45f &&
+                  copyEvent && copyEvent->details.op==edvr::FlatOverlayMutationOp::CopyRegion &&
+                  copyEvent->details.known==(edvr::FlatMutationDetails::Source|
+                      edvr::FlatMutationDetails::SrcSub|edvr::FlatMutationDetails::DstSub|
+                      edvr::FlatMutationDetails::DstXYZ|edvr::FlatMutationDetails::Box) &&
+                  copyEvent->details.source==baselineDepth.Get() && copyEvent->details.srcSub==2 &&
+                  copyEvent->details.dstSub==3 && copyEvent->details.dstX==4 &&
+                  copyEvent->details.dstY==5 && copyEvent->details.hasBox &&
+                  copyEvent->details.box.left==1 && copyEvent->details.box.top==2 &&
+                  copyEvent->details.box.right==8 && copyEvent->details.box.bottom==7 &&
+                  updateEvent && updateEvent->details.op==edvr::FlatOverlayMutationOp::UpdateSubresource &&
+                  updateEvent->details.known==(edvr::FlatMutationDetails::DstSub|
+                      edvr::FlatMutationDetails::Box) && updateEvent->details.dstSub==4 &&
+                  updateEvent->details.hasBox && updateEvent->details.box.left==2 &&
+                  updateEvent->details.box.top==3 && updateEvent->details.box.right==9 &&
+                  updateEvent->details.box.bottom==8 && !capture.view() && sameOriginal(),
+                  "mutation signatures aggregate repeats, retain later events through sticky refusal, and own caller boxes");
+            capture.consumer();
+            capture.noteMutation(liveDepth.Get(),depthOnly,7);
+            check(capture.mutationCount(0)==4 && capture.mutationClassCount(0)==3 &&
+                  capture.mutationClassDiagnostic(0,0)->count==3 &&
+                  capture.mutationDiagnostic(0,0)->count==2 &&
+                  capture.mutationDiagnostic(0,3)->consumer==false,
+                  "consumer keeps prior mutation snapshots and ignores later writes");
+            capture.beginFrame(83);
+            check(capture.mutationCount(0)==0 && capture.mutationDropped(0)==0 &&
+                  capture.mutationClassCount(0)==0 && capture.mutationClassDropped(0)==0 &&
+                  capture.mutationDiagnostic(0,0)==nullptr && !capture.globalFailure(),
+                  "the next frame clears mutation records and refusal state");
+        }
+        {
+            edvr::FlatUntrustedCoverage capture;capture.beginFrame(84);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;clearPair();
+            const auto world=submit(capture,observed,used,84,1,worldBytes,
+                0xEB5234DB6ADB491Dull,0x11223344ull,vs.Get(),ps.Get(),full,false);
+            const auto alternate=submit(capture,observed,used,84,2,alternateBytes,
+                0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                secondVs.Get(),secondPs.Get(),secondRect,true);
+            const auto unknown=edvr::FlatMutationDetails::named(
+                edvr::FlatOverlayMutationOp::Written,"unknown-writer");
+            capture.noteMutation(nullptr,unknown,3);
+            const auto* worldEvent=capture.mutationDiagnostic(0,0);
+            const auto* alternateEvent=capture.mutationDiagnostic(1,0);
+            check(world.began && alternate.began && used==2 &&
+                  capture.globalFailure() && std::strcmp(capture.globalFailure(),
+                      "untrusted-source-unknown-mutation")==0 &&
+                  capture.mutationCount(0)==1 && capture.mutationCount(1)==1 &&
+                  capture.mutationClassCount(0)==1 && capture.mutationClassCount(1)==1 &&
+                  worldEvent && alternateEvent && !worldEvent->resource &&
+                  !alternateEvent->resource && worldEvent->afterSequence==3 &&
+                  alternateEvent->afterSequence==3 && worldEvent->nominee.sequence==1 &&
+                  alternateEvent->nominee.sequence==2 &&
+                  !capture.mutationClassDiagnostic(0,0)->color &&
+                  !capture.mutationClassDiagnostic(0,0)->depth &&
+                  std::strcmp(worldEvent->details.entry,"unknown-writer")==0 &&
+                  std::strcmp(alternateEvent->details.entry,"unknown-writer")==0,
+                  "unknown-resource mutation preserves global refusal and snapshots each active camera bucket");
+        }
+        {
+            edvr::FlatUntrustedCoverage capture;capture.beginFrame(85);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;clearPair();
+            const auto alternate=submit(capture,observed,used,85,1,alternateBytes,
+                0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                secondVs.Get(),secondPs.Get(),secondRect,true);
+            for(uint32_t i=0;i<16;++i) {
+                auto detail=edvr::FlatMutationDetails::clearDepth(D3D11_CLEAR_STENCIL,.8f,i);
+                detail.view=liveDsv.Get();detail.known|=edvr::FlatMutationDetails::View;
+                capture.noteMutation(liveDepth.Get(),detail,i+2);
+            }
+            auto copy=edvr::FlatMutationDetails::transfer(
+                edvr::FlatOverlayMutationOp::CopyResource,"CopyResource",baselineDepth.Get());
+            capture.noteMutation(liveDepth.Get(),copy,18);
+            capture.noteMutation(liveDepth.Get(),copy,19);
+            D3D11_BOX updateBox{1,2,0,8,7,1};
+            auto update=edvr::FlatMutationDetails::transfer(
+                edvr::FlatOverlayMutationOp::UpdateSubresource,"UpdateSubresource",
+                nullptr,0,1,&updateBox);
+            capture.noteMutation(liveDepth.Get(),update,20);
+            capture.noteMutation(liveColor.Get(),copy,21);
+            const auto* clearClass=capture.mutationClassDiagnostic(0,0);
+            const auto* copyDepthClass=capture.mutationClassDiagnostic(0,1);
+            const auto* updateClass=capture.mutationClassDiagnostic(0,2);
+            const auto* copyColorClass=capture.mutationClassDiagnostic(0,3);
+            check(alternate.began && capture.mutationCount(0)==16 &&
+                  capture.mutationDropped(0)==4 && capture.mutationClassCount(0)==4 &&
+                  capture.mutationClassDropped(0)==0 && clearClass &&
+                  clearClass->details.op==edvr::FlatOverlayMutationOp::ClearDsv &&
+                  clearClass->count==16 && clearClass->ordinal==1 &&
+                  copyDepthClass && copyDepthClass->details.op==edvr::FlatOverlayMutationOp::CopyResource &&
+                  copyDepthClass->count==2 && copyDepthClass->ordinal==17 &&
+                  copyDepthClass->afterSequence==18 && copyDepthClass->depth && !copyDepthClass->color &&
+                  copyDepthClass->details.source==baselineDepth.Get() && updateClass &&
+                  updateClass->details.op==edvr::FlatOverlayMutationOp::UpdateSubresource &&
+                  updateClass->ordinal==19 && updateClass->details.hasBox &&
+                  updateClass->details.box.left==1 && copyColorClass &&
+                  copyColorClass->details.op==edvr::FlatOverlayMutationOp::CopyResource &&
+                  copyColorClass->color && !copyColorClass->depth &&
+                  copyColorClass->ordinal==20,
+                  "mutation class summaries retain later operations and resource roles after detailed signature slots fill");
         }
         {
             edvr::FlatUntrustedCoverage capture;capture.beginFrame(81);

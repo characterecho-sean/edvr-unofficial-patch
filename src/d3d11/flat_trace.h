@@ -139,16 +139,43 @@ struct FlatTraceFrameHeader {
 
 // The runtime's bounded ring: the last few complete frames, frame-atomic so a
 // dump never holds half a frame. Fixed storage, no allocation on the draw
-// path; a frame with more draws than the slot marks itself truncated and is
+// path; a frame with more events than the slot marks itself truncated and is
 // skipped by the dump.
 constexpr uint32_t kFlatTraceFrames = 4;
-constexpr uint32_t kFlatTraceEventsPerFrame = 4096;
+constexpr uint32_t kFlatTraceEventsPerFrame = 65536;
+constexpr uint64_t kFlatTraceStorageBudgetBytes = 256ull * 1024ull * 1024ull;
 struct FlatTraceRing {
     FlatTraceEvent events[kFlatTraceFrames][kFlatTraceEventsPerFrame];
     FlatTraceFrameHeader headers[kFlatTraceFrames]{};
+    uint32_t attempted[kFlatTraceFrames]{}; // live-only; never serialized
     uint32_t slot = 0;
     bool slotUsed[kFlatTraceFrames]{};
 };
+static_assert(sizeof(FlatTraceRing) <= kFlatTraceStorageBudgetBytes,
+              "flat trace ring exceeds its fixed storage budget");
+
+struct FlatTraceStats {
+    uint32_t capacity = kFlatTraceEventsPerFrame;
+    uint32_t peakAttempted = 0;
+    uint32_t overflowSlots = 0;
+};
+inline FlatTraceStats flatTraceStats(const FlatTraceRing& r) {
+    FlatTraceStats stats{};
+    for (uint32_t i = 0; i < kFlatTraceFrames; ++i) {
+        if (!r.slotUsed[i]) continue;
+        if (r.attempted[i] > stats.peakAttempted) stats.peakAttempted = r.attempted[i];
+        if (r.headers[i].truncated) ++stats.overflowSlots;
+    }
+    return stats;
+}
+inline bool flatTraceCanAppend(FlatTraceRing& r) {
+    if (!r.slotUsed[r.slot]) return false;
+    auto& attempted = r.attempted[r.slot];
+    if (attempted != 0xffffffffu) ++attempted;
+    auto& h = r.headers[r.slot];
+    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return false; }
+    return true;
+}
 
 inline void flatTraceBeginFrame(FlatTraceRing& r, uint64_t frame, const void* output,
                                 uint32_t width, uint32_t height, uint32_t format) {
@@ -156,29 +183,27 @@ inline void flatTraceBeginFrame(FlatTraceRing& r, uint64_t frame, const void* ou
     auto& h = r.headers[r.slot];
     h = FlatTraceFrameHeader{};
     h.frame = frame; h.output = output; h.width = width; h.height = height; h.format = format;
+    r.attempted[r.slot] = 0;
     r.slotUsed[r.slot] = true;
 }
 inline void flatTraceRecord(FlatTraceRing& r, const FlatRuntimeDraw& d, bool foreignWork,
                             const void* const* hdrSrv = nullptr) {
-    if (!r.slotUsed[r.slot]) return;
+    if (!flatTraceCanAppend(r)) return;
     auto& h = r.headers[r.slot];
-    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return; }
     auto& e = r.events[r.slot][h.eventCount++];
     e = flatTraceEventFromDraw(d, foreignWork);
     flatTraceEventSetSrv(e, hdrSrv);
 }
 inline void flatTraceMark(FlatTraceRing& r, uint32_t kind, const void* resource) {
-    if (!r.slotUsed[r.slot]) return;
+    if (!flatTraceCanAppend(r)) return;
     auto& h = r.headers[r.slot];
-    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return; }
     r.events[r.slot][h.eventCount++] = flatTraceEventMarker(kind, resource);
 }
 // The HDR route's resolve marker, after the trigger draw's own event.
 inline void flatTraceResolve(FlatTraceRing& r, const void* hdr, uint64_t vs, uint64_t ps, uint32_t sequence,
                              uint32_t reason) {
-    if (!r.slotUsed[r.slot]) return;
+    if (!flatTraceCanAppend(r)) return;
     auto& h = r.headers[r.slot];
-    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return; }
     r.events[r.slot][h.eventCount++] = flatTraceEventResolve(hdr, vs, ps, sequence, reason);
 }
 inline void flatTraceSeal(FlatTraceRing& r, bool produced, uint64_t contractHash) {

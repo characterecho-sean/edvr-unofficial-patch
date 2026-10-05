@@ -2873,7 +2873,8 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
     }
     if (flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);   // a clear is not a substituted producer draw: the game's state first
-        flatRuntimeOverlayViewMutation(rtv, FlatOverlayMutationOp::ClearRtv);
+        flatRuntimeOverlayViewMutation(rtv, FlatOverlayMutationOp::ClearRtv,
+            FlatMutationDetails::clear(FlatOverlayMutationOp::ClearRtv,"ClearRenderTargetView",c));
         ResourceInfo info{}; if (bindingResolve(rtv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource));
     }
     if (g_vrWorldWatchWrites) vrWorldRouteNoteRtvClear(rtv);
@@ -2928,7 +2929,8 @@ void STDMETHODCALLTYPE hookedClearUavUint(ID3D11DeviceContext* self,
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
-        flatRuntimeOverlayViewMutation(uav, FlatOverlayMutationOp::ClearUav);
+        flatRuntimeOverlayViewMutation(uav, FlatOverlayMutationOp::ClearUav,
+            FlatMutationDetails::clear(FlatOverlayMutationOp::ClearUav,"ClearUnorderedAccessViewUint",c));
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearUav(uav);
     g_state->realClearUavUint(self, uav, c);
@@ -2941,7 +2943,8 @@ void STDMETHODCALLTYPE hookedClearUavFloat(ID3D11DeviceContext* self,
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
-        flatRuntimeOverlayViewMutation(uav, FlatOverlayMutationOp::ClearUav);
+        flatRuntimeOverlayViewMutation(uav, FlatOverlayMutationOp::ClearUav,
+            FlatMutationDetails::clear(FlatOverlayMutationOp::ClearUav,"ClearUnorderedAccessViewFloat",c));
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearUav(uav);
     g_state->realClearUavFloat(self, uav, c);
@@ -3313,8 +3316,14 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     flatRuntimeMapBounceNoteMap(self,res,sub,type,false,mapData);
     if (mapData0) mapped->pData=flatRuntimeMapBounceInstall(self,res,sub,type,mapped->pData);
     if (mapData0 && flatRuntimeActive()) {
-        if (type != D3D11_MAP_READ)
-            flatRuntimeOverlayResourceMutation(res, FlatOverlayMutationOp::Map);
+        if (type != D3D11_MAP_READ) {
+            auto detail=FlatMutationDetails::named(FlatOverlayMutationOp::Map,"Map");
+            detail.known=FlatMutationDetails::MapType|FlatMutationDetails::Flags|FlatMutationDetails::DstSub|
+                FlatMutationDetails::RowPitch|FlatMutationDetails::DepthPitch;
+            detail.mapType=type;detail.flags=flags;detail.dstSub=sub;
+            detail.rowPitch=mapped->RowPitch;detail.depthPitch=mapped->DepthPitch;
+            flatRuntimeOverlayResourceMutation(res, FlatOverlayMutationOp::Map,detail);
+        }
         flatRuntimeMap(res, type, mapped->pData);
     }
     if (mapData0 && flatTemporalCapturing())
@@ -3470,7 +3479,9 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // longer ours to look at.
     if (drawCensusArmed()) drawCensusCbNoteUnmap(res);
     if (flatRuntimeActive()) {
-        flatRuntimeOverlayResourceMutation(res, FlatOverlayMutationOp::Unmap);
+        auto detail=FlatMutationDetails::named(FlatOverlayMutationOp::Unmap,"Unmap");detail.dstSub=sub;
+        detail.known=FlatMutationDetails::DstSub;
+        flatRuntimeOverlayResourceMutation(res, FlatOverlayMutationOp::Unmap,detail);
         flatRuntimeUnmap(res);
     }
     if (flatTemporalCapturing()) flatTemporalUnmap(res);
@@ -4326,7 +4337,8 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (!foreignContext(self)) {motionResourceWritten(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
-        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource);
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource,
+            FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyResource,"CopyResource",src));
         flatRuntimeWritten(dst);
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'R');
@@ -4358,7 +4370,8 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     if (!foreignContext(self)) {depthProbeNoteClear(dsv, depth);if(uiLayerWatching())uiLayerNoteDepthClear(dsv, flags, depth, stencil);}
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
-        flatRuntimeOverlayViewMutation(dsv, FlatOverlayMutationOp::ClearDsv);
+        flatRuntimeOverlayViewMutation(dsv, FlatOverlayMutationOp::ClearDsv,
+            FlatMutationDetails::clearDepth(flags,depth,stencil));
         flatRuntimeWeaponFootprintClear(dsv, flags, stencil);
     }
     if (!foreignContext(self) && (flags & D3D11_CLEAR_DEPTH) && flatRuntimeActive()) { ResourceInfo info{}; if (bindingResolve(dsv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource)); }
@@ -4461,7 +4474,10 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
     if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
-        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyStructureCount);
+        auto detail=FlatMutationDetails::named(FlatOverlayMutationOp::CopyStructureCount,"CopyStructureCount");
+        detail.sourceView=src;detail.dstX=off;
+        detail.known=FlatMutationDetails::SourceView|FlatMutationDetails::DstXYZ;
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyStructureCount,detail);
     }
     if(!foreignContext(self)){motionResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
     else engineVelocityResourceUnknown(dst);
@@ -4495,7 +4511,9 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     }
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
-        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyRegion);
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyRegion,
+            FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyRegion,"CopySubresourceRegion",
+                src,srcSub,dstSub,box,dstX,dstY,dstZ));
         flatRuntimeWritten(dst);
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'C');
@@ -4549,7 +4567,11 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     }
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
-        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::UpdateSubresource);
+        auto detail=FlatMutationDetails::transfer(FlatOverlayMutationOp::UpdateSubresource,
+            "UpdateSubresource",nullptr,0,dstSub,box);
+        detail.rowPitch=rowPitch;detail.depthPitch=depthPitch;
+        detail.known|=FlatMutationDetails::RowPitch|FlatMutationDetails::DepthPitch;
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::UpdateSubresource,detail);
         flatRuntimeUpdate(dst, data, box);
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalUpdate(dst, data, box);
@@ -4575,7 +4597,10 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
     if(!foreignContext(self)){if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kResolve);
-        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::Resolve);
+        auto detail=FlatMutationDetails::transfer(FlatOverlayMutationOp::Resolve,"ResolveSubresource",src,srcSub,dstSub);
+        detail.format=static_cast<UINT>(fmt);
+        detail.known|=FlatMutationDetails::Format;
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::Resolve,detail);
         flatRuntimeWritten(dst);
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'V');

@@ -8,6 +8,7 @@
 #include "flat_mono_frame.h"
 #include "flat_camera_phase.h"
 #include "flat_runtime_model.h"
+#include "flat_mutation_diagnostic.h"
 #include "../common/log.h"
 #include <array>
 #include <cstring>
@@ -99,6 +100,21 @@ struct FlatUntrustedBucketDiagnostic {
     FlatUntrustedDrawDiagnostic firstFailure{};
 };
 
+struct FlatUntrustedMutationDiagnostic {
+    FlatMutationDetails details{};
+    FlatUntrustedDrawDiagnostic nominee{};
+    uint64_t frame=0,ordinal=0;
+    uint32_t afterSequence=0,count=0,pending=0,completed=0;
+    const void* resource=nullptr;
+    bool color=false,depth=false,ready=false,planned=false,open=false,consumer=false;
+};
+struct FlatUntrustedNomineeDiagnostic {
+    uint64_t vs=0,ps=0;
+    uint32_t firstSequence=0,count=0;
+    bool firstAfterFailure=false;
+    FlatOverlayShaderDiagnostic shader{};
+};
+
 struct FlatUntrustedQualification {
     const char* reason="not-checked";
     bool hIdentity=false, uniqueAlternate=false, dsvMatch=false;
@@ -144,6 +160,7 @@ class FlatUntrustedCoverage {
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
     static constexpr uint32_t kBuckets = 2;
     static constexpr uint32_t kMaxDraws = 128;
+    static constexpr uint32_t kMutationClasses=(static_cast<uint32_t>(FlatOverlayMutationOp::Written)+1)*4;
     struct Draw {
         uint64_t vs = 0, ps = 0;
         uint32_t sequence = 0;
@@ -158,16 +175,29 @@ class FlatUntrustedCoverage {
         uint32_t width = 0, height = 0, count = 0;
         std::string failure;
         FlatUntrustedDrawDiagnostic nominee{}, firstFailure{};
+        std::array<FlatUntrustedMutationDiagnostic,16> mutations{};
+        uint32_t mutationsUsed=0,mutationsDropped=0;
+        std::array<FlatUntrustedMutationDiagnostic,kMutationClasses> mutationClasses{};
+        uint32_t mutationClassesUsed=0,mutationClassesDropped=0;
+        std::array<FlatUntrustedNomineeDiagnostic,32> nominees{};
+        uint32_t nomineesUsed=0,nomineesDropped=0;
         void reset() {
             layer.reset(); color.Reset(); depth.Reset(); dsv.Reset();
             width=height=count=0; failure.clear();nominee={};firstFailure={};
+            mutations={};mutationsUsed=mutationsDropped=0;
+            mutationClasses={};mutationClassesUsed=mutationClassesDropped=0;
+            nominees={};nomineesUsed=nomineesDropped=0;
         }
         void beginFrame(uint64_t frame) {
             layer.beginFrame(frame); color.Reset(); depth.Reset(); dsv.Reset();
             width=height=count=0; failure.clear();nominee={};firstFailure={};
+            mutations={};mutationsUsed=mutationsDropped=0;
+            mutationClasses={};mutationClassesUsed=mutationClassesDropped=0;
+            nominees={};nomineesUsed=nomineesDropped=0;
         }
     } buckets_[kBuckets];
     uint64_t frame_ = 0;
+    uint64_t mutationOrdinal_=0;
     uint32_t used_ = 0, planned_ = kBuckets, open_ = kBuckets, selected_ = kBuckets;
     bool consumerSeen_ = false;
     std::string globalFailure_, selectionFailure_;
@@ -260,24 +290,93 @@ public:
             sampleUnavailable(i,"resize-before-readback");
         for(auto& b:buckets_)b.reset();
         frame_=0;used_=0;planned_=open_=selected_=kBuckets;consumerSeen_=false;
+        mutationOrdinal_=0;
         globalFailure_.clear();selectionFailure_.clear();
     }
     void beginFrame(uint64_t frame) {
         if(frame_==frame)return;
         for(auto& b:buckets_)b.beginFrame(frame);
         frame_=frame;used_=0;planned_=open_=selected_=kBuckets;consumerSeen_=false;
+        mutationOrdinal_=0;
         globalFailure_.clear();selectionFailure_.clear();
     }
     void invalidate(const char* reason) {
         if(!consumerSeen_ && globalFailure_.empty())
             globalFailure_=reason?reason:"untrusted-coverage-invalid";
     }
-    void noteMutation(ID3D11Resource* resource) {
+    void noteMutation(ID3D11Resource* resource,const FlatMutationDetails& details={},
+                      uint32_t afterSequence=0) {
         if(consumerSeen_ || !used_)return;
-        if(!resource) {invalidate("untrusted-source-unknown-mutation");return;}
-        for(uint32_t i=0;i<used_;++i)
-            if(resource==buckets_[i].depth.Get() || resource==buckets_[i].color.Get())
-                bucketFailure(i,"mutation","untrusted-source-explicit-mutation");
+        ++mutationOrdinal_;
+        for(uint32_t i=0;i<used_;++i) {
+            auto& b=buckets_[i];
+            if(!resource || resource==b.depth.Get() || resource==b.color.Get()) {
+                const bool color=resource==b.color.Get(),depth=resource==b.depth.Get();
+                const auto snapshot=[&](FlatUntrustedMutationDiagnostic& m) {
+                    m.details=details;m.nominee=b.nominee;m.frame=frame_;m.ordinal=mutationOrdinal_;
+                    m.afterSequence=afterSequence;m.count=1;m.resource=resource;
+                    m.color=color;m.depth=depth;m.pending=b.count;
+                    for(uint32_t j=0;j<b.count;++j)if(b.draws[j].completed)++m.completed;
+                    m.ready=b.layer.coverageReady(frame_,b.color.Get());
+                    m.planned=planned_==i;m.open=open_==i;m.consumer=consumerSeen_;
+                };
+                // Independent class coverage prevents many clear/region payload
+                // variants from hiding the first later operation or resource role.
+                uint32_t mutationClass=0;
+                for(;mutationClass<b.mutationClassesUsed;++mutationClass) {
+                    const auto& prior=b.mutationClasses[mutationClass];
+                    if(prior.details.op==details.op && prior.color==color && prior.depth==depth)break;
+                }
+                if(mutationClass<b.mutationClassesUsed)++b.mutationClasses[mutationClass].count;
+                else if(mutationClass<b.mutationClasses.size())snapshot(b.mutationClasses[b.mutationClassesUsed++]);
+                else ++b.mutationClassesDropped;
+                uint32_t slot=0;
+                for(;slot<b.mutationsUsed;++slot)
+                    if(b.mutations[slot].resource==resource &&
+                       flatMutationSameSignature(b.mutations[slot].details,details))break;
+                if(slot<b.mutationsUsed)++b.mutations[slot].count;
+                else if(slot<b.mutations.size())snapshot(b.mutations[b.mutationsUsed++]);
+                else ++b.mutationsDropped;
+                if(resource)bucketFailure(i,"mutation","untrusted-source-explicit-mutation");
+            }
+        }
+        if(!resource)invalidate("untrusted-source-unknown-mutation");
+    }
+    uint32_t mutationCount(uint32_t bucket) const {
+        return bucket<used_?buckets_[bucket].mutationsUsed:0;
+    }
+    uint32_t mutationDropped(uint32_t bucket) const {
+        return bucket<used_?buckets_[bucket].mutationsDropped:0;
+    }
+    const FlatUntrustedMutationDiagnostic* mutationDiagnostic(uint32_t bucket,uint32_t slot) const {
+        return bucket<used_ && slot<buckets_[bucket].mutationsUsed?
+            &buckets_[bucket].mutations[slot]:nullptr;
+    }
+    uint32_t mutationClassCount(uint32_t bucket) const {
+        return bucket<used_?buckets_[bucket].mutationClassesUsed:0;
+    }
+    uint32_t mutationClassDropped(uint32_t bucket) const {
+        return bucket<used_?buckets_[bucket].mutationClassesDropped:0;
+    }
+    const FlatUntrustedMutationDiagnostic* mutationClassDiagnostic(uint32_t bucket,uint32_t slot) const {
+        return bucket<used_ && slot<buckets_[bucket].mutationClassesUsed?
+            &buckets_[bucket].mutationClasses[slot]:nullptr;
+    }
+    uint32_t nomineeCount(uint32_t bucket) const {return bucket<used_?buckets_[bucket].nomineesUsed:0;}
+    uint32_t nomineeDropped(uint32_t bucket) const {return bucket<used_?buckets_[bucket].nomineesDropped:0;}
+    const FlatUntrustedNomineeDiagnostic* nomineeDiagnostic(uint32_t bucket,uint32_t slot) const {
+        return bucket<used_ && slot<buckets_[bucket].nomineesUsed?&buckets_[bucket].nominees[slot]:nullptr;
+    }
+    void diagnoseNomineeShader(uint32_t sequence,ID3D11PixelShader* original) {
+        for(uint32_t i=0;i<used_;++i)for(uint32_t j=0;j<buckets_[i].nomineesUsed;++j) {
+            auto& n=buckets_[i].nominees[j];
+            if(n.firstSequence!=sequence || n.shader.read)continue;
+            for(uint32_t x=0;x<used_;++x)for(uint32_t y=0;y<buckets_[x].nomineesUsed;++y) {
+                const auto& prior=buckets_[x].nominees[y].shader;
+                if(prior.read && prior.object==original) {n.shader=prior;return;}
+            }
+            n.shader=FlatOverlayLayer::diagnosePixelShader(original);return;
+        }
     }
     void consumer() { consumerSeen_=true; }
     bool active() const { return used_!=0; }
@@ -309,6 +408,13 @@ public:
             std::memcpy(b.camera,camera,sizeof(b.camera));
         }
         Bucket& b=buckets_[index];
+        uint32_t nomineeIndex=0;
+        for(;nomineeIndex<b.nomineesUsed;++nomineeIndex)
+            if(b.nominees[nomineeIndex].vs==vs && b.nominees[nomineeIndex].ps==ps)break;
+        if(nomineeIndex<b.nomineesUsed)++b.nominees[nomineeIndex].count;
+        else if(nomineeIndex<b.nominees.size())
+            b.nominees[b.nomineesUsed++]={vs,ps,sequence,1,!b.failure.empty()};
+        else ++b.nomineesDropped;
         b.nominee=diagnostic?*diagnostic:FlatUntrustedDrawDiagnostic{};
         b.nominee.frame=frame;b.nominee.sequence=sequence;
         b.nominee.vs=vs;b.nominee.ps=ps;

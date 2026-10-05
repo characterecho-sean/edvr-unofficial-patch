@@ -6,6 +6,7 @@
 #include "flat_projection_scope.h"
 #include "flat_substitution.h"
 #include "flat_map_bounce.h"
+#include "flat_mutation_diagnostic.h"
 #include <optional>
 namespace edvr {
 struct FlatMapBounceD3DDriver {
@@ -79,10 +80,6 @@ void flatRuntimeMap(ID3D11Resource*, D3D11_MAP, void*);
 void flatRuntimeUnmap(ID3D11Resource*);
 void flatRuntimeUpdate(ID3D11Resource*, const void*, const D3D11_BOX*);
 void flatRuntimeWritten(ID3D11Resource*);
-enum class FlatOverlayMutationOp : unsigned char {
-    Map, Unmap, ClearRtv, ClearDsv, ClearUav, GenerateMips, CopyResource,
-    CopyRegion, CopyStructureCount, UpdateSubresource, Resolve
-};
 enum class FlatOverlayMutationRole : unsigned char { Unrelated, Hdr, Depth, Unknown };
 inline FlatOverlayMutationRole flatRuntimeOverlayMutationRole(
     const void* resource, const void* hdr, const void* depth) {
@@ -91,8 +88,10 @@ inline FlatOverlayMutationRole flatRuntimeOverlayMutationRole(
     if (resource == depth) return FlatOverlayMutationRole::Depth;
     return FlatOverlayMutationRole::Unrelated;
 }
-void flatRuntimeOverlayResourceMutation(ID3D11Resource*, FlatOverlayMutationOp);
-void flatRuntimeOverlayViewMutation(ID3D11View*, FlatOverlayMutationOp);
+void flatRuntimeOverlayResourceMutation(ID3D11Resource*, FlatOverlayMutationOp,
+                                       const FlatMutationDetails& = {});
+void flatRuntimeOverlayViewMutation(ID3D11View*, FlatOverlayMutationOp,
+                                   const FlatMutationDetails& = {});
 void flatRuntimeOverlayForeignMutation();
 void flatRuntimeUnknown();
 void flatRuntimeOverlayUavBind(ID3D11DeviceContext*, UINT count,

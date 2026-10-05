@@ -1983,9 +1983,11 @@ void flatTraceDumpToLogDir(State& s, uint64_t frame) {
     // Emitted versus withheld counts are reported separately: the serializer
     // skips the in-flight, empty and truncated slots, and a busy frame that
     // dropped out must not read as captured evidence.
-    uint32_t emittedFrames = 0, emittedEvents = 0, skipped = 0;
+    uint32_t emittedFrames = 0, emittedEvents = 0, skipped = 0,inFlight=0,empty=0;
     for (uint32_t i = 0; i < kFlatTraceFrames; ++i) {
         if (!s.traceRing.slotUsed[i]) continue;
+        if(i==s.traceRing.slot)++inFlight;
+        if(!s.traceRing.headers[i].eventCount)++empty;
         if (i == s.traceRing.slot || s.traceRing.headers[i].truncated || !s.traceRing.headers[i].eventCount)
             ++skipped;
         else { ++emittedFrames; emittedEvents += s.traceRing.headers[i].eventCount; }
@@ -2002,8 +2004,9 @@ void flatTraceDumpToLogDir(State& s, uint64_t frame) {
         return wrote;
     });
     CloseHandle(f);
-    Log::get().note("flat trace dump: %ls frames=%u events=%u bytes=%u skipped-slots=%u%s",
-        path, emittedFrames, emittedEvents, bytes, skipped,
+    const auto stats=flatTraceStats(s.traceRing);
+    Log::get().note("flat trace dump: %ls frames=%u events=%u bytes=%u skipped-slots=%u capacity=%u peak-attempted=%u overflow-slots=%u in-flight-slots=%u empty-slots=%u%s",
+        path, emittedFrames, emittedEvents, bytes, skipped,stats.capacity,stats.peakAttempted,stats.overflowSlots,inFlight,empty,
         shortWrite || bytes != expected ? " SHORT WRITE -- capture unusable" : "");
 }
 // --- The HDR route's runtime half (flat_hdr_route.h holds the pure logic and the log lines) -----------------
@@ -2262,6 +2265,59 @@ static void reportUntrustedAtH(State& s,const FlatMonoFrame& sel) {
         char bucketRows[24*9+1]{};hexWords(b.camera,24,bucketRows,sizeof(bucketRows));
         Log::get().note("flat untrusted H bucket rows: frame=%llu index=%u rows270-275=%s",
             (unsigned long long)s.prefix.frame,i,bucketRows);
+        Log::get().note("flat untrusted H mutations: frame=%llu bucket=%u signatures=%u dropped=%u classes=%u class-dropped=%u; ordinal counts notifications including API and generic-write duplicates, after-q is the current prefix position",
+            (unsigned long long)s.prefix.frame,i,s.untrusted.mutationCount(i),s.untrusted.mutationDropped(i),
+            s.untrusted.mutationClassCount(i),s.untrusted.mutationClassDropped(i));
+        const auto emitMutation=[&](const FlatUntrustedMutationDiagnostic& m,uint32_t j,const char* kind) {
+            const auto& d=m.details;
+            Log::get().note("flat untrusted H mutation%s: frame=%llu bucket=%u signature=%u first=%u ordinal=%llu after-q=%u entry=%s op=%s role=%s resource=%p view=%p count=%u pending=%u completed=%u ready=%u planned=%u open=%u consumer=%u nominee-q=%u nominee-VS=%016llX nominee-PS=%016llX nominee-camera=%016llX nominee-write=%llu/%u nominee-current=%u nominee-viewport=%u",
+                kind,(unsigned long long)m.frame,i,j,j==0?1u:0u,(unsigned long long)m.ordinal,m.afterSequence,
+                d.entry,flatMutationOpName(d.op),m.color?(m.depth?"color+depth":"color"):m.depth?"depth":"unknown",
+                m.resource,d.view,m.count,m.pending,m.completed,m.ready?1u:0u,m.planned?1u:0u,
+                m.open?1u:0u,m.consumer?1u:0u,m.nominee.sequence,
+                (unsigned long long)m.nominee.vs,(unsigned long long)m.nominee.ps,
+                (unsigned long long)m.nominee.cameraHash,(unsigned long long)m.nominee.writeEpoch,m.nominee.writeSeq,
+                m.nominee.current?1u:0u,m.nominee.viewport?1u:0u);
+            Log::get().note("flat untrusted H mutation%s payload: frame=%llu bucket=%u signature=%u known=0x%X flags=0x%X clear-depth=%.9g stencil=%u map-type=%u source=%p source-view=%p src-sub=%u dst-sub=%u dst-xyz=(%u,%u,%u) box-present=%u box=(%u,%u,%u,%u,%u,%u) row-pitch=%u depth-pitch=%u format=%u values-present=%u values=%08X,%08X,%08X,%08X",
+                kind,(unsigned long long)m.frame,i,j,d.known,d.flags,d.depth,d.stencil,d.mapType,d.source,d.sourceView,
+                d.srcSub,d.dstSub,d.dstX,d.dstY,d.dstZ,d.hasBox?1u:0u,
+                d.box.left,d.box.top,d.box.front,d.box.right,d.box.bottom,d.box.back,
+                d.rowPitch,d.depthPitch,d.format,d.hasValues?1u:0u,d.values[0],d.values[1],d.values[2],d.values[3]);
+        };
+        for(uint32_t j=0;j<s.untrusted.mutationCount(i);++j)
+            emitMutation(*s.untrusted.mutationDiagnostic(i,j),j,"");
+        for(uint32_t j=0;j<s.untrusted.mutationClassCount(i);++j) {
+            const auto& m=*s.untrusted.mutationClassDiagnostic(i,j);
+            int detail=-1;
+            for(uint32_t k=0;k<s.untrusted.mutationCount(i);++k)
+                if(s.untrusted.mutationDiagnostic(i,k)->ordinal==m.ordinal) {detail=static_cast<int>(k);break;}
+            Log::get().note("flat untrusted H mutation class: frame=%llu bucket=%u class=%u op=%s role=%s count=%u first-ordinal=%llu first-after-q=%u detail-signature=%d",
+                (unsigned long long)m.frame,i,j,flatMutationOpName(m.details.op),
+                m.color?(m.depth?"color+depth":"color"):m.depth?"depth":"unknown",m.count,
+                (unsigned long long)m.ordinal,m.afterSequence,detail);
+            if(detail<0)emitMutation(m,j," class-first");
+        }
+        if(b.alternate) {
+            Log::get().note("flat untrusted H nominee shaders: frame=%llu bucket=%u pairs=%u dropped=%u; bytecode-only MRT7 preflight, no device creation or draw-state admission",
+                (unsigned long long)s.prefix.frame,i,s.untrusted.nomineeCount(i),s.untrusted.nomineeDropped(i));
+            for(uint32_t j=0;j<s.untrusted.nomineeCount(i);++j) {
+                const auto& n=*s.untrusted.nomineeDiagnostic(i,j);
+                const uint8_t* psBytes=nullptr;size_t byteCount=0;
+                const bool found=n.ps && flatProbeShaderLookup('p',n.ps,&psBytes,&byteCount);
+                std::vector<BYTE> patched;std::string why;
+                const bool patch=found && flatOverlayPatchPs(psBytes,byteCount,patched,why);
+                const bool vsSaved=n.vs && captureFlatProbeShader('v',n.vs);
+                const bool psSaved=n.ps && captureFlatProbeShader('p',n.ps);
+                Log::get().note("flat untrusted H nominee shader: frame=%llu bucket=%u pair=%u first-q=%u count=%u first-after-failure=%u VS=%016llX saved=%u PS=%016llX saved=%u creation-bytes=%zu patch=%u reason=%s",
+                    (unsigned long long)s.prefix.frame,i,j,n.firstSequence,n.count,n.firstAfterFailure?1u:0u,
+                    (unsigned long long)n.vs,vsSaved?1u:0u,(unsigned long long)n.ps,psSaved?1u:0u,
+                    found?byteCount:0,patch?1u:0u,!n.ps?"absent-hash":!found?"creation-bytes-missing":patch?"bytecode-patchable":why.c_str());
+                Log::get().note("flat untrusted H nominee registry: frame=%llu bucket=%u pair=%u read=%u binding-shadow-PS=%p eligible=%u previously-created=%u reason=%s; captured after original-state restore, no new device work",
+                    (unsigned long long)s.prefix.frame,i,j,n.shader.read?1u:0u,n.shader.object,
+                    n.shader.eligible?1u:0u,n.shader.created?1u:0u,
+                    n.shader.read?n.shader.reason.c_str():"not-read-unqualified-or-cap");
+            }
+        }
         if(!f.reason.empty()) {
             const bool vsSaved=f.vs && captureFlatProbeShader('v',f.vs);
             const bool psSaved=f.ps && captureFlatProbeShader('p',f.ps);
@@ -3180,8 +3236,9 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 // for a frame that could be treated, and the projection shadows, which do not exist then.
 // What a write to a resource does to the prefix model, the camera table and the shadows -- the
 // body flatRuntimeWritten, Map and Update share, timed by the caller's scope.
-static void resourceWritten(State& s, ID3D11Resource* res) {
-    if(s.untrusted.active())s.untrusted.noteMutation(res);
+static void resourceWritten(State& s, ID3D11Resource* res,const char* entry) {
+    if(s.untrusted.active())s.untrusted.noteMutation(res,
+        FlatMutationDetails::named(FlatOverlayMutationOp::Written,entry),s.prefix.sequence);
     if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
         const auto& t=s.prefix.targets[i];
         if(t.overlayOpen && (t.resource==res || t.overlayDepth==res)) {
@@ -3197,7 +3254,7 @@ static void resourceWritten(State& s, ID3D11Resource* res) {
 void flatRuntimeWritten(ID3D11Resource* res) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);   // prefix target and source lookup, camera lookup
-    resourceWritten(state(), res);
+    resourceWritten(state(), res,"flatRuntimeWritten");
 }
 namespace {
 const char* overlayMutationOpName(FlatOverlayMutationOp op) {
@@ -3213,6 +3270,7 @@ const char* overlayMutationOpName(FlatOverlayMutationOp op) {
     case FlatOverlayMutationOp::CopyStructureCount: return "CopyStructureCount";
     case FlatOverlayMutationOp::UpdateSubresource: return "UpdateSubresource";
     case FlatOverlayMutationOp::Resolve: return "Resolve";
+    case FlatOverlayMutationOp::Written: return "Written";
     }
     return "UnknownOp";
 }
@@ -3225,10 +3283,21 @@ const char* overlayMutationRoleName(FlatOverlayMutationRole role) {
     }
 }
 }
-void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMutationOp op) {
+void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMutationOp op,
+                                       const FlatMutationDetails& details) {
     if(untrustedCoverageActive.load(std::memory_order_acquire)) {
         if(!owner())foreignWork.store(true,std::memory_order_release);
-        else state().untrusted.noteMutation(resource);
+        else {
+            auto payload=details;payload.op=op;
+            if(std::strcmp(payload.entry,"unspecified-write")==0)payload.entry=flatMutationOpName(op);
+            Ptr<ID3D11Resource> source;
+            if(op==FlatOverlayMutationOp::CopyStructureCount && payload.sourceView) {
+                FlatComputeInternalScope internal;
+                static_cast<ID3D11UnorderedAccessView*>(const_cast<void*>(payload.sourceView))->GetResource(&source);
+                payload.source=source.Get();payload.known|=FlatMutationDetails::Source;
+            }
+            state().untrusted.noteMutation(resource,payload,state().prefix.sequence);
+        }
     }
     if(foregroundProbeActive.load(std::memory_order_acquire)) {
         if(!owner())foreignWork.store(true,std::memory_order_release);
@@ -3252,14 +3321,16 @@ void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMut
     overlayFail(s,role==FlatOverlayMutationRole::Unknown ?
         "overlay-unresolved-resource-write" : "overlay-explicit-resource-write",protectedHdr);
 }
-void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op) {
+void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op,
+                                   const FlatMutationDetails& details) {
     if (!overlaySuffixActive.load(std::memory_order_acquire) &&
         !foregroundProbeActive.load(std::memory_order_acquire) &&
         !untrustedCoverageActive.load(std::memory_order_acquire)) return;
     if (!owner()) { foreignWork.store(true,std::memory_order_release); return; }
     Ptr<ID3D11Resource> resource;
     if (view) view->GetResource(&resource);
-    flatRuntimeOverlayResourceMutation(resource.Get(),op);
+    auto payload=details;payload.view=view;payload.known|=FlatMutationDetails::View;
+    flatRuntimeOverlayResourceMutation(resource.Get(),op,payload);
 }
 void flatRuntimeOverlayForeignMutation() {
     if (!overlaySuffixActive.load(std::memory_order_acquire) &&
@@ -3358,7 +3429,7 @@ void flatRuntimeMapBounceNoteKind(ID3D11Resource* resource, bool buffer) {
 void flatRuntimeMap(ID3D11Resource* res, D3D11_MAP type, void* bytes) {
     if (!owner() || type == D3D11_MAP_READ || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
-    resourceWritten(state(), res); if (auto* c = camera(res, false)) state().cameras.setMapped(*c, bytes);
+    resourceWritten(state(), res,"flatRuntimeMap"); if (auto* c = camera(res, false)) state().cameras.setMapped(*c, bytes);
     if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows); state().projection->observeMap(res,type,bytes); }
 }
 void flatRuntimeUnmap(ID3D11Resource* res) {
@@ -3373,7 +3444,7 @@ void flatRuntimeUnmap(ID3D11Resource* res) {
 void flatRuntimeUpdate(ID3D11Resource* res, const void* bytes, const D3D11_BOX* box) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
-    resourceWritten(state(), res);
+    resourceWritten(state(), res,"flatRuntimeUpdate");
     if (auto* c = camera(res, false)) {
         if (!box || (box->left == 0 && box->right == c->width)) { capture(*c, bytes); if (state().work == FlatWork::Full) cameraWitness(res); }
     }
@@ -3800,6 +3871,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),
             static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv)),
             k.vs,k.ps,d.camera,alternate.admissible(),&nomineeDiagnostic);
+        if(alternate.admissible()) {
+            FlatComputeInternalScope internal;
+            s.untrusted.diagnoseNomineeShader(s.prefix.sequence,
+                static_cast<ID3D11PixelShader*>(bindingGet(BindSlot::Ps)));
+        }
         if(!untrustedPlanned)s.untrusted.diagnosePlanShader(context,s.prefix.sequence,
             [](void* shader) { return lookupShaderHash(shader); });
         if(untrustedPlanned)untrustedCoverageActive.store(true,std::memory_order_release);

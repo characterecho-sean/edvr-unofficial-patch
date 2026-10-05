@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** v45 FLOWN: empty-output alpha PS B40B blocks weapon capture.
-  Generic correction reviewed, full-gate validated and installed, NOT FLOWN.
-  Section 102; Epic `v0.18.1-47-gab74d281`.
+- **State:** v47 FLOWN: B40B captures; later mutation remains unidentified.
+  Section 102; mutation/F10 diagnostic FULL VALIDATION PASSED, pending install.
+  Epic currently `v0.18.1-47-gab74d281`.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: restart Epic; weapon drawn 15s, holstered 10s; verify
-  world AA remains engaged. F10 if it still drops, then exit for log analysis.
+- **Next:** section 102: retain mutation payloads and a complete F10 trace;
+  distinguish stencil-only clear, depth clear, color write, copy and update.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10804,3 +10804,67 @@ NOT FLOWN. Restart Epic; hold the same weapon drawn for 15s, holster for 10s,
 then exit. If world AA still disengages, take F10 while drawn; otherwise the
 automatic capture/coverage and treatment counters suffice. Match the next
 flight to this literal installed version after the documentation-only commit.
+
+### 2026-10-04: v47 captures the depth pass, then refuses a resource mutation
+
+Sean reports world AA still disengages with weapon drawn; F10 taken.
+Verified `edvr_gfx_20261004_174952.log`, `v0.18.1-47-gab74d281`,
+build `6AC2E57E`, linked 23:47:10 UTC. Frame44439 alternate F516/B40B has
+pending1/completed1/ready1; frame44499 has pending13/completed13/ready1.
+H camera/DSV/extent/phase and qualification predicates all pass. First failure
+is now `mutation/untrusted-source-explicit-mutation`, with global failure none;
+observed9/completed1 and observed37/completed13, AACF receipts0/3 and0/7.
+
+Ruled out: accepting B40B's empty signature alone restores weapon AA, because
+the capture now succeeds but a later explicit mutation prevents later draws.
+The B40B correction itself is flight-qualified. The first-q field records the
+last nominee (q4612/q4776), not the actual mutation's operation or sequence.
+Do not infer a depth clear or stencil-only clear from that field.
+
+ClearRtv, ClearDsv (including stencil-only), copies and other resource writes
+all collapse into noteMutation(resource). A stencil-only clear is plausible;
+genuine depth replacement requires a different response. Inspect existing
+footprint/capture evidence before editing admission. F10 frame44548 trace is
+frames0/events0/skipped-slots4; draw pixels retry failed frames, then capture
+partial holstered frames44933/44934 under
+`flat_draw_pixels/20261004_235204_520_4644_1`. No whole failing-frame replay.
+Treatment frame44700 is38/refused262, frame45000 is70/refused230, frame45300
+is300/refused0; recovery matches the holster sequence, whose input is not logged.
+
+The saved weapon-footprint frames44549/44551 identify the same depth/DSV and
+report no clears after their late selected draw. That tracker starts too late
+to exclude an earlier clear and does not cover every depth mutation. Dispatch
+does not call this coverage bucket's noteMutation; it cannot directly explain
+the measured explicit-mutation failure. No rendering-policy change is justified
+by these captures.
+
+The next build is diagnostic only. Preserve mutation entry point, operation,
+resource role, owned API payload, actual after-q position, notification ordinal
+and capture state through sticky refusal. Preserve the last nominee separately
+from the mutation position. Retain sixteen exact-payload signatures per bucket
+with repeats/drops, plus independent first occurrence/count for each operation
+and role so many variants cannot hide a later mutation type. Observe later
+nominee shader preparation after refusal without creating GPU shaders or
+changing admission. Continue existing budgeted H reports on refused frames.
+
+Increase the four-slot F10 ring from4096 to65536 events per frame (about118MiB
+bounded CPU storage, allocated on the heap). Keep existing V3/V4 binary layouts;
+report attempted events, overflow slots and other skip reasons explicitly.
+Tests must cover a twenty-thousand-event refused-frame round trip, exact cap
+and overflow, and mutation payload/state lifetime across repeats, later writes,
+consumer, reset and signature exhaustion. No per-weapon table or settings edit.
+
+Astra reviewed the frozen hook-to-report path, metadata ownership, registry
+lock scope and independent operation/role coverage: rendering admission is
+unchanged. Globally unassignable draws still follow existing early refusal;
+registry and bytecode success do not prove later device creation or full draw
+state eligibility. These remain explicitly labelled limitations.
+
+Full absolute build.bat --jobs4 exited0, with mono resolve and temporal
+collector rigs PASS, including the new mutation and busy-frame cases; existing
+corpus replay is46/46 frames identical. Installer resources verified and all
+gates passed. Fresh full-pass receipt created2026-10-05T00:22:26.193917Z,
+inputs SHA256 `0ce1cffb78b6b9e78fb7d773b22d835f492b67cf33b6457fad4a9d8f0fd7d6de`.
+An earlier direct run_jobs invocation failed its missing parent build environment
+before either affected rig ran; it supplied no test evidence. Validation came
+from the full build, with no source changes during it. Diagnostic NOT FLOWN.
