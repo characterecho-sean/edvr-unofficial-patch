@@ -16,6 +16,7 @@
 #include "flat_draw_capture.h"
 #include "flat_weapon_footprint.h"
 #include "flat_overlay_layer.h"
+#include "flat_replay_query_tracker.h"
 #include "flat_untrusted_coverage.h"
 #include "flat_foreground_probe.h"
 #include "flat_pixel_capture_policy.h"
@@ -181,6 +182,8 @@ struct State {
     FlatDrawCapture drawCapture;
     FlatWeaponFootprint weaponFootprint;
     FlatOverlayLayer overlay;
+    uint64_t overlayReplayCandidates = 0, overlayReplayCompleted = 0;
+    std::map<std::string,uint64_t> overlayReplayRefusals;
     FlatForegroundProbe foreground;
     FlatUntrustedCoverage untrusted;
     bool untrustedUnknown = false;
@@ -441,6 +444,59 @@ struct State {
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
 bool owner() { return state().thread == GetCurrentThreadId(); }
+// Observe query brackets from the first game Begin/End, independently of
+// Present, AA mode, resize and State's owner thread. Context/query references
+// prevent pointer reuse; a fixed table never evicts an active observation.
+struct ReplayQueryObserver {
+    struct Context {
+        Ptr<ID3D11DeviceContext> context;
+        FlatReplayQueryTracker tracker;
+        Ptr<ID3D11Asynchronous> holds[64];
+    } contexts[8];
+    std::mutex mutex;
+    bool overflow=false;
+    Context* find(ID3D11DeviceContext* ctx) {
+        for(auto& entry:contexts)if(entry.context.Get()==ctx)return &entry;
+        for(auto& entry:contexts)if(!entry.context) { entry.context=ctx;return &entry; }
+        overflow=true;return nullptr;
+    }
+};
+ReplayQueryObserver& replayQueryObserver() { static auto* observer=new ReplayQueryObserver;return *observer; }
+bool replayQueriesSafe(ID3D11DeviceContext* ctx) {
+    if(!ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return false;
+    auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
+    auto* entry=observer.find(ctx);
+    return !observer.overflow && entry && entry->tracker.safe();
+}
+FlatReplayQueryTracker::Kind replayQueryKind(ID3D11Asynchronous* async) {
+    if (!async) return FlatReplayQueryTracker::Kind::Unknown;
+    Ptr<ID3D11Query> query;
+    if (FAILED(async->QueryInterface(IID_PPV_ARGS(&query))))
+        return FlatReplayQueryTracker::Kind::Unknown;
+    D3D11_QUERY_DESC desc{}; query->GetDesc(&desc);
+    switch (desc.Query) {
+    case D3D11_QUERY_EVENT:
+    case D3D11_QUERY_TIMESTAMP:
+        return FlatReplayQueryTracker::Kind::EndOnly;
+    case D3D11_QUERY_TIMESTAMP_DISJOINT:
+        return FlatReplayQueryTracker::Kind::Timing;
+    case D3D11_QUERY_OCCLUSION:
+    case D3D11_QUERY_OCCLUSION_PREDICATE:
+    case D3D11_QUERY_PIPELINE_STATISTICS:
+    case D3D11_QUERY_SO_STATISTICS:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE:
+    case D3D11_QUERY_SO_STATISTICS_STREAM0:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0:
+    case D3D11_QUERY_SO_STATISTICS_STREAM1:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1:
+    case D3D11_QUERY_SO_STATISTICS_STREAM2:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2:
+    case D3D11_QUERY_SO_STATISTICS_STREAM3:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3:
+        return FlatReplayQueryTracker::Kind::Count;
+    default: return FlatReplayQueryTracker::Kind::Unknown;
+    }
+}
 FlatMapBounce& mapBounce() {
     static FlatMapBounceD3DDriver* driver = new FlatMapBounceD3DDriver;
     static FlatMapBounce* bounce = new FlatMapBounce(*driver);
@@ -2961,6 +3017,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             (unsigned long long)s.overlayPlannedWindow,(unsigned long long)s.overlayMarkedWindow,
             (unsigned long long)s.overlayIsolatedWindow,(unsigned long long)s.overlayRefusedWindow,
             s.overlayRefusalWindow.size());
+        Log::get().note("flat late overlay replay 5s: candidates=%llu completed=%llu refusals=%zu",
+            (unsigned long long)s.overlayReplayCandidates,
+            (unsigned long long)s.overlayReplayCompleted,s.overlayReplayRefusals.size());
+        for(const auto& entry:s.overlayReplayRefusals)
+            Log::get().note("flat late overlay replay refusal: reason=%s count=%llu",
+                entry.first.c_str(),(unsigned long long)entry.second);
         for(const auto& entry:s.overlayRefusalWindow)
             Log::get().note("flat late overlay refusal: reason=%s count=%llu",entry.first.c_str(),
                 (unsigned long long)entry.second);
@@ -2999,6 +3061,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             (unsigned long long)s.sourceWitnessAmbiguousWindow);
         s.overlayPlannedWindow=s.overlayMarkedWindow=s.overlayIsolatedWindow=s.overlayRefusedWindow=0;
         s.overlayRefusalWindow.clear();
+        s.overlayReplayCandidates=s.overlayReplayCompleted=0;
+        s.overlayReplayRefusals.clear();
         s.overlayMutationWindow.clear();
         s.sourceWitnessEligibleWindow=s.sourceWitnessAmbiguousWindow=0;
         // The camera injector's row bookkeeping, every window while a temporal mode runs
@@ -3175,6 +3239,31 @@ void flatRuntimeClearBindings() {
         state().viewportCount = 0; for (auto& u : state().uavs) u.Reset();
         // ClearState took engine motion's bound state with the game's: nothing left to put back, and nothing safe to touch.
         flatRuntimeSubstitution(nullptr, FlatSubstEvent::kClearState);
+    }
+}
+void flatRuntimeReplayQueryBegin(ID3D11DeviceContext* ctx, ID3D11Asynchronous* async) {
+    if (ctx && ctx->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+        const auto kind=replayQueryKind(async);
+        auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
+        auto* entry=observer.find(ctx);if(!entry)return;
+        entry->tracker.begin(async,kind);
+        // Keep the object's identity alive for the whole bracket. A released
+        // query's address could otherwise be reused by an unrelated query.
+        if(async) for(size_t i=0;i<64;++i)
+            if(entry->tracker.active[i].identity==async && !entry->holds[i]) {
+                entry->holds[i]=async; break;
+            }
+    }
+}
+void flatRuntimeReplayQueryEnd(ID3D11DeviceContext* ctx, ID3D11Asynchronous* async) {
+    if (ctx && ctx->GetType()==D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+        const auto kind=replayQueryKind(async);
+        auto& observer=replayQueryObserver();std::lock_guard<std::mutex> lock(observer.mutex);
+        auto* entry=observer.find(ctx);if(!entry)return;
+        size_t release=64;
+        for(size_t i=0;i<64;++i)if(entry->tracker.active[i].identity==async) { release=i;break; }
+        entry->tracker.end(async,kind);
+        if(release<64)entry->holds[release].Reset();
     }
 }
 void flatRuntimeUnknown() {
@@ -4622,6 +4711,38 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     else { ++s.acceptedHistoryWindow; ++s.streak; }
     if (s.streak > s.longestStreak) s.longestStreak = s.streak;
 }
+static const char* replayDrawGuard(ID3D11DeviceContext* ctx, const FlatRuntimeDrawScope& draw,
+                                   ID3D11Buffer* indirectArgs) {
+    auto& s=state();
+    if(!owner() || ctx!=s.context.Get() || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)
+        return "replay-foreign-or-deferred-context";
+    if(foreignWork.load(std::memory_order_acquire) || s.prefix.uncertain)
+        return "replay-foreign-or-uncertain-state";
+    if(draw.foregroundStarted || draw.untrustedStarted)
+        return "replay-other-private-draw-active";
+    if(indirectArgs || (draw.weaponDrawKind!='D' && draw.weaponDrawKind!='I' &&
+                        draw.weaponDrawKind!='N' && draw.weaponDrawKind!='X') ||
+       !draw.weaponDrawCount || !draw.weaponDrawInstances)
+        return "replay-unsupported-draw-kind-or-arguments";
+    if(!replayQueriesSafe(ctx))return "replay-active-or-uncertain-query";
+    ID3D11Buffer* streams[D3D11_SO_BUFFER_SLOT_COUNT]{};
+    ctx->SOGetTargets(D3D11_SO_BUFFER_SLOT_COUNT,streams);
+    bool streamBound=false;
+    for(auto* stream:streams) if(stream) { streamBound=true; stream->Release(); }
+    if(streamBound) return "replay-stream-output-bound";
+    return nullptr;
+}
+static void issueExactReplayDraw(ID3D11DeviceContext* ctx,const FlatRuntimeDrawScope& draw) {
+    const UINT count=draw.weaponDrawCount, instances=draw.weaponDrawInstances;
+    switch(draw.weaponDrawKind) {
+    case 'D': ctx->Draw(count,static_cast<UINT>(draw.weaponDrawBase)); break;
+    case 'I': ctx->DrawIndexed(count,draw.weaponDrawStart,draw.weaponDrawBase); break;
+    case 'N': ctx->DrawInstanced(count,instances,static_cast<UINT>(draw.weaponDrawBase),
+                                 draw.weaponDrawStartInstance); break;
+    case 'X': ctx->DrawIndexedInstanced(count,instances,draw.weaponDrawStart,
+                                       draw.weaponDrawBase,draw.weaponDrawStartInstance); break;
+    }
+}
 void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
     if(!ctx)return;
     if(untrustedPlanned) {
@@ -4642,7 +4763,37 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                 sample.vsHash=sample.vs?lookupShaderHash(const_cast<void*>(sample.vs)):0;
                 sample.psHash=sample.ps?lookupShaderHash(const_cast<void*>(sample.ps)):0;
             }
-            if(!overlayStarted) overlayFail(s,reason?reason:"overlay-private-MRT-refused",overlayHdr);
+            if(!overlayStarted && reason && std::strcmp(reason,"dual-source-blend")==0) {
+                ++s.overlayReplayCandidates;
+                const char* replayWhy=replayDrawGuard(ctx,*this,indirectArgs);
+                if(!replayWhy) {
+                    FlatComputeInternalScope internal;
+                    // Begin observes before forwarding to D3D. Hold its gate
+                    // until private replay/restoration completes, closing the
+                    // race between the first safe check and a concurrent Begin.
+                    auto& observer=replayQueryObserver();
+                    std::unique_lock<std::mutex> queryGate(observer.mutex);
+                    auto* queries=observer.find(ctx);
+                    if(observer.overflow || !queries || !queries->tracker.safe())
+                        replayWhy="replay-active-or-uncertain-query";
+                    else {
+                        overlayStarted=s.overlay.beginReplayDraw(ctx,s.prefix.frame,overlayHdr,overlayDsv,&replayWhy);
+                        if(overlayStarted) {
+                            issueExactReplayDraw(ctx,*this);
+                            const bool restored=s.overlay.finishReplayDraw(ctx);
+                            overlayStarted=false;
+                            overlayReplayPending=restored;
+                            if(!restored)replayWhy=s.overlay.refusal()?s.overlay.refusal():"replay-restore-failed";
+                        }
+                    }
+                }
+                if(!overlayReplayPending) {
+                    const char* why=replayWhy?replayWhy:"replay-private-draw-refused";
+                    ++s.overlayReplayRefusals[why];
+                    overlayFail(s,why,overlayHdr);
+                }
+            } else if(!overlayStarted)
+                overlayFail(s,reason?reason:"overlay-private-MRT-refused",overlayHdr);
         }
     }
     if(!weaponFootprintStarted)return;
@@ -4661,6 +4812,13 @@ void FlatRuntimeDrawScope::endActualDraw() {
     if(foregroundPlanned&&ctx) {
         state().foreground.endDraw(ctx);
         foregroundEnded=true;foregroundStarted=false;
+    }
+    if(overlayReplayPending&&ctx) {
+        state().overlay.endReplayOriginalDraw(ctx);
+        overlayReplayPending=false;
+        overlayEnded=true;
+        if(const char* reason=state().overlay.refusal()) overlayFail(state(),reason,overlayHdr);
+        else { ++state().overlayMarkedWindow; ++state().overlayReplayCompleted; }
     }
     if(overlayStarted&&ctx) {
         state().overlay.endDraw(ctx);
@@ -4682,6 +4840,10 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if(overlayStarted) {
         state().overlay.endDraw(ctx);
         overlayStarted=false;
+    }
+    if(overlayReplayPending) {
+        state().overlay.invalidate("replay-original-draw-incomplete");
+        overlayReplayPending=false;
     }
     if(overlayPlanned && !overlayEnded)
         overlayFail(state(),"overlay-draw-scope-incomplete",overlayHdr);

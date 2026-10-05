@@ -3,8 +3,7 @@
 ## Status
 
 - **State:** color-clear weapon-AA fault CLOSED (102); plasma refusal OPEN (103).
-  Supporter v0.18.2 logs confirm late-overlay dual-source-blend refusals.
-  Epic diagnostic `v0.18.2-1-ga2e406c5` installed; section 102 fix qualified.
+  Epic diagnostic confirms active RT0 SRC1 blending and three matching F10 frames.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +31,10 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 103: Epic diagnostic with one affected plasma weapon;
-  record the actual refused blend state and shader outputs before changing it.
-  Retain section 102's color-clear fix; no per-weapon table or near heuristic.
+- **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
+  changes queries. A stencil-write flag alone does not establish its operations.
+- **Next:** Epic qualification of guarded private-DSV replay (103).
+  Retain section 102's qualified color-clear fix; no per-weapon table.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -11088,3 +11088,63 @@ paired refusal counts. samples0/no-dual-source-sample is a distinct result,
 not evidence that a fix worked. This is measurement only; guard behavior
 still refuses the original unsupported case. No two-minute wait or per-weapon
 matrix required.
+
+### 2026-10-05: diagnostic flight and replay proof
+
+The completed plasma test captured an active RT0 dual-source blend: `SRC1_COLOR`
+and `SRC1_ALPHA` are enabled on the active target; RT0 mask is `0F`, effective
+SRC1 channels `0F`, and slots 1–7 are inactive. The same failed shader pair is
+in all three complete F10 frames. Depth-write is off; the trace stencil-write
+flag is enabled, but its flag/mask do not prove an actual stencil operation
+wrote. The original VS/PS DXBC is absent, so PS outputs and side effects remain
+unknown. See `build\supporter-0182\diagnostic-flight\evidence.md` for sample,
+frame, descriptor, hash, and refusal-window details.
+
+Ruled out: inactive/unused SRC1 false rejection, because active RT0's actual
+GetDesc uses SRC1 color and alpha. Ruled out: unconditional forced-early UAV
+capture, because the temporary UAV proof changes discard/query counts; stencil
+semantics remain unknown. The private-DSV replay proof passes with production-
+style dual-output shaders, preserves color and depth/stencil (including
+discard), and preserves occlusion queries and pipeline statistics when no
+external query is active. Its negative proof shows an external active query
+counts replay twice, so production use requires query guards (and SO guards).
+Results: `build\supporter-0182\dual_source_replay_probe_results.txt` and
+`build\supporter-0182\dual_source_uav_probe_results.txt`.
+
+The production-DXBC proof now passes all four variants: plain, discard,
+derivative/discard, and original early-depth semantics. Original color,
+depth/stencil and query results match the untouched draw; coverage excludes
+failed depth/stencil tests and discarded fragments. The original shader's
+early-depth flag is preserved. The extra pass requires an inactive count-
+bearing query bracket; the negative proof detects double counting otherwise.
+
+The implementation derives a private RT0 coverage shader lazily from the
+existing validated MRT7 bytecode. Original outputs become private temporary
+registers, retaining the original calculations and discard. Before each
+eligible dual-source draw, it copies the pre-draw DSV to a reusable private
+DSV, executes coverage there, restores the game bindings, and leaves the
+original dual-source draw unchanged. Clean HDR is copied before the first
+overlay; subsequent coverage accumulates without refreshing that copy.
+Normal MRT7 capture is unchanged. No weapon identities or new config keys.
+
+Admission retains the late-overlay depth/stencil ownership rules and refuses
+predication, stream output, graphics UAVs, indirect/DrawAuto, uncertain state,
+and active count-bearing queries. Query observation starts with the first
+flat-profile game Begin/End, independently of temporal mode and Present, and
+survives resize/ClearState. Context/query identities are retained. Existing
+128 MiB HDR/mask limits remain; a separate 64 MiB private DSV limit supports
+3840x2160 D32S8 (63.28 MiB). This is desktop D3D11 capture; VR uses its existing
+path. WARP validation has no debug layer installed on this machine.
+
+Focused mono/GPU validation passes, including real layer color/depth/stencil
+equivalence, discard and derivative coverage, original early-depth behavior,
+mask union, query-model refusals, and invalid-bytecode negatives. The final
+absolute-path full build passed after source freeze: production DLLs, all
+117 parallel and five quiet jobs, 234/234 config contract, and actual installer
+resources. Receipt fingerprint:
+`56faf69b59ca4adce7ebb48c01486c328e0d6c7a7a50479a1030975f561cc47b`;
+log: `build\plasma-overlay-replay-full-final.log`. Epic qualification remains
+open; perform the clean receipt-guarded promotion before installing. The five-second
+`flat late overlay replay` report distinguishes candidates, completed original
+draws and specific refusals; one plasma weapon is sufficient for this test.
+Keep section 102's color-clear fix qualified.

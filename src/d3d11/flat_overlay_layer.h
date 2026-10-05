@@ -65,11 +65,16 @@ class FlatOverlayLayer {
         Ptr<ID3D11PixelShader> original; // retain identity; a COM pointer cannot be reused while cached
         std::vector<BYTE> bytes;
         Ptr<ID3D11PixelShader> patched;
+        std::vector<BYTE> replayBytes;
+        Ptr<ID3D11PixelShader> replayPatched;
+        bool replayAttempted=false;
+        std::string replayReason;
     };
     struct Registry {
         std::mutex mutex;
         std::unordered_map<ID3D11PixelShader*, Shader> shaders;
         size_t bytes = 0;
+        size_t replayBytes = 0; // independent cap: replay cannot evict normal admission
     };
     struct Blend {
         Ptr<ID3D11BlendState> original; // retain identity as for shaders
@@ -209,6 +214,89 @@ class FlatOverlayLayer {
         blends_.emplace(original,std::move(entry));
         return out;
     }
+    Ptr<ID3D11PixelShader> replayShader(ID3D11Device* dev,ID3D11PixelShader* original,
+                                      std::string& why) {
+        std::vector<BYTE> bytes;bool qualified=false;
+        {
+            auto& r=registry();std::lock_guard<std::mutex> lock(r.mutex);
+            auto it=r.shaders.find(original);
+            if(it==r.shaders.end()) { why="replay-PS-bytecode-not-retained";return {}; }
+            if(it->second.replayPatched)return it->second.replayPatched;
+            if(it->second.replayAttempted) {
+                qualified=true;
+                if(it->second.replayBytes.empty()) { why=it->second.replayReason;return {}; }
+                bytes=it->second.replayBytes;
+            } else bytes=it->second.bytes;
+        }
+        if(!qualified) {
+            std::vector<BYTE> replay;
+            const bool valid=flatOverlayCoverageFromPatchedPs(bytes.data(),bytes.size(),replay,why);
+            auto& r=registry();std::lock_guard<std::mutex> lock(r.mutex);
+            auto it=r.shaders.find(original);
+            if(it==r.shaders.end()) { why="replay-PS-cache-changed";return {}; }
+            auto& entry=it->second;
+            if(!entry.replayAttempted) {
+                entry.replayAttempted=true;
+                if(!valid)entry.replayReason=why;
+                else if(replay.size()>32u*1024u*1024u-r.replayBytes)
+                    entry.replayReason="replay-PS-cache-cap";
+                else { r.replayBytes+=replay.size();entry.replayBytes=std::move(replay); }
+            }
+            if(entry.replayBytes.empty()) { why=entry.replayReason;return {}; }
+            bytes=entry.replayBytes;
+        }
+        Ptr<ID3D11PixelShader> result;
+        creatingPatched()=true;
+        const HRESULT hr=dev->CreatePixelShader(bytes.data(),bytes.size(),nullptr,&result);
+        creatingPatched()=false;
+        if(FAILED(hr) || !result) { why="replay-PS-create";return {}; }
+        auto& r=registry();std::lock_guard<std::mutex> lock(r.mutex);
+        auto it=r.shaders.find(original);
+        if(it==r.shaders.end()) { why="replay-PS-cache-changed";return {}; }
+        if(!it->second.replayPatched)it->second.replayPatched=result;
+        return it->second.replayPatched;
+    }
+    bool ensureReplayDepth(ID3D11Device* dev,ID3D11DepthStencilView* source,const char** reason) {
+        Ptr<ID3D11Resource> resource;source->GetResource(&resource);
+        Ptr<ID3D11Texture2D> texture;
+        if(!resource || FAILED(resource.As(&texture)))return refuse("replay-depth-resource",reason);
+        D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
+        D3D11_DEPTH_STENCIL_VIEW_DESC view{};source->GetDesc(&view);
+        if(d.MipLevels!=1 || d.ArraySize!=1 || d.SampleDesc.Count!=1 ||
+           view.ViewDimension!=D3D11_DSV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice!=0)
+            return refuse("replay-depth-shape",reason);
+        unsigned pixelBytes=0;
+        switch(d.Format) {
+        case DXGI_FORMAT_R32G8X24_TYPELESS:case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:pixelBytes=8;break;
+        case DXGI_FORMAT_R24G8_TYPELESS:case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        case DXGI_FORMAT_R32_TYPELESS:case DXGI_FORMAT_D32_FLOAT:pixelBytes=4;break;
+        case DXGI_FORMAT_R16_TYPELESS:case DXGI_FORMAT_D16_UNORM:pixelBytes=2;break;
+        default:return refuse("replay-depth-format",reason);
+        }
+        // Separate from the unchanged 128 MiB clean-HDR/mask budget. A 4K
+        // D32S8 mirror is 63.28 MiB and fits this additional 64 MiB bound.
+        if(uint64_t(d.Width)*d.Height*pixelBytes>64ull*1024*1024)
+            return refuse("replay-depth-budget",reason);
+        if(replayDepth_) {
+            D3D11_TEXTURE2D_DESC have{};replayDepth_->GetDesc(&have);
+            if(have.Width!=d.Width || have.Height!=d.Height || have.Format!=d.Format) {
+                replayDepth_.Reset();replayDsv_.Reset();
+            }
+        }
+        if(!replayDepth_) {
+            d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+            d.CPUAccessFlags=0;d.MiscFlags=0;
+            if(FAILED(dev->CreateTexture2D(&d,nullptr,&replayDepth_)))
+                return refuse("replay-depth-create",reason);
+        }
+        if(!replayDsv_ || replayDsvFormat_!=view.Format || replayDsvFlags_!=view.Flags) {
+            replayDsv_.Reset();
+            if(FAILED(dev->CreateDepthStencilView(replayDepth_.Get(),&view,&replayDsv_)))
+                return refuse("replay-DSV-create",reason);
+            replayDsvFormat_=view.Format;replayDsvFlags_=view.Flags;
+        }
+        replayDepthSource_=std::move(texture);return true;
+    }
     bool ensureResources(ID3D11Device* dev, ID3D11Texture2D* hdr, const D3D11_TEXTURE2D_DESC& source,
                          DXGI_FORMAT viewFormat, bool coverageOnly, const char** reason) {
         if (cleanSource_ && cleanSource_.Get()!=hdr) return refuse("HDR-resource-changed",reason);
@@ -246,6 +334,7 @@ class FlatOverlayLayer {
     }
     void releaseResources() {
         cleanSource_.Reset();clean_.Reset();cleanView_.Reset();coverage_.Reset();coverageView_.Reset();coverageRtv_.Reset();
+        replayDepth_.Reset();replayDsv_.Reset();replayDepthSource_.Reset();
         resourceWidth_=resourceHeight_=0;resourceFormat_=DXGI_FORMAT_UNKNOWN;resourceCoverageOnly_=false;
     }
     void restore() {
@@ -265,11 +354,17 @@ class FlatOverlayLayer {
     uint32_t completedDraws_=0;
     std::string refusal_;
     bool active_=false;
+    bool replayPendingOriginal_=false;
+    Ptr<ID3D11DeviceContext> replayOriginalContext_;
     Saved saved_{};
     Ptr<ID3D11Device> device_;
     Ptr<ID3D11Texture2D> cleanSource_,clean_,coverage_;
     Ptr<ID3D11ShaderResourceView> cleanView_,coverageView_;
     Ptr<ID3D11RenderTargetView> coverageRtv_;
+    Ptr<ID3D11Texture2D> replayDepth_,replayDepthSource_;
+    Ptr<ID3D11DepthStencilView> replayDsv_;
+    DXGI_FORMAT replayDsvFormat_=DXGI_FORMAT_UNKNOWN;
+    UINT replayDsvFlags_=0;
     UINT resourceWidth_=0,resourceHeight_=0;
     DXGI_FORMAT resourceFormat_=DXGI_FORMAT_UNKNOWN;
     bool resourceCoverageOnly_=false;
@@ -315,20 +410,25 @@ public:
         if (frame_==frame) return;
         if (active_) restore();
         frame_=frame; completedDraws_=0; refusal_.clear();
+        replayPendingOriginal_=false;replayOriginalContext_.Reset();
         cleanSource_.Reset(); // reuse private textures/views when the next H has the same shape
     }
     void reset() {
         restore(); frame_=0; completedDraws_=0; refusal_.clear();
+        replayPendingOriginal_=false;replayOriginalContext_.Reset();
         releaseResources();
         blends_.clear(); device_.Reset();
     }
     bool beginDraw(ID3D11DeviceContext* ctx,uint64_t frame,ID3D11Texture2D* hdr,
                     ID3D11DepthStencilView* expectedDsv,const char** reason=nullptr,
                     bool diagnosticTypelessPool=false,bool diagnosticCoverageOnly=false,
-                    bool persistentCoverage=false,FlatOverlayBlendDiagnostic* blendDiagnostic=nullptr) {
+                    bool persistentCoverage=false,FlatOverlayBlendDiagnostic* blendDiagnostic=nullptr,
+                    bool privateReplayMode=false) {
         if (reason) *reason=nullptr;
         if (!ctx || !hdr || !expectedDsv || !frame || frame_!=frame) return refuse("draw-frame-or-source",reason);
+        if(privateReplayMode && refusal_=="dual-source-blend")refusal_.clear();
         if (!refusal_.empty()) return refuse(refusal_.c_str(),reason);
+        if(replayPendingOriginal_)return refuse("replay-original-draw-pending",reason);
         if (active_) return refuse("nested-overlay-draw",reason);
         if (ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE) return refuse("non-immediate-context",reason);
         FlatComputeInternalScope internal;
@@ -379,6 +479,59 @@ public:
         for (UINT i=0;i<classCount;++i) if (classes[i]) classes[i]->Release();
         if (!game.ps || classCount) return refuse("PS-linkage-or-null",reason);
         ctx->OMGetBlendState(&game.blend,game.factors,&game.sampleMask);
+        if(privateReplayMode) {
+            // The real draw keeps its dual-source blend and both PS outputs.
+            // Replay runs only into a private RT0/DSV, preserving shader
+            // early-depth semantics and the original stencil operations.
+            D3D11_BLEND_DESC actual=defaultBlend();if(game.blend)game.blend->GetDesc(&actual);
+            if(validateBlend(actual) || !actual.RenderTarget[0].BlendEnable ||
+               actual.IndependentBlendEnable || actual.AlphaToCoverageEnable)
+                return refuse("replay-not-single-target-dual-source",reason);
+            for(unsigned i=1;i<8;++i)if(game.rtv[i])return refuse("replay-extra-game-RTV",reason);
+            Ptr<ID3D11DepthStencilState> depthState;UINT stencilRef=0;
+            ctx->OMGetDepthStencilState(&depthState,&stencilRef);
+            D3D11_DEPTH_STENCIL_DESC depth{};
+            if(depthState)depthState->GetDesc(&depth);
+            else { depth.DepthEnable=TRUE;depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL; }
+            if(depth.DepthEnable && depth.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ZERO)
+                return refuse("replay-game-depth-write",reason);
+            if(depth.StencilEnable && depth.StencilWriteMask!=0 && depth.StencilWriteMask!=0x04u)
+                return refuse("replay-game-stencil-write-mask",reason);
+            ID3D11Buffer* so[D3D11_SO_BUFFER_SLOT_COUNT]{};
+            ctx->SOGetTargets(D3D11_SO_BUFFER_SLOT_COUNT,so);bool hasSo=false;
+            for(auto* buffer:so)if(buffer) { hasSo=true;buffer->Release(); }
+            if(hasSo)return refuse("replay-stream-output-bound",reason);
+            const UINT uavCount=dev->GetFeatureLevel()>=D3D_FEATURE_LEVEL_11_1?
+                D3D11_1_UAV_SLOT_COUNT:D3D11_PS_CS_UAV_REGISTER_COUNT;
+            ID3D11UnorderedAccessView* uavs[D3D11_1_UAV_SLOT_COUNT]{};
+            ctx->OMGetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,uavCount,uavs);
+            bool hasUav=false;for(UINT i=0;i<uavCount;++i)if(uavs[i]) { hasUav=true;uavs[i]->Release(); }
+            if(hasUav)return refuse("replay-OM-UAV-bound",reason);
+            std::string shaderWhy;Ptr<ID3D11PixelShader> coverage=replayShader(dev.Get(),game.ps.Get(),shaderWhy);
+            if(!coverage)return refuse(shaderWhy.c_str(),reason);
+            if(!ensureResources(dev.Get(),hdr,hd,viewFormat,false,reason) ||
+               !ensureReplayDepth(dev.Get(),game.dsv.Get(),reason))return false;
+            if(!completedDraws_) {
+                const FLOAT zero[4]{};ctx->ClearRenderTargetView(coverageRtv_.Get(),zero);
+                ctx->CopyResource(clean_.Get(),hdr);
+            }
+            ctx->CopyResource(replayDepth_.Get(),replayDepthSource_.Get());
+            saved_=std::move(game);active_=true;
+            ID3D11RenderTargetView* target=coverageRtv_.Get();
+            ctx->OMSetRenderTargets(1,&target,replayDsv_.Get());
+            ctx->OMSetBlendState(nullptr,nullptr,saved_.sampleMask);
+            ctx->PSSetShader(coverage.Get(),nullptr,0);
+            ID3D11RenderTargetView* held[8]{};ID3D11DepthStencilView* heldDsv=nullptr;
+            ctx->OMGetRenderTargets(8,held,&heldDsv);
+            bool kept=held[0]==target && heldDsv==replayDsv_.Get();
+            for(unsigned i=0;i<8;++i) { if(i && held[i])kept=false;if(held[i])held[i]->Release(); }
+            if(heldDsv)heldDsv->Release();
+            Ptr<ID3D11PixelShader> heldPs;ctx->PSGetShader(&heldPs,nullptr,nullptr);
+            Ptr<ID3D11BlendState> heldBlend;UINT heldMask=0;ctx->OMGetBlendState(&heldBlend,nullptr,&heldMask);
+            if(heldPs.Get()!=coverage.Get() || heldBlend || heldMask!=saved_.sampleMask)kept=false;
+            if(!kept) { restore();return refuse("replay-private-bindings-dropped",reason); }
+            return true;
+        }
         const char* blendWhy=nullptr;
         Ptr<ID3D11BlendState> blend=derivedBlend(dev.Get(),game.blend.Get(),&blendWhy);
         if (!blend) {
@@ -449,6 +602,20 @@ public:
         const bool same=ctx==saved_.context.Get();
         restore();
         if (same) ++completedDraws_; else invalidate("draw-context-changed");
+    }
+    bool beginReplayDraw(ID3D11DeviceContext* ctx,uint64_t frame,ID3D11Texture2D* hdr,
+                         ID3D11DepthStencilView* dsv,const char** reason=nullptr) {
+        return beginDraw(ctx,frame,hdr,dsv,reason,false,false,false,nullptr,true);
+    }
+    bool finishReplayDraw(ID3D11DeviceContext* ctx) {
+        if(!active_ || ctx!=saved_.context.Get()) { restore();invalidate("replay-context-changed");return false; }
+        replayOriginalContext_=saved_.context;
+        restore();replayPendingOriginal_=true;return true;
+    }
+    void endReplayOriginalDraw(ID3D11DeviceContext* ctx) {
+        if(!replayPendingOriginal_ || ctx!=replayOriginalContext_.Get())invalidate("replay-original-draw-missing");
+        else ++completedDraws_;
+        replayPendingOriginal_=false;replayOriginalContext_.Reset();
     }
     void invalidate(const char* why) { if (refusal_.empty()) refusal_=why?why:"overlay-invalidated"; }
     bool ready(uint64_t frame,ID3D11Texture2D* hdr) const {

@@ -1,5 +1,6 @@
 #pragma once
 #include "../../src/d3d11/flat_overlay_layer.h"
+#include "../../src/d3d11/flat_replay_query_tracker.h"
 
 inline int flatOverlayLayerGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) {
     using Microsoft::WRL::ComPtr;
@@ -7,6 +8,27 @@ inline int flatOverlayLayerGpuTests(ID3D11Device* device, ID3D11DeviceContext* c
     auto expect = [&](bool ok, const char* why) {
         if (!ok) { std::printf("FAIL: flat overlay GPU %s\n", why); ++failures; }
     };
+    {
+        using Tracker=edvr::FlatReplayQueryTracker;int countQuery=0,timingQuery=0,unknownCounter=0,other=0;
+        Tracker tracker;
+        tracker.begin(&countQuery,Tracker::Kind::Count);
+        tracker.begin(&timingQuery,Tracker::Kind::Timing);
+        tracker.end(&timingQuery,Tracker::Kind::Timing);
+        expect(!tracker.safe(),"ending a timing query cannot clear another active count-bearing query");
+        tracker.end(&countQuery,Tracker::Kind::Count);
+        expect(tracker.safe(),"matching End closes the observed count-bearing bracket");
+        tracker.begin(&unknownCounter,Tracker::Kind::Unknown);
+        expect(!tracker.safe(),"unknown asynchronous counter blocks replay until its own End");
+        tracker.end(&unknownCounter,Tracker::Kind::Unknown);
+        expect(tracker.safe(),"matching unknown-counter End safely closes its bracket");
+        tracker.end(&other,Tracker::Kind::Count);
+        tracker.begin(&countQuery,Tracker::Kind::Count);tracker.end(&countQuery,Tracker::Kind::Count);
+        expect(!tracker.safe(),"unmatched End remains uncertain despite later correctly paired queries");
+        Tracker capacity;int identities[65]{};
+        for(auto& identity:identities)capacity.begin(&identity,Tracker::Kind::Count);
+        for(auto& identity:identities)capacity.end(&identity,Tracker::Kind::Count);
+        expect(!capacity.safe(),"query-table overflow cannot be cleared by later Ends");
+    }
     constexpr UINT w = 16, h = 16;
     auto compile = [&](const char* source, const char* profile) {
         ComPtr<ID3DBlob> bytecode, errors;
@@ -525,6 +547,105 @@ inline int flatOverlayLayerGpuTests(ID3D11Device* device, ID3D11DeviceContext* c
         classification.blend.RenderTarget[1].BlendOpAlpha=D3D11_BLEND_OP_MAX;
         edvr::flatOverlayClassifyBlendDiagnostic(classification);
         expect(classification.effectiveSlots==0,"MIN/MAX ignores blend factors in diagnostic classification");
+    }
+    // True dual-source color stays on the untouched original draw. Coverage
+    // replays against a copied private stencil/depth resource before it.
+    {
+        auto dualBytes=compile("struct O{float4 c:SV_Target0;float4 b:SV_Target1;};"
+            "O main(float4 p:SV_Position){if(p.x<4)discard;O o;o.c=float4(.2,.3,.4,.5);o.b=float4(.7,.6,.5,.4);return o;}","ps_5_0");
+        auto leftBytes=compile("struct O{float4 c:SV_Target0;float4 b:SV_Target1;};"
+            "O main(float4 p:SV_Position){if(p.x>=4)discard;O o;o.c=float4(.3,.2,.4,.5);o.b=float4(.7,.6,.5,.4);return o;}","ps_5_0");
+        ComPtr<ID3D11PixelShader> dual,left;
+        expect(dualBytes && leftBytes && SUCCEEDED(device->CreatePixelShader(dualBytes->GetBufferPointer(),dualBytes->GetBufferSize(),nullptr,&dual)) &&
+            SUCCEEDED(device->CreatePixelShader(leftBytes->GetBufferPointer(),leftBytes->GetBufferSize(),nullptr,&left)),"true dual-output replay shaders create");
+        if(dual && left) {
+            edvr::FlatOverlayLayer::rememberPixelShader(dual.Get(),dualBytes->GetBufferPointer(),dualBytes->GetBufferSize(),false);
+            edvr::FlatOverlayLayer::rememberPixelShader(left.Get(),leftBytes->GetBufferPointer(),leftBytes->GetBufferSize(),false);
+            D3D11_BLEND_DESC bd{};auto& t=bd.RenderTarget[0];
+            t.BlendEnable=TRUE;t.SrcBlend=t.SrcBlendAlpha=D3D11_BLEND_ONE;
+            t.DestBlend=D3D11_BLEND_SRC1_COLOR;t.DestBlendAlpha=D3D11_BLEND_SRC1_ALPHA;
+            t.BlendOp=t.BlendOpAlpha=D3D11_BLEND_OP_ADD;t.RenderTargetWriteMask=15;
+            ComPtr<ID3D11BlendState> dualBlend;expect(SUCCEEDED(device->CreateBlendState(&bd,&dualBlend)),"true dual-source blend state creates");
+            D3D11_DEPTH_STENCIL_DESC ds{};ds.DepthEnable=TRUE;ds.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;ds.DepthFunc=D3D11_COMPARISON_LESS;
+            ds.StencilEnable=TRUE;ds.StencilReadMask=1;ds.StencilWriteMask=4;
+            ds.FrontFace.StencilFunc=D3D11_COMPARISON_EQUAL;
+            ds.FrontFace.StencilFailOp=ds.FrontFace.StencilDepthFailOp=D3D11_STENCIL_OP_KEEP;
+            ds.FrontFace.StencilPassOp=D3D11_STENCIL_OP_REPLACE;ds.BackFace=ds.FrontFace;
+            ComPtr<ID3D11DepthStencilState> stencilWrites;expect(SUCCEEDED(device->CreateDepthStencilState(&ds,&stencilWrites)),"replay stencil-write-mask4 state creates");
+            if(dualBlend && stencilWrites) {
+                context->ClearRenderTargetView(baselineRtv.Get(),clear);context->ClearRenderTargetView(instrumentedRtv.Get(),clear);
+                context->ClearDepthStencilView(baselineDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,5);
+                context->ClearDepthStencilView(instrumentedDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,5);
+                const auto preColor=bytes(instrumented.Get(),4),preDepth=bytes(instrumentedDepth.Get(),4);
+                edvr::FlatOverlayLayer replay;replay.beginFrame(80);
+                const auto draw=[&](ID3D11PixelShader* shader) {
+                    bind(baselineRtv.Get(),baselineDsv.Get(),shader);context->OMSetBlendState(dualBlend.Get(),nullptr,~0u);context->OMSetDepthStencilState(stencilWrites.Get(),1);context->Draw(3,0);
+                    bind(instrumentedRtv.Get(),instrumentedDsv.Get(),shader);context->OMSetBlendState(dualBlend.Get(),nullptr,~0u);context->OMSetDepthStencilState(stencilWrites.Get(),1);
+                    const char* why=nullptr;
+                    expect(!replay.beginDraw(context,80,instrumented.Get(),instrumentedDsv.Get(),&why) && why && std::strcmp(why,"dual-source-blend")==0,"normal MRT7 guard still refuses true dual-source");
+                    const bool began=replay.beginReplayDraw(context,80,instrumented.Get(),instrumentedDsv.Get(),&why);
+                    expect(began,"guarded private DSV/RT0 replay begins after dual-source refusal");
+                    if(!began)return;
+                    context->Draw(3,0);expect(replay.finishReplayDraw(context),"private replay restores game before original draw");
+                    ComPtr<ID3D11PixelShader> restored;ComPtr<ID3D11BlendState> restoredBlend;
+                    context->PSGetShader(&restored,nullptr,nullptr);context->OMGetBlendState(&restoredBlend,nullptr,nullptr);
+                    ID3D11RenderTargetView* restoredRtv=nullptr;ID3D11DepthStencilView* restoredDsv=nullptr;context->OMGetRenderTargets(1,&restoredRtv,&restoredDsv);
+                    expect(restored.Get()==shader && restoredBlend.Get()==dualBlend.Get() && restoredRtv==instrumentedRtv.Get() && restoredDsv==instrumentedDsv.Get(),"dual-source original PS/blend/RTV/DSV restored exactly");
+                    if(restoredRtv)restoredRtv->Release();if(restoredDsv)restoredDsv->Release();
+                    context->Draw(3,0);replay.endReplayOriginalDraw(context);
+                };
+                draw(dual.Get());
+                expect(bytes(baseline.Get(),4)==bytes(instrumented.Get(),4) && bytes(baselineDepth.Get(),4)==bytes(instrumentedDepth.Get(),4),"dual-source replay leaves original color/depth/stencil byte-identical");
+                expect(replay.ready(80,instrumented.Get()) && replay.markedDraws()==1 && bytes(replay.cleanHdr(),4)==preColor,"replay retains first pre-overlay clean HDR and completed original receipt");
+                ComPtr<ID3D11Resource> coveredResource;replay.coverageView()->GetResource(&coveredResource);ComPtr<ID3D11Texture2D> coveredTexture;coveredResource.As(&coveredTexture);
+                auto coveredBytes=bytes(coveredTexture.Get(),1);bool exact=coveredBytes.size()==w*h;
+                for(UINT y=0;y<h && exact;++y)for(UINT x=0;x<w;++x)exact &= coveredBytes[y*w+x]==(x<4?0:255);
+                expect(exact,"private coverage excludes actual dual-source PS discard");
+                draw(left.Get());coveredBytes=bytes(coveredTexture.Get(),1);
+                expect(replay.markedDraws()==2 && std::all_of(coveredBytes.begin(),coveredBytes.end(),[](BYTE b){return b==255;}) && bytes(replay.cleanHdr(),4)==preColor,"later dual-source replay unions coverage without refreshing clean HDR");
+                expect(bytes(baseline.Get(),4)==bytes(instrumented.Get(),4) && bytes(baselineDepth.Get(),4)==bytes(instrumentedDepth.Get(),4),"second replay reproduces current stencil transitions privately");
+                edvr::FlatOverlayLayer depthRefused;depthRefused.beginFrame(81);context->OMSetDepthStencilState(prefillDepth.Get(),1);
+                const auto beforeRefusal=bytes(instrumentedDepth.Get(),4);
+                expect(!depthRefused.beginReplayDraw(context,81,instrumented.Get(),instrumentedDsv.Get(),&reason) && reason && std::strcmp(reason,"replay-game-depth-write")==0 && bytes(instrumentedDepth.Get(),4)==beforeRefusal,"replay refuses original depth writes before private copies or draws");
+            }
+        }
+        // An undeclared original o7 use cannot become private coverage. Only
+        // the exact injected terminal MOV o7.x,1 is remapped to o0.
+        std::vector<BYTE> normal,replay;std::string why;
+        expect(edvr::flatOverlayPatchPs(psBytes->GetBufferPointer(),psBytes->GetBufferSize(),normal,why) && edvr::flatOverlayCoverageFromPatchedPs(normal.data(),normal.size(),replay,why),"qualified normal coverage bytecode derives replay variant");
+        auto badChunks=edvr::dxbc_container::parseContainer(normal.data(),normal.size(),0x50);
+        bool changed=false;
+        for(auto& chunk:badChunks)if(chunk.tag==0x58454853u || chunk.tag==0x52444853u) {
+            std::vector<uint32_t> words(chunk.bytes.size()/4);std::memcpy(words.data(),chunk.bytes.data(),chunk.bytes.size());
+            for(size_t at=2;at<words.size();) { const auto length=edvr::dxbc_container::instructionLength(words,at);
+                if((words[at]&0x7ffu)==54 && length>=3 && ((words[at+1]>>12)&255u)==2 && words[at+2]<7) { words[at+2]=7;changed=true;break; }at+=length; }
+            std::memcpy(chunk.bytes.data(),words.data(),chunk.bytes.size());
+        }
+        auto bad=edvr::dxbc_container::makeContainer(badChunks);
+        expect(changed && !edvr::flatOverlayCoverageFromPatchedPs(bad.data(),bad.size(),replay,why) && replay.empty(),"replay refuses undeclared original MRT7 operand");
+        for(unsigned mutation=0;mutation<3;++mutation) {
+            auto chunks=edvr::dxbc_container::parseContainer(normal.data(),normal.size(),0x50);bool altered=false;
+            for(auto& chunk:chunks)if(chunk.tag==0x58454853u || chunk.tag==0x52444853u) {
+                std::vector<uint32_t> words(chunk.bytes.size()/4);std::memcpy(words.data(),chunk.bytes.data(),chunk.bytes.size());
+                for(size_t at=2;at<words.size();) {
+                    const auto length=edvr::dxbc_container::instructionLength(words,at);
+                    if(mutation==2 && (words[at]&0x7ffu)==104 && length==2) {
+                        words[at+1]=4090;altered=true;break;
+                    }
+                    if(mutation<2 && (words[at]&0x7ffu)==54 && length>=3 &&
+                       ((words[at+1]>>12)&255u)==2 && words[at+2]<7) {
+                        if(mutation==0)words[at+1]|=2u<<22; // unbounded relative output index
+                        else words[at]|=0x80000000u; // malformed opcode extension consumes operand
+                        altered=true;break;
+                    }
+                    at+=length;
+                }
+                std::memcpy(chunk.bytes.data(),words.data(),chunk.bytes.size());
+            }
+            auto malformed=edvr::dxbc_container::makeContainer(chunks);
+            const char* labels[]={"replay rejects relative output operand","replay rejects malformed opcode extension","replay rejects SM5 temp overflow"};
+            expect(altered && !edvr::flatOverlayCoverageFromPatchedPs(malformed.data(),malformed.size(),replay,why) && replay.empty(),labels[mutation]);
+        }
     }
     context->ClearState();
     return failures;

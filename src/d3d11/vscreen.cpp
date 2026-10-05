@@ -4387,6 +4387,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
                                    ID3D11Asynchronous* async) {
     if (g_flatComputeInternal) { g_state->realBegin(self, async); return; }
+    if(runtimeFlatProfile())flatRuntimeReplayQueryBegin(self, async);
     gpuFrameCommand(self);
     if (gpuFrameInternal()) { g_state->realBegin(self, async); return; }
     if (drawCensusArmed()) {
@@ -4399,11 +4400,16 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
                                  ID3D11Asynchronous* async) {
     if (g_flatComputeInternal) { g_state->realEnd(self, async); return; }
     gpuFrameCommand(self);
-    if (gpuFrameInternal()) { g_state->realEnd(self, async); return; }
+    if (gpuFrameInternal()) {
+        g_state->realEnd(self, async);
+        if(runtimeFlatProfile())flatRuntimeReplayQueryEnd(self, async);
+        return;
+    }
     if (drawCensusArmed()) {
         drawCensusQuery('E', async, foreignContext(self));
     }
     g_state->realEnd(self, async);
+    if(runtimeFlatProfile())flatRuntimeReplayQueryEnd(self, async);
 }
 
 // The argument buffer holds the counts, so the census records n=0 i=0

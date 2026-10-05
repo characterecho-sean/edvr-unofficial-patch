@@ -162,4 +162,132 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
         return false;
     }
 }
+// Derive private RT0 coverage from the lifetime cache's already-qualified
+// MRT7 variant. Original colour outputs become fresh temps, including reads
+// of those outputs; their calculations/discards and early-depth flag remain.
+// No original shader output or game blend is changed during its real draw.
+inline bool flatOverlayCoverageFromPatchedPs(const void* data,size_t size,
+                                            std::vector<BYTE>& result,std::string& why) {
+    result.clear();why.clear();
+    using namespace dxbc_container;
+    using namespace flat_shader_classifier_detail;
+    try {
+        auto chunks=parseContainer(data,size,kPs50);
+        bool signature=false,program=false;
+        for(auto& chunk:chunks) {
+            if(chunk.tag==kTagOsgn) {
+                if(signature)throw std::runtime_error("duplicate replay output signature");
+                signature=true;
+                auto sig=parseSignature(chunk.bytes);SignatureElement coverage;unsigned found=0;
+                for(const auto& e:sig) {
+                    if(!equalName(e.name,"SV_TARGET") || e.componentType!=3 ||
+                       e.semanticIndex>7 || e.registerIndex>7)
+                        throw std::runtime_error("replay output signature");
+                    if(e.semanticIndex==7 || e.registerIndex==7) {
+                        if(e.semanticIndex!=7 || e.registerIndex!=7 || e.masks!=0x0e01u)
+                            throw std::runtime_error("unexpected qualified coverage signature");
+                        coverage=e;++found;
+                    }
+                }
+                if(found!=1)throw std::runtime_error("missing or duplicate qualified coverage signature");
+                coverage.semanticIndex=coverage.registerIndex=0;
+                chunk.bytes=makeSignature({coverage});
+            } else if(chunk.tag==kTagShex || chunk.tag==kTagShdr) {
+                if(program || chunk.bytes.size()<8 || (chunk.bytes.size()&3u))throw std::runtime_error("replay program");
+                program=true;
+                std::vector<uint32_t> in(chunk.bytes.size()/4);
+                std::memcpy(in.data(),chunk.bytes.data(),chunk.bytes.size());
+                uint32_t temps=0;unsigned coverageDeclarations=0,coverageWrites=0;
+                for(size_t at=2;at<in.size();) {
+                    const uint32_t op=in[at]&0x7ffu;const size_t len=instructionLength(in,at);
+                    if(op==kOpDclTemps) {
+                        if(len!=2)throw std::runtime_error("replay temps declaration");
+                        temps=(std::max)(temps,in[at+1]);
+                    }
+                    if(op>=101 && op<=103) {
+                        if(len<3)throw std::runtime_error("short replay output declaration");
+                        if(in[at+2]==7) {
+                            if(op!=101 || len!=3 || in[at+1]!=0x00102012u)
+                                throw std::runtime_error("unexpected coverage declaration");
+                            ++coverageDeclarations;
+                        }
+                    }
+                    if(!isDeclaration(op)) {
+                        if(op==54 && (in[at]&0x80000000u))
+                            throw std::runtime_error("unexpected MOV opcode extension");
+                        const int count=operandCount(op);
+                        if(count<0)throw std::runtime_error("unknown replay operand layout");
+                        size_t cursor=at+1;
+                        uint32_t extended=in[at];
+                        while(extended&0x80000000u) {
+                            if(cursor>=at+len)throw std::runtime_error("replay opcode extension");
+                            extended=in[cursor++];
+                            if((extended&0x3fu)>3u)throw std::runtime_error("unknown replay opcode extension");
+                        }
+                        for(int i=0;i<count;++i) {
+                            Operand o;
+                            if(!parseOperand(in,cursor,o) || cursor>at+len)
+                                throw std::runtime_error("replay operand parse");
+                            if(o.type==kOperandTemp) {
+                                if(o.reg>=4096)throw std::runtime_error("replay temp operand budget");
+                                temps=(std::max)(temps,o.reg+1);
+                            }
+                            if(o.type==kOperandOutput && o.reg==7) {
+                                if(i!=0 || op!=54 || len!=5 || in[at]!=0x05000036u ||
+                                   in[at+1]!=0x00102012u || in[at+2]!=7 ||
+                                   in[at+3]!=0x00004001u || in[at+4]!=0x3f800000u ||
+                                   at+len+1!=in.size() || in[at+len]!=0x0100003eu)
+                                    throw std::runtime_error("unexpected executable MRT7 operand");
+                                ++coverageWrites;
+                            }
+                        }
+                        if(cursor!=at+len)throw std::runtime_error("replay trailing operands");
+                    }
+                    at+=len;
+                }
+                if(temps>4089)throw std::runtime_error("replay temp budget");
+                if(coverageDeclarations!=1 || coverageWrites!=1)
+                    throw std::runtime_error("missing or duplicate coverage injection");
+                std::vector<uint32_t> out{in[0],0};bool declared=false;
+                for(size_t at=2;at<in.size();) {
+                    const uint32_t op=in[at]&0x7ffu;const size_t len=instructionLength(in,at);
+                    if(op==kOpDclTemps || (op>=101 && op<=103)) { at+=len;continue; }
+                    if(!isDeclaration(op)) {
+                        if(!declared) {
+                            const uint32_t decl[]={0x02000068u,temps+7,0x03000065u,0x00102012u,0};
+                            out.insert(out.end(),decl,decl+5);declared=true;
+                        }
+                        size_t cursor=at+1;uint32_t extended=in[at];
+                        while(extended&0x80000000u) {
+                            if(cursor>=at+len)throw std::runtime_error("replay rewrite extension");
+                            extended=in[cursor++];
+                        }
+                        for(int i=0;i<operandCount(op);++i) {
+                            const size_t start=cursor;Operand o;
+                            if(!parseOperand(in,cursor,o))throw std::runtime_error("replay rewrite parse");
+                            if(o.type!=kOperandOutput)continue;
+                            const uint32_t tok=in[start];
+                            if(o.relative || ((tok>>20)&3u)!=1u || ((tok>>22)&7u)!=0u || o.reg>7)
+                                throw std::runtime_error("unbounded replay output index");
+                            size_t index=start+1;uint32_t operandExtended=tok;
+                            while(operandExtended&0x80000000u) {
+                                if(index>=cursor)throw std::runtime_error("replay operand extension");
+                                operandExtended=in[index++];
+                            }
+                            if(index>=cursor)throw std::runtime_error("missing replay output index");
+                            if(o.reg==7)in[index]=0;
+                            else { in[start]=tok&~(255u<<12);in[index]=temps+o.reg; }
+                        }
+                    }
+                    out.insert(out.end(),in.begin()+at,in.begin()+at+len);at+=len;
+                }
+                if(!declared)throw std::runtime_error("missing replay coverage declaration");
+                out[1]=static_cast<uint32_t>(out.size());chunk.bytes.resize(out.size()*4);
+                std::memcpy(chunk.bytes.data(),out.data(),chunk.bytes.size());
+            }
+        }
+        if(!signature || !program)throw std::runtime_error("missing replay signature or program");
+        result=makeContainer(chunks);return true;
+    } catch(const std::exception& e) { why=e.what();result.clear();return false; }
+}
 } // namespace edvr

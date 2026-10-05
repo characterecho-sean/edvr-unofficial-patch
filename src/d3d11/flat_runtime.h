@@ -99,6 +99,8 @@ void flatRuntimeOverlayUavBind(ID3D11DeviceContext*, UINT count,
 void flatRuntimeArmProjectionAudit();
 void flatRuntimeCreateBuffer(ID3D11Buffer*, const void* initialData);
 void flatRuntimeClearBindings();
+void flatRuntimeReplayQueryBegin(ID3D11DeviceContext*, ID3D11Asynchronous*);
+void flatRuntimeReplayQueryEnd(ID3D11DeviceContext*, ID3D11Asynchronous*);
 // F10-only retained DSV clear chronology; called before the real clear.
 void flatRuntimeWeaponFootprintClear(ID3D11DepthStencilView*, UINT clearFlags, UINT8 stencil);
 void flatRuntimeWeaponFootprintBeforePresent(IDXGISwapChain*, UINT flags);
@@ -119,6 +121,7 @@ struct FlatRuntimeDrawScope {
     bool drawCaptureStarted = false;
     bool weaponFootprintStarted = false;
     bool overlayPlanned = false, overlayStarted = false, overlayEnded = false;
+    bool overlayReplayPending = false;
     bool foregroundPlanned = false, foregroundStarted = false, foregroundEnded = false;
     bool untrustedPlanned = false, untrustedStarted = false, untrustedEnded = false;
     bool needsActualDraw() const { return flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
