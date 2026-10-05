@@ -3674,8 +3674,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(drawPacket){s.drawPackets.missing(drawPacket,"chronology.resource_mutations","unsupported-AA-off-or-paused-mutation-observation");
             Log::get().note("flat draw packets: selected frame=%llu q=%u VS=%016llX PS=%016llX capture-only=1 priority=%u category=%u",
                 (unsigned long long)s.drawPacketFrame,q,(unsigned long long)pair.first,(unsigned long long)pair.second,priority?1u:0u,representative);}
-        FlatRuntimeDraw d{};d.key.vs=pair.first;d.key.ps=pair.second;d.key.sequence=q;d.key.color=color.Get();d.key.depth=depth.Get();d.key.rtv=rtv.Get();d.key.dsv=dsv.Get();d.instances=instances;
-        flatTraceRecord(s.traceRing,d,false);return;
+        FlatRuntimeDraw d{};d.key.vs=pair.first;d.key.ps=pair.second;d.key.color=color.Get();d.key.depth=depth.Get();d.key.rtv=rtv.Get();d.key.dsv=dsv.Get();d.instances=instances;
+        flatTraceRecord(s.traceRing,d,false,nullptr,q);return;
     }
     auto& ingress = drawIngressAudit;
     const bool auditing = ingress.active.load(std::memory_order_relaxed);
@@ -3984,7 +3984,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     {
         flatcpu::Scope trace(flatcpu::kTrace);
-        flatTraceRecord(s.traceRing, d, foreignWork.load(std::memory_order_acquire), hdrSrvKnown ? hdrSrv : nullptr);
+        // Correlation q is separate from the original contract observation.
+        flatTraceRecord(s.traceRing, d, foreignWork.load(std::memory_order_acquire), hdrSrvKnown ? hdrSrv : nullptr, s.prefix.sequence);
     }
     // The final copy's admission by structure (flat_copy_structure.h, section 83): after the reducer and the detector, which
     // it reads, and before anything below uses the verdict. What the whitelist selected stays what it was.

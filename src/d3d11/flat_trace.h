@@ -49,8 +49,13 @@ struct FlatTraceEvent {
     uint32_t instances = 1;
     uint32_t flags = 0;
     uint32_t kind = kFlatTraceEventDraw;
+    // FTR5 uses the former x64 alignment padding for the draw's reducer q.
+    // key.sequence remains the original observation used by contract hashing.
+    uint32_t drawSequence = 0;
     const void* hdrSrv[4] = {};
 };
+static_assert(offsetof(FlatTraceEvent,drawSequence)==468 && offsetof(FlatTraceEvent,hdrSrv)==472 && sizeof(FlatTraceEvent)==504,
+              "FTR5 must preserve the FTR4 event size and resource offsets");
 constexpr uint32_t kFlatTraceHasCamera = 1u << 0;
 constexpr uint32_t kFlatTraceSupported = 1u << 1;
 constexpr uint32_t kFlatTraceHdrCopyVerified = 1u << 2;
@@ -123,7 +128,7 @@ inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
 }
 
 struct FlatTraceHeader {
-    char magic[8] = {'E','D','V','R','F','T','R','4'};
+    char magic[8] = {'E','D','V','R','F','T','R','5'};
     uint32_t frameCount = 0;
     uint32_t reserved = 0;
 };
@@ -187,11 +192,12 @@ inline void flatTraceBeginFrame(FlatTraceRing& r, uint64_t frame, const void* ou
     r.slotUsed[r.slot] = true;
 }
 inline void flatTraceRecord(FlatTraceRing& r, const FlatRuntimeDraw& d, bool foreignWork,
-                            const void* const* hdrSrv = nullptr) {
+                            const void* const* hdrSrv = nullptr, uint32_t drawSequence = 0) {
     if (!flatTraceCanAppend(r)) return;
     auto& h = r.headers[r.slot];
     auto& e = r.events[r.slot][h.eventCount++];
     e = flatTraceEventFromDraw(d, foreignWork);
+    e.drawSequence = drawSequence ? drawSequence : d.key.sequence;
     flatTraceEventSetSrv(e, hdrSrv);
 }
 inline void flatTraceMark(FlatTraceRing& r, uint32_t kind, const void* resource) {
@@ -244,8 +250,8 @@ inline FlatTraceEvent flatTraceEventFromV3(const FlatTraceEventV3& v) {
     return e;
 }
 // Parse one trace document, invoking onFrame(header) then onEvent(event)
-// per event in order. EDVRFTR3 (the corpus) and EDVRFTR4 (the runtime's dump since the HDR route) are read;
-// an EDVRFTR3 event reaches onEvent widened, with no SRVs. Returns false on any malformed input.
+// per event in order. FTR3/4 retain their original contract keys. FTR5 adds
+// independent draw correlation; legacy alignment padding is never read as q.
 template <class OnFrame, class OnEvent>
 inline bool flatTraceParse(const unsigned char* data, size_t size,
                            OnFrame&& onFrame, OnEvent&& onEvent) {
@@ -253,8 +259,9 @@ inline bool flatTraceParse(const unsigned char* data, size_t size,
     FlatTraceHeader header{};
     std::memcpy(&header, data, sizeof(header));
     const bool v4 = std::memcmp(header.magic, "EDVRFTR4", 8) == 0;
-    if (!v4 && std::memcmp(header.magic, "EDVRFTR3", 8) != 0) return false;
-    const size_t eventSize = v4 ? sizeof(FlatTraceEvent) : sizeof(FlatTraceEventV3);
+    const bool v5 = std::memcmp(header.magic, "EDVRFTR5", 8) == 0;
+    if (!v4 && !v5 && std::memcmp(header.magic, "EDVRFTR3", 8) != 0) return false;
+    const size_t eventSize = v4 || v5 ? sizeof(FlatTraceEvent) : sizeof(FlatTraceEventV3);
     size_t at = sizeof(FlatTraceHeader);
     for (uint32_t f = 0; f < header.frameCount; ++f) {
         if (size - at < sizeof(FlatTraceFrameHeader)) return false;
@@ -265,9 +272,10 @@ inline bool flatTraceParse(const unsigned char* data, size_t size,
         if (size - at < fh.eventCount * eventSize) return false;
         onFrame(fh);
         for (uint32_t i = 0; i < fh.eventCount; ++i) {
-            if (v4) {
+            if (v4 || v5) {
                 FlatTraceEvent e{};
                 std::memcpy(&e, data + at, sizeof(e));
+                if(!v5)e.drawSequence=0;
                 onEvent(e);
             } else {
                 FlatTraceEventV3 v{};

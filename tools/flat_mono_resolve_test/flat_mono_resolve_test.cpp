@@ -200,6 +200,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_draw_packet_gpu_tests.h"
 #include "flat_weapon_footprint_gpu_tests.h"
 #include "flat_overlay_layer_gpu_tests.h"
+#include "flat_loop_output_gpu_tests.h"
 #include "flat_foreground_ownership_gpu_tests.h"
 #include "flat_hdr_route_gpu_tests.h"
 #include "flat_resolve_fixture.h"
@@ -795,6 +796,7 @@ int main(int argc,char** argv) {
     failures+=flatDrawPacketGpuTests(device.Get(),context.Get());
     failures+=flatWeaponFootprintGpuTests(device.Get(),context.Get());
     failures+=flatOverlayLayerGpuTests(device.Get(),context.Get());
+    failures+=flatLoopOutputGpuTests(device.Get(),context.Get());
     failures+=flatForegroundOwnershipGpuTests(device.Get(),context.Get());
     // The HDR route's resolver half (design section 81): before the D3D message check below, so its draws are held to it.
     hdrRouteGpuTests(device.Get(),context.Get());

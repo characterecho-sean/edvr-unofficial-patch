@@ -1314,7 +1314,7 @@ void testFrameContractTrace() {
     using namespace edvr;
     // Gate 1 (the staged program): the frame contract is produced by the same
     // reducer online and under trace replay, with identical decisions.
-    for (uint32_t width : {960u, 1280u}) {
+    for (uint32_t width : {960u, 1280u}) for (bool originalSequenceZero : {false,true}) {
         MonoFixture fixture(width);
         auto prefix = std::make_unique<FlatRuntimePrefix>();
         prefix->frame = fixture.input.frame; prefix->output = fixture.input.output;
@@ -1338,6 +1338,7 @@ void testFrameContractTrace() {
         for (uint32_t i = 0; i < count; ++i) {
             const auto& r = *events[i].r;
             FlatRuntimeDraw d{}; d.key = r.key;
+            if(originalSequenceZero)d.key.sequence=0; // live observations retain the default sequence
             std::memcpy(d.camera, r.camera, sizeof(d.camera));
             d.key.writeEpoch = prefix->frame; d.key.writeSeq = prefix->sequence + 1;
             d.supported = engine_velocity_family::supportedPair(d.key.vs, d.key.ps);
@@ -1348,7 +1349,8 @@ void testFrameContractTrace() {
                     static_cast<uint32_t>(FlatMonoReason::Selected));
             if (isCopy(d, *prefix)) flatRuntimeObserveContract(*prefix, d, *contract);
             else flatRuntimeObserve(*prefix, d);
-            flatTraceRecord(*ring, d, false);
+            flatTraceRecord(*ring, d, false, nullptr, prefix->sequence);
+            check(d.key.sequence==(originalSequenceZero?0:r.key.sequence),"trace correlation never mutates the live contract observation");
         }
         flatTraceSeal(*ring, contract->produced, contract->produced ? flatFrameContractHash(*contract) : 0);
         // Exercise the non-draw kinds: recorded after the copy, they apply
@@ -1360,6 +1362,11 @@ void testFrameContractTrace() {
         flatTraceBeginFrame(*ring, prefix->frame + 1, prefix->output, prefix->width, prefix->height, prefix->format);
         check(contract->produced && contract->copiesUsed == 1 && contract->copies[0].selected(),
               "trace online run produces a selected frame contract");
+        if(originalSequenceZero) {
+            bool keysUnchanged=contract->recordCount>0;
+            for(uint32_t i=0;i<contract->recordCount;++i)keysUnchanged&=contract->records[i].key.sequence==0;
+            check(keysUnchanged,"live-like produced contract keeps the original zero observation sequence in every record");
+        }
         const uint64_t wantHash = flatFrameContractHash(*contract);
         std::vector<unsigned char> bytes;
         flatTraceDump(*ring, [&](const void* data, uint32_t n) {
@@ -1370,6 +1377,7 @@ void testFrameContractTrace() {
         FlatRuntimePrefix replay{};
         FlatFrameContract rc{};
         FlatTraceFrameHeader cur{};
+        bool drawCorrelation=true;
         auto finishFrame = [&]() {
             if (!cur.eventCount) return;
             ++framesReplayed;
@@ -1391,6 +1399,8 @@ void testFrameContractTrace() {
                 if (e.kind == kFlatTraceEventResolve) { ++resolveMarkers; return; }
                 if (hdr_route_test::replayOverlayMarker(replay,e)) return;
                 FlatRuntimeDraw d = flatTraceEventToDraw(e);
+                drawCorrelation&=e.drawSequence==replay.sequence+1;
+                if(originalSequenceZero)drawCorrelation&=d.key.sequence==0;
                 // The traced writeEpoch/writeSeq are the online-resolved
                 // values; replaying them verbatim keeps the shared camera/
                 // draw sequence counter's online interleaving intact.
@@ -1402,7 +1412,7 @@ void testFrameContractTrace() {
                 else flatRuntimeObserve(replay, d);
             });
         finishFrame();
-        check(parsed && framesReplayed == 1 && framesMatched == 1 && wantHash == cur.contractHash &&
+        check(parsed && drawCorrelation && framesReplayed == 1 && framesMatched == 1 && wantHash == cur.contractHash &&
               resolveMarkers == 1 && copiesAfterResolve == 1 && rc.copies[0].selected(),
               "resolve marker before final copy is parsed but does not change selected contract or draw order");
     }
@@ -2451,7 +2461,7 @@ void testStandDownWiring() {
     auto at = [&](const char* needle) { return runtimeCpp.find(needle); };
     const size_t menuVerify = at("d.menuHdrCopyVerified=verifyMenuHdrCopy(ctx,d);");
     const size_t observe = at("? flatRuntimeObserveContract(s.prefix, d, s.traceContract)");
-    const size_t record = at("flatTraceRecord(s.traceRing, d, foreignWork.load(std::memory_order_acquire), hdrSrvKnown ? hdrSrv : nullptr);");
+    const size_t record = at("flatTraceRecord(s.traceRing, d, foreignWork.load(std::memory_order_acquire), hdrSrvKnown ? hdrSrv : nullptr, s.prefix.sequence);");
     const size_t verdict = at("const FlatFrameSeen seen = flatFrameSeenFor(");
     const size_t probeReturn = at("if (s.work == FlatWork::Probe) return;");
     check(menuVerify != std::string::npos && observe != std::string::npos && record != std::string::npos &&

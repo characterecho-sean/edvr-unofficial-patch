@@ -126,19 +126,22 @@ class Reader:
             header = stream.read(16)
             check(len(header) == 16, "truncated trace header")
             magic, frames, reserved = struct.unpack('<8sII', header)
-            check(magic in (b'EDVRFTR3', b'EDVRFTR4') and frames == 1 and reserved == 0,
+            check(magic in (b'EDVRFTR3', b'EDVRFTR4', b'EDVRFTR5') and frames == 1 and reserved == 0,
                   "invalid packet trace header")
             raw = stream.read(48)
             check(len(raw) == 48, "truncated trace frame")
             frame, output, width, height, fmt, count, truncated, produced, contract = struct.unpack('<QQIIIIIIQ', raw)
             check(frame == packet['frame'] and 0 < count <= 65536 and not truncated,
                   "trace frame association or completeness mismatch")
-            event_size = 504 if magic == b'EDVRFTR4' else 472
+            event_size = 504 if magic in (b'EDVRFTR4', b'EDVRFTR5') else 472
             for _ in range(count):
                 event = stream.read(event_size)
                 check(len(event) == event_size, "truncated trace event")
                 vs, ps = struct.unpack_from('<QQ', event, 120)
-                q = struct.unpack_from('<I', event, 196)[0]
+                # FTR5 stores the actual draw sequence separately from the
+                # event key's sequence field. Older traces used byte 196 for q.
+                q_offset = 468 if magic == b'EDVRFTR5' else 196
+                q = struct.unpack_from('<I', event, q_offset)[0]
                 kind = struct.unpack_from('<I', event, 464)[0]
                 if kind == 0 and q == packet['q']:
                     matches.append((vs, ps))
@@ -320,12 +323,14 @@ def self_test():
         (root / 'resource.bin').write_bytes(b'12345678')
         event = bytearray(504)
         struct.pack_into('<QQ', event, 120, digest, digest)
-        struct.pack_into('<I', event, 196, 7)
-        trace = struct.pack('<8sII', b'EDVRFTR4', 1, 0) + struct.pack('<QQIIIIIIQ', 42, 0, 1, 1, 28, 1, 0, 0, 0) + event
+        struct.pack_into('<I', event, 196, 0)  # key.sequence is not draw q in FTR5
+        struct.pack_into('<I', event, 464, 0)  # draw kind
+        struct.pack_into('<I', event, 468, 1)  # actual drawSequence
+        trace = struct.pack('<8sII', b'EDVRFTR5', 1, 0) + struct.pack('<QQIIIIIIQ', 42, 0, 1, 1, 28, 1, 0, 0, 0) + event
         (root / 'trace.bin').write_bytes(trace)
         fields = [{'name': stage + suffix, 'type': 'text', 'status': 'complete', 'value': value}
                   for stage in ('VS', 'PS') for suffix, value in (('.hash', f'{digest:x}'), ('.bytecode', 'shader.bin'))]
-        packet = dict(schema='edvr-flat-draw-packet', version=1, frame=42, q=7,
+        packet = dict(schema='edvr-flat-draw-packet', version=1, frame=42, q=1,
                       vs=f'{digest:x}', ps=f'{digest:x}', complete=True, executed=True,
                       reason='candidate', trace_file='trace.bin', trace_status='complete',
                       draw=dict(kind='D', count=3, start=0, base=0, instances=1, start_instance=0),
@@ -345,6 +350,27 @@ def self_test():
             after = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
             check(before == after, 'reader wrote capture files')
         save(); run(0, '--validate', '--field', 'VS', '--require-complete')
+        # FTR5 joins by drawSequence at byte 468, even when key.sequence is 0.
+        bad = copy.deepcopy(packet); bad['q'] = 2; save(bad); run(1)
+        bad = copy.deepcopy(packet); bad['ps'] = f'{digest ^ 1:x}'; save(bad); run(1)
+        # Corrupt only the trace shader, leaving packet metadata and bytecode
+        # consistent, so the trace-to-draw association check rejects it.
+        bad_trace = bytearray(trace)
+        struct.pack_into('<Q', bad_trace, 16 + 48 + 128, digest ^ 1)
+        (root / 'trace.bin').write_bytes(bad_trace); save(packet); run(1)
+        (root / 'trace.bin').write_bytes(trace)
+        # Legacy FTR3/FTR4 continue joining through their historical q field at byte 196.
+        for legacy_magic, legacy_size in ((b'EDVRFTR3', 472), (b'EDVRFTR4', 504)):
+            legacy_event = bytearray(legacy_size)
+            struct.pack_into('<QQ', legacy_event, 120, digest, digest)
+            struct.pack_into('<I', legacy_event, 196, 7)
+            struct.pack_into('<I', legacy_event, 464, 0)
+            legacy_trace = (struct.pack('<8sII', legacy_magic, 1, 0) +
+                            struct.pack('<QQIIIIIIQ', 42, 0, 1, 1, 28, 1, 0, 0, 0) + legacy_event)
+            legacy_packet = copy.deepcopy(packet); legacy_packet['q'] = 7
+            (root / 'trace.bin').write_bytes(legacy_trace); save(legacy_packet); run(0)
+            legacy_packet['q'] = 8; save(legacy_packet); run(1)
+        (root / 'trace.bin').write_bytes(trace); save(packet)
         (root / 'packet.json').unlink(); run(1)
         (root / 'manifest.json').write_text(json.dumps(dict(manifest, complete=False, pending=1, finished=0)), encoding='utf-8')
         run(0); run(2, '--require-complete'); save()

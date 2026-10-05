@@ -60,30 +60,48 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
                 // A read-only structured/raw SRV may feed conditional colour
                 // math. Keep that control flow intact and add the coverage
                 // write only at one unconditional, top-level terminal RET.
-                std::vector<bool> elseSeen;
+                // Structured loop branches stay inside their enclosing loop;
+                // every path that terminates still reaches this same tail.
+                struct Control { bool loop=false, elseSeen=false; };
+                std::vector<Control> control;
                 for (size_t at = 2; at < in.size();) {
                     const uint32_t op = in[at] & 0x7ffu;
                     const uint32_t length = instructionLength(in, at);
                     if (op == 106 && (in[at] & 0x2000u))
                         forceEarlyDepthStencil = true;
                     if (returned) throw std::runtime_error("instructions after terminal PS return");
-                    // Only balanced IF/ELSE/ENDIF is admitted. Loops, jumps,
-                    // calls and conditional returns cannot establish that
-                    // every surviving fragment reaches the coverage write.
-                    if ((op >= 2 && op <= 9) || (op >= 19 && op <= 20) ||
-                        (op >= 22 && op <= 23) || op == 48 || op == 58 ||
+                    // Calls, switches and conditional returns are outside
+                    // this terminal-tail proof and retain their refusal.
+                    if ((op >= 4 && op <= 6) || op == 9 || (op >= 19 && op <= 20) ||
+                        op == 23 || op == 58 ||
                         op == 63 || op == 76 || op == 120)
                         throw std::runtime_error("unsupported PS control flow or declaration");
-                    if (op == 31) {
-                        if (elseSeen.size() >= 64) throw std::runtime_error("PS IF nesting limit");
-                        elseSeen.push_back(false);
+                    const bool conditionalControl=op==31 || op==3 || op==8;
+                    const bool structuralControl=op==18 || op==21 || op==48 || op==22 || op==2 || op==7;
+                    if(conditionalControl) {
+                        size_t cursor=at+1;
+                        flat_shader_classifier_detail::Operand condition;
+                        if((in[at]&0x80000000u) ||
+                           !flat_shader_classifier_detail::parseOperand(in,cursor,condition) || cursor!=at+length)
+                            throw std::runtime_error("PS control condition operand bounds");
+                    } else if(structuralControl && (length!=1 || (in[at]&0x80000000u)))
+                        throw std::runtime_error("PS structural control instruction bounds");
+                    if (op == 31 || op==48) {
+                        if (control.size() >= 64) throw std::runtime_error("PS control nesting limit");
+                        control.push_back({op==48,false});
                     } else if (op == 18) {
-                        if (elseSeen.empty() || elseSeen.back())
+                        if (control.empty() || control.back().loop || control.back().elseSeen)
                             throw std::runtime_error("unbalanced PS ELSE");
-                        elseSeen.back() = true;
+                        control.back().elseSeen = true;
                     } else if (op == 21) {
-                        if (elseSeen.empty()) throw std::runtime_error("unbalanced PS ENDIF");
-                        elseSeen.pop_back();
+                        if (control.empty() || control.back().loop) throw std::runtime_error("unbalanced PS ENDIF");
+                        control.pop_back();
+                    } else if(op==22) {
+                        if(control.empty() || !control.back().loop) throw std::runtime_error("unbalanced PS ENDLOOP");
+                        control.pop_back();
+                    } else if(op==2 || op==3 || op==7 || op==8) {
+                        bool loop=false;for(const auto& frame:control)loop|=frame.loop;
+                        if(!loop)throw std::runtime_error("PS loop branch outside LOOP");
                     }
                     // Shader Model 5: DCL_RESOURCE_RAW/STRUCTURED are SRV
                     // declarations; LD_RAW/STRUCTURED read them. All UAV
@@ -132,7 +150,7 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
                         declared = true;
                     }
                     if (op == 62) { // RET: only surviving fragments execute this tail.
-                        if (!elseSeen.empty() || at + length != in.size())
+                        if (!control.empty() || at + length != in.size() || length!=1)
                             throw std::runtime_error("PS return not terminal and top-level");
                         const uint32_t mark[] = {0x05000036u, 0x00102012u, kFlatOverlayTarget,
                                                  0x00004001u, 0x3f800000u};
@@ -142,7 +160,7 @@ inline bool flatOverlayPatchPs(const void* bytecode, size_t bytes,
                     out.insert(out.end(), in.begin() + at, in.begin() + at + length);
                     at += length;
                 }
-                if (!declared || !returned || !elseSeen.empty())
+                if (!declared || !returned || !control.empty())
                     throw std::runtime_error("PS has no terminal unconditional return");
                 out[1] = static_cast<uint32_t>(out.size());
                 chunk.bytes.resize(out.size() * 4);

@@ -191,8 +191,9 @@ inline int traceTrim(const char* in, const char* out, const char* list) {
     FlatTraceHeader header{};
     std::memcpy(&header, bytes.data(), sizeof(header));
     const bool v4 = std::memcmp(header.magic, "EDVRFTR4", 8) == 0;
-    if (!v4 && std::memcmp(header.magic, "EDVRFTR3", 8) != 0) { std::printf("%s is not EDVRFTR3/4\n", in); return 2; }
-    const size_t eventSize = v4 ? sizeof(FlatTraceEvent) : sizeof(FlatTraceEventV3);
+    const bool v5 = std::memcmp(header.magic, "EDVRFTR5", 8) == 0;
+    if (!v4 && !v5 && std::memcmp(header.magic, "EDVRFTR3", 8) != 0) { std::printf("%s is not EDVRFTR3/4/5\n", in); return 2; }
+    const size_t eventSize = v4 || v5 ? sizeof(FlatTraceEvent) : sizeof(FlatTraceEventV3);
     std::set<uint64_t> wanted;
     {
         std::stringstream ss(list);
@@ -1225,10 +1226,10 @@ inline int flatHdrRouteTests() {
             const auto* p = static_cast<const unsigned char*>(data);
             bytes.insert(bytes.end(), p, p + n); return n;
         });
-        expect(bytes.size() > 16 && std::memcmp(bytes.data(), "EDVRFTR4", 8) == 0, "the dump is EDVRFTR4");
+        expect(bytes.size() > 16 && std::memcmp(bytes.data(), "EDVRFTR5", 8) == 0, "the dump is EDVRFTR5");
         std::vector<ParsedFrame> frames;
         const bool parsed = parseTrace(bytes, &frames);
-        expect(parsed && frames.size() == 1 && frames[0].events.size() == 3, "a v4 dump parses: one frame, three events");
+        expect(parsed && frames.size() == 1 && frames[0].events.size() == 3, "a v5 dump parses: one frame, three events");
         if (parsed && frames.size() == 1 && frames[0].events.size() == 3) {
             const auto& e = frames[0].events;
             expect(!(e[0].flags & kFlatTraceHdrSrvKnown) && e[0].hdrSrv[1] == nullptr,
@@ -1264,7 +1265,7 @@ inline int flatHdrRouteTests() {
         std::vector<ParsedFrame> old;
         expect(parseTrace(v3, &old) && old.size() == 1 && old[0].events.size() == 1 && old[0].header.frame == 77 &&
                old[0].events[0].key.ps == 0xFE && old[0].events[0].flags == kFlatTraceSupported &&
-               old[0].events[0].hdrSrv[0] == nullptr && old[0].events[0].hdrSrv[3] == nullptr,
+               old[0].events[0].hdrSrv[0] == nullptr && old[0].events[0].hdrSrv[3] == nullptr && old[0].events[0].drawSequence == 0,
                "an EDVRFTR3 trace still parses: the event is widened and its slots are zero");
         std::vector<unsigned char> bad = v3;
         bad[7] = '9';
@@ -1272,6 +1273,16 @@ inline int flatHdrRouteTests() {
         bad = v3; bad.resize(bad.size() - 3);
         expect(!parseTrace(bad, &old), "a truncated v3 trace is refused");
         expect(sizeof(FlatTraceEventV3) == 472, "the EDVRFTR3 event layout is the 472 bytes the corpus was written with");
+        auto v4bytes=bytes;v4bytes[7]='4';
+        for(size_t at=sizeof(FlatTraceHeader)+sizeof(FlatTraceFrameHeader);at+sizeof(FlatTraceEvent)<=v4bytes.size();at+=sizeof(FlatTraceEvent)) {
+            const uint32_t arbitraryPadding=0xDEADBEEFu;
+            std::memcpy(v4bytes.data()+at+468,&arbitraryPadding,sizeof(arbitraryPadding));
+        }
+        std::vector<ParsedFrame> legacy;
+        expect(parseTrace(v4bytes,&legacy)&&legacy.size()==1&&legacy[0].events.size()==3&&
+               legacy[0].events[0].key.sequence==d1.key.sequence&&legacy[0].events[0].drawSequence==0&&
+               legacy[0].events[1].hdrSrv[1]==s.sc.h&&legacy[0].events[1].drawSequence==0,
+               "FTR4 preserves contract keys and SRVs while ignoring arbitrary legacy padding at the new q offset");
     }
 
     // The live trace has to preserve the protection and effective-write

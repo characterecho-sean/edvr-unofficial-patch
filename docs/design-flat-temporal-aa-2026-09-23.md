@@ -3,7 +3,7 @@
 ## Status
 
 - **State:** color-clear weapon-AA fault CLOSED (102); plasma refusal OPEN (103).
-  f13ee92b: plasma PS absent from replay cache; raw VS/PS remain cached (103).
+  Loop repair and separate trace q pass full validation; Epic flight pending (103).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** Epic NumLock draw packet with plasma drawn (103); no two-minute wait.
+- **Next:** promote/install the clean build, then confirm plasma AA on Epic (103).
   Retain section 102's qualified color-clear fix; no per-weapon table.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -11219,3 +11219,91 @@ capture exception and the separate AA-Off request consumer; focused checks
 retain the unarmed Paused freeze and all 46 identical frame-contract replays.
 Next promotion installs the clean DLL on Epic and migrates only its explicit
 F10 binding/help comment to NumLock. Plasma shader admission remains unchanged.
+
+2026-10-05, NumLock flight: `edvr_gfx_20261005_090010.log` matches
+`v0.18.2-4-g85329199`, build `6AC3B4FD`. At 09:03:06.769, frame 50147,
+draw q=17202 reports `replay-PS-bytecode-not-retained: unsupported PS control
+flow or declaration`. The original VS (4948 bytes) and PS (66988 bytes) are
+available and saved; the raw PS preflight independently gives the same
+refusal. Ruled out: missing original shader bytecode, because this diagnostic
+exports it successfully. The next discrimination is the actual rejected
+opcode: balanced loops/switches may preserve the terminal coverage mark;
+calls or nonterminal returns require a different proof. Do not broaden the
+qualifier until the saved program establishes which case is present.
+
+Saved PS `CBB1A87D6023B2A8` establishes that case: the first rejected token
+is LOOP (opcode 48), SHEX word 755, disassembly instruction 86. The shader
+contains nine balanced LOOP/ENDLOOP pairs, nine BREAKC, fifteen CONTINUE,
+and one BREAK; its seventy IF/ENDIF pairs are balanced, maximum typed nesting
+eight. It has one top-level terminal RET (instruction 2287), no RETC, calls,
+switches, discard or UAV operations. Read-only raw SRV loads were already
+admitted. Hypothesis confirmed: rejecting structured loops prevents the
+qualified shader from entering the replay registry. A typed IF/LOOP stack
+can prove that local loop branches cannot bypass the final coverage mark;
+the repair must retain the original instructions and reject crossed blocks,
+unmatched branches and nonterminal returns. Test the exact saved shader's
+normal/replay creation and dynamic-loop coverage with discard offline.
+
+NumLock capture `capture_1109472078_48932` saved two plasma packets,
+frames/draws 49882/17170 and 49883/24332. The validator correctly refused
+their trace association: the matching frame and shader pair occur once,
+but the normal runtime trace recorded `key.sequence=0`. Packet metadata uses
+the frame reducer's actual draw sequence. The capture-only Off/Paused path
+sets the trace sequence; the normal path omitted it. Repair only the trace
+copy after the reducer advances, preserving the reducer's original
+observation and cache behavior. Existing bytecode and draw snapshots remain
+usable; do not label the old event traces complete or relax validation.
+
+The first packet's original draw state also satisfies the existing private
+replay guard: one RT0 with enabled ONE/SRC1_COLOR (alpha ONE/SRC1_ALPHA),
+full color mask, effective depth write disabled, stencil mask/reference
+`0x04`, no SO/OM-UAV bindings and no active counting query. Its output and
+DSV snapshots are present. This confirms a shader-qualification repair can
+reach the existing generic replay path without weakening those guards.
+The second packet hit resource limits; its payload cannot substitute for
+the first packet's complete resource snapshots. Raw shader evidence is
+staged under `build\numlock-capture-evidence`.
+
+The focused O2 mono rig passed (`build\packet_loop_focus.log`): the exact
+66988-byte captured PS qualifies and both derived variants create on WARP.
+Dynamic nested loops with continue/break/discard preserve original color,
+depth and stencil; private RT0 replay uses the pre-original cloned DSV and
+matches normal MRT7 coverage for stencil-fail, pass and depth-fail cases.
+The patch preserves every original instruction byte. Crossed/unclosed
+blocks, loop-less branches, malformed controls and nonterminal/conditional
+returns remain refused. The trace regression now uses the real reducer,
+ring serialization and parser across a camera event and a frame reset,
+asserting emitted frame/draw/hash association with unchanged observations.
+Production validation is in progress; no flight has qualified this repair.
+
+The first full gate stopped on two older temporal source-wiring pins after
+the trace-copy call changed. A deeper review found a real regression in
+that proposed trace copy: contract hashing includes `key.sequence`, while
+the live reducer retains the original zero and offline replay would consume
+the trace's numbered key. Ruled out: numbering `key.sequence` is an isolated
+trace repair, because a produced frame's contract hash would change on
+replay. Keep the original key and use an explicit `EDVRFTR5` draw-number
+field in the event's former padding at byte 468; size stays 504. Legacy
+FTR3/FTR4 parsers retain their original keys and ignore the new field. The
+regression must replay a produced frame with original sequence zero, verify
+the contract hash and independently join its packet draw number. Do not
+install the first full build (`build\plasma-loop-full-build.log`).
+
+FTR5 is implemented with the separate draw number. Both focused O2 rigs
+passed (`build\packet_loop_focus.log`, `build\packet_temporal_focus.log`):
+live-like zero-key-sequence produced contracts replay to the same hash,
+and all 46 historical frames across 17 corpus traces remain identical.
+Legacy alignment padding is explicitly ignored. Regenerated complete
+packets validate and satisfy `--require-complete`; intentionally partial
+cap/timeout/Off/overflow/map-failure cases return the expected 0/2.
+The reader also refuses a changed trace shader with otherwise consistent
+packet metadata. The final full build is running in
+`build\plasma-loop-full-final.log`; Epic confirmation is still pending.
+
+Final full validation passed: production DLLs, 117 parallel jobs, five quiet
+jobs and the self-contained installer gates. Receipt input fingerprint:
+`8b6bc74178416ecdabdd0641016b509ad03b5b4bc1c3b8b8dc231acbdfa33246`.
+The source is ready for commit, main push and clean DLL-only promotion.
+Install on Epic with the current flat INI preserved. Next flight: draw the
+same plasma weapon; if AA drops, press NumLock and keep it drawn ten seconds.
+No two-minute wait and no weapon-by-weapon test matrix are required.
