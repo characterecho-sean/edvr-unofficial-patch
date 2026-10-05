@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** color-clear weapon-AA fault CLOSED (102); plasma AA fault OPEN (103).
-  Loop gate cleared; plasma draw covers 1% offline; visual fault persists (103).
+- **State:** weapon replay/TAA works; flat mixed-camera SDK AA OPEN (103).
+  Loop gate cleared; latest plasma works in TAA; the SDK guard still blocks.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** configured-backend build; plasma NumLock capture, wait 10 s (103).
+- **Next:** lightweight NumLock; offline shared VR motion/ownership work (103).
   Retain section 102's qualified color-clear fix; no per-weapon table.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -11415,3 +11415,76 @@ unchanged gate. No heartbeat source or assertion was changed. The coverage
 summary now labels the configured attempt `attempt-mode`, rather than
 claiming an effective backend on refused frames. Runtime refusal only
 invalidates history; Present still polls the staged input capture.
+
+### 2026-10-05: TAA works; configured SDK route still blocked
+
+Flight `edvr_gfx_20261005_114905.log` matches installed commit `f2e7c6c7`,
+version `v0.18.2-7-gf2e7c6c7`, build `6AC3E232`. Sean reports TAA works
+with plasma. The log records 147/147 TAA HDR treatments in a steady window;
+sustained DLSS later reaches the resolver but has zero prep/backend calls,
+with `flat-resolve-untrusted-coverage-requires-native-HDR-TAA`. This is the
+remaining input-ownership guard, not a weapon replay rejection or SDK failure.
+The second NumLock is labelled DLSS rather than DLAA. A separate DLAA warning
+is a 512 x 512 render versus 3840 x 2160 output mismatch, and FSR initializes
+only briefly without a recorded completed resolve. Do not claim a measured
+sustained DLAA/FSR backend failure from this log.
+
+Both prebackend dumps validate all nine payloads/CRCs, 220826112 bytes each.
+The first TAA sample has empty coverage masks and clean/current HDR equality;
+it does not establish the mask state of every plasma frame. The second DLSS
+sample has 13.2571% overlay and 12.0363% untrusted coverage, union 21.9532%.
+Clean/current differ at 26028 pixels, all within the overlay; 721292 untrusted
+pixels outside the overlay have identical clean/current colors. The late-H
+snapshot therefore does not certify removal of earlier foreign-camera
+Gbuffer contributions. Both dumps have reset/zero-phase current-equals-prior
+camera metadata, so they cannot establish animated history correctness.
+Evidence: `build/configured-backend-flight/{evidence.md,findings.txt,comparison.json}`.
+
+Ruled out: whole-frame coverage causes this sustained SDK AA loss, because
+the captured union is localized and the resolver refuses before evaluation.
+Ruled out: repeating these bulk dumps supplies previous animated foreground
+positions, because they omit foreign prior B1, original VS/IA and paired bones.
+VR already retains post-VS positions and geometry/skeleton identities. Flat
+needs exact final Gbuffer/pixel ownership plus its own projection/depth and
+raster phase qualification before that shared motion can feed SDKs. Stencil16
+is insufficient: the measured material pass explicitly clears it. Do not
+restore secret TAA, remove the guard, zero foreground motion, reset all history
+each frame or treat reactive masks as strict RGB-history exclusion.
+
+Sean reports NumLock tanks FPS. Four weapon-footprint samples alone record
+1260519424 bytes (about 1.17 GiB), in addition to the two 211 MiB input sets.
+There are no >=250 ms freeze lines; missing timing counters prevent exact
+attribution of the frame-rate loss. Source review finds synchronous packing,
+CRC and filesystem export on Present, despite nonblocking GPU maps. Another
+broad capture is not needed for this issue. Sean approved ordinary NumLock as
+a bounded general shader/state/census/routing report, with bulk pixel/geometry
+exports behind an explicit full-capture action. Keep it useful for future
+support logs; do not silently collect gigabytes or change the configured AA.
+
+Offline slot inspection gives a concrete production gap: all 998337 marked
+DLSS pixels contain exactly the cleared MRT6 pair `(-1.0f, 0.0f)`. There is no
+foreground slot marker to match, although t33 identity fields are present.
+The flat route excludes weapon motion families from source candidates and
+only starts the MRT6 producer within a named world-camera run; the engine
+producer independently rejects before-naming/other-camera draws. The AACF/CF
+shader recipe already exists. Reuse the MRT6 target and VR's bounded original
+VS position/identity history, with an explicit flat camera-domain marker;
+do not mistake current slots for exact final ownership. Unknown/equal-depth
+writers must update or invalidate that provenance. The existing historical
+original-shader identity-fusion corpus qualifies four of five families; it
+does not provide a blanket live flat SDK qualification.
+
+General diagnostic policy implemented: ordinary configured census key
+(`NumLock` by default) keeps bounded desktop shader/state discovery and normal
+backend/refusal/environment reports. It does not arm manual compute probes,
+cold projection audits, full input/output pixels, draw pixels/packets or the
+weapon-footprint exporter. Holding Shift with the same key explicitly arms
+the existing full capture. Pending full requests cannot be downgraded by an
+ordinary repeat; VR's census branch is unchanged. No INI key was added and
+live settings are preserved. Focused policy/wiring tests pass, including
+AA-off gating and byte-identical replay of the existing 46-frame corpus.
+This diagnostic-policy change does not claim to fix SDK AA engagement.
+
+Full validation for the diagnostic policy: `build/capture-policy-full.log`,
+all 122 jobs plus installer/package gates passed. Receipt fingerprint is
+`edd2bced98da58d903dde81ca356530db948cf0cb5b824dcfb7225027ec78932`.

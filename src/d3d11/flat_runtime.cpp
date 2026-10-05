@@ -1,4 +1,5 @@
 #include "flat_runtime.h"
+#include "flat_capture_policy.h"
 #include "flat_runtime_model.h"
 #include "flat_hdr_route.h"
 #include "flat_copy_structure.h"
@@ -82,7 +83,7 @@ std::atomic<bool> foreignWork{false};
 std::atomic<bool> overlaySuffixActive{false};
 std::atomic<bool> foregroundProbeActive{false};
 std::atomic<bool> untrustedCoverageActive{false};
-std::atomic<bool> projectionAuditRequested{false};
+FlatCaptureRequest projectionAuditRequested;
 template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
 // F10-only ingress audit. Keep the counters outside State: a draw on a foreign
 // thread must still explain why the runtime did not see it. All draw-side work
@@ -2045,7 +2046,7 @@ void flatRuntimePhaseState(float* x, float* y, uint32_t* w, uint32_t* h, uint32_
 }
 void flatRuntimeNoteCameraApplied() { auto& s = state(); s.phase.noteApplied(); ++s.jitterDraws; }
 bool flatRuntimeLegacyPlanExists() { return state().projection != nullptr; }
-void flatRuntimeArmProjectionAudit() { if(runtimeFlatProfile()) projectionAuditRequested.store(true,std::memory_order_release); }
+void flatRuntimeArmProjectionAudit(bool full) { if(runtimeFlatProfile()) projectionAuditRequested.request(full); }
 void flatRuntimeCreateBuffer(ID3D11Buffer* buffer, const void* initialData) {
     if(owner() && state().projection) {
         flatcpu::Scope shadows(flatcpu::kShadows);
@@ -2715,7 +2716,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // No temporal mode selected: the census stops (its gates close, a scope costs a load and a compare).
     if (!enabled) {
         s.census.idle();if(s.device || s.output || s.cameras.count())flatRuntimeResize();
-        const bool manual=projectionAuditRequested.exchange(false,std::memory_order_acq_rel);
+        const auto request=projectionAuditRequested.take();
+        const bool manual=flatCaptureBulk(request);
+        if(request==FlatCaptureTier::General)Log::get().note("flat capture general: configured=%s AA=off; bounded desktop discovery only, bulk exporters not armed",mode.c_str());
         if(!manual&&!s.drawPackets.active())return;
         FlatComputeInternalScope internal;Ptr<ID3D11Device> dev;swap->GetDevice(IID_PPV_ARGS(&dev));
         if(dev){dev->GetImmediateContext(&s.drawPacketContext);swap->GetBuffer(0,IID_PPV_ARGS(&s.drawPacketOutput));}
@@ -2871,7 +2874,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if(s.projectionFrames && --s.projectionFrames==0) {
         reportProjection(s,"complete");
     }
-    if(projectionAuditRequested.exchange(false,std::memory_order_acq_rel)) {
+    const auto captureRequest=projectionAuditRequested.take();
+    if(captureRequest!=FlatCaptureTier::None)Log::get().note("flat capture general: configured=%s last=%s accepted=%llu refused=%llu tier=%s; backend/refusal and environment counters follow normal census",mode.c_str(),s.reason,(unsigned long long)s.accepted,(unsigned long long)s.refused,flatCaptureBulk(captureRequest)?"full":"general");
+    if(flatCaptureBulk(captureRequest)) {
         armDrawIngress();
         // A diagnostic asks for everything, refused frames included: the stand-down ends.
         endStandDown(s, frame, "an F10 audit asked for everything");

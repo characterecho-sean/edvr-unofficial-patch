@@ -1,4 +1,5 @@
 #include <memory>
+#include "../../src/d3d11/flat_capture_policy.h"
 #include <algorithm>
 #include <utility>
 #include "../../src/d3d11/flat_temporal_model.h"
@@ -2736,6 +2737,17 @@ void testFlatCpuWiring() {
 // walk is asked for only while the bound wants one, the bound is told what each walk learned, an F10
 // audit re-arms it, and the camera data capture is a different function that never reads any of it.
 void testFlatWitnessWiring() {
+    FlatCaptureRequest requests;
+    check(requests.take()==FlatCaptureTier::None, "capture requests start idle");
+    requests.request(false);
+    check(!flatCaptureBulk(requests.take()), "ordinary census has zero bulk capture arms");
+    requests.request(true);requests.request(false);requests.request(false);
+    check(flatCaptureBulk(requests.take()), "light duplicate requests cannot downgrade pending full capture");
+    check(requests.take()==FlatCaptureTier::None, "Present consumes each capture burst only once");
+    requests.request(false);requests.request(true);
+    check(requests.take()==FlatCaptureTier::Full, "explicit full upgrades a pending general report");
+    requests.request(false);
+    check(requests.take()==FlatCaptureTier::General, "a later independent ordinary press remains general");
     auto slurp = [](const char* path) {
         std::ifstream in(path, std::ios::binary);
         return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -2769,7 +2781,7 @@ void testFlatWitnessWiring() {
     // The AA-off capture consumes the same request earlier without rearming temporal discovery.
     // Find the enabled audit's exact block, then prove rearm is inside it after stand-down
     // and before packet arming. The flat default is NumLock; explicit F10 remains valid.
-    const size_t audit = runtimeCpp.find("if(projectionAuditRequested.exchange(false,std::memory_order_acq_rel)) {");
+    const size_t audit = runtimeCpp.find("if(flatCaptureBulk(captureRequest)) {");
     const size_t body = audit == std::string::npos ? audit : runtimeCpp.find('{', audit);
     size_t auditEnd = body;unsigned depth = 0;
     if(body != std::string::npos) for(size_t i=body;i<runtimeCpp.size();++i) {
@@ -2782,6 +2794,17 @@ void testFlatWitnessWiring() {
     check(body != std::string::npos && auditEnd > body && standDown > body &&
           standDown < rearm && rearm < packetArm && packetArm < auditEnd,
           "manual NumLock/F10 audit rearms the witness inside the enabled audit after stand-down, before packet capture");
+    const std::string fullBody=runtimeCpp.substr(body,auditEnd-body);
+    for(const char* arm : {"flatMonoResolveArmPixels(frame);", "s.drawCapture.arm(frame);", "armDrawPackets(s,frame);", "s.weaponFootprint.arm(frame);", "s.projectionFrames=900;", "witnessRearm();"})
+        check(fullBody.find(arm)!=std::string::npos, "all manual bulk exporters/preparation remain inside explicit full tier");
+    const std::string temporalCpp=slurp("src/d3d11/flat_temporal.cpp");
+    const std::string hookCpp=slurp("src/d3d11/device_hook.cpp");
+    check(temporalCpp.find("g.projectionManual = full;")!=std::string::npos &&
+          temporalCpp.find("if (full) flatComputeArm(device, g.presents);")!=std::string::npos &&
+          temporalCpp.find("flatRuntimeArmProjectionAudit(full);")!=std::string::npos,
+          "ordinary discovery avoids compute/manual projection arms and propagates explicit full tier");
+    check(hookCpp.find("flatTemporalArm((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);")!=std::string::npos,
+          "configured flat census key samples physical Shift for explicit full capture");
     // The camera data capture is not the witness: nothing in the bounded region captures or invalidates a camera.
     const size_t from = runtimeCpp.find("bool witnessWalk(const void* buffer) {");
     const size_t to = runtimeCpp.find("bool depthView(ID3D11Texture2D* depth) {");

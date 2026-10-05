@@ -96,7 +96,7 @@ void flatRuntimeOverlayForeignMutation();
 void flatRuntimeUnknown();
 void flatRuntimeOverlayUavBind(ID3D11DeviceContext*, UINT count,
                                ID3D11UnorderedAccessView* const*);
-void flatRuntimeArmProjectionAudit();
+void flatRuntimeArmProjectionAudit(bool full = false);
 void flatRuntimeCreateBuffer(ID3D11Buffer*, const void* initialData);
 void flatRuntimeClearBindings();
 void flatRuntimeReplayQueryBegin(ID3D11DeviceContext*, ID3D11Asynchronous*);

@@ -861,7 +861,7 @@ void flatTemporalStart(ID3D11Device* device) {
                     Config::get().requestedTemporalMode().c_str());
 }
 
-void flatTemporalArm() {
+void flatTemporalArm(bool full) {
     if (!runtimeFlatProfile() || !g.device) return;
     const DWORD owner = detail::g_flatTemporalOwnerThread.load(std::memory_order_acquire);
     if (owner && owner != GetCurrentThreadId()) return;
@@ -871,10 +871,10 @@ void flatTemporalArm() {
     flatTemporalStart(device);
     g.projectionDetailsRemaining = 2;
     g.menuCopyReportsLeft = 2;
-    g.projectionManual = true;
-    flatComputeArm(device, g.presents);
-    flatRuntimeArmProjectionAudit();
-    Log::get().note("flat temporal: dump_draws started a fresh bounded desktop discovery window");
+    g.projectionManual = full;
+    if (full) flatComputeArm(device, g.presents);
+    flatRuntimeArmProjectionAudit(full);
+    Log::get().note("flat temporal: dump_draws started a fresh bounded desktop discovery window tier=%s; general reports shader/state/routing/refusals, Shift+key requests full capture (slow, large)", full ? "full" : "general");
 }
 
 void flatTemporalStop() {

@@ -1231,7 +1231,7 @@ void tickHotkeys() {
     // place anyone would look for the reason.
     if (g_state->censusKey.pressed()) {
         if (runtimeFlatProfile()) {
-            flatTemporalArm();
+            flatTemporalArm((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
         } else {
             drawCensusRequest();
             // Same key: the census says WHAT was drawn, the quad probe says
