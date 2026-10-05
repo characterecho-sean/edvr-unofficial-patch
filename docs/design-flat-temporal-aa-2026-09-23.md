@@ -3,8 +3,8 @@
 ## Status
 
 - **State:** v49 FLOWN: pool color clear invalidates completed weapon coverage.
-  Section 102; narrow correction FULL VALIDATION PASSED, pending clean install.
-  Epic `v0.18.1-49-g5698007f` installed and verified.
+  Section 102; narrow correction validated, installed, NOT FLOWN.
+  Epic `v0.18.1-51-g30ced747` installed and verified.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: validate scoped color-clear handling and its duplicate
-  notification, preserving depth/unknown-write and HDR ownership checks.
+- **Next:** section 102: restart Epic; draw same weapon, F10 while drawn,
+  hold10s, holster10s, exit; confirm world AA and complete later draw receipts.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10948,3 +10948,18 @@ match and all gates passed. Fresh full-pass receipt created
 `a7e7550b5ebe65f0b0104da3f229e61b2283d9e0159338a66ace921ead890bf6`.
 No production edits followed independent review; heap-only test repair retained
 every assertion. Color-clear correction BUILT, NOT FLOWN.
+
+Validated source committed as `30ced747`, fast-forwarded main and pushed;
+origin/main confirmed that exact commit. Clean --dll-only promotion verified
+the full-build receipt and exited0. Sanctioned Epic flat dry-run, real install
+and --verify-only exited0. Installed ProductVersion `v0.18.1-51-g30ced747`,
+receipt backup `edvr_flat_receipt.json.pre-pool-color-clear-30ced747-20261004-191121.bak`.
+Root repeated payload/profile/version verification and exact baseline SHA256
+checks: edvr-flat.ini and nvngx_dlss.dll unchanged, edvr.ini absent. No Frontier
+install. Bind next flight to this literal version after documentation commit.
+
+Confirmation flight: restart Epic, draw the same weapon, F10 while drawn,10s
+drawn and10s holstered, then exit. Check that world AA stays engaged and that
+post-clear alternate captures/receipts complete through H. If still refused,
+use the preserved first-failure and later nominee diagnostics; do not assume
+the color-clear policy failed. No two-minute wait or per-weapon checklist.
