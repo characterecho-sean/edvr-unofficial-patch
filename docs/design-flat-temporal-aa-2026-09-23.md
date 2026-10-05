@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** weapon/world-AA disengagement CLOSED; v51 FLOWN across weapons.
-  Section 102; color-clear correction flight-qualified, capture refusals zero.
-  Epic `v0.18.1-51-g30ced747` installed and verified.
+- **State:** color-clear weapon-AA fault CLOSED (102); plasma refusal OPEN (103).
+  Supporter v0.18.2 logs confirm late-overlay dual-source-blend refusals.
+  Color-clear correction stays qualified; blend-state diagnostic BUILT.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,9 +32,9 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102 needs no further weapon-validation flight. Retain the
-  installed fix; other open image-quality/runtime items below remain separate.
-  No per-weapon table or near heuristic.
+- **Next:** section 103: Epic diagnostic with one affected plasma weapon;
+  record the actual refused blend state and shader outputs before changing it.
+  Retain section 102's color-clear fix; no per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -10984,3 +10984,89 @@ the unchanged safety checks and WARP regressions, this flight qualifies the
 scoped color-clear fix. Close the weapon/world-AA disengagement investigation;
 no further weapon-by-weapon test required. Other rendering/runtime arcs remain
 open as listed in Status. Keep diagnostics available for a future distinct fault.
+
+## 103. 2026-10-05: plasma-weapon late-overlay refusal on v0.18.2
+
+The reporter says Aphelion laser-rifle AA works, while switching to a plasma
+shotgun or plasma pistol stops it. Sean confirmed both supplied ZIPs come
+from this one user. The longer `edvr_logs.zip` export continues the same
+`edvr_gfx_20261005_080621.log` as `edvr-logs-20261005-081245.zip`, ending
+08:14:18.258 rather than 08:12:42.574. Sanctioned log-tool checks verify
+v0.18.2, build6AC30AC5, linked2026-10-05 02:26:13UTC. Four older v0.18.1 logs
+in the larger archive are historical. The profile is flat, RTX 3050,
+1920x1080, DLSS model K. Host OS/runtime is not identified; a system32 path
+does not establish Wine/Proton. Logs contain no weapon labels.
+
+At frame18420, 08:09:36.859, `flat runtime conflict` reports
+`unprotected-late-hdr-overlay-or-depth-write`, ref-q1089/current-q0. The empty
+current witness is also produced by `overlayFail`, so it does not prove an
+actual resource write. The corresponding H identity is absent and the two
+buckets become `unrelated-depth`; qualification was not called. Both buckets
+share depth/DSV but have different camera IDs. A null-PS plan failure exists
+in one bucket, but cannot explain the earlier H selector failure by itself.
+
+Periodic `flat late overlay refusal` reports `dual-source-blend`: 288 at
+08:09:43.480, 123 at 08:09:53.505, and 300 in the sustained 08:10:54.612 and
+08:11:04-14 windows. Frame23100 reports selected0/capture-refused300; other
+windows treat300/300. The guard in FlatOverlayLayer::validateBlend rejects
+SRC1 factors before private-MRT capture; overlayFail then invalidates H.
+This explains the synthetic conflict and is the primary remaining refusal
+category. The exact live blend descriptor and offending shader are absent
+from current diagnostics, so active dual-source versus dormant fields is
+not yet established for this reporter.
+
+Ruled out: repeating the shared-color-clear hypothesis, because the recorded
+color ClearRtv and runtime-written duplicate are tolerated by section 102;
+the sustained refusal counters identify the separate blend guard.
+
+Ruled out: using F10 trace14759 as the failing plasma sequence, because its
+three frames14756-14758 replay with produced1/copy-selected1, one H, zero
+ambiguity/late writes and one resolve marker each. Its 08:08:31 dump predates
+the sustained refusals. Trace14719 is empty. The archive has60 DXBC files;
+only blobs tied to current log identities establish current shader provenance.
+
+Ruled out on WARP: ordinary inactive SRC1 fields surviving GetDesc and
+causing production rejection. A temporary MSVC probe called the actual guard
+and WARP CreateBlendState/GetDesc: disabled-blend and independent-false
+dormant descriptors are API-valid but normalized to ordinary factors before
+the guard reads them. Active RT0 SRC1 survives and is rejected. Enabled SRC1
+in RT1/RT7 is invalid even with a zero write mask. RT0 zero-write or
+noncontributing-channel edges remain possible; their effective behavior is
+not a license to attach an extra MRT during active dual-source blending.
+
+Next: diagnostic only, preserving capture/AA behavior. Record the actual
+GetDesc result, active RTVs, all blend factors/enables/write masks, and shader
+identity/output metadata at the refused draw, publish alongside the existing
+five-second refusal report, and distinguish no sample from successful capture.
+Sean will test one affected plasma weapon on Epic. No per-weapon matrix or
+two-minute wait is needed. Do not relax the guard before this evidence.
+
+### Diagnostic implementation and local reproduction
+
+Sean also reports the symptom with any plasma weapon tested locally. The
+latest Epic baseline log, edvr_gfx_20261005_045207.log, verifies as installed
+v0.18.1-51-g30ced747/build6AC2F925. Its paired late-overlay/runtime counts
+255/412/43 at05:04:18/23/28 and258/392/38 at05:04:58..05:05:08 report the
+same dual-source-blend and HDR-conflict reasons as the supporter. Frame100363
+has the same synthetic empty-current conflict, at3840x2160. No F10 trace
+dump is present; automatic projection capture saved74 shader stages/37 pairs.
+
+The diagnostic adds an optional data snapshot only on the existing
+dual-source guard failure. The runtime annotates its live VS/PS and draw
+sequence before overlayFail replaces the conflict witness. The existing
+five-second reporter emits guard-failures, sample status, one sample and all
+eight target descriptors, then rearms. An armed/ready startup line and
+samples0/no-dual-source-sample window distinguish no event from missing code.
+Original PS output signature is explicitly unknown in this path; hashes
+identify bytecode for later analysis rather than inferring output signatures
+from a patched shader. No admission, binding, shader or AA behavior changes.
+
+Focused WARP tests exercise the existing refusal with actual GetDesc data,
+first-sample retention/reset, ordinary acceptance without a sample, and
+byte-identical color/depth/stencil plus unchanged OM/PS bindings. Pure
+classification tests cover independent targets, unbound slots, disabled
+blending, contributing write channels and MIN/MAX operations. Full validation
+passed: 117 parallel jobs and five quiet jobs, mono resolve PASS, config
+contract234/234, both installer resource checks and all final gates. Receipt
+fingerprint11609745426ba8bd3305e8344465bc1360b045121e2a7aa86dadebc825c9cd95
+matches the validated source. Commit/promotion/install follow this gate.

@@ -21,6 +21,44 @@ struct FlatOverlayShaderDiagnostic {
     const void* object=nullptr;
     std::string reason;
 };
+// First actual dual-source refusal per reporting window; observation only.
+// Shader hashes/q are filled by the runtime immediately after beginDraw fails.
+struct FlatOverlayBlendDiagnostic {
+    bool captured=false;
+    uint64_t failures=0,frame=0,vsHash=0,psHash=0;
+    uint32_t sequence=0,activeRtvMask=0,activeRtvCount=0,effectiveSlots=0;
+    const void* vs=nullptr;
+    const void* ps=nullptr;
+    const void* hdr=nullptr;
+    const void* dsv=nullptr;
+    D3D11_BLEND_DESC blend{};
+    uint8_t effectiveChannels[8]{}; // RGB=7, alpha=8; contributing SRC1 factors only
+    // The creation registry retains patched bytes, not an original output
+    // signature. Do not infer original PS outputs from the private MRT patch.
+    bool psOutputSignatureKnown=false;
+};
+inline bool flatOverlayDiagnosticSrc1(D3D11_BLEND v) {
+    return v==D3D11_BLEND_SRC1_COLOR || v==D3D11_BLEND_INV_SRC1_COLOR ||
+           v==D3D11_BLEND_SRC1_ALPHA || v==D3D11_BLEND_INV_SRC1_ALPHA;
+}
+inline void flatOverlayClassifyBlendDiagnostic(FlatOverlayBlendDiagnostic& sample) {
+    sample.effectiveSlots=0;
+    for(unsigned i=0;i<8;++i) {
+        sample.effectiveChannels[i]=0;
+        if(!(sample.activeRtvMask&(1u<<i)))continue;
+        const auto& t=sample.blend.RenderTarget[sample.blend.IndependentBlendEnable?i:0];
+        if(!t.BlendEnable)continue;
+        uint8_t channels=0;
+        if(t.BlendOp!=D3D11_BLEND_OP_MIN && t.BlendOp!=D3D11_BLEND_OP_MAX &&
+           (flatOverlayDiagnosticSrc1(t.SrcBlend)||flatOverlayDiagnosticSrc1(t.DestBlend)))
+            channels|=t.RenderTargetWriteMask&7u;
+        if(t.BlendOpAlpha!=D3D11_BLEND_OP_MIN && t.BlendOpAlpha!=D3D11_BLEND_OP_MAX &&
+           (flatOverlayDiagnosticSrc1(t.SrcBlendAlpha)||flatOverlayDiagnosticSrc1(t.DestBlendAlpha)))
+            channels|=t.RenderTargetWriteMask&8u;
+        sample.effectiveChannels[i]=channels;
+        if(channels)sample.effectiveSlots|=1u<<i;
+    }
+}
 class FlatOverlayLayer {
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
     struct Shader {
@@ -287,7 +325,7 @@ public:
     bool beginDraw(ID3D11DeviceContext* ctx,uint64_t frame,ID3D11Texture2D* hdr,
                     ID3D11DepthStencilView* expectedDsv,const char** reason=nullptr,
                     bool diagnosticTypelessPool=false,bool diagnosticCoverageOnly=false,
-                    bool persistentCoverage=false) {
+                    bool persistentCoverage=false,FlatOverlayBlendDiagnostic* blendDiagnostic=nullptr) {
         if (reason) *reason=nullptr;
         if (!ctx || !hdr || !expectedDsv || !frame || frame_!=frame) return refuse("draw-frame-or-source",reason);
         if (!refusal_.empty()) return refuse(refusal_.c_str(),reason);
@@ -343,7 +381,25 @@ public:
         ctx->OMGetBlendState(&game.blend,game.factors,&game.sampleMask);
         const char* blendWhy=nullptr;
         Ptr<ID3D11BlendState> blend=derivedBlend(dev.Get(),game.blend.Get(),&blendWhy);
-        if (!blend) return refuse(blendWhy?blendWhy:"blend-unavailable",reason);
+        if (!blend) {
+            if(blendDiagnostic && blendWhy && std::strcmp(blendWhy,"dual-source-blend")==0) {
+                ++blendDiagnostic->failures;
+                if(!blendDiagnostic->captured) {
+                    auto& sample=*blendDiagnostic;
+                    sample.captured=true;sample.frame=frame;sample.hdr=hdr;sample.dsv=game.dsv.Get();
+                    sample.ps=game.ps.Get();
+                    Ptr<ID3D11VertexShader> actualVs;ctx->VSGetShader(&actualVs,nullptr,nullptr);
+                    sample.vs=actualVs.Get();
+                    sample.blend=defaultBlend();
+                    if(game.blend)game.blend->GetDesc(&sample.blend);
+                    for(unsigned i=0;i<8;++i)if(game.rtv[i]) {
+                        sample.activeRtvMask|=1u<<i;++sample.activeRtvCount;
+                    }
+                    flatOverlayClassifyBlendDiagnostic(sample);
+                }
+            }
+            return refuse(blendWhy?blendWhy:"blend-unavailable",reason);
+        }
         std::string shaderWhy;
         Ptr<ID3D11PixelShader> patched=patchedShader(dev.Get(),game.ps.Get(),shaderWhy);
         if (!patched) return refuse(shaderWhy.c_str(),reason);

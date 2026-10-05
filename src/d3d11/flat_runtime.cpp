@@ -214,6 +214,7 @@ struct State {
     uint64_t overlayIsolatedWindow = 0, overlayRefusedWindow = 0;
     std::map<std::string,uint64_t> overlayRefusalWindow;
     std::map<std::string,uint64_t> overlayMutationWindow;
+    FlatOverlayBlendDiagnostic overlayBlendDiagnostic{};
     uint64_t sourceWitnessFirstFrame = 0;
     uint32_t sourceWitnessCaptured = 0;
     uint64_t sourceWitnessEligibleWindow = 0, sourceWitnessAmbiguousWindow = 0;
@@ -2022,6 +2023,7 @@ static void hdrReadKey(State& s, uint64_t frame) {
     if (s.hdrKeyRead && key == s.hdrKey) return;
     const bool first = !s.hdrKeyRead;
     s.hdrKey = key; s.hdrKeyRead = true;
+    if(first)Log::get().note("flat late overlay blend diagnostic: event=armed ready=1 sample-limit=1-per-5s-window; actual bindings and GetDesc only on dual-source-blend refusal; acceptance unchanged");
     if (key == FlatHdrKey::Off) s.hdrLatch.reset();
     // The crash-safe trail's first line (flat_hdr_crumbs.h): proof, in edvr_breadcrumbs.txt itself, that this build has the
     // crumbs and that the route is on, so a trail without an "admitted" after it is a session that ended before the route
@@ -2965,6 +2967,31 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         for(const auto& entry:s.overlayMutationWindow)
             Log::get().note("flat late overlay mutation refusal: %s count=%llu",entry.first.c_str(),
                 (unsigned long long)entry.second);
+        const auto& blendSample=s.overlayBlendDiagnostic;
+        Log::get().note("flat late overlay blend diagnostic 5s: ready=1 guard-failures=%llu samples=%u status=%s",
+            (unsigned long long)blendSample.failures,blendSample.captured?1u:0u,
+            blendSample.captured?"captured":"no-dual-source-sample");
+        if(blendSample.captured) {
+            Log::get().note("flat late overlay blend sample: frame=%llu q=%u actual-VS=%016llX VS-present=%u actual-PS=%016llX PS-present=%u VS-object=%p PS-object=%p hdr=%p dsv=%p active-rtv-mask=%02X active-rtv-count=%u alpha-to-coverage=%u independent=%u effective-src1-slots=%02X ps-output-signature-known=%u",
+                (unsigned long long)blendSample.frame,blendSample.sequence,
+                (unsigned long long)blendSample.vsHash,blendSample.vs?1u:0u,
+                (unsigned long long)blendSample.psHash,blendSample.ps?1u:0u,
+                blendSample.vs,blendSample.ps,blendSample.hdr,blendSample.dsv,
+                blendSample.activeRtvMask,blendSample.activeRtvCount,
+                blendSample.blend.AlphaToCoverageEnable?1u:0u,
+                blendSample.blend.IndependentBlendEnable?1u:0u,blendSample.effectiveSlots,
+                blendSample.psOutputSignatureKnown?1u:0u);
+            for(unsigned i=0;i<8;++i) {
+                const auto& t=blendSample.blend.RenderTarget[i];
+                Log::get().note("flat late overlay blend target: frame=%llu q=%u slot=%u active=%u enabled=%u write-mask=%02X src=%u dst=%u op=%u alpha-src=%u alpha-dst=%u alpha-op=%u effective-src1-channels=%02X",
+                    (unsigned long long)blendSample.frame,blendSample.sequence,i,
+                    (blendSample.activeRtvMask&(1u<<i))?1u:0u,t.BlendEnable?1u:0u,
+                    (unsigned)t.RenderTargetWriteMask,(unsigned)t.SrcBlend,(unsigned)t.DestBlend,
+                    (unsigned)t.BlendOp,(unsigned)t.SrcBlendAlpha,(unsigned)t.DestBlendAlpha,
+                    (unsigned)t.BlendOpAlpha,(unsigned)blendSample.effectiveChannels[i]);
+            }
+        }
+        s.overlayBlendDiagnostic={};
         Log::get().note("flat HDR source witness 5s: enabled=1 limit=2 captured=%u first-frame=%llu second-earliest=%llu eligible=%llu ambiguous=%llu; automatic on marked overlay ambiguity, no F10",
             s.sourceWitnessCaptured,(unsigned long long)s.sourceWitnessFirstFrame,
             (unsigned long long)(s.sourceWitnessFirstFrame?s.sourceWitnessFirstFrame+60:0),
@@ -4607,7 +4634,14 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         if(overlayStarted) overlayFail(s,"overlay-duplicate-begin",overlayHdr);
         else {
             const char* reason=nullptr;
-            overlayStarted=s.overlay.beginDraw(ctx,s.prefix.frame,overlayHdr,overlayDsv,&reason);
+            overlayStarted=s.overlay.beginDraw(ctx,s.prefix.frame,overlayHdr,overlayDsv,&reason,
+                false,false,false,&s.overlayBlendDiagnostic);
+            auto& sample=s.overlayBlendDiagnostic;
+            if(sample.captured && !sample.sequence && sample.frame==s.prefix.frame) {
+                sample.sequence=s.prefix.sequence;
+                sample.vsHash=sample.vs?lookupShaderHash(const_cast<void*>(sample.vs)):0;
+                sample.psHash=sample.ps?lookupShaderHash(const_cast<void*>(sample.ps)):0;
+            }
             if(!overlayStarted) overlayFail(s,reason?reason:"overlay-private-MRT-refused",overlayHdr);
         }
     }

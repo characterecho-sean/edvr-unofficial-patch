@@ -216,12 +216,16 @@ inline int flatOverlayLayerGpuTests(ID3D11Device* device, ID3D11DeviceContext* c
     const auto cleanBefore=bytes(baseline.Get(),4);
 
     edvr::FlatOverlayLayer layer;
+    edvr::FlatOverlayBlendDiagnostic ordinaryBlendSample;
     layer.beginFrame(10);
     bind(baselineRtv.Get(),baselineDsv.Get(),ps.Get());context->Draw(3,0);
     bind(instrumentedRtv.Get(),instrumentedDsv.Get(),ps.Get());
     const char* reason=nullptr;
-    expect(layer.beginDraw(context,10,instrumented.Get(),instrumentedDsv.Get(),&reason),
+    expect(layer.beginDraw(context,10,instrumented.Get(),instrumentedDsv.Get(),&reason,
+        false,false,false,&ordinaryBlendSample),
            "supported draw binds private MRT7");
+    expect(!ordinaryBlendSample.captured && ordinaryBlendSample.failures==0,
+           "ordinary accepted blend leaves an explicit empty diagnostic sample");
     if (!reason) { context->Draw(3,0);layer.endDraw(context); }
     expect(layer.ready(10,instrumented.Get()) && layer.markedDraws()==1,
            "completed overlay is ready for this frame and HDR target");
@@ -428,6 +432,99 @@ inline int flatOverlayLayerGpuTests(ID3D11Device* device, ID3D11DeviceContext* c
                reason && std::strstr(reason,"predication"),
                "predicated draw refuses private coverage injection");
         context->SetPredication(nullptr,FALSE);
+    }
+    // Diagnostics read the exact live GetDesc state at a real existing guard
+    // failure, retain only the first sample, and leave admission/state intact.
+    {
+        D3D11_BLEND_DESC dualDesc{};
+        for(auto& t:dualDesc.RenderTarget) {
+            t.SrcBlend=t.SrcBlendAlpha=D3D11_BLEND_ONE;
+            t.DestBlend=t.DestBlendAlpha=D3D11_BLEND_ZERO;
+            t.BlendOp=t.BlendOpAlpha=D3D11_BLEND_OP_ADD;
+            t.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        }
+        dualDesc.RenderTarget[0].BlendEnable=TRUE;
+        dualDesc.RenderTarget[0].SrcBlend=D3D11_BLEND_SRC1_COLOR;
+        ComPtr<ID3D11BlendState> dualBlend;
+        expect(SUCCEEDED(device->CreateBlendState(&dualDesc,&dualBlend)),
+               "actual active dual-source diagnostic fixture creates");
+        if(dualBlend) {
+            bind(instrumentedRtv.Get(),instrumentedDsv.Get(),ps.Get());
+            context->OMSetBlendState(dualBlend.Get(),nullptr,~0u);
+            D3D11_BLEND_DESC actual{};dualBlend->GetDesc(&actual);
+            ComPtr<ID3D11VertexShader> actualVs;context->VSGetShader(&actualVs,nullptr,nullptr);
+            const auto beforeColor=bytes(instrumented.Get(),4);
+            const auto beforeDepth=bytes(instrumentedDepth.Get(),4);
+            edvr::FlatOverlayBlendDiagnostic sample;
+            edvr::FlatOverlayLayer dualLayer;dualLayer.beginFrame(20);
+            expect(!dualLayer.beginDraw(context,20,instrumented.Get(),instrumentedDsv.Get(),
+                &reason,false,false,false,&sample) && reason &&
+                std::strcmp(reason,"dual-source-blend")==0,
+                "sampled active dual-source blend still refuses before game draw");
+            expect(sample.captured && sample.failures==1 && sample.frame==20 &&
+                sample.ps==ps.Get() && sample.vs==actualVs.Get() &&
+                sample.hdr==instrumented.Get() && sample.dsv==instrumentedDsv.Get() &&
+                sample.activeRtvMask==1 && sample.activeRtvCount==1 &&
+                std::memcmp(&sample.blend,&actual,sizeof(actual))==0 &&
+                sample.effectiveSlots==1 && sample.effectiveChannels[0]==7 &&
+                !sample.psOutputSignatureKnown,
+                "first refusal captures actual descriptor, bindings and effective RGB dependency");
+            ComPtr<ID3D11BlendState> stillBlend;context->OMGetBlendState(&stillBlend,nullptr,nullptr);
+            ComPtr<ID3D11PixelShader> stillPs;context->PSGetShader(&stillPs,nullptr,nullptr);
+            ID3D11RenderTargetView* stillRtv=nullptr;ID3D11DepthStencilView* stillDsv=nullptr;
+            context->OMGetRenderTargets(1,&stillRtv,&stillDsv);
+            expect(stillBlend.Get()==dualBlend.Get() && stillPs.Get()==ps.Get() &&
+                stillRtv==instrumentedRtv.Get() && stillDsv==instrumentedDsv.Get() &&
+                beforeColor==bytes(instrumented.Get(),4) && beforeDepth==bytes(instrumentedDepth.Get(),4),
+                "refusal diagnostic preserves game OM/PS bindings and color/depth/stencil bytes");
+            if(stillRtv)stillRtv->Release();if(stillDsv)stillDsv->Release();
+            dualLayer.beginFrame(21);
+            expect(!dualLayer.beginDraw(context,21,instrumented.Get(),instrumentedDsv.Get(),
+                &reason,false,false,false,&sample) && sample.failures==2 && sample.frame==20,
+                "another refusing frame increments count without replacing first window sample");
+            sample={};dualLayer.beginFrame(22);
+            expect(!dualLayer.beginDraw(context,22,instrumented.Get(),instrumentedDsv.Get(),
+                &reason,false,false,false,&sample) && sample.failures==1 && sample.frame==22,
+                "report-window reset rearms the first actual refusal sample");
+        }
+        // WARP canonicalizes API-inactive SRC1 fields; production reads
+        // GetDesc, so an input descriptor is not evidence of a live refusal.
+        dualDesc.RenderTarget[0].BlendEnable=FALSE;
+        ComPtr<ID3D11BlendState> disabledBlend;
+        expect(SUCCEEDED(device->CreateBlendState(&dualDesc,&disabledBlend)),
+               "disabled SRC1 fixture creates");
+        if(disabledBlend) {
+            D3D11_BLEND_DESC actual{};disabledBlend->GetDesc(&actual);
+            expect(actual.RenderTarget[0].SrcBlend==D3D11_BLEND_ONE,
+                   "WARP actual GetDesc canonicalizes disabled SRC1 factor");
+        }
+        edvr::FlatOverlayBlendDiagnostic classification;
+        classification.blend=dualDesc;classification.activeRtvMask=1;
+        edvr::flatOverlayClassifyBlendDiagnostic(classification);
+        expect(classification.effectiveSlots==0,"disabled blend has no effective SRC1 dependency");
+        classification.blend.RenderTarget[0].SrcBlend=D3D11_BLEND_ONE;
+        classification.blend.RenderTarget[1].BlendEnable=TRUE;
+        classification.blend.RenderTarget[1].SrcBlend=D3D11_BLEND_SRC1_ALPHA;
+        classification.activeRtvMask=3;
+        edvr::flatOverlayClassifyBlendDiagnostic(classification);
+        expect(classification.effectiveSlots==0,"nonindependent blend ignores dormant RT1 descriptor");
+        classification.blend.IndependentBlendEnable=TRUE;
+        edvr::flatOverlayClassifyBlendDiagnostic(classification);
+        expect(classification.effectiveSlots==2 && classification.effectiveChannels[1]==7,
+               "independent active slot classifies contributing RGB factors");
+        classification.activeRtvMask=1;
+        edvr::flatOverlayClassifyBlendDiagnostic(classification);
+        expect(classification.effectiveSlots==0,"unbound RTV contributes no diagnostic dependency");
+        classification.activeRtvMask=3;
+        classification.blend.RenderTarget[1].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALPHA;
+        edvr::flatOverlayClassifyBlendDiagnostic(classification);
+        expect(classification.effectiveSlots==0,"unwritten RGB channels contribute no SRC1 dependency");
+        classification.blend.RenderTarget[1].SrcBlendAlpha=D3D11_BLEND_SRC1_ALPHA;
+        edvr::flatOverlayClassifyBlendDiagnostic(classification);
+        expect(classification.effectiveChannels[1]==8,"written alpha classifies its own SRC1 factor");
+        classification.blend.RenderTarget[1].BlendOpAlpha=D3D11_BLEND_OP_MAX;
+        edvr::flatOverlayClassifyBlendDiagnostic(classification);
+        expect(classification.effectiveSlots==0,"MIN/MAX ignores blend factors in diagnostic classification");
     }
     context->ClearState();
     return failures;
