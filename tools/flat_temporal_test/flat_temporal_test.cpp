@@ -2424,7 +2424,8 @@ void testStandDownWiring() {
         {&runtimeCpp, "flatTemporalSetPaused(next == FlatWork::Paused);", 1, "the stand-down pauses the discovery observers on Paused frames"},
         // The trace ring keeps the last watched frames.
         {&runtimeCpp, "if (s.work != FlatWork::Paused) s.prefix = FlatRuntimePrefix{};", 1, "a Paused frame does not clear the prefix"},
-        {&runtimeCpp, "if (s.work != FlatWork::Paused) {", 1, "a Paused frame neither rotates the trace ring nor resets its contract"},
+        {&runtimeCpp, "if (s.work != FlatWork::Paused || s.drawPackets.armed()) {\n        s.traceContract = FlatFrameContract{};\n        flatTraceBeginFrame(s.traceRing, frame + 1, output.Get(), d.Width, d.Height, d.Format);\n    }", 1,
+         "an unarmed Paused frame preserves its trace and contract; only an armed diagnostic permits next-frame observation"},
         {&temporalH, "if (detail::g_flatTemporalPaused.load(std::memory_order_relaxed)) return false;", 1,
          "discovery observers see nothing while paused"},
         {&temporalCpp, "flatMonoReasonStructural(mono.reason)", 1, "the chain dump asks the shared structural-reason question"},
@@ -2743,7 +2744,7 @@ void testFlatWitnessWiring() {
         {"if (w.sitesFull || !w.bound.wantsWalk()) { ++w.dedupHits; return; }", 1,
          "a write is counted and returns before any stack walk when the witness is full or disarmed"},
         {"const FlatWitnessStop stopped = w.bound.noteWalk(learned);", 1, "every walk tells the bound what it learned"},
-        {"witnessRearm();", 1, "an F10 audit re-arms the witness"},
+        {"witnessRearm();", 1, "a manual diagnostic audit re-arms the witness"},
         {"CaptureStackBackTrace(", 1, "there is one stack walk in the runtime"},
         {"witnessWalk(", 2, "and it is reached from one place: the bounded cameraWitness"},
         {"bool learned = witnessWalk(buffer);", 1, "the walk's result is what the bound is told"},
@@ -2755,11 +2756,22 @@ void testFlatWitnessWiring() {
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "witness wiring control: a source with the line removed no longer contains it");
     }
-    // The re-arm sits in the F10 audit's block, right after the stand-down ends.
-    const size_t audit = runtimeCpp.find("projectionAuditRequested.exchange(false");
-    const size_t rearm = runtimeCpp.find("witnessRearm();");
-    check(audit != std::string::npos && rearm != std::string::npos && audit < rearm && rearm - audit < 500,
-          "the re-arm is inside the F10 audit's block");
+    // The AA-off capture consumes the same request earlier without rearming temporal discovery.
+    // Find the enabled audit's exact block, then prove rearm is inside it after stand-down
+    // and before packet arming. The flat default is NumLock; explicit F10 remains valid.
+    const size_t audit = runtimeCpp.find("if(projectionAuditRequested.exchange(false,std::memory_order_acq_rel)) {");
+    const size_t body = audit == std::string::npos ? audit : runtimeCpp.find('{', audit);
+    size_t auditEnd = body;unsigned depth = 0;
+    if(body != std::string::npos) for(size_t i=body;i<runtimeCpp.size();++i) {
+        if(runtimeCpp[i]=='{')++depth;
+        else if(runtimeCpp[i]=='}'&&--depth==0){auditEnd=i;break;}
+    }
+    const size_t standDown = runtimeCpp.find("endStandDown(s, frame,", body);
+    const size_t rearm = runtimeCpp.find("witnessRearm();", body);
+    const size_t packetArm = runtimeCpp.find("armDrawPackets(s,frame);", body);
+    check(body != std::string::npos && auditEnd > body && standDown > body &&
+          standDown < rearm && rearm < packetArm && packetArm < auditEnd,
+          "manual NumLock/F10 audit rearms the witness inside the enabled audit after stand-down, before packet capture");
     // The camera data capture is not the witness: nothing in the bounded region captures or invalidates a camera.
     const size_t from = runtimeCpp.find("bool witnessWalk(const void* buffer) {");
     const size_t to = runtimeCpp.find("bool depthView(ID3D11Texture2D* depth) {");

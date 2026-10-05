@@ -4395,6 +4395,47 @@ static bool bundleHas(const std::vector<std::string>& names, const char* wanted)
     return false;
 }
 
+// Independent stored-ZIP reader checks the local payload and its CRC, rather
+// than accepting a central directory full of names as evidence of a valid ZIP.
+static bool zipPayloadEquals(const std::wstring& path,const std::string& wanted,const std::string& expected) {
+    const auto data=readAll(path);
+    auto u16=[&](size_t at){return unsigned(static_cast<unsigned char>(data[at])) |
+        (unsigned(static_cast<unsigned char>(data[at+1]))<<8);};
+    auto u32=[&](size_t at){return u16(at)|(static_cast<unsigned long>(u16(at+2))<<16);};
+    size_t at=0;
+    while(at+30<=data.size() && u32(at)==0x04034b50) {
+        const auto size=u32(at+18);const auto length=u16(at+26);const auto extra=u16(at+28);
+        const size_t start=at+30+length+extra;
+        if(start>data.size()||size>data.size()-start||u16(at+8)!=0)return false;
+        const auto body=data.substr(start,size);
+        unsigned long crc=0xffffffffu;
+        for(unsigned char byte:body){crc^=byte;for(unsigned bit=0;bit<8;++bit)crc=(crc&1)?(crc>>1)^0xedb88320u:crc>>1;}
+        if((crc^0xffffffffu)!=u32(at+14))return false;
+        if(data.substr(at+30,length)==wanted)return body==expected;
+        at=start+size;
+    }
+    return false;
+}
+
+static void bundleStamp(const std::wstring& path,WORD day,WORD minute,WORD second=0) {
+    SYSTEMTIME st{};st.wYear=2026;st.wMonth=8;st.wDay=day;st.wHour=14;st.wMinute=minute;st.wSecond=second;
+    FILETIME stamp{};SystemTimeToFileTime(&st,&stamp);
+    HANDLE file=CreateFileW(path.c_str(),FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    check(file!=INVALID_HANDLE_VALUE,"capture fixture timestamp file opens");
+    if(file!=INVALID_HANDLE_VALUE){check(SetFileTime(file,nullptr,nullptr,&stamp)!=0,"capture fixture timestamp is set");CloseHandle(file);}
+}
+
+static bool bundleSparse(const std::wstring& path,unsigned long long size) {
+    HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(file==INVALID_HANDLE_VALUE)return false;
+    DWORD returned=0;
+    // FSCTL_SET_SPARSE, kept numeric to avoid changing the rig's include set.
+    const bool sparse=DeviceIoControl(file,0x000900c4,nullptr,0,nullptr,0,&returned,nullptr)!=0;
+    LARGE_INTEGER end{};end.QuadPart=static_cast<LONGLONG>(size);
+    const bool ok=sparse&&SetFilePointerEx(file,end,nullptr,FILE_BEGIN)&&SetEndOfFile(file);
+    CloseHandle(file);return ok;
+}
+
 static void testLogBundle(const std::wstring& scratch) {
     printf("\nthe log bundle\n");
 
@@ -4422,6 +4463,33 @@ static void testLogBundle(const std::wstring& scratch) {
     // and the three above would be left out.
     writeAll(joinPath(logs, L"edvr_gfx_20260827_140000_500_9.log"), "a second process, same second");
 
+    for(const auto* name:{L"edvr_gfx_20260827_140000.log",L"edvr_vr_20260827_140003.log",
+                          L"edvr_openxr_20260827_140004_123_4567.log",L"edvr_gfx_20260827_140000_500_9.log"})
+        bundleStamp(joinPath(logs,name),27,12);
+    const auto packetRoot=joinPath(logs,L"flat_draw_packets");
+    auto packetFixture=[&](const wchar_t* folder,WORD minute,bool manifest=true){
+        const auto group=joinPath(packetRoot,folder);makeTree(group);
+        writeAll(joinPath(group,L"payload.bin"),std::string((1u<<20)+37,'p'));
+        bundleStamp(joinPath(group,L"payload.bin"),27,minute);
+        if(manifest){writeAll(joinPath(group,L"manifest.json"),"{\"complete\":false}");bundleStamp(joinPath(group,L"manifest.json"),27,minute);}
+        return group;
+    };
+    const auto late=packetFixture(L"late",10);
+    // Member straddles the old three-minute boundary while the manifest is
+    // ten minutes into a session. The selected folder must retain both.
+    bundleStamp(joinPath(late,L"payload.bin"),27,2);
+    packetFixture(L"missing_manifest",11,false);
+    packetFixture(L"within_grace",14);
+    packetFixture(L"after_grace",16);
+    const auto oversized=packetFixture(L"oversized_member",11);
+    const auto oversizedFile=joinPath(oversized,L"oversized.bin");
+    check(bundleSparse(oversizedFile,(64ull<<20)+1),"per-file capture limit fixture is sparse");
+    bundleStamp(oversizedFile,27,11);
+    const auto prior=packetFixture(L"previous",0);bundleStamp(joinPath(prior,L"manifest.json"),26,0);
+    const auto budget=packetFixture(L"over_budget",11);
+    for(unsigned i=0;i<25;++i){const auto path=joinPath(budget,L"chunk_"+std::to_wstring(i)+L".bin");
+        check(bundleSparse(path,64ull<<20),"atomic-budget fixture is sparse");bundleStamp(path,27,11);}
+
     const LogBundle bundle = collectLogs(dir, scratch);
     check(bundle.ok, "the bundle is written", bundle.error);
     if (!bundle.ok) return;
@@ -4439,6 +4507,32 @@ static void testLogBundle(const std::wstring& scratch) {
     check(bundleHas(names, "edvr_breadcrumbs.txt"), "the breadcrumbs are in");
     check(bundleHas(names, "edvr_FATAL.txt"), "the fatal note is in");
     check(bundleHas(names, "edvr.ini"), "the settings file is in");
+    check(bundleHas(names,"flat_draw_packets/late/manifest.json")&&bundleHas(names,"flat_draw_packets/late/payload.bin"),
+          "packet capture ten minutes into a flight retains its whole folder across member timestamp boundaries");
+    check(!bundleHas(names,"flat_draw_packets/missing_manifest/payload.bin"),"packet folder without manifest is omitted atomically");
+    check(!bundleHas(names,"flat_draw_packets/over_budget/manifest.json")&&!bundleHas(names,"flat_draw_packets/over_budget/payload.bin"),"over-budget packet group retains no misleading manifest or partial payload");
+    check(!bundleHas(names,"flat_draw_packets/previous/manifest.json"),"packet from earlier session is omitted");
+    check(bundleHas(names,"flat_draw_packets/within_grace/manifest.json")&&!bundleHas(names,"flat_draw_packets/after_grace/manifest.json"),
+          "packet folder selection permits three minutes after actual log end and rejects later evidence");
+    check(!bundleHas(names,"flat_draw_packets/oversized_member/manifest.json"),"one oversized member omits the entire packet capture");
+    check(zipPayloadEquals(bundle.zipPath,"flat_draw_packets/late/payload.bin",std::string((1u<<20)+37,'p')),
+          "streamed ZIP payload crossing one MiB extracts exactly and has an independently verified CRC");
+    bool missingNote=false,budgetNote=false;
+    for(const auto& note:bundle.notes){missingNote|=note.find("manifest missing")!=std::string::npos;budgetNote|=note.find("bundle budget")!=std::string::npos;}
+    check(missingNote&&budgetNote,"atomic capture omissions state manifest and budget reasons");
+    {
+        const auto huge=joinPath(scratch,L"zip32-sparse.bin");const auto out=joinPath(scratch,L"zip32-rejected.zip");
+        check(bundleSparse(huge,0xF0000001ull),"ZIP32 boundary fixture uses sparse disk storage");
+        std::string error;std::vector<std::wstring> skipped;
+        check(!writeZip(out,{huge},{L"huge.bin"},&error,&skipped)&&error.find("ZIP32")!=std::string::npos,
+              "ZIP32 bound fails before reading or allocating a multi-GiB payload");
+        check(!fileExists(out),"failed ZIP32 write deletes its partial output");
+        const auto missing=joinPath(scratch,L"absent-packet.bin");
+        check(!writeZip(out,{joinPath(late,L"manifest.json"),missing},
+              {L"flat_draw_packets/late/manifest.json",L"flat_draw_packets/late/payload.bin"},&error,&skipped),
+              "packet member disappearing during bundling fails the whole ZIP");
+        check(!fileExists(out),"packet read failure removes ZIP after an earlier member was written");
+    }
 
     {   // A flat install's logs are found where ITS settings file says: edvr-flat.ini
         // (edvr.ini only while it has none). The VR profile's log.dir, which the

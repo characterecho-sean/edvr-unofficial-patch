@@ -14,6 +14,7 @@
 #include "flat_camera_phase.h"
 #include "flat_live_phase.h"
 #include "flat_draw_capture.h"
+#include "flat_draw_packet_capture.h"
 #include "flat_weapon_footprint.h"
 #include "flat_overlay_layer.h"
 #include "flat_replay_query_tracker.h"
@@ -180,10 +181,27 @@ struct View {
 };
 struct State {
     FlatDrawCapture drawCapture;
+    FlatDrawPacketCapture drawPackets;
+    std::map<std::pair<uint64_t,uint64_t>,uint64_t> drawPacketRefusedPairs;
+    uint64_t drawPacketHistoryEvictions=0;
+    unsigned drawPacketsReported=0;
+    Ptr<ID3D11DeviceContext> drawPacketContext;
+    Ptr<ID3D11Texture2D> drawPacketOutput;
+    DWORD drawPacketThread=0;
+    uint64_t drawPacketFrame=0;UINT drawPacketSequence=0;
+    bool drawPacketOnlyObserved=false;
     FlatWeaponFootprint weaponFootprint;
     FlatOverlayLayer overlay;
     uint64_t overlayReplayCandidates = 0, overlayReplayCompleted = 0;
     std::map<std::string,uint64_t> overlayReplayRefusals;
+    // Session-bounded original-byte export outcomes; never repeat a failed
+    // export each draw/window, and never change shader admission.
+    struct ReplayShaderCapture {
+        bool vsSaved=false,psSaved=false,qualified=false;
+        std::string reason;
+    };
+    std::map<std::pair<uint64_t,uint64_t>,ReplayShaderCapture> overlayReplayShaderCaptures;
+    bool overlayReplayShaderCaptureCapReported=false;
     FlatForegroundProbe foreground;
     FlatUntrustedCoverage untrusted;
     bool untrustedUnknown = false;
@@ -444,6 +462,17 @@ struct State {
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
 bool owner() { return state().thread == GetCurrentThreadId(); }
+void armDrawPackets(State& s,uint64_t frame) {
+    const auto root=Config::get().logDir()+L"\\flat_draw_packets";
+    const auto leaf=root+L"\\capture_"+std::to_wstring(GetTickCount64())+L"_"+std::to_wstring(GetCurrentProcessId());
+    const bool rootOk=CreateDirectoryW(root.c_str(),nullptr)||GetLastError()==ERROR_ALREADY_EXISTS;
+    const bool leafOk=rootOk&&(CreateDirectoryW(leaf.c_str(),nullptr)||GetLastError()==ERROR_ALREADY_EXISTS);
+    if(leafOk){s.drawPackets.arm(leaf,frame,&lookupShaderHash,&flatProbeShaderLookup);s.drawPacketsReported=0;}
+    Log::get().note("flat draw packets: arm ready=%u frame=%llu priority-pairs=16 representative-categories=4 draws-per-priority-pair=2 distinct-frames=1 memory=1GiB representatives=256MiB file-chunk=64MiB expiry=900frames/30s directory=%ls; no HDR qualification required",
+        leafOk?1u:0u,(unsigned long long)frame,leaf.c_str());
+    Log::get().note("flat draw packets: refused-pair history retained=%zu capacity=64 oldest-evictions=%llu; draw-scoped projection/overlay refusals update identities independently of manual arm",
+        s.drawPacketRefusedPairs.size(),(unsigned long long)s.drawPacketHistoryEvictions);
+}
 // Observe query brackets from the first game Begin/End, independently of
 // Present, AA mode, resize and State's owner thread. Context/query references
 // prevent pointer reuse; a fixed table never evicts an active observation.
@@ -1962,6 +1991,7 @@ void flatRuntimeResize() {
     untrustedCoverageActive.store(false,std::memory_order_release);
     s.overlayFailureNoted=false;
     s.weaponFootprint.cancel("resize-or-stop");flatMonoResolveReset();
+    s.drawPackets.cancel();
     // A reset (or the mode turned off) ends a stand-down: the new contract may well be
     // one the selector recognises, and every paused piece restarts with it.
     endStandDown(s, s.prefix.frame, "the swap chain or device was reset, or the mode was turned off");
@@ -2683,7 +2713,27 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const bool enginePausedThen = s.enginePaused;
     engineVelocityConfigure(enabled && !enginePausedThen);
     // No temporal mode selected: the census stops (its gates close, a scope costs a load and a compare).
-    if (!enabled) { s.census.idle(); if (s.device || s.output || s.cameras.count()) flatRuntimeResize(); return; }
+    if (!enabled) {
+        s.census.idle();if(s.device || s.output || s.cameras.count())flatRuntimeResize();
+        const bool manual=projectionAuditRequested.exchange(false,std::memory_order_acq_rel);
+        if(!manual&&!s.drawPackets.active())return;
+        FlatComputeInternalScope internal;Ptr<ID3D11Device> dev;swap->GetDevice(IID_PPV_ARGS(&dev));
+        if(dev){dev->GetImmediateContext(&s.drawPacketContext);swap->GetBuffer(0,IID_PPV_ARGS(&s.drawPacketOutput));}
+        s.drawPacketThread=GetCurrentThreadId();
+        if(s.drawPacketContext && s.drawPackets.active()) {
+            flatTraceSeal(s.traceRing,false,0);s.drawPackets.trace(s.drawPacketFrame,s.traceRing,true);
+            s.drawPackets.present(s.drawPacketContext.Get(),frame+1);
+        }
+        if(manual) {
+            armDrawPackets(s,frame);
+            Log::get().note("flat draw packets: capture-only AA-off ready=%u; original draws only, chronology resource mutations explicitly unavailable",
+                s.drawPacketContext?1u:0u);
+        }
+        if(s.drawPackets.armed()) {D3D11_TEXTURE2D_DESC d{};if(s.drawPacketOutput)s.drawPacketOutput->GetDesc(&d);
+            s.drawPacketFrame=frame+1;s.drawPacketSequence=0;
+            flatTraceBeginFrame(s.traceRing,frame+1,s.drawPacketOutput.Get(),d.Width,d.Height,d.Format);}
+        return;
+    }
     static bool bounceKeyRead=false;
     if (!bounceKeyRead) {
         bounceKeyRead=true;
@@ -2760,6 +2810,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // it, and it ran at a nonzero phase unless the jitter is off on purpose. The two frames after an
     // F10 arm were neither, and their constants carry no phase (2026-09-29).
     s.drawCapture.present(s.context.Get(),frame,flatCaptureFrameLive(flatMonoResolveLastReset(),s.frameHadPhase,s.jitterWanted));
+    {FlatComputeInternalScope internal;s.drawPackets.present(s.context.Get(),frame);}
+    if(s.drawPackets.finished()!=s.drawPacketsReported) {
+        s.drawPacketsReported=s.drawPackets.finished();
+        Log::get().note("flat draw packets: completed=%u incomplete=%u selected=%u skipped=%u armed=%u; independently retained even for unqualified HDR frames",
+            s.drawPackets.finished(),s.drawPackets.incomplete(),s.drawPackets.selected(),s.drawPackets.skipped(),s.drawPackets.armed()?1u:0u);
+    }
     s.weaponFootprint.present(s.context.Get(),frame,s.prefix.sequence);
     s.foreground.present(s.context.Get(),frame);
     foregroundProbeActive.store(s.foreground.active(),std::memory_order_release);
@@ -2823,6 +2879,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         syncEngine();
         flatMonoResolveArmPixels(frame);
         s.drawCapture.arm(frame);
+        armDrawPackets(s,frame);
+        s.drawPacketContext=s.context;s.drawPacketThread=GetCurrentThreadId();s.drawPacketFrame=frame+1;
         s.weaponFootprint.arm(frame);
         if(s.projectionFrames)reportProjection(s,"rearmed");
         else if(s.unknownProjectionPairsUsed || s.unknownProjectionCaptureOverflow)
@@ -2957,12 +3015,16 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // copy outcome it produced, then reset the contract for the next frame. Through
     // Paused frames the contract is the last watched frame's, untouched, so sealing
     // again writes the same values into the same slot.
-    flatTraceSeal(s.traceRing, s.traceContract.produced,
-                  s.traceContract.produced ? flatFrameContractHash(s.traceContract) : 0);
-    if (s.work != FlatWork::Paused) {
+    flatTraceSeal(s.traceRing, !s.drawPacketOnlyObserved&&s.traceContract.produced,
+                  !s.drawPacketOnlyObserved&&s.traceContract.produced ? flatFrameContractHash(s.traceContract) : 0);
+    s.drawPackets.trace(s.traceRing.headers[s.traceRing.slot].frame,s.traceRing,true);
+    s.drawPacketOnlyObserved=false;
+    if (s.work != FlatWork::Paused || s.drawPackets.armed()) {
         s.traceContract = FlatFrameContract{};
         flatTraceBeginFrame(s.traceRing, frame + 1, output.Get(), d.Width, d.Height, d.Format);
     }
+    s.drawPacketFrame=frame+1;s.drawPacketSequence=0;
+    s.drawPacketContext=s.context;s.drawPacketThread=GetCurrentThreadId();s.drawPacketOutput=output;
     s.phaseCensusPending=s.jitterWanted && s.work != FlatWork::Paused;
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
@@ -3034,6 +3096,14 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             (unsigned long long)blendSample.failures,blendSample.captured?1u:0u,
             blendSample.captured?"captured":"no-dual-source-sample");
         if(blendSample.captured) {
+            Log::get().note("flat late overlay shader diagnostic: frame=%llu q=%u read=%u eligible=%u previously-created=%u reason=%s raw-VS-available=%u raw-VS-bytes=%zu raw-PS-available=%u raw-PS-bytes=%zu capture-recorded=%u VS-saved=%u PS-saved=%u raw-PS-qualified=%u raw-PS-reason=%s; capture limited to 64 unique pairs per session, preflight only with no admission changes",
+                (unsigned long long)blendSample.frame,blendSample.sequence,
+                blendSample.shader.read?1u:0u,blendSample.shader.eligible?1u:0u,
+                blendSample.shader.created?1u:0u,blendSample.shader.reason.c_str(),
+                blendSample.rawVsAvailable?1u:0u,blendSample.rawVsBytes,
+                blendSample.rawPsAvailable?1u:0u,blendSample.rawPsBytes,
+                blendSample.captureRecorded?1u:0u,blendSample.vsSaved?1u:0u,blendSample.psSaved?1u:0u,
+                blendSample.rawPsQualified?1u:0u,blendSample.rawPsReason.empty()?"not-sampled-or-cap":blendSample.rawPsReason.c_str());
             Log::get().note("flat late overlay blend sample: frame=%llu q=%u actual-VS=%016llX VS-present=%u actual-PS=%016llX PS-present=%u VS-object=%p PS-object=%p hdr=%p dsv=%p active-rtv-mask=%02X active-rtv-count=%u alpha-to-coverage=%u independent=%u effective-src1-slots=%02X ps-output-signature-known=%u",
                 (unsigned long long)blendSample.frame,blendSample.sequence,
                 (unsigned long long)blendSample.vsHash,blendSample.vs?1u:0u,
@@ -3583,6 +3653,30 @@ static bool coverageShadersMatch(ID3D11DeviceContext* context, const FlatContrac
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
                                             char kind, uint32_t count, uint32_t start,
                                             int32_t base, uint32_t startInstance) {
+    // Manual packet evidence remains useful with AA off or a stood-down
+    // frame. This path never prepares temporal resources or substitutes state.
+    if(!g_flatComputeInternal && runtimeFlatProfile() && state().drawPackets.armed() &&
+       (!flatRuntimeActive() || state().work==FlatWork::Paused) &&
+       context==state().drawPacketContext.Get() && GetCurrentThreadId()==state().drawPacketThread) {
+        auto& s=state();FlatComputeInternalScope internal;drawPacketOnly=true;ctx=context;s.drawPacketOnlyObserved=true;
+        weaponDrawKind=kind;weaponDrawCount=count;weaponDrawStart=start;weaponDrawBase=base;
+        weaponDrawInstances=instances;weaponDrawStartInstance=startInstance;
+        Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;Ptr<ID3D11RenderTargetView> rtv;Ptr<ID3D11DepthStencilView> dsv;
+        context->VSGetShader(&vs,nullptr,nullptr);context->PSGetShader(&ps,nullptr,nullptr);context->OMGetRenderTargets(1,&rtv,&dsv);
+        drawPacketVs=lookupShaderHash(vs.Get());drawPacketPs=lookupShaderHash(ps.Get());const auto pair=std::make_pair(drawPacketVs,drawPacketPs);
+        const auto known=s.drawPacketRefusedPairs.find(pair);const bool priority=known!=s.drawPacketRefusedPairs.end();
+        Ptr<ID3D11Resource> color,depth;if(rtv)rtv->GetResource(&color);if(dsv)dsv->GetResource(&depth);
+        Ptr<ID3D11DepthStencilState> stateDepth;UINT stencilRef=0;context->OMGetDepthStencilState(&stateDepth,&stencilRef);D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;if(stateDepth)stateDepth->GetDesc(&dd);
+        const unsigned representative=flat_mono_detail::toneHdrSlot(pair.first,pair.second)!=~0u?3:color.Get()==s.drawPacketOutput.Get()?4:dsv&&dd.DepthEnable&&dd.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL?1:2;
+        const UINT q=++s.drawPacketSequence;FlatDrawPacketCapture::Args args{kind,count,
+            kind=='D'||kind=='N'?UINT(base):start,instances,startInstance,kind=='D'||kind=='N'?0:base};
+        drawPacket=s.drawPackets.before(context,s.drawPacketFrame,q,pair.first,pair.second,args,priority,replayQueriesSafe(context),representative);
+        if(drawPacket){s.drawPackets.missing(drawPacket,"chronology.resource_mutations","unsupported-AA-off-or-paused-mutation-observation");
+            Log::get().note("flat draw packets: selected frame=%llu q=%u VS=%016llX PS=%016llX capture-only=1 priority=%u category=%u",
+                (unsigned long long)s.drawPacketFrame,q,(unsigned long long)pair.first,(unsigned long long)pair.second,priority?1u:0u,representative);}
+        FlatRuntimeDraw d{};d.key.vs=pair.first;d.key.ps=pair.second;d.key.sequence=q;d.key.color=color.Get();d.key.depth=depth.Get();d.key.rtv=rtv.Get();d.key.dsv=dsv.Get();d.instances=instances;
+        flatTraceRecord(s.traceRing,d,false);return;
+    }
     auto& ingress = drawIngressAudit;
     const bool auditing = ingress.active.load(std::memory_order_relaxed);
     if (auditing) ingress.entered.fetch_add(1, std::memory_order_relaxed);
@@ -3630,6 +3724,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if (auditing) ingress.accepted.fetch_add(1, std::memory_order_relaxed);
     flatcpu::Scope shell(flatcpu::kOther);   // the scope's own time; the named families below are carved out of it
     ctx = context;
+    drawPacketJitterBefore=s.jitterRefusals;drawPacketOverlayBefore=s.overlayRefusedWindow;
     weaponDrawKind=kind;weaponDrawCount=count;weaponDrawStart=start;weaponDrawBase=base;
     weaponDrawInstances=instances;weaponDrawStartInstance=startInstance;
     FlatRuntimeDraw d{}; auto& k = d.key;
@@ -3637,7 +3732,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // one, and stays bound only while nothing that could see it runs. A diagnostic capture reads the context, so with
     // one armed the game's state goes back at once and every producer draw restores after itself, as it always did.
     {
-        const bool diagnostics = flatTemporalCapturing() || s.drawCapture.active();
+        const bool diagnostics = flatTemporalCapturing() || s.drawCapture.active() || s.drawPackets.armed();
         engineVelocityFlatLazy(!diagnostics);
         if (diagnostics) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
     }
@@ -3646,6 +3741,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     k.color = rt.resource; k.rtv = bindingGet(BindSlot::Rtv0); k.width = rt.a; k.height = rt.b; k.format = rt.fmt;
     k.depth = ds.resource; k.dsv = bindingGet(BindSlot::Dsv0); k.depthWidth = ds.a; k.depthHeight = ds.b; k.depthFormat = ds.fmt;
     k.vs = bindingShaderHash(BindSlot::Vs); k.ps = bindingShaderHash(BindSlot::Ps);
+    drawPacketVs=k.vs;drawPacketPs=k.ps;
+    drawPacketJitterBefore=s.jitterRefusals;drawPacketOverlayBefore=s.overlayRefusedWindow;
     if (auditing) {
         const bool relevant = (k.vs == flat_mono_detail::kCopyVs &&
                                k.ps == flat_mono_detail::kCopyPs) ||
@@ -3706,6 +3803,23 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             kept = &s.cameras.refresh(k.b1, b1Binding, s.prefix.frame);
         }
         if (kept->have) { std::memcpy(d.camera, kept->rows, sizeof(d.camera)); k.camera = d.camera; k.cameraHash = kept->hash; d.cameraHashTrusted = true; k.writeEpoch = kept->epoch; k.writeSeq = kept->sequence; }
+    }
+    if(s.drawPackets.armed()) {
+        const auto pair=std::make_pair(k.vs,k.ps);const auto refused=s.drawPacketRefusedPairs.find(pair);
+        const bool priority=refused!=s.drawPacketRefusedPairs.end() && s.prefix.frame-refused->second<=900;
+        drawPacketPriority=priority;
+        const bool tone=flat_mono_detail::toneHdrSlot(k.vs,k.ps)!=~0u;
+        const bool output=k.color==s.prefix.output;
+        Ptr<ID3D11DepthStencilState> stateDepth;UINT stencilRef=0;ctx->OMGetDepthStencilState(&stateDepth,&stencilRef);D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;if(stateDepth)stateDepth->GetDesc(&dd);
+        const unsigned representative=tone?3:output?4:k.depth&&dd.DepthEnable&&dd.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL?1:2;
+        {
+            FlatComputeInternalScope internal;
+            FlatDrawPacketCapture::Args args{kind,count,kind=='D'||kind=='N'?UINT(base):start,
+                instances,startInstance,kind=='D'||kind=='N'?0:base};
+            drawPacket=s.drawPackets.before(ctx,s.prefix.frame,s.prefix.sequence+1,k.vs,k.ps,args,priority,replayQueriesSafe(ctx),representative);
+            if(drawPacket)Log::get().note("flat draw packets: selected frame=%llu q=%u VS=%016llX PS=%016llX priority=%u representative-category=%u; original bindings before substitution",
+                (unsigned long long)s.prefix.frame,s.prefix.sequence+1,(unsigned long long)k.vs,(unsigned long long)k.ps,priority?1u:0u,representative);
+        }
     }
     d.supported = engineVelocityPoolFamilyPair(k.vs, k.ps); d.instances = instances;
     // A draw that is not a pool-family draw cannot be a substituted producer: it sees the game's state, and so does
@@ -4745,6 +4859,7 @@ static void issueExactReplayDraw(ID3D11DeviceContext* ctx,const FlatRuntimeDrawS
 }
 void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
     if(!ctx)return;
+    if(drawPacketOnly){FlatComputeInternalScope internal;state().drawPackets.execution(ctx,drawPacket,indirectArgs,indirectOffset,"capture-only-AA-off-or-paused");return;}
     if(untrustedPlanned) {
         untrustedStarted=state().untrusted.beginDraw(ctx,state().prefix.frame,
             [](void* shader) { return lookupShaderHash(shader); });
@@ -4762,9 +4877,22 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                 sample.sequence=s.prefix.sequence;
                 sample.vsHash=sample.vs?lookupShaderHash(const_cast<void*>(sample.vs)):0;
                 sample.psHash=sample.ps?lookupShaderHash(const_cast<void*>(sample.ps)):0;
+                // Read while the sampled original object is still live. No
+                // delayed dereference of the diagnostic's raw COM pointer.
+                sample.shader=FlatOverlayLayer::diagnosePixelShader(
+                    static_cast<ID3D11PixelShader*>(const_cast<void*>(sample.ps)));
+                const uint8_t* raw=nullptr;
+                sample.rawVsAvailable=flatProbeShaderLookup('v',sample.vsHash,&raw,&sample.rawVsBytes);
+                sample.rawPsAvailable=flatProbeShaderLookup('p',sample.psHash,&raw,&sample.rawPsBytes);
             }
             if(!overlayStarted && reason && std::strcmp(reason,"dual-source-blend")==0) {
                 ++s.overlayReplayCandidates;
+                // Snapshot before any replay binding work, including a failed
+                // restore. Hashes and objects name the actual refused original.
+                Ptr<ID3D11VertexShader> refusedVs;Ptr<ID3D11PixelShader> refusedPs;
+                ctx->VSGetShader(&refusedVs,nullptr,nullptr);
+                ctx->PSGetShader(&refusedPs,nullptr,nullptr);
+                const auto pair=std::make_pair(lookupShaderHash(refusedVs.Get()),lookupShaderHash(refusedPs.Get()));
                 const char* replayWhy=replayDrawGuard(ctx,*this,indirectArgs);
                 if(!replayWhy) {
                     FlatComputeInternalScope internal;
@@ -4789,12 +4917,56 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                 }
                 if(!overlayReplayPending) {
                     const char* why=replayWhy?replayWhy:"replay-private-draw-refused";
+                    if(s.drawPacketRefusedPairs.size()<64 || s.drawPacketRefusedPairs.count(pair))s.drawPacketRefusedPairs[pair]=s.prefix.frame;
+                    // The window's first blend sample may name a different
+                    // successful replay. Export this refusal's live pair.
+                    auto found=s.overlayReplayShaderCaptures.find(pair);
+                    if(found==s.overlayReplayShaderCaptures.end() &&
+                       s.overlayReplayShaderCaptures.size()<64) {
+                        State::ReplayShaderCapture capture;
+                        capture.vsSaved=pair.first && captureFlatProbeShader('v',pair.first);
+                        capture.psSaved=pair.second && captureFlatProbeShader('p',pair.second);
+                        const uint8_t* raw=nullptr;size_t rawBytes=0;
+                        const bool rawFound=flatProbeShaderLookup('p',pair.second,&raw,&rawBytes);
+                        if(rawFound) {
+                            std::vector<BYTE> patched;
+                            capture.qualified=flatOverlayPatchPs(raw,rawBytes,patched,capture.reason);
+                            if(capture.qualified)capture.reason="bytecode-patchable";
+                        } else capture.reason="creation-bytes-missing";
+                        const auto live=FlatOverlayLayer::diagnosePixelShader(refusedPs.Get());
+                        Log::get().note("flat late overlay refused shader capture: frame=%llu q=%u actual-VS=%016llX actual-PS=%016llX eligible=%u previously-created=%u registry-reason=%s raw-PS-available=%u raw-PS-bytes=%zu raw-PS-qualified=%u raw-PS-reason=%s VS-saved=%u PS-saved=%u replay-reason=%s",
+                            (unsigned long long)s.prefix.frame,s.prefix.sequence,
+                            (unsigned long long)pair.first,(unsigned long long)pair.second,
+                            live.eligible?1u:0u,live.created?1u:0u,live.reason.c_str(),
+                            rawFound?1u:0u,rawBytes,capture.qualified?1u:0u,capture.reason.c_str(),
+                            capture.vsSaved?1u:0u,capture.psSaved?1u:0u,why);
+                        found=s.overlayReplayShaderCaptures.emplace(pair,std::move(capture)).first;
+                    }
+                    if(found==s.overlayReplayShaderCaptures.end() && !s.overlayReplayShaderCaptureCapReported) {
+                        s.overlayReplayShaderCaptureCapReported=true;
+                        Log::get().note("flat late overlay refused shader capture: frame=%llu q=%u actual-VS=%016llX actual-PS=%016llX status=diagnostic-unique-pair-cap-64; no export or raw preflight",
+                            (unsigned long long)s.prefix.frame,s.prefix.sequence,
+                            (unsigned long long)pair.first,(unsigned long long)pair.second);
+                    }
+                    const bool sampledPair=sample.captured && sample.vsHash==pair.first && sample.psHash==pair.second;
+                    if(sampledPair && found!=s.overlayReplayShaderCaptures.end()) {
+                        sample.captureRecorded=true;sample.vsSaved=found->second.vsSaved;sample.psSaved=found->second.psSaved;
+                        sample.rawPsQualified=found->second.qualified;sample.rawPsReason=found->second.reason;
+                    } else if(sampledPair)sample.rawPsReason="diagnostic-unique-pair-cap-64";
                     ++s.overlayReplayRefusals[why];
                     overlayFail(s,why,overlayHdr);
                 }
             } else if(!overlayStarted)
                 overlayFail(s,reason?reason:"overlay-private-MRT-refused",overlayHdr);
         }
+    }
+    if(drawPacket) {
+        FlatComputeInternalScope internal;
+        state().drawPackets.execution(ctx,drawPacket,indirectArgs,indirectOffset,
+            state().overlayRefusedWindow>drawPacketOverlayBefore?
+                (state().overlay.refusal()?state().overlay.refusal():"current-overlay-refusal"):
+            state().jitterRefusals>drawPacketJitterBefore?state().jitterReason:
+            drawPacketPriority?"observed-priority-pair":"representative-observation");
     }
     if(!weaponFootprintStarted)return;
     const uint32_t actualStart=(weaponDrawKind=='D'||weaponDrawKind=='N')?
@@ -4805,6 +4977,8 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         weaponDrawStartInstance,indirectArgs,indirectOffset);
 }
 void FlatRuntimeDrawScope::endActualDraw() {
+    if(drawPacket&&ctx){FlatComputeInternalScope internal;state().drawPackets.after(ctx,drawPacket);drawPacketExecuted=true;}
+    if(drawPacketOnly)return;
     if(untrustedStarted&&ctx) {
         state().untrusted.endDraw(ctx);
         untrustedEnded=true;untrustedStarted=false;
@@ -4831,6 +5005,18 @@ void FlatRuntimeDrawScope::endActualDraw() {
         state().weaponFootprint.endActualDraw(ctx,state().prefix.frame,weaponFootprintSeq);
 }
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
+    if(drawPacketOnly){if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);return;}
+    if(ctx && (state().jitterRefusals>drawPacketJitterBefore || state().overlayRefusedWindow>drawPacketOverlayBefore)) {
+        auto& s=state();const auto pair=std::make_pair(drawPacketVs,drawPacketPs);
+        if(pair.first||pair.second) {
+            if(s.drawPacketRefusedPairs.size()>=64 && !s.drawPacketRefusedPairs.count(pair)) {
+                auto oldest=std::min_element(s.drawPacketRefusedPairs.begin(),s.drawPacketRefusedPairs.end(),[](const auto& a,const auto& b){return a.second<b.second;});
+                s.drawPacketRefusedPairs.erase(oldest);
+                ++s.drawPacketHistoryEvictions;
+            }s.drawPacketRefusedPairs[pair]=s.prefix.frame;
+        }
+    }
+    if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);
     if (!ctx) return; FlatComputeInternalScope guard;
     flatcpu::Scope shell(flatcpu::kOther);
     if(untrustedStarted) {state().untrusted.endDraw(ctx,false);untrustedStarted=false;}

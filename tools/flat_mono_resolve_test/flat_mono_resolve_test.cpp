@@ -197,6 +197,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_projection_runtime_tests.h"
 #include "flat_pixel_capture_gpu_tests.h"
 #include "flat_draw_capture_gpu_tests.h"
+#include "flat_draw_packet_gpu_tests.h"
 #include "flat_weapon_footprint_gpu_tests.h"
 #include "flat_overlay_layer_gpu_tests.h"
 #include "flat_foreground_ownership_gpu_tests.h"
@@ -791,6 +792,7 @@ int main(int argc,char** argv) {
     context->ClearState();
     failures+=flatPixelCaptureGpuTests(device.Get(),context.Get());
     failures+=flatDrawCaptureGpuTests(device.Get(),context.Get());
+    failures+=flatDrawPacketGpuTests(device.Get(),context.Get());
     failures+=flatWeaponFootprintGpuTests(device.Get(),context.Get());
     failures+=flatOverlayLayerGpuTests(device.Get(),context.Get());
     failures+=flatForegroundOwnershipGpuTests(device.Get(),context.Get());

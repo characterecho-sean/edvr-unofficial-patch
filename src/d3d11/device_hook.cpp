@@ -93,6 +93,8 @@ constexpr size_t kDevCreateTexture2D     = 5;
 constexpr size_t kDevCreateVertexShader  = 12;
 constexpr size_t kDevCreateInputLayout   = 11;
 constexpr size_t kDevCreatePixelShader   = 15;
+constexpr size_t kDevCreateGeometryShader=13,kDevCreateGeometryShaderSO=14;
+constexpr size_t kDevCreateHullShader=16,kDevCreateDomainShader=17;
 constexpr size_t kDevCreateComputeShader = 18;
 // CreateSamplerState, counted against the SDK's ID3D11DeviceVtbl the same
 // way: CreateBlendState 20, CreateDepthStencilState 21, CreateRasterizerState
@@ -132,6 +134,8 @@ constexpr size_t kFactory2CreateSwapChainForHwnd = 15;
 
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateShader)(ID3D11Device*, const void*, SIZE_T,
                                                      ID3D11ClassLinkage*, void**);
+typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateShaderSO)(ID3D11Device*,const void*,SIZE_T,
+    const D3D11_SO_DECLARATION_ENTRY*,UINT,const UINT*,UINT,UINT,ID3D11ClassLinkage*,void**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateLayout)(ID3D11Device*,const D3D11_INPUT_ELEMENT_DESC*,UINT,const void*,SIZE_T,ID3D11InputLayout**);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_CreateTexture2D)(
     ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*,
@@ -180,6 +184,8 @@ struct State {
     PFN_CreateShader realCreateVS = nullptr;
     PFN_CreateLayout realCreateLayout = nullptr;
     PFN_CreateShader realCreatePS = nullptr;
+    PFN_CreateShader realCreateHS=nullptr,realCreateDS=nullptr,realCreateGS=nullptr;
+    PFN_CreateShaderSO realCreateGSSO=nullptr;
     PFN_CreateTexture2D realCreateTexture2D = nullptr;
     PFN_CreateSamplerState realCreateSamplerState = nullptr;
     // The format-support log's two pass-through hooks (hookedCheckFormatSupport).
@@ -676,10 +682,34 @@ uint64_t texture2DBytes(const D3D11_TEXTURE2D_DESC& d) {
     return bytes;
 }
 
+const GUID& packetLayoutKey() {
+    static const GUID key={0x634b0d93,0x20de,0x4e4a,{0xab,0x41,0x10,0x63,0x65,0x56,0x02,0xcc}};return key;
+}
+const GUID& packetGeometryKey() {
+    static const GUID key={0x794134fb,0xc337,0x4ac4,{0xa2,0x4f,0x31,0x82,0xab,0x70,0x0e,0xb4}};return key;
+}
+void packetGeometryCreation(ID3D11GeometryShader* shader,const D3D11_SO_DECLARATION_ENTRY* entries,UINT count,const UINT* strides,UINT strideCount,UINT rasterized,bool streamOutput) {
+    if(!shader || count>512 || strideCount>4 || (count&&!entries)||(strideCount&&!strides))return;
+    FlatPacketGeometryCreate header{streamOutput?1u:0u,count,strideCount,rasterized};std::vector<BYTE> bytes(sizeof(header)+count*sizeof(FlatPacketSOElement)+strideCount*sizeof(UINT));std::memcpy(bytes.data(),&header,sizeof(header));
+    for(UINT i=0;i<count;++i){const auto& e=entries[i];FlatPacketSOElement kept{};
+        if(e.SemanticName){if(std::strlen(e.SemanticName)>=sizeof(kept.semantic))return;strcpy_s(kept.semantic,e.SemanticName);}
+        kept.stream=e.Stream;kept.semanticIndex=e.SemanticIndex;kept.startComponent=e.StartComponent;kept.componentCount=e.ComponentCount;kept.outputSlot=e.OutputSlot;
+        std::memcpy(bytes.data()+sizeof(header)+i*sizeof(kept),&kept,sizeof(kept));}
+    if(strideCount)std::memcpy(bytes.data()+sizeof(header)+count*sizeof(FlatPacketSOElement),strides,strideCount*sizeof(UINT));
+    shader->SetPrivateData(packetGeometryKey(),UINT(bytes.size()),bytes.data());
+}
 HRESULT STDMETHODCALLTYPE hookedCreateLayout(ID3D11Device* self,const D3D11_INPUT_ELEMENT_DESC* elements,UINT count,const void* bytecode,SIZE_T len,ID3D11InputLayout** out) {
     const HRESULT hr=g_state->realCreateLayout(self,elements,count,bytecode,len,out);
     if(self==g_state->device && SUCCEEDED(hr) && bytecode && len && out && *out)
         guardedBudget(g_createBudget,[&]{
+            if(runtimeFlatProfile() && elements && count<=32) {
+                std::vector<FlatPacketInputElement> kept;bool valid=true;
+                for(UINT i=0;i<count;++i){const auto& e=elements[i];FlatPacketInputElement k{};
+                    if(!e.SemanticName || std::strlen(e.SemanticName)>=sizeof(k.semantic)){valid=false;break;}
+                    strcpy_s(k.semantic,e.SemanticName);k.semanticIndex=e.SemanticIndex;k.format=UINT(e.Format);k.inputSlot=e.InputSlot;
+                    k.alignedByteOffset=e.AlignedByteOffset;k.inputSlotClass=UINT(e.InputSlotClass);k.instanceDataStepRate=e.InstanceDataStepRate;kept.push_back(k);}
+                if(valid && !kept.empty())(*out)->SetPrivateData(packetLayoutKey(),UINT(kept.size()*sizeof(FlatPacketInputElement)),kept.data());
+            }
             const uint64_t hash=fnv1a64(bytecode,len);
             GuiDrawSnapshot::rememberLayout(*out,elements,count,hash);
             EyeDrawSnapshot::rememberLayout(*out,elements,count,hash);
@@ -711,6 +741,21 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         if (g_state->shaderDump) dumpShaderBlob(L"vs", hash, bytecode, len);
     });
     return hr;
+}
+
+HRESULT packetCreateShader(ID3D11Device* self,const void* bytes,SIZE_T n,ID3D11ClassLinkage* link,void** out,PFN_CreateShader real,char stage) {
+    const HRESULT hr=real(self,bytes,n,link,out);
+    if(self==g_state->device && SUCCEEDED(hr) && bytes && n && out && *out)
+        guardedBudget(g_createBudget,[&]{const uint64_t hash=fnv1a64(bytes,n);rememberFlatProbeShader(stage,hash,bytes,n);registerShaderHash(*out,hash);
+            if(stage=='g')packetGeometryCreation(static_cast<ID3D11GeometryShader*>(*out),nullptr,0,nullptr,0,0,false);});
+    return hr;
+}
+HRESULT STDMETHODCALLTYPE hookedCreateHS(ID3D11Device* d,const void* b,SIZE_T n,ID3D11ClassLinkage* l,void** o){return packetCreateShader(d,b,n,l,o,g_state->realCreateHS,'h');}
+HRESULT STDMETHODCALLTYPE hookedCreateDS(ID3D11Device* d,const void* b,SIZE_T n,ID3D11ClassLinkage* l,void** o){return packetCreateShader(d,b,n,l,o,g_state->realCreateDS,'d');}
+HRESULT STDMETHODCALLTYPE hookedCreateGS(ID3D11Device* d,const void* b,SIZE_T n,ID3D11ClassLinkage* l,void** o){return packetCreateShader(d,b,n,l,o,g_state->realCreateGS,'g');}
+HRESULT STDMETHODCALLTYPE hookedCreateGSSO(ID3D11Device* d,const void* b,SIZE_T n,const D3D11_SO_DECLARATION_ENTRY* e,UINT ec,const UINT* s,UINT sc,UINT r,ID3D11ClassLinkage* l,void** o) {
+    const HRESULT hr=g_state->realCreateGSSO(d,b,n,e,ec,s,sc,r,l,o);
+    if(d==g_state->device && SUCCEEDED(hr) && b && n && o && *o)guardedBudget(g_createBudget,[&]{const uint64_t h=fnv1a64(b,n);rememberFlatProbeShader('g',h,b,n);registerShaderHash(*o,h);packetGeometryCreation(static_cast<ID3D11GeometryShader*>(*o),e,ec,s,sc,r,true);});return hr;
 }
 
 HRESULT STDMETHODCALLTYPE hookedCreatePS(ID3D11Device* self, const void* bytecode,
@@ -2042,7 +2087,7 @@ State& ensureState() {
             // A retained older INI may not contain this key. Flat discovery
             // still needs a re-arm key without overwriting that user's file.
             const std::string b = Config::get().getString("hotkey.dump_draws",
-                runtimeFlatProfile() ? "F10" : "");
+                runtimeFlatProfile() ? "NUMLOCK" : "");
             g_state->censusKey.setBinding(b.c_str());
             if (g_state->censusKey.key() != 0) {
                 Log::get().note(
@@ -2225,7 +2270,7 @@ State& ensureState() {
 
 bool captureFlatProbeShader(char stage, uint64_t hash) {
     if (!g_state || !runtimeFlatProfile() || !hash ||
-        (stage != 'v' && stage != 'p' && stage != 'c')) return false;
+        (stage != 'v' && stage != 'p' && stage != 'c' && stage!='h' && stage!='d' && stage!='g')) return false;
     auto& s = *g_state;
     std::lock_guard<std::mutex> lock(s.flatProbeShaderMutex);
     const auto found = s.flatProbeShaders.find(std::make_pair(stage, hash));
@@ -2237,7 +2282,7 @@ bool captureFlatProbeShader(char stage, uint64_t hash) {
         return false;
     }
     const auto& bytes = found->second;
-    const auto result = dumpShaderBlob(stage == 'v' ? L"vs" : stage == 'p' ? L"ps" : L"cs",
+    const auto result = dumpShaderBlob(stage == 'v' ? L"vs" : stage == 'p' ? L"ps" : stage=='h'?L"hs":stage=='d'?L"ds":stage=='g'?L"gs":L"cs",
         hash, bytes.data(), bytes.size(), true);
     Log::get().note("flat producer shader: %s stage=%cs hash=%016llX bytes=%llu saved-bytes=%u existing=%u error=%u cache-drops=%u",
         result.success ? "succeeded" : "failed", stage, static_cast<unsigned long long>(hash),
@@ -2248,7 +2293,7 @@ bool captureFlatProbeShader(char stage, uint64_t hash) {
 
 bool flatProbeShaderLookup(char stage, uint64_t hash, const uint8_t** data, size_t* bytes) {
     if (!g_state || !hash || !data || !bytes ||
-        (stage != 'v' && stage != 'p' && stage != 'c')) return false;
+        (stage != 'v' && stage != 'p' && stage != 'c' && stage!='h' && stage!='d' && stage!='g')) return false;
     auto& s = *g_state;
     std::lock_guard<std::mutex> lock(s.flatProbeShaderMutex);
     const auto found = s.flatProbeShaders.find(std::make_pair(stage, hash));
@@ -2261,6 +2306,16 @@ bool flatProbeShaderLookup(char stage, uint64_t hash, const uint8_t** data, size
     return true;
 }
 
+bool flatPacketInputLayout(ID3D11InputLayout* layout,std::vector<FlatPacketInputElement>& elements) {
+    elements.clear();if(!layout)return false;FlatPacketInputElement kept[32]{};UINT bytes=sizeof(kept);
+    if(FAILED(layout->GetPrivateData(packetLayoutKey(),&bytes,kept)) || !bytes || bytes%sizeof(kept[0]) || bytes>sizeof(kept))return false;
+    elements.assign(kept,kept+bytes/sizeof(kept[0]));return true;
+}
+bool flatPacketGeometryShaderData(ID3D11GeometryShader* shader,std::vector<uint8_t>& bytes) {
+    bytes.clear();if(!shader)return false;UINT size=0;shader->GetPrivateData(packetGeometryKey(),&size,nullptr);
+    if(size<sizeof(FlatPacketGeometryCreate) || size>sizeof(FlatPacketGeometryCreate)+512*sizeof(FlatPacketSOElement)+4*sizeof(UINT))return false;
+    bytes.resize(size);if(FAILED(shader->GetPrivateData(packetGeometryKey(),&size,bytes.data()))){bytes.clear();return false;}return true;
+}
 // The two entries the investigation turns on, named at install. See the header
 // for what they are and why the departure point matters as much as the
 // destination.
@@ -2661,6 +2716,12 @@ void hookDevice(ID3D11Device* device) {
     s.deviceHook.replace(kDevCreateInputLayout,&hookedCreateLayout,reinterpret_cast<void**>(&s.realCreateLayout));
     s.deviceHook.replace(kDevCreatePixelShader, &hookedCreatePS,
                          reinterpret_cast<void**>(&s.realCreatePS));
+    if(runtimeFlatProfile()) {
+        s.deviceHook.replace(kDevCreateHullShader,&hookedCreateHS,reinterpret_cast<void**>(&s.realCreateHS));
+        s.deviceHook.replace(kDevCreateDomainShader,&hookedCreateDS,reinterpret_cast<void**>(&s.realCreateDS));
+        s.deviceHook.replace(kDevCreateGeometryShader,&hookedCreateGS,reinterpret_cast<void**>(&s.realCreateGS));
+        s.deviceHook.replace(kDevCreateGeometryShaderSO,&hookedCreateGSSO,reinterpret_cast<void**>(&s.realCreateGSSO));
+    }
     s.deviceHook.replace(kDevCreateComputeShader, &hookedCreateCS,
                          reinterpret_cast<void**>(&s.realCreateCS));
     s.deviceHook.replace(kDevCreateTexture2D, &hookedCreateTexture2D,

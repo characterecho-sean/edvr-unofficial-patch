@@ -573,6 +573,29 @@ inline int flatOverlayLayerGpuTests(ID3D11Device* device, ID3D11DeviceContext* c
             ds.FrontFace.StencilPassOp=D3D11_STENCIL_OP_REPLACE;ds.BackFace=ds.FrontFace;
             ComPtr<ID3D11DepthStencilState> stencilWrites;expect(SUCCEEDED(device->CreateDepthStencilState(&ds,&stencilWrites)),"replay stencil-write-mask4 state creates");
             if(dualBlend && stencilWrites) {
+                ComPtr<ID3D11PixelShader> rejected,unregistered;
+                expect(SUCCEEDED(device->CreatePixelShader(occupiedBytes->GetBufferPointer(),occupiedBytes->GetBufferSize(),nullptr,&rejected)) &&
+                    SUCCEEDED(device->CreatePixelShader(leftBytes->GetBufferPointer(),leftBytes->GetBufferSize(),nullptr,&unregistered)),"diagnostic rejection fixtures create");
+                if(rejected && unregistered) {
+                    edvr::FlatOverlayLayer::rememberPixelShader(rejected.Get(),occupiedBytes->GetBufferPointer(),occupiedBytes->GetBufferSize(),false);
+                    ID3D11PixelShader* cases[]={rejected.Get(),unregistered.Get(),linked.Get()};
+                    const char* reasons[]={"private MRT7 occupied","creation-metadata-unavailable","PS class linkage"};
+                    for(unsigned i=0;i<3;++i) {
+                        bind(instrumentedRtv.Get(),instrumentedDsv.Get(),cases[i]);
+                        context->OMSetBlendState(dualBlend.Get(),nullptr,~0u);context->OMSetDepthStencilState(stencilWrites.Get(),1);
+                        const auto diagnostic=edvr::FlatOverlayLayer::diagnosePixelShader(cases[i]);
+                        expect(diagnostic.read && !diagnostic.eligible && !diagnostic.created &&
+                            (i==1 || diagnostic.reason==reasons[i]),"actual rejected PS diagnostic preserves creation reason without admission");
+                        edvr::FlatOverlayLayer refusal;refusal.beginFrame(79);
+                        const char* why=nullptr;
+                        const std::string expected=std::string("replay-PS-bytecode-not-retained: ")+reasons[i];
+                        expect(!refusal.beginReplayDraw(context,79,instrumented.Get(),instrumentedDsv.Get(),&why) && why && expected==why,
+                            "replay missing-cache refusal distinguishes qualifier, linkage and missing creation metadata");
+                        ComPtr<ID3D11PixelShader> current;context->PSGetShader(&current,nullptr,nullptr);
+                        expect(current.Get()==cases[i] && !edvr::FlatOverlayLayer::diagnosePixelShader(cases[i]).eligible,
+                            "diagnostic and refused replay leave actual PS binding and eligibility unchanged");
+                    }
+                }
                 context->ClearRenderTargetView(baselineRtv.Get(),clear);context->ClearRenderTargetView(instrumentedRtv.Get(),clear);
                 context->ClearDepthStencilView(baselineDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,5);
                 context->ClearDepthStencilView(instrumentedDsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.8f,5);

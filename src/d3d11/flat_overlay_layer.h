@@ -36,6 +36,12 @@ struct FlatOverlayBlendDiagnostic {
     // The creation registry retains patched bytes, not an original output
     // signature. Do not infer original PS outputs from the private MRT patch.
     bool psOutputSignatureKnown=false;
+    FlatOverlayShaderDiagnostic shader;
+    bool rawVsAvailable=false,rawPsAvailable=false;
+    size_t rawVsBytes=0,rawPsBytes=0;
+    bool captureRecorded=false,vsSaved=false,psSaved=false;
+    bool rawPsQualified=false;
+    std::string rawPsReason;
 };
 inline bool flatOverlayDiagnosticSrc1(D3D11_BLEND v) {
     return v==D3D11_BLEND_SRC1_COLOR || v==D3D11_BLEND_INV_SRC1_COLOR ||
@@ -220,7 +226,14 @@ class FlatOverlayLayer {
         {
             auto& r=registry();std::lock_guard<std::mutex> lock(r.mutex);
             auto it=r.shaders.find(original);
-            if(it==r.shaders.end()) { why="replay-PS-bytecode-not-retained";return {}; }
+            if(it==r.shaders.end()) {
+                char noted[96]{};UINT n=sizeof(noted);
+                if(SUCCEEDED(original->GetPrivateData(reasonKey(),&n,noted)) && n && n<=sizeof(noted)) {
+                    noted[sizeof(noted)-1]=0;
+                    why=std::string("replay-PS-bytecode-not-retained: ")+noted;
+                } else why="replay-PS-bytecode-not-retained: creation-metadata-unavailable";
+                return {};
+            }
             if(it->second.replayPatched)return it->second.replayPatched;
             if(it->second.replayAttempted) {
                 qualified=true;
@@ -394,7 +407,10 @@ public:
         return out;
     }
     static void rememberPixelShader(ID3D11PixelShader* shader,const void* bytecode,size_t bytes,bool linked) {
-        if (creatingPatched() || !shader || !bytecode || !bytes || bytes>1024u*1024u) return;
+        if (!shader) return;
+        if (creatingPatched()) { markShaderReason(shader,"internal overlay PS creation");return; }
+        if (!bytecode || !bytes) { markShaderReason(shader,"PS creation bytes absent");return; }
+        if (bytes>1024u*1024u) { markShaderReason(shader,"PS creation bytes exceed 1MiB");return; }
         if (linked) { markShaderReason(shader,"PS class linkage"); return; }
         std::vector<BYTE> patched; std::string why;
         if (!flatOverlayPatchPs(bytecode,bytes,patched,why)) { markShaderReason(shader,why.c_str()); return; }

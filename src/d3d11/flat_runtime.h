@@ -119,12 +119,17 @@ struct FlatRuntimeDrawScope {
     bool gameHadTarget6 = false;   // the game's own slot 6 was occupied under a substituted draw
     bool producer = false, replaced = false;
     bool drawCaptureStarted = false;
+    void* drawPacket=nullptr;
+    bool drawPacketExecuted=false;
+    bool drawPacketOnly=false;
+    bool drawPacketPriority=false;
+    uint64_t drawPacketVs=0,drawPacketPs=0,drawPacketJitterBefore=0,drawPacketOverlayBefore=0;
     bool weaponFootprintStarted = false;
     bool overlayPlanned = false, overlayStarted = false, overlayEnded = false;
     bool overlayReplayPending = false;
     bool foregroundPlanned = false, foregroundStarted = false, foregroundEnded = false;
     bool untrustedPlanned = false, untrustedStarted = false, untrustedEnded = false;
-    bool needsActualDraw() const { return flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
+    bool needsActualDraw() const { return drawPacket || flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
     ID3D11Texture2D* overlayHdr = nullptr;
     ID3D11DepthStencilView* overlayDsv = nullptr;

@@ -2572,6 +2572,10 @@ python "tools\flat_draw_pixels.py" --self-test || (
     echo [edvr] ERROR: the flat draw pixel analyzer failed its own test
     exit /b 1
 )
+python "tools\flat_draw_packets.py" --self-test || (
+    echo [edvr] ERROR: the flat draw packet reader failed its own test
+    exit /b 1
+)
 python "tools\flat_weapon_pixels.py" --self-test || (
     echo [edvr] ERROR: the flat weapon footprint analyzer failed its own test
     exit /b 1

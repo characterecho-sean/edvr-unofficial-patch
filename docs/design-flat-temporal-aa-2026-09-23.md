@@ -3,7 +3,7 @@
 ## Status
 
 - **State:** color-clear weapon-AA fault CLOSED (102); plasma refusal OPEN (103).
-  Epic diagnostic confirms active RT0 SRC1 blending and three matching F10 frames.
+  f13ee92b: plasma PS absent from replay cache; raw VS/PS remain cached (103).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -32,8 +32,8 @@
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
-  changes queries. A stencil-write flag alone does not establish its operations.
-- **Next:** Epic qualification of guarded private-DSV replay (103).
+  changes queries; f13ee92b admits this PS (zero completed replay draws).
+- **Next:** Epic NumLock draw packet with plasma drawn (103); no two-minute wait.
   Retain section 102's qualified color-clear fix; no per-weapon table.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -11148,3 +11148,74 @@ open; perform the clean receipt-guarded promotion before installing. The five-se
 `flat late overlay replay` report distinguishes candidates, completed original
 draws and specific refusals; one plasma weapon is sufficient for this test.
 Keep section 102's color-clear fix qualified.
+
+**2026-10-05, Epic qualification of f13ee92b:** clean promotion and verified
+flat install completed with the INI and DLSS preserved. The flight
+`edvr_gfx_20261005_063607.log` matches `v0.18.2-3-gf13ee92b` (build 6AC39824).
+World AA still disengages with plasma drawn. Ruled out: the deployed replay
+fallback qualifies this plasma shader, because every replay window has zero
+completed draws and `replay-PS-bytecode-not-retained` (234, 349, 223, 134, 73
+candidates). The private-DSV mechanism has not run on the affected draw.
+Live VS/PS bindings are present: 7F9B650EC1A1E570 / CBB1A87D6023B2A8. Their
+original DXBC files are absent. F10 `flat_trace_45355.bin` records three frames,
+60,687 events and no overflow; staged evidence is
+`build\supporter-0182\replay-flight\evidence.md`. Retrieve the creation-time
+qualifier reason and original shader bytes before changing shader admission.
+The generic replay currently hides the original cache exclusion reason.
+
+Raw creation bytes are nevertheless present in the separate flat probe cache:
+at 06:38:22.963 the exact pair is `verdict=generic-recipe`, `ps=clean`,
+`ps-reason=none`. `classifyGenericPair` reads both raw cache entries; a missing
+PS returns NoBytecode, never clean. Ruled out: the single raw-cache drop or
+one-MiB blob cap explains this pair, because its raw PS classified clean.
+Absent files are an export-trigger gap. Next diagnostic preserves the actual
+overlay exclusion reason and exports the original pair once on replay refusal.
+
+**2026-10-05, capture the draw before another flight:** Sean requested full
+draw evidence comparable to the VR NumLock diagnostic and NumLock as the flat
+default. The existing point chronology excludes non-depth-writing/non-motion
+draws, then discards unqualified HDR frames. Those gates exclude the failed
+plasma overlay. The new packet capture is independent of that qualification,
+prioritizes observed refusal pairs, and retains original and executed pipeline
+state plus draw inputs and before/after outputs. Shader admission is unchanged.
+Limits and missing data must be explicit in each packet and its capture-level
+manifest; no packet with omitted required data may claim completeness.
+The budget is one GiB per arm, sixteen priority pairs with two distinct frames
+per pair, and four representative categories capped at 256 MiB so they cannot
+consume the priority reserve. Files split into at most 64-MiB chunks. This is a manually armed
+desktop D3D11 instrument; it adds no per-draw copies while unarmed and does not
+change the VR runtime. The log bundler needs a streaming ZIP writer before
+its aggregate capture limit can safely increase. NumLock uses the existing
+`hotkey.dump_draws` action in flat; the VR keys and capture behavior remain.
+Epic's explicit F10 binding will be changed to NUMLOCK with its other settings
+preserved. Capture implementation is validated; do not qualify the
+plasma rendering fix from offline capture tests.
+
+**Capture validation:** the focused WARP rig passed with a nonempty original
+dual-source/discard/stencil-04 draw. Captured before/after color and depth/stencil
+match the original draw; separate original/executed mutable constants, shader
+bytes, textures, high-slot geometry and nonindexed start arguments are retained.
+Each selected frame/q joins its sealed same-frame trace. The offline reader
+validated the genuine complete fixture and seven intentional partial fixtures.
+Hidden SO offsets, UAV counters, predicate/query results and AA-Off resource
+mutation chronology remain explicitly incomplete. Binary output reserves
+64 MiB of the one-GiB limit for metadata. The streaming ZIP tests passed CRC and
+extraction, full-session folder selection, atomic cap omissions, ZIP32 bounds
+and failed-output cleanup. The full validation build passed; no new flight
+has qualified the plasma rendering fix.
+
+The first full gate stopped on unchanged heartbeat stress check `H5.whole`.
+Its combined sample-count/record-consistency predicate does not identify which
+condition failed. The unchanged executable then passed all 30 focused checks;
+the capture sources are not linked into that rig. A full `--jobs 8` rerun keeps
+all checks enabled and reduces concurrent scheduler pressure. This is not
+evidence of a proven heartbeat root cause.
+
+The `--jobs 8` full gate passed: 117 parallel jobs, five quiet jobs, config
+contract 234/234, and actual installer resources. Receipt fingerprint:
+`df10048331b953d69c820aa80115ab1f57cc6258492604ac9c935a684901d875`.
+Two older temporal source pins were updated for the explicitly armed Paused
+capture exception and the separate AA-Off request consumer; focused checks
+retain the unarmed Paused freeze and all 46 identical frame-contract replays.
+Next promotion installs the clean DLL on Epic and migrates only its explicit
+F10 binding/help comment to NumLock. Plasma shader admission remains unchanged.

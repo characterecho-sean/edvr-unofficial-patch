@@ -10,6 +10,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <cstdint>
+#include <vector>
 
 #include "../common/vtable_hook.h"  // HookMode
 
@@ -77,6 +78,14 @@ bool captureFlatProbeShader(char stage, uint64_t hash);
 // classifier. The map is node-based and entries are never mutated or erased
 // after insert, so the returned pointer stays valid after the lock releases.
 bool flatProbeShaderLookup(char stage, uint64_t hash, const uint8_t** data, size_t* bytes);
+struct FlatPacketInputElement {
+    char semantic[64]{};
+    UINT semanticIndex=0,format=0,inputSlot=0,alignedByteOffset=0,inputSlotClass=0,instanceDataStepRate=0;
+};
+bool flatPacketInputLayout(ID3D11InputLayout* layout,std::vector<FlatPacketInputElement>& elements);
+struct FlatPacketGeometryCreate {UINT streamOutput=0,declarations=0,strides=0,rasterizedStream=0;};
+struct FlatPacketSOElement {char semantic[64]{};UINT stream=0,semanticIndex=0,startComponent=0,componentCount=0,outputSlot=0;};
+bool flatPacketGeometryShaderData(ID3D11GeometryShader* shader,std::vector<uint8_t>& bytes);
 // Sticky for the process, including later devices and submit-side passes.
 // True for either sentinel recovery or advanced.d3d11_fixes=0.
 bool deviceHookRecoveryDisabled();
