@@ -79,7 +79,7 @@ void flatRuntimeViewport(UINT, const D3D11_VIEWPORT*);
 void flatRuntimeMap(ID3D11Resource*, D3D11_MAP, void*);
 void flatRuntimeUnmap(ID3D11Resource*);
 void flatRuntimeUpdate(ID3D11Resource*, const void*, const D3D11_BOX*);
-void flatRuntimeWritten(ID3D11Resource*);
+void flatRuntimeWritten(ID3D11Resource*, FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written);
 enum class FlatOverlayMutationRole : unsigned char { Unrelated, Hdr, Depth, Unknown };
 inline FlatOverlayMutationRole flatRuntimeOverlayMutationRole(
     const void* resource, const void* hdr, const void* depth) {

@@ -337,7 +337,13 @@ public:
                 if(slot<b.mutationsUsed)++b.mutations[slot].count;
                 else if(slot<b.mutations.size())snapshot(b.mutations[b.mutationsUsed++]);
                 else ++b.mutationsDropped;
-                if(resource)bucketFailure(i,"mutation","untrusted-source-explicit-mutation");
+                // The game can clear its shared pool color between depth-only
+                // alternate draws and later material draws. The coverage lives
+                // in a separate R8 target, so this exact RTV clear leaves its
+                // original-fragment marks intact. Every other write still fails.
+                if(resource && !(details.op==FlatOverlayMutationOp::ClearRtv &&
+                                 color && !depth))
+                    bucketFailure(i,"mutation","untrusted-source-explicit-mutation");
             }
         }
         if(!resource)invalidate("untrusted-source-unknown-mutation");

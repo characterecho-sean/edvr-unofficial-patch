@@ -3128,6 +3128,27 @@ void testFlatOverlayMutationWiring() {
         noForeign.erase(noForeign.find(foreignCall),foreignCall.size());
         check(!valid(noForeign),"mutation control: losing foreign-context invalidation fails");
     }
+    const std::string rtvClear=compact(bodyOf(vscreen,"void STDMETHODCALLTYPE hookedClearRtv("));
+    const std::string written=compact(bodyOf(runtime,"static void resourceWritten(State& s, ID3D11Resource* res,"));
+    const std::string typedClear="flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource),FlatOverlayMutationOp::ClearRtv);";
+    const auto clearTyped=[&](const std::string& source) {
+        const size_t notification=source.find(typedClear);
+        const size_t real=source.rfind("realClearRtv(");
+        return notification!=std::string::npos && real!=std::string::npos && notification<real;
+    };
+    check(clearTyped(rtvClear) &&
+          written.find("FlatMutationDetails::named(provenance,entry)")!=std::string::npos &&
+          written.find("flatRuntimeWritten(s.prefix,res);")!=std::string::npos &&
+          written.find("flatHdrObserveExplicitWrite(s.hdr,res);")!=std::string::npos &&
+          written.find("s.cameras.invalidate(*c);")!=std::string::npos &&
+          written.find("s.projection->invalidate(res);")!=std::string::npos &&
+          written.find("overlayFail(s,")!=std::string::npos,
+          "RTV clear forwards typed provenance while independent write observers still run");
+    std::string untypedClear=rtvClear;
+    const size_t typedAt=untypedClear.find(typedClear);
+    if(typedAt!=std::string::npos)untypedClear.replace(typedAt,typedClear.size(),
+        "flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource));");
+    check(!clearTyped(untypedClear),"mutation control: losing typed RTV provenance fails");
     const std::string map=compact(bodyOf(vscreen,"HRESULT STDMETHODCALLTYPE hookedMap("));
     const std::string unmapHook=compact(bodyOf(vscreen,"void STDMETHODCALLTYPE hookedUnmap("));
     const auto mapValid=[](const std::string& text) {

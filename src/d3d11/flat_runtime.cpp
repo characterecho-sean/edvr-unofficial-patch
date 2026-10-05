@@ -3236,9 +3236,10 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 // for a frame that could be treated, and the projection shadows, which do not exist then.
 // What a write to a resource does to the prefix model, the camera table and the shadows -- the
 // body flatRuntimeWritten, Map and Update share, timed by the caller's scope.
-static void resourceWritten(State& s, ID3D11Resource* res,const char* entry) {
+static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
+                            FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written) {
     if(s.untrusted.active())s.untrusted.noteMutation(res,
-        FlatMutationDetails::named(FlatOverlayMutationOp::Written,entry),s.prefix.sequence);
+        FlatMutationDetails::named(provenance,entry),s.prefix.sequence);
     if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
         const auto& t=s.prefix.targets[i];
         if(t.overlayOpen && (t.resource==res || t.overlayDepth==res)) {
@@ -3251,10 +3252,10 @@ static void resourceWritten(State& s, ID3D11Resource* res,const char* entry) {
     if (auto* c = camera(res, false)) s.cameras.invalidate(*c);
     if (s.projection) { flatcpu::Scope shadows(flatcpu::kShadows); s.projection->invalidate(res); }
 }
-void flatRuntimeWritten(ID3D11Resource* res) {
+void flatRuntimeWritten(ID3D11Resource* res,FlatOverlayMutationOp provenance) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);   // prefix target and source lookup, camera lookup
-    resourceWritten(state(), res,"flatRuntimeWritten");
+    resourceWritten(state(), res,"flatRuntimeWritten",provenance);
 }
 namespace {
 const char* overlayMutationOpName(FlatOverlayMutationOp op) {

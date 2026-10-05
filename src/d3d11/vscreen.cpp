@@ -2875,7 +2875,8 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);   // a clear is not a substituted producer draw: the game's state first
         flatRuntimeOverlayViewMutation(rtv, FlatOverlayMutationOp::ClearRtv,
             FlatMutationDetails::clear(FlatOverlayMutationOp::ClearRtv,"ClearRenderTargetView",c));
-        ResourceInfo info{}; if (bindingResolve(rtv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource));
+        ResourceInfo info{}; if (bindingResolve(rtv, &info))
+            flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource),FlatOverlayMutationOp::ClearRtv);
     }
     if (g_vrWorldWatchWrites) vrWorldRouteNoteRtvClear(rtv);
     if (flatTemporalCapturing()) flatTemporalClearColor(rtv);

@@ -3,6 +3,8 @@
 #include "../../src/d3d11/flat_overlay_layer.h"
 #include "../../src/d3d11/flat_untrusted_coverage.h"
 #include "flat_empty_output_gpu_tests.h"
+#include <fstream>
+#include <memory>
 
 inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) {
     using Microsoft::WRL::ComPtr;
@@ -66,7 +68,34 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
           unknownMetadata.object==unregisteredPs.Get() &&
           unknownMetadata.reason=="PS bytecode not retained" && nullMetadata.read &&
           !nullMetadata.eligible && nullMetadata.reason=="null-PS",
-          "read-only shader metadata separates patchable, explicit-depth, unregistered and null PS without creating patches");
+           "read-only shader metadata separates patchable, explicit-depth, unregistered and null PS without creating patches");
+    // All five PS bytecode blobs reported by the verified v49 H nominee census,
+    // including the two that had not created patched GPU objects in the flight.
+    struct FlightPs {const char* hash;size_t bytes;};
+    const FlightPs flightShaders[]={
+        {"B40B0462256E31C2",384},{"8A08FF781272C5F6",216},
+        {"7268762D11A610F2",7104},{"CF534B32F491561A",3456},
+        {"0DF03E64DF9DBEF1",7208}
+    };
+    for(const auto& fixture:flightShaders) {
+        const std::string path=std::string("tools/flat_temporal_test/fixtures/ps_")+
+            fixture.hash+".dxbc";
+        std::ifstream file(path,std::ios::binary|std::ios::ate);
+        std::vector<BYTE> original;
+        if(file) {
+            original.resize(static_cast<size_t>(file.tellg()));
+            file.seekg(0);
+            file.read(reinterpret_cast<char*>(original.data()),std::streamsize(original.size()));
+        }
+        std::vector<BYTE> patched;std::string why;
+        const bool patchable=original.size()==fixture.bytes && file &&
+            edvr::flatOverlayPatchPs(original.data(),original.size(),patched,why);
+        ComPtr<ID3D11PixelShader> created;
+        const bool gpuCreated=patchable && !patched.empty() &&
+            SUCCEEDED(device->CreatePixelShader(patched.data(),patched.size(),nullptr,&created)) &&
+            created!=nullptr;
+        check(gpuCreated,"each of the five captured v49 nominee pixel shaders patches and creates on WARP");
+    }
 
     D3D11_TEXTURE2D_DESC colorDesc{};
     colorDesc.Width=w;colorDesc.Height=h;colorDesc.MipLevels=colorDesc.ArraySize=colorDesc.SampleDesc.Count=1;
@@ -127,6 +156,12 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
     blendDesc.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
     ComPtr<ID3D11BlendState> blend;
     check(SUCCEEDED(device->CreateBlendState(&blendDesc,&blend)),"zero-alpha game blend state");
+    blendDesc.RenderTarget[0].RenderTargetWriteMask=0;
+    blendDesc.IndependentBlendEnable=TRUE;
+    blendDesc.RenderTarget[7].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+    ComPtr<ID3D11BlendState> depthOnlyBlend;
+    check(SUCCEEDED(device->CreateBlendState(&blendDesc,&depthOnlyBlend)),
+          "depth-only alternate blend state");
     D3D11_DEPTH_STENCIL_DESC depthStateDesc{};
     depthStateDesc.DepthEnable=TRUE;
     depthStateDesc.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
@@ -140,7 +175,7 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
     ComPtr<ID3D11RasterizerState> raster;
     check(SUCCEEDED(device->CreateRasterizerState(&rasterDesc,&raster)),
           "game rasterizer for both original draws");
-    if(!blend || !depthState || !raster)return failures;
+    if(!blend || !depthOnlyBlend || !depthState || !raster)return failures;
     const FLOAT clear[4]={.25f,.5f,.75f,1};
     context->ClearRenderTargetView(baselineRtv.Get(),clear);
     context->ClearRenderTargetView(liveRtv.Get(),clear);
@@ -619,13 +654,15 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
                         uint64_t frame,uint32_t seq,const unsigned char* cameraBytes,
                         uint64_t vsHash,uint64_t psHash,ID3D11VertexShader* gameVs,
                         ID3D11PixelShader* gamePs,const D3D11_RECT& scissor,
-                        bool supported,bool bracket=true) {
+                         bool supported,bool bracket=true,bool depthOnly=false) {
             bind(baselineRtv.Get(),baselineDsv.Get());
+            if(depthOnly)context->OMSetBlendState(depthOnlyBlend.Get(),nullptr,~0u);
             context->VSSetShader(gameVs,nullptr,0);
             context->PSSetShader(gamePs,nullptr,0);
             context->RSSetScissorRects(1,&scissor);
             context->Draw(3,0);
             bind(liveRtv.Get(),liveDsv.Get());
+            if(depthOnly)context->OMSetBlendState(depthOnlyBlend.Get(),nullptr,~0u);
             context->VSSetShader(gameVs,nullptr,0);
             context->PSSetShader(gamePs,nullptr,0);
             context->RSSetScissorRects(1,&scissor);
@@ -680,6 +717,173 @@ inline int flatForegroundOwnershipGpuTests(ID3D11Device* device, ID3D11DeviceCon
                 seenDepth.size()==baseDepth.size() &&
                 baseColor==seenColor && baseDepth==seenDepth;
         };
+        auto captureMask=[&](edvr::FlatUntrustedCoverage& capture) {
+            ComPtr<ID3D11Resource> resource;
+            if(capture.view())capture.view()->GetResource(&resource);
+            ComPtr<ID3D11Texture2D> texture;
+            if(resource)resource.As(&texture);
+            return texture?readTex(texture.Get(),1):std::vector<BYTE>{};
+        };
+        {
+            // The flight's deferred order: depth-only alternate, pool color
+            // clear, later alternate materials, then world overdraw and H.
+            constexpr uint64_t frame=86;
+            auto captureStorage=std::make_unique<edvr::FlatUntrustedCoverage>();
+            auto& capture=*captureStorage;capture.beginFrame(frame);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;clearPair();
+            const auto prepass=submit(capture,observed,used,frame,1,alternateBytes,
+                0xCFCA8FFC6B058630ull,0x8A08FF781272C5F6ull,
+                vs.Get(),ps.Get(),full,false,true,true);
+            ComPtr<ID3D11RenderTargetView> restoredRtv;
+            ComPtr<ID3D11DepthStencilView> restoredDsv;
+            ComPtr<ID3D11BlendState> restoredBlend;
+            ComPtr<ID3D11PixelShader> restoredPs;
+            FLOAT restoredFactors[4]{};UINT restoredMask=0;
+            context->OMGetRenderTargets(1,&restoredRtv,&restoredDsv);
+            context->OMGetBlendState(&restoredBlend,restoredFactors,&restoredMask);
+            context->PSGetShader(&restoredPs,nullptr,nullptr);
+            const bool bindingsRestored=restoredRtv.Get()==liveRtv.Get() &&
+                restoredDsv.Get()==liveDsv.Get() && restoredBlend.Get()==depthOnlyBlend.Get() &&
+                restoredPs.Get()==ps.Get() && restoredMask==~0u;
+            const bool earlySelected=capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
+            const auto beforeClear=captureMask(capture);
+            const FLOAT poolClear[4]={0,0,0,0};
+            context->ClearRenderTargetView(baselineRtv.Get(),poolClear);
+            context->ClearRenderTargetView(liveRtv.Get(),poolClear);
+            auto detail=edvr::FlatMutationDetails::clear(
+                edvr::FlatOverlayMutationOp::ClearRtv,"ClearRenderTargetView",poolClear);
+            detail.view=liveRtv.Get();detail.known|=edvr::FlatMutationDetails::View;
+            capture.noteMutation(liveColor.Get(),detail,2);
+            capture.noteMutation(liveColor.Get(),edvr::FlatMutationDetails::named(
+                edvr::FlatOverlayMutationOp::ClearRtv,"flatRuntimeWritten"),2);
+            const auto afterClear=captureMask(capture);
+            const auto material=submit(capture,observed,used,frame,3,alternateBytes,
+                0x7B0DC42D383F694Cull,0x0DF03E64DF9DBEF1ull,
+                secondVs.Get(),secondPs.Get(),secondRect,false);
+            const auto supported=submit(capture,observed,used,frame,4,alternateBytes,
+                0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                secondVs.Get(),secondPs.Get(),secondRect,true);
+            const auto afterMaterials=captureMask(capture);
+            const auto world=submit(capture,observed,used,frame,5,worldBytes,
+                0xEB5234DB6ADB491Dull,0x22ull,
+                vs.Get(),secondPs.Get(),full,true);
+            const auto afterWorld=captureMask(capture);
+            edvr::FlatContractRecord record{};
+            record.key.color=liveColor.Get();record.key.depth=liveDepth.Get();
+            record.key.dsv=liveDsv.Get();record.key.width=w;record.key.height=h;
+            record.key.vs=0xAACFDCF2FB9AD809ull;
+            record.key.ps=0xCF534B32F491561Aull;
+            std::memcpy(record.camera,alternateBytes,sizeof(record.camera));
+            record.key.camera=record.camera;record.first=record.last=4;record.draws=1;
+            const bool qualified=capture.qualifies(record,worldBytes,0,0);
+            const bool selected=capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0);
+            uint32_t completed=0;
+            const bool accounted=used==2 &&
+                edvr::flatUntrustedObservationAccounted(observed[0],capture,&completed);
+            const auto* clearEvent=capture.mutationDiagnostic(0,0);
+            const auto* duplicate=capture.mutationDiagnostic(0,1);
+            const auto* clearClass=capture.mutationClassDiagnostic(0,0);
+            check(prepass.began && bindingsRestored && earlySelected &&
+                  material.began && supported.began && world.began &&
+                  beforeClear.size()==w*h && afterClear==beforeClear &&
+                  beforeClear[4*w+4]==255 && beforeClear[w+1]==0 &&
+                  afterMaterials.size()==w*h && afterMaterials[4*w+4]==255 &&
+                  afterMaterials[w+1]==255 && afterWorld==afterMaterials &&
+                  qualified && selected && accounted && completed==3 &&
+                  capture.completedDraws(liveDepth.Get(),alternateBytes)==3 &&
+                  clearEvent && duplicate && clearClass &&
+                  clearEvent->details.op==edvr::FlatOverlayMutationOp::ClearRtv &&
+                  clearEvent->details.view==liveRtv.Get() &&
+                  duplicate->details.op==edvr::FlatOverlayMutationOp::ClearRtv &&
+                  duplicate->afterSequence==2 && clearClass->count==2 &&
+                  !capture.failure() && !capture.globalFailure() && sameOriginal(),
+                  "pool RTV clear retains prepass marks, later material receipts, world overdraw and original bytes through H");
+        }
+        {
+            auto captureStorage=std::make_unique<edvr::FlatUntrustedCoverage>();
+            auto& capture=*captureStorage;capture.beginFrame(96);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;clearPair();
+            const auto prepass=submit(capture,observed,used,96,1,alternateBytes,
+                0xCFCA8FFC6B058630ull,0x8A08FF781272C5F6ull,
+                vs.Get(),ps.Get(),full,false,true,true);
+            const FLOAT poolClear[4]={0,0,0,0};
+            context->ClearRenderTargetView(baselineRtv.Get(),poolClear);
+            context->ClearRenderTargetView(liveRtv.Get(),poolClear);
+            capture.noteMutation(liveColor.Get(),edvr::FlatMutationDetails::clear(
+                edvr::FlatOverlayMutationOp::ClearRtv,"ClearRenderTargetView",poolClear),2);
+            capture.noteMutation(liveColor.Get(),edvr::FlatMutationDetails::named(
+                edvr::FlatOverlayMutationOp::ClearRtv,"flatRuntimeWritten"),2);
+            const auto unsupported=submit(capture,observed,used,96,3,alternateBytes,
+                0x7B0DC42D383F694Cull,0x0DF03E64DF9DBEF1ull,
+                secondVs.Get(),unregisteredPs.Get(),secondRect,false);
+            check(prepass.began && unsupported.nominee && !unsupported.began &&
+                  !capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0) &&
+                  !edvr::flatUntrustedObservationAccounted(observed[0],capture) &&
+                  sameOriginal(),
+                  "unsupported later alternate shader still refuses after the retained pool color clear");
+        }
+        {
+            auto captureStorage=std::make_unique<edvr::FlatUntrustedCoverage>();
+            auto& capture=*captureStorage;capture.beginFrame(97);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;clearPair();
+            const auto alternate=submit(capture,observed,used,97,1,alternateBytes,
+                0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                secondVs.Get(),secondPs.Get(),secondRect,true);
+            const FLOAT nonzero[4]={.125f,.375f,.625f,1};
+            context->ClearRenderTargetView(baselineRtv.Get(),nonzero);
+            context->ClearRenderTargetView(liveRtv.Get(),nonzero);
+            capture.noteMutation(liveColor.Get(),edvr::FlatMutationDetails::clear(
+                edvr::FlatOverlayMutationOp::ClearRtv,"ClearRenderTargetView",nonzero),2);
+            capture.noteMutation(liveColor.Get(),edvr::FlatMutationDetails::named(
+                edvr::FlatOverlayMutationOp::ClearRtv,"flatRuntimeWritten"),2);
+            check(alternate.began && capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0) &&
+                  capture.view() && !capture.failure() && sameOriginal(),
+                  "nonzero pool RTV clear preserves private coverage by operation and resource role");
+        }
+        {
+            struct Refusal {ID3D11Resource* resource;edvr::FlatMutationDetails detail;};
+            const Refusal refusals[]={
+                {liveColor.Get(),edvr::FlatMutationDetails::named(edvr::FlatOverlayMutationOp::Written,"untyped-write")},
+                {liveDepth.Get(),edvr::FlatMutationDetails::named(edvr::FlatOverlayMutationOp::ClearRtv,"wrong-role-rtv-clear")},
+                {liveDepth.Get(),edvr::FlatMutationDetails::clearDepth(D3D11_CLEAR_DEPTH,.5f,0)},
+                {liveDepth.Get(),edvr::FlatMutationDetails::clearDepth(D3D11_CLEAR_STENCIL,.5f,3)},
+                {liveColor.Get(),edvr::FlatMutationDetails::named(edvr::FlatOverlayMutationOp::CopyResource,"copy")},
+                {liveColor.Get(),edvr::FlatMutationDetails::named(edvr::FlatOverlayMutationOp::UpdateSubresource,"update")},
+                {liveColor.Get(),edvr::FlatMutationDetails::named(edvr::FlatOverlayMutationOp::Resolve,"resolve")},
+                {nullptr,edvr::FlatMutationDetails::named(edvr::FlatOverlayMutationOp::ClearRtv,"null-clear")}
+            };
+            for(uint32_t i=0;i<sizeof(refusals)/sizeof(refusals[0]);++i) {
+                auto captureStorage=std::make_unique<edvr::FlatUntrustedCoverage>();
+                auto& capture=*captureStorage;capture.beginFrame(87+i);
+                edvr::FlatUntrustedObservedCamera observed[4]{};
+                uint32_t used=0;clearPair();
+                const auto alternate=submit(capture,observed,used,87+i,1,alternateBytes,
+                    0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                    secondVs.Get(),secondPs.Get(),secondRect,true);
+                capture.noteMutation(refusals[i].resource,refusals[i].detail,2);
+                check(alternate.began && !capture.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0) &&
+                      !capture.view() && capture.mutationCount(0)==1 &&
+                      (refusals[i].resource ? capture.failure()!=nullptr :
+                       capture.globalFailure()!=nullptr),
+                      "untyped, depth/stencil, transfer and null mutations still refuse coverage");
+            }
+            auto foreignStorage=std::make_unique<edvr::FlatUntrustedCoverage>();
+            auto& foreign=*foreignStorage;foreign.beginFrame(95);
+            edvr::FlatUntrustedObservedCamera observed[4]{};
+            uint32_t used=0;
+            clearPair();
+            const auto alternate=submit(foreign,observed,used,95,1,alternateBytes,
+                0xAACFDCF2FB9AD809ull,0xCF534B32F491561Aull,
+                secondVs.Get(),secondPs.Get(),secondRect,true);
+            foreign.invalidate("untrusted-foreign-mutation");
+            check(alternate.began && !foreign.select(liveDepth.Get(),liveDsv.Get(),worldBytes,0,0) &&
+                  foreign.globalFailure() && std::strcmp(foreign.globalFailure(),
+                      "untrusted-foreign-mutation")==0,
+                  "foreign mutations retain their global refusal");
+        }
         for(uint32_t scenario=0;scenario<2;++scenario) {
             const uint64_t frame=50+scenario;
             edvr::FlatUntrustedCoverage capture;capture.beginFrame(frame);

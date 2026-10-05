@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** v47 FLOWN: B40B capture qualified; later mutation unidentified.
-  Section 102; diagnostic validated and installed, NOT FLOWN.
+- **State:** v49 FLOWN: pool color clear invalidates completed weapon coverage.
+  Section 102; narrow correction FULL VALIDATION PASSED, pending clean install.
   Epic `v0.18.1-49-g5698007f` installed and verified.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
@@ -32,8 +32,8 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 102: restart Epic; same weapon, F10,10s drawn/10s holstered,
-  then exit. Identify mutation from retained payloads and complete frame trace.
+- **Next:** section 102: validate scoped color-clear handling and its duplicate
+  notification, preserving depth/unknown-write and HDR ownership checks.
   No per-weapon table or near heuristic.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -10847,7 +10847,7 @@ and role so many variants cannot hide a later mutation type. Observe later
 nominee shader preparation after refusal without creating GPU shaders or
 changing admission. Continue existing budgeted H reports on refused frames.
 
-Increase the four-slot F10 ring from4096 to65536 events per frame (about118MiB
+Increase the four-slot F10 ring from4096 to65536 events per frame (about126MiB
 bounded CPU storage, allocated on the heap). Keep existing V3/V4 binary layouts;
 report attempted events, overflow slots and other skip reasons explicitly.
 Tests must cover a twenty-thousand-event refused-frame round trip, exact cap
@@ -10884,3 +10884,67 @@ hold10s, holster10s, then exit. No two-minute wait or per-weapon testing require
 This build changes evidence collection, so world AA may still refuse. Use the
 actual mutation operation/flags/payload and later nominee reports to select
 the rendering fix; do not infer it from the preceding draw or an empty trace.
+
+### 2026-10-04: v49 identifies the pool color clear and retains the full frame
+
+Sean completed the short F10 sequence. Verified edvr_gfx_20261004_183816.log,
+`v0.18.1-49-g5698007f`, build6AC2EF2D, linked2026-10-05 00:28:29UTC.
+Failed frames54886/54946 have completed9/9 and13/13 alternate captures, ready1,
+then ClearRenderTargetView on shared pool color0x1F094368AA0, values all zero,
+after-q4610/4710. Generic flatRuntimeWritten duplicates the notification at the
+same q. Each bucket has two detailed signatures/two classes, no drops; global
+failure none. H camera/depth/DSV, shape/phase and frozen-camera predicates pass.
+
+Ruled out: depth or stencil clear causes these measured refusals, because both
+complete mutation reports identify only a color ClearRtv and its generic write.
+Five later/earlier nominee pairs all have saved VS/PS bytes, patchable bytecode
+and eligible registry metadata. Three patched PS objects exist already; two
+are not yet created. No later bytecode/registry blocker appears in this capture;
+that still does not prove every later GPU/state admission.
+
+F10 frame54972 retains three complete frames,61219 events,30854536 bytes;
+peak25041/cap65536, overflow0, one in-flight slot skipped. Existing trace-check
+parses all three and replays contracts identically. Actual V4 events are504B
+(include32B HDR SRV identities), so fixed ring is132120792B, about126MiB; the
+earlier472B/118MiB estimate omitted that V4 field and is corrected above.
+
+Astra's decoded frame54969 shows depth-write marker q4517, alternate B40B
+prepass q4519..4531, world prepass, pool color-write q4677, then alternate and
+world material draws using the same depth/DSV and two frozen cameras. No depth
+write/copy marker occurs after the alternate capture begins. H is a different
+resource0x1F09436BC20, unique, with late-writes0. This is deferred-pipeline
+ordering and supports retaining the private coverage union across the color
+clear while keeping independent prefix/HDR write accounting. Before editing,
+review duplicate generic-notification handling and WARP preservation/refusal
+tests; no broad exemption for copies, updates or unknown writes.
+
+The correction retains coverage only for typed ClearRtv on bucket.color when
+that resource differs from bucket.depth. The ClearRtv hook labels its generic
+flatRuntimeWritten callback with the same operation; every other caller defaults
+to Written. Do not infer provenance from sequence adjacency. Diagnostic mutation
+records remain. Prefix, HDR, camera, projection and overlay write observers still
+run in their existing order; HDR color clears remain protected independently.
+
+GPU regressions execute real zero/nonzero pool clears between original draws:
+prepass marks survive, later marks accumulate, world overdraw cannot erase them,
+H qualifies with complete receipts, and color/full depth-stencil bytes match the
+uninstrumented baseline with restored bindings. Separate later-unregistered PS,
+untyped write, wrong-role ClearRtv, depth/stencil clear, copy, update, resolve,
+null and foreign controls still refuse. Tests also patch and create the five
+actual v49 PS blobs on WARP. Four new fixtures plus existing CF534 were verified
+by Astra against their EDVR FNV hashes and sizes: B40B:384B,8A08:216B,7268:7104B,
+CF534:3456B,0DF0:7208B. Source/test independent review approved; full build pending.
+
+First full validation compiled production, then the enlarged mono GPU fixture
+exited0xC00000FD (stack overflow) before assertions. The five new large capture
+objects were moved to scoped heap ownership, with explicit memory include;
+assertions and production policy unchanged. Astra reviewed this correction.
+Full rerun uses pool-color-clear-full-rerun.log, retaining the failed build log.
+
+Full absolute build.bat --jobs4 rerun exited0: mono resolve and temporal
+collector PASS, all five real PS patches created on WARP, installer resources
+match and all gates passed. Fresh full-pass receipt created
+2026-10-05T01:05:20.064909Z, inputs SHA256
+`a7e7550b5ebe65f0b0104da3f229e61b2283d9e0159338a66ace921ead890bf6`.
+No production edits followed independent review; heap-only test repair retained
+every assertion. Color-clear correction BUILT, NOT FLOWN.
