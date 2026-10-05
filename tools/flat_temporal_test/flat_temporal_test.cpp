@@ -3479,8 +3479,9 @@ void testFlatUntrustedCameraWiring() {
           "selected H compares every alternate depth-camera observation with completed original draw receipts");
     check(runtime.find("if(alternateObserved || sel.mixedCamera)")!=std::string::npos &&
           runtime.find("if(!s.untrustedUnknown)sel.mixedCamera=true;")!=std::string::npos &&
-          runtime.find("selected.mixedCamera?FlatMonoResolveMode::Taa:s.engine")!=std::string::npos,
-          "an unsupported-only certified alternate is routed through mixed-camera TAA");
+          runtime.find("mixedCamera?FlatMonoResolveMode::Taa:s.engine")==std::string::npos &&
+          runtime.find("const FlatMonoResolveMode effectiveMode=s.engine;")!=std::string::npos,
+          "a certified alternate retains configured backend policy instead of forcing TAA");
     const size_t callback=runtime.find("static bool qualifiedUntrustedSource(");
     const size_t callbackProof=runtime.find("s->untrustedQualificationCalled=true;",callback);
     const size_t callbackRefusal=runtime.find("if(!qualified)s->untrustedQualificationFailed=true;",callback);

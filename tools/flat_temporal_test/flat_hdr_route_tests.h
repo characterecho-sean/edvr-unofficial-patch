@@ -1578,7 +1578,7 @@ inline int flatHdrRouteTests() {
         expect(count(runtime, "Config::get().getString(\"experimental.temporal_aa_before_post\", \"auto\")") == 1,
                "the route's key falls back to auto when the file has no line");
         expect(count(runtime, "flatHdrTriggerSeen(sel,") == 1 &&
-                   count(runtime, "sel.mixedCamera?FlatMonoResolveMode::Taa:s.engine);") == 1 &&
+                   count(runtime, "sel.mixedCamera?FlatMonoResolveMode::Taa:s.engine);") == 0 &&
                    count(runtime, "flatFrameSeenFor(") == 1 &&
                    count(runtime, "if (routeSeen == FlatFrameSeen::Treatable) { s.frameSeen = FlatFrameSeen::Treatable;") == 1,
                "the route adds to a frame's stand-down verdict through flatHdrTriggerSeen only; the copy stage is the one other caller of flatFrameSeenFor");

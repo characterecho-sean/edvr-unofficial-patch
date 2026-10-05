@@ -44,6 +44,7 @@ std::vector<uint64_t> motionHashLog; // one entry per backend call, in call orde
 std::vector<int> backendSlots;
 std::vector<std::string> firstPersonLines;
 std::vector<std::string> weaponFootprintLines;
+std::vector<std::string> resolveInputLines;
 uint32_t observedInW=0,observedInH=0,observedOutW=0,observedOutH=0;
 // What the stub backends were handed on the HDR route (section 81): the flag and the formats of the textures it names.
 bool observedHdr=false;DXGI_FORMAT observedColourFormat=DXGI_FORMAT_UNKNOWN,observedOutFormat=DXGI_FORMAT_UNKNOWN;
@@ -155,6 +156,7 @@ void Log::note(const char* fmt,...) {
     else if(std::strncmp(line,firstPersonPrefix,sizeof(firstPersonPrefix)-1)==0)firstPersonLines.emplace_back(line);
     else if(std::strncmp(line,isolationPrefix,sizeof(isolationPrefix)-1)==0)isolationLines.emplace_back(line);
     else if(std::strncmp(line,"flat weapon footprint:",22)==0)weaponFootprintLines.emplace_back(line);
+    else if(std::strncmp(line,"flat resolve inputs:",20)==0)resolveInputLines.emplace_back(line);
 }
 // Stand-in for src\common\proxy.cpp's breadcrumb(): the route's crumbs land here so the rig can read the trail back.
 void breadcrumb(const char* stage) {if(stage)crumbLines.emplace_back(stage);}
@@ -203,6 +205,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_loop_output_gpu_tests.h"
 #include "flat_foreground_ownership_gpu_tests.h"
 #include "flat_hdr_route_gpu_tests.h"
+#include "flat_resolve_input_gpu_tests.h"
 #include "flat_resolve_fixture.h"
 #include "flat_upscaler_slot_gpu_tests.h"
 #include "flat_first_person_gpu_tests.h"
@@ -797,6 +800,7 @@ int main(int argc,char** argv) {
     failures+=flatWeaponFootprintGpuTests(device.Get(),context.Get());
     failures+=flatOverlayLayerGpuTests(device.Get(),context.Get());
     failures+=flatLoopOutputGpuTests(device.Get(),context.Get());
+    failures+=flatResolveInputGpuTests(device.Get(),context.Get());
     failures+=flatForegroundOwnershipGpuTests(device.Get(),context.Get());
     // The HDR route's resolver half (design section 81): before the D3D message check below, so its draws are held to it.
     hdrRouteGpuTests(device.Get(),context.Get());

@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** color-clear weapon-AA fault CLOSED (102); plasma refusal OPEN (103).
-  Loop repair and separate trace q pass full validation; Epic flight pending (103).
+- **State:** color-clear weapon-AA fault CLOSED (102); plasma AA fault OPEN (103).
+  Loop gate cleared; plasma draw covers 1% offline; visual fault persists (103).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -17,10 +17,10 @@
   gate-2 matrix cells; section 78: nine of ten refusing ship pairs reciped
   (census 46), vs_C7FA0C0F5DD49180 refused until its blob is captured; the
   upstream camera hook is now design-flat-camera-integration.md.
-- **Priority (Sean):** performance over code sharing. Share math/backends where
-  cheap; keep separate frame scheduling/capture paths when that avoids copies,
-  synchronization or additional per-draw work. Defer broad core extraction
-  until flat capture establishes the necessary boundary.
+- **Priority (Sean):** performance over code sharing; honor configured backend.
+  Mixed cameras must not downgrade DLAA/FSR to TAA. Share math/backends where
+  cheap; separate scheduling/capture when it saves copies/sync/per-draw work.
+  Defer broad core extraction until flat capture establishes the boundary.
 - **Recommendation:** two installer artifacts, one graphics implementation, one
   temporal pipeline, separate VR and mono frame adapters. Flat installs enable
   only temporal AA and its required support services.
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** promote/install the clean build, then confirm plasma AA on Epic (103).
+- **Next:** configured-backend build; plasma NumLock capture, wait 10 s (103).
   Retain section 102's qualified color-clear fix; no per-weapon table.
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
@@ -11307,3 +11307,111 @@ The source is ready for commit, main push and clean DLL-only promotion.
 Install on Epic with the current flat INI preserved. Next flight: draw the
 same plasma weapon; if AA drops, press NumLock and keep it drawn ten seconds.
 No two-minute wait and no weapon-by-weapon test matrix are required.
+
+2026-10-05, follow-up flight `edvr_gfx_20261005_095515.log` matches installed
+`v0.18.2-5-g7bc87490`, build `6AC3C7A3`, linked 15:52:03 UTC. Sean still
+sees AA disabled with plasma and took NumLock. Ruled out: the loop gate alone
+explains the visible fault, because at 09:58:16.835 all 76 replay candidates
+complete with zero refusals, and the same plasma PS is retained/eligible.
+The log reports 3274 treated frames overall; temporal draw failure counters
+are sparse. NumLock selected tone/resolve draws on frames 45215-45217.
+Next discriminate backend disengagement versus an overbroad overlay mask:
+check actual resolve eligibility/backend evaluations, and measure the saved
+coverage texture's nonzero fraction and extent. The captured plasma PS has
+no discard, so surviving raster fragments are not proof of visible color
+contribution under dual-source blending. Require actual mask/output evidence
+before changing coverage semantics; retain the qualified loop repair.
+
+The later focused log read confirms 1348 replay candidates/completions and
+zero replay refusals. At 09:58:11.835, 141/141 HDR frames reach, evaluate,
+finish and restore; 141 continue valid history, with cumulative backend
+failures zero. Ruled out: backend disengagement or permanent history reset
+explains this steady interval. `configured=dlss effective-last=taa` is a
+separate confirmed policy override: `treatHdr` chooses TAA for mixed cameras,
+and the renderer currently refuses untrusted coverage for SDK modes.
+Sean explicitly requires honoring configured DLAA/FSR without that downgrade.
+Support the configured backend safely; do not merely remove the selection
+ternary and leave the renderer's SDK-input refusal in place.
+
+All six new FTR5 packets validate, but omit the now-successful plasma pair
+and the private EDVR coverage textures. The actual t12 overlay mask is absent,
+and the HDR consumer's large resource payloads were capped. A genuine earlier
+supported-alternate untrusted-mask GPU sample (frame 44417) marks 5465 of
+8294400 pixels (0.066%); this refutes a full-screen untrusted union for that
+sample, not the unmeasured plasma overlay mask. Prefer offline footprint
+replay of the older exact plasma packet: its shader has no discard, depth
+or sample-mask output, so the captured VS/IA/depth/stencil path plus a solid
+PS can establish raster extent without all material textures. Color-change
+claims additionally require the original material shader and HDR parity.
+
+The older original plasma packet `49882/17170` has every required original
+resource (468732820 bytes). The new offline WARP diagnostic recreates its
+original shader, IA, raster, blend and depth/stencil state. Passing raster
+coverage is 84181/8294400 pixels (1.01491%), with inclusive bounds
+`(2351,1535)-(2657,1899)`. Captured before/after HDR changes exactly those
+84181 pixels; no captured masked pixel is bitwise identical. WARP depth and
+stencil match the captured after image exactly. Color parity is incomplete:
+13098 pixels differ, all within coverage, maximum decoded channel error 0.5,
+maximum scaled error `abs(delta)/(1+abs(captured))=0.027027`; 18 pixels exceed
+1% scaled error, none are nonfinite. Do not attribute the differences to
+hardware without evidence, or treat this as exact material-output parity.
+Ruled out: this saved plasma draw's own passing raster mask covers the entire
+world, because it covers only 1.01491%. Other overlay draws, their union, and
+the current flight remain unmeasured. The legacy trace association remains
+invalid; original resource/state replay does not repair or validate it.
+
+Mixed-camera coverage is logged at frame 43232, 784 frames before the plasma
+pair's first logged late-overlay draw at 44016. The forced TAA choice therefore
+predates that plasma draw and is a separate policy issue. Runtime selection,
+preflight and telemetry must preserve `s.engine`. Until SDK input ownership is
+qualified, an explicit refusal is honest; it is not an AA fix. Do not install
+a downgrade-removal-only change and claim the plasma problem is solved.
+
+The private pixel capture cancels TAA/FSR routes and only runs after successful
+backend evaluation. That explains the missing private masks in this NumLock
+capture. Add manually armed prebackend evidence before the mixed-camera SDK
+guard: original H/depth, optional clean H, full-plane overlay/untrusted masks,
+camera/phase/backend metadata and explicit prebackend status. Stage resources
+asynchronously without GPU waits, retain no borrowed game pointers, and keep
+the byte cap. A refused attempt must still export its available inputs; it
+must not fabricate successful backend images. The existing successful pixel
+capture needs mode-correct TAA ping-pong output if extended to TAA/FSR.
+
+Implemented diagnostic, 2026-10-05: all three flat route selectors now retain
+the configured engine. The SDK mixed-camera refusal guard is unchanged:
+DLAA/DLSS/FSR may decline these frames, but cannot silently run TAA. This is
+not a qualified plasma-AA fix. NumLock stages prebackend H, raw depth,
+optional clean H, full overlay/untrusted masks, slots, the structured pool
+and scene-now/previous buffers, with camera, phase and prep metadata. Present
+polls owned staging resources without GPU waits; absent inputs, budget caps
+and failures are explicit. Two attempts share a 384 MiB cap, with 64 MiB
+file chunks. The log bundler includes each input-capture directory atomically
+for the selected session. The older successful-output capture still covers
+DLSS/DLAA only; these input files never claim a backend output.
+
+Focused validation: actual WARP renderer calls for DLAA/DLSS/FSR retain the
+SDK refusal, leave H unchanged and complete the input capture through normal
+Present polling. Exact mask/engine bytes, CRCs, view ranges, all-mips views,
+unarmed inertness, budget/timeout/publication failures and whole-session
+bundling pass. Existing 46-frame temporal corpus remains byte-identical.
+The standalone offline replay has missing/corrupt-input and write-free dry-run
+checks plus real depth/stencil pass/fail cases and private-DSV isolation.
+
+Environment: Epic flat desktop DX11, 3840 x 2160 render/output; no VR runtime
+or headset in this test. Installed NVIDIA DLL file/product version is
+`310,9,1,0`, SHA256 `3975567B8943C53ACCE397F2B72380092F84F162D00B0D2C7D08A1025C563983`.
+The internal two-camera coverage limit is unchanged. Next evidence is one
+plasma-drawn NumLock capture and 10 seconds for asynchronous readback: compare
+the full overlay/untrusted union with the captured engine records and camera
+inputs. No weapon matrix or two-minute wait is required.
+
+Full validation: `configured-backend-inputs-full-retry.log` passes all 122
+jobs, quiet checks and installer/package gates. Receipt fingerprint is
+`7836d2f8919896989d15ee47c0276648e52d791da7c181200be2e20b61aa9bdf`.
+The first `--jobs 8` run stopped at the unchanged heartbeat H5.reader check,
+which combines throughput and tear detection without distinguishing them.
+Two isolated runs passed all 30 checks; the full `--jobs 4` retry passed the
+unchanged gate. No heartbeat source or assertion was changed. The coverage
+summary now labels the configured attempt `attempt-mode`, rather than
+claiming an effective backend on refused frames. Runtime refusal only
+invalidates history; Present still polls the staged input capture.

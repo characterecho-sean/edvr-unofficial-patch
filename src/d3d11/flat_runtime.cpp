@@ -2570,7 +2570,7 @@ static void hdrSelectAtTrigger(State& s) {
         // outrank the copy stage's structural one, and at R < D every frame the copy route refuses would read as transient, so
         // the stand-down and the F8 warning would never start.
         const FlatFrameSeen routeSeen = flatHdrTriggerSeen(sel,
-            sel.mixedCamera?FlatMonoResolveMode::Taa:s.engine);
+            s.engine);
         if (routeSeen == FlatFrameSeen::Treatable) { s.frameSeen = FlatFrameSeen::Treatable; s.frameReason = sel.reason; }
     }
     {
@@ -2639,12 +2639,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.untrusted.pollMask(s.context.Get());
     if(frame && frame%300==0 &&
        (s.untrustedAccepted || s.untrustedRefused || s.untrustedTreated || s.untrustedWorldExcluded)) {
-        Log::get().note("flat untrusted camera coverage summary: frame=%llu selected=%llu capture-refused=%llu world-excluded=%llu actually-treated=%llu configured=%s effective-last=%s last-draws=%u last-ready=%u last-unknown=%u nominee-witnesses=%u nominee-dropped=%u unclassified-witnesses=%u unclassified-dropped=%u last-selector=%s last-failure=%s audit-emitted=%u audit-dropped=%u supported-first=%u supported-second=%u last-qualification=%s",
+        Log::get().note("flat untrusted camera coverage summary: frame=%llu selected=%llu capture-refused=%llu world-excluded=%llu actually-treated=%llu configured=%s attempt-mode=%s last-draws=%u last-ready=%u last-unknown=%u nominee-witnesses=%u nominee-dropped=%u unclassified-witnesses=%u unclassified-dropped=%u last-selector=%s last-failure=%s audit-emitted=%u audit-dropped=%u supported-first=%u supported-second=%u last-qualification=%s",
             (unsigned long long)frame,(unsigned long long)s.untrustedAccepted,
             (unsigned long long)s.untrustedRefused,(unsigned long long)s.untrustedWorldExcluded,
             (unsigned long long)s.untrustedTreated,
             flatMonoResolveModeName(s.engine),
-            flatMonoResolveModeName(s.hdrSelected.mixedCamera?FlatMonoResolveMode::Taa:s.engine),
+            flatMonoResolveModeName(s.engine),
             s.untrusted.drawCount(),s.untrusted.view()?1u:0u,s.untrustedUnknown?1u:0u,
             s.untrustedNomineeDiagnosticsUsed,s.untrustedNomineeDiagnosticsDropped,
             s.unclassifiedConsumerDiagnosticsUsed,s.unclassifiedConsumerDiagnosticsDropped,
@@ -4610,7 +4610,7 @@ bool FlatRuntimeDrawScope::recover(const char* temporalReason) {
 // its own, and counts as the refusal it is; if even that fails H is still the game's and the frame is declined.
 void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvSlot) {
     auto& s = state();
-    const FlatMonoResolveMode effectiveMode=selected.mixedCamera?FlatMonoResolveMode::Taa:s.engine;
+    const FlatMonoResolveMode effectiveMode=s.engine;
     // Crash-safe breadcrumbs (flat_hdr_crumbs.h, edvr_breadcrumbs.txt): the route took this frame. The first frames that
     // reach the resolver write a crumb before and after every step from here to the frame's Present, so a session that
     // ends inside the treatment names the step; after the third, this is one compare. They change nothing the route does.

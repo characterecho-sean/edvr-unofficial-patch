@@ -14,6 +14,7 @@
 #include "flat_cpu.h"
 #include "flat_hdr_crumbs.h"
 #include "flat_pixel_capture.h"
+#include "flat_resolve_input_capture.h"
 #include "flat_projection_math.h"
 
 namespace edvr {
@@ -46,6 +47,7 @@ struct CrumbScope {
 // Like renderer state, explicit owner-thread cleanup only: never release live
 // driver resources from static destruction under the DLL loader lock.
 FlatPixelCapture& pixels=*new FlatPixelCapture;
+FlatResolveInputCapture& resolveInputs=*new FlatResolveInputCapture;
 struct Image {
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> srv;
@@ -704,12 +706,16 @@ FlatMonoResolvePreflightResult flatMonoResolvePreflight(ID3D11Device* device,
         result.reason?result.reason:"none");
     return result;
 }
-void flatMonoResolveReset() { pixels.cancel();++stats.fullResets;stats.currentContinueRun=0;g=State{}; }
+void flatMonoResolveReset() { pixels.cancel();resolveInputs.cancel();++stats.fullResets;stats.currentContinueRun=0;g=State{}; }
 void flatMonoResolveSetIsolation(FlatContextIsolation request) { g_isolationRequest=request; }
 void flatMonoResolveArmPixels(uint64_t frame) {
     try { pixels.arm(frame); } catch(...) { pixels.cancel(); }
+    try { resolveInputs.arm(frame); } catch(...) { resolveInputs.cancel(); }
 }
 void flatMonoResolvePollPixels(ID3D11DeviceContext* context,uint64_t frame) {
+    if(resolveInputs.active()) {
+        try { resolveInputs.poll(context,frame); } catch(...) { resolveInputs.cancel(); }
+    }
     if(!pixels.active())return;
     try { pixels.poll(context,frame); } catch(...) { pixels.cancel(); }
 }
@@ -759,6 +765,11 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(hdr && (evalW!=f.renderWidth || evalH!=f.renderHeight || f.renderWidth<f.outputWidth || f.renderHeight<f.outputHeight))
         return fail(reason,"flat-resolve-hdr-requires-render-size-evaluation");
     const bool untrusted=f.untrustedCameraCoverage!=nullptr;
+    // Manual evidence observes full input planes even when the SDK guard
+    // below refuses this attempt. It never implies backend evaluation.
+    if(resolveInputs.active()) {
+        try { resolveInputs.capture(device,context,f); } catch(...) { resolveInputs.cancel(); }
+    }
     if(untrusted && (!hdr || f.mode!=FlatMonoResolveMode::Taa ||
                      f.outputWidth!=f.renderWidth || f.outputHeight!=f.renderHeight))
         return fail(reason,"flat-resolve-untrusted-coverage-requires-native-HDR-TAA");

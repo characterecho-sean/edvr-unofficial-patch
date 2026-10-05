@@ -239,9 +239,10 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
     for (size_t i = 0; i < files.size(); ++i) {
         HANDLE source = CreateFileW(files[i].c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        const bool packetFile = names[i].compare(0, 18, L"flat_draw_packets/") == 0;
+        const bool packetFile = names[i].compare(0, 18, L"flat_draw_packets/") == 0 ||
+                                names[i].find(L"flat_pixels/resolve_inputs_") == 0;
         if (source == INVALID_HANDLE_VALUE) {
-            if(packetFile) return fail("draw packet capture became unreadable; no partial bundle was retained");
+            if(packetFile) return fail("atomic capture became unreadable; no partial bundle was retained");
             skipped.push_back(names[i]); continue;
         }
         LARGE_INTEGER length{};
@@ -249,7 +250,7 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         if (!GetFileSizeEx(source, &length) || length.QuadPart < 0 ||
             !GetFileTime(source, nullptr, nullptr, &written)) {
             CloseHandle(source);
-            if(packetFile) return fail("draw packet capture metadata became unreadable; no partial bundle was retained");
+            if(packetFile) return fail("atomic capture metadata became unreadable; no partial bundle was retained");
             skipped.push_back(names[i]);
             continue;
         }
@@ -290,7 +291,7 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         LARGE_INTEGER zero{};
         if (!readOk || !SetFilePointerEx(source, zero, nullptr, FILE_BEGIN)) {
             CloseHandle(source);
-            if(packetFile) return fail("draw packet capture could not be scanned; no partial bundle was retained");
+            if(packetFile) return fail("atomic capture could not be scanned; no partial bundle was retained");
             skipped.push_back(names[i]); continue;
         }
         std::vector<unsigned char> header;
@@ -317,7 +318,7 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         CloseHandle(source);
         if (!readOk || copiedCrc != entry.crc || (packetFile && !unchanged)) {
             if (!rollback(entry.offset)) return fail("could not roll back a changed capture file");
-            if(packetFile) return fail("a draw packet source changed during ZIP scan/copy; no partial bundle was retained");
+            if(packetFile) return fail("an atomic capture source changed during ZIP scan/copy; no partial bundle was retained");
             // Live logs may append while collected. A stable copied prefix
             // is valid; a prefix that changed is omitted with an explicit note.
             skipped.push_back(names[i]);continue;
@@ -504,7 +505,9 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
             if (ch == INVALID_HANDLE_VALUE) continue;
             do {
                 if (wcscmp(cfd.cFileName, L".") == 0 || wcscmp(cfd.cFileName, L"..") == 0) continue;
-                if(packetRoot && (cfd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                const bool resolveInputs=wcscmp(root,L"flat_pixels")==0 && wcsncmp(cfd.cFileName,L"resolve_inputs_",15)==0;
+                const bool atomicCapture=packetRoot || resolveInputs;
+                if(atomicCapture && (cfd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
                     bundle.notes.push_back("Capture omitted (reparse point): "+toUtf8(std::wstring(root)+L"/"+cfd.cFileName));
                     continue;
                 }
@@ -518,19 +521,19 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
                     if (sh == INVALID_HANDLE_VALUE) continue;
                     do {
                         if (sfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-                        if (!packetRoot && secondsBetween(sfd.ftLastWriteTime, newestLog) > kSessionWindowSeconds)
+                        if (!atomicCapture && secondsBetween(sfd.ftLastWriteTime, newestLog) > kSessionWindowSeconds)
                             continue;
                         caps.push_back({joinPath(joinPath(rootPath, sub), sfd.cFileName),
                                         std::wstring(root) + L"/" + sub + L"/" + sfd.cFileName,
-                                        wcscmp(root,L"flat_draw_packets")==0 ? sub : L"",
+                                        atomicCapture ? std::wstring(root)+L"/"+sub : L"",
                                         sfd.ftLastWriteTime,
                                         (static_cast<unsigned long long>(sfd.nFileSizeHigh) << 32) |
                                             sfd.nFileSizeLow,
-                                        packetRoot && (sfd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)!=0});
+                                        atomicCapture && (sfd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)!=0});
                     } while (FindNextFileW(sh, &sfd));
                     FindClose(sh);
                 } else {
-                    if(packetRoot) {
+                    if(atomicCapture) {
                         bundle.notes.push_back("Capture omitted (capture folder required): "+toUtf8(std::wstring(root)+L"/"+cfd.cFileName));
                         continue;
                     }

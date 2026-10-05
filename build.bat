@@ -1300,6 +1300,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit /b 1 )
 "%BUILD%\flat_mono_resolve_test.exe" --dry-run || exit /b 1
 "%BUILD%\flat_mono_resolve_test.exe" --self-test || exit /b 1
+python "tools\flat_resolve_inputs.py" --verify-fixture "%BUILD%\flat-pixel-fixture" || exit /b 1
 python "tools\flat_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
 python "tools\flat_draw_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
 python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-fixture" --verify-fixture || exit /b 1
@@ -2576,6 +2577,20 @@ python "tools\flat_draw_packets.py" --self-test || (
     echo [edvr] ERROR: the flat draw packet reader failed its own test
     exit /b 1
 )
+python "tools\flat_packet_replay.py" --self-test || (
+    echo [edvr] ERROR: the offline flat packet replay preparer failed its own test
+    exit /b 1
+)
+python "tools\flat_resolve_inputs.py" --self-test || (
+    echo [edvr] ERROR: the prebackend resolve input reader failed its own test
+    exit /b 1
+)
+if not exist "%OBJ%\flat_packet_replay" mkdir "%OBJ%\flat_packet_replay"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\flat_packet_replay\replay.obj" /Fe"%BUILD%\flat_packet_replay.exe" ^
+    "tools\flat_packet_replay\flat_packet_replay.cpp" /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: offline flat packet replay compile failed & exit /b 1 )
+"%BUILD%\flat_packet_replay.exe" --self-test || exit /b 1
 python "tools\flat_weapon_pixels.py" --self-test || (
     echo [edvr] ERROR: the flat weapon footprint analyzer failed its own test
     exit /b 1

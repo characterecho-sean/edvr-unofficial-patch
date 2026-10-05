@@ -373,7 +373,7 @@ inline int flatHdrCrumbWiringTests() {
 
     // -- the runtime's draw scope: admission first, the reach after the last decline that precedes the resolver --
     const std::string treat = body(runtime, "void FlatRuntimeDrawScope::treatHdr(");
-    ordered(treat, {"auto& s = state();", "const FlatMonoResolveMode effectiveMode=selected.mixedCamera?FlatMonoResolveMode::Taa:s.engine;",
+    ordered(treat, {"auto& s = state();", "const FlatMonoResolveMode effectiveMode=s.engine;",
                     "hdrCrumbAdmit(s.prefix.frame, flatMonoResolveModeName(effectiveMode));", "++s.hdrWindow.steps.admitted;",
                     "const auto reach = [&](const char* step) {", "hdrCrumbReach(s.prefix.frame, flatMonoResolveModeName(effectiveMode), step);",
                     "const auto decline = [&](const char* why) {", "hdrCrumbDeclined(why);", "if (s.hdrLatch.tripped) { decline(\"latched-off\"); return; }"},

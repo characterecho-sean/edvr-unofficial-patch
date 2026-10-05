@@ -4475,6 +4475,16 @@ static void testLogBundle(const std::wstring& scratch) {
         return group;
     };
     const auto late=packetFixture(L"late",10);
+    const auto resolveRoot=joinPath(logs,L"flat_pixels");
+    const auto resolveLate=joinPath(resolveRoot,L"resolve_inputs_late");makeTree(resolveLate);
+    writeAll(joinPath(resolveLate,L"manifest.json"),"{\"stage\":\"prebackend\",\"backend_status\":\"not-run\"}");
+    writeAll(joinPath(resolveLate,L"inputs_frame_1.json"),"{\"complete\":true}");
+    writeAll(joinPath(resolveLate,L"overlay.bin"),"full-plane-mask");
+    bundleStamp(joinPath(resolveLate,L"manifest.json"),27,10);
+    bundleStamp(joinPath(resolveLate,L"inputs_frame_1.json"),27,10);
+    bundleStamp(joinPath(resolveLate,L"overlay.bin"),27,2);
+    const auto resolveMissing=joinPath(resolveRoot,L"resolve_inputs_missing");makeTree(resolveMissing);
+    writeAll(joinPath(resolveMissing,L"overlay.bin"),"orphan");bundleStamp(joinPath(resolveMissing,L"overlay.bin"),27,10);
     // Member straddles the old three-minute boundary while the manifest is
     // ten minutes into a session. The selected folder must retain both.
     bundleStamp(joinPath(late,L"payload.bin"),27,2);
@@ -4509,6 +4519,11 @@ static void testLogBundle(const std::wstring& scratch) {
     check(bundleHas(names, "edvr.ini"), "the settings file is in");
     check(bundleHas(names,"flat_draw_packets/late/manifest.json")&&bundleHas(names,"flat_draw_packets/late/payload.bin"),
           "packet capture ten minutes into a flight retains its whole folder across member timestamp boundaries");
+    check(bundleHas(names,"flat_pixels/resolve_inputs_late/manifest.json") &&
+          bundleHas(names,"flat_pixels/resolve_inputs_late/inputs_frame_1.json") &&
+          zipPayloadEquals(bundle.zipPath,"flat_pixels/resolve_inputs_late/overlay.bin","full-plane-mask"),
+          "prebackend input capture remains atomic ten minutes into a flight with intact mask CRC");
+    check(!bundleHas(names,"flat_pixels/resolve_inputs_missing/overlay.bin"),"prebackend input folder without manifest is omitted atomically");
     check(!bundleHas(names,"flat_draw_packets/missing_manifest/payload.bin"),"packet folder without manifest is omitted atomically");
     check(!bundleHas(names,"flat_draw_packets/over_budget/manifest.json")&&!bundleHas(names,"flat_draw_packets/over_budget/payload.bin"),"over-budget packet group retains no misleading manifest or partial payload");
     check(!bundleHas(names,"flat_draw_packets/previous/manifest.json"),"packet from earlier session is omitted");
