@@ -17,6 +17,8 @@
 #include "../../src/d3d11/flat_mono_shader_source.h"
 #include "../../src/d3d11/engine_velocity_primary_copy_shader.h"
 #include "../../src/d3d11/fixed_shader_source.h"
+#include "../../src/d3d11/flat_foreground_motion_shader.h"
+#include "../../src/d3d11/flat_domain_marker_shader.h"
 #include "../../src/d3d11/ui_resolve.h"
 #include "../../src/d3d11/night_vision_shader.h"
 #include "../../src/d3d11/stellar_coverage.h"
@@ -298,6 +300,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), coreFixed.begin(), coreFixed.end());
     const auto extra = extraVariants();
     variants.insert(variants.end(), extra.begin(), extra.end());
+    const auto foreground = foregroundVariants();
+    variants.insert(variants.end(), foreground.begin(), foreground.end());
     return variants;
 }
 
@@ -516,8 +520,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 58 && coreLegacy.size() + 3 == coreFixed.size(),
-          "all original fixed shader contracts and three bounded diagnostics are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 63 && coreLegacy.size() + 8 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics and five flat foreground shaders are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -588,6 +592,33 @@ static void selfTest() {
                     desc.Type==expected.type && desc.BindPoint==expected.slot && desc.BindCount==1;
             }
             check(bound,"foreground diagnostic payload retains its measured inputs and outputs at fixed slots");
+        }
+    }
+
+    const struct {const char* symbol;const char* name;const char* source;const char* profile;} foreground[] = {
+        {"kFlatForegroundMotionVsBytecode","flat foreground motion",edvr::kFlatForegroundMotionVs,"vs_5_0"},
+        {"kFlatForegroundMotionPsBytecode","flat foreground motion",edvr::kFlatForegroundMotionPs,"ps_5_0"},
+        {"kFlatNullWorldMarkerPsBytecode","flat null world marker",edvr::kFlatNullWorldMarkerPs,"ps_5_0"},
+        {"kFlatNullForeignMarkerPsBytecode","flat null foreign marker",edvr::kFlatNullForeignMarkerPs,"ps_5_0"},
+        {"kFlatNullPoolMarkerPsBytecode","flat null pool marker",edvr::kFlatNullPoolMarkerPs,"ps_5_0"},
+    };
+    for(size_t i=0;i<5;++i) {
+        auto& shader=coreFixed[coreLegacy.size()+3+i];
+        check(!std::strcmp(shader.symbol,foreground[i].symbol) &&
+              !std::strcmp(shader.sourceName,foreground[i].name) &&
+              !std::strcmp(shader.entry,"main") && !std::strcmp(shader.profile,foreground[i].profile) &&
+              shader.alternate==foreground[i].source && shader.macros==nullptr && !shader.flags1 && !shader.flags2,
+              "each flat foreground payload has its distinct symbol and exact source/stage contract");
+        check(compile(compiler.fn,shader.alternate,shader,true) && shader.bytes.size()>4 &&
+              !std::memcmp(shader.bytes.data(),"DXBC",4),"each flat foreground shader compiles to fixed DXBC");
+        if(reflect && !shader.bytes.empty()) {
+            ComPtr<ID3D11ShaderReflection> reflection;D3D11_SHADER_DESC desc{};
+            const HRESULT hr=reflect(shader.bytes.data(),shader.bytes.size(),__uuidof(ID3D11ShaderReflection),
+                                    reinterpret_cast<void**>(reflection.GetAddressOf()));
+            const unsigned stage=i==0?D3D11_SHVER_VERTEX_SHADER:D3D11_SHVER_PIXEL_SHADER;
+            check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                  D3D11_SHVER_GET_TYPE(desc.Version)==stage && D3D11_SHVER_GET_MAJOR(desc.Version)==5,
+                  "flat foreground payload reflects its registered SM5 stage");
         }
     }
 

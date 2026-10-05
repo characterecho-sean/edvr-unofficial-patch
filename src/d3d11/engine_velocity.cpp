@@ -1,4 +1,6 @@
 #include "engine_velocity.h"
+#include "temporal_shader_bytecode.h"
+#include "dxbc_flat_overlay.h"
 
 #include <windows.h>
 #include <d3d11.h>
@@ -281,6 +283,28 @@ struct Eye {
 // Eyes 0 and 1, and the on-foot source (kEngineVelocitySourceEye): the same
 // eye-frame rules for a pass into the source's depth.
 Eye g_eyes[3];
+// Slot ownership can start before world naming. Scene/pool snapshots retain
+// their original world-only lifecycle and do not use this frame stamp.
+uint32_t g_flatMarkerFrame=~0u;
+Ptr<ID3D11Texture2D> g_flatMarkerDepth;
+struct FlatDomainSaved {
+    Ptr<ID3D11DeviceContext> context;
+    Ptr<ID3D11VertexShader> vs;
+    Ptr<ID3D11PixelShader> ps;
+    Ptr<ID3D11BlendState> blend;
+    Ptr<ID3D11RenderTargetView> targets[8];
+    Ptr<ID3D11DepthStencilView> depth;
+    FLOAT factor[4]{};UINT sampleMask=~0u;
+};
+FlatDomainSaved g_flatDomainSaved;
+struct FlatDomainShader {
+    Ptr<ID3D11VertexShader> originalVs,patchedVs;
+    Ptr<ID3D11PixelShader> originalPs,patchedPs;
+    FlatEngineDomain domain=FlatEngineDomain::World;
+    bool coverage=false;
+};
+std::vector<FlatDomainShader> g_flatDomainShaders;
+
 static_assert(kEngineVelocitySourceEye == 2 && kWatchSlots == 6, "one watch pair per eye, the source's last");
 // The on-foot source's depth as screen_motion last named it, and the present
 // frame it did (~0u: never). A pool draw into this depth is the source pass
@@ -1478,7 +1502,9 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             // The census (issue #38): the eye-frame's clear, its own span --
             // a separate call site from the snapshot below, not merged with it.
             GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
-            ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+            if(!runtimeFlatProfile() || g_flatMarkerFrame!=frame || g_flatMarkerDepth.Get()!=depthTex.Get())
+                ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
+            if(runtimeFlatProfile()){g_flatMarkerFrame=frame;g_flatMarkerDepth=depthTex;}
             engineVelocityNoteStateCalls(1);
         }
         endCapture(ctx, clearTimer);
@@ -1964,6 +1990,7 @@ void releasePrimaryPoolsLocked() {
 }
 
 void clearLocked() {
+    g_flatDomainSaved={};g_flatDomainShaders.clear();g_flatMarkerFrame=~0u;g_flatMarkerDepth.Reset();
     releasePrimaryPoolsLocked();
     for (auto& e : g_eyes) e = Eye{};
     g_sourceDepth.Reset();
@@ -2118,6 +2145,142 @@ void engineVelocityAfterFlatDraw(ID3D11DeviceContext* ctx) {
 // The lazy flat bracket (engine_velocity.h). Owner thread. What is owner-only here (g_flatGame, the cache,
 // g_bound's reads) is read without the lock, so a run of draws that changed nothing costs no mutex at all;
 // whatever puts state back takes it.
+bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext* ctx,ID3D11Texture2D* depth,
+    const void* vsBytes,size_t vsSize,const void* psBytes,size_t psSize,
+    FlatEngineDomain domain,const char** reason,bool coverage) {
+    const bool pool=domain!=FlatEngineDomain::World;
+    auto fail=[&](const char* why){if(reason)*reason=why;return false;};
+    if(reason)*reason=nullptr;
+    if(!runtimeFlatProfile() || !ctx || !depth ||
+       ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return fail("flat-domain-invalid-input");
+    engineVelocityFlatFlush(ctx,EngineVelocityFlushCause::kOtherDraw);
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if(g_flatDomainSaved.context)return fail("flat-domain-nested-bracket");
+    FlatDomainSaved saved; saved.context=ctx;
+    UINT classes=0;ctx->VSGetShader(&saved.vs,nullptr,&classes);if(classes)return fail("flat-domain-VS-linkage");
+    ctx->PSGetShader(&saved.ps,nullptr,&classes);if(classes)return fail("flat-domain-PS-linkage");
+    if(!saved.vs)return fail("flat-domain-shader-missing");
+    if(saved.ps && (!psBytes || !psSize))return fail("flat-domain-PS-bytecode-missing");
+    if(saved.ps)try {
+        const auto chunks=dxbc_engine_velocity_detail::parseContainer(psBytes,psSize,dxbc_engine_velocity_detail::kPs50);
+        for(const auto& chunk:chunks)if(chunk.tag==dxbc_engine_velocity_detail::kTagOsgn)
+            for(const auto& output:dxbc_engine_velocity_detail::parseSignature(chunk.bytes))
+                if(output.systemValue && output.systemValue!=64)return fail("flat-domain-depth-or-coverage-output");
+        if(domain==FlatEngineDomain::ForeignPool)for(const auto& chunk:chunks)
+            if(dxbc_engine_velocity_detail::isProgram(chunk.tag)) {
+                const auto words=dxbc_engine_velocity_detail::programWords(chunk.bytes);
+                for(size_t at=2;at<words.size();at+=dxbc_engine_velocity_detail::instructionLength(words,at))
+                    if((words[at]&0x7ffu)==13)return fail("flat-domain-foreign-discard-provenance");
+            }
+    } catch(...) {return fail("flat-domain-output-signature");}
+    Ptr<ID3D11GeometryShader> gs;Ptr<ID3D11HullShader> hs;Ptr<ID3D11DomainShader> ds;
+    ctx->GSGetShader(&gs,nullptr,nullptr);ctx->HSGetShader(&hs,nullptr,nullptr);ctx->DSGetShader(&ds,nullptr,nullptr);
+    if(gs || hs || ds)return fail("flat-domain-unsupported-shader-stage");
+    Ptr<ID3D11Predicate> predicate;BOOL predicateValue=FALSE;ctx->GetPredication(&predicate,&predicateValue);
+    if(predicate)return fail("flat-domain-predication");
+    ID3D11Buffer* so[4]{};ctx->SOGetTargets(4,so);bool busy=false;
+    for(auto* p:so)if(p){busy=true;p->Release();}
+    if(busy)return fail("flat-domain-stream-output");
+    ID3D11UnorderedAccessView* uavs[8]{};
+    ctx->OMGetRenderTargetsAndUnorderedAccessViews(0,nullptr,nullptr,0,8,uavs);
+    for(auto* p:uavs)if(p){busy=true;p->Release();}
+    if(busy)return fail("flat-domain-uav");
+    ID3D11RenderTargetView* targets[8]{};ctx->OMGetRenderTargets(8,targets,&saved.depth);
+    for(unsigned i=0;i<8;++i)saved.targets[i].Attach(targets[i]);
+    if(!saved.depth || targets[kEngineVelocityTarget])return fail("flat-domain-native-MRT6-or-depth");
+    if(coverage && !targets[kFlatOverlayTarget])return fail("flat-domain-coverage-target-missing");
+    Ptr<ID3D11Resource> actualDepth;saved.depth->GetResource(&actualDepth);
+    if(actualDepth.Get()!=depth)return fail("flat-domain-depth-identity");
+    D3D11_TEXTURE2D_DESC desc{};depth->GetDesc(&desc);
+    if(desc.SampleDesc.Count!=1 || desc.MipLevels!=1 || desc.ArraySize!=1 ||
+       (desc.Format!=DXGI_FORMAT_R32_TYPELESS && desc.Format!=DXGI_FORMAT_R32G8X24_TYPELESS &&
+        desc.Format!=DXGI_FORMAT_D32_FLOAT && desc.Format!=DXGI_FORMAT_D32_FLOAT_S8X24_UINT))
+        return fail("flat-domain-depth-format");
+    auto shader=std::find_if(g_flatDomainShaders.begin(),g_flatDomainShaders.end(),[&](const FlatDomainShader& s){
+        return s.originalVs==saved.vs && s.originalPs==saved.ps && s.domain==domain && s.coverage==coverage;});
+    if(shader==g_flatDomainShaders.end()) {
+        if(g_flatDomainShaders.size()>=64)return fail("flat-domain-shader-cap");
+        EngineVelocityInputs inputs{};std::string why;
+        if(pool) {
+            if(!engineVelocityDeriveInputs(vsBytes,vsSize,inputs,why))return fail("flat-domain-pool-contract");
+            if(!saved.ps) {
+                uint32_t maximum=0;
+                const auto chunks=dxbc_engine_velocity_detail::parseContainer(vsBytes,vsSize,dxbc_engine_velocity_detail::kVs50);
+                for(const auto& chunk:chunks)if(chunk.tag==dxbc_engine_velocity_detail::kTagOsgn)
+                    for(const auto& output:dxbc_engine_velocity_detail::parseSignature(chunk.bytes))maximum=std::max(maximum,output.registerIndex);
+                if(maximum>=31)return fail("flat-domain-null-PS-slot-register");
+                inputs.identityRegister=maximum+1;inputs.identityComponent=0;inputs.slotFromVsPatch=true;
+            }
+        } else {inputs.positionRegister=30;inputs.identityRegister=31;inputs.identityComponent=0;}
+        FlatDomainShader entry;entry.originalVs=saved.vs;entry.originalPs=saved.ps;entry.domain=domain;entry.coverage=coverage;
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);std::vector<BYTE> bytes;
+        const auto kind=domain==FlatEngineDomain::ForeignPool?dxbc_engine_velocity_detail::FlatMarkerKind::ForeignPool:
+            domain==FlatEngineDomain::WorldPool?dxbc_engine_velocity_detail::FlatMarkerKind::None:dxbc_engine_velocity_detail::FlatMarkerKind::World;
+        if(saved.ps) {
+            if(!engineVelocityPatchPs(psBytes,psSize,inputs,bytes,why,false,kind))return fail("flat-domain-PS-proof");
+        } else {
+            const BYTE* code=domain==FlatEngineDomain::ForeignPool?kFlatNullForeignMarkerPsBytecode:
+                domain==FlatEngineDomain::WorldPool?kFlatNullPoolMarkerPsBytecode:kFlatNullWorldMarkerPsBytecode;
+            const size_t size=domain==FlatEngineDomain::ForeignPool?sizeof(kFlatNullForeignMarkerPsBytecode):
+                domain==FlatEngineDomain::WorldPool?sizeof(kFlatNullPoolMarkerPsBytecode):sizeof(kFlatNullWorldMarkerPsBytecode);
+            if(pool)bytes=dxbc_engine_velocity_detail::relocateNullPoolInput(code,size,inputs.identityRegister);
+            else bytes.assign(code,code+size);
+        }
+        if(coverage) {
+            std::vector<BYTE> combined;
+            if(!flatOverlayPatchPs(bytes.data(),bytes.size(),combined,why))return fail("flat-domain-combined-coverage-proof");
+            bytes=std::move(combined);
+        }
+        t_creating=true;HRESULT hr=dev->CreatePixelShader(bytes.data(),bytes.size(),nullptr,&entry.patchedPs);t_creating=false;
+        if(FAILED(hr))return fail("flat-domain-PS-create");
+        if(pool && inputs.slotFromVsPatch) {
+            if(!engineVelocityPatchVs(vsBytes,vsSize,inputs,bytes,why))return fail("flat-domain-VS-proof");
+            t_creating=true;hr=dev->CreateVertexShader(bytes.data(),bytes.size(),nullptr,&entry.patchedVs);t_creating=false;
+            if(FAILED(hr))return fail("flat-domain-VS-create");
+        }
+        g_flatDomainShaders.push_back(std::move(entry));shader=g_flatDomainShaders.end()-1;
+    }
+    ctx->OMGetBlendState(&saved.blend,saved.factor,&saved.sampleMask);
+    const char* blendReason=nullptr;ID3D11BlendState* blend=derivedBlendFor(ctx,saved.blend.Get(),&blendReason);
+    if(!blend)return fail(blendReason?blendReason:"flat-domain-blend");
+    Eye& e=g_eyes[kEngineVelocitySourceEye];const auto frame=frameNow();
+    if(g_flatMarkerFrame==frame && g_flatMarkerDepth.Get()!=depth)return fail("flat-domain-multiple-depths");
+    if(!ensureSlots(ctx,e,kEngineVelocitySourceEye,depth))return fail("flat-domain-slot-allocation");
+    if(g_flatMarkerFrame!=frame) {
+        const float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(e.slotsRtv.Get(),empty);
+        g_flatMarkerFrame=frame;g_flatMarkerDepth=depth;
+    }
+    targets[kEngineVelocityTarget]=e.slotsRtv.Get();
+    vScreenSetRenderTargetsRaw(ctx,8,targets,saved.depth.Get());
+    vScreenOMSetBlendStateRaw(ctx,blend,saved.factor,saved.sampleMask);
+    if(shader->patchedVs)vScreenVSSetShaderRaw(ctx,shader->patchedVs.Get(),nullptr,0);
+    vScreenPSSetShaderRaw(ctx,shader->patchedPs.Get(),nullptr,0);
+    g_flatDomainSaved=std::move(saved);
+    ID3D11RenderTargetView* verified[8]{};ctx->OMGetRenderTargets(8,verified,nullptr);
+    bool bound=verified[kEngineVelocityTarget]==e.slotsRtv.Get();
+    for(unsigned i=0;i<8;++i)if(i!=kEngineVelocityTarget && verified[i]!=g_flatDomainSaved.targets[i].Get())bound=false;
+    Ptr<ID3D11PixelShader> heldPs;ctx->PSGetShader(&heldPs,nullptr,nullptr);
+    if(heldPs!=shader->patchedPs)bound=false;
+    for(auto* view:verified)if(view)view->Release();
+    if(!bound){engineVelocityFlatDomainEndDraw(ctx);return fail("flat-domain-slot-bind-refused");}
+    return true;
+}
+void engineVelocityFlatDomainEndDraw(ID3D11DeviceContext* ctx) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    auto& s=g_flatDomainSaved;if(!s.context)return;
+    if(ctx!=s.context.Get()){s={};return;}
+    ID3D11RenderTargetView* targets[8]{};for(unsigned i=0;i<8;++i)targets[i]=s.targets[i].Get();
+    vScreenPSSetShaderRaw(ctx,s.ps.Get(),nullptr,0);vScreenVSSetShaderRaw(ctx,s.vs.Get(),nullptr,0);
+    vScreenOMSetBlendStateRaw(ctx,s.blend.Get(),s.factor,s.sampleMask);vScreenSetRenderTargetsRaw(ctx,8,targets,s.depth.Get());
+    s={};cache=DrawCache{};
+}
+bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth,ID3D11ShaderResourceView** out) {
+    if(out)*out=nullptr;std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    auto& e=g_eyes[kEngineVelocitySourceEye];
+    if(!out || g_flatMarkerFrame!=frameNow() || g_flatMarkerDepth.Get()!=depth || e.depth.Get()!=depth || !e.slotsSrv)return false;
+    *out=e.slotsSrv.Get();(*out)->AddRef();return true;
+}
+
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6) {
     const bool wasBound = g_flatPending.load(std::memory_order_relaxed);
     flatSaveTargets(ctx);

@@ -37,6 +37,16 @@ static std::vector<Variant> coreVariants(const std::string& core) {
     };
 }
 
+static std::vector<Variant> foregroundVariants() {
+    return {
+        {"kFlatForegroundMotionVsBytecode", "flat foreground motion", "main", nullptr, {}, false, edvr::kFlatForegroundMotionVs, "vs_5_0"},
+        {"kFlatForegroundMotionPsBytecode", "flat foreground motion", "main", nullptr, {}, false, edvr::kFlatForegroundMotionPs, "ps_5_0"},
+        {"kFlatNullWorldMarkerPsBytecode", "flat null world marker", "main", nullptr, {}, false, edvr::kFlatNullWorldMarkerPs, "ps_5_0"},
+        {"kFlatNullForeignMarkerPsBytecode", "flat null foreign marker", "main", nullptr, {}, false, edvr::kFlatNullForeignMarkerPs, "ps_5_0"},
+        {"kFlatNullPoolMarkerPsBytecode", "flat null pool marker", "main", nullptr, {}, false, edvr::kFlatNullPoolMarkerPs, "ps_5_0"},
+    };
+}
+
 static std::vector<LegacyContract> coreLegacyContracts() {
     return {
         {"ui_layer_composite_cs", "main", "cs_5_0", nullptr, 0x237EEBB920BC9015ull},

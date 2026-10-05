@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** weapon replay/TAA works; flat mixed-camera SDK AA OPEN (103).
-  Loop gate cleared; latest plasma works in TAA; the SDK guard still blocks.
+- **State:** weapon replay/TAA works; shared flat SDK path qualified offline (103).
+  Geometry, phase, mono regression and full-build gates pass; BUILT, NOT FLOWN.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,8 +33,8 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** lightweight NumLock; offline shared VR motion/ownership work (103).
-  Retain section 102's qualified color-clear fix; no per-weapon table.
+- **Next:** push and verified Epic test install, then one plasma draw/holster test.
+  Retain section 102's qualified color-clear fix; no per-weapon table (103).
   Quiet performance recovered; building shimmer is unqualified. Section 87:
   native FSR comparison. Preserve section 83's remaining matrix and open items.
   Preserve high-G motion and strict depth ownership; do not repeat qualified
@@ -11488,3 +11488,113 @@ This diagnostic-policy change does not claim to fix SDK AA engagement.
 Full validation for the diagnostic policy: `build/capture-policy-full.log`,
 all 122 jobs plus installer/package gates passed. Receipt fingerprint is
 `edd2bced98da58d903dde81ca356530db948cf0cb5b824dcfb7225027ec78932`.
+
+### 2026-10-05: shared animated-history implementation and SDK input qualification
+
+Hypothesis confirmed before editing: the private DLSS input capture's 998,337
+alternate-camera pixels all carry the cleared `(-1,0)` marker, while the source
+adapter excludes the foreign animated producer. The missing producer and final
+camera ownership prevent SDK motion/depth qualification; the configured backend
+must remain unchanged.
+
+The VR position/identity producer is extracted into a bounded shared history.
+Its existing source/stencil scheduling, shaders and timer boundaries stay in the
+VR adapter. Focused WARP tests pass 80,537 checks. Separately compiled original
+and extracted implementations produce identical bytes for all 18 existing VR
+motion maps (1,769,472 bytes). Flat may retain one four-byte GPU instance index
+for its deferred ownership raster; VR asks for no new copy.
+
+Flat-only DXBC marker variants preserve original color/depth in seven synthetic
+shader families. Foreign slots use negative odd codes distinct from clear;
+passing world fragments replace foreign ownership, including equal-depth draws.
+The resolver now has an explicit qualified foreground-motion/depth contract,
+with canonical world-convention depth. Native TAA keeps its conservative union.
+Production admission remains subject to the adapter's complete qualification.
+
+Ruled out: an invented invalid/offscreen motion vector as a shared SDK local
+history reset. NVIDIA's direct NGX contract supplies a frame reset and actual
+current-to-previous motion; Streamline's invalid-vector setting fills missing
+camera motion and is not that contract. FSR's out-of-image history check follows
+nearest-depth motion dilation, so a fabricated vector is not a guaranteed local
+RGB-history exclusion. No zero-motion substitute or reset-every-frame is added.
+
+Complete plasma packet descriptors establish that IA.VB0 is a dynamic CPU-writable
+688,128-byte buffer and VS t33 is a dynamic CPU-writable 336-byte structured pool.
+A bounded flat-only identity ledger can read the actual index/allocation identity
+from full CPU writes and invalidate on unsupported/GPU mutation. This avoids a
+per-frame GPU wait. Unique prior identities select actual captured positions;
+new identities require a transition reset, and ambiguous prior inputs remain an
+explicit qualification failure until equivalence is proven.
+
+Offline qualification now covers 105,506 WARP checks for the shared history,
+CPU upload witness and deferred foreground raster. The raster uses actual
+captured clip positions, including signed previous W and current triangles
+crossing the eye plane. Common SDK depth derives from the captured constant
+clip-Z; it does not assume that CPU camera metadata is the rendered near plane.
+Final slot and exact device-depth equality filter world overdraw. Unsupported
+foreign discard/depth/coverage shaders remain explicit contract refusals.
+
+The focused mono resolve suite passes with DLAA, DLSS and FSR backend stand-ins
+receiving the exact foreground motion and common-near depth. A genuinely new
+identity resets once; stable identities continue. Stale, missing, malformed or
+unqualified maps refuse before evaluation. Native TAA keeps its previous route.
+The existing mutation tests still catch all 21 first-person, 18 raster-phase and
+22 steady-detail mutations. These checks establish adapter/input behavior,
+not in-game SDK image quality or performance.
+
+Independent HEAD/current mono rigs using the identical HEAD test corpus both
+pass. All 20,939 complete texture readbacks are byte-identical: 16,249,856 pixel
+bytes, SHA256 of the 16,584,880-byte records (including shape/format headers)
+`48aa8fcc6328c4c2dfb3f3e8a7509bf28147e1a5245ec3c0be487e427744b9aa`.
+This pins the existing VR/TAA/backend-input paths across the shared shader edit;
+the comparison harnesses and logs are under `build/mono-shader-parity`.
+
+Environment: the pending Epic test is Windows native D3D11, flat native HDR at
+3840x2160, with the existing pinned DLSS 310.9.1 runtime. Flat history requires
+the qualified 336-byte animated pool and is bounded to 64 retained draw records;
+the deferred map is bounded to 16 million pixels. No VR runtime/headset selection
+or eye scheduling is changed by this extraction. VR output parity is offline
+evidence; it does not replace a live regression qualification on other runtimes.
+
+The combined original-to-MRT6-to-MRT7 shader avoids competing substitutions:
+one game draw writes final ownership and conservative coverage. The focused
+engine rig passes 13,235 checks, including identical original color/depth bytes,
+foreign/world ownership and coverage together, and null-PS depth-only markers.
+Single-camera SDK admission keeps its prior route. Only an actually mixed-camera
+H requires the new domain producer; private late-HDR overlay protection remains
+its existing qualified clean-color boundary.
+
+Ruled out: global upstream camera ownership proves each foreign draw's phase.
+The refresh hook admits centered alternate-near cameras, but its global receipt
+does not name every upload. A new bounded witness reads the actual bound b1
+publication and requires the measured projection shift and near to match the
+draw's phase before capture. The final focused shared-history rig passes 105,532
+checks, including zero/nonzero actual GPU camera rows, incorrect phase claims,
+near mismatch and unsupported off-center projections. It adds no GPU readback
+to production. The runtime also invalidates history certificates on UAV writes.
+
+Full-build qualification caught three test integration errors before installation.
+The five new payloads now append after the original shader registry, preserving
+all legacy byte/stage contracts; each new payload has independent registration,
+compile and stage checks. The null-marker color oracle now reads exactly one
+raw word per RGBA8 pixel and compares bytes across all four nonzero seeded
+targets. Its former word3664 comparison exceeded the actual 960-pixel plane.
+Ruled out: null-marker color corruption as that failure's cause; both the
+original production policy and a temporary alternate policy pass the corrected
+pixel oracle. No extra write-mask policy is retained: the D3D11 output contract
+already leaves undeclared render-target outputs untouched
+([D3D11 spec section 16.9.1](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm)).
+
+The HDR progress-wiring test also retained the former literal 14-slot cleanup.
+The foreground path binds and clears 16 slots; other frames retain 14. Its
+source-order assertion now follows that conditional count while still requiring
+cleanup before the completed-preparation counter and timing step.
+
+Final absolute-path `build.bat --jobs 4` passed all gates with exit 0, including
+production DLLs, Python self-tests, GPU/CPU test rigs, PE checks and both
+self-contained installer profiles. Log: `build/shared-foreground-full-final.log`.
+The full-pass receipt was written at 2026-10-05 20:21:15 UTC, input fingerprint
+`5d050812d44de3bb4f359ff1e9c5bde69c4c1dd28918f125bf385db8fea64091`.
+Source is frozen for commit and clean-version promotion. BUILT, NOT FLOWN;
+the next qualification is one plasma draw/holster transition in the configured
+DLAA/DLSS/FSR mode, with ordinary NumLock if the backend refuses.

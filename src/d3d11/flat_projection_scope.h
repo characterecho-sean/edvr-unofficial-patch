@@ -1,4 +1,5 @@
 #pragma once
+#include <cstring>
 #include <d3d11_1.h>
 #include <wrl/client.h>
 #include <cstddef>
@@ -45,6 +46,11 @@ public:
     void invalidate() { ready_ = false; if (prepared_) prepared_->ready = false; }
     FlatPrivateProjectionBinding binding(FlatProjectionStage, UINT slot, UINT first = 0, UINT count = 4096) const;
     uint64_t uploads() const { return uploads_; }
+    bool copyUploadedConstants(ID3D11Buffer* buffer,uint32_t offset,uint32_t count,void* out) const {
+        if(!out || !count || !ready_ || !prepared_ || !prepared_->ready || !uploads_ ||
+           buffer!=replacement_.Get() || !scratch_ || offset>width_ || count>width_-offset)return false;
+        std::memcpy(out,scratch_.get()+offset,count);return true;
+    }
 private:
     bool prepareSnapshot(const FlatProjectionShadowView&, const FlatProjectionPatchRequest*,
                          uint32_t, const FlatProjectionJitter&, uint32_t);

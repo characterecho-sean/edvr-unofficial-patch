@@ -21,6 +21,11 @@
 #include "flat_replay_query_tracker.h"
 #include "flat_untrusted_coverage.h"
 #include "flat_foreground_probe.h"
+#include "flat_foreground_identity.h"
+#include "flat_foreground_motion.h"
+#include "flat_foreground_certificate.h"
+#include "flat_foreground_phase.h"
+#include "dxbc_engine_velocity.h"
 #include "flat_pixel_capture_policy.h"
 #include "flat_local_reject.h"
 #include "flat_trace.h"
@@ -82,6 +87,7 @@ std::atomic<uint64_t> mapBouncePresentEpoch{1};
 std::atomic<bool> foreignWork{false};
 std::atomic<bool> overlaySuffixActive{false};
 std::atomic<bool> foregroundProbeActive{false};
+std::atomic<bool> foregroundDomainActive{false};
 std::atomic<bool> untrustedCoverageActive{false};
 FlatCaptureRequest projectionAuditRequested;
 template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
@@ -204,6 +210,17 @@ struct State {
     std::map<std::pair<uint64_t,uint64_t>,ReplayShaderCapture> overlayReplayShaderCaptures;
     bool overlayReplayShaderCaptureCapReported=false;
     FlatForegroundProbe foreground;
+    FlatForegroundIdentity foregroundIdentity;
+    FlatForegroundMotion foregroundMotion;
+    Ptr<ID3D11Texture2D> foregroundDomainDepth;
+    std::array<Ptr<ID3D11Resource>,6> foregroundDomainColors;
+    uint64_t foregroundDomainFrame=~0ull;
+    bool foregroundColorWritten=false;
+    const char* foregroundHRefusal=nullptr;
+    struct DomainCounts {
+        uint64_t foreignSeen=0,captured=0,worldMarkers=0,nullMarkers=0,markerRefused=0;
+        uint64_t identityKnown=0,identityUnavailable=0,certificateMissing=0,hAttempts=0,hQualified=0;
+    } foregroundCounts;
     FlatUntrustedCoverage untrusted;
     bool untrustedUnknown = false;
     bool untrustedSupportedAlternate = false;
@@ -462,6 +479,14 @@ struct State {
 };
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
+static void reportForegroundDomain(State& s) {
+    const auto& n=s.foregroundCounts;
+    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu world-markers=%llu null-markers=%llu marker-refused=%llu identity-known=%llu identity-unpublished=%llu certificate-missing=%llu H-attempts=%llu H-qualified=%llu last-refusal=%s; counts are original-writer evidence, qualification alone is not a completed SDK call",
+        flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
+        (unsigned long long)n.worldMarkers,(unsigned long long)n.nullMarkers,(unsigned long long)n.markerRefused,
+        (unsigned long long)n.identityKnown,(unsigned long long)n.identityUnavailable,(unsigned long long)n.certificateMissing,
+        (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,s.foregroundMotion.refusal()?s.foregroundMotion.refusal():s.foregroundHRefusal?s.foregroundHRefusal:"none");
+}
 bool owner() { return state().thread == GetCurrentThreadId(); }
 void armDrawPackets(State& s,uint64_t frame) {
     const auto root=Config::get().logDir()+L"\\flat_draw_packets";
@@ -1526,6 +1551,8 @@ const FlatProjectionBindingPlan* qualifyProjection(State& s, FlatProjectionRecip
 }
 void reset() { auto& s = state(); s.havePrevious = false; FlatComputeInternalScope guard; flatMonoResolveInvalidateHistory(); }
 void overlayFail(State& s, const char* reason, const void* hdr = nullptr) {
+    if(s.engine!=FlatMonoResolveMode::Taa && s.foregroundDomainDepth)
+        s.foregroundMotion.fail("foreground-private-overlay-failed");
     if (s.overlayFailureNoted) return;
     s.overlayFailureNoted = true;
     overlaySuffixActive.store(false,std::memory_order_release);
@@ -1982,6 +2009,8 @@ void flatRuntimeResize() {
     overlaySuffixActive.store(false,std::memory_order_release);
     s.overlay.reset();
     s.foreground.reset();
+    s.foregroundIdentity.reset();
+    s.foregroundMotion={};s.foregroundDomainDepth.Reset();s.foregroundDomainFrame=~0ull;
     s.untrusted.reset();
     s.untrustedUnknown=false;
     s.untrustedSupportedAlternate=false;
@@ -1989,6 +2018,7 @@ void flatRuntimeResize() {
     s.untrustedQualificationFailed=false;
     s.unclassifiedPoolUsed=0;s.unclassifiedPoolOverflow=false;
     foregroundProbeActive.store(false,std::memory_order_release);
+    foregroundDomainActive.store(false,std::memory_order_release);
     untrustedCoverageActive.store(false,std::memory_order_release);
     s.overlayFailureNoted=false;
     s.weaponFootprint.cancel("resize-or-stop");flatMonoResolveReset();
@@ -2706,6 +2736,10 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         s.engine = _stricmp(mode.c_str(), "fsr") == 0 ? FlatMonoResolveMode::Fsr :
             _stricmp(mode.c_str(), "dlss") == 0 ? FlatMonoResolveMode::Dlss :
             _stricmp(mode.c_str(), "dlaa") == 0 ? FlatMonoResolveMode::Dlaa : FlatMonoResolveMode::Taa;
+        if(s.engine==FlatMonoResolveMode::Taa) {
+            s.foregroundMotion.reset();s.foregroundIdentity.reset();s.foregroundDomainDepth.Reset();
+            for(auto& color:s.foregroundDomainColors)color.Reset();foregroundDomainActive.store(false,std::memory_order_release);
+        }
         Log::get().note("flat runtime: mode=%s experimental mono temporal; game SS controls render size; jitter uses qualified D3D11 projection scopes", mode.c_str());
     }
     g_flatRuntimeLive.store(false, std::memory_order_release);
@@ -2875,7 +2909,10 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         reportProjection(s,"complete");
     }
     const auto captureRequest=projectionAuditRequested.take();
-    if(captureRequest!=FlatCaptureTier::None)Log::get().note("flat capture general: configured=%s last=%s accepted=%llu refused=%llu tier=%s; backend/refusal and environment counters follow normal census",mode.c_str(),s.reason,(unsigned long long)s.accepted,(unsigned long long)s.refused,flatCaptureBulk(captureRequest)?"full":"general");
+    if(captureRequest!=FlatCaptureTier::None) {
+        Log::get().note("flat capture general: configured=%s last=%s accepted=%llu refused=%llu tier=%s; backend/refusal and environment counters follow normal census",mode.c_str(),s.reason,(unsigned long long)s.accepted,(unsigned long long)s.refused,flatCaptureBulk(captureRequest)?"full":"general");
+        reportForegroundDomain(s);
+    }
     if(flatCaptureBulk(captureRequest)) {
         armDrawIngress();
         // A diagnostic asks for everything, refused frames included: the stand-down ends.
@@ -3006,6 +3043,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // frames for an F10 dump instead of filling with empty ones.
     if (s.work != FlatWork::Paused) s.prefix = FlatRuntimePrefix{};
     s.prefix.frame = frame + 1;
+    if(s.engine!=FlatMonoResolveMode::Taa && s.work==FlatWork::Full) {
+        s.foregroundDomainFrame=s.prefix.frame;s.foregroundDomainDepth.Reset();s.foregroundColorWritten=false;
+        for(auto& color:s.foregroundDomainColors)color.Reset();
+        s.foregroundMotion.beginFrame(static_cast<unsigned>(s.prefix.frame));
+        foregroundDomainActive.store(true,std::memory_order_release);
+    } else foregroundDomainActive.store(false,std::memory_order_release);
     s.overlay.beginFrame(frame + 1);
     s.untrusted.beginFrame(frame + 1);
     s.untrustedUnknown=false;
@@ -3048,6 +3091,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         if(s.projectionFrames)reportProjection(s,"progress");
         else reportUnknownProjection(s,"5s");
         s.foreground.logStatus();
+        reportForegroundDomain(s);
         Log::get().note("flat HDR image continuation: accepted=%llu refused=%llu; source writes require current matching scene provenance",
             (unsigned long long)s.hdrCopiesAccepted,(unsigned long long)s.hdrCopiesRefused);
         // static-scene-frames: frames the resolver was handed with the menu's stale-slot policy on
@@ -3410,6 +3454,12 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
         }
     }
     for (const auto& u : s.uavs) if (u) {
+        if(s.engine!=FlatMonoResolveMode::Taa) {
+            s.foregroundIdentity.written(u.Get());s.foregroundMotion.resourceWritten(u.Get());
+            if(s.foregroundDomainDepth.Get()==u.Get())s.foregroundMotion.fail("foreground-dispatch-depth-write");
+            if(s.foregroundColorWritten)for(const auto& color:s.foregroundDomainColors)
+                if(color && color.Get()==u.Get())s.foregroundMotion.fail("foreground-dispatch-color-write");
+        }
         { flatcpu::Scope trace(flatcpu::kTrace); flatTraceMark(s.traceRing, kFlatTraceEventDispatchWritten, u.Get()); }
         flatRuntimeDispatchObserveWritten(s.prefix, u.Get());
         if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
@@ -3429,6 +3479,12 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 // body flatRuntimeWritten, Map and Update share, timed by the caller's scope.
 static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
                             FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written) {
+    if(s.engine!=FlatMonoResolveMode::Taa)s.foregroundIdentity.written(res);
+    if(s.engine!=FlatMonoResolveMode::Taa)s.foregroundMotion.resourceWritten(res);
+    if(s.engine!=FlatMonoResolveMode::Taa && s.foregroundDomainDepth &&
+       (!res || s.foregroundDomainDepth.Get()==res))s.foregroundMotion.fail("foreground-depth-or-unknown-mutation");
+    if(s.engine!=FlatMonoResolveMode::Taa && s.foregroundColorWritten)
+        for(const auto& color:s.foregroundDomainColors)if(color && color.Get()==res)s.foregroundMotion.fail("foreground-color-mutation");
     if(s.untrusted.active())s.untrusted.noteMutation(res,
         FlatMutationDetails::named(provenance,entry),s.prefix.sequence);
     if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
@@ -3477,6 +3533,18 @@ const char* overlayMutationRoleName(FlatOverlayMutationRole role) {
 }
 void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMutationOp op,
                                        const FlatMutationDetails& details) {
+    if(foregroundDomainActive.load(std::memory_order_acquire)) {
+        if(!owner())foreignWork.store(true,std::memory_order_release);
+        else {
+            if(op!=FlatOverlayMutationOp::Map && op!=FlatOverlayMutationOp::Unmap && op!=FlatOverlayMutationOp::UpdateSubresource)
+                state().foregroundIdentity.written(resource);
+            state().foregroundMotion.resourceWritten(resource);
+            if(state().foregroundDomainDepth && (!resource || state().foregroundDomainDepth.Get()==resource))
+                state().foregroundMotion.fail("foreground-depth-or-unknown-mutation");
+            if(state().foregroundColorWritten)for(const auto& color:state().foregroundDomainColors)
+                if(color && color.Get()==resource)state().foregroundMotion.fail("foreground-color-mutation");
+        }
+    }
     if(untrustedCoverageActive.load(std::memory_order_acquire)) {
         if(!owner())foreignWork.store(true,std::memory_order_release);
         else {
@@ -3516,6 +3584,7 @@ void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMut
 void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op,
                                    const FlatMutationDetails& details) {
     if (!overlaySuffixActive.load(std::memory_order_acquire) &&
+        !foregroundDomainActive.load(std::memory_order_acquire) &&
         !foregroundProbeActive.load(std::memory_order_acquire) &&
         !untrustedCoverageActive.load(std::memory_order_acquire)) return;
     if (!owner()) { foreignWork.store(true,std::memory_order_release); return; }
@@ -3526,9 +3595,11 @@ void flatRuntimeOverlayViewMutation(ID3D11View* view, FlatOverlayMutationOp op,
 }
 void flatRuntimeOverlayForeignMutation() {
     if (!overlaySuffixActive.load(std::memory_order_acquire) &&
+        !foregroundDomainActive.load(std::memory_order_acquire) &&
         !foregroundProbeActive.load(std::memory_order_acquire) &&
         !untrustedCoverageActive.load(std::memory_order_acquire)) return;
     foreignWork.store(true,std::memory_order_release);
+    if(owner() && foregroundDomainActive.load(std::memory_order_relaxed))state().foregroundMotion.fail("foreground-foreign-mutation");
     if(owner() && untrustedCoverageActive.load(std::memory_order_relaxed))
         state().untrusted.invalidate("untrusted-foreign-mutation");
     if(owner() && foregroundProbeActive.load(std::memory_order_relaxed))state().foreground.noteForeign();
@@ -3622,11 +3693,13 @@ void flatRuntimeMap(ID3D11Resource* res, D3D11_MAP type, void* bytes) {
     if (!owner() || type == D3D11_MAP_READ || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
     resourceWritten(state(), res,"flatRuntimeMap"); if (auto* c = camera(res, false)) state().cameras.setMapped(*c, bytes);
+    if(state().engine!=FlatMonoResolveMode::Taa)state().foregroundIdentity.map(res,type,bytes);
     if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows); state().projection->observeMap(res,type,bytes); }
 }
 void flatRuntimeUnmap(ID3D11Resource* res) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
+    if(state().engine!=FlatMonoResolveMode::Taa)state().foregroundIdentity.unmap(res);
     if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows); state().projection->observeUnmap(res); }
     if (auto* c = camera(res, false)) {
         if (c->mapped) { capture(*c, c->mapped); if (state().work == FlatWork::Full) cameraWitness(res); }
@@ -3637,6 +3710,7 @@ void flatRuntimeUpdate(ID3D11Resource* res, const void* bytes, const D3D11_BOX* 
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
     resourceWritten(state(), res,"flatRuntimeUpdate");
+    if(state().engine!=FlatMonoResolveMode::Taa)state().foregroundIdentity.update(res,bytes,box);
     if (auto* c = camera(res, false)) {
         if (!box || (box->left == 0 && box->right == c->width)) { capture(*c, bytes); if (state().work == FlatWork::Full) cameraWitness(res); }
     }
@@ -3732,6 +3806,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     drawPacketJitterBefore=s.jitterRefusals;drawPacketOverlayBefore=s.overlayRefusedWindow;
     weaponDrawKind=kind;weaponDrawCount=count;weaponDrawStart=start;weaponDrawBase=base;
     weaponDrawInstances=instances;weaponDrawStartInstance=startInstance;
+    if(s.engine!=FlatMonoResolveMode::Taa && s.work==FlatWork::Full && s.foregroundDomainFrame!=s.prefix.frame) {
+        s.foregroundDomainFrame=s.prefix.frame;s.foregroundDomainDepth.Reset();s.foregroundColorWritten=false;
+        for(auto& color:s.foregroundDomainColors)color.Reset();
+        foregroundDomainActive.store(true,std::memory_order_release);
+        s.foregroundMotion.beginFrame(static_cast<unsigned>(s.prefix.frame));
+    }
     FlatRuntimeDraw d{}; auto& k = d.key;
     // Lazy substitution (engine_velocity.h): engine motion's state may still be bound from the producer draw before this
     // one, and stays bound only while nothing that could see it runs. A diagnostic capture reads the context, so with
@@ -4176,6 +4256,38 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     const bool foregroundGap=s.foreground.needsPreWorldState(
         static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)));
+    // The flat SDK ownership plane follows every original writer on the
+    // selected native scene DSV. Unknown writers fail qualification; depth
+    // equality alone cannot certify ownership after world overdraw.
+    const bool nativeDepthExtent=k.depthWidth==s.prefix.width && k.depthHeight==s.prefix.height;
+    if(s.engine!=FlatMonoResolveMode::Taa && s.foregroundColorWritten && !k.depth)
+        for(const auto& color:s.foregroundDomainColors)if(color && color.Get()==k.color)
+            s.foregroundMotion.fail("foreground-color-writer-without-depth");
+    if(s.engine!=FlatMonoResolveMode::Taa && s.work==FlatWork::Full && k.depth && (sceneExtent || nativeDepthExtent)) {
+        if(!s.foregroundDomainDepth)s.foregroundDomainDepth=static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth));
+        if(s.foregroundDomainDepth.Get()!=k.depth)s.foregroundMotion.fail("foreground-multiple-scene-depths");
+        const uint8_t* raw=nullptr;size_t rawSize=0;EngineVelocityInputs poolInputs{};std::string poolReason;
+        const bool nullPool=!k.ps && engineVelocityPoolFamilyVs(k.vs) && flatProbeShaderLookup('v',k.vs,&raw,&rawSize) &&
+            engineVelocityDeriveInputs(raw,rawSize,poolInputs,poolReason);
+        domainProtectedOverlay=overlayPlanned && d.overlayProtected && !d.effectiveDepthWrite &&
+            (!d.effectiveStencilWrite || effectiveDepth.StencilWriteMask==0x04u);
+        if(domainProtectedOverlay) {
+            // Its HDR color is captured separately and restored after AA.
+            // Successful original bracket completion is checked below.
+        } else if(s.foregroundDomainDepth.Get()==k.depth &&
+           ((k.format!=23 && k.color) || (!d.supported && !nullPool) || !k.camera))
+            s.foregroundMotion.fail("foreground-unknown-original-writer");
+        else if(s.foregroundDomainDepth.Get()==k.depth) {
+            domainPlanned=true;domainDepth=s.foregroundDomainDepth.Get();domainVs=k.vs;domainPs=k.ps;
+            domainWidth=k.depthWidth;domainHeight=k.depthHeight;
+            domainPool=k.kind==kFlatContractPool || nullPool;
+            domainForeign=!s.namedDepth || s.namedDepth!=k.depth ||
+                std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))!=0;
+            std::memcpy(domainCamera,d.camera,sizeof(domainCamera));
+            if(domainForeign)++s.foregroundCounts.foreignSeen;
+            if(domainForeign && !domainPool)s.foregroundMotion.fail("foreground-unknown-foreign-projection");
+        }
+    }
     FlatForegroundProbe::Draw evidence{};
     if(foregroundCandidate || foregroundGap) {
         evidence.vs=k.vs;evidence.ps=k.ps;evidence.kind=kind;evidence.count=count;
@@ -4791,6 +4903,24 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     }
     Ptr<ID3D11ShaderResourceView> engineSlots, enginePool, outputView; Ptr<ID3D11Buffer> nowCb, prevCb;
     engineSlots.Attach(f.engine.slots); enginePool.Attach(f.engine.pool); nowCb.Attach(f.engine.sceneNow); prevCb.Attach(f.engine.scenePrev);
+    FlatForegroundMotion::Output foregroundOutput;
+    f.foregroundRequired=f.mode!=FlatMonoResolveMode::Taa && selected.mixedCamera;
+    if(f.foregroundRequired && s.foregroundDomainDepth.Get()==selected.depth) {
+        FlatComputeInternalScope internal;
+        ++s.foregroundCounts.hAttempts;
+        if(foreignWork.load(std::memory_order_acquire) || s.prefix.uncertain)
+            s.foregroundMotion.fail("foreground-uncertain-frame");
+        Ptr<ID3D11ShaderResourceView> domainOwners;
+        if(!engineVelocityFlatDomainSlots(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)),&domainOwners))
+            s.foregroundMotion.fail("foreground-current-owner-plane-unavailable");
+        s.foregroundMotion.prepareH(ctx,domainOwners.Get(),s.depthView.Get(),selected.camera,
+            static_cast<unsigned>(s.prefix.frame),f.renderWidth,f.renderHeight,foregroundOutput);
+        s.foregroundHRefusal=foregroundOutput.refusal;
+        f.foregroundMotion=foregroundOutput.motion.Get();f.foregroundQualified=foregroundOutput.qualified;
+        f.foregroundResetRequired=foregroundOutput.resetRequired;f.foregroundFrame=foregroundOutput.frame;
+        f.foregroundDepthNear=foregroundOutput.depthNear;
+        if(foregroundOutput.qualified)++s.foregroundCounts.hQualified;
+    }
     if (cameraRoute != FlatCameraRoute::Off) {
         ++s.rows.frames;
         if (rowsNow.x != 0.0f || rowsNow.y != 0.0f) ++s.rows.unjittered; else ++s.rows.zeroPhase;
@@ -4863,12 +4993,90 @@ static void issueExactReplayDraw(ID3D11DeviceContext* ctx,const FlatRuntimeDrawS
                                        draw.weaponDrawBase,draw.weaponDrawStartInstance); break;
     }
 }
+static void __stdcall foregroundOriginalDraw(ID3D11DeviceContext* ctx,UINT count,UINT instances,
+    UINT start,INT base,UINT startInstance) {
+    ctx->DrawIndexedInstanced(count,instances,start,base,startInstance);
+}
 void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indirectOffset) {
     if(!ctx)return;
     if(drawPacketOnly){FlatComputeInternalScope internal;state().drawPackets.execution(ctx,drawPacket,indirectArgs,indirectOffset,"capture-only-AA-off-or-paused");return;}
+    if(domainPlanned && !producer) {
+        FlatComputeInternalScope internal;Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+        ctx->VSGetShader(&vs,nullptr,nullptr);ctx->PSGetShader(&ps,nullptr,nullptr);
+        if(lookupShaderHash(vs.Get())!=domainVs || lookupShaderHash(ps.Get())!=domainPs)
+            state().foregroundMotion.fail("foreground-original-shader-pair-mismatch");
+    }
     if(untrustedPlanned) {
         untrustedStarted=state().untrusted.beginDraw(ctx,state().prefix.frame,
             [](void* shader) { return lookupShaderHash(shader); });
+    }
+    if(domainPlanned) {
+        auto& s=state();FlatComputeInternalScope internal;
+        ID3D11RenderTargetView* colors[6]{};ctx->OMGetRenderTargets(6,colors,nullptr);
+        for(unsigned i=0;i<6;++i)if(colors[i]) {
+            Ptr<ID3D11Resource> resource;colors[i]->GetResource(&resource);colors[i]->Release();
+            if(s.foregroundDomainColors[i] && s.foregroundDomainColors[i]!=resource)
+                s.foregroundMotion.fail("foreground-color-target-changed");
+            else s.foregroundDomainColors[i]=std::move(resource);
+        }
+        const uint8_t* vsBytes=nullptr;const uint8_t* psBytes=nullptr;size_t vsSize=0,psSize=0;
+        const bool bytes=flatProbeShaderLookup('v',domainVs,&vsBytes,&vsSize) &&
+            (!domainPs || flatProbeShaderLookup('p',domainPs,&psBytes,&psSize));
+        Ptr<ID3D11BlendState> blend;FLOAT factors[4]{};UINT sampleMask=0;
+        ctx->OMGetBlendState(&blend,factors,&sampleMask);D3D11_BLEND_DESC bd{};
+        if(blend)blend->GetDesc(&bd);else for(auto& rt:bd.RenderTarget)rt.RenderTargetWriteMask=15;
+        bool opaque=!bd.AlphaToCoverageEnable;
+        bool colorWrites=false;
+        Ptr<ID3D11DepthStencilState> depthState;UINT stencilRef=0;
+        ctx->OMGetDepthStencilState(&depthState,&stencilRef);D3D11_DEPTH_STENCIL_DESC dd{};
+        dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+        if(depthState)depthState->GetDesc(&dd);
+        if(domainForeign && (!dd.DepthEnable ||
+            (dd.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ALL && dd.DepthFunc!=D3D11_COMPARISON_EQUAL)))opaque=false;
+        if(domainForeign && dd.StencilEnable &&
+           (dd.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || dd.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS))opaque=false;
+        for(unsigned i=0;i<6;++i) {
+            const auto& rt=bd.RenderTarget[bd.IndependentBlendEnable?i:0];
+            if(rt.BlendEnable || (rt.RenderTargetWriteMask && rt.RenderTargetWriteMask!=15))opaque=false;
+            colorWrites=colorWrites || rt.RenderTargetWriteMask!=0;
+        }
+        if((!domainPs || !colorWrites) && s.foregroundColorWritten) {
+            opaque=false;s.foregroundMotion.fail("foreground-depth-only-after-color");
+        }
+        if(domainPs && colorWrites)s.foregroundColorWritten=true;
+        if(!opaque || !bytes || !replayQueriesSafe(ctx) || indirectArgs)
+            s.foregroundMotion.fail(!opaque?"foreground-mixed-component-writer":!bytes?
+                "foreground-original-shader-unavailable":indirectArgs?"foreground-indirect-writer":"foreground-active-query");
+        else {
+            if(domainForeign && domainPool) {
+                FlatForegroundMotion::Inputs inputs{};std::memcpy(inputs.camera,domainCamera,sizeof(inputs.camera));
+                inputs.phaseX=s.phase.currentX;inputs.phaseY=s.phase.currentY;
+                inputs.certificate=flatForegroundCertificate(ctx,s.projection.get(),s.foregroundIdentity.ledger());
+                if(!inputs.certificate.complete)++s.foregroundCounts.certificateMissing;
+                if(!s.foregroundIdentity.demandAndLookup(ctx,weaponDrawStartInstance,inputs.identity)) {
+                    ++s.foregroundCounts.identityUnavailable;
+                    s.foregroundMotion.fail(inputs.identity.refusal);
+                } else ++s.foregroundCounts.identityKnown;
+                Ptr<ID3D11VertexShader> originalVs;ctx->VSGetShader(&originalVs,nullptr,nullptr);
+                if(originalVs)AnimatedVertexHistory::rememberShader(originalVs.Get(),vsBytes,vsSize);
+                const char* phaseReason=nullptr;
+                const bool phaseKnown=flatForegroundBoundPhase(ctx,s.projection.get(),inputs.phaseX,inputs.phaseY,
+                    domainWidth,domainHeight,inputs.camera[3][2],&phaseReason);
+                if(!phaseKnown)s.foregroundMotion.fail(phaseReason);
+                else if(weaponDrawKind!='X')s.foregroundMotion.fail("foreground-draw-kind");
+                else if(s.foregroundMotion.capture(ctx,&foregroundOriginalDraw,weaponDrawCount,weaponDrawInstances,weaponDrawStart,weaponDrawBase,
+                    weaponDrawStartInstance,static_cast<unsigned>(s.prefix.frame),inputs))++s.foregroundCounts.captured;
+            }
+            if(!producer) {
+                const char* reason=nullptr;
+                domainStarted=engineVelocityFlatDomainBeginDraw(ctx,domainDepth,vsBytes,vsSize,psBytes,psSize,
+                    domainForeign?FlatEngineDomain::ForeignPool:domainPool?FlatEngineDomain::WorldPool:FlatEngineDomain::World,&reason,untrustedStarted);
+                if(!domainStarted)s.foregroundMotion.fail(reason);
+                if(!domainStarted)++s.foregroundCounts.markerRefused;
+                else if(!domainPs)++s.foregroundCounts.nullMarkers;
+                else if(!domainForeign)++s.foregroundCounts.worldMarkers;
+            } else if(gameHadTarget6)s.foregroundMotion.fail("foreground-native-MRT6-conflict");
+        }
     }
     if(foregroundPlanned) foregroundStarted=state().foreground.beginDraw(ctx,state().prefix.frame);
     if(overlayPlanned) {
@@ -4985,10 +5193,8 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
 void FlatRuntimeDrawScope::endActualDraw() {
     if(drawPacket&&ctx){FlatComputeInternalScope internal;state().drawPackets.after(ctx,drawPacket);drawPacketExecuted=true;}
     if(drawPacketOnly)return;
-    if(untrustedStarted&&ctx) {
-        state().untrusted.endDraw(ctx);
-        untrustedEnded=true;untrustedStarted=false;
-    }
+    if(domainProtectedOverlay && !overlayStarted && !overlayReplayPending)
+        state().foregroundMotion.fail("foreground-private-overlay-not-captured");
     if(foregroundPlanned&&ctx) {
         state().foreground.endDraw(ctx);
         foregroundEnded=true;foregroundStarted=false;
@@ -5009,6 +5215,11 @@ void FlatRuntimeDrawScope::endActualDraw() {
     }
     if(weaponFootprintStarted&&ctx)
         state().weaponFootprint.endActualDraw(ctx,state().prefix.frame,weaponFootprintSeq);
+    if(domainStarted&&ctx){engineVelocityFlatDomainEndDraw(ctx);domainStarted=false;}
+    if(untrustedStarted&&ctx) {
+        state().untrusted.endDraw(ctx);
+        untrustedEnded=true;untrustedStarted=false;
+    }
 }
 FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     if(drawPacketOnly){if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);return;}
@@ -5024,6 +5235,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     }
     if(drawPacket&&!drawPacketExecuted)state().drawPackets.abandoned(drawPacket);
     if (!ctx) return; FlatComputeInternalScope guard;
+    if(domainStarted){engineVelocityFlatDomainEndDraw(ctx);domainStarted=false;state().foregroundMotion.fail("foreground-abandoned-writer");}
     flatcpu::Scope shell(flatcpu::kOther);
     if(untrustedStarted) {state().untrusted.endDraw(ctx,false);untrustedStarted=false;}
     if(untrustedPlanned && !untrustedEnded)state().untrusted.abandon();

@@ -1,6 +1,9 @@
 // Production post-VS history, animated perspective projection and state
 // restoration. No game assets or CPU readback exists in the production path.
 #include "../../src/d3d11/weapon_motion.cpp"
+#include "../../src/d3d11/flat_animated_identity_ledger.h"
+#include "../../src/d3d11/flat_foreground_motion.h"
+#include "../../src/d3d11/flat_foreground_phase.h"
 #include <d3dcompiler.h>
 #include <d3d11sdklayers.h>
 #include <DirectXPackedVector.h>
@@ -46,6 +49,31 @@ int main(int argc,char** argv){
  if(made==DXGI_ERROR_SDK_COMPONENT_MISSING)made=D3D11CreateDevice(nullptr,driver,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&dev,&fl,&ctx);hr(made);
  ComPtr<ID3D11InfoQueue> queue;dev.As(&queue);
  auto buffer=[&](const void* data,UINT bytes,UINT bind,UINT stride=0){D3D11_BUFFER_DESC d{};d.ByteWidth=bytes;d.BindFlags=bind;d.StructureByteStride=stride;d.MiscFlags=stride?D3D11_RESOURCE_MISC_BUFFER_STRUCTURED:0;D3D11_SUBRESOURCE_DATA sd{};sd.pSysMem=data;ComPtr<ID3D11Buffer>b;hr(dev->CreateBuffer(&d,data?&sd:nullptr,&b));return b;};
+ // Validate the phase witness against actual bound GPU publication bytes.
+ // This readback is an offline oracle; production reads its complete CPU witness.
+ {
+  float constants[276][4]{};constants[270][0]=1.7f;constants[271][1]=2.1f;constants[272][3]=1;constants[273][2]=.025f;
+  auto phaseBuffer=buffer(constants,sizeof(constants),D3D11_BIND_CONSTANT_BUFFER);
+  auto boundRows=[&](){
+   ComPtr<ID3D11Buffer> actual;ctx->VSGetConstantBuffers(1,1,&actual);check(actual==phaseBuffer,"phase witness reads currently bound b1");
+   D3D11_BUFFER_DESC d{};actual->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+   ComPtr<ID3D11Buffer> staging;hr(dev->CreateBuffer(&d,nullptr,&staging));ctx->CopyResource(staging.Get(),actual.Get());
+   D3D11_MAPPED_SUBRESOURCE mapped{};hr(ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped));
+   std::array<std::array<float,4>,6> rows{};std::memcpy(rows.data(),static_cast<const unsigned char*>(mapped.pData)+270*16,64);ctx->Unmap(staging.Get(),0);return rows;
+  };
+  auto accepts=[&](float x,float y,float nearPlane){auto rows=boundRows();float actual[6][4]{};std::memcpy(actual,rows.data(),sizeof(actual));return flatForegroundRowsCarryPhase(actual,x,y,W,H,nearPlane);};
+  ctx->VSSetConstantBuffers(1,1,phaseBuffer.GetAddressOf());
+  check(accepts(0,0,.025f),"actual zero-phase alternate-near bound rows accepted");
+  check(!accepts(.375f,-.25f,.025f),"global nonzero phase cannot certify unphased foreign bound rows");
+  FlatProjectionJitter jitter{};check(flatProjectionJitter(.375f,-.25f,W,H,jitter),"common phase recipe valid");
+  constants[272][0]=jitter.ndcX;constants[272][1]=jitter.ndcY;ctx->UpdateSubresource(phaseBuffer.Get(),0,nullptr,constants,0,0);
+  check(accepts(.375f,-.25f,.025f),"actual nonzero common phase alternate-near bound rows accepted");
+  check(!accepts(0,0,.025f),"zero phase claim rejects phased actual bound rows");
+  check(!accepts(.375f,-.25f,.0675f),"phase witness pins actual bound near convention");
+  constants[272][0]+=.02f;ctx->UpdateSubresource(phaseBuffer.Get(),0,nullptr,constants,0,0);
+  check(!accepts(.375f,-.25f,.025f),"unknown off-center projection cannot certify common phase");
+  ID3D11Buffer* none=nullptr;ctx->VSSetConstantBuffers(1,1,&none);
+ }
  D3D11_TEXTURE2D_DESC td{};td.Width=W;td.Height=H;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_R32G8X24_TYPELESS;td.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
  ComPtr<ID3D11Texture2D> depth,colour;hr(dev->CreateTexture2D(&td,nullptr,&depth));D3D11_DEPTH_STENCIL_VIEW_DESC dd{};dd.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;dd.Format=DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
  ComPtr<ID3D11DepthStencilView> dsv;hr(dev->CreateDepthStencilView(depth.Get(),&dd,&dsv));
@@ -112,12 +140,12 @@ int main(int argc,char** argv){
  // the map remains available to unrelated weapon/tool geometry.
  motion();bind(view);motion();first=read();for(UINT i=0;i<W*H;++i)check(first[i*4+3]!=1,"ambiguous equal-projection histories are never guessed");
  check(weaponMotionView()!=nullptr,"ambiguous mesh does not discard the whole weapon map");
- weaponMotionFrameBoundary(ctx.Get());weaponMotionFrameBoundary(ctx.Get());weaponMotionFrameBoundary(ctx.Get());check(!weaponMotionView()&&weapon_motion_detail::g.records.empty(),"missing frames discard stale mesh history");
+ weaponMotionFrameBoundary(ctx.Get());weaponMotionFrameBoundary(ctx.Get());weaponMotionFrameBoundary(ctx.Get());check(!weaponMotionView()&&weapon_motion_detail::g.history.recordCount()==0,"missing frames discard stale mesh history");
  bind(old);motion();first=read();for(UINT i=0;i<W*H;++i)check(first[i*4+3]!=1,"returning mesh has no old animation history");
  weaponMotionConfigure(false);check(weaponMotionGpuDiagnostics().draining,"weapon GPU diagnostics close immediately on config change");check(!weaponMotionView()&&!weapon_motion_detail::g.map,"off frees temporal weapon resources");bind(old);motion();check(!weaponMotionView(),"live off stays inactive");
  weaponMotionConfigure(true);bind(old);motion();check(weaponMotionView()!=nullptr,"live on resumes with fresh coverage");
  // Bound GPU resource growth; these states must decline before a draw.
- unsigned allocated=weapon_motion_detail::g.bytes;weaponMotionDraw(ctx.Get(),issue,131073,1,0,0,0);weaponMotionDraw(ctx.Get(),issue,9,2,0,0,0);check(weapon_motion_detail::g.bytes==allocated,"oversized and instanced meshes allocate nothing");
+ unsigned allocated=weapon_motion_detail::g.history.bytes();weaponMotionDraw(ctx.Get(),issue,131073,1,0,0,0);weaponMotionDraw(ctx.Get(),issue,9,2,0,0,0);check(weapon_motion_detail::g.history.bytes()==allocated,"oversized and instanced meshes allocate nothing");
  weaponMotionResourceWritten(bones.Get());check(weaponMotionView()!=nullptr,"animation updates preserve vertex correspondence");
  weaponMotionResourceWritten(ib.Get());check(!weaponMotionView(),"rewritten mesh indices invalidate motion");bind(old);motion();first=read();for(UINT i=0;i<W*H;++i)check(first[i*4+3]!=1,"rewritten mesh cannot reuse old correspondence");
  // Deterministic source-boundary, drain-cutoff and same-frame budget checks.
@@ -129,7 +157,201 @@ int main(int argc,char** argv){
  diagnostics.start(depth.Get(),W,H,weapon_motion_detail::g.frame);bool admitted=false,budgetSkipped=false;
  for(unsigned n=0;n<192&&!budgetSkipped;++n){if(diagnostics.choose(weapon_motion_detail::g.frame))admitted=true;budgetSkipped=diagnostics.budgetSkipped!=0;}
  check(admitted&&budgetSkipped&&diagnostics.selected==2,"weapon GPU diagnostics enforce one draw admission per frame");diagnostics.reset(ctx.Get());
- weaponMotionShutdown();ctx->ClearState();
+ weaponMotionShutdown();
+ // The flat adapter shares original-VS capture before any world-source name,
+ // with a material that clears stencil16. Its retained index must survive
+ // later captures until the final H raster; position order includes repeats.
+ weaponMotionConfigure(false);
+ auto bytesOf=[&](ID3D11ShaderResourceView* view){
+  ComPtr<ID3D11Resource> resource;view->GetResource(&resource);ComPtr<ID3D11Buffer> sourceBuffer;hr(resource.As(&sourceBuffer));
+  D3D11_BUFFER_DESC d{};sourceBuffer->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;d.StructureByteStride=0;
+  ComPtr<ID3D11Buffer> staging;hr(dev->CreateBuffer(&d,nullptr,&staging));ctx->CopyResource(staging.Get(),sourceBuffer.Get());
+  D3D11_MAPPED_SUBRESOURCE map{};hr(ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&map));std::vector<unsigned char> result(d.ByteWidth);std::memcpy(result.data(),map.pData,result.size());ctx->Unmap(staging.Get(),0);return result;
+ };
+ auto wordsOf=[&](ID3D11ShaderResourceView* view){const auto bytes=bytesOf(view);std::vector<unsigned> words(bytes.size()/4);std::memcpy(words.data(),bytes.data(),bytes.size());return words;};
+ AnimatedVertexHistory shared;AnimatedVertexHistory::Capture firstCapture,secondCapture,nextCapture;
+ Pose capturedView{.13f,1.12f,.02f,-.04f,.0675f,740};
+ bind(capturedView);ctx->OMSetDepthStencilState(state.Get(),5);
+ check(shared.capture(ctx.Get(),issue,9,1,0,0,0,100,firstCapture,true),"shared core captures before world naming without stencil16");
+ check(!weaponMotionView() && firstCapture.candidateCount==0,"shared capture does not create a VR map or invent prior history");
+ check(firstCapture.retainedIndexBytes==4 && wordsOf(firstCapture.instanceIndex.Get())==std::vector<unsigned>{1},"deferred capture owns the exact scalar pool index");
+ check(wordsOf(firstCapture.currentIdentity.Get())==std::vector<unsigned>({740,1631,1,0}),"shared GPU identity preserves original skeleton allocation and VR padding");
+ const auto capturedPositions=bytesOf(firstCapture.currentPositions.Get());
+ check(capturedPositions.size()==9*16,"shared position buffer has one float4 per original index invocation");
+ for(unsigned i=0;i<9;++i){float got[4]{};std::memcpy(got,capturedPositions.data()+i*16,16);const auto expected=vertex(indices[i],capturedView);
+  check(std::fabs(got[0]-expected.x)<.000001 && std::fabs(got[1]-expected.y)<.000001 && std::fabs(got[2]-expected.z)<.000001 && std::fabs(got[3]-expected.w)<.000001,"shared original animated positions match independent indexed VS math");}
+ bind(world,false);ctx->OMSetDepthStencilState(state.Get(),5);
+ check(shared.capture(ctx.Get(),issue,9,1,0,0,0,100,secondCapture),"shared core retains separate same-frame occurrences");
+ check(secondCapture.retainedIndexBytes==0 && wordsOf(secondCapture.instanceIndex.Get())[0]==0,"default capture uses existing index scratch without another copy");
+ check(wordsOf(firstCapture.instanceIndex.Get())==std::vector<unsigned>{1} && bytesOf(firstCapture.currentPositions.Get())==capturedPositions,"earlier deferred inputs survive another draw with the same geometry");
+ check(shared.recordCount()==2 && shared.bytes()==9*32*2,"shared geometry history preserves the original position-allocation budget");
+ shared.advance(101);bind(capturedView,false);ctx->OMSetDepthStencilState(state.Get(),5);
+ check(shared.capture(ctx.Get(),issue,9,1,0,0,0,101,nextCapture,true) && nextCapture.candidateCount==2,"shared next frame offers both previous occurrences for exact GPU matching");
+ check(wordsOf(nextCapture.previousIdentity[0].Get())==std::vector<unsigned>({740,1631,1,0}) && wordsOf(nextCapture.previousIdentity[1].Get())==std::vector<unsigned>({92,1631,1,0}),"shared prior candidates retain skeleton identities independently of instance ordering");
+ check(shared.resourceWritten(bones.Get())==0 && shared.resourceWritten(ib.Get())==4,"shared history distinguishes animation updates from index-correspondence changes");
+ bind(capturedView,false);ctx->OMSetDepthStencilState(state.Get(),5);
+ check(shared.capture(ctx.Get(),issue,9,1,0,0,0,102,nextCapture) && nextCapture.candidateCount==0,"shared rewritten indices cannot reuse prior animated positions");
+ const unsigned allocatedBytes=shared.bytes();AnimatedVertexHistory::Capture refused;
+ check(!shared.capture(ctx.Get(),issue,131073,1,0,0,0,102,refused) && shared.bytes()==allocatedBytes,"shared unsupported draw shape allocates nothing");
+ shared.advance(105);check(shared.recordCount()==0 && shared.bytes()==0,"shared history eviction is driven by frame progress rather than successful backend evaluation");
+ check(wordsOf(firstCapture.instanceIndex.Get())==std::vector<unsigned>{1},"owned deferred index remains alive after history eviction");
+ // CPU upload witnesses must agree with actual GPU identity dispatch, and
+ // become unavailable on every incomplete or unobserved mutation.
+ FlatAnimatedIdentityLedger ledger;FlatAnimatedIdentityLedger::Identity identity;
+ D3D11_BUFFER_DESC dynamicDesc{};dynamicDesc.ByteWidth=16;dynamicDesc.Usage=D3D11_USAGE_DYNAMIC;
+ dynamicDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;dynamicDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+ ComPtr<ID3D11Buffer> cpuInstance,cpuPool;hr(dev->CreateBuffer(&dynamicDesc,nullptr,&cpuInstance));
+ dynamicDesc.ByteWidth=sizeof(poolData);dynamicDesc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+ dynamicDesc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;dynamicDesc.StructureByteStride=336;
+ hr(dev->CreateBuffer(&dynamicDesc,nullptr,&cpuPool));ComPtr<ID3D11ShaderResourceView> cpuPoolView;
+ hr(dev->CreateShaderResourceView(cpuPool.Get(),nullptr,&cpuPoolView));
+ check(ledger.demandInstances(cpuInstance.Get(),16) && ledger.demandPool(cpuPool.Get(),sizeof(poolData)),"bounded ledger demands dynamic instance and pool buffers");
+ check(!ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity),"demand alone never claims authoritative CPU bytes");
+ unsigned cpuIndices[4]={1,526606,0,0};
+ auto uploadWitness=[&](ID3D11Buffer* target,const void* data,unsigned size){D3D11_MAPPED_SUBRESOURCE mapped{};
+  hr(ctx->Map(target,0,D3D11_MAP_WRITE_DISCARD,0,&mapped));check(ledger.beginMap(target,D3D11_MAP_WRITE_DISCARD),"witness observes successful write map");
+  std::memcpy(mapped.pData,data,size);check(ledger.endMap(target,mapped.pData,size),"complete mapped upload publishes before Unmap");ctx->Unmap(target,0);};
+ uploadWitness(cpuInstance.Get(),cpuIndices,sizeof(cpuIndices));uploadWitness(cpuPool.Get(),poolData,sizeof(poolData));
+ check(ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity) && identity.slot==1 && identity.skeleton==740 && identity.allocation==1631,"ledger reads actual indexed pool identity rows");
+ const auto initialIdentityEpoch=identity.instanceEpoch;const auto initialMutationEpoch=ledger.mutationEpoch(cpuInstance.Get());
+ UINT cpuStride=8,cpuOffset=0;ctx->IASetVertexBuffers(0,1,cpuInstance.GetAddressOf(),&cpuStride,&cpuOffset);ctx->VSSetShaderResources(33,1,cpuPoolView.GetAddressOf());
+ AnimatedVertexHistory witnessedCore;AnimatedVertexHistory::Capture witnessed;
+ check(witnessedCore.capture(ctx.Get(),issue,9,1,0,0,0,500,witnessed,true),"WARP captures the buffers witnessed by the CPU ledger");
+ check(wordsOf(witnessed.currentIdentity.Get())==std::vector<unsigned>({identity.skeleton,identity.allocation,1,0}) && wordsOf(witnessed.instanceIndex.Get())[0]==identity.slot,"CPU identity certificate equals actual WARP identity and pool index");
+ check(ledger.retainedBytes()==sizeof(cpuIndices)+2*8,"ledger retains only eight identity bytes per pool row");
+ D3D11_MAPPED_SUBRESOURCE appended{};hr(ctx->Map(cpuInstance.Get(),0,D3D11_MAP_WRITE_NO_OVERWRITE,0,&appended));
+ check(ledger.beginMap(cpuInstance.Get(),D3D11_MAP_WRITE_NO_OVERWRITE),"actual WARP append begins a CPU publication witness");
+ unsigned appendedSlot=0;std::memcpy(appended.pData,&appendedSlot,4);
+ check(ledger.endMap(cpuInstance.Get(),appended.pData,sizeof(cpuIndices)),"actual WARP append snapshots mapped current storage");ctx->Unmap(cpuInstance.Get(),0);
+ check(ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity) && identity.slot==0 && identity.skeleton==92,"NO_OVERWRITE witness sees appended scalar and retained pool allocation");
+ check(witnessedCore.capture(ctx.Get(),issue,9,1,0,0,0,500,witnessed,true) && wordsOf(witnessed.currentIdentity.Get())==std::vector<unsigned>({identity.skeleton,identity.allocation,1,0}),"NO_OVERWRITE CPU identity equals the actual current WARP GPU dispatch");
+ check(ledger.demandPoolSlot(cpuPool.Get(),sizeof(poolData),336,1) && ledger.publishWhole(cpuPool.Get(),poolData,sizeof(poolData)),"pool publication samples only the demanded actual allocation slot");
+ check(!ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity),"new actual pool slot cannot inherit another row's publication witness");
+ check(ledger.demandPoolSlot(cpuPool.Get(),sizeof(poolData),336,0) && ledger.publishWhole(cpuPool.Get(),poolData,sizeof(poolData)) && ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity),"new pool slot qualifies after its next complete publication witness");
+ check(!ledger.lookup(cpuInstance.Get(),1,cpuPool.Get(),identity) && !ledger.lookup(cpuInstance.Get(),16,cpuPool.Get(),identity),"unaligned and out of range instance offsets refuse");
+ ledger.beginMap(cpuInstance.Get(),D3D11_MAP_WRITE_NO_OVERWRITE);
+ check(ledger.endMap(cpuInstance.Get(),cpuIndices,sizeof(cpuIndices)) && ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity),"complete NO_OVERWRITE storage witness observes current index without assuming a full application rewrite");
+ check(ledger.publishWhole(cpuInstance.Get(),cpuIndices,sizeof(cpuIndices)) && ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity) && identity.instanceEpoch!=initialIdentityEpoch && ledger.mutationEpoch(cpuInstance.Get())!=initialMutationEpoch,"complete CPU republish advances identity and resource epochs");
+ ledger.beginMap(cpuInstance.Get(),D3D11_MAP_WRITE_DISCARD);
+ check(!ledger.endMap(cpuInstance.Get(),cpuIndices,8) && !ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity),"partial mapped byte span remains unknown");
+ ledger.publishWhole(cpuInstance.Get(),cpuIndices,sizeof(cpuIndices));ledger.invalidate(cpuPool.Get());
+ check(!ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity),"unobserved GPU or copy mutation invalidates pool identity");
+ ledger.publishWhole(cpuPool.Get(),poolData,sizeof(poolData));cpuIndices[0]=0x800001u;ledger.publishWhole(cpuInstance.Get(),cpuIndices,sizeof(cpuIndices));
+ check(!ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity),"authoritative raw pool index is never silently masked");
+ cpuIndices[0]=2;ledger.publishWhole(cpuInstance.Get(),cpuIndices,sizeof(cpuIndices));
+ check(!ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity),"raw slot observes actual pool bounds");
+ const auto boneEpoch=ledger.demandMutation(bones.Get());ledger.noteMutation(bones.Get());
+ check(boneEpoch && ledger.mutationEpoch(bones.Get())!=boneEpoch,"non-shadow animated inputs carry mutation certificates");
+ ledger.invalidate(nullptr);check(!ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity) && ledger.mutationEpoch(bones.Get())!=boneEpoch,"unknown mutation invalidates all identity witnesses and source epochs");
+ ledger.erase(cpuInstance.Get());check(!ledger.lookup(cpuInstance.Get(),0,cpuPool.Get(),identity) && !ledger.mutationEpoch(cpuInstance.Get()),"released resource address has no retained authority");
+ std::array<int,FlatAnimatedIdentityLedger::maxMutationResources+8> resourceKeys{};
+ ledger.reset();for(unsigned i=0;i<resourceKeys.size();++i)ledger.demandMutation(&resourceKeys[i]);
+ check(!ledger.mutationEpoch(&resourceKeys[0]) && ledger.mutationEpoch(&resourceKeys.back()),"bounded mutation ledger refuses evicted source certificates");
+ std::vector<unsigned char> largeInstance(FlatAnimatedIdentityLedger::maxInstanceBytes);
+ ledger.reset();for(unsigned i=0;i<5;++i){check(ledger.demandInstances(&resourceKeys[i],unsigned(largeInstance.size())),"bounded instance demand accepts exact cap");ledger.publishWhole(&resourceKeys[i],largeInstance.data(),largeInstance.size());}
+ check(ledger.retainedBytes()==4*largeInstance.size() && !ledger.demandInstances(&resourceKeys[6],unsigned(largeInstance.size()+1)),"instance shadow storage has a hard four MiB bound");
+ check(!ledger.demandPool(&resourceKeys[7],337) && !ledger.demandPool(&resourceKeys[7],336*(FlatAnimatedIdentityLedger::maxPoolRows+1)),"pool stride and row caps are structural refusals");
+ // Final owner comes from the original material raster, including its exact
+ // depth. The H adapter must retain animated correspondence across refusals
+ // and exclude equal-depth world overdraw using that final owner.
+ D3D11_TEXTURE2D_DESC ownerDesc{};ownerDesc.Width=W;ownerDesc.Height=H;ownerDesc.MipLevels=ownerDesc.ArraySize=ownerDesc.SampleDesc.Count=1;
+ ownerDesc.Format=DXGI_FORMAT_R32G32_FLOAT;ownerDesc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+ ComPtr<ID3D11Texture2D> ownerTexture;ComPtr<ID3D11RenderTargetView> ownerTarget;ComPtr<ID3D11ShaderResourceView> ownerView,rawDepthView;
+ hr(dev->CreateTexture2D(&ownerDesc,nullptr,&ownerTexture));hr(dev->CreateRenderTargetView(ownerTexture.Get(),nullptr,&ownerTarget));hr(dev->CreateShaderResourceView(ownerTexture.Get(),nullptr,&ownerView));
+ D3D11_SHADER_RESOURCE_VIEW_DESC depthViewDesc{};depthViewDesc.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;depthViewDesc.Format=DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;depthViewDesc.Texture2D.MipLevels=1;
+ hr(dev->CreateShaderResourceView(depth.Get(),&depthViewDesc,&rawDepthView));
+ auto foreignMarkerCode=compile("float2 main(float4 p:SV_Position):SV_Target{return float2(-5,p.z);}","ps_5_0");ComPtr<ID3D11PixelShader> foreignMarker;
+ hr(dev->CreatePixelShader(foreignMarkerCode->GetBufferPointer(),foreignMarkerCode->GetBufferSize(),nullptr,&foreignMarker));
+ auto finalRaster=[&](Pose pose){bind(pose,false);float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(ownerTarget.Get(),empty);ctx->OMSetRenderTargets(1,ownerTarget.GetAddressOf(),dsv.Get());ctx->PSSetShader(foreignMarker.Get(),nullptr,0);issue(ctx.Get(),9,1,0,0,0);};
+ auto readFloatMap=[&](ID3D11ShaderResourceView* view){ComPtr<ID3D11Resource> res;view->GetResource(&res);ComPtr<ID3D11Texture2D> texture;hr(res.As(&texture));D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+  ComPtr<ID3D11Texture2D> staging;hr(dev->CreateTexture2D(&d,nullptr,&staging));ctx->CopyResource(staging.Get(),texture.Get());D3D11_MAPPED_SUBRESOURCE m{};hr(ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&m));std::vector<float> pixels(W*H*4);
+  for(unsigned y=0;y<H;++y)std::memcpy(pixels.data()+y*W*4,static_cast<unsigned char*>(m.pData)+y*m.RowPitch,W*16);ctx->Unmap(staging.Get(),0);return pixels;};
+ FlatForegroundMotion flat;FlatForegroundMotion::Inputs flatInputs;FlatForegroundMotion::Output flatOutput;
+ flatInputs.camera[3][2]=.025f;flatInputs.identity={1,740,1631,1,1,nullptr};
+ float worldCamera[6][4]{};worldCamera[3][2]=.0675f;
+ Pose foreignOld{.1f,1,0,0,.025f,740},foreignNow{.2f,1,0,0,.025f,740};
+ finalRaster(foreignOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,600,flatInputs),"flat captures a new foreign identity before H");
+ check(flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,600,W,H,flatOutput) && flatOutput.resetRequired && flatOutput.depthNear==.025f,"new geometry requests one reset and common near spans foreign/world");
+ auto flatPixels=readFloatMap(flatOutput.motion.Get());unsigned flatCovered=0;
+ for(unsigned i=0;i<W*H;++i)if(flatPixels[i*4+3]==2){++flatCovered;check(flatPixels[i*4+2]>0 && flatPixels[i*4+2]<=1,"new geometry carries actual canonical depth");}
+ check(flatCovered>2000,"first H map has final owned foreign samples");
+ flatInputs.phaseX=.25f;flatInputs.phaseY=-.375f;finalRaster(foreignNow);
+ check(flat.capture(ctx.Get(),issue,9,1,0,0,0,601,flatInputs) && flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,601,W,H,flatOutput) && !flatOutput.resetRequired,"steady foreign identity uses actual previous history without another reset");
+ flatPixels=readFloatMap(flatOutput.motion.Get());flatCovered=0;
+ for(unsigned i=0;i<W*H;++i)if(flatPixels[i*4+3]==1){++flatCovered;float expected=(foreignOld.mouse-foreignNow.mouse)*W*.5f*flatPixels[i*4+2]/foreignNow.clip+.25f;
+  // Rasterized triangle coordinates use the D3D 8-bit subpixel grid, whereas
+  // this oracle projects the original float vertices analytically.
+  check(std::fabs(flatPixels[i*4]-expected)<1.f/256 && std::fabs(flatPixels[i*4+1]+.375f)<1.f/256,"H motion follows real previous animated coordinates with both phases removed");}
+ check(flatCovered>2000,"steady H map contains matched motion");
+ float worldOwner[4]={3,0,0,0};ctx->ClearRenderTargetView(ownerTarget.Get(),worldOwner);
+ check(flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,601,W,H,flatOutput),"world overdraw still permits a qualified empty map");
+ flatPixels=readFloatMap(flatOutput.motion.Get());check(std::all_of(flatPixels.begin(),flatPixels.end(),[](float f){return f==0;}),"equal-depth world ownership prevents stale foreign motion");
+ flat.fail("unknown-final-writer");check(!flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,601,W,H,flatOutput),"unknown final writer refuses SDK foreground qualification");
+ finalRaster(foreignOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,602,flatInputs),"capture resumes after refused backend frame");
+ check(flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,602,W,H,flatOutput) && !flatOutput.resetRequired,"refused backend did not erase previous original-VS history");
+ // Same actual identity can legitimately appear twice. Only complete equal
+ // input certificates make those previous GPU positions interchangeable.
+ flat.reset();flatInputs.phaseX=flatInputs.phaseY=0;flatInputs.certificate.complete=true;
+ flatInputs.certificate.constants.resize(sizeof(foreignOld));std::memcpy(flatInputs.certificate.constants.data(),&foreignOld,sizeof(foreignOld));
+ flatInputs.certificate.resourceCount=1;flatInputs.certificate.resources[0]={bones,17};
+ finalRaster(foreignOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,700,flatInputs) && flat.capture(ctx.Get(),issue,9,1,0,0,0,700,flatInputs),"equivalent duplicate poses capture independently");
+ finalRaster(foreignNow);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,701,flatInputs) && flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,701,W,H,flatOutput) && !flatOutput.resetRequired,"complete equal prior input certificates admit duplicate histories");
+ flat.reset();finalRaster(foreignOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,800,flatInputs),"first ambiguous scenario pose captures");
+ flatInputs.certificate.resources[0].epoch=18;finalRaster(foreignNow);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,800,flatInputs),"changed bone epoch captures second actual pose");
+ finalRaster(foreignNow);check(!flat.capture(ctx.Get(),issue,9,1,0,0,0,801,flatInputs) && !flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,801,W,H,flatOutput),"same identity with changed animated input epoch refuses ambiguous history");
+ flat.reset();flatInputs.certificate.complete=false;flatInputs.camera[3][2]=.026f;finalRaster(foreignOld);
+ check(flat.capture(ctx.Get(),issue,9,1,0,0,0,900,flatInputs) && flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,900,W,H,flatOutput),"metadata near mismatch reaches actual captured projection math");
+ flatPixels=readFloatMap(flatOutput.motion.Get());unsigned actualDepthSamples=0;
+ for(unsigned i=0;i<W*H;++i)if(flatPixels[i*4+3]==2){++actualDepthSamples;float y=float(i/W)+.5f;
+  // Original vertices have bottom W=1/top W=1.25; recover perspective W
+  // from the projected y coordinate and compare actual common-near depth.
+  float ndcY=1-2*y/H;float physicalW=1.125f/(1-ndcY*.125f/.6f);
+  check(std::fabs(flatPixels[i*4+2]-.026f/physicalW)<.000002f,"canonical SDK depth divides by actual captured clip-Z rather than mismatched metadata");}
+ check(actualDepthSamples>2000,"metadata mismatch does not erase legitimate captured geometry motion/depth");
+ flat.reset();flatInputs.camera[3][2]=.025f;Pose offscreenOld=foreignOld;offscreenOld.mouse=2;
+ finalRaster(offscreenOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,910,flatInputs),"real offscreen previous geometry is captured");
+ finalRaster(foreignNow);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,911,flatInputs) && flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,911,W,H,flatOutput),"real offscreen correspondence remains qualified");
+ flatPixels=readFloatMap(flatOutput.motion.Get());unsigned actualOffscreen=0;
+ for(unsigned i=0;i<W*H;++i)if(flatPixels[i*4+3]==1 && float(i%W)+.5f+flatPixels[i*4]>=W)++actualOffscreen;
+ check(actualOffscreen>1000,"actual out of image previous coordinates retain finite real motion and matched history");
+ ComPtr<ID3D11VertexShader> restoredVs;ComPtr<ID3D11PixelShader> restoredPs;ComPtr<ID3D11RenderTargetView> restoredTarget;ComPtr<ID3D11DepthStencilView> restoredDsv;
+ ctx->VSGetShader(&restoredVs,nullptr,nullptr);ctx->PSGetShader(&restoredPs,nullptr,nullptr);ctx->OMGetRenderTargets(1,&restoredTarget,&restoredDsv);
+ check(restoredVs==vs && restoredPs==foreignMarker && restoredTarget==ownerTarget && restoredDsv==dsv,"H raster restores original shaders and owner/depth target bindings");
+ D3D11_QUERY_DESC predicateDesc{D3D11_QUERY_OCCLUSION_PREDICATE,0};ComPtr<ID3D11Predicate> testPredicate;hr(dev->CreatePredicate(&predicateDesc,&testPredicate));ctx->SetPredication(testPredicate.Get(),FALSE);
+ check(!flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,911,W,H,flatOutput),"H refuses active predication before touching its map");ctx->SetPredication(nullptr,FALSE);
+ flat.resourceWritten(ib.Get());check(!flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,911,W,H,flatOutput),"geometry mutation between capture and H invalidates qualification");
+ // A triangle may straddle either camera's eye plane. Its visible current
+ // fragments still have actual finite correspondence through old.xy/old.w;
+ // an all-three-vertices positive-W test incorrectly discarded all of it.
+ const char* straddleSource="cbuffer P:register(b1){float mouse,projection,a,b;float clip;float3 pad;} StructuredBuffer<float4> Bones:register(t38);struct O{uint2 extra:DATA0;float4 normal:DATA1;float4 p:SV_Position;};O main(float4 p:POSITION){O o;o.extra=0;o.normal=1;o.p=float4((p.x+mouse)*projection,p.y,clip,p.z+lerp(Bones[0].z,Bones[1].z,p.w));return o;}";
+ auto straddleCode=compile(straddleSource,"vs_5_0");ComPtr<ID3D11VertexShader> straddleVs;hr(dev->CreateVertexShader(straddleCode->GetBufferPointer(),straddleCode->GetBufferSize(),nullptr,&straddleVs));
+ AnimatedVertexHistory::rememberShader(straddleVs.Get(),straddleCode->GetBufferPointer(),straddleCode->GetBufferSize());
+ auto straddleRaster=[&](float nearOffset,float farOffset=0){bind(foreignOld,false);ctx->VSSetShader(straddleVs.Get(),nullptr,0);float boneDepths[8]={0,0,nearOffset,0,0,0,farOffset,0};ctx->UpdateSubresource(bones.Get(),0,nullptr,boneDepths,0,0);
+  float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(ownerTarget.Get(),empty);ctx->OMSetRenderTargets(1,ownerTarget.GetAddressOf(),dsv.Get());ctx->PSSetShader(foreignMarker.Get(),nullptr,0);issue(ctx.Get(),9,1,0,0,0);};
+ flat.reset();straddleRaster(-2);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,920,flatInputs),"prior eye-straddling triangle retains original animated outputs");
+ straddleRaster(0);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,921,flatInputs) && flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,921,W,H,flatOutput),"prior eye straddling does not refuse current visible triangles");
+ flatPixels=readFloatMap(flatOutput.motion.Get());unsigned negativePrior=0;
+ for(unsigned i=0;i<W*H;++i)if(flatPixels[i*4+3]==1){float currentW=.025f/flatPixels[i*4+2],t=(currentW-1)/.25f,oldW=currentW-2*(1-t);
+  if(oldW<-.25f){++negativePrior;float x=float(i%W)+.5f,y=float(i/W)+.5f;
+   float previousX=((x/W*2-1)*currentW/oldW*.5f+.5f)*W;
+   float previousY=((y/H*2-1)*currentW/oldW*.5f+.5f)*H;
+   check(std::fabs(flatPixels[i*4]-(previousX-x))<.025f && std::fabs(flatPixels[i*4+1]-(previousY-y))<.025f,"negative prior W preserves real projected correspondence");}}
+ check(negativePrior>1000,"negative prior W pixels have actual motion instead of fake zero");
+ flat.reset();straddleRaster(0);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,930,flatInputs),"positive previous pose captures for current eye-straddling geometry");
+ straddleRaster(-2);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,931,flatInputs) && flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,931,W,H,flatOutput),"current eye straddling is clipped by the real raster rather than all-three W rejection");
+ flatPixels=readFloatMap(flatOutput.motion.Get());unsigned currentStraddle=0;
+ for(unsigned i=0;i<W*H;++i)if(flatPixels[i*4+3]==1){++currentStraddle;float currentW=.025f/flatPixels[i*4+2],t=(currentW+1)/2.25f,oldW=1+.25f*t;
+  float x=float(i%W)+.5f,y=float(i/W)+.5f;float previousX=((x/W*2-1)*currentW/oldW*.5f+.5f)*W,previousY=((y/H*2-1)*currentW/oldW*.5f+.5f)*H;
+  check(std::fabs(flatPixels[i*4]-(previousX-x))<.025f && std::fabs(flatPixels[i*4+1]-(previousY-y))<.025f,"current clipped fragments use actual positive fragment W and prior projection");}
+ check(currentStraddle>1000,"current eye-straddling mesh produces qualified visible motion");
+ flat.reset();straddleRaster(-1,-1.25f);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,940,flatInputs),"actual previous eye-plane position captures zero W with nonzero projected XY");
+ straddleRaster(0);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,941,flatInputs) && flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,941,W,H,flatOutput),"real infinite previous projection reaches representable SDK motion");
+ flatPixels=readFloatMap(flatOutput.motion.Get());unsigned infiniteProjection=0;
+ for(unsigned i=0;i<W*H;++i)if(flatPixels[i*4+3]==1){++infiniteProjection;
+  float directionX=(float(i%W)+.5f-W*.5f)>0?1.f:-1.f,directionY=(float(i/W)+.5f-H*.5f)>0?1.f:-1.f;
+  check(flatPixels[i*4]==directionX*65504 && flatPixels[i*4+1]==directionY*65504,"actual infinite previous projection saturates its true direction without inventing zero motion");}
+ check(infiniteProjection>2000,"true eye-plane previous projection remains actual matched history");
+ ctx->ClearState();
  if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T n=0;queue->GetMessage(i,nullptr,&n);std::vector<char> bytes(n);auto* m=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());hr(queue->GetMessage(i,m,&n));if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"no D3D warnings/errors");}}
  std::printf("weapon motion: %u checks passed (%s)\n",checks,driver==D3D_DRIVER_TYPE_WARP?"WARP":"hardware");
 }

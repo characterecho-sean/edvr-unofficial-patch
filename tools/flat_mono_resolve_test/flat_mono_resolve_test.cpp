@@ -34,6 +34,7 @@ std::vector<std::string> isolationLines;
 // Set by flat_context_isolation_gpu_tests.h: what the stub backend leaves bound, after its own ClearState. Null dirties nothing.
 void (*backendDirtyHook)(ID3D11DeviceContext*)=nullptr;
 float expectedJx=0,expectedJy=0;
+float expectedNear=.025f;
 float observedMotion=0,observedMotionY=0,observedDepth=0;unsigned observedReject=0;
 // The whole motion texture the SDK was handed, decoded, and a hash over its raw bits: the shader's complete
 // output for the frame, so "bit-identical" can be asserted rather than sampled at one pixel.
@@ -191,7 +192,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
     {D3D11_TEXTURE2D_DESC d{};colour->GetDesc(&d);observedColourFormat=d.Format;out->GetDesc(&d);observedOutFormat=d.Format;}
     if(hdr) observedBackendPixels=readPixel(c,colour,&observedBackendCenter,4,8,8) &&
                                   readPixel(c,colour,&observedBackendOutside,4,1,1);
-    infiniteSeen=infinite;check(nearZ==.025f && std::abs(fov-1.5707963f)<1e-5f,"FSR actual near and FOV");
+    infiniteSeen=infinite;check(nearZ==expectedNear && std::abs(fov-1.5707963f)<1e-5f,"FSR actual near and FOV");
     return backend(c,depth,mv,mask,out,jx,jy,reset,why);
 }
 } // namespace edvr
@@ -213,6 +214,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_refusal_gpu_tests.h"
 #include "flat_steady_depth_gpu_tests.h"
 #include "flat_context_isolation_gpu_tests.h"
+#include "flat_sdk_foreground_gpu_tests.h"
 int main(int argc,char** argv) {
     const bool printGoldens=argc==2 && !std::strcmp(argv[1],"--print-goldens"); // --self-test plus the recorded key-off hashes, for re-recording
     if(argc!=2 || (std::strcmp(argv[1],"--self-test") && std::strcmp(argv[1],"--dry-run") && !printGoldens)){std::puts("usage: flat_mono_resolve_test --self-test|--dry-run|--print-goldens");return 2;}
@@ -804,6 +806,7 @@ int main(int argc,char** argv) {
     failures+=flatForegroundOwnershipGpuTests(device.Get(),context.Get());
     // The HDR route's resolver half (design section 81): before the D3D message check below, so its draws are held to it.
     hdrRouteGpuTests(device.Get(),context.Get());
+    sdkForegroundGpuTests(device.Get(),context.Get());
     // The VR world route's seams (section 82): the third upscaler slot, the first-person map and stencil in the prep, and the phase term
     // the map's vector gets when the world and the first-person camera are jittered (stage 2).
     upscalerSlotGpuTests(device.Get(),context.Get());

@@ -16,7 +16,9 @@ cbuffer Mono : register(b0) {
                  // vector as given, 1 the two phases' difference is added to it, any other value rejects attached pixels' history).
                  // All zero on the copy route without them.
     uint4 debug; // x/y: refusal census/view, z: late overlay. w: flat HDR TAA has a conservative alternate-camera
-                 // fragment union at t13 and output-domain history at t14/u7. Zero leaves the old shader path unchanged.
+                 // fragment union at t13 and output-domain history at t14/u7 (bit 0).
+                 // Bit 1: qualified flat SDK foreground map at t15. Zero leaves the old shader path unchanged.
+    float4 foregroundDepth; // SDK common-near/world-near scale, only read with debug.w bit 1
 };
 cbuffer EngineNow : register(b1) { float4 EN[277]; };   // EN[276].x: the frame stamp
 cbuffer EngineBefore : register(b2) { float4 EB[276]; };
@@ -36,6 +38,7 @@ Texture2D<uint> ClassMap : register(t11);             // the census kernel's and
 Texture2D<float> OverlayCoverage : register(t12);   // HDR finish only: fragments from protected late colour draws
 Texture2D<float> UntrustedCameraCoverage : register(t13); // prep/TAA only: conservative R8_UNORM fragment union
 Texture2D<float> HistoryOutputDomain : register(t14);    // TAA only: last output's trusted-world sampling footprint
+Texture2D<float4> FlatForegroundMotion : register(t15); // SDK prep only: exact final foreground motion and canonical depth
 SamplerState LinearClamp : register(s0);
 RWTexture2D<float> OutDepth : register(u0);
 RWTexture2D<float2> OutMotion : register(u1);
@@ -144,6 +147,8 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before,out uint cls) {
     }
     return 1;
 }
+)HLSL"
+R"HLSL(
 [numthreads(8,8,1)]
 void prep(uint3 id:SV_DispatchThreadID) {
     if(any(id.xy>=size.xy))return;
@@ -153,6 +158,7 @@ void prep(uint3 id:SV_DispatchThreadID) {
     float2 rawUv=uv-jitter.xy/float2(size.xy);
     float depth=SceneDepth.Load(int3(q,0));
     float2 motion=0; float reject=1, expected=0;
+    bool foregroundActualMotion=false;
     // What the pixel is (kClass*), for the refusal census and view alone: nothing below reads it back. Until a check says
     // otherwise a pixel the checks below do not reach is a reset frame's, or one whose own depth is no depth.
     uint cls=flags.x!=0?kClassReset:kClassDepth;
@@ -162,12 +168,28 @@ void prep(uint3 id:SV_DispatchThreadID) {
     // and field of view would be wrong (a screen-fixed weapon ghosting in turns). Without the inputs route.z is zero and both
     // views are unbound, so no pixel is attached and the branch below is the code that was here before.
     bool untrusted=false;
-    if(debug.w!=0)untrusted=UntrustedCameraCoverage.Load(int3(q,0))>0;
+    if((debug.w&1)!=0)untrusted=UntrustedCameraCoverage.Load(int3(q,0))>0;
+    bool foreground=false;
+    if((debug.w&2)!=0)foreground=Slots.Load(int3(q,0)).x < -1;
     bool attached=route.z!=0 && (FirstPersonStencil.Load(int3(q,0)).y&16)!=0;
     if(untrusted) {
         // A later world draw may have overwritten the same encoded depth.
         // Coverage remains a conservative camera-ambiguity veto.
         cls=kClassMasked;
+    } else if(foreground) {
+        // Final ownership was checked against the actual indexed draw by the
+        // flat adapter. Depth uses the SDK world convention; raw SceneDepth
+        // still uses this draw's alternate near plane and must not be reused.
+        float4 foregroundSample=FlatForegroundMotion.Load(int3(q,0));
+        bool foregroundValid=all(isfinite(foregroundSample)) && foregroundSample.z>=0 && foregroundSample.z<=1;
+        if(foregroundValid)depth=foregroundSample.z;
+        foregroundValid=foregroundValid && flags.x==0 && foregroundSample.w==1 && all(abs(foregroundSample.xy)<=65504);
+        foregroundActualMotion=foregroundValid;
+        if(foregroundActualMotion)motion=foregroundSample.xy;
+        float2 prior=float2(q)+.5-jitter.xy+foregroundSample.xy+jitter.zw;
+        foregroundValid=foregroundValid && all(prior>=0) && all(prior<=float2(size.xy));
+        reject=foregroundValid?0:1;expected=foregroundValid?depth:0;
+        cls=foregroundValid?kClassWeapon:kClassWeaponRefused;
     } else if(attached) {
         float4 m=FirstPersonMotion.Load(int3(q,0));
         // The previous position in render pixels. Leaving the frame is disocclusion, not something to extrapolate.
@@ -207,11 +229,13 @@ void prep(uint3 id:SV_DispatchThreadID) {
             if(!valid)cls=kClassRange;
             // A stale slot under the steady-detail rule (kind 3): the camera term stands only if last frame's depth confirms it. A pixel
             // the check refuses stays a stale-slot pixel (cls kClassStale, refused): the census counts it as stale-refused.
+            if((debug.w&2)!=0)expected*=foregroundDepth.x;
             if(valid && kind==3)valid=stalePreviousDepthMatches(prev,expected);
             reject=valid?0:1;
         } else if(kind!=2)cls=kClassCamera;
     }
-    if(reject!=0)motion=0;
+    if(!foregroundActualMotion) { if(reject!=0)motion=0; }
+    if((debug.w&2)!=0 && !foreground)depth*=foregroundDepth.x;
     OutDepth[q]=isfinite(depth)?saturate(depth):0;
     OutMotion[q]=motion; OutRejection[q]=reject;
     if(flags.z!=0)OutExpected[q]=expected;

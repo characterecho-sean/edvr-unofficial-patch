@@ -98,6 +98,7 @@ struct State {
     bool hdr=false;   // the resources below are the HDR route's (an HDR input copy, fp16 outputs)
     bool history=false;
     bool untrustedCoverageLast=false;
+    float sdkDepthScaleLast=1.f;
     DXGI_FORMAT inputFormat=DXGI_FORMAT_UNKNOWN;
 };
 // Explicit owner-thread cleanup only: releasing driver objects from a static
@@ -139,8 +140,8 @@ bool g_steadyFailureLogged=false;
 // unchanged.
 // debug: x = this frame samples the refusal census, y = this frame paints the refusal view (FlatMonoResolveFrame::refusalCensus and
 // refusalView; the prep writes its class texture for either). Zero for every frame that asks for neither.
-struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; };
-static_assert(sizeof(Constants)==288, "HLSL cbuffer layout");
+struct Constants { float camera[6][4], previous[6][4]; uint32_t size[4], flags[4]; float jitter[4], rowsJitter[4]; uint32_t route[4], debug[4]; float foregroundDepth[4]; };
+static_assert(sizeof(Constants)==304, "HLSL cbuffer layout");
 // The game's pipeline state out of the way for the resolver's own work and its backends', and back on every exit. Two ways
 // (flat_context_isolation.h says which a device gets): the context state swap, which every device but DXMT's has always had and
 // which is unchanged, or the explicit capture (flat_context_state.h) for DXMT, whose SwapDeviceContextState aborts the process.
@@ -770,7 +771,14 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(resolveInputs.active()) {
         try { resolveInputs.capture(device,context,f); } catch(...) { resolveInputs.cancel(); }
     }
-    if(untrusted && (!hdr || f.mode!=FlatMonoResolveMode::Taa ||
+    const bool foreground = f.mode!=FlatMonoResolveMode::Taa && f.foregroundMotion;
+    if(f.mode!=FlatMonoResolveMode::Taa && (foreground || f.foregroundRequired) &&
+       (!foreground || !hdr || !f.foregroundQualified || f.foregroundFrame!=f.frame))
+        return fail(reason,"flat-resolve-foreground-contract-unqualified");
+    const float sdkNear=foreground && f.foregroundDepthNear!=0?f.foregroundDepthNear:f.camera[3][2];
+    if(foreground && (!std::isfinite(sdkNear) || sdkNear<=0 || sdkNear>f.camera[3][2]))
+        return fail(reason,"flat-resolve-foreground-depth-convention-invalid");
+    if(untrusted && ((!foreground && f.mode!=FlatMonoResolveMode::Taa) || !hdr ||
                      f.outputWidth!=f.renderWidth || f.outputHeight!=f.renderHeight))
         return fail(reason,"flat-resolve-untrusted-coverage-requires-native-HDR-TAA");
     if(!initialize(device,context,reason))return false;
@@ -815,8 +823,24 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
            !(md.BindFlags&D3D11_BIND_SHADER_RESOURCE) || maskDevice.Get()!=g.device.Get())
             return fail(reason,"flat-resolve-untrusted-coverage-view-mismatch");
     }
+    if(foreground) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC view{};f.foregroundMotion->GetDesc(&view);
+        ComPtr<ID3D11Resource> resource;f.foregroundMotion->GetResource(&resource);
+        ComPtr<ID3D11Texture2D> map;
+        if(!resource || FAILED(resource.As(&map)))
+            return fail(reason,"flat-resolve-foreground-resource-mismatch");
+        D3D11_TEXTURE2D_DESC desc{};map->GetDesc(&desc);
+        ComPtr<ID3D11Device> owner;map->GetDevice(&owner);
+        if(view.Format!=DXGI_FORMAT_R32G32B32A32_FLOAT || view.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D ||
+           view.Texture2D.MostDetailedMip!=0 ||
+           (view.Texture2D.MipLevels!=1 && view.Texture2D.MipLevels!=UINT(-1)) ||
+           desc.Format!=DXGI_FORMAT_R32G32B32A32_FLOAT || desc.Width!=f.renderWidth || desc.Height!=f.renderHeight ||
+           desc.MipLevels!=1 || desc.ArraySize!=1 || desc.SampleDesc.Count!=1 ||
+           !(desc.BindFlags&D3D11_BIND_SHADER_RESOURCE) || owner.Get()!=g.device.Get())
+            return fail(reason,"flat-resolve-foreground-view-mismatch");
+    }
     if(!resources(f,reason))return false;
-    if(untrusted && !ensureOutputDomains(f.outputWidth,f.outputHeight))
+    if(untrusted && f.mode==FlatMonoResolveMode::Taa && !ensureOutputDomains(f.outputWidth,f.outputHeight))
         return fail(reason,"flat-resolve-output-domain-create-failed");
     if(overlay && !g.rawOverlay.texture &&
        !image(g.device.Get(),f.renderWidth,f.renderHeight,DXGI_FORMAT_R11G11B10_FLOAT,
@@ -827,7 +851,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(hdr && !hdrTargetView(color.Get(),reason))return false;
     const bool taa=f.mode==FlatMonoResolveMode::Taa;
     D3D11_SHADER_RESOURCE_VIEW_DESC colorDesc{};f.color->GetDesc(&colorDesc);
-    const bool requestedReset=f.reset, lostHistory=!g.history, frameGap=f.frame!=g.lastFrame+1;
+    const float sdkDepthScale=foreground?sdkNear/f.camera[3][2]:1.f;
+    const bool depthConventionTransition=g.history && sdkDepthScale!=g.sdkDepthScaleLast;
+    const bool requestedReset=f.reset || (foreground && f.foregroundResetRequired) || depthConventionTransition, lostHistory=!g.history, frameGap=f.frame!=g.lastFrame+1;
     const bool coverageTransition=g.history && untrusted!=g.untrustedCoverageLast;
     const bool invalidPreviousCamera=!cameraValid(f.previousCamera);
     const bool formatChange=g.inputFormat!=colorDesc.Format;
@@ -916,7 +942,8 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     constants.route[2]=firstPersonMap?1u:0u;constants.route[3]=firstPersonMap?f.firstPersonPhaseMode:0u;
     constants.debug[0]=sampleNow?1u:0u;constants.debug[1]=paintNow?1u:0u;
     constants.debug[2]=overlay?1u:0u;
-    constants.debug[3]=untrusted?1u:0u;
+    constants.debug[3]=foreground?2u:(untrusted?1u:0u);
+    constants.foregroundDepth[0]=sdkDepthScale;
     constants.jitter[0]=f.jitterX;constants.jitter[1]=f.jitterY;
     constants.jitter[2]=f.previousJitterX;constants.jitter[3]=f.previousJitterY;
     // On a reset the previous rows ARE the current rows (above), so they carry the current phase.
@@ -939,16 +966,16 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     // stencil, null unless the pair was accepted above.
     ID3D11ShaderResourceView* prepViews[]={g.color.srv.Get(),f.depth,f.engine.slots,f.engine.pool,
         nullptr,nullptr,nullptr,nullptr,depthCheck?g.depth[prevDepthIndex].srv.Get():nullptr,firstPersonMap,firstPersonStencil,
-        nullptr,nullptr,f.untrustedCameraCoverage};
-    context->CSSetShaderResources(0,14,prepViews);
+        nullptr,nullptr,f.untrustedCameraCoverage,nullptr,foreground?f.foregroundMotion:nullptr};
+    context->CSSetShaderResources(0,foreground?16:14,prepViews);
     // u5 is the refusal census's class texture, bound only on a frame that samples or paints (u4 is the later kernels' OutColor).
     ID3D11UnorderedAccessView* prepOutputs[]={g.depth[depthIndex].uav.Get(),g.motion.uav.Get(),g.rejection.uav.Get(),g.expected.uav.Get(),
         nullptr,needClass?g.klass.uav.Get():nullptr};
     context->CSSetUnorderedAccessViews(0,needClass?6:4,prepOutputs,nullptr);
     context->CSSetShader(g.prep.Get(),nullptr,0);
     context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);
-    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[14]={};
-    context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,14,nullViews);
+    ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[16]={};
+    context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);context->CSSetShaderResources(0,foreground?16:14,nullViews);
     if(hdr)++stats.hdrPrepped;
     prepStep.close();
     if(sampleNow) {
@@ -991,7 +1018,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         const float sy=std::sqrt(f.camera[0][1]*f.camera[0][1]+f.camera[1][1]*f.camera[1][1]+f.camera[2][1]*f.camera[2][1]);
         ok=fsr3Evaluate(context,f.slot,g.color.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),g.rejection.texture.Get(),
             g.output[0].texture.Get(),f.renderWidth,f.renderHeight,evalW,evalH,f.jitterX,f.jitterY,reset,f.deltaMs,
-            f.camera[3][2],(std::numeric_limits<float>::max)(),2*std::atan(1/sy),reason,true,hdr);
+            sdkNear,(std::numeric_limits<float>::max)(),2*std::atan(1/sy),reason,true,hdr);
     } else {
         ok=dlaaEvaluate(context,static_cast<int>(f.slot),g.color.texture.Get(),g.depth[depthIndex].texture.Get(),g.motion.texture.Get(),g.output[0].texture.Get(),
             g.rejection.texture.Get(),f.renderWidth,f.renderHeight,evalW,evalH,f.jitterX,f.jitterY,reset,f.deltaMs,reason,hdr);
@@ -1040,6 +1067,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     }
     g.history=true;g.lastFrame=f.frame;g.current=index^1;g.inputFormat=colorDesc.Format;
     g.untrustedCoverageLast=untrusted;
+    g.sdkDepthScaleLast=sdkDepthScale;
     if(!taa)g.depthLast=depthIndex;   // the image the next asking frame reads as last frame's depth (0 while no frame asks)
     if(reset) {
         ++stats.acceptedResets;stats.currentContinueRun=0;
@@ -1063,7 +1091,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
                 "requested=%u lost=%u gap=%u invalid-prev-camera=%u format=%u camera-cut=%u "
                 "delta-ms=%.9g now=(%.9g,%.9g,%.9g) previous=(%.9g,%.9g,%.9g) "
                 "origin-delta=(%.9g,%.9g,%.9g) max-matrix-delta=%.9g "
-                "jitter-now=(%.9g,%.9g) jitter-previous=(%.9g,%.9g) event=%u/%u",
+                "jitter-now=(%.9g,%.9g) jitter-previous=(%.9g,%.9g) event=%u/%u sdk-depth-transition=%u",
                 static_cast<unsigned long long>(f.frame),modeName,f.renderWidth,f.renderHeight,f.outputWidth,f.outputHeight,
                 requestedReset?1u:0u,lostHistory?1u:0u,frameGap?1u:0u,invalidPreviousCamera?1u:0u,
                 formatChange?1u:0u,cameraCut?1u:0u,f.deltaMs,
@@ -1072,7 +1100,7 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
                 f.camera[5][0]-f.previousCamera[5][0],
                 f.camera[5][1]-f.previousCamera[5][1],
                 f.camera[5][2]-f.previousCamera[5][2],maxMatrixDelta,
-                f.jitterX,f.jitterY,f.previousJitterX,f.previousJitterY,logged,kResetEventLogCap);
+                f.jitterX,f.jitterY,f.previousJitterX,f.previousJitterY,logged,kResetEventLogCap,depthConventionTransition?1u:0u);
         }
     } else {
         ++stats.acceptedContinues;

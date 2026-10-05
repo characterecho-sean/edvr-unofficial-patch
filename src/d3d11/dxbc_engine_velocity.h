@@ -179,8 +179,37 @@ inline std::vector<BYTE> patchVsProgram(const std::vector<BYTE>& bytes, uint32_t
 // cleared target (-1), an untouched one and any sum or blend of two writes is
 // never an odd whole number, so arithmetic that reached MRT6 is declined by
 // the compose instead of naming another record (the 2026-09-23 review, item 4).
+enum class FlatMarkerKind { None, ForeignPool, World };
+
+// Only EDVR's fixed null-pool PS is accepted here. Its one uint input is
+// relocated to the extra VS output register; D3D11 does not remap that link.
+inline std::vector<BYTE> relocateNullPoolInput(const void* data,size_t size,uint32_t slotRegister) {
+    if(slotRegister==0 || slotRegister>=32)throw std::runtime_error("null pool input register");
+    auto chunks=parseContainer(data,size,kPs50);uint32_t old=~0u;
+    for(auto& chunk:chunks)if(chunk.tag==kTagIsgn) {
+        auto signature=parseSignature(chunk.bytes);
+        for(auto& e:signature)if(equalName(e.name,"EDVRPOOLSLOT") && e.componentType==1 && e.masks&1) {
+            if(old!=~0u)throw std::runtime_error("duplicate null pool input");
+            old=e.registerIndex;e.registerIndex=slotRegister;
+        }
+        chunk.bytes=makeSignature(signature);
+    }
+    if(old==~0u)throw std::runtime_error("missing null pool input");
+    for(auto& chunk:chunks)if(isProgram(chunk.tag)) {
+        auto words=programWords(chunk.bytes);
+        for(size_t at=2;at<words.size();) {
+            const auto length=instructionLength(words,at);
+            for(size_t i=at+1;i+1<at+length;++i)
+                if(operandType(words[i])==1 && (words[i]&0x00100000u) && words[i+1]==old)words[i+1]=slotRegister;
+            at+=length;
+        }
+        chunk.bytes=programBytes(std::move(words));
+    }
+    return makeContainer(chunks);
+}
+
 inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const EngineVelocityInputs& in,
-                                        bool guardOverlayDepth = false) {
+                                        bool guardOverlayDepth = false, FlatMarkerKind flatMarker = FlatMarkerKind::None) {
     auto t = programWords(bytes);
     size_t firstOutput = 0, tempAt = 0, firstExecutable = 0;
     uint32_t tempCount = 0, returns = 0;
@@ -228,7 +257,7 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
     }
     if (!firstOutput) throw std::runtime_error("no output declarations");
     if (!returns) throw std::runtime_error("no return");
-    if (!in.slotFromVsPatch && !identityDeclared) throw std::runtime_error("identity input not declared");
+    if (flatMarker != FlatMarkerKind::World && !in.slotFromVsPatch && !identityDeclared) throw std::runtime_error("identity input not declared");
     if (!tempAt && !firstExecutable) throw std::runtime_error("no executable instructions");
 
     const uint32_t temp = tempCount;   // the new temp's index
@@ -243,6 +272,25 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
         0x05000056u, 0x00102012u, kEngineVelocityTarget, 0x0010000Au, temp,
         0x05000036u, 0x00102022u, kEngineVelocityTarget, 0x0010102Au, in.positionRegister,
     };
+    // Flat foreign encoding leaves the VR/world tail above byte-identical.
+    // The qualified VS contract uses the same low23 pool index; high bits
+    // are draw metadata, not an extra address. Validate that decoded slot
+    // before the odd encoding can round. -2 is invalid, never an owner.
+    const uint32_t foreignTail[] = {
+        0x07000001u, 0x00100012u, temp, identitySelect, in.identityRegister, 0x00004001u, kEngineVelocitySlotMask,
+        0x07000050u, 0x00100022u, temp, 0x0010000Au, temp, 0x00004001u, 0x007fffffu,
+        0x09000023u, 0x00100012u, temp, 0x0010000Au, temp, 0x00004001u, 2u, 0x00004001u, 3u,
+        0x05000056u, 0x00100012u, temp, 0x0010000Au, temp,
+        0x07000038u, 0x00100012u, temp, 0x0010000Au, temp, 0x00004001u, 0xbf800000u,
+        0x09000037u, 0x00102012u, kEngineVelocityTarget, 0x0010001Au, temp, 0x00004001u, 0xc0000000u, 0x0010000Au, temp,
+        0x05000036u, 0x00102022u, kEngineVelocityTarget, 0x0010102Au, in.positionRegister,
+    };
+    const uint32_t worldTail[] = {
+        0x05000036u, 0x00102012u, kEngineVelocityTarget, 0x00004001u, 0u,
+        0x05000036u, 0x00102022u, kEngineVelocityTarget, 0x0010102Au, in.positionRegister,
+    };
+    if (guardOverlayDepth && flatMarker != FlatMarkerKind::None)
+        throw std::runtime_error("flat ownership cannot use the VR overlay depth guard");
     // This block is the exact token form of SM5 ftoi/ld_indexable/eq/movc,
     // checked against D3DCompile and WARP by engine_velocity_test. The guard
     // chooses the substrate depth only for the same odd pool-record code.
@@ -286,7 +334,9 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
                 outputDeclared = true;
             }
             if (opcode == kOpRet) {
-                if (guardOverlayDepth) out.insert(out.end(), std::begin(guardedTail), std::end(guardedTail));
+                if (flatMarker == FlatMarkerKind::ForeignPool) out.insert(out.end(), std::begin(foreignTail), std::end(foreignTail));
+                else if (flatMarker == FlatMarkerKind::World) out.insert(out.end(), std::begin(worldTail), std::end(worldTail));
+                else if (guardOverlayDepth) out.insert(out.end(), std::begin(guardedTail), std::end(guardedTail));
                 else out.insert(out.end(), std::begin(tail), std::end(tail));
             }
             out.insert(out.end(), t.begin() + at, t.begin() + at + length);
@@ -403,7 +453,8 @@ inline bool engineVelocityPatchVs(const void* data, size_t bytes, const EngineVe
 }
 
 inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVelocityInputs& inputs,
-                                  std::vector<BYTE>& output, std::string& reason, bool guardOverlayDepth = false) {
+                                  std::vector<BYTE>& output, std::string& reason, bool guardOverlayDepth = false,
+                                  dxbc_engine_velocity_detail::FlatMarkerKind flatMarker = dxbc_engine_velocity_detail::FlatMarkerKind::None) {
     using namespace dxbc_engine_velocity_detail;
     output.clear();
     reason.clear();
@@ -511,7 +562,7 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
             } else if (isProgram(chunk.tag)) {
                 if (program) throw std::runtime_error("duplicate program");
                 program = true;
-                chunk.bytes = patchPsProgram(chunk.bytes, psInputs, guardOverlayDepth);
+                chunk.bytes = patchPsProgram(chunk.bytes, psInputs, guardOverlayDepth, flatMarker);
             }
         }
         if (!isgn || !osgn || !program) throw std::runtime_error("missing pixel shader chunks");

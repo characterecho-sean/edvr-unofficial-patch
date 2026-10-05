@@ -1,12 +1,40 @@
 #pragma once
 #include "../../src/d3d11/flat_projection_runtime.h"
 #include "../../src/d3d11/flat_map_bounce.h"
+#include "../../src/d3d11/flat_foreground_phase.h"
+#include "../../src/d3d11/flat_foreground_certificate.h"
 
 void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     using namespace edvr;
     ComPtr<ID3D11DeviceContext1> ctx;
     check(SUCCEEDED(base->QueryInterface(IID_PPV_ARGS(ctx.GetAddressOf()))), "runtime Context1 available");
     if (!ctx) return;
+    {
+        float camera[320][4]{};camera[270][0]=camera[271][1]=1;camera[272][3]=-1;camera[273][2]=.025f;
+        D3D11_BUFFER_DESC cameraDesc{};cameraDesc.ByteWidth=sizeof(camera);cameraDesc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA data{};data.pSysMem=camera;ComPtr<ID3D11Buffer> cameraBuffer;
+        check(SUCCEEDED(device->CreateBuffer(&cameraDesc,&data,&cameraBuffer)),"foreground live phase CB");
+        FlatProjectionRuntime phaseRuntime;check(phaseRuntime.initialize(base) && phaseRuntime.observeCreateBuffer(cameraBuffer.Get(),camera),"foreground phase complete CPU witness");
+        ID3D11Buffer* savedCb[14]{};ctx->VSGetConstantBuffers(0,14,savedCb);
+        ID3D11ShaderResourceView* savedSrv[128]{};ctx->VSGetShaderResources(0,128,savedSrv);
+        ID3D11Buffer* noCb[14]{};ID3D11ShaderResourceView* noSrv[128]{};ctx->VSSetConstantBuffers(0,14,noCb);ctx->VSSetShaderResources(0,128,noSrv);
+        auto* boundCamera=cameraBuffer.Get();ctx->VSSetConstantBuffers(1,1,&boundCamera);
+        check(flatForegroundBoundPhase(ctx.Get(),&phaseRuntime,0,0,3840,2160,.025f),"foreground actual zero phase accepted");
+        FlatProjectionRuntimeRequest phaseRequest{};phaseRequest.stage=FlatProjectionStage::Vertex;phaseRequest.slot=1;phaseRequest.original=cameraBuffer.Get();phaseRequest.constantCount=4096;phaseRequest.patchCount=1;
+        phaseRequest.patches[0]={FlatProjectionPatchLayout::ForwardColumns,270*16,{}};
+        FlatProjectionJitter jitter{};check(flatProjectionJitter(.25f,-.125f,3840,2160,jitter),"foreground centered nonzero phase fixture");
+        check(phaseRuntime.preflight(&phaseRequest,1,jitter,1),"foreground private phase preflight");
+        const auto* plan=phaseRuntime.prepare(&phaseRequest,1,jitter,1);check(plan!=nullptr,"foreground private phase upload");
+        if(plan) {
+            FlatProjectionBindingScope scope(*plan);check(scope.active(),"foreground actual private CB bound");
+            check(flatForegroundBoundPhase(ctx.Get(),&phaseRuntime,.25f,-.125f,3840,2160,.025f),"foreground nonzero phase measured from live private upload");
+            check(!flatForegroundBoundPhase(ctx.Get(),&phaseRuntime,0,0,3840,2160,.025f),"foreground actual nonzero phase refuses forged zero phase");
+            FlatAnimatedIdentityLedger ledger;const auto certificate=flatForegroundCertificate(ctx.Get(),&phaseRuntime,ledger);
+            check(certificate.complete,"nonzero actual private CB forms complete duplicate pose certificate");
+        }
+        ctx->VSSetConstantBuffers(0,14,savedCb);ctx->VSSetShaderResources(0,128,savedSrv);
+        for(auto* p:savedCb)if(p)p->Release();for(auto* p:savedSrv)if(p)p->Release();
+    }
     float raw[64]{};
     raw[0]=1; raw[5]=1; raw[10]=1; raw[15]=1;
     D3D11_BUFFER_DESC desc{}; desc.ByteWidth=sizeof(raw); desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
@@ -43,6 +71,19 @@ void projectionRuntimeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
         ComPtr<ID3D11Buffer> seen;UINT f=999,n=0;
         ctx->VSGetConstantBuffers1(1,1,seen.GetAddressOf(),&f,&n);
         check(seen.Get()!=original.Get() && f==0 && n==4096,"private binding preserves exact range");
+        float actual[sizeof(raw)/sizeof(float)]{};
+        check(runtime.copyConstants(seen.Get(),0,sizeof(actual),actual),"nonzero-phase actual private CB has complete CPU upload certificate");
+        D3D11_BUFFER_DESC readDesc{};seen->GetDesc(&readDesc);readDesc.Usage=D3D11_USAGE_STAGING;
+        readDesc.BindFlags=0;readDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Buffer> staging;
+        check(SUCCEEDED(device->CreateBuffer(&readDesc,nullptr,&staging)),"private CB certificate staging fixture");
+        if(staging) {
+            ctx->CopyResource(staging.Get(),seen.Get());D3D11_MAPPED_SUBRESOURCE read{};
+            check(SUCCEEDED(ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&read)),"private CB certificate GPU readback");
+            if(read.pData){check(std::memcmp(actual,read.pData,sizeof(actual))==0,"complete private certificate equals actual GPU upload bytes");ctx->Unmap(staging.Get(),0);}
+        }
+        actual[0]=8123;
+        check(!runtime.copyConstants(seen.Get(),sizeof(raw),4,actual) && actual[0]==8123,"private CB certificate invalid range leaves output untouched");
     }
     {ComPtr<ID3D11Buffer> seen;UINT f=999,n=0;
      ctx->VSGetConstantBuffers1(1,1,seen.GetAddressOf(),&f,&n);

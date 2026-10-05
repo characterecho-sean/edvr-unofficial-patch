@@ -129,7 +129,13 @@ struct FlatRuntimeDrawScope {
     bool overlayReplayPending = false;
     bool foregroundPlanned = false, foregroundStarted = false, foregroundEnded = false;
     bool untrustedPlanned = false, untrustedStarted = false, untrustedEnded = false;
-    bool needsActualDraw() const { return drawPacket || flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
+    bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
+    bool domainProtectedOverlay=false;
+    ID3D11Texture2D* domainDepth=nullptr;
+    uint64_t domainVs=0,domainPs=0;
+    unsigned domainWidth=0,domainHeight=0;
+    float domainCamera[6][4]{};
+    bool needsActualDraw() const { return drawPacket || domainPlanned || flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
     ID3D11Texture2D* overlayHdr = nullptr;
     ID3D11DepthStencilView* overlayDsv = nullptr;
