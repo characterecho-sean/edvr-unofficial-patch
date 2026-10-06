@@ -3,7 +3,8 @@
 ## Status
 
 - **State:** 3d5ecaf6 FLOWN: still refused (forward HDR meshes) at 26 fps, the
-  world markers it admitted cost 14 ms GPU (104). v2 marks only first person.
+  world markers it admitted cost 14 ms GPU (104). v2 (only first person is
+  marked) is 0e9f59eb, INSTALLED on Epic, NOT FLOWN.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -12611,3 +12612,16 @@ writer other than the 88DCF116/494506A6 laser pair (or an overlay-protected
 draw) still makes the HDR selector refuse the frame
 (`conflicting-hdr-target-or-camera`, flat_runtime_model.h). The settlement's
 only first-person HDR mesh is that pair, and its log shows H selected.
+
+Committed 0e9f59eb, main fast-forwarded and pushed; origin/main confirmed.
+`--dll-only` passed. Epic flat install: dry run, install, `--verify-only`;
+installed DLL `v0.18.2-21-g0e9f59eb`, SHA256 CFCFBCAE81E8..., equal to the
+build and to the install receipt. `edvr-flat.ini`, `nvngx_dlss.dll` and the
+absent `edvr.ini` are unchanged. The installer's console was cut by a
+`Select-Object -First` pipe after its plan lines (exit -1); the receipt and
+DLL were already complete, as checked.
+
+Next flight: the same settlement and routine (DLAA, then FSR, NumLock once in
+each). Read: H-qualified and backend calls on the SDK domain line,
+world-markers near zero, world-unmarked counting, any refusal kinds, and
+GPU/present against 31.9/38 ms on 3d5ecaf6 and 17.8/22.5 ms on 4f6197e8.
