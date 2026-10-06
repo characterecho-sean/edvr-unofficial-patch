@@ -13017,3 +13017,38 @@ the key is read at startup. Calmer on the copy route: the HDR-space resolve
 of a bright thin highlight is the cause, fixable on EDVR's side (exposure or
 a tonemapped resolve). The same: the content, a highlight finer than the
 samples.
+
+### 2026-10-06: the copy-route A/B and Sean's video: the bevel follows the jitter
+
+Flight `edvr_gfx_20261006_120258.log` (`v0.18.2-38-g7cc82978`) with
+`experimental.temporal_aa_before_post = off`: the copy route at SS 1.0, DLSS as
+DLAA after the game's tone, treated-jittered with history (about 300 accepted
+frames per 5 s, no resets, the eight-phase jitter cycling). Sean: no
+improvement; standing still, the bright dashes on the roof's top bevel pulse
+rhythmically.
+
+His 4.4 s recording (30 fps, 462x144, standing still), measured frame by frame:
+the bevel runs at 1 pixel per 20.6 across. Its pixels vary by a median 28/255
+frame to frame, against 1.3 on a flat patch of roof. The dash pattern slides
+along the edge by up to 5 pixels between frames, which is the line moving
+about a quarter pixel up and down. The profile's autocorrelation has a small
+bump at four video frames (133 ms), one eight-phase jitter cycle at 60 fps.
+The output keeps part of the jitter on this line: DLSS does not fully settle
+a highlight about a pixel wide.
+
+EDVR's input is right. The shift in the game's camera rows is measured every
+frame against the phase DLSS is told, converted as `2*px/width` (y negated),
+and the log shows no mismatch (max error about 2e-7).
+
+Ruled out: the HDR-space resolve (a bright highlight resolved before the tone
+map) as the cause, because the copy route, which resolves after the tone,
+pulses the same.
+
+Ruled out: a jitter scale or sign error, because the measured row shift
+matches the phase handed to DLSS every frame.
+
+What remains is the upscalers' handling of a bright highlight about a pixel
+wide on a slope, and the jitter is what moves it. Levers left, none an EDVR
+input fix: another DLSS model, more supersampling, or a longer jitter cycle (a
+slower, smaller pulse; section 84 removed the phase-count switch after the VR
+hills showed no change).
