@@ -163,12 +163,6 @@ void prep(uint3 id:SV_DispatchThreadID) {
     float depth=SceneDepth.Load(int3(q,0));
     float2 motion=0; float reject=1, expected=0;
     bool foregroundActualMotion=false;
-    // keepRefused (debug.w bit 4, experimental.flat_sdk_local_reset = off; temporary, design doc section 104): a world pixel the checks
-    // below refuse stays refused in the census and the view, but where a motion was formed for it (`formed`) no rejection is written, so
-    // the SDK backend keeps its own result there and is handed that motion. A record that says nothing about its surface (sentinel,
-    // corrupt) forms the camera term for this alone; a masked or unreprojectable record is a mover's, forms none, and stays refused.
-    const bool keepRefused=(debug.w&4)!=0;
-    bool formed=false;
     // What the pixel is (kClass*), for the refusal census and view alone: nothing below reads it back. Until a check says
     // otherwise a pixel the checks below do not reach is a reset frame's, or one whose own depth is no depth.
     uint cls=flags.x!=0?kClassReset:kClassDepth;
@@ -232,30 +226,27 @@ void prep(uint3 id:SV_DispatchThreadID) {
         // HLSL logical operators do not short-circuit: putting cameraBefore's
         // out parameter in || would overwrite the exact engine result.
         bool valid=kind==1;
-        const bool silentRecord=kind==2 && (cls==kClassSentinel || cls==kClassCorrupt);
-        if(kind==0||kind==3||(keepRefused && silentRecord))valid=cameraBefore(rawUv,depth,before);
+        if(kind==0||kind==3)valid=cameraBefore(rawUv,depth,before);
         if(valid) {
             float2 prev=before.xy/before.w*float2(.5,-.5)+.5;
             // SDK vectors exclude both raster phases; the backend receives
             // the actual current phase separately and tracks its own history.
             motion=(prev-rawUv)*float2(size.xy);
             expected=before.z/before.w;
-            formed=all(isfinite(motion)) && all(abs(motion)<=65504);
-            valid=formed && all(prev>=0) && all(prev<=1) && isfinite(expected) && expected>=0 && expected<=1;
-            if(!valid && kind!=2)cls=kClassRange;
+            valid=all(isfinite(motion)) && all(abs(motion)<=65504) &&
+                  all(prev>=0) && all(prev<=1) && isfinite(expected) && expected>=0 && expected<=1;
+            if(!valid)cls=kClassRange;
             // A stale slot under the steady-detail rule (kind 3): the camera term stands only if last frame's depth confirms it. A pixel
             // the check refuses stays a stale-slot pixel (cls kClassStale, refused): the census counts it as stale-refused.
             if((debug.w&2)!=0)expected*=foregroundDepth.x;
             if(valid && kind==3)valid=historyDepthMatches(prev,expected);
-            // An engine refusal (kind 2) formed the camera term above only as keepRefused's motion: it stays refused, and keeps its class.
-            if(kind==2)valid=false;
             reject=valid?0:1;
         } else if(kind!=2)cls=kClassCamera;
     }
-    if(!foregroundActualMotion) { if(reject!=0 && !(keepRefused && formed))motion=0; }
+    if(!foregroundActualMotion) { if(reject!=0)motion=0; }
     if((debug.w&2)!=0 && !foreground)depth*=foregroundDepth.x;
     OutDepth[q]=isfinite(depth)?saturate(depth):0;
-    OutMotion[q]=motion; OutRejection[q]=(keepRefused && formed)?0:reject;
+    OutMotion[q]=motion; OutRejection[q]=reject;
     if(flags.z!=0)OutExpected[q]=expected;
     // The refusal census and view: one byte, the class and (bit 7) whether this pixel's history was refused.
     if(debug.x!=0 || debug.y!=0)OutClass[q]=cls|(reject!=0?0x80u:0u);
@@ -343,7 +334,6 @@ void taa(uint3 id:SV_DispatchThreadID) {
 }
 // Modern DLSS presets ignore NGX's bias-current-colour mask. Explicitly rejected
 // pixels must display current colour even when the backend declines that hint.
-// (Under keepRefused the prep writes no rejection for a world pixel it formed a motion for: the backend's result stands there.)
 [numthreads(8,8,1)]
 void finish(uint3 id:SV_DispatchThreadID) {
     if(any(id.xy>=size.zw))return;
