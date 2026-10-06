@@ -13157,3 +13157,28 @@ Flight reads: at SS 1.0 while aiming, no `pending-null mismatch` lines,
 weapon up and aiming, `flat copy weapon 5s` mixed frames with H-qualified equal
 to H-attempts and no `conflicting-hdr-target-or-camera`; a hipfire NumLock for
 the weapon-refused share.
+
+### 2026-10-06: 54ea9cee flown; aiming and SS 0.75 hold; the weapon's own pixels refused
+
+Flight `edvr_gfx_20261006_142951.log`, verified `v0.18.2-49-g54ea9cee`. Sean:
+much better overall; aiming down sights on the HDR route, things seen
+through or around the sights seem to lose AA.
+
+- Aiming, HDR route: `scale-rejected-5s` about 10,000 a window while aiming;
+  H-qualified equals H-attempts (6,347 of 6,347 by 14:33:17); no witness
+  mismatch line. The aiming fix holds.
+- SS 0.75, the copy route, weapon up: `flat copy weapon 5s` mixed frames,
+  domain-mixed, H attempts and qualified all equal (308, 306, 310, 316, 348,
+  332, 328, 121 a window). The copy-route weapon support holds.
+- The NumLock censuses: `weapon-refused` 5.9%, 6.6%, 6.9% (native), 4.4%,
+  5.4%, 5.8% (SS 0.75) of all pixels; everything else is tiny. A
+  weapon-refused pixel has a trusted first-person mark and an invalid map
+  sample (w not 1, or its prior off screen), so it shows the raw frame: the
+  weapon's footprint, and while aiming probably the world seen through the
+  sight. The 13:19 census, before this build, already had 3%.
+
+Open: why the weapon's own map samples are invalid most frames, and whether a
+transparent depth-writing sight lens takes the world behind it as the
+weapon's. A planning pass is reading the code; a view screenshot while
+aiming will show which pixels are refused (white) and which keep weapon
+motion (cyan).
