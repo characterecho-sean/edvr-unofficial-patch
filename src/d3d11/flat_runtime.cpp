@@ -260,6 +260,7 @@ struct State {
     uint64_t foregroundDomainFrame=~0ull;
     uint32_t namedWorldQ=0;
     const char* foregroundHRefusal=nullptr;
+    const char* foregroundHRefusalWindow=nullptr;   // the most recent H refusal since the last 5 s line (survives the frame starts)
     struct DomainProofEntry { FlatDomainShaderProof proof;uint64_t attemptedFrame=0; };
     std::map<std::pair<uint64_t,uint64_t>,DomainProofEntry> foregroundProofs;
     struct DomainCounts {
@@ -610,7 +611,10 @@ static void reportForegroundDomain(State& s) {
         (unsigned long long)n.worldMarkers,(unsigned long long)n.nullMarkers,(unsigned long long)n.markerRefused,
         (unsigned long long)n.predictedWorld,s.predictedWorldNear,(unsigned long long)n.worldUnmarked,
         (unsigned long long)n.surfacePreserving,(unsigned long long)n.surfacePreservingForeign,
-        (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,s.foregroundHRefusal?s.foregroundHRefusal:"none");
+        (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,s.foregroundHRefusalWindow?s.foregroundHRefusalWindow:"none");
+    // last-refusal is the most recent H refusal since the previous line. The per-frame field clears at every frame start, so it read
+    // "none" here even while every frame was refused (section 104, supersampled 4K).
+    s.foregroundHRefusalWindow=nullptr;
     const auto& f=s.foregroundFirstFailure;
     Log::get().note("flat foreground first failure: configured=%s frame=%llu q=%u VS=%016llX PS=%016llX format=%u camera=%016llX depth=%p stage=%s reason=%s pending-world-null=%u selected-H-frame=%llu selected-depth=%p candidates=%u cap=%u overflow=%u candidate-present=%u; first failure on selected H depth in the most recent failed frame, not a shader allowlist",
         flatMonoResolveModeName(s.engine),(unsigned long long)f.frame,f.q,(unsigned long long)f.vs,(unsigned long long)f.ps,
@@ -4841,6 +4845,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     FlatMonoResolveFrame f{}; f.color = original; f.depth = s.depthView.Get(); f.renderWidth = selected.renderWidth; f.renderHeight = selected.renderHeight;
     f.outputWidth = selected.outputWidth; f.outputHeight = selected.outputHeight; f.frame = s.prefix.frame; f.mode = s.engine;
+    // The refusal view and census on the copy route too (render below the output: DLSS or FSR upscaling), as on the HDR route.
+    f.refusalView = s.motionSourceView ? 1u : 0u;
+    f.refusalCensus = s.motionSourceView || s.refusalCensusFrames > 0;
+    if (s.refusalCensusFrames) --s.refusalCensusFrames;
     nativeScale.store(f.renderWidth >= f.outputWidth && f.renderHeight >= f.outputHeight,
                       std::memory_order_release);
     f.configuredDlssPreset=s.preset;
@@ -5259,7 +5267,8 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         FlatContractObservation failureKey{};failureKey.vs=s.drawVs;failureKey.ps=s.drawPs;
         failureKey.depth=selected.depth;failureKey.format=26;
         failureKey.cameraHash=flatDomainBytecodeHash(selected.camera,sizeof(selected.camera));
-        auto failH=[&](const char* why){domainFail(s,"H-qualification",why,failureKey);if(!s.foregroundHRefusal)s.foregroundHRefusal=why;};
+        auto failH=[&](const char* why){domainFail(s,"H-qualification",why,failureKey);if(!s.foregroundHRefusal)s.foregroundHRefusal=why;
+            if(why)s.foregroundHRefusalWindow=why;};
         ++s.foregroundCounts.hAttempts;
         s.foregroundLastH={s.prefix.frame,selected.depth,s.foregroundRoute.count(s.prefix.frame),
             candidate?candidate->pendingNull.count():0,

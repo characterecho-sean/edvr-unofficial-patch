@@ -8,6 +8,13 @@
 #include <cstring>
 
 namespace edvr {
+// The largest render size H may qualify at (design doc section 104). The first-person map is RGBA32F at the render size, so 64M
+// pixels (8192x8192) is 1 GB. It covers a 4K screen supersampled 2.0 (7680x4320, 33.2M pixels). The bound it replaced, 16M,
+// refused every on-foot frame of a 4K screen above SS 1.42, and those frames fell back to the spatial recovery with no AA.
+inline constexpr uint64_t kFlatForegroundMaxPixels = 64ull * 1024 * 1024;
+inline bool flatForegroundExtentAllowed(unsigned width, unsigned height) {
+    return width && height && uint64_t(width) * height <= kFlatForegroundMaxPixels;
+}
 // Flat ownership and camera adapter for the same bounded original-VS capture
 // used by VR. No readback, diagnostic timer, or per-weapon selector is here.
 class FlatForegroundMotion {
@@ -122,7 +129,7 @@ public:
         out=Output{};out.frame=frame;
         auto refuse=[&](const char* reason){out.refusal=reason;return false;};
         if(frame!=frame_ || refusal_)return refuse(refusal_?refusal_:"foreground-frame");
-        if(!ctx || !owners || !rawDepth || !width || !height || uint64_t(width)*height>16*1024*1024)
+        if(!ctx || !owners || !rawDepth || !flatForegroundExtentAllowed(width,height))
             return refuse("foreground-H-resources");
         if(!textureExtent(owners,width,height,true) || !textureExtent(rawDepth,width,height,false))
             return refuse("foreground-H-resource-shape");

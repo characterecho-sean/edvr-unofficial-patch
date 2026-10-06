@@ -1021,8 +1021,9 @@ void experimentCases() {
     char cl[768];
     n = vrWorldFormatViewChanged(cl, sizeof(cl), 77, true);
     check(n > 0 && n < 768 && std::strstr(cl, "vr world route: the refusal view is ON from frame=77 (advanced.temporal_aa_debug = motion_source)") &&
-              std::strstr(cl, "yellow stale slot") && std::strstr(cl, "red masked record") && std::strstr(cl, "before the game's tone pass"),
-          "view line: coming on names the key and the legend (yellow stale slot, red masked record) and the tone-pass caveat");
+              std::strstr(cl, "yellow stale slot (kept)") && std::strstr(cl, "pink stale slot refused (shown raw)") &&
+              std::strstr(cl, "red masked record") && std::strstr(cl, "before the game's tone pass"),
+          "view line: coming on names the key and the legend (yellow stale slot kept, pink stale slot refused, red masked record) and the tone-pass caveat");
     n = vrWorldFormatViewChanged(cl, sizeof(cl), 99, false);
     check(n > 0 && std::strstr(cl, "vr world route: the refusal view is OFF from frame=99") != nullptr, "view line: going off is one short line");
     // The classes the census names are the numbers the shader writes (the resolver rig compares them to the HLSL).

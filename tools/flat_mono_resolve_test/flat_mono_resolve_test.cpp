@@ -216,6 +216,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_taa_history_depth_gpu_tests.h"
 #include "flat_context_isolation_gpu_tests.h"
 #include "flat_sdk_foreground_gpu_tests.h"
+#include "flat_copy_refusal_view_gpu_tests.h"
 int main(int argc,char** argv) {
     const bool printGoldens=argc==2 && !std::strcmp(argv[1],"--print-goldens"); // --self-test plus the recorded key-off hashes, for re-recording
     if(argc!=2 || (std::strcmp(argv[1],"--self-test") && std::strcmp(argv[1],"--dry-run") && !printGoldens)){std::puts("usage: flat_mono_resolve_test --self-test|--dry-run|--print-goldens");return 2;}
@@ -808,6 +809,8 @@ int main(int argc,char** argv) {
     // The HDR route's resolver half (design section 81): before the D3D message check below, so its draws are held to it.
     hdrRouteGpuTests(device.Get(),context.Get());
     sdkForegroundGpuTests(device.Get(),context.Get());
+    // The same SDK foreground contract above the output (the supersampled on-foot frame), and the untrusted-coverage clause's other two sides.
+    sdkForegroundSupersampleGpuTests(device.Get(),context.Get());
     // The VR world route's seams (section 82): the third upscaler slot, the first-person map and stencil in the prep, and the phase term
     // the map's vector gets when the world and the first-person camera are jittered (stage 2).
     upscalerSlotGpuTests(device.Get(),context.Get());
@@ -816,6 +819,8 @@ int main(int argc,char** argv) {
     // The stage 2 experiment build's refusal census and view: the prep's class byte, the counting pass and its read-back, the steady-detail
     // rule's effect on the counts, and the HDR finish's paint.
     refusalGpuTests(device.Get(),context.Get());
+    // The same view on the copy route (hdr off): the compute finish paints it for the SDK backends, EDVR's own TAA there asks for nothing.
+    copyRefusalViewGpuTests(device.Get(),context.Get());
     // The depth-validated steady detail (the same section, the key's second form): the prep's depth check, its tolerance and its previous depth,
     // through the DLSS and FSR stubs and EDVR's own TAA, and the same scenario against the prep with one rule flipped at a time.
     steadyDepthGpuTests(device.Get(),context.Get());

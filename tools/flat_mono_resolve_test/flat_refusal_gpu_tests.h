@@ -238,8 +238,10 @@ inline void refusalGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) 
     run("refusal: the view on");
     check(observedMotionHash == viewOffHash, "refusal: the view changes nothing the backend is handed (depth, motion and rejection are bit-identical)");
     check(readH(px), "refusal: the painted H is readable");
-    check(isColour(px, 5, 5, 2.0, 2.0, 0.0) && isColour(px, 6, 6, 2.0, 2.0, 0.0),
-          "refusal view: a stale slot is yellow (twice the pixel's own level in red and green, none in blue)");
+    // A stale slot the prep REFUSED (class 4 with bit 7 set: the pixel shows the raw frame) is pink, y x (1, .4, .7); one the steady-detail rule
+    // KEPT (class 4, bit 7 clear) stays yellow, y x (1, 1, 0), and is asserted below. The refused block shows the raw (1,1,1), so y = 2.
+    check(isColour(px, 5, 5, 2.0, 0.8, 1.4) && isColour(px, 6, 6, 2.0, 0.8, 1.4),
+          "refusal view: a REFUSED stale slot is pink (twice the pixel's own level in red, .4 of that in green, .7 of that in blue), not yellow");
     check(isColour(px, 2, 2, 2.0, 0.0, 2.0), "refusal view: a corrupt slot is magenta");
     check(isColour(px, 13, 3, 2.0, 2.0, 2.0), "refusal view: the out-of-range sentinel is white (any other refusal)");
     check(isColour(px, 10, 2, 0.0, 0.3 * y1, y1), "refusal view: a pool surface that is not a rig record (the camera term) is blue");
@@ -252,12 +254,12 @@ inline void refusalGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) 
     setRecord(1);
     run("refusal: the view on, a joined record");
     check(readH(px) && isColour(px, 8, 8, 0.0, y1, 0.0), "refusal view: a joined record is green (accepted: the backend's result scaled by its own level)");
-    // With the steady-detail rule on, a stale pixel the depth check keeps is accepted but still painted yellow (the view says what the pixel IS,
-    // the census how it was treated).
+    // With the steady-detail rule on, a stale pixel the depth check KEEPS is accepted and stays yellow (class 4 with bit 7 clear: the view says
+    // what the pixel IS, the census how it was treated); only a refused one is pink (above). Same texel, same class, the other bit.
     f.steadyDetail = true;
     run("refusal: the view on, steady detail on");
     check(readH(px) && isColour(px, 5, 5, y1, y1, 0.0),
-          "refusal view: a stale pixel the steady-detail rule accepted is painted yellow from the backend's result, not from the raw input");
+          "refusal view: a stale pixel the steady-detail rule KEPT is yellow, painted from the backend's result (not from the raw input, and not pink)");
     f.steadyDetail = false;
     f.refusalView = 0;
     run("refusal: the view off again");

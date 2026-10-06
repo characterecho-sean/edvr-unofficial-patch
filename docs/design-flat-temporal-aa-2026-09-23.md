@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** 104 CLOSED: DLAA/FSR work at the settlement, inputs verified,
-  slight shimmer is the content; 5f7e43e8 (A/B key removed) on Epic (104).
-  TAA's history depth takes the best of four texels: BUILT, NOT FLOWN (104).
+- **State:** native DLAA/FSR work at the settlement; SS above 1 on foot was
+  refused by two gates (16M H bound, TAA's native-size rule), both fixed, plus
+  the copy-route view; TAA best-of-four history depth NOT FLOWN (104).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -34,12 +34,12 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** fly the TAA depth change (104): the settlement roof, standing
-  still, EDVR's TAA against DLAA. Retain 102's color-clear fix; no
-  per-weapon table; preserve Epic settings, 87's native FSR comparison,
-  83's open items and high-G motion; do not repeat qualified PS91/BFE or
-  stale-resize hypotheses. Menu hangar-floor P1 open; VR regression tests
-  and `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
+- **Next:** one flight on foot (104): SS 0.75 (copy-route view), 1.0, 1.5 (H
+  qualifies, backend runs), EDVR's TAA standing still at the roof. Retain
+  102's color-clear fix; no per-weapon table; preserve Epic settings, 87's
+  native FSR comparison, 83's open items and high-G motion; do not repeat
+  qualified PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
+  regression tests and `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
@@ -12813,6 +12813,57 @@ documented); `--dll-only` passed; Epic flat install verified,
 `v0.18.2-30-g5f7e43e8`, SHA256 C97FB27B83EE256A..., `edvr-flat.ini`
 unchanged (its `flat_sdk_local_reset` line now names a key nothing reads).
 
+### 2026-10-06: 5f7e43e8 flown; supersampling never runs the SDK on foot
+
+Flight `edvr_gfx_20261006_094726.log`, `v0.18.2-30-g5f7e43e8`. Sean: the view
+"was removed" and, even at SS 2.0, the roof edge still shimmers in motion.
+
+The view was not removed. The ini had no view line at launch (first read:
+off). After Sean added it at 09:52:12 the view came on, but at SS 0.75: DLSS
+upscaling 2880x1620 to 3840x2160 on the copy route, and only the HDR route's
+finish painted. The census ran either way.
+
+Supersampling never ran DLSS or FSR. At SS 1.5 (5760x3240) and SS 2.0
+(7680x4320) every frame was refused with
+`flat-resolve-foreground-contract-unqualified`: the first-person contract
+never qualified H (H-qualified 0 of about 7,140 attempts, against 100% at
+native). The HDR route recovered each frame spatially (`last=spatial-fallback`,
+`backend=0`), and the jitter never left its warm-up (`jitter=(0,0)`), so there
+was no temporal AA at all: the SS 2.0 shimmer Sean saw is plain supersampling.
+It is no evidence about DLAA, and it means supersampling above native cannot be
+offered as the lever for the roof yet. OPEN: why H never qualifies above native.
+
+At SS 0.75 the copy route ran DLSS normally (treated-jittered, about 400
+accepted-history frames per 5 s).
+
+Build (Sean asked for it): the refusal view and census on the copy route. The
+copy route's frame carries the view and census flags; the resolver paints in
+the copy route's compute finish (DLSS or FSR; EDVR's TAA on the copy route has
+no finish), with the class texture at t11. Rig: flat_copy_refusal_view_gpu_
+tests.h (DLAA, DLSS and FSR at 1x and 2x; view off bit-identical; TAA never
+paints); reverting the paint line, the t11 binding or the HDR-only gate fails
+32 to 40 checks. On the RGBA8 copy route the paint keeps hue, not brightness.
+
+Root cause of the supersampled refusals (code reading; the sizes settle it):
+`FlatForegroundMotion::prepareH` refused any H above 16*1024*1024 pixels
+(`foreground-H-resources`). 3840x2160 is 8.3M, 5760x3240 18.7M, 7680x4320
+33.2M; SS 1.25 on a 4K screen (13.0M) was under it. The reason never reached
+the log: the 5 s line printed a per-frame field that every frame start
+clears, so it read `last-refusal=none` with every frame refused.
+
+Fix (Sean, 2026-10-06, with the recommendations below): the bound is 64M
+pixels (`kFlatForegroundMaxPixels`; 8192x8192, 1 GB of RGBA32F map; about
+530 MB at SS 2.0 on a 4K screen), and `last-refusal` is the most recent H
+refusal since the previous line.
+
+Two routes (Sean asked why; kept). H and the game's post chain run at the
+render size, and only the final copy scales to the screen. An upscaler
+(R < D) can only take the place of that copy; at R >= D the HDR route
+resolves before bloom, DoF and tone and does not depend on the post chain's
+shape (section 81). Both stay. The cost is that every feature and instrument
+needs both routes; the bench gains a supersampled on-foot HDR case and a
+copy-route case so every build checks both.
+
 Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
 motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
 jagged roof and spool edges, and NumLock once in each mode. Then drop the view,
@@ -12893,3 +12944,111 @@ Next flight (Epic, flat profile, TAA on): the same settlement at night,
 standing still, EDVR's TAA on the roof's top bevel and lower-left corner, then
 DLAA on the same view. Read the edge pixels for the beading, and for any new
 ghost trail where a ship or a walker leaves the frame (the price above).
+
+### 2026-10-06: the second supersample gate; a colour for refused stale slots
+
+The bench found a second gate behind the 16M bound. With the bound raised, H
+qualified at 5760x3240, and the resolver then refused the frame with
+`flat-resolve-untrusted-coverage-requires-native-HDR-TAA`. Section 102's rule
+refused untrusted camera coverage (every mixed-camera frame) at any render
+size other than the output, for every mode. It was written for EDVR's TAA,
+whose output-domain test maps one output pixel to one render pixel. An SDK
+backend with the qualified first-person map never reads that mask (the prep's
+debug.w is 2), and the map, the prep and the backend all run at the render
+size. The size clause now applies to TAA alone; an SDK frame still needs the
+HDR route and the first-person map. Bench, a scratch proxy with only that
+clause changed: all six supersampled cells (96x96 into 64x64 and 5760x3240
+into 3840x2160, DLAA, DLSS and FSR) ran the backend, where the real tree
+refused all six.
+
+Ruled out: the 64M bound alone as the supersample fix, because the bench at
+the real size qualified H and then hit the size clause above.
+
+The copy-route bench case is not built: the copy route admits the game's final
+copy by its exact shader hashes, which no fixture holds. A capture flight and
+one to two days of scaffolding would build it. The resolver side is pinned by
+flat_copy_refusal_view_gpu_tests.h; the three lines in flat_runtime.cpp that
+ask for the view on the copy route are left to the flight.
+
+The view (Sean asked, after the roof painted yellow): a stale slot the depth
+check refused now paints pink, a kept one stays yellow. Before, both were
+yellow and only the census told them apart.
+
+Committed 7cc82978 on d923d5f5 and the merge of main (588a443c, which
+brought 2d8e6761's TAA history depth). Full build green, receipt
+`342298b1`; bench hardware 50/50 PASS (the six supersampled cells
+included), WARP 25 PASS, 25 UNSUPPORTED, 0 FAIL. `--dll-only` passed. The
+first install was refused ("native staging requires a proven stopped game")
+while Elite was running; once it had closed, the same probe passed, and the
+Epic flat install verified `v0.18.2-38-g7cc82978`, SHA256
+8F958B9B574146DD..., `edvr-flat.ini` unchanged.
+
+Next flight, on foot at the roof: SS 1.0 DLAA with the view (pink on the
+edge while walking is a refused stale slot); SS 1.5 DLAA (H must qualify,
+`backend` above 0 on the `flat hdr route 5s` line, no spatial fallback); SS
+0.75 DLSS with the view (it now paints on the copy route); EDVR's TAA
+standing still with the view off (2d8e6761's best-of-four); NumLock in each.
+
+### 2026-10-06: 7cc82978 flown; supersampled DLAA runs; the copy route refuses the weapon
+
+Flight `edvr_gfx_20261006_114449.log`, verified `v0.18.2-38-g7cc82978`, DLSS
+mode throughout: SS 2.0 (7680x4320) from 11:45:24, SS 1.5 (5760x3240) from
+11:47:54, SS 0.75 (2880x1620, the copy route) from about 11:49:50.
+
+- Supersampling now runs the SDK on foot: H-qualified 2,982 of 2,982 by
+  11:48:06, `treated-jittered-hdr`, about 250 to 300 accepted-history frames
+  per 5 s at SS 2.0 and 1.5. Both gates are fixed in flight.
+- Pink (refused stale): present and tiny. With the view on at SS 2.0 while
+  walking, stale refused peaked at about 21,000 pixels a frame of 33 million
+  (11:47:16), then about 200; the paint is luma-scaled and the scene is at
+  night. Sean saw none. The roof edge is kept (yellow).
+- Weapon up at SS 0.75: every frame refused, `conflicting-hdr-target-or-
+  camera`, from 11:49:51; treated again with the weapon down. The copy route
+  has never handled a mixed-camera frame: the first-person contract (marks,
+  the map, H qualification) exists on the HDR route alone. Not a regression;
+  OPEN as its own piece of work.
+- The roof still shimmers in motion at SS 1.5 with DLAA running. Plain SS 2.0
+  (5f7e43e8's spatial fallback, no AA) shimmered as well.
+
+Next discriminator (no build): SS 1.0 DLAA, weapon down, walking past the
+roof, with `experimental.temporal_aa_before_post` at auto (HDR route: AA in
+linear HDR before bloom and tone) against off (copy route: AA after tone);
+the key is read at startup. Calmer on the copy route: the HDR-space resolve
+of a bright thin highlight is the cause, fixable on EDVR's side (exposure or
+a tonemapped resolve). The same: the content, a highlight finer than the
+samples.
+
+### 2026-10-06: the copy-route A/B and Sean's video: the bevel follows the jitter
+
+Flight `edvr_gfx_20261006_120258.log` (`v0.18.2-38-g7cc82978`) with
+`experimental.temporal_aa_before_post = off`: the copy route at SS 1.0, DLSS as
+DLAA after the game's tone, treated-jittered with history (about 300 accepted
+frames per 5 s, no resets, the eight-phase jitter cycling). Sean: no
+improvement; standing still, the bright dashes on the roof's top bevel pulse
+rhythmically.
+
+His 4.4 s recording (30 fps, 462x144, standing still), measured frame by frame:
+the bevel runs at 1 pixel per 20.6 across. Its pixels vary by a median 28/255
+frame to frame, against 1.3 on a flat patch of roof. The dash pattern slides
+along the edge by up to 5 pixels between frames, which is the line moving
+about a quarter pixel up and down. The profile's autocorrelation has a small
+bump at four video frames (133 ms), one eight-phase jitter cycle at 60 fps.
+The output keeps part of the jitter on this line: DLSS does not fully settle
+a highlight about a pixel wide.
+
+EDVR's input is right. The shift in the game's camera rows is measured every
+frame against the phase DLSS is told, converted as `2*px/width` (y negated),
+and the log shows no mismatch (max error about 2e-7).
+
+Ruled out: the HDR-space resolve (a bright highlight resolved before the tone
+map) as the cause, because the copy route, which resolves after the tone,
+pulses the same.
+
+Ruled out: a jitter scale or sign error, because the measured row shift
+matches the phase handed to DLSS every frame.
+
+What remains is the upscalers' handling of a bright highlight about a pixel
+wide on a slope, and the jitter is what moves it. Levers left, none an EDVR
+input fix: another DLSS model, more supersampling, or a longer jitter cycle (a
+slower, smaller pulse; section 84 removed the phase-count switch after the VR
+hills showed no change).

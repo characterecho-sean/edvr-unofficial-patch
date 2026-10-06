@@ -30,8 +30,10 @@ class PresentDevice final {
     if(window_)DestroyWindow(window_);
     if(anchor_)DestroyWindow(anchor_);
   }
-  HRESULT initialize(HMODULE proxy,D3D_DRIVER_TYPE driver) {
-    if(window_||!proxy)return E_INVALIDARG;
+  // `width` x `height` is the swap chain's back buffer, which is the output size the proxy's flat runtime reads (64 x 64 for every rig but
+  // the flat SDK bench's supersampled cases, which present at their real display size).
+  HRESULT initialize(HMODULE proxy,D3D_DRIVER_TYPE driver,UINT width=64,UINT height=64) {
+    if(window_||!proxy||!width||!height)return E_INVALIDARG;
     const auto create=reinterpret_cast<decltype(&D3D11CreateDeviceAndSwapChain)>(
       GetProcAddress(proxy,"D3D11CreateDeviceAndSwapChain"));
     if(!create)return E_NOINTERFACE;
@@ -40,14 +42,14 @@ class PresentDevice final {
       0,0,0,0,HWND_MESSAGE,nullptr,GetModuleHandleW(nullptr),nullptr);
     if(!anchor_)return HRESULT_FROM_WIN32(GetLastError());
     window_=CreateWindowExW(0,L"STATIC",L"EDVR hidden Present fixture",WS_CHILD,
-      0,0,64,64,anchor_,nullptr,GetModuleHandleW(nullptr),nullptr);
+      0,0,static_cast<int>(width),static_cast<int>(height),anchor_,nullptr,GetModuleHandleW(nullptr),nullptr);
     if(!window_){
       const DWORD error=GetLastError();
       DestroyWindow(anchor_);anchor_=nullptr;
       return HRESULT_FROM_WIN32(error);
     }
     DXGI_SWAP_CHAIN_DESC desc{};
-    desc.BufferDesc.Width=desc.BufferDesc.Height=64;
+    desc.BufferDesc.Width=width;desc.BufferDesc.Height=height;
     desc.BufferDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count=1;desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount=2;desc.OutputWindow=window_;desc.Windowed=TRUE;
