@@ -3742,6 +3742,7 @@ int main(int argc, char** argv) {
     failures += flatDomainAdmissionTests();
     failures += flatDomainWorldPredictionTests();
     failures += flatDomainWorldPredictionWiringTests();
+    failures += flatWeaponHistoryWiringTests();
     failures += flatDomainDepthRouteTests();
     failures += flatProjectionOwnershipTests();
     failures += flatComputeTests();

@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** DLAA/FSR on foot at any SS; weapon support below SS 1.0 and the
-  aiming fix (scale-checked world prediction) BUILT, NOT FLOWN (104).
+- **State:** DLAA/FSR on foot at any SS, weapon below SS 1.0 and aiming FLOWN;
+  overlay composite and weapon history by content BUILT, NOT FLOWN (104).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,8 +33,8 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** fly aiming at SS 1.0 and 0.75, the weapon up at 0.75, a hipfire
-  NumLock (weapon-refused share); TAA at the roof standing still. Retain
+- **Next:** fly aiming over the coils at SS 1.0, the view while moving with
+  the weapon up, a NumLock (weapon-refused by reason). Retain
   102's color-clear fix; no per-weapon table; preserve Epic settings, 87's
   native FSR comparison, 83's open items and high-G motion; do not repeat
   qualified PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
@@ -13235,3 +13235,26 @@ Fix (next build): a reason code for every class-2 sample, reported in the
 census; then match by content, not slot (identity.x equal, identity.y equal
 except byte 30), keeping the equal-or-reject rule for several matches. Target:
 live weapon-refused at the still-camera baseline, about 0.1%.
+
+Built, one install (both green; bench hardware 56/56 PASS, WARP 0 FAIL):
+- Overlay composite (9d041f21): at covered pixels the anti-aliased world
+  plus the overlay's contribution (raw H with the overlay minus the clean H);
+  covered and refused keeps the raw value; a transparent overlay adds
+  nothing. finishHdr binds the clean H at t0, the overlay H at t16.
+- Weapon history by content: the flat map's match drops the slot and needs
+  identity.x equal and identity.y equal except byte 30; equal-or-reject for
+  several matches stays. AnimatedVertexHistory::maxRecords 64 to 128 (the
+  equip transient). Reason codes for every class-2 sample (no-prior,
+  prior-positions, identity-differs, prior-identity-invalid, ambiguous, ...)
+  in the class byte's bits 4-6, split in the census as `weapon-refused by
+  reason`. CPU counters on the SDK domain line (no-candidate, no-prior-pool,
+  no-prior-near, no-prior-absent, priors-one, priors-several,
+  repeated-geometry). Bench `first_person_slot_repacked`: slots alternating
+  under one identity match 4,578 of 4,578, all rejected with the slot check.
+- Risk named: content identity can give one wrong frame of history to an
+  identical mesh that takes the freed bone range; watch `ambiguous`,
+  `priors-several` and `repeated-geometry`.
+
+Flight: aiming over the coils at SS 1.0 (the world through the sight keeps
+AA); the refusal view while moving with the weapon up (the gun should stay
+cyan); a NumLock while moving (weapon-refused near 0.1%, and by reason).

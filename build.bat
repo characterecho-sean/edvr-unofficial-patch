@@ -317,6 +317,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_scene_draws ^
     --extra-export edvr_selftest_flat_sdk_snapshot ^
     --extra-export edvr_selftest_flat_sdk_owner_view ^
+    --extra-export edvr_selftest_flat_sdk_foreground_map ^
     --extra-export edvr_selftest_binding ^
     --extra-export edvrAcquireGraphicsBridge ^
     --extra-export edvrAcquireRenderBoundary ^

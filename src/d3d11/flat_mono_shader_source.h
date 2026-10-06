@@ -48,11 +48,13 @@ RWTexture2D<float> OutRejection : register(u2);
 RWTexture2D<float> OutExpected : register(u3);
 RWTexture2D<float4> OutColor : register(u4);
 RWTexture2D<uint> OutClass : register(u5);            // prep only, bound when debug.x or debug.y: what the pixel is and whether its history was refused
-RWByteAddressBuffer RefusalCounts : register(u6);     // the census kernel's: 16 stripes of 16 counters (flat_mono_refusal.h)
+RWByteAddressBuffer RefusalCounts : register(u6);     // the census kernel's: 16 stripes of 24 counters, 16 by class and 8 by weapon-refused reason (flat_mono_refusal.h)
 RWTexture2D<float> OutOutputDomain : register(u7);    // TAA only: 1 when all current colour taps are trusted world
 
-// The pixel classes (flat_mono_refusal.h kFlatMonoClass*, which tools\flat_mono_resolve_test holds these to). Bit 7 of the byte the prep
-// writes says its history was refused.
+// The pixel classes (flat_mono_refusal.h kFlatMonoClass*, which tools\flat_mono_resolve_test holds these to). The byte the prep writes is the
+// class in bits 0-3 (the highest is 14), for a refused first-person pixel the reason it has no history in bits 4-6 (0..7, from the foreground
+// map's x channel: flat_foreground_motion_shader.h), and in bit 7 whether its history was refused. Every reader masks what it reads: the
+// census, the view's colour and the view's choice among the four taps read the class with 0x0F (and the choice the refused bit with it).
 static const uint kClassNone=0, kClassJoined=1, kClassMasked=2, kClassNotRig=3, kClassStale=4, kClassCorrupt=5, kClassStaleStamp=6,
     kClassSentinel=7, kClassUnreprojectable=8, kClassCamera=9, kClassRange=10, kClassDepth=11, kClassWeapon=12,
     kClassWeaponRefused=13, kClassReset=14;
@@ -201,6 +203,10 @@ void prep(uint3 id:SV_DispatchThreadID) {
         foregroundValid=foregroundValid && all(prior>=0) && all(prior<=float2(size.xy));
         reject=foregroundValid?0:1;expected=foregroundValid?depth:0;
         cls=foregroundValid?kClassWeapon:kClassWeaponRefused;
+        // Why a rejected draw has no history: the map's vertex shader names the cause in x of its class-2 samples, 1..7, and only there
+        // (x is motion in a valid sample). Bits 4-6 of the class byte carry it to the census and nothing else reads it back: no value
+        // the prep writes below depends on it. A pixel with no sample, or a valid sample refused here, carries 0.
+        if(!foregroundValid && foregroundSample.w==2 && foregroundSample.x>=1 && foregroundSample.x<=7)cls|=uint(foregroundSample.x)<<4;
     } else if(attached) {
         float4 m=FirstPersonMotion.Load(int3(q,0));
         // The previous position in render pixels. Leaving the frame is disocclusion, not something to extrapolate.
@@ -260,19 +266,25 @@ R"HLSL(
 // group column, so the atomics of 220 000 groups do not queue on sixteen addresses). Slot 15 counts a stale pixel the prep did NOT
 // refuse (the steady-detail rule kept it: the camera term, confirmed by last frame's depth); a stale pixel it did refuse stays in the
 // stale slot. Accepted pixels are not counted. No early return: every thread reaches both barriers.
-groupshared uint gRefusal[16];
+// Slots 16..23 count the refused first-person pixels (class kClassWeaponRefused) by the reason in bits 4-6 of their byte, so the 24
+// counters of a stripe are the class counters and then the reasons'. The weapon-refused pixels are in slot 13 as well: a reason slot is a
+// split of that one, never an addition to the refused total.
+groupshared uint gRefusal[24];
 [numthreads(8,8,1)]
 void census(uint3 id:SV_DispatchThreadID,uint3 gid:SV_GroupID,uint gi:SV_GroupIndex) {
-    if(gi<16)gRefusal[gi]=0;
+    if(gi<24)gRefusal[gi]=0;
     GroupMemoryBarrierWithGroupSync();
     if(all(id.xy<size.xy)) {
         const uint v=ClassMap.Load(int3(id.xy,0));
-        const uint kind=v&0x7Fu;
-        if((v&0x80u)!=0)InterlockedAdd(gRefusal[min(kind,14u)],1u);
+        const uint kind=v&0x0Fu;
+        if((v&0x80u)!=0) {
+            InterlockedAdd(gRefusal[min(kind,14u)],1u);
+            if(kind==kClassWeaponRefused)InterlockedAdd(gRefusal[16+((v>>4)&7u)],1u);
+        }
         else if(kind==kClassStale)InterlockedAdd(gRefusal[15],1u);
     }
     GroupMemoryBarrierWithGroupSync();
-    if(gi<16 && gRefusal[gi]!=0)RefusalCounts.InterlockedAdd(((gid.x&15u)*16u+gi)*4u,gRefusal[gi]);
+    if(gi<24 && gRefusal[gi]!=0)RefusalCounts.InterlockedAdd(((gid.x&15u)*24u+gi)*4u,gRefusal[gi]);
 }
 
 // The HDR route accumulates in a bounded space, c / (1 + max3(c)), and inverts it on output: a sun disc or a hot
@@ -341,7 +353,7 @@ void taa(uint3 id:SV_DispatchThreadID) {
 // stale slot the depth check kept, pink 4 stale slot it refused (bit 7: the pixel shows the raw frame), magenta 5 corrupt, orange 6
 // stale stamp, cyan 12 first-person, white any other refusal, and a pixel with no engine slot is dimmed to a quarter.
 float3 refusalPaint(float3 c,uint v) {
-    const uint kind=v&0x7Fu;
+    const uint kind=v&0x0Fu;   // the class: bits 4-6 are a first-person pixel's reason and do not change its colour
     const float y=max(dot(c,float3(.2126,.7152,.0722)),.02)*2;
     return kind==kClassJoined?float3(0,y,0):kind==kClassMasked?float3(y,0,0)
          :kind==kClassNotRig?float3(0,.3*y,y):kind==kClassStale?((v&0x80u)!=0?float3(y,.4*y,.7*y):float3(y,y,0))
@@ -356,7 +368,7 @@ uint refusalClassAt(float2 rasterUv) {
     uint best=0;
     [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x) {
         const uint v=ClassMap.Load(int3(clamp(q+int2(x,y),0,hi),0));
-        if((v&0x80u)!=0)best=max(best,v);
+        if((v&0x80u)!=0)best=max(best,v&0x8Fu);   // the highest refused class wins, as it did when the byte held nothing else
     }
     return best!=0?best:ClassMap.Load(int3(clamp(int2(floor(rasterUv*float2(size.xy))),0,hi),0));
 }

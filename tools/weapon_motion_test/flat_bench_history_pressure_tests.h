@@ -76,21 +76,24 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
     std::vector<FlatHistoryPressureResult> results;
     ctx->ClearState();
     bind(Pose{},false);
+    // Every record-limit case is written against the production cap, so raising it moves the cases with it.
+    constexpr unsigned cap=AnimatedVertexHistory::maxRecords;
 
-    // 64 small, distinct geometries are provisionally captured before any
-    // caller names a source. The 65th is labelled genuine foreign by this
-    // workload, but only a caller could reserve space for it.
+    // The cap's worth of small, distinct geometries are provisionally
+    // captured before any caller names a source. The next one is labelled
+    // genuine foreign by this workload, but only a caller could reserve
+    // space for it.
     {
-        std::vector<UINT> indices(65*3);
-        for(unsigned i=0;i<65;++i){indices[i*3]=0;indices[i*3+1]=1;indices[i*3+2]=2;}
+        std::vector<UINT> indices((cap+1)*3);
+        for(unsigned i=0;i<cap+1;++i){indices[i*3]=0;indices[i*3+1]=1;indices[i*3+2]=2;}
         auto ib=flatHistoryPressureIndexBuffer(dev,indices);
         ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
         AnimatedVertexHistory history;
         FlatHistoryPressureResult result{"provisional_before_foreign"};
-        for(unsigned i=0;i<65;++i) {
+        for(unsigned i=0;i<cap+1;++i) {
             AnimatedVertexHistory::Capture capture;
             const bool admitted=history.capture(ctx,issue,3,1,i*3,0,0,100,capture);
-            if(i<AnimatedVertexHistory::maxRecords) {
+            if(i<cap) {
                 check(admitted && capture.currentPositions && capture.currentIdentity,
                       "reconstructed provisional GPU captures fill record budget");
                 ++result.captures;
@@ -101,19 +104,19 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
             }
         }
         result.records=unsigned(history.recordCount());result.bytes=history.bytes();
-        check(result.records==64 && result.bytes==64*3*32,
+        check(result.records==cap && result.bytes==cap*3*32,
               "record pressure reports actual retained GPU-history allocation");
         history.advance(101);
         AnimatedVertexHistory::Capture reused;
         check(history.capture(ctx,issue,3,1,0,0,0,101,reused) && reused.candidateCount==1,
               "previous-frame indexed geometry reuses real GPU history at the record cap");
         result.priorCandidates=reused.candidateCount;
-        check(history.recordCount()==64 && history.bytes()==result.bytes,
-              "history reuse does not allocate a 65th record");
+        check(history.recordCount()==cap && history.bytes()==result.bytes,
+              "history reuse does not allocate a record past the cap");
         history.advance(104);
         check(history.recordCount()==0 && history.bytes()==0,
               "two absent frames retire the full provisional record budget");
-        result.retired=64;
+        result.retired=cap;
         results.push_back(result);
     }
 
@@ -146,7 +149,7 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         check(result.records==8 && result.bytes==expectedBytes &&
               result.bytes<=AnimatedVertexHistory::maxBytes &&
               result.bytes+(largeCount-8*3)*32>AnimatedVertexHistory::maxBytes,
-              "byte pressure measures real allocation before 64-record limit");
+              "byte pressure measures real allocation before the record limit");
         results.push_back(result);
 
         // Reuse those eight real SO captures to isolate stale byte occupancy:
@@ -262,17 +265,19 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         results.push_back(result);
     }
 
-    // The flat adapter has a separate 64-current-draw preflight. Split the
-    // distinct records across adjacent frames so the late draw reaches the
+    // The flat adapter has a separate current-draw preflight at the same
+    // cap. Split the distinct records across adjacent frames (the seeded
+    // frame before, 24 of the current frame) so the late draw reaches the
     // actual allocator instead of failing that adapter guard.
     {
-        std::vector<UINT> indices(65*3);
-        for(unsigned i=0;i<65;++i){indices[i*3]=0;indices[i*3+1]=1;indices[i*3+2]=2;}
+        constexpr unsigned seeded=cap-24;
+        std::vector<UINT> indices((cap+1)*3);
+        for(unsigned i=0;i<cap+1;++i){indices[i*3]=0;indices[i*3+1]=1;indices[i*3+2]=2;}
         auto ib=flatHistoryPressureIndexBuffer(dev,indices);
         ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
         FlatForegroundMotion motion;
         FlatHistoryPressureResult result{"adapter_cross_frame_record_budget"};
-        for(unsigned i=0;i<40;++i) {
+        for(unsigned i=0;i<seeded;++i) {
             auto inputs=flatHistoryPressureInputs(i+1);
             inputs.beforeWorld=false;
             check(motion.capture(ctx,issue,3,1,i*3,0,0,600,inputs),
@@ -280,29 +285,29 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
             ++result.captures;
         }
         motion.beginFrame(601);
-        for(unsigned i=40;i<64;++i) {
+        for(unsigned i=seeded;i<cap;++i) {
             auto inputs=flatHistoryPressureInputs(i+1);
             inputs.beforeWorld=true;
             check(motion.capture(ctx,issue,3,1,i*3,0,0,601,inputs),
                   "adapter admits current-frame reconstructed pre-world captures");
             ++result.captures;
         }
-        auto late=flatHistoryPressureInputs(65);
+        auto late=flatHistoryPressureInputs(cap+1);
         late.beforeWorld=false;
-        check(!motion.capture(ctx,issue,3,1,64*3,0,0,601,late) &&
+        check(!motion.capture(ctx,issue,3,1,cap*3,0,0,601,late) &&
               motion.refusal() && !std::strcmp(motion.refusal(),"history-budget"),
               "late reconstructed foreign draw reaches allocator record budget");
         const auto stats=motion.stats();
-        check(stats.attempts==65 && stats.gpuAttempts==65 && stats.submitted==64 &&
+        check(stats.attempts==cap+1 && stats.gpuAttempts==cap+1 && stats.submitted==cap &&
               stats.preflightRefused==0 && stats.warmedAfterRefusal==0,
               "cross-frame allocator refusal is distinct from adapter draw bound");
         const auto receipt=motion.budgetReceipt();
-        check(receipt.valid==1 && receipt.records==64 && receipt.bytes==64*3*32 &&
+        check(receipt.valid==1 && receipt.records==cap && receipt.bytes==cap*3*32 &&
               receipt.requestedBytes==3*32 && receipt.recordLimitHit==1 && receipt.byteLimitHit==0,
               "first budget receipt identifies record limit and actual retained allocation");
-        check(receipt.currentDraws==24 && receipt.previousDraws==40 &&
+        check(receipt.currentDraws==24 && receipt.previousDraws==seeded &&
               receipt.beforeWorldCurrent==24 && receipt.beforeWorldPrevious==0 &&
-              receipt.current==24 && receipt.prior==40 && receipt.older==0 &&
+              receipt.current==24 && receipt.prior==seeded && receipt.older==0 &&
               receipt.invalid==0 && receipt.pending==0 &&
               receipt.reclaimedRecords==0 && receipt.reclaimedBytes==0 &&
               receipt.knownMutations==0 && receipt.unknownMutations==0,
@@ -313,7 +318,7 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         check(!motion.budgetReceipt().valid && !motion.refusal(),
               "new frame clears first budget receipt and sticky refusal");
         auto bad=flatHistoryPressureInputs(0);
-        check(!motion.capture(ctx,issue,3,1,64*3,0,0,602,bad) &&
+        check(!motion.capture(ctx,issue,3,1,cap*3,0,0,602,bad) &&
               motion.refusal() && !std::strcmp(motion.refusal(),"foreground-writer-token-unavailable") &&
               !motion.budgetReceipt().valid,
               "non-budget preflight refusal cannot fabricate a history receipt");
@@ -322,14 +327,14 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
     // A known write invalidates the prior frame's correspondence, but its
     // records still occupy the helper's budget until the next advance().
     {
-        std::vector<UINT> indices(64*3);
-        for(unsigned i=0;i<64;++i){indices[i*3]=0;indices[i*3+1]=1;indices[i*3+2]=2;}
+        std::vector<UINT> indices(cap*3);
+        for(unsigned i=0;i<cap;++i){indices[i*3]=0;indices[i*3+1]=1;indices[i*3+2]=2;}
         auto oldIb=flatHistoryPressureIndexBuffer(dev,indices);
         auto freshIb=flatHistoryPressureIndexBuffer(dev,{0,1,2});
         ctx->IASetIndexBuffer(oldIb.Get(),DXGI_FORMAT_R32_UINT,0);
         FlatForegroundMotion motion;
         FlatHistoryPressureResult result{"adapter_invalidated_prior_occupancy"};
-        for(unsigned i=0;i<64;++i) {
+        for(unsigned i=0;i<cap;++i) {
             const auto inputs=flatHistoryPressureInputs(i+1);
             check(motion.capture(ctx,issue,3,1,i*3,0,0,700,inputs),
                   "adapter seeds prior-frame geometry before known write");
@@ -342,21 +347,21 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         check(!motion.refusal(),
               "known write to prior-only geometry does not poison current adapter frame");
         ctx->IASetIndexBuffer(freshIb.Get(),DXGI_FORMAT_R32_UINT,0);
-        const auto fresh=flatHistoryPressureInputs(65);
+        const auto fresh=flatHistoryPressureInputs(cap+1);
         check(motion.capture(ctx,issue,3,1,0,0,0,701,fresh) && !motion.refusal(),
               "adapter reclaims invalidated prior record for same-frame GPU capture");
         const auto admitted=motion.stats();
-        check(admitted.attempts==65 && admitted.gpuAttempts==65 && admitted.submitted==65 &&
+        check(admitted.attempts==cap+1 && admitted.gpuAttempts==cap+1 && admitted.submitted==cap+1 &&
               admitted.preflightRefused==0,
               "same-frame reclamation passes adapter and submits actual GPU work");
         ++result.captures;
         motion.beginFrame(702);
         check(!motion.refusal() && motion.capture(ctx,issue,3,1,0,0,0,702,fresh),
               "next frame retains prior fresh geometry after old records retire");
-        check(motion.stats().submitted==66,
+        check(motion.stats().submitted==cap+2,
               "fresh post-retirement draw submits original-VS GPU history");
         ++result.captures;
-        result.records=64;result.bytes=64*3*32;result.retired=64;
+        result.records=cap;result.bytes=cap*3*32;result.retired=cap;
         results.push_back(result);
     }
 
@@ -364,15 +369,15 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
     // records. Keep one live across invalidation and retirement as the VR
     // caller could, and compare its actual GPU position bytes afterward.
     {
-        std::vector<UINT> indices(64*3);
-        for(unsigned i=0;i<64;++i){indices[i*3]=0;indices[i*3+1]=1;indices[i*3+2]=2;}
+        std::vector<UINT> indices(cap*3);
+        for(unsigned i=0;i<cap;++i){indices[i*3]=0;indices[i*3+1]=1;indices[i*3+2]=2;}
         auto oldIb=flatHistoryPressureIndexBuffer(dev,indices);
         auto freshIb=flatHistoryPressureIndexBuffer(dev,{0,1,2});
         ctx->IASetIndexBuffer(oldIb.Get(),DXGI_FORMAT_R32_UINT,0);
         AnimatedVertexHistory history;
         AnimatedVertexHistory::Capture retained;
         FlatHistoryPressureResult result{"invalidated_capture_snapshot_lifetime"};
-        for(unsigned i=0;i<64;++i) {
+        for(unsigned i=0;i<cap;++i) {
             AnimatedVertexHistory::Capture next;
             check(history.capture(ctx,issue,3,1,i*3,0,0,800,next,true),
                   "direct helper seeds bounded actual GPU records");
@@ -386,7 +391,7 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         indices[0]=2;indices[2]=0;
         ctx->UpdateSubresource(oldIb.Get(),0,nullptr,indices.data(),0,0);
         check(history.resourceWritten(oldIb.Get())==4 &&
-              history.recordCount()==64 && history.bytes()==64*3*32,
+              history.recordCount()==cap && history.bytes()==cap*3*32,
               "known IB write invalidates but retains same-frame occupancy");
         ctx->IASetIndexBuffer(freshIb.Get(),DXGI_FORMAT_R32_UINT,0);
         AnimatedVertexHistory::Capture refused;
@@ -394,7 +399,7 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
               "fresh helper key reclaims invalidated slot before frame advance");
         ++result.captures;
         const auto pressured=history.accounting(801);
-        check(pressured.recordCount==64 && pressured.invalid==63 && pressured.current==1 &&
+        check(pressured.recordCount==cap && pressured.invalid==cap-1 && pressured.current==1 &&
               pressured.reclaimedRecords==1 && pressured.reclaimedBytes==3*32,
               "record-pressure compaction releases one invalidated slot and stops");
         history.advance(802);
@@ -408,7 +413,7 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
               refused.candidateCount==1,
               "fresh geometry retains only its own valid prior candidate");
         ++result.captures;
-        result.records=pressured.recordCount;result.bytes=pressured.bytes;result.retired=64;
+        result.records=pressured.recordCount;result.bytes=pressured.bytes;result.retired=cap;
         result.priorCandidates=refused.candidateCount;
         results.push_back(result);
     }
@@ -429,7 +434,8 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         AnimatedVertexHistory::rememberShader(otherVs.Get(),code.data(),code.size());
         auto aIb=flatHistoryPressureIndexBuffer(dev,{0,1,2});
         auto bIb=flatHistoryPressureIndexBuffer(dev,{0,1,2});
-        std::vector<UINT> fillerIndices(61*3);
+        constexpr unsigned fillers=cap-3;   // with A, B and the pending D, the cap exactly
+        std::vector<UINT> fillerIndices(fillers*3);
         for(unsigned i=0;i<fillerIndices.size();++i)fillerIndices[i]=i%3;
         auto fillerIb=flatHistoryPressureIndexBuffer(dev,fillerIndices);
         auto dIb=flatHistoryPressureIndexBuffer(dev,{0,1,2});
@@ -448,7 +454,7 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
               "later B record captures independently from A");
         result.captures=2;
         ctx->IASetIndexBuffer(fillerIb.Get(),DXGI_FORMAT_R32_UINT,0);
-        for(unsigned i=0;i<61;++i) {
+        for(unsigned i=0;i<fillers;++i) {
             check(history.capture(ctx,issue,3,1,i*3,0,0,900,capture),
                   "alternate original VS fills bounded prior records");
             ++result.captures;
@@ -457,12 +463,12 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         AnimatedVertexHistory::Capture pendingB;
         ctx->IASetIndexBuffer(bIb.Get(),DXGI_FORMAT_R32_UINT,0);
         check(history.prepareCapture(ctx,3,1,0,0,0,901,pendingB) &&
-              pendingB.candidateCount==1 && history.recordCount()==63,
+              pendingB.candidateCount==1 && history.recordCount()==cap-1,
               "B prepares with one prior candidate while A precedes it in record vector");
         AnimatedVertexHistory::Capture pendingD;
         ctx->IASetIndexBuffer(dIb.Get(),DXGI_FORMAT_R32_UINT,0);
         check(history.prepareCapture(ctx,3,1,0,0,0,901,pendingD) &&
-              history.accounting(901).pending==1 && history.recordCount()==64,
+              history.accounting(901).pending==1 && history.recordCount()==cap,
               "fresh D reservation is pending rather than invalidated at record cap");
         const UINT rewrittenA[3]{2,1,0};
         ctx->UpdateSubresource(aIb.Get(),0,nullptr,rewrittenA,0,0);
@@ -477,8 +483,8 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         check(flatHistoryPressureStreamOutput(ctx,history,captureC)==oldSo,
               "reclaimed last same-original record reuses its SO program");
         const auto pressured=history.accounting(901);
-        check(pressured.recordCount==64 && pressured.invalid==0 && pressured.pending==1 &&
-              pressured.current==1 && pressured.prior==62 && pressured.reclaimedRecords==1 &&
+        check(pressured.recordCount==cap && pressured.invalid==0 && pressured.pending==1 &&
+              pressured.current==1 && pressured.prior==cap-2 && pressured.reclaimedRecords==1 &&
               pressured.reclaimedBytes==3*32,
               "compaction reclaims only explicitly invalid A, preserving pending D");
         ctx->VSSetShader(otherVs.Get(),nullptr,0);
@@ -491,7 +497,7 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         history.submitPositions(ctx,issue,0,pendingD);
         ++result.captures;
         history.advance(902);
-        check(history.recordCount()==64 && history.bytes()==64*3*32 &&
+        check(history.recordCount()==cap && history.bytes()==cap*3*32 &&
               history.accounting(902).reclaimedRecords==0,
               "B and D remain while pressure reclamation receipt resets");
         AnimatedVertexHistory::Capture nextB;

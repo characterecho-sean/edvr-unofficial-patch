@@ -467,7 +467,7 @@ bool ensureOutputDomains(uint32_t width,uint32_t height) {
     return image(g.device.Get(),width,height,DXGI_FORMAT_R8_UNORM,g.outputDomain[0],true,"output-domain0") &&
            image(g.device.Get(),width,height,DXGI_FORMAT_R8_UNORM,g.outputDomain[1],true,"output-domain1");
 }
-// The counting pass, its counter buffer (16 stripes of 16 counters, raw, UAV) and the four-slot staging ring the sums are read
+// The counting pass, its counter buffer (16 stripes of 24 counters, raw, UAV) and the four-slot staging ring the sums are read
 // back from.
 bool ensureRefusalCensus() {
     if(g.census && g.refusalCounts && g.refusalCountsUav && g.refusalStaging[0] && g.refusalStaging[1] && g.refusalStaging[2] && g.refusalStaging[3])
@@ -476,7 +476,7 @@ bool ensureRefusalCensus() {
     if(!device)return false;
     if(!g.census && FAILED(device->CreateComputeShader(kFlatMonoCensusBytecode,sizeof(kFlatMonoCensusBytecode),nullptr,g.census.GetAddressOf())))
         return false;
-    const UINT bytes=kFlatMonoRefusalStripes*kFlatMonoRefusalSlots*4u;
+    const UINT bytes=kFlatMonoRefusalStripes*kFlatMonoRefusalCounters*4u;
     if(!g.refusalCounts) {
         D3D11_BUFFER_DESC bd{};bd.ByteWidth=bytes;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
         bd.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
@@ -504,9 +504,11 @@ void pollRefusalCensus(ID3D11DeviceContext* context) {
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if(context->Map(g.refusalStaging[i].Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped)!=S_OK)break;
         const uint32_t* sums=static_cast<const uint32_t*>(mapped.pData);
-        for(uint32_t stripe=0;stripe<kFlatMonoRefusalStripes;++stripe)
-            for(uint32_t slot=0;slot<kFlatMonoRefusalSlots;++slot)
-                g_refusal.counts[slot]+=sums[stripe*kFlatMonoRefusalSlots+slot];
+        for(uint32_t stripe=0;stripe<kFlatMonoRefusalStripes;++stripe) {
+            const uint32_t* row=sums+stripe*kFlatMonoRefusalCounters;
+            for(uint32_t slot=0;slot<kFlatMonoRefusalSlots;++slot)g_refusal.counts[slot]+=row[slot];
+            for(uint32_t reason=0;reason<kFlatMonoWeaponReasons;++reason)g_refusal.weaponReasons[reason]+=row[kFlatMonoRefusalSlots+reason];
+        }
         context->Unmap(g.refusalStaging[i].Get(),0);
         ++g_refusal.frames;
         g_refusal.pixels+=static_cast<uint64_t>(g.refusalWidth[i])*g.refusalHeight[i];

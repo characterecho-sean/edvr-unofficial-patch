@@ -7,9 +7,11 @@
 // slots decides, and the end-to-end invariant is the strongest one: the census's refused total equals the number of texels the backend
 // was handed a rejection mask of 255 for, frame by frame, because the class byte and the mask come from the same decision.
 #pragma once
+#include "../../src/d3d11/flat_foreground_motion_shader.h"
 #include "../../src/d3d11/flat_mono_refusal.h"
 #include "../../src/d3d11/flat_mono_shader_source.h"
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 // flat_mono_resolve.cpp, at its foot: true while any of the census's or the view's resources (class texture, counting pass, counter
@@ -27,11 +29,14 @@ inline int hlslConstant(const std::string& source, const char* name) {
 struct Taken {
     uint64_t asked = 0, sampled = 0, dropped = 0, frames = 0, pixels = 0, checked = 0, skipped = 0;
     uint64_t counts[edvr::kFlatMonoRefusalSlots] = {};
+    uint64_t weaponReasons[edvr::kFlatMonoWeaponReasons] = {};
     void add(const edvr::FlatMonoRefusalCensus& c) {
         asked += c.asked; sampled += c.sampled; dropped += c.dropped; frames += c.frames; pixels += c.pixels;
         checked += c.checked; skipped += c.skipped;
         for (uint32_t i = 0; i < edvr::kFlatMonoRefusalSlots; ++i) counts[i] += c.counts[i];
+        for (uint32_t i = 0; i < edvr::kFlatMonoWeaponReasons; ++i) weaponReasons[i] += c.weaponReasons[i];
     }
+    uint64_t reasoned() const { uint64_t n = 0; for (uint32_t i = 0; i < edvr::kFlatMonoWeaponReasons; ++i) n += weaponReasons[i]; return n; }
     uint64_t refused() const { uint64_t n = 0; for (uint32_t i = 0; i < edvr::kFlatMonoRefusalStaleKept; ++i) n += counts[i]; return n; }
 };
 }  // namespace refusalgpu
@@ -56,9 +61,35 @@ inline void refusalGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) 
         bool same = true;
         for (const Pair& p : pairs) same = same && refusalgpu::hlslConstant(source, p.name) == static_cast<int>(p.value);
         check(same, "refusal: the HLSL's kClass* numbers are flat_mono_refusal.h's, all fifteen");
-        check(source.find("(reject!=0?0x80u:0u)") != std::string::npos && source.find("&0x7Fu") != std::string::npos &&
-                  kFlatMonoClassRefusedBit == 0x80u && kFlatMonoClassMask == 0x7Fu,
-              "refusal: the shader's refused bit is bit 7 and its class mask is the low seven bits, as the header says");
+        // The byte is the class in bits 0-3, a refused first-person pixel's reason in bits 4-6 and the refused flag in bit 7. Every reader masks
+        // what it reads: a reader that still took the low seven bits as the class would read a reason as a class number.
+        const auto occurrences = [&](const char* needle) {
+            size_t n = 0, at = 0;
+            const std::string s(needle);
+            while ((at = source.find(s, at)) != std::string::npos) { ++n; at += s.size(); }
+            return n;
+        };
+        check(source.find("(reject!=0?0x80u:0u)") != std::string::npos && source.find("&0x7Fu") == std::string::npos &&
+                  occurrences("const uint kind=v&0x0Fu;") == 2 && occurrences("best=max(best,v&0x8Fu)") == 1 &&
+                  kFlatMonoClassRefusedBit == 0x80u && kFlatMonoClassMask == 0x0Fu && kFlatMonoClassReasonMask == 0x70u &&
+                  kFlatMonoClassReasonShift == 4 && kFlatMonoClassReset <= kFlatMonoClassMask &&
+                  (kFlatMonoClassMask | kFlatMonoClassReasonMask | kFlatMonoClassRefusedBit) == 0xFFu &&
+                  (kFlatMonoClassMask & kFlatMonoClassReasonMask) == 0 && (kFlatMonoClassReasonMask >> kFlatMonoClassReasonShift) + 1 == kFlatMonoWeaponReasons,
+              "refusal: the class byte is the class (bits 0-3, every class fits), the reason (bits 4-6) and the refused bit (bit 7), and the shader's readers mask it so");
+        // The reason numbers the foreground map's vertex shader writes are the header's, all eight.
+        const std::string vs = kFlatForegroundMotionVs;
+        const Pair reasons[] = {
+            {"kReasonNone", kFlatMonoWeaponReasonNone}, {"kReasonInvalidCurrent", kFlatMonoWeaponReasonInvalidCurrent},
+            {"kReasonNotAuthentic", kFlatMonoWeaponReasonNotAuthentic}, {"kReasonNoPrior", kFlatMonoWeaponReasonNoPrior},
+            {"kReasonPriorPositions", kFlatMonoWeaponReasonPriorPositions}, {"kReasonIdentityDiffers", kFlatMonoWeaponReasonIdentityDiffers},
+            {"kReasonPriorIdentityInvalid", kFlatMonoWeaponReasonPriorIdentityInvalid}, {"kReasonAmbiguous", kFlatMonoWeaponReasonAmbiguous}};
+        bool sameReasons = true;
+        for (const Pair& r : reasons) sameReasons = sameReasons && refusalgpu::hlslConstant(vs, r.name) == static_cast<int>(r.value);
+        check(sameReasons, "refusal: the foreground map's kReason* numbers are flat_mono_refusal.h's, all eight");
+        bool named = true;
+        for (uint32_t r = 0; r < kFlatMonoWeaponReasons; ++r) named = named && std::strcmp(flatMonoWeaponReasonName(r), "?") != 0;
+        check(named && std::strcmp(flatMonoWeaponReasonName(kFlatMonoWeaponReasons), "?") == 0 && kFlatMonoRefusalCounters == 24 && kFlatMonoRefusalSlots == 16,
+              "refusal: every reason has a name, the counters of a stripe are the sixteen class slots and the eight reasons, and the class slots stay sixteen");
     }
 
     // ---- the fixture ----------------------------------------------------------------------------------------------------------------

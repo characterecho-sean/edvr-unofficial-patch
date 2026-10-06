@@ -27,18 +27,20 @@ MODES = ("taa", "dlaa", "dlss", "fsr")
 DEFAULT_CASES = ("unsupported_host", "scene", "inert_no_write", "inert_depth_write", "inert_color_write",
                  "state_partial_mask", "state_blended", "state_blended_no_depth", "state_blended_hdr",
                  "settlement_prepass", "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world",
-                 "inert_depth_write_world", "stale_foreign_mark", "supersampled_scene", "supersampled_scene_4k")
+                 "inert_depth_write_world", "stale_foreign_mark", "first_person_slot_repacked", "supersampled_scene",
+                 "supersampled_scene_4k")
 # "renderer" cases must complete the production HDR resolve; "guard" cases must keep a refusal.
 CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "renderer", "inert_no_write": "renderer",
                  "inert_depth_write": "guard", "inert_color_write": "renderer", "state_partial_mask": "renderer",
                  "state_blended": "renderer", "state_blended_no_depth": "renderer", "state_blended_hdr": "guard",
                  "settlement_prepass": "renderer", "predicted_world_mismatch": "renderer", "predicted_world_close_scale": "guard",
                  "state_blended_hdr_world": "renderer", "inert_depth_write_world": "renderer",
-                 "stale_foreign_mark": "renderer", "supersampled_scene": "renderer", "supersampled_scene_4k": "renderer"}
+                 "stale_foreign_mark": "renderer", "first_person_slot_repacked": "renderer", "supersampled_scene": "renderer",
+                 "supersampled_scene_4k": "renderer"}
 SDK_CASES = frozenset(("inert_no_write", "inert_depth_write", "inert_color_write", "state_partial_mask",
                        "state_blended", "state_blended_no_depth", "state_blended_hdr", "settlement_prepass",
                        "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world", "inert_depth_write_world",
-                       "stale_foreign_mark", "supersampled_scene", "supersampled_scene_4k"))
+                       "stale_foreign_mark", "first_person_slot_repacked", "supersampled_scene", "supersampled_scene_4k"))
 PRODUCTION_CASES = frozenset(("unsupported_host",))
 # The real-size supersampled case (5760x3240 into 3840x2160: H alone is 75 MB at the render size, the owner plane and the foreground map
 # 300 MB each) is not run on WARP: it reports UNSUPPORTED there, with this cause, and no process starts. It runs for longer than the
@@ -60,7 +62,7 @@ LARGE_CASE_TIMEOUT = 300
 #  - settlement_prepass: the camera-0 prepass run is planned as the predicted world and is neither captured nor marked.
 #  - predicted_world_mismatch: the first-person camera takes the world's near plane (aiming down sights) and keeps a projection scale 25%
 #    off the world's: not predicted (flatDomainPredictsWorld asks the scale as well as the near), so its pre-naming draw is a first-person
-#    draw like the one after naming (two foreign, two captured), the 72 world prepass draws are the predicted ones, and H qualifies.
+#    draw like the one after naming (two foreign, two captured), the 136 world prepass draws are the predicted ones, and H qualifies.
 #    Guard predicted_world_close_scale: the same camera 3% off is still the world's, so it refuses as the near-only rule always did.
 #  - stale_foreign_mark: a camera-0 depth writer outside the producer's families, drawn over a camera-1 surface in
 #    front of it, leaves the owner plane byte-identical: the marks it covers are stale (their depth is no longer the
@@ -82,10 +84,10 @@ RULE_COUNTERS = {
                                 "worldUnmarked": (2, 2), **FIRST_PERSON_ONLY},
     "inert_depth_write_world": {"surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1),
                                 "worldUnmarked": (3, 3), **FIRST_PERSON_ONLY},
-    "settlement_prepass": {"predictedWorld": (70, None), "foreignSeen": (0, 4), "captured": (0, 4),
+    "settlement_prepass": {"predictedWorld": (134, None), "foreignSeen": (0, 4), "captured": (0, 4),
                            "worldUnmarked": (2, 2), "prepass.worldMarkers": (0, 0), "prepass.worldUnmarked": (0, 0),
                            **FIRST_PERSON_ONLY},
-    "predicted_world_mismatch": {"predictedWorld": (72, 72), "surfacePreserving": (0, 0), "foreignSeen": (2, 2), "captured": (2, 2),
+    "predicted_world_mismatch": {"predictedWorld": (136, 136), "surfacePreserving": (0, 0), "foreignSeen": (2, 2), "captured": (2, 2),
                                  "worldUnmarked": (2, 2), "hQualified": (1, None), "prepass.worldMarkers": (0, 0),
                                  "prepass.worldUnmarked": (0, 0), **FIRST_PERSON_ONLY},
     "stale_foreign_mark": {"surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1),
@@ -106,8 +108,28 @@ RULE_COUNTERS.update({
     case: {**SUPERSAMPLED_FRAME, "@sizes.renderWidth": (rw, rw), "@sizes.renderHeight": (rh, rh),
            "@sizes.outputWidth": (ow, ow), "@sizes.outputHeight": (oh, oh)}
     for case, (rw, rh, ow, oh) in SUPERSAMPLED_SIZES.items()})
+# The first person's pool slot moves every frame (first_person_slot_repacked). The measured frame is the ordinary scene frame (a camera-0 world draw
+# and a camera-1 first-person one, H qualified, the backend's frame, no refusal). After it the proxy's first-person map, the one it hands the resolver
+# (w = 1 a sample with its motion, w = 2 a rejected one with its reason in x), is read after the H of every frame of three runs of 32 ordinary frames and
+# its samples counted. (The resolver's refusal census is not the witness: every bench frame is a reset frame for the resolver, the offline proxy having no
+# camera injector for the jitter's phase machine to call a frame clean, and a reset frame is neither asked for the census nor sampled.)
+# A frame is counted only if its map is its own and a history could exist (its H qualified, and its first-person draw and the frame before's were captured:
+# the offline proxy cannot land the jitter's phase on every frame, and a frame whose phase fails is neither captured nor treated); at least six of the 32 are.
+#   steady    slot 9 every frame: every sample matched, none rejected.
+#   moved     slots 9 and 10 alternating, two pool records of one identity (the pool repacked): still none rejected. The flat map matches a draw to the
+#             frame before's by the record's identity (flat_foreground_motion_shader.h), not its slot; the slot compared rejected every sample of every
+#             frame after the first of this run.
+#   different slots 9 and 12 alternating, two records with another bone base: from the second frame on (31 of 32 are drawn) nothing matched and every
+#             rejected sample says the identity differs (the scene's own rule says so: here the counts): the control that this scene's map rejects at all.
+RULE_COUNTERS["first_person_slot_repacked"] = {
+    "surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1), "worldUnmarked": (2, 2), "hAttempts": (1, None),
+    "hQualified": (1, None), "backendCalls": (1, None), "hdrSpatial": (0, 0), "backendFailures": (0, 0), **FIRST_PERSON_ONLY,
+    "@repack.steady.drawn": (32, 32), "@repack.steady.frames": (6, 32), "@repack.steady.matched": (1, None), "@repack.steady.rejected": (0, 0),
+    "@repack.moved.drawn": (32, 32), "@repack.moved.frames": (6, 32), "@repack.moved.matched": (1, None), "@repack.moved.rejected": (0, 0),
+    "@repack.different.drawn": (31, 31), "@repack.different.frames": (6, 31), "@repack.different.matched": (0, 0),
+    "@repack.different.rejected": (1, None), "@repack.different.identityDiffers": (1, None)}
 # Facts a rule PASS must report as the boolean true.
-RULE_TRUE = {"stale_foreign_mark": ("@staleMark.planeUntouched",)}
+RULE_TRUE = {"stale_foreign_mark": ("@staleMark.planeUntouched",), "first_person_slot_repacked": ("@repack.ran",)}
 # The exact first-failure reason a guard that keeps its refusal must still report.
 GUARD_REASONS = {"predicted_world_close_scale": "foreground-pending-null-not-selected-world"}
 # A guard whose refusal is the selector's, before any H attempt: the verdict it must report, with no H attempt.
@@ -603,16 +625,21 @@ def self_test():
                                        "captured": 1, "worldUnmarked": 2},
             "state_blended_hdr_world": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2},
             "inert_depth_write_world": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 3},
-            "settlement_prepass": {"predictedWorld": 73, "foreignSeen": 3, "captured": 3, "worldUnmarked": 2,
+            "settlement_prepass": {"predictedWorld": 137, "foreignSeen": 3, "captured": 3, "worldUnmarked": 2,
                                    "prepass": {"worldMarkers": 0, "worldUnmarked": 0}},
-            "predicted_world_mismatch": {"predictedWorld": 72, "surfacePreserving": 0, "foreignSeen": 2, "captured": 2,
+            "predicted_world_mismatch": {"predictedWorld": 136, "surfacePreserving": 0, "foreignSeen": 2, "captured": 2,
                                          "worldUnmarked": 2, "hQualified": 1, "prepass": {"worldMarkers": 0, "worldUnmarked": 0}},
             "stale_foreign_mark": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 3,
                                    "hQualified": 1},
+            "first_person_slot_repacked": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2,
+                                           "hAttempts": 1, "hQualified": 1, "backendCalls": 1, "hdrSpatial": 0,
+                                           "backendFailures": 0},
         }
         supersampled_frame = {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2, "hAttempts": 1,
                               "hQualified": 1, "backendCalls": 1, "hdrSpatial": 0, "backendFailures": 0}
-        good_extras = {}
+        kept_run = {"drawn": 32, "treated": 21, "frames": 10, "matched": 2180, "rejected": 0, "identityDiffers": 0}
+        good_extras = {"first_person_slot_repacked": {"repack": {"ran": True, "steady": kept_run, "moved": kept_run,
+                       "different": {"drawn": 31, "treated": 21, "frames": 10, "matched": 0, "rejected": 2180, "identityDiffers": 2180}}}}
         for case, (rw, rh, ow, oh) in SUPERSAMPLED_SIZES.items():
             good_frames[case] = supersampled_frame
             good_extras[case] = {"sizes": {"renderWidth": rw, "renderHeight": rh, "outputWidth": ow, "outputHeight": oh}}
@@ -679,9 +706,9 @@ def self_test():
                 assert not accepted(case, "renderer", with_value(good_observed(case), counter, bad)), f"{case}: {counter}={bad}"
         # The camera-0 prepass run is not marked and not captured, whatever the numbers elsewhere say.
         assert not accepted("settlement_prepass", "renderer", with_value(
-            sdk_observed(good_frames["settlement_prepass"]), "predictedWorld", 69))
+            sdk_observed(good_frames["settlement_prepass"]), "predictedWorld", 133))
         assert not accepted("settlement_prepass", "renderer", with_value(
-            sdk_observed(good_frames["settlement_prepass"]), "captured", 72))
+            sdk_observed(good_frames["settlement_prepass"]), "captured", 136))
         # A first-person mark that was never fresh, or a plane the world writer changed, is not the stale-mark proof.
         stale_frame = good_frames["stale_foreign_mark"]
         assert not accepted("stale_foreign_mark", "renderer", sdk_observed(

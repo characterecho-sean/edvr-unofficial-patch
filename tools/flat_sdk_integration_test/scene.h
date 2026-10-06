@@ -131,6 +131,10 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     using OwnerViewFn=unsigned int (__cdecl*)(ID3D11ShaderResourceView**);
     const auto ownerView=reinterpret_cast<OwnerViewFn>(GetProcAddress(proxy,"edvr_selftest_flat_sdk_owner_view"));
     if (!snapshot || !ownerView) {std::fputs("flat SDK bench: snapshot or owner export absent\n",stderr);return 2;}
+    const auto foregroundMap=reinterpret_cast<OwnerViewFn>(GetProcAddress(proxy,"edvr_selftest_flat_sdk_foreground_map"));
+    if (std::strcmp(name,"first_person_slot_repacked")==0 && !foregroundMap) {
+        std::fputs("flat SDK bench: foreground map export absent\n",stderr);return 2;
+    }
     // Sizes (section 104). Every case renders and presents at 64 x 64. The supersampled cases are the on-foot frame of a screen
     // rendered above it (the HDR route's R > D): 96 x 96 into 64 x 64 (1.5 x per axis), and, on hardware only, the real size that
     // the 16M-pixel bound of the foreground map once refused: 5760 x 3240 (4K at SS 1.5) into 3840 x 2160.
@@ -184,6 +188,11 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool closeScale=std::strcmp(name,"predicted_world_close_scale")==0;
     const bool weaponCamera=mismatch||closeScale;
     const bool staleMark=std::strcmp(name,"stale_foreign_mark")==0;
+    // The first person's pool slot moves every frame (flat_foreground_motion_shader.h: the map matches a draw to the frame before's by the
+    // record's identity, not its slot). After the ordinary measured frame, three runs of ordinary frames count the refusal census: the slot
+    // steady (the control), the slot alternating between two records of one identity (the case), and the slot alternating between two
+    // records of two identities (the control that the census sees a refused first-person pixel in this scene at all).
+    const bool repacked=std::strcmp(name,"first_person_slot_repacked")==0;
     const bool inertWorld=std::strcmp(name,"inert_depth_write_world")==0;
     const bool prepassCase=settlement||weaponCamera;
     const bool stateDraw=partialState||blendedState||blendedNoDepth;
@@ -273,9 +282,11 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         {{packed(800,-800),4096u<<16|32768u,64u<<24,0},{},{}} ,
         {{packed(0,800),4096u<<16|32768u,64u<<24,0},{},{}} };
     // Records 5 and 9 are the world's and the first person's triangles (family 0 and 1); record 11 is the stale-mark
-    // case's world-camera surface: small, centred right of the first person's, and in front of it.
-    const uint32_t instance[3][2]={{5,0},{9,0},{11,0}};const uint16_t indices[3]={0,1,2};
-    ComPtr<ID3D11Buffer> verticesBuffer,instanceBuffer[3],indexBuffer;
+    // case's world-camera surface: small, centred right of the first person's, and in front of it. Records 10 and 12
+    // are the first-person-slot case's: 10 is record 9 again at another slot (the same record, repacked, with the same
+    // identity words), 12 the same triangle with another bone base (word 0: another record).
+    const uint32_t instance[5][2]={{5,0},{9,0},{11,0},{10,0},{12,0}};const uint16_t indices[3]={0,1,2};
+    ComPtr<ID3D11Buffer> verticesBuffer,instanceBuffer[5],indexBuffer;
     auto createDataBuffer=[&](const void* data,UINT size,UINT bind,ComPtr<ID3D11Buffer>& out) {
         D3D11_BUFFER_DESC bd{};bd.ByteWidth=size;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=bind;
         D3D11_SUBRESOURCE_DATA init{data,0,0};return ok(device->CreateBuffer(&bd,&init,&out),"scene geometry buffer");};
@@ -283,10 +294,12 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
        !createDataBuffer(instance[0],sizeof(instance[0]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[0]) ||
        !createDataBuffer(instance[1],sizeof(instance[1]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[1]) ||
        !createDataBuffer(instance[2],sizeof(instance[2]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[2]) ||
+       !createDataBuffer(instance[3],sizeof(instance[3]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[3]) ||
+       !createDataBuffer(instance[4],sizeof(instance[4]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[4]) ||
        !createDataBuffer(indices,sizeof(indices),D3D11_BIND_INDEX_BUFFER,indexBuffer))return 2;
     // The prepass run: draw i starts at index 3*i, so no two prepass draws share a packet though they read the
-    // same three vertices. More than the 64 draws one frame's foreground capture may hold.
-    constexpr unsigned prepassDraws=72;
+    // same three vertices. More than the 128 draws (AnimatedVertexHistory::maxRecords) one frame's foreground capture may hold.
+    constexpr unsigned prepassDraws=136;
     ComPtr<ID3D11Buffer> prepassIndexBuffer;
     if(prepassCase) {
         std::vector<uint16_t> run(prepassDraws*3);
@@ -309,6 +322,10 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     float smallScale=.1f,smallX=.225f,smallForward=.5f;
     std::memcpy(&records[11].words[1],&smallScale,4);std::memcpy(&records[11].words[4],&smallX,4);
     std::memcpy(&records[11].words[6],&smallForward,4);
+    // The first-person-slot case: record 10 is record 9 at another slot, record 12 is record 9 with another bone base. The identity the
+    // flat map matches by is word 0 and the word at byte 28 (word 7) of the record, never its slot: both are zero in 9 and 10.
+    records[10]=records[9];
+    records[12]=records[9];records[12].words[0]=1;
     uint32_t t38Data[12*16]{};
     auto makeStructured=[&](const void* data,UINT stride,UINT count,ComPtr<ID3D11ShaderResourceView>& srv) {
         D3D11_BUFFER_DESC bd{};bd.ByteWidth=stride*count;bd.Usage=D3D11_USAGE_DEFAULT;
@@ -403,12 +420,13 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     // Family 0 draws with the world camera, family 1 with the first-person one: camera 1 (near .0675), or in the
     // weapon-camera cases camera 2, whose near equals the world's.
     const unsigned familyCamera[2]={0u,weaponCamera?2u:1u};
-    auto originalDraw=[&](unsigned family,ID3D11RenderTargetView* target,Snapshot& snap) {
+    // `instanceData` replaces the family's own instance buffer (which pool record the draw reads) where a case moves it.
+    auto originalDraw=[&](unsigned family,ID3D11RenderTargetView* target,Snapshot& snap,ID3D11Buffer* instanceData=nullptr) {
         ID3D11RenderTargetView* view=target;context->OMSetRenderTargets(1,&view,dsv.Get());
         ID3D11Buffer* cb=camera[familyCamera[family]].Get();context->VSSetConstantBuffers(1,1,&cb);
         context->PSSetConstantBuffers(1,1,&cb);
         context->IASetInputLayout(layout[family].Get());
-        vb[0]=instanceBuffer[family].Get();context->IASetVertexBuffers(0,2,vb,strides,offsets);
+        vb[0]=instanceData?instanceData:instanceBuffer[family].Get();context->IASetVertexBuffers(0,2,vb,strides,offsets);
         context->IASetIndexBuffer(indexBuffer.Get(),DXGI_FORMAT_R16_UINT,0);
         context->VSSetShader(vs[family].Get(),nullptr,0);context->PSSetShader(ps[family].Get(),nullptr,0);
         ID3D11ShaderResourceView* resources[7]{};
@@ -699,6 +717,91 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         if(SUCCEEDED(present.swapchain()->GetBuffer(0,IID_PPV_ARGS(&backBuffer))) && backBuffer)backBuffer->GetDesc(&backDesc);
         evidence.renderW=hdrDesc.Width;evidence.renderH=hdrDesc.Height;evidence.outputW=backDesc.Width;evidence.outputH=backDesc.Height;
     }
+    // The first person's slot moves (first_person_slot_repacked). The measured frame above is the ordinary `scene` frame, with its record at slot 9.
+    // Three runs of 32 ordinary frames follow it. After each frame's H the proxy's first-person map, the one it hands the resolver (RGBA32F at the
+    // render size: w = 1 a sample with its motion in xy, w = 2 a rejected one with its reason in x, flat_foreground_motion_shader.h), is read through
+    // the proxy's test export and its samples are counted: matched, rejected, and how many of the rejected say the identity differs. The map is read,
+    // not the resolver's refusal census: every bench frame is a reset frame for the resolver (the offline proxy has no camera injector, so the jitter's
+    // phase machine calls no frame clean and the resolver neither asks the census nor samples it), while the map is built at H whatever then happens.
+    // A frame is counted only if the map is its own and its history could exist: its H qualified, and its first-person draw and the frame before's were
+    // captured (the offline proxy cannot land the jitter's phase on every frame, and a frame whose phase fails is neither captured nor treated).
+    //   steady    slot 9 every frame: the control. Every first-person sample is matched, none rejected.
+    //   moved     slots 9 and 10 alternating, two records with one identity: the repacked pool. Still none rejected: the map matches a draw to the
+    //             frame before's by the record's identity, and the slot compared would reject every sample of every frame after the first.
+    //   different slots 9 and 12 alternating, two records with another bone base: from the second frame on every sample is rejected, and says why
+    //             (the identity differs): the control that this scene's map rejects at all.
+    struct RepackRun {unsigned drawn=0,treated=0,frames=0;uint64_t matched=0,rejected=0,identityDiffers=0,reasons[8]={};};
+    bool repackPreviousCaptured=true;   // the frame before had its first-person draw captured (the measured frame did)
+    RepackRun repackSteady,repackMoved,repackDifferent;
+    Snapshot repackEnd{};   // the proxy's counters after the runs (reported: how many H attempts and qualifications the runs took, and the last verdict)
+    bool repackRan=false;
+    if(repacked) {
+        using namespace edvr;
+        const auto frameOf=[&](ID3D11Buffer* firstPerson,RepackRun* count)->bool {
+            for(unsigned c=0;c<cameraCount;++c) {   // the scene's constants are uploaded again each frame, as the game does
+                float rows[280][4]{};cameraRows(c,rows);
+                ID3D11Buffer* bound=camera[c].Get();context->VSSetConstantBuffers(1,1,&bound);
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                if(!ok(context->Map(camera[c].Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"repacked frame camera upload"))return false;
+                std::memcpy(mapped.pData,rows,sizeof(rows));context->Unmap(camera[c].Get(),0);
+            }
+            // The game binds the pool, the bones and the pipeline's state again every frame; the scene did once, before the first.
+            ID3D11ShaderResourceView* boundPool=poolSrv.Get();context->VSSetShaderResources(33,1,&boundPool);
+            ID3D11ShaderResourceView* boundBones=t38Srv.Get();context->VSSetShaderResources(38,1,&boundBones);
+            ID3D11Buffer* boundMaterial=materialBuffer.Get();context->VSSetConstantBuffers(2,1,&boundMaterial);context->PSSetConstantBuffers(2,1,&boundMaterial);
+            ID3D11SamplerState* boundSampler=sampler.Get();context->PSSetSamplers(0,1,&boundSampler);
+            context->RSSetViewports(1,&vp);context->RSSetState(raster.Get());context->OMSetDepthStencilState(depthState.Get(),0);
+            context->OMSetBlendState(nullptr,nullptr,0xffffffffu);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->ClearRenderTargetView(poolRtv.Get(),clearPool);
+            context->ClearRenderTargetView(hdrRtv.Get(),clearHdr);
+            context->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);
+            Snapshot drawn{},beforeFrame{},afterFrame{};
+            if(!snapshot(&beforeFrame,sizeof(beforeFrame)))return false;
+            if(!originalDraw(0,poolRtv.Get(),drawn) || !originalDraw(1,poolRtv.Get(),drawn,firstPerson) || !originalDraw(0,hdrRtv.Get(),drawn))return false;
+            ID3D11RenderTargetView* frameConsumerTarget=consumerRtv.Get();context->OMSetRenderTargets(1,&frameConsumerTarget,nullptr);
+            ID3D11ShaderResourceView* frameH=hSrv.Get();context->PSSetShaderResources(0,1,&frameH);
+            context->IASetInputLayout(nullptr);context->VSSetShader(consumerVertex.Get(),nullptr,0);
+            context->PSSetShader(consumerPixel.Get(),nullptr,0);context->Draw(3,0);
+            context->OMSetRenderTargets(0,nullptr,nullptr);
+            if(!snapshot(&afterFrame,sizeof(afterFrame)))return false;
+            const bool capturedNow=afterFrame.captured>beforeFrame.captured,qualifiedNow=afterFrame.hQualified>beforeFrame.hQualified;
+            const bool historyPossible=qualifiedNow && capturedNow && repackPreviousCaptured;
+            repackPreviousCaptured=capturedNow;
+            if(count) {++count->drawn;if(qualifiedNow)++count->treated;}
+            if(count && historyPossible) {   // this frame's map: the H the consumer draw just took
+                ComPtr<ID3D11ShaderResourceView> mapView;
+                if(!foregroundMap(mapView.GetAddressOf()) || !mapView)return false;
+                ComPtr<ID3D11Resource> mapResource;mapView->GetResource(&mapResource);
+                ComPtr<ID3D11Texture2D> mapTexture;
+                if(FAILED(mapResource.As(&mapTexture)))return false;
+                const auto texels=readPixels(device,context,mapTexture.Get(),16);
+                if(texels.empty())return false;
+                ++count->frames;
+                for(size_t at=0;at+16<=texels.size();at+=16) {
+                    float sample[4]{};std::memcpy(sample,texels.data()+at,16);
+                    if(sample[3]==1.f)++count->matched;
+                    else if(sample[3]==2.f) {
+                        ++count->rejected;
+                        if(sample[0]==float(kFlatMonoWeaponReasonIdentityDiffers))++count->identityDiffers;
+                        if(sample[0]>=0.f && sample[0]<8.f && sample[0]==std::floor(sample[0]))++count->reasons[unsigned(sample[0])];
+                    }
+                }
+            }
+            return ok(present.present(),"repacked frame Present");
+        };
+        // `skip` frames of the run are drawn and not counted (the first of a run that begins with a change of record).
+        const auto run=[&](RepackRun& result,ID3D11Buffer* a,ID3D11Buffer* b,unsigned skip)->bool {
+            constexpr unsigned frames=32;
+            for(unsigned i=0;i<frames;++i)if(!frameOf((i&1)?b:a,i>=skip?&result:nullptr))return false;
+            return true;
+        };
+        if(!ok(present.present(),"measured frame Present"))return 2;
+        repackRan=run(repackSteady,instanceBuffer[1].Get(),instanceBuffer[1].Get(),0) &&
+                  run(repackMoved,instanceBuffer[1].Get(),instanceBuffer[3].Get(),0) &&
+                  run(repackDifferent,instanceBuffer[1].Get(),instanceBuffer[4].Get(),1);
+        if(!repackRan) {std::fputs("flat SDK bench: the repacked-slot frames did not run\n",stderr);return 2;}
+        if(!snapshot(&repackEnd,sizeof(repackEnd)))return 2;
+    }
     const auto& after=evidence.consumer;
     const bool taa=std::strcmp(after.mode,"on")==0;
     const bool hostGuard=std::strcmp(name,"unsupported_host")==0;
@@ -834,10 +937,21 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool supersampleRule=supersampledSizes && attemptedDelta>0 && qualifiedDelta>0 && !surfaceDelta &&
         foreignDelta==1 && capturedDelta==1 && frameClean && !after.failureKinds;
     const bool supersampleBackendRan=!supersampledAny || (backendDelta>0 && !spatialDelta && !backendFailureDelta);
+    // The first person's slot moves: the measured frame is the ordinary scene frame (its first-person draw captured, H qualified, no refusal), and
+    // the map of the frames of the three runs after it that could have a history (at least six of each run, so a run that was not read cannot pass)
+    // has first-person samples: matched and none rejected while the slot is steady or alternates between two records of one identity, and (from the
+    // second frame on) none matched and every one rejected for the identity while it alternates between two records of two (the control that this
+    // scene's map rejects at all).
+    const bool repackRule=repacked && repackRan && attemptedDelta>0 && qualifiedDelta>0 && !surfaceDelta &&
+        foreignDelta==1 && capturedDelta==1 && frameClean && !after.failureKinds &&
+        repackSteady.drawn==32 && repackMoved.drawn==32 && repackDifferent.drawn==31 &&
+        repackSteady.frames>=6 && repackMoved.frames>=6 && repackDifferent.frames>=6 &&
+        repackSteady.matched>0 && repackSteady.rejected==0 && repackMoved.matched>0 && repackMoved.rejected==0 &&
+        repackDifferent.matched==0 && repackDifferent.rejected>0 && repackDifferent.identityDiffers==repackDifferent.rejected;
     const bool ruleConfirmed=worldsUnmarked && (inertNoWrite?inertNoWriteRule:colorInert?forwardedColorOnly:
         blendedNoDepth?forwardedBlended:(partialState||blendedState)?admittedState:blendedHdrWorld?worldHdrBlended:
         inertWorld?worldInertWriter:staleMark?staleMarkRule:settlement?settlementConfirmed:mismatch?scaleRecognised:
-        supersampledAny?supersampleRule:true);
+        repacked?repackRule:supersampledAny?supersampleRule:true);
     const bool guardConfirmed=worldsUnmarked && (hostGuard?
         rasterReady && evidence.world.namedWorld && (taa || ownershipForeign) && after.hdrTriggered && !after.hAttempts &&
             std::strcmp(after.hdrVerdict,"engine-source-not-ready")==0:
@@ -850,6 +964,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         blendedHdrWorld?"world-camera-hdr-writer-left-unmarked":inertWorld?"world-camera-depth-writer-left-unmarked":
         staleMark?"stale-first-person-mark-kept-and-frame-resolved":
         mismatch?"weapon-camera-at-world-near-captured-by-projection-scale":
+        repacked?"first-person-history-kept-by-identity-across-slots":
         supersampledAny?"supersampled-hdr-route-qualified-and-resolved-at-render-size":
         settlement?"predicted-world-prepass-planned-without-capture":"production-hdr-resolve-completed";
     if(guardCase) {
@@ -902,6 +1017,14 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
          <<",\"rtvFormat0\":"<<s.firstFailureState.slot[0].viewFormat
          <<",\"budgetValid\":"<<s.firstFailureBudget.valid<<"}";
         return f.str();
+    };
+    const auto repackJson=[](const RepackRun& run) {
+        std::ostringstream o;
+        o<<"{\"drawn\":"<<run.drawn<<",\"treated\":"<<run.treated<<",\"frames\":"<<run.frames<<",\"matched\":"<<run.matched<<",\"rejected\":"<<run.rejected
+         <<",\"identityDiffers\":"<<run.identityDiffers<<",\"reasons\":[";
+        for(unsigned r=0;r<8;++r)o<<(r?",":"")<<run.reasons[r];   // the rejected samples by the reason in x: 0 none, 1 invalid current ... 7 ambiguous
+        o<<"]}";
+        return o.str();
     };
     std::ostringstream result;
     result<<"EDVR_BENCH_RESULT {\"schema\":\"edvr-flat-sdk-bench\",\"version\":1,\"case\":"<<quote(name)
@@ -958,6 +1081,12 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           <<",\"stale\":"<<evidence.marksAfter.stale<<",\"fresh\":"<<evidence.marksAfter.fresh
           <<"},\"atH\":{\"foreign\":"<<evidence.marksAtH.foreign<<",\"stale\":"<<evidence.marksAtH.stale
           <<",\"fresh\":"<<evidence.marksAtH.fresh<<"}}"
+          // The first-person map over the three runs of the first-person-slot case, per run: the frames read, and the samples matched, rejected, and
+          // rejected for the identity.
+          <<",\"repack\":{\"ran\":"<<(repackRan?"true":"false")<<",\"hAttempts\":"<<since(repackEnd.hAttempts,after.hAttempts)
+          <<",\"hQualified\":"<<since(repackEnd.hQualified,after.hQualified)<<",\"work\":"<<repackEnd.work
+          <<",\"hdrVerdict\":"<<quote(repackEnd.hdrVerdict)<<",\"steady\":"<<repackJson(repackSteady)
+          <<",\"moved\":"<<repackJson(repackMoved)<<",\"different\":"<<repackJson(repackDifferent)<<"}"
           <<",\"lastH\":{\"attempts\":"<<after.hAttempts<<",\"qualified\":"<<after.hQualified
           <<",\"reason\":"<<quote(after.hRefusal)<<"}"
           <<",\"hdrTriggered\":"<<after.hdrTriggered<<",\"hdrSelected\":"<<after.hdrSelected
@@ -973,6 +1102,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     if(!hostGuard)result<<",\"Emit-hook availability reconstructed only in offline test-link proxy\"";
     if(prepassCase)result<<",\"Prepass order, shader pair and run length follow the 2026-10 settlement census; geometry, record contents and the alpha-test inputs are reconstructed\"";
     if(staleMark)result<<",\"The covering world surface is a reconstructed small pool record drawn with the prepass pair; the owner plane is read back through the proxy's test export\"";
+    if(repacked)result<<",\"Pool records 10 and 12 are reconstructed copies of record 9 (same identity words; another bone base); the first-person map is the proxy's own, read through its test export. Every bench frame is a reset frame for the resolver, so its refusal census is not asked\"";
     if(supersampledAny)result<<",\"The scene targets are rendered above the swap chain's size (the HDR route's R > D): 1.5 x per axis; the game's own final copy that would downsample the result is not part of the bench\"";
     if(supersampled4k)result<<",\"Hardware adapter only: 5760 x 3240 into 3840 x 2160 is impractical on WARP\"";
     result<<"]}";

@@ -131,6 +131,52 @@ inline void sdkForegroundScenario(ID3D11Device* device, ID3D11DeviceContext* con
         check(freshCensus.frames>=1 && freshCensus.counts[kFlatMonoClassWeaponRefused]==freshCensus.frames &&
               freshCensus.refused()==freshCensus.frames,
               "census: the matching-depth mark's pixel is counted once per sampled frame as a refused first-person pixel");
+        // WHY the draw has no history. A rejected sample (w = 2) carries the cause in its x channel, 1..7 (flat_foreground_motion_shader.h); the prep
+        // keeps it in bits 4-6 of the pixel's class byte and the census splits the weapon-refused pixels by it. Nothing else follows from it: the pixel's
+        // class, canonical depth, rejection, motion and the backend's engagement are those of a rejection with no reason, and the refusal view paints it as
+        // before. A second first-person pixel at the right edge has a VALID sample (w = 1, x = 3 is its motion) whose previous position falls off the
+        // raster: the prep refuses it, and its x is motion, never a reason, so it is counted under reason 0.
+        {
+            const UINT edge=8*w+15;
+            markers[2*edge]=-3;context->UpdateSubresource(slots.Get(),0,nullptr,markers.data(),w*8,0);
+            map[4*edge]=3.f;map[4*edge+1]=0;map[4*edge+2]=.0025f;map[4*edge+3]=1;
+            f.refusalView=1;
+            const auto centerWord=[&]() {
+                std::vector<unsigned char> bytes;uint32_t word=0;
+                if(readWhole(context,color.Get(),bytes,4))std::memcpy(&word,bytes.data()+4*center,4);
+                return word;
+            };
+            uint32_t paintedNoReason=0;
+            for(unsigned reason=0;reason<kFlatMonoWeaponReasons;++reason) {
+                map[4*center]=float(reason);map[4*center+1]=0;map[4*center+3]=2;
+                context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
+                for(unsigned i=0;i<kFlatMonoRefusalEvery;++i) {
+                    ++f.frame;f.foregroundFrame=f.frame;const int calls=backendCalls;
+                    // The game draws H afresh every frame; the view paints into it, so it is put back, or the paint would feed on itself.
+                    context->UpdateSubresource(color.Get(),0,nullptr,rgb.data(),w*4,0);
+                    resolve(true,"SDK rejected foreground sample with a reason stays admitted");
+                    check(backendCalls==calls+1 && !backendReset && observedDepth==.0025f && observedMotion==0 && observedMotionY==0 && observedReject==255,
+                          "a rejected sample's reason leaves its canonical depth, motion, rejection and the backend's engagement as they are for a rejection with no reason");
+                }
+                const uint32_t painted=centerWord();
+                if(reason==0)paintedNoReason=painted;
+                double decoded[3]{};hdrgpu::unpack(painted,decoded);
+                const auto reasoned=takeCensus();
+                char label[256];
+                std::snprintf(label,sizeof(label),"census: the weapon-refused pixel with reason %u (%s) is counted once per sampled frame under it, and the valid sample refused by range under reason 0",
+                              reason,flatMonoWeaponReasonName(reason));
+                const uint64_t frames=reasoned.frames;
+                check(frames>=1 && reasoned.counts[kFlatMonoClassWeaponRefused]==2*frames && reasoned.weaponReasons[reason]==(reason?1u:2u)*frames &&
+                          (reason==0 || reasoned.weaponReasons[0]==frames) && reasoned.reasoned()==2*frames,label);
+                std::snprintf(label,sizeof(label),"view: the weapon-refused pixel with reason %u paints as the one with no reason: white, not dimmed, whatever its byte's reason bits",reason);
+                check(painted==paintedNoReason && std::fabs(decoded[0]-decoded[1])<.6 && std::fabs(decoded[1]-decoded[2])<1.1 && decoded[0]>50 && decoded[0]<64,label);   // blue has one mantissa bit fewer
+            }
+            f.refusalView=0;
+            markers[2*edge]=0;context->UpdateSubresource(slots.Get(),0,nullptr,markers.data(),w*8,0);
+            map[4*edge]=map[4*edge+1]=map[4*edge+2]=map[4*edge+3]=0;
+            map[4*center]=1.75f;map[4*center+1]=-.5f;map[4*center+3]=2;
+            context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
+        }
         f.refusalCensus=false;map[4*center+3]=1;
         context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
         camera(f.previousCamera);
@@ -194,6 +240,15 @@ inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* con
          "foreground=owner.x < -1 && asuint(owner.y)==asuint(depth);","foreground=owner.x < -1;"},
         {"a mark names its pixel only where its depth differs",
          "foreground=owner.x < -1 && asuint(owner.y)==asuint(depth);","foreground=owner.x < -1 && asuint(owner.y)!=asuint(depth);"},
+        // The reason a rejected sample carries (x, 1..7) and where the prep keeps it.
+        {"the reason is not kept in the class byte",
+         "cls|=uint(foregroundSample.x)<<4;","cls|=0u;"},
+        {"the reason is read from y, which a rejected sample leaves zero",
+         "cls|=uint(foregroundSample.x)<<4;","cls|=uint(foregroundSample.y)<<4;"},
+        {"a valid sample the prep refused is given a reason too (its x is motion)",
+         "if(!foregroundValid && foregroundSample.w==2 && foregroundSample.x>=1","if(!foregroundValid && foregroundSample.x>=1"},
+        {"the reason is kept in the wrong bits (3-5)",
+         "cls|=uint(foregroundSample.x)<<4;","cls|=uint(foregroundSample.x)<<3;"},
     };
     const std::string shipped=kFlatMonoShaderSource;
     auto runMutated=[&](const std::string& hlsl,int* failed,std::string* first) {

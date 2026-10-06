@@ -635,3 +635,94 @@ inline int flatDomainWorldPredictionWiringTests() {
     check(!reportValid(without(report, "s.predictedScaleRejectedWindow=0;")), "mutation control: a window that never resets fails the wiring");
     return failures;
 }
+
+// The weapon's history, as the runtime reports it (source pins with mutation controls): the CPU's counters of what each draw's history found ride
+// the SDK domain line (summed over the retired candidates and the live ones), the GPU's reasons for a refused first-person pixel ride the refusal
+// census line, and the bench's map export lends what the last qualified H built. The behaviour of the first two is run on WARP by
+// weapon_motion_test and flat_mono_resolve_test, the third by the bench's first_person_slot_repacked case; these keep a report from losing a field.
+inline int flatWeaponHistoryWiringTests() {
+    int failures = 0;
+    const auto check = [&](bool ok, const char* name) { if (!ok) { std::printf("FAIL: flat weapon history wiring %s\n", name); ++failures; } };
+    const auto slurp = [](const char* path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto compact = [](const std::string& in) {
+        std::string out; out.reserve(in.size());
+        for (char c : in) if (c != ' ' && c != '\r' && c != '\n' && c != '\t') out += c;
+        return out;
+    };
+    const auto body = [](const std::string& text, const char* signature) {
+        const size_t at = text.find(signature);
+        if (at == std::string::npos) return std::string();
+        const size_t end = text.find("\n}\n", at);
+        return text.substr(at, end == std::string::npos ? std::string::npos : end + 3 - at);
+    };
+    const auto ordered = [&](const std::string& compacted, std::initializer_list<const char*> needles) {
+        size_t pos = 0;
+        bool ok = !compacted.empty();
+        for (const char* needle : needles) {
+            const std::string n = compact(needle);
+            const size_t at = compacted.find(n, pos);
+            if (at == std::string::npos) { ok = false; break; }
+            pos = at + n.size();
+        }
+        return ok;
+    };
+    const auto without = [&](std::string text, const char* needle) {
+        const std::string n = compact(needle);
+        const size_t at = text.find(n);
+        if (at != std::string::npos) text.erase(at, n.size());
+        return text;
+    };
+    const std::string runtime = slurp("src/d3d11/flat_runtime.cpp");
+    const std::string build = slurp("build.bat");
+    check(!runtime.empty() && !build.empty(), "the runtime source and build.bat are readable from the repo root");
+
+    // The SDK domain line: the seven counters in the order the format names them, each from the summed stats, and the sums add every field.
+    const std::string report = compact(body(runtime, "static void reportForegroundDomain(State& s) {"));
+    const auto reportValid = [&](const std::string& text) {
+        return ordered(text, {"captures.add(candidate.motion.stats())",
+                              "warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu "
+                              "priors-several=%llu repeated-geometry=%llu world-markers=%llu",
+                              "captures.warmedAfterRefusal,", "captures.noCandidate,", "captures.noPriorPool,", "captures.noPriorNear,",
+                              "captures.noPriorAbsent,", "captures.priorsOne,", "captures.priorsSeveral,", "captures.repeated,", "n.worldMarkers,"});
+    };
+    check(reportValid(report), "the SDK domain line prints the capture history counters and sums every candidate's, live and retired");
+    check(!reportValid(without(report, "captures.noPriorNear,")), "mutation control: a counter named in the format and missing from the arguments fails the wiring");
+    check(!reportValid(without(report, "no-prior-absent=%llu")), "mutation control: a counter that is passed and not named fails the wiring");
+    check(!reportValid(without(report, "captures.add(candidate.motion.stats())")), "mutation control: a report that does not sum the live candidates' counters fails the wiring");
+    const std::string retire = compact(body(runtime, "static void retireDomainCandidate("));
+    check(ordered(retire, {"s.foregroundRetiredCaptureStats.add(candidate.motion.stats());", "candidate=State::DomainCandidate{};"}),
+          "a candidate that is retired hands its counters to the retired sum before it is cleared");
+    check(!ordered(without(retire, "s.foregroundRetiredCaptureStats.add(candidate.motion.stats());"), {"s.foregroundRetiredCaptureStats.add(candidate.motion.stats());"}),
+          "mutation control: a retirement that drops the counters fails the wiring");
+
+    // The refusal census line: the weapon-refused pixels by reason, named, after the classes and before the line's explanation.
+    const std::string census = compact(runtime);
+    const auto censusValid = [&](const std::string& text) {
+        return ordered(text, {"flatMonoWeaponReasonName(i)", "(unsignedlonglong)steady.weaponReasons[i]", "refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR",
+                              "used?classes:\"none\",usedReasons?reasons:\"none\""});
+    };
+    check(censusValid(census), "the refusal census line prints the weapon-refused pixels by reason");
+    check(!censusValid(without(census, "weapon-refused by reason: %s;")), "mutation control: a census line that does not name the reasons fails the wiring");
+    check(!censusValid(without(census, "usedReasons?reasons:\"none\"")), "mutation control: a reasons argument that is not passed fails the wiring");
+
+    // The bench's map export lends the map a depth candidate's adapter last drew (an AddRef'd view), is defined once and is linked into the proxy.
+    const std::string exportBody = compact(body(runtime, "extern \"C\" unsigned int __cdecl edvr_selftest_flat_sdk_foreground_map("));
+    const auto lendsValid = [&](const std::string& text) {
+        return ordered(text, {"for (const auto& candidate : s.foregroundCandidates) {", "candidate.motion.mapView()", "*out = view.Detach();", "return 1;"});
+    };
+    check(lendsValid(exportBody), "the bench's map export lends a candidate's map view");
+    check(!lendsValid(without(exportBody, "candidate.motion.mapView()")), "mutation control: an export that lends nothing from the candidates fails the wiring");
+    const auto exportValid = [&](const std::string& runtimeText, const std::string& buildText) {
+        return runtimeText.find(compact("extern \"C\" unsigned int __cdecl edvr_selftest_flat_sdk_foreground_map(")) != std::string::npos &&
+               buildText.find(compact("--extra-export edvr_selftest_flat_sdk_foreground_map")) != std::string::npos;
+    };
+    check(exportValid(compact(runtime), compact(build)), "the bench's foreground map export is defined by the runtime and exported by the proxy's link");
+    check(!exportValid(compact(runtime), without(compact(build), "--extra-export edvr_selftest_flat_sdk_foreground_map")),
+          "mutation control: a link line without the export fails the wiring");
+    check(!exportValid(without(compact(runtime), "extern \"C\" unsigned int __cdecl edvr_selftest_flat_sdk_foreground_map("), compact(build)),
+          "mutation control: a runtime without the export fails the wiring");
+    return failures;
+}

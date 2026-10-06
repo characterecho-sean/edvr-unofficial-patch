@@ -582,10 +582,7 @@ static State::DomainCandidate* domainCandidate(State& s,const void* depth) {
     return slot<0?nullptr:&s.foregroundCandidates[slot];
 }
 static void retireDomainCandidate(State& s,State::DomainCandidate& candidate) {
-    const auto old=candidate.motion.stats();auto& retired=s.foregroundRetiredCaptureStats;
-    retired.attempts+=old.attempts;retired.gpuAttempts+=old.gpuAttempts;
-    retired.submitted+=old.submitted;retired.preflightRefused+=old.preflightRefused;
-    retired.warmedAfterRefusal+=old.warmedAfterRefusal;
+    s.foregroundRetiredCaptureStats.add(candidate.motion.stats());
     candidate=State::DomainCandidate{};
 }
 static State::DomainCandidate* observeDomainCandidate(State& s,const void* depth) {
@@ -610,17 +607,15 @@ static void domainResourceWritten(State& s,ID3D11Resource* resource,const char* 
 static void reportForegroundDomain(State& s) {
     const auto& n=s.foregroundCounts;
     auto captures=s.foregroundRetiredCaptureStats;
-    for(const auto& candidate:s.foregroundCandidates) {
-        const auto& c=candidate.motion.stats();
-        captures.attempts+=c.attempts;captures.gpuAttempts+=c.gpuAttempts;
-        captures.submitted+=c.submitted;captures.preflightRefused+=c.preflightRefused;
-        captures.warmedAfterRefusal+=c.warmedAfterRefusal;
-    }
-    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call",
+    for(const auto& candidate:s.foregroundCandidates)captures.add(candidate.motion.stats());
+    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call; history of the submitted draws, cumulative: no-candidate found no record of its geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on (pool differs, near differs, the previous draw is not there), priors-one/several matched on the GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame",
         flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
         (unsigned long long)captures.attempts,(unsigned long long)captures.gpuAttempts,
         (unsigned long long)captures.submitted,(unsigned long long)captures.preflightRefused,
         (unsigned long long)captures.warmedAfterRefusal,
+        (unsigned long long)captures.noCandidate,(unsigned long long)captures.noPriorPool,(unsigned long long)captures.noPriorNear,
+        (unsigned long long)captures.noPriorAbsent,(unsigned long long)captures.priorsOne,(unsigned long long)captures.priorsSeveral,
+        (unsigned long long)captures.repeated,
         (unsigned long long)n.worldMarkers,(unsigned long long)n.nullMarkers,(unsigned long long)n.markerRefused,
         (unsigned long long)n.predictedWorld,s.worldReference.nearPlane,(unsigned long long)s.predictedScaleRejectedWindow,
         (unsigned long long)n.worldUnmarked,
@@ -3377,15 +3372,23 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                         (unsigned long long)steady.counts[i]);
                     if(n<0)break;used+=static_cast<size_t>(n);
                 }
+                // The refused first-person pixels by the reason the foreground map gave (flat_foreground_motion_shader.h): a split of the
+                // weapon-refused class above, in the same pixels.
+                char reasons[320]{};size_t usedReasons=0;
+                for(uint32_t i=0;i<kFlatMonoWeaponReasons && usedReasons<sizeof(reasons);++i)if(steady.weaponReasons[i]) {
+                    const int n=std::snprintf(reasons+usedReasons,sizeof(reasons)-usedReasons,"%s%s=%llu",usedReasons?" ":"",
+                        flatMonoWeaponReasonName(i),(unsigned long long)steady.weaponReasons[i]);
+                    if(n<0)break;usedReasons+=static_cast<size_t>(n);
+                }
                 const uint64_t refused=steady.refused();
                 Log::get().note("flat refusal census 5s: asked=%llu sampled=%llu read=%llu dropped=%llu every=%u size=%ux%u pixels=%llu "
-                                "refused=%llu (%.4f%%) stale-kept=%llu view=%s; refused by class: %s; with DLSS or FSR a refused pixel "
+                                "refused=%llu (%.4f%%) stale-kept=%llu view=%s; refused by class: %s; weapon-refused by reason: %s; with DLSS or FSR a refused pixel "
                                 "shows the raw current frame in place of the backend's result",
                     (unsigned long long)steady.asked,(unsigned long long)steady.sampled,(unsigned long long)steady.frames,
                     (unsigned long long)steady.dropped,steady.every,steady.width,steady.height,(unsigned long long)steady.pixels,
                     (unsigned long long)refused,steady.pixels?100.0*double(refused)/double(steady.pixels):0.0,
                     (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],s.motionSourceView?"on":"off",
-                    used?classes:"none");
+                    used?classes:"none",usedReasons?reasons:"none");
             }
             // The camera term's translation precision (section 104): float32 spacing at row 275's size against its per-frame step.
             // A spacing near a walking step (a few centimetres a frame) quantises the motion the camera term hands the upscaler.
@@ -5924,6 +5927,23 @@ extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
     std::snprintf(snap.hdrVerdict, sizeof(snap.hdrVerdict), "%s", s.hdrWindow.lastVerdict);
     *out = snap;
     return 1;
+}
+
+// The bench may inspect the first-person map the last H drew (the first depth candidate's): RGBA32F at the render size, w = 1 a valid sample
+// (x, y its motion), w = 2 a rejected one (x the reason, flat_foreground_motion_shader.h), w = 0 none. This only lends an AddRef'd SRV; readback
+// happens in the offline process, and the next H rewrites the map.
+extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_foreground_map(
+    ID3D11ShaderResourceView** out) {
+    if (out) *out = nullptr;
+    if (!out || !runtimeFlatProfile() || !owner()) return 0;
+    const auto& s = state();
+    for (const auto& candidate : s.foregroundCandidates) {
+        auto view = candidate.motion.mapView();
+        if (!view) continue;
+        *out = view.Detach();
+        return 1;
+    }
+    return 0;
 }
 
 // The bench may inspect the actual marker plane produced by the draw hooks.

@@ -394,8 +394,8 @@ int main(int argc,char** argv){
        std::to_string(slot*2+3)+",p.z,float(primitive),"+std::to_string(writer)+");}";
    auto code=compile(source.c_str(),"ps_5_0");hr(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&gpuMarkers[slot][writer-1]));
   }
-  auto gpuRaster=[&](Pose pose,unsigned slot,unsigned writer) {
-   bind(pose,false);unsigned ids[4]={slot,526606,0,0};ctx->UpdateSubresource(instance.Get(),0,nullptr,ids,0,0);
+  auto gpuRaster=[&](Pose pose,unsigned slot,unsigned writer,unsigned flags) {
+   bind(pose,false);unsigned ids[4]={slot|flags,526606,0,0};ctx->UpdateSubresource(instance.Get(),0,nullptr,ids,0,0);
    ID3D11ShaderResourceView* untouched[15];for(auto& view:untouched)view=poolView.Get();ctx->VSSetShaderResources(0,15,untouched);
    if(rangedContext){UINT first=16,count=16;rangedContext->VSSetConstantBuffers1(0,1,rangedCb.GetAddressOf(),&first,&count);
        first=32;rangedContext->PSSetConstantBuffers1(0,1,rangedCb.GetAddressOf(),&first,&count);}

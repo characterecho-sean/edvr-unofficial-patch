@@ -58,7 +58,7 @@ inline unsigned byteOf(double v) { return unsigned(std::floor((v < 0 ? 0 : v > 1
 // refusalPaint, as the shader has it (flat_mono_shader_source.h), in doubles.
 inline void paintModel(double (&c)[3], unsigned v) {
     using namespace edvr;
-    const unsigned kind = v & 0x7Fu;
+    const unsigned kind = v & 0x0Fu;   // the class: a first-person pixel's reason, bits 4-6, does not paint
     const double y = std::max(.2126 * c[0] + .7152 * c[1] + .0722 * c[2], .02) * 2;
     double p[3];
     if (kind == kFlatMonoClassJoined) { p[0] = 0; p[1] = y; p[2] = 0; }
@@ -96,7 +96,7 @@ inline std::vector<unsigned char> finishModel(const Classes& cls, UINT D, bool p
                 for (int dx = 0; dx < 2; ++dx) {
                     const int tx = std::min(std::max(qx + dx, 0), int(R) - 1), ty = std::min(std::max(qy + dy, 0), int(R) - 1);
                     const unsigned c = cls.v[size_t(ty) * R + tx];
-                    if (c & 0x80u) { reject = true; best = std::max(best, c); }
+                    if (c & 0x80u) { reject = true; best = std::max(best, c & 0x8Fu); }   // the highest refused class wins, the reason bits aside
                 }
             const int nx = std::min(std::max(int(std::floor(u * R)), 0), int(R) - 1), ny = std::min(std::max(int(std::floor(v * R)), 0), int(R) - 1);
             const unsigned k = best ? best : cls.v[size_t(ny) * R + nx];

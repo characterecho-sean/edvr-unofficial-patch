@@ -42,8 +42,22 @@ public:
     };
     struct CaptureStats {
         uint64_t attempts=0,gpuAttempts=0,submitted=0,preflightRefused=0,warmedAfterRefusal=0;
+        // What the previous frame had for each submitted draw (the weapon's history, section 104), counted where the CPU decides it. A draw
+        // is in exactly one of: noCandidate (history holds no record of its geometry from the frame before), noPriorPool / noPriorNear /
+        // noPriorAbsent (the history has candidates and the adapter passed none on: the previous draw's pool or near differs, or no previous
+        // draw is named by any candidate), priorsOne, priorsSeveral (the GPU map matches among them by identity). repeated counts the draws
+        // that are not the first of their geometry in the frame (occurrence above 1), whichever of the above they are.
+        uint64_t noCandidate=0,noPriorPool=0,noPriorNear=0,noPriorAbsent=0,priorsOne=0,priorsSeveral=0,repeated=0;
+        void add(const CaptureStats& o) {
+            attempts+=o.attempts;gpuAttempts+=o.gpuAttempts;submitted+=o.submitted;preflightRefused+=o.preflightRefused;
+            warmedAfterRefusal+=o.warmedAfterRefusal;noCandidate+=o.noCandidate;noPriorPool+=o.noPriorPool;noPriorNear+=o.noPriorNear;
+            noPriorAbsent+=o.noPriorAbsent;priorsOne+=o.priorsOne;priorsSeveral+=o.priorsSeveral;repeated+=o.repeated;
+        }
     };
     const CaptureStats& stats() const{return stats_;}
+    // The map the last prepareH drew (RGBA32F at its render size), or null before the first. For the offline bench's test export, which reads it
+    // back in its own process; the next prepareH rewrites it.
+    Ptr<ID3D11ShaderResourceView> mapView() const{return view_;}
     const EdvrFlatForegroundBudgetReceipt& budgetReceipt() const{return budgetReceipt_;}
     void reset(){*this=FlatForegroundMotion{};}
     void beginFrame(unsigned frame) {
@@ -115,13 +129,14 @@ public:
                 if(inputs.gpuIdentity) {
                     if(d.priorCount<d.priors.size()) {
                         auto& prior=d.priors[d.priorCount++];prior.positions=d.capture.previousPositions[i];
-                        prior.identity=d.capture.previousIdentity[i];prior.index=old.capture.instanceIndex;
+                        prior.identity=d.capture.previousIdentity[i];
                         prior.phaseX=old.inputs.phaseX;prior.phaseY=old.inputs.phaseY;
                     }
                 } else if(!d.oldPositions){d.oldPositions=d.capture.previousPositions[i];d.oldIdentity=d.capture.previousIdentity[i];d.oldInputs=old.inputs;}
                 else if(!equivalent(d.oldInputs,old.inputs)){d.ambiguous=true;fail("foreground-ambiguous-prior-inputs");}
             }
         }
+        tally(d);
         current_.push_back(std::move(d));return !refusal_;
     }
     bool prepareH(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* owners,ID3D11ShaderResourceView* rawDepth,
@@ -191,8 +206,10 @@ public:
             ctx->UpdateSubresource(settings_.Get(),0,nullptr,&c,0,0);
             ID3D11ShaderResourceView* vsViews[15]{};
             vsViews[0]=d.capture.currentPositions.Get();
+            // t1-t4 the priors' positions, t5 the draw's identity, t6-t9 the priors' identities, t10 the draw's own raw instance index. The
+            // priors' slots are not bound: the match is by identity (flat_foreground_motion_shader.h), a slot is not an identity.
             if(d.inputs.gpuIdentity){for(unsigned i=0;i<d.priorCount;++i){vsViews[1+i]=d.priors[i].positions.Get();
-                    vsViews[6+i]=d.priors[i].identity.Get();vsViews[11+i]=d.priors[i].index.Get();}
+                    vsViews[6+i]=d.priors[i].identity.Get();}
                 vsViews[5]=d.capture.currentIdentity.Get();vsViews[10]=d.capture.instanceIndex.Get();}
             else {vsViews[1]=d.oldPositions.Get();vsViews[5]=d.capture.currentIdentity.Get();
                 vsViews[6]=d.oldIdentity.Get();vsViews[10]=d.capture.instanceIndex.Get();}
@@ -217,7 +234,7 @@ private:
     unsigned knownMutations_=0,unknownMutations_=0;
     struct Draw {
         AnimatedVertexHistory::Capture capture;Inputs inputs,oldInputs;
-        struct Prior {Ptr<ID3D11ShaderResourceView> positions,identity,index;float phaseX=0,phaseY=0;};
+        struct Prior {Ptr<ID3D11ShaderResourceView> positions,identity;float phaseX=0,phaseY=0;};
         std::array<Prior,4> priors{};unsigned priorCount=0;
         Ptr<ID3D11ShaderResourceView> oldPositions,oldIdentity;Ptr<ID3D11RasterizerState> raster;
         D3D11_VIEWPORT viewport{};std::array<D3D11_RECT,16> scissors{};UINT scissorCount=0;
@@ -230,6 +247,25 @@ private:
     }
     static bool samePool(const AnimatedVertexHistory::Capture& a,const AnimatedVertexHistory::Capture& b) {
         Ptr<ID3D11Resource> x,y;a.pool->GetResource(&x);b.pool->GetResource(&y);return x==y;
+    }
+    // Files a submitted draw under what its history found (CaptureStats). A draw whose candidates reached no prior is filed by the first test
+    // that refused the previous draws its candidates name: the pool, then the near; none of them refusing, the previous draw is not there.
+    void tally(const Draw& d) {
+        if(d.capture.occurrences>0)++stats_.repeated;
+        if(d.capture.candidateCount==0){++stats_.noCandidate;return;}
+        if(d.inputs.gpuIdentity?d.priorCount>0:bool(d.oldPositions)) {
+            if(d.inputs.gpuIdentity)++(d.priorCount==1?stats_.priorsOne:stats_.priorsSeveral);
+            return;
+        }
+        bool poolRefused=false,nearRefused=false;
+        for(const auto& old:previous_) {
+            bool named=false;
+            for(unsigned i=0;i<d.capture.candidateCount && !named;++i)named=d.capture.previousPositions[i].Get()==old.capture.currentPositions.Get();
+            if(!named)continue;
+            if(!samePool(d.capture,old.capture))poolRefused=true;
+            else if(d.inputs.camera[3][2]!=old.inputs.camera[3][2])nearRefused=true;
+        }
+        ++(poolRefused?stats_.noPriorPool:nearRefused?stats_.noPriorNear:stats_.noPriorAbsent);
     }
     static bool textureExtent(ID3D11ShaderResourceView* view,unsigned width,unsigned height,bool owner) {
         D3D11_SHADER_RESOURCE_VIEW_DESC v{};view->GetDesc(&v);

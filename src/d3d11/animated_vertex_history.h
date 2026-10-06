@@ -14,7 +14,9 @@ namespace edvr {
 class AnimatedVertexHistory {
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
 public:
-    static constexpr unsigned maxVertices = 131072, maxRecords = 64;
+    // maxRecords bounds the live records (one per geometry key and same-frame occurrence). One equip frame in the 2026-10-06 flights reached
+    // the old bound of 64 (the budget receipt's records=64); 128 gives that transient room. The byte bound below is what limits large draws.
+    static constexpr unsigned maxVertices = 131072, maxRecords = 128;
     static constexpr unsigned maxBytes = 32 * 1024 * 1024;
     inline static const GUID bytecodeKey = {0x65a40e9c,0xa4ee,0x473d,{0x85,0x4a,0xeb,0x10,0x35,0x8e,0x4f,0x20}};
     struct Geometry {
@@ -40,6 +42,9 @@ public:
         // rewrites its contents. No additional copy or CPU readback is made.
         Ptr<ID3D11ShaderResourceView> instanceIndex;
         unsigned instanceByteOffset=0, frame=0, candidateCount=0, retainedIndexBytes=0;
+        // How many records of this geometry key this frame had already used when this draw prepared: 0 for the first draw of the key,
+        // 1 for the second, and so on. A draw's own occurrence number is occurrences+1.
+        unsigned occurrences=0;
         Ptr<ID3D11ShaderResourceView> currentPositions, currentIdentity;
         Ptr<ID3D11ShaderResourceView> previousPositions[4], previousIdentity[4];
         const char* refusal=nullptr;
@@ -125,6 +130,7 @@ public:
                 out.previousIdentity[out.candidateCount++]=r.identityViews[previous];
             }
         }
+        out.occurrences=occurrences;
         if(occurrences==4)return refuse("occurrence-cap");
         auto found=std::find_if(records_.begin(),records_.end(),[&](const Record& r){return matches(r.geometry,key) && r.frame[next]!=frame;});
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
