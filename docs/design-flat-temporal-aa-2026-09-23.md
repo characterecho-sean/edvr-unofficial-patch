@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State:** 0e9f59eb FLOWN: SDK AA engages at the settlement, some edges
-  jagged in DLSS and FSR; 0ed050a1 (census, A/B) on Epic, NOT FLOWN (104).
-- **Temporary key:** `experimental.flat_sdk_local_reset` (on = refused pixels
-  show raw, shipped; off = the backend's result). Remove when 104 closes.
+- **State:** 0ed050a1 FLOWN: DLAA resolves the settlement's edges in a still
+  frame; refusals 0.0145% (ruled out); edges break up in motion (104).
+- **Temporary key:** `experimental.flat_sdk_local_reset`, outside the flat
+  allow-list, so it reads "off" (backend kept). Its question is answered: remove.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -35,8 +35,8 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** same settlement: refusal view on the jagged edges, NumLock census,
-  then local reset off against on, DLSS and FSR (104). Retain 102's
+- **Next:** motion at the roof: walking past it against standing and turning,
+  DLAA/FSR against EDVR's TAA; log row 275's size (104). Retain 102's
   color-clear fix; no per-weapon table; preserve Epic settings, 87's native
   FSR comparison, 83's open items and high-G motion; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
@@ -12703,6 +12703,46 @@ Committed 0ed050a1, main fast-forwarded and pushed; `--dll-only` passed. Epic
 flat install: dry run, install, `--verify-only`; installed
 `v0.18.2-24-g0ed050a1`, SHA256 9FB04CC95CD08E73..., equal to the build.
 `edvr-flat.ini` unchanged.
+
+### 2026-10-06: 0ed050a1 flown; refusals ruled out, DLAA resolves still edges
+
+Flight `edvr_gfx_20261006_085316.log`, verified `v0.18.2-24-g0ed050a1`: FSR
+08:53:52-08:54:22, then DLAA at 3840x2160 from 08:55:24; every in-game frame
+treated with history.
+
+The view and the A/B key never worked. Neither key is in the flat profile's
+allow-list (`runtimeProfileAllowsKey`, `src\common\runtime_profile.h`), and
+`Config::getString` returns "off" for any key outside it. The view stayed off,
+and local reset read "off" (keep the backend's result) for the whole flight,
+and on main from 0ed050a1 on. Sean's toggles did nothing. The config contract
+checks that a key is documented, not that the flat profile lets it through.
+
+NumLock census (DLAA, 08:58:37 and 08:58:42, 76 and 74 sampled frames):
+0.0145% of pixels refused, about 1,200 a frame of 8.3 million (sentinel about
+1,020, stale about 190). Stale slots kept by the depth check: about 2.76
+million a frame, a third of the screen.
+
+Sean's DLAA and AA-off screenshots of the same roof, enlarged to the pixel:
+DLAA draws the roof's thin top bevel as a continuous line where AA off breaks
+it into dashes; the dome and the strut edges likewise. In a still frame DLAA
+anti-aliases these edges.
+
+Ruled out: refused pixels shown raw as the jagged edges, because the census
+refuses 0.0145% of pixels, far too few to line an edge, and Sean saw the same
+edges on 0e9f59eb (raw) and on this flight (backend kept).
+
+Ruled out: settlement surfaces left unjittered, because the still DLAA frame
+resolves them, which DLAA cannot do without jitter; the cameras left alone are
+shadow and light (kinds 0 and 1) and one kind-4 camera refreshed 3 times a
+frame.
+
+Open: edges break up in motion, in DLAA and FSR. Candidates: (a) the
+upscalers' own handling of a bright sub-pixel line in motion, which EDVR
+cannot change; (b) a sub-pixel motion error in the camera term's translation
+(`now[5]-old[5]` in float32: if row 275 is a large world position, walking
+quantises the delta, and turning does not). Discriminator: walk past the roof,
+then stand and turn so the edge crosses the screen at the same speed; compare
+EDVR's TAA; log the size of row 275 and the per-frame translation.
 
 Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
 motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
