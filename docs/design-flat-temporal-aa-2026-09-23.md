@@ -12944,3 +12944,32 @@ Next flight (Epic, flat profile, TAA on): the same settlement at night,
 standing still, EDVR's TAA on the roof's top bevel and lower-left corner, then
 DLAA on the same view. Read the edge pixels for the beading, and for any new
 ghost trail where a ship or a walker leaves the frame (the price above).
+
+### 2026-10-06: the second supersample gate; a colour for refused stale slots
+
+The bench found a second gate behind the 16M bound. With the bound raised, H
+qualified at 5760x3240, and the resolver then refused the frame with
+`flat-resolve-untrusted-coverage-requires-native-HDR-TAA`. Section 102's rule
+refused untrusted camera coverage (every mixed-camera frame) at any render
+size other than the output, for every mode. It was written for EDVR's TAA,
+whose output-domain test maps one output pixel to one render pixel. An SDK
+backend with the qualified first-person map never reads that mask (the prep's
+debug.w is 2), and the map, the prep and the backend all run at the render
+size. The size clause now applies to TAA alone; an SDK frame still needs the
+HDR route and the first-person map. Bench, a scratch proxy with only that
+clause changed: all six supersampled cells (96x96 into 64x64 and 5760x3240
+into 3840x2160, DLAA, DLSS and FSR) ran the backend, where the real tree
+refused all six.
+
+Ruled out: the 64M bound alone as the supersample fix, because the bench at
+the real size qualified H and then hit the size clause above.
+
+The copy-route bench case is not built: the copy route admits the game's final
+copy by its exact shader hashes, which no fixture holds. A capture flight and
+one to two days of scaffolding would build it. The resolver side is pinned by
+flat_copy_refusal_view_gpu_tests.h; the three lines in flat_runtime.cpp that
+ask for the view on the copy route are left to the flight.
+
+The view (Sean asked, after the roof painted yellow): a stale slot the depth
+check refused now paints pink, a kept one stays yellow. Before, both were
+yellow and only the census told them apart.

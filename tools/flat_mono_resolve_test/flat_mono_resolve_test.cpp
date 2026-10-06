@@ -809,6 +809,8 @@ int main(int argc,char** argv) {
     // The HDR route's resolver half (design section 81): before the D3D message check below, so its draws are held to it.
     hdrRouteGpuTests(device.Get(),context.Get());
     sdkForegroundGpuTests(device.Get(),context.Get());
+    // The same SDK foreground contract above the output (the supersampled on-foot frame), and the untrusted-coverage clause's other two sides.
+    sdkForegroundSupersampleGpuTests(device.Get(),context.Get());
     // The VR world route's seams (section 82): the third upscaler slot, the first-person map and stencil in the prep, and the phase term
     // the map's vector gets when the world and the first-person camera are jittered (stage 2).
     upscalerSlotGpuTests(device.Get(),context.Get());

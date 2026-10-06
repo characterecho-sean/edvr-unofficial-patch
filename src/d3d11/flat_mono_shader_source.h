@@ -336,13 +336,13 @@ void taa(uint3 id:SV_DispatchThreadID) {
 // (temporal_shader_source.h, the motion_source view), by the HDR route's finish and by the copy route's. On the HDR route the
 // picture is H, which the game's tone pass reads next, so each colour is scaled by the pixel's own level (twice its luma, never below
 // .04): the hue survives the tone pass, the absolute value does not. green 1 joined, red 2 masked, blue 3 not a rig record, yellow 4
-// stale slot, magenta 5 corrupt, orange 6 stale stamp, cyan 12 first-person, white any other refusal, and a pixel with no engine slot
-// is dimmed to a quarter.
+// stale slot the depth check kept, pink 4 stale slot it refused (bit 7: the pixel shows the raw frame), magenta 5 corrupt, orange 6
+// stale stamp, cyan 12 first-person, white any other refusal, and a pixel with no engine slot is dimmed to a quarter.
 float3 refusalPaint(float3 c,uint v) {
     const uint kind=v&0x7Fu;
     const float y=max(dot(c,float3(.2126,.7152,.0722)),.02)*2;
     return kind==kClassJoined?float3(0,y,0):kind==kClassMasked?float3(y,0,0)
-         :kind==kClassNotRig?float3(0,.3*y,y):kind==kClassStale?float3(y,y,0)
+         :kind==kClassNotRig?float3(0,.3*y,y):kind==kClassStale?((v&0x80u)!=0?float3(y,.4*y,.7*y):float3(y,y,0))
          :kind==kClassCorrupt?float3(y,0,y):kind==kClassStaleStamp?float3(y,.5*y,0)
          :kind==kClassWeapon?float3(0,y,y):(kind>=kClassSentinel && kind<=kClassWeaponRefused)?float3(y,y,y):c*.25;
 }

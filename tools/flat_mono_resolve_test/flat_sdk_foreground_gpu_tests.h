@@ -229,3 +229,114 @@ inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* con
     }
     flatMonoResolveTestPrepBytecode(nullptr,0);flatMonoResolveReset();
 }
+
+// ---- the SDK foreground contract above the output: the supersampled on-foot frame (section 104) -----------------------------------------
+// The resolver's untrusted-coverage clause ("flat-resolve-untrusted-coverage-requires-native-HDR-TAA", flat_mono_resolve.cpp) once demanded a
+// render size equal to the output's of EVERY frame that carried coverage, the SDK's mixed-camera frame (coverage plus a qualified foreground map)
+// included. Elite's supersampling on foot, the HDR route's R > D, therefore never reached DLAA, DLSS or FSR: once H qualified, the resolver refused
+// the frame before its prep and the route recovered it spatially (the bench's supersampled_scene cases pin the same through the proxy). The
+// equal-size requirement now belongs to EDVR's own TAA alone, whose coverage route evaluates on the output's grid. Three pins, at 2.0x and 1.33x:
+//   an SDK frame with coverage AND a qualified foreground map, render above the output, on the HDR route: resolved; the backend runs at the render
+//     size (E = R) and is handed the real foreground motion and canonical depth, history kept, for DLAA, DLSS and FSR;
+//   an SDK frame with coverage and NO foreground map, at the same sizes: still refused by name, before the backend, with H untouched (the existing
+//     pins at equal sizes are in flat_hdr_route_gpu_tests.h and flat_resolve_input_gpu_tests.h);
+//   EDVR's TAA with coverage and a render above the output: still refused by name, and accepted at equal sizes (the control that the size clause,
+//     and nothing else, is what refuses it). A TAA frame reaches the clause only with the negotiated evaluation size (FlatMonoResolveFrame::evalWidth)
+//     at the render size: without it TAA's E is the output's and the HDR route's earlier gate answers first, which is pinned here too.
+// What fails if the clause is put back or changed (checked by mutating a private copy of the resolver): the old bare size clause fails the first pin
+// (resolved, evaluated at E = R: all six cells); dropping the TAA term fails the TAA refusal at the render size; inverting it fails both of those;
+// dropping the no-foreground term fails the no-foreground pin (all six cells).
+inline void sdkForegroundSupersampleScenario(ID3D11Device* device,ID3D11DeviceContext* context,UINT outputSize) {
+    using namespace edvr;
+    ResolveFixture fixture(device,context);
+    constexpr UINT w=ResolveFixture::w,h=ResolveFixture::h;
+    std::vector<uint32_t> rgb(w*h,hdrgpu::pack(20,30,40));
+    std::vector<float> depths(w*h,.01f),markers(w*h*2),map(w*h*4);
+    std::vector<unsigned char> coverage(w*h,255);
+    for(UINT i=0;i<w*h;++i) {markers[2*i]=0;markers[2*i+1]=.01f;}
+    const UINT center=8*w+8;
+    markers[2*center]=-3;   // a first-person mark at the pixel's own depth: the foreground map names it
+    map[4*center]=1.75f;map[4*center+1]=-.5f;map[4*center+2]=.0025f;map[4*center+3]=1;
+    auto color=texture(device,w,h,DXGI_FORMAT_R11G11B10_FLOAT,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET,rgb.data(),w*4);
+    auto depth=texture(device,w,h,DXGI_FORMAT_R32_FLOAT,D3D11_BIND_SHADER_RESOURCE,depths.data(),w*4);
+    auto slots=texture(device,w,h,DXGI_FORMAT_R32G32_FLOAT,D3D11_BIND_SHADER_RESOURCE,markers.data(),w*8);
+    auto motion=texture(device,w,h,DXGI_FORMAT_R32G32B32A32_FLOAT,D3D11_BIND_SHADER_RESOURCE,map.data(),w*16);
+    auto mask=texture(device,w,h,DXGI_FORMAT_R8_UNORM,D3D11_BIND_SHADER_RESOURCE,coverage.data(),w);
+    auto colorView=view(device,color.Get()),depthView=view(device,depth.Get()),slotsView=view(device,slots.Get());
+    auto motionView=view(device,motion.Get()),maskView=view(device,mask.Get());
+    FlatMonoResolveFrame f{};f.color=colorView.Get();f.depth=depthView.Get();
+    f.renderWidth=w;f.renderHeight=h;f.outputWidth=f.outputHeight=outputSize;
+    camera(f.camera);camera(f.previousCamera);fixture.engine(f);f.engine.slots=slotsView.Get();
+    f.hdr=true;f.untrustedCameraCoverage=maskView.Get();
+    f.foregroundMotion=motionView.Get();f.foregroundQualified=true;
+    char what[320];
+    const auto resolve=[&](bool expected,const char* label) {
+        fixture.bindOriginal();ComPtr<ID3D11ShaderResourceView> output;const char* why=nullptr;
+        const bool ok=flatMonoResolve(device,context,f,&output,&why);
+        if(ok!=expected)std::printf("info: \"%s\": resolver %s, reason %s\n",label,ok?"accepted":"refused",why?why:"none");
+        check(ok==expected,label);check(fixture.restored(),"SDK supersample restores the game pipeline");
+        return ok;
+    };
+    const auto refuse=[&](const char* reasonPart,const char* label) {
+        std::vector<unsigned char> original,after;
+        check(readWhole(context,color.Get(),original,4),"SDK supersample refusal: the original H is readable");
+        const int calls=backendCalls;
+        fixture.bindOriginal();ComPtr<ID3D11ShaderResourceView> output;const char* why=nullptr;
+        const bool ok=flatMonoResolve(device,context,f,&output,&why);
+        const bool named=why && std::strstr(why,reasonPart);
+        if(ok || !named)std::printf("info: \"%s\": resolver %s, reason %s\n",label,ok?"accepted":"refused",why?why:"none");
+        std::snprintf(what,sizeof(what),"%s: refused by name (%s), before the backend, with H and the game's pipeline untouched",label,reasonPart);
+        check(!ok && named && backendCalls==calls && fixture.restored() && readWhole(context,color.Get(),after,4) && original==after,what);
+    };
+    expectedJx=expectedJy=0;
+    const UINT frameBase=72000+outputSize*100;
+    unsigned index=0;
+    for(auto mode:{FlatMonoResolveMode::Dlaa,FlatMonoResolveMode::Dlss,FlatMonoResolveMode::Fsr}) {
+        const char* name=flatMonoResolveModeName(mode);
+        char label[256];
+        const auto say=[&](const char* text) {
+            std::snprintf(label,sizeof(label),"SDK supersample (%s, render %u, output %u): %s",name,w,outputSize,text);return label;
+        };
+        // The mixed-camera frame as the HDR route hands it over: coverage, the foreground required, and a qualified foreground map, the render
+        // above the output.
+        flatMonoResolveReset();f.mode=mode;f.frame=frameBase+index++*10;f.foregroundFrame=f.frame;f.reset=true;f.foregroundRequired=true;
+        f.untrustedCameraCoverage=maskView.Get();f.foregroundMotion=motionView.Get();f.foregroundQualified=true;
+        resolve(true,say("the reset frame (coverage and a qualified foreground map, render above the output) is resolved, not refused"));
+        ++f.frame;f.foregroundFrame=f.frame;f.reset=false;
+        const int before=backendCalls;
+        resolve(true,say("the continuing frame is resolved"));
+        check(backendCalls==before+1 && !backendReset && observedInW==w && observedInH==h && observedOutW==w && observedOutH==h &&
+              observedMotion==1.75f && observedMotionY==-.5f && observedDepth==.0025f && observedReject==0,
+              say("the backend runs at the render size (E = R) and is handed the real foreground motion and canonical depth, history kept"));
+        // The foreground contract still stands above the output: H not qualified is the refusal the 16M-pixel bound produced in flight, by name.
+        f.foregroundQualified=false;++f.frame;f.foregroundFrame=f.frame;
+        refuse("foreground-contract-unqualified",say("a required foreground map that did not qualify"));
+        f.foregroundQualified=true;
+        // Coverage and no foreground map: the union is the conservative camera-ambiguity veto no SDK may consume, whatever the sizes.
+        f.foregroundRequired=false;f.foregroundMotion=nullptr;f.foregroundQualified=false;++f.frame;f.foregroundFrame=f.frame;
+        refuse("untrusted-coverage-requires-native-HDR-TAA",say("coverage with no foreground map"));
+        f.foregroundMotion=motionView.Get();f.foregroundQualified=true;
+    }
+    // EDVR's own TAA keeps the requirement: its coverage route evaluates on the output's grid.
+    flatMonoResolveReset();f.mode=FlatMonoResolveMode::Taa;f.frame=frameBase+90;f.foregroundFrame=0;f.reset=true;
+    f.foregroundMotion=nullptr;f.foregroundQualified=false;f.untrustedCameraCoverage=maskView.Get();
+    char prefix[96],tag[256];   // `what` is refuse()'s own buffer, so the TAA labels are built in these
+    std::snprintf(prefix,sizeof(prefix),"TAA supersample (render %u, output %u)",w,outputSize);
+    std::snprintf(tag,sizeof(tag),"%s: coverage, no negotiated size (E is the output's)",prefix);
+    refuse("hdr-requires-render-size-evaluation",tag);
+    f.evalWidth=f.evalHeight=w;   // E = R, the negotiated size: the only way a TAA frame gets past the HDR route's gate to the clause
+    std::snprintf(tag,sizeof(tag),"%s: coverage, evaluation at the render size",prefix);
+    refuse("untrusted-coverage-requires-native-HDR-TAA",tag);
+    f.evalWidth=f.evalHeight=0;f.outputWidth=f.outputHeight=w;
+    std::snprintf(tag,sizeof(tag),"TAA (render %u, output %u): coverage at equal sizes is accepted: the refusal above is the size clause",w,w);
+    const int calls=backendCalls;
+    resolve(true,tag);
+    check(backendCalls==calls,"TAA at equal sizes does not call an SDK");
+    flatMonoResolveReset();context->ClearState();
+}
+
+inline void sdkForegroundSupersampleGpuTests(ID3D11Device* device,ID3D11DeviceContext* context) {
+    sdkForegroundSupersampleScenario(device,context,8);    // render 16, output 8: 2.0x per axis (Elite's SS 2.0)
+    sdkForegroundSupersampleScenario(device,context,12);   // render 16, output 12: 1.33x
+    edvr::flatMonoResolveReset();context->ClearState();
+}

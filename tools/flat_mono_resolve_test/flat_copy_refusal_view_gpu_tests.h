@@ -9,13 +9,14 @@
 // One fixture (steady_depth's Rig: the copy route's 16 x 16 render, a still camera, one pool record, an RGBA8 game frame of a uniform 64 grey), the
 // render below the output (16 -> 32) for DLSS and FSR and equal to it for DLAA and DLSS. The stub backend hands back a uniform green (0, 1, 0), so
 // in the output a pixel whose history was refused shows the raw 64 grey and any other pixel the backend's green, and the view paints over both:
-//   a stale slot (a 4 x 4 block), refused           -> yellow     (y, y, 0)   from the raw grey, y = twice its luma: 128 128 0
+//   a stale slot (a 4 x 4 block), refused           -> PINK       (y, .4y, .7y)  from the raw grey, y = twice its luma: 128 51 90
 //   a corrupt slot                                  -> magenta    (y, 0, y)   128 0 128
 //   the out-of-range sentinel                       -> white      (y, y, y)   128 128 128
 //   a masked record (a frame of its own)            -> red        (y, 0, 0)   128 0 0
 //   a pool surface that is not a rig record         -> blue       (0, .3y, y) from the backend's green, y = 1.43: 0 109 255 (RGBA8 saturates)
 //   a joined record (a frame of its own)            -> green      (0, y, 0)   0 255 0: not dimmed, which a pixel with no slot is
-//   a stale slot the steady-detail rule keeps       -> yellow from the backend's green: 255 255 0 (accepted, but the view says what it IS)
+//   a stale slot the steady-detail rule KEEPS       -> yellow (y, y, 0) from the backend's green: 255 255 0 (accepted, but the view says what it IS;
+//                                                      pink is for the refused one: the same class, the class byte's bit 7 is the difference)
 //   a pixel with no engine slot                     -> a quarter of what it showed: the green's 0 64 0
 // Every output pixel is checked against a model of the finish (the 2 x 2 raster footprint under the output pixel's sample, the refused class among
 // them else the nearest texel's), and the named probes against the colours above.
@@ -32,6 +33,10 @@
 //   paintView back to the HDR route's alone   -> the same, and "the view makes the class texture on the copy route"
 //   the finish paints whether the view asked  -> "view off ... unpainted" and "view off again"
 //   paintView for EDVR's TAA too              -> "TAA: ... makes no class texture"
+//   the stale paint's bit-7 branch out (the shader paints every stale slot yellow)
+//                                             -> "a REFUSED stale slot is pink" and "every output pixel is the finish's colour painted by its class"
+//   the branch inverted                       -> those two and "a stale slot the steady-detail rule KEEPS is painted yellow"
+//   every stale slot pink                     -> "a stale slot the steady-detail rule KEEPS is painted yellow" alone: the pair pins the bit, not a colour
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -59,7 +64,10 @@ inline void paintModel(double (&c)[3], unsigned v) {
     if (kind == kFlatMonoClassJoined) { p[0] = 0; p[1] = y; p[2] = 0; }
     else if (kind == kFlatMonoClassMasked) { p[0] = y; p[1] = 0; p[2] = 0; }
     else if (kind == kFlatMonoClassNotRig) { p[0] = 0; p[1] = .3 * y; p[2] = y; }
-    else if (kind == kFlatMonoClassStale) { p[0] = y; p[1] = y; p[2] = 0; }
+    else if (kind == kFlatMonoClassStale) {   // bit 7: refused (pink, the pixel shows the raw frame); clear: kept by the steady-detail rule (yellow)
+        if (v & 0x80u) { p[0] = y; p[1] = .4 * y; p[2] = .7 * y; }
+        else { p[0] = y; p[1] = y; p[2] = 0; }
+    }
     else if (kind == kFlatMonoClassCorrupt) { p[0] = y; p[1] = 0; p[2] = y; }
     else if (kind == kFlatMonoClassStaleStamp) { p[0] = y; p[1] = .5 * y; p[2] = 0; }
     else if (kind == kFlatMonoClassWeapon) { p[0] = 0; p[1] = y; p[2] = y; }
@@ -173,7 +181,7 @@ inline void sdkScenario(steadygpu::Rig& r, edvr::FlatMonoResolveMode mode, const
     check(flatMonoResolveTestRefusalResources(), msg("copy-route view (%s), view on: the view makes the class texture on the copy route", name));
     check(worstDiff(got, finishModel(classesA(false), D, true, raw, false)) <= 2,
           msg("copy-route view (%s), view on: every output pixel is the finish's colour painted by its class", name));
-    check(pixelIs(got, D, outX(5), outX(5), 128, 128, 0), msg("copy-route view (%s), view on: a refused stale slot is yellow, painted from the raw grey (128 128 0), not the raw grey", name));
+    check(pixelIs(got, D, outX(5), outX(5), 128, 51, 90), msg("copy-route view (%s), view on: a REFUSED stale slot is pink, painted from the raw grey (128 51 90), not yellow and not the raw grey", name));
     check(pixelIs(got, D, outX(2), outX(2), 128, 0, 128), msg("copy-route view (%s), view on: a corrupt slot is magenta (128 0 128)", name));
     check(pixelIs(got, D, outX(13), outX(3), 128, 128, 128), msg("copy-route view (%s), view on: the out-of-range sentinel is white (128 128 128)", name));
     check(pixelIs(got, D, outX(10), outX(2), 0, 109, 255), msg("copy-route view (%s), view on: a pool surface that is not a rig record is blue, painted from the backend's green (0 109 255)", name));
@@ -191,13 +199,14 @@ inline void sdkScenario(steadygpu::Rig& r, edvr::FlatMonoResolveMode mode, const
               pixelIs(got, D, outX(8), outX(8), 0, 255, 0) && pixelIs(got, D, outX(0), outX(0), 0, 64, 0),
           msg("copy-route view (%s), view on: a joined record is green (0 255 0), not dimmed as a pixel with no slot is (0 64 0)", name));
 
-    // The steady-detail rule keeps the stale block (last frame's depth confirms it): accepted, so the backend's green, and still painted yellow.
+    // The steady-detail rule keeps the stale block (last frame's depth confirms it): accepted, so the backend's green, and painted YELLOW, not
+    // pink: the class is the same stale slot, but its history was not refused (bit 7 clear). The pink block above is the refused one.
     layoutA();
     r.f.steadyDetail = true;
     frame("the steady-detail settle frame (view on)", true, false, got);
     frame("a stale block the steady-detail rule keeps (view on)", true, false, got);
     check(worstDiff(got, finishModel(classesA(true), D, true, raw, false)) <= 2 && pixelIs(got, D, outX(5), outX(5), 255, 255, 0),
-          msg("copy-route view (%s), view on: a stale slot the steady-detail rule keeps is painted yellow from the backend's green (255 255 0): the view says what the pixel is", name));
+          msg("copy-route view (%s), view on: a stale slot the steady-detail rule KEEPS is painted yellow from the backend's green (255 255 0), not pink: the view says what the pixel is", name));
     r.f.steadyDetail = false;
 
     // The view off again, after frames that painted: unpainted (the class texture exists but the frame does not ask).

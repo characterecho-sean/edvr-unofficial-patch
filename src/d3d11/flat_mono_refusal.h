@@ -94,13 +94,13 @@ struct FlatMonoRefusalCensus {
 
 // The refusal view's palette (the eye path's, temporal_shader_source.h motion_source, painted by the HDR finish before the game's
 // tone pass: it scales each colour by the pixel's own level, so the hue survives the tone but the absolute colour does not).
-//   green  1 joined      red  2 masked      blue 3 not a rig record      yellow 4 stale slot
+//   green  1 joined      red  2 masked      blue 3 not a rig record      yellow 4 stale slot kept   pink 4 stale slot refused
 //   magenta 5 corrupt    orange 6 stale stamp   cyan 12 weapon           white  any other refusal (7..11, 13)
 //   dimmed to a quarter  no engine slot (0)
 // The names below are for the log line.
 inline const char* flatMonoViewLegend() {
-    return "green exact record, red masked record, blue pool surface (camera term), yellow stale slot, magenta corrupt slot, "
-           "orange stale stamp, cyan first-person, white any other refusal, dimmed no engine slot";
+    return "green exact record, red masked record, blue pool surface (camera term), yellow stale slot (kept), pink stale slot refused "
+           "(shown raw), magenta corrupt slot, orange stale stamp, cyan first-person, white any other refusal, dimmed no engine slot";
 }
 
 }  // namespace edvr
