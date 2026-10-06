@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** last FLOWN 4bb67d35: TAA works; configured SDK AA refuses (103).
-  Inert correction: 17 hardware cases PASS, NOT FLOWN; history demand open (103).
+- **State:** 32db3d2d FLOWN: configured SDK AA still refuses (103).
+  Inert refusal gone; selected-H first failures are history-budget (103).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** account for history-budget demand and differing live OM state (103).
+- **Next:** account for history records/bytes and provisional demand (103).
   Retain 102's color-clear fix; no per-weapon table; preserve Epic settings.
   Building shimmer is unqualified. Preserve 87's native FSR comparison and
   section 83's remaining matrix and open items.
@@ -12233,3 +12233,70 @@ fingerprint is
 independently verified against the source and compiler context. Promotion will
 use the receipt-guarded clean DLL build and preserve Epic's settings and DLSS
 runtime. No additional flight was required for this correction.
+
+### 2026-10-05: inert correction flown; history budget still blocks SDK AA
+
+Sean reports DLAA/FSR still appear off and took NumLock. The sanctioned log
+tool verifies Epic `edvr_gfx_20261005_195534.log` as `v0.18.2-16-g32db3d2d`,
+linked 2026-10-06 01:52:33 UTC. The SDK runtime summary's configured string is
+`dlss`; retain that distinction from the UI report. NumLock appears at
+19:58:25.267 as a general capture, with 1,017 accepted and 2,500 refused
+frames. These totals span mode changes; they do not demonstrate SDK backend
+success.
+
+The first-failure samples now name VS `F516BF0201303B87`, PS
+`B40B0462256E31C2`, format 23, stage `history`, reason `history-budget`. At
+19:58:25.267 the selected-H depth matches the refusing depth, with two
+candidates against cap four and no overflow. Four selected-H samples name the
+same budget refusal; a fifth sample is in TAA mode with no selected H. No
+inert-state or original-projection-unproven refusal appears. At 19:58:40.539
+there are 2,535 H attempts, zero qualified, 119,843 actual GPU identity
+submissions, and zero marker refusals. The 1,017 treated frames in the route
+report include TAA; they are not evidence that the configured SDK ran.
+
+Ruled out: the inert admission correction alone restores SDK AA in this scene,
+because this verified flight removes that first refusal but still qualifies no
+H, with selected-H failures now at history allocation.
+
+Source trace: before world naming, the domain planner classifies proven pool
+draws as foreign and submits their original vertex captures immediately. Each
+depth candidate owns a history with 64 records and 32 MiB limits; the budget
+reason combines those two limits. Records remain for current/prior history and
+retire when both parities are more than two frames old. The current per-frame
+draw list also has a 64-draw bound, with a different refusal string. Existing
+offline workloads prove the bounds and retirement operate as implemented; they
+do not prove the scene's demand fits them.
+
+Open hypotheses: record exhaustion from provisional or legitimate foreign
+draws (record count and camera-domain occupancy discriminate); byte exhaustion
+from large captured meshes (retained bytes and requested vertex count
+discriminate); transient geometry churn across retained frames
+(current/prior/older record counts and reuse discriminate). The log omits
+these allocation fields, so it cannot select among them. Candidate overflow,
+marker failure and the prior inert first refusal are not the sampled blocker.
+Do not raise either budget or exempt a weapon shader from this reason alone.
+Preserve the offline bench and qualify the scheduling path before requesting
+another flight.
+
+The adapter has another bound before the history allocator: 64 successful
+captures in the current frame refuse the next as `foreground-draw-bound`.
+Therefore a same-frame 64+1 workload cannot reproduce this flight's
+`history-budget` through the adapter. A discriminating reconstructed
+regression must retain prior-frame records: for example, 40 old records plus
+24 new pre-world captures leave the current list below its bound but exhaust
+the history's record capacity before a late foreign draw. Small meshes isolate
+records from bytes. An integrated classifier/adapter test of this ordering can
+expose scheduling sensitivity, but cannot establish which occupants caused the
+live refusal. The 11,249 submitted captures after a sticky refusal explain
+`submitted - captured`; they are next-frame warming, not unexplained failed
+allocations.
+
+Another offline discriminator is known VB/IB mutation. The history helper
+invalidates matching record parities immediately but reclaims their allocation
+only at the next advance. If a previous-only geometry is invalidated after
+beginFrame, the adapter erases its previous draw without a current-frame
+failure, while invalid records still consume capacity for later capture. This
+is a provable ordering edge, not an established cause of this flight. An
+offline test can distinguish it from legitimate retained history; a live
+receipt would need invalid-record occupancy and mutation counts. Any shared
+reclamation change must preserve active VR consumers' capture references.
