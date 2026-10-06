@@ -12973,3 +12973,18 @@ ask for the view on the copy route are left to the flight.
 The view (Sean asked, after the roof painted yellow): a stale slot the depth
 check refused now paints pink, a kept one stays yellow. Before, both were
 yellow and only the census told them apart.
+
+Committed 7cc82978 on d923d5f5 and the merge of main (588a443c, which
+brought 2d8e6761's TAA history depth). Full build green, receipt
+`342298b1`; bench hardware 50/50 PASS (the six supersampled cells
+included), WARP 25 PASS, 25 UNSUPPORTED, 0 FAIL. `--dll-only` passed. The
+first install was refused ("native staging requires a proven stopped game")
+while Elite was running; once it had closed, the same probe passed, and the
+Epic flat install verified `v0.18.2-38-g7cc82978`, SHA256
+8F958B9B574146DD..., `edvr-flat.ini` unchanged.
+
+Next flight, on foot at the roof: SS 1.0 DLAA with the view (pink on the
+edge while walking is a refused stale slot); SS 1.5 DLAA (H must qualify,
+`backend` above 0 on the `flat hdr route 5s` line, no spatial fallback); SS
+0.75 DLSS with the view (it now paints on the copy route); EDVR's TAA
+standing still with the view off (2d8e6761's best-of-four); NumLock in each.
