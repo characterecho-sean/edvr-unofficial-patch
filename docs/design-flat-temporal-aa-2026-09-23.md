@@ -13194,3 +13194,19 @@ roughly regular rhythm. That is the census's 4 to 7% weapon-refused, and the
 flicker between resolved and raw on the gun and sight is the lost AA Sean
 saw. The cause is in the first-person motion history (the map's w is not 1
 on most frames); a planning pass is on it.
+
+The coils behind the sight (Sean): at SS 0.75 the weapon still flickers
+between white and cyan, but aiming over the coils no longer costs them AA;
+on the HDR route it did. The difference is the late-overlay isolation, which
+runs on the HDR route only (54ea9cee plans no overlay on the copy route).
+`flat late overlay 5s` while aiming at SS 1.0: planned-draws 2,104 to 6,188 a
+window (about 14 a frame), against 644 to 1,848 in hipfire, with nearly every
+frame isolated. finishHdr shows the raw frame wherever an overlay draw
+covered, transparent lens and glow quads included, so the world through the
+sight went raw. Two separate issues, then: the weapon's own history (both
+routes), and the overlay composite (HDR route).
+
+Overlay fix (building): at covered pixels, the anti-aliased world plus the
+overlay's own contribution (raw H with the overlay minus clean H), in place
+of the raw frame. A covered and refused pixel keeps today's raw value; a
+transparent overlay adds nothing.
