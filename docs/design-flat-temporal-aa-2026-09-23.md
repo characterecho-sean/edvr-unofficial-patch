@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** 0ed050a1 FLOWN: DLAA resolves still edges, refusals 0.0145%,
-  edges break up in motion; 84f6a147 on Epic, NOT FLOWN (104).
+- **State:** 84f6a147 FLOWN: DLAA/FSR work at the settlement; inputs verified
+  (refusals, jitter, motion precision); slight shimmer is the content (104).
 - **Temporary key:** `experimental.flat_sdk_local_reset` (on = refused pixels
   raw; off = backend kept); allowed in flat from 84f6a147. Remove at arc close.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
@@ -35,8 +35,8 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** motion at the roof: walking past it against standing and turning,
-  DLAA/FSR against EDVR's TAA; log row 275's size (104). Retain 102's
+- **Next:** close 104 (local-reset key: Sean decides its value); TAA's
+  single-texel depth check at silhouettes is a separate item. Retain 102's
   color-clear fix; no per-weapon table; preserve Epic settings, 87's native
   FSR comparison, 83's open items and high-G motion; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
@@ -12757,6 +12757,50 @@ the same screen speed; NumLock while walking; local reset on against off
 while walking; EDVR's TAA on the same walk. Read: `flat camera origin` (a
 float spacing near the walking step rules (b) in), the census in motion, and
 which movement breaks the edge.
+
+### 2026-10-06: 84f6a147 flown; inputs verified, residual is the content
+
+Flight `edvr_gfx_20261006_092649.log`, verified `v0.18.2-27-g84f6a147`. Both
+keys now read and logged: the view on at start, local reset toggled on at
+09:29:06 and off at 09:29:25 while walking. DLAA (3840x2160), then TAA.
+
+Sean: "definitely looks much better"; walking, DLAA is calmer but the roof
+edge still shimmers slightly; no difference between local reset on and off.
+EDVR's TAA shimmers at the roof's lower-left corner standing still.
+
+- The view paints the roof yellow: a stale slot (an unkeyed surface over a
+  keyed one) taking the camera term once last frame's depth confirms it.
+  Stale-kept: 1.8 to 3.0 million pixels a frame.
+- Census while walking (DLAA): refused 0.006% to 1.4% a window; the large
+  windows are `range` (motion leaving the screen while turning, up to 116,000
+  pixels a frame at the borders); stale refused at most about 5,600 a frame,
+  sentinel about 1,000 (likely the stars: a slot on a depth-0 pixel).
+- `flat camera origin`: row 275 is a local position, 1.8 to 63.5 m from its
+  origin; float32 spacing at most 3.8e-6 m against walking steps of 0.03 to
+  0.26 m a frame. Standing, the step is 0 or about 2e-7 m.
+
+Ruled out: float32 quantisation of the camera term's translation, because
+row 275 stays under 64 m, where the spacing (3.8e-6 m) is four orders of
+magnitude below a walking step.
+
+Ruled out: the local reset as the shimmer, because toggling it while walking
+changed nothing Sean could see.
+
+TAA standing still: the enlarged screenshot shows the roof's thin top bevel
+beaded (alternate bright and dark pixels) and the corner's edge pixels
+unresolved. EDVR's `taa()` checks history depth against the single nearest
+texel (`oldQ`) with a 1% tolerance. At a jittered silhouette that texel is
+roof one frame and sky the next, so the edge pixels lose history on
+alternate frames. The steady-detail check solved the same problem with the
+best of four texels; the TAA kernel never got it. A TAA-only finding: the
+SDK backends do not use that check. Not changed here.
+
+What remains with DLAA is a bright, sub-pixel, view-dependent (specular)
+bevel against a black sky, shimmering slightly in motion. With jitter on
+every surface, motion verified, refusals negligible and translation exact, no
+EDVR input is left to correct; the backends' own handling of such a line is
+the limit. Rendering above native (Elite's supersampling with DLAA on the
+HDR route, which takes R >= D) is the known way to reduce it, at GPU cost.
 
 Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
 motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
