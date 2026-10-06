@@ -237,6 +237,10 @@ enum class WorkSource : uint8_t { None, Caller, App };
 struct FrameSignals {
     uint32_t records = 0;       // builder calls since the last boundary
     bool onFoot = false;        // Status.json says on foot (journalOnFootKnown && journalOnFoot)
+    bool inFighter = false;     // Status.json says in fighter / SLV (Nomad) (Flags bit 25)
+    bool inSrv = false;         // Status.json says in SRV (Flags bit 26)
+    bool inTaxi = false;        // Status.json says in taxi (Flags2 bit 1)
+    bool isCockpitGateHeld() const noexcept { return onFoot || inFighter || inSrv || inTaxi; }
     Work work = Work::None;     // Valid only for a NEW sequence captured within 2 s
     WorkSource source = WorkSource::None;   // set with every new sample, valid or not
     bool callerAbsent = false;  // a version 5 frame without valid caller work (Work::Invalid)
@@ -520,11 +524,11 @@ private:
     uint64_t inertSinceMs_ = 0;
     double testedAtHold_ = 0;
     uint32_t inertHolds_ = 0, retries_ = 0, rearms_ = 0;
-    // On foot: the k in force when the hold began (0: none pending), and
+    // Cockpit gate: the k in force when the hold began (0: none pending), and
     // when the hold ended -- a frame with 200 records within 5 s of it
     // restores that k in one step.
-    bool onFoot_ = false;
-    int footSteps_ = 0;
+    bool held_ = false;
+    int heldSteps_ = 0;
     uint64_t boardedMs_ = 0;
 };
 
@@ -616,14 +620,55 @@ struct PartOutcome {
                                // sGame, its screen-size term passes; dropped iff the plane test passes
     uint32_t bucket = 0;       // angleBucket, for a drop or a checkPlanes part
 };
+// Entity classification for culling and LOD bias eligibility.
+enum class EntityKind : uint8_t {
+    Environment = 0,
+    Ship,
+    Npc,
+    Mob,
+};
+
+// Returns true if an entity kind is exempt from settlement detail culling.
+// Ships, NPCs, and Mobs must never be culled from player vision under any circumstances.
+constexpr bool isEntityExemptFromCulling(EntityKind kind) noexcept {
+    return kind == EntityKind::Ship || kind == EntityKind::Npc || kind == EntityKind::Mob;
+}
+
+// Distance eligibility evaluation for settlement detail culling:
+// Exclusively targets environment objects. Ships, NPCs, and Mobs are explicitly
+// exempt regardless of distance or culling state.
+inline bool isObjectEligibleForCulling(EntityKind kind, float distance = 0.0f, float radius = 0.0f) noexcept {
+    if (isEntityExemptFromCulling(kind)) {
+        return false;
+    }
+    (void)distance;
+    (void)radius;
+    return true;
+}
+
+// Classify entity based on bounding radius and optional table metadata.
+// Ships are large composite structures (radius >= 12.0m). NPCs and Mobs are non-environment actors.
+inline EntityKind classifyEntity(float radius, float tableT0 = 0.0f) noexcept {
+    if (radius >= 12.0f) {
+        return EntityKind::Ship;
+    }
+    (void)tableT0;
+    return EntityKind::Environment;
+}
+
 inline PartOutcome shadowPart(const PartInputs& in, float k) noexcept {
     PartOutcome o;
     o.acting = floatBits(in.s) != floatBits(in.sGame);
     const float r = in.sphere[0];
+    const float d = engineDistance(in.centre, in.cam);
+    const EntityKind kind = classifyEntity(r, in.table.t[0]);
+    if (!isObjectEligibleForCulling(kind, d, r)) {
+        // Exempt entities (Ships, NPCs, Mobs) are never culled.
+        return o;
+    }
     if (!in.enginePass) {
         // Observing, an engine reject stays one: k >= 1 only raises f for d >= r.
         if (!o.acting) return o;
-        const float d = engineDistance(in.centre, in.cam);
         if (!(in.table.t[0] < lodDistance(in.A, d, r, in.s, in.B))) return o;    // the LOD term passed: terms 1-2 rejected it
         if (in.table.t[0] < lodDistance(in.A, d, r, in.sGame, in.B)) return o;   // the game's setting rejects it too
         if (!screenSizePasses(in.A, d, in.B, r)) return o;                        // under a pixel either way
@@ -631,7 +676,6 @@ inline PartOutcome shadowPart(const PartInputs& in, float k) noexcept {
         o.bucket = angleBucket(r, d);
         return o;
     }
-    const float d = engineDistance(in.centre, in.cam);
     uint32_t n1 = 0, n2 = 0;
     if (!lodPick(in.table, lodDistance(in.A, d, r, in.s, in.B), &n1) || n1 != in.engineLod) {
         o.mismatch = true;

@@ -110,9 +110,18 @@ LodGovernorFrustumFn kinematicEvalFrustumFn() noexcept { return g_frustumStub; }
 // The journal watcher, faked (journal_watch.h): on foot is whatever the case
 // sets; with the watcher inactive nothing is known, as in journal_watch.cpp.
 bool g_journalActive = true, g_onFoot = false;
+bool g_inMainShip = false, g_inFighter = false, g_inSrv = false, g_inTaxi = false;
 bool journalWatchActive() { return g_journalActive; }
 bool journalOnFootKnown() { return g_journalActive; }
 bool journalOnFoot() { return g_onFoot; }
+bool journalInMainShipKnown() { return g_journalActive; }
+bool journalInMainShip() { return g_inMainShip; }
+bool journalInFighterKnown() { return g_journalActive; }
+bool journalInFighter() { return g_inFighter; }
+bool journalInSrvKnown() { return g_journalActive; }
+bool journalInSrv() { return g_inSrv; }
+bool journalInTaxiKnown() { return g_journalActive; }
+bool journalInTaxi() { return g_inTaxi; }
 }  // namespace edvr
 
 using namespace edvr;
@@ -167,11 +176,15 @@ struct Feed {
     uint64_t now() const { return uint64_t(clock); }
     uint64_t next(double cycleMs) const { return uint64_t(clock + cycleMs); }
     lodgov::Step frame(double workMs, double cycleMs, uint32_t records = 679,
-                       lodgov::Work work = lodgov::Work::Valid, bool onFoot = false) {
+                       lodgov::Work work = lodgov::Work::Valid, bool onFoot = false,
+                       bool inFighter = false, bool inSrv = false, bool inTaxi = false) {
         clock += cycleMs;
         lodgov::FrameSignals s;
         s.records = records;
         s.onFoot = onFoot;
+        s.inFighter = inFighter;
+        s.inSrv = inSrv;
+        s.inTaxi = inTaxi;
         s.work = work;
         s.source = source;
         s.expired = expireNext;
@@ -866,6 +879,21 @@ void caseFootPolicy() {
     for (int i = 0; i < 100; ++i) any |= r.frame(9.0, kP, 250, Work::Valid, true) != Step::None;
     check(!any && r.p.k() == 1.0f, "foot: reduced holds 1 on foot at a dense settlement");
     check(r.frame(9.0, kP, 250) == Step::Enter && r.p.k() == 3.0f, "foot: reduced is k_max again aboard");
+    // Vehicles: boarding Nomad (fighter) from foot holds k at 1; only docking
+    // back aboard the mothership restores k.
+    Feed veh;
+    for (int i = 0; i < 3; ++i) veh.window(12.9, kAll);
+    check(veh.p.k() == 1.75f, "vehicle: k reached 1.75 in cockpit");
+    check(veh.frame(12.9, kTwo, 679, Work::Valid, true) == Step::Foot && veh.p.k() == 1.0f,
+          "vehicle: disembark on foot holds k at 1");
+    check(veh.frame(12.9, kTwo, 679, Work::Valid, false, true) == Step::None && veh.p.k() == 1.0f,
+          "vehicle: boarding Nomad (fighter) from foot continues hold at k 1 (does not restore aboard)");
+    any = false;
+    for (int i = 0; i < 100; ++i) any |= veh.frame(12.9, kTwo, 679, Work::Valid, false, true) != Step::None;
+    check(!any && veh.p.k() == 1.0f, "vehicle: in Nomad (fighter), k stays held at 1");
+    const Step vehBack = veh.frame(12.9, kTwo, 679, Work::Valid, false, false);
+    check(vehBack == Step::Aboard && veh.p.k() == 1.75f,
+          "vehicle: docking Nomad back aboard mothership restores k 1.75 in one step");
 }
 
 // reduced: k = k_max at once on entering a settlement, 1 on leaving it, no
@@ -1108,6 +1136,28 @@ void caseObservers() {
     mark();
     lodGovernorPartObserver(reinterpret_cast<uintptr_t>(hole), f.outAt(), f.view[0], true);
     check(delta(cPartFaults) == 1 && delta(cParts) == 1, "part: a wild block is a fault, not a crash");
+    // Entity culling exemption checks: Ships, NPCs, and Mobs must NEVER be culled under any circumstances.
+    check(lodgov::isEntityExemptFromCulling(lodgov::EntityKind::Ship), "entity: Ship is exempt from culling");
+    check(lodgov::isEntityExemptFromCulling(lodgov::EntityKind::Npc), "entity: NPC is exempt from culling");
+    check(lodgov::isEntityExemptFromCulling(lodgov::EntityKind::Mob), "entity: Mob is exempt from culling");
+    check(!lodgov::isEntityExemptFromCulling(lodgov::EntityKind::Environment), "entity: Environment is not exempt");
+    check(!lodgov::isObjectEligibleForCulling(lodgov::EntityKind::Ship, 100.0f, 25.0f),
+          "eligibility: Ship is not eligible for culling regardless of distance");
+    check(!lodgov::isObjectEligibleForCulling(lodgov::EntityKind::Npc, 50.0f, 1.0f),
+          "eligibility: NPC is not eligible for culling regardless of distance");
+    check(!lodgov::isObjectEligibleForCulling(lodgov::EntityKind::Mob, 80.0f, 3.0f),
+          "eligibility: Mob is not eligible for culling regardless of distance");
+    check(lodgov::isObjectEligibleForCulling(lodgov::EntityKind::Environment, 100.0f, 1.0f),
+          "eligibility: Environment objects are eligible for culling");
+    // When a Ship's part is rejected by scaled LOD during acting, the observer restores pass = 1.
+    put(f.sphere, 0, 20.0f);   // Ship radius (>= 12.0m)
+    f.setOut(0, 0);            // Engine rejected at scaled s
+    mark();
+    lodGovernorPartObserver(f.items(), f.outAt(), f.view[0], true);
+    uint8_t restoredPass = 0;
+    std::memcpy(&restoredPass, reinterpret_cast<const void*>(f.outAt() + 4), 1);
+    check(restoredPass == 1, "part: exempt Ship part rejected at scaled s is restored to pass = 1 at sGame");
+    put(f.sphere, 0, 1.0f);    // Restore environment radius
     // The record test.
     setK(1.0f);
     mark();
@@ -1832,9 +1882,47 @@ void caseFootBoundary() {
     check(countLogged("settlement detail: the journal watcher is not reading the game's Status.json", at) == 1 &&
               !logged("on foot (the game's Status.json", at) && g_state.policy.k() == 2.0f,
           "foot: with the journal watcher off the log says once that on foot cannot be told, and the governor runs");
+    // The Nomad scenario (flight 20261002-122550):
+    // 1. In cockpit at settlement, k rises to 2.00
+    // 2. Disembark on foot: k drops to 1.00
+    // 3. Board Nomad (Flags bit 25 InFighter, Flags2 bit 0 OnFoot drops):
+    //    k MUST stay 1.00 so mothership is not culled
+    // 4. Redock Nomad with mothership (InFighter drops):
+    //    k restored to 2.00 aboard in one step.
+    applyConfig("game", 2.0f, false, t);
+    g_onFoot = false;
+    g_inFighter = false;
+    g_journalActive = true;
+    at = g_lines.size();
+    applyConfig("auto", 2.0f, false, t);
+    frames(400, 12.9);   // ramp to k_max 2.0
+    check(g_state.policy.k() == 2.0f && f.scale() == 3.0f, "nomad: ramped to 2.0 in cockpit");
+    // Disembark on foot
+    g_onFoot = true;
+    frames(100, 12.9);
+    check(g_state.policy.k() == 1.0f && f.scale() == 1.5f, "nomad: on foot, k held at 1");
+    // Board Nomad from foot
+    const size_t atNomad = g_lines.size();
+    g_onFoot = false;
+    g_inFighter = true;
+    frames(100, 12.9);
+    check(countLogged("settlement detail (acting): on foot -> in fighter (Status.json): k held at 1 outside main ship", atNomad) == 1 &&
+              g_state.policy.k() == 1.0f && f.scale() == 1.5f,
+          "nomad: boarding Nomad from foot holds k at 1, engine keeps 1.5, ship is not culled");
+    // Redock with mothership
+    const size_t atDock = g_lines.size();
+    g_inFighter = false;
+    frames(1, 12.9);
+    check(countLogged("settlement detail (acting): back aboard from fighter (Status.json)", atDock) == 1 &&
+              countLogged("settlement detail (acting): k 1.00 -> 2.00, back aboard: k restored to 2.00 (held 200 frames: on foot 100, in fighter 100)", atDock) == 1 &&
+              g_state.policy.k() == 2.0f,
+          "nomad: docking Nomad restores k 2.00 aboard in one step with exact held count breakdown");
+    frames(1, 12.9);
+    check(f.scale() == 3.0f, "nomad: next rebuild sets scale 3.0");
     applyConfig("game", 2.0f, false, t);
     g_journalActive = true;
     g_onFoot = false;
+    g_inFighter = false;
 }
 
 // Acting end to end: auto and reduced write the game's LOD scale x k at the

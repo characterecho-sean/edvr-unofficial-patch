@@ -337,17 +337,18 @@ Step Policy::update(const FrameSignals& s) noexcept {
     windowClosed_ = inertStarted_ = rearmed_ = false;
     camValid_ = s.camValid;
     if (s.camValid) std::memcpy(cam_, s.cam, sizeof(cam_));
-    // On foot (the game's Status.json, the flag the on-foot frame pacing keys
-    // on): the arc measured the cockpit only, so k is held at 1 exactly as
+    // Cockpit gate (Status.json: on foot, in fighter/Nomad, in SRV, in taxi):
+    // the arc measured the cockpit only, so k is held at 1 exactly as
     // outside a settlement -- at once, the settlement, the samples, the clock,
     // the window and its runs, the working point and a pending clamp
     // forgotten -- for as long as it lasts. The k in force when the hold
     // began is kept (a pending one survives a hold that begins at 1) for the
     // return aboard.
-    if (s.onFoot) {
-        if (!onFoot_) {
-            onFoot_ = true;
-            if (steps_ > 0) footSteps_ = steps_;
+    const bool hold = s.isCockpitGateHeld();
+    if (hold) {
+        if (!held_) {
+            held_ = true;
+            if (steps_ > 0) heldSteps_ = steps_;
         }
         clampPending_ = inSettlement_ = false;
         sparse_ = 0;
@@ -360,8 +361,8 @@ Step Policy::update(const FrameSignals& s) noexcept {
         }
         return Step::None;
     }
-    if (onFoot_) {   // aboard again: the 5 s in which the settlement may be found
-        onFoot_ = false;
+    if (held_) {   // aboard again: the 5 s in which the settlement may be found
+        held_ = false;
         boardedMs_ = s.nowMs;
     }
     // This boundary's cycle: the interval since the previous one, when that
@@ -465,12 +466,12 @@ Step Policy::update(const FrameSignals& s) noexcept {
     // (06:53: re-ramping from 1 in 0.25 steps after re-boarding flickered
     // every structure at each step); not found within 5 s, it starts from 1
     // as ever. reduced's Enter does its own.
-    if (footSteps_ > 0) {
+    if (heldSteps_ > 0) {
         if (fixed_ || s.nowMs - boardedMs_ > kAboardMs) {
-            footSteps_ = 0;
+            heldSteps_ = 0;
         } else if (inSettlement_ && s.records >= kSettlementRecords) {
-            const int to = footSteps_ < maxSteps_ ? footSteps_ : maxSteps_;
-            footSteps_ = 0;
+            const int to = heldSteps_ < maxSteps_ ? heldSteps_ : maxSteps_;
+            heldSteps_ = 0;
             if (to > steps_) {
                 steps_ = to;
                 return Step::Aboard;
@@ -974,6 +975,11 @@ bool shadowRecord(uintptr_t ctx, uintptr_t nibbles, uint32_t eyes, float k, Reco
             o->tableRange = true;
             return true;
         }
+        const lodgov::EntityKind entityKind = lodgov::classifyEntity(radius, table.t[0]);
+        if (!lodgov::isObjectEligibleForCulling(entityKind, 0.0f, radius)) {
+            // Ships, NPCs, and Mobs are explicitly exempt from culling regardless of distance or culling state.
+            return true;
+        }
         const uint32_t eyeBit[2] = {eyes & 0xFFu, (eyes >> 8) & 0xFFu};
         uint64_t eyeMask = 0;
         for (uint32_t e = 0; e < 2; ++e)
@@ -1068,6 +1074,34 @@ bool readViews(uintptr_t ctx, ViewInfo* views, uint32_t* count) noexcept {
 // --- The runtime state (the caller thread's, and configure's, under g_mutex) -------
 enum class Mode { Game, Auto, Reduced };
 
+enum class CockpitGateState : uint8_t {
+    Cockpit,    // in main ship cockpit
+    OnFoot,     // on foot
+    InFighter,  // in fighter / SLV (Nomad)
+    InSrv,      // in SRV
+    InTaxi      // in taxi / shuttle
+};
+
+inline const char* cockpitGateStateName(CockpitGateState s) noexcept {
+    switch (s) {
+    case CockpitGateState::OnFoot: return "on foot";
+    case CockpitGateState::InFighter: return "in fighter";
+    case CockpitGateState::InSrv: return "in SRV";
+    case CockpitGateState::InTaxi: return "in taxi";
+    default: return "in cockpit";
+    }
+}
+
+inline const char* cockpitGateStateVehicleName(CockpitGateState s) noexcept {
+    switch (s) {
+    case CockpitGateState::OnFoot: return "on foot";
+    case CockpitGateState::InFighter: return "fighter";
+    case CockpitGateState::InSrv: return "SRV";
+    case CockpitGateState::InTaxi: return "taxi";
+    default: return "vehicle";
+    }
+}
+
 struct Window {
     uint64_t startMs = 0;
     uint32_t frames = 0, denseFrames = 0, eyeFrames = 0;
@@ -1092,6 +1126,9 @@ struct Window {
     uint32_t upCoarse = 0;     // up steps of 0.25 (inside up)
     uint32_t aboard = 0;       // the k from before on foot restored aboard
     uint32_t footFrames = 0;   // frames held at k 1 on foot
+    uint32_t fighterFrames = 0; // frames held at k 1 in fighter (Nomad)
+    uint32_t srvFrames = 0;     // frames held at k 1 in SRV
+    uint32_t heldFrames = 0;    // frames held at k 1 outside main ship
     uint64_t sum[kCounters] = {};
     uint32_t dropMax[kClasses] = {};
     uint32_t notDispatchedMax = 0;
@@ -1137,8 +1174,13 @@ struct State {
     float eyeCam[3] = {};
     bool standDownLogged = false;   // process lifetime, like the stand-down
     bool overflowLogged = false;
-    // The cockpit gate: on foot as the last boundary saw it, since when, for
-    // how many frames; and whether the missing journal watcher was said.
+    // The cockpit gate: on foot, in fighter (Nomad), in SRV or in taxi as
+    // the last boundary saw it, since when, for how many frames; and whether
+    // the missing journal watcher was said.
+    CockpitGateState gateState = CockpitGateState::Cockpit;
+    CockpitGateState lastHeldState = CockpitGateState::Cockpit;
+    uint64_t gateStartMs = 0;
+    uint32_t gateFrames = 0;
     bool onFoot = false;
     uint64_t footStartMs = 0;
     uint32_t footFrames = 0;
@@ -1443,6 +1485,12 @@ void logSummary(State& st, uint64_t nowMs) {
     if (w.kHigh <= 1.0f) {
         if (w.footFrames >= w.frames)
             std::snprintf(stuck, sizeof(stuck), "; k stayed 1: on foot the whole window (the governor is for the cockpit only)");
+        else if (w.fighterFrames >= w.frames)
+            std::snprintf(stuck, sizeof(stuck), "; k stayed 1: in fighter the whole window (the governor is for the cockpit only)");
+        else if (w.srvFrames >= w.frames)
+            std::snprintf(stuck, sizeof(stuck), "; k stayed 1: in SRV the whole window (the governor is for the cockpit only)");
+        else if (w.heldFrames >= w.frames)
+            std::snprintf(stuck, sizeof(stuck), "; k stayed 1: outside main ship the whole window (the governor is for the cockpit only)");
         else if (!w.recordsSum)
             std::snprintf(stuck, sizeof(stuck), "; k stayed 1: no draw-item builder calls (no settlement records, or the "
                           "builder hook ran nothing)");
@@ -1522,16 +1570,23 @@ void logSummary(State& st, uint64_t nowMs) {
         std::snprintf(enters, sizeof(enters), ", %u to k_max", w.enters);
     else if (w.aboard)
         std::snprintf(enters, sizeof(enters), ", %u restored aboard", w.aboard);
+    char extraHeld[64] = "";
+    if (w.fighterFrames > 0 && w.srvFrames > 0)
+        std::snprintf(extraHeld, sizeof(extraHeld), ", in fighter %u, in SRV %u", w.fighterFrames, w.srvFrames);
+    else if (w.fighterFrames > 0)
+        std::snprintf(extraHeld, sizeof(extraHeld), ", in fighter %u", w.fighterFrames);
+    else if (w.srvFrames > 0)
+        std::snprintf(extraHeld, sizeof(extraHeld), ", in SRV %u", w.srvFrames);
     Log::get().note(
         "settlement detail (%s): %.1f s, %u frames: k now %.2f, effective s x k %s (window %.2f..%.2f of max %.2f; %u "
-        "up (%u by 0.25), %u down, %u resets, %u clamps%s; held on foot %u frames); builder records/frame %.1f (max "
+        "up (%u by 0.25), %u down, %u resets, %u clamps%s; held on foot %u frames%s); builder records/frame %.1f (max "
         "%u, >= 200 on %u frames, 150-199 in a settlement on %u), part tests/frame %.1f (max %u); frame work = %s: "
         "%.2f ms mean vs period %.2f ms over %u samples (over by > 0.30 ms: %u, under by > 1.00 ms: %u, invalid %u, "
         "caller work absent %u; no fresh timing on %u frames, %u expiries); LOD scale: game s %s, held %s (k %.2f); "
         "setter calls %u (scaled %u) on %u pointers (called with %u; builder contexts %u); implausible %u; faults %u; "
         "%s%s%s.",
         tag, double(nowMs - w.startMs) / 1000.0, w.frames, kNow, effective, w.kLow, w.kHigh, st.policy.kMax(), w.up,
-        w.upCoarse, w.down, w.resets, w.clamps, enters, w.footFrames, perFrame(w.recordsSum, w.frames), w.recordsMax,
+        w.upCoarse, w.down, w.resets, w.clamps, enters, w.footFrames, extraHeld, perFrame(w.recordsSum, w.frames), w.recordsMax,
         w.denseFrames, w.bandFrames, perFrame(w.partsSum, w.frames), w.partsMax, source,
         w.workSamples ? w.workSum / w.workSamples : 0.0, w.workSamples ? w.periodSum / w.workSamples : 0.0,
         w.workSamples, w.workOver, w.workUnder, w.workInvalid, w.callerAbsent, w.staleFrames, w.expiries, gameText,
@@ -1655,8 +1710,25 @@ void logStep(State& st, lodgov::Step step, float from, const lodgov::FrameSignal
                       st.policy.upHeld() ? ", held to k_max" : "",
                       st.policy.retrying() ? "; a retry while the lever is inert here" : "");
     } else if (step == lodgov::Step::Aboard) {
-        std::snprintf(why, sizeof(why), "back aboard: k restored to %.2f (held on foot %u frames)",
-                      double(st.policy.k()), st.footFrames);
+        if (st.lastHeldState == CockpitGateState::OnFoot && st.footFrames == st.gateFrames) {
+            std::snprintf(why, sizeof(why), "back aboard: k restored to %.2f (held on foot %u frames)",
+                          double(st.policy.k()), st.footFrames);
+        } else if (st.lastHeldState == CockpitGateState::InFighter && st.footFrames == 0) {
+            std::snprintf(why, sizeof(why), "back aboard: k restored to %.2f (held in fighter %u frames)",
+                          double(st.policy.k()), st.gateFrames);
+        } else if (st.lastHeldState == CockpitGateState::InSrv && st.footFrames == 0) {
+            std::snprintf(why, sizeof(why), "back aboard: k restored to %.2f (held in SRV %u frames)",
+                          double(st.policy.k()), st.gateFrames);
+        } else if (st.lastHeldState == CockpitGateState::InTaxi && st.footFrames == 0) {
+            std::snprintf(why, sizeof(why), "back aboard: k restored to %.2f (held in taxi %u frames)",
+                          double(st.policy.k()), st.gateFrames);
+        } else if (st.lastHeldState == CockpitGateState::InFighter && st.footFrames > 0) {
+            std::snprintf(why, sizeof(why), "back aboard: k restored to %.2f (held %u frames: on foot %u, in fighter %u)",
+                          double(st.policy.k()), st.gateFrames, st.footFrames, st.gateFrames - st.footFrames);
+        } else {
+            std::snprintf(why, sizeof(why), "back aboard: k restored to %.2f (held outside cockpit %u frames)",
+                          double(st.policy.k()), st.gateFrames);
+        }
     } else if (step == lodgov::Step::Restore && st.policy.restoredAfterKick()) {
         std::snprintf(why, sizeof(why), "restored k %.2f after a failed kick: the fifth second at k_max still had a "
                       "tenth or more of its cycles take two display slots as the CPU's (%u of %u); no kick for 60 s",
@@ -1777,6 +1849,9 @@ void frameBoundaryAt(uint64_t nowMs, double clockMs) {
     // on-foot frame pacing reads it (native_frame.cpp). Unknown -- menus, the
     // watcher off -- is not on foot.
     sig.onFoot = journalOnFootKnown() && journalOnFoot();
+    sig.inFighter = journalInFighterKnown() && journalInFighter();
+    sig.inSrv = journalInSrvKnown() && journalInSrv();
+    sig.inTaxi = journalInTaxiKnown() && journalInTaxi();
     if (!st.journalNoted && !journalWatchActive()) {
         st.journalNoted = true;
         Log::get().note("settlement detail: the journal watcher is not reading the game's Status.json "
@@ -1804,26 +1879,78 @@ void frameBoundaryAt(uint64_t nowMs, double clockMs) {
     g_kBits.store(toBits(k), std::memory_order_release);
     logWriteEvents(st);
     // One line per transition of the cockpit gate, never rate-limited.
-    if (sig.onFoot != st.onFoot) {
-        st.onFoot = sig.onFoot;
-        if (sig.onFoot) {
-            st.footStartMs = nowMs;
+    CockpitGateState newGateState = CockpitGateState::Cockpit;
+    if (sig.onFoot) newGateState = CockpitGateState::OnFoot;
+    else if (sig.inFighter) newGateState = CockpitGateState::InFighter;
+    else if (sig.inSrv) newGateState = CockpitGateState::InSrv;
+    else if (sig.inTaxi) newGateState = CockpitGateState::InTaxi;
+
+    if (newGateState != st.gateState) {
+        const CockpitGateState prevState = st.gateState;
+        if (prevState == CockpitGateState::Cockpit) {
+            // Entering a held state from cockpit
+            st.gateStartMs = nowMs;
+            st.gateFrames = 0;
             st.footFrames = 0;
-            Log::get().note("settlement detail (%s): on foot (the game's Status.json, the flag the on-foot frame "
-                            "pacing reads): k %.2f -> %.2f, held at 1 while on foot -- the governor is for the "
-                            "cockpit only; on foot is unmeasured.", modeTag(st), from, k);
+            st.footStartMs = nowMs;
+            if (newGateState == CockpitGateState::OnFoot) {
+                Log::get().note("settlement detail (%s): on foot (the game's Status.json, the flag the on-foot frame "
+                                "pacing reads): k %.2f -> %.2f, held at 1 while on foot -- the governor is for the "
+                                "cockpit only; on foot is unmeasured.", modeTag(st), from, k);
+            } else if (newGateState == CockpitGateState::InFighter) {
+                Log::get().note("settlement detail (%s): in fighter (Status.json Flags bit 25): k %.2f -> %.2f, held at 1 while "
+                                "outside main ship -- the governor is for the cockpit only; fighter is unmeasured.",
+                                modeTag(st), from, k);
+            } else if (newGateState == CockpitGateState::InSrv) {
+                Log::get().note("settlement detail (%s): in SRV (Status.json Flags bit 26): k %.2f -> %.2f, held at 1 while "
+                                "outside main ship -- the governor is for the cockpit only; SRV is unmeasured.",
+                                modeTag(st), from, k);
+            } else if (newGateState == CockpitGateState::InTaxi) {
+                Log::get().note("settlement detail (%s): in taxi (Status.json Flags2 bit 1): k %.2f -> %.2f, held at 1 while "
+                                "outside main ship -- the governor is for the cockpit only; taxi is unmeasured.",
+                                modeTag(st), from, k);
+            }
+        } else if (newGateState != CockpitGateState::Cockpit) {
+            // Switching between two held states (e.g. foot -> fighter/Nomad)
+            Log::get().note("settlement detail (%s): %s -> %s (Status.json): k held at 1 outside main ship "
+                            "(the governor is for the cockpit only).",
+                            modeTag(st), cockpitGateStateName(prevState), cockpitGateStateName(newGateState));
         } else {
-            Log::get().note("settlement detail (%s): no longer on foot (Status.json) after %.1f s, %u frames held at "
-                            "k 1; the governor resumes (the k from before, in one step, if a frame has 200 builder "
-                            "records within 5 s; else from 1, a second of at least 20 cycles before a step).",
-                            modeTag(st), double(nowMs - st.footStartMs) / 1000.0, st.footFrames);
+            // Returning aboard to cockpit from a held state
+            if (prevState == CockpitGateState::OnFoot && st.footFrames == st.gateFrames) {
+                Log::get().note("settlement detail (%s): no longer on foot (Status.json) after %.1f s, %u frames held at "
+                                "k 1; the governor resumes (the k from before, in one step, if a frame has 200 builder "
+                                "records within 5 s; else from 1, a second of at least 20 cycles before a step).",
+                                modeTag(st), double(nowMs - st.gateStartMs) / 1000.0, st.gateFrames);
+            } else {
+                Log::get().note("settlement detail (%s): back aboard from %s (Status.json) after %.1f s, %u frames held at "
+                                "k 1; the governor resumes (the k from before, in one step, if a frame has 200 builder "
+                                "records within 5 s; else from 1, a second of at least 20 cycles before a step).",
+                                modeTag(st), cockpitGateStateVehicleName(prevState),
+                                double(nowMs - st.gateStartMs) / 1000.0, st.gateFrames);
+            }
         }
+        if (newGateState != CockpitGateState::Cockpit) {
+            st.lastHeldState = newGateState;
+        }
+        st.gateState = newGateState;
+        st.onFoot = sig.onFoot;
     }
-    if (sig.onFoot) ++st.footFrames;
+
+    if (st.gateState != CockpitGateState::Cockpit) {
+        ++st.gateFrames;
+        if (st.gateState == CockpitGateState::OnFoot) ++st.footFrames;
+    }
+
     // The window.
     Window& w = st.w;
     ++w.frames;
-    if (sig.onFoot) ++w.footFrames;
+    if (st.gateState != CockpitGateState::Cockpit) {
+        ++w.heldFrames;
+        if (st.gateState == CockpitGateState::OnFoot) ++w.footFrames;
+        else if (st.gateState == CockpitGateState::InFighter) ++w.fighterFrames;
+        else if (st.gateState == CockpitGateState::InSrv) ++w.srvFrames;
+    }
     if (sig.expired) ++w.expiries;
     if (!st.freshAtMs || nowMs - st.freshAtMs > lodgov::kFreshMs) ++w.staleFrames;
     // Density the lever itself may have cut: a settlement's frame at 150-199
@@ -2041,6 +2168,10 @@ bool enableLocked(State& st, uint64_t nowMs) {
     st.lastSeq = 0;
     st.lastStepLogMs = 0;
     st.stepsUnlogged = 0;
+    st.gateState = CockpitGateState::Cockpit;
+    st.lastHeldState = CockpitGateState::Cockpit;
+    st.gateStartMs = 0;
+    st.gateFrames = 0;
     st.onFoot = false;   // so the first boundary on foot says so
     st.footStartMs = 0;
     st.footFrames = 0;
@@ -2194,6 +2325,24 @@ void lodGovernorPartObserver(uintptr_t items, uintptr_t out, uintptr_t view, boo
     in.sGame = gameScaleFor(ctx, in.s);
     const uint32_t base = cPartBase + classOf(in.bit) * kPartFields;
     bump(s, base + pSeen);
+    const lodgov::EntityKind entityKind = lodgov::classifyEntity(in.sphere[0], in.table.t[0]);
+    const bool isExempt = lodgov::isEntityExemptFromCulling(entityKind);
+    if (!in.enginePass && isExempt) {
+        // Ships, NPCs, and Mobs are explicitly exempt from culling regardless of distance or culling state.
+        // If the part would pass at the normal unscaled game scale (sGame), restore the pass verdict.
+        const float d = lodgov::engineDistance(in.centre, in.cam);
+        uint32_t gameLod = 0;
+        if (lodgov::screenSizePasses(in.A, d, in.B, in.sphere[0]) &&
+            lodgov::lodPick(in.table, lodgov::lodDistance(in.A, d, in.sphere[0], in.sGame, in.B), &gameLod)) {
+            __try {
+                *reinterpret_cast<uint32_t*>(out) = gameLod;
+                *reinterpret_cast<uint8_t*>(out + 4) = 1;
+                in.enginePass = true;
+                in.engineLod = gameLod;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+    }
     if (in.enginePass) bump(s, base + pPassed);
     const lodgov::PartOutcome o = lodgov::shadowPart(in, currentK());
     if (o.acting) bump(s, base + pActing);
