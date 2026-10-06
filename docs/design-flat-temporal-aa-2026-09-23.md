@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** 84f6a147 FLOWN: DLAA/FSR work at the settlement; inputs verified
-  (refusals, jitter, motion precision); slight shimmer is the content (104).
+- **State:** 104 CLOSED: DLAA/FSR work at the settlement, inputs verified,
+  slight shimmer is the content; 5f7e43e8 (A/B key removed) on Epic (104).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -12807,6 +12807,10 @@ prep bit, its rig tests and the phase test's changed anchors are backed out.
 Kept: the refusal view (`advanced.temporal_aa_debug = motion_source`, now
 allowed in flat), the NumLock refusal census and the `flat camera origin` 5 s
 line. The TAA single-texel depth check is offered as a separate task.
+Committed 5f7e43e8 (full build green, receipt `fb1b6035`, 234 keys read and
+documented); `--dll-only` passed; Epic flat install verified,
+`v0.18.2-30-g5f7e43e8`, SHA256 C97FB27B83EE256A..., `edvr-flat.ini`
+unchanged (its `flat_sdk_local_reset` line now names a key nothing reads).
 
 Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
 motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
