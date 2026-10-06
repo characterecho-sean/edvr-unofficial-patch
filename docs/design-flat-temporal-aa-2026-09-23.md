@@ -13258,3 +13258,7 @@ Built, one install (both green; bench hardware 56/56 PASS, WARP 0 FAIL):
 Flight: aiming over the coils at SS 1.0 (the world through the sight keeps
 AA); the refusal view while moving with the weapon up (the gun should stay
 cyan); a NumLock while moving (weapon-refused near 0.1%, and by reason).
+
+Committed 9d041f21 and eccfce7a, main fast-forwarded and pushed; `--dll-only`
+passed; the game probe found it stopped. Epic flat install verified:
+`v0.18.2-56-geccfce7a`, SHA256 F2D3A48BE0819640..., `edvr-flat.ini` unchanged.
