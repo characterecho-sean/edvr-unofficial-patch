@@ -54,8 +54,10 @@
 #include "../common/temporal_mode.h"
 #include <wrl/client.h>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <string>
 #include <memory>
@@ -269,7 +271,12 @@ struct State {
     // (NumLock), so the per-class line names what the finish shows raw instead of the backend's result.
     bool motionSourceView = false;
     bool sdkLocalReset = true;   // experimental.flat_sdk_local_reset (temporary, design doc section 104)
+    bool debugKeysRead = false;  // the two keys above have been read once (and said once)
     uint32_t refusalCensusFrames = 0;
+    // The camera term's translation precision (design doc section 104): row 275 is the render origin the camera term subtracts
+    // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
+    struct CameraOriginWindow { uint64_t frames = 0, moved = 0; float maxAbs = 0, maxStep = 0, minStep = 0; float last[3] = {}; };
+    CameraOriginWindow origin;
     // Near plane of the last named world camera. Elite draws world-camera
     // depth prepasses on H before the first supported material draw names
     // the world; a draw at this near is provisionally world and must match
@@ -536,6 +543,27 @@ struct State {
 };
 // Driver objects retire on the owner Present; never release under loader lock.
 State& state() { static State* p = new State; return *p; }
+// Row 275's size and its frame-to-frame step (design doc section 104). The float32 spacing at that size is the finest step the camera
+// term can see: a walking step near it reaches the upscaler quantised.
+static void noteCameraOrigin(State& s, const FlatMonoResolveFrame& f) {
+    if (f.reset) return;
+    State::CameraOriginWindow& o = s.origin;
+    ++o.frames;
+    float step = 0, smallest = 0;
+    for (int i = 0; i < 3; ++i) {
+        const float a = std::fabs(f.camera[5][i]);
+        if (a > o.maxAbs) o.maxAbs = a;
+        const float d = std::fabs(f.camera[5][i] - f.previousCamera[5][i]);
+        if (d > step) step = d;
+        if (d > 0 && (smallest == 0 || d < smallest)) smallest = d;
+        o.last[i] = f.camera[5][i];
+    }
+    if (step > 0) {
+        ++o.moved;
+        if (step > o.maxStep) o.maxStep = step;
+        if (o.minStep == 0 || smallest < o.minStep) o.minStep = smallest;
+    }
+}
 static State::DomainCandidate* domainCandidate(State& s,const void* depth) {
     const int slot=s.foregroundRoute.selected(depth,s.prefix.frame);
     return slot<0?nullptr:&s.foregroundCandidates[slot];
@@ -2894,8 +2922,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const auto preset = temporalPresetFor(model);
     // advanced.temporal_aa_debug = motion_source paints the prep's per-pixel classes into H, as on the VR route: what the finish
     // shows raw instead of the backend's result is painted by its refusal (white, yellow, red), so a jagged edge says why.
+    // Both keys below are said on their first read as well as on every change, so the log always names the value that was read: a
+    // key the flat profile refused once read its silent "off" for a whole flight (runtimeProfileAllowsKey, section 104).
+    const bool firstDebugRead = !s.debugKeysRead;
+    s.debugKeysRead = true;
     const bool motionSourceView = _stricmp(Config::get().getString("advanced.temporal_aa_debug", "off").c_str(), "motion_source") == 0;
-    if (motionSourceView != s.motionSourceView) {
+    if (motionSourceView != s.motionSourceView || firstDebugRead) {
         s.motionSourceView = motionSourceView;
         Log::get().note("flat runtime: refusal view %s (advanced.temporal_aa_debug = motion_source): %s", motionSourceView ? "on" : "off",
             flatMonoViewLegend());
@@ -2904,7 +2936,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // shows the raw current frame; off, where the prep formed a motion for it DLSS or FSR keeps its own result there and is handed that
     // motion (a mover's record forms none and stays refused). No effect on TAA.
     const bool sdkLocalReset = _stricmp(Config::get().getString("experimental.flat_sdk_local_reset", "on").c_str(), "off") != 0;
-    if (sdkLocalReset != s.sdkLocalReset) {
+    if (sdkLocalReset != s.sdkLocalReset || firstDebugRead) {
         s.sdkLocalReset = sdkLocalReset;
         Log::get().note("flat runtime: SDK local reset %s (experimental.flat_sdk_local_reset): %s", sdkLocalReset ? "on" : "off",
             sdkLocalReset ? "a refused world pixel shows the raw current frame"
@@ -3325,6 +3357,18 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                                    :"with DLSS or FSR a refused world pixel keeps the backend's result where a motion was formed for it "
                                     "(local reset off; a mover's record and a pixel with no motion still show raw)");
             }
+            // The camera term's translation precision (section 104): float32 spacing at row 275's size against its per-frame step.
+            // A spacing near a walking step (a few centimetres a frame) quantises the motion the camera term hands the upscaler.
+            if(s.origin.frames) {
+                const State::CameraOriginWindow& o=s.origin;
+                const float spacing=std::nextafter(o.maxAbs,std::numeric_limits<float>::infinity())-o.maxAbs;
+                Log::get().note("flat camera origin 5s: frames=%llu moved=%llu row275=(%.9g,%.9g,%.9g) max-abs=%.9g float-spacing=%.3g "
+                                "step max=%.4g smallest=%.4g; the camera term adds row 275's step, so a spacing near a walking step "
+                                "quantises the motion it hands the upscaler",
+                    (unsigned long long)o.frames,(unsigned long long)o.moved,o.last[0],o.last[1],o.last[2],o.maxAbs,spacing,
+                    o.maxStep,o.minStep);
+            }
+            s.origin={};
         }
         // The census of unkeyed pairs, every window while a temporal mode runs (empty
         // included: an absent line is what "this block never ran" looks like). A pair
@@ -4921,6 +4965,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.previousJitterX=f.reset?f.jitterX:s.phase.previousX;
     f.previousJitterY=f.reset?f.jitterY:s.phase.previousY;
     std::memcpy(f.previousCamera, f.reset ? selected.camera : s.previous.camera, sizeof(f.previousCamera));
+    noteCameraOrigin(s, f);
     // The phase the captured rows carry. Only the injector writes one into the
     // game's own upload, so only an Upstream frame in which an injection landed
     // has any; the resolver removes it from both frames' rows and from the
@@ -5199,6 +5244,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     f.previousJitterX = f.reset ? f.jitterX : s.phase.previousX;
     f.previousJitterY = f.reset ? f.jitterY : s.phase.previousY;
     std::memcpy(f.previousCamera, f.reset ? selected.camera : s.previous.camera, sizeof(f.previousCamera));
+    noteCameraOrigin(s, f);
     const FlatCameraRoute cameraRoute = flatCameraInjectRoute();
     const FlatCameraRowsPhase rowsNow = flatCameraRowsPhase(cameraRoute, s.phase.applied, s.phase.currentX, s.phase.currentY);
     f.rowsJitterX = rowsNow.x; f.rowsJitterY = rowsNow.y;
