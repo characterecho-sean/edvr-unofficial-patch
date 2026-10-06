@@ -3,7 +3,7 @@
 ## Status
 
 - **State:** 4bb67d35 FLOWN: TAA works; configured SDK AA still refuses (103).
-  GPU identity runs; inert-draw planning and history budget now block.
+  Offline bench reproduces inert refusal; history lifecycle passes (103).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** bounded draw-state and history-demand receipts together (103).
+- **Next:** correct inert admission against the offline SDK matrix (103).
   Retain 102's color-clear fix; no per-weapon table; preserve Epic settings.
   Building shimmer is unqualified. Preserve 87's native FSR comparison and
   section 83's remaining matrix and open items.
@@ -12072,3 +12072,103 @@ through the production failure/report path offline. The verified flight already
 proves zero SDK H qualification; no second flight is needed to re-establish
 that symptom. Installed graphics remain `4bb67d35`; this entry changes
 documentation only.
+
+### 2026-10-05: offline bench using the production proxy
+
+Sean requested an offline bench before another flight. The available evidence
+supports the known shader-planning and bounded history paths, not an exact
+settlement replay. The four retained draw-packet captures contain 27 packets
+and neither refusing shader pair. Their manifests have no build identity, and
+the existing replay rejects their missing post-draw DSV payload. Do not treat
+those packets as a faithful reproduction of the current failure.
+
+The bench pins eight original shader fixtures by DXBC size, FNV identity and
+SHA256 (27,312 bytes total). The latest refused
+FC1193AFFC596F74/258B95AC99520C1F pair is actual captured bytecode. World and
+representative alternate-camera fixtures come from prior captures. Geometry,
+pose constants, render-target contents, blend/depth/stencil state and draw
+ordering are reconstructed. The report preserves that distinction and
+fingerprints the tested proxy DLL.
+
+The history workload uses the production AnimatedVertexHistory on WARP. It
+independently reproduces the 64-record refusal (65th distinct draw; 6,144
+retained bytes), the byte refusal (eight large indexed draws; 33,551,232
+retained bytes), and the fifth duplicate's occurrence cap. Reuse, transient
+churn, two-frame retirement, actual buffer writes and global reset also pass.
+This establishes the bounds and lifecycle; it does not establish which source
+consumes the current game's budget. No budget or rendering policy was changed.
+
+The integration process loads a staged proxy in an invisible D3D11 fixture and
+enters the actual Present and draw hooks. The shipping proxy's
+unsupported-host control retains its real game-build guard. A separately named
+bench DLL uses the existing engine rig define and three reconstructed
+emit-hook entry points; all other rendering objects are the production
+objects. It tests the actual GPU slot resources, original vertex history,
+ownership and H qualification, with engine job hooking explicitly outside its
+evidence. A read-only, owner-thread snapshot exposes runtime planning,
+original GPU identity submissions, H qualification and completed backend
+counters. Exact structure size and ABI version are required. It supplies no
+fabricated qualification maps or state overrides.
+
+GPU readback also checks the actual owner plane before and after H. The scene
+keeps a visible alternate-camera triangle outside the world draw; a positive
+capture counter with an empty foreground cannot pass. SDK renderer PASS
+requires visible world and foreign pixels at H, H qualification, and a
+completed configured backend. Native TAA requires the real HDR resolve. The
+unsupported-host case is a guard result, not a renderer result.
+
+Three SDK-only cases execute the exact FC/258B shader pair with reconstructed
+OM state: stencil-only with color and depth writes disabled, depth-writing,
+and color-writing. Readbacks distinguish their actual effects. The guard cases
+report the measured writer refusal; they do not prove that projection planning
+is the right stage to reject a writer. No hash-only exemption was introduced.
+The F516/B40 fixture identities are pinned but their exact plasma draw
+geometry and workload are not replayed; the history tests use controlled
+workloads instead.
+
+The runner stages only under build/ and leaves game installs and settings
+alone. Each scene/mode gets a fresh process. Native TAA's public INI setting
+is on; the runner's readable taa label maps to it. --dry-run creates no files,
+directories, subprocesses, devices or DLL loads, and the actual CLI self-test
+verifies that property. Framework self-test success is separate from renderer
+PASS/FAIL/UNSUPPORTED.
+
+Run python tools/flat_sdk_bench.py --report build/flat-aa-report.json. WARP
+covers deterministic D3D11 behavior; --adapter hardware uses the local adapter
+for supported backend checks. Neither synthetic scenes nor WARP certify actual
+settlement image quality, performance, or every VR runtime. The installed Epic
+graphics remain 4bb67d35. No new flight or capture is needed to continue work
+on the covered paths.
+
+Validation: the frozen-source full build passed all gates. Its receipt input
+fingerprint is
+`65023684e8ab0ff28575043c0fd49a439bba33740a460705db13543ea2104584`,
+independently verified against this source and compiler context. Native build
+stdout is saved in `build/flat_sdk_bench_final_build.log`.
+
+Both default 17-case matrices ran. The 64x64 flat D3D11 scene uses no VR
+runtime or headset. Hardware logs identify NVIDIA GeForce RTX 5090; the
+installed driver inventory reports 32.0.16.1692 and the carried DLSS DLL's
+file version is `310,9,1,0`. Baseline TAA, DLAA, DLSS and FSR each complete
+one real HDR resolve on hardware, with zero spatial fallback. SDK baselines
+qualify one H and complete one configured backend. GPU readback at H finds 338
+world pixels and 218 foreign pixels, after 338 foreign pixels before H.
+
+Adding the stencil-only FC/258B draw changes 4,096 stencil pixels and zero
+color/depth pixels. The visible owner pixels survive, but all three SDKs
+refuse H with `foreground-original-projection-unproven`, with zero backend
+calls and a spatial fallback. This reproduces the current first-refusal path
+through the production hooks under explicit reconstructed no-write state. It
+does not establish that the latest game uses that same OM state. All
+unsupported-host and writer-refusal controls pass; all five history cases
+pass. WARP also completes TAA and FSR, while NGX explicitly reports
+unsupported GPU `0xBAD00001` after upstream qualification.
+
+Reports are `build/flat-aa-warp-report.json` and
+`build/flat-aa-hardware-report.json`, about 50 KB each. Overall renderer
+verdict is deliberately FAIL because the no-write case reproduces the bug; the
+framework and full-build gate being green are not a rendering fix. Next:
+correct inert-draw admission using this positive and negative matrix, then
+test the bounded history scheduling independently. Do not add a guessed
+projection, ignore a shader pair unconditionally, increase a budget without
+accounting, or request another flight to rediscover this refusal.

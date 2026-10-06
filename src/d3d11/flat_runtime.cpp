@@ -1,4 +1,5 @@
 #include "flat_runtime.h"
+#include "flat_sdk_bench_probe.h"
 #include "flat_capture_policy.h"
 #include "flat_runtime_model.h"
 #include "flat_hdr_route.h"
@@ -5426,5 +5427,90 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
     }
     if (replaced) ctx->PSSetShaderResources(0, 1, &original);
     if (original) original->Release();
+}
+
+extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
+    EdvrFlatSdkBenchSnapshot* out, unsigned int bytes) {
+    if (!out || bytes != sizeof(EdvrFlatSdkBenchSnapshot) ||
+        out->size != sizeof(EdvrFlatSdkBenchSnapshot) || out->version != 1 ||
+        !runtimeFlatProfile() || !owner())
+        return 0;
+    const auto& s = state();
+    EdvrFlatSdkBenchSnapshot snap{};
+    snap.flatProfile = 1;
+    snap.live = g_flatRuntimeLive.load(std::memory_order_relaxed) ? 1u : 0u;
+    snap.owner = 1;
+    snap.deviceReady = s.device ? 1u : 0u;
+    snap.contextReady = s.context ? 1u : 0u;
+    snap.outputReady = s.output ? 1u : 0u;
+    snap.frame = s.prefix.frame;
+    snap.drawSequence = s.prefix.sequence;
+    snap.work = static_cast<uint32_t>(s.work);
+    snap.namedWorld = s.namedDepth ? 1u : 0u;
+    snap.candidates = s.foregroundRoute.count(s.prefix.frame);
+    snap.foreignSeen = s.foregroundCounts.foreignSeen;
+    snap.captured = s.foregroundCounts.captured;
+    auto captures = s.foregroundRetiredCaptureStats;
+    for (const auto& candidate : s.foregroundCandidates) {
+        const auto& stats = candidate.motion.stats();
+        captures.attempts += stats.attempts;
+        captures.submitted += stats.submitted;
+    }
+    snap.captureAttempts = captures.attempts;
+    snap.gpuIdentitySubmitted = captures.submitted;
+    snap.worldMarkers = s.foregroundCounts.worldMarkers;
+    snap.hAttempts = s.foregroundCounts.hAttempts;
+    snap.hQualified = s.foregroundCounts.hQualified;
+    snap.hdrTriggered = s.hdr.triggered ? 1u : 0u;
+    snap.hdrSelected = s.hdrSelected.selected() ? 1u : 0u;
+    const auto resolver = flatMonoResolveStats();
+    snap.resolverCalls = resolver.calls;
+    snap.backendFailures = resolver.backendFailures;
+    snap.hdrResolves = resolver.hdrResolves;
+    snap.hdrSpatial = resolver.hdrSpatial;
+    snap.hdrCaptured = resolver.hdrCaptured;
+    snap.hdrCopied = resolver.hdrCopied;
+    snap.hdrPrepped = resolver.hdrPrepped;
+    snap.hdrBackendCompleted = resolver.hdrBackend;
+    snap.hdrFinished = resolver.hdrFinished;
+    snap.hdrRestored = resolver.hdrRestored;
+    std::snprintf(snap.mode, sizeof(snap.mode), "%s", s.mode.c_str());
+    const State::DomainFailure* failure = nullptr;
+    if (s.prefix.frame && s.foregroundFirstFailure.frame == s.prefix.frame) {
+        failure = &s.foregroundFirstFailure;
+        snap.firstFailureSelectedH = 1;
+    } else {
+        for (const auto& candidate : s.foregroundCandidates)
+            if (s.prefix.frame && candidate.firstFailure.frame == s.prefix.frame &&
+                (!failure || candidate.firstFailure.q < failure->q))
+                failure = &candidate.firstFailure;
+    }
+    if (failure) {
+        const auto& f = *failure;
+        snap.firstFailureFrame = f.frame;
+        snap.firstFailureSequence = f.q;
+        snap.firstFailureFormat = f.format;
+        snap.firstFailureVs = f.vs;
+        snap.firstFailurePs = f.ps;
+        std::snprintf(snap.firstFailureStage, sizeof(snap.firstFailureStage), "%s", f.stage);
+        std::snprintf(snap.firstFailureReason, sizeof(snap.firstFailureReason), "%s", f.reason);
+    }
+    std::snprintf(snap.hRefusal, sizeof(snap.hRefusal), "%s",
+                  s.foregroundHRefusal ? s.foregroundHRefusal : "none");
+    std::snprintf(snap.hdrVerdict, sizeof(snap.hdrVerdict), "%s", s.hdrWindow.lastVerdict);
+    *out = snap;
+    return 1;
+}
+
+// The bench may inspect the actual marker plane produced by the draw hooks.
+// This only lends an AddRef'd SRV; readback happens in the offline process.
+extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_owner_view(
+    ID3D11ShaderResourceView** out) {
+    if (out) *out = nullptr;
+    if (!out || !runtimeFlatProfile() || !owner()) return 0;
+    const auto& s = state();
+    if (!s.namedDepth) return 0;
+    return engineVelocityFlatDomainSlots(
+        static_cast<ID3D11Texture2D*>(const_cast<void*>(s.namedDepth)), out) ? 1u : 0u;
 }
 } // namespace edvr

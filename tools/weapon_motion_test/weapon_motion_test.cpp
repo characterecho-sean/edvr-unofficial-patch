@@ -45,6 +45,7 @@ struct Pose {float mouse=0,projection=1,nearBone=0,farBone=0,clip=.025f,skeleton
 F4 vertex(int i,Pose p){const double x=i==0||i==3?-.6:.6,y=i<2?-.6:.6,t=i<2?0:1;double z=1+t*.25;return {(x+p.mouse+p.nearBone*(1-t)+p.farBone*t)*p.projection,y,p.clip,z};}
 #include "flat_gpu_identity_tests.h"
 #include "flat_identity_receipt_tests.h"
+#include "flat_bench_history_pressure_tests.h"
 int main(int argc,char** argv){
  check(flatIdentityReceiptTests()==0,"identity receipt regressions pass");
  const UINT W=128,H=96;ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> ctx;D3D_FEATURE_LEVEL fl;
@@ -122,6 +123,10 @@ int main(int argc,char** argv){
  ComPtr<ID3D11ShaderResourceView> boneView;hr(dev->CreateShaderResourceView(bones.Get(),nullptr,&boneView));
  auto bind=[&](Pose p,bool advance=true){if(advance)weaponMotionFrameBoundary(ctx.Get());weaponMotionSource(depth.Get());ctx->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv.Get());ctx->OMSetDepthStencilState(state.Get(),21);ctx->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,0,4);D3D11_VIEWPORT vp{0,0,float(W),float(H),0,1};ctx->RSSetViewports(1,&vp);ctx->RSSetState(raster.Get());ctx->IASetInputLayout(layout.Get());UINT stride=16,off=0;ctx->IASetVertexBuffers(1,1,vb.GetAddressOf(),&stride,&off);UINT instanceStride=8;ctx->IASetVertexBuffers(0,1,instance.GetAddressOf(),&instanceStride,&off);
  unsigned ids[4]={p.skeleton==740?1u:0u,526606,0,0};ctx->UpdateSubresource(instance.Get(),0,nullptr,ids,0,0);ctx->VSSetShaderResources(33,1,poolView.GetAddressOf());ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);ctx->VSSetConstantBuffers(1,1,cb.GetAddressOf());ctx->UpdateSubresource(cb.Get(),0,nullptr,&p,0,0);float b[8]={p.nearBone,0,0,0,p.farBone,0,0,0};ctx->UpdateSubresource(bones.Get(),0,nullptr,b,0,0);ctx->VSSetShaderResources(38,1,boneView.GetAddressOf());issue(ctx.Get(),9,1,0,0,0);};
+ if(argc>1&&!std::strcmp(argv[1],"--bench-history")) {
+  flatBenchHistoryPressureTests(dev.Get(),ctx.Get(),bind,true);
+  return 0;
+ }
  auto motion=[&](){weaponMotionDraw(ctx.Get(),issue,9,1,0,0,0);};
  auto read=[&](){auto& g=weapon_motion_detail::g;D3D11_TEXTURE2D_DESC d{};g.map->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;ComPtr<ID3D11Texture2D> s;hr(dev->CreateTexture2D(&d,nullptr,&s));ctx->CopyResource(s.Get(),g.map.Get());D3D11_MAPPED_SUBRESOURCE m{};hr(ctx->Map(s.Get(),0,D3D11_MAP_READ,0,&m));std::vector<float> out(W*H*4);for(UINT y=0;y<H;++y)for(UINT x=0;x<W*4;++x)out[y*W*4+x]=DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const uint16_t*>(static_cast<const unsigned char*>(m.pData)+y*m.RowPitch)[x]);ctx->Unmap(s.Get(),0);return out;};
  weaponMotionConfigure(true);Pose old{};bind(old);motion();check(weaponMotionView()!=nullptr,"first mesh writes rejection coverage");auto first=read();unsigned covered=0;for(UINT i=0;i<W*H;++i)if(first[i*4+3]){++covered;check(first[i*4+3]==2,"new mesh has no fabricated history");}check(covered>2000,"rasterized weapon coverage present");
@@ -518,6 +523,7 @@ int main(int argc,char** argv){
    check(restored==conditional && reference==(pass?21u:22u),"H restores actual conditional stencil state and reference");
   }
  }
+ flatBenchHistoryPressureTests(dev.Get(),ctx.Get(),bind,false);
  ctx->ClearState();
  if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T n=0;queue->GetMessage(i,nullptr,&n);std::vector<char> bytes(n);auto* m=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());hr(queue->GetMessage(i,m,&n));if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"no D3D warnings/errors");}}
  std::printf("weapon motion: %u checks passed (%s)\n",checks,driver==D3D_DRIVER_TYPE_WARP?"WARP":"hardware");

@@ -1,0 +1,22 @@
+{
+  "schema": "edvr-flat-sdk-bench-fixtures",
+  "version": 1,
+  "evidence": {
+    "graphics_build": "v0.18.2-13-g4bb67d35",
+    "log": "edvr_gfx_20261005_171647.log",
+    "captured": ["original target shader bytecode", "prior world and weapon shader fixtures", "refusal pair identities", "selected-depth failure ordering"],
+    "reconstructed": ["vertex and instance data", "camera and skeleton constants", "render target contents", "blend/depth/stencil states", "history pressure workloads"],
+    "exact_scene_replay": false,
+    "limits": ["No complete target draw packet or current stencil state", "No captured adjacent target poses", "WARP does not certify NVIDIA image quality or game performance"]
+  },
+  "shaders": [
+    {"path": "tools/flat_temporal_test/fixtures/vs_FC1193AFFC596F74.dxbc", "stage": "vs", "bytes": 252, "hash": "FC1193AFFC596F74", "sha256": "5c9525340781e9b6f5b7e436ca1fdf8235086e4776d6bef8ab65f725a4b3fe7a"},
+    {"path": "tools/flat_temporal_test/fixtures/ps_258B95AC99520C1F.dxbc", "stage": "ps", "bytes": 180, "hash": "258B95AC99520C1F", "sha256": "952f65211d986c3e8ea81c2056ab88dd97c5a63b410401368db2bf6e72ca6538"},
+    {"path": "tools/flat_temporal_test/fixtures/vs_F516BF0201303B87.dxbc", "stage": "vs", "bytes": 4544, "hash": "F516BF0201303B87", "sha256": "2dcec183c119d13656e2899fa317745dc035c0461482429a1d38821b8dabe6a3"},
+    {"path": "tools/flat_temporal_test/fixtures/ps_B40B0462256E31C2.dxbc", "stage": "ps", "bytes": 384, "hash": "B40B0462256E31C2", "sha256": "8cf8295796e39ea1604ba8f0781ae130692cdb40350655abff22dcdc0a874557"},
+    {"path": "tools/flat_temporal_test/fixtures/vs_EB5234DB6ADB491D.dxbc", "stage": "vs", "bytes": 5080, "hash": "EB5234DB6ADB491D", "sha256": "c075a6fb580cc334d711505ecbc274edac54bb97560281ec2c9cdee74d894db4"},
+    {"path": "tools/flat_temporal_test/fixtures/ps_DC603C35BBE74B31.dxbc", "stage": "ps", "bytes": 8316, "hash": "DC603C35BBE74B31", "sha256": "2b23b0a5140647e9195d6e248a0ae41c9b5d8c2fc95c18502e5a889fe38129c8"},
+    {"path": "tools/flat_temporal_test/fixtures/vs_AACFDCF2FB9AD809.dxbc", "stage": "vs", "bytes": 5100, "hash": "AACFDCF2FB9AD809", "sha256": "151815f081c880b72aeeb226f9c1503c11c15de78da5a4d81492b05c30bb3ccc"},
+    {"path": "tools/flat_temporal_test/fixtures/ps_CF534B32F491561A.dxbc", "stage": "ps", "bytes": 3456, "hash": "CF534B32F491561A", "sha256": "3548d93ae130e955c20f44670adf9936aaf83d190f5e1b59b2e45456ab6b93f7"}
+  ]
+}
