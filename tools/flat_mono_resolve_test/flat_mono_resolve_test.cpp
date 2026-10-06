@@ -213,6 +213,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_first_person_phase_gpu_tests.h"
 #include "flat_refusal_gpu_tests.h"
 #include "flat_steady_depth_gpu_tests.h"
+#include "flat_taa_history_depth_gpu_tests.h"
 #include "flat_context_isolation_gpu_tests.h"
 #include "flat_sdk_foreground_gpu_tests.h"
 #include "flat_keep_refused_gpu_tests.h"
@@ -822,6 +823,9 @@ int main(int argc,char** argv) {
     // The depth-validated steady detail (the same section, the key's second form): the prep's depth check, its tolerance and its previous depth,
     // through the DLSS and FSR stubs and EDVR's own TAA, and the same scenario against the prep with one rule flipped at a time.
     steadyDepthGpuTests(device.Get(),context.Get());
+    // EDVR's own TAA's history depth check (section 104): the best of four texels, shared with the check above. A jittered silhouette keeps its
+    // history, a true disocclusion still resets, and both tests against the kernel with the old single-texel rule (and others) in: they must fail.
+    taaHistoryDepthGpuTests(device.Get(),context.Get());
     // The resolver's context isolation (the swap, and the explicit capture DXMT gets): also before the message check, so its calls are held to it.
     contextIsolationGpuTests(device.Get(),context.Get());
     if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessages();++i){SIZE_T n=0;messages->GetMessage(i,nullptr,&n);std::vector<unsigned char> bytes(n);

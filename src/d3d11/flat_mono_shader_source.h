@@ -81,19 +81,23 @@ bool cameraBefore(float2 uv, float depth, out float4 before) {
     before=position.x*o0+position.y*o1+position.z*o2+iz*o3;
     return before.w>0 && all(isfinite(before));
 }
-// THE STEADY-DETAIL DEPTH CHECK (flags.w==2; design doc section 82, the depth-validated steady detail). A stale slot's pixel is an
-// overdrawn one: its record says nothing about it, so the camera term is the only motion it has, and the camera term is right only
-// when the surface did not move. Last frame's depth says whether it did not: the surface that was at the position the camera term sends
-// this pixel to, in last frame's own raster (that position plus the previous phase), must be this surface, i.e. its depth must be the
-// one this surface would have had there had it not moved (`expected`, the camera term's own). Depth is reversed-Z, float32, d = near/z,
-// so a relative error in d is the same relative error in z at any range and a relative tolerance is the right form; the tolerance is the
-// 1% (floor 1e-6) the resolver's own TAA applies before it trusts history (taa(), below), against the best of the four texels around the
-// previous raster position: a thin line the jitter put on the neighbouring texel last frame still finds itself, and a static slanted
-// surface is within half a texel's gradient of one of them (tools\flat_mono_resolve_test holds the numbers; the simulation is in the
-// design doc). True = confirmed; false = refused, as a stale slot always was. Called for a stale pixel whose camera term was already
-// formed and in range, and only then.
-static const float kStaleDepthRel=.01, kStaleDepthFloor=1e-6;
-bool stalePreviousDepthMatches(float2 prev,float expected) {
+// THE HISTORY DEPTH CHECK (design doc section 82, the depth-validated steady detail; section 104 for taa()). One rule, two callers: the
+// prep asks it of a stale slot's pixel when flags.w==2, and taa(), below, asks it of every pixel before it trusts that pixel's history.
+// A stale slot's pixel is an overdrawn one: its record says nothing about it, so the camera term is the only motion it has, and the
+// camera term is right only when the surface did not move. Last frame's depth says whether it did not: the surface that was at the
+// position the camera term sends this pixel to, in last frame's own raster (that position plus the previous phase), must be this
+// surface, i.e. its depth must be the one this surface would have had there had it not moved (`expected`, the camera term's own).
+// Depth is reversed-Z, float32, d = near/z, so a relative error in d is the same relative error in z at any range and a relative
+// tolerance is the right form; the tolerance is 1% (floor 1e-6), against the best of the four texels around the previous raster
+// position. That is what lets a thin line the jitter put on the neighbouring texel last frame still find itself, what keeps a static
+// slanted surface (within half a texel's gradient of one of them), and what keeps a jittered silhouette: at a roof's edge against
+// the sky the one texel the position falls in is the roof one frame and the sky the next, and taa() reading that texel alone lost
+// the edge pixels' history on the alternate frames (tools\flat_mono_resolve_test holds the numbers; the simulation is in the design
+// doc). True = confirmed; false = refused: the prep refuses the stale slot's history, as it always did, and taa() shows the current
+// colour. The prep calls it for a stale pixel whose camera term was already formed and in range, and only then; taa() for a pixel the
+// prep did not reject.
+static const float kStaleDepthRel=.01, kStaleDepthFloor=1e-6;   // named for the rule they were written for; taa() shares them
+bool historyDepthMatches(float2 prev,float expected) {
     const int2 hi=int2(size.xy)-1;
     const float2 raster=prev*float2(size.xy)+jitter.zw-.5;   // the previous raster position in texel-centre coordinates: the 2x2 below surrounds it
     const int2 base=int2(floor(raster));
@@ -118,7 +122,7 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before,out uint cls) {
     // pixel takes the camera term -- an unkeyed hull that overdraws a keyed one no longer aliases. With
     // the steady detail on (flags.w==2: both routes always set it, the VR world route and the flat
     // profile on foot) the pixel takes the camera term only where last frame's depth confirms it (return 3: the
-    // caller asks stalePreviousDepthMatches) and is refused everywhere else, as by default. Only this refusal is
+    // caller asks historyDepthMatches) and is refused everywhere else, as by default. Only this refusal is
     // relaxed, either way: a masked record stays refused.
     if(asuint(depth)!=asuint(es.y)){cls=kClassStale;return flags.w==1?0:(flags.w==2?3:2);}
     uint code=uint(es.x);
@@ -242,7 +246,7 @@ void prep(uint3 id:SV_DispatchThreadID) {
             // A stale slot under the steady-detail rule (kind 3): the camera term stands only if last frame's depth confirms it. A pixel
             // the check refuses stays a stale-slot pixel (cls kClassStale, refused): the census counts it as stale-refused.
             if((debug.w&2)!=0)expected*=foregroundDepth.x;
-            if(valid && kind==3)valid=stalePreviousDepthMatches(prev,expected);
+            if(valid && kind==3)valid=historyDepthMatches(prev,expected);
             // An engine refusal (kind 2) formed the camera term above only as keepRefused's motion: it stays refused, and keeps its class.
             if(kind==2)valid=false;
             reject=valid?0:1;
@@ -304,9 +308,10 @@ void taa(uint3 id:SV_DispatchThreadID) {
         if(!world) {OutColor[id.xy]=current;return;}
     }
     if(flags.x==0 && Rejection.Load(int3(q,0))==0 && all(previous>=0) && all(previous<=1)) {
-        int2 oldQ=clamp(int2(previous*float2(size.xy)+jitter.zw),0,int2(size.xy)-1);
-        float was=HistoryDepth.Load(int3(oldQ,0)), predicted=ExpectedDepth.Load(int3(q,0));
-        if(abs(was-predicted)<=max(1e-6,predicted*.01))weight=.9;
+        // Last frame's depth must hold this surface somewhere in the four texels around where the camera term puts the pixel in last
+        // frame's raster, not in the one texel the position falls in: at a jittered silhouette that texel is the roof one frame and the
+        // sky the next, and the edge pixels lost their history on the alternate frames (design doc section 104).
+        if(historyDepthMatches(previous,ExpectedDepth.Load(int3(q,0))))weight=.9;
     }
     if(weight!=0 && debug.w!=0) {
         // History uses linear filtering on the output grid. Depth's one
