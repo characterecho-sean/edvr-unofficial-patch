@@ -13148,3 +13148,12 @@ Unverified until flown:
 - the glow pass on the copy route (surface-preserving by code reading);
 - weapon-down frames with arms on the copy route now ask the contract;
 - the aiming fix in flight.
+
+Committed 54ea9cee, main fast-forwarded and pushed; `--dll-only` passed; the
+installer's game probe found the game stopped. Epic flat install verified:
+`v0.18.2-49-g54ea9cee`, SHA256 061A3B8EFEB04E24..., `edvr-flat.ini` unchanged.
+Flight reads: at SS 1.0 while aiming, no `pending-null mismatch` lines,
+`scale-rejected-5s` above 0 and H-qualified equal to H-attempts; at SS 0.75
+weapon up and aiming, `flat copy weapon 5s` mixed frames with H-qualified equal
+to H-attempts and no `conflicting-hdr-target-or-camera`; a hipfire NumLock for
+the weapon-refused share.
