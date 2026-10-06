@@ -13182,3 +13182,15 @@ transparent depth-writing sight lens takes the world behind it as the
 weapon's. A planning pass is reading the code; a view screenshot while
 aiming will show which pixels are refused (white) and which keep weapon
 motion (cyan).
+
+Sean's view screenshot and video (54ea9cee, aiming, refusal view on): the
+world around and through the sight keeps its classes (yellow, blue, green),
+so a lens claiming the world is ruled out for this weapon. The weapon itself
+alternates: Sean, "rapidly switches between white and cyan constantly". In
+the 43-frame clip (30 fps of a 60 fps game) the gun is cyan (first-person
+motion) in frames 5, 15-16, 25-26, 30-31 and 40-41 and white (refused, raw)
+in the rest: usable motion about one game frame in four or five, in a
+roughly regular rhythm. That is the census's 4 to 7% weapon-refused, and the
+flicker between resolved and raw on the gun and sight is the lost AA Sean
+saw. The cause is in the first-person motion history (the map's w is not 1
+on most frames); a planning pass is on it.
