@@ -3,7 +3,7 @@
 ## Status
 
 - **State:** 4f6197e8 FLOWN at a settlement: SDK AA refused every frame (104).
-  Owner marks now follow the depth surface (104): BUILT, NOT FLOWN.
+  Owner marks follow the depth surface: 3d5ecaf6 INSTALLED on Epic, NOT FLOWN.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -12521,3 +12521,17 @@ Known limits: a first-person draw at the world camera's near now refuses the
 frame through its witness instead of being captured. Three cameras on one
 depth refuse earlier, in the HDR selector (`source-camera-or-depth-not-
 unique`), as before.
+
+Committed as 3d5ecaf6, fast-forwarded main and pushed; origin/main confirmed.
+Receipt-guarded `--dll-only` promotion passed in 52 s. Epic flat install via
+`install_edvr.py` (dry run, install, `--verify-only`); the installed DLL is
+`v0.18.2-19-g3d5ecaf6`. `edvr-flat.ini` (17EA3670...) and `nvngx_dlss.dll`
+(3975567B...) hashes are unchanged and `edvr.ini` stays absent. Frontier was
+not installed.
+
+Next flight: the same settlement, configured DLAA, about 20 s holstered and
+10 s drawn, one NumLock while there; then FSR the same way. Read against the
+literal installed version: H-qualified above zero and backend calls on the SDK
+domain line; `predicted-world` and `surface-preserving` counting; any
+`flat foreground refusal kind:` lines (each names a remaining blocker with
+its VS/PS, stage and count); and EDVR CPU a frame against 12-14 ms (104).
