@@ -265,6 +265,11 @@ struct State {
         uint64_t hAttempts=0,hQualified=0;
         uint64_t predictedWorld=0,worldUnmarked=0,surfacePreserving=0,surfacePreservingForeign=0;
     } foregroundCounts;
+    // The prep's refusal census in flat: sampled while the motion-source view is on, and for a bounded window after the census key
+    // (NumLock), so the per-class line names what the finish shows raw instead of the backend's result.
+    bool motionSourceView = false;
+    bool sdkLocalReset = true;   // experimental.flat_sdk_local_reset (temporary, design doc section 104)
+    uint32_t refusalCensusFrames = 0;
     // Near plane of the last named world camera. Elite draws world-camera
     // depth prepasses on H before the first supported material draw names
     // the world; a draw at this near is provisionally world and must match
@@ -2887,6 +2892,24 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const bool enabled = temporalModeEnabled(mode);
     const auto model = Config::get().getString("fix.temporal_aa_model", "k");
     const auto preset = temporalPresetFor(model);
+    // advanced.temporal_aa_debug = motion_source paints the prep's per-pixel classes into H, as on the VR route: what the finish
+    // shows raw instead of the backend's result is painted by its refusal (white, yellow, red), so a jagged edge says why.
+    const bool motionSourceView = _stricmp(Config::get().getString("advanced.temporal_aa_debug", "off").c_str(), "motion_source") == 0;
+    if (motionSourceView != s.motionSourceView) {
+        s.motionSourceView = motionSourceView;
+        Log::get().note("flat runtime: refusal view %s (advanced.temporal_aa_debug = motion_source): %s", motionSourceView ? "on" : "off",
+            flatMonoViewLegend());
+    }
+    // experimental.flat_sdk_local_reset (temporary, design doc section 104): on, the shipped behaviour, a world pixel the prep refuses
+    // shows the raw current frame; off, where the prep formed a motion for it DLSS or FSR keeps its own result there and is handed that
+    // motion (a mover's record forms none and stays refused). No effect on TAA.
+    const bool sdkLocalReset = _stricmp(Config::get().getString("experimental.flat_sdk_local_reset", "on").c_str(), "off") != 0;
+    if (sdkLocalReset != s.sdkLocalReset) {
+        s.sdkLocalReset = sdkLocalReset;
+        Log::get().note("flat runtime: SDK local reset %s (experimental.flat_sdk_local_reset): %s", sdkLocalReset ? "on" : "off",
+            sdkLocalReset ? "a refused world pixel shows the raw current frame"
+                          : "a refused world pixel keeps the DLSS/FSR result where a motion was formed for it (a mover's record stays refused)");
+    }
     if (s.preset != preset.full || s.foveaPreset != preset.fovea) {
         s.preset = preset.full; s.foveaPreset = preset.fovea;
         dlaaSetPreset(preset.full, preset.fovea);
@@ -3084,6 +3107,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     if(captureRequest!=FlatCaptureTier::None) {
         Log::get().note("flat capture general: configured=%s last=%s accepted=%llu refused=%llu tier=%s; backend/refusal and environment counters follow normal census",mode.c_str(),s.reason,(unsigned long long)s.accepted,(unsigned long long)s.refused,flatCaptureBulk(captureRequest)?"full":"general");
         reportForegroundDomain(s);
+        s.refusalCensusFrames=600;   // about five seconds of resolves; one in kFlatMonoRefusalEvery is sampled
     }
     if(flatCaptureBulk(captureRequest)) {
         armDrawIngress();
@@ -3282,6 +3306,25 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             Log::get().note("flat steady detail 5s: steady-detail=on depth-check=%llu/%llu; a stale-slot pixel takes the camera term only where "
                             "last frame's depth confirms it (ran/skipped resolves this window)",
                 (unsigned long long)steady.checked,(unsigned long long)steady.skipped);
+            if(steady.asked || steady.sampled || steady.frames) {
+                char classes[384]{};size_t used=0;
+                for(uint32_t i=0;i<kFlatMonoRefusalStaleKept && used<sizeof(classes);++i)if(steady.counts[i]) {
+                    const int n=std::snprintf(classes+used,sizeof(classes)-used,"%s%s=%llu",used?" ":"",flatMonoClassName(i),
+                        (unsigned long long)steady.counts[i]);
+                    if(n<0)break;used+=static_cast<size_t>(n);
+                }
+                const uint64_t refused=steady.refused();
+                Log::get().note("flat refusal census 5s: asked=%llu sampled=%llu read=%llu dropped=%llu every=%u size=%ux%u pixels=%llu "
+                                "refused=%llu (%.4f%%) stale-kept=%llu view=%s local-reset=%s; refused by class: %s; %s",
+                    (unsigned long long)steady.asked,(unsigned long long)steady.sampled,(unsigned long long)steady.frames,
+                    (unsigned long long)steady.dropped,steady.every,steady.width,steady.height,(unsigned long long)steady.pixels,
+                    (unsigned long long)refused,steady.pixels?100.0*double(refused)/double(steady.pixels):0.0,
+                    (unsigned long long)steady.counts[kFlatMonoRefusalStaleKept],s.motionSourceView?"on":"off",
+                    s.sdkLocalReset?"on":"off",used?classes:"none",
+                    s.sdkLocalReset?"with DLSS or FSR a refused pixel shows the raw current frame in place of the backend's result"
+                                   :"with DLSS or FSR a refused world pixel keeps the backend's result where a motion was formed for it "
+                                    "(local reset off; a mover's record and a pixel with no motion still show raw)");
+            }
         }
         // The census of unkeyed pairs, every window while a temporal mode runs (empty
         // included: an absent line is what "this block never ran" looks like). A pair
@@ -5088,6 +5131,10 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return false;
     };
     FlatMonoResolveFrame f{}; f.color = hdrView.Get(); f.depth = s.depthView.Get(); f.hdr = true;
+    f.refusalView = s.motionSourceView ? 1u : 0u;
+    f.keepRefusedHistory = !s.sdkLocalReset;
+    f.refusalCensus = s.motionSourceView || s.refusalCensusFrames > 0;
+    if (s.refusalCensusFrames) --s.refusalCensusFrames;
     if(selected.mixedCamera) {
         f.untrustedCameraCoverage=s.untrusted.view();
         if(!f.untrustedCameraCoverage) {

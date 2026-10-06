@@ -541,7 +541,8 @@ inline void contractTests(fpgpu::Fixture& fx) {
     // when the pair is bound, verbatim (2 and 7 and the largest value included), and 0 otherwise; route.z says whether the pair is bound.
     {
         bool once = false;
-        const std::string probe = fpgpu::replaceOnce(shipped, "if(reject!=0)motion=0;", "motion=float2(route.w,route.z);", &once);
+        // (The statement that zeroes a refused pixel's motion is conditional while the temporary A/B bit lives: flat_keep_refused_gpu_tests.h.)
+        const std::string probe = fpgpu::replaceOnce(shipped, "if(reject!=0 && !(keepRefused && formed))motion=0;", "motion=float2(route.w,route.z);", &once);
         check(once, "first person phase probe: its anchor is in the shader source exactly once");
         const bool installed = once && installPrep(fx, probe);
         check(installed, "first person phase probe: the probe prep compiles and makes a compute shader");
@@ -603,10 +604,12 @@ inline void mutationChecks(fpgpu::Fixture& fx) {
          "float2 prevPx=float2(q)+.5+m.xy+(route.w==1?jitter.xy-jitter.zw:0);", nullptr},
         {"the correction is also added to world pixels", "motion=(prev-rawUv)*float2(size.xy);",
          "motion=(prev-rawUv)*float2(size.xy)+(route.w==1?jitter.xy-jitter.zw:0);", nullptr},
-        {"the correction is added to every pixel at the end (attached ones twice)", "if(reject!=0)motion=0;",
-         "if(route.w==1)motion+=jitter.xy-jitter.zw; if(reject!=0)motion=0;", nullptr},
-        {"a mode that is not 0 or 1 rejects every pixel, attached or not", "if(reject!=0)motion=0;",
-         "if(route.w>1){reject=1;expected=0;} if(reject!=0)motion=0;", nullptr},
+        // The statement that zeroes a refused pixel's motion is conditional while the temporary A/B bit lives (flat_keep_refused_gpu_tests.h); it is
+        // "if(reject!=0)motion=0;" again once that bit is gone.
+        {"the correction is added to every pixel at the end (attached ones twice)", "if(reject!=0 && !(keepRefused && formed))motion=0;",
+         "if(route.w==1)motion+=jitter.xy-jitter.zw; if(reject!=0 && !(keepRefused && formed))motion=0;", nullptr},
+        {"a mode that is not 0 or 1 rejects every pixel, attached or not", "if(reject!=0 && !(keepRefused && formed))motion=0;",
+         "if(route.w>1){reject=1;expected=0;} if(reject!=0 && !(keepRefused && formed))motion=0;", nullptr},
     };
     const std::string shipped = edvr::kFlatMonoShaderSource;
     int caught = 0, equivalent = 0;

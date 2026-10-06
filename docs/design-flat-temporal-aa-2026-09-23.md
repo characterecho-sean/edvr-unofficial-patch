@@ -2,8 +2,10 @@
 
 ## Status
 
-- **State:** 3d5ecaf6 FLOWN: refused at 26 fps, world marks cost 14 ms GPU.
-  v2 marks only first person: 0e9f59eb INSTALLED on Epic, NOT FLOWN (104).
+- **State:** 0e9f59eb FLOWN: SDK AA engages at the settlement (H 100%, GPU
+  9.7-13.6 ms); some edges stay jagged in DLSS and FSR (104, last entry).
+- **Temporary key:** `experimental.flat_sdk_local_reset` (on = refused pixels
+  show raw, shipped; off = the backend's result). Remove when 104 closes.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,14 +35,12 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** fly 104 at the same settlement: H-qualified, the refusal inventory,
-  backend calls and CPU a frame (SDK mode cost 12-14 ms there). Retain 102's
-  color-clear fix; no per-weapon table; preserve Epic settings. Building
-  shimmer is unqualified. Preserve 87's native FSR comparison and section 83's
-  open items. Preserve high-G motion; do not repeat qualified PS91/BFE or
-  stale-resize hypotheses. The menu hangar-floor P1 defect remains open. VR
-  still needs regression tests; the concourse NPC observation on `d9f86b09`
-  belongs to the main/openxr-perf-gaps line.
+- **Next:** same settlement: refusal view on the jagged edges, NumLock census,
+  then local reset off against on, DLSS and FSR (104). Retain 102's
+  color-clear fix; no per-weapon table; preserve Epic settings, 87's native
+  FSR comparison, 83's open items and high-G motion; do not repeat qualified
+  PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
+  regression tests and `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
@@ -12624,3 +12624,66 @@ Next flight: the same settlement and routine (DLAA, then FSR, NumLock once in
 each). Read: H-qualified and backend calls on the SDK domain line,
 world-markers near zero, world-unmarked counting, any refusal kinds, and
 GPU/present against 31.9/38 ms on 3d5ecaf6 and 17.8/22.5 ms on 4f6197e8.
+
+### 2026-10-06: 0e9f59eb flown; SDK AA engages, some edges stay jagged
+
+Flight `edvr_gfx_20261006_072437.log` on the installed `v0.18.2-21-g0e9f59eb`,
+same settlement: FSR from 07:24:38, DLSS from 07:24:54, FSR again from
+07:27:38. Every mixed frame qualified H (8629 of 8629 by 07:28:53); world
+markers 0.0 a frame, first-person captures 0.7-36 a frame, 2,000-16,000 world
+draws a frame left unmarked. SDK windows: present 11-17 ms, GPU 9.7-13.6 ms
+(17.8 on 4f6197e8, 31.9 on 3d5ecaf6), EDVR CPU 7-11 ms for 6,700-10,200
+substituted draws a frame.
+
+Sean: much better, but some edges still look aliased, in DLSS and FSR alike: a
+roof edge against the night sky and a blue cable spool. On the roof it is
+always there, most noticeable when moving.
+
+With an SDK backend, finishHdr shows the raw current frame instead of the
+backend's result for any output pixel with a refused raster texel among its
+four bilinear taps (the rule for presets that ignore the bias mask). A refused
+pixel on either side of a silhouette shows an unresolved edge, and it crawls
+as the camera moves. Candidates, with their signature in the refusal view and
+census:
+
+- a stale slot whose previous-depth check fails at the silhouette (a
+  non-producer world surface over a producer one; v2 leaves those unmarked):
+  yellow, census `stale`;
+- an engine refusal: a producer record on a depth-0 sky pixel (`sentinel`),
+  `masked`, `corrupt` or `unreprojectable`: white, red or magenta;
+- the camera term leaving the screen (`range`, white): near the border only;
+- none (the edge is painted as accepted): the backend's own result or wrong
+  motion on accepted pixels, not a refusal.
+
+Ruled out by reading the code (no flight):
+
+- the section 102 untrusted-camera mask, because the SDK route sends the
+  foreground bit (constants.debug[3] = 2) and the prep reads the mask only
+  without it;
+- a sky pixel with no producer slot losing its motion, because it takes the
+  camera term (kind 0) with no depth check, and at depth 0 that term is the
+  camera's rotation alone, which forms.
+
+Build: the flat refusal census and view, and one temporary key.
+
+- `advanced.temporal_aa_debug = motion_source` paints the flat prep's classes
+  into H (legend in the log line when it changes) and samples the census
+  while on. NumLock samples it for the next 600 resolves. The 5 s line `flat
+  refusal census 5s` gives pixels, refused, stale-kept and refused by class,
+  with `view=` and `local-reset=`.
+- `experimental.flat_sdk_local_reset` (temporary; default `on`, the shipped
+  behaviour). `off` writes no rejection for a refused world pixel that has a
+  motion formed for it, so DLSS or FSR keeps its own result there and gets
+  that motion. A sentinel or corrupt record forms the camera term for this
+  alone. A masked or unreprojectable record is a mover's (engineBefore's own
+  rule: "a masked record stays refused"), forms none and stays refused, as
+  do a pixel whose camera term does not form and the first-person, reset and
+  invalid-depth refusals. A red edge in the view is therefore one `off`
+  leaves alone. Classes are unchanged, so the census reads the same either
+  way. Hot-reloaded; each change is logged.
+
+Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
+motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
+jagged roof and spool edges, and NumLock once in each mode. Then drop the view,
+set `flat_sdk_local_reset = off` under `[experimental]` and compare the same
+edges while moving: jagged against ghosting or smearing at the silhouettes.
