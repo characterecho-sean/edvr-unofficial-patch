@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State:** 0ed050a1 FLOWN: DLAA resolves the settlement's edges in a still
-  frame; refusals 0.0145% (ruled out); edges break up in motion (104).
-- **Temporary key:** `experimental.flat_sdk_local_reset`, outside the flat
-  allow-list, so it reads "off" (backend kept). Its question is answered: remove.
+- **State:** 0ed050a1 FLOWN: DLAA resolves still edges, refusals 0.0145%,
+  edges break up in motion; 84f6a147 on Epic, NOT FLOWN (104).
+- **Temporary key:** `experimental.flat_sdk_local_reset` (on = refused pixels
+  raw; off = backend kept); allowed in flat from 84f6a147. Remove at arc close.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -12743,6 +12743,20 @@ cannot change; (b) a sub-pixel motion error in the camera term's translation
 quantises the delta, and turning does not). Discriminator: walk past the roof,
 then stand and turn so the edge crosses the screen at the same speed; compare
 EDVR's TAA; log the size of row 275 and the per-frame translation.
+
+Sean kept the A/B key for the motion question (asked 2026-10-06). Build
+84f6a147: both keys join the flat allow-list (config_test pins them) and are
+logged on their first read; a 5 s line `flat camera origin` gives row 275's
+size, its float32 spacing and the per-frame step. Full build green, receipt
+`6a6ea9d6`; `--dll-only` passed; Epic flat install verified,
+`v0.18.2-27-g84f6a147`, SHA256 9D769421FE5E3A02..., `edvr-flat.ini`
+unchanged (it already holds the view line, twice, and local reset `off`).
+
+Next flight, DLAA at the roof: still; walking past; standing and turning at
+the same screen speed; NumLock while walking; local reset on against off
+while walking; EDVR's TAA on the same walk. Read: `flat camera origin` (a
+float spacing near the walking step rules (b) in), the census in motion, and
+which movement breaks the edge.
 
 Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
 motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
