@@ -12988,3 +12988,32 @@ edge while walking is a refused stale slot); SS 1.5 DLAA (H must qualify,
 `backend` above 0 on the `flat hdr route 5s` line, no spatial fallback); SS
 0.75 DLSS with the view (it now paints on the copy route); EDVR's TAA
 standing still with the view off (2d8e6761's best-of-four); NumLock in each.
+
+### 2026-10-06: 7cc82978 flown; supersampled DLAA runs; the copy route refuses the weapon
+
+Flight `edvr_gfx_20261006_114449.log`, verified `v0.18.2-38-g7cc82978`, DLSS
+mode throughout: SS 2.0 (7680x4320) from 11:45:24, SS 1.5 (5760x3240) from
+11:47:54, SS 0.75 (2880x1620, the copy route) from about 11:49:50.
+
+- Supersampling now runs the SDK on foot: H-qualified 2,982 of 2,982 by
+  11:48:06, `treated-jittered-hdr`, about 250 to 300 accepted-history frames
+  per 5 s at SS 2.0 and 1.5. Both gates are fixed in flight.
+- Pink (refused stale): present and tiny. With the view on at SS 2.0 while
+  walking, stale refused peaked at about 21,000 pixels a frame of 33 million
+  (11:47:16), then about 200; the paint is luma-scaled and the scene is at
+  night. Sean saw none. The roof edge is kept (yellow).
+- Weapon up at SS 0.75: every frame refused, `conflicting-hdr-target-or-
+  camera`, from 11:49:51; treated again with the weapon down. The copy route
+  has never handled a mixed-camera frame: the first-person contract (marks,
+  the map, H qualification) exists on the HDR route alone. Not a regression;
+  OPEN as its own piece of work.
+- The roof still shimmers in motion at SS 1.5 with DLAA running. Plain SS 2.0
+  (5f7e43e8's spatial fallback, no AA) shimmered as well.
+
+Next discriminator (no build): SS 1.0 DLAA, weapon down, walking past the
+roof, with `experimental.temporal_aa_before_post` at auto (HDR route: AA in
+linear HDR before bloom and tone) against off (copy route: AA after tone);
+the key is read at startup. Calmer on the copy route: the HDR-space resolve
+of a bright thin highlight is the cause, fixable on EDVR's side (exposure or
+a tonemapped resolve). The same: the content, a highlight finer than the
+samples.
