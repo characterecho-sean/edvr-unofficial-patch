@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** 0e9f59eb FLOWN: SDK AA engages at the settlement (H 100%, GPU
-  9.7-13.6 ms); some edges stay jagged in DLSS and FSR (104, last entry).
+- **State:** 0e9f59eb FLOWN: SDK AA engages at the settlement, some edges
+  jagged in DLSS and FSR; 0ed050a1 (census, A/B) on Epic, NOT FLOWN (104).
 - **Temporary key:** `experimental.flat_sdk_local_reset` (on = refused pixels
   show raw, shipped; off = the backend's result). Remove when 104 closes.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
@@ -12681,6 +12681,28 @@ Build: the flat refusal census and view, and one temporary key.
   invalid-depth refusals. A red edge in the view is therefore one `off`
   leaves alone. Classes are unchanged, so the census reads the same either
   way. Hot-reloaded; each change is logged.
+
+Validation: `flat_keep_refused_gpu_tests.h` in `tools\flat_mono_resolve_test`
+runs DLAA, DLSS and FSR, with and without the foreground map, on a moved
+camera. Key on: every refused probe keeps raw with no motion. Key off: a
+stale slot that failed the depth check, a corrupt slot and both sentinels
+(out of range, sky) carry the camera term with no rejection; off-screen
+motion is kept; a masked or unreprojectable record, a Camera-class patch, a
+half-float overflow, a reset frame, a depth-2 pixel and a refused
+first-person pixel stay refused. Accepted pixels, and a frame with nothing
+refused, are bit-identical either way; the finish shows History where no
+rejection was handed; TAA never gets the bit. 13 of 13 in-rig mutants
+caught. The first-person phase test's shader anchors follow the changed
+motion line; restore them when the key goes. Full build green, receipt
+`d9aa012f`. Bench (default key only): hardware 44/44 PASS; WARP 24 PASS, 20
+UNSUPPORTED (NGX), 0 FAIL. The A/B needs the steady-detail depth check to
+run (the 5 s steady line's `depth-check` ran above 0): without it a stale
+slot reaches the prep as an explicit refusal and `off` leaves it.
+
+Committed 0ed050a1, main fast-forwarded and pushed; `--dll-only` passed. Epic
+flat install: dry run, install, `--verify-only`; installed
+`v0.18.2-24-g0ed050a1`, SHA256 9FB04CC95CD08E73..., equal to the build.
+`edvr-flat.ini` unchanged.
 
 Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
 motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
