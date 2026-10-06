@@ -778,8 +778,13 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     const float sdkNear=foreground && f.foregroundDepthNear!=0?f.foregroundDepthNear:f.camera[3][2];
     if(foreground && (!std::isfinite(sdkNear) || sdkNear<=0 || sdkNear>f.camera[3][2]))
         return fail(reason,"flat-resolve-foreground-depth-convention-invalid");
+    // Untrusted camera coverage (a mixed-camera frame) needs the HDR route; an SDK backend needs the qualified first-person map, which
+    // takes the mask's place (the prep's debug.w is 2 then, and the mask is never read); EDVR's TAA needs native size besides, because
+    // its output-domain test maps one output pixel to one render pixel. A supersampled SDK frame (render above output) is the SDK's own
+    // business at the render size: the first-person map, the prep and the backend all run there (section 104; the rule was written
+    // for TAA in section 102 and refused every on-foot SDK frame above SS 1).
     if(untrusted && ((!foreground && f.mode!=FlatMonoResolveMode::Taa) || !hdr ||
-                     f.outputWidth!=f.renderWidth || f.outputHeight!=f.renderHeight))
+                     (f.mode==FlatMonoResolveMode::Taa && (f.outputWidth!=f.renderWidth || f.outputHeight!=f.renderHeight))))
         return fail(reason,"flat-resolve-untrusted-coverage-requires-native-HDR-TAA");
     if(!initialize(device,context,reason))return false;
     if(hdr && !initializeHdr(device,reason))return false;
@@ -891,7 +896,9 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     } else if(f.firstPersonMotion || f.firstPersonStencil) ++stats.firstPersonPartial;
     // The refusal census and view. Neither runs on a reset frame (every pixel is refused there, which says nothing) and the view is the
     // HDR route's alone. A frame that asks for neither reaches the end of this block having touched nothing: no resource is made.
-    const bool paintView=hdr && f.refusalView!=0 && !reset;
+    // The HDR route paints in its finish draw; the copy route with an SDK backend in its compute finish. EDVR's own TAA on the copy
+    // route writes its output directly, with no finish to paint in.
+    const bool paintView=(hdr || !taa) && f.refusalView!=0 && !reset;
     bool sampleNow=false;
     if(f.refusalCensus && !reset) {
         ++g_refusal.asked;
@@ -1049,9 +1056,10 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         // empty state; the outer guard still owns the untouched game's state.
         context->ClearState();
         ID3D11Buffer* cb0=g.constants.Get();context->CSSetConstantBuffers(0,1,&cb0);
-        ID3D11ShaderResourceView* views[]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
-            g.rejection.srv.Get(),nullptr,g.output[0].srv.Get()};
-        context->CSSetShaderResources(0,8,views);
+        // t11 is the prep's class texture, bound only for the refusal view (the finish paints from it when debug.y says so).
+        ID3D11ShaderResourceView* views[12]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
+            g.rejection.srv.Get(),nullptr,g.output[0].srv.Get(),nullptr,nullptr,nullptr,paintNow?g.klass.srv.Get():nullptr};
+        context->CSSetShaderResources(0,paintNow?12:8,views);
         ID3D11SamplerState* sampler=g.sampler.Get();context->CSSetSamplers(0,1,&sampler);
         ID3D11UnorderedAccessView* out=g.output[1].uav.Get();context->CSSetUnorderedAccessViews(4,1,&out,nullptr);
         context->CSSetShader(g.finish.Get(),nullptr,0);context->Dispatch((evalW+7)/8,(evalH+7)/8,1);

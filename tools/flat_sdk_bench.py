@@ -27,19 +27,25 @@ MODES = ("taa", "dlaa", "dlss", "fsr")
 DEFAULT_CASES = ("unsupported_host", "scene", "inert_no_write", "inert_depth_write", "inert_color_write",
                  "state_partial_mask", "state_blended", "state_blended_no_depth", "state_blended_hdr",
                  "settlement_prepass", "predicted_world_mismatch", "state_blended_hdr_world",
-                 "inert_depth_write_world", "stale_foreign_mark")
+                 "inert_depth_write_world", "stale_foreign_mark", "supersampled_scene", "supersampled_scene_4k")
 # "renderer" cases must complete the production HDR resolve; "guard" cases must keep a refusal.
 CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "renderer", "inert_no_write": "renderer",
                  "inert_depth_write": "guard", "inert_color_write": "renderer", "state_partial_mask": "renderer",
                  "state_blended": "renderer", "state_blended_no_depth": "renderer", "state_blended_hdr": "guard",
                  "settlement_prepass": "renderer", "predicted_world_mismatch": "guard",
                  "state_blended_hdr_world": "renderer", "inert_depth_write_world": "renderer",
-                 "stale_foreign_mark": "renderer"}
+                 "stale_foreign_mark": "renderer", "supersampled_scene": "renderer", "supersampled_scene_4k": "renderer"}
 SDK_CASES = frozenset(("inert_no_write", "inert_depth_write", "inert_color_write", "state_partial_mask",
                        "state_blended", "state_blended_no_depth", "state_blended_hdr", "settlement_prepass",
                        "predicted_world_mismatch", "state_blended_hdr_world", "inert_depth_write_world",
-                       "stale_foreign_mark"))
+                       "stale_foreign_mark", "supersampled_scene", "supersampled_scene_4k"))
 PRODUCTION_CASES = frozenset(("unsupported_host",))
+# The real-size supersampled case (5760x3240 into 3840x2160: H alone is 75 MB at the render size, the owner plane and the foreground map
+# 300 MB each) is not run on WARP: it reports UNSUPPORTED there, with this cause, and no process starts. It runs for longer than the
+# others (the scene reads whole planes back several times), so it has a timeout of its own.
+HARDWARE_ONLY_CASES = frozenset(("supersampled_scene_4k",))
+UNSUPPORTED_ON_WARP = "case-needs-hardware-adapter-at-real-size"
+LARGE_CASE_TIMEOUT = 300
 # What a rule-bearing PASS must have measured over its own frame (observed.measuredFrame, or a path from observed
 # itself when it starts with "@"), as (min, max) with None for unbounded. The scenario computes the same claims;
 # this is the independent check that its PASS is believed. Cameras (section 104): camera 0 is the world's, camera 1
@@ -81,6 +87,18 @@ RULE_COUNTERS = {
                            "@staleMark.before.stale": (0, 0), "@staleMark.after.stale": (1, None),
                            "@staleMark.atH.stale": (1, None), "@staleMark.atH.fresh": (1, None), **FIRST_PERSON_ONLY},
 }
+# The supersampled on-foot frame (the HDR route at R > D, section 104): the plain scene's draws (a camera-0 world draw and a
+# camera-1 first-person one: a mixed camera) with the scene targets 1.5x the swap chain per axis. H must qualify and the frame must
+# be the backend's: its calls rise, and neither the spatial recovery nor a backend failure does. The sizes are the targets' own,
+# read by the scenario, not the case's name.
+SUPERSAMPLED_FRAME = {"surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1), "worldUnmarked": (2, 2),
+                      "hAttempts": (1, None), "hQualified": (1, None), "backendCalls": (1, None), "hdrSpatial": (0, 0),
+                      "backendFailures": (0, 0), **FIRST_PERSON_ONLY}
+SUPERSAMPLED_SIZES = {"supersampled_scene": (96, 96, 64, 64), "supersampled_scene_4k": (5760, 3240, 3840, 2160)}
+RULE_COUNTERS.update({
+    case: {**SUPERSAMPLED_FRAME, "@sizes.renderWidth": (rw, rw), "@sizes.renderHeight": (rh, rh),
+           "@sizes.outputWidth": (ow, ow), "@sizes.outputHeight": (oh, oh)}
+    for case, (rw, rh, ow, oh) in SUPERSAMPLED_SIZES.items()})
 # Facts a rule PASS must report as the boolean true.
 RULE_TRUE = {"stale_foreign_mark": ("@staleMark.planeUntouched",)}
 # The exact first-failure reason a guard that keeps its refusal must still report.
@@ -221,7 +239,10 @@ def make_plan(root, cases, modes, adapter, report=None):
                             "source_proxy": str(source), "staged_proxy": str(stage / source.name),
                             "source_dlss": str(build / DLSS_RUNTIME),
                             "staged_dlss": str(stage / DLSS_RUNTIME) if stages_dlss(mode) else None,
-                            "proxy_flavor": "production" if case in PRODUCTION_CASES else "reconstructed-emit"})
+                            "proxy_flavor": "production" if case in PRODUCTION_CASES else "reconstructed-emit",
+                            # Not run at all where the adapter cannot do it: the entry says so, and no process starts.
+                            "unsupported": UNSUPPORTED_ON_WARP if adapter == "warp" and case in HARDWARE_ONLY_CASES else None,
+                            "timeout": LARGE_CASE_TIMEOUT if case in HARDWARE_ONLY_CASES else None})
     checked(entries, "selected cases do not apply to the selected AA mode")
     return {"schema": "edvr-flat-sdk-bench-plan", "version": 1, "adapter": adapter,
             "proxy": str(proxy), "executable": str(exe), "report": str(report) if report else None,
@@ -333,6 +354,16 @@ def execute_plan(root, plan, evidence, timeout):
     results = []
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     for run in plan["runs"]:
+        if run.get("unsupported"):
+            # A case the adapter cannot run: UNSUPPORTED with its cause, never a PASS, and nothing is staged or started.
+            r = {"schema": "edvr-flat-sdk-bench", "version": 1, "case": run["case"], "mode": run["mode"],
+                 "purpose": CASE_PURPOSES[run["case"]], "verdict": "UNSUPPORTED", "observed": {},
+                 "cause": run["unsupported"], "limitations": ["Not run on this adapter: the case needs the hardware adapter"],
+                 "proxy_flavor": run["proxy_flavor"], "proxy_sha256": None,
+                 "staging": {"proxy": "not-staged", "dlss": "not-staged", "removed": True}}
+            results.append(r)
+            print(f"{run['case']} / {run['mode']}: UNSUPPORTED ({r['cause']})")
+            continue
         stage = pathlib.Path(run["stage"])
         staged_proxy = pathlib.Path(run["staged_proxy"])
         staged_dlss = pathlib.Path(run["staged_dlss"]) if run["staged_dlss"] else None
@@ -353,7 +384,8 @@ def execute_plan(root, plan, evidence, timeout):
         p = None
         try:
             p = subprocess.run(run["command"], cwd=stage, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=timeout, creationflags=flags)
+                               encoding="utf-8", errors="replace", timeout=max(timeout, run.get("timeout") or 0),
+                               creationflags=flags)
             r = parse_result(p.stdout, run["case"], run["mode"])
             checked(p.returncode in (0, 1, 2), "unexpected scenario process exit")
             checked(p.returncode == {"PASS": 0, "FAIL": 1, "UNSUPPORTED": 2}[r["verdict"]],
@@ -434,6 +466,16 @@ def self_test():
         assert len(matrix["runs"]) == len(DEFAULT_CASES)*len(MODES)-len(SDK_CASES)
         assert not any(r["mode"] == "taa" and r["case"] in SDK_CASES for r in matrix["runs"])
         assert all((r["staged_dlss"] is not None) == (r["mode"] in ("dlaa", "dlss")) for r in matrix["runs"])
+        # The real-size case is the hardware adapter's: on WARP its entries are UNSUPPORTED with a cause (no process, no staging),
+        # on hardware they run, with a timeout of their own.
+        hardware_matrix = make_plan(root, DEFAULT_CASES, MODES, "hardware")
+        assert len(hardware_matrix["runs"]) == len(matrix["runs"])
+        for planned, adapter in ((matrix, "warp"), (hardware_matrix, "hardware")):
+            for run in planned["runs"]:
+                big = run["case"] in HARDWARE_ONLY_CASES
+                assert run["unsupported"] == (UNSUPPORTED_ON_WARP if big and adapter == "warp" else None), (adapter, run["case"])
+                assert run["timeout"] == (LARGE_CASE_TIMEOUT if big else None), (adapter, run["case"])
+        assert {r["mode"] for r in matrix["runs"] if r["case"] == "supersampled_scene_4k"} == {"dlaa", "dlss", "fsr"}
         # Exercise the real CLI branch, not just its planning helper. Any subprocess would load a DLL and may write
         # runtime settings/logs. A dry run also stages nothing: no link, copy, delete, directory or file.
         writers = [(os, "link"), (os, "unlink"), (os, "remove"), (shutil, "copy2"), (shutil, "rmtree"),
@@ -530,8 +572,15 @@ def self_test():
         assert set(guards) <= SDK_CASES and all(CASE_PURPOSES[c] == "guard" for c in guards)
         assert not set(GUARD_REASONS) & set(GUARD_VERDICTS)
         assert {"state_blended_no_depth", "state_blended_hdr", "settlement_prepass", "predicted_world_mismatch",
-                "state_blended_hdr_world", "inert_depth_write_world", "stale_foreign_mark"} <= set(DEFAULT_CASES)
+                "state_blended_hdr_world", "inert_depth_write_world", "stale_foreign_mark", "supersampled_scene",
+                "supersampled_scene_4k"} <= set(DEFAULT_CASES)
         assert CASE_PURPOSES["state_blended_hdr"] == "guard" and CASE_PURPOSES["state_blended_hdr_world"] == "renderer"
+        # The supersampled cases are SDK renderer cases (EDVR's TAA above the output stays on the copy route), the real-size one is the
+        # hardware adapter's alone, and their sizes are a uniform 1.5x per axis: render above output, the same factor on both axes.
+        assert {"supersampled_scene", "supersampled_scene_4k"} <= SDK_CASES and HARDWARE_ONLY_CASES == {"supersampled_scene_4k"}
+        assert all(CASE_PURPOSES[c] == "renderer" for c in SUPERSAMPLED_SIZES) and set(SUPERSAMPLED_SIZES) <= set(RULE_COUNTERS)
+        assert all(rw * 2 == ow * 3 and rh * 2 == oh * 3 for rw, rh, ow, oh in SUPERSAMPLED_SIZES.values())
+        assert SUPERSAMPLED_SIZES["supersampled_scene_4k"] == (5760, 3240, 3840, 2160) and 5760 * 3240 > 16 * 1024 * 1024
 
         # Synthetic observations: what a PASS of each rule case looks like, then every table entry broken in turn.
         stale_good = {"planeUntouched": True, "worldWriterDepthPixels": 50, "before": {"foreign": 338, "stale": 0, "fresh": 338},
@@ -549,6 +598,12 @@ def self_test():
             "stale_foreign_mark": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 3,
                                    "hQualified": 1},
         }
+        supersampled_frame = {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2, "hAttempts": 1,
+                              "hQualified": 1, "backendCalls": 1, "hdrSpatial": 0, "backendFailures": 0}
+        good_extras = {}
+        for case, (rw, rh, ow, oh) in SUPERSAMPLED_SIZES.items():
+            good_frames[case] = supersampled_frame
+            good_extras[case] = {"sizes": {"renderWidth": rw, "renderHeight": rh, "outputWidth": ow, "outputHeight": oh}}
         good_frames["inert_color_write"] = good_frames["inert_no_write"]
         good_frames["state_blended"] = good_frames["state_partial_mask"]
         assert set(good_frames) == set(RULE_COUNTERS)
@@ -559,9 +614,13 @@ def self_test():
                     "owner": {"gpuWorldPixelsAtH": 556, "gpuForeignPixelsAtH": 218},
                     "firstFailure": {"frame": 6 if reason else 0, "reason": reason},
                     "staleMark": json.loads(json.dumps(stale_good)),
+                    "sizes": {"renderWidth": 64, "renderHeight": 64, "outputWidth": 64, "outputHeight": 64},
                     "measuredFrame": {"worldMarkers": 0, "failureKinds": 1 if reason else 0, **frame}}
             seen.update(extra)
             return seen
+
+        def good_observed(case, reason="", **extra):
+            return sdk_observed(good_frames[case], reason, **{**json.loads(json.dumps(good_extras.get(case, {}))), **extra})
 
         def accepted(case, purpose, observed):
             result = {"schema": "edvr-flat-sdk-bench", "version": 1, "case": case, "mode": "dlaa",
@@ -580,21 +639,32 @@ def self_test():
             return observed
 
         for case, bounds in RULE_COUNTERS.items():
-            assert accepted(case, "renderer", sdk_observed(good_frames[case])), f"{case}: the good frame is refused"
+            assert accepted(case, "renderer", good_observed(case)), f"{case}: the good frame is refused"
             for counter, (low, high) in bounds.items():
                 for outside in ([low - 1] if low is not None else []) + ([high + 1] if high is not None else []):
-                    broken = with_value(sdk_observed(good_frames[case]), counter, outside)
+                    broken = with_value(good_observed(case), counter, outside)
                     assert not accepted(case, "renderer", broken), f"{case}: {counter}={outside} accepted"
                 for bad in ("1", None, True):
-                    broken = with_value(sdk_observed(good_frames[case]), counter, bad)
+                    broken = with_value(good_observed(case), counter, bad)
                     assert not accepted(case, "renderer", broken), f"{case}: {counter}={bad!r} accepted"
             for path in RULE_TRUE.get(case, ()):
                 for bad in (False, 1, None):
-                    assert not accepted(case, "renderer", with_value(sdk_observed(good_frames[case]), path, bad)), \
+                    assert not accepted(case, "renderer", with_value(good_observed(case), path, bad)), \
                         f"{case}: {path}={bad!r} accepted"
-            assert not accepted(case, "renderer", sdk_observed(good_frames[case], reason="foreground-draw-bound"))
-            assert not accepted(case, "renderer", sdk_observed(good_frames[case], ruleConfirmed=False))
-            assert not accepted(case, "renderer", sdk_observed(good_frames[case], measuredFrame=None))
+            assert not accepted(case, "renderer", good_observed(case, reason="foreground-draw-bound"))
+            assert not accepted(case, "renderer", good_observed(case, ruleConfirmed=False))
+            assert not accepted(case, "renderer", good_observed(case, measuredFrame=None))
+        # A supersampled PASS is the backend's frame at the measured sizes: a size the case did not run at (native, or 1.4x), H not
+        # qualified in the frame, or the frame the spatial recovery's or a failed backend's, is no PASS.
+        for case, (rw, rh, ow, oh) in SUPERSAMPLED_SIZES.items():
+            for sizes in ({"renderWidth": ow, "renderHeight": oh, "outputWidth": ow, "outputHeight": oh},
+                          {"renderWidth": rw - 1, "renderHeight": rh, "outputWidth": ow, "outputHeight": oh},
+                          {"renderWidth": rw, "renderHeight": rh, "outputWidth": ow + 1, "outputHeight": oh}):
+                assert not accepted(case, "renderer", good_observed(case, sizes=sizes)), f"{case}: {sizes} accepted"
+            assert not accepted(case, "renderer", good_observed(case, sizes={}))
+            assert not accepted(case, "renderer", good_observed(case, sizes=None))
+            for counter, bad in (("hQualified", 0), ("backendCalls", 0), ("hdrSpatial", 1), ("backendFailures", 1)):
+                assert not accepted(case, "renderer", with_value(good_observed(case), counter, bad)), f"{case}: {counter}={bad}"
         # The camera-0 prepass run is not marked and not captured, whatever the numbers elsewhere say.
         assert not accepted("settlement_prepass", "renderer", with_value(
             sdk_observed(good_frames["settlement_prepass"]), "predictedWorld", 69))
@@ -712,7 +782,7 @@ def self_test():
             failing = (case, mode) == ("scene", "fsr")
             result = {"schema": "edvr-flat-sdk-bench", "version": 1, "case": case, "mode": mode,
                       "purpose": CASE_PURPOSES[case], "verdict": "FAIL" if failing else "PASS",
-                      "observed": sdk_observed({}), "limitations": []}
+                      "observed": good_observed(case) if case in good_frames else sdk_observed({}), "limitations": []}
             return SimpleNamespace(stdout=MARKER + json.dumps(result), stderr="", returncode=int(failing))
 
         def run_plan(cases, modes):
@@ -746,6 +816,30 @@ def self_test():
         assert summary["verdict"] == "PASS" and results[("scene", "dlaa")]["staging"] == {
             "proxy": "copy", "dlss": "copy", "removed": True}
         assert sorted(p.name for p in (stages / "dlaa/scene").iterdir()) == ["edvr-flat.ini", "edvr_profile.ini"]
+        # The real-size case on WARP starts no process and stages nothing (UNSUPPORTED, with its cause); on hardware it runs, with a
+        # timeout of its own that no shorter --timeout can undercut.
+        started = []
+
+        def spying_process(command, **kwargs):
+            started.append((command, kwargs.get("timeout")))
+            return fake_process(command, **kwargs)
+
+        for adapter in ("warp", "hardware"):
+            started.clear()
+            staged_plan = make_plan(xroot, ["supersampled_scene_4k", "supersampled_scene"], ["dlss"], adapter)
+            staged_plan["fixtures"] = []
+            with mock.patch.object(subprocess, "run", side_effect=spying_process), contextlib.redirect_stdout(io.StringIO()):
+                summary = execute_plan(xroot, staged_plan, {}, 10)
+            by_case = {r["case"]: r for r in summary["runs"]}
+            ran = [(c[c.index("--case") + 1], t) for c, t in started if str(c[0]).endswith("flat_sdk_integration_test.exe")]
+            if adapter == "warp":
+                big = by_case["supersampled_scene_4k"]
+                assert big["verdict"] == "UNSUPPORTED" and big["cause"] == UNSUPPORTED_ON_WARP and big["proxy_sha256"] is None
+                assert ran == [("supersampled_scene", 10)] and not (stages / "dlss/supersampled_scene_4k").exists()
+                assert summary["verdict"] == "UNSUPPORTED" and by_case["supersampled_scene"]["verdict"] == "PASS"
+            else:
+                assert ran == [("supersampled_scene_4k", LARGE_CASE_TIMEOUT), ("supersampled_scene", 10)]
+                assert summary["verdict"] == "PASS" and all(r["verdict"] == "PASS" for r in summary["runs"])
     print("flat_sdk_bench: self-test passed (write-free plans, pinned fixtures, linked staging, honest verdicts)")
 
 

@@ -4,6 +4,9 @@ struct SceneVertex { uint32_t a[4], b[4], c[4]; };
 struct SceneEvidence {
     Snapshot world{}, alternate{}, writer{}, consumer{};
     unsigned depthPixels=0, poolPixels=0, hdrPixels=0;
+    // The sizes the case ran at, read from the targets themselves: the HDR scene target's (the render size) and the swap chain's
+    // back buffer (the output size).
+    unsigned renderW=0, renderH=0, outputW=0, outputH=0;
     unsigned gpuWorldPixelsBeforeH=0, gpuForeignPixelsBeforeH=0;
     unsigned gpuWorldPixelsAtH=0, gpuForeignPixelsAtH=0;
     unsigned inertDepthPixels=0, inertStencilPixels=0, inertColorPixels=0;
@@ -38,11 +41,11 @@ bool readShader(const wchar_t* directory, const wchar_t* leaf, uint64_t expected
     return hash==expected;
 }
 
-bool makeSceneTexture(ID3D11Device* device, DXGI_FORMAT format, DXGI_FORMAT viewFormat,
+bool makeSceneTexture(ID3D11Device* device, UINT width, UINT height, DXGI_FORMAT format, DXGI_FORMAT viewFormat,
                       UINT bind, ComPtr<ID3D11Texture2D>& texture,
                       ComPtr<ID3D11RenderTargetView>& view) {
     D3D11_TEXTURE2D_DESC desc{};
-    desc.Width=desc.Height=64;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
+    desc.Width=width;desc.Height=height;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
     desc.Format=format;desc.BindFlags=bind;
     if (!ok(device->CreateTexture2D(&desc,nullptr,&texture),"scene target texture")) return false;
     D3D11_RENDER_TARGET_VIEW_DESC vd{};
@@ -128,8 +131,16 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     using OwnerViewFn=unsigned int (__cdecl*)(ID3D11ShaderResourceView**);
     const auto ownerView=reinterpret_cast<OwnerViewFn>(GetProcAddress(proxy,"edvr_selftest_flat_sdk_owner_view"));
     if (!snapshot || !ownerView) {std::fputs("flat SDK bench: snapshot or owner export absent\n",stderr);return 2;}
+    // Sizes (section 104). Every case renders and presents at 64 x 64. The supersampled cases are the on-foot frame of a screen
+    // rendered above it (the HDR route's R > D): 96 x 96 into 64 x 64 (1.5 x per axis), and, on hardware only, the real size that
+    // the 16M-pixel bound of the foreground map once refused: 5760 x 3240 (4K at SS 1.5) into 3840 x 2160.
+    const bool supersampled=std::strcmp(name,"supersampled_scene")==0;
+    const bool supersampled4k=std::strcmp(name,"supersampled_scene_4k")==0;
+    const bool supersampledAny=supersampled||supersampled4k;
+    const UINT outputW=supersampled4k?3840u:64u,outputH=supersampled4k?2160u:64u;
+    const UINT renderW=supersampled4k?5760u:supersampled?96u:64u,renderH=supersampled4k?3240u:supersampled?96u:64u;
     edvr::openxr::PresentDevice present;
-    if (!ok(present.initialize(proxy,driver),"hidden proxy device")) return 2;
+    if (!ok(present.initialize(proxy,driver,outputW,outputH),"hidden proxy device")) return 2;
     for(unsigned i=0;i<3;++i) if(!ok(present.present(),"arm flat frame"))return 2;
     Snapshot before{};
     if(!snapshot(&before,sizeof(before)) || !before.live || !before.owner) {
@@ -220,13 +231,14 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     }
     ComPtr<ID3D11Texture2D> pool,hdr,consumerColor;
     ComPtr<ID3D11RenderTargetView> poolRtv,hdrRtv,consumerRtv;
-    if(!makeSceneTexture(device,DXGI_FORMAT_R10G10B10A2_TYPELESS,DXGI_FORMAT_R10G10B10A2_UNORM,
+    // The consumer's target is the game's tone pass target, rendered at the scene's size, as in the game.
+    if(!makeSceneTexture(device,renderW,renderH,DXGI_FORMAT_R10G10B10A2_TYPELESS,DXGI_FORMAT_R10G10B10A2_UNORM,
         D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE,pool,poolRtv) ||
-       !makeSceneTexture(device,DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R11G11B10_FLOAT,
+       !makeSceneTexture(device,renderW,renderH,DXGI_FORMAT_R11G11B10_FLOAT,DXGI_FORMAT_R11G11B10_FLOAT,
         D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE,hdr,hdrRtv) ||
-       !makeSceneTexture(device,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM,
+       !makeSceneTexture(device,renderW,renderH,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R8G8B8A8_UNORM,
         D3D11_BIND_RENDER_TARGET,consumerColor,consumerRtv))return 2;
-    D3D11_TEXTURE2D_DESC depthDesc{};depthDesc.Width=depthDesc.Height=64;
+    D3D11_TEXTURE2D_DESC depthDesc{};depthDesc.Width=renderW;depthDesc.Height=renderH;
     depthDesc.MipLevels=depthDesc.ArraySize=depthDesc.SampleDesc.Count=1;
     depthDesc.Format=DXGI_FORMAT_R32G8X24_TYPELESS;
     depthDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
@@ -361,7 +373,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         return true;
     };
     if(settlement && (!uploadClip(0) || !uploadClip(1)))return 2;
-    const D3D11_VIEWPORT vp{0,0,64,64,0,1};context->RSSetViewports(1,&vp);
+    const D3D11_VIEWPORT vp{0,0,static_cast<float>(renderW),static_cast<float>(renderH),0,1};context->RSSetViewports(1,&vp);
     context->RSSetState(raster.Get());context->OMSetDepthStencilState(depthState.Get(),0);
     context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -673,6 +685,12 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     }
     evidence.poolPixels=changedPixels(poolBefore,readPixels(device,context,pool.Get(),4),4);
     evidence.hdrPixels=changedPixels(hdrBefore,readPixels(device,context,hdr.Get(),4),4);
+    {   // The sizes the case ran at, from the targets: the scene's HDR target, and the swap chain's back buffer the proxy reads as the output.
+        D3D11_TEXTURE2D_DESC hdrDesc{},backDesc{};hdr->GetDesc(&hdrDesc);
+        ComPtr<ID3D11Texture2D> backBuffer;
+        if(SUCCEEDED(present.swapchain()->GetBuffer(0,IID_PPV_ARGS(&backBuffer))) && backBuffer)backBuffer->GetDesc(&backDesc);
+        evidence.renderW=hdrDesc.Width;evidence.renderH=hdrDesc.Height;evidence.outputW=backDesc.Width;evidence.outputH=backDesc.Height;
+    }
     const auto& after=evidence.consumer;
     const bool taa=std::strcmp(after.mode,"on")==0;
     const bool hostGuard=std::strcmp(name,"unsupported_host")==0;
@@ -694,6 +712,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const uint64_t qualifiedDelta=since(after.hQualified,before.hQualified);
     const uint64_t backendDelta=since(after.hdrBackendCompleted,before.hdrBackendCompleted);
     const uint64_t resolverDelta=since(after.resolverCalls,before.resolverCalls);
+    const uint64_t spatialDelta=since(after.hdrSpatial,before.hdrSpatial);
+    const uint64_t backendFailureDelta=since(after.backendFailures,before.backendFailures);
     const uint64_t prepassPredicted=since(evidence.prepass.predictedWorld,before.predictedWorld);
     const uint64_t prepassForeign=since(evidence.prepass.foreignSeen,before.foreignSeen);
     const uint64_t prepassCaptured=since(evidence.prepass.captured,before.captured);
@@ -790,9 +810,20 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         evidence.marksAfter.foreign==evidence.marksBefore.foreign && evidence.marksAfter.stale>0 &&
         evidence.marksAtH.stale>0 && evidence.marksAtH.fresh>0 &&
         foreignDelta==1 && capturedDelta==1 && !surfaceDelta && frameClean && qualifiedDelta>0;
+    // The supersampled on-foot frame (the HDR route's R > D): the plain `scene` draws (a world draw and a first-person one, so a mixed
+    // camera) at the render size above the output, 1.5 x per axis by the targets' own sizes. H must qualify at that size and the frame
+    // must be the backend's, not the spatial recovery's. The backend half is checked where the verdict is made: a WARP device cannot
+    // evaluate NGX, and that case is UNSUPPORTED, not a failed rule.
+    const bool supersampledSizes=supersampledAny && evidence.renderW==renderW && evidence.renderH==renderH &&
+        evidence.outputW==outputW && evidence.outputH==outputH &&
+        uint64_t(evidence.renderW)*2==uint64_t(evidence.outputW)*3 && uint64_t(evidence.renderH)*2==uint64_t(evidence.outputH)*3;
+    const bool supersampleRule=supersampledSizes && attemptedDelta>0 && qualifiedDelta>0 && !surfaceDelta &&
+        foreignDelta==1 && capturedDelta==1 && frameClean && !after.failureKinds;
+    const bool supersampleBackendRan=!supersampledAny || (backendDelta>0 && !spatialDelta && !backendFailureDelta);
     const bool ruleConfirmed=worldsUnmarked && (inertNoWrite?inertNoWriteRule:colorInert?forwardedColorOnly:
         blendedNoDepth?forwardedBlended:(partialState||blendedState)?admittedState:blendedHdrWorld?worldHdrBlended:
-        inertWorld?worldInertWriter:staleMark?staleMarkRule:settlement?settlementConfirmed:true);
+        inertWorld?worldInertWriter:staleMark?staleMarkRule:settlement?settlementConfirmed:
+        supersampledAny?supersampleRule:true);
     const bool guardConfirmed=worldsUnmarked && (hostGuard?
         rasterReady && evidence.world.namedWorld && (taa || ownershipForeign) && after.hdrTriggered && !after.hAttempts &&
             std::strcmp(after.hdrVerdict,"engine-source-not-ready")==0:
@@ -804,19 +835,35 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         partialState||blendedState?"depth-writing-gbuffer-draw-admitted":
         blendedHdrWorld?"world-camera-hdr-writer-left-unmarked":inertWorld?"world-camera-depth-writer-left-unmarked":
         staleMark?"stale-first-person-mark-kept-and-frame-resolved":
+        supersampledAny?"supersampled-hdr-route-qualified-and-resolved-at-render-size":
         settlement?"predicted-world-prepass-planned-without-capture":"production-hdr-resolve-completed";
     if(guardCase) {
         verdict=guardConfirmed?"PASS":"FAIL";
         cause=guardConfirmed?hostGuard?"host-guard-confirmed":depthGuard?"depth-write-refusal-confirmed":
             blendedHdr?"second-camera-hdr-writer-refused-by-selector":"pending-world-mismatch-refusal-confirmed":
             "guard-not-confirmed";
-    } else if(upstream && ruleConfirmed && after.hdrResolves && (taa || after.hdrBackendCompleted)) {
+    } else if(upstream && ruleConfirmed && after.hdrResolves && (taa || after.hdrBackendCompleted) && supersampleBackendRan) {
         verdict="PASS";cause=passCause;
     } else if(upstream && ruleConfirmed && !taa && driver==D3D_DRIVER_TYPE_WARP &&
               (std::strcmp(after.mode,"dlaa")==0 || std::strcmp(after.mode,"dlss")==0) &&
               after.backendFailures && !after.hdrBackendCompleted) {
         verdict="UNSUPPORTED";cause="configured-backend-unavailable-on-adapter";
     } else if(upstream && !ruleConfirmed)cause="expected-rule-not-observed";
+    // A supersampled case that fails names where the frame stopped, in the order it meets the gates: the sizes the case planned, the H
+    // attempt, H's qualification (the 64M-pixel extent cap is here: observed.lastH.reason and firstFailure name the refusal), a refusal
+    // by the resolver before its prep dispatch (no GPU work was done: a gate of flatMonoResolve itself, not the backend), a backend
+    // failure, and last a resolve that never reached the backend.
+    if(supersampledAny && std::strcmp(verdict,"FAIL")==0) {
+        const uint64_t preppedDelta=since(after.hdrPrepped,before.hdrPrepped);
+        cause=!supersampledSizes?"supersampled-sizes-not-as-planned":
+            !attemptedDelta?"supersampled-h-never-attempted":
+            !qualifiedDelta?"supersampled-h-not-qualified":
+            backendFailureDelta?"supersampled-backend-failed":
+            (spatialDelta && !preppedDelta)?"supersampled-h-qualified-resolver-refused-before-the-backend":
+            spatialDelta?"supersampled-h-qualified-then-spatial-recovery":
+            !backendDelta?"supersampled-h-qualified-no-backend-call":
+            !ruleConfirmed?"expected-rule-not-observed":cause;
+    }
     const auto quote=[](const char* value) {
         std::string escaped="\"";
         for(const unsigned char* p=reinterpret_cast<const unsigned char*>(value?value:"");*p;++p) {
@@ -851,6 +898,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           <<",\"profileFlat\":"<<after.flatProfile
           <<",\"scope\":{\"frame\":"<<after.frame<<",\"drawBefore\":"<<before.drawSequence
           <<",\"drawAfter\":"<<after.drawSequence<<",\"work\":"<<after.work<<"}"
+          <<",\"sizes\":{\"renderWidth\":"<<evidence.renderW<<",\"renderHeight\":"<<evidence.renderH
+          <<",\"outputWidth\":"<<evidence.outputW<<",\"outputHeight\":"<<evidence.outputH<<"}"
           <<",\"rasterPixels\":"<<evidence.validDepthPixels
           <<",\"raster\":{\"depthPixels\":"<<evidence.depthPixels<<",\"validDepthPixels\":"<<evidence.validDepthPixels
           <<",\"depthMin\":"<<evidence.depthMin<<",\"depthMax\":"<<evidence.depthMax
@@ -878,6 +927,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           <<",\"worldUnmarked\":"<<worldUnmarkedDelta<<",\"worldMarkers\":"<<worldMarkerDelta
           <<",\"foreignSeen\":"<<foreignDelta<<",\"captured\":"<<capturedDelta
           <<",\"hAttempts\":"<<attemptedDelta<<",\"hQualified\":"<<qualifiedDelta<<",\"backendCalls\":"<<backendDelta
+          <<",\"hdrSpatial\":"<<spatialDelta<<",\"backendFailures\":"<<backendFailureDelta
           <<",\"failureKinds\":"<<after.failureKinds<<",\"failureKindsDropped\":"<<after.failureKindsDropped
           <<",\"prepass\":{\"draws\":"<<(prepassCase?prepassDraws:0u)<<",\"mistakenDraws\":"<<mistaken
           <<",\"namedWorldAfterRun\":"<<evidence.prepass.namedWorld<<",\"predictedWorld\":"<<prepassPredicted
@@ -908,6 +958,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     if(!hostGuard)result<<",\"Emit-hook availability reconstructed only in offline test-link proxy\"";
     if(prepassCase)result<<",\"Prepass order, shader pair and run length follow the 2026-10 settlement census; geometry, record contents and the alpha-test inputs are reconstructed\"";
     if(staleMark)result<<",\"The covering world surface is a reconstructed small pool record drawn with the prepass pair; the owner plane is read back through the proxy's test export\"";
+    if(supersampledAny)result<<",\"The scene targets are rendered above the swap chain's size (the HDR route's R > D): 1.5 x per axis; the game's own final copy that would downsample the result is not part of the bench\"";
+    if(supersampled4k)result<<",\"Hardware adapter only: 5760 x 3240 into 3840 x 2160 is impractical on WARP\"";
     result<<"]}";
     std::puts(result.str().c_str());
     return std::strcmp(verdict,"PASS")==0?0:std::strcmp(verdict,"UNSUPPORTED")==0?2:1;

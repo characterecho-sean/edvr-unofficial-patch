@@ -327,43 +327,12 @@ void taa(uint3 id:SV_DispatchThreadID) {
     float3 mixed=lerp(cur,clamp(history,lo,hi),weight);
     OutColor[id.xy]=float4(hdr?hdrExpand(mixed):mixed,current.a);
 }
-// Modern DLSS presets ignore NGX's bias-current-colour mask. Explicitly rejected
-// pixels must display current colour even when the backend declines that hint.
-[numthreads(8,8,1)]
-void finish(uint3 id:SV_DispatchThreadID) {
-    if(any(id.xy>=size.zw))return;
-    float2 uv=(float2(id.xy)+.5)/float2(size.zw);
-    float2 rasterUv=uv+jitter.xy/float2(size.xy);
-    int2 q=int2(floor(rasterUv*float2(size.xy)-.5));
-    float reject=0;
-    [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
-        reject=max(reject,Rejection.Load(int3(clamp(q+int2(x,y),0,int2(size.xy)-1),0)));
-    OutColor[id.xy]=reject>0?Color.SampleLevel(LinearClamp,rasterUv,0):History.Load(int3(id.xy,0));
-}
-// Single-frame recovery after a temporal backend declines already-jittered
-// input. The result lands on the same output grid as the successful backend.
-[numthreads(8,8,1)]
-void spatial(uint3 id:SV_DispatchThreadID) {
-    if(any(id.xy>=size.zw))return;
-    float2 uv=(float2(id.xy)+.5)/float2(size.zw);
-    OutColor[id.xy]=Color.SampleLevel(LinearClamp,uv+jitter.xy/float2(size.xy),0);
-}
-// The HDR route's pixel-shader half (section 81). The result goes back into H, a render target that need not have an
-// unordered-access view, so the compute finish cannot carry it: one triangle over the render-size target, the
-// finish or the spatial recovery as a pixel shader. R11G11B10_FLOAT holds no NaN, no negative, at most 65024 in red
-// and green (6-bit mantissas) and 64512 in blue (5 bits); the game's own tone pass sees a value the format can
-// represent, which is what requantisation to its precision means here.
-float hdrSafe(float v,float top) { return isnan(v)?0:clamp(v,0,top); }
-float3 hdrRepresentable(float3 c) { return float3(hdrSafe(c.x,65024),hdrSafe(c.y,65024),hdrSafe(c.z,64512)); }
-float4 hdrVs(uint id:SV_VertexID):SV_Position {
-    float2 p=float2((id<<1)&2,id&2);
-    return float4(p*float2(2,-2)+float2(-1,1),0,1);
-}
-// The refusal view (advanced.temporal_aa_debug = motion_source on the VR world route; debug.y): the prep's class, painted in the eye
-// path's colours (temporal_shader_source.h, the motion_source view). The picture is H, which the game's tone pass reads next, so each
-// colour is scaled by the pixel's own level (twice its luma, never below .04): the hue survives the tone pass, the absolute value
-// does not. green 1 joined, red 2 masked, blue 3 not a rig record, yellow 4 stale slot, magenta 5 corrupt, orange 6 stale stamp,
-// cyan 12 first-person, white any other refusal, and a pixel with no engine slot is dimmed to a quarter.
+// The refusal view (advanced.temporal_aa_debug = motion_source; debug.y): the prep's class, painted in the eye path's colours
+// (temporal_shader_source.h, the motion_source view), by the HDR route's finish and by the copy route's. On the HDR route the
+// picture is H, which the game's tone pass reads next, so each colour is scaled by the pixel's own level (twice its luma, never below
+// .04): the hue survives the tone pass, the absolute value does not. green 1 joined, red 2 masked, blue 3 not a rig record, yellow 4
+// stale slot, magenta 5 corrupt, orange 6 stale stamp, cyan 12 first-person, white any other refusal, and a pixel with no engine slot
+// is dimmed to a quarter.
 float3 refusalPaint(float3 c,uint v) {
     const uint kind=v&0x7Fu;
     const float y=max(dot(c,float3(.2126,.7152,.0722)),.02)*2;
@@ -383,6 +352,41 @@ uint refusalClassAt(float2 rasterUv) {
         if((v&0x80u)!=0)best=max(best,v);
     }
     return best!=0?best:ClassMap.Load(int3(clamp(int2(floor(rasterUv*float2(size.xy))),0,hi),0));
+}
+// Modern DLSS presets ignore NGX's bias-current-colour mask. Explicitly rejected
+// pixels must display current colour even when the backend declines that hint.
+// The copy route's finish (render below the output with an SDK backend); it paints the refusal view as well when debug.y says so.
+[numthreads(8,8,1)]
+void finish(uint3 id:SV_DispatchThreadID) {
+    if(any(id.xy>=size.zw))return;
+    float2 uv=(float2(id.xy)+.5)/float2(size.zw);
+    float2 rasterUv=uv+jitter.xy/float2(size.xy);
+    int2 q=int2(floor(rasterUv*float2(size.xy)-.5));
+    float reject=0;
+    [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
+        reject=max(reject,Rejection.Load(int3(clamp(q+int2(x,y),0,int2(size.xy)-1),0)));
+    float4 c=reject>0?Color.SampleLevel(LinearClamp,rasterUv,0):History.Load(int3(id.xy,0));
+    if(debug.y!=0)c.rgb=refusalPaint(c.rgb,refusalClassAt(rasterUv));
+    OutColor[id.xy]=c;
+}
+// Single-frame recovery after a temporal backend declines already-jittered
+// input. The result lands on the same output grid as the successful backend.
+[numthreads(8,8,1)]
+void spatial(uint3 id:SV_DispatchThreadID) {
+    if(any(id.xy>=size.zw))return;
+    float2 uv=(float2(id.xy)+.5)/float2(size.zw);
+    OutColor[id.xy]=Color.SampleLevel(LinearClamp,uv+jitter.xy/float2(size.xy),0);
+}
+// The HDR route's pixel-shader half (section 81). The result goes back into H, a render target that need not have an
+// unordered-access view, so the compute finish cannot carry it: one triangle over the render-size target, the
+// finish or the spatial recovery as a pixel shader. R11G11B10_FLOAT holds no NaN, no negative, at most 65024 in red
+// and green (6-bit mantissas) and 64512 in blue (5 bits); the game's own tone pass sees a value the format can
+// represent, which is what requantisation to its precision means here.
+float hdrSafe(float v,float top) { return isnan(v)?0:clamp(v,0,top); }
+float3 hdrRepresentable(float3 c) { return float3(hdrSafe(c.x,65024),hdrSafe(c.y,65024),hdrSafe(c.z,64512)); }
+float4 hdrVs(uint id:SV_VertexID):SV_Position {
+    float2 p=float2((id<<1)&2,id&2);
+    return float4(p*float2(2,-2)+float2(-1,1),0,1);
 }
 float4 finishHdr(float4 pos:SV_Position):SV_Target {
     int2 p=int2(pos.xy);

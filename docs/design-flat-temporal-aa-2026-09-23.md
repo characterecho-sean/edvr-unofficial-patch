@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** 104 CLOSED: DLAA/FSR work at the settlement, inputs verified,
-  slight shimmer is the content; 5f7e43e8 (A/B key removed) on Epic (104).
+- **State:** native DLAA/FSR work at the settlement; SS above 1.42 on foot was
+  refused by a 16M-pixel H bound: raised, with the copy-route view (104).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,8 +33,8 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** 104 closed (local-reset key removed, raw kept); TAA's
-  single-texel depth check at silhouettes is a separate item. Retain 102's
+- **Next:** fly SS 0.75 (copy-route view), 1.0 and 1.5 (H must qualify) on
+  foot; bench both routes; TAA's depth check is a separate task. Retain 102's
   color-clear fix; no per-weapon table; preserve Epic settings, 87's native
   FSR comparison, 83's open items and high-G motion; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
@@ -12811,6 +12811,57 @@ Committed 5f7e43e8 (full build green, receipt `fb1b6035`, 234 keys read and
 documented); `--dll-only` passed; Epic flat install verified,
 `v0.18.2-30-g5f7e43e8`, SHA256 C97FB27B83EE256A..., `edvr-flat.ini`
 unchanged (its `flat_sdk_local_reset` line now names a key nothing reads).
+
+### 2026-10-06: 5f7e43e8 flown; supersampling never runs the SDK on foot
+
+Flight `edvr_gfx_20261006_094726.log`, `v0.18.2-30-g5f7e43e8`. Sean: the view
+"was removed" and, even at SS 2.0, the roof edge still shimmers in motion.
+
+The view was not removed. The ini had no view line at launch (first read:
+off). After Sean added it at 09:52:12 the view came on, but at SS 0.75: DLSS
+upscaling 2880x1620 to 3840x2160 on the copy route, and only the HDR route's
+finish painted. The census ran either way.
+
+Supersampling never ran DLSS or FSR. At SS 1.5 (5760x3240) and SS 2.0
+(7680x4320) every frame was refused with
+`flat-resolve-foreground-contract-unqualified`: the first-person contract
+never qualified H (H-qualified 0 of about 7,140 attempts, against 100% at
+native). The HDR route recovered each frame spatially (`last=spatial-fallback`,
+`backend=0`), and the jitter never left its warm-up (`jitter=(0,0)`), so there
+was no temporal AA at all: the SS 2.0 shimmer Sean saw is plain supersampling.
+It is no evidence about DLAA, and it means supersampling above native cannot be
+offered as the lever for the roof yet. OPEN: why H never qualifies above native.
+
+At SS 0.75 the copy route ran DLSS normally (treated-jittered, about 400
+accepted-history frames per 5 s).
+
+Build (Sean asked for it): the refusal view and census on the copy route. The
+copy route's frame carries the view and census flags; the resolver paints in
+the copy route's compute finish (DLSS or FSR; EDVR's TAA on the copy route has
+no finish), with the class texture at t11. Rig: flat_copy_refusal_view_gpu_
+tests.h (DLAA, DLSS and FSR at 1x and 2x; view off bit-identical; TAA never
+paints); reverting the paint line, the t11 binding or the HDR-only gate fails
+32 to 40 checks. On the RGBA8 copy route the paint keeps hue, not brightness.
+
+Root cause of the supersampled refusals (code reading; the sizes settle it):
+`FlatForegroundMotion::prepareH` refused any H above 16*1024*1024 pixels
+(`foreground-H-resources`). 3840x2160 is 8.3M, 5760x3240 18.7M, 7680x4320
+33.2M; SS 1.25 on a 4K screen (13.0M) was under it. The reason never reached
+the log: the 5 s line printed a per-frame field that every frame start
+clears, so it read `last-refusal=none` with every frame refused.
+
+Fix (Sean, 2026-10-06, with the recommendations below): the bound is 64M
+pixels (`kFlatForegroundMaxPixels`; 8192x8192, 1 GB of RGBA32F map; about
+530 MB at SS 2.0 on a 4K screen), and `last-refusal` is the most recent H
+refusal since the previous line.
+
+Two routes (Sean asked why; kept). H and the game's post chain run at the
+render size, and only the final copy scales to the screen. An upscaler
+(R < D) can only take the place of that copy; at R >= D the HDR route
+resolves before bloom, DoF and tone and does not depend on the post chain's
+shape (section 81). Both stay. The cost is that every feature and instrument
+needs both routes; the bench gains a supersampled on-foot HDR case and a
+copy-route case so every build checks both.
 
 Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
 motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the

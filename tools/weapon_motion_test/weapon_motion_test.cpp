@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <string>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
 void check(bool b,const char* s){++checks;if(!b){std::printf("FAIL: %s\n",s);std::exit(1);}}
@@ -326,6 +327,36 @@ int main(int argc,char** argv){
   worldOnly.fail("unknown-world-writer");
   check(!worldOnly.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),nearerCamera,593,W,H,output) &&
         !output.qualified && !output.motion,"world-only H still refuses an uncertified writer");
+ }
+ {
+  // The largest render size H may qualify at (design doc section 104). The first-person map is RGBA32F at the render size, so 64M pixels
+  // (8192x8192) is 1 GB; the cap covers a 4K screen supersampled 2.0. The bound it replaced, 16M pixels, refused every on-foot frame of a
+  // 4K screen above SS 1.42: 5760x3240 (SS 1.5) and 7680x4320 (SS 2.0) fell back to the spatial recovery with no AA.
+  struct Extent{unsigned width,height;bool allowed;const char* what;};
+  const Extent extents[]={
+   {3840,2160,true,"3840x2160 (4K at SS 1.0)"},{5760,3240,true,"5760x3240 (4K at SS 1.5, 18.7M pixels)"},
+   {7680,4320,true,"7680x4320 (4K at SS 2.0, 33.2M pixels)"},{8192,8192,true,"8192x8192 (exactly 64M pixels)"},
+   {8192,8193,false,"8192x8193 (one row past 64M pixels)"},{0,2160,false,"0x2160 (no width)"},{3840,0,false,"3840x0 (no height)"}};
+  for(const auto& e:extents)
+   check(flatForegroundExtentAllowed(e.width,e.height)==e.allowed,(std::string("foreground extent cap: ")+e.what+(e.allowed?" is allowed":" is refused")).c_str());
+  check(kFlatForegroundMaxPixels==64ull*1024*1024,"the foreground extent cap is 64M pixels (8192x8192)");
+  // The documented regression: the old 16M bound refuses 5760x3240 (and 7680x4320), the cap admits them.
+  constexpr uint64_t oldBound=16ull*1024*1024;
+  check(uint64_t(5760)*3240>oldBound && uint64_t(7680)*4320>oldBound && uint64_t(3840)*2160<=oldBound &&
+        flatForegroundExtentAllowed(5760,3240) && flatForegroundExtentAllowed(7680,4320),
+        "regression: the old 16M-pixel bound refused 4K at SS 1.5 (5760x3240) and SS 2.0 (7680x4320); the cap admits both");
+  // prepareH takes its bound from the same function: an extent the cap refuses is "foreground-H-resources"; one it admits goes on to the
+  // shape check, which these 128x96 textures fail ("foreground-H-resource-shape"), so the cap is not what refused it.
+  FlatForegroundMotion capped;FlatForegroundMotion::Output sized;float cappedCamera[6][4]{};cappedCamera[3][2]=.025f;
+  auto cappedRefusal=[&](unsigned frame,unsigned width,unsigned height)->const char* {
+   capped.beginFrame(frame);
+   return capped.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),cappedCamera,frame,width,height,sized)?"qualified":(sized.refusal?sized.refusal:"none");};
+  check(!std::strcmp(cappedRefusal(5900,8192,8193),"foreground-H-resources"),"H refuses 8192x8193 as foreground-H-resources");
+  check(!std::strcmp(cappedRefusal(5901,0,2160),"foreground-H-resources") && !std::strcmp(cappedRefusal(5902,3840,0),"foreground-H-resources"),
+        "H refuses a zero extent as foreground-H-resources");
+  check(!std::strcmp(cappedRefusal(5903,5760,3240),"foreground-H-resource-shape"),
+        "H admits 5760x3240 past the extent cap (the 128x96 test textures fail the shape check instead): the 16M bound refused it as foreground-H-resources");
+  check(!std::strcmp(cappedRefusal(5904,8192,8192),"foreground-H-resource-shape"),"H admits 8192x8192 past the extent cap");
  }
  Pose foreignOld{.1f,1,0,0,.025f,740},foreignNow{.2f,1,0,0,.025f,740};
  {
