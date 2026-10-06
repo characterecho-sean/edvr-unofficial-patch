@@ -2,44 +2,35 @@
 
 ## Status
 
-- **Current flight:** verified `c668f83f`, gfx `055138`/runtime
-  `055140_455_44976`, build `6ABBA511`; Sean reports "Much better." All 13,978
-  deferred pairs completed, handoffs completed and Present checks bypassed;
-  zero failures/rejections/cancellations. User now requests removal of the
-  mistaken selector admission; scanner identification is delegated elsewhere.
-- **Diagnosis:** verified `6eede364` CPU trace `052039-ca6860`, PID30932, gfx
-  `052105`/runtime `052107_579_30932`, build `6ABB9884`; matching PDBs, zero
-  loss, 5,257 covered cycles. Exact seq8490 caller/owner stacks confirm Present
-  reblocks behind deferred xrEndFrame via loadingBoundary, even when its policy
-  check has no work. Steady callback-site wait .625ms/frame mean. Earlier
-  handoff remains ~.001ms, no failures. A bounded one-use bypass now passes
-  4,904 focused checks, including the actual registered callback, loading
-  transitions and fatal invalidation; independent review found no blocker. Full
-  validation passed all 86 jobs and installer checks.
-- **Installed:** Frontier `v0.18.0-rc.3-68-g967f0519`, source `967f0519`, after
-  clean receipt-guarded promotion; payload and native receipt verified.
-  INI/DLSS hashes preserved. Source pushed on the separate branch; main
-  unchanged.
-- **Conclusion:** two caller waits behind deferred xrEndFrame are confirmed.
-  Both handoff and Present fixes are flown with positive feedback. No
-  controlled whole-frame regression attribution against 0.17.0 yet. See
-  Exclusions for ruled-out causes and the HUD arc for visual evidence.
-- **Baseline:** OpenVR `v0.16.2` Steam graphics `160129`/`6AA6D371`, runtime
-  `160131`/`6AA6D378`; user reports 8.9–9.6 ms. Dimensions/preset/DLSS hash
-  match, but legacy Valve OpenVR differs from native OpenXR over SteamVR.
-- **Environment:** RTX 5090 SteamVR/OpenXR, 2016×1948 input → 4032×3896
-  output/eye, DLSS Performance/preset K, UI 125 5040×4870. Earlier Pimax
-  Crystal Super/Pimax OpenXR 90 Hz evidence used
-  2037×1969→4074×3938/UI5093×4923. Installed DLSS metadata is 310.7.0.0;
-  graphics logs omit driver/DLSS versions. Profiling uses Frontier; baseline
-  uses Steam.
-- **Next:** selector unwind complete; scanner <> identification belongs to the
-  other agent. Holograms/performance fixes are preserved. Use explicit
-  `--expect-build 967f0519` for this installed source. No new capture required
-  for diagnosis. Review B1/B2 recovery and B3 permission remain open.
-  Allocation stalls and driver work stay separate; sampled direct-self does not
-  price induced driver execution. Existing GPU trace `035907-fda516` is
-  retained; do not repeat it.
+- **State, 2026-10-06:** proactive review of features added since `v0.18.2`,
+  rather than a newly reported regression. Frozen source range `9a875295` to
+  `12a381a6` (57 commits); branch `codex/dlss-performance-since-0182`.
+- **Conclusion:** core VR eye DLSS, NGX evaluation, submission, and crisp HUD
+  are unchanged. The shared on-foot world shader has higher compiled resource
+  usage; weapon-history extraction adds CPU bookkeeping on admitted on-foot
+  draws and raises its record limit from 64 to 128. These are candidates, not a
+  measured frametime regression.
+- **Open hypotheses:** actual GPU cost of the larger shared shader, admitted
+  weapon-draw CPU cost, and whether VR exceeds 64 live records. Compiled
+  baseline/current comparison and discriminators are in the dated entry below.
+- **Evidence limit:** latest located Steam VR flight verifies its own source
+  `373198c1`, but is earlier than the baseline and outside the reviewed
+  lineage. No paired current/baseline capture or usable current Frontier log
+  was found. Historical GPU/CPU timings cannot price this source delta.
+- **Environment:** historical Steam flight used Pimax OpenXR/Crystal Super, RTX
+  5090, 90 Hz, DLSS Performance/K, runtime 310.9.1.0, 2016x1949 input to
+  4032x3898 output per eye. This is evidence provenance, not a verification of
+  the current install. Any optimization flight uses Frontier and the user's
+  requested SteamVR/OpenXR runtime.
+- **Ruled-out pointer:** the dated review below separates flat-only features,
+  own TAA changes, and unchanged VR routes. September's measured handoff and
+  Present waits, flown fixes, exclusions, and selector unwind remain in their
+  dated journal entries; recovery/diagnostic review B1/B2/B3 was not
+  re-audited.
+- **Next:** review complete; no flight or speculative install required. Measure
+  the candidates before choosing a fix. Keep this branch separate from main.
+  September Frontier checkpoint `967f0519` and trace `035907-fda516` are
+  historical, not current-build evidence.
 
 ## Pre-optimization Frontier evidence
 
@@ -505,3 +496,168 @@ unchanged INI/DLSS hashes (`build/dlss-selector-unwind-frontier-install.log`).
 Capture helper now expects this source; CPU-only dry-run succeeded without
 writes, workloads or trace sessions. Main and Steam unchanged; no additional
 flight is requested for this removal.
+
+## 2026-10-06: proactive review since 0.18.2
+
+Sean requested a proactive review of new features, with no new slowdown
+reported. Scope is tagged `v0.18.2`
+(`9a8752958f394be6872015721fe336b43f115e38`, 2026-10-04) through frozen
+`12a381a65f1dd44b0c4a62b5c4f18a63a5d64f9f` (2026-10-06), 57 commits. Other work
+advanced `origin/main` during the review; it was not merged into
+`codex/dlss-performance-since-0182`.
+
+### Findings and reachability
+
+**Measure first: higher static resource usage in the shared on-foot world
+shader.** The VR world route's shared `prep` and HDR `finishHdr` shaders grew
+even though VR leaves the new foreground-map branch disabled. Compiling both
+source revisions with identical production entry points, profiles, macros, and
+flags gives the following DXBC/disassembly comparison:
+
+| Variant | Baseline bytes -> current | Reflected instructions | Virtual temporary registers | Bound resources |
+| --- | --- | --- | --- | --- |
+| `prep`, `cs_5_0` | 17,992 -> 19,780 | 560 -> 618 | 20 -> 21 | 15 -> 16 |
+| `finishHdr`, `ps_5_0` | 5,648 -> 6,148 | 137 -> 147 | 6 -> 8 | 7 -> 8 |
+
+Declared DXBC temporaries and static instruction counts are not measured RTX
+register occupancy or executed instructions. A uniform false branch can avoid
+new sampling while the driver still compiles a larger program. Thus a potential
+VR GPU cost remains open, rather than being ruled out by the foreground gate
+alone. Hardware timing of these passes with foreground disabled is the
+discriminator; no shader specialization or rollback was shipped.
+
+Reachability is narrower than the ordinary DLSS eye path. The separate
+`experimental.temporal_aa_on_foot_world` route defaults to `auto`
+(`vr_world_route.cpp:695-704`). Watching requires an active machine, live UI
+layer, and held world screen (`vr_world_route.cpp:712-713,894`); treatment
+requires the HDR/depth/camera selection and render size at least screen size
+(`vr_world_route.cpp:277-306`, `flat_hdr_route.h:446-449`). Normal undersampled
+DLSS eyes do not run these mono shaders. This is a conditional on-foot world
+cost candidate, not an added cost to every cockpit DLSS frame. The flat-only
+`experimental.temporal_aa_before_post` key is unrelated.
+
+**Low priority: added CPU bookkeeping in admitted VR weapon draws.** Commit
+`6ab6acff` extracted the existing animated-vertex history into
+`AnimatedVertexHistory`. Its `prepareCapture` now calls `GetDevice`
+(`animated_vertex_history.h:136`), and the VR consumer calls it again
+(`weapon_motion.cpp:152`); the baseline made one such call. The owned capture
+also adds six fixed COM AddRef/Release pairs, plus two per prior candidate (up
+to four candidates), compared with the baseline's raw borrowed views:
+`animated_vertex_history.h:129-130,167-173`. These are real additional
+operations, but their CPU time has not been measured. The geometry metadata
+queries and two record-matching scans already existed. No new steady-state heap
+allocation was found below the record/byte limits after warmup.
+
+This path requires weapon stability, a recognized on-foot weapon/tool VS, and
+the matching on-foot source depth (`screen_motion.cpp:260-313`,
+`weapon_motion.cpp:132-145`, `vscreen.cpp:4944-4949`). Ordinary cockpit eye
+draws do not enter it. The extraction preserves the GPU index copy, one
+identity dispatch, original-VS stream-output capture, and motion raster. It
+does add a constant-time epoch/record check after capture; the fallback record
+scan requires an intervening invalidation/erase.
+
+**Low priority, conditional: more weapon history may now be processed.** Commit
+`eccfce7a` raises the shared live-record ceiling from 64 to 128
+(`animated_vertex_history.h:17-20`). The position-history byte cap remains 32
+MiB, with small identity resources and metadata outside that accounting.
+Records beyond the old limit can now allocate and execute identity/capture/
+raster work instead of being refused, and matching scans can visit a larger
+set. This permits intended motion coverage during equip bursts; reducing it
+would trade correctness for cost. The observed `records=64` motivating the
+change was a flat flight. No VR record-count evidence establishes how often the
+larger limit is reached. Do not reduce the cap on this review alone.
+
+**Direct VR eye DLSS and crisp HUD: unchanged.** `temporal_pass.cpp`,
+`temporal_shader_source.h`, `dlaa.cpp`, `fsr3_engine.cpp`,
+`native_temporal.cpp`, `vr_world_route.cpp`, `ui_layer.cpp`, and
+`hud_layer_census.cpp` have no source delta in this range. No new eye-sized
+allocation, readback, clear, copy, NGX evaluation, UI replay, or GPU query was
+added to those routes. The NGX SDK pin/fetch and package-copy path are
+unchanged; this does not verify a live `nvngx_dlss.dll`. Generated shader
+bytecode is ignored and is rebuilt from source; the generator adds flat
+foreground variants rather than changing the VR eye shader.
+
+**Shared mono shader: changed, with new work disabled in VR DLSS.** The VR
+world route does use `flat_mono_shader_source.h`. Its frame is
+value-initialized and leaves the new foreground fields empty
+(`vr_world_route.cpp:321-415`); `flat_mono_resolve.cpp:965` consequently leaves
+the foreground control zero. The new foreground-map sampling path is not taken
+there. The new four-texel history-depth test runs only in own TAA, not in DLSS.
+Disabled branches alone do not prove identical register pressure or shader
+execution time; the compiled comparison is recorded below.
+
+**Flat observers and allocations: gated out of VR.** New replay-query calls at
+`vscreen.cpp:4390,4405,4412` check `runtimeFlatProfile()`, a plain comparison
+of the cached profile (`runtime_profile.h:80`). New shader metadata capture at
+`device_hook.cpp:705-713,2719-2724` is flat-gated, and the shader cache returns
+before work outside flat (`device_hook.cpp:629-640`). Engine velocity retains
+the VR `R32G32_FLOAT` target; new marker format/resources and blend state
+require flat provenance (`engine_velocity.cpp:761-776,1005-1030`). The extra
+MRT6 condition is one profile check, with no added VR GPU pass.
+
+Flat mixed-camera SDK AA has a full-render-size RGBA32F foreground map, cleared
+and replay-drawn at H (`flat_foreground_motion.h:192-217`), gated by flat
+runtime, SDK mode, and `selected.mixedCamera`
+(`flat_runtime.cpp:4094-4095,5157,5438`). That can be expensive in flat, but
+the state and calls are not reached by VR. Flat's GPU resolve timer begins
+inside the resolver (`flat_mono_resolve.cpp:975`) after this preparation, so it
+excludes the map work; the whole-frame GPU timer includes it. This is a
+measurement limitation, not evidence of a VR regression.
+
+**Timing, jitter, and submission: unchanged for VR.** The optional jitter count
+in `temporal_math.h:118-121` defaults to eight, and the VR call at
+`native_temporal.cpp:357` supplies no alternate count. OpenXR source,
+`native_perf_history.cpp`, `perf_monitor.cpp`, and graph thresholds have no
+delta. ABI-v5's monitor CPU figure still uses `callerWorkMs`, while native
+benchmark CPU is pre-submit application time. A low benchmark CPU row does not
+exclude post-submit caller stalls or explain a red monitor bar.
+
+### Existing flight evidence
+
+The sanctioned locator found Steam graphics `edvr_gfx_20261004_143345.log` and
+runtime `edvr_openxr_20261004_143347_525_57808.log`. `edvr_log.py
+--expect-build 373198c1` verifies their source
+`373198c16538609638a8c1df622800e288a448e7`, version `v0.18.1-19-g373198c1`. The
+explicit `v0.18.2` check fails; that source is not an ancestor of the frozen
+review head. These are historical evidence only. The locator found no usable
+Frontier log for the review target.
+
+That Steam run used EDVR native OpenXR over Pimax OpenXR, Pimax Crystal Super
+at 90 Hz, RTX 5090, DLSS runtime file version 310.9.1.0, Performance/preset K,
+2016x1949 input to 4032x3898 output per eye. Driver version was not logged.
+Completed benchmark window 9 had 2,011 valid samples over 30 seconds: CPU
+p50/p95/p99 7.118/9.144/11.048 ms and GPU 12.082/13.758/15.598 ms.
+Scene/scope/configuration and source are not matched to a baseline/current
+pair. Neither these numbers nor the older 0.16.2 OpenVR comparison measures the
+cost of features added since 0.18.2.
+
+### Validation and next discriminators
+
+This is a source/reachability review, not a measured whole-frame A/B result. No
+production code, configuration, installed DLL, or DLSS runtime was changed.
+
+The shader comparison used `D3DCompile`, `D3DDisassemble`, and `D3DReflect`
+from `C:\Windows\System32\d3dcompiler_47.dll`, version 10.0.26100.9457, SHA256
+`2E3526354DBCD9CF013F7B741C549DF2170FE6AF607628442216A21E7D584883`. That is the
+production generator's resolved compiler path. Entry points, profiles, source
+names, no macros, and compile flags 0/0 match the unchanged production
+mono-variant table. It compares source-generated bytecode, not the currently
+installed DLL or NVIDIA driver machine code. Scratch outputs are under ignored
+`build/gpu_shader_compare`; the results above are retained here so the review
+does not depend on those temporary artifacts.
+
+For the weapon candidate, compare admitted `weaponMotionDraw` CPU intervals in
+the existing offline WARP rig at one and 32 matching records, baseline and
+current, after warmup. Include state restoration and final COM releases in the
+measured interval. A WARP result isolates implementation overhead; it is not a
+hardware DLSS frame budget. A separate 64 versus 65-128 distinct geometry-key
+workload can confirm admission, allocation, scan, and GPU-work counts above the
+old cap. Existing `--bench-history` is a reconstructed production-history
+correctness/pressure test, not a frametime benchmark. VR weapon logs have no
+live-record budget line: `records=` is flat-only. If real VR cap usage becomes
+material, instrument it before a Frontier flight.
+
+No fix is justified by an unmeasured cost alone. Any future flight must first
+verify the exact build, and match SteamVR/OpenXR runtime, headset/per-eye size,
+DLSS DLL/preset, scene, and diagnostics state. Keep the review branch separate
+from main and use Frontier for optimization testing.
