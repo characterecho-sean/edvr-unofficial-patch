@@ -2,8 +2,9 @@
 
 ## Status
 
-- **State:** native DLAA/FSR work at the settlement; SS above 1.42 on foot was
-  refused by a 16M-pixel H bound: raised, with the copy-route view (104).
+- **State:** native DLAA/FSR work at the settlement; SS above 1 on foot was
+  refused by two gates (16M H bound, TAA's native-size rule), both fixed, plus
+  the copy-route view; TAA best-of-four history depth NOT FLOWN (104).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,11 +34,11 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** fly SS 0.75 (copy-route view), 1.0 and 1.5 (H must qualify) on
-  foot; bench both routes; TAA's depth check is a separate task. Retain 102's
-  color-clear fix; no per-weapon table; preserve Epic settings, 87's native
-  FSR comparison, 83's open items and high-G motion; do not repeat qualified
-  PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
+- **Next:** one flight on foot (104): SS 0.75 (copy-route view), 1.0, 1.5 (H
+  qualifies, backend runs), EDVR's TAA standing still at the roof. Retain
+  102's color-clear fix; no per-weapon table; preserve Epic settings, 87's
+  native FSR comparison, 83's open items and high-G motion; do not repeat
+  qualified PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
   regression tests and `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
@@ -12868,3 +12869,78 @@ motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
 jagged roof and spool edges, and NumLock once in each mode. Then drop the view,
 set `flat_sdk_local_reset = off` under `[experimental]` and compare the same
 edges while moving: jagged against ghosting or smearing at the silhouettes.
+
+### 2026-10-06: TAA's history depth check takes the best of four texels
+
+Hypothesis, from code reading (BUILT, NOT FLOWN): the shimmer EDVR's TAA
+shows on the roof's top bevel and corner while standing still is `taa()`
+losing the edge pixels' history on alternate frames. It kept a pixel's history
+only if last frame's depth at one texel, `oldQ = int2(previous * size +
+jitter.zw)`, was within 1% (floor 1e-6) of the camera term's expected depth.
+A previous phase under half a texel puts that position inside the pixel's own
+texel, so at a jittered silhouette the texel is the roof on one frame and the
+sky on the next. The pixel then shows the raw jittered sample, bright on one
+frame and black on the next: the beaded bevel in the enlarged screenshot. The
+prep's steady-detail check took the best of the four texels around the
+previous raster position for exactly this (section 82); `taa()` never got it.
+
+Environment: the flat profile with `fix.temporal_aa = on` (EDVR's own TAA;
+DLAA, DLSS and FSR never run `taa()`), the Epic install, Sean's 4K rig
+(3840x2160 output). The check reads the resolver's own R32_FLOAT depth copy at
+the render size; no fixed-size table is involved. VR is not touched: its TAA is
+another kernel.
+
+Change: `stalePreviousDepthMatches` is now `historyDepthMatches` (it has two
+callers) and `taa()` asks it in place of its own single-texel lines:
+`if(historyDepthMatches(previous,ExpectedDepth.Load(int3(q,0))))weight=.9;`.
+Same four texels, same previous-phase arithmetic, same 1% tolerance and 1e-6
+floor (`kStaleDepthRel`, `kStaleDepthFloor`; the names stay). The prep's call
+is unchanged. Cost: three more R32_FLOAT loads per output pixel, on adjacent
+texels.
+
+Tests, `tools\flat_mono_resolve_test\flat_taa_history_depth_gpu_tests.h`, on
+WARP through the real kernel (history a flat 128, the current frame a checker
+of 64 and 192: a kept pixel reads 122 or 134, a reset one 64 or 192; last
+frame's depth drawn by hand; previous phase +-0.25 per axis):
+1. A jittered silhouette keeps its history: roof edges against the sky, both
+   axes, both signs. The pixel whose own texel was sky but whose neighbour
+   toward the phase was the roof is kept; the next one out, four sky texels,
+   is reset.
+2. A true disocclusion still resets: where an occluder moved away every pixel
+   whose four texels held it is reset, and only the trailing-edge pixel is
+   kept (the best of four's known price, and what separates four texels from
+   sixteen). Depths 0.9% off either way are kept; 1.1% off either way, a sky
+   and a surface twice as near are reset; at depth 1e-5, 5e-7 off is kept (the
+   floor) and 2e-6 off is reset.
+Both run again against the kernel with one rule flipped, through a new
+test-only seam (`flatMonoResolveTestTaaBytecode`, like the prep's): 15 of 15
+mutants fail the tests, and the old single-texel rule fails both.
+
+Full build green after merging main (5f7e43e8), receipt `89e75443`: the two
+tests pass on the shipped kernel. A first full build had stopped on
+`heartbeat_writer_test` H5.whole (a reader-tick count under CPU load; it
+passed 5 of 5 alone and in the rebuild); not touched.
+
+What it cannot do: a thin, bright, sub-pixel specular line still has its
+history clamped to a 3x3 box of the current frame's texels, and that box moves
+with the jitter. That is TAA's own limit and is not changed here.
+
+Refuted if, standing still at the roof in TAA, the bevel and corner shimmer as
+before: then the depth check was not what lost the history, and the next step
+is a count of the pixels `taa()` zeroes at the roof, not a threshold.
+
+Committed as 36003718 (the shader and its tests), main merged in as 3db65989
+and this entry as 2d8e6761; fast-forwarded main and pushed, origin/main
+confirmed. Receipt-guarded `--dll-only` promotion passed. Epic flat install via
+`install_edvr.py` (dry run, install, `--verify-only`); the installed DLL is
+`v0.18.2-34-g2d8e6761`, SHA256 D5B6A47E814AE5CA..., the build's own.
+`edvr-flat.ini` (8A00D126...) and `nvngx_dlss.dll` (3975567B...) are unchanged
+and `edvr.ini` stays absent. Frontier was not installed. Read the flight
+against that literal version: `edvr_log.py --target <the Epic game directory>
+--expect-build 2d8e6761` (`epic` is not an alias) exits 2 on any other build;
+today it names the 5f7e43e8 flight's log as a mismatch, as it should.
+
+Next flight (Epic, flat profile, TAA on): the same settlement at night,
+standing still, EDVR's TAA on the roof's top bevel and lower-left corner, then
+DLAA on the same view. Read the edge pixels for the beading, and for any new
+ghost trail where a ship or a walker leaves the frame (the price above).

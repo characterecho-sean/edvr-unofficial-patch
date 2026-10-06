@@ -409,13 +409,13 @@ inline void mutationChecks(Rig& r) {
         {"the floor is zero", "kStaleDepthFloor=1e-6;", "kStaleDepthFloor=0;", nullptr},
         {"the floor is 1e-3", "kStaleDepthFloor=1e-6;", "kStaleDepthFloor=1e-3;", nullptr},
         {"the tolerance is the smaller of the floor and the relative term", "max(kStaleDepthFloor,expected*kStaleDepthRel)", "min(kStaleDepthFloor,expected*kStaleDepthRel)", nullptr},
-        {"there is no depth check", "if(valid && kind==3)valid=stalePreviousDepthMatches(prev,expected);", "if(valid && kind==3)valid=true;", nullptr},
-        {"the depth check is inverted", "if(valid && kind==3)valid=stalePreviousDepthMatches(prev,expected);",
-         "if(valid && kind==3)valid=!stalePreviousDepthMatches(prev,expected);", nullptr},
-        {"the check looks where the pixel is, not where the camera sends it", "valid=stalePreviousDepthMatches(prev,expected);",
-         "valid=stalePreviousDepthMatches(rawUv,expected);", nullptr},
-        {"a stale pixel the check refuses is counted as a range refusal", "if(valid && kind==3)valid=stalePreviousDepthMatches(prev,expected);",
-         "if(valid && kind==3){valid=stalePreviousDepthMatches(prev,expected);if(!valid)cls=kClassRange;}", nullptr},
+        {"there is no depth check", "if(valid && kind==3)valid=historyDepthMatches(prev,expected);", "if(valid && kind==3)valid=true;", nullptr},
+        {"the depth check is inverted", "if(valid && kind==3)valid=historyDepthMatches(prev,expected);",
+         "if(valid && kind==3)valid=!historyDepthMatches(prev,expected);", nullptr},
+        {"the check looks where the pixel is, not where the camera sends it", "valid=historyDepthMatches(prev,expected);",
+         "valid=historyDepthMatches(rawUv,expected);", nullptr},
+        {"a stale pixel the check refuses is counted as a range refusal", "if(valid && kind==3)valid=historyDepthMatches(prev,expected);",
+         "if(valid && kind==3){valid=historyDepthMatches(prev,expected);if(!valid)cls=kClassRange;}", nullptr},
         {"the previous phase is ignored", "prev*float2(size.xy)+jitter.zw-.5", "prev*float2(size.xy)-.5", nullptr},
         {"the previous phase has the wrong sign", "prev*float2(size.xy)+jitter.zw-.5", "prev*float2(size.xy)-jitter.zw-.5", nullptr},
         {"the current phase is used for the previous one", "prev*float2(size.xy)+jitter.zw-.5", "prev*float2(size.xy)+jitter.xy-.5", nullptr},
@@ -432,8 +432,8 @@ inline void mutationChecks(Rig& r) {
          "if(!(depth>0) || es.x>=4294967296.0){cls=kClassSentinel;return flags.w==2?0:2;}", nullptr},
         {"a corrupt code is kept with the key on", "if(float(code)!=es.x || (code&1)==0){cls=kClassCorrupt;return 2;}",
          "if(float(code)!=es.x || (code&1)==0){cls=kClassCorrupt;return flags.w==2?0:2;}", nullptr},
-        {"the check compares with the pixel's own depth, not the camera term's expected depth", "valid=stalePreviousDepthMatches(prev,expected);",
-         "valid=stalePreviousDepthMatches(prev,depth);", nullptr},
+        {"the check compares with the pixel's own depth, not the camera term's expected depth", "valid=historyDepthMatches(prev,expected);",
+         "valid=historyDepthMatches(prev,depth);", nullptr},
     };
     const std::string shipped = edvr::kFlatMonoShaderSource;
     int caught = 0, equivalent = 0;
@@ -502,8 +502,11 @@ inline void sourceTests() {
               std::strtod(source.c_str() + rel + std::strlen("kStaleDepthRel="), nullptr) == kFlatMonoStaleDepthRelative &&
               std::strtod(source.c_str() + floorAt + std::strlen("kStaleDepthFloor="), nullptr) == kFlatMonoStaleDepthFloor,
           "steady detail: the HLSL's tolerance (kStaleDepthRel, kStaleDepthFloor) is flat_mono_refusal.h's: 1% and 1e-6, the resolver's own TAA's");
-    check(source.find("abs(was-predicted)<=max(1e-6,predicted*.01)") != std::string::npos,
-          "steady detail: the resolver's own TAA still applies the same 1% (floor 1e-6) test to its history depth, as the check's tolerance says");
+    // The resolver's own TAA applies the same rule: its own 1% (floor 1e-6) literal is gone, taa() asks the shared check (section 104;
+    // flat_taa_history_depth_gpu_tests.h holds what it does).
+    check(source.find("abs(was-predicted)") == std::string::npos &&
+              source.find("if(historyDepthMatches(previous,ExpectedDepth.Load(int3(q,0))))weight=.9;") != std::string::npos,
+          "steady detail: the resolver's own TAA applies the same check, with the same 1% (floor 1e-6) tolerance, to its history depth: no literal of its own");
     check(source.find("flags.w==1?0:(flags.w==2?3:2)") != std::string::npos,
           "steady detail: the stale-slot policy has three values (0 refuse, 1 the menu's blanket, 2 the depth-checked camera term)");
 }

@@ -113,9 +113,11 @@ constexpr uint32_t kResetEventLogCap=32;
 // The first-person inputs' two log lines (FlatMonoResolveFrame::firstPersonMotion): each said once a session, like the
 // budgets above. The refusal's reason is also kept in stats.firstPersonRefusal, so a later, different one is not lost.
 bool firstPersonBoundLogged=false, firstPersonRefusedLogged=false;
-// Test-only (flatMonoResolveTestPrepBytecode, at the foot of this file): empty, the only state outside tools\flat_mono_resolve_test.
-// Leaked on purpose, like the renderer state: nothing of ours runs from static destruction under the DLL loader lock.
+// Test-only (flatMonoResolveTestPrepBytecode and flatMonoResolveTestTaaBytecode, at the foot of this file): empty, the only state outside
+// tools\flat_mono_resolve_test. Leaked on purpose, like the renderer state: nothing of ours runs from static destruction under the DLL
+// loader lock.
 std::vector<unsigned char>& g_testPrepBytecode=*new std::vector<unsigned char>;
+std::vector<unsigned char>& g_testTaaBytecode=*new std::vector<unsigned char>;
 // advanced.flat_context_isolation (flatMonoResolveSetIsolation): what the next initialisation is asked for; and the renderer's
 // initialisations that said which isolation they chose, in the log, at most kIsolationLogCap a session.
 FlatContextIsolation g_isolationRequest=FlatContextIsolation::Auto;
@@ -341,9 +343,13 @@ bool initialize(ID3D11Device* device,ID3D11DeviceContext* context,const char** r
             static_cast<unsigned>(hrShader[2]),static_cast<unsigned>(hrShader[3]));
     }
     if(shadersFailed)return fail(reason,"flat-resolve-shader-create-failed");
-    // Only a rig ever has bytes here (flatMonoResolveTestPrepBytecode): its mutated prep replaces the shipped one.
+    // Only a rig ever has bytes here (flatMonoResolveTestPrepBytecode, flatMonoResolveTestTaaBytecode): its mutated kernel replaces the
+    // shipped one.
     if(!g_testPrepBytecode.empty() &&
        FAILED(device->CreateComputeShader(g_testPrepBytecode.data(),g_testPrepBytecode.size(),nullptr,g.prep.ReleaseAndGetAddressOf())))
+        return fail(reason,"flat-resolve-shader-create-failed");
+    if(!g_testTaaBytecode.empty() &&
+       FAILED(device->CreateComputeShader(g_testTaaBytecode.data(),g_testTaaBytecode.size(),nullptr,g.taa.ReleaseAndGetAddressOf())))
         return fail(reason,"flat-resolve-shader-create-failed");
     HRESULT hrBuffer=E_PENDING,hrSampler=E_PENDING;
     {
@@ -1194,6 +1200,13 @@ bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* co
 void flatMonoResolveTestPrepBytecode(const void* bytes,size_t size) {
     g_testPrepBytecode.clear();
     if(bytes && size)g_testPrepBytecode.assign(static_cast<const unsigned char*>(bytes),static_cast<const unsigned char*>(bytes)+size);
+}
+// Test-only, likewise, the same contract for the TAA kernel: tools\flat_mono_resolve_test runs its TAA history-depth scenarios against a
+// taa() with one rule flipped (the old single-texel check among them) and proves they fail. Empty bytes mean the shipped bytecode; it
+// takes effect when the renderer is next initialised.
+void flatMonoResolveTestTaaBytecode(const void* bytes,size_t size) {
+    g_testTaaBytecode.clear();
+    if(bytes && size)g_testTaaBytecode.assign(static_cast<const unsigned char*>(bytes),static_cast<const unsigned char*>(bytes)+size);
 }
 // Test-only, likewise: the session's budget of isolation log lines (kIsolationLogCap) starts over, so a rig that has initialised the
 // renderer many times can still read the line an initialisation says.
