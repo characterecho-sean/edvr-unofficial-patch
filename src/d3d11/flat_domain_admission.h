@@ -3,6 +3,7 @@
 #include "flat_projection_recipes.h"
 #include "flat_shader_classifier.h"
 #include <array>
+#include <cstdio>
 #include <cstring>
 
 namespace edvr {
@@ -232,15 +233,54 @@ inline const char* flatDomainRasterRefusal(const FlatDomainShaderProof& p,const 
 // actual selected world camera in this frame. No later-material coverage is
 // guessed, and a foreign or missing world witness leaves the frame refused.
 class FlatDomainPendingNull {
-    struct Witness { const void* depth=nullptr;unsigned width=0,height=0;float camera[6][4]{};float x=0,y=0; };
+    // vs, ps and kind name the draw that left the witness, for the mismatch line alone (describeMismatch): they take no part in
+    // matching or in merging two witnesses. kind 1: a draw at the predicted world near before naming; 2: a null prepass at
+    // another near.
+    struct Witness { const void* depth=nullptr;unsigned width=0,height=0;float camera[6][4]{};float x=0,y=0;uint64_t vs=0,ps=0;unsigned kind=0; };
     std::array<Witness,4> witnesses_{};unsigned count_=0;uint64_t frame_=~0ull;
 public:
     void beginFrame(uint64_t frame){if(frame_!=frame){frame_=frame;count_=0;}}
-    bool add(uint64_t frame,const void* depth,unsigned width,unsigned height,const float camera[6][4],float x,float y) {
-        beginFrame(frame);Witness w{depth,width,height,{},x,y};std::memcpy(w.camera,camera,sizeof(w.camera));
+    bool add(uint64_t frame,const void* depth,unsigned width,unsigned height,const float camera[6][4],float x,float y,
+             uint64_t vs=0,uint64_t ps=0,unsigned kind=0) {
+        beginFrame(frame);Witness w{depth,width,height,{},x,y,vs,ps,kind};std::memcpy(w.camera,camera,sizeof(w.camera));
         for(unsigned i=0;i<count_;++i)if(witnesses_[i].depth==depth && witnesses_[i].width==width && witnesses_[i].height==height &&
             witnesses_[i].x==x && witnesses_[i].y==y && std::memcmp(witnesses_[i].camera,camera,sizeof(w.camera))==0)return true;
         if(count_==witnesses_.size())return false;witnesses_[count_++]=w;return true;
+    }
+    // The first witness matches() would refuse, said in one line (design doc section 104: aiming down sights refused H with this
+    // witness): which kind of draw left it, what differs (depth, size, phase, or the camera block), and for the camera block the
+    // decoded terms of both (x and y scale, near, position) plus the first differing float. False when every witness matches.
+    bool describeMismatch(uint64_t frame,const void* depth,unsigned width,unsigned height,const float camera[6][4],float x,float y,
+                          char* out,size_t size)const {
+        if(!out || !size)return false;
+        out[0]=0;
+        if(frame!=frame_) {   // matches() refuses these too: witnesses kept from an earlier frame, none recorded in this one
+            if(!count_)return false;
+            std::snprintf(out,size,"%u witness(es) left from frame %llu, none recorded in this frame",count_,(unsigned long long)frame_);
+            return true;
+        }
+        for(unsigned i=0;i<count_;++i) {
+            const auto& w=witnesses_[i];
+            const bool d=w.depth!=depth, s=w.width!=width || w.height!=height, p=w.x!=x || w.y!=y;
+            const bool c=std::memcmp(w.camera,camera,sizeof(w.camera))!=0;
+            if(!d && !s && !p && !c)continue;
+            unsigned row=0,col=0;bool found=false;
+            for(unsigned r=0;r<6 && !found;++r)for(unsigned k=0;k<4;++k)
+                if(std::memcmp(&w.camera[r][k],&camera[r][k],sizeof(float))!=0){row=r;col=k;found=true;break;}
+            std::snprintf(out,size,"witness %u/%u kind=%s VS=%016llX PS=%016llX differs:%s%s%s%s; witness scale=(%.6g,%.6g) near=%.6g "
+                "pos=(%.6g,%.6g,%.6g) phase=(%.5g,%.5g) | selected scale=(%.6g,%.6g) near=%.6g pos=(%.6g,%.6g,%.6g) phase=(%.5g,%.5g)",
+                i+1,count_,w.kind==1?"predicted-world-near":w.kind==2?"null-prepass":"unnamed",
+                (unsigned long long)w.vs,(unsigned long long)w.ps,d?" depth":"",s?" size":"",p?" phase":"",c?" camera":"",
+                w.camera[0][0],w.camera[1][1],w.camera[3][2],w.camera[5][0],w.camera[5][1],w.camera[5][2],w.x,w.y,
+                camera[0][0],camera[1][1],camera[3][2],camera[5][0],camera[5][1],camera[5][2],x,y);
+            if(found) {
+                const size_t used=std::strlen(out);
+                if(used<size)std::snprintf(out+used,size-used,"; first differing float row=%u col=%u witness=%.9g selected=%.9g",
+                    270+row,col,w.camera[row][col],camera[row][col]);
+            }
+            return true;
+        }
+        return false;
     }
     bool matches(uint64_t frame,const void* depth,unsigned width,unsigned height,const float camera[6][4],float x,float y)const {
         if(frame!=frame_)return count_==0;

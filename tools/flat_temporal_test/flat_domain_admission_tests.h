@@ -201,6 +201,27 @@ inline int flatDomainAdmissionTests() {
     float foreignCamera[6][4];std::memcpy(foreignCamera,world,sizeof(world));foreignCamera[3][2]=.0675f;
     check(!pending.matches(46474,&depth,3840,2160,foreignCamera,0,0),"foreign near cannot be mislabeled world by null prepass");
     check(!pending.matches(46475,&depth,3840,2160,world,0,0),"pending witness cannot cross frames");
+    {
+        // The mismatch line (section 104: aiming down sights refused H at the pending-null check). It names the witness's kind and
+        // draw, what differs and the first differing float, says nothing when every witness matches, and explains a refusal
+        // matches() makes for witnesses kept from an earlier frame.
+        FlatDomainPendingNull said;char text[768];
+        check(said.add(1,&depth,3840,2160,world,0,0,0xAAAAull,0xBBBBull,1u) &&
+              !said.describeMismatch(1,&depth,3840,2160,world,0,0,text,sizeof(text)) && text[0]==0,
+              "pending-null mismatch line: a matching witness says nothing");
+        float zoomed[6][4];std::memcpy(zoomed,world,sizeof(world));zoomed[0][0]*=2;zoomed[1][1]*=2;
+        check(said.describeMismatch(1,&depth,3840,2160,zoomed,0,0,text,sizeof(text)) && std::strstr(text,"kind=predicted-world-near") &&
+              std::strstr(text,"VS=000000000000AAAA") && std::strstr(text,"differs: camera") && std::strstr(text,"row=270 col=0"),
+              "pending-null mismatch line: names the kind, the draw and the first differing float (row 270, the x scale)");
+        FlatDomainPendingNull prepass;
+        check(prepass.add(2,&depth,3840,2160,foreignCamera,0,0,1,2,2u) &&
+              prepass.describeMismatch(2,&depth,3840,2160,world,0,0,text,sizeof(text)) && std::strstr(text,"kind=null-prepass") &&
+              std::strstr(text,"row=273 col=2"),"pending-null mismatch line: a null prepass at another near names row 273 (the near)");
+        check(prepass.describeMismatch(3,&depth,3840,2160,world,0,0,text,sizeof(text)) && std::strstr(text,"left from frame 2"),
+              "pending-null mismatch line: witnesses kept from an earlier frame are said, as matches() refuses them");
+        check(said.describeMismatch(1,&otherDepth,3840,2160,world,.25f,0,text,sizeof(text)) && std::strstr(text,"depth") &&
+              std::strstr(text,"phase") && !std::strstr(text,"camera;"),"pending-null mismatch line: depth and phase are named");
+    }
     pending.beginFrame(46475);check(pending.count()==0 && pending.matches(46475,&depth,3840,2160,world,0,0),"next frame holstered empty pending set starts clean");
     for(unsigned i=0;i<4;++i){world[4][0]=float(i);check(pending.add(46475,&depth,3840,2160,world,0,0),"bounded distinct pending witness");}
     world[4][0]=9;check(!pending.add(46475,&depth,3840,2160,world,0,0),"pending camera overflow refuses rather than dropping proof");

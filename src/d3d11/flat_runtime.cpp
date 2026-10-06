@@ -261,6 +261,7 @@ struct State {
     uint32_t namedWorldQ=0;
     const char* foregroundHRefusal=nullptr;
     const char* foregroundHRefusalWindow=nullptr;   // the most recent H refusal since the last 5 s line (survives the frame starts)
+    uint32_t pendingNullMismatchLogged=0;           // "flat foreground pending-null mismatch" lines said this session (12 at most)
     struct DomainProofEntry { FlatDomainShaderProof proof;uint64_t attemptedFrame=0; };
     std::map<std::pair<uint64_t,uint64_t>,DomainProofEntry> foregroundProofs;
     struct DomainCounts {
@@ -4617,13 +4618,14 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // selected world camera at H, so a wrong prediction only refuses.
             const bool predictedWorld=!s.namedDepth && k.camera && s.predictedWorldNear>0 && drawNear==s.predictedWorldNear;
             const bool worldCamera=s.namedDepth && k.camera && std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))==0;
-            auto witness=[&]{
-                if(!candidate->pendingNull.add(s.prefix.frame,k.depth,k.depthWidth,k.depthHeight,rows,s.phase.currentX,s.phase.currentY))
+            auto witness=[&](unsigned kind){
+                if(!candidate->pendingNull.add(s.prefix.frame,k.depth,k.depthWidth,k.depthHeight,rows,s.phase.currentX,s.phase.currentY,
+                                               k.vs,k.ps,kind))
                     domainFail(s,"pending-world","foreground-pending-null-overflow",k);
             };
             if(!k.camera || worldCamera || predictedWorld) {
                 // Screen passes and world-camera draws: nothing to mark or capture.
-                if(predictedWorld){++s.foregroundCounts.predictedWorld;witness();}
+                if(predictedWorld){++s.foregroundCounts.predictedWorld;witness(1u);}
                 else ++s.foregroundCounts.worldUnmarked;
             } else {
                 const auto& proof=domainShaderProof(s,k.vs,k.ps);
@@ -4631,7 +4633,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 if(plan.kind==FlatDomainPlanKind::PendingWorldNull) {
                     // A null prepass before naming at another near is world only
                     // if it matches the selected camera at H.
-                    witness();
+                    witness(2u);
                 } else if(!plan.admitted() && domainDrawPreservesSurface(context)) {
                     // No depth write: the surface and its owner mark are the last
                     // depth writer's. Forward the game's draw unchanged.
@@ -5303,8 +5305,19 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
             s.foregroundRoute.overflowed(s.prefix.frame),candidate!=nullptr};
         if(!candidate)failH("foreground-selected-depth-unobserved-or-overflow");
         if(candidate && !candidate->pendingNull.matches(s.prefix.frame,selected.depth,f.renderWidth,f.renderHeight,
-            selected.camera,s.phase.currentX,s.phase.currentY))
+            selected.camera,s.phase.currentX,s.phase.currentY)) {
             failH("foreground-pending-null-not-selected-world");
+            // Which witness and what differs (section 104: aiming down sights refused H here). The first 12 such frames of a session.
+            if(s.pendingNullMismatchLogged<12) {
+                char text[768];
+                if(candidate->pendingNull.describeMismatch(s.prefix.frame,selected.depth,f.renderWidth,f.renderHeight,selected.camera,
+                                                           s.phase.currentX,s.phase.currentY,text,sizeof(text))) {
+                    ++s.pendingNullMismatchLogged;
+                    Log::get().note("flat foreground pending-null mismatch %u/12: frame=%llu %s",s.pendingNullMismatchLogged,
+                        (unsigned long long)s.prefix.frame,text);
+                }
+            }
+        }
         if(candidate && candidate->hdr && candidate->hdr.Get()!=selected.hdr)
             failH("foreground-provisional-HDR-not-selected");
         if(foreignWork.load(std::memory_order_acquire) || s.prefix.uncertain)
