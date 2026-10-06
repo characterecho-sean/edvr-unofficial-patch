@@ -13089,3 +13089,27 @@ frame instead.
 Left: the other DLSS models (L, M, J), and a thin-highlight filter before
 the upscaler (Sean's suggestion: find one-pixel bright ridges and spread
 them, at a small look cost).
+
+### 2026-10-06: aiming down sights: the weapon's prepass at the world near
+
+Flight `edvr_gfx_20261006_131356.log`, verified `v0.18.2-43-g52565eb8`. Sean:
+plasma is fine like every weapon, unless aiming down sights, which turns AA
+off with all of them. NumLock taken while aiming.
+
+The witness line fired 12 times (13:18:35-36, frames 51696-51707, as the
+sights came up), the same each time. Witness 1 of 2 is `predicted-world-near`,
+VS `F516BF0201303B87` / PS `B40B0462256E31C2` (the known depth-prepass pair,
+canonical B1 recipe, no colour output). It differs from the selected world
+camera only in the camera block: the same near (0.025), position and phase,
+but x and y scale rising -1.29 to -1.98 and 2.14 to 3.28, against the world's
+-1.05 to -1.20 and 1.74 to 1.98; first differing float row 270 col 0.
+
+Reading (to be confirmed against the NumLock capture): while aiming, the
+weapon's camera takes the world's near plane and a narrower field of view,
+so its depth prepass, drawn before the world camera is named, is predicted
+world by its near alone. Its witness cannot match the world camera at the
+tone pass, and H is refused. The check is right to refuse: the prepass wrote
+the weapon's depth without a first-person mark. The fix must recognise a
+weapon prepass at the world near at draw time (by its projection, not its
+near) and capture and mark it as first-person. A planning pass is on it; the
+copy route's stage 2 runs the same qualification and needs the same fix.
