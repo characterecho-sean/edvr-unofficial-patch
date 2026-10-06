@@ -12878,6 +12878,17 @@ Refuted if, standing still at the roof in TAA, the bevel and corner shimmer as
 before: then the depth check was not what lost the history, and the next step
 is a count of the pixels `taa()` zeroes at the roof, not a threshold.
 
+Committed as 36003718 (the shader and its tests), main merged in as 3db65989
+and this entry as 2d8e6761; fast-forwarded main and pushed, origin/main
+confirmed. Receipt-guarded `--dll-only` promotion passed. Epic flat install via
+`install_edvr.py` (dry run, install, `--verify-only`); the installed DLL is
+`v0.18.2-34-g2d8e6761`, SHA256 D5B6A47E814AE5CA..., the build's own.
+`edvr-flat.ini` (8A00D126...) and `nvngx_dlss.dll` (3975567B...) are unchanged
+and `edvr.ini` stays absent. Frontier was not installed. Read the flight
+against that literal version: `edvr_log.py --target <the Epic game directory>
+--expect-build 2d8e6761` (`epic` is not an alias) exits 2 on any other build;
+today it names the 5f7e43e8 flight's log as a mismatch, as it should.
+
 Next flight (Epic, flat profile, TAA on): the same settlement at night,
 standing still, EDVR's TAA on the roof's top bevel and lower-left corner, then
 DLAA on the same view. Read the edge pixels for the beading, and for any new
