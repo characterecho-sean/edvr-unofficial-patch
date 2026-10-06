@@ -3,7 +3,7 @@
 ## Status
 
 - **State:** 32db3d2d FLOWN: configured SDK AA still refuses (103).
-  Inert refusal gone; selected-H first failures are history-budget (103).
+  Pressure reclamation and bounded receipts BUILT, NOT FLOWN (103).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** account for history records/bytes and provisional demand (103).
+- **Next:** classify the mixed writer and history occupants from receipts (103).
   Retain 102's color-clear fix; no per-weapon table; preserve Epic settings.
   Building shimmer is unqualified. Preserve 87's native FSR comparison and
   section 83's remaining matrix and open items.
@@ -12300,3 +12300,98 @@ is a provable ordering edge, not an established cause of this flight. An
 offline test can distinguish it from legitimate retained history; a live
 receipt would need invalid-record occupancy and mutation counts. Any shared
 reclamation change must preserve active VR consumers' capture references.
+
+### 2026-10-05: full refusal inventory and cross-frame allocation regressions
+
+Sean clarifies that holstered and drawn weapons fail alike. Treat this as a
+scene-wide qualification failure; a weapon shader at an allocation failure
+does not identify every draw consuming capacity or establish a weapon-only
+defect.
+
+Correction to the preceding scoped log read: filtering for history-budget
+missed another refusal in the same verified flight. The complete first-failure
+inventory in `edvr_gfx_20261005_195534.log` has ten selected-H
+`foreground-mixed-component-writer` samples, four selected-H `history-budget`
+samples, one TAA-mode budget sample without a selected H, and 24 never-failed
+samples. The mixed writer is VS `CFCA8FFC6B058630` / PS `8A08FF781272C5F6`.
+Its original PS declares and writes all four target-0 components. The refusal
+proves enabled blending or a partial output mask on a color-enabled target;
+the existing capture does not identify the state. Before world naming, this
+same pair was observed with both eventual world and alternate-camera
+projections. Provisional camera classification remains an open discriminator;
+no guard relaxation follows from these identities.
+
+The expanded WARP regressions reproduce adapter allocation pressure with 40
+prior-frame records plus 24 current-frame captures. The next new geometry
+refuses `history-budget` while staying below the adapter's current-draw bound.
+Known IB writes also reproduce a distinct allocator edge: prior captures
+become unusable immediately, but their allocation still blocks a new key until
+the next frame. Small meshes isolate record pressure; eight large allocations
+isolate byte pressure. COM-owned snapshots survive ordinary eviction, but
+outstanding captures retain a record index that can shift under compaction.
+Reclamation must preserve publication through stable view identity and
+distinguish never-submitted reservations from write-invalidated records.
+
+Ruled out: plasma-only draw state explains this report, because Sean sees the
+same absence of AA holstered and drawn and the full inventory contains two
+different first-refusal paths. These offline regressions establish a
+reclamation defect, not the live allocation occupants or the mixed writer's
+blend/write state. Keep both distinctions in the build and test conclusions.
+
+The correction reclaims explicitly write-invalidated history records only when
+an allocation would otherwise exceed the existing record or byte limit, and
+only when reclaiming them can satisfy that allocation. Never-submitted
+reservations are distinct from invalidated records. Same-key reuse retains its
+allocation; pressure reclamation retains the original shader's stream-output
+program so it does not trigger an unnecessary compile. Published and pending
+captures survive other-record compaction through view identity and a mutation
+epoch; a stale capture cannot republish a record after invalidation and reuse.
+The shared helper's 64-record, 32-MiB and vertex bounds remain unchanged.
+
+First-failure summaries now retain bounded allocation occupancy and the
+original draw's blend, sample mask, depth/stencil and color-target state. Raw
+effective OM write masks remain separate from PS component masks. Typed RTV
+formats are read from already-retained views on the first refusal only. The
+original DSV was not returned by the existing query, so DSV flags remain
+explicitly unobserved. No extra context query, GPU readback, capture export or
+config key was added. The selected-H snapshot carries the same first-failure
+receipt even if later draws use a different state; the bench ABI is version 2.
+
+The renderer matrix independently exercises partial component writes and
+enabled blending. Each guard case requires a real GPU color change and checks
+that the first refusal's state survives a later opaque draw and H selection.
+These tests preserve the safety guards; they do not establish the live mixed
+writer's operation or justify bypassing it.
+
+The first complete hardware matrix caught a bench entry-point defect: the new
+guard names were absent from its CLI whitelist and never entered the scene. A
+single case table now drives validation, dispatch and usage; the build-gated
+self-test exercises every accepted command shape. All six guard cases then ran
+through the actual proxy: partial writes changed 218 pixels, blending changed
+338, and each first-failure state survived later draws and H.
+
+Environment: flat profile, reconstructed 64x64 targets, no VR runtime or
+headset. Hardware is RTX 5090, driver 32.0.16.1692, DLSS runtime file version
+310.9.1.0. The 64-record shared history bound is unchanged. Captured original
+shader bytecode is exact; geometry, constants, state and frame ordering are
+reconstructed. This is not an exact scene replay or a visual-quality result.
+
+Validation: the final full build passed all gates and wrote receipt
+`52af2c3eff78997269bcc750ee54ba35048ac7d9951bca79da269fbcd6c0c202`, verified
+against the frozen source. Console: `build/flat-history-final-build-2.log`.
+Hardware: all 23 renderer/guard cases PASS and all 11 GPU history workloads
+PASS (`build/flat-aa-history-hardware-final-report.json`). WARP: 19 PASS, four
+NVIDIA backend cases UNSUPPORTED, zero FAIL, and all 11 history workloads PASS
+(`build/flat-aa-history-warp-report.json`). Baseline SDK scenes qualify H,
+invoke the configured backend and have zero spatial fallback. No TAA
+substitute is introduced. An earlier concurrent-build hardware run had one
+pre-draw device-creation failure `0x8876017C`; the final quiet matrix passes
+that case. This does not establish the cause of that device failure or a
+rendering fix for it.
+
+Next in-game evidence is the new first-refusal receipt in ordinary periodic or
+NumLock summaries: invalid/pending/current/prior/older allocation occupancy,
+mutation and pressure-reclamation counts, or the mixed writer's exact blend,
+write mask and world-naming state. No weapon list or long bulk capture is
+required. Live AA recovery remains unqualified; holstered and drawn still
+share the same unresolved scene-wide report.

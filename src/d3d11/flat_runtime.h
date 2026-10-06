@@ -133,6 +133,8 @@ struct FlatRuntimeDrawScope {
     bool domainProtectedOverlay=false;
     bool domainPendingWorldNull=false;
     bool domainHdrWriter=false;
+    bool domainBeforeWorld=false;
+    bool domainSameWorld=false;
     ID3D11Texture2D* domainDepth=nullptr;
     uint64_t domainVs=0,domainPs=0;
     uint64_t domainCameraHash=0;

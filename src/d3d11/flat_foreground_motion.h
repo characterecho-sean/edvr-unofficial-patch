@@ -1,6 +1,7 @@
 #pragma once
 #include "animated_vertex_history.h"
 #include "flat_animated_identity_ledger.h"
+#include "flat_foreground_receipt.h"
 #include <d3d11_1.h>
 #include <array>
 #include <cmath>
@@ -25,6 +26,7 @@ public:
         FlatAnimatedIdentityLedger::Identity identity;
         Certificate certificate;
         bool gpuIdentity=false;
+        bool beforeWorld=false;
     };
     struct Output {
         Ptr<ID3D11ShaderResourceView> motion;
@@ -35,16 +37,20 @@ public:
         uint64_t attempts=0,gpuAttempts=0,submitted=0,preflightRefused=0,warmedAfterRefusal=0;
     };
     const CaptureStats& stats() const{return stats_;}
+    const EdvrFlatForegroundBudgetReceipt& budgetReceipt() const{return budgetReceipt_;}
     void reset(){*this=FlatForegroundMotion{};}
     void beginFrame(unsigned frame) {
         if(frame==frame_)return;
         if(frame==frame_+1)previous_=std::move(current_);else previous_.clear();
-        current_.clear();frame_=frame;refusal_=nullptr;history_.advance(frame);
+        current_.clear();frame_=frame;refusal_=nullptr;budgetReceipt_={};
+        knownMutations_=unknownMutations_=0;history_.advance(frame);
     }
     void fail(const char* reason){if(!refusal_)refusal_=reason?reason:"foreground-contract";}
     const char* refusal() const{return refusal_;}
     void resourceWritten(ID3D11Resource* resource) {
         const unsigned kind=history_.resourceWritten(resource);
+        // Count only geometry invalidations, not unrelated resource-write notifications.
+        if(!resource)++unknownMutations_;else if(kind&6)++knownMutations_;
         if(!kind)return;
         auto erase=[&](std::vector<Draw>& draws){draws.erase(std::remove_if(draws.begin(),draws.end(),[&](const Draw& d){
             return !resource || d.capture.geometry.vertices.Get()==resource || d.capture.geometry.indices.Get()==resource;}),draws.end());};
@@ -74,6 +80,21 @@ public:
         if(current_.size()>=AnimatedVertexHistory::maxRecords)return reject("foreground-draw-bound");
         const bool warming=refusal_!=nullptr;++stats_.gpuAttempts;
         if(!history_.capture(ctx,draw,count,instances,start,base,startInstance,frame,d.capture,true)){
+            if(!refusal_ && d.capture.refusal && std::strcmp(d.capture.refusal,"history-budget")==0 &&
+               !budgetReceipt_.valid) {
+                const auto usage=history_.accounting(frame);
+                auto& r=budgetReceipt_;r.valid=1;r.requestedBytes=count*32;
+                r.records=usage.recordCount;r.bytes=usage.bytes;r.invalid=usage.invalid;r.pending=usage.pending;
+                r.current=usage.current;r.prior=usage.prior;r.older=usage.older;
+                r.reclaimedRecords=usage.reclaimedRecords;r.reclaimedBytes=usage.reclaimedBytes;
+                r.recordLimitHit=usage.recordCount>=AnimatedVertexHistory::maxRecords;
+                r.byteLimitHit=uint64_t(usage.bytes)+r.requestedBytes>AnimatedVertexHistory::maxBytes;
+                r.currentDraws=static_cast<unsigned>(current_.size());
+                r.previousDraws=static_cast<unsigned>(previous_.size());
+                for(const auto& old:current_)if(old.inputs.beforeWorld)++r.beforeWorldCurrent;
+                for(const auto& old:previous_)if(old.inputs.beforeWorld)++r.beforeWorldPrevious;
+                r.knownMutations=knownMutations_;r.unknownMutations=unknownMutations_;
+            }
             fail(d.capture.refusal);return false;}
         ++stats_.submitted;if(warming)++stats_.warmedAfterRefusal;
         ctx->RSGetState(&d.raster);UINT n=1;ctx->RSGetViewports(&n,&d.viewport);
@@ -185,6 +206,8 @@ public:
     }
 private:
     CaptureStats stats_{};
+    EdvrFlatForegroundBudgetReceipt budgetReceipt_{};
+    unsigned knownMutations_=0,unknownMutations_=0;
     struct Draw {
         AnimatedVertexHistory::Capture capture;Inputs inputs,oldInputs;
         struct Prior {Ptr<ID3D11ShaderResourceView> positions,identity,index;float phaseX=0,phaseY=0;};

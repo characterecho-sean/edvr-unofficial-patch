@@ -21,13 +21,19 @@ MANIFEST = pathlib.Path("tools/flat_sdk_integration_test/fixtures_manifest.json"
 MARKER = "EDVR_BENCH_RESULT "
 HISTORY_MARKER = "EDVR_BENCH_HISTORY_RESULT "
 MODES = ("taa", "dlaa", "dlss", "fsr")
-DEFAULT_CASES = ("unsupported_host", "scene", "inert_no_write", "inert_depth_write", "inert_color_write")
+DEFAULT_CASES = ("unsupported_host", "scene", "inert_no_write", "inert_depth_write", "inert_color_write",
+                 "state_partial_mask", "state_blended")
 CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "renderer", "inert_no_write": "renderer",
-                 "inert_depth_write": "guard", "inert_color_write": "guard"}
-SDK_CASES = frozenset(("inert_no_write", "inert_depth_write", "inert_color_write"))
+                 "inert_depth_write": "guard", "inert_color_write": "guard", "state_partial_mask": "guard",
+                 "state_blended": "guard"}
+SDK_CASES = frozenset(("inert_no_write", "inert_depth_write", "inert_color_write", "state_partial_mask",
+                       "state_blended"))
 PRODUCTION_CASES = frozenset(("unsupported_host",))
-HISTORY_CASES = frozenset(("provisional_before_foreign", "byte_budget", "transient_churn",
-                           "mutation_reset", "duplicate_occurrence_cap"))
+HISTORY_CASES = frozenset(("provisional_before_foreign", "byte_budget", "invalidated_byte_occupancy",
+                            "transient_churn", "mutation_reset", "adapter_cross_frame_record_budget",
+                            "adapter_invalidated_prior_occupancy", "invalidated_capture_snapshot_lifetime",
+                            "outstanding_capture_record_index", "stale_capture_epoch_guard",
+                            "duplicate_occurrence_cap"))
 MAX_JSON = 1 << 20
 
 
@@ -272,7 +278,7 @@ def self_test():
             name = "d3d11.dll" if run["case"] == "unsupported_host" else "flat_sdk_bench_proxy.dll"
             assert pathlib.Path(run["staged_proxy"]).name == name
         matrix = make_plan(root, DEFAULT_CASES, MODES, "warp")
-        assert len(matrix["runs"]) == 17
+        assert len(matrix["runs"]) == len(DEFAULT_CASES)*len(MODES)-len(SDK_CASES)
         assert not any(r["mode"] == "taa" and r["case"] in SDK_CASES for r in matrix["runs"])
         # Exercise the real CLI branch, not just its planning helper. Any
         # subprocess would load a DLL and may write runtime settings/logs.

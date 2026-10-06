@@ -26,6 +26,45 @@ using SnapshotFn = unsigned int (__cdecl*)(Snapshot*, unsigned int);
 bool absolute(const wchar_t* p) {
     return p && ((p[0] && p[1] == L':') || (p[0] == L'\\' && p[1] == L'\\'));
 }
+struct BenchCase { const wchar_t* argument; const char* sceneName; };
+constexpr BenchCase benchCases[] = {
+    {L"smoke","smoke"}, {L"scene","scene"}, {L"unsupported_host","unsupported_host"},
+    {L"inert_no_write","inert_no_write"}, {L"inert_depth_write","inert_depth_write"},
+    {L"inert_color_write","inert_color_write"}, {L"state_partial_mask","state_partial_mask"},
+    {L"state_blended","state_blended"}
+};
+const BenchCase* commandCase(int argc, const wchar_t* const* argv) {
+    if (argc!=9 || std::wcscmp(argv[1],L"--case")!=0 ||
+        std::wcscmp(argv[3],L"--proxy")!=0 || !absolute(argv[4]) ||
+        std::wcscmp(argv[5],L"--fixtures")!=0 || !absolute(argv[6]) ||
+        std::wcscmp(argv[7],L"--adapter")!=0 ||
+        (std::wcscmp(argv[8],L"warp")!=0 && std::wcscmp(argv[8],L"hardware")!=0))return nullptr;
+    for (const auto& entry:benchCases)
+        if (std::wcscmp(argv[2],entry.argument)==0)return &entry;
+    return nullptr;
+}
+bool commandSelfTest() {
+    const wchar_t* args[]={L"bench",L"--case",L"scene",L"--proxy",L"C:\\proxy.dll",
+        L"--fixtures",L"C:\\fixtures",L"--adapter",L"warp"};
+    for (const auto& entry:benchCases) {
+        args[2]=entry.argument;
+        for (const auto* adapter:{L"warp",L"hardware"}) {
+            args[8]=adapter;
+            // The admitted entry is also the dispatched scene name: no second whitelist.
+            if (commandCase(9,args)!=&entry)return false;
+        }
+    }
+    args[2]=L"state_partial_mask";
+    if (!commandCase(9,args) || std::strcmp(commandCase(9,args)->sceneName,"state_partial_mask")!=0)return false;
+    args[2]=L"state_blended";
+    if (!commandCase(9,args) || std::strcmp(commandCase(9,args)->sceneName,"state_blended")!=0)return false;
+    args[2]=L"unknown";
+    if (commandCase(9,args))return false;
+    args[2]=L"scene";args[4]=L"proxy.dll";
+    if (commandCase(9,args))return false;
+    args[4]=L"C:\\proxy.dll";args[8]=L"unknown";
+    return !commandCase(9,args) && !commandCase(8,args);
+}
 bool ok(HRESULT hr, const char* operation) {
     if (SUCCEEDED(hr)) return true;
     std::fprintf(stderr, "flat SDK bench: %s failed 0x%08X\n", operation, unsigned(hr));
@@ -171,27 +210,18 @@ int wmain(int argc,wchar_t** argv) {
     }
     if (argc==2 && std::wcscmp(argv[1],L"--self-test")==0) {
         const bool good=absolute(L"C:\\proxy.dll") && !absolute(L"proxy.dll") &&
-            sizeof(Snapshot)==sizeof(EdvrFlatSdkBenchSnapshot);
+            sizeof(Snapshot)==sizeof(EdvrFlatSdkBenchSnapshot) && commandSelfTest();
         std::printf("flat_sdk_integration_test: %s (CLI and snapshot contract)\n",good?"PASS":"FAIL");
         return good?0:1;
     }
-    if (argc==9 && std::wcscmp(argv[1],L"--case")==0 &&
-        (std::wcscmp(argv[2],L"smoke")==0 || std::wcscmp(argv[2],L"scene")==0 ||
-         std::wcscmp(argv[2],L"unsupported_host")==0 ||
-         std::wcscmp(argv[2],L"inert_no_write")==0 ||
-         std::wcscmp(argv[2],L"inert_depth_write")==0 ||
-         std::wcscmp(argv[2],L"inert_color_write")==0) &&
-        std::wcscmp(argv[3],L"--proxy")==0 &&
-        absolute(argv[4]) && std::wcscmp(argv[5],L"--fixtures")==0 && absolute(argv[6]) &&
-        std::wcscmp(argv[7],L"--adapter")==0 &&
-        (std::wcscmp(argv[8],L"warp")==0 || std::wcscmp(argv[8],L"hardware")==0))
-        return std::wcscmp(argv[2],L"smoke")==0?
+    if (const auto* entry=commandCase(argc,argv))
+        return std::strcmp(entry->sceneName,"smoke")==0?
             smoke(argv[4],std::wcscmp(argv[8],L"warp")==0?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE):
             scene(argv[4],argv[6],std::wcscmp(argv[8],L"warp")==0?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE,
-                  std::wcscmp(argv[2],L"scene")==0?"scene":
-                  std::wcscmp(argv[2],L"unsupported_host")==0?"unsupported_host":
-                  std::wcscmp(argv[2],L"inert_no_write")==0?"inert_no_write":
-                  std::wcscmp(argv[2],L"inert_depth_write")==0?"inert_depth_write":"inert_color_write");
-    std::fputs("usage: flat_sdk_integration_test --dry-run|--self-test|--case smoke|scene|unsupported_host|inert_no_write|inert_depth_write|inert_color_write --proxy ABS_DLL --fixtures ABS_DIR --adapter warp|hardware\n",stderr);
+                  entry->sceneName);
+    std::fputs("usage: flat_sdk_integration_test --dry-run|--self-test|--case ",stderr);
+    for (size_t i=0;i<std::size(benchCases);++i)
+        std::fprintf(stderr,"%s%s",i?"|":"",benchCases[i].sceneName);
+    std::fputs(" --proxy ABS_DLL --fixtures ABS_DIR --adapter warp|hardware\n",stderr);
     return 2;
 }

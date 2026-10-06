@@ -214,6 +214,8 @@ struct State {
     struct DomainFailure {
         uint64_t frame=~0ull,vs=0,ps=0,camera=0;uint32_t q=0,format=0;
         const void* depth=nullptr;const char* stage="never-failed";const char* reason="none";
+        EdvrFlatForegroundStateReceipt state{};
+        EdvrFlatForegroundBudgetReceipt budget{};
     } foregroundFirstFailure;
     struct DomainCandidate {
         Ptr<ID3D11Texture2D> depth;
@@ -249,6 +251,7 @@ struct State {
         unsigned candidates=0,pendingNull=0;bool overflow=false,present=false;
     } foregroundLastH;
     uint64_t foregroundDomainFrame=~0ull;
+    uint32_t namedWorldQ=0;
     const char* foregroundHRefusal=nullptr;
     struct DomainProofEntry { FlatDomainShaderProof proof;uint64_t attemptedFrame=0; };
     std::map<std::pair<uint64_t,uint64_t>,DomainProofEntry> foregroundProofs;
@@ -567,6 +570,30 @@ static void reportForegroundDomain(State& s) {
         f.format,(unsigned long long)f.camera,f.depth,f.stage,f.reason,s.foregroundLastH.pendingNull,
         (unsigned long long)s.foregroundLastH.frame,s.foregroundLastH.depth,s.foregroundLastH.candidates,
         State::kDomainCandidateCap,s.foregroundLastH.overflow?1u:0u,s.foregroundLastH.present?1u:0u);
+    const auto& st=f.state;
+    Log::get().note("flat foreground first failure state: valid=%u frame=%llu q=%u bound=%02X independent=%u alpha-to-coverage=%u sample-mask=%08X depth-enable=%u depth-write=%u depth-func=%u foreign=%u HDR=%u world-named=%u same-world=%u named-world-q=%u",
+        st.valid,(unsigned long long)f.frame,f.q,st.boundColors,st.independentBlend,st.alphaToCoverage,
+        st.sampleMask,st.depthEnable,st.depthWriteMask,st.depthFunc,st.foreign,st.hdr,
+        st.worldNamed,st.sameWorld,st.namedWorldQ);
+    Log::get().note("flat foreground first failure stencil: valid=%u frame=%llu q=%u enable=%u read=%02X write=%02X ref=%u front=%u/%u/%u/%u back=%u/%u/%u/%u DSV-flags-valid=%u DSV-flags=%u",
+        st.valid,(unsigned long long)f.frame,f.q,st.stencilEnable,st.stencilReadMask,
+        st.stencilWriteMask,st.stencilRef,st.front.func,st.front.fail,st.front.depthFail,
+        st.front.pass,st.back.func,st.back.fail,st.back.depthFail,st.back.pass,
+        st.dsvFlagsValid,st.dsvFlags);
+    if(st.valid)for(unsigned i=0;i<6;++i) {
+        const auto& slot=st.slot[i];
+        if(!(st.boundColors&(1u<<i)) && !slot.componentMask)continue;
+        Log::get().note("flat foreground first failure state slot: frame=%llu q=%u slot=%u RTV-format-valid=%u RTV-format=%u PS-components=%X effective-write=%X blend=%u color=%u/%u/%u alpha=%u/%u/%u",
+            (unsigned long long)f.frame,f.q,i,slot.viewFormatValid,slot.viewFormat,
+            slot.componentMask,slot.effectiveWriteMask,slot.blendEnable,
+            slot.src,slot.dst,slot.op,slot.srcAlpha,slot.dstAlpha,slot.opAlpha);
+    }
+    const auto& b=f.budget;
+    Log::get().note("flat foreground first failure budget: valid=%u frame=%llu q=%u requested-bytes=%u record-limit=%u byte-limit=%u records=%u bytes=%u invalid=%u pending=%u current=%u prior=%u older=%u reclaimed-records=%u reclaimed-bytes=%u current-draws=%u previous-draws=%u before-world-current=%u before-world-previous=%u known-mutations=%u unknown-mutations=%u",
+        b.valid,(unsigned long long)f.frame,f.q,b.requestedBytes,b.recordLimitHit,b.byteLimitHit,
+        b.records,b.bytes,b.invalid,b.pending,b.current,b.prior,b.older,b.reclaimedRecords,
+        b.reclaimedBytes,b.currentDraws,b.previousDraws,b.beforeWorldCurrent,b.beforeWorldPrevious,
+        b.knownMutations,b.unknownMutations);
 }
 static const FlatDomainShaderProof& domainShaderProof(State& s,uint64_t vs,uint64_t ps) {
     const auto key=std::make_pair(vs,ps);auto found=s.foregroundProofs.find(key);
@@ -581,16 +608,24 @@ static const FlatDomainShaderProof& domainShaderProof(State& s,uint64_t vs,uint6
     auto& entry=s.foregroundProofs[key];entry.proof=flatDomainShaderProof(vs,ps,v,vn,p,pn);entry.attemptedFrame=s.prefix.frame;
     return entry.proof;
 }
-template<class Key>static void domainFail(State& s,const char* stage,const char* reason,const Key& k) {
+template<class Key>static void domainFail(State& s,const char* stage,const char* reason,const Key& k,
+    const EdvrFlatForegroundStateReceipt* stateReceipt=nullptr,
+    const EdvrFlatForegroundBudgetReceipt* budgetReceipt=nullptr) {
     auto* candidate=domainCandidate(s,k.depth);
     if(candidate) {
         candidate->motion.fail(reason);
-        if(candidate->firstFailure.frame!=s.prefix.frame)
+        if(candidate->firstFailure.frame!=s.prefix.frame) {
             candidate->firstFailure={s.prefix.frame,k.vs,k.ps,k.cameraHash,s.prefix.sequence,k.format,k.depth,stage,reason?reason:"foreground-contract"};
+            if(stateReceipt)candidate->firstFailure.state=*stateReceipt;
+            if(budgetReceipt)candidate->firstFailure.budget=*budgetReceipt;
+        }
     } else if(s.foregroundSelectedDepth==k.depth) {
         s.foregroundHRefusal=reason;
-        if(s.foregroundFirstFailure.frame!=s.prefix.frame)
+        if(s.foregroundFirstFailure.frame!=s.prefix.frame) {
             s.foregroundFirstFailure={s.prefix.frame,k.vs,k.ps,k.cameraHash,s.prefix.sequence,k.format,k.depth,stage,reason?reason:"foreground-contract"};
+            if(stateReceipt)s.foregroundFirstFailure.state=*stateReceipt;
+            if(budgetReceipt)s.foregroundFirstFailure.budget=*budgetReceipt;
+        }
     }
 }
 bool owner() { return state().thread == GetCurrentThreadId(); }
@@ -3186,7 +3221,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.phaseCensusPending=s.jitterWanted && s.work != FlatWork::Paused;
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
-    s.namedDepth = s.namedConstants = nullptr; s.treated = false;
+    s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;
     flatHdrBeginFrame(s.hdr, d.Width, d.Height); s.hdrTreated = false;
     s.observingQualifiedHandoff = false;
     s.drawCapture.begin(frame+1,s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight);
@@ -4404,10 +4439,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // The first-person pool family can draw before the world into the same
     // depth. It is not the scene source: the VR screen-motion naming path uses
     // the same family exclusion before choosing its world camera.
+    const bool domainWasBeforeWorld=s.namedDepth==nullptr;
     if(sourceCandidate && !s.namedDepth) {
         FlatComputeInternalScope guard;
         flatcpu::Scope engine(flatcpu::kEngineDraw);
-        s.namedDepth=k.depth;s.namedConstants=k.b1;std::memcpy(s.namedCamera,d.camera,sizeof(d.camera));
+        s.namedDepth=k.depth;s.namedConstants=k.b1;s.namedWorldQ=s.prefix.sequence;
+        std::memcpy(s.namedCamera,d.camera,sizeof(d.camera));
         engineVelocityNoteSource(static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),static_cast<ID3D11Buffer*>(const_cast<void*>(k.b1)));
     }
     const bool foregroundGap=s.foreground.needsPreWorldState(
@@ -4440,6 +4477,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             } else if(!plan.admitted())domainFail(s,"planning",plan.refusal,k);
             else {
                 domainPlanned=true;domainDepth=candidate->depth.Get();domainVs=k.vs;domainPs=k.ps;
+                domainBeforeWorld=domainWasBeforeWorld;domainSameWorld=sameWorld;
                 domainCameraHash=k.cameraHash;domainFormat=k.format;domainHdrWriter=k.format==26;
                 domainCbEpoch=k.writeEpoch;domainCbGeneration=bindingGeneration(BindSlot::VsCb1);
                 if(domainHdrWriter) {
@@ -5224,22 +5262,26 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         if(!candidate)return;
         FlatContractObservation failureKey{};failureKey.vs=domainVs;failureKey.ps=domainPs;
         failureKey.cameraHash=domainCameraHash;failureKey.format=domainFormat;failureKey.depth=domainDepth;
-        auto failDomain=[&](const char* stage,const char* why){domainFail(s,stage,why,failureKey);};
         const auto& projection=domainShaderProof(s,domainVs,domainPs);
         Ptr<ID3D11BlendState> blend;FLOAT factors[4]{};UINT sampleMask=0;
         ctx->OMGetBlendState(&blend,factors,&sampleMask);D3D11_BLEND_DESC bd{};
         if(blend)blend->GetDesc(&bd);else for(auto& rt:bd.RenderTarget)rt.RenderTargetWriteMask=15;
         unsigned boundColors=0;ID3D11RenderTargetView* colors[6]{};ctx->OMGetRenderTargets(6,colors,nullptr);
+        std::array<Ptr<ID3D11RenderTargetView>,6> originalColors{};
+        const char* earlyStateStage=nullptr;const char* earlyStateReason=nullptr;
         for(unsigned i=0;i<6;++i)if(colors[i]) {
             boundColors|=1u<<i;
-            Ptr<ID3D11Resource> resource;colors[i]->GetResource(&resource);colors[i]->Release();
+            originalColors[i].Attach(colors[i]);
+            Ptr<ID3D11Resource> resource;colors[i]->GetResource(&resource);
             if(domainHdrWriter) {
                 const auto mask=bd.RenderTarget[bd.IndependentBlendEnable?i:0].RenderTargetWriteMask;
                 for(const auto& gbuffer:candidate->colors)if(gbuffer && gbuffer==resource &&
-                    (mask&projection.colorComponents[i]))
-                    failDomain("state-HDR","foreground-HDR-writes-Gbuffer");
-            } else if(candidate->colors[i] && candidate->colors[i]!=resource)
-                failDomain("state","foreground-color-target-changed");
+                    (mask&projection.colorComponents[i]) && !earlyStateReason) {
+                    earlyStateStage="state-HDR";earlyStateReason="foreground-HDR-writes-Gbuffer";
+                }
+            } else if(candidate->colors[i] && candidate->colors[i]!=resource) {
+                if(!earlyStateReason){earlyStateStage="state";earlyStateReason="foreground-color-target-changed";}
+            }
             else candidate->colors[i]=std::move(resource);
         }
         const uint8_t* vsBytes=nullptr;const uint8_t* psBytes=nullptr;size_t vsSize=0,psSize=0;
@@ -5249,6 +5291,59 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         ctx->OMGetDepthStencilState(&depthState,&stencilRef);D3D11_DEPTH_STENCIL_DESC dd{};
         dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
         if(depthState)depthState->GetDesc(&dd);
+        EdvrFlatForegroundStateReceipt stateReceipt{};
+        auto failDomain=[&](const char* stage,const char* why){
+            if(candidate->firstFailure.frame!=s.prefix.frame) {
+                stateReceipt.valid=1;stateReceipt.boundColors=boundColors;
+                stateReceipt.independentBlend=bd.IndependentBlendEnable?1u:0u;
+                stateReceipt.alphaToCoverage=bd.AlphaToCoverageEnable?1u:0u;
+                stateReceipt.sampleMask=sampleMask;stateReceipt.depthEnable=dd.DepthEnable?1u:0u;
+                stateReceipt.depthWriteMask=dd.DepthWriteMask;
+                stateReceipt.depthFunc=depthState?dd.DepthFunc:D3D11_COMPARISON_LESS;
+                stateReceipt.stencilEnable=dd.StencilEnable?1u:0u;
+                stateReceipt.stencilReadMask=depthState?dd.StencilReadMask:D3D11_DEFAULT_STENCIL_READ_MASK;
+                stateReceipt.stencilWriteMask=depthState?dd.StencilWriteMask:D3D11_DEFAULT_STENCIL_WRITE_MASK;
+                stateReceipt.stencilRef=stencilRef;
+                const auto face=[&](EdvrFlatForegroundStateReceipt::Face& out,
+                    const D3D11_DEPTH_STENCILOP_DESC& in) {
+                    out.func=in.StencilFunc;out.fail=in.StencilFailOp;
+                    out.depthFail=in.StencilDepthFailOp;out.pass=in.StencilPassOp;
+                };
+                if(depthState) {face(stateReceipt.front,dd.FrontFace);face(stateReceipt.back,dd.BackFace);}
+                else {
+                    D3D11_DEPTH_STENCILOP_DESC defaults{};
+                    defaults.StencilFunc=D3D11_COMPARISON_ALWAYS;
+                    defaults.StencilFailOp=D3D11_STENCIL_OP_KEEP;
+                    defaults.StencilDepthFailOp=D3D11_STENCIL_OP_KEEP;
+                    defaults.StencilPassOp=D3D11_STENCIL_OP_KEEP;
+                    face(stateReceipt.front,defaults);face(stateReceipt.back,defaults);
+                }
+                stateReceipt.foreign=domainForeign?1u:0u;stateReceipt.hdr=domainHdrWriter?1u:0u;
+                stateReceipt.worldNamed=s.namedDepth?1u:0u;stateReceipt.sameWorld=domainSameWorld?1u:0u;
+                stateReceipt.namedWorldQ=s.namedWorldQ;
+                for(unsigned i=0;i<6;++i) {
+                    const auto& rt=bd.RenderTarget[bd.IndependentBlendEnable?i:0];
+                    auto& slot=stateReceipt.slot[i];
+                    slot.componentMask=projection.colorComponents[i];
+                    slot.effectiveWriteMask=rt.RenderTargetWriteMask;
+                    if(originalColors[i]) {
+                        D3D11_RENDER_TARGET_VIEW_DESC vd{};originalColors[i]->GetDesc(&vd);
+                        slot.viewFormatValid=1;slot.viewFormat=vd.Format;
+                    }
+                    slot.blendEnable=rt.BlendEnable?1u:0u;
+                    slot.src=blend?rt.SrcBlend:D3D11_BLEND_ONE;
+                    slot.dst=blend?rt.DestBlend:D3D11_BLEND_ZERO;
+                    slot.op=blend?rt.BlendOp:D3D11_BLEND_OP_ADD;
+                    slot.srcAlpha=blend?rt.SrcBlendAlpha:D3D11_BLEND_ONE;
+                    slot.dstAlpha=blend?rt.DestBlendAlpha:D3D11_BLEND_ZERO;
+                    slot.opAlpha=blend?rt.BlendOpAlpha:D3D11_BLEND_OP_ADD;
+                }
+            }
+            const auto& budget=candidate->motion.budgetReceipt();
+            domainFail(s,stage,why,failureKey,stateReceipt.valid?&stateReceipt:nullptr,
+                why && std::strcmp(why,"history-budget")==0 && budget.valid?&budget:nullptr);
+        };
+        if(earlyStateReason)failDomain(earlyStateStage,earlyStateReason);
         const char* rasterRefusal=flatDomainRasterRefusal(projection,bd,dd,boundColors,domainForeign,domainHdrWriter,candidate->colorWritten);
         const bool opaque=rasterRefusal==nullptr;
         const bool colorWrites=flatDomainWritesColor(projection,bd,boundColors);
@@ -5278,6 +5373,7 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                 inputs.phaseX=s.phase.currentX;inputs.phaseY=s.phase.currentY;
                 inputs.writerToken=domainWriterToken;
                 inputs.gpuIdentity=true;
+                inputs.beforeWorld=domainBeforeWorld;
                 Ptr<ID3D11VertexShader> originalVs;ctx->VSGetShader(&originalVs,nullptr,nullptr);
                 if(originalVs)AnimatedVertexHistory::rememberShader(originalVs.Get(),vsBytes,vsSize);
                 if(weaponDrawKind!='X')failDomain("capture","foreground-draw-kind");
@@ -5497,7 +5593,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
 extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
     EdvrFlatSdkBenchSnapshot* out, unsigned int bytes) {
     if (!out || bytes != sizeof(EdvrFlatSdkBenchSnapshot) ||
-        out->size != sizeof(EdvrFlatSdkBenchSnapshot) || out->version != 1 ||
+        out->size != sizeof(EdvrFlatSdkBenchSnapshot) || out->version != 2 ||
         !runtimeFlatProfile() || !owner())
         return 0;
     const auto& s = state();
@@ -5559,6 +5655,8 @@ extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
         snap.firstFailurePs = f.ps;
         std::snprintf(snap.firstFailureStage, sizeof(snap.firstFailureStage), "%s", f.stage);
         std::snprintf(snap.firstFailureReason, sizeof(snap.firstFailureReason), "%s", f.reason);
+        snap.firstFailureState=f.state;
+        snap.firstFailureBudget=f.budget;
     }
     std::snprintf(snap.hRefusal, sizeof(snap.hRefusal), "%s",
                   s.foregroundHRefusal ? s.foregroundHRefusal : "none");

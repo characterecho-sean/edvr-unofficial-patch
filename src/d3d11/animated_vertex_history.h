@@ -50,6 +50,12 @@ public:
         Ptr<ID3D11UnorderedAccessView> identityUav;
         D3D11_PRIMITIVE_TOPOLOGY topology=D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
         unsigned recordIndex=~0u;
+        uint64_t recordEpoch=0;
+    };
+    struct Usage {
+        unsigned recordCount=0,bytes=0;
+        unsigned invalid=0,pending=0,current=0,prior=0,older=0;
+        unsigned reclaimedRecords=0,reclaimedBytes=0;
     };
 
     static void rememberShader(ID3D11VertexShader* shader,const void* bytes,size_t size) {
@@ -123,11 +129,35 @@ public:
         auto found=std::find_if(records_.begin(),records_.end(),[&](const Record& r){return matches(r.geometry,key) && r.frame[next]!=frame;});
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
         if(found==records_.end()) {
-            if(records_.size()>=maxRecords || uint64_t(bytes_)+count*32>maxBytes)return refuse("history-budget");
-            Record record;record.geometry=key;
+            const uint64_t requested=uint64_t(count)*32;
+            auto overBudget=[&]{return records_.size()>=maxRecords || uint64_t(bytes_)+requested>maxBytes;};
+            Ptr<ID3D11GeometryShader> reclaimedCapture;
+            if(overBudget()) {
+                // Known writes invalidate correspondence immediately, but
+                // keep the allocation for cheap same-key reuse. Reclaim only
+                // when a different key actually needs its budget.
+                size_t invalidCount=0;uint64_t invalidBytes=0;
+                for(const auto& r:records_)if(r.invalidated) {
+                    ++invalidCount;invalidBytes+=uint64_t(r.geometry.count)*32;
+                }
+                if(records_.size()-invalidCount>=maxRecords ||
+                   uint64_t(bytes_)-invalidBytes+requested>maxBytes)return refuse("history-budget");
+                for(auto it=records_.begin();it!=records_.end() && overBudget();) {
+                    if(!it->invalidated){++it;continue;}
+                    if(!reclaimedCapture && it->geometry.original==key.original)
+                        reclaimedCapture=it->capture;
+                    const unsigned released=it->geometry.count*32;
+                    bytes_-=released;++reclaimedRecords_;reclaimedBytes_+=released;
+                    it=records_.erase(it);
+                }
+            }
+            if(overBudget())return refuse("history-budget");
+            Record record;record.geometry=key;record.capture=std::move(reclaimedCapture);
             if(!allocate(dev.Get(),record)){failed_=true;return refuse("resource-creation");}
             bytes_+=count*32;records_.push_back(std::move(record));found=records_.end()-1;
         }
+        found->invalidated=false;
+        out.recordEpoch=found->mutationEpoch;
         out.recordIndex=unsigned(found-records_.begin());out.streamOutput=found->capture;
         out.positionBuffer=found->positions[next];out.identityUav=found->identityUavs[next];
         out.currentPositions=found->views[next];out.currentIdentity=found->identityViews[next];
@@ -159,8 +189,19 @@ public:
     }
     void restorePositions(ID3D11DeviceContext* ctx,const Capture& out) {
         ctx->SOSetTargets(0,nullptr,nullptr);ctx->GSSetShader(nullptr,nullptr,0);ctx->IASetPrimitiveTopology(out.topology);
-        if(out.recordIndex<records_.size() && records_[out.recordIndex].views[out.frame&1]==out.currentPositions)
+        const unsigned parity=out.frame&1;
+        if(out.recordIndex<records_.size() && !records_[out.recordIndex].invalidated &&
+           records_[out.recordIndex].mutationEpoch==out.recordEpoch &&
+           records_[out.recordIndex].views[parity]==out.currentPositions) {
             records_[out.recordIndex].frame[out.frame&1]=out.frame;
+            return;
+        }
+        // Pressure reclamation may shift a different record while this
+        // Capture owns its views. Never publish an invalidated/erased record.
+        auto found=std::find_if(records_.begin(),records_.end(),[&](const Record& r){
+            return !r.invalidated && r.mutationEpoch==out.recordEpoch &&
+                r.views[parity]==out.currentPositions;});
+        if(found!=records_.end())found->frame[parity]=out.frame;
     }
     void submitPositions(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned startInstance,const Capture& out) {
         bindPositions(ctx,out);drawPositions(ctx,draw,startInstance,out);restorePositions(ctx,out);
@@ -192,6 +233,7 @@ public:
         out.instanceIndex=std::move(view);out.retainedIndexBytes=4;return true;
     }
     void advance(unsigned frame) {
+        reclaimedRecords_=reclaimedBytes_=0;
         for(auto it=records_.begin();it!=records_.end();)
             if((it->frame[0]==~0u || frame-it->frame[0]>2) && (it->frame[1]==~0u || frame-it->frame[1]>2)) {
                 bytes_-=it->geometry.count*32;it=records_.erase(it);
@@ -201,19 +243,36 @@ public:
     unsigned resourceWritten(ID3D11Resource* resource) {
         unsigned reasons=0;
         for(auto& r:records_)if(!resource || resource==r.geometry.vertices.Get() || resource==r.geometry.indices.Get()) {
-            reasons|=!resource?1:resource==r.geometry.vertices.Get()?2:4;r.frame[0]=r.frame[1]=~0u;
+            reasons|=!resource?1:resource==r.geometry.vertices.Get()?2:4;
+            r.frame[0]=r.frame[1]=~0u;r.invalidated=true;++r.mutationEpoch;
         }
         return reasons;
     }
     bool failed() const{return failed_;}
     unsigned bytes() const{return bytes_;}
     size_t recordCount() const{return records_.size();}
+    Usage accounting(unsigned frame) const {
+        Usage u{};u.recordCount=unsigned(records_.size());u.bytes=bytes_;
+        u.reclaimedRecords=reclaimedRecords_;u.reclaimedBytes=reclaimedBytes_;
+        for(const auto& r:records_) {
+            if(r.invalidated){++u.invalid;continue;}
+            unsigned age=~0u;
+            for(unsigned parity=0;parity<2;++parity)if(r.frame[parity]!=~0u)
+                age=(std::min)(age,frame-r.frame[parity]);
+            if(age==~0u)++u.pending;
+            else if(age==0)++u.current;
+            else if(age==1)++u.prior;
+            else ++u.older;
+        }
+        return u;
+    }
 private:
     struct Record {
         Geometry geometry;Ptr<ID3D11Buffer> positions[2],identity[2];
         Ptr<ID3D11ShaderResourceView> views[2],identityViews[2];
         Ptr<ID3D11UnorderedAccessView> identityUavs[2];Ptr<ID3D11GeometryShader> capture;
         unsigned frame[2]={~0u,~0u};
+        uint64_t mutationEpoch=0;bool invalidated=false;
     };
     static bool matches(const Geometry& a,const Geometry& b) {
         return a.original==b.original && a.layout==b.layout && a.vertices==b.vertices && a.indices==b.indices &&
@@ -244,6 +303,6 @@ private:
     }
     std::vector<Record> records_;
     Ptr<ID3D11ComputeShader> identify_;Ptr<ID3D11Buffer> instance_;Ptr<ID3D11ShaderResourceView> instanceView_;
-    unsigned bytes_=0;bool failed_=false;
+    unsigned bytes_=0,reclaimedRecords_=0,reclaimedBytes_=0;bool failed_=false;
 };
 } // namespace edvr

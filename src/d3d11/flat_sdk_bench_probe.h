@@ -1,12 +1,13 @@
 #pragma once
 #include <cstdint>
+#include "flat_foreground_receipt.h"
 
 // Read-only, owner-thread snapshot for the offline proxy integration bench.
 // The caller supplies the exact structure size so an old bench cannot silently
 // interpret a new DLL's layout. No pointer or COM object crosses this boundary.
 struct EdvrFlatSdkBenchSnapshot {
     uint32_t size = sizeof(EdvrFlatSdkBenchSnapshot);
-    uint32_t version = 1;
+    uint32_t version = 2;
     uint32_t flatProfile = 0;
     uint32_t live = 0;
     uint32_t owner = 0;
@@ -48,4 +49,6 @@ struct EdvrFlatSdkBenchSnapshot {
     char firstFailureReason[96]{};
     char hRefusal[96]{};
     char hdrVerdict[96]{};
+    EdvrFlatForegroundStateReceipt firstFailureState{};
+    EdvrFlatForegroundBudgetReceipt firstFailureBudget{};
 };

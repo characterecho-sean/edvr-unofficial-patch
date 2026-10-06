@@ -7,9 +7,10 @@ struct SceneEvidence {
     unsigned gpuWorldPixelsBeforeH=0, gpuForeignPixelsBeforeH=0;
     unsigned gpuWorldPixelsAtH=0, gpuForeignPixelsAtH=0;
     unsigned inertDepthPixels=0, inertStencilPixels=0, inertColorPixels=0;
+    unsigned stateColorPixels=0;
     unsigned validDepthPixels=0;
     float depthMin=1.f, depthMax=0.f;
-    Snapshot inert{};
+    Snapshot inert{},stateRefused{},stateLater{};
 };
 
 bool readShader(const wchar_t* directory, const wchar_t* leaf, uint64_t expected,
@@ -103,11 +104,11 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         return 2;
     }
     Snapshot incompatible{};
-    incompatible.version=2;
+    incompatible.version=3;
     if(snapshot(&incompatible,sizeof(incompatible))) {
         std::fputs("flat SDK bench: snapshot accepted a future ABI version\n",stderr);return 2;
     }
-    incompatible.version=1;incompatible.size=sizeof(incompatible)-1;
+    incompatible.version=2;incompatible.size=sizeof(incompatible)-1;
     if(snapshot(&incompatible,sizeof(incompatible))) {
         std::fputs("flat SDK bench: snapshot accepted a wrong ABI size\n",stderr);return 2;
     }
@@ -286,8 +287,30 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const auto poolBefore=readPixels(device,context,pool.Get(),4);
     const auto hdrBefore=readPixels(device,context,hdr.Get(),4);
     const auto depthBefore=readPixels(device,context,depth.Get(),8);
-    if(!originalDraw(0,poolRtv.Get(),evidence.world) ||
-       !originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;
+    if(!originalDraw(0,poolRtv.Get(),evidence.world))return 2;
+    const bool partialState=std::strcmp(name,"state_partial_mask")==0;
+    const bool blendedState=std::strcmp(name,"state_blended")==0;
+    const bool stateGuard=partialState||blendedState;
+    if(stateGuard) {
+        D3D11_BLEND_DESC guardBlend{};
+        guardBlend.RenderTarget[0].RenderTargetWriteMask=partialState?7:15;
+        guardBlend.RenderTarget[0].BlendEnable=blendedState?TRUE:FALSE;
+        guardBlend.RenderTarget[0].SrcBlend=D3D11_BLEND_ONE;
+        guardBlend.RenderTarget[0].DestBlend=blendedState?D3D11_BLEND_ONE:D3D11_BLEND_ZERO;
+        guardBlend.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;
+        guardBlend.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;
+        guardBlend.RenderTarget[0].DestBlendAlpha=blendedState?D3D11_BLEND_ONE:D3D11_BLEND_ZERO;
+        guardBlend.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        ComPtr<ID3D11BlendState> guardState;
+        if(!ok(device->CreateBlendState(&guardBlend,&guardState),"foreground guard blend"))return 2;
+        const auto beforeGuard=readPixels(device,context,pool.Get(),4);
+        context->OMSetBlendState(guardState.Get(),nullptr,0xffffffffu);
+        if(!originalDraw(1,poolRtv.Get(),evidence.stateRefused))return 2;
+        evidence.stateColorPixels=changedPixels(beforeGuard,readPixels(device,context,pool.Get(),4),4);
+        context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+        if(!originalDraw(1,poolRtv.Get(),evidence.stateLater))return 2;
+        evidence.alternate=evidence.stateLater;
+    } else if(!originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;
     const auto ownerBeforeH=readOwnerPixels(device,context,ownerView);
     evidence.gpuWorldPixelsBeforeH=ownerBeforeH.world;
     evidence.gpuForeignPixelsBeforeH=ownerBeforeH.foreign;
@@ -404,7 +427,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool hostGuard=std::strcmp(name,"unsupported_host")==0;
     const bool depthGuard=std::strcmp(name,"inert_depth_write")==0;
     const bool colorGuard=std::strcmp(name,"inert_color_write")==0;
-    const bool guardCase=hostGuard||depthGuard||colorGuard;
+    const bool guardCase=hostGuard||depthGuard||colorGuard||stateGuard;
     const bool inertNoWrite=std::strcmp(name,"inert_no_write")==0;
     const bool rasterReady=evidence.validDepthPixels>0 && evidence.poolPixels>0 && evidence.hdrPixels>0;
     const bool ownership=evidence.world.namedWorld && evidence.alternate.foreignSeen &&
@@ -422,7 +445,30 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         std::strcmp(evidence.inert.firstFailureStage,"inert-state")==0 &&
         std::strcmp(evidence.inert.firstFailureReason,depthGuard?
             "foreground-inert-depth-write":"foreground-inert-color-write")==0;
-    const bool guardConfirmed=hostGuard?
+    const bool stateRefusal=stateGuard && evidence.stateColorPixels>0 &&
+        after.hAttempts>0 && !after.hQualified &&
+        evidence.stateRefused.firstFailureFrame==after.firstFailureFrame &&
+        evidence.stateRefused.firstFailureSequence==after.firstFailureSequence &&
+        evidence.stateRefused.firstFailureSequence==evidence.stateRefused.drawSequence &&
+        evidence.stateRefused.firstFailureSequence<evidence.stateLater.drawSequence &&
+        std::memcmp(&evidence.stateRefused.firstFailureState,&evidence.stateLater.firstFailureState,
+                    sizeof(after.firstFailureState))==0 &&
+        std::memcmp(&evidence.stateRefused.firstFailureState,&after.firstFailureState,
+                    sizeof(after.firstFailureState))==0 &&
+        after.firstFailureSelectedH && after.firstFailureState.valid &&
+        after.firstFailureState.slot[0].effectiveWriteMask==(partialState?7u:15u) &&
+        after.firstFailureState.slot[0].blendEnable==(blendedState?1u:0u) &&
+        after.firstFailureState.slot[0].dst==static_cast<uint32_t>(blendedState?D3D11_BLEND_ONE:D3D11_BLEND_ZERO) &&
+        after.firstFailureState.slot[0].viewFormatValid==1 &&
+        after.firstFailureState.slot[0].viewFormat==DXGI_FORMAT_R10G10B10A2_UNORM &&
+        after.firstFailureState.boundColors==1 &&
+        after.firstFailureState.stencilEnable==0 &&
+        after.firstFailureState.dsvFlagsValid==0 &&
+        std::strcmp(after.firstFailureStage,"state")==0 &&
+        std::strcmp(after.firstFailureReason,"foreground-mixed-component-writer")==0 &&
+        after.firstFailureState.sampleMask==0xffffffffu &&
+        !after.firstFailureBudget.valid;
+    const bool guardConfirmed=stateGuard?stateRefusal:hostGuard?
         rasterReady && evidence.world.namedWorld && (taa || ownership) && after.hdrTriggered && !after.hAttempts &&
             std::strcmp(after.hdrVerdict,"engine-source-not-ready")==0:
         depthGuard?evidence.inertDepthPixels>0 && !evidence.inertColorPixels && inertWriterRefusal:
@@ -431,8 +477,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const char* cause="upstream-qualification-or-raster-refused";
     if(guardCase) {
         verdict=guardConfirmed?"PASS":"FAIL";
-        cause=guardConfirmed?hostGuard?"host-guard-confirmed":depthGuard?"depth-write-refusal-confirmed":
-            "color-write-refusal-confirmed":"guard-not-confirmed";
+        cause=guardConfirmed?stateGuard?"first-state-receipt-selected-H":hostGuard?"host-guard-confirmed":
+            depthGuard?"depth-write-refusal-confirmed":"color-write-refusal-confirmed":"guard-not-confirmed";
     } else if(upstream && after.hdrResolves && (taa || after.hdrBackendCompleted)) {
         verdict="PASS";cause="production-hdr-resolve-completed";
     } else if(upstream && !taa && driver==D3D_DRIVER_TYPE_WARP &&
@@ -454,7 +500,14 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
          <<",\"vs\":\""<<std::hex<<std::uppercase<<std::setw(16)<<std::setfill('0')<<s.firstFailureVs
          <<"\",\"ps\":\""<<std::setw(16)<<s.firstFailurePs<<std::dec
          <<"\",\"stage\":"<<quote(s.firstFailureStage)<<",\"reason\":"<<quote(s.firstFailureReason)
-         <<",\"selectedH\":"<<s.firstFailureSelectedH<<"}";
+         <<",\"selectedH\":"<<s.firstFailureSelectedH
+         <<",\"stateValid\":"<<s.firstFailureState.valid
+         <<",\"boundColors\":"<<s.firstFailureState.boundColors
+         <<",\"component0\":"<<s.firstFailureState.slot[0].componentMask
+         <<",\"writeMask0\":"<<s.firstFailureState.slot[0].effectiveWriteMask
+         <<",\"blend0\":"<<s.firstFailureState.slot[0].blendEnable
+         <<",\"rtvFormat0\":"<<s.firstFailureState.slot[0].viewFormat
+         <<",\"budgetValid\":"<<s.firstFailureBudget.valid<<"}";
         return f.str();
     };
     std::ostringstream result;
@@ -486,6 +539,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           <<",\"stencilPixels\":"<<evidence.inertStencilPixels
           <<",\"firstFailure\":"<<failure(evidence.inert)<<"}"
           <<",\"firstFailure\":"<<failure(after)
+          <<",\"stateGuardColorPixels\":"<<evidence.stateColorPixels
           <<",\"lastH\":{\"attempts\":"<<after.hAttempts<<",\"qualified\":"<<after.hQualified
           <<",\"reason\":"<<quote(after.hRefusal)<<"}"
           <<",\"hdrTriggered\":"<<after.hdrTriggered<<",\"hdrSelected\":"<<after.hdrSelected
