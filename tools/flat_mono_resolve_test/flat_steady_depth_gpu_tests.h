@@ -70,6 +70,7 @@ struct Rig {
     std::vector<uint32_t> rgba;
     uint32_t record[84]{};
     edvr::FlatMonoResolveFrame f{};
+    const char* lastWhy = nullptr;   // the resolver's reason for the last run() (null when it accepted the frame)
 
     Rig(ID3D11Device* d, ID3D11DeviceContext* c)
         : device(d), context(c), fx(d, c), z(W * H, .01f), slots(W * H * 2), rgba(W * H, 0xff808080u) {
@@ -119,6 +120,7 @@ struct Rig {
         ComPtr<ID3D11ShaderResourceView> resolved; const char* why = nullptr;
         const int before = backendCalls;
         const bool ok = edvr::flatMonoResolve(device, context, f, resolved.GetAddressOf(), &why);
+        lastWhy = why;
         if (ok != wantOk) std::printf("info: steady-detail scenario \"%s\": resolver reason %s\n", what, why ? why : "none");
         check(ok == wantOk, what);
         check(fx.restored(), "steady detail: the game's whole pipeline comes back untouched");

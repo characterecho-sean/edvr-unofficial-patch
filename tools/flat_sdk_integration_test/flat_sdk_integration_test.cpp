@@ -33,7 +33,7 @@ constexpr BenchCase benchCases[] = {
     {L"inert_color_write","inert_color_write"}, {L"state_partial_mask","state_partial_mask"},
     {L"state_blended","state_blended"}, {L"state_blended_no_depth","state_blended_no_depth"},
     {L"state_blended_hdr","state_blended_hdr"}, {L"settlement_prepass","settlement_prepass"},
-    {L"predicted_world_mismatch","predicted_world_mismatch"},
+    {L"predicted_world_mismatch","predicted_world_mismatch"}, {L"predicted_world_close_scale","predicted_world_close_scale"},
     {L"state_blended_hdr_world","state_blended_hdr_world"}, {L"inert_depth_write_world","inert_depth_write_world"},
     {L"stale_foreign_mark","stale_foreign_mark"},
     {L"supersampled_scene","supersampled_scene"}, {L"supersampled_scene_4k","supersampled_scene_4k"}
@@ -60,7 +60,7 @@ bool commandSelfTest() {
         }
     }
     for (const char* name:{"state_partial_mask","state_blended","state_blended_no_depth","state_blended_hdr",
-                            "settlement_prepass","predicted_world_mismatch","state_blended_hdr_world",
+                            "settlement_prepass","predicted_world_mismatch","predicted_world_close_scale","state_blended_hdr_world",
                             "inert_depth_write_world","stale_foreign_mark","supersampled_scene","supersampled_scene_4k"}) {
         // The scene name is the case name: nothing else maps a command line to a scenario.
         const std::wstring wide(name,name+std::strlen(name));

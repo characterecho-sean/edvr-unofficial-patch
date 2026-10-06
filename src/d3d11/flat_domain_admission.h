@@ -1,8 +1,10 @@
 #pragma once
 #include "dxbc_engine_velocity.h"
+#include "flat_camera_phase.h"
 #include "flat_projection_recipes.h"
 #include "flat_shader_classifier.h"
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -229,13 +231,61 @@ inline const char* flatDomainRasterRefusal(const FlatDomainShaderProof& p,const 
     if(!surfaceWriter && (p.nullPs || !color) && colorAlready)return "foreground-depth-only-after-color";
     return nullptr;
 }
+// ---- the world camera, predicted before it is named (design section 104) ------------------------------------------------------
+// A frame draws its world prepasses before the first source draw names the world camera, so before naming the only reference is the last
+// named world camera's (it persists across frames). A draw whose near plane equals the reference's was taken for the world's, planned
+// World/WorldPool with no capture, and left a witness that H checks against the selected camera. Near alone mistook a first-person depth
+// prepass for it: aiming down sights the weapon camera takes the world's near plane (and the world's pose and phase) and keeps its own
+// projection, 1.23 to 1.66 times the world's scale (flight 13:18, frames 51696-51707), so the draw left a witness no world camera could
+// match and every frame refused H (foreground-pending-null-not-selected-world). The projection scale tells the cameras apart where the
+// near plane cannot (flatCameraProjectionScale: free of the rotation and the phase). The world against its own previous frame moves
+// 1.000 to 1.038 a frame at 50 fps; the weapon against the previous world 1.32 to 1.66 entering the sights and at least 1.18 leaving
+// them. 10% sits between the two, and is the VR role tracker's own cut (flat_camera_vr.h, 0.92 of the field of view).
+constexpr double kFlatDomainWorldScaleTolerance = 0.10;
+struct FlatDomainWorldReference {
+    float nearPlane = 0;
+    double p0 = 0, p1 = 0;   // the projection scale on x and on y
+    bool valid() const { return nearPlane > 0 && std::isfinite(nearPlane) && p0 > 0 && p1 > 0; }
+};
+// The reference a named world camera leaves: its near plane and projection scales (invalid when its rows have no scale to take).
+inline FlatDomainWorldReference flatDomainWorldReference(const float (&rows)[6][4]) {
+    FlatDomainWorldReference ref;
+    double p0 = 0, p1 = 0;
+    if (!flatCameraProjectionScale(rows, p0, p1)) return ref;
+    ref.nearPlane = rows[3][2]; ref.p0 = p0; ref.p1 = p1;
+    return ref;
+}
+struct FlatDomainWorldPrediction {
+    bool nearEqual = false;          // the draw's near plane is the reference's (the cheap test, made first)
+    bool predicted = false;          // ... and both projection scales are within the tolerance of the reference's
+    double ratio0 = 0, ratio1 = 0;   // the draw's scale over the reference's, taken only for a draw whose near plane was equal
+};
+// THE predicate: is a draw before naming the world camera's? True only when its near plane is the reference's AND both projection scales
+// are within kFlatDomainWorldScaleTolerance of the reference's. No reference (the first frame of a session, or rows with no scale) is not
+// predicted: the draw is classified as any other (a first-person pool draw is captured). The scales are taken only for a draw whose near
+// plane is equal. `detail` reports the pieces (the runtime counts the near-equal draws the scale rejected).
+inline bool flatDomainPredictsWorld(const float (&rows)[6][4], const FlatDomainWorldReference& ref,
+                                    FlatDomainWorldPrediction* detail = nullptr) {
+    FlatDomainWorldPrediction out;
+    if (ref.valid() && rows[3][2] == ref.nearPlane) {
+        out.nearEqual = true;
+        double p0 = 0, p1 = 0;
+        if (flatCameraProjectionScale(rows, p0, p1)) {
+            out.ratio0 = p0 / ref.p0; out.ratio1 = p1 / ref.p1;
+            out.predicted = std::fabs(out.ratio0 - 1.0) <= kFlatDomainWorldScaleTolerance &&
+                            std::fabs(out.ratio1 - 1.0) <= kFlatDomainWorldScaleTolerance;
+        }
+    }
+    if (detail) *detail = out;
+    return out.predicted;
+}
 // A pre-world depth-only draw is provisional: its camera must become the
 // actual selected world camera in this frame. No later-material coverage is
 // guessed, and a foreign or missing world witness leaves the frame refused.
 class FlatDomainPendingNull {
     // vs, ps and kind name the draw that left the witness, for the mismatch line alone (describeMismatch): they take no part in
-    // matching or in merging two witnesses. kind 1: a draw at the predicted world near before naming; 2: a null prepass at
-    // another near.
+    // matching or in merging two witnesses. kind 1: a draw predicted to be the world's before naming (flatDomainPredictsWorld: the last
+    // world's near plane and projection scale); 2: a null prepass at another near.
     struct Witness { const void* depth=nullptr;unsigned width=0,height=0;float camera[6][4]{};float x=0,y=0;uint64_t vs=0,ps=0;unsigned kind=0; };
     std::array<Witness,4> witnesses_{};unsigned count_=0;uint64_t frame_=~0ull;
 public:
@@ -249,7 +299,9 @@ public:
     }
     // The first witness matches() would refuse, said in one line (design doc section 104: aiming down sights refused H with this
     // witness): which kind of draw left it, what differs (depth, size, phase, or the camera block), and for the camera block the
-    // decoded terms of both (x and y scale, near, position) plus the first differing float. False when every witness matches.
+    // decoded terms of both (x and y scale, near, position), the witness's projection scale over the selected camera's on each axis
+    // (flatCameraProjectionScale: 1.0 for the world's own draw, 1.23 and more for a weapon camera sharing the world's near plane) and
+    // the first differing float. False when every witness matches.
     bool describeMismatch(uint64_t frame,const void* depth,unsigned width,unsigned height,const float camera[6][4],float x,float y,
                           char* out,size_t size)const {
         if(!out || !size)return false;
@@ -273,6 +325,16 @@ public:
                 (unsigned long long)w.vs,(unsigned long long)w.ps,d?" depth":"",s?" size":"",p?" phase":"",c?" camera":"",
                 w.camera[0][0],w.camera[1][1],w.camera[3][2],w.camera[5][0],w.camera[5][1],w.camera[5][2],w.x,w.y,
                 camera[0][0],camera[1][1],camera[3][2],camera[5][0],camera[5][1],camera[5][2],x,y);
+            {
+                float selected[6][4];std::memcpy(selected,camera,sizeof(selected));
+                double w0=0,w1=0,s0=0,s1=0;
+                const size_t used=std::strlen(out);
+                if(used<size) {
+                    if(flatCameraProjectionScale(w.camera,w0,w1) && flatCameraProjectionScale(selected,s0,s1))
+                        std::snprintf(out+used,size-used,"; projection scale ratio witness/selected=(%.4g,%.4g)",w0/s0,w1/s1);
+                    else std::snprintf(out+used,size-used,"; projection scale ratio witness/selected=n/a");
+                }
+            }
             if(found) {
                 const size_t used=std::strlen(out);
                 if(used<size)std::snprintf(out+used,size-used,"; first differing float row=%u col=%u witness=%.9g selected=%.9g",

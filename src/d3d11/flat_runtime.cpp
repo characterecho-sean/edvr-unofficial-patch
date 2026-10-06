@@ -241,9 +241,12 @@ struct State {
         Ptr<ID3D11Resource> hdr;
         DomainFailure firstFailure{};
         DomainFailureKinds failureKinds{};
+        // First-person (foreign) draws the domain planned into this depth this frame: the copy route's second witness that the frame is
+        // mixed-camera (flatCopyMixedCamera), for a weapon whose draws the model cannot see. Zeroed with the frame.
+        uint32_t foreignPlanned=0;
         void beginFrame(uint64_t next) {
             if(frame==next)return;
-            frame=next;colorWritten=false;
+            frame=next;colorWritten=false;foreignPlanned=0;
             pendingNull.beginFrame(next);hdr.Reset();firstFailure={};
             motion.beginFrame(static_cast<unsigned>(next));
         }
@@ -278,11 +281,13 @@ struct State {
     // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
     struct CameraOriginWindow { uint64_t frames = 0, moved = 0; float maxAbs = 0, maxStep = 0, minStep = 0; float last[3] = {}; };
     CameraOriginWindow origin;
-    // Near plane of the last named world camera. Elite draws world-camera
-    // depth prepasses on H before the first supported material draw names
-    // the world; a draw at this near is provisionally world and must match
-    // the selected world camera at H (FlatDomainPendingNull), else H refuses.
-    float predictedWorldNear=0;
+    // The last named world camera's near plane and projection scales. Elite draws world-camera depth prepasses on H before the first
+    // supported material draw names the world; a draw with this near AND this projection scale (flatDomainPredictsWorld) is provisionally
+    // world and must match the selected world camera at H (FlatDomainPendingNull), else H refuses. Persists across frames.
+    FlatDomainWorldReference worldReference;
+    // Draws whose near plane was the reference's and whose projection scale was not (aiming down sights: the weapon camera takes the
+    // world's near): classified as first-person draws, not as the world. One 5 s window, on the `flat foreground SDK domain` line.
+    uint64_t predictedScaleRejectedWindow=0;
     FlatUntrustedCoverage untrusted;
     bool untrustedUnknown = false;
     bool untrustedSupportedAlternate = false;
@@ -525,6 +530,9 @@ struct State {
     // copy route is the whitelist alone, as before, and the admission only names what it sees (no scene, a render size
     // that does not fit). Nothing here touches a D3D object.
     FlatCopyWindow copyWindow{};     // the 5 s window of the census line
+    // The copy route's weapon support (flat_copy_structure.h, flatWeaponRoute): cohort draws flagged, glow draws admitted as
+    // alternate HDR writers, frames selected mixed-camera and the foreground contract's H qualification at the copy.
+    FlatCopyWeaponWindow copyWeaponWindow{};
     bool copyFirstLogged = false;    // the once-a-session first admission line
     uint32_t copyDeclineLines = 0;   // bounded per-session decline lines, each cause once
     const char* copyDeclineSeen[12]{};
@@ -608,18 +616,20 @@ static void reportForegroundDomain(State& s) {
         captures.submitted+=c.submitted;captures.preflightRefused+=c.preflightRefused;
         captures.warmedAfterRefusal+=c.warmedAfterRefusal;
     }
-    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu last-refusal=%s; counts cover all depth candidates, qualification alone is not a completed SDK call",
+    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call",
         flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
         (unsigned long long)captures.attempts,(unsigned long long)captures.gpuAttempts,
         (unsigned long long)captures.submitted,(unsigned long long)captures.preflightRefused,
         (unsigned long long)captures.warmedAfterRefusal,
         (unsigned long long)n.worldMarkers,(unsigned long long)n.nullMarkers,(unsigned long long)n.markerRefused,
-        (unsigned long long)n.predictedWorld,s.predictedWorldNear,(unsigned long long)n.worldUnmarked,
+        (unsigned long long)n.predictedWorld,s.worldReference.nearPlane,(unsigned long long)s.predictedScaleRejectedWindow,
+        (unsigned long long)n.worldUnmarked,
         (unsigned long long)n.surfacePreserving,(unsigned long long)n.surfacePreservingForeign,
         (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,s.foregroundHRefusalWindow?s.foregroundHRefusalWindow:"none");
     // last-refusal is the most recent H refusal since the previous line. The per-frame field clears at every frame start, so it read
     // "none" here even while every frame was refused (section 104, supersampled 4K).
     s.foregroundHRefusalWindow=nullptr;
+    s.predictedScaleRejectedWindow=0;
     const auto& f=s.foregroundFirstFailure;
     Log::get().note("flat foreground first failure: configured=%s frame=%llu q=%u VS=%016llX PS=%016llX format=%u camera=%016llX depth=%p stage=%s reason=%s pending-world-null=%u selected-H-frame=%llu selected-depth=%p candidates=%u cap=%u overflow=%u candidate-present=%u; first failure on selected H depth in the most recent failed frame, not a shader allowlist",
         flatMonoResolveModeName(s.engine),(unsigned long long)f.frame,f.q,(unsigned long long)f.vs,(unsigned long long)f.ps,
@@ -3516,6 +3526,11 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             flatCopyFormatWindow(copyText, sizeof(copyText), s.hdrKey == FlatHdrKey::Auto, s.copyWindow);
             Log::get().note("%s", copyText);
             s.copyWindow.reset();
+            // The copy route's weapon census, every window, zeros included (see FlatCopyWeaponWindow).
+            char weaponText[480];
+            flatCopyWeaponFormatWindow(weaponText, sizeof(weaponText), flatMonoResolveModeName(s.engine), s.copyWeaponWindow);
+            Log::get().note("%s", weaponText);
+            s.copyWeaponWindow.reset();
         }
         // Part B coverage census: always printed, even when every field is
         // zero -- that is how "code never ran" (line absent) differs from
@@ -4064,6 +4079,70 @@ static bool domainDrawPreservesSurface(ID3D11DeviceContext* context) {
     if(depthState)depthState->GetDesc(&depth);
     return flatDomainPreservesSurface(depth);
 }
+// The foreground (first-person) contract of a mixed-camera frame (design section 104): an SDK frame is handed the qualified
+// first-person map built from the domain's captured draws, or the resolver refuses it. One block for both routes. The HDR route runs it
+// at its trigger (treatHdr); the copy route runs it at the game's final copy, for the render-below-output frames its weapon support
+// admits (flatWeaponRoute == Copy, flat_copy_structure.h). The map is built from the depth, the owner plane and the captured geometry
+// as they are at the call, so a depth write between H and the copy takes those pixels' ownership (tools\weapon_motion_test pins it)
+// and the map the SDK is handed is the picture's. `foregroundOutput` outlives the resolve: the frame's map view is borrowed from it.
+// Sets f.foregroundRequired and, when that is true, the map, its qualification, frame, reset request and depth convention.
+static void foregroundContractAtH(State& s,ID3D11DeviceContext* ctx,const FlatMonoFrame& selected,FlatMonoResolveFrame& f,
+                                  FlatForegroundMotion::Output& foregroundOutput) {
+    f.foregroundRequired=f.mode!=FlatMonoResolveMode::Taa && selected.mixedCamera;
+    if(!f.foregroundRequired)return;
+    FlatComputeInternalScope internal;
+    s.foregroundSelectedDepth=selected.depth;
+    s.foregroundRoute.pin(selected.depth);
+    auto* candidate=domainCandidate(s,selected.depth);
+    FlatContractObservation failureKey{};failureKey.vs=s.drawVs;failureKey.ps=s.drawPs;
+    failureKey.depth=selected.depth;failureKey.format=26;
+    failureKey.cameraHash=flatDomainBytecodeHash(selected.camera,sizeof(selected.camera));
+    auto failH=[&](const char* why){domainFail(s,"H-qualification",why,failureKey);if(!s.foregroundHRefusal)s.foregroundHRefusal=why;
+        if(why)s.foregroundHRefusalWindow=why;};
+    ++s.foregroundCounts.hAttempts;
+    if(!f.hdr)++s.copyWeaponWindow.hAttempts;   // the copy route's own count (the HDR route's frames carry f.hdr)
+    s.foregroundLastH={s.prefix.frame,selected.depth,s.foregroundRoute.count(s.prefix.frame),
+        candidate?candidate->pendingNull.count():0,
+        s.foregroundRoute.overflowed(s.prefix.frame),candidate!=nullptr};
+    if(!candidate)failH("foreground-selected-depth-unobserved-or-overflow");
+    if(candidate && !candidate->pendingNull.matches(s.prefix.frame,selected.depth,f.renderWidth,f.renderHeight,
+        selected.camera,s.phase.currentX,s.phase.currentY)) {
+        failH("foreground-pending-null-not-selected-world");
+        // Which witness and what differs (section 104: aiming down sights refused H here). The first 12 such frames of a session.
+        if(s.pendingNullMismatchLogged<12) {
+            char text[768];
+            if(candidate->pendingNull.describeMismatch(s.prefix.frame,selected.depth,f.renderWidth,f.renderHeight,selected.camera,
+                                                       s.phase.currentX,s.phase.currentY,text,sizeof(text))) {
+                ++s.pendingNullMismatchLogged;
+                Log::get().note("flat foreground pending-null mismatch %u/12: frame=%llu %s",s.pendingNullMismatchLogged,
+                    (unsigned long long)s.prefix.frame,text);
+            }
+        }
+    }
+    if(candidate && candidate->hdr && candidate->hdr.Get()!=selected.hdr)
+        failH("foreground-provisional-HDR-not-selected");
+    if(foreignWork.load(std::memory_order_acquire) || s.prefix.uncertain)
+        failH("foreground-uncertain-frame");
+    if(s.foregroundRoute.unknownMutation(s.prefix.frame))
+        failH("foreground-prior-unknown-mutation");
+    Ptr<ID3D11ShaderResourceView> domainOwners;
+    if(!engineVelocityFlatDomainSlots(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)),&domainOwners))
+        failH("foreground-current-owner-plane-unavailable");
+    if(candidate)candidate->motion.prepareH(ctx,domainOwners.Get(),s.depthView.Get(),selected.camera,
+        static_cast<unsigned>(s.prefix.frame),f.renderWidth,f.renderHeight,foregroundOutput);
+    if(candidate && !foregroundOutput.qualified)failH(foregroundOutput.refusal);
+    if(candidate && candidate->firstFailure.frame==s.prefix.frame)
+        s.foregroundFirstFailure=candidate->firstFailure;
+    if(candidate && candidate->failureKinds.frame==s.prefix.frame)
+        s.foregroundFailureKinds=candidate->failureKinds;
+    f.foregroundMotion=foregroundOutput.motion.Get();f.foregroundQualified=foregroundOutput.qualified;
+    f.foregroundResetRequired=foregroundOutput.resetRequired;f.foregroundFrame=foregroundOutput.frame;
+    f.foregroundDepthNear=foregroundOutput.depthNear;
+    if(foregroundOutput.qualified) {
+        ++s.foregroundCounts.hQualified;
+        if(!f.hdr)++s.copyWeaponWindow.hQualified;
+    }
+}
 
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
                                             char kind, uint32_t count, uint32_t start,
@@ -4297,13 +4376,52 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             k.vs,k.ps,conflict,k.cameraHash,d.camera,
             target?target->tone.key.cameraHash:0,target?target->tone.camera:nullptr);
     }
+    // The world camera, predicted before it is named: ONE decision per draw (flatDomainPredictsWorld: the last named world's near plane
+    // AND its projection scale), taken lazily and shared by the cohort flag below and by the domain's classification further down. A
+    // near plane alone took the weapon's own depth prepass for the world while aiming down sights (design section 104).
+    FlatDomainWorldPrediction worldPrediction{};bool worldPredictionKnown=false;
+    const auto worldPredicted=[&]()->const FlatDomainWorldPrediction& {
+        if(!worldPredictionKnown) {
+            worldPredictionKnown=true;
+            if(k.camera) {float rows[6][4];std::memcpy(rows,d.camera,sizeof(rows));flatDomainPredictsWorld(rows,s.worldReference,&worldPrediction);}
+        }
+        return worldPrediction;
+    };
+    // Where the weapon's two passes are judged (flat_copy_structure.h, flatWeaponRoute; design section 104). The HDR route's frame
+    // keeps what it had: a protected overlay for the glow pass below, and the cohort's own qualification at H. Where the copy route
+    // judges the frame (DLSS or FSR, and the HDR route will not treat it) the cohort is flagged here, before the model sees the draw,
+    // and the glow pass is admitted as an alternate HDR writer instead of planned as an overlay; both ride the trace.
+    bool weaponRouteKnown=false,weaponCopyRoute=false;
+    const auto copyWeapon=[&]() {
+        if(!weaponRouteKnown) {
+            weaponRouteKnown=true;
+            weaponCopyRoute=flatWeaponRoute(s.hdrKey==FlatHdrKey::Auto,s.hdrLatch.tripped,s.engine,k.width,k.height,
+                s.prefix.width,s.prefix.height)==FlatWeaponRoute::Copy;
+        }
+        return weaponCopyRoute;
+    };
+    if(d.supported && k.camera && k.depth && k.kind==kFlatContractPool && k.format==23 && weaponMotionFamilyVs(k.vs) &&
+       flat_mono_detail::fullViewport(k,k.width,k.height) &&
+       flatContractKind(false,k.color,k.depth,k.width,k.height,k.format,s.prefix.width,s.prefix.height,false)==kFlatContractScreen &&
+       copyWeapon()) {
+        // The first-person camera, not the world's: the world camera is the named one once H has named it, and the last named world's
+        // (near plane and projection scale: the domain's own prediction, below) before that, so a weapon-family draw under the world's
+        // camera stays a world source.
+        const bool predictedWorld=!s.namedDepth && worldPredicted().predicted;
+        const bool worldCamera=s.namedDepth && std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))==0;
+        d.firstPersonCohort=!predictedWorld && !worldCamera;
+        if(d.firstPersonCohort)++s.copyWeaponWindow.cohortDraws;
+    }
     // Only a same-pose, same-raster-phase, camera-conflicting HDR draw may
     // enter the protected late-colour suffix. All names below are the current
     // draw's uploaded camera and live binding shadow, never a guessed weapon
     // shader list. The model gets a provisional mark; the actual private MRT
-    // binding is verified immediately around the original draw below.
+    // binding is verified immediately around the original draw below. Where the
+    // copy route judges the frame the same tests admit the draw as an alternate
+    // HDR writer instead (d.alternateHdr), with no overlay: the key's value
+    // never bars it there, because the HDR route is not the one that treats it.
     const FlatRuntimeTarget* overlayTarget=nullptr;
-    if(s.work==FlatWork::Full && s.hdrKey==FlatHdrKey::Auto && s.projection &&
+    if(s.work==FlatWork::Full && (s.hdrKey==FlatHdrKey::Auto || copyWeapon()) && s.projection &&
        s.jitterWanted && !s.phase.failed && s.frameCoverage &&
        flatCameraInjectUpstreamOwns() && !foreignWork.load(std::memory_order_acquire) &&
        !s.prefix.uncertain && !d.supported && !tone && !copy &&
@@ -4351,11 +4469,18 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if((pair.vs==FlatVsProjectionClass::ForwardColumns ||
                 pair.vs==FlatVsProjectionClass::ForwardDp4) &&
                 pair.ps==FlatPsProjectionSafety::Clean) {
-                d.overlayProtected=true;
-                overlayPlanned=true;
-                ++s.overlayPlannedWindow;
-                overlayHdr=static_cast<ID3D11Texture2D*>(const_cast<void*>(k.color));
-                overlayDsv=static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv));
+                if(copyWeapon()) {
+                    // The copy route resolves after the game's post chain, so the glow is in the picture the SDK is handed and
+                    // there is no clean H to restore: no private MRT bracket, no open suffix, nothing to seal or to fail.
+                    d.alternateHdr=true;
+                    ++s.copyWeaponWindow.alternateDraws;
+                } else {
+                    d.overlayProtected=true;
+                    overlayPlanned=true;
+                    ++s.overlayPlannedWindow;
+                    overlayHdr=static_cast<ID3D11Texture2D*>(const_cast<void*>(k.color));
+                    overlayDsv=static_cast<ID3D11DepthStencilView*>(const_cast<void*>(k.dsv));
+                }
             }
         }
     }
@@ -4590,7 +4715,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         flatcpu::Scope engine(flatcpu::kEngineDraw);
         s.namedDepth=k.depth;s.namedConstants=k.b1;s.namedWorldQ=s.prefix.sequence;
         std::memcpy(s.namedCamera,d.camera,sizeof(d.camera));
-        std::memcpy(&s.predictedWorldNear,d.camera+(3*4+2)*sizeof(float),sizeof(float));
+        {float namedRows[6][4];std::memcpy(namedRows,d.camera,sizeof(namedRows));s.worldReference=flatDomainWorldReference(namedRows);}
         engineVelocityNoteSource(static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),static_cast<ID3D11Buffer*>(const_cast<void*>(k.b1)));
     }
     const bool foregroundGap=s.foreground.needsPreWorldState(
@@ -4610,13 +4735,14 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // Successful original bracket completion is checked below.
             domainDepth=static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth));
         } else if(candidate) {
-            float drawNear=0;if(k.camera)std::memcpy(&drawNear,d.camera+(3*4+2)*sizeof(float),sizeof(float));
             float rows[6][4]{};if(k.camera)std::memcpy(rows,d.camera,sizeof(rows));
-            // Before naming, the world camera's prepass shares this depth with
-            // the first-person camera's (near 0.025 against 0.0675). A draw at
-            // the last named world near is world; its witness must equal the
-            // selected world camera at H, so a wrong prediction only refuses.
-            const bool predictedWorld=!s.namedDepth && k.camera && s.predictedWorldNear>0 && drawNear==s.predictedWorldNear;
+            // Before naming, the world camera's prepass shares this depth with the first-person camera's (near 0.025 against 0.0675).
+            // A draw with the last named world's near plane AND projection scale is the world's (flatDomainPredictsWorld, the one
+            // prediction, shared with the cohort flag); its witness must equal the selected world camera at H, so a wrong prediction
+            // only refuses. A weapon aiming down sights takes the world's near plane but keeps its own scale (1.23 to 1.66 times the
+            // world's): it is not predicted, and is classified, captured and marked as the first-person draw it is.
+            const bool predictedWorld=!s.namedDepth && k.camera && worldPredicted().predicted;
+            if(!s.namedDepth && k.camera && worldPredicted().nearEqual && !worldPredicted().predicted)++s.predictedScaleRejectedWindow;
             const bool worldCamera=s.namedDepth && k.camera && std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))==0;
             auto witness=[&](unsigned kind){
                 if(!candidate->pendingNull.add(s.prefix.frame,k.depth,k.depthWidth,k.depthHeight,rows,s.phase.currentX,s.phase.currentY,
@@ -4658,7 +4784,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                     domainPool=domainForeign=plan.kind==FlatDomainPlanKind::ForeignPool;
                     domainWriterToken=s.prefix.sequence;
                     std::memcpy(domainCamera,d.camera,sizeof(domainCamera));
-                    ++s.foregroundCounts.foreignSeen;
+                    ++s.foregroundCounts.foreignSeen;++candidate->foreignPlanned;
                 }
             }
         }
@@ -4857,6 +4983,17 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(!s.treated && s.phase.applied)recover(s.reason);
         refuse(s); return;
     }
+    {
+        // The weapon the model cannot see (an unsupported first-person pair: the plasma weapon) is known only to the domain, which planned
+        // its draws into this frame's depth: either witness makes the frame mixed-camera, where the copy route judges the weapon.
+        const auto* planned = domainCandidate(s, selected.depth);
+        const bool modelMixed = selected.mixedCamera;
+        selected.mixedCamera = flatCopyMixedCamera(modelMixed,
+            flatWeaponRoute(s.hdrKey == FlatHdrKey::Auto, s.hdrLatch.tripped, s.engine, selected.renderWidth, selected.renderHeight,
+                            selected.outputWidth, selected.outputHeight),
+            planned ? planned->foreignPlanned : 0);
+        if (selected.mixedCamera) { ++s.copyWeaponWindow.mixedFrames; if (!modelMixed) ++s.copyWeaponWindow.domainMixedFrames; }
+    }
     FlatComputeInternalScope guard;
     flatcpu::Scope resolveScope(flatcpu::kResolve);   // the treatment: the handoff checks, the resolver, the sharpen pass
     // Verify the actual handoff once. Cached bindings only nominate this draw.
@@ -5009,6 +5146,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     Ptr<ID3D11ShaderResourceView> engineSlots, enginePool, outputView; Ptr<ID3D11Buffer> nowCb, prevCb;
     engineSlots.Attach(f.engine.slots); enginePool.Attach(f.engine.pool); nowCb.Attach(f.engine.sceneNow); prevCb.Attach(f.engine.scenePrev);
+    // The weapon on the copy route (flatWeaponRoute == Copy, flat_copy_structure.h): a frame that is mixed-camera (the model's cohort
+    // in it, or a first-person draw the domain planned: flatCopyMixedCamera, above) asks the same foreground contract the HDR route asks
+    // at its trigger, here at the final copy, and the resolver takes a qualified map or refuses. EDVR's TAA is never asked (the call
+    // returns with the field false), and a frame with no first-person draw is never mixed-camera, so it asks nothing.
+    FlatForegroundMotion::Output foregroundOutput;
+    foregroundContractAtH(s,ctx,selected,f,foregroundOutput);
     if (cameraRoute != FlatCameraRoute::Off) {
         ++s.rows.frames;
         if (rowsNow.x != 0.0f || rowsNow.y != 0.0f) ++s.rows.unjittered; else ++s.rows.zeroPhase;
@@ -5287,58 +5430,9 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     }
     Ptr<ID3D11ShaderResourceView> engineSlots, enginePool, outputView; Ptr<ID3D11Buffer> nowCb, prevCb;
     engineSlots.Attach(f.engine.slots); enginePool.Attach(f.engine.pool); nowCb.Attach(f.engine.sceneNow); prevCb.Attach(f.engine.scenePrev);
+    // The foreground contract of a mixed-camera frame (the copy route's final copy asks the same, below its engine source views).
     FlatForegroundMotion::Output foregroundOutput;
-    f.foregroundRequired=f.mode!=FlatMonoResolveMode::Taa && selected.mixedCamera;
-    if(f.foregroundRequired) {
-        FlatComputeInternalScope internal;
-        s.foregroundSelectedDepth=selected.depth;
-        s.foregroundRoute.pin(selected.depth);
-        auto* candidate=domainCandidate(s,selected.depth);
-        FlatContractObservation failureKey{};failureKey.vs=s.drawVs;failureKey.ps=s.drawPs;
-        failureKey.depth=selected.depth;failureKey.format=26;
-        failureKey.cameraHash=flatDomainBytecodeHash(selected.camera,sizeof(selected.camera));
-        auto failH=[&](const char* why){domainFail(s,"H-qualification",why,failureKey);if(!s.foregroundHRefusal)s.foregroundHRefusal=why;
-            if(why)s.foregroundHRefusalWindow=why;};
-        ++s.foregroundCounts.hAttempts;
-        s.foregroundLastH={s.prefix.frame,selected.depth,s.foregroundRoute.count(s.prefix.frame),
-            candidate?candidate->pendingNull.count():0,
-            s.foregroundRoute.overflowed(s.prefix.frame),candidate!=nullptr};
-        if(!candidate)failH("foreground-selected-depth-unobserved-or-overflow");
-        if(candidate && !candidate->pendingNull.matches(s.prefix.frame,selected.depth,f.renderWidth,f.renderHeight,
-            selected.camera,s.phase.currentX,s.phase.currentY)) {
-            failH("foreground-pending-null-not-selected-world");
-            // Which witness and what differs (section 104: aiming down sights refused H here). The first 12 such frames of a session.
-            if(s.pendingNullMismatchLogged<12) {
-                char text[768];
-                if(candidate->pendingNull.describeMismatch(s.prefix.frame,selected.depth,f.renderWidth,f.renderHeight,selected.camera,
-                                                           s.phase.currentX,s.phase.currentY,text,sizeof(text))) {
-                    ++s.pendingNullMismatchLogged;
-                    Log::get().note("flat foreground pending-null mismatch %u/12: frame=%llu %s",s.pendingNullMismatchLogged,
-                        (unsigned long long)s.prefix.frame,text);
-                }
-            }
-        }
-        if(candidate && candidate->hdr && candidate->hdr.Get()!=selected.hdr)
-            failH("foreground-provisional-HDR-not-selected");
-        if(foreignWork.load(std::memory_order_acquire) || s.prefix.uncertain)
-            failH("foreground-uncertain-frame");
-        if(s.foregroundRoute.unknownMutation(s.prefix.frame))
-            failH("foreground-prior-unknown-mutation");
-        Ptr<ID3D11ShaderResourceView> domainOwners;
-        if(!engineVelocityFlatDomainSlots(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)),&domainOwners))
-            failH("foreground-current-owner-plane-unavailable");
-        if(candidate)candidate->motion.prepareH(ctx,domainOwners.Get(),s.depthView.Get(),selected.camera,
-            static_cast<unsigned>(s.prefix.frame),f.renderWidth,f.renderHeight,foregroundOutput);
-        if(candidate && !foregroundOutput.qualified)failH(foregroundOutput.refusal);
-        if(candidate && candidate->firstFailure.frame==s.prefix.frame)
-            s.foregroundFirstFailure=candidate->firstFailure;
-        if(candidate && candidate->failureKinds.frame==s.prefix.frame)
-            s.foregroundFailureKinds=candidate->failureKinds;
-        f.foregroundMotion=foregroundOutput.motion.Get();f.foregroundQualified=foregroundOutput.qualified;
-        f.foregroundResetRequired=foregroundOutput.resetRequired;f.foregroundFrame=foregroundOutput.frame;
-        f.foregroundDepthNear=foregroundOutput.depthNear;
-        if(foregroundOutput.qualified)++s.foregroundCounts.hQualified;
-    }
+    foregroundContractAtH(s,ctx,selected,f,foregroundOutput);
     if (cameraRoute != FlatCameraRoute::Off) {
         ++s.rows.frames;
         if (rowsNow.x != 0.0f || rowsNow.y != 0.0f) ++s.rows.unjittered; else ++s.rows.zeroPhase;

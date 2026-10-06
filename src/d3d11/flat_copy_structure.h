@@ -82,6 +82,44 @@ inline FlatSceneFacts flatSceneFacts(const FlatRuntimePrefix& p, uint32_t outW, 
     return FlatSceneFacts{};
 }
 
+// ---- where the weapon's passes are judged -----------------------------------------------------------------------
+// A frame with a weapon up has two kinds of draw the scene-camera model cannot take as they are: the first-person pool cohort
+// (an alternate camera at the scene's depth) and the glow pass (an HDR draw from a second camera). The HDR route judges both when
+// it treats the frame: a protected overlay for the glow pass and the qualified alternate source, with its coverage map, for the
+// cohort. The copy route has none of that, and until the copy route learned the weapon every such frame was refused (section 104).
+//   Hdr:       the frame is the HDR route's (the key auto, the route not latched, a mode that resolves at the render size): what
+//              the runtime does for it has not changed.
+//   Copy:      the copy route judges it, for DLSS and FSR: the glow pass is admitted as an alternate HDR writer (no overlay), the
+//              cohort stays out of the sources and makes the frame mixed-camera, and the foreground contract qualifies it at the
+//              final copy. This is every frame the HDR route will not treat, which includes the key off at any size.
+//   Unchanged: EDVR's TAA and DLAA, where the HDR route will not treat the frame: they keep what they always had.
+enum class FlatWeaponRoute : uint8_t { Hdr, Copy, Unchanged };
+inline const char* flatWeaponRouteName(FlatWeaponRoute r) {
+    switch (r) {
+    case FlatWeaponRoute::Hdr: return "hdr";
+    case FlatWeaponRoute::Copy: return "copy";
+    case FlatWeaponRoute::Unchanged: return "unchanged";
+    }
+    return "?";
+}
+// The copy route's mixed-camera verdict (the first-person contract's trigger) has two witnesses. The model's own: the first-person cohort
+// it was told of (FlatRuntimeDraw::firstPersonCohort, FlatMonoFrame::mixedCamera), which keeps SUPPORTED alternate-camera pool draws from
+// making the frame ambiguous. And the domain's: a first-person draw it planned into the frame's depth (the count the depth candidate keeps
+// per frame), seen whatever the model took the draw for. The plasma weapon's first-person draws are unsupported pairs, so they reach the
+// model as nothing at all and the cohort flag never fires for them; the domain, which proves a draw by its own bytes, planned them. Either
+// witness asks the contract; the domain's is taken only where the copy route judges the weapon (flatWeaponRoute == Copy), so EDVR's TAA
+// and DLAA keep what they had. A holstered-arms frame is planned too: it qualifies as it does on the HDR route, with the arms' own motion.
+inline bool flatCopyMixedCamera(bool modelMixed, FlatWeaponRoute route, uint32_t domainForeignPlanned) {
+    return modelMixed || (route == FlatWeaponRoute::Copy && domainForeignPlanned > 0);
+}
+inline FlatWeaponRoute flatWeaponRoute(bool keyAuto, bool routeLatched, FlatMonoResolveMode mode,
+                                       uint32_t renderW, uint32_t renderH, uint32_t outputW, uint32_t outputH) {
+    if (keyAuto && !routeLatched && flatHdrRouteEvaluatesAtRender(mode, renderW, renderH, outputW, outputH))
+        return FlatWeaponRoute::Hdr;
+    return mode == FlatMonoResolveMode::Dlss || mode == FlatMonoResolveMode::Fsr ? FlatWeaponRoute::Copy
+                                                                                : FlatWeaponRoute::Unchanged;
+}
+
 // ---- the admission --------------------------------------------------------------------------------------------
 struct FlatCopyPolicy {
     bool structure = false;              // admit by structure (experimental.temporal_aa_before_post = auto)
@@ -236,6 +274,9 @@ inline FlatMonoFrame flatCopyAdmit(FlatRuntimePrefix& p, const FlatHdrFrame& f, 
         g.outcome = FlatCopyOutcome::Refused;
         return sel;
     }
+    // A first-person cohort the model left out of the sources (FlatRuntimeDraw::firstPersonCohort) makes the admitted frame
+    // mixed-camera, as it does for the whitelist's own selection (flatRuntimeObserve's copy branch).
+    if (flatRuntimeFirstPerson(p, sel.depth)) sel.mixedCamera = true;
     // The frame is the copy's: its source is S, and a frame that came through the verified menu copy names that copy's
     // inherited destination as its HDR (the 3D menu's stale-slot policy asks for it: flatFrameThroughMenuCopy).
     sel.color = k.srvResource[0];
@@ -364,6 +405,30 @@ inline int flatCopyFormatDeclined(char* out, size_t size, uint64_t frame, const 
 // The render size's own words, for the stand-down line and the F8 panel ("Elite renders 2176x1224 on a 2560x1600 screen").
 inline int flatRenderSizeWords(char* out, size_t size, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh) {
     return std::snprintf(out, size, "Elite renders %ux%u on a %ux%u screen", rw, rh, ow, oh);
+}
+
+// The copy route's weapon census (flatWeaponRoute == Copy), one 5 s window printed every window while a temporal mode runs, zeros
+// included: an absent line is what "the weapon wiring never ran" looks like, and `cohort-draws=0` is "it ran and no weapon was up"
+// (with the HDR route serving, or TAA and DLAA, every field is zero by construction). The H counters are the foreground contract's
+// own, taken at the final copy: `H-attempts` is the frames the copy selected mixed-camera and asked for the coverage map, and
+// `H-qualified` how many got one; the refusal's name rides the `flat foreground SDK domain` line (last-refusal), as on the HDR route.
+struct FlatCopyWeaponWindow {
+    uint64_t cohortDraws = 0;        // first-person pool draws flagged for the model (FlatRuntimeDraw::firstPersonCohort)
+    uint64_t alternateDraws = 0;     // glow-pass draws admitted as alternate HDR writers (FlatRuntimeDraw::alternateHdr), no overlay
+    uint64_t mixedFrames = 0;        // copy selections that came out mixed-camera (the cohort was in the frame, or the domain planned a first-person draw)
+    uint64_t domainMixedFrames = 0;  // ... of those, the frames only the domain made mixed (the model saw no cohort: an unsupported weapon, holstered arms)
+    uint64_t hAttempts = 0, hQualified = 0;
+    void reset() { *this = FlatCopyWeaponWindow{}; }
+};
+inline int flatCopyWeaponFormatWindow(char* out, size_t size, const char* modeName, const FlatCopyWeaponWindow& w) {
+    return std::snprintf(out, size,
+        "flat copy weapon 5s: mode=%s cohort-draws=%llu alternate-glow-draws=%llu mixed-frames=%llu domain-mixed-frames=%llu "
+        "H-attempts=%llu H-qualified=%llu; DLSS and FSR where the HDR route does not treat the frame, no overlay is planned there, and "
+        "the refusal behind a missing map is the last-refusal on the flat foreground SDK domain line",
+        modeName ? modeName : "?", static_cast<unsigned long long>(w.cohortDraws),
+        static_cast<unsigned long long>(w.alternateDraws), static_cast<unsigned long long>(w.mixedFrames),
+        static_cast<unsigned long long>(w.domainMixedFrames),
+        static_cast<unsigned long long>(w.hAttempts), static_cast<unsigned long long>(w.hQualified));
 }
 
 }  // namespace edvr

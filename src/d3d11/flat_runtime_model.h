@@ -43,6 +43,18 @@ struct FlatRuntimeDraw {
     bool effectiveDepthWrite = false;
     bool effectiveStencilWrite = false;
     uint32_t instances = 1;
+    // The weapon's two passes on the COPY route (design section 104; flatWeaponRoute in flat_copy_structure.h says where a frame is
+    // judged). Both are set only by the runtime, only for DLSS or FSR, and only where the HDR route will not treat the frame, and
+    // both ride the trace (kFlatTraceFirstPersonCohort, kFlatTraceAlternateHdr), so a replay decides as the live run did. A draw
+    // without them is judged exactly as it always was.
+    //   firstPersonCohort: a supported pool draw of the first-person weapon family under an alternate camera, into the scene's
+    //     depth (the cohort that draws before the world, near 0.0675 against 0.025). It is no world motion source, so it joins no
+    //     source record, and the frame it is in is mixed-camera (FlatMonoFrame::mixedCamera): the foreground contract qualifies it.
+    //   alternateHdr: an HDR draw from a second camera that is the world's pose, with no depth write (the weapon's glow pass). No
+    //     overlay is planned for it, and on a scene H that is still sound it neither sets nor vetoes the scene camera, as the laser
+    //     pair does by its shader hashes.
+    bool firstPersonCohort = false;
+    bool alternateHdr = false;
 };
 // Exact bytecode-qualified image filters, with a position/UV passthrough VS.
 // Live shader verification and resource/frame provenance remain mandatory.
@@ -124,7 +136,15 @@ struct FlatRuntimePrefix {
     uint32_t width = 0, height = 0, format = 0;
     bool uncertain = false;
     FlatRuntimeWitness selectedConflict{};
+    // The first-person cohort seen so far (FlatRuntimeDraw::firstPersonCohort): the depth it draws into and how many draws. Never
+    // part of the contract hash; the copy branch reads it to call the selected frame mixed-camera.
+    const void* firstPersonDepth = nullptr;
+    uint32_t firstPersonDraws = 0;
 };
+// Whether the cohort drew into `depth`, the scene depth a selection names: the selected frame is then mixed-camera.
+inline bool flatRuntimeFirstPerson(const FlatRuntimePrefix& p, const void* depth) {
+    return depth && p.firstPersonDraws && p.firstPersonDepth == depth;
+}
 inline void flatRuntimeBad(FlatRuntimeTarget& t, FlatRuntimeConflict cause,
                           uint32_t sequence, const FlatContractRecord& reference,
                           const FlatContractRecord& current) {
@@ -296,6 +316,9 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
         in.output = p.output; in.outputWidth = p.width; in.outputHeight = p.height; in.outputFormat = p.format;
         in.frame = in.epoch = p.frame; in.supportedPair = [](uint64_t, uint64_t) { return true; };
         out = flatSelectMonoFrame(in);
+        // The first-person cohort left out of the sources above makes the frame mixed-camera (the foreground contract's
+        // trigger). Not part of the contract hash, and false for every frame whose draws carry no cohort flag.
+        if (out.selected() && flatRuntimeFirstPerson(p, out.depth)) out.mixedCamera = true;
         if (out.reason == FlatMonoReason::ConflictingHdr) {
             for (uint32_t i = 0; i < p.targetsUsed; ++i) {
                 const auto& t = p.targets[i];
@@ -439,9 +462,16 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
             // b1[270..273]. It neither sets nor vetoes the scene camera; its
             // pixels fail strict depth ownership at resolve and fall back to
             // current colour.
-            const bool secondCamera =
+            const bool laserPair =
                 k.vs == 0x88DCF1164C640EC3ull && k.ps == 0x494506A63091DF8Cull;
             const bool otherCamera = t->hdrCamera && !flatRuntimeSameCamera(t->tone, d);
+            // The weapon's glow pass where the copy route judges it (FlatRuntimeDraw::alternateHdr): the laser pair's exemption by flag,
+            // for a second camera and only for a draw that writes no depth (a flag on a draw that writes depth is no flag: it conflicts
+            // as any second camera does). Nothing else needs saying here, because the checks around this one already judge the rest and
+            // the flag changes none of them: a draw into another depth is a DepthMismatch above, an H a plain second camera already made
+            // bad stays bad with its first witness, and a draw planned as a protected overlay is the overlay's own case just below.
+            const bool alternate = d.alternateHdr && otherCamera && !d.effectiveDepthWrite;
+            const bool secondCamera = laserPair || alternate;
             const bool overlay = d.overlayProtected && otherCamera && !t->hdrBad &&
                 t->writes.draws && t->writes.key.format == 26 &&
                 k.depth == t->writes.key.depth && k.dsv == t->writes.key.dsv;
@@ -493,7 +523,13 @@ inline FlatMonoFrame flatRuntimeObserve(FlatRuntimePrefix& p, const FlatRuntimeD
     else { ++t->writes.draws; t->writes.last = q; t->writes.lastInstances = d.instances;
         if (k.camera) { t->writes.lastWriteEpoch = k.writeEpoch; t->writes.lastWriteSeq = k.writeSeq; } }
     if (k.format != 9 && toneHdrSlot(k.vs, k.ps) != ~0u) { ++t->tones; t->tone = current(); }
-    if (d.supported && k.depth && k.kind == kFlatContractPool) {
+    if (d.firstPersonCohort && d.supported && k.depth && k.kind == kFlatContractPool) {
+        // Not a world source (FlatRuntimeDraw::firstPersonCohort): counted, never a source record. A cohort in two depths is a frame
+        // this cannot name the scene of, and refuses as every uncertain frame does.
+        if (!p.firstPersonDraws) p.firstPersonDepth = k.depth;
+        else if (p.firstPersonDepth != k.depth) p.uncertain = true;
+        ++p.firstPersonDraws;
+    } else if (d.supported && k.depth && k.kind == kFlatContractPool) {
         FlatContractRecord* source = nullptr;
         for (uint32_t i = 0; i < p.sourcesUsed; ++i) if (p.sources[i].key.depth == k.depth && flatRuntimeSameCamera(p.sources[i], d)) { source = &p.sources[i]; break; }
         if (!source) {

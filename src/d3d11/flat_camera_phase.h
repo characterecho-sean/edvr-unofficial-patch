@@ -82,6 +82,28 @@ inline bool flatCameraMeasureRowShift(const float (&rows)[6][4], double& ndcX, d
             static_cast<double>(rows[2][1]) * f2) / ff;
     return std::isfinite(ndcX) && std::isfinite(ndcY);
 }
+// The projection's own scale on each axis, free of the camera's rotation and of the raster phase the rows carry: what is left of the clip x
+// column (and of the clip y column) once its component along the view direction is taken out. With f the view direction (component 3 of
+// rows 0..2) and a, b the clip x and y columns (components 0 and 1 of rows 0..2), a = p0*right + ndcX*f and b = p1*up + ndcY*f, so
+//   p0 = |a - (a.f / f.f) f|   p1 = |b - (b.f / f.f) f|
+// the remainder of the shift decomposition above. A turn or a roll moves right, up and f together and changes neither; the jitter the rows
+// carry is the ndcX*f term and cancels. Two cameras with one pose and one near plane (the world's, and the first-person weapon's once it has
+// taken the world's near plane aiming down sights) differ by these two numbers alone: flight 13:18, the weapon's against the world's was
+// 1.2313 on both axes at rest (1.2937 against 1.0507, 2.2998 against 1.8679) and 1.32 to 1.66 entering the sights.
+// False when the view direction is degenerate or a scale is not a finite positive number.
+inline bool flatCameraProjectionScale(const float (&rows)[6][4], double& p0, double& p1) {
+    const double f0 = rows[0][3], f1 = rows[1][3], f2 = rows[2][3];
+    const double ff = f0 * f0 + f1 * f1 + f2 * f2;
+    if (!std::isfinite(ff) || !(ff > 1.0e-6)) return false;
+    const auto remainder = [&](size_t column, double& out) {
+        const double a0 = rows[0][column], a1 = rows[1][column], a2 = rows[2][column];
+        const double along = (a0 * f0 + a1 * f1 + a2 * f2) / ff;
+        const double r0 = a0 - along * f0, r1 = a1 - along * f1, r2 = a2 - along * f2;
+        out = std::sqrt(r0 * r0 + r1 * r1 + r2 * r2);
+        return std::isfinite(out) && out > 0.0;
+    };
+    return remainder(0, p0) && remainder(1, p1);
+}
 // A deliberately narrow same-phase proof for the late colour-overlay path.
 // Off-centre projections have an unknown built-in offset and are refused;
 // different FOV and near planes are allowed when the projected centre and

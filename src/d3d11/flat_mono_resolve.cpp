@@ -777,18 +777,23 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
     if(resolveInputs.active()) {
         try { resolveInputs.capture(device,context,f); } catch(...) { resolveInputs.cancel(); }
     }
+    // The first-person map belongs to neither route (section 104): the HDR route qualifies it at its trigger, the copy route at the
+    // game's final copy (a render below the output with DLSS or FSR: flatWeaponRoute, flat_copy_structure.h), and the prep reads it
+    // the same either way, a per-pixel owner-and-motion map at the render size whatever the colour's format. A frame that requires it
+    // and has no qualified map of its own frame is refused here, before anything is made or written.
     const bool foreground = f.mode!=FlatMonoResolveMode::Taa && f.foregroundMotion;
     if(f.mode!=FlatMonoResolveMode::Taa && (foreground || f.foregroundRequired) &&
-       (!foreground || !hdr || !f.foregroundQualified || f.foregroundFrame!=f.frame))
+       (!foreground || !f.foregroundQualified || f.foregroundFrame!=f.frame))
         return fail(reason,"flat-resolve-foreground-contract-unqualified");
     const float sdkNear=foreground && f.foregroundDepthNear!=0?f.foregroundDepthNear:f.camera[3][2];
     if(foreground && (!std::isfinite(sdkNear) || sdkNear<=0 || sdkNear>f.camera[3][2]))
         return fail(reason,"flat-resolve-foreground-depth-convention-invalid");
-    // Untrusted camera coverage (a mixed-camera frame) needs the HDR route; an SDK backend needs the qualified first-person map, which
-    // takes the mask's place (the prep's debug.w is 2 then, and the mask is never read); EDVR's TAA needs native size besides, because
-    // its output-domain test maps one output pixel to one render pixel. A supersampled SDK frame (render above output) is the SDK's own
-    // business at the render size: the first-person map, the prep and the backend all run there (section 104; the rule was written
-    // for TAA in section 102 and refused every on-foot SDK frame above SS 1).
+    // Untrusted camera coverage (a mask, the HDR route's way of handling a mixed-camera frame) needs the HDR route, and the copy route
+    // never takes one: its weapon support hands an SDK backend the qualified first-person map above instead. An SDK backend needs that
+    // map, which takes the mask's place (the prep's debug.w is 2 then, and the mask is never read); EDVR's TAA needs native size
+    // besides, because its output-domain test maps one output pixel to one render pixel. A supersampled SDK frame (render above output)
+    // is the SDK's own business at the render size: the first-person map, the prep and the backend all run there (section 104; the rule
+    // was written for TAA in section 102 and refused every on-foot SDK frame above SS 1).
     if(untrusted && ((!foreground && f.mode!=FlatMonoResolveMode::Taa) || !hdr ||
                      (f.mode==FlatMonoResolveMode::Taa && (f.outputWidth!=f.renderWidth || f.outputHeight!=f.renderHeight))))
         return fail(reason,"flat-resolve-untrusted-coverage-requires-native-HDR-TAA");

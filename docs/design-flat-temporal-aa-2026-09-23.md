@@ -2,9 +2,8 @@
 
 ## Status
 
-- **State:** native DLAA/FSR work at the settlement; SS above 1 on foot was
-  refused by two gates (16M H bound, TAA's native-size rule), both fixed, plus
-  the copy-route view; TAA best-of-four history depth NOT FLOWN (104).
+- **State:** DLAA/FSR on foot at any SS; weapon support below SS 1.0 and the
+  aiming fix (scale-checked world prediction) BUILT, NOT FLOWN (104).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -34,8 +33,8 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** one flight on foot (104): SS 0.75 (copy-route view), 1.0, 1.5 (H
-  qualifies, backend runs), EDVR's TAA standing still at the roof. Retain
+- **Next:** fly aiming at SS 1.0 and 0.75, the weapon up at 0.75, a hipfire
+  NumLock (weapon-refused share); TAA at the roof standing still. Retain
   102's color-clear fix; no per-weapon table; preserve Epic settings, 87's
   native FSR comparison, 83's open items and high-G motion; do not repeat
   qualified PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
@@ -13113,3 +13112,39 @@ the weapon's depth without a first-person mark. The fix must recognise a
 weapon prepass at the world near at draw time (by its projection, not its
 near) and capture and mark it as first-person. A planning pass is on it; the
 copy route's stage 2 runs the same qualification and needs the same fix.
+
+### 2026-10-06: weapon support below SS 1.0 and the aiming fix (built)
+
+Both designs above, built in one batch (full build green, inputs
+`2c14c62d`; bench hardware 53/53 PASS, WARP 26 PASS, 27 UNSUPPORTED, 0 FAIL).
+
+Aiming, both routes. `flatCameraProjectionScale` measures a camera's x and y
+projection scale free of rotation and phase. Naming stores the world
+reference (near, both scales). `flatDomainPredictsWorld` calls a pre-naming
+draw world only when its near equals the reference's AND both scales are
+within 10% of it (the world moves at most 3.8% a frame; the weapon sits
+1.18 to 1.66 times the world). One predicate serves the domain block and the
+cohort flag. `scale-rejected-5s` on the SDK domain line counts the near-equal
+draws the scale turned away. The witness line adds the scale ratio. Bench:
+`predicted_world_mismatch` (camera 2 at x1.25) is now admitted;
+`predicted_world_close_scale` (x1.03) still refuses; settlement_prepass is
+unchanged.
+
+The copy route (render below output, DLSS or FSR). The first-person pool
+cohort and the glow pass carry trace flags (bits 10 and 11; zero in every
+committed trace): cohort draws stay out of the motion sources, the glow pass
+is an alternate HDR writer with no overlay planned, and the frame is mixed.
+The domain's planned first-person draws also mark it mixed, so a weapon whose
+draws have no motion support (the plasma weapon) is covered.
+`foregroundContractAtH` (treatHdr's H block, moved whole) runs at the final
+copy. The resolver's first-person clause no longer asks for the HDR route;
+the mask still does. New 5 s line: `flat copy weapon 5s` (cohort and glow
+draws, mixed frames, H attempts and qualified).
+
+Unverified until flown:
+- the copy route's H qualification late in the frame (a depth write or
+  Clear after H's consumer would refuse it, a reason the HDR route never
+  shows);
+- the glow pass on the copy route (surface-preserving by code reading);
+- weapon-down frames with arms on the copy route now ask the contract;
+- the aiming fix in flight.

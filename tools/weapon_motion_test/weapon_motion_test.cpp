@@ -425,6 +425,51 @@ int main(int argc,char** argv){
  flat.fail("unknown-final-writer");check(!flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,601,W,H,flatOutput),"unknown final writer refuses SDK foreground qualification");
  finalRaster(foreignOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,602,flatInputs),"capture resumes after refused backend frame");
  check(flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,602,W,H,flatOutput) && !flatOutput.resetRequired,"refused backend did not erase previous original-VS history");
+ {
+  // WHERE H IS ASKED (design section 104). The copy route asks the foreground contract at the game's final copy, after the post chain, not at
+  // H's consumer. prepareH reads the depth, the owner plane and the captured geometry as they are AT ITS CALL, so what ran in between matters
+  // only if it wrote the depth or the owner plane. Three instances are fed the same two captured frames and ask three ways: at once; after
+  // passes that sample the depth through a shader view, write a scratch colour and leave their own state bound (a post chain); and after a
+  // draw that wrote the depth over the weapon. The first two maps are equal bit for bit (the late call is as good as the immediate one); the
+  // third has lost the ownership of every pixel the later draw covers (an empty map, still qualified), so a late map is a map of the picture.
+  auto fullVsCode=compile("float4 main(uint id:SV_VertexID):SV_Position{float2 p=float2((id<<1)&2,id&2);return float4(p*2-1,.5,1);}","vs_5_0");
+  ComPtr<ID3D11VertexShader> fullVs;hr(dev->CreateVertexShader(fullVsCode->GetBufferPointer(),fullVsCode->GetBufferSize(),nullptr,&fullVs));
+  auto readDepthCode=compile("Texture2D<float> Depth:register(t0);float4 main(float4 p:SV_Position):SV_Target{return float4(Depth.Load(int3(p.xy,0)),0,0,1);}","ps_5_0");
+  ComPtr<ID3D11PixelShader> readDepth;hr(dev->CreatePixelShader(readDepthCode->GetBufferPointer(),readDepthCode->GetBufferSize(),nullptr,&readDepth));
+  D3D11_DEPTH_STENCIL_DESC writeAll{};writeAll.DepthEnable=TRUE;writeAll.DepthFunc=D3D11_COMPARISON_ALWAYS;writeAll.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+  D3D11_DEPTH_STENCIL_DESC noDepth{};noDepth.DepthEnable=FALSE;
+  ComPtr<ID3D11DepthStencilState> writeAllState,noDepthState;hr(dev->CreateDepthStencilState(&writeAll,&writeAllState));hr(dev->CreateDepthStencilState(&noDepth,&noDepthState));
+  auto fullScreen=[&](ID3D11PixelShader* pixel,ID3D11DepthStencilState* depthState){
+   ctx->IASetInputLayout(nullptr);ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);ctx->VSSetShader(fullVs.Get(),nullptr,0);
+   ctx->PSSetShader(pixel,nullptr,0);ctx->OMSetDepthStencilState(depthState,0);ctx->Draw(3,0);};
+  enum class Late{None,PostChain,DepthWrite};
+  auto lateAsk=[&](unsigned frame,Late late,FlatForegroundMotion::Output& out){
+   FlatForegroundMotion fresh;auto inputs=flatInputs;
+   finalRaster(foreignOld);check(fresh.capture(ctx.Get(),issue,9,1,0,0,0,frame,inputs),"late ask: the first frame captures its prior pose");
+   finalRaster(foreignNow);check(fresh.capture(ctx.Get(),issue,9,1,0,0,0,frame+1,inputs),"late ask: the second frame captures the pose the map is built from");
+   if(late==Late::PostChain) {
+    ctx->OMSetRenderTargets(1,rtv.GetAddressOf(),nullptr);ctx->PSSetShaderResources(0,1,rawDepthView.GetAddressOf());
+    fullScreen(readDepth.Get(),noDepthState.Get());fullScreen(readDepth.Get(),noDepthState.Get());
+    ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(0,1,&none);
+   }
+   if(late==Late::DepthWrite) {
+    ctx->OMSetRenderTargets(0,nullptr,dsv.Get());fullScreen(nullptr,writeAllState.Get());ctx->OMSetRenderTargets(0,nullptr,nullptr);
+   }
+   const bool asked=fresh.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,frame+1,W,H,out);
+   check(asked && out.qualified && out.motion,"late ask: the map qualifies");
+   return readFloatMap(out.motion.Get());
+  };
+  FlatForegroundMotion::Output immediateOut,chainOut,writtenOut;
+  const auto immediate=lateAsk(1100,Late::None,immediateOut);
+  unsigned owned=0;for(unsigned i=0;i<W*H;++i)if(immediate[4*i+3]==1)++owned;
+  check(owned>2000 && !immediateOut.resetRequired,"late ask: the immediate map names the weapon's pixels with real matched history (the baseline is not empty)");
+  const auto afterChain=lateAsk(1200,Late::PostChain,chainOut);
+  check(afterChain==immediate && chainOut.resetRequired==immediateOut.resetRequired && chainOut.depthNear==immediateOut.depthNear,
+        "late ask: after passes that sample the depth and change state the map equals the immediate one, bit for bit");
+  const auto afterWrite=lateAsk(1300,Late::DepthWrite,writtenOut);
+  check(std::all_of(afterWrite.begin(),afterWrite.end(),[](float v){return v==0;}) && afterWrite!=immediate,
+        "late ask: a draw that wrote the depth over the weapon takes those pixels' ownership: the late map names none of them");
+ }
  // Same actual identity can legitimately appear twice. Only complete equal
  // input certificates make those previous GPU positions interchangeable.
  flat.reset();flatInputs.phaseX=flatInputs.phaseY=0;flatInputs.certificate.complete=true;

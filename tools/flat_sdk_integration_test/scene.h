@@ -175,10 +175,17 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool blendedHdr=std::strcmp(name,"state_blended_hdr")==0;
     const bool blendedHdrWorld=std::strcmp(name,"state_blended_hdr_world")==0;
     const bool settlement=std::strcmp(name,"settlement_prepass")==0;
+    // The first-person camera that shares the world's near plane (camera 2, aiming down sights): another projection scale. At x1.25 the
+    // scale tells it from the world (flatDomainPredictsWorld: near AND scale within 10%), so its pre-naming draw is a first-person draw,
+    // captured, and the frame is admitted (`mismatch`, the case that used to guard the near-only prediction's refusal). At x1.03 it is
+    // still the world's by every test the runtime has, so it is predicted, leaves a witness no world camera matches, and H refuses as it
+    // always did (`closeScale`, the guard that the scale margin is not a loophole).
     const bool mismatch=std::strcmp(name,"predicted_world_mismatch")==0;
+    const bool closeScale=std::strcmp(name,"predicted_world_close_scale")==0;
+    const bool weaponCamera=mismatch||closeScale;
     const bool staleMark=std::strcmp(name,"stale_foreign_mark")==0;
     const bool inertWorld=std::strcmp(name,"inert_depth_write_world")==0;
-    const bool prepassCase=settlement||mismatch;
+    const bool prepassCase=settlement||weaponCamera;
     const bool stateDraw=partialState||blendedState||blendedNoDepth;
     const struct ShaderName {const wchar_t* name;uint64_t hash;} names[]={
         {L"vs_EB5234DB6ADB491D.dxbc",0xEB5234DB6ADB491Dull},
@@ -333,15 +340,16 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     float material[6][4]{};material[0][0]=-1000.f;
     ComPtr<ID3D11Buffer> materialBuffer;
     if(!createDataBuffer(material,sizeof(material),D3D11_BIND_CONSTANT_BUFFER,materialBuffer))return 2;
-    // Camera 0 is the world (near .025), 1 the first person (near .0675). Camera 2 exists only for the mismatch
-    // case and is its first-person camera: the world's near with another projection scale, so a draw taken for
-    // the world by its near alone is not the camera H selects. It replaces camera 1 rather than joining it:
-    // measured 2026-10-06, with the world, camera 1 and a mid-run prepass draw at this one all on the depth, the
-    // selector refused the frame first as source-camera-or-depth-not-unique (no H attempt, no failure). With only
-    // the world and this camera the pending-witness check is reached.
-    const unsigned cameraCount=mismatch?3u:2u;
-    const auto cameraRows=[](unsigned c,float (&rows)[280][4]) {
-        rows[270][0]=c==2?1.25f:1.f;rows[271][1]=1;rows[272][3]=1;
+    // Camera 0 is the world (near .025), 1 the first person (near .0675). Camera 2 exists only for the two weapon-camera
+    // cases and is their first-person camera: the world's near with another projection scale (x1.25 in `mismatch`, x1.03 in
+    // `closeScale`), so a draw taken for the world by its near alone is not the camera H selects. It replaces camera 1 rather
+    // than joining it: measured 2026-10-06, with the world, camera 1 and a mid-run prepass draw at this one all on the depth,
+    // the selector refused the frame first as source-camera-or-depth-not-unique (no H attempt, no failure). With only the
+    // world and this camera the pending-witness check is reached.
+    const unsigned cameraCount=weaponCamera?3u:2u;
+    const float weaponScale=closeScale?1.03f:1.25f;
+    const auto cameraRows=[weaponScale](unsigned c,float (&rows)[280][4]) {
+        rows[270][0]=c==2?weaponScale:1.f;rows[271][1]=1;rows[272][3]=1;
         rows[273][2]=c==1?.0675f:.025f;rows[274][2]=1;
     };
     ComPtr<ID3D11Buffer> camera[3];
@@ -393,8 +401,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     context->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);
     SceneEvidence evidence;
     // Family 0 draws with the world camera, family 1 with the first-person one: camera 1 (near .0675), or in the
-    // mismatch case camera 2, whose near equals the world's.
-    const unsigned familyCamera[2]={0u,mismatch?2u:1u};
+    // weapon-camera cases camera 2, whose near equals the world's.
+    const unsigned familyCamera[2]={0u,weaponCamera?2u:1u};
     auto originalDraw=[&](unsigned family,ID3D11RenderTargetView* target,Snapshot& snap) {
         ID3D11RenderTargetView* view=target;context->OMSetRenderTargets(1,&view,dsv.Get());
         ID3D11Buffer* cb=camera[familyCamera[family]].Get();context->VSSetConstantBuffers(1,1,&cb);
@@ -535,7 +543,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         context->OMSetDepthStencilState(depthState.Get(),0);
         if(!originalDraw(1,poolRtv.Get(),evidence.stateLater))return 2;
         evidence.alternate=evidence.stateLater;
-    } else if(!originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;   // the first person's surface: family 1, camera 1 (2 in the mismatch case)
+    } else if(!originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;   // the first person's surface: family 1, camera 1 (2 in the weapon-camera cases)
     if(staleMark) {
         // A world surface drawn over the first person's, in front of it (camera 0, record 11). It has the named world camera,
         // so nothing marks it: the owner plane must come out byte-identical, and the first-person marks it covers keep
@@ -697,7 +705,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool depthGuard=std::strcmp(name,"inert_depth_write")==0;
     const bool colorInert=std::strcmp(name,"inert_color_write")==0;
     // A guard expects a refusal that must remain. Every other case expects the production resolve to complete.
-    const bool guardCase=hostGuard||depthGuard||blendedHdr||mismatch;
+    const bool guardCase=hostGuard||depthGuard||blendedHdr||closeScale;
     const bool inertNoWrite=std::strcmp(name,"inert_no_write")==0;
     // The counters are cumulative for the process: what a case claims is what changed over the measured frame.
     const auto since=[](uint64_t now,uint64_t then){return now>=then?now-then:0ull;};
@@ -756,12 +764,14 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         std::strcmp(after.hdrVerdict,"conflicting-hdr-target-or-camera")==0;
     // Settlement order: every prepass draw (camera 0) ran before the world was named, was planned as the predicted
     // world and none was captured or marked; only the first-person draws (camera 1, before naming) and the ordinary
-    // alternate draw (camera 1) are foreign. In the mismatch case the pre-naming first-person draw has camera 2, with
-    // the world's near, so it too is taken for the world: it is predicted (never captured) and the one foreign draw
-    // is the alternate after naming (camera 2 again). The settlement also draws the laser pair in both cameras before
+    // alternate draw (camera 1) are foreign. In the close-scale case the pre-naming first-person draw has camera 2, with
+    // the world's near and a scale 3% off the world's, so it too is taken for the world: it is predicted (never captured)
+    // and the one foreign draw is the alternate after naming (camera 2 again). In the mismatch case camera 2's scale is
+    // 25% off, the draw is not predicted, and it is foreign and captured like the one after naming (the section 104 fix for
+    // aiming down sights). The settlement also draws the laser pair in both cameras before
     // naming: the camera-1 one is a foreign pool draw (captured), the camera-0 one is the predicted world like the
     // prepass run. None of the predicted draws is marked: the domain's world-marker count must not rise over the run.
-    const unsigned mistaken=mismatch?1u:0u,laserForeign=settlement?1u:0u,laserWorld=settlement?1u:0u;
+    const unsigned mistaken=closeScale?1u:0u,laserForeign=settlement?1u:0u,laserWorld=settlement?1u:0u;
     const bool namedAfterPrepass=prepassCase && !evidence.prepass.namedWorld && evidence.world.namedWorld;
     // The prepass draws wrote depth (a run that discarded everything would still plan, but proves less).
     const bool prepassPlanned=namedAfterPrepass && evidence.prepassDepthPixels>0 &&
@@ -770,9 +780,13 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         predictedDelta==prepassDraws+mistaken+laserWorld &&
         foreignDelta==2u-mistaken+laserForeign && capturedDelta==2u-mistaken+laserForeign;
     const bool settlementConfirmed=settlement && prepassPlanned && frameClean && qualifiedDelta>0;
-    // The mistaken camera shares the world's near but not its projection: H must refuse on that witness, and it
-    // is the only refusal the frame's inventory holds.
-    const bool mismatchRefusal=mismatch && prepassPlanned && attemptedDelta>0 && !qualifiedDelta && !backendDelta &&
+    // The weapon camera 25% off the world's scale at the world's near plane: its pre-naming draw is captured as the first-person
+    // draw it is (prepassPlanned with nothing mistaken: one foreign draw before naming and one after), no refusal anywhere, H
+    // qualified and the backend's frame.
+    const bool scaleRecognised=mismatch && prepassPlanned && frameClean && qualifiedDelta>0;
+    // The camera that shares the world's near and is within the scale margin of its projection is taken for the world: H
+    // must refuse on that witness, and it is the only refusal the frame's inventory holds.
+    const bool closeScaleRefusal=closeScale && prepassPlanned && attemptedDelta>0 && !qualifiedDelta && !backendDelta &&
         after.firstFailureFrame==after.frame && after.firstFailureSelectedH &&
         after.failureKinds==1 && !after.failureKindsDropped &&
         std::strcmp(after.firstFailureStage,"H-qualification")==0 &&
@@ -822,25 +836,26 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool supersampleBackendRan=!supersampledAny || (backendDelta>0 && !spatialDelta && !backendFailureDelta);
     const bool ruleConfirmed=worldsUnmarked && (inertNoWrite?inertNoWriteRule:colorInert?forwardedColorOnly:
         blendedNoDepth?forwardedBlended:(partialState||blendedState)?admittedState:blendedHdrWorld?worldHdrBlended:
-        inertWorld?worldInertWriter:staleMark?staleMarkRule:settlement?settlementConfirmed:
+        inertWorld?worldInertWriter:staleMark?staleMarkRule:settlement?settlementConfirmed:mismatch?scaleRecognised:
         supersampledAny?supersampleRule:true);
     const bool guardConfirmed=worldsUnmarked && (hostGuard?
         rasterReady && evidence.world.namedWorld && (taa || ownershipForeign) && after.hdrTriggered && !after.hAttempts &&
             std::strcmp(after.hdrVerdict,"engine-source-not-ready")==0:
         depthGuard?evidence.inertDepthPixels>0 && !evidence.inertColorPixels && inertWriterRefusal:
-        blendedHdr?hdrSecondCameraRefusal:mismatch?mismatchRefusal:false);
+        blendedHdr?hdrSecondCameraRefusal:closeScale?closeScaleRefusal:false);
     const char* verdict="FAIL";
     const char* cause="upstream-qualification-or-raster-refused";
     const char* passCause=colorInert||blendedNoDepth?"depth-preserving-draw-forwarded":
         partialState||blendedState?"depth-writing-gbuffer-draw-admitted":
         blendedHdrWorld?"world-camera-hdr-writer-left-unmarked":inertWorld?"world-camera-depth-writer-left-unmarked":
         staleMark?"stale-first-person-mark-kept-and-frame-resolved":
+        mismatch?"weapon-camera-at-world-near-captured-by-projection-scale":
         supersampledAny?"supersampled-hdr-route-qualified-and-resolved-at-render-size":
         settlement?"predicted-world-prepass-planned-without-capture":"production-hdr-resolve-completed";
     if(guardCase) {
         verdict=guardConfirmed?"PASS":"FAIL";
         cause=guardConfirmed?hostGuard?"host-guard-confirmed":depthGuard?"depth-write-refusal-confirmed":
-            blendedHdr?"second-camera-hdr-writer-refused-by-selector":"pending-world-mismatch-refusal-confirmed":
+            blendedHdr?"second-camera-hdr-writer-refused-by-selector":"close-scale-camera-taken-for-world-refusal-confirmed":
             "guard-not-confirmed";
     } else if(upstream && ruleConfirmed && after.hdrResolves && (taa || after.hdrBackendCompleted) && supersampleBackendRan) {
         verdict="PASS";cause=passCause;

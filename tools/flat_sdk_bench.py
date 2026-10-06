@@ -26,18 +26,18 @@ HISTORY_MARKER = "EDVR_BENCH_HISTORY_RESULT "
 MODES = ("taa", "dlaa", "dlss", "fsr")
 DEFAULT_CASES = ("unsupported_host", "scene", "inert_no_write", "inert_depth_write", "inert_color_write",
                  "state_partial_mask", "state_blended", "state_blended_no_depth", "state_blended_hdr",
-                 "settlement_prepass", "predicted_world_mismatch", "state_blended_hdr_world",
+                 "settlement_prepass", "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world",
                  "inert_depth_write_world", "stale_foreign_mark", "supersampled_scene", "supersampled_scene_4k")
 # "renderer" cases must complete the production HDR resolve; "guard" cases must keep a refusal.
 CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "renderer", "inert_no_write": "renderer",
                  "inert_depth_write": "guard", "inert_color_write": "renderer", "state_partial_mask": "renderer",
                  "state_blended": "renderer", "state_blended_no_depth": "renderer", "state_blended_hdr": "guard",
-                 "settlement_prepass": "renderer", "predicted_world_mismatch": "guard",
+                 "settlement_prepass": "renderer", "predicted_world_mismatch": "renderer", "predicted_world_close_scale": "guard",
                  "state_blended_hdr_world": "renderer", "inert_depth_write_world": "renderer",
                  "stale_foreign_mark": "renderer", "supersampled_scene": "renderer", "supersampled_scene_4k": "renderer"}
 SDK_CASES = frozenset(("inert_no_write", "inert_depth_write", "inert_color_write", "state_partial_mask",
                        "state_blended", "state_blended_no_depth", "state_blended_hdr", "settlement_prepass",
-                       "predicted_world_mismatch", "state_blended_hdr_world", "inert_depth_write_world",
+                       "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world", "inert_depth_write_world",
                        "stale_foreign_mark", "supersampled_scene", "supersampled_scene_4k"))
 PRODUCTION_CASES = frozenset(("unsupported_host",))
 # The real-size supersampled case (5760x3240 into 3840x2160: H alone is 75 MB at the render size, the owner plane and the foreground map
@@ -58,6 +58,10 @@ LARGE_CASE_TIMEOUT = 300
 #  - state_blended_hdr_world, inert_depth_write_world: camera-0 depth writers (a blended HDR mesh; a full-screen inert
 #    pair) are never planned, marked or refused.
 #  - settlement_prepass: the camera-0 prepass run is planned as the predicted world and is neither captured nor marked.
+#  - predicted_world_mismatch: the first-person camera takes the world's near plane (aiming down sights) and keeps a projection scale 25%
+#    off the world's: not predicted (flatDomainPredictsWorld asks the scale as well as the near), so its pre-naming draw is a first-person
+#    draw like the one after naming (two foreign, two captured), the 72 world prepass draws are the predicted ones, and H qualifies.
+#    Guard predicted_world_close_scale: the same camera 3% off is still the world's, so it refuses as the near-only rule always did.
 #  - stale_foreign_mark: a camera-0 depth writer outside the producer's families, drawn over a camera-1 surface in
 #    front of it, leaves the owner plane byte-identical: the marks it covers are stale (their depth is no longer the
 #    pixel's), stay in the plane, and the frame still qualifies.
@@ -81,6 +85,9 @@ RULE_COUNTERS = {
     "settlement_prepass": {"predictedWorld": (70, None), "foreignSeen": (0, 4), "captured": (0, 4),
                            "worldUnmarked": (2, 2), "prepass.worldMarkers": (0, 0), "prepass.worldUnmarked": (0, 0),
                            **FIRST_PERSON_ONLY},
+    "predicted_world_mismatch": {"predictedWorld": (72, 72), "surfacePreserving": (0, 0), "foreignSeen": (2, 2), "captured": (2, 2),
+                                 "worldUnmarked": (2, 2), "hQualified": (1, None), "prepass.worldMarkers": (0, 0),
+                                 "prepass.worldUnmarked": (0, 0), **FIRST_PERSON_ONLY},
     "stale_foreign_mark": {"surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1),
                            "worldUnmarked": (3, 3), "hQualified": (1, 1),
                            "@staleMark.worldWriterDepthPixels": (1, None), "@staleMark.before.foreign": (1, None),
@@ -102,7 +109,7 @@ RULE_COUNTERS.update({
 # Facts a rule PASS must report as the boolean true.
 RULE_TRUE = {"stale_foreign_mark": ("@staleMark.planeUntouched",)}
 # The exact first-failure reason a guard that keeps its refusal must still report.
-GUARD_REASONS = {"predicted_world_mismatch": "foreground-pending-null-not-selected-world"}
+GUARD_REASONS = {"predicted_world_close_scale": "foreground-pending-null-not-selected-world"}
 # A guard whose refusal is the selector's, before any H attempt: the verdict it must report, with no H attempt.
 #  - state_blended_hdr: a camera-1 depth writer into the HDR light target. The domain admits and captures it, but the
 #    prefix model refuses a second camera on H (conflicting-hdr-target-or-camera) before H is attempted.
@@ -572,8 +579,11 @@ def self_test():
         assert set(guards) <= SDK_CASES and all(CASE_PURPOSES[c] == "guard" for c in guards)
         assert not set(GUARD_REASONS) & set(GUARD_VERDICTS)
         assert {"state_blended_no_depth", "state_blended_hdr", "settlement_prepass", "predicted_world_mismatch",
-                "state_blended_hdr_world", "inert_depth_write_world", "stale_foreign_mark", "supersampled_scene",
-                "supersampled_scene_4k"} <= set(DEFAULT_CASES)
+                "predicted_world_close_scale", "state_blended_hdr_world", "inert_depth_write_world", "stale_foreign_mark",
+                "supersampled_scene", "supersampled_scene_4k"} <= set(DEFAULT_CASES)
+        # The two weapon-camera cases (aiming down sights): the 25% one is admitted, the 3% one keeps the old refusal.
+        assert CASE_PURPOSES["predicted_world_mismatch"] == "renderer" and CASE_PURPOSES["predicted_world_close_scale"] == "guard"
+        assert "predicted_world_mismatch" in RULE_COUNTERS and "predicted_world_close_scale" in GUARD_REASONS
         assert CASE_PURPOSES["state_blended_hdr"] == "guard" and CASE_PURPOSES["state_blended_hdr_world"] == "renderer"
         # The supersampled cases are SDK renderer cases (EDVR's TAA above the output stays on the copy route), the real-size one is the
         # hardware adapter's alone, and their sizes are a uniform 1.5x per axis: render above output, the same factor on both axes.
@@ -595,6 +605,8 @@ def self_test():
             "inert_depth_write_world": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 3},
             "settlement_prepass": {"predictedWorld": 73, "foreignSeen": 3, "captured": 3, "worldUnmarked": 2,
                                    "prepass": {"worldMarkers": 0, "worldUnmarked": 0}},
+            "predicted_world_mismatch": {"predictedWorld": 72, "surfacePreserving": 0, "foreignSeen": 2, "captured": 2,
+                                         "worldUnmarked": 2, "hQualified": 1, "prepass": {"worldMarkers": 0, "worldUnmarked": 0}},
             "stale_foreign_mark": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 3,
                                    "hQualified": 1},
         }
