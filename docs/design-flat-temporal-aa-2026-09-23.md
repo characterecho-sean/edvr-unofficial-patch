@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** DLAA/FSR on foot at any SS, weapon below SS 1.0 and aiming FLOWN;
-  overlay composite and weapon history by content BUILT, NOT FLOWN (104).
+- **State:** FLOWN OK (eccfce7a): DLAA/FSR on foot at any SS, the weapon and
+  aiming included; the weapon and the sight keep AA (104).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,8 +33,8 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** fly aiming over the coils at SS 1.0, the view while moving with
-  the weapon up, a NumLock (weapon-refused by reason). Retain
+- **Next:** open: weapon no-candidate bursts, the roof's highlight shimmer
+  (content), TAA at the roof standing still (104). Retain
   102's color-clear fix; no per-weapon table; preserve Epic settings, 87's
   native FSR comparison, 83's open items and high-G motion; do not repeat
   qualified PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
@@ -13262,3 +13262,28 @@ cyan); a NumLock while moving (weapon-refused near 0.1%, and by reason).
 Committed 9d041f21 and eccfce7a, main fast-forwarded and pushed; `--dll-only`
 passed; the game probe found it stopped. Epic flat install verified:
 `v0.18.2-56-geccfce7a`, SHA256 F2D3A48BE0819640..., `edvr-flat.ini` unchanged.
+
+### 2026-10-06: eccfce7a flown OK: the weapon and the sight keep AA
+
+Flight `edvr_gfx_20261006_165304.log`, verified `v0.18.2-56-geccfce7a`, SS 0.75
+and 1.0, aiming, the refusal view on. Sean: "It looks pretty good in all
+cases".
+
+- Weapon history: after 16:56:10 every captured weapon draw found its prior
+  (priors-one equals captured each window, 8,000 to 16,000 draws a window,
+  at SS 0.75 and 1.0). weapon-refused fell from 5 to 11% to 0.003 to 0.16%
+  of pixels, mostly `unspecified` (no map sample at the gun's edges).
+  priors-several and repeated-geometry stayed 0: content identity never met
+  an ambiguous match.
+- Remaining transient: from about 16:55:15 to 16:56:05, and briefly at
+  16:57:00, about 35 to 40% of weapon draws had no candidate (geometry never
+  captured before); the census caught its tail as weapon-refused 3.4 to 5.2%,
+  all `no-prior`. It ended by itself; the likely cause is the game
+  rewriting a weapon's vertex data during an action. Aiming in and out costs
+  one frame per switch (no-prior-near 158 over the aiming stretch).
+- The sight: no complaint while aiming over the coils; the overlay composite
+  is in.
+
+Open: the no-candidate bursts (which action rewrites the weapon's geometry);
+the roof's thin-highlight shimmer (content; the pre-upscaler filter is the
+remaining idea); EDVR's TAA standing still at the roof (2d8e6761, unflown).
