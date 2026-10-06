@@ -13052,3 +13052,40 @@ wide on a slope, and the jitter is what moves it. Levers left, none an EDVR
 input fix: another DLSS model, more supersampling, or a longer jitter cycle (a
 slower, smaller pulse; section 84 removed the phase-count switch after the VR
 hills showed no change).
+
+### 2026-10-06: HDR-route weapons, the jitter cycle key, the witness line
+
+Flight `edvr_gfx_20261006_124106.log` (`v0.18.2-38-g7cc82978`, before_post back
+to auto, HDR route at SS 1.0). Sean: AA turns off for plasma weapons and any
+weapon that can aim down sights, when aiming. The log: in every refused
+stretch (12:43:38-58, 12:45:39-54, 12:48:14-29) H qualification failed with
+`foreground-pending-null-not-selected-world` on about two frames in three. A
+pre-naming world witness, one of two, did not match the selected world camera
+at the tone pass. The resolver refused (`foreground-contract-unqualified`) and
+the frame went to spatial fallback. `conflicting-hdr-target-or-camera` was
+rare (one frame in a window). The earlier session at 12:29 (weapon up at SS 1.0)
+ran with `temporal_aa_before_post = off` still set, so it was the copy route.
+
+Built and installed (`v0.18.2-43-g52565eb8`, on main through 00d27f59, full
+build receipts `af2686ad` and `329274ee`, then `091596e9` after merging
+main):
+- `advanced.temporal_aa_jitter_phases` (8 to 64, default 8; upstream camera
+  route only, since the legacy lighting patch refuses a nudge past 7/16 px;
+  live; restarts history; `phases=` on the 5 s jitter line).
+- The witness line: each pending-null witness keeps its draw (VS, PS, kind),
+  and the first 12 refusals log which witness differs, how (depth, size,
+  phase, camera), both cameras' scale, near and position, and the first
+  differing float.
+
+Flight `edvr_gfx_20261006_125940.log`: 16 phases from 13:02:09, 32 from
+13:02:37, both logged. Sean: no difference; the roof line still pulses. No
+aiming down sights, so no witness lines yet.
+
+Ruled out: the jitter cycle's length as the lever on the roof's pulse,
+because 16 and 32 phases looked the same as 8. A pulse locked to the cycle
+would have slowed from about 7.5 to 1.9 per second; the edge changes every
+frame instead.
+
+Left: the other DLSS models (L, M, J), and a thin-highlight filter before
+the upscaler (Sean's suggestion: find one-pixel bright ridges and spread
+them, at a small look cost).
