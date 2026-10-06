@@ -132,9 +132,6 @@ struct FlatMonoResolveFrame {
     //     refused pixels can be SEEN. Painted every frame it is set. A reset frame does neither.
     bool refusalCensus = false;
     uint32_t refusalView = 0;
-    //   keepRefusedHistory (experimental.flat_sdk_local_reset = off, temporary, section 104): with an SDK backend, a world pixel the
-    //   prep refuses but formed a motion for keeps the backend's result instead of the raw current frame, and is handed that motion.
-    bool keepRefusedHistory = false;
     EngineVelocityViews engine{};
     uint64_t frame = 0;
     float deltaMs = 0;

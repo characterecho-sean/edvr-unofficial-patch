@@ -116,10 +116,9 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "experimental.temporal_aa_partial") == 0 ||
         // The HDR route's key (flat_hdr_route.h, design doc section 81; auto by default); developer tier, no flat panel row.
         std::strcmp(key, "experimental.temporal_aa_before_post") == 0 ||
-        // The flat refusal view (advanced.temporal_aa_debug = motion_source; flat_runtime.cpp) and the temporary local-reset A/B
-        // (design doc section 104). Developer tier, no flat panel rows. The other readers of temporal_aa_debug (the eye pass, screen
-        // motion, the UI layer) stay inert in flat: each is gated on a key this function refuses.
-        std::strcmp(key, "advanced.temporal_aa_debug") == 0 ||
-        std::strcmp(key, "experimental.flat_sdk_local_reset") == 0);
+        // The flat refusal view (advanced.temporal_aa_debug = motion_source; flat_runtime.cpp, design doc section 104). Developer
+        // tier, no flat panel row. The other readers of temporal_aa_debug (the eye pass, screen motion, the UI layer) stay inert in
+        // flat: each is gated on a key this function refuses.
+        std::strcmp(key, "advanced.temporal_aa_debug") == 0);
 }
 } // namespace edvr

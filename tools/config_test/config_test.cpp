@@ -2014,16 +2014,10 @@ int main(int argc, char** argv) {
     expectStr("experimental.temporal_aa_before_post", "auto", "flat scope permits the HDR route's key");
     Config::get().set("experimental.temporal_aa_before_post", "off");
     expectStr("experimental.temporal_aa_before_post", "off", "flat scope reads the HDR route's key off");
-    // The flat refusal view and the temporary local-reset A/B (design doc section 104). Both flew unlisted once: the view read off
-    // and the A/B read its non-default "off" whatever the file said. "on" is the A/B's default, so it is the value that proves it.
+    // The flat refusal view (design doc section 104). It flew unlisted once and read off whatever the file said.
     Config::get().set("advanced.temporal_aa_debug", "motion_source");
     expectStr("advanced.temporal_aa_debug", "motion_source", "flat scope permits the refusal view's key");
-    Config::get().set("experimental.flat_sdk_local_reset", "on");
-    expectStr("experimental.flat_sdk_local_reset", "on", "flat scope reads the local-reset A/B on");
-    Config::get().set("experimental.flat_sdk_local_reset", "off");
-    expectStr("experimental.flat_sdk_local_reset", "off", "flat scope reads the local-reset A/B off");
     Config::get().set("advanced.temporal_aa_debug", "off");
-    Config::get().set("experimental.flat_sdk_local_reset", "on");
     // The VR world route's key is a VR-profile key: unlisted in runtimeProfileAllowsKey, so a flat profile reads it off
     // whatever the file says, and the flat runtime (which never asks) cannot be turned into it.
     Config::get().set("experimental.temporal_aa_on_foot_world", "auto");

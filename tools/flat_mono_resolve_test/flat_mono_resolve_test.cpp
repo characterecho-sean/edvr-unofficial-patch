@@ -215,7 +215,6 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_steady_depth_gpu_tests.h"
 #include "flat_context_isolation_gpu_tests.h"
 #include "flat_sdk_foreground_gpu_tests.h"
-#include "flat_keep_refused_gpu_tests.h"
 int main(int argc,char** argv) {
     const bool printGoldens=argc==2 && !std::strcmp(argv[1],"--print-goldens"); // --self-test plus the recorded key-off hashes, for re-recording
     if(argc!=2 || (std::strcmp(argv[1],"--self-test") && std::strcmp(argv[1],"--dry-run") && !printGoldens)){std::puts("usage: flat_mono_resolve_test --self-test|--dry-run|--print-goldens");return 2;}
@@ -808,9 +807,6 @@ int main(int argc,char** argv) {
     // The HDR route's resolver half (design section 81): before the D3D message check below, so its draws are held to it.
     hdrRouteGpuTests(device.Get(),context.Get());
     sdkForegroundGpuTests(device.Get(),context.Get());
-    // The temporary A/B bit (experimental.flat_sdk_local_reset = off): a world pixel the prep refuses keeps the backend's result and its camera
-    // term's motion, a non-world refusal does not, EDVR's own TAA never sees the bit; and the same scenario against the prep with each rule of it out.
-    keepRefusedGpuTests(device.Get(),context.Get());
     // The VR world route's seams (section 82): the third upscaler slot, the first-person map and stencil in the prep, and the phase term
     // the map's vector gets when the world and the first-person camera are jittered (stage 2).
     upscalerSlotGpuTests(device.Get(),context.Get());

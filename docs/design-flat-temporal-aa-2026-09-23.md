@@ -4,8 +4,6 @@
 
 - **State:** 84f6a147 FLOWN: DLAA/FSR work at the settlement; inputs verified
   (refusals, jitter, motion precision); slight shimmer is the content (104).
-- **Temporary key:** `experimental.flat_sdk_local_reset` (on = refused pixels
-  raw; off = backend kept); allowed in flat from 84f6a147. Remove at arc close.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -35,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** close 104 (local-reset key: Sean decides its value); TAA's
+- **Next:** 104 closed (local-reset key removed, raw kept); TAA's
   single-texel depth check at silhouettes is a separate item. Retain 102's
   color-clear fix; no per-weapon table; preserve Epic settings, 87's native
   FSR comparison, 83's open items and high-G motion; do not repeat qualified
@@ -12801,6 +12799,14 @@ every surface, motion verified, refusals negligible and translation exact, no
 EDVR input is left to correct; the backends' own handling of such a line is
 the limit. Rendering above native (Elite's supersampling with DLAA on the
 HDR route, which takes R >= D) is the known way to reduce it, at GPU cost.
+
+Closed with Sean (2026-10-06): `experimental.flat_sdk_local_reset` is removed
+and the raw behaviour stays: a refused pixel shows the raw current frame, as
+before 0ed050a1, the behaviour flown across many scenes. The keep-refused
+prep bit, its rig tests and the phase test's changed anchors are backed out.
+Kept: the refusal view (`advanced.temporal_aa_debug = motion_source`, now
+allowed in flat), the NumLock refusal census and the `flat camera origin` 5 s
+line. The TAA single-texel depth check is offered as a separate task.
 
 Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
 motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
