@@ -217,6 +217,19 @@ struct State {
         EdvrFlatForegroundStateReceipt state{};
         EdvrFlatForegroundBudgetReceipt budget{};
     } foregroundFirstFailure;
+    // Every distinct refusal on a candidate in one frame, not only the first:
+    // one flight then names every remaining blocker on the selected H.
+    struct DomainFailureKinds {
+        struct Kind {uint64_t vs=0,ps=0;const char* stage=nullptr;const char* reason=nullptr;uint32_t count=0,firstQ=0,format=0;};
+        std::array<Kind,8> kinds{};unsigned used=0,dropped=0;uint64_t frame=~0ull;
+        void note(uint64_t f,uint64_t vs,uint64_t ps,const char* stage,const char* reason,uint32_t q,uint32_t format) {
+            if(frame!=f){frame=f;used=dropped=0;}
+            for(unsigned i=0;i<used;++i)if(kinds[i].vs==vs && kinds[i].ps==ps &&
+                (kinds[i].reason==reason || (kinds[i].reason && reason && std::strcmp(kinds[i].reason,reason)==0))){++kinds[i].count;return;}
+            if(used==kinds.size()){++dropped;return;}
+            kinds[used++]={vs,ps,stage,reason,1,q,format};
+        }
+    } foregroundFailureKinds;
     struct DomainCandidate {
         Ptr<ID3D11Texture2D> depth;
         uint64_t frame=~0ull;
@@ -233,6 +246,7 @@ struct State {
         D3D11_DEPTH_STENCIL_DESC worldDepthDesc{};
         unsigned worldBoundColors=0;
         DomainFailure firstFailure{};
+        DomainFailureKinds failureKinds{};
         void beginFrame(uint64_t next) {
             if(frame==next)return;
             frame=next;for(auto& color:colors)color.Reset();colorWritten=false;
@@ -258,7 +272,13 @@ struct State {
     struct DomainCounts {
         uint64_t foreignSeen=0,captured=0,worldMarkers=0,nullMarkers=0,markerRefused=0;
         uint64_t hAttempts=0,hQualified=0;
+        uint64_t predictedWorld=0,surfacePreserving=0,surfacePreservingForeign=0,surfacePreservingCameraless=0;
     } foregroundCounts;
+    // Near plane of the last named world camera. Elite draws world-camera
+    // depth prepasses on H before the first supported material draw names
+    // the world; a draw at this near is provisionally world and must match
+    // the selected world camera at H (FlatDomainPendingNull), else H refuses.
+    float predictedWorldNear=0;
     FlatUntrustedCoverage untrusted;
     bool untrustedUnknown = false;
     bool untrustedSupportedAlternate = false;
@@ -446,7 +466,10 @@ struct State {
     // dumped on the F10 audit arm; the replay rig runs the same reducer over
     // the trace and compares contract hashes. The contract accumulates every
     // copy draw's outcome through the frame and is hashed at seal time.
-    FlatTraceRing traceRing{};
+    // No braces: every member already has a default initializer, and `{}`
+    // made MSVC expand all 262,144 events as an aggregate initializer, so
+    // this file's compile took ~74 GB of commit and 3.5 min (2026-10-06).
+    FlatTraceRing traceRing;
     FlatFrameContract traceContract{};
 
     // --- Partial temporal AA: coverage census (Part B), reset every 5s --------
@@ -557,12 +580,14 @@ static void reportForegroundDomain(State& s) {
         captures.submitted+=c.submitted;captures.preflightRefused+=c.preflightRefused;
         captures.warmedAfterRefusal+=c.warmedAfterRefusal;
     }
-    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu world-markers=%llu null-markers=%llu marker-refused=%llu H-attempts=%llu H-qualified=%llu last-refusal=%s; counts cover all depth candidates, qualification alone is not a completed SDK call",
+    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g surface-preserving=%llu (foreign-camera=%llu no-camera=%llu) H-attempts=%llu H-qualified=%llu last-refusal=%s; counts cover all depth candidates, qualification alone is not a completed SDK call",
         flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
         (unsigned long long)captures.attempts,(unsigned long long)captures.gpuAttempts,
         (unsigned long long)captures.submitted,(unsigned long long)captures.preflightRefused,
         (unsigned long long)captures.warmedAfterRefusal,
         (unsigned long long)n.worldMarkers,(unsigned long long)n.nullMarkers,(unsigned long long)n.markerRefused,
+        (unsigned long long)n.predictedWorld,s.predictedWorldNear,(unsigned long long)n.surfacePreserving,
+        (unsigned long long)n.surfacePreservingForeign,(unsigned long long)n.surfacePreservingCameraless,
         (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,s.foregroundHRefusal?s.foregroundHRefusal:"none");
     const auto& f=s.foregroundFirstFailure;
     Log::get().note("flat foreground first failure: configured=%s frame=%llu q=%u VS=%016llX PS=%016llX format=%u camera=%016llX depth=%p stage=%s reason=%s pending-world-null=%u selected-H-frame=%llu selected-depth=%p candidates=%u cap=%u overflow=%u candidate-present=%u; first failure on selected H depth in the most recent failed frame, not a shader allowlist",
@@ -594,6 +619,15 @@ static void reportForegroundDomain(State& s) {
         b.records,b.bytes,b.invalid,b.pending,b.current,b.prior,b.older,b.reclaimedRecords,
         b.reclaimedBytes,b.currentDraws,b.previousDraws,b.beforeWorldCurrent,b.beforeWorldPrevious,
         b.knownMutations,b.unknownMutations);
+    const auto& inventory=s.foregroundFailureKinds;
+    Log::get().note("flat foreground refusal inventory: frame=%llu kinds=%u dropped=%u; every distinct refusal on the selected H in that frame, in order of first appearance",
+        (unsigned long long)inventory.frame,inventory.used,inventory.dropped);
+    for(unsigned i=0;i<inventory.used;++i) {
+        const auto& kind=inventory.kinds[i];
+        Log::get().note("flat foreground refusal kind: frame=%llu first-q=%u count=%u VS=%016llX PS=%016llX format=%u stage=%s reason=%s",
+            (unsigned long long)inventory.frame,kind.firstQ,kind.count,(unsigned long long)kind.vs,(unsigned long long)kind.ps,
+            kind.format,kind.stage?kind.stage:"none",kind.reason?kind.reason:"none");
+    }
 }
 static const FlatDomainShaderProof& domainShaderProof(State& s,uint64_t vs,uint64_t ps) {
     const auto key=std::make_pair(vs,ps);auto found=s.foregroundProofs.find(key);
@@ -612,17 +646,20 @@ template<class Key>static void domainFail(State& s,const char* stage,const char*
     const EdvrFlatForegroundStateReceipt* stateReceipt=nullptr,
     const EdvrFlatForegroundBudgetReceipt* budgetReceipt=nullptr) {
     auto* candidate=domainCandidate(s,k.depth);
+    const char* why=reason?reason:"foreground-contract";
     if(candidate) {
         candidate->motion.fail(reason);
+        candidate->failureKinds.note(s.prefix.frame,k.vs,k.ps,stage,why,s.prefix.sequence,k.format);
         if(candidate->firstFailure.frame!=s.prefix.frame) {
-            candidate->firstFailure={s.prefix.frame,k.vs,k.ps,k.cameraHash,s.prefix.sequence,k.format,k.depth,stage,reason?reason:"foreground-contract"};
+            candidate->firstFailure={s.prefix.frame,k.vs,k.ps,k.cameraHash,s.prefix.sequence,k.format,k.depth,stage,why};
             if(stateReceipt)candidate->firstFailure.state=*stateReceipt;
             if(budgetReceipt)candidate->firstFailure.budget=*budgetReceipt;
         }
     } else if(s.foregroundSelectedDepth==k.depth) {
         s.foregroundHRefusal=reason;
+        s.foregroundFailureKinds.note(s.prefix.frame,k.vs,k.ps,stage,why,s.prefix.sequence,k.format);
         if(s.foregroundFirstFailure.frame!=s.prefix.frame) {
-            s.foregroundFirstFailure={s.prefix.frame,k.vs,k.ps,k.cameraHash,s.prefix.sequence,k.format,k.depth,stage,reason?reason:"foreground-contract"};
+            s.foregroundFirstFailure={s.prefix.frame,k.vs,k.ps,k.cameraHash,s.prefix.sequence,k.format,k.depth,stage,why};
             if(stateReceipt)s.foregroundFirstFailure.state=*stateReceipt;
             if(budgetReceipt)s.foregroundFirstFailure.budget=*budgetReceipt;
         }
@@ -3919,6 +3956,17 @@ static const char* domainOriginalInertRefusal(ID3D11DeviceContext* context,
     b.noPredicate=!predicate;
     return flatDomainInertRefusal(proof,b);
 }
+// Asked only of a draw the planner would otherwise refuse. The game's state
+// is restored first, as for the inert query; a null state writes depth.
+static bool domainDrawPreservesSurface(ID3D11DeviceContext* context) {
+    flatRuntimeSubstitution(context,FlatSubstEvent::kOtherDraw);
+    FlatComputeInternalScope guard;
+    Ptr<ID3D11DepthStencilState> depthState;UINT stencilRef=0;
+    context->OMGetDepthStencilState(&depthState,&stencilRef);
+    D3D11_DEPTH_STENCIL_DESC depth{};depth.DepthEnable=TRUE;depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+    if(depthState)depthState->GetDesc(&depth);
+    return flatDomainPreservesSurface(depth);
+}
 
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
                                             char kind, uint32_t count, uint32_t start,
@@ -4445,6 +4493,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         flatcpu::Scope engine(flatcpu::kEngineDraw);
         s.namedDepth=k.depth;s.namedConstants=k.b1;s.namedWorldQ=s.prefix.sequence;
         std::memcpy(s.namedCamera,d.camera,sizeof(d.camera));
+        std::memcpy(&s.predictedWorldNear,d.camera+(3*4+2)*sizeof(float),sizeof(float));
         engineVelocityNoteSource(static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),static_cast<ID3D11Buffer*>(const_cast<void*>(k.b1)));
     }
     const bool foregroundGap=s.foreground.needsPreWorldState(
@@ -4467,9 +4516,23 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             domainDepth=static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth));
         } else if(candidate) {
             const auto& proof=domainShaderProof(s,k.vs,k.ps);
-            const bool sameWorld=s.namedDepth==k.depth && std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))==0;
-            const auto plan=flatDomainPlan(proof,k.color!=nullptr,k.format,k.camera!=nullptr,s.namedDepth!=nullptr,sameWorld);
-            if(!plan.admitted() && proof.inertNoSideEffects) {
+            float drawNear=0;if(k.camera)std::memcpy(&drawNear,d.camera+(3*4+2)*sizeof(float),sizeof(float));
+            // Provisional world before naming (section 103, 2026-10-06): the
+            // world camera's prepass shares the selected depth with the first-
+            // person camera's (near 0.025 against 0.0675). Planned as world; the
+            // pending witness below must equal the selected world camera at H.
+            const bool predictedWorld=!s.namedDepth && k.camera && s.predictedWorldNear>0 && drawNear==s.predictedWorldNear;
+            const bool sameWorld=predictedWorld ||
+                (s.namedDepth==k.depth && std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))==0);
+            const auto plan=flatDomainPlan(proof,k.color!=nullptr,k.format,k.camera!=nullptr,
+                s.namedDepth!=nullptr || predictedWorld,sameWorld);
+            if(!plan.admitted() && domainDrawPreservesSurface(context)) {
+                // No depth write: the surface and its owner mark are the last
+                // depth writer's. Forward the game's draw unchanged.
+                ++s.foregroundCounts.surfacePreserving;
+                if(!k.camera)++s.foregroundCounts.surfacePreservingCameraless;
+                else if(!sameWorld && (s.namedDepth || s.predictedWorldNear>0))++s.foregroundCounts.surfacePreservingForeign;
+            } else if(!plan.admitted() && proof.inertNoSideEffects) {
                 const char* inertRefusal=domainOriginalInertRefusal(context,k,proof);
                 if(inertRefusal)domainFail(s,"inert-state",inertRefusal,k);
                 // Otherwise no private marker/history or ownership nomination:
@@ -4489,9 +4552,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 domainPool=plan.kind==FlatDomainPlanKind::WorldPool || plan.kind==FlatDomainPlanKind::ForeignPool;
                 domainForeign=plan.kind==FlatDomainPlanKind::ForeignPool;
                 if(domainForeign)domainWriterToken=s.prefix.sequence;
-                domainPendingWorldNull=plan.kind==FlatDomainPlanKind::PendingWorldNull;
+                domainPendingWorldNull=plan.kind==FlatDomainPlanKind::PendingWorldNull || predictedWorld;
                 std::memcpy(domainCamera,d.camera,sizeof(domainCamera));
                 if(domainForeign)++s.foregroundCounts.foreignSeen;
+                if(predictedWorld)++s.foregroundCounts.predictedWorld;
             }
         }
     }
@@ -5159,6 +5223,8 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         if(candidate && !foregroundOutput.qualified)failH(foregroundOutput.refusal);
         if(candidate && candidate->firstFailure.frame==s.prefix.frame)
             s.foregroundFirstFailure=candidate->firstFailure;
+        if(candidate && candidate->failureKinds.frame==s.prefix.frame)
+            s.foregroundFailureKinds=candidate->failureKinds;
         f.foregroundMotion=foregroundOutput.motion.Get();f.foregroundQualified=foregroundOutput.qualified;
         f.foregroundResetRequired=foregroundOutput.resetRequired;f.foregroundFrame=foregroundOutput.frame;
         f.foregroundDepthNear=foregroundOutput.depthNear;
@@ -5343,15 +5409,23 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
             domainFail(s,stage,why,failureKey,stateReceipt.valid?&stateReceipt:nullptr,
                 why && std::strcmp(why,"history-budget")==0 && budget.valid?&budget:nullptr);
         };
-        if(earlyStateReason)failDomain(earlyStateStage,earlyStateReason);
         const char* rasterRefusal=flatDomainRasterRefusal(projection,bd,dd,boundColors,domainForeign,domainHdrWriter,candidate->colorWritten);
         const bool opaque=rasterRefusal==nullptr;
         const bool colorWrites=flatDomainWritesColor(projection,bd,boundColors);
         if(domainPs && colorWrites)candidate->colorWritten=true;
-        if(!opaque || !bytes || !replayQueriesSafe(ctx) || indirectArgs)
+        const bool queriesUnsafe=opaque && bytes && !replayQueriesSafe(ctx);
+        const bool unplannable=!opaque || !bytes || queriesUnsafe || indirectArgs;
+        if((earlyStateReason || unplannable) && flatDomainPreservesSurface(dd)) {
+            // No depth write: the last depth writer's surface and owner mark
+            // stand. No capture, marker or refusal; the game's draw runs as is.
+            ++s.foregroundCounts.surfacePreserving;
+            if(domainForeign)++s.foregroundCounts.surfacePreservingForeign;
+        } else if(unplannable) {
+            if(earlyStateReason)failDomain(earlyStateStage,earlyStateReason);
             failDomain("state",!opaque?rasterRefusal:!bytes?
                 "foreground-original-shader-unavailable":indirectArgs?"foreground-indirect-writer":"foreground-active-query");
-        else {
+        } else {
+            if(earlyStateReason)failDomain(earlyStateStage,earlyStateReason);
             const char* phaseReason=nullptr;
             const bool phaseKnown=flatForegroundBoundProjectionPhase(ctx,s.projection.get(),projection.projectionSlot,
                 projection.projectionRow,projection.projectionLayout,s.phase.currentX,s.phase.currentY,
@@ -5593,7 +5667,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
 extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
     EdvrFlatSdkBenchSnapshot* out, unsigned int bytes) {
     if (!out || bytes != sizeof(EdvrFlatSdkBenchSnapshot) ||
-        out->size != sizeof(EdvrFlatSdkBenchSnapshot) || out->version != 2 ||
+        out->size != sizeof(EdvrFlatSdkBenchSnapshot) || out->version != 3 ||
         !runtimeFlatProfile() || !owner())
         return 0;
     const auto& s = state();
@@ -5622,6 +5696,12 @@ extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
     snap.worldMarkers = s.foregroundCounts.worldMarkers;
     snap.hAttempts = s.foregroundCounts.hAttempts;
     snap.hQualified = s.foregroundCounts.hQualified;
+    snap.predictedWorld = s.foregroundCounts.predictedWorld;
+    snap.surfacePreserving = s.foregroundCounts.surfacePreserving;
+    snap.surfacePreservingForeign = s.foregroundCounts.surfacePreservingForeign;
+    snap.surfacePreservingCameraless = s.foregroundCounts.surfacePreservingCameraless;
+    snap.failureKinds = s.foregroundFailureKinds.used;
+    snap.failureKindsDropped = s.foregroundFailureKinds.dropped;
     snap.hdrTriggered = s.hdr.triggered ? 1u : 0u;
     snap.hdrSelected = s.hdrSelected.selected() ? 1u : 0u;
     const auto resolver = flatMonoResolveStats();

@@ -31,7 +31,9 @@ constexpr BenchCase benchCases[] = {
     {L"smoke","smoke"}, {L"scene","scene"}, {L"unsupported_host","unsupported_host"},
     {L"inert_no_write","inert_no_write"}, {L"inert_depth_write","inert_depth_write"},
     {L"inert_color_write","inert_color_write"}, {L"state_partial_mask","state_partial_mask"},
-    {L"state_blended","state_blended"}
+    {L"state_blended","state_blended"}, {L"state_blended_no_depth","state_blended_no_depth"},
+    {L"state_blended_hdr","state_blended_hdr"}, {L"settlement_prepass","settlement_prepass"},
+    {L"predicted_world_mismatch","predicted_world_mismatch"}
 };
 const BenchCase* commandCase(int argc, const wchar_t* const* argv) {
     if (argc!=9 || std::wcscmp(argv[1],L"--case")!=0 ||
@@ -54,10 +56,15 @@ bool commandSelfTest() {
             if (commandCase(9,args)!=&entry)return false;
         }
     }
-    args[2]=L"state_partial_mask";
-    if (!commandCase(9,args) || std::strcmp(commandCase(9,args)->sceneName,"state_partial_mask")!=0)return false;
-    args[2]=L"state_blended";
-    if (!commandCase(9,args) || std::strcmp(commandCase(9,args)->sceneName,"state_blended")!=0)return false;
+    for (const char* name:{"state_partial_mask","state_blended","state_blended_no_depth","state_blended_hdr",
+                            "settlement_prepass","predicted_world_mismatch"}) {
+        // The scene name is the case name: nothing else maps a command line to a scenario.
+        const std::wstring wide(name,name+std::strlen(name));
+        args[2]=wide.c_str();
+        if (!commandCase(9,args) || std::strcmp(commandCase(9,args)->sceneName,name)!=0)return false;
+    }
+    args[2]=L"state_blended_no";   // a prefix of an admitted name is not an admitted name
+    if (commandCase(9,args))return false;
     args[2]=L"unknown";
     if (commandCase(9,args))return false;
     args[2]=L"scene";args[4]=L"proxy.dll";

@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** 32db3d2d FLOWN: configured SDK AA still refuses (103).
-  Pressure reclamation and bounded receipts BUILT, NOT FLOWN (103).
+- **State:** 4f6197e8 FLOWN at a settlement: SDK AA refused every frame (104).
+  Owner marks now follow the depth surface (104): BUILT, NOT FLOWN.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -31,16 +31,16 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
-  changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** classify the mixed writer and history occupants from receipts (103).
-  Retain 102's color-clear fix; no per-weapon table; preserve Epic settings.
-  Building shimmer is unqualified. Preserve 87's native FSR comparison and
-  section 83's remaining matrix and open items.
-  Preserve high-G motion and strict depth ownership; do not repeat qualified
-  PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
-  open. VR still needs regression tests; the concourse NPC observation on
-  `d9f86b09` belongs to the main/openxr-perf-gaps line.
+- **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
+  capture; raising the 64-draw/64-record bounds; a weapon-only cause.
+- **Next:** fly 104 at the same settlement: H-qualified, the refusal inventory,
+  backend calls and CPU a frame (SDK mode cost 12-14 ms there). Retain 102's
+  color-clear fix; no per-weapon table; preserve Epic settings. Building
+  shimmer is unqualified. Preserve 87's native FSR comparison and section 83's
+  open items. Preserve high-G motion; do not repeat qualified PS91/BFE or
+  stale-resize hypotheses. The menu hangar-floor P1 defect remains open. VR
+  still needs regression tests; the concourse NPC observation on `d9f86b09`
+  belongs to the main/openxr-perf-gaps line.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
@@ -12395,3 +12395,129 @@ mutation and pressure-reclamation counts, or the mixed writer's exact blend,
 write mask and world-naming state. No weapon list or long bulk capture is
 required. Live AA recovery remains unqualified; holstered and drawn still
 share the same unresolved scene-wide report.
+
+## 104. Settlement SDK AA: owner marks follow the depth surface (2026-10-06)
+
+Flight: Epic `edvr_gfx_20261006_035353.log`, verified by the log tool as
+`v0.18.2-18-g4f6197e8` (build 6AC463CF, linked 02:58:23 UTC). Flat profile,
+native 3840x2160, configured `dlss`, DLSS 310.9.1, RTX 5090, no VR runtime.
+Sean took one NumLock at a settlement (03:58:00.873). Every settlement frame
+refuses `flat-resolve-foreground-contract-unqualified` and falls back to
+spatial; H-attempts reach 3635 with zero qualified. The new receipts name two
+first failures, alternating between frames:
+
+- `foreground-draw-bound` / `history-budget` on F516BF02/B40B0462, a skinned
+  alpha-tested depth prepass (colour masked, stencil REPLACE ref 0): records
+  64, current 57, prior 7, no invalid or mutated records; all 57 current and
+  all 64 previous draws were captured before world naming.
+- `foreground-mixed-component-writer` on CFCA8FFC/8A08FF78: Gbuffer RT0
+  (R10G10B10A2) with ONE/ONE/MIN on colour and alpha, independent blend,
+  depth write on, GREATER_EQUAL. Disassembly: a skinned VS projecting through
+  CB0 rows 4..7 that passes clip W to a PS writing it to all four channels.
+
+The same log's nominee lines already show F516BF02 and CFCA8FFC before
+naming at near 0.025, the world camera's; first-person draws use 0.0675.
+
+Offline sweep (scratch harness; production `flatDomainShaderProof` and
+`flatDomainPlan` over the 10-05 F10 traces 48930, 47706 and 45214 from the
+same settlement, with the dumped shader bytes). In frame 48927 the world is
+named at q5359 and 146 draws reach H before it: 15 F516BF02 at 0.0675, then
+44 F516BF02, 63 ACE405F4 and 3 other null-PS prepasses, 2 31869313, FC1193AF
+and one CFCA8FFC, all at 0.025 with camera bytes identical to the camera named
+later in the frame; then one CFCA8FFC, 15 8B589D25 and 2 7B0DC42D at 0.0675.
+The rule "every pool draw before naming is foreign" captures 53-86 draws a
+frame against the 64-draw bound; only 50 draws a frame use the first-person
+camera. Both cameras share one b1 buffer; the first-person rows are the
+world's scaled by 1.2313 with near 0.0675.
+
+The sweep also finds what the first-failure receipt cannot show. Before H
+(the frame's resolve marker follows every scene-depth draw), 128-149 more
+draws refuse at planning in every frame: about 120 world-camera forward HDR
+and format-60 effects as `foreground-non-Gbuffer-writer` (84 of them
+359BF8FF/92FF8499 particles), 12 camera-less deferred light volumes (0357BBB2,
+24DE25E4, F8FA801F, ...) as `foreground-original-camera-unavailable`, 13
+in-world text draws (12 of them 0B71713B/CDDFE215) as
+`foreground-original-projection-unproven`, and the first-person HDR draw
+88DCF116/494506A6. Under these rules no mixed-camera frame containing a lit
+point light could ever qualify; H-qualified has been zero in every flight
+since the SDK domain route was built.
+
+Ruled out: raising the 64-draw or 64-record bounds, because 48 of the 82
+captures a frame are world-camera draws that need no capture, and 128-149
+planning refusals would remain.
+Ruled out: a weapon-specific cause at the settlement, because holstered
+frames fail alike and both first failures are world-camera prepass draws.
+
+The ownership model is changed. Deferred lighting reconstructs each pixel's
+position from depth, so the owner mark must follow whatever wrote the
+pixel's depth, and only that:
+
+- Provisional world before naming. A draw whose near equals the last named
+  world camera's (persisted across frames) is planned World/WorldPool with no
+  capture and records the existing pending witness. H refuses unless every
+  witness equals the selected world camera (all 96 camera bytes, depth,
+  extent and phase), so a misprediction can only refuse, never admit. In the
+  sweep 102-115 predicted draws a frame all match, and captures fall to 3-35.
+- A depth-writing Gbuffer draw owns its fragments however its colour blends
+  or masks (CFCA8FFC's MIN), and may follow colour writes as a depth-only draw.
+  HDR writers keep the strict opaque, complete-RGB rule.
+- A draw that cannot write depth never changes ownership. When the planner
+  or the raster check would refuse it and its depth state cannot write depth,
+  it is forwarded unchanged: no marker, capture or refusal. This covers light
+  volumes, particles, decals and glows. Colour such a draw puts over another
+  camera's surface reprojects with that surface's motion, the ordinary
+  transparency case; the late-overlay layer still protects the known
+  first-person overlays.
+- Diagnostics: every distinct refusal on the selected H in the last failed
+  frame (up to 8 kinds, with counts and first q) in `flat foreground refusal
+  inventory` / `kind` lines, and `predicted-world`, `predicted-near` and
+  `surface-preserving` counts on the SDK domain line. Bench snapshot ABI 3.
+
+Cost seen in the same flight: in DLSS mode at the settlement the flat runtime
+takes 11.9-13.7 ms of render-thread CPU a frame (foreground capture 3.4-4.8 ms
+over about 10,000 slow-path validations, other 3.4-3.6 ms; present p50 16.8-
+19.7 ms). TAA took about 8 ms a frame in the 10-05 flight. The change removes
+about 47 stream-output captures a frame but not the per-draw validation.
+Engaging the SDK at this draw count may still cost frame rate; that is a
+separate optimisation, not part of this fix.
+
+Ruled out: b1 rewrites defeating the cached world fast path, because all
+10,384 supported draws on H in trace frame 48927 share one b1 write epoch.
+Why about 10,000 draws a frame take the slow validation path is not measured.
+
+Offline qualification (flat profile, reconstructed 64x64 targets, RTX 5090,
+DLSS 310.9.1; shaders exact, state and workloads reconstructed; not an exact
+scene replay). The admission unit tests grow from 65 to 86 checks. The bench
+gains `settlement_prepass`: 72 world-camera F516BF02/B40B0462 prepass draws
+before naming, plus CFCA8FFC's MIN-blend depth write in both cameras. It
+requires every prepass draw predicted and none captured, depth written, no
+failure anywhere in the frame, H qualified and the configured backend run.
+Guards: `predicted_world_mismatch` (world near, different rows) must refuse
+`foreground-pending-null-not-selected-world`; `state_blended_hdr` must refuse
+`foreground-mixed-component-writer`. The former blended/partial guards now
+expect admission, and colour-only draws without depth write are forwarded.
+Hardware: 35/35 PASS plus GPU history pressure (`build/settlement-bench-hw-
+final.json`). WARP: 21 PASS, 14 UNSUPPORTED (DLAA/DLSS need NGX), 0 FAIL,
+history PASS (`build/settlement-bench-warp-final.json`). Mutation runs against scratch proxies: HEAD fails the 7 new or
+changed cases; rule A removed reproduces the live `foreground-draw-bound`;
+rules B or C removed, rule B widened to HDR, rule C widened to depth writers,
+or the witness removed each fail their case.
+
+Ruled out: separate staged DLL copies per bench scenario, because process
+isolation only needs a separate directory and ini. Hard links replace about
+2.78 GB written per matrix; nvngx_dlss.dll is staged only for DLAA/DLSS.
+
+Compile memory, found the same day: compiling flat_runtime.cpp alone took
+about 74 GB of commit and 3.5 minutes, paging the 32 GB build machine, at HEAD
+as well; /Od did the same and the file's headers alone took 0.41 GB. The cause
+was `FlatTraceRing traceRing{};` in State: MSVC expanded all 262,144 trace
+events as an aggregate initializer once 5698007f (2026-10-04) raised the ring
+to 65,536 events a frame. Every member already has a default initializer, so
+plain default initialization is identical. With it the file compiles in 7.1 s
+at 0.50 GB, and the full build's largest compiler process peaked at 1.37 GB
+(213 s, receipt `0948558e`).
+
+Known limits: a first-person draw at the world camera's near now refuses the
+frame through its witness instead of being captured. Three cameras on one
+depth refuse earlier, in the HDR selector (`source-camera-or-depth-not-
+unique`), as before.

@@ -10,7 +10,10 @@ struct SceneEvidence {
     unsigned stateColorPixels=0;
     unsigned validDepthPixels=0;
     float depthMin=1.f, depthMax=0.f;
-    Snapshot inert{},stateRefused{},stateLater{};
+    Snapshot inert{},stateDrawn{},stateLater{};
+    // Settlement order: the first-person draw and the world-camera prepass run draw before the world is named.
+    Snapshot firstPerson{}, cfcaFirstPerson{}, cfcaWorld{}, prepass{};
+    unsigned prepassDepthPixels=0;
 };
 
 bool readShader(const wchar_t* directory, const wchar_t* leaf, uint64_t expected,
@@ -104,15 +107,28 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         return 2;
     }
     Snapshot incompatible{};
-    incompatible.version=3;
+    incompatible.version=4;
     if(snapshot(&incompatible,sizeof(incompatible))) {
         std::fputs("flat SDK bench: snapshot accepted a future ABI version\n",stderr);return 2;
     }
-    incompatible.version=2;incompatible.size=sizeof(incompatible)-1;
+    incompatible.version=2;
+    if(snapshot(&incompatible,sizeof(incompatible))) {
+        std::fputs("flat SDK bench: snapshot accepted a retired ABI version\n",stderr);return 2;
+    }
+    incompatible.version=3;incompatible.size=sizeof(incompatible)-1;
     if(snapshot(&incompatible,sizeof(incompatible))) {
         std::fputs("flat SDK bench: snapshot accepted a wrong ABI size\n",stderr);return 2;
     }
     auto* device=present.device();auto* context=present.context();
+    // The case table in flat_sdk_integration_test.cpp admits the names; these select the draw state.
+    const bool partialState=std::strcmp(name,"state_partial_mask")==0;
+    const bool blendedState=std::strcmp(name,"state_blended")==0;
+    const bool blendedNoDepth=std::strcmp(name,"state_blended_no_depth")==0;
+    const bool blendedHdr=std::strcmp(name,"state_blended_hdr")==0;
+    const bool settlement=std::strcmp(name,"settlement_prepass")==0;
+    const bool mismatch=std::strcmp(name,"predicted_world_mismatch")==0;
+    const bool prepassCase=settlement||mismatch;
+    const bool stateDraw=partialState||blendedState||blendedNoDepth;
     const struct ShaderName {const wchar_t* name;uint64_t hash;} names[]={
         {L"vs_EB5234DB6ADB491D.dxbc",0xEB5234DB6ADB491Dull},
         {L"ps_DC603C35BBE74B31.dxbc",0xDC603C35BBE74B31ull},
@@ -134,6 +150,33 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         {"PACKEDVERTEXDATAC",0,DXGI_FORMAT_R32G32B32A32_UINT,1,32,D3D11_INPUT_PER_VERTEX_DATA,0}};
     ComPtr<ID3D11InputLayout> layout[2];
     for(unsigned i=0;i<2;++i) if(!ok(device->CreateInputLayout(inputs,4,code[2*i].data(),code[2*i].size(),&layout[i]),"captured VS layout"))return 2;
+    // The world camera's depth prepass pair as the settlement draws it: the pool VS and an alpha-test PS with no
+    // color output. Captured bytes; the input layout is the family's own.
+    ComPtr<ID3D11VertexShader> prepassVs;ComPtr<ID3D11PixelShader> prepassPs;ComPtr<ID3D11InputLayout> prepassLayout;
+    if(prepassCase) {
+        std::vector<BYTE> prepassVsCode,prepassPsCode;
+        if(!readShader(fixturePath,L"vs_F516BF0201303B87.dxbc",0xF516BF0201303B87ull,prepassVsCode) ||
+           !readShader(fixturePath,L"ps_B40B0462256E31C2.dxbc",0xB40B0462256E31C2ull,prepassPsCode)) {
+            std::fputs("flat SDK bench: fixture missing or hash mismatch: settlement prepass pair\n",stderr);return 2;
+        }
+        if(!ok(device->CreateVertexShader(prepassVsCode.data(),prepassVsCode.size(),nullptr,&prepassVs),"captured prepass VS") ||
+           !ok(device->CreatePixelShader(prepassPsCode.data(),prepassPsCode.size(),nullptr,&prepassPs),"captured prepass PS") ||
+           !ok(device->CreateInputLayout(inputs,4,prepassVsCode.data(),prepassVsCode.size(),&prepassLayout),"captured prepass layout"))return 2;
+    }
+    // The first-person laser's Gbuffer pair, drawn in both cameras: clip W into RT0 with MIN blend and a depth write.
+    // It projects through CB0[4..7] by dp4 rather than the camera table, and has no PACKEDVERTEXDATAB input.
+    ComPtr<ID3D11VertexShader> cfcaVs;ComPtr<ID3D11PixelShader> cfcaPs;ComPtr<ID3D11InputLayout> cfcaLayout;
+    if(settlement) {
+        std::vector<BYTE> cfcaVsCode,cfcaPsCode;
+        if(!readShader(fixturePath,L"vs_CFCA8FFC6B058630.dxbc",0xCFCA8FFC6B058630ull,cfcaVsCode) ||
+           !readShader(fixturePath,L"ps_8A08FF781272C5F6.dxbc",0x8A08FF781272C5F6ull,cfcaPsCode)) {
+            std::fputs("flat SDK bench: fixture missing or hash mismatch: settlement CFCA pair\n",stderr);return 2;
+        }
+        const D3D11_INPUT_ELEMENT_DESC cfcaInputs[]={inputs[0],inputs[1],inputs[3]};
+        if(!ok(device->CreateVertexShader(cfcaVsCode.data(),cfcaVsCode.size(),nullptr,&cfcaVs),"captured CFCA VS") ||
+           !ok(device->CreatePixelShader(cfcaPsCode.data(),cfcaPsCode.size(),nullptr,&cfcaPs),"captured CFCA PS") ||
+           !ok(device->CreateInputLayout(cfcaInputs,3,cfcaVsCode.data(),cfcaVsCode.size(),&cfcaLayout),"captured CFCA layout"))return 2;
+    }
     ComPtr<ID3D11Texture2D> pool,hdr,consumerColor;
     ComPtr<ID3D11RenderTargetView> poolRtv,hdrRtv,consumerRtv;
     if(!makeSceneTexture(device,DXGI_FORMAT_R10G10B10A2_TYPELESS,DXGI_FORMAT_R10G10B10A2_UNORM,
@@ -178,6 +221,15 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
        !createDataBuffer(instance[0],sizeof(instance[0]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[0]) ||
        !createDataBuffer(instance[1],sizeof(instance[1]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[1]) ||
        !createDataBuffer(indices,sizeof(indices),D3D11_BIND_INDEX_BUFFER,indexBuffer))return 2;
+    // The prepass run: draw i starts at index 3*i, so no two prepass draws share a packet though they read the
+    // same three vertices. More than the 64 draws one frame's foreground capture may hold.
+    constexpr unsigned prepassDraws=72;
+    ComPtr<ID3D11Buffer> prepassIndexBuffer;
+    if(prepassCase) {
+        std::vector<uint16_t> run(prepassDraws*3);
+        for(unsigned i=0;i<prepassDraws;++i) {run[3*i]=0;run[3*i+1]=1;run[3*i+2]=2;}
+        if(!createDataBuffer(run.data(),static_cast<UINT>(run.size()*sizeof(uint16_t)),D3D11_BIND_INDEX_BUFFER,prepassIndexBuffer))return 2;
+    }
     struct PoolRecord {uint32_t words[84];};
     PoolRecord records[16]{};
     auto lane=[](float c){return static_cast<uint32_t>((c+1.f)*32767.f);};
@@ -218,10 +270,20 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     float material[6][4]{};material[0][0]=-1000.f;
     ComPtr<ID3D11Buffer> materialBuffer;
     if(!createDataBuffer(material,sizeof(material),D3D11_BIND_CONSTANT_BUFFER,materialBuffer))return 2;
-    ComPtr<ID3D11Buffer> camera[2];
-    for(unsigned c=0;c<2;++c) {
-        float rows[280][4]{};rows[270][0]=1;rows[271][1]=1;rows[272][3]=1;
-        rows[273][2]=c?.0675f:.025f;rows[274][2]=1;
+    // Camera 0 is the world (near .025), 1 the first person (near .0675). Camera 2 exists only for the mismatch
+    // case and is its first-person camera: the world's near with another projection scale, so a draw taken for
+    // the world by its near alone is not the camera H selects. It replaces camera 1 rather than joining it:
+    // measured 2026-10-06, with the world, camera 1 and a mid-run prepass draw at this one all on the depth, the
+    // selector refused the frame first as source-camera-or-depth-not-unique (no H attempt, no failure). With only
+    // the world and this camera the pending-witness check is reached.
+    const unsigned cameraCount=mismatch?3u:2u;
+    const auto cameraRows=[](unsigned c,float (&rows)[280][4]) {
+        rows[270][0]=c==2?1.25f:1.f;rows[271][1]=1;rows[272][3]=1;
+        rows[273][2]=c==1?.0675f:.025f;rows[274][2]=1;
+    };
+    ComPtr<ID3D11Buffer> camera[3];
+    for(unsigned c=0;c<cameraCount;++c) {
+        float rows[280][4]{};cameraRows(c,rows);
         D3D11_BUFFER_DESC bd{};bd.ByteWidth=sizeof(rows);bd.Usage=D3D11_USAGE_DYNAMIC;
         bd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         if(!ok(device->CreateBuffer(&bd,nullptr,&camera[c]),"scene camera"))return 2;
@@ -230,6 +292,24 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         if(!ok(context->Map(camera[c].Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"scene camera upload"))return 2;
         std::memcpy(mapped.pData,rows,sizeof(rows));context->Unmap(camera[c].Get(),0);
     }
+    // CB0[4..7] of the CFCA draws: each camera's clip rows transposed for the shader's dp4 projection, with the same
+    // near plane as its camera table. Index 0 is the world camera, 1 the first-person one.
+    ComPtr<ID3D11Buffer> cfcaClip[2];
+    const auto uploadClip=[&](unsigned c)->bool {
+        float rows[8][4]{};rows[4][0]=1;rows[5][1]=1;rows[6][3]=c?.0675f:.025f;rows[7][2]=1;
+        if(!cfcaClip[c]) {
+            D3D11_BUFFER_DESC bd{};bd.ByteWidth=sizeof(rows);bd.Usage=D3D11_USAGE_DYNAMIC;
+            bd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+            if(!ok(device->CreateBuffer(&bd,nullptr,&cfcaClip[c]),"CFCA clip rows"))return false;
+        }
+        ID3D11Buffer* bound=cfcaClip[c].Get();context->VSSetConstantBuffers(0,1,&bound);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if(!ok(context->Map(cfcaClip[c].Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"CFCA clip rows upload"))return false;
+        std::memcpy(mapped.pData,rows,sizeof(rows));context->Unmap(cfcaClip[c].Get(),0);
+        ID3D11Buffer* unbound=nullptr;context->VSSetConstantBuffers(0,1,&unbound);
+        return true;
+    };
+    if(settlement && (!uploadClip(0) || !uploadClip(1)))return 2;
     const D3D11_VIEWPORT vp{0,0,64,64,0,1};context->RSSetViewports(1,&vp);
     context->RSSetState(raster.Get());context->OMSetDepthStencilState(depthState.Get(),0);
     context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
@@ -249,9 +329,12 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     context->ClearRenderTargetView(hdrRtv.Get(),clearHdr);
     context->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);
     SceneEvidence evidence;
+    // Family 0 draws with the world camera, family 1 with the first-person one: camera 1 (near .0675), or in the
+    // mismatch case camera 2, whose near equals the world's.
+    const unsigned familyCamera[2]={0u,mismatch?2u:1u};
     auto originalDraw=[&](unsigned family,ID3D11RenderTargetView* target,Snapshot& snap) {
         ID3D11RenderTargetView* view=target;context->OMSetRenderTargets(1,&view,dsv.Get());
-        ID3D11Buffer* cb=camera[family].Get();context->VSSetConstantBuffers(1,1,&cb);
+        ID3D11Buffer* cb=camera[familyCamera[family]].Get();context->VSSetConstantBuffers(1,1,&cb);
         context->PSSetConstantBuffers(1,1,&cb);
         context->IASetInputLayout(layout[family].Get());
         vb[0]=instanceBuffer[family].Get();context->IASetVertexBuffers(0,2,vb,strides,offsets);
@@ -266,19 +349,51 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         context->DrawIndexedInstanced(3,1,0,0,0);
         return snapshot(&snap,sizeof(snap))!=0;
     };
+    // The laser's Gbuffer draw in the camera `view` (0 world with record 5, 1 first person with record 9): MIN blend on
+    // RT0 with IndependentBlendEnable, and a GREATER_EQUAL depth test with the depth write on, as the settlement has it.
+    ComPtr<ID3D11BlendState> cfcaBlendState;ComPtr<ID3D11DepthStencilState> cfcaDepthState;
+    if(settlement) {
+        D3D11_BLEND_DESC minBlend{};minBlend.IndependentBlendEnable=TRUE;
+        for(auto& target:minBlend.RenderTarget)target.RenderTargetWriteMask=15;
+        auto& rt0=minBlend.RenderTarget[0];rt0.BlendEnable=TRUE;
+        rt0.SrcBlend=rt0.DestBlend=rt0.SrcBlendAlpha=rt0.DestBlendAlpha=D3D11_BLEND_ONE;
+        rt0.BlendOp=rt0.BlendOpAlpha=D3D11_BLEND_OP_MIN;
+        D3D11_DEPTH_STENCIL_DESC greaterEqual{};greaterEqual.DepthEnable=TRUE;
+        greaterEqual.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;greaterEqual.DepthFunc=D3D11_COMPARISON_GREATER_EQUAL;
+        if(!ok(device->CreateBlendState(&minBlend,&cfcaBlendState),"CFCA MIN blend") ||
+           !ok(device->CreateDepthStencilState(&greaterEqual,&cfcaDepthState),"CFCA depth state"))return 2;
+    }
+    auto cfcaDraw=[&](unsigned view,Snapshot& snap) {
+        ID3D11RenderTargetView* target=poolRtv.Get();context->OMSetRenderTargets(1,&target,dsv.Get());
+        ID3D11Buffer* clip=cfcaClip[view].Get();context->VSSetConstantBuffers(0,1,&clip);
+        ID3D11Buffer* table=camera[view].Get();context->VSSetConstantBuffers(1,1,&table);
+        context->PSSetConstantBuffers(1,1,&table);
+        context->IASetInputLayout(cfcaLayout.Get());
+        vb[0]=instanceBuffer[view].Get();context->IASetVertexBuffers(0,2,vb,strides,offsets);
+        context->IASetIndexBuffer(indexBuffer.Get(),DXGI_FORMAT_R16_UINT,0);
+        context->VSSetShader(cfcaVs.Get(),nullptr,0);context->PSSetShader(cfcaPs.Get(),nullptr,0);
+        ID3D11ShaderResourceView* none[7]{};context->PSSetShaderResources(0,7,none);
+        context->OMSetBlendState(cfcaBlendState.Get(),nullptr,0xffffffffu);
+        context->OMSetDepthStencilState(cfcaDepthState.Get(),0);
+        context->DrawIndexedInstanced(3,1,0,0,0);
+        context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+        context->OMSetDepthStencilState(depthState.Get(),0);
+        ID3D11Buffer* unbound=nullptr;context->VSSetConstantBuffers(0,1,&unbound);
+        return snapshot(&snap,sizeof(snap))!=0;
+    };
     // The engine source has a previous-frame scene CB and slot plane by
     // contract. Produce one ordinary world frame before the measured frame.
     Snapshot warmup{};
     for(unsigned frame=0;frame<2;++frame) {
         if(!originalDraw(0,poolRtv.Get(),warmup) || !ok(present.present(),"source warmup Present"))return 2;
-        for(unsigned c=0;c<2;++c) {
-            float rows[280][4]{};rows[270][0]=1;rows[271][1]=1;rows[272][3]=1;
-            rows[273][2]=c?.0675f:.025f;rows[274][2]=1;
+        for(unsigned c=0;c<cameraCount;++c) {
+            float rows[280][4]{};cameraRows(c,rows);
             ID3D11Buffer* bound=camera[c].Get();context->VSSetConstantBuffers(1,1,&bound);
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if(!ok(context->Map(camera[c].Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped),"next-frame camera upload"))return 2;
             std::memcpy(mapped.pData,rows,sizeof(rows));context->Unmap(camera[c].Get(),0);
         }
+        if(settlement)for(unsigned c=0;c<2;++c)if(!uploadClip(c))return 2;
         context->ClearRenderTargetView(poolRtv.Get(),clearPool);
         context->ClearRenderTargetView(hdrRtv.Get(),clearHdr);
         context->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);
@@ -287,27 +402,59 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const auto poolBefore=readPixels(device,context,pool.Get(),4);
     const auto hdrBefore=readPixels(device,context,hdr.Get(),4);
     const auto depthBefore=readPixels(device,context,depth.Get(),8);
-    if(!originalDraw(0,poolRtv.Get(),evidence.world))return 2;
-    const bool partialState=std::strcmp(name,"state_partial_mask")==0;
-    const bool blendedState=std::strcmp(name,"state_blended")==0;
-    const bool stateGuard=partialState||blendedState;
-    if(stateGuard) {
-        D3D11_BLEND_DESC guardBlend{};
-        guardBlend.RenderTarget[0].RenderTargetWriteMask=partialState?7:15;
-        guardBlend.RenderTarget[0].BlendEnable=blendedState?TRUE:FALSE;
-        guardBlend.RenderTarget[0].SrcBlend=D3D11_BLEND_ONE;
-        guardBlend.RenderTarget[0].DestBlend=blendedState?D3D11_BLEND_ONE:D3D11_BLEND_ZERO;
-        guardBlend.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;
-        guardBlend.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;
-        guardBlend.RenderTarget[0].DestBlendAlpha=blendedState?D3D11_BLEND_ONE:D3D11_BLEND_ZERO;
-        guardBlend.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
-        ComPtr<ID3D11BlendState> guardState;
-        if(!ok(device->CreateBlendState(&guardBlend,&guardState),"foreground guard blend"))return 2;
-        const auto beforeGuard=readPixels(device,context,pool.Get(),4);
-        context->OMSetBlendState(guardState.Get(),nullptr,0xffffffffu);
-        if(!originalDraw(1,poolRtv.Get(),evidence.stateRefused))return 2;
-        evidence.stateColorPixels=changedPixels(beforeGuard,readPixels(device,context,pool.Get(),4),4);
+    if(prepassCase) {
+        // The settlement's order, in a frame after one that named the world: the first-person camera draws first
+        // (the family's draw and, in the settlement, the laser pair), then a run of the world camera's depth prepass
+        // with color masked off and the laser pair again, and only then the material draw that names the world.
+        if(!originalDraw(1,poolRtv.Get(),evidence.firstPerson))return 2;
+        if(settlement && !cfcaDraw(1,evidence.cfcaFirstPerson))return 2;
+        const auto depthAfterFirstPerson=readPixels(device,context,depth.Get(),8);
+        D3D11_BLEND_DESC prepassMask{};   // every render-target write mask zero
+        ComPtr<ID3D11BlendState> prepassMaskState;
+        if(!ok(device->CreateBlendState(&prepassMask,&prepassMaskState),"prepass color mask"))return 2;
+        ID3D11RenderTargetView* prepassTarget=poolRtv.Get();context->OMSetRenderTargets(1,&prepassTarget,dsv.Get());
+        context->OMSetBlendState(prepassMaskState.Get(),nullptr,0xffffffffu);
+        context->IASetInputLayout(prepassLayout.Get());
+        vb[0]=instanceBuffer[0].Get();context->IASetVertexBuffers(0,2,vb,strides,offsets);
+        context->IASetIndexBuffer(prepassIndexBuffer.Get(),DXGI_FORMAT_R16_UINT,0);
+        context->VSSetShader(prepassVs.Get(),nullptr,0);context->PSSetShader(prepassPs.Get(),nullptr,0);
+        ID3D11ShaderResourceView* prepassResources[7]{};prepassResources[0]=textureSrv.Get();
+        context->PSSetShaderResources(0,7,prepassResources);
+        ID3D11Buffer* prepassCamera=camera[0].Get();   // the world camera, as the settlement's prepass draws it
+        context->VSSetConstantBuffers(1,1,&prepassCamera);context->PSSetConstantBuffers(1,1,&prepassCamera);
+        for(unsigned i=0;i<prepassDraws;++i)context->DrawIndexedInstanced(3,1,3*i,0,0);
         context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+        if(settlement && !cfcaDraw(0,evidence.cfcaWorld))return 2;
+        if(!snapshot(&evidence.prepass,sizeof(evidence.prepass)))return 2;
+        evidence.prepassDepthPixels=changedPixels(depthAfterFirstPerson,readPixels(device,context,depth.Get(),8),8);
+    }
+    if(!originalDraw(0,poolRtv.Get(),evidence.world))return 2;
+    if(stateDraw) {
+        // A masked or blended draw of the first-person pair, then the ordinary one. With a depth write it defines
+        // the surface it shows and is admitted; without one it cannot change the surface and is forwarded.
+        D3D11_BLEND_DESC drawBlend{};
+        const bool blendOn=blendedState||blendedNoDepth;
+        drawBlend.RenderTarget[0].RenderTargetWriteMask=partialState?7:15;
+        drawBlend.RenderTarget[0].BlendEnable=blendOn?TRUE:FALSE;
+        drawBlend.RenderTarget[0].SrcBlend=D3D11_BLEND_ONE;
+        drawBlend.RenderTarget[0].DestBlend=blendOn?D3D11_BLEND_ONE:D3D11_BLEND_ZERO;
+        drawBlend.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;
+        drawBlend.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ONE;
+        drawBlend.RenderTarget[0].DestBlendAlpha=blendOn?D3D11_BLEND_ONE:D3D11_BLEND_ZERO;
+        drawBlend.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        ComPtr<ID3D11BlendState> drawBlendState;
+        if(!ok(device->CreateBlendState(&drawBlend,&drawBlendState),"state draw blend"))return 2;
+        D3D11_DEPTH_STENCIL_DESC keepDepth{};keepDepth.DepthEnable=TRUE;
+        keepDepth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;keepDepth.DepthFunc=D3D11_COMPARISON_ALWAYS;
+        ComPtr<ID3D11DepthStencilState> keepDepthState;
+        if(!ok(device->CreateDepthStencilState(&keepDepth,&keepDepthState),"state draw read-only depth"))return 2;
+        const auto beforeDraw=readPixels(device,context,pool.Get(),4);
+        context->OMSetBlendState(drawBlendState.Get(),nullptr,0xffffffffu);
+        if(blendedNoDepth)context->OMSetDepthStencilState(keepDepthState.Get(),0);
+        if(!originalDraw(1,poolRtv.Get(),evidence.stateDrawn))return 2;
+        evidence.stateColorPixels=changedPixels(beforeDraw,readPixels(device,context,pool.Get(),4),4);
+        context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+        context->OMSetDepthStencilState(depthState.Get(),0);
         if(!originalDraw(1,poolRtv.Get(),evidence.stateLater))return 2;
         evidence.alternate=evidence.stateLater;
     } else if(!originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;
@@ -390,7 +537,19 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         context->OMSetDepthStencilState(depthState.Get(),0);
         context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
     }
+    if(blendedHdr) {
+        // HDR color is the final picture: a blended HDR writer cannot stand in for the owner, depth write or not.
+        D3D11_BLEND_DESC hdrBlend{};
+        hdrBlend.RenderTarget[0].RenderTargetWriteMask=15;hdrBlend.RenderTarget[0].BlendEnable=TRUE;
+        hdrBlend.RenderTarget[0].SrcBlend=hdrBlend.RenderTarget[0].DestBlend=D3D11_BLEND_ONE;
+        hdrBlend.RenderTarget[0].SrcBlendAlpha=hdrBlend.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ONE;
+        hdrBlend.RenderTarget[0].BlendOp=hdrBlend.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        ComPtr<ID3D11BlendState> hdrBlendState;
+        if(!ok(device->CreateBlendState(&hdrBlend,&hdrBlendState),"blended HDR writer"))return 2;
+        context->OMSetBlendState(hdrBlendState.Get(),nullptr,0xffffffffu);
+    }
     if(!originalDraw(0,hdrRtv.Get(),evidence.writer))return 2;
+    if(blendedHdr)context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
     const auto ownerAtH=readOwnerPixels(device,context,ownerView);
     evidence.gpuWorldPixelsAtH=ownerAtH.world;
     evidence.gpuForeignPixelsAtH=ownerAtH.foreign;
@@ -426,9 +585,26 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool taa=std::strcmp(after.mode,"on")==0;
     const bool hostGuard=std::strcmp(name,"unsupported_host")==0;
     const bool depthGuard=std::strcmp(name,"inert_depth_write")==0;
-    const bool colorGuard=std::strcmp(name,"inert_color_write")==0;
-    const bool guardCase=hostGuard||depthGuard||colorGuard||stateGuard;
+    const bool colorInert=std::strcmp(name,"inert_color_write")==0;
+    // A guard expects a refusal that must remain. Every other case expects the production resolve to complete.
+    const bool guardCase=hostGuard||depthGuard||blendedHdr||mismatch;
     const bool inertNoWrite=std::strcmp(name,"inert_no_write")==0;
+    // The counters are cumulative for the process: what a case claims is what changed over the measured frame.
+    const auto since=[](uint64_t now,uint64_t then){return now>=then?now-then:0ull;};
+    const uint64_t predictedDelta=since(after.predictedWorld,before.predictedWorld);
+    const uint64_t surfaceDelta=since(after.surfacePreserving,before.surfacePreserving);
+    const uint64_t surfaceForeignDelta=since(after.surfacePreservingForeign,before.surfacePreservingForeign);
+    const uint64_t surfaceCameralessDelta=since(after.surfacePreservingCameraless,before.surfacePreservingCameraless);
+    const uint64_t foreignDelta=since(after.foreignSeen,before.foreignSeen);
+    const uint64_t capturedDelta=since(after.captured,before.captured);
+    const uint64_t attemptedDelta=since(after.hAttempts,before.hAttempts);
+    const uint64_t qualifiedDelta=since(after.hQualified,before.hQualified);
+    const uint64_t backendDelta=since(after.hdrBackendCompleted,before.hdrBackendCompleted);
+    const uint64_t prepassPredicted=since(evidence.prepass.predictedWorld,before.predictedWorld);
+    const uint64_t prepassForeign=since(evidence.prepass.foreignSeen,before.foreignSeen);
+    const uint64_t prepassCaptured=since(evidence.prepass.captured,before.captured);
+    // No refusal anywhere on the frame: the snapshot reports the frame's first failure over every candidate.
+    const bool frameClean=!after.firstFailureFrame;
     const bool rasterReady=evidence.validDepthPixels>0 && evidence.poolPixels>0 && evidence.hdrPixels>0;
     const bool ownership=evidence.world.namedWorld && evidence.alternate.foreignSeen &&
         evidence.alternate.captured && evidence.alternate.gpuIdentitySubmitted &&
@@ -439,53 +615,81 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
          !evidence.inert.firstFailureFrame);
     const bool upstream=rasterReady && evidence.world.namedWorld && route && inertNoWriteMeasured &&
         (taa || (ownership && after.hQualified>0));
-    const bool inertWriterRefusal=inert && after.hAttempts>0 && !after.hQualified &&
+    const bool inertWriterRefusal=depthGuard && after.hAttempts>0 && !after.hQualified &&
         evidence.inert.firstFailureVs==0xFC1193AFFC596F74ull &&
         evidence.inert.firstFailurePs==0x258B95AC99520C1Full &&
         std::strcmp(evidence.inert.firstFailureStage,"inert-state")==0 &&
-        std::strcmp(evidence.inert.firstFailureReason,depthGuard?
-            "foreground-inert-depth-write":"foreground-inert-color-write")==0;
-    const bool stateRefusal=stateGuard && evidence.stateColorPixels>0 &&
-        after.hAttempts>0 && !after.hQualified &&
-        evidence.stateRefused.firstFailureFrame==after.firstFailureFrame &&
-        evidence.stateRefused.firstFailureSequence==after.firstFailureSequence &&
-        evidence.stateRefused.firstFailureSequence==evidence.stateRefused.drawSequence &&
-        evidence.stateRefused.firstFailureSequence<evidence.stateLater.drawSequence &&
-        std::memcmp(&evidence.stateRefused.firstFailureState,&evidence.stateLater.firstFailureState,
-                    sizeof(after.firstFailureState))==0 &&
-        std::memcmp(&evidence.stateRefused.firstFailureState,&after.firstFailureState,
-                    sizeof(after.firstFailureState))==0 &&
-        after.firstFailureSelectedH && after.firstFailureState.valid &&
-        after.firstFailureState.slot[0].effectiveWriteMask==(partialState?7u:15u) &&
-        after.firstFailureState.slot[0].blendEnable==(blendedState?1u:0u) &&
-        after.firstFailureState.slot[0].dst==static_cast<uint32_t>(blendedState?D3D11_BLEND_ONE:D3D11_BLEND_ZERO) &&
-        after.firstFailureState.slot[0].viewFormatValid==1 &&
-        after.firstFailureState.slot[0].viewFormat==DXGI_FORMAT_R10G10B10A2_UNORM &&
-        after.firstFailureState.boundColors==1 &&
-        after.firstFailureState.stencilEnable==0 &&
-        after.firstFailureState.dsvFlagsValid==0 &&
+        std::strcmp(evidence.inert.firstFailureReason,"foreground-inert-depth-write")==0;
+    // A blended HDR writer is refused on the HDR draw itself, ahead of anything H could say, and no backend
+    // call follows. The failure is the frame's first and is the one H reports.
+    const bool hdrWriterRefusal=blendedHdr && evidence.hdrPixels>0 &&
+        attemptedDelta>0 && !qualifiedDelta && !backendDelta &&
+        after.firstFailureFrame==after.frame && after.firstFailureSelectedH && after.failureKinds>=1 &&
+        after.firstFailureSequence==evidence.writer.drawSequence &&
+        after.firstFailureVs==0xEB5234DB6ADB491Dull && after.firstFailurePs==0xDC603C35BBE74B31ull &&
+        after.firstFailureFormat==26 && after.firstFailureState.valid && after.firstFailureState.hdr==1 &&
+        after.firstFailureState.slot[0].blendEnable==1 && after.firstFailureState.slot[0].effectiveWriteMask==15 &&
+        after.firstFailureState.slot[0].viewFormat==static_cast<uint32_t>(DXGI_FORMAT_R11G11B10_FLOAT) &&
+        after.firstFailureState.depthEnable==1 &&
+        after.firstFailureState.depthWriteMask==static_cast<uint32_t>(D3D11_DEPTH_WRITE_MASK_ALL) &&
         std::strcmp(after.firstFailureStage,"state")==0 &&
-        std::strcmp(after.firstFailureReason,"foreground-mixed-component-writer")==0 &&
-        after.firstFailureState.sampleMask==0xffffffffu &&
-        !after.firstFailureBudget.valid;
-    const bool guardConfirmed=stateGuard?stateRefusal:hostGuard?
+        std::strcmp(after.firstFailureReason,"foreground-mixed-component-writer")==0;
+    // Settlement order: every prepass draw ran before the world was named, was planned as the predicted world and
+    // none was captured; only the first-person draw (before naming) and the ordinary alternate draw are foreign.
+    // In the mismatch case the pre-naming first-person draw has the world's near, so it too is taken for the world:
+    // it is planned as the predicted world (never captured) and the one foreign draw is the alternate after naming.
+    // The settlement also draws the laser pair in both cameras before naming: the first-person one is a foreign pool
+    // draw (captured), the world-camera one is the predicted world like the prepass run (never captured).
+    const unsigned mistaken=mismatch?1u:0u,laserForeign=settlement?1u:0u,laserWorld=settlement?1u:0u;
+    const bool namedAfterPrepass=prepassCase && !evidence.prepass.namedWorld && evidence.world.namedWorld;
+    // The prepass draws wrote depth (a run that discarded everything would still plan, but proves less).
+    const bool prepassPlanned=namedAfterPrepass && evidence.prepassDepthPixels>0 &&
+        prepassPredicted==prepassDraws+mistaken+laserWorld &&
+        prepassForeign==1u-mistaken+laserForeign && prepassCaptured==1u-mistaken+laserForeign &&
+        predictedDelta==prepassDraws+mistaken+laserWorld &&
+        foreignDelta==2u-mistaken+laserForeign && capturedDelta==2u-mistaken+laserForeign;
+    const bool settlementConfirmed=settlement && prepassPlanned && frameClean && qualifiedDelta>0;
+    // The mistaken camera shares the world's near but not its projection: H must refuse on that witness, and it
+    // is the only refusal the frame's inventory holds.
+    const bool mismatchRefusal=mismatch && prepassPlanned && attemptedDelta>0 && !qualifiedDelta && !backendDelta &&
+        after.firstFailureFrame==after.frame && after.firstFailureSelectedH &&
+        after.failureKinds==1 && !after.failureKindsDropped &&
+        std::strcmp(after.firstFailureStage,"H-qualification")==0 &&
+        std::strcmp(after.firstFailureReason,"foreground-pending-null-not-selected-world")==0 &&
+        std::strcmp(after.hRefusal,"foreground-pending-null-not-selected-world")==0;
+    // Rule C: a draw that cannot write depth is forwarded unchanged: counted, never refused. Rule B: a depth-writing
+    // Gbuffer draw is admitted however it blends or masks, so these two draws are planned and captured as foreign.
+    const bool forwardedColorOnly=colorInert && evidence.inertColorPixels>0 && !evidence.inertDepthPixels &&
+        !evidence.inert.firstFailureFrame && surfaceDelta>=1 && foreignDelta==1 && capturedDelta==1 && frameClean;
+    // Both state draws are planned as foreign pool writers; only the one that can write depth is captured.
+    const bool forwardedBlended=blendedNoDepth && evidence.stateColorPixels>0 &&
+        surfaceDelta>=1 && surfaceForeignDelta>=1 && foreignDelta==2 && capturedDelta==1 && frameClean;
+    const bool admittedState=(partialState||blendedState) && evidence.stateColorPixels>0 &&
+        !surfaceDelta && foreignDelta==2 && capturedDelta==2 && frameClean;
+    const bool ruleConfirmed=colorInert?forwardedColorOnly:blendedNoDepth?forwardedBlended:
+        (partialState||blendedState)?admittedState:settlement?settlementConfirmed:true;
+    const bool guardConfirmed=hostGuard?
         rasterReady && evidence.world.namedWorld && (taa || ownership) && after.hdrTriggered && !after.hAttempts &&
             std::strcmp(after.hdrVerdict,"engine-source-not-ready")==0:
         depthGuard?evidence.inertDepthPixels>0 && !evidence.inertColorPixels && inertWriterRefusal:
-        colorGuard?evidence.inertColorPixels>0 && !evidence.inertDepthPixels && inertWriterRefusal:false;
+        blendedHdr?hdrWriterRefusal:mismatch?mismatchRefusal:false;
     const char* verdict="FAIL";
     const char* cause="upstream-qualification-or-raster-refused";
+    const char* passCause=colorInert||blendedNoDepth?"depth-preserving-draw-forwarded":
+        partialState||blendedState?"depth-writing-gbuffer-draw-admitted":
+        settlement?"predicted-world-prepass-planned-without-capture":"production-hdr-resolve-completed";
     if(guardCase) {
         verdict=guardConfirmed?"PASS":"FAIL";
-        cause=guardConfirmed?stateGuard?"first-state-receipt-selected-H":hostGuard?"host-guard-confirmed":
-            depthGuard?"depth-write-refusal-confirmed":"color-write-refusal-confirmed":"guard-not-confirmed";
-    } else if(upstream && after.hdrResolves && (taa || after.hdrBackendCompleted)) {
-        verdict="PASS";cause="production-hdr-resolve-completed";
-    } else if(upstream && !taa && driver==D3D_DRIVER_TYPE_WARP &&
+        cause=guardConfirmed?hostGuard?"host-guard-confirmed":depthGuard?"depth-write-refusal-confirmed":
+            blendedHdr?"blended-hdr-writer-refusal-confirmed":"pending-world-mismatch-refusal-confirmed":
+            "guard-not-confirmed";
+    } else if(upstream && ruleConfirmed && after.hdrResolves && (taa || after.hdrBackendCompleted)) {
+        verdict="PASS";cause=passCause;
+    } else if(upstream && ruleConfirmed && !taa && driver==D3D_DRIVER_TYPE_WARP &&
               (std::strcmp(after.mode,"dlaa")==0 || std::strcmp(after.mode,"dlss")==0) &&
               after.backendFailures && !after.hdrBackendCompleted) {
         verdict="UNSUPPORTED";cause="configured-backend-unavailable-on-adapter";
-    }
+    } else if(upstream && !ruleConfirmed)cause="expected-rule-not-observed";
     const auto quote=[](const char* value) {
         std::string escaped="\"";
         for(const unsigned char* p=reinterpret_cast<const unsigned char*>(value?value:"");*p;++p) {
@@ -539,7 +743,19 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           <<",\"stencilPixels\":"<<evidence.inertStencilPixels
           <<",\"firstFailure\":"<<failure(evidence.inert)<<"}"
           <<",\"firstFailure\":"<<failure(after)
-          <<",\"stateGuardColorPixels\":"<<evidence.stateColorPixels
+          <<",\"stateDrawColorPixels\":"<<evidence.stateColorPixels
+          // Counter changes over the measured frame, which is what a rule case claims. The prepass counters are read
+          // before the world is named, so the order the settlement draws in is itself recorded.
+          <<",\"measuredFrame\":{\"predictedWorld\":"<<predictedDelta
+          <<",\"surfacePreserving\":"<<surfaceDelta<<",\"surfacePreservingForeign\":"<<surfaceForeignDelta
+          <<",\"surfacePreservingCameraless\":"<<surfaceCameralessDelta
+          <<",\"foreignSeen\":"<<foreignDelta<<",\"captured\":"<<capturedDelta
+          <<",\"hAttempts\":"<<attemptedDelta<<",\"hQualified\":"<<qualifiedDelta<<",\"backendCalls\":"<<backendDelta
+          <<",\"failureKinds\":"<<after.failureKinds<<",\"failureKindsDropped\":"<<after.failureKindsDropped
+          <<",\"prepass\":{\"draws\":"<<(prepassCase?prepassDraws:0u)<<",\"mistakenDraws\":"<<mistaken
+          <<",\"namedWorldAfterRun\":"<<evidence.prepass.namedWorld<<",\"predictedWorld\":"<<prepassPredicted
+          <<",\"foreignSeen\":"<<prepassForeign<<",\"captured\":"<<prepassCaptured
+          <<",\"depthPixelsChanged\":"<<evidence.prepassDepthPixels<<"}}"
           <<",\"lastH\":{\"attempts\":"<<after.hAttempts<<",\"qualified\":"<<after.hQualified
           <<",\"reason\":"<<quote(after.hRefusal)<<"}"
           <<",\"hdrTriggered\":"<<after.hdrTriggered<<",\"hdrSelected\":"<<after.hdrSelected
@@ -550,8 +766,10 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           <<",\"hdrPrepped\":"<<after.hdrPrepped<<",\"backendCalls\":"<<after.hdrBackendCompleted
           <<",\"hdrFinished\":"<<after.hdrFinished<<",\"hdrRestored\":"<<after.hdrRestored
           <<",\"guardConfirmed\":"<<(guardConfirmed?"true":"false")
+          <<",\"ruleConfirmed\":"<<(ruleConfirmed?"true":"false")
           <<"},\"limitations\":[\"Controlled geometry, camera and OM state reconstructed; shader bytes captured\"";
     if(!hostGuard)result<<",\"Emit-hook availability reconstructed only in offline test-link proxy\"";
+    if(prepassCase)result<<",\"Prepass order, shader pair and run length follow the 2026-10 settlement census; geometry, record contents and the alpha-test inputs are reconstructed\"";
     result<<"]}";
     std::puts(result.str().c_str());
     return std::strcmp(verdict,"PASS")==0?0:std::strcmp(verdict,"UNSUPPORTED")==0?2:1;

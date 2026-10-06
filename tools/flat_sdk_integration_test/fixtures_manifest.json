@@ -17,6 +17,8 @@
     {"path": "tools/flat_temporal_test/fixtures/vs_EB5234DB6ADB491D.dxbc", "stage": "vs", "bytes": 5080, "hash": "EB5234DB6ADB491D", "sha256": "c075a6fb580cc334d711505ecbc274edac54bb97560281ec2c9cdee74d894db4"},
     {"path": "tools/flat_temporal_test/fixtures/ps_DC603C35BBE74B31.dxbc", "stage": "ps", "bytes": 8316, "hash": "DC603C35BBE74B31", "sha256": "2b23b0a5140647e9195d6e248a0ae41c9b5d8c2fc95c18502e5a889fe38129c8"},
     {"path": "tools/flat_temporal_test/fixtures/vs_AACFDCF2FB9AD809.dxbc", "stage": "vs", "bytes": 5100, "hash": "AACFDCF2FB9AD809", "sha256": "151815f081c880b72aeeb226f9c1503c11c15de78da5a4d81492b05c30bb3ccc"},
-    {"path": "tools/flat_temporal_test/fixtures/ps_CF534B32F491561A.dxbc", "stage": "ps", "bytes": 3456, "hash": "CF534B32F491561A", "sha256": "3548d93ae130e955c20f44670adf9936aaf83d190f5e1b59b2e45456ab6b93f7"}
+    {"path": "tools/flat_temporal_test/fixtures/ps_CF534B32F491561A.dxbc", "stage": "ps", "bytes": 3456, "hash": "CF534B32F491561A", "sha256": "3548d93ae130e955c20f44670adf9936aaf83d190f5e1b59b2e45456ab6b93f7"},
+    {"path": "tools/flat_temporal_test/fixtures/vs_CFCA8FFC6B058630.dxbc", "stage": "vs", "bytes": 2804, "hash": "CFCA8FFC6B058630", "sha256": "d912444cb99562230609bfc6226be45bfc6d39da970d58eb49d53a5a4e0a8029"},
+    {"path": "tools/flat_temporal_test/fixtures/ps_8A08FF781272C5F6.dxbc", "stage": "ps", "bytes": 216, "hash": "8A08FF781272C5F6", "sha256": "c781cea4c2b1186d8858dce3d66633e6ac0ca1b7b35be2715a55471e6b2d8420"}
   ]
 }

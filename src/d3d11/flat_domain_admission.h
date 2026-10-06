@@ -185,6 +185,13 @@ inline FlatDomainPlan flatDomainPlan(const FlatDomainShaderProof& p,bool color,u
     }
     return {p.pool?FlatDomainPlanKind::WorldPool:FlatDomainPlanKind::World,nullptr};
 }
+// A draw that cannot write depth leaves every pixel's surface, and so its
+// owner mark, as the last depth writer left it: deferred light volumes,
+// particles, decals and forward glows only change color over that surface.
+// It needs no camera, projection or marker, and cannot refuse the frame.
+inline bool flatDomainPreservesSurface(const D3D11_DEPTH_STENCIL_DESC& depth) {
+    return !depth.DepthEnable || depth.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ZERO;
+}
 inline bool flatDomainWritesColor(const FlatDomainShaderProof& p,const D3D11_BLEND_DESC& blend,unsigned boundTargets) {
     for(unsigned i=0;i<6;++i)if((boundTargets&(1u<<i)) &&
         (blend.RenderTarget[blend.IndependentBlendEnable?i:0].RenderTargetWriteMask&p.colorComponents[i]))return true;
@@ -202,7 +209,13 @@ inline const char* flatDomainRasterRefusal(const FlatDomainShaderProof& p,const 
     if(foreign && !p.foreignPs && depth.StencilEnable &&
        (depth.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || depth.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS))
         return "foreground-conditional-stencil";
-    for(unsigned i=0;i<6;++i)if((boundTargets&(1u<<i)) && p.colorComponents[i]) {
+    // A Gbuffer draw that writes depth defines the surface its passing
+    // fragments show: deferred lighting reconstructs position from that depth,
+    // so its owner mark is exact however its color blends or masks. Measured
+    // 2026-10-06: CFCA8FFC writes clip W into RT0 with MIN blend and depth
+    // write in both cameras. HDR color is final, so HDR writers stay strict.
+    const bool surfaceWriter=!hdr && depth.DepthEnable && depth.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL;
+    if(!surfaceWriter)for(unsigned i=0;i<6;++i)if((boundTargets&(1u<<i)) && p.colorComponents[i]) {
         const auto& rt=blend.RenderTarget[blend.IndependentBlendEnable?i:0];
         if(!rt.RenderTargetWriteMask)continue;
         if(rt.BlendEnable || (rt.RenderTargetWriteMask&p.colorComponents[i])!=p.colorComponents[i])
@@ -210,7 +223,7 @@ inline const char* flatDomainRasterRefusal(const FlatDomainShaderProof& p,const 
     }
     const bool color=flatDomainWritesColor(p,blend,boundTargets);
     if(hdr && (!color || (p.colorComponents[0]&7)!=7))return "foreground-incomplete-HDR-color";
-    if((p.nullPs || !color) && colorAlready)return "foreground-depth-only-after-color";
+    if(!surfaceWriter && (p.nullPs || !color) && colorAlready)return "foreground-depth-only-after-color";
     return nullptr;
 }
 // A pre-world depth-only draw is provisional: its camera must become the

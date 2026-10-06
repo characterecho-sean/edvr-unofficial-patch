@@ -7,7 +7,7 @@
 // interpret a new DLL's layout. No pointer or COM object crosses this boundary.
 struct EdvrFlatSdkBenchSnapshot {
     uint32_t size = sizeof(EdvrFlatSdkBenchSnapshot);
-    uint32_t version = 2;
+    uint32_t version = 3;
     uint32_t flatProfile = 0;
     uint32_t live = 0;
     uint32_t owner = 0;
@@ -51,4 +51,12 @@ struct EdvrFlatSdkBenchSnapshot {
     char hdrVerdict[96]{};
     EdvrFlatForegroundStateReceipt firstFailureState{};
     EdvrFlatForegroundBudgetReceipt firstFailureBudget{};
+    // Version 3: provisional world before naming, draws that cannot write
+    // depth forwarded unchanged, and the distinct refusals of the last failed H.
+    uint64_t predictedWorld = 0;
+    uint64_t surfacePreserving = 0;
+    uint64_t surfacePreservingForeign = 0;
+    uint64_t surfacePreservingCameraless = 0;
+    uint32_t failureKinds = 0;
+    uint32_t failureKindsDropped = 0;
 };

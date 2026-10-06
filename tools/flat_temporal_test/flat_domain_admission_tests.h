@@ -210,5 +210,94 @@ inline int flatDomainAdmissionTests() {
           !flatDomainPlan(foreign,true,26,true,false,false).admitted(),"missing camera or unknown HDR writer refuses");
     std::vector<uint8_t> vs,ps;flat_shader_classifier_tests::loadFixture("vs_AACFDCF2FB9AD809",vs);flat_shader_classifier_tests::loadFixture("ps_CAD1F585EDDC5641",ps);
     check(!flatDomainShaderProof(1,0xCAD1F585EDDC5641ull,vs.data(),vs.size(),ps.data(),ps.size()).present,"forged exact recipe hash refuses");
+    {
+        // The settlement rules (2026-10-06). A non-HDR draw that writes depth defines the surface its fragments
+        // show, so its owner mark is exact however its color blends or masks; one that cannot write depth never
+        // changes the surface and is forwarded unchanged; HDR color is final and stays strict.
+        const auto reason=[](const char* got,const char* want){return got && std::strcmp(got,want)==0;};
+        D3D11_BLEND_DESC minBlend{};minBlend.IndependentBlendEnable=TRUE;
+        for(auto& rt:minBlend.RenderTarget)rt.RenderTargetWriteMask=15;
+        {
+            auto& rt=minBlend.RenderTarget[0];rt.BlendEnable=TRUE;
+            rt.SrcBlend=rt.DestBlend=rt.SrcBlendAlpha=rt.DestBlendAlpha=D3D11_BLEND_ONE;
+            rt.BlendOp=rt.BlendOpAlpha=D3D11_BLEND_OP_MIN;
+        }
+        D3D11_DEPTH_STENCIL_DESC writesDepth{};writesDepth.DepthEnable=TRUE;
+        writesDepth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;writesDepth.DepthFunc=D3D11_COMPARISON_GREATER_EQUAL;
+        auto keepsDepth=writesDepth;keepsDepth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
+        auto noDepthTest=writesDepth;noDepthTest.DepthEnable=FALSE;
+        check(cfca.colorComponents[0]==15 && !cfca.colorComponents[1] && !cfca.colorComponents[2] && !cfca.colorComponents[3],
+              "actual CFCA pixel shader writes exactly RT0 xyzw, so the MIN blend below is a real mixed writer");
+        check(cfca.worldPs && cfca.foreignPs &&
+              flatDomainPlan(cfca,true,23,true,false,false).kind==FlatDomainPlanKind::ForeignPool &&
+              flatDomainPlan(cfca,true,23,true,true,true).kind==FlatDomainPlanKind::WorldPool,
+              "CFCA is a foreign pool writer in the first-person camera and a world pool writer as the predicted world camera");
+        bool cfcaAdmitted=true;
+        for(const bool foreignDraw:{false,true})for(const bool colorAlready:{false,true})
+            cfcaAdmitted=cfcaAdmitted && !flatDomainRasterRefusal(cfca,minBlend,writesDepth,0x0F,foreignDraw,false,colorAlready);
+        check(cfcaAdmitted,"CFCA RT0 MIN blend with depth write ALL is admitted foreign or world, before or after color");
+        check(reason(flatDomainRasterRefusal(cfca,minBlend,keepsDepth,0x0F,false,false,false),"foreground-mixed-component-writer") &&
+              reason(flatDomainRasterRefusal(cfca,minBlend,keepsDepth,0x0F,false,false,true),"foreground-mixed-component-writer"),
+              "the same MIN blend without a depth write is still a mixed-component writer");
+        auto keepsDepthEqual=keepsDepth;keepsDepthEqual.DepthFunc=D3D11_COMPARISON_EQUAL;
+        check(reason(flatDomainRasterRefusal(cfca,minBlend,keepsDepthEqual,0x0F,true,false,false),"foreground-mixed-component-writer"),
+              "a foreign EQUAL depth-test MIN blend without a depth write still names the mixed-component writer");
+        check(reason(flatDomainRasterRefusal(cfca,minBlend,keepsDepth,0x0F,true,false,false),"foreground-unproven-readonly-depth"),
+              "a foreign non-EQUAL read-only depth draw keeps its own refusal ahead of the blend check");
+        check(flatDomainPreservesSurface(keepsDepth) && flatDomainPreservesSurface(keepsDepthEqual),
+              "the blended draw that cannot write depth preserves the surface and is forwarded");
+        check(flatDomainPreservesSurface(noDepthTest) && !flatDomainPreservesSurface(writesDepth),
+              "no depth test preserves the surface; a depth write never does");
+        D3D11_DEPTH_STENCIL_DESC disabledWriter{};disabledWriter.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+        D3D11_DEPTH_STENCIL_DESC zeroedWriter{};zeroedWriter.DepthEnable=TRUE;zeroedWriter.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
+        D3D11_DEPTH_STENCIL_DESC enabledWriter{};enabledWriter.DepthEnable=TRUE;enabledWriter.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+        check(flatDomainPreservesSurface(disabledWriter) && flatDomainPreservesSurface(zeroedWriter) &&
+              !flatDomainPreservesSurface(enabledWriter),
+              "preserve truth table: DepthEnable FALSE and enable+ZERO preserve; enable+ALL does not");
+        // HDR color is the final picture: a blended or partly masked HDR writer cannot stand in for the owner,
+        // whatever it does to depth.
+        D3D11_BLEND_DESC hdrBlend{};for(auto& rt:hdrBlend.RenderTarget)rt.RenderTargetWriteMask=15;
+        auto hdrAlways=writesDepth;hdrAlways.DepthFunc=D3D11_COMPARISON_ALWAYS;
+        check(!flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,true),
+              "positive control: an opaque full-mask HDR writer that writes depth is still admitted");
+        hdrBlend.RenderTarget[0].BlendEnable=TRUE;
+        check(reason(flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,true),"foreground-mixed-component-writer") &&
+              reason(flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,false),"foreground-mixed-component-writer"),
+              "a blended HDR writer with a depth write still refuses");
+        hdrBlend.RenderTarget[0].BlendEnable=FALSE;hdrBlend.RenderTarget[0].RenderTargetWriteMask=3;
+        check(reason(flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,true),"foreground-mixed-component-writer"),
+              "a partly masked HDR writer with a depth write still refuses");
+        // A depth-only draw after color: legal and exact when it writes depth (non-HDR), refused when it cannot.
+        D3D11_BLEND_DESC allColor{};for(auto& rt:allColor.RenderTarget)rt.RenderTargetWriteMask=15;
+        auto nullWritesDepth=writesDepth;nullWritesDepth.DepthFunc=D3D11_COMPARISON_LESS;
+        auto nullKeepsDepth=nullWritesDepth;nullKeepsDepth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
+        check(!flatDomainRasterRefusal(nullA,allColor,nullWritesDepth,15,false,false,true) &&
+              !flatDomainRasterRefusal(nullA,allColor,nullWritesDepth,15,false,false,false),
+              "a null-PS depth writer after color is admitted when it writes depth");
+        check(reason(flatDomainRasterRefusal(nullA,allColor,nullKeepsDepth,15,false,false,true),"foreground-depth-only-after-color") &&
+              !flatDomainRasterRefusal(nullA,allColor,nullKeepsDepth,15,false,false,false),
+              "the same null-PS draw without a depth write still refuses after color and not before it");
+        check(reason(flatDomainRasterRefusal(nullA,allColor,[&]{auto d=nullWritesDepth;d.DepthEnable=FALSE;return d;}(),15,false,false,true),
+                     "foreground-depth-only-after-color"),
+              "a null-PS draw with no depth test is not a surface writer and still refuses after color");
+        // The settlement pair itself: the world camera's depth-only pool prepass (color masked off, PS without outputs).
+        const auto prepass=proof("vs_F516BF0201303B87","ps_B40B0462256E31C2",0xF516BF0201303B87ull,0xB40B0462256E31C2ull);
+        check(prepass.present && prepass.pool && prepass.projection && prepass.worldPs && prepass.foreignPs &&
+              prepass.projectionSlot==1 && prepass.projectionRow==270 &&
+              prepass.projectionLayout==FlatProjectionPatchLayout::ForwardColumns &&
+              !prepass.colorComponents[0],
+              "actual F516BF02/B40B0462 prepass pair has the canonical B1 recipe, both PS proofs and no color output");
+        check(flatDomainPlan(prepass,true,23,true,false,false).kind==FlatDomainPlanKind::ForeignPool,
+              "before naming and without the predicted-world witness the prepass pair is a foreign pool writer");
+        check(flatDomainPlan(prepass,true,23,true,true,true).kind==FlatDomainPlanKind::WorldPool,
+              "planned as the predicted world camera it is a world pool writer and is never captured");
+        D3D11_BLEND_DESC maskedOff{};
+        check(!flatDomainWritesColor(prepass,maskedOff,1),"the masked-off prepass writes no color");
+        check(!flatDomainRasterRefusal(prepass,maskedOff,writesDepth,1,false,false,true) &&
+              !flatDomainRasterRefusal(prepass,maskedOff,writesDepth,1,false,false,false),
+              "the masked-off depth-writing prepass is admitted after color and before it");
+        check(reason(flatDomainRasterRefusal(prepass,maskedOff,keepsDepth,1,false,false,true),"foreground-depth-only-after-color"),
+              "a masked-off prepass that cannot write depth keeps the depth-only-after-color refusal");
+    }
     if(!failures)std::puts("flat domain admission: recorded foreign/null/holstered and mismatch cases PASS");return failures;
 }
