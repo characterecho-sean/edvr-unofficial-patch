@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../common/temporal_math.h"   // kTemporalJitterCount: flatCameraPhaseCount
 #include "flat_camera_ownership.h"
 #include "flat_projection_math.h"
 
@@ -170,6 +171,20 @@ inline bool flatCameraPhaseEnabled(FlatCameraRoute route, bool jitterWanted, boo
         case FlatCameraRoute::Legacy: break;
     }
     return jitterWanted && !observing && legacyPlanExists;
+}
+
+// How many jitter phases the flat route's sequence runs this frame, given the
+// count advanced.temporal_aa_jitter_phases asks for: that count on the Upstream
+// route, the fixed eight on every other. The reason is the Legacy route's
+// lighting patch (flat_lighting_contract.h): it refuses a phase outside +-7/16
+// of a pixel, which the eight shipped Halton phases stay inside and a longer
+// cycle's do not (the ninth's y is -0.463 and the sixteenth's x is -0.469), so a
+// Legacy frame (and an Off one, which patches the same way) at a longer count
+// would lose its jitter to a refusal. Only the injector's rows, which an
+// Upstream frame alone carries, take any phase with no such bound. A count of
+// zero reads as the fixed eight.
+inline uint32_t flatCameraPhaseCount(FlatCameraRoute route, uint32_t configured) {
+    return route == FlatCameraRoute::Upstream && configured ? configured : kTemporalJitterCount;
 }
 
 // The phase the camera rows captured this frame carry. Only the injector

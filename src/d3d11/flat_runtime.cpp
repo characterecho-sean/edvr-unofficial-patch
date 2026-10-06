@@ -408,6 +408,10 @@ struct State {
     FlatLivePhase phase;
     Ptr<ID3D11Resource> phaseDepth,phaseHdr;
     bool jitterWanted = false, frameCoverage = true, temporalAccepted = false;
+    // advanced.temporal_aa_jitter_phases as of the last read (8 to 64, default 8), and the one value the log has said it could not use,
+    // so a bad value is said once and not every frame. The count a frame runs is flatCameraPhaseCount(route, jitterPhases).
+    uint32_t jitterPhases = kTemporalJitterCount;
+    bool jitterPhasesBadSaid = false; int jitterPhasesBad = 0;
     uint32_t phaseWidth = 0, phaseHeight = 0;
     uint64_t jitteredFrames = 0, jitterDraws = 0, jitterDispatches = 0, jitterRefusals = 0;
     const char* jitterReason = "warming";
@@ -3089,6 +3093,29 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const bool wanted=Config::get().getBool("experimental.temporal_aa_jitter",true);
     if(wanted!=s.jitterWanted) { s.phase.resetHistory();reset(); }
     s.jitterWanted=wanted;
+    // The jitter cycle's length, read live beside the key above (advanced.temporal_aa_jitter_phases: a whole number from 8 to 64, default 8).
+    // A value the cycle cannot use reads as 8: one Config could not parse says so itself (once), and one outside the range is said here, once
+    // per value. A change starts a new cycle, so the phase and the resolver's history restart as the jitter toggle's do, and the log names it.
+    {
+        const int asked=Config::get().getInt("advanced.temporal_aa_jitter_phases",8);
+        bool usable=false;
+        const uint32_t phases=temporalJitterPhases(asked,&usable);
+        if(!usable) {
+            if(!s.jitterPhasesBadSaid || s.jitterPhasesBad!=asked) {
+                s.jitterPhasesBadSaid=true;s.jitterPhasesBad=asked;
+                Log::get().note("flat jitter: advanced.temporal_aa_jitter_phases = %d is outside %u..%u, so the default %u is used",
+                    asked,kTemporalJitterPhasesMin,kTemporalJitterPhasesMax,kTemporalJitterCount);
+            }
+        } else s.jitterPhasesBadSaid=false;
+        if(phases!=s.jitterPhases) {
+            const FlatCameraRoute route=flatCameraInjectRoute();
+            Log::get().note("flat jitter: the cycle is %u phases (advanced.temporal_aa_jitter_phases, was %u); the %s camera route runs %u; "
+                            "the phase and the resolver's history restart",
+                phases,s.jitterPhases,flatCameraRouteName(route),flatCameraPhaseCount(route,phases));
+            s.phase.resetHistory();reset();
+            s.jitterPhases=phases;
+        }
+    }
     // Partial temporal AA: read live, same idiom as jitter above. Unlike
     // jitter, toggling it does not change any projection math, so it needs
     // no history reset -- it only gates refuseDraw, checked fresh on every
@@ -3250,8 +3277,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // identity between the two routes resets history once, here.
     flatCameraInjectFrame(frame + 1,enabled);
     if(flatCameraInjectTakeHistoryReset()) {s.phase.resetHistory();reset();}
-    s.phase.beginFrame(flatCameraPhaseEnabled(flatCameraInjectRoute(),wanted,s.observing,s.projection!=nullptr),
-        compatible,s.phaseWidth,s.phaseHeight);
+    const FlatCameraRoute phaseRoute=flatCameraInjectRoute();
+    s.phase.beginFrame(flatCameraPhaseEnabled(phaseRoute,wanted,s.observing,s.projection!=nullptr),
+        compatible,s.phaseWidth,s.phaseHeight,flatCameraPhaseCount(phaseRoute,s.jitterPhases));
     s.frameHadPhase=nonzeroPhase(s);
     flatCameraInjectArm(); // the phase is chosen: the injector's frame window opens
     s.frameCoverage=true;s.temporalAccepted=false;
@@ -3369,8 +3397,8 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             char unkeyed[560]; engineVelocityFormatUnkeyed(unkeyed,sizeof(unkeyed));
             Log::get().note("%s",unkeyed);
         }
-        Log::get().note("flat jitter: enabled=%u wanted=%u phase=(%.5g,%.5g) previous=(%.5g,%.5g) warm=%u frames=%llu draws=%llu dispatches=%llu refusals=%llu state=%s history-valid=%u",
-            enabled?1u:0u,s.jitterWanted?1u:0u,
+        Log::get().note("flat jitter: enabled=%u wanted=%u phases=%u phase=(%.5g,%.5g) previous=(%.5g,%.5g) warm=%u frames=%llu draws=%llu dispatches=%llu refusals=%llu state=%s history-valid=%u",
+            enabled?1u:0u,s.jitterWanted?1u:0u,s.phase.phaseCount,
             s.phase.currentX,s.phase.currentY,s.phase.previousX,s.phase.previousY,s.phase.warmFrames,
             (unsigned long long)s.jitteredFrames,(unsigned long long)s.jitterDraws,(unsigned long long)s.jitterDispatches,
             (unsigned long long)s.jitterRefusals,s.jitterReason,s.phase.previousAcceptedValid?1u:0u);

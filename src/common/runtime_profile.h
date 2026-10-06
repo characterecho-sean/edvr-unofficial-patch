@@ -119,6 +119,9 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         // The flat refusal view (advanced.temporal_aa_debug = motion_source; flat_runtime.cpp, design doc section 104). Developer
         // tier, no flat panel row. The other readers of temporal_aa_debug (the eye pass, screen motion, the UI layer) stay inert in
         // flat: each is gated on a key this function refuses.
-        std::strcmp(key, "advanced.temporal_aa_debug") == 0);
+        std::strcmp(key, "advanced.temporal_aa_debug") == 0 ||
+        // The flat jitter cycle's length (flat_runtime.cpp, FlatLivePhase::phaseCount; temporal_math.h). Developer tier, no flat panel
+        // row. Unlisted, getInt answers 0 here whatever the file says, which the reader takes for out of range and reads as 8.
+        std::strcmp(key, "advanced.temporal_aa_jitter_phases") == 0);
 }
 } // namespace edvr
