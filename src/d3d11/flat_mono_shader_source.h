@@ -170,7 +170,12 @@ void prep(uint3 id:SV_DispatchThreadID) {
     bool untrusted=false;
     if((debug.w&1)!=0)untrusted=UntrustedCameraCoverage.Load(int3(q,0))>0;
     bool foreground=false;
-    if((debug.w&2)!=0)foreground=Slots.Load(int3(q,0)).x < -1;
+    if((debug.w&2)!=0) {
+        // A first-person mark names this pixel only while its depth is still the pixel's. World draws leave no
+        // mark (section 104), so a world surface drawn over a first-person one keeps the world's motion.
+        float2 owner=Slots.Load(int3(q,0));
+        foreground=owner.x < -1 && asuint(owner.y)==asuint(depth);
+    }
     bool attached=route.z!=0 && (FirstPersonStencil.Load(int3(q,0)).y&16)!=0;
     if(untrusted) {
         // A later world draw may have overwritten the same encoded depth.

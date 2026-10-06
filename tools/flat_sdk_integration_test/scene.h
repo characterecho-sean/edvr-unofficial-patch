@@ -12,8 +12,13 @@ struct SceneEvidence {
     float depthMin=1.f, depthMax=0.f;
     Snapshot inert{},stateDrawn{},stateLater{};
     // Settlement order: the first-person draw and the world-camera prepass run draw before the world is named.
-    Snapshot firstPerson{}, cfcaFirstPerson{}, cfcaWorld{}, prepass{};
+    Snapshot firstPerson{}, cfcaFirstPerson{}, cfcaWorld{}, prepass{}, firstPersonHdr{};
     unsigned prepassDepthPixels=0;
+    // The stale-mark case: a world-camera depth writer over a first-person surface, and the owner plane around it.
+    Snapshot worldWriter{};
+    bool planeUntouched=false;
+    unsigned worldWriterDepthPixels=0;
+    struct OwnerMarks {unsigned foreign=0,stale=0,fresh=0;} marksBefore{},marksAfter{},marksAtH{};
 };
 
 bool readShader(const wchar_t* directory, const wchar_t* leaf, uint64_t expected,
@@ -89,6 +94,31 @@ OwnerPixelCounts readOwnerPixels(ID3D11Device* device, ID3D11DeviceContext* cont
     }
     return counts;
 }
+// The owner plane's own texels: RGBA32F, the marker, the raw depth it was written at, then draw metadata. Empty if unavailable.
+std::vector<BYTE> readOwnerPlane(ID3D11Device* device, ID3D11DeviceContext* context,
+                                 unsigned int (__cdecl* ownerView)(ID3D11ShaderResourceView**)) {
+    ComPtr<ID3D11ShaderResourceView> view;
+    if(!ownerView(view.GetAddressOf()) || !view)return {};
+    ComPtr<ID3D11Resource> resource;view->GetResource(&resource);
+    ComPtr<ID3D11Texture2D> texture;
+    if(!resource || FAILED(resource.As(&texture)))return {};
+    return readPixels(device,context,texture.Get(),16);
+}
+// First-person marks (a marker below -1.5, as readOwnerPixels counts them) by whether the depth a mark carries is still the depth
+// texture's at that pixel, bit for bit: the prep shader's own test. The depth texture's first dword per texel is the depth.
+SceneEvidence::OwnerMarks classifyOwnerMarks(const std::vector<BYTE>& plane,const std::vector<BYTE>& depth8) {
+    SceneEvidence::OwnerMarks marks{};
+    if(plane.empty() || plane.size()/16!=depth8.size()/8)return marks;
+    for(size_t i=0;i<plane.size()/16;++i) {
+        float marker=0;uint32_t markDepth=0,rawDepth=0;
+        std::memcpy(&marker,plane.data()+16*i,4);std::memcpy(&markDepth,plane.data()+16*i+4,4);
+        std::memcpy(&rawDepth,depth8.data()+8*i,4);
+        if(!std::isfinite(marker) || marker>=-1.5f)continue;
+        ++marks.foreign;
+        if(markDepth==rawDepth)++marks.fresh;else ++marks.stale;
+    }
+    return marks;
+}
 
 int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE driver,
           const char* name) {
@@ -121,12 +151,22 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     }
     auto* device=present.device();auto* context=present.context();
     // The case table in flat_sdk_integration_test.cpp admits the names; these select the draw state.
+    //
+    // Cameras (section 104). Camera 0 is the world's, near .025: family 0 draws with it, and so do the prepass and
+    // world-depth draws. Camera 1 is the first person's, near .0675: family 1 and the laser draw with it. Only a
+    // first-person (foreign camera) depth writer is planned, captured and marked; a draw with the named world camera
+    // (or, before naming, the last world's near) and a draw with no camera are never planned, marked or refused.
+    // The domain's world-marker count therefore stays at zero in every case here; the engine producer's own slots
+    // (the supported family-0 pair) are not that count.
     const bool partialState=std::strcmp(name,"state_partial_mask")==0;
     const bool blendedState=std::strcmp(name,"state_blended")==0;
     const bool blendedNoDepth=std::strcmp(name,"state_blended_no_depth")==0;
     const bool blendedHdr=std::strcmp(name,"state_blended_hdr")==0;
+    const bool blendedHdrWorld=std::strcmp(name,"state_blended_hdr_world")==0;
     const bool settlement=std::strcmp(name,"settlement_prepass")==0;
     const bool mismatch=std::strcmp(name,"predicted_world_mismatch")==0;
+    const bool staleMark=std::strcmp(name,"stale_foreign_mark")==0;
+    const bool inertWorld=std::strcmp(name,"inert_depth_write_world")==0;
     const bool prepassCase=settlement||mismatch;
     const bool stateDraw=partialState||blendedState||blendedNoDepth;
     const struct ShaderName {const wchar_t* name;uint64_t hash;} names[]={
@@ -151,9 +191,10 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     ComPtr<ID3D11InputLayout> layout[2];
     for(unsigned i=0;i<2;++i) if(!ok(device->CreateInputLayout(inputs,4,code[2*i].data(),code[2*i].size(),&layout[i]),"captured VS layout"))return 2;
     // The world camera's depth prepass pair as the settlement draws it: the pool VS and an alpha-test PS with no
-    // color output. Captured bytes; the input layout is the family's own.
+    // color output. Captured bytes; the input layout is the family's own. Not in the engine producer's families, so
+    // it is a world-camera depth writer that nothing marks: the stale-mark case draws it over a first-person surface.
     ComPtr<ID3D11VertexShader> prepassVs;ComPtr<ID3D11PixelShader> prepassPs;ComPtr<ID3D11InputLayout> prepassLayout;
-    if(prepassCase) {
+    if(prepassCase||staleMark) {
         std::vector<BYTE> prepassVsCode,prepassPsCode;
         if(!readShader(fixturePath,L"vs_F516BF0201303B87.dxbc",0xF516BF0201303B87ull,prepassVsCode) ||
            !readShader(fixturePath,L"ps_B40B0462256E31C2.dxbc",0xB40B0462256E31C2ull,prepassPsCode)) {
@@ -212,14 +253,17 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         {{packed(-800,-800),4096u<<16|32768u,64u<<24,0},{},{}} ,
         {{packed(800,-800),4096u<<16|32768u,64u<<24,0},{},{}} ,
         {{packed(0,800),4096u<<16|32768u,64u<<24,0},{},{}} };
-    const uint32_t instance[2][2]={{5,0},{9,0}};const uint16_t indices[3]={0,1,2};
-    ComPtr<ID3D11Buffer> verticesBuffer,instanceBuffer[2],indexBuffer;
+    // Records 5 and 9 are the world's and the first person's triangles (family 0 and 1); record 11 is the stale-mark
+    // case's world-camera surface: small, centred right of the first person's, and in front of it.
+    const uint32_t instance[3][2]={{5,0},{9,0},{11,0}};const uint16_t indices[3]={0,1,2};
+    ComPtr<ID3D11Buffer> verticesBuffer,instanceBuffer[3],indexBuffer;
     auto createDataBuffer=[&](const void* data,UINT size,UINT bind,ComPtr<ID3D11Buffer>& out) {
         D3D11_BUFFER_DESC bd{};bd.ByteWidth=size;bd.Usage=D3D11_USAGE_DEFAULT;bd.BindFlags=bind;
         D3D11_SUBRESOURCE_DATA init{data,0,0};return ok(device->CreateBuffer(&bd,&init,&out),"scene geometry buffer");};
     if(!createDataBuffer(vertices,sizeof(vertices),D3D11_BIND_VERTEX_BUFFER,verticesBuffer) ||
        !createDataBuffer(instance[0],sizeof(instance[0]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[0]) ||
        !createDataBuffer(instance[1],sizeof(instance[1]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[1]) ||
+       !createDataBuffer(instance[2],sizeof(instance[2]),D3D11_BIND_VERTEX_BUFFER,instanceBuffer[2]) ||
        !createDataBuffer(indices,sizeof(indices),D3D11_BIND_INDEX_BUFFER,indexBuffer))return 2;
     // The prepass run: draw i starts at index 3*i, so no two prepass draws share a packet though they read the
     // same three vertices. More than the 64 draws one frame's foreground capture may hold.
@@ -239,6 +283,13 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     records[5].words[3]=lane(0.f)|(lane(1.f)<<16);
     records[9]=records[5];
     float alternateX=.65f;std::memcpy(&records[9].words[4],&alternateX,4);
+    // Record 11 at the world's near: scale .1, forward .5 (depth .025/.5 = .05, nearer than the first person's .03375 since
+    // depth is reversed), offset .225 (centre x .225/.5 = .45 in NDC, inside the first person's triangle and mostly
+    // outside the world family's).
+    records[11]=records[5];
+    float smallScale=.1f,smallX=.225f,smallForward=.5f;
+    std::memcpy(&records[11].words[1],&smallScale,4);std::memcpy(&records[11].words[4],&smallX,4);
+    std::memcpy(&records[11].words[6],&smallForward,4);
     uint32_t t38Data[12*16]{};
     auto makeStructured=[&](const void* data,UINT stride,UINT count,ComPtr<ID3D11ShaderResourceView>& srv) {
         D3D11_BUFFER_DESC bd{};bd.ByteWidth=stride*count;bd.Usage=D3D11_USAGE_DEFAULT;
@@ -381,6 +432,19 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         ID3D11Buffer* unbound=nullptr;context->VSSetConstantBuffers(0,1,&unbound);
         return snapshot(&snap,sizeof(snap))!=0;
     };
+    // A world-camera depth writer outside the engine producer's families: the prepass pair with camera 0 and the surface
+    // in `instanceData`. Nothing marks it (it has the named world camera), and it writes depth.
+    auto worldDepthWriter=[&](ID3D11Buffer* instanceData) {
+        ID3D11RenderTargetView* target=poolRtv.Get();context->OMSetRenderTargets(1,&target,dsv.Get());
+        ID3D11Buffer* cb=camera[0].Get();context->VSSetConstantBuffers(1,1,&cb);context->PSSetConstantBuffers(1,1,&cb);
+        context->IASetInputLayout(prepassLayout.Get());
+        vb[0]=instanceData;context->IASetVertexBuffers(0,2,vb,strides,offsets);
+        context->IASetIndexBuffer(indexBuffer.Get(),DXGI_FORMAT_R16_UINT,0);
+        context->VSSetShader(prepassVs.Get(),nullptr,0);context->PSSetShader(prepassPs.Get(),nullptr,0);
+        ID3D11ShaderResourceView* resources[7]{};resources[0]=textureSrv.Get();
+        context->PSSetShaderResources(0,7,resources);
+        context->DrawIndexedInstanced(3,1,0,0,0);
+    };
     // The engine source has a previous-frame scene CB and slot plane by
     // contract. Produce one ordinary world frame before the measured frame.
     Snapshot warmup{};
@@ -428,10 +492,12 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         if(!snapshot(&evidence.prepass,sizeof(evidence.prepass)))return 2;
         evidence.prepassDepthPixels=changedPixels(depthAfterFirstPerson,readPixels(device,context,depth.Get(),8),8);
     }
+    // The world draw: family 0 with camera 0. It names the world and is counted unmarked, never planned or captured.
     if(!originalDraw(0,poolRtv.Get(),evidence.world))return 2;
     if(stateDraw) {
-        // A masked or blended draw of the first-person pair, then the ordinary one. With a depth write it defines
-        // the surface it shows and is admitted; without one it cannot change the surface and is forwarded.
+        // A masked or blended draw of the first-person pair (family 1, camera 1), then the ordinary one. With a depth
+        // write it defines the surface it shows and is admitted; without one it cannot change the surface and is
+        // forwarded. Both are first-person draws, so both are planned.
         D3D11_BLEND_DESC drawBlend{};
         const bool blendOn=blendedState||blendedNoDepth;
         drawBlend.RenderTarget[0].RenderTargetWriteMask=partialState?7:15;
@@ -457,7 +523,22 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         context->OMSetDepthStencilState(depthState.Get(),0);
         if(!originalDraw(1,poolRtv.Get(),evidence.stateLater))return 2;
         evidence.alternate=evidence.stateLater;
-    } else if(!originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;
+    } else if(!originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;   // the first person's surface: family 1, camera 1 (2 in the mismatch case)
+    if(staleMark) {
+        // A world surface drawn over the first person's, in front of it (camera 0, record 11). It has the named world camera,
+        // so nothing marks it: the owner plane must come out byte-identical, and the first-person marks it covers keep
+        // a depth that is no longer the pixel's. The prep trusts a mark only while its depth is still the pixel's.
+        const auto planePre=readOwnerPlane(device,context,ownerView);
+        const auto depthPre=readPixels(device,context,depth.Get(),8);
+        worldDepthWriter(instanceBuffer[2].Get());
+        const auto planePost=readOwnerPlane(device,context,ownerView);
+        const auto depthPost=readPixels(device,context,depth.Get(),8);
+        if(!snapshot(&evidence.worldWriter,sizeof(evidence.worldWriter)))return 2;
+        evidence.planeUntouched=!planePre.empty() && planePre==planePost;
+        evidence.marksBefore=classifyOwnerMarks(planePre,depthPre);
+        evidence.marksAfter=classifyOwnerMarks(planePost,depthPost);
+        evidence.worldWriterDepthPixels=changedPixels(depthPre,depthPost,8);
+    }
     const auto ownerBeforeH=readOwnerPixels(device,context,ownerView);
     evidence.gpuWorldPixelsBeforeH=ownerBeforeH.world;
     evidence.gpuForeignPixelsBeforeH=ownerBeforeH.foreign;
@@ -498,7 +579,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         }
         D3D11_DEPTH_STENCIL_DESC inertDepth{};
         const bool stencilOnly=std::strcmp(name,"inert_no_write")==0;
-        const bool depthWrite=std::strcmp(name,"inert_depth_write")==0;
+        const bool depthWrite=std::strcmp(name,"inert_depth_write")==0 || inertWorld;
         if(stencilOnly) {
             inertDepth.StencilEnable=TRUE;inertDepth.StencilReadMask=0xff;inertDepth.StencilWriteMask=0xff;
             inertDepth.FrontFace.StencilFunc=D3D11_COMPARISON_ALWAYS;
@@ -518,6 +599,11 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         auto poolAtInert=readPixels(device,context,pool.Get(),4);
         auto depthAtInert=readPixels(device,context,depth.Get(),8);
         ID3D11RenderTargetView* target=poolRtv.Get();context->OMSetRenderTargets(1,&target,dsv.Get());
+        // The inert pair's camera is explicit: the first person's (camera 1: a foreign camera, so a first-person depth
+        // writer that is not a pool mesh cannot be captured and refuses) in every inert case but the world one, whose
+        // draw has the named world camera and is never planned, marked or refused.
+        ID3D11Buffer* inertCamera=camera[inertWorld?0:1].Get();
+        context->VSSetConstantBuffers(1,1,&inertCamera);context->PSSetConstantBuffers(1,1,&inertCamera);
         context->OMSetDepthStencilState(inertDepthState.Get(),stencilOnly?8:0);
         context->OMSetBlendState(stencilOnly||depthWrite?noColorState.Get():nullptr,nullptr,0xffffffffu);
         context->IASetInputLayout(clipLayout.Get());
@@ -537,22 +623,28 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         context->OMSetDepthStencilState(depthState.Get(),0);
         context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
     }
-    if(blendedHdr) {
-        // HDR color is the final picture: a blended HDR writer cannot stand in for the owner, depth write or not.
-        D3D11_BLEND_DESC hdrBlend{};
-        hdrBlend.RenderTarget[0].RenderTargetWriteMask=15;hdrBlend.RenderTarget[0].BlendEnable=TRUE;
-        hdrBlend.RenderTarget[0].SrcBlend=hdrBlend.RenderTarget[0].DestBlend=D3D11_BLEND_ONE;
-        hdrBlend.RenderTarget[0].SrcBlendAlpha=hdrBlend.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ONE;
-        hdrBlend.RenderTarget[0].BlendOp=hdrBlend.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
-        ComPtr<ID3D11BlendState> hdrBlendState;
-        if(!ok(device->CreateBlendState(&hdrBlend,&hdrBlendState),"blended HDR writer"))return 2;
-        context->OMSetBlendState(hdrBlendState.Get(),nullptr,0xffffffffu);
-    }
+    // The HDR light target's writers. Every case has the world writer (family 0, camera 0: the supported pair is also the
+    // engine producer, which keeps its own slots; the domain neither marks nor refuses it). state_blended_hdr_world blends
+    // that writer; state_blended_hdr adds a blended first-person one (family 1, camera 1) into the same target.
+    D3D11_BLEND_DESC hdrBlend{};
+    hdrBlend.RenderTarget[0].RenderTargetWriteMask=15;hdrBlend.RenderTarget[0].BlendEnable=TRUE;
+    hdrBlend.RenderTarget[0].SrcBlend=hdrBlend.RenderTarget[0].DestBlend=D3D11_BLEND_ONE;
+    hdrBlend.RenderTarget[0].SrcBlendAlpha=hdrBlend.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ONE;
+    hdrBlend.RenderTarget[0].BlendOp=hdrBlend.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+    ComPtr<ID3D11BlendState> hdrBlendState;
+    if((blendedHdr||blendedHdrWorld) && !ok(device->CreateBlendState(&hdrBlend,&hdrBlendState),"blended HDR writer"))return 2;
+    if(blendedHdrWorld)context->OMSetBlendState(hdrBlendState.Get(),nullptr,0xffffffffu);
     if(!originalDraw(0,hdrRtv.Get(),evidence.writer))return 2;
-    if(blendedHdr)context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+    if(blendedHdrWorld)context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+    if(blendedHdr) {
+        context->OMSetBlendState(hdrBlendState.Get(),nullptr,0xffffffffu);
+        if(!originalDraw(1,hdrRtv.Get(),evidence.firstPersonHdr))return 2;
+        context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
+    }
     const auto ownerAtH=readOwnerPixels(device,context,ownerView);
     evidence.gpuWorldPixelsAtH=ownerAtH.world;
     evidence.gpuForeignPixelsAtH=ownerAtH.foreign;
+    if(staleMark)evidence.marksAtH=classifyOwnerMarks(readOwnerPlane(device,context,ownerView),readPixels(device,context,depth.Get(),8));
     ID3D11RenderTargetView* consumerTarget=consumerRtv.Get();
     context->OMSetRenderTargets(1,&consumerTarget,nullptr);
     ID3D11ShaderResourceView* hView=hSrv.Get();context->PSSetShaderResources(0,1,&hView);
@@ -594,21 +686,32 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const uint64_t predictedDelta=since(after.predictedWorld,before.predictedWorld);
     const uint64_t surfaceDelta=since(after.surfacePreserving,before.surfacePreserving);
     const uint64_t surfaceForeignDelta=since(after.surfacePreservingForeign,before.surfacePreservingForeign);
-    const uint64_t surfaceCameralessDelta=since(after.surfacePreservingCameraless,before.surfacePreservingCameraless);
+    const uint64_t worldUnmarkedDelta=since(after.worldUnmarked,before.worldUnmarked);
+    const uint64_t worldMarkerDelta=since(after.worldMarkers,before.worldMarkers);
     const uint64_t foreignDelta=since(after.foreignSeen,before.foreignSeen);
     const uint64_t capturedDelta=since(after.captured,before.captured);
     const uint64_t attemptedDelta=since(after.hAttempts,before.hAttempts);
     const uint64_t qualifiedDelta=since(after.hQualified,before.hQualified);
     const uint64_t backendDelta=since(after.hdrBackendCompleted,before.hdrBackendCompleted);
+    const uint64_t resolverDelta=since(after.resolverCalls,before.resolverCalls);
     const uint64_t prepassPredicted=since(evidence.prepass.predictedWorld,before.predictedWorld);
     const uint64_t prepassForeign=since(evidence.prepass.foreignSeen,before.foreignSeen);
     const uint64_t prepassCaptured=since(evidence.prepass.captured,before.captured);
+    const uint64_t prepassWorldMarkers=since(evidence.prepass.worldMarkers,before.worldMarkers);
+    const uint64_t prepassUnmarked=since(evidence.prepass.worldUnmarked,before.worldUnmarked);
     // No refusal anywhere on the frame: the snapshot reports the frame's first failure over every candidate.
     const bool frameClean=!after.firstFailureFrame;
+    // The domain marks first-person surfaces only (section 104): its world-marker count stays at zero, and every draw
+    // with camera 0 (the named world camera) is counted unmarked. worldDraws is how many such draws a case makes:
+    // the naming draw and the HDR writer, and the case's own (inert_depth_write_world, stale_foreign_mark). Prepass
+    // and laser draws with camera 0 before naming are predicted, not unmarked. Native TAA never plans anything.
+    const unsigned worldDraws=2u+(inertWorld?1u:0u)+(staleMark?1u:0u);
+    const bool worldsUnmarked=taa || (!worldMarkerDelta && worldUnmarkedDelta==worldDraws);
     const bool rasterReady=evidence.validDepthPixels>0 && evidence.poolPixels>0 && evidence.hdrPixels>0;
-    const bool ownership=evidence.world.namedWorld && evidence.alternate.foreignSeen &&
-        evidence.alternate.captured && evidence.alternate.gpuIdentitySubmitted &&
-        evidence.gpuWorldPixelsAtH>0 && evidence.gpuForeignPixelsAtH>0;
+    const bool ownershipForeign=evidence.world.namedWorld && evidence.alternate.foreignSeen &&
+        evidence.alternate.captured && evidence.alternate.gpuIdentitySubmitted && evidence.gpuForeignPixelsAtH>0;
+    // The engine producer's own slots (the supported family-0 pair) mark the world; the shipping host has no producer.
+    const bool ownership=ownershipForeign && evidence.gpuWorldPixelsAtH>0;
     const bool route=after.hdrTriggered && after.hdrSelected && after.resolverCalls;
     const bool inertNoWriteMeasured=!inertNoWrite ||
         (evidence.inertStencilPixels>0 && !evidence.inertColorPixels && !evidence.inertDepthPixels &&
@@ -620,31 +723,29 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         evidence.inert.firstFailurePs==0x258B95AC99520C1Full &&
         std::strcmp(evidence.inert.firstFailureStage,"inert-state")==0 &&
         std::strcmp(evidence.inert.firstFailureReason,"foreground-inert-depth-write")==0;
-    // A blended HDR writer is refused on the HDR draw itself, ahead of anything H could say, and no backend
-    // call follows. The failure is the frame's first and is the one H reports.
-    const bool hdrWriterRefusal=blendedHdr && evidence.hdrPixels>0 &&
-        attemptedDelta>0 && !qualifiedDelta && !backendDelta &&
-        after.firstFailureFrame==after.frame && after.firstFailureSelectedH && after.failureKinds>=1 &&
-        after.firstFailureSequence==evidence.writer.drawSequence &&
-        after.firstFailureVs==0xEB5234DB6ADB491Dull && after.firstFailurePs==0xDC603C35BBE74B31ull &&
-        after.firstFailureFormat==26 && after.firstFailureState.valid && after.firstFailureState.hdr==1 &&
-        after.firstFailureState.slot[0].blendEnable==1 && after.firstFailureState.slot[0].effectiveWriteMask==15 &&
-        after.firstFailureState.slot[0].viewFormat==static_cast<uint32_t>(DXGI_FORMAT_R11G11B10_FLOAT) &&
-        after.firstFailureState.depthEnable==1 &&
-        after.firstFailureState.depthWriteMask==static_cast<uint32_t>(D3D11_DEPTH_WRITE_MASK_ALL) &&
-        std::strcmp(after.firstFailureStage,"state")==0 &&
-        std::strcmp(after.firstFailureReason,"foreground-mixed-component-writer")==0;
-    // Settlement order: every prepass draw ran before the world was named, was planned as the predicted world and
-    // none was captured; only the first-person draw (before naming) and the ordinary alternate draw are foreign.
-    // In the mismatch case the pre-naming first-person draw has the world's near, so it too is taken for the world:
-    // it is planned as the predicted world (never captured) and the one foreign draw is the alternate after naming.
-    // The settlement also draws the laser pair in both cameras before naming: the first-person one is a foreign pool
-    // draw (captured), the world-camera one is the predicted world like the prepass run (never captured).
+    // state_blended_hdr: a blended first-person (family 1, camera 1) depth writer into the HDR light target. Measured
+    // 2026-10-06 on the section 104 runtime, contradicting the expectation that it is admitted, captured and resolved:
+    // the domain does admit it (format 26 takes a mark: foreignSeen and captured rise for it, the refusal inventory
+    // stays empty, no first failure), but the prefix model, which decides what H is, vetoes any second camera writing H
+    // before an attempt is made (flat_runtime_model.h: hdr-camera-changed, exempting only the laser pair 88DCF116/
+    // 494506A6 and overlay-protected draws). The frame is refused as conflicting-hdr-target-or-camera, with no H
+    // attempt and no resolve. This pins that verdict; it flips to a resolve if the veto is ever lifted for such draws.
+    const bool hdrSecondCameraRefusal=blendedHdr && evidence.hdrPixels>0 &&
+        foreignDelta==2 && capturedDelta==2 && !surfaceDelta && frameClean && !after.failureKinds &&
+        !attemptedDelta && !qualifiedDelta && !backendDelta && !resolverDelta &&
+        std::strcmp(after.hdrVerdict,"conflicting-hdr-target-or-camera")==0;
+    // Settlement order: every prepass draw (camera 0) ran before the world was named, was planned as the predicted
+    // world and none was captured or marked; only the first-person draws (camera 1, before naming) and the ordinary
+    // alternate draw (camera 1) are foreign. In the mismatch case the pre-naming first-person draw has camera 2, with
+    // the world's near, so it too is taken for the world: it is predicted (never captured) and the one foreign draw
+    // is the alternate after naming (camera 2 again). The settlement also draws the laser pair in both cameras before
+    // naming: the camera-1 one is a foreign pool draw (captured), the camera-0 one is the predicted world like the
+    // prepass run. None of the predicted draws is marked: the domain's world-marker count must not rise over the run.
     const unsigned mistaken=mismatch?1u:0u,laserForeign=settlement?1u:0u,laserWorld=settlement?1u:0u;
     const bool namedAfterPrepass=prepassCase && !evidence.prepass.namedWorld && evidence.world.namedWorld;
     // The prepass draws wrote depth (a run that discarded everything would still plan, but proves less).
     const bool prepassPlanned=namedAfterPrepass && evidence.prepassDepthPixels>0 &&
-        prepassPredicted==prepassDraws+mistaken+laserWorld &&
+        prepassPredicted==prepassDraws+mistaken+laserWorld && !prepassWorldMarkers && !prepassUnmarked &&
         prepassForeign==1u-mistaken+laserForeign && prepassCaptured==1u-mistaken+laserForeign &&
         predictedDelta==prepassDraws+mistaken+laserWorld &&
         foreignDelta==2u-mistaken+laserForeign && capturedDelta==2u-mistaken+laserForeign;
@@ -657,31 +758,57 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         std::strcmp(after.firstFailureStage,"H-qualification")==0 &&
         std::strcmp(after.firstFailureReason,"foreground-pending-null-not-selected-world")==0 &&
         std::strcmp(after.hRefusal,"foreground-pending-null-not-selected-world")==0;
+    // The inert pair is drawn with camera 1 (first person) in the inert cases below except the world one. A first-person
+    // draw that is not a pool mesh cannot be captured; one that cannot write depth is forwarded unchanged (counted),
+    // one that writes depth refuses (inert_depth_write above).
+    const bool inertNoWriteRule=inertNoWrite && surfaceDelta==1 && surfaceForeignDelta==1 &&
+        foreignDelta==1 && capturedDelta==1 && frameClean;
     // Rule C: a draw that cannot write depth is forwarded unchanged: counted, never refused. Rule B: a depth-writing
     // Gbuffer draw is admitted however it blends or masks, so these two draws are planned and captured as foreign.
     const bool forwardedColorOnly=colorInert && evidence.inertColorPixels>0 && !evidence.inertDepthPixels &&
-        !evidence.inert.firstFailureFrame && surfaceDelta>=1 && foreignDelta==1 && capturedDelta==1 && frameClean;
-    // Both state draws are planned as foreign pool writers; only the one that can write depth is captured.
+        !evidence.inert.firstFailureFrame && surfaceDelta==1 && surfaceForeignDelta==1 &&
+        foreignDelta==1 && capturedDelta==1 && frameClean;
+    // Both state draws (camera 1) are planned as foreign pool writers; only the one that can write depth is captured.
     const bool forwardedBlended=blendedNoDepth && evidence.stateColorPixels>0 &&
-        surfaceDelta>=1 && surfaceForeignDelta>=1 && foreignDelta==2 && capturedDelta==1 && frameClean;
+        surfaceDelta==1 && surfaceForeignDelta==1 && foreignDelta==2 && capturedDelta==1 && frameClean;
     const bool admittedState=(partialState||blendedState) && evidence.stateColorPixels>0 &&
         !surfaceDelta && foreignDelta==2 && capturedDelta==2 && frameClean;
-    const bool ruleConfirmed=colorInert?forwardedColorOnly:blendedNoDepth?forwardedBlended:
-        (partialState||blendedState)?admittedState:settlement?settlementConfirmed:true;
-    const bool guardConfirmed=hostGuard?
-        rasterReady && evidence.world.namedWorld && (taa || ownership) && after.hdrTriggered && !after.hAttempts &&
+    // A blended depth writer into the HDR light target with camera 0 is a world draw: never planned, marked or refused.
+    // Only the alternate (camera 1) is foreign; the blended draw changed H's pixels.
+    const bool worldHdrBlended=blendedHdrWorld && evidence.hdrPixels>0 && !surfaceDelta &&
+        foreignDelta==1 && capturedDelta==1 && frameClean;
+    // The inert depth writer with camera 0 (full-screen, color masked): the same unmarked, unrefused world draw.
+    const bool worldInertWriter=inertWorld && evidence.inertDepthPixels>0 && !evidence.inertColorPixels &&
+        !evidence.inert.firstFailureFrame && !surfaceDelta && foreignDelta==1 && capturedDelta==1 && frameClean;
+    // A camera-0 depth writer outside the producer's families (the prepass pair) over the camera-1 surface, in front of it:
+    // it writes depth and no mark (the plane is byte-identical around it), every first-person mark was fresh before
+    // it, the ones it covers are stale after it and stay in the plane, and the frame still qualifies and resolves.
+    // Marks the producer's later camera-0 HDR writer re-marks as world leave the foreign count by H, so the stale
+    // marks counted at H are the ones only the prepass-pair draw overdrew.
+    const bool staleMarkRule=staleMark && evidence.planeUntouched && evidence.worldWriterDepthPixels>0 &&
+        evidence.marksBefore.foreign>0 && evidence.marksBefore.stale==0 &&
+        evidence.marksAfter.foreign==evidence.marksBefore.foreign && evidence.marksAfter.stale>0 &&
+        evidence.marksAtH.stale>0 && evidence.marksAtH.fresh>0 &&
+        foreignDelta==1 && capturedDelta==1 && !surfaceDelta && frameClean && qualifiedDelta>0;
+    const bool ruleConfirmed=worldsUnmarked && (inertNoWrite?inertNoWriteRule:colorInert?forwardedColorOnly:
+        blendedNoDepth?forwardedBlended:(partialState||blendedState)?admittedState:blendedHdrWorld?worldHdrBlended:
+        inertWorld?worldInertWriter:staleMark?staleMarkRule:settlement?settlementConfirmed:true);
+    const bool guardConfirmed=worldsUnmarked && (hostGuard?
+        rasterReady && evidence.world.namedWorld && (taa || ownershipForeign) && after.hdrTriggered && !after.hAttempts &&
             std::strcmp(after.hdrVerdict,"engine-source-not-ready")==0:
         depthGuard?evidence.inertDepthPixels>0 && !evidence.inertColorPixels && inertWriterRefusal:
-        blendedHdr?hdrWriterRefusal:mismatch?mismatchRefusal:false;
+        blendedHdr?hdrSecondCameraRefusal:mismatch?mismatchRefusal:false);
     const char* verdict="FAIL";
     const char* cause="upstream-qualification-or-raster-refused";
     const char* passCause=colorInert||blendedNoDepth?"depth-preserving-draw-forwarded":
         partialState||blendedState?"depth-writing-gbuffer-draw-admitted":
+        blendedHdrWorld?"world-camera-hdr-writer-left-unmarked":inertWorld?"world-camera-depth-writer-left-unmarked":
+        staleMark?"stale-first-person-mark-kept-and-frame-resolved":
         settlement?"predicted-world-prepass-planned-without-capture":"production-hdr-resolve-completed";
     if(guardCase) {
         verdict=guardConfirmed?"PASS":"FAIL";
         cause=guardConfirmed?hostGuard?"host-guard-confirmed":depthGuard?"depth-write-refusal-confirmed":
-            blendedHdr?"blended-hdr-writer-refusal-confirmed":"pending-world-mismatch-refusal-confirmed":
+            blendedHdr?"second-camera-hdr-writer-refused-by-selector":"pending-world-mismatch-refusal-confirmed":
             "guard-not-confirmed";
     } else if(upstream && ruleConfirmed && after.hdrResolves && (taa || after.hdrBackendCompleted)) {
         verdict="PASS";cause=passCause;
@@ -748,14 +875,24 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           // before the world is named, so the order the settlement draws in is itself recorded.
           <<",\"measuredFrame\":{\"predictedWorld\":"<<predictedDelta
           <<",\"surfacePreserving\":"<<surfaceDelta<<",\"surfacePreservingForeign\":"<<surfaceForeignDelta
-          <<",\"surfacePreservingCameraless\":"<<surfaceCameralessDelta
+          <<",\"worldUnmarked\":"<<worldUnmarkedDelta<<",\"worldMarkers\":"<<worldMarkerDelta
           <<",\"foreignSeen\":"<<foreignDelta<<",\"captured\":"<<capturedDelta
           <<",\"hAttempts\":"<<attemptedDelta<<",\"hQualified\":"<<qualifiedDelta<<",\"backendCalls\":"<<backendDelta
           <<",\"failureKinds\":"<<after.failureKinds<<",\"failureKindsDropped\":"<<after.failureKindsDropped
           <<",\"prepass\":{\"draws\":"<<(prepassCase?prepassDraws:0u)<<",\"mistakenDraws\":"<<mistaken
           <<",\"namedWorldAfterRun\":"<<evidence.prepass.namedWorld<<",\"predictedWorld\":"<<prepassPredicted
           <<",\"foreignSeen\":"<<prepassForeign<<",\"captured\":"<<prepassCaptured
+          <<",\"worldMarkers\":"<<prepassWorldMarkers<<",\"worldUnmarked\":"<<prepassUnmarked
           <<",\"depthPixelsChanged\":"<<evidence.prepassDepthPixels<<"}}"
+          // The owner plane around a camera-0 depth writer drawn over a camera-1 surface (stale_foreign_mark): a mark is
+          // fresh while its depth is still the pixel's raw depth, stale once something else wrote depth there.
+          <<",\"staleMark\":{\"planeUntouched\":"<<(evidence.planeUntouched?"true":"false")
+          <<",\"worldWriterDepthPixels\":"<<evidence.worldWriterDepthPixels
+          <<",\"before\":{\"foreign\":"<<evidence.marksBefore.foreign<<",\"stale\":"<<evidence.marksBefore.stale
+          <<",\"fresh\":"<<evidence.marksBefore.fresh<<"},\"after\":{\"foreign\":"<<evidence.marksAfter.foreign
+          <<",\"stale\":"<<evidence.marksAfter.stale<<",\"fresh\":"<<evidence.marksAfter.fresh
+          <<"},\"atH\":{\"foreign\":"<<evidence.marksAtH.foreign<<",\"stale\":"<<evidence.marksAtH.stale
+          <<",\"fresh\":"<<evidence.marksAtH.fresh<<"}}"
           <<",\"lastH\":{\"attempts\":"<<after.hAttempts<<",\"qualified\":"<<after.hQualified
           <<",\"reason\":"<<quote(after.hRefusal)<<"}"
           <<",\"hdrTriggered\":"<<after.hdrTriggered<<",\"hdrSelected\":"<<after.hdrSelected
@@ -770,6 +907,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           <<"},\"limitations\":[\"Controlled geometry, camera and OM state reconstructed; shader bytes captured\"";
     if(!hostGuard)result<<",\"Emit-hook availability reconstructed only in offline test-link proxy\"";
     if(prepassCase)result<<",\"Prepass order, shader pair and run length follow the 2026-10 settlement census; geometry, record contents and the alpha-test inputs are reconstructed\"";
+    if(staleMark)result<<",\"The covering world surface is a reconstructed small pool record drawn with the prepass pair; the owner plane is read back through the proxy's test export\"";
     result<<"]}";
     std::puts(result.str().c_str());
     return std::strcmp(verdict,"PASS")==0?0:std::strcmp(verdict,"UNSUPPORTED")==0?2:1;

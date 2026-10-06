@@ -26,34 +26,69 @@ HISTORY_MARKER = "EDVR_BENCH_HISTORY_RESULT "
 MODES = ("taa", "dlaa", "dlss", "fsr")
 DEFAULT_CASES = ("unsupported_host", "scene", "inert_no_write", "inert_depth_write", "inert_color_write",
                  "state_partial_mask", "state_blended", "state_blended_no_depth", "state_blended_hdr",
-                 "settlement_prepass", "predicted_world_mismatch")
+                 "settlement_prepass", "predicted_world_mismatch", "state_blended_hdr_world",
+                 "inert_depth_write_world", "stale_foreign_mark")
 # "renderer" cases must complete the production HDR resolve; "guard" cases must keep a refusal.
 CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "renderer", "inert_no_write": "renderer",
                  "inert_depth_write": "guard", "inert_color_write": "renderer", "state_partial_mask": "renderer",
                  "state_blended": "renderer", "state_blended_no_depth": "renderer", "state_blended_hdr": "guard",
-                 "settlement_prepass": "renderer", "predicted_world_mismatch": "guard"}
+                 "settlement_prepass": "renderer", "predicted_world_mismatch": "guard",
+                 "state_blended_hdr_world": "renderer", "inert_depth_write_world": "renderer",
+                 "stale_foreign_mark": "renderer"}
 SDK_CASES = frozenset(("inert_no_write", "inert_depth_write", "inert_color_write", "state_partial_mask",
                        "state_blended", "state_blended_no_depth", "state_blended_hdr", "settlement_prepass",
-                       "predicted_world_mismatch"))
+                       "predicted_world_mismatch", "state_blended_hdr_world", "inert_depth_write_world",
+                       "stale_foreign_mark"))
 PRODUCTION_CASES = frozenset(("unsupported_host",))
-# What a rule-bearing PASS must have measured over its own frame (observed.measuredFrame), as (min, max) with None
-# for unbounded. The scenario computes the same claims; this is the independent check that its PASS is believed.
-#  - inert_color_write, state_blended_no_depth: draws that cannot write depth are counted as forwarded, never refused.
-#  - state_partial_mask, state_blended: a depth-writing Gbuffer draw is admitted and captured, not forwarded.
-#  - settlement_prepass: the world camera's prepass run is planned as the predicted world, and is not captured.
+# What a rule-bearing PASS must have measured over its own frame (observed.measuredFrame, or a path from observed
+# itself when it starts with "@"), as (min, max) with None for unbounded. The scenario computes the same claims;
+# this is the independent check that its PASS is believed. Cameras (section 104): camera 0 is the world's, camera 1
+# the first person's. Only a camera-1 depth writer is planned (foreignSeen), captured and marked; a camera-0 draw is
+# counted worldUnmarked (or, before the world is named at the last world's near, predictedWorld); the domain's own
+# world-marker count (worldMarkers) is zero in every case.
+#  - inert_no_write, inert_color_write, state_blended_no_depth: camera-1 draws that cannot write depth are forwarded
+#    unchanged (surfacePreserving), never refused.
+#  - state_partial_mask, state_blended: a camera-1 depth-writing Gbuffer draw is admitted and captured, not forwarded.
+#  - state_blended_hdr_world, inert_depth_write_world: camera-0 depth writers (a blended HDR mesh; a full-screen inert
+#    pair) are never planned, marked or refused.
+#  - settlement_prepass: the camera-0 prepass run is planned as the predicted world and is neither captured nor marked.
+#  - stale_foreign_mark: a camera-0 depth writer outside the producer's families, drawn over a camera-1 surface in
+#    front of it, leaves the owner plane byte-identical: the marks it covers are stale (their depth is no longer the
+#    pixel's), stay in the plane, and the frame still qualifies.
 # Every one of them also ends with an empty refusal inventory (failureKinds 0).
+FIRST_PERSON_ONLY = {"worldMarkers": (0, 0), "failureKinds": (0, 0)}
 RULE_COUNTERS = {
-    "inert_color_write": {"surfacePreserving": (1, None), "failureKinds": (0, 0)},
-    "state_partial_mask": {"surfacePreserving": (0, 0), "captured": (2, 2), "failureKinds": (0, 0)},
-    "state_blended": {"surfacePreserving": (0, 0), "captured": (2, 2), "failureKinds": (0, 0)},
-    "state_blended_no_depth": {"surfacePreserving": (1, None), "surfacePreservingForeign": (1, None),
-                               "captured": (1, 1), "failureKinds": (0, 0)},
+    "inert_no_write": {"surfacePreserving": (1, 1), "surfacePreservingForeign": (1, 1), "foreignSeen": (1, 1),
+                       "captured": (1, 1), "worldUnmarked": (2, 2), **FIRST_PERSON_ONLY},
+    "inert_color_write": {"surfacePreserving": (1, 1), "surfacePreservingForeign": (1, 1), "foreignSeen": (1, 1),
+                          "captured": (1, 1), "worldUnmarked": (2, 2), **FIRST_PERSON_ONLY},
+    "state_partial_mask": {"surfacePreserving": (0, 0), "foreignSeen": (2, 2), "captured": (2, 2),
+                           "worldUnmarked": (2, 2), **FIRST_PERSON_ONLY},
+    "state_blended": {"surfacePreserving": (0, 0), "foreignSeen": (2, 2), "captured": (2, 2),
+                      "worldUnmarked": (2, 2), **FIRST_PERSON_ONLY},
+    "state_blended_no_depth": {"surfacePreserving": (1, 1), "surfacePreservingForeign": (1, 1), "foreignSeen": (2, 2),
+                               "captured": (1, 1), "worldUnmarked": (2, 2), **FIRST_PERSON_ONLY},
+    "state_blended_hdr_world": {"surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1),
+                                "worldUnmarked": (2, 2), **FIRST_PERSON_ONLY},
+    "inert_depth_write_world": {"surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1),
+                                "worldUnmarked": (3, 3), **FIRST_PERSON_ONLY},
     "settlement_prepass": {"predictedWorld": (70, None), "foreignSeen": (0, 4), "captured": (0, 4),
-                           "failureKinds": (0, 0)},
+                           "worldUnmarked": (2, 2), "prepass.worldMarkers": (0, 0), "prepass.worldUnmarked": (0, 0),
+                           **FIRST_PERSON_ONLY},
+    "stale_foreign_mark": {"surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1),
+                           "worldUnmarked": (3, 3), "hQualified": (1, 1),
+                           "@staleMark.worldWriterDepthPixels": (1, None), "@staleMark.before.foreign": (1, None),
+                           "@staleMark.before.stale": (0, 0), "@staleMark.after.stale": (1, None),
+                           "@staleMark.atH.stale": (1, None), "@staleMark.atH.fresh": (1, None), **FIRST_PERSON_ONLY},
 }
+# Facts a rule PASS must report as the boolean true.
+RULE_TRUE = {"stale_foreign_mark": ("@staleMark.planeUntouched",)}
 # The exact first-failure reason a guard that keeps its refusal must still report.
-GUARD_REASONS = {"state_blended_hdr": "foreground-mixed-component-writer",
-                 "predicted_world_mismatch": "foreground-pending-null-not-selected-world"}
+GUARD_REASONS = {"predicted_world_mismatch": "foreground-pending-null-not-selected-world"}
+# A guard whose refusal is the selector's, before any H attempt: the verdict it must report, with no H attempt.
+#  - state_blended_hdr: a camera-1 depth writer into the HDR light target. The domain admits and captures it, but the
+#    prefix model refuses a second camera on H (conflicting-hdr-target-or-camera) before H is attempted.
+GUARD_VERDICTS = {"state_blended_hdr": "conflicting-hdr-target-or-camera"}
 HISTORY_CASES = frozenset(("provisional_before_foreign", "byte_budget", "invalidated_byte_occupancy",
                             "transient_churn", "mutation_reset", "adapter_cross_frame_record_budget",
                             "adapter_invalidated_prior_occupancy", "invalidated_capture_snapshot_lifetime",
@@ -194,6 +229,16 @@ def make_plan(root, cases, modes, adapter, report=None):
                                                      "--bench-history"]}
 
 
+def rule_value(obs, path):
+    """A counter by dotted path: from observed.measuredFrame, or from observed itself when the path starts with @."""
+    node = obs if path.startswith("@") else obs.get("measuredFrame")
+    for part in path.lstrip("@").split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
 def parse_result(stdout, case, mode):
     checked(len(stdout) <= MAX_JSON, "scenario output exceeds cap")
     lines = [line[len(MARKER):] for line in stdout.splitlines() if line.startswith(MARKER)]
@@ -227,9 +272,11 @@ def parse_result(stdout, case, mode):
             checked(isinstance(frame, dict) and isinstance(failure, dict) and failure.get("frame") == 0,
                     "rule PASS requires measured frame counters and a frame with no refusal")
             for counter, (low, high) in counters.items():
-                value = frame.get(counter)
+                value = rule_value(obs, counter)
                 checked(type(value) is int and (low is None or value >= low) and (high is None or value <= high),
                         f"rule PASS needs {counter} within [{low}, {high}], saw {value}")
+        for path in RULE_TRUE.get(case, ()):
+            checked(rule_value(obs, path) is True, f"rule PASS needs {path} to be true, saw {rule_value(obs, path)}")
     if r["verdict"] == "PASS" and r["purpose"] == "guard":
         checked(obs.get("guardConfirmed") is True, "guard PASS requires a measured expected refusal")
         reason = GUARD_REASONS.get(case)
@@ -239,6 +286,12 @@ def parse_result(stdout, case, mode):
             checked(isinstance(frame, dict) and isinstance(failure, dict) and failure.get("reason") == reason and
                     frame.get("hQualified") == 0 and frame.get("backendCalls") == 0,
                     f"guard PASS requires first failure {reason} with no qualified H and no backend call")
+        verdict = GUARD_VERDICTS.get(case)
+        if verdict:
+            frame = obs.get("measuredFrame")
+            checked(isinstance(frame, dict) and obs.get("hdrVerdict") == verdict and frame.get("hAttempts") == 0 and
+                    frame.get("hQualified") == 0 and frame.get("backendCalls") == 0,
+                    f"guard PASS requires the selector verdict {verdict} with no H attempt and no backend call")
     if r["verdict"] == "PASS" and r["purpose"] == "entry":
         scope = obs.get("scope", {})
         checked(mode == "taa" and isinstance(scope, dict) and
@@ -472,16 +525,41 @@ def self_test():
         # The case tables agree with each other, and every rule or guard check names a case that can carry it.
         assert set(DEFAULT_CASES) <= set(CASE_PURPOSES) and SDK_CASES <= set(DEFAULT_CASES)
         assert set(RULE_COUNTERS) <= SDK_CASES and all(CASE_PURPOSES[c] == "renderer" for c in RULE_COUNTERS)
-        assert set(GUARD_REASONS) <= SDK_CASES and all(CASE_PURPOSES[c] == "guard" for c in GUARD_REASONS)
-        assert {"state_blended_no_depth", "state_blended_hdr", "settlement_prepass",
-                "predicted_world_mismatch"} <= set(DEFAULT_CASES)
+        assert set(RULE_TRUE) <= set(RULE_COUNTERS)
+        guards = {**GUARD_REASONS, **GUARD_VERDICTS}
+        assert set(guards) <= SDK_CASES and all(CASE_PURPOSES[c] == "guard" for c in guards)
+        assert not set(GUARD_REASONS) & set(GUARD_VERDICTS)
+        assert {"state_blended_no_depth", "state_blended_hdr", "settlement_prepass", "predicted_world_mismatch",
+                "state_blended_hdr_world", "inert_depth_write_world", "stale_foreign_mark"} <= set(DEFAULT_CASES)
+        assert CASE_PURPOSES["state_blended_hdr"] == "guard" and CASE_PURPOSES["state_blended_hdr_world"] == "renderer"
+
+        # Synthetic observations: what a PASS of each rule case looks like, then every table entry broken in turn.
+        stale_good = {"planeUntouched": True, "worldWriterDepthPixels": 50, "before": {"foreign": 338, "stale": 0, "fresh": 338},
+                      "after": {"foreign": 338, "stale": 50, "fresh": 288}, "atH": {"foreign": 218, "stale": 50, "fresh": 168}}
+        good_frames = {
+            "inert_no_write": {"surfacePreserving": 1, "surfacePreservingForeign": 1, "foreignSeen": 1, "captured": 1,
+                               "worldUnmarked": 2},
+            "state_partial_mask": {"surfacePreserving": 0, "foreignSeen": 2, "captured": 2, "worldUnmarked": 2},
+            "state_blended_no_depth": {"surfacePreserving": 1, "surfacePreservingForeign": 1, "foreignSeen": 2,
+                                       "captured": 1, "worldUnmarked": 2},
+            "state_blended_hdr_world": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2},
+            "inert_depth_write_world": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 3},
+            "settlement_prepass": {"predictedWorld": 73, "foreignSeen": 3, "captured": 3, "worldUnmarked": 2,
+                                   "prepass": {"worldMarkers": 0, "worldUnmarked": 0}},
+            "stale_foreign_mark": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 3,
+                                   "hQualified": 1},
+        }
+        good_frames["inert_color_write"] = good_frames["inert_no_write"]
+        good_frames["state_blended"] = good_frames["state_partial_mask"]
+        assert set(good_frames) == set(RULE_COUNTERS)
 
         def sdk_observed(frame, reason="", **extra):
             seen = {"lastH": {"qualified": 1}, "backendCalls": 1, "rasterPixels": 1352, "namedWorld": 1,
-                    "resolverCalls": 1, "ruleConfirmed": True, "guardConfirmed": True,
+                    "resolverCalls": 1, "ruleConfirmed": True, "guardConfirmed": True, "hdrVerdict": "",
                     "owner": {"gpuWorldPixelsAtH": 556, "gpuForeignPixelsAtH": 218},
                     "firstFailure": {"frame": 6 if reason else 0, "reason": reason},
-                    "measuredFrame": {"failureKinds": 1 if reason else 0, **frame}}
+                    "staleMark": json.loads(json.dumps(stale_good)),
+                    "measuredFrame": {"worldMarkers": 0, "failureKinds": 1 if reason else 0, **frame}}
             seen.update(extra)
             return seen
 
@@ -493,27 +571,46 @@ def self_test():
             except ValueError:
                 return False
 
-        settlement = {"predictedWorld": 72, "foreignSeen": 2, "captured": 2, "surfacePreserving": 0}
-        assert accepted("settlement_prepass", "renderer", sdk_observed(settlement))
-        for counter, bad in (("predictedWorld", 69), ("predictedWorld", "72"), ("captured", 72), ("foreignSeen", 72),
-                             ("predictedWorld", None)):
-            assert not accepted("settlement_prepass", "renderer", sdk_observed({**settlement, counter: bad})), \
-                f"settlement pass accepted with {counter}={bad!r}"
-        assert not accepted("settlement_prepass", "renderer", sdk_observed(settlement, reason="foreground-draw-bound"))
-        assert not accepted("settlement_prepass", "renderer", sdk_observed({**settlement, "failureKinds": 1}))
-        assert not accepted("settlement_prepass", "renderer", sdk_observed(settlement, ruleConfirmed=False))
-        assert not accepted("settlement_prepass", "renderer", sdk_observed(settlement, measuredFrame=None))
-        forwarded = {"surfacePreserving": 1, "surfacePreservingForeign": 1, "foreignSeen": 2, "captured": 1}
-        assert accepted("state_blended_no_depth", "renderer", sdk_observed(forwarded))
-        assert not accepted("state_blended_no_depth", "renderer", sdk_observed({**forwarded, "surfacePreserving": 0}))
-        assert not accepted("state_blended_no_depth", "renderer", sdk_observed({**forwarded, "captured": 2}))
-        assert accepted("inert_color_write", "renderer", sdk_observed({"surfacePreserving": 1}))
-        assert not accepted("inert_color_write", "renderer", sdk_observed({"surfacePreserving": 0}))
-        admitted = {"surfacePreserving": 0, "foreignSeen": 2, "captured": 2}
-        for case in ("state_partial_mask", "state_blended"):
-            assert accepted(case, "renderer", sdk_observed(admitted))
-            assert not accepted(case, "renderer", sdk_observed({**admitted, "surfacePreserving": 1}))
-            assert not accepted(case, "renderer", sdk_observed({**admitted, "captured": 1}))
+        def with_value(observed, path, value):
+            node = observed if path.startswith("@") else observed["measuredFrame"]
+            parts = path.lstrip("@").split(".")
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = value
+            return observed
+
+        for case, bounds in RULE_COUNTERS.items():
+            assert accepted(case, "renderer", sdk_observed(good_frames[case])), f"{case}: the good frame is refused"
+            for counter, (low, high) in bounds.items():
+                for outside in ([low - 1] if low is not None else []) + ([high + 1] if high is not None else []):
+                    broken = with_value(sdk_observed(good_frames[case]), counter, outside)
+                    assert not accepted(case, "renderer", broken), f"{case}: {counter}={outside} accepted"
+                for bad in ("1", None, True):
+                    broken = with_value(sdk_observed(good_frames[case]), counter, bad)
+                    assert not accepted(case, "renderer", broken), f"{case}: {counter}={bad!r} accepted"
+            for path in RULE_TRUE.get(case, ()):
+                for bad in (False, 1, None):
+                    assert not accepted(case, "renderer", with_value(sdk_observed(good_frames[case]), path, bad)), \
+                        f"{case}: {path}={bad!r} accepted"
+            assert not accepted(case, "renderer", sdk_observed(good_frames[case], reason="foreground-draw-bound"))
+            assert not accepted(case, "renderer", sdk_observed(good_frames[case], ruleConfirmed=False))
+            assert not accepted(case, "renderer", sdk_observed(good_frames[case], measuredFrame=None))
+        # The camera-0 prepass run is not marked and not captured, whatever the numbers elsewhere say.
+        assert not accepted("settlement_prepass", "renderer", with_value(
+            sdk_observed(good_frames["settlement_prepass"]), "predictedWorld", 69))
+        assert not accepted("settlement_prepass", "renderer", with_value(
+            sdk_observed(good_frames["settlement_prepass"]), "captured", 72))
+        # A first-person mark that was never fresh, or a plane the world writer changed, is not the stale-mark proof.
+        stale_frame = good_frames["stale_foreign_mark"]
+        assert not accepted("stale_foreign_mark", "renderer", sdk_observed(
+            stale_frame, staleMark={**stale_good, "planeUntouched": False}))
+        assert not accepted("stale_foreign_mark", "renderer", sdk_observed(
+            stale_frame, staleMark={**stale_good, "before": {"foreign": 338, "stale": 3, "fresh": 335}}))
+        assert not accepted("stale_foreign_mark", "renderer", sdk_observed(
+            stale_frame, staleMark={**stale_good, "atH": {"foreign": 218, "stale": 218, "fresh": 0}}))
+        assert not accepted("stale_foreign_mark", "renderer", sdk_observed(
+            stale_frame, staleMark={**stale_good, "atH": {"foreign": 218, "stale": 0, "fresh": 218}}))
+
         for case, reason in GUARD_REASONS.items():
             refusal = sdk_observed({"hQualified": 0, "backendCalls": 0}, reason=reason)
             assert accepted(case, "guard", refusal)
@@ -522,6 +619,15 @@ def self_test():
             assert not accepted(case, "guard", sdk_observed({"hQualified": 0, "backendCalls": 1}, reason=reason))
             assert not accepted(case, "guard", sdk_observed({"hQualified": 0, "backendCalls": 0}, reason=reason,
                                                             guardConfirmed=False))
+        for case, verdict in GUARD_VERDICTS.items():
+            refused = {"hAttempts": 0, "hQualified": 0, "backendCalls": 0}
+            assert accepted(case, "guard", sdk_observed(refused, hdrVerdict=verdict))
+            assert not accepted(case, "guard", sdk_observed(refused, hdrVerdict="selected"))
+            assert not accepted(case, "guard", sdk_observed(refused, hdrVerdict=""))
+            for counter in refused:
+                assert not accepted(case, "guard", sdk_observed({**refused, counter: 1}, hdrVerdict=verdict)), \
+                    f"{case}: {counter}=1 accepted"
+            assert not accepted(case, "guard", sdk_observed(refused, hdrVerdict=verdict, guardConfirmed=False))
         # A case that is not a rule case still passes on the generic renderer evidence alone.
         assert accepted("scene", "renderer", sdk_observed({}))
         hist = {"schema": "edvr-flat-sdk-history-bench", "version": 1, "verdict": "PASS",

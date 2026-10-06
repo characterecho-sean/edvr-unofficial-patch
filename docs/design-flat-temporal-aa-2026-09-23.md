@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** 4f6197e8 FLOWN at a settlement: SDK AA refused every frame (104).
-  Owner marks follow the depth surface: 3d5ecaf6 INSTALLED on Epic, NOT FLOWN.
+- **State:** 3d5ecaf6 FLOWN: still refused (forward HDR meshes) at 26 fps, the
+  world markers it admitted cost 14 ms GPU (104). v2 marks only first person.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -12535,3 +12535,79 @@ literal installed version: H-qualified above zero and backend calls on the SDK
 domain line; `predicted-world` and `surface-preserving` counting; any
 `flat foreground refusal kind:` lines (each names a remaining blocker with
 its VS/PS, stage and count); and EDVR CPU a frame against 12-14 ms (104).
+
+### 2026-10-06: 3d5ecaf6 flown; marks only first-person surfaces
+
+Flight `edvr_gfx_20261006_061644.log`, verified against the literal installed
+`v0.18.2-19-g3d5ecaf6` (build 6AC4E642). Configured DLSS from 06:16:45, FSR
+from 06:19:20, at the same settlement. Sean: DLAA/FSR still did not engage;
+H-qualified stays zero. The old blockers are gone. No draw-bound or
+history-budget refusal; about 70 world prepass draws a frame are predicted
+and every witness matches; about 3,600 draws a frame that cannot write depth
+are forwarded; first-person captures are about 3-35 a frame. The inventory
+names what remains, 13 kinds over the flight, with 16 windows over its
+8-kind cap:
+
+- forward HDR pool meshes (5B0068AF, 617C6E44, 33A5025C, A8E4D93B, 01A029C7,
+  A6A39338; single RGBA target, alpha-tested) that write depth:
+  `foreground-HDR-writes-Gbuffer`, and for two of them
+  `foreground-mixed-component-writer`. The scene's HDR target is Gbuffer
+  slot 3 (R11G11B10_FLOAT, format 26), so every forward HDR draw "writes the
+  Gbuffer".
+- 41E245D4 (world, non-pool) and 88DCF116 (first person, pool) HDR depth
+  writers: `foreground-non-Gbuffer-writer` at planning.
+- `foreground-color-writer-without-depth` at H: a draw with no depth bound
+  writing that same texture.
+- 989E0439/2A5456CF, a Gbuffer depth writer with an unproven projection
+  (2 windows).
+
+Cost: at about 10,000 substituted draws a frame the GPU frame took 31.9 ms
+against 17.8 ms on 4f6197e8, and present p50 rose to about 38 ms (26 fps).
+Rule B admitted about 650-770 world draws a frame into the per-draw marker
+bracket (patched shader, the 4K RGBA32F owner target bound and unbound around
+each draw), against about 10 a frame before. That is roughly 20 us of GPU
+each.
+
+Ruled out: the engine-bracket flush in the rule-C depth query as the main GPU
+cost, because only about 150 draws a frame take that path while world
+markers rose by about 700 a frame. The flush was unnecessary anyway (the
+engine bracket never sets depth-stencil state) and is removed.
+
+Change (v2, BUILT): only first-person surfaces are marked.
+
+- World-camera draws (named camera bytes, or the predicted near before
+  naming) and camera-less draws are never planned, marked, captured or
+  refused. World pixels keep the engine producer's slots and the camera
+  term, as single-camera SDK frames always have. The predicted witness is
+  added at the draw and still has to match at H.
+- First-person depth writers are captured and marked, now including HDR
+  (format 26) pool meshes; colour blending and masks never refuse a depth
+  writer.
+- Colour bookkeeping is removed: HDR-writes-Gbuffer, colour-target-changed,
+  colour-writer-without-depth and the colour branch of resource writes. Only
+  writes to the depth can change which surface a pixel shows.
+- The SDK prep trusts a first-person mark only while its depth equals the
+  pixel's raw depth. A world surface drawn later over it takes the world
+  path, whose engine lookup gives the camera term for a negative mark.
+
+Trade-off: world objects drawn by shaders outside the engine producer's family
+get camera motion in mixed frames, as they already do in single-camera SDK
+frames; the 103 world domain markers had given them per-object motion.
+
+Offline (same environment as above): the production proof admits all six
+recorded first-person pairs, including the HDR mesh 88DCF116/494506A6, as
+ForeignPool. Bench, hardware 44/44 PASS plus history; WARP 24 PASS, 20
+UNSUPPORTED (NGX), 0 FAIL. New cases: `stale_foreign_mark` (a world
+non-producer depth writer over a first-person surface leaves the stale mark;
+H qualifies and resolves), `inert_depth_write_world` and
+`state_blended_hdr_world` (unmarked, unrefused); `settlement_prepass` now also
+requires zero world markers. The GPU prep test takes the camera term for a
+first-person mark under another depth; the pre-104 rule fails 18 of its
+checks and the inverted rule 48. Mutation runs: restoring the v1 world marks
+passes 0 of 26 cases. Full build passed, receipt `9c3aeb0f`.
+
+Known limit, pinned as the `state_blended_hdr` guard: a first-person HDR depth
+writer other than the 88DCF116/494506A6 laser pair (or an overlay-protected
+draw) still makes the HDR selector refuse the frame
+(`conflicting-hdr-target-or-camera`, flat_runtime_model.h). The settlement's
+only first-person HDR mesh is that pair, and its log shows H selected.

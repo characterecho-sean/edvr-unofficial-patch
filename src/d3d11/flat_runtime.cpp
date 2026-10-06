@@ -234,24 +234,15 @@ struct State {
         Ptr<ID3D11Texture2D> depth;
         uint64_t frame=~0ull;
         FlatForegroundMotion motion;
-        std::array<Ptr<ID3D11Resource>,6> colors;
         bool colorWritten=false;
         FlatDomainPendingNull pendingNull;
         Ptr<ID3D11Resource> hdr;
-        bool worldValidated=false;
-        uint32_t worldTargetGeneration=0;
-        FlatDomainPhasePublication worldPhase;
-        const void* worldBlend=nullptr;
-        D3D11_BLEND_DESC worldBlendDesc{};
-        D3D11_DEPTH_STENCIL_DESC worldDepthDesc{};
-        unsigned worldBoundColors=0;
         DomainFailure firstFailure{};
         DomainFailureKinds failureKinds{};
         void beginFrame(uint64_t next) {
             if(frame==next)return;
-            frame=next;for(auto& color:colors)color.Reset();colorWritten=false;
-            pendingNull.beginFrame(next);hdr.Reset();worldValidated=false;
-            worldPhase={};worldBlend=nullptr;worldBoundColors=0;firstFailure={};
+            frame=next;colorWritten=false;
+            pendingNull.beginFrame(next);hdr.Reset();firstFailure={};
             motion.beginFrame(static_cast<unsigned>(next));
         }
     };
@@ -272,7 +263,7 @@ struct State {
     struct DomainCounts {
         uint64_t foreignSeen=0,captured=0,worldMarkers=0,nullMarkers=0,markerRefused=0;
         uint64_t hAttempts=0,hQualified=0;
-        uint64_t predictedWorld=0,surfacePreserving=0,surfacePreservingForeign=0,surfacePreservingCameraless=0;
+        uint64_t predictedWorld=0,worldUnmarked=0,surfacePreserving=0,surfacePreservingForeign=0;
     } foregroundCounts;
     // Near plane of the last named world camera. Elite draws world-camera
     // depth prepasses on H before the first supported material draw names
@@ -560,15 +551,14 @@ static State::DomainCandidate* observeDomainCandidate(State& s,const void* depth
     candidate.beginFrame(s.prefix.frame);
     return &candidate;
 }
-static void domainResourceWritten(State& s,ID3D11Resource* resource,
-    const char* depthReason,const char* colorReason) {
+// Only a write to the depth itself (or an unknown one) can change which
+// surface a pixel shows; colour copies and compute writes cannot.
+static void domainResourceWritten(State& s,ID3D11Resource* resource,const char* depthReason) {
     if(!resource)s.foregroundRoute.noteUnknownMutation(s.prefix.frame);
     for(auto& candidate:s.foregroundCandidates)if(candidate.depth) {
         candidate.motion.resourceWritten(resource);
         if(candidate.frame!=s.prefix.frame)continue;
         if(!resource || candidate.depth.Get()==resource)candidate.motion.fail(depthReason);
-        if(candidate.colorWritten)for(const auto& color:candidate.colors)
-            if(color && color.Get()==resource)candidate.motion.fail(colorReason);
     }
 }
 static void reportForegroundDomain(State& s) {
@@ -580,14 +570,14 @@ static void reportForegroundDomain(State& s) {
         captures.submitted+=c.submitted;captures.preflightRefused+=c.preflightRefused;
         captures.warmedAfterRefusal+=c.warmedAfterRefusal;
     }
-    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g surface-preserving=%llu (foreign-camera=%llu no-camera=%llu) H-attempts=%llu H-qualified=%llu last-refusal=%s; counts cover all depth candidates, qualification alone is not a completed SDK call",
+    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu last-refusal=%s; counts cover all depth candidates, qualification alone is not a completed SDK call",
         flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
         (unsigned long long)captures.attempts,(unsigned long long)captures.gpuAttempts,
         (unsigned long long)captures.submitted,(unsigned long long)captures.preflightRefused,
         (unsigned long long)captures.warmedAfterRefusal,
         (unsigned long long)n.worldMarkers,(unsigned long long)n.nullMarkers,(unsigned long long)n.markerRefused,
-        (unsigned long long)n.predictedWorld,s.predictedWorldNear,(unsigned long long)n.surfacePreserving,
-        (unsigned long long)n.surfacePreservingForeign,(unsigned long long)n.surfacePreservingCameraless,
+        (unsigned long long)n.predictedWorld,s.predictedWorldNear,(unsigned long long)n.worldUnmarked,
+        (unsigned long long)n.surfacePreserving,(unsigned long long)n.surfacePreservingForeign,
         (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,s.foregroundHRefusal?s.foregroundHRefusal:"none");
     const auto& f=s.foregroundFirstFailure;
     Log::get().note("flat foreground first failure: configured=%s frame=%llu q=%u VS=%016llX PS=%016llX format=%u camera=%016llX depth=%p stage=%s reason=%s pending-world-null=%u selected-H-frame=%llu selected-depth=%p candidates=%u cap=%u overflow=%u candidate-present=%u; first failure on selected H depth in the most recent failed frame, not a shader allowlist",
@@ -3637,7 +3627,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
     }
     for (const auto& u : s.uavs) if (u) {
         if(s.engine!=FlatMonoResolveMode::Taa) {
-            domainResourceWritten(s,u.Get(),"foreground-dispatch-depth-write","foreground-dispatch-color-write");
+            domainResourceWritten(s,u.Get(),"foreground-dispatch-depth-write");
         }
         { flatcpu::Scope trace(flatcpu::kTrace); flatTraceMark(s.traceRing, kFlatTraceEventDispatchWritten, u.Get()); }
         flatRuntimeDispatchObserveWritten(s.prefix, u.Get());
@@ -3659,7 +3649,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
                             FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written) {
     if(s.engine!=FlatMonoResolveMode::Taa)
-        domainResourceWritten(s,res,"foreground-depth-or-unknown-mutation","foreground-color-mutation");
+        domainResourceWritten(s,res,"foreground-depth-or-unknown-mutation");
     if(s.untrusted.active())s.untrusted.noteMutation(res,
         FlatMutationDetails::named(provenance,entry),s.prefix.sequence);
     if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
@@ -3711,7 +3701,7 @@ void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMut
     if(foregroundDomainActive.load(std::memory_order_acquire)) {
         if(!owner())foreignWork.store(true,std::memory_order_release);
         else {
-            domainResourceWritten(state(),resource,"foreground-depth-or-unknown-mutation","foreground-color-mutation");
+            domainResourceWritten(state(),resource,"foreground-depth-or-unknown-mutation");
         }
     }
     if(untrustedCoverageActive.load(std::memory_order_acquire)) {
@@ -4498,14 +4488,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     }
     const bool foregroundGap=s.foreground.needsPreWorldState(
         static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)));
-    // The flat SDK ownership plane follows every original writer on the
-    // selected native scene DSV. Unknown writers fail qualification; depth
-    // equality alone cannot certify ownership after world overdraw.
+    // Owner marks follow the depth surface (section 104). World surfaces keep
+    // the engine producer's slots and the camera term, as single-camera
+    // frames always have. Only first-person depth writers are captured and
+    // marked, and the consumer trusts such a mark only while its depth is
+    // still the pixel's. A draw that cannot write depth changes no surface.
     const bool nativeDepthExtent=k.depthWidth==s.prefix.width && k.depthHeight==s.prefix.height;
-    if(s.engine!=FlatMonoResolveMode::Taa && !k.depth)
-        for(auto& candidate:s.foregroundCandidates)if(candidate.frame==s.prefix.frame && candidate.colorWritten)
-            for(const auto& color:candidate.colors)if(color && color.Get()==k.color)
-                candidate.motion.fail("foreground-color-writer-without-depth");
     if(s.engine!=FlatMonoResolveMode::Taa && s.work==FlatWork::Full && k.depth && (sceneExtent || nativeDepthExtent)) {
         auto* candidate=observeDomainCandidate(s,k.depth);
         domainProtectedOverlay=overlayPlanned && d.overlayProtected && !d.effectiveDepthWrite &&
@@ -4515,47 +4503,55 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // Successful original bracket completion is checked below.
             domainDepth=static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth));
         } else if(candidate) {
-            const auto& proof=domainShaderProof(s,k.vs,k.ps);
             float drawNear=0;if(k.camera)std::memcpy(&drawNear,d.camera+(3*4+2)*sizeof(float),sizeof(float));
-            // Provisional world before naming (section 103, 2026-10-06): the
-            // world camera's prepass shares the selected depth with the first-
-            // person camera's (near 0.025 against 0.0675). Planned as world; the
-            // pending witness below must equal the selected world camera at H.
+            float rows[6][4]{};if(k.camera)std::memcpy(rows,d.camera,sizeof(rows));
+            // Before naming, the world camera's prepass shares this depth with
+            // the first-person camera's (near 0.025 against 0.0675). A draw at
+            // the last named world near is world; its witness must equal the
+            // selected world camera at H, so a wrong prediction only refuses.
             const bool predictedWorld=!s.namedDepth && k.camera && s.predictedWorldNear>0 && drawNear==s.predictedWorldNear;
-            const bool sameWorld=predictedWorld ||
-                (s.namedDepth==k.depth && std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))==0);
-            const auto plan=flatDomainPlan(proof,k.color!=nullptr,k.format,k.camera!=nullptr,
-                s.namedDepth!=nullptr || predictedWorld,sameWorld);
-            if(!plan.admitted() && domainDrawPreservesSurface(context)) {
-                // No depth write: the surface and its owner mark are the last
-                // depth writer's. Forward the game's draw unchanged.
-                ++s.foregroundCounts.surfacePreserving;
-                if(!k.camera)++s.foregroundCounts.surfacePreservingCameraless;
-                else if(!sameWorld && (s.namedDepth || s.predictedWorldNear>0))++s.foregroundCounts.surfacePreservingForeign;
-            } else if(!plan.admitted() && proof.inertNoSideEffects) {
-                const char* inertRefusal=domainOriginalInertRefusal(context,k,proof);
-                if(inertRefusal)domainFail(s,"inert-state",inertRefusal,k);
-                // Otherwise no private marker/history or ownership nomination:
-                // forward the game's original stencil-only draw unchanged.
-            } else if(!plan.admitted())domainFail(s,"planning",plan.refusal,k);
-            else {
-                domainPlanned=true;domainDepth=candidate->depth.Get();domainVs=k.vs;domainPs=k.ps;
-                domainBeforeWorld=domainWasBeforeWorld;domainSameWorld=sameWorld;
-                domainCameraHash=k.cameraHash;domainFormat=k.format;domainHdrWriter=k.format==26;
-                domainCbEpoch=k.writeEpoch;domainCbGeneration=bindingGeneration(BindSlot::VsCb1);
-                if(domainHdrWriter) {
-                    if(candidate->hdr && candidate->hdr.Get()!=k.color)
-                        domainFail(s,"planning-HDR","foreground-multiple-provisional-HDR-targets",k);
-                    else candidate->hdr=static_cast<ID3D11Resource*>(const_cast<void*>(k.color));
+            const bool worldCamera=s.namedDepth && k.camera && std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))==0;
+            auto witness=[&]{
+                if(!candidate->pendingNull.add(s.prefix.frame,k.depth,k.depthWidth,k.depthHeight,rows,s.phase.currentX,s.phase.currentY))
+                    domainFail(s,"pending-world","foreground-pending-null-overflow",k);
+            };
+            if(!k.camera || worldCamera || predictedWorld) {
+                // Screen passes and world-camera draws: nothing to mark or capture.
+                if(predictedWorld){++s.foregroundCounts.predictedWorld;witness();}
+                else ++s.foregroundCounts.worldUnmarked;
+            } else {
+                const auto& proof=domainShaderProof(s,k.vs,k.ps);
+                const auto plan=flatDomainPlan(proof,k.color!=nullptr,k.format,true,s.namedDepth!=nullptr,false);
+                if(plan.kind==FlatDomainPlanKind::PendingWorldNull) {
+                    // A null prepass before naming at another near is world only
+                    // if it matches the selected camera at H.
+                    witness();
+                } else if(!plan.admitted() && domainDrawPreservesSurface(context)) {
+                    // No depth write: the surface and its owner mark are the last
+                    // depth writer's. Forward the game's draw unchanged.
+                    ++s.foregroundCounts.surfacePreserving;++s.foregroundCounts.surfacePreservingForeign;
+                } else if(!plan.admitted() && proof.inertNoSideEffects) {
+                    const char* inertRefusal=domainOriginalInertRefusal(context,k,proof);
+                    if(inertRefusal)domainFail(s,"inert-state",inertRefusal,k);
+                    // Otherwise no private marker/history or ownership nomination:
+                    // forward the game's original stencil-only draw unchanged.
+                } else if(!plan.admitted())domainFail(s,"planning",plan.refusal,k);
+                else {
+                    // A first-person depth writer: capture its geometry and mark it.
+                    domainPlanned=true;domainDepth=candidate->depth.Get();domainVs=k.vs;domainPs=k.ps;
+                    domainBeforeWorld=domainWasBeforeWorld;domainSameWorld=false;
+                    domainCameraHash=k.cameraHash;domainFormat=k.format;domainHdrWriter=k.format==26;
+                    if(domainHdrWriter) {
+                        if(candidate->hdr && candidate->hdr.Get()!=k.color)
+                            domainFail(s,"planning-HDR","foreground-multiple-provisional-HDR-targets",k);
+                        else candidate->hdr=static_cast<ID3D11Resource*>(const_cast<void*>(k.color));
+                    }
+                    domainWidth=k.depthWidth;domainHeight=k.depthHeight;
+                    domainPool=domainForeign=plan.kind==FlatDomainPlanKind::ForeignPool;
+                    domainWriterToken=s.prefix.sequence;
+                    std::memcpy(domainCamera,d.camera,sizeof(domainCamera));
+                    ++s.foregroundCounts.foreignSeen;
                 }
-                domainWidth=k.depthWidth;domainHeight=k.depthHeight;
-                domainPool=plan.kind==FlatDomainPlanKind::WorldPool || plan.kind==FlatDomainPlanKind::ForeignPool;
-                domainForeign=plan.kind==FlatDomainPlanKind::ForeignPool;
-                if(domainForeign)domainWriterToken=s.prefix.sequence;
-                domainPendingWorldNull=plan.kind==FlatDomainPlanKind::PendingWorldNull || predictedWorld;
-                std::memcpy(domainCamera,d.camera,sizeof(domainCamera));
-                if(domainForeign)++s.foregroundCounts.foreignSeen;
-                if(predictedWorld)++s.foregroundCounts.predictedWorld;
             }
         }
     }
@@ -4675,22 +4671,6 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         // wrapper's D3D state calls are counted where they are made.
         flatcpu::Scope engine(flatcpu::kEngineDraw);
         producer = engineVelocityFlatBeginDraw(ctx, &gameHadTarget6);
-    }
-    // An existing world producer already owns the original shader/MRT6
-    // bracket. Reuse the checked game bindings and immutable descriptors for
-    // its run; no DXBC parsing, actual-CB query or additional driver state
-    // query occurs on the thousands of unchanged world draws.
-    auto* checkedDomain=domainPlanned?domainCandidate(s,domainDepth):nullptr;
-    if(checkedDomain && producer && !gameHadTarget6 && !domainForeign && !domainHdrWriter &&
-       !domainPendingWorldNull && checkedDomain->worldValidated &&
-       checkedDomain->worldTargetGeneration==bindingGeneration(BindSlot::Rtv0) &&
-       checkedDomain->worldPhase.matches(domainShaderProof(s,k.vs,k.ps),bindingGeneration(BindSlot::VsCb1),k.writeEpoch) &&
-       checkedDomain->worldBlend==bindingGet(BindSlot::Blend)) {
-        const auto& proof=domainShaderProof(s,k.vs,k.ps);
-        const char* why=flatDomainRasterRefusal(proof,checkedDomain->worldBlendDesc,checkedDomain->worldDepthDesc,
-            checkedDomain->worldBoundColors,false,false,checkedDomain->colorWritten);
-        if(why)domainFail(s,"cached-world-state",why,k);
-        domainPlanned=false;
     }
     // The earlier capture preserves original game CBs and shader identities.
     // Motion is sampled only after the producer has attached its actual MRT6,
@@ -5334,21 +5314,12 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         if(blend)blend->GetDesc(&bd);else for(auto& rt:bd.RenderTarget)rt.RenderTargetWriteMask=15;
         unsigned boundColors=0;ID3D11RenderTargetView* colors[6]{};ctx->OMGetRenderTargets(6,colors,nullptr);
         std::array<Ptr<ID3D11RenderTargetView>,6> originalColors{};
-        const char* earlyStateStage=nullptr;const char* earlyStateReason=nullptr;
+        // Which colour targets a first-person draw writes does not decide who
+        // owns a pixel (section 104); the scene's HDR target is itself a
+        // Gbuffer slot, so every forward HDR draw also "writes the Gbuffer".
         for(unsigned i=0;i<6;++i)if(colors[i]) {
             boundColors|=1u<<i;
             originalColors[i].Attach(colors[i]);
-            Ptr<ID3D11Resource> resource;colors[i]->GetResource(&resource);
-            if(domainHdrWriter) {
-                const auto mask=bd.RenderTarget[bd.IndependentBlendEnable?i:0].RenderTargetWriteMask;
-                for(const auto& gbuffer:candidate->colors)if(gbuffer && gbuffer==resource &&
-                    (mask&projection.colorComponents[i]) && !earlyStateReason) {
-                    earlyStateStage="state-HDR";earlyStateReason="foreground-HDR-writes-Gbuffer";
-                }
-            } else if(candidate->colors[i] && candidate->colors[i]!=resource) {
-                if(!earlyStateReason){earlyStateStage="state";earlyStateReason="foreground-color-target-changed";}
-            }
-            else candidate->colors[i]=std::move(resource);
         }
         const uint8_t* vsBytes=nullptr;const uint8_t* psBytes=nullptr;size_t vsSize=0,psSize=0;
         const bool bytes=flatProbeShaderLookup('v',domainVs,&vsBytes,&vsSize) &&
@@ -5415,33 +5386,20 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         if(domainPs && colorWrites)candidate->colorWritten=true;
         const bool queriesUnsafe=opaque && bytes && !replayQueriesSafe(ctx);
         const bool unplannable=!opaque || !bytes || queriesUnsafe || indirectArgs;
-        if((earlyStateReason || unplannable) && flatDomainPreservesSurface(dd)) {
+        if(unplannable && flatDomainPreservesSurface(dd)) {
             // No depth write: the last depth writer's surface and owner mark
             // stand. No capture, marker or refusal; the game's draw runs as is.
             ++s.foregroundCounts.surfacePreserving;
             if(domainForeign)++s.foregroundCounts.surfacePreservingForeign;
         } else if(unplannable) {
-            if(earlyStateReason)failDomain(earlyStateStage,earlyStateReason);
             failDomain("state",!opaque?rasterRefusal:!bytes?
                 "foreground-original-shader-unavailable":indirectArgs?"foreground-indirect-writer":"foreground-active-query");
         } else {
-            if(earlyStateReason)failDomain(earlyStateStage,earlyStateReason);
             const char* phaseReason=nullptr;
             const bool phaseKnown=flatForegroundBoundProjectionPhase(ctx,s.projection.get(),projection.projectionSlot,
                 projection.projectionRow,projection.projectionLayout,s.phase.currentX,s.phase.currentY,
                 domainWidth,domainHeight,domainCamera[3][2],&phaseReason);
             if(!phaseKnown)failDomain("projection-phase",phaseReason);
-            if(phaseKnown && producer && !gameHadTarget6 && !domainForeign && !domainHdrWriter && !domainPendingWorldNull &&
-               projection.projectionSlot==1 && projection.projectionRow==270 &&
-               projection.projectionLayout==FlatProjectionPatchLayout::ForwardColumns) {
-                candidate->worldValidated=true;candidate->worldTargetGeneration=bindingGeneration(BindSlot::Rtv0);
-                candidate->worldPhase.checked(projection,domainCbGeneration,domainCbEpoch);
-                candidate->worldBlend=bindingGet(BindSlot::Blend);candidate->worldBlendDesc=bd;
-                candidate->worldDepthDesc=dd;candidate->worldBoundColors=boundColors;
-            }
-            if(domainPendingWorldNull && phaseKnown && !candidate->pendingNull.add(s.prefix.frame,domainDepth,
-                domainWidth,domainHeight,domainCamera,s.phase.currentX,s.phase.currentY))
-                failDomain("pending-null","foreground-pending-null-overflow");
             if(domainForeign && domainPool && phaseKnown) {
                 FlatForegroundMotion::Inputs inputs{};std::memcpy(inputs.camera,domainCamera,sizeof(inputs.camera));
                 inputs.phaseX=s.phase.currentX;inputs.phaseY=s.phase.currentY;
@@ -5699,7 +5657,7 @@ extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
     snap.predictedWorld = s.foregroundCounts.predictedWorld;
     snap.surfacePreserving = s.foregroundCounts.surfacePreserving;
     snap.surfacePreservingForeign = s.foregroundCounts.surfacePreservingForeign;
-    snap.surfacePreservingCameraless = s.foregroundCounts.surfacePreservingCameraless;
+    snap.worldUnmarked = s.foregroundCounts.worldUnmarked;
     snap.failureKinds = s.foregroundFailureKinds.used;
     snap.failureKindsDropped = s.foregroundFailureKinds.dropped;
     snap.hdrTriggered = s.hdr.triggered ? 1u : 0u;

@@ -3,7 +3,8 @@
 // the actual inputs handed to each backend and refusals before any H mutation.
 #pragma once
 
-inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) {
+// The scenario, on whichever prep the resolver holds (the shipped one, or a mutated one a mutation run installs).
+inline void sdkForegroundScenario(ID3D11Device* device, ID3D11DeviceContext* context) {
     using namespace edvr;
     ResolveFixture fixture(device,context);
     constexpr UINT w=ResolveFixture::w,h=ResolveFixture::h;
@@ -79,6 +80,60 @@ inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* con
         resolve(true,"SDK final world overdraw remains admitted");
         check(observedDepth==.01f && observedMotion==0 && observedMotionY==0 && observedReject==0,
               "equal-depth world overdraw uses world inputs despite conservative foreign footprint");
+        // Section 104: world draws leave no mark, so a first-person mark names its pixel only while its depth is still the pixel's raw
+        // depth. A world surface drawn over it leaves the negative code behind with the old depth: the pixel takes the world path (the
+        // engine lookup answers the camera term for a negative code), never the foreground map. The camera is moved so that term is
+        // not zero and cannot be mistaken for a refusal's zero.
+        f.previousCamera[5][0]=.05f;
+        markers[2*center]=0;context->UpdateSubresource(slots.Get(),0,nullptr,markers.data(),w*8,0);
+        ++f.frame;f.foregroundFrame=f.frame;
+        resolve(true,"SDK moving camera with no mark resolves");
+        const float cameraX=observedMotion,cameraY=observedMotionY,cameraDepth=observedDepth;
+        check(std::isfinite(cameraX) && std::isfinite(cameraY) && (cameraX!=0 || cameraY!=0) && cameraDepth==.01f && observedReject==0,
+              "reference: an unmarked pixel takes the camera term, which is not zero here");
+        markers[2*center]=-3;markers[2*center+1]=.02f;   // a first-person mark whose depth is no longer the pixel's (.01)
+        context->UpdateSubresource(slots.Get(),0,nullptr,markers.data(),w*8,0);
+        ++f.frame;f.foregroundFrame=f.frame;
+        resolve(true,"SDK stale first-person mark remains admitted");
+        check(observedMotion==cameraX && observedMotionY==cameraY && observedDepth==cameraDepth && observedReject==0 &&
+              !(observedMotion==1.75f && observedMotionY==-.5f) && observedDepth!=.0025f,
+              "a first-person mark under another depth is stale: the pixel takes the camera term and raw depth, not the foreground map");
+        // The same stale pixel under a map the foreground path would have refused (ambiguous history) is still the world's, not a refused
+        // first-person pixel; with the depth equal, the identical map and mark are refused as first-person (kClassWeaponRefused).
+        map[4*center+3]=2;context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
+        f.refusalCensus=true;
+        auto takeCensus=[&]() {   // the sample lands a few frames later; the bound is generous because the rig runs beside others
+            refusalgpu::Taken taken;
+            for(int i=0;i<3000 && taken.frames<1;++i) {
+                context->Flush();taken.add(flatMonoResolveTakeRefusalCensus());
+                if(taken.frames<1)Sleep(2);
+            }
+            return taken;
+        };
+        (void)flatMonoResolveTakeRefusalCensus();   // nothing has asked yet; start the sums from zero
+        for(unsigned i=0;i<kFlatMonoRefusalEvery;++i) {   // four asking frames take exactly one sample
+            ++f.frame;f.foregroundFrame=f.frame;
+            resolve(true,"SDK stale first-person mark under an ambiguous map stays admitted");
+            check(observedMotion==cameraX && observedMotionY==cameraY && observedDepth==cameraDepth && observedReject==0,
+                  "a stale mark is not first-person even where the foreground map would refuse: world inputs, history kept");
+        }
+        const auto staleCensus=takeCensus();
+        check(staleCensus.frames>=1 && staleCensus.counts[kFlatMonoClassWeaponRefused]==0 && staleCensus.refused()==0,
+              "census: the stale mark's pixel is not counted as a refused first-person pixel");
+        markers[2*center+1]=.01f;context->UpdateSubresource(slots.Get(),0,nullptr,markers.data(),w*8,0);
+        for(unsigned i=0;i<kFlatMonoRefusalEvery;++i) {
+            ++f.frame;f.foregroundFrame=f.frame;
+            resolve(true,"SDK matching-depth first-person mark under an ambiguous map stays admitted");
+            check(observedReject==255 && observedDepth==.0025f,
+                  "control: the same mark at the pixel's own depth is first-person and its ambiguous history is refused");
+        }
+        const auto freshCensus=takeCensus();
+        check(freshCensus.frames>=1 && freshCensus.counts[kFlatMonoClassWeaponRefused]==freshCensus.frames &&
+              freshCensus.refused()==freshCensus.frames,
+              "census: the matching-depth mark's pixel is counted once per sampled frame as a refused first-person pixel");
+        f.refusalCensus=false;map[4*center+3]=1;
+        context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
+        camera(f.previousCamera);
         markers[2*center]=-3;context->UpdateSubresource(slots.Get(),0,nullptr,markers.data(),w*8,0);
         // A common near avoids depth >1 when the foreground camera can see
         // nearer geometry. World reprojection still consumes the raw depth.
@@ -126,4 +181,51 @@ inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* con
     const int calls=backendCalls;resolve(true,"native TAA retains existing conservative coverage route");
     check(backendCalls==calls,"TAA route does not call an SDK");
     flatMonoResolveReset();context->ClearState();
+}
+
+// The scenario on the shipped prep, then on the prep with one section 104 rule flipped at a time: the stale-mark checks must catch
+// each flip (a scenario that cannot fail proves nothing), and the unmutated source compiled here must pass through the same seam.
+inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* context) {
+    using namespace edvr;
+    sdkForegroundScenario(device,context);
+    struct Mutant {const char* name;const char* from;const char* to;};
+    static const Mutant mutants[]={
+        {"a negative mark is first person at any depth (the rule before section 104)",
+         "foreground=owner.x < -1 && asuint(owner.y)==asuint(depth);","foreground=owner.x < -1;"},
+        {"a mark names its pixel only where its depth differs",
+         "foreground=owner.x < -1 && asuint(owner.y)==asuint(depth);","foreground=owner.x < -1 && asuint(owner.y)!=asuint(depth);"},
+    };
+    const std::string shipped=kFlatMonoShaderSource;
+    auto runMutated=[&](const std::string& hlsl,int* failed,std::string* first) {
+        std::vector<unsigned char> bytes;
+        if(!fpgpu::compilePrep(hlsl,bytes))return false;
+        ComPtr<ID3D11ComputeShader> probe;   // the bytes must make a compute shader, or "the scenario fails" could mean the resolver never started
+        if(FAILED(device->CreateComputeShader(bytes.data(),bytes.size(),nullptr,probe.GetAddressOf())))return false;
+        flatMonoResolveTestPrepBytecode(bytes.data(),bytes.size());flatMonoResolveReset();
+        *failed=0;mutationFailures=failed;mutationFirst.clear();
+        sdkForegroundScenario(device,context);
+        mutationFailures=nullptr;if(first)*first=mutationFirst;
+        return true;
+    };
+    {   // The control: the same source, compiled here and run through the same seam, is the shipped prep and passes.
+        int failed=0;std::string first;
+        const bool ran=runMutated(shipped,&failed,&first);
+        check(ran && failed==0,"SDK foreground mutations: control: the unmutated prep, compiled here and run through the test seam, passes the whole scenario");
+    }
+    for(const Mutant& m:mutants) {
+        bool once=false;
+        const std::string hlsl=fpgpu::replaceOnce(shipped,m.from,m.to,&once);
+        char what[320];
+        std::snprintf(what,sizeof(what),"SDK foreground mutations: \"%s\": its anchor is in the shader source exactly once",m.name);
+        check(once,what);
+        int failed=0;std::string first;
+        const bool ran=once && runMutated(hlsl,&failed,&first);
+        std::snprintf(what,sizeof(what),"SDK foreground mutations: \"%s\" compiles and makes a compute shader",m.name);
+        check(ran,what);
+        if(!ran)continue;
+        std::snprintf(what,sizeof(what),"SDK foreground mutations: \"%s\" is caught by the scenario",m.name);
+        check(failed>0,what);
+        std::printf("flat mono resolve: SDK foreground mutation \"%s\": %d checks fail; first: %s\n",m.name,failed,first.c_str());
+    }
+    flatMonoResolveTestPrepBytecode(nullptr,0);flatMonoResolveReset();
 }

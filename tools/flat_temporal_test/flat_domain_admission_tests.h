@@ -170,8 +170,10 @@ inline int flatDomainAdmissionTests() {
     check(hdrDiscard.pool && hdrDiscard.worldPs && hdrDiscard.foreignPs && hdrOpaque.worldPs,"actual HDR material discard retains original primitive and writer provenance");
     check(flatDomainPlan(hdrDiscard,true,26,true,true,true).kind==FlatDomainPlanKind::WorldPool &&
           flatDomainPlan(hdrOpaque,true,26,true,true,true).kind==FlatDomainPlanKind::WorldPool,"same-world original HDR mesh can update final owner");
-    check(!flatDomainPlan(hdrOpaque,true,26,true,true,false).admitted() &&
-          !flatDomainPlan(hdrOpaque,true,26,true,false,false).admitted(),"foreign/unassociated HDR cannot replace world owner");
+    // Section 104: a first-person forward mesh writes the HDR light target; it is captured with its own motion.
+    check(flatDomainPlan(hdrDiscard,true,26,true,true,false).kind==FlatDomainPlanKind::ForeignPool &&
+          flatDomainPlan(hdrDiscard,true,26,true,false,false).kind==FlatDomainPlanKind::ForeignPool,"first-person HDR mesh is captured as foreign");
+    check(!flatDomainPlan(hdrDiscard,true,60,true,false,false).admitted(),"other colour formats still refuse");
     D3D11_BLEND_DESC blend{};for(auto& rt:blend.RenderTarget)rt.RenderTargetWriteMask=15;
     D3D11_DEPTH_STENCIL_DESC depthState{};depthState.DepthEnable=TRUE;depthState.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;depthState.DepthFunc=D3D11_COMPARISON_EQUAL;
     check(!flatDomainRasterRefusal(hdrDiscard,blend,depthState,1,false,true,true),"opaque EQUAL HDR mesh updates owner without changing raw depth");
@@ -207,7 +209,8 @@ inline int flatDomainAdmissionTests() {
     auto discard=foreign;discard.foreignPs=false;discard.refusal="foreground-foreign-discard-provenance";
     check(!flatDomainPlan(discard,true,23,true,false,false).admitted(),"discard foreign cannot fabricate history ownership");
     check(!flatDomainPlan(foreign,true,23,false,false,false).admitted() &&
-          !flatDomainPlan(foreign,true,26,true,false,false).admitted(),"missing camera or unknown HDR writer refuses");
+          flatDomainPlan(foreign,true,26,true,false,false).kind==FlatDomainPlanKind::ForeignPool,
+          "missing camera refuses; a first-person HDR writer is captured");
     std::vector<uint8_t> vs,ps;flat_shader_classifier_tests::loadFixture("vs_AACFDCF2FB9AD809",vs);flat_shader_classifier_tests::loadFixture("ps_CAD1F585EDDC5641",ps);
     check(!flatDomainShaderProof(1,0xCAD1F585EDDC5641ull,vs.data(),vs.size(),ps.data(),ps.size()).present,"forged exact recipe hash refuses");
     {
@@ -260,13 +263,14 @@ inline int flatDomainAdmissionTests() {
         auto hdrAlways=writesDepth;hdrAlways.DepthFunc=D3D11_COMPARISON_ALWAYS;
         check(!flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,true),
               "positive control: an opaque full-mask HDR writer that writes depth is still admitted");
+        // Section 104: a depth writer owns its surface whatever its colour does, HDR included.
         hdrBlend.RenderTarget[0].BlendEnable=TRUE;
-        check(reason(flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,true),"foreground-mixed-component-writer") &&
-              reason(flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,false),"foreground-mixed-component-writer"),
-              "a blended HDR writer with a depth write still refuses");
+        check(!flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,true) &&
+              !flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,false),
+              "a blended HDR writer with a depth write owns its surface");
         hdrBlend.RenderTarget[0].BlendEnable=FALSE;hdrBlend.RenderTarget[0].RenderTargetWriteMask=3;
-        check(reason(flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,true),"foreground-mixed-component-writer"),
-              "a partly masked HDR writer with a depth write still refuses");
+        check(!flatDomainRasterRefusal(hdrDiscard,hdrBlend,hdrAlways,1,false,true,true),
+              "a partly masked HDR writer with a depth write owns its surface");
         // A depth-only draw after color: legal and exact when it writes depth (non-HDR), refused when it cannot.
         D3D11_BLEND_DESC allColor{};for(auto& rt:allColor.RenderTarget)rt.RenderTargetWriteMask=15;
         auto nullWritesDepth=writesDepth;nullWritesDepth.DepthFunc=D3D11_COMPARISON_LESS;

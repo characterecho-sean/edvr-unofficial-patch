@@ -51,12 +51,13 @@ struct EdvrFlatSdkBenchSnapshot {
     char hdrVerdict[96]{};
     EdvrFlatForegroundStateReceipt firstFailureState{};
     EdvrFlatForegroundBudgetReceipt firstFailureBudget{};
-    // Version 3: provisional world before naming, draws that cannot write
-    // depth forwarded unchanged, and the distinct refusals of the last failed H.
+    // Version 3: provisional world before naming, world draws left unmarked,
+    // draws that cannot write depth forwarded unchanged, and the distinct
+    // refusals of the last failed H.
     uint64_t predictedWorld = 0;
     uint64_t surfacePreserving = 0;
     uint64_t surfacePreservingForeign = 0;
-    uint64_t surfacePreservingCameraless = 0;
+    uint64_t worldUnmarked = 0;
     uint32_t failureKinds = 0;
     uint32_t failureKindsDropped = 0;
 };

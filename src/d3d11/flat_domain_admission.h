@@ -171,7 +171,9 @@ struct FlatDomainPlan {
 inline FlatDomainPlan flatDomainPlan(const FlatDomainShaderProof& p,bool color,uint32_t format,
                                      bool camera,bool namedWorld,bool sameWorld) {
     if(!camera)return {FlatDomainPlanKind::Refuse,"foreground-original-camera-unavailable"};
-    if(color && format!=23 && !(format==26 && namedWorld && sameWorld && p.pool && !p.nullPs))
+    // Gbuffer (23) and the HDR light target (26, itself a Gbuffer slot in
+    // Odyssey) take owner marks; a forward first-person mesh writes the latter.
+    if(color && format!=23 && format!=26)
         return {FlatDomainPlanKind::Refuse,"foreground-non-Gbuffer-writer"};
     if(!p.present || !p.projection || !p.worldPs)return {FlatDomainPlanKind::Refuse,p.refusal};
     if(p.nullPs && !p.pool) {
@@ -209,12 +211,12 @@ inline const char* flatDomainRasterRefusal(const FlatDomainShaderProof& p,const 
     if(foreign && !p.foreignPs && depth.StencilEnable &&
        (depth.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || depth.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS))
         return "foreground-conditional-stencil";
-    // A Gbuffer draw that writes depth defines the surface its passing
-    // fragments show: deferred lighting reconstructs position from that depth,
-    // so its owner mark is exact however its color blends or masks. Measured
-    // 2026-10-06: CFCA8FFC writes clip W into RT0 with MIN blend and depth
-    // write in both cameras. HDR color is final, so HDR writers stay strict.
-    const bool surfaceWriter=!hdr && depth.DepthEnable && depth.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL;
+    // A draw that writes depth defines the surface its passing fragments
+    // show, so its owner mark is exact however its colour blends or masks
+    // (CFCA8FFC writes clip W into RT0 with MIN blend; forward HDR meshes
+    // blend). Colour mixed over a surface reprojects with that surface's
+    // motion, the ordinary transparency case for every temporal upscaler.
+    const bool surfaceWriter=depth.DepthEnable && depth.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL;
     if(!surfaceWriter)for(unsigned i=0;i<6;++i)if((boundTargets&(1u<<i)) && p.colorComponents[i]) {
         const auto& rt=blend.RenderTarget[blend.IndependentBlendEnable?i:0];
         if(!rt.RenderTargetWriteMask)continue;
@@ -222,7 +224,7 @@ inline const char* flatDomainRasterRefusal(const FlatDomainShaderProof& p,const 
             return "foreground-mixed-component-writer";
     }
     const bool color=flatDomainWritesColor(p,blend,boundTargets);
-    if(hdr && (!color || (p.colorComponents[0]&7)!=7))return "foreground-incomplete-HDR-color";
+    if(!surfaceWriter && hdr && (!color || (p.colorComponents[0]&7)!=7))return "foreground-incomplete-HDR-color";
     if(!surfaceWriter && (p.nullPs || !color) && colorAlready)return "foreground-depth-only-after-color";
     return nullptr;
 }
