@@ -231,9 +231,15 @@ inline void hdrRouteGpuTests(ID3D11Device* device, ID3D11DeviceContext* context)
     ok = run(true);
     check(ok && observedHdr, "HDR route: DLAA is told HDR too (R = D)");
 
-    // The backend sees only the clean world image while the final HDR target
-    // takes the live game colour at covered source texels. The shader's four
-    // bilinear source taps apply coverage at a nonzero phase, for SDK and TAA.
+    // A late overlay (a weapon's glow, a sight's lens and glow quads) is drawn into H after the world. The backend sees only the clean world
+    // image, which is t0 of the finish; t16 is the raw H with the overlays drawn. The finish keeps the world under the overlay's coverage and
+    // adds what the overlay drew there, the raw sample minus the clean one:
+    //   covered and trusted:  the backend's result + (raw - clean)    (a fully transparent part of a quad, raw == clean, adds nothing:
+    //                         the world stays anti-aliased under it; the sum is clamped at zero, an alpha overlay can darken)
+    //   covered and refused:  the raw sample, as it always was
+    //   not covered:          the backend's result where trusted and the clean sample where refused, as before.
+    // It used to show the raw frame wherever the coverage said an overlay draw had touched, so aiming down sights took the anti-aliasing off
+    // the world behind the sight. The shader's four bilinear source taps apply coverage at a nonzero phase, for SDK and TAA.
     {
         const uint32_t cleanPixel=pack(20,30,40);
         std::vector<uint32_t> cleanTexels(w*h,cleanPixel);
@@ -251,39 +257,96 @@ inline void hdrRouteGpuTests(ID3D11Device* device, ID3D11DeviceContext* context)
             f.jitterX=f.previousJitterX=expectedJx=.25f;
             f.jitterY=f.previousJitterY=expectedJy=-.25f;
             std::memcpy(f.previousCamera,f.camera,sizeof(f.camera));
-            auto live=[&] { fill([&](UINT x,UINT y,double (&c)[3]) {
+            // What the game drew into H: the clean world everywhere, and over texel (8, 8) the overlay's glow, brighter in red and green and
+            // darker in blue than the world under it.
+            auto liveWith=[&](double r,double g,double bl) { fill([&](UINT x,UINT y,double (&c)[3]) {
                 c[0]=20;c[1]=30;c[2]=40;
-                if(x==8 && y==8) {c[0]=200;c[1]=10;c[2]=10;}
+                if(x==8 && y==8) {c[0]=r;c[1]=g;c[2]=bl;}
             }); };
-            auto composited=[&](const char* route) {
-                std::vector<uint32_t> got;
-                if(!readH(got)) {check(false,route);return;}
-                double marked[3]{},outside[3]{};
-                unpack(got[8*w+8],marked);unpack(got[2*w+2],outside);
-                bool fourTaps=true;
-                for(UINT y=8;y<=9;++y)for(UINT x=7;x<=8;++x) {
+            auto live=[&] { liveWith(200,60,10); };
+            auto transparent=[&] { liveWith(20,30,40); };   // the overlay covers the texel and draws nothing there: raw == clean
+            const double cleanOf[3]={20,30,40};
+            const double stub[3]={0,1,0};                   // the stub backend's result: uniform green
+            const double quarter[3]={0,.25,0};              // the refusal view's paint of a pixel with no engine slot: a quarter of what it showed
+            // The raw H (the live image) where the finish samples it: bilinear at the jittered position.
+            auto rawAt=[&](UINT x,UINT y,int c) { return bilinear(c==0?inR:c==1?inG:inB,x+f.jitterX,y+f.jitterY); };
+            // The four pixels whose bilinear taps touch the covered texel at this phase (x 7..8, y 8..9), channel by channel against wantOf.
+            auto fourPixels=[&](const std::vector<uint32_t>& got,auto wantOf) {
+                bool all=got.size()==w*h;
+                for(UINT y=8;all && y<=9;++y)for(UINT x=7;x<=8;++x) {
                     double pixel[3]{};unpack(got[y*w+x],pixel);
-                    const double raw=bilinear(inR,x+f.jitterX,y+f.jitterY);
-                    fourTaps&=std::abs(pixel[0]-raw)<=1.5*ulp(raw,6) && pixel[0]>20;
+                    for(int c=0;c<3;++c) {
+                        const double want=wantOf(x,y,c);
+                        all&=std::abs(pixel[c]-want)<=1.5*ulp(want,mantissa(c))+1e-6;
+                    }
                 }
-                check(fourTaps && marked[0]>100,
-                      "HDR overlay: all four nonzero-phase bilinear neighbors use aligned live colour");
-                if(f.mode==FlatMonoResolveMode::Taa)
-                    check(std::abs(outside[0]-20)<=ulp(20,6) && std::abs(outside[1]-30)<=ulp(30,6),
-                          "HDR overlay: TAA world outside coverage came from clean input");
-                else
-                    check(std::abs(outside[0])<1e-6 && std::abs(outside[1]-1)<.01,
-                          "HDR overlay: SDK world outside coverage came from backend result");
+                return all;
+            };
+            // Pixels no tap of which touches the covered texel: the world, whatever the overlay did.
+            auto worldOutside=[&](const std::vector<uint32_t>& got,const double (&want)[3]) {
+                const UINT spots[][2]={{2,2},{6,8},{9,8},{8,10},{8,7},{12,12}};
+                bool all=got.size()==w*h;
+                for(const auto& spot:spots) {
+                    if(!all)break;
+                    double pixel[3]{};unpack(got[spot[1]*w+spot[0]],pixel);
+                    for(int c=0;c<3;++c)all&=std::abs(pixel[c]-want[c])<=1.5*ulp(want[c],mantissa(c))+1e-6;
+                }
+                return all;
+            };
+            std::string label;
+            auto say=[&](const char* mode,const char* text)->const char* {
+                label=std::string("HDR overlay (")+mode+"): "+text;return label.c_str();
             };
             for(auto mode:{FlatMonoResolveMode::Dlaa,FlatMonoResolveMode::Fsr}) {
+                const char* name=mode==FlatMonoResolveMode::Dlaa?"DLAA":"FSR";
                 f.mode=mode;f.reset=false;++f.frame;live();run(true); // prime a new SDK mode's history
                 ++f.frame;live();observedBackendPixels=false;
                 backendCalls=0;
                 ok=run(true);
                 check(ok && !backendReset && backendCalls==1 && observedBackendPixels &&
                       observedBackendCenter==cleanPixel && observedBackendOutside==cleanPixel,
-                      "HDR overlay: both SDKs receive clean world pixels, never live overlay pixels");
-                composited("HDR overlay SDK readback");
+                      say(name,"the SDK receives clean world pixels, never live overlay pixels"));
+                std::vector<uint32_t> got;
+                check(readH(got) && got.size()==w*h,say(name,"the finished H is readable"));
+                // Covered and trusted: the backend's result plus the overlay's own contribution, clamped at zero.
+                check(fourPixels(got,[&](UINT x,UINT y,int c) { return std::max(0.0,stub[c]+rawAt(x,y,c)-cleanOf[c]); }),
+                      say(name,"covered and trusted: the world's backend result plus the overlay's contribution (History + raw - clean, clamped at zero)"));
+                {
+                    // It is not the raw frame the finish used to show there (green is 1 + 30 w here, the raw frame's 30 + 30 w).
+                    double marked[3]{};if(got.size()==w*h)unpack(got[8*w+8],marked);
+                    check(marked[0]>100 && std::abs(marked[1]-rawAt(8,8,1))>20,
+                          say(name,"covered and trusted: the pixel under the glow is not the raw frame"));
+                }
+                check(worldOutside(got,stub),say(name,"outside the coverage and its four taps the world is the backend's result"));
+                // A fully transparent overlay over a covered region: raw == clean there. The world stays anti-aliased under it (History), it
+                // does not turn into the raw frame (20, 30, 40).
+                ++f.frame;transparent();ok=run(true);
+                got.clear();
+                check(ok && readH(got) && fourPixels(got,[&](UINT,UINT,int c) { return stub[c]; }) && worldOutside(got,stub),
+                      say(name,"a fully transparent overlay over a covered region keeps the anti-aliased world (History), not the raw frame"));
+                // The refusal view in an overlay frame paints the finish's own colour (the view's slots: t11 the class, t12 the mask, t16 the raw H).
+                ++f.frame;live();f.refusalView=1;ok=run(true);f.refusalView=0;
+                got.clear();
+                check(ok && readH(got) &&
+                          fourPixels(got,[&](UINT x,UINT y,int c) { return .25*std::max(0.0,stub[c]+rawAt(x,y,c)-cleanOf[c]); }) &&
+                          worldOutside(got,quarter),
+                      say(name,"the refusal view in an overlay frame paints a quarter of the same composite (a pixel with no engine slot)"));
+                // Covered and refused: texel (8, 8) is a stale slot (code 1, a depth the scene never had), so every pixel whose taps touch it
+                // is refused and shows the raw sample, the overlay and the world under it together, exactly as before; the trusted
+                // neighbours keep the backend's result.
+                slots[(8*w+8)*2]=1;slots[(8*w+8)*2+1]=.5f;
+                context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
+                ++f.frame;live();ok=run(true);
+                slots[(8*w+8)*2]=-1;slots[(8*w+8)*2+1]=.01f;
+                context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
+                got.clear();
+                check(ok && readH(got) && fourPixels(got,[&](UINT x,UINT y,int c) { return rawAt(x,y,c); }) && worldOutside(got,stub),
+                      say(name,"covered and refused (a stale slot under the glow): the raw sample, as before; the trusted neighbours keep the backend's result"));
+                // And a reset frame refuses every pixel: the raw sample under the coverage, the clean sample everywhere else.
+                f.reset=true;++f.frame;live();ok=run(true);f.reset=false;
+                got.clear();
+                check(ok && readH(got) && fourPixels(got,[&](UINT x,UINT y,int c) { return rawAt(x,y,c); }) && worldOutside(got,cleanOf),
+                      say(name,"covered and refused (a reset frame): the raw sample under the coverage and the clean sample outside it"));
             }
             std::vector<unsigned char> none(w*h,0);
             auto noCoverageTexture=texture(device,w,h,DXGI_FORMAT_R8_UNORM,
@@ -305,7 +368,15 @@ inline void hdrRouteGpuTests(ID3D11Device* device, ID3D11DeviceContext* context)
             f.mode=FlatMonoResolveMode::Taa;f.reset=true;++f.frame;live();
             ok=run(true);
             check(ok,"HDR overlay: internal TAA accepts clean/live split");
-            composited("HDR overlay TAA readback");
+            {
+                // EDVR's TAA output for a uniform clean frame is the clean frame, so under the coverage the sum is clean + (raw - clean):
+                // the raw frame, here, in all three channels (blue darkens); outside it the world is the TAA's output, the clean input.
+                std::vector<uint32_t> got;
+                check(readH(got) && got.size()==w*h &&
+                          fourPixels(got,[&](UINT x,UINT y,int c) { return std::max(0.0,cleanOf[c]+rawAt(x,y,c)-cleanOf[c]); }) &&
+                          worldOutside(got,cleanOf),
+                      "HDR overlay (TAA): covered pixels are the TAA's world plus the overlay's contribution, and the world outside the coverage came from clean input");
+            }
 
             // The next unmarked frame does not inherit a stale coverage mask.
             f.cleanColor=nullptr;f.overlayCoverage=nullptr;

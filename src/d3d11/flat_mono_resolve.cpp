@@ -603,7 +603,7 @@ void drawHdrTarget(ID3D11DeviceContext* context,ID3D11PixelShader* ps,uint32_t w
     }
     // Nothing of ours stays bound: the isolation guard's destructor clears the state once more before the game's returns.
     context->OMSetRenderTargets(0,nullptr,nullptr);
-    ID3D11ShaderResourceView* none[13]={};context->PSSetShaderResources(0,viewCount,none);   // t12 is the optional late-overlay mask
+    ID3D11ShaderResourceView* none[17]={};context->PSSetShaderResources(0,viewCount,none);   // t12 is the optional late-overlay mask, t16 its raw H
 }
 // The backend's availability ask, where the asker is the HDR route: the first such ask of a session is the SDK's own
 // initialisation (NGX's, or AMD's), the first call into code that has never run on a DXMT device, so the crumbs bracket it.
@@ -1050,17 +1050,20 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         // The result goes back into the game's HDR target through a pixel-shader draw: per pixel the backend's output,
         // or the raw input where the rejection mask says the history is not to be trusted; for EDVR's TAA (route y) its
         // output, which has already made that choice. The state is our own, cleared at the top of the draw.
+        // t0 is always the CLEAN H (g.color, the image the backend was handed). A late-overlay frame adds the overlay mask at t12 and the raw
+        // H with the overlays drawn at t16: the finish keeps the world under an overlay and adds the overlay's own contribution (raw minus
+        // clean), instead of showing the raw frame there.
         if(paintNow) {
             // The refusal view: the same draw with the prep's class texture at t11, which the finish paints from.
-            ID3D11ShaderResourceView* paintViews[13]={overlay?g.rawOverlay.srv.Get():g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
+            ID3D11ShaderResourceView* paintViews[17]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
                 g.rejection.srv.Get(),nullptr,g.output[taa?index:0].srv.Get(),nullptr,nullptr,nullptr,g.klass.srv.Get(),
-                overlay?f.overlayCoverage:nullptr};
-            drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,paintViews,13);
+                overlay?f.overlayCoverage:nullptr,nullptr,nullptr,nullptr,overlay?g.rawOverlay.srv.Get():nullptr};
+            drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,paintViews,overlay?17:13);
         } else {
-            ID3D11ShaderResourceView* views[13]={overlay?g.rawOverlay.srv.Get():g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
+            ID3D11ShaderResourceView* views[17]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,
                 g.rejection.srv.Get(),nullptr,g.output[taa?index:0].srv.Get(),nullptr,nullptr,nullptr,nullptr,
-                overlay?f.overlayCoverage:nullptr};
-            drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,overlay?13:8);
+                overlay?f.overlayCoverage:nullptr,nullptr,nullptr,nullptr,overlay?g.rawOverlay.srv.Get():nullptr};
+            drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,overlay?17:8);
         }
     } else if(!taa) {
         // SDKs may alter every stage. Start our final composite from the isolated

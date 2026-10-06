@@ -427,7 +427,7 @@ inline int flatHdrCrumbWiringTests() {
                     "if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());", "copyStep.close();",
                     "HdrCrumbSpan prepStep(", "context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);", "prepStep.close();",
                     "HdrCrumbSpan backendStep(", "ok=fsr3Evaluate(", "ok=dlaaEvaluate(", "backendStep.close();",
-                    "drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,overlay?13:8);"},
+                    "drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,overlay?17:8);"},
             "the resolve writes capture, copy, prep, backend and finish in the order it runs them, each crumb before its call");
     const std::string spatial = body(resolve, "bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,");
     ordered(spatial, {"CrumbScope crumbs(f.hdr);", "Isolate isolated(", "HdrCrumbSpan copyStep(", "context->CopyResource(g.color.texture.Get(),color.Get());",
@@ -590,5 +590,30 @@ inline int flatHdrCrumbWiringTests() {
            "the runtime opens the gate in one place, and nothing else does");
     expect(isolation.find("inline bool flatCrumbsWantedFor(const FlatDxmtDetection& d) { return d.dxmt(); }") != std::string::npos,
            "the gate's question is the markers' answer and no argument but the detection");
+
+    // -- the late-overlay composite in the HDR finish ----------------------------------------------------------------------------
+    // flat_mono_resolve_test runs it on its adapter (flat_hdr_route_gpu_tests.h); these keep its text from drifting back to the raw frame: t0 is the
+    // CLEAN H in every frame, the raw H with the overlays is t16 in an overlay frame alone, and a covered pixel keeps its world and adds the overlay's
+    // contribution instead of taking the raw sample whole.
+    const std::string shader = slurp("src/d3d11/flat_mono_shader_source.h");
+    const std::string finish = body(shader, "float4 finishHdr(float4 pos:SV_Position):SV_Target {");
+    expect(!finish.empty() && count(shader, "Texture2D<float4> OverlayColor : register(t16);") == 1 &&
+               count(shader, "register(t16)") == 1,
+           "the finish's raw-overlay texture is declared once, at t16");
+    ordered(finish, {"refused=reject>0;", "c=refused?Color.SampleLevel(LinearClamp,rasterUv,0).rgb:History.Load(int3(p,0)).rgb;",
+                     "if(debug.z!=0) {", "if(covered>0) {", "const float3 raw=OverlayColor.SampleLevel(LinearClamp,rasterUv,0).rgb;",
+                     "c=refused?raw:c+raw-Color.SampleLevel(LinearClamp,rasterUv,0).rgb;", "if(debug.y!=0)c=refusalPaint("},
+            "a covered pixel keeps its world and adds the overlay's contribution (raw minus clean, both at the jittered position); a refused one is the raw sample");
+    expect(!finish.empty() && count(finish, "c=Color.SampleLevel(") == 0 && count(finish, "c=OverlayColor.SampleLevel(") == 0 &&
+               count(finish, "OverlayColor.SampleLevel(") == 1,
+           "no covered pixel takes a whole sample of either texture as its colour: the overlay's sample is read once, for the sum");
+    expect(count(resolve, "overlay?g.rawOverlay.srv.Get():g.color.srv.Get()") == 0 &&
+               count(solve, "ID3D11ShaderResourceView* paintViews[17]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,") == 1 &&
+               count(solve, "ID3D11ShaderResourceView* views[17]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,") == 1 &&
+               count(solve, "overlay?f.overlayCoverage:nullptr,nullptr,nullptr,nullptr,overlay?g.rawOverlay.srv.Get():nullptr};") == 2,
+           "both finish draws read the clean H at t0 in every frame, and bind the mask at t12 and the raw H at t16 in an overlay frame alone");
+    expect(count(solve, "paintViews,overlay?17:13);") == 1 && count(solve, "views,overlay?17:8);") == 1 &&
+               count(draw, "ID3D11ShaderResourceView* none[17]={};context->PSSetShaderResources(0,viewCount,none);") == 1,
+           "the finish draws bind seventeen views in an overlay frame, otherwise thirteen with the refusal paint and eight without, and unbind as many");
     return failures;
 }

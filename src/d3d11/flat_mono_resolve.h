@@ -149,7 +149,11 @@ struct FlatMonoResolveFrame {
     bool hdr = false;
     // Optional late-colour-overlay isolation. `color` remains the live HDR
     // destination and raw post-overlay image. The backend and prep consume
-    // only cleanColor; finish composites raw colour under coverage.
+    // only cleanColor. The finish keeps the world under the coverage (the
+    // backend's result where its history is trusted, the clean sample where
+    // it is not) and adds what the overlays drew there, the raw sample minus
+    // the clean one; a covered pixel whose history is refused is the raw
+    // sample itself. A transparent part of an overlay adds nothing.
     ID3D11ShaderResourceView* cleanColor = nullptr;
     ID3D11ShaderResourceView* overlayCoverage = nullptr;
     // Conservative union of fragments rendered through a qualified alternate

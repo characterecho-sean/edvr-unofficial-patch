@@ -39,6 +39,8 @@ Texture2D<float> OverlayCoverage : register(t12);   // HDR finish only: fragment
 Texture2D<float> UntrustedCameraCoverage : register(t13); // prep/TAA only: conservative R8_UNORM fragment union
 Texture2D<float> HistoryOutputDomain : register(t14);    // TAA only: last output's trusted-world sampling footprint
 Texture2D<float4> FlatForegroundMotion : register(t15); // SDK prep only: exact final foreground motion and canonical depth
+Texture2D<float4> OverlayColor : register(t16);         // HDR finish only, bound in overlay frames: the raw H with the protected late overlays
+                                                         // drawn (t0 is then the CLEAN H, the image the backend was handed)
 SamplerState LinearClamp : register(s0);
 RWTexture2D<float> OutDepth : register(u0);
 RWTexture2D<float2> OutMotion : register(u1);
@@ -398,6 +400,7 @@ float4 finishHdr(float4 pos:SV_Position):SV_Target {
     float2 uv=pos.xy/float2(size.zw);
     float2 rasterUv=uv+jitter.xy/float2(size.xy);
     float3 c;
+    bool refused=false;
     if(route.y!=0) {
         // EDVR's TAA output is final (its own rejection ran inside it): a plain copy.
         c=History.Load(int3(p,0)).rgb;
@@ -406,17 +409,28 @@ float4 finishHdr(float4 pos:SV_Position):SV_Target {
         float reject=0;
         [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
             reject=max(reject,Rejection.Load(int3(clamp(q+int2(x,y),0,int2(size.xy)-1),0)));
-        c=reject>0?Color.SampleLevel(LinearClamp,rasterUv,0).rgb:History.Load(int3(p,0)).rgb;
+        refused=reject>0;
+        c=refused?Color.SampleLevel(LinearClamp,rasterUv,0).rgb:History.Load(int3(p,0)).rgb;
     }
     if(debug.z!=0) {
-        // The raw HDR sample is bilinear: any covered source texel among its
-        // four taps must bypass the clean-world temporal result. This also
-        // protects the one-pixel filtered edge of a late colour overlay.
+        // Protected late overlays (a weapon's glow, a sight's lens and glow quads: draws the game made into H after the world). In an
+        // overlay frame t0 is the CLEAN H, the image the backend resolved, and OverlayColor the raw H with the overlays drawn, so what an
+        // overlay contributed at a pixel is the raw sample minus the clean one, both taken at the same jittered position. A covered pixel
+        // keeps its world (the backend's result where its history is trusted, the clean raw sample where it is not) and adds that
+        // contribution: the overlay's own filtered edge comes with it, and a transparent part of a quad adds nothing. Before, every
+        // covered pixel showed the raw sample, the world behind a lens or a glow quad included, so aiming down sights took the
+        // anti-aliasing off everything the sight covered. The contribution can be negative (an alpha overlay darkens); hdrRepresentable
+        // clamps the sum. A refused covered pixel is the raw sample itself, which is what the sum comes to for it, taken without the
+        // rounding of the round trip. The raw sample is bilinear, so a pixel counts as covered when any of its four source taps is
+        // (the one-pixel filtered edge of an overlay).
         int2 q=int2(floor(rasterUv*float2(size.xy)-.5));
         float covered=0;
         [unroll]for(int y=0;y<2;++y)[unroll]for(int x=0;x<2;++x)
             covered=max(covered,OverlayCoverage.Load(int3(clamp(q+int2(x,y),0,int2(size.xy)-1),0)));
-        if(covered>0)c=Color.SampleLevel(LinearClamp,rasterUv,0).rgb;
+        if(covered>0) {
+            const float3 raw=OverlayColor.SampleLevel(LinearClamp,rasterUv,0).rgb;
+            c=refused?raw:c+raw-Color.SampleLevel(LinearClamp,rasterUv,0).rgb;
+        }
     }
     if(debug.y!=0)c=refusalPaint(c,refusalClassAt(rasterUv));
     return float4(hdrRepresentable(c),1);
