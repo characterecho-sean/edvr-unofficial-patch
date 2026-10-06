@@ -2,9 +2,8 @@
 
 ## Status
 
-- **State:** 3d5ecaf6 FLOWN: still refused (forward HDR meshes) at 26 fps, the
-  world markers it admitted cost 14 ms GPU (104). v2 (only first person is
-  marked) is 0e9f59eb, INSTALLED on Epic, NOT FLOWN.
+- **State:** 3d5ecaf6 FLOWN: refused at 26 fps, world marks cost 14 ms GPU.
+  v2 marks only first person: 0e9f59eb INSTALLED on Epic, NOT FLOWN (104).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
