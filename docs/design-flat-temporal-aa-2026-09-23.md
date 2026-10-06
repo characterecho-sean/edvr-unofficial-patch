@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** 4bb67d35 FLOWN: TAA works; configured SDK AA still refuses (103).
-  Offline bench reproduces inert refusal; history lifecycle passes (103).
+- **State:** last FLOWN 4bb67d35: TAA works; configured SDK AA refuses (103).
+  Inert correction: 17 hardware cases PASS, NOT FLOWN; history demand open (103).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,7 +33,7 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103):** dormant SRC1 false rejection; forced-early UAV capture
   changes queries; f13ee92b admits this PS (zero completed replay draws).
-- **Next:** correct inert admission against the offline SDK matrix (103).
+- **Next:** account for history-budget demand and differing live OM state (103).
   Retain 102's color-clear fix; no per-weapon table; preserve Epic settings.
   Building shimmer is unqualified. Preserve 87's native FSR comparison and
   section 83's remaining matrix and open items.
@@ -12172,3 +12172,64 @@ correct inert-draw admission using this positive and negative matrix, then
 test the bounded history scheduling independently. Do not add a guessed
 projection, ignore a shader pair unconditionally, increase a budget without
 accounting, or request another flight to rediscover this refusal.
+
+### 2026-10-05: inert admission corrected against the offline bench
+
+Hypothesis: the ownership planner unnecessarily requires a projection for a
+draw which cannot change color or depth. The prior hardware bench confirms the
+first-refusal path: FC1193AFFC596F74/258B95AC99520C1F changes stencil only,
+preserves visible world and foreign owner pixels, then refuses H before any
+configured SDK backend executes. The discriminating result after correction is
+a qualified H and completed configured backend with the stencil changes
+preserved; actual color and depth writers must continue to refuse.
+
+The correction uses original creation-byte proof and live output state. It has
+no shader-hash exemption, invented projection or per-weapon table. The camera
+classifier's Clean result is insufficient by itself: its parser also models
+UAV stores. An independent cached side-effect proof rejects those stores,
+atomics, unsafe declarations and unknown operations, while allowing supported
+pure arithmetic and read-only operations. The original VS must be structurally
+camera independent, and the original PS must be classified Clean.
+
+Only a refusing inert candidate incurs the additional live-state queries. Lazy
+substitutions are restored first. Actual shader objects and identities, DSV
+and depth resource, all eight effective render-target masks, effective depth
+writes including the read-only DSV flag, all supported OM UAV slots, other
+graphics stages, stream output and predication are checked. A proved no-write
+draw executes its original stencil operation once, without an ownership
+nomination, private marker or vertex-history capture. World/pool hot paths
+keep their existing queries.
+
+An inert candidate which fails these state checks records its specific
+first-failure reason under inert-state. A future live difference therefore
+identifies color/depth writing, shader/DSV mismatch, another stage, UAV,
+stream output or predication rather than repeating projection-unproven. No
+capture payload or configuration key was added.
+
+History-budget remains an independent open discriminator: the bench proves the
+existing bounds and retirement behavior, but current game logs do not identify
+the retained occupants. No budget or scheduling change follows from this
+correction. The current game's exact OM state is also unmeasured; offline
+success covers the tested state contract, not every settlement image or
+performance condition.
+
+Validation: all 17 hardware matrix cases PASS on the NVIDIA GeForce RTX 5090
+in the 64x64 flat fixture (no VR runtime or headset). DLSS runtime file
+version is `310,9,1,0`. Each stencil-only DLAA, DLSS and FSR case changes
+4,096 stencil pixels and zero color/depth pixels, retains 338 world and 218
+foreign pixels at H, qualifies one H, completes one configured backend, and
+uses zero spatial fallback. All six color/depth writer controls and all four
+host guards PASS. The five controlled GPU history-pressure cases also PASS.
+WARP has 13 PASS, zero FAIL and four explicit NGX GPU-unsupported results,
+with FSR's stencil-only case now PASS. These are backend execution and
+state-contract results; they do not certify game image quality, frame rate or
+VR behavior.
+
+Reports: `build/flat-aa-inert-hardware-report.json` and
+`build/flat-aa-inert-warp-report.json`. The frozen-source full build passed
+all gates; stdout is `build/flat-inert-final-build.log`. Receipt input
+fingerprint is
+`d62ef1db0319d317a2c253274e6ae6f89bc9eadcc868c1478477ea47081c1eed`,
+independently verified against the source and compiler context. Promotion will
+use the receipt-guarded clean DLL build and preserve Epic's settings and DLSS
+runtime. No additional flight was required for this correction.

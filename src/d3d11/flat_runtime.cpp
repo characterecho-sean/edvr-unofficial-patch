@@ -3825,6 +3825,66 @@ static bool coverageShadersMatch(ID3D11DeviceContext* context, const FlatContrac
                             [](const char* line) { Log::get().note("%s", line); });
 }
 
+// Only a refused, structurally pure inert shader reaches this expensive
+// original-state check. A no-write draw still runs normally (including its
+// stencil operation); it simply cannot alter the color/depth owner plane.
+static const char* domainOriginalInertRefusal(ID3D11DeviceContext* context,
+    const FlatContractObservation& k,const FlatDomainShaderProof& proof) {
+    flatRuntimeSubstitution(context,FlatSubstEvent::kOtherDraw);
+    FlatComputeInternalScope guard;
+    FlatDomainInertBindings b{};
+    Ptr<ID3D11VertexShader> vs;Ptr<ID3D11PixelShader> ps;
+    UINT vsClasses=0,psClasses=0;
+    context->VSGetShader(&vs,nullptr,&vsClasses);
+    context->PSGetShader(&ps,nullptr,&psClasses);
+    b.actualShaderPair=vs && ps && !vsClasses && !psClasses &&
+        vs.Get()==bindingGet(BindSlot::Vs) && ps.Get()==bindingGet(BindSlot::Ps) &&
+        lookupShaderHash(vs.Get())==k.vs && lookupShaderHash(ps.Get())==k.ps;
+    Ptr<ID3D11GeometryShader> gs;Ptr<ID3D11HullShader> hs;Ptr<ID3D11DomainShader> ds;
+    UINT gsClasses=0,hsClasses=0,dsClasses=0;
+    context->GSGetShader(&gs,nullptr,&gsClasses);
+    context->HSGetShader(&hs,nullptr,&hsClasses);
+    context->DSGetShader(&ds,nullptr,&dsClasses);
+    b.noOtherStages=!gs && !hs && !ds && !gsClasses && !hsClasses && !dsClasses;
+    Ptr<ID3D11Device> device;context->GetDevice(&device);
+    if(!device)return "foreground-inert-device-unavailable";
+    const UINT uavCount=device->GetFeatureLevel()>=D3D_FEATURE_LEVEL_11_1?
+        D3D11_1_UAV_SLOT_COUNT:D3D11_PS_CS_UAV_REGISTER_COUNT;
+    ID3D11RenderTargetView* rawTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+    ID3D11UnorderedAccessView* rawUavs[D3D11_1_UAV_SLOT_COUNT]{};
+    Ptr<ID3D11DepthStencilView> dsv;
+    context->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
+        rawTargets,&dsv,0,uavCount,rawUavs);
+    for(unsigned i=0;i<D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;++i) {
+        if(rawTargets[i]){b.boundTargets|=1u<<i;rawTargets[i]->Release();}
+    }
+    b.noUavs=true;
+    for(unsigned i=0;i<uavCount;++i)if(rawUavs[i]) {b.noUavs=false;rawUavs[i]->Release();}
+    b.originalDsv=dsv && dsv.Get()==k.dsv;
+    if(b.originalDsv) {
+        Ptr<ID3D11Resource> depth;dsv->GetResource(&depth);
+        b.originalDsv=depth.Get()==k.depth;
+        D3D11_DEPTH_STENCIL_VIEW_DESC view{};dsv->GetDesc(&view);
+        b.readOnlyDepth=(view.Flags&D3D11_DSV_READ_ONLY_DEPTH)!=0;
+    }
+    Ptr<ID3D11BlendState> blend;FLOAT factors[4]{};UINT sampleMask=0;
+    context->OMGetBlendState(&blend,factors,&sampleMask);
+    D3D11_BLEND_DESC blendDesc{};
+    if(blend){blend->GetDesc(&blendDesc);b.blend=&blendDesc;}
+    Ptr<ID3D11DepthStencilState> depthState;UINT stencilRef=0;
+    context->OMGetDepthStencilState(&depthState,&stencilRef);
+    D3D11_DEPTH_STENCIL_DESC depthDesc{};
+    if(depthState){depthState->GetDesc(&depthDesc);b.depth=&depthDesc;}
+    ID3D11Buffer* streams[D3D11_SO_BUFFER_SLOT_COUNT]{};
+    context->SOGetTargets(D3D11_SO_BUFFER_SLOT_COUNT,streams);
+    b.noStreamOutput=true;
+    for(auto* stream:streams)if(stream){b.noStreamOutput=false;stream->Release();}
+    Ptr<ID3D11Predicate> predicate;BOOL predicateValue=FALSE;
+    context->GetPredication(&predicate,&predicateValue);
+    b.noPredicate=!predicate;
+    return flatDomainInertRefusal(proof,b);
+}
+
 FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_t instances,
                                             char kind, uint32_t count, uint32_t start,
                                             int32_t base, uint32_t startInstance) {
@@ -4372,7 +4432,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             const auto& proof=domainShaderProof(s,k.vs,k.ps);
             const bool sameWorld=s.namedDepth==k.depth && std::memcmp(s.namedCamera,d.camera,sizeof(d.camera))==0;
             const auto plan=flatDomainPlan(proof,k.color!=nullptr,k.format,k.camera!=nullptr,s.namedDepth!=nullptr,sameWorld);
-            if(!plan.admitted())domainFail(s,"planning",plan.refusal,k);
+            if(!plan.admitted() && proof.inertNoSideEffects) {
+                const char* inertRefusal=domainOriginalInertRefusal(context,k,proof);
+                if(inertRefusal)domainFail(s,"inert-state",inertRefusal,k);
+                // Otherwise no private marker/history or ownership nomination:
+                // forward the game's original stencil-only draw unchanged.
+            } else if(!plan.admitted())domainFail(s,"planning",plan.refusal,k);
             else {
                 domainPlanned=true;domainDepth=candidate->depth.Get();domainVs=k.vs;domainPs=k.ps;
                 domainCameraHash=k.cameraHash;domainFormat=k.format;domainHdrWriter=k.format==26;

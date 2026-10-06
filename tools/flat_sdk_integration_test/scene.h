@@ -405,28 +405,34 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool depthGuard=std::strcmp(name,"inert_depth_write")==0;
     const bool colorGuard=std::strcmp(name,"inert_color_write")==0;
     const bool guardCase=hostGuard||depthGuard||colorGuard;
+    const bool inertNoWrite=std::strcmp(name,"inert_no_write")==0;
     const bool rasterReady=evidence.validDepthPixels>0 && evidence.poolPixels>0 && evidence.hdrPixels>0;
     const bool ownership=evidence.world.namedWorld && evidence.alternate.foreignSeen &&
         evidence.alternate.captured && evidence.alternate.gpuIdentitySubmitted &&
         evidence.gpuWorldPixelsAtH>0 && evidence.gpuForeignPixelsAtH>0;
     const bool route=after.hdrTriggered && after.hdrSelected && after.resolverCalls;
-    const bool upstream=rasterReady && evidence.world.namedWorld && route &&
+    const bool inertNoWriteMeasured=!inertNoWrite ||
+        (evidence.inertStencilPixels>0 && !evidence.inertColorPixels && !evidence.inertDepthPixels &&
+         !evidence.inert.firstFailureFrame);
+    const bool upstream=rasterReady && evidence.world.namedWorld && route && inertNoWriteMeasured &&
         (taa || (ownership && after.hQualified>0));
-    const bool inertProjectionRefusal=inert && after.hAttempts>0 && !after.hQualified &&
+    const bool inertWriterRefusal=inert && after.hAttempts>0 && !after.hQualified &&
         evidence.inert.firstFailureVs==0xFC1193AFFC596F74ull &&
         evidence.inert.firstFailurePs==0x258B95AC99520C1Full &&
-        std::strcmp(evidence.inert.firstFailureReason,"foreground-original-projection-unproven")==0;
+        std::strcmp(evidence.inert.firstFailureStage,"inert-state")==0 &&
+        std::strcmp(evidence.inert.firstFailureReason,depthGuard?
+            "foreground-inert-depth-write":"foreground-inert-color-write")==0;
     const bool guardConfirmed=hostGuard?
         rasterReady && evidence.world.namedWorld && (taa || ownership) && after.hdrTriggered && !after.hAttempts &&
             std::strcmp(after.hdrVerdict,"engine-source-not-ready")==0:
-        depthGuard?evidence.inertDepthPixels>0 && !evidence.inertColorPixels && inertProjectionRefusal:
-        colorGuard?evidence.inertColorPixels>0 && !evidence.inertDepthPixels && inertProjectionRefusal:false;
+        depthGuard?evidence.inertDepthPixels>0 && !evidence.inertColorPixels && inertWriterRefusal:
+        colorGuard?evidence.inertColorPixels>0 && !evidence.inertDepthPixels && inertWriterRefusal:false;
     const char* verdict="FAIL";
     const char* cause="upstream-qualification-or-raster-refused";
     if(guardCase) {
         verdict=guardConfirmed?"PASS":"FAIL";
-        cause=guardConfirmed?hostGuard?"host-guard-confirmed":depthGuard?"depth-write-with-projection-refusal-observed":
-            "color-write-with-projection-refusal-observed":"guard-not-confirmed";
+        cause=guardConfirmed?hostGuard?"host-guard-confirmed":depthGuard?"depth-write-refusal-confirmed":
+            "color-write-refusal-confirmed":"guard-not-confirmed";
     } else if(upstream && after.hdrResolves && (taa || after.hdrBackendCompleted)) {
         verdict="PASS";cause="production-hdr-resolve-completed";
     } else if(upstream && !taa && driver==D3D_DRIVER_TYPE_WARP &&

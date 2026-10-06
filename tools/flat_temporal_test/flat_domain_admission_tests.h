@@ -1,6 +1,7 @@
 #pragma once
 #include "../../src/d3d11/flat_domain_admission.h"
 #include "flat_shader_classifier_tests.h"
+#include <d3dcompiler.h>
 
 inline int flatDomainAdmissionTests() {
     using namespace edvr;int failures=0;
@@ -12,6 +13,130 @@ inline int flatDomainAdmissionTests() {
         return flatDomainShaderProof(vh,ph,vs.data(),vs.size(),ps.data(),ps.size());
     };
     const auto foreign=proof("vs_AACFDCF2FB9AD809","ps_CAD1F585EDDC5641",0xAACFDCF2FB9AD809ull,0xCAD1F585EDDC5641ull);
+    const auto inert=proof("vs_FC1193AFFC596F74","ps_258B95AC99520C1F",0xFC1193AFFC596F74ull,0x258B95AC99520C1Full);
+    check(inert.present && !inert.projection && inert.inertNoSideEffects &&
+          !flatDomainPlan(inert,true,23,true,true,false).admitted(),
+          "captured passthrough/constant pair is pure but does not fabricate a projection");
+    std::vector<uint8_t> inertVs,inertPs;
+    flat_shader_classifier_tests::loadFixture("vs_FC1193AFFC596F74",inertVs);
+    flat_shader_classifier_tests::loadFixture("ps_258B95AC99520C1F",inertPs);
+    const auto mutatedProgram=[&](const std::vector<uint8_t>& original,uint32_t stage,
+                                  uint32_t from,uint32_t to) {
+        auto chunks=dxbc_engine_velocity_detail::parseContainer(original.data(),original.size(),stage);
+        bool changed=false;
+        for(auto& chunk:chunks)if(dxbc_engine_velocity_detail::isProgram(chunk.tag)) {
+            auto words=dxbc_engine_velocity_detail::programWords(chunk.bytes);
+            for(size_t at=2;at<words.size();at+=dxbc_engine_velocity_detail::instructionLength(words,at))
+                if((words[at]&0x7ffu)==from) {words[at]=(words[at]&~0x7ffu)|to;changed=true;break;}
+            chunk.bytes=dxbc_engine_velocity_detail::programBytes(std::move(words));
+        }
+        check(changed,"mutation found target instruction");
+        return dxbc_engine_velocity_detail::makeContainer(chunks);
+    };
+    const auto store=mutatedProgram(inertPs,dxbc_engine_velocity_detail::kPs50,
+        flat_shader_classifier_detail::kOpMov,164);
+    const auto rawStore=mutatedProgram(inertPs,dxbc_engine_velocity_detail::kPs50,
+        flat_shader_classifier_detail::kOpMov,166);
+    const auto atomic=mutatedProgram(inertPs,dxbc_engine_velocity_detail::kPs50,
+        flat_shader_classifier_detail::kOpMov,170);
+    const auto unknownInstruction=mutatedProgram(inertPs,dxbc_engine_velocity_detail::kPs50,
+        flat_shader_classifier_detail::kOpMov,511);
+    const auto uavDeclaration=mutatedProgram(inertPs,dxbc_engine_velocity_detail::kPs50,
+        dxbc_engine_velocity_detail::kOpDclOutput,158);
+    check(!flatDomainNoSideEffectProgram(store.data(),store.size(),dxbc_engine_velocity_detail::kPs50) &&
+          !flatDomainNoSideEffectProgram(rawStore.data(),rawStore.size(),dxbc_engine_velocity_detail::kPs50) &&
+          !flatDomainNoSideEffectProgram(atomic.data(),atomic.size(),dxbc_engine_velocity_detail::kPs50) &&
+          !flatDomainNoSideEffectProgram(unknownInstruction.data(),unknownInstruction.size(),dxbc_engine_velocity_detail::kPs50) &&
+          !flatDomainNoSideEffectProgram(uavDeclaration.data(),uavDeclaration.size(),dxbc_engine_velocity_detail::kPs50) &&
+          !flatDomainNoSideEffectProgram(inertPs.data(),inertPs.size()-1,dxbc_engine_velocity_detail::kPs50),
+          "typed/raw UAV stores, atomic, unknown opcode/declaration and malformed bytecode cannot earn inert proof");
+    // Compile a new no-CB arithmetic VS during the test: admission is based
+    // on effects and original state, not on either captured shader hash.
+    FlatDomainShaderProof arithmetic{};
+    HMODULE compiler=LoadLibraryW(L"d3dcompiler_47.dll");
+    check(compiler!=nullptr,"test compiler available for generated arithmetic VS");
+    if(compiler) {
+        auto compile=reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler,"D3DCompile"));
+        check(compile!=nullptr,"test compiler exposes D3DCompile");
+        if(compile) {
+            constexpr char source[]=
+                "float4 main(float4 p:POSITION):SV_Position{return p*float4(.5,.5,1,1)+float4(.25,0,0,0);}";
+            ID3DBlob *blob=nullptr,*errors=nullptr;
+            const HRESULT hr=compile(source,sizeof(source)-1,"generated-inert-arithmetic",nullptr,nullptr,
+                "main","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&blob,&errors);
+            check(SUCCEEDED(hr) && blob,"generated arithmetic VS compiles");
+            if(SUCCEEDED(hr) && blob) {
+                const auto* bytes=blob->GetBufferPointer();const size_t size=blob->GetBufferSize();
+                arithmetic=flatDomainShaderProof(flatDomainBytecodeHash(bytes,size),0x258B95AC99520C1Full,
+                    bytes,size,inertPs.data(),inertPs.size());
+                check(arithmetic.inertNoSideEffects && !arithmetic.projection,
+                      "generated arithmetic position transform earns structural no-side-effect proof");
+            }
+            if(errors)errors->Release();if(blob)blob->Release();
+            constexpr char readOnlySource[]=
+                "Texture2D<float4> t:register(t0);float4 main():SV_Target{return t.Load(int3(0,0,0));}";
+            blob=nullptr;errors=nullptr;
+            const HRESULT readOnlyHr=compile(readOnlySource,sizeof(readOnlySource)-1,"generated-read-only-PS",
+                nullptr,nullptr,"main","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&blob,&errors);
+            check(SUCCEEDED(readOnlyHr) && blob,"generated read-only texture PS compiles");
+            if(SUCCEEDED(readOnlyHr) && blob) {
+                const auto* bytes=blob->GetBufferPointer();const size_t size=blob->GetBufferSize();
+                const auto readOnly=flatDomainShaderProof(0xFC1193AFFC596F74ull,
+                    flatDomainBytecodeHash(bytes,size),inertVs.data(),inertVs.size(),bytes,size);
+                check(readOnly.inertNoSideEffects,"generated texture load remains a read-only inert PS");
+            }
+            if(errors)errors->Release();if(blob)blob->Release();
+        }
+        FreeLibrary(compiler);
+    }
+    FlatDomainInertBindings inertBindings{};
+    D3D11_BLEND_DESC noColor{};
+    D3D11_DEPTH_STENCIL_DESC stencilOnly{};
+    stencilOnly.StencilEnable=TRUE;stencilOnly.StencilWriteMask=0xff;
+    inertBindings.blend=&noColor;inertBindings.depth=&stencilOnly;inertBindings.boundTargets=1;
+    inertBindings.actualShaderPair=inertBindings.originalDsv=inertBindings.noOtherStages=true;
+    inertBindings.noUavs=inertBindings.noStreamOutput=inertBindings.noPredicate=true;
+    check(flatDomainInertNoWrite(inert,inertBindings),
+          "zero color/depth writes pass while the original stencil write stays in the draw");
+    check(flatDomainInertNoWrite(arithmetic,inertBindings),
+          "generated arithmetic shader uses the same effect-based admission");
+    auto changedBindings=inertBindings;
+    changedBindings.blend=nullptr;
+    check(!flatDomainInertNoWrite(inert,changedBindings),"null blend defaults to full color writes");
+    changedBindings=inertBindings;changedBindings.depth=nullptr;
+    check(!flatDomainInertNoWrite(inert,changedBindings),"null depth state defaults to depth writes");
+    changedBindings.readOnlyDepth=true;
+    check(flatDomainInertNoWrite(inert,changedBindings),"read-only DSV makes default depth state harmless");
+    changedBindings=inertBindings;D3D11_DEPTH_STENCIL_DESC depthWriter=stencilOnly;
+    depthWriter.DepthEnable=TRUE;depthWriter.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
+    changedBindings.depth=&depthWriter;
+    check(!flatDomainInertNoWrite(inert,changedBindings) &&
+          std::strcmp(flatDomainInertRefusal(inert,changedBindings),"foreground-inert-depth-write")==0,
+          "effective depth writer is never inert and names its first failure");
+    changedBindings=inertBindings;changedBindings.boundTargets=1u<<7;
+    noColor.IndependentBlendEnable=TRUE;noColor.RenderTarget[7].RenderTargetWriteMask=15;
+    check(!flatDomainInertNoWrite(inert,changedBindings),"independent MRT7 color writer is checked");
+    noColor.IndependentBlendEnable=FALSE;
+    check(flatDomainInertNoWrite(inert,changedBindings),"shared RTV0 mask governs all MRTs when independent blending is off");
+    noColor.RenderTarget[0].RenderTargetWriteMask=15;
+    check(!flatDomainInertNoWrite(inert,inertBindings) &&
+          std::strcmp(flatDomainInertRefusal(inert,inertBindings),"foreground-inert-color-write")==0,
+          "ordinary color writer is never inert and names its first failure");
+    check(!flatDomainInertNoWrite(arithmetic,inertBindings),
+          "generated arithmetic shader with live color writes is refused");
+    noColor.RenderTarget[0].RenderTargetWriteMask=0;
+    changedBindings=inertBindings;changedBindings.actualShaderPair=false;
+    check(!flatDomainInertNoWrite(inert,changedBindings),"stale actual shader pair refuses");
+    changedBindings=inertBindings;changedBindings.noUavs=false;
+    check(!flatDomainInertNoWrite(inert,changedBindings),"any bound OM UAV refuses");
+    changedBindings=inertBindings;changedBindings.noOtherStages=false;
+    check(!flatDomainInertNoWrite(inert,changedBindings),"another shader stage refuses");
+    changedBindings=inertBindings;changedBindings.noStreamOutput=false;
+    check(!flatDomainInertNoWrite(inert,changedBindings),"stream output refuses");
+    changedBindings=inertBindings;changedBindings.originalDsv=false;
+    check(!flatDomainInertNoWrite(inert,changedBindings),"stale DSV refuses");
+    auto unprovenInert=inert;unprovenInert.inertNoSideEffects=false;
+    check(!flatDomainInertNoWrite(unprovenInert,inertBindings),"unproven side effects refuse");
     check(!engine_velocity_family::supportedPair(0xAACFDCF2FB9AD809ull,0xCAD1F585EDDC5641ull),"recorded legacy world-pair gate still refuses CAD1");
     check(foreign.pool && foreign.foreignPs && foreign.projection,"actual CAD1 original bytecode proves pool/PS/projection");
     check(flatDomainPlan(foreign,true,23,true,false,false).kind==FlatDomainPlanKind::ForeignPool,"recorded pre-world foreign admitted structurally");

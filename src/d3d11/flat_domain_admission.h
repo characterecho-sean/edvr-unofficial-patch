@@ -13,11 +13,43 @@ inline uint64_t flatDomainBytecodeHash(const void* data,size_t size) {
 }
 struct FlatDomainShaderProof {
     bool present=false,pool=false,projection=false,nullPs=false,worldPs=false,foreignPs=false;
+    bool inertNoSideEffects=false;
     unsigned projectionSlot=0,projectionRow=0;
     FlatProjectionPatchLayout projectionLayout=FlatProjectionPatchLayout::ForwardColumns;
     std::array<unsigned char,6> colorComponents{};
     const char* refusal="foreground-original-shader-unavailable";
 };
+// The camera classifier proves jitter independence, not freedom from UAV
+// effects. Accept only its understood read/arithmetic/control operations and
+// known read-only declarations. The store opcodes 164/166, other stores,
+// atomics, UAV/thread declarations and unknown token forms all fail closed.
+inline bool flatDomainNoSideEffectProgram(const void* bytes,size_t size,uint32_t stage) {
+    try {
+        const auto chunks=dxbc_engine_velocity_detail::parseContainer(bytes,size,stage);
+        bool found=false,returned=false;
+        for(const auto& chunk:chunks)if(dxbc_engine_velocity_detail::isProgram(chunk.tag)) {
+            if(found)return false;
+            found=true;
+            const auto words=dxbc_engine_velocity_detail::programWords(chunk.bytes);
+            std::vector<flat_shader_classifier_detail::Instr> instructions;
+            flat_shader_classifier_detail::ProgramFacts facts;
+            if(!flat_shader_classifier_detail::walkProgram(words,instructions,facts) ||
+               facts.sawUnknownOpcode || facts.operandOutOfRange)return false;
+            for(const auto& in:instructions) {
+                const uint32_t op=in.opcode;
+                if(in.parseError || in.unmodelable)return false;
+                if(op==88 || op==dxbc_engine_velocity_detail::kOpDclConstantBuffer || op==90 ||
+                   (op>=dxbc_engine_velocity_detail::kOpDclInput && op<=dxbc_engine_velocity_detail::kOpDclTemps) ||
+                   op==dxbc_engine_velocity_detail::kOpDclGlobalFlags || op==161 || op==162)continue;
+                if(flat_shader_classifier_detail::isDeclaration(op) ||
+                   op==164 || op==166 || op>=168 ||
+                   flat_shader_classifier_detail::operandCount(op)<0)return false;
+                if(op==dxbc_engine_velocity_detail::kOpRet) returned=true;
+            }
+        }
+        return found && returned;
+    } catch(...) {return false;}
+}
 // Creation bytes, rather than membership of the legacy world producer table,
 // establish the additional flat ownership producer. Exact projection recipes
 // remain valid only for the exact bytecode identities they describe.
@@ -47,6 +79,10 @@ inline FlatDomainShaderProof flatDomainShaderProof(uint64_t vsHash,uint64_t psHa
     }
     if(!p.projection) {
         const auto c=classifyFlatShaderPair(vs,vsSize,ps,psSize);
+        p.inertNoSideEffects=!p.nullPs && c.vs==FlatVsProjectionClass::InertNoCB &&
+            c.ps==FlatPsProjectionSafety::Clean &&
+            flatDomainNoSideEffectProgram(vs,vsSize,dxbc_engine_velocity_detail::kVs50) &&
+            flatDomainNoSideEffectProgram(ps,psSize,dxbc_engine_velocity_detail::kPs50);
         if(c.vs==FlatVsProjectionClass::ForwardColumns || c.vs==FlatVsProjectionClass::ForwardDp4) {
             p.projection=true;p.projectionSlot=c.vsSlot;p.projectionRow=c.vsRow;
             p.projectionLayout=c.vs==FlatVsProjectionClass::ForwardColumns?
@@ -81,6 +117,34 @@ inline FlatDomainShaderProof flatDomainShaderProof(uint64_t vsHash,uint64_t psHa
         dxbc_engine_velocity_detail::FlatMarkerKind::ForeignPoolProvenance,&tokenSlot);
     p.refusal=!p.worldPs?"foreground-original-PS-proof":discard && !p.foreignPs?"foreground-foreign-discard-provenance":nullptr;
     return p;
+}
+struct FlatDomainInertBindings {
+    const D3D11_BLEND_DESC* blend=nullptr;
+    const D3D11_DEPTH_STENCIL_DESC* depth=nullptr;
+    unsigned boundTargets=0;
+    bool actualShaderPair=false,originalDsv=false,readOnlyDepth=false;
+    bool noOtherStages=false,noUavs=false,noStreamOutput=false,noPredicate=false;
+};
+inline const char* flatDomainInertRefusal(const FlatDomainShaderProof& proof,const FlatDomainInertBindings& b) {
+    if(!proof.present || !proof.inertNoSideEffects)return "foreground-inert-shader-unproven";
+    if(!b.actualShaderPair)return "foreground-inert-actual-shader-mismatch";
+    if(!b.originalDsv)return "foreground-inert-original-DSV-mismatch";
+    if(!b.noOtherStages)return "foreground-inert-other-shader-stage";
+    if(!b.noUavs)return "foreground-inert-OM-UAV-bound";
+    if(!b.noStreamOutput)return "foreground-inert-stream-output-bound";
+    if(!b.noPredicate)return "foreground-inert-predicate-bound";
+    if(!b.readOnlyDepth && (!b.depth || (b.depth->DepthEnable &&
+        b.depth->DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ZERO)))return "foreground-inert-depth-write";
+    for(unsigned i=0;i<8;++i)if(b.boundTargets&(1u<<i)) {
+        const unsigned mask=b.blend?
+            b.blend->RenderTarget[b.blend->IndependentBlendEnable?i:0].RenderTargetWriteMask:
+            D3D11_COLOR_WRITE_ENABLE_ALL;
+        if(mask)return "foreground-inert-color-write";
+    }
+    return nullptr;
+}
+inline bool flatDomainInertNoWrite(const FlatDomainShaderProof& proof,const FlatDomainInertBindings& b) {
+    return flatDomainInertRefusal(proof,b)==nullptr;
 }
 // A checked actual B1 publication can serve multiple independently proven
 // shaders using the same canonical projection. Other recipes must be checked
