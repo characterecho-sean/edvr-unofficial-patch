@@ -13210,3 +13210,28 @@ Overlay fix (building): at covered pixels, the anti-aliased world plus the
 overlay's own contribution (raw H with the overlay minus clean H), in place
 of the raw frame. A covered and refused pixel keeps today's raw value; a
 transparent overlay adds nothing.
+
+The weapon's refused history (planning pass, read-only; logs 142951 and
+143826). Captures work: captured, attempts and GPU-identity submitted
+advance together at 36 a frame, preflight-refused 0. Joining the census to
+`flat camera origin moved=`: live hipfire weapon-refused 5.2 to 6.5%, live
+aiming 8.3 to 11.3%, copy route 4.5 to 5.3%; with the camera still (moved=0)
+the same 36 draws are refused on 0.09 to 0.10%. So the failing input changes
+between consecutive live frames, on both routes.
+
+Ranked causes (inferred): about 75%, the flat map's match requires the
+weapon's pool slot to be equal in consecutive frames (`PreviousIndex==raw`,
+flat_foreground_motion_shader.h), while the engine re-orders that pool every
+live frame (docs\per-object-motion.md: "The slot is not an identity, even at
+rest", 160 of 279 records at a new slot in a stable set). VR's matcher never
+asked for the slot. About 15%, byte 30 of the identity word (a per-instance
+parameter that changes on 10-40% of records). About 10%, CPU priors lost.
+
+Ruled out: the sight lens taking the world behind it, because the 14
+glow, lens and reticle quads write no depth and cannot own a pixel; the
+refusal view agrees.
+
+Fix (next build): a reason code for every class-2 sample, reported in the
+census; then match by content, not slot (identity.x equal, identity.y equal
+except byte 30), keeping the equal-or-reject rule for several matches. Target:
+live weapon-refused at the still-camera baseline, about 0.1%.
