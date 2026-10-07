@@ -94,6 +94,8 @@ extern "C" void edvrPluginCostNoteD3dCall(uint8_t owner, uint16_t siteId, uint8_
     }
     ++probe.sites[siteId];
     ++probe.classes[apiClass];
+    if (probe.noteCount < probe.noteOrder.size())
+        probe.noteOrder[probe.noteCount++] = siteId;
 }
 
 namespace flat_lazy_tests {
@@ -426,6 +428,11 @@ int wmain(int argc, wchar_t** argv) {
     primary_copy_tests::run(device.Get(),context.Get(),&check);
     panel_tests::run({device.Get(), context.Get(), &check});
     lifecycle_tests::run({device.Get(), context.Get(), &check});
+    const auto flatRuntimeSource = readFile(L"src/d3d11/flat_runtime.cpp");
+    const auto engineVelocitySource = readFile(L"src/d3d11/engine_velocity.cpp");
+    flat_lazy_tests::otherDrawWiringTests({device.Get(), context.Get(), &check},
+        std::string(flatRuntimeSource.begin(), flatRuntimeSource.end()),
+        std::string(engineVelocitySource.begin(), engineVelocitySource.end()));
     flat_lazy_tests::run({device.Get(), context.Get(), &check});
     flat_domain_tests::run({device.Get(), context.Get(), &check});
     pin_tests::run({device.Get(), context.Get(), &check});

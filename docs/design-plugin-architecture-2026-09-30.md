@@ -36,25 +36,23 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** checkpoint `445e0ef6` is validated and pushed. Main `84b6f760` is
-  integrated; all 149 full-build jobs, installer gates and the refreshed scoped
-  assembly proof pass. V2's 256 API sites preserve V1 and the 128-site CPU
-  limit. Collector, velocity (15,758 checks) and weapon (217,415 checks) rigs
-  pass; the strict unsampled assembly/callback comparison passes. Focused
-  generated-header, source-pin and PanelDistance classifier checks pass. The
-  independent six-action claim ledger preserves the 38-site prefix; the
-  checkpoint's 148 full-build jobs and installer gates also pass.
-  Boundary-selector cost remains outside the assembly proof. Keep the flight
-  pair frozen: `7bbe7d90` control and `6c63f6aa` candidate. Both October 7
-  flights match their builds/environment and exit cleanly; Sean reports no
-  visual changes. NV-on sampled hook time per timed draw is 15.0% lower; other
-  CPU ranges overlap. Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its
-  median above the control range. Draw counts differ and the on-foot source has
-  4.175% more pixels. Attribution/non-regression stay open. Finish coverage and
-  selectors offline before another flight. Whole-ladder actions remain open.
-  Replay retains 482.4 MiB when enabled, none when off; NV blur reproduces on
-  `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
-  Scope control. No Phase 1 acceptance, Phase 2 or shipping approval.
+- **Next:** main `84b6f760` is integrated and pushed as `f11d6e59`. The next
+  reviewed tree passes all 149 jobs and installer checks, six fresh-child UI
+  forwarder cases, 16,279 held-restore checks and all 17 scoped assembly gates.
+  V2 preserves V1 and the 128-site CPU limit. UI proves one D-only composed
+  path; the held boundary's machine paths are measured, not runtime timing.
+  Domain-entry/frame/lifecycle restoration, runtime-caller cost and full
+  coverage remain open. Keep the flight pair frozen: `7bbe7d90` control and
+  `6c63f6aa` candidate. Both October 7 flights match their builds/environment
+  and exit cleanly; Sean reports no visual changes. NV-on sampled hook time per
+  timed draw is 15.0% lower; other CPU ranges overlap. Carrier DLSS/NV-off EDVR
+  GPU cost is 2.9% higher, its median above the control range. Draw counts
+  differ and the on-foot source has 4.175% more pixels.
+  Attribution/non-regression stay open. Finish coverage and selectors offline
+  before another flight. Whole-ladder actions remain open. Replay retains 482.4
+  MiB when enabled, none when off; NV blur reproduces on `14a7ff70`. Temporary
+  key: `advanced.draw_replay` (off); removal requires Scope control. No Phase 1
+  acceptance, Phase 2 or shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -2961,3 +2959,124 @@ checks including the new covered-draw cases, and the on-foot split passes 4,084
 checks. The fresh receipt fingerprint is
 `2779be20ffaf3c803f4f6f70a18bd9bf2181ab886b6659851de0aefe93f3a7e7`,
 independently verified before the merge commit. Steam remains unchanged.
+
+### UI forwarder action parity, 2026-10-07
+
+The next bounded contract exercises the real UI redirect and depth/stencil
+writeback through `forwardWithVerdict(kNone)`. The independent expectation has
+nine actions: draw begin, UI begin, original issue, UI end, declined multiply
+begin (marker 1), writeback begin/issue/end (marker 2), and draw end. It
+requires an admitted alpha/premultiplied draw with writable depth/stencil; a
+true multiply draw with such writes is refused earlier. Two actual callbacks
+retain the same typed tuple: the first targets the UI layer/private depth, the
+second targets zero colour views and the original DSV. Host bindings must
+restore afterward.
+
+Core-owned UI sites 83-96 cover six reads and eight state calls/restores. Their
+sampling is chosen independently inside UI Begin and latched through End; the
+surrounding classifier's NoApi type alone does not disable these legacy notes.
+Writeback calls and selector queries remain outside this annotated subset.
+
+Ruled out: a partial copy snapshot for repeated UI cases, because the module
+owns move-only timers, unique resources, atomics and private fault budgets.
+Each case instead starts in a fresh child process; the parent never executes
+the UI path. Cases compare pointer-free actions, calls and pixel fingerprints,
+including a repeated case. Actual module shutdown and host cleanup run before
+case reporting. This avoids altering any parent's UI counters or resources.
+
+A narrow test-macro temporal-input override supplies the sequence, eye, size
+and jitter normally provided by a begun native runtime channel. Real family
+classification, surface learning, door admission, depth seeding, bindings and
+writeback remain under test. Production temporal input remains unchanged.
+
+The first focused native gate compiles/links and passes dry-run, but the new
+child fixture fails. Direct child `1 1 0` exits 1 before its final diagnostic
+with no output. That early setup failure is indistinguishable in the parent
+report from an unexecuted case; the mid-tier repair adds stage diagnostics and
+bounded captured failure output before pursuing the specific failed input.
+Production behavior and the strong GPU/action expectations stay unchanged.
+
+The diagnostic identifies two missing fixture inputs: trace arming requires an
+existing `edvr_gfx_*.log`, and temporal admission requires a 16-byte CB shadow.
+The repaired child supplies both and pins the actual all-decline winner,
+`kEyeNoDistanceNone`. Ruled out: a mode/size gate in `uiDepthEyeOfTarget`,
+because that helper has no such gate. All GPU, action and binding expectations
+then pass; the API expectation still misses four cold surface inspections. Each
+calls sites 112, 113 and 115, adding twelve reads to the six UI reads and eight
+UI State calls. Sampled success requires exactly eighteen reads/eight State
+calls and mask `0xb0001fff80000`; the unarmed-door refusal requires twelve
+reads/no State calls and mask `0xb000000000000`. Unsampled cases require zero
+notes. These totals/site sets do not prove note ordering or whole-route D3D
+coverage; writeback and other selector work remain outside the ledger.
+
+Ruled out: a failed child after its successful GPU checks, because its exit is
+zero and its complete result ends in CRLF. The parent parser now accepts
+exactly one complete LF or CRLF frame, with no extra/truncated data. Child
+launch uses hidden creation, valid inherited handles, bounded output and a
+120-second timeout. Actual module shutdown precedes success reporting.
+
+The focused WARP gate passes all six fresh-child cases: sampled/unsampled
+success with and without Trace, a repeated success, and an unarmed-door
+refusal. Success requires two real draws, nine independently expected actions,
+every colour/depth pixel, identical surface hashes and complete binding-slot
+pointer/generation/hash restoration. Refusal requires one host draw and three
+actions. This is a D-only, depth-only D32 fixture; other draw kinds, stencil,
+linked class instances and other claimed families remain unproved.
+
+### Substitution-triggered held restoration, 2026-10-07
+
+The bounded velocity slice accounts for an ordinary substitution-triggered
+`kOtherDraw` that ends a held producer run. The runtime retains its pending,
+owner-thread and exact-context gates. A dedicated boundary rechecks pending
+state before selecting sampling once; the original NoApi flush remains
+unchanged. Actual blend and target restoration emit State sites 135 then 132
+only when their respective generation guards allow the real setter. Domain
+entry's separate `kOtherDraw` caller, other causes and frame/lifecycle restores
+remain on the original entry and outside this slice.
+
+The focused WARP rig passes 16,158 checks, including real setter/state parity,
+generation changes, hint-off, sampler-context refusal, repeat flushes, shutdown
+with a stale positive hint and the direct NoApi entry. Mid-tier review found no
+production blocker, but four oracle gaps require repair: direct no-pending
+boundary coverage, independent RTV/DSV generation mutations, exact API classes,
+and source/mutation controls for the real runtime caller. The Emu route alone
+does not execute that caller. Foreign-thread/configure/owner transfer remain
+inherited collector contracts; new boundary coverage is not claimed for them.
+The original flush and recursive NoApi closure gate passes on the previous
+merged listing; fresh codegen and the full edited tree remain pending.
+Runtime-caller machine cost is outside that three-TU listing scope.
+
+The mid-tier repair adds all four controls, including six in-memory caller
+mutants and independent wrong-class/unexpected-site rejection. The focused rig
+then passes 16,279 checks. The original NoApi production entry remains
+unchanged.
+
+Fresh parent/current listings pass all seventeen scoped assembly gates,
+including the original flush and its recursive NoApi restoration closure. All
+fifteen temporary swaps restore exactly and seventeen current inputs retain
+their hashes. The two planned sampled weapon callee deltas remain explicit;
+this is scoped erasure proof, not whole-tree byte identity or timing evidence.
+
+The new public boundary is 308 machine bytes with 67 instruction records and an
+80-byte local stack allocation. Its no-pending path has twelve instructions,
+forty fragment bytes and zero calls before TLS access. Hint-off has twenty-five
+instructions/103 bytes and one original flush call; verifier refusal has
+twenty-nine/119 and the verifier plus original flush. Accepted sampling has
+fifty-three/252 and one verifier, one mutex lock and one sampled restoration,
+followed by a tail unlock. Counts exclude callees and the runtime caller; they
+are diagnostics, not an overhead or performance acceptance claim.
+
+The first joint build stops at job 20/149: an older flat-temporal source pin
+requires the flush cause inline. The production branch maps the event to a
+local cause before choosing its entry. The repaired rig pins the complete
+cause-preserving branch and rejects four independent mutants: remapped cause,
+broadened selection, missing ordinary restoration and forced fallback cause.
+Its focused native gate passes, including all 46 prior corpus frames.
+
+The repaired full tree passes all 149 jobs, config/export contracts and the
+self-contained installer checks. The pool takes 237 seconds with no shown
+windows, consoles or foreground changes. Its fresh receipt fingerprint is
+`2f741c1138238560323f4813762248155fb9a9c11214f05b2480bfe58f589708`. The receipt
+is independently verified before committing this tree. No Steam install, live
+config edit or flight occurred. Phase 1 performance and whole-ladder/action
+coverage remain open; Phase 2 and shipping stay held.

@@ -67,6 +67,10 @@
 
 namespace edvr {
 
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+thread_local UiLayerPredicateTestTemporalInput g_uiLayerPredicateTestTemporalInput{};
+#endif
+
 namespace detail {
 bool g_uiLayerLive = false;
 bool g_uiLayerWatching = false;
@@ -3118,8 +3122,26 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         // this resource was taken from.
         f.eye = knownEye >= 0 ? knownEye
                               : uiDepthEyeOfTarget(g_tc.info.resource, g_tc.info.a, g_tc.info.b, g_tc.info.fmt);
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+        bool haveDrawTemporal = false;
+        const auto& testTemporal = g_uiLayerPredicateTestTemporalInput;
+        if (f.eye >= 0 && testTemporal.active &&
+            f.eye == static_cast<int>(testTemporal.eye)) {
+            seq = testTemporal.sequence;
+            jx = testTemporal.jx;
+            jy = testTemporal.jy;
+            sw = testTemporal.width;
+            sh = testTemporal.height;
+            haveDrawTemporal = true;
+        } else if (f.eye >= 0) {
+            haveDrawTemporal = nativeTemporalDrawJitter(static_cast<uint32_t>(f.eye),
+                                                        &seq, &jx, &jy, &sw, &sh);
+        }
+        if (f.eye >= 0 && haveDrawTemporal) {
+#else
         if (f.eye >= 0 &&
             nativeTemporalDrawJitter(static_cast<uint32_t>(f.eye), &seq, &jx, &jy, &sw, &sh)) {
+#endif
             // The map sends the whole target onto the layer: only right when
             // the target IS the region the game submits for that eye.
             f.targetMatchesEye = !sw || !sh || (sw == g_tc.info.a && sh == g_tc.info.b);
@@ -4706,5 +4728,16 @@ void uiLayerShutdown() {
                         static_cast<unsigned long long>(g_sessionRedirected));
     }
 }
+
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+void uiLayerPredicateTestSetTemporalInput(
+    const UiLayerPredicateTestTemporalInput& input) noexcept {
+    g_uiLayerPredicateTestTemporalInput = input;
+}
+
+UiLayerPredicateTestTemporalInput uiLayerPredicateTestGetTemporalInput() noexcept {
+    return g_uiLayerPredicateTestTemporalInput;
+}
+#endif
 
 }  // namespace edvr

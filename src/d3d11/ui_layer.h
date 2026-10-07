@@ -382,4 +382,17 @@ void uiLayerShutdown();
 bool nativeTemporalDrawJitter(uint32_t eye, uint64_t* sequence, float* jx, float* jy,
                               uint32_t* w, uint32_t* h);
 
+#if defined(EDVR_VSCREEN_PREDICATE_TEST)
+struct UiLayerPredicateTestTemporalInput final {
+    bool active = false;
+    uint64_t sequence = 0;
+    uint32_t eye = 0;
+    float jx = 0.0f, jy = 0.0f;
+    uint32_t width = 0, height = 0;
+};
+void uiLayerPredicateTestSetTemporalInput(
+    const UiLayerPredicateTestTemporalInput& input) noexcept;
+UiLayerPredicateTestTemporalInput uiLayerPredicateTestGetTemporalInput() noexcept;
+#endif
+
 }  // namespace edvr

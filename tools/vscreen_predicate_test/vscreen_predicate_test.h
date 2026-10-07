@@ -88,8 +88,18 @@ struct VScreenPanelDistanceApiTestInput final {
     // Test-only full Common+Eye selector traversal. Requires a real panel-size
     // SRV/CB binding and uses the injected Map callback for the terminal miss.
     bool fullClassifier = false;
+    // Isolated-child UI composition transaction: execute the real eye/panel
+    // classifier and forwarder with the configured UI layer enabled.
+    bool composedUi = false;
+    bool issueRealDraw = false;
+    bool uiTemporalInput = true;
+    bool expectUiRedirect = true;
+    std::uint32_t uiEyeWidth = 0, uiEyeHeight = 0;
+    std::uint64_t uiSequence = 0;
+    float uiJitterX = 0.0f, uiJitterY = 0.0f;
     void* panelSrv = nullptr;
     void* eyeRtv = nullptr;
+    void* hostDsv = nullptr;
     char kind = 'I';
     std::uint32_t drawCount = 3;
     std::uint32_t drawInstances = 1;
@@ -134,6 +144,12 @@ struct VScreenPanelDistanceApiTestResult final {
     bool overrideBindArgumentsValid = false;
     bool restoreBindArgumentsValid = false;
     bool drawArgumentsValid = false;
+    bool realDrawCallbacks = false;
+    std::uint32_t realDrawCallbackCount = 0;
+    std::uint32_t drawTargetCount[2]{};
+    void* drawTargets[2]{};
+    void* drawDepthTargets[2]{};
+    bool drawTargetsValid = true;
     bool eventOverflow = false;
     std::uint8_t eventCount = 0;
     std::uint8_t events[5]{};

@@ -2650,17 +2650,17 @@ cl.exe /I"%GEN%" /nologo /c /O2 /Gy /Gw /MT /std:c++17 /EHsc /W4 /GR- ^
     /DEDVR_VSCREEN_PREDICATE_TEST /DEDVR_VERSION_STRING=\"%EDVR_VER%\" %NGXFLAGS% %FSRFLAGS% ^
     /Fo"%OBJ%\vscreenpredicate\\" ^
     "tools\vscreen_predicate_test\vscreen_predicate_test.cpp" ^
-    "src\d3d11\vscreen.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\fss_dump.cpp" "src\d3d11\target_sharp.cpp" "src\d3d11\sunglare_fix.cpp"
+    "src\d3d11\vscreen.cpp" "src\d3d11\ui_layer.cpp" "src\d3d11\draw_ladder_trace.cpp" "src\d3d11\loader_panel.cpp" "src\d3d11\fss_dump.cpp" "src\d3d11\target_sharp.cpp" "src\d3d11\sunglare_fix.cpp"
 if errorlevel 1 ( echo [edvr] ERROR: VScreen predicate test compile failed & exit /b 1 )
 > "%OBJ%\vscreenpredicate\production_objects.rsp" (
     for %%F in ("%OBJ%\d3d11\*.obj") do (
-        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="fss_dump.obj" if /I not "%%~nxF"=="target_sharp.obj" if /I not "%%~nxF"=="sunglare_fix.obj" echo "%%~fF"
+        if /I not "%%~nxF"=="vscreen.obj" if /I not "%%~nxF"=="ui_layer.obj" if /I not "%%~nxF"=="draw_ladder_trace.obj" if /I not "%%~nxF"=="loader_panel.obj" if /I not "%%~nxF"=="fss_dump.obj" if /I not "%%~nxF"=="target_sharp.obj" if /I not "%%~nxF"=="sunglare_fix.obj" echo "%%~fF"
     )
 )
 link.exe /nologo /MACHINE:X64 /INCREMENTAL:NO /OPT:REF ^
     /OUT:"%BUILD%\vscreen_predicate_test.exe" ^
     "%OBJ%\vscreenpredicate\vscreen_predicate_test.obj" ^
-    "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
+    "%OBJ%\vscreenpredicate\vscreen.obj" "%OBJ%\vscreenpredicate\ui_layer.obj" "%OBJ%\vscreenpredicate\draw_ladder_trace.obj" ^
     "%OBJ%\vscreenpredicate\loader_panel.obj" "%OBJ%\vscreenpredicate\fss_dump.obj" "%OBJ%\vscreenpredicate\target_sharp.obj" "%OBJ%\vscreenpredicate\sunglare_fix.obj" ^
     @"%OBJ%\vscreenpredicate\production_objects.rsp" ^
     "%OBJ%\plugins\cockpit_visuals\plugin_cockpit_visuals.lib" ^

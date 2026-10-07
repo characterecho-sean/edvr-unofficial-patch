@@ -3743,7 +3743,11 @@ void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event) {
         // engine motion's draw wrapper's, and the census counts it there, not in whatever hook it came from.
         if (ctx && ctx == state().context.Get()) {
             flatcpu::Scope engine(flatcpu::kEngineDraw);
-            engineVelocityFlatFlush(ctx, flushCauseOf(event));
+            const EngineVelocityFlushCause cause = flushCauseOf(event);
+            if (cause == EngineVelocityFlushCause::kOtherDraw)
+                engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);
+            else
+                engineVelocityFlatFlush(ctx, cause);
         }
         return;
     case FlatSubstAction::kAbandon:

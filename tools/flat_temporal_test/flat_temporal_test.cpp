@@ -2920,6 +2920,13 @@ void testFlatSubstitutionWiring() {
     };
     const std::string runtimeCpp = slurp("src/d3d11/flat_runtime.cpp");
     const std::string vscreenCpp = normalizeNewlines(slurp("src/d3d11/vscreen.cpp"));
+    const std::string normalizedRuntimeCpp = normalizeNewlines(runtimeCpp);
+    const char* const causeRoute =
+        "const EngineVelocityFlushCause cause = flushCauseOf(event);\n"
+        "            if (cause == EngineVelocityFlushCause::kOtherDraw)\n"
+        "                engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);\n"
+        "            else\n"
+        "                engineVelocityFlatFlush(ctx, cause);";
     const std::string exposureCpp = slurp("src/d3d11/exposure_fix.cpp");
     const std::string deviceCpp = slurp("src/d3d11/device_hook.cpp");
     const std::string policyH = slurp("src/d3d11/flat_substitution.h");
@@ -2962,7 +2969,7 @@ void testFlatSubstitutionWiring() {
         {&runtimeCpp, "flatRuntimeSubstitution(nullptr, FlatSubstEvent::kClearState);", 1, "ClearState forgets it, touching no context"},
         {&runtimeCpp, "if (!engineVelocityFlatPending()) return;", 1, "with nothing of engine motion's bound the policy costs one load"},
         {&runtimeCpp, "switch (flatSubstAction(event)) {", 1, "the runtime asks the policy what to do"},
-        {&runtimeCpp, "engineVelocityFlatFlush(ctx, flushCauseOf(event));", 1, "a flush names its cause"},
+        {&normalizedRuntimeCpp, causeRoute, 1, "a flush names its mapped cause: only OtherDraw selects the sampled boundary, every other cause reaches the original flush unchanged"},
         {&runtimeCpp, "engineVelocityFlatAbandon();", 1, "an abandon"},
         {&runtimeCpp, "producer = engineVelocityFlatBeginDraw(ctx, &gameHadTarget6);", 1, "the producer branch opens the lazy bracket"},
         {&runtimeCpp, "engineVelocityFlatEndDraw(ctx);", 1, "and closes it"},
@@ -2985,6 +2992,24 @@ void testFlatSubstitutionWiring() {
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "substitution wiring control: a source with the line removed no longer contains it");
     }
+    const auto causeRouteMutation = [&](const char* from, const char* to, const char* what) {
+        std::string changed = normalizedRuntimeCpp;
+        const size_t at = changed.find(from);
+        check(count(changed, from) == 1, "cause-route mutant has exactly one production anchor");
+        if (at != std::string::npos) changed.replace(at, std::strlen(from), to);
+        check(count(changed, causeRoute) == 0, what);
+    };
+    causeRouteMutation("const EngineVelocityFlushCause cause = flushCauseOf(event);",
+        "const EngineVelocityFlushCause cause = EngineVelocityFlushCause::kPresent;",
+        "cause-route control: replacing the mapped cause with Present fails");
+    causeRouteMutation("if (cause == EngineVelocityFlushCause::kOtherDraw)",
+        "if (cause == EngineVelocityFlushCause::kOtherDraw || cause == EngineVelocityFlushCause::kPresent)",
+        "cause-route control: broadening the sampled boundary to Present fails");
+    causeRouteMutation("engineVelocityFlatFlushOtherDrawSampledBoundary(ctx);", "",
+        "cause-route control: dropping the selected OtherDraw restore fails");
+    causeRouteMutation("engineVelocityFlatFlush(ctx, cause);",
+        "engineVelocityFlatFlush(ctx, EngineVelocityFlushCause::kOtherDraw);",
+        "cause-route control: replacing every non-OtherDraw cause with OtherDraw fails");
     // The hooks: one event each, ahead of the real call the hook forwards to (the last one in its body: the early returns
     // for an internal or foreign call forward untouched, and the void fix in ClearRenderTargetView is another way out).
     struct Hook { const char* name; const char* event; const char* real; };

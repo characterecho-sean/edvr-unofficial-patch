@@ -7,14 +7,19 @@
 
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <initializer_list>
+#include <vector>
 
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/config.h"
 #include "../../src/common/plugin_cost.h"
 #include "../../src/d3d11/vscreen.h"
+#include "../../src/d3d11/ui_layer.h"
+#include "../../src/d3d11/ui_depth.h"
 #include "../../src/d3d11/binding_shadow.h"
 #include "../../src/d3d11/resolve_bind_fix.h"
 #include "../../src/d3d11/exposure_fix.h"
@@ -1655,7 +1660,671 @@ bool testFullClassifierTerminalPath(ID3D11Device* device,
 
 } // namespace
 
+namespace {
+struct UiCaseTexture final {
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    ComPtr<ID3D11ShaderResourceView> srv;
+};
+struct UiCaseRig final {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    UiCaseTexture eye, frame, panel;
+    ComPtr<ID3D11Texture2D> depth;
+    ComPtr<ID3D11DepthStencilView> dsv;
+    ComPtr<ID3D11VertexShader> vs;
+    ComPtr<ID3D11PixelShader> ps;
+    ComPtr<ID3D11RasterizerState> raster;
+    ComPtr<ID3D11BlendState> blend;
+    ComPtr<ID3D11DepthStencilState> depthState;
+};
+constexpr UINT kUiEyeW = 64, kUiEyeH = 64, kUiPanelW = 1920, kUiPanelH = 1080;
+// Four cold texture-view inspections precede door admission: the eye target
+// in kStateSnapshot, SRV0 in uiDepthOnEyeDraw, the UI target-kind cache, and
+// SRV0's panel-size cache. Independent caches resolve each view separately;
+// each bindingResolve records Core GetResource(112), GetType(113), and
+// Texture2DGetDesc(115). The depth probe's unlearned SRV and zero VS hash
+// decline before dsvIsSceneDepth. These twelve reads also occur on refusal.
+constexpr unsigned long long kUiSharedDescriptorReads = 4ull * 3ull;
+constexpr unsigned long long kUiSharedDescriptorMask =
+    (1ull << (112 - 64)) | (1ull << (113 - 64)) | (1ull << (115 - 64));
+constexpr unsigned long long kUiTransactionMask = ((1ull << 14) - 1) << (83 - 64);
+// The collector checks totals and site presence, not runtime note order.
+// This is the attributed Core subset, not all D3D calls in the UI route.
+bool uiCaseSucceeded(HRESULT value,const char* stage) {
+    if (SUCCEEDED(value)) return true;
+    std::fprintf(stderr,"UI_REISSUE_SETUP_FAIL stage=%s hr=%08lx\n",stage,
+        static_cast<unsigned long>(value));
+    return false;
+}
+bool uiCaseFailed(const char* stage) {
+    std::fprintf(stderr,"UI_REISSUE_SETUP_FAIL stage=%s error=%lu\n",stage,
+        static_cast<unsigned long>(GetLastError()));
+    return false;
+}
+constexpr char kUiCaseShader[] = R"HLSL(
+struct V { float4 pos : SV_Position; };
+V vsMain(uint id : SV_VertexID) {
+    V o;
+    o.pos = float4(id == 2 ? 3.0 : -1.0,
+                   id == 1 ? 3.0 : -1.0, 0.5, 1.0);
+    return o;
+}
+float4 psMain(V input) : SV_Target { return float4(0.5, 0.0, 0.0, 0.5); }
+)HLSL";
+
+bool makeUiCaseTexture(ID3D11Device* device, UINT w, UINT h, UINT bind,
+                       UiCaseTexture* out) {
+    D3D11_TEXTURE2D_DESC d{};
+    d.Width = w; d.Height = h; d.MipLevels = d.ArraySize = 1;
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1;
+    d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = bind;
+    if (!uiCaseSucceeded(device->CreateTexture2D(&d, nullptr, &out->texture),"texture")) return false;
+    if ((bind & D3D11_BIND_RENDER_TARGET) &&
+        !uiCaseSucceeded(device->CreateRenderTargetView(out->texture.Get(), nullptr, &out->rtv),"texture-rtv")) return false;
+    if ((bind & D3D11_BIND_SHADER_RESOURCE) &&
+        !uiCaseSucceeded(device->CreateShaderResourceView(out->texture.Get(), nullptr, &out->srv),"texture-srv")) return false;
+    return true;
+}
+
+bool setupUiCaseRig(UiCaseRig* r) {
+    D3D_FEATURE_LEVEL level{};
+    const auto create = edvr::systemD3D11CreateDevice();
+    if (!create) return uiCaseFailed("system-create-accessor");
+    if (!uiCaseSucceeded(create(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+                                 D3D11_SDK_VERSION, &r->device, &level, &r->context),"warp-device")) return false;
+    if (!makeUiCaseTexture(r->device.Get(), kUiEyeW, kUiEyeH,
+            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, &r->eye) ||
+        !makeUiCaseTexture(r->device.Get(), kUiEyeW, kUiEyeH,
+            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, &r->frame) ||
+        !makeUiCaseTexture(r->device.Get(), kUiPanelW, kUiPanelH,
+            D3D11_BIND_SHADER_RESOURCE, &r->panel)) return false;
+    ComPtr<ID3DBlob> vb, pb, errors;
+    if (!uiCaseSucceeded(D3DCompile(kUiCaseShader, sizeof(kUiCaseShader)-1, "ui-case", nullptr, nullptr,
+            "vsMain", "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &vb, &errors),"compile-vs")) return false;
+    errors.Reset();
+    if (!uiCaseSucceeded(D3DCompile(kUiCaseShader, sizeof(kUiCaseShader)-1, "ui-case", nullptr, nullptr,
+            "psMain", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &pb, &errors),"compile-ps") ||
+        !uiCaseSucceeded(r->device->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(),
+                                               nullptr, &r->vs),"create-vs") ||
+        !uiCaseSucceeded(r->device->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(),
+                                              nullptr, &r->ps),"create-ps")) return false;
+    D3D11_TEXTURE2D_DESC dd{};
+    dd.Width = kUiEyeW; dd.Height = kUiEyeH; dd.MipLevels = dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_R32_TYPELESS; dd.SampleDesc.Count = 1;
+    dd.Usage = D3D11_USAGE_DEFAULT; dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+    dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+    dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    if (!uiCaseSucceeded(r->device->CreateTexture2D(&dd, nullptr, &r->depth),"depth-texture") ||
+        !uiCaseSucceeded(r->device->CreateDepthStencilView(r->depth.Get(), &dsvDesc, &r->dsv),"depth-dsv")) return false;
+    D3D11_RASTERIZER_DESC rs{};
+    rs.FillMode = D3D11_FILL_SOLID; rs.CullMode = D3D11_CULL_NONE;
+    rs.DepthClipEnable = TRUE; rs.ScissorEnable = TRUE;
+    if (!uiCaseSucceeded(r->device->CreateRasterizerState(&rs, &r->raster),"raster-state")) return false;
+    D3D11_BLEND_DESC bd{};
+    auto& b = bd.RenderTarget[0];
+    b.BlendEnable = TRUE; b.SrcBlend = D3D11_BLEND_ONE;
+    b.DestBlend = D3D11_BLEND_INV_SRC_ALPHA; b.BlendOp = D3D11_BLEND_OP_ADD;
+    b.SrcBlendAlpha = D3D11_BLEND_ONE; b.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    b.BlendOpAlpha = D3D11_BLEND_OP_ADD; b.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    if (!uiCaseSucceeded(r->device->CreateBlendState(&bd, &r->blend),"blend-state")) return false;
+    D3D11_DEPTH_STENCIL_DESC ds{};
+    ds.DepthEnable = TRUE; ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    ds.DepthFunc = D3D11_COMPARISON_LESS;
+    if (!uiCaseSucceeded(r->device->CreateDepthStencilState(&ds, &r->depthState),"depth-state")) return false;
+    const float blue[4] = {0,0,1,1};
+    r->context->ClearRenderTargetView(r->eye.rtv.Get(), blue);
+    r->context->ClearRenderTargetView(r->frame.rtv.Get(), blue);
+    r->context->ClearDepthStencilView(r->dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    ID3D11RenderTargetView* target = r->eye.rtv.Get();
+    r->context->OMSetRenderTargets(1, &target, r->dsv.Get());
+    const D3D11_VIEWPORT vp{0,0,static_cast<float>(kUiEyeW),static_cast<float>(kUiEyeH),0,1};
+    const D3D11_RECT sc{0,0,static_cast<LONG>(kUiEyeW),static_cast<LONG>(kUiEyeH)};
+    r->context->RSSetViewports(1, &vp); r->context->RSSetScissorRects(1, &sc);
+    r->context->RSSetState(r->raster.Get());
+    const float factor[4] = {};
+    r->context->OMSetBlendState(r->blend.Get(), factor, 0xFFFFFFFFu);
+    r->context->OMSetDepthStencilState(r->depthState.Get(), 0);
+    r->context->VSSetShader(r->vs.Get(), nullptr, 0);
+    r->context->PSSetShader(r->ps.Get(), nullptr, 0);
+    ID3D11ShaderResourceView* panel = r->panel.srv.Get();
+    r->context->PSSetShaderResources(0, 1, &panel);
+    r->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    edvr::bindingSet(edvr::BindSlot::Rtv0, r->eye.rtv.Get());
+    edvr::bindingSet(edvr::BindSlot::Dsv0, r->dsv.Get());
+    edvr::bindingSet(edvr::BindSlot::PsSrv0, r->panel.srv.Get());
+    edvr::bindingSetShader(edvr::BindSlot::Vs, r->vs.Get(), 0);
+    edvr::bindingSetShader(edvr::BindSlot::Ps, r->ps.Get(), 0);
+    const std::wstring systemD3d11 = edvr::systemD3D11Path();
+    const std::vector<std::wstring> mappedD3d11 = edvr::mappedD3D11Paths();
+    bool systemOnly = !systemD3d11.empty() && !mappedD3d11.empty();
+    for (const std::wstring& path : mappedD3d11)
+        if (_wcsicmp(path.c_str(), systemD3d11.c_str()) != 0) systemOnly = false;
+    if (!systemOnly)
+        std::fprintf(stderr, "ui-reissue child: D3D11 is not exclusively mapped from System32\n");
+    return systemOnly;
+}
+
+struct UiCaseSnapshot {
+    void* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+    ID3D11DepthStencilView* dsv = nullptr;
+    ID3D11BlendState* blend; ID3D11DepthStencilState* depth;
+    ID3D11RasterizerState* raster; ID3D11VertexShader* vs;
+    ID3D11PixelShader* ps; ID3D11ShaderResourceView* srv;
+    ID3D11ComputeShader* cs = nullptr;
+    ID3D11Buffer* csCb = nullptr;
+    ID3D11ShaderResourceView* csSrvs[3]{};
+    ID3D11UnorderedAccessView* csUav = nullptr;
+    UINT viewportCount; D3D11_VIEWPORT viewport;
+    UINT scissorCount; D3D11_RECT scissor;
+    float factor[4]; UINT mask; UINT stencilRef;
+};
+UiCaseSnapshot takeUiCaseSnapshot(ID3D11DeviceContext* c) {
+    UiCaseSnapshot s{};
+    ID3D11RenderTargetView* rt[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+    ID3D11DepthStencilView* ds = nullptr;
+    c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rt, &ds); s.dsv = ds;
+    for (UINT i=0;i<D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;++i) {
+        s.rtvs[i]=rt[i]; if (rt[i]) rt[i]->Release();
+    }
+    if (ds) ds->Release();
+    c->OMGetBlendState(&s.blend, s.factor, &s.mask);
+    c->OMGetDepthStencilState(&s.depth, &s.stencilRef); c->RSGetState(&s.raster);
+    c->VSGetShader(&s.vs, nullptr, nullptr); c->PSGetShader(&s.ps, nullptr, nullptr);
+    c->PSGetShaderResources(0, 1, &s.srv);
+    c->CSGetShader(&s.cs,nullptr,nullptr);
+    c->CSGetConstantBuffers(0,1,&s.csCb);
+    c->CSGetShaderResources(0,3,s.csSrvs);
+    c->CSGetUnorderedAccessViews(0,1,&s.csUav);
+    s.viewportCount = 1; c->RSGetViewports(&s.viewportCount, &s.viewport);
+    s.scissorCount = 1; c->RSGetScissorRects(&s.scissorCount, &s.scissor);
+    if (s.blend) s.blend->Release(); if (s.depth) s.depth->Release();
+    if (s.raster) s.raster->Release(); if (s.vs) s.vs->Release();
+    if (s.ps) s.ps->Release(); if (s.srv) s.srv->Release();
+    if (s.cs) s.cs->Release(); if (s.csCb) s.csCb->Release();
+    for (ID3D11ShaderResourceView* srv : s.csSrvs) if (srv) srv->Release();
+    if (s.csUav) s.csUav->Release();
+    return s;
+}
+bool sameUiCaseSnapshot(const UiCaseSnapshot& a, const UiCaseSnapshot& b) {
+    return std::memcmp(a.rtvs,b.rtvs,sizeof(a.rtvs))==0 && a.dsv == b.dsv && a.blend == b.blend &&
+        a.depth == b.depth && a.raster == b.raster && a.vs == b.vs &&
+        a.ps == b.ps && a.srv == b.srv && a.viewportCount == b.viewportCount &&
+        a.cs == b.cs && a.csCb == b.csCb &&
+        std::memcmp(a.csSrvs,b.csSrvs,sizeof(a.csSrvs))==0 && a.csUav == b.csUav &&
+        std::memcmp(&a.viewport, &b.viewport, sizeof(a.viewport)) == 0 &&
+        a.scissorCount == b.scissorCount &&
+        std::memcmp(&a.scissor, &b.scissor, sizeof(a.scissor)) == 0 &&
+        std::memcmp(a.factor, b.factor, sizeof(a.factor)) == 0 &&
+        a.mask == b.mask && a.stencilRef == b.stencilRef;
+}
+
+bool readUiCaseSurface(ID3D11Device* dev, ID3D11DeviceContext* c, ID3D11Texture2D* src,
+                       UINT bytesPerPixel, std::vector<std::uint8_t>* bytes,
+                       UINT* width, UINT* height, std::uint64_t* fingerprint) {
+    if (!dev || !c || !src || !bytes || !width || !height || !fingerprint ||
+        (bytesPerPixel != 4)) return false;
+    D3D11_TEXTURE2D_DESC d{}; src->GetDesc(&d);
+    if (!d.Width || !d.Height || d.SampleDesc.Count != 1 ||
+        d.Width > 4096 || d.Height > 4096) return false;
+    D3D11_TEXTURE2D_DESC stagingDesc=d;
+    if (stagingDesc.Format==DXGI_FORMAT_R32_TYPELESS) stagingDesc.Format=DXGI_FORMAT_R32_FLOAT;
+    stagingDesc.BindFlags = 0; stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; stagingDesc.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(dev->CreateTexture2D(&stagingDesc, nullptr, &staging))) return false;
+    c->CopyResource(staging.Get(), src);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (FAILED(c->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) return false;
+    const std::size_t rowBytes = static_cast<std::size_t>(d.Width) * bytesPerPixel;
+    if (m.RowPitch < rowBytes) { c->Unmap(staging.Get(), 0); return false; }
+    bytes->resize(rowBytes * d.Height);
+    std::uint64_t hash = 14695981039346656037ull;
+    for (UINT y = 0; y < d.Height; ++y) {
+        const auto* row = static_cast<const std::uint8_t*>(m.pData) +
+            static_cast<std::size_t>(y) * m.RowPitch;
+        std::memcpy(bytes->data() + static_cast<std::size_t>(y) * rowBytes, row, rowBytes);
+        for (std::size_t x = 0; x < rowBytes; ++x) {
+            hash ^= row[x]; hash *= 1099511628211ull;
+        }
+    }
+    c->Unmap(staging.Get(), 0);
+    *width = d.Width; *height = d.Height; *fingerprint = hash;
+    return true;
+}
+
+bool literalUiReissueActions(const edvr::VScreenPanelDistanceApiTestResult& result) {
+    using namespace edvr::draw_ladder;
+    struct E { ActionId id; ActionPhase phase; ActionOutcome outcome; std::uint16_t issues, flags; };
+    constexpr E expected[] = {
+        {ActionId::kDrawBegin,ActionPhase::Begin,ActionOutcome::Applied,0,0},
+        {ActionId::kUiLayerDraw,ActionPhase::Begin,ActionOutcome::Applied,0,0},
+        {ActionId::kOriginalDraw,ActionPhase::Issue,ActionOutcome::Applied,1,0},
+        {ActionId::kUiLayerDraw,ActionPhase::End,ActionOutcome::Applied,0,0},
+        {ActionId::kSecondUiDraw,ActionPhase::Begin,ActionOutcome::Declined,0,1},
+        {ActionId::kSecondUiDraw,ActionPhase::Begin,ActionOutcome::Applied,0,2},
+        {ActionId::kSecondUiDraw,ActionPhase::Issue,ActionOutcome::Applied,1,2},
+        {ActionId::kSecondUiDraw,ActionPhase::End,ActionOutcome::Applied,0,2},
+        {ActionId::kDrawEnd,ActionPhase::End,ActionOutcome::Applied,0,0},
+    };
+    if (!result.token.valid() || draw_ladder_trace::actionCountForTest(result.token) != 9) return false;
+    for (std::uint16_t i = 0; i < 9; ++i) {
+        std::uint16_t id = 0; ActionRecord a{};
+        if (!draw_ladder_trace::readActionForTest(result.token, i, &id, &a) ||
+            id != static_cast<std::uint16_t>(expected[i].id) ||
+            a.phase != expected[i].phase || a.outcome != expected[i].outcome ||
+            a.call != DrawCallKind::Draw || a.issueCount != expected[i].issues ||
+            a.flags != expected[i].flags || a.count != 3 || a.instances != 1 ||
+            a.start != 0 || a.baseVertex != 0 || a.startInstance != 0) return false;
+    }
+    return true;
+}
+
+bool literalUiRefusalActions(const edvr::VScreenPanelDistanceApiTestResult& result) {
+    using namespace edvr::draw_ladder;
+    struct E { ActionId id; ActionPhase phase; ActionOutcome outcome; std::uint16_t issues; };
+    constexpr E expected[] = {
+        {ActionId::kDrawBegin,ActionPhase::Begin,ActionOutcome::Applied,0},
+        {ActionId::kOriginalDraw,ActionPhase::Issue,ActionOutcome::Applied,1},
+        {ActionId::kDrawEnd,ActionPhase::End,ActionOutcome::Applied,0},
+    };
+    if (!result.token.valid() || draw_ladder_trace::actionCountForTest(result.token) != 3) return false;
+    for (std::uint16_t i=0;i<3;++i) {
+        std::uint16_t id=0; ActionRecord a{};
+        if (!draw_ladder_trace::readActionForTest(result.token,i,&id,&a) ||
+            id!=static_cast<std::uint16_t>(expected[i].id) ||
+            a.phase!=expected[i].phase || a.outcome!=expected[i].outcome ||
+            a.call!=DrawCallKind::Draw || a.issueCount!=expected[i].issues || a.flags!=0 ||
+            a.count!=3 || a.instances!=1 || a.start!=0 || a.baseVertex!=0 || a.startInstance!=0)
+            return false;
+    }
+    return true;
+}
+
+bool runUiReissueChild(bool traceEnabled, bool apiSample, bool refusal) {
+    UiCaseRig rig{};
+    if (!setupUiCaseRig(&rig)) return uiCaseFailed("rig-setup");
+    struct Cleanup final {
+        std::wstring tracePath;
+        ID3D11DeviceContext* context = nullptr;
+        bool done = false;
+        void run() {
+            if (done) return;
+            done = true;
+            edvr::uiLayerPredicateTestSetTemporalInput({});
+            edvrPluginCostShutdown();
+            edvr::uiLayerShutdown();
+            edvr::uiDepthShutdown();
+            edvr::draw_ladder_trace::shutdown();
+            for (std::size_t i = 0; i < static_cast<std::size_t>(edvr::BindSlot::Count); ++i)
+                edvr::detail::g_bindingSlots[i] = edvr::detail::BindingSlot{};
+            if (context) context->ClearState();
+            if (!tracePath.empty()) DeleteFileW(tracePath.c_str());
+        }
+        ~Cleanup() { run(); }
+    } cleanup;
+    cleanup.context = rig.context.Get();
+    auto& cfg = edvr::Config::get();
+    cfg.set("fix.ui_quality", "100"); cfg.set("fix.temporal_aa", "dlss");
+    cfg.set("advanced.temporal_aa_jitter_sign", "as_is");
+    cfg.set("advanced.temporal_aa_jitter_lag", "0");
+    cfg.set("advanced.temporal_aa_debug", "off");
+    cfg.set("experimental.on_foot_maps_sharp", "off");
+    edvr::uiDepthConfigure(cfg); edvr::uiLayerConfigure(cfg);
+    edvr::uiLayerFrameBoundary(rig.context.Get());
+    const int registeredEye=edvr::uiDepthEyeOfTarget(rig.eye.texture.Get(), kUiEyeW, kUiEyeH,
+            DXGI_FORMAT_R8G8B8A8_UNORM);
+    if (registeredEye != 0) {
+        std::fprintf(stderr,"UI_REISSUE_SETUP_FAIL stage=register-eye eye=%d depthOn=%u depthStoodDown=%u\n",
+            registeredEye,edvr::detail::g_uiDepthOn?1u:0u,edvr::detail::g_uiDepthStoodDown?1u:0u);
+        return false;
+    }
+    constexpr std::uint64_t priorSeq = 7, drawSeq = 8;
+    edvr::uiLayerNoteSubmitted(priorSeq, 0, rig.eye.texture.Get());
+    edvr::uiLayerNoteTemporal(priorSeq, 0, rig.frame.texture.Get());
+    if (!refusal)
+        edvr::uiLayerDoorSeen(priorSeq, 0, rig.frame.texture.Get());
+    wchar_t temp[MAX_PATH + 1]{};
+    if (!GetTempPathW(MAX_PATH, temp)) return uiCaseFailed("temp-path");
+    const std::wstring tracePath = std::wstring(temp) + L"edvr_gfx_ui_reissue_" +
+        std::to_wstring(GetCurrentProcessId()) + L".log";
+    cleanup.tracePath = tracePath;
+    if (traceEnabled) {
+        HANDLE traceFile=CreateFileW(tracePath.c_str(),GENERIC_WRITE,0,nullptr,
+            CREATE_NEW,FILE_ATTRIBUTE_TEMPORARY,nullptr);
+        if (traceFile==INVALID_HANDLE_VALUE) return uiCaseFailed("create-trace-file");
+        CloseHandle(traceFile);
+    }
+    if (traceEnabled && !armCapture(tracePath)) return uiCaseFailed("arm-trace");
+    edvrPluginCostShutdown();
+    LARGE_INTEGER hz{};
+    if (!QueryPerformanceFrequency(&hz) || hz.QuadPart <= 0) return uiCaseFailed("qpc-frequency");
+    edvrPluginCostConfigure(1u, static_cast<std::uint64_t>(hz.QuadPart));
+    edvrPluginCostSetOwnerContext(rig.context.Get());
+    EdvrPluginCostWindowV1 discard{};
+    edvrPluginCostFrameBoundary(0,0,0,apiSample ? 1 : 0,0,&discard);
+    D3D11_BUFFER_DESC cbd{}; cbd.ByteWidth=16; cbd.Usage=D3D11_USAGE_DEFAULT;
+    cbd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+    ComPtr<ID3D11Buffer> compositeCb, ourCb;
+    if (!uiCaseSucceeded(rig.device->CreateBuffer(&cbd,nullptr,&compositeCb),"host-cb") ||
+        !uiCaseSucceeded(rig.device->CreateBuffer(&cbd,nullptr,&ourCb),"override-cb")) return false;
+    VScreenPanelDistanceApiTestInput in{};
+    in.context=rig.context.Get(); in.ownerContext=rig.context.Get();
+    in.traceEnabled=traceEnabled; in.distanceEnabled=false; in.fullClassifier=true;
+    // The shared seam validates its CB shadow even with distance disabled.
+    in.shadowBytes=cbd.ByteWidth; in.distanceIndex=0;
+    in.composedUi=true; in.issueRealDraw=true; in.uiTemporalInput=true;
+    in.expectUiRedirect=!refusal; in.panelSrv=rig.panel.srv.Get();
+    in.eyeRtv=rig.eye.rtv.Get(); in.hostDsv=rig.dsv.Get();
+    in.compositeCb=compositeCb.Get(); in.ourCb=ourCb.Get();
+    in.kind='D'; in.drawCount=3; in.drawInstances=1; in.drawArgs={0,0,0};
+    in.uiEyeWidth=kUiEyeW; in.uiEyeHeight=kUiEyeH; in.uiSequence=drawSeq;
+    const std::size_t shadowCount=static_cast<std::size_t>(edvr::BindSlot::Count);
+    std::vector<edvr::detail::BindingSlot> shadowsBefore(shadowCount);
+    for (std::size_t i=0;i<shadowCount;++i)
+        shadowsBefore[i]=edvr::detail::g_bindingSlots[i];
+    const UiCaseSnapshot before=takeUiCaseSnapshot(rig.context.Get());
+    VScreenPanelDistanceApiTestResult result{};
+    const bool ran=vScreenPanelDistanceApiTransactionTest(in,&result);
+    bool shadowsRestored=true;
+    for (std::size_t i=0;i<shadowCount;++i) {
+        const auto& a=shadowsBefore[i]; const auto& b=edvr::detail::g_bindingSlots[i];
+        shadowsRestored=shadowsRestored && a.ptr==b.ptr && a.gen==b.gen && a.hash==b.hash;
+    }
+    EdvrPluginCostWindowV1 report{}; bool completed=false;
+    for (std::uint32_t f=1; f<=1800; ++f)
+        completed=edvrPluginCostFrameBoundary(f,0,apiSample?1:0,apiSample?1:0,0,&report)!=0;
+    const auto& core=report.owners[static_cast<std::uint8_t>(edvr::plugin_cost::Owner::Core)];
+    const auto reads=core.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::ReadQuery)];
+    const auto states=core.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::State)];
+    const bool expectUiApi=apiSample && !refusal;
+    const bool costs=completed && report.version==1 &&
+        report.completedApiSampleFrames==(apiSample?1800u:0u) &&
+        reads==(apiSample?kUiSharedDescriptorReads+(expectUiApi?6ull:0ull):0ull) &&
+        states==(expectUiApi?8u:0u) && core.apiSiteMask[0]==0 &&
+        core.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::Work)]==0 &&
+        core.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::Transfer)]==0 &&
+        core.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::Instrumentation)]==0 &&
+        (core.apiSiteMask[1]&kUiTransactionMask)==(expectUiApi?kUiTransactionMask:0ull) &&
+        core.apiSiteMask[1]==((apiSample?kUiSharedDescriptorMask:0ull) |
+            (expectUiApi?kUiTransactionMask:0ull));
+    const bool actions=traceEnabled ? (refusal ? literalUiRefusalActions(result) :
+        literalUiReissueActions(result)) :
+        draw_ladder_trace::actionCountForTest(result.token)==0;
+    const std::uint32_t region[4]={0,0,kUiEyeW,kUiEyeH};
+    const float uv[4]={0,0,1,1};
+    ComPtr<ID3D11Texture2D> out;
+    out.Attach(edvr::uiLayerComposite(drawSeq,0,rig.frame.texture.Get(),region,uv));
+    const UiCaseSnapshot after=takeUiCaseSnapshot(rig.context.Get());
+    rig.context->ClearState();
+    std::vector<std::uint8_t> hostBytes, composedBytes, depthBytes;
+    UINT hostW=0,hostH=0,composedW=0,composedH=0,depthW=0,depthH=0;
+    std::uint64_t hostHash=0,composedHash=0,depthHash=0;
+    const bool hostRead=readUiCaseSurface(rig.device.Get(),rig.context.Get(),rig.eye.texture.Get(),4,
+        &hostBytes,&hostW,&hostH,&hostHash);
+    const bool compositeRead=refusal ? !out : out &&
+        readUiCaseSurface(rig.device.Get(),rig.context.Get(),out.Get(),4,
+            &composedBytes,&composedW,&composedH,&composedHash);
+    const bool depthRead=readUiCaseSurface(rig.device.Get(),rig.context.Get(),rig.depth.Get(),4,
+        &depthBytes,&depthW,&depthH,&depthHash);
+    const bool pixels=hostRead && compositeRead && depthRead;
+    bool hostUntouched=pixels && hostW==kUiEyeW && hostH==kUiEyeH &&
+        hostBytes.size()==static_cast<std::size_t>(kUiEyeW)*kUiEyeH*4;
+    std::size_t composedOverlayPixels=0, hostDrawPixels=0, depthWrittenPixels=0;
+    bool hostDrawFull=pixels && hostBytes.size()==static_cast<std::size_t>(kUiEyeW)*kUiEyeH*4;
+    for (std::size_t i=0; hostUntouched && i<hostBytes.size(); i+=4)
+        hostUntouched=hostBytes[i]==0 && hostBytes[i+1]==0 && hostBytes[i+2]>=250 && hostBytes[i+3]>=250;
+    for (std::size_t i=0; hostDrawFull && i<hostBytes.size(); i+=4)
+        if (hostBytes[i]>=120 && hostBytes[i]<=136 && hostBytes[i+1]<=2 &&
+            hostBytes[i+2]>=120 && hostBytes[i+2]<=136 && hostBytes[i+3]>=250) ++hostDrawPixels;
+    bool composedMatches=!refusal && pixels && composedBytes.size()==
+        static_cast<std::size_t>(kUiEyeW)*kUiEyeH*4;
+    if (composedMatches) {
+        for (std::size_t i=0;i<composedBytes.size();i+=4)
+            if (composedBytes[i]>=120 && composedBytes[i]<=136 && composedBytes[i+1]<=2 &&
+                composedBytes[i+2]>=120 && composedBytes[i+2]<=136 && composedBytes[i+3]>=250)
+                ++composedOverlayPixels;
+    }
+    if (pixels && depthBytes.size()==static_cast<std::size_t>(kUiEyeW)*kUiEyeH*sizeof(float)) {
+        for (std::size_t i=0;i<depthBytes.size();i+=sizeof(float)) {
+            float sample=1.0f; std::memcpy(&sample,depthBytes.data()+i,sizeof(sample));
+            if (std::abs(sample-0.5f)<1.0e-6f) ++depthWrittenPixels;
+        }
+    }
+    const bool pixelsMatch=pixels && depthW==kUiEyeW && depthH==kUiEyeH &&
+        (refusal ? hostDrawPixels==static_cast<std::size_t>(kUiEyeW)*kUiEyeH :
+            hostUntouched && composedW==kUiEyeW && composedH==kUiEyeH && composedMatches &&
+            composedOverlayPixels==static_cast<std::size_t>(kUiEyeW)*kUiEyeH) &&
+        depthWrittenPixels==static_cast<std::size_t>(kUiEyeW)*kUiEyeH;
+    const bool pass=ran && result.winner==static_cast<std::int16_t>(edvr::draw_ladder::SiteId::kEyeNoDistanceNone) &&
+        result.verdict==static_cast<std::int16_t>(edvr::draw_ladder::VerdictOrdinal::kNone) &&
+        result.originalDrawCalls==(refusal?1u:2u) && result.realDrawCallbacks &&
+        result.realDrawCallbackCount==(refusal?1u:2u) &&
+        result.drawArgumentsValid && result.drawTargetsValid &&
+        (refusal ? result.drawTargetCount[0]==1 && result.drawTargets[0]==in.eyeRtv &&
+            result.drawDepthTargets[0]==in.hostDsv : result.drawTargetCount[0]==1 &&
+            result.drawTargets[0]!=in.eyeRtv && result.drawDepthTargets[0]!=nullptr &&
+            result.drawDepthTargets[0]!=in.hostDsv && result.drawTargetCount[1]==0 &&
+            result.drawDepthTargets[1]==in.hostDsv) &&
+        (refusal ? !out : out!=nullptr) &&
+        sameUiCaseSnapshot(before,after) && shadowsRestored && actions && costs && pixelsMatch;
+    if (!pass) {
+        std::fprintf(stderr,"UI_REISSUE_FAIL trace=%u sample=%u refuse=%u ran=%u winner=%d verdict=%d args=%u hoststate=%u shadows=%u actionmatch=%u costmatch=%u pixelmatch=%u calls=%u cb=%u cbstate=%u read=%llu state=%llu mask=%llx host=%llx out=%llx depth=%llx dims=%ux%u/%ux%u/%ux%u overlay=%llu hostdraw=%llu depthhit=%llu actions=%u\n",
+            traceEnabled?1u:0u,apiSample?1u:0u,refusal?1u:0u,ran?1u:0u,
+            static_cast<int>(result.winner),static_cast<int>(result.verdict),
+            result.drawArgumentsValid?1u:0u,sameUiCaseSnapshot(before,after)?1u:0u,
+            shadowsRestored?1u:0u,actions?1u:0u,costs?1u:0u,pixelsMatch?1u:0u,
+            result.originalDrawCalls,
+            result.realDrawCallbackCount,result.drawTargetsValid?1u:0u,
+            static_cast<unsigned long long>(reads),static_cast<unsigned long long>(states),
+            static_cast<unsigned long long>(core.apiSiteMask[1]),
+            static_cast<unsigned long long>(hostHash),static_cast<unsigned long long>(composedHash),
+            static_cast<unsigned long long>(depthHash),hostW,hostH,composedW,composedH,depthW,depthH,
+            static_cast<unsigned long long>(composedOverlayPixels),
+            static_cast<unsigned long long>(hostDrawPixels),
+            static_cast<unsigned long long>(depthWrittenPixels),
+            result.token.valid()?draw_ladder_trace::actionCountForTest(result.token):0u);
+        cleanup.run();
+        return false;
+    }
+    cleanup.run();
+    std::printf("UI_REISSUE_RESULT trace=%u sample=%u refusal=%u actions=%u callbacks=%u read=%llu state=%llu mask=%llx host=%llx out=%llx depth=%llx overlay=%llu depthhit=%llu\n",
+        traceEnabled?1u:0u,apiSample?1u:0u,refusal?1u:0u,
+        traceEnabled?(refusal?3u:9u):0u,result.realDrawCallbackCount,
+        static_cast<unsigned long long>(reads),static_cast<unsigned long long>(states),
+        static_cast<unsigned long long>(core.apiSiteMask[1]),
+        static_cast<unsigned long long>(hostHash),static_cast<unsigned long long>(composedHash),
+        static_cast<unsigned long long>(depthHash),
+        static_cast<unsigned long long>(composedOverlayPixels),
+        static_cast<unsigned long long>(depthWrittenPixels));
+    return true;
+}
+
+struct UiChildReport final {
+    unsigned trace = 0, sample = 0, refusal = 0, actions = 0, callbacks = 0;
+    unsigned long long reads = 0, states = 0, mask = 0;
+    unsigned long long host = 0, output = 0, depth = 0;
+    unsigned long long overlayPixels = 0, depthWrittenPixels = 0;
+};
+
+bool launchUiReissueChild(bool trace, bool sample, bool refusal, UiChildReport* report) {
+    wchar_t exe[MAX_PATH * 2]{};
+    const DWORD exeLen = GetModuleFileNameW(nullptr, exe,
+        static_cast<DWORD>(sizeof(exe) / sizeof(exe[0])));
+    if (!exeLen || exeLen >= sizeof(exe) / sizeof(exe[0])) return false;
+    HANDLE readPipe = nullptr, writePipe = nullptr, nullInput = INVALID_HANDLE_VALUE;
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) return false;
+    if (!SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0) ||
+        !SetHandleInformation(writePipe, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+        CloseHandle(readPipe); CloseHandle(writePipe); return false;
+    }
+    nullInput = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (nullInput == INVALID_HANDLE_VALUE) {
+        CloseHandle(readPipe); CloseHandle(writePipe); return false;
+    }
+    SIZE_T attributeBytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
+    if (!attributeBytes) {
+        CloseHandle(nullInput); CloseHandle(readPipe); CloseHandle(writePipe); return false;
+    }
+    std::vector<std::uint8_t> attributeStorage(attributeBytes);
+    auto* attributes = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attributeStorage.data());
+    bool attributesInitialized = InitializeProcThreadAttributeList(
+        attributes, 1, 0, &attributeBytes) != FALSE;
+    HANDLE inheritedHandles[2] = {writePipe, nullInput};
+    if (!attributesInitialized ||
+        !UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                   inheritedHandles, sizeof(inheritedHandles), nullptr, nullptr)) {
+        if (attributesInitialized) DeleteProcThreadAttributeList(attributes);
+        CloseHandle(nullInput); CloseHandle(readPipe); CloseHandle(writePipe); return false;
+    }
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = nullInput;
+    startup.StartupInfo.hStdOutput = writePipe;
+    startup.StartupInfo.hStdError = writePipe;
+    startup.lpAttributeList = attributes;
+    PROCESS_INFORMATION process{};
+    std::wstring command = L"\"" + std::wstring(exe, exeLen) +
+        L"\" --ui-reissue-child " + (trace ? L"1 " : L"0 ") +
+        (sample ? L"1 " : L"0 ") + (refusal ? L"1" : L"0");
+    const BOOL started = CreateProcessW(exe, &command[0], nullptr, nullptr, TRUE,
+        EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr, nullptr,
+        &startup.StartupInfo, &process);
+    const DWORD startError = GetLastError();
+    DeleteProcThreadAttributeList(attributes);
+    CloseHandle(writePipe);
+    CloseHandle(nullInput);
+    if (!started) { CloseHandle(readPipe); SetLastError(startError); return false; }
+    std::string output;
+    constexpr std::size_t kMaxChildOutput = 4096;
+    const ULONGLONG deadline = GetTickCount64() + 120000;
+    DWORD wait = WAIT_TIMEOUT;
+    bool overflow = false;
+    char chunk[512];
+    while (GetTickCount64() < deadline) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr)) {
+            wait = WaitForSingleObject(process.hProcess, 0);
+            break;
+        }
+        while (available) {
+            DWORD got = 0;
+            const DWORD take = (std::min)(available, static_cast<DWORD>(sizeof(chunk)));
+            if (!ReadFile(readPipe, chunk, take, &got, nullptr) || !got) break;
+            if (output.size() + got > kMaxChildOutput) { overflow = true; break; }
+            output.append(chunk, got);
+            available -= got;
+        }
+        if (overflow) break;
+        wait = WaitForSingleObject(process.hProcess, 0);
+        if (wait == WAIT_OBJECT_0) break;
+        if (wait == WAIT_FAILED) break;
+        Sleep(10);
+    }
+    if (wait != WAIT_OBJECT_0 || overflow) {
+        TerminateProcess(process.hProcess, 1);
+        WaitForSingleObject(process.hProcess, 5000);
+    }
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread); CloseHandle(process.hProcess);
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) || !available) break;
+        DWORD got = 0;
+        const DWORD take = (std::min)(available, static_cast<DWORD>(sizeof(chunk)));
+        if (!ReadFile(readPipe, chunk, take, &got, nullptr) || !got) break;
+        if (output.size() + got > kMaxChildOutput) { overflow = true; break; }
+        output.append(chunk, got);
+    }
+    CloseHandle(readPipe);
+    auto failedChild = [&](const char* reason) {
+        std::fprintf(stderr,
+            "UI_REISSUE_CHILD_FAIL trace=%u sample=%u refusal=%u reason=%s wait=%lu exit=%lu overflow=%u bytes=%llu\n",
+            trace?1u:0u, sample?1u:0u, refusal?1u:0u, reason,
+            static_cast<unsigned long>(wait), static_cast<unsigned long>(exitCode),
+            overflow?1u:0u, static_cast<unsigned long long>(output.size()));
+        if (!output.empty()) {
+            std::fwrite(output.data(), 1, output.size(), stderr);
+            if (output.back()!='\n') std::fputc('\n',stderr);
+        }
+        return false;
+    };
+    if (wait != WAIT_OBJECT_0 || overflow || exitCode != 0 || output.empty() ||
+        output.back() != '\n' || output.find('\n') != output.size() - 1 ||
+        output.rfind("UI_REISSUE_RESULT ", 0) != 0 || !report)
+        return failedChild("execution-or-framing");
+    int consumed = -1;
+    const int parsed = std::sscanf(output.c_str(),
+        "UI_REISSUE_RESULT trace=%u sample=%u refusal=%u actions=%u callbacks=%u read=%llu state=%llu mask=%llx host=%llx out=%llx depth=%llx overlay=%llu depthhit=%llu%n",
+        &report->trace, &report->sample, &report->refusal, &report->actions, &report->callbacks,
+        &report->reads, &report->states, &report->mask, &report->host,
+        &report->output, &report->depth, &report->overlayPixels,
+        &report->depthWrittenPixels, &consumed);
+    // Windows text-mode stdout emits CRLF. Accept that or LF, but require
+    // the entire captured record to end immediately after its one terminator.
+    const bool terminator = consumed >= 0 &&
+        ((output.size() == static_cast<std::size_t>(consumed) + 1 &&
+          output[consumed] == '\n') ||
+         (output.size() == static_cast<std::size_t>(consumed) + 2 &&
+          output[consumed] == '\r' && output[consumed + 1] == '\n'));
+    const bool expectUiApi = sample && !refusal;
+    const bool accepted = parsed == 13 && terminator &&
+        report->trace == (trace ? 1u : 0u) &&
+        report->sample == (sample ? 1u : 0u) &&
+        report->refusal == (refusal ? 1u : 0u) &&
+        report->actions == (trace ? (refusal ? 3u : 9u) : 0u) &&
+        report->callbacks == (refusal ? 1u : 2u) &&
+        report->reads == (sample ? kUiSharedDescriptorReads+(expectUiApi?6ull:0ull) : 0ull) &&
+        report->states == (expectUiApi ? 8ull : 0ull) &&
+        (report->mask & kUiTransactionMask) == (expectUiApi ? kUiTransactionMask : 0ull) &&
+        report->mask == ((sample ? kUiSharedDescriptorMask : 0ull) |
+            (expectUiApi ? kUiTransactionMask : 0ull)) &&
+        report->overlayPixels == (refusal ? 0ull :
+            static_cast<unsigned long long>(kUiEyeW)*kUiEyeH) &&
+        report->depthWrittenPixels == static_cast<unsigned long long>(kUiEyeW)*kUiEyeH;
+    return accepted ? true : failedChild("result-contract");
+}
+
+bool testUiComposedActionSubprocesses() {
+    UiChildReport reports[6]{};
+    constexpr bool traceCases[6] = {true, false, true, false, true, true};
+    constexpr bool sampleCases[6] = {true, true, false, false, true, true};
+    constexpr bool refusalCases[6] = {false, false, false, false, false, true};
+    for (unsigned i = 0; i < 6; ++i) {
+        if (!launchUiReissueChild(traceCases[i], sampleCases[i], refusalCases[i], &reports[i])) return false;
+    }
+    return reports[0].host == reports[1].host &&
+        reports[0].host == reports[2].host && reports[0].host == reports[3].host &&
+        reports[0].host == reports[4].host &&
+        reports[0].output == reports[1].output &&
+        reports[0].output == reports[2].output &&
+        reports[0].output == reports[3].output &&
+        reports[0].output == reports[4].output &&
+        reports[0].depth == reports[1].depth &&
+        reports[0].depth == reports[2].depth &&
+        reports[0].depth == reports[3].depth &&
+        reports[0].depth == reports[4].depth && reports[5].host != reports[0].host &&
+        reports[5].output == 0;
+}
+} // namespace
+
 int main(int argc, char** argv) {
+    if (argc == 5 && std::strcmp(argv[1], "--ui-reissue-child") == 0) {
+        const bool trace = std::strcmp(argv[2], "1") == 0;
+        const bool sample = std::strcmp(argv[3], "1") == 0;
+        const bool refusal = std::strcmp(argv[4], "1") == 0;
+        if ((std::strcmp(argv[2], "0") != 0 && !trace) ||
+            (std::strcmp(argv[3], "0") != 0 && !sample) ||
+            (std::strcmp(argv[4], "0") != 0 && !refusal)) return 2;
+        return runUiReissueChild(trace, sample, refusal) ? 0 : 1;
+    }
     bool dryRun = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--dry-run") == 0) dryRun = true;
@@ -3355,6 +4024,8 @@ int main(int argc, char** argv) {
         if (texture) texture->Release();
     }
 
+    okay &= check(testUiComposedActionSubprocesses(),
+                  "isolated WARP children exercise production UI family routing, composed reissues, sampled API notes, and NoTrace parity");
     if (deferred) deferred->Release();
     if (immediate) immediate->Release();
     if (device) device->Release();

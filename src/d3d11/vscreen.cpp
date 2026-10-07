@@ -6712,7 +6712,57 @@ void STDMETHODCALLTYPE panelDistanceApiTestSetConstantBuffers(
     }
 }
 
-void panelDistanceApiTestDraw(char kind, UINT count, UINT instances,
+void STDMETHODCALLTYPE panelDistanceApiTestOMSetRenderTargets(
+    ID3D11DeviceContext* context, UINT count, ID3D11RenderTargetView* const* targets,
+    ID3D11DepthStencilView* depth) {
+    if (context) context->OMSetRenderTargets(count, targets, depth);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestClearRtv(
+    ID3D11DeviceContext* context, ID3D11RenderTargetView* target, const FLOAT colour[4]) {
+    if (context && target && colour) context->ClearRenderTargetView(target, colour);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestClearDsv(
+    ID3D11DeviceContext* context, ID3D11DepthStencilView* target, UINT flags,
+    FLOAT depth, UINT8 stencil) {
+    if (context && target) context->ClearDepthStencilView(target, flags, depth, stencil);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestRSSetViewports(
+    ID3D11DeviceContext* context, UINT count, const D3D11_VIEWPORT* viewports) {
+    if (context) context->RSSetViewports(count, viewports);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestOMSetBlendState(
+    ID3D11DeviceContext* context, ID3D11BlendState* state, const FLOAT factor[4], UINT mask) {
+    if (context) context->OMSetBlendState(state, factor, mask);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestVSSetShader(
+    ID3D11DeviceContext* context, ID3D11VertexShader* shader,
+    ID3D11ClassInstance* const* instances, UINT count) {
+    if (context) context->VSSetShader(shader, instances, count);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestPSSetShader(
+    ID3D11DeviceContext* context, ID3D11PixelShader* shader,
+    ID3D11ClassInstance* const* instances, UINT count) {
+    if (context) context->PSSetShader(shader, instances, count);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestPSSetShaderResources(
+    ID3D11DeviceContext* context, UINT start, UINT count,
+    ID3D11ShaderResourceView* const* resources) {
+    if (context) context->PSSetShaderResources(start, count, resources);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestExecuteCommandList(
+    ID3D11DeviceContext* context, ID3D11CommandList* list, BOOL restore) {
+    if (context && list) context->ExecuteCommandList(list, restore);
+}
+
+void panelDistanceApiTestDraw(ID3D11DeviceContext* context, char kind, UINT count, UINT instances,
                               const DrawArgs& args) noexcept {
     const auto* input = t_panelDistanceApiInput;
     auto* result = t_panelDistanceApiResult;
@@ -6739,43 +6789,80 @@ void panelDistanceApiTestDraw(char kind, UINT count, UINT instances,
     default:
         break;
     }
-    result->drawArgumentsValid = kind == input->kind && count == input->drawCount &&
+    const bool thisArgsMatch = kind == input->kind && count == input->drawCount &&
         instances == input->drawInstances && argsMatch;
+    const std::uint32_t drawIndex = result->originalDrawCalls - 1;
+    result->drawArgumentsValid = drawIndex == 0 ? thisArgsMatch :
+        result->drawArgumentsValid && thisArgsMatch;
+    if (input->issueRealDraw && context) {
+        if (drawIndex < 2) {
+            ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+            ID3D11DepthStencilView* depth = nullptr;
+            context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, &depth);
+            std::uint32_t targetCount = 0;
+            for (ID3D11RenderTargetView* target : targets) {
+                if (target) {
+                    if (targetCount == 0) result->drawTargets[drawIndex] = target;
+                    ++targetCount;
+                    target->Release();
+                }
+            }
+            if (depth) {
+                result->drawDepthTargets[drawIndex] = depth;
+                depth->Release();
+            }
+            result->drawTargetCount[drawIndex] = targetCount;
+            const bool callbackBindingsValid = drawIndex == 0
+                ? input->expectUiRedirect
+                    ? targetCount == 1 && result->drawTargets[drawIndex] != input->eyeRtv &&
+                        result->drawDepthTargets[drawIndex] != nullptr &&
+                        result->drawDepthTargets[drawIndex] != input->hostDsv
+                    : targetCount == 1 && result->drawTargets[drawIndex] == input->eyeRtv &&
+                        result->drawDepthTargets[drawIndex] == input->hostDsv
+                : targetCount == 0 && result->drawDepthTargets[drawIndex] == input->hostDsv;
+            result->drawTargetsValid = result->drawTargetsValid && callbackBindingsValid;
+        } else {
+            result->drawTargetsValid = false;
+        }
+        context->Draw(count, args.base < 0 ? 0u : static_cast<UINT>(args.base));
+        result->realDrawCallbacks = true;
+        ++result->realDrawCallbackCount;
+    }
     panelDistanceApiTestEvent(VScreenPanelDistanceApiTestEvent::OriginalDraw);
 }
 
 void STDMETHODCALLTYPE panelDistanceApiTestDrawSimple(
-    ID3D11DeviceContext*, UINT count, UINT start) {
+    ID3D11DeviceContext* context, UINT count, UINT start) {
     DrawArgs args{};
     args.base = static_cast<std::int32_t>(start);
-    panelDistanceApiTestDraw('D', count, 1, args);
+    panelDistanceApiTestDraw(context, 'D', count, 1, args);
 }
 
 void STDMETHODCALLTYPE panelDistanceApiTestDrawIndexed(
-    ID3D11DeviceContext*, UINT count, UINT startIndex, INT baseVertex) {
+    ID3D11DeviceContext* context, UINT count, UINT startIndex, INT baseVertex) {
     DrawArgs args{};
     args.start = startIndex;
     args.base = baseVertex;
-    panelDistanceApiTestDraw('I', count, 1, args);
+    panelDistanceApiTestDraw(context, 'I', count, 1, args);
 }
 
 void STDMETHODCALLTYPE panelDistanceApiTestDrawInstanced(
-    ID3D11DeviceContext*, UINT perInstance, UINT instances,
+    ID3D11DeviceContext* context, UINT perInstance, UINT instances,
     UINT startVertex, UINT startInstance) {
     DrawArgs args{};
     args.base = static_cast<std::int32_t>(startVertex);
     args.startInstance = startInstance;
-    panelDistanceApiTestDraw('N', perInstance, instances, args);
+    panelDistanceApiTestDraw(context, 'N', perInstance, instances, args);
 }
 
 void STDMETHODCALLTYPE panelDistanceApiTestDrawIndexedInstanced(
-    ID3D11DeviceContext*, UINT perInstance, UINT instances,
+    ID3D11DeviceContext* context, UINT perInstance, UINT instances,
     UINT startIndex, INT baseVertex, UINT startInstance) {
     DrawArgs args{};
     args.start = startIndex;
     args.base = baseVertex;
     args.startInstance = startInstance;
-    panelDistanceApiTestDraw('X', perInstance, instances, args);
+    panelDistanceApiTestDraw(context, 'X', perInstance, instances, args);
 }
 State* g_eyeCensusTestState = nullptr;
 
@@ -7478,6 +7565,8 @@ bool vScreenPanelDistanceApiTransactionTest(
     const VScreenPanelDistanceApiTestInput& input,
     VScreenPanelDistanceApiTestResult* result) noexcept {
     if (!result || !input.context || !input.ownerContext ||
+        (input.issueRealDraw && (input.kind != 'D' || input.drawInstances != 1 ||
+                                 input.drawArgs.base < 0)) ||
         input.shadowBytes > sizeof(input.shadow) ||
         static_cast<std::uint64_t>(input.distanceIndex) * sizeof(float) + sizeof(float) >
             input.shadowBytes ||
@@ -7485,10 +7574,17 @@ bool vScreenPanelDistanceApiTransactionTest(
          (!input.mappedStorage || input.mappedStorageBytes < input.shadowBytes)) ||
         (input.fullClassifier && (!input.panelSrv || !input.eyeRtv ||
                                   !input.compositeCb || !input.ourCb)) ||
+        (input.composedUi && (!input.fullClassifier || !input.issueRealDraw ||
+                              input.kind != 'D' || input.drawInstances != 1 ||
+                              !input.hostDsv ||
+                              input.uiEyeWidth == 0 || input.uiEyeHeight == 0 ||
+                              input.uiSequence <= 1)) ||
         (input.traceEnabled && !draw_ladder_trace::configured())) return false;
     *result = {};
 
     static State fixture{};
+    const uint32_t priorEyeW = fixture.eyeW;
+    const uint32_t priorEyeH = fixture.eyeH;
     const bool priorIntroCurve = fixture.introCurveThisDraw;
     const bool priorCurve = fixture.curveThisDraw;
     fixture.ownerCtx = input.ownerContext;
@@ -7521,6 +7617,15 @@ bool vScreenPanelDistanceApiTransactionTest(
     fixture.realMap = &panelDistanceApiTestMap;
     fixture.realUnmap = &panelDistanceApiTestUnmap;
     fixture.realVSSetConstantBuffers = &panelDistanceApiTestSetConstantBuffers;
+    fixture.realOMSetRenderTargets = &panelDistanceApiTestOMSetRenderTargets;
+    fixture.realClearRtv = &panelDistanceApiTestClearRtv;
+    fixture.realClearDsv = &panelDistanceApiTestClearDsv;
+    fixture.realRSSetViewports = &panelDistanceApiTestRSSetViewports;
+    fixture.realOMSetBlendState = &panelDistanceApiTestOMSetBlendState;
+    fixture.realVSSetShader = &panelDistanceApiTestVSSetShader;
+    fixture.realPSSetShader = &panelDistanceApiTestPSSetShader;
+    fixture.realPSSetShaderResources = &panelDistanceApiTestPSSetShaderResources;
+    fixture.realExecuteCommandList = &panelDistanceApiTestExecuteCommandList;
     fixture.realDraw = &panelDistanceApiTestDrawSimple;
     fixture.realDrawIndexed = &panelDistanceApiTestDrawIndexed;
     fixture.realDrawInstanced = &panelDistanceApiTestDrawInstanced;
@@ -7554,6 +7659,8 @@ bool vScreenPanelDistanceApiTransactionTest(
         : draw_interest::InterestMask{};
     const bool priorTraceCapture = draw_ladder_trace::detail::g_captureActive.exchange(
         input.traceEnabled, std::memory_order_relaxed);
+    const UiLayerPredicateTestTemporalInput priorTestTemporal =
+        uiLayerPredicateTestGetTemporalInput();
     const auto* priorInput = t_panelDistanceApiInput;
     auto* priorResult = t_panelDistanceApiResult;
     t_panelDistanceApiInput = &input;
@@ -7562,14 +7669,27 @@ bool vScreenPanelDistanceApiTransactionTest(
     detail::g_uiLayerIssueBlocked = false;
     detail::g_objectProbeLedgerOn = false;
     detail::g_uiSeedDiagnostics = false;
-    detail::g_uiLayerLive = false;
+    detail::g_uiLayerLive = input.composedUi;
     detail::g_uiLayerWatching = false;
     detail::g_uiLayerCrispPending = false;
     detail::g_uiDepthPlanetPending = false;
     detail::g_uiDepthPlanetSolarPending = false;
     detail::g_uiDepthMode = detail::UiDepthMode::kNone;
-    detail::g_uiDepthOn = false;
+    detail::g_uiDepthOn = input.composedUi;
     detail::g_uiDepthStoodDown = false;
+    if (input.composedUi) {
+        fixture.eyeW = input.uiEyeWidth;
+        fixture.eyeH = input.uiEyeHeight;
+        UiLayerPredicateTestTemporalInput temporal{};
+        temporal.active = input.uiTemporalInput;
+        temporal.sequence = input.uiSequence;
+        temporal.eye = 0;
+        temporal.jx = input.uiJitterX;
+        temporal.jy = input.uiJitterY;
+        temporal.width = input.uiEyeWidth;
+        temporal.height = input.uiEyeHeight;
+        uiLayerPredicateTestSetTemporalInput(temporal);
+    }
     if (input.fullClassifier) {
         // The fixture uses real WARP eye/panel views and matching CB0. The
         // Only the live cached interest mask is temporarily neutralized above;
@@ -7678,6 +7798,9 @@ bool vScreenPanelDistanceApiTransactionTest(
     detail::g_uiDepthMode = priorDepthMode;
     detail::g_uiDepthOn = priorDepthOn;
     detail::g_uiDepthStoodDown = priorDepthStoodDown;
+    fixture.eyeW = priorEyeW;
+    fixture.eyeH = priorEyeH;
+    uiLayerPredicateTestSetTemporalInput(priorTestTemporal);
     if (input.fullClassifier) {
         detail::g_bindingSlots[psSrv0Slot] = priorPsSrv0;
         detail::g_bindingSlots[vsCb0Slot] = priorVsCb0;
