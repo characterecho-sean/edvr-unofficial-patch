@@ -36,21 +36,22 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** main `fcdc3c05` is integrated; the warm PanelDistance API slice and
-  combined tree pass 148 full-build jobs and scoped codegen comparisons.
-  Selector costs remain (section 11's latest entry). Keep the earlier pair
-  frozen: `7bbe7d90` control and `6c63f6aa` candidate. Both October 7 flights
-  match their builds and environment, exit cleanly, and Sean reports no visual
-  changes. NV-on sampled hook time per timed draw is 15.0% lower; other CPU
-  ranges overlap. Carrier DLSS/NV-off direct EDVR GPU cost is 2.9% higher; its
-  candidate median exceeds the control range. Draw counts differ and the
+- **Next:** main `fcdc3c05` is integrated. By-value API policy dispatch and two
+  full VR-eye classifier exit fixtures pass 148 full-build jobs and scoped
+  codegen gates. Tag/stack costs remain (section 11's latest entry). Keep the
+  pair frozen: `7bbe7d90` control and `6c63f6aa` candidate. Both October 7
+  flights match their builds and environment, exit cleanly, and Sean reports no
+  visual changes. NV-on sampled hook time per timed draw is 15.0% lower; other
+  CPU ranges overlap. Carrier DLSS/NV-off direct EDVR GPU cost is 2.9% higher;
+  its candidate median exceeds the control range. Draw counts differ and the
   on-foot source has 4.175% more pixels. CPU attribution and GPU non-regression
   remain open. Finish missing cost coverage and selector work offline before
   another flight. Twenty-three selectors and local None/Skip checks pass;
-  whole-ladder/actions and remaining API/CPU coverage stay open. Replay retains
-  482.4 MiB when enabled, none when disabled. Earlier NV blur is reproduced by
-  `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
-  Scope control. No Phase 1 acceptance, Phase 2 or shipping approval.
+  whole-ladder/actions, API coverage and CPU attribution stay open. Replay
+  retains 482.4 MiB when enabled, none when disabled. Earlier NV blur is
+  reproduced by `14a7ff70`. Temporary key: `advanced.draw_replay` (off);
+  removal requires Scope control. No Phase 1 acceptance, Phase 2 or shipping
+  approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -2767,3 +2768,76 @@ rendering and sampler changes are not evidence that the earlier carrier GPU
 increase is resolved. Remaining cost coverage, whole-ladder/action parity and
 CPU/GPU performance acceptance stay open. Next flight: none until the offline
 gates produce a discriminating comparison; Phase 2 and shipping remain held.
+
+### By-value API policy and full classifier exit fixtures, 2026-10-07
+
+The selected work lambda receives the empty API policy by value. The outer
+chooser still constructs one capture object and independently selects API
+sampling with the existing hint/context check. The selected helper constructs
+the tag with `ApiPolicy{}`; a compile-time empty-type invariant prevents member
+state from being added silently. Classification, forwarding, restoration and
+CPU/replay suppression retain their existing ordering.
+
+Three bounded codegen trials were reviewed against the frozen merged-main
+reference and parent `4d6b9c58`. Ruled out: the typed work factory as the
+chosen implementation, because it duplicated capture blocks in the two branches
+and grew D/I/N/X hooks by 40/54/71/86 bytes. Each draw still executed one
+capture block; the growth was static, not extra live stores. It removed the
+empty tag marshalling, but the smaller by-value change preserves the parent
+hook sizes. Ruled out: default-initializing the by-value tag, because MSVC
+emitted a load of its padding byte and an outgoing byte store (N 989 bytes, X
+1622), worse than value initialization. The absence of a warning did not
+establish erasure.
+
+The chosen value-initialized variant keeps the parent hook bodies' sizes,
+stacks and live capture materialization: D/I/N/X are 1166/1207/1319/1469 bytes
+with 5/6/7/8 capture stores. Instanced NoApi dispatch shrinks 988 -> 971 bytes,
+and IndexedInstanced 1621 -> 1616. D/I dispatch still matches the pre-API
+reference. N retains a 304-byte stack versus the pre-API 288, and writes one
+unused byte in each selected work branch; X retains a trace-only tag store and
+a 320-byte stack. The false-hint check remains three instructions/11 local
+bytes and skips the context verifier. No new hint TLS guard or executed outer
+trampoline appears. This reduces setup; it does not erase all selector cost.
+
+Strict listing comparisons retain the 7057-byte, 1636-record, 94-call,
+288-byte-stack NoTrace/NoCpu classifier fingerprint (`2647f030...`). All three
+NoApi classifier variants and all six parent/current policy variants match; all
+sixteen NoTrace forwarders and four typed original callback families preserve
+bodies, stack and ordered calls. Renamed local targets require exact callee
+bodies and raw ordered targets. These proofs are instrumentation and forwarding
+gates, not whole-ladder or frame-time acceptance.
+
+The test-only WARP seam now also invokes the full Common+Eye classifier before
+the production forwarder. Real panel SRV, eye RTV and matching CB resources
+seed the binding shadows. An injected failed Map reaches `PanelTailNone` after
+39 literal ordered site/outcome records; disabling distance exits at
+`EyeNoDistanceNone` after 36. Both paths preserve None and issue one typed
+original callback for D/I/N/X in Trace and NoTrace. The enabled failure path
+records Map then Draw, with no Unmap or override/restore bind; the disabled
+path records Draw only. Trace checks exact DrawBegin/OriginalDraw/DrawEnd
+records; NoTrace emits no site observations. Effects here are the injected
+saved-call recorder, not GPU binding equality. Successful Panel selection
+through the complete classifier and other claim paths remain unproved.
+
+Review repaired repeated-call eye-cache invalidation and preserved registry
+filters by exchanging only the cached legacy interest mask. The trace facade
+borrows the live policy's state and forwards its complete interface; an
+explicit constructor avoids MSVC's aggregate reference-initializer failure.
+Fixture arguments follow the real hooks, including zero unused fields for D/I.
+The original action assertions were retained. Focused collector and world-route
+gates pass (283 world checks and 96 mutation anchors); the WARP gate passes
+after these corrections.
+
+The normal full build passes all 148 jobs: 141 pooled in 178.9 s and seven
+quiet in 50.7 s. FocusWatch reports no visible window, console opening or
+foreground movement into the build tree. All 236 config keys agree; actual
+installer resources match the release files. The fresh full-pass receipt
+(`b507662b`, 2026-10-07 15:45 UTC) verifies the same source/dependencies.
+
+The earlier control/candidate flight pair stays frozen. No Steam install,
+personal config edit or flight occurred for this slice. Remaining API coverage,
+CPU attribution, whole-ladder/actions and CPU/GPU acceptance stay open. The
+EngineVelocity API inventory belongs to TemporalAa, but a complete saved-call
+slice needs a deliberate site allocation beyond the two remaining IDs in the
+128-site mask. Next flight: none until the remaining offline gates produce a
+discriminating comparison. Phase 2 and shipping remain held.

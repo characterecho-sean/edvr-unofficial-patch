@@ -933,6 +933,7 @@ bool testSunglareNomination(ID3D11Device* device, ID3D11DeviceContext* context) 
 using edvr::VScreenPanelDistanceApiTestEvent;
 using edvr::VScreenPanelDistanceApiTestInput;
 using edvr::VScreenPanelDistanceApiTestResult;
+using edvr::VScreenClassifierSiteEvent;
 namespace draw_ladder = edvr::draw_ladder;
 namespace draw_ladder_trace = edvr::draw_ladder_trace;
 namespace plugin_cost = edvr::plugin_cost;
@@ -1179,6 +1180,297 @@ bool testPanelDistanceApiTransaction(ID3D11DeviceContext* immediate,
     return okay;
 }
 
+struct ExpectedClassifierSite final {
+    draw_ladder::SiteId id;
+    draw_ladder::SiteKind kind;
+    draw_ladder::SiteOutcome outcome;
+    std::uint16_t subsite = 0;
+    std::int16_t verdict = -1;
+};
+
+bool classifierSiteSequenceIs(const VScreenPanelDistanceApiTestResult& result,
+                              const ExpectedClassifierSite* expected,
+                              std::size_t expectedCount) {
+    if (result.classifierSiteOverflow || result.classifierSiteCount != expectedCount)
+        return false;
+    for (std::size_t i = 0; i < expectedCount; ++i) {
+        const auto& actual = result.classifierSites[i];
+        const auto& want = expected[i];
+        if (actual.siteId != static_cast<std::uint16_t>(want.id) ||
+            actual.kind != static_cast<std::uint8_t>(want.kind) ||
+            actual.outcome != static_cast<std::uint8_t>(want.outcome) ||
+            actual.subsite != want.subsite || actual.verdict != want.verdict)
+            return false;
+    }
+    return true;
+}
+
+bool noneDrawActionsMatch(const VScreenPanelDistanceApiTestResult& result,
+                          const VScreenPanelDistanceApiTestInput& input) {
+    using namespace draw_ladder;
+    if (!result.token.valid() || draw_ladder_trace::actionCountForTest(result.token) != 3)
+        return false;
+    const DrawCallKind call = input.kind == 'D' ? DrawCallKind::Draw
+        : input.kind == 'I' ? DrawCallKind::DrawIndexed
+        : input.kind == 'N' ? DrawCallKind::DrawInstanced
+                            : DrawCallKind::DrawIndexedInstanced;
+    const std::uint32_t start = (input.kind == 'D' || input.kind == 'N')
+        ? static_cast<std::uint32_t>(input.drawArgs.base) : input.drawArgs.start;
+    const std::uint32_t startInstance = (input.kind == 'N' || input.kind == 'X')
+        ? input.drawArgs.startInstance : 0;
+    const std::int32_t baseVertex = (input.kind == 'I' || input.kind == 'X')
+        ? input.drawArgs.base : 0;
+    const ActionId expectedIds[] = {ActionId::kDrawBegin, ActionId::kOriginalDraw,
+                                    ActionId::kDrawEnd};
+    const ActionPhase expectedPhases[] = {ActionPhase::Begin, ActionPhase::Issue,
+                                          ActionPhase::End};
+    for (std::uint16_t i = 0; i < 3; ++i) {
+        std::uint16_t id = 0;
+        ActionRecord record{};
+        if (!draw_ladder_trace::readActionForTest(result.token, i, &id, &record) ||
+            id != static_cast<std::uint16_t>(expectedIds[i]) ||
+            record.phase != expectedPhases[i] || record.outcome != ActionOutcome::Applied)
+            return false;
+        if (i == 1 && (record.call != call || record.issueCount != 1 ||
+                       record.count != input.drawCount ||
+                       record.instances != input.drawInstances || record.start != start ||
+                       record.startInstance != startInstance ||
+                       record.baseVertex != baseVertex)) return false;
+    }
+    return true;
+}
+
+bool testFullClassifierTerminalPath(ID3D11Device* device,
+                                    ID3D11DeviceContext* immediate) {
+    using draw_ladder::SiteId;
+    using draw_ladder::SiteKind;
+    using draw_ladder::SiteOutcome;
+    bool okay = true;
+
+    // Literal expected production order and outcomes. The two interest gates
+    // are forced off by the seam; plugin dispatch is disabled. The matching
+    // WARP SRV/CB lets panel eligibility pass, and injected Map failure is the
+    // only reason the enabled case reaches PanelTailNone.
+    constexpr ExpectedClassifierSite full[] = {
+        {SiteId::kFssChromeSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kForeignContextNone, SiteKind::Exit, SiteOutcome::Observed},
+        {SiteId::kDrawGateDisabledNone, SiteKind::Exit, SiteOutcome::Observed},
+        {SiteId::kParticleProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kParticleSubstitute, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kWitchspaceStarsSkip, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kStateSnapshot, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kRouteSelected, SiteKind::Observe, SiteOutcome::Observed, 6},
+        {SiteId::kEyeDepthAndCount, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeUiDepthProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeHoloDepthProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kIntroPanelClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kIntroCurveObserve, SiteKind::Observe, SiteOutcome::NotEligible},
+        {SiteId::kSunglareNomination, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeCensusSubmitted, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kUiCrispProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kObjectProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeCensusSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kEyeRangeSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kNightVisionClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kRemlokHideSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kRemlokScissorClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kHoloClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kTargetSharpClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kScrimClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kEyeBackdropComposite, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kFssPanelClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kFssRevealClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kFssDumpClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kResolveBindClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kSunglareSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kSunglareSteadyClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kGlareClampClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kHeadOffsetObserve, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kPanelCurveObserve, SiteKind::Observe, SiteOutcome::NotEligible},
+        {SiteId::kEyeNoDistanceNone, SiteKind::Exit, SiteOutcome::Declined},
+        {SiteId::kPanelEligibilityNone, SiteKind::Exit, SiteOutcome::Declined},
+        {SiteId::kPanelDistanceClaim, SiteKind::Claim, SiteOutcome::Declined, 1},
+        {SiteId::kPanelTailNone, SiteKind::Exit, SiteOutcome::Exited, 1, 0},
+    };
+    constexpr ExpectedClassifierSite distanceDisabled[] = {
+        {SiteId::kFssChromeSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kForeignContextNone, SiteKind::Exit, SiteOutcome::Observed},
+        {SiteId::kDrawGateDisabledNone, SiteKind::Exit, SiteOutcome::Observed},
+        {SiteId::kParticleProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kParticleSubstitute, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kWitchspaceStarsSkip, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kStateSnapshot, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kRouteSelected, SiteKind::Observe, SiteOutcome::Observed, 6},
+        {SiteId::kEyeDepthAndCount, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeUiDepthProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeHoloDepthProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kIntroPanelClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kIntroCurveObserve, SiteKind::Observe, SiteOutcome::NotEligible},
+        {SiteId::kSunglareNomination, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeCensusSubmitted, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kUiCrispProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kObjectProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeCensusSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kEyeRangeSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kNightVisionClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kRemlokHideSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kRemlokScissorClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kHoloClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kTargetSharpClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kScrimClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kEyeBackdropComposite, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kFssPanelClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kFssRevealClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kFssDumpClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kResolveBindClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kSunglareSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kSunglareSteadyClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kGlareClampClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kHeadOffsetObserve, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kPanelCurveObserve, SiteKind::Observe, SiteOutcome::NotEligible},
+        {SiteId::kEyeNoDistanceNone, SiteKind::Exit, SiteOutcome::Exited, 0, 0},
+    };
+
+    D3D11_TEXTURE2D_DESC textureDesc{};
+    textureDesc.Width = 1920;
+    textureDesc.Height = 1080;
+    textureDesc.MipLevels = 1;
+    textureDesc.ArraySize = 1;
+    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    textureDesc.SampleDesc.Count = 1;
+    textureDesc.Usage = D3D11_USAGE_DEFAULT;
+    textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> panelTexture;
+    ComPtr<ID3D11ShaderResourceView> panelSrv;
+    D3D11_TEXTURE2D_DESC eyeDesc = textureDesc;
+    eyeDesc.Width = 2048;
+    eyeDesc.Height = 2048;
+    eyeDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> eyeTexture;
+    ComPtr<ID3D11RenderTargetView> eyeRtv;
+    D3D11_BUFFER_DESC cbDesc{};
+    cbDesc.ByteWidth = 16;
+    cbDesc.Usage = D3D11_USAGE_DEFAULT;
+    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    ComPtr<ID3D11Buffer> compositeCb;
+    ComPtr<ID3D11Buffer> overrideCb;
+    okay &= check(device && SUCCEEDED(device->CreateTexture2D(&textureDesc, nullptr,
+                                                            &panelTexture)) &&
+                      SUCCEEDED(device->CreateShaderResourceView(panelTexture.Get(), nullptr,
+                                                                  &panelSrv)) &&
+                      SUCCEEDED(device->CreateTexture2D(&eyeDesc, nullptr, &eyeTexture)) &&
+                      SUCCEEDED(device->CreateRenderTargetView(eyeTexture.Get(), nullptr,
+                                                                &eyeRtv)) &&
+                      SUCCEEDED(device->CreateBuffer(&cbDesc, nullptr, &compositeCb)) &&
+                      SUCCEEDED(device->CreateBuffer(&cbDesc, nullptr, &overrideCb)),
+                  "WARP creates actual panel-sized SRV and matching constant buffers for full ladder");
+    if (!device || !immediate || !panelSrv || !eyeRtv || !compositeCb || !overrideCb) return false;
+
+    alignas(float) std::uint8_t shadow[16]{};
+    const float shadowValues[4] = {2.0f, 4.0f, 6.0f, 8.0f};
+    std::memcpy(shadow, shadowValues, sizeof(shadowValues));
+    auto makeInput = [&](bool distanceEnabled, bool traceEnabled) {
+        VScreenPanelDistanceApiTestInput input{};
+        input.context = immediate;
+        input.ownerContext = immediate;
+        input.traceEnabled = traceEnabled;
+        input.distanceEnabled = distanceEnabled;
+        input.shadowBytes = sizeof(shadow);
+        std::memcpy(input.shadow, shadow, sizeof(shadow));
+        input.distanceIndex = 2;
+        input.distanceScale = 0.5f;
+        input.compositeCb = compositeCb.Get();
+        input.ourCb = overrideCb.Get();
+        input.mapHresult = static_cast<std::int32_t>(E_FAIL);
+        input.fullClassifier = true;
+        input.panelSrv = panelSrv.Get();
+        input.eyeRtv = eyeRtv.Get();
+        input.kind = 'I';
+        input.drawCount = 6;
+        input.drawArgs = {2, -3, 0};
+        return input;
+    };
+
+    struct DrawFixture final {
+        char kind;
+        std::uint32_t instances;
+        edvr::DrawArgs args;
+    };
+    // Match each real hook's populated fields; unused fields remain zero.
+    constexpr DrawFixture drawFixtures[] = {
+        {'D', 1, {0, -3, 0}}, {'I', 1, {2, -3, 0}},
+        {'N', 3, {0, -3, 7}}, {'X', 3, {2, -3, 7}},
+    };
+    for (const bool traceEnabled : {false, true}) {
+      for (const auto& draw : drawFixtures) {
+        VScreenPanelDistanceApiTestResult result{};
+        auto input = makeInput(true, traceEnabled);
+        input.kind = draw.kind;
+        input.drawInstances = draw.instances;
+        input.drawArgs = draw.args;
+        const bool ran = edvr::vScreenPanelDistanceApiTransactionTest(input, &result);
+        okay &= check(ran && result.winner == static_cast<std::int16_t>(SiteId::kPanelTailNone) &&
+                          result.verdict == static_cast<std::int16_t>(draw_ladder::VerdictOrdinal::kNone) &&
+                          result.mapCalls == 1 &&
+                          result.unmapCalls == 0 && result.constantBufferCalls == 0 &&
+                          result.originalDrawCalls == 1 &&
+                          result.finalBoundCb == input.compositeCb &&
+                          result.mapArgumentsValid && result.drawArgumentsValid &&
+                          panelEventSequence(result, {VScreenPanelDistanceApiTestEvent::Map,
+                                                      VScreenPanelDistanceApiTestEvent::OriginalDraw}),
+                          traceEnabled
+                          ? "Trace full VR-eye classifier reaches PanelTailNone after injected Map failure and forwards one original draw"
+                          : "NoTrace full VR-eye classifier reaches PanelTailNone after injected Map failure and forwards one original draw");
+        if (traceEnabled) {
+            okay &= check(result.siteResult.outcome == SiteOutcome::Exited &&
+                              result.siteResult.subsite == 1 &&
+                              classifierSiteSequenceIs(result, full, sizeof(full) / sizeof(full[0])),
+                          "Trace full VR-eye classifier matches the literal ordered all-decline site/outcome sequence");
+            okay &= check(noneDrawActionsMatch(result, input),
+                          "None verdict forwards exactly one typed original draw between DrawBegin/DrawEnd");
+        } else {
+            okay &= check(result.classifierSiteCount == 0 && !result.classifierSiteOverflow,
+                          "NoTrace full classifier emits no ordered-site observations");
+        }
+
+        VScreenPanelDistanceApiTestResult disabledResult{};
+        auto disabled = makeInput(false, traceEnabled);
+        disabled.kind = draw.kind;
+        disabled.drawInstances = draw.instances;
+        disabled.drawArgs = draw.args;
+        const bool disabledRan = edvr::vScreenPanelDistanceApiTransactionTest(
+            disabled, &disabledResult);
+        okay &= check(disabledRan &&
+                          disabledResult.winner == static_cast<std::int16_t>(SiteId::kEyeNoDistanceNone) &&
+                          disabledResult.verdict == static_cast<std::int16_t>(draw_ladder::VerdictOrdinal::kNone) &&
+                          disabledResult.mapCalls == 0 && disabledResult.unmapCalls == 0 &&
+                          disabledResult.constantBufferCalls == 0 &&
+                          disabledResult.originalDrawCalls == 1 &&
+                          disabledResult.finalBoundCb == disabled.compositeCb &&
+                          disabledResult.drawArgumentsValid &&
+                          panelEventSequence(disabledResult,
+                              {VScreenPanelDistanceApiTestEvent::OriginalDraw}),
+                      traceEnabled
+                          ? "Trace distance-disabled full classifier exits at EyeNoDistanceNone and forwards one original draw"
+                          : "NoTrace distance-disabled full classifier exits at EyeNoDistanceNone and forwards one original draw");
+        if (traceEnabled) {
+            okay &= check(disabledResult.siteResult.outcome == SiteOutcome::Exited &&
+                              disabledResult.siteResult.subsite == 0 &&
+                              classifierSiteSequenceIs(disabledResult, distanceDisabled,
+                                                   sizeof(distanceDisabled) / sizeof(distanceDisabled[0])),
+                          "Trace distance-disabled route matches the independent literal prefix and omits later Panel sites");
+            okay &= check(noneDrawActionsMatch(disabledResult, disabled),
+                          "distance-disabled None verdict records exactly one typed original draw");
+        } else {
+            okay &= check(disabledResult.classifierSiteCount == 0 &&
+                              !disabledResult.classifierSiteOverflow,
+                          "NoTrace distance-disabled classifier emits no ordered-site observations");
+        }
+      }
+    }
+    return okay;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1239,6 +1531,7 @@ int main(int argc, char** argv) {
     if (immediate && deferred) {
         using namespace edvr::draw_ladder;
         okay &= testPanelDistanceApiTransaction(immediate, deferred);
+        okay &= testFullClassifierTerminalPath(device, immediate);
         // Local action-scope check only: the production forwardWithVerdict
         // receives a real WARP context and an injected thunk boundary. The
         // external caller's real draw implementation is intentionally not run.

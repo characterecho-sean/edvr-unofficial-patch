@@ -533,25 +533,28 @@ bool productionCpuRouteChecks() {
         ? source.substr(selectedStart, selectedOpen - selectedStart) : std::string{};
     const std::size_t capturing = chooser.find("if (capturing)");
     const std::size_t captureNoCpu = chooser.find("plugin_cost::NoCpu noCpu;");
-    const std::size_t captureWork = chooser.find("work(trace, noCpu, api)");
+    const std::size_t captureWork = chooser.find("work(trace, noCpu, ApiPolicy{});");
     const std::size_t selected = chooser.find("if (cpuSample && !suppressCpu)");
     const std::size_t sampled = chooser.find("plugin_cost::SampledCpu<> sampledCpu;");
     const std::size_t unsampled = chooser.find("plugin_cost::NoCpu noCpu;", sampled);
     ok &= check(!chooser.empty() && !selectedSignature.empty() &&
-                selectedSignature.find("ApiPolicy& api") == std::string::npos &&
-                chooser.find("ApiPolicy api;") != std::string::npos &&
+                selectedSignature.find("ApiPolicy&") == std::string::npos &&
+                selectedSignature.find("Work&& work") != std::string::npos &&
+                chooser.find("ApiPolicy api") == std::string::npos &&
                 capturing < captureNoCpu && captureNoCpu < captureWork &&
                 captureWork < selected && selected < sampled && sampled < unsampled &&
-                chooser.find("return work(noTrace, sampledCpu, api);") != std::string::npos &&
-                chooser.find("return work(noTrace, noCpu, api);") != std::string::npos &&
+                chooser.find("work(trace, noCpu, api)") == std::string::npos &&
+                chooser.find("return work(noTrace, sampledCpu, ApiPolicy{});") != std::string::npos &&
+                chooser.find("return work(noTrace, noCpu, ApiPolicy{});") != std::string::npos &&
                 chooser.find("const bool suppressCpu = cpuSample && replayActive;") != std::string::npos &&
                 chooser.find("if (suppressCpu) edvrPluginCostMarkTraceSuppressed();") < capturing,
                 "trace capture selects NoCpu before the independent sampled-or-unsampled classifier path");
     if (captureWork != std::string::npos && selected > captureWork) {
         const std::string captureBranch = chooser.substr(capturing, selected - capturing);
         ok &= check(captureBranch.find("SampledCpu") == std::string::npos &&
-                    captureBranch.find("work(trace, noCpu, api)") != std::string::npos,
-                    "trace capture path has no sampled CPU policy or QPC handler scope");
+                captureBranch.find("work(trace, noCpu, ApiPolicy{});") != std::string::npos &&
+                    captureBranch.find("api") == std::string::npos,
+                    "trace capture path has no sampled CPU policy, runtime API object, or QPC handler scope");
     }
     const std::string apiChooser = functionBody(source, "LadderDecision withDrawLadderTrace(");
     const std::size_t msvcForceInline = source.find(
@@ -560,6 +563,10 @@ bool productionCpuRouteChecks() {
         "#define EDVR_VSCREEN_FORCEINLINE inline", msvcForceInline);
     const std::size_t outerDispatch = source.find(
         "EDVR_VSCREEN_FORCEINLINE LadderDecision withDrawLadderTrace(");
+    const std::size_t outerOpen = source.find('{', outerDispatch);
+    const std::string outerSignature = outerDispatch != std::string::npos &&
+        outerOpen != std::string::npos
+        ? source.substr(outerDispatch, outerOpen - outerDispatch) : std::string{};
     const std::size_t forceInlineCleanup = source.find(
         "#undef EDVR_VSCREEN_FORCEINLINE", outerDispatch);
     const auto countIn = [](const std::string& text, const char* needle) {
@@ -582,12 +589,15 @@ bool productionCpuRouteChecks() {
         "return withDrawLadderTraceSelectedApi<plugin_cost::NoApi>(");
     const std::size_t secondDispatch = noApi;
     ok &= check(!apiChooser.empty() &&
+                !outerSignature.empty() &&
+                outerSignature.find("Work&& work") != std::string::npos &&
+                outerSignature.find("Factory") == std::string::npos &&
+                outerSignature.find("ApiPolicy") == std::string::npos &&
                 gate == "if(plugin_cost::apiSampleHint()&&edvrPluginCostApiSampleContext(self)!=0)" &&
                 countIn(apiChooser, "plugin_cost::apiSampleHint()") == 1 &&
                 countIn(apiChooser, "edvrPluginCostApiSampleContext(self)") == 1 &&
                 countIn(apiChooser, "withDrawLadderTraceSelectedApi<") == 2 &&
-                apiChooser.find("plugin_cost::SampledApi<> api;") == std::string::npos &&
-                apiChooser.find("plugin_cost::NoApi api;") == std::string::npos &&
+                countIn(apiChooser, "work(") == 0 &&
                 sampledApi != std::string::npos && firstDispatch < noApi &&
                 noApi != std::string::npos && secondDispatch == noApi &&
                 msvcForceInline < portableForceInline &&
@@ -596,6 +606,12 @@ bool productionCpuRouteChecks() {
                 apiChooser.find("drawLadderTraceCaptureActive") == std::string::npos &&
                 apiChooser.find("edvrPluginCostApiSampleFrame") == std::string::npos,
                 "API policy selection short-circuits one inline TLS hint before one owner/context verifier independently of CPU/perf/replay sampling");
+    ok &= check(countIn(source, "[&](auto& trace, auto& cpu, auto api) {") == 5 &&
+                countIn(source, "using Api = std::remove_reference_t<decltype(api)>;") == 5 &&
+                countIn(source, "using Api = std::remove_cv_t<std::remove_reference_t<decltype(api)>>;") == 0 &&
+                countIn(source, "Api>(trace,") == 4 &&
+                countIn(source, "endPanelOverride<Api>(") == 5,
+                "four production draw thunks and the warm test seam receive the selected empty API policy by value");
     return ok;
 }
 

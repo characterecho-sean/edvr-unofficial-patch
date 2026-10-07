@@ -85,10 +85,23 @@ struct VScreenPanelDistanceApiTestInput final {
     bool mapReturnsNull = false;
     std::uint8_t* mappedStorage = nullptr;
     std::uint32_t mappedStorageBytes = 0;
+    // Test-only full Common+Eye selector traversal. Requires a real panel-size
+    // SRV/CB binding and uses the injected Map callback for the terminal miss.
+    bool fullClassifier = false;
+    void* panelSrv = nullptr;
+    void* eyeRtv = nullptr;
     char kind = 'I';
     std::uint32_t drawCount = 3;
     std::uint32_t drawInstances = 1;
     edvr::DrawArgs drawArgs{};
+};
+
+struct VScreenClassifierSiteEvent final {
+    std::uint16_t siteId = 0;
+    std::uint8_t kind = 0;
+    std::uint8_t outcome = 0;
+    std::uint16_t subsite = 0;
+    std::int16_t verdict = -1;
 };
 
 enum class VScreenPanelDistanceApiTestEvent : std::uint8_t {
@@ -102,6 +115,8 @@ enum class VScreenPanelDistanceApiTestEvent : std::uint8_t {
 struct VScreenPanelDistanceApiTestResult final {
     draw_ladder_trace::Token token{};
     draw_ladder::SiteResult siteResult{};
+    std::int16_t winner = -1;
+    std::int16_t verdict = 0;
     std::uint32_t mapCalls = 0;
     std::uint32_t unmapCalls = 0;
     std::uint32_t constantBufferCalls = 0;
@@ -124,6 +139,9 @@ struct VScreenPanelDistanceApiTestResult final {
     std::uint8_t events[5]{};
     std::uint32_t mappedBytes = 0;
     std::uint8_t mappedSnapshot[256]{};
+    std::uint8_t classifierSiteCount = 0;
+    bool classifierSiteOverflow = false;
+    VScreenClassifierSiteEvent classifierSites[48]{};
 };
 
 bool vScreenPanelDistanceApiTransactionTest(

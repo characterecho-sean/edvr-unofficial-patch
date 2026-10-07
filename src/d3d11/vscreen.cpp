@@ -3455,7 +3455,7 @@ template <class ApiPolicy, class Work>
 LadderDecision withDrawLadderTraceSelectedApi(
     ID3D11DeviceContext* self, char kind, UINT count, UINT instances,
     const DrawArgs& args, bool cpuSample, Work&& work) {
-    ApiPolicy api;
+    static_assert(std::is_empty<ApiPolicy>::value, "API policies must carry no member state");
     const bool isOwner = self == g_state->ownerCtx;
     const bool replayActive = (isOwner || cpuSample) &&
         draw_ladder_trace::drawLadderTraceCaptureActive();
@@ -3495,7 +3495,7 @@ LadderDecision withDrawLadderTraceSelectedApi(
         const auto previousToken = t_activeDrawReplayToken;
         t_activeDrawReplayToken = token;
         plugin_cost::NoCpu noCpu;
-        const LadderDecision result = work(trace, noCpu, api);
+        const LadderDecision result = work(trace, noCpu, ApiPolicy{});
         t_activeDrawReplayToken = previousToken;
         ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawEnd>(
             trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
@@ -3507,10 +3507,10 @@ LadderDecision withDrawLadderTraceSelectedApi(
     draw_ladder::NoTrace noTrace;
     if (cpuSample && !suppressCpu) {
         plugin_cost::SampledCpu<> sampledCpu;
-        return work(noTrace, sampledCpu, api);
+        return work(noTrace, sampledCpu, ApiPolicy{});
     }
     plugin_cost::NoCpu noCpu;
-    return work(noTrace, noCpu, api);
+    return work(noTrace, noCpu, ApiPolicy{});
 }
 
 #if defined(_MSC_VER)
@@ -6207,11 +6207,12 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     args.base = static_cast<int32_t>(start);
     withDrawLadderTrace(self, 'D', count, 1, args,
                         clock.cpuOn && g_state && self == g_state->ownerCtx,
-                        [&](auto& trace, auto& cpu, auto& api) {
+                        [&](auto& trace, auto& cpu, auto api) {
+        using Api = std::remove_reference_t<decltype(api)>;
         const LadderDecision decision = beginPanelOverride<
             std::remove_reference_t<decltype(trace)>,
             std::remove_reference_t<decltype(cpu)>,
-            std::remove_reference_t<decltype(api)>>(trace, self, 'D', count, 1, args);
+            Api>(trace, self, 'D', count, 1, args);
         const DrawVerdict v = decision.verdict;
         if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
@@ -6226,7 +6227,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             return true;
         });
         if (v == DrawVerdict::kPanel) {
-            endPanelOverride<std::remove_reference_t<decltype(api)>>(self);
+            endPanelOverride<Api>(self);
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
                 trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
                 'D', count, 1, args);
@@ -6309,11 +6310,12 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     args.base = baseVertex;
     withDrawLadderTrace(self, 'I', count, 1, args,
                         clock.cpuOn && g_state && self == g_state->ownerCtx,
-                        [&](auto& trace, auto& cpu, auto& api) {
+                        [&](auto& trace, auto& cpu, auto api) {
+        using Api = std::remove_reference_t<decltype(api)>;
         const LadderDecision decision = beginPanelOverride<
             std::remove_reference_t<decltype(trace)>,
             std::remove_reference_t<decltype(cpu)>,
-            std::remove_reference_t<decltype(api)>>(trace, self, 'I', count, 1, args);
+            Api>(trace, self, 'I', count, 1, args);
         const DrawVerdict v = decision.verdict;
         if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
@@ -6328,7 +6330,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
             return true;
         });
         if (v == DrawVerdict::kPanel) {
-            endPanelOverride<std::remove_reference_t<decltype(api)>>(self);
+            endPanelOverride<Api>(self);
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
                 trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
                 'I', count, 1, args);
@@ -6375,11 +6377,12 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     args.startInstance = startInstance;
     withDrawLadderTrace(self, 'N', perInstance, instances, args,
                         clock.cpuOn && g_state && self == g_state->ownerCtx,
-                        [&](auto& trace, auto& cpu, auto& api) {
+                        [&](auto& trace, auto& cpu, auto api) {
+        using Api = std::remove_reference_t<decltype(api)>;
         const LadderDecision decision = beginPanelOverride<
             std::remove_reference_t<decltype(trace)>,
             std::remove_reference_t<decltype(cpu)>,
-            std::remove_reference_t<decltype(api)>>(trace, self, 'N', perInstance, instances, args);
+            Api>(trace, self, 'N', perInstance, instances, args);
         const DrawVerdict v = decision.verdict;
         if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
@@ -6402,7 +6405,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             return true;
         });
         if (v == DrawVerdict::kPanel) {
-            endPanelOverride<std::remove_reference_t<decltype(api)>>(self);
+            endPanelOverride<Api>(self);
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
                 trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
                 'N', perInstance, drawn, args);
@@ -6465,11 +6468,12 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.startInstance = startInstance;
     withDrawLadderTrace(self, 'X', perInstance, instances, args,
                         clock.cpuOn && g_state && self == g_state->ownerCtx,
-        [&](auto& trace, auto& cpu, auto& api) {
+        [&](auto& trace, auto& cpu, auto api) {
+      using Api = std::remove_reference_t<decltype(api)>;
       const LadderDecision decision = beginPanelOverride<
           std::remove_reference_t<decltype(trace)>,
           std::remove_reference_t<decltype(cpu)>,
-          std::remove_reference_t<decltype(api)>>(trace, self, 'X', perInstance, instances, args);
+          Api>(trace, self, 'X', perInstance, instances, args);
       const DrawVerdict v = decision.verdict;
       // Engine-record velocity (with fix.temporal_aa): four generation
       // compares; the pool families' substituted shaders and MRT6 are bound
@@ -6565,7 +6569,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         return true;  // the original draw was issued
       });
       if (v == DrawVerdict::kPanel) {
-          endPanelOverride<std::remove_reference_t<decltype(api)>>(self);
+          endPanelOverride<Api>(self);
           ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
               trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
               'X', perInstance, instances, args);
@@ -6773,13 +6777,72 @@ struct VScreenTestTraceCapture final {
     static constexpr bool enabled = Policy::enabled;
     Policy& policy;
     draw_ladder::SiteResult& result;
+    VScreenClassifierSiteEvent* orderedSites = nullptr;
+    std::uint8_t* orderedSiteCount = nullptr;
+    bool* orderedSiteOverflow = nullptr;
+    std::uint32_t& sunglareClampResetBefore;
+    std::uint32_t& sunglareClampResetAfter;
+    bool& sunglareClampResetSeen;
+
+    explicit VScreenTestTraceCapture(
+        Policy& borrowedPolicy, draw_ladder::SiteResult& capturedResult,
+        VScreenClassifierSiteEvent* sites = nullptr,
+        std::uint8_t* siteCount = nullptr, bool* siteOverflow = nullptr) noexcept
+        : policy(borrowedPolicy), result(capturedResult), orderedSites(sites),
+          orderedSiteCount(siteCount), orderedSiteOverflow(siteOverflow),
+          sunglareClampResetBefore(borrowedPolicy.sunglareClampResetBefore),
+          sunglareClampResetAfter(borrowedPolicy.sunglareClampResetAfter),
+          sunglareClampResetSeen(borrowedPolicy.sunglareClampResetSeen) {}
 
     template <draw_ladder::SiteId Id, draw_ladder::SiteKind Kind,
               class Payload>
     void site(const Payload& payload) noexcept {
-        if constexpr (std::is_same_v<Payload, draw_ladder::SiteResult>)
+        if constexpr (std::is_same_v<Payload, draw_ladder::SiteResult>) {
             result = payload;
+            if (orderedSites && orderedSiteCount && orderedSiteOverflow) {
+                if (*orderedSiteCount < 48) {
+                    orderedSites[*orderedSiteCount] = {
+                        static_cast<std::uint16_t>(Id),
+                        static_cast<std::uint8_t>(Kind),
+                        static_cast<std::uint8_t>(payload.outcome),
+                        payload.subsite, payload.verdict};
+                    ++*orderedSiteCount;
+                } else {
+                    *orderedSiteOverflow = true;
+                }
+            }
+        }
         policy.template site<Id, Kind>(payload);
+    }
+
+    void candidates(std::uint64_t mask) noexcept { policy.candidates(mask); }
+
+    void route(draw_ladder::RouteId routeId,
+               draw_ladder::SequenceId sequenceId) noexcept {
+        policy.route(routeId, sequenceId);
+    }
+
+    void predicateFact(const draw_ladder_trace::PredicateFact& fact) noexcept {
+        policy.predicateFact(fact);
+    }
+
+    void completePredicateFact(const draw_ladder_trace::PredicateFact& fact) noexcept {
+        policy.completePredicateFact(fact);
+    }
+
+    void completeWitchspaceStarsPredicateFact(
+        const draw_ladder_trace::PredicateFact& fact) noexcept {
+        policy.completeWitchspaceStarsPredicateFact(fact);
+    }
+
+    void sunglareFact(const SunglareObservation& fact) noexcept {
+        policy.sunglareFact(fact);
+    }
+
+    void fssFact(const FssObservation& fact) noexcept { policy.fssFact(fact); }
+
+    void remlokFact(const remlok_observation::Observation& fact) noexcept {
+        policy.remlokFact(fact);
     }
 
     void basicFact(const BasicDrawObservation& fact) noexcept {
@@ -7409,8 +7472,10 @@ bool vScreenPanelDistanceApiTransactionTest(
         input.shadowBytes > sizeof(input.shadow) ||
         static_cast<std::uint64_t>(input.distanceIndex) * sizeof(float) + sizeof(float) >
             input.shadowBytes ||
-        (input.mapHresult >= 0 && !input.mapReturnsNull &&
+        (input.distanceEnabled && input.mapHresult >= 0 && !input.mapReturnsNull &&
          (!input.mappedStorage || input.mappedStorageBytes < input.shadowBytes)) ||
+        (input.fullClassifier && (!input.panelSrv || !input.eyeRtv ||
+                                  !input.compositeCb || !input.ourCb)) ||
         (input.traceEnabled && !draw_ladder_trace::configured())) return false;
     *result = {};
 
@@ -7419,7 +7484,10 @@ bool vScreenPanelDistanceApiTransactionTest(
     const bool priorCurve = fixture.curveThisDraw;
     fixture.ownerCtx = input.ownerContext;
     fixture.pluginDispatchEnabled = false;
-    fixture.rtv0Eye = nullptr;
+    fixture.rtv0Eye = false;
+    // Restoring the borrowed binding slot makes its next test generation
+    // repeat. Invalidate the paired answer before classifying the next RTV.
+    fixture.rtv0EyeGen = 0;
     fixture.eyeDrawsThisFrame = 0;
     fixture.fssHealOn = false;
     fixture.quadSkipArmed = false;
@@ -7428,10 +7496,19 @@ bool vScreenPanelDistanceApiTransactionTest(
     fixture.distanceEnabled = input.distanceEnabled;
     fixture.distanceIndex = input.distanceIndex;
     fixture.distanceScale = input.distanceScale;
+    fixture.panelW = 1920;
+    fixture.panelH = 1080;
+    fixture.eyeW = 0;
+    fixture.eyeH = 0;
+    fixture.renderW = 0;
+    fixture.renderH = 0;
     fixture.shadowBytes = input.shadowBytes;
     std::memcpy(fixture.shadow, input.shadow, input.shadowBytes);
     fixture.compositeCb = input.compositeCb;
     fixture.ourCb = static_cast<ID3D11Buffer*>(input.ourCb);
+    fixture.ourCbBytes = input.shadowBytes;
+    fixture.psSrv0PanelGen = 0;
+    fixture.psSrv0Panel = false;
     fixture.realMap = &panelDistanceApiTestMap;
     fixture.realUnmap = &panelDistanceApiTestUnmap;
     fixture.realVSSetConstantBuffers = &panelDistanceApiTestSetConstantBuffers;
@@ -7439,7 +7516,7 @@ bool vScreenPanelDistanceApiTransactionTest(
     fixture.realDrawIndexed = &panelDistanceApiTestDrawIndexed;
     fixture.realDrawInstanced = &panelDistanceApiTestDrawInstanced;
     fixture.realDrawIndexedInstanced = &panelDistanceApiTestDrawIndexedInstanced;
-    fixture.panelOverrides = 1;
+    fixture.panelOverrides = input.fullClassifier ? 0 : 1;
 
     State* const priorState = g_state;
     const bool priorUiDepth = t_uiDepthThisDraw;
@@ -7456,7 +7533,16 @@ bool vScreenPanelDistanceApiTransactionTest(
     const auto priorDepthMode = detail::g_uiDepthMode;
     const bool priorDepthOn = detail::g_uiDepthOn;
     const bool priorDepthStoodDown = detail::g_uiDepthStoodDown;
+    const auto psSrv0Slot = static_cast<std::size_t>(BindSlot::PsSrv0);
+    const auto vsCb0Slot = static_cast<std::size_t>(BindSlot::VsCb0);
+    const auto rtv0Slot = static_cast<std::size_t>(BindSlot::Rtv0);
+    const auto priorPsSrv0 = detail::g_bindingSlots[psSrv0Slot];
+    const auto priorVsCb0 = detail::g_bindingSlots[vsCb0Slot];
+    const auto priorRtv0 = detail::g_bindingSlots[rtv0Slot];
     const auto priorReplayToken = t_activeDrawReplayToken;
+    const auto priorLegacyInterestMask = input.fullClassifier
+        ? detail::g_legacyDrawInterestMask.exchange(0, std::memory_order_relaxed)
+        : draw_interest::InterestMask{};
     const bool priorTraceCapture = draw_ladder_trace::detail::g_captureActive.exchange(
         input.traceEnabled, std::memory_order_relaxed);
     const auto* priorInput = t_panelDistanceApiInput;
@@ -7475,28 +7561,58 @@ bool vScreenPanelDistanceApiTransactionTest(
     detail::g_uiDepthMode = detail::UiDepthMode::kNone;
     detail::g_uiDepthOn = false;
     detail::g_uiDepthStoodDown = false;
+    if (input.fullClassifier) {
+        // The fixture uses real WARP eye/panel views and matching CB0. The
+        // Only the live cached interest mask is temporarily neutralized above;
+        // registration metadata and observer publication remain untouched.
+        detail::g_bindingSlots[psSrv0Slot].ptr = input.panelSrv;
+        ++detail::g_bindingSlots[psSrv0Slot].gen;
+        detail::g_bindingSlots[vsCb0Slot].ptr = input.compositeCb;
+        ++detail::g_bindingSlots[vsCb0Slot].gen;
+        detail::g_bindingSlots[rtv0Slot].ptr = input.eyeRtv;
+        ++detail::g_bindingSlots[rtv0Slot].gen;
+    }
     g_state = &fixture;
 
     DrawArgs args = input.drawArgs;
-    auto run = [&](auto& trace, auto& cpu, auto& api) {
+    auto run = [&](auto& trace, auto& cpu, auto api) {
         using Trace = std::remove_reference_t<decltype(trace)>;
+        using Cpu = std::remove_reference_t<decltype(cpu)>;
         using Api = std::remove_reference_t<decltype(api)>;
-        VScreenDrawLadderVisitor<Trace, Api> visitor{
-            &fixture, input.context, input.kind, input.drawCount,
-            input.drawInstances, args, trace};
         if constexpr (Trace::enabled) result->token = trace.token;
-        VScreenTestInterest interest;
-        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
-        if constexpr (Trace::enabled) {
-            VScreenTestTraceCapture<Trace> capture{trace, result->siteResult};
-            draw_ladder::visitOne<decltype(visitor), VScreenPanelDistanceApiTestSite>(
-                flow, visitor, interest, capture, cpu);
+        LadderDecision decision{};
+        if (input.fullClassifier) {
+            if constexpr (Trace::enabled) {
+                VScreenTestTraceCapture<Trace> capture{
+                    trace, result->siteResult, result->classifierSites,
+                    &result->classifierSiteCount, &result->classifierSiteOverflow};
+                decision = beginPanelOverride<decltype(capture), Cpu, Api>(
+                    capture, input.context, input.kind, input.drawCount,
+                    input.drawInstances, args);
+            } else {
+                decision = beginPanelOverride<Trace, Cpu, Api>(
+                    trace, input.context, input.kind, input.drawCount,
+                    input.drawInstances, args);
+            }
         } else {
-            VScreenPanelDistanceResultCapture capture{result->siteResult};
-            draw_ladder::visitOne<decltype(visitor), VScreenPanelDistanceApiTestSite>(
-                flow, visitor, interest, capture, cpu);
+            VScreenDrawLadderVisitor<Trace, Api> visitor{
+                &fixture, input.context, input.kind, input.drawCount,
+                input.drawInstances, args, trace};
+            VScreenTestInterest interest;
+            draw_ladder::Flow flow = draw_ladder::Flow::Continue;
+            if constexpr (Trace::enabled) {
+                VScreenTestTraceCapture<Trace> capture{trace, result->siteResult};
+                draw_ladder::visitOne<decltype(visitor), VScreenPanelDistanceApiTestSite>(
+                    flow, visitor, interest, capture, cpu);
+            } else {
+                VScreenPanelDistanceResultCapture capture{result->siteResult};
+                draw_ladder::visitOne<decltype(visitor), VScreenPanelDistanceApiTestSite>(
+                    flow, visitor, interest, capture, cpu);
+            }
+            decision = visitor.decision;
         }
-        const LadderDecision decision = visitor.decision;
+        result->winner = static_cast<std::int16_t>(decision.winner);
+        result->verdict = static_cast<std::int16_t>(decision.verdict);
         forwardWithVerdict(trace, input.context, decision.verdict, input.kind,
             input.drawCount, input.drawInstances, args, [&](AlteredDraw) {
                 switch (input.kind) {
@@ -7553,6 +7669,13 @@ bool vScreenPanelDistanceApiTransactionTest(
     detail::g_uiDepthMode = priorDepthMode;
     detail::g_uiDepthOn = priorDepthOn;
     detail::g_uiDepthStoodDown = priorDepthStoodDown;
+    if (input.fullClassifier) {
+        detail::g_bindingSlots[psSrv0Slot] = priorPsSrv0;
+        detail::g_bindingSlots[vsCb0Slot] = priorVsCb0;
+        detail::g_bindingSlots[rtv0Slot] = priorRtv0;
+        detail::g_legacyDrawInterestMask.store(priorLegacyInterestMask,
+                                               std::memory_order_relaxed);
+    }
     draw_ladder_trace::detail::g_captureActive.store(
         priorTraceCapture, std::memory_order_relaxed);
     return true;
