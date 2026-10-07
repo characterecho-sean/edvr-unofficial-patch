@@ -14,12 +14,15 @@
   hook cost GPU p50 +0.27 ms, p95 +0.48 ms and CPU p50 +0.51 ms (Frontier
   log edvr_gfx_20261001_090933.log, interleaved toggles); and it still
   matched build 332841 (62/62 patches), so a retirement, not a fix.
-- Untested: gliding or orbiting near a fast-rotating body. Theory puts the
-  camera term's error at about v/d per frame, about 0.5 px at 10 km for
-  465 m/s. Sean accepted that.
-- Next: one low flight over terrain (the journal entry has the pass and
-  fail signs). A glide or orbit beside a fast-rotating body, if anyone
-  wants the untested case, goes in the same flight.
+- Tested 2026-10-06, and it fails in supercruise: Sean saw a planet blur
+  on approach (dump eye_180540, eccfce7a). Its patches grew 7% in area in
+  15 frames (0.40 render px a frame at the edge). The motion DLSS got over
+  them carried under 1% of that: the v/d error the theory predicted.
+  Details are in the top journal entry. It is not a regression: Sean's
+  Frontier ini had the key off.
+- Next: Sean's call on giving near-range planet patches approach motion
+  (options in the top journal entry). The low-flight check and the
+  fast-rotating-body orbit are still unflown.
 - The rest of this doc is the 2026-09-17 arc that priced the hook, kept as
   the record. FLOWN 16:34 (log 163420, build 91d5b75, Pimax Crystal Super,
   2646x2206 in, DLSS out 4072x3394): (a) CONFIRMED, benchmark gpu p50 under
@@ -57,6 +60,63 @@
   fsr 4.4 / 9.3). The oldest journal entry has the reading of those logs.
 
 ## Journal
+
+### 2026-10-06 -- the untested case, tested: a supercruise approach blurs the planet
+
+Sean asked for a VR regression check after the DLSS performance review. The
+setup:
+- Frontier install, build `v0.18.2-56-geccfce7a`.
+- Pimax Crystal Super.
+- DLSS rendering 2016x1949 to 4032x3898 per eye.
+
+He reported "planet was blurring on approach in supercruise". Eye dump
+`eye_180540` caught it at 18:05:40, approaching 38 Lyncis 4 F at 3.9 Mm.
+
+**The planet was not EDVR's tracked planet draw.**
+- The traced frame has 108 draws each of two passes:
+  - `ACE405F428C17EF6`: depth, no PS.
+  - `72BDD292154158AD`/`76849D64AC657DB9`: colour, n=2304.
+- This is the patch renderer the retired hook keyed on
+  (`celestial_motion.cpp`'s `kTerrainDepth`).
+- There is no draw of `kPlanetSurfaceVs` (`71DD9863DCFC0986`).
+- The GPU census's `planet` row reads 1.5-1.7 draws a frame in the two
+  windows before 18:05:14, and none in the dump's window.
+
+**Every planet pixel took the world path.** Over the disc the decisions read:
+- world 1.000;
+- depth valid 0.80-1.00;
+- Z 3.2-3.7e6 m.
+
+**Measured from the 16 D crops** (a scratch script, box x720-1130
+y430-850):
+- The disc's depth silhouette grew from 88657 to 94839 px over 15 frames,
+  +6.97%. That is an isotropic scale of 2.32e-3 a frame, or 0.40 render px
+  a frame at the edge.
+- A least-squares affine fit of the motion handed to DLSS over the same
+  pixels:
+  - isotropic divergence -1.7e-5 per px on average;
+  - at most 2.1e-4 in any single frame, with either sign;
+  - fit residual under 0.02 px.
+- So the camera term carried head rotation and under 1% of the approach.
+
+- ruled out: the camera term carries a supercruise approach, because the
+  measured growth is 100 times the motion's divergence (above). The
+  retirement's theory held: the error is about v/d a frame, here 2.3e-3.
+
+**Not a regression.**
+- `planet_motion.h`, `holo_motion.h` and `ui_depth.cpp` are unchanged
+  since `521d625b` (Sean's previous Frontier build) and since `v0.18.2`.
+- Sean's Frontier `edvr.ini` carries `terrain_motion = off` (line 1092), so
+  the patches got the camera term before the retirement too.
+
+**Options, not built (Sean's call):**
+1. Give the patches the body's draw-transform motion: the planet path's
+   affine approach, extended to the patch pair, with coverage taken from
+   the depth pass. The retired hook did this per patch at GPU p50 +0.27 ms
+   and CPU p50 +0.51 ms. One transform per body should cost less.
+2. Find why the camera term carries no approach in supercruise, though it
+   matched the hook when landed (0.002 px) and showed no smearing in low
+   flight. Then fix it once, for every body.
 
 ### 2026-10-01 -- advanced.terrain_motion RETIRED: the hook, its shaders and its rig are deleted
 
