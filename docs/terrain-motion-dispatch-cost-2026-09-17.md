@@ -20,8 +20,11 @@
   them carried under 1% of that: the v/d error the theory predicted.
   Details are in the top journal entry. It is not a regression: Sean's
   Frontier ini had the key off.
-- Next: Sean's call on giving near-range planet patches approach motion
-  (options in the top journal entry). The low-flight check and the
+- Next: FIX DESIGNED 2026-10-06 (Sean: "Let's fix it properly"). Each
+  body's rigid motion is taken from its patch constants and replaces the
+  camera term on that body's pixels. Design and evidence are in the top
+  journal entry; implementation is in progress. Sean: the blur shows at
+  approach speeds near or above c. The low-flight check and the
   fast-rotating-body orbit are still unflown.
 - The rest of this doc is the 2026-09-17 arc that priced the hook, kept as
   the record. FLOWN 16:34 (log 163420, build 91d5b75, Pimax Crystal Super,
@@ -60,6 +63,88 @@
   fsr 4.4 / 9.3). The oldest journal entry has the reading of those logs.
 
 ## Journal
+
+### 2026-10-06 (later) -- the design: each body's rigid motion from its patch constants
+
+This entry was measured offline, with no flight. Inputs:
+- `eye_180540`;
+- `drawstate_180540.bin`: 1368 draws each of the two patch VSs over 19
+  frames, with VS b0/b1/b2;
+- 88 older Frontier dumps, read by a research subagent.
+
+**How a patch is placed.** From disassembly of `vs_72BDD292154158AD`:
+
+    X = rotate(q = cb2[10], lerp(cb2[4], cb2[5], h)) + cb2[2]
+
+- X is camera-relative, in head axes.
+- `cb0[9..11]` is the camera rows' rotation (equal to EDVR's rows once the
+  dump's frame counter is offset by one).
+- `cb1[270..273]` holds per-eye clip columns, jitter included.
+- The depth pass `vs_ACE405F428C17EF6` has the same structure with
+  q = `cb2[8]` and t = `cb2[1]`. That is the retired hook's capture point.
+- Each body is a cube-sphere: 6 face patches at this range, its radius in
+  `cb2[12].w`. 36 draws an eye a frame are 6 bodies, including bodies 470
+  to 810 Mm away.
+
+**Supercruise loses only the ship's translation.**
+- In the camera rows' world-aligned frame, every body moves by the same
+  vector each frame: 2.5-2.8 km on calm frames, 25-28 km on slow ones. So
+  the frame is world-aligned and travels with the ship. Rotation is right;
+  the ship's translation is missing.
+- The research subagent read 88 older dumps:
+  - In normal space the rows carry the ship's translation (41 dumps,
+    median 2 m a frame).
+  - In supercruise the rows freeze at the ship-centred eye point, about
+    13.5 m (44 dumps).
+  - The retirement's 0.002 px agreement came from landed and hovering
+    dumps.
+
+**The world path's prediction matches the dump.** EDVR's world path holds
+the moon still in that frame. Its prediction matches the dump's MVs exactly
+once the jitter step is removed; for example, at 23651
+(2.124, 0.433) - (1.874, 0.766) = (0.25, -0.333). What is left at the
+moon's centre is the missing motion: about 0.9 render px a frame steady,
+and 3.6 px on slow frames.
+
+**One rigid delta per body.** Each face gives
+`D = T_prev T_cur^-1`, with `T = [A R(q) | A c]`. All 6 faces agree to
+1-2 m in translation, with rotation about 0. In the old landed
+`Terrain.bin` dumps, every patch's delta agreed too (rotation within
+1.3e-6, translation within float32 rounding of |c|). So one matched patch
+gives the body's motion, including the LOD patches that are new this frame.
+
+**The design.**
+- **Capture on the CPU.** The retired CPU shadow tee (91d5b75) is restored,
+  scoped to the patch constant blocks. It records each patch's c, q,
+  static box rows (its identity across frames) and the body radius. There
+  are no per-patch GPU copies, reissues or extra draws.
+- **One transform per body, per eye and frame.**
+  - Patches are clustered into bodies by radius.
+  - Each patch is matched to last frame's by its static rows.
+  - The body's delta is the consensus of its matched patches, taken from
+    the nearest patch first, because float32 error grows with |c|.
+- **Coverage.** A pixel belongs to a body if its depth falls in the body's
+  depth interval and the pixel lies in its screen rectangle, both taken
+  from the patch boxes. No coverage pass is drawn.
+- **Motion shader.** World-path pixels with finite depth inside a body's
+  volume use the body's `[R|t]` (`A_prev^T D A_cur`) in place of the
+  camera's, under a new decision path 12, `celestial`. It replaces the
+  camera term rather than adding to it, so it is right whether the rows
+  carry the ship (normal space) or not (supercruise), with no regime test
+  and no jump gate in its way.
+- **Fallback.** With no matched patch the pixel gets the camera term, as
+  today.
+
+**Known residual.** The VS's distance-based LOD morph (`cb2[0..3]`) moves
+vertices non-rigidly, and no rigid transform covers that.
+
+**Verification.**
+- A rig over the real dumped constants (19 frames, both eyes) must:
+  - reproduce the measured deltas within 2 m;
+  - reproduce the moon centre's true jitter-free motion within 0.01 px of
+    the scratch scripts.
+- Then one flight: a fast approach to a planet, near or above c, with an
+  eye dump.
 
 ### 2026-10-06 -- the untested case, tested: a supercruise approach blurs the planet
 
