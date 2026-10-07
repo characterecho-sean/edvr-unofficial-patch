@@ -10,18 +10,29 @@
   That is the first EDVR write into game-side camera controller memory, it
   retires explorer-cam.md's "never writes", and it must not touch anything
   the game replicates (H5). Phase 0 writes nothing and does not wait on D1.
-- **Open hypotheses** (the signature for each is in Phase 0):
-  - H1: under the relative lock the free camera keeps a commander-local
-    pose, so a placement is two constants written once.
-  - H2: that pose lives in a struct Ghidra can reach from the free-camera
-    bindings or `FreeCameraActivity`.
-  - H3: writing it moves culling with the picture.
-  - H4: the game has its own head-hide switch for the commander model (the
-    one the VR cockpit uses).
-  - H5: `VanityCameraDataReplicator` does not send camera state off the
-    machine.
-  - H6: a free-camera-active flag in the same state can replace watching
-    the camera key.
+- **Hypotheses after Phase 0a** (static, 2026-10-07; the signature for each
+  is in Phase 0; RVAs are build 332841, exe SHA-256 e6be8bbe...e988, the
+  same in the Steam, Epic and Frontier installs; evidence in
+  `analysis\decomp\explorer_cam\INDEX.txt`):
+  - H1: **READ true.** `FreeCameraActivity`'s update (0x1071980) composes
+    world = commander-local (+0x3B0) x commander frame under the relative
+    lock and re-derives local every frame.
+  - H2: **READ true.** The state is the activity object (rcx at 0x1071980):
+    world pose +0x70, local +0x3B0, flags +0x470/+0x471/+0x473, state +0x48C.
+  - H3: open, flight F1. A write before the update is upstream of the
+    camera and culling view by ordering (stack not traced to 0x5921F0).
+  - H4: **no head flag found** (about 25% one exists). The game flips a
+    whole-body FirstPerson/ThirdPerson avatar pair (0x2A96740).
+  - H5: **inferred not replicated, about 65%.** The pose lives only in the
+    activity; the replicator holds handle slots. Write the activity, never
+    the shared record (mode, speed, range).
+  - H6: **READ, with a change.** Shared record +0x30 = activity +0x48C: 3
+    free, 4 relative lock, 5 world lock. Reloaded each frame: watch only.
+  - H7 (new): the update's camera collision runs between the compose and
+    the re-derive, so if it treats the commander's own body as an obstacle
+    it pushes a placement out of the head. Sean can check it by hand,
+    before any build: steer the free camera into the head and see if it
+    stops.
 - **Ruled out:**
   - Counting presses as the source of truth, because it has no origin
     (6ac.6d), and the free camera can be moved by hand after the preset is
@@ -36,8 +47,8 @@
   `+0x592200`. The culling view (render context +0x40, frustum planes) is
   built upstream of that call (design-occlusion-culling-2026-09-22.md), and
   6s.9 saw holes and body culling from a downstream move.
-- **Next:** Phase 0a in Ghidra (no flight), then flight F0 with log-only
-  instruments.
+- **Next:** 0b instruments (I3 detours 0x1071980, rcx = activity), then
+  flight F0. 0a is done; its findings are at the end of this doc.
 - **Temporary keys:** none yet. Any key Phase 0 adds is listed here and
   removed when the arc closes.
 
@@ -263,3 +274,81 @@ helmet on and off, body variants, EDHM, other headsets and eye sizes.
 one. The head-anchor servo stays behind: it needed the rig-follow term
 (float 1100) and was written against the proxy that no longer exists, and
 the placement design does not need it.
+
+## 2026-10-07 Phase 0a: static findings
+
+Build 332841, SHA-256 e6be8bbe...e988; every RVA below is for it. The
+Steam, Epic and Frontier installs and the Ghidra project all hash the same.
+READ = seen in the decompilation or disassembly, INFERRED = reasoned.
+Evidence and tools: `analysis\decomp\explorer_cam\INDEX.txt`.
+
+**The object (H2, READ).** The free camera is `FreeCameraActivity`. Its
+update is 0x1071980 (rcx = the activity), run through job thunk 0x102FC20
+(slot 22 of the "Camera" table at 0x51854A0). It serves on foot too: the
+binding builder 0x1094860 picks Driving for context 2, Humanoid for 4,
+Flight otherwise, and the lock actions exist only in its binding set.
+Fields (row-major 4x4, axes in rows 0-2, origin in row 3):
+
+- +0x70..0xAC world pose; +0x370..0x3AC last world; +0x3B0..0x3EC
+  commander-local pose (origin +0x3E0/E4/E8); +0x440..0x46C captured frame.
+- +0x470 relative (1) or world (0); +0x471 rotation lock (1 = live frame);
+  +0x473 preset placement pending; +0x48C state: 0 off, 3 free, 4 relative
+  lock, 5 world lock, 6 a variant that enters with +0x471 = 0.
+- Action handles (+0x18 float, +0x1C int pressed): +0x4C8 X, 4D0 Y, 4F0 Z,
+  4D8 pitch, 4E0 yaw, 4E8 roll, 4F8 ToggleRotationLock, 500 FixCameraWorld,
+  508 FixCameraRelative. +0x2C8 is the target's transform (matrix via
+  vtable +0x20), the commander on foot.
+
+**H1 true (READ).** With +0x473 == 0 and +0x470 != 0 the update builds
+world = local x frame: `fVar36 = fVar58*fVar36 + local_398 + fVar59*fVar42
++ fVar60*fVar29` (decomp_1071980.txt line 688; local origin rotated by the
+frame, plus the target origin). After the move and collision code it
+re-derives local: `fVar59 = fVar59 - fVar34` (line 1269), then +0x3B0 =
+world rows . frame rows (1281-1296). The origin-shift rebase 0x1091520
+rewrites +0x70/+0x370/+0x440 but not +0x3B0, so local is the invariant:
+walking changes only the frame. The first update (ctor 0x1060190 sets
++0x470..+0x473 = 1) seeds the pose from the preset matrix plus config
+offsets (0x106F0A0), so the preset only decides the start.
+
+**H6 changed (READ).** +0x48C is reloaded from a shared record every update
+(line 254) and stored back (1297); the vanity controller (0x2DF14C0,
+SetMode 0x2E01550) writes the same byte. Watch it, do not write it. Lock
+levers: the pressed state of action +0x500/+0x508 (read every frame), or
+the record byte, which is the H5 risk.
+
+**To the camera (INFERRED).** The update leaves the final pose at +0x70,
+inside the activity's camera-params blob (+0x30..+0x138, copied by
+0x1066D80). The game's translate 0x4F2AC0 has one caller, 0x28A4D30, not
+this path. Not traced to 0x5921F0; a pre-update write is upstream by order.
+
+**Hook for I3.** Entry 0x1071980, rcx = activity. Prologue `48 89 5C 24 20
+55 57 41 55 41 56 41 57 48 8D AC 24 40 FD FF FF 48 81 EC C0 03 00 00`,
+no rip-relative bytes in it; boundaries at 5, 6, 7, 9, 11, 13, 21, 28.
+Expect once per frame while the activity exists (INFERRED; the call
+counter proves it), maybe on a worker thread: copy, take no lock.
+Edges: OnEnter 0x10996A0 (`40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D
+6C 24 E1 48 81 EC A8 00 00 00`), OnExit 0x10888E0 (a rel32 call at byte
+15). A later write goes before the compose: with +0x473 == 0 and +0x470 ==
+1, 16 floats at +0x3B0 and +0x471 = 1. No dirty bits at this level; the
+stack sets the camera's own.
+
+**H5 (INFERRED, about 65% not replicated).** Both types are pooled
+components (0x5F52370 block 0x120, 0x5F52460 block 0xF0; factories
+0x10857C0, 0x1085830). Their constructors register only handle slots
+(0x529550 links a list node); the replicator exposes two 16-byte slots and
+two flag bits, has no Read/Write virtual of its own, and the activity never
+touches it. The activity's writes to the shared record are range, state,
+rotation lock and speed (+0x20/24/30/40/44/50), never a pose. Not found:
+the ReplicationService's property walk, so not proven.
+
+**H4 (about 25% a flag exists).** The local humanoid has two avatars,
+FirstPersonAvatar and ThirdPersonAvatar (0x1C2EC60); 0x2A96740 flips them
+and sets data key "HumanoidFirstPersonMode": whole body, not head. Avatars
+are also built per ResourceContext (Cockpit, Humanoid_FirstPerson, ...,
+table 0x5E9C780) from parts Head, Eyes, Helmet, SkullCap, Hair, Beard,
+Teeth (0x5E9C7D0), so the headless cockpit body is probably a build choice.
+Phase 2 stays on the draw skip.
+
+**Unknown:** what calls the job and on which thread; the row convention
+(right/up/forward); whether TAB on foot always reaches this activity (F0's
+call counter and +0x48C answer it).
