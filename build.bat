@@ -537,6 +537,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\static_prop_gate.cpp" "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\lod_governor.cpp" ^
     "src\d3d11\engine_velocity.cpp" ^
+    "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
@@ -1743,6 +1744,23 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: terrain retirement test build failed & exit /b 1 )
 "%OBJ%\terrainretired\terrain_retired_test.exe" --dry-run || exit /b 1
 "%OBJ%\terrainretired\terrain_retired_test.exe" || exit /b 1
+exit /b 0
+
+:rig_celestial_motion_test
+echo [edvr] === planet patch motion (celestial) ===
+REM The planet patch motion (docs\terrain-motion-dispatch-cost-2026-09-17.md, 2026-10-06): src\common\celestial_math.h run on the REAL patch
+REM constants of eye dump 180540 (tools\celestial_motion_test\fixture_180540.bin, extracted by tools\celestial_fixture.py, which re-derives
+REM every reference in its own --self-test below), the motion shader's celestial path on WARP (a pixel inside a body's volume takes path 12 with
+REM the body's motion, outside takes path 2, and with no records the outputs are byte-identical to the shader compiled without the path), and
+REM the CPU tee of src\d3d11\celestial_motion.cpp (Map/Unmap, UpdateSubresource, the copies that invalidate, the draw capture, the census).
+python "tools\celestial_fixture.py" --self-test || exit /b 1
+if not exist "%OBJ%\celestialmotion" mkdir "%OBJ%\celestialmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\celestialmotion\\" /Fe"%OBJ%\celestialmotion\celestial_motion_test.exe" ^
+    "tools\celestial_motion_test\celestial_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: celestial motion test build failed & exit /b 1 )
+"%OBJ%\celestialmotion\celestial_motion_test.exe" || exit /b 1
 exit /b 0
 
 :rig_depth_scene_pick_test
