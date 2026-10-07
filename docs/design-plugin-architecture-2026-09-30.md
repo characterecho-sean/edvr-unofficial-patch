@@ -39,20 +39,21 @@
 - **Next:** main `465e3edd` source and documentation-only `501e2b15` are
   integrated after measuring control `373198c1`. Candidate `6c63f6aa` passes
   143 full-build jobs, fresh NoTrace/forwarding comparisons and clean
-  promotion. Updated control `7bbe7d90` passes 125 jobs and clean promotion; it
-  is installed and verified in Steam, personal INI preserved. Next flight:
-  two-minute stationary carrier off/DLSS/NV and hangar off/DLSS holds with
-  Pimax OpenXR, 90 Hz, 4032x3898 per eye, same DLSS and replay off. The prior
-  hangar executed sampled weapon-history capture/raster work despite a
-  holstered weapon; October 7's audit records the counters. Carrier is the
-  cockpit workload for the matched source pair. Its prior NV toggle is
-  unlogged. Twenty-three supported selectors and local None/Skip checks pass;
-  whole-ladder/actions and remaining module API/CPU coverage stay open. Enabled
-  replay retains 482.4 MiB; disabled replay allocates none. Earlier NV blur is
-  reproduced by `14a7ff70`. Matched CPU improvement beyond noise and direct GPU
-  non-regression remain unresolved (section 11). Temporary key:
-  `advanced.draw_replay` (off); removal requires Scope control. No Phase 2 or
-  shipping approval.
+  promotion. Control `7bbe7d90` passes 125 jobs and clean promotion; its
+  October 7 flight matches the build and environment, exits cleanly, and Sean
+  reports no visual change. Candidate `6c63f6aa` is now installed and verified
+  in Steam, personal INI and existing DLSS preserved. Next flight: two-minute
+  stationary carrier off/DLSS/NV and hangar off/DLSS holds with Pimax OpenXR,
+  90 Hz, 4032x3898 per eye, same DLSS and replay off. The new control records
+  NV engagement at 05:25:06.132 and on-foot source 3872x2178 with width `auto`.
+  AA activation snapshots do not mark scene transitions; AA-off scene labels
+  use Sean's confirmed sequence. Twenty-three supported selectors and local
+  None/Skip checks pass; whole-ladder/actions and remaining module API/CPU
+  coverage stay open. Enabled replay retains 482.4 MiB; disabled replay
+  allocates none. Earlier NV blur is reproduced by `14a7ff70`. Matched CPU
+  improvement beyond noise and direct GPU non-regression remain unresolved
+  (section 11). Temporary key: `advanced.draw_replay` (off); removal requires
+  Scope control. No Phase 2 or shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -2492,3 +2493,80 @@ source, rather than a weapon-quality test. The fresh hangar control is needed
 to separate the shared history change from plugin overhead. Keep the previous
 baseline as evidence, preserve the holstered scenes, and make no weapon-visual
 or plugin-performance acceptance claim from these counters.
+
+### Measured common-main control and installed candidate, 2026-10-07
+
+Sean confirms carrier AA off, DLSS with NV off, DLSS with NV on, then on-foot
+hangar AA off and DLSS, two minutes per hold, with no visual change. The exact
+graphics log `edvr_gfx_20261007_051735.log` passes the sanctioned reader's
+`--expect-build 7bbe7d90`: `v0.18.2-60-g7bbe7d90`, PE `6AC592E4`. Its paired
+runtime `edvr_openxr_20261007_051737_047_55460.log` independently matches that
+build. Pimax OpenXR / Crystal Super remains at 90 Hz, 4032x3898 output and
+2016x1949 DLSS input per eye, preset K, separate-device mode 1. The mapped DLSS
+library is `310.9.1.0`. Shutdown returns without an exception; lifecycle stages
+complete, frame-cycle accounting is intact, and direct GPU timing reports no
+failed spans. No dump or replay sidecar was captured.
+
+The new on-foot source is 3872x2178; the live width setting is `auto`. The
+October 6 control's source was 5120x2880, so do not mix that older measurement
+into this matched pair. Native benchmark rows contain the render dimensions but
+do not independently record HMD quality; its unchanged setting relies on Sean's
+protocol confirmation.
+
+Night vision engagement is positively logged at 05:25:06.132. There is no NV
+off marker. The UI maps ON messages at 05:22:58.443 and 05:30:23.737 are AA
+activation snapshots of the journal, not scene transition timestamps.
+`ui_layer.cpp` emits them when the key and screen-motion service become active.
+Ruled out: the first on-foot ON message means the earlier AA-off hold was still
+aboard, because AA off suppresses this instrument and Sean confirms the hangar
+hold. Scene labels below use that operator evidence. Initial Luna selection
+incorrectly omitted both operator-labelled AA-off phases; the next-tier review
+repaired the selection and an invalid trailing JSON escape.
+
+All 40 native benchmark rows and 44 draw-hook rows were independently checked
+against sanctioned reader output. Conservative settled bins are:
+
+| Phase | Draw-window end frames | Timed draws | Weighted us/timed draw | Weighted ms/sampled frame | Native windows | Native CPU/GPU median p50 ms |
+|---|---|---:|---:|---:|---|---:|
+| Carrier, AA off | 18000-25200 | 28515 | 0.117983 | 0.382902 | 14-16 | 3.482 / 5.674 |
+| Carrier, DLSS, NV off | 30600-37800 | 30836 | 0.320056 | 1.121945 | 20-22 | 5.384 / 10.801 |
+| Carrier, DLSS, NV on | 41400-48600 | 26156 | 0.363235 | 1.079597 | 24-26 | 5.028 / 10.818 |
+| Hangar, AA off | 59400-66600 | 26379 | 0.097019 | 0.291171 | 33-35 | 2.441 / 4.517 |
+| Hangar, DLSS | 70200-77400 | 26231 | 0.169289 | 0.504980 | 37-39 | 2.788 / 6.486 |
+
+Each draw bin has five completed windows. Per-draw means weight logged means by
+their timed-draw denominators; frame means weight by sampled-frame counts. The
+draw interval has the same first-forwarding subtraction limitation as October 6
+and is not total EDVR CPU. Native values are medians of the three completed
+windows' p50 values, not pooled frame percentiles. Mode changes, NV-on
+crossing, travel/source changes and final menu windows are excluded. The
+ignored reproducible report is
+`build/control_plugin_measurement_20261007.json`; scene snapshots and positive
+NV engagement are kept separately from operator-labelled phases.
+
+Control payload verification passes before installing the candidate. The
+candidate `6c63f6aa` had already passed the complete 143-job build, fresh
+codegen comparisons and clean receipt-guarded promotion as
+`v0.18.2-90-g6c63f6aa`. The sanctioned install now passes dry run,
+transactional install and `--verify-only`. It preserves the personal INI SHA256
+`88284200D1BB3FF4681CDFE67D0C06614EABF1799F7A047CE7494B18ADD3D839` and existing
+DLSS SHA256 `3975567B8943C53ACCE397F2B72380092F84F162D00B0D2C7D08A1025C563983`.
+The live candidate setting is explicitly `draw_replay = off`; the control does
+not implement that feature and ignored the key. Native receipt backup:
+`edvr_native_receipt.json.pre-6c63f6aa-20261007-053456.bak`.
+
+Next flight is the candidate under the same five holds, with menus closed,
+stationary matching views, replay off and no NumLock dump. Native builds stay
+idle. Pin the fresh logs to `6c63f6aa`, check actual source dimensions and
+workload counts, then compare with this control. No plugin gain, repeatability,
+GPU non-regression, Phase 1 completion, Phase 2 or shipping approval is claimed
+from a control-only measurement. Keep both source revisions frozen until the
+pair is measured; the feature stays separate from main.
+
+Read-only Luna preparation identifies the next bounded coverage slice: the warm
+PanelDistance path's saved-original Map, Unmap, override constant-buffer bind
+and restore bind bypass shared hook counters. Attribute those actual calls to
+OnFootPanel with one claim-scoped API sample latch carried through restoration;
+preserve Map failure and unsampled behavior. Cold allocation is outside that
+slice. This is a review proposal, not an implemented or validated change, and
+waits until the measured pair is adjudicated.
