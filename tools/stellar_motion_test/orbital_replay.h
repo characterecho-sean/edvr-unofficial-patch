@@ -24,10 +24,12 @@ void verifyOrbitalVertices(ID3D11Device* dev,ID3D11DeviceContext* ctx,const char
         auto cb=buffer(UINT(scene.size()*4),D3D11_BIND_CONSTANT_BUFFER,scene.data()),vb0=buffer(UINT(vertices.size()*4),D3D11_BIND_VERTEX_BUFFER,vertices.data()),vb1=buffer(UINT(instances.size()*4),D3D11_BIND_VERTEX_BUFFER,instances.data());
         auto output=buffer(8194*count*20,D3D11_BIND_STREAM_OUTPUT,nullptr),stage=buffer(8194*count*20,0,nullptr,D3D11_USAGE_STAGING);
         UINT info[4]={0,0,2,count};auto motionInfo=buffer(16,D3D11_BIND_CONSTANT_BUFFER,info);std::vector<float> results[2];
+        // The replacement's half-width factor (VS b13, orbital_width.h): 2 x f with f = 1, the game's own literal.
+        const float two[4]={2,2,2,2};auto widthCb=buffer(16,D3D11_BIND_CONSTANT_BUFFER,two);
         for(int i=0;i<2;++i){
             ctx->ClearState();ctx->IASetInputLayout(layout.Get());ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
             ID3D11Buffer* vb[]={vb0.Get(),vb1.Get()};UINT strides[]={16,60},offsets[]={0,0};ctx->IASetVertexBuffers(0,2,vb,strides,offsets);
-            ctx->VSSetShader(vs[i].Get(),nullptr,0);ctx->VSSetConstantBuffers(1,1,cb.GetAddressOf());ctx->VSSetConstantBuffers(12,1,motionInfo.GetAddressOf());ctx->GSSetShader(so[i].Get(),nullptr,0);
+            ctx->VSSetShader(vs[i].Get(),nullptr,0);ctx->VSSetConstantBuffers(1,1,cb.GetAddressOf());ctx->VSSetConstantBuffers(12,1,motionInfo.GetAddressOf());ctx->VSSetConstantBuffers(13,1,widthCb.GetAddressOf());ctx->GSSetShader(so[i].Get(),nullptr,0);
             UINT zero=0;ctx->SOSetTargets(1,output.GetAddressOf(),&zero);ctx->DrawInstanced(8194,count,0,0);ctx->ClearState();ctx->CopyResource(stage.Get(),output.Get());
             D3D11_MAPPED_SUBRESOURCE map{};hr(ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&map));results[i].resize(8194*count*5);std::memcpy(results[i].data(),map.pData,results[i].size()*4);ctx->Unmap(stage.Get(),0);
         }

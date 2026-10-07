@@ -545,18 +545,46 @@ o.pos=float4((p*float2(2,-2)+float2(-1,1))*v.x,abs(v.x),v.x);o.tc0=p;return o;}
         auto vb0=make(sizeof(vertices),D3D11_BIND_VERTEX_BUFFER,vertices),vb1=make(sizeof(instances),D3D11_BIND_VERTEX_BUFFER,instances);
         auto bindOrbital=[&]() {
             ID3D11Buffer* vb[]={vb0.Get(),vb1.Get()};UINT strides[]={16,60},offsets[]={0,0};ctx->IASetVertexBuffers(0,2,vb,strides,offsets);ctx->IASetInputLayout(layout.Get());ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-            ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);ctx->VSSetConstantBuffers(1,1,sceneCb.GetAddressOf());ctx->PSSetConstantBuffers(2,1,materialCb.GetAddressOf());ctx->VSSetConstantBuffers(12,1,savedCb.GetAddressOf());ctx->PSSetConstantBuffers(12,1,savedCb.GetAddressOf());
+            ctx->VSSetShader(vs.Get(),nullptr,0);ctx->PSSetShader(ps.Get(),nullptr,0);ctx->VSSetConstantBuffers(1,1,sceneCb.GetAddressOf());ctx->PSSetConstantBuffers(2,1,materialCb.GetAddressOf());ctx->VSSetConstantBuffers(12,1,savedCb.GetAddressOf());ctx->PSSetConstantBuffers(12,1,savedCb.GetAddressOf());ctx->VSSetConstantBuffers(13,1,savedCb.GetAddressOf());
             ctx->RSSetState(raster.Get());D3D11_VIEWPORT orbitalVp{0,0,8,8,0,1};ctx->RSSetViewports(1,&orbitalVp);ctx->OMSetRenderTargets(1,rtv.GetAddressOf(),scene.dsv.Get());
         };
         ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);testScene=scene.tex.Get();bindOrbital();
         detail::g_uiDepthOn=true;detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
         check(uiDepthReissueBegin(ctx.Get()),"orbital private reissue begins");ctx->DrawInstanced(4,2,0,0);uiDepthReissueEnd(ctx.Get());
         ComPtr<ID3D11VertexShader> afterVs;ctx->VSGetShader(&afterVs,nullptr,nullptr);check(afterVs.Get()==vs.Get(),"orbital reissue restores original vertex shader");
-        ComPtr<ID3D11Buffer> afterCb;ctx->VSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores VS constants");afterCb.Reset();ctx->PSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores PS constants");
+        ComPtr<ID3D11Buffer> afterCb;ctx->VSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores VS constants");afterCb.Reset();
+        ctx->VSGetConstantBuffers(orbital_width::kSlot,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores the caller's VS b13 (the half-width factor the twin read)");afterCb.Reset();ctx->PSGetConstantBuffers(12,1,&afterCb);check(afterCb.Get()==savedCb.Get(),"orbital reissue restores PS constants");
         ID3D11ShaderResourceView* views[2]{};g_holoMotion[0].views(scene.tex.Get(),views);ComPtr<ID3D11Resource> orbitalCoverage;views[0]->GetResource(&orbitalCoverage);auto indices=read(dev.Get(),ctx.Get(),orbitalCoverage.Get());auto orbitalDepth=read(dev.Get(),ctx.Get(),orbitalCoverage.Get(),1);unsigned counts[3]{};for(float v:indices)if(v>=0&&v<=2)++counts[unsigned(v)];
         std::printf("orbital indices %u/%u/%u\n",counts[0],counts[1],counts[2]);check(counts[1]>0&&counts[2]>0,"orbital pixels carry their actual instance index");for(size_t i=0;i<indices.size();++i)if(indices[i]>0)check(std::fabs(orbitalDepth[i]-.025f)<1e-6f,"orbital HC preserves exact raster depth");for(float v:read(dev.Get(),ctx.Get(),scene.tex.Get()))check(v==0,"orbital coverage preserves live game depth");
         ID3D11ShaderResourceView* privateOrbital=nullptr;check(uiDepthTemporalDepth(8,8,0,scene.tex.Get(),&privateOrbital)&&privateOrbital,"orbital publishes its private depth seed");ComPtr<ID3D11Resource> privateOrbitalResource;privateOrbital->GetResource(&privateOrbitalResource);
         for(float v:read(dev.Get(),ctx.Get(),privateOrbitalResource.Get()))check(v==0,"orbital coverage leaves the private scene-depth seed unchanged");
+        // The twin follows the factor the game's own draw of this line was made with (orbital_width.h). The 8x8 target's
+        // lines are 2 px tall at f = 1 and cover two rows of pixel centres each; at f = 0.25 they are half a pixel tall and
+        // cover none, at f = 0.75 they are 1.5 px and still cover the same two rows. Slot 13 comes back to the caller's
+        // buffer after each, and the buffer the twin binds is the one made from the factor (2 x f in x).
+        {
+            auto covered=[&](double f) {
+                orbital_width::detail::g_factor.store(f);
+                ctx->ClearState();uiDepthFrameBoundary(ctx.Get());g_holoMotion[0]=HoloMotion{};
+                ctx->ClearDepthStencilView(scene.dsv.Get(),D3D11_CLEAR_DEPTH,0,0);testScene=scene.tex.Get();bindOrbital();
+                detail::g_uiDepthOn=true;detail::g_uiDepthMode=Mode::kReissueScene;g_reissueShader=&g_depthShaders[7];g_drawEye=0;g_reissueMaskSlot=0;g_rebindW=g_rebindH=8;g_wantMask=true;g_holoDraw={'N',4,2,0,0,0};
+                check(uiDepthReissueBegin(ctx.Get()),"orbital twin begins at a scaled factor");
+                ComPtr<ID3D11Buffer> bound;ctx->VSGetConstantBuffers(orbital_width::kSlot,1,&bound);
+                check(bound.Get()!=savedCb.Get(),"the twin binds its own b13, not the caller's");
+                float lanes[4]{};{ComPtr<ID3D11Buffer> stage;D3D11_BUFFER_DESC bd{};bound->GetDesc(&bd);bd.BindFlags=bd.MiscFlags=0;bd.Usage=D3D11_USAGE_STAGING;bd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;hr(dev->CreateBuffer(&bd,nullptr,&stage));ctx->CopyResource(stage.Get(),bound.Get());D3D11_MAPPED_SUBRESOURCE mapped{};hr(ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&mapped));std::memcpy(lanes,mapped.pData,sizeof(lanes));ctx->Unmap(stage.Get(),0);}
+                check(lanes[0]==orbital_width::Constants::value(f)&&lanes[3]==lanes[0],"the twin's b13 holds 2 x the factor");
+                ctx->DrawInstanced(4,2,0,0);uiDepthReissueEnd(ctx.Get());
+                ComPtr<ID3D11Buffer> back;ctx->VSGetConstantBuffers(orbital_width::kSlot,1,&back);check(back.Get()==savedCb.Get(),"the caller's b13 is back after the twin");
+                ID3D11ShaderResourceView* v[2]{};g_holoMotion[0].views(scene.tex.Get(),v);ComPtr<ID3D11Resource> res;v[0]->GetResource(&res);
+                unsigned n=0;for(float x:read(dev.Get(),ctx.Get(),res.Get()))if(x>0)++n;return n;
+            };
+            const unsigned full=covered(1.0),threeQuarters=covered(0.75),quarter=covered(0.25);
+            orbital_width::detail::g_factor.store(1.0);
+            std::printf("orbital twin coverage: f 1 %u px, f 0.75 %u px, f 0.25 %u px\n",full,threeQuarters,quarter);
+            check(full==counts[1]+counts[2]&&full>0,"the twin at f = 1 covers what it always did");
+            check(threeQuarters==full,"a strip 1.5 px tall still covers the same pixel centres");
+            check(quarter==0,"a strip half a pixel tall covers no pixel centre of the 8x8 target: the factor reaches the footprint");
+        }
         // Orbital geometry has its own HC/record motion path.  It must not
         // enter the ordinary text cleanup mask: the temporal consumer gets
         // the record and exact coverage depth, while ui_resolve sees zero.

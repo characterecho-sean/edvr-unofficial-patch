@@ -231,6 +231,7 @@ int uiDepthEyeOfTargetReadOnly(const void* res) { return uiDepthEyeOfTarget(res,
 void uiPanelScaleSetTarget(float) {}
 void uiPanelScaleFrameBoundary() {}
 void uiPanelScaleLog() {}
+void orbitalWidthLog() {}
 void uiSurfacesSetTarget(float) {}
 void uiSurfacesFrameBoundary() {}
 void uiSurfacesLogAtlas() {}

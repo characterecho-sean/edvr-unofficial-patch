@@ -70,7 +70,7 @@ static std::vector<LegacyContract> coreLegacyContracts() {
         {"ui_depth_holo_resolve_ps", "main", "ps_5_0", nullptr, 0xA0BA9F47CC37A5BAull},
         {"ui_depth_holo_near_light_cs", "main", "cs_5_0", nullptr, 0xB1BF8BF2F8942B44ull},
         {"ui_depth_holo_marker_reticle_ps", "main", "ps_5_0", nullptr, 0x6EE982850EC312BBull},
-        {"orbital coverage", "main", "vs_5_0", nullptr, 0xF436926B85A7DA3Full},
+        {"orbital coverage", "main", "vs_5_0", nullptr, 0xE791DFD3733D1EBAull},
         {"ui_depth_corona_ps", "main", "ps_5_0", nullptr, 0x0372DA1389F36CE0ull},
         {"night exterior", "main", "cs_5_0", nullptr, 0x28453D6A0BAB0138ull},
         {"screen motion", "main", "ps_5_0", nullptr, 0x422615E32B4FE096ull},
