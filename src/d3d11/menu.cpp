@@ -34,6 +34,7 @@
 #include "flat_runtime.h"
 #include "flat_wrapper_note.h"
 #include "input_gate.h"
+#include "../plugins/plugin_manager.h"
 #include "menu_flat_rows.h"
 #include "menu_keys.h"
 #include "menu_panel.h"
@@ -88,13 +89,14 @@ constexpr uint64_t kMonitorRefreshMs = 250;
 // R twice within this long resets a row to its shipped value.
 constexpr uint64_t kResetArmMs = 3000;
 
-enum class EntryKind { Setting, Action, Heading };
+enum class EntryKind { Setting, Action, Heading, PluginSetting };
 
 struct Entry {
     EntryKind   kind = EntryKind::Setting;
-    int         def = -1;        // index into kMenuRows for Setting
-    int         action = -1;     // index into g_actions for Action
-    const char* text = "";       // for Heading
+    int         def = -1;           // index into kMenuRows for Setting
+    int         action = -1;        // index into g_actions for Action
+    int         pluginSetting = -1; // index into g_pluginSettings for PluginSetting
+    const char* text = "";          // for Heading
 };
 
 struct Page {
@@ -111,6 +113,23 @@ struct Action {
     std::string  hint;
     MenuActionFn fn = nullptr;
     void*        user = nullptr;
+};
+
+struct PluginSettingRow {
+    std::string header;
+    std::string key;
+    std::string label;
+    std::string hint;
+    EdvrPluginSettingType type = EDVR_PLUGIN_SETTING_BOOL;
+    int64_t minValue = 0;
+    int64_t maxValue = 1;
+    int64_t stepValue = 1;
+    int64_t defaultValue = 0;
+    std::vector<std::string> choiceOptions;
+    EdvrPluginSettingGetter getter = nullptr;
+    EdvrPluginSettingSetter setter = nullptr;
+    void* userData = nullptr;
+    int64_t cachedValue = 0;
 };
 
 struct RowState {
@@ -1359,6 +1378,41 @@ void stopWriter() {
 // ---------------------------------------------------------------------------
 // Pages
 
+static std::vector<PluginSettingRow> g_pluginSettings;
+static std::recursive_mutex g_pluginSettingsMutex;
+
+void buildPluginsPage(Page& p) {
+    std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
+    if (g_pluginSettings.empty()) {
+        Entry h;
+        h.kind = EntryKind::Heading;
+        h.text = "No plugin settings registered";
+        p.entries.push_back(h);
+        return;
+    }
+
+    // std::map automatically sorts headers alphabetically
+    std::map<std::string, std::vector<int>> groups;
+    for (size_t i = 0; i < g_pluginSettings.size(); ++i) {
+        groups[g_pluginSettings[i].header].push_back(static_cast<int>(i));
+    }
+
+    for (const auto& kv : groups) {
+        if (kv.second.empty()) continue;
+        Entry h;
+        h.kind = EntryKind::Heading;
+        h.text = g_pluginSettings[kv.second[0]].header.c_str();
+        p.entries.push_back(h);
+
+        for (int idx : kv.second) {
+            Entry e;
+            e.kind = EntryKind::PluginSetting;
+            e.pluginSetting = idx;
+            p.entries.push_back(e);
+        }
+    }
+}
+
 void addSettingRows(Page& p, MenuTier tier, const char* page, bool grouped) {
     const char* lastGroup = nullptr;
     for (int i = 0; i < kRowDefCount; ++i) {
@@ -1447,6 +1501,13 @@ void buildPages() {
         Page p;
         p.name = "Status";
         p.status = true;
+        s.pages.push_back(p);
+    }
+    {
+        Page p;
+        p.name = "Plugins";
+        buildPluginsPage(p);
+        firstSelectable(p);
         s.pages.push_back(p);
     }
     if (s.developer) {
@@ -2013,6 +2074,36 @@ void buildContent(MenuContent& c) {
                 if (hi) snprintf(c.hint, sizeof(c.hint), "%s", a.hint.c_str());
                 continue;
             }
+            if (e.kind == EntryKind::PluginSetting) {
+                std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
+                if (e.pluginSetting >= 0 && e.pluginSetting < static_cast<int>(g_pluginSettings.size())) {
+                    const auto& ps = g_pluginSettings[e.pluginSetting];
+                    strncpy(l.left, ps.label.c_str(), sizeof(l.left) - 1);
+                    l.style = hi ? kMenuRowHi : kMenuRow;
+                    if (hi && !ps.hint.empty()) snprintf(c.hint, sizeof(c.hint), "%s", ps.hint.c_str());
+
+                    int64_t val = ps.getter ? ps.getter(ps.key.c_str(), ps.userData) : ps.cachedValue;
+                    if (ps.type == EDVR_PLUGIN_SETTING_BOOL) {
+                        l.toggle = (val != 0) ? 2 : 1;
+                        l.right[0] = 0;
+                    } else if (ps.type == EDVR_PLUGIN_SETTING_CHOICE) {
+                        if (!ps.choiceOptions.empty() && val >= 0 && val < static_cast<int64_t>(ps.choiceOptions.size())) {
+                            strncpy(l.right, ps.choiceOptions[static_cast<size_t>(val)].c_str(), sizeof(l.right) - 1);
+                        } else {
+                            snprintf(l.right, sizeof(l.right), "%lld", (long long)val);
+                        }
+                    } else if (ps.type == EDVR_PLUGIN_SETTING_INT) {
+                        snprintf(l.right, sizeof(l.right), "%lld", (long long)val);
+                    } else if (ps.type == EDVR_PLUGIN_SETTING_FLOAT) {
+                        float fval = 0.0f;
+                        memcpy(&fval, &val, sizeof(float));
+                        snprintf(l.right, sizeof(l.right), "%.2f", fval);
+                    } else if (ps.type == EDVR_PLUGIN_SETTING_ACTION) {
+                        strncpy(l.right, "run", sizeof(l.right) - 1);
+                    }
+                }
+                continue;
+            }
             const MenuRowDef& d = kMenuRows[e.def];
             const RowState& r = g_rows[e.def];
             const bool editingThis = (s.editEntry == i);
@@ -2560,6 +2651,47 @@ void beginEdit(int entryIndex, int defIndex);
 void cancelEdit();
 void commitEdit();
 
+void stepPluginSetting(int psIdx, int dir) {
+    std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
+    if (psIdx < 0 || psIdx >= static_cast<int>(g_pluginSettings.size())) return;
+    auto& ps = g_pluginSettings[psIdx];
+    int64_t val = ps.getter ? ps.getter(ps.key.c_str(), ps.userData) : ps.cachedValue;
+
+    if (ps.type == EDVR_PLUGIN_SETTING_BOOL) {
+        val = (val == 0) ? 1 : 0;
+    } else if (ps.type == EDVR_PLUGIN_SETTING_CHOICE) {
+        int count = static_cast<int>(ps.choiceOptions.size());
+        if (count > 0) {
+            val = (val + (dir >= 0 ? 1 : count - 1)) % count;
+        }
+    } else if (ps.type == EDVR_PLUGIN_SETTING_INT) {
+        val += dir * ps.stepValue;
+        if (val < ps.minValue) val = ps.minValue;
+        if (val > ps.maxValue) val = ps.maxValue;
+    } else if (ps.type == EDVR_PLUGIN_SETTING_FLOAT) {
+        float fval = 0.0f;
+        memcpy(&fval, &val, sizeof(float));
+        float fstep = 0.05f;
+        memcpy(&fstep, &ps.stepValue, sizeof(float));
+        if (fstep == 0.0f) fstep = 0.05f;
+        float fmin = 0.0f, fmax = 1.0f;
+        memcpy(&fmin, &ps.minValue, sizeof(float));
+        memcpy(&fmax, &ps.maxValue, sizeof(float));
+        fval += dir * fstep;
+        if (fval < fmin) fval = fmin;
+        if (fval > fmax) fval = fmax;
+        memcpy(&val, &fval, sizeof(float));
+    } else if (ps.type == EDVR_PLUGIN_SETTING_ACTION) {
+        val = 1;
+    }
+
+    ps.cachedValue = val;
+    if (ps.setter) {
+        ps.setter(ps.key.c_str(), val, ps.userData);
+    }
+    g_s.contentDirty = true;
+}
+
 void activateEntry() {
     State& s = g_s;
     Page& p = s.pages[s.page];
@@ -2571,6 +2703,10 @@ void activateEntry() {
         if (a.fn) a.fn(a.user);
         s.lastWrite = "ran: " + a.label;
         s.contentDirty = true;
+        return;
+    }
+    if (e.kind == EntryKind::PluginSetting) {
+        stepPluginSetting(e.pluginSetting, +1);
         return;
     }
     if (e.kind == EntryKind::Setting) {
@@ -2970,9 +3106,13 @@ void dispatchNav(MenuNav nav, uint64_t now) {
         case kNavDown: moveHighlight(+1); break;
         case kNavLeft:
         case kNavRight:
-            if (!p.status && !p.entries.empty() &&
-                p.entries[p.highlight].kind == EntryKind::Setting) {
-                stepRow(p.entries[p.highlight].def, nav == kNavLeft ? -1 : +1, s.shiftHeld ? 5 : 1);
+            if (!p.status && !p.entries.empty()) {
+                const auto& entry = p.entries[p.highlight];
+                if (entry.kind == EntryKind::Setting) {
+                    stepRow(entry.def, nav == kNavLeft ? -1 : +1, s.shiftHeld ? 5 : 1);
+                } else if (entry.kind == EntryKind::PluginSetting) {
+                    stepPluginSetting(entry.pluginSetting, nav == kNavLeft ? -1 : +1);
+                }
             }
             break;
         case kNavSelect: activateEntry(); break;
@@ -3565,6 +3705,60 @@ void menuRegisterAction(const char* label, const char* hint, MenuActionFn fn, vo
     if (g_s.configured && g_s.developer) buildPages();
 }
 
+extern "C" __declspec(dllexport) int WINAPI edvrRegisterPluginSetting(const EdvrPluginSettingDef* setting) {
+    if (!setting || setting->structSize < sizeof(EdvrPluginSettingDef)) return -1;
+    std::lock_guard<std::recursive_mutex> lock(g_pluginSettingsMutex);
+
+    std::string headerStr = (setting->header && setting->header[0]) ? setting->header : "Plugins";
+    std::string keyStr = setting->key ? setting->key : "";
+
+    for (auto& existing : g_pluginSettings) {
+        if (existing.header == headerStr && existing.key == keyStr) {
+            existing.label = setting->label ? setting->label : keyStr;
+            existing.hint = setting->hint ? setting->hint : "";
+            existing.type = setting->type;
+            existing.minValue = setting->minValue;
+            existing.maxValue = setting->maxValue;
+            existing.stepValue = setting->stepValue != 0 ? setting->stepValue : 1;
+            existing.defaultValue = setting->defaultValue;
+            existing.getter = setting->getter;
+            existing.setter = setting->setter;
+            existing.userData = setting->userData;
+            existing.choiceOptions.clear();
+            if (setting->choiceOptions && setting->choiceCount > 0) {
+                for (uint32_t i = 0; i < setting->choiceCount; ++i) {
+                    if (setting->choiceOptions[i]) existing.choiceOptions.push_back(setting->choiceOptions[i]);
+                }
+            }
+            if (g_s.configured) buildPages();
+            return 0;
+        }
+    }
+
+    PluginSettingRow row;
+    row.header = headerStr;
+    row.key = keyStr;
+    row.label = setting->label ? setting->label : keyStr;
+    row.hint = setting->hint ? setting->hint : "";
+    row.type = setting->type;
+    row.minValue = setting->minValue;
+    row.maxValue = setting->maxValue;
+    row.stepValue = setting->stepValue != 0 ? setting->stepValue : 1;
+    row.defaultValue = setting->defaultValue;
+    row.getter = setting->getter;
+    row.setter = setting->setter;
+    row.userData = setting->userData;
+    row.cachedValue = setting->defaultValue;
+    if (setting->choiceOptions && setting->choiceCount > 0) {
+        for (uint32_t i = 0; i < setting->choiceCount; ++i) {
+            if (setting->choiceOptions[i]) row.choiceOptions.push_back(setting->choiceOptions[i]);
+        }
+    }
+    g_pluginSettings.push_back(std::move(row));
+    if (g_s.configured) buildPages();
+    return 0;
+}
+
 bool menuTakeConfigPollRequest() {
     const bool r = g_s.pollRequest;
     g_s.pollRequest = false;
@@ -3717,6 +3911,8 @@ void menuTick(ID3D11Device* dev) {
             g.alpha = s.open ? 1.0f : 0.0f;
             menuPanelSetGeometry(g);
             inputGateTick();
+            inputGateSetPluginBlock(
+                edvr::plugins::PluginManager::instance().onFilterInput(0, nullptr));
             if (dev) menuPanelTick(dev);
         });
         if (!g_budget.shouldRun()) inputGateSetPrivate(false);
@@ -4019,11 +4215,14 @@ void menuTick(ID3D11Device* dev) {
         setMenuHeadLock(showingOverlay, s.overlayYaw, s.overlayPitch);
         setMenuVisible(g.alpha);
         inputGateTick();
+        inputGateSetPluginBlock(
+            edvr::plugins::PluginManager::instance().onFilterInput(0, nullptr));
         if (dev) menuPanelTick(dev);
     });
     if (!g_budget.shouldRun()) {
         // A faulting tick must not leave the keyboard taken.
         inputGateSetPrivate(false);
+        inputGateSetPluginBlock(false);
         setMenuVisible(0.0f);
     }
 }

@@ -77,6 +77,11 @@ void inputGateInstall();
 void inputGateSetPrivate(bool priv);
 bool inputGatePrivate();
 
+// Set by the plugin manager each frame when any plugin (e.g. MFD) holds
+// keyboard focus. Independent of the menu's private flag: plugin focus
+// suppresses all three keyboard doors without affecting the menu's own state.
+void inputGateSetPluginBlock(bool block);
+
 // The stricter question the menu's adopted Elite keys ask (menu_keys.h):
 // is the flag set AND a DirectInput door installed and not retired AND the
 // game's keyboard seen reaching one -- the same two facts the Status

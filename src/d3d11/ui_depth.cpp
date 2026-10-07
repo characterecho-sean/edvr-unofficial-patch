@@ -3855,6 +3855,10 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
             Microsoft::WRL::ComPtr<ID3D11Buffer> savedCsCb;
             ctx->CSGetConstantBuffers(0, 1, &savedCsCb);
 
+            ID3D11RenderTargetView* savedRtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
+            ID3D11DepthStencilView* savedDsv = nullptr;
+            ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtvs, &savedDsv);
+
             ID3D11ShaderResourceView* in[4] = {s.contribSrv, s.depthSrv, haveTarget ? s.targetSrv : nullptr,
                                                haveDisplay ? display : nullptr};
             // The game's output merger, before any view is set: this runs at
@@ -3931,6 +3935,9 @@ bool uiDepthHologramResolve(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* 
             ctx->CSSetUnorderedAccessViews(0, 1, savedUav, nullptr);
             ctx->CSSetConstantBuffers(0, 1, savedCsCb.GetAddressOf());
             ctx->CSSetShader(savedCs.Get(), savedCsClasses, savedCsClassCount);
+            ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRtvs, savedDsv);
+            for (auto* p : savedRtvs) if (p) p->Release();
+            if (savedDsv) savedDsv->Release();
             for (UINT i = 0; i < savedCsClassCount; ++i) if (savedCsClasses[i]) savedCsClasses[i]->Release();
             for (auto* p : savedSrv) if (p) p->Release();
             for (auto* p : savedUav) if (p) p->Release();

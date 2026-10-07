@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EDVR Install Receipt Schema",
+  "type": "object",
+  "properties": {
+    "edition": {
+      "type": "string",
+      "description": "The edition of EDVR installed (e.g., 'odyssey', 'horizons')."
+    },
+    "profile": {
+      "type": "string",
+      "enum": ["VR", "flat"],
+      "description": "The target profile for this installation."
+    },
+    "installed_plugins": {
+      "type": "array",
+      "description": "List of plugins statically compiled and activated for this install, including exact versions.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Plugin identifier (e.g., 'cockpit-visuals')."
+          },
+          "version": {
+            "type": "string",
+            "description": "Plugin version string."
+          }
+        },
+        "required": ["id", "version"],
+        "additionalProperties": false
+      }
+    },
+    "file_fingerprints": {
+      "type": "object",
+      "description": "Hashes of installed binaries to ensure integrity and prevent stale DLLs.",
+      "additionalProperties": {
+        "type": "string",
+        "description": "SHA-256 hash of the installed file."
+      }
+    }
+  },
+  "required": ["edition", "profile", "installed_plugins", "file_fingerprints"]
+}
