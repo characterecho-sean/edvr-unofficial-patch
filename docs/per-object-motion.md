@@ -6,13 +6,14 @@
 section) adds the split's on-foot mode. The journal is history: the paths it
 builds were removed from the code that day.*
 
-- **State, 2026-10-07: the world/ship split has an on-foot mode (BUILT, NOT
-  FLOWN).** In Explorer Cam the ground within 10 m took the head path and
-  smeared as the commander walked (eye dump 090359). While Status.json says
-  on foot and not seated, the split the shader reads is a millimetre
-  (`src/common/temporal_mode.h`, `tools/on_foot_split_test`; the shader is
-  untouched). Evidence, rig numbers and the flight's pass signs: "The
-  world/ship split on foot, 2026-10-07", the last section.
+- **State, 2026-10-07: the world/ship split has an on-foot mode (FLOWN OK,
+  8fa6d443, Frontier log 103323; Sean: "Looks good now").** In Explorer Cam
+  the ground within 10 m took the head path and smeared as the commander
+  walked (eye dump 090359). While Status.json says on foot and not seated, the
+  split the shader reads is a millimetre (`src/common/temporal_mode.h`,
+  `tools/on_foot_split_test`; the shader is untouched). In flight the split was
+  off for 100% of on-foot eye-frames. The key stays (Sean: "Let's leave it for
+  now"). Details: "The world/ship split on foot, 2026-10-07", the last section.
 - **State:** RETIRED 2026-09-23 (Sean's teardown). Every path that
   ESTIMATED a per-object transform is gone from the code (tier 2's body path
   and occupancy grid, the second body, the stepped parts, the moving ships,
