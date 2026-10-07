@@ -30,7 +30,7 @@ inline bool flatTemporalCapturing() {
 }
 
 void flatTemporalStart(ID3D11Device* device);
-void flatTemporalArm();  // existing dump_draws hotkey starts a fresh flat window
+void flatTemporalArm(bool full = false);  // Shift + dump_draws requests the large full capture
 void flatTemporalStop();
 // Stand-down: the observers see no draw or call while paused (flatTemporalCapturing).
 // Set by the flat runtime at a frame boundary, so a frame is observed whole or not at all.

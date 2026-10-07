@@ -17,6 +17,8 @@
 #include "../../src/d3d11/flat_mono_shader_source.h"
 #include "../../src/d3d11/engine_velocity_primary_copy_shader.h"
 #include "../../src/d3d11/fixed_shader_source.h"
+#include "../../src/d3d11/flat_foreground_motion_shader.h"
+#include "../../src/d3d11/flat_domain_marker_shader.h"
 #include "../../src/d3d11/ui_resolve.h"
 #include "../../src/d3d11/night_vision_shader.h"
 #include "../../src/d3d11/stellar_coverage.h"
@@ -298,6 +300,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), coreFixed.begin(), coreFixed.end());
     const auto extra = extraVariants();
     variants.insert(variants.end(), extra.begin(), extra.end());
+    const auto foreground = foregroundVariants();
+    variants.insert(variants.end(), foreground.begin(), foreground.end());
     return variants;
 }
 
@@ -516,7 +520,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 56 && coreLegacy.size() + 1 == coreFixed.size(), "all original fixed shader contracts and the weapon footprint diagnostic are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 64 && coreLegacy.size() + 9 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics and six flat foreground shaders are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -546,10 +551,77 @@ static void selfTest() {
                 "generated payload reflects its original shader stage and SM5 contract");
         }
     }
-    check(!std::strcmp(coreFixed.back().symbol, "kWeaponFootprintBytecode") &&
-          compile(compiler.fn, coreFixed.back().alternate, coreFixed.back(), true) &&
-          coreFixed.back().bytes.size() > 4 && !std::memcmp(coreFixed.back().bytes.data(), "DXBC", 4),
-          "the weapon footprint shader compiles as a distinct fixed diagnostic variant");
+    const struct {const char* symbol;const char* name;const char* source;} diagnostics[] = {
+        {"kFlatForegroundOwnershipBytecode","flat_foreground_ownership_cs",edvr::kFlatForegroundOwnershipCs},
+        {"kFlatForegroundMergeBytecode","flat_foreground_merge_cs",edvr::kFlatForegroundMergeCs},
+        {"kWeaponFootprintBytecode","weapon_footprint_cs",edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl},
+    };
+    for(size_t i=0;i<3;++i) {
+        auto& diagnostic=coreFixed[coreLegacy.size()+i];
+        check(!std::strcmp(diagnostic.symbol,diagnostics[i].symbol) &&
+              !std::strcmp(diagnostic.sourceName,diagnostics[i].name) &&
+              !std::strcmp(diagnostic.entry,"main") && !std::strcmp(diagnostic.profile,"cs_5_0") &&
+              diagnostic.alternate==diagnostics[i].source && diagnostic.macros==nullptr,
+              "each diagnostic has its distinct generated symbol and exact source/stage contract");
+        check(compile(compiler.fn,diagnostic.alternate,diagnostic,true) &&
+              diagnostic.bytes.size()>4 && !std::memcmp(diagnostic.bytes.data(),"DXBC",4),
+              "each diagnostic compiles to a fixed DXBC payload");
+        if(i<2 && reflect && !diagnostic.bytes.empty()) {
+            ComPtr<ID3D11ShaderReflection> reflection;
+            const HRESULT hr=reflect(diagnostic.bytes.data(),diagnostic.bytes.size(),
+                __uuidof(ID3D11ShaderReflection),reinterpret_cast<void**>(reflection.GetAddressOf()));
+            UINT x=0,y=0,z=0;
+            const bool group=SUCCEEDED(hr) && reflection &&
+                reflection->GetThreadGroupSize(&x,&y,&z)==64 && x==8 && y==8 && z==1;
+            check(group,"foreground diagnostic payload keeps its bounded 8x8 compute group");
+            struct Binding {const char* name;D3D_SHADER_INPUT_TYPE type;UINT slot;};
+            const Binding ownership[]={{"Coverage",D3D_SIT_TEXTURE,0},
+                {"OwnerDepth",D3D_SIT_TEXTURE,1},{"ConsumerDepth",D3D_SIT_TEXTURE,2},
+                {"ConsumerStencil",D3D_SIT_TEXTURE,3},{"Counters",D3D_SIT_UAV_RWSTRUCTURED,0},
+                {"Extent",D3D_SIT_CBUFFER,0}};
+            const Binding merge[]={{"CurrentMask",D3D_SIT_TEXTURE,0},
+                {"ImmediateDepth",D3D_SIT_TEXTURE,1},{"CoverageUnion",D3D_SIT_UAV_RWTYPED,0},
+                {"OwnerDepth",D3D_SIT_UAV_RWTYPED,1},{"Extent",D3D_SIT_CBUFFER,0}};
+            bool bound=reflection!=nullptr;
+            const Binding* bindings=i==0?ownership:merge;
+            const size_t bindingCount=i==0?sizeof(ownership)/sizeof(ownership[0]):sizeof(merge)/sizeof(merge[0]);
+            if(reflection)for(size_t j=0;j<bindingCount;++j) {
+                const auto& expected=bindings[j];
+                D3D11_SHADER_INPUT_BIND_DESC desc{};
+                bound &= SUCCEEDED(reflection->GetResourceBindingDescByName(expected.name,&desc)) &&
+                    desc.Type==expected.type && desc.BindPoint==expected.slot && desc.BindCount==1;
+            }
+            check(bound,"foreground diagnostic payload retains its measured inputs and outputs at fixed slots");
+        }
+    }
+
+    const struct {const char* symbol;const char* name;const char* source;const char* profile;} foreground[] = {
+        {"kFlatForegroundMotionVsBytecode","flat foreground motion",edvr::kFlatForegroundMotionVs,"vs_5_0"},
+        {"kFlatForegroundMotionPsBytecode","flat foreground motion",edvr::kFlatForegroundMotionPs,"ps_5_0"},
+        {"kFlatNullWorldMarkerPsBytecode","flat null world marker",edvr::kFlatNullWorldMarkerPs,"ps_5_0"},
+        {"kFlatNullForeignMarkerPsBytecode","flat null foreign marker",edvr::kFlatNullForeignMarkerPs,"ps_5_0"},
+        {"kFlatNullForeignProvenanceMarkerPsBytecode","flat null foreign provenance marker",edvr::kFlatNullForeignProvenanceMarkerPs,"ps_5_0"},
+        {"kFlatNullPoolMarkerPsBytecode","flat null pool marker",edvr::kFlatNullPoolMarkerPs,"ps_5_0"},
+    };
+    for(size_t i=0;i<5;++i) {
+        auto& shader=coreFixed[coreLegacy.size()+3+i];
+        check(!std::strcmp(shader.symbol,foreground[i].symbol) &&
+              !std::strcmp(shader.sourceName,foreground[i].name) &&
+              !std::strcmp(shader.entry,"main") && !std::strcmp(shader.profile,foreground[i].profile) &&
+              shader.alternate==foreground[i].source && shader.macros==nullptr && !shader.flags1 && !shader.flags2,
+              "each flat foreground payload has its distinct symbol and exact source/stage contract");
+        check(compile(compiler.fn,shader.alternate,shader,true) && shader.bytes.size()>4 &&
+              !std::memcmp(shader.bytes.data(),"DXBC",4),"each flat foreground shader compiles to fixed DXBC");
+        if(reflect && !shader.bytes.empty()) {
+            ComPtr<ID3D11ShaderReflection> reflection;D3D11_SHADER_DESC desc{};
+            const HRESULT hr=reflect(shader.bytes.data(),shader.bytes.size(),__uuidof(ID3D11ShaderReflection),
+                                    reinterpret_cast<void**>(reflection.GetAddressOf()));
+            const unsigned stage=i==0?D3D11_SHVER_VERTEX_SHADER:D3D11_SHVER_PIXEL_SHADER;
+            check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                  D3D11_SHVER_GET_TYPE(desc.Version)==stage && D3D11_SHVER_GET_MAJOR(desc.Version)==5,
+                  "flat foreground payload reflects its registered SM5 stage");
+        }
+    }
 
     // The native runtime's stereo shaders (src/openxr/stereo_shader_source.h): four variants from two texts, held to the four D3DCompile calls they replace. The
     // contracts below are written independently of stereoVariants(): the source names, entries, profiles and flag word of src/openxr/d3d11_stereo.cpp at

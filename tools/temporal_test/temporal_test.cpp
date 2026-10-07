@@ -157,6 +157,94 @@ int main() {
         check(periodic, "jitter: the sequence repeats after eight frames");
     }
 
+    // ---- The jitter cycle's length (advanced.temporal_aa_jitter_phases, the flat profile's key). ----
+    // Eight is what every path ran before a count could be named; the key's default must change nothing, so the eight offsets are held
+    // twice: as a literal table (the Halton (2,3) points at index 1..8, minus half a pixel), and as the formula the code had.
+    {
+        const float lx[8] = {0.0f, -0.25f, 0.25f, -0.375f, 0.125f, -0.125f, 0.375f, -0.4375f};
+        const float ly[8] = {1.0f / 3 - 0.5f, 2.0f / 3 - 0.5f, 1.0f / 9 - 0.5f, 4.0f / 9 - 0.5f,
+                             7.0f / 9 - 0.5f, 2.0f / 9 - 0.5f, 5.0f / 9 - 0.5f, 8.0f / 9 - 0.5f};
+        bool literal = true, noCountIsOld = true, eightIsOld = true;
+        for (uint32_t n = 0; n < 200; ++n) {
+            const uint32_t i = (n % 8) + 1;
+            const float ex = edvr::temporalHalton(i, 2) - 0.5f, ey = edvr::temporalHalton(i, 3) - 0.5f;
+            float nx, ny, ax, ay;
+            edvr::temporalJitter(n, &nx, &ny);
+            edvr::temporalJitter(n, &ax, &ay, 8);
+            if (memcmp(&nx, &ex, sizeof(float)) || memcmp(&ny, &ey, sizeof(float))) noCountIsOld = false;
+            if (memcmp(&ax, &ex, sizeof(float)) || memcmp(&ay, &ey, sizeof(float))) eightIsOld = false;
+            if (fabsf(nx - lx[n % 8]) > 1e-6f || fabsf(ny - ly[n % 8]) > 1e-6f) literal = false;
+        }
+        check(literal, "jitter count: with no count the offsets are the shipped eight, as a literal table, for 200 frames");
+        check(noCountIsOld, "jitter count: no count draws the formula's bits (index (n mod 8) + 1), so the VR paths are unchanged");
+        check(eightIsOld, "jitter count: a count of 8 draws the same bits as no count (the key's default changes nothing)");
+        float zx, zy, ex, ey;
+        edvr::temporalJitter(3, &zx, &zy, 0);
+        edvr::temporalJitter(3, &ex, &ey);
+        check(zx == ex && zy == ey, "jitter count: a count of zero reads as the default eight, not a division by zero");
+    }
+    {
+        const uint32_t counts[] = {8, 9, 12, 16, 24, 32, 48, 63, 64};
+        for (const uint32_t count : counts) {
+            float x[64], y[64];
+            bool inRange = true, distinct = true, periodic = true, extendsEight = true;
+            for (uint32_t n = 0; n < count; ++n) {
+                edvr::temporalJitter(n, &x[n], &y[n], count);
+                if (x[n] < -0.5f || x[n] >= 0.5f || y[n] < -0.5f || y[n] >= 0.5f) inRange = false;
+                for (uint32_t m = 0; m < n; ++m)
+                    if (x[m] == x[n] && y[m] == y[n]) distinct = false;
+                for (uint32_t round = 1; round <= 3; ++round) {
+                    float px, py;
+                    edvr::temporalJitter(n + round * count, &px, &py, count);
+                    if (px != x[n] || py != y[n]) periodic = false;
+                }
+                if (n < 8) {
+                    float fx, fy;
+                    edvr::temporalJitter(n, &fx, &fy);
+                    if (fx != x[n] || fy != y[n]) extendsEight = false;
+                }
+            }
+            char what[160];
+            snprintf(what, sizeof(what), "jitter count %u: every offset lies inside the pixel, [-0.5, 0.5)", count);
+            check(inRange, what);
+            snprintf(what, sizeof(what), "jitter count %u: the %u offsets of one cycle are all different", count, count);
+            check(distinct, what);
+            snprintf(what, sizeof(what), "jitter count %u: the sequence repeats with period %u (three more cycles, bit for bit)", count, count);
+            check(periodic, what);
+            snprintf(what, sizeof(what), "jitter count %u: its first eight offsets are the shipped eight's", count);
+            check(extendsEight, what);
+        }
+        // Where a longer cycle departs from the eight: its ninth frame (n = 8) is the ninth Halton point, (1/16, 1/27 - 1/2) = (0.0625,
+        // -0.463), where the eight starts over at its first (0, 1/3 - 1/2). That y is past 7/16 of a pixel, which is why the legacy route's
+        // lighting patch cannot take a longer cycle (flat_lighting_tests.h; flatCameraPhaseCount).
+        float nine[2], again[2];
+        edvr::temporalJitter(8, &nine[0], &nine[1], 16);
+        edvr::temporalJitter(8, &again[0], &again[1], 8);
+        checkNear(nine[0], 0.0625f, 1e-6f, "jitter count 16: frame 8 is the ninth Halton point, x");
+        checkNear(nine[1], 1.0f / 27 - 0.5f, 1e-6f, "jitter count 16: frame 8 is the ninth Halton point, y (-0.463)");
+        check(again[0] == 0.0f && fabsf(again[1] - (1.0f / 3 - 0.5f)) < 1e-6f, "jitter count 8: frame 8 starts the cycle over at its first point");
+    }
+    {
+        // What the key's value asks for: a whole number from 8 to 64 as written; anything else is the default, not the nearest edge.
+        const long accepted[] = {8, 9, 16, 32, 48, 63, 64};
+        bool acceptedOk = true, flagged = true;
+        for (const long value : accepted) {
+            bool usable = false;
+            if (edvr::temporalJitterPhases(value, &usable) != static_cast<uint32_t>(value) || !usable) acceptedOk = false;
+        }
+        check(acceptedOk, "jitter phases: 8, 9, 16, 32, 48, 63 and 64 are read as written, both edges included");
+        const long refused[] = {7, 6, 1, 0, -1, -8, -64, 65, 100, 128, 1000000, 2147483647L, -2147483647L - 1};
+        bool fallsBack = true;
+        for (const long value : refused) {
+            bool usable = true;
+            if (edvr::temporalJitterPhases(value, &usable) != 8u || usable) { fallsBack = false; flagged = false; }
+        }
+        check(fallsBack, "jitter phases: 7, 0, a negative, 65, 100 and the extremes of an int all read as 8 (the default, not the nearest edge)");
+        check(flagged && edvr::temporalJitterPhases(100) == 8u, "jitter phases: the caller is told a value was not usable, and the pointer is optional");
+        check(edvr::kTemporalJitterPhasesMin == 8u && edvr::kTemporalJitterPhasesMax == 64u && edvr::kTemporalJitterCount == 8u,
+              "jitter phases: the range is 8 to 64 and the default is the fixed eight");
+    }
+
     // ---- The jitter as a tangent shift: the sign, pinned. -----------------
     {
         const float tan[4] = {-1.0f, 1.0f, -1.0f, 1.0f};   // a square 90-degree frustum

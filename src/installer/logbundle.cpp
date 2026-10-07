@@ -78,34 +78,6 @@ void dosStamp(const FILETIME& fileTime, unsigned* dosTime, unsigned* dosDate) {
     *dosDate = ((local.wYear - 1980) << 9) | (local.wMonth << 5) | local.wDay;
 }
 
-bool readWhole(const std::wstring& path, std::vector<unsigned char>* out, FILETIME* written) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(f, &size) || size.QuadPart < 0 || size.QuadPart > (256ll << 20)) {
-        CloseHandle(f);
-        return false;
-    }
-    if (written) GetFileTime(f, nullptr, nullptr, written);
-
-    out->resize(static_cast<size_t>(size.QuadPart));
-    size_t done = 0;
-    while (done < out->size()) {
-        DWORD read = 0;
-        const DWORD want = static_cast<DWORD>(
-            std::min<size_t>(out->size() - done, 1u << 20));
-        if (!ReadFile(f, out->data() + done, want, &read, nullptr) || read == 0) {
-            CloseHandle(f);
-            return false;
-        }
-        done += read;
-    }
-    CloseHandle(f);
-    return true;
-}
-
 struct Found {
     std::wstring path;
     std::wstring name;  // inside the zip
@@ -216,7 +188,8 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
     }
     std::vector<std::wstring> skipped;
 
-    std::vector<unsigned char> zip;
+    constexpr unsigned long long kZipLimit = 0xF0000000ull;
+    constexpr DWORD kChunk = 1u << 20;
     struct Entry {
         std::string name;
         unsigned long crc = 0;
@@ -227,32 +200,71 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         unsigned flags = 0;
     };
     std::vector<Entry> entries;
+    std::vector<unsigned char> chunk(kChunk);
+    unsigned long long position = 0, directoryBytes = 0;
+    HANDLE out = CreateFileW(zipPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (out == INVALID_HANDLE_VALUE) {
+        if (error) *error = "could not create the zip file";
+        return false;
+    }
+    struct PartialZip {
+        HANDLE file;
+        const std::wstring& path;
+        bool complete = false;
+        ~PartialZip() { CloseHandle(file); if(!complete) DeleteFileW(path.c_str()); }
+    } partial{out,zipPath};
+    auto fail = [&](const char* why) {
+        if (error) *error = why;
+        return false;
+    };
+    auto write = [&](const unsigned char* bytes, size_t size) {
+        size_t done = 0;
+        while (done < size) {
+            DWORD wrote = 0;
+            const DWORD want = static_cast<DWORD>(std::min<size_t>(size - done, kChunk));
+            if (!WriteFile(out, bytes + done, want, &wrote, nullptr) || !wrote) return false;
+            done += wrote;
+        }
+        position += size;
+        return true;
+    };
+    auto rollback = [&](unsigned long long offset) {
+        LARGE_INTEGER where{}; where.QuadPart = static_cast<LONGLONG>(offset);
+        if (!SetFilePointerEx(out, where, nullptr, FILE_BEGIN) || !SetEndOfFile(out)) return false;
+        position = offset;
+        return true;
+    };
 
     for (size_t i = 0; i < files.size(); ++i) {
-        std::vector<unsigned char> data;
+        HANDLE source = CreateFileW(files[i].c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        const bool packetFile = names[i].compare(0, 18, L"flat_draw_packets/") == 0 ||
+                                names[i].find(L"flat_pixels/resolve_inputs_") == 0;
+        if (source == INVALID_HANDLE_VALUE) {
+            if(packetFile) return fail("atomic capture became unreadable; no partial bundle was retained");
+            skipped.push_back(names[i]); continue;
+        }
+        LARGE_INTEGER length{};
         FILETIME written{};
-        if (!readWhole(files[i], &data, &written)) {
-            // The likeliest reason is a log the game is still writing to, which
-            // is exactly when somebody presses Save logs. Say which file, rather
-            // than handing over a bundle that is quietly missing one.
-            skipped.push_back(leafOf(files[i]));
+        if (!GetFileSizeEx(source, &length) || length.QuadPart < 0 ||
+            !GetFileTime(source, nullptr, nullptr, &written)) {
+            CloseHandle(source);
+            if(packetFile) return fail("atomic capture metadata became unreadable; no partial bundle was retained");
+            skipped.push_back(names[i]);
             continue;
         }
-
-        // Stored entries, 32-bit offsets, no ZIP64. Logs are small and capped,
-        // but a bundle that crossed 4 GB would produce a silently corrupt
-        // archive rather than an error, and a corrupt archive attached to a bug
-        // report is worse than no archive.
-        if (zip.size() + data.size() > 0xF0000000ull) {
-            if (error) *error = "these logs are too large to package (over 4 GB)";
-            return false;
-        }
-
         Entry entry;
         entry.name = toUtf8(names[i]);
-        entry.crc = crc32Of(data.data(), data.size(), 0);
-        entry.size = static_cast<unsigned long>(data.size());
-        entry.offset = static_cast<unsigned long>(zip.size());
+        if (entry.name.size() > 65535 || entries.size() >= 65535 ||
+            static_cast<unsigned long long>(length.QuadPart) > kZipLimit ||
+            position + 30ull + entry.name.size() + static_cast<unsigned long long>(length.QuadPart) +
+                directoryBytes + 46ull + entry.name.size() + 22ull > kZipLimit) {
+            CloseHandle(source);
+            return fail("these logs are too large to package (ZIP32 limit)");
+        }
+        entry.size = static_cast<unsigned long>(length.QuadPart);
+        entry.offset = static_cast<unsigned long>(position);
         dosStamp(written, &entry.dosTime, &entry.dosDate);
 
         // Bit 11 says the name is UTF-8. Without it a name outside ASCII is
@@ -265,31 +277,65 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         const unsigned flags = asciiName ? 0u : 0x0800u;
         entry.flags = flags;
 
-        put32(zip, 0x04034b50);            // local file header
-        put16(zip, 20);                    // version needed
-        put16(zip, flags);                 // flags
-        put16(zip, 0);                     // method: stored
-        put16(zip, entry.dosTime);
-        put16(zip, entry.dosDate);
-        put32(zip, entry.crc);
-        put32(zip, entry.size);            // compressed == uncompressed
-        put32(zip, entry.size);
-        put16(zip, static_cast<unsigned>(entry.name.size()));
-        put16(zip, 0);                     // extra length
-        zip.insert(zip.end(), entry.name.begin(), entry.name.end());
-        zip.insert(zip.end(), data.begin(), data.end());
-
+        // A first bounded pass determines CRC before the local header. The
+        // second pass writes the stored payload without a data descriptor.
+        unsigned long long scanned = 0;
+        bool readOk = true;
+        while (scanned < entry.size) {
+            DWORD got = 0;
+            const DWORD want = static_cast<DWORD>(std::min<unsigned long long>(kChunk, entry.size-scanned));
+            if (!ReadFile(source, chunk.data(), want, &got, nullptr) || got != want) { readOk=false; break; }
+            entry.crc = crc32Of(chunk.data(), got, entry.crc);
+            scanned += got;
+        }
+        LARGE_INTEGER zero{};
+        if (!readOk || !SetFilePointerEx(source, zero, nullptr, FILE_BEGIN)) {
+            CloseHandle(source);
+            if(packetFile) return fail("atomic capture could not be scanned; no partial bundle was retained");
+            skipped.push_back(names[i]); continue;
+        }
+        std::vector<unsigned char> header;
+        put32(header, 0x04034b50); put16(header, 20); put16(header, flags);
+        put16(header, 0); put16(header, entry.dosTime); put16(header, entry.dosDate);
+        put32(header, entry.crc); put32(header, entry.size); put32(header, entry.size);
+        put16(header, static_cast<unsigned>(entry.name.size())); put16(header, 0);
+        header.insert(header.end(), entry.name.begin(), entry.name.end());
+        if (!write(header.data(), header.size())) { CloseHandle(source); return fail("could not write the zip file"); }
+        unsigned long long copied = 0;
+        unsigned long copiedCrc = 0;
+        while (copied < entry.size) {
+            DWORD got = 0;
+            const DWORD want = static_cast<DWORD>(std::min<unsigned long long>(kChunk, entry.size-copied));
+            if (!ReadFile(source, chunk.data(), want, &got, nullptr) || got != want) { readOk=false; break; }
+            if (!write(chunk.data(), got)) { CloseHandle(source); return fail("could not write the zip file"); }
+            copiedCrc = crc32Of(chunk.data(), got, copiedCrc);
+            copied += got;
+        }
+        LARGE_INTEGER finalLength{}; FILETIME finalWritten{};
+        const bool unchanged = GetFileSizeEx(source,&finalLength) &&
+            GetFileTime(source,nullptr,nullptr,&finalWritten) && finalLength.QuadPart==length.QuadPart &&
+            CompareFileTime(&written,&finalWritten)==0;
+        CloseHandle(source);
+        if (!readOk || copiedCrc != entry.crc || (packetFile && !unchanged)) {
+            if (!rollback(entry.offset)) return fail("could not roll back a changed capture file");
+            if(packetFile) return fail("an atomic capture source changed during ZIP scan/copy; no partial bundle was retained");
+            // Live logs may append while collected. A stable copied prefix
+            // is valid; a prefix that changed is omitted with an explicit note.
+            skipped.push_back(names[i]);continue;
+        }
+        directoryBytes += 46ull + entry.name.size();
         entries.push_back(entry);
     }
 
     if (skippedOut) *skippedOut = skipped;
     if (entries.empty()) {
         if (error) *error = "there was nothing to collect";
-        return false;
+        return fail("there was nothing to collect");
     }
 
-    const unsigned long directoryOffset = static_cast<unsigned long>(zip.size());
+    const unsigned long directoryOffset = static_cast<unsigned long>(position);
     for (const Entry& entry : entries) {
+        std::vector<unsigned char> zip;
         put32(zip, 0x02014b50);            // central directory header
         put16(zip, 20);                    // version made by
         put16(zip, 20);                    // version needed
@@ -308,10 +354,11 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
         put32(zip, 0);                     // external attributes
         put32(zip, entry.offset);
         zip.insert(zip.end(), entry.name.begin(), entry.name.end());
+        if (!write(zip.data(),zip.size())) return fail("could not write the zip file");
     }
-    const unsigned long directorySize =
-        static_cast<unsigned long>(zip.size()) - directoryOffset;
+    const unsigned long directorySize = static_cast<unsigned long>(position - directoryOffset);
 
+    std::vector<unsigned char> zip;
     put32(zip, 0x06054b50);                // end of central directory
     put16(zip, 0);
     put16(zip, 0);
@@ -321,24 +368,9 @@ bool writeZip(const std::wstring& zipPath, const std::vector<std::wstring>& file
     put32(zip, directoryOffset);
     put16(zip, 0);                         // comment length
 
-    HANDLE f = CreateFileW(zipPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) {
-        if (error) *error = "could not create the zip file";
-        return false;
-    }
-    size_t done = 0;
-    while (done < zip.size()) {
-        DWORD wrote = 0;
-        const DWORD want = static_cast<DWORD>(std::min<size_t>(zip.size() - done, 1u << 20));
-        if (!WriteFile(f, zip.data() + done, want, &wrote, nullptr) || wrote == 0) {
-            CloseHandle(f);
-            if (error) *error = "could not write the zip file";
-            return false;
-        }
-        done += wrote;
-    }
-    CloseHandle(f);
+    if (!write(zip.data(),zip.size())) return fail("could not write the zip file");
+    if (!FlushFileBuffers(out)) return fail("could not finish the zip file");
+    partial.complete=true;
     return true;
 }
 
@@ -367,8 +399,10 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
     struct LogFile {
         std::wstring name;
         FILETIME     written{};
+        FILETIME     actualWritten{};
     };
     FILETIME newestLog{};
+    FILETIME sessionStart{}, sessionEnd{};
     bool haveNewestLog = false;
     std::vector<LogFile> logs;
     WIN32_FIND_DATAW fd{};
@@ -378,6 +412,7 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             LogFile log;
             log.name = fd.cFileName;
+            log.actualWritten = fd.ftLastWriteTime;
             // The name first, the write time only when the name does not carry
             // a stamp -- a log from a custom log.dir, or one somebody renamed.
             if (!stampFromName(log.name, &log.written)) log.written = fd.ftLastWriteTime;
@@ -395,10 +430,14 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
             if (CompareFileTime(&log.written, &newest->written) > 0) newest = &log;
         }
         newestLog = newest->written;
+        sessionStart = newestLog;
+        sessionEnd = newestLog;
         haveNewestLog = true;
         int sessionCount = 0;
         for (const LogFile& log : logs) {
             if (secondsBetween(log.written, newest->written) > kSessionWindowSeconds) continue;
+            if(CompareFileTime(&log.written,&sessionStart)<0) sessionStart=log.written;
+            if(CompareFileTime(&log.actualWritten,&sessionEnd)>0) sessionEnd=log.actualWritten;
             take.push_back({joinPath(logDir, log.name), log.name});
             ++sessionCount;
         }
@@ -447,21 +486,31 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
     // report like the settings do; captures without logs are not a report.
     if (!take.empty() && haveNewestLog) {
         const unsigned long long kCapFileBytes = 64ull << 20;   // one 4K dump fits
-        const unsigned long long kCapTotalBytes = 512ull << 20; // the bundle stays sendable
-        const wchar_t* captureRoots[] = {L"shaders", L"traces", L"flat_pixels", L"flat_draw_pixels"};
+        const unsigned long long kCapTotalBytes = 1536ull << 20; // streamed ZIP, bounded memory
+        const wchar_t* captureRoots[] = {L"shaders", L"traces", L"flat_pixels", L"flat_draw_pixels",
+                                         L"flat_draw_packets"};
         struct CapFile {
             std::wstring path, zipName;
+            std::wstring packetGroup;
             FILETIME written{};
             unsigned long long size = 0;
+            bool unsafe = false;
         };
         std::vector<CapFile> caps;
         for (const wchar_t* root : captureRoots) {
+            const bool packetRoot=wcscmp(root,L"flat_draw_packets")==0;
             const std::wstring rootPath = joinPath(logDir, root);
             WIN32_FIND_DATAW cfd{};
             HANDLE ch = FindFirstFileW(joinPath(rootPath, L"*").c_str(), &cfd);
             if (ch == INVALID_HANDLE_VALUE) continue;
             do {
                 if (wcscmp(cfd.cFileName, L".") == 0 || wcscmp(cfd.cFileName, L"..") == 0) continue;
+                const bool resolveInputs=wcscmp(root,L"flat_pixels")==0 && wcsncmp(cfd.cFileName,L"resolve_inputs_",15)==0;
+                const bool atomicCapture=packetRoot || resolveInputs;
+                if(atomicCapture && (cfd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                    bundle.notes.push_back("Capture omitted (reparse point): "+toUtf8(std::wstring(root)+L"/"+cfd.cFileName));
+                    continue;
+                }
                 if (cfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                     // One level of per-capture subfolders (the pixel roots);
                     // deeper nesting does not exist today, and a recursive
@@ -472,20 +521,26 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
                     if (sh == INVALID_HANDLE_VALUE) continue;
                     do {
                         if (sfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-                        if (secondsBetween(sfd.ftLastWriteTime, newestLog) > kSessionWindowSeconds)
+                        if (!atomicCapture && secondsBetween(sfd.ftLastWriteTime, newestLog) > kSessionWindowSeconds)
                             continue;
                         caps.push_back({joinPath(joinPath(rootPath, sub), sfd.cFileName),
                                         std::wstring(root) + L"/" + sub + L"/" + sfd.cFileName,
+                                        atomicCapture ? std::wstring(root)+L"/"+sub : L"",
                                         sfd.ftLastWriteTime,
                                         (static_cast<unsigned long long>(sfd.nFileSizeHigh) << 32) |
-                                            sfd.nFileSizeLow});
+                                            sfd.nFileSizeLow,
+                                        atomicCapture && (sfd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)!=0});
                     } while (FindNextFileW(sh, &sfd));
                     FindClose(sh);
                 } else {
+                    if(atomicCapture) {
+                        bundle.notes.push_back("Capture omitted (capture folder required): "+toUtf8(std::wstring(root)+L"/"+cfd.cFileName));
+                        continue;
+                    }
                     if (secondsBetween(cfd.ftLastWriteTime, newestLog) > kSessionWindowSeconds)
                         continue;
                     caps.push_back({joinPath(rootPath, cfd.cFileName),
-                                    std::wstring(root) + L"/" + cfd.cFileName, cfd.ftLastWriteTime,
+                                    std::wstring(root) + L"/" + cfd.cFileName, L"", cfd.ftLastWriteTime,
                                     (static_cast<unsigned long long>(cfd.nFileSizeHigh) << 32) |
                                         cfd.nFileSizeLow});
                 }
@@ -499,10 +554,46 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
         });
         unsigned long long spent = 0, leftBytes = 0;
         int taken = 0, leftOut = 0;
+        std::vector<std::wstring> decidedGroups;
         for (const CapFile& cap : caps) {
-            if (cap.size > kCapFileBytes || spent + cap.size > kCapTotalBytes) {
-                ++leftOut;
-                leftBytes += cap.size;
+            if(!cap.packetGroup.empty()) {
+                if(std::find(decidedGroups.begin(),decidedGroups.end(),cap.packetGroup)!=decidedGroups.end())
+                    continue;
+                decidedGroups.push_back(cap.packetGroup);
+                unsigned long long groupBytes=0;
+                bool oversized=false, manifest=false, unsafe=false;
+                FILETIME groupWritten=cap.written;
+                for(const auto& part:caps) if(part.packetGroup==cap.packetGroup) {
+                    groupBytes+=part.size;
+                    oversized|=part.size>kCapFileBytes;
+                    unsafe|=part.unsafe;
+                    const bool isManifest=part.zipName.size()>=14 &&
+                              part.zipName.substr(part.zipName.size()-14)==L"/manifest.json";
+                    if(isManifest) {manifest=true;groupWritten=part.written;}
+                }
+                // Packet files are atomic evidence. The filename stamp of a
+                // selected log is its session START; its actual mtime bounds
+                // the session END. Never filter packet members individually.
+                const bool session=CompareFileTime(&groupWritten,&sessionStart)>=0 &&
+                    (CompareFileTime(&groupWritten,&sessionEnd)<=0 ||
+                     secondsBetween(groupWritten,sessionEnd)<=kSessionWindowSeconds);
+                const char* why=unsafe?"reparse point":!session?"outside newest log session":!manifest?"manifest missing":oversized?"file over 64 MiB":
+                                groupBytes>kCapTotalBytes-spent?"bundle budget":"";
+                for(const auto& part:caps) if(part.packetGroup==cap.packetGroup) {
+                    if(*why) {
+                        ++leftOut;leftBytes+=part.size;
+                        bundle.notes.push_back("Capture omitted ("+std::string(why)+"): "+toUtf8(part.zipName));
+                    } else {
+                        take.push_back({part.path,part.zipName});
+                        spent+=part.size;++taken;
+                    }
+                }
+                continue;
+            }
+            if (cap.size > kCapFileBytes || cap.size > kCapTotalBytes-spent) {
+                ++leftOut; leftBytes += cap.size;
+                bundle.notes.push_back("Capture omitted ("+std::string(cap.size>kCapFileBytes?
+                    "file over 64 MiB":"bundle budget")+"): "+toUtf8(cap.zipName));
                 continue;
             }
             take.push_back({cap.path, cap.zipName});
@@ -511,7 +602,7 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
         }
         char line[192];
         if (taken > 0) {
-            sprintf_s(line, "%d capture file%s from the most recent session (traces, shaders, pixel captures)",
+            sprintf_s(line, "%d capture file%s from the most recent session (traces, shaders, pixels, draw packets)",
                       taken, taken == 1 ? "" : "s");
             bundle.notes.push_back(line);
         }
@@ -615,7 +706,6 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
     for (const Found& found : take) {
         files.push_back(found.path);
         names.push_back(found.name);
-        bundle.included.push_back(found.name);
     }
     std::string error;
     std::vector<std::wstring> skipped;
@@ -623,16 +713,18 @@ LogBundle collectLogs(const std::wstring& gameDir, const std::wstring& outDir) t
         bundle.error = "Could not write " + toUtf8(bundle.zipPath) + ": " + error;
         return bundle;
     }
+    for(const auto& name:names)
+        if(std::find(skipped.begin(),skipped.end(),name)==skipped.end()) bundle.included.push_back(name);
     for (const std::wstring& name : skipped) {
         bundle.notes.push_back(toUtf8(name) +
-                               " could not be read and is not in the zip -- it is probably still "
+                               " could not be read consistently (unreadable or changed during collection) and is not in the zip -- it is probably still "
                                "being written to.");
     }
     bundle.ok = true;
     return bundle;
 } catch (const std::bad_alloc&) {
-    // The whole archive is assembled in memory. Several large logs on a machine
-    // already short of it should say so, not disappear.
+    // Payloads stream through one MiB; allocation failure in metadata or the
+    // chunk buffer should still produce an actionable installer error.
     LogBundle failed;
     failed.error = "Ran out of memory collecting the logs. Close the game and try again.";
     return failed;

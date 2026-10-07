@@ -16,6 +16,10 @@ struct FlatLivePhase {
     uint32_t warmFrames = 0;
     bool failed = false;
     bool previousAcceptedValid = false;
+    // How many frames the sequence ran before it repeats, as the last
+    // beginFrame was asked: never history, so resetHistory leaves it. The 5 s
+    // line prints it, so a flight reads the cycle length the frames used.
+    uint32_t phaseCount = kTemporalJitterCount;
 
     void resetHistory() {
         currentX = currentY = previousX = previousY = 0.0f;
@@ -24,11 +28,19 @@ struct FlatLivePhase {
         renderW_ = renderH_ = 0;
     }
 
+    // `phases` is the cycle length: the fixed eight unless the caller names
+    // another (the flat runtime, from advanced.temporal_aa_jitter_phases, on
+    // the camera route that can carry it: flatCameraPhaseCount). The VR world
+    // route shares this machine and asks for none, so it keeps the eight. The
+    // sequence number keeps counting through a change of count, and the offset
+    // is its remainder in the count of the frame that draws it.
     void beginFrame(bool enabled, bool compatiblePreviousFrame,
-                    uint32_t renderW, uint32_t renderH) {
+                    uint32_t renderW, uint32_t renderH,
+                    uint32_t phases = kTemporalJitterCount) {
         currentX = currentY = 0.0f;
         applied = 0;
         failed = false;
+        phaseCount = phases ? phases : kTemporalJitterCount;
         if (!enabled || !renderW || !renderH) {
             resetHistory();
             return;
@@ -42,7 +54,7 @@ struct FlatLivePhase {
         renderW_ = renderW;
         renderH_ = renderH;
         if (warmFrames >= 2 && previousAcceptedValid) {
-            temporalJitter(phaseSequence++, &currentX, &currentY);
+            temporalJitter(phaseSequence++, &currentX, &currentY, phaseCount);
         }
     }
 

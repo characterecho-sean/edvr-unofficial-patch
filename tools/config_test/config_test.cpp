@@ -2014,6 +2014,17 @@ int main(int argc, char** argv) {
     expectStr("experimental.temporal_aa_before_post", "auto", "flat scope permits the HDR route's key");
     Config::get().set("experimental.temporal_aa_before_post", "off");
     expectStr("experimental.temporal_aa_before_post", "off", "flat scope reads the HDR route's key off");
+    // The flat refusal view (design doc section 104). It flew unlisted once and read off whatever the file said.
+    Config::get().set("advanced.temporal_aa_debug", "motion_source");
+    expectStr("advanced.temporal_aa_debug", "motion_source", "flat scope permits the refusal view's key");
+    Config::get().set("advanced.temporal_aa_debug", "off");
+    // The flat jitter cycle's length (advanced.temporal_aa_jitter_phases): the flat runtime reads it through getInt with an 8 default.
+    // Unlisted in runtimeProfileAllowsKey, a refused key answers 0 whatever the file says, which the reader takes for out of range and
+    // reads as 8: a user who wrote 32 would fly 8, with a log line naming a value they never wrote.
+    Config::get().set("advanced.temporal_aa_jitter_phases", "32");
+    expectInt("advanced.temporal_aa_jitter_phases", 32, "flat scope permits the jitter cycle's key");
+    Config::get().set("advanced.temporal_aa_jitter_phases", "8");
+    expectInt("advanced.temporal_aa_jitter_phases", 8, "flat scope reads the jitter cycle's key at its default");
     // The VR world route's key is a VR-profile key: unlisted in runtimeProfileAllowsKey, so a flat profile reads it off
     // whatever the file says, and the flat runtime (which never asks) cannot be turned into it.
     Config::get().set("experimental.temporal_aa_on_foot_world", "auto");

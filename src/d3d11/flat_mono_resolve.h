@@ -147,6 +147,37 @@ struct FlatMonoResolveFrame {
     // is nothing for the caller to swap into a binding. False, the default, is the copy route and every byte of it
     // unchanged.
     bool hdr = false;
+    // Optional late-colour-overlay isolation. `color` remains the live HDR
+    // destination and raw post-overlay image. The backend and prep consume
+    // only cleanColor. The finish keeps the world under the coverage (the
+    // backend's result where its history is trusted, the clean sample where
+    // it is not) and adds what the overlays drew there, the raw sample minus
+    // the clean one; a covered pixel whose history is refused is the raw
+    // sample itself. A transparent part of an overlay adds nothing.
+    ID3D11ShaderResourceView* cleanColor = nullptr;
+    ID3D11ShaderResourceView* overlayCoverage = nullptr;
+    // Conservative union of fragments rendered through a qualified alternate
+    // camera on the flat HDR route. The mask is R8_UNORM at render size and
+    // remains marked after later draws, even when they write identical depth.
+    // Native HDR TAA uses current colour under this footprint. SDK modes also
+    // require the qualified final-owner motion/depth contract below.
+    // Null keeps the existing resolver path unchanged.
+    ID3D11ShaderResourceView* untrustedCameraCoverage = nullptr;
+    // Flat SDK input contract. The adapter certifies final camera ownership
+    // and supplies actual animated foreground motion on the render grid.
+    // RGBA32_FLOAT: xy = previous-current pixels with both raster phases out,
+    // z = infinite reversed-Z device depth using foregroundDepthNear below,
+    // w = 1 matched history, 2 newly seen geometry, 0 invalid or no fragment.
+    // These inputs never alter native TAA or the VR first-person adapter.
+    ID3D11ShaderResourceView* foregroundMotion = nullptr;
+    bool foregroundRequired = false;
+    bool foregroundQualified = false;
+    bool foregroundResetRequired = false;
+    uint64_t foregroundFrame = 0;
+    // Zero means world near. A smaller positive common near keeps every
+    // camera's device depth representable; the resolver scales world depth
+    // only after computing world reprojection from the original raw depth.
+    float foregroundDepthNear = 0;
     // The upscaler feature slot the backend evaluates on (dlaa.h, kUpscalerSlots; dlaa.cpp and fsr3_engine.cpp keep one
     // feature, one size key and one history per slot). 0 is the flat profile's and eye 0's -- the default, and every
     // caller before the VR world route. The VR world route passes 2 (vr_world_route.h, kVrWorldFeatureSlot), because its two

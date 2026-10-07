@@ -42,6 +42,10 @@ void projectionScopeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     check(raw[64]==2 && reinterpret_cast<const float*>(snapshot.bytes)[64]==2,"raw camera and engine snapshot remains unmodified");
     auto* replacement=privateBuffer.binding(FlatProjectionStage::Vertex,1).replacement;
     if(!replacement)return;
+    float certificate[256]{};
+    check(privateBuffer.copyUploadedConstants(replacement,0,sizeof(certificate),certificate),"ready private upload offers exact complete certificate");
+    certificate[0]=713;
+    check(!privateBuffer.copyUploadedConstants(original.Get(),0,4,certificate) && certificate[0]==713,"wrong resource cannot borrow private upload certificate");
     UINT first=16, count=16; auto* buffer=original.Get();
     ctx->VSSetConstantBuffers1(1,1,&buffer,&first,&count);
     ctx->PSSetConstantBuffers1(2,1,&buffer,&first,&count);
@@ -110,6 +114,8 @@ void projectionScopeTests(ID3D11Device* device, ID3D11DeviceContext* base) {
     }
     check(!g_flatComputeInternal,"nested suppression restored");checkBindings(original.Get());
     check(shadows.invalidate(original.Get(),1) && !privateBuffer.prepare(shadows,&patch,1,jitter,2),"failed prepare invalidates existing plan token");
+    certificate[0]=713;
+    check(!privateBuffer.copyUploadedConstants(replacement,0,4,certificate) && certificate[0]==713,"invalidated private upload cannot certify stale bytes");
     {FlatProjectionBindingScope refused(plan);check(!refused.active(),"old plan cannot bind after failed prepare");}
     check(!plan.refreshPrepared(),"invalid token cannot refresh plan");checkBindings(original.Get());
     check(shadows.captureFullWrite(original.Get(),1,raw,sizeof(raw)) &&

@@ -231,6 +231,323 @@ inline void hdrRouteGpuTests(ID3D11Device* device, ID3D11DeviceContext* context)
     ok = run(true);
     check(ok && observedHdr, "HDR route: DLAA is told HDR too (R = D)");
 
+    // A late overlay (a weapon's glow, a sight's lens and glow quads) is drawn into H after the world. The backend sees only the clean world
+    // image, which is t0 of the finish; t16 is the raw H with the overlays drawn. The finish keeps the world under the overlay's coverage and
+    // adds what the overlay drew there, the raw sample minus the clean one:
+    //   covered and trusted:  the backend's result + (raw - clean)    (a fully transparent part of a quad, raw == clean, adds nothing:
+    //                         the world stays anti-aliased under it; the sum is clamped at zero, an alpha overlay can darken)
+    //   covered and refused:  the raw sample, as it always was
+    //   not covered:          the backend's result where trusted and the clean sample where refused, as before.
+    // It used to show the raw frame wherever the coverage said an overlay draw had touched, so aiming down sights took the anti-aliasing off
+    // the world behind the sight. The shader's four bilinear source taps apply coverage at a nonzero phase, for SDK and TAA.
+    {
+        const uint32_t cleanPixel=pack(20,30,40);
+        std::vector<uint32_t> cleanTexels(w*h,cleanPixel);
+        auto cleanTexture=texture(device,w,h,DXGI_FORMAT_R11G11B10_FLOAT,
+            D3D11_BIND_SHADER_RESOURCE,cleanTexels.data(),w*4);
+        auto cleanView=view(device,cleanTexture.Get());
+        std::vector<unsigned char> coverage(w*h,0);
+        coverage[8*w+8]=255;
+        auto coverageTexture=texture(device,w,h,DXGI_FORMAT_R8_UNORM,
+            D3D11_BIND_SHADER_RESOURCE,coverage.data(),w);
+        auto coverageView=view(device,coverageTexture.Get());
+        check(cleanView && coverageView,"HDR overlay: clean and private coverage views create");
+        if(cleanView && coverageView) {
+            f.cleanColor=cleanView.Get();f.overlayCoverage=coverageView.Get();
+            f.jitterX=f.previousJitterX=expectedJx=.25f;
+            f.jitterY=f.previousJitterY=expectedJy=-.25f;
+            std::memcpy(f.previousCamera,f.camera,sizeof(f.camera));
+            // What the game drew into H: the clean world everywhere, and over texel (8, 8) the overlay's glow, brighter in red and green and
+            // darker in blue than the world under it.
+            auto liveWith=[&](double r,double g,double bl) { fill([&](UINT x,UINT y,double (&c)[3]) {
+                c[0]=20;c[1]=30;c[2]=40;
+                if(x==8 && y==8) {c[0]=r;c[1]=g;c[2]=bl;}
+            }); };
+            auto live=[&] { liveWith(200,60,10); };
+            auto transparent=[&] { liveWith(20,30,40); };   // the overlay covers the texel and draws nothing there: raw == clean
+            const double cleanOf[3]={20,30,40};
+            const double stub[3]={0,1,0};                   // the stub backend's result: uniform green
+            const double quarter[3]={0,.25,0};              // the refusal view's paint of a pixel with no engine slot: a quarter of what it showed
+            // The raw H (the live image) where the finish samples it: bilinear at the jittered position.
+            auto rawAt=[&](UINT x,UINT y,int c) { return bilinear(c==0?inR:c==1?inG:inB,x+f.jitterX,y+f.jitterY); };
+            // The four pixels whose bilinear taps touch the covered texel at this phase (x 7..8, y 8..9), channel by channel against wantOf.
+            auto fourPixels=[&](const std::vector<uint32_t>& got,auto wantOf) {
+                bool all=got.size()==w*h;
+                for(UINT y=8;all && y<=9;++y)for(UINT x=7;x<=8;++x) {
+                    double pixel[3]{};unpack(got[y*w+x],pixel);
+                    for(int c=0;c<3;++c) {
+                        const double want=wantOf(x,y,c);
+                        all&=std::abs(pixel[c]-want)<=1.5*ulp(want,mantissa(c))+1e-6;
+                    }
+                }
+                return all;
+            };
+            // Pixels no tap of which touches the covered texel: the world, whatever the overlay did.
+            auto worldOutside=[&](const std::vector<uint32_t>& got,const double (&want)[3]) {
+                const UINT spots[][2]={{2,2},{6,8},{9,8},{8,10},{8,7},{12,12}};
+                bool all=got.size()==w*h;
+                for(const auto& spot:spots) {
+                    if(!all)break;
+                    double pixel[3]{};unpack(got[spot[1]*w+spot[0]],pixel);
+                    for(int c=0;c<3;++c)all&=std::abs(pixel[c]-want[c])<=1.5*ulp(want[c],mantissa(c))+1e-6;
+                }
+                return all;
+            };
+            std::string label;
+            auto say=[&](const char* mode,const char* text)->const char* {
+                label=std::string("HDR overlay (")+mode+"): "+text;return label.c_str();
+            };
+            for(auto mode:{FlatMonoResolveMode::Dlaa,FlatMonoResolveMode::Fsr}) {
+                const char* name=mode==FlatMonoResolveMode::Dlaa?"DLAA":"FSR";
+                f.mode=mode;f.reset=false;++f.frame;live();run(true); // prime a new SDK mode's history
+                ++f.frame;live();observedBackendPixels=false;
+                backendCalls=0;
+                ok=run(true);
+                check(ok && !backendReset && backendCalls==1 && observedBackendPixels &&
+                      observedBackendCenter==cleanPixel && observedBackendOutside==cleanPixel,
+                      say(name,"the SDK receives clean world pixels, never live overlay pixels"));
+                std::vector<uint32_t> got;
+                check(readH(got) && got.size()==w*h,say(name,"the finished H is readable"));
+                // Covered and trusted: the backend's result plus the overlay's own contribution, clamped at zero.
+                check(fourPixels(got,[&](UINT x,UINT y,int c) { return std::max(0.0,stub[c]+rawAt(x,y,c)-cleanOf[c]); }),
+                      say(name,"covered and trusted: the world's backend result plus the overlay's contribution (History + raw - clean, clamped at zero)"));
+                {
+                    // It is not the raw frame the finish used to show there (green is 1 + 30 w here, the raw frame's 30 + 30 w).
+                    double marked[3]{};if(got.size()==w*h)unpack(got[8*w+8],marked);
+                    check(marked[0]>100 && std::abs(marked[1]-rawAt(8,8,1))>20,
+                          say(name,"covered and trusted: the pixel under the glow is not the raw frame"));
+                }
+                check(worldOutside(got,stub),say(name,"outside the coverage and its four taps the world is the backend's result"));
+                // A fully transparent overlay over a covered region: raw == clean there. The world stays anti-aliased under it (History), it
+                // does not turn into the raw frame (20, 30, 40).
+                ++f.frame;transparent();ok=run(true);
+                got.clear();
+                check(ok && readH(got) && fourPixels(got,[&](UINT,UINT,int c) { return stub[c]; }) && worldOutside(got,stub),
+                      say(name,"a fully transparent overlay over a covered region keeps the anti-aliased world (History), not the raw frame"));
+                // The refusal view in an overlay frame paints the finish's own colour (the view's slots: t11 the class, t12 the mask, t16 the raw H).
+                ++f.frame;live();f.refusalView=1;ok=run(true);f.refusalView=0;
+                got.clear();
+                check(ok && readH(got) &&
+                          fourPixels(got,[&](UINT x,UINT y,int c) { return .25*std::max(0.0,stub[c]+rawAt(x,y,c)-cleanOf[c]); }) &&
+                          worldOutside(got,quarter),
+                      say(name,"the refusal view in an overlay frame paints a quarter of the same composite (a pixel with no engine slot)"));
+                // Covered and refused: texel (8, 8) is a stale slot (code 1, a depth the scene never had), so every pixel whose taps touch it
+                // is refused and shows the raw sample, the overlay and the world under it together, exactly as before; the trusted
+                // neighbours keep the backend's result.
+                slots[(8*w+8)*2]=1;slots[(8*w+8)*2+1]=.5f;
+                context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
+                ++f.frame;live();ok=run(true);
+                slots[(8*w+8)*2]=-1;slots[(8*w+8)*2+1]=.01f;
+                context->UpdateSubresource(slotTexture.Get(),0,nullptr,slots.data(),w*8,0);
+                got.clear();
+                check(ok && readH(got) && fourPixels(got,[&](UINT x,UINT y,int c) { return rawAt(x,y,c); }) && worldOutside(got,stub),
+                      say(name,"covered and refused (a stale slot under the glow): the raw sample, as before; the trusted neighbours keep the backend's result"));
+                // And a reset frame refuses every pixel: the raw sample under the coverage, the clean sample everywhere else.
+                f.reset=true;++f.frame;live();ok=run(true);f.reset=false;
+                got.clear();
+                check(ok && readH(got) && fourPixels(got,[&](UINT x,UINT y,int c) { return rawAt(x,y,c); }) && worldOutside(got,cleanOf),
+                      say(name,"covered and refused (a reset frame): the raw sample under the coverage and the clean sample outside it"));
+            }
+            std::vector<unsigned char> none(w*h,0);
+            auto noCoverageTexture=texture(device,w,h,DXGI_FORMAT_R8_UNORM,
+                D3D11_BIND_SHADER_RESOURCE,none.data(),w);
+            auto noCoverageView=view(device,noCoverageTexture.Get());
+            check(noCoverageView!=nullptr,"HDR overlay: zero coverage control view creates");
+            if(noCoverageView) {
+                f.mode=FlatMonoResolveMode::Taa;f.reset=true;++f.frame;live();
+                f.overlayCoverage=noCoverageView.Get();
+                ok=run(true);
+                std::vector<uint32_t> zeroMaskOutput;readH(zeroMaskOutput);
+                double zeroCenter[3]{};
+                if(zeroMaskOutput.size()==w*h)unpack(zeroMaskOutput[8*w+8],zeroCenter);
+                check(ok && zeroMaskOutput.size()==w*h &&
+                      std::abs(zeroCenter[0]-20)<=ulp(20,6),
+                      "HDR overlay: TAA receives clean HDR, proven by zero-mask live-hot-pixel control");
+            }
+            f.overlayCoverage=coverageView.Get();
+            f.mode=FlatMonoResolveMode::Taa;f.reset=true;++f.frame;live();
+            ok=run(true);
+            check(ok,"HDR overlay: internal TAA accepts clean/live split");
+            {
+                // EDVR's TAA output for a uniform clean frame is the clean frame, so under the coverage the sum is clean + (raw - clean):
+                // the raw frame, here, in all three channels (blue darkens); outside it the world is the TAA's output, the clean input.
+                std::vector<uint32_t> got;
+                check(readH(got) && got.size()==w*h &&
+                          fourPixels(got,[&](UINT x,UINT y,int c) { return std::max(0.0,cleanOf[c]+rawAt(x,y,c)-cleanOf[c]); }) &&
+                          worldOutside(got,cleanOf),
+                      "HDR overlay (TAA): covered pixels are the TAA's world plus the overlay's contribution, and the world outside the coverage came from clean input");
+            }
+
+            // The next unmarked frame does not inherit a stale coverage mask.
+            f.cleanColor=nullptr;f.overlayCoverage=nullptr;
+            f.mode=FlatMonoResolveMode::Dlaa;f.reset=false;++f.frame;
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=20;c[1]=30;c[2]=40;});
+            run(true); // the previous TAA mode forces a reset of the SDK slot
+            ++f.frame;
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=20;c[1]=30;c[2]=40;});
+            ok=run(true);
+            std::vector<uint32_t> next;readH(next);
+            double center[3]{};if(next.size()==w*h)unpack(next[8*w+8],center);
+            check(ok && !backendReset && next.size()==w*h && center[0]<1e-6 && std::abs(center[1]-1)<.01,
+                  "HDR overlay: next unmarked frame uses backend world result at former overlay pixel");
+
+            // Supplying only half of the clean/raw contract must fail before
+            // the backend, preserving the actual game H bytes.
+            f.cleanColor=cleanView.Get();f.overlayCoverage=nullptr;++f.frame;live();
+            const auto liveHash=hHash();const int calls=backendCalls;
+            ok=run(false);
+            check(!ok && backendCalls==calls && hHash()==liveHash,
+                  "HDR overlay: missing coverage refuses without modifying game H or calling backend");
+            f.cleanColor=nullptr;f.overlayCoverage=nullptr;
+        }
+    }
+
+    // The flat mixed-camera route keeps a conservative R8 fragment union.
+    // Identical depth cannot make a prior alternate-camera colour world
+    // history. Exercise the actual prep/TAA/finish bytecode with colour that
+    // exposes a false history accept: 64/192 checker now, uniform 128 before.
+    {
+        std::vector<unsigned char> mask(w*h,0);
+        auto maskTexture=texture(device,w,h,DXGI_FORMAT_R8_UNORM,
+            D3D11_BIND_SHADER_RESOURCE,mask.data(),w);
+        auto maskView=view(device,maskTexture.Get());
+        check(maskTexture && maskView,"mixed-camera R8 union view creates");
+        if(maskTexture && maskView) {
+            auto uploadMask=[&](int x,int y) {
+                std::fill(mask.begin(),mask.end(),static_cast<unsigned char>(0));
+                if(x>=0 && y>=0)mask[UINT(y)*w+UINT(x)]=255;
+                context->UpdateSubresource(maskTexture.Get(),0,nullptr,mask.data(),w,0);
+            };
+            int caseId=0;
+            auto pair=[&](int prevX,int prevY,int nowX,int nowY,bool fractionalMotion,bool fractionalCurrent) {
+                edvr::flatMonoResolveReset();
+                camera(f.camera);camera(f.previousCamera);
+                f.mode=FlatMonoResolveMode::Taa;f.hdr=true;
+                f.cleanColor=nullptr;f.overlayCoverage=nullptr;
+                f.untrustedCameraCoverage=maskView.Get();
+                f.frame=50000+UINT64(++caseId)*3;f.reset=true;
+                f.jitterX=f.jitterY=f.previousJitterX=f.previousJitterY=0;
+                expectedJx=expectedJy=0;
+                uploadMask(prevX,prevY);
+                fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});
+                const bool prime=run(true);
+                ++f.frame;f.reset=false;
+                std::memcpy(f.previousCamera,f.camera,sizeof(f.camera));
+                if(fractionalMotion) {
+                    // The fixture camera maps +/-0.078125 world units to a
+                    // quarter render pixel at z=.01, x/y in opposite signs.
+                    f.camera[5][0]=.078125f;f.camera[5][1]=-.078125f;
+                }
+                if(fractionalCurrent) {
+                    f.jitterX=f.jitterY=expectedJx=expectedJy=.25f;
+                }
+                uploadMask(nowX,nowY);
+                fill([&](UINT x,UINT y,double (&c)[3]) {
+                    c[0]=c[1]=c[2]=((x+y)&1)?192:64;
+                });
+                const bool resolved=run(true);
+                std::vector<uint32_t> got;readH(got);
+                double pixel[3]{};
+                if(got.size()==w*h)unpack(got[8*w+8],pixel);
+                check(prime && resolved && got.size()==w*h,
+                      "mixed-camera two-frame TAA fixture resolves");
+                return pixel[0];
+            };
+            const double oldWorld=pair(-1,-1,-1,-1,true,false);
+            check(oldWorld>90 && oldWorld<130,
+                  "mixed-camera all-world control accepts equal-depth history");
+            bool previousFour=true;
+            for(int y=0;y<2;++y)for(int x=0;x<2;++x) {
+                // Each mark affects exactly one of the four prior output
+                // domains sampled at previous=(8.25,8.25) pixels.
+                const double pixel=pair(8+2*x,8+2*y,-1,-1,true,false);
+                previousFour &= std::abs(pixel-64)<=1.5;
+            }
+            check(previousFour,"mixed-camera every previous bilinear domain tap vetoes equal-depth world history");
+            const double currentWorld=pair(-1,-1,-1,-1,false,true);
+            check(currentWorld>118 && currentWorld<133,
+                  "mixed-camera current four-tap control accepts world history");
+            bool currentFour=true;
+            for(int y=0;y<2;++y)for(int x=0;x<2;++x) {
+                const double pixel=pair(-1,-1,8+x,8+y,false,true);
+                currentFour &= std::abs(pixel-112)<=2;
+            }
+            check(currentFour,"mixed-camera each current bilinear coverage tap uses current HDR colour");
+
+            auto clampCase=[&](bool markHotNeighbor) {
+                edvr::flatMonoResolveReset();camera(f.camera);camera(f.previousCamera);
+                f.mode=FlatMonoResolveMode::Taa;f.untrustedCameraCoverage=maskView.Get();
+                f.jitterX=f.jitterY=f.previousJitterX=f.previousJitterY=0;
+                expectedJx=expectedJy=0;f.frame=58000+(markHotNeighbor?3:0);f.reset=true;
+                uploadMask(-1,-1);
+                fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+                ++f.frame;f.reset=false;uploadMask(markHotNeighbor?7:-1,markHotNeighbor?7:-1);
+                fill([&](UINT x,UINT y,double (&c)[3]) {
+                    c[0]=c[1]=c[2]=(x==7 && y==7)?192:64;
+                });
+                run(true);std::vector<uint32_t> got;readH(got);double pixel[3]{};
+                if(got.size()==w*h)unpack(got[8*w+8],pixel);
+                return pixel[0];
+            };
+            const double wideClamp=clampCase(false),worldClamp=clampCase(true);
+            check(wideClamp>90 && std::abs(worldClamp-64)<=1.5,
+                  "mixed-camera untrusted 3x3 neighbor cannot widen world history clamp");
+
+            // An SDK must never consume this union, and neither an SDK
+            // refusal nor an invalid view may alter the game's HDR bytes.
+            uploadMask(8,8);f.mode=FlatMonoResolveMode::Dlss;++f.frame;
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=12;c[1]=24;c[2]=36;});
+            const uint64_t beforeRefusal=hHash();const int beforeCalls=backendCalls;
+            const char* refusal=nullptr;const bool sdk=run(false,&refusal);
+            check(!sdk && refusal && std::strstr(refusal,"untrusted-coverage-requires-native-HDR-TAA") &&
+                  backendCalls==beforeCalls && hHash()==beforeRefusal,
+                  "mixed-camera SDK request refuses before backend or HDR write");
+            f.mode=FlatMonoResolveMode::Taa;
+            auto wrongTexture=texture(device,w,h,DXGI_FORMAT_R8_UINT,
+                D3D11_BIND_SHADER_RESOURCE,mask.data(),w);
+            auto wrongView=view(device,wrongTexture.Get());
+            if(wrongView) {
+                f.untrustedCameraCoverage=wrongView.Get();++f.frame;
+                const uint64_t beforeInvalid=hHash();refusal=nullptr;
+                const bool invalid=run(false,&refusal);
+                check(!invalid && refusal && std::strstr(refusal,"untrusted-coverage-view-mismatch") &&
+                      hHash()==beforeInvalid,
+                      "mixed-camera unfit mask refuses without altering game HDR");
+            }
+
+            // This edge occurs when the configured engine already is TAA:
+            // the mixed->single transition keeps its mode, so it must reset
+            // once and then resume accumulation on the second single frame.
+            edvr::flatMonoResolveReset();camera(f.camera);camera(f.previousCamera);
+            f.mode=FlatMonoResolveMode::Taa;f.untrustedCameraCoverage=maskView.Get();
+            f.frame=61000;f.reset=true;f.jitterX=f.jitterY=f.previousJitterX=f.previousJitterY=0;
+            expectedJx=expectedJy=0;uploadMask(8,8);
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+            f.untrustedCameraCoverage=nullptr;f.reset=false;++f.frame;uploadMask(-1,-1);
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+            const bool exitReset=edvr::flatMonoResolveStats().lastReset;
+            ++f.frame;
+            fill([&](UINT x,UINT y,double (&c)[3]) {c[0]=c[1]=c[2]=((x+y)&1)?192:64;});
+            run(true);std::vector<uint32_t> resumed;readH(resumed);double resumedPixel[3]{};
+            if(resumed.size()==w*h)unpack(resumed[8*w+8],resumedPixel);
+            check(exitReset && !edvr::flatMonoResolveStats().lastReset && resumedPixel[0]>90,
+                  "mixed-camera to same-mode single-camera resets once, then resumes world TAA");
+            edvr::flatMonoResolveReset();camera(f.camera);camera(f.previousCamera);
+            f.untrustedCameraCoverage=nullptr;f.frame=62000;f.reset=true;
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+            f.untrustedCameraCoverage=maskView.Get();++f.frame;f.reset=false;uploadMask(-1,-1);
+            fill([&](UINT,UINT,double (&c)[3]) {c[0]=c[1]=c[2]=128;});run(true);
+            const bool entryReset=edvr::flatMonoResolveStats().lastReset;
+            ++f.frame;
+            fill([&](UINT x,UINT y,double (&c)[3]) {c[0]=c[1]=c[2]=((x+y)&1)?192:64;});
+            run(true);std::vector<uint32_t> continued;readH(continued);double continuedPixel[3]{};
+            if(continued.size()==w*h)unpack(continued[8*w+8],continuedPixel);
+            check(entryReset && !edvr::flatMonoResolveStats().lastReset && continuedPixel[0]>90,
+                  "same-mode single-camera to mixed-camera resets once, then continues world history");
+            f.untrustedCameraCoverage=nullptr;
+        }
+    }
+
     // ---- 4. EDVR's TAA: bounded-space accumulation -----------------------------------------------------------------
     // A still camera and a still scene, jitter zero: a hot pixel appears on the second frame. In c/(1+max3(c)) space the
     // history (100) and the new value (10000) are a hair apart, the 3x3 box holds the history, and the blend at .9

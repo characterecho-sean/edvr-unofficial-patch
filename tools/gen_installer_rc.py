@@ -335,9 +335,9 @@ def main(argv=None):
             f.write(b'# Experimental flat temporal profile: visual qualification in progress.\r\n'
                     b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 and DLSS model presets.\r\n'
                     b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr. Game SS controls render scale.\r\n'
-                    b'# Press F10 in the cockpit to collect one bounded flat scene capture.\r\n'
+                    b'# Press NumLock while the issue is visible to collect a diagnostic capture.\r\n'
                     b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\n\r\n'
-                    b'[hotkey]\r\nmenu = F8\r\ndump_draws = F10\r\n\r\n'
+                    b'[hotkey]\r\nmenu = F8\r\ndump_draws = NUMLOCK\r\n\r\n'
                     b'[log]\r\nenabled = 1\r\n\r\n'
                     b'[advanced]\r\nreal_dll =\r\n')
     if args.profile == 'flat':
@@ -352,7 +352,7 @@ def main(argv=None):
                     b'Press F8 or Escape to close. Game keys are private while the menu is drawn.\r\n'
                     b'[fix] temporal_aa also accepts off, on (TAA), dlaa, dlss or fsr (default off).\r\n'
                     b'Game supersampling controls render scale; DLAA requires native SS.\r\n'
-                    b'Press F10 in the cockpit to collect one bounded flat scene capture.\r\n'
+                    b'Press NumLock while the issue is visible to collect a diagnostic capture.\r\n'
                     b'Use --convert-profile for an explicit VR/flat edition switch.\r\n')
     icon_path = os.path.join(args.out, 'edvr_installer.ico')
     with open(icon_path, 'wb') as f:
@@ -450,6 +450,7 @@ def self_test():
                 flat_ini = stream.read()
                 assert b'temporal_aa = off' in flat_ini
                 assert b'temporal_aa_model = k' in flat_ini and b'menu = F8' in flat_ini
+                assert b'dump_draws = NUMLOCK' in flat_ini and b'dump_draws = F10' not in flat_ini
             with open(os.path.join(build, 'edvr_profile_flat.ini'), 'rb') as stream:
                 assert stream.read() == b'[install]\r\nschema = 1\r\nprofile = flat\r\n'
             # The flat edition's settings are edvr-flat.ini: what its README and the

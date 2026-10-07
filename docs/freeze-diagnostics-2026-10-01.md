@@ -2,7 +2,7 @@
 
 ## Status
 
-*Written 2026-10-01. Update whenever this doc changes.*
+*Written 2026-10-01; the heartbeat rig's H5 flake fixed 2026-10-06 (below). Update whenever this doc changes.*
 
 - **State:** SHIPPED in v0.18.0 (merged 1c42ebdf). First field log 2026-10-02, a Quest 3
   user on Virtual Desktop: 15 FREEZE lines, the sampler naming the game, the NVIDIA driver
@@ -45,7 +45,7 @@
   2026-10-02: `vram:`, `slow test:`, `native_xr_event(s)`, `native_end_frame_episode(s)`,
   `native_slow_regime`, `native_end_frame_hold`.
 - **Gates:** rigs `freeze_log_test` (41 mutants), `stall_sampler_test` (32),
-  `heartbeat_writer_test` (24), `gpu_census_test` updated, each with `mutants.py`; for
+  `heartbeat_writer_test` (25), `gpu_census_test` updated, each with `mutants.py`; for
   the 2026-10-02 lines `vram_watch_test` and `slow_regime_test`, and the reader's self-test.
 - **Ruled out:** a deferred (next-frame) judgement of the gap: a freeze must be written
   at the Present that ends it. Unwinding while the thread is stopped (`RtlLookupFunctionEntry`
@@ -136,6 +136,34 @@ posted; posts coalesce, newest wins, so a slow disk never writes an old frame af
 the crash filter closes the heartbeat (bounded wait of 20 ms for a write under way) before its
 first line, and DllMain closes it on both detach paths before the closing crumb. A write
 already stuck in a stalled disk for longer than 20 ms can still land behind the crash lines.
+
+### The rig's H5 flake, found and fixed (2026-10-06)
+
+`heartbeat_writer_test` case H5 (300,000 posts against two readers) stopped full builds under
+load at least five times, passing alone each time: on `seen >= 10 && bad == 0` and once on
+`reads > 100000 && torn == 0`, each a combined check that did not say which half failed. It
+was never a torn record, and not a running writer starved by load (24 busy processes, or 6
+plus 3 at HIGH priority, left it reading about 250,000 of the 300,000 posts). A thread
+created a moment ago can wait longer than the burst (70-112 ms) for its first turn on a CPU.
+A copy of H5 looped beside a full build, 544 runs: twice `seen=1`, and both times the writer
+had read nothing and the second reader had made no read when the posts ended (then one record
+and millions of reads in the 100 ms after); a third run had only the reader late, which the
+old check passed without the reader ever racing the poster. `bad` and `torn` were 0 in all 544.
+Eight parallel `cl.exe` loops, the build's own load shape, fail the old case 14 times in 250
+(5.6%; 19 in 250 for a probe of the same logic); 32 concurrent copies, 3 in 64; a first run
+held 3 s by suspension, 3 in 3. The whole rig, one H5 per process, passed 30 of 30 in that
+storm unmodified: too few to tell, so the case is measured looped.
+
+The fix is in the case, not the writer. The poster waits until both threads have read a record,
+posts on past the 300,000th until the writer has read 10 and the second thread 100,000 records
+*while posting* (or 20 s), and the one check is five (`H5.start`, `.whole`, `.writer`, `.reader`,
+`.reads`), each failure line carrying the counts. The same loads fail the new case 0 times in
+250 (190 of them waited 58-605 ms for their threads), 0 in 64 and 0 in 3, and the built rig
+passes 30 of 30 alone and 30 of 30 in the storm. A run that had to wait prints `note: H5
+waited on the scheduler` with how long and how many. Tear detection is as strong as before:
+`version-never-odd` is caught in 23 of 60 runs now and 22 of 60 before (a coin flip in
+`mutants.py --run`, as it was; not changed here). New mutant `post-wakes-the-writer-once`
+fails `H5.writer` alone.
 
 ## Test plan for Sean
 

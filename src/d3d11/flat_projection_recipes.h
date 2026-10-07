@@ -311,7 +311,10 @@ inline FlatProjectionRecipes flatProjectionDrawRecipes(uint64_t vs, uint64_t ps)
         // so the VS projection and the depth pass stay aligned.
         if (ps == 0xA9975F91040B0BCDull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
     case 0xACE405F428C17EF6ull: if (ps == 0) result.add(S::Vertex,1,L::ForwardColumns,270); break;
-    case 0x72BDD292154158ADull: if (ps == 0x76849D64AC657DB9ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
+    // F167 consumes only material varyings and static lighting/orientation
+    // rows; it has no SV_Position, phased forward rows or inverse camera.
+    // The same audited vertex suffix remains B1[270..273] forward columns.
+    case 0x72BDD292154158ADull: if (ps == 0x76849D64AC657DB9ull || ps == 0xF1670378EE92F1E1ull) result.add(S::Vertex,1,L::ForwardColumns,270); break;
     default: break;
     }
     // Epic 20260925_122208 on-foot hangar/concourse (d0898e1b flight). A/B

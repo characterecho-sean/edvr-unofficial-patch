@@ -15,7 +15,8 @@
 //   H4  the writer has no clock of its own: with no posts nothing is written, however long it waits (a hung render
 //       thread stops the heartbeat)
 //   H5  a record is whole: the frame and the uptime of one line were posted together (three hundred thousand
-//       posts at full speed against a reader)
+//       posts at full speed against two readers that are running before the first post; the poster goes on until
+//       each has read enough, so what the scheduler grants never decides the case and a torn record does)
 //   H6  close() and closeAndDrain(): a pending post is dropped, a post after the close is dropped, a write that
 //       has begun is waited for -- for a bounded time -- and one that has not begun never begins
 //   H7  THROUGH THE REAL breadcrumbHeartbeat (proxy.cpp) and the real breadcrumb file: lines appear, the frames in
@@ -51,11 +52,13 @@ using namespace edvr;
 namespace {
 unsigned g_checks = 0, g_failures = 0;
 
-void check(bool ok, const char* label) {
+// `detail`, when given, is the numbers behind a failure, after " -- " (mutants.py reads a label up to that).
+void check(bool ok, const char* label, const char* detail = nullptr) {
     ++g_checks;
     if (!ok) {
         ++g_failures;
-        std::printf("FAIL: %s\n", label);
+        if (detail) std::printf("FAIL: %s -- %s\n", label, detail);
+        else std::printf("FAIL: %s\n", label);
     }
 }
 
@@ -182,11 +185,23 @@ void ordinaryCases() {
 }
 
 // ---- H5 ---------------------------------------------------------------------------------------------------------
+// What this case holds is that no record is TORN: not one the writer thread reads (bad), not one a second thread reads
+// (torn). A reader that read nothing has torn nothing, so the case also needs both to read while the poster posts, and
+// that is the scheduler's to grant, not the code's: a thread created a moment ago may not have had its first turn on a
+// CPU a moment later. Beside a full build, 300,000 posts (about 100 ms) twice ended with the writer having read no record
+// and the second thread having made no read (then one record and millions of reads in the 100 ms after), nothing torn:
+// the case failed on `seen >= 10`, and a late second thread alone would have passed without ever racing the poster.
+// So the poster waits until both threads have read a record, and if either count is still short at the 300,000th post
+// it posts on, with a real sleep between chunks so there is a CPU to take, until the counts are made or 20 s pass.
+// The counts are those at the last post, the reads made while records were posted, the only reads that can catch a
+// tear; bad and torn are judged over every read, as they were.
 void tearCases() {
+    constexpr unsigned long long kPosts = 300000, kMinSeen = 10, kMinReads = 100000;
+    constexpr double kWaitMs = 20000.0;
     reset();
     auto* w = new HeartbeatWriter;
     static std::atomic<unsigned long long> bad{0}, seen{0};
-    w->start([](uint64_t frame, uint64_t uptime) {
+    const bool started = w->start([](uint64_t frame, uint64_t uptime) {
         ++seen;
         if (uptime != frame * 7) ++bad;
     });
@@ -203,16 +218,43 @@ void tearCases() {
             }
         }
     });
-    for (uint64_t i = 1; i <= 300000; ++i) {
+    // Neither thread is known to be running until it has read a record: post one and wait for both.
+    const double t0 = nowMs();
+    w->post(0, 0);
+    while ((seen.load() < 1 || reads.load() < 1) && nowMs() - t0 < kWaitMs) Sleep(1);
+    const double firstRunMs = nowMs() - t0;
+    const bool running = seen.load() >= 1 && reads.load() >= 1;
+    uint64_t i = 1;
+    for (; running && i <= kPosts; ++i) {
         w->post(i, i * 7);
         if ((i & 0x3FF) == 0) Sleep(0);
     }
+    const unsigned long long seenAtBurst = seen.load(), readsAtBurst = reads.load();
+    const double t1 = nowMs();
+    while (running && (seen.load() < kMinSeen || reads.load() <= kMinReads) && nowMs() - t1 < kWaitMs) {
+        for (int k = 0; k < 1024; ++k, ++i) w->post(i, i * 7);
+        Sleep(1);
+    }
+    const unsigned long long seenPosting = seen.load(), readsPosting = reads.load();
+    const double extraMs = nowMs() - t1;
     Sleep(100);
     go = false;
     reader.join();
-    check(seen.load() >= 10 && bad.load() == 0, "H5.whole: of every record the writer read under 300,000 posts at full speed, the uptime belongs to the frame");
-    check(reads.load() > 100000 && torn.load() == 0,
-          "H5.reader: and so of every record a second thread read, over a hundred thousand reads, while the poster ran flat out");
+    if (running && (firstRunMs > 50.0 || seenAtBurst < kMinSeen || readsAtBurst <= kMinReads))
+        std::printf("note: H5 waited on the scheduler: the threads first ran %.0f ms after the first post; at the 300,000th post the writer had read "
+                    "%llu record(s) and the second thread made %llu read(s); %.0f ms more posting made them %llu and %llu\n",
+                    firstRunMs, seenAtBurst, readsAtBurst, extraMs, seenPosting, readsPosting);
+    char detail[360];
+    std::snprintf(detail, sizeof detail,
+                  "writer thread: %llu read(s) while posting (want %llu), %llu torn; second thread: %llu read(s) (want over %llu), %llu torn; "
+                  "first run after %.0f ms, %llu posts, %.0f ms of them past the 300,000th%s",
+                  seenPosting, kMinSeen, bad.load(), readsPosting, kMinReads, torn.load(), firstRunMs, static_cast<unsigned long long>(i - 1), extraMs,
+                  started ? "" : "; the writer thread did not start");
+    check(running, "H5.start: the writer thread and the second thread both ran within 20 s of the first post", detail);
+    check(bad.load() == 0, "H5.whole: of every record the writer read under 300,000 posts at full speed, the uptime belongs to the frame", detail);
+    check(seenPosting >= kMinSeen, "H5.writer: and the writer did read some of them while the poster posted (at least ten): with none, the line above says nothing", detail);
+    check(torn.load() == 0, "H5.reader: and so of every record a second thread read while the poster ran flat out", detail);
+    check(readsPosting > kMinReads, "H5.reads: and the second thread did make them, over a hundred thousand reads: with none, the line above says nothing", detail);
     w->stop();
 }
 
