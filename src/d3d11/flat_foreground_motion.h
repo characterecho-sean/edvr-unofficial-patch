@@ -1,6 +1,7 @@
 #pragma once
 #include "animated_vertex_history.h"
 #include "flat_animated_identity_ledger.h"
+#include "flat_foreground_identity_sample.h"
 #include "flat_foreground_receipt.h"
 #include <d3d11_1.h>
 #include <array>
@@ -16,7 +17,8 @@ inline bool flatForegroundExtentAllowed(unsigned width, unsigned height) {
     return width && height && uint64_t(width) * height <= kFlatForegroundMaxPixels;
 }
 // Flat ownership and camera adapter for the same bounded original-VS capture
-// used by VR. No readback, diagnostic timer, or per-weapon selector is here.
+// used by VR. No diagnostic timer or per-weapon selector is here, and no readback but one: the sampled identity words (section 104,
+// flat_foreground_identity_sample.h), copied to staging and read frames later without waiting. It decides nothing.
 class FlatForegroundMotion {
     template<class T> using Ptr=Microsoft::WRL::ComPtr<T>;
 public:
@@ -34,6 +36,8 @@ public:
         Certificate certificate;
         bool gpuIdentity=false;
         bool beforeWorld=false;
+        // The draw's shader pair, for the examples the no-candidate and identity lines name (section 104). Naming only: nothing reads them.
+        uint64_t vs=0,ps=0;
     };
     struct Output {
         Ptr<ID3D11ShaderResourceView> motion;
@@ -56,13 +60,59 @@ public:
         // refusal (a preflight bound, an unreadable identity, a draw shape the original-VS capture cannot take). windowed counts the draws
         // that were handed the window of four priors out of more (the extended policy: a mesh drawn more than four times in a frame).
         uint64_t coveredOccurrence=0,coveredBudget=0,coveredOther=0,windowed=0;
+        // The pistol's no-candidate bursts (section 104). missBy counts, by pattern, the submitted draws that found no record of their exact
+        // geometry key that the frame before used (animated_history_ledger.h: every pattern, zeros included). acrossOffset is the part the
+        // history rescued (HistoryGap::OffsetShift: the same mesh at another place in the same buffers, handed over as the one candidate),
+        // so the draws still in noCandidate are the misses less the rescued. frames counts the frames that submitted a draw, framesMissing
+        // those with at least one miss, framesAllMissing those where every submitted draw missed. resetFrames counts the frames H asked
+        // the backend to reset history for, nearChanges those where the common near plane moved.
+        uint64_t missBy[kHistoryGapCount]={};
+        uint64_t acrossOffset=0,frames=0,framesMissing=0,framesAllMissing=0,resetFrames=0,nearChanges=0;
+        // The rescues withdrawn at the end of the frame because another draw used the donor record that frame: two parts of one object, not a
+        // mesh that moved (AnimatedVertexHistory::rescueHolds). The prior is dropped and the map says no prior, as it did before the rescue.
+        uint64_t rescueCancelled=0;
+        // The sampled identity readback (flat_foreground_identity_sample.h): the draws sampled, by what the map will have decided for them.
+        uint64_t identitySamples=0;
+        uint64_t identityBy[kIdentityVerdictCount]={};
         void add(const CaptureStats& o) {
             attempts+=o.attempts;gpuAttempts+=o.gpuAttempts;submitted+=o.submitted;preflightRefused+=o.preflightRefused;
             warmedAfterRefusal+=o.warmedAfterRefusal;noCandidate+=o.noCandidate;noPriorPool+=o.noPriorPool;noPriorNear+=o.noPriorNear;
             noPriorAbsent+=o.noPriorAbsent;priorsOne+=o.priorsOne;priorsSeveral+=o.priorsSeveral;repeated+=o.repeated;
             coveredOccurrence+=o.coveredOccurrence;coveredBudget+=o.coveredBudget;coveredOther+=o.coveredOther;windowed+=o.windowed;
+            for(unsigned i=0;i<kHistoryGapCount;++i)missBy[i]+=o.missBy[i];
+            acrossOffset+=o.acrossOffset;frames+=o.frames;framesMissing+=o.framesMissing;framesAllMissing+=o.framesAllMissing;
+            resetFrames+=o.resetFrames;nearChanges+=o.nearChanges;rescueCancelled+=o.rescueCancelled;identitySamples+=o.identitySamples;
+            for(unsigned i=0;i<kIdentityVerdictCount;++i)identityBy[i]+=o.identityBy[i];
         }
     };
+    // The first draws of a window that found no same-key prior, one per pattern, with the whole key and the nearest entry's (section 104).
+    struct MissExample {
+        unsigned frame=0;HistoryClass miss;HistoryKey key;bool rescued=false;uint64_t vs=0,ps=0;
+    };
+    static constexpr unsigned kMissExamples=6,kIdentityExamples=4;
+    // Hands over (and forgets) the examples gathered since the last call.
+    unsigned takeMissExamples(MissExample* out,unsigned capacity) {
+        const unsigned n=(std::min)(missExampleCount_,capacity);
+        for(unsigned i=0;i<n;++i)out[i]=missExamples_[i];
+        missExampleCount_=0;return n;
+    }
+    unsigned takeIdentityExamples(FlatIdentitySampler::Sample* out,unsigned capacity) {
+        const unsigned n=(std::min)(identityExampleCount_,capacity);
+        for(unsigned i=0;i<n;++i)out[i]=identityExamples_[i];
+        identityExampleCount_=0;return n;
+    }
+    // The longest run of consecutive frames with a same-key miss since the last call (the window's), and the identity samples that could
+    // not be read or taken.
+    unsigned takeLongestMissRun() {const unsigned n=longestRun_;longestRun_=0;return n;}
+    uint64_t identitySkipped() const{return sampler_.skipped();}
+    uint64_t identityNotReady() const{return sampler_.notReady();}
+    // Reads the identity samples that are ready (all of them, waiting, in a rig). The capture does it once a frame; a rig asks directly.
+    void pollIdentity(ID3D11DeviceContext* ctx,unsigned frame,bool wait=false) {
+        sampler_.poll(ctx,frame,wait,[&](const FlatIdentitySampler::Sample& s){
+            ++stats_.identitySamples;++stats_.identityBy[unsigned(s.verdict)];
+            if(s.verdict!=IdentityVerdict::Match && identityExampleCount_<kIdentityExamples)identityExamples_[identityExampleCount_++]=s;
+        });
+    }
     const CaptureStats& stats() const{return stats_;}
     // The map the last prepareH drew (RGBA32F at its render size), or null before the first. For the offline bench's test export, which reads it
     // back in its own process; the next prepareH rewrites it.
@@ -71,6 +121,17 @@ public:
     void reset(){*this=FlatForegroundMotion{};}
     void beginFrame(unsigned frame) {
         if(frame==frame_)return;
+        // The frame that ends: the draws it submitted and how many of them found no same-key prior (section 104's frame counters).
+        if(frameSubmitted_) {
+            ++stats_.frames;
+            if(frameMissed_) {
+                ++stats_.framesMissing;
+                missRun_=(lastMissFrame_ && frame_==lastMissFrame_+1)?missRun_+1:1;lastMissFrame_=frame_;
+                if(missRun_>longestRun_)longestRun_=missRun_;
+            }
+            if(frameMissed_==frameSubmitted_)++stats_.framesAllMissing;
+        }
+        frameSubmitted_=frameMissed_=0;
         if(frame==frame_+1)previous_=std::move(current_);else previous_.clear();
         current_.clear();frame_=frame;refusal_=nullptr;budgetReceipt_={};
         knownMutations_=unknownMutations_=0;covered_=0;gpuAttempted_=false;drawRefusal_=nullptr;history_.advance(frame);
@@ -104,12 +165,15 @@ public:
     bool capture(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                   unsigned start,int base,unsigned startInstance,unsigned frame,const Inputs& inputs) {
         beginFrame(frame);++stats_.attempts;drawRefusal_=nullptr;Draw d;d.inputs=inputs;
+        // The identity samples a few frames old are read once a frame, here, without waiting.
+        if(polledFrame_!=frame){polledFrame_=frame;pollIdentity(ctx,frame);}
         // The map's empty clear follows the identity mode of the frame's draws, refused ones included (prepareH).
         if(inputs.gpuIdentity)gpuAttempted_=true;
         // reject: the frame's refusal (nothing says whose pixels these are). defer: this draw's alone (drawRefusal): the draw is not in
-        // the map, and the caller covers its pixels per pixel when it has marked them.
-        auto reject=[&](const char* reason){++stats_.preflightRefused;fail(reason);return false;};
-        auto defer=[&](const char* reason){++stats_.preflightRefused;drawRefusal_=reason;return false;};
+        // the map, and the caller covers its pixels per pixel when it has marked them. Either way the history was never asked, and the
+        // ledger remembers that this frame offered it a draw (section 104: a frame whose draws were all turned away here has no prior).
+        auto reject=[&](const char* reason){++stats_.preflightRefused;history_.noteNotOffered(frame);fail(reason);return false;};
+        auto defer=[&](const char* reason){++stats_.preflightRefused;history_.noteNotOffered(frame);drawRefusal_=reason;return false;};
         if(!ctx)return reject("foreground-missing-context");
         if(!inputs.writerToken || inputs.writerToken>0xffffffu)return reject("foreground-writer-token-unavailable");
         if(!count || count%3 || count>AnimatedVertexHistory::maxVertices)return defer("foreground-primitive-bound");
@@ -166,6 +230,24 @@ public:
             }
         }
         tally(d);
+        ++frameSubmitted_;
+        if(d.capture.missed) {
+            ++frameMissed_;
+            // The first draw of each pattern in the window, with the whole key, for the line that names it.
+            bool seen=false;
+            for(unsigned i=0;i<missExampleCount_;++i)seen=seen||missExamples_[i].miss.gap==d.capture.miss.gap;
+            if(!seen && missExampleCount_<kMissExamples) {
+                MissExample& e=missExamples_[missExampleCount_++];
+                e.frame=frame;e.miss=d.capture.miss;e.key=d.capture.key;e.rescued=d.capture.acrossOffset;e.vs=inputs.vs;e.ps=inputs.ps;
+            }
+        }
+        // One draw in thirteen that the map will match by identity has its identity words read back a few frames later (section 104): the
+        // priors the map is handed, which are fewer than the history's candidates when the adapter filtered some.
+        if(inputs.gpuIdentity && d.priorCount && d.capture.currentIdentity) {
+            ID3D11ShaderResourceView* identities[4]{};
+            for(unsigned i=0;i<d.priorCount;++i)identities[i]=d.priors[i].identity.Get();
+            sampler_.consider(ctx,frame,d.capture.currentIdentity.Get(),identities,d.priorCount,d.capture.key,inputs.vs,inputs.ps);
+        }
         current_.push_back(std::move(d));return !refusal_;
     }
     bool prepareH(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* owners,ID3D11ShaderResourceView* rawDepth,
@@ -174,6 +256,10 @@ public:
         auto refuse=[&](const char* reason){out.refusal=reason;return false;};
         if(frame!=frame_ || refusal_)return refuse(refusal_?refusal_:"foreground-frame");
         out.coveredDraws=covered_;
+        // The frame's draws are all in: an offset-shift rescue whose donor another draw used this frame was two parts of one object, not a
+        // mesh that moved. Its prior is withdrawn (section 104, rescueHolds); the map then says no prior for it, as before the rescue.
+        for(auto& d:current_)
+            if(d.capture.acrossOffset && d.priorCount && !history_.rescueHolds(d.capture,frame)){d.priorCount=0;++stats_.rescueCancelled;}
         if(!ctx || !owners || !rawDepth || !flatForegroundExtentAllowed(width,height))
             return refuse("foreground-H-resources");
         if(!textureExtent(owners,width,height,true) || !textureExtent(rawDepth,width,height,false))
@@ -199,7 +285,7 @@ public:
             if(!d.inputs.gpuIdentity && !d.oldPositions)out.resetRequired=true;
         }
         if(!initialize(ctx,width,height))return refuse("foreground-map-create");
-        if(previousNear_ && previousNear_!=commonNear)out.resetRequired=true;
+        if(previousNear_ && previousNear_!=commonNear){out.resetRequired=true;++stats_.nearChanges;}
         previousNear_=commonNear;
         // H is bracketed independently of original geometry capture. Restore
         // every binding touched here, including all eight OM render targets.
@@ -258,7 +344,9 @@ public:
         ctx->RSSetState(oldRaster.Get());ctx->RSSetViewports(oldViewportCount,oldViewport);ctx->RSSetScissorRects(oldScissorCount,oldScissors);
         for(auto* p:oldTargets)if(p)p->Release();if(oldDsv)oldDsv->Release();
         for(auto* p:oldVsViews)if(p)p->Release();for(auto* p:oldPsViews)if(p)p->Release();
-        out.motion=view_;out.qualified=true;out.depthNear=commonNear;return true;
+        out.motion=view_;out.qualified=true;out.depthNear=commonNear;
+        if(out.resetRequired)++stats_.resetFrames;
+        return true;
     }
 private:
     CaptureStats stats_{};
@@ -284,6 +372,11 @@ private:
     // that refused the previous draws its candidates name: the pool, then the near; none of them refusing, the previous draw is not there.
     void tally(const Draw& d) {
         if(d.capture.occurrences>0)++stats_.repeated;
+        // Why the exact key had no prior (section 104), whichever of the filings below the draw then takes.
+        if(d.capture.missed) {
+            ++stats_.missBy[unsigned(d.capture.miss.gap)];
+            if(d.capture.acrossOffset)++stats_.acrossOffset;
+        }
         if(d.capture.candidateCount==0){++stats_.noCandidate;return;}
         if(d.inputs.gpuIdentity?d.priorCount>0:bool(d.oldPositions)) {
             if(d.inputs.gpuIdentity)++(d.priorCount==1?stats_.priorsOne:stats_.priorsSeveral);
@@ -332,6 +425,12 @@ private:
             width_=width;height_=height;}
         return true;
     }
+    // Section 104's frame counters and examples: the draws this frame submitted and the ones among them that missed, the run of
+    // consecutive missing frames, the examples not yet handed over, and the sampled identity readback.
+    unsigned frameSubmitted_=0,frameMissed_=0,missRun_=0,longestRun_=0,lastMissFrame_=0,polledFrame_=~0u;
+    MissExample missExamples_[kMissExamples];unsigned missExampleCount_=0;
+    FlatIdentitySampler::Sample identityExamples_[kIdentityExamples];unsigned identityExampleCount_=0;
+    FlatIdentitySampler sampler_;
     AnimatedVertexHistory history_;std::vector<Draw> current_,previous_;unsigned frame_=0,width_=0,height_=0;
     const char* refusal_=nullptr,*drawRefusal_=nullptr;float previousNear_=0;unsigned covered_=0;bool gpuAttempted_=false;
     Ptr<ID3D11VertexShader> vs_;Ptr<ID3D11PixelShader> ps_;Ptr<ID3D11Buffer> settings_;

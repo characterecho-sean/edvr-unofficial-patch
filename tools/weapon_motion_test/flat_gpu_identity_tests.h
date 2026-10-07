@@ -223,4 +223,31 @@ void flatGpuIdentityTests(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* own
         capture(motion,nowPose,1,1703);
         output(motion,1703,1,"changed near convention settles with actual GPU history",true);
     }
+    {
+        // SECTION 104, the pistol's identity-differs window. One draw in thirteen that the map will match by identity has its identity words and its
+        // priors' read back a few frames later and classified by the map's own two tests. Fourteen draws of one geometry a frame: the first frame
+        // has no priors and samples nothing; the second offers fourteen and the thirteenth is read, and with the pool unchanged the map matches it.
+        // Then the record's first word moves (another bone base): the next sample is another record, and says which word.
+        auto fourteen=[&](FlatForegroundMotion& motion,unsigned frame) {for(unsigned i=0;i<14;++i)capture(motion,oldPose,1,frame,1);};
+        auto verdictCount=[&](const FlatForegroundMotion& motion,edvr::IdentityVerdict v){return motion.stats().identityBy[unsigned(v)];};
+        inputs.vs=0xA1;inputs.ps=0xB2;
+        FlatForegroundMotion motion;
+        fourteen(motion,1800);motion.pollIdentity(ctx,1802,true);
+        check(motion.stats().identitySamples==0,"a frame whose draws have no priors samples no identity");
+        fourteen(motion,1801);motion.pollIdentity(ctx,1803,true);
+        check(motion.stats().identitySamples==1 && verdictCount(motion,edvr::IdentityVerdict::Match)==1,
+              "fourteen draws with priors offer fourteen and one is read back: the identity the map matches is classified a match");
+        FlatIdentitySampler::Sample none[FlatForegroundMotion::kIdentityExamples];
+        check(motion.takeIdentityExamples(none,FlatForegroundMotion::kIdentityExamples)==0,"a match is no example");
+        const unsigned savedBase=poolData[84];++poolData[84];ctx->UpdateSubresource(pool,0,nullptr,poolData,0,0);
+        fourteen(motion,1802);motion.pollIdentity(ctx,1804,true);
+        check(motion.stats().identitySamples==2 && verdictCount(motion,edvr::IdentityVerdict::XDiffers)==1 && verdictCount(motion,edvr::IdentityVerdict::Match)==1,
+              "after the record's first word moves the sampled draw is x-differs, as the map decides it");
+        FlatIdentitySampler::Sample example[FlatForegroundMotion::kIdentityExamples];
+        const unsigned shown=motion.takeIdentityExamples(example,FlatForegroundMotion::kIdentityExamples);
+        check(shown==1 && example[0].verdict==edvr::IdentityVerdict::XDiffers && example[0].priors>=1 && example[0].current.x==example[0].prior[0].x+1 &&
+                  example[0].current.y==example[0].prior[0].y && example[0].current.z==1 && example[0].vs==0xA1 && example[0].ps==0xB2 && example[0].key.count==9,
+              "the example carries the words of the draw and its candidate, which differ in the first word alone, and the draw's shaders and key");
+        poolData[84]=savedBase;ctx->UpdateSubresource(pool,0,nullptr,poolData,0,0);
+    }
 }

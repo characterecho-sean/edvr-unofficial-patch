@@ -36,23 +36,23 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** main `84b6f760` is integrated and pushed as `f11d6e59`. The next
-  reviewed tree passes all 149 jobs and installer checks, six fresh-child UI
-  forwarder cases, 16,279 held-restore checks and all 17 scoped assembly gates.
-  V2 preserves V1 and the 128-site CPU limit. UI proves one D-only composed
-  path; the held boundary's machine paths are measured, not runtime timing.
-  Domain-entry/frame/lifecycle restoration, runtime-caller cost and full
-  coverage remain open. Keep the flight pair frozen: `7bbe7d90` control and
-  `6c63f6aa` candidate. Both October 7 flights match their builds/environment
-  and exit cleanly; Sean reports no visual changes. NV-on sampled hook time per
-  timed draw is 15.0% lower; other CPU ranges overlap. Carrier DLSS/NV-off EDVR
-  GPU cost is 2.9% higher, its median above the control range. Draw counts
-  differ and the on-foot source has 4.175% more pixels.
-  Attribution/non-regression stay open. Finish coverage and selectors offline
-  before another flight. Whole-ladder actions remain open. Replay retains 482.4
-  MiB when enabled, none when off; NV blur reproduces on `14a7ff70`. Temporary
-  key: `advanced.draw_replay` (off); removal requires Scope control. No Phase 1
-  acceptance, Phase 2 or shipping approval.
+- **Next:** checkpoint `3c0783e8` is pushed. Main `d6ecc252` merges cleanly;
+  the combined tree passes all 149 jobs and installer checks, six fresh-child
+  UI forwarder cases, 16,279 held-restore checks and all 17 scoped assembly
+  gates. V2 preserves V1 and the 128-site CPU limit. UI proves one D-only
+  composed path; the held boundary's machine paths are measured, not runtime
+  timing. Domain-entry/frame/lifecycle restoration, runtime-caller cost and
+  full coverage remain open. Keep the flight pair frozen: `7bbe7d90` control
+  and `6c63f6aa` candidate. Both October 7 flights match their
+  builds/environment and exit cleanly; Sean reports no visual changes. NV-on
+  sampled hook time per timed draw is 15.0% lower; other CPU ranges overlap.
+  Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its median above the
+  control range. Draw counts differ and the on-foot source has 4.175% more
+  pixels. Attribution/non-regression stay open. Finish coverage and selectors
+  offline before another flight. Whole-ladder actions remain open. Replay
+  retains 482.4 MiB when enabled, none when off; NV blur reproduces on
+  `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
+  Scope control. No Phase 1 acceptance, Phase 2 or shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -3080,3 +3080,30 @@ windows, consoles or foreground changes. Its fresh receipt fingerprint is
 is independently verified before committing this tree. No Steam install, live
 config edit or flight occurred. Phase 1 performance and whole-ladder/action
 coverage remain open; Phase 2 and shipping stay held.
+
+Checkpoint `3c0783e8` is committed, clean-receipt verified and pushed. Fetch
+finds new main `d6ecc252`, after three further first-person history/diagnostic
+commits. It merges automatically into the feature tree without conflicts;
+shared runtime and cause-route test changes coexist. Source review preserves
+the pending, owner, context and cause gates and the original NoApi entries. The
+checkpoint proof is preserved before rebuilding. Incoming flat identity
+readback is outside the partial plugin API ledger; no new coverage is claimed.
+Main's offset-shift rescue/diagnostics are built but not yet flown, and the
+previous checkpoint flights do not validate them. Steam remains unchanged.
+
+The combined tree passes the flat SDK tool's self-test, all seventeen fresh
+scoped assembly gates, all 149 full-build jobs and installer checks. The engine
+rig retains 16,279 checks and the updated weapon rig passes 217,576 WARP
+checks; the full-classifier composed UI fixture passes. All 46 corpus frames
+remain identical. No window, console or foreground change occurs during the
+246-second pool. The new full-pass receipt is independently verified:
+`203a1657f9c8277c6f0980bfc36ed9361465c08e38adcd4b6bee115949bc7cd8`. The
+synthetic selector benchmark reports gating improvement, but it measures only
+its fixed typed-selector corpus, not whole-plugin or flight cost. Phase 1
+acceptance remains open.
+
+The separate current-only runtime caller listing compiles with production proof
+flags without swapping sources. Its first diagnostic parser fails closed on two
+indirect jumps (offsets `0xe3` and `0x1e0`); caller-path machine cost remains
+unproved while the mid-tier reviewer resolves their actual targets. No
+production change follows from that diagnostic failure.

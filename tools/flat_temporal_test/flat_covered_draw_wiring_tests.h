@@ -126,7 +126,7 @@ inline int flatCoveredDrawWiringTests() {
             "history_.capture(ctx,draw,count,instances,start,base,startInstance,frame,d.capture,true,true)",
             "drawRefusal_=d.capture.refusal?d.capture.refusal:\"history-refused\";returnfalse;}"}) &&
             count(text, "returnreject(") == 2 && text.find(compact("fail(d.capture.refusal)")) == std::string::npos &&
-            ordered(text, {"auto defer=[&](constchar*reason){++stats_.preflightRefused;drawRefusal_=reason;returnfalse;};"});
+            ordered(text, {"auto defer=[&](constchar*reason){++stats_.preflightRefused;history_.noteNotOffered(frame);drawRefusal_=reason;returnfalse;};"});
     };
     expect(captureValid(capture), "the adapter's frame refusals are the missing context and the writer token only; every other capture failure is the draw's");
     expect(!captureValid(replaced(capture, "returndefer(\"foreground-draw-bound\");", "returnreject(\"foreground-draw-bound\");")),
@@ -149,8 +149,8 @@ inline int flatCoveredDrawWiringTests() {
     const std::string prepare = compact(body(historySource, "bool prepareCapture("));
     const auto historyValid = [&](const std::string& text) {
         return ordered(text, {
-            "constunsignedlimit=extended?maxExtendedOccurrences:maxOccurrences;", "if(priorCount==limit)returnrefuse(\"occurrence-cap\");",
-            "if(occurrences>=limit)returnrefuse(\"occurrence-cap\");", "constunsignedfirst=priorCount>4?(std::min)(occurrences>0?occurrences-1:0u,priorCount-4):0u;",
+            "constunsignedlimit=extended?maxExtendedOccurrences:maxOccurrences;", "if(priorCount==limit)returnrefuseKeyed(\"occurrence-cap\",HistoryLedger::RefusedOccurrence);",
+            "if(occurrences>=limit)returnrefuseKeyed(\"occurrence-cap\",HistoryLedger::RefusedOccurrence);", "constunsignedfirst=priorCount>4?(std::min)(occurrences>0?occurrences-1:0u,priorCount-4):0u;",
             "records_[prior[first+i]]", "return r.invalidated||(extended&&spentForHistory(r,frame));"}) &&
             text.find(compact("bool extended=false)")) != std::string::npos;
     };

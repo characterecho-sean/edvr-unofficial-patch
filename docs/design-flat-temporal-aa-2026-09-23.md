@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** grenade hold (104, 2026-10-07): 67 frames lost in runs of 36 and
-  28, 64 because the grenade named the world with the first person's camera.
-  BUILT, NOT FLOWN: no first-person draw names it.
+- **State:** pistol no-candidate instruments, the offset-shift rescue and the
+  training mission's `flat source 5s` line (104): BUILT, NOT FLOWN. Grenade hold
+  (104): FLOWN OK (4c69779f, log 115209); its world naming is vetoed.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -34,9 +34,9 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** the grenade flight (104); section 105: request existing supporter
-  traces for AA refusal. Open: weapon no-candidate bursts, the roof's highlight
-  shimmer (content), TAA at the roof standing still (104). Retain 102's
+- **Next:** fly the pistol (which no-candidate pattern carries the bursts) and
+  the training mission turned left (`flat source 5s`); decide the source-less
+  selection (104 B); 105 traces. Open: roof shimmer/TAA (104). Retain 102's
   color-clear fix; no per-weapon table; preserve Epic settings, 87's native FSR
   comparison, 83's open items and high-G motion; do not repeat qualified
   PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR regression
@@ -13465,6 +13465,347 @@ disagrees with H` and no `pending-null mismatch` lines;
 lost; `foreground-contract-unqualified` for `history-budget` and
 `occurrence-cap` stops appearing. If the declines remain, the qualification
 line's `receipts=a/b` names the next cause.
+
+### 2026-10-07: pistol no-candidate bursts; the view with no source
+
+Two reports from the grenade flight's day, one build: instruments, a fix gated
+on one pattern for the pistol, and for the training mission a diagnosis whose
+cure is a feature, so it waits for a decision.
+
+**Part A. The pistol**
+
+Sean: "just holding my pistol was occasionally going white"; a NumLock at
+11:54:31-32 in `edvr_gfx_20261007_115209.log` (v0.18.3-3-g4c69779f, the flight
+that cleared the grenade). The domain line's cumulative counters, as 5 s
+deltas, against the refusal census:
+
+| window | submitted | no-candidate | census: weapon-refused pixels |
+|---|---|---|---|
+| 11:54:01 | 8354 | 76 (1%) | unspecified 1 205 095, identity-differs 67 211 |
+| 11:54:06 | 6878 | 0 | unspecified 160 795 |
+| 11:54:11 | 7824 | 1218 (16%) | unspecified 418 921, no-prior 3 182 969 |
+| 11:54:16 | 10796 | 33 | unspecified 220 968, identity-differs 361 192 |
+| 11:54:21 | 9625 | 17 | unspecified 245 012, identity-differs 355 064 |
+| 11:54:26 | 7258 | 0 | unspecified 173 527 |
+| 11:54:31 | 6346 | 799 (13%) | unspecified 18, no-prior 4 164 435 |
+| 11:54:32 (1 s) | 2014 | 359 (18%) | |
+| 11:54:36 | 4845 | 323 (7%) | no-prior 2 546 948 |
+
+no-prior-pool, no-prior-near and no-prior-absent stay 0; so do priors-several,
+repeated-geometry, per-pixel-refused-draws, windowed-priors and
+H-qualified-with-per-pixel-refusals: the grenade fix's paths never engaged, and
+every miss is a draw whose geometry key the history held no same-key record of
+from the frame before. Nothing in the log says which part of the key moved. The
+5 s census reads three different things:
+
+- No-prior bursts (11:54:11, 31, 36: 2.5 to 4.2 M refused pixels in about 90
+  sampled frames, 25 to 50 thousand a frame): the weapon's big draws lack a
+  candidate for 14 to 30 frames. 799 misses in 5 s is 1.8 a frame of 14
+  captures; the 1 s window after is 4 of 22 a frame. That is several draws at
+  once, not one.
+- Identity-differs (11:54:01, 16, 21: up to 361 thousand pixels): on a draw
+  that HAS a candidate (priors-several = 0; no miss in those windows). The map
+  found the prior and refused it for its identity words. Which word moved is
+  not in the log.
+- Unspecified (a floor of 1.8 to 4.6 thousand pixels per sampled frame, 12
+  thousand at 11:54:01): reason 0 is three things the census cannot split
+  (flat_foreground_motion_shader.h, the prep): an owner-marked pixel with no
+  map sample, a sample whose previous position is not finite, and a valid
+  sample the prep refused (a reset frame, or a previous position off the
+  raster). The reset is not it: accepted-reset-5s is 0 in every window. What
+  remains is edge pixels of a moving mesh (the previous position leaves the
+  raster) or fragments the map's draw did not cover; neither can be told apart
+  without a census slot (a GPU change, not made here).
+
+Hypotheses for the bursts, all instrumented in the one build. H1: the draw
+keeps its buffers and vertex count and moves its start or base (the game
+re-packs or ring-allocates it). H2: the vertex count changes (a mesh or LOD
+swap: genuinely new geometry). H3: last frame's record exists but was not kept:
+the frame before offered nothing, the draw was refused or never published, a
+write invalidated the record, or pressure reclaimed it. The training-mission
+log (Part B) has a weapon on screen too: no-candidate is 44% and 26% in the
+first two windows after it is raised and under 1% after, so the bursts are not
+a property of every weapon draw.
+
+**What is built**
+
+The history keeps a ledger (animated_history_ledger.h): a ring of the last 512
+captures it was asked for, each with its whole key (raw pointers, compared for
+identity, never dereferenced), its outcome (captured, or refused for the cap,
+the budget or another cause) and whether its record was published; a draw
+offered to the history that never got a key (the adapter's preflight, or an
+early refusal) is noted too. Under the extended policy only (the flat adapter;
+VR writes nothing), a draw that finds no record of its exact key that the frame
+before used is classified, in this order, by the ledger and by facts only the
+history can read about its own records:
+
+- `previous-frame-empty`: nothing was offered to the history the frame before.
+  `previous-frame-not-captured`: only draws turned away before they had a key.
+- The same key was drawn the frame before and: `refused-last-frame-cap`,
+  `refused-last-frame-budget`, `refused-last-frame-other` (refused);
+  `unpublished-last-frame` (captured, never published); `invalidated-unknown` /
+  `-vertices` / `-indices` (a write killed its record, named by the write);
+  `record-reclaimed` (published, gone); `record-unusable` (present, valid,
+  still not a prior: must be 0).
+- The same mesh was drawn the frame before from another place in the same
+  buffers (same shader, layout, vertex and index buffers, vertex count, stride
+  and index format; start, base, vertex-buffer offset or index-buffer offset
+  differ): `offset-shift` when exactly one usable record no other draw took
+  holds it; `offset-shift-ambiguous` for several, or one that is taken;
+  `offset-shift-unusable` when it is gone or invalidated.
+- `count-change` (the same buffers, another vertex count), `format-change`
+  (another layout, stride or index format), `buffer-change` (the same shader
+  from other buffers).
+- `absent-short` (this key was last drawn two to eight frames ago, with its
+  age), `absent-long`, `new-key`.
+
+Every pattern is exclusive; their counts sum to `same-key-misses`. The adapter
+files each under `missBy`, keeps the first draw of each pattern as an example
+with its shader pair and the nearest earlier key, counts per frame (draws
+submitted, draws that missed, frames where every draw missed, the longest run
+of consecutive frames with a miss), and counts the frames H asked the backend
+to reset history for and the near plane changes behind them. The runtime prints
+the window's difference every 5 s, zeros included:
+
+```text
+flat foreground no-candidate 5s: submitted=N same-key-misses=M
+  rescued-offset-shift=R rescue-cancelled=C still-no-candidate=S
+  frames=F frames-with-misses=FM frames-all-missed=FA
+  longest-miss-run=L reset-frames=X near-changes=Y
+  by pattern: previous-frame-empty=.. previous-frame-not-captured=..
+  refused-last-frame-cap=.. refused-last-frame-budget=..
+  refused-last-frame-other=.. unpublished-last-frame=..
+  invalidated-unknown=.. invalidated-vertices=.. invalidated-indices=..
+  record-reclaimed=.. record-unusable=.. offset-shift=..
+  offset-shift-ambiguous=.. offset-shift-unusable=.. count-change=..
+  buffer-change=.. format-change=.. absent-short=.. absent-long=..
+  new-key=..; (explanation)
+flat foreground no-candidate example: frame= pattern= rescued= age=
+  VS= PS= key: shader= layout= vertices= indices= count= start= base=
+  vb-offset= stride= ib-offset= format=; nearest the frame before: (the
+  same fields); differs: start,base,...
+```
+
+Identity-differs gets the same treatment from the other side. One submitted
+draw in thirteen that the map will match by identity has its identity words and
+each of its priors' copied to a staging buffer (sixteen slots, never waited
+for), read two or more frames later and classified with the map's own two tests
+(flat_foreground_identity_verdict.h): `match`, `x-differs` (the bone base
+moved), `parameter-differs` (the signature moved outside byte 30),
+`both-differ`, `priors-unreadable`, `current-unauthentic`.
+
+```text
+flat foreground identity 5s: sampled=N by verdict: match=..
+  current-unauthentic=.. priors-unreadable=.. x-differs=..
+  parameter-differs=.. both-differ=.. skipped-total=.. unread-total=..;
+  (explanation)
+flat foreground identity example: frame= verdict= priors= VS= PS=
+  current=(x,y,z) prior0=(x,y,z) ... key: ...
+```
+
+The verdict is what the map WILL have decided for that draw (it reads the same
+buffers); the census' identity-differs pixels are the cross-check. Traced end
+to end: the capture classifies and notes; the adapter files and samples; the
+runtime prints. If the new code never ran the lines are absent; if it ran on a
+quiet window every pattern prints at 0.
+
+**The fix, H1 only**
+
+When the classification is `offset-shift` the one usable record of the same
+mesh at another place is handed to the draw as its single candidate, across the
+change of placement, and the draw keeps its own new record. The GPU identity
+still decides whether the candidate is the draw's own (the pool repack case:
+Elite re-orders the pool every live frame and identity, not slot, is the key),
+so a wrong guess is a refused pixel, as before. It is inert for every other
+pattern: another vertex count, another buffer, a taken record, two records, an
+invalidated one, the default (VR) policy, and a draw with an exact prior. The
+record is claimed for the frame, so a second shifted draw finds it taken and is
+refused. And it is withdrawn when the frame is complete (`rescue-cancelled`): a
+mesh that moved vacates its old place, so a donor record another draw used this
+frame means two parts of one object (equal in shader, buffers, count and
+stride, one pool identity), where the map would match a part to its sibling's
+positions; H drops that prior whichever of the two draws came first. What it
+still does not prove: pool identity says the same object, not that the mesh at
+the new place has the same vertices in the same order. Equal buffers and
+counts, one donor, an old place nobody draws again is the guard; a sibling that
+appears while its twin is not drawn that frame would pass it, for one frame. No
+configuration key: a fix that only ever turns a refusal into a candidate the
+GPU then verifies gets no switch.
+
+**Reading the next flight**
+
+- `previous-frame-empty` or `previous-frame-not-captured` high, with
+  `frames-all-missed` near `frames-with-misses`: a frame-level event, nothing
+  reached the history the frame before (a skipped or stood-down frame, the
+  adapter's preflight). Look upstream of the history: `preflight-refused`,
+  `foreign-seen` against `captured`, H attempts.
+- `offset-shift` and `rescued-offset-shift` high, `still-no-candidate` low: H1
+  was the cause and is fixed. The identity line's `match` must be high and the
+  census' no-prior pixels fall.
+- `offset-shift-ambiguous` or `offset-shift-unusable`: H1's shape, not safe to
+  take. The example line names the keys; widen only on evidence.
+- `count-change`: H2, a mesh or LOD swap, new geometry by nature. Nothing to
+  rescue; the cost is the swap frames.
+- `invalidated-vertices`, `invalidated-indices`, `invalidated-unknown`: a write
+  to the weapon's buffers (or any global write) killed the records. The write
+  is the cause; find what writes (a shared dynamic buffer?).
+- `record-reclaimed`, `refused-last-frame-budget`: pressure; the budget receipt
+  line names the occupancy.
+- `absent-short` with `frames-all-missed` low: partial; the draw was not drawn
+  the frame before (culled, occluded, a state gap).
+- `x-differs`, `parameter-differs`, `both-differ` with high identity-differs
+  pixels: which word of the pool record moved; the example's words name the
+  field.
+- `reset-frames` and `near-changes` rising with the unspecified pixels: H asked
+  the backend to reset history, the weapon's near plane moved; the unspecified
+  floor is the reset frames.
+
+**Part B. The training mission: AA disengages on turning left**
+
+Sean, flat training mission: AA engages on entering and disengages completely
+as soon as he turns left about 90 degrees. `edvr_gfx_20261007_121355.log`,
+v0.18.3-3-g4c69779f, DLSS, render 2880x1620 on a 3840x2160 output (the copy
+route; the HDR route says `hdr-route-needs-render-at-least-output`). It is
+Sean's capture of the supporter's repro.
+
+The cause is in the log, and it is not the camera injector. The runtime refuses
+every frame of the turned view with `no-supported-motion-source-pair`: the copy
+route's selector needs one draw whose shader pair the motion producer
+substitutes (a pool family: station and settlement structure, ships) to name
+the scene's depth, camera and motion slots, and the turned view has none. The
+evidence, window by window:
+
+- `engine motion: on-foot source slot target released ... no on-foot source for
+  120 frames` at 12:15:50.4 (frame 36748) and `substitution starts ... 205
+  frames without one` at 12:15:51.358 (frame 36832): the first turn. The
+  second: the slot target is released at frame 37695 (12:16:01.8), 120 frames
+  after the last on-foot source, so the spell began at frame 37576, and the
+  view ends in a menu (`no-3d-scene`, 12:16:11).
+- The discover contract inventory: 5881 eligible pool draws while treated
+  (12:15:46), none at 12:16:02, with 194 screen draws.
+- The refusal windows: 203 frames (12:15:51), 91, 447, then 182 as he left;
+  treated stays at 3112 from about 12:16:00.
+
+The camera injector's `warming` is the same fact seen from the other side, and
+it is not stuck. A phase is chosen only after two clean accepted zero-phase
+frames (FlatLivePhase); a refused frame is never accepted, so for as long as
+the selector refuses every frame every kind-3 refresh is `warming`, nothing
+injects and no close is clean (`injected=0 clean-closes=0` at 12:16:06). The
+first turn proves it recovers: the 12:15:51 window shows warming=23644 and
+injected=28128 (clean-closes 210 of 415), and the next has warming=0,
+injected=48258, 377 of 377 clean, with the treated streak at 11 by
+12:15:51.483, a tenth of a second after the pool draws returned. The census' 7
+cameras becoming 6 is the pool pass's camera (kind 3, refreshed by its own
+caller, +0x58DE73: 232 calls a window to 0) no longer being refreshed: an
+effect of the view, not a cause. The stand-down is not involved either:
+no-supported-motion-source-pair is not a structural refusal, so the work stays
+Full and the selector is asked again every frame.
+
+The recipe fallback the question assumed does not exist for sources.
+`supported` on the nominee lines and in the selector is
+`engineVelocityPoolFamilyPair`, the motion producer's table; the projection
+recipes (ACE405F4's null-PS planet depth pass is one) say where a shader reads
+its projection, for the legacy jitter route and the untrusted-camera nominees,
+and make nothing a motion source. ACE405F4 and 154FB5A4/BB32FCBB are the view's
+own terrain passes, nominees (role pre-world-structural; ACE405F4 has no pixel
+shader, which fails the nominee bucket for shader identity, and the later
+nominees inherit the failure), never sources.
+
+Not fixed in this build, deliberately. It is a missing capability, not a
+defect: with no pool draw there is no source slot target (engine_velocity.cpp
+creates it with the first substituted draw and releases it after 120 idle
+frames), no pool snapshot and no scene constants snapshot, and
+`engineVelocitySourceViews` refuses without all of them. A source-less
+selection would (1) let the selector select a frame whose HDR chain and camera
+are valid and which has no supported draw, marked source-less; (2) make the
+views from nothing: a slot target cleared to no-slot, a one-row pool, and the
+scene constants of the HDR's camera as now and previous; (3) rely on the prep's
+existing path for a pixel with no slot, the camera term from depth, which
+terrain already takes in sourced frames. The risk is plumbing (two lifetimes in
+engine_velocity.cpp), not the motion. It wants its own build, a WARP prep case
+with an empty slot target, and the training mission turned left as the flight.
+Not started without a decision.
+
+Instrument, in this build. The refusal now says what the view held:
+`FlatMonoFrame.sourceless` (records and draws on the HDR's depth, those with
+the HDR's camera, the four pairs with the most draws), and a spell tracker
+counts the spells, the longest, recoveries, and the zero-phase frames after
+each until the first non-zero phase:
+
+```text
+flat source 5s: frames=N no-source-frames=M spells=S longest-spell=L
+  open-spell=O recoveries=R abandoned=A warm-ups-done=W
+  warm-frames-total=T warm-frames-max=X warm-ups-aborted=Y;
+  last no-source frame=F: records-on-scene-depth=.. draws=..
+  same-camera-draws=.. pool-kind-records=.. distinct-pairs=..
+  top: [VS= PS= draws= records= same-camera= pool-kind= family-vs=
+  recipe=] ...; (explanation)
+```
+
+Next flight, the training mission turned left: `no-source-frames` and a spell
+of the log's length; `top:` names the terrain passes (`family-vs=0`);
+`recoveries=1` and `warm-frames-max=2` when he turns back. A top pair with
+`family-vs=1` would be a pool-family vertex shader drawn with an unkeyed pixel
+shader, the one case where keying a pair, not building a feature, fixes the
+view.
+
+ruled out: the grenade fix's paths as the cause of the pistol's misses, because
+per-pixel-refused-draws, windowed-priors and
+H-qualified-with-per-pixel-refusals stay 0 in every window.
+
+ruled out: an SDK history reset as the unspecified floor, because
+accepted-reset-5s is 0 in every window.
+
+ruled out: the camera injector's warming as the training mission's disengage,
+because the first turn recovers within a tenth of a second of the pool draws
+returning, and the phase machine, the ownership core and the fallback hold no
+latch (the rig drives them through a spell).
+
+ruled out: a recipe fallback for motion sources, because `supported` is the
+motion producer's table in both selectors and nothing consults the projection
+recipes for a source.
+
+**Tests**
+
+- flat_temporal_test: the ledger's classifier, one case per pattern and the
+  order between them, the ring and a stale token; the identity verdicts; the
+  lines (every pattern and verdict printed at zero, the sum); the spell tracker
+  on the log's sequence; the real phase machine, ownership core and admission
+  driven through a camera set that changes: 300 refused frames warm and inject
+  nothing, and two accepted frames later the phase is chosen; the selector's
+  source-less summary on the fixture; wiring pins with mutation controls for
+  the history, the adapter and the runtime (flat_no_candidate_tests.h).
+- weapon_motion_test (WARP and `--hardware`), history cases
+  `offset_shift_rescue`, `offset_shift_refusals`,
+  `offset_shift_sibling_withdrawn` (the sibling's rescue withdrawn through H,
+  in either order) and `identity_sample_readback`, and the adapter's identity
+  block: the rescue across start, base and both and a mesh that alternates
+  between two places; count change, absent, ambiguous, taken, claimed,
+  invalidated (vertex, index, unknown), buffer change, refused last frame, the
+  default policy, a frame of preflight refusals; the sampler on real staging
+  copies (one in thirteen, not before two frames, sixteen slots, the matching
+  and moving words) and through the adapter with the pool changed under it.
+- Private mutants of the C++: 27 mutants of the C++, each built from a copy of
+  the tree: 26 caught by the rigs (the WARP rig for the history, the adapter,
+  the withdrawal and the sampler; flat_temporal_test for the classifier, the
+  verdicts, the lines, the tracker, the phase machine and the selector
+  summary), one equivalent (usableAsPrior without its invalidation test:
+  resourceWritten clears the record frames in the same step, so no scene tells
+  them apart). The bench: the RTX 5090 passes every case in TAA, DLAA, DLSS and
+  FSR (64 PASS and the history pressure case, no failure) and
+  weapon_motion_test --hardware passes 217538 checks; WARP passes the FSR runs,
+  the host guard and the history cases, and reports DLAA, DLSS and the 4K case
+  UNSUPPORTED, as it does for every case.
+
+**Flight pass signs**
+
+The three `flat foreground ...` lines and `flat source 5s:` appear every
+window, zeros included, in the pistol and the training mission. In the pistol:
+`same-key-misses` equals the patterns' sum; one pattern carries the bursts;
+`record-unusable` is 0; if it is `offset-shift`, `still-no-candidate` falls by
+`rescued-offset-shift` and the identity line's `match` follows it; the census'
+no-prior pixels fall with it. In the training mission: the spell is counted and
+named, and it ends with a recovery of two warm frames.
 
 ## 105. Different supporter: v0.18.2 AA selector refusal (2026-10-06)
 
