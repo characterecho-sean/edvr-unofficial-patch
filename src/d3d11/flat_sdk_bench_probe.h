@@ -63,4 +63,7 @@ struct EdvrFlatSdkBenchSnapshot {
     // Version 4: draws refused their capture and covered per pixel (the frame stays qualified), and the qualified frames that held one.
     uint64_t coveredDraws = 0;
     uint64_t hCoveredFrames = 0;
+    // The near plane of the camera that named the world this frame (0 before naming): 0.025 is the world's, 0.0675 the first person's.
+    float namedNear = 0;
+    uint32_t reserved = 0;
 };

@@ -165,5 +165,57 @@ inline int flatCoveredDrawWiringTests() {
     expect(count(history, compact("return r.invalidated||(extended&&spentForHistory(r,frame));")) == 1 &&
                history.find(compact("if(r.frame[parity]==~0u)continue;used=true;if(frame-r.frame[parity]<2)returnfalse;")) != std::string::npos,
            "a record is spent only when it has been used and neither its frames is this one or the one before (a prior is never reclaimed; a pending record is not spent)");
+
+    // -- the naming veto: a first-person draw cannot name the world (design section 104, the grenade hold) --
+    const auto vetoCall = [&](const std::string& text) {
+        return ordered(text, {"const boolsourceShape=d.supported&&!weaponMotionFamilyVs(k.vs)&&k.camera&&k.depth&&sceneExtent&&",
+                              "(k.format==23||k.format==26)&&flat_mono_detail::fullViewport(k,k.width,k.height);",
+                              "constboolsourceCandidate=sourceShape&&!(!s.namedDepth&&namingVetoed(s,d,k));",
+                              "flatUntrustedNomination(d,s.namedDepth,", "sourceCandidate&&!s.namedDepth);",
+                              "if(sourceCandidate&&!s.namedDepth){", "s.namedDepth=k.depth;"}) &&
+            count(text, "namingVetoed(s,d,k)") == 1;
+    };
+    expect(vetoCall(runtime), "the source candidate asks the veto before the world is named, ahead of the nomination and the naming that both use it");
+    expect(!vetoCall(replaced(runtime, "constboolsourceCandidate=sourceShape&&!(!s.namedDepth&&namingVetoed(s,d,k));", "constboolsourceCandidate=sourceShape;")),
+           "mutation control: a source candidate that never asks the veto fails the wiring");
+    expect(!vetoCall(replaced(runtime, "constboolsourceCandidate=sourceShape&&!(!s.namedDepth&&namingVetoed(s,d,k));", "constboolsourceCandidate=sourceShape&&!namingVetoed(s,d,k);")),
+           "mutation control: a veto that also judges the draws after the world is named fails the wiring");
+    const std::string vetoBody = compact(body(runtimeSource, "template<class Draw,class Key>static bool namingVetoed("));
+    const auto vetoValid = [&](const std::string& text) {
+        return ordered(text, {"if(!s.worldReference.valid()||!k.camera)returnfalse;", "std::memcpy(rows,d.camera,sizeof(rows));",
+                              "if(flatDomainPredictsWorld(rows,s.worldReference,&p))returnfalse;", "s.namingVetoedThisFrame=true;++s.namingVetoes;",
+                              "flat world naming vetoed %u/12", "returntrue;"});
+    };
+    expect(vetoValid(vetoBody), "the veto refuses a draw only when a world reference exists and the draw's camera is not predicted by it, and says so");
+    expect(!vetoValid(without(vetoBody, "if(!s.worldReference.valid()||!k.camera)returnfalse;")), "mutation control: a veto with no reference to judge by fails the wiring");
+    expect(!vetoValid(replaced(vetoBody, "if(flatDomainPredictsWorld(rows,s.worldReference,&p))returnfalse;", "if(!flatDomainPredictsWorld(rows,s.worldReference,&p))returnfalse;")),
+           "mutation control: a veto that refuses the world's own draw fails the wiring");
+    expect(!vetoValid(without(vetoBody, "s.namingVetoedThisFrame=true;")), "mutation control: a veto the frame boundary never hears of fails the wiring");
+
+    const auto selectionValid = [&](const std::string& text) {
+        return ordered(text, {"s.untrustedSupportedAlternate=sel.selected()&&sel.mixedCamera;", "if(sel.selected()){",
+                              "constautoreference=flatDomainWorldReference(sel.camera);", "if(reference.valid())s.worldReference=reference;}",
+                              "if(sel.selected()&&s.namedDepth&&flatCameraHash(s.namedCamera)!=sel.cameraHash){"});
+    };
+    expect(selectionValid(runtime), "the camera H selected replaces the world reference, before the check that the naming agrees with it");
+    expect(!selectionValid(without(runtime, "if(reference.valid())s.worldReference=reference;")),
+           "mutation control: a reference H never corrects, so a first-person camera that set it once keeps it, fails the wiring");
+
+    const auto boundaryValid = [&](const std::string& text) {
+        return ordered(text, {"if(s.namingVetoedThisFrame){", "if(s.namedDepth)s.namingVetoStreak=0;",
+                              "elseif(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};",
+                              "++s.namingVetoReleases;}", "s.namingVetoedThisFrame=false;", "}elses.namingVetoStreak=0;",
+                              "s.namedDepth=s.namedConstants=nullptr;"});
+    };
+    expect(boundaryValid(runtime), "a frame that vetoed and never named counts toward giving the reference up; one that named resets the count; both before the naming resets");
+    expect(!boundaryValid(without(runtime, "elseif(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};")),
+           "mutation control: a veto that can never release a reference that is wrong fails the wiring");
+    expect(!boundaryValid(replaced(runtime, "if(s.namedDepth)s.namingVetoStreak=0;", "if(false)s.namingVetoStreak=0;")),
+           "mutation control: a frame that named after a veto counted as a failed one fails the wiring");
+    expect(slurp("src/d3d11/flat_domain_admission.h").find("constexpr uint32_t kFlatNamingVetoFrames = 3;") != std::string::npos,
+           "three frames in a row give the reference up");
+    expect(report.find(compact("naming-vetoes=%llu naming-veto-releases=%llu")) != std::string::npos &&
+               report.find(compact("(unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,")) != std::string::npos,
+           "the 5 s line counts the vetoes and the releases");
     return failures;
 }

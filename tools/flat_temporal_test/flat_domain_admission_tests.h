@@ -598,8 +598,10 @@ inline int flatDomainWorldPredictionWiringTests() {
     const std::string scope = compact(body(runtime, "FlatRuntimeDrawScope::FlatRuntimeDrawScope("));
 
     // One predicate, one place that calls it: a lazy lambda, read by the cohort flag and by the domain's classification.
-    const auto oneValid = [&](const std::string& text) {
-        return count(text, "flatDomainPredictsWorld(") == 1 &&
+    // `calls` is how many places call the predicate in the text: the draw scope has one (the lazy lambda below). The whole file has the naming veto's
+    // helper besides (namingVetoed, section 104's grenade hold), which asks the same predicate of the same reference.
+    const auto oneValid = [&](const std::string& text, size_t calls = 1) {
+        return count(text, "flatDomainPredictsWorld(") == calls &&
                ordered(text, {"const auto worldPredicted=[&]()->const FlatDomainWorldPrediction& {",
                               "flatDomainPredictsWorld(rows,s.worldReference,&worldPrediction);",
                               "const bool predictedWorld=!s.namedDepth && worldPredicted().predicted;",
@@ -608,7 +610,7 @@ inline int flatDomainWorldPredictionWiringTests() {
                               "if(!s.namedDepth && k.camera && worldPredicted().nearEqual && !worldPredicted().predicted)++s.predictedScaleRejectedWindow;"}) &&
                text.find("drawNear") == std::string::npos && text.find("predictedWorldNear") == std::string::npos;
     };
-    check(oneValid(scope) && oneValid(all),
+    check(oneValid(scope) && oneValid(all, 2),
           "the cohort flag and the domain's classification read the one prediction (flatDomainPredictsWorld: near and projection scale), and the near-only test is gone");
     check(!oneValid(without(scope, "const bool predictedWorld=!s.namedDepth && worldPredicted().predicted;")),
           "mutation control: a cohort flag with a test of its own fails the wiring");

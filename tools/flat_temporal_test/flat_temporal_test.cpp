@@ -3409,7 +3409,7 @@ void testFlatHdrSourceWitnessWiring() {
           runtime.find("second-earliest=")!=std::string::npos,
           "the five-second report exposes whether automatic evidence was enabled and whether either sample completed");
     const std::string naming=segment(runtime,
-        "const bool sourceCandidate=", "if(sourceCandidate && !s.namedDepth)");
+        "const bool sourceShape=", "if(sourceCandidate && !s.namedDepth)");
     check(naming.find("d.supported && !weaponMotionFamilyVs(k.vs) && k.camera && k.depth && sceneExtent")!=std::string::npos,
           "world source naming excludes the existing first-person motion family before binding a depth and camera");
     std::string unguarded=naming;

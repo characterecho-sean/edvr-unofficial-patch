@@ -350,6 +350,17 @@ struct State {
     // Why a frame's untrusted-camera accounting failed (untrustedUnknown set): table overflow, an alternate draw no bucket completed, a
     // same-depth draw without a camera, no alternate bucket to select. Events since the process started.
     uint64_t untrustedUnknownCause[4] = {};
+    // THE NAMING VETO (design section 104, the grenade hold). Naming takes the first supported scene draw that is not one of the five weapon
+    // vertex shaders (weaponMotionFamilyVs), whatever its camera; a grenade is not one of them, and drawn before the world it named the first
+    // person's camera (near 0.0675 for the world's 0.025) for runs of 36 and 28 frames. A pre-naming scene draw whose camera is not the last
+    // world's (worldReference: flatDomainPredictsWorld, its near plane and both scales) is not a source candidate, as a weapon-family draw is
+    // not; the draw that names the world then is the world's. worldReference is the last named world's, and the camera H selected for a
+    // frame replaces it (the selector's choice is the world, naming's is a guess): a reference a first-person draw once set is put right by
+    // the next H. A world camera that really changed would veto the world itself; three frames in a row that vetoed and never named give the
+    // reference up (kFlatNamingVetoFrames).
+    bool namingVetoedThisFrame = false;
+    uint32_t namingVetoStreak = 0, namingVetoLogged = 0;
+    uint64_t namingVetoes = 0, namingVetoReleases = 0;
     FlatMonoFrame previous{}; bool havePrevious = false, treated = false;
     std::string mode; FlatMonoResolveMode engine = FlatMonoResolveMode::Taa;
     unsigned preset = ~0u, foveaPreset = ~0u;
@@ -625,7 +636,7 @@ static void reportForegroundDomain(State& s) {
     const auto& n=s.foregroundCounts;
     auto captures=s.foregroundRetiredCaptureStats;
     for(const auto& candidate:s.foregroundCandidates)captures.add(candidate.motion.stats());
-    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call; history of the submitted draws, cumulative: no-candidate found no record of its geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on (pool differs, near differs, the previous draw is not there), priors-one/several matched on the GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame",
+    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call; history of the submitted draws, cumulative: no-candidate found no record of its geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on (pool differs, near differs, the previous draw is not there), priors-one/several matched on the GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame",
         flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
         (unsigned long long)captures.attempts,(unsigned long long)captures.gpuAttempts,
         (unsigned long long)captures.submitted,(unsigned long long)captures.preflightRefused,
@@ -640,6 +651,7 @@ static void reportForegroundDomain(State& s) {
         (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,(unsigned long long)n.hCoveredFrames,
         (unsigned long long)n.coveredDraws,(unsigned long long)captures.coveredOccurrence,(unsigned long long)captures.coveredBudget,
         (unsigned long long)captures.coveredOther,(unsigned long long)captures.windowed,
+        (unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,
         s.foregroundHRefusalWindow?s.foregroundHRefusalWindow:"none");
     // last-refusal is the most recent H refusal since the previous line. The per-frame field clears at every frame start, so it read
     // "none" here even while every frame was refused (section 104, supersampled 4K).
@@ -755,6 +767,23 @@ template<class Key>static void domainCovered(State& s,const char* reason,const K
         if(stateReceipt)candidate->firstCovered.state=*stateReceipt;
         if(budgetReceipt)candidate->firstCovered.budget=*budgetReceipt;
     }
+}
+// A pre-naming scene draw whose camera is not the last world's cannot name the world (see State::namingVetoedThisFrame). The draw is then no
+// source candidate: a first-person draw like any other, classified, captured and marked by the domain.
+template<class Draw,class Key>static bool namingVetoed(State& s,const Draw& d,const Key& k) {
+    if(!s.worldReference.valid() || !k.camera)return false;
+    float rows[6][4];std::memcpy(rows,d.camera,sizeof(rows));
+    FlatDomainWorldPrediction p;
+    if(flatDomainPredictsWorld(rows,s.worldReference,&p))return false;
+    s.namingVetoedThisFrame=true;++s.namingVetoes;
+    if(s.namingVetoLogged<12) {
+        ++s.namingVetoLogged;
+        double p0=0,p1=0;const bool scale=flatCameraProjectionScale(rows,p0,p1);
+        Log::get().note("flat world naming vetoed %u/12: frame=%llu seq=%u VS=%016llX PS=%016llX camera=%016llX near=%.9g scale=%.6g,%.6g; world reference near=%.9g scale=%.6g,%.6g; a supported scene draw before the world is named, with a camera that is not the last world's, does not name it",
+            s.namingVetoLogged,(unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)k.vs,(unsigned long long)k.ps,
+            (unsigned long long)k.cameraHash,rows[3][2],scale?p0:0.0,scale?p1:0.0,s.worldReference.nearPlane,s.worldReference.p0,s.worldReference.p1);
+    }
+    return true;
 }
 bool owner() { return state().thread == GetCurrentThreadId(); }
 void armDrawPackets(State& s,uint64_t frame) {
@@ -2756,6 +2785,11 @@ static void hdrSelectAtTrigger(State& s) {
         witnessSample?hdrAmbiguousSourceReport:nullptr,witnessSample?&s:nullptr,
         qualifiedUntrustedSource,&s);
     s.untrustedSupportedAlternate=sel.selected() && sel.mixedCamera;
+    // The camera H selected is the world's: the reference for the frames after, whatever naming left (State::namingVetoedThisFrame).
+    if(sel.selected()) {
+        const auto reference=flatDomainWorldReference(sel.camera);
+        if(reference.valid())s.worldReference=reference;
+    }
     // The camera a draw named the world with is not the camera H selected: the world's own draws are then every one a different camera
     // from the named one (draws of a first-person camera after naming are the named camera's, and no bucket accounts for them). The
     // grenade hold named a camera of near 0.0675 against the selected world's 0.025 for a run of 28 and 36 frames, each declined.
@@ -3407,6 +3441,13 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.phaseCensusPending=s.jitterWanted && s.work != FlatWork::Paused;
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
+    if(s.namingVetoedThisFrame) {
+        // A frame that vetoed a draw: if the world was named anyway the veto did its work; if nothing named it, the reference may be the
+        // one that is wrong, and the third such frame in a row gives it up (the next naming and the next H select a new one).
+        if(s.namedDepth)s.namingVetoStreak=0;
+        else if(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};s.namingVetoStreak=0;++s.namingVetoReleases;}
+        s.namingVetoedThisFrame=false;
+    } else s.namingVetoStreak=0;
     s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;
     flatHdrBeginFrame(s.hdr, d.Width, d.Height); s.hdrTreated = false;
     s.observingQualifiedHandoff = false;
@@ -4674,8 +4715,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // FP16 image intermediates use the same scene-size predicate; their
     // producer admission remains separate from the format-23/26 motion source.
     const bool sceneExtent = flatContractKind(false, k.color, k.depth, k.width, k.height, k.format==9?26:k.format, s.prefix.width, s.prefix.height, false) == kFlatContractScreen;
-    const bool sourceCandidate=d.supported && !weaponMotionFamilyVs(k.vs) && k.camera && k.depth && sceneExtent &&
+    const bool sourceShape=d.supported && !weaponMotionFamilyVs(k.vs) && k.camera && k.depth && sceneExtent &&
         (k.format==23 || k.format==26) && flat_mono_detail::fullViewport(k,k.width,k.height);
+    // Before the world is named, a source draw of a camera the selected world's reference rules out is no source candidate (namingVetoed).
+    const bool sourceCandidate=sourceShape && !(!s.namedDepth && namingVetoed(s,d,k));
     const auto alternate=flatUntrustedNomination(d,s.namedDepth,
         s.namedDepth?s.namedCamera:nullptr,sceneExtent,
         s.work==FlatWork::Full && s.hdrKey==FlatHdrKey::Auto &&
@@ -5988,6 +6031,7 @@ extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
     snap.failureKindsDropped = s.foregroundFailureKinds.dropped;
     snap.coveredDraws = s.foregroundCounts.coveredDraws;
     snap.hCoveredFrames = s.foregroundCounts.hCoveredFrames;
+    if (s.namedDepth) std::memcpy(&snap.namedNear, s.namedCamera + (3 * 4 + 2) * sizeof(float), sizeof(float));
     snap.hdrTriggered = s.hdr.triggered ? 1u : 0u;
     snap.hdrSelected = s.hdrSelected.selected() ? 1u : 0u;
     const auto resolver = flatMonoResolveStats();

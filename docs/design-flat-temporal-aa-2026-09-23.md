@@ -3,8 +3,8 @@
 ## Status
 
 - **State:** grenade hold (104, 2026-10-07): 67 frames lost in runs of 36 and
-  28, 64 of them because the grenade named the world with the first person's
-  camera; a refused history is now the draw's: BUILT, NOT FLOWN.
+  28, 64 because the grenade named the world with the first person's camera.
+  BUILT, NOT FLOWN: no first-person draw names it.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -13323,9 +13323,9 @@ selects the world camera. The world was NAMED with the first person's camera.
 `FlatRuntimeDrawScope` names it with the first supported scene draw that is not
 one of the five weapon vertex shaders (`weaponMotionFamilyVs`: 7B0DC42D,
 8B589D25, 114AF608, AACFDCF2, 174E8D76), whatever its camera. A grenade is not
-a weapon: it is drawn before the world, with a generic material shader, under
-the first person's camera. The draw itself is not in the log (a naming draw is
-excluded from the nominee lines by construction); the near plane, the scales
+a weapon. The log reads as a first-person item drawn before the world with a
+generic material shader (below); the draw itself is not in it (a naming draw is
+excluded from the nominee lines by construction), the near plane, the scales
 and the five-hash list are. Consequences, all in the log:
 
 - Every world draw after the naming is a draw of another camera than the named
@@ -13351,11 +13351,12 @@ symptoms of the poisoned reference); a history bound that is too small (4.97 MB
 of 32 MiB, 122 of 128 records spent); adding the grenade to the weapon list (a
 per-item table: any first-person item that is not a weapon names the world).
 
-Built, NOT FLOWN. Part 1 (this commit): a draw refused its history is the
-draw's refusal, not the frame's. It is what the coordinator's task named, it is
-true of every capture refusal (the occurrence cap, the history budget, any
-other history-stage reason), and the frame it saves is the last of each run.
-Part 2 (the next commit): the first person cannot name the world.
+Built, NOT FLOWN, in two parts (two commits). Part 1: a draw refused its
+history is the draw's refusal, not the frame's. It is true of every capture
+refusal (the occurrence cap, the history budget, any other history-stage
+reason), and the frame it saves is the last of each run. Part 2, below the
+tests of part 1: the first person cannot name the world, which is what the 64
+declined frames are.
 
 - `FlatForegroundMotion::capture()` returns the refusal as the draw's
   (`drawRefusal()`), no longer as the frame's. The draw scope keeps it until
@@ -13386,26 +13387,84 @@ Part 2 (the next commit): the first person cannot name the world.
   selected` on the untrusted summary, and `flat world naming disagrees with H`
   lines naming the naming draw's shaders beside the two cameras.
 
-Tests. weapon_motion_test (WARP and `--hardware`): flat_covered_draw_tests.h
-scenes A-E (a draw over the occurrence cap, over the history budget, every draw
-refused, eight pieces of one mesh with eight identities in order, with two
-swapped and reversed, and the uncovered draw) and the history cases
-`extended_occurrence_window`, `extended_spent_record_reclaim` and
-`adapter_covered_refusals`. flat_mono_resolve_test: a first-person pixel with
-no sample (reject, no motion, its own depth, census reason 0) and two prep
+Part 2: a first-person draw cannot name the world. Reproduced offline before it
+was fixed: the bench's `first_person_generic_naming` draws one first-person
+draw with the world family's generic shaders (EB5234DB/DC603C35, not one of the
+five) under the first person's camera (near 0.0675) before the world draw, the
+first person's only supported draw. On the unfixed runtime the world is named
+with that camera (`named.nearMilli` 68 against 25), the selector answers
+`source-camera-or-depth-not-unique` (`hdrSelected` 0, H never attempted), the
+flight's verdict. With the change the world is named by its own camera (25),
+the selector selects, H qualifies and the backend runs (PASS in DLAA, DLSS and
+FSR on the RTX 5090, and in FSR on WARP, where DLAA and DLSS are unsupported
+for every case).
+
+- A scene draw before the world is named whose camera is not the last world's
+  (`flatDomainPredictsWorld`: its near plane and both projection scales within
+  10%, the predicate the pre-naming prepass prediction uses) is no source
+  candidate, as a weapon-family draw is not (`namingVetoed`). It is then a
+  first-person nominee and a first-person draw like any other. The draw that
+  names the world is the world's.
+- `worldReference` is the last named world's; the camera H selects now replaces
+  it every selected frame (`hdrSelectAtTrigger`), so a reference a first-person
+  draw once set is put right by the next H.
+- A world camera that really changed would veto the world itself: three frames
+  in a row that vetoed and never named give the reference up
+  (`kFlatNamingVetoFrames`), and the next naming sets a new one. Up to three
+  frames of a mode change are declined; there was no such gap before.
+- Instruments: `naming-vetoes` and `naming-veto-releases` on the domain line;
+  `flat world naming vetoed n/12` lines (the vetoed draw's shaders, camera and
+  scale against the reference's).
+
+What part 2 does not prove. The grenade's draw is not in the log (a naming draw
+is excluded from the nominee lines by construction), so that it is a generic-
+material draw of the first person's camera is the reading the log supports
+(record rows near 0.0675 at 38999's q2456-2459, four consecutive supported
+draws of DE545DC8/E46E3E48), not a capture. And the selector can still decline
+the frame after the world is named correctly: it qualifies an alternate
+camera's source record only if every draw of that record is one the nominee
+tracker completed AND shares the record's first shader pair
+(`FlatUntrustedCoverage::qualifies`), so a first person with supported draws of
+two or more pairs is declined whoever names the world; the bench's case has one
+pair. The next flight says which: `flat untrusted H qualification ...
+receipts=a/b` at the first declined frame, `flat world naming vetoed` for the
+naming draw. The copy route keeps naming's reference (no H correction there,
+unbenched).
+
+Tests of part 1. weapon_motion_test (WARP and `--hardware`):
+flat_covered_draw_tests.h scenes A-E (a draw over the occurrence cap, over the
+history budget, every draw refused, eight pieces of one mesh with eight
+identities in order, with two swapped and reversed, and the uncovered draw) and
+the history cases `extended_occurrence_window`, `extended_spent_record_reclaim`
+and `adapter_covered_refusals`. flat_mono_resolve_test: a first-person pixel
+with no sample (reject, no motion, its own depth, census reason 0) and two prep
 mutants. flat_temporal_test: wiring pins with mutation controls
 (flat_covered_draw_wiring_tests.h). The bench's `first_person_pieces`: 70 draws
 of one mesh in the real runtime, 64 captured, 6 covered, the frame the
-backend's (PASS on the RTX 5090 and on WARP, DLAA, DLSS and FSR). Private
-mutants of the C++: 10 of 10 caught by the WARP rig; 4 of 4 bench-proxy mutants
-caught.
+backend's. Private mutants of the C++: 10 of 10 caught by the WARP rig; 4 of 4
+bench-proxy mutants caught.
+
+Tests of part 2: the bench case above and its mutants (the veto off fails it
+with named near 68; a veto that refuses the world's own draw fails it and
+`scene`); wiring pins with controls for the veto, H's correction of the
+reference and the release; the existing prediction and naming pins updated for
+the veto's call. The H correction is pinned by source only: no bench scene
+starts from a first-person reference (a mutant without it survives the case).
+Bench, final build: the RTX 5090 passes every case in DLAA, DLSS and FSR (62
+runs, the history pressure case, no failure); WARP passes the FSR runs and the
+host guard, and reports DLAA, DLSS and the 4K case UNSUPPORTED, as it does for
+every case.
 
 Flight pass signs (view on). Holding a grenade the frame keeps its colours and
 the hand is cyan, or white/pink only where per-pixel refusals remain; holster
-and unholster stay treated; `H-qualified-with-per-pixel-refusals` counts the
-frames the old rule would have lost; `foreground-contract-unqualified` for
-`history-budget` and `occurrence-cap` stops appearing in the runtime refusal
-line.
+and unholster stay treated; `source-camera-or-depth-not-unique` stays at 0 in
+the runtime refusal line through the hold; `naming-vetoes` rises and `flat
+world naming vetoed` names the grenade's shaders; no `flat world naming
+disagrees with H` and no `pending-null mismatch` lines;
+`H-qualified-with-per-pixel-refusals` counts the frames the old rule would have
+lost; `foreground-contract-unqualified` for `history-budget` and
+`occurrence-cap` stops appearing. If the declines remain, the qualification
+line's `receipts=a/b` names the next cause.
 
 ## 105. Different supporter: v0.18.2 AA selector refusal (2026-10-06)
 

@@ -28,7 +28,7 @@ DEFAULT_CASES = ("unsupported_host", "scene", "inert_no_write", "inert_depth_wri
                  "state_partial_mask", "state_blended", "state_blended_no_depth", "state_blended_hdr",
                  "settlement_prepass", "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world",
                  "inert_depth_write_world", "stale_foreign_mark", "first_person_slot_repacked", "first_person_pieces",
-                 "supersampled_scene", "supersampled_scene_4k")
+                 "first_person_generic_naming", "supersampled_scene", "supersampled_scene_4k")
 # "renderer" cases must complete the production HDR resolve; "guard" cases must keep a refusal.
 CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "renderer", "inert_no_write": "renderer",
                  "inert_depth_write": "guard", "inert_color_write": "renderer", "state_partial_mask": "renderer",
@@ -36,13 +36,13 @@ CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "render
                  "settlement_prepass": "renderer", "predicted_world_mismatch": "renderer", "predicted_world_close_scale": "guard",
                  "state_blended_hdr_world": "renderer", "inert_depth_write_world": "renderer",
                  "stale_foreign_mark": "renderer", "first_person_slot_repacked": "renderer", "first_person_pieces": "renderer",
-                 "supersampled_scene": "renderer",
+                 "first_person_generic_naming": "renderer", "supersampled_scene": "renderer",
                  "supersampled_scene_4k": "renderer"}
 SDK_CASES = frozenset(("inert_no_write", "inert_depth_write", "inert_color_write", "state_partial_mask",
                        "state_blended", "state_blended_no_depth", "state_blended_hdr", "settlement_prepass",
                        "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world", "inert_depth_write_world",
-                       "stale_foreign_mark", "first_person_slot_repacked", "first_person_pieces", "supersampled_scene",
-                       "supersampled_scene_4k"))
+                       "stale_foreign_mark", "first_person_slot_repacked", "first_person_pieces", "first_person_generic_naming",
+                       "supersampled_scene", "supersampled_scene_4k"))
 PRODUCTION_CASES = frozenset(("unsupported_host",))
 # The real-size supersampled case (5760x3240 into 3840x2160: H alone is 75 MB at the render size, the owner plane and the foreground map
 # 300 MB each) is not run on WARP: it reports UNSUPPORTED there, with this cause, and no process starts. It runs for longer than the
@@ -138,6 +138,14 @@ RULE_COUNTERS["first_person_pieces"] = {
     "surfacePreserving": (0, 0), "foreignSeen": (70, 70), "captured": (64, 64), "coveredDraws": (6, 6), "hCoveredFrames": (1, None),
     "worldUnmarked": (2, 2), "hAttempts": (1, None), "hQualified": (1, None), "backendCalls": (1, None), "hdrSpatial": (0, 0),
     "backendFailures": (0, 0), **FIRST_PERSON_ONLY}
+# The grenade hold's other half (first_person_generic_naming): a first-person draw with the world family's generic shaders and the first person's
+# camera (near 0.0675) is drawn before the world. It must not name the world: the world's own draw (camera 0, near 0.025) does, and the frame is the
+# backend's with the generic draw as the first person's only supported draw and two world draws. namedNear is read off the proxy's state right after
+# the world draw.
+RULE_COUNTERS["first_person_generic_naming"] = {
+    "surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1), "worldUnmarked": (2, 2), "hAttempts": (1, None),
+    "hQualified": (1, None), "backendCalls": (1, None), "hdrSpatial": (0, 0), "backendFailures": (0, 0),
+    "@named.nearMilli": (25, 25), **FIRST_PERSON_ONLY}
 # Facts a rule PASS must report as the boolean true.
 RULE_TRUE = {"stale_foreign_mark": ("@staleMark.planeUntouched",), "first_person_slot_repacked": ("@repack.ran",)}
 # The exact first-failure reason a guard that keeps its refusal must still report.
@@ -645,6 +653,9 @@ def self_test():
             "first_person_slot_repacked": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2,
                                            "hAttempts": 1, "hQualified": 1, "backendCalls": 1, "hdrSpatial": 0,
                                            "backendFailures": 0},
+            "first_person_generic_naming": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2,
+                                            "hAttempts": 1, "hQualified": 1, "backendCalls": 1, "hdrSpatial": 0,
+                                            "backendFailures": 0},
             "first_person_pieces": {"surfacePreserving": 0, "foreignSeen": 70, "captured": 64, "coveredDraws": 6,
                                     "hCoveredFrames": 1, "worldUnmarked": 2, "hAttempts": 1, "hQualified": 1,
                                     "backendCalls": 1, "hdrSpatial": 0, "backendFailures": 0},
@@ -652,7 +663,7 @@ def self_test():
         supersampled_frame = {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2, "hAttempts": 1,
                               "hQualified": 1, "backendCalls": 1, "hdrSpatial": 0, "backendFailures": 0}
         kept_run = {"drawn": 32, "treated": 21, "frames": 10, "matched": 2180, "rejected": 0, "identityDiffers": 0}
-        good_extras = {"first_person_slot_repacked": {"repack": {"ran": True, "steady": kept_run, "moved": kept_run,
+        good_extras = {"first_person_generic_naming": {"named": {"nearMilli": 25}}, "first_person_slot_repacked": {"repack": {"ran": True, "steady": kept_run, "moved": kept_run,
                        "different": {"drawn": 31, "treated": 21, "frames": 10, "matched": 0, "rejected": 2180, "identityDiffers": 2180}}}}
         for case, (rw, rh, ow, oh) in SUPERSAMPLED_SIZES.items():
             good_frames[case] = supersampled_frame
