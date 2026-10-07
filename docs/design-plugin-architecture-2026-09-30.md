@@ -4,8 +4,7 @@
 
 - **State (2026-10-07):** implementation in progress on
   `codex/plugin-architecture`; do not merge to main until Sean is ready to
-  ship. This is Phase 1 of five; the review and remaining gates are in section
-  11. The add-on tier extends draft PR #46 (section 6).
+  ship. Phase 1 of five is in progress; review and remaining gates: section 11.
 - **Goal (Sean):** every fix and performance item belongs to one plugin,
   plugins group features logically, and the user picks which to install in the
   installer. A plugin that is not installed costs nothing.
@@ -36,12 +35,11 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** main is integrated through `0d4bc714`; the prior merged tree passes
-  149 build jobs, installer checks and 17 scoped assembly gates. The NV pilot's
-  legacy replay, 32 composed children and pixel coverage run. Whole-ladder
-  actions precede broader migration. The refreshed 814 caller is diagnostic:
-  its body gains 52 instruction bytes/14 records, raw equality fails and timing
-  remains unmeasured. New cold census sample/calibration rows and the strict
+- **Next:** main is integrated through `0d4bc714`. The NV pilot's legacy
+  replay, 32 composed children and pixel coverage run. Whole-ladder actions
+  precede broader migration. The refreshed 814 caller is diagnostic: its body
+  gains 52 instruction bytes/14 records, raw equality fails and timing remains
+  unmeasured. New cold census sample/calibration rows and the strict
   `edvr_log.py --plugin-cost` reader pass the full 149-job build and installer
   checks, 344 focused census checks and 17 fresh scoped gates. The complete
   main-based control `405b14cd` passes 129 jobs with identical census files.
@@ -3265,6 +3263,12 @@ against the exact source tree. No window appears and foreground focus stays
 unchanged. Main integration is cut at `0d4bc714`; Steam/settings and the frozen
 flight interpretation stay unchanged. Pilot performance acceptance remains
 open; broader migration and shipping stay held.
+
+The first clean-version promotion refuses the updated documentation's 61-line
+Status block. The fragment helper had omitted the separating blank line from
+its count. The Status is compressed, and the ignored helper now uses the
+build's own counting function before writing. All 72 Status blocks pass; no C++
+source changes and the clean full-build receipt still verifies.
 
 ### Raw cost evidence and current caller diagnostic, 2026-10-07
 
