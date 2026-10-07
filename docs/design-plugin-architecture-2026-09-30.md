@@ -39,21 +39,22 @@
 - **Next:** main `465e3edd` source and documentation-only `501e2b15` are
   integrated after measuring control `373198c1`. Candidate `6c63f6aa` passes
   143 full-build jobs, fresh NoTrace/forwarding comparisons and clean
-  promotion. Control `7bbe7d90` passes 125 jobs and clean promotion; its
-  October 7 flight matches the build and environment, exits cleanly, and Sean
-  reports no visual change. Candidate `6c63f6aa` is now installed and verified
-  in Steam, personal INI and existing DLSS preserved. Next flight: two-minute
-  stationary carrier off/DLSS/NV and hangar off/DLSS holds with Pimax OpenXR,
-  90 Hz, 4032x3898 per eye, same DLSS and replay off. The new control records
-  NV engagement at 05:25:06.132 and on-foot source 3872x2178 with width `auto`.
-  AA activation snapshots do not mark scene transitions; AA-off scene labels
-  use Sean's confirmed sequence. Twenty-three supported selectors and local
-  None/Skip checks pass; whole-ladder/actions and remaining module API/CPU
-  coverage stay open. Enabled replay retains 482.4 MiB; disabled replay
-  allocates none. Earlier NV blur is reproduced by `14a7ff70`. Matched CPU
-  improvement beyond noise and direct GPU non-regression remain unresolved
-  (section 11). Temporary key: `advanced.draw_replay` (off); removal requires
-  Scope control. No Phase 2 or shipping approval.
+  promotion. Control `7bbe7d90` passes 125 jobs and clean promotion. Both
+  October 7 flights match their builds and environment, exit cleanly, and Sean
+  reports no visual changes. Candidate remains installed and verified in Steam;
+  personal INI and existing DLSS were preserved. The measured pair has a
+  promising NV-on CPU signal (15.0% less sampled hook time per timed draw), but
+  other CPU ranges overlap. Direct EDVR GPU cost in carrier DLSS/NV-off is 2.9%
+  higher; the candidate median exceeds the control range. Draw counts differ
+  and the automatic on-foot source has 4.175% more pixels. CPU attribution and
+  GPU non-regression remain open. Next: inspect scope costs and workload counts
+  offline, finish missing cost coverage, and prepare discriminating evidence
+  before another flight or a rendering change. Keep this source pair frozen.
+  Twenty-three selectors and local None/Skip checks pass; whole-ladder/actions
+  and remaining API/CPU coverage stay open (section 11). Replay retains 482.4
+  MiB when enabled, none when disabled. Earlier NV blur is reproduced by
+  `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
+  Scope control. No Phase 1 acceptance, Phase 2 or shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -2570,3 +2571,125 @@ OnFootPanel with one claim-scoped API sample latch carried through restoration;
 preserve Map failure and unsampled behavior. Cold allocation is outside that
 slice. This is a review proposal, not an implemented or validated change, and
 waits until the measured pair is adjudicated.
+
+### Common-main candidate comparison, 2026-10-07
+
+Control `7bbe7d90` and candidate `6c63f6aa` are now measured. The graphics logs
+are `edvr_gfx_20261007_051735.log` and `edvr_gfx_20261007_055115.log`,
+respectively; the sanctioned reader verified each build before analysis. Their
+runtime logs are `edvr_openxr_20261007_051737_047_55460.log` and
+`edvr_openxr_20261007_055117_046_44884.log`. Both use RTX 5090, Pimax OpenXR
+Crystal Super at 90 Hz, 2016x1949 input and 4032x3898 output per eye, mapped
+DLSS 310.9.1.0 preset K, native `separate_device=1`, and replay off. Sean
+confirms carrier first, then on-foot hangar, following the prescribed holds; he
+reports no visual changes. Both exit cleanly with no rejected, invalid or
+cancelled handoffs. Each runtime log has two cycles exceeding 250 ms; the
+candidate also has two transient head-locate failures (-30). These observations
+do not establish a cause or a stall-free run.
+
+The independent audit verified all 37 candidate native benchmark rows and 48
+draw-hook rows. Native window IDs selected by phase are 12-14 / 17-19 / 21-23 /
+30-32 / 34-36. Selected draw-window end frames are 27000-34200 / 37800-45000 /
+48600-55800 / 64800-73800 / 77400-84600, every 1800 frames. The hangar AA-off
+selection has six draw windows; all other selections have five. The control
+selections remain those recorded above. AA activation snapshots do not date
+scene transitions; operator-confirmed sequence supplies scene labels. Positive
+NV markers are 05:25:06.132 for control and 05:59:19.742 for candidate.
+
+Sampled draw-hook own time, after the existing real-draw subtraction:
+
+| Phase | Control -> candidate us/timed draw | Change | Control -> candidate ms/sampled frame |
+|---|---:|---:|---:|
+| Carrier AA off | 0.11798 -> 0.11898 | +0.85% | 0.38290 -> 0.27720 |
+| Carrier DLSS, NV off | 0.32006 -> 0.29905 | -6.56% | 1.12194 -> 1.10571 |
+| Carrier DLSS, NV on | 0.36324 -> 0.30888 | -14.96% | 1.07960 -> 1.03894 |
+| Hangar AA off | 0.09702 -> 0.09871 | +1.74% | 0.29117 -> 0.25491 |
+| Hangar DLSS | 0.16929 -> 0.17841 | +5.39% | 0.50498 -> 0.48757 |
+
+Only NV-on has the entire candidate per-draw window range (0.294-0.328 us)
+below the control range (0.331-0.398 us); every other aggregate lies within the
+control's observed range. This is a preliminary favorable NV-on signal, not a
+repeatability or attribution result. Timed draws per sampled frame change by
+-28.30% / +5.53% / +13.07% / -13.82% / -8.36%, respectively. Normalization
+accounts for unequal window counts but does not equate shader or action mixes.
+Lower per-frame means therefore cannot alone prove a plugin CPU improvement.
+Native CPU/GPU benchmark medians also include game/runtime work and do not
+replace complete EDVR cost coverage.
+
+The independently corrected direct GPU comparison uses all 32 completed
+30-second census intervals wholly contained within the five phase boundaries,
+not intervals clipped to native benchmark endpoints. The selected rows contain
+147,398 timed spans and zero failed spans. Frame-weighted EDVR GPU subtotals:
+
+| Phase | Control/candidate windows | Control -> candidate ms/frame | Change |
+|---|---:|---:|---:|
+| Carrier AA off | 3/3 | 0.011000 -> 0.011334 | Below display precision |
+| Carrier DLSS, NV off | 4/3 | 5.863693 -> 6.034487 | +2.91% |
+| Carrier DLSS, NV on | 3/3 | 5.999020 -> 5.890454 | -1.81% |
+| Hangar AA off | 3/4 | 0.012668 -> 0.011000 | -13.17% |
+| Hangar DLSS | 3/3 | 1.763675 -> 1.796999 | +1.89% |
+
+Carrier NV-off is a preliminary adverse result: candidate median 6.017 ms
+exceeds control maximum 5.991 ms, though the ranges overlap narrowly. Dropping
+the control census ending only 54 ms before the positive NV marker still leaves
++2.20% and the candidate median above the control maximum. NV-on is
+preliminarily favorable: all candidate subtotals are below all selected control
+subtotals. Hangar ranges overlap; its DLSS point estimate is adverse. The
+AA-off absolute differences are very small. These are direct EDVR subtotals
+with incomplete module coverage, not whole-game GPU totals; pooling NV-on and
+NV-off would hide the adverse cell.
+
+The automatic on-foot source is 3872x2178 in control and 3952x2223 in
+candidate, 4.175% more pixels, despite unchanged output eye sizes and preserved
+INI. That difference cannot explain the carrier result. The hangar DLSS weapon
+scope records 78.24 versus 62.78 wrapper entries per frame, not admitted
+captures: its census begins before early returns. Both detailed reports have
+9000 eligible calls over 1800 frames (five per frame), 141 selected/ready/
+submitted identity/capture/raster calls, and no skips, failures or pending
+captures. A holstered weapon does not bypass this shader/depth classifier; the
+counters do not identify a visible weapon or a particular mesh.
+
+Ruled out: equal output eye sizes establish equal workload, because source
+pixel count and timed-draw density differ. Ruled out: lower native GPU medians
+establish EDVR GPU non-regression, because the direct NV-off subtotal
+increases. The Phase 1 performance gate remains open. No rendering fix is
+established by this pair; no additional flight is requested yet. Keep
+`7bbe7d90` and `6c63f6aa` frozen while reviewing the adverse carrier scopes and
+their work counts; distinguish changed workload, timing variation and
+additional EDVR work before selecting a rendering fix. The 5.53% higher NV-off
+timed-draw density is a discriminator to inspect, not proof of the cause. The
+warm PanelDistance API policy remains an unimplemented coverage proposal.
+
+Sean notes that carrier ship types and quantities vary between runs. Variable
+scene workload is a plausible explanation for the higher NV-off cost; the
+increased sampled draw density is consistent with that hypothesis. Inspect the
+measured GPU scope costs and their work counts before attributing the change to
+the plugin layer. Draw counts alone cannot establish causation.
+
+The bounded scope audit confirms NV-off door cost rises 0.128420 ms/frame and
+in-frame cost rises 0.042123 ms/frame; their sum differs from the 0.170793
+subtotal delta by 0.000250 due to displayed-row quantization. Within the door,
+upscaler time rises 0.118731 ms/frame at two entries per frame in both builds.
+The UI reissue scope rises 0.062104 ms/frame with 81.58 -> 100.26 entries per
+frame (+22.9%). Those entries count helper attempts after the blocked-path
+check, before multiply/write-back begin helpers that can decline
+(`vscreen.cpp:4915-4950`); they are neither successful redraws nor ship counts.
+The census estimates corrected mean sampled time per entry times all entries
+per frame (`gpu_census.cpp:168-180`), with capped round-robin sampling. These
+component figures sit within the subtotals; do not add them to the subtotal
+again. NV-on UI attempt counts also rise (72.77 -> 78.10/frame), while their
+cost falls 0.019659 ms/frame. Increased counts alone therefore do not explain
+the duration change. Unchanged upscaler counts do not rule out scene content or
+GPU/queue timing changing per-call duration. Variable ships remain a plausible,
+unproven contributor; this pair does not establish an architecture regression.
+Existing engine-motion pool/joined/moving/history summaries and native
+ROI/submit-window fields can provide workload context before another flight.
+The performance gate stays open.
+
+Reproducible ignored reports:
+`build/candidate_plugin_measurement_20261007.json`,
+`build/candidate_plugin_independent_comparison_20261007.json`, and
+`build/plugin_direct_gpu_comparison_20261007.json`. The latter includes the
+corrected phase-contained row selection and near-NV-boundary sensitivity. The
+feature stays on `codex/plugin-architecture`; no merge to main, Phase 1
+acceptance, Phase 2 or shipping approval is claimed.
