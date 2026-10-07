@@ -264,6 +264,7 @@ struct Eye {
     uint32_t sceneFrame[2] = {~0u, ~0u};
     UINT sceneBytes = 0;
     Ptr<ID3D11Buffer> stampCell;         // 16 bytes: the frame stamp's carrier into scene[slot]
+    Ptr<ID3D11Buffer> rowsCell;          // rows 270..275 and the stamp: the source-free frame's scene constants (engineVelocityPrepareSourceFree)
     uint32_t frame = ~0u;                // the present frame this eye's data belongs to
     uint32_t rtvGen = 0, dsvGen = 0;     // the pass binding MRT6 was added to
     bool bindingStale = false;           // an internal flat restore removed MRT6 without a game generation
@@ -409,6 +410,7 @@ struct DrawStats {
     // The on-foot source: its eye-frames (also counted in eyeFrames above),
     // the screen shader's view requests and refusals, and its panel pixels.
     uint64_t sourceFrames = 0, sourceFramesBound = 0;
+    uint64_t sourceFreeFrames = 0;   // eye-frames made from nothing (engineVelocityPrepareSourceFree)
     uint64_t sourceViewsAsked = 0, sourceViewsGiven = 0;
     uint64_t sourceRefusedNoEmit = 0, sourceRefusedDepth = 0, sourceRefusedFrame = 0, sourceRefusedInvalid = 0,
              sourceRefusedUnwritten = 0, sourceRefusedPrevious = 0;
@@ -2814,6 +2816,96 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
                            {g_draw.sourceViewsAsked, g_draw.sourceViewsGiven, g_draw.sourceRefusedNoEmit,
                             g_draw.sourceRefusedDepth, g_draw.sourceRefusedFrame, g_draw.sourceRefusedInvalid,
                             g_draw.sourceRefusedUnwritten, g_draw.sourceRefusedPrevious});
+}
+
+bool engineVelocityPrepareSourceFree(ID3D11DeviceContext* ctx, ID3D11Texture2D* sceneDepth, ID3D11Buffer* sceneConstants,
+                                     const float (&rows)[6][4]) {
+    if (!ctx || !sceneDepth || !runtimeFlatProfile() || !live.load(std::memory_order_acquire) ||
+        !g_emitLive.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    Eye& e = g_eyes[kEngineVelocitySourceEye];
+    const uint32_t frame = frameNow();
+    // A pool draw already made this frame's views: they stand.
+    if (e.frame == frame && e.written) return e.depth.Get() == sceneDepth && !e.invalid;
+    // The watch follows the constants buffer from now on, so the next frame's pool draws find its rows written (engineVelocityNoteSource).
+    // Its size is the size the snapshots are made at, the one a pool draw would make them at: the two kinds of frame share the buffers, and
+    // snapshots of another size are re-made (their history dropped) by whichever kind of frame comes next.
+    UINT sceneBytes = kStampBytes;
+    if (sceneConstants) {
+        D3D11_BUFFER_DESC sd{};
+        sceneConstants->GetDesc(&sd);
+        if (sd.ByteWidth >= (kRowsFirst + 6u) * 16u && sd.ByteWidth <= 65536u) {
+            assignWatch(static_cast<unsigned>(kEngineVelocitySourceEye) * 2u + 1u, sceneConstants);
+            sceneBytes = sd.ByteWidth;
+        }
+    }
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    if (!ensureSlots(ctx, e, kEngineVelocitySourceEye, sceneDepth)) return false;
+    // The eye-frame, as slowPath starts one (the flat marker plane was cleared at its first use this frame).
+    ++g_draw.eyeFrames;
+    e.frame = frame;
+    e.bound = e.boundCounted = e.written = e.invalid = e.consumed = false;
+    e.overlayGroup = false;
+    e.rtvGen = e.dsvGen = 0;
+    e.bindingStale = false;
+    // The pool: one record, made once. No marker in the slot target points into it.
+    if (!e.pool || !e.poolSrv) {
+        e.poolOutput = {}; e.pool.Reset(); e.poolSrv.Reset();
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = emit::kItemBytes; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        d.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; d.StructureByteStride = emit::kItemBytes;
+        if (FAILED(dev->CreateBuffer(&d, nullptr, &e.pool)) || FAILED(dev->CreateShaderResourceView(e.pool.Get(), nullptr, &e.poolSrv))) {
+            e.pool.Reset(); e.poolSrv.Reset(); e.poolBytes = 0; ++g_draw.createFailed;
+            invalidate(e, kCreate);
+            return false;
+        }
+        e.poolBytes = emit::kItemBytes;
+    }
+    // The scene constants: rows 270..275 and the stamp in one 112-byte cell, copied into this frame's buffer.
+    const unsigned slot = frame & 1u;
+    if (!e.scene[slot] || e.sceneBytes != sceneBytes) {
+        for (auto& b : e.scene) b.Reset();
+        e.sceneFrame[0] = e.sceneFrame[1] = ~0u;
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = std::max<UINT>(sceneBytes, kStampBytes); d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        for (auto& b : e.scene) if (FAILED(dev->CreateBuffer(&d, nullptr, &b))) {
+            for (auto& c : e.scene) c.Reset();
+            e.sceneBytes = 0; ++g_draw.createFailed;
+            invalidate(e, kCreate);
+            return false;
+        }
+        e.sceneBytes = sceneBytes;
+    }
+    if (!e.rowsCell) {
+        D3D11_BUFFER_DESC cd{};
+        cd.ByteWidth = kRowsBytes + 16; cd.Usage = D3D11_USAGE_DEFAULT;
+        if (FAILED(dev->CreateBuffer(&cd, nullptr, &e.rowsCell))) { ++g_draw.createFailed; invalidate(e, kCreate); return false; }
+    }
+    uint8_t cell[kRowsBytes + 16] = {};
+    std::memcpy(cell, rows, kRowsBytes);
+    const uint32_t stamp[4] = {frame, 0, 0, 0};
+    std::memcpy(cell + kRowsBytes, stamp, sizeof(stamp));
+    ctx->UpdateSubresource(e.rowsCell.Get(), 0, nullptr, cell, 0, 0);
+    const D3D11_BOX box{0, 0, 0, kRowsBytes + 16, 1, 1};
+    ctx->CopySubresourceRegion(e.scene[slot].Get(), 0, kRowsFirst * 16u, 0, 0, e.rowsCell.Get(), 0, &box);
+    engineVelocityNoteStateCalls(2);
+    e.sceneFrame[slot] = frame;
+    e.sceneRowsKnown = true;
+    std::memcpy(e.sceneRows, rows, kRowsBytes);
+    // The views need an eye-frame that was written; the source stays named for as long as source-free frames come.
+    e.written = true;
+    g_sourceDepth = sceneDepth;
+    g_sourceNoted = frame;
+    if (g_draw.sourceFreeFrames++ == 0)
+        Log::get().note("engine motion: source-free views at present frame %u (%ux%u): no pool draw this frame, so the slot target holds no "
+                        "record, the pool is one empty record and the scene constants are the selected camera's; every pixel takes the camera term.",
+                        frame, e.width, e.height);
+    return true;
+}
+uint64_t engineVelocitySourceFreeFrames() {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    return g_draw.sourceFreeFrames;
 }
 
 bool engineVelocitySourceIsNamed(const ID3D11Texture2D* depth) {

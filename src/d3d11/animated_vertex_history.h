@@ -289,21 +289,42 @@ public:
         return true;
     }
     // One instance per admitted draw: a single four-byte index describes every
-    // emitted vertex. Deferred flat raster needs one owned scalar snapshot,
-    // not a replicated per-vertex index plane. VR never requests this copy.
+    // emitted vertex. Deferred flat raster needs one owned scalar, not a
+    // replicated per-vertex index plane. VR never requests this copy.
+    //
+    // The scalars live in ONE buffer of retainSlots four-byte elements with a single-element view over each, all made the first time a
+    // capture asks and reused by every frame after (design section 104: the old code created a buffer and a view per captured draw per
+    // frame). A frame's k-th retained draw takes element k; the element is valid through that frame's H, the only place it is read, and is
+    // rewritten by the next frame's k-th draw. The GPU executes in order, so the rewrite cannot overtake the read. More than retainSlots
+    // retained draws in one frame is a refusal (the adapter's own draw bound is the same number).
+    static constexpr unsigned retainSlots = maxRecords;
     bool retainInstanceIndex(ID3D11DeviceContext* ctx,Capture& out) {
         if(!out.instanceIndex)return false;
-        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);Ptr<ID3D11Buffer> snapshot;
-        D3D11_BUFFER_DESC d{};d.ByteWidth=4;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R32_UINT;
-        v.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;v.Buffer.NumElements=1;
-        Ptr<ID3D11ShaderResourceView> view;
-        if(FAILED(dev->CreateBuffer(&d,nullptr,&snapshot)) ||
-           FAILED(dev->CreateShaderResourceView(snapshot.Get(),&v,&view)))return false;
+        if(out.frame!=retainFrame_){retainFrame_=out.frame;retainNext_=0;}
+        if(retainNext_>=retainSlots)return false;
+        if(!retain_) {
+            Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+            D3D11_BUFFER_DESC d{};d.ByteWidth=retainSlots*4;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            Ptr<ID3D11Buffer> buffer;
+            if(FAILED(dev->CreateBuffer(&d,nullptr,&buffer)))return false;
+            Ptr<ID3D11ShaderResourceView> views[retainSlots];
+            for(unsigned i=0;i<retainSlots;++i) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R32_UINT;
+                v.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;v.Buffer.FirstElement=i;v.Buffer.NumElements=1;
+                if(FAILED(dev->CreateShaderResourceView(buffer.Get(),&v,&views[i])))return false;
+            }
+            retain_=std::move(buffer);
+            for(unsigned i=0;i<retainSlots;++i)retainViews_[i]=std::move(views[i]);
+            retainCreated_+=1+retainSlots;
+        }
+        const unsigned slot=retainNext_++;
         Ptr<ID3D11Resource> source;out.instanceIndex->GetResource(&source);
-        D3D11_BOX box{0,0,0,4,1,1};ctx->CopySubresourceRegion(snapshot.Get(),0,0,0,0,source.Get(),0,&box);
-        out.instanceIndex=std::move(view);out.retainedIndexBytes=4;return true;
+        D3D11_BOX box{0,0,0,4,1,1};ctx->CopySubresourceRegion(retain_.Get(),0,slot*4,0,0,source.Get(),0,&box);
+        out.instanceIndex=retainViews_[slot];out.retainedIndexBytes=4;++retainUsed_;return true;
     }
+    // Resources made for the retained scalars over this history's life (the buffer and its views, once) and the draws that used a slot.
+    uint64_t retainCreated() const{return retainCreated_;}
+    uint64_t retainUsed() const{return retainUsed_;}
     void advance(unsigned frame) {
         reclaimedRecords_=reclaimedBytes_=0;
         for(auto it=records_.begin();it!=records_.end();)
@@ -423,6 +444,8 @@ private:
     }
     std::vector<Record> records_;
     HistoryLedger ledger_;
+    Ptr<ID3D11Buffer> retain_;Ptr<ID3D11ShaderResourceView> retainViews_[retainSlots];
+    unsigned retainFrame_=~0u,retainNext_=0;uint64_t retainCreated_=0,retainUsed_=0;
     Ptr<ID3D11ComputeShader> identify_;Ptr<ID3D11Buffer> instance_;Ptr<ID3D11ShaderResourceView> instanceView_;
     unsigned bytes_=0,reclaimedRecords_=0,reclaimedBytes_=0;bool failed_=false;
 };

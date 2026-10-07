@@ -310,6 +310,13 @@ struct Stream {
     void dispatch(const void* uav) {
         edvr::flatRuntimeDispatchObserveWritten(*prefix, uav); edvr::flatHdrObserveDispatchWrite(hdr, uav);
     }
+    // A draw of a pool family's vertex shader with a pixel shader the motion producer does not substitute, into the scene's depth: the
+    // runtime flags it (FlatRuntimeDraw::poolFamilyVs), and a scene holding one is never source-free.
+    void stockFamilyDraw() {
+        edvr::FlatRuntimeDraw d = make(sc.h, sc.hDepth, sc.hW, sc.hH, 26, 0xA1, 0xB9, true, false);
+        d.poolFamilyVs = true;
+        draw(d);
+    }
     // The scene's draws into H: the first few are pool-family draws (the motion source), the rest lighting and glass.
     void sceneDraws(uint32_t pool, uint32_t other) {
         for (uint32_t i = 0; i < pool; ++i)
@@ -632,8 +639,16 @@ inline int flatHdrRouteTests() {
         expect(!wild.select().selected(), "a target off the output's aspect is refused");
 
         Stream noPool; noPool.sceneDraws(0, 4); noPool.toneTrigger();   // H without a pool-family source
-        expect(noPool.select().reason == FlatMonoReason::NoSupportedSource,
-               "no supported source: no-supported-motion-source-pair");
+        const FlatMonoFrame noPoolFrame = noPool.select();
+        expect(noPoolFrame.selected() && noPoolFrame.sourceFree && noPoolFrame.supportedDraws == 0 && noPoolFrame.hdr == noPool.sc.h &&
+                   noPoolFrame.depth == noPool.sc.hDepth && noPoolFrame.sceneConstants == noPool.sc.b1 && noPoolFrame.sourceFirst == 0,
+               "no pool-family draw in the scene: selected with no motion source, naming H's depth, constants and camera (the pool-less view)");
+        Stream stockOnly; stockOnly.sceneDraws(0, 4); stockOnly.stockFamilyDraw(); stockOnly.toneTrigger();
+        expect(stockOnly.select().reason == FlatMonoReason::NoSupportedSource && !stockOnly.select().sourceFree,
+               "no supported source and a pool-family draw left stock: no-supported-motion-source-pair");
+        Stream sourced; sourced.sceneDraws(2, 2); sourced.toneTrigger();
+        expect(sourced.select().selected() && !sourced.select().sourceFree,
+               "a scene with a supported source is selected as before and is not source-free");
         Stream noCam;
         for (int i = 0; i < 2; ++i) noCam.draw(noCam.make(noCam.sc.h, noCam.sc.hDepth, 3840, 2160, 26, 0xA1, 0xB1, false, true));
         noCam.toneTrigger();
@@ -1174,7 +1189,7 @@ inline int flatHdrRouteTests() {
         expect(taaAbove.machine.entries == 1 && dlssAbove.machine.entries == 0,
                "EDVR's TAA above D: a refused chain stands down as before; DLSS above D: the route treats it, nothing stands down");
         // A refusal for any other reason adds nothing either (the copy stage decides).
-        Stream noPool; noPool.sceneDraws(0, 4); noPool.toneTrigger();
+        Stream noPool; noPool.sceneDraws(0, 4); noPool.stockFamilyDraw(); noPool.toneTrigger();
         const FlatMonoFrame refused = noPool.select();
         Sim refusedSim;
         runs(refused, FlatMonoResolveMode::Dlss, true, &refusedSim);

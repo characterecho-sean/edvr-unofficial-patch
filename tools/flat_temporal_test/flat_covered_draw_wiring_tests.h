@@ -194,11 +194,11 @@ inline int flatCoveredDrawWiringTests() {
 
     const auto selectionValid = [&](const std::string& text) {
         return ordered(text, {"s.untrustedSupportedAlternate=sel.selected()&&sel.mixedCamera;", "if(sel.selected()){",
-                              "constautoreference=flatDomainWorldReference(sel.camera);", "if(reference.valid())s.worldReference=reference;}",
+                              "constautoreference=flatDomainWorldReference(sel.camera);", "if(reference.valid())s.worldReference=reference;nameSourceFree(s,sel);}",
                               "if(sel.selected()&&s.namedDepth&&flatCameraHash(s.namedCamera)!=sel.cameraHash){"});
     };
     expect(selectionValid(runtime), "the camera H selected replaces the world reference, before the check that the naming agrees with it");
-    expect(!selectionValid(without(runtime, "if(reference.valid())s.worldReference=reference;")),
+    expect(!selectionValid(replaced(runtime, "if(reference.valid())s.worldReference=reference;nameSourceFree(s,sel);}", "nameSourceFree(s,sel);}")),
            "mutation control: a reference H never corrects, so a first-person camera that set it once keeps it, fails the wiring");
 
     const auto boundaryValid = [&](const std::string& text) {

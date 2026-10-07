@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <set>
 #include <vector>
 
 // Reconstructed indexed draws exercise the real WARP original-VS, identity
@@ -46,6 +47,16 @@ inline std::vector<unsigned char> flatHistoryPressurePositionBytes(
     std::memcpy(bytes.data(),mapped.pData,bytes.size());
     ctx->Unmap(staging.Get(),0);
     return bytes;
+}
+
+// The word a retained instance-scalar view names: its buffer copied to staging and the view's own element read (section 104).
+inline unsigned flatHistoryPressureViewWord(ID3D11Device* dev,ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* view) {
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+    view->GetDesc(&vd);
+    const auto bytes=flatHistoryPressurePositionBytes(dev,ctx,view);
+    unsigned word=0;
+    std::memcpy(&word,bytes.data()+vd.Buffer.FirstElement*4,4);
+    return word;
 }
 
 inline FlatForegroundMotion::Inputs flatHistoryPressureInputs(unsigned token) {
@@ -971,6 +982,51 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         check(motion.capture(ctx,issue,3,1,3,0,0,3601,inputs()),"and from another start the frame after, alone");
         check(motion.prepareH(ctx,owners.Get(),rawDepth.Get(),world,3601,128,96,out) && motion.stats().acrossOffset==2 && motion.stats().rescueCancelled==1,
               "a mesh that moved keeps its rescue through H: nothing is withdrawn");
+        results.push_back(result);
+    }
+
+    // THE RETAINED INSTANCE SCALARS (design section 104). Each captured draw of the flat adapter keeps its four-byte instance index for the
+    // frame's map. The old code made a buffer and a view for every captured draw of every frame; the scalars are now one buffer with a
+    // single-element view over each element, made once, so a frame's k-th retained draw takes element k and the next frame reuses it.
+    {
+        std::vector<UINT> indices{0,1,2,0,1,2,0,1,2};
+        auto ib=flatHistoryPressureIndexBuffer(dev,indices);
+        FlatHistoryPressureResult result{"retained_index_ring"};
+        constexpr unsigned slots=AnimatedVertexHistory::retainSlots;
+        AnimatedVertexHistory h;
+        std::vector<AnimatedVertexHistory::Capture> first(slots),second(slots);
+        auto frameOf=[&](unsigned frame,std::vector<AnimatedVertexHistory::Capture>& caps,unsigned flip) {
+            unsigned wrong=0;
+            for(unsigned i=0;i<slots;++i) {
+                Pose pose{};pose.skeleton=((i^flip)&1)?740.f:92.f;   // the pool row the draw reads is 0 or 1: the scalar the map keeps
+                bind(pose,false);
+                ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+                check(h.capture(ctx,issue,3,1,(i%3)*3,0,0,frame,caps[i],true,true),"a retained draw is captured");
+                ++result.captures;
+                if(flatHistoryPressureViewWord(dev,ctx,caps[i].instanceIndex.Get())!=(((i^flip)&1)?1u:0u))++wrong;
+            }
+            return wrong;
+        };
+        check(frameOf(4000,first,0)==0,"every retained scalar holds its own draw's pool index, read right after the capture");
+        check(h.retainCreated()==1+slots && h.retainUsed()==slots,"the buffer and its views were made once, and every slot was used");
+        std::set<ID3D11ShaderResourceView*> distinct;
+        for(auto& c:first)distinct.insert(c.instanceIndex.Get());
+        check(distinct.size()==slots,"each draw of the frame holds a view of its own element");
+        h.advance(4001);
+        check(frameOf(4001,second,1)==0,"the next frame's scalars hold that frame's pool indices");
+        check(h.retainCreated()==1+slots && h.retainUsed()==2*slots,"the next frame made no buffer and no view");
+        bool reused=true;
+        for(unsigned i=0;i<slots;++i)reused=reused && second[i].instanceIndex.Get()==first[i].instanceIndex.Get();
+        check(reused,"the k-th retained draw of every frame holds the same view object");
+        AnimatedVertexHistory::Capture over;
+        check(!h.capture(ctx,issue,3,1,0,0,0,4001,over,true,true),"a draw past the frame's record bound is refused, and takes no slot");
+        check(h.retainUsed()==2*slots,"the refused draw retained nothing");
+        // The default (VR) capture retains nothing at all.
+        AnimatedVertexHistory plain;AnimatedVertexHistory::Capture vr;
+        bind(Pose{},false);ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        check(plain.capture(ctx,issue,3,1,0,0,0,4100,vr) && vr.retainedIndexBytes==0 && plain.retainCreated()==0,
+              "a capture that does not ask for the scalar makes no ring");
+        result.records=unsigned(h.recordCount());result.bytes=h.bytes();
         results.push_back(result);
     }
 
