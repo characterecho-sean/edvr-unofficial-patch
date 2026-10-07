@@ -37,16 +37,18 @@
   4.1), the installer skips it and Elite stays on its stock VR path. Four
   changes first (section 10); no F8, AA, flash fix or Explorer Cam without
   the runtime; the first build needs a flight on a stock runtime.
-- **Next:** main `465e3edd` is integrated after measuring control `373198c1`.
-  Feature source passes 143 full-build jobs and fresh NoTrace/forwarding
-  comparisons; symmetric updated control `7bbe7d90` passes 125 jobs. Clean
-  promotions and the next matched Steam comparison are pending. Pimax OpenXR,
-  90 Hz, 4032x3898 per eye, DLSS 310.9.1.0, separate-device ownership; replay
-  off. The prior carrier hold includes reported NV; its exact toggle is
-  unlogged. Twenty-three supported selectors and local None/Skip checks pass;
-  whole-ladder/actions and remaining module API/CPU coverage stay open. Enabled
-  replay retains 482.4 MiB; disabled replay allocates none. Earlier NV blur is
-  reproduced by `14a7ff70`. Matched CPU improvement beyond noise and direct GPU
+- **Next:** main `465e3edd` source and documentation-only `501e2b15` are
+  integrated after measuring control `373198c1`. Candidate `6c63f6aa` passes
+  143 full-build jobs, fresh NoTrace/forwarding comparisons and clean
+  promotion. Updated control `7bbe7d90` passes 125 jobs and clean promotion; it
+  is installed and verified in Steam, personal INI preserved. Next flight:
+  two-minute stationary carrier off/DLSS/NV and hangar off/DLSS holds with
+  Pimax OpenXR, 90 Hz, 4032x3898 per eye, same DLSS and replay off. The prior
+  carrier hold includes reported NV; its exact toggle is unlogged. Twenty-three
+  supported selectors and local None/Skip checks pass; whole-ladder/actions and
+  remaining module API/CPU coverage stay open. Enabled replay retains 482.4
+  MiB; disabled replay allocates none. Earlier NV blur is reproduced by
+  `14a7ff70`. Matched CPU improvement beyond noise and direct GPU
   non-regression remain unresolved (section 11). Temporary key:
   `advanced.draw_replay` (off); removal requires Scope control. No Phase 2 or
   shipping approval.
@@ -2424,3 +2426,30 @@ Steam still holds measured control `373198c1` while that completes. Preserve
 the personal INI, loaded DLSS, separate-device mode and render dimensions for
 the next matched control/candidate comparison. The original baseline is
 retained; Phase 1 performance acceptance, Phase 2 and shipping stay open.
+
+### Updated matched builds ready in Steam, 2026-10-06
+
+Clean receipt-verified promotions pass for control `7bbe7d90`
+(`v0.18.2-60-g7bbe7d90`) and candidate `6c63f6aa` (`v0.18.2-90-g6c63f6aa`).
+Both source commits are pushed on their separate branches. The subsequent main
+commit `501e2b15` changes only the terrain investigation document; it is also
+merged into the feature. Rendering source and receipt inputs remain those
+validated against main `465e3edd`. The candidate DLLs identify source commit
+`6c63f6aa`, not the later documentation merge; use that explicit build pin when
+reading its future flight.
+
+The sanctioned control Steam install passes dry run, transactional install and
+`--verify-only`. Existing DLSS is preserved and the personal INI SHA256 remains
+`750BB1D392EA59270B12CB54051F7E476D28433351B9DA238BF0BFA4B520B91C`. The
+configuration retains `separate_device=1`. Native receipt backup:
+`edvr_native_receipt.json.pre-7bbe7d90-20261006-183751.bak`.
+
+Next flight: verified control `7bbe7d90`, Pimax OpenXR, 90 Hz, 4032x3898 output
+per eye, unchanged HMD quality and DLSS. Stationary carrier AA off, DLSS with
+NV off, then DLSS with NV on; on-foot hangar AA off then DLSS. Each hold is two
+minutes after menus close. Replay stays off; no NumLock dump. Exit Elite
+afterward. Read the fresh log with `--expect-build 7bbe7d90` before evaluating
+timings or visuals. Then install and fly the candidate under the same
+conditions. Native builds are complete for the pair. The October 6 control
+`373198c1` measurement remains retained; no plugin performance improvement or
+Phase 1 acceptance is claimed yet.
