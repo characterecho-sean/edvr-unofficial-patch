@@ -2,41 +2,40 @@
 
 ## Status
 
-- **State (2026-10-06):** implementation in progress on
-  `codex/plugin-architecture`; do not merge to main until Sean is ready to ship.
-  This is Phase 1 of five; the review and remaining gates are in section 11.
-  The add-on tier extends draft PR #46 (section 6).
+- **State (2026-10-07):** implementation in progress on
+  `codex/plugin-architecture`; do not merge to main until Sean is ready to
+  ship. This is Phase 1 of five; the review and remaining gates are in section
+  11. The add-on tier extends draft PR #46 (section 6).
 - **Goal (Sean):** every fix and performance item belongs to one plugin,
-  plugins group features logically, and the user picks which to install in
-  the installer. A plugin that is not installed costs nothing.
-- **Built on:** a read-only inventory of main `4296f142` (25 features, 225
-  ini keys, 19 draw verdicts, the services they share; section 2), the flat
-  CPU census of 2026-09-30 (hook entry about 1.4 ms over 17,180 calls a frame
-  on foot; D3D call counts are what a wrapper such as ReShade multiplies),
-  the landing-pad regression of 2026-09-29 (a claim order nobody had written
-  down) and PR #46's diff.
-- **North star (Sean, 2026-09-30): performance.** The plugin layer never
-  makes EDVR slower, and its first phase makes it faster. Gates are relative:
-  each phase flies the same spots and must be no worse than the previous
-  phase, within noise (section 7).
+  plugins group features logically, and the user picks which to install in the
+  installer. A plugin that is not installed costs nothing.
+- **Built on:** a read-only inventory of main `4296f142` (25 features, 225 ini
+  keys, 19 draw verdicts, the services they share; section 2), the flat CPU
+  census of 2026-09-30 (hook entry about 1.4 ms over 17,180 calls a frame on
+  foot; D3D call counts are what a wrapper such as ReShade multiplies), the
+  landing-pad regression of 2026-09-29 (a claim order nobody had written down)
+  and PR #46's diff.
+- **North star (Sean, 2026-09-30): performance.** The plugin layer never makes
+  EDVR slower, and its first phase makes it faster. Gates are relative: each
+  phase flies the same spots and must be no worse than the previous phase,
+  within noise (section 7).
 - **Decided, Q1 (Sean, 2026-09-30): monolithic.** First-party plugins are
   modules inside the one DLL: each a static library behind the plugin
-  interface, a build gate against one plugin including another's internals,
-  and an unselected plugin never registers. The interface stays C-compatible
-  so a split into DLLs stays mechanical (section 10 has the reasons).
-  PR #46's C ABI stays the add-on tier, moved into the core so flat mode
-  gets it too.
+  interface, a build gate against one plugin including another's internals, and
+  an unselected plugin never registers. The interface stays C-compatible so a
+  split into DLLs stays mechanical (section 10 has the reasons). PR #46's C ABI
+  stays the add-on tier, moved into the core so flat mode gets it too.
 - **Decided, Q2-Q6 (Sean, 2026-09-30):** the nine plugins of section 4
   (regrouped: intro and on-foot-panel split out, UI quality inside
-  temporal-aa); defaults that reproduce today's shipped behaviour; the
-  add-on tier after Phase 1 (PR #46's OM-unbind fix lands on its own now);
-  diagnostics probes out of the default install, census kept in the core;
-  today's keys and sections kept, each owned by a plugin. Section 10.
-- **Decided, Q7 (Sean, 2026-09-30): graphics-only VR is its own phase,
-  after Phase 1.** When no selected plugin needs the OpenXR runtime (section
-  4.1), the installer skips it and Elite stays on its stock VR path. Four
-  changes first (section 10); no F8, AA, flash fix or Explorer Cam without
-  the runtime; the first build needs a flight on a stock runtime.
+  temporal-aa); defaults that reproduce today's shipped behaviour; the add-on
+  tier after Phase 1 (PR #46's OM-unbind fix lands on its own now); diagnostics
+  probes out of the default install, census kept in the core; today's keys and
+  sections kept, each owned by a plugin. Section 10.
+- **Decided, Q7 (Sean, 2026-09-30): graphics-only VR is its own phase, after
+  Phase 1.** When no selected plugin needs the OpenXR runtime (section 4.1),
+  the installer skips it and Elite stays on its stock VR path. Four changes
+  first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
+  the first build needs a flight on a stock runtime.
 - **Next:** main `465e3edd` source and documentation-only `501e2b15` are
   integrated after measuring control `373198c1`. Candidate `6c63f6aa` passes
   143 full-build jobs, fresh NoTrace/forwarding comparisons and clean
@@ -44,19 +43,21 @@
   is installed and verified in Steam, personal INI preserved. Next flight:
   two-minute stationary carrier off/DLSS/NV and hangar off/DLSS holds with
   Pimax OpenXR, 90 Hz, 4032x3898 per eye, same DLSS and replay off. The prior
-  carrier hold includes reported NV; its exact toggle is unlogged. Twenty-three
-  supported selectors and local None/Skip checks pass; whole-ladder/actions and
-  remaining module API/CPU coverage stay open. Enabled replay retains 482.4
-  MiB; disabled replay allocates none. Earlier NV blur is reproduced by
-  `14a7ff70`. Matched CPU improvement beyond noise and direct GPU
+  hangar executed sampled weapon-history capture/raster work despite a
+  holstered weapon; October 7's audit records the counters. Carrier is the
+  cockpit workload for the matched source pair. Its prior NV toggle is
+  unlogged. Twenty-three supported selectors and local None/Skip checks pass;
+  whole-ladder/actions and remaining module API/CPU coverage stay open. Enabled
+  replay retains 482.4 MiB; disabled replay allocates none. Earlier NV blur is
+  reproduced by `14a7ff70`. Matched CPU improvement beyond noise and direct GPU
   non-regression remain unresolved (section 11). Temporary key:
   `advanced.draw_replay` (off); removal requires Scope control. No Phase 2 or
   shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
-  planting; the installer's receipts already know what it installed), a
-  stable ABI for first-party plugins (they ship with the core; freezing
-  their interface buys nothing and costs every refactor), and a per-draw
-  virtual call into every plugin (section 7's measured costs forbid it).
+  planting; the installer's receipts already know what it installed), a stable
+  ABI for first-party plugins (they ship with the core; freezing their
+  interface buys nothing and costs every refactor), and a per-draw virtual call
+  into every plugin (section 7's measured costs forbid it).
 
 ## 1. Goals and non-goals
 
@@ -2453,3 +2454,41 @@ timings or visuals. Then install and fly the candidate under the same
 conditions. Native builds are complete for the pair. The October 6 control
 `373198c1` measurement remains retained; no plugin performance improvement or
 Phase 1 acceptance is claimed yet.
+
+### Why the holstered hangar still exercises history, 2026-10-07
+
+Sean points out that neither the carrier cockpit nor the on-foot hangar lets
+him draw a weapon. The earlier rationale cited eligible calls without tracing
+the completed command intervals. That evidence alone does not identify a
+rendered weapon, the mesh that matched, or pixels receiving valid vectors.
+
+Re-read the exact October 6 graphics log through `edvr_log.py --file` with
+`--expect-build 373198c1`; the build matches. During the hangar interval, scope
+2 at 17:54:34.279 records 1800 source frames and 9000 eligible calls. Its
+identity, post-VS capture and raster reports each contain 141 selected, 141
+submitted and 141 ready samples, with no invalid or pending samples. The other
+six reported scopes likewise contain completed capture and raster samples.
+These are sampled GPU command intervals, not a count of visible weapons or an
+estimate of all unsampled work.
+
+The indexed-instanced hook calls `weaponMotionDraw` for matching vertex-shader
+hashes after the original draw, on the owner context and the on-foot source
+path. Admission checks shader family, current source, geometry, viewport and
+depth/stencil state; it does not query whether the player equipped a weapon.
+The new shared `AnimatedVertexHistory` prepares the capture and supplies its
+identity/history work before position capture and motion-map rasterization. The
+reported samples therefore establish executed work on this path in the
+holstered hangar. Which mesh triggered it remains unproven.
+
+Ruled out: a holstered weapon makes the weapon-history path inactive in this
+hangar baseline, because capture and raster intervals completed. Do not infer
+weapon visibility from the feature name or the eligible-call counter.
+
+Read-only Luna source review confirms main's engine-velocity domain/marker
+additions are flat-profile gated; the carrier's existing VR engine-velocity
+activity is not evidence those additions executed. The carrier comparison is
+the cockpit/plugin workload for the control and candidate with common main
+source, rather than a weapon-quality test. The fresh hangar control is needed
+to separate the shared history change from plugin overhead. Keep the previous
+baseline as evidence, preserve the holstered scenes, and make no weapon-visual
+or plugin-performance acceptance claim from these counters.
