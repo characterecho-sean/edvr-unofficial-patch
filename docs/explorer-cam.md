@@ -7,6 +7,11 @@
   `camera_index_track` and its five sibling keys are gone, and so is
   `fix.head_offset_view_bridge` ("hold through camera gaps"), which only held
   the read's last view (removed 4aa78e48).
+- **Redesign proposed 2026-10-07, nothing built:** place Elite's own free
+  camera at the commander's head and lock it, with no press counting and no
+  pose offsets, and hide the head only while the camera is in it. See
+  [design-explorer-cam-free-camera-2026-10-07.md](design-explorer-cam-free-camera-2026-10-07.md),
+  which also reviews the unmerged head-hiding branch.
 
 Explorer Cam moves your viewpoint to your commander's head while you are on
 foot in Elite's external camera, which renders in proper stereo. This page

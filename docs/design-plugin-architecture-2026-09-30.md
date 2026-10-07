@@ -35,24 +35,25 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** main is integrated through `0d4bc714`. The NV pilot's legacy
-  replay, 32 composed children and pixel coverage run. Whole-ladder actions
-  precede broader migration. The refreshed 814 caller is diagnostic: its body
-  gains 52 instruction bytes/14 records, raw equality fails and timing remains
-  unmeasured. New cold census sample/calibration rows and the strict
-  `edvr_log.py --plugin-cost` reader pass the full 149-job build and installer
-  checks, 344 focused census checks and 17 fresh scoped gates. The complete
-  main-based control `405b14cd` passes 129 jobs with identical census files.
-  Frozen flights: `7bbe7d90` control/`6c63f6aa` candidate, build/environment
-  matched; no visual changes. NV-on sampled hook time per timed draw is 15.0%
-  lower; other CPU ranges overlap. Carrier DLSS/NV-off EDVR GPU cost is 2.9%
-  higher, its median above the control range. Draw counts differ and the
-  on-foot source has 4.175% more pixels; normalization cannot establish GPU
-  attribution/non-regression. Domain/frame/lifecycle accounting, held-boundary
-  frame cost and full coverage remain open. Replay retains 482.4 MiB when
-  enabled, none when off; NV blur reproduces on `14a7ff70`. Temporary key:
-  `advanced.draw_replay` (off); removal requires Scope control. V2 preserves
-  V1/CPU limits. No Phase 1 acceptance or shipping.
+- **Next:** main integrates through `6b43ffc9` (code unchanged from
+  `0d4bc714`). The NV pilot's legacy replay, 32 composed children and pixel
+  coverage run. Whole-ladder actions precede broader migration. The refreshed
+  814 caller is diagnostic: its body gains 52 instruction bytes/14 records, raw
+  equality fails and timing remains unmeasured. New cold census
+  sample/calibration rows and the strict `edvr_log.py --plugin-cost` reader
+  pass the full 149-job build and installer checks, 344 focused census checks
+  and 17 fresh scoped gates. The complete main-based control `405b14cd` passes
+  129 jobs with identical census files. Frozen flights: `7bbe7d90`
+  control/`6c63f6aa` candidate, build/environment matched; no visual changes.
+  NV-on sampled hook time per timed draw is 15.0% lower; other CPU ranges
+  overlap. Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its median above
+  the control range. Draw counts differ and the on-foot source has 4.175% more
+  pixels; normalization cannot establish GPU attribution/non-regression.
+  Domain/frame/lifecycle accounting, held-boundary frame cost and full coverage
+  remain open. Replay retains 482.4 MiB when enabled, none when off; NV blur
+  reproduces on `14a7ff70`. Temporary key: `advanced.draw_replay` (off);
+  removal requires Scope control. V2 preserves V1/CPU limits. No Phase 1
+  acceptance or shipping.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -3342,6 +3343,13 @@ config contract, exports and installer-resource checks. Receipt
 `e83b9268ba5bfa1a20dcec36ac05ea7e8ff3950b35ebebfd6fbda2a039267486` verifies
 against the exact source/compiler context. Commit `405b14cd` has only the three
 reviewed census files and parent `0d4bc714`; its clean receipt verifies. Both
-builds await clean-version DLL promotion before a matched flight.
-Steam/settings stay unchanged. GPU attribution and Phase 1 acceptance remain
-open; broader migration and shipping stay held.
+clean-version DLL promotions pass, for candidate `2bd15a67` and control
+`405b14cd`, and both testing branches are pushed with remote hashes confirmed.
+
+The remote advances main to `6b43ffc9` during validation. The complete delta
+from `0d4bc714` contains only two Explorer Cam docs, with no build-input
+change. That exact commit merges cleanly into the feature branch under Sean's
+standing authorization; the production main cut and control stay identical to
+`0d4bc714`. A final candidate version promotion follows the documentation
+merge. Steam/settings stay unchanged at this point. GPU attribution and Phase 1
+acceptance remain open; broader migration and shipping stay held.
