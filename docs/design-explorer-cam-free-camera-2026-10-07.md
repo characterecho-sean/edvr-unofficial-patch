@@ -48,9 +48,14 @@
   `+0x592200`. The culling view (render context +0x40, frustum planes) is
   built upstream of that call (design-occlusion-culling-2026-09-22.md), and
   6s.9 saw holes and body culling from a downstream move.
-- **Next:** flight F0. 0a is done and the 0b instruments are built
-  (2026-10-07, compiled and gated, not flown); the log prefixes to grep are in
-  the last section of this doc.
+- **Branch and scope (Sean, 2026-10-07):** this work stays on
+  `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
+  old Explorer Cam route entirely; deleting the old route is authorized
+  (Phase 3).
+- **Next:** flight F0 on FRONTIER. 2d103d84 is installed and verified there
+  (2026-10-07 17:22). The live ini has `head_offset_gate = 0`, so the old
+  route cannot move the camera, and `explorer_cam_probe = on`; set the probe
+  off after F0. The log prefixes to grep are in the last section.
 - **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off)
   switches on all three 0b instruments, and the VR camera census with them.
   Removed when the arc closes. Any other key Phase 0 adds is listed here.
@@ -194,10 +199,16 @@ Use H4 if 0a found it. Otherwise port `commander_head.{h,cpp}`, which
 depends only on Config and Log, with the fixes above. Main's
 `bindingShaderHash(BindSlot::Vs)` replaces the per-draw `VSGetShader`.
 
-## Phase 3: delete the counting (Sean signs off key by key)
+## Phase 3: replace the old route (authorized by Sean, 2026-10-07)
 
-These keys and their code go, quoted with behaviour per Scope control
-before anything is removed:
+The new route replaces the old Explorer Cam entirely, and Sean authorized
+deleting it. It goes in the same build as Phase 1, so the branch never
+carries two Explorer Cams. The old gate, press counting, camera-key
+adoption and pose offsets go with their keys and `gate_test` sections; the
+commit lists every key removed. Shared pieces stay: the journal watch, the
+binding lookups FSS uses, the Disembark/Embark counters `static_prop_gate`
+uses, and `hotkey.read_game_bindings` (the menu's panel keys). The keys
+that go include:
 
 - `advanced.head_offset_view` and `fix.head_offset_view_count`.
 - The menu action "Reset Explorer Cam's counted view to 0".
