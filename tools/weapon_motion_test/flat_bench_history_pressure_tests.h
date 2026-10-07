@@ -729,6 +729,297 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         results.push_back(result);
     }
 
+    // THE PISTOL'S NO-CANDIDATE BURSTS (design section 104). A draw that finds no record of its exact geometry key that the frame before used
+    // is classified (animated_history_ledger.h), and one pattern is acted on: the same mesh drawn the frame before from another place in the
+    // same buffers (the game re-packed or ring-allocated it), through exactly one record no other draw took. That record is handed over as the
+    // draw's one candidate and the GPU identity still decides. Every other pattern stays refused, and the default policy (VR) is untouched.
+    {
+        std::vector<UINT> indices{0,1,2,0,1,2,0,1,2};   // start 0, 3 and 6 are three places of one three-vertex mesh
+        auto ib=flatHistoryPressureIndexBuffer(dev,indices);
+        ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        FlatHistoryPressureResult result{"offset_shift_rescue"};
+        auto take=[&](AnimatedVertexHistory& h,unsigned start,int base,unsigned frame,AnimatedVertexHistory::Capture& c) {
+            const bool ok=h.capture(ctx,issue,3,1,start,base,0,frame,c,false,true);++result.captures;return ok;
+        };
+        AnimatedVertexHistory h;
+        AnimatedVertexHistory::Capture a,b,c,d,e,f;
+        check(take(h,0,0,2000,a) && a.missed && a.miss.gap==HistoryGap::PreviousFrameEmpty && a.candidateCount==0 && !a.acrossOffset,
+              "the first draw of a key has no prior and is classified: nothing was offered the frame before");
+        h.advance(2001);
+        check(take(h,3,0,2001,b) && b.missed && b.miss.gap==HistoryGap::OffsetShift && b.acrossOffset && b.candidateCount==1 && b.priorRecords==1 &&
+                  b.previousPositions[0]==a.currentPositions && b.previousIdentity[0]==a.currentIdentity && b.miss.diff==kDiffStart,
+              "the same mesh drawn from another start is rescued: the frame before's record is its one candidate, across the offset");
+        check(h.recordCount()==2 && h.bytes()==2*3*32,"the rescue allocates the draw's own record and takes nothing from the other");
+        h.advance(2002);
+        check(take(h,3,0,2002,c) && !c.missed && !c.acrossOffset && c.candidateCount==1 && c.previousPositions[0]==b.currentPositions,
+              "the frame after is an exact match at the new place: no miss, no rescue");
+        h.advance(2003);
+        check(take(h,3,1,2003,d) && d.missed && d.miss.gap==HistoryGap::OffsetShift && d.acrossOffset && d.miss.diff==kDiffBase &&
+                  d.previousPositions[0]==c.currentPositions,
+              "a mesh whose base vertex moves is rescued the same way");
+        h.advance(2004);
+        check(take(h,0,0,2004,e) && e.missed && e.miss.gap==HistoryGap::OffsetShift && e.acrossOffset && e.miss.diff==(kDiffStart|kDiffBase) &&
+                  e.previousPositions[0]==d.currentPositions,
+              "a mesh that moves in start and base at once is rescued, and names both");
+        h.advance(2005);
+        check(take(h,3,1,2005,f) && f.missed && f.acrossOffset && f.previousPositions[0]==e.currentPositions,
+              "a mesh that alternates between two places is rescued every frame, against the frame before");
+        check(h.recordCount()<=3,"a mesh that moves every frame holds the records of three frames at most");
+        result.priorCandidates=f.candidateCount;result.records=unsigned(h.recordCount());result.bytes=h.bytes();
+        // Through the adapter: the rescue is a prior the map is handed, counted as the rescue, and it leaves no draw in no-candidate.
+        FlatForegroundMotion motion;unsigned token=0;
+        auto inputs=[&]{auto in=flatHistoryPressureInputs(++token);in.vs=0xA1;in.ps=0xB2;return in;};
+        check(motion.capture(ctx,issue,3,1,0,0,0,3000,inputs()) && motion.capture(ctx,issue,3,1,3,0,0,3001,inputs()),
+              "the adapter captures the same mesh at two places in two frames");
+        const auto& stats=motion.stats();
+        check(stats.missBy[unsigned(HistoryGap::PreviousFrameEmpty)]==1 && stats.missBy[unsigned(HistoryGap::OffsetShift)]==1 &&
+                  stats.acrossOffset==1 && stats.noCandidate==1 && stats.priorsOne==1,
+              "the adapter files the first draw as new, the second as an offset shift that was rescued and found its prior");
+        motion.beginFrame(3002);
+        check(motion.capture(ctx,issue,3,1,3,0,0,3002,inputs()),"and the third, at the same place, captures");
+        check(stats.missBy[unsigned(HistoryGap::OffsetShift)]==1 && stats.noCandidate==1 && stats.priorsOne==2,
+              "an exact match is no miss");
+        motion.beginFrame(3004);
+        check(stats.frames==3 && stats.framesMissing==2 && stats.framesAllMissing==2 && motion.takeLongestMissRun()==2 && motion.takeLongestMissRun()==0,
+              "the frame counters: three frames submitted, two with a miss, in both of them every draw missed, the run two frames");
+        FlatForegroundMotion::MissExample examples[FlatForegroundMotion::kMissExamples];
+        const unsigned shown=motion.takeMissExamples(examples,FlatForegroundMotion::kMissExamples);
+        check(shown==2 && examples[0].miss.gap==HistoryGap::PreviousFrameEmpty && examples[1].miss.gap==HistoryGap::OffsetShift &&
+                  examples[1].rescued && examples[1].vs==0xA1 && examples[1].ps==0xB2 && examples[1].key.start==3 && examples[1].key.count==3 &&
+                  examples[1].miss.hasNearest && examples[1].miss.nearest.start==0 && examples[1].frame==3001 && motion.takeMissExamples(examples,6)==0,
+              "the first draw of each pattern is kept as an example with its shaders, its whole key and the nearest entry's");
+        results.push_back(result);
+    }
+
+    // The refusals. Each is a draw that finds no exact prior and is NOT rescued: its candidate count stays zero and its pattern is named.
+    {
+        std::vector<UINT> indices{0,1,2,0,1,2,0,1,2,0,1,2};
+        auto ib=flatHistoryPressureIndexBuffer(dev,indices);
+        auto ib2=flatHistoryPressureIndexBuffer(dev,indices);
+        ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        FlatHistoryPressureResult result{"offset_shift_refusals"};
+        auto take=[&](AnimatedVertexHistory& h,unsigned count,unsigned start,unsigned frame,AnimatedVertexHistory::Capture& c,bool extended=true) {
+            const bool ok=h.capture(ctx,issue,count,1,start,0,0,frame,c,false,extended);++result.captures;return ok;
+        };
+        auto refused=[&](const AnimatedVertexHistory::Capture& c,HistoryGap gap,const char* what) {
+            check(c.missed && c.miss.gap==gap && !c.acrossOffset && c.candidateCount==0,what);
+        };
+        {   // A change of vertex count is a different mesh: new geometry, not a shift.
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,b;
+            check(take(h,3,0,2100,a),"a draw of three vertices captures");h.advance(2101);
+            check(take(h,6,0,2101,b),"the same buffers drawn with six vertices capture");
+            refused(b,HistoryGap::CountChange,"another vertex count is count-change and stays new: no candidate, no rescue");
+            check(b.miss.diff==kDiffCount,"count-change names the count");
+        }
+        {   // A change of vertex count AND of place: the count guard is all that keeps it from the offset shift.
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,b;
+            check(take(h,3,0,2110,a),"a draw of three vertices captures");h.advance(2111);
+            check(take(h,6,3,2111,b),"the same buffers drawn with six vertices from another start capture");
+            refused(b,HistoryGap::CountChange,"a mesh that changes its vertex count and its start is count-change, not an offset shift");
+            check(b.miss.diff==(kDiffCount|kDiffStart),"and it names both fields");
+        }
+        {   // The frame before missing a frame: the key is seen again after a gap. A second vertex shader object with the same bytecode keeps
+            // the frame in between from being empty without being related to the key (no shared shader, no nearest key).
+            ComPtr<ID3D11VertexShader> original,other;ctx->VSGetShader(&original,nullptr,nullptr);
+            UINT size=0;original->GetPrivateData(AnimatedVertexHistory::bytecodeKey,&size,nullptr);
+            std::vector<unsigned char> code(size);original->GetPrivateData(AnimatedVertexHistory::bytecodeKey,&size,code.data());
+            hr(dev->CreateVertexShader(code.data(),size,nullptr,&other));AnimatedVertexHistory::rememberShader(other.Get(),code.data(),size);
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,u,b;
+            check(take(h,3,0,2200,a),"a key is drawn");h.advance(2201);
+            ctx->VSSetShader(other.Get(),nullptr,0);
+            check(take(h,3,0,2201,u),"a draw under another vertex shader object keeps the frame in between from being empty");
+            ctx->VSSetShader(original.Get(),nullptr,0);
+            h.advance(2202);check(take(h,3,0,2202,b),"the key is drawn again two frames later");
+            refused(b,HistoryGap::AbsentShort,"a key drawn two frames ago and not the frame before stays without a prior: absent-short");
+            check(b.miss.age==2,"absent-short names its age");
+            AnimatedVertexHistory g;AnimatedVertexHistory::Capture c,d;
+            check(take(g,3,0,2250,c),"a key is drawn");g.advance(2252);
+            check(take(g,3,0,2252,d),"and again after a frame with nothing offered");
+            refused(d,HistoryGap::PreviousFrameEmpty,"a frame before that offered nothing is previous-frame-empty");
+        }
+        {   // Several places at once: the record cannot be told from its neighbour. Ambiguous, refused.
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,b,c;
+            check(take(h,3,0,2300,a) && take(h,3,3,2300,b),"one mesh is drawn from two places in a frame");h.advance(2301);
+            check(take(h,3,6,2301,c),"and from a third the frame after");
+            refused(c,HistoryGap::OffsetShiftAmbiguous,"two records of the same mesh at other places are ambiguous: refused");
+        }
+        {   // A record another draw of this frame already used is not free.
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,b,c;
+            check(take(h,3,0,2400,a),"a mesh is drawn from one place");h.advance(2401);
+            check(take(h,3,0,2401,b) && b.candidateCount==1 && !b.missed,"the frame after, the draw at that place takes its own record");
+            check(take(h,3,3,2401,c),"and a second draw of the mesh from another place");
+            refused(c,HistoryGap::OffsetShiftAmbiguous,"a record the frame's other draw already used is not offered to this one: refused");
+        }
+        {   // One record, two shifted draws: the first takes it and the second is refused (the claim).
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,b,c,d;
+            check(take(h,3,0,2500,a),"a mesh is drawn from one place");h.advance(2501);
+            check(take(h,3,3,2501,b) && b.acrossOffset && b.candidateCount==1,"the first shifted draw takes the record");
+            check(take(h,3,6,2501,c),"a second shifted draw of the frame");
+            refused(c,HistoryGap::OffsetShiftAmbiguous,"the second shifted draw finds the record claimed and is refused");
+            check(take(h,3,0,2501,d) && d.candidateCount==1 && !d.missed,"the draw at the record's own place still finds it: the claim takes nothing from it");
+        }
+        {   // A write to the buffers invalidated the record: nothing to take across.
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,b,c,d;
+            check(take(h,3,0,2600,a),"a mesh is drawn");h.advance(2601);
+            check(h.resourceWritten(ib.Get())==4,"its index buffer is written");
+            check(take(h,3,3,2601,b),"the mesh is drawn from another place");
+            refused(b,HistoryGap::OffsetShiftUnusable,"the mesh seen elsewhere has no usable record: offset-shift-unusable, refused");
+            AnimatedVertexHistory g;AnimatedVertexHistory::Capture e,f;
+            check(take(g,3,0,2650,e),"a mesh is drawn");g.advance(2651);
+            check(g.resourceWritten(ib.Get())==4,"its index buffer is written");
+            check(take(g,3,0,2651,f),"and drawn from the same place");
+            refused(f,HistoryGap::InvalidatedIndices,"the same key after a write to its index buffer is invalidated-indices");
+            AnimatedVertexHistory v;AnimatedVertexHistory::Capture g1,g2;
+            check(take(v,3,0,2680,g1),"a mesh is drawn");v.advance(2681);
+            check(v.resourceWritten(nullptr)==1,"an unknown write lands");
+            check(take(v,3,0,2681,g2),"and it is drawn again");
+            refused(g2,HistoryGap::InvalidatedUnknown,"an unknown write is invalidated-unknown");
+        }
+        {   // The same shader from another index buffer: the draw is not the same mesh.
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,b;
+            check(take(h,3,0,2700,a),"a mesh is drawn");h.advance(2701);
+            ctx->IASetIndexBuffer(ib2.Get(),DXGI_FORMAT_R32_UINT,0);
+            check(take(h,3,0,2701,b),"the same shader draws from another index buffer");
+            refused(b,HistoryGap::BufferChange,"another index buffer is buffer-change and stays new");
+            ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        }
+        {   // A capture the frame before refused, and one it never completed.
+            AnimatedVertexHistory h;
+            std::vector<AnimatedVertexHistory::Capture> held(AnimatedVertexHistory::maxExtendedOccurrences);
+            for(unsigned i=0;i<AnimatedVertexHistory::maxExtendedOccurrences;++i)take(h,3,0,2800,held[i]);
+            AnimatedVertexHistory::Capture over;
+            check(!take(h,3,0,2800,over) && over.refusal && !std::strcmp(over.refusal,"occurrence-cap"),"the sixty-fifth draw of a key is refused");
+            // The frame after has nothing of this key that the 64 first records do not already give; the refused draw is the ledger's.
+            const HistoryClass later=h.ledger().classify(2801,over.key,HistoryRecordFacts{});
+            check(later.gap==HistoryGap::RefusedLastFrame,"a key refused last frame is refused-last-frame, whatever the records say");
+        }
+        {   // The default policy: nothing is classified, nothing is rescued, and the ledger is never written.
+            AnimatedVertexHistory plain;AnimatedVertexHistory::Capture a,b;
+            check(take(plain,3,0,2900,a,false),"the default policy captures");plain.advance(2901);
+            check(take(plain,3,3,2901,b,false) && !b.missed && !b.acrossOffset && b.candidateCount==0,
+                  "the default policy (VR) never rescues across an offset and classifies nothing");
+            check(plain.ledger().entries()==0,"the default policy writes no ledger");
+        }
+        {   // The frame before offered draws that were turned away before the history was asked: not an empty frame.
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,b;
+            check(take(h,3,0,3100,a),"a mesh is drawn");h.advance(3101);
+            h.noteNotOffered(3101);h.advance(3102);
+            check(take(h,3,0,3102,b),"and drawn two frames later");
+            refused(b,HistoryGap::PreviousFrameNotCaptured,"a frame before that offered only draws turned away is previous-frame-not-captured");
+        }
+        FlatForegroundMotion motion;unsigned token=0;
+        // The adapter records a preflight refusal in the ledger, so the next frame is classified against it.
+        check(!motion.capture(ctx,issue,4,1,0,0,0,3200,flatHistoryPressureInputs(++token)) && motion.drawRefusal() &&
+                  !std::strcmp(motion.drawRefusal(),"foreground-primitive-bound"),"a draw with a vertex count that is not a triangle list is deferred");
+        check(motion.capture(ctx,issue,3,1,0,0,0,3201,flatHistoryPressureInputs(++token)) &&
+                  motion.stats().missBy[unsigned(HistoryGap::PreviousFrameNotCaptured)]==1,
+              "the next frame's draw is filed under previous-frame-not-captured through the adapter");
+        // Every miss is filed under exactly one pattern.
+        uint64_t sum=0;for(unsigned i=0;i<kHistoryGapCount;++i)sum+=motion.stats().missBy[i];
+        check(sum==1,"the patterns sum to the misses");
+        results.push_back(result);
+    }
+
+    // SIBLINGS. Two parts of one object can share a shader, buffers, vertex count and stride, and one pool identity, and differ in where they start.
+    // A mesh that MOVED vacates its old place; a donor record another draw uses this frame is a part that did not move, and the rescue is withdrawn
+    // when the frame's draws are all in (rescueHolds), whichever of the two draws came first.
+    {
+        std::vector<UINT> indices{0,1,2,0,1,2,0,1,2};
+        auto ib=flatHistoryPressureIndexBuffer(dev,indices);
+        ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        FlatHistoryPressureResult result{"offset_shift_sibling_withdrawn"};
+        auto take=[&](AnimatedVertexHistory& h,unsigned start,unsigned frame,AnimatedVertexHistory::Capture& c) {
+            const bool ok=h.capture(ctx,issue,3,1,start,0,0,frame,c,false,true);++result.captures;return ok;
+        };
+        {   // The shifted draw first, its sibling at the old place after: the rescue is withdrawn.
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,shifted,sibling;
+            check(take(h,0,3300,a),"a part is drawn");h.advance(3301);
+            check(take(h,3,3301,shifted) && shifted.acrossOffset && shifted.candidateCount==1,"the same mesh from another start is rescued");
+            check(h.rescueHolds(shifted,3301),"and the rescue holds while the old place is not drawn again");
+            check(take(h,0,3301,sibling) && sibling.candidateCount==1 && !sibling.missed,"the part at the old place draws, and takes its own record");
+            check(!h.rescueHolds(shifted,3301),"the donor was used this frame: the rescue is withdrawn, the two draws are siblings");
+            check(h.rescueHolds(sibling,3301),"a draw that was not rescued always holds");
+        }
+        {   // A mesh that moved: nothing draws at the old place.
+            AnimatedVertexHistory h;AnimatedVertexHistory::Capture a,shifted,next;
+            check(take(h,0,3400,a),"a part is drawn");h.advance(3401);
+            check(take(h,3,3401,shifted) && shifted.acrossOffset,"it is drawn from another start");
+            check(h.rescueHolds(shifted,3401),"and nothing draws at its old place: the rescue holds at the end of the frame");
+            h.advance(3402);
+            check(take(h,3,3402,next) && !next.missed && next.candidateCount==1,"and the frame after, from there, it has its own exact prior");
+        }
+        // Through the adapter and H: the withdrawn prior reaches the map as no prior, and the count says so.
+        auto texture=[&](DXGI_FORMAT format) {
+            D3D11_TEXTURE2D_DESC d{};d.Width=128;d.Height=96;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;d.Format=format;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+            ComPtr<ID3D11Texture2D> t;hr(dev->CreateTexture2D(&d,nullptr,&t));
+            ComPtr<ID3D11ShaderResourceView> v;hr(dev->CreateShaderResourceView(t.Get(),nullptr,&v));return v;
+        };
+        auto owners=texture(DXGI_FORMAT_R32G32B32A32_FLOAT),rawDepth=texture(DXGI_FORMAT_R32_FLOAT);
+        float world[6][4]{};world[3][2]=.0675f;
+        FlatForegroundMotion motion;unsigned token=0;
+        auto inputs=[&]{return flatHistoryPressureInputs(++token);};
+        check(motion.capture(ctx,issue,3,1,0,0,0,3500,inputs()),"the adapter captures a part");
+        check(motion.capture(ctx,issue,3,1,3,0,0,3501,inputs()) && motion.capture(ctx,issue,3,1,0,0,0,3501,inputs()),
+              "and the next frame the shifted draw first and its sibling after");
+        FlatForegroundMotion::Output out;
+        check(motion.prepareH(ctx,owners.Get(),rawDepth.Get(),world,3501,128,96,out) && out.qualified,"H qualifies the frame");
+        check(motion.stats().acrossOffset==1 && motion.stats().rescueCancelled==1,"the rescue was counted, and withdrawn once H asked");
+        check(motion.prepareH(ctx,owners.Get(),rawDepth.Get(),world,3501,128,96,out) && motion.stats().rescueCancelled==1,
+              "asking H again does not withdraw it twice");
+        motion.beginFrame(3600);
+        check(motion.capture(ctx,issue,3,1,0,0,0,3600,inputs()),"a part is drawn");
+        check(motion.capture(ctx,issue,3,1,3,0,0,3601,inputs()),"and from another start the frame after, alone");
+        check(motion.prepareH(ctx,owners.Get(),rawDepth.Get(),world,3601,128,96,out) && motion.stats().acrossOffset==2 && motion.stats().rescueCancelled==1,
+              "a mesh that moved keeps its rescue through H: nothing is withdrawn");
+        results.push_back(result);
+    }
+
+    // THE PISTOL'S IDENTITY-DIFFERS WINDOW (design section 104). One draw in thirteen that the map will match by identity has its identity words and
+    // its priors' copied to a staging buffer, read a few frames later without waiting, and classified by the map's own two tests.
+    {
+        FlatHistoryPressureResult result{"identity_sample_readback"};
+        auto words=[&](const uint32_t (&w)[4]) {
+            D3D11_BUFFER_DESC d{};d.ByteWidth=16;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;d.StructureByteStride=16;
+            D3D11_SUBRESOURCE_DATA sd{w,0,0};ComPtr<ID3D11Buffer> b;hr(dev->CreateBuffer(&d,&sd,&b));
+            ComPtr<ID3D11ShaderResourceView> v;hr(dev->CreateShaderResourceView(b.Get(),nullptr,&v));return v;
+        };
+        const uint32_t currentWords[4]={100,0x00AB1234u,1,0},otherBase[4]={101,0x00AB1234u,1,0},unwritten[4]={0,0,0,0},sameWithParameter[4]={100,0x00FF1234u^0x00AB0000u,1,0};
+        auto current=words(currentWords),moved=words(otherBase),blank=words(unwritten),parameter=words(sameWithParameter);
+        HistoryKey key;key.count=9;key.start=3;
+        FlatIdentitySampler sampler;
+        ID3D11ShaderResourceView* priors[2]={moved.Get(),blank.Get()};
+        unsigned taken=0;
+        for(unsigned i=0;i<FlatIdentitySampler::every-1;++i)taken+=sampler.consider(ctx,600,current.Get(),priors,2,key,0xA1,0xB2)?1:0;
+        check(taken==0,"the first twelve draws offered are not sampled");
+        check(sampler.consider(ctx,600,current.Get(),priors,2,key,0xA1,0xB2),"the thirteenth is");
+        unsigned seen=0;
+        sampler.poll(ctx,601,false,[&](const FlatIdentitySampler::Sample&){++seen;});
+        check(seen==0,"a sample is not read before two frames have passed");
+        FlatIdentitySampler::Sample got;
+        sampler.poll(ctx,602,true,[&](const FlatIdentitySampler::Sample& s){++seen;got=s;});
+        check(seen==1 && got.priors==2 && got.frame==600 && got.vs==0xA1 && got.ps==0xB2 && got.key.start==3 && got.key.count==9,
+              "the sample comes back with its frame, its shaders and its key");
+        check(got.current.x==100 && got.current.y==0x00AB1234u && got.current.z==1 && got.prior[0].x==101 && got.prior[1].z==0,
+              "the words read back are the ones the draw and each candidate hold");
+        check(got.verdict==IdentityVerdict::XDiffers,"a moved first word with the same signature is x-differs, as the map decides it");
+        ID3D11ShaderResourceView* matching[2]={parameter.Get(),moved.Get()};
+        for(unsigned i=0;i<FlatIdentitySampler::every-1;++i)sampler.consider(ctx,610,current.Get(),matching,2,key,1,2);
+        check(sampler.consider(ctx,610,current.Get(),matching,2,key,1,2),"the next thirteenth is sampled");
+        sampler.poll(ctx,612,true,[&](const FlatIdentitySampler::Sample& s){got=s;});
+        check(got.verdict==IdentityVerdict::Match,"a candidate that differs from the draw only in byte 30 matches");
+        // Sixteen slots: the seventeenth sample finds none free and is counted, never waited for.
+        FlatIdentitySampler full;unsigned accepted=0;
+        for(unsigned i=0;i<FlatIdentitySampler::every*(FlatIdentitySampler::slots+1);++i)accepted+=full.consider(ctx,700,current.Get(),priors,2,key,1,2)?1:0;
+        check(accepted==FlatIdentitySampler::slots && full.skipped()==1,"with every slot waiting the next sample is skipped and counted");
+        unsigned drained=0;
+        full.poll(ctx,702,true,[&](const FlatIdentitySampler::Sample&){++drained;});
+        check(drained==FlatIdentitySampler::slots,"every waiting sample is read once the frames have passed");
+        check(!sampler.consider(ctx,800,nullptr,priors,2,key,1,2) && !sampler.consider(ctx,800,current.Get(),priors,0,key,1,2) &&
+                  !sampler.consider(nullptr,800,current.Get(),priors,2,key,1,2),"a draw with no identity view, no candidates or no context is never sampled");
+        result.captures=accepted;
+        results.push_back(result);
+    }
+
     if(printJson) {
         std::printf("EDVR_BENCH_HISTORY_RESULT {\"schema\":\"edvr-flat-sdk-history-bench\",\"version\":1,\"verdict\":\"PASS\",\"provenance\":\"reconstructed GPU workload using production AnimatedVertexHistory\",\"cases\":[");
         for(size_t i=0;i<results.size();++i) {

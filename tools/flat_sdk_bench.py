@@ -159,7 +159,8 @@ HISTORY_CASES = frozenset(("provisional_before_foreign", "byte_budget", "invalid
                             "adapter_invalidated_prior_occupancy", "invalidated_capture_snapshot_lifetime",
                             "outstanding_capture_record_index", "stale_capture_epoch_guard",
                             "duplicate_occurrence_cap", "extended_occurrence_window",
-                            "extended_spent_record_reclaim", "adapter_covered_refusals"))
+                            "extended_spent_record_reclaim", "adapter_covered_refusals", "offset_shift_rescue",
+                            "offset_shift_refusals", "offset_shift_sibling_withdrawn", "identity_sample_readback"))
 MAX_JSON = 1 << 20
 
 

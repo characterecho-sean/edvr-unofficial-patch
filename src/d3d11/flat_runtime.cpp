@@ -23,6 +23,8 @@
 #include "flat_untrusted_coverage.h"
 #include "flat_foreground_probe.h"
 #include "flat_foreground_motion.h"
+#include "flat_no_candidate_report.h"
+#include "flat_source_spell.h"
 #include "flat_foreground_phase.h"
 #include "flat_domain_admission.h"
 #include "flat_domain_depth_route.h"
@@ -261,6 +263,15 @@ struct State {
     FlatDomainDepthRoute<kDomainCandidateCap> foregroundRoute;
     std::array<DomainCandidate,kDomainCandidateCap> foregroundCandidates;
     FlatForegroundMotion::CaptureStats foregroundRetiredCaptureStats;
+    // Section 104, the pistol's no-candidate bursts: the cumulative counters as of the last `flat foreground no-candidate 5s:` line (the
+    // line prints the window's), and the example lines said this session (each kind is capped).
+    FlatForegroundMotion::CaptureStats foregroundMissReported;
+    uint32_t foregroundMissExampleLines=0,foregroundIdentityExampleLines=0;
+    // Section 104, the training mission's turned-left view: the spell tracker (flat_source_spell.h), and what the last frame refused for
+    // no motion source held on the scene's depth.
+    FlatSourceSpell sourceSpell;
+    FlatMonoSourceless sourcelessLast;
+    uint64_t sourcelessLastFrame=0;
     const void* foregroundSelectedDepth=nullptr;
     struct DomainHReceipt {
         uint64_t frame=~0ull;const void* depth=nullptr;
@@ -632,10 +643,65 @@ static void domainResourceWritten(State& s,ID3D11Resource* resource,const char* 
         if(!resource || candidate.depth.Get()==resource)candidate.motion.fail(depthReason);
     }
 }
+// Section 104, the pistol's no-candidate bursts: why the draws of the last 5 s found no record of their exact geometry key that the frame
+// before used (every pattern, zeros included), the draws with priors that the map will not match by identity (the same for the identity
+// words), and the first draw of each pattern with its whole key. All of it is read from counters the capture already keeps; the window is
+// the difference of the cumulative counters from the last line.
+static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::CaptureStats& captures) {
+    const auto& was=s.foregroundMissReported;
+    const auto delta=[](uint64_t now,uint64_t before){return now>before?now-before:uint64_t(0);};
+    FlatNoCandidateWindow w;
+    w.submitted=delta(captures.submitted,was.submitted);w.noCandidate=delta(captures.noCandidate,was.noCandidate);
+    w.acrossOffset=delta(captures.acrossOffset,was.acrossOffset);w.rescueCancelled=delta(captures.rescueCancelled,was.rescueCancelled);
+    w.frames=delta(captures.frames,was.frames);
+    w.framesMissing=delta(captures.framesMissing,was.framesMissing);w.framesAllMissing=delta(captures.framesAllMissing,was.framesAllMissing);
+    w.resetFrames=delta(captures.resetFrames,was.resetFrames);w.nearChanges=delta(captures.nearChanges,was.nearChanges);
+    for(unsigned i=0;i<kHistoryGapCount;++i)w.missBy[i]=delta(captures.missBy[i],was.missBy[i]);
+    w.identitySamples=delta(captures.identitySamples,was.identitySamples);
+    for(unsigned i=0;i<kIdentityVerdictCount;++i)w.identityBy[i]=delta(captures.identityBy[i],was.identityBy[i]);
+    struct Taken {FlatForegroundMotion::MissExample miss[FlatForegroundMotion::kMissExamples];unsigned misses=0;
+                  FlatIdentitySampler::Sample identity[FlatForegroundMotion::kIdentityExamples];unsigned identities=0;};
+    std::array<Taken,State::kDomainCandidateCap> taken{};
+    for(unsigned i=0;i<s.foregroundCandidates.size();++i) {
+        auto& motion=s.foregroundCandidates[i].motion;
+        w.longestRun=(std::max)(w.longestRun,motion.takeLongestMissRun());
+        w.identitySkipped+=motion.identitySkipped();w.identityUnread+=motion.identityNotReady();
+        taken[i].misses=motion.takeMissExamples(taken[i].miss,FlatForegroundMotion::kMissExamples);
+        taken[i].identities=motion.takeIdentityExamples(taken[i].identity,FlatForegroundMotion::kIdentityExamples);
+    }
+    s.foregroundMissReported=captures;
+    char line[4096];
+    flatNoCandidateLine(line,sizeof(line),w);Log::get().note("%s",line);
+    flatIdentityLine(line,sizeof(line),w);Log::get().note("%s",line);
+    for(const auto& t:taken) {
+        for(unsigned i=0;i<t.misses && s.foregroundMissExampleLines<48;++i,++s.foregroundMissExampleLines) {
+            const auto& e=t.miss[i];
+            flatNoCandidateExampleLine(line,sizeof(line),e.frame,e.miss,e.key,e.rescued,e.vs,e.ps);Log::get().note("%s",line);
+        }
+        for(unsigned i=0;i<t.identities && s.foregroundIdentityExampleLines<24;++i,++s.foregroundIdentityExampleLines) {
+            const auto& e=t.identity[i];
+            flatIdentityExampleLine(line,sizeof(line),e.frame,e.verdict,e.current,e.prior,e.priors,e.key,e.vs,e.ps);Log::get().note("%s",line);
+        }
+    }
+}
+// Section 104, the training mission's turned-left view: the 5 s window of the source spells and the pairs the last frame refused for no
+// source held on the scene's depth (flat_source_spell.h), annotated with what only the runtime knows of each pair.
+static void reportSourceSpell(State& s) {
+    const FlatSourceSpellWindow w=s.sourceSpell.take();
+    FlatSourcelessPairNote notes[4]{};
+    for(uint32_t i=0;i<s.sourcelessLast.topCount && i<4;++i) {
+        notes[i].familyVs=engineVelocityPoolFamilyVs(s.sourcelessLast.top[i].vs);
+        notes[i].recipe=flatProjectionDrawRecipes(s.sourcelessLast.top[i].vs,s.sourcelessLast.top[i].ps).count!=0;
+    }
+    char line[3072];
+    flatSourceSpellLine(line,sizeof(line),w,s.sourcelessLast,s.sourcelessLastFrame,notes);
+    Log::get().note("%s",line);
+}
 static void reportForegroundDomain(State& s) {
     const auto& n=s.foregroundCounts;
     auto captures=s.foregroundRetiredCaptureStats;
     for(const auto& candidate:s.foregroundCandidates)captures.add(candidate.motion.stats());
+    reportForegroundNoCandidate(s,captures);
     Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call; history of the submitted draws, cumulative: no-candidate found no record of its geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on (pool differs, near differs, the previous draw is not there), priors-one/several matched on the GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame",
         flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
         (unsigned long long)captures.attempts,(unsigned long long)captures.gpuAttempts,
@@ -3148,6 +3214,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     hdrFrameEnd(s, frame);
     hdrReadKey(s, frame);
     const bool endedPaused = s.work == FlatWork::Paused;
+    // The verdict of the frame that just ended, taken before the stand-down clears it: the source spell below reads it (section 104).
+    const FlatFrameSeen endedSeen = s.frameSeen;
+    const FlatMonoReason endedReason = s.frameReason;
     standDownFrame(s, frame);
     syncEngine();
     // The CPU and GPU census (flat_cpu.h): the frame that just ended is cut into its families,
@@ -3206,6 +3275,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // zeroed by now, and a frame that failed because nothing landed is the very
     // frame the fallback must count.
     flatCameraInjectClose(s.frameHadPhase,s.phase.applied!=0,s.phase.previousAcceptedValid,s.namedDepth!=nullptr);
+    // A frame with a verdict feeds the spell tracker (flat_source_spell.h): refused for no source, treated, and whether it carried a phase.
+    if(endedSeen!=FlatFrameSeen::None)
+        s.sourceSpell.frame(endedReason==FlatMonoReason::NoSupportedSource,endedSeen==FlatFrameSeen::Treatable,s.frameHadPhase);
     const bool wanted=Config::get().getBool("experimental.temporal_aa_jitter",true);
     if(wanted!=s.jitterWanted) { s.phase.resetHistory();reset(); }
     s.jitterWanted=wanted;
@@ -3464,6 +3536,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         else reportUnknownProjection(s,"5s");
         s.foreground.logStatus();
         reportForegroundDomain(s);
+        reportSourceSpell(s);
         Log::get().note("flat HDR image continuation: accepted=%llu refused=%llu; source writes require current matching scene provenance",
             (unsigned long long)s.hdrCopiesAccepted,(unsigned long long)s.hdrCopiesRefused);
         // static-scene-frames: frames the resolver was handed with the menu's stale-slot policy on
@@ -4694,6 +4767,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if (copy) {
         const FlatFrameSeen seen = flatFrameSeenFor(selected.selected(), selected.reason);
         if (seen >= s.frameSeen) { s.frameSeen = seen; s.frameReason = selected.reason; }
+        // What the view held when it had no motion source (section 104); the line names it.
+        if (selected.reason == FlatMonoReason::NoSupportedSource) { s.sourcelessLast = selected.sourceless; s.sourcelessLastFrame = s.prefix.frame; }
     }
     // The HDR route's selection at its trigger (and, with the key auto, its verdict into the stand-down): a Probe frame
     // runs it too, so a probe that finds the route's consumer ends the stand-down, as a probe that selects a copy does.
@@ -5761,6 +5836,7 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                 inputs.writerToken=domainWriterToken;
                 inputs.gpuIdentity=true;
                 inputs.beforeWorld=domainBeforeWorld;
+                inputs.vs=domainVs;inputs.ps=domainPs;
                 Ptr<ID3D11VertexShader> originalVs;ctx->VSGetShader(&originalVs,nullptr,nullptr);
                 if(originalVs)AnimatedVertexHistory::rememberShader(originalVs.Get(),vsBytes,vsSize);
                 if(weaponDrawKind!='X')failDomain("capture","foreground-draw-kind");

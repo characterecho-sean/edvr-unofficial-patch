@@ -37,6 +37,7 @@
 #include "flat_copy_weapon_tests.h"
 #include "flat_covered_draw_wiring_tests.h"
 #include "flat_hdr_crumbs_tests.h"
+#include "flat_no_candidate_tests.h"
 #include "../../src/d3d11/flat_runtime.h"
 #include "../../src/d3d11/flat_foreground_probe_policy.h"
 
@@ -820,6 +821,90 @@ void testMonoFrameSelection() {
           !engine_velocity_family::supportedPair(0xDE545DC8EE4FBB87ull, 0xA6070F9DD1CFB601ull) &&
           engine_velocity_family::supportedPair(0xDE545DC8EE4FBB87ull, 0x91F8937EDA723663ull),
           "flat metadata admits PS91 but keeps unqualified captured pairs excluded");
+
+    // Section 104, the training mission's turned-left view: a scene with no draw of a supported pair is refused with
+    // no-supported-motion-source-pair, and the refusal says what the HDR's depth held instead -- the records and draws, those with the
+    // HDR's camera, and the four pairs with the most draws -- so a log can name the view. A scene that selects fills none of it.
+    {
+        MonoFixture f;
+        const auto selected = flatSelectMonoFrame(f.input);
+        check(selected.selected() && selected.sourceless.records == 0 && selected.sourceless.draws == 0 && selected.sourceless.topCount == 0,
+              "a scene that selects holds no source-less summary");
+        // The nine pool draws become draws of a pair the producer does not substitute (the ground and sky of an open view): not Pool kind.
+        for (uint32_t i = 0; i < 9; ++i) f.world[i].key.kind = kFlatContractScreen;
+        for (uint32_t i = 0; i < 9; ++i) f.world[i].key.ps = 0x1000 + i;
+        f.world[3].key.ps = f.world[2].key.ps;   // two records of one pair: their draws are summed
+        f.world[3].key.vs = f.world[2].key.vs;
+        const auto out = flatSelectMonoFrame(f.input);
+        check(out.reason == FlatMonoReason::NoSupportedSource && !out.selected(),
+              "a scene whose draws name no supported pair is refused for no source");
+        uint32_t records = 0, draws = 0, same = 0;
+        for (uint32_t i = 0; i < f.input.worldCount; ++i) {
+            const auto& r = f.world[i];
+            if (!r.key.depth || r.key.depth != MonoFixture::token(0xD000)) continue;
+            ++records; draws += r.draws;
+            if (flat_mono_detail::sameCamera(r, f.world[9])) same += r.draws;
+        }
+        check(out.sourceless.records == records && out.sourceless.draws == draws && out.sourceless.sameCameraDraws == same && draws > 20,
+              "the refusal counts every record and draw on the HDR's depth, and those drawn with the HDR's camera");
+        check(out.sourceless.poolRecords == 0, "none of them is of pool kind");
+        check(out.sourceless.topCount == 4, "four pairs are named");
+        bool descending = true;
+        for (uint32_t i = 1; i < out.sourceless.topCount; ++i)
+            descending = descending && out.sourceless.top[i - 1].draws >= out.sourceless.top[i].draws;
+        check(descending, "the named pairs are in descending order of draws");
+        // The pairs of the fixture's depth, summed by brute force: the named four are its four largest, the largest first.
+        struct Sum { uint64_t vs, ps; uint32_t draws, records; bool same; };
+        std::vector<Sum> sums;
+        for (uint32_t i = 0; i < f.input.worldCount; ++i) {
+            const auto& r = f.world[i];
+            if (!r.key.depth || r.key.depth != MonoFixture::token(0xD000)) continue;
+            Sum* at = nullptr;
+            for (auto& v : sums) if (v.vs == r.key.vs && v.ps == r.key.ps) at = &v;
+            if (!at) { sums.push_back({r.key.vs, r.key.ps, 0, 0, true}); at = &sums.back(); }
+            at->draws += r.draws; ++at->records;
+            at->same = at->same && flat_mono_detail::sameCamera(r, f.world[9]);
+        }
+        std::vector<uint32_t> sortedDraws;
+        for (const auto& v : sums) sortedDraws.push_back(v.draws);
+        std::sort(sortedDraws.rbegin(), sortedDraws.rend());
+        bool exact = true;
+        for (uint32_t i = 0; i < 4; ++i) {
+            exact = exact && out.sourceless.top[i].draws == sortedDraws[i];
+            const Sum* match = nullptr;
+            for (const auto& v : sums) if (v.vs == out.sourceless.top[i].vs && v.ps == out.sourceless.top[i].ps) match = &v;
+            exact = exact && match && match->draws == out.sourceless.top[i].draws && match->records == out.sourceless.top[i].records &&
+                    match->same == out.sourceless.top[i].sameCamera;
+        }
+        check(exact, "the four named pairs are the four with the most draws, each with its draws, records and whether it used the HDR's camera");
+        bool summed = false;
+        for (uint32_t i = 0; i < 4; ++i)
+            summed = summed || (out.sourceless.top[i].vs == f.world[2].key.vs && out.sourceless.top[i].ps == f.world[2].key.ps &&
+                                out.sourceless.top[i].draws == f.world[2].draws + f.world[3].draws && out.sourceless.top[i].records == 2);
+        check(summed, "two records of one pair are one pair with the draws summed");
+        uint32_t distinct = 0;
+        for (uint32_t i = 0; i < f.input.worldCount; ++i) {
+            const auto& r = f.world[i];
+            if (!r.key.depth || r.key.depth != MonoFixture::token(0xD000)) continue;
+            bool seen = false;
+            for (uint32_t j = 0; j < i && !seen; ++j)
+                seen = f.world[j].key.depth == r.key.depth && f.world[j].key.vs == r.key.vs && f.world[j].key.ps == r.key.ps;
+            if (!seen) ++distinct;
+        }
+        check(out.sourceless.distinctPairs == distinct, "every distinct pair on the depth is counted, named or not");
+        // A record with another camera is counted but its pair is flagged as not the HDR's.
+        MonoFixture g;
+        for (uint32_t i = 0; i < 9; ++i) { g.world[i].key.kind = kFlatContractScreen; g.world[i].key.ps = 0x2000 + i; }
+        float other[6][4]; std::memcpy(other, g.rows, sizeof(other)); other[5][0] += 3;
+        MonoFixture::setCamera(g.world[0], other);
+        const auto otherCamera = flatSelectMonoFrame(g.input);
+        bool flagged = false;
+        for (uint32_t i = 0; i < otherCamera.sourceless.topCount; ++i)
+            flagged = flagged || (otherCamera.sourceless.top[i].vs == g.world[0].key.vs && otherCamera.sourceless.top[i].ps == g.world[0].key.ps &&
+                                  !otherCamera.sourceless.top[i].sameCamera);
+        check(otherCamera.reason == FlatMonoReason::NoSupportedSource && flagged,
+              "a pair drawn under another camera is named, and flagged as not the HDR's");
+    }
 }
 } // namespace
 
@@ -3788,6 +3873,9 @@ int main(int argc, char** argv) {
     failures += flatCoveredDrawWiringTests();
     failures += flatHdrCrumbTests();
     failures += flatHdrCrumbWiringTests();
+    failures += flatNoCandidateTests();
+    failures += flatSourceSpellTests();
+    failures += flatNoCandidateWiringTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

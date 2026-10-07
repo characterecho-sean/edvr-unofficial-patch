@@ -74,6 +74,23 @@ struct FlatMonoFrameInput {
     void* qualifiedAlternateUser = nullptr;
 };
 
+// WHY A SCENE HAS NO MOTION SOURCE (design doc section 104, the training mission's turned-left view). The selector needs a draw whose
+// shader pair the motion producer can substitute (a pool family: engine_velocity_families.h) to name the scene's depth, camera and motion
+// slots; a view with none (open ground and sky) refuses every frame with no-supported-motion-source-pair until one returns. This is what
+// the refused frame DID hold on the HDR's depth, so a log can say what the view was made of: the records and draws that write or bind
+// that depth, how many used the HDR's camera, and the four pairs with the most draws. Filled by that one refusal and no other.
+struct FlatMonoSourceless {
+    struct Pair {
+        uint64_t vs = 0, ps = 0;
+        uint32_t draws = 0, records = 0;
+        bool sameCamera = false;   // drawn with the HDR's camera
+        bool pool = false;         // contract kind pool (a source candidate by kind)
+    };
+    uint32_t records = 0, draws = 0, sameCameraDraws = 0, poolRecords = 0, distinctPairs = 0;
+    Pair top[4];
+    uint32_t topCount = 0;
+};
+
 struct FlatMonoFrame {
     FlatMonoReason reason = FlatMonoReason::InvalidInput;
     uint64_t frame = 0, epoch = 0;
@@ -90,6 +107,7 @@ struct FlatMonoFrame {
     uint32_t toneSequence = 0, copySequence = 0, firstLaterOutput = 0;
     uint32_t supportedDraws = 0, unsupportedDraws = 0;
     bool mixedCamera = false;
+    FlatMonoSourceless sourceless;
     bool selected() const { return reason == FlatMonoReason::Selected; }
 };
 
@@ -194,6 +212,40 @@ inline bool sameCamera(const FlatContractRecord& a, const FlatContractRecord& b)
     return a.key.b1 == b.key.b1 && a.key.camera && b.key.camera &&
         a.key.cameraHash == b.key.cameraHash &&
         std::memcmp(a.camera, b.camera, kFlatCameraBytes) == 0;
+}
+// What the frame holds on the scene's depth when no draw names a supported source (FlatMonoSourceless). Counts every record that binds
+// the HDR's depth, grouped by shader pair, and keeps the four pairs with the most draws; pairs beyond sixteen are counted, not named.
+inline void summarizeSourceless(const FlatMonoFrameInput& in, uint32_t count, const void* depth,
+                                const FlatContractRecord& hdrCamera, FlatMonoSourceless& out) {
+    out = FlatMonoSourceless{};
+    FlatMonoSourceless::Pair acc[16];
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& r = record(in, i);
+        const auto& k = r.key;
+        if (!k.depth || k.depth != depth) continue;
+        const bool same = sameCamera(r, hdrCamera);
+        ++out.records; out.draws += r.draws;
+        if (same) out.sameCameraDraws += r.draws;
+        if (k.kind == kFlatContractPool) ++out.poolRecords;
+        uint32_t at = 0;
+        while (at < used && !(acc[at].vs == k.vs && acc[at].ps == k.ps)) ++at;
+        if (at == used) {
+            ++out.distinctPairs;
+            if (used == 16) continue;
+            acc[used] = {}; acc[used].vs = k.vs; acc[used].ps = k.ps; acc[used].sameCamera = same;
+            at = used++;
+        }
+        acc[at].draws += r.draws; ++acc[at].records;
+        acc[at].sameCamera = acc[at].sameCamera && same;
+        acc[at].pool = acc[at].pool || k.kind == kFlatContractPool;
+    }
+    for (uint32_t n = 0; n < 4 && n < used; ++n) {
+        uint32_t best = n;
+        for (uint32_t j = n + 1; j < used; ++j) if (acc[j].draws > acc[best].draws) best = j;
+        const auto swap = acc[n]; acc[n] = acc[best]; acc[best] = swap;
+        out.top[out.topCount++] = acc[n];
+    }
 }
 inline bool cameraShape(const unsigned char* bytes, float (&rows)[6][4]) {
     std::memcpy(rows, bytes, sizeof(rows));
@@ -320,7 +372,11 @@ inline FlatMonoFrame flatSelectMonoFrame(const FlatMonoFrameInput& in) {
         if (!sourceFirst || r.first < sourceFirst) sourceFirst = r.first;
         if (r.last > sourceLast) sourceLast = r.last;
     }
-    if (!out.supportedDraws) return refuse(FlatMonoReason::NoSupportedSource);
+    if (!out.supportedDraws) {
+        // Section 104: what the view held instead, for the line that names it. Nothing else reads it.
+        summarizeSourceless(in, count, hdr->key.depth, *hdrCamera, out.sourceless);
+        return refuse(FlatMonoReason::NoSupportedSource);
+    }
 
     // Detect another supported naming at this extent under the same camera
     // but another depth; a lucky matching chain is not proof of uniqueness.
