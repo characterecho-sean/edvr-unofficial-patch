@@ -157,8 +157,13 @@ struct FlatTraceFrameHeader {
 constexpr uint32_t kFlatTraceFrames = 4;
 constexpr uint32_t kFlatTraceEventsPerFrame = 65536;
 constexpr uint64_t kFlatTraceStorageBudgetBytes = 256ull * 1024ull * 1024ull;
+// Outside an armed capture the runtime keeps the pre-v0.18.2 window: every
+// recorded event is a 504-byte store on the render thread, and a settlement
+// frame has ~11k draws. The full window opens only while a capture reads it.
+constexpr uint32_t kFlatTraceIdleEventsPerFrame = 4096;
 struct FlatTraceRing {
     FlatTraceEvent events[kFlatTraceFrames][kFlatTraceEventsPerFrame];
+    uint32_t eventLimit = kFlatTraceEventsPerFrame; // the runtime narrows it per frame
     FlatTraceFrameHeader headers[kFlatTraceFrames]{};
     uint32_t attempted[kFlatTraceFrames]{}; // live-only; never serialized
     uint32_t slot = 0;
@@ -174,6 +179,7 @@ struct FlatTraceStats {
 };
 inline FlatTraceStats flatTraceStats(const FlatTraceRing& r) {
     FlatTraceStats stats{};
+    stats.capacity = r.eventLimit;
     for (uint32_t i = 0; i < kFlatTraceFrames; ++i) {
         if (!r.slotUsed[i]) continue;
         if (r.attempted[i] > stats.peakAttempted) stats.peakAttempted = r.attempted[i];
@@ -186,7 +192,7 @@ inline bool flatTraceCanAppend(FlatTraceRing& r) {
     auto& attempted = r.attempted[r.slot];
     if (attempted != 0xffffffffu) ++attempted;
     auto& h = r.headers[r.slot];
-    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return false; }
+    if (h.eventCount >= r.eventLimit) { h.truncated = 1; return false; }
     return true;
 }
 

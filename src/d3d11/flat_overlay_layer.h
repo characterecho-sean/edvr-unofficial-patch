@@ -15,6 +15,13 @@
 #include <unordered_map>
 #include <vector>
 
+// The late overlay's private copies (clean HDR, coverage mask, replay depth
+// mirror) are capped by extent, the same 64M-pixel cap as the foreground map
+// (kFlatForegroundMaxPixels). A byte budget (128 MiB HDR+mask, 64 MiB depth)
+// refused render targets above ~14.9 / ~8.4 Mpx, e.g. 9000x2160 at SS 1.0,
+// and every refusal invalidates the AA history for that frame.
+inline constexpr uint64_t kFlatOverlayMaxPixels = 64ull * 1024 * 1024;
+
 namespace edvr {
 struct FlatOverlayShaderDiagnostic {
     bool read=false,eligible=false,created=false;
@@ -278,17 +285,15 @@ class FlatOverlayLayer {
         if(d.MipLevels!=1 || d.ArraySize!=1 || d.SampleDesc.Count!=1 ||
            view.ViewDimension!=D3D11_DSV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice!=0)
             return refuse("replay-depth-shape",reason);
-        unsigned pixelBytes=0;
         switch(d.Format) {
-        case DXGI_FORMAT_R32G8X24_TYPELESS:case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:pixelBytes=8;break;
+        case DXGI_FORMAT_R32G8X24_TYPELESS:case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
         case DXGI_FORMAT_R24G8_TYPELESS:case DXGI_FORMAT_D24_UNORM_S8_UINT:
-        case DXGI_FORMAT_R32_TYPELESS:case DXGI_FORMAT_D32_FLOAT:pixelBytes=4;break;
-        case DXGI_FORMAT_R16_TYPELESS:case DXGI_FORMAT_D16_UNORM:pixelBytes=2;break;
+        case DXGI_FORMAT_R32_TYPELESS:case DXGI_FORMAT_D32_FLOAT:
+        case DXGI_FORMAT_R16_TYPELESS:case DXGI_FORMAT_D16_UNORM:break;
         default:return refuse("replay-depth-format",reason);
         }
-        // Separate from the unchanged 128 MiB clean-HDR/mask budget. A 4K
-        // D32S8 mirror is 63.28 MiB and fits this additional 64 MiB bound.
-        if(uint64_t(d.Width)*d.Height*pixelBytes>64ull*1024*1024)
+        // The mirror shares the clean-HDR/mask extent cap (kFlatOverlayMaxPixels).
+        if(uint64_t(d.Width)*d.Height>kFlatOverlayMaxPixels)
             return refuse("replay-depth-budget",reason);
         if(replayDepth_) {
             D3D11_TEXTURE2D_DESC have{};replayDepth_->GetDesc(&have);
@@ -469,7 +474,7 @@ public:
         const uint64_t colorBytes=hd.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?8u:
             (hd.Format==DXGI_FORMAT_R11G11B10_FLOAT || hd.Format==DXGI_FORMAT_R8G8B8A8_UNORM || poolProbe?4u:0u);
         if (!colorBytes) return refuse("unsupported-HDR-format",reason);
-        if (uint64_t(hd.Width)*hd.Height*(diagnosticCoverageOnly?1u:colorBytes+1u)>128ull*1024*1024)
+        if (uint64_t(hd.Width)*hd.Height>kFlatOverlayMaxPixels)
             return refuse("overlay-resource-budget",reason);
         Saved game{};game.context=ctx;
         ID3D11RenderTargetView* raw[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};

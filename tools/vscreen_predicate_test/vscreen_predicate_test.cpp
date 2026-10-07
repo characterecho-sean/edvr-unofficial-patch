@@ -2534,6 +2534,166 @@ bool runNvPrecedenceChild(unsigned rawCase, bool traceEnabled, bool apiSample) {
     return true;
 }
 
+struct ChildCompletion final {
+    DWORD processId = 0;
+    DWORD wait = WAIT_TIMEOUT, finalWait = WAIT_TIMEOUT, exitCode = STILL_ACTIVE;
+    DWORD pipeError = 0, waitError = 0, terminationError = 0, exitError = 0;
+    bool overflow = false, unexpectedPipeError = false, exitKnown = false;
+    bool eofWhileRunning = false;
+    ULONGLONG elapsed = 0;
+    std::string output;
+    bool succeeded() const {
+        return wait == WAIT_OBJECT_0 && finalWait == WAIT_OBJECT_0 && exitKnown &&
+            exitCode == 0 && !overflow && !unexpectedPipeError &&
+            !waitError && !terminationError && !exitError;
+    }
+    const char* failureReason() const {
+        if (overflow) return "output-overflow";
+        if (unexpectedPipeError) return "pipe-error";
+        if (finalWait != WAIT_OBJECT_0 || terminationError) return "termination-failed";
+        if (wait == WAIT_FAILED || waitError) return "process-wait";
+        if (wait == WAIT_TIMEOUT) return "deadline";
+        if (!exitKnown || exitError) return "exit-query";
+        if (exitCode != 0) return "child-exit";
+        return "framing";
+    }
+};
+
+ChildCompletion collectChild(HANDLE pipe, HANDLE process, DWORD budgetMs,
+                             std::size_t maxBytes, HANDLE releaseAtEof = nullptr) {
+    ChildCompletion result{};
+    result.processId = GetProcessId(process);
+    const ULONGLONG started = GetTickCount64();
+    const ULONGLONG deadline = started + budgetMs;
+    bool eof = false;
+    char chunk[512];
+    auto drain = [&] {
+        while (!eof && !result.overflow && !result.unexpectedPipeError) {
+            DWORD available = 0;
+            if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
+                result.pipeError = GetLastError();
+                eof = result.pipeError == ERROR_BROKEN_PIPE;
+                result.unexpectedPipeError = !eof;
+                break;
+            }
+            if (!available) break;
+            DWORD got = 0;
+            const DWORD take = (std::min)(available, static_cast<DWORD>(sizeof(chunk)));
+            if (!ReadFile(pipe, chunk, take, &got, nullptr)) {
+                result.pipeError = GetLastError();
+                eof = result.pipeError == ERROR_BROKEN_PIPE;
+                result.unexpectedPipeError = !eof;
+                break;
+            }
+            if (!got) { eof = true; break; }
+            if (result.output.size() + got > maxBytes) { result.overflow = true; break; }
+            result.output.append(chunk, got);
+        }
+    };
+    while (GetTickCount64() < deadline) {
+        drain();
+        if (result.overflow || result.unexpectedPipeError) break;
+        if (eof && releaseAtEof) {
+            result.eofWhileRunning = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+            if (!SetEvent(releaseAtEof)) { result.waitError = GetLastError(); break; }
+            releaseAtEof = nullptr;
+        }
+        // EOF closes the output stream, not the process. CRT teardown can
+        // close stdout before the process handle becomes signalled.
+        const ULONGLONG remaining = deadline - (std::min)(deadline, GetTickCount64());
+        result.wait = WaitForSingleObject(process,
+            static_cast<DWORD>((std::min)(remaining, 10ull)));
+        if (result.wait == WAIT_OBJECT_0) break;
+        if (result.wait == WAIT_FAILED) { result.waitError = GetLastError(); break; }
+    }
+    result.finalWait = WaitForSingleObject(process, 0);
+    if (result.finalWait != WAIT_OBJECT_0) {
+        if (!TerminateProcess(process, 1)) result.terminationError = GetLastError();
+        result.finalWait = WaitForSingleObject(process, 5000);
+        if (result.finalWait == WAIT_FAILED) result.waitError = GetLastError();
+    }
+    result.exitKnown = GetExitCodeProcess(process, &result.exitCode) != FALSE;
+    if (!result.exitKnown) result.exitError = GetLastError();
+    drain();
+    result.elapsed = GetTickCount64() - started;
+    return result;
+}
+
+// CPU-only process controls use an inherited event to guarantee the child
+// closes output while still alive. The parent releases it only after EOF.
+bool launchPipeLifecycleControl(unsigned mode, ChildCompletion* completion) {
+    wchar_t exe[MAX_PATH + 1]{};
+    const DWORD length = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (!completion || !length || length >= MAX_PATH) return false;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE readPipe = nullptr, writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) return false;
+    HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE release = CreateEventW(&sa, TRUE, FALSE, nullptr);
+    SIZE_T bytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+    std::vector<std::uint8_t> storage(bytes);
+    auto* attributes = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
+    const bool initialized = bytes &&
+        InitializeProcThreadAttributeList(attributes, 1, 0, &bytes) != FALSE;
+    HANDLE inherited[] = {writePipe, input, release};
+    const bool ready = input != INVALID_HANDLE_VALUE && release && initialized &&
+        SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0) &&
+        UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherited, sizeof(inherited), nullptr, nullptr);
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = input;
+    startup.StartupInfo.hStdOutput = startup.StartupInfo.hStdError = writePipe;
+    startup.lpAttributeList = attributes;
+    PROCESS_INFORMATION process{};
+    std::wstring command = L"\"" + std::wstring(exe, length) +
+        L"\" --pipe-lifecycle-child " + std::to_wstring(mode) + L" " +
+        std::to_wstring(reinterpret_cast<std::uintptr_t>(release));
+    const bool started = ready && CreateProcessW(exe, &command[0], nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+        &startup.StartupInfo, &process) != FALSE;
+    if (initialized) DeleteProcThreadAttributeList(attributes);
+    CloseHandle(writePipe);
+    if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
+    if (started) {
+        *completion = collectChild(readPipe, process.hProcess, mode == 2 ? 1500u : 5000u,
+            512, release);
+        CloseHandle(process.hThread); CloseHandle(process.hProcess);
+    }
+    if (release) CloseHandle(release);
+    CloseHandle(readPipe);
+    return started;
+}
+
+bool testChildPipeLifecycle() {
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        ChildCompletion result{};
+        if (!launchPipeLifecycleControl(mode, &result)) return false;
+        const bool common = result.output == "PIPE_LIFECYCLE_RESULT\n" &&
+            result.pipeError == ERROR_BROKEN_PIPE && result.eofWhileRunning &&
+            !result.unexpectedPipeError && !result.overflow && result.exitKnown &&
+            result.finalWait == WAIT_OBJECT_0 && !result.waitError &&
+            !result.terminationError && !result.exitError;
+        const bool expected = mode == 0 ? result.succeeded() : mode == 1 ?
+            (!result.succeeded() && result.wait == WAIT_OBJECT_0 && result.exitCode == 7 &&
+             std::strcmp(result.failureReason(), "child-exit") == 0) :
+            (!result.succeeded() && result.wait == WAIT_TIMEOUT && result.exitCode == 1 &&
+             result.elapsed >= 1500u && std::strcmp(result.failureReason(), "deadline") == 0);
+        if (!common || !expected) {
+            std::fprintf(stderr,"PIPE_LIFECYCLE_FAIL mode=%u wait=%lu finalwait=%lu exit=%lu elapsed=%llu pipeerror=%lu eofrunning=%u waiterror=%lu killerror=%lu exiterror=%lu pid=%lu\n",
+                mode,result.wait,result.finalWait,result.exitCode,
+                static_cast<unsigned long long>(result.elapsed),result.pipeError,
+                result.eofWhileRunning?1u:0u,result.waitError,result.terminationError,result.exitError,
+                result.processId);
+            return false;
+        }
+    }
+    return true;
+}
+
 struct UiChildReport final {
     unsigned trace = 0, sample = 0, refusal = 0, actions = 0, callbacks = 0;
     unsigned long long reads = 0, states = 0, mask = 0;
@@ -2594,65 +2754,31 @@ bool launchUiReissueChild(bool trace, bool sample, bool refusal, UiChildReport* 
     CloseHandle(writePipe);
     CloseHandle(nullInput);
     if (!started) { CloseHandle(readPipe); SetLastError(startError); return false; }
-    std::string output;
-    constexpr std::size_t kMaxChildOutput = 4096;
-    const ULONGLONG deadline = GetTickCount64() + 120000;
-    DWORD wait = WAIT_TIMEOUT;
-    bool overflow = false;
-    char chunk[512];
-    while (GetTickCount64() < deadline) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr)) {
-            wait = WaitForSingleObject(process.hProcess, 0);
-            break;
-        }
-        while (available) {
-            DWORD got = 0;
-            const DWORD take = (std::min)(available, static_cast<DWORD>(sizeof(chunk)));
-            if (!ReadFile(readPipe, chunk, take, &got, nullptr) || !got) break;
-            if (output.size() + got > kMaxChildOutput) { overflow = true; break; }
-            output.append(chunk, got);
-            available -= got;
-        }
-        if (overflow) break;
-        wait = WaitForSingleObject(process.hProcess, 0);
-        if (wait == WAIT_OBJECT_0) break;
-        if (wait == WAIT_FAILED) break;
-        Sleep(10);
-    }
-    if (wait != WAIT_OBJECT_0 || overflow) {
-        TerminateProcess(process.hProcess, 1);
-        WaitForSingleObject(process.hProcess, 5000);
-    }
-    DWORD exitCode = 1;
-    GetExitCodeProcess(process.hProcess, &exitCode);
+    const ChildCompletion completion = collectChild(readPipe, process.hProcess, 120000, 4096);
+    const auto& output = completion.output;
+    const DWORD wait = completion.wait, exitCode = completion.exitCode;
+    const bool overflow = completion.overflow;
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
-    for (;;) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) || !available) break;
-        DWORD got = 0;
-        const DWORD take = (std::min)(available, static_cast<DWORD>(sizeof(chunk)));
-        if (!ReadFile(readPipe, chunk, take, &got, nullptr) || !got) break;
-        if (output.size() + got > kMaxChildOutput) { overflow = true; break; }
-        output.append(chunk, got);
-    }
     CloseHandle(readPipe);
     auto failedChild = [&](const char* reason) {
         std::fprintf(stderr,
-            "UI_REISSUE_CHILD_FAIL trace=%u sample=%u refusal=%u reason=%s wait=%lu exit=%lu overflow=%u bytes=%llu\n",
+            "UI_REISSUE_CHILD_FAIL trace=%u sample=%u refusal=%u reason=%s wait=%lu exit=%lu overflow=%u bytes=%llu elapsed=%llu pipeerror=%lu finalwait=%lu waiterror=%lu killerror=%lu exiterror=%lu pid=%lu\n",
             trace?1u:0u, sample?1u:0u, refusal?1u:0u, reason,
             static_cast<unsigned long>(wait), static_cast<unsigned long>(exitCode),
-            overflow?1u:0u, static_cast<unsigned long long>(output.size()));
+            overflow?1u:0u, static_cast<unsigned long long>(output.size()),
+            static_cast<unsigned long long>(completion.elapsed),
+            completion.pipeError,completion.finalWait,completion.waitError,
+            completion.terminationError,completion.exitError,completion.processId);
         if (!output.empty()) {
             std::fwrite(output.data(), 1, output.size(), stderr);
             if (output.back()!='\n') std::fputc('\n',stderr);
         }
         return false;
     };
-    if (wait != WAIT_OBJECT_0 || overflow || exitCode != 0 || output.empty() ||
+    if (!completion.succeeded() || output.empty() ||
         output.back() != '\n' || output.find('\n') != output.size() - 1 ||
         output.rfind("UI_REISSUE_RESULT ", 0) != 0 || !report)
-        return failedChild("execution-or-framing");
+        return failedChild(completion.failureReason());
     int consumed = -1;
     const int parsed = std::sscanf(output.c_str(),
         "UI_REISSUE_RESULT trace=%u sample=%u refusal=%u actions=%u callbacks=%u read=%llu state=%llu mask=%llx host=%llx out=%llx depth=%llx overlay=%llu depthhit=%llu%n",
@@ -2759,55 +2885,29 @@ bool launchNvPrecedenceChild(unsigned caseId, bool trace, bool sample,
     const DWORD startError = GetLastError();
     DeleteProcThreadAttributeList(attributes); CloseHandle(writePipe); CloseHandle(nullInput);
     if (!started) { CloseHandle(readPipe); SetLastError(startError); return false; }
-    std::string output; char chunk[256]; bool overflow = false;
-    constexpr std::size_t maxBytes = 512;
-    const ULONGLONG deadline = GetTickCount64() + 120000;
-    DWORD wait = WAIT_TIMEOUT;
-    while (GetTickCount64() < deadline) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr)) {
-            wait = WaitForSingleObject(process.hProcess, 0);
-            break;
-        }
-        while (available) {
-            DWORD got = 0; const DWORD take = (std::min)(available, static_cast<DWORD>(sizeof(chunk)));
-            if (!ReadFile(readPipe, chunk, take, &got, nullptr) || !got) break;
-            if (output.size() + got > maxBytes) { overflow = true; break; }
-            output.append(chunk, got); available -= got;
-        }
-        if (overflow) break;
-        wait = WaitForSingleObject(process.hProcess, 0);
-        if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) break;
-        Sleep(10);
-    }
-    if (wait != WAIT_OBJECT_0 || overflow) {
-        TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 5000);
-    }
-    DWORD exitCode = 1; GetExitCodeProcess(process.hProcess, &exitCode);
+    const ChildCompletion completion = collectChild(readPipe, process.hProcess, 120000, 512);
+    const auto& output = completion.output;
+    const DWORD wait = completion.wait, exitCode = completion.exitCode;
+    const bool overflow = completion.overflow;
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
-    for (;;) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) || !available) break;
-        DWORD got = 0; const DWORD take = (std::min)(available, static_cast<DWORD>(sizeof(chunk)));
-        if (!ReadFile(readPipe, chunk, take, &got, nullptr) || !got) break;
-        if (output.size() + got > maxBytes) { overflow = true; break; }
-        output.append(chunk, got);
-    }
     CloseHandle(readPipe);
     auto failedChild = [&](const char* reason) {
-        std::fprintf(stderr,"NV_PRECEDENCE_CHILD_DETAIL case=%u trace=%u sample=%u reason=%s wait=%lu exit=%lu overflow=%u bytes=%llu\n",
+        std::fprintf(stderr,"NV_PRECEDENCE_CHILD_DETAIL case=%u trace=%u sample=%u reason=%s wait=%lu exit=%lu overflow=%u bytes=%llu elapsed=%llu pipeerror=%lu finalwait=%lu waiterror=%lu killerror=%lu exiterror=%lu pid=%lu\n",
             caseId,trace?1u:0u,sample?1u:0u,reason,
             static_cast<unsigned long>(wait),static_cast<unsigned long>(exitCode),
-            overflow?1u:0u,static_cast<unsigned long long>(output.size()));
+            overflow?1u:0u,static_cast<unsigned long long>(output.size()),
+            static_cast<unsigned long long>(completion.elapsed),
+            completion.pipeError,completion.finalWait,completion.waitError,
+            completion.terminationError,completion.exitError,completion.processId);
         if (!output.empty()) {
             std::fwrite(output.data(),1,output.size(),stderr);
             if (output.back()!='\n') std::fputc('\n',stderr);
         }
         return false;
     };
-    if (wait != WAIT_OBJECT_0 || overflow || exitCode != 0 || output.empty() ||
+    if (!completion.succeeded() || output.empty() ||
         output.back() != '\n' || output.find('\n') != output.size() - 1 ||
-        output.rfind("NV_PRECEDENCE_RESULT ", 0) != 0) return failedChild("execution-or-framing");
+        output.rfind("NV_PRECEDENCE_RESULT ", 0) != 0) return failedChild(completion.failureReason());
     int consumed = -1;
     const int parsed = std::sscanf(output.c_str(),
         "NV_PRECEDENCE_RESULT case=%u trace=%u sample=%u winner=%d verdict=%d sub=%u claim=%x claimcalls=%u begin=%u end=%u actions=%u original=%u reads=%llu mask=%llx host=1 bindings=1%n",
@@ -2855,6 +2955,27 @@ bool testNvPrecedenceSubprocesses() {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 4 && std::strcmp(argv[1], "--pipe-lifecycle-child") == 0) {
+        if (std::strcmp(argv[2],"0") && std::strcmp(argv[2],"1") &&
+            std::strcmp(argv[2],"2")) return 2;
+        char* end = nullptr;
+        const unsigned long long rawHandle = std::strtoull(argv[3], &end, 10);
+        if (!end || end == argv[3] || *end || !rawHandle) return 2;
+        HANDLE release = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(rawHandle));
+        constexpr char frame[] = "PIPE_LIFECYCLE_RESULT\n";
+        constexpr DWORD frameBytes = static_cast<DWORD>(sizeof(frame)-1);
+        DWORD written = 0;
+        if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), frame, frameBytes,
+                &written, nullptr) || written != frameBytes) return 2;
+        std::fclose(stdout);
+        std::fclose(stderr);
+        const DWORD released = WaitForSingleObject(release, 5000);
+        CloseHandle(release);
+        if (released != WAIT_OBJECT_0) return 2;
+        // Parent has proved EOF while this process is still alive.
+        Sleep(std::strcmp(argv[2],"2") == 0 ? 10000u : 100u);
+        return std::strcmp(argv[2],"1") == 0 ? 7 : 0;
+    }
     if (argc == 5 && std::strcmp(argv[1], "--nv-precedence-child") == 0) {
         char* end = nullptr;
         const unsigned long caseId = std::strtoul(argv[2], &end, 10);
@@ -4572,6 +4693,8 @@ int main(int argc, char** argv) {
         if (texture) texture->Release();
     }
 
+    okay &= check(testChildPipeLifecycle(),
+                  "CPU child EOF precedes natural exit; nonzero exit and actual short deadline are rejected and reaped");
     okay &= check(testUiComposedActionSubprocesses(),
                   "isolated WARP children exercise production UI family routing, composed reissues, sampled API notes, and NoTrace parity");
     okay &= check(testNvPrecedenceSubprocesses(),

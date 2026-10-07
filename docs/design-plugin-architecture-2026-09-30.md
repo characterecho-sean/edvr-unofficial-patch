@@ -36,24 +36,24 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** `37951e9f` integrates main `d6ecc252` and is pushed. The NV
-  precedence slice passes 32 fresh-child cases, the six UI cases, all 149 build
-  jobs and installer checks, and all 17 fresh scoped assembly gates. V2
-  preserves V1 and the 128-site CPU limit. UI proves one D-only composed path;
-  NV uses typed X forwarding spies and real registered Begin/End operations.
-  Held-boundary and caller machine paths are measured, not runtime timing.
-  Domain/frame/lifecycle accounting, held-boundary frame cost and full coverage
-  remain open. Keep the flight pair frozen: `7bbe7d90` control and `6c63f6aa`
-  candidate. Both October 7 flights match their builds/environment and exit
-  cleanly; Sean reports no visual changes. NV-on sampled hook time per timed
-  draw is 15.0% lower; other CPU ranges overlap. Carrier DLSS/NV-off EDVR GPU
-  cost is 2.9% higher, its median above the control range. Draw counts differ
-  and the on-foot source has 4.175% more pixels. Attribution/non-regression
-  stay open. Finish coverage and selectors offline before another flight.
-  Whole-ladder actions remain open. Replay retains 482.4 MiB when enabled, none
-  when off; NV blur reproduces on `14a7ff70`. Temporary key:
-  `advanced.draw_replay` (off); removal requires Scope control. No Phase 1
-  acceptance, Phase 2 or shipping approval.
+- **Next:** main `0d4bc714` integrates cleanly. The repaired merged tree passes
+  all 149 build jobs and installer checks, 17 fresh scoped assembly gates,
+  three deterministic child-exit controls, 32 NV fresh-child cases and six UI
+  cases. The child-pipe EOF/exit race is fixed under the same deadline. UI
+  proves one D-only composed path; NV uses typed X spies and real registered
+  Begin/End operations. The d6 caller comparison is historical; merged caller
+  timing remains unmeasured. Domain/frame/lifecycle accounting, held-boundary
+  frame cost and full coverage remain open. Keep the flight pair frozen:
+  `7bbe7d90` control and `6c63f6aa` candidate. Both October 7 flights match
+  their builds/environment and exit cleanly; Sean reports no visual changes.
+  NV-on sampled hook time per timed draw is 15.0% lower; other CPU ranges
+  overlap. Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its median above
+  the control range. Draw counts differ and the on-foot source has 4.175% more
+  pixels. Attribution/non-regression stay open. Independent NV legacy replay
+  already runs; whole-ladder actions must precede broader group migration.
+  Replay retains 482.4 MiB when enabled, none when off; NV blur reproduces on
+  `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
+  Scope control. V2 preserves V1/CPU limits. No Phase 1 acceptance or shipping.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -3189,3 +3189,78 @@ receipt is `2b5e9829c8ec700d5c241b5dbbd6acc49652366c897e375d735727b06fe655f1`.
 The build shows no window and does not take focus. Steam files and settings are
 unchanged. Full-ladder coverage, domain/frame/lifecycle API accounting and
 performance attribution remain open; Phase 2 and shipping stay held.
+
+### Main PR 80 integration, 2026-10-07
+
+After the NV slice is validated and pushed as `856a3ac3`, the verified remote
+advances main to `0d4bc714` (PR 80: idle flat-trace window and late-overlay
+extent cap). Sean's main-into-feature authorization applies; that exact commit
+merges cleanly, with no feature-into-main action. Mid-tier review finds no
+integration repair. The held substitution function body is unchanged, including
+pending, owner, exact-context and OtherDraw-only sampling gates.
+
+The runtime assigns trace limits of 4096 while idle and 65536 during active
+draw-packet capture or a pending F10 dump. F10 arms at frame F, opens full
+recording at F+1 and schedules its dump at F+4; ordinary frame advancement
+leaves three completed full-window slots. Serialization remains event-count
+based and skips current/truncated slots. The new ring test checks the idle
+threshold plus seven overflow attempts and then a full-window busy frame.
+Runtime window selection/F10 scheduling and invalid mutable limits remain
+upstream test gaps; production assigns only the two valid constants.
+
+Private HDR/mask and replay-depth copies now share a 64 Mi-pixel extent cap.
+Format/shape guards remain, and creation failures still refuse. This
+intentional budget expansion can admit 576 MiB for an eight-byte HDR plus mask
+and 512 MiB for a D32S8 mirror at the cap. Cap equality/over-limit tests remain
+an upstream coverage gap, not evidence of a plugin regression. Existing overlay
+WARP rigs are part of the full build.
+
+The earlier d6 caller body comparison is historical: this merge changes source,
+State/Ring layout and shared-header pins. Its helpers retain strict pin
+failures; no diagnostic is relabeled as current and no runtime timing claim
+follows from it. A fresh same-header production comparison passes all 17 scoped
+gates, restores 15 source swaps and leaves all 17 inputs unchanged. The full
+merged-source validation must pass before the merge is committed.
+
+The first full build fails in the predicate rig after 17 of 149 jobs. A UI
+child emits the complete expected 196-byte result, but the parent reports
+`wait=258`, `exit=0`; the entire rig took 16.1 seconds against a 120-second
+deadline. Mid-tier review finds a concrete EOF/process-exit race in both UI and
+NV parent loops: pipe close triggers a zero-time process poll, then premature
+termination if the process is not yet signaled. Ruled out: a 120-second child
+hang, because the failed job ends far before that deadline. The repair keeps
+the deadline and strict result/exit checks; no rendering change follows.
+
+A separate mid-tier coverage review rejects a duplicate NV replay proposal.
+`plugin_dispatch_test` already compares a literal frozen pre-registry predicate
+with candidate dispatch, including earlier claims, modes, failure, shape and
+hashes. `draw_ladder_test` writes raw terminal facts; `draw_ladder_replay.py`
+independently reevaluates legacy NV, rejects candidate-cache drift and missing
+facts, and reports 18/18 NV matches in the existing corpus. All are wired into
+the full build. The new 32 children add actual registered cockpit and typed
+forwarding evidence, with the existing NV rig retaining pixel coverage. No
+additional pilot legacy replay is needed. Whole-ladder/action parity precedes
+broader migration; performance and non-regression acceptance remain open.
+
+The repaired UI and NV parents share a bounded child collector. Only
+`ERROR_BROKEN_PIPE` denotes EOF; the collector still waits for process exit
+within the original 120-second budget. UI's 4096-byte and NV's 512-byte caps,
+exact LF/CRLF frame consumption and two-handle inheritance remain unchanged.
+Unexpected pipe/wait/termination/exit-query failures reject the child, and
+diagnostics include elapsed time, error codes, final wait and PID. The fixture
+checks termination and reaping instead of discarding their results.
+
+Three CPU-only controls force EOF while the child remains alive, using an
+explicitly inherited test event. The parent releases the child only after
+observing that ordering: delayed exit zero succeeds, delayed exit seven fails,
+and a long hold is terminated/reaped at a 1.5-second test-only deadline. Their
+fixed frame is independently pinned. The focused rig passes in 13.8 seconds,
+including these controls and the existing six UI/32 NV children. Fresh assembly
+proof then passes all 17 scoped gates. The repaired merged tree passes all 149
+full-build jobs, the 236-key config contract, exports and installer-resource
+checks in 238 seconds. Its receipt is
+`c0266d28dfdcf18bd5f17f16e69de0167f42933f166b1f515b22331cf495fb1c` and verifies
+against the exact source tree. No window appears and foreground focus stays
+unchanged. Main integration is cut at `0d4bc714`; Steam/settings and the frozen
+flight interpretation stay unchanged. Pilot performance acceptance remains
+open; broader migration and shipping stay held.
