@@ -114,8 +114,58 @@ static bool wiredUiDepth(const std::string& t) {
 
 static bool wiredLayer(const std::string& t) {
     const size_t panels = t.find("    uiPanelScaleLog();");
-    const size_t orbit = t.find("    orbitalWidthLog();");
-    return found(panels) && found(orbit) && orbit > panels && orbit - panels < 200 && found(t.find("#include \"orbital_width.h\""));
+    const size_t orbit = t.find("    orbitalWidthLog(sceneLineLayerText(UiLayerFamily::kOrbitLines, frames).c_str());");
+    return found(panels) && found(orbit) && orbit > panels && orbit - panels < 700 && found(t.find("#include \"orbital_width.h\""));
+}
+
+// THE ORBIT LINES IN THE LAYER (2026-10-07; docs/ui-layer-2026-09-23.md, "2026-10-07: orbit lines, supercruise bars and space dust
+// in the layer"). The width patch's factor f is the SAME one in the layer (2 x w x f pixels of the render are 2 x w pixels of a layer f
+// times as narrow), so the patched issue must not depend on whether the layer takes the draw: the gate of orbitalWidthBegin names
+// neither `uiLayer` nor `layered`, and the patch is bound before the layer's bracket and put back before the layer's restore.
+// The coverage twin is the scene's account of a line the scene still draws: it runs only when the layer did not take the draw
+// (`!layered`), which is also the fallback when the layer declines. ui_layer.cpp: the family is one of the crisp take's HDR families
+// by the ONE list (uiLayerFamilyTakesHdr), its density fact is asked of the scene lines alone and from the layer's own size, and
+// the decision comes before the layer is made for it.
+static bool wiredLayerTakeVscreen(const std::string& t) {
+    const size_t fn = t.find("void forwardWithVerdict(");
+    if (!found(fn)) return false;
+    const size_t gate = t.find("const bool orbitScaled = ", fn);
+    const size_t begin = t.find("orbitalWidthBegin(self, instances, args.startInstance)", fn);
+    // (the loader panel's and the curved screen's own brackets come earlier in the function: the layer's bracket of THIS issue is the first after the gate)
+    const size_t layerBegin = found(begin) ? t.find("const bool layered = uiLayer && uiLayerBegin(self);", begin) : std::string::npos;
+    const size_t issue = t.find("const bool originalIssued=observedDraw(", fn);
+    const size_t end = t.find("if (orbitScaled) orbitalWidthEnd(self);", fn);
+    const size_t layerEnd = t.find("        uiLayerEnd(self);\n        if (originalIssued) uiLayerSecondIssues(", fn);
+    const size_t twin = t.find("if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {", fn);
+    const size_t twinBegin = t.find("uiDepthReissueBegin(self)", fn);
+    if (!found(gate) || !found(begin) || !found(layerBegin) || !found(issue) || !found(end) || !found(layerEnd) || !found(twin) || !found(twinBegin)) return false;
+    // the same factor in the layer: the gate never asks whether the layer takes the draw
+    const std::string condition = t.substr(gate, begin - gate);
+    if (found(condition.find("uiLayer")) || found(condition.find("layered")) || found(condition.find("barsDecided"))) return false;
+    // the patch is bound before the layer's bracket and put back after the issue and before the layer's own restore
+    if (!(begin < layerBegin && layerBegin < issue && issue < end && end < layerEnd)) return false;
+    // the twin: only for a draw the layer did not take, and after the patch is put back
+    return end < twin && twin < twinBegin;
+}
+
+static bool wiredLayerTakeLayer(const std::string& t) {
+    const size_t fn = t.find("bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards,");
+    if (!found(fn)) return false;
+    const size_t crisp = t.find("f.crispHdr = detail::g_uiLayerCrispOn && f.eyeTarget && !f.ldrView && uiLayerFamilyTakesHdr(family);", fn);
+    const size_t guard = t.find("if (uiLayerFamilyIsSceneLines(family)) {", fn);
+    const size_t size = t.find("const UiLayerSize ls = uiLayerSize(g_eye[f.eye].door.fullW, g_eye[f.eye].door.fullH, layerTarget());", fn);
+    const size_t wider = t.find("f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, g_tc.info.a, g_tc.info.b);", fn);
+    const size_t armed = t.find("f.armed = uiLayerArmed(g_eye[f.eye].door, seq);", fn);
+    const size_t decide = t.find("UiLayerDecision d = uiLayerDecide(f);", fn);
+    const size_t ready = t.find("f.familyReady = supercruiseBarsReady(ctx, &familyWhy);", fn);
+    const size_t layerReady = t.find("f.layerReady =", fn);
+    if (!found(crisp) || !found(guard) || !found(size) || !found(wider) || !found(armed) || !found(decide) || !found(ready) || !found(layerReady)) return false;
+    // the HDR list is the one list; the density fact follows the arming (the door's size is known), is asked of the scene lines alone,
+    // is made from the layer's own size against the target's, and is in hand before the first decision
+    if (!(crisp < armed && armed < guard && guard < size && size < wider && wider < decide)) return false;
+    // the bars' readiness is asked after the cheap decision and before the layer is made for the draw
+    const std::string asked = t.substr(ready > 200 ? ready - 200 : 0, 200);
+    return decide < ready && ready < layerReady && found(asked.find("family == UiLayerFamily::kSupercruiseBars"));
 }
 
 static bool wiredCoverage(const std::string& t) {
@@ -170,8 +220,40 @@ static void wiringCases() {
     check(!wiredUiDepth(replaced(depth, "g_orbitalWidthCb.get(ctx,orbital_width::factor())", "g_orbitalWidthCb.get(ctx,1.0)")), "control: a twin that ignores the factor trips the pin");
     check(!wiredUiDepth(without(depth, "g_orbitalWidthCb.reset();")), "control: a shutdown that keeps the twin's buffer trips the pin");
 
-    check(wiredLayer(layer), "ui_layer.cpp: the orbit lines' 30 s line follows the panels'");
-    check(!wiredLayer(without(layer, "    orbitalWidthLog();")), "control: no orbit-line log call trips the pin");
+    check(wiredLayer(layer), "ui_layer.cpp: the orbit lines' 30 s line follows the panels' and carries the layer's half (how many the HDR layer took)");
+    check(!wiredLayer(without(layer, "    orbitalWidthLog(sceneLineLayerText(UiLayerFamily::kOrbitLines, frames).c_str());")), "control: no orbit-line log call trips the pin");
+    check(!wiredLayer(replaced(layer, "orbitalWidthLog(sceneLineLayerText(UiLayerFamily::kOrbitLines, frames).c_str());", "orbitalWidthLog(\"\");")),
+          "control: an orbit-line line without the layer's half (it could not tell a take that never ran from one that did) trips the pin");
+
+    // THE ORBIT LINES IN THE LAYER: the factor choice, the twin skip and the decision's facts.
+    check(wiredLayerTakeVscreen(vscreen),
+          "vscreen.cpp: the width patch is bound whether or not the layer takes the draw (the same factor f in the layer), before the layer's bracket and put back before its "
+          "restore; the coverage twin runs only for a draw the layer did not take (`!layered`), after the patch is back");
+    const std::string gateText = "bindingShaderHash(BindSlot::Vs) == orbital_width::kVs &&";
+    check(!wiredLayerTakeVscreen(replacedAfter(vscreen, "const bool orbitScaled = ", gateText, gateText + " !uiLayer &&")),
+          "control: a width patch that stands down for a draw the layer takes (another factor in the layer) trips the pin");
+    check(!wiredLayerTakeVscreen(replacedAfter(vscreen, "const bool orbitScaled = ", gateText, gateText + " !barsDecided &&")),
+          "control: ...whatever name the layer's decision goes by");
+    check(!wiredLayerTakeVscreen(replaced(vscreen, "if (!layered && uiDepthScope.on && uiDepthWantsReissue()) {", "if (uiDepthScope.on && uiDepthWantsReissue()) {")),
+          "control: a coverage twin that also runs for a draw the layer took (a second, phantom line in the scene's account) trips the pin");
+    check(!wiredLayerTakeVscreen(replaced(without(vscreen, "    if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks\n"),
+                                          "if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n    }\n",
+                                          "if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);\n    }\n    if (orbitScaled) orbitalWidthEnd(self);\n")),
+          "control: the patch put back after the layer's own restore trips the pin");
+
+    check(wiredLayerTakeLayer(layer),
+          "ui_layer.cpp: the orbit lines and the bars are HDR families by the one list; the density fact is asked of them alone, from the layer's own size against the render's, "
+          "after the arming and before the first decision; the bars' readiness is asked before the layer is made for the draw");
+    check(!wiredLayerTakeLayer(replaced(layer, "&& uiLayerFamilyTakesHdr(family);", "&& (family == UiLayerFamily::kHolo || family == UiLayerFamily::kFlightHud);")),
+          "control: a crisp set that is not the one list (the lines left out) trips the pin");
+    check(!wiredLayerTakeLayer(replaced(layer, "if (uiLayerFamilyIsSceneLines(family)) {", "{")),
+          "control: a density fact asked of every family (the cockpit HUD would be declined too) trips the pin");
+    check(!wiredLayerTakeLayer(replaced(layer, "f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, g_tc.info.a, g_tc.info.b);", "f.layerWider = true;")),
+          "control: a density fact that is always true (the take never declines) trips the pin");
+    check(!wiredLayerTakeLayer(replaced(layer, "f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, g_tc.info.a, g_tc.info.b);", "f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, ls.w, ls.h);")),
+          "control: a density fact measured against the layer itself trips the pin");
+    check(!wiredLayerTakeLayer(replaced(layer, "f.familyReady = supercruiseBarsReady(ctx, &familyWhy);", "f.familyReady = true;")),
+          "control: a bars decision that never asks the private pass trips the pin");
 
     check(wiredCoverage(coverage), "stellar_coverage.h: the twin's half-width is the factor in b13, not the literal 2");
     check(!wiredCoverage(replaced(coverage, "scene[332].zw*width.x*p.w", "scene[332].zw*2*p.w")), "control: a twin with the literal 2 back trips the pin");

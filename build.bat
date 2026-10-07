@@ -165,6 +165,9 @@ python tools\release_credits.py --self-test || exit /b 1
 python tools\flash_patch_residual.py --self-test || exit /b 1
 python tools\check_status_blocks.py --self-test || exit /b 1
 python tools\check_status_blocks.py || exit /b 1
+REM The fixtures of the supercruise layer rigs (tools\orbit_layer_test, tools\supercruise_census_test): the writers' encoders and readers, the census
+REM parser, every writer's --dry-run, and the three fixtures in the repo read back and held to their shape.
+python tools\layer_fixtures.py --self-test || exit /b 1
 REM The physics the black-hole shader is held to (docs\black-holes.md).
 python tools\blackhole_optics.py --self-test || exit /b 1
 REM Kerr optics and the hot flow the Sagittarius A* design is held to
@@ -550,7 +553,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
     "src\d3d11\wake_pulse.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
-    "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" ^
+    "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
@@ -3254,4 +3257,72 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: orbital width test build failed & exit /b 1 )
 "%OBJ%\orbitalwidth\orbital_width_test.exe" --dry-run || exit /b 1
 "%OBJ%\orbitalwidth\orbital_width_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_supercruise_bars_test
+echo [edvr] === supercruise_bars_test.exe ===
+REM fix.ui_quality's supercruise bars in the HDR layer (src\d3d11\supercruise_bars*.h, supercruise_bars.cpp; docs\ui-layer-2026-09-23.md, "2026-10-07"):
+REM the build's own bytecode of the strip geometry shader (kSupercruiseBarsGsBytecode, compiled from supercruise_bars_shader.h's HLSL by
+REM tools\temporal_shader_build and checked here to be that text's compile), the production binding, constants and rasterizer states, run on WARP in
+REM front of HLSL stand-ins for the game's vs A47A3315FFF5E2E4 / ps 869FFF43E875906E that disassemble to the instruction lists of the game's own
+REM (tools\supercruise_bars_test\fixtures): the tent at 0/30/45/89.9 degrees and three half-widths (the analytic tent, the width at half maximum, the area), the cut
+REM at the camera plane (a segment crossing w = 0, both ends behind, no length, one end at the cut), three viewports, perspective-correct attributes,
+REM seventy segments in a draw, the binding's in-and-out with the game's state exactly back (and the restore that fails, the settle, the state the game rebound),
+REM a game geometry shader refused, every cull mode and winding and the scissor, the geometry stage empty after the issue and a plain issue a hardware line
+REM again; the constants and states; and the mutants (the cut, the viewport axes, the perpendicular, the alpha edge, the half-width; the binding that keeps the
+REM game's raster state and the one whose restore does nothing) each caught by the same cases. --wiring scans the draw hook's source with controls.
+REM Built outside build\ and without d3d11.lib, like the orbit-line rig: its device is System32's.
+if not exist "%OBJ%\supercruisebars" mkdir "%OBJ%\supercruisebars"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\supercruisebars\\" /Fe"%OBJ%\supercruisebars\supercruise_bars_test.exe" ^
+    "tools\supercruise_bars_test\supercruise_bars_test.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: supercruise bars test build failed & exit /b 1 )
+"%OBJ%\supercruisebars\supercruise_bars_test.exe" --dry-run || exit /b 1
+"%OBJ%\supercruisebars\supercruise_bars_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_orbit_layer_test
+echo [edvr] === orbit_layer_test.exe ===
+REM fix.ui_quality's orbit lines in the HDR layer on the real dump (docs\ui-layer-2026-09-23.md, "2026-10-07"): the game's own vertex shader through the
+REM production patched copy, cache, constants and binding (src\d3d11\orbital_width_patch.h), the production depth-stencil seed (ui_layer_seed.h) and the
+REM production map and sizes (ui_layer_math.h, ui_sizing_math.h), on WARP, over one captured draw and the crop of the eye's own depth and stencil
+REM beneath it (tools\orbit_layer_test\fixtures, made by tools\layer_fixtures.py): the strip 2w LAYER pixels wide (4.000), the seed the game's crop
+REM texel for texel, the draw's tests the oracle's pixel for pixel (0 lit where stencil & 0x81 != 1 or the scene is nearer; thousands of pixels the
+REM unobstructed line would light on the cockpit and behind the nearer scene, none in the layer), the lit fraction against the game's own 2016 draw
+REM over stencil 5 at least 0.98, a line behind a nearer scene rejected and one in front accepted (a constant and a split depth), and the mutants (the
+REM factor not applied, applied twice, the seed skipped, the stencil mask 0x01 and 0x80 and the reference 0, the depth test off, the seed a texel
+REM away, the seed's mask without bit 7) each caught by the comparator that passes the real thing (--hardware-self-test runs the lot on the machine's own
+REM adapter, which is not a gate). Built outside build\ and without d3d11.lib: its device is System32's.
+if not exist "%OBJ%\orbitlayer" mkdir "%OBJ%\orbitlayer"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\orbitlayer\\" /Fe"%OBJ%\orbitlayer\orbit_layer_test.exe" ^
+    "tools\orbit_layer_test\orbit_layer_test.cpp" "src\common\guard.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: orbit layer test build failed & exit /b 1 )
+"%OBJ%\orbitlayer\orbit_layer_test.exe" --dry-run || exit /b 1
+"%OBJ%\orbitlayer\orbit_layer_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_supercruise_census_test
+echo [edvr] === supercruise_census_test.exe ===
+REM The supercruise draws in the HDR layer on the real census and the real dump (docs\ui-layer-2026-09-23.md, "2026-10-07"), pure C++ on
+REM src\d3d11\ui_layer_math.h: frame 1 of the 2026-10-07 05:48:01 census (tools\supercruise_census_test\fixtures\census_054801_f1.txt, 244 draw rows)
+REM turned into the facts the DLL gathers -- the space dust's rows named and redirected, one-token mutants refused (the flat route's pixel shader, blend MIN,
+REM an 8-bit target, a depth state the layer cannot reproduce, a late tonemap) -- a differential over every row against the rule on main (exactly the six
+REM supercruise rows change) and against the orbit lines and bars alone (only the two dust rows), the layer's depth-stencil seed rules replayed over the
+REM frame (the seeds a frame needs before and after, printed), and the dust pixels of the dump (all 2043 on sky, about 1% within one render pixel of an
+REM occluder, the parity bound's background at most 8 of 255). A scan holds this rig, the orbit-layer rig, the bars rig and the fixtures tool in this file.
+if not exist "%OBJ%\supercruisecensus" mkdir "%OBJ%\supercruisecensus"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\supercruisecensus\\" /Fe"%OBJ%\supercruisecensus\supercruise_census_test.exe" ^
+    "tools\supercruise_census_test\supercruise_census_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: supercruise census test build failed & exit /b 1 )
+"%OBJ%\supercruisecensus\supercruise_census_test.exe" --dry-run || exit /b 1
+"%OBJ%\supercruisecensus\supercruise_census_test.exe" --self-test || exit /b 1
 exit /b 0

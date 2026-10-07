@@ -41,8 +41,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SRC = ROOT / "src" / "d3d11"
 # Every header the rig's include closure holds (the rig includes ui_layer_math.h and ui_scene_composites.h; the first includes the two holo
-# headers). A mutation edits one of them; the others are copied as they are.
-HEADERS = ("ui_layer_math.h", "ui_scene_composites.h", "holo_material.h", "holo_families.h")
+# headers and, since 2026-10-07, supercruise_lines.h, the supercruise draws' shader hashes). A mutation edits one of them; the others are
+# copied as they are.
+HEADERS = ("ui_layer_math.h", "ui_scene_composites.h", "holo_material.h", "holo_families.h", "supercruise_lines.h")
 RIG = HERE / "ui_composite_census_test.cpp"
 BUILD_BAT = ROOT / "build.bat"
 RIG_LABEL = ":rig_ui_composite_census_test"

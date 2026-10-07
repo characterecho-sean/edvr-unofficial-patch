@@ -67,6 +67,7 @@
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
 #include "orbital_width.h"      // fix.ui_quality: the orbit lines' half-width, scaled in the game's own draw of their shader
+#include "supercruise_bars.h"   // fix.ui_quality: the supercruise bars' private geometry-shader pass, bound around the layered issue
 #include "engine_velocity.h"
 #include "vr_world_route.h"
 #include "vr_camera_census.h"
@@ -3887,9 +3888,10 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     UiFamilyFacts f;
     f.targetKind = uiLayerTargetKind();
     f.vs = bindingShaderHash(BindSlot::Vs);
-    // The target sphere needs exact PS admission for its depth-address remap.
-    // Ordinary HDR draws need no extra hash read.
-    if (f.targetKind == 1 && f.vs == kHoloTargetSphere)
+    // The target sphere needs exact PS admission for its depth-address remap, and the three supercruise draws are named by their
+    // shader PAIR (ui_layer_math.h: the bars' and the dust's vertex shaders are also seen with another pixel shader). Ordinary
+    // HDR draws need no extra hash read.
+    if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))
         f.ps = bindingShaderHash(BindSlot::Ps);
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,
@@ -4043,10 +4045,14 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // after-UI retry has had its say.
     bool compositeCounted = false;
     UiLayerFamily compositeFamily = UiLayerFamily::kNone;
+    // This draw is the supercruise bars' (ui_layer_math.h kSupercruiseBars): when the layer takes it, its issue is made through a
+    // private geometry shader (supercruise_bars.h). Set with the family below, read at the layer's bracket.
+    bool barsFamily = false;
     if (owner && uiLayerLive() && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
         const UiLayerFamily uiFamily = uiLayerFamilyOf(g_state, kind, count);
         compositeCounted = uiDepthScope.composite;
         compositeFamily = uiFamily;
+        barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;
         if (uiFamily != UiLayerFamily::kNone) {
             uiLayer = uiLayerDecide(self, static_cast<int>(uiFamily), uiLayerVerdictForwards(v),
                                     g_state->curveThisDraw);
@@ -4185,6 +4191,11 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // when the factor is below 1; one hash compare for any other draw.
     const bool orbitScaled = owner && g_state->rtv0Eye && bindingShaderHash(BindSlot::Vs) == orbital_width::kVs &&
                              orbitalWidthBegin(self, instances, args.startInstance);
+    // The supercruise bars (supercruise_bars.h): the layer decided to take the draw, so its issue will be made through the private
+    // geometry shader. The tent is one render pixel of the line the game drew, so the game's own viewport is read here, BEFORE the
+    // layer's bracket below remaps it to the layer's.
+    const bool barsDecided = barsFamily && uiLayer;
+    if (barsDecided) supercruiseBarsPrepare(self);
     // The layer's bracket goes innermost: after the verdict's own Begin (a
     // RemLok scissor, a slot swap) so the layer maps the state the draw is
     // actually issued with, and around nothing but the game's own draw.
@@ -4232,9 +4243,15 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
             }
         }
     }
+    // The supercruise bars: with the layer's remapped viewport bound (the bracket above), the strip shader, its constants and the
+    // private rasterizer state go in for this issue alone; supercruiseBarsEnd below puts the game's back before the layer's own
+    // restore. A false Begin leaves the game's state as it was: the draw goes into the layer as the plain lines the game drew,
+    // counted by the module.
+    const bool barsBound = layered && barsDecided && supercruiseBarsBegin(self, count);
     const bool originalIssued=observedDraw(alteredClass == AlteredDrawClass::Verdict
                                                ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));
     if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks
+    if (barsBound) supercruiseBarsEnd(self);  // the game's geometry stage, its constant slot and its rasterizer state back, before the layer's restore
     if (layered) {
         uiLayerEnd(self);
         if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);
@@ -5830,6 +5847,7 @@ EDVR_BOUNDARY_TICK(tkWakePulse, "wake_pulse");
 EDVR_BOUNDARY_TICK(tkUiDepth, "ui_depth");
 EDVR_BOUNDARY_TICK(tkUiLayer, "ui_layer");
 EDVR_BOUNDARY_TICK(tkOrbitalWidth, "orbital_width");
+EDVR_BOUNDARY_TICK(tkSupercruiseBars, "supercruise_bars");
 EDVR_BOUNDARY_TICK(tkVrWorldRoute, "vr_world_route");
 EDVR_BOUNDARY_TICK(tkVrCameraCensus, "vr_camera_census");
 EDVR_BOUNDARY_TICK(tkVScreenFootprint, "vscreen_footprint");
@@ -5891,6 +5909,8 @@ void vScreenFrameBoundary() {
         // The orbit lines' factor, read from the panel patch the layer's boundary has just settled (orbital_width.h): one atomic
         // every draw of the next frame sees, both eyes, the game's and the coverage twin.
         tkOrbitalWidth.run([&] { orbitalWidthFrameBoundary(g_state->ownerCtx); });
+        // The supercruise bars' private pass (supercruise_bars.h): settles a binding the last issue could not restore.
+        tkSupercruiseBars.run([&] { supercruiseBarsFrameBoundary(g_state->ownerCtx); });
         // The VR world route (docs section 82) reads the world-screen gate the layer's boundary just computed, accounts the
         // frame that ended, steps its ownership machine and arms its detector; the camera census runs after it. With
         // experimental.temporal_aa_on_foot_world off and the census off each returns at its first test.
@@ -7256,6 +7276,7 @@ void shutdownVScreenFixes() {
     uiDepthShutdown();
     uiLayerShutdown();
     orbitalWidthShutdown();
+    supercruiseBarsShutdown();
     screenMotionShutdown();
     celestialMotionShutdown();
     nightVisionShutdown();

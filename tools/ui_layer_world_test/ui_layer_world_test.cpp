@@ -231,7 +231,14 @@ int uiDepthEyeOfTargetReadOnly(const void* res) { return uiDepthEyeOfTarget(res,
 void uiPanelScaleSetTarget(float) {}
 void uiPanelScaleFrameBoundary() {}
 void uiPanelScaleLog() {}
-void orbitalWidthLog() {}
+void orbitalWidthLog(const char*) {}
+// The supercruise bars' private pass (supercruise_bars.h): this rig never draws one, so the layer is never asked to take the family
+// (ui_layer.cpp asks the module only for it) and the 30 s line is not read.
+bool supercruiseBarsReady(ID3D11DeviceContext*, const char** why) {
+    if (why) *why = "";
+    return false;
+}
+void supercruiseBarsLog(const char*) {}
 void uiSurfacesSetTarget(float) {}
 void uiSurfacesFrameBoundary() {}
 void uiSurfacesLogAtlas() {}

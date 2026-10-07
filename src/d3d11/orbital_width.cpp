@@ -192,30 +192,35 @@ void orbitalWidthFrameBoundary(ID3D11DeviceContext* ctx) {
     ow::detail::g_factor.store(ow::target(in), std::memory_order_relaxed);
 }
 
-void orbitalWidthLog() {
+void orbitalWidthLog(const char* layerText) {
     const ow::Why why = static_cast<ow::Why>(g_refused.load(std::memory_order_acquire));
     const bool live = uiPanelScaleLive();
     const uint64_t seen = g_windowSeen, scaled = g_windowScaled;
     g_windowSeen = g_windowScaled = 0;
     if (!live && !g_scaled && why == ow::Why::kNone) return;  // fix.ui_quality is off: nothing to say
+    // The layer's half, on every branch: "K in the HDR layer (x a frame), L left in the scene (reasons)". The width patch stays
+    // on for a draw the layer takes (the same factor is right at the layer's density: 2 x w x f render pixels are 2 x w layer
+    // pixels at the layer/render ratio the factor is made of) and is what the scene shows when the layer declines.
+    const char* layer = layerText && *layerText ? layerText : "layer text not supplied";
     if (why != ow::Why::kNone) {
-        Log::get().note("ui quality: orbit lines: not scaled (%s) -- %llu draw(s) this window with the game's own shader.",
-                        ow::whyName(why), static_cast<unsigned long long>(seen));
+        Log::get().note("ui quality: orbit lines: not scaled (%s) -- %llu draw(s) this window with the game's own shader; %s.",
+                        ow::whyName(why), static_cast<unsigned long long>(seen), layer);
     } else if (scaled) {
         Log::get().note("ui quality: orbit lines: half-width x%.4f (the panel patch's factor) -- %llu of %llu orbit-line "
-                        "draws this window through the shader copy, %llu in all, since frame %u.",
+                        "draws this window through the shader copy, %llu in all, since frame %u; %s.",
                         ow::factor(), static_cast<unsigned long long>(scaled), static_cast<unsigned long long>(seen),
-                        static_cast<unsigned long long>(g_scaled), g_firstFrame);
+                        static_cast<unsigned long long>(g_scaled), g_firstFrame, layer);
     } else if (seen) {
-        Log::get().note("ui quality: orbit lines: %llu draw(s) this window, none scaled -- %s.",
+        Log::get().note("ui quality: orbit lines: %llu draw(s) this window, none scaled -- %s; %s.",
                         static_cast<unsigned long long>(seen),
                         !live            ? "the panel patch is not live"
                         : !g_cache.remembered() ? "the game's orbit-line shader was not captured at its creation"
                         : !(ow::factor() < 1.0)     ? "the factor is 1 (HMD Quality is at the target, or the panels are not under the engine's sizing)"
-                                                : "the shader copy is not ready");
+                                                : "the shader copy is not ready",
+                        layer);
     } else {
-        Log::get().note("ui quality: orbit lines: none drawn this window (shader %s, factor %.4f).",
-                        g_cache.remembered() ? "captured" : "not captured", ow::factor());
+        Log::get().note("ui quality: orbit lines: none drawn this window (shader %s, factor %.4f); %s.",
+                        g_cache.remembered() ? "captured" : "not captured", ow::factor(), layer);
     }
 }
 

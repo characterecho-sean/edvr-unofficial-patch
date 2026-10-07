@@ -23,11 +23,18 @@
 // the panel patch's written one (uiPanelScaleFactor), read once a frame at the frame boundary into the one atomic
 // below, so every draw of a frame -- both eyes, the game's and the twin -- sees the same value.
 //
+// THE LAYER (2026-10-07). The same draw is also the HDR layer's to take (ui_layer_math.h kOrbitLines): drawn into the eye's HDR
+// layer at the layer's density, composited after the upscale, so a line is no longer upscaled with the world. The width patch
+// stays on for that issue and the factor is the SAME f: 2 x w x f pixels of the 2016 wide render are 2 x w pixels of the layer
+// at the layer/render ratio f is made of (f = W_render / (W_output x target); 0.4 at 2016 -> 5040). The take is declined when
+// the layer is not wider than the render; the patch and the coverage twin are then what the scene shows, as before.
+//
 // This header is what ui_depth.cpp includes: the factor and the twin's constant buffer, with no .cpp behind them (the
 // rigs that include ui_depth.cpp whole need nothing more). orbital_width_patch.h holds the DXBC edit and the cache and
 // binding the game's own draw uses; orbital_width.cpp the module.
 #pragma once
 
+#include "supercruise_lines.h"
 #include "../common/guard.h"
 
 #include <d3d11.h>
@@ -44,6 +51,8 @@ inline constexpr uint64_t kVs = 0xC7FA0C0F5DD49180ull;  // the game's orbit-line
 inline constexpr uint64_t kPs = 0x6EEF165A350DA30Full;  // and its pixel shader: shapes the alpha, unchanged here
 inline constexpr uint32_t kInstanceStride = 60;         // vertex buffer 1: 15 floats an instance, the half-width the fourth
 inline constexpr uint32_t kSlot = 13;                    // the private vertex-shader constant buffer: the game's shader declares none above CB1
+// The layer's family rule (ui_layer_math.h) names this pair from supercruise_lines.h: the same two numbers.
+static_assert(kVs == kUiVsOrbitLines && kPs == kUiPsOrbitLines, "the orbit lines' width patch and the layer's family rule name one shader pair");
 
 namespace detail {
 // The factor the game's draws of the orbit-line shader are made with right now: 1 unless the module has found the
@@ -169,8 +178,10 @@ void orbitalWidthEnd(ID3D11DeviceContext* ctx);
 // decides the factor, settles a binding that did not restore, reads back the first draw's half-widths.
 void orbitalWidthFrameBoundary(ID3D11DeviceContext* ctx);
 
-// The 30 s line, from ui_layer's totals beside the panels' own.
-void orbitalWidthLog();
+// The 30 s line, from ui_layer's totals beside the panels' own. `layerText` is the layer's half of it, built there from the
+// decided table (how many orbit-line draws the HDR layer took this window, at what rate, and how many it left in the scene
+// by reason); it is appended to every branch, so a window in which the take never ran reads "0 in the HDR layer".
+void orbitalWidthLog(const char* layerText);
 
 // DLL unload: the copy, its buffer and the readback released.
 void orbitalWidthShutdown();

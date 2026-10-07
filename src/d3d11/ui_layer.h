@@ -261,7 +261,7 @@ int uiLayerWorldDoorGap(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame)
 // was re-issued (lost while the route owns that eye), and the route's own refusals (refused indexes UiWorldRefuse).
 struct UiLayerWorldStats {
     uint64_t screenAsked = 0;
-    uint64_t screenDecided[16] = {};
+    uint64_t screenDecided[24] = {};   // 24 wide: the orbit lines' and the bars' two decisions (2026-10-07) took the enum past 16
     uint64_t reissued = 0;
     uint64_t lostDraws = 0;
     uint64_t refused[16] = {};

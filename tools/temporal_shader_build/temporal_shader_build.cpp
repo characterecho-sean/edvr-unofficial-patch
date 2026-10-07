@@ -22,6 +22,7 @@
 #include "../../src/d3d11/ui_resolve.h"
 #include "../../src/d3d11/night_vision_shader.h"
 #include "../../src/d3d11/stellar_coverage.h"
+#include "../../src/d3d11/supercruise_bars_shader.h"
 #include "../../src/openxr/stereo_shader_source.h"
 
 namespace fs = std::filesystem;
@@ -302,6 +303,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), extra.begin(), extra.end());
     const auto foreground = foregroundVariants();
     variants.insert(variants.end(), foreground.begin(), foreground.end());
+    const auto supercruise = supercruiseVariants();
+    variants.insert(variants.end(), supercruise.begin(), supercruise.end());
     return variants;
 }
 
@@ -520,8 +523,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 64 && coreLegacy.size() + 9 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics and six flat foreground shaders are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 65 && coreLegacy.size() + 10 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders and the supercruise bars' geometry shader are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -620,6 +623,39 @@ static void selfTest() {
             check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
                   D3D11_SHVER_GET_TYPE(desc.Version)==stage && D3D11_SHVER_GET_MAJOR(desc.Version)==5,
                   "flat foreground payload reflects its registered SM5 stage");
+        }
+    }
+
+    // The supercruise bars' strip shader (src/d3d11/supercruise_bars_shader.h): the proxy's first geometry shader, new, so held to its
+    // own contract rather than a former call's -- the symbol, source name, entry, profile and flags, the text it compiles, and what its
+    // DXBC reflects: a Shader Model 5 geometry shader that takes lines, emits at most six vertices as a triangle strip, and reads one
+    // 16-byte constant buffer, Strip at b0 (supercruise_bars_binding.h's StripParams). A change to any of them fails here, in the build.
+    {
+        auto& shader = coreFixed[coreLegacy.size() + 9];
+        check(!std::strcmp(shader.symbol, "kSupercruiseBarsGsBytecode") && !std::strcmp(shader.sourceName, "supercruise bars strip") &&
+              !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "gs_5_0") && shader.alternate == edvr::kSupercruiseBarsGs &&
+              shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+              "the supercruise bars' strip shader has its distinct symbol and exact source/stage contract");
+        check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+              "the supercruise bars' strip shader compiles to fixed DXBC");
+        if (reflect && !shader.bytes.empty()) {
+            ComPtr<ID3D11ShaderReflection> reflection;
+            D3D11_SHADER_DESC desc{};
+            const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                       reinterpret_cast<void**>(reflection.GetAddressOf()));
+            check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                  D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_GEOMETRY_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5,
+                  "the strip shader reflects as a Shader Model 5 geometry shader");
+            check(reflection && reflection->GetGSInputPrimitive() == D3D_PRIMITIVE_LINE &&
+                  desc.GSOutputTopology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP && desc.GSMaxOutputVertexCount == 36,
+                  "...taking lines and emitting at most 36 vertices of triangle strips (two strips of nine cross-sections: the tent's two sides)");
+            D3D11_SHADER_INPUT_BIND_DESC bind{};
+            ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("Strip") : nullptr;
+            D3D11_SHADER_BUFFER_DESC bufferDesc{};
+            check(reflection && SUCCEEDED(reflection->GetResourceBindingDescByName("Strip", &bind)) && bind.Type == D3D_SIT_CBUFFER &&
+                  bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 16 &&
+                  desc.ConstantBuffers == 1 && desc.BoundResources == 1,
+                  "...reading one 16-byte constant buffer, Strip at b0, and nothing else");
         }
     }
 
