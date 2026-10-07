@@ -4,7 +4,9 @@
 
 - **State:** grenade hold (104, 2026-10-07): 67 frames lost in runs of 36 and
   28, 64 because the grenade named the world with the first person's camera.
-  BUILT, NOT FLOWN: no first-person draw names it.
+  FLOWN OK (4c69779f, Epic log 115209): zero source-camera declines.
+  `flat world naming vetoed` names the grenade's DE545DC8/E46E3E48 (near
+  0.0675).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -34,8 +36,10 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** the grenade flight (104); section 105: request existing supporter
-  traces for AA refusal. Open: weapon no-candidate bursts, the roof's highlight
+- **Next:** a user's training-mission AA disengage (log pending); section 105:
+  request existing supporter traces for AA refusal. Open: weapon no-candidate
+  bursts (the pistol's white in the 115209 flight: 13-18% of draws in bursts;
+  part 1's paths never engaged; which key field changes is unlogged), the roof's highlight
   shimmer (content), TAA at the roof standing still (104). Retain 102's
   color-clear fix; no per-weapon table; preserve Epic settings, 87's native FSR
   comparison, 83's open items and high-G motion; do not repeat qualified
