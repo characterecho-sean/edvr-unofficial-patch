@@ -24,7 +24,7 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format for main, and for mv's debug views the trained runtime's OUTPUT texture, which is LARGER under DLSS -- paintDebug, not O[id.xy]
 RWTexture2D<float4> N : register(u1);    // the new history
-RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 the mover mask's pixels; 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-55 the engine path's pixel kinds (mv only, gCount 48-53)
+RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 the mover mask's pixels; 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 the pixels that took the celestial path (decision 12; mv only), 40-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-55 the engine path's pixel kinds (mv only, gCount 48-53)
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (both entries, when the mover mask wants last frame's)
 Texture2D<float> ZP : register(t3);      // last frame's ZC; movers.x or holoJitter.w validates it
@@ -36,6 +36,15 @@ Texture2D<float4> UP : register(t8);     // previous raw-raster UI colour; alpha
 Texture2D<float2> HC : register(t12);
 struct HoloRecord { uint4 key[8]; float4 clip[3]; float4 map[3]; float4 meta; };
 StructuredBuffer<HoloRecord> HR : register(t13);
+// EDVR_CELESTIAL 0 compiles the shader as it was before the celestial path: tools/celestial_motion_test builds both and holds
+// the outputs of this one, with no records bound, byte for byte to the other's.
+#ifndef EDVR_CELESTIAL
+#define EDVR_CELESTIAL 1
+#endif
+#if EDVR_CELESTIAL
+struct CelestialRecord { float4 m0; float4 m1; float4 m2; float4 box; float4 span; };
+StructuredBuffer<CelestialRecord> CR : register(t15);   // planet patch motion: one record per body, this eye (probe.w bit 8192)
+#endif
 )HLSL"
 R"HLSL(
 // ENGINE_MOTION_HLSL_BEGIN
@@ -242,7 +251,7 @@ cbuffer P : register(b0) {
     float4 fovea0;      // xy the fovea centre in output pixels, z the inner radius (px) where the periphery calming starts, w 1/(the ramp width in px)
     float4 fovea1;      // x the periphery calm strength (0..1), w 1 = the fovea is on (else no modulation)
     float4 movers;      // x 1 = the mover mask is on (ZP holds last frame's depth for this frustum); y the depth tolerance, a fraction; z the strength, how much history a masked pixel loses (0..1); w 1 = main writes ZC
-    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path)
+    float4 probe;       // x history scale, y registration probes, z coverage bound; w bits: 1 fixed bias, 2 prior UI valid, 4 adaptive UI, 8 (retired 2026-10-01: terrain), 16 holo, 32 screen, 128 the scanner's screen is up (its interface takes the head's path), 8192 the celestial records are bound (t15)
     float4 holoJitter; // current minus previous raster jitter; z = consecutive treated frames; w = valid DLSS depth history
     float4 skip;        // the fovea's own-resolve early-out: x0 y0 x1 y1 in THIS render, all zero = no skip
     float4 lead;        // xy: how far the fovea crop's base slid THIS frame (render pixels, base_now - base_prev), added to the vectors written to ML for NVIDIA's crop alone; zero on every other dispatch. zw unused
@@ -495,6 +504,40 @@ bool holoPixel(float2 p, float2 offset, out float2 pp, out float zp) {
 }
 )HLSL"
 R"HLSL(
+#if EDVR_CELESTIAL
+// Planet patch motion (docs/terrain-motion-dispatch-cost-2026-09-17.md, 2026-10-06 "the design"). CR holds one record
+// per body this eye, nearest first: m0..m2 the rows of the body's view-space [R|t] (this frame's view to last frame's,
+// in the pass's -Z convention, from the body's own patch constants), box the pixel rectangle and span the view-depth
+// interval of its patches' boxes, span.z = 1 for a record (the list ends at the first 0). Bound only while probe.w
+// bit 8192 says so; unbound it is never read and the shader is the one without this block. A world-path pixel with a
+// depth inside a volume takes THAT BODY'S motion in place of the camera's: right whether the rows carry the ship's
+// translation (normal space) or not (supercruise, where they lose it and a planet closes at km a frame). Where two
+// volumes hold a pixel the one with the narrower depth span wins -- a moon in front of its planet. d is the pixel's
+// ray (d.z = -1) and z its depth in metres; dp comes back as the pixel's point in last frame's view.
+bool celestialPixel(float2 p, float3 d, float z, out float3 dp) {
+    dp = 0;
+    if ((uint(probe.w + 0.5) & 8192u) == 0u) return false;
+    int hit = -1;
+    float narrow = 3.0e38;
+    [loop] for (int i = 0; i < 16; ++i) {
+        CelestialRecord r = CR[i];
+        if (r.span.z == 0.0) break;
+        float span = r.span.y - r.span.x;
+        if (p.x >= r.box.x && p.x <= r.box.z && p.y >= r.box.y && p.y <= r.box.w &&
+            z >= r.span.x && z <= r.span.y && span < narrow) {
+            hit = i;
+            narrow = span;
+        }
+    }
+    if (hit < 0) return false;
+    CelestialRecord r = CR[hit];
+    float3 P = d * z;
+    dp = float3(dot(r.m0.xyz, P) + r.m0.w, dot(r.m1.xyz, P) + r.m1.w, dot(r.m2.xyz, P) + r.m2.w);
+    return all(isfinite(dp));
+}
+#endif
+)HLSL"
+R"HLSL(
 // Engine-record motion (with fix.temporal_aa, phase 1; docs/kinematic-motion-
 // injection-2026-09-19.md, 2026-09-23 "Phase 1 built"). The kinds:
 //   0 no engine data at this pixel (unbound, unwritten, UI, screen);
@@ -696,6 +739,13 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             if (!far) {
                 dp = dp * z + tvCam.xyz;
                 zPred = -dp.z;
+#if EDVR_CELESTIAL
+                float3 celestialDp;
+                if (celestialPixel(p, d, z, celestialDp)) {
+                    dp = celestialDp;
+                    zPred = -dp.z;
+                }
+#endif
             }
         } else if (useDepth && !far) {
             dp = dp * z + tv;
@@ -826,6 +876,9 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // others, and a forty-element local array costs forty registers of
     // occupancy on a dispatch that covers the whole eye.
     uint count15 = 0, count16 = 0, count17 = 0, count28 = 0;
+#if EDVR_CELESTIAL
+    uint count39 = 0;   // pixels that took decision path 12
+#endif
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
         float3 d;
@@ -859,6 +912,14 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 if (!far) {
                     dp = dp * z + tvCam.xyz;
                     zPred = -dp.z;
+#if EDVR_CELESTIAL
+                    float3 celestialDp;
+                    if (celestialPixel(p, d, z, celestialDp)) {
+                        dp = celestialDp;
+                        zPred = -dp.z;
+                        count39 = 1;
+                    }
+#endif
                 }
             } else if (!far) {
                 dp = dp * z + tvUsed.xyz;
@@ -885,7 +946,11 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
             pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
             motion = pp - p;
+#if EDVR_CELESTIAL
+            decisionPath = count39 != 0 ? 12u : (count15 != 0 ? 2u : 1u);
+#else
             decisionPath = count15 != 0 ? 2u : 1u;
+#endif
             projectionValid = true;
             float2 holoP; float holoZ;
             if(holoPixel(p,0,holoP,holoZ)) {
@@ -1112,6 +1177,9 @@ R"HLSL(
     if (count16 != 0) InterlockedAdd(gCount[16], count16);
     if (count17 != 0) InterlockedAdd(gCount[17], count17);
     if (count28 != 0) InterlockedAdd(gCount[28], count28);
+#if EDVR_CELESTIAL
+    if (count39 != 0) InterlockedAdd(gCount[39], count39);
+#endif
     GroupMemoryBarrierWithGroupSync();
 #endif
     // Only the counters that moved. A group whose counters are all zero --

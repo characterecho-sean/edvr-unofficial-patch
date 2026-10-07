@@ -65,6 +65,8 @@
 #include "ui_layer_math.h"
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
+#include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
+#include "orbital_width.h"      // fix.ui_quality: the orbit lines' half-width, scaled in the game's own draw of their shader
 #include "engine_velocity.h"
 #include "vr_world_route.h"
 #include "vr_camera_census.h"
@@ -3229,6 +3231,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     if (!privateExecution) {
         graphicsBridgeNoteUnknownExecution();
         motionResourceWritten(nullptr);
+        if (celestialMotionAnyWatched()) celestialMotionConstantsUnknownWrite(nullptr);
         glitchFrameInvalidatePool(nullptr);
     }
     s->realExecuteCommandList(self, list, restoreContextState);
@@ -3338,6 +3341,12 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // The reveal sync's shadow of the scene block, same tee, its own gate.
     if (mapData && fssRevealWantsDraws()) {
         fssRevealNoteMap(res, mapped->pData);
+    }
+    // Planet-patch constants' CPU shadow: remember the mapped pointer so the Unmap tee can copy the game's write
+    // without a GPU copy at the draw. celestialMotionAnyWatched() is the callee's own first test, inline: with no
+    // buffer watched (the module off, or no planet patch drawn yet) no resource can match.
+    if (mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {
+        celestialMotionConstantsMapped(res, mapped->pData);
     }
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
@@ -3466,6 +3475,9 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         return;
     }
     motionResourceWritten(res);
+    // The planet-patch shadow reads the write BEFORE the real Unmap, like every tee here: after it the memory is
+    // no longer ours to look at.
+    if (celestialMotionAnyWatched()) celestialMotionConstantsUnmapped(res);
     // glitchFrameInvalidatePool's own and only test is "installed at all"
     // (glitch_frame.h) -- unlike glitchFrameWantsPool, it does not also ask
     // State::observing, so glitchFrameObserving() would be the wrong,
@@ -4162,7 +4174,17 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // One compare for the ordinary draw; the switch for the one with a
     // verdict (forwardVerdictBegin says why this is the same ladder).
     if (v != DrawVerdict::kNone) forwardVerdictBegin(self, v);
+    // Planet patch motion (celestial_motion.h): a colour-pass patch draw's constants are read from the CPU shadow here, before the game's
+    // own issue -- no GPU copy, no reissue. celestialMotionLive() first, one load; then the VS hash the draw path already holds.
+    if (owner && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
+    // The orbit lines (orbital_width.h; fix.ui_quality): the game's own draw of their vertex shader into an eye target is
+    // issued with the half-width scaled by the panel patch's factor -- a patched copy of that shader and a private b13
+    // bound for this issue alone and put back right after it, so everything else (the census above, the coverage twin
+    // below, the binding shadow, which is never told) sees the game's own. Begin counts every such draw and binds only
+    // when the factor is below 1; one hash compare for any other draw.
+    const bool orbitScaled = owner && g_state->rtv0Eye && bindingShaderHash(BindSlot::Vs) == orbital_width::kVs &&
+                             orbitalWidthBegin(self, instances, args.startInstance);
     // The layer's bracket goes innermost: after the verdict's own Begin (a
     // RemLok scissor, a slot swap) so the layer maps the state the draw is
     // actually issued with, and around nothing but the game's own draw.
@@ -4212,6 +4234,7 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     }
     const bool originalIssued=observedDraw(alteredClass == AlteredDrawClass::Verdict
                                                ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));
+    if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks
     if (layered) {
         uiLayerEnd(self);
         if (originalIssued) uiLayerSecondIssues(self, kind, count, instances, args);
@@ -4335,7 +4358,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     uiAtlasNoteWrite(dst, 2);
     if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteWrite(dst);   // a write into H after the resolve is the latch's
     if(foreignContext(self))engineVelocityResourceUnknown(dst);
-    if (!foreignContext(self)) {motionResourceWritten(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
+    if (!foreignContext(self)) {motionResourceWritten(dst);if(celestialMotionAnyWatched())celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource,
@@ -4512,6 +4535,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         if(box && box->right>=box->left)
             motionResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
         else motionResourceWritten(dst);
+        if (celestialMotionAnyWatched()) celestialMotionConstantsUnknownWrite(dst);
         glitchFrameInvalidatePool(dst);
         if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
         if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
@@ -4554,6 +4578,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     if (!foreignContext(self)) {
         if(box && box->right>=box->left)motionResourceWritten(dst,box->left,box->right);
         else motionResourceWritten(dst);
+        if (celestialMotionAnyWatched()) celestialMotionConstantsWritten(dst, data, box);
         glitchFrameInvalidatePool(dst);
     }
     if (drawCensusArmed()) {
@@ -5804,11 +5829,13 @@ EDVR_BOUNDARY_TICK(tkPixelProbe, "pixel_probe");
 EDVR_BOUNDARY_TICK(tkWakePulse, "wake_pulse");
 EDVR_BOUNDARY_TICK(tkUiDepth, "ui_depth");
 EDVR_BOUNDARY_TICK(tkUiLayer, "ui_layer");
+EDVR_BOUNDARY_TICK(tkOrbitalWidth, "orbital_width");
 EDVR_BOUNDARY_TICK(tkVrWorldRoute, "vr_world_route");
 EDVR_BOUNDARY_TICK(tkVrCameraCensus, "vr_camera_census");
 EDVR_BOUNDARY_TICK(tkVScreenFootprint, "vscreen_footprint");
 EDVR_BOUNDARY_TICK(tkScreenMotion, "screen_motion");
 EDVR_BOUNDARY_TICK(tkEngineVelocity, "engine_velocity");
+EDVR_BOUNDARY_TICK(tkCelestialMotion, "celestial_motion");
 EDVR_BOUNDARY_TICK(tkSharpenTick, "sharpen_tick");
 EDVR_BOUNDARY_TICK(tkTemporalTick, "temporal_tick");
 EDVR_BOUNDARY_TICK(tkTemporalBoundary, "temporal_boundary");
@@ -5861,6 +5888,9 @@ void vScreenFrameBoundary() {
         // cross-check and learning, the key's 30-second totals, and the end
         // of this frame's watch for draws after the UI.
         tkUiLayer.run([&] { uiLayerFrameBoundary(g_state->ownerCtx); });
+        // The orbit lines' factor, read from the panel patch the layer's boundary has just settled (orbital_width.h): one atomic
+        // every draw of the next frame sees, both eyes, the game's and the coverage twin.
+        tkOrbitalWidth.run([&] { orbitalWidthFrameBoundary(g_state->ownerCtx); });
         // The VR world route (docs section 82) reads the world-screen gate the layer's boundary just computed, accounts the
         // frame that ended, steps its ownership machine and arms its detector; the camera census runs after it. With
         // experimental.temporal_aa_on_foot_world off and the census off each returns at its first test.
@@ -5877,6 +5907,9 @@ void vScreenFrameBoundary() {
         });
         tkScreenMotion.run([&] { screenMotionFrameBoundary(g_state->ownerCtx); });
         tkEngineVelocity.run([&] { engineVelocityFrameBoundary(g_state->ownerCtx); });
+        // Planet patch motion's stamp and 5 s census line (celestial_motion.h): the stamp pairs each eye's frames, and the pass's
+        // consumer for a frame has run by the time this does, as every consumer of the frame's draws has.
+        tkCelestialMotion.run([&] { celestialMotionFrameBoundary(); });
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
         tkSharpenTick.run([&] { sharpenPassTick(g_state->ownerCtx); });
@@ -7222,7 +7255,9 @@ void shutdownVScreenFixes() {
     holoShutdown();
     uiDepthShutdown();
     uiLayerShutdown();
+    orbitalWidthShutdown();
     screenMotionShutdown();
+    celestialMotionShutdown();
     nightVisionShutdown();
     scrimShutdown();
     quadProbeShutdown();

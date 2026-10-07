@@ -38,6 +38,7 @@
 #include "shader_swap.h"
 #include "ui_depth.h"      // uiDepthEyeOfTarget: the eye, by the pass's own table
 #include "ui_panel_scale.h" // the engine-side panel sizing, configured and ticked with the key
+#include "orbital_width.h"  // the orbit lines' half-width at the same factor: its 30 s line follows the panels'
 #include "ui_surfaces.h"   // the instruments: the target, the frame count, the atlas line
 #include "vscreen.h"       // the raw OM/RS entry points, vScreenIsEyeSized, vScreenPanelSize
 #include "vr_world_mips.h"  // the VR world route: the mipped screen and its sampler (the re-issue's inputs)
@@ -2535,6 +2536,7 @@ void logTotals(double seconds) {
     // The panels and the layer on lines of their own: Log's line holds 1200
     // characters. The panels' line is the engine-side sizing's own.
     uiPanelScaleLog();     // the engine-side panel sizing: its factor, or why it stands down
+    orbitalWidthLog();     // and the orbit lines made at the same factor (orbital_width.h), or why they are not
     uiSurfacesLogAtlas();  // the glyph atlas instrument's write counts, when one is watched
     // The price: each stage's GPU time per eye-frame it ran in, and the
     // route's -- every stage of an eye-frame added up -- per eye-frame the

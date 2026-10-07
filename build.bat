@@ -537,6 +537,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\static_prop_gate.cpp" "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\lod_governor.cpp" ^
     "src\d3d11\engine_velocity.cpp" ^
+    "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
     "src\d3d11\fss_reveal.cpp" ^
@@ -549,7 +550,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
     "src\d3d11\wake_pulse.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
-    "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" ^
+    "src\d3d11\ui_layer.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
     "src\d3d11\backdrop_fix.cpp" ^
     "src\d3d11\scrim_fix.cpp" ^
@@ -1743,6 +1744,23 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: terrain retirement test build failed & exit /b 1 )
 "%OBJ%\terrainretired\terrain_retired_test.exe" --dry-run || exit /b 1
 "%OBJ%\terrainretired\terrain_retired_test.exe" || exit /b 1
+exit /b 0
+
+:rig_celestial_motion_test
+echo [edvr] === planet patch motion (celestial) ===
+REM The planet patch motion (docs\terrain-motion-dispatch-cost-2026-09-17.md, 2026-10-06): src\common\celestial_math.h run on the REAL patch
+REM constants of eye dump 180540 (tools\celestial_motion_test\fixture_180540.bin, extracted by tools\celestial_fixture.py, which re-derives
+REM every reference in its own --self-test below), the motion shader's celestial path on WARP (a pixel inside a body's volume takes path 12 with
+REM the body's motion, outside takes path 2, and with no records the outputs are byte-identical to the shader compiled without the path), and
+REM the CPU tee of src\d3d11\celestial_motion.cpp (Map/Unmap, UpdateSubresource, the copies that invalidate, the draw capture, the census).
+python "tools\celestial_fixture.py" --self-test || exit /b 1
+if not exist "%OBJ%\celestialmotion" mkdir "%OBJ%\celestialmotion"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\celestialmotion\\" /Fe"%OBJ%\celestialmotion\celestial_motion_test.exe" ^
+    "tools\celestial_motion_test\celestial_motion_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: celestial motion test build failed & exit /b 1 )
+"%OBJ%\celestialmotion\celestial_motion_test.exe" || exit /b 1
 exit /b 0
 
 :rig_depth_scene_pick_test
@@ -3215,4 +3233,25 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: UI hologram test build failed & exit /b 1 )
 "%OBJ%\uiholo\ui_holo_test.exe" --dry-run || exit /b 1
 "%OBJ%\uiholo\ui_holo_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_orbital_width_test
+echo [edvr] === orbital_width_test.exe ===
+REM fix.ui_quality's orbit lines (src\d3d11\orbital_width*.h; docs\ui-layer-2026-09-23.md, "2026-10-06: the orbit lines"): the game's own
+REM vertex shader (vs C7FA0C0F5DD49180, a fixture) and the production patched copy run on WARP over a captured draw's constants and
+REM vertex streams -- byte-identical at f = 1, every strip 2 x w x f pixels wide at 0.5, 0.4, 0.7 and 0.25 -- with the coverage twin,
+REM the cache, the binding (and its failed restore), the constants, the half-width read-back and the frame boundary's decision, the
+REM mutants (the factor not applied, applied twice, the twin left alone) caught by the same comparators, and the draw hook's source pins
+REM with their controls (--wiring runs those alone; --hardware-self-test runs the lot on the machine's own adapter, which is not
+REM a gate). Built outside build\ and without d3d11.lib, like the UI hologram rig.
+if not exist "%OBJ%\orbitalwidth" mkdir "%OBJ%\orbitalwidth"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /utf-8 ^
+    /Fo"%OBJ%\orbitalwidth\\" /Fe"%OBJ%\orbitalwidth\orbital_width_test.exe" ^
+    "tools\orbital_width_test\orbital_width_test.cpp" "src\common\guard.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: orbital width test build failed & exit /b 1 )
+"%OBJ%\orbitalwidth\orbital_width_test.exe" --dry-run || exit /b 1
+"%OBJ%\orbitalwidth\orbital_width_test.exe" --self-test || exit /b 1
 exit /b 0

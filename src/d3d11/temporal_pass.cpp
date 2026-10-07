@@ -44,6 +44,7 @@
 #include "weapon_motion.h"
 #include "cs_stage_save.h"
 #include "engine_velocity.h"
+#include "celestial_motion.h"   // planet patch motion: each body's own rigid motion on its pixels (decision path 12)
 #include "scheduler_stack_probe.h"
 #include "static_prop_gate.h"
 #include "perf_monitor.h"
@@ -1093,6 +1094,7 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                 g_brightPix += v[16];
                 g_brightNoDepthPix += v[17];
                 g_moverPix += v[28];
+                celestialMotionNotePixels(v[39]);   // the pixels that took decision path 12 (the mv entry's count39)
                 g_probeWorldDx += static_cast<int32_t>(v[18]);
                 g_probeWorldDy += static_cast<int32_t>(v[19]);
                 g_probeWorldN += v[20];
@@ -1506,6 +1508,10 @@ struct EyeMotionTrace {
     uint32_t sceneDraws;
     float prevRows[12], nowRows[12];
     PassParams params;
+    // The nearest body's planet-patch record (celestial_motion.h): records bound, bodies and patches the eye drew, patches matched to
+    // the last frame's, D's translation (world-aligned metres) and turn, and that body's distance. Zero when no record was bound.
+    uint32_t celestialRecords, celestialBodies, celestialPatches, celestialMatched;
+    float celestialT[3], celestialRotDeg, celestialDistance;
 };
 EyeMotionTrace g_eyeMotionTrace[kEyeRun * 4] = {};
 uint32_t g_eyeMotionTraceCount = 0;
@@ -1524,6 +1530,7 @@ void writeEyeMotionTrace(const std::wstring& dir) {
     names("cameraR",12); names("cameraTv",4);
     names("headR",12); names("headTv",4);
     fprintf(f, ",projectionA,projectionB,rowsBound,rowsFollow,sceneDraws");
+    fprintf(f, ",celestialRecords,celestialBodies,celestialPatches,celestialMatched,celestialTx,celestialTy,celestialTz,celestialRotDeg,celestialDistance");
     fprintf(f, "\n");
     for (uint32_t i = 0; i < g_eyeMotionTraceCount; ++i) {
         const EyeMotionTrace& t = g_eyeMotionTrace[i];
@@ -1540,6 +1547,8 @@ void writeEyeMotionTrace(const std::wstring& dir) {
         values(p.tvCam,4);
         values(p.dR0,4); values(p.dR1,4); values(p.dR2,4); values(p.tvUsed,4);
         fprintf(f, ",%.9g,%.9g,%d,%d,%u", p.knobs[0], p.knobs[2], t.rowsBound, t.rowsFollow, t.sceneDraws);
+        fprintf(f, ",%u,%u,%u,%u,%.9g,%.9g,%.9g,%.9g,%.9g", t.celestialRecords, t.celestialBodies, t.celestialPatches, t.celestialMatched,
+                t.celestialT[0], t.celestialT[1], t.celestialT[2], t.celestialRotDeg, t.celestialDistance);
         fprintf(f, "\n");
     }
     const bool wrote = !ferror(f);
@@ -3446,6 +3455,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
 
     ID3D11ShaderResourceView* uiDepthSrv = nullptr;
     ID3D11ShaderResourceView* holoSrvs[2] = {};
+    // Planet patch motion's records for this eye (celestial_motion.h): one per body that has a delta from the patch constants
+    // of this frame and the last, bound at t15 with probe.w bit 8192. Null (and every bit and slot as before) when no body does.
+    CelestialEyeRecords celestial{};
     // Engine-record velocity's inputs for this eye (engine_velocity.h): MRT6,
     // the pool snapshot and the scene constants now/before; all four or none.
     EngineVelocityViews engineViews{};
@@ -3477,6 +3489,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             uiDepthTemporalDepth(sd.Width, sd.Height, eye, scene, &uiDepthSrv);
             gpuCensusEnd(ctx, GpuCensusSection::DoorHologramResolve);
             uiDepthHoloMotion(eye,scene,holoSrvs);
+            celestialMotionRecords(ctx, eye, tanNow, static_cast<int>(w), static_cast<int>(h), &celestial);
             engineViewsGiven = engineVelocityViews(ctx, eye, scene, &engineViews);
             engineHeldSrv[0].Attach(engineViews.slots);
             engineHeldSrv[1].Attach(engineViews.pool);
@@ -3880,7 +3893,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         auto uiFlags = [&]() {
             return static_cast<float>((uiDepthReactive()>0.0f?1u:0u) |
                 (uiTrack && e.uiHistoryValid?2u:0u) | (uiTrack?4u:0u) | (holoSrvs[0]?16u:0u) | (screenSrv?32u:0u) |   // 8 (the terrain's) retired 2026-10-01
-                (fssInterface?128u:0u));
+                (fssInterface?128u:0u) | (celestial.srv?8192u:0u));
         };
 
 
@@ -3913,6 +3926,10 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 t.outputWidth = outW ? outW : w; t.outputHeight = outH ? outH : h;
                 t.rowsOk = g_rowsDeltaOwn; t.jumped = jumpedNow; t.dlHistory = e.dlHaveHistory;
                 t.rowsBound = g_curRowsBound; t.rowsFollow = g_rowsFollow; t.sceneDraws = sceneDraws;
+                t.celestialRecords = celestial.records; t.celestialBodies = celestial.bodies; t.celestialPatches = celestial.patches;
+                t.celestialMatched = celestial.matched; t.celestialRotDeg = static_cast<float>(celestial.rotationDeg);
+                t.celestialDistance = static_cast<float>(celestial.distance);
+                for (int k = 0; k < 3; ++k) t.celestialT[k] = static_cast<float>(celestial.translation[k]);
                 memcpy(t.prevRows, g_prevRows, sizeof(t.prevRows));
                 memcpy(t.nowRows, g_curRows, sizeof(t.nowRows));
                 t.params = p;
@@ -3924,7 +3941,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             (holoSrvs[0]?64u:0u) |
             (screenSrv?256u:0u) | (p.holoJitter[2]!=0?512u:0u) |
             (e.haveHistory?1024u:0u) | (e.dlHaveHistory?2048u:0u) |
-            (g_rowsDeltaOwn?4096u:0u) | (jumpedNow?8192u:0u) | (g_curRowsBound?16384u:0u);
+            (g_rowsDeltaOwn?4096u:0u) | (jumpedNow?8192u:0u) | (g_curRowsBound?16384u:0u) |
+            (celestial.srv?32768u:0u);
         memcpy(trace.worldTranslation,p.tvCam,12);
         if (g_rowsChoice.frame == g_rowsFrame) {
             trace.cameraChoiceFlags = g_rowsChoice.flags;
@@ -4825,7 +4843,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           nullptr,   // t5: free since the body path retired (2026-09-23)
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
+                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, celestial.srv, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15: the planet patch records (probe.w bit 8192); t16..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr};
                     ID3D11UnorderedAccessView* uavsM[8] = {debugPaint ? e.dlOutUav : nullptr,
@@ -5331,7 +5349,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           nullptr,   // t5: free since the body path retired (2026-09-23)
                                                           smokeSrv, uiDepthSrv,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
+                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, celestial.srv, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15: the planet patch records (probe.w bit 8192); t16..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
@@ -5633,7 +5651,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                      nullptr,   // t5: free since the body path retired (2026-09-23)
                                                      smokeSrv, uiDepthSrv,
                                                      uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
-                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, nullptr, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
+                                                          nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, celestial.srv, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15: the planet patch records (probe.w bit 8192); t16..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
                                                           engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
                 ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
@@ -6010,7 +6028,7 @@ void temporalPassDumpHistory(const char* trigger) {
         "events hex: 1 requested reset,2 size/format change,4 source-screen change,8 NVIDIA attempt,"
         "10 NVIDIA reset,20 diagnostic paint. inputs hex: 1 depth,2 previous depth,4 delta,8 world,"
         "10 body (retired),20 terrain (retired),40 holo,80 mesh (retired),100 source-screen,200 consecutive,400 native history,"
-        "800 NVIDIA history,1000 camera rows,2000 origin step,4000 bound rows. CPU only. ---",
+        "800 NVIDIA history,1000 camera rows,2000 origin step,4000 bound rows,8000 celestial records. CPU only. ---",
         entries.size(),g_rowsFrame,trigger?trigger:"diagnostic request");
     constexpr size_t kTcamEntries = 512;
     const size_t tcamFirst = entries.size() > kTcamEntries ? entries.size() - kTcamEntries : 0;
@@ -6128,6 +6146,9 @@ void temporalPassConfigure(Config& cfg) {
     // diagnostic-only (applyEngineMotionDiagnostics, below the debug mode's
     // read).
     engineVelocityConfigure(engineMotionOn);
+    // Planet patch motion (celestial_motion.h) is part of fix.temporal_aa in the VR build, with no key of its own (a fix that always helps
+    // gets no toggle): its capture and its records run exactly while the pass does. The flat profile has its own planet, its own pass.
+    celestialMotionConfigure(detail::g_temporalPassWantedFssChrome && !runtimeFlatProfile());
     // The scheduler stack-capture probe (docs/engine-render-pipeline.md
     // stage 0): read-only return-address signatures at the four
     // scheduler-fed worker entries, naming the frame scheduler the vtable

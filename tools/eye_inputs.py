@@ -25,6 +25,8 @@ ScreenMotion is RGBA16_FLOAT: previous-minus-current raster motion XY,
 source reversed Z, validity (0 outside, 1 valid, 2 source disocclusion,
 3 source UI requiring current reconstruction).
 UI-flags bit 32 means this map was supplied to temporal reconstruction.
+UI-flags bit 8192 means planet patch records (celestial motion) were bound
+for this eye's motion pass: decision path 12 in D can only appear then.
 UI-flags bit 64 (captures before 2026-09-23, when the UI separation
 retired) means target UI was separated before DLSS. In that case
 DlssColour is the world-only tone-mapped input, UiInfluence is its signed
