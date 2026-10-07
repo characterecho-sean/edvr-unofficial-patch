@@ -1189,6 +1189,20 @@ int main() {
               "FUN_1428431d0's own prologue would misdecode: either refused "
               "(no hook) or stolen at the wrong length (a corrupted trampoline)");
 
+        // FreeCameraActivity's update (EliteDangerous64.exe+0x1071980, build 332841), the
+        // Explorer Cam probe's target (advanced.explorer_cam_probe, explorer_cam_probe.cpp
+        // in the d3d11 half): `mov [rsp+20h], rbx` is its first instruction, FIVE
+        // bytes with no rip-relative displacement, so CodeHook steals exactly five and
+        // the 28-byte prologue's later instructions (pushes, a SIB lea, a sub with an
+        // imm32) never have to be decoded or moved.
+        const uint8_t freeCamera[] = {0x48, 0x89, 0x5C, 0x24, 0x20, 0x55, 0x57, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48,
+                                      0x8D, 0xAC, 0x24, 0x40, 0xFD, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xC0, 0x03, 0x00, 0x00};
+        check(codeInstructionLength(freeCamera, sizeof(freeCamera), &disp) == 5 && disp == 0,
+              "...and FreeCameraActivity's update prologue: its first instruction is 5 bytes, "
+              "no displacement, so 5 are stolen",
+              "the Explorer Cam probe's hook target would be refused or stolen at the "
+              "wrong length");
+
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.
         const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};

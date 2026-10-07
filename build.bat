@@ -527,6 +527,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\pose_reader_watch.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
+    "src\d3d11\explorer_cam_probe.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -2822,6 +2823,27 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: transition flash prevent test build failed & exit /b 1 )
 "%BUILD%\transition_flash_prevent_test.exe" --dry-run || exit /b 1
 "%BUILD%\transition_flash_prevent_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_explorer_cam_probe_test
+echo [edvr] === explorer_cam_probe_test.exe ===
+REM Build gate for the Explorer Cam probe (advanced.explorer_cam_probe, a TEMPORARY log-only instrument for the redesign's flight F0;
+REM docs\design-explorer-cam-free-camera-2026-10-07.md). Part A drives src\d3d11\explorer_cam_probe_core.h, the pure half the DLL
+REM compiles: the snapshot decode, the seqlock against a writer thread, the event ring, the state-change detection, the 1 Hz / 5 s
+REM cadence and the 2 s hold, the 5376-byte skinned-object fingerprint (accepts the head-look branch's shape, refuses near misses),
+REM the yaw and pitch decode of known rotations, the camera tally, every log line's prefix, and the consumer against a scripted
+REM clock. Part B compiles the REAL glue (explorer_cam_probe.cpp, EDVR_EXPLORER_CAM_PROBE_TEST) with the real CodeHook and installs
+REM it on a synthetic function that begins with the real 28-byte prologue: 5 stolen bytes, the original runs first, the return value
+REM and the game's memory are untouched, a wrong prologue stands down without a patch, key off installs nothing and closes the gate.
+if not exist "%OBJ%\explorercamprobe" mkdir "%OBJ%\explorercamprobe"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_EXPLORER_CAM_PROBE_TEST /I"%GEN%" ^
+    /Fo"%OBJ%\explorercamprobe"\ /Fe"%BUILD%\explorer_cam_probe_test.exe" ^
+    "tools\explorer_cam_probe_test\explorer_cam_probe_test.cpp" "src\d3d11\explorer_cam_probe.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: explorer cam probe test build failed & exit /b 1 )
+"%BUILD%\explorer_cam_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_scheduler_stack_json_test

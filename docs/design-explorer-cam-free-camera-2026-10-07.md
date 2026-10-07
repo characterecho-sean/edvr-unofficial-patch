@@ -2,7 +2,8 @@
 
 ## Status
 
-- **State: DESIGN, 2026-10-07. Nothing built, nothing flown.** Replaces
+- **State: DESIGN, 2026-10-07. Only the Phase 0b log-only instruments are
+  built; nothing is flown.** Replaces
   press counting and headset-pose offsets with a placement of Elite's own
   free camera at the commander's head, and hides the head only while the
   camera sits in it.
@@ -47,10 +48,12 @@
   `+0x592200`. The culling view (render context +0x40, frustum planes) is
   built upstream of that call (design-occlusion-culling-2026-09-22.md), and
   6s.9 saw holes and body culling from a downstream move.
-- **Next:** 0b instruments (I3 detours 0x1071980, rcx = activity), then
-  flight F0. 0a is done; its findings are at the end of this doc.
-- **Temporary keys:** none yet. Any key Phase 0 adds is listed here and
-  removed when the arc closes.
+- **Next:** flight F0. 0a is done and the 0b instruments are built
+  (2026-10-07, compiled and gated, not flown); the log prefixes to grep are in
+  the last section of this doc.
+- **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off)
+  switches on all three 0b instruments, and the VR camera census with them.
+  Removed when the arc closes. Any other key Phase 0 adds is listed here.
 
 ## Why today's Explorer Cam is half-baked
 
@@ -352,3 +355,31 @@ Phase 2 stays on the draw skip.
 **Unknown:** what calls the job and on which thread; the row convention
 (right/up/forward); whether TAB on foot always reaches this activity (F0's
 call counter and +0x48C answer it).
+
+## 2026-10-07 Phase 0b: instruments built
+
+Key: `[advanced] explorer_cam_probe = off|on`, temporary, VR profile only.
+On also switches on `advanced.vr_camera_census`. Log only: nothing in the
+game is written. Every line starts `explorer cam probe`; F0 greps these:
+
+- `: on` / `: off` once. `I3 armed:` (stolen bytes) or `I3 stood down:`
+  (build differs; I1 and I2 still run, their 1 Hz lines do not).
+- `I3 heartbeat:` every 5 s: calls, activity pointers, thread ids, +0x48C.
+  Idle reads `idle=no-call-yet` (hook never reached) or
+  `idle=no-call-in-window`.
+- `I3 change:` at once on a change of +0x48C, +0x470, +0x471 or +0x473:
+  old->new for all four, `first-call` on first sight of an activity.
+- `I3 pose:` at 1 Hz while +0x48C != 0 and 2 s after (`phase=active|hold`):
+  local origin, local and world basis rows, world origin. `I3 stale:` when
+  an activity stops being called with +0x48C != 0.
+- `I1 armed:`, `I1 heartbeat:` (`census_calls`, `kinds`; idle reads
+  `idle=no-refresh-call-reached-the-probe`), `I1 cam:` per kind and call
+  site at 1 Hz: calls per frame, origin, axes rows.
+- `I2 armed:`, `I2 heartbeat:` (`blocks_offered`, `skinned`, `far`; idle
+  reads `idle=no-5376-byte-block-offered` or `idle=blocks-offered-none-
+  skinned`), `I2 root:` at 1 Hz: distinct blocks, nearest root in view
+  space, model-axis yaw and pitch, the convention printed in the line.
+
+Yaw and pitch assume view x right, y up, z forward (unmeasured); the 3x3 is
+logged too, so F0 can recompute. The hook forwards four integer registers
+and snapshots after the original returns.
