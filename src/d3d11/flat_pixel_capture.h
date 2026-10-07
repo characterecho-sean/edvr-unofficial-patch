@@ -210,15 +210,15 @@ public:
         auto addTexture=[&](const char* name,ID3D11Texture2D* texture,const D3D11_SHADER_RESOURCE_VIEW_DESC* view=nullptr) {
             if(!texture || used_>=items_.size())return false;
             auto& item=items_[used_];texture->GetDesc(&item.desc);const auto& d=item.desc;
-            const uint32_t bpp=d.Format==DXGI_FORMAT_R8_UNORM?1:
+            const uint32_t bpp=d.Format==DXGI_FORMAT_R32G32B32A32_FLOAT?16:d.Format==DXGI_FORMAT_R8_UNORM?1:
                 (d.Format==DXGI_FORMAT_R32G32_FLOAT || d.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?8:4);
             const bool format=d.Format==DXGI_FORMAT_R8_UNORM || d.Format==DXGI_FORMAT_R32_FLOAT ||
                 d.Format==DXGI_FORMAT_R16G16_FLOAT || d.Format==DXGI_FORMAT_R8G8B8A8_UNORM ||
                 d.Format==DXGI_FORMAT_R8G8B8A8_TYPELESS || d.Format==DXGI_FORMAT_R32G32_FLOAT ||
-                d.Format==DXGI_FORMAT_R11G11B10_FLOAT || d.Format==DXGI_FORMAT_R16G16B16A16_FLOAT;
+                d.Format==DXGI_FORMAT_R11G11B10_FLOAT || d.Format==DXGI_FORMAT_R16G16B16A16_FLOAT || d.Format==DXGI_FORMAT_R32G32B32A32_FLOAT;
             if(!format || !d.Width || !d.Height || d.Width>16384 || d.Height>16384 || d.MipLevels!=1 || d.ArraySize!=1 || d.SampleDesc.Count!=1)return false;
             if(hdr) {
-                const DXGI_FORMAT expected=used_==6?DXGI_FORMAT_R32G32_FLOAT:
+                const DXGI_FORMAT expected=used_==6?d.Format:
                     used_==0||used_==5?DXGI_FORMAT_R11G11B10_FLOAT:
                     used_==1?DXGI_FORMAT_R32_FLOAT:used_==2?DXGI_FORMAT_R16G16_FLOAT:
                     used_==3?DXGI_FORMAT_R8_UNORM:DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -249,11 +249,11 @@ public:
             D3D11_SHADER_RESOURCE_VIEW_DESC view{};frame.engine.slots->GetDesc(&view);
             Microsoft::WRL::ComPtr<ID3D11Resource> resource;frame.engine.slots->GetResource(&resource);
             Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-            if(view.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || view.Format!=DXGI_FORMAT_R32G32_FLOAT ||
+            if(view.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || (view.Format!=DXGI_FORMAT_R32G32_FLOAT && view.Format!=DXGI_FORMAT_R32G32B32A32_FLOAT) ||
                 view.Texture2D.MostDetailedMip || (view.Texture2D.MipLevels!=1 && view.Texture2D.MipLevels!=UINT(-1)) ||
                 !resource || FAILED(resource.As(&texture))) {stop("failed-slots-view");return;}
             D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
-            if(d.Width!=frame.renderWidth || d.Height!=frame.renderHeight || d.Format!=DXGI_FORMAT_R32G32_FLOAT ||
+            if(d.Width!=frame.renderWidth || d.Height!=frame.renderHeight || d.Format!=view.Format ||
                 !addTexture("slots",texture.Get(),&view)) {stop("failed-slots-resource");return;}
         }
         if(frame.engine.pool) {

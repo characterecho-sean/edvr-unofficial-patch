@@ -2,9 +2,8 @@
 
 ## Status
 
-- **State:** shared route merged at `dacb7a56`; qualifications below remain open.
-  Epic installed `v0.18.1-15-g06e9225c`, FLOWN. Latest analyzed log:
-  `v0.18.1-15-g06e9225c`; evidence is in sections 1-95.
+- **State:** FLOWN OK (eccfce7a): DLAA/FSR on foot at any SS, the weapon and
+  aiming included; the weapon and the sight keep AA (104).
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -18,10 +17,10 @@
   gate-2 matrix cells; section 78: nine of ten refusing ship pairs reciped
   (census 46), vs_C7FA0C0F5DD49180 refused until its blob is captured; the
   upstream camera hook is now design-flat-camera-integration.md.
-- **Priority (Sean):** performance over code sharing. Share math/backends where
-  cheap; keep separate frame scheduling/capture paths when that avoids copies,
-  synchronization or additional per-draw work. Defer broad core extraction
-  until flat capture establishes the necessary boundary.
+- **Priority (Sean):** performance over code sharing; honor configured backend.
+  Mixed cameras must not downgrade DLAA/FSR to TAA. Share math/backends where
+  cheap; separate scheduling/capture when it saves copies/sync/per-draw work.
+  Defer broad core extraction until flat capture establishes the boundary.
 - **Recommendation:** two installer artifacts, one graphics implementation, one
   temporal pipeline, separate VR and mono frame adapters. Flat installs enable
   only temporal AA and its required support services.
@@ -32,14 +31,14 @@
 - **Ruled-out pointer:** the kinematic arc's Status records rejected motion
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
-- **Next:** section 95: full-width lower capture and scoped draw queries are
-  validated; next flight confirms contribution on the shared first-person path.
-  Quiet performance recovered; building shimmer is unqualified. Section 87:
-  native FSR comparison. Preserve section 83's remaining matrix and open items.
-  Preserve high-G motion and strict depth ownership; do not repeat qualified
-  PS91/BFE or stale-resize hypotheses. The menu hangar-floor P1 defect remains
-  open. VR still needs regression tests; the concourse NPC observation on
-  `d9f86b09` belongs to the main/openxr-perf-gaps line.
+- **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
+  capture; raising the 64-draw/64-record bounds; a weapon-only cause.
+- **Next:** open: weapon no-candidate bursts, the roof's highlight shimmer
+  (content), TAA at the roof standing still (104). Retain
+  102's color-clear fix; no per-weapon table; preserve Epic settings, 87's
+  native FSR comparison, 83's open items and high-G motion; do not repeat
+  qualified PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
+  regression tests and `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
@@ -9642,8 +9641,13 @@ right-edge WARP cases distinguish visible, depth-rejected, color-write-disabled
 and empty draws, plus unavailable/timed-out queries. They verify nested game
 occlusion queries retain their result and capture CS invocations stay outside
 the draw statistics. Existing complete/partial capture gates also pass.
-Clean promotion and Epic flat installation follow; preserve live settings
-and DLSS 310.9.1.
+Clean promotion passed; Epic flat installed and verified as
+`v0.18.1-18-g83938927` (code commit `83938927`). Live `edvr-flat.ini` and
+`nvngx_dlss.dll` hashes remain unchanged. This diagnostic build is NOT FLOWN.
+
+Next test uses the same weapon that reproduced the conflict: draw it until
+world AA turns off, F10, hold it drawn ten seconds, then holster. Wait two
+minutes before comparing performance. No per-weapon live test matrix.
 
 Sean explicitly requires a solution that does not need him to test every
 weapon type. The exact shader pair is a diagnostic witness, not the final
@@ -9652,3 +9656,3634 @@ and render phase, with actual pixel/history ownership separated from the
 world. Automated GPU tests cover pass variants; a representative live test
 confirms the game route. Do not replace the current conflict with a growing
 per-weapon hash whitelist or assume global stencil 0x04 identifies weapons.
+
+## 96. Real draw confirmed; lower image stays unchanged (2026-10-03)
+
+Verified `edvr_gfx_20261003_101515.log` against installed
+`v0.18.1-18-g83938927` (6AC12887), Windows flat Epic, 3840x2160. Sean
+completed the weapon diagnostic. F10 arms at 10:19:57.869; both four-stage
+captures finish by 10:19:58.339, unsupported=0. Session is
+`flat_weapon_footprint/20261003_161957_869_59304_1`, frames 66718/66720.
+Each frame allocates 315129856 bytes. No two-minute performance wait is
+needed for these captures; this analysis makes no new performance comparison.
+
+Exact draw: DrawIndexedInstanced, six indices starting 6623712, base vertex
+3096903, one instance starting 37036. Triangle-list statistics report two
+IA primitives, four VS invocations and two clipper primitives. Whole-draw
+occlusion and PS invocation counts are 55365/55236, with CS invocations=0.
+Both queries and explicit brackets complete successfully. Cull=BACK,
+scissor disabled, predication unbound, sample mask all, RTV0 write mask=15
+and blending enabled. This is a real two-triangle material draw; the record
+does not establish that it is the weapon mesh itself.
+
+Ruled out: empty draw, whole-draw depth rejection and a disabled RTV0 write
+mask, because nonzero primitives/samples/PS work and write mask 15 are
+measured. These do not rule out a no-op blend or sampled zero alpha. The saved
+PS outputs o0.xyzw; t3's scalar supplies alpha and multiplies RGB, so shader
+execution is not by itself proof of visible color changes.
+
+ROI now spans x0..3839/y1008..2159, 4,423,680 pixels (53.33% of the frame).
+Color/depth/stencil changes remain zero before/after and through the consumer
+and pre-Present snapshot in both frames; there are no recorded clears.
+Stencil 0x04 preexists on every sampled pixel. Bit 0x10 preexists on
+480726/477369 lower-right pixels, bounding boxes x2190..3397/y1392..2159
+and x2188..3393/y1396..2159, and is unchanged. Thus the selected draw has no
+measured effect on that known lower first-person region. The upper 1008
+rows remain unsampled; passing samples cannot identify their location.
+
+The alternate camera still has XY scale ratio approximately 1.231279,
+near depth 0.0675 versus reference 0.025 and identical pose rows. It writes
+no depth and replaces stencil 0x04. First-bad sequences 14797/14793 equal
+the selected draws. Consumers four draws later report
+`conflicting-hdr-target-or-camera`. No simple ignore/whitelist exception is
+qualified, and stencil 0x04 remains ruled out as an exclusive marker.
+
+The intended shared-path design remains actual per-draw coverage with local
+history isolation, validated by automated pass-variant tests. Conservative
+coverage can include equal-color/transparent fragments without depending on
+weapon type, but shader substitution, blend preservation, raster phase and
+backend history semantics must be proven before admission changes. A reactive
+mask must not be assumed to guarantee zero history for every backend. No
+renderer, installed build or live setting changed during this analysis.
+
+## 97. Guarded shared late-overlay isolation (2026-10-03)
+
+Section 96 supplies enough evidence to implement the shared-path mechanism
+and prove it with automated GPU tests before another representative flight.
+The exact shader pair remains a diagnostic witness, never an admission list.
+No additional cropped capture or per-weapon live matrix is planned.
+
+Proposed contract: before the first supported alternate-camera, color-only
+HDR draw, retain clean pre-overlay HDR. Append a private coverage output to
+the original pixel shader while preserving its original outputs, clipping,
+depth/stencil tests and color blending. Union passing fragments across the
+late overlay suffix. Every later HDR writer before the consumer must satisfy
+that contract; an ordinary world write, copy, clear, unsupported shader or
+binding, or unproven raster phase keeps the existing frame refusal.
+
+The temporal backend receives clean pre-overlay color. The final HDR finish
+uses the game's post-overlay color under aligned coverage and resolved world
+color elsewhere. A reactive mask or a final current-color override alone is
+insufficient: opaque DLSS/FSR history could otherwise ingest the overlay and
+carry it into later frames. Keep raw post-overlay input and live HDR output
+separate from clean backend input, avoiding SRV/RTV feedback.
+
+Implemented and installed, not live-qualified. Targeted tests and full
+validation passed. No new config key or diagnostic removal. Missing or
+declined HDR consumers refuse before the final LDR copy can call a backend.
+The suffix seals at the ready HDR consumer; later HDR writers retain the
+existing post-consumer latch. PS UAV binds, depth/stencil or producer writes,
+unknown copies/clears and scene-camera writes fail closed while it is open.
+
+Initial environment: Windows Epic flat, upstream camera injection, centered
+same-pose alternate projections, single-sample R11G11B10 HDR, and a free
+private MRT slot 7. The latest capture is 3840x2160; installed DLSS is
+310.9.1. Legacy injection, off-center or unproven cameras and unsupported
+target layouts retain refusal. This scope does not qualify VR or Frontier.
+The coverage shader cache is bounded to 2048 structurally supported shaders
+and 32 MiB of patched bytecode; reaching a cap retains refusal. Overlay draws
+that produce engine-motion metadata also retain refusal, so clean color is
+never paired with motion written by the excluded overlay.
+Private clean HDR plus coverage allocations are capped at 128 MiB and reused
+across frames. The production R11 HDR route at 3840x2160 uses 41,472,000 bytes
+for these textures; exceeding the budget retains refusal.
+The resolver also retains a raw post-overlay R11 copy for feedback-free
+composition. Total additional active-overlay scratch is 74,649,600 bytes
+(about 71 MiB) at this size; ordinary frames do not create these allocations.
+
+Automated evidence: the WARP layer test marks 32/256 passing fragments after
+discard, depth and stencil rejection while original HDR and D24S8 bytes match
+an uninstrumented draw exactly. A second shader unions to 96 pixels; the next
+frame reuses the same private textures, refreshes clean color and clears old
+coverage. An alpha-zero draw marks all 256 pixels while HDR/depth/stencil stay
+byte-identical. Occupied MRT7, PS depth output, linkage, predication, OM UAV
+and unsupported conditional control flow refuse.
+
+Both SDK stubs receive clean 20/30/40 pixels where the game has 200/10/10.
+The final HDR composite matches the game's bilinear color at all four
+neighbors with phase (+0.25,-0.25), preserving resolved world elsewhere.
+TAA has covered and zero-mask clean-input controls. The next unmarked frame
+uses backend world output; an incomplete input pair preserves H and never
+calls the backend. Reducer and trace replay tests cover protected suffixes,
+later HDR/depth writes, retained prior conflicts, actual phase/pose mismatch,
+failure/seal markers and post-seal unrelated writes. Updated source wiring
+gates retain isolation and verify the distinct clean/raw copies.
+
+The 5s `flat late overlay` line reports planned and fully marked draws,
+isolated consumer frames and refusals. A route that never ran is distinct
+from one that completed. Its shader/target/blend binds are verified before
+the original draw; incomplete brackets retain refusal. No more diagnostic
+flight is required before installing the validated fix.
+
+Full validation passed with receipt fingerprint
+`76efe4d51af3882ae8aed6212be5c1aa7cc480c3b5020ee46aa515e410d38506`.
+Committed as `087501bb`, fast-forwarded main and verified the push. Clean
+DLL-only promotion passed. Epic flat installed and verified as
+`v0.18.1-21-g087501bb`; live `edvr-flat.ini` and `nvngx_dlss.dll` hashes are
+unchanged. This fix is BUILT, NOT FLOWN.
+
+Next representative test: reproduce with the same weapon, hold it drawn ten
+seconds, then holster for ten. Check that world AA remains active and that
+`flat late overlay 5s` reports fully marked draws and isolated consumers.
+Take F10 if world AA still turns off or another visual defect appears. A
+two-minute wait is only needed for a performance comparison, not this test.
+No per-weapon test matrix and no new diagnostic flight before this install.
+
+## 98. Live route activation failure (2026-10-03)
+
+Verified `edvr_gfx_20261003_110718.log` against installed
+`v0.18.1-21-g087501bb` (6AC13580), linked 17:04 UTC. Sean reports world AA
+still turns off with the same weapon. Representative 5s window at 11:10:49:
+planned-draws=417, fully-marked-draws=0, isolated-consumer-frames=0,
+refused-frames=417, reason `overlay-draw-scope-incomplete`. Holstered windows
+return to treated HDR/history, including a 744-frame streak at 11:11:24.
+
+Ruled out: the camera/phase admission never runs, because the live plan
+counter increments on hundreds of draws per window. The actual coverage
+bracket does not run on those ordinary draws: all seven flat draw thunks
+still gate begin/end solely on `weaponFootprintStarted`. That ties the real
+fix to the F10 instrument and leaves `overlayPlanned` unexecuted. Correct
+the call-site gate and test every original draw bracket with F10 unarmed.
+
+A second measured refusal appears only when F10 arms the bracket:
+`unsupported PS UAV/structured operation`, twice in the 11:11:09 and
+11:11:39 windows. The exact diagnostic pair's captures complete at
+11:11:37.783/37.955, so this is not a readback timeout. Inspect its saved
+bytecode and authoritative opcodes before allowing any operation. A safe
+SRV structured read and a UAV write need different treatment; retain UAV,
+atomic and unknown-control-flow refusal. No additional flight is needed to
+distinguish these two implementation failures.
+
+Saved `edvr_logs/shaders/ps_46F92DC71BF8DFA5.dxbc` disassembly confirms
+`dcl_resource_structured t1, 96` and `ld_structured` from t1, no UAV
+declaration, store or atomic operation. Its opcodes 162/167 were rejected by
+the patcher's blanket `op >= 143` guard. It also has balanced IF/ELSE/ENDIF
+(31/18/21) and one terminal top-level RET, which the initial flow guard
+would reject next. Microsoft DirectX-Headers confirms the opcode mapping.
+The correction admits validated raw/structured SRV reads and balanced
+branches with one final top-level return; UAV operands, stores, atomics,
+early returns, loops, calls and malformed flow remain refused. Test the
+captured PS's actual patched shader creation before another live flight.
+
+Implemented normal-draw activation through one shared policy: footprint OR
+planned overlay. Regression tests cover all four input cases and all seven
+begin/original-draw/end hook branches, with removal, ordering and indirect
+offset mutation controls. They fail the old diagnostic-only wiring.
+Targeted temporal self-tests pass. WARP tests pass for read-only structured
+and raw SRV loads with balanced branches, preserving original color/depth/
+stencil and marking coverage. UAV stores/writes/atomics and unsafe return
+flow remain refused, including actual SRV-versus-UAV load operand checks.
+The exact captured 2008-byte PS patches to 2076 bytes and WARP creates it
+successfully. Full validation passed, including the GPU rigs and installer
+gates, with receipt fingerprint
+`4cb7f4dc02591042e3c501aec845e7d912784ace9b592e7ad4856a2833941467`.
+Committed as `90d0c3d8`, fast-forwarded main and verified the push. Clean
+DLL-only promotion passed. Epic flat installed and independently verified
+as `v0.18.1-23-g90d0c3d8`; live `edvr-flat.ini` and `nvngx_dlss.dll` hashes
+are unchanged. These corrections are BUILT, NOT FLOWN.
+
+Read-only suffix audit finds no additional confirmed blocker. F10 trace
+dumps at frames 56778/58972 contain zero frames/events (16-byte headers,
+four skipped slots). The frame-58973 manifest identifies selected seq 17735
+and consumer 17739 with the same H/depth, but has no draw records for the
+three intervening sequences. Their writer roles remain unknown; runtime
+suffix checks must still prove them in the representative test. Do not
+assume the snapshot ROI establishes their ownership or waive those checks.
+
+Next representative test: same weapon drawn ten seconds, then holstered
+ten seconds. Check world AA and the 5s fully marked/isolated counters. No
+two-minute wait or weapon matrix is required; take F10 only if AA still
+turns off or another visual defect appears. Verify the next log against
+the literal installed `v0.18.1-23-g90d0c3d8`, not the later docs-only HEAD.
+
+## 99. Marked weapon, later resource refusals (2026-10-03)
+
+Verified `edvr_gfx_20261003_113932.log` against installed
+`v0.18.1-23-g90d0c3d8` (6AC13A91), linked 17:25:37 UTC. Sean reports the
+same weapon still disables world AA and took F10. At 11:42:07: planned=305,
+fully-marked=305, isolated-consumer-frames=0, refused-frames=305, with
+`overlay-scene-constants-written` 194 and
+`overlay-unknown-write-or-command-list` 111. F10 completes frames 48487 and
+48489, with two complete captures and zero unsupported captures.
+
+Ruled out: the ordinary-draw coverage bracket never runs or the captured
+weapon PS cannot be patched, because every planned draw is now fully marked
+outside F10 as well as during it. The failure occurs later in the suffix.
+Trace the specific operation and affected resource before changing either
+refusal: constants can change future draw interpretation, while a generic
+copy/clear hook may know its destination. Retain true HDR/depth writes and
+unknown command-list refusal. No additional flight requested yet.
+
+Source audit confirms the constant-upload refusal is `res==namedConstants`,
+not a write to H or scene depth. World rows are already copied into
+`namedCamera`, target/selector records and resolve `f.camera`. Engine source
+rows and scene/previous GPU inputs are private snapshots. Subsequent camera
+uploads cannot mutate them; later draws and engine producers retain their
+own admission checks. The specific log reason therefore confirms a stale
+blanket invalidation rather than loss of those saved inputs.
+
+The second reason is emitted for every kCopy/kClear/kResolve substitution,
+including known-destination UpdateSubresource before destination inspection.
+It does not establish a write to protected H/depth. Correct it by checking
+known destinations/views at all mutation hooks while preserving substitution
+flush semantics, null lookup refusal, actual H/depth writes, command lists,
+unknown context state and future-draw admission. The log does not identify
+which mutation subtype ran; resource-aware refusal will still reject any
+actual protected write without requiring another diagnostic first. Add
+policy and hook-integration regressions that fail this blanket wiring.
+
+The new complete captures cover lower-1152 rows at 3840x2160. Both frames
+show zero HDR/depth/stencil changes in that ROI across before/after selected
+draw, pre-consumer and pre-Present, despite about 55k selected PS invocations.
+There are 146/20 sequences between selected draw and consumer; the F10 trace
+again has no events (16-byte header, four skipped slots). This capture does
+not prove full-frame suffix safety: upper rows and private coverage are not
+captured. The correction therefore depends on explicit resource identity
+and owned snapshot semantics, not absence of changes in this ROI. Retain
+runtime checks and operation/role refusal diagnostics for remaining writes.
+
+Implemented typed destination roles and resource/view mutation helpers.
+Known clears, copies, updates, mip generation, resolves and Map/Unmap
+compare their actual destination with every open suffix H/depth; unrelated
+resources pass, null/unresolved identities refuse. Scene-b1 uploads still
+invalidate camera/projection tracking for future draws but no longer discard
+owned snapshots. Engine substitution flush semantics are unchanged. Unknown
+command lists and context resets still refuse. Foreign/wrong-thread
+mutations latch uncertainty during the suffix; the HDR consumer acquires
+that latch before backend evaluation.
+
+Resource failures increment the operation/role counter before the first
+failure closes the suffix. The existing 5s report prints and resets those
+counters beside marked/isolated/refused counts. Dead instrumentation is
+therefore distinguishable from a successful path. Re-read changed runtime,
+header, hooks and tests; no declaration/order or duplicate log defect found.
+Targeted flat_temporal_test build passes (17 traces, 46/46 replay frames).
+New tests exercise unrelated buffer writes through the actual consumer,
+protected HDR/depth and unknown refusal, all ten mutation-hook variants,
+Map/Unmap and foreign latch wiring, with removal/misrouting mutation controls.
+Full validation passed, including GPU rigs and installer gates, with receipt
+fingerprint `630ee203b04248f94eeeb2c642db9daac8a6ef285725281e226b5498269c9fd6`.
+Committed as `128fca02`, fast-forwarded main and verified the push. Clean
+DLL-only promotion passed. Epic flat installed and independently verified
+as `v0.18.1-25-g128fca02`; live `edvr-flat.ini` and `nvngx_dlss.dll` hashes
+are unchanged. The resource correction is BUILT, NOT FLOWN.
+
+Next representative test: same weapon drawn ten seconds, then holstered
+ten seconds. Check that world AA remains active and 5s marked/isolated
+counters advance; any relevant mutation refusal now names operation/role.
+F10 only if AA still turns off or another defect appears. No two-minute wait
+or weapon matrix is required. Verify the next log against the literal
+installed `v0.18.1-25-g128fca02`, not the later docs-only HEAD.
+
+## 100. HDR source ambiguity after protected draws (2026-10-03)
+
+Verified `edvr_gfx_20261003_115819.log` against installed
+`v0.18.1-25-g128fca02` (6AC141F7), linked 17:57:11 UTC. Sean drew the same
+weapon, took F10, waited ten seconds, then holstered ten seconds. At
+12:00:35: planned=360, fully-marked=360, isolated=0, refused=360. The sole
+layer reason is `overlay-unsealed-at-final-copy`; the earlier HDR consumer
+selection is `source-camera-or-depth-not-unique` on all 360 frames. No
+resource mutation or old constant-upload refusal appears. The transition
+windows each isolate five frames; holstered 12:00:55 treats all 156 frames.
+F10 completes frames 46126/46128 with zero unsupported captures.
+
+Ruled out: coarse resource mutation guards still block the protected suffix,
+because all those reasons disappear on the verified new build. The final
+copy's unsealed refusal is downstream of the HDR source-selector ambiguity,
+not the first cause. Identify which source records conflict and why before
+editing uniqueness rules. Real second-world source/depth or a mismatched
+world camera must still refuse. No new diagnostic flight requested yet.
+
+Source audit: the protected VS025B/PS46F pair is not an engine-supported
+Pool pair; only supported Pool draws enter `prefix.sources`. Ruled out:
+the protected draw directly adds a competing motion source. HDR ambiguity
+can arise from a supported source on H's depth with mismatched DSV/camera,
+or an alternate supported depth using H's camera. The manifest retains H
+and depth through consumer, with first_bad_seq=0; that does not identify
+the offending source record. Five transition frames prove the isolation
+route can complete, not that source uniqueness is safe to relax. Keep the
+existing two-world-depth and different-camera refusal tests.
+
+The complete VS88DC/PS4945 camera probe is also an unsupported HDR weapon
+pass, not a Pool motion source, so neither captured weapon pair supplies the
+missing source identity. Existing data cannot distinguish same-depth layout/
+DSV mismatch, same-depth camera mismatch, or alternate-depth matching-world
+camera. Do not ship a uniqueness exception on this missing evidence.
+
+Implement a bounded automatic witness at the actual HDR selector input:
+two Screen records plus at most 32 Pool sources. On two overlay-open
+AmbiguousSource frames separated by at least 60 frame indices, report the
+H reference and all supported same-extent Pool records, each branch flag,
+first culprit, resources/views/formats, VS/PS, copied camera rows, hashes
+and sequence/write provenance. No F10 dependency, extra key, temporal-policy
+change or prolonged wait. Include an enabled/limit/report summary so a dead
+instrument cannot masquerade as successful qualification. Full validation,
+commit, clean promotion and Epic install precede the next short run.
+
+The witness is implemented as a synchronous callback from the actual
+34-record route wrapper only after AmbiguousSource. It reads live local
+record copies before they expire; no dangling camera pointers are retained.
+Runtime sampling requires an open marked overlay, reports before spending
+the two-frame budget, and exposes enabled/captured/eligible/ambiguous totals
+in the 5s log. All eligible source records are enumerated, including records
+after the first offender; the first branch respects the selector's two-pass
+order. Re-read helper, runtime/report fields and tests; declarations and
+format arguments match. Rendering selection and refusal policy are unchanged.
+
+Targeted flat_temporal_test passes (17 traces, 46/46 replay frames), with
+wrong-camera, wrong-DSV and true second-world-depth refusal fixtures,
+unsupported filtering, selected-frame silence, callback wiring, full fields,
+all-record enumeration and sampler/order checks. Full validation passed,
+including GPU rigs and installer gates, with receipt fingerprint
+`0285c441be41d192768ed3f9ded4e4d65fabf5a3a090cdb542a048ff513160d9`.
+Committed as `aca86106`, fast-forwarded main and verified the push. Clean
+DLL-only promotion passed. Epic flat installed and independently verified
+as `v0.18.1-27-gaca86106`; live `edvr-flat.ini` and `nvngx_dlss.dll` hashes
+are unchanged. The automatic diagnostic is BUILT, NOT FLOWN; it changes no
+source-selection rule and the remaining AA refusal is still open.
+
+Next short diagnostic: same weapon drawn ten seconds, then holstered ten
+seconds. No F10 or two-minute wait is required. The report captures two
+failing frames automatically and enumerates their supported source records.
+Verify the next log against the literal installed `v0.18.1-27-gaca86106`,
+not the later docs-only HEAD.
+
+## 101. Early foreground motion source identified (2026-10-04)
+
+Verified `edvr_gfx_20261004_132943.log` against installed
+`v0.18.1-27-gaca86106` (6AC14625), linked 2026-10-03 18:15:01 UTC. Both
+automatic witnesses completed, frames 44789 and 44849. First offending
+record index 2 is `same-depth-camera`, VS AACFDCF2FB9AD809 / PS
+CF534B32F491561A, seven draws, same 3840x2160 Pool color (fmt23), depth,
+DSV and b1 as the valid world source and H reference. Layout/current/
+viewport/order all pass. Position and orientation rows 4/5 match exactly;
+projection scale differs and near is 0.0675 versus world 0.025.
+
+Frame 44789: foreground source seq 4506-4513, key write 4504; valid world
+source EB5234DB6ADB491D / CB9F297EFF264251 spans 4529-15056, 9555 draws,
+key write 4528; H camera names seq15663. Frame44849 repeats the pattern:
+seven foreground draws, then 9596 matching-world draws. This is not a
+second depth or DSV mismatch and not stale source provenance.
+
+Ruled out: the selector's culprit is an unrelated second-world-depth source,
+because both witnesses show same depth/DSV and identical pose, with only
+foreground projection/near different. The exact early supported source is
+now known. Do not simply ignore it: shared-depth writes and engine-motion
+records must remain consistent with the world resolver's depth convention
+and clean history. Audit foreground depth/motion ownership and measured
+projection relation before editing admission; no new flight requested yet.
+
+The engine-motion audit confirms first-source ownership is not harmless:
+flat naming takes the first supported full-viewport fmt23/26 candidate and
+`continuesRun` gates the actual producer by that copied camera. Naming the
+early foreground camera can therefore skip all later world MRT6 work. The
+established screen-motion path excludes `weaponMotionFamilyVs`, including
+the measured AACF source; align flat world naming with this semantic rule.
+Keep HDR source ambiguity refusal until foreground ownership is qualified.
+
+The optional VR first-person map/stencil contract cannot yet justify flat
+admission. No early draw DS/stencil/arguments are in the witness. A missing
+map drops the pair and exposes world-camera fallback; alternate near depth
+must not borrow that history. For opaque backends, raw output/rejection alone
+also does not prove internal history safety. Late HDR bit0x04 is separate
+from first-person bit0x10 and its lower-half capture proves neither early
+cohort ownership nor surviving marks.
+
+Implement world-source naming correction plus one bounded diagnostic of the
+early cohort: actual producer state, conservative passing-fragment coverage
+from the original PS, depth after the cohort and current depth/stencil at HDR
+consumer. Count surviving marked/unmarked fragments, overwritten fragments
+and marks lacking tracked ownership; include intervening stencil mutations,
+world/engine camera identity and every missing-stage status. Max two frames,
+automatic, no F10/key. No selector or opaque backend admission relaxation.
+This collects the remaining qualification evidence together in one short run.
+
+Implemented the existing first-person-family exclusion for world naming only;
+the selector still refuses AACF's alternate projection. The automatic probe
+brackets all seven draw thunks, exports private MRT7 coverage from the original
+PS without replay, clones shared depth before the first world draw, and compares
+the depth/stencil planes at the selector's actual H consumer. Readback is eight
+uints, asynchronous, at most two frames separated by 60 frames; combined private
+resources are bounded to 128 MiB. Missing stages, predication, active stream
+output and unknown work have explicit status rather than a false zero count.
+
+The WARP fixture initially measured zero coverage because its full-screen
+triangle was culled. Explicit no-cull state on both original and instrumented
+draws corrected the fixture without changing the production counter shader.
+The independent 13x9 geometry discards three columns: total 117, covered 90.
+Counts then prove 90 surviving unmarked pixels, 90 marked survivors with 27
+unowned marks, and after depth overwrite zero survivors with 90 overwritten
+pixels. Original color/depth/stencil bytes match the uninstrumented draw.
+Full validation passed 2026-10-04 at 14:03 MDT, including both targeted rigs,
+shader compilation/reflection, the complete rig suite and installer gates.
+Receipt inputs SHA256: `3898af9b73634a9d24ed970faa3a972e68e7669f01e4297b548117ca23c01acf`.
+The first full attempt stopped at the old single-diagnostic registry count;
+the gate now validates both distinct diagnostics, including ownership CS
+8x8x1 and t0-t3/u0/b0 bindings. The complete build was then rerun successfully.
+This build has not flown. No AA admission,
+configuration, or VR behavior change is included.
+
+Committed and pushed `40c3a1c7` to main. Receipt-guarded `--dll-only` promotion
+passed from the clean tree. Installed `v0.18.1-29-g40c3a1c7` to Epic flat at
+14:05 MDT using `install_edvr.py`; dry-run wrote nothing, install and
+`--verify-only` passed, and the installed DLL ProductVersion is this version.
+Backup tag `flat-foreground-40c3a1c7`, stamp `20261004-140552`.
+`edvr-flat.ini` SHA256 remains
+`1696ADFC572CBA74668C56A60AAD09FDFDD64B1FC947B6759B68925E4EE2DDC1`;
+DLSS SHA256 remains
+`3975567B8943C53ACCE397F2B72380092F84F162D00B0D2C7D08A1025C563983`.
+No INI or DLSS install flag was used. Frontier was not installed.
+NOT FLOWN: reproduce with the same weapon for 10 seconds drawn, then
+10 seconds holstered, no F10. Verify the literal installed version rather
+than documentation HEAD. Read both automatic ownership reports, missing-stage
+statuses, named-same-H and engine-source counts; do not interpret zero partial
+counts or exact depth alone as exclusive first-person ownership.
+
+### 2026-10-04: world naming confirmed; probe budget spent before reproduction
+
+Verified `edvr_gfx_20261004_140803.log` against `v0.18.1-29-g40c3a1c7`,
+build 6AC2B17A, linked 20:05:14 UTC. Sean repeated 10 seconds drawn then
+10 seconds holstered; AA still switched off. Source witnesses at frames
+44390/44450 both have `named-same-H=1`: corrected world camera, depth and b1
+match the actual H reference. Early AACF/CF still has near0.0675 against
+world0.025, and source uniqueness still refuses as designed. Late overlay
+marking succeeds throughout; refusal clears after holstering.
+During the 14:10:19 refusing window the engine wrapper reports 9943.9
+substituted draws/frame and GPU resolve zero timed calls, confirming motion
+production is active while the mixed-camera selector declines AA.
+
+Ruled out: remaining weapon refusal is caused by the old foreground-first
+world naming, because both new witnesses name exactly the H world camera.
+Foreground depth/motion/history handling remains unqualified.
+
+Instrumentation failure: loading frames36302/36362 armed at seq64/102,
+reported `partial reason=foreground-after-world-source`, draws0, same-phase1,
+and consumed both samples before the actual reproduction at frame44390.
+All pixel counters are unavailable, not measured zeros. The arming routine
+already detects the ineligible already-named-world condition, but records it
+as an active failed sample instead of declining to arm. Correct that bounded
+eligibility path and test that skipped loading draws leave both samples for
+the later early cohort. No AA admission relaxation or new rendering hypothesis
+is justified by these partial reports.
+
+Corrected the production arming gate: an idle after-world candidate increments
+`late-skipped` and returns before activation, allocation, coverage or reports.
+An active cohort extending after world source is explicitly partial, as is an
+interleaved shared-depth depth/stencil writer before the snapshot. The selector
+and temporal behavior are unchanged. The temporal rig directly replays the
+observed loading frames36302/36362, then eligible44390/44450; skipped candidates
+preserve both samples, frame44449 is too early, pending/missing-resource/budget
+gates remain closed and post-world extension is refused.
+
+Full validation passed 2026-10-04 at 14:19 MDT, all DLL/rig/installer gates.
+Receipt inputs SHA256: `fa0ca37638bd2a74c94690811fa70627ed9e911e7f303059c317803eac896883`.
+The first attempt stopped at the investigation's 62-line Status block, which
+was shortened; the full build was rerun successfully. Arming correction NOT
+FLOWN. No INI, DLSS, VR or AA admission change.
+
+Pushed code `2b8f5475` to main. Clean-tree receipt-guarded `--dll-only`
+promotion passed. Installed and verified Epic flat `v0.18.1-31-g2b8f5475`
+at 14:21 MDT; dry-run wrote nothing. Backup tag `flat-probe-arming-2b8f5475`,
+stamp `20261004-142144`. DLL ProductVersion verified; settings and DLSS
+hashes match the pre-install snapshot, no INI/DLSS install flags, no Frontier
+install. NOT FLOWN. Next repeat10s drawn/10s holstered, no F10; verify the
+literal installed version and check late-skipped plus both complete/partial
+ownership reports. AA switching off remains expected while admission is closed;
+this build repairs evidence collection, not the unresolved foreground path.
+
+### 2026-10-04: arming corrected; early cohort has intervening depth writers
+
+Verified `edvr_gfx_20261004_142246.log`, `v0.18.1-31-g2b8f5475`, build
+6AC2B53A, linked20:21:14 UTC. Both samples now arm during the actual weapon
+reproduction at14:25:15/16, frames45214/45274; 238778 late loading candidates
+were skipped without spending the budget. Both witnesses name exactly the H
+world camera (`named-same-H=1`), and early AACF/CF projection near0.0675 still
+differs from world0.025. AA refuses while drawn and recovers after holstering.
+
+Frame45214: first5266, last5268, world5274, consumer20616, marked3/planned3;
+three intervening same-depth state-enabled depth/stencil writers. Frame45274:
+first4957, last4965, world4981, consumer21155, marked3/planned7; fifteen gap
+writers. Both report depth-write-all1, stencil-replace16=0, full-viewport1,
+same-phase1, no explicit mutations/clears or foreign work. The first latched
+`interleaved-shared-depth-draw` failure prevents further marking and dispatch;
+all pixel counters are unavailable partial values, not measured zeros.
+
+Ruled out: late loading consumes the probe's budget after the arming fix,
+because reported0 survives loading and samples arm only at the reproduction.
+Ruled out: the tracked early foreground forms one uninterrupted call sequence
+before named world source, because both samples contain intervening draws
+bound to shared depth. This makes an after-cohort clone insufficient to
+attribute surviving pixels to the tracked draws. The combined state report
+also does not certify the VR first-person stencil-replace16 producer contract;
+it does not prove that every foreground pixel lacks stencil16 at the consumer.
+Audit immediate per-draw passing coverage/depth capture and the omitted writer
+states before another flight; retain AA refusal and avoid a per-weapon whitelist.
+
+The later state-query audit qualifies the gap counters: noteSameDepthDraw was
+called before the lazy engine-motion flush decision, so a pending substitution
+could leave EDVR's OM state bound at the query. These counters therefore do not
+certify the next game's depth/stencil operations. Query pre-world gap chronology
+after restoring the game's state; do not force a flush across all later world
+draws just for diagnostic aggregates. The intervening call sequence and the
+probe's sticky failure are confirmed; actual fragment writes remain unmeasured.
+
+The producer audit narrows the finding: `stencil-replace16=0` is ANDed across
+the cohort, so at least one marked draw fails the existing VR producer gate;
+it does not identify which draw or prove all consumer pixels lack that bit.
+`X` is DrawIndexedInstanced; the logged24-index, one-instance draw passes only
+the count/instance gate. Flat exits its hook before `weaponMotionDraw`, so
+there is no existing producer map to reuse. History safety is required even
+for EDVR TAA: current-frame rejection alone does not tag stored foreground
+history against a later world pixel with coincident encoded depth. FSR and
+DLSS also remain unqualified with shared raw depth and one world near/FOV.
+
+Implement a bounded per-draw measurement: fresh private R8 passing mask for
+each eligible original draw, immediate shared-depth copy after that draw,
+GPU merge only those passing pixels into persistent union/owner-depth maps.
+Intervening draws cannot replace the saved owner-depth values. Compare those
+values with actual consumer depth/stencil; retain exact-depth equality's
+explicit non-exclusive limitation. Record capped per-draw and pre-world gap
+chronology with shader/camera/DS state, and distinguish measured partial counts
+from unavailable counts. Coverage-only diagnostic mode skips the unused clean
+Pool-color copy, allowing mask1 + union1 + owner-depth4 + depth-copy8 bytes per
+pixel (14 B/px, about111 MiB at4K) under the existing128 MiB bound. Max two
+frames,60-frame separation, no F10/key; AA selection and temporal history are
+unchanged. Tests must execute the canonical merge shader with intervening
+depth writes and verify original color/depth/stencil and context restoration.
+
+Sean reports drawing the weapon in VR keeps world AA active. The code paths
+explain the visible difference: screen_motion excludes the first-person family
+when naming VR world source; vr_world_route has optional weapon motion/stencil
+inputs and does not use flat's supported-source camera-uniqueness rejection.
+The flat hook exits before the VR weapon producer. Corrected flat world naming
+therefore restores engine production but not the separate HDR admission guard.
+This is a reported VR observation, not a new VR log qualification; no VR install
+or VR behavior is changed in the per-draw diagnostic.
+
+Per-draw implementation audit: each eligible draw uses a fresh passing mask,
+runs the original draw once, restores its layer state, copies depth immediately
+and merges under saved/restored context state. Only pre-world gaps on the exact
+shared depth resource force lazy-state restoration before querying game state;
+later draws only increment a resource-identity counter, explicitly unobserved
+for DS state. Capped chronology includes both faces' stencil functions and all
+operations. Predication/stream output and read-only depth have named refusals;
+failed/subset captures cannot appear as complete measurements. No AA admission
+or backend history policy changed.
+
+Targeted WARP test: two real raster draws reuse the same coverage-only layer in
+one frame, with an intervening depth write. The second mask is 25 pixels (105
+would expose a missed clear), persistent union 105, final surviving 25 and
+overwritten 80. Overlap takes the second draw's depth; untouched pixels retain
+the first draw's depth. Original color/depth/stencil match the uninstrumented
+baseline, and no clean HDR texture/view is allocated. Shader reflection retains
+the merge's 8x8 group, t0/t1, u0/u1 and b0 slots. Targeted mono and temporal rigs,
+generator self-test and runtime syntax compilation passed.
+
+Full absolute-path build passed all gates, including production DLLs, Python
+self-tests, GPU/test rigs and self-contained installer resource checks. Receipt
+input fingerprint: `ae977748c6961e0af59443086295929dff7a2c9800313771fb9665c7a6525886`.
+The full gate preceded clean-commit promotion and Epic installation below.
+
+Install completed: code commit `2657c1f4` fast-forwarded to main and pushed;
+clean receipt-guarded DLL-only promotion passed, then the sanctioned installer
+dry-run, install and verify-only all passed for Epic's flat package. Live DLL
+ProductVersion/FileVersion: `v0.18.1-33-g2657c1f4`. Flat INI and DLSS SHA256
+match the pre-install snapshot exactly; Frontier/VR was not installed.
+INSTALLED, NOT FLOWN. The AA refusal remains during this measurement. Next:
+the same weapon drawn for 10 seconds, then holstered for 10 seconds, no F10.
+Read measured versus unavailable counts, every eligible draw's merge status
+and the intervening chronology before changing AA admission.
+
+### 2026-10-04: per-draw measurements obtained; stencil16 is incomplete
+
+Verified `edvr_gfx_20261004_145317.log`, `v0.18.1-33-g2657c1f4`, build
+`6AC2BC1C`, linked 20:50:36 UTC. Samples at 14:55:26/27, frames45724/45784,
+both report `complete counts=measured`: planned/drawn/merged 1/1/1, one F event,
+no G events or chronology overflow. First coverage0; second coverage1020,
+surviving-exact-depth1020, surviving-marked16=0, surviving-unmarked1020,
+overwritten0. Second consumer has497800 stencil16 pixels elsewhere. These are
+measurements of the nominated draw, not proof that all weapon pixels were
+captured. The 24-index AACF/CF draw has near0.0675, while the named H/world
+camera uses0.025. HDR witnesses identify exactly this one mismatching Pool
+record and1402/1449 matching world-source draws, `named-same-H=1`.
+
+Both F events: writable depth, GREATER_EQUAL, stencil ALWAYS/REPLACE on both
+faces, ref5, write-mask21 (bits0/2/4). This deliberately clears bit16 while
+writing the low bits; a generic foreground classifier cannot assume every
+first-person contribution uses the VR producer's stencil16 convention.
+
+Ruled out: the sampled second draw's final depth differs from its immediate
+captured depth, because all1020 covered pixels compare exactly and overwritten
+is0. Equal bits still do not prove exclusive final ownership; later writers
+may write identical depth. The first sample's zero coverage does not explain
+why that original draw had no passing samples. No same-depth pre-world gaps
+were observed; after-world1966/2009 same-DS draws have unobserved DS state.
+`foreign=1` with `reason=none` needs a boundary audit: active persists through
+asynchronous readback and `noteForeign` currently accepts post-consumer work.
+
+AA timeline: 14:55:23 selects/treats379/379; 14:55:33 refuses350/350 for
+`source-camera-or-depth-not-unique`; 14:55:38 refuses183/treats163; 14:55:43
+treats366/366 with zero late-overlay draws after holstering. Late overlays are
+fully marked but remain unsealed during rejection. Code seals only inside an
+admitted HDR treatment, so the later `overlay-unsealed-at-final-copy` can be a
+consequence of the earlier source conflict, not an independent uncovered draw.
+Audit final contributor ownership and temporal history before changing that
+admission. No additional flight requested from this result yet.
+
+Read-only code audit resolves both reporting questions. `noteForeign` accepts
+work after `consumerSeen_` while readback keeps `active_` true; consumer checks
+would have latched `foreign-work-during-probe` if foreign work preceded the
+measurement. Thus these reports' `foreign=1 reason=none` is post-consumer
+pollution, not evidence against the measured counts. Nomination is faithful:
+the independent HDR witness has exactly the one eligible AACF/CF record in
+each frame, so planned1 is not lost capture. The late overlay refusal counts
+139/350/183 match source ambiguity; the selector refuses before treatment,
+which is the only place that seals the protected HDR suffix. No independent
+uncovered late writer is evidenced here.
+
+The engine slot/depth map is not a foreground ownership channel. The flat
+producer runs only for world `continuesRun` candidates, excluding AACF, and
+the prep shader takes the world-camera term when a slot is absent. Extending
+stencil16 or ignoring the AACF record would therefore misclassify its pixels.
+Implementation boundary: final per-pixel world/foreground/unknown provenance
+must follow every relevant original writer in order, with unknown writers and
+explicit mutations refused. A prior-frame domain must prevent world history
+from inheriting foreground at coincident depth. FSR/DLSS additionally need a
+qualified depth/projection and history contract; one current-frame mask does
+not establish that. No further diagnostic-only flight is required to repeat
+the source conflict, measure the same subset or investigate the derivative
+seal refusal. The next validation flight should exercise implemented generic
+handling rather than another speculative marker heuristic. AA fix still open;
+no C++ or installed-package change from this flight analysis.
+
+## 102. Preserve world AA with conservative camera-domain exclusion (2026-10-04)
+
+Sean authorized implementation after the measured section101 flight. The
+required property is a trusted subset of world pixels, not an exclusive final
+owner for every pixel. A persistent R8 MRT7 mask unions passing fragments of
+every qualified alternate-camera contributor. Later world overdraw may retain
+a mark: that sacrifices AA locally but cannot assign world motion/history to
+foreground. The original shader still draws once with its depth/stencil and
+color behavior. Clear once per frame; no per-draw full-size copy or dispatch.
+
+The consumer must prove all conflicting source records were captured, with
+current camera/phase/pose, shared depth, native render/output extent and valid
+HDR lineage. Unknown writers, capture/state failure, mutation or a missing
+record preserve refusal. Existing late HDR isolation is retained. Its suffix
+forbids depth writes, so the clean color snapshot and final depth plane still
+match; no additional depth copy is necessary.
+
+SDK history has no proven per-pixel camera-domain reset. Modern NGX presets
+ignore the available bias-current-color mask (`dlaa.cpp`); AMD documents FSR
+reactivity as reducing history influence rather than removing it. Qualified
+mixed-camera frames therefore use EDVR TAA internally, with foreground current
+color. Single-camera frames retain the configured backend, with history reset
+on transition. No INI key, setting change, per-weapon table or VR change.
+
+TAA checks all four current bilinear taps against the untrusted union and
+writes current color/domain0 when any tap is untrusted. Valid world output gets
+domain1 even if this frame cannot reuse history for another reason. All four
+previous bilinear taps must be domain1 before history is sampled, in addition
+to existing depth/motion/rejection checks. The current 3x3 clamp omits untrusted
+neighbors. Output-domain ping-pong follows color/depth history and is reset on
+entry/exit, resize, failure and mode transition; even a configured TAA mode
+must reset on coverage-presence changes. Null coverage preserves existing
+never-mixed and VR arithmetic. Foreground uses no world near/FOV or motion, so
+its raw depth need not be converted for this current-color-only treatment.
+
+Environment: Epic flat, native3840x2160 from the verified section101 flight;
+no VR runtime/headset dependency. Initial admission requires native-size HDR.
+Tests must exercise the actual capture and TAA shaders: original rendering
+preserved, stencil16 cleared, equal-depth world overdraw remains conservatively
+marked, every current/previous bilinear tap checked, coincident-depth history
+refused, world history retained outside coverage, late overlay preserved and
+entry/exit reset exactly once. Targeted validation passes: generated shader
+contracts, resolver syntax, the WARP resolver rig and the temporal policy rig.
+The production capture test retains its 105-pixel union across an equal-depth
+world pass and a second captured draw, with original color/depth/stencil bytes
+preserved. Missing records, unknown mutation and the 128-draw cap fail closed.
+Both same-mode history transitions reset once, then world history resumes.
+The absolute-path full build completed with exit 0 and all gates passed.
+Receipt input fingerprint:
+`a316677aaf53f275b41c228c4d01e961d2b3cd48508705d4f5036644cf69dd56`.
+Code commit `b38eff130a6146cf79420f2a22c4ebe151897845` is pushed to main.
+The clean, receipt-guarded DLL-only promotion passed; Epic flat installation
+and a separate `--verify-only` passed. Installed DLL file/product version is
+`v0.18.1-36-gb38eff13`. The pre-install `edvr-flat.ini` and `nvngx_dlss.dll`
+SHA-256 values are unchanged. Frontier/VR installation was not changed.
+
+INSTALLED, NOT FLOWN. Next: restart Epic, use the same native-size scene and
+weapon, hold it drawn 10 seconds and holstered 10 seconds; no F10 needed.
+World AA should remain active while drawn. Automatic coverage summaries must
+show selected and actually-treated mixed frames with effective TAA, and the
+configured backend should return after holstering. A selection without actual
+treatment or a capture refusal is distinguishable in those summaries. This
+tests the runtime integration; the GPU rigs do not claim a successful flight.
+
+### 2026-10-04: capture admission refused before TAA
+
+Sean flew the installed version and reported world AA still turns off.
+Verified log `edvr_gfx_20261004_153808.log`: `v0.18.1-36-gb38eff13`, build
+`6AC2C633`, linked 21:33:39 UTC. From frame41394 at 15:40:07.969, coverage
+reports draws0/ready0/unknown1, `untrusted-alternate-unqualified`. Every mixed
+coverage summary has selected0/actually-treated0. The fallback never ran.
+
+Ruled out: bad domain-TAA accumulation as this flight's cause, because no frame
+reached that path; capture admission failed first. The guard combines
+supported pair, full viewport and current camera checks, so its reason alone
+does not identify the failed condition. Source witnesses at frames42347/42407
+show the same early AACFDCF2FB9AD809/CF534B32F491561A pair current1/viewport1,
+layout1, matching world depth, with three/seven draws respectively. Investigate
+nomination scope and guard call order before weakening any ownership check.
+
+The existing camera validator accepts writeSeq <= drawSeq; passing sequence+1
+is not an equality failure. The runtime can nominate unsupported same-depth
+draws whose camera bytes differ from the first named source. The failure also
+appears while holstered AA is treated, so the failed candidate need not be the
+early measured weapon source. The current log cannot distinguish:
+
+- unsupported nominee: supported0, with its VS/PS and naming stage;
+- camera freshness/hash failure: current0, write epoch/sequence/hash evidence;
+- viewport failure: viewport0 with actual extent/range;
+- earlier sticky failure: valid nominee, plan refused with prior failure;
+- unclassified consumer: captured union, unknown same-depth source differs
+  from the authoritative HDR camera, or the bounded source table overflowed.
+
+Collect all five together in bounded automatic logs before changing production
+admission. No shader whitelist, settings change, forced F10 or per-weapon run.
+
+The bounded diagnostic is implemented: 32 ordinary distinct nominee signatures,
+one reserved valid-but-sticky report per pre-world/post-name role, 16 consumer
+source signatures and a first-overflow identity. Reports execute independently
+of successful capture, include camera-shape/phase comparisons and actual draw
+sequence, and summaries expose witness/drop counts. No capture policy changes.
+The absolute-path full build passed all gates with exit 0; receipt fingerprint
+`ff4fe85eee85f373000d844bc120e9a471a8052b1f96e9eb35544eb244b42d19`.
+Diagnostic code commit `b32db53e92bd6dd46d25cef08189f50ba8bfd77d` is pushed
+to main. Clean, receipt-guarded DLL-only promotion passed, followed by Epic flat
+installation and separate `--verify-only`. File/product version is
+`v0.18.1-38-gb32db53e`; `edvr-flat.ini` and `nvngx_dlss.dll` hashes are
+unchanged. The diagnostic is INSTALLED, NOT FLOWN, with v36 rendering behavior.
+Next: same weapon drawn 10 seconds, holstered 10 seconds, no F10. AA may still
+turn off; the report must identify the failing nominee/check and any valid
+draw blocked by it before production admission changes.
+
+### 2026-10-04: shader-support gate is the measured blocker
+
+Verified `edvr_gfx_20261004_155725.log`: `v0.18.1-38-gb32db53e`, build
+`6AC2CB1B`, linked 21:54:35 UTC. Sean still observes world AA turning off.
+Frame44358 q1631 nominates VS7B0DC42D383F694C/PS0DF03E64DF9DBEF1 before world
+naming: supported0, viewport1, current1, near0.0675. This sets the first sticky
+`untrusted-alternate-unqualified` failure. The consumer identifies an earlier
+unclassified CFCA8FFC6B058630/8A08FF781272C5F6 draw at q1630 with the same
+depth/camera, phase-pair1, near0.0675 versus authoritative world near0.025.
+
+At frame45026 q4530, 8B589D25B2A0ADDC/7268762D11A610F2 again reports
+supported0/viewport1/current1 before naming. The following AACFDCF2FB9AD809/
+CF534B32F491561A draw at q4531 reports all three checks1, prior-failure1 and
+planned0. Coverage and mixed TAA never run; periodic selected/treated stay0.
+
+Ruled out: stale camera or viewport mismatch as this capture failure, because
+both predicates are1 on the first failing nominees. The measured blocker is
+the world-motion supported-pair gate and its sticky effect on later valid
+draws. Adding those shader hashes is not a general solution: the first
+unclassified source even uses a VS outside the pre-world family nomination.
+Coverage must include every alternate-camera contributor and exclude the
+authoritative world domain, independently of the world-motion recipe list.
+Original passing-fragment coverage can veto history without reconstructing
+foreground motion. Establish that complete boundary before implementation.
+
+Implementation boundary: two bounded camera/color/depth/DSV buckets capture
+structurally eligible native-size format23 draws before world naming, without
+the motion-pair or VS-family list. After naming, capture same-depth camera
+mismatches. At the authoritative HDR consumer discard world-camera buckets,
+require exactly one complete alternate bucket and verify its current pose/phase
+and every observed unsupported draw as well as the supported source records.
+An unsupported-only alternate bucket must also select domain-aware TAA. More
+domains, missing capture, relevant patch/state failure, mutation or overflow
+refuse. A world bucket's failure can be ignored only when it matches the
+authoritative world camera; its pixels never enter the alternate mask.
+
+Two R8 planes cost about16.6MB at Epic native3840x2160, reused across frames;
+one alternate SRV is borrowed, with no mask-combine pass or per-draw full-size
+copies. Generic original-PS MRT7 export remains the actual patch/binding gate.
+The regression must call the runtime's shared nomination decision, then replay
+unknown CFCA, unsupported material variants, AACF and world selection. It must
+exclude world coverage, refuse a missing variant and test unsupported-only
+mixed treatment. Holstering need not return the SDK if first-person material
+draws still form a real alternate-camera domain; single-camera frames do.
+
+### 2026-10-04: complete camera-domain capture implemented
+
+The shared runtime nomination rule now includes unsupported material pairs
+and unclassified geometry. Only the classifier's proven projection-independent
+VS InertNoCB plus PS Clean combination is exempt. The first world-naming draw
+is excluded because EDVR substitutes its motion shader; earlier world-camera
+coverage is discarded at H. Each relevant alternate draw needs a completed
+original-fragment receipt, including unsupported-only camera domains.
+
+Certification now reads the supported record's frozen camera bytes. Its key's
+camera pointer was only a presence marker pointing into a later-changing draw
+scope. A regression mutates that producer scope after freezing the record.
+
+Targeted mono WARP and temporal policy regressions pass: actual shared
+nomination, unsupported variants followed by AACF, world bucket exclusion,
+original color/depth/stencil preservation, persistent coverage through equal-
+depth world overdraw, missing receipts, unsupported-only treatment and domain
+overflow. All four exact Epic v38 pixel shader blobs and their production MRT7
+patches also pass WARP CreatePixelShader; no game bytecode is tracked.
+
+CFCA's actual vertex shader projects geometry through cb0 rather than the b1
+lens. Coverage is conservative; a new occupancy report distinguishes a local
+foreground veto from a mask covering too much of the scene. After a successful
+mixed resolve, one unsupported-only and one supported-alternate sample may
+copy the R8 mask to staging. Later Presents poll with DO_NOT_WAIT, with explicit
+unavailable/timeout reporting. This diagnostic never changes admission and
+uses no per-weapon hashes. Log prefix: `flat untrusted mask occupancy:`.
+
+Full absolute-path `build.bat --jobs 4` passed all gates, including GPU rigs,
+quiet serial reruns and installer-resource validation. Receipt input hash:
+`be79e2d20ba260224f36d70db4c90b273c6a97e65e58123d9c915c0906531bd9`.
+Log: `build/flat-complete-camera-domain-full.log`. Clean-version promotion and
+Epic installation are next. INI, DLSS and VR behavior remain untouched.
+
+Commit `129cbb13` merged to main, pushed and confirmed at `origin/main`.
+Receipt-guarded absolute-path `build.bat --dll-only` passed; production DLLs
+carry `v0.18.1-40-g129cbb13`. Epic flat installation passed its dry run,
+installation and separate `--verify-only`. The installed product version
+matches; `edvr-flat.ini` and `nvngx_dlss.dll` SHA256 hashes match the fresh
+pre-install snapshot. No `edvr.ini` was present. Frontier was not installed.
+
+INSTALLED, NOT FLOWN. Next: restart Epic, same weapon drawn 10 seconds then
+holstered 10 seconds, no F10. Expected: world AA continues through the draw.
+Inspect selected/actually-treated and mask-occupancy measured fraction. If
+treatment still refuses, the completed/observed counts and capture failure
+identify the remaining boundary. If treatment runs but AA looks absent, mask
+occupancy tests conservative overcoverage in the same flight. The configured
+SDK resumes on single-camera frames; holstering alone need not remove every
+alternate first-person material draw.
+
+### 2026-10-04: v40 still refuses; independent Astra review
+
+Sean reports world AA still turns off when the weapon is drawn. Verified
+`edvr_gfx_20261004_162843.log`: `v0.18.1-40-g129cbb13`, build `6AC2D263`,
+linked 22:25:39 UTC. At 16:30:50.427 frame44845, the CFCA/8A08 alternate
+scene source reports observed4/completed0, matching H depth and valid camera
+shape/phase. Coverage reports draws0/ready0/unknown1/mixed0, selector
+`source-camera-or-depth-not-unique`, failure `untrusted-source-identity`.
+
+At 16:30:59.247 frame45463, the AACF/CF supported alternate record has six
+draws q4610..4615; the world EB5234/CB9F record has 9485 draws. Subsequent
+coverage summaries at frames45600/45900 remain selected0/actually-treated0,
+last-draws1/ready0/unknown0, failure `untrusted-source-identity`. There are no
+mask-occupancy entries: successful mixed treatment, which queues those
+samples, was never reached.
+
+Ruled out: removing the motion-pair nomination gate alone is sufficient,
+because v40 still fails original-fragment capture's source-identity guard.
+Mask overcoverage and TAA accumulation remain untested; this run fails before
+either executes. An independent Astra agent is reviewing the exact predicate,
+runtime ordering, resource state and whether the synthetic rigs cover them.
+No new fix, install or test flight is requested during that review.
+
+Independent Astra review completed. The first blocker is proven at
+16:30:50.412 frame44845 q1593: PS=0, valid viewport/current identity, camera
+`262106EADACB94DA`. H in the same frame has exactly those world-camera bytes.
+`FlatUntrustedCoverage::plan` rejects `!ps` as a global source-identity failure
+before assigning a bucket; `alternateBucket` rejects that global flag before
+it can discard the exact world bucket. Alternate CFCA/7B draws then report
+prior-failure1/planned0. This violates the implemented failure-scope boundary.
+
+Frame44967 q1820 demonstrates the intended behavior for a non-null shader:
+F516/B40B world draw plans, the next nominee reports `no colour output`, and
+that patch failure is bucket-local. A following null-PS draw q1823 upgrades
+the failure to global. The existing regression instead captured the alternate
+first, then failed a nonzero-hash world bucket with admissible=false; it did
+not exercise the observed shader guard or ordering and runtime source counts.
+
+The weapon rendering transition is around 16:30:59 frame45458. Runtime
+treatment stays at1340 through 16:31:09 and resumes by 16:31:14, consistent
+with Sean's drawn/holstered test. Input actions themselves are not logged.
+Mixed selected/actually-treated remain0 throughout; mask overcoverage and
+domain-aware TAA remain unqualified in the game.
+
+Recommended correction: keep identifiable shader failures in their known
+resource/camera bucket, retain observation counts, and discard the failure
+only after exact H world-camera matching. Preserve global failures for
+unassignable identities and overflow. Do not blanket-skip null PS or zero-
+color-output draws: they may still change depth/stencil; alternate-domain
+uncaptured effects must continue refusing. Keep the generic patcher unchanged.
+
+Required regressions use shared production nomination and accounting: world
+null PS first, unsupported alternate variants, AACF, H; real zero-output PS
+followed by null PS; either shader failure in the alternate domain still
+refuses; a nominal world bucket not matching H still refuses; missing receipt
+still refuses; original color/depth/stencil remain intact. Then one same-
+weapon flight measures treatment and existing occupancy together. Astra made
+no source edits, build or installation; the installed v40 remains current.
+
+Sean authorized implementation after the review. Correction scope: known
+camera/resource shader failures remain local to that bucket; unassignable
+identity and capacity failures remain global. Regress the measured ordering
+through the shared runtime nomination and observation-accounting code, then
+full build, clean commit promotion and Epic flat installation. The installed
+v40 remains current until those gates pass; no extra flight is requested yet.
+
+Production correction implemented: `plan` first validates assignable identity,
+then finds/creates the resource/camera bucket. Null VS/PS is now a local
+`untrusted-source-shader-identity` failure. Exact H world-camera exclusion
+precedes inspection of that bucket's failure; alternate failures remain
+ineligible. Global identity and capacity refusal and the patcher are unchanged.
+Runtime observation aggregation and completed-receipt comparison now call the
+same helpers used by the regression rather than a copied counting model.
+Astra's final production/regression audit found no blocker. Targeted mono
+WARP and temporal-policy rigs pass. New tests exercise the actual shared
+nomination, observation aggregation and receipt comparison, including the
+null-PS world-first order and a real no-color-output world shader followed
+by null PS. Both preserve the full 105-pixel alternate union and original
+color/depth/stencil. Alternate shader failures, H camera mismatch and an
+actual unbracketed alternate draw refuse; that missing draw reports observed5
+versus completed4. Readback size checks prevent empty-equals-empty false
+passes. Sources frozen; full build is the next gate.
+
+Full absolute-path `build.bat --jobs 4` passed all gates, including complete
+GPU/policy rigs, quiet serial reruns and installer-resource validation.
+Receipt input hash:
+`b436a93920cf67991456283f9f84afbac91793cef968d883640c6ea96af42112`.
+Log: `build/flat-bucket-local-failure-full.log`. Commit, clean-version DLL
+promotion and Epic flat installation are next; v40 is still installed.
+
+Commit `8afc3e01` merged to main, pushed and confirmed at `origin/main`.
+Receipt-guarded absolute-path `build.bat --dll-only` passed. Epic flat
+installation passed dry run, installation and separate `--verify-only`;
+installed product version is `v0.18.1-43-g8afc3e01`. Fresh pre-install SHA256
+comparison confirms `edvr-flat.ini` and `nvngx_dlss.dll` unchanged. No
+`edvr.ini` was present; Frontier was not installed.
+
+INSTALLED, NOT FLOWN. Next: restart Epic, same weapon drawn 10 seconds and
+holstered 10 seconds, no F10. Expected: H discards the exact world-camera
+shader failures, selected/actually-treated become nonzero, and mixed TAA
+keeps world AA active. The existing mask-occupancy report will measure the
+alternate union after successful treatment. Remaining visual/coverage
+uncertainty is explicitly unqualified until this flight. Verify the next log
+against the literal installed version above; the installation-journal commit
+does not change DLL behavior or require another promotion.
+
+### 2026-10-04: v43 admits unsupported-only capture; weapon still refuses
+
+Sean reports AA still disengages with the weapon drawn. Verified
+`edvr_gfx_20261004_165257.log`: `v0.18.1-43-g8afc3e01`, build `6AC2D869`,
+linked 22:51:21 UTC. Frame44050 q1806/1807 CFCA/7B now plan despite an earlier
+world-null-PS bucket failure. H reports observed4/completed4, ready1, unknown0,
+mixed1, failure none. Summaries frames44400/44700 select and actually treat300
+frames with no refusals. Unsupported-only mask sample frame44052 measures
+marked0/8294400; this is a completed zero readback, not an absent instrument.
+
+At 16:55:08.560 frame44945 q4788 (8B/7268) and q4789 (AACF/CF) both plan0.
+The supported AACF witness has five draws q4789..4793; frame45005 has seven
+draws q4973..4981, both current/viewport/order1 and same H depth/DSV/extent.
+Summaries frames45300/45600 show selected0/actually-treated0, refused300,
+last-draws1/ready0/unknown0, selector source-camera-or-depth-not-unique and
+last-failure none. Runtime treatment stops at1256 during 16:55:12/17 and
+resumes after 16:55:22, consistent with drawing/holstering; input not logged.
+The terminal late-HDR-overlay/depth conflict is downstream of source refusal.
+
+Ruled out: v40's global world-null-PS poisoning persists, because v43 captures
+all four alternate draws and treats before the weapon appears. Weapon mask
+overcoverage is not measured: that supported-alternate path never treats.
+
+Astra traced a reporting gap: nonzero/admissible weapon draws with plan0 and
+no surviving global failure imply a pre-existing local failure in their
+identified camera bucket. Pre-consumer failure() returns the first bucket's
+failure, which can instead be the world's `no colour output`; qualifies()
+discards the alternateBucket reason, H then skips select(), and consumer()
+hides unselected local failures. Thus the first failing alternate draw and
+predicate are not identifiable from this log. Actual PS binding of the later
+8B/AACF draws cannot explain their refusal: their beginDraw is never reached.
+Review existing dumps first; if insufficient, instrument first failure origin,
+qualification checks and actual patch/state failures together in one run.
+
+Astra completed the evidence review: existing creation-time shader dumps do
+not recover the first failure's dynamic camera/order. No trace dump or armed
+projection audit occurs in this flight, and the old foreground probe reports
+active0/reported0 throughout the drawn interval. A rendering fix is therefore
+not yet justified. An early alternate null-PS/depth-only draw is plausible,
+not proven.
+
+The next build is diagnostic only: retain each bucket's first failure origin
+and all record-qualification predicates, actual PS identity on begin failures,
+and report world/alternate roles against H even when selection fails. Reserve
+two supported-alternate refusal reports (second at least60 frames later),
+separate from holstered success; retain reasons after consumer completion and
+count emitted/dropped diagnostics. Tests must prove distinct failed-bucket
+provenance, refusal-report emission and reason survival. No admission change,
+settings key, per-weapon table or GPU wait. One run measures the remaining
+competing boundaries together; do not silently bypass depth-only effects.
+
+Sean asks whether F10 can speed diagnosis and explain the problem fully.
+Capture audit: the v43 F10 draw/pixel path only finalizes two qualified
+successfully treated frames, with sparse pixel windows and stride/quota
+sampling; failed weapon frames are discarded. Its independent always-on trace
+does retain observed draw keys and frozen camera bytes, but only the last
+three completed frames fit, each capped at4096 events; truncated frames are
+omitted. Neither path retains private MRT7 capture failure/receipt details.
+Thus existing F10 can complement the diagnostic, not recover its missing
+first failure reliably. Do not increase trace quotas or rewrite capture
+admission in this change. The bounded failure report also requests cached
+creation bytecode of the first failed nominee and actual PS, so one combined
+run supplies the data for offline reproduction rather than another guessed
+rendering fix. Next capture: draw weapon, press F10 once, wait15s, holster10s.
+
+Combined diagnostic implemented and independently reviewed by Astra with no
+admission changes or blockers. Targeted mono WARP and temporal-policy rigs
+pass: two distinct failed buckets retain the alternate reason after consumer,
+supported refusal reporting reaches H, original outputs match, and the sample
+budget survives holstered success and enforces the60-frame interval. Actual
+PS object identity is separate from fingerprint, so an untracked shader is
+not reported absent. Failure-only binding queries see original/restored state.
+Bounded emitted reports also retain raw frozen H, bucket and qualification-
+record rows (maximum384 bytes), with record first/last sequences; the updated
+WARP checks assert these snapshots match owned camera bytes. No GPU work was
+added for those rows. Sources frozen; full gate next.
+
+The first full gate passed (receipt2489b11d), but the final data audit found
+one material gap before installation: shader hash0 means absent OR untracked
+nonnull PS (`lookupShaderHash` and the binding hook explicitly handle both).
+The original diagnostic sampled physical PS only at begin failure, so a plan
+shader-identity failure could still require another flight. It now snapshots
+physical PS only on that bucket's first matching shader-identity plan failure,
+under InternalScope after the existing restore/plan path; sticky and valid
+plans add no queries. A regression distinguishes null from nonnull unknown
+hash and proves repeated attempts cannot overwrite the first snapshot.
+No admission change. Updated sources frozen; full gate rerun required.
+
+Final full gate passed: `build/flat-first-failure-diagnostic-full-final.log`,
+exit0, all gates passed; receipt `1be12b21ebe757920894f400e81bd7899c4c825617ea87c0351118ef03e8a131`.
+Astra approved the final plan-failure PS snapshot and its regression, with
+no blocker or admission change. This receipt supersedes the first full gate;
+commit, clean DLL promotion and verified Epic flat install next.
+
+Diagnostic code `0f20f4e9` merged to main and pushed. Clean receipt-guarded
+promotion passed (`build/flat-first-failure-diagnostic-promotion.log`); Epic
+flat install and separate `--verify-only` passed. Installed ProductVersion
+`v0.18.1-45-g0f20f4e9`. SHA256 confirms live `edvr-flat.ini` and
+`nvngx_dlss.dll` unchanged. No Frontier install. NOT FLOWN; this build records
+the failure without changing AA admission. Restart Epic, draw the same weapon,
+press F10 once, wait 15s, holster for 10s, then exit. Read the next flight
+against this literal installed version after the documentation-only commit.
+
+### 2026-10-04: v45 identifies the first weapon-camera failure
+
+Verified `edvr_gfx_20261004_172835.log`, installed
+`v0.18.1-45-g0f20f4e9`, build `6AC2E095`, linked 23:26:13 UTC. At
+frame42878 q4923 and frame42938 q5187, the first alternate bucket failure is
+VS `F516BF0201303B87` / PS `B40B0462256E31C2`, begin `no colour output`.
+Actual PS matches the nominee; current, viewport, H DSV, shape and phase all
+pass, global failure none. Observed15/37 draws have completed0; supported
+AACF qualification has matching resources/camera but ready0 and receipts0/5
+or0/7. Thus the first failed capture prevents later weapon receipts.
+
+Ruled out: the weapon's first failed draw has a null, untracked or mismatched
+PS, because the physical nonnull PS is known and exactly matches B40B.
+Saved PS disassembly proves an empty output signature, optional cb2-controlled
+texture alpha test and `discard_z`, followed by a terminal `ret`; no explicit
+depth, coverage, stencil or UAV output. The existing patcher rejects empty
+signatures before it can append its private coverage export. A general pure
+empty-output extension can retain those instructions and alpha/depth effects;
+skipping the draw would lose the depth ownership evidence. Offline regression
+must compare original color/depth/stencil and private surviving-fragment mask,
+including alpha enable/disable and subsequent supported-camera qualification.
+
+Astra independently confirmed B40B and that F516 projects via cb1[270..273].
+Compiled SV_Target7 and Elite's color signatures use OSGN systemValue0;
+retain that representation for empty signatures. The new empty-output case
+must refuse forced early depth/stencil (opcode106 flag0x2000): otherwise
+discarded fragments could write depth before reaching the coverage export.
+B40B has only refactoringAllowed. Existing colored-shader admission is outside
+this correction's scope; explicit depth/coverage/stencil/UAV guards remain.
+
+F10 at17:31:00 armed frame42954. Its trace dump has frames0/events0,
+skipped-slots4. Draw pixels retry unqualified weapon frames42955..43314,
+then save partial frames43369/43370 at17:31:15 under
+`flat_draw_pixels/20261004_233100_014_60168_1`, with copy/cap refusals.
+The independent first-failure reports, saved exact shader and camera bytes
+are sufficient for this correction despite the absent whole-frame replay.
+Summary frame43200 treats0/refuses300; frame43500 treats134/refuses166;
+frame43800 treats300/refuses0. Recovery is consistent with holstering;
+the input event itself is not logged. Next flight should test actual coverage
+and treatment after the offline regression, not add another instrument.
+
+Generic correction implemented: empty original OSGN can gain private MRT7,
+with original instructions unchanged; forced early depth/stencil is rejected
+only for this new case after both chunks are parsed. Shader creation caches
+the patch; no new per-draw query or setting. Astra reviewed production and
+implemented WARP regressions using the exact 384-byte B40B shader, whose
+EDVR hash is asserted. Alpha off/mixed/all-pass/all-discard, depth and stencil
+rejection with stencil writes, exact original color/full depth-stencil bytes
+and restored bindings pass. Empty alternate then unsupported material then
+AACF has complete receipts and H qualification; equal-depth world overdraw
+retains conservative coverage. Forced early and reversed chunk order,
+explicit depth/coverage, UAV and unsupported control flow refusal pass.
+Old no-output refusal fixtures now use explicitly unsupported SV_Depth.
+Targeted absolute mono build exit0; sources frozen and final full gate running
+(`build/flat-empty-output-full.log`). NOT FLOWN; admission is structural,
+with no weapon identity or shader hash list.
+
+Final full build passed all gates, exit0, source tree frozen:
+`build/flat-empty-output-full.log`; receipt
+`d7bad299440972c707bfc3dfcd8336091061369a32438424b4d84513ba63411f`.
+Commit, clean receipt-guarded promotion, main push and Epic flat install next.
+
+Fix code `ab74d281` merged to main and pushed. Clean DLL promotion passed,
+exit0 (`build/flat-empty-output-promotion.log`); sanctioned Epic flat install
+and separate verification passed. Installed version `v0.18.1-47-gab74d281`.
+Live flat INI and DLSS SHA256 match pre-install snapshots; Frontier untouched.
+NOT FLOWN. Restart Epic; hold the same weapon drawn for 15s, holster for 10s,
+then exit. If world AA still disengages, take F10 while drawn; otherwise the
+automatic capture/coverage and treatment counters suffice. Match the next
+flight to this literal installed version after the documentation-only commit.
+
+### 2026-10-04: v47 captures the depth pass, then refuses a resource mutation
+
+Sean reports world AA still disengages with weapon drawn; F10 taken.
+Verified `edvr_gfx_20261004_174952.log`, `v0.18.1-47-gab74d281`,
+build `6AC2E57E`, linked 23:47:10 UTC. Frame44439 alternate F516/B40B has
+pending1/completed1/ready1; frame44499 has pending13/completed13/ready1.
+H camera/DSV/extent/phase and qualification predicates all pass. First failure
+is now `mutation/untrusted-source-explicit-mutation`, with global failure none;
+observed9/completed1 and observed37/completed13, AACF receipts0/3 and0/7.
+
+Ruled out: accepting B40B's empty signature alone restores weapon AA, because
+the capture now succeeds but a later explicit mutation prevents later draws.
+The B40B correction itself is flight-qualified. The first-q field records the
+last nominee (q4612/q4776), not the actual mutation's operation or sequence.
+Do not infer a depth clear or stencil-only clear from that field.
+
+ClearRtv, ClearDsv (including stencil-only), copies and other resource writes
+all collapse into noteMutation(resource). A stencil-only clear is plausible;
+genuine depth replacement requires a different response. Inspect existing
+footprint/capture evidence before editing admission. F10 frame44548 trace is
+frames0/events0/skipped-slots4; draw pixels retry failed frames, then capture
+partial holstered frames44933/44934 under
+`flat_draw_pixels/20261004_235204_520_4644_1`. No whole failing-frame replay.
+Treatment frame44700 is38/refused262, frame45000 is70/refused230, frame45300
+is300/refused0; recovery matches the holster sequence, whose input is not logged.
+
+The saved weapon-footprint frames44549/44551 identify the same depth/DSV and
+report no clears after their late selected draw. That tracker starts too late
+to exclude an earlier clear and does not cover every depth mutation. Dispatch
+does not call this coverage bucket's noteMutation; it cannot directly explain
+the measured explicit-mutation failure. No rendering-policy change is justified
+by these captures.
+
+The next build is diagnostic only. Preserve mutation entry point, operation,
+resource role, owned API payload, actual after-q position, notification ordinal
+and capture state through sticky refusal. Preserve the last nominee separately
+from the mutation position. Retain sixteen exact-payload signatures per bucket
+with repeats/drops, plus independent first occurrence/count for each operation
+and role so many variants cannot hide a later mutation type. Observe later
+nominee shader preparation after refusal without creating GPU shaders or
+changing admission. Continue existing budgeted H reports on refused frames.
+
+Increase the four-slot F10 ring from4096 to65536 events per frame (about126MiB
+bounded CPU storage, allocated on the heap). Keep existing V3/V4 binary layouts;
+report attempted events, overflow slots and other skip reasons explicitly.
+Tests must cover a twenty-thousand-event refused-frame round trip, exact cap
+and overflow, and mutation payload/state lifetime across repeats, later writes,
+consumer, reset and signature exhaustion. No per-weapon table or settings edit.
+
+Astra reviewed the frozen hook-to-report path, metadata ownership, registry
+lock scope and independent operation/role coverage: rendering admission is
+unchanged. Globally unassignable draws still follow existing early refusal;
+registry and bytecode success do not prove later device creation or full draw
+state eligibility. These remain explicitly labelled limitations.
+
+Full absolute build.bat --jobs4 exited0, with mono resolve and temporal
+collector rigs PASS, including the new mutation and busy-frame cases; existing
+corpus replay is46/46 frames identical. Installer resources verified and all
+gates passed. Fresh full-pass receipt created2026-10-05T00:22:26.193917Z,
+inputs SHA256 `0ce1cffb78b6b9e78fb7d773b22d835f492b67cf33b6457fad4a9d8f0fd7d6de`.
+An earlier direct run_jobs invocation failed its missing parent build environment
+before either affected rig ran; it supplied no test evidence. Validation came
+from the full build, with no source changes during it. Diagnostic NOT FLOWN.
+
+Validated source committed as `5698007f`, fast-forwarded to main and pushed;
+origin/main confirmed that exact commit. Clean --dll-only promotion verified
+the full-build receipt and exited0. Sanctioned Epic --profile flat dry-run,
+real install and --verify-only all exited0; installed DLL ProductVersion is
+`v0.18.1-49-g5698007f`. Receipt backup
+`edvr_flat_receipt.json.pre-flat-mutation-context-5698007f-20261004-182850.bak`.
+Root repeated verification: flat payload/profile match, exact SHA256 of live
+edvr-flat.ini and nvngx_dlss.dll unchanged, edvr.ini remains absent. Frontier
+not installed. Bind the next log to this literal version after doc-only commit.
+
+Next flight: restart Epic, draw the same weapon, press F10 while AA is refused,
+hold10s, holster10s, then exit. No two-minute wait or per-weapon testing required.
+This build changes evidence collection, so world AA may still refuse. Use the
+actual mutation operation/flags/payload and later nominee reports to select
+the rendering fix; do not infer it from the preceding draw or an empty trace.
+
+### 2026-10-04: v49 identifies the pool color clear and retains the full frame
+
+Sean completed the short F10 sequence. Verified edvr_gfx_20261004_183816.log,
+`v0.18.1-49-g5698007f`, build6AC2EF2D, linked2026-10-05 00:28:29UTC.
+Failed frames54886/54946 have completed9/9 and13/13 alternate captures, ready1,
+then ClearRenderTargetView on shared pool color0x1F094368AA0, values all zero,
+after-q4610/4710. Generic flatRuntimeWritten duplicates the notification at the
+same q. Each bucket has two detailed signatures/two classes, no drops; global
+failure none. H camera/depth/DSV, shape/phase and frozen-camera predicates pass.
+
+Ruled out: depth or stencil clear causes these measured refusals, because both
+complete mutation reports identify only a color ClearRtv and its generic write.
+Five later/earlier nominee pairs all have saved VS/PS bytes, patchable bytecode
+and eligible registry metadata. Three patched PS objects exist already; two
+are not yet created. No later bytecode/registry blocker appears in this capture;
+that still does not prove every later GPU/state admission.
+
+F10 frame54972 retains three complete frames,61219 events,30854536 bytes;
+peak25041/cap65536, overflow0, one in-flight slot skipped. Existing trace-check
+parses all three and replays contracts identically. Actual V4 events are504B
+(include32B HDR SRV identities), so fixed ring is132120792B, about126MiB; the
+earlier472B/118MiB estimate omitted that V4 field and is corrected above.
+
+Astra's decoded frame54969 shows depth-write marker q4517, alternate B40B
+prepass q4519..4531, world prepass, pool color-write q4677, then alternate and
+world material draws using the same depth/DSV and two frozen cameras. No depth
+write/copy marker occurs after the alternate capture begins. H is a different
+resource0x1F09436BC20, unique, with late-writes0. This is deferred-pipeline
+ordering and supports retaining the private coverage union across the color
+clear while keeping independent prefix/HDR write accounting. Before editing,
+review duplicate generic-notification handling and WARP preservation/refusal
+tests; no broad exemption for copies, updates or unknown writes.
+
+The correction retains coverage only for typed ClearRtv on bucket.color when
+that resource differs from bucket.depth. The ClearRtv hook labels its generic
+flatRuntimeWritten callback with the same operation; every other caller defaults
+to Written. Do not infer provenance from sequence adjacency. Diagnostic mutation
+records remain. Prefix, HDR, camera, projection and overlay write observers still
+run in their existing order; HDR color clears remain protected independently.
+
+GPU regressions execute real zero/nonzero pool clears between original draws:
+prepass marks survive, later marks accumulate, world overdraw cannot erase them,
+H qualifies with complete receipts, and color/full depth-stencil bytes match the
+uninstrumented baseline with restored bindings. Separate later-unregistered PS,
+untyped write, wrong-role ClearRtv, depth/stencil clear, copy, update, resolve,
+null and foreign controls still refuse. Tests also patch and create the five
+actual v49 PS blobs on WARP. Four new fixtures plus existing CF534 were verified
+by Astra against their EDVR FNV hashes and sizes: B40B:384B,8A08:216B,7268:7104B,
+CF534:3456B,0DF0:7208B. Source/test independent review approved; full build pending.
+
+First full validation compiled production, then the enlarged mono GPU fixture
+exited0xC00000FD (stack overflow) before assertions. The five new large capture
+objects were moved to scoped heap ownership, with explicit memory include;
+assertions and production policy unchanged. Astra reviewed this correction.
+Full rerun uses pool-color-clear-full-rerun.log, retaining the failed build log.
+
+Full absolute build.bat --jobs4 rerun exited0: mono resolve and temporal
+collector PASS, all five real PS patches created on WARP, installer resources
+match and all gates passed. Fresh full-pass receipt created
+2026-10-05T01:05:20.064909Z, inputs SHA256
+`a7e7550b5ebe65f0b0104da3f229e61b2283d9e0159338a66ace921ead890bf6`.
+No production edits followed independent review; heap-only test repair retained
+every assertion. Color-clear correction BUILT, NOT FLOWN.
+
+Validated source committed as `30ced747`, fast-forwarded main and pushed;
+origin/main confirmed that exact commit. Clean --dll-only promotion verified
+the full-build receipt and exited0. Sanctioned Epic flat dry-run, real install
+and --verify-only exited0. Installed ProductVersion `v0.18.1-51-g30ced747`,
+receipt backup `edvr_flat_receipt.json.pre-pool-color-clear-30ced747-20261004-191121.bak`.
+Root repeated payload/profile/version verification and exact baseline SHA256
+checks: edvr-flat.ini and nvngx_dlss.dll unchanged, edvr.ini absent. No Frontier
+install. Bind next flight to this literal version after documentation commit.
+
+Confirmation flight: restart Epic, draw the same weapon, F10 while drawn,10s
+drawn and10s holstered, then exit. Check that world AA stays engaged and that
+post-clear alternate captures/receipts complete through H. If still refused,
+use the preserved first-failure and later nominee diagnostics; do not assume
+the color-clear policy failed. No two-minute wait or per-weapon checklist.
+
+### 2026-10-04: v51 confirmation across several weapons
+
+Sean reports the fix worked, then tested several weapons and world AA stayed
+engaged. Verified edvr_gfx_20261004_200720.log against literal installed
+`v0.18.1-51-g30ced747`, build6AC2F925, linked2026-10-05 01:11:01UTC.
+Frames52200..56400 sampled windows report selected300/actually-treated300,
+capture-refused0, ready1, failure none and qualification qualified. Alternate
+draw counts change through4,34,28,32,37 while treatment continues. The previous
+all-refused weapon interval is absent. Later windows return to the ordinary
+world path (world-excluded300, effective DLSS), not a coverage refusal.
+
+In the mixed-camera windows configured DLSS uses effective TAA; this confirms
+AA engagement, not DLSS execution in those windows or a performance gain.
+No F10/H audit is present in this flight, and inputs/weapon names are not logged;
+associate the multi-weapon result with Sean's report rather than inventing a
+per-weapon timeline. Together with v49's explicit clear and complete trace,
+the unchanged safety checks and WARP regressions, this flight qualifies the
+scoped color-clear fix. Close the weapon/world-AA disengagement investigation;
+no further weapon-by-weapon test required. Other rendering/runtime arcs remain
+open as listed in Status. Keep diagnostics available for a future distinct fault.
+
+## 103. 2026-10-05: plasma-weapon late-overlay refusal on v0.18.2
+
+The reporter says Aphelion laser-rifle AA works, while switching to a plasma
+shotgun or plasma pistol stops it. Sean confirmed both supplied ZIPs come
+from this one user. The longer `edvr_logs.zip` export continues the same
+`edvr_gfx_20261005_080621.log` as `edvr-logs-20261005-081245.zip`, ending
+08:14:18.258 rather than 08:12:42.574. Sanctioned log-tool checks verify
+v0.18.2, build6AC30AC5, linked2026-10-05 02:26:13UTC. Four older v0.18.1 logs
+in the larger archive are historical. The profile is flat, RTX 3050,
+1920x1080, DLSS model K. Host OS/runtime is not identified; a system32 path
+does not establish Wine/Proton. Logs contain no weapon labels.
+
+At frame18420, 08:09:36.859, `flat runtime conflict` reports
+`unprotected-late-hdr-overlay-or-depth-write`, ref-q1089/current-q0. The empty
+current witness is also produced by `overlayFail`, so it does not prove an
+actual resource write. The corresponding H identity is absent and the two
+buckets become `unrelated-depth`; qualification was not called. Both buckets
+share depth/DSV but have different camera IDs. A null-PS plan failure exists
+in one bucket, but cannot explain the earlier H selector failure by itself.
+
+Periodic `flat late overlay refusal` reports `dual-source-blend`: 288 at
+08:09:43.480, 123 at 08:09:53.505, and 300 in the sustained 08:10:54.612 and
+08:11:04-14 windows. Frame23100 reports selected0/capture-refused300; other
+windows treat300/300. The guard in FlatOverlayLayer::validateBlend rejects
+SRC1 factors before private-MRT capture; overlayFail then invalidates H.
+This explains the synthetic conflict and is the primary remaining refusal
+category. The exact live blend descriptor and offending shader are absent
+from current diagnostics, so active dual-source versus dormant fields is
+not yet established for this reporter.
+
+Ruled out: repeating the shared-color-clear hypothesis, because the recorded
+color ClearRtv and runtime-written duplicate are tolerated by section 102;
+the sustained refusal counters identify the separate blend guard.
+
+Ruled out: using F10 trace14759 as the failing plasma sequence, because its
+three frames14756-14758 replay with produced1/copy-selected1, one H, zero
+ambiguity/late writes and one resolve marker each. Its 08:08:31 dump predates
+the sustained refusals. Trace14719 is empty. The archive has60 DXBC files;
+only blobs tied to current log identities establish current shader provenance.
+
+Ruled out on WARP: ordinary inactive SRC1 fields surviving GetDesc and
+causing production rejection. A temporary MSVC probe called the actual guard
+and WARP CreateBlendState/GetDesc: disabled-blend and independent-false
+dormant descriptors are API-valid but normalized to ordinary factors before
+the guard reads them. Active RT0 SRC1 survives and is rejected. Enabled SRC1
+in RT1/RT7 is invalid even with a zero write mask. RT0 zero-write or
+noncontributing-channel edges remain possible; their effective behavior is
+not a license to attach an extra MRT during active dual-source blending.
+
+Next: diagnostic only, preserving capture/AA behavior. Record the actual
+GetDesc result, active RTVs, all blend factors/enables/write masks, and shader
+identity/output metadata at the refused draw, publish alongside the existing
+five-second refusal report, and distinguish no sample from successful capture.
+Sean will test one affected plasma weapon on Epic. No per-weapon matrix or
+two-minute wait is needed. Do not relax the guard before this evidence.
+
+### Diagnostic implementation and local reproduction
+
+Sean also reports the symptom with any plasma weapon tested locally. The
+latest Epic baseline log, edvr_gfx_20261005_045207.log, verifies as installed
+v0.18.1-51-g30ced747/build6AC2F925. Its paired late-overlay/runtime counts
+255/412/43 at05:04:18/23/28 and258/392/38 at05:04:58..05:05:08 report the
+same dual-source-blend and HDR-conflict reasons as the supporter. Frame100363
+has the same synthetic empty-current conflict, at3840x2160. No F10 trace
+dump is present; automatic projection capture saved74 shader stages/37 pairs.
+
+The diagnostic adds an optional data snapshot only on the existing
+dual-source guard failure. The runtime annotates its live VS/PS and draw
+sequence before overlayFail replaces the conflict witness. The existing
+five-second reporter emits guard-failures, sample status, one sample and all
+eight target descriptors, then rearms. An armed/ready startup line and
+samples0/no-dual-source-sample window distinguish no event from missing code.
+Original PS output signature is explicitly unknown in this path; hashes
+identify bytecode for later analysis rather than inferring output signatures
+from a patched shader. No admission, binding, shader or AA behavior changes.
+
+Focused WARP tests exercise the existing refusal with actual GetDesc data,
+first-sample retention/reset, ordinary acceptance without a sample, and
+byte-identical color/depth/stencil plus unchanged OM/PS bindings. Pure
+classification tests cover independent targets, unbound slots, disabled
+blending, contributing write channels and MIN/MAX operations. Full validation
+passed: 117 parallel jobs and five quiet jobs, mono resolve PASS, config
+contract234/234, both installer resource checks and all final gates. Receipt
+fingerprint11609745426ba8bd3305e8344465bc1360b045121e2a7aa86dadebc825c9cd95
+matches the validated source. Commit/promotion/install follow this gate.
+
+Validated source committed as a2e406c5, fast-forwarded main and pushed;
+origin/main confirmed the exact commit. Clean --dll-only promotion verified
+the receipt and passed. Sanctioned exact-path Epic flat dry-run, install and
+verify-only passed; root repeated verification. ProductVersion is
+`v0.18.2-1-ga2e406c5`. Backup receipt:
+`edvr_flat_receipt.json.pre-plasma-overlay-a2e406c5-20261005-052320.bak`.
+Flat settings and DLSS SHA256 match the pre-install baseline; edvr.ini stays
+absent. Frontier was not installed.
+
+Next flight: launch Epic, draw one plasma weapon, and once world AA disengages
+wait five seconds before F10. Keep it drawn another five seconds, then exit.
+Read against literal installed v0.18.2-1-ga2e406c5 after this doc commit.
+Check armed/ready, samples1/captured, the actual blend sample/target rows and
+paired refusal counts. samples0/no-dual-source-sample is a distinct result,
+not evidence that a fix worked. This is measurement only; guard behavior
+still refuses the original unsupported case. No two-minute wait or per-weapon
+matrix required.
+
+### 2026-10-05: diagnostic flight and replay proof
+
+The completed plasma test captured an active RT0 dual-source blend: `SRC1_COLOR`
+and `SRC1_ALPHA` are enabled on the active target; RT0 mask is `0F`, effective
+SRC1 channels `0F`, and slots 1–7 are inactive. The same failed shader pair is
+in all three complete F10 frames. Depth-write is off; the trace stencil-write
+flag is enabled, but its flag/mask do not prove an actual stencil operation
+wrote. The original VS/PS DXBC is absent, so PS outputs and side effects remain
+unknown. See `build\supporter-0182\diagnostic-flight\evidence.md` for sample,
+frame, descriptor, hash, and refusal-window details.
+
+Ruled out: inactive/unused SRC1 false rejection, because active RT0's actual
+GetDesc uses SRC1 color and alpha. Ruled out: unconditional forced-early UAV
+capture, because the temporary UAV proof changes discard/query counts; stencil
+semantics remain unknown. The private-DSV replay proof passes with production-
+style dual-output shaders, preserves color and depth/stencil (including
+discard), and preserves occlusion queries and pipeline statistics when no
+external query is active. Its negative proof shows an external active query
+counts replay twice, so production use requires query guards (and SO guards).
+Results: `build\supporter-0182\dual_source_replay_probe_results.txt` and
+`build\supporter-0182\dual_source_uav_probe_results.txt`.
+
+The production-DXBC proof now passes all four variants: plain, discard,
+derivative/discard, and original early-depth semantics. Original color,
+depth/stencil and query results match the untouched draw; coverage excludes
+failed depth/stencil tests and discarded fragments. The original shader's
+early-depth flag is preserved. The extra pass requires an inactive count-
+bearing query bracket; the negative proof detects double counting otherwise.
+
+The implementation derives a private RT0 coverage shader lazily from the
+existing validated MRT7 bytecode. Original outputs become private temporary
+registers, retaining the original calculations and discard. Before each
+eligible dual-source draw, it copies the pre-draw DSV to a reusable private
+DSV, executes coverage there, restores the game bindings, and leaves the
+original dual-source draw unchanged. Clean HDR is copied before the first
+overlay; subsequent coverage accumulates without refreshing that copy.
+Normal MRT7 capture is unchanged. No weapon identities or new config keys.
+
+Admission retains the late-overlay depth/stencil ownership rules and refuses
+predication, stream output, graphics UAVs, indirect/DrawAuto, uncertain state,
+and active count-bearing queries. Query observation starts with the first
+flat-profile game Begin/End, independently of temporal mode and Present, and
+survives resize/ClearState. Context/query identities are retained. Existing
+128 MiB HDR/mask limits remain; a separate 64 MiB private DSV limit supports
+3840x2160 D32S8 (63.28 MiB). This is desktop D3D11 capture; VR uses its existing
+path. WARP validation has no debug layer installed on this machine.
+
+Focused mono/GPU validation passes, including real layer color/depth/stencil
+equivalence, discard and derivative coverage, original early-depth behavior,
+mask union, query-model refusals, and invalid-bytecode negatives. The final
+absolute-path full build passed after source freeze: production DLLs, all
+117 parallel and five quiet jobs, 234/234 config contract, and actual installer
+resources. Receipt fingerprint:
+`56faf69b59ca4adce7ebb48c01486c328e0d6c7a7a50479a1030975f561cc47b`;
+log: `build\plasma-overlay-replay-full-final.log`. Epic qualification remains
+open; perform the clean receipt-guarded promotion before installing. The five-second
+`flat late overlay replay` report distinguishes candidates, completed original
+draws and specific refusals; one plasma weapon is sufficient for this test.
+Keep section 102's color-clear fix qualified.
+
+**2026-10-05, Epic qualification of f13ee92b:** clean promotion and verified
+flat install completed with the INI and DLSS preserved. The flight
+`edvr_gfx_20261005_063607.log` matches `v0.18.2-3-gf13ee92b` (build 6AC39824).
+World AA still disengages with plasma drawn. Ruled out: the deployed replay
+fallback qualifies this plasma shader, because every replay window has zero
+completed draws and `replay-PS-bytecode-not-retained` (234, 349, 223, 134, 73
+candidates). The private-DSV mechanism has not run on the affected draw.
+Live VS/PS bindings are present: 7F9B650EC1A1E570 / CBB1A87D6023B2A8. Their
+original DXBC files are absent. F10 `flat_trace_45355.bin` records three frames,
+60,687 events and no overflow; staged evidence is
+`build\supporter-0182\replay-flight\evidence.md`. Retrieve the creation-time
+qualifier reason and original shader bytes before changing shader admission.
+The generic replay currently hides the original cache exclusion reason.
+
+Raw creation bytes are nevertheless present in the separate flat probe cache:
+at 06:38:22.963 the exact pair is `verdict=generic-recipe`, `ps=clean`,
+`ps-reason=none`. `classifyGenericPair` reads both raw cache entries; a missing
+PS returns NoBytecode, never clean. Ruled out: the single raw-cache drop or
+one-MiB blob cap explains this pair, because its raw PS classified clean.
+Absent files are an export-trigger gap. Next diagnostic preserves the actual
+overlay exclusion reason and exports the original pair once on replay refusal.
+
+**2026-10-05, capture the draw before another flight:** Sean requested full
+draw evidence comparable to the VR NumLock diagnostic and NumLock as the flat
+default. The existing point chronology excludes non-depth-writing/non-motion
+draws, then discards unqualified HDR frames. Those gates exclude the failed
+plasma overlay. The new packet capture is independent of that qualification,
+prioritizes observed refusal pairs, and retains original and executed pipeline
+state plus draw inputs and before/after outputs. Shader admission is unchanged.
+Limits and missing data must be explicit in each packet and its capture-level
+manifest; no packet with omitted required data may claim completeness.
+The budget is one GiB per arm, sixteen priority pairs with two distinct frames
+per pair, and four representative categories capped at 256 MiB so they cannot
+consume the priority reserve. Files split into at most 64-MiB chunks. This is a manually armed
+desktop D3D11 instrument; it adds no per-draw copies while unarmed and does not
+change the VR runtime. The log bundler needs a streaming ZIP writer before
+its aggregate capture limit can safely increase. NumLock uses the existing
+`hotkey.dump_draws` action in flat; the VR keys and capture behavior remain.
+Epic's explicit F10 binding will be changed to NUMLOCK with its other settings
+preserved. Capture implementation is validated; do not qualify the
+plasma rendering fix from offline capture tests.
+
+**Capture validation:** the focused WARP rig passed with a nonempty original
+dual-source/discard/stencil-04 draw. Captured before/after color and depth/stencil
+match the original draw; separate original/executed mutable constants, shader
+bytes, textures, high-slot geometry and nonindexed start arguments are retained.
+Each selected frame/q joins its sealed same-frame trace. The offline reader
+validated the genuine complete fixture and seven intentional partial fixtures.
+Hidden SO offsets, UAV counters, predicate/query results and AA-Off resource
+mutation chronology remain explicitly incomplete. Binary output reserves
+64 MiB of the one-GiB limit for metadata. The streaming ZIP tests passed CRC and
+extraction, full-session folder selection, atomic cap omissions, ZIP32 bounds
+and failed-output cleanup. The full validation build passed; no new flight
+has qualified the plasma rendering fix.
+
+The first full gate stopped on unchanged heartbeat stress check `H5.whole`.
+Its combined sample-count/record-consistency predicate does not identify which
+condition failed. The unchanged executable then passed all 30 focused checks;
+the capture sources are not linked into that rig. A full `--jobs 8` rerun keeps
+all checks enabled and reduces concurrent scheduler pressure. This is not
+evidence of a proven heartbeat root cause.
+
+The `--jobs 8` full gate passed: 117 parallel jobs, five quiet jobs, config
+contract 234/234, and actual installer resources. Receipt fingerprint:
+`df10048331b953d69c820aa80115ab1f57cc6258492604ac9c935a684901d875`.
+Two older temporal source pins were updated for the explicitly armed Paused
+capture exception and the separate AA-Off request consumer; focused checks
+retain the unarmed Paused freeze and all 46 identical frame-contract replays.
+Next promotion installs the clean DLL on Epic and migrates only its explicit
+F10 binding/help comment to NumLock. Plasma shader admission remains unchanged.
+
+2026-10-05, NumLock flight: `edvr_gfx_20261005_090010.log` matches
+`v0.18.2-4-g85329199`, build `6AC3B4FD`. At 09:03:06.769, frame 50147,
+draw q=17202 reports `replay-PS-bytecode-not-retained: unsupported PS control
+flow or declaration`. The original VS (4948 bytes) and PS (66988 bytes) are
+available and saved; the raw PS preflight independently gives the same
+refusal. Ruled out: missing original shader bytecode, because this diagnostic
+exports it successfully. The next discrimination is the actual rejected
+opcode: balanced loops/switches may preserve the terminal coverage mark;
+calls or nonterminal returns require a different proof. Do not broaden the
+qualifier until the saved program establishes which case is present.
+
+Saved PS `CBB1A87D6023B2A8` establishes that case: the first rejected token
+is LOOP (opcode 48), SHEX word 755, disassembly instruction 86. The shader
+contains nine balanced LOOP/ENDLOOP pairs, nine BREAKC, fifteen CONTINUE,
+and one BREAK; its seventy IF/ENDIF pairs are balanced, maximum typed nesting
+eight. It has one top-level terminal RET (instruction 2287), no RETC, calls,
+switches, discard or UAV operations. Read-only raw SRV loads were already
+admitted. Hypothesis confirmed: rejecting structured loops prevents the
+qualified shader from entering the replay registry. A typed IF/LOOP stack
+can prove that local loop branches cannot bypass the final coverage mark;
+the repair must retain the original instructions and reject crossed blocks,
+unmatched branches and nonterminal returns. Test the exact saved shader's
+normal/replay creation and dynamic-loop coverage with discard offline.
+
+NumLock capture `capture_1109472078_48932` saved two plasma packets,
+frames/draws 49882/17170 and 49883/24332. The validator correctly refused
+their trace association: the matching frame and shader pair occur once,
+but the normal runtime trace recorded `key.sequence=0`. Packet metadata uses
+the frame reducer's actual draw sequence. The capture-only Off/Paused path
+sets the trace sequence; the normal path omitted it. Repair only the trace
+copy after the reducer advances, preserving the reducer's original
+observation and cache behavior. Existing bytecode and draw snapshots remain
+usable; do not label the old event traces complete or relax validation.
+
+The first packet's original draw state also satisfies the existing private
+replay guard: one RT0 with enabled ONE/SRC1_COLOR (alpha ONE/SRC1_ALPHA),
+full color mask, effective depth write disabled, stencil mask/reference
+`0x04`, no SO/OM-UAV bindings and no active counting query. Its output and
+DSV snapshots are present. This confirms a shader-qualification repair can
+reach the existing generic replay path without weakening those guards.
+The second packet hit resource limits; its payload cannot substitute for
+the first packet's complete resource snapshots. Raw shader evidence is
+staged under `build\numlock-capture-evidence`.
+
+The focused O2 mono rig passed (`build\packet_loop_focus.log`): the exact
+66988-byte captured PS qualifies and both derived variants create on WARP.
+Dynamic nested loops with continue/break/discard preserve original color,
+depth and stencil; private RT0 replay uses the pre-original cloned DSV and
+matches normal MRT7 coverage for stencil-fail, pass and depth-fail cases.
+The patch preserves every original instruction byte. Crossed/unclosed
+blocks, loop-less branches, malformed controls and nonterminal/conditional
+returns remain refused. The trace regression now uses the real reducer,
+ring serialization and parser across a camera event and a frame reset,
+asserting emitted frame/draw/hash association with unchanged observations.
+Production validation is in progress; no flight has qualified this repair.
+
+The first full gate stopped on two older temporal source-wiring pins after
+the trace-copy call changed. A deeper review found a real regression in
+that proposed trace copy: contract hashing includes `key.sequence`, while
+the live reducer retains the original zero and offline replay would consume
+the trace's numbered key. Ruled out: numbering `key.sequence` is an isolated
+trace repair, because a produced frame's contract hash would change on
+replay. Keep the original key and use an explicit `EDVRFTR5` draw-number
+field in the event's former padding at byte 468; size stays 504. Legacy
+FTR3/FTR4 parsers retain their original keys and ignore the new field. The
+regression must replay a produced frame with original sequence zero, verify
+the contract hash and independently join its packet draw number. Do not
+install the first full build (`build\plasma-loop-full-build.log`).
+
+FTR5 is implemented with the separate draw number. Both focused O2 rigs
+passed (`build\packet_loop_focus.log`, `build\packet_temporal_focus.log`):
+live-like zero-key-sequence produced contracts replay to the same hash,
+and all 46 historical frames across 17 corpus traces remain identical.
+Legacy alignment padding is explicitly ignored. Regenerated complete
+packets validate and satisfy `--require-complete`; intentionally partial
+cap/timeout/Off/overflow/map-failure cases return the expected 0/2.
+The reader also refuses a changed trace shader with otherwise consistent
+packet metadata. The final full build is running in
+`build\plasma-loop-full-final.log`; Epic confirmation is still pending.
+
+Final full validation passed: production DLLs, 117 parallel jobs, five quiet
+jobs and the self-contained installer gates. Receipt input fingerprint:
+`8b6bc74178416ecdabdd0641016b509ad03b5b4bc1c3b8b8dc231acbdfa33246`.
+The source is ready for commit, main push and clean DLL-only promotion.
+Install on Epic with the current flat INI preserved. Next flight: draw the
+same plasma weapon; if AA drops, press NumLock and keep it drawn ten seconds.
+No two-minute wait and no weapon-by-weapon test matrix are required.
+
+2026-10-05, follow-up flight `edvr_gfx_20261005_095515.log` matches installed
+`v0.18.2-5-g7bc87490`, build `6AC3C7A3`, linked 15:52:03 UTC. Sean still
+sees AA disabled with plasma and took NumLock. Ruled out: the loop gate alone
+explains the visible fault, because at 09:58:16.835 all 76 replay candidates
+complete with zero refusals, and the same plasma PS is retained/eligible.
+The log reports 3274 treated frames overall; temporal draw failure counters
+are sparse. NumLock selected tone/resolve draws on frames 45215-45217.
+Next discriminate backend disengagement versus an overbroad overlay mask:
+check actual resolve eligibility/backend evaluations, and measure the saved
+coverage texture's nonzero fraction and extent. The captured plasma PS has
+no discard, so surviving raster fragments are not proof of visible color
+contribution under dual-source blending. Require actual mask/output evidence
+before changing coverage semantics; retain the qualified loop repair.
+
+The later focused log read confirms 1348 replay candidates/completions and
+zero replay refusals. At 09:58:11.835, 141/141 HDR frames reach, evaluate,
+finish and restore; 141 continue valid history, with cumulative backend
+failures zero. Ruled out: backend disengagement or permanent history reset
+explains this steady interval. `configured=dlss effective-last=taa` is a
+separate confirmed policy override: `treatHdr` chooses TAA for mixed cameras,
+and the renderer currently refuses untrusted coverage for SDK modes.
+Sean explicitly requires honoring configured DLAA/FSR without that downgrade.
+Support the configured backend safely; do not merely remove the selection
+ternary and leave the renderer's SDK-input refusal in place.
+
+All six new FTR5 packets validate, but omit the now-successful plasma pair
+and the private EDVR coverage textures. The actual t12 overlay mask is absent,
+and the HDR consumer's large resource payloads were capped. A genuine earlier
+supported-alternate untrusted-mask GPU sample (frame 44417) marks 5465 of
+8294400 pixels (0.066%); this refutes a full-screen untrusted union for that
+sample, not the unmeasured plasma overlay mask. Prefer offline footprint
+replay of the older exact plasma packet: its shader has no discard, depth
+or sample-mask output, so the captured VS/IA/depth/stencil path plus a solid
+PS can establish raster extent without all material textures. Color-change
+claims additionally require the original material shader and HDR parity.
+
+The older original plasma packet `49882/17170` has every required original
+resource (468732820 bytes). The new offline WARP diagnostic recreates its
+original shader, IA, raster, blend and depth/stencil state. Passing raster
+coverage is 84181/8294400 pixels (1.01491%), with inclusive bounds
+`(2351,1535)-(2657,1899)`. Captured before/after HDR changes exactly those
+84181 pixels; no captured masked pixel is bitwise identical. WARP depth and
+stencil match the captured after image exactly. Color parity is incomplete:
+13098 pixels differ, all within coverage, maximum decoded channel error 0.5,
+maximum scaled error `abs(delta)/(1+abs(captured))=0.027027`; 18 pixels exceed
+1% scaled error, none are nonfinite. Do not attribute the differences to
+hardware without evidence, or treat this as exact material-output parity.
+Ruled out: this saved plasma draw's own passing raster mask covers the entire
+world, because it covers only 1.01491%. Other overlay draws, their union, and
+the current flight remain unmeasured. The legacy trace association remains
+invalid; original resource/state replay does not repair or validate it.
+
+Mixed-camera coverage is logged at frame 43232, 784 frames before the plasma
+pair's first logged late-overlay draw at 44016. The forced TAA choice therefore
+predates that plasma draw and is a separate policy issue. Runtime selection,
+preflight and telemetry must preserve `s.engine`. Until SDK input ownership is
+qualified, an explicit refusal is honest; it is not an AA fix. Do not install
+a downgrade-removal-only change and claim the plasma problem is solved.
+
+The private pixel capture cancels TAA/FSR routes and only runs after successful
+backend evaluation. That explains the missing private masks in this NumLock
+capture. Add manually armed prebackend evidence before the mixed-camera SDK
+guard: original H/depth, optional clean H, full-plane overlay/untrusted masks,
+camera/phase/backend metadata and explicit prebackend status. Stage resources
+asynchronously without GPU waits, retain no borrowed game pointers, and keep
+the byte cap. A refused attempt must still export its available inputs; it
+must not fabricate successful backend images. The existing successful pixel
+capture needs mode-correct TAA ping-pong output if extended to TAA/FSR.
+
+Implemented diagnostic, 2026-10-05: all three flat route selectors now retain
+the configured engine. The SDK mixed-camera refusal guard is unchanged:
+DLAA/DLSS/FSR may decline these frames, but cannot silently run TAA. This is
+not a qualified plasma-AA fix. NumLock stages prebackend H, raw depth,
+optional clean H, full overlay/untrusted masks, slots, the structured pool
+and scene-now/previous buffers, with camera, phase and prep metadata. Present
+polls owned staging resources without GPU waits; absent inputs, budget caps
+and failures are explicit. Two attempts share a 384 MiB cap, with 64 MiB
+file chunks. The log bundler includes each input-capture directory atomically
+for the selected session. The older successful-output capture still covers
+DLSS/DLAA only; these input files never claim a backend output.
+
+Focused validation: actual WARP renderer calls for DLAA/DLSS/FSR retain the
+SDK refusal, leave H unchanged and complete the input capture through normal
+Present polling. Exact mask/engine bytes, CRCs, view ranges, all-mips views,
+unarmed inertness, budget/timeout/publication failures and whole-session
+bundling pass. Existing 46-frame temporal corpus remains byte-identical.
+The standalone offline replay has missing/corrupt-input and write-free dry-run
+checks plus real depth/stencil pass/fail cases and private-DSV isolation.
+
+Environment: Epic flat desktop DX11, 3840 x 2160 render/output; no VR runtime
+or headset in this test. Installed NVIDIA DLL file/product version is
+`310,9,1,0`, SHA256 `3975567B8943C53ACCE397F2B72380092F84F162D00B0D2C7D08A1025C563983`.
+The internal two-camera coverage limit is unchanged. Next evidence is one
+plasma-drawn NumLock capture and 10 seconds for asynchronous readback: compare
+the full overlay/untrusted union with the captured engine records and camera
+inputs. No weapon matrix or two-minute wait is required.
+
+Full validation: `configured-backend-inputs-full-retry.log` passes all 122
+jobs, quiet checks and installer/package gates. Receipt fingerprint is
+`7836d2f8919896989d15ee47c0276648e52d791da7c181200be2e20b61aa9bdf`.
+The first `--jobs 8` run stopped at the unchanged heartbeat H5.reader check,
+which combines throughput and tear detection without distinguishing them.
+Two isolated runs passed all 30 checks; the full `--jobs 4` retry passed the
+unchanged gate. No heartbeat source or assertion was changed. The coverage
+summary now labels the configured attempt `attempt-mode`, rather than
+claiming an effective backend on refused frames. Runtime refusal only
+invalidates history; Present still polls the staged input capture.
+
+### 2026-10-05: TAA works; configured SDK route still blocked
+
+Flight `edvr_gfx_20261005_114905.log` matches installed commit `f2e7c6c7`,
+version `v0.18.2-7-gf2e7c6c7`, build `6AC3E232`. Sean reports TAA works
+with plasma. The log records 147/147 TAA HDR treatments in a steady window;
+sustained DLSS later reaches the resolver but has zero prep/backend calls,
+with `flat-resolve-untrusted-coverage-requires-native-HDR-TAA`. This is the
+remaining input-ownership guard, not a weapon replay rejection or SDK failure.
+The second NumLock is labelled DLSS rather than DLAA. A separate DLAA warning
+is a 512 x 512 render versus 3840 x 2160 output mismatch, and FSR initializes
+only briefly without a recorded completed resolve. Do not claim a measured
+sustained DLAA/FSR backend failure from this log.
+
+Both prebackend dumps validate all nine payloads/CRCs, 220826112 bytes each.
+The first TAA sample has empty coverage masks and clean/current HDR equality;
+it does not establish the mask state of every plasma frame. The second DLSS
+sample has 13.2571% overlay and 12.0363% untrusted coverage, union 21.9532%.
+Clean/current differ at 26028 pixels, all within the overlay; 721292 untrusted
+pixels outside the overlay have identical clean/current colors. The late-H
+snapshot therefore does not certify removal of earlier foreign-camera
+Gbuffer contributions. Both dumps have reset/zero-phase current-equals-prior
+camera metadata, so they cannot establish animated history correctness.
+Evidence: `build/configured-backend-flight/{evidence.md,findings.txt,comparison.json}`.
+
+Ruled out: whole-frame coverage causes this sustained SDK AA loss, because
+the captured union is localized and the resolver refuses before evaluation.
+Ruled out: repeating these bulk dumps supplies previous animated foreground
+positions, because they omit foreign prior B1, original VS/IA and paired bones.
+VR already retains post-VS positions and geometry/skeleton identities. Flat
+needs exact final Gbuffer/pixel ownership plus its own projection/depth and
+raster phase qualification before that shared motion can feed SDKs. Stencil16
+is insufficient: the measured material pass explicitly clears it. Do not
+restore secret TAA, remove the guard, zero foreground motion, reset all history
+each frame or treat reactive masks as strict RGB-history exclusion.
+
+Sean reports NumLock tanks FPS. Four weapon-footprint samples alone record
+1260519424 bytes (about 1.17 GiB), in addition to the two 211 MiB input sets.
+There are no >=250 ms freeze lines; missing timing counters prevent exact
+attribution of the frame-rate loss. Source review finds synchronous packing,
+CRC and filesystem export on Present, despite nonblocking GPU maps. Another
+broad capture is not needed for this issue. Sean approved ordinary NumLock as
+a bounded general shader/state/census/routing report, with bulk pixel/geometry
+exports behind an explicit full-capture action. Keep it useful for future
+support logs; do not silently collect gigabytes or change the configured AA.
+
+Offline slot inspection gives a concrete production gap: all 998337 marked
+DLSS pixels contain exactly the cleared MRT6 pair `(-1.0f, 0.0f)`. There is no
+foreground slot marker to match, although t33 identity fields are present.
+The flat route excludes weapon motion families from source candidates and
+only starts the MRT6 producer within a named world-camera run; the engine
+producer independently rejects before-naming/other-camera draws. The AACF/CF
+shader recipe already exists. Reuse the MRT6 target and VR's bounded original
+VS position/identity history, with an explicit flat camera-domain marker;
+do not mistake current slots for exact final ownership. Unknown/equal-depth
+writers must update or invalidate that provenance. The existing historical
+original-shader identity-fusion corpus qualifies four of five families; it
+does not provide a blanket live flat SDK qualification.
+
+General diagnostic policy implemented: ordinary configured census key
+(`NumLock` by default) keeps bounded desktop shader/state discovery and normal
+backend/refusal/environment reports. It does not arm manual compute probes,
+cold projection audits, full input/output pixels, draw pixels/packets or the
+weapon-footprint exporter. Holding Shift with the same key explicitly arms
+the existing full capture. Pending full requests cannot be downgraded by an
+ordinary repeat; VR's census branch is unchanged. No INI key was added and
+live settings are preserved. Focused policy/wiring tests pass, including
+AA-off gating and byte-identical replay of the existing 46-frame corpus.
+This diagnostic-policy change does not claim to fix SDK AA engagement.
+
+Full validation for the diagnostic policy: `build/capture-policy-full.log`,
+all 122 jobs plus installer/package gates passed. Receipt fingerprint is
+`edd2bced98da58d903dde81ca356530db948cf0cb5b824dcfb7225027ec78932`.
+
+### 2026-10-05: shared animated-history implementation and SDK input qualification
+
+Hypothesis confirmed before editing: the private DLSS input capture's 998,337
+alternate-camera pixels all carry the cleared `(-1,0)` marker, while the source
+adapter excludes the foreign animated producer. The missing producer and final
+camera ownership prevent SDK motion/depth qualification; the configured backend
+must remain unchanged.
+
+The VR position/identity producer is extracted into a bounded shared history.
+Its existing source/stencil scheduling, shaders and timer boundaries stay in the
+VR adapter. Focused WARP tests pass 80,537 checks. Separately compiled original
+and extracted implementations produce identical bytes for all 18 existing VR
+motion maps (1,769,472 bytes). Flat may retain one four-byte GPU instance index
+for its deferred ownership raster; VR asks for no new copy.
+
+Flat-only DXBC marker variants preserve original color/depth in seven synthetic
+shader families. Foreign slots use negative odd codes distinct from clear;
+passing world fragments replace foreign ownership, including equal-depth draws.
+The resolver now has an explicit qualified foreground-motion/depth contract,
+with canonical world-convention depth. Native TAA keeps its conservative union.
+Production admission remains subject to the adapter's complete qualification.
+
+Ruled out: an invented invalid/offscreen motion vector as a shared SDK local
+history reset. NVIDIA's direct NGX contract supplies a frame reset and actual
+current-to-previous motion; Streamline's invalid-vector setting fills missing
+camera motion and is not that contract. FSR's out-of-image history check follows
+nearest-depth motion dilation, so a fabricated vector is not a guaranteed local
+RGB-history exclusion. No zero-motion substitute or reset-every-frame is added.
+
+Complete plasma packet descriptors establish that IA.VB0 is a dynamic CPU-writable
+688,128-byte buffer and VS t33 is a dynamic CPU-writable 336-byte structured pool.
+A bounded flat-only identity ledger can read the actual index/allocation identity
+from full CPU writes and invalidate on unsupported/GPU mutation. This avoids a
+per-frame GPU wait. Unique prior identities select actual captured positions;
+new identities require a transition reset, and ambiguous prior inputs remain an
+explicit qualification failure until equivalence is proven.
+
+Offline qualification now covers 105,506 WARP checks for the shared history,
+CPU upload witness and deferred foreground raster. The raster uses actual
+captured clip positions, including signed previous W and current triangles
+crossing the eye plane. Common SDK depth derives from the captured constant
+clip-Z; it does not assume that CPU camera metadata is the rendered near plane.
+Final slot and exact device-depth equality filter world overdraw. Unsupported
+foreign discard/depth/coverage shaders remain explicit contract refusals.
+
+The focused mono resolve suite passes with DLAA, DLSS and FSR backend stand-ins
+receiving the exact foreground motion and common-near depth. A genuinely new
+identity resets once; stable identities continue. Stale, missing, malformed or
+unqualified maps refuse before evaluation. Native TAA keeps its previous route.
+The existing mutation tests still catch all 21 first-person, 18 raster-phase and
+22 steady-detail mutations. These checks establish adapter/input behavior,
+not in-game SDK image quality or performance.
+
+Independent HEAD/current mono rigs using the identical HEAD test corpus both
+pass. All 20,939 complete texture readbacks are byte-identical: 16,249,856 pixel
+bytes, SHA256 of the 16,584,880-byte records (including shape/format headers)
+`48aa8fcc6328c4c2dfb3f3e8a7509bf28147e1a5245ec3c0be487e427744b9aa`.
+This pins the existing VR/TAA/backend-input paths across the shared shader edit;
+the comparison harnesses and logs are under `build/mono-shader-parity`.
+
+Environment: the pending Epic test is Windows native D3D11, flat native HDR at
+3840x2160, with the existing pinned DLSS 310.9.1 runtime. Flat history requires
+the qualified 336-byte animated pool and is bounded to 64 retained draw records;
+the deferred map is bounded to 16 million pixels. No VR runtime/headset selection
+or eye scheduling is changed by this extraction. VR output parity is offline
+evidence; it does not replace a live regression qualification on other runtimes.
+
+The combined original-to-MRT6-to-MRT7 shader avoids competing substitutions:
+one game draw writes final ownership and conservative coverage. The focused
+engine rig passes 13,235 checks, including identical original color/depth bytes,
+foreign/world ownership and coverage together, and null-PS depth-only markers.
+Single-camera SDK admission keeps its prior route. Only an actually mixed-camera
+H requires the new domain producer; private late-HDR overlay protection remains
+its existing qualified clean-color boundary.
+
+Ruled out: global upstream camera ownership proves each foreign draw's phase.
+The refresh hook admits centered alternate-near cameras, but its global receipt
+does not name every upload. A new bounded witness reads the actual bound b1
+publication and requires the measured projection shift and near to match the
+draw's phase before capture. The final focused shared-history rig passes 105,532
+checks, including zero/nonzero actual GPU camera rows, incorrect phase claims,
+near mismatch and unsupported off-center projections. It adds no GPU readback
+to production. The runtime also invalidates history certificates on UAV writes.
+
+Full-build qualification caught three test integration errors before installation.
+The five new payloads now append after the original shader registry, preserving
+all legacy byte/stage contracts; each new payload has independent registration,
+compile and stage checks. The null-marker color oracle now reads exactly one
+raw word per RGBA8 pixel and compares bytes across all four nonzero seeded
+targets. Its former word3664 comparison exceeded the actual 960-pixel plane.
+Ruled out: null-marker color corruption as that failure's cause; both the
+original production policy and a temporary alternate policy pass the corrected
+pixel oracle. No extra write-mask policy is retained: the D3D11 output contract
+already leaves undeclared render-target outputs untouched
+([D3D11 spec section 16.9.1](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm)).
+
+The HDR progress-wiring test also retained the former literal 14-slot cleanup.
+The foreground path binds and clears 16 slots; other frames retain 14. Its
+source-order assertion now follows that conditional count while still requiring
+cleanup before the completed-preparation counter and timing step.
+
+Final absolute-path `build.bat --jobs 4` passed all gates with exit 0, including
+production DLLs, Python self-tests, GPU/CPU test rigs, PE checks and both
+self-contained installer profiles. Log: `build/shared-foreground-full-final.log`.
+The full-pass receipt was written at 2026-10-05 20:21:15 UTC, input fingerprint
+`5d050812d44de3bb4f359ff1e9c5bde69c4c1dd28918f125bf385db8fea64091`.
+Source is frozen for commit and clean-version promotion. BUILT, NOT FLOWN;
+the next qualification is one plasma draw/holster transition in the configured
+DLAA/DLSS/FSR mode, with ordinary NumLock if the backend refuses.
+
+### 2026-10-05: first shared-history flight still refuses SDK AA
+
+Verified Epic `edvr_gfx_20261005_142842.log`: `v0.18.2-9-g6ab6acff`,
+build `6AC4080F`, linked 20:26:55 UTC. Sean reports weapon-drawn AA disengagement
+or aliasing with DLAA/DLSS/FSR, while TAA continues. NumLock at 14:33:01 starts
+the bounded general report. At 14:33:24 the foreground report has 1,384 H
+attempts, zero qualified, zero foreign-seen/captured, and
+`last-refusal=foreground-unknown-original-writer`. The resolve reports
+`flat-resolve-foreground-contract-unqualified`. TAA has repeated 300/300
+actually-treated windows at frames 54000, 54300 and 54600; the later DLSS
+windows have zero completed treatment. A separate 2880x1620-to-3840x2160
+interval also hits `hdr-route-needs-render-at-least-output`; the native-size
+foreground refusal remains after that interval.
+
+TAA's own kernel rejects history locally using current and prior camera-domain
+masks. It displays current color in ambiguous weapon-covered pixels and still
+accumulates qualified world pixels. The SDK adapter instead requires qualified
+foreground geometry/history and a common depth convention for mixed-camera H;
+failure refuses evaluation, and spatial recovery supplies current-frame color.
+This is an adapter admission difference, not evidence that SDK AA cannot work
+with weapons.
+
+The intake is connected, but its constructor still requires the old world
+family-pair admission (`d.supported=engineVelocityPoolFamilyPair`), or a known
+family null prepass. Unknown pairs refuse before the new foreground counters.
+For example, frame 50069/q2358 has VS AACFDCF2FB9AD809 and PS CAD1F585EDDC5641,
+valid current camera/full viewport, alternate near .0675, and `supported=0`.
+The old family table explicitly excludes this PS. Same-depth unknown null-PS
+prepasses are also reported. The aggregate refusal does not identify the first
+blocking draw; retain that limit rather than claiming one precise culprit.
+
+Ruled out: a disconnected wrapper or wrong-depth-only latch, because H attempts
+are counted only when the watched depth equals the selected H depth, and the
+existing MRT6 producer still runs about 10,300 substituted draws/frame. Its
+draws intentionally do not increment the new non-producer world-marker counter.
+Ruled out: offline geometry parity alone proves live foreground admission,
+because this verified flight never captures an admitted foreign draw.
+
+Next: exercise the production admission planner offline with these recorded
+pairs and null prepasses, distinguish original world-family support from
+structural foreign geometry support, and retain bounded first-failure evidence.
+Do not remove the SDK safety guard or ask for another flight before this
+boundary is tested. This analysis changes no renderer or installed settings;
+the installed code remains `6ab6acff`.
+
+### 2026-10-05: admission repair and ordinary NumLock cost
+
+Sean confirms SDK AA also appears disengaged while holstered, and ordinary
+NumLock causes a sustained frame-rate dip. The same verified flight shows
+discovery CPU cost near zero at 14:32:59, then about 5.2 ms/frame after the
+14:33:01 general trigger. The draw wrapper rises from about 1.5 to 6.9 ms/frame.
+General requests exclude bulk exporters, but still restart the old 120-second
+passive observer window. The repair limits ordinary reports to three useful
+frames or one second, with wall-clock expiry before the paused observer gate;
+explicit full capture retains its existing longer window. No new config key.
+
+Admission hypotheses and discriminators, before the next build:
+
+- Old pair membership blocks structurally valid foreign geometry. Actual
+  AACF/CAD1 creation bytes derive the pool ABI and produce valid foreign-only
+  and combined MRT6/MRT7 pixel shaders on WARP. All 156 original executable
+  instructions remain byte-identical and ordered; this is not pixel parity.
+- Pre-world null prepasses need provisional world-camera proof. Actual
+  84F6/ACE405 VS bytes end in B1 rows270..273 projected to o0; the generic
+  classifier rejects their split coefficient temporaries. A pending receipt
+  must match the subsequently named world camera/depth/extent in the same frame
+  before H admission, or refuse. Shape alone does not establish the camera.
+- CFCA8 uses actual CB0 rows4..7 DP4 projection. B1 phase alone is insufficient;
+  the new helper checks the actual ranged/private CB0 publication, finite
+  canonical near and measured raster phase. Focused WARP checks pass (105,557).
+- Recorded native HDR writers EC813/B765 and 983979/350735 are projected pool
+  material meshes, not fullscreen GBuffer shading. They need exact final-color
+  ownership treatment, original discard/coverage semantics and actual draw
+  state; a generic read-only lighting exemption would be unsupported.
+
+Ruled out: small output files mean cheap NumLock, because the ordinary window
+keeps driver/state observers running and the measured CPU cost remains high.
+Ruled out: those HDR material passes merely shade the existing GBuffer, because
+their actual shaders sample mesh UV material textures and lack that screen-depth
+reconstruction proof. The temporary CAD1 dummy-resource harness crashes even
+with the original unpatched PS; it cannot establish color parity. No flight is
+requested while these production admission boundaries remain untested offline.
+
+The structural planner caches proofs from original creation bytes and validates
+the actual ranged projection publication before recording foreign motion or
+provisional null ownership. The final H boundary must match every provisional
+null camera/depth/extent/phase witness and the separately recorded HDR target.
+Known world producers reuse checked bindings without extra per-draw CB queries.
+A compact first-failure record retains frame, draw sequence, VS/PS, format,
+camera, depth, stage and reason for ordinary NumLock reports.
+
+World HDR markers share the original material PS (including discard) and the
+original depth/stencil state: `engineVelocityFlatDomainBeginDraw` only changes
+the marker target, derived blend and shader bindings. Conditional stencil thus
+selects original color and world marker together. The new primitive/writer
+tuple also certifies surviving foreign stencil coverage; legacy markers without
+that provenance retain their refusal. HDR depth must write or
+test EQUAL, and color must be opaque with complete RGB writes. The old packet
+contains the HDR shader bytes but not their live descriptors; runtime admission
+must check them, and raw shader proof alone is not flight qualification.
+
+The full recorded-nominee audit found additional real same-DSV writers before
+building: two nonnull depth-only PSs were rejected by the legacy color-output
+requirement; nonpool World markers demanded an identity they do not consume;
+72BDD's exact VS projection was unnecessarily tied to one companion PS. The
+flat-only marker and independent VS proof paths address these without changing
+legacy VR derivative behavior.
+
+Ruled out: the old world-pair gate alone explains all SDK refusal, because
+recorded foreign 7B0DC/0DF0, 8B589D/7268, 114AF/A175 and F516/B40B draws use the
+same selected DSV but near .0675 versus world .025 and have real PS discard.
+The existing RG32F owner stores pool identity and depth, insufficient to select
+the original surviving primitive among coincident triangles or different draws
+of the same pool identity. The discard guard correctly refuses this ambiguity.
+
+The next proof uses flat-only RGBA32F ownership: retain pool/depth in xy and add
+exact primitive and frame-local writer identity in zw. The original material
+raster stamps both after its own discard/depth/stencil tests; H replay must match
+all four fields. Triangle-list, one-instance and no-GS/HS/DS restrictions preserve
+indexed invocation order through the position capture. A verified free private
+PS constant slot publishes the writer identity and is restored after the draw;
+missing slots, identity overflow and unsupported shape refuse. VR retains its
+RG32F allocation and original derivative bytes. Required offline negatives are
+coincident primitives and separate same-slot/depth draws with different motion.
+
+The shared WARP rig now passes 114,044 checks with RGBA ownership. Its real
+indexed material discards the later of two coincident same-slot/depth triangles
+whose previous bone poses differ; H retains the surviving primitive's motion.
+A separate same-primitive cross-draw case discards writer 2 and retains writer
+1's motion. Conditional-stencil EQUAL selects the actual surviving writer;
+replay with stencil disabled still recovers its motion from the tuple and
+restores original stencil state/reference. Fresh world-only H, native extents
+and common-near transitions also pass. The production marker rig passes 15,201
+checks, including original RGB/depth bytes and exact ranged PS CB restoration.
+All 14 recorded nominees prove world admission, and every pool foreign shader
+creates with provenance on WARP. Generator reflection/hash/dry-run tests and all
+three capture-reader Python self-tests pass.
+
+Full absolute-path `build.bat --jobs 4` passed on 2026-10-05 at 21:57 UTC:
+production DLLs, all 122 jobs, config/exports, self-contained installer payload
+checks and the fresh full-build receipt. Receipt inputs are
+`eaf7d1f47f90b162bd22fccdb744c2c327cac235da228544f05f3c45ab007646`.
+Log: `build/flat-provenance-numlock-full.log`. No flight or hardware frame-rate
+claim yet. Epic flat settings and DLSS 310.9.1 remain the test environment;
+the wider owner plane applies to flat, while VR keeps its original RG32 format.
+Native HDR still requires render extent at least output extent; scaled-HDR
+support is a separate route, and unknown/incomplete writers still refuse with
+the first-failure receipt. Ordinary NumLock expires at three useful frames or
+one second; Shift+key retains explicit full capture.
+
+### 2026-10-05: five-mode report and Astra review of c145d97d
+
+State: FLOWN, SDK qualification still refuses. Sean reports five NumLocks: AA
+off, TAA, DLAA, FSR, and DLAA with a plasma weapon drawn. The sanctioned log
+reader verifies Epic log `edvr_gfx_20261005_160625.log` against installed
+commit `c145d97d`: version `v0.18.2-11-gc145d97d`, build `6AC41EBB`.
+Environment: flat Epic, native 3840x2160, installed DLSS 310.9.1; no VR
+runtime/headset/per-eye qualification in this flight. Actual requested modes in
+the log are `on`, `dlss` and `fsr`; no `off` or literal `dlaa` transition is
+recorded. Treat the NVIDIA windows as Sean's DLAA-labelled tests, not proof
+that that intended rendering mode ran.
+
+Four manual general captures are recorded. Each reports the
+1000-ms/3-useful-frame budget and completes at three useful frames. Four
+Presents include the initial ownership boundary, not four populated frames.
+
+| Requested test | NumLock time | Final time | Useful frames | Elapsed from key |
+|---|---|---|---|---|
+| TAA | 16:09:00.194 | 16:09:00.283 | 3 | 89 ms |
+| NVIDIA/DLAA-labelled | 16:09:08.692 | 16:09:08.782 | 3 | 90 ms |
+| FSR | 16:09:21.977 | 16:09:22.074 | 3 | 97 ms |
+| NVIDIA/plasma drawn | 16:09:58.035 | 16:09:58.153 | 3 | 118 ms |
+
+The reported AA-off press is absent; this log alone does not distinguish a
+missing key event from a mode/ownership issue. Startup discovery is separate:
+16:06:27.265 through 16:08:27.265, its existing 120-second budget, 887 useful
+frames. Continuing five-second reports after manual completion are ordinary
+runtime reporting. Manual discovery is no longer collecting for seconds, but
+that does not dismiss the reported persistent slowdown. In the final windows,
+`discovery=0.000 ms/frame` while the EDVR CPU receipt remains 12.54-12.72
+ms/frame. This flight does not isolate the stream-output capture cost or prove
+that NumLock caused the remaining production overhead. Every capture also
+reports relevant-observation truncation; bounded output does not imply a
+complete draw record.
+
+TAA treats frames (1069 treated by 16:09:02.331). The holstered NVIDIA and FSR
+windows then leave treated count at 1311 with zero backend calls. After a brief
+additional TAA interval, the final NVIDIA count remains 1442. Final HDR
+receipts have 230-238 triggers per reporting window and zero prepared/backend
+calls, reason `flat-resolve-foreground-contract-unqualified`. Across the
+flight: `marker-refused=0`, `identity-known=42528`,
+`identity-unpublished=49649`, `certificate-missing=92084`, `H-attempts=2474`,
+`H-qualified=0`. These are cumulative totals, not per-mode comparisons. The old
+marker gate is passed; the SDK contract is still refused before backend
+evaluation.
+
+Ruled out: c145d97d's structural admission and primitive/writer provenance are
+sufficient to engage SDK AA, because original markers now run without marker
+refusal but all 2474 H attempts fail. Ruled out: the short manual NumLock
+budget runs beyond three useful frames in this flight, because all four
+recorded manual windows finish at three in 89-118 ms. The unrecorded fifth
+press remains unresolved. Pool rotation is not established by
+`identity-pool-slot-unobserved` alone.
+
+Astra independently reviewed `9d59690d..c145d97d` and the verified flight.
+Findings:
+
+1. **P1, premature scene-depth selection.** `flat_runtime.cpp:4313-4315` binds
+   `foregroundDomainDepth` to the first scene/native-sized DSV before proving
+   camera, format, shader or selected H membership. Any later different
+   candidate fails the whole frame. The final plasma capture supplies the
+   trigger: frame 50915, q1, format 27, camera 0, VS `04873C8813207261`, PS
+   `EF37E1BB2C09B26E`, DSV `000002207D606460`, reason
+   `foreground-original-camera-unavailable`. Earlier scene identity refusals
+   name `0000021D5FFF83A0`. The log lacks a paired selected-H DSV witness for
+   that same frame, so it establishes the premature latch and failure, not the
+   identity of every actual scene DSV. Keep candidate evidence by depth until
+   existing scene/H selection chooses its resource; unknown writers on the
+   chosen resource must still refuse. Offline regression: unrelated
+   native-sized pass before a valid scene, plus an unknown writer on the
+   selected scene.
+2. **P1, identity acquisition never settles.** `flat_foreground_identity.h:83`
+   demands the pool row after learning the actual instance index at draw time.
+   `flat_animated_identity_ledger.h:93-99` makes a newly demanded slot
+   unobserved and only later publication can populate it. Scene draws
+   repeatedly report `identity-pool-slot-unobserved`, including holstered
+   NVIDIA and FSR. Existing tests demand before publication. They do not cover
+   publication-before-demand with changing slots. Discriminate ordering, slot
+   rotation and the 64-row eviction limit using actual pool/instance identity,
+   slot, demand/eviction event, publication epoch/sequence, and requested rows
+   at publication; do not choose the repair from the refusal string alone. Keep
+   authoritative identity validation.
+3. **P2, capture work survives sticky refusal.** `flat_runtime.cpp:5157-5160`
+   still calls foreground capture after failed identity, and
+   `flat_foreground_motion.h:76` appends the captured draw before returning
+   `!refusal_`. The `captured` counter therefore counts successful returns, not
+   all actual GPU captures. Separate attempts/completions/cost and necessary
+   next-frame history warming from work that cannot benefit either frame. This
+   source path can waste work, but the current flight does not attribute its
+   milliseconds.
+
+Astra found no concrete defect in primitive/writer stamping or preservation of
+original discard within the admitted draw shape. Do not replace that ownership
+proof, add weapon-specific allowlists, or downgrade configured SDK AA to TAA.
+Next work is offline regression and identity evidence design. No new fix,
+build, install or test flight was requested as part of this review; Epic
+remains on c145d97d.
+
+### 2026-10-05: selected-depth isolation and authoritative GPU identity
+
+State: implemented, focused regressions pass, full validation pending. The
+c145d97d flight remains the last hardware evidence. No performance improvement
+or SDK engagement is claimed until the new build flies.
+
+The depth repair keeps four bounded, persistent DSV candidates. Each has its
+own original-writer failures, motion history, provisional null camera
+witnesses, HDR/color resources and phase/state proof. Only the exact depth
+chosen by the existing H boundary qualifies. The prior selected depth is pinned
+across the next frame so an early unrelated native-sized pass cannot evict its
+history. A missing selected candidate or its capacity overflow still refuses;
+an unknown writer on the actual selected scene still refuses. Selected H
+receipts now name frame, depth pointer, candidate count/cap and
+missing/overflow state. Failures on unrelated DSVs no longer poison the
+selected one.
+
+The route regression reproduces the q1 unrelated failure before scene selection
+and proves the selected scene can qualify while an unknown writer on that
+selected scene cannot. Audit found a separate hole:
+`flatRuntimeWritten(prefix,nullptr)` does not set `prefix.uncertain`. A null
+mutation before the first DSV candidate therefore needed an explicit
+frame-level refusal, now checked at H and covered offline. Foreign-thread
+mutation continues to set `foreignWork` and refuse at H. Per-DSV geometry
+mutation handling retains existing invalidation and unknown-write rules.
+
+The sparse CPU ledger probe reproduces `identity-pool-slot-unobserved` when a
+newly encountered slot is requested after publication. It still cannot
+establish whether ordering, slot rotation, row eviction or resource churn
+caused the flown failures. The repair removes all of those CPU row-cache
+dependencies from live SDK admission instead of guessing one. It shares VR's
+existing `AnimatedVertexHistory` GPU capture: actual original VS positions,
+current/previous skeleton and allocation, and an exact retained instance-index
+scalar. There is no GPU readback, whole-pool CPU scan or weapon-specific
+selector. The shared VR shaders and scheduling are unchanged; the new adapter
+and shaders are flat-only.
+
+CPU matching retains same-pool, same-geometry history candidates; the GPU
+compares the exact slot, skeleton and allocation. A unique match uses its
+actual previous positions and stored prior raster phase. Multiple matches
+coalesce only when every previous triangle position is bitwise identical and
+its prior phase agrees. Otherwise the map carries actual canonical current
+depth with class 2, rejecting that pixel's history. It does not guess a
+previous pose or veto world SDK AA. Missing current GPU identity likewise
+cannot borrow prior history. Unrepresentable slots or invalid positions remain
+invalid coverage. Original final-owner slot/depth/primitive/writer and
+raw-depth checks remain intact. High-bit raw instance metadata is a remaining
+boundary: the shared identity CS reads raw index, so those records
+conservatively reject history rather than infer a masked identity.
+
+The live path no longer queries/copies fourteen VS constant buffers and 128 VS
+SRVs for a CPU input certificate on each foreign draw, and no longer tracks
+sparse CPU identity uploads at every Map/Unmap. Exact GPU position agreement is
+a sufficient duplicate-motion proof. The bounded ledger receipt support remains
+exercised by offline tests. No config keys were added or removed. Performance
+remains unmeasured on hardware; the CPU census has a separate `foreground
+capture` family, and capture receipts separate attempts, GPU attempts,
+completed submissions, preflight refusals and useful warming after another
+frame refusal.
+
+The original performance regression failed before the repair because an
+unidentified draw still submitted an original-VS GPU capture. Preflight now
+rejects unusable CPU-mode identities/cameras before SO; GPU-mode capture
+instead uses the actual GPU identity witness. Valid captures continue warming
+history after unrelated sticky frame failures, because the next frame can use
+them. The offline test proves that preserving this warming supplies real
+previous motion, not repeated reset.
+
+Focused WARP passed 146,618 checks after shader regeneration. Added actual GPU
+cases cover unavailable CPU rows/certificates, first-seen and changing slots,
+allocation reuse, identical and differing duplicate poses, differing prior
+phases, out-of-range GPU identity, canonical-depth rejection and exact
+restoration of all fifteen touched VS SRVs and Context1 VS/PS CB0 ranges.
+Existing primitive/draw discard, stencil, world-only H and CPU fixture tests
+continue to pass. The SDK prep rig additionally checks DLAA, DLSS and FSR all
+keep their backend engaged on class-2 ambiguity, preserve canonical depth,
+reject only the affected pixel's history and avoid a whole-frame reset or TAA
+substitution. Full build and clean promotion remain required.
+
+Environment for the next test: flat Epic, native 3840x2160, DLSS 310.9.1,
+preserved `edvr-flat.ini`. The per-DSV table has four entries; each original-VS
+history retains its existing 64-record/32-MiB limits. VR
+runtime/headset/per-eye behavior is not newly qualified. Ordinary NumLock
+retains the already-proven three-useful-frame/one-second bound; startup
+discovery still has its separate 120-second budget. One short holstered/plasma
+comparison with configured DLAA or FSR and one NumLock is sufficient to inspect
+backend engagement and selected-depth/foreground-capture receipts; no
+per-weapon matrix is requested.
+
+### 2026-10-05: Astra completion review and additional offline gates
+
+Astra's second review found two concrete gaps before installation. Runtime
+per-DSV isolation did not extend to `engine_velocity.cpp`: a global marker
+depth/frame still rejected a second admitted DSV, and retrieval exposed only
+one plane. A marker on A followed by a foreign/null pre-world draw on selected
+B could still sticky-fail B. The old q1 camera-less flight does not prove A
+stamped any marker; this is a source-proven correctness gap in the new
+implementation. The new regression must exercise actual A/B GPU markers, exact
+DSV lookup and ordinary world-source aliasing without clearing pre-world
+evidence, rather than just the route table. Marker-layer completion is in
+progress.
+
+Ruled out: runtime candidate isolation alone completes per-DSV ownership,
+because the producer/retrieval layer still had a global depth latch. Preserve
+the chosen DSV's complete original-writer proof through the actual ownership
+plane.
+
+The GPU adapter also requested a whole SDK reset for `priorCount == 0`, despite
+class 2 already rejecting new geometry's history locally. The new warm-world
+regression failed that condition on the previous code. GPU mode now leaves
+first-seen history rejection local; the legacy CPU fixture mode retains its
+established initial-history reset. A real common-near convention transition
+still resets once and settles on the following frame. The focused original-VS
+WARP rig now passes 157,476 checks, including warm world, first-seen GPU
+geometry, actual near transition, canonical depth and state restoration. Logs:
+`build/foreground-local-reset-before.log` and
+`build/foreground-local-reset-after.log`.
+
+The first full build compiled both production DLLs, then failed `run_jobs.py`'s
+Windows process-tree self-test. A ping grandchild survived timeout cleanup and
+held its heartbeat file; this was a sandbox process-termination limitation, not
+a rendering regression. The isolated self-test passes with escalated execution.
+The full gate must run again under that execution context after the marker
+source is frozen. No receipt, clean promotion or installation is claimed from
+the failed build. No flight is requested while these offline gaps remain open.
+
+Both Astra completion findings now have failing-before/passing-after
+regressions. The marker layer uses four cached per-DSV RGBA ownership planes,
+each cleared once per frame, with source-depth pins and conservative capacity
+refusal. Ordinary flat source production aliases its exact cached plane; it
+neither replaces nor clears earlier foreign ownership. Internal MRT6
+recognition includes every cached plane so lazy source restoration cannot
+mistake a previous plane for the game's own MRT6. The actual two-depth GPU test
+failed `flat-domain-multiple-depths` on old code and passes after the repair: A
+and B remain separately retrievable, B retains original foreign tuples through
+a later named B world draw, and A's bytes are unchanged. Focused production
+marker WARP rig passes 15,223 checks. Logs: `build/engine-marker-red.log` and
+`build/engine-marker-green.log`. Shared VR RG32 eye/source production keeps its
+profile-specific lifecycle; only flat ownership uses the new four-plane cache.
+
+The full escalated build is rerunning against this frozen source and the
+157,476-check local-reset GPU adapter regression. Hardware SDK engagement and
+frame time remain unqualified until the installed build is tested.
+
+### 2026-10-05: full validation passed, clean promotion next
+
+The full escalated absolute-path build completed with exit 0 against the frozen
+repair. Both production DLLs, the 117-job rig pool, five quiet jobs, config
+contract and self-contained installer/resource checks passed.
+`build/full_build_receipt.json` records `full-pass` with input fingerprint
+`c0d7b0b9b34552d4e6e2b947f3ffc287cfbc0b3dce373b5a7284c40a1f16d0c1`; the log is
+`build/flat-gpu-identity-depth-full.log`. This supersedes the earlier failed
+process-tree gate.
+
+Commit this same source, push main, then use the receipt-guarded DLL-only
+promotion and sanctioned Epic flat installer. Preserve the live flat INI and
+DLSS runtime. The next hardware check is configured DLAA or FSR with the weapon
+holstered, then one plasma weapon drawn for about ten seconds each and one
+lightweight NumLock. No complete flight or weapon inventory is needed. Hardware
+backend engagement and frame time are still unqualified; the offline
+regressions demonstrate the corrected failure paths rather than a measured
+performance gain.
+
+### 2026-10-05: 4bb67d35 flight still refuses configured SDK AA
+
+Sean reports good TAA and apparent AA-off output with DLAA. The sanctioned log
+tool verifies Epic `edvr_gfx_20261005_171647.log` as `v0.18.2-13-g4bb67d35`,
+build `6AC42EC9`, linked 23:12:09 UTC. The visible SDK summaries call the
+configured mode `dlss`; retain this naming distinction when interpreting the UI
+report.
+
+At 17:19:43.335 the runtime reports 2,401 H attempts, zero qualified, 112,669
+actual GPU-identity submissions and zero marker refusals. The first selected-H
+failure is planning `foreground-original-projection-unproven`, VS
+`FC1193AFFC596F74`, PS `258B95AC99520C1F`, format 23, camera present, and exact
+selected depth `000001FF7B33B160`. There are three candidates against the
+four-slot cap with no overflow. Repeated samples name the same shader pair and
+refusal. At 17:19:48.326 a later selected-H sample instead names
+`history-budget`, VS `F516BF0201303B87`, PS `B40B0462256E31C2`, with 2,516 H
+attempts and still none qualified.
+
+Ruled out: repairing GPU identity acquisition and per-DSV marker isolation
+alone restores this scene, because this verified build submits actual GPU
+identity, reports no marker refusal or candidate overflow, and still qualifies
+no H. This does not prove every identity match or candidate is valid. The prior
+implementation defects remain independently covered by offline regressions.
+
+Open discriminators: projection-proof parsing/classification versus genuinely
+unsupported original clip construction, confirmed by the actual refused VS
+bytecode and planner fields; retained history-record pressure versus legitimate
+within-frame demand, confirmed by the bounded key/record lifecycle and budget
+accounting. No guard relaxation, guessed motion or budget increase follows from
+the refusal strings alone. Trace both paths offline before proposing another
+build or asking for another capture.
+
+Offline conclusion: the actual captured Epic VS `FC1193AFFC596F74` contains
+only an input-position move to `SV_Position` and return, with no camera
+constant reads. Its actual PS `258B95AC99520C1F` writes zero to target 0.
+`flat_projection_recipes.h` already recognizes this exact pair as unchanged.
+The SDK ownership planner instead requires a forward projection before any
+ownership classification, and refuses it. Ruled out: a missing
+perspective-projection parser pattern for this pair, because its actual
+bytecode contains no projection. Historical per-object-motion censuses identify
+a fullscreen stencil stamp, including depth-disabled cases. They do not
+establish the current Epic blend/depth/stencil state; do not invent a
+projection recipe or unconditionally ignore this pair.
+
+The GPU history helper has 64 records and 32 MiB bounds and retires records
+untouched for more than two frames. Thus a permanent never-retired record leak
+is not established. Before a world source is named, the planner treats
+structurally proven pool draws as foreign and captures them; legitimate
+current/previous demand, transient geometry churn, and provisional world
+captures can consume the bounded pool. Current logs omit the record/byte usage
+and camera-domain demand at the refusing draw, so no budget increase or
+scheduling change is justified yet.
+
+Next diagnostic should record both missing receipts together: original bound
+target masks, depth enable/write/function and stencil state/reference for the
+first refused draw; and active record/byte counts plus
+current/previous/provisional capture demand for history refusals. Use bounded
+first-failure summaries, independent of large manual exports, and test logging
+through the production failure/report path offline. The verified flight already
+proves zero SDK H qualification; no second flight is needed to re-establish
+that symptom. Installed graphics remain `4bb67d35`; this entry changes
+documentation only.
+
+### 2026-10-05: offline bench using the production proxy
+
+Sean requested an offline bench before another flight. The available evidence
+supports the known shader-planning and bounded history paths, not an exact
+settlement replay. The four retained draw-packet captures contain 27 packets
+and neither refusing shader pair. Their manifests have no build identity, and
+the existing replay rejects their missing post-draw DSV payload. Do not treat
+those packets as a faithful reproduction of the current failure.
+
+The bench pins eight original shader fixtures by DXBC size, FNV identity and
+SHA256 (27,312 bytes total). The latest refused
+FC1193AFFC596F74/258B95AC99520C1F pair is actual captured bytecode. World and
+representative alternate-camera fixtures come from prior captures. Geometry,
+pose constants, render-target contents, blend/depth/stencil state and draw
+ordering are reconstructed. The report preserves that distinction and
+fingerprints the tested proxy DLL.
+
+The history workload uses the production AnimatedVertexHistory on WARP. It
+independently reproduces the 64-record refusal (65th distinct draw; 6,144
+retained bytes), the byte refusal (eight large indexed draws; 33,551,232
+retained bytes), and the fifth duplicate's occurrence cap. Reuse, transient
+churn, two-frame retirement, actual buffer writes and global reset also pass.
+This establishes the bounds and lifecycle; it does not establish which source
+consumes the current game's budget. No budget or rendering policy was changed.
+
+The integration process loads a staged proxy in an invisible D3D11 fixture and
+enters the actual Present and draw hooks. The shipping proxy's
+unsupported-host control retains its real game-build guard. A separately named
+bench DLL uses the existing engine rig define and three reconstructed
+emit-hook entry points; all other rendering objects are the production
+objects. It tests the actual GPU slot resources, original vertex history,
+ownership and H qualification, with engine job hooking explicitly outside its
+evidence. A read-only, owner-thread snapshot exposes runtime planning,
+original GPU identity submissions, H qualification and completed backend
+counters. Exact structure size and ABI version are required. It supplies no
+fabricated qualification maps or state overrides.
+
+GPU readback also checks the actual owner plane before and after H. The scene
+keeps a visible alternate-camera triangle outside the world draw; a positive
+capture counter with an empty foreground cannot pass. SDK renderer PASS
+requires visible world and foreign pixels at H, H qualification, and a
+completed configured backend. Native TAA requires the real HDR resolve. The
+unsupported-host case is a guard result, not a renderer result.
+
+Three SDK-only cases execute the exact FC/258B shader pair with reconstructed
+OM state: stencil-only with color and depth writes disabled, depth-writing,
+and color-writing. Readbacks distinguish their actual effects. The guard cases
+report the measured writer refusal; they do not prove that projection planning
+is the right stage to reject a writer. No hash-only exemption was introduced.
+The F516/B40 fixture identities are pinned but their exact plasma draw
+geometry and workload are not replayed; the history tests use controlled
+workloads instead.
+
+The runner stages only under build/ and leaves game installs and settings
+alone. Each scene/mode gets a fresh process. Native TAA's public INI setting
+is on; the runner's readable taa label maps to it. --dry-run creates no files,
+directories, subprocesses, devices or DLL loads, and the actual CLI self-test
+verifies that property. Framework self-test success is separate from renderer
+PASS/FAIL/UNSUPPORTED.
+
+Run python tools/flat_sdk_bench.py --report build/flat-aa-report.json. WARP
+covers deterministic D3D11 behavior; --adapter hardware uses the local adapter
+for supported backend checks. Neither synthetic scenes nor WARP certify actual
+settlement image quality, performance, or every VR runtime. The installed Epic
+graphics remain 4bb67d35. No new flight or capture is needed to continue work
+on the covered paths.
+
+Validation: the frozen-source full build passed all gates. Its receipt input
+fingerprint is
+`65023684e8ab0ff28575043c0fd49a439bba33740a460705db13543ea2104584`,
+independently verified against this source and compiler context. Native build
+stdout is saved in `build/flat_sdk_bench_final_build.log`.
+
+Both default 17-case matrices ran. The 64x64 flat D3D11 scene uses no VR
+runtime or headset. Hardware logs identify NVIDIA GeForce RTX 5090; the
+installed driver inventory reports 32.0.16.1692 and the carried DLSS DLL's
+file version is `310,9,1,0`. Baseline TAA, DLAA, DLSS and FSR each complete
+one real HDR resolve on hardware, with zero spatial fallback. SDK baselines
+qualify one H and complete one configured backend. GPU readback at H finds 338
+world pixels and 218 foreign pixels, after 338 foreign pixels before H.
+
+Adding the stencil-only FC/258B draw changes 4,096 stencil pixels and zero
+color/depth pixels. The visible owner pixels survive, but all three SDKs
+refuse H with `foreground-original-projection-unproven`, with zero backend
+calls and a spatial fallback. This reproduces the current first-refusal path
+through the production hooks under explicit reconstructed no-write state. It
+does not establish that the latest game uses that same OM state. All
+unsupported-host and writer-refusal controls pass; all five history cases
+pass. WARP also completes TAA and FSR, while NGX explicitly reports
+unsupported GPU `0xBAD00001` after upstream qualification.
+
+Reports are `build/flat-aa-warp-report.json` and
+`build/flat-aa-hardware-report.json`, about 50 KB each. Overall renderer
+verdict is deliberately FAIL because the no-write case reproduces the bug; the
+framework and full-build gate being green are not a rendering fix. Next:
+correct inert-draw admission using this positive and negative matrix, then
+test the bounded history scheduling independently. Do not add a guessed
+projection, ignore a shader pair unconditionally, increase a budget without
+accounting, or request another flight to rediscover this refusal.
+
+### 2026-10-05: inert admission corrected against the offline bench
+
+Hypothesis: the ownership planner unnecessarily requires a projection for a
+draw which cannot change color or depth. The prior hardware bench confirms the
+first-refusal path: FC1193AFFC596F74/258B95AC99520C1F changes stencil only,
+preserves visible world and foreign owner pixels, then refuses H before any
+configured SDK backend executes. The discriminating result after correction is
+a qualified H and completed configured backend with the stencil changes
+preserved; actual color and depth writers must continue to refuse.
+
+The correction uses original creation-byte proof and live output state. It has
+no shader-hash exemption, invented projection or per-weapon table. The camera
+classifier's Clean result is insufficient by itself: its parser also models
+UAV stores. An independent cached side-effect proof rejects those stores,
+atomics, unsafe declarations and unknown operations, while allowing supported
+pure arithmetic and read-only operations. The original VS must be structurally
+camera independent, and the original PS must be classified Clean.
+
+Only a refusing inert candidate incurs the additional live-state queries. Lazy
+substitutions are restored first. Actual shader objects and identities, DSV
+and depth resource, all eight effective render-target masks, effective depth
+writes including the read-only DSV flag, all supported OM UAV slots, other
+graphics stages, stream output and predication are checked. A proved no-write
+draw executes its original stencil operation once, without an ownership
+nomination, private marker or vertex-history capture. World/pool hot paths
+keep their existing queries.
+
+An inert candidate which fails these state checks records its specific
+first-failure reason under inert-state. A future live difference therefore
+identifies color/depth writing, shader/DSV mismatch, another stage, UAV,
+stream output or predication rather than repeating projection-unproven. No
+capture payload or configuration key was added.
+
+History-budget remains an independent open discriminator: the bench proves the
+existing bounds and retirement behavior, but current game logs do not identify
+the retained occupants. No budget or scheduling change follows from this
+correction. The current game's exact OM state is also unmeasured; offline
+success covers the tested state contract, not every settlement image or
+performance condition.
+
+Validation: all 17 hardware matrix cases PASS on the NVIDIA GeForce RTX 5090
+in the 64x64 flat fixture (no VR runtime or headset). DLSS runtime file
+version is `310,9,1,0`. Each stencil-only DLAA, DLSS and FSR case changes
+4,096 stencil pixels and zero color/depth pixels, retains 338 world and 218
+foreign pixels at H, qualifies one H, completes one configured backend, and
+uses zero spatial fallback. All six color/depth writer controls and all four
+host guards PASS. The five controlled GPU history-pressure cases also PASS.
+WARP has 13 PASS, zero FAIL and four explicit NGX GPU-unsupported results,
+with FSR's stencil-only case now PASS. These are backend execution and
+state-contract results; they do not certify game image quality, frame rate or
+VR behavior.
+
+Reports: `build/flat-aa-inert-hardware-report.json` and
+`build/flat-aa-inert-warp-report.json`. The frozen-source full build passed
+all gates; stdout is `build/flat-inert-final-build.log`. Receipt input
+fingerprint is
+`d62ef1db0319d317a2c253274e6ae6f89bc9eadcc868c1478477ea47081c1eed`,
+independently verified against the source and compiler context. Promotion will
+use the receipt-guarded clean DLL build and preserve Epic's settings and DLSS
+runtime. No additional flight was required for this correction.
+
+### 2026-10-05: inert correction flown; history budget still blocks SDK AA
+
+Sean reports DLAA/FSR still appear off and took NumLock. The sanctioned log
+tool verifies Epic `edvr_gfx_20261005_195534.log` as `v0.18.2-16-g32db3d2d`,
+linked 2026-10-06 01:52:33 UTC. The SDK runtime summary's configured string is
+`dlss`; retain that distinction from the UI report. NumLock appears at
+19:58:25.267 as a general capture, with 1,017 accepted and 2,500 refused
+frames. These totals span mode changes; they do not demonstrate SDK backend
+success.
+
+The first-failure samples now name VS `F516BF0201303B87`, PS
+`B40B0462256E31C2`, format 23, stage `history`, reason `history-budget`. At
+19:58:25.267 the selected-H depth matches the refusing depth, with two
+candidates against cap four and no overflow. Four selected-H samples name the
+same budget refusal; a fifth sample is in TAA mode with no selected H. No
+inert-state or original-projection-unproven refusal appears. At 19:58:40.539
+there are 2,535 H attempts, zero qualified, 119,843 actual GPU identity
+submissions, and zero marker refusals. The 1,017 treated frames in the route
+report include TAA; they are not evidence that the configured SDK ran.
+
+Ruled out: the inert admission correction alone restores SDK AA in this scene,
+because this verified flight removes that first refusal but still qualifies no
+H, with selected-H failures now at history allocation.
+
+Source trace: before world naming, the domain planner classifies proven pool
+draws as foreign and submits their original vertex captures immediately. Each
+depth candidate owns a history with 64 records and 32 MiB limits; the budget
+reason combines those two limits. Records remain for current/prior history and
+retire when both parities are more than two frames old. The current per-frame
+draw list also has a 64-draw bound, with a different refusal string. Existing
+offline workloads prove the bounds and retirement operate as implemented; they
+do not prove the scene's demand fits them.
+
+Open hypotheses: record exhaustion from provisional or legitimate foreign
+draws (record count and camera-domain occupancy discriminate); byte exhaustion
+from large captured meshes (retained bytes and requested vertex count
+discriminate); transient geometry churn across retained frames
+(current/prior/older record counts and reuse discriminate). The log omits
+these allocation fields, so it cannot select among them. Candidate overflow,
+marker failure and the prior inert first refusal are not the sampled blocker.
+Do not raise either budget or exempt a weapon shader from this reason alone.
+Preserve the offline bench and qualify the scheduling path before requesting
+another flight.
+
+The adapter has another bound before the history allocator: 64 successful
+captures in the current frame refuse the next as `foreground-draw-bound`.
+Therefore a same-frame 64+1 workload cannot reproduce this flight's
+`history-budget` through the adapter. A discriminating reconstructed
+regression must retain prior-frame records: for example, 40 old records plus
+24 new pre-world captures leave the current list below its bound but exhaust
+the history's record capacity before a late foreign draw. Small meshes isolate
+records from bytes. An integrated classifier/adapter test of this ordering can
+expose scheduling sensitivity, but cannot establish which occupants caused the
+live refusal. The 11,249 submitted captures after a sticky refusal explain
+`submitted - captured`; they are next-frame warming, not unexplained failed
+allocations.
+
+Another offline discriminator is known VB/IB mutation. The history helper
+invalidates matching record parities immediately but reclaims their allocation
+only at the next advance. If a previous-only geometry is invalidated after
+beginFrame, the adapter erases its previous draw without a current-frame
+failure, while invalid records still consume capacity for later capture. This
+is a provable ordering edge, not an established cause of this flight. An
+offline test can distinguish it from legitimate retained history; a live
+receipt would need invalid-record occupancy and mutation counts. Any shared
+reclamation change must preserve active VR consumers' capture references.
+
+### 2026-10-05: full refusal inventory and cross-frame allocation regressions
+
+Sean clarifies that holstered and drawn weapons fail alike. Treat this as a
+scene-wide qualification failure; a weapon shader at an allocation failure
+does not identify every draw consuming capacity or establish a weapon-only
+defect.
+
+Correction to the preceding scoped log read: filtering for history-budget
+missed another refusal in the same verified flight. The complete first-failure
+inventory in `edvr_gfx_20261005_195534.log` has ten selected-H
+`foreground-mixed-component-writer` samples, four selected-H `history-budget`
+samples, one TAA-mode budget sample without a selected H, and 24 never-failed
+samples. The mixed writer is VS `CFCA8FFC6B058630` / PS `8A08FF781272C5F6`.
+Its original PS declares and writes all four target-0 components. The refusal
+proves enabled blending or a partial output mask on a color-enabled target;
+the existing capture does not identify the state. Before world naming, this
+same pair was observed with both eventual world and alternate-camera
+projections. Provisional camera classification remains an open discriminator;
+no guard relaxation follows from these identities.
+
+The expanded WARP regressions reproduce adapter allocation pressure with 40
+prior-frame records plus 24 current-frame captures. The next new geometry
+refuses `history-budget` while staying below the adapter's current-draw bound.
+Known IB writes also reproduce a distinct allocator edge: prior captures
+become unusable immediately, but their allocation still blocks a new key until
+the next frame. Small meshes isolate record pressure; eight large allocations
+isolate byte pressure. COM-owned snapshots survive ordinary eviction, but
+outstanding captures retain a record index that can shift under compaction.
+Reclamation must preserve publication through stable view identity and
+distinguish never-submitted reservations from write-invalidated records.
+
+Ruled out: plasma-only draw state explains this report, because Sean sees the
+same absence of AA holstered and drawn and the full inventory contains two
+different first-refusal paths. These offline regressions establish a
+reclamation defect, not the live allocation occupants or the mixed writer's
+blend/write state. Keep both distinctions in the build and test conclusions.
+
+The correction reclaims explicitly write-invalidated history records only when
+an allocation would otherwise exceed the existing record or byte limit, and
+only when reclaiming them can satisfy that allocation. Never-submitted
+reservations are distinct from invalidated records. Same-key reuse retains its
+allocation; pressure reclamation retains the original shader's stream-output
+program so it does not trigger an unnecessary compile. Published and pending
+captures survive other-record compaction through view identity and a mutation
+epoch; a stale capture cannot republish a record after invalidation and reuse.
+The shared helper's 64-record, 32-MiB and vertex bounds remain unchanged.
+
+First-failure summaries now retain bounded allocation occupancy and the
+original draw's blend, sample mask, depth/stencil and color-target state. Raw
+effective OM write masks remain separate from PS component masks. Typed RTV
+formats are read from already-retained views on the first refusal only. The
+original DSV was not returned by the existing query, so DSV flags remain
+explicitly unobserved. No extra context query, GPU readback, capture export or
+config key was added. The selected-H snapshot carries the same first-failure
+receipt even if later draws use a different state; the bench ABI is version 2.
+
+The renderer matrix independently exercises partial component writes and
+enabled blending. Each guard case requires a real GPU color change and checks
+that the first refusal's state survives a later opaque draw and H selection.
+These tests preserve the safety guards; they do not establish the live mixed
+writer's operation or justify bypassing it.
+
+The first complete hardware matrix caught a bench entry-point defect: the new
+guard names were absent from its CLI whitelist and never entered the scene. A
+single case table now drives validation, dispatch and usage; the build-gated
+self-test exercises every accepted command shape. All six guard cases then ran
+through the actual proxy: partial writes changed 218 pixels, blending changed
+338, and each first-failure state survived later draws and H.
+
+Environment: flat profile, reconstructed 64x64 targets, no VR runtime or
+headset. Hardware is RTX 5090, driver 32.0.16.1692, DLSS runtime file version
+310.9.1.0. The 64-record shared history bound is unchanged. Captured original
+shader bytecode is exact; geometry, constants, state and frame ordering are
+reconstructed. This is not an exact scene replay or a visual-quality result.
+
+Validation: the final full build passed all gates and wrote receipt
+`52af2c3eff78997269bcc750ee54ba35048ac7d9951bca79da269fbcd6c0c202`, verified
+against the frozen source. Console: `build/flat-history-final-build-2.log`.
+Hardware: all 23 renderer/guard cases PASS and all 11 GPU history workloads
+PASS (`build/flat-aa-history-hardware-final-report.json`). WARP: 19 PASS, four
+NVIDIA backend cases UNSUPPORTED, zero FAIL, and all 11 history workloads PASS
+(`build/flat-aa-history-warp-report.json`). Baseline SDK scenes qualify H,
+invoke the configured backend and have zero spatial fallback. No TAA
+substitute is introduced. An earlier concurrent-build hardware run had one
+pre-draw device-creation failure `0x8876017C`; the final quiet matrix passes
+that case. This does not establish the cause of that device failure or a
+rendering fix for it.
+
+Next in-game evidence is the new first-refusal receipt in ordinary periodic or
+NumLock summaries: invalid/pending/current/prior/older allocation occupancy,
+mutation and pressure-reclamation counts, or the mixed writer's exact blend,
+write mask and world-naming state. No weapon list or long bulk capture is
+required. Live AA recovery remains unqualified; holstered and drawn still
+share the same unresolved scene-wide report.
+
+## 104. Settlement SDK AA: owner marks follow the depth surface (2026-10-06)
+
+Flight: Epic `edvr_gfx_20261006_035353.log`, verified by the log tool as
+`v0.18.2-18-g4f6197e8` (build 6AC463CF, linked 02:58:23 UTC). Flat profile,
+native 3840x2160, configured `dlss`, DLSS 310.9.1, RTX 5090, no VR runtime.
+Sean took one NumLock at a settlement (03:58:00.873). Every settlement frame
+refuses `flat-resolve-foreground-contract-unqualified` and falls back to
+spatial; H-attempts reach 3635 with zero qualified. The new receipts name two
+first failures, alternating between frames:
+
+- `foreground-draw-bound` / `history-budget` on F516BF02/B40B0462, a skinned
+  alpha-tested depth prepass (colour masked, stencil REPLACE ref 0): records
+  64, current 57, prior 7, no invalid or mutated records; all 57 current and
+  all 64 previous draws were captured before world naming.
+- `foreground-mixed-component-writer` on CFCA8FFC/8A08FF78: Gbuffer RT0
+  (R10G10B10A2) with ONE/ONE/MIN on colour and alpha, independent blend,
+  depth write on, GREATER_EQUAL. Disassembly: a skinned VS projecting through
+  CB0 rows 4..7 that passes clip W to a PS writing it to all four channels.
+
+The same log's nominee lines already show F516BF02 and CFCA8FFC before
+naming at near 0.025, the world camera's; first-person draws use 0.0675.
+
+Offline sweep (scratch harness; production `flatDomainShaderProof` and
+`flatDomainPlan` over the 10-05 F10 traces 48930, 47706 and 45214 from the
+same settlement, with the dumped shader bytes). In frame 48927 the world is
+named at q5359 and 146 draws reach H before it: 15 F516BF02 at 0.0675, then
+44 F516BF02, 63 ACE405F4 and 3 other null-PS prepasses, 2 31869313, FC1193AF
+and one CFCA8FFC, all at 0.025 with camera bytes identical to the camera named
+later in the frame; then one CFCA8FFC, 15 8B589D25 and 2 7B0DC42D at 0.0675.
+The rule "every pool draw before naming is foreign" captures 53-86 draws a
+frame against the 64-draw bound; only 50 draws a frame use the first-person
+camera. Both cameras share one b1 buffer; the first-person rows are the
+world's scaled by 1.2313 with near 0.0675.
+
+The sweep also finds what the first-failure receipt cannot show. Before H
+(the frame's resolve marker follows every scene-depth draw), 128-149 more
+draws refuse at planning in every frame: about 120 world-camera forward HDR
+and format-60 effects as `foreground-non-Gbuffer-writer` (84 of them
+359BF8FF/92FF8499 particles), 12 camera-less deferred light volumes (0357BBB2,
+24DE25E4, F8FA801F, ...) as `foreground-original-camera-unavailable`, 13
+in-world text draws (12 of them 0B71713B/CDDFE215) as
+`foreground-original-projection-unproven`, and the first-person HDR draw
+88DCF116/494506A6. Under these rules no mixed-camera frame containing a lit
+point light could ever qualify; H-qualified has been zero in every flight
+since the SDK domain route was built.
+
+Ruled out: raising the 64-draw or 64-record bounds, because 48 of the 82
+captures a frame are world-camera draws that need no capture, and 128-149
+planning refusals would remain.
+Ruled out: a weapon-specific cause at the settlement, because holstered
+frames fail alike and both first failures are world-camera prepass draws.
+
+The ownership model is changed. Deferred lighting reconstructs each pixel's
+position from depth, so the owner mark must follow whatever wrote the
+pixel's depth, and only that:
+
+- Provisional world before naming. A draw whose near equals the last named
+  world camera's (persisted across frames) is planned World/WorldPool with no
+  capture and records the existing pending witness. H refuses unless every
+  witness equals the selected world camera (all 96 camera bytes, depth,
+  extent and phase), so a misprediction can only refuse, never admit. In the
+  sweep 102-115 predicted draws a frame all match, and captures fall to 3-35.
+- A depth-writing Gbuffer draw owns its fragments however its colour blends
+  or masks (CFCA8FFC's MIN), and may follow colour writes as a depth-only draw.
+  HDR writers keep the strict opaque, complete-RGB rule.
+- A draw that cannot write depth never changes ownership. When the planner
+  or the raster check would refuse it and its depth state cannot write depth,
+  it is forwarded unchanged: no marker, capture or refusal. This covers light
+  volumes, particles, decals and glows. Colour such a draw puts over another
+  camera's surface reprojects with that surface's motion, the ordinary
+  transparency case; the late-overlay layer still protects the known
+  first-person overlays.
+- Diagnostics: every distinct refusal on the selected H in the last failed
+  frame (up to 8 kinds, with counts and first q) in `flat foreground refusal
+  inventory` / `kind` lines, and `predicted-world`, `predicted-near` and
+  `surface-preserving` counts on the SDK domain line. Bench snapshot ABI 3.
+
+Cost seen in the same flight: in DLSS mode at the settlement the flat runtime
+takes 11.9-13.7 ms of render-thread CPU a frame (foreground capture 3.4-4.8 ms
+over about 10,000 slow-path validations, other 3.4-3.6 ms; present p50 16.8-
+19.7 ms). TAA took about 8 ms a frame in the 10-05 flight. The change removes
+about 47 stream-output captures a frame but not the per-draw validation.
+Engaging the SDK at this draw count may still cost frame rate; that is a
+separate optimisation, not part of this fix.
+
+Ruled out: b1 rewrites defeating the cached world fast path, because all
+10,384 supported draws on H in trace frame 48927 share one b1 write epoch.
+Why about 10,000 draws a frame take the slow validation path is not measured.
+
+Offline qualification (flat profile, reconstructed 64x64 targets, RTX 5090,
+DLSS 310.9.1; shaders exact, state and workloads reconstructed; not an exact
+scene replay). The admission unit tests grow from 65 to 86 checks. The bench
+gains `settlement_prepass`: 72 world-camera F516BF02/B40B0462 prepass draws
+before naming, plus CFCA8FFC's MIN-blend depth write in both cameras. It
+requires every prepass draw predicted and none captured, depth written, no
+failure anywhere in the frame, H qualified and the configured backend run.
+Guards: `predicted_world_mismatch` (world near, different rows) must refuse
+`foreground-pending-null-not-selected-world`; `state_blended_hdr` must refuse
+`foreground-mixed-component-writer`. The former blended/partial guards now
+expect admission, and colour-only draws without depth write are forwarded.
+Hardware: 35/35 PASS plus GPU history pressure (`build/settlement-bench-hw-
+final.json`). WARP: 21 PASS, 14 UNSUPPORTED (DLAA/DLSS need NGX), 0 FAIL,
+history PASS (`build/settlement-bench-warp-final.json`). Mutation runs against scratch proxies: HEAD fails the 7 new or
+changed cases; rule A removed reproduces the live `foreground-draw-bound`;
+rules B or C removed, rule B widened to HDR, rule C widened to depth writers,
+or the witness removed each fail their case.
+
+Ruled out: separate staged DLL copies per bench scenario, because process
+isolation only needs a separate directory and ini. Hard links replace about
+2.78 GB written per matrix; nvngx_dlss.dll is staged only for DLAA/DLSS.
+
+Compile memory, found the same day: compiling flat_runtime.cpp alone took
+about 74 GB of commit and 3.5 minutes, paging the 32 GB build machine, at HEAD
+as well; /Od did the same and the file's headers alone took 0.41 GB. The cause
+was `FlatTraceRing traceRing{};` in State: MSVC expanded all 262,144 trace
+events as an aggregate initializer once 5698007f (2026-10-04) raised the ring
+to 65,536 events a frame. Every member already has a default initializer, so
+plain default initialization is identical. With it the file compiles in 7.1 s
+at 0.50 GB, and the full build's largest compiler process peaked at 1.37 GB
+(213 s, receipt `0948558e`).
+
+Known limits: a first-person draw at the world camera's near now refuses the
+frame through its witness instead of being captured. Three cameras on one
+depth refuse earlier, in the HDR selector (`source-camera-or-depth-not-
+unique`), as before.
+
+Committed as 3d5ecaf6, fast-forwarded main and pushed; origin/main confirmed.
+Receipt-guarded `--dll-only` promotion passed in 52 s. Epic flat install via
+`install_edvr.py` (dry run, install, `--verify-only`); the installed DLL is
+`v0.18.2-19-g3d5ecaf6`. `edvr-flat.ini` (17EA3670...) and `nvngx_dlss.dll`
+(3975567B...) hashes are unchanged and `edvr.ini` stays absent. Frontier was
+not installed.
+
+Next flight: the same settlement, configured DLAA, about 20 s holstered and
+10 s drawn, one NumLock while there; then FSR the same way. Read against the
+literal installed version: H-qualified above zero and backend calls on the SDK
+domain line; `predicted-world` and `surface-preserving` counting; any
+`flat foreground refusal kind:` lines (each names a remaining blocker with
+its VS/PS, stage and count); and EDVR CPU a frame against 12-14 ms (104).
+
+### 2026-10-06: 3d5ecaf6 flown; marks only first-person surfaces
+
+Flight `edvr_gfx_20261006_061644.log`, verified against the literal installed
+`v0.18.2-19-g3d5ecaf6` (build 6AC4E642). Configured DLSS from 06:16:45, FSR
+from 06:19:20, at the same settlement. Sean: DLAA/FSR still did not engage;
+H-qualified stays zero. The old blockers are gone. No draw-bound or
+history-budget refusal; about 70 world prepass draws a frame are predicted
+and every witness matches; about 3,600 draws a frame that cannot write depth
+are forwarded; first-person captures are about 3-35 a frame. The inventory
+names what remains, 13 kinds over the flight, with 16 windows over its
+8-kind cap:
+
+- forward HDR pool meshes (5B0068AF, 617C6E44, 33A5025C, A8E4D93B, 01A029C7,
+  A6A39338; single RGBA target, alpha-tested) that write depth:
+  `foreground-HDR-writes-Gbuffer`, and for two of them
+  `foreground-mixed-component-writer`. The scene's HDR target is Gbuffer
+  slot 3 (R11G11B10_FLOAT, format 26), so every forward HDR draw "writes the
+  Gbuffer".
+- 41E245D4 (world, non-pool) and 88DCF116 (first person, pool) HDR depth
+  writers: `foreground-non-Gbuffer-writer` at planning.
+- `foreground-color-writer-without-depth` at H: a draw with no depth bound
+  writing that same texture.
+- 989E0439/2A5456CF, a Gbuffer depth writer with an unproven projection
+  (2 windows).
+
+Cost: at about 10,000 substituted draws a frame the GPU frame took 31.9 ms
+against 17.8 ms on 4f6197e8, and present p50 rose to about 38 ms (26 fps).
+Rule B admitted about 650-770 world draws a frame into the per-draw marker
+bracket (patched shader, the 4K RGBA32F owner target bound and unbound around
+each draw), against about 10 a frame before. That is roughly 20 us of GPU
+each.
+
+Ruled out: the engine-bracket flush in the rule-C depth query as the main GPU
+cost, because only about 150 draws a frame take that path while world
+markers rose by about 700 a frame. The flush was unnecessary anyway (the
+engine bracket never sets depth-stencil state) and is removed.
+
+Change (v2, BUILT): only first-person surfaces are marked.
+
+- World-camera draws (named camera bytes, or the predicted near before
+  naming) and camera-less draws are never planned, marked, captured or
+  refused. World pixels keep the engine producer's slots and the camera
+  term, as single-camera SDK frames always have. The predicted witness is
+  added at the draw and still has to match at H.
+- First-person depth writers are captured and marked, now including HDR
+  (format 26) pool meshes; colour blending and masks never refuse a depth
+  writer.
+- Colour bookkeeping is removed: HDR-writes-Gbuffer, colour-target-changed,
+  colour-writer-without-depth and the colour branch of resource writes. Only
+  writes to the depth can change which surface a pixel shows.
+- The SDK prep trusts a first-person mark only while its depth equals the
+  pixel's raw depth. A world surface drawn later over it takes the world
+  path, whose engine lookup gives the camera term for a negative mark.
+
+Trade-off: world objects drawn by shaders outside the engine producer's family
+get camera motion in mixed frames, as they already do in single-camera SDK
+frames; the 103 world domain markers had given them per-object motion.
+
+Offline (same environment as above): the production proof admits all six
+recorded first-person pairs, including the HDR mesh 88DCF116/494506A6, as
+ForeignPool. Bench, hardware 44/44 PASS plus history; WARP 24 PASS, 20
+UNSUPPORTED (NGX), 0 FAIL. New cases: `stale_foreign_mark` (a world
+non-producer depth writer over a first-person surface leaves the stale mark;
+H qualifies and resolves), `inert_depth_write_world` and
+`state_blended_hdr_world` (unmarked, unrefused); `settlement_prepass` now also
+requires zero world markers. The GPU prep test takes the camera term for a
+first-person mark under another depth; the pre-104 rule fails 18 of its
+checks and the inverted rule 48. Mutation runs: restoring the v1 world marks
+passes 0 of 26 cases. Full build passed, receipt `9c3aeb0f`.
+
+Known limit, pinned as the `state_blended_hdr` guard: a first-person HDR depth
+writer other than the 88DCF116/494506A6 laser pair (or an overlay-protected
+draw) still makes the HDR selector refuse the frame
+(`conflicting-hdr-target-or-camera`, flat_runtime_model.h). The settlement's
+only first-person HDR mesh is that pair, and its log shows H selected.
+
+Committed 0e9f59eb, main fast-forwarded and pushed; origin/main confirmed.
+`--dll-only` passed. Epic flat install: dry run, install, `--verify-only`;
+installed DLL `v0.18.2-21-g0e9f59eb`, SHA256 CFCFBCAE81E8..., equal to the
+build and to the install receipt. `edvr-flat.ini`, `nvngx_dlss.dll` and the
+absent `edvr.ini` are unchanged. The installer's console was cut by a
+`Select-Object -First` pipe after its plan lines (exit -1); the receipt and
+DLL were already complete, as checked.
+
+Next flight: the same settlement and routine (DLAA, then FSR, NumLock once in
+each). Read: H-qualified and backend calls on the SDK domain line,
+world-markers near zero, world-unmarked counting, any refusal kinds, and
+GPU/present against 31.9/38 ms on 3d5ecaf6 and 17.8/22.5 ms on 4f6197e8.
+
+### 2026-10-06: 0e9f59eb flown; SDK AA engages, some edges stay jagged
+
+Flight `edvr_gfx_20261006_072437.log` on the installed `v0.18.2-21-g0e9f59eb`,
+same settlement: FSR from 07:24:38, DLSS from 07:24:54, FSR again from
+07:27:38. Every mixed frame qualified H (8629 of 8629 by 07:28:53); world
+markers 0.0 a frame, first-person captures 0.7-36 a frame, 2,000-16,000 world
+draws a frame left unmarked. SDK windows: present 11-17 ms, GPU 9.7-13.6 ms
+(17.8 on 4f6197e8, 31.9 on 3d5ecaf6), EDVR CPU 7-11 ms for 6,700-10,200
+substituted draws a frame.
+
+Sean: much better, but some edges still look aliased, in DLSS and FSR alike: a
+roof edge against the night sky and a blue cable spool. On the roof it is
+always there, most noticeable when moving.
+
+With an SDK backend, finishHdr shows the raw current frame instead of the
+backend's result for any output pixel with a refused raster texel among its
+four bilinear taps (the rule for presets that ignore the bias mask). A refused
+pixel on either side of a silhouette shows an unresolved edge, and it crawls
+as the camera moves. Candidates, with their signature in the refusal view and
+census:
+
+- a stale slot whose previous-depth check fails at the silhouette (a
+  non-producer world surface over a producer one; v2 leaves those unmarked):
+  yellow, census `stale`;
+- an engine refusal: a producer record on a depth-0 sky pixel (`sentinel`),
+  `masked`, `corrupt` or `unreprojectable`: white, red or magenta;
+- the camera term leaving the screen (`range`, white): near the border only;
+- none (the edge is painted as accepted): the backend's own result or wrong
+  motion on accepted pixels, not a refusal.
+
+Ruled out by reading the code (no flight):
+
+- the section 102 untrusted-camera mask, because the SDK route sends the
+  foreground bit (constants.debug[3] = 2) and the prep reads the mask only
+  without it;
+- a sky pixel with no producer slot losing its motion, because it takes the
+  camera term (kind 0) with no depth check, and at depth 0 that term is the
+  camera's rotation alone, which forms.
+
+Build: the flat refusal census and view, and one temporary key.
+
+- `advanced.temporal_aa_debug = motion_source` paints the flat prep's classes
+  into H (legend in the log line when it changes) and samples the census
+  while on. NumLock samples it for the next 600 resolves. The 5 s line `flat
+  refusal census 5s` gives pixels, refused, stale-kept and refused by class,
+  with `view=` and `local-reset=`.
+- `experimental.flat_sdk_local_reset` (temporary; default `on`, the shipped
+  behaviour). `off` writes no rejection for a refused world pixel that has a
+  motion formed for it, so DLSS or FSR keeps its own result there and gets
+  that motion. A sentinel or corrupt record forms the camera term for this
+  alone. A masked or unreprojectable record is a mover's (engineBefore's own
+  rule: "a masked record stays refused"), forms none and stays refused, as
+  do a pixel whose camera term does not form and the first-person, reset and
+  invalid-depth refusals. A red edge in the view is therefore one `off`
+  leaves alone. Classes are unchanged, so the census reads the same either
+  way. Hot-reloaded; each change is logged.
+
+Validation: `flat_keep_refused_gpu_tests.h` in `tools\flat_mono_resolve_test`
+runs DLAA, DLSS and FSR, with and without the foreground map, on a moved
+camera. Key on: every refused probe keeps raw with no motion. Key off: a
+stale slot that failed the depth check, a corrupt slot and both sentinels
+(out of range, sky) carry the camera term with no rejection; off-screen
+motion is kept; a masked or unreprojectable record, a Camera-class patch, a
+half-float overflow, a reset frame, a depth-2 pixel and a refused
+first-person pixel stay refused. Accepted pixels, and a frame with nothing
+refused, are bit-identical either way; the finish shows History where no
+rejection was handed; TAA never gets the bit. 13 of 13 in-rig mutants
+caught. The first-person phase test's shader anchors follow the changed
+motion line; restore them when the key goes. Full build green, receipt
+`d9aa012f`. Bench (default key only): hardware 44/44 PASS; WARP 24 PASS, 20
+UNSUPPORTED (NGX), 0 FAIL. The A/B needs the steady-detail depth check to
+run (the 5 s steady line's `depth-check` ran above 0): without it a stale
+slot reaches the prep as an explicit refusal and `off` leaves it.
+
+Committed 0ed050a1, main fast-forwarded and pushed; `--dll-only` passed. Epic
+flat install: dry run, install, `--verify-only`; installed
+`v0.18.2-24-g0ed050a1`, SHA256 9FB04CC95CD08E73..., equal to the build.
+`edvr-flat.ini` unchanged.
+
+### 2026-10-06: 0ed050a1 flown; refusals ruled out, DLAA resolves still edges
+
+Flight `edvr_gfx_20261006_085316.log`, verified `v0.18.2-24-g0ed050a1`: FSR
+08:53:52-08:54:22, then DLAA at 3840x2160 from 08:55:24; every in-game frame
+treated with history.
+
+The view and the A/B key never worked. Neither key is in the flat profile's
+allow-list (`runtimeProfileAllowsKey`, `src\common\runtime_profile.h`), and
+`Config::getString` returns "off" for any key outside it. The view stayed off,
+and local reset read "off" (keep the backend's result) for the whole flight,
+and on main from 0ed050a1 on. Sean's toggles did nothing. The config contract
+checks that a key is documented, not that the flat profile lets it through.
+
+NumLock census (DLAA, 08:58:37 and 08:58:42, 76 and 74 sampled frames):
+0.0145% of pixels refused, about 1,200 a frame of 8.3 million (sentinel about
+1,020, stale about 190). Stale slots kept by the depth check: about 2.76
+million a frame, a third of the screen.
+
+Sean's DLAA and AA-off screenshots of the same roof, enlarged to the pixel:
+DLAA draws the roof's thin top bevel as a continuous line where AA off breaks
+it into dashes; the dome and the strut edges likewise. In a still frame DLAA
+anti-aliases these edges.
+
+Ruled out: refused pixels shown raw as the jagged edges, because the census
+refuses 0.0145% of pixels, far too few to line an edge, and Sean saw the same
+edges on 0e9f59eb (raw) and on this flight (backend kept).
+
+Ruled out: settlement surfaces left unjittered, because the still DLAA frame
+resolves them, which DLAA cannot do without jitter; the cameras left alone are
+shadow and light (kinds 0 and 1) and one kind-4 camera refreshed 3 times a
+frame.
+
+Open: edges break up in motion, in DLAA and FSR. Candidates: (a) the
+upscalers' own handling of a bright sub-pixel line in motion, which EDVR
+cannot change; (b) a sub-pixel motion error in the camera term's translation
+(`now[5]-old[5]` in float32: if row 275 is a large world position, walking
+quantises the delta, and turning does not). Discriminator: walk past the roof,
+then stand and turn so the edge crosses the screen at the same speed; compare
+EDVR's TAA; log the size of row 275 and the per-frame translation.
+
+Sean kept the A/B key for the motion question (asked 2026-10-06). Build
+84f6a147: both keys join the flat allow-list (config_test pins them) and are
+logged on their first read; a 5 s line `flat camera origin` gives row 275's
+size, its float32 spacing and the per-frame step. Full build green, receipt
+`6a6ea9d6`; `--dll-only` passed; Epic flat install verified,
+`v0.18.2-27-g84f6a147`, SHA256 9D769421FE5E3A02..., `edvr-flat.ini`
+unchanged (it already holds the view line, twice, and local reset `off`).
+
+Next flight, DLAA at the roof: still; walking past; standing and turning at
+the same screen speed; NumLock while walking; local reset on against off
+while walking; EDVR's TAA on the same walk. Read: `flat camera origin` (a
+float spacing near the walking step rules (b) in), the census in motion, and
+which movement breaks the edge.
+
+### 2026-10-06: 84f6a147 flown; inputs verified, residual is the content
+
+Flight `edvr_gfx_20261006_092649.log`, verified `v0.18.2-27-g84f6a147`. Both
+keys now read and logged: the view on at start, local reset toggled on at
+09:29:06 and off at 09:29:25 while walking. DLAA (3840x2160), then TAA.
+
+Sean: "definitely looks much better"; walking, DLAA is calmer but the roof
+edge still shimmers slightly; no difference between local reset on and off.
+EDVR's TAA shimmers at the roof's lower-left corner standing still.
+
+- The view paints the roof yellow: a stale slot (an unkeyed surface over a
+  keyed one) taking the camera term once last frame's depth confirms it.
+  Stale-kept: 1.8 to 3.0 million pixels a frame.
+- Census while walking (DLAA): refused 0.006% to 1.4% a window; the large
+  windows are `range` (motion leaving the screen while turning, up to 116,000
+  pixels a frame at the borders); stale refused at most about 5,600 a frame,
+  sentinel about 1,000 (likely the stars: a slot on a depth-0 pixel).
+- `flat camera origin`: row 275 is a local position, 1.8 to 63.5 m from its
+  origin; float32 spacing at most 3.8e-6 m against walking steps of 0.03 to
+  0.26 m a frame. Standing, the step is 0 or about 2e-7 m.
+
+Ruled out: float32 quantisation of the camera term's translation, because
+row 275 stays under 64 m, where the spacing (3.8e-6 m) is four orders of
+magnitude below a walking step.
+
+Ruled out: the local reset as the shimmer, because toggling it while walking
+changed nothing Sean could see.
+
+TAA standing still: the enlarged screenshot shows the roof's thin top bevel
+beaded (alternate bright and dark pixels) and the corner's edge pixels
+unresolved. EDVR's `taa()` checks history depth against the single nearest
+texel (`oldQ`) with a 1% tolerance. At a jittered silhouette that texel is
+roof one frame and sky the next, so the edge pixels lose history on
+alternate frames. The steady-detail check solved the same problem with the
+best of four texels; the TAA kernel never got it. A TAA-only finding: the
+SDK backends do not use that check. Not changed here.
+
+What remains with DLAA is a bright, sub-pixel, view-dependent (specular)
+bevel against a black sky, shimmering slightly in motion. With jitter on
+every surface, motion verified, refusals negligible and translation exact, no
+EDVR input is left to correct; the backends' own handling of such a line is
+the limit. Rendering above native (Elite's supersampling with DLAA on the
+HDR route, which takes R >= D) is the known way to reduce it, at GPU cost.
+
+Closed with Sean (2026-10-06): `experimental.flat_sdk_local_reset` is removed
+and the raw behaviour stays: a refused pixel shows the raw current frame, as
+before 0ed050a1, the behaviour flown across many scenes. The keep-refused
+prep bit, its rig tests and the phase test's changed anchors are backed out.
+Kept: the refusal view (`advanced.temporal_aa_debug = motion_source`, now
+allowed in flat), the NumLock refusal census and the `flat camera origin` 5 s
+line. The TAA single-texel depth check is offered as a separate task.
+Committed 5f7e43e8 (full build green, receipt `fb1b6035`, 234 keys read and
+documented); `--dll-only` passed; Epic flat install verified,
+`v0.18.2-30-g5f7e43e8`, SHA256 C97FB27B83EE256A..., `edvr-flat.ini`
+unchanged (its `flat_sdk_local_reset` line now names a key nothing reads).
+
+### 2026-10-06: 5f7e43e8 flown; supersampling never runs the SDK on foot
+
+Flight `edvr_gfx_20261006_094726.log`, `v0.18.2-30-g5f7e43e8`. Sean: the view
+"was removed" and, even at SS 2.0, the roof edge still shimmers in motion.
+
+The view was not removed. The ini had no view line at launch (first read:
+off). After Sean added it at 09:52:12 the view came on, but at SS 0.75: DLSS
+upscaling 2880x1620 to 3840x2160 on the copy route, and only the HDR route's
+finish painted. The census ran either way.
+
+Supersampling never ran DLSS or FSR. At SS 1.5 (5760x3240) and SS 2.0
+(7680x4320) every frame was refused with
+`flat-resolve-foreground-contract-unqualified`: the first-person contract
+never qualified H (H-qualified 0 of about 7,140 attempts, against 100% at
+native). The HDR route recovered each frame spatially (`last=spatial-fallback`,
+`backend=0`), and the jitter never left its warm-up (`jitter=(0,0)`), so there
+was no temporal AA at all: the SS 2.0 shimmer Sean saw is plain supersampling.
+It is no evidence about DLAA, and it means supersampling above native cannot be
+offered as the lever for the roof yet. OPEN: why H never qualifies above native.
+
+At SS 0.75 the copy route ran DLSS normally (treated-jittered, about 400
+accepted-history frames per 5 s).
+
+Build (Sean asked for it): the refusal view and census on the copy route. The
+copy route's frame carries the view and census flags; the resolver paints in
+the copy route's compute finish (DLSS or FSR; EDVR's TAA on the copy route has
+no finish), with the class texture at t11. Rig: flat_copy_refusal_view_gpu_
+tests.h (DLAA, DLSS and FSR at 1x and 2x; view off bit-identical; TAA never
+paints); reverting the paint line, the t11 binding or the HDR-only gate fails
+32 to 40 checks. On the RGBA8 copy route the paint keeps hue, not brightness.
+
+Root cause of the supersampled refusals (code reading; the sizes settle it):
+`FlatForegroundMotion::prepareH` refused any H above 16*1024*1024 pixels
+(`foreground-H-resources`). 3840x2160 is 8.3M, 5760x3240 18.7M, 7680x4320
+33.2M; SS 1.25 on a 4K screen (13.0M) was under it. The reason never reached
+the log: the 5 s line printed a per-frame field that every frame start
+clears, so it read `last-refusal=none` with every frame refused.
+
+Fix (Sean, 2026-10-06, with the recommendations below): the bound is 64M
+pixels (`kFlatForegroundMaxPixels`; 8192x8192, 1 GB of RGBA32F map; about
+530 MB at SS 2.0 on a 4K screen), and `last-refusal` is the most recent H
+refusal since the previous line.
+
+Two routes (Sean asked why; kept). H and the game's post chain run at the
+render size, and only the final copy scales to the screen. An upscaler
+(R < D) can only take the place of that copy; at R >= D the HDR route
+resolves before bloom, DoF and tone and does not depend on the post chain's
+shape (section 81). Both stay. The cost is that every feature and instrument
+needs both routes; the bench gains a supersampled on-foot HDR case and a
+copy-route case so every build checks both.
+
+Next flight: same settlement, DLSS then FSR. With `temporal_aa_debug =
+motion_source` under `[advanced]` in `edvr-flat.ini`, note the colour on the
+jagged roof and spool edges, and NumLock once in each mode. Then drop the view,
+set `flat_sdk_local_reset = off` under `[experimental]` and compare the same
+edges while moving: jagged against ghosting or smearing at the silhouettes.
+
+### 2026-10-06: TAA's history depth check takes the best of four texels
+
+Hypothesis, from code reading (BUILT, NOT FLOWN): the shimmer EDVR's TAA
+shows on the roof's top bevel and corner while standing still is `taa()`
+losing the edge pixels' history on alternate frames. It kept a pixel's history
+only if last frame's depth at one texel, `oldQ = int2(previous * size +
+jitter.zw)`, was within 1% (floor 1e-6) of the camera term's expected depth.
+A previous phase under half a texel puts that position inside the pixel's own
+texel, so at a jittered silhouette the texel is the roof on one frame and the
+sky on the next. The pixel then shows the raw jittered sample, bright on one
+frame and black on the next: the beaded bevel in the enlarged screenshot. The
+prep's steady-detail check took the best of the four texels around the
+previous raster position for exactly this (section 82); `taa()` never got it.
+
+Environment: the flat profile with `fix.temporal_aa = on` (EDVR's own TAA;
+DLAA, DLSS and FSR never run `taa()`), the Epic install, Sean's 4K rig
+(3840x2160 output). The check reads the resolver's own R32_FLOAT depth copy at
+the render size; no fixed-size table is involved. VR is not touched: its TAA is
+another kernel.
+
+Change: `stalePreviousDepthMatches` is now `historyDepthMatches` (it has two
+callers) and `taa()` asks it in place of its own single-texel lines:
+`if(historyDepthMatches(previous,ExpectedDepth.Load(int3(q,0))))weight=.9;`.
+Same four texels, same previous-phase arithmetic, same 1% tolerance and 1e-6
+floor (`kStaleDepthRel`, `kStaleDepthFloor`; the names stay). The prep's call
+is unchanged. Cost: three more R32_FLOAT loads per output pixel, on adjacent
+texels.
+
+Tests, `tools\flat_mono_resolve_test\flat_taa_history_depth_gpu_tests.h`, on
+WARP through the real kernel (history a flat 128, the current frame a checker
+of 64 and 192: a kept pixel reads 122 or 134, a reset one 64 or 192; last
+frame's depth drawn by hand; previous phase +-0.25 per axis):
+1. A jittered silhouette keeps its history: roof edges against the sky, both
+   axes, both signs. The pixel whose own texel was sky but whose neighbour
+   toward the phase was the roof is kept; the next one out, four sky texels,
+   is reset.
+2. A true disocclusion still resets: where an occluder moved away every pixel
+   whose four texels held it is reset, and only the trailing-edge pixel is
+   kept (the best of four's known price, and what separates four texels from
+   sixteen). Depths 0.9% off either way are kept; 1.1% off either way, a sky
+   and a surface twice as near are reset; at depth 1e-5, 5e-7 off is kept (the
+   floor) and 2e-6 off is reset.
+Both run again against the kernel with one rule flipped, through a new
+test-only seam (`flatMonoResolveTestTaaBytecode`, like the prep's): 15 of 15
+mutants fail the tests, and the old single-texel rule fails both.
+
+Full build green after merging main (5f7e43e8), receipt `89e75443`: the two
+tests pass on the shipped kernel. A first full build had stopped on
+`heartbeat_writer_test` H5.whole (a reader-tick count under CPU load; it
+passed 5 of 5 alone and in the rebuild); not touched.
+
+What it cannot do: a thin, bright, sub-pixel specular line still has its
+history clamped to a 3x3 box of the current frame's texels, and that box moves
+with the jitter. That is TAA's own limit and is not changed here.
+
+Refuted if, standing still at the roof in TAA, the bevel and corner shimmer as
+before: then the depth check was not what lost the history, and the next step
+is a count of the pixels `taa()` zeroes at the roof, not a threshold.
+
+Committed as 36003718 (the shader and its tests), main merged in as 3db65989
+and this entry as 2d8e6761; fast-forwarded main and pushed, origin/main
+confirmed. Receipt-guarded `--dll-only` promotion passed. Epic flat install via
+`install_edvr.py` (dry run, install, `--verify-only`); the installed DLL is
+`v0.18.2-34-g2d8e6761`, SHA256 D5B6A47E814AE5CA..., the build's own.
+`edvr-flat.ini` (8A00D126...) and `nvngx_dlss.dll` (3975567B...) are unchanged
+and `edvr.ini` stays absent. Frontier was not installed. Read the flight
+against that literal version: `edvr_log.py --target <the Epic game directory>
+--expect-build 2d8e6761` (`epic` is not an alias) exits 2 on any other build;
+today it names the 5f7e43e8 flight's log as a mismatch, as it should.
+
+Next flight (Epic, flat profile, TAA on): the same settlement at night,
+standing still, EDVR's TAA on the roof's top bevel and lower-left corner, then
+DLAA on the same view. Read the edge pixels for the beading, and for any new
+ghost trail where a ship or a walker leaves the frame (the price above).
+
+### 2026-10-06: the second supersample gate; a colour for refused stale slots
+
+The bench found a second gate behind the 16M bound. With the bound raised, H
+qualified at 5760x3240, and the resolver then refused the frame with
+`flat-resolve-untrusted-coverage-requires-native-HDR-TAA`. Section 102's rule
+refused untrusted camera coverage (every mixed-camera frame) at any render
+size other than the output, for every mode. It was written for EDVR's TAA,
+whose output-domain test maps one output pixel to one render pixel. An SDK
+backend with the qualified first-person map never reads that mask (the prep's
+debug.w is 2), and the map, the prep and the backend all run at the render
+size. The size clause now applies to TAA alone; an SDK frame still needs the
+HDR route and the first-person map. Bench, a scratch proxy with only that
+clause changed: all six supersampled cells (96x96 into 64x64 and 5760x3240
+into 3840x2160, DLAA, DLSS and FSR) ran the backend, where the real tree
+refused all six.
+
+Ruled out: the 64M bound alone as the supersample fix, because the bench at
+the real size qualified H and then hit the size clause above.
+
+The copy-route bench case is not built: the copy route admits the game's final
+copy by its exact shader hashes, which no fixture holds. A capture flight and
+one to two days of scaffolding would build it. The resolver side is pinned by
+flat_copy_refusal_view_gpu_tests.h; the three lines in flat_runtime.cpp that
+ask for the view on the copy route are left to the flight.
+
+The view (Sean asked, after the roof painted yellow): a stale slot the depth
+check refused now paints pink, a kept one stays yellow. Before, both were
+yellow and only the census told them apart.
+
+Committed 7cc82978 on d923d5f5 and the merge of main (588a443c, which
+brought 2d8e6761's TAA history depth). Full build green, receipt
+`342298b1`; bench hardware 50/50 PASS (the six supersampled cells
+included), WARP 25 PASS, 25 UNSUPPORTED, 0 FAIL. `--dll-only` passed. The
+first install was refused ("native staging requires a proven stopped game")
+while Elite was running; once it had closed, the same probe passed, and the
+Epic flat install verified `v0.18.2-38-g7cc82978`, SHA256
+8F958B9B574146DD..., `edvr-flat.ini` unchanged.
+
+Next flight, on foot at the roof: SS 1.0 DLAA with the view (pink on the
+edge while walking is a refused stale slot); SS 1.5 DLAA (H must qualify,
+`backend` above 0 on the `flat hdr route 5s` line, no spatial fallback); SS
+0.75 DLSS with the view (it now paints on the copy route); EDVR's TAA
+standing still with the view off (2d8e6761's best-of-four); NumLock in each.
+
+### 2026-10-06: 7cc82978 flown; supersampled DLAA runs; the copy route refuses the weapon
+
+Flight `edvr_gfx_20261006_114449.log`, verified `v0.18.2-38-g7cc82978`, DLSS
+mode throughout: SS 2.0 (7680x4320) from 11:45:24, SS 1.5 (5760x3240) from
+11:47:54, SS 0.75 (2880x1620, the copy route) from about 11:49:50.
+
+- Supersampling now runs the SDK on foot: H-qualified 2,982 of 2,982 by
+  11:48:06, `treated-jittered-hdr`, about 250 to 300 accepted-history frames
+  per 5 s at SS 2.0 and 1.5. Both gates are fixed in flight.
+- Pink (refused stale): present and tiny. With the view on at SS 2.0 while
+  walking, stale refused peaked at about 21,000 pixels a frame of 33 million
+  (11:47:16), then about 200; the paint is luma-scaled and the scene is at
+  night. Sean saw none. The roof edge is kept (yellow).
+- Weapon up at SS 0.75: every frame refused, `conflicting-hdr-target-or-
+  camera`, from 11:49:51; treated again with the weapon down. The copy route
+  has never handled a mixed-camera frame: the first-person contract (marks,
+  the map, H qualification) exists on the HDR route alone. Not a regression;
+  OPEN as its own piece of work.
+- The roof still shimmers in motion at SS 1.5 with DLAA running. Plain SS 2.0
+  (5f7e43e8's spatial fallback, no AA) shimmered as well.
+
+Next discriminator (no build): SS 1.0 DLAA, weapon down, walking past the
+roof, with `experimental.temporal_aa_before_post` at auto (HDR route: AA in
+linear HDR before bloom and tone) against off (copy route: AA after tone);
+the key is read at startup. Calmer on the copy route: the HDR-space resolve
+of a bright thin highlight is the cause, fixable on EDVR's side (exposure or
+a tonemapped resolve). The same: the content, a highlight finer than the
+samples.
+
+### 2026-10-06: the copy-route A/B and Sean's video: the bevel follows the jitter
+
+Flight `edvr_gfx_20261006_120258.log` (`v0.18.2-38-g7cc82978`) with
+`experimental.temporal_aa_before_post = off`: the copy route at SS 1.0, DLSS as
+DLAA after the game's tone, treated-jittered with history (about 300 accepted
+frames per 5 s, no resets, the eight-phase jitter cycling). Sean: no
+improvement; standing still, the bright dashes on the roof's top bevel pulse
+rhythmically.
+
+His 4.4 s recording (30 fps, 462x144, standing still), measured frame by frame:
+the bevel runs at 1 pixel per 20.6 across. Its pixels vary by a median 28/255
+frame to frame, against 1.3 on a flat patch of roof. The dash pattern slides
+along the edge by up to 5 pixels between frames, which is the line moving
+about a quarter pixel up and down. The profile's autocorrelation has a small
+bump at four video frames (133 ms), one eight-phase jitter cycle at 60 fps.
+The output keeps part of the jitter on this line: DLSS does not fully settle
+a highlight about a pixel wide.
+
+EDVR's input is right. The shift in the game's camera rows is measured every
+frame against the phase DLSS is told, converted as `2*px/width` (y negated),
+and the log shows no mismatch (max error about 2e-7).
+
+Ruled out: the HDR-space resolve (a bright highlight resolved before the tone
+map) as the cause, because the copy route, which resolves after the tone,
+pulses the same.
+
+Ruled out: a jitter scale or sign error, because the measured row shift
+matches the phase handed to DLSS every frame.
+
+What remains is the upscalers' handling of a bright highlight about a pixel
+wide on a slope, and the jitter is what moves it. Levers left, none an EDVR
+input fix: another DLSS model, more supersampling, or a longer jitter cycle (a
+slower, smaller pulse; section 84 removed the phase-count switch after the VR
+hills showed no change).
+
+### 2026-10-06: HDR-route weapons, the jitter cycle key, the witness line
+
+Flight `edvr_gfx_20261006_124106.log` (`v0.18.2-38-g7cc82978`, before_post back
+to auto, HDR route at SS 1.0). Sean: AA turns off for plasma weapons and any
+weapon that can aim down sights, when aiming. The log: in every refused
+stretch (12:43:38-58, 12:45:39-54, 12:48:14-29) H qualification failed with
+`foreground-pending-null-not-selected-world` on about two frames in three. A
+pre-naming world witness, one of two, did not match the selected world camera
+at the tone pass. The resolver refused (`foreground-contract-unqualified`) and
+the frame went to spatial fallback. `conflicting-hdr-target-or-camera` was
+rare (one frame in a window). The earlier session at 12:29 (weapon up at SS 1.0)
+ran with `temporal_aa_before_post = off` still set, so it was the copy route.
+
+Built and installed (`v0.18.2-43-g52565eb8`, on main through 00d27f59, full
+build receipts `af2686ad` and `329274ee`, then `091596e9` after merging
+main):
+- `advanced.temporal_aa_jitter_phases` (8 to 64, default 8; upstream camera
+  route only, since the legacy lighting patch refuses a nudge past 7/16 px;
+  live; restarts history; `phases=` on the 5 s jitter line).
+- The witness line: each pending-null witness keeps its draw (VS, PS, kind),
+  and the first 12 refusals log which witness differs, how (depth, size,
+  phase, camera), both cameras' scale, near and position, and the first
+  differing float.
+
+Flight `edvr_gfx_20261006_125940.log`: 16 phases from 13:02:09, 32 from
+13:02:37, both logged. Sean: no difference; the roof line still pulses. No
+aiming down sights, so no witness lines yet.
+
+Ruled out: the jitter cycle's length as the lever on the roof's pulse,
+because 16 and 32 phases looked the same as 8. A pulse locked to the cycle
+would have slowed from about 7.5 to 1.9 per second; the edge changes every
+frame instead.
+
+Left: the other DLSS models (L, M, J), and a thin-highlight filter before
+the upscaler (Sean's suggestion: find one-pixel bright ridges and spread
+them, at a small look cost).
+
+### 2026-10-06: aiming down sights: the weapon's prepass at the world near
+
+Flight `edvr_gfx_20261006_131356.log`, verified `v0.18.2-43-g52565eb8`. Sean:
+plasma is fine like every weapon, unless aiming down sights, which turns AA
+off with all of them. NumLock taken while aiming.
+
+The witness line fired 12 times (13:18:35-36, frames 51696-51707, as the
+sights came up), the same each time. Witness 1 of 2 is `predicted-world-near`,
+VS `F516BF0201303B87` / PS `B40B0462256E31C2` (the known depth-prepass pair,
+canonical B1 recipe, no colour output). It differs from the selected world
+camera only in the camera block: the same near (0.025), position and phase,
+but x and y scale rising -1.29 to -1.98 and 2.14 to 3.28, against the world's
+-1.05 to -1.20 and 1.74 to 1.98; first differing float row 270 col 0.
+
+Reading (to be confirmed against the NumLock capture): while aiming, the
+weapon's camera takes the world's near plane and a narrower field of view,
+so its depth prepass, drawn before the world camera is named, is predicted
+world by its near alone. Its witness cannot match the world camera at the
+tone pass, and H is refused. The check is right to refuse: the prepass wrote
+the weapon's depth without a first-person mark. The fix must recognise a
+weapon prepass at the world near at draw time (by its projection, not its
+near) and capture and mark it as first-person. A planning pass is on it; the
+copy route's stage 2 runs the same qualification and needs the same fix.
+
+### 2026-10-06: weapon support below SS 1.0 and the aiming fix (built)
+
+Both designs above, built in one batch (full build green, inputs
+`2c14c62d`; bench hardware 53/53 PASS, WARP 26 PASS, 27 UNSUPPORTED, 0 FAIL).
+
+Aiming, both routes. `flatCameraProjectionScale` measures a camera's x and y
+projection scale free of rotation and phase. Naming stores the world
+reference (near, both scales). `flatDomainPredictsWorld` calls a pre-naming
+draw world only when its near equals the reference's AND both scales are
+within 10% of it (the world moves at most 3.8% a frame; the weapon sits
+1.18 to 1.66 times the world). One predicate serves the domain block and the
+cohort flag. `scale-rejected-5s` on the SDK domain line counts the near-equal
+draws the scale turned away. The witness line adds the scale ratio. Bench:
+`predicted_world_mismatch` (camera 2 at x1.25) is now admitted;
+`predicted_world_close_scale` (x1.03) still refuses; settlement_prepass is
+unchanged.
+
+The copy route (render below output, DLSS or FSR). The first-person pool
+cohort and the glow pass carry trace flags (bits 10 and 11; zero in every
+committed trace): cohort draws stay out of the motion sources, the glow pass
+is an alternate HDR writer with no overlay planned, and the frame is mixed.
+The domain's planned first-person draws also mark it mixed, so a weapon whose
+draws have no motion support (the plasma weapon) is covered.
+`foregroundContractAtH` (treatHdr's H block, moved whole) runs at the final
+copy. The resolver's first-person clause no longer asks for the HDR route;
+the mask still does. New 5 s line: `flat copy weapon 5s` (cohort and glow
+draws, mixed frames, H attempts and qualified).
+
+Unverified until flown:
+- the copy route's H qualification late in the frame (a depth write or
+  Clear after H's consumer would refuse it, a reason the HDR route never
+  shows);
+- the glow pass on the copy route (surface-preserving by code reading);
+- weapon-down frames with arms on the copy route now ask the contract;
+- the aiming fix in flight.
+
+Committed 54ea9cee, main fast-forwarded and pushed; `--dll-only` passed; the
+installer's game probe found the game stopped. Epic flat install verified:
+`v0.18.2-49-g54ea9cee`, SHA256 061A3B8EFEB04E24..., `edvr-flat.ini` unchanged.
+Flight reads: at SS 1.0 while aiming, no `pending-null mismatch` lines,
+`scale-rejected-5s` above 0 and H-qualified equal to H-attempts; at SS 0.75
+weapon up and aiming, `flat copy weapon 5s` mixed frames with H-qualified equal
+to H-attempts and no `conflicting-hdr-target-or-camera`; a hipfire NumLock for
+the weapon-refused share.
+
+### 2026-10-06: 54ea9cee flown; aiming and SS 0.75 hold; the weapon's own pixels refused
+
+Flight `edvr_gfx_20261006_142951.log`, verified `v0.18.2-49-g54ea9cee`. Sean:
+much better overall; aiming down sights on the HDR route, things seen
+through or around the sights seem to lose AA.
+
+- Aiming, HDR route: `scale-rejected-5s` about 10,000 a window while aiming;
+  H-qualified equals H-attempts (6,347 of 6,347 by 14:33:17); no witness
+  mismatch line. The aiming fix holds.
+- SS 0.75, the copy route, weapon up: `flat copy weapon 5s` mixed frames,
+  domain-mixed, H attempts and qualified all equal (308, 306, 310, 316, 348,
+  332, 328, 121 a window). The copy-route weapon support holds.
+- The NumLock censuses: `weapon-refused` 5.9%, 6.6%, 6.9% (native), 4.4%,
+  5.4%, 5.8% (SS 0.75) of all pixels; everything else is tiny. A
+  weapon-refused pixel has a trusted first-person mark and an invalid map
+  sample (w not 1, or its prior off screen), so it shows the raw frame: the
+  weapon's footprint, and while aiming probably the world seen through the
+  sight. The 13:19 census, before this build, already had 3%.
+
+Open: why the weapon's own map samples are invalid most frames, and whether a
+transparent depth-writing sight lens takes the world behind it as the
+weapon's. A planning pass is reading the code; a view screenshot while
+aiming will show which pixels are refused (white) and which keep weapon
+motion (cyan).
+
+Sean's view screenshot and video (54ea9cee, aiming, refusal view on): the
+world around and through the sight keeps its classes (yellow, blue, green),
+so a lens claiming the world is ruled out for this weapon. The weapon itself
+alternates: Sean, "rapidly switches between white and cyan constantly". In
+the 43-frame clip (30 fps of a 60 fps game) the gun is cyan (first-person
+motion) in frames 5, 15-16, 25-26, 30-31 and 40-41 and white (refused, raw)
+in the rest: usable motion about one game frame in four or five, in a
+roughly regular rhythm. That is the census's 4 to 7% weapon-refused, and the
+flicker between resolved and raw on the gun and sight is the lost AA Sean
+saw. The cause is in the first-person motion history (the map's w is not 1
+on most frames); a planning pass is on it.
+
+The coils behind the sight (Sean): at SS 0.75 the weapon still flickers
+between white and cyan, but aiming over the coils no longer costs them AA;
+on the HDR route it did. The difference is the late-overlay isolation, which
+runs on the HDR route only (54ea9cee plans no overlay on the copy route).
+`flat late overlay 5s` while aiming at SS 1.0: planned-draws 2,104 to 6,188 a
+window (about 14 a frame), against 644 to 1,848 in hipfire, with nearly every
+frame isolated. finishHdr shows the raw frame wherever an overlay draw
+covered, transparent lens and glow quads included, so the world through the
+sight went raw. Two separate issues, then: the weapon's own history (both
+routes), and the overlay composite (HDR route).
+
+Overlay fix (building): at covered pixels, the anti-aliased world plus the
+overlay's own contribution (raw H with the overlay minus clean H), in place
+of the raw frame. A covered and refused pixel keeps today's raw value; a
+transparent overlay adds nothing.
+
+The weapon's refused history (planning pass, read-only; logs 142951 and
+143826). Captures work: captured, attempts and GPU-identity submitted
+advance together at 36 a frame, preflight-refused 0. Joining the census to
+`flat camera origin moved=`: live hipfire weapon-refused 5.2 to 6.5%, live
+aiming 8.3 to 11.3%, copy route 4.5 to 5.3%; with the camera still (moved=0)
+the same 36 draws are refused on 0.09 to 0.10%. So the failing input changes
+between consecutive live frames, on both routes.
+
+Ranked causes (inferred): about 75%, the flat map's match requires the
+weapon's pool slot to be equal in consecutive frames (`PreviousIndex==raw`,
+flat_foreground_motion_shader.h), while the engine re-orders that pool every
+live frame (docs\per-object-motion.md: "The slot is not an identity, even at
+rest", 160 of 279 records at a new slot in a stable set). VR's matcher never
+asked for the slot. About 15%, byte 30 of the identity word (a per-instance
+parameter that changes on 10-40% of records). About 10%, CPU priors lost.
+
+Ruled out: the sight lens taking the world behind it, because the 14
+glow, lens and reticle quads write no depth and cannot own a pixel; the
+refusal view agrees.
+
+Fix (next build): a reason code for every class-2 sample, reported in the
+census; then match by content, not slot (identity.x equal, identity.y equal
+except byte 30), keeping the equal-or-reject rule for several matches. Target:
+live weapon-refused at the still-camera baseline, about 0.1%.
+
+Built, one install (both green; bench hardware 56/56 PASS, WARP 0 FAIL):
+- Overlay composite (9d041f21): at covered pixels the anti-aliased world
+  plus the overlay's contribution (raw H with the overlay minus the clean H);
+  covered and refused keeps the raw value; a transparent overlay adds
+  nothing. finishHdr binds the clean H at t0, the overlay H at t16.
+- Weapon history by content: the flat map's match drops the slot and needs
+  identity.x equal and identity.y equal except byte 30; equal-or-reject for
+  several matches stays. AnimatedVertexHistory::maxRecords 64 to 128 (the
+  equip transient). Reason codes for every class-2 sample (no-prior,
+  prior-positions, identity-differs, prior-identity-invalid, ambiguous, ...)
+  in the class byte's bits 4-6, split in the census as `weapon-refused by
+  reason`. CPU counters on the SDK domain line (no-candidate, no-prior-pool,
+  no-prior-near, no-prior-absent, priors-one, priors-several,
+  repeated-geometry). Bench `first_person_slot_repacked`: slots alternating
+  under one identity match 4,578 of 4,578, all rejected with the slot check.
+- Risk named: content identity can give one wrong frame of history to an
+  identical mesh that takes the freed bone range; watch `ambiguous`,
+  `priors-several` and `repeated-geometry`.
+
+Flight: aiming over the coils at SS 1.0 (the world through the sight keeps
+AA); the refusal view while moving with the weapon up (the gun should stay
+cyan); a NumLock while moving (weapon-refused near 0.1%, and by reason).
+
+Committed 9d041f21 and eccfce7a, main fast-forwarded and pushed; `--dll-only`
+passed; the game probe found it stopped. Epic flat install verified:
+`v0.18.2-56-geccfce7a`, SHA256 F2D3A48BE0819640..., `edvr-flat.ini` unchanged.
+
+### 2026-10-06: eccfce7a flown OK: the weapon and the sight keep AA
+
+Flight `edvr_gfx_20261006_165304.log`, verified `v0.18.2-56-geccfce7a`, SS 0.75
+and 1.0, aiming, the refusal view on. Sean: "It looks pretty good in all
+cases".
+
+- Weapon history: after 16:56:10 every captured weapon draw found its prior
+  (priors-one equals captured each window, 8,000 to 16,000 draws a window,
+  at SS 0.75 and 1.0). weapon-refused fell from 5 to 11% to 0.003 to 0.16%
+  of pixels, mostly `unspecified` (no map sample at the gun's edges).
+  priors-several and repeated-geometry stayed 0: content identity never met
+  an ambiguous match.
+- Remaining transient: from about 16:55:15 to 16:56:05, and briefly at
+  16:57:00, about 35 to 40% of weapon draws had no candidate (geometry never
+  captured before); the census caught its tail as weapon-refused 3.4 to 5.2%,
+  all `no-prior`. It ended by itself; the likely cause is the game
+  rewriting a weapon's vertex data during an action. Aiming in and out costs
+  one frame per switch (no-prior-near 158 over the aiming stretch).
+- The sight: no complaint while aiming over the coils; the overlay composite
+  is in.
+
+Open: the no-candidate bursts (which action rewrites the weapon's geometry);
+the roof's thin-highlight shimmer (content; the pre-upscaler filter is the
+remaining idea); EDVR's TAA standing still at the roof (2d8e6761, unflown).

@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State (2026-10-03):** implementation in progress on
+- **State (2026-10-06):** implementation in progress on
   `codex/plugin-architecture`; do not merge to main until Sean is ready to ship.
   This is Phase 1 of five; the review and remaining gates are in section 11.
   The add-on tier extends draft PR #46 (section 6).
@@ -37,19 +37,19 @@
   4.1), the installer skips it and Elite stays on its stock VR path. Four
   changes first (section 10); no F8, AA, flash fix or Explorer Cam without
   the runtime; the first build needs a flight on a stock runtime.
-- **Next:** Steam has verified control `373198c1` (124 full-build jobs and
-  clean promotion); candidate `ecdda1d9` passes 142 jobs and clean
-  promotion, ready for the paired test. Pimax OpenXR, 90 Hz, 4032x3898 per
-  eye. Replay is off and the personal INI hash is preserved. Twenty-three
-  supported selectors and local None/Skip forwarding checks pass;
-  whole-ladder/actions and remaining module API/CPU coverage stay open.
-  Enabled replay retains 482.4 MiB; disabled replay allocates none. Earlier
-  NV blur is reproduced by `14a7ff70`. Main `83938927` is integrated. Next
-  flight: stationary hangar/carrier AA off/on and carrier DLSS+NV, two
-  minutes per hold; no draw dump. Matched CPU improvement beyond noise and
-  direct GPU non-regression remain unresolved (section 11). Temporary key:
-  `advanced.draw_replay` (off); removal requires Scope control. No Phase 2
-  or shipping approval.
+- **Next:** main `465e3edd` is integrated after measuring control `373198c1`.
+  Feature source passes 143 full-build jobs and fresh NoTrace/forwarding
+  comparisons; symmetric updated control `7bbe7d90` passes 125 jobs. Clean
+  promotions and the next matched Steam comparison are pending. Pimax OpenXR,
+  90 Hz, 4032x3898 per eye, DLSS 310.9.1.0, separate-device ownership; replay
+  off. The prior carrier hold includes reported NV; its exact toggle is
+  unlogged. Twenty-three supported selectors and local None/Skip checks pass;
+  whole-ladder/actions and remaining module API/CPU coverage stay open. Enabled
+  replay retains 482.4 MiB; disabled replay allocates none. Earlier NV blur is
+  reproduced by `14a7ff70`. Matched CPU improvement beyond noise and direct GPU
+  non-regression remain unresolved (section 11). Temporary key:
+  `advanced.draw_replay` (off); removal requires Scope control. No Phase 2 or
+  shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a
   stable ABI for first-party plugins (they ship with the core; freezing
@@ -2309,3 +2309,118 @@ needed repeat remain pending. Per-timed-draw CPU is the declared
 hook-minus-first-forwarding interval; it does not establish total EDVR CPU
 or full GPU/module coverage. Phase 1 acceptance, Phase 2 and shipping stay
 open.
+
+### Measured Steam control, 2026-10-06
+
+The sanctioned log reader verifies graphics log `edvr_gfx_20261006_174238.log`
+as control `373198c1`, `v0.18.1-19-g373198c1`, PE `6AC133AA`. The paired
+runtime log is `edvr_openxr_20261006_174240_034_14868.log`. The mapped DLSS
+file reports version `310.9.1.0`. Observed environment: RTX 5090, Pimax OpenXR,
+Pimax Crystal Super, 90 Hz, 4032x3898 output per eye, 2016x1949 input per eye,
+HMD quality 0.50, DLSS performance preset K, separate-device graphics
+ownership. Replay is off. Sean confirms carrier first, with NV enabled for the
+last two minutes of its DLSS hold, then on-foot hangar. The log has no
+NV-toggle marker, so it cannot split the carrier DLSS hold into independent
+NV-off/on bins.
+
+The conservative settled draw-hook windows give:
+
+| Scene and mode | End frames | Timed draws | Weighted us/timed draw | Mean window ms/sampled frame |
+|---|---|---:|---:|---:|
+| Carrier, AA off | 16200-23400, five windows | 29588 | 0.1154 | 0.3884 |
+| Carrier, DLSS K, includes reported NV | 28800-43200, nine windows | 53232 | 0.3225 | 1.0862 |
+| Hangar, AA off | 54000-61200, five windows | 24646 | 0.0886 | 0.2482 |
+| Hangar, DLSS K | 66600-73800, five windows | 24592 | 0.1650 | 0.4614 |
+
+Per-draw means weight each logged mean by its timed-draw denominator. The
+interval subtracts the first forwarding call, including an indexed instanced
+weapon-motion reissue, but includes later EDVR reissues. It is not total EDVR
+CPU time. Startup, mode boundaries and the final transition are excluded. The
+hangar DLSS sample-frame means decline from 0.547 to 0.406 ms; a single run
+does not establish repeatability or improvement.
+
+Native benchmark medians of completed-window p50 values are CPU/GPU 3.854/5.811
+ms for carrier off, 5.085/10.792 for carrier DLSS, 1.901/5.386 for hangar off
+and 2.2915/8.1735 for hangar DLSS. The selected completed windows are 9-11,
+13-19, 25-27 and 29 plus 36 respectively. Startup carrier windows 6 and 7 and
+all scope-changed windows are omitted. Only two hangar DLSS benchmark windows
+completed; these are medians of per-window percentiles, not percentiles over
+pooled samples. CPU p50 ranges are 3.721-4.027, 4.667-5.696, 1.867-2.058 and
+2.286-2.297 ms; GPU ranges are 5.632-5.927, 10.631-10.837, 5.336-5.632 and
+8.161-8.186 ms. These native render intervals and partial GPU sections do not
+establish whole-module cost coverage. Runtime reports no temporal failures.
+
+Post-flight native verification initially failed because the expected
+configuration spelled `C:\Steam` while the installed paths spell `c:\steam`.
+Repeating `install_edvr.py --verify-only` with that recorded target spelling
+passes all payload/profile checks. `separate_device=1` is already the control's
+standard configuration, not a changed setting. No live configuration was
+edited. Current personal INI SHA256 is
+`750BB1D392EA59270B12CB54051F7E476D28433351B9DA238BF0BFA4B520B91C`.
+
+The measured control is based on main `83938927`. Main was fetched and frozen
+at `465e3eddf4769ae5833ae726658170b380394d45` for integration after this
+measurement. Its shared animated weapon-history change can affect VR motion
+work; this flight logged five eligible weapon-motion calls per frame while DLSS
+was active, and `fix.weapon_stability` is enabled. A candidate that includes it
+cannot attribute every difference against this older control to plugin
+dispatch. Preserve this baseline and validate an updated symmetric control
+before the next attributable paired comparison. Phase 1 performance acceptance
+and whole-ladder gates stay open.
+
+### Main 465 integration after measurement, 2026-10-06
+
+Main `465e3eddf4769ae5833ae726658170b380394d45` is merged into the feature
+after the October 6 baseline was measured and independently checked. Seven flat
+draw-wrapper conflicts retain the feature's trace/bypass structure and main's
+`needsActualDraw()` brackets, including indirect `args/off`. Independent
+three-way review confirms all main changes in `vscreen.cpp` and `build.bat`
+remain. The new flat SDK proxy, integration rig, three self-test exports and 64
+shader variants are preserved. Main's new `advanced.temporal_aa_jitter_phases`
+key belongs to `temporal-aa`; no key is removed or renamed.
+
+The first full build compiled the production DLL but caught a missing
+`cockpitVisualsPluginOps` symbol when relinking the new offline bench.
+`build_flat_sdk_bench_proxy.py` now links the production cockpit archive
+exactly once when the production object set includes `plugin_registry.obj`. It
+rejects a missing or out-of-build archive and ignores a stale optional archive
+for a main-only control. Self-tests pin those cases and the no-write dry run.
+The complete rerun passes the bench's real link and integration rig.
+
+The unchanged runner's timeout-cleanup self-test repeatedly failed in the
+restricted process context, leaving test grandchildren alive. It passes with
+normal Windows process permissions, as do both complete builds in that context.
+No runner assertion was weakened; no Windows error code was observed. Ruled
+out: a main-source regression in timeout cleanup, because runner bytes are
+identical and the same self-test and full gates pass with the required process
+permissions.
+
+Feature validation passes all 143 jobs: 136 pooled in 167.8 seconds, seven
+quiet in 48.3 seconds. FocusWatch reports no window, console or foreground move
+to the build tree in 216 seconds. Production profiles, Python tools, native
+rigs and actual self-contained installer resources pass. Full-build receipt
+input SHA256:
+`01d9f72a3d54e2dad859b01874d4ad80f132ce50e63215e8187b5985989b934d`. Fresh MSVC
+NoTrace/NoCpu comparison matches the saved classifier exactly: 7057 bytes, 1636
+records, 94 calls, 288-byte stack and SHA256
+`2647f0304a6ed9d294791c5d09d650376843065afdf25660406aaab53fd3ca40`. All eight
+NoTrace forwarding bodies also match: 2782 bytes, 756 records, 71 calls,
+176-byte stack and SHA256 prefix `6ea003ac45a3e806`. This proves the scoped
+instrumentation erasure, not whole-ladder equivalence.
+
+Updated control `7bbe7d907bcf0b5f2e969e1d3373e9c37ba5f5ed` includes the same
+main pin and retains only the symmetric denominator and mapped-DLSS
+diagnostics. It passes all 125 jobs: 120 pooled in 157.6 seconds and five quiet
+in 23.1 seconds; FocusWatch reports no shown window, console or foreground move
+in 181 seconds. Receipt input SHA256:
+`d62d3bdbeb2ac5f44041ea909100517bda45e010ea11018e96c761dd065c5c53`. The
+draw-window header, DLSS helper and DLSS test are byte-identical across both
+trees. The feature's per-frame plugin-cost collector remains part of its
+production overhead and lies outside the declared draw-hook interval. These
+partial timings do not establish total EDVR CPU coverage.
+
+Both clean commits require receipt-verified promotion before installation.
+Steam still holds measured control `373198c1` while that completes. Preserve
+the personal INI, loaded DLSS, separate-device mode and render dimensions for
+the next matched control/candidate comparison. The original baseline is
+retained; Phase 1 performance acceptance, Phase 2 and shipping stay open.

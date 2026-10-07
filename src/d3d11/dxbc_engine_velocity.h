@@ -179,16 +179,56 @@ inline std::vector<BYTE> patchVsProgram(const std::vector<BYTE>& bytes, uint32_t
 // cleared target (-1), an untouched one and any sum or blend of two writes is
 // never an odd whole number, so arithmetic that reached MRT6 is declined by
 // the compose instead of naming another record (the 2026-09-23 review, item 4).
+enum class FlatMarkerKind { None, ForeignPool, World, WorldPool, ForeignPoolProvenance };
+
+// Only EDVR's fixed null-pool PS is accepted here. Its one uint input is
+// relocated to the extra VS output register; D3D11 does not remap that link.
+inline std::vector<BYTE> relocateNullPoolInput(const void* data,size_t size,uint32_t slotRegister) {
+    if(slotRegister==0 || slotRegister>=32)throw std::runtime_error("null pool input register");
+    auto chunks=parseContainer(data,size,kPs50);uint32_t old=~0u;
+    for(auto& chunk:chunks)if(chunk.tag==kTagIsgn) {
+        auto signature=parseSignature(chunk.bytes);
+        for(auto& e:signature)if(equalName(e.name,"EDVRPOOLSLOT") && e.componentType==1 && e.masks&1) {
+            if(old!=~0u)throw std::runtime_error("duplicate null pool input");
+            old=e.registerIndex;e.registerIndex=slotRegister;
+        }
+        sortByRegister(signature);
+        chunk.bytes=makeSignature(signature);
+    }
+    if(old==~0u)throw std::runtime_error("missing null pool input");
+    for(auto& chunk:chunks)if(isProgram(chunk.tag)) {
+        auto words=programWords(chunk.bytes);
+        for(size_t at=2;at<words.size();) {
+            const auto length=instructionLength(words,at);
+            for(size_t i=at+1;i+1<at+length;++i)
+                if(operandType(words[i])==1 && (words[i]&0x00100000u) && words[i+1]==old)words[i+1]=slotRegister;
+            at+=length;
+        }
+        chunk.bytes=programBytes(std::move(words));
+    }
+    return makeContainer(chunks);
+}
+
 inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const EngineVelocityInputs& in,
-                                        bool guardOverlayDepth = false) {
+                                        bool guardOverlayDepth = false, FlatMarkerKind flatMarker = FlatMarkerKind::None,
+                                        uint32_t primitiveRegister = ~0u, uint32_t tokenSlot = ~0u, uint32_t primitiveComponent = 0) {
     auto t = programWords(bytes);
+    const bool provenance = flatMarker == FlatMarkerKind::ForeignPoolProvenance;
+    const bool rgba = provenance || flatMarker == FlatMarkerKind::World || flatMarker == FlatMarkerKind::WorldPool;
+    if(provenance && (primitiveRegister>=32 || tokenSlot>=14 || primitiveComponent>=4))throw std::runtime_error("invalid foreign provenance inputs");
     size_t firstOutput = 0, tempAt = 0, firstExecutable = 0;
     uint32_t tempCount = 0, returns = 0;
-    bool identityDeclared = false, positionDeclared = false;
+    bool identityDeclared = false, positionDeclared = false, primitiveDeclared = false;
     for (size_t at = 2; at < t.size();) {
         const uint32_t opcode = t[at] & 0x7ffu;
         const uint32_t length = instructionLength(t, at);
         declineUnsupported(opcode);
+        if(provenance && opcode==kOpDclConstantBuffer && length>=4 && t[at+2]==tokenSlot)
+            throw std::runtime_error("foreign token constant buffer occupied");
+        if(provenance && opcode==kOpDclInputPsSgv && length==4 && t[at+2]==primitiveRegister && t[at+3]==7) {
+            if(operandType(t[at+1])!=1 || operandMask(t[at+1])!=(1u<<primitiveComponent))throw std::runtime_error("invalid primitive ID declaration");
+            primitiveDeclared=true;
+        }
         // The admitted SM5 shader has direct t0..t2 references. Refuse any
         // existing direct t3 operand or declaration rather than rebinding a
         // game resource that this exact shader could read.
@@ -226,23 +266,50 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
         if (opcode == kOpRet) ++returns;
         at += length;
     }
-    if (!firstOutput) throw std::runtime_error("no output declarations");
+    if (!firstOutput && flatMarker == FlatMarkerKind::None) throw std::runtime_error("no output declarations");
     if (!returns) throw std::runtime_error("no return");
-    if (!in.slotFromVsPatch && !identityDeclared) throw std::runtime_error("identity input not declared");
+    if (flatMarker != FlatMarkerKind::World && !in.slotFromVsPatch && !identityDeclared) throw std::runtime_error("identity input not declared");
     if (!tempAt && !firstExecutable) throw std::runtime_error("no executable instructions");
+    if (!firstOutput) firstOutput = tempAt ? tempAt : firstExecutable;
 
     const uint32_t temp = tempCount;   // the new temp's index
     const uint32_t identitySelect = 0x0010100Au | (in.identityComponent << 4); // v<id>.<c>
     const uint32_t posDecl[] = {0x04002064u, guardOverlayDepth ? 0x00101072u : 0x00101042u,
                                 in.positionRegister, 1u}; // dcl_input_ps_siv linear noperspective v.xyz, position
     const uint32_t slotDecl[] = {0x03000862u, 0x00101012u, in.identityRegister};    // dcl_input_ps constant v.x
-    const uint32_t outDecl[] = {0x03000065u, 0x00102032u, kEngineVelocityTarget};   // dcl_output o6.xy
+    const uint32_t outDecl[] = {0x03000065u, rgba?0x001020f2u:0x00102032u, kEngineVelocityTarget};
+    const uint32_t primitiveDecl[] = {0x04000863u,0x00101012u,primitiveRegister,7u};
+    const uint32_t tokenDecl[] = {0x04000059u,0x00208e46u,tokenSlot,1u};
+    const uint32_t provenanceTail[] = {
+        0x05000056u,0x00102042u,kEngineVelocityTarget,0x0010100au|(primitiveComponent<<4),primitiveRegister,
+        0x06000036u,0x00102082u,kEngineVelocityTarget,0x0020800au,tokenSlot,0u,
+    };
+    const uint32_t clearProvenanceTail[] = {0x05000036u,0x001020c2u,kEngineVelocityTarget,0x00004001u,0u};
     const uint32_t tail[] = {
         0x07000001u, 0x00100012u, temp, identitySelect, in.identityRegister, 0x00004001u, kEngineVelocitySlotMask,
         0x09000023u, 0x00100012u, temp, 0x0010000Au, temp, 0x00004001u, 2u, 0x00004001u, 1u,
         0x05000056u, 0x00102012u, kEngineVelocityTarget, 0x0010000Au, temp,
         0x05000036u, 0x00102022u, kEngineVelocityTarget, 0x0010102Au, in.positionRegister,
     };
+    // Flat foreign encoding leaves the VR/world tail above byte-identical.
+    // The qualified VS contract uses the same low23 pool index; high bits
+    // are draw metadata, not an extra address. Validate that decoded slot
+    // before the odd encoding can round. -2 is invalid, never an owner.
+    const uint32_t foreignTail[] = {
+        0x07000001u, 0x00100012u, temp, identitySelect, in.identityRegister, 0x00004001u, kEngineVelocitySlotMask,
+        0x07000050u, 0x00100022u, temp, 0x0010000Au, temp, 0x00004001u, 0x007fffffu,
+        0x09000023u, 0x00100012u, temp, 0x0010000Au, temp, 0x00004001u, 2u, 0x00004001u, 3u,
+        0x05000056u, 0x00100012u, temp, 0x0010000Au, temp,
+        0x07000038u, 0x00100012u, temp, 0x0010000Au, temp, 0x00004001u, 0xbf800000u,
+        0x09000037u, 0x00102012u, kEngineVelocityTarget, 0x0010001Au, temp, 0x00004001u, 0xc0000000u, 0x0010000Au, temp,
+        0x05000036u, 0x00102022u, kEngineVelocityTarget, 0x0010102Au, in.positionRegister,
+    };
+    const uint32_t worldTail[] = {
+        0x05000036u, 0x00102012u, kEngineVelocityTarget, 0x00004001u, 0u,
+        0x05000036u, 0x00102022u, kEngineVelocityTarget, 0x0010102Au, in.positionRegister,
+    };
+    if (guardOverlayDepth && flatMarker != FlatMarkerKind::None)
+        throw std::runtime_error("flat ownership cannot use the VR overlay depth guard");
     // This block is the exact token form of SM5 ftoi/ld_indexable/eq/movc,
     // checked against D3DCompile and WARP by engine_velocity_test. The guard
     // chooses the substrate depth only for the same odd pool-record code.
@@ -272,6 +339,10 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
             if (guardOverlayDepth) out.insert(out.end(), std::begin(overlayResource), std::end(overlayResource));
             if (!positionDeclared) out.insert(out.end(), posDecl, posDecl + 4);
             if (in.slotFromVsPatch) out.insert(out.end(), slotDecl, slotDecl + 3);
+            if(provenance) {
+                out.insert(out.end(),tokenDecl,tokenDecl+4);
+                if(!primitiveDeclared)out.insert(out.end(),primitiveDecl,primitiveDecl+4);
+            }
         }
         if (tempAt && at == tempAt) {
             out.insert(out.end(), outDecl, outDecl + 3);
@@ -286,8 +357,12 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
                 outputDeclared = true;
             }
             if (opcode == kOpRet) {
-                if (guardOverlayDepth) out.insert(out.end(), std::begin(guardedTail), std::end(guardedTail));
+                if (flatMarker == FlatMarkerKind::ForeignPool || provenance) out.insert(out.end(), std::begin(foreignTail), std::end(foreignTail));
+                else if (flatMarker == FlatMarkerKind::World) out.insert(out.end(), std::begin(worldTail), std::end(worldTail));
+                else if (guardOverlayDepth) out.insert(out.end(), std::begin(guardedTail), std::end(guardedTail));
                 else out.insert(out.end(), std::begin(tail), std::end(tail));
+                if(provenance)out.insert(out.end(),provenanceTail,provenanceTail+11);
+                else if(rgba)out.insert(out.end(),clearProvenanceTail,clearProvenanceTail+5);
             }
             out.insert(out.end(), t.begin() + at, t.begin() + at + length);
         }
@@ -403,10 +478,13 @@ inline bool engineVelocityPatchVs(const void* data, size_t bytes, const EngineVe
 }
 
 inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVelocityInputs& inputs,
-                                  std::vector<BYTE>& output, std::string& reason, bool guardOverlayDepth = false) {
+                                  std::vector<BYTE>& output, std::string& reason, bool guardOverlayDepth = false,
+                                  dxbc_engine_velocity_detail::FlatMarkerKind flatMarker = dxbc_engine_velocity_detail::FlatMarkerKind::None,
+                                  unsigned* tokenSlot = nullptr) {
     using namespace dxbc_engine_velocity_detail;
     output.clear();
     reason.clear();
+    if(tokenSlot)*tokenSlot=~0u;
     if (inputs.identityRegister >= 32 || inputs.identityComponent >= 4 || inputs.positionRegister >= 32 ||
         inputs.identityRegister == inputs.positionRegister) {
         reason = "invalid shader inputs";
@@ -414,13 +492,24 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
     }
     try {
         auto chunks = parseContainer(data, bytes, kPs50);
+        const bool provenance=flatMarker==FlatMarkerKind::ForeignPoolProvenance;
+        const bool rgba=provenance || flatMarker==FlatMarkerKind::World || flatMarker==FlatMarkerKind::WorldPool;
+        if(provenance && !tokenSlot)throw std::runtime_error("foreign token binding output missing");
         EngineVelocityInputs psInputs = inputs;
         bool usedInput[32]{};
         uint32_t declaredPosition = ~0u;
+        uint32_t primitiveRegister=~0u,selectedToken=~0u,primitiveComponent=0;
         for (const auto& chunk : chunks) if (chunk.tag == kTagIsgn) {
             for (const auto& e : parseSignature(chunk.bytes)) {
                 if (e.registerIndex >= 32) throw std::runtime_error("input register out of range");
                 usedInput[e.registerIndex] = true;
+                if(provenance && (e.systemValue==7 || equalName(e.name,"SV_PrimitiveID"))) {
+                    const unsigned mask=e.masks&15u;
+                    if(primitiveRegister!=~0u || e.componentType!=1 || !mask || (mask&(mask-1u)))
+                        throw std::runtime_error("ambiguous primitive ID input");
+                    primitiveRegister=e.registerIndex;
+                    while((mask&(1u<<primitiveComponent))==0)++primitiveComponent;
+                }
                 if (e.systemValue == 1 || equalName(e.name, "SV_POSITION")) {
                     if (declaredPosition != ~0u || e.componentType != 3)
                         throw std::runtime_error("ambiguous position input");
@@ -438,6 +527,26 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
         }
         if (psInputs.positionRegister == psInputs.identityRegister)
             throw std::runtime_error("position and identity input overlap");
+        if(provenance) {
+            if(primitiveRegister==~0u) {
+                for(uint32_t reg=0;reg<32;++reg)if(!usedInput[reg] && reg!=psInputs.positionRegister && reg!=psInputs.identityRegister) {primitiveRegister=reg;break;}
+                if(primitiveRegister==~0u)throw std::runtime_error("no free primitive ID input register");
+            }
+            bool occupied[14]{};bool programFound=false;
+            for(const auto& chunk:chunks)if(isProgram(chunk.tag)) {
+                if(programFound)throw std::runtime_error("duplicate program");programFound=true;
+                const auto words=programWords(chunk.bytes);
+                for(size_t at=2;at<words.size();at+=instructionLength(words,at))if((words[at]&0x7ffu)==kOpDclConstantBuffer) {
+                    if(instructionLength(words,at)!=4 || operandType(words[at+1])!=8 ||
+                       ((words[at+1]>>20)&3u)!=2 || ((words[at+1]>>22)&63u)!=0 || words[at+2]>=14)
+                        throw std::runtime_error("unproven original constant buffer declaration");
+                    occupied[words[at+2]]=true;
+                }
+            }
+            if(!programFound)throw std::runtime_error("missing pixel shader program");
+            for(unsigned slot=14;slot>0;--slot)if(!occupied[slot-1]){selectedToken=slot-1;break;}
+            if(selectedToken==~0u)throw std::runtime_error("no free foreign token constant buffer");
+        }
         bool isgn = false, osgn = false, program = false;
         for (auto& chunk : chunks) {
             if (chunk.tag == kTagIsgn) {
@@ -464,7 +573,7 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                     slot.registerIndex = psInputs.identityRegister;
                     slot.masks = 0x0101u;                    // x, used
                     elements.push_back(std::move(slot));
-                } else if (!identity) {
+                } else if (!identity && flatMarker != FlatMarkerKind::World) {
                     throw std::runtime_error("identity input absent");
                 }
                 if (!position) {
@@ -475,6 +584,14 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                     p.registerIndex = psInputs.positionRegister;
                     p.masks = guardOverlayDepth ? 0x070Fu : 0x040Fu;
                     elements.push_back(std::move(p));
+                }
+                if(provenance) {
+                    bool primitive=false;
+                    for(const auto& e:elements)primitive=primitive || e.systemValue==7 || equalName(e.name,"SV_PrimitiveID");
+                    if(!primitive) {
+                        SignatureElement p;p.name="SV_PrimitiveID";p.systemValue=7;p.componentType=1;
+                        p.registerIndex=primitiveRegister;p.masks=0x0101u;elements.push_back(std::move(p));
+                    }
                 }
                 sortByRegister(elements);
                 for (size_t i = 1; i < elements.size(); ++i)
@@ -498,24 +615,26 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                         if (e.registerIndex >= kEngineVelocityTarget) throw std::runtime_error("output target 6 or above occupied");
                     }
                 }
-                if (!target) throw std::runtime_error("no colour output");
+                if (!target && flatMarker == FlatMarkerKind::None) throw std::runtime_error("no colour output");
+                if (!target) targetSystemValue = 64; // SM5 SV_Target for flat-only depth passes
                 SignatureElement velocity;
                 velocity.name = "SV_TARGET";
                 velocity.semanticIndex = kEngineVelocityTarget;
                 velocity.systemValue = targetSystemValue;
                 velocity.componentType = 3;                  // float
                 velocity.registerIndex = kEngineVelocityTarget;
-                velocity.masks = 0x0C03u;                    // xy; z,w never written
+                velocity.masks = rgba?0x000fu:0x0C03u;
                 elements.push_back(std::move(velocity));
                 chunk.bytes = makeSignature(elements);
             } else if (isProgram(chunk.tag)) {
                 if (program) throw std::runtime_error("duplicate program");
                 program = true;
-                chunk.bytes = patchPsProgram(chunk.bytes, psInputs, guardOverlayDepth);
+                chunk.bytes = patchPsProgram(chunk.bytes, psInputs, guardOverlayDepth, flatMarker,primitiveRegister,selectedToken,primitiveComponent);
             }
         }
         if (!isgn || !osgn || !program) throw std::runtime_error("missing pixel shader chunks");
         output = makeContainer(chunks);
+        if(provenance)*tokenSlot=selectedToken;
         return true;
     } catch (const std::exception& e) {
         reason = e.what();

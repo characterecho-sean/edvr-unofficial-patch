@@ -3762,12 +3762,16 @@ void STDMETHODCALLTYPE hookedClearRtv(ID3D11DeviceContext* self,
     State* s = g_state;
     ++s->thunkHits[kHitClearRtv];
     if (foreignContext(self)) {
+        if (flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
         s->realClearRtv(self, rtv, c);
         return;
     }
     if (flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);   // a clear is not a substituted producer draw: the game's state first
-        ResourceInfo info{}; if (bindingResolve(rtv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource));
+        flatRuntimeOverlayViewMutation(rtv, FlatOverlayMutationOp::ClearRtv,
+            FlatMutationDetails::clear(FlatOverlayMutationOp::ClearRtv,"ClearRenderTargetView",c));
+        ResourceInfo info{}; if (bindingResolve(rtv, &info))
+            flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource),FlatOverlayMutationOp::ClearRtv);
     }
     if (g_vrWorldWatchWrites) vrWorldRouteNoteRtvClear(rtv);
     if (flatTemporalCapturing()) flatTemporalClearColor(rtv);
@@ -3818,7 +3822,12 @@ void STDMETHODCALLTYPE hookedClearUavUint(ID3D11DeviceContext* self,
                                           const UINT c[4]) {
     if (g_flatComputeInternal) { g_state->realClearUavUint(self, uav, c); return; }
     gpuFrameCommand(self);
-    if (!foreignContext(self) && flatRuntimeActive()) flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
+    if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
+        flatRuntimeOverlayViewMutation(uav, FlatOverlayMutationOp::ClearUav,
+            FlatMutationDetails::clear(FlatOverlayMutationOp::ClearUav,"ClearUnorderedAccessViewUint",c));
+    }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearUav(uav);
     g_state->realClearUavUint(self, uav, c);
 }
@@ -3827,7 +3836,12 @@ void STDMETHODCALLTYPE hookedClearUavFloat(ID3D11DeviceContext* self,
                                            const FLOAT c[4]) {
     if (g_flatComputeInternal) { g_state->realClearUavFloat(self, uav, c); return; }
     gpuFrameCommand(self);
-    if (!foreignContext(self) && flatRuntimeActive()) flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
+    if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
+        flatRuntimeOverlayViewMutation(uav, FlatOverlayMutationOp::ClearUav,
+            FlatMutationDetails::clear(FlatOverlayMutationOp::ClearUav,"ClearUnorderedAccessViewFloat",c));
+    }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalClearUav(uav);
     g_state->realClearUavFloat(self, uav, c);
 }
@@ -3835,7 +3849,11 @@ void STDMETHODCALLTYPE hookedGenerateMips(ID3D11DeviceContext* self,
                                           ID3D11ShaderResourceView* srv) {
     if (g_flatComputeInternal) { g_state->realGenerateMips(self, srv); return; }
     gpuFrameCommand(self);
-    if (!foreignContext(self) && flatRuntimeActive()) flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
+    if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
+        flatRuntimeOverlayViewMutation(srv, FlatOverlayMutationOp::GenerateMips);
+    }
     g_state->realGenerateMips(self, srv);
 }
 
@@ -3876,11 +3894,18 @@ void STDMETHODCALLTYPE hookedOMSetRtvAndUav(ID3D11DeviceContext* self, UINT n,
                                             ID3D11UnorderedAccessView* const* uavs,
                                             const UINT* counts) {
     if (g_flatComputeInternal) { g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs, counts); return; }
+    // A foreign deferred context cannot write the immediate target yet, but
+    // an eventual command list or undocumented cross-context path must not
+    // silently preserve the protected suffix.
+    flatRuntimeOverlayUavBind(self,uavCount,uavs);
     if (foreignContext(self)) {
         g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs,
                                     counts);
         return;
     }
+    // A pixel-shader UAV may write the protected HDR/depth resources even
+    // when RTV0 is null or points elsewhere. The suffix cannot prove such a
+    // write's ownership, including KEEP_RENDER_TARGETS_UNCHANGED binds.
     // D3D11_KEEP_RENDER_TARGETS_UNCHANGED asks for the UAVs to be set while the
     // render targets are left alone, so it says nothing about slot 0 and must
     // not be treated as a rebind. Spelled out rather than named: the SDK header
@@ -4078,6 +4103,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ExecuteList, self, static_cast<int>(self->GetType()));
     State* s = g_state;
     if (foreignContext(self)) {
+        if (flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
         engineVelocityResourceUnknown(nullptr);
         s->realExecuteCommandList(self, list, restoreContextState);
         return;
@@ -4151,6 +4177,8 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
         if(type!=D3D11_MAP_READ)engineVelocityResourceUnknown(res);
         const HRESULT hr=s->realMap(self, res, sub, type, flags, mapped);
         flatRuntimeMapBounceNoteMap(self,res,sub,type,false,SUCCEEDED(hr));
+        if (type!=D3D11_MAP_READ && SUCCEEDED(hr) && flatRuntimeActive())
+            flatRuntimeOverlayForeignMutation();
         return hr;
     }
     // Timed, not touched: the wait inside the runtime's Map is the game's
@@ -4183,7 +4211,17 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     const bool mapData0 = mapData && sub == 0;
     flatRuntimeMapBounceNoteMap(self,res,sub,type,false,mapData);
     if (mapData0) mapped->pData=flatRuntimeMapBounceInstall(self,res,sub,type,mapped->pData);
-    if (mapData0 && flatRuntimeActive()) flatRuntimeMap(res, type, mapped->pData);
+    if (mapData0 && flatRuntimeActive()) {
+        if (type != D3D11_MAP_READ) {
+            auto detail=FlatMutationDetails::named(FlatOverlayMutationOp::Map,"Map");
+            detail.known=FlatMutationDetails::MapType|FlatMutationDetails::Flags|FlatMutationDetails::DstSub|
+                FlatMutationDetails::RowPitch|FlatMutationDetails::DepthPitch;
+            detail.mapType=type;detail.flags=flags;detail.dstSub=sub;
+            detail.rowPitch=mapped->RowPitch;detail.depthPitch=mapped->DepthPitch;
+            flatRuntimeOverlayResourceMutation(res, FlatOverlayMutationOp::Map,detail);
+        }
+        flatRuntimeMap(res, type, mapped->pData);
+    }
     if (mapData0 && flatTemporalCapturing())
         flatTemporalMap(res, sub, type, mapped->pData);
     // The census CB watch's half of the tee: while a census runs, it needs
@@ -4317,6 +4355,7 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     ++s->thunkHits[kHitUnmap];
     if (foreignContext(self)) {
         engineVelocityResourceUnknown(res);
+        if (flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
         bounceLease.finish();
         s->realUnmap(self, res, sub);
         return;
@@ -4335,7 +4374,12 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
     // the tees below do and for the same reason: after it, the memory is no
     // longer ours to look at.
     if (drawCensusArmed()) drawCensusCbNoteUnmap(res);
-    if (flatRuntimeActive()) flatRuntimeUnmap(res);
+    if (flatRuntimeActive()) {
+        auto detail=FlatMutationDetails::named(FlatOverlayMutationOp::Unmap,"Unmap");detail.dstSub=sub;
+        detail.known=FlatMutationDetails::DstSub;
+        flatRuntimeOverlayResourceMutation(res, FlatOverlayMutationOp::Unmap,detail);
+        flatRuntimeUnmap(res);
+    }
     if (flatTemporalCapturing()) flatTemporalUnmap(res);
     if (fssRevealWantsDraws()) fssRevealNoteUnmap(res);
     // Read before forwarding: after the real Unmap the memory is no longer ours
@@ -5591,6 +5635,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
                                           ID3D11Resource* dst, ID3D11Resource* src) {
     if (g_flatComputeInternal) { g_state->realCopyResource(self, dst, src); return; }
     gpuFrameCommand(self);
+    if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Copy, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopyResource, reinterpret_cast<const void*>(g_state->realCopyResource),
                      "CopyResource");
@@ -5598,7 +5643,12 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteWrite(dst);   // a write into H after the resolve is the latch's
     if(foreignContext(self))engineVelocityResourceUnknown(dst);
     if (!foreignContext(self)) {motionResourceWritten(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
-    if (!foreignContext(self) && flatRuntimeActive()) { flatRuntimeSubstitution(self, FlatSubstEvent::kCopy); flatRuntimeWritten(dst); }
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource,
+            FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyResource,"CopyResource",src));
+        flatRuntimeWritten(dst);
+    }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'R');
     if (drawCensusArmed()) {
         drawCensusCopy('R', dst, 0, 0, 0, src, 0, false, 0, 0, 0, 0,
@@ -5615,6 +5665,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
                                       FLOAT depth, UINT8 stencil) {
     if (g_flatComputeInternal) { g_state->realClearDsv(self, dsv, flags, depth, stencil); return; }
     gpuFrameCommand(self);
+    if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::ClearDsv, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotClearDepthStencilView, reinterpret_cast<const void*>(g_state->realClearDsv),
                      "ClearDepthStencilView");
@@ -5627,6 +5678,8 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
     if (!foreignContext(self)) {depthProbeNoteClear(dsv, depth);if(uiLayerWatching())uiLayerNoteDepthClear(dsv, flags, depth, stencil);}
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kClear);
+        flatRuntimeOverlayViewMutation(dsv, FlatOverlayMutationOp::ClearDsv,
+            FlatMutationDetails::clearDepth(flags,depth,stencil));
         flatRuntimeWeaponFootprintClear(dsv, flags, stencil);
     }
     if (!foreignContext(self) && (flags & D3D11_CLEAR_DEPTH) && flatRuntimeActive()) { ResourceInfo info{}; if (bindingResolve(dsv, &info)) flatRuntimeWritten(static_cast<ID3D11Resource*>(info.resource)); }
@@ -5641,6 +5694,7 @@ void STDMETHODCALLTYPE hookedClearDsv(ID3D11DeviceContext* self,
 void STDMETHODCALLTYPE hookedBegin(ID3D11DeviceContext* self,
                                    ID3D11Asynchronous* async) {
     if (g_flatComputeInternal) { g_state->realBegin(self, async); return; }
+    if(runtimeFlatProfile())flatRuntimeReplayQueryBegin(self, async);
     gpuFrameCommand(self);
     if (gpuFrameInternal()) { g_state->realBegin(self, async); return; }
     if (drawCensusArmed()) {
@@ -5653,11 +5707,16 @@ void STDMETHODCALLTYPE hookedEnd(ID3D11DeviceContext* self,
                                  ID3D11Asynchronous* async) {
     if (g_flatComputeInternal) { g_state->realEnd(self, async); return; }
     gpuFrameCommand(self);
-    if (gpuFrameInternal()) { g_state->realEnd(self, async); return; }
+    if (gpuFrameInternal()) {
+        g_state->realEnd(self, async);
+        if(runtimeFlatProfile())flatRuntimeReplayQueryEnd(self, async);
+        return;
+    }
     if (drawCensusArmed()) {
         drawCensusQuery('E', async, foreignContext(self));
     }
     g_state->realEnd(self, async);
+    if(runtimeFlatProfile())flatRuntimeReplayQueryEnd(self, async);
 }
 
 // The argument buffer holds the counts, so the census records n=0 i=0
@@ -5668,9 +5727,9 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
         withFlatBypassTrace(self, 'Z', 0, 0, DrawArgs{}, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
             FlatRuntimeDrawScope flatDraw(self, 0, 'Z');
-            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
+            if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw(args, off);
             g_state->realDrawIndexedInstancedIndirect(self, args, off);
-            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawIndexedInstancedIndirect>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'Z', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable, off);
@@ -5718,9 +5777,9 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
         withFlatBypassTrace(self, 'Y', 0, 0, DrawArgs{}, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
             FlatRuntimeDrawScope flatDraw(self, 0, 'Y');
-            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw(args, off);
+            if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw(args, off);
             g_state->realDrawInstancedIndirect(self, args, off);
-            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawInstancedIndirect>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'Y', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable, off);
@@ -5765,7 +5824,14 @@ void STDMETHODCALLTYPE hookedCopyStructureCount(ID3D11DeviceContext* self,
                                                 ID3D11Buffer* dst, UINT off,
                                                 ID3D11UnorderedAccessView* src) {
     gpuFrameCommand(self);
-    if (!foreignContext(self) && flatRuntimeActive()) flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
+    if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
+        auto detail=FlatMutationDetails::named(FlatOverlayMutationOp::CopyStructureCount,"CopyStructureCount");
+        detail.sourceView=src;detail.dstX=off;
+        detail.known=FlatMutationDetails::SourceView|FlatMutationDetails::DstXYZ;
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyStructureCount,detail);
+    }
     if(!foreignContext(self)){motionResourceWritten(dst,off,uint64_t(off)+4);glitchFrameInvalidatePool(dst);}
     else engineVelocityResourceUnknown(dst);
     if (drawCensusArmed()) {
@@ -5779,6 +5845,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
     UINT dstZ, ID3D11Resource* src, UINT srcSub, const D3D11_BOX* box) {
     if (g_flatComputeInternal) { g_state->realCopySubresourceRegion(self,dst,dstSub,dstX,dstY,dstZ,src,srcSub,box); return; }
     gpuFrameCommand(self);
+    if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::CopyRegion, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotCopySubresourceRegion, reinterpret_cast<const void*>(g_state->realCopySubresourceRegion),
                      "CopySubresourceRegion");
@@ -5795,7 +5862,13 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
         if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
     }
-    if (!foreignContext(self) && flatRuntimeActive()) { flatRuntimeSubstitution(self, FlatSubstEvent::kCopy); flatRuntimeWritten(dst); }
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyRegion,
+            FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyRegion,"CopySubresourceRegion",
+                src,srcSub,dstSub,box,dstX,dstY,dstZ));
+        flatRuntimeWritten(dst);
+    }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'C');
     if (drawCensusArmed()) {
         drawCensusCopy('S', dst, dstSub, dstX, dstY, src, srcSub, box != nullptr,
@@ -5817,6 +5890,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
                                                UINT rowPitch, UINT depthPitch) {
     if (g_flatComputeInternal) { g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch, depthPitch); return; }
     gpuFrameCommand(self);
+    if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Update, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotUpdateSubresource, reinterpret_cast<const void*>(g_state->realUpdateSubresource),
                      "UpdateSubresource");
@@ -5844,7 +5918,15 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     if (fssRevealWantsDraws() && !foreignContext(self)) {
         fssRevealNoteUpdate(dst, data);
     }
-    if (!foreignContext(self) && flatRuntimeActive()) { flatRuntimeSubstitution(self, FlatSubstEvent::kCopy); flatRuntimeUpdate(dst, data, box); }
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
+        auto detail=FlatMutationDetails::transfer(FlatOverlayMutationOp::UpdateSubresource,
+            "UpdateSubresource",nullptr,0,dstSub,box);
+        detail.rowPitch=rowPitch;detail.depthPitch=depthPitch;
+        detail.known|=FlatMutationDetails::RowPitch|FlatMutationDetails::DepthPitch;
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::UpdateSubresource,detail);
+        flatRuntimeUpdate(dst, data, box);
+    }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalUpdate(dst, data, box);
     g_state->realUpdateSubresource(self, dst, dstSub, box, data, rowPitch,
                                    depthPitch);
@@ -5861,11 +5943,19 @@ void STDMETHODCALLTYPE hookedResolveSubresource(ID3D11DeviceContext* self,
                                                 DXGI_FORMAT fmt) {
     if (g_flatComputeInternal) { g_state->realResolveSubresource(self, dst, dstSub, src, srcSub, fmt); return; }
     gpuFrameCommand(self);
+    if (foreignContext(self) && flatRuntimeActive()) flatRuntimeOverlayForeignMutation();
     if (vrCensusEnabled()) vrCensusNote(VrCensusEvent::Resolve, self, static_cast<int>(self->GetType()));
     noteStaleForward(kSlotResolveSubresource, reinterpret_cast<const void*>(g_state->realResolveSubresource),
                      "ResolveSubresource");
     if(!foreignContext(self)){if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);}
-    if (!foreignContext(self) && flatRuntimeActive()) { flatRuntimeSubstitution(self, FlatSubstEvent::kResolve); flatRuntimeWritten(dst); }
+    if (!foreignContext(self) && flatRuntimeActive()) {
+        flatRuntimeSubstitution(self, FlatSubstEvent::kResolve);
+        auto detail=FlatMutationDetails::transfer(FlatOverlayMutationOp::Resolve,"ResolveSubresource",src,srcSub,dstSub);
+        detail.format=static_cast<UINT>(fmt);
+        detail.known|=FlatMutationDetails::Format;
+        flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::Resolve,detail);
+        flatRuntimeWritten(dst);
+    }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'V');
     if (drawCensusArmed()) {
         drawCensusResolve(dst, dstSub, src, srcSub, static_cast<uint32_t>(fmt));
@@ -6014,9 +6104,9 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             // the engine-motion PS/MRT or the output-copy SRV.
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
             FlatRuntimeDrawScope flatDraw(self, 1, 'D', count, 0, static_cast<int32_t>(start));
-            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDraw(self, count, start);
-            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'D', count, 1, args, 1);
@@ -6073,9 +6163,9 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         withFlatBypassTrace(self, 'A', 0, 0, DrawArgs{}, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, 0, 0);
             FlatRuntimeDrawScope flatDraw(self, 0, 'A');
-            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDrawAuto(self);
-            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kAutoDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'A', 0, 0, DrawArgs{}, 1, draw_ladder::kActionGpuDrawArgsUnavailable);
@@ -6114,9 +6204,9 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
         withFlatBypassTrace(self, 'I', count, 1, args, [&](auto& trace) {
             if (self == g_state->ownerCtx && flatTemporalCapturing()) flatTemporalDraw(self, count, 1);
             FlatRuntimeDrawScope flatDraw(self, 1, 'I', count, startIndex, baseVertex);
-            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDrawIndexed(self, count, startIndex, baseVertex);
-            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'I', count, 1, args, 1);
@@ -6179,9 +6269,9 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
                 flatTemporalDraw(self, perInstance, instances);
             FlatRuntimeDrawScope flatDraw(self, instances, 'N', perInstance, 0,
                                           static_cast<int32_t>(startVertex), startInstance);
-            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDrawInstanced(self, perInstance, instances, startVertex, startInstance);
-            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'N', perInstance, instances, args, 1);
@@ -6253,10 +6343,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
                 flatTemporalDraw(self, perInstance, instances);
             FlatRuntimeDrawScope flatDraw(self, instances, 'X', perInstance, startIndex,
                                           baseVertex, startInstance);
-            if (flatDraw.weaponFootprintStarted) flatDraw.beginActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.beginActualDraw();
             g_state->realDrawIndexedInstanced(self, perInstance, instances, startIndex,
                                               baseVertex, startInstance);
-            if (flatDraw.weaponFootprintStarted) flatDraw.endActualDraw();
+            if (flatDraw.needsActualDraw()) flatDraw.endActualDraw();
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kOriginalDraw>(
                 trace, draw_ladder::ActionPhase::Issue, draw_ladder::ActionOutcome::Applied,
                 'X', perInstance, instances, args, 1);

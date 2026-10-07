@@ -198,10 +198,11 @@ inline int flatPixelCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
             check(SUCCEEDED(device->CreateTexture2D(&d,&init,&ht[i])),"HDR route source texture created");
             hs[i]=ht[i].Get();
         }
-        std::vector<float> hslots(hw*hh*2,0);
+        std::vector<float> hslots(hw*hh*4,0);
+        for(unsigned i=0;i<hw*hh;++i){hslots[i*4+2]=float(i);hslots[i*4+3]=19;}
         D3D11_TEXTURE2D_DESC sd{};sd.Width=hw;sd.Height=hh;sd.ArraySize=sd.MipLevels=1;
-        sd.SampleDesc.Count=1;sd.Format=DXGI_FORMAT_R32G32_FLOAT;sd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SUBRESOURCE_DATA si{};si.pSysMem=hslots.data();si.SysMemPitch=hw*8;
+        sd.SampleDesc.Count=1;sd.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;sd.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA si{};si.pSysMem=hslots.data();si.SysMemPitch=hw*16;
         ComPtr<ID3D11Texture2D> st;ComPtr<ID3D11ShaderResourceView> sv;
         check(SUCCEEDED(device->CreateTexture2D(&sd,&si,&st)) &&
             SUCCEEDED(device->CreateShaderResourceView(st.Get(),nullptr,&sv)),"HDR cropped engine slot texture created");
@@ -235,6 +236,12 @@ inline int flatPixelCaptureGpuTests(ID3D11Device* device,ID3D11DeviceContext* co
                 const std::vector<unsigned char> actual((std::istreambuf_iterator<char>(file)),std::istreambuf_iterator<char>());
                 check(actual==expected,"HDR format bytes and nonzero ROI origin match their frame's source");
             }
+            std::vector<float> expectedSlots(cw*ch*4);
+            for(unsigned y=0;y<ch;++y)std::memcpy(expectedSlots.data()+y*cw*4,hslots.data()+((cy+y)*hw+cx)*4,cw*16);
+            std::ifstream slotFile(hdir/(std::string("frame_")+std::to_string(frameNo)+"_slots.bin"),std::ios::binary);
+            const std::vector<unsigned char> slotBytes((std::istreambuf_iterator<char>(slotFile)),std::istreambuf_iterator<char>());
+            check(slotBytes.size()==expectedSlots.size()*4 && !std::memcmp(slotBytes.data(),expectedSlots.data(),slotBytes.size()),
+                "HDR ROI ownership preserves exact primitive and draw-token channels");
             std::ifstream mf(hdir/(std::string("frame_")+std::to_string(frameNo)+".json"),std::ios::binary);
             const std::string body((std::istreambuf_iterator<char>(mf)),std::istreambuf_iterator<char>());
             check(body.find("\"route\":\"hdr\"")!=std::string::npos &&

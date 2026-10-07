@@ -6,6 +6,7 @@
 #include "flat_projection_scope.h"
 #include "flat_substitution.h"
 #include "flat_map_bounce.h"
+#include "flat_mutation_diagnostic.h"
 #include <optional>
 namespace edvr {
 struct FlatMapBounceD3DDriver {
@@ -78,11 +79,28 @@ void flatRuntimeViewport(UINT, const D3D11_VIEWPORT*);
 void flatRuntimeMap(ID3D11Resource*, D3D11_MAP, void*);
 void flatRuntimeUnmap(ID3D11Resource*);
 void flatRuntimeUpdate(ID3D11Resource*, const void*, const D3D11_BOX*);
-void flatRuntimeWritten(ID3D11Resource*);
+void flatRuntimeWritten(ID3D11Resource*, FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written);
+enum class FlatOverlayMutationRole : unsigned char { Unrelated, Hdr, Depth, Unknown };
+inline FlatOverlayMutationRole flatRuntimeOverlayMutationRole(
+    const void* resource, const void* hdr, const void* depth) {
+    if (!resource) return FlatOverlayMutationRole::Unknown;
+    if (resource == hdr) return FlatOverlayMutationRole::Hdr;
+    if (resource == depth) return FlatOverlayMutationRole::Depth;
+    return FlatOverlayMutationRole::Unrelated;
+}
+void flatRuntimeOverlayResourceMutation(ID3D11Resource*, FlatOverlayMutationOp,
+                                       const FlatMutationDetails& = {});
+void flatRuntimeOverlayViewMutation(ID3D11View*, FlatOverlayMutationOp,
+                                   const FlatMutationDetails& = {});
+void flatRuntimeOverlayForeignMutation();
 void flatRuntimeUnknown();
-void flatRuntimeArmProjectionAudit();
+void flatRuntimeOverlayUavBind(ID3D11DeviceContext*, UINT count,
+                               ID3D11UnorderedAccessView* const*);
+void flatRuntimeArmProjectionAudit(bool full = false);
 void flatRuntimeCreateBuffer(ID3D11Buffer*, const void* initialData);
 void flatRuntimeClearBindings();
+void flatRuntimeReplayQueryBegin(ID3D11DeviceContext*, ID3D11Asynchronous*);
+void flatRuntimeReplayQueryEnd(ID3D11DeviceContext*, ID3D11Asynchronous*);
 // F10-only retained DSV clear chronology; called before the real clear.
 void flatRuntimeWeaponFootprintClear(ID3D11DepthStencilView*, UINT clearFlags, UINT8 stencil);
 void flatRuntimeWeaponFootprintBeforePresent(IDXGISwapChain*, UINT flags);
@@ -91,13 +109,42 @@ void flatRuntimeWeaponFootprintBeforePresent(IDXGISwapChain*, UINT flags);
 // lost its state). Every hook of that kind calls this before its real call; a load and a compare when nothing of EDVR's
 // is bound, which is nearly always.
 void flatRuntimeSubstitution(ID3D11DeviceContext* ctx, FlatSubstEvent event);
+inline bool flatRuntimeNeedsActualDraw(bool footprintStarted, bool overlayPlanned, bool foregroundPlanned=false,
+                                       bool untrustedPlanned=false) {
+    return footprintStarted || overlayPlanned || foregroundPlanned || untrustedPlanned;
+}
 struct FlatRuntimeDrawScope {
     ID3D11DeviceContext* ctx = nullptr;
     ID3D11ShaderResourceView* original = nullptr;
     bool gameHadTarget6 = false;   // the game's own slot 6 was occupied under a substituted draw
     bool producer = false, replaced = false;
     bool drawCaptureStarted = false;
+    void* drawPacket=nullptr;
+    bool drawPacketExecuted=false;
+    bool drawPacketOnly=false;
+    bool drawPacketPriority=false;
+    uint64_t drawPacketVs=0,drawPacketPs=0,drawPacketJitterBefore=0,drawPacketOverlayBefore=0;
     bool weaponFootprintStarted = false;
+    bool overlayPlanned = false, overlayStarted = false, overlayEnded = false;
+    bool overlayReplayPending = false;
+    bool foregroundPlanned = false, foregroundStarted = false, foregroundEnded = false;
+    bool untrustedPlanned = false, untrustedStarted = false, untrustedEnded = false;
+    bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
+    bool domainProtectedOverlay=false;
+    bool domainHdrWriter=false;
+    bool domainBeforeWorld=false;
+    bool domainSameWorld=false;
+    ID3D11Texture2D* domainDepth=nullptr;
+    uint64_t domainVs=0,domainPs=0;
+    uint64_t domainCameraHash=0;
+    unsigned domainWriterToken=0;
+    unsigned domainFormat=0;
+    unsigned domainWidth=0,domainHeight=0;
+    float domainCamera[6][4]{};
+    bool needsActualDraw() const { return drawPacket || domainPlanned || flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
+                                                                     foregroundPlanned, untrustedPlanned); }
+    ID3D11Texture2D* overlayHdr = nullptr;
+    ID3D11DepthStencilView* overlayDsv = nullptr;
     uint32_t weaponFootprintSeq = 0;
     char weaponDrawKind = '?';
     uint32_t weaponDrawCount = 0, weaponDrawStart = 0, weaponDrawInstances = 0, weaponDrawStartInstance = 0;

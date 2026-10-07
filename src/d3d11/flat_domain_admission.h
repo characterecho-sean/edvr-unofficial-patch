@@ -1,0 +1,354 @@
+#pragma once
+#include "dxbc_engine_velocity.h"
+#include "flat_camera_phase.h"
+#include "flat_projection_recipes.h"
+#include "flat_shader_classifier.h"
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
+namespace edvr {
+inline uint64_t flatDomainBytecodeHash(const void* data,size_t size) {
+    uint64_t h=1469598103934665603ull;
+    const auto* bytes=static_cast<const unsigned char*>(data);
+    for(size_t i=0;i<size;++i){h^=bytes[i];h*=1099511628211ull;}return h;
+}
+struct FlatDomainShaderProof {
+    bool present=false,pool=false,projection=false,nullPs=false,worldPs=false,foreignPs=false;
+    bool inertNoSideEffects=false;
+    unsigned projectionSlot=0,projectionRow=0;
+    FlatProjectionPatchLayout projectionLayout=FlatProjectionPatchLayout::ForwardColumns;
+    std::array<unsigned char,6> colorComponents{};
+    const char* refusal="foreground-original-shader-unavailable";
+};
+// The camera classifier proves jitter independence, not freedom from UAV
+// effects. Accept only its understood read/arithmetic/control operations and
+// known read-only declarations. The store opcodes 164/166, other stores,
+// atomics, UAV/thread declarations and unknown token forms all fail closed.
+inline bool flatDomainNoSideEffectProgram(const void* bytes,size_t size,uint32_t stage) {
+    try {
+        const auto chunks=dxbc_engine_velocity_detail::parseContainer(bytes,size,stage);
+        bool found=false,returned=false;
+        for(const auto& chunk:chunks)if(dxbc_engine_velocity_detail::isProgram(chunk.tag)) {
+            if(found)return false;
+            found=true;
+            const auto words=dxbc_engine_velocity_detail::programWords(chunk.bytes);
+            std::vector<flat_shader_classifier_detail::Instr> instructions;
+            flat_shader_classifier_detail::ProgramFacts facts;
+            if(!flat_shader_classifier_detail::walkProgram(words,instructions,facts) ||
+               facts.sawUnknownOpcode || facts.operandOutOfRange)return false;
+            for(const auto& in:instructions) {
+                const uint32_t op=in.opcode;
+                if(in.parseError || in.unmodelable)return false;
+                if(op==88 || op==dxbc_engine_velocity_detail::kOpDclConstantBuffer || op==90 ||
+                   (op>=dxbc_engine_velocity_detail::kOpDclInput && op<=dxbc_engine_velocity_detail::kOpDclTemps) ||
+                   op==dxbc_engine_velocity_detail::kOpDclGlobalFlags || op==161 || op==162)continue;
+                if(flat_shader_classifier_detail::isDeclaration(op) ||
+                   op==164 || op==166 || op>=168 ||
+                   flat_shader_classifier_detail::operandCount(op)<0)return false;
+                if(op==dxbc_engine_velocity_detail::kOpRet) returned=true;
+            }
+        }
+        return found && returned;
+    } catch(...) {return false;}
+}
+// Creation bytes, rather than membership of the legacy world producer table,
+// establish the additional flat ownership producer. Exact projection recipes
+// remain valid only for the exact bytecode identities they describe.
+inline FlatDomainShaderProof flatDomainShaderProof(uint64_t vsHash,uint64_t psHash,
+    const void* vs,size_t vsSize,const void* ps,size_t psSize) {
+    FlatDomainShaderProof p;p.nullPs=psHash==0;
+    if(!vs || !vsSize || (!p.nullPs && (!ps || !psSize)))return p;
+    if(flatDomainBytecodeHash(vs,vsSize)!=vsHash ||
+       (!p.nullPs && flatDomainBytecodeHash(ps,psSize)!=psHash)) {
+        p.refusal="foreground-original-bytecode-identity";return p;
+    }
+    p.present=true;EngineVelocityInputs inputs{};std::string why;
+    p.pool=engineVelocityDeriveInputs(vs,vsSize,inputs,why);
+    auto recipes=flatProjectionDrawRecipes(vsHash,psHash);
+    // The audited 72BDD vertex suffix is an unconditional B1[270..273]
+    // forward-column clip calculation, independent of its consumer PS. Reuse
+    // that existing exact-bytecode recipe; PS ownership proof remains below.
+    if(!recipes.count && vsHash==0x72BDD292154158ADull)
+        recipes=flatProjectionDrawRecipes(vsHash,0x76849D64AC657DB9ull);
+    for(unsigned i=0;i<recipes.count;++i) {
+        const auto& r=recipes.requests[i];
+        if(r.stage!=FlatProjectionStage::Vertex || r.patchCount!=1)continue;
+        const auto& patch=r.patches[0];
+        if(patch.layout!=FlatProjectionPatchLayout::ForwardColumns &&
+           patch.layout!=FlatProjectionPatchLayout::ForwardDp4)continue;
+        p.projection=true;p.projectionSlot=r.slot;p.projectionRow=patch.byteOffset/16;p.projectionLayout=patch.layout;break;
+    }
+    if(!p.projection) {
+        const auto c=classifyFlatShaderPair(vs,vsSize,ps,psSize);
+        p.inertNoSideEffects=!p.nullPs && c.vs==FlatVsProjectionClass::InertNoCB &&
+            c.ps==FlatPsProjectionSafety::Clean &&
+            flatDomainNoSideEffectProgram(vs,vsSize,dxbc_engine_velocity_detail::kVs50) &&
+            flatDomainNoSideEffectProgram(ps,psSize,dxbc_engine_velocity_detail::kPs50);
+        if(c.vs==FlatVsProjectionClass::ForwardColumns || c.vs==FlatVsProjectionClass::ForwardDp4) {
+            p.projection=true;p.projectionSlot=c.vsSlot;p.projectionRow=c.vsRow;
+            p.projectionLayout=c.vs==FlatVsProjectionClass::ForwardColumns?
+                FlatProjectionPatchLayout::ForwardColumns:FlatProjectionPatchLayout::ForwardDp4;
+        }
+    }
+    if(!p.projection){p.refusal="foreground-original-projection-unproven";return p;}
+    if(p.nullPs){p.worldPs=true;p.foreignPs=p.pool;p.refusal=nullptr;return p;}
+    bool discard=false;
+    try {
+        const auto chunks=dxbc_engine_velocity_detail::parseContainer(ps,psSize,dxbc_engine_velocity_detail::kPs50);
+        for(const auto& chunk:chunks) {
+            if(chunk.tag==dxbc_engine_velocity_detail::kTagOsgn)
+                for(const auto& output:dxbc_engine_velocity_detail::parseSignature(chunk.bytes)) {
+                    if(output.systemValue && output.systemValue!=64){p.refusal="foreground-depth-or-coverage-output";return p;}
+                    if((output.systemValue==64 || dxbc_engine_velocity_detail::equalName(output.name,"SV_Target")) && output.semanticIndex<6)
+                        p.colorComponents[output.semanticIndex]=static_cast<unsigned char>(output.masks&15);
+                }
+            if(dxbc_engine_velocity_detail::isProgram(chunk.tag)) {
+                const auto words=dxbc_engine_velocity_detail::programWords(chunk.bytes);
+                for(size_t at=2;at<words.size();at+=dxbc_engine_velocity_detail::instructionLength(words,at))
+                    discard=discard || (words[at]&0x7ffu)==13;
+            }
+        }
+    } catch(...) {p.refusal="foreground-original-PS-proof";return p;}
+    std::vector<BYTE> derivative;EngineVelocityInputs world=inputs;
+    if(!p.pool){world.positionRegister=30;world.identityRegister=31;world.identityComponent=0;}
+    p.worldPs=engineVelocityPatchPs(ps,psSize,world,derivative,why,false,p.pool?
+        dxbc_engine_velocity_detail::FlatMarkerKind::WorldPool:dxbc_engine_velocity_detail::FlatMarkerKind::World);
+    unsigned tokenSlot=~0u;
+    p.foreignPs=p.pool && engineVelocityPatchPs(ps,psSize,inputs,derivative,why,false,
+        dxbc_engine_velocity_detail::FlatMarkerKind::ForeignPoolProvenance,&tokenSlot);
+    p.refusal=!p.worldPs?"foreground-original-PS-proof":discard && !p.foreignPs?"foreground-foreign-discard-provenance":nullptr;
+    return p;
+}
+struct FlatDomainInertBindings {
+    const D3D11_BLEND_DESC* blend=nullptr;
+    const D3D11_DEPTH_STENCIL_DESC* depth=nullptr;
+    unsigned boundTargets=0;
+    bool actualShaderPair=false,originalDsv=false,readOnlyDepth=false;
+    bool noOtherStages=false,noUavs=false,noStreamOutput=false,noPredicate=false;
+};
+inline const char* flatDomainInertRefusal(const FlatDomainShaderProof& proof,const FlatDomainInertBindings& b) {
+    if(!proof.present || !proof.inertNoSideEffects)return "foreground-inert-shader-unproven";
+    if(!b.actualShaderPair)return "foreground-inert-actual-shader-mismatch";
+    if(!b.originalDsv)return "foreground-inert-original-DSV-mismatch";
+    if(!b.noOtherStages)return "foreground-inert-other-shader-stage";
+    if(!b.noUavs)return "foreground-inert-OM-UAV-bound";
+    if(!b.noStreamOutput)return "foreground-inert-stream-output-bound";
+    if(!b.noPredicate)return "foreground-inert-predicate-bound";
+    if(!b.readOnlyDepth && (!b.depth || (b.depth->DepthEnable &&
+        b.depth->DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ZERO)))return "foreground-inert-depth-write";
+    for(unsigned i=0;i<8;++i)if(b.boundTargets&(1u<<i)) {
+        const unsigned mask=b.blend?
+            b.blend->RenderTarget[b.blend->IndependentBlendEnable?i:0].RenderTargetWriteMask:
+            D3D11_COLOR_WRITE_ENABLE_ALL;
+        if(mask)return "foreground-inert-color-write";
+    }
+    return nullptr;
+}
+inline bool flatDomainInertNoWrite(const FlatDomainShaderProof& proof,const FlatDomainInertBindings& b) {
+    return flatDomainInertRefusal(proof,b)==nullptr;
+}
+// A checked actual B1 publication can serve multiple independently proven
+// shaders using the same canonical projection. Other recipes must be checked
+// against their own actual bound constants rather than inheriting this receipt.
+struct FlatDomainPhasePublication {
+    uint64_t epoch=0;uint32_t generation=0;bool valid=false;
+    static bool canonical(const FlatDomainShaderProof& p) {
+        return p.projection && p.projectionSlot==1 && p.projectionRow==270 &&
+            p.projectionLayout==FlatProjectionPatchLayout::ForwardColumns;
+    }
+    void checked(const FlatDomainShaderProof& p,uint32_t binding,uint64_t publication) {
+        valid=canonical(p);generation=binding;epoch=publication;
+    }
+    bool matches(const FlatDomainShaderProof& p,uint32_t binding,uint64_t publication)const {
+        return valid && canonical(p) && generation==binding && epoch==publication;
+    }
+};
+enum class FlatDomainPlanKind { Refuse,World,WorldPool,ForeignPool,PendingWorldNull };
+struct FlatDomainPlan {
+    FlatDomainPlanKind kind=FlatDomainPlanKind::Refuse;
+    const char* refusal=nullptr;
+    bool admitted()const{return kind!=FlatDomainPlanKind::Refuse;}
+};
+inline FlatDomainPlan flatDomainPlan(const FlatDomainShaderProof& p,bool color,uint32_t format,
+                                     bool camera,bool namedWorld,bool sameWorld) {
+    if(!camera)return {FlatDomainPlanKind::Refuse,"foreground-original-camera-unavailable"};
+    // Gbuffer (23) and the HDR light target (26, itself a Gbuffer slot in
+    // Odyssey) take owner marks; a forward first-person mesh writes the latter.
+    if(color && format!=23 && format!=26)
+        return {FlatDomainPlanKind::Refuse,"foreground-non-Gbuffer-writer"};
+    if(!p.present || !p.projection || !p.worldPs)return {FlatDomainPlanKind::Refuse,p.refusal};
+    if(p.nullPs && !p.pool) {
+        if(!namedWorld)return {FlatDomainPlanKind::PendingWorldNull,nullptr};
+        return sameWorld?FlatDomainPlan{FlatDomainPlanKind::World,nullptr}:
+            FlatDomainPlan{FlatDomainPlanKind::Refuse,"foreground-null-camera-not-world"};
+    }
+    if(!namedWorld || !sameWorld) {
+        if(!p.pool || !p.foreignPs)return {FlatDomainPlanKind::Refuse,p.refusal?p.refusal:"foreground-foreign-pool-unproven"};
+        return {FlatDomainPlanKind::ForeignPool,nullptr};
+    }
+    return {p.pool?FlatDomainPlanKind::WorldPool:FlatDomainPlanKind::World,nullptr};
+}
+// A draw that cannot write depth leaves every pixel's surface, and so its
+// owner mark, as the last depth writer left it: deferred light volumes,
+// particles, decals and forward glows only change color over that surface.
+// It needs no camera, projection or marker, and cannot refuse the frame.
+inline bool flatDomainPreservesSurface(const D3D11_DEPTH_STENCIL_DESC& depth) {
+    return !depth.DepthEnable || depth.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ZERO;
+}
+inline bool flatDomainWritesColor(const FlatDomainShaderProof& p,const D3D11_BLEND_DESC& blend,unsigned boundTargets) {
+    for(unsigned i=0;i<6;++i)if((boundTargets&(1u<<i)) &&
+        (blend.RenderTarget[blend.IndependentBlendEnable?i:0].RenderTargetWriteMask&p.colorComponents[i]))return true;
+    return false;
+}
+inline const char* flatDomainRasterRefusal(const FlatDomainShaderProof& p,const D3D11_BLEND_DESC& blend,
+    const D3D11_DEPTH_STENCIL_DESC& depth,unsigned boundTargets,bool foreign,bool hdr,bool colorAlready) {
+    if(blend.AlphaToCoverageEnable)return "foreground-alpha-to-coverage";
+    if((foreign || hdr) && (!depth.DepthEnable ||
+       (depth.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ALL && depth.DepthFunc!=D3D11_COMPARISON_EQUAL)))
+        return "foreground-unproven-readonly-depth";
+    // H's primitive/writer tuple limits the raster to fragments that passed
+    // the original stencil and discard. Unstamped replay cannot inherit that
+    // proof. World HDR likewise writes color and owner in the same fragment.
+    if(foreign && !p.foreignPs && depth.StencilEnable &&
+       (depth.FrontFace.StencilFunc!=D3D11_COMPARISON_ALWAYS || depth.BackFace.StencilFunc!=D3D11_COMPARISON_ALWAYS))
+        return "foreground-conditional-stencil";
+    // A draw that writes depth defines the surface its passing fragments
+    // show, so its owner mark is exact however its colour blends or masks
+    // (CFCA8FFC writes clip W into RT0 with MIN blend; forward HDR meshes
+    // blend). Colour mixed over a surface reprojects with that surface's
+    // motion, the ordinary transparency case for every temporal upscaler.
+    const bool surfaceWriter=depth.DepthEnable && depth.DepthWriteMask==D3D11_DEPTH_WRITE_MASK_ALL;
+    if(!surfaceWriter)for(unsigned i=0;i<6;++i)if((boundTargets&(1u<<i)) && p.colorComponents[i]) {
+        const auto& rt=blend.RenderTarget[blend.IndependentBlendEnable?i:0];
+        if(!rt.RenderTargetWriteMask)continue;
+        if(rt.BlendEnable || (rt.RenderTargetWriteMask&p.colorComponents[i])!=p.colorComponents[i])
+            return "foreground-mixed-component-writer";
+    }
+    const bool color=flatDomainWritesColor(p,blend,boundTargets);
+    if(!surfaceWriter && hdr && (!color || (p.colorComponents[0]&7)!=7))return "foreground-incomplete-HDR-color";
+    if(!surfaceWriter && (p.nullPs || !color) && colorAlready)return "foreground-depth-only-after-color";
+    return nullptr;
+}
+// ---- the world camera, predicted before it is named (design section 104) ------------------------------------------------------
+// A frame draws its world prepasses before the first source draw names the world camera, so before naming the only reference is the last
+// named world camera's (it persists across frames). A draw whose near plane equals the reference's was taken for the world's, planned
+// World/WorldPool with no capture, and left a witness that H checks against the selected camera. Near alone mistook a first-person depth
+// prepass for it: aiming down sights the weapon camera takes the world's near plane (and the world's pose and phase) and keeps its own
+// projection, 1.23 to 1.66 times the world's scale (flight 13:18, frames 51696-51707), so the draw left a witness no world camera could
+// match and every frame refused H (foreground-pending-null-not-selected-world). The projection scale tells the cameras apart where the
+// near plane cannot (flatCameraProjectionScale: free of the rotation and the phase). The world against its own previous frame moves
+// 1.000 to 1.038 a frame at 50 fps; the weapon against the previous world 1.32 to 1.66 entering the sights and at least 1.18 leaving
+// them. 10% sits between the two, and is the VR role tracker's own cut (flat_camera_vr.h, 0.92 of the field of view).
+constexpr double kFlatDomainWorldScaleTolerance = 0.10;
+struct FlatDomainWorldReference {
+    float nearPlane = 0;
+    double p0 = 0, p1 = 0;   // the projection scale on x and on y
+    bool valid() const { return nearPlane > 0 && std::isfinite(nearPlane) && p0 > 0 && p1 > 0; }
+};
+// The reference a named world camera leaves: its near plane and projection scales (invalid when its rows have no scale to take).
+inline FlatDomainWorldReference flatDomainWorldReference(const float (&rows)[6][4]) {
+    FlatDomainWorldReference ref;
+    double p0 = 0, p1 = 0;
+    if (!flatCameraProjectionScale(rows, p0, p1)) return ref;
+    ref.nearPlane = rows[3][2]; ref.p0 = p0; ref.p1 = p1;
+    return ref;
+}
+struct FlatDomainWorldPrediction {
+    bool nearEqual = false;          // the draw's near plane is the reference's (the cheap test, made first)
+    bool predicted = false;          // ... and both projection scales are within the tolerance of the reference's
+    double ratio0 = 0, ratio1 = 0;   // the draw's scale over the reference's, taken only for a draw whose near plane was equal
+};
+// THE predicate: is a draw before naming the world camera's? True only when its near plane is the reference's AND both projection scales
+// are within kFlatDomainWorldScaleTolerance of the reference's. No reference (the first frame of a session, or rows with no scale) is not
+// predicted: the draw is classified as any other (a first-person pool draw is captured). The scales are taken only for a draw whose near
+// plane is equal. `detail` reports the pieces (the runtime counts the near-equal draws the scale rejected).
+inline bool flatDomainPredictsWorld(const float (&rows)[6][4], const FlatDomainWorldReference& ref,
+                                    FlatDomainWorldPrediction* detail = nullptr) {
+    FlatDomainWorldPrediction out;
+    if (ref.valid() && rows[3][2] == ref.nearPlane) {
+        out.nearEqual = true;
+        double p0 = 0, p1 = 0;
+        if (flatCameraProjectionScale(rows, p0, p1)) {
+            out.ratio0 = p0 / ref.p0; out.ratio1 = p1 / ref.p1;
+            out.predicted = std::fabs(out.ratio0 - 1.0) <= kFlatDomainWorldScaleTolerance &&
+                            std::fabs(out.ratio1 - 1.0) <= kFlatDomainWorldScaleTolerance;
+        }
+    }
+    if (detail) *detail = out;
+    return out.predicted;
+}
+// A pre-world depth-only draw is provisional: its camera must become the
+// actual selected world camera in this frame. No later-material coverage is
+// guessed, and a foreign or missing world witness leaves the frame refused.
+class FlatDomainPendingNull {
+    // vs, ps and kind name the draw that left the witness, for the mismatch line alone (describeMismatch): they take no part in
+    // matching or in merging two witnesses. kind 1: a draw predicted to be the world's before naming (flatDomainPredictsWorld: the last
+    // world's near plane and projection scale); 2: a null prepass at another near.
+    struct Witness { const void* depth=nullptr;unsigned width=0,height=0;float camera[6][4]{};float x=0,y=0;uint64_t vs=0,ps=0;unsigned kind=0; };
+    std::array<Witness,4> witnesses_{};unsigned count_=0;uint64_t frame_=~0ull;
+public:
+    void beginFrame(uint64_t frame){if(frame_!=frame){frame_=frame;count_=0;}}
+    bool add(uint64_t frame,const void* depth,unsigned width,unsigned height,const float camera[6][4],float x,float y,
+             uint64_t vs=0,uint64_t ps=0,unsigned kind=0) {
+        beginFrame(frame);Witness w{depth,width,height,{},x,y,vs,ps,kind};std::memcpy(w.camera,camera,sizeof(w.camera));
+        for(unsigned i=0;i<count_;++i)if(witnesses_[i].depth==depth && witnesses_[i].width==width && witnesses_[i].height==height &&
+            witnesses_[i].x==x && witnesses_[i].y==y && std::memcmp(witnesses_[i].camera,camera,sizeof(w.camera))==0)return true;
+        if(count_==witnesses_.size())return false;witnesses_[count_++]=w;return true;
+    }
+    // The first witness matches() would refuse, said in one line (design doc section 104: aiming down sights refused H with this
+    // witness): which kind of draw left it, what differs (depth, size, phase, or the camera block), and for the camera block the
+    // decoded terms of both (x and y scale, near, position), the witness's projection scale over the selected camera's on each axis
+    // (flatCameraProjectionScale: 1.0 for the world's own draw, 1.23 and more for a weapon camera sharing the world's near plane) and
+    // the first differing float. False when every witness matches.
+    bool describeMismatch(uint64_t frame,const void* depth,unsigned width,unsigned height,const float camera[6][4],float x,float y,
+                          char* out,size_t size)const {
+        if(!out || !size)return false;
+        out[0]=0;
+        if(frame!=frame_) {   // matches() refuses these too: witnesses kept from an earlier frame, none recorded in this one
+            if(!count_)return false;
+            std::snprintf(out,size,"%u witness(es) left from frame %llu, none recorded in this frame",count_,(unsigned long long)frame_);
+            return true;
+        }
+        for(unsigned i=0;i<count_;++i) {
+            const auto& w=witnesses_[i];
+            const bool d=w.depth!=depth, s=w.width!=width || w.height!=height, p=w.x!=x || w.y!=y;
+            const bool c=std::memcmp(w.camera,camera,sizeof(w.camera))!=0;
+            if(!d && !s && !p && !c)continue;
+            unsigned row=0,col=0;bool found=false;
+            for(unsigned r=0;r<6 && !found;++r)for(unsigned k=0;k<4;++k)
+                if(std::memcmp(&w.camera[r][k],&camera[r][k],sizeof(float))!=0){row=r;col=k;found=true;break;}
+            std::snprintf(out,size,"witness %u/%u kind=%s VS=%016llX PS=%016llX differs:%s%s%s%s; witness scale=(%.6g,%.6g) near=%.6g "
+                "pos=(%.6g,%.6g,%.6g) phase=(%.5g,%.5g) | selected scale=(%.6g,%.6g) near=%.6g pos=(%.6g,%.6g,%.6g) phase=(%.5g,%.5g)",
+                i+1,count_,w.kind==1?"predicted-world-near":w.kind==2?"null-prepass":"unnamed",
+                (unsigned long long)w.vs,(unsigned long long)w.ps,d?" depth":"",s?" size":"",p?" phase":"",c?" camera":"",
+                w.camera[0][0],w.camera[1][1],w.camera[3][2],w.camera[5][0],w.camera[5][1],w.camera[5][2],w.x,w.y,
+                camera[0][0],camera[1][1],camera[3][2],camera[5][0],camera[5][1],camera[5][2],x,y);
+            {
+                float selected[6][4];std::memcpy(selected,camera,sizeof(selected));
+                double w0=0,w1=0,s0=0,s1=0;
+                const size_t used=std::strlen(out);
+                if(used<size) {
+                    if(flatCameraProjectionScale(w.camera,w0,w1) && flatCameraProjectionScale(selected,s0,s1))
+                        std::snprintf(out+used,size-used,"; projection scale ratio witness/selected=(%.4g,%.4g)",w0/s0,w1/s1);
+                    else std::snprintf(out+used,size-used,"; projection scale ratio witness/selected=n/a");
+                }
+            }
+            if(found) {
+                const size_t used=std::strlen(out);
+                if(used<size)std::snprintf(out+used,size-used,"; first differing float row=%u col=%u witness=%.9g selected=%.9g",
+                    270+row,col,w.camera[row][col],camera[row][col]);
+            }
+            return true;
+        }
+        return false;
+    }
+    bool matches(uint64_t frame,const void* depth,unsigned width,unsigned height,const float camera[6][4],float x,float y)const {
+        if(frame!=frame_)return count_==0;
+        for(unsigned i=0;i<count_;++i){const auto& w=witnesses_[i];if(w.depth!=depth || w.width!=width || w.height!=height ||
+            w.x!=x || w.y!=y || std::memcmp(w.camera,camera,sizeof(w.camera)))return false;}return true;
+    }
+    unsigned count()const{return count_;}
+};
+}

@@ -416,6 +416,11 @@ bool FlatProjectionRuntime::copyConstants(ID3D11Buffer* buffer, uint32_t offset,
                                          uint32_t count, void* out) {
     if (!owner() || !out || !count) return false;
     Tracked* entry = find(buffer);
+    if(!entry) {
+        for(const auto& candidate:tracked_)
+            if(candidate.privateBuffer.copyUploadedConstants(buffer,offset,count,out))return true;
+        return false;
+    }
     FlatProjectionShadowView view{};
     if (!entry || !shadows_.lookup(buffer, entry->generation, view) ||
         offset > view.width || count > view.width - offset) return false;

@@ -85,6 +85,7 @@
         "advanced.temporal_aa_hologram_floor",
         "advanced.temporal_aa_hologram_share",
         "advanced.temporal_aa_jitter_lag",
+        "advanced.temporal_aa_jitter_phases",
         "advanced.temporal_aa_jitter_sign",
         "advanced.temporal_aa_menu_metres",
         "advanced.temporal_aa_motion",

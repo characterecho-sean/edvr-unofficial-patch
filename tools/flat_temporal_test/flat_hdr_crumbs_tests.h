@@ -361,13 +361,21 @@ inline int flatHdrCrumbWiringTests() {
     const std::string dlaa = slurp("src/d3d11/dlaa.cpp");
     const std::string fsr = slurp("src/d3d11/fsr3_engine.cpp");
     const std::string hook = slurp("src/d3d11/device_hook.cpp");
-    expect(!runtime.empty() && !resolve.empty() && !dlaa.empty() && !fsr.empty() && !hook.empty(),
+    const std::string vscreen = slurp("src/d3d11/vscreen.cpp");
+    expect(!runtime.empty() && !resolve.empty() && !dlaa.empty() && !fsr.empty() && !hook.empty() && !vscreen.empty(),
            "the runtime, resolver, backend and hook sources are readable from the repo root");
+    const std::string omUav = body(vscreen, "void STDMETHODCALLTYPE hookedOMSetRtvAndUav(");
+    ordered(omUav, {"flatRuntimeOverlayUavBind(self,uavCount,uavs);", "if (foreignContext(self))",
+                    "g_state->realOMSetRtvAndUav(self, n, rtvs, dsv, uavStart, uavCount, uavs,"},
+            "a PS UAV bind invalidates an open overlay suffix before the game's bind, including foreign and KEEP-target paths");
+    expect(vscreen.find("s.hook.replace(kSlotOMSetRtvAndUav, &hookedOMSetRtvAndUav,") != std::string::npos,
+           "the OM UAV hook with overlay suffix guard is installed");
 
     // -- the runtime's draw scope: admission first, the reach after the last decline that precedes the resolver --
     const std::string treat = body(runtime, "void FlatRuntimeDrawScope::treatHdr(");
-    ordered(treat, {"auto& s = state();", "hdrCrumbAdmit(s.prefix.frame, flatMonoResolveModeName(s.engine));", "++s.hdrWindow.steps.admitted;",
-                    "const auto reach = [&](const char* step) {", "hdrCrumbReach(s.prefix.frame, flatMonoResolveModeName(s.engine), step);",
+    ordered(treat, {"auto& s = state();", "const FlatMonoResolveMode effectiveMode=s.engine;",
+                    "hdrCrumbAdmit(s.prefix.frame, flatMonoResolveModeName(effectiveMode));", "++s.hdrWindow.steps.admitted;",
+                    "const auto reach = [&](const char* step) {", "hdrCrumbReach(s.prefix.frame, flatMonoResolveModeName(effectiveMode), step);",
                     "const auto decline = [&](const char* why) {", "hdrCrumbDeclined(why);", "if (s.hdrLatch.tripped) { decline(\"latched-off\"); return; }"},
             "treatHdr admits the frame before any decline, counts it, and every decline writes its reason");
     ordered(treat, {"const auto recoverHdr = [&]", "reach(\"spatial-recovery\");", "failPhase(s, temporalReason);", "flatMonoResolveSpatialFallback("},
@@ -415,10 +423,11 @@ inline int flatHdrCrumbWiringTests() {
     const std::string solve = body(resolve, "bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,");
     ordered(solve, {"CrumbScope crumbs(f.hdr);", "initialize(device,context,reason)", "initializeHdr(device,reason)", "resources(f,reason)",
                     "hdrTargetView(color.Get(),reason)", "Isolate isolated(", "backendAvailable(f.mode,device,reason)", "HdrCrumbSpan copyStep(",
-                    "SpanGuard span(context);", "context->CopyResource(g.color.texture.Get(),color.Get());", "copyStep.close();",
+                    "SpanGuard span(context);", "context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());",
+                    "if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());", "copyStep.close();",
                     "HdrCrumbSpan prepStep(", "context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);", "prepStep.close();",
                     "HdrCrumbSpan backendStep(", "ok=fsr3Evaluate(", "ok=dlaaEvaluate(", "backendStep.close();",
-                    "drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,8);"},
+                    "drawHdrTarget(context,g.finishHdr.Get(),f.renderWidth,f.renderHeight,views,overlay?17:8);"},
             "the resolve writes capture, copy, prep, backend and finish in the order it runs them, each crumb before its call");
     const std::string spatial = body(resolve, "bool flatMonoResolveSpatialFallback(ID3D11Device* device,ID3D11DeviceContext* context,const FlatMonoResolveFrame& f,");
     ordered(spatial, {"CrumbScope crumbs(f.hdr);", "Isolate isolated(", "HdrCrumbSpan copyStep(", "context->CopyResource(g.color.texture.Get(),color.Get());",
@@ -489,10 +498,19 @@ inline int flatHdrCrumbWiringTests() {
     ordered(draw, {"\"finish-bind\"", "context->ClearState();", "context->OMSetRenderTargets(1,&rtv,nullptr);", "\"finish-draw\"", "context->Draw(3,0);",
                    "++stats.hdrFinished;"},
             "H's binding as the render target and the draw into it are two crumbed steps, in that order, and the draw is counted");
-    ordered(solve, {"context->CopyResource(g.color.texture.Get(),color.Get());", "if(hdr)++stats.hdrCopied;", "copyStep.close();",
-                    "context->CSSetShaderResources(0,11,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
+    ordered(solve, {"context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());",
+                    "if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());",
+                    "if(hdr)++stats.hdrCopied;", "copyStep.close();",
+                    "context->CSSetShaderResources(0,foreground?16:14,prepViews);",
+                    "context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);",
+                    "ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[16]={};",
+                    "context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);",
+                    "context->CSSetShaderResources(0,foreground?16:14,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
                     "backendStep.close();", "if(hdr && ok)++stats.hdrBackend;", "if(!ok) {"},
             "the resolve counts its copy, prep and backend for the 5 s line as each completes");
+    expect(count(solve,"context->CSSetShaderResources(0,foreground?16:14,prepViews);")==1 &&
+           count(solve,"context->CSSetShaderResources(0,foreground?16:14,nullViews);")==1,
+           "prep binds and clears exactly the same fourteen legacy or sixteen foreground SRV slots once");
     ordered(spatial, {"context->CopyResource(g.color.texture.Get(),color.Get());", "if(hdr)++stats.hdrCopied;"},
             "the spatial recovery counts its copy too");
     ordered(resolve, {"\"create-context-state\"", "d1->CreateDeviceContextState(", "\"create-compute-shaders\"", "device->CreateComputeShader(kFlatMonoPrepBytecode",
@@ -572,5 +590,30 @@ inline int flatHdrCrumbWiringTests() {
            "the runtime opens the gate in one place, and nothing else does");
     expect(isolation.find("inline bool flatCrumbsWantedFor(const FlatDxmtDetection& d) { return d.dxmt(); }") != std::string::npos,
            "the gate's question is the markers' answer and no argument but the detection");
+
+    // -- the late-overlay composite in the HDR finish ----------------------------------------------------------------------------
+    // flat_mono_resolve_test runs it on its adapter (flat_hdr_route_gpu_tests.h); these keep its text from drifting back to the raw frame: t0 is the
+    // CLEAN H in every frame, the raw H with the overlays is t16 in an overlay frame alone, and a covered pixel keeps its world and adds the overlay's
+    // contribution instead of taking the raw sample whole.
+    const std::string shader = slurp("src/d3d11/flat_mono_shader_source.h");
+    const std::string finish = body(shader, "float4 finishHdr(float4 pos:SV_Position):SV_Target {");
+    expect(!finish.empty() && count(shader, "Texture2D<float4> OverlayColor : register(t16);") == 1 &&
+               count(shader, "register(t16)") == 1,
+           "the finish's raw-overlay texture is declared once, at t16");
+    ordered(finish, {"refused=reject>0;", "c=refused?Color.SampleLevel(LinearClamp,rasterUv,0).rgb:History.Load(int3(p,0)).rgb;",
+                     "if(debug.z!=0) {", "if(covered>0) {", "const float3 raw=OverlayColor.SampleLevel(LinearClamp,rasterUv,0).rgb;",
+                     "c=refused?raw:c+raw-Color.SampleLevel(LinearClamp,rasterUv,0).rgb;", "if(debug.y!=0)c=refusalPaint("},
+            "a covered pixel keeps its world and adds the overlay's contribution (raw minus clean, both at the jittered position); a refused one is the raw sample");
+    expect(!finish.empty() && count(finish, "c=Color.SampleLevel(") == 0 && count(finish, "c=OverlayColor.SampleLevel(") == 0 &&
+               count(finish, "OverlayColor.SampleLevel(") == 1,
+           "no covered pixel takes a whole sample of either texture as its colour: the overlay's sample is read once, for the sum");
+    expect(count(resolve, "overlay?g.rawOverlay.srv.Get():g.color.srv.Get()") == 0 &&
+               count(solve, "ID3D11ShaderResourceView* paintViews[17]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,") == 1 &&
+               count(solve, "ID3D11ShaderResourceView* views[17]={g.color.srv.Get(),nullptr,nullptr,nullptr,nullptr,") == 1 &&
+               count(solve, "overlay?f.overlayCoverage:nullptr,nullptr,nullptr,nullptr,overlay?g.rawOverlay.srv.Get():nullptr};") == 2,
+           "both finish draws read the clean H at t0 in every frame, and bind the mask at t12 and the raw H at t16 in an overlay frame alone");
+    expect(count(solve, "paintViews,overlay?17:13);") == 1 && count(solve, "views,overlay?17:8);") == 1 &&
+               count(draw, "ID3D11ShaderResourceView* none[17]={};context->PSSetShaderResources(0,viewCount,none);") == 1,
+           "the finish draws bind seventeen views in an overlay frame, otherwise thirteen with the refusal paint and eight without, and unbind as many");
     return failures;
 }

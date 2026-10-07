@@ -3,9 +3,11 @@
 // I/O, so the route's rig and the resolver's rig read the same numbers the shader writes.
 //
 // WHAT THE CLASS IS. Every render pixel the prep treats gets one byte, written to a private texture only on a frame that needs
-// it (a census sample, or the route's refusal view): the low seven bits say what the pixel IS, bit 7 says the prep REFUSED its
+// it (a census sample, or the route's refusal view): the low four bits say what the pixel IS (0..14), bits 4-6 say WHY a refused
+// first-person pixel has no history (0..7, set only with kFlatMonoClassWeaponRefused), bit 7 says the prep REFUSED its
 // history (rejection 1: the finish shows the raw input, which under a jittered world is a different sample every frame, so a
-// fine pattern on a refused pixel shimmers). Classes 1..6 are the eye path's source kinds (screen_motion's sourceEngine and the
+// fine pattern on a refused pixel shimmers). Every reader of the byte masks what it reads: the class with kFlatMonoClassMask, the
+// reason with kFlatMonoClassReasonMask. Classes 1..6 are the eye path's source kinds (screen_motion's sourceEngine and the
 // temporal pass's motion_source view), with the same numbers and the same colours, so the two views read alike; 7 and up are what
 // only the resolver's prep can say. The HLSL repeats the numbers as `static const uint kClass...` (flat_mono_shader_source.h) and
 // tools\flat_mono_resolve_test holds the two to each other.
@@ -29,7 +31,24 @@ constexpr uint32_t kFlatMonoClassWeapon = 12;         // an attached first-perso
 constexpr uint32_t kFlatMonoClassWeaponRefused = 13;  // an attached first-person pixel the map cannot place: REFUSED
 constexpr uint32_t kFlatMonoClassReset = 14;          // a reset frame, every pixel refused: never sampled, never painted
 constexpr uint32_t kFlatMonoClassRefusedBit = 0x80u;  // the prep refused this pixel's history
-constexpr uint32_t kFlatMonoClassMask = 0x7Fu;
+constexpr uint32_t kFlatMonoClassMask = 0x0Fu;        // the class, bits 0-3: the highest is 14, so the next bits are free
+constexpr uint32_t kFlatMonoClassReasonShift = 4;
+constexpr uint32_t kFlatMonoClassReasonMask = 0x70u;  // bits 4-6: kFlatMonoWeaponReason*, only ever with kFlatMonoClassWeaponRefused
+
+// WHY A REFUSED FIRST-PERSON PIXEL HAS NO HISTORY (the SDK foreground map's samples, flat_foreground_motion_shader.h, which says what each
+// number means). The map's vertex shader names the cause of a rejected draw in the x channel of its class-2 samples; the prep keeps it in
+// bits 4-6 of the class byte of a refused first-person pixel; the census counts it. The HLSL repeats the numbers as kReason*, and
+// tools\flat_mono_resolve_test holds the two to each other. 0 is no reason given: no sample at the pixel, or a valid sample the prep refused
+// (a reset frame, a previous position off the raster).
+constexpr uint32_t kFlatMonoWeaponReasonNone = 0;
+constexpr uint32_t kFlatMonoWeaponReasonInvalidCurrent = 1;       // the current draw is not valid, or its slot is out of range
+constexpr uint32_t kFlatMonoWeaponReasonNotAuthentic = 2;         // the instance index has flag bits, or the pool has no row for it
+constexpr uint32_t kFlatMonoWeaponReasonNoPrior = 3;              // the previous frame has no draw of this geometry under this pool and near
+constexpr uint32_t kFlatMonoWeaponReasonPriorPositions = 4;       // the matching prior's vertices are not finite or are behind the camera
+constexpr uint32_t kFlatMonoWeaponReasonIdentityDiffers = 5;      // priors were read and none has this identity
+constexpr uint32_t kFlatMonoWeaponReasonPriorIdentityInvalid = 6; // priors were supplied and none could be read
+constexpr uint32_t kFlatMonoWeaponReasonAmbiguous = 7;            // several priors matched and their previous positions or phases differ
+constexpr uint32_t kFlatMonoWeaponReasons = 8;
 
 // The census counts REFUSED pixels by class (slot = class, 0..14) and, in slot 15, the stale pixels that were not refused because
 // the steady-detail rule kept them ("stale-kept": the camera term, confirmed by last frame's depth, or the menu's blanket policy).
@@ -41,6 +60,8 @@ constexpr uint32_t kFlatMonoRefusalStaleKept = 15;
 // One sample every this many resolves that ask for the census; the 5 s line names it.
 constexpr uint32_t kFlatMonoRefusalEvery = 4;
 constexpr uint32_t kFlatMonoRefusalStripes = 16;     // the counter buffer's stripes (spreads the atomics); the host sums them
+// Each stripe holds kFlatMonoRefusalSlots class counters, then kFlatMonoWeaponReasons counters of the refused first-person pixels by reason.
+constexpr uint32_t kFlatMonoRefusalCounters = kFlatMonoRefusalSlots + kFlatMonoWeaponReasons;
 
 // The steady-detail depth check's tolerance (flat_mono_shader_source.h, kStaleDepthRel and kStaleDepthFloor, which the resolver's rig
 // holds to these): a stale pixel keeps its camera-term history only where last frame's depth, in the best of the four texels around the
@@ -71,6 +92,20 @@ inline const char* flatMonoClassName(uint32_t cls) {
     return "?";
 }
 
+inline const char* flatMonoWeaponReasonName(uint32_t reason) {
+    switch (reason) {
+        case kFlatMonoWeaponReasonNone: return "unspecified";
+        case kFlatMonoWeaponReasonInvalidCurrent: return "invalid-current";
+        case kFlatMonoWeaponReasonNotAuthentic: return "not-authentic";
+        case kFlatMonoWeaponReasonNoPrior: return "no-prior";
+        case kFlatMonoWeaponReasonPriorPositions: return "prior-positions";
+        case kFlatMonoWeaponReasonIdentityDiffers: return "identity-differs";
+        case kFlatMonoWeaponReasonPriorIdentityInvalid: return "prior-identity-invalid";
+        case kFlatMonoWeaponReasonAmbiguous: return "ambiguous";
+    }
+    return "?";
+}
+
 // What flatMonoResolveTakeRefusalCensus() hands back: the samples read back since the last take.
 struct FlatMonoRefusalCensus {
     uint64_t asked = 0;        // resolves that asked for the census (the key on, not a reset frame)
@@ -79,6 +114,7 @@ struct FlatMonoRefusalCensus {
     uint64_t frames = 0;       // samples whose counts were read back
     uint64_t pixels = 0;       // pixels those samples examined (render width x height each)
     uint64_t counts[kFlatMonoRefusalSlots] = {};   // refused pixels by class; [kFlatMonoRefusalStaleKept] stale pixels the steady-detail rule kept
+    uint64_t weaponReasons[kFlatMonoWeaponReasons] = {};   // the refused first-person pixels (counts[kFlatMonoClassWeaponRefused]) by reason
     // The steady-detail rule's own frames since the last take, whatever the census asked: resolves with the key on whose prep ran the
     // depth check (last frame's depth was there to check against) and resolves with the key on that could not (a reset frame is neither:
     // it refuses every pixel anyway). "Key on and checked=0" is the check never having run.
@@ -94,13 +130,13 @@ struct FlatMonoRefusalCensus {
 
 // The refusal view's palette (the eye path's, temporal_shader_source.h motion_source, painted by the HDR finish before the game's
 // tone pass: it scales each colour by the pixel's own level, so the hue survives the tone but the absolute colour does not).
-//   green  1 joined      red  2 masked      blue 3 not a rig record      yellow 4 stale slot
+//   green  1 joined      red  2 masked      blue 3 not a rig record      yellow 4 stale slot kept   pink 4 stale slot refused
 //   magenta 5 corrupt    orange 6 stale stamp   cyan 12 weapon           white  any other refusal (7..11, 13)
 //   dimmed to a quarter  no engine slot (0)
 // The names below are for the log line.
 inline const char* flatMonoViewLegend() {
-    return "green exact record, red masked record, blue pool surface (camera term), yellow stale slot, magenta corrupt slot, "
-           "orange stale stamp, cyan first-person, white any other refusal, dimmed no engine slot";
+    return "green exact record, red masked record, blue pool surface (camera term), yellow stale slot (kept), pink stale slot refused "
+           "(shown raw), magenta corrupt slot, orange stale stamp, cyan first-person, white any other refusal, dimmed no engine slot";
 }
 
 }  // namespace edvr

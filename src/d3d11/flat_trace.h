@@ -28,6 +28,8 @@ constexpr uint32_t kFlatTraceEventCameraCapture = 4;
 // verdict (a FlatMonoReason value). A replay skips it: the reducer never sees it. The rig reads it to pin what
 // the live run decided against what the pure detector decides over the same draws.
 constexpr uint32_t kFlatTraceEventResolve = 5;
+constexpr uint32_t kFlatTraceEventOverlayFailed = 6;
+constexpr uint32_t kFlatTraceEventOverlaySeal = 7;
 
 // The EDVRFTR3 event, byte for byte: the corpus files are still this layout and are read through it.
 struct FlatTraceEventV3 {
@@ -47,8 +49,13 @@ struct FlatTraceEvent {
     uint32_t instances = 1;
     uint32_t flags = 0;
     uint32_t kind = kFlatTraceEventDraw;
+    // FTR5 uses the former x64 alignment padding for the draw's reducer q.
+    // key.sequence remains the original observation used by contract hashing.
+    uint32_t drawSequence = 0;
     const void* hdrSrv[4] = {};
 };
+static_assert(offsetof(FlatTraceEvent,drawSequence)==468 && offsetof(FlatTraceEvent,hdrSrv)==472 && sizeof(FlatTraceEvent)==504,
+              "FTR5 must preserve the FTR4 event size and resource offsets");
 constexpr uint32_t kFlatTraceHasCamera = 1u << 0;
 constexpr uint32_t kFlatTraceSupported = 1u << 1;
 constexpr uint32_t kFlatTraceHdrCopyVerified = 1u << 2;
@@ -59,6 +66,13 @@ constexpr uint32_t kFlatTraceImageSourceVerified = 1u << 4;
 constexpr uint32_t kFlatTraceForeignWork = 1u << 5;
 // The event's hdrSrv slots were read (the runtime resolved t0..t3 for this draw).
 constexpr uint32_t kFlatTraceHdrSrvKnown = 1u << 6;
+constexpr uint32_t kFlatTraceOverlayProtected = 1u << 7;
+constexpr uint32_t kFlatTraceDepthWrite = 1u << 8;
+constexpr uint32_t kFlatTraceStencilWrite = 1u << 9;
+// The weapon's two passes on the copy route (FlatRuntimeDraw::firstPersonCohort and alternateHdr, flat_runtime_model.h). Appended
+// bits, zero in every committed trace, so the corpus replays as it always did.
+constexpr uint32_t kFlatTraceFirstPersonCohort = 1u << 10;
+constexpr uint32_t kFlatTraceAlternateHdr = 1u << 11;
 
 inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool foreignWork) {
     FlatTraceEvent e{};
@@ -74,6 +88,11 @@ inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool fore
     e.flags |= d.menuHdrCopyVerified ? kFlatTraceMenuCopyVerified : 0;
     e.flags |= d.imageSourceCameraIndependentVerified ? kFlatTraceImageSourceVerified : 0;
     e.flags |= foreignWork ? kFlatTraceForeignWork : 0;
+    e.flags |= d.overlayProtected ? kFlatTraceOverlayProtected : 0;
+    e.flags |= d.effectiveDepthWrite ? kFlatTraceDepthWrite : 0;
+    e.flags |= d.effectiveStencilWrite ? kFlatTraceStencilWrite : 0;
+    e.flags |= d.firstPersonCohort ? kFlatTraceFirstPersonCohort : 0;
+    e.flags |= d.alternateHdr ? kFlatTraceAlternateHdr : 0;
     e.kind = kFlatTraceEventDraw;
     return e;
 }
@@ -107,12 +126,17 @@ inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
     d.hdrCopyVerified = (e.flags & kFlatTraceHdrCopyVerified) != 0;
     d.menuHdrCopyVerified = (e.flags & kFlatTraceMenuCopyVerified) != 0;
     d.imageSourceCameraIndependentVerified = (e.flags & kFlatTraceImageSourceVerified) != 0;
+    d.overlayProtected = (e.flags & kFlatTraceOverlayProtected) != 0;
+    d.effectiveDepthWrite = (e.flags & kFlatTraceDepthWrite) != 0;
+    d.effectiveStencilWrite = (e.flags & kFlatTraceStencilWrite) != 0;
+    d.firstPersonCohort = (e.flags & kFlatTraceFirstPersonCohort) != 0;
+    d.alternateHdr = (e.flags & kFlatTraceAlternateHdr) != 0;
     d.instances = e.instances;
     return d;
 }
 
 struct FlatTraceHeader {
-    char magic[8] = {'E','D','V','R','F','T','R','4'};
+    char magic[8] = {'E','D','V','R','F','T','R','5'};
     uint32_t frameCount = 0;
     uint32_t reserved = 0;
 };
@@ -128,16 +152,43 @@ struct FlatTraceFrameHeader {
 
 // The runtime's bounded ring: the last few complete frames, frame-atomic so a
 // dump never holds half a frame. Fixed storage, no allocation on the draw
-// path; a frame with more draws than the slot marks itself truncated and is
+// path; a frame with more events than the slot marks itself truncated and is
 // skipped by the dump.
 constexpr uint32_t kFlatTraceFrames = 4;
-constexpr uint32_t kFlatTraceEventsPerFrame = 4096;
+constexpr uint32_t kFlatTraceEventsPerFrame = 65536;
+constexpr uint64_t kFlatTraceStorageBudgetBytes = 256ull * 1024ull * 1024ull;
 struct FlatTraceRing {
     FlatTraceEvent events[kFlatTraceFrames][kFlatTraceEventsPerFrame];
     FlatTraceFrameHeader headers[kFlatTraceFrames]{};
+    uint32_t attempted[kFlatTraceFrames]{}; // live-only; never serialized
     uint32_t slot = 0;
     bool slotUsed[kFlatTraceFrames]{};
 };
+static_assert(sizeof(FlatTraceRing) <= kFlatTraceStorageBudgetBytes,
+              "flat trace ring exceeds its fixed storage budget");
+
+struct FlatTraceStats {
+    uint32_t capacity = kFlatTraceEventsPerFrame;
+    uint32_t peakAttempted = 0;
+    uint32_t overflowSlots = 0;
+};
+inline FlatTraceStats flatTraceStats(const FlatTraceRing& r) {
+    FlatTraceStats stats{};
+    for (uint32_t i = 0; i < kFlatTraceFrames; ++i) {
+        if (!r.slotUsed[i]) continue;
+        if (r.attempted[i] > stats.peakAttempted) stats.peakAttempted = r.attempted[i];
+        if (r.headers[i].truncated) ++stats.overflowSlots;
+    }
+    return stats;
+}
+inline bool flatTraceCanAppend(FlatTraceRing& r) {
+    if (!r.slotUsed[r.slot]) return false;
+    auto& attempted = r.attempted[r.slot];
+    if (attempted != 0xffffffffu) ++attempted;
+    auto& h = r.headers[r.slot];
+    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return false; }
+    return true;
+}
 
 inline void flatTraceBeginFrame(FlatTraceRing& r, uint64_t frame, const void* output,
                                 uint32_t width, uint32_t height, uint32_t format) {
@@ -145,29 +196,28 @@ inline void flatTraceBeginFrame(FlatTraceRing& r, uint64_t frame, const void* ou
     auto& h = r.headers[r.slot];
     h = FlatTraceFrameHeader{};
     h.frame = frame; h.output = output; h.width = width; h.height = height; h.format = format;
+    r.attempted[r.slot] = 0;
     r.slotUsed[r.slot] = true;
 }
 inline void flatTraceRecord(FlatTraceRing& r, const FlatRuntimeDraw& d, bool foreignWork,
-                            const void* const* hdrSrv = nullptr) {
-    if (!r.slotUsed[r.slot]) return;
+                            const void* const* hdrSrv = nullptr, uint32_t drawSequence = 0) {
+    if (!flatTraceCanAppend(r)) return;
     auto& h = r.headers[r.slot];
-    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return; }
     auto& e = r.events[r.slot][h.eventCount++];
     e = flatTraceEventFromDraw(d, foreignWork);
+    e.drawSequence = drawSequence ? drawSequence : d.key.sequence;
     flatTraceEventSetSrv(e, hdrSrv);
 }
 inline void flatTraceMark(FlatTraceRing& r, uint32_t kind, const void* resource) {
-    if (!r.slotUsed[r.slot]) return;
+    if (!flatTraceCanAppend(r)) return;
     auto& h = r.headers[r.slot];
-    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return; }
     r.events[r.slot][h.eventCount++] = flatTraceEventMarker(kind, resource);
 }
 // The HDR route's resolve marker, after the trigger draw's own event.
 inline void flatTraceResolve(FlatTraceRing& r, const void* hdr, uint64_t vs, uint64_t ps, uint32_t sequence,
                              uint32_t reason) {
-    if (!r.slotUsed[r.slot]) return;
+    if (!flatTraceCanAppend(r)) return;
     auto& h = r.headers[r.slot];
-    if (h.eventCount >= kFlatTraceEventsPerFrame) { h.truncated = 1; return; }
     r.events[r.slot][h.eventCount++] = flatTraceEventResolve(hdr, vs, ps, sequence, reason);
 }
 inline void flatTraceSeal(FlatTraceRing& r, bool produced, uint64_t contractHash) {
@@ -208,8 +258,8 @@ inline FlatTraceEvent flatTraceEventFromV3(const FlatTraceEventV3& v) {
     return e;
 }
 // Parse one trace document, invoking onFrame(header) then onEvent(event)
-// per event in order. EDVRFTR3 (the corpus) and EDVRFTR4 (the runtime's dump since the HDR route) are read;
-// an EDVRFTR3 event reaches onEvent widened, with no SRVs. Returns false on any malformed input.
+// per event in order. FTR3/4 retain their original contract keys. FTR5 adds
+// independent draw correlation; legacy alignment padding is never read as q.
 template <class OnFrame, class OnEvent>
 inline bool flatTraceParse(const unsigned char* data, size_t size,
                            OnFrame&& onFrame, OnEvent&& onEvent) {
@@ -217,8 +267,9 @@ inline bool flatTraceParse(const unsigned char* data, size_t size,
     FlatTraceHeader header{};
     std::memcpy(&header, data, sizeof(header));
     const bool v4 = std::memcmp(header.magic, "EDVRFTR4", 8) == 0;
-    if (!v4 && std::memcmp(header.magic, "EDVRFTR3", 8) != 0) return false;
-    const size_t eventSize = v4 ? sizeof(FlatTraceEvent) : sizeof(FlatTraceEventV3);
+    const bool v5 = std::memcmp(header.magic, "EDVRFTR5", 8) == 0;
+    if (!v4 && !v5 && std::memcmp(header.magic, "EDVRFTR3", 8) != 0) return false;
+    const size_t eventSize = v4 || v5 ? sizeof(FlatTraceEvent) : sizeof(FlatTraceEventV3);
     size_t at = sizeof(FlatTraceHeader);
     for (uint32_t f = 0; f < header.frameCount; ++f) {
         if (size - at < sizeof(FlatTraceFrameHeader)) return false;
@@ -229,9 +280,10 @@ inline bool flatTraceParse(const unsigned char* data, size_t size,
         if (size - at < fh.eventCount * eventSize) return false;
         onFrame(fh);
         for (uint32_t i = 0; i < fh.eventCount; ++i) {
-            if (v4) {
+            if (v4 || v5) {
                 FlatTraceEvent e{};
                 std::memcpy(&e, data + at, sizeof(e));
+                if(!v5)e.drawSequence=0;
                 onEvent(e);
             } else {
                 FlatTraceEventV3 v{};

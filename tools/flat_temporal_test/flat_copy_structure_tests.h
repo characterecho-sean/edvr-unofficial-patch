@@ -60,6 +60,7 @@ inline CopyFacts replayCopy(const ParsedFrame& frame, const edvr::FlatCopyPolicy
         if (e.kind == kFlatTraceEventMarkUncertain) { prefix->uncertain = true; continue; }
         if (e.kind == kFlatTraceEventCameraCapture) { ++prefix->sequence; continue; }
         if (e.kind == kFlatTraceEventResolve) continue;
+        if (hdr_route_test::replayOverlayMarker(*prefix,e)) continue;
         if (hook) hook(e, hookContext);
         FlatRuntimeDraw d = flatTraceEventToDraw(e);
         if (e.flags & kFlatTraceForeignWork) prefix->uncertain = true;
@@ -905,7 +906,7 @@ inline int flatCopyStructureTests() {
                "the reducer, the frame contract and the whitelist's selector do not mention the admission (the corpus hashes are the whitelist's)");
         // The call: once, at the copy draw, after the detector and the trace record and before the stand-down merge and the
         // treatment; the whitelist's own answer is what it is handed.
-        const size_t record = runtime.find("flatTraceRecord(s.traceRing, d, foreignWork.load(std::memory_order_acquire), hdrSrvKnown ? hdrSrv : nullptr);");
+        const size_t record = runtime.find("flatTraceRecord(s.traceRing, d, foreignWork.load(std::memory_order_acquire), hdrSrvKnown ? hdrSrv : nullptr, s.prefix.sequence);");
         const size_t call = runtime.find("if (copy) { flatcpu::Scope reduce(flatcpu::kReduce); selected = copyAdmit(s, d, selected); }");
         const size_t merge = runtime.find("const FlatFrameSeen seen = flatFrameSeenFor(selected.selected(), selected.reason);");
         expect(count(runtime, "selected = copyAdmit(s, d, selected);") == 1 && record != std::string::npos && call != std::string::npos &&

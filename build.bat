@@ -333,6 +333,9 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --wrap D3D11CreateDevice --wrap D3D11CreateDeviceAndSwapChain ^
     --extra-export edvr_selftest_hooks ^
     --extra-export edvr_selftest_scene_draws ^
+    --extra-export edvr_selftest_flat_sdk_snapshot ^
+    --extra-export edvr_selftest_flat_sdk_owner_view ^
+    --extra-export edvr_selftest_flat_sdk_foreground_map ^
     --extra-export edvr_selftest_binding ^
     --extra-export edvrAcquireGraphicsBridge ^
     --extra-export edvrAcquireRenderBoundary ^
@@ -619,6 +622,13 @@ if errorlevel 1 ( echo [edvr] ERROR: link failed & exit /b 1 )
 echo [edvr] built %BUILD%\d3d11.dll
 copy /y "%BUILD%\d3d11.dll" "%BUILD%\edvr_openxr_graphics.dll" >nul || exit /b 1
 echo [edvr] built %BUILD%\edvr_openxr_graphics.dll
+
+REM Offline-only test-link proxy: all normal production objects except one
+REM engine_velocity object built with its existing rig guard and an inert emit
+REM fixture. Never copied into an installer or game directory.
+python "tools\build_flat_sdk_bench_proxy.py" --self-test || exit /b 1
+python "tools\build_flat_sdk_bench_proxy.py" --dry-run || exit /b 1
+python "tools\build_flat_sdk_bench_proxy.py" || exit /b 1
 
 echo.
 REM Gated with `||`, not `if errorlevel 1`.
@@ -1310,16 +1320,31 @@ if errorlevel 1 ( echo [edvr] ERROR: vr world route GPU test build failed & exit
 "%BUILD%\vr_world_route_gpu_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_flat_sdk_integration_test
+echo [edvr] === flat_sdk_integration_test.exe ===
+if not exist "%OBJ%\flat_sdk_integration_test" mkdir "%OBJ%\flat_sdk_integration_test"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\flat_sdk_integration_test\\" /Fe"%BUILD%\flat_sdk_integration_test.exe" ^
+    "tools\flat_sdk_integration_test\flat_sdk_integration_test.cpp" ^
+    /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: flat SDK integration bench compile failed & exit /b 1 )
+"%BUILD%\flat_sdk_integration_test.exe" --dry-run || exit /b 1
+"%BUILD%\flat_sdk_integration_test.exe" --self-test || exit /b 1
+python "tools\flat_sdk_bench.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_flat_mono_resolve_test
 echo [edvr] === flat_mono_resolve_test.exe ===
 if not exist "%OBJ%\flat_mono_resolve_test" mkdir "%OBJ%\flat_mono_resolve_test"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\flat_mono_resolve_test\\" ^
     /Fe"%BUILD%\flat_mono_resolve_test.exe" "tools\flat_mono_resolve_test\flat_mono_resolve_test.cpp" ^
-    "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib
+    "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" /link /INCREMENTAL:NO dxgi.lib d3dcompiler.lib
 if errorlevel 1 ( echo [edvr] ERROR: flat mono resolve test build failed & exit /b 1 )
 "%BUILD%\flat_mono_resolve_test.exe" --dry-run || exit /b 1
 "%BUILD%\flat_mono_resolve_test.exe" --self-test || exit /b 1
+python "tools\flat_resolve_inputs.py" --verify-fixture "%BUILD%\flat-pixel-fixture" || exit /b 1
 python "tools\flat_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
 python "tools\flat_draw_pixels.py" "%BUILD%\flat-pixel-fixture" --verify-fixture || exit /b 1
 python "tools\flat_weapon_pixels.py" "%BUILD%\flat-weapon-fixture" --verify-fixture || exit /b 1
@@ -3484,6 +3509,24 @@ python "tools\flat_draw_pixels.py" --self-test || (
     echo [edvr] ERROR: the flat draw pixel analyzer failed its own test
     exit /b 1
 )
+python "tools\flat_draw_packets.py" --self-test || (
+    echo [edvr] ERROR: the flat draw packet reader failed its own test
+    exit /b 1
+)
+python "tools\flat_packet_replay.py" --self-test || (
+    echo [edvr] ERROR: the offline flat packet replay preparer failed its own test
+    exit /b 1
+)
+python "tools\flat_resolve_inputs.py" --self-test || (
+    echo [edvr] ERROR: the prebackend resolve input reader failed its own test
+    exit /b 1
+)
+if not exist "%OBJ%\flat_packet_replay" mkdir "%OBJ%\flat_packet_replay"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\flat_packet_replay\replay.obj" /Fe"%BUILD%\flat_packet_replay.exe" ^
+    "tools\flat_packet_replay\flat_packet_replay.cpp" /link /INCREMENTAL:NO d3dcompiler.lib
+if errorlevel 1 ( echo [edvr] ERROR: offline flat packet replay compile failed & exit /b 1 )
+"%BUILD%\flat_packet_replay.exe" --self-test || exit /b 1
 python "tools\flat_weapon_pixels.py" --self-test || (
     echo [edvr] ERROR: the flat weapon footprint analyzer failed its own test
     exit /b 1

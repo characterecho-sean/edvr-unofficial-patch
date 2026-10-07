@@ -97,9 +97,11 @@ MUTANTS = [
     M("heartbeat-never-posts", ("H10", "H7"), "proxy", [(HB_POST, "")], "breadcrumbHeartbeat hands nothing to the writer"),
     M("heartbeat-never-starts-the-writer", ("H10", "H7"), "proxy", [(HB_START, "")], "the writer thread is never started"),
     M("sink-writes-nothing", ("H10", "H7"), "proxy", [(SINK_CRUMB, "}\n\nLPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = nullptr;")], "the writer's sink does not write the line"),
-    # ---- H2, H3: order and coalescing --------------------------------------------------------------------------------------------
+    # ---- H5: a record is whole, and the writer reads some -----------------------------------------------------------------------
     M("version-never-odd", "H5", "hdr", [(VERSION_ODD, "")], "the record's version does not mark a write in progress: a reader can take half of two posts"),
     M("snapshot-takes-a-torn-read", "H5", "hdr", [(SNAP_ODD, ""), (SNAP_AGAIN, "            return before != 0;\n")], "the reader does not check the version around its reads"),
+    M("post-wakes-the-writer-once", "H5", "hdr", [(POST_STORE, "        const uint64_t n = posts_.fetch_add(1, std::memory_order_release);\n        if (wake_ && n == 0) SetEvent(wake_);\n")],
+      "after its first post, post() never wakes the writer: it reads one record and no more, and H5.writer holds that against the case (nothing is torn; nothing was read)"),
     # ---- H2, H3: order and coalescing --------------------------------------------------------------------------------------------
     M("first-post-of-a-batch-wins", "H2", "hdr", [(POST_FIELDS, POST_FIELDS_FIRST_WINS)],
       "a record that is pending is not overwritten by a newer post: a held-up writer writes the OLD frame when it comes back"),

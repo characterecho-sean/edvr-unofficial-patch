@@ -1,4 +1,5 @@
 #pragma once
+#include "../../src/d3d11/dxbc_flat_overlay.h"
 // engine_velocity_test: the DXBC patcher, end to end on WARP.
 //
 // Three synthetic families mirror the real pool families' signatures:
@@ -259,9 +260,18 @@ inline void patchStaticChecks(const Harness& h, const Family& f, const std::vect
     h.check(!edvr::engineVelocityPatchPs(bad.data(), bad.size(), in, out, why) && out.empty(), "corrupt DXBC declines");
 }
 
+inline std::vector<BYTE> textureBytes(const Harness& h,ID3D11Texture2D* source,UINT pixelBytes) {
+    D3D11_TEXTURE2D_DESC d{};source->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;h.check(SUCCEEDED(h.device->CreateTexture2D(&d,nullptr,&staging)),"combined shader staging");
+    h.context->CopyResource(staging.Get(),source);D3D11_MAPPED_SUBRESOURCE m{};
+    h.check(SUCCEEDED(h.context->Map(staging.Get(),0,D3D11_MAP_READ,0,&m)),"combined shader readback");
+    std::vector<BYTE> bytes(size_t(d.Width)*d.Height*pixelBytes);
+    for(UINT y=0;y<d.Height;++y)std::memcpy(bytes.data()+size_t(y)*d.Width*pixelBytes,static_cast<const BYTE*>(m.pData)+size_t(y)*m.RowPitch,size_t(d.Width)*pixelBytes);
+    h.context->Unmap(staging.Get(),0);return bytes;
+}
 inline void drawChecks(const Harness& h, const Family& f, const std::vector<BYTE>& vsOriginal,
                        const std::vector<BYTE>& psOriginal, const std::vector<BYTE>& vsPatched,
-                       const std::vector<BYTE>& psPatched) {
+                       const std::vector<BYTE>& psPatched, bool foreign = false, bool world = false, bool coverage = false) {
     auto* dev = h.device;
     auto* ctx = h.context;
     constexpr UINT W = 64, H = 64;
@@ -329,8 +339,8 @@ inline void drawChecks(const Harness& h, const Family& f, const std::vector<BYTE
     ComPtr<ID3D11Buffer> instanceBuffer;
     h.check(SUCCEEDED(dev->CreateBuffer(&vd, &iinit, &instanceBuffer)), "instance buffer");
 
-    ComPtr<ID3D11Texture2D> colour[4], slots, depth;
-    ComPtr<ID3D11RenderTargetView> rtv[7];
+    ComPtr<ID3D11Texture2D> colour[4], slots, depth,mask;
+    ComPtr<ID3D11RenderTargetView> rtv[8];
     D3D11_TEXTURE2D_DESC td{};
     td.Width = W; td.Height = H; td.MipLevels = 1; td.ArraySize = 1; td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
@@ -342,6 +352,7 @@ inline void drawChecks(const Harness& h, const Family& f, const std::vector<BYTE
     td.Format = DXGI_FORMAT_R32G32_FLOAT;
     h.check(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &slots)), "slot target");
     h.check(SUCCEEDED(dev->CreateRenderTargetView(slots.Get(), nullptr, &rtv[6])), "slot RTV");
+    if(coverage){td.Format=DXGI_FORMAT_R32_FLOAT;h.check(SUCCEEDED(dev->CreateTexture2D(&td,nullptr,&mask)),"combined mask target");h.check(SUCCEEDED(dev->CreateRenderTargetView(mask.Get(),nullptr,&rtv[7])),"combined mask RTV");}
     td.Format = DXGI_FORMAT_D32_FLOAT;
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
     h.check(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &depth)), "depth target");
@@ -365,8 +376,9 @@ inline void drawChecks(const Harness& h, const Family& f, const std::vector<BYTE
     for (int i = 0; i < 4; ++i) ctx->ClearRenderTargetView(rtv[i].Get(), black);
     ctx->ClearRenderTargetView(rtv[6].Get(), clearSlots);
     ctx->ClearDepthStencilView(dsv.Get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
-    ID3D11RenderTargetView* bound[7] = {rtv[0].Get(), rtv[1].Get(), rtv[2].Get(), rtv[3].Get(), nullptr, nullptr, rtv[6].Get()};
-    ctx->OMSetRenderTargets(7, bound, dsv.Get());
+    if(coverage)ctx->ClearRenderTargetView(rtv[7].Get(),black);
+    ID3D11RenderTargetView* bound[8] = {rtv[0].Get(), rtv[1].Get(), rtv[2].Get(), rtv[3].Get(), nullptr, nullptr, rtv[6].Get(),rtv[7].Get()};
+    ctx->OMSetRenderTargets(8, bound, dsv.Get());
     ctx->OMSetDepthStencilState(dss.Get(), 0);
     ctx->OMSetBlendState(nullptr, nullptr, ~0u);
     D3D11_VIEWPORT vp{0, 0, float(W), float(H), 0, 1};
@@ -381,6 +393,15 @@ inline void drawChecks(const Harness& h, const Family& f, const std::vector<BYTE
     ctx->VSSetShaderResources(33, 1, &poolView);
     ID3D11Buffer* cb = sceneCb.Get();
     ctx->VSSetConstantBuffers(1, 1, &cb);
+    std::vector<BYTE> originalPixels[5];
+    if(coverage) {
+        ctx->VSSetShader(vsOrig.Get(),nullptr,0);ctx->PSSetShader(psOrig.Get(),nullptr,0);
+        ctx->DrawInstanced(4,2,0,0);ctx->DrawInstanced(4,1,0,2);
+        for(unsigned i=0;i<4;++i)originalPixels[i]=textureBytes(h,colour[i].Get(),4);
+        originalPixels[4]=textureBytes(h,depth.Get(),4);
+        for(unsigned i=0;i<4;++i)ctx->ClearRenderTargetView(rtv[i].Get(),black);
+        ctx->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
+    }
     // The two pool movers through the PATCHED pair...
     ctx->VSSetShader(vs.Get(), nullptr, 0);
     ctx->PSSetShader(ps.Get(), nullptr, 0);
@@ -410,6 +431,12 @@ inline void drawChecks(const Harness& h, const Family& f, const std::vector<BYTE
     std::vector<float> slotPixels, depthPixels;
     readback(slots.Get(), slotPixels, 2);
     readback(depth.Get(), depthPixels, 1);
+    if(coverage) {
+        for(unsigned i=0;i<4;++i)h.check(originalPixels[i]==textureBytes(h,colour[i].Get(),4),"combined marker+coverage preserves every original Gbuffer color byte");
+        h.check(originalPixels[4]==textureBytes(h,depth.Get(),4),"combined marker+coverage preserves every original depth byte");
+        std::vector<float> maskPixels;readback(mask.Get(),maskPixels,1);
+        for(size_t i=0;i<maskPixels.size();++i)h.check(maskPixels[i]==(slotPixels[i*2]==-1?0:1),"combined single original draw writes matching marker and coverage footprint");
+    }
 
     uint32_t covered5 = 0, covered9 = 0, stale = 0, empty = 0, wrong = 0;
     for (UINT i = 0; i < W * H; ++i) {
@@ -423,14 +450,15 @@ inline void drawChecks(const Harness& h, const Family& f, const std::vector<BYTE
             continue;
         }
         // The odd code: 2 * slot + 1.
-        if (slot != 11.0f && slot != 19.0f) { ++wrong; continue; }
-        if (zBits == sceneBits) { if (slot == 11.0f) ++covered5; else ++covered9; }
+        const float code5=world?0.0f:(foreign?-13.0f:11.0f), code9=world?0.0f:(foreign?-21.0f:19.0f);
+        if (slot != code5 && slot != code9) { if(!wrong)std::printf("unexpected marker %.9g foreign=%u\n",slot,foreign?1u:0u); ++wrong; continue; }
+        if (zBits == sceneBits) { if (slot == code5) ++covered5; else ++covered9; }
         else ++stale;
     }
     std::printf("  family %s: slot 5 %u px, slot 9 %u px, stale (occluded) %u px, empty %u px\n",
                 f.name, covered5, covered9, stale, empty);
     h.check(wrong == 0, "MRT6 holds only an exact slot or the cleared value");
-    h.check(covered5 > 0 && covered9 > 0, "both movers own pixels with exact depth");
+    h.check(covered5 > 0 && (world || covered9 > 0), "passing original fragments own pixels with exact depth");
     h.check(stale > 0, "the unpatched occluder leaves stale slots the depth test rejects");
     h.check(empty > 0, "uncovered pixels keep the cleared value");
 }
@@ -763,6 +791,21 @@ inline void run(const Harness& h) {
                     "front-face stays at v4 while MRT6 depth reads new SV_Position v5");
         }
         drawChecks(h, f, vs, ps, patchedVs, patchedPs);
+        std::vector<BYTE> foreignPs;std::string foreignWhy;
+        h.check(edvr::engineVelocityPatchPs(ps.data(), ps.size(), in, foreignPs, foreignWhy, false,
+                edvr::dxbc_engine_velocity_detail::FlatMarkerKind::ForeignPool), foreignWhy.c_str());
+        drawChecks(h, f, vs, ps, patchedVs, foreignPs, true);
+        std::vector<BYTE> worldPs;
+        h.check(edvr::engineVelocityPatchPs(ps.data(),ps.size(),in,worldPs,foreignWhy,false,
+                edvr::dxbc_engine_velocity_detail::FlatMarkerKind::World),foreignWhy.c_str());
+        drawChecks(h,f,vs,ps,vs,worldPs,false,true);
+        if(&f==&families[0]) {
+            std::vector<BYTE> combined;
+            h.check(edvr::flatOverlayPatchPs(foreignPs.data(),foreignPs.size(),combined,foreignWhy),foreignWhy.c_str());
+            drawChecks(h,f,vs,ps,patchedVs,combined,true,false,true);
+            h.check(edvr::flatOverlayPatchPs(worldPs.data(),worldPs.size(),combined,foreignWhy),foreignWhy.c_str());
+            drawChecks(h,f,vs,ps,vs,combined,false,true,true);
+        }
         // Family A is the shape the flight substituted (vs_EB52 -> ps_3434).
         if (&f == &families[0]) blendChecks(h, vs, ps, patchedPs);
     }

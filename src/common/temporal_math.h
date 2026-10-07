@@ -71,8 +71,30 @@ inline bool temporalSceneProjection(float rowA, float rowB, float nearZ,
 
 // How many frames the jitter sequence runs before repeating. Halton (2,3)
 // over eight frames covers the pixel evenly; longer sequences converge
-// finer detail but take longer to settle after a reset.
+// finer detail but take longer to settle after a reset. Eight is what every
+// path has always run, and what temporalJitter below draws unless a caller
+// names another count.
 constexpr uint32_t kTemporalJitterCount = 8;
+
+// The cycle lengths the flat profile's key (advanced.temporal_aa_jitter_phases)
+// accepts. NVIDIA and AMD suggest about 8 x (output / render)^2 when the game
+// renders below the output: 32 at half the output's size. 64 is twice that
+// figure and the ceiling; the floor is the fixed eight, which a render at or
+// above the output keeps.
+constexpr uint32_t kTemporalJitterPhasesMin = kTemporalJitterCount;
+constexpr uint32_t kTemporalJitterPhasesMax = 64;
+
+// The cycle length a configured value asks for: an integer from
+// kTemporalJitterPhasesMin to kTemporalJitterPhasesMax as written, and the fixed
+// kTemporalJitterCount for anything else (zero, a negative, one past the
+// ceiling): a value the cycle cannot use is not clamped to its nearest edge,
+// it is the default. `usable`, when given, says which of the two happened.
+inline uint32_t temporalJitterPhases(long configured, bool* usable = nullptr) {
+    const bool ok = configured >= static_cast<long>(kTemporalJitterPhasesMin) &&
+                    configured <= static_cast<long>(kTemporalJitterPhasesMax);
+    if (usable) *usable = ok;
+    return ok ? static_cast<uint32_t>(configured) : kTemporalJitterCount;
+}
 
 // The radical inverse of i (i >= 1) in `base`: the Halton sequence's
 // members, in [0, 1).
@@ -86,9 +108,16 @@ inline float temporalHalton(uint32_t i, uint32_t base) {
     return r;
 }
 
-// Frame n's sub-pixel offset, in render pixels, in [-0.5, 0.5).
-inline void temporalJitter(uint32_t n, float* jx, float* jy) {
-    const uint32_t i = (n % kTemporalJitterCount) + 1;
+// Frame n's sub-pixel offset, in render pixels, in [-0.5, 0.5), when the
+// sequence runs `count` frames before it repeats: the Halton (2,3) point at
+// index (n mod count) + 1. The default is kTemporalJitterCount, which is the
+// sequence every path ran before a count could be named, bit for bit (the VR
+// eye pass and the VR world route still call it with no count); a count of
+// zero reads as that default. The first eight offsets of any count are the
+// fixed eight's.
+inline void temporalJitter(uint32_t n, float* jx, float* jy,
+                           uint32_t count = kTemporalJitterCount) {
+    const uint32_t i = (n % (count ? count : kTemporalJitterCount)) + 1;
     *jx = temporalHalton(i, 2) - 0.5f;
     *jy = temporalHalton(i, 3) - 0.5f;
 }

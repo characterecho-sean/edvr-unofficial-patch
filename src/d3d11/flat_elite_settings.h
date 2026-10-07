@@ -427,7 +427,7 @@ inline void flatComposeSettingsWarning(const char* modeLabel, const EliteGraphic
         }
         second = "Turn off in Elite's graphics options: " + list;
     } else {
-        second = "Please send your logs (F10 in the cockpit, then the installer's log bundle).";
+        second = "Please send your logs (NumLock, then the installer's log bundle).";
     }
     flatWrapWarning(second, widthPx, measure, context, out);
     if (cause.taaAbove) flatWrapWarning(kFlatTaaAboveWords, widthPx, measure, context, out);

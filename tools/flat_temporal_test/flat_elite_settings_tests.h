@@ -380,7 +380,7 @@ inline int flatEliteSettingsTests() {
         words("FSR3", sean, wide, &w);
         expect(w.count == 2 &&
                std::strcmp(w.line[0], "FSR3 is not active: Elite's post-processing is not recognised.") == 0 &&
-               std::strcmp(w.line[1], "Please send your logs (F10 in the cockpit, then the installer's log bundle).") == 0,
+               std::strcmp(w.line[1], "Please send your logs (NumLock, then the installer's log bundle).") == 0,
                "Sean (all off): asks for the logs and names no setting");
         EliteGraphics all = user1;
         all.bloomQuality = 1; all.dofEnabled = 1;
@@ -583,7 +583,7 @@ inline int flatEliteSettingsTests() {
         flatFormatSettingsWarningLog(line, sizeof(line), true, "TAA", "no-known-tone-pass", true, taa, logged);
         expect(std::string(line) == "flat settings warning: changed (mode=TAA, frames refused for no-known-tone-pass, work stood down, "
                                     "structure admission on, TAA above the output (render 3840x2160, output 2560x1440)): TAA is not "
-                                    "active: Elite's post-processing is not recognised. | Please send your logs (F10 in the cockpit, "
+                                    "active: Elite's post-processing is not recognised. | Please send your logs (NumLock, "
                                     "then the installer's log bundle). | " + std::string(kFlatTaaAboveWords),
                "the log line for TAA above the output: the conditions, the sizes, all three paragraphs");
         FlatWarningCause off;

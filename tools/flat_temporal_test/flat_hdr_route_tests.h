@@ -5,6 +5,7 @@
 // writes a trace with only the named frames (how the fixtures of the four section-81 captures were cut).
 #pragma once
 #include "../../src/d3d11/flat_hdr_route.h"
+#include "../../src/d3d11/flat_camera_phase.h"
 #include "../../src/d3d11/flat_trace.h"
 #include "../../src/d3d11/hdr_backend_flags.h"
 #include "../../src/d3d11/flat_standdown.h"
@@ -69,6 +70,18 @@ inline bool readFile(const std::filesystem::path& path, std::vector<unsigned cha
     file.read(reinterpret_cast<char*>(bytes->data()), std::streamsize(bytes->size()));
     return static_cast<bool>(file);
 }
+inline bool replayOverlayMarker(edvr::FlatRuntimePrefix& prefix, const edvr::FlatTraceEvent& e) {
+    using namespace edvr;
+    if (e.kind == kFlatTraceEventOverlayFailed) {
+        flatRuntimeOverlayFailed(prefix,e.key.color);
+        return true;
+    }
+    if (e.kind == kFlatTraceEventOverlaySeal) {
+        flatRuntimeOverlaySeal(prefix,e.key.color);
+        return true;
+    }
+    return false;
+}
 
 inline FrameFacts replayFrame(const ParsedFrame& frame) {
     using namespace edvr;
@@ -94,6 +107,7 @@ inline FrameFacts replayFrame(const ParsedFrame& frame) {
         if (e.kind == kFlatTraceEventMarkUncertain) { prefix->uncertain = true; continue; }
         if (e.kind == kFlatTraceEventCameraCapture) { ++prefix->sequence; continue; }
         if (e.kind == kFlatTraceEventResolve) { ++f.resolveMarkers; f.markerEvent = i; f.markerReason = e.key.count; continue; }
+        if (replayOverlayMarker(*prefix,e)) continue;
         FlatRuntimeDraw d = flatTraceEventToDraw(e);
         if (e.flags & kFlatTraceForeignWork) prefix->uncertain = true;
         ++f.draws;
@@ -177,8 +191,9 @@ inline int traceTrim(const char* in, const char* out, const char* list) {
     FlatTraceHeader header{};
     std::memcpy(&header, bytes.data(), sizeof(header));
     const bool v4 = std::memcmp(header.magic, "EDVRFTR4", 8) == 0;
-    if (!v4 && std::memcmp(header.magic, "EDVRFTR3", 8) != 0) { std::printf("%s is not EDVRFTR3/4\n", in); return 2; }
-    const size_t eventSize = v4 ? sizeof(FlatTraceEvent) : sizeof(FlatTraceEventV3);
+    const bool v5 = std::memcmp(header.magic, "EDVRFTR5", 8) == 0;
+    if (!v4 && !v5 && std::memcmp(header.magic, "EDVRFTR3", 8) != 0) { std::printf("%s is not EDVRFTR3/4/5\n", in); return 2; }
+    const size_t eventSize = v4 || v5 ? sizeof(FlatTraceEvent) : sizeof(FlatTraceEventV3);
     std::set<uint64_t> wanted;
     {
         std::stringstream ss(list);
@@ -645,6 +660,327 @@ inline int flatHdrRouteTests() {
                "a second supported source depth under the same camera is ambiguous");
     }
 
+    // A protected divergent-camera draw may open a late overlay suffix, but
+    // every following HDR write must remain protected. The model must retain
+    // conflicts that occurred before the suffix opened.
+    {
+        auto late = [](Stream& s, bool protectedDraw) {
+            auto d = s.make(s.sc.h, s.sc.hDepth, s.sc.hW, s.sc.hH, 26,
+                            0x12345678, 0x87654321, true, false);
+            d.camera[0] ^= 1;
+            d.key.cameraHash = flatCameraHash(d.camera);
+            d.overlayProtected = protectedDraw;
+            s.draw(d);
+        };
+        auto target = [](const Stream& s) -> const FlatRuntimeTarget* {
+            for (uint32_t i = 0; i < s.prefix->targetsUsed; ++i)
+                if (s.prefix->targets[i].resource == s.sc.h) return &s.prefix->targets[i];
+            return nullptr;
+        };
+        Stream accepted; accepted.sceneDraws(2, 2); late(accepted, true);
+        const auto* a = target(accepted);
+        expect(a && a->overlayOpen && a->overlayDepth == accepted.sc.hDepth && !a->hdrBad,
+               "protected alternate-camera HDR draw opens a clean overlay suffix");
+        late(accepted, true);
+        a = target(accepted);
+        expect(a && a->overlayOpen && !a->hdrBad,
+               "a second protected draw may extend the same overlay suffix");
+        accepted.toneTrigger();
+        expect(accepted.select().selected(),
+               "the real HDR consumer selector admits a protected suffix with the original world camera");
+
+        Stream unrelated; unrelated.sceneDraws(2, 2); late(unrelated, true);
+        // Clear, copy, resolve, UpdateSubresource and Map all report their
+        // destination resource to the reducer. Writes to separate resources
+        // cannot change the protected H or its scene depth. A scene constant
+        // buffer update is likewise safe only while the later draw's measured
+        // camera and phase still pass the ordinary checks.
+        unrelated.write(unrelated.sc.copyOfH);
+        unrelated.write(unrelated.sc.b1);
+        unrelated.dispatch(unrelated.sc.h2);
+        late(unrelated, true);
+        const auto* n = target(unrelated);
+        expect(n && n->overlayOpen && !n->hdrBad,
+               "unrelated writes and a scene-CB update leave a verified protected suffix open");
+        unrelated.toneTrigger();
+        expect(unrelated.select().selected(),
+               "unrelated writes still admit the real HDR consumer with the frozen world camera");
+
+        Stream unknown; unknown.sceneDraws(2, 2); late(unknown, true);
+        flatRuntimeOverlayFailed(*unknown.prefix, nullptr);
+        const auto* q = target(unknown);
+        expect(q && q->hdrBad && q->firstBad.cause == FlatRuntimeConflict::OverlaySuffix,
+               "an unknown write or command list invalidates an open suffix");
+        unknown.toneTrigger();
+        expect(unknown.select().reason == FlatMonoReason::ConflictingHdr,
+               "the actual HDR consumer refuses an unknown suffix mutation");
+
+        Stream unprotected; unprotected.sceneDraws(2, 2); late(unprotected, true);
+        unprotected.draw(unprotected.make(unprotected.sc.h, unprotected.sc.hDepth,
+            unprotected.sc.hW, unprotected.sc.hH, 26, 0x44, 0x55, true, false));
+        const auto* u = target(unprotected);
+        expect(u && u->hdrBad && u->firstBad.cause == FlatRuntimeConflict::OverlaySuffix,
+               "unprotected later HDR draw makes the suffix sticky-bad");
+        unprotected.toneTrigger();
+        expect(unprotected.select().reason == FlatMonoReason::ConflictingHdr,
+               "unprotected suffix is refused by the actual HDR consumer selector");
+
+        Stream colorWrite; colorWrite.sceneDraws(2, 2); late(colorWrite, true);
+        colorWrite.write(colorWrite.sc.h);
+        const auto* c = target(colorWrite);
+        expect(c && c->hdrBad && c->firstBad.cause == FlatRuntimeConflict::ExplicitWrite,
+               "explicit HDR copy, clear, update, or map invalidates the suffix");
+        colorWrite.toneTrigger();
+        expect(colorWrite.select().reason == FlatMonoReason::ConflictingHdr,
+               "explicit HDR write is refused by the actual HDR consumer selector");
+
+        Stream depthWrite; depthWrite.sceneDraws(2, 2); late(depthWrite, true);
+        depthWrite.write(depthWrite.sc.hDepth);
+        const auto* z = target(depthWrite);
+        expect(z && z->hdrBad && z->firstBad.cause == FlatRuntimeConflict::OverlaySuffix,
+               "explicit scene-depth write invalidates the suffix");
+        depthWrite.toneTrigger();
+        expect(depthWrite.select().reason == FlatMonoReason::ConflictingHdr,
+               "scene-depth write is refused by the actual HDR consumer selector");
+
+        Stream drawDepth; drawDepth.sceneDraws(2, 2); late(drawDepth, true);
+        auto depthOnly = drawDepth.make(drawDepth.sc.h2, drawDepth.sc.hDepth,
+            drawDepth.sc.hW, drawDepth.sc.hH, 26, 0x51, 0x52, false, false);
+        depthOnly.effectiveDepthWrite = true;
+        drawDepth.draw(depthOnly);
+        z = target(drawDepth);
+        expect(z && z->hdrBad && z->firstBad.cause == FlatRuntimeConflict::OverlaySuffix,
+               "a different-color draw writing scene depth invalidates the suffix");
+        drawDepth.toneTrigger();
+        expect(drawDepth.select().reason == FlatMonoReason::ConflictingHdr,
+               "different-color scene-depth writer is refused by the HDR consumer selector");
+
+        Stream readOnlyDepth; readOnlyDepth.sceneDraws(2, 2); late(readOnlyDepth, true);
+        auto depthRead = readOnlyDepth.make(readOnlyDepth.sc.h2, readOnlyDepth.sc.hDepth,
+            readOnlyDepth.sc.hW, readOnlyDepth.sc.hH, 26, 0x51, 0x52, false, false);
+        depthRead.effectiveDepthWrite = false;
+        readOnlyDepth.draw(depthRead);
+        z = target(readOnlyDepth);
+        expect(z && !z->hdrBad,
+               "a depth-read-only draw on another target does not invent a scene-depth write");
+        readOnlyDepth.toneTrigger();
+        expect(readOnlyDepth.select().selected(),
+               "depth-read-only work leaves the original HDR consumer eligible");
+
+        Stream prior; prior.sceneDraws(2, 2); late(prior, false);
+        const auto* p = target(prior);
+        const auto first = p ? p->firstBad.cause : FlatRuntimeConflict::None;
+        late(prior, true);
+        p = target(prior);
+        expect(p && first == FlatRuntimeConflict::CameraChange && p->hdrBad &&
+               p->firstBad.cause == first && !p->overlayOpen,
+               "protection cannot erase an earlier camera conflict");
+        prior.toneTrigger();
+        expect(prior.select().reason == FlatMonoReason::ConflictingHdr,
+               "earlier camera conflict remains refused at the HDR consumer");
+    }
+
+    // The automatic ambiguity witness sees the exact 34-record input while it
+    // is alive, including every source after the first offender. It must
+    // classify the selector's real branches without changing its verdict.
+    {
+        struct Witness {
+            uint32_t calls = 0, records = 0, eligible = 0;
+            const void* hdr = nullptr;
+            std::vector<FlatHdrSourceIssue> issues;
+        };
+        const auto sink=+[](const FlatMonoFrameInput& in,const void* hdr,uint32_t consumer,void* user) {
+            auto& w=*static_cast<Witness*>(user);
+            ++w.calls;w.records=in.worldCount+in.handoffCount;w.hdr=hdr;
+            if(in.worldCount<2)return;
+            const auto& h=in.world[0];const auto& camera=in.world[1];
+            for(uint32_t i=0;i<w.records;++i) {
+                const auto facts=flatHdrSourceFacts(in,i,h,camera,h.key.width,h.key.height,
+                                                    consumer,h.last);
+                if(facts.eligible) {++w.eligible;w.issues.push_back(facts.issue);}
+            }
+        };
+        const auto supported=+[](uint64_t,uint64_t){return true;};
+        Stream normal;normal.sceneDraws(2,2);normal.toneTrigger();
+        Witness none{};
+        expect(flatSelectHdrRoute(*normal.prefix,normal.hdr,supported,sink,&none).selected() &&
+               none.calls==0,
+               "a selected frame never emits an AmbiguousSource witness");
+
+        Stream cameraMix;cameraMix.sceneDraws(2,2);
+        auto secondCamera=cameraMix.make(cameraMix.sc.h2,cameraMix.sc.hDepth,
+            cameraMix.sc.hW,cameraMix.sc.hH,26,0xA1,0xB1,true,true);
+        secondCamera.camera[0]^=1;
+        secondCamera.key.cameraHash=flatCameraHash(secondCamera.camera);
+        cameraMix.draw(secondCamera);cameraMix.toneTrigger();
+        Witness cameras{};
+        const auto cameraVerdict=flatSelectHdrRoute(*cameraMix.prefix,cameraMix.hdr,supported,sink,&cameras);
+        expect(cameraVerdict.reason==FlatMonoReason::AmbiguousSource && cameras.calls==1 &&
+               cameras.hdr==cameraMix.sc.h && cameras.records==4 && cameras.eligible==2 &&
+               cameras.issues.size()==2 && cameras.issues[0]==FlatHdrSourceIssue::None &&
+               cameras.issues[1]==FlatHdrSourceIssue::SameDepthCamera,
+               "one wrong-camera pool source is identified after the valid source; all records are reported");
+        struct Qualified {uint32_t calls=0,allow=0;};
+        const auto qualify=+[](const FlatContractRecord& record,const unsigned char* worldCamera,void* user)->bool {
+            auto& q=*static_cast<Qualified*>(user);
+            ++q.calls;
+            return record.key.camera && worldCamera && q.calls<=q.allow;
+        };
+        Stream qualifiedMix;qualifiedMix.sceneDraws(2,2);
+        auto qualifiedDraw=qualifiedMix.make(qualifiedMix.sc.h2,qualifiedMix.sc.hDepth,
+            qualifiedMix.sc.hW,qualifiedMix.sc.hH,26,0xA1,0xB1,true,true);
+        qualifiedDraw.camera[0]^=1;qualifiedDraw.key.cameraHash=flatCameraHash(qualifiedDraw.camera);
+        qualifiedMix.draw(qualifiedDraw);
+        qualifiedMix.draw(qualifiedMix.make(qualifiedMix.sc.h,qualifiedMix.sc.hDepth,
+            qualifiedMix.sc.hW,qualifiedMix.sc.hH,26,0xA2,0xB2,true,false));
+        qualifiedMix.toneTrigger();
+        Qualified denied{0,0};
+        const auto deniedVerdict=flatSelectHdrRoute(*qualifiedMix.prefix,qualifiedMix.hdr,supported,
+                                                    nullptr,nullptr,qualify,&denied);
+        expect(deniedVerdict.reason==FlatMonoReason::AmbiguousSource && denied.calls==1,
+               "an alternate-camera record remains ambiguous when qualification refuses it");
+        Qualified accepted{0,1};
+        const auto qualifiedVerdict=flatSelectHdrRoute(*qualifiedMix.prefix,qualifiedMix.hdr,supported,
+                                                       nullptr,nullptr,qualify,&accepted);
+        if(!qualifiedVerdict.selected() || !qualifiedVerdict.mixedCamera || accepted.calls!=1)
+            std::printf("info: qualified single reason=%s mixed=%u calls=%u\n",
+                flatMonoReasonName(qualifiedVerdict.reason),qualifiedVerdict.mixedCamera?1u:0u,accepted.calls);
+        expect(qualifiedVerdict.selected() && qualifiedVerdict.mixedCamera && accepted.calls==1 &&
+               qualifiedVerdict.hdr==qualifiedMix.sc.h,
+               "one qualified alternate-camera source selects a mixed frame without renaming world H");
+
+        Stream twoAlternates;twoAlternates.sceneDraws(2,2);
+        auto alternateA=twoAlternates.make(twoAlternates.sc.h2,twoAlternates.sc.hDepth,
+            twoAlternates.sc.hW,twoAlternates.sc.hH,26,0xA1,0xB1,true,true);
+        alternateA.camera[0]^=1;alternateA.key.cameraHash=flatCameraHash(alternateA.camera);
+        twoAlternates.draw(alternateA);
+        auto alternateB=twoAlternates.make(twoAlternates.sc.h2,twoAlternates.sc.hDepth,
+            twoAlternates.sc.hW,twoAlternates.sc.hH,26,0xA1,0xB1,true,true);
+        alternateB.camera[0]^=2;alternateB.key.cameraHash=flatCameraHash(alternateB.camera);
+        twoAlternates.draw(alternateB);
+        twoAlternates.draw(twoAlternates.make(twoAlternates.sc.h,twoAlternates.sc.hDepth,
+            twoAlternates.sc.hW,twoAlternates.sc.hH,26,0xA2,0xB2,true,false));
+        twoAlternates.toneTrigger();
+        Qualified partial{0,1};
+        const auto partialVerdict=flatSelectHdrRoute(*twoAlternates.prefix,twoAlternates.hdr,supported,
+                                                    nullptr,nullptr,qualify,&partial);
+        if(partialVerdict.reason!=FlatMonoReason::AmbiguousSource || partial.calls!=2)
+            std::printf("info: qualified partial reason=%s calls=%u\n",
+                flatMonoReasonName(partialVerdict.reason),partial.calls);
+        expect(partialVerdict.reason==FlatMonoReason::AmbiguousSource && partial.calls==2,
+               "all alternate-camera records must qualify; accepting only the first still refuses");
+        Qualified complete{0,2};
+        const auto completeVerdict=flatSelectHdrRoute(*twoAlternates.prefix,twoAlternates.hdr,supported,
+                                                     nullptr,nullptr,qualify,&complete);
+        if(!completeVerdict.selected() || !completeVerdict.mixedCamera || complete.calls!=2)
+            std::printf("info: qualified complete reason=%s mixed=%u calls=%u\n",
+                flatMonoReasonName(completeVerdict.reason),completeVerdict.mixedCamera?1u:0u,complete.calls);
+        expect(completeVerdict.selected() && completeVerdict.mixedCamera && complete.calls==2,
+               "each qualified alternate-camera source is checked before mixed selection");
+        Stream unsupportedAlternate;unsupportedAlternate.sceneDraws(2,2);
+        auto unsupportedDraw=unsupportedAlternate.make(unsupportedAlternate.sc.h2,unsupportedAlternate.sc.hDepth,
+            unsupportedAlternate.sc.hW,unsupportedAlternate.sc.hH,26,0xA1,0xBAD,true,true);
+        unsupportedDraw.camera[0]^=1;unsupportedDraw.key.cameraHash=flatCameraHash(unsupportedDraw.camera);
+        unsupportedAlternate.draw(unsupportedDraw);
+        unsupportedAlternate.draw(unsupportedAlternate.make(unsupportedAlternate.sc.h,unsupportedAlternate.sc.hDepth,
+            unsupportedAlternate.sc.hW,unsupportedAlternate.sc.hH,26,0xA2,0xB2,true,false));
+        unsupportedAlternate.toneTrigger();
+        Qualified noUnsupported{0,1};
+        const auto supportedExceptBad=+[](uint64_t,uint64_t ps){return ps!=0xBAD;};
+        const auto unsupportedVerdict=flatSelectHdrRoute(*unsupportedAlternate.prefix,unsupportedAlternate.hdr,
+            supportedExceptBad,nullptr,nullptr,qualify,&noUnsupported);
+        expect(unsupportedVerdict.reason==FlatMonoReason::AmbiguousSource && noUnsupported.calls==0,
+               "an unsupported alternate-camera writer cannot inherit another draw's qualification");
+
+        Stream depthMix;depthMix.sceneDraws(2,2);
+        depthMix.draw(depthMix.make(depthMix.sc.h2,depthMix.sc.h2Depth,
+            depthMix.sc.hW,depthMix.sc.hH,26,0xA1,0xB1,true,true));
+        depthMix.toneTrigger();
+        Witness depths{};
+        const auto depthVerdict=flatSelectHdrRoute(*depthMix.prefix,depthMix.hdr,supported,sink,&depths);
+        expect(depthVerdict.reason==FlatMonoReason::AmbiguousSource && depths.calls==1 &&
+               depths.eligible==2 && depths.issues.size()==2 &&
+               depths.issues[0]==FlatHdrSourceIssue::None &&
+               depths.issues[1]==FlatHdrSourceIssue::SecondDepthSameCamera,
+               "a genuine second world depth still refuses and names the second-depth branch");
+
+        auto world=cameraMix.make(cameraMix.sc.h,cameraMix.sc.hDepth,
+            cameraMix.sc.hW,cameraMix.sc.hH,26,0xA1,0xB1,true,true);
+        auto other=cameraMix.make(cameraMix.sc.h2,cameraMix.sc.hDepth,
+            cameraMix.sc.hW,cameraMix.sc.hH,26,0xA2,0xB2,true,true);
+        FlatContractRecord baseline=flatRuntimeRecord(world,2,kFrame);
+        FlatContractRecord source=flatRuntimeRecord(other,3,kFrame);
+        baseline.key.kind=source.key.kind=kFlatContractPool;
+        FlatMonoFrameInput input{};input.world=&source;input.worldCount=1;
+        input.frame=input.epoch=kFrame;input.supportedPair=supported;
+        source.key.dsv=tok(0x7777);
+        expect(flatHdrSourceFacts(input,0,baseline,baseline,cameraMix.sc.hW,cameraMix.sc.hH,10,8).issue==
+                   FlatHdrSourceIssue::SameDepthLayout,
+               "same-depth wrong DSV is reported as layout ambiguity before camera comparison");
+        FlatContractRecord records[4]{};
+        const FlatRuntimeTarget* hTarget=nullptr;
+        for(uint32_t i=0;i<normal.prefix->targetsUsed;++i)
+            if(normal.prefix->targets[i].resource==normal.sc.h)hTarget=&normal.prefix->targets[i];
+        if(hTarget) {
+            records[0]=hTarget->writes;records[0].key.camera=nullptr;
+            records[0].key.kind=kFlatContractScreen;
+            records[1]=hTarget->tone;records[1].key.kind=kFlatContractScreen;
+            records[2]=baseline;records[3]=source;
+            input.world=records;input.worldCount=4;
+            input.output=normal.sc.output;input.outputWidth=normal.sc.outW;
+            input.outputHeight=normal.sc.outH;input.outputFormat=28;
+            expect(flatSelectHdrFrame(input,normal.sc.h,normal.hdr.trigger.sequence).reason==
+                       FlatMonoReason::AmbiguousSource,
+                   "the actual selector refuses a supported same-depth wrong-DSV source");
+        } else expect(false,"the HDR target exists for the selector-layout fixture");
+        source.key.dsv=baseline.key.dsv;
+        source.key.vs=0xBAD;
+        input.supportedPair=+[](uint64_t vs,uint64_t){return vs!=0xBAD;};
+        records[3]=source;
+        expect(!flatHdrSourceFacts(input,3,baseline,baseline,cameraMix.sc.hW,cameraMix.sc.hH,10,8).eligible &&
+               flatSelectHdrFrame(input,normal.sc.h,normal.hdr.trigger.sequence).selected(),
+               "an unsupported pool pair is filtered from the source witness");
+        expect(flatHdrShouldSampleAmbiguousSource(100,0,0) &&
+               !flatHdrShouldSampleAmbiguousSource(0,0,0) &&
+               !flatHdrShouldSampleAmbiguousSource(159,100,1) &&
+               flatHdrShouldSampleAmbiguousSource(160,100,1) &&
+               !flatHdrShouldSampleAmbiguousSource(99,100,1) &&
+               !flatHdrShouldSampleAmbiguousSource(220,100,2),
+               "automatic witness captures at most twice with a 60-frame separation");
+    }
+
+    // The projection proof measures the uploaded rows, independently of VS/PS
+    // identity. Scale and near may differ, but both centres and the pose must
+    // agree with this frame's raster phase.
+    {
+        constexpr uint32_t w=3840, h=2160;
+        FlatProjectionJitter phase{};
+        expect(flatProjectionJitter(.25f,-.25f,w,h,phase),
+               "nonzero phase has a finite expected NDC shift");
+        float world[6][4]{}, overlay[6][4]{};
+        world[0][0]=1.2f;world[1][1]=1.5f;world[2][3]=1;
+        world[2][0]=phase.ndcX;world[2][1]=phase.ndcY;world[3][2]=.025f;
+        std::memcpy(overlay,world,sizeof(world));
+        overlay[0][0]=1.8f;overlay[1][1]=2.1f;overlay[3][2]=.0675f;
+        expect(flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "alternate FOV and near with the same nonzero phase and pose is admitted");
+        overlay[2][0]+=1.e-4f;
+        expect(!flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "off-centre alternate projection is refused");
+        overlay[2][0]=phase.ndcX;overlay[2][1]=0;
+        expect(!flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "unphased alternate projection is refused when the frame is jittered");
+        overlay[2][1]=phase.ndcY;overlay[4][0]=1;
+        expect(!flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "different camera pose is refused");
+        overlay[4][0]=0;overlay[2][3]=0;
+        expect(!flatCameraCenteredPairAtPhase(world,overlay,.25f,-.25f,w,h),
+               "malformed forward row is refused");
+        overlay[2][3]=1;world[2][0]=overlay[2][0]=0;world[2][1]=overlay[2][1]=0;
+        expect(flatCameraCenteredPairAtPhase(world,overlay,0,0,w,h),
+               "centered zero-phase alternate projection is admitted");
+    }
+
     // ---- the latch: three treated frames with late writes turn the route off ------------------------------------
     {
         FlatHdrLatch latch;
@@ -890,10 +1226,10 @@ inline int flatHdrRouteTests() {
             const auto* p = static_cast<const unsigned char*>(data);
             bytes.insert(bytes.end(), p, p + n); return n;
         });
-        expect(bytes.size() > 16 && std::memcmp(bytes.data(), "EDVRFTR4", 8) == 0, "the dump is EDVRFTR4");
+        expect(bytes.size() > 16 && std::memcmp(bytes.data(), "EDVRFTR5", 8) == 0, "the dump is EDVRFTR5");
         std::vector<ParsedFrame> frames;
         const bool parsed = parseTrace(bytes, &frames);
-        expect(parsed && frames.size() == 1 && frames[0].events.size() == 3, "a v4 dump parses: one frame, three events");
+        expect(parsed && frames.size() == 1 && frames[0].events.size() == 3, "a v5 dump parses: one frame, three events");
         if (parsed && frames.size() == 1 && frames[0].events.size() == 3) {
             const auto& e = frames[0].events;
             expect(!(e[0].flags & kFlatTraceHdrSrvKnown) && e[0].hdrSrv[1] == nullptr,
@@ -929,7 +1265,7 @@ inline int flatHdrRouteTests() {
         std::vector<ParsedFrame> old;
         expect(parseTrace(v3, &old) && old.size() == 1 && old[0].events.size() == 1 && old[0].header.frame == 77 &&
                old[0].events[0].key.ps == 0xFE && old[0].events[0].flags == kFlatTraceSupported &&
-               old[0].events[0].hdrSrv[0] == nullptr && old[0].events[0].hdrSrv[3] == nullptr,
+               old[0].events[0].hdrSrv[0] == nullptr && old[0].events[0].hdrSrv[3] == nullptr && old[0].events[0].drawSequence == 0,
                "an EDVRFTR3 trace still parses: the event is widened and its slots are zero");
         std::vector<unsigned char> bad = v3;
         bad[7] = '9';
@@ -937,6 +1273,82 @@ inline int flatHdrRouteTests() {
         bad = v3; bad.resize(bad.size() - 3);
         expect(!parseTrace(bad, &old), "a truncated v3 trace is refused");
         expect(sizeof(FlatTraceEventV3) == 472, "the EDVRFTR3 event layout is the 472 bytes the corpus was written with");
+        auto v4bytes=bytes;v4bytes[7]='4';
+        for(size_t at=sizeof(FlatTraceHeader)+sizeof(FlatTraceFrameHeader);at+sizeof(FlatTraceEvent)<=v4bytes.size();at+=sizeof(FlatTraceEvent)) {
+            const uint32_t arbitraryPadding=0xDEADBEEFu;
+            std::memcpy(v4bytes.data()+at+468,&arbitraryPadding,sizeof(arbitraryPadding));
+        }
+        std::vector<ParsedFrame> legacy;
+        expect(parseTrace(v4bytes,&legacy)&&legacy.size()==1&&legacy[0].events.size()==3&&
+               legacy[0].events[0].key.sequence==d1.key.sequence&&legacy[0].events[0].drawSequence==0&&
+               legacy[0].events[1].hdrSrv[1]==s.sc.h&&legacy[0].events[1].drawSequence==0,
+               "FTR4 preserves contract keys and SRVs while ignoring arbitrary legacy padding at the new q offset");
+    }
+
+    // The live trace has to preserve the protection and effective-write
+    // semantics. A replay that drops them could approve an unsafe suffix.
+    {
+        auto ring=std::make_unique<FlatTraceRing>();
+        Stream s;
+        auto recordFrame=[&](uint64_t frame,bool depthWriter) {
+            flatTraceBeginFrame(*ring,frame,s.sc.output,s.sc.outW,s.sc.outH,28);
+            flatTraceMark(*ring,kFlatTraceEventCameraCapture,nullptr);
+            auto world=s.make(s.sc.h,s.sc.hDepth,s.sc.hW,s.sc.hH,26,0xA1,0xB1,true,true);
+            world.key.writeEpoch=frame;
+            flatTraceRecord(*ring,world,false);
+            auto overlay=s.make(s.sc.h,s.sc.hDepth,s.sc.hW,s.sc.hH,26,0x1234,0x5678,true,false);
+            overlay.camera[0]^=1;overlay.key.cameraHash=flatCameraHash(overlay.camera);
+            overlay.key.writeEpoch=frame;
+            overlay.overlayProtected=true;overlay.effectiveStencilWrite=true;
+            flatTraceRecord(*ring,overlay,false);
+            if (depthWriter) {
+                auto z=s.make(s.sc.h2,s.sc.hDepth,s.sc.hW,s.sc.hH,26,0x51,0x52,false,false);
+                z.effectiveDepthWrite=true;
+                flatTraceRecord(*ring,z,false);
+                flatTraceMark(*ring,kFlatTraceEventOverlayFailed,s.sc.h);
+            } else {
+                flatTraceMark(*ring,kFlatTraceEventOverlaySeal,s.sc.h);
+                flatTraceMark(*ring,kFlatTraceEventWriteResource,s.sc.hDepth);
+            }
+        };
+        recordFrame(kFrame,true);
+        recordFrame(kFrame+1,false);
+        flatTraceBeginFrame(*ring,kFrame+2,s.sc.output,s.sc.outW,s.sc.outH,28);
+        std::vector<unsigned char> serialized;
+        flatTraceDump(*ring,[&](const void* data,uint32_t n) {
+            const auto* p=static_cast<const unsigned char*>(data);
+            serialized.insert(serialized.end(),p,p+n);return n;
+        });
+        std::vector<ParsedFrame> frames;
+        expect(parseTrace(serialized,&frames) && frames.size()==2,
+               "overlay semantic trace frames serialize and parse");
+        if (frames.size()==2) {
+            for (size_t fi=0;fi<2;++fi) {
+                FlatRuntimePrefix replay{};
+                replay.frame=frames[fi].header.frame;replay.output=s.sc.output;
+                replay.width=s.sc.outW;replay.height=s.sc.outH;replay.format=28;
+                bool protectedFlag=false,depthFlag=false,stencilFlag=false;
+                for (const auto& e:frames[fi].events) {
+                    if (e.kind==kFlatTraceEventCameraCapture) {++replay.sequence;continue;}
+                    if (e.kind==kFlatTraceEventWriteResource) {flatRuntimeWritten(replay,e.key.color);continue;}
+                    if (replayOverlayMarker(replay,e)) continue;
+                    auto d=flatTraceEventToDraw(e);
+                    protectedFlag|=d.overlayProtected;
+                    depthFlag|=d.effectiveDepthWrite;
+                    stencilFlag|=d.effectiveStencilWrite;
+                    flatRuntimeObserve(replay,d);
+                }
+                const FlatRuntimeTarget* hTarget=nullptr;
+                for (uint32_t i=0;i<replay.targetsUsed;++i)
+                    if(replay.targets[i].resource==s.sc.h) hTarget=&replay.targets[i];
+                expect(hTarget && protectedFlag && stencilFlag &&
+                       (fi==0 ? depthFlag && hTarget->hdrBad &&
+                           hTarget->firstBad.cause==FlatRuntimeConflict::OverlaySuffix
+                              : !depthFlag && !hTarget->hdrBad && !hTarget->overlayOpen),
+                       fi==0 ? "serialized depth writer and failure marker refuse overlay replay"
+                             : "serialized seal ends suffix before unrelated depth write");
+            }
+        }
     }
 
     // ---- the corpus: the detector over every captured frame, and the four captures of section 81 ----------------
@@ -1165,7 +1577,9 @@ inline int flatHdrRouteTests() {
         expect(!runtime.empty() && !menu.empty(), "the runtime and menu sources are readable from the repo root");
         expect(count(runtime, "Config::get().getString(\"experimental.temporal_aa_before_post\", \"auto\")") == 1,
                "the route's key falls back to auto when the file has no line");
-        expect(count(runtime, "flatHdrTriggerSeen(sel, s.engine)") == 1 && count(runtime, "flatFrameSeenFor(") == 1 &&
+        expect(count(runtime, "flatHdrTriggerSeen(sel,") == 1 &&
+                   count(runtime, "sel.mixedCamera?FlatMonoResolveMode::Taa:s.engine);") == 0 &&
+                   count(runtime, "flatFrameSeenFor(") == 1 &&
                    count(runtime, "if (routeSeen == FlatFrameSeen::Treatable) { s.frameSeen = FlatFrameSeen::Treatable;") == 1,
                "the route adds to a frame's stand-down verdict through flatHdrTriggerSeen only; the copy stage is the one other caller of flatFrameSeenFor");
         // The F8 supersampling advice (the game rendering below the output) is gone (section 83: below 1.0 is served by the

@@ -34,6 +34,7 @@ std::vector<std::string> isolationLines;
 // Set by flat_context_isolation_gpu_tests.h: what the stub backend leaves bound, after its own ClearState. Null dirties nothing.
 void (*backendDirtyHook)(ID3D11DeviceContext*)=nullptr;
 float expectedJx=0,expectedJy=0;
+float expectedNear=.025f;
 float observedMotion=0,observedMotionY=0,observedDepth=0;unsigned observedReject=0;
 // The whole motion texture the SDK was handed, decoded, and a hash over its raw bits: the shader's complete
 // output for the frame, so "bit-identical" can be asserted rather than sampled at one pixel.
@@ -44,9 +45,12 @@ std::vector<uint64_t> motionHashLog; // one entry per backend call, in call orde
 std::vector<int> backendSlots;
 std::vector<std::string> firstPersonLines;
 std::vector<std::string> weaponFootprintLines;
+std::vector<std::string> resolveInputLines;
 uint32_t observedInW=0,observedInH=0,observedOutW=0,observedOutH=0;
 // What the stub backends were handed on the HDR route (section 81): the flag and the formats of the textures it names.
 bool observedHdr=false;DXGI_FORMAT observedColourFormat=DXGI_FORMAT_UNKNOWN,observedOutFormat=DXGI_FORMAT_UNKNOWN;
+uint32_t observedBackendCenter=0,observedBackendOutside=0;
+bool observedBackendPixels=false;
 // Mutation runs (flat_first_person_gpu_tests.h) count a failed check here instead of failing the rig: a scenario run against a
 // shader with one rule flipped is SUPPOSED to fail, and the rig fails only if it does not.
 int* mutationFailures=nullptr;std::string mutationFirst;
@@ -153,6 +157,7 @@ void Log::note(const char* fmt,...) {
     else if(std::strncmp(line,firstPersonPrefix,sizeof(firstPersonPrefix)-1)==0)firstPersonLines.emplace_back(line);
     else if(std::strncmp(line,isolationPrefix,sizeof(isolationPrefix)-1)==0)isolationLines.emplace_back(line);
     else if(std::strncmp(line,"flat weapon footprint:",22)==0)weaponFootprintLines.emplace_back(line);
+    else if(std::strncmp(line,"flat resolve inputs:",20)==0)resolveInputLines.emplace_back(line);
 }
 // Stand-in for src\common\proxy.cpp's breadcrumb(): the route's crumbs land here so the rig can read the trail back.
 void breadcrumb(const char* stage) {if(stage)crumbLines.emplace_back(stage);}
@@ -174,6 +179,8 @@ bool dlaaEvaluate(ID3D11DeviceContext* c,int slot,ID3D11Texture2D* colour,ID3D11
     observedInW=w;observedInH=h;observedOutW=outW;observedOutH=outH;
     observedHdr=hdr;observedColourFormat=DXGI_FORMAT_UNKNOWN;observedOutFormat=DXGI_FORMAT_UNKNOWN;
     {D3D11_TEXTURE2D_DESC d{};colour->GetDesc(&d);observedColourFormat=d.Format;out->GetDesc(&d);observedOutFormat=d.Format;}
+    if(hdr) observedBackendPixels=readPixel(c,colour,&observedBackendCenter,4,8,8) &&
+                                  readPixel(c,colour,&observedBackendOutside,4,1,1);
     return backend(c,depth,mv,mask,out,jx,jy,reset,why);
 }
 bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,ID3D11Texture2D* depth,ID3D11Texture2D* mv,
@@ -183,7 +190,9 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
     observedInW=w;observedInH=h;observedOutW=outW;observedOutH=outH;
     observedHdr=hdr;observedColourFormat=DXGI_FORMAT_UNKNOWN;observedOutFormat=DXGI_FORMAT_UNKNOWN;
     {D3D11_TEXTURE2D_DESC d{};colour->GetDesc(&d);observedColourFormat=d.Format;out->GetDesc(&d);observedOutFormat=d.Format;}
-    infiniteSeen=infinite;check(nearZ==.025f && std::abs(fov-1.5707963f)<1e-5f,"FSR actual near and FOV");
+    if(hdr) observedBackendPixels=readPixel(c,colour,&observedBackendCenter,4,8,8) &&
+                                  readPixel(c,colour,&observedBackendOutside,4,1,1);
+    infiniteSeen=infinite;check(nearZ==expectedNear && std::abs(fov-1.5707963f)<1e-5f,"FSR actual near and FOV");
     return backend(c,depth,mv,mask,out,jx,jy,reset,why);
 }
 } // namespace edvr
@@ -191,15 +200,24 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_projection_runtime_tests.h"
 #include "flat_pixel_capture_gpu_tests.h"
 #include "flat_draw_capture_gpu_tests.h"
+#include "flat_draw_packet_gpu_tests.h"
 #include "flat_weapon_footprint_gpu_tests.h"
+#include "flat_overlay_layer_gpu_tests.h"
+#include "flat_loop_output_gpu_tests.h"
+#include "flat_foreground_ownership_gpu_tests.h"
 #include "flat_hdr_route_gpu_tests.h"
+#include "flat_resolve_input_gpu_tests.h"
 #include "flat_resolve_fixture.h"
 #include "flat_upscaler_slot_gpu_tests.h"
 #include "flat_first_person_gpu_tests.h"
 #include "flat_first_person_phase_gpu_tests.h"
 #include "flat_refusal_gpu_tests.h"
 #include "flat_steady_depth_gpu_tests.h"
+#include "flat_taa_history_depth_gpu_tests.h"
 #include "flat_context_isolation_gpu_tests.h"
+#include "flat_sdk_foreground_gpu_tests.h"
+#include "flat_copy_refusal_view_gpu_tests.h"
+#include "flat_copy_foreground_gpu_tests.h"
 int main(int argc,char** argv) {
     const bool printGoldens=argc==2 && !std::strcmp(argv[1],"--print-goldens"); // --self-test plus the recorded key-off hashes, for re-recording
     if(argc!=2 || (std::strcmp(argv[1],"--self-test") && std::strcmp(argv[1],"--dry-run") && !printGoldens)){std::puts("usage: flat_mono_resolve_test --self-test|--dry-run|--print-goldens");return 2;}
@@ -783,9 +801,17 @@ int main(int argc,char** argv) {
     context->ClearState();
     failures+=flatPixelCaptureGpuTests(device.Get(),context.Get());
     failures+=flatDrawCaptureGpuTests(device.Get(),context.Get());
+    failures+=flatDrawPacketGpuTests(device.Get(),context.Get());
     failures+=flatWeaponFootprintGpuTests(device.Get(),context.Get());
+    failures+=flatOverlayLayerGpuTests(device.Get(),context.Get());
+    failures+=flatLoopOutputGpuTests(device.Get(),context.Get());
+    failures+=flatResolveInputGpuTests(device.Get(),context.Get());
+    failures+=flatForegroundOwnershipGpuTests(device.Get(),context.Get());
     // The HDR route's resolver half (design section 81): before the D3D message check below, so its draws are held to it.
     hdrRouteGpuTests(device.Get(),context.Get());
+    sdkForegroundGpuTests(device.Get(),context.Get());
+    // The same SDK foreground contract above the output (the supersampled on-foot frame), and the untrusted-coverage clause's other two sides.
+    sdkForegroundSupersampleGpuTests(device.Get(),context.Get());
     // The VR world route's seams (section 82): the third upscaler slot, the first-person map and stencil in the prep, and the phase term
     // the map's vector gets when the world and the first-person camera are jittered (stage 2).
     upscalerSlotGpuTests(device.Get(),context.Get());
@@ -794,9 +820,17 @@ int main(int argc,char** argv) {
     // The stage 2 experiment build's refusal census and view: the prep's class byte, the counting pass and its read-back, the steady-detail
     // rule's effect on the counts, and the HDR finish's paint.
     refusalGpuTests(device.Get(),context.Get());
+    // The same view on the copy route (hdr off): the compute finish paints it for the SDK backends, EDVR's own TAA there asks for nothing.
+    copyRefusalViewGpuTests(device.Get(),context.Get());
+    // The first-person contract on the copy route (the weapon support below the output): a qualified map reaches the DLSS and FSR stubs, the
+    // refusals stay by name, a mask still refuses there, and EDVR's TAA never asks.
+    copyForegroundGpuTests(device.Get(),context.Get());
     // The depth-validated steady detail (the same section, the key's second form): the prep's depth check, its tolerance and its previous depth,
     // through the DLSS and FSR stubs and EDVR's own TAA, and the same scenario against the prep with one rule flipped at a time.
     steadyDepthGpuTests(device.Get(),context.Get());
+    // EDVR's own TAA's history depth check (section 104): the best of four texels, shared with the check above. A jittered silhouette keeps its
+    // history, a true disocclusion still resets, and both tests against the kernel with the old single-texel rule (and others) in: they must fail.
+    taaHistoryDepthGpuTests(device.Get(),context.Get());
     // The resolver's context isolation (the swap, and the explicit capture DXMT gets): also before the message check, so its calls are held to it.
     contextIsolationGpuTests(device.Get(),context.Get());
     if(messages)for(UINT64 i=0;i<messages->GetNumStoredMessages();++i){SIZE_T n=0;messages->GetMessage(i,nullptr,&n);std::vector<unsigned char> bytes(n);

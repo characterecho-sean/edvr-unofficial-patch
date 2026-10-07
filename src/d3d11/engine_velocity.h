@@ -264,6 +264,17 @@ extern std::atomic<bool> g_flatPending;   // EDVR's state may be bound over the 
 inline bool engineVelocityFlatPending() noexcept {
     return engine_velocity_detail::g_flatPending.load(std::memory_order_relaxed);
 }
+// Flat-only explicit-domain marker bracket. It never renames the primary
+// world camera or snapshots foreign scene/pool buffers as world inputs.
+// The caller certifies camera domain and final-writer provenance separately.
+enum class FlatEngineDomain { ForeignPool, WorldPool, World };
+bool engineVelocityFlatDomainBeginDraw(ID3D11DeviceContext*, ID3D11Texture2D* depth,
+    const void* vsBytes, size_t vsSize, const void* psBytes, size_t psSize,
+    FlatEngineDomain domain, const char** reason, bool coverage=false,
+    unsigned writerToken=0,unsigned primitiveCount=0);
+void engineVelocityFlatDomainEndDraw(ID3D11DeviceContext*);
+bool engineVelocityFlatDomainSlots(ID3D11Texture2D* depth, ID3D11ShaderResourceView** out);
+
 bool engineVelocityFlatBeginDraw(ID3D11DeviceContext* ctx, bool* gameHadTarget6);
 void engineVelocityFlatEndDraw(ID3D11DeviceContext* ctx);
 void engineVelocityFlatFlush(ID3D11DeviceContext* ctx, EngineVelocityFlushCause cause);
