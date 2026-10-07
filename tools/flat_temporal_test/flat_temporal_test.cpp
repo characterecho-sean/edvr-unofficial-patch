@@ -1633,6 +1633,27 @@ void testFrameContractTrace() {
     for (uint32_t i = 0; i < kFlatTraceFrames - 1; ++i)
         flatTraceBeginFrame(*full, 9102 + i, MonoFixture::token(0x9100), 3840, 2160, 28);
     check(full->attempted[overflowSlot] == 0, "reused trace slot resets its nonserialized attempt counter");
+
+    // The runtime's idle window: a busy frame stops at the narrow limit and
+    // reports it as its capacity; the full window opens on the next frame.
+    full->eventLimit = kFlatTraceIdleEventsPerFrame;
+    flatTraceBeginFrame(*full, 9200, MonoFixture::token(0x9100), 3840, 2160, 28);
+    const uint32_t idleSlot = full->slot;
+    for (uint32_t i = 0; i < kFlatTraceIdleEventsPerFrame + 7; ++i)
+        flatTraceMark(*full, kFlatTraceEventMarkUncertain, nullptr);
+    const FlatTraceStats idleStats = flatTraceStats(*full);
+    check(kFlatTraceIdleEventsPerFrame < kFlatTraceEventsPerFrame &&
+          full->headers[idleSlot].eventCount == kFlatTraceIdleEventsPerFrame &&
+          full->headers[idleSlot].truncated && full->attempted[idleSlot] == kFlatTraceIdleEventsPerFrame + 7 &&
+          idleStats.capacity == kFlatTraceIdleEventsPerFrame,
+          "the idle trace window stores only its narrow limit and reports it as capacity");
+    full->eventLimit = kFlatTraceEventsPerFrame;
+    flatTraceBeginFrame(*full, 9201, MonoFixture::token(0x9100), 3840, 2160, 28);
+    for (uint32_t i = 0; i < kFlatTraceIdleEventsPerFrame + 7; ++i)
+        flatTraceMark(*full, kFlatTraceEventMarkUncertain, nullptr);
+    check(full->headers[full->slot].eventCount == kFlatTraceIdleEventsPerFrame + 7 &&
+          !full->headers[full->slot].truncated,
+          "the full trace window keeps a busy frame complete");
 }
 
 // Committed corpus: every trace replays to its recorded contract hashes.
