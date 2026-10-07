@@ -483,6 +483,7 @@ struct State {
     // made MSVC expand all 262,144 events as an aggregate initializer, so
     // this file's compile took ~74 GB of commit and 3.5 min (2026-10-06).
     FlatTraceRing traceRing;
+    uint64_t traceDumpFrame = 0;   // an F10 dump waits for full-window frames
     FlatFrameContract traceContract{};
 
     // --- Partial temporal AA: coverage census (Part B), reset every 5s --------
@@ -2300,6 +2301,12 @@ void flatRuntimeCreateBuffer(ID3D11Buffer* buffer, const void* initialData) {
         state().projection->observeCreateBuffer(buffer,initialData);
     }
 }
+// The trace window for the frame that starts now: full while a capture reads
+// the ring (draw packets, a pending F10 dump), the narrow idle window otherwise.
+void traceWindow(State& s) {
+    s.traceRing.eventLimit=s.traceDumpFrame || s.drawPackets.active()?
+        kFlatTraceEventsPerFrame:kFlatTraceIdleEventsPerFrame;
+}
 // Gate 1 trace dump: write the ring's complete frames to logDir\traces on the
 // F10 audit arm. CREATE_ALWAYS: each arm is a new capture of the newest slots.
 void flatTraceDumpToLogDir(State& s, uint64_t frame) {
@@ -2998,7 +3005,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         }
         if(s.drawPackets.armed()) {D3D11_TEXTURE2D_DESC d{};if(s.drawPacketOutput)s.drawPacketOutput->GetDesc(&d);
             s.drawPacketFrame=frame+1;s.drawPacketSequence=0;
-            flatTraceBeginFrame(s.traceRing,frame+1,s.drawPacketOutput.Get(),d.Width,d.Height,d.Format);}
+            traceWindow(s);flatTraceBeginFrame(s.traceRing,frame+1,s.drawPacketOutput.Get(),d.Width,d.Height,d.Format);}
         return;
     }
     static bool bounceKeyRead=false;
@@ -3158,6 +3165,10 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         }
     }
     if(s.projection)s.projection->pollColdReadbacks();
+    if(s.traceDumpFrame && frame>=s.traceDumpFrame) {
+        flatTraceDumpToLogDir(s, frame);
+        s.traceDumpFrame=0;
+    }
     if(s.projectionFrames && --s.projectionFrames==0) {
         reportProjection(s,"complete");
     }
@@ -3211,7 +3222,9 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             s.resolvePreflight=s.haveResolvePlan ? flatMonoResolvePreflight(s.device.Get(),s.context.Get(),s.plannedResolve) : FlatMonoResolvePreflightResult{};
             if(s.haveResolvePlan)s.resolvePreflightRetryMs=GetTickCount64();
             Log::get().note("flat projection: armed 900-frame live preparation audit; frame phase governs raster and backend; F10 does not reset live projection resources");
-            flatTraceDumpToLogDir(s, frame);
+            // The idle window may have truncated the frames before the arm:
+            // dump the first kFlatTraceFrames-1 frames recorded with the full one.
+            s.traceDumpFrame=frame+kFlatTraceFrames;
             // Refresh exact creation bytecode once per manual arm, or emit
             // an explicit missing-cache result; no inferred shader admission.
             captureFlatProbeShader('v',0x5EAFFCD01B97D0C4ull);
@@ -3322,6 +3335,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                   !s.drawPacketOnlyObserved&&s.traceContract.produced ? flatFrameContractHash(s.traceContract) : 0);
     s.drawPackets.trace(s.traceRing.headers[s.traceRing.slot].frame,s.traceRing,true);
     s.drawPacketOnlyObserved=false;
+    traceWindow(s);
     if (s.work != FlatWork::Paused || s.drawPackets.armed()) {
         s.traceContract = FlatFrameContract{};
         flatTraceBeginFrame(s.traceRing, frame + 1, output.Get(), d.Width, d.Height, d.Format);
