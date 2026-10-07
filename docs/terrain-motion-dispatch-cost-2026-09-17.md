@@ -2,8 +2,8 @@
 
 ## Status
 
-- State: planet patch motion BUILT 2026-10-06 (branch claude/planet-patch-motion,
-  gated by the full build, NOT FLOWN, NOT INSTALLED, not merged). Each body's
+- State: planet patch motion FLOWN OK 2026-10-07 (v0.18.2-62-gc136ba80 on
+  Frontier, ON MAIN c947620c). Sean: "Planet looks great now". Each body's
   rigid motion, read from its patch constants on the CPU, replaces the camera
   term on that body's pixels: decision path 12, `celestial`. Parts:
   src\common\celestial_math.h (the arithmetic), src\d3d11\celestial_motion.{h,cpp}
@@ -21,18 +21,12 @@
   0.01); on WARP a pixel inside a body's volume takes path 12 with the record's
   motion and no other pixel changes; with no records every output is byte for
   byte the old shader's; six one-token breaks of the path are each caught.
-- Next: ONE FLIGHT, a supercruise approach to a planet near or above c, an eye
-  dump with advanced.temporal_aa_diagnostics on. Pass: the log carries
-  `celestial motion: planet patch draws are being read`, then a `celestial
-  motion 5s:` line with captured near draws, records above 0 and `pixels`
-  (diagnostics) in the thousands; the dump's D crops show path 12 over the disc
-  (tools\eye_decisions.py), its motion.csv celestialT* is km a frame; the disc
-  stops blurring. Fail signs, by the census: no line = stale DLL or module off;
-  draws=0 = the draw hook never saw the VS; declined[unwatched|no-b2] large =
-  the game writes the colour pass's VS b2 another way than Map/Unmap (the
-  shadow follows Map/Unmap and UpdateSubresource only); captured>0 and
-  records=0 = fallback[...] names the stage. Still unflown: low flight beside a
-  planet, a fast-rotating body in orbit.
+- Flown 2026-10-07, log edvr_gfx_20261007_045509, journal top entry. Every
+  patch draw was read from the shadow, with 0 declines. Each approach frame
+  bound records for 5-6 bodies. Translation per frame was 1.45 Mm (0.43c) at
+  the start and 2-8 km on arrival. CPU was 0.03-0.05 ms a frame.
+  Still unflown: low flight beside a planet, and an orbit of a fast-rotating
+  body. The GPU cost is unmeasured.
 - Open: the volume is the union of the patches' boxes (a pixel rectangle and a
   depth interval, margins 3 px and 1%), about 30% loose around the disc; the
   VS's LOD morph (cb2[0..3]) moves vertices non-rigidly and no rigid transform
@@ -61,6 +55,33 @@
   write-combined mapped memory.
 
 ## Journal
+
+### 2026-10-07 -- planet patch motion flown OK
+
+The flight: Frontier, `v0.18.2-62-gc136ba80` (verified with
+`edvr_log.py --expect-build c136ba80`), Pimax, DLSS, a supercruise approach
+to a planet. Sean: "Planet looks great now."
+
+From `edvr_gfx_20261007_045509.log`:
+- **First read.** At 04:56:39 patch draws were first read from the CPU
+  shadow; the first record was for the moon, 1.22 Mm away, with 5 of 5
+  patches agreeing.
+- **5 s windows, 04:58:36 to 04:59:41:**
+  - Every draw was captured (11808 to 32472 a window), with no declines.
+  - 13 to 36 patches and 2.2 to 6 bodies a frame.
+  - 702 to 2570 records a window.
+  - Fallbacks were only `no-previous-body`, 0 to 4 a window: a body whose
+    first frame has no history.
+- **Speed.** Max |t| fell from 1,449 km a frame (about 0.43c at 90 Hz) to
+  2-8 km a frame on arrival. 23,125 km appears in one window, the moment a new
+  far body joins.
+- **CPU.** About 0.15 us a captured draw, 11-16 us an eye-frame,
+  0.03-0.05 ms a frame.
+- **Before the approach.** The windows before it read `draws=0` (no planet
+  in view), as the census is meant to.
+
+The eye dump at 05:00:20 was taken for the HUD, with no planet in view, so
+path 12's pixel share is not measured from a dump this time.
 
 ### 2026-10-06 (night) -- built: each body's rigid motion on its pixels, gated, not flown
 
