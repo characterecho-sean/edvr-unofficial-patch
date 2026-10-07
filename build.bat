@@ -1766,6 +1766,32 @@ if errorlevel 1 ( echo [edvr] ERROR: celestial motion test build failed & exit /
 "%OBJ%\celestialmotion\celestial_motion_test.exe" || exit /b 1
 exit /b 0
 
+:rig_on_foot_split_test
+echo [edvr] === on_foot_split_test.exe ===
+REM The ship split on foot (docs\per-object-motion.md, 2026-10-07; src\common\temporal_mode.h): Explorer Cam's ground within ten metres smeared
+REM because the temporal pass sent every pixel nearer than advanced.temporal_aa_ship_metres down the HEAD path, and on foot the ground is the
+REM world. While Status.json says the commander is on foot and not seated, the split the shader reads is a millimetre; the shader is not
+REM touched. The rig holds: the pure verdict (on foot, in a ship, in an SRV, unknown, stale, not read, before LoadGame, the contradictions, the
+REM order of the reasons, and 192 input combinations against the spec written out again), the seat from Status.json's flags (Flags bits 24-26,
+REM Flags2 bits 1-2), the split's value (the configured one bit for bit off foot, a millimetre on foot, never zero, a player's zero kept), the
+REM production shader on WARP over patches of two REAL eye dumps (tools\on_foot_split_fixture.py: Steam Explorer Cam 090359 and Frontier cockpit
+REM 054804) -- the dump's own split reproduces what the game's shader wrote (path, flags, motion, depth), on foot no pixel of the ground takes the
+REM head path and every pixel moves as the camera's rows say, the cockpit is byte for byte what it was and keeps the head path under a walking
+REM camera -- six broken shaders the same judge must refuse, and the source pins (the pass asks the pure functions, tells each change of mode
+REM and the totals with their zeros). tools\on_foot_split_test\mutants.py --self-test holds the mutation list to the headers as they are; the
+REM list itself (--run, on demand, under a minute) proves the rig fails when each rule is flipped. A WARP device, no window.
+python "tools\on_foot_split_fixture.py" --self-test || exit /b 1
+if not exist "%OBJ%\onfootsplit" mkdir "%OBJ%\onfootsplit"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /I"src\common" /I"src\d3d11" /Fo"%OBJ%\onfootsplit\\" /Fe"%OBJ%\onfootsplit\on_foot_split_test.exe" ^
+    "tools\on_foot_split_test\on_foot_split_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: on foot split test build failed & exit /b 1 )
+"%OBJ%\onfootsplit\on_foot_split_test.exe" --dry-run || exit /b 1
+"%OBJ%\onfootsplit\on_foot_split_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\on_foot_split_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_depth_scene_pick_test
 echo [edvr] === scene depth selection cache regression ===
 if not exist "%OBJ%\depthscenepick" mkdir "%OBJ%\depthscenepick"

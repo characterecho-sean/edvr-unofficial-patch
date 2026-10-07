@@ -2,17 +2,17 @@
 
 ## Status
 
-*Rewritten 2026-09-23 at the retirement (the last entry below). The journal
-is history: the paths it builds were removed from the code that day.*
+*Rewritten 2026-09-23 at the retirement; the 2026-10-07 entry (the last
+section) adds the split's on-foot mode. The journal is history: the paths it
+builds were removed from the code that day.*
 
-- **State: two cited probes retired 2026-09-29 (code removed, d38272de).**
-  stencil_probe.cpp and resolve_probe.h, cited below as evidence, are deleted
-  with `advanced.stencil_probe` and `advanced.resolve_probe`; the code is at
-  `d38272de^`.
-- **State: the v1 and v2 readers retired 2026-09-29 (code removed, e9dc9ae8).**
-  `tools/object_classification.py` reads schema v3 only, the only one the DLL
-  has written since 2026-09-23. The journal line below that says it reads all
-  three describes the tool as it was.
+- **State, 2026-10-07: the world/ship split has an on-foot mode (BUILT, NOT
+  FLOWN).** In Explorer Cam the ground within 10 m took the head path and
+  smeared as the commander walked (eye dump 090359). While Status.json says
+  on foot and not seated, the split the shader reads is a millimetre
+  (`src/common/temporal_mode.h`, `tools/on_foot_split_test`; the shader is
+  untouched). Evidence, rig numbers and the flight's pass signs: "The
+  world/ship split on foot, 2026-10-07", the last section.
 - **State:** RETIRED 2026-09-23 (Sean's teardown). Every path that
   ESTIMATED a per-object transform is gone from the code (tier 2's body path
   and occupancy grid, the second body, the stepped parts, the moving ships,
@@ -29,9 +29,10 @@ is history: the paths it builds were removed from the code that day.*
   pool recognition and the per-frame pool, instance, bone and draw-state
   files for tools\eye_run_ledger.py), and the manual eye run
   (hotkey.dump_eyes).
-- **Open:** nothing on this arc. The smoke-trail voids (cause undecided
-  on 2026-09-10) were never an estimate's problem; they stay open for
-  whichever arc next works on smoke.
+- **Open:** whether engine records cover the commander's own body in
+  Explorer Cam (the last section); otherwise nothing on this arc. The
+  smoke-trail voids (cause undecided on 2026-09-10) were never an
+  estimate's problem; they stay open for whichever arc next works on smoke.
 - **Ruled out (do not re-propose):** eight items, the full text and their
   dated journal entries in Status detail below: estimating per-object motion
   at all (2026-09-23); tier 1's mask moving geometry (2026-09-08); a
@@ -40,7 +41,7 @@ is history: the paths it builds were removed from the code that day.*
   turns with the ring" (16:22 flight); the "stepped parts" per-record
   multiple (37th flight); distant shimmer as a pure sampling limit (8th
   flight, retired by the 9th).
-- **Next flight:** none on this doc.
+- **Next flight:** Explorer Cam on foot, walking (pass signs: last section).
 - **Detail:** "Retired, 2026-09-23" and "The two keys left over" (the last
   two sections) say what went and what stayed. The flight log (48 numbered flights) is inline under
   "Phasing" item 3; twelve later reviews (2026-09-10/11) sit beside this
@@ -60,6 +61,14 @@ session is collected under Phase 0. Nothing here is implemented.*
 
 ## Status detail (moved out of Status 2026-09-29)
 
+- **State: two cited probes retired 2026-09-29 (code removed, d38272de).**
+  stencil_probe.cpp and resolve_probe.h, cited below as evidence, are deleted
+  with `advanced.stencil_probe` and `advanced.resolve_probe`; the code is at
+  `d38272de^`.
+- **State: the v1 and v2 readers retired 2026-09-29 (code removed, e9dc9ae8).**
+  `tools/object_classification.py` reads schema v3 only, the only one the DLL
+  has written since 2026-09-23. The journal line below that says it reads all
+  three describes the tool as it was.
 - **State:** RETIRED 2026-09-23 (Sean's teardown). Every path here that
   ESTIMATED a per-object transform is gone from the code: tier 2's body
   path and its occupancy grid, the second body, the stepped parts, the
@@ -3445,3 +3454,111 @@ probe), uncalled since the mesh records retired above; the eye run's
 classification capture is now schema v3 (executable identity, binary_ok,
 the record-writer and kinematic eval sections), and
 tools/object_classification.py reads v3 and the old v1/v2 captures alike.
+
+## The world/ship split on foot, 2026-10-07
+
+**The bug.** Sean, VR: "When on foot with explorer cam, the ground in a ~10
+meter radius smears when I move." Explorer Cam is the one on-foot mode Elite
+draws in stereo through the eye path; the first-person view is a flat panel.
+
+**Cause, measured on Steam eye dump 090359** (v0.18.2-90-g6c63f6aa, taken
+09:03:59 in Explorer Cam, which ran 09:03:22 to 09:04:09, the journal saying
+on foot). The split sends a pixel nearer than `advanced.temporal_aa_ship_metres`
+(10 m) down the head path, the head's own delta, which is right for a cockpit,
+and the rest down the world path, the game's camera rows. On foot there is
+no ship.
+- D00..D15: 55% of the 1400 x 1400 decision crop on path 1 (head), 45% on
+  path 2, 0.06% on path 11 (1,220 px, by position the turret on the barrier;
+  the commander is out of frame). SceneZ of frame 16401: 53.5% of the whole
+  frame is within 10 m (1.4 to 10 m), stencil 0 on every one of them. A numpy
+  port of the pixel decision reproduces D00's path on all 1,958,780 path 1/2
+  pixels (no mismatch) and its motion to 4.2e-4 px, from motion.csv's rows.
+- motion.csv: cameraTv 0.127 to 0.478 m a frame over frames 16403-16416,
+  headTv under 1 mm. The head path drops the camera's whole walk.
+- Block matching between consecutive raw crops C01..C07 (a scratch script,
+  not kept: 49 x 49 blocks on a 40 px grid, normalised cross-correlation
+  with a sub-pixel peak, search +-170 px, the raster jitter the raw crops
+  carry taken out, which the far pixels' residual follows, depth from D's
+  predicted-depth word): 384 near-ground blocks (path 1). Median measured
+  flow 24.8 px (46 px at 1.4 to 3 m, 25 at 3 to 5, 12.5 at 5 to 7.5, 5.6 at
+  7.5 to 10.5). The world path's prediction, the camera rows with cameraTv, is
+  off by a median 0.84 px (p90 2.3, 77% within 1.5 px); the head path's, which
+  is what the shader wrote there, by 24.9 px (p10 4.7). The two quickest pairs
+  (the camera at 0.42 and 0.48 m a frame, flows to 200 px) matched 34 blocks
+  at 2.6 and 2.3 px; the other four pairs 0.73 to 0.80 px. The pairing is
+  decisions.json's (C(k) is frame 16401 + k): the rows of the frame before or
+  after give 2.2 to 14.5 px.
+
+ruled out: the camera rows or the depth being wrong on foot, because the
+rows and depth the shader used predict the measured flow to 0.84 px.
+
+ruled out: replacing the distance with the game's cockpit stencil (bit 7),
+because in the cockpit dumps 054804 and 180540 it marks only 75% and 73% of
+the pixels within 10 m; the rest (stencil 5, 16, 20) is cockpit too.
+
+**The fix.** One value; no shader change, no key. `temporalOnFoot`
+(`src/common/temporal_mode.h`) says on foot when the journal watcher is read
+and has seen this process's LoadGame, Status.json has Flags2 and Flags,
+Flags2 bit 0 is set, nothing seats the commander (Flags 24-26: ship, fighter,
+SRV; Flags2 1-2: taxi, multicrew) and the watcher's read count moved in the
+last 5 s of the pass's looking (a gap of over a second between two of its
+questions is its own stall and restarts that clock). Then
+`temporalShipSplitMetres` hands the shader 0.001 m in place of
+`temporal_aa_ship_metres`: every pixel with a depth is farther than the split
+and takes the camera's rows; the far plane was there already. Never zero: the
+shader reads split.x == 0 as the world path OFF and would put everything on
+the head path. A player's 0 stays 0. Engine records (path 11), holo, screen
+and the scanner's interface decide after the split and keep their priority.
+In a ship, an SRV, a menu, with the journal off or its word unknown: the
+configured split, bit for bit.
+
+The signal is the one `fix.weapon_stability` and the LOD governor key on
+(`journalOnFootKnown() && journalOnFoot()`), from Status.json: the game
+writes it about once a second, the watcher reads it every 500 ms, so a
+change is seen up to about 1.5 s late. On boarding the cockpit then rides
+the camera's rows for that long with the ship at rest, where the two paths'
+motion differ by 0.01 to 0.02 px on the cockpit dumps: a path code, not a
+smear. On disembarking `head_offset_gate.h` records Status.json saying "not
+on foot" for about 6 s more; the mode stays off then, as before this change.
+
+Log: `temporal aa: on foot -- the ship split is off, near pixels take the
+world path (...)` and `temporal aa: no longer on foot (reason) -- ...` once
+per change (40 at most); every 20 s beside the totals, `temporal aa on foot:
+the ship split was off for N of M eye-frames ...`, zeros included; the eye
+dump's motion.csv has a `shipSplit` column. With diagnostics on, the
+registration line's world-path share should read about 100% on foot (the rig
+checks the counter behind it).
+
+**Rig** (`tools/on_foot_split_test`, gated in build.bat; the fixture is cut
+from the two dumps by `tools/on_foot_split_fixture.py`): the production
+shader on WARP over 48 x 48 patches of the real frames. The dump's own split
+reproduces what the game's shader wrote on 15,488 Steam pixels (7,102 on the
+head path) and 11,616 cockpit pixels (5,965): path, flags, motion to 0.003 px,
+predicted depth to 2.4e-7. On foot the 7,102 are all on the world path with
+the camera rows' motion, to 0.0002 px of an independent float64 port; on
+that frame (the camera 0.04 m on) the head path missed by 7.2 px on average.
+The same depth under the rows of the dump's other 15 frames (106,530 near
+pixel-frames) has the head path missing by up to 180 px. The cockpit keeps
+the head path under those walking rows, and its outputs are byte for byte
+what the configured split gives. The verdict, the staleness clock and the
+changes of mode are stepped through scripted timelines. Six broken shaders,
+23 source pins with controls and 41 header mutations (`mutants.py --run`)
+are each refused.
+
+**Flight, pass signs.** Frontier, Explorer Cam on foot, walking: the ground
+sharp; the `on foot` note at entry and `no longer on foot` at boarding; the
+totals line "off for N of N eye-frames" with N not zero; an eye dump's
+decisions (`tools/eye_decisions.py`) show the near ground on path 2, none on
+path 1, and `shipSplit` 0.001 in its motion.csv. Not a pass: the ground
+still smears with those present (then the camera rows' registration, not the
+split), or a cockpit that smears after boarding (the seat, or the lag).
+
+**Not verified.** The commander's own body. It is not in frame in 090359 and
+no dump we have shows it in Explorer Cam, so whether engine records reach it
+there is unknown; the kinematic doc still lists walkers and articulated
+parts as open. A body that rides with the camera and no record covers now
+takes the camera's rows, not the head's, which would be wrong for it where
+the head path was right. The flight needs the body in view (a third-person
+preset). Also unchanged: `ui_depth.cpp` keeps the hologram filler 1% inside
+the cockpit radius so those pixels stay on the head path; on foot they take
+the world path wherever the holo path does not own them.

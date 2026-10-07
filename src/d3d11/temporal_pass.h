@@ -152,6 +152,14 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
 // at 1200 characters). buf2 may be null.
 bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* buf3, size_t n3);
 
+// The ship split on foot (src/common/temporal_mode.h; docs/per-object-motion.md, 2026-10-07), once an interval beside the other
+// totals: the eye-frames the pass built constants for, how many had the split off because the game says the commander is on
+// foot, how many of those also had the world path on, and what the journal says now. It prints its zeros: a build without the
+// mode prints no line at all beside the totals line, a cockpit flight prints "off for 0 of N", a pass that ran without reaching
+// its constants prints "0 of 0", and a journal that cannot tell says why. Call it where the pass's totals are printed, in an
+// interval where it treated eye-submits. The change of mode is told once, by the pass itself, when it happens.
+void temporalPassNoteFootTotals();
+
 // The trained pass's totals (fix.temporal_aa = dlaa | dlss): eye-frames it
 // took, its measured price, and how many evaluations started NVIDIA's
 // history afresh (a handful per session on a good build: each eye's first

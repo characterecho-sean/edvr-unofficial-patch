@@ -114,6 +114,19 @@ uint32_t journalEmbarks();
 bool journalOnFootKnown();
 bool journalOnFoot();
 
+// The commander is SEATED in something, by the same Status.json read: Flags bit 24 (the main ship), 25 (a fighter) or 26 (an
+// SRV), or Flags2 bit 1 (a taxi) or 2 (someone else's ship). On foot is Flags2 bit 0 and none of these; the game writes both
+// words in one file, so the two answers change together, and a sample that says both is read as seated (the temporal pass's
+// ship split, src/common/temporal_mode.h, takes the cockpit's rule on any doubt). `known` is false whenever Flags is not in the
+// file, or the watcher is off.
+constexpr uint32_t kStatusFlagsSeated = (1u << 24) | (1u << 25) | (1u << 26);
+constexpr uint32_t kStatusFlags2Seated = (1u << 1) | (1u << 2);
+constexpr bool journalSeatedFromFlags(uint32_t flags, uint32_t flags2) {
+    return (flags & kStatusFlagsSeated) != 0 || (flags2 & kStatusFlags2Seated) != 0;
+}
+bool journalSeatedKnown();
+bool journalSeated();
+
 // How many Status.json samples have been read. The gate uses it to require
 // an on-foot sample taken AFTER the panel stopped before arming keylessly:
 // boarding from the camera stops the panel while the previous sample still
