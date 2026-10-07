@@ -36,22 +36,24 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** main `fcdc3c05` is integrated. By-value API policy dispatch and two
-  full VR-eye classifier exit fixtures pass 148 full-build jobs and scoped
-  codegen gates. Tag/stack costs remain (section 11's latest entry). Keep the
-  pair frozen: `7bbe7d90` control and `6c63f6aa` candidate. Both October 7
-  flights match their builds and environment, exit cleanly, and Sean reports no
-  visual changes. NV-on sampled hook time per timed draw is 15.0% lower; other
-  CPU ranges overlap. Carrier DLSS/NV-off direct EDVR GPU cost is 2.9% higher;
-  its candidate median exceeds the control range. Draw counts differ and the
-  on-foot source has 4.175% more pixels. CPU attribution and GPU non-regression
-  remain open. Finish missing cost coverage and selector work offline before
-  another flight. Twenty-three selectors and local None/Skip checks pass;
-  whole-ladder/actions, API coverage and CPU attribution stay open. Replay
-  retains 482.4 MiB when enabled, none when disabled. Earlier NV blur is
-  reproduced by `14a7ff70`. Temporary key: `advanced.draw_replay` (off);
-  removal requires Scope control. No Phase 1 acceptance, Phase 2 or shipping
-  approval.
+- **Next:** main `fcdc3c05` is integrated; reviewed `8fa6d443` will follow a
+  validated checkpoint. V2's 256 API sites preserve V1 and the 128-site CPU
+  limit. Focused collector, velocity (15,758 checks) and weapon (216,262
+  checks) rigs pass; the strict unsampled assembly/callback comparison passes.
+  Focused generated-header, source-pin and PanelDistance classifier checks
+  pass. The independent six-action claim ledger preserves the 38-site prefix;
+  all 148 full-build jobs and installer gates pass. Boundary-selector cost
+  remains outside the assembly proof. Keep the flight pair frozen: `7bbe7d90`
+  control and `6c63f6aa` candidate. Both October 7 flights match their
+  builds/environment and exit cleanly; Sean reports no visual changes. NV-on
+  sampled hook time per timed draw is 15.0% lower; other CPU ranges overlap.
+  Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its median above the
+  control range. Draw counts differ and the on-foot source has 4.175% more
+  pixels. Attribution/non-regression stay open. Finish coverage and selectors
+  offline before another flight. Whole-ladder actions remain open. Replay
+  retains 482.4 MiB when enabled, none when off; NV blur reproduces on
+  `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
+  Scope control. No Phase 1 acceptance, Phase 2 or shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -2841,3 +2843,96 @@ EngineVelocity API inventory belongs to TemporalAa, but a complete saved-call
 slice needs a deliberate site allocation beyond the two remaining IDs in the
 128-site mask. Next flight: none until the remaining offline gates produce a
 discriminating comparison. Phase 2 and shipping remain held.
+
+### API capacity and draw transaction accounting, 2026-10-07
+
+The API-only collector gains a versioned 256-site report. V1 keeps its original
+symbols, 1328-byte window, version 1 and two-word masks; aggregate API counts
+include high IDs while its site mask exposes only IDs 0-127. V2 uses a
+1488-byte window, version 2 and four API words. CPU IDs stay capped at 127. The
+focused collector rig passes C layout/signature checks, V1 output canaries,
+high-site aggregate counts, V2 bit boundaries 127/128/191/192/255, rejection of
+API 256 and CPU 128, sampled-frame closure and zero other owners. Production
+reads V2 only when the report is ready and labels partial coverage.
+
+The successful PanelDistance full classifier fixture checks the literal 38-site
+Trace prefix and claim, exact Map/Unmap/override/draw/restore order, scaled
+constant bytes, callback arguments and restored CB0 for D/I/N/X. NoTrace
+compares the decision and zero ordered observations, because its siteResult
+payload is intentionally absent. The prior 39-site failed-Map and 36-site
+distance-off controls remain. This is recorded-effect evidence, not an
+independent GPU binding oracle or complete ladder parity.
+
+EngineVelocity sites 126-135 belong to TemporalAa and cover target/blend
+transactions. Ruled out: treating eager/declined flat draw restoration as
+lifecycle-only, because WARP recorded target/blend restore calls with no
+matching sampled notes. The higher-tier repair retains strict note-to-actual
+call assertions and adds eager, declined, memo, injected MRT6 rollback and
+VR/NoApi cases. The repaired focused rig passes 15,758 checks (32.1 s). Legacy
+AfterFlatDraw and frame/lifecycle restoration remain deferred.
+
+The initial assembly comparison caught new helper calls in the unsampled
+velocity path. Narrow private inline routes retain the original cold-helper
+structure. The final original-path comparison against `9e79763e` passes all six
+classifier variants, the unsampled velocity entries and slow path, the original
+weapon body and recursively checked helpers, and 16 forwarders in four callback
+families. The unsampled classifier remains 7057 bytes/94 calls; the slow path
+remains 5115 bytes/704-byte stack/95 calls; the weapon body remains 3359
+bytes/91 calls. The two sampled X forwarders intentionally call the
+same-signature sampled weapon entry. The analyzer records those exact target
+changes instead of treating them as unchanged code.
+
+Both supervised compilations used fixed version text, original source paths and
+identical flags; all 17 current inputs retained their hashes after the 15-file
+parent swap was restored. The failed listings remain archived under
+`build/engine-velocity-api-proof`. This proof covers the named leaves and
+callback contracts. Boundary selector overhead and whole-path performance
+remain outside it; no frame-time acceptance follows from assembly equality.
+
+The parallel weapon-motion slice implements 30 operations, IDs 136-165,
+OnFootPanel: seven ReadQuery, 21 State, one Transfer and one Work.
+UpdateSubresource is Transfer; two IA apply binds are included; the extra
+raster uses `(count,1,0,0,0)`, distinct from the original/capture tuples.
+Admission, resource preparation, history capture, clears and GPU timers are
+outside this bracket. Linked class-instance lifetime needs a real nonzero
+fixture and remains explicitly unproved. The repaired WARP fixture passes
+216,262 checks: exact note-to-call order, temporary raster bindings, restored
+host state and bytes, shifted nonzero original/capture tuples, zero notes in
+NoApi and rejected draws, and the existing motion-output oracle. Ruled out:
+expecting host state unchanged during SO capture, because capture deliberately
+uses POINTLIST, its capture GS and SO target0. The fixture now verifies those
+changes and their resource identity while checking the remaining state.
+
+The first full build compiled the production DLLs, then found a missing
+generated-header path in a transitive engine-velocity consumer. An inventory
+identified three affected rigs: flat temporal, VR world route and VR camera
+census. Adding their GEN include paths exposed two stale tooling assumptions:
+the VR mutation compiler still omitted GEN, and the flat temporal source pin
+counted one velocity query body although legacy and sampled bodies are now
+separate. The repair checks each body independently and retains deletion
+controls. All three focused rigs pass. The supervised pure mutation compiler
+passes its unmodified control and catches all 28 named mutations (19.1 s),
+exercising the repaired GEN path. Its self-test also passes 96 controls across
+four rigs.
+
+The next full build passed the repaired tooling gates but stopped at the new
+PanelDistance fixture: all four Trace variants fail the exact prefix/action
+assertion, while the separate API order and draw/restore checks pass. The
+immutable parent `9e79763e` has the same replacement markers as production.
+Ruled out: four actions for a Panel claim, because every non-None verdict
+records ReplaceDraw Begin/Attempted and End/Applied around its original issue.
+The literal six-action expectation checks every field, outcome, flag and issue
+count without changing the 38-site prefix. The repaired focused rig passes for
+D/I/N/X (7.9 s). Separate failure diagnostics now distinguish payload, prefix
+and action failures. The failed full-build log is retained as
+`build/full-plugin-api-transactions-20261007-panel-failed.log`.
+
+The full absolute-path build passes all 148 jobs, production DLLs and
+self-contained installer checks; its rig pool reports no shown windows,
+consoles or foreground changes (241 s). The fresh full-pass receipt fingerprint
+is `c55f15b0a2f4ae38943ef9b3deb4c07bc52a3ab8d52ad79d96bde230fcf97137`,
+independently verified before commit. The unchanged 17-input assembly proof
+also passes. Commit and the reviewed main refresh are next. No Steam install,
+config edit or flight occurred for this slice. The previous pair stays frozen;
+Phase 1 performance, whole-ladder/actions and remaining coverage remain open.
+Phase 2 and shipping stay held.

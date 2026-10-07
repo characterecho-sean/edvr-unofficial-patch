@@ -5831,7 +5831,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstancedIndirect(
             if (drawCensusArmed()) drawCensusDrawDirect(self, 'Z', 0, 0, foreignContext(self), args, off);
             if (!foreignContext(self)) {
                 depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-                engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+                engineVelocityBeforeDrawSampledBoundary(self, g_state->rtv0Eye);
                 pixelProbeBefore(g_state, self);
                 if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
             }
@@ -5881,7 +5881,7 @@ void STDMETHODCALLTYPE hookedDrawInstancedIndirect(ID3D11DeviceContext* self,
             if (drawCensusArmed()) drawCensusDrawDirect(self, 'Y', 0, 0, foreignContext(self), args, off);
             if (!foreignContext(self)) {
                 depthProbeNoteIndirectDraw(self, bindingGet(BindSlot::Dsv0));
-                engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+                engineVelocityBeforeDrawSampledBoundary(self, g_state->rtv0Eye);
                 pixelProbeBefore(g_state, self);
                 if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
             }
@@ -6214,7 +6214,8 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             std::remove_reference_t<decltype(cpu)>,
             Api>(trace, self, 'D', count, 1, args);
         const DrawVerdict v = decision.verdict;
-        if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+      if (v == DrawVerdict::kNone && self == g_state->ownerCtx)
+          engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
         if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
         forwardWithVerdict(trace, self, v, 'D', count, 1, args, [&](AlteredDraw altered) {
@@ -6265,7 +6266,7 @@ void STDMETHODCALLTYPE hookedDrawAuto(ID3D11DeviceContext* self) {
         self, 'A', 0, 0, DrawArgs{}, nullptr, 0, false, false,
         draw_ladder::kActionGpuDrawArgsUnavailable, blocked, [&](auto& trace) {
             gpuFrameCommand(self);
-            if (self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+            if (self == g_state->ownerCtx) engineVelocityBeforeDrawSampledBoundary(self, g_state->rtv0Eye);
             if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
             g_state->realDrawAuto(self);
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kAutoDraw>(
@@ -6317,7 +6318,8 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
             std::remove_reference_t<decltype(cpu)>,
             Api>(trace, self, 'I', count, 1, args);
         const DrawVerdict v = decision.verdict;
-        if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        if (v == DrawVerdict::kNone && self == g_state->ownerCtx)
+            engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
         if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
         forwardWithVerdict(trace, self, v, 'I', count, 1, args, [&](AlteredDraw altered) {
@@ -6384,7 +6386,8 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             std::remove_reference_t<decltype(cpu)>,
             Api>(trace, self, 'N', perInstance, instances, args);
         const DrawVerdict v = decision.verdict;
-        if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        if (v == DrawVerdict::kNone && self == g_state->ownerCtx)
+            engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
         if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
         if (v == DrawVerdict::kGlareSteady) sunglareDrawArgs(instances, startInstance);
@@ -6479,7 +6482,8 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
       // compares; the pool families' substituted shaders and MRT6 are bound
       // only when the game has rebound something since the last look. After the
       // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
-      if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        if (v == DrawVerdict::kNone && self == g_state->ownerCtx)
+            engineVelocityBeforeDrawWithApi<Api>(self, g_state->rtv0Eye);
       if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
       if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
       forwardWithVerdict(trace, self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {
@@ -6495,8 +6499,13 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         if (self == g_state->ownerCtx && !g_state->rtv0Eye &&
             weaponMotionWants(bindingShaderHash(BindSlot::Vs))) {
             GpuCensusScope census(self, GpuCensusSection::FrameWeaponMotion);
-            weaponMotionDraw(self, g_state->realDrawIndexedInstanced, perInstance, instances,
-                             startIndex, baseVertex, startInstance);
+            if constexpr (std::is_same<Api, plugin_cost::NoApi>::value) {
+                weaponMotionDraw(self, g_state->realDrawIndexedInstanced, perInstance, instances,
+                                 startIndex, baseVertex, startInstance);
+            } else {
+                weaponMotionDrawSampledApi(self, g_state->realDrawIndexedInstanced, perInstance, instances,
+                                           startIndex, baseVertex, startInstance);
+            }
         }
         if (clock.on) clock.realCall(r0);
         if(self==g_state->ownerCtx) {

@@ -58,7 +58,7 @@ RIGS = {
         "target": SRC / "vr_world_route_math.h",
         "sources": ["tools\\vr_world_route_test\\vr_world_route_test.cpp"],
         "libs": ["kernel32.lib"],
-        "include_gen": False,
+        "include_gen": True,
     },
     "gpu": {
         "rig": ROOT / "tools" / "vr_world_route_gpu_test" / "vr_world_route_gpu_test.cpp",
@@ -600,6 +600,8 @@ def build_and_run(tc, rig_key, tree, edited_text, edited_ladder=None):
     if rig_key == "wiring":
         return build_and_run_wiring(tc, tree, edited_text, edited_ladder)
     spec = RIGS[rig_key]
+    if spec["include_gen"] and not GEN.is_dir():
+        return "nocompile", "build\\gen is missing: run one build first"
     tree.mkdir(parents=True, exist_ok=True)
     exe = tree / "rig.exe"
     if rig_key == "pure":
@@ -612,7 +614,7 @@ def build_and_run(tc, rig_key, tree, edited_text, edited_ladder=None):
             shutil.copyfile(src, dest)
         (tree / spec["target"].relative_to(ROOT)).write_text(edited_text, encoding="utf-8", newline="\n")
         sources = [str(rig_dest)]
-        extra = []
+        extra = ["/I" + str(GEN)] if spec["include_gen"] else []
         run_cmd = [str(exe), "--self-test", str(ROOT)]
     else:
         if not GEN.is_dir():

@@ -42,12 +42,15 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 
+#include <array>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../../src/d3d11/engine_velocity.h"
@@ -63,6 +66,26 @@ using lifecycle_tests::Harness;
 using edvr::BindSlot;
 using edvr::FlatSubstAction;
 using edvr::FlatSubstEvent;
+
+struct ApiProbe {
+    const void* ownerContext = nullptr;
+    std::thread::id ownerThread;
+    bool enabled = false;
+    unsigned verifierCalls = 0;
+    std::array<uint64_t, 256> sites{};
+    std::array<uint64_t, 5> classes{};
+    unsigned badNotes = 0;
+    void reset(const void* context, bool sampling) {
+        ownerContext = context;
+        ownerThread = std::this_thread::get_id();
+        enabled = sampling;
+        verifierCalls = badNotes = 0;
+        sites.fill(0);
+        classes.fill(0);
+    }
+};
+extern ApiProbe g_apiProbe;
+void apiProbeThreadRejection(const Harness& h);
 
 // --- The recorder: every call the code under test makes on the context, counted on its own vtable -----------------
 // The wrapper counts its own calls (engineVelocityNoteStateCalls); a count that undercounts is exactly what a rig that
@@ -104,6 +127,23 @@ struct Recorder {
     }
 };
 inline Recorder g_rec;
+inline bool g_rejectNextMrt6 = false;
+
+// Model a runtime refusing one MRT6 set, while the real WARP binding/readback
+// and rollback still execute. The recorder continues to count the actual call.
+inline void STDMETHODCALLTYPE recTargets(ID3D11DeviceContext* self, UINT count,
+    ID3D11RenderTargetView* const* targets, ID3D11DepthStencilView* depth) {
+    if (g_rec.on && self == g_rec.ctx) ++g_rec.calls[kOMSetRT];
+    ID3D11RenderTargetView* refused[8]{};
+    if (g_rec.on && g_rejectNextMrt6 && count == 8 && targets && targets[6]) {
+        for (unsigned i = 0; i < 8; ++i) refused[i] = targets[i];
+        refused[6] = nullptr;
+        targets = refused;
+        g_rejectNextMrt6 = false;
+    }
+    reinterpret_cast<void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT,
+        ID3D11RenderTargetView* const*, ID3D11DepthStencilView*)>(g_rec.orig[kOMSetRT])(self, count, targets, depth);
+}
 
 template <unsigned S, class... A>
 void STDMETHODCALLTYPE recThunk(ID3D11DeviceContext* self, A... a) {
@@ -119,7 +159,7 @@ inline void recPatch(unsigned i, void* to) {
 }
 inline void recInstall(ID3D11DeviceContext* ctx) {
     static void* const thunks[kRecCount] = {
-        reinterpret_cast<void*>(&recThunk<kOMSetRT, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*>),
+        reinterpret_cast<void*>(&recTargets),
         reinterpret_cast<void*>(&recThunk<kOMSetRTUav, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*, UINT, UINT,
                                           ID3D11UnorderedAccessView* const*, const UINT*>),
         reinterpret_cast<void*>(&recThunk<kOMSetBlend, ID3D11BlendState*, const FLOAT*, UINT>),
@@ -1043,6 +1083,178 @@ struct FaultKeepOnCommandList : edvr::FlatSubstNoFaults { static constexpr bool 
 struct FaultKeepOnPresent : edvr::FlatSubstNoFaults { static constexpr bool keepOnPresent = true; };
 struct FaultFlushOnResize : edvr::FlatSubstNoFaults { static constexpr bool flushOnResize = true; };
 
+struct ApiRunResult {
+    Recorder recorder;
+    ApiProbe probe;
+};
+
+enum class ApiScenario { Eager, Declined, Memo, Rejected };
+
+inline ApiRunResult runApiTransaction(const Harness& h, bool sampling, bool matchingOwner,
+    ApiScenario scenario = ApiScenario::Eager) {
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    edvr::flatQueryCut().reset();
+    Game g(h);
+    g.setup();
+    SceneCleanup cleanup(g.ctx);
+    for (auto& s : lifecycle_fake::g_slots) { s.ptr = nullptr; s.hash = 0; ++s.gen; }
+    edvr::engineVelocityConfigure(true);
+    edvr::engineVelocityFlatLazy(false);
+    g.makeSource(40, 24);
+    Emu<> e(h, g);
+    e.warmUp();
+    e.startFrame();
+
+    if (scenario == ApiScenario::Declined || scenario == ApiScenario::Memo) {
+        edvr::engineVelocityFlatLazy(scenario == ApiScenario::Declined);
+        h.check(e.producer("API fixture setup producer"), "engine velocity API sampling: prior producer establishes held state");
+        edvr::flatQueryCut().beginFrame(1); // an ordinary frame: held answers, not the periodic checking frame
+        if (scenario == ApiScenario::Declined)
+            e.gameSetPs(g.unkeyed.Get(), lifecycle_tests::kUnkeyedPs);
+    }
+
+    g_apiProbe.reset(matchingOwner ? static_cast<const void*>(g.ctx) : static_cast<const void*>(h.device), sampling);
+    edvr::plugin_cost::detail::g_apiSampleHint = sampling;
+    g_rec.reset();
+    g_rejectNextMrt6 = scenario == ApiScenario::Rejected;
+    if (scenario == ApiScenario::Declined || scenario == ApiScenario::Rejected)
+        e.declinedProducer("sampled declined target/blend API transaction");
+    else
+        e.producer("sampled target/blend API transaction");
+    h.check(!g_rejectNextMrt6, "engine velocity API sampling: rejection fixture reaches the actual MRT6 set");
+    g_rejectNextMrt6 = false;
+    edvr::plugin_cost::detail::g_apiSampleHint = false;
+    g_apiProbe.enabled = false;
+    h.check(e.ok, "engine velocity API sampling: fixture preserves the actual producer decision and game state");
+
+    ApiRunResult out;
+    out.recorder = g_rec;
+    out.probe = g_apiProbe;
+    e.present();
+    g.ctx->ClearState();
+    return out;
+}
+
+template <class ApiPolicy>
+inline ApiRunResult runVrApiTransaction(const Harness& h) {
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
+    Game g(h);
+    g.setup();
+    SceneCleanup cleanup(g.ctx);
+    for (auto& s : lifecycle_fake::g_slots) { s.ptr = nullptr; s.hash = 0; ++s.gen; }
+    edvr::engineVelocityConfigure(true);
+    g.ordinaryFrame();
+    g.beginFrame();
+    g.writeScene(g.sceneA.Get(), g.rows[0]);
+    g.pass(0, 0); // prepare the real eye pass without entering a draw policy
+    g_apiProbe.reset(g.ctx, true);
+    edvr::plugin_cost::detail::g_apiSampleHint = true;
+    g_rec.reset();
+    {
+        RecOn on;
+        edvr::engineVelocityBeforeDrawWithApi<ApiPolicy>(g.ctx, true);
+    }
+    h.check(edvr::engineVelocityDrawSubstituted(), "engine velocity API sampling: VR fixture reaches the substituted eye draw");
+    g.ctx->DrawInstanced(4, 1, 0, 0);
+    g.setPs(g.unkeyed.Get(), lifecycle_tests::kUnkeyedPs);
+    {
+        RecOn on;
+        edvr::engineVelocityBeforeDrawWithApi<ApiPolicy>(g.ctx, true);
+    }
+    h.check(!edvr::engineVelocityDrawSubstituted(), "engine velocity API sampling: VR unkeyed draw takes the typed restore path");
+    edvr::plugin_cost::detail::g_apiSampleHint = false;
+    g_apiProbe.enabled = false;
+    ApiRunResult out{g_rec, g_apiProbe};
+    g.endFrame();
+    g.ctx->ClearState();
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+    return out;
+}
+
+inline void apiTransactionTests(const Harness& h) {
+    const ApiRunResult sampled = runApiTransaction(h, true, true);
+    const ApiRunResult disabled = runApiTransaction(h, false, true);
+    const ApiRunResult foreign = runApiTransaction(h, true, false);
+
+    h.check(sampled.probe.sites[132] == 1 && sampled.probe.sites[135] == 1,
+            "engine velocity API sampling: eager draw restores its MRT6 and derived blend exactly once");
+
+    h.check(sampled.probe.badNotes == 0 && sampled.probe.sites[126] > 0,
+            "engine velocity API sampling: current owner context records the target snapshot site");
+    h.check(sampled.probe.sites[128] == sampled.recorder.calls[kOMGetRTUav] &&
+                sampled.probe.sites[126] + sampled.probe.sites[127] + sampled.probe.sites[130] ==
+                    sampled.recorder.calls[kOMGetRT],
+            "engine velocity API sampling: each target query note matches the context vtable recorder");
+    h.check(sampled.probe.sites[129] + sampled.probe.sites[131] + sampled.probe.sites[132] ==
+                sampled.recorder.calls[kOMSetRT] &&
+                sampled.probe.sites[133] == sampled.recorder.calls[kOMGetBlend] &&
+                sampled.probe.sites[134] + sampled.probe.sites[135] == sampled.recorder.calls[kOMSetBlend],
+            "engine velocity API sampling: MRT6/blend apply and draw-scope restore notes match actual calls");
+    h.check(sampled.probe.classes[static_cast<unsigned>(edvr::plugin_cost::ApiClass::ReadQuery)] ==
+                sampled.probe.sites[126] + sampled.probe.sites[127] + sampled.probe.sites[128] +
+                    sampled.probe.sites[130] + sampled.probe.sites[133] &&
+                sampled.probe.classes[static_cast<unsigned>(edvr::plugin_cost::ApiClass::State)] ==
+                    sampled.probe.sites[129] + sampled.probe.sites[131] + sampled.probe.sites[132] +
+                    sampled.probe.sites[134] + sampled.probe.sites[135],
+            "engine velocity API sampling: ReadQuery and State classes stay independent and exact");
+    h.check(disabled.probe.verifierCalls == 0 && disabled.probe.badNotes == 0 &&
+                std::all_of(disabled.probe.sites.begin(), disabled.probe.sites.end(), [](uint64_t n) { return n == 0; }),
+            "engine velocity API sampling: hint-off path skips verifier and erases API notes");
+    h.check(foreign.probe.verifierCalls > 0 && foreign.probe.badNotes == 0 &&
+                std::all_of(foreign.probe.sites.begin(), foreign.probe.sites.end(), [](uint64_t n) { return n == 0; }),
+            "engine velocity API sampling: mismatched owner context rejects notes while the transaction runs");
+    bool sameCalls = true;
+    for (unsigned i = 0; i < kRecCount; ++i)
+        sameCalls = sameCalls && sampled.recorder.calls[i] == disabled.recorder.calls[i] &&
+                    sampled.recorder.calls[i] == foreign.recorder.calls[i];
+    h.check(sameCalls, "engine velocity API sampling: sampled, disabled, and foreign cases execute identical context calls");
+    for (ApiScenario scenario : {ApiScenario::Declined, ApiScenario::Memo, ApiScenario::Rejected}) {
+        const ApiRunResult actual = runApiTransaction(h, true, true, scenario);
+        const ApiRunResult noApi = runApiTransaction(h, false, true, scenario);
+        const bool exact = actual.probe.badNotes == 0 &&
+            actual.probe.sites[126] + actual.probe.sites[127] + actual.probe.sites[130] == actual.recorder.calls[kOMGetRT] &&
+            actual.probe.sites[128] == actual.recorder.calls[kOMGetRTUav] &&
+            actual.probe.sites[129] + actual.probe.sites[131] + actual.probe.sites[132] == actual.recorder.calls[kOMSetRT] &&
+            actual.probe.sites[133] == actual.recorder.calls[kOMGetBlend] &&
+            actual.probe.sites[134] + actual.probe.sites[135] == actual.recorder.calls[kOMSetBlend];
+        h.check(exact, "engine velocity API sampling: declined/memo/rejected notes match actual target/blend calls");
+        bool unchanged = noApi.probe.verifierCalls == 0 && noApi.probe.badNotes == 0 &&
+            std::all_of(noApi.probe.sites.begin(), noApi.probe.sites.end(), [](uint64_t n) { return n == 0; });
+        for (unsigned i = 0; i < kRecCount; ++i)
+            unchanged = unchanged && actual.recorder.calls[i] == noApi.recorder.calls[i];
+        h.check(unchanged, "engine velocity API sampling: declined/memo/rejected NoApi work is unchanged and unannotated");
+        if (scenario == ApiScenario::Declined)
+            h.check(actual.probe.sites[132] == 1 && actual.probe.sites[135] == 1,
+                    "engine velocity API sampling: declined draw restores held target and blend");
+        if (scenario == ApiScenario::Memo)
+            h.check(actual.probe.sites[126] == 0 && actual.probe.sites[130] == 0 && actual.probe.sites[133] == 0 &&
+                        actual.probe.sites[129] == 1 && actual.probe.sites[132] == 1,
+                    "engine velocity API sampling: memo shortcuts suppress query notes while apply/restore remain exact");
+        if (scenario == ApiScenario::Rejected)
+            h.check(actual.probe.sites[129] == 1 && actual.probe.sites[130] == 1 && actual.probe.sites[131] == 1,
+                    "engine velocity API sampling: rejected readback records apply/query/rollback exactly once");
+        std::printf("  engine velocity API scenario %u: sites126-135", static_cast<unsigned>(scenario));
+        for (unsigned site = 126; site <= 135; ++site) std::printf(" %llu", static_cast<unsigned long long>(actual.probe.sites[site]));
+        std::printf("; %s\n", actual.recorder.describe().c_str());
+    }
+    const ApiRunResult vr = runVrApiTransaction<edvr::plugin_cost::SampledApi<>>(h);
+    const ApiRunResult vrNoApi = runVrApiTransaction<edvr::plugin_cost::NoApi>(h);
+    h.check(vr.probe.badNotes == 0 && vr.probe.sites[127] > 0 && vr.probe.sites[135] > 0 &&
+                vr.probe.sites[126] == 0 &&
+                vr.probe.sites[127] + vr.probe.sites[130] == vr.recorder.calls[kOMGetRT] &&
+                vr.probe.sites[128] == vr.recorder.calls[kOMGetRTUav] &&
+                vr.probe.sites[129] + vr.probe.sites[131] + vr.probe.sites[132] == vr.recorder.calls[kOMSetRT] &&
+                vr.probe.sites[133] == vr.recorder.calls[kOMGetBlend] &&
+                vr.probe.sites[134] + vr.probe.sites[135] == vr.recorder.calls[kOMSetBlend],
+            "engine velocity API sampling: VR target/current-read and blend restore notes match actual calls");
+    bool vrUnchanged = vrNoApi.probe.verifierCalls == 0 && vrNoApi.probe.badNotes == 0 &&
+        std::all_of(vrNoApi.probe.sites.begin(), vrNoApi.probe.sites.end(), [](uint64_t n) { return n == 0; });
+    for (unsigned i = 0; i < kRecCount; ++i)
+        vrUnchanged = vrUnchanged && vr.recorder.calls[i] == vrNoApi.recorder.calls[i];
+    h.check(vrUnchanged, "engine velocity API sampling: typed VR NoApi ignores a positive hint and preserves context calls");
+    apiProbeThreadRejection(h);
+}
+
 inline void run(const Harness& h) {
     edvr::g_clockForTest = &lifecycle_fake::fakeClock;
     edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
@@ -1243,6 +1455,8 @@ inline void run(const Harness& h) {
         edvr::engineVelocityShutdown();
         g.ctx->ClearState();
     }
+
+    apiTransactionTests(h);
 
     // The census line.
     {

@@ -4,7 +4,10 @@
 
 #define EDVR_PLUGIN_COST_OWNER_COUNT 10u
 #define EDVR_PLUGIN_COST_API_CLASS_COUNT 5u
+// V1 and CPU-handler coverage remain capped at 127. V2 API-site coverage
+// extends independently so API instrumentation cannot widen CPU indexing.
 #define EDVR_PLUGIN_COST_MAX_SITE_ID 127u
+#define EDVR_PLUGIN_COST_MAX_API_SITE_ID 255u
 
 // Collector configuration, frame-boundary calls, and all note calls are
 // render-owner-thread-only; this API is deliberately lock-free and does not
@@ -30,6 +33,8 @@ typedef struct EdvrPluginCostOwnerV1 {
     double cpuMeanMs;
     double cpuStdDevMs;
     uint64_t apiCalls[EDVR_PLUGIN_COST_API_CLASS_COUNT]; // Work, Transfer, State, ReadQuery, Instrumentation.
+    // Legacy two-word mask. With V2 API IDs 128..255, aggregate API counts
+    // still include those calls but this mask only identifies IDs 0..127.
     uint64_t apiSiteMask[2];
 } EdvrPluginCostOwnerV1;
 
@@ -45,6 +50,38 @@ typedef struct EdvrPluginCostWindowV1 {
     uint64_t cpuTraceSuppressedFrames;
     EdvrPluginCostOwnerV1 owners[EDVR_PLUGIN_COST_OWNER_COUNT];
 } EdvrPluginCostWindowV1;
+
+// V2 preserves CPU coverage and all V1 fields while extending only the API
+// site mask. V1 readers remain layout-safe and receive aggregate API counts
+// with low-word-only site coverage when IDs 128..255 are observed.
+typedef struct EdvrPluginCostOwnerV2 {
+    uint8_t owner;
+    uint8_t cpuObserved;
+    uint8_t apiObserved;
+    uint8_t reserved;
+    uint64_t cpuTimedScopes;
+    uint64_t cpuReached;
+    uint64_t cpuInvoked;
+    uint64_t cpuNotEligible;
+    uint64_t cpuSiteMask[2];
+    double cpuMeanMs;
+    double cpuStdDevMs;
+    uint64_t apiCalls[EDVR_PLUGIN_COST_API_CLASS_COUNT];
+    uint64_t apiSiteMask[4];
+} EdvrPluginCostOwnerV2;
+
+typedef struct EdvrPluginCostWindowV2 {
+    uint32_t version;
+    uint32_t profileBit;
+    uint32_t firstFrame;
+    uint32_t lastFrame;
+    uint32_t windowFrames;
+    uint32_t reserved;
+    uint64_t completedCpuSampleFrames;
+    uint64_t completedApiSampleFrames;
+    uint64_t cpuTraceSuppressedFrames;
+    EdvrPluginCostOwnerV2 owners[EDVR_PLUGIN_COST_OWNER_COUNT];
+} EdvrPluginCostWindowV2;
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,6 +114,12 @@ uint8_t edvrPluginCostFrameBoundary(uint32_t frameNo,
                                     uint8_t nextApiSampleFrame,
                                     uint8_t traceSuppressed,
                                     EdvrPluginCostWindowV1* out) EDVR_PLUGIN_COST_NOEXCEPT;
+uint8_t edvrPluginCostFrameBoundaryV2(uint32_t frameNo,
+                                      uint8_t closedCpuSampleFrame,
+                                      uint8_t closedApiSampleFrame,
+                                      uint8_t nextApiSampleFrame,
+                                      uint8_t traceSuppressed,
+                                      EdvrPluginCostWindowV2* out) EDVR_PLUGIN_COST_NOEXCEPT;
 #ifdef __cplusplus
 }
 #endif
@@ -119,9 +162,11 @@ enum class ApiClass : uint8_t {
 };
 
 constexpr uint16_t kMaxSiteId = EDVR_PLUGIN_COST_MAX_SITE_ID;
+constexpr uint16_t kMaxApiSiteId = EDVR_PLUGIN_COST_MAX_API_SITE_ID;
 constexpr uint8_t kOwnerCount = EDVR_PLUGIN_COST_OWNER_COUNT;
 constexpr uint8_t kApiClassCount = EDVR_PLUGIN_COST_API_CLASS_COUNT;
 constexpr uint32_t kWindowVersion = 1;
+constexpr uint32_t kWindowV2Version = 2;
 constexpr uint32_t kWindowFrameCount = 1800;
 constexpr uint32_t kCpuDrawStride = 64;
 
@@ -216,8 +261,11 @@ static_assert(plugins::kPluginIndexCount == 9, "Cost owner indices must cover th
 static_assert(static_cast<uint8_t>(Owner::Count) == kOwnerCount, "Cost owner count must include Core after all plugins.");
 static_assert(static_cast<uint8_t>(ApiClass::Count) == kApiClassCount, "Cost API class count changed without ABI review.");
 static_assert(kMaxSiteId < 2 * 64, "Cost site IDs must fit two fixed coverage words.");
+static_assert(kMaxApiSiteId < 4 * 64, "API site IDs must fit four V2 coverage words.");
 static_assert(sizeof(EdvrPluginCostOwnerV1) == 128, "Cost owner POD ABI changed.");
 static_assert(sizeof(EdvrPluginCostWindowV1) == 1328, "Cost window POD ABI changed.");
+static_assert(sizeof(EdvrPluginCostOwnerV2) == 144, "Cost owner V2 POD layout changed.");
+static_assert(sizeof(EdvrPluginCostWindowV2) == 1488, "Cost window V2 POD layout changed.");
 
 }} // namespace edvr::plugin_cost
 #endif

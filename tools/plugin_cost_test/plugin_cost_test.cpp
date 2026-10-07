@@ -642,7 +642,13 @@ bool collectorHotPathChecks() {
     const std::string ownerGuard = functionBody(source,
         "extern \"C\" uint8_t edvrPluginCostApiSampleOwnerThread(");
     const std::string boundary = functionBody(source,
+        "uint8_t frameBoundaryImpl(");
+    const std::string boundaryV1 = functionBody(source,
         "extern \"C\" uint8_t edvrPluginCostFrameBoundary(");
+    const std::string boundaryV2 = functionBody(source,
+        "extern \"C\" uint8_t edvrPluginCostFrameBoundaryV2(");
+    const std::string copyWindow = functionBody(source,
+        "void copyWindow(uint32_t profile, uint32_t version,");
     const std::string registration = functionBody(source,
         "extern \"C\" void edvrPluginCostSetOwnerContext(");
     const std::string configure = functionBody(source,
@@ -669,8 +675,13 @@ bool collectorHotPathChecks() {
     ok &= check(!boundary.empty() && boundary.find("const uintptr_t ownerToken = threadToken();") != std::string::npos &&
                 boundary.find("const uintptr_t previousOwner = g_ownerThreadToken.load(std::memory_order_relaxed);") != std::string::npos &&
                 boundary.find("if (previousOwner != ownerToken)") < boundary.find("g_ownerContext.load(std::memory_order_acquire)") &&
-                boundary.find("if (previousOwner != publishedOwner)") < boundary.find("g_ownerThreadToken.store(publishedOwner"),
-                "owner boundary uses one steady-state token load and accesses context/stores publication only on transfer");
+                boundary.find("if (previousOwner != publishedOwner)") < boundary.find("g_ownerThreadToken.store(publishedOwner") &&
+                boundary.find("copyWindow(g_profileBit") < boundary.find("return true") &&
+                boundaryV1.find("frameBoundaryImpl(") != std::string::npos &&
+                boundaryV2.find("frameBoundaryImpl(") != std::string::npos &&
+                !copyWindow.empty() && copyWindow.find("*out = {};") != std::string::npos &&
+                copyWindow.find("dst.apiSiteMask[word] = src.apiSiteMask[word];") != std::string::npos,
+                "one shared boundary advances both layouts, and a completed report fully initializes the selected output");
     ok &= check(!registration.empty() &&
                 registration.find("g_ownerThreadToken.store(0") <
                     registration.find("g_ownerContext.store(context"),
@@ -708,13 +719,18 @@ bool collectorLifecycleChecks() {
     bool ok = true;
 
     const std::string frame = functionBody(perf, "void perfMonitorFrame(");
-    const std::size_t drain = frame.find("edvrPluginCostFrameBoundary(");
+    const std::size_t drain = frame.find("edvrPluginCostFrameBoundaryV2(");
     const std::size_t publish = frame.find("detail::g_pluginCostApiSampleFrame = nextSampleFrame;");
     const std::size_t reset = frame.find("s.drawWholeTicks = s.drawRealTicks = 0;");
+    const std::size_t reportReady = frame.find("if (pluginCostWindowReady)");
+    const std::size_t reportRead = frame.find("pluginCostWindow.firstFrame", reportReady);
     ok &= check(!frame.empty() && drain < publish && publish < reset &&
                 frame.find("const bool closedCpuSampleFrame = detail::g_perfMonitorSampleDraws;") < drain &&
-                frame.find("const bool closedApiSampleFrame = detail::g_pluginCostApiSampleFrame;") < drain,
-                "frame boundary drains closed CPU/API flags before publishing next API sample and resetting draw totals");
+                frame.find("const bool closedApiSampleFrame = detail::g_pluginCostApiSampleFrame;") < drain &&
+                frame.find("EdvrPluginCostWindowV2 pluginCostWindow;") != std::string::npos &&
+                frame.find("EdvrPluginCostWindowV2 pluginCostWindow{};") == std::string::npos &&
+                reportReady < reportRead,
+                "frame boundary drains V2 once, and fully written report data is read only after success");
 
     const std::string install = functionBody(screen, "void installVScreenFixes(");
     const std::size_t commit = install.find("if (!s.hook.commit())");
@@ -932,7 +948,7 @@ bool panelDistanceApiPolicyChecks() {
         // mask or class array outside its fixed bounds.
         edvrPluginCostNoteD3dCall(pc::kOwnerCount, map,
                                   static_cast<uint8_t>(pc::ApiClass::Transfer));
-        edvrPluginCostNoteD3dCall(owner, pc::kMaxSiteId + 1,
+        edvrPluginCostNoteD3dCall(owner, pc::kMaxApiSiteId + 1,
                                   static_cast<uint8_t>(pc::ApiClass::Transfer));
         edvrPluginCostNoteD3dCall(owner, map, pc::kApiClassCount);
     } else {
@@ -1098,6 +1114,149 @@ bool collectorChecks() {
     return ok;
 }
 
+bool collectorV2CapacityChecks() {
+    bool ok = true;
+    constexpr uint8_t owner = static_cast<uint8_t>(pc::Owner::OnFootPanel);
+    constexpr uint8_t badOwner = pc::kOwnerCount;
+    constexpr uint64_t kBefore = 0x9173A5C20E4D6B8Full;
+    constexpr uint64_t kAfter = 0x6C48D210B35A7E91ull;
+    struct GuardedV1 { uint64_t before; EdvrPluginCostWindowV1 report; uint64_t after; };
+    struct GuardedV2 { uint64_t before; EdvrPluginCostWindowV2 report; uint64_t after; };
+    static_assert(sizeof(EdvrPluginCostOwnerV1) == 128 &&
+                  sizeof(EdvrPluginCostWindowV1) == 1328,
+                  "V1 snapshot layout remains fixed");
+    static_assert(sizeof(EdvrPluginCostOwnerV2) == 144 &&
+                  sizeof(EdvrPluginCostWindowV2) == 1488,
+                  "V2 snapshot appends two API-mask words per owner");
+    static_assert(pc::kMaxSiteId == 127 && pc::kMaxApiSiteId == 255,
+                  "CPU and API site limits are independent");
+
+    // The legacy call accepts and counts API IDs above 127 while preserving
+    // its 1328-byte buffer and exposing only its two low mask words.
+    int ownerContext = 0;
+    int wrongContext = 0;
+    GuardedV1 v1{kBefore, {}, kAfter};
+    edvrPluginCostShutdown();
+    edvrPluginCostConfigure(1u, 1000000u);
+    edvrPluginCostSetOwnerContext(&ownerContext);
+    ok &= check(!edvrPluginCostFrameBoundary(0u, 0u, 0u, 1u, 0u, &v1.report),
+                "V1 skips a partial configure boundary without closing a window");
+    const bool v1WrongContextRejected =
+        edvrPluginCostApiSampleContext(&wrongContext) == 0;
+    if (pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext)) {
+        edvrPluginCostNoteD3dCall(owner, 127u, static_cast<uint8_t>(pc::ApiClass::State));
+        edvrPluginCostNoteD3dCall(owner, 128u, static_cast<uint8_t>(pc::ApiClass::ReadQuery));
+        edvrPluginCostNoteD3dCall(owner, 255u, static_cast<uint8_t>(pc::ApiClass::Transfer));
+        edvrPluginCostNoteD3dCall(badOwner, 200u, static_cast<uint8_t>(pc::ApiClass::State));
+        edvrPluginCostNoteD3dCall(owner, 256u, static_cast<uint8_t>(pc::ApiClass::State));
+        edvrPluginCostNoteD3dCall(owner, 200u, pc::kApiClassCount);
+    }
+    ok &= check(v1WrongContextRejected && pc::apiSampleHint() &&
+                edvrPluginCostApiSampleContext(&ownerContext) == 1,
+                "V1 API sample still requires the positive hint and registered context");
+    ok &= check(!edvrPluginCostFrameBoundary(1u, 0u, 1u, 0u, 0u, &v1.report),
+                "V1 does not expose an incomplete 1800-frame window");
+    ok &= check(!pc::apiSampleHint() &&
+                edvrPluginCostApiSampleContext(&ownerContext) == 0,
+                "closed API sample frame clears the hint and context eligibility");
+    edvrPluginCostNoteD3dCall(owner, 128u, static_cast<uint8_t>(pc::ApiClass::State));
+    bool completed = false;
+    for (uint32_t frame = 2; frame <= pc::kWindowFrameCount && !completed; ++frame)
+        completed = edvrPluginCostFrameBoundary(frame, 0u, 0u, 0u, 0u,
+                                                &v1.report) != 0;
+    const auto& oldOwner = v1.report.owners[owner];
+    bool v1OtherOwnersClear = true;
+    for (uint8_t i = 0; i < pc::kOwnerCount; ++i) {
+        if (i == owner) continue;
+        const auto& row = v1.report.owners[i];
+        v1OtherOwnersClear &= row.apiCalls[0] == 0 && row.apiCalls[1] == 0 &&
+            row.apiCalls[2] == 0 && row.apiCalls[3] == 0 && row.apiCalls[4] == 0 &&
+            row.apiSiteMask[0] == 0 && row.apiSiteMask[1] == 0;
+    }
+    ok &= check(completed && v1.report.version == pc::kWindowVersion &&
+                v1.report.windowFrames == pc::kWindowFrameCount &&
+                v1.before == kBefore && v1.after == kAfter &&
+                oldOwner.apiObserved == 1 && oldOwner.apiCalls[1] == 1 &&
+                oldOwner.apiCalls[2] == 1 && oldOwner.apiCalls[3] == 1 &&
+                oldOwner.apiSiteMask[0] == 0 &&
+                oldOwner.apiSiteMask[1] == (uint64_t{1} << 63) &&
+                v1OtherOwnersClear,
+                "V1 canaries hold, counts include high IDs, and its legacy mask truncates safely");
+
+    // V2 preserves the two-word CPU range and maps all four API words exactly.
+    GuardedV2 v2{kBefore, {}, kAfter};
+    edvrPluginCostShutdown();
+    edvrPluginCostConfigure(1u, 1000000u);
+    edvrPluginCostSetOwnerContext(&ownerContext);
+    ok &= check(!edvrPluginCostFrameBoundaryV2(0u, 0u, 0u, 1u, 0u,
+                                               &v2.report),
+                "V2 skips a partial configure boundary without closing a window");
+    const bool v2WrongContextRejected =
+        edvrPluginCostApiSampleContext(&wrongContext) == 0;
+    const uint16_t apiSites[] = {127u, 128u, 191u, 192u, 255u};
+    const uint8_t apiClasses[] = {
+        static_cast<uint8_t>(pc::ApiClass::State),
+        static_cast<uint8_t>(pc::ApiClass::Transfer),
+        static_cast<uint8_t>(pc::ApiClass::ReadQuery),
+        static_cast<uint8_t>(pc::ApiClass::Work),
+        static_cast<uint8_t>(pc::ApiClass::Instrumentation),
+    };
+    if (pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext)) {
+        for (size_t i = 0; i < sizeof(apiSites) / sizeof(apiSites[0]); ++i)
+            edvrPluginCostNoteD3dCall(owner, apiSites[i], apiClasses[i]);
+        edvrPluginCostNoteD3dCall(owner, 256u, static_cast<uint8_t>(pc::ApiClass::State));
+        edvrPluginCostNoteD3dCall(badOwner, 255u, static_cast<uint8_t>(pc::ApiClass::State));
+        edvrPluginCostNoteD3dCall(owner, 200u, pc::kApiClassCount);
+    }
+    // CPU handlers intentionally retain their old limit despite the wider API range.
+    edvrPluginCostNoteSite(owner, 128u, static_cast<uint8_t>(pc::SiteEvent::Invoked));
+    edvrPluginCostNoteCpuTicks(owner, 128u, 900u);
+    ok &= check(v2WrongContextRejected &&
+                edvrPluginCostApiSampleContext(&ownerContext) == 1 &&
+                !edvrPluginCostFrameBoundaryV2(1u, 1u, 1u, 0u, 0u,
+                                               &v2.report) &&
+                !pc::apiSampleHint(),
+                "V2 stays open until the fixed window completes and closes API sampling");
+    edvrPluginCostNoteD3dCall(owner, 255u, static_cast<uint8_t>(pc::ApiClass::State));
+    completed = false;
+    for (uint32_t frame = 2; frame <= pc::kWindowFrameCount && !completed; ++frame)
+        completed = edvrPluginCostFrameBoundaryV2(frame, 0u, 0u, 0u, 0u,
+                                                  &v2.report) != 0;
+    const auto& newOwner = v2.report.owners[owner];
+    bool v2OtherOwnersClear = true;
+    for (uint8_t i = 0; i < pc::kOwnerCount; ++i) {
+        if (i == owner) continue;
+        const auto& row = v2.report.owners[i];
+        v2OtherOwnersClear &= row.cpuObserved == 0 && row.apiObserved == 0 &&
+            row.cpuTimedScopes == 0 && row.cpuReached == 0 && row.cpuInvoked == 0 &&
+            row.cpuNotEligible == 0 && row.cpuMeanMs == 0.0 && row.cpuStdDevMs == 0.0 &&
+            row.apiCalls[0] == 0 && row.apiCalls[1] == 0 && row.apiCalls[2] == 0 &&
+            row.apiCalls[3] == 0 && row.apiCalls[4] == 0 &&
+            row.apiSiteMask[0] == 0 && row.apiSiteMask[1] == 0 &&
+            row.apiSiteMask[2] == 0 && row.apiSiteMask[3] == 0 &&
+            row.cpuSiteMask[0] == 0 && row.cpuSiteMask[1] == 0;
+    }
+    ok &= check(completed && v2.report.version == pc::kWindowV2Version &&
+                v2.report.windowFrames == pc::kWindowFrameCount &&
+                v2.report.completedCpuSampleFrames == 1 &&
+                v2.before == kBefore && v2.after == kAfter &&
+                newOwner.apiObserved == 1 && newOwner.cpuObserved == 0 &&
+                newOwner.cpuTimedScopes == 0 && newOwner.cpuReached == 0 &&
+                newOwner.cpuInvoked == 0 && newOwner.cpuNotEligible == 0 &&
+                newOwner.apiCalls[0] == 1 && newOwner.apiCalls[1] == 1 &&
+                newOwner.apiCalls[2] == 1 && newOwner.apiCalls[3] == 1 &&
+                newOwner.apiCalls[4] == 1 &&
+                newOwner.apiSiteMask[0] == 0 &&
+                newOwner.apiSiteMask[1] == (uint64_t{1} << 63) &&
+                newOwner.apiSiteMask[2] == ((uint64_t{1} << 0) | (uint64_t{1} << 63)) &&
+                newOwner.apiSiteMask[3] == ((uint64_t{1} << 0) | (uint64_t{1} << 63)) &&
+                newOwner.cpuSiteMask[0] == 0 && newOwner.cpuSiteMask[1] == 0 &&
+                v2OtherOwnersClear,
+                "V2 maps IDs 127/128/191/192/255 across four words and rejects 256/CPU 128");
+    edvrPluginCostShutdown();
+    return ok;
+}
+
 bool drawCpuWindowProductionChecks() {
     std::ifstream input("src/d3d11/perf_monitor.cpp", std::ios::binary);
     std::ifstream screenInput("src/d3d11/vscreen.cpp", std::ios::binary);
@@ -1151,6 +1310,7 @@ bool run(bool full) {
     bool ok = policyChecks() && drawCpuWindowChecks();
     if (full) {
         ok &= collectorChecks();
+        ok &= collectorV2CapacityChecks();
         ok &= nightVisionAnnotationChecks();
         ok &= targetSharpRemlokAnnotationChecks();
         ok &= productionCpuRouteChecks();

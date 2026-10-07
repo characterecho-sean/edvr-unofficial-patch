@@ -43,8 +43,8 @@ inline void note(Site site, plugin_cost::ApiClass apiClass) noexcept {
 static_assert(id(Site::LearnGetPsCb) == 53 &&
                   id(Site::RestorePsCb) == 73,
               "FSS Reveal API site IDs are stable.");
-static_assert(id(Site::RestorePsCb) <= plugin_cost::kMaxSiteId &&
-                  plugin_cost::kMaxSiteId < 2 * 64,
-              "FSS Reveal sites must fit the fixed two-word coverage mask.");
+static_assert(id(Site::RestorePsCb) <= plugin_cost::kMaxApiSiteId &&
+                 plugin_cost::kMaxApiSiteId < 4 * 64,
+              "FSS Reveal sites must fit the fixed four-word V2 API mask.");
 
 }}  // namespace edvr::fss_reveal_cost

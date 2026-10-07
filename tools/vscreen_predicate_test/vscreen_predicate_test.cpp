@@ -1191,16 +1191,28 @@ struct ExpectedClassifierSite final {
 bool classifierSiteSequenceIs(const VScreenPanelDistanceApiTestResult& result,
                               const ExpectedClassifierSite* expected,
                               std::size_t expectedCount) {
-    if (result.classifierSiteOverflow || result.classifierSiteCount != expectedCount)
+    if (result.classifierSiteOverflow || result.classifierSiteCount != expectedCount) {
+        std::fprintf(stderr, "Classifier sites: actual=%u expected=%u overflow=%u\n",
+            static_cast<unsigned>(result.classifierSiteCount), static_cast<unsigned>(expectedCount),
+            static_cast<unsigned>(result.classifierSiteOverflow));
         return false;
+    }
     for (std::size_t i = 0; i < expectedCount; ++i) {
         const auto& actual = result.classifierSites[i];
         const auto& want = expected[i];
         if (actual.siteId != static_cast<std::uint16_t>(want.id) ||
             actual.kind != static_cast<std::uint8_t>(want.kind) ||
             actual.outcome != static_cast<std::uint8_t>(want.outcome) ||
-            actual.subsite != want.subsite || actual.verdict != want.verdict)
+            actual.subsite != want.subsite || actual.verdict != want.verdict) {
+            std::fprintf(stderr,
+                "Classifier site[%u]: id=%u/%u kind=%u/%u outcome=%u/%u subsite=%u/%u verdict=%d/%d\n",
+                static_cast<unsigned>(i), static_cast<unsigned>(actual.siteId), static_cast<unsigned>(want.id),
+                static_cast<unsigned>(actual.kind), static_cast<unsigned>(want.kind),
+                static_cast<unsigned>(actual.outcome), static_cast<unsigned>(want.outcome),
+                static_cast<unsigned>(actual.subsite), static_cast<unsigned>(want.subsite),
+                static_cast<int>(actual.verdict), static_cast<int>(want.verdict));
             return false;
+        }
     }
     return true;
 }
@@ -1236,6 +1248,68 @@ bool noneDrawActionsMatch(const VScreenPanelDistanceApiTestResult& result,
                        record.instances != input.drawInstances || record.start != start ||
                        record.startInstance != startInstance ||
                        record.baseVertex != baseVertex)) return false;
+    }
+    return true;
+}
+
+bool panelDrawActionsMatch(const VScreenPanelDistanceApiTestResult& result,
+                           const VScreenPanelDistanceApiTestInput& input) {
+    using namespace draw_ladder;
+    // Every non-None verdict also records the forwarder's replace bracket,
+    // including Panel, whose actual CB restore belongs to the caller.
+    if (!result.token.valid() || draw_ladder_trace::actionCountForTest(result.token) != 6) {
+        std::fprintf(stderr, "Panel %c trace action count: actual=%u expected=6 token=%u\n",
+            input.kind, static_cast<unsigned>(draw_ladder_trace::actionCountForTest(result.token)),
+            static_cast<unsigned>(result.token.valid()));
+        return false;
+    }
+    const DrawCallKind call = input.kind == 'D' ? DrawCallKind::Draw
+        : input.kind == 'I' ? DrawCallKind::DrawIndexed
+        : input.kind == 'N' ? DrawCallKind::DrawInstanced
+                            : DrawCallKind::DrawIndexedInstanced;
+    const std::uint32_t start = (input.kind == 'D' || input.kind == 'N')
+        ? static_cast<std::uint32_t>(input.drawArgs.base) : input.drawArgs.start;
+    const std::uint32_t startInstance = (input.kind == 'N' || input.kind == 'X')
+        ? input.drawArgs.startInstance : 0;
+    const std::int32_t baseVertex = (input.kind == 'I' || input.kind == 'X')
+        ? input.drawArgs.base : 0;
+    const ActionId expectedIds[] = {ActionId::kDrawBegin, ActionId::kReplaceDraw,
+        ActionId::kOriginalDraw, ActionId::kReplaceDraw,
+        ActionId::kPanelConstantBufferRestore, ActionId::kDrawEnd};
+    const ActionPhase expectedPhases[] = {ActionPhase::Begin, ActionPhase::Begin,
+        ActionPhase::Issue, ActionPhase::End, ActionPhase::Restore, ActionPhase::End};
+    const ActionOutcome expectedOutcomes[] = {ActionOutcome::Applied, ActionOutcome::Attempted,
+        ActionOutcome::Applied, ActionOutcome::Applied, ActionOutcome::Applied,
+        ActionOutcome::Applied};
+    const std::uint16_t expectedFlags[] = {0, 1, 0, 1, 0, 0}; // Panel verdict ordinal.
+    const std::uint16_t expectedIssueCounts[] = {0, 0, 1, 0, 0, 0};
+    for (std::uint16_t i = 0; i < 6; ++i) {
+        std::uint16_t id = 0;
+        ActionRecord record{};
+        const bool read = draw_ladder_trace::readActionForTest(result.token, i, &id, &record);
+        if (!read ||
+            id != static_cast<std::uint16_t>(expectedIds[i]) ||
+            record.phase != expectedPhases[i] || record.outcome != expectedOutcomes[i] ||
+            record.flags != expectedFlags[i] || record.issueCount != expectedIssueCounts[i] ||
+            record.call != call || record.count != input.drawCount ||
+            record.instances != input.drawInstances || record.start != start ||
+            record.startInstance != startInstance || record.baseVertex != baseVertex) {
+            std::fprintf(stderr,
+                "Panel %c action[%u]: read=%u id=%u/%u phase=%u/%u outcome=%u/%u "
+                "flags=%u/%u issues=%u/%u call=%u/%u count=%u/%u instances=%u/%u "
+                "start=%u/%u startInstance=%u/%u base=%d/%d\n",
+                input.kind, static_cast<unsigned>(i), static_cast<unsigned>(read),
+                static_cast<unsigned>(id), static_cast<unsigned>(expectedIds[i]),
+                static_cast<unsigned>(record.phase), static_cast<unsigned>(expectedPhases[i]),
+                static_cast<unsigned>(record.outcome), static_cast<unsigned>(expectedOutcomes[i]),
+                static_cast<unsigned>(record.flags), static_cast<unsigned>(expectedFlags[i]),
+                static_cast<unsigned>(record.issueCount), static_cast<unsigned>(expectedIssueCounts[i]),
+                static_cast<unsigned>(record.call), static_cast<unsigned>(call),
+                record.count, input.drawCount, record.instances, input.drawInstances,
+                record.start, start, record.startInstance, startInstance,
+                record.baseVertex, baseVertex);
+            return false;
+        }
     }
     return true;
 }
@@ -1329,6 +1403,46 @@ bool testFullClassifierTerminalPath(ID3D11Device* device,
         {SiteId::kHeadOffsetObserve, SiteKind::Observe, SiteOutcome::Observed},
         {SiteId::kPanelCurveObserve, SiteKind::Observe, SiteOutcome::NotEligible},
         {SiteId::kEyeNoDistanceNone, SiteKind::Exit, SiteOutcome::Exited, 0, 0},
+    };
+    constexpr ExpectedClassifierSite successful[] = {
+        {SiteId::kFssChromeSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kForeignContextNone, SiteKind::Exit, SiteOutcome::Observed},
+        {SiteId::kDrawGateDisabledNone, SiteKind::Exit, SiteOutcome::Observed},
+        {SiteId::kParticleProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kParticleSubstitute, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kWitchspaceStarsSkip, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kStateSnapshot, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kRouteSelected, SiteKind::Observe, SiteOutcome::Observed, 6},
+        {SiteId::kEyeDepthAndCount, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeUiDepthProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeHoloDepthProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kIntroPanelClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kIntroCurveObserve, SiteKind::Observe, SiteOutcome::NotEligible},
+        {SiteId::kSunglareNomination, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeCensusSubmitted, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kUiCrispProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kObjectProbe, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kEyeCensusSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kEyeRangeSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kNightVisionClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kRemlokHideSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kRemlokScissorClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kHoloClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kTargetSharpClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kScrimClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kEyeBackdropComposite, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kFssPanelClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kFssRevealClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kFssDumpClaim, SiteKind::Claim, SiteOutcome::NotEligible},
+        {SiteId::kResolveBindClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kSunglareSkip, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kSunglareSteadyClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kGlareClampClaim, SiteKind::Claim, SiteOutcome::Declined},
+        {SiteId::kHeadOffsetObserve, SiteKind::Observe, SiteOutcome::Observed},
+        {SiteId::kPanelCurveObserve, SiteKind::Observe, SiteOutcome::NotEligible},
+        {SiteId::kEyeNoDistanceNone, SiteKind::Exit, SiteOutcome::Declined},
+        {SiteId::kPanelEligibilityNone, SiteKind::Exit, SiteOutcome::Declined},
+        {SiteId::kPanelDistanceClaim, SiteKind::Claim, SiteOutcome::Claimed, 0, 1},
     };
 
     D3D11_TEXTURE2D_DESC textureDesc{};
@@ -1465,6 +1579,74 @@ bool testFullClassifierTerminalPath(ID3D11Device* device,
             okay &= check(disabledResult.classifierSiteCount == 0 &&
                               !disabledResult.classifierSiteOverflow,
                           "NoTrace distance-disabled classifier emits no ordered-site observations");
+        }
+
+        alignas(float) std::uint8_t mappedStorage[16]{};
+        auto claimed = makeInput(true, traceEnabled);
+        claimed.kind = draw.kind;
+        claimed.drawInstances = draw.instances;
+        claimed.drawArgs = draw.args;
+        claimed.mapHresult = static_cast<std::int32_t>(S_OK);
+        claimed.mappedStorage = mappedStorage;
+        claimed.mappedStorageBytes = sizeof(mappedStorage);
+        VScreenPanelDistanceApiTestResult claimedResult{};
+        const bool claimRan = edvr::vScreenPanelDistanceApiTransactionTest(
+            claimed, &claimedResult);
+        const float scaledConstants[4] = {2.0f, 4.0f, 3.0f, 8.0f};
+        okay &= check(claimRan &&
+                          claimedResult.winner == static_cast<std::int16_t>(SiteId::kPanelDistanceClaim) &&
+                          claimedResult.verdict == static_cast<std::int16_t>(
+                              draw_ladder::VerdictOrdinal::kPanel) &&
+                          claimedResult.mapCalls == 1 && claimedResult.unmapCalls == 1 &&
+                          claimedResult.constantBufferCalls == 2 &&
+                          claimedResult.originalDrawCalls == 1 &&
+                          claimedResult.mapArgumentsValid && claimedResult.unmapArgumentsValid &&
+                          claimedResult.overrideBindArgumentsValid &&
+                          claimedResult.restoreBindArgumentsValid &&
+                          claimedResult.drawArgumentsValid &&
+                          claimedResult.finalBoundCb == claimed.compositeCb &&
+                          panelEventSequence(claimedResult, {
+                              VScreenPanelDistanceApiTestEvent::Map,
+                              VScreenPanelDistanceApiTestEvent::Unmap,
+                              VScreenPanelDistanceApiTestEvent::OverrideBind,
+                              VScreenPanelDistanceApiTestEvent::OriginalDraw,
+                              VScreenPanelDistanceApiTestEvent::RestoreBind}),
+                      traceEnabled
+                          ? "Trace full VR-eye classifier claims PanelDistance and preserves exact API/draw/restore order"
+                          : "NoTrace full VR-eye classifier claims PanelDistance and preserves exact API/draw/restore order");
+        okay &= check(claimedResult.bindStartSlots[0] == 0 &&
+                          claimedResult.bindStartSlots[1] == 0 &&
+                          claimedResult.bindCounts[0] == 1 && claimedResult.bindCounts[1] == 1 &&
+                          claimedResult.bindBuffers[0] == claimed.ourCb &&
+                          claimedResult.bindBuffers[1] == claimed.compositeCb &&
+                          claimedResult.mappedBytes == claimed.shadowBytes &&
+                          std::memcmp(claimedResult.mappedSnapshot, scaledConstants,
+                                      sizeof(scaledConstants)) == 0,
+                      "full classifier claim copies shadow constants, scales only the selected value, and restores CB0");
+        if (traceEnabled) {
+            const bool claimPayloadMatches = claimedResult.siteResult.outcome == SiteOutcome::Claimed &&
+                claimedResult.siteResult.verdict == static_cast<std::int16_t>(
+                    draw_ladder::VerdictOrdinal::kPanel) && claimedResult.siteResult.subsite == 0;
+            if (!claimPayloadMatches) {
+                std::fprintf(stderr, "Panel %c claim payload: outcome=%u/%u verdict=%d/1 subsite=%u/0\n",
+                    claimed.kind, static_cast<unsigned>(claimedResult.siteResult.outcome),
+                    static_cast<unsigned>(SiteOutcome::Claimed),
+                    static_cast<int>(claimedResult.siteResult.verdict),
+                    static_cast<unsigned>(claimedResult.siteResult.subsite));
+            }
+            const bool sitesMatch = classifierSiteSequenceIs(claimedResult, successful,
+                sizeof(successful) / sizeof(successful[0]));
+            const bool actionsMatch = panelDrawActionsMatch(claimedResult, claimed);
+            okay &= check(claimPayloadMatches && sitesMatch && actionsMatch,
+                          "Trace claim matches the independent 38-site prefix and exact six-action original-draw/restore ledger");
+        } else {
+            okay &= check(claimedResult.classifierSiteCount == 0 &&
+                              !claimedResult.classifierSiteOverflow &&
+                              claimedResult.winner == static_cast<std::int16_t>(
+                                  SiteId::kPanelDistanceClaim) &&
+                              claimedResult.verdict == static_cast<std::int16_t>(
+                                  draw_ladder::VerdictOrdinal::kPanel),
+                          "NoTrace full classifier claims with zero ordered-site observations");
         }
       }
     }

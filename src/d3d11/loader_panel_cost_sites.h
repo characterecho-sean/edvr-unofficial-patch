@@ -38,8 +38,8 @@ inline void note(Site site, plugin_cost::ApiClass apiClass) noexcept {
 
 static_assert(id(Site::IaGetIndexBuffer) == 91 && id(Site::UnmapReadback) == 110,
               "Loader-panel API site IDs are stable.");
-static_assert(id(Site::UnmapReadback) <= plugin_cost::kMaxSiteId &&
-              plugin_cost::kMaxSiteId < 2 * 64,
-              "Loader-panel sites must fit the fixed two-word coverage mask.");
+static_assert(id(Site::UnmapReadback) <= plugin_cost::kMaxApiSiteId &&
+              plugin_cost::kMaxApiSiteId < 4 * 64,
+              "Loader-panel sites must fit the fixed four-word V2 API mask.");
 
 }} // namespace edvr::loader_panel_cost

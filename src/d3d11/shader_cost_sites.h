@@ -27,8 +27,8 @@ static_assert(id(Site::CreateVsGetDevice) == 116 && id(Site::CreateVsShader) == 
               id(Site::CreateCsGetDevice) == 118 && id(Site::CreateCsShader) == 119 &&
               id(Site::CreatePsGetDevice) == 120 && id(Site::CreatePsShader) == 121,
               "Precompiled shader creation site IDs are stable.");
-static_assert(id(Site::CreatePsShader) <= plugin_cost::kMaxSiteId &&
-              plugin_cost::kMaxSiteId < 2 * 64,
-              "Precompiled shader sites must fit the fixed two-word coverage mask.");
+static_assert(id(Site::CreatePsShader) <= plugin_cost::kMaxApiSiteId &&
+              plugin_cost::kMaxApiSiteId < 4 * 64,
+              "Precompiled shader sites must fit the fixed four-word V2 API mask.");
 
 }} // namespace edvr::shader_cost

@@ -64,6 +64,54 @@
 
 using Microsoft::WRL::ComPtr;
 
+namespace edvr::plugin_cost::detail { thread_local bool g_apiSampleHint = false; }
+
+namespace flat_lazy_tests {
+ApiProbe g_apiProbe;
+}
+
+extern "C" uint8_t edvrPluginCostApiSampleContext(const void* context) noexcept {
+    auto& probe = flat_lazy_tests::g_apiProbe;
+    ++probe.verifierCalls;
+    return static_cast<uint8_t>(edvr::plugin_cost::apiSampleHint() && probe.enabled &&
+                                context == probe.ownerContext &&
+                                std::this_thread::get_id() == probe.ownerThread);
+}
+
+extern "C" uint8_t edvrPluginCostApiSampleOwnerThread(void) noexcept {
+    const auto& probe = flat_lazy_tests::g_apiProbe;
+    return static_cast<uint8_t>(edvr::plugin_cost::apiSampleHint() && probe.enabled &&
+                                std::this_thread::get_id() == probe.ownerThread);
+}
+
+extern "C" void edvrPluginCostNoteD3dCall(uint8_t owner, uint16_t siteId, uint8_t apiClass) noexcept {
+    auto& probe = flat_lazy_tests::g_apiProbe;
+    if (owner != static_cast<uint8_t>(edvr::plugin_cost::Owner::TemporalAa) ||
+        siteId >= probe.sites.size() || apiClass >= probe.classes.size() ||
+        !probe.enabled || std::this_thread::get_id() != probe.ownerThread) {
+        ++probe.badNotes;
+        return;
+    }
+    ++probe.sites[siteId];
+    ++probe.classes[apiClass];
+}
+
+namespace flat_lazy_tests {
+void apiProbeThreadRejection(const lifecycle_tests::Harness& h) {
+    g_apiProbe.reset(h.context, true);
+    uint8_t accepted = 1;
+    std::thread worker([&] {
+        edvr::plugin_cost::detail::g_apiSampleHint = true;
+        accepted = edvrPluginCostApiSampleContext(h.context);
+        edvr::plugin_cost::detail::g_apiSampleHint = false;
+    });
+    worker.join();
+    h.check(accepted == 0 && g_apiProbe.verifierCalls == 1,
+            "engine velocity API sampling: matching context and enabled hint still reject a foreign thread");
+    g_apiProbe.enabled = false;
+}
+}
+
 // The linked draw half uses the same internal binding guard as production;
 // the rig does not link the flat readback module that normally defines it.
 namespace edvr { thread_local bool g_flatComputeInternal = false; }

@@ -1,5 +1,6 @@
 #include "temporal_shader_bytecode.h"
 #include "weapon_motion.h"
+#include "weapon_motion_cost_sites.h"
 #include "animated_vertex_history.h"
 #include <cstring>
 #include <d3d11.h>
@@ -136,7 +137,7 @@ void weaponMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     D3D11_DEPTH_STENCIL_DESC dd{};ds->GetDesc(&dd);
     if(!dd.DepthEnable || dd.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ALL || !dd.StencilEnable || !(dd.StencilWriteMask&16) ||
        dd.FrontFace.StencilPassOp!=D3D11_STENCIL_OP_REPLACE || dd.BackFace.StencilPassOp!=D3D11_STENCIL_OP_REPLACE)return;
-    Ptr<ID3D11DepthStencilView> depth;ctx->OMGetRenderTargets(0,nullptr,&depth);if(!depth)return;
+    Ptr<ID3D11DepthStencilView> depth;ctx->OMGetRenderTargets(0,nullptr,depth.GetAddressOf());if(!depth)return;
     Ptr<ID3D11Resource> resource;depth->GetResource(&resource);if(resource.Get()!=g.source.Get())return;
     D3D11_VIEWPORT vp{};UINT nv=1;ctx->RSGetViewports(&nv,&vp);
     if(nv!=1 || vp.TopLeftX || vp.TopLeftY || vp.Width!=g.width || vp.Height!=g.height || vp.MinDepth!=0 || vp.MaxDepth!=1)return;
@@ -179,6 +180,116 @@ void weaponMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
     ctx->IASetInputLayout(r.layout.Get());ctx->IASetIndexBuffer(r.indices.Get(),r.format,r.indexOffset);
     ctx->VSSetShader(vs.Get(),vc,nc);ctx->VSSetShaderResources(0,10,srvs);ctx->VSSetConstantBuffers(0,1,vsCb.GetAddressOf());ctx->PSSetShader(ps.Get(),pc,np);ctx->PSSetConstantBuffers(0,1,cb.GetAddressOf());
     vScreenSetRenderTargetsRaw(ctx,8,rt,depth.Get());ctx->OMSetDepthStencilState(ds.Get(),ref);ctx->OMSetBlendState(blend.Get(),factors,mask);
+    for(auto* p:rt)if(p)p->Release();for(auto* p:srvs)if(p)p->Release();for(UINT i=0;i<np;++i)pc[i]->Release();for(UINT i=0;i<nc;++i)vc[i]->Release();
+    if(valid && !g.noted){g.noted=true;Log::get().note("weapon motion: original animated vertices supply skeleton/projection-matched source motion at %ux%u; aiming, skinning and projection included. GPU-only, bounded 32 MiB vertex history.",g.width,g.height);}
+}
+void weaponMotionDrawSampledApi(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,unsigned start,int base,unsigned startInstance){
+    using namespace weapon_motion_detail;
+    if(!enabled || g.failed || g.sourceFrame!=g.frame || !ctx || !draw || instances!=1 || !count || count%3 || count>maxVertices || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
+    Ptr<ID3D11DepthStencilState> ds;UINT ref=0;
+    ctx->OMGetDepthStencilState(&ds,&ref);if(!ds || !(ref&16))return;
+    D3D11_DEPTH_STENCIL_DESC dd{};ds->GetDesc(&dd);
+    if(!dd.DepthEnable || dd.DepthWriteMask!=D3D11_DEPTH_WRITE_MASK_ALL || !dd.StencilEnable || !(dd.StencilWriteMask&16) ||
+       dd.FrontFace.StencilPassOp!=D3D11_STENCIL_OP_REPLACE || dd.BackFace.StencilPassOp!=D3D11_STENCIL_OP_REPLACE)return;
+    Ptr<ID3D11DepthStencilView> depth;
+    ctx->OMGetRenderTargets(0,nullptr,depth.GetAddressOf());if(!depth)return;
+    Ptr<ID3D11Resource> resource;depth->GetResource(&resource);if(resource.Get()!=g.source.Get())return;
+    D3D11_VIEWPORT vp{};UINT nv=1;ctx->RSGetViewports(&nv,&vp);
+    if(nv!=1 || vp.TopLeftX || vp.TopLeftY || vp.Width!=g.width || vp.Height!=g.height || vp.MinDepth!=0 || vp.MaxDepth!=1)return;
+    AnimatedVertexHistory::Capture vertices;
+    if(!g.history.prepareCapture(ctx,count,instances,start,base,startInstance,g.frame,vertices)) {
+        if(vertices.refusal && std::strcmp(vertices.refusal,"occurrence-cap")==0) {
+            g.ambiguous=true;
+            if(!g.declined){g.declined=true;Log::get().note("weapon motion: more than four mesh occurrences; rejecting this frame's weapon history.");}
+        }
+        if(g.history.failed()){g.failed=true;Log::get().note("weapon motion: stream-output creation failed; weapon history rejected.");}
+        return;
+    }
+    Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+    if(!prepare(ctx,dev.Get())){g.failed=true;Log::get().note("weapon motion: resource creation failed; weapon history rejected.");return;}
+    const bool selected=gpu.choose(g.frame);
+    const auto& r=vertices.geometry;const unsigned candidates=vertices.candidateCount;const bool valid=candidates!=0;
+    const bool identifyTimed=selected&&gpu.identify.begin(ctx);g.history.submitIdentity(ctx,vertices);if(identifyTimed)gpu.identify.timer.end(ctx);
+    if(g.mapFrame!=g.frame){
+        const bool clearTimed=gpu.phase==GpuDiagnostics::Phase::Collecting&&gpu.chooseClear()&&gpu.clear.begin(ctx);
+        float zero[4]{};ctx->ClearRenderTargetView(g.rtv.Get(),zero);if(clearTimed)gpu.clear.timer.end(ctx);g.mapFrame=g.frame;
+    }
+    g.history.bindPositions(ctx,vertices);
+    const bool captureTimed=selected&&gpu.capture.begin(ctx);
+    g.history.drawPositions(ctx,draw,startInstance,vertices);
+    if(captureTimed)gpu.capture.timer.end(ctx);
+    g.history.restorePositions(ctx,vertices);
+    ID3D11RenderTargetView* rt[8]{};
+    weapon_motion_cost::note<weapon_motion_cost::Site::TargetRead,plugin_cost::ApiClass::ReadQuery>();
+    ctx->OMGetRenderTargets(8,rt,nullptr);
+    Ptr<ID3D11BlendState> blend;FLOAT factors[4];UINT mask;
+    weapon_motion_cost::note<weapon_motion_cost::Site::BlendRead,plugin_cost::ApiClass::ReadQuery>();
+    ctx->OMGetBlendState(&blend,factors,&mask);
+    Ptr<ID3D11PixelShader> ps;ID3D11ClassInstance* pc[256]{},*vc[256]{};UINT np=256,nc=256;
+    weapon_motion_cost::note<weapon_motion_cost::Site::PixelShaderRead,plugin_cost::ApiClass::ReadQuery>();
+    ctx->PSGetShader(&ps,pc,&np);
+    Ptr<ID3D11VertexShader> vs;
+    weapon_motion_cost::note<weapon_motion_cost::Site::VertexShaderRead,plugin_cost::ApiClass::ReadQuery>();
+    ctx->VSGetShader(&vs,vc,&nc);
+    Ptr<ID3D11Buffer> cb,vsCb;
+    weapon_motion_cost::note<weapon_motion_cost::Site::PixelConstantBufferRead,plugin_cost::ApiClass::ReadQuery>();
+    ctx->PSGetConstantBuffers(0,1,&cb);
+    weapon_motion_cost::note<weapon_motion_cost::Site::VertexConstantBufferRead,plugin_cost::ApiClass::ReadQuery>();
+    ctx->VSGetConstantBuffers(0,1,&vsCb);
+    ID3D11ShaderResourceView* srvs[10]{};
+    weapon_motion_cost::note<weapon_motion_cost::Site::VertexResourcesRead,plugin_cost::ApiClass::ReadQuery>();
+    ctx->VSGetShaderResources(0,10,srvs);
+    float settings[4]={float(g.width),float(g.height),float(candidates),0};
+    weapon_motion_cost::note<weapon_motion_cost::Site::SettingsWrite,plugin_cost::ApiClass::Transfer>();
+    ctx->UpdateSubresource(g.settings.Get(),0,nullptr,settings,0,0);
+    ID3D11ShaderResourceView* in[10]={vertices.currentPositions.Get(),vertices.previousPositions[0].Get(),vertices.previousPositions[1].Get(),vertices.previousPositions[2].Get(),vertices.previousPositions[3].Get(),vertices.currentIdentity.Get(),vertices.previousIdentity[0].Get(),vertices.previousIdentity[1].Get(),vertices.previousIdentity[2].Get(),vertices.previousIdentity[3].Get()};
+    weapon_motion_cost::note<weapon_motion_cost::Site::MotionTargetBind,plugin_cost::ApiClass::State>();
+    vScreenSetRenderTargetsRaw(ctx,1,g.rtv.GetAddressOf(),depth.Get());
+    weapon_motion_cost::note<weapon_motion_cost::Site::DepthStateBind,plugin_cost::ApiClass::State>();
+    ctx->OMSetDepthStencilState(g.depth.Get(),16);
+    weapon_motion_cost::note<weapon_motion_cost::Site::BlendStateBind,plugin_cost::ApiClass::State>();
+    ctx->OMSetBlendState(g.blend.Get(),nullptr,~0u);
+    weapon_motion_cost::note<weapon_motion_cost::Site::MotionVertexShaderBind,plugin_cost::ApiClass::State>();
+    ctx->VSSetShader(g.vs.Get(),nullptr,0);
+    weapon_motion_cost::note<weapon_motion_cost::Site::MotionVertexResourcesBind,plugin_cost::ApiClass::State>();
+    ctx->VSSetShaderResources(0,10,in);
+    weapon_motion_cost::note<weapon_motion_cost::Site::MotionVertexConstantBufferBind,plugin_cost::ApiClass::State>();
+    ctx->VSSetConstantBuffers(0,1,g.settings.GetAddressOf());
+    weapon_motion_cost::note<weapon_motion_cost::Site::MotionPixelShaderBind,plugin_cost::ApiClass::State>();
+    ctx->PSSetShader(g.ps.Get(),nullptr,0);
+    weapon_motion_cost::note<weapon_motion_cost::Site::MotionPixelConstantBufferBind,plugin_cost::ApiClass::State>();
+    ctx->PSSetConstantBuffers(0,1,g.settings.GetAddressOf());
+    const bool rasterTimed=selected&&gpu.raster.begin(ctx);
+    weapon_motion_cost::note<weapon_motion_cost::Site::SequentialLayoutBind,plugin_cost::ApiClass::State>();
+    ctx->IASetInputLayout(nullptr);
+    weapon_motion_cost::note<weapon_motion_cost::Site::SequentialIndexBufferBind,plugin_cost::ApiClass::State>();
+    ctx->IASetIndexBuffer(g.sequential.Get(),DXGI_FORMAT_R32_UINT,0);
+    weapon_motion_cost::note<weapon_motion_cost::Site::RasterDraw,plugin_cost::ApiClass::Work>();
+    draw(ctx,count,1,0,0,0);
+    if(rasterTimed)gpu.raster.timer.end(ctx);
+    ID3D11ShaderResourceView* none[10]{};
+    weapon_motion_cost::note<weapon_motion_cost::Site::VertexResourcesClear,plugin_cost::ApiClass::State>();
+    ctx->VSSetShaderResources(0,10,none);
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostLayoutRestore,plugin_cost::ApiClass::State>();
+    ctx->IASetInputLayout(r.layout.Get());
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostIndexBufferRestore,plugin_cost::ApiClass::State>();
+    ctx->IASetIndexBuffer(r.indices.Get(),r.format,r.indexOffset);
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostVertexShaderRestore,plugin_cost::ApiClass::State>();
+    ctx->VSSetShader(vs.Get(),vc,nc);
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostVertexResourcesRestore,plugin_cost::ApiClass::State>();
+    ctx->VSSetShaderResources(0,10,srvs);
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostVertexConstantBufferRestore,plugin_cost::ApiClass::State>();
+    ctx->VSSetConstantBuffers(0,1,vsCb.GetAddressOf());
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostPixelShaderRestore,plugin_cost::ApiClass::State>();
+    ctx->PSSetShader(ps.Get(),pc,np);
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostPixelConstantBufferRestore,plugin_cost::ApiClass::State>();
+    ctx->PSSetConstantBuffers(0,1,cb.GetAddressOf());
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostTargetRestore,plugin_cost::ApiClass::State>();
+    vScreenSetRenderTargetsRaw(ctx,8,rt,depth.Get());
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostDepthStateRestore,plugin_cost::ApiClass::State>();
+    ctx->OMSetDepthStencilState(ds.Get(),ref);
+    weapon_motion_cost::note<weapon_motion_cost::Site::HostBlendStateRestore,plugin_cost::ApiClass::State>();
+    ctx->OMSetBlendState(blend.Get(),factors,mask);
     for(auto* p:rt)if(p)p->Release();for(auto* p:srvs)if(p)p->Release();for(UINT i=0;i<np;++i)pc[i]->Release();for(UINT i=0;i<nc;++i)vc[i]->Release();
     if(valid && !g.noted){g.noted=true;Log::get().note("weapon motion: original animated vertices supply skeleton/projection-matched source motion at %ux%u; aiming, skinning and projection included. GPU-only, bounded 32 MiB vertex history.",g.width,g.height);}
 }

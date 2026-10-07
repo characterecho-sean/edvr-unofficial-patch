@@ -3671,9 +3671,9 @@ void testFlatQueryCutWiring() {
         {&runtimeCpp, "if (owner()) engineVelocityFlatFrameEnd();", 1, "the frame's end lets go of what the bracket kept"},
         // Engine motion's wrapper.
         {&engineCpp, "flatQueryCut().plan(FlatQuery::GameTargets)", 1, "the game's render-target set is kept through the policy"},
-        {&engineCpp, "flatQueryCut().plan(FlatQuery::GameBlend)", 1, "and its blend state"},
+        {&engineCpp, "flatQueryCut().plan(FlatQuery::GameBlend)", 2, "and its blend state in each mutually exclusive API policy body"},
         {&engineCpp, "flatQueryCut().plan(FlatQuery::TargetsKept)", 1, "and the runtime's acceptance of MRT6"},
-        {&engineCpp, "flatQueryCut().compared(", 3, "each is compared with the context on a check"},
+        {&engineCpp, "flatQueryCut().compared(", 4, "each is compared with the context on a check, including both API policy bodies"},
         {&engineCpp, "void engineVelocityFlatFrameEnd() noexcept {", 1, "the bracket lets go of what it kept at the frame's end"},
         // The shared reads.
         {&readsH, "cut.plan(FlatQuery::CoverageDepth)", 1, "the depth question asks the policy"},
@@ -3686,6 +3686,50 @@ void testFlatQueryCutWiring() {
         for (size_t at = without.find(pin.needle); at != std::string::npos; at = without.find(pin.needle))
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "query cut wiring control: a source with the line removed no longer contains it");
+    }
+    // The legacy and sampled slow paths are mutually exclusive. Each keeps
+    // the same blend shortcut and its check; a file-wide count cannot prove
+    // both bodies retain them. Delimit the function with balanced braces,
+    // ignoring quoted text and comments so they cannot move its boundary.
+    auto functionBody = [](const std::string& code, const char* signature) {
+        const size_t first = code.find(signature);
+        if (first == std::string::npos || code.find(signature, first + 1) != std::string::npos) return std::string();
+        const size_t open = code.find('{', first);
+        if (open == std::string::npos) return std::string();
+        unsigned depth = 0;
+        char quote = 0;
+        bool lineComment = false, blockComment = false;
+        for (size_t at = open; at < code.size(); ++at) {
+            const char c = code[at], next = at + 1 < code.size() ? code[at + 1] : '\0';
+            if (lineComment) { if (c == '\n') lineComment = false; continue; }
+            if (blockComment) { if (c == '*' && next == '/') { blockComment = false; ++at; } continue; }
+            if (quote) { if (c == '\\') ++at; else if (c == quote) quote = 0; continue; }
+            if (c == '/' && next == '/') { lineComment = true; ++at; continue; }
+            if (c == '/' && next == '*') { blockComment = true; ++at; continue; }
+            if (c == '"' || c == '\'') { quote = c; continue; }
+            if (c == '{') ++depth;
+            if (c == '}' && --depth == 0) return code.substr(open, at - open + 1);
+        }
+        return std::string();
+    };
+    const char* const slowPaths[] = {
+        "void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye)",
+        "void slowPathSampledApi(ID3D11DeviceContext* ctx, bool rtv0Eye)",
+    };
+    const char* const blendPins[] = {
+        "flatQueryCut().plan(FlatQuery::GameBlend)",
+        "flatQueryCut().compared(FlatQuery::GameBlend, agree)",
+    };
+    for (const char* signature : slowPaths) {
+        const std::string body = functionBody(engineCpp, signature);
+        check(!body.empty(), "query cut: each API policy slow-path body is uniquely delimited");
+        for (const char* needle : blendPins) {
+            check(count(body, needle) == 1, "query cut: each API policy body plans and compares its blend state exactly once");
+            std::string without = body;
+            const size_t at = without.find(needle);
+            if (at != std::string::npos) without.erase(at, std::strlen(needle));
+            check(count(without, needle) == 0, "query cut control: removing either policy's blend plan or comparison fails its pin");
+        }
     }
     // The coverage classification no longer reads the context for what the shadow knows.
     const size_t coverageFrom = runtimeCpp.find("flatcpu::Scope coverage(flatcpu::kCoverage);");

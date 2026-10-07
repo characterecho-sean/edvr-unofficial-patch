@@ -1272,7 +1272,7 @@ exit /b 0
 :rig_flat_temporal_test
 echo [edvr] === flat_temporal_test.exe ===
 if not exist "%OBJ%\flattemporaltest" mkdir "%OBJ%\flattemporaltest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\flattemporaltest"\ ^
     /Fe"%BUILD%\flat_temporal_test.exe" "tools\flat_temporal_test\flat_temporal_test.cpp" ^
     "third_party\dxbc_hash\DxilHash.cpp" ^
@@ -1295,7 +1295,7 @@ REM holds the mutation list of this rig, of vr_world_route_gpu_test and of ui_la
 REM --run (on demand) builds each rig against one edited production file and requires a check that names the edit to fail. Its wiring rig
 REM (--run --rig wiring) proves the surface strip's wiring pins (:rig_ui_quality_test, --wiring) on edited copies of vscreen.cpp, in seconds.
 if not exist "%OBJ%\vrworldroutetest" mkdir "%OBJ%\vrworldroutetest"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vrworldroutetest"\ ^
     /Fe"%BUILD%\vr_world_route_test.exe" "tools\vr_world_route_test\vr_world_route_test.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
@@ -1412,7 +1412,7 @@ REM source scans that hold "key off = nothing" and "the detour never writes a ca
 REM root), plus tools\camera_census_fixture.log held to exactly what the formatters write -- the file that
 REM edvr_log.py --camera-census's own self-test reads.
 if not exist "%OBJ%\vrcamcensus" mkdir "%OBJ%\vrcamcensus"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\vrcamcensus\\" ^
     /Fe"%BUILD%\vr_camera_census_test.exe" "tools\vr_camera_census_test\vr_camera_census_test.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib

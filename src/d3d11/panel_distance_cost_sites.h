@@ -28,8 +28,8 @@ static_assert(id(Site::Map) < id(Site::Unmap) &&
               id(Site::OverrideVSSetCB) < id(Site::RestoreVSSetCB),
               "PanelDistance site IDs must not overlap or reorder.");
 static_assert(id(Site::Map) > shader_cost::id(shader_cost::Site::CreatePsShader) &&
-              id(Site::RestoreVSSetCB) <= plugin_cost::kMaxSiteId &&
-              plugin_cost::kMaxSiteId < 2 * 64,
-              "PanelDistance sites must follow shader IDs and fit the fixed coverage mask.");
+              id(Site::RestoreVSSetCB) <= plugin_cost::kMaxApiSiteId &&
+              plugin_cost::kMaxApiSiteId < 4 * 64,
+              "PanelDistance sites must follow shader IDs and fit the fixed V2 API mask.");
 
 }} // namespace edvr::panel_distance_cost

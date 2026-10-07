@@ -37,8 +37,8 @@ inline void note(bool sampled, Site site, plugin_cost::ApiClass apiClass) noexce
 
 static_assert(id(Site::GetBlendState) == 83 && id(Site::RestoreBlendState) == 96,
               "UI-layer state transaction API site IDs are stable.");
-static_assert(id(Site::RestoreBlendState) <= plugin_cost::kMaxSiteId &&
-              plugin_cost::kMaxSiteId < 2 * 64,
-              "UI-layer sites must fit the fixed two-word coverage mask.");
+static_assert(id(Site::RestoreBlendState) <= plugin_cost::kMaxApiSiteId &&
+              plugin_cost::kMaxApiSiteId < 4 * 64,
+              "UI-layer sites must fit the fixed four-word V2 API mask.");
 
 }} // namespace edvr::ui_layer_cost

@@ -18,13 +18,13 @@ inline void note(Site site) noexcept {
                               static_cast<uint8_t>(plugin_cost::ApiClass::ReadQuery));
 }
 
-static_assert(id(Site::GetResource) <= plugin_cost::kMaxSiteId &&
-              id(Site::Texture2DGetDesc) <= plugin_cost::kMaxSiteId,
-              "Binding resolver sites must fit the fixed two-word coverage mask.");
+static_assert(id(Site::GetResource) <= plugin_cost::kMaxApiSiteId &&
+              id(Site::Texture2DGetDesc) <= plugin_cost::kMaxApiSiteId,
+              "Binding resolver sites must fit the fixed four-word V2 API mask.");
 static_assert(id(Site::GetResource) == 112 && id(Site::GetType) == 113 &&
               id(Site::BufferGetDesc) == 114 && id(Site::Texture2DGetDesc) == 115,
               "Binding resolver site IDs are stable.");
-static_assert(plugin_cost::kMaxSiteId < 2 * 64,
-              "Binding resolver site coverage requires exactly two 64-bit words.");
+static_assert(plugin_cost::kMaxApiSiteId < 4 * 64,
+              "Binding resolver site coverage requires four 64-bit API words.");
 
 }} // namespace edvr::binding_cost

@@ -28,7 +28,8 @@ static_assert(id(Site::SplashPsGetShader) == 83 &&
               id(Site::SplashBlendGetDevice) == 89 &&
               id(Site::SplashCreateBlendState) == 90,
               "SplashDim API site IDs are stable.");
-static_assert(id(Site::SplashCreateBlendState) <= plugin_cost::kMaxSiteId,
-              "SplashDim API sites must fit the fixed two-word coverage mask.");
+static_assert(id(Site::SplashCreateBlendState) <= plugin_cost::kMaxApiSiteId &&
+              plugin_cost::kMaxApiSiteId < 4 * 64,
+              "SplashDim API sites must fit the fixed four-word V2 mask.");
 
 }} // namespace edvr::intro_cost
