@@ -55,10 +55,12 @@ motion vectors and jitter cancellation.
   If this repeats every frame, a "reset storm" occurs.
 - **How to capture diagnostic data:**
   1. Go to the in-game scene where the flicker occurs.
-  2. Press **`F10`** on your keyboard while looking directly at the artifact.
-  3. `F10` arms a bounded 900-frame diagnostic audit: it captures the unknown
-     vertex, pixel, and compute shader bytecode, records camera probes, and
-     dumps the unrecognized hash pairs to `edvr_gfx_*.log`.
+  2. Press **`NumLock`** on your keyboard while looking directly at the
+     artifact.
+  3. `NumLock` writes a short report covering about one second: bounded shader
+     and state discovery, plus the usual routing and refusal reports, in
+     `edvr_gfx_*.log`. Shift plus `NumLock` requests the full capture, which
+     is slow and large; use it only if asked.
   4. Exit the game, run `edvr-flat-installer.exe`, and click **Save logs**.
 
 ### Flat mode: EDHM side-menu haze or blurry angled panels
@@ -76,8 +78,8 @@ motion vectors and jitter cancellation.
     [chain]
     d3d11 = EDHM_x64.dll
     ```
-  - While looking at the hazy panel, press `F10` to log the exact replacement
-    hashes for inclusion in the recipe dictionary.
+  - While looking at the hazy panel, press `NumLock` to log the shaders in use
+    there, for inclusion in the recipe dictionary.
 
 ---
 

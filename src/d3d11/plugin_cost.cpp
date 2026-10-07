@@ -3,6 +3,13 @@
 #include <atomic>
 #include <cmath>
 
+namespace edvr { namespace plugin_cost { namespace detail {
+#if defined(_MSC_VER)
+[[msvc::no_tls_guard]]
+#endif
+thread_local bool g_apiSampleHint = false;
+}}}
+
 namespace {
 
 struct FrameOwner {
@@ -48,6 +55,11 @@ std::atomic<void*> g_ownerContext{nullptr};
 std::atomic<uintptr_t> g_ownerThreadToken{0};
 std::atomic<uintptr_t> g_nextThreadToken{1};
 thread_local uintptr_t g_threadToken = 0;
+
+void setApiSampleFrame(bool enabled) noexcept {
+    g_apiSampleFrame = g_configured && enabled;
+    edvr::plugin_cost::detail::g_apiSampleHint = g_apiSampleFrame;
+}
 
 uintptr_t threadToken() noexcept {
     if (g_threadToken == 0) {
@@ -162,7 +174,7 @@ extern "C" void edvrPluginCostConfigure(uint8_t profileBit, uint64_t qpcFrequenc
     g_profileBit = validProfile ? profileBit : 0;
     g_qpcFrequency = validProfile ? qpcFrequency : 0;
     g_configured = validProfile && qpcFrequency != 0;
-    g_apiSampleFrame = false;
+    setApiSampleFrame(false);
     g_traceSuppressed = false;
     g_skipNextBoundary = g_configured;
     clearFrame();
@@ -175,7 +187,7 @@ extern "C" void edvrPluginCostShutdown() noexcept {
     g_qpcFrequency = 0;
     g_configured = false;
     g_skipNextBoundary = false;
-    g_apiSampleFrame = false;
+    setApiSampleFrame(false);
     g_traceSuppressed = false;
     g_ownerThreadToken.store(0, std::memory_order_release);
     g_ownerContext.store(nullptr, std::memory_order_release);
@@ -189,6 +201,7 @@ extern "C" void edvrPluginCostSetOwnerContext(void* context) noexcept {
     // context during a transfer or reinstall.
     g_ownerThreadToken.store(0, std::memory_order_release);
     g_ownerContext.store(context, std::memory_order_release);
+    edvr::plugin_cost::detail::g_apiSampleHint = false;
 }
 
 extern "C" uint8_t edvrPluginCostApiSampleContext(const void* context) noexcept {
@@ -247,7 +260,7 @@ extern "C" void edvrPluginCostNoteD3dCall(uint8_t owner, uint16_t siteId,
 }
 
 extern "C" void edvrPluginCostSetApiSampleFrame(uint8_t enabled) noexcept {
-    g_apiSampleFrame = g_configured && enabled != 0;
+    setApiSampleFrame(enabled != 0);
 }
 
 extern "C" uint8_t edvrPluginCostApiSampleFrame(void) noexcept {
@@ -267,7 +280,7 @@ extern "C" uint8_t edvrPluginCostFrameBoundary(uint32_t frameNo,
                                                 EdvrPluginCostWindowV1* out) noexcept {
     if (!out) return false;
     if (!g_configured) {
-        g_apiSampleFrame = false;
+        setApiSampleFrame(false);
         return false;
     }
     const uintptr_t ownerToken = threadToken();
@@ -289,7 +302,7 @@ extern "C" uint8_t edvrPluginCostFrameBoundary(uint32_t frameNo,
         g_skipNextBoundary = false;
         clearFrame();
         g_traceSuppressed = false;
-        g_apiSampleFrame = nextApiSampleFrame != 0;
+        setApiSampleFrame(nextApiSampleFrame != 0);
         return false;
     }
 
@@ -309,7 +322,7 @@ extern "C" uint8_t edvrPluginCostFrameBoundary(uint32_t frameNo,
     clearFrame();
     g_traceSuppressed = false;
     // Notes after this boundary belong to the next frame and use its flag.
-    g_apiSampleFrame = nextApiSampleFrame != 0;
+    setApiSampleFrame(nextApiSampleFrame != 0);
 
     if (g_windowFrames < edvr::plugin_cost::kWindowFrameCount) return false;
     copyWindow(g_profileBit, out);

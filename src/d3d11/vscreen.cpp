@@ -32,6 +32,7 @@
 #include "backdrop_fix.h"
 #include "billboard_fix.h"
 #include "binding_shadow.h"
+#include "panel_distance_cost_sites.h"
 #include "panel_curve.h"
 #include "screen_motion.h"
 #include "weapon_motion.h"
@@ -76,6 +77,9 @@
 #include "ui_layer_math.h"
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
+#include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
+#include "orbital_width.h"      // fix.ui_quality: the orbit lines' half-width, scaled in the game's own draw of their shader
+#include "supercruise_bars.h"   // fix.ui_quality: the supercruise bars' private geometry-shader pass, bound around the layered issue
 #include "engine_velocity.h"
 #include "vr_world_route.h"
 #include "vr_camera_census.h"
@@ -1924,7 +1928,7 @@ struct LadderDecision {
     draw_ladder::SiteId winner = draw_ladder::SiteId::kPanelTailNone;
 };
 
-template <class TracePolicy>
+template <class TracePolicy, class ApiPolicy = plugin_cost::NoApi>
 struct VScreenDrawLadderVisitor {
     State* s;
     ID3D11DeviceContext* self;
@@ -3314,14 +3318,23 @@ struct VScreenDrawLadderVisitor {
             if (!s->distanceEnabled) return SiteResult::declined();
             const uint32_t bytes = s->shadowBytes;
             D3D11_MAPPED_SUBRESOURCE m{};
+            ApiPolicy::template note<panel_distance_cost::owner,
+                panel_distance_cost::id(panel_distance_cost::Site::Map),
+                plugin_cost::ApiClass::Transfer>();
             if (FAILED(s->realMap(self, s->ourCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) {
                 distanceAttemptFailed = true;
                 return SiteResult::declined(1);
             }
             memcpy(m.pData, s->shadow, bytes);
             static_cast<float*>(m.pData)[s->distanceIndex] *= s->distanceScale;
+            ApiPolicy::template note<panel_distance_cost::owner,
+                panel_distance_cost::id(panel_distance_cost::Site::Unmap),
+                plugin_cost::ApiClass::Transfer>();
             s->realUnmap(self, s->ourCb, 0);
             ID3D11Buffer* ours = s->ourCb;
+            ApiPolicy::template note<panel_distance_cost::owner,
+                panel_distance_cost::id(panel_distance_cost::Site::OverrideVSSetCB),
+                plugin_cost::ApiClass::State>();
             s->realVSSetConstantBuffers(self, 0, 1, &ours);
             if (++s->panelOverrides == 1) Log::get().note("vScreen: panel distance x%.3f applied", s->distanceScale);
             return claimed(id, DrawVerdict::kPanel);
@@ -3334,13 +3347,14 @@ struct VScreenDrawLadderVisitor {
     }
 };
 
-template <class TracePolicy, class CpuPolicy>
+template <class TracePolicy, class CpuPolicy,
+          class ApiPolicy = plugin_cost::NoApi>
 LadderDecision beginPanelOverride(TracePolicy& trace, ID3D11DeviceContext* self,
                                   char kind, UINT count, UINT instances,
                                   const DrawArgs& args) {
     CpuPolicy cpu;
-    VScreenDrawLadderVisitor<TracePolicy> visitor{g_state, self, kind, count,
-                                                  instances, args, trace};
+    VScreenDrawLadderVisitor<TracePolicy, ApiPolicy> visitor{
+        g_state, self, kind, count, instances, args, trace};
     if (draw_ladder::visitOrdered(draw_ladder::CommonSequence{}, visitor, visitor, trace, cpu) ==
         draw_ladder::Flow::Stop) return visitor.decision;
     if (!visitor.s->rtv0Eye) {
@@ -3437,11 +3451,11 @@ void ladderTraceAction(TracePolicy& trace,
     }
 }
 
-template <class Work>
-LadderDecision withDrawLadderTrace(ID3D11DeviceContext* self, char kind,
-                                   UINT count, UINT instances,
-                                   const DrawArgs& args, bool cpuSample,
-                                   Work&& work) {
+template <class ApiPolicy, class Work>
+LadderDecision withDrawLadderTraceSelectedApi(
+    ID3D11DeviceContext* self, char kind, UINT count, UINT instances,
+    const DrawArgs& args, bool cpuSample, Work&& work) {
+    ApiPolicy api;
     const bool isOwner = self == g_state->ownerCtx;
     const bool replayActive = (isOwner || cpuSample) &&
         draw_ladder_trace::drawLadderTraceCaptureActive();
@@ -3481,7 +3495,7 @@ LadderDecision withDrawLadderTrace(ID3D11DeviceContext* self, char kind,
         const auto previousToken = t_activeDrawReplayToken;
         t_activeDrawReplayToken = token;
         plugin_cost::NoCpu noCpu;
-        const LadderDecision result = work(trace, noCpu);
+        const LadderDecision result = work(trace, noCpu, api);
         t_activeDrawReplayToken = previousToken;
         ladderTraceAction<decltype(trace), draw_ladder::ActionId::kDrawEnd>(
             trace, draw_ladder::ActionPhase::End, draw_ladder::ActionOutcome::Applied,
@@ -3493,11 +3507,30 @@ LadderDecision withDrawLadderTrace(ID3D11DeviceContext* self, char kind,
     draw_ladder::NoTrace noTrace;
     if (cpuSample && !suppressCpu) {
         plugin_cost::SampledCpu<> sampledCpu;
-        return work(noTrace, sampledCpu);
+        return work(noTrace, sampledCpu, api);
     }
     plugin_cost::NoCpu noCpu;
-    return work(noTrace, noCpu);
+    return work(noTrace, noCpu, api);
 }
+
+#if defined(_MSC_VER)
+#define EDVR_VSCREEN_FORCEINLINE __forceinline
+#else
+#define EDVR_VSCREEN_FORCEINLINE inline
+#endif
+template <class Work>
+EDVR_VSCREEN_FORCEINLINE LadderDecision withDrawLadderTrace(
+    ID3D11DeviceContext* self, char kind, UINT count, UINT instances,
+    const DrawArgs& args, bool cpuSample, Work&& work) {
+    if (plugin_cost::apiSampleHint() &&
+        edvrPluginCostApiSampleContext(self) != 0) {
+        return withDrawLadderTraceSelectedApi<plugin_cost::SampledApi<>>(
+            self, kind, count, instances, args, cpuSample, work);
+    }
+    return withDrawLadderTraceSelectedApi<plugin_cost::NoApi>(
+        self, kind, count, instances, args, cpuSample, work);
+}
+#undef EDVR_VSCREEN_FORCEINLINE
 
 template <class Work>
 void withFlatBypassTrace(ID3D11DeviceContext* self, char kind, UINT count,
@@ -3633,9 +3666,13 @@ void withInternalWorldBypass(ID3D11DeviceContext* self, char kind,
             return true;
         });
 }
+template <class ApiPolicy = plugin_cost::NoApi>
 void endPanelOverride(ID3D11DeviceContext* self) {
     State* s = g_state;
     ID3D11Buffer* orig = static_cast<ID3D11Buffer*>(s->compositeCb);
+    ApiPolicy::template note<panel_distance_cost::owner,
+        panel_distance_cost::id(panel_distance_cost::Site::RestoreVSSetCB),
+        plugin_cost::ApiClass::State>();
     s->realVSSetConstantBuffers(self, 0, 1, &orig);
 }
 
@@ -4124,6 +4161,7 @@ void STDMETHODCALLTYPE hookedExecuteCommandList(ID3D11DeviceContext* self,
     if (!privateExecution) {
         graphicsBridgeNoteUnknownExecution();
         motionResourceWritten(nullptr);
+        if (celestialMotionAnyWatched()) celestialMotionConstantsUnknownWrite(nullptr);
         glitchFrameInvalidatePool(nullptr);
     }
     s->realExecuteCommandList(self, list, restoreContextState);
@@ -4233,6 +4271,12 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
     // The reveal sync's shadow of the scene block, same tee, its own gate.
     if (mapData && fssRevealWantsDraws()) {
         fssRevealNoteMap(res, mapped->pData);
+    }
+    // Planet-patch constants' CPU shadow: remember the mapped pointer so the Unmap tee can copy the game's write
+    // without a GPU copy at the draw. celestialMotionAnyWatched() is the callee's own first test, inline: with no
+    // buffer watched (the module off, or no planet patch drawn yet) no resource can match.
+    if (mapData0 && type != D3D11_MAP_READ && celestialMotionAnyWatched()) {
+        celestialMotionConstantsMapped(res, mapped->pData);
     }
     // Only the one buffer we care about, so this is a pointer compare on a very
     // hot path and nothing more.
@@ -4361,6 +4405,9 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         return;
     }
     motionResourceWritten(res);
+    // The planet-patch shadow reads the write BEFORE the real Unmap, like every tee here: after it the memory is
+    // no longer ours to look at.
+    if (celestialMotionAnyWatched()) celestialMotionConstantsUnmapped(res);
     // glitchFrameInvalidatePool's own and only test is "installed at all"
     // (glitch_frame.h) -- unlike glitchFrameWantsPool, it does not also ask
     // State::observing, so glitchFrameObserving() would be the wrong,
@@ -4855,9 +4902,10 @@ __declspec(noinline) UiLayerFamily uiLayerFamilyOf(State* s, char kind, UINT cou
     UiFamilyFacts f;
     f.targetKind = uiLayerTargetKind();
     f.vs = bindingShaderHash(BindSlot::Vs);
-    // The target sphere needs exact PS admission for its depth-address remap.
-    // Ordinary HDR draws need no extra hash read.
-    if (f.targetKind == 1 && f.vs == kHoloTargetSphere)
+    // The target sphere needs exact PS admission for its depth-address remap, and the three supercruise draws are named by their
+    // shader PAIR (ui_layer_math.h: the bars' and the dust's vertex shaders are also seen with another pixel shader). Ordinary
+    // HDR draws need no extra hash read.
+    if (f.targetKind == 1 && (f.vs == kHoloTargetSphere || f.vs == kUiVsOrbitLines || f.vs == kUiVsSupercruiseBars || f.vs == kUiVsSpaceDust))
         f.ps = bindingShaderHash(BindSlot::Ps);
     if (f.targetKind == 2) {
         // ui_depth's exclude list (the null-output mesh B018D143700AB803,
@@ -5134,6 +5182,9 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
     // after-UI retry has had its say.
     bool compositeCounted = false;
     UiLayerFamily compositeFamily = UiLayerFamily::kNone;
+    // This draw is the supercruise bars' (ui_layer_math.h kSupercruiseBars): when the layer takes it, its issue is made through a
+    // private geometry shader (supercruise_bars.h). Set with the family below, read at the layer's bracket.
+    bool barsFamily = false;
     if (owner && forwardInputs.read(forwardInputs.fact.uiLayerLiveEyeGate,
             [] { return detail::g_uiLayerLive; },
             [] { return uiLayerLive(); }) && g_state->rtv0Eye && v != DrawVerdict::kQuadSkip) {
@@ -5141,6 +5192,7 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
         familyEvaluated = true;
         compositeCounted = uiDepthScope.composite;
         compositeFamily = uiFamily;
+        barsFamily = uiFamily == UiLayerFamily::kSupercruiseBars;
         if (uiFamily != UiLayerFamily::kNone) {
             verdictForwards = uiLayerVerdictForwards(v);
             verdictForwardsEvaluated = true;
@@ -5374,7 +5426,22 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
             kind, count, instances, args, 0, static_cast<uint16_t>(v));
         forwardVerdictBegin(self, v);
     }
+    // Planet patch motion (celestial_motion.h): a colour-pass patch draw's constants are read from the CPU shadow here, before the game's
+    // own issue -- no GPU copy, no reissue. celestialMotionLive() first, one load; then the VS hash the draw path already holds.
+    if (owner && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
+    // The orbit lines (orbital_width.h; fix.ui_quality): the game's own draw of their vertex shader into an eye target is
+    // issued with the half-width scaled by the panel patch's factor -- a patched copy of that shader and a private b13
+    // bound for this issue alone and put back right after it, so everything else (the census above, the coverage twin
+    // below, the binding shadow, which is never told) sees the game's own. Begin counts every such draw and binds only
+    // when the factor is below 1; one hash compare for any other draw.
+    const bool orbitScaled = owner && g_state->rtv0Eye && bindingShaderHash(BindSlot::Vs) == orbital_width::kVs &&
+                             orbitalWidthBegin(self, instances, args.startInstance);
+    // The supercruise bars (supercruise_bars.h): the layer decided to take the draw, so its issue will be made through the private
+    // geometry shader. The tent is one render pixel of the line the game drew, so the game's own viewport is read here, BEFORE the
+    // layer's bracket below remaps it to the layer's.
+    const bool barsDecided = barsFamily && uiLayer;
+    if (barsDecided) supercruiseBarsPrepare(self);
     // The layer's bracket goes innermost: after the verdict's own Begin (a
     // RemLok scissor, a slot swap) so the layer maps the state the draw is
     // actually issued with, and around nothing but the game's own draw.
@@ -5446,8 +5513,15 @@ void forwardWithVerdict(TracePolicy& trace, ID3D11DeviceContext* self, DrawVerdi
             }
         }
     }
+    // The supercruise bars: with the layer's remapped viewport bound (the bracket above), the strip shader, its constants and the
+    // private rasterizer state go in for this issue alone; supercruiseBarsEnd below puts the game's back before the layer's own
+    // restore. A false Begin leaves the game's state as it was: the draw goes into the layer as the plain lines the game drew,
+    // counted by the module.
+    const bool barsBound = layered && barsDecided && supercruiseBarsBegin(self, count);
     const bool originalIssued=observedDraw(alteredClass == AlteredDrawClass::Verdict
                                                ? AlteredDraw(alteredClass, alteredFixOf(v)) : AlteredDraw(alteredClass));
+    if (orbitScaled) orbitalWidthEnd(self);   // the game's vertex shader and its slot 13 back, before anything else looks
+    if (barsBound) supercruiseBarsEnd(self);  // the game's geometry stage, its constant slot and its rasterizer state back, before the layer's restore
     if (layered) {
         uiLayerEnd(self);
         ladderTraceAction<TracePolicy, draw_ladder::ActionId::kUiLayerDraw>(
@@ -5642,7 +5716,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
     uiAtlasNoteWrite(dst, 2);
     if (g_vrWorldWatchWrites && !foreignContext(self)) vrWorldRouteNoteWrite(dst);   // a write into H after the resolve is the latch's
     if(foreignContext(self))engineVelocityResourceUnknown(dst);
-    if (!foreignContext(self)) {motionResourceWritten(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
+    if (!foreignContext(self)) {motionResourceWritten(dst);if(celestialMotionAnyWatched())celestialMotionConstantsUnknownWrite(dst);glitchFrameInvalidatePool(dst);if(fssResActive())fssResNoteCopyMaybeMismatched(dst,src);if(uiLayerWatching())uiLayerNoteCopy(dst,src);}
     if (!foreignContext(self) && flatRuntimeActive()) {
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource,
@@ -5858,6 +5932,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         if(box && box->right>=box->left)
             motionResourceWritten(dst,dstX,uint64_t(dstX)+box->right-box->left);
         else motionResourceWritten(dst);
+        if (celestialMotionAnyWatched()) celestialMotionConstantsUnknownWrite(dst);
         glitchFrameInvalidatePool(dst);
         if (fssResActive()) fssResNoteCopyMaybeMismatched(dst, src);
         if (uiLayerWatching()) uiLayerNoteCopy(dst, src);
@@ -5900,6 +5975,7 @@ void STDMETHODCALLTYPE hookedUpdateSubresource(ID3D11DeviceContext* self,
     if (!foreignContext(self)) {
         if(box && box->right>=box->left)motionResourceWritten(dst,box->left,box->right);
         else motionResourceWritten(dst);
+        if (celestialMotionAnyWatched()) celestialMotionConstantsWritten(dst, data, box);
         glitchFrameInvalidatePool(dst);
     }
     if (drawCensusArmed()) {
@@ -6131,10 +6207,11 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
     args.base = static_cast<int32_t>(start);
     withDrawLadderTrace(self, 'D', count, 1, args,
                         clock.cpuOn && g_state && self == g_state->ownerCtx,
-                        [&](auto& trace, auto& cpu) {
+                        [&](auto& trace, auto& cpu, auto& api) {
         const LadderDecision decision = beginPanelOverride<
             std::remove_reference_t<decltype(trace)>,
-            std::remove_reference_t<decltype(cpu)>>(trace, self, 'D', count, 1, args);
+            std::remove_reference_t<decltype(cpu)>,
+            std::remove_reference_t<decltype(api)>>(trace, self, 'D', count, 1, args);
         const DrawVerdict v = decision.verdict;
         if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
@@ -6149,7 +6226,7 @@ void STDMETHODCALLTYPE hookedDraw(ID3D11DeviceContext* self, UINT count, UINT st
             return true;
         });
         if (v == DrawVerdict::kPanel) {
-            endPanelOverride(self);
+            endPanelOverride<std::remove_reference_t<decltype(api)>>(self);
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
                 trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
                 'D', count, 1, args);
@@ -6232,10 +6309,11 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
     args.base = baseVertex;
     withDrawLadderTrace(self, 'I', count, 1, args,
                         clock.cpuOn && g_state && self == g_state->ownerCtx,
-                        [&](auto& trace, auto& cpu) {
+                        [&](auto& trace, auto& cpu, auto& api) {
         const LadderDecision decision = beginPanelOverride<
             std::remove_reference_t<decltype(trace)>,
-            std::remove_reference_t<decltype(cpu)>>(trace, self, 'I', count, 1, args);
+            std::remove_reference_t<decltype(cpu)>,
+            std::remove_reference_t<decltype(api)>>(trace, self, 'I', count, 1, args);
         const DrawVerdict v = decision.verdict;
         if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
@@ -6250,7 +6328,7 @@ void STDMETHODCALLTYPE hookedDrawIndexed(ID3D11DeviceContext* self, UINT count,
             return true;
         });
         if (v == DrawVerdict::kPanel) {
-            endPanelOverride(self);
+            endPanelOverride<std::remove_reference_t<decltype(api)>>(self);
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
                 trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
                 'I', count, 1, args);
@@ -6297,10 +6375,11 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     args.startInstance = startInstance;
     withDrawLadderTrace(self, 'N', perInstance, instances, args,
                         clock.cpuOn && g_state && self == g_state->ownerCtx,
-                        [&](auto& trace, auto& cpu) {
+                        [&](auto& trace, auto& cpu, auto& api) {
         const LadderDecision decision = beginPanelOverride<
             std::remove_reference_t<decltype(trace)>,
-            std::remove_reference_t<decltype(cpu)>>(trace, self, 'N', perInstance, instances, args);
+            std::remove_reference_t<decltype(cpu)>,
+            std::remove_reference_t<decltype(api)>>(trace, self, 'N', perInstance, instances, args);
         const DrawVerdict v = decision.verdict;
         if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
         if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
@@ -6323,7 +6402,7 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
             return true;
         });
         if (v == DrawVerdict::kPanel) {
-            endPanelOverride(self);
+            endPanelOverride<std::remove_reference_t<decltype(api)>>(self);
             ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
                 trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
                 'N', perInstance, drawn, args);
@@ -6386,10 +6465,11 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     args.startInstance = startInstance;
     withDrawLadderTrace(self, 'X', perInstance, instances, args,
                         clock.cpuOn && g_state && self == g_state->ownerCtx,
-                        [&](auto& trace, auto& cpu) {
+        [&](auto& trace, auto& cpu, auto& api) {
       const LadderDecision decision = beginPanelOverride<
           std::remove_reference_t<decltype(trace)>,
-          std::remove_reference_t<decltype(cpu)>>(trace, self, 'X', perInstance, instances, args);
+          std::remove_reference_t<decltype(cpu)>,
+          std::remove_reference_t<decltype(api)>>(trace, self, 'X', perInstance, instances, args);
       const DrawVerdict v = decision.verdict;
       // Engine-record velocity (with fix.temporal_aa): four generation
       // compares; the pool families' substituted shaders and MRT6 are bound
@@ -6485,7 +6565,7 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
         return true;  // the original draw was issued
       });
       if (v == DrawVerdict::kPanel) {
-          endPanelOverride(self);
+          endPanelOverride<std::remove_reference_t<decltype(api)>>(self);
           ladderTraceAction<decltype(trace), draw_ladder::ActionId::kPanelConstantBufferRestore>(
               trace, draw_ladder::ActionPhase::Restore, draw_ladder::ActionOutcome::Applied,
               'X', perInstance, instances, args);
@@ -6543,6 +6623,147 @@ using VScreenTargetSharpTestSite = draw_ladder::InterestGated<
     draw_interest::InterestId::TargetSharp>;
 using VScreenSunglareNominationTestSite = draw_ladder::Site<
     draw_ladder::SiteId::kSunglareNomination, draw_ladder::SiteKind::Observe>;
+using VScreenPanelDistanceApiTestSite = draw_ladder::Site<
+    draw_ladder::SiteId::kPanelDistanceClaim, draw_ladder::SiteKind::Claim>;
+
+struct VScreenPanelDistanceResultCapture final {
+    static constexpr bool enabled = true;
+    draw_ladder::SiteResult& result;
+
+    template <draw_ladder::SiteId, draw_ladder::SiteKind>
+    void site(draw_ladder::SiteResult value) noexcept { result = value; }
+};
+
+thread_local const VScreenPanelDistanceApiTestInput* t_panelDistanceApiInput = nullptr;
+thread_local VScreenPanelDistanceApiTestResult* t_panelDistanceApiResult = nullptr;
+
+void panelDistanceApiTestEvent(VScreenPanelDistanceApiTestEvent event) noexcept {
+    auto* result = t_panelDistanceApiResult;
+    if (!result) return;
+    if (result->eventCount < sizeof(result->events)) {
+        result->events[result->eventCount++] = static_cast<std::uint8_t>(event);
+    } else {
+        result->eventOverflow = true;
+    }
+}
+
+HRESULT STDMETHODCALLTYPE panelDistanceApiTestMap(
+    ID3D11DeviceContext*, ID3D11Resource* resource, UINT subresource,
+    D3D11_MAP type, UINT flags, D3D11_MAPPED_SUBRESOURCE* mapped) {
+    const auto* input = t_panelDistanceApiInput;
+    auto* result = t_panelDistanceApiResult;
+    if (!input || !result || !mapped) return E_FAIL;
+    ++result->mapCalls;
+    result->mapSubresource = subresource;
+    result->mapType = static_cast<std::uint32_t>(type);
+    result->mapFlags = flags;
+    result->mapArgumentsValid = resource == input->ourCb && subresource == 0 &&
+        type == D3D11_MAP_WRITE_DISCARD && flags == 0;
+    panelDistanceApiTestEvent(VScreenPanelDistanceApiTestEvent::Map);
+    mapped->pData = input->mapReturnsNull ? nullptr : input->mappedStorage;
+    return static_cast<HRESULT>(input->mapHresult);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestUnmap(
+    ID3D11DeviceContext*, ID3D11Resource* resource, UINT subresource) {
+    const auto* input = t_panelDistanceApiInput;
+    auto* result = t_panelDistanceApiResult;
+    if (!input || !result) return;
+    ++result->unmapCalls;
+    result->unmapSubresource = subresource;
+    result->unmapArgumentsValid = resource == input->ourCb && subresource == 0;
+    panelDistanceApiTestEvent(VScreenPanelDistanceApiTestEvent::Unmap);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestSetConstantBuffers(
+    ID3D11DeviceContext*, UINT startSlot, UINT count,
+    ID3D11Buffer* const* buffers) {
+    const auto* input = t_panelDistanceApiInput;
+    auto* result = t_panelDistanceApiResult;
+    if (!input || !result) return;
+    const std::uint32_t index = result->constantBufferCalls++;
+    if (index < 2) {
+        result->bindStartSlots[index] = startSlot;
+        result->bindCounts[index] = count;
+        result->bindBuffers[index] = buffers && count ? buffers[0] : nullptr;
+    }
+    result->finalBoundCb = buffers && count ? buffers[0] : nullptr;
+    if (index == 0) {
+        result->overrideBindArgumentsValid = startSlot == 0 && count == 1 &&
+            result->finalBoundCb == input->ourCb;
+        panelDistanceApiTestEvent(VScreenPanelDistanceApiTestEvent::OverrideBind);
+    } else if (index == 1) {
+        result->restoreBindArgumentsValid = startSlot == 0 && count == 1 &&
+            result->finalBoundCb == input->compositeCb;
+        panelDistanceApiTestEvent(VScreenPanelDistanceApiTestEvent::RestoreBind);
+    }
+}
+
+void panelDistanceApiTestDraw(char kind, UINT count, UINT instances,
+                              const DrawArgs& args) noexcept {
+    const auto* input = t_panelDistanceApiInput;
+    auto* result = t_panelDistanceApiResult;
+    if (!input || !result) return;
+    ++result->originalDrawCalls;
+    bool argsMatch = false;
+    switch (kind) {
+    case 'D':
+        argsMatch = args.base == input->drawArgs.base;
+        break;
+    case 'I':
+        argsMatch = args.start == input->drawArgs.start &&
+            args.base == input->drawArgs.base;
+        break;
+    case 'N':
+        argsMatch = args.base == input->drawArgs.base &&
+            args.startInstance == input->drawArgs.startInstance;
+        break;
+    case 'X':
+        argsMatch = args.start == input->drawArgs.start &&
+            args.base == input->drawArgs.base &&
+            args.startInstance == input->drawArgs.startInstance;
+        break;
+    default:
+        break;
+    }
+    result->drawArgumentsValid = kind == input->kind && count == input->drawCount &&
+        instances == input->drawInstances && argsMatch;
+    panelDistanceApiTestEvent(VScreenPanelDistanceApiTestEvent::OriginalDraw);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestDrawSimple(
+    ID3D11DeviceContext*, UINT count, UINT start) {
+    DrawArgs args{};
+    args.base = static_cast<std::int32_t>(start);
+    panelDistanceApiTestDraw('D', count, 1, args);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestDrawIndexed(
+    ID3D11DeviceContext*, UINT count, UINT startIndex, INT baseVertex) {
+    DrawArgs args{};
+    args.start = startIndex;
+    args.base = baseVertex;
+    panelDistanceApiTestDraw('I', count, 1, args);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestDrawInstanced(
+    ID3D11DeviceContext*, UINT perInstance, UINT instances,
+    UINT startVertex, UINT startInstance) {
+    DrawArgs args{};
+    args.base = static_cast<std::int32_t>(startVertex);
+    args.startInstance = startInstance;
+    panelDistanceApiTestDraw('N', perInstance, instances, args);
+}
+
+void STDMETHODCALLTYPE panelDistanceApiTestDrawIndexedInstanced(
+    ID3D11DeviceContext*, UINT perInstance, UINT instances,
+    UINT startIndex, INT baseVertex, UINT startInstance) {
+    DrawArgs args{};
+    args.start = startIndex;
+    args.base = baseVertex;
+    args.startInstance = startInstance;
+    panelDistanceApiTestDraw('X', perInstance, instances, args);
+}
 State* g_eyeCensusTestState = nullptr;
 
 struct VScreenTestInterest final {};
@@ -7178,6 +7399,162 @@ bool vScreenSunglareNominationPredicateTestVisit(
     t_uiDepthThisDraw = priorUiDepth;
     t_compositeThisDraw = priorComposite;
     g_state = priorState;
+    return true;
+}
+
+bool vScreenPanelDistanceApiTransactionTest(
+    const VScreenPanelDistanceApiTestInput& input,
+    VScreenPanelDistanceApiTestResult* result) noexcept {
+    if (!result || !input.context || !input.ownerContext ||
+        input.shadowBytes > sizeof(input.shadow) ||
+        static_cast<std::uint64_t>(input.distanceIndex) * sizeof(float) + sizeof(float) >
+            input.shadowBytes ||
+        (input.mapHresult >= 0 && !input.mapReturnsNull &&
+         (!input.mappedStorage || input.mappedStorageBytes < input.shadowBytes)) ||
+        (input.traceEnabled && !draw_ladder_trace::configured())) return false;
+    *result = {};
+
+    static State fixture{};
+    const bool priorIntroCurve = fixture.introCurveThisDraw;
+    const bool priorCurve = fixture.curveThisDraw;
+    fixture.ownerCtx = input.ownerContext;
+    fixture.pluginDispatchEnabled = false;
+    fixture.rtv0Eye = nullptr;
+    fixture.eyeDrawsThisFrame = 0;
+    fixture.fssHealOn = false;
+    fixture.quadSkipArmed = false;
+    fixture.curveThisDraw = false;
+    fixture.introCurveThisDraw = false;
+    fixture.distanceEnabled = input.distanceEnabled;
+    fixture.distanceIndex = input.distanceIndex;
+    fixture.distanceScale = input.distanceScale;
+    fixture.shadowBytes = input.shadowBytes;
+    std::memcpy(fixture.shadow, input.shadow, input.shadowBytes);
+    fixture.compositeCb = input.compositeCb;
+    fixture.ourCb = static_cast<ID3D11Buffer*>(input.ourCb);
+    fixture.realMap = &panelDistanceApiTestMap;
+    fixture.realUnmap = &panelDistanceApiTestUnmap;
+    fixture.realVSSetConstantBuffers = &panelDistanceApiTestSetConstantBuffers;
+    fixture.realDraw = &panelDistanceApiTestDrawSimple;
+    fixture.realDrawIndexed = &panelDistanceApiTestDrawIndexed;
+    fixture.realDrawInstanced = &panelDistanceApiTestDrawInstanced;
+    fixture.realDrawIndexedInstanced = &panelDistanceApiTestDrawIndexedInstanced;
+    fixture.panelOverrides = 1;
+
+    State* const priorState = g_state;
+    const bool priorUiDepth = t_uiDepthThisDraw;
+    const bool priorHoloDepth = t_holoDepthThisDraw;
+    const bool priorComposite = t_compositeThisDraw;
+    const bool priorIssueBlocked = detail::g_uiLayerIssueBlocked;
+    const bool priorObjectLedger = detail::g_objectProbeLedgerOn;
+    const bool priorSeedDiagnostics = detail::g_uiSeedDiagnostics;
+    const bool priorLayerLive = detail::g_uiLayerLive;
+    const bool priorLayerWatching = detail::g_uiLayerWatching;
+    const bool priorCrispPending = detail::g_uiLayerCrispPending;
+    const bool priorDepthPending = detail::g_uiDepthPlanetPending;
+    const bool priorSolarPending = detail::g_uiDepthPlanetSolarPending;
+    const auto priorDepthMode = detail::g_uiDepthMode;
+    const bool priorDepthOn = detail::g_uiDepthOn;
+    const bool priorDepthStoodDown = detail::g_uiDepthStoodDown;
+    const auto priorReplayToken = t_activeDrawReplayToken;
+    const bool priorTraceCapture = draw_ladder_trace::detail::g_captureActive.exchange(
+        input.traceEnabled, std::memory_order_relaxed);
+    const auto* priorInput = t_panelDistanceApiInput;
+    auto* priorResult = t_panelDistanceApiResult;
+    t_panelDistanceApiInput = &input;
+    t_panelDistanceApiResult = result;
+    result->finalBoundCb = input.compositeCb;
+    detail::g_uiLayerIssueBlocked = false;
+    detail::g_objectProbeLedgerOn = false;
+    detail::g_uiSeedDiagnostics = false;
+    detail::g_uiLayerLive = false;
+    detail::g_uiLayerWatching = false;
+    detail::g_uiLayerCrispPending = false;
+    detail::g_uiDepthPlanetPending = false;
+    detail::g_uiDepthPlanetSolarPending = false;
+    detail::g_uiDepthMode = detail::UiDepthMode::kNone;
+    detail::g_uiDepthOn = false;
+    detail::g_uiDepthStoodDown = false;
+    g_state = &fixture;
+
+    DrawArgs args = input.drawArgs;
+    auto run = [&](auto& trace, auto& cpu, auto& api) {
+        using Trace = std::remove_reference_t<decltype(trace)>;
+        using Api = std::remove_reference_t<decltype(api)>;
+        VScreenDrawLadderVisitor<Trace, Api> visitor{
+            &fixture, input.context, input.kind, input.drawCount,
+            input.drawInstances, args, trace};
+        if constexpr (Trace::enabled) result->token = trace.token;
+        VScreenTestInterest interest;
+        draw_ladder::Flow flow = draw_ladder::Flow::Continue;
+        if constexpr (Trace::enabled) {
+            VScreenTestTraceCapture<Trace> capture{trace, result->siteResult};
+            draw_ladder::visitOne<decltype(visitor), VScreenPanelDistanceApiTestSite>(
+                flow, visitor, interest, capture, cpu);
+        } else {
+            VScreenPanelDistanceResultCapture capture{result->siteResult};
+            draw_ladder::visitOne<decltype(visitor), VScreenPanelDistanceApiTestSite>(
+                flow, visitor, interest, capture, cpu);
+        }
+        const LadderDecision decision = visitor.decision;
+        forwardWithVerdict(trace, input.context, decision.verdict, input.kind,
+            input.drawCount, input.drawInstances, args, [&](AlteredDraw) {
+                switch (input.kind) {
+                case 'D': fixture.realDraw(input.context, input.drawCount,
+                                           static_cast<UINT>(input.drawArgs.base)); break;
+                case 'I': fixture.realDrawIndexed(input.context, input.drawCount,
+                    input.drawArgs.start, input.drawArgs.base); break;
+                case 'N': fixture.realDrawInstanced(input.context, input.drawCount,
+                    input.drawInstances, static_cast<UINT>(input.drawArgs.base),
+                    input.drawArgs.startInstance); break;
+                case 'X': fixture.realDrawIndexedInstanced(input.context,
+                    input.drawCount, input.drawInstances, input.drawArgs.start,
+                    input.drawArgs.base, input.drawArgs.startInstance); break;
+                default: return false;
+                }
+                return true;
+            });
+        if (decision.verdict == DrawVerdict::kPanel) {
+            endPanelOverride<Api>(input.context);
+            ladderTraceAction<Trace, draw_ladder::ActionId::kPanelConstantBufferRestore>(
+                trace, draw_ladder::ActionPhase::Restore,
+                draw_ladder::ActionOutcome::Applied, input.kind,
+                input.drawCount, input.drawInstances, args);
+        }
+        return decision;
+    };
+
+    withDrawLadderTrace(input.context, input.kind, input.drawCount,
+                        input.drawInstances, args, input.cpuSample, run);
+    result->mappedBytes = (input.mappedStorage && input.mapHresult >= 0 &&
+                           !input.mapReturnsNull)
+        ? (input.shadowBytes < sizeof(result->mappedSnapshot)
+            ? input.shadowBytes : sizeof(result->mappedSnapshot)) : 0;
+    if (result->mappedBytes)
+        std::memcpy(result->mappedSnapshot, input.mappedStorage, result->mappedBytes);
+
+    t_panelDistanceApiInput = priorInput;
+    t_panelDistanceApiResult = priorResult;
+    t_activeDrawReplayToken = priorReplayToken;
+    g_state = priorState;
+    t_uiDepthThisDraw = priorUiDepth;
+    t_holoDepthThisDraw = priorHoloDepth;
+    t_compositeThisDraw = priorComposite;
+    fixture.introCurveThisDraw = priorIntroCurve;
+    fixture.curveThisDraw = priorCurve;
+    detail::g_uiLayerIssueBlocked = priorIssueBlocked;
+    detail::g_objectProbeLedgerOn = priorObjectLedger;
+    detail::g_uiSeedDiagnostics = priorSeedDiagnostics;
+    detail::g_uiLayerLive = priorLayerLive;
+    detail::g_uiLayerWatching = priorLayerWatching;
+    detail::g_uiLayerCrispPending = priorCrispPending;
+    detail::g_uiDepthPlanetPending = priorDepthPending;
+    detail::g_uiDepthPlanetSolarPending = priorSolarPending;
+    detail::g_uiDepthMode = priorDepthMode;
+    detail::g_uiDepthOn = priorDepthOn;
+    detail::g_uiDepthStoodDown = priorDepthStoodDown;
+    draw_ladder_trace::detail::g_captureActive.store(
+        priorTraceCapture, std::memory_order_relaxed);
     return true;
 }
 #endif
@@ -8011,11 +8388,14 @@ EDVR_BOUNDARY_TICK(tkPixelProbe, "pixel_probe");
 EDVR_BOUNDARY_TICK(tkWakePulse, "wake_pulse");
 EDVR_BOUNDARY_TICK(tkUiDepth, "ui_depth");
 EDVR_BOUNDARY_TICK(tkUiLayer, "ui_layer");
+EDVR_BOUNDARY_TICK(tkOrbitalWidth, "orbital_width");
+EDVR_BOUNDARY_TICK(tkSupercruiseBars, "supercruise_bars");
 EDVR_BOUNDARY_TICK(tkVrWorldRoute, "vr_world_route");
 EDVR_BOUNDARY_TICK(tkVrCameraCensus, "vr_camera_census");
 EDVR_BOUNDARY_TICK(tkVScreenFootprint, "vscreen_footprint");
 EDVR_BOUNDARY_TICK(tkScreenMotion, "screen_motion");
 EDVR_BOUNDARY_TICK(tkEngineVelocity, "engine_velocity");
+EDVR_BOUNDARY_TICK(tkCelestialMotion, "celestial_motion");
 EDVR_BOUNDARY_TICK(tkSharpenTick, "sharpen_tick");
 EDVR_BOUNDARY_TICK(tkTemporalTick, "temporal_tick");
 EDVR_BOUNDARY_TICK(tkTemporalBoundary, "temporal_boundary");
@@ -8071,6 +8451,11 @@ void vScreenFrameBoundary() {
         // cross-check and learning, the key's 30-second totals, and the end
         // of this frame's watch for draws after the UI.
         tkUiLayer.run([&] { uiLayerFrameBoundary(g_state->ownerCtx); });
+        // The orbit lines' factor, read from the panel patch the layer's boundary has just settled (orbital_width.h): one atomic
+        // every draw of the next frame sees, both eyes, the game's and the coverage twin.
+        tkOrbitalWidth.run([&] { orbitalWidthFrameBoundary(g_state->ownerCtx); });
+        // The supercruise bars' private pass (supercruise_bars.h): settles a binding the last issue could not restore.
+        tkSupercruiseBars.run([&] { supercruiseBarsFrameBoundary(g_state->ownerCtx); });
         // The VR world route (docs section 82) reads the world-screen gate the layer's boundary just computed, accounts the
         // frame that ended, steps its ownership machine and arms its detector; the camera census runs after it. With
         // experimental.temporal_aa_on_foot_world off and the census off each returns at its first test.
@@ -8087,6 +8472,9 @@ void vScreenFrameBoundary() {
         });
         tkScreenMotion.run([&] { screenMotionFrameBoundary(g_state->ownerCtx); });
         tkEngineVelocity.run([&] { engineVelocityFrameBoundary(g_state->ownerCtx); });
+        // Planet patch motion's stamp and 5 s census line (celestial_motion.h): the stamp pairs each eye's frames, and the pass's
+        // consumer for a frame has run by the time this does, as every consumer of the frame's draws has.
+        tkCelestialMotion.run([&] { celestialMotionFrameBoundary(); });
         // The sharpening's warm compile and missing-hook note, once a frame,
         // unconditionally -- not nested under any other feature's gate.
         tkSharpenTick.run([&] { sharpenPassTick(g_state->ownerCtx); });
@@ -9521,8 +9909,11 @@ void shutdownVScreenFixes() {
     holoShutdown();
     uiDepthShutdown();
     uiLayerShutdown();
+    orbitalWidthShutdown();
+    supercruiseBarsShutdown();
     screenMotionShutdown();
     pluginRegistryShutdown();
+    celestialMotionShutdown();
     scrimShutdown();
     quadProbeShutdown();
     wakePulseShutdown();

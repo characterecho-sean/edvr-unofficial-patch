@@ -125,6 +125,20 @@ constexpr uint32_t kWindowVersion = 1;
 constexpr uint32_t kWindowFrameCount = 1800;
 constexpr uint32_t kCpuDrawStride = 64;
 
+namespace detail {
+// The false path is an inline TLS read: hot call sites can skip the context
+// verifier (and its atomics) entirely outside API-sampled frames. The
+// collector owns writes; a positive hint is never authority on its own.
+#if defined(_MSC_VER)
+[[msvc::no_tls_guard]]
+#endif
+extern thread_local bool g_apiSampleHint;
+}
+
+inline bool apiSampleHint() noexcept {
+    return detail::g_apiSampleHint;
+}
+
 // Production clock and sink are static policies: no runtime callback or
 // virtual dispatch. Tests substitute their own Clock/Sink template arguments.
 struct QpcClock {
@@ -138,6 +152,26 @@ struct LiveSink {
     }
     static void ticks(Owner owner, uint16_t siteId, uint64_t value) noexcept {
         edvrPluginCostNoteCpuTicks(static_cast<uint8_t>(owner), siteId, value);
+    }
+};
+
+struct NoApi {
+    template<Owner O, uint16_t Site, ApiClass Class>
+    static void note() noexcept {}
+};
+
+struct LiveApiSink {
+    static void api(Owner owner, uint16_t siteId, ApiClass apiClass) noexcept {
+        edvrPluginCostNoteD3dCall(static_cast<uint8_t>(owner), siteId,
+                                  static_cast<uint8_t>(apiClass));
+    }
+};
+
+template<class Sink = LiveApiSink>
+struct SampledApi {
+    template<Owner O, uint16_t Site, ApiClass Class>
+    static void note() noexcept {
+        Sink::api(O, Site, Class);
     }
 };
 

@@ -271,6 +271,42 @@ ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,
     return out;
 }
 
+ID3D11GeometryShader* shaderSwapCreateGs(ID3D11DeviceContext* ctx,
+                                       const void* bytecode, size_t bytecodeLen,
+                                       const char* name, const char* who) {
+    if (!ctx || !bytecode || !bytecodeLen) return nullptr;
+    ID3D11GeometryShader* out = nullptr;
+    const int64_t t0 = qpcNow();
+    HRESULT hr = E_FAIL;
+    // Keep published COM pointers outside SEH: a driver can fault after
+    // writing an output, and /EHsc does not unwind its interrupted lambda.
+    ID3D11Device* dev = nullptr;
+    bool ran = guardedBudget(g_createBudget, [&] {
+        ctx->GetDevice(&dev);
+        if (dev) hr = dev->CreateGeometryShader(bytecode, bytecodeLen, nullptr, &out);
+    });
+    if (dev) {
+        ID3D11Device* release = dev;
+        dev = nullptr;
+        // Never retry a Release that faulted: it may already have destroyed
+        // the object. Reject the shader even if creation published S_OK.
+        if (!guarded("shaderSwap.create.device.release", [&] { release->Release(); })) ran = false;
+    }
+    if ((!ran || FAILED(hr)) && out) {
+        auto* release = out;
+        out = nullptr;
+        guarded("shaderSwap.create.shader.release", [&] { release->Release(); });
+    }
+    const int64_t frequency = qpcFrequency();
+    const double ms = frequency > 0
+        ? static_cast<double>(qpcNow() - t0) * 1000.0 / static_cast<double>(frequency)
+        : 0.0;
+    Log::get().note("%s: precompiled geometry shader %s %s (0x%08X, %.3f ms).",
+                    who, name, out ? "created" : (!ran ? "creation faulted/refused; standing down" : "creation FAILED; standing down"),
+                    static_cast<unsigned>(hr), ms);
+    return out;
+}
+
 // Every compile is an EVENT for the monitor's drop attribution, with its
 // duration: a compile on the render thread is the mod's own classic hitch
 // (the theater's 142 ms, the temporal pass's 6 s on issue #20), and a

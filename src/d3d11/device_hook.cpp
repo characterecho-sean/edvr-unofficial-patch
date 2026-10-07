@@ -45,6 +45,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "journal_watch.h"
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
+#include "orbital_width.h" // orbitalWidthRememberVs: the orbit lines' shader, captured at its creation
 #include "xinput_watch.h"
 #include "elite_binds.h"
 #include "../common/log.h"
@@ -80,6 +81,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "pose_reader_watch.h"
 #include "transition_flash_eye_base.h"
 #include "vscreen_res.h"
+#include "celestial_motion.h"
 
 namespace edvr {
 namespace {
@@ -734,6 +736,7 @@ HRESULT STDMETHODCALLTYPE hookedCreateVS(ID3D11Device* self, const void* bytecod
         registerShaderHash(*out, hash);
         engineVelocityRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);
         weaponMotionRememberShader(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len));
+        orbitalWidthRememberVs(static_cast<ID3D11VertexShader*>(*out),hash,bytecode,static_cast<size_t>(len),linkage!=nullptr);   // fix.ui_quality: the orbit lines (orbital_width.h)
         EyeDrawSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyeTonemapSnapshot::rememberShader(hash, bytecode, static_cast<size_t>(len));
         EyePanelSnapshot::rememberShader(hash,bytecode,static_cast<size_t>(len),static_cast<ID3D11VertexShader*>(*out));
@@ -1057,6 +1060,10 @@ HRESULT STDMETHODCALLTYPE hookedDevCreate(ID3D11Device* self, const void* first,
         } else if constexpr (Slot == kDevCreateBuffer) {
             const auto* desc=static_cast<const D3D11_BUFFER_DESC*>(first);
             if(out && *out)engineVelocityBufferCreated(static_cast<ID3D11Buffer*>(*out),desc);
+            // A destroyed buffer's address can be reused by a fresh one; a watched planet-patch buffer would otherwise
+            // inherit that buffer's stale shadow. Guarded like the Map/Unmap tees (celestial_motion.h): with nothing
+            // watched, no new buffer's address can match.
+            if(out && *out && celestialMotionAnyWatched())celestialMotionConstantsUnknownWrite(static_cast<ID3D11Buffer*>(*out));
             if(out && *out && desc && desc->BindFlags==D3D11_BIND_CONSTANT_BUFFER && flatRuntimeActive()) {
                 const auto* initial=static_cast<const D3D11_SUBRESOURCE_DATA*>(second);
                 flatRuntimeCreateBuffer(static_cast<ID3D11Buffer*>(*out),initial?initial->pSysMem:nullptr);

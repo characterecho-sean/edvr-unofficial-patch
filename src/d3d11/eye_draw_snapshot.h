@@ -166,7 +166,8 @@ public:
         case 0xB12F7A618E1BDE98ull:
         case 0x203DF51758AADC4Dull:
         case 0xC7FA0C0F5DD49180ull: // six 8194-vertex instances beside the bodies
-        case 0xA47A3315FFF5E2E4ull: // line candidate; identity is not yet proven
+        case 0xA47A3315FFF5E2E4ull: // the supercruise bars' line list (supercruise_lines.h); identity is evidence, proved by the aux vertex capture
+        case 0x9BFC7FD232328391ull: // the supercruise space dust's 300 ribbon quads (supercruise_lines.h): its b0/b1/b2 here, its vertices in the aux capture
             return true;
         default: return false;
         }

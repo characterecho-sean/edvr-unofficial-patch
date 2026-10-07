@@ -31,6 +31,7 @@ struct ID3D11DeviceContext;
 struct ID3D11VertexShader;
 struct ID3D11PixelShader;
 struct ID3D11ComputeShader;
+struct ID3D11GeometryShader;
 
 namespace edvr {
 
@@ -58,6 +59,11 @@ ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,
 ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,
                                     const void* bytecode, size_t bytecodeLen,
                                     const char* name, const char* who);
+// The geometry form (2026-10-07: the supercruise bars' strip shader, the first geometry shader the proxy makes): the same
+// contract and the same log line, "<who>: precompiled geometry shader <name> created ...".
+ID3D11GeometryShader* shaderSwapCreateGs(ID3D11DeviceContext* ctx,
+                                       const void* bytecode, size_t bytecodeLen,
+                                       const char* name, const char* who);
 
 // THE RUNTIME COMPILE, vertex and pixel forms, for exactly two callers whose
 // HLSL macros are the USER'S SETTINGS and so cannot be known at build time:

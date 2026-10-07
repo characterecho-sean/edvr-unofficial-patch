@@ -36,23 +36,19 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** main `465e3edd` source and documentation-only `501e2b15` are
-  integrated after measuring control `373198c1`. Candidate `6c63f6aa` passes
-  143 full-build jobs, fresh NoTrace/forwarding comparisons and clean
-  promotion. Control `7bbe7d90` passes 125 jobs and clean promotion. Both
-  October 7 flights match their builds and environment, exit cleanly, and Sean
-  reports no visual changes. Candidate remains installed and verified in Steam;
-  personal INI and existing DLSS were preserved. The measured pair has a
-  promising NV-on CPU signal (15.0% less sampled hook time per timed draw), but
-  other CPU ranges overlap. Direct EDVR GPU cost in carrier DLSS/NV-off is 2.9%
-  higher; the candidate median exceeds the control range. Draw counts differ
-  and the automatic on-foot source has 4.175% more pixels. CPU attribution and
-  GPU non-regression remain open. Next: inspect scope costs and workload counts
-  offline, finish missing cost coverage, and prepare discriminating evidence
-  before another flight or a rendering change. Keep this source pair frozen.
-  Twenty-three selectors and local None/Skip checks pass; whole-ladder/actions
-  and remaining API/CPU coverage stay open (section 11). Replay retains 482.4
-  MiB when enabled, none when disabled. Earlier NV blur is reproduced by
+- **Next:** main `fcdc3c05` is integrated; the warm PanelDistance API slice and
+  combined tree pass 148 full-build jobs and scoped codegen comparisons.
+  Selector costs remain (section 11's latest entry). Keep the earlier pair
+  frozen: `7bbe7d90` control and `6c63f6aa` candidate. Both October 7 flights
+  match their builds and environment, exit cleanly, and Sean reports no visual
+  changes. NV-on sampled hook time per timed draw is 15.0% lower; other CPU
+  ranges overlap. Carrier DLSS/NV-off direct EDVR GPU cost is 2.9% higher; its
+  candidate median exceeds the control range. Draw counts differ and the
+  on-foot source has 4.175% more pixels. CPU attribution and GPU non-regression
+  remain open. Finish missing cost coverage and selector work offline before
+  another flight. Twenty-three selectors and local None/Skip checks pass;
+  whole-ladder/actions and remaining API/CPU coverage stay open. Replay retains
+  482.4 MiB when enabled, none when disabled. Earlier NV blur is reproduced by
   `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
   Scope control. No Phase 1 acceptance, Phase 2 or shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
@@ -2693,3 +2689,81 @@ Reproducible ignored reports:
 corrected phase-contained row selection and near-NV-boundary sensitivity. The
 feature stays on `codex/plugin-architecture`; no merge to main, Phase 1
 acceptance, Phase 2 or shipping approval is claimed.
+
+### Main refresh and warm PanelDistance API cost, 2026-10-07
+
+Main `fcdc3c05` is integrated into the feature tree after Sean lifted the merge
+hold. Its planet-patch motion and supercruise HDR orbit/bar/dust changes are
+preserved alongside the existing trace actions and forwarding. The conflicts
+retained both sets of build rigs. Night vision still shuts down through the
+cockpit plugin registry; scheduler/static configure and reload remain owned by
+vScreen, avoiding duplicated lifecycle calls from the older main layout.
+
+The bounded API slice records the four saved-original calls in the warm
+PanelDistance transaction: Map and Unmap at OnFootPanel sites 122/123
+(Transfer), override and restore VS constant-buffer binds at 124/125 (State).
+The fixed 128-site limit and 1328-byte snapshot ABI are unchanged. Selection is
+independent of CPU sampling and replay. A thread-local hint avoids a context
+query on unselected frames; positive hints still pass the atomic context and
+owner-token checks before the collector reads owner-only sample state. The
+constant-initialized hint has the specific MSVC `no_tls_guard` attribute, and
+only the small outer dispatcher is forced inline.
+
+The actual-production test seam runs the prequalified warm Site 66 claim,
+forwarder and restore with injected saved-original callbacks. It checks all
+four draw families' typed arguments, single issuance, Map/Unmap/bind/draw/
+restore order, scaled/copied constants and final binding. Failed Map and null
+mapped data decline without later panel calls. NoApi preserves the transaction
+with zero counters/bits; API sampling works with NoCpu and CPU trace
+suppression. Collector tests cover owner registration, lifecycle transitions,
+masks and a stale positive hint after quiescent owner transfer. This is not the
+complete eligibility ladder. The first native failure incorrectly expected a
+foreign exit from this prequalified seam: it now checks the same transaction
+with NoApi; separate production Site 2 tests still require foreign-context
+exit.
+
+The incoming orbit and bars scanners initially rejected the trace action
+between `uiLayerEnd` and second issues. Production ordering was correct. Both
+now pin exact traced or plain second-issue arguments independently and retain
+the full binding/issue/restore order. Their late-restore controls now move the
+actual restore, and missing-second-issue controls are checked. All five
+incoming rendering rigs pass together on captured fixtures and WARP (27.2 s,
+zero FocusWatch events); these corrections change no rendering code.
+
+Fresh reference/current listings use the same merged source revision, flags and
+original source path. The saved pre-API reference hash is `d4e4d28c`; current
+production source hash is `345ea597`. All three NoApi classifier variants
+preserve bytes, records, stack and ordered calls. The NoTrace/NoCpu variant
+remains 7057 bytes, 1636 records, 94 calls and a 288-byte stack (SHA-256
+`2647f030...`). All sixteen NoTrace forwarding variants and all four
+draw-callback families preserve exact bodies, stack and call order. A changed
+local symbol is accepted only after its body and raw callees match. The
+forwarders retain all three callback call positions (15/39/70).
+
+The whole selector is not zero-cost. Each false-hint check has three
+instructions/11 bytes and jumps over the context verifier. There is no new hint
+TLS initialization guard and no executed outer trampoline; the existing
+DrawClock TLS guard is unchanged. Instanced NoApi dispatch still marshals the
+empty API argument to an outlined work lambda: 939 -> 988 bytes and stack 288
+-> 304. IndexedInstanced dispatch adds argument setup only in its trace branch
+(1611 -> 1621 bytes, stack 320 unchanged). Whole-hook static size deltas for
+D/I/N/X are +74/+77/+102/+87 bytes, including both branches; X hook stack is
+336 -> 344. These are codegen measurements, not measured frame-time costs.
+Removing the remaining empty-policy argument cost needs another bounded codegen
+review before any zero-cost claim.
+
+The final normal full build passes all 148 jobs: 141 pooled in 166.2 s and
+seven quiet in 49.4 s, with zero FocusWatch events over 216 s. Config contract
+checks all 236 keys, actual installer resources match the release files, and
+the fresh full-pass receipt fingerprints source/dependencies as `5d8aa96c`. The
+world-route mutation's old template anchor also needed the third API policy
+parameter; all 96 mutation self-tests over four rigs now pass, and the control
+still moves cleanup before verdict selection and the original issue.
+
+
+The earlier `7bbe7d90`/`6c63f6aa` source and flight pair stays frozen. No Steam
+install, personal INI edit or flight occurred for this refresh. The new main
+rendering and sampler changes are not evidence that the earlier carrier GPU
+increase is resolved. Remaining cost coverage, whole-ladder/action parity and
+CPU/GPU performance acceptance stay open. Next flight: none until the offline
+gates produce a discriminating comparison; Phase 2 and shipping remain held.

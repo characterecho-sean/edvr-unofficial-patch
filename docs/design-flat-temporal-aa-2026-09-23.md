@@ -33,7 +33,8 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** open: weapon no-candidate bursts, the roof's highlight shimmer
+- **Next:** section 105: request existing supporter traces for AA refusal.
+  Open: weapon no-candidate bursts, the roof's highlight shimmer
   (content), TAA at the roof standing still (104). Retain
   102's color-clear fix; no per-weapon table; preserve Epic settings, 87's
   native FSR comparison, 83's open items and high-G motion; do not repeat
@@ -13287,3 +13288,58 @@ cases".
 Open: the no-candidate bursts (which action rewrites the weapon's geometry);
 the roof's thin-highlight shimmer (content; the pre-upscaler filter is the
 remaining idea); EDVR's TAA standing still at the roof (2d8e6761, unflown).
+
+## 105. Different supporter: v0.18.2 AA selector refusal (2026-10-06)
+
+State: AA initializes and treats earlier frames, then fails frame selection.
+Bundle edvr-logs-20261006-171546 (1).zip has one graphics log (8819 lines),
+settings and breadcrumbs. No shader, trace or pixel binaries are included.
+Literal build v0.18.2, stamp 6AC30AC5, linked 2026-10-05 02:26:13 UTC;
+release source is tag 9a875295, predating current main eccfce7a and its
+flown on-foot history work. Version-prefix matching cannot establish exact
+commit identity. This capture does not establish a failure in current main.
+
+Environment: flat desktop, RTX 5080, 3440x1440, no mod DLL chain or headset
+runtime in this path. Driver and DLSS DLL versions are explicitly not read.
+INI requests dlss/model auto. At 16:58:42.971 NGX creates native DLAA for
+3440x1440, HDR input/automatic exposure; later live mode is DLSS. Game AA
+snapshots are Off; Custom.4.3 has SS 2.0 and Custom.4.4 SS 1.0, DoF 2 and
+bloom 3. Captured failed-route scene/output size is 3440x1440; the 1720x720
+HDR consumer target is not evidence that the game's scene is half scale.
+
+Final treated=6835, refused=425700, last=no-known-tone-pass, history
+accepted in the window=0. Backend calls=6835, init=1, backend-failure=0;
+all accepted resolves used HDR. Cumulative refusals include earlier
+no-supported-motion-source-pair/loading intervals; do not treat the total
+as a single post-chain cause. The latest window has no treatment and the
+live DLSS warning agrees it is inactive. HDR sees DFED8E1C9E191BEC /
+143AAE0597E2F7BF consume 3440x1440 H but selects
+conflicting-hdr-target-or-camera, with zero backend dispatches. The copy
+route says route-serves, which is size/mode ownership, not actual HDR
+success; it does not attempt structural rescue in this R=D case.
+
+Earlier bounded firstBad records (17:02:07..37) name image-copy-source,
+CFA91824129ECBBC/07B3F82100F29401 into CFA91824129ECBBC/DFCBA0EC70B03C9B.
+The release already has section 85's 07 camera-independent exception.
+Do not reapply that fix: collective source/depth/current HDR-camera checks
+can still refuse the copy. F10 copy provenance completes two exact actual
+binding samples, with no source/destination missing or shader mismatch.
+The destination's first writer is 7E38A6AA1269C901/7CECABDE34FFBE9E with no
+b1 camera; this does not prove later writers never established a camera.
+Need all preceding draws to isolate the failed guard.
+
+ruled out: AA simply left Off for the final window, because DLSS is requested
+and the warning/refusal counters run.
+ruled out: demonstrated backend initialization/dispatch failure, because
+NGX initialized and rendered 6835 frames with zero backend failures.
+
+Existing evidence to request, no repeat flight: F10 saved
+edvr_logs/traces/flat_trace_482683.bin, flat_trace_485034.bin and
+flat_trace_552289.bin on the supporter's machine. Each has three complete
+frames, roughly 10 MB, and zero overflow slots; ZIP omits all three.
+Request these files (especially 552289) and the existing shaders folder.
+Replay source/copy verification, every H writer's camera/depth, and trigger
+order before attributing the refusal or changing rendering code. Pixel
+captures expired with zero copies; their absence does not measure motion.
+Newer weapon/history fixes are not yet a demonstrated cure for this report.
+No source, settings, build or installation changed in this investigation.

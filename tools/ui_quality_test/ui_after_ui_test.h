@@ -294,8 +294,7 @@ struct Router {
         const int kind = kindOf(d.target);
         f.eyeTarget = kind != 0;
         f.ldrView = kind == 2;
-        f.crispHdr = kind == 1 && (family == UiLayerFamily::kHolo || family == UiLayerFamily::kFlightHud ||
-                                   family == UiLayerFamily::kSprite || family == UiLayerFamily::kHoloGeneric);
+        f.crispHdr = kind == 1 && uiLayerFamilyTakesHdr(family);  // the one list ui_layer.cpp asks (it names the orbit lines and the bars too)
         f.eye = eyeIndex;
         f.armed = true;
         f.ds = uiLayerDsEffect(d.ds, d.dsv);

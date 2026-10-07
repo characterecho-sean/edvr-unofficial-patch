@@ -16,10 +16,12 @@ import struct
 import sys
 
 # 4-7 and 9 are retired paths (body, body2, stepped, terrain -- 7 went 2026-10-01 with terrain
-# motion -- and mesh), kept so an older dump still reads; the shader writes none of them now.
+# motion -- and mesh), kept so an older dump still reads; the shader writes none of them now. 7 is
+# deliberately not reused. 12 is the planet patch motion (2026-10-06): a world-path pixel with a depth
+# inside a body's patch volume takes that body's own rigid motion (src/d3d11/celestial_motion.h).
 PATHS = {0: 'invalid', 1: 'head', 2: 'world', 3: 'ship', 4: 'body',
          5: 'body2', 6: 'stepped', 7: 'terrain', 8: 'holo', 9: 'mesh', 10: 'screen',
-         11: 'engine'}
+         11: 'engine', 12: 'celestial'}
 FLAGS = {16: 'hidden_history', 32: 'screen_invalid_history', 64: 'ui_here',
          128: 'world_available', 256: 'depth_valid', 512: 'tracked_foreground',
          1024: 'projection_valid', 2048: 'static_confirmed'}
@@ -313,6 +315,20 @@ def self_test():
                         original[:44] + struct.pack('<f', float('nan')) + original[48:]):
             dpath.write_bytes(payload)
             assert not run()['complete']
+        dpath.write_bytes(original)
+        # Path 12, `celestial`: the second pixel (path 10, screen, above) takes its body's own motion instead. 13 is still no path.
+        celestial = bytearray(original)
+        struct.pack_into('<f', celestial, 56 + 16, 12 | 1024)
+        dpath.write_bytes(celestial)
+        again = run()['frames'][0]
+        assert again['path_fraction']['celestial'] == .25
+        assert again['path_fraction']['screen'] == 0
+        assert again['path_fraction']['world'] == .25
+        assert again['physical_motion_samples'] == 4
+        assert PATHS[12] == 'celestial' and 7 in PATHS and PATHS[7] == 'terrain'
+        struct.pack_into('<f', celestial, 56 + 16, 13 | 1024)
+        dpath.write_bytes(celestial)
+        assert not run()['complete']
         dpath.write_bytes(original)
         # Ownership result is separate from path membership and history flags.
         encoded = bytearray(original)

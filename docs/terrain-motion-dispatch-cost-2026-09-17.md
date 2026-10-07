@@ -2,64 +2,300 @@
 
 ## Status
 
-- State: RETIRED 2026-10-01. `advanced.terrain_motion` and its per-patch hook
-  are deleted (Sean: "Build the jitter change and remove terrain motion
-  now"). Terrain pixels take the camera's motion, exactly what the key off
-  gave them: tools\terrain_retired_test proves it byte for byte on WARP. On
-  branch claude/jitter-phases-terrain-retire (commit 1 of 2), gated and NOT
-  FLOWN; the regression flight is in the top journal entry.
-- Why it could go: the hook predates engine-record motion, whose camera
-  rows now give the camera term; landed, the two agree to 0.002 px rms;
-  Sean's low-flight A/B, key off against on: "no smearing" either way; the
-  hook cost GPU p50 +0.27 ms, p95 +0.48 ms and CPU p50 +0.51 ms (Frontier
-  log edvr_gfx_20261001_090933.log, interleaved toggles); and it still
-  matched build 332841 (62/62 patches), so a retirement, not a fix.
-- Tested 2026-10-06, and it fails in supercruise: Sean saw a planet blur
-  on approach (dump eye_180540, eccfce7a). Its patches grew 7% in area in
-  15 frames (0.40 render px a frame at the edge). The motion DLSS got over
-  them carried under 1% of that: the v/d error the theory predicted.
-  Details are in the top journal entry. It is not a regression: Sean's
-  Frontier ini had the key off.
-- Next: Sean's call on giving near-range planet patches approach motion
-  (options in the top journal entry). The low-flight check and the
-  fast-rotating-body orbit are still unflown.
-- The rest of this doc is the 2026-09-17 arc that priced the hook, kept as
-  the record. FLOWN 16:34 (log 163420, build 91d5b75, Pimax Crystal Super,
-  2646x2206 in, DLSS out 4072x3394): (a) CONFIRMED, benchmark gpu p50 under
-  dlss 9.0-9.6 ms against 10.2-10.6 on 185ceee at the same spot; the
-  per-patch bracket 3.5-4.0 us against 13.5-15.8; the 306 terrain copies
-  gone; the CPU shadow served 256856 slots against 103 GPU copies;
-  `history hidden` 0.000% of the eye. The key off under dlss moved nothing
-  (the residual was below noise) and made the terrain flicker, as it must.
-- ATTRIBUTED (flight 150849 on 185ceee): the gap was the SUM of EDVR's
-  per-draw GPU syncs inside the game's passes: +306 CopySubresourceRegion +
-  102 UpdateSubresource (terrain, 51 patches/eye), +37 Dispatch(1,1,1)
-  (holo) + 10 (stellar ring), ~50 mesh/probe copies, +38 query Ends. Offline
-  prices on the 5090: a copy ~2 us fixed, a Dispatch(1,1,1) with CS churn
-  4.75 us, a timestamp pair free.
-- Left inside the game's passes under dlss (flight 163420, per frame): holo
-  33 Dispatch(1,1,1) + 39 UpdateSubresource + 24 instance copies; stellar
-  ring 10 dispatches; mesh 10 copies + 10 uploads. By the offline prices
-  0.3-0.45 ms a frame: (b) batch the holo dispatch and (c) the stellar
-  ring's, a rig and a flight each, still Sean's call.
-- The rest of "DLSS doubles the frame" is the door itself: NVIDIA's `full`
-  2.8-3.1 + `prep` 0.2-0.5 + `ui` 0.36-0.6 = 3.5-4.0 ms per pair at
-  4072x3394, a per-output-pixel price. Levers: the DLSS rectangle (the
-  foveated arc, paused by Sean) or a smaller game render.
-- ruled out (by measurement, journal): the per-patch dispatch (a17c793
-  flown flat); the game's Map stalling on the GPU (0.003 ms/frame); the
-  hook's CPU (0.03 ms/frame); EDVR's timestamp brackets (free); the
-  texture LOD bias; the PS + 2 MRTs beyond ~0.15 ms; write-combined mapped
-  memory. Open: the benchmark's CPU figure under dlss (3.9-4.2 on the
-  planet, 1.9 after the runtime's wait moved into Submit).
-- Report: Sean, Frontier, Pimax Crystal Super, after the terrain history
-  fix (docs/terrain-history-shimmer-2026-09-17.md): "performance is now
-  quite bad flying low to the surface" (log 122915, HMD quality 75%), then
-  his A/B in log 124139 at 65%: "DLSS effectively doubles the gpu and cpu
-  frametime numbers" (off cpu 2.8 / gpu 4.5-4.9; dlss 4.7-5.2 / 10.9-11.0;
-  fsr 4.4 / 9.3). The oldest journal entry has the reading of those logs.
+- State: planet patch motion FLOWN OK 2026-10-07 (v0.18.2-62-gc136ba80 on
+  Frontier, ON MAIN c947620c). Sean: "Planet looks great now". Each body's
+  rigid motion, read from its patch constants on the CPU, replaces the camera
+  term on that body's pixels: decision path 12, `celestial`. Parts:
+  src\common\celestial_math.h (the arithmetic), src\d3d11\celestial_motion.{h,cpp}
+  (the CPU shadow of VS b0 and b2, the draw capture, the per-eye records),
+  the `celestial` block of temporal_shader_source.h (mv and main), and
+  tools\celestial_motion_test with tools\celestial_fixture.py (the rig, on the
+  real dump). No config key: it runs while fix.temporal_aa does, VR build only.
+- Why: Sean's supercruise approach blur (dump eye_180540, eccfce7a). The camera
+  rows lose the ship's translation, so every body took the camera's motion,
+  under 1% of its real growth (2.3e-3 a frame). The retired hook is not back:
+  no GPU copy, no reissue, no extra draw; `advanced.terrain_motion` stays gone.
+- Verified offline, no flight (numbers in the top journal entry): the moon's
+  delta reproduces the doc's D references to 1.73 m (limit 2); the shader's
+  arithmetic reproduces the game's own jitter-free motion to 0.0002 px (limit
+  0.01); on WARP a pixel inside a body's volume takes path 12 with the record's
+  motion and no other pixel changes; with no records every output is byte for
+  byte the old shader's; six one-token breaks of the path are each caught.
+- Flown 2026-10-07, log edvr_gfx_20261007_045509, journal top entry. Every
+  patch draw was read from the shadow, with 0 declines. Each approach frame
+  bound records for 5-6 bodies. Translation per frame was 1.45 Mm (0.43c) at
+  the start and 2-8 km on arrival. CPU was 0.03-0.05 ms a frame.
+  Still unflown: low flight beside a planet, and an orbit of a fast-rotating
+  body. The GPU cost is unmeasured.
+- Open: the volume is the union of the patches' boxes (a pixel rectangle and a
+  depth interval, margins 3 px and 1%), about 30% loose around the disc; the
+  VS's LOD morph (cb2[0..3]) moves vertices non-rigidly and no rigid transform
+  covers it; a body wholly behind the eye (the dump's five far bodies) or off
+  its pixels gets no record. The GPU cost is unmeasured (a 1280-byte upload and
+  a 2-record loop per world pixel per eye). The colour pass is used, not
+  ACE405's depth pass.
+- ruled out: the retired hook's route (per-patch GPU copies, a coverage reissue,
+  GPU p50 +0.27 ms, CPU p50 +0.51 ms): replaced by the CPU shadow, 8.6 us a
+  build and 0.16 us a draw on the rig's core; a rotation read off an
+  unnormalised quaternion's matrix: the 0.01-0.06 degree turn it shows on
+  alternate frames is |q|^2 != 1 (1e-7) in the trace, not motion.
+- History: `advanced.terrain_motion` was retired 2026-10-01 (the hook cost GPU
+  p50 +0.27 ms, CPU p50 +0.51 ms) and fails in supercruise (journal 2026-10-06).
+  The 2026-09-17 arc that priced it (FLOWN 163420 on 91d5b75: gpu p50 9.0-9.6 ms
+  against 10.2-10.6; the CPU shadow served 256856 slots against 103 GPU copies)
+  found the doubled frame was the SUM of EDVR's per-draw GPU syncs (+306 copies,
+  +102 UpdateSubresource, +47 Dispatch(1,1,1), +38 query Ends; a copy ~2 us, a
+  Dispatch with CS churn 4.75 us). 0.3-0.45 ms a frame is left in the holo
+  dispatches and the stellar ring's (Sean's call); the door (`full` 2.8-3.1 +
+  `prep` 0.2-0.5 + `ui` 0.36-0.6 ms) is the rest. Sean's report: "DLSS
+  effectively doubles the gpu and cpu frametime numbers" (log 124139).
+- ruled out (journal): the per-patch dispatch; the game's Map stalling on the
+  GPU (0.003 ms/frame); the hook's CPU (0.03 ms/frame); EDVR's timestamp
+  brackets; the texture LOD bias; the PS + 2 MRTs beyond ~0.15 ms;
+  write-combined mapped memory.
 
 ## Journal
+
+### 2026-10-07 -- planet patch motion flown OK
+
+The flight: Frontier, `v0.18.2-62-gc136ba80` (verified with
+`edvr_log.py --expect-build c136ba80`), Pimax, DLSS, a supercruise approach
+to a planet. Sean: "Planet looks great now."
+
+From `edvr_gfx_20261007_045509.log`:
+- **First read.** At 04:56:39 patch draws were first read from the CPU
+  shadow; the first record was for the moon, 1.22 Mm away, with 5 of 5
+  patches agreeing.
+- **5 s windows, 04:58:36 to 04:59:41:**
+  - Every draw was captured (11808 to 32472 a window), with no declines.
+  - 13 to 36 patches and 2.2 to 6 bodies a frame.
+  - 702 to 2570 records a window.
+  - Fallbacks were only `no-previous-body`, 0 to 4 a window: a body whose
+    first frame has no history.
+- **Speed.** Max |t| fell from 1,449 km a frame (about 0.43c at 90 Hz) to
+  2-8 km a frame on arrival. 23,125 km appears in one window, the moment a new
+  far body joins.
+- **CPU.** About 0.15 us a captured draw, 11-16 us an eye-frame,
+  0.03-0.05 ms a frame.
+- **Before the approach.** The windows before it read `draws=0` (no planet
+  in view), as the census is meant to.
+
+The eye dump at 05:00:20 was taken for the HUD, with no planet in view, so
+path 12's pixel share is not measured from a dump this time.
+
+### 2026-10-06 (night) -- built: each body's rigid motion on its pixels, gated, not flown
+
+Built on branch claude/planet-patch-motion from the design below. Nothing here
+was flown or installed; every number is the rig's (`tools\celestial_motion_test`,
+20 s, on the real constants of eye dump 180540).
+
+**What it is.**
+- `src\common\celestial_math.h`: no D3D; takes two frames of an eye's patch
+  constants to one record per body.
+- `src\d3d11\celestial_motion.{h,cpp}`: the CPU shadow, the draw capture, the
+  per-eye records and their GPU buffer, the 5 s census.
+- The shader (`temporal_shader_source.h`): `celestialPixel` and its two call
+  sites. EDVR_CELESTIAL 0 compiles the shader as it was.
+- Hooks: vscreen.cpp (Map, Unmap, UpdateSubresource, CopyResource,
+  CopySubresourceRegion, ExecuteCommandList, the draw, the boundary tick, the
+  shutdown), device_hook.cpp (CreateBuffer), temporal_pass.cpp (records,
+  flag, SRV, trace, Stats).
+- Tools: `tools\celestial_fixture.py` extracts the fixture (202 KB, 38
+  eye-frames, 60 references) and its `--self-test` re-derives every reference
+  from the stored raw constants; `tools\eye_decisions.py` knows path 12.
+
+**How the capture works.**
+- vscreen.cpp tees the game's own writes. Map saves the mapped pointer;
+  Unmap, before the real one, copies 384 bytes (VS b2 rows 0-23, the patch) or
+  48 (VS b0 rows 9-11, the camera rows' 3x3) into a shadow kept per watched
+  buffer; UpdateSubresource copies the overlap with the segment. A copy into
+  a watched buffer, an executed command list, a re-created buffer at the same
+  address: the shadow is invalid until the next write. A table of 128 buffers,
+  a pointer compare on the hot path, nothing read from the GPU.
+- At a draw whose VS hash is 72BDD292154158AD (forwardWithVerdict, before the
+  game's own issue), on the owner context, `celestialMotionNoteDraw` resolves
+  the eye from the scene depth view (`depthProbeCurrentSceneEyeOf`), gets the
+  bound VS b0 and b2 (`VSGetConstantBuffers`), and builds a patch from the
+  shadows. A buffer seen for the first time is only registered, with its size
+  read there and not in the tee; the draws after the game's next write read.
+- Why Map/Unmap: the draw census of this dump (edvr_gfx_20261006_180143.log,
+  lines 5484-5499) has only EDVR's own four snapshot copies between
+  consecutive patch draws, so the game issues no CopySubresourceRegion,
+  CopyResource or UpdateSubresource there. The depth pass's shadow was flown
+  (256856 slots from the shadow, 103 GPU copies); the colour pass's is not.
+  The census counts the routes, so a flight says which.
+
+**What the dump taught.**
+- cb2[12] is the body's centre (world-aligned, camera-relative) and radius,
+  bit-equal on every patch of a body: |A c - centre| is the radius to 5 km on
+  all six bodies. Bodies are clustered by that row, not by radius alone.
+- The dump's five far bodies (4e8-8e8 m) are all BEHIND the camera: drawn and
+  clipped. The build skips a body with no corner in front of the eye or off
+  its pixels before any matching (`behind`, `off-screen` in the census).
+- Quaternions are normalised before their matrix is built. The unnormalised
+  matrices turn a 1e-7 scale error into a 0.03 degree apparent spin on
+  alternate frames.
+- Consensus: the nearest four patches' own deltas are hypotheses, the one the
+  most patches agree with wins (ties keep the nearer), and the translation is
+  the inverse-square-distance weighted mean over its agreeing patches with
+  that rotation held. Agreement is 1 m plus 12 float ulp of the patch's
+  distance (6.6 m at 3.9e6 m; the faces spread to 3 m). Plausible: finite, a
+  displacement no more than the body is far, a spin under 10 degrees.
+
+**Deviations from the design.** (1) Bodies cluster by cb2[12], above. (2) The
+consensus is a vote and a weighted mean, not the nearest patch alone. (3) A
+body behind the eye or off its pixels is skipped, not a failure. (4) The path
+is in both entries, mv (DLSS and FSR) and main (the own history), not mv only:
+the same bug, the same arithmetic, one function. (5) Where two volumes hold a
+pixel the NARROWER depth span wins (a moon in front of its planet), not the
+first listed. (6) Stats[39] counts path-12 pixels under diagnostics. (7) The
+colour pass, not ACE405's depth pass.
+
+**Rig numbers against the references.**
+- (a) 36 moon deltas (two eyes, frames 23651-23668): the doc's D within 2 m at
+  all seven frames it lists, worst 1.73 m; against the extractor's mean of
+  faces worst 0.63 m; D carries the previous frame's centre (cb2[12], not read
+  by the arithmetic) to within 3.16 m (limit 6.6). With the head turned half
+  way about, 144 far-body deltas at 4e8-8e8 m: centre worst 660 m (float: 64
+  m a unit there).
+- (b) the shader's arithmetic at a patch's centre and at the body's centre
+  against the game's own jitter-free motion (cb1's columns, no EDVR convention
+  in it): 60 moon points worst 0.00021 px, 144 far centres worst 0.00031 px
+  (limit 0.01).
+- (c) WARP, six scenes (both eyes, frames 23651, 23654, 23665; a virtual eye a
+  quarter the dump's size, the moon's sphere, a near block, a block off the
+  rectangle, a cockpit strip, sky): 36573 pixels took path 12 with the record's
+  motion (worst 0.00008 px) and every other pixel was byte for byte the shader
+  without the path; with no records, or with the bit clear and records bound,
+  every output of mv (trace and diagnostic) and main is byte for byte the
+  shader compiled with EDVR_CELESTIAL 0; main's history moved on exactly those
+  36573 pixels; Stats[39] counted them; two volumes over one pixel give the
+  narrower one's record in either order; six controls (the bit's gate, the
+  translation's sign, the depth interval, the rectangle, the decision path
+  left at 2, the widest-wins rule) are each caught by the same judge.
+- (d) 9 cases of the tee on WARP buffers: Map/Unmap, whole and boxed
+  UpdateSubresource, a copy and a command list invalidating, a re-created
+  buffer, sizes, the 512 cap, the pipeline from 144 draws to the GPU buffer
+  (bit for bit the pure build's), the census line. (e) 16 edge cases, each
+  refusal by its own reason: no previous frame, no previous body, no match,
+  an outlier face, the nearest face the outlier, no consensus, a body that
+  jumped across the view, a 5 and a 30 degree spin, twin bodies, identical
+  rows on two faces, a doubly claimed patch, 20 bodies to 16 records, a body
+  on the eye plane, non-patch constants, outside the volume.
+
+**The log.** A live module prints a line every 5 s, zeros included:
+
+    celestial motion 5s: frames=N draws=D captured=C declined[off-eye=.. unwatched=.. no-b0=.. no-b2=.. size=.. constants=.. duplicate=.. cap=..];
+    consumer=K eye-frames=E patches/frame=P bodies/frame=B (behind=.. off-screen=..) matched/frame=M unmatched=U;
+    fallback[no-previous-frame=.. no-previous-body=.. no-match=.. implausible=.. disagree=..]; records=R (R/E per frame) uploads=.. max|t|=T m/frame
+    pixels=X|n/a (diagnostics off); tee[map=.. update=.. invalidated=.. watched=.. copy=..us]; cpu[capture=..us/draw build=..us/eye-frame total=..ms/frame]
+
+No line at all: a stale DLL or the module off. `draws=0`: the hook never saw the
+VS. `captured` far below `draws` with `declined[...]`: the shadow does not
+vouch for the draw (named). `captured>0, records=0`: `fallback[...]` and the
+`behind`/`off-screen` counts say where it stopped. Said once each: the first
+patch read, the first record, the first body without one and why, the first
+decline by reason. motion.csv gains celestialRecords, celestialBodies,
+celestialPatches, celestialMatched, celestialTx/Ty/Tz (D's translation,
+world-aligned metres), celestialRotDeg and celestialDistance for the nearest
+body; the eye dump's UI-flags carry bit 8192 and the submission history's
+inputs 0x8000 when records were bound.
+
+**Cost.** `cel::build` of one real eye-frame (36 patches, six bodies, one in
+view): 8.6 us. The census of the pipeline test, two eye-frames of it: capture
+0.16 us a draw, tee copy 0.02 us, 0.13 ms a frame including the first-use buffer
+creation (the live line replaces these). 72 patch draws a frame cost the
+capture under 12 us. The GPU side is a 1280-byte upload per eye and a two-
+iteration loop per world-path pixel: not measured.
+
+**Not verified.** How the game writes the colour pass's VS b2 and b0 (Map/Unmap
+is inferred, above); the GPU cost; that the two eyes' frame stamps pair as the
+rig assumes under the live boundary tick (the consumer runs before it, as every
+consumer of a frame's draws does); the flight itself. The old rig's
+terrain_retired_test is untouched and passes: the celestial block sits in
+fragments the retirement's anchors do not read, at t15 not t9-t11.
+
+### 2026-10-06 (later) -- the design: each body's rigid motion from its patch constants
+
+This entry was measured offline, with no flight. Inputs:
+- `eye_180540`;
+- `drawstate_180540.bin`: 1368 draws each of the two patch VSs over 19
+  frames, with VS b0/b1/b2;
+- 88 older Frontier dumps, read by a research subagent.
+
+**How a patch is placed.** From disassembly of `vs_72BDD292154158AD`:
+
+    X = rotate(q = cb2[10], lerp(cb2[4], cb2[5], h)) + cb2[2]
+
+- X is camera-relative, in head axes.
+- `cb0[9..11]` is the camera rows' rotation (equal to EDVR's rows once the
+  dump's frame counter is offset by one).
+- `cb1[270..273]` holds per-eye clip columns, jitter included.
+- The depth pass `vs_ACE405F428C17EF6` has the same structure with
+  q = `cb2[8]` and t = `cb2[1]`. That is the retired hook's capture point.
+- Each body is a cube-sphere: 6 face patches at this range, its radius in
+  `cb2[12].w`. 36 draws an eye a frame are 6 bodies, including bodies 470
+  to 810 Mm away.
+
+**Supercruise loses only the ship's translation.**
+- In the camera rows' world-aligned frame, every body moves by the same
+  vector each frame: 2.5-2.8 km on calm frames, 25-28 km on slow ones. So
+  the frame is world-aligned and travels with the ship. Rotation is right;
+  the ship's translation is missing.
+- The research subagent read 88 older dumps:
+  - In normal space the rows carry the ship's translation (41 dumps,
+    median 2 m a frame).
+  - In supercruise the rows freeze at the ship-centred eye point, about
+    13.5 m (44 dumps).
+  - The retirement's 0.002 px agreement came from landed and hovering
+    dumps.
+
+**The world path's prediction matches the dump.** EDVR's world path holds
+the moon still in that frame. Its prediction matches the dump's MVs exactly
+once the jitter step is removed; for example, at 23651
+(2.124, 0.433) - (1.874, 0.766) = (0.25, -0.333). What is left at the
+moon's centre is the missing motion: about 0.9 render px a frame steady,
+and 3.6 px on slow frames.
+
+**One rigid delta per body.** Each face gives
+`D = T_prev T_cur^-1`, with `T = [A R(q) | A c]`. All 6 faces agree to
+1-2 m in translation, with rotation about 0. In the old landed
+`Terrain.bin` dumps, every patch's delta agreed too (rotation within
+1.3e-6, translation within float32 rounding of |c|). So one matched patch
+gives the body's motion, including the LOD patches that are new this frame.
+
+**The design.**
+- **Capture on the CPU.** The retired CPU shadow tee (91d5b75) is restored,
+  scoped to the patch constant blocks. It records each patch's c, q,
+  static box rows (its identity across frames) and the body radius. There
+  are no per-patch GPU copies, reissues or extra draws.
+- **One transform per body, per eye and frame.**
+  - Patches are clustered into bodies by radius.
+  - Each patch is matched to last frame's by its static rows.
+  - The body's delta is the consensus of its matched patches, taken from
+    the nearest patch first, because float32 error grows with |c|.
+- **Coverage.** A pixel belongs to a body if its depth falls in the body's
+  depth interval and the pixel lies in its screen rectangle, both taken
+  from the patch boxes. No coverage pass is drawn.
+- **Motion shader.** World-path pixels with finite depth inside a body's
+  volume use the body's `[R|t]` (`A_prev^T D A_cur`) in place of the
+  camera's, under a new decision path 12, `celestial`. It replaces the
+  camera term rather than adding to it, so it is right whether the rows
+  carry the ship (normal space) or not (supercruise), with no regime test
+  and no jump gate in its way.
+- **Fallback.** With no matched patch the pixel gets the camera term, as
+  today.
+
+**Known residual.** The VS's distance-based LOD morph (`cb2[0..3]`) moves
+vertices non-rigidly, and no rigid transform covers that.
+
+**Verification.**
+- A rig over the real dumped constants (19 frames, both eyes) must:
+  - reproduce the measured deltas within 2 m;
+  - reproduce the moon centre's true jitter-free motion within 0.01 px of
+    the scratch scripts.
+- Then one flight: a fast approach to a planet, near or above c, with an
+  eye dump.
 
 ### 2026-10-06 -- the untested case, tested: a supercruise approach blurs the planet
 

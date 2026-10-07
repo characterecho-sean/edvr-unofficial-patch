@@ -3,6 +3,7 @@
 #include "ui_depth.h"
 #include "ui_depth_layer.h"
 #include "stellar_coverage.h"
+#include "orbital_width.h"    // the orbit lines' factor and the twin's private b13 (fix.ui_quality)
 #include "planet_motion.h"
 #include "gpu_interval.h"
 #include "ui_content.h"
@@ -121,6 +122,7 @@ constexpr uint64_t kSpritePs  = 0x63ABD86359B57D01ull;
 constexpr uint64_t kHoloPanelPs = kHoloLitPs;
 constexpr uint64_t kRingVs=0xB12F7A618E1BDE98ull, kRingPs=0x42AC0CACC9CDF72Bull;
 constexpr uint64_t kOrbitalVs=0xC7FA0C0F5DD49180ull, kOrbitalPs=0x6EEF165A350DA30Full;
+static_assert(kOrbitalVs==orbital_width::kVs && kOrbitalPs==orbital_width::kPs,"the orbit-line shader the module scales is the one this twin follows");
 // THE DRIVES' SMOKE (fix.temporal_aa_smoke, 2026-09-09): the trail a ship
 // leaves is a ribbon of fifty translucent quads -- vs 5E417E9DF2E7F9E6, ps
 // BD801F2FB02522EB, additive, a 1024x512 streak scrolled twice and a
@@ -193,7 +195,10 @@ ID3D11Buffer* g_savedHoloInfo=nullptr;
 ID3D11ShaderResourceView* g_savedSceneDepth=nullptr;
 bool g_sceneDepthBound=false;
 Microsoft::WRL::ComPtr<ID3D11VertexShader> g_orbitalVs,g_savedOrbitalVs;
-Microsoft::WRL::ComPtr<ID3D11Buffer> g_savedOrbitalInfo;
+Microsoft::WRL::ComPtr<ID3D11Buffer> g_savedOrbitalInfo,g_savedOrbitalWidth;
+// The twin's VS b13 (orbital_width.h): x = 2 x the factor the game's own draw of this line was made with, so the footprint
+// it writes is the visible line's. The twin reads it on every run, so it is bound on every run (2 when the draw was not scaled).
+orbital_width::Constants g_orbitalWidthCb;
 ID3D11ClassInstance* g_savedOrbitalClasses[256]{};
 UINT g_savedOrbitalClassCount=0;
 bool g_orbitalBound=false,g_stellarNoted[2]{};
@@ -3139,7 +3144,8 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         bool holo=false;
         const bool ring=shader==&g_depthShaders[6],orbital=shader==&g_depthShaders[7],sprite=shader==&g_depthShaders[5];
         if(orbital && !g_orbitalVs) g_orbitalVs.Attach(shaderSwapCreateVs(ctx,kUiOrbitalCoverageVsBytecode,sizeof(kUiOrbitalCoverageVsBytecode),"orbital coverage","stellar motion"));
-        if (target && scene && mask && (holoShader(shader) || sprite || ring || (orbital && g_orbitalVs))) {
+        ID3D11Buffer* orbitalWidth=orbital?g_orbitalWidthCb.get(ctx,orbital_width::factor()):nullptr;   // null declines the twin, like a missing shader
+        if (target && scene && mask && (holoShader(shader) || sprite || ring || (orbital && g_orbitalVs && orbitalWidth))) {
             holo=g_holoMotion[g_drawEye].prepare(ctx,scene,g_holoDraw,g_cockpitMetres,ring?1:orbital?2:sprite?3:0,shader->slot);
             if(holo && !g_holoNoted) {
                 g_holoNoted=true;
@@ -3303,6 +3309,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
             g_savedOrbitalClassCount=256;
             ctx->VSGetShader(&g_savedOrbitalVs,g_savedOrbitalClasses,&g_savedOrbitalClassCount);
             ctx->VSGetConstantBuffers(12,1,&g_savedOrbitalInfo);
+            ctx->VSGetConstantBuffers(orbital_width::kSlot,1,&g_savedOrbitalWidth);
         }
         if (hudScene) ctx->PSGetShaderResources(2, 1, &g_savedHudScene);
         if(surfaceComposite) ctx->PSGetShaderResources(14,1,&g_savedEdits);
@@ -3336,7 +3343,7 @@ bool uiDepthReissueBegin(ID3D11DeviceContext* ctx) {
         if(holo) {
             g_holoBound=true;
             ID3D11Buffer* info=g_holoMotion[g_drawEye].info(); ctx->PSSetConstantBuffers(12,1,&info);
-            if(orbital) { g_orbitalBound=true;ctx->VSSetShader(g_orbitalVs.Get(),nullptr,0);ctx->VSSetConstantBuffers(12,1,&info); }
+            if(orbital) { g_orbitalBound=true;ctx->VSSetShader(g_orbitalVs.Get(),nullptr,0);ctx->VSSetConstantBuffers(12,1,&info);ctx->VSSetConstantBuffers(orbital_width::kSlot,1,&orbitalWidth); }
         }
         if (hudScene) {
             g_hudSceneBound = true;
@@ -3386,6 +3393,7 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
             if(g_orbitalBound) {
                 ctx->VSSetShader(g_savedOrbitalVs.Get(),g_savedOrbitalClasses,g_savedOrbitalClassCount);
                 ctx->VSSetConstantBuffers(12,1,g_savedOrbitalInfo.GetAddressOf());
+                ctx->VSSetConstantBuffers(orbital_width::kSlot,1,g_savedOrbitalWidth.GetAddressOf());
             }
             if (g_hudSceneBound) ctx->PSSetShaderResources(2, 1, &g_savedHudScene);
             if (g_sceneDepthBound) ctx->PSSetShaderResources(2, 1, &g_savedSceneDepth);
@@ -3406,7 +3414,7 @@ void uiDepthReissueEnd(ID3D11DeviceContext* ctx) {
         g_savedPsClassCount=0;
         if(g_orbitalBound) {
             for(UINT i=0;i<g_savedOrbitalClassCount;++i) g_savedOrbitalClasses[i]->Release();
-            g_savedOrbitalClassCount=0;g_savedOrbitalVs.Reset();g_savedOrbitalInfo.Reset();g_orbitalBound=false;
+            g_savedOrbitalClassCount=0;g_savedOrbitalVs.Reset();g_savedOrbitalInfo.Reset();g_savedOrbitalWidth.Reset();g_orbitalBound=false;
         }
         if (g_savedHudScene) { g_savedHudScene->Release(); g_savedHudScene = nullptr; }
         g_hudSceneBound = false;
@@ -4330,7 +4338,7 @@ void uiDepthShutdown() {
     if(g_savedSceneDepth){g_savedSceneDepth->Release();g_savedSceneDepth=nullptr;}g_sceneDepthBound=false;
     for(UINT i=0;i<g_savedPsClassCount;++i)if(g_savedPsClasses[i])g_savedPsClasses[i]->Release();g_savedPsClassCount=0;
     for(auto& cached:g_sceneDepthRead){if(cached.srv)cached.srv->Release();if(cached.tex)cached.tex->Release();cached={};}
-    g_orbitalVs.Reset();g_stellarNoted[0]=g_stellarNoted[1]=false;
+    g_orbitalVs.Reset();g_savedOrbitalWidth.Reset();g_orbitalWidthCb.reset();g_stellarNoted[0]=g_stellarNoted[1]=false;
     if (g_savedFloorCb) { g_savedFloorCb->Release(); g_savedFloorCb = nullptr; }
     if (g_savedPs) {
         g_savedPs->Release();

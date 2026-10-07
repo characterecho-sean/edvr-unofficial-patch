@@ -337,10 +337,12 @@ MUTANTS = [
     wiring("iw-flag-put-away-before-the-draw", "flag-lifetime",
            [(W_END, ""), ("      const LadderDecision decision = beginPanelOverride<\n"
                           "          std::remove_reference_t<decltype(trace)>,\n"
-                          "          std::remove_reference_t<decltype(cpu)>>(trace, self, 'X', perInstance, instances, args);\n",
+                          "          std::remove_reference_t<decltype(cpu)>,\n"
+                          "          std::remove_reference_t<decltype(api)>>(trace, self, 'X', perInstance, instances, args);\n",
                           "      const LadderDecision decision = beginPanelOverride<\n"
                           "          std::remove_reference_t<decltype(trace)>,\n"
-                          "          std::remove_reference_t<decltype(cpu)>>(trace, self, 'X', perInstance, instances, args);\n" + W_END)],
+                          "          std::remove_reference_t<decltype(cpu)>,\n"
+                          "          std::remove_reference_t<decltype(api)>>(trace, self, 'X', perInstance, instances, args);\n" + W_END)],
            "the numbers are put away before the draw and the dim have used them"),
     wiring("iw-recognition-without-wants", "recognition", [("if (kind == 'X' && count == 6 && introCurveWants())", "if (kind == 'X' && count == 6)")],
            "the recogniser is asked at curvature 0 too"),

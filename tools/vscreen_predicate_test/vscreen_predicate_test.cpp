@@ -13,6 +13,7 @@
 
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/config.h"
+#include "../../src/common/plugin_cost.h"
 #include "../../src/d3d11/vscreen.h"
 #include "../../src/d3d11/binding_shadow.h"
 #include "../../src/d3d11/resolve_bind_fix.h"
@@ -929,6 +930,255 @@ bool testSunglareNomination(ID3D11Device* device, ID3D11DeviceContext* context) 
     return okay;
 }
 
+using edvr::VScreenPanelDistanceApiTestEvent;
+using edvr::VScreenPanelDistanceApiTestInput;
+using edvr::VScreenPanelDistanceApiTestResult;
+namespace draw_ladder = edvr::draw_ladder;
+namespace draw_ladder_trace = edvr::draw_ladder_trace;
+namespace plugin_cost = edvr::plugin_cost;
+
+constexpr std::uint16_t kPanelDistanceClaimSite = 66;
+constexpr std::uint16_t kPanelDistanceMapApiSite = 122;
+constexpr std::uint16_t kPanelDistanceUnmapApiSite = 123;
+constexpr std::uint16_t kPanelDistanceOverrideBindApiSite = 124;
+constexpr std::uint16_t kPanelDistanceRestoreBindApiSite = 125;
+
+bool panelApiSite(const EdvrPluginCostOwnerV1& owner, std::uint16_t site) {
+    return (owner.apiSiteMask[site / 64] & (std::uint64_t{1} << (site % 64))) != 0;
+}
+
+bool panelCpuSite(const EdvrPluginCostOwnerV1& owner, std::uint16_t site) {
+    return (owner.cpuSiteMask[site / 64] & (std::uint64_t{1} << (site % 64))) != 0;
+}
+
+bool panelEventSequence(const VScreenPanelDistanceApiTestResult& result,
+                        std::initializer_list<VScreenPanelDistanceApiTestEvent> expected) {
+    if (result.eventOverflow || result.eventCount != expected.size()) return false;
+    std::size_t i = 0;
+    for (const auto event : expected) {
+        if (result.events[i++] != static_cast<std::uint8_t>(event)) return false;
+    }
+    return true;
+}
+
+bool configurePanelCostWindow(ID3D11DeviceContext* ownerContext, bool apiSample) {
+    LARGE_INTEGER frequency{};
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return false;
+    edvrPluginCostShutdown();
+    edvrPluginCostConfigure(0x2u, static_cast<std::uint64_t>(frequency.QuadPart));
+    edvrPluginCostSetOwnerContext(ownerContext);
+    EdvrPluginCostWindowV1 discarded{};
+    // The first boundary publishes the render-owner thread and starts the
+    // requested API sample frame; its partial window is intentionally skipped.
+    (void)edvrPluginCostFrameBoundary(1, 0, 0, apiSample ? 1u : 0u, 0, &discarded);
+    return true;
+}
+
+bool completePanelCostWindow(bool apiSample, bool cpuSample,
+                             EdvrPluginCostWindowV1* window) {
+    if (!window) return false;
+    bool ready = false;
+    // Frame 1 is the collector's configure/reload discard. Frames 2..1801
+    // close one complete 1800-frame window while retaining the chosen axes.
+    for (std::uint32_t frame = 2; frame <= 1801; ++frame) {
+        const std::uint8_t nextApi = apiSample && frame < 1801 ? 1u : 0u;
+        ready = edvrPluginCostFrameBoundary(
+            frame, cpuSample ? 1u : 0u, apiSample ? 1u : 0u, nextApi, 0, window) != 0;
+    }
+    return ready;
+}
+
+bool testPanelDistanceApiTransaction(ID3D11DeviceContext* immediate,
+                                     ID3D11DeviceContext* deferred) {
+    bool okay = true;
+    std::uint64_t compositeIdentity = 0x50414E454Cull;
+    std::uint64_t overrideIdentity = 0x4F55524342ull;
+    alignas(float) std::uint8_t mappedStorage[256]{};
+    VScreenPanelDistanceApiTestInput base{};
+    base.context = immediate;
+    base.ownerContext = immediate;
+    base.shadowBytes = 16;
+    base.distanceIndex = 2;
+    base.distanceScale = 0.5f;
+    const float originalConstants[4] = {2.0f, 4.0f, 6.0f, 8.0f};
+    std::memcpy(base.shadow, originalConstants, sizeof(originalConstants));
+    base.compositeCb = &compositeIdentity;
+    base.ourCb = &overrideIdentity;
+    base.mappedStorage = mappedStorage;
+    base.mappedStorageBytes = base.shadowBytes;
+    base.kind = 'I';
+    base.drawCount = 6;
+    base.drawInstances = 1;
+    // DrawIndexed uses only start/base; startInstance belongs to the
+    // instanced families and must remain zero for this fixture.
+    base.drawArgs = {2, -3, 0};
+
+    const auto run = [&](const VScreenPanelDistanceApiTestInput& input,
+                         bool apiSample, bool cpuSample,
+                         VScreenPanelDistanceApiTestResult* result,
+                         EdvrPluginCostWindowV1* window) {
+        const bool configured = configurePanelCostWindow(input.ownerContext, apiSample);
+        const bool visited = configured &&
+            vScreenPanelDistanceApiTransactionTest(input, result);
+        const bool completed = visited && completePanelCostWindow(apiSample, cpuSample, window);
+        edvrPluginCostShutdown();
+        return configured && visited && completed;
+    };
+    const auto ownerAt = [](const EdvrPluginCostWindowV1& window)
+        -> const EdvrPluginCostOwnerV1& {
+        return window.owners[static_cast<std::uint8_t>(plugin_cost::Owner::OnFootPanel)];
+    };
+    const auto apiCallsAre = [&](const EdvrPluginCostWindowV1& window,
+                                 std::uint64_t transfer, std::uint64_t state) {
+        const auto& owner = ownerAt(window);
+        return owner.owner == static_cast<std::uint8_t>(plugin_cost::Owner::OnFootPanel) &&
+            owner.apiCalls[static_cast<std::uint8_t>(plugin_cost::ApiClass::Transfer)] == transfer &&
+            owner.apiCalls[static_cast<std::uint8_t>(plugin_cost::ApiClass::State)] == state;
+    };
+    const auto siteMaskIs = [&](const EdvrPluginCostWindowV1& window,
+                                bool map, bool unmap, bool apply, bool restore) {
+        const auto& owner = ownerAt(window);
+        return panelApiSite(owner, kPanelDistanceMapApiSite) == map &&
+            panelApiSite(owner, kPanelDistanceUnmapApiSite) == unmap &&
+            panelApiSite(owner, kPanelDistanceOverrideBindApiSite) == apply &&
+            panelApiSite(owner, kPanelDistanceRestoreBindApiSite) == restore;
+    };
+
+    VScreenPanelDistanceApiTestResult result{};
+    EdvrPluginCostWindowV1 window{};
+
+    // The production path calls Map, Unmap, binds the replacement, forwards
+    // the original draw, then restores the original constant buffer.
+    std::memset(mappedStorage, 0, sizeof(mappedStorage));
+    okay &= check(run(base, true, false, &result, &window),
+                  "PanelDistance successful path completes a sampled API window");
+    const float scaledConstants[4] = {2.0f, 4.0f, 3.0f, 8.0f};
+    const auto expectedEvents = {VScreenPanelDistanceApiTestEvent::Map,
+        VScreenPanelDistanceApiTestEvent::Unmap,
+        VScreenPanelDistanceApiTestEvent::OverrideBind,
+        VScreenPanelDistanceApiTestEvent::OriginalDraw,
+        VScreenPanelDistanceApiTestEvent::RestoreBind};
+    okay &= check(result.siteResult.outcome == draw_ladder::SiteOutcome::Claimed &&
+                      result.siteResult.verdict == static_cast<std::int16_t>(
+                          edvr::draw_ladder::VerdictOrdinal::kPanel) &&
+                      result.mapCalls == 1 && result.unmapCalls == 1 &&
+                      result.constantBufferCalls == 2 && result.originalDrawCalls == 1 &&
+                      result.mapArgumentsValid && result.unmapArgumentsValid &&
+                      result.overrideBindArgumentsValid && result.restoreBindArgumentsValid &&
+                      result.drawArgumentsValid && result.finalBoundCb == base.compositeCb &&
+                      panelEventSequence(result, expectedEvents),
+                  "PanelDistance actual visitor and forwarder preserve exact saved-original order and arguments");
+    okay &= check(result.mapSubresource == 0 &&
+                      result.mapType == static_cast<std::uint32_t>(D3D11_MAP_WRITE_DISCARD) &&
+                      result.mapFlags == 0 &&
+                      result.unmapSubresource == 0 && result.bindStartSlots[0] == 0 &&
+                      result.bindStartSlots[1] == 0 && result.bindCounts[0] == 1 &&
+                      result.bindCounts[1] == 1 && result.bindBuffers[0] == base.ourCb &&
+                      result.bindBuffers[1] == base.compositeCb &&
+                      result.mappedBytes == base.shadowBytes &&
+                      std::memcmp(result.mappedSnapshot, scaledConstants, sizeof(scaledConstants)) == 0,
+                  "PanelDistance scales only the selected shadow constant and restores the saved binding");
+    okay &= check(apiCallsAre(window, 2, 2) &&
+                      siteMaskIs(window, true, true, true, true),
+                  "SampledApi attributes successful Map/Unmap and both binds to OnFootPanel");
+
+    // A Map HRESULT failure still counts the actual Map call, but no later
+    // transfer or binding exists to attribute.
+    auto mapFailure = base;
+    mapFailure.mapHresult = static_cast<std::int32_t>(E_FAIL);
+    result = {};
+    okay &= check(run(mapFailure, true, false, &result, &window) &&
+                      result.mapCalls == 1 && result.unmapCalls == 0 &&
+                      result.constantBufferCalls == 0 && result.originalDrawCalls == 1 &&
+                      result.mapArgumentsValid && result.finalBoundCb == base.compositeCb &&
+                      panelEventSequence(result, {VScreenPanelDistanceApiTestEvent::Map,
+                                                  VScreenPanelDistanceApiTestEvent::OriginalDraw}) &&
+                      apiCallsAre(window, 1, 0) &&
+                      siteMaskIs(window, true, false, false, false),
+                  "failed Map records only the attempted transfer and preserves the original draw/binding");
+
+    // S_OK with a null mapped pointer is also a refused transaction and must
+    // not invent an Unmap or either state bind.
+    auto nullMap = base;
+    nullMap.mapReturnsNull = true;
+    result = {};
+    okay &= check(run(nullMap, true, false, &result, &window) &&
+                      result.mapCalls == 1 && result.unmapCalls == 0 &&
+                      result.constantBufferCalls == 0 && result.originalDrawCalls == 1 &&
+                      result.mapArgumentsValid &&
+                      panelEventSequence(result, {VScreenPanelDistanceApiTestEvent::Map,
+                                                  VScreenPanelDistanceApiTestEvent::OriginalDraw}) &&
+                      apiCallsAre(window, 1, 0) &&
+                      siteMaskIs(window, true, false, false, false),
+                  "null Map data records the attempted Map and no synthetic cleanup/binds");
+
+    // The API sample axis stays active while CPU sampling is independently off
+    // or on. A live trace capture must also force NoCpu without muting API data.
+    auto cpuSampled = base;
+    cpuSampled.cpuSample = true;
+    result = {};
+    okay &= check(run(cpuSampled, true, true, &result, &window) &&
+                      apiCallsAre(window, 2, 2) &&
+                      ownerAt(window).cpuTimedScopes > 0 &&
+                      panelCpuSite(ownerAt(window), kPanelDistanceClaimSite),
+                  "SampledApi remains independent when the actual claim also uses SampledCpu");
+    auto replay = base;
+    replay.traceEnabled = true;
+    replay.cpuSample = true;
+    result = {};
+    okay &= check(run(replay, true, true, &result, &window) &&
+                      result.token.valid() &&
+                      draw_ladder_trace::actionCountForTest(result.token) > 0 &&
+                      apiCallsAre(window, 2, 2) && ownerAt(window).cpuTimedScopes == 0,
+                  "active DrawLadderTrace selects NoCpu while retaining sampled PanelDistance API attribution");
+
+    // An unselected API frame still runs the rendering transaction; notes are
+    // erased. The warm-site seam deliberately bypasses the ladder's foreign
+    // context exit: a mismatched context selects NoApi while this prequalified
+    // claim still renders. An unclaimed draw performs no panel transaction.
+    auto unsampled = base;
+    result = {};
+    okay &= check(run(unsampled, false, false, &result, &window) &&
+                      result.siteResult.outcome == draw_ladder::SiteOutcome::Claimed &&
+                      result.mapCalls == 1 && result.unmapCalls == 1 &&
+                      result.constantBufferCalls == 2 && result.originalDrawCalls == 1 &&
+                      apiCallsAre(window, 0, 0) && siteMaskIs(window, false, false, false, false),
+                  "NoApi erases notes without changing the actual PanelDistance transaction");
+
+    auto foreignContext = base;
+    foreignContext.context = deferred;
+    foreignContext.ownerContext = immediate;
+    result = {};
+    okay &= check(run(foreignContext, true, false, &result, &window) &&
+                      result.siteResult.outcome == draw_ladder::SiteOutcome::Claimed &&
+                      result.siteResult.verdict == static_cast<std::int16_t>(
+                          edvr::draw_ladder::VerdictOrdinal::kPanel) &&
+                      result.mapCalls == 1 && result.unmapCalls == 1 &&
+                      result.constantBufferCalls == 2 && result.originalDrawCalls == 1 &&
+                      result.mapArgumentsValid && result.unmapArgumentsValid &&
+                      result.overrideBindArgumentsValid && result.restoreBindArgumentsValid &&
+                      result.drawArgumentsValid && result.finalBoundCb == base.compositeCb &&
+                      panelEventSequence(result, expectedEvents) &&
+                      result.mappedBytes == base.shadowBytes &&
+                      std::memcmp(result.mappedSnapshot, scaledConstants, sizeof(scaledConstants)) == 0 &&
+                      apiCallsAre(window, 0, 0) &&
+                      siteMaskIs(window, false, false, false, false),
+                  "foreign context selects NoApi without altering the prequalified warm-site transaction");
+
+    auto noClaim = base;
+    noClaim.distanceEnabled = false;
+    result = {};
+    okay &= check(run(noClaim, true, false, &result, &window) &&
+                      result.mapCalls == 0 && result.unmapCalls == 0 &&
+                      result.constantBufferCalls == 0 && result.originalDrawCalls == 1 &&
+                      apiCallsAre(window, 0, 0) &&
+                      siteMaskIs(window, false, false, false, false),
+                  "a draw with no PanelDistance claim leaves API counters and site mask empty");
+
+    edvrPluginCostShutdown();
+    return okay;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -988,6 +1238,7 @@ int main(int argc, char** argv) {
 
     if (immediate && deferred) {
         using namespace edvr::draw_ladder;
+        okay &= testPanelDistanceApiTransaction(immediate, deferred);
         // Local action-scope check only: the production forwardWithVerdict
         // receives a real WARP context and an injected thunk boundary. The
         // external caller's real draw implementation is intentionally not run.

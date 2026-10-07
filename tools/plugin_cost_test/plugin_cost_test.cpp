@@ -2,6 +2,7 @@
 #include "plugin_manifest.inc"
 #include "../../src/d3d11/cockpit_cost_sites.h"
 #include "../../src/d3d11/binding_cost_sites.h"
+#include "../../src/d3d11/panel_distance_cost_sites.h"
 #include "../../src/d3d11/draw_cpu_window.h"
 
 #include <algorithm>
@@ -91,6 +92,19 @@ struct FakeSink final {
     }
 };
 
+struct FakeApiSink final {
+    static inline unsigned calls = 0;
+    static inline pc::Owner lastOwner = pc::Owner::Core;
+    static inline uint16_t lastSite = 0;
+    static inline pc::ApiClass lastClass = pc::ApiClass::Work;
+    static void api(pc::Owner owner, uint16_t site, pc::ApiClass apiClass) noexcept {
+        ++calls;
+        lastOwner = owner;
+        lastSite = site;
+        lastClass = apiClass;
+    }
+};
+
 template <class Policy>
 void policyScope(uint64_t& handlers) {
     Policy::template note<pc::Owner::CockpitVisuals, 7>(pc::SiteEvent::Reached);
@@ -107,6 +121,11 @@ bool policyChecks() {
     static_assert(edvr::binding_cost::id(edvr::binding_cost::Site::GetType) == 113);
     static_assert(edvr::binding_cost::id(edvr::binding_cost::Site::BufferGetDesc) == 114);
     static_assert(edvr::binding_cost::id(edvr::binding_cost::Site::Texture2DGetDesc) == 115);
+    static_assert(edvr::panel_distance_cost::owner == pc::Owner::OnFootPanel);
+    static_assert(edvr::panel_distance_cost::id(edvr::panel_distance_cost::Site::Map) == 122);
+    static_assert(edvr::panel_distance_cost::id(edvr::panel_distance_cost::Site::Unmap) == 123);
+    static_assert(edvr::panel_distance_cost::id(edvr::panel_distance_cost::Site::OverrideVSSetCB) == 124);
+    static_assert(edvr::panel_distance_cost::id(edvr::panel_distance_cost::Site::RestoreVSSetCB) == 125);
     static_assert(static_cast<uint8_t>(pc::Owner::Core) == 9);
     static_assert(static_cast<uint8_t>(pc::ApiClass::ReadQuery) == 3);
     static_assert(static_cast<uint8_t>(pc::Owner::TemporalAa) == edvr::plugins::kPluginTemporalAa);
@@ -132,6 +151,16 @@ bool policyChecks() {
     ok &= check(FakeClock::reads == 2 && FakeSink::siteNotes == 2 &&
                 FakeSink::tickNotes == 1 && FakeSink::tickTotal == 10,
                 "sampled scope clocks only an invoked handler and reports exact ticks");
+
+    FakeApiSink::calls = 0;
+    pc::NoApi::template note<pc::Owner::OnFootPanel, 122, pc::ApiClass::Transfer>();
+    using SampledApi = pc::SampledApi<FakeApiSink>;
+    SampledApi::template note<pc::Owner::OnFootPanel, 122, pc::ApiClass::Transfer>();
+    ok &= check(FakeApiSink::calls == 1 &&
+                FakeApiSink::lastOwner == pc::Owner::OnFootPanel &&
+                FakeApiSink::lastSite == 122 &&
+                FakeApiSink::lastClass == pc::ApiClass::Transfer,
+                "NoApi is an empty policy and SampledApi forwards its fixed owner/site/class");
     return ok;
 }
 
@@ -495,30 +524,88 @@ bool productionCpuRouteChecks() {
                     "Auto and indirect bypass routes contain no classifier CPU clock path");
     }
 
-    const std::string chooser = functionBody(source, "LadderDecision withDrawLadderTrace(");
+    const std::string chooser = functionBody(source, "LadderDecision withDrawLadderTraceSelectedApi(");
+    const std::size_t selectedStart = source.find(
+        "LadderDecision withDrawLadderTraceSelectedApi(");
+    const std::size_t selectedOpen = source.find('{', selectedStart);
+    const std::string selectedSignature = selectedStart != std::string::npos &&
+        selectedOpen != std::string::npos
+        ? source.substr(selectedStart, selectedOpen - selectedStart) : std::string{};
     const std::size_t capturing = chooser.find("if (capturing)");
     const std::size_t captureNoCpu = chooser.find("plugin_cost::NoCpu noCpu;");
-    const std::size_t captureWork = chooser.find("work(trace, noCpu)");
+    const std::size_t captureWork = chooser.find("work(trace, noCpu, api)");
     const std::size_t selected = chooser.find("if (cpuSample && !suppressCpu)");
     const std::size_t sampled = chooser.find("plugin_cost::SampledCpu<> sampledCpu;");
     const std::size_t unsampled = chooser.find("plugin_cost::NoCpu noCpu;", sampled);
-    ok &= check(!chooser.empty() && capturing < captureNoCpu && captureNoCpu < captureWork &&
+    ok &= check(!chooser.empty() && !selectedSignature.empty() &&
+                selectedSignature.find("ApiPolicy& api") == std::string::npos &&
+                chooser.find("ApiPolicy api;") != std::string::npos &&
+                capturing < captureNoCpu && captureNoCpu < captureWork &&
                 captureWork < selected && selected < sampled && sampled < unsampled &&
-                chooser.find("return work(noTrace, noCpu);") != std::string::npos,
+                chooser.find("return work(noTrace, sampledCpu, api);") != std::string::npos &&
+                chooser.find("return work(noTrace, noCpu, api);") != std::string::npos &&
+                chooser.find("const bool suppressCpu = cpuSample && replayActive;") != std::string::npos &&
+                chooser.find("if (suppressCpu) edvrPluginCostMarkTraceSuppressed();") < capturing,
                 "trace capture selects NoCpu before the independent sampled-or-unsampled classifier path");
     if (captureWork != std::string::npos && selected > captureWork) {
         const std::string captureBranch = chooser.substr(capturing, selected - capturing);
         ok &= check(captureBranch.find("SampledCpu") == std::string::npos &&
-                    captureBranch.find("work(trace, noCpu)") != std::string::npos,
+                    captureBranch.find("work(trace, noCpu, api)") != std::string::npos,
                     "trace capture path has no sampled CPU policy or QPC handler scope");
     }
+    const std::string apiChooser = functionBody(source, "LadderDecision withDrawLadderTrace(");
+    const std::size_t msvcForceInline = source.find(
+        "#define EDVR_VSCREEN_FORCEINLINE __forceinline");
+    const std::size_t portableForceInline = source.find(
+        "#define EDVR_VSCREEN_FORCEINLINE inline", msvcForceInline);
+    const std::size_t outerDispatch = source.find(
+        "EDVR_VSCREEN_FORCEINLINE LadderDecision withDrawLadderTrace(");
+    const std::size_t forceInlineCleanup = source.find(
+        "#undef EDVR_VSCREEN_FORCEINLINE", outerDispatch);
+    const auto countIn = [](const std::string& text, const char* needle) {
+        std::size_t count = 0;
+        for (std::size_t pos = text.find(needle); pos != std::string::npos;
+             pos = text.find(needle, pos + 1)) ++count;
+        return count;
+    };
+    const std::size_t firstIf = apiChooser.find("if (");
+    const std::size_t gateEnd = apiChooser.find('{', firstIf);
+    std::string gate;
+    if (firstIf != std::string::npos && gateEnd != std::string::npos) {
+        for (const char ch : apiChooser.substr(firstIf, gateEnd - firstIf))
+            if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r') gate += ch;
+    }
+    const std::size_t sampledApi = apiChooser.find(
+        "return withDrawLadderTraceSelectedApi<plugin_cost::SampledApi<>>(");
+    const std::size_t firstDispatch = sampledApi;
+    const std::size_t noApi = apiChooser.find(
+        "return withDrawLadderTraceSelectedApi<plugin_cost::NoApi>(");
+    const std::size_t secondDispatch = noApi;
+    ok &= check(!apiChooser.empty() &&
+                gate == "if(plugin_cost::apiSampleHint()&&edvrPluginCostApiSampleContext(self)!=0)" &&
+                countIn(apiChooser, "plugin_cost::apiSampleHint()") == 1 &&
+                countIn(apiChooser, "edvrPluginCostApiSampleContext(self)") == 1 &&
+                countIn(apiChooser, "withDrawLadderTraceSelectedApi<") == 2 &&
+                apiChooser.find("plugin_cost::SampledApi<> api;") == std::string::npos &&
+                apiChooser.find("plugin_cost::NoApi api;") == std::string::npos &&
+                sampledApi != std::string::npos && firstDispatch < noApi &&
+                noApi != std::string::npos && secondDispatch == noApi &&
+                msvcForceInline < portableForceInline &&
+                portableForceInline < outerDispatch &&
+                outerDispatch < forceInlineCleanup &&
+                apiChooser.find("drawLadderTraceCaptureActive") == std::string::npos &&
+                apiChooser.find("edvrPluginCostApiSampleFrame") == std::string::npos,
+                "API policy selection short-circuits one inline TLS hint before one owner/context verifier independently of CPU/perf/replay sampling");
     return ok;
 }
 
 bool collectorHotPathChecks() {
     std::ifstream input("src/d3d11/plugin_cost.cpp", std::ios::binary);
-    if (!input) return check(false, "collector source is available for fixed-memory note-path verification");
+    std::ifstream headerInput("src/common/plugin_cost.h", std::ios::binary);
+    if (!input || !headerInput)
+        return check(false, "collector source/header are available for fixed-memory note-path verification");
     const std::string source((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    const std::string header((std::istreambuf_iterator<char>(headerInput)), std::istreambuf_iterator<char>());
     bool ok = true;
     constexpr const char* noteFunctions[] = {
         "extern \"C\" void edvrPluginCostNoteSite(",
@@ -546,6 +633,7 @@ bool collectorHotPathChecks() {
         "extern \"C\" void edvrPluginCostConfigure(");
     const std::string shutdown = functionBody(source,
         "extern \"C\" void edvrPluginCostShutdown(");
+    const std::string sampleSetter = functionBody(source, "void setApiSampleFrame(");
     ok &= check(!apiGuard.empty() &&
                 apiGuard.find("g_ownerContext.load(std::memory_order_acquire) != context") <
                     apiGuard.find("g_ownerThreadToken.load(std::memory_order_acquire)") &&
@@ -577,6 +665,20 @@ bool collectorHotPathChecks() {
     ok &= check(!shutdown.empty() && shutdown.find("g_ownerThreadToken.store(0") != std::string::npos &&
                 shutdown.find("g_ownerContext.store(nullptr") != std::string::npos,
                 "collector shutdown clears both owner-thread publication and registered context");
+    std::size_t rawFlagWrites = 0;
+    for (std::size_t pos = source.find("g_apiSampleFrame ="); pos != std::string::npos;
+         pos = source.find("g_apiSampleFrame =", pos + 1)) ++rawFlagWrites;
+    ok &= check(!sampleSetter.empty() &&
+                sampleSetter.find("g_apiSampleFrame = g_configured && enabled;") != std::string::npos &&
+                sampleSetter.find("detail::g_apiSampleHint = g_apiSampleFrame;") != std::string::npos &&
+                rawFlagWrites == 2,
+                "collector mirrors every API-frame transition into its TLS positive hint");
+    const std::size_t hintAccessor = header.find("inline bool apiSampleHint() noexcept {");
+    ok &= check(hintAccessor != std::string::npos &&
+                header.find("return detail::g_apiSampleHint;", hintAccessor) != std::string::npos &&
+                header.find("std::atomic", hintAccessor) == std::string::npos &&
+                header.find("edvrPluginCostApiSample", hintAccessor) == std::string::npos,
+                "API hint false path is an inline TLS read with no helper or atomic call");
     return ok;
 }
 
@@ -621,11 +723,13 @@ bool ownerContextChecks() {
     int ownerContext = 0;
     int otherContext = 0;
     edvrPluginCostShutdown();
+    ok &= check(!pc::apiSampleHint(), "shutdown begins with the current thread API hint clear");
     edvrPluginCostConfigure(1u, 1000000u);
     ok &= check(edvrPluginCostApiSampleOwnerThread() == 0,
                 "owner-thread getter rejects an unregistered collector during bootstrap");
     edvrPluginCostSetOwnerContext(&ownerContext);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+    ok &= check(!pc::apiSampleHint() &&
+                edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
                 edvrPluginCostApiSampleContext(&otherContext) == 0 &&
                 edvrPluginCostApiSampleOwnerThread() == 0,
                 "registered context alone does not sample before an owner frame boundary");
@@ -633,22 +737,23 @@ bool ownerContextChecks() {
     // Configuration discards its first close, but that existing boundary is
     // still the owner-thread publication point and opens the next API sample.
     ok &= check(edvrPluginCostFrameBoundary(1u, 0u, 0u, 1u, 0u, &window) == 0 &&
+                pc::apiSampleHint() &&
                 edvrPluginCostApiSampleContext(&ownerContext) == 1 &&
                 edvrPluginCostApiSampleOwnerThread() == 1,
                 "owner frame boundary publishes render-thread identity before enabling the next sample");
     edvrPluginCostConfigure(1u, 1000000u);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+    ok &= check(!pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
                 edvrPluginCostApiSampleOwnerThread() == 0,
                 "collector reconfiguration preserves owner registration but closes API sampling");
     edvrPluginCostSetApiSampleFrame(1u);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1,
+    ok &= check(pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext) == 1,
                 "collector reconfiguration preserves the published owner-thread identity");
     edvrPluginCostConfigure(1u, 1000000u);
     (void)edvrPluginCostFrameBoundary(2u, 0u, 0u, 1u, 0u, &window);
     ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1,
                 "the next owner boundary reopens sampling after configuration discards its first close");
     edvrPluginCostSetApiSampleFrame(0u);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+    ok &= check(!pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
                 edvrPluginCostApiSampleOwnerThread() == 0,
                 "both sample getters reject a closed API-sample frame");
     // The next frame remains closed when its next-sample flag is zero.
@@ -658,7 +763,7 @@ bool ownerContextChecks() {
     ok &= check(edvrPluginCostApiSampleOwnerThread() == 0,
                 "closed API frame leaves owner-thread sampling disabled");
     edvrPluginCostSetApiSampleFrame(1u);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 1 &&
+    ok &= check(pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext) == 1 &&
                 edvrPluginCostApiSampleOwnerThread() == 1,
                 "owner getters accept only the open API-sample frame");
 
@@ -678,7 +783,7 @@ bool ownerContextChecks() {
     // Simulate a quiescent owner transfer: registration clears publication,
     // then the next owner-only boundary establishes the new thread token.
     edvrPluginCostSetOwnerContext(&ownerContext);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0,
+    ok &= check(!pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext) == 0,
                 "re-registering a context invalidates its previous owner-thread token");
     std::atomic<uint8_t> newOwnerAccepted{0};
     std::atomic<uint8_t> newOwnerContextAccepted{0};
@@ -698,7 +803,7 @@ bool ownerContextChecks() {
                 "owner transfer accepts the new frame thread and rejects the previous thread");
 
     edvrPluginCostSetOwnerContext(nullptr);
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+    ok &= check(!pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
                 edvrPluginCostApiSampleOwnerThread() == 0,
                 "clearing the owner context disables the API sample getter");
     edvrPluginCostConfigure(1u, 1000000u);
@@ -715,9 +820,130 @@ bool ownerContextChecks() {
     ok &= check(completed && window.completedApiSampleFrames == 2,
                 "complete API report counts sampled empty frames and excludes unsampled frames");
     edvrPluginCostShutdown();
-    ok &= check(edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
+    ok &= check(!pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext) == 0 &&
                 edvrPluginCostApiSampleOwnerThread() == 0,
                 "collector shutdown clears owner context and thread publication");
+    return ok;
+}
+
+bool staleApiHintTransferChecks() {
+    bool ok = true;
+    int ownerContext = 0;
+    std::atomic<uint8_t> oldOwnerReady{0};
+    std::atomic<uint8_t> allowOldOwnerCheck{0};
+    std::atomic<uint8_t> oldHintInitiallyPositive{0};
+    std::atomic<uint8_t> oldHintStayedPositive{0};
+    std::atomic<uint8_t> oldOwnerWasRejected{0};
+
+    edvrPluginCostShutdown();
+    edvrPluginCostConfigure(1u, 1000000u);
+    edvrPluginCostSetOwnerContext(&ownerContext);
+    std::thread oldOwner([&] {
+        EdvrPluginCostWindowV1 local{};
+        (void)edvrPluginCostFrameBoundary(1u, 0u, 0u, 1u, 0u, &local);
+        oldHintInitiallyPositive.store(pc::apiSampleHint() ? 1u : 0u,
+                                       std::memory_order_release);
+        oldOwnerReady.store(1u, std::memory_order_release);
+        while (allowOldOwnerCheck.load(std::memory_order_acquire) == 0)
+            std::this_thread::yield();
+        oldHintStayedPositive.store(pc::apiSampleHint() ? 1u : 0u,
+                                    std::memory_order_release);
+        oldOwnerWasRejected.store(
+            edvrPluginCostApiSampleContext(&ownerContext) == 0 ? 1u : 0u,
+            std::memory_order_release);
+    });
+    while (oldOwnerReady.load(std::memory_order_acquire) == 0)
+        std::this_thread::yield();
+
+    // Registration and the next owner boundary transfer authority to this
+    // thread. The former thread's TLS hint intentionally remains positive;
+    // only the context/thread verifier may reject that stale hint.
+    edvrPluginCostSetOwnerContext(&ownerContext);
+    EdvrPluginCostWindowV1 window{};
+    (void)edvrPluginCostFrameBoundary(2u, 0u, 0u, 1u, 0u, &window);
+    allowOldOwnerCheck.store(1u, std::memory_order_release);
+    oldOwner.join();
+    ok &= check(oldHintInitiallyPositive.load(std::memory_order_acquire) == 1 &&
+                oldHintStayedPositive.load(std::memory_order_acquire) == 1 &&
+                oldOwnerWasRejected.load(std::memory_order_acquire) == 1 &&
+                pc::apiSampleHint() &&
+                edvrPluginCostApiSampleContext(&ownerContext) == 1,
+                "stale positive TLS hint after owner transfer is harmless and current owner is accepted");
+
+    edvrPluginCostShutdown();
+    return ok;
+}
+
+bool panelDistanceApiPolicyChecks() {
+    bool ok = true;
+    constexpr uint8_t owner = static_cast<uint8_t>(pc::Owner::OnFootPanel);
+    constexpr uint16_t map = edvr::panel_distance_cost::id(
+        edvr::panel_distance_cost::Site::Map);
+    constexpr uint16_t unmap = edvr::panel_distance_cost::id(
+        edvr::panel_distance_cost::Site::Unmap);
+    constexpr uint16_t over = edvr::panel_distance_cost::id(
+        edvr::panel_distance_cost::Site::OverrideVSSetCB);
+    constexpr uint16_t restore = edvr::panel_distance_cost::id(
+        edvr::panel_distance_cost::Site::RestoreVSSetCB);
+    static_assert(owner == edvr::plugins::kPluginOnFootPanel);
+    static_assert(static_cast<uint8_t>(pc::ApiClass::Transfer) == 1);
+    static_assert(static_cast<uint8_t>(pc::ApiClass::State) == 2);
+
+    int ownerContext = 0;
+    EdvrPluginCostWindowV1 window{};
+    edvrPluginCostShutdown();
+    pc::NoApi::template note<pc::Owner::OnFootPanel, map, pc::ApiClass::Transfer>();
+    ok &= check(!pc::apiSampleHint(), "unsampled PanelDistance API path starts silent");
+    edvrPluginCostConfigure(1u, 1000000u);
+    edvrPluginCostSetOwnerContext(&ownerContext);
+    (void)edvrPluginCostFrameBoundary(0u, 0u, 0u, 1u, 0u, &window);
+
+    // The classifier policy is NoCpu, and replay marks the CPU frame
+    // suppressed. API notes remain independently eligible on the positive,
+    // owner-verified sample gate.
+    pc::NoCpu::template note<pc::Owner::OnFootPanel, map>(pc::SiteEvent::Invoked);
+    edvrPluginCostMarkTraceSuppressed();
+    if (pc::apiSampleHint() && edvrPluginCostApiSampleContext(&ownerContext)) {
+        pc::SampledApi<>::template note<pc::Owner::OnFootPanel, map,
+                                        pc::ApiClass::Transfer>();
+        pc::SampledApi<>::template note<pc::Owner::OnFootPanel, unmap,
+                                        pc::ApiClass::Transfer>();
+        pc::SampledApi<>::template note<pc::Owner::OnFootPanel, over,
+                                        pc::ApiClass::State>();
+        pc::SampledApi<>::template note<pc::Owner::OnFootPanel, restore,
+                                        pc::ApiClass::State>();
+        // Invalid owner/site/class inputs must be ignored without indexing a
+        // mask or class array outside its fixed bounds.
+        edvrPluginCostNoteD3dCall(pc::kOwnerCount, map,
+                                  static_cast<uint8_t>(pc::ApiClass::Transfer));
+        edvrPluginCostNoteD3dCall(owner, pc::kMaxSiteId + 1,
+                                  static_cast<uint8_t>(pc::ApiClass::Transfer));
+        edvrPluginCostNoteD3dCall(owner, map, pc::kApiClassCount);
+    } else {
+        pc::NoApi::template note<pc::Owner::OnFootPanel, map,
+                                 pc::ApiClass::Transfer>();
+    }
+    ok &= check(pc::apiSampleHint() &&
+                edvrPluginCostApiSampleContext(&ownerContext) == 1,
+                "positive TLS hint still requires registered context verification");
+
+    bool completed = edvrPluginCostFrameBoundary(1u, 1u, 1u, 0u, 0u, &window) != 0;
+    for (uint32_t frame = 2; frame <= pc::kWindowFrameCount && !completed; ++frame)
+        completed = edvrPluginCostFrameBoundary(frame, 0u, 0u, 0u, 0u, &window) != 0;
+    const auto& panel = window.owners[owner];
+    const uint64_t expectedMask = (uint64_t{1} << (map - 64)) |
+        (uint64_t{1} << (unmap - 64)) | (uint64_t{1} << (over - 64)) |
+        (uint64_t{1} << (restore - 64));
+    ok &= check(completed && window.cpuTraceSuppressedFrames == 1 &&
+                panel.cpuObserved == 0 && panel.apiObserved == 1 &&
+                panel.apiCalls[static_cast<uint8_t>(pc::ApiClass::Transfer)] == 2 &&
+                panel.apiCalls[static_cast<uint8_t>(pc::ApiClass::State)] == 2 &&
+                panel.apiSiteMask[0] == 0 && panel.apiSiteMask[1] == expectedMask,
+                "PanelDistance Map/Unmap and state calls aggregate under OnFootPanel through NoCpu/replay with high-word coverage");
+    ok &= check(!pc::apiSampleHint(), "unsampled next frame clears the positive hint");
+    pc::NoApi::template note<pc::Owner::OnFootPanel, map, pc::ApiClass::Transfer>();
+    edvrPluginCostShutdown();
+    ok &= check(!pc::apiSampleHint(), "shutdown clears the current thread API hint");
     return ok;
 }
 
@@ -915,6 +1141,8 @@ bool run(bool full) {
         ok &= collectorHotPathChecks();
         ok &= collectorLifecycleChecks();
         ok &= ownerContextChecks();
+        ok &= staleApiHintTransferChecks();
+        ok &= panelDistanceApiPolicyChecks();
         ok &= drawCpuWindowProductionChecks();
         ok &= collectorLifecycleChecks();
     }

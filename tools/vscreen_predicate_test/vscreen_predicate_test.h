@@ -64,6 +64,72 @@ struct VScreenForwardingTestResult final {
     std::int32_t engineVelocityCacheFamilyAfter = -1;
 };
 
+// Runs the production PanelDistance claim, forwarded draw, and restoration
+// through the test-only saved-original callbacks. The collector's owner/context
+// and API-frame state are configured by the serialized rig before this call.
+// This is a prequalified warm-site seam: it does not run the common foreign
+// context exit or panel eligibility sites. Context mismatch tests API selection.
+struct VScreenPanelDistanceApiTestInput final {
+    ID3D11DeviceContext* context = nullptr;
+    ID3D11DeviceContext* ownerContext = nullptr;
+    bool traceEnabled = false;
+    bool cpuSample = false;
+    bool distanceEnabled = true;
+    std::uint8_t shadow[256]{};
+    std::uint32_t shadowBytes = 0;
+    std::uint32_t distanceIndex = 0;
+    float distanceScale = 1.0f;
+    void* compositeCb = nullptr;
+    void* ourCb = nullptr;
+    std::int32_t mapHresult = 0;
+    bool mapReturnsNull = false;
+    std::uint8_t* mappedStorage = nullptr;
+    std::uint32_t mappedStorageBytes = 0;
+    char kind = 'I';
+    std::uint32_t drawCount = 3;
+    std::uint32_t drawInstances = 1;
+    edvr::DrawArgs drawArgs{};
+};
+
+enum class VScreenPanelDistanceApiTestEvent : std::uint8_t {
+    Map = 1,
+    Unmap = 2,
+    OverrideBind = 3,
+    OriginalDraw = 4,
+    RestoreBind = 5,
+};
+
+struct VScreenPanelDistanceApiTestResult final {
+    draw_ladder_trace::Token token{};
+    draw_ladder::SiteResult siteResult{};
+    std::uint32_t mapCalls = 0;
+    std::uint32_t unmapCalls = 0;
+    std::uint32_t constantBufferCalls = 0;
+    std::uint32_t originalDrawCalls = 0;
+    std::uint32_t mapSubresource = 0;
+    std::uint32_t mapType = 0;
+    std::uint32_t mapFlags = 0;
+    std::uint32_t unmapSubresource = 0;
+    std::uint32_t bindStartSlots[2]{};
+    std::uint32_t bindCounts[2]{};
+    void* bindBuffers[2]{};
+    void* finalBoundCb = nullptr;
+    bool mapArgumentsValid = false;
+    bool unmapArgumentsValid = false;
+    bool overrideBindArgumentsValid = false;
+    bool restoreBindArgumentsValid = false;
+    bool drawArgumentsValid = false;
+    bool eventOverflow = false;
+    std::uint8_t eventCount = 0;
+    std::uint8_t events[5]{};
+    std::uint32_t mappedBytes = 0;
+    std::uint8_t mappedSnapshot[256]{};
+};
+
+bool vScreenPanelDistanceApiTransactionTest(
+    const VScreenPanelDistanceApiTestInput& input,
+    VScreenPanelDistanceApiTestResult* result) noexcept;
+
 struct VScreenEyeCensusTestFilter final {
     std::uint8_t mode = 0;
     std::uint32_t width = 0;

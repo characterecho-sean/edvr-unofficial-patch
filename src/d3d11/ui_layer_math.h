@@ -44,6 +44,7 @@
 #include <cstring>
 
 #include "holo_families.h"  // the crisp take's eight hologram VS hashes: kHoloGeneric's match list
+#include "supercruise_lines.h"  // the orbit lines' and the supercruise bars' shader pairs
 #include "holo_material.h"  // the cockpit holo panels' second vertex shader (Disable GUI effects)
 
 namespace edvr {
@@ -602,6 +603,21 @@ enum class UiLayerFamily : uint8_t {
                    // hashes: the 30 s table prints one row, and the per-draw
                    // first-seen lines name the VS hash (ui_layer.cpp's
                    // noteFamily keys on (family, decision, vs, ps)).
+    kOrbitLines,       // the supercruise orbit lines and ring lines (vs C7FA0C0F5DD49180 with
+                       // its pixel shader 6EEF165A350DA30F: supercruise_lines.h): SCENE geometry,
+                       // not interface, taken into the HDR layer so they are drawn at the layer's
+                       // density instead of the render's and composited after the upscale. Its
+                       // OWN family, not kHoloGeneric: that list also feeds ui_depth's hologram
+                       // pass, which must not see a line.
+    kSupercruiseBars,  // the supercruise bars (vs A47A3315FFF5E2E4 with ps 869FFF43E875906E): a
+                       // line list, taken into the HDR layer through a private geometry shader
+                       // that gives each 1 px segment a smooth strip (supercruise_bars.h)
+    kSpaceDust,        // the supercruise space dust (vs 9BFC7FD232328391 with ps DBF1725726018F52):
+                       // 300 additive ribbon quads, taken into the HDR layer as they are -- the
+                       // vertex shader builds the ribbon's width in world units, so nothing about
+                       // the draw changes but where it lands. Not a scene LINE (no width to give
+                       // it): it is exempt from the density rule and is taken whatever the layer's
+                       // size (uiLayerFamilyIsSceneLines does not name it)
     kAfterUi,    // not the interface at all: an owner draw that WRITES an eye
                  // target the UI was already taken from this frame
                  // (uiLayerNoteOther's 'W' case), taken into the same layer
@@ -623,9 +639,34 @@ inline const char* uiLayerFamilyName(UiLayerFamily f) {
         case UiLayerFamily::kFlightHud: return "flight HUD";
         case UiLayerFamily::kSprite: return "target sprite";
         case UiLayerFamily::kHoloGeneric: return "hologram";
+        case UiLayerFamily::kOrbitLines: return "orbit lines";
+        case UiLayerFamily::kSupercruiseBars: return "supercruise bars";
+        case UiLayerFamily::kSpaceDust: return "space dust";
         case UiLayerFamily::kAfterUi: return "after the UI";
         default: return "none";
     }
+}
+
+// The families the crisp take draws into the eye's HDR layer when they are drawn into the lit HDR scene target (the
+// cockpit's holo panels, the flight HUD, the target sprite, the eight holograms, and the three supercruise draws: the
+// orbit lines, the bars and the space dust). The ONE list: ui_layer.cpp's decision and the rigs' routing model both ask it.
+inline bool uiLayerFamilyTakesHdr(UiLayerFamily f) {
+    return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
+           f == UiLayerFamily::kHoloGeneric || f == UiLayerFamily::kOrbitLines ||
+           f == UiLayerFamily::kSupercruiseBars || f == UiLayerFamily::kSpaceDust;
+}
+
+// The two families that are scene geometry rather than interface: the layer takes them for DENSITY alone (their lines
+// are drawn at the layer's resolution instead of the render's), so a layer that is not wider than the render has
+// nothing to give them and they stay in the scene (UiLayerDecision::kNoDensityGain).
+inline bool uiLayerFamilyIsSceneLines(UiLayerFamily f) {
+    return f == UiLayerFamily::kOrbitLines || f == UiLayerFamily::kSupercruiseBars;
+}
+
+// Whether the layer is wider than the render it replaces the lines of: the layer's size against the eye target's, both
+// axes (a layer that is wider in one only is not a density gain the strip's width arithmetic is made for).
+inline bool uiLayerWiderThanRender(uint32_t layerW, uint32_t layerH, uint32_t renderW, uint32_t renderH) {
+    return renderW != 0 && renderH != 0 && layerW > renderW && layerH > renderH;
 }
 
 // After the UI: whether a later owner draw that WRITES an eye target the UI
@@ -826,10 +867,17 @@ inline UiLayerFamily uiLayerFamilyFor(const UiFamilyFacts& f, UiFamilyWhy* why =
         // one the game switches in with Disable GUI effects on. An unnamed pair
         // gets no decision and no refusal line (2026-10-01: soft, ghosting panels
         // for a user with the setting on), which is why ui_scene_composites.h
-        // counts the composites left in the scene.
+        // counts the composites left in the scene. The three supercruise draws (the
+        // orbit lines, the bars and the space dust) are named by their shader PAIR,
+        // here on the HDR target alone: the vertex shaders of the bars and of the dust
+        // are also seen with another pixel shader (the flat recipes), and a draw of
+        // theirs into the post-tonemap target is nothing this names.
         out = uiVsIsHoloPanel(f.vs)    ? UiLayerFamily::kHolo
               : f.vs == kUiVsFlightHud ? UiLayerFamily::kFlightHud
               : f.vs == kUiVsSprite    ? UiLayerFamily::kSprite
+              : (f.vs == kUiVsOrbitLines && f.ps == kUiPsOrbitLines) ? UiLayerFamily::kOrbitLines
+              : (f.vs == kUiVsSupercruiseBars && f.ps == kUiPsSupercruiseBars) ? UiLayerFamily::kSupercruiseBars
+              : (f.vs == kUiVsSpaceDust && f.ps == kUiPsSpaceDust) ? UiLayerFamily::kSpaceDust
               : (uiHoloGenericHash(f.vs) ||
                  (f.vs == kHoloTargetSphere &&
                   (f.ps == 0xEA02FAC2BD6C643Cull || f.ps == 0xE95634B0F61D218Full)))
@@ -1004,6 +1052,9 @@ enum class UiLayerDecision : uint8_t {
                      // frame); the draw stays in the game's frame, as stock
     kNotArmed,       // no door frame for this eye last frame (first frames,
                      // key just on, pass not running)
+    kNoDensityGain,  // an orbit-line or supercruise-bar draw (scene geometry the layer takes
+                     // for density alone) while the layer is not wider than the render: the
+                     // layer has nothing to give it and it stays in the scene
     kMrt,            // more than one render target bound, or PS UAVs
     kDepthStencilTest,  // tests depth or stencil against a depth target the
                         // layer cannot reproduce at its size (the format, an
@@ -1012,6 +1063,10 @@ enum class UiLayerDecision : uint8_t {
                         // (the loader panel, the curved screen) whose own
                         // geometry the write-back cannot re-issue
     kBlendRefused,   // a blend with no premultiplied or multiplicative form
+    kFamilyNotReady, // the family's own private pass is not available (the supercruise bars'
+                     // geometry shader, its constants or its rasterizer state could not be
+                     // made, or the game has a geometry shader of its own bound): the draw
+                     // stays in the scene, and the module's line says which
     kLayerFailed,    // the layer (or its depth target) could not be created
     kCount
 };
@@ -1033,6 +1088,8 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
         case UiLayerDecision::kToneLate:
             return "arrived after its eye's tonemap re-issue (cannot publish this frame)";
         case UiLayerDecision::kNotArmed: return "layer not armed";
+        case UiLayerDecision::kNoDensityGain:
+            return "the layer is not wider than the render (nothing to gain; left in the scene)";
         case UiLayerDecision::kMrt: return "more than one render target, or pixel-shader UAVs";
         case UiLayerDecision::kDepthStencilTest:
             return "tests depth or stencil against a target the layer cannot reproduce";
@@ -1040,6 +1097,8 @@ inline const char* uiLayerDecisionName(UiLayerDecision d) {
             return "writes depth or stencil through a substituted geometry";
         case UiLayerDecision::kBlendRefused:
             return "blend with no premultiplied or multiplicative form";
+        case UiLayerDecision::kFamilyNotReady:
+            return "the family's own private pass is not available (left in the scene)";
         case UiLayerDecision::kLayerFailed: return "layer creation failed";
         default: return "?";
     }
@@ -1075,9 +1134,18 @@ struct UiLayerDrawFacts {
     bool substituted = false;     // drawn by a substitution's own geometry
     UiBlendShape blend = UiBlendShape::kRefused;
     bool layerReady = true;       // the eye's layer exists at the wanted size
+    // The orbit lines and the supercruise bars (uiLayerFamilyIsSceneLines) are scene geometry the layer takes for DENSITY: a
+    // layer that is not wider than the render (uiLayerWiderThanRender) has nothing to give them. True for every other
+    // family, and by default, so a family that is not a scene line is decided exactly as it always was.
+    bool layerWider = true;
+    // The family's own private pass exists (the supercruise bars' geometry shader and its state: supercruise_bars.h). True by
+    // default and for every family but that one.
+    bool familyReady = true;
     // The HDR HUD take is armed (with fix.ui_quality) and this is one of the
     // cockpit HUD families (the holo panels, the flight HUD, the target
-    // sprite, and the crisp take's eight hologram families as kHoloGeneric)
+    // sprite, and the crisp take's eight hologram families as kHoloGeneric --
+    // and the three supercruise draws, the orbit lines, the bars and the space
+    // dust: uiLayerFamilyTakesHdr says which)
     // drawn into the
     // lit HDR (pre-tonemap) eye target: the draw goes to the HDR layer, and
     // the tonemap re-issue brings it back over the finished eye. Every other
@@ -1104,6 +1172,9 @@ inline UiLayerDecision uiLayerDecide(const UiLayerDrawFacts& f) {
     if (f.late) return UiLayerDecision::kLate;
     if (f.crispHdr && f.lateTone) return UiLayerDecision::kToneLate;
     if (!f.armed) return UiLayerDecision::kNotArmed;
+    // After the arming (the layer's size is known from the door) and before any state is read: a scene line the layer cannot
+    // draw any denser than the scene does is not taken.
+    if (!f.layerWider && uiLayerFamilyIsSceneLines(f.family)) return UiLayerDecision::kNoDensityGain;
     if (f.mrt) return UiLayerDecision::kMrt;
     if (f.ds.tests() && !f.dsReproducible) return UiLayerDecision::kDepthStencilTest;
     if (f.ds.writes() && f.substituted) return UiLayerDecision::kSubstitutedWrite;
@@ -1120,6 +1191,9 @@ inline UiLayerDecision uiLayerDecide(const UiLayerDrawFacts& f) {
     // unconvertible blend or depth-stencil state is what the refusal net is
     // for, and it names the state that refused.
     if (f.crispHdr && f.blend == UiBlendShape::kMultiply) return UiLayerDecision::kBlendRefused;
+    // Before the layer's own readiness: a draw the family's private pass cannot serve must not be the reason the HDR layer is
+    // made (ui_layer.cpp asks the family first, then the layer).
+    if (!f.familyReady && f.family == UiLayerFamily::kSupercruiseBars) return UiLayerDecision::kFamilyNotReady;
     if (!f.layerReady) return UiLayerDecision::kLayerFailed;
     return UiLayerDecision::kRedirect;
 }
@@ -1212,10 +1286,12 @@ inline const char* uiLayerDecisionKey(UiLayerDecision d) {
         case UiLayerDecision::kLate: return "late";
         case UiLayerDecision::kToneLate: return "tone-late";
         case UiLayerDecision::kNotArmed: return "not-armed";
+        case UiLayerDecision::kNoDensityGain: return "no-density-gain";
         case UiLayerDecision::kMrt: return "mrt";
         case UiLayerDecision::kDepthStencilTest: return "depth-stencil-test";
         case UiLayerDecision::kSubstitutedWrite: return "substituted-write";
         case UiLayerDecision::kBlendRefused: return "blend-refused";
+        case UiLayerDecision::kFamilyNotReady: return "family-not-ready";
         case UiLayerDecision::kLayerFailed: return "layer-failed";
         default: return "?";
     }

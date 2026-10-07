@@ -39,6 +39,8 @@
 #include "shader_swap.h"
 #include "ui_depth.h"      // uiDepthEyeOfTarget: the eye, by the pass's own table
 #include "ui_panel_scale.h" // the engine-side panel sizing, configured and ticked with the key
+#include "orbital_width.h"  // the orbit lines' half-width at the same factor: its 30 s line follows the panels'
+#include "supercruise_bars.h"  // the supercruise bars' private geometry-shader pass: its readiness and its 30 s line
 #include "ui_surfaces.h"   // the instruments: the target, the frame count, the atlas line
 #include "vscreen.h"       // the raw OM/RS entry points, vScreenIsEyeSized, vScreenPanelSize
 #include "vr_world_mips.h"  // the VR world route: the mipped screen and its sampler (the re-issue's inputs)
@@ -2538,6 +2540,29 @@ void logMemory() {
                     uiLayerMB(total));
 }
 
+// The layer's half of a scene-line family's own 30 s line (the orbit lines': orbital_width.cpp; the supercruise bars':
+// supercruise_bars.cpp), from the decided table the families line reads: how many draws the layer took this window, at what
+// rate, and how many it left in the scene by decision key. A window in which the code never ran says "0 in the HDR layer, 0
+// left in the scene" -- no draw reached the decision at all -- which is not what a decline looks like.
+std::string sceneLineLayerText(UiLayerFamily family, double frames) {
+    const size_t fi = static_cast<size_t>(family);
+    const uint64_t taken = g_win.decided[fi][static_cast<size_t>(UiLayerDecision::kRedirect)];
+    std::string left;
+    uint64_t leftTotal = 0;
+    for (size_t d = 1; d < static_cast<size_t>(UiLayerDecision::kCount); ++d) {
+        const uint64_t n = g_win.decided[fi][d];
+        if (!n) continue;
+        leftTotal += n;
+        appendf(left, "%s%s %llu", left.empty() ? "" : ", ", uiLayerDecisionKey(static_cast<UiLayerDecision>(d)),
+                static_cast<unsigned long long>(n));
+    }
+    std::string text;
+    appendf(text, "%llu in the HDR layer (%.2f a frame), %llu left in the scene%s%s%s",
+            static_cast<unsigned long long>(taken), static_cast<double>(taken) / frames,
+            static_cast<unsigned long long>(leftTotal), left.empty() ? "" : " (", left.c_str(), left.empty() ? "" : ")");
+    return text;
+}
+
 void logTotals(double seconds) {
     // The frosted base's own count: the flight's answer to "did the station menu's base go through the
     // remapped program" -- admitted must climb with the panels, refused stay 0.
@@ -2572,6 +2597,14 @@ void logTotals(double seconds) {
     // The panels and the layer on lines of their own: Log's line holds 1200
     // characters. The panels' line is the engine-side sizing's own.
     uiPanelScaleLog();     // the engine-side panel sizing: its factor, or why it stands down
+    // The two supercruise line draws (2026-10-07): the orbit lines made at the same factor (orbital_width.h), or why they are not,
+    // and how many of them the HDR layer took; the supercruise bars' own pass (supercruise_bars.h) and how many it took.
+    orbitalWidthLog(sceneLineLayerText(UiLayerFamily::kOrbitLines, frames).c_str());
+    supercruiseBarsLog(sceneLineLayerText(UiLayerFamily::kSupercruiseBars, frames).c_str());
+    // The space dust has no module of its own (it is taken as the game draws it): its whole account is the decided table's,
+    // printed with zeros like the other two so that a log without the line is a build that never ran it, and a window in which no
+    // dust reached the decision reads "0 in the HDR layer, 0 left in the scene" -- which is not what a decline looks like.
+    Log::get().note("ui quality: space dust: %s.", sceneLineLayerText(UiLayerFamily::kSpaceDust, frames).c_str());
     uiSurfacesLogAtlas();  // the glyph atlas instrument's write counts, when one is watched
     // The price: each stage's GPU time per eye-frame it ran in, and the
     // route's -- every stage of an eye-frame added up -- per eye-frame the
@@ -3064,16 +3097,18 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     f.ldrView = kind == 2;
     // The HDR HUD take (Phases 1-3: the cockpit HUD families -- the holo
     // panels, the flight HUD, the target sprite, and the crisp take's eight
-    // hologram families as kHoloGeneric): a draw of one into the lit HDR pre-tonemap
+    // hologram families as kHoloGeneric -- and, since 2026-10-07, the two supercruise
+    // line draws): a draw of one into the lit HDR pre-tonemap
     // eye target goes to the eye's HDR HUD layer instead of the kHdrTarget
     // refusal. The take arms with the layer (fix.ui_quality), and every
-    // other refusal applies to it exactly as to the LDR take.
-    f.crispHdr = detail::g_uiLayerCrispOn && f.eyeTarget && !f.ldrView &&
-                 (family == UiLayerFamily::kHolo || family == UiLayerFamily::kFlightHud ||
-                  family == UiLayerFamily::kSprite || family == UiLayerFamily::kHoloGeneric);
+    // other refusal applies to it exactly as to the LDR take. The list is
+    // ui_layer_math.h's uiLayerFamilyTakesHdr, one place for this and the rigs' routing model.
+    f.crispHdr = detail::g_uiLayerCrispOn && f.eyeTarget && !f.ldrView && uiLayerFamilyTakesHdr(family);
     uint64_t seq = 0;
     float jx = 0.0f, jy = 0.0f;
     uint32_t sw = 0, sh = 0;
+    // The scene lines' density fact, for the detail text of its refusal.
+    uint32_t sceneLayerW = 0, sceneLayerH = 0;
     if (f.eyeTarget && (f.ldrView || f.crispHdr)) {
         // A caller that already knows the eye (uiLayerNoteOther, for an
         // after-UI write into the exact resource this frame's UI left)
@@ -3090,6 +3125,15 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
             f.targetMatchesEye = !sw || !sh || (sw == g_tc.info.a && sh == g_tc.info.b);
             f.late = uiLayerLateFor(g_eye[f.eye].door, seq);
             f.armed = uiLayerArmed(g_eye[f.eye].door, seq);
+            // The orbit lines and the supercruise bars are scene geometry the layer takes for DENSITY: the layer the door will
+            // hand on (its size, from the door's frame and the target) against the render this draw is made at. Not asked of
+            // any other family, which keeps its default and so its decision exactly as it was.
+            if (uiLayerFamilyIsSceneLines(family)) {
+                const UiLayerSize ls = uiLayerSize(g_eye[f.eye].door.fullW, g_eye[f.eye].door.fullH, layerTarget());
+                sceneLayerW = ls.w;
+                sceneLayerH = ls.h;
+                f.layerWider = uiLayerWiderThanRender(ls.w, ls.h, g_tc.info.a, g_tc.info.b);
+            }
             // The crisp take's publication deadline (review crisp-hud-phase3-
             // 2026-09-28, the missing ship/target mesh holograms): the game's
             // tonemap ordering varies frame to frame, and content taken after
@@ -3103,6 +3147,10 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     f.blend = UiBlendShape::kOpaque;
     UiLayerDecision d = uiLayerDecide(f);
     char detail[320] = "";
+    if (d == UiLayerDecision::kNoDensityGain) {
+        _snprintf_s(detail, _TRUNCATE, "the layer would be %ux%u and the render is %ux%u: a line drawn there is no denser",
+                    sceneLayerW, sceneLayerH, g_tc.info.a, g_tc.info.b);
+    }
     UiDsState dsState;
     if (d == UiLayerDecision::kRedirect) {
         // A second render target, or pixel-shader UAVs (which the layer's
@@ -3143,6 +3191,14 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         // gate refuses a crisp multiply; the detail line names it below.
         const bool hdrMultiply = f.crispHdr && f.blend == UiBlendShape::kMultiply;
         d = uiLayerDecide(f);
+        // The supercruise bars' private pass (a geometry shader, its constants and its rasterizer states) is asked BEFORE the
+        // layer is made: a draw the family cannot serve must not be the reason an HDR layer is. Declined, the lines stay in the
+        // scene and the module's line says which part was missing.
+        const char* familyWhy = "";
+        if (d == UiLayerDecision::kRedirect && family == UiLayerFamily::kSupercruiseBars) {
+            f.familyReady = supercruiseBarsReady(ctx, &familyWhy);
+            d = uiLayerDecide(f);
+        }
         if (d == UiLayerDecision::kRedirect) {
             // The crisp take establishes its WHOLE dependency set here, no
             // later than the first take (review R2): a failure refuses the
@@ -3201,6 +3257,8 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
         } else if (d == UiLayerDecision::kDepthStencilTest ||
                    d == UiLayerDecision::kSubstitutedWrite) {
             _snprintf_s(detail, _TRUNCATE, "%s%s%s", ds, *dsWhy ? "; " : "", dsWhy);
+        } else if (d == UiLayerDecision::kFamilyNotReady) {
+            _snprintf_s(detail, _TRUNCATE, "%s", familyWhy);
         } else if (d == UiLayerDecision::kRedirect) {
             _snprintf_s(detail, _TRUNCATE, "%s%s%s%s", uiBlendShapeName(f.blend),
                         f.ds.tests() ? "; tests against the layer's seeded copy of the game's "
@@ -3929,7 +3987,7 @@ UiLayerWorldStats uiLayerWorldStats() {
     UiLayerWorldStats s;
     s.screenAsked = g_win.screenAsked;
     const size_t screen = static_cast<size_t>(UiLayerFamily::kScreen);
-    static_assert(static_cast<size_t>(UiLayerDecision::kCount) <= 16, "UiLayerWorldStats::screenDecided is 16 wide");
+    static_assert(static_cast<size_t>(UiLayerDecision::kCount) <= 24, "UiLayerWorldStats::screenDecided is 24 wide");
     static_assert(static_cast<size_t>(UiWorldRefuse::kCount) <= 16, "UiLayerWorldStats::refused is 16 wide");
     for (size_t d = 0; d < static_cast<size_t>(UiLayerDecision::kCount); ++d) s.screenDecided[d] = g_win.decided[screen][d];
     s.reissued = g_win.worldReissued;

@@ -2,7 +2,8 @@
 // Coverage-only transcriptions of the captured ring and orbital materials.
 // The original game colour/depth draw is never changed. Ring opacity follows
 // PS 42AC0CACC9CDF72B; orbital alpha follows PS 6EEF165A350DA30F, recovered
-// from the Steam Effects2 archive and verified against its captured hash.
+// from the Steam Effects2 archive and verified against its captured hash. The orbital
+// strip's half-width is the game's own literal 2 times the factor in VS b13 (orbital_width.h).
 namespace edvr {
 constexpr char kRingCoverage[] = R"HLSL(
 Texture2D<float4> Bands:register(t0); Texture2D<float4> Radial:register(t1);
@@ -41,6 +42,9 @@ float4 main(In i,out float2 motion:SV_Target1):SV_Target0 {
 constexpr char kOrbitalCoverageVs[] = R"HLSL(
 cbuffer Scene:register(b1){float4 scene[333];}
 cbuffer Motion:register(b12){uint4 motionInfo;}
+// x = 2 x the factor the game's own draw of this line was made with (orbital_width.h, fix.ui_quality): the game's
+// literal 2 below at f = 1, the half-width scaled with the panels' density otherwise, so this footprint is the visible line's.
+cbuffer Width:register(b13){float4 width;}
 struct In {float4 vertex:POSTANGENT;float4 translation:OSTOWST;float4 rotation:OSTOWSR;
     float3 scale:OSTOWSS;float4 colour:COLOUR;uint vertexId:SV_VertexID;uint instance:SV_InstanceID;};
 struct Out {float4 colour:__USER_STELLARVERTEX_COLOUR;
@@ -63,7 +67,7 @@ Out main(In i) {
     v=normalize(v);
     float2 projected=v.xy-v.z/dot(scene[279].xyz,relative)*float2(dot(scene[277].xyz,relative),dot(scene[278].xyz,relative));
     projected=normalize(projected);
-    p.xy+=float2(-projected.y,projected.x)*sign*i.translation.w*(scene[332].zw*2*p.w);
+    p.xy+=float2(-projected.y,projected.x)*sign*i.translation.w*(scene[332].zw*width.x*p.w);
     o.pos=p;return o;
 }
 )HLSL";

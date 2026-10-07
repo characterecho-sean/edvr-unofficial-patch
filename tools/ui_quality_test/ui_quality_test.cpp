@@ -1177,6 +1177,355 @@ void testFamilyRule() {
     }
 }
 
+// The orbit lines and the supercruise bars in the HDR layer (2026-10-07; docs/ui-layer-2026-09-23.md, "2026-10-07: orbit lines,
+// supercruise bars and space dust in the layer"; supercruise_lines.h): scene geometry the layer takes for DENSITY. Their two families are
+// named by a shader PAIR on the lit HDR target alone, are the crisp take's (uiLayerFamilyTakesHdr, the one list), are declined
+// when the layer is not wider than the render (kNoDensityGain), and are otherwise decided exactly as every other HDR family.
+void testSupercruiseLines() {
+    UiFamilyFacts f;
+    f.targetKind = 1;  // the lit HDR eye target
+    UiFamilyWhy why = UiFamilyWhy::kOther;
+    check(kUiVsOrbitLines == 0xC7FA0C0F5DD49180ull && kUiPsOrbitLines == 0x6EEF165A350DA30Full &&
+              kUiVsSupercruiseBars == 0xA47A3315FFF5E2E4ull && kUiPsSupercruiseBars == 0x869FFF43E875906Eull,
+          "SC1a: the pairs are the disassembled ones (vs C7FA0C0F.. / ps 6EEF165A.., vs A47A3315.. / ps 869FFF43..)");
+    f.vs = kUiVsOrbitLines;
+    f.ps = kUiPsOrbitLines;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kOrbitLines && why == UiFamilyWhy::kDirect,
+          "SC1b: the orbit lines' pair on the HDR target names the orbit-lines family, a direct shader");
+    f.vs = kUiVsSupercruiseBars;
+    f.ps = kUiPsSupercruiseBars;
+    check(uiLayerFamilyFor(f, &why) == UiLayerFamily::kSupercruiseBars && why == UiFamilyWhy::kDirect,
+          "SC1c: the bars' pair on the HDR target names the supercruise-bars family");
+    // The PAIR is the key: the bars' vertex shader is seen with another pixel shader (the flat recipes), a missing pixel shader
+    // (ui_layer.cpp reads it for these two vertex shaders alone) and the other family's pixel shader name nothing.
+    bool nothing = true;
+    const uint64_t kFlatBarsPs = 0xC67370DE72E4422Cull;  // flat_projection_recipes.h: the vertex shader's other pair
+    for (uint64_t ps : {kFlatBarsPs, 0ull, kUiPsOrbitLines, kUiPsSupercruiseBars ^ 1ull, kUiPsSupercruiseBars << 1}) {
+        f.vs = kUiVsSupercruiseBars;
+        f.ps = ps;
+        why = UiFamilyWhy::kOther;
+        nothing = nothing && uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap;
+    }
+    for (uint64_t ps : {0ull, kUiPsSupercruiseBars, kUiPsOrbitLines ^ 1ull, kFlatBarsPs}) {
+        f.vs = kUiVsOrbitLines;
+        f.ps = ps;
+        why = UiFamilyWhy::kOther;
+        nothing = nothing && uiLayerFamilyFor(f, &why) == UiLayerFamily::kNone && why == UiFamilyWhy::kNotPostTonemap;
+    }
+    check(nothing, "SC1d: (A47A, another pixel shader) and (C7FA, another pixel shader) stay kNone, whatever the pixel shader says");
+    // A vertex shader one bit away, and the pair on any other target, name nothing.
+    f.vs = kUiVsOrbitLines ^ 1ull;
+    f.ps = kUiPsOrbitLines;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "SC1e: a vertex shader one bit from the orbit lines' names nothing");
+    f.vs = kUiVsSupercruiseBars ^ 0x100ull;
+    f.ps = kUiPsSupercruiseBars;
+    check(uiLayerFamilyFor(f) == UiLayerFamily::kNone, "SC1f: ...nor one bit from the bars'");
+    bool offHdr = true;
+    for (int kind : {0, 2}) {
+        for (const auto& pair : {std::pair<uint64_t, uint64_t>{kUiVsOrbitLines, kUiPsOrbitLines},
+                                 std::pair<uint64_t, uint64_t>{kUiVsSupercruiseBars, kUiPsSupercruiseBars}}) {
+            UiFamilyFacts g;
+            g.targetKind = kind;
+            g.vs = pair.first;
+            g.ps = pair.second;
+            offHdr = offHdr && uiLayerFamilyFor(g) == UiLayerFamily::kNone;
+            // Over a learned surface or the 2D screen's SRV the post-tonemap branch names an interface composite, never the lines.
+            g.learnedSurface = true;
+            offHdr = offHdr && uiLayerFamilyFor(g) != UiLayerFamily::kOrbitLines && uiLayerFamilyFor(g) != UiLayerFamily::kSupercruiseBars;
+            g.learnedSurface = false;
+            g.panelSized = true;
+            offHdr = offHdr && uiLayerFamilyFor(g) != UiLayerFamily::kOrbitLines && uiLayerFamilyFor(g) != UiLayerFamily::kSupercruiseBars;
+        }
+    }
+    check(offHdr, "SC1g: on a draw that is not into an eye target, or into the post-tonemap one, neither pair is a family (HDR branch only)");
+
+    // The names the 30 s line prints (taken: "<name> <rate>"), each its own.
+    check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kOrbitLines), "orbit lines") == 0 &&
+              std::strcmp(uiLayerFamilyName(UiLayerFamily::kSupercruiseBars), "supercruise bars") == 0,
+          "SC2a: the families are named \"orbit lines\" and \"supercruise bars\" in the 30 s line");
+    bool distinctNames = true;
+    for (uint32_t a = 1; a < static_cast<uint32_t>(UiLayerFamily::kCount); ++a)
+        for (uint32_t b = a + 1; b < static_cast<uint32_t>(UiLayerFamily::kCount); ++b)
+            distinctNames = distinctNames && std::strcmp(uiLayerFamilyName(static_cast<UiLayerFamily>(a)),
+                                                        uiLayerFamilyName(static_cast<UiLayerFamily>(b))) != 0;
+    check(distinctNames, "SC2b: every family has a name of its own (the census rows cannot merge)");
+    check(std::strstr(uiLayerFamilyName(UiLayerFamily::kSupercruiseBars), "dust") == nullptr &&
+              std::strstr(uiLayerFamilyName(UiLayerFamily::kOrbitLines), "dust") == nullptr,
+          "SC2c: neither name calls the line draws space dust (the maintainer's naming: the A47A line list is the bars)");
+
+    // The one list of families the crisp take draws into the HDR layer, and the two that are scene lines.
+    bool takesHdr = true, sceneLines = true;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(UiLayerFamily::kCount); ++i) {
+        const UiLayerFamily fam = static_cast<UiLayerFamily>(i);
+        const bool expectHdr = fam == UiLayerFamily::kHolo || fam == UiLayerFamily::kFlightHud || fam == UiLayerFamily::kSprite ||
+                               fam == UiLayerFamily::kHoloGeneric || fam == UiLayerFamily::kOrbitLines ||
+                               fam == UiLayerFamily::kSupercruiseBars || fam == UiLayerFamily::kSpaceDust;
+        takesHdr = takesHdr && uiLayerFamilyTakesHdr(fam) == expectHdr;
+        sceneLines = sceneLines && uiLayerFamilyIsSceneLines(fam) == (fam == UiLayerFamily::kOrbitLines || fam == UiLayerFamily::kSupercruiseBars);
+    }
+    check(takesHdr, "SC3a: uiLayerFamilyTakesHdr is exactly the holo panels, flight HUD, sprite, holograms, orbit lines, bars and space dust");
+    check(sceneLines, "SC3b: uiLayerFamilyIsSceneLines is exactly the orbit lines and the bars (the space dust has no width to give: it is exempt from the density rule)");
+    check(uiLayerWiderThanRender(5040, 4873, 2016, 1949) && uiLayerWiderThanRender(4032, 3898, 2016, 1949) &&
+              !uiLayerWiderThanRender(2016, 1949, 2016, 1949) && !uiLayerWiderThanRender(4032, 1949, 4032, 1949) &&
+              !uiLayerWiderThanRender(5040, 1949, 2016, 1949) && !uiLayerWiderThanRender(2016, 4873, 2016, 1949) &&
+              !uiLayerWiderThanRender(1000, 1000, 2016, 1949) && !uiLayerWiderThanRender(5040, 4873, 0, 1949) &&
+              !uiLayerWiderThanRender(5040, 4873, 2016, 0),
+          "SC3c: the layer is wider than the render only when both axes are (125% over a 2016 wide render, and 100% over it, are; "
+          "DLAA at 100%, one axis, a smaller layer and a dead render size are not)");
+
+    // The decision: the lines' measured states into the production classification, then the ladder.
+    UiDsState orbitDs;  // depth GEQUAL, no write; stencil EQUAL, ref 1, read 0x81, write 0 (census: ds=17wZ st=11)
+    orbitDs.depthEnable = true;
+    orbitDs.depthFunc = 7;
+    orbitDs.depthWriteAll = false;
+    orbitDs.stencilEnable = true;
+    orbitDs.readMask = 0x81;
+    orbitDs.writeMask = 0x00;
+    orbitDs.front.func = 3;
+    orbitDs.back.func = 3;
+    const UiDsEffect orbitEffect = uiLayerDsEffect(orbitDs, true);
+    check(orbitEffect.depthTest && orbitEffect.stencilTest && !orbitEffect.depthWrite && !orbitEffect.stencilWrite &&
+              orbitEffect.tests() && !orbitEffect.writes(),
+          "SC4a: the orbit lines' state TESTS depth and stencil and writes neither (so the seed serves it and no write-back runs)");
+    UiDsState barsDs;  // depth and stencil off (census: ds=02wA st=04)
+    barsDs.depthEnable = false;
+    barsDs.depthFunc = 2;
+    barsDs.depthWriteAll = true;
+    barsDs.stencilEnable = false;
+    const UiDsEffect barsEffect = uiLayerDsEffect(barsDs, true);
+    check(!barsEffect.tests() && !barsEffect.writes(), "SC4b: the bars' state tests and writes nothing: nothing to seed");
+    UiBlendRt over;  // SRC_ALPHA, INV_SRC_ALPHA, add; alpha the same; all channels (census: bl=15,6,1/5,6,1 bm=F)
+    over.enable = true;
+    over.src = uiblend::kSrcAlpha;
+    over.dst = uiblend::kInvSrcAlpha;
+    over.op = uiblend::kOpAdd;
+    over.srcA = uiblend::kSrcAlpha;
+    over.dstA = uiblend::kInvSrcAlpha;
+    over.opA = uiblend::kOpAdd;
+    over.mask = 0xF;
+    check(uiLayerBlendShape(over) == UiBlendShape::kOver, "SC4c: both lines' blend is the over shape the layer converts");
+
+    auto lines = [&](UiLayerFamily fam, const UiDsEffect& ds, void (*edit)(UiLayerDrawFacts&)) {
+        UiLayerDrawFacts g;
+        g.family = fam;
+        g.verdictForwards = true;
+        g.eyeTarget = true;
+        g.ldrView = false;   // the lit HDR target
+        g.crispHdr = true;   // the crisp take is armed and the family is one of its (ui_layer.cpp: uiLayerFamilyTakesHdr)
+        g.eye = 0;
+        g.armed = true;
+        g.ds = ds;
+        g.blend = UiBlendShape::kOver;
+        edit(g);
+        return uiLayerDecide(g);
+    };
+    auto none = [](UiLayerDrawFacts&) {};
+    check(lines(UiLayerFamily::kOrbitLines, orbitEffect, none) == UiLayerDecision::kRedirect,
+          "SC5a: an armed orbit-lines draw into the HDR target, testing the seeded depth-stencil, over-blended, is redirected");
+    check(lines(UiLayerFamily::kSupercruiseBars, barsEffect, none) == UiLayerDecision::kRedirect,
+          "SC5b: an armed bars draw (no depth, no stencil) is redirected");
+    check(lines(UiLayerFamily::kOrbitLines, orbitEffect, [](UiLayerDrawFacts& g) { g.late = true; }) == UiLayerDecision::kLate &&
+              lines(UiLayerFamily::kSupercruiseBars, barsEffect, [](UiLayerDrawFacts& g) { g.late = true; }) == UiLayerDecision::kLate,
+          "SC5c: after its eye's composite either family is kLate (gate G1)");
+    check(lines(UiLayerFamily::kOrbitLines, orbitEffect, [](UiLayerDrawFacts& g) { g.dsReproducible = false; }) ==
+              UiLayerDecision::kDepthStencilTest,
+          "SC5d: orbit lines over a depth target the layer cannot reproduce are kDepthStencilTest (the read-only view, MSAA...)");
+    check(lines(UiLayerFamily::kSupercruiseBars, barsEffect, [](UiLayerDrawFacts& g) { g.dsReproducible = false; }) ==
+              UiLayerDecision::kRedirect,
+          "SC5e: ...which the bars never need: they test nothing");
+    check(lines(UiLayerFamily::kOrbitLines, orbitEffect, [](UiLayerDrawFacts& g) { g.crispHdr = false; }) == UiLayerDecision::kHdrTarget &&
+              lines(UiLayerFamily::kSupercruiseBars, barsEffect, [](UiLayerDrawFacts& g) { g.crispHdr = false; }) == UiLayerDecision::kHdrTarget,
+          "SC5f: with the crisp take off (or stood down) both stay plain HDR, left in the scene");
+    check(lines(UiLayerFamily::kOrbitLines, orbitEffect, [](UiLayerDrawFacts& g) { g.lateTone = true; }) == UiLayerDecision::kToneLate &&
+              lines(UiLayerFamily::kOrbitLines, orbitEffect, [](UiLayerDrawFacts& g) { g.armed = false; }) == UiLayerDecision::kNotArmed &&
+              lines(UiLayerFamily::kOrbitLines, orbitEffect, [](UiLayerDrawFacts& g) { g.mrt = true; }) == UiLayerDecision::kMrt &&
+              lines(UiLayerFamily::kOrbitLines, orbitEffect, [](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kMultiply; }) == UiLayerDecision::kBlendRefused &&
+              lines(UiLayerFamily::kOrbitLines, orbitEffect, [](UiLayerDrawFacts& g) { g.layerReady = false; }) == UiLayerDecision::kLayerFailed,
+          "SC5g: the ladder's other tests reach them as they reach every HDR family (tone-late, not armed, MRT, a multiply, no layer)");
+
+    // THE DENSITY DECLINE.
+    auto narrow = [](UiLayerDrawFacts& g) { g.layerWider = false; };
+    check(lines(UiLayerFamily::kOrbitLines, orbitEffect, narrow) == UiLayerDecision::kNoDensityGain &&
+              lines(UiLayerFamily::kSupercruiseBars, barsEffect, narrow) == UiLayerDecision::kNoDensityGain,
+          "SC6a: a layer that is not wider than the render declines both: kNoDensityGain");
+    check(lines(UiLayerFamily::kHolo, orbitEffect, narrow) == UiLayerDecision::kRedirect &&
+              lines(UiLayerFamily::kFlightHud, orbitEffect, narrow) == UiLayerDecision::kRedirect &&
+              lines(UiLayerFamily::kHoloGeneric, barsEffect, narrow) == UiLayerDecision::kRedirect &&
+              lines(UiLayerFamily::kSprite, barsEffect, narrow) == UiLayerDecision::kRedirect,
+          "SC6b: the fact is asked of the two scene-line families alone: the cockpit HUD families are decided as they always were");
+    check(lines(UiLayerFamily::kOrbitLines, orbitEffect,
+                [](UiLayerDrawFacts& g) {
+                    g.layerWider = false;
+                    g.late = true;
+                }) == UiLayerDecision::kLate &&
+              lines(UiLayerFamily::kOrbitLines, orbitEffect,
+                    [](UiLayerDrawFacts& g) {
+                        g.layerWider = false;
+                        g.armed = false;
+                    }) == UiLayerDecision::kNotArmed,
+          "SC6c: the density decline comes after the arming (the layer's size is the door's): late and not-armed are the reasons first");
+    check(lines(UiLayerFamily::kOrbitLines, orbitEffect,
+                [](UiLayerDrawFacts& g) {
+                    g.layerWider = false;
+                    g.mrt = true;
+                    g.dsReproducible = false;
+                    g.layerReady = false;
+                }) == UiLayerDecision::kNoDensityGain,
+          "SC6d: ...and before every state test: the reason is the density's, whatever the state would have said");
+
+    // THE FAMILY'S OWN READINESS (the bars' private geometry shader): before the layer's readiness, the bars alone.
+    auto notReady = [](UiLayerDrawFacts& g) { g.familyReady = false; };
+    check(lines(UiLayerFamily::kSupercruiseBars, barsEffect, notReady) == UiLayerDecision::kFamilyNotReady &&
+              lines(UiLayerFamily::kSupercruiseBars, barsEffect,
+                    [](UiLayerDrawFacts& g) {
+                        g.familyReady = false;
+                        g.layerReady = false;
+                    }) == UiLayerDecision::kFamilyNotReady,
+          "SC7a: a bars draw whose private pass is missing is kFamilyNotReady, ahead of the layer's own readiness (no HDR layer is made for it)");
+    check(lines(UiLayerFamily::kOrbitLines, orbitEffect, notReady) == UiLayerDecision::kRedirect &&
+              lines(UiLayerFamily::kHolo, orbitEffect, notReady) == UiLayerDecision::kRedirect,
+          "SC7b: the orbit lines need no private pass, and no other family is asked");
+    check(lines(UiLayerFamily::kSupercruiseBars, barsEffect,
+                [](UiLayerDrawFacts& g) {
+                    g.familyReady = false;
+                    g.late = true;
+                }) == UiLayerDecision::kLate,
+          "SC7c: every earlier reason still comes first");
+    bool texts = true;
+    for (UiLayerDecision d : {UiLayerDecision::kNoDensityGain, UiLayerDecision::kFamilyNotReady}) {
+        const std::string name = uiLayerDecisionName(d), key = uiLayerDecisionKey(d);
+        texts = texts && !name.empty() && name != "?" && !key.empty() && key != "?";
+        for (uint32_t other = 0; other < static_cast<uint32_t>(UiLayerDecision::kCount); ++other) {
+            if (other == static_cast<uint32_t>(d)) continue;
+            texts = texts && name != uiLayerDecisionName(static_cast<UiLayerDecision>(other)) &&
+                    key != uiLayerDecisionKey(static_cast<UiLayerDecision>(other));
+        }
+    }
+    check(texts, "SC7d: the two new decisions have a reason and a short key of their own (the 30 s lines and the first-seen lines name them)");
+    // The key-off contract: with the two new facts at their defaults the decision of every family is the decision as it was.
+    UiLayerDrawFacts defaults;
+    check(defaults.layerWider && defaults.familyReady, "SC7e: the new facts default to true, so a draw that does not set them is decided as before");
+
+    // ---------------------------------------------------------------------------------------------------------------------------------
+    // THE SPACE DUST (vs 9BFC7FD232328391 / ps DBF1725726018F52): 300 additive ribbon quads into the lit HDR target, depth GEQUAL with no
+    // write, stencil ALWAYS with REPLACE under mask 0x40 (census 2026-10-07 05:48, frame 1 rows #145 and #194: ds=17wZ st=18 so=r40/w40/f8/3,3,3
+    // bl=12,2,1/2,2,1 bm=F). The family is the pair, on the HDR target alone; the decision is every other HDR family's; it is exempt from the
+    // density rule (it has no width to give) and needs no private pass.
+    UiFamilyFacts d;
+    d.targetKind = 1;
+    d.vs = kUiVsSpaceDust;
+    d.ps = kUiPsSpaceDust;
+    UiFamilyWhy dwhy = UiFamilyWhy::kOther;
+    check(kUiVsSpaceDust == 0x9BFC7FD232328391ull && kUiPsSpaceDust == 0xDBF1725726018F52ull, "SD1a: the pair is the disassembled one (vs 9BFC7FD232328391 / ps DBF1725726018F52)");
+    check(uiLayerFamilyFor(d, &dwhy) == UiLayerFamily::kSpaceDust && dwhy == UiFamilyWhy::kDirect,
+          "SD1b: the census tuple on the HDR target names the space-dust family, a direct shader");
+    // The PAIR is the key: the flat route's other pixel shader for the same vertex shader (CB7AF179, flat_projection_recipes.h ~305), none, a bit away,
+    // and the other two families' pixel shaders name nothing; neither does the pair on any other target.
+    const uint64_t kFlatDustPs = 0xCB7AF179DF4E6A60ull;  // flat_projection_recipes.h: this vertex shader's flat-route pair
+    bool dustNothing = true;
+    for (uint64_t ps : {kFlatDustPs, 0ull, kUiPsSpaceDust ^ 1ull, kUiPsSpaceDust >> 4, kUiPsOrbitLines, kUiPsSupercruiseBars}) {
+        d.ps = ps;
+        dwhy = UiFamilyWhy::kOther;
+        dustNothing = dustNothing && uiLayerFamilyFor(d, &dwhy) == UiLayerFamily::kNone && dwhy == UiFamilyWhy::kNotPostTonemap;
+    }
+    d.ps = kUiPsSpaceDust;
+    for (uint64_t vs : {kUiVsSpaceDust ^ 1ull, kUiVsSpaceDust ^ 0x100ull, kUiVsSupercruiseBars, kUiVsOrbitLines}) {
+        d.vs = vs;
+        dustNothing = dustNothing && uiLayerFamilyFor(d) != UiLayerFamily::kSpaceDust;
+    }
+    d.vs = kUiVsSpaceDust;
+    for (int kind : {0, 2}) {
+        d.targetKind = kind;
+        dustNothing = dustNothing && uiLayerFamilyFor(d) != UiLayerFamily::kSpaceDust;
+        d.panelSized = true;
+        dustNothing = dustNothing && uiLayerFamilyFor(d) != UiLayerFamily::kSpaceDust;
+        d.panelSized = false;
+    }
+    check(dustNothing, "SD1c: (9BFC7FD2, another pixel shader), a vertex shader a bit away, the other families' shaders and any target but the lit HDR one name no space dust");
+    // And the other two families keep their own names with the dust's shaders around.
+    d.targetKind = 1;
+    d.vs = kUiVsOrbitLines;
+    d.ps = kUiPsOrbitLines;
+    check(uiLayerFamilyFor(d) == UiLayerFamily::kOrbitLines, "SD1d: the orbit lines are still the orbit lines");
+    d.vs = kUiVsSupercruiseBars;
+    d.ps = kUiPsSupercruiseBars;
+    check(uiLayerFamilyFor(d) == UiLayerFamily::kSupercruiseBars, "SD1e: ...and the bars the bars");
+    check(std::strcmp(uiLayerFamilyName(UiLayerFamily::kSpaceDust), "space dust") == 0, "SD1f: the family is named \"space dust\" in the 30 s line");
+
+    UiDsState dustDs;  // depth GEQUAL, no write; stencil ALWAYS with REPLACE on every outcome under mask 0x40, reference 8
+    dustDs.depthEnable = true;
+    dustDs.depthFunc = 7;
+    dustDs.depthWriteAll = false;
+    dustDs.stencilEnable = true;
+    dustDs.readMask = 0x40;
+    dustDs.writeMask = 0x40;
+    dustDs.front.func = uids::kAlways;
+    dustDs.front.fail = dustDs.front.depthFail = dustDs.front.pass = 3;  // D3D11_STENCIL_OP_REPLACE
+    dustDs.back = dustDs.front;
+    const UiDsEffect dustEffect = uiLayerDsEffect(dustDs, true);
+    check(dustEffect.depthTest && !dustEffect.stencilTest && !dustEffect.depthWrite && dustEffect.stencilWrite && dustEffect.tests() && dustEffect.writes(),
+          "SD2a: the dust's state TESTS depth and WRITES stencil (the test seeds the layer's depth; the write is kept by the colourless re-issue into the game's buffer)");
+    UiBlendRt additive;  // ONE, ONE, add, all channels (census: bl=12,2,1/2,2,1 bm=F)
+    additive.enable = true;
+    additive.src = uiblend::kOne;
+    additive.dst = uiblend::kOne;
+    additive.op = uiblend::kOpAdd;
+    additive.srcA = uiblend::kOne;
+    additive.dstA = uiblend::kOne;
+    additive.opA = uiblend::kOpAdd;
+    additive.mask = 0xF;
+    check(uiLayerBlendShape(additive) == UiBlendShape::kAdditive, "SD2b: the dust's blend is the additive shape, converted exactly (ui_layer_math.h uiLayerConvertBlend: colour as the game's, transmittance untouched)");
+    UiBlendRt converted;
+    check(uiLayerConvertBlend(additive, &converted) && converted.src == uiblend::kOne && converted.dst == uiblend::kOne && converted.dstA == uiblend::kOne &&
+              converted.srcA == uiblend::kZero && (converted.mask & uiblend::kWriteRgb) == uiblend::kWriteRgb,
+          "SD2c: ...ONE, ONE into the layer's colour, the layer's alpha (the transmittance) kept as it is");
+
+    auto dust = [&](void (*edit)(UiLayerDrawFacts&)) {
+        UiLayerDrawFacts g;
+        g.family = UiLayerFamily::kSpaceDust;
+        g.verdictForwards = true;
+        g.eyeTarget = true;
+        g.ldrView = false;
+        g.crispHdr = true;
+        g.eye = 0;
+        g.armed = true;
+        g.ds = dustEffect;
+        g.blend = UiBlendShape::kAdditive;
+        edit(g);
+        return uiLayerDecide(g);
+    };
+    check(dust(none) == UiLayerDecision::kRedirect, "SD3a: the census tuple (armed, HDR, additive, depth tested, stencil written) is kRedirect");
+    // One-token mutants of that row, each refused.
+    check(dust([](UiLayerDrawFacts& g) {
+              UiBlendRt minBlend;
+              minBlend.enable = true;
+              minBlend.src = uiblend::kOne;
+              minBlend.dst = uiblend::kOne;
+              minBlend.op = 4;  // D3D11_BLEND_OP_MIN
+              minBlend.srcA = uiblend::kOne;
+              minBlend.dstA = uiblend::kOne;
+              minBlend.opA = uiblend::kOpAdd;
+              minBlend.mask = 0xF;
+              g.blend = uiLayerBlendShape(minBlend);
+          }) == UiLayerDecision::kBlendRefused,
+          "SD3b: the blend operation MIN instead of ADD is kBlendRefused");
+    check(dust([](UiLayerDrawFacts& g) { g.blend = UiBlendShape::kMultiply; }) == UiLayerDecision::kBlendRefused, "SD3c: a multiply into the HDR layer has no transmittance route: kBlendRefused");
+    check(dust([](UiLayerDrawFacts& g) { g.dsReproducible = false; }) == UiLayerDecision::kDepthStencilTest, "SD3d: an unreproducible depth state (read-only view, MSAA, another size) is kDepthStencilTest");
+    check(dust([](UiLayerDrawFacts& g) { g.lateTone = true; }) == UiLayerDecision::kToneLate, "SD3e: a draw after its eye's tonemap re-issue is kToneLate");
+    check(dust([](UiLayerDrawFacts& g) { g.late = true; }) == UiLayerDecision::kLate && dust([](UiLayerDrawFacts& g) { g.armed = false; }) == UiLayerDecision::kNotArmed &&
+              dust([](UiLayerDrawFacts& g) { g.crispHdr = false; }) == UiLayerDecision::kHdrTarget && dust([](UiLayerDrawFacts& g) { g.eye = -1; }) == UiLayerDecision::kNoEye &&
+              dust([](UiLayerDrawFacts& g) { g.mrt = true; }) == UiLayerDecision::kMrt && dust([](UiLayerDrawFacts& g) { g.layerReady = false; }) == UiLayerDecision::kLayerFailed,
+          "SD3f: late, not armed, the crisp take off, no eye, a second target and no layer are each the ladder's own reason");
+    check(dust([](UiLayerDrawFacts& g) { g.substituted = true; }) == UiLayerDecision::kSubstitutedWrite,
+          "SD3g: a stencil write through a substituted geometry would be refused (the colourless re-issue cannot repeat it); the dust is never substituted");
+    // The density rule and the private pass do not apply to it: it is taken at any layer size.
+    check(dust([](UiLayerDrawFacts& g) { g.layerWider = false; }) == UiLayerDecision::kRedirect && dust([](UiLayerDrawFacts& g) { g.familyReady = false; }) == UiLayerDecision::kRedirect,
+          "SD3h: the space dust is exempt from the density rule and the bars' private pass: taken whatever the layer's size");
+    // The mutant of the exemption: were it a scene line, a narrow layer would decline it.
+    check(lines(UiLayerFamily::kSupercruiseBars, dustEffect, narrow) == UiLayerDecision::kNoDensityGain,
+          "SD3i: (control) a family that IS a scene line is declined by the same fact, so SD3h proves the exemption");
+}
+
 // fix.ui_quality's after-UI take (uiLayerNoteOther, vscreen.cpp): a draw
 // after the UI that WRITES an eye target the UI was taken from is taken
 // into the same layer too, after the UI, so it stays over it -- unless it
@@ -2466,6 +2815,7 @@ int main(int argc, char** argv) {
     testFootprint();
     testGate();
     testFamilyRule();
+    testSupercruiseLines();
     testAfterUi();
     afterui::testIdentity();
     afterui::testRecordedTails();
