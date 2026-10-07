@@ -587,9 +587,10 @@ inline int flatNoCandidateWiringTests() {
     const std::string selector = compact(body(selectorSource, "inline FlatMonoFrame flatSelectMonoFrame("));
     const auto selectorValid = [&](const std::string& text) {
         return ordered(text, {"if(!out.supportedDraws){", "summarizeSourceless(in,count,hdr->key.depth,*hdrCamera,out.sourceless);",
-                              "returnrefuse(FlatMonoReason::NoSupportedSource);", "}"});
+                              "if(in.unsupportedFamilyDraws||out.unsupportedDraws)returnrefuse(FlatMonoReason::NoSupportedSource);",
+                              "out.sourceFree=true;", "}"});
     };
-    expect(selectorValid(selector), "a scene with no supported source says what it held on the HDR's depth before it is refused");
+    expect(selectorValid(selector), "a scene with no supported source says what it held on the HDR's depth before it is refused, or taken source-free");
     expect(!selectorValid(without(selector, "summarizeSourceless(in,count,hdr->key.depth,*hdrCamera,out.sourceless);")), "mutation control: a refusal that names nothing fails the wiring");
     const std::string present = compact(runtimeSource);
     const auto spellValid = [&](const std::string& text) {

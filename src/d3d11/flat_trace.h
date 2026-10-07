@@ -73,6 +73,8 @@ constexpr uint32_t kFlatTraceStencilWrite = 1u << 9;
 // bits, zero in every committed trace, so the corpus replays as it always did.
 constexpr uint32_t kFlatTraceFirstPersonCohort = 1u << 10;
 constexpr uint32_t kFlatTraceAlternateHdr = 1u << 11;
+// A pool family's vertex shader left stock, drawn into the scene's depth (FlatRuntimeDraw::poolFamilyVs, section 104). Appended the same way.
+constexpr uint32_t kFlatTracePoolFamilyVs = 1u << 12;
 
 inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool foreignWork) {
     FlatTraceEvent e{};
@@ -93,6 +95,7 @@ inline FlatTraceEvent flatTraceEventFromDraw(const FlatRuntimeDraw& d, bool fore
     e.flags |= d.effectiveStencilWrite ? kFlatTraceStencilWrite : 0;
     e.flags |= d.firstPersonCohort ? kFlatTraceFirstPersonCohort : 0;
     e.flags |= d.alternateHdr ? kFlatTraceAlternateHdr : 0;
+    e.flags |= d.poolFamilyVs ? kFlatTracePoolFamilyVs : 0;
     e.kind = kFlatTraceEventDraw;
     return e;
 }
@@ -131,6 +134,7 @@ inline FlatRuntimeDraw flatTraceEventToDraw(const FlatTraceEvent& e) {
     d.effectiveStencilWrite = (e.flags & kFlatTraceStencilWrite) != 0;
     d.firstPersonCohort = (e.flags & kFlatTraceFirstPersonCohort) != 0;
     d.alternateHdr = (e.flags & kFlatTraceAlternateHdr) != 0;
+    d.poolFamilyVs = (e.flags & kFlatTracePoolFamilyVs) != 0;
     d.instances = e.instances;
     return d;
 }

@@ -67,6 +67,10 @@ struct FlatMonoFrameInput {
     uint32_t droppedSmallCb = 0, unknownLists = 0;
     uint64_t foreignCalls = 0;
     bool (*supportedPair)(uint64_t, uint64_t) = nullptr;
+    // Draws of a pool family's vertex shader with a pixel shader the motion producer does not substitute, into the scene's depth
+    // (FlatRuntimePrefix::unsupportedFamilyDraws). They move and no motion source sees them, so a frame holding any is never
+    // source-free (design section 104). Zero for every frame whose draws carry no flag, as in a recorded trace of an older build.
+    uint32_t unsupportedFamilyDraws = 0;
     // HDR only: a caller may certify that every draw of an alternate-camera
     // same-depth Pool record wrote its original passing fragments to a
     // conservative untrusted-camera coverage map.
@@ -107,6 +111,9 @@ struct FlatMonoFrame {
     uint32_t toneSequence = 0, copySequence = 0, firstLaterOutput = 0;
     uint32_t supportedDraws = 0, unsupportedDraws = 0;
     bool mixedCamera = false;
+    // The scene has no draw of a pool family at all (open ground and sky), and nothing in it moves that the motion producer cannot see:
+    // selected with no motion source, every pixel on the camera term (design section 104). supportedDraws is 0 and sourceFirst/Last are 0.
+    bool sourceFree = false;
     FlatMonoSourceless sourceless;
     bool selected() const { return reason == FlatMonoReason::Selected; }
 };
@@ -373,9 +380,13 @@ inline FlatMonoFrame flatSelectMonoFrame(const FlatMonoFrameInput& in) {
         if (r.last > sourceLast) sourceLast = r.last;
     }
     if (!out.supportedDraws) {
-        // Section 104: what the view held instead, for the line that names it. Nothing else reads it.
+        // Section 104: what the view held instead, for the line that names it.
         summarizeSourceless(in, count, hdr->key.depth, *hdrCamera, out.sourceless);
-        return refuse(FlatMonoReason::NoSupportedSource);
+        // A scene that holds no draw of a pool family has nothing the motion producer could have seen move: the camera term is the whole
+        // of its motion, and it is selected with no source. One that holds a family draw the producer left stock (an unkeyed pixel
+        // shader) has moving geometry nothing tracks, and stays refused as it always was.
+        if (in.unsupportedFamilyDraws || out.unsupportedDraws) return refuse(FlatMonoReason::NoSupportedSource);
+        out.sourceFree = true;
     }
 
     // Detect another supported naming at this extent under the same camera

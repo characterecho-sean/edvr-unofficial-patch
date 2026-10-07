@@ -38,6 +38,8 @@
 #include "flat_covered_draw_wiring_tests.h"
 #include "flat_hdr_crumbs_tests.h"
 #include "flat_no_candidate_tests.h"
+#include "flat_source_free_tests.h"
+#include "flat_sibling_policy_tests.h"
 #include "../../src/d3d11/flat_runtime.h"
 #include "../../src/d3d11/flat_foreground_probe_policy.h"
 
@@ -835,9 +837,19 @@ void testMonoFrameSelection() {
         for (uint32_t i = 0; i < 9; ++i) f.world[i].key.ps = 0x1000 + i;
         f.world[3].key.ps = f.world[2].key.ps;   // two records of one pair: their draws are summed
         f.world[3].key.vs = f.world[2].key.vs;
+        // Draws of a pool family's vertex shader left stock (an unkeyed pixel shader) move with no source: the scene is refused for it.
+        f.input.unsupportedFamilyDraws = 1;
         const auto out = flatSelectMonoFrame(f.input);
-        check(out.reason == FlatMonoReason::NoSupportedSource && !out.selected(),
-              "a scene whose draws name no supported pair is refused for no source");
+        check(out.reason == FlatMonoReason::NoSupportedSource && !out.selected() && !out.sourceFree,
+              "a scene whose draws name no supported pair, with a pool-family draw left stock, is refused for no source");
+        // Without it the scene holds no pool-family draw at all (open ground and sky): selected, with no source, and the same summary.
+        FlatMonoFrameInput freeInput = f.input; freeInput.unsupportedFamilyDraws = 0;
+        const auto sourceFree = flatSelectMonoFrame(freeInput);
+        check(sourceFree.selected() && sourceFree.sourceFree && sourceFree.supportedDraws == 0 && sourceFree.sourceFirst == 0 &&
+                  sourceFree.sourceLast == 0 && sourceFree.sourceless.records == out.sourceless.records &&
+                  sourceFree.sourceless.draws == out.sourceless.draws && sourceFree.depth != nullptr &&
+                  sourceFree.sceneConstants != nullptr && sourceFree.cameraHash != 0,
+              "a scene that holds no pool-family draw is selected with no source (sourceFree), naming its depth, constants and camera");
         uint32_t records = 0, draws = 0, same = 0;
         for (uint32_t i = 0; i < f.input.worldCount; ++i) {
             const auto& r = f.world[i];
@@ -897,6 +909,7 @@ void testMonoFrameSelection() {
         for (uint32_t i = 0; i < 9; ++i) { g.world[i].key.kind = kFlatContractScreen; g.world[i].key.ps = 0x2000 + i; }
         float other[6][4]; std::memcpy(other, g.rows, sizeof(other)); other[5][0] += 3;
         MonoFixture::setCamera(g.world[0], other);
+        g.input.unsupportedFamilyDraws = 1;
         const auto otherCamera = flatSelectMonoFrame(g.input);
         bool flagged = false;
         for (uint32_t i = 0; i < otherCamera.sourceless.topCount; ++i)
@@ -968,7 +981,15 @@ void flatRuntimePrefixTests() {
         check(flatRuntimeObserve(*inertTone, copy).selected(),
               "missing or rebound tone VS camera does not gate current HDR scene");
         refusal([](auto&, auto& d) { d.key.srvResource[0] = MonoFixture::token(0xDEAD); }, "output copy cannot use unrelated tone resource");
-        refusal([](auto& p, auto&) { p.sourcesUsed = 0; }, "no supported current-frame source denies treatment");
+        refusal([](auto& p, auto&) { p.sourcesUsed = 0; p.unsupportedFamilyDraws = 1; }, "no supported current-frame source, with a pool-family draw left stock, denies treatment");
+        {
+            auto p = std::make_unique<FlatRuntimePrefix>(*beforeCopy); auto d = copy;
+            p->sourcesUsed = 0;
+            const auto free = flatRuntimeObserve(*p, d);
+            check(free.selected() && free.sourceFree && free.supportedDraws == 0 &&
+                      std::memcmp(free.camera, fixture.rows, sizeof(free.camera)) == 0,
+                  "no source at all, and no pool-family draw left stock, is selected with no source and the HDR's camera");
+        }
         refusal([](auto& p, auto&) { auto r = p.sources[0]; r.key.depth = MonoFixture::token(0xBAD0); p.sources[p.sourcesUsed++] = r; }, "another same-camera scene depth is ambiguous");
         refusal([](auto& p, auto&) { p.sources[0].key.camera = nullptr; }, "overwritten scene depth invalidates source provenance");
         refusal([](auto& p, auto&) { for (uint32_t i=0;i<p.targetsUsed;++i) if (p.targets[i].tones) ++p.targets[i].tones; }, "multiple tone draws refuse online handoff");
@@ -3897,6 +3918,10 @@ int main(int argc, char** argv) {
     failures += flatNoCandidateTests();
     failures += flatSourceSpellTests();
     failures += flatNoCandidateWiringTests();
+    failures += flatSourceFreeTests();
+    failures += flatSourceFreeWiringTests();
+    failures += flatSiblingPolicyTests();
+    failures += flatSiblingWiringTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

@@ -28,7 +28,7 @@ DEFAULT_CASES = ("unsupported_host", "scene", "inert_no_write", "inert_depth_wri
                  "state_partial_mask", "state_blended", "state_blended_no_depth", "state_blended_hdr",
                  "settlement_prepass", "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world",
                  "inert_depth_write_world", "stale_foreign_mark", "first_person_slot_repacked", "first_person_pieces",
-                 "first_person_generic_naming", "supersampled_scene", "supersampled_scene_4k")
+                 "first_person_generic_naming", "supersampled_scene", "supersampled_scene_4k", "pool_less_view")
 # "renderer" cases must complete the production HDR resolve; "guard" cases must keep a refusal.
 CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "renderer", "inert_no_write": "renderer",
                  "inert_depth_write": "guard", "inert_color_write": "renderer", "state_partial_mask": "renderer",
@@ -37,12 +37,12 @@ CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "render
                  "state_blended_hdr_world": "renderer", "inert_depth_write_world": "renderer",
                  "stale_foreign_mark": "renderer", "first_person_slot_repacked": "renderer", "first_person_pieces": "renderer",
                  "first_person_generic_naming": "renderer", "supersampled_scene": "renderer",
-                 "supersampled_scene_4k": "renderer"}
+                 "supersampled_scene_4k": "renderer", "pool_less_view": "renderer"}
 SDK_CASES = frozenset(("inert_no_write", "inert_depth_write", "inert_color_write", "state_partial_mask",
                        "state_blended", "state_blended_no_depth", "state_blended_hdr", "settlement_prepass",
                        "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world", "inert_depth_write_world",
                        "stale_foreign_mark", "first_person_slot_repacked", "first_person_pieces", "first_person_generic_naming",
-                       "supersampled_scene", "supersampled_scene_4k"))
+                       "supersampled_scene", "supersampled_scene_4k", "pool_less_view"))
 PRODUCTION_CASES = frozenset(("unsupported_host",))
 # The real-size supersampled case (5760x3240 into 3840x2160: H alone is 75 MB at the render size, the owner plane and the foreground map
 # 300 MB each) is not run on WARP: it reports UNSUPPORTED there, with this cause, and no process starts. It runs for longer than the
@@ -121,15 +121,20 @@ RULE_COUNTERS.update({
 #   moved     slots 9 and 10 alternating, two pool records of one identity (the pool repacked): still none rejected. The flat map matches a draw to the
 #             frame before's by the record's identity (flat_foreground_motion_shader.h), not its slot; the slot compared rejected every sample of every
 #             frame after the first of this run.
-#   different slots 9 and 12 alternating, two records with another bone base: from the second frame on (31 of 32 are drawn) nothing matched and every
-#             rejected sample says the identity differs (the scene's own rule says so: here the counts): the control that this scene's map rejects at all.
+#   different slots 9 and 12 alternating, two records with another bone base and another place (the triangle swaps sides each frame): from the second
+#             frame on (31 of 32 are drawn) the map refuses a draw whose prior is another record, and every rejected sample says the identity differs, until
+#             the identity sampler has read such a draw and armed the sibling pass (section 104): then the draw, which has no sibling, takes the view's own
+#             motion, none. The run holds rejected samples (the control that this scene's map rejects at all), then valid ones, and no sample that moves: a
+#             history taken from the other record would move the triangle by its whole displacement (`moving`).
 RULE_COUNTERS["first_person_slot_repacked"] = {
     "surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1), "worldUnmarked": (2, 2), "hAttempts": (1, None),
     "hQualified": (1, None), "backendCalls": (1, None), "hdrSpatial": (0, 0), "backendFailures": (0, 0), **FIRST_PERSON_ONLY,
     "@repack.steady.drawn": (32, 32), "@repack.steady.frames": (6, 32), "@repack.steady.matched": (1, None), "@repack.steady.rejected": (0, 0),
+    "@repack.steady.moving": (0, 0),
     "@repack.moved.drawn": (32, 32), "@repack.moved.frames": (6, 32), "@repack.moved.matched": (1, None), "@repack.moved.rejected": (0, 0),
-    "@repack.different.drawn": (31, 31), "@repack.different.frames": (6, 31), "@repack.different.matched": (0, 0),
-    "@repack.different.rejected": (1, None), "@repack.different.identityDiffers": (1, None)}
+    "@repack.moved.moving": (0, 0),
+    "@repack.different.drawn": (31, 31), "@repack.different.frames": (6, 31), "@repack.different.matched": (1, None),
+    "@repack.different.rejected": (1, None), "@repack.different.identityDiffers": (1, None), "@repack.different.moving": (0, 0)}
 # The grenade hold (first_person_pieces): seventy draws of one first-person mesh in one frame. The flat adapter captures 64 of a key
 # (AnimatedVertexHistory::maxExtendedOccurrences); the six past it are refused their capture and covered per pixel (their owner marks stand,
 # the map holds no sample for them), so the frame stays qualified: H qualified with the covered draws counted, the backend's frame, and no
@@ -146,6 +151,19 @@ RULE_COUNTERS["first_person_generic_naming"] = {
     "surfacePreserving": (0, 0), "foreignSeen": (1, 1), "captured": (1, 1), "worldUnmarked": (2, 2), "hAttempts": (1, None),
     "hQualified": (1, None), "backendCalls": (1, None), "hdrSpatial": (0, 0), "backendFailures": (0, 0),
     "@named.nearMilli": (25, 25), **FIRST_PERSON_ONLY}
+# The pool-less view (pool_less_view, section 104): the supersampled frame (the HDR route at R > D) of a scene that draws no pool-family draw at all, the
+# warm-up frames before it having named the world as the frames before a turn onto open ground do. Its one draw is a full-screen colour and depth writer
+# with the world camera, and nothing in it is a source: no first-person draw seen or captured, and the foreground contract is never asked (hAttempts 0).
+# The selection takes the frame with no motion source and names the world from itself; the engine's views are made from nothing, the previous frame's
+# constants being the warm-up's; the resolver runs and the backend's frame is the result: its calls rise, neither the spatial recovery nor a backend
+# failure does, and the refusal inventory is empty.
+RULE_COUNTERS["pool_less_view"] = {
+    "surfacePreserving": (0, 0), "foreignSeen": (0, 0), "captured": (0, 0), "hAttempts": (0, 0), "backendCalls": (1, None),
+    "hdrSpatial": (0, 0), "backendFailures": (0, 0), "@sizes.renderWidth": (96, 96), "@sizes.renderHeight": (96, 96),
+    "@sizes.outputWidth": (64, 64), "@sizes.outputHeight": (64, 64), **FIRST_PERSON_ONLY}
+# The cases with no first-person draw in the measured frame, so no foreground contract (H) and no owner pixels to show: an SDK PASS asks for the backend's
+# completed call and the case's own counters, not for a qualified H or visible foreground.
+NO_FOREGROUND = frozenset(("pool_less_view",))
 # Facts a rule PASS must report as the boolean true.
 RULE_TRUE = {"stale_foreign_mark": ("@staleMark.planeUntouched",), "first_person_slot_repacked": ("@repack.ran",)}
 # The exact first-failure reason a guard that keeps its refusal must still report.
@@ -160,7 +178,8 @@ HISTORY_CASES = frozenset(("provisional_before_foreign", "byte_budget", "invalid
                             "outstanding_capture_record_index", "stale_capture_epoch_guard",
                             "duplicate_occurrence_cap", "extended_occurrence_window",
                             "extended_spent_record_reclaim", "adapter_covered_refusals", "offset_shift_rescue",
-                            "offset_shift_refusals", "offset_shift_sibling_withdrawn", "identity_sample_readback"))
+                            "offset_shift_refusals", "offset_shift_sibling_withdrawn", "identity_sample_readback",
+                            "retained_index_ring"))
 MAX_JSON = 1 << 20
 
 
@@ -329,11 +348,14 @@ def parse_result(stdout, case, mode):
         if mode != "taa":
             h = obs.get("lastH", {})
             owner = obs.get("owner", {})
-            checked(isinstance(h, dict) and positive_counter(h.get("qualified")) and
-                    positive_counter(obs.get("backendCalls")) and isinstance(owner, dict) and
-                    positive_counter(owner.get("gpuWorldPixelsAtH")) and
-                    positive_counter(owner.get("gpuForeignPixelsAtH")),
-                    "SDK PASS requires visible world and foreground, qualified original draws, and a completed backend call")
+            if case in NO_FOREGROUND:
+                checked(positive_counter(obs.get("backendCalls")), "SDK PASS requires a completed backend call")
+            else:
+                checked(isinstance(h, dict) and positive_counter(h.get("qualified")) and
+                        positive_counter(obs.get("backendCalls")) and isinstance(owner, dict) and
+                        positive_counter(owner.get("gpuWorldPixelsAtH")) and
+                        positive_counter(owner.get("gpuForeignPixelsAtH")),
+                        "SDK PASS requires visible world and foreground, qualified original draws, and a completed backend call")
         checked(obs.get("ruleConfirmed") is True, "renderer PASS requires its expected rule to be measured")
         counters = RULE_COUNTERS.get(case)
         if counters:
@@ -661,17 +683,21 @@ def self_test():
                                     "hCoveredFrames": 1, "worldUnmarked": 2, "hAttempts": 1, "hQualified": 1,
                                     "backendCalls": 1, "hdrSpatial": 0, "backendFailures": 0},
         }
+        good_frames["pool_less_view"] = {"surfacePreserving": 0, "foreignSeen": 0, "captured": 0, "hAttempts": 0, "backendCalls": 1,
+                                         "hdrSpatial": 0, "backendFailures": 0}
         supersampled_frame = {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2, "hAttempts": 1,
                               "hQualified": 1, "backendCalls": 1, "hdrSpatial": 0, "backendFailures": 0}
-        kept_run = {"drawn": 32, "treated": 21, "frames": 10, "matched": 2180, "rejected": 0, "identityDiffers": 0}
+        kept_run = {"drawn": 32, "treated": 21, "frames": 10, "matched": 2180, "rejected": 0, "identityDiffers": 0, "moving": 0}
         good_extras = {"first_person_generic_naming": {"named": {"nearMilli": 25}}, "first_person_slot_repacked": {"repack": {"ran": True, "steady": kept_run, "moved": kept_run,
-                       "different": {"drawn": 31, "treated": 21, "frames": 10, "matched": 0, "rejected": 2180, "identityDiffers": 2180}}}}
+                       "different": {"drawn": 31, "treated": 21, "frames": 10, "matched": 1090, "rejected": 1090, "identityDiffers": 1090, "moving": 0}}}}
         for case, (rw, rh, ow, oh) in SUPERSAMPLED_SIZES.items():
             good_frames[case] = supersampled_frame
             good_extras[case] = {"sizes": {"renderWidth": rw, "renderHeight": rh, "outputWidth": ow, "outputHeight": oh}}
+        good_extras["pool_less_view"] = {"sizes": {"renderWidth": 96, "renderHeight": 96, "outputWidth": 64, "outputHeight": 64}}
         good_frames["inert_color_write"] = good_frames["inert_no_write"]
         good_frames["state_blended"] = good_frames["state_partial_mask"]
         assert set(good_frames) == set(RULE_COUNTERS)
+        assert NO_FOREGROUND <= set(RULE_COUNTERS)
 
         def sdk_observed(frame, reason="", **extra):
             seen = {"lastH": {"qualified": 1}, "backendCalls": 1, "rasterPixels": 1352, "namedWorld": 1,
@@ -716,6 +742,13 @@ def self_test():
                 for bad in (False, 1, None):
                     assert not accepted(case, "renderer", with_value(good_observed(case), path, bad)), \
                         f"{case}: {path}={bad!r} accepted"
+            if case in NO_FOREGROUND:
+                # No foreground, no H: the frame is still the backend's, and only that.
+                bare = good_observed(case, lastH={}, owner={})
+                assert accepted(case, "renderer", bare), f"{case}: a frame with no foreground is refused"
+                assert not accepted(case, "renderer", good_observed(case, lastH={}, owner={}, backendCalls=0))
+            else:
+                assert not accepted(case, "renderer", good_observed(case, lastH={}, owner={})), f"{case}: a frame with no foreground accepted"
             assert not accepted(case, "renderer", good_observed(case, reason="foreground-draw-bound"))
             assert not accepted(case, "renderer", good_observed(case, ruleConfirmed=False))
             assert not accepted(case, "renderer", good_observed(case, measuredFrame=None))

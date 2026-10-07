@@ -358,7 +358,12 @@ inline FlatMonoFrame flatSelectHdrFrame(const FlatMonoFrameInput& in, const void
         if (!sourceFirst || r.first < sourceFirst) sourceFirst = r.first;
         if (r.last > sourceLast) sourceLast = r.last;
     }
-    if (!out.supportedDraws) return refuse(FlatMonoReason::NoSupportedSource);
+    if (!out.supportedDraws) {
+        // Section 104, as flatSelectMonoFrame: no pool family in the scene is source-free; a family draw left stock stays refused.
+        summarizeSourceless(in, count, hdr->key.depth, *hdrCamera, out.sourceless);
+        if (in.unsupportedFamilyDraws || out.unsupportedDraws) return refuse(FlatMonoReason::NoSupportedSource);
+        out.sourceFree = true;
+    }
     for (uint32_t i = 0; i < count; ++i) {
         const auto& r = record(in, i);
         const auto& k = r.key;
@@ -414,6 +419,7 @@ inline FlatMonoFrame flatSelectHdrRouteAt(FlatRuntimePrefix& p, const FlatHdrFra
     in.frame = in.epoch = p.frame; in.supportedPair = supportedPair;
     in.qualifiedAlternate = qualifiedAlternate;
     in.qualifiedAlternateUser = qualifiedAlternateUser;
+    in.unsupportedFamilyDraws = p.unsupportedFamilyDraws;
     out = flatSelectHdrFrame(in, f.trigger.hdr, consumerSeq, gate);
     if (out.reason == FlatMonoReason::AmbiguousSource && sourceSink)
         sourceSink(in, f.trigger.hdr, consumerSeq, sourceSinkUser);

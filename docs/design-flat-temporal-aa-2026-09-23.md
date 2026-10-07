@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** pistol no-candidate instruments, the offset-shift rescue and the
-  training mission's `flat source 5s` line (104): BUILT, NOT FLOWN. Grenade hold
-  (104): FLOWN OK (4c69779f, log 115209); its world naming is vetoed.
+- **State:** pool-less views, the pistol's sibling motion and the retained-
+  index ring (104, 2026-10-07): BUILT, NOT FLOWN, over the pistol and `flat
+  source 5s` instruments. Grenade hold (104): FLOWN OK (4c69779f); naming vetoed.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -34,13 +34,13 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** fly the pistol (which no-candidate pattern carries the bursts) and
-  the training mission turned left (`flat source 5s`); decide the source-less
-  selection (104 B); 105 traces. Open: roof shimmer/TAA (104). Retain 102's
-  color-clear fix; no per-weapon table; preserve Epic settings, 87's native FSR
-  comparison, 83's open items and high-G motion; do not repeat qualified
-  PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR regression
-  tests and `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
+- **Next:** fly the pistol aiming at debris and the training mission turned
+  left (104's sibling, source and admission lines); 105 traces. Open: roof
+  shimmer/TAA, record-reclaimed storms (104). Retain 102's color-clear fix; no
+  per-weapon table; preserve Epic settings, 87's native FSR comparison, 83's
+  open items and high-G motion; do not repeat qualified PS91/BFE or
+  stale-resize hypotheses. Menu hangar-floor P1 open; VR regression tests and
+  `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
@@ -13806,6 +13806,269 @@ window, zeros included, in the pistol and the training mission. In the pistol:
 `rescued-offset-shift` and the identity line's `match` follows it; the census'
 no-prior pixels fall with it. In the training mission: the spell is counted and
 named, and it ends with a recovery of two warm frames.
+
+### 2026-10-07, second build: pool-less views, the pistol's LOD swap
+
+One build, four items, from `edvr_gfx_20261007_143943.log`
+(v0.18.3-10-g0d4bc714, build 6AC6A82A, Epic, SS 2.0: 7680x4320 into 3840x2160,
+DLSS, the HDR route). Sean approved all four; it installs on Epic when green.
+
+**Part A. The view with no source (items 2 and 3)**
+
+One missing thing, two refusals. Both selectors need a draw of a pool family
+the motion producer substitutes to name the scene's depth, camera and constants
+(the copy route: no-supported-motion-source-pair, the training mission's
+turned-left view, reproduced every time); a view of ground and sky has none. On
+the HDR route the same view refused `conflicting-hdr-target-or-camera` instead,
+which is checked first.
+
+The HDR route's refusal, from the log. `flat runtime refusal 5s` reads 167
+(14:44:50), 448, 438, 367 (14:45:05) and 108 (14:45:45), all
+`cause=hdr-camera-changed`. The three detailed lines (frames 54484, 55372,
+58213) name the same pair every time: the reference is the HDR's first camera
+draw (VS 68DDDEF04D9894AF, PS 06332CA168B6DA63, q 4209), the conflicting draw
+VS 025B4B9FF54622ED, PS 46F92DC71BF8DFA5 (q 4262) in the same target, depth and
+constants buffer with the constants rewritten between (write 4208 to 4261). The
+camera line says how: rows 270 to 273 differ and row 273.2 goes from 0.025 to
+0.0675, the first person's near plane against the world's. The pair is a clean
+forward-columns pair (`generic-recipe`, slot 1 row 270): the one the overlay
+admission takes.
+
+What the log pins. `flat late overlay 5s` reads `planned-draws` of 270 to 320
+in the windows that were treated, about one a frame: the pass is drawn every
+frame and admitted as a protected overlay. In the windows that refused it is
+not: 208 planned and 167 conflicts at 14:44:50 (375 frames, all accounted for),
+0 planned and 448 and 438 conflicts at 14:44:55 and 14:45:00, 62 and 367 at
+14:45:05, 252 and 108 at 14:45:45. Every frame of those windows drew the pass
+and it was admitted in some and not in others, so it is a state of the frame
+that decides. The windows' edges carry `engine-source-not-ready` (2 at
+14:45:05, 3 at 14:45:45), the first pool-bearing frame after a spell with no
+pool draw (the watch of the scene constants was not kept: fixed in this build),
+and the long stare at empty terrain is the 0-planned windows. The admission
+judged a draw only against a named world (`k.depth == s.namedDepth`), which a
+view without a pool-family draw never has. That is the reading that fits; what
+the log cannot show is the other gates (about twenty are chained; the camera
+injector sits in `warming` through the refused windows, injected=0, and a
+refused frame never ends a clean close, so a gate that depends on it could hold
+the loop shut).
+
+Two things are done. The overlay admission now also judges a draw against the
+HDR target's own first camera when no draw has named the world and the model
+has seen no source, no first-person cohort draw and no stock family draw so
+far, counted in `overlays-without-named-world`. And the first draw that makes
+an HDR target a second camera logs every gate, as it stood:
+
+```text
+flat overlay admission refused: frame=.. seq=.. VS=.. PS=..
+  route=hdr|copy key-auto=. copy-weapon=. work-full=. projection=.
+  jitter-wanted=. phase-ok=. frame-coverage=. injector-owns=.
+  foreign-work=. uncertain=. supported=. color-depth-dsv-camera=.
+  viewport=. hdr-could-consume=. camera-current=. world-named=.
+  depth-is-named=. pool-less-so-far=. (sources=.. first-person=..
+  stock-family=..) target-hdr-camera=. target-drawn=.
+  target-layout-changed=. target-menu=. target-depth-same=.
+  target-dsv-same=. target-tone-current=. overlay-target-found=.
+  depth-write=. stencil-write=. stencil-mask-04=.
+  phase-applied-or-zero=.
+```
+
+Six lines at most, ten seconds apart. The gate that reads 0 where the pair
+needs a 1 is the refusal, and `world-named=0` with `pool-less-so-far=1` says
+the view was pool-less. If the relaxation is inert,
+`overlays-without-named-world` stays 0 while the conflicts persist.
+
+The change for the pool-less view itself.
+`FlatMonoFrameInput.unsupportedFamilyDraws` counts the draws of a pool family's
+vertex shader left stock (an unkeyed pixel shader) into a scene-sized depth,
+flagged by the draw scope (`FlatRuntimeDraw.poolFamilyVs`, trace flag bit 12)
+and counted by the model before it looks for a colour target, so a depth
+pre-pass counts. A frame with no supported draw and none of those is selected
+with `sourceFree` and its HDR's own depth, constants and camera; one with a
+stock family draw is refused for no source as before, because it moves and
+nothing tracks it. The first person's pistol pair (F516BF0201303B87,
+B40B0462256E31C2) is not a pool family, so it is no veto. The world is then
+named from the selection (`nameSourceFree`, once, at the HDR trigger's
+selection, at the copy route's resolve and at the HDR route's treatment,
+comparing a world a draw already named), and before the views are asked for the
+engine makes them from nothing (`engineVelocityPrepareSourceFree`): the slot
+target is the flat marker plane, cleared at its first use of the frame, so no
+pixel names a record; the pool is one record nothing points into; the scene
+constants are the selected camera's rows 270 to 275 and this frame's stamp, in
+snapshots of the size a pool draw makes them (found by the rig: smaller ones
+are re-made by the next pool-bearing frame and its history dropped) and with
+the watch following the constants buffer (without it the first pool draw after
+a spell is declined, `the naming's rows not seen`). Every pixel then takes the
+camera term, as a pixel with no slot always has.
+
+range (item 3's question). The refusal census' `range` class is a pixel whose
+previous position, by the camera term, is outside the previous raster: the band
+the camera's motion brings in at the leading edge, with no history anywhere. It
+is 99% of the refused pixels in every window with no weapon refusal of this
+log, 0.0034% standing still (14:40:40: 88 thousand in 80 sampled frames) and
+0.7 to 2.3% of 33.2 million pixels in the windows of fast turns (13.6 million
+at 14:44:50, 45.8 million at 14:45:45: 740 thousand a frame, a band about 170
+pixels wide at 7680, a turn of about two degrees a frame at a hundred degree
+field of view). At SS 2.0 the same turn is four times the pixels of SS 1.0.
+Expected, then, and the only class that scales with motion; with DLSS or FSR it
+shows the raw current frame for those pixels, one frame each.
+
+The pink fringe. Pink is the `stale` class (a keyed draw wrote the slot,
+something not marked drew over it: the slot's depth is not the pixel's). It is
+not `range`: stale is 1.9 to 2.5 thousand pixels a window with the pistol away
+(14:40:40 to 14:44:05, about 25 a sampled frame) and 40 thousand to 1.1 million
+while it is up (14:45:15 on: 659 742, 605 865, 767 493, 1 113 565), up to 16
+thousand a frame, and unrelated to the turns (range). So the fringe is the
+stale class and it follows the pistol. Whether it is the trailing edge, or a
+disocclusion of the world behind the pistol, the census cannot say (it has no
+position); what it says is that the pixels are refused for a slot overdrawn
+this frame, not for want of history. Not touched by this build.
+
+**Part B. The pistol's LOD swap (item 1)**
+
+The tally named the cause in the windows with the pistol up
+(rescued-offset-shift 0 throughout, H1 stays ruled out): 4 to 66 misses of 4500
+to 6200 draws a window, in 1 to 21 of about 310 frames, count-change 4 to 40,
+absent-long 6 to 25, absent-short 1 to 4, new-key 3 to 5 (14:45:10 to
+14:46:55). The same mesh drawn under another count is a LOD swap: no same-key
+record, and a different vertex count, so no prior positions to take. It is not
+a lost object: the object's other pieces, drawn this frame under the same pool
+identity, matched theirs.
+
+The pass (`flat_foreground_sibling.h`, the shaders in
+`flat_foreground_motion_shader.h`, the class in `flat_foreground_motion.h`).
+When a frame holds a draw with no prior (the CPU knows), or for 30 frames after
+the identity sampler read a draw that had priors and no identity match (only
+the GPU knows), H runs two compute passes before the map is drawn: one thread
+group a draw that matched, running the map's own decision for every vertex (one
+shared text, `resolveGpuIdentity`) and recording the mean and the extremes of
+the motion in pixels it would have written, with no atomics; then one thread a
+draw, which looks for donors of its identity (x and y with byte 30 left out, as
+the history compares) among the others and decides. The map's vertex shader
+then gives a draw with reasons 3, 5 or 6 the fit as a valid sample: the
+previous position is this vertex moved by the motion in homogeneous clip space
+(exact at every pixel) and the previous phase is this frame's. The decision
+(`siblingDecide`, plain C++, the rig holds the shader to it for every draw of
+every scene):
+
+- donors that agree to within one pixel per axis (largest less smallest motion
+  over every donor vertex, `kFlatSiblingSpreadPixels`): their mean, weighted by
+  vertices (mode 1, sibling);
+- no donor, or fewer vertices than a triangle: the view's own motion, none,
+  history kept (mode 2, view-attached). A first-person draw is attached to the
+  view; the object it belongs to has no matched piece, so nothing in the frame
+  says it moved;
+- donors that disagree: refused as before (mode 3). A held object swung through
+  the view moves its pieces differently, and a translation would be wrong by
+  the difference; the parallax of a deep object is the same effect (motion goes
+  as one over depth), so fast lateral sway refuses too;
+- refused as before in every case: a current draw that is not valid (1), a pool
+  row that is not authentic (2), prior positions unreadable or ambiguous (4,
+  7), and an identity the pool cannot read (mode 4). Nothing says what their
+  motion would be.
+
+Not chosen: a rigid fit (four clip-space vertices fix a rigid motion exactly,
+but a skinned piece is not rigid, and the residual check it needs is a second
+pass over the vertices and a numerically poor difference of large sums at this
+size); a borrow across identities (the rig has the sibling of another object,
+and it does not borrow). The one-pixel limit is the resampling's own blur (the
+history is read bilinearly); it is a model bound, not tuned by a flight.
+
+Instrument, every window, zeros included:
+
+```text
+flat foreground sibling 5s: engaged-frames=N dispatches=N
+  draws-read=N (frames read=N unread=N failed=N) sibling=N
+  view-attached=N disagree=N identity-unreadable=N; by pattern
+  (sibling/view-attached/disagree/identity-unreadable):
+  previous-frame-empty=a/b/c/d ... count-change=.. absent-short=..
+  absent-long=.. new-key=.. prior-filtered=.. identity-differs=..;
+  (explanation)
+```
+
+Counts are draws, read back from the GPU two frames or more late through a
+staging ring. A frame in which every draw matched dispatches nothing.
+
+A consequence worth knowing: the first frame of an object (an equip, the first
+frame of the log's session) has no donor, so every piece is view-attached:
+valid with no motion where it was refused to the raw frame (`weapon-refused`
+reason 3). The seed frames count as view-attached in the line; whether a static
+guess beats the raw frame there is a flight's answer (the census' no-prior
+pixels fall, and ghosting on a pistol drawn from the holster would show in the
+debug view).
+
+Not this build's, seen in the same log: 14:43:15 to 14:43:50,
+`record-reclaimed` 800 to 4300 misses a window, weapon-refused no-prior 19 to
+137 million pixels a window. Whole-weapon history loss for 35 seconds, a
+different pattern from the LOD swap; the sibling pass would make it
+view-attached (no donor) rather than refused. The reclaim after an invalidation
+is the suspect (the ledger files an invalidated-then-erased record as
+reclaimed), not investigated.
+
+**Part C. The allocation (item 4)**
+
+`AnimatedVertexHistory::retainInstanceIndex` made a 4-byte buffer and a shader
+view for every captured draw, every frame (about 5000 draws a window: 10
+thousand creations in 5 s). It now keeps one buffer of 128 elements
+(`maxRecords`) and 128 one-element views, made on first use, and a draw's copy
+goes to the next element of its frame; the 129th draw is refused as the history
+is. The rig (`retained_index_ring`) holds: 128 draws read their own pool index
+right after capture; `retainCreated` is 129 after the first frame and still 129
+after the second; the next frame reuses the same view objects; each draw of a
+frame has a view of its own; the 129th takes no slot; a VR capture makes no
+ring.
+
+**Tests**
+
+- flat_temporal_test: the selector in both routes (source-free, vetoed by a
+  stock family draw, a sourced scene unchanged), the model's count (a pre-pass
+  counts), the trace flag and an older trace, the counters and the line, the
+  sibling policy case by case (limit inclusive, weights, byte 30, matched
+  draws, unreadable identity), and wiring pins with mutation controls for the
+  naming, both routes' preparation, the overlay admission, the flag, the
+  counters, the engine's views, the shaders (reasons served, identity compared,
+  limits) and the class (when the pass runs, the compute stage kept, the fit
+  unbound before the map reads it).
+- engine_velocity_test (`source_free_tests.h`): the views from nothing on WARP:
+  the slot target empty, one structured record, this frame's rows and stamp and
+  the last frame's, the pool and its view the same objects frame after frame,
+  the two constant buffers alternating, a pool draw's views not overwritten,
+  the walk onto open ground and back, the source let go after 120 idle frames
+  and made again, outside the flat profile nothing.
+- flat_mono_resolve_test: an empty slot target and a one-record pool of zeros
+  or of garbage give the same texture, the camera term.
+- weapon_motion_test (WARP and `--hardware`, `flat_sibling_tests.h`): S1 to
+  S11, the compute stage kept, every draw's fit held to the policy. 218821
+  checks, WARP and hardware.
+- Private mutants: 56 (the sibling pass's shaders, class and policy, the
+  engine's views, both selectors, the model, the trace flag, the counters and
+  the runtime's wiring): 54 killed by the rigs, 2 equivalent (a donor test the
+  vertex test already makes: an unmatched draw takes no vertex; the engine's
+  snapshot re-creation by size, which differs only if the game's constants
+  buffer changes size).
+- The bench: on the hardware adapter the whole matrix passes (67 results),
+  pool_less_view in DLAA, DLSS and FSR through the real runtime (the HDR route
+  at 96x96 into 64x64: selected source-free, the world named, the views from
+  nothing, the backend's frame); first_person_slot_repacked's control is
+  reworked, because a draw whose prior is another record is now served: refused
+  (reason 5) until the identity sampler arms the pass, then valid with no
+  motion, and no sample ever moves (the records now sit on opposite sides).
+  WARP: 31 pass, 36 unsupported (no NGX), none fails.
+
+**Flight pass signs**
+
+The pistol: the `flat foreground sibling 5s:` line every window; `sibling` and
+`view-attached` rise where `count-change`, `absent-*` and `new-key` misses
+were, `disagree` stays near 0 while aiming; the census' weapon-refused no-prior
+and identity-differs pixels fall with them; no ghosting on the pistol in the
+debug view. The pool-less view: `flat source 5s:` carries `source-free-frames`
+and `source-free-treated` (equal when the resolver ran), the refusal counts of
+`conflicting-hdr-target-or-camera` and `no-supported-motion-source-pair` fall
+to the frames that hold a stock family draw, and `engine motion: source-free
+views at present frame N` appears once. If the HDR route still refuses, `flat
+overlay admission refused:` names the gate.
+
+ruled out: a cost of the sibling pass to the quiet frame, because a frame in
+which every draw matched dispatches nothing (rig scene S7).
 
 ## 105. Different supporter: v0.18.2 AA selector refusal (2026-10-06)
 

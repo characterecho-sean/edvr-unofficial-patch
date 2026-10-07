@@ -142,6 +142,7 @@ struct Build {
     uint64_t sPs = 0xFE;                 // S's writer's pixel shader (0xFE is no whitelisted pair)
     uint32_t sInstances = 1;
     bool poolSources = true;
+    bool stockFamily = false;            // a pool-family draw left stock (no pixel shader the producer substitutes) into the scene's depth
     bool sExplicitWrite = false;         // a Clear, Copy, Update or Map into S after its pass (the prefix model marks S bad)
     bool sClearedBefore = false;         // ...and the game clearing S for its own use BEFORE its pass: not marked
 };
@@ -172,6 +173,7 @@ inline Built build(const Build& b) {
     if (b.sBeforeConsumer) writeS();
     s.write(s.sc.h);
     s.sceneDraws(b.poolSources ? 4 : 0, b.sceneDraws - (b.poolSources ? 4 : 0));
+    if (b.stockFamily) s.stockFamilyDraw();
     if (b.consumer && !b.consumerWritesS)
         s.draw(s.make(s.sc.half, nullptr, b.sc.hW / 2, b.sc.hH / 2, 26, 0xDF, 0xC1, false, false), s.sc.h);
     for (uint32_t i = 0; i < b.llmBefore; ++i) {
@@ -552,13 +554,18 @@ inline int flatCopyStructureTests() {
                "the chain length rides the decline: two R-sized image passes, one draw each");
 
         // The refusals that are the scene's, not the chain's.
-        Build sources; sources.poolSources = false;
+        Build sources; sources.poolSources = false; sources.stockFamily = true;
         Built sourcesBuilt = build(sources);
         FlatCopyDiag sourcesDiag;
         const FlatMonoFrame noSource = admit(sourcesBuilt, policy(true, FlatMonoResolveMode::Dlss, true), &sourcesDiag);
         expect(sourcesDiag.outcome == FlatCopyOutcome::Refused && noSource.reason == FlatMonoReason::NoSupportedSource &&
                !flatMonoReasonStructural(noSource.reason),
-               "a recognised chain with no motion source is refused by the selector's own reason (no-supported-motion-source-pair), transient");
+               "a recognised chain with no motion source and a pool-family draw left stock is refused by the selector's own reason (no-supported-motion-source-pair), transient");
+        Build poolless; poolless.poolSources = false;
+        Built poolBuilt = build(poolless);
+        const FlatMonoFrame poolFrame = admit(poolBuilt, policy(true, FlatMonoResolveMode::Dlss, true));
+        expect(poolFrame.selected() && poolFrame.sourceFree && poolFrame.supportedDraws == 0,
+               "a recognised chain with no pool-family draw at all is selected with no motion source: the pool-less view is treated, not refused");
         Build ambiguous;
         Built amb = build(ambiguous);
         amb.stream->hdr.trigger.ambiguous = true;

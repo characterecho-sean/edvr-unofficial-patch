@@ -272,6 +272,8 @@ struct State {
     FlatSourceSpell sourceSpell;
     FlatMonoSourceless sourcelessLast;
     uint64_t sourcelessLastFrame=0;
+    bool frameSourceFree=false;   // this frame's selection took no motion source and named the world from itself (nameSourceFree)
+    uint32_t admissionLines=0;uint64_t lastAdmissionMs=0;   // the overlay admission trace's line budget (see beginActualDraw)
     const void* foregroundSelectedDepth=nullptr;
     struct DomainHReceipt {
         uint64_t frame=~0ull;const void* depth=nullptr;
@@ -660,6 +662,11 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
     for(unsigned i=0;i<kHistoryGapCount;++i)w.missBy[i]=delta(captures.missBy[i],was.missBy[i]);
     w.identitySamples=delta(captures.identitySamples,was.identitySamples);
     for(unsigned i=0;i<kIdentityVerdictCount;++i)w.identityBy[i]=delta(captures.identityBy[i],was.identityBy[i]);
+    FlatSiblingWindow sibling;
+    sibling.engagedFrames=delta(captures.siblingFrames,was.siblingFrames);sibling.dispatches=delta(captures.siblingDispatches,was.siblingDispatches);
+    sibling.readbacks=delta(captures.siblingReads,was.siblingReads);sibling.notReady=delta(captures.siblingNotReady,was.siblingNotReady);
+    sibling.failed=delta(captures.siblingFailed,was.siblingFailed);
+    for(unsigned p=0;p<kSiblingPatterns;++p)for(unsigned o=0;o<kSiblingOutcomes;++o)sibling.by[p][o]=delta(captures.siblingBy[p][o],was.siblingBy[p][o]);
     struct Taken {FlatForegroundMotion::MissExample miss[FlatForegroundMotion::kMissExamples];unsigned misses=0;
                   FlatIdentitySampler::Sample identity[FlatForegroundMotion::kIdentityExamples];unsigned identities=0;};
     std::array<Taken,State::kDomainCandidateCap> taken{};
@@ -674,6 +681,7 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
     char line[4096];
     flatNoCandidateLine(line,sizeof(line),w);Log::get().note("%s",line);
     flatIdentityLine(line,sizeof(line),w);Log::get().note("%s",line);
+    flatSiblingLine(line,sizeof(line),sibling);Log::get().note("%s",line);
     for(const auto& t:taken) {
         for(unsigned i=0;i<t.misses && s.foregroundMissExampleLines<48;++i,++s.foregroundMissExampleLines) {
             const auto& e=t.miss[i];
@@ -2848,6 +2856,22 @@ static void reportUntrustedAtH(State& s,const FlatMonoFrame& sel) {
         (unsigned long long)firstGap->writeEpoch,firstGap->writeSeq,
         firstGap->draws,firstGapCompleted);
 }
+// Section 104, the pool-less view. A selection that holds no motion source (FlatMonoFrame::sourceFree: the scene drew no pool-family
+// draw at all) is named from the selection itself, because no draw named the world. The depth, scene constants and camera are the ones
+// the selector took from the HDR's first camera draw, so every comparison against the naming after this (the identity check at the
+// resolve, the overlay admission of what draws next) is the selection against itself. Idempotent: a world a draw named stands, and is
+// compared. The frame's engine views follow from engineVelocityPrepareSourceFree, at the resolve.
+static bool nameSourceFree(State& s, const FlatMonoFrame& sel) {
+    if(!sel.selected() || !sel.sourceFree) return false;
+    if(s.namedDepth) return s.namedDepth==sel.depth && s.namedConstants==sel.sceneConstants;
+    s.namedDepth=sel.depth;s.namedConstants=sel.sceneConstants;s.namedWorldQ=s.prefix.sequence;s.namedVs=s.namedPs=0;
+    static_assert(sizeof(sel.camera)==kFlatCameraBytes,"the selected camera is the 96 bytes of rows 270..275");
+    std::memcpy(s.namedCamera,sel.camera,sizeof(sel.camera));
+    const auto reference=flatDomainWorldReference(sel.camera);
+    if(reference.valid())s.worldReference=reference;
+    s.frameSourceFree=true;
+    return true;
+}
 static void hdrSelectAtTrigger(State& s) {
     const bool witnessEligible=overlayOpen(s) && s.overlay.markedDraws()!=0;
     if(witnessEligible)++s.sourceWitnessEligibleWindow;
@@ -2862,6 +2886,7 @@ static void hdrSelectAtTrigger(State& s) {
     if(sel.selected()) {
         const auto reference=flatDomainWorldReference(sel.camera);
         if(reference.valid())s.worldReference=reference;
+        nameSourceFree(s,sel);
     }
     // The camera a draw named the world with is not the camera H selected: the world's own draws are then every one a different camera
     // from the named one (draws of a first-person camera after naming are the named camera's, and no bucket accounts for them). The
@@ -3456,6 +3481,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 static_cast<unsigned long>(hr));
         }
     }
+    if (s.frameSourceFree) s.sourceSpell.sourceFreeFrame(s.treated && SUCCEEDED(hr));
     if (!s.treated || FAILED(hr)) reset();
     Ptr<ID3D11Texture2D> output; if (FAILED(swap->GetBuffer(0, IID_PPV_ARGS(&output)))) return;
     // Swapchain image rotation does not change render scale. Resize/device
@@ -3534,7 +3560,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         else if(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};s.namingVetoStreak=0;++s.namingVetoReleases;}
         s.namingVetoedThisFrame=false;
     } else s.namingVetoStreak=0;
-    s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;
+    s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;
     flatHdrBeginFrame(s.hdr, d.Width, d.Height); s.hdrTreated = false;
     s.observingQualifiedHandoff = false;
     s.drawCapture.begin(frame+1,s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight);
@@ -4535,6 +4561,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         }
     }
     d.supported = engineVelocityPoolFamilyPair(k.vs, k.ps); d.instances = instances;
+    // A pool family's vertex shader left stock (an unkeyed pixel shader), drawn into the scene's depth: it moves with no motion source, so a
+    // scene holding one is never source-free (design section 104; the selector's unsupportedFamilyDraws).
+    d.poolFamilyVs = !d.supported && k.depth && engineVelocityPoolFamilyVs(k.vs) &&
+        flatContractKind(false, k.depth, k.depth, k.depthWidth, k.depthHeight, 26, s.prefix.width, s.prefix.height, false) == kFlatContractScreen;
     // A draw that is not a pool-family draw cannot be a substituted producer: it sees the game's state, and so does
     // everything EDVR reads of the context for it below.
     if (!d.supported) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
@@ -4633,13 +4663,20 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // copy route judges the frame the same tests admit the draw as an alternate
     // HDR writer instead (d.alternateHdr), with no overlay: the key's value
     // never bars it there, because the HDR route is not the one that treats it.
+    // Section 104, the pool-less view: no draw has named the world (a view of ground and sky holds no pool-family draw), and nothing the
+    // model saw so far is a source, a first-person cohort draw or a pool-family draw left stock. The HDR target's own first camera is then the
+    // world's, and the glow pass is judged against it with the depth the target was drawn with (the search below), as a pool-bearing frame's
+    // is against the named one. Without this the pass was a second camera in the HDR, and every frame of such a view was refused as
+    // conflicting-hdr-target-or-camera.
+    const bool unnamedWorldDepth=!s.namedDepth && s.prefix.sourcesUsed==0 && s.prefix.firstPersonDraws==0 &&
+        s.prefix.unsupportedFamilyDraws==0;
     const FlatRuntimeTarget* overlayTarget=nullptr;
     if(s.work==FlatWork::Full && (s.hdrKey==FlatHdrKey::Auto || copyWeapon()) && s.projection &&
        s.jitterWanted && !s.phase.failed && s.frameCoverage &&
        flatCameraInjectUpstreamOwns() && !foreignWork.load(std::memory_order_acquire) &&
        !s.prefix.uncertain && !d.supported && !tone && !copy &&
        k.format==26 && k.color && k.depth && k.dsv && k.camera &&
-       k.depth==s.namedDepth && flat_mono_detail::hdrViewport(k,k.width,k.height) &&
+       (k.depth==s.namedDepth || unnamedWorldDepth) && flat_mono_detail::hdrViewport(k,k.width,k.height) &&
        !flatHdrCouldConsume(s.hdr,k) &&
        flatRuntimeCameraCurrent(d,s.prefix.sequence+1,s.prefix.frame)) {
         for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
@@ -4682,6 +4719,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if((pair.vs==FlatVsProjectionClass::ForwardColumns ||
                 pair.vs==FlatVsProjectionClass::ForwardDp4) &&
                 pair.ps==FlatPsProjectionSafety::Clean) {
+                if(!s.namedDepth)s.sourceSpell.overlayUnnamed();
                 if(copyWeapon()) {
                     // The copy route resolves after the game's post chain, so the glow is in the picture the SDK is handed and
                     // there is no clean H to restore: no private MRT bracket, no open suffix, nothing to seal or to fail.
@@ -4756,6 +4794,37 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             witness.cause==FlatRuntimeConflict::CameraChange && witness.sequence==s.prefix.sequence?1u:0u);
         break;
     }
+    // Section 104, the HDR route's second camera. A draw that made its HDR target a second camera (the model's first camera change) and every gate
+    // that would have admitted it as a protected overlay, or on the copy route as an alternate HDR writer, as the draw stood. The 2026-10-07 log
+    // (v0.18.3-10-g0d4bc714) named the pair (VS 025B4B9F, PS 46F92DC7: the first person's camera, near 0.0675 against the world's 0.025) and
+    // not why nothing admitted it: planned-draws was 0 in every window of it. A few lines of this say which gate refused, and whether a world
+    // had been named when it did.
+    if(k.format==26 && k.camera && !tone && !copy && s.admissionLines<6 && GetTickCount64()-s.lastAdmissionMs>=10000)
+        for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
+            const auto& target=s.prefix.targets[i];
+            if(target.resource!=k.color)continue;
+            if(target.firstBad.cause!=FlatRuntimeConflict::CameraChange || target.firstBad.sequence!=s.prefix.sequence)break;
+            ++s.admissionLines;s.lastAdmissionMs=GetTickCount64();
+            const auto flag=[](bool v){return v?1u:0u;};
+            const bool hdrCamera=target.hdrCamera,drawn=target.writes.draws!=0;
+            Log::get().note("flat overlay admission refused: frame=%llu seq=%u VS=%016llX PS=%016llX route=%s key-auto=%u copy-weapon=%u work-full=%u projection=%u "
+                "jitter-wanted=%u phase-ok=%u frame-coverage=%u injector-owns=%u foreign-work=%u uncertain=%u supported=%u color-depth-dsv-camera=%u "
+                "viewport=%u hdr-could-consume=%u camera-current=%u world-named=%u depth-is-named=%u pool-less-so-far=%u (sources=%u first-person=%u stock-family=%u) "
+                "target-hdr-camera=%u target-drawn=%u target-layout-changed=%u target-menu=%u target-depth-same=%u target-dsv-same=%u target-tone-current=%u "
+                "overlay-target-found=%u depth-write=%u stencil-write=%u stencil-mask-04=%u phase-applied-or-zero=%u; the model made this draw the HDR's first second camera, "
+                "so none of the admissions took it",
+                (unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)k.vs,(unsigned long long)k.ps,copyWeapon()?"copy":"hdr",
+                flag(s.hdrKey==FlatHdrKey::Auto),flag(copyWeapon()),flag(s.work==FlatWork::Full),flag(s.projection!=nullptr),flag(s.jitterWanted),
+                flag(!s.phase.failed),flag(s.frameCoverage),flag(flatCameraInjectUpstreamOwns()),flag(foreignWork.load(std::memory_order_acquire)),
+                flag(s.prefix.uncertain),flag(d.supported),flag(k.color && k.depth && k.dsv && k.camera),
+                flag(flat_mono_detail::hdrViewport(k,k.width,k.height)),flag(flatHdrCouldConsume(s.hdr,k)),
+                flag(flatRuntimeCameraCurrent(d,s.prefix.sequence,s.prefix.frame)),flag(s.namedDepth!=nullptr),flag(k.depth==s.namedDepth),
+                flag(unnamedWorldDepth),s.prefix.sourcesUsed,s.prefix.firstPersonDraws,s.prefix.unsupportedFamilyDraws,
+                flag(hdrCamera),flag(drawn),flag(target.hdrLayoutChanged),flag(target.menuInherited),flag(target.writes.key.depth==k.depth),
+                flag(target.writes.key.dsv==k.dsv),flag(flat_mono_detail::cameraCurrent(target.tone,s.prefix.frame)),flag(overlayTarget!=nullptr),
+                flag(d.effectiveDepthWrite),flag(d.effectiveStencilWrite),flag(effectiveDepth.StencilWriteMask==0x04u),flag(!nonzeroPhase(s) || s.phase.applied));
+            break;
+        }
     if(weaponFootprintStarted)for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
         if(s.prefix.targets[i].resource==k.color){
             const auto& bad=s.prefix.targets[i].firstBad;
@@ -5195,6 +5264,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(s.phase.applied)recover(s.reason);
         refuse(s); return;
     }
+    nameSourceFree(s, selected);
     if (s.treated || selected.depth != s.namedDepth || selected.sceneConstants != s.namedConstants) {
         s.reason = s.treated ? "already-treated-this-frame" : "producer-source-identity-mismatch";
         if(!s.treated && s.phase.applied)recover(s.reason);
@@ -5358,6 +5428,13 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.previousRowsJitterY=f.reset?rowsNow.y:s.previousRowsY;
     const auto now = GetTickCount64(); f.deltaMs = s.lastMs ? static_cast<float>(now - s.lastMs) : 16.667f;
     if(s.phase.needsSpatialFallback()) {s.reason="incomplete-jitter-frame";recover(s.reason);refuse(s);return;}
+    // A scene with no pool-family draw has no views a draw made: they are made from nothing for the camera term
+    // (engineVelocityPrepareSourceFree). A refusal there leaves the views unprepared, and the request below declines as ever.
+    if (selected.sourceFree) {
+        float sourceFreeRows[6][4]; std::memcpy(sourceFreeRows, selected.camera, sizeof(sourceFreeRows));
+        engineVelocityPrepareSourceFree(ctx, static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)),
+            static_cast<ID3D11Buffer*>(const_cast<void*>(selected.sceneConstants)), sourceFreeRows);
+    }
     if (!engineVelocitySourceViews(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)), &f.engine)) {
         s.reason="engine-source-not-ready";if(s.phase.applied)recover(s.reason);refuse(s);return;
     }
@@ -5495,6 +5572,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         overlayFail(s,"overlay-foreign-mutation",selected.hdr);
         decline("overlay-foreign-mutation"); return;
     }
+    nameSourceFree(s, selected);
     if (selected.depth != s.namedDepth || selected.sceneConstants != s.namedConstants) {
         decline("producer-source-identity-mismatch"); return;
     }
@@ -5639,6 +5717,13 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         s.reason = "incomplete-jitter-frame";
         if (recoverHdr(s.reason, f)) { refuse(s); } else decline("incomplete-jitter-frame");
         return;
+    }
+    // A scene with no pool-family draw has no views a draw made: they are made from nothing for the camera term
+    // (engineVelocityPrepareSourceFree). A refusal there leaves the views unprepared, and the request below declines as ever.
+    if (selected.sourceFree) {
+        float sourceFreeRows[6][4]; std::memcpy(sourceFreeRows, selected.camera, sizeof(sourceFreeRows));
+        engineVelocityPrepareSourceFree(ctx, static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)),
+            static_cast<ID3D11Buffer*>(const_cast<void*>(selected.sceneConstants)), sourceFreeRows);
     }
     if (!engineVelocitySourceViews(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)), &f.engine)) {
         s.reason = "engine-source-not-ready";

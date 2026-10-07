@@ -48,6 +48,7 @@ F4 vertex(int i,Pose p){const double x=i==0||i==3?-.6:.6,y=i<2?-.6:.6,t=i<2?0:1;
 #include "flat_identity_receipt_tests.h"
 #include "flat_bench_history_pressure_tests.h"
 #include "flat_covered_draw_tests.h"
+#include "flat_sibling_tests.h"
 int main(int argc,char** argv){
  check(flatIdentityReceiptTests()==0,"identity receipt regressions pass");
  const UINT W=128,H=96;ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> ctx;D3D_FEATURE_LEVEL fl;
@@ -202,7 +203,13 @@ int main(int argc,char** argv){
   ComPtr<ID3D11Resource> resource;view->GetResource(&resource);ComPtr<ID3D11Buffer> sourceBuffer;hr(resource.As(&sourceBuffer));
   D3D11_BUFFER_DESC d{};sourceBuffer->GetDesc(&d);d.Usage=D3D11_USAGE_STAGING;d.BindFlags=0;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;d.MiscFlags=0;d.StructureByteStride=0;
   ComPtr<ID3D11Buffer> staging;hr(dev->CreateBuffer(&d,nullptr,&staging));ctx->CopyResource(staging.Get(),sourceBuffer.Get());
-  D3D11_MAPPED_SUBRESOURCE map{};hr(ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&map));std::vector<unsigned char> result(d.ByteWidth);std::memcpy(result.data(),map.pData,result.size());ctx->Unmap(staging.Get(),0);return result;
+  D3D11_MAPPED_SUBRESOURCE map{};hr(ctx->Map(staging.Get(),0,D3D11_MAP_READ,0,&map));std::vector<unsigned char> result(d.ByteWidth);std::memcpy(result.data(),map.pData,result.size());ctx->Unmap(staging.Get(),0);
+  // A typed four-byte view over part of a buffer (the retained instance scalars are one element each of a shared buffer, section 104) names
+  // its own elements; every other view names its whole buffer, as before.
+  D3D11_SHADER_RESOURCE_VIEW_DESC vd{};view->GetDesc(&vd);
+  if(vd.ViewDimension==D3D11_SRV_DIMENSION_BUFFER && vd.Format==DXGI_FORMAT_R32_UINT && (vd.Buffer.FirstElement||vd.Buffer.NumElements*4<result.size()))
+   return std::vector<unsigned char>(result.begin()+vd.Buffer.FirstElement*4,result.begin()+(vd.Buffer.FirstElement+vd.Buffer.NumElements)*4);
+  return result;
  };
  auto wordsOf=[&](ID3D11ShaderResourceView* view){const auto bytes=bytesOf(view);std::vector<unsigned> words(bytes.size()/4);std::memcpy(words.data(),bytes.data(),bytes.size());return words;};
  AnimatedVertexHistory shared;AnimatedVertexHistory::Capture firstCapture,secondCapture,nextCapture;
@@ -432,6 +439,8 @@ int main(int argc,char** argv){
     issue(ctx.Get(),9,1,0,0,0);
    };
    flatCoveredDrawTests(dev.Get(),ctx.Get(),ownerView.Get(),rawDepthView.Get(),W,H,flatInputs,worldCamera,ib.Get(),gpuRasterMulti,readFloatMap);
+   // The sibling pass (flat_sibling_tests.h): a draw with no history of its own takes its siblings' motion.
+   flatSiblingTests(dev.Get(),ctx.Get(),ownerView.Get(),rawDepthView.Get(),W,H,flatInputs,worldCamera,ib.Get(),multiPool.Get(),multiPoolData,gpuRasterMulti,readFloatMap);
   }
  }
  finalRaster(foreignOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,600,flatInputs),"flat captures a new foreign identity before H");

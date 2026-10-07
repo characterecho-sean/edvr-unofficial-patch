@@ -374,6 +374,18 @@ bool engineVelocityPoolFamilyVs(uint64_t vsHash) noexcept;
 // does not assert that the runtime shader patch or motion views are ready.
 bool engineVelocityPoolFamilyPair(uint64_t vsHash, uint64_t psHash) noexcept;
 bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews* out);
+// The source's views for a scene that drew no pool-family draw at all (design section 104: open ground and sky). The views a pool draw's first
+// substitution would have made are made from nothing: the slot target (the flat marker plane, cleared this frame, so no pixel names a record),
+// a one-record pool nothing points into, and the scene constants of `rows` (rows 270..275, the selected camera) with this frame's stamp. The
+// previous frame's constants must be the source's own (a sourced frame's, or this call's of the frame before), or the next engineVelocitySourceViews
+// declines as it does after any gap. Keeps the source's depth alive for the frame. False when the engine motion is not live, the depth is not one
+// a slot target fits, or a resource could not be made. Flat profile only; owner thread.
+// `sceneConstants` is the buffer the rows came from (the selected frame's b1): the source's watch follows it from here, as a naming draw's
+// engineVelocityNoteSource does, so the first pool draw of the frame that follows a run of source-free ones sees its rows written and is not
+// declined as 'the naming's rows not seen' (one frame lost at every turn back to a view with pool draws).
+bool engineVelocityPrepareSourceFree(ID3D11DeviceContext* ctx, ID3D11Texture2D* sceneDepth, ID3D11Buffer* sceneConstants, const float (&rows)[6][4]);
+// Frames prepared from nothing since the module went live, for the 5 s line.
+uint64_t engineVelocitySourceFreeFrames();
 // The VR world route's two reads of the source's naming (vr_world_route.cpp; docs section 82): is `depth` the source depth
 // screen_motion named in THIS present frame, and the source camera's rows 270..275 (the resolver's camera[6][4]: b1's first
 // 96 bytes from row 270) as the watch last saw them written for that naming. False when nothing was named this frame, the

@@ -140,9 +140,13 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     // the 16M-pixel bound of the foreground map once refused: 5760 x 3240 (4K at SS 1.5) into 3840 x 2160.
     const bool supersampled=std::strcmp(name,"supersampled_scene")==0;
     const bool supersampled4k=std::strcmp(name,"supersampled_scene_4k")==0;
-    const bool supersampledAny=supersampled||supersampled4k;
+    // The pool-less view (design section 104): the supersampled frame of a scene that draws no pool-family draw at all (ground and sky). The
+    // warm-up frames before it name the world and give the engine its previous scene constants, as the frames before a turn onto open ground do;
+    // the measured frame draws one full-screen colour and depth writer with the world camera and nothing else, then the consumer.
+    const bool poolLess=std::strcmp(name,"pool_less_view")==0;
+    const bool supersampledAny=supersampled||supersampled4k||poolLess;
     const UINT outputW=supersampled4k?3840u:64u,outputH=supersampled4k?2160u:64u;
-    const UINT renderW=supersampled4k?5760u:supersampled?96u:64u,renderH=supersampled4k?3240u:supersampled?96u:64u;
+    const UINT renderW=supersampled4k?5760u:(supersampled||poolLess)?96u:64u,renderH=supersampled4k?3240u:(supersampled||poolLess)?96u:64u;
     edvr::openxr::PresentDevice present;
     if (!ok(present.initialize(proxy,driver,outputW,outputH),"hidden proxy device")) return 2;
     for(unsigned i=0;i<3;++i) if(!ok(present.present(),"arm flat frame"))return 2;
@@ -338,6 +342,9 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     // flat map matches by is word 0 and the word at byte 28 (word 7) of the record, never its slot: both are zero in 9 and 10.
     records[10]=records[9];
     records[12]=records[9];records[12].words[0]=1;
+    // ...and at another place (x = -.65 against .65), so that a history taken across the two identities would carry a motion: the sibling pass gives
+    // a draw whose prior is another record the view's own (none), so no sample of the 'different' run may move.
+    float otherX=-.65f;std::memcpy(&records[12].words[4],&otherX,4);
     uint32_t t38Data[12*16]{};
     auto makeStructured=[&](const void* data,UINT stride,UINT count,ComPtr<ID3D11ShaderResourceView>& srv) {
         D3D11_BUFFER_DESC bd{};bd.ByteWidth=stride*count;bd.Usage=D3D11_USAGE_DEFAULT;
@@ -550,7 +557,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         if(!originalDraw(0,poolRtv.Get(),evidence.alternate,instanceBuffer[1].Get(),1))return 2;
     }
     // The world draw: family 0 with camera 0. It names the world and is counted unmarked, never planned or captured.
-    if(!originalDraw(0,poolRtv.Get(),evidence.world))return 2;
+    if(!poolLess && !originalDraw(0,poolRtv.Get(),evidence.world))return 2;
     if(stateDraw) {
         // A masked or blended draw of the first-person pair (family 1, camera 1), then the ordinary one. With a depth
         // write it defines the surface it shows and is admitted; without one it cannot change the surface and is
@@ -580,7 +587,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         context->OMSetDepthStencilState(depthState.Get(),0);
         if(!originalDraw(1,poolRtv.Get(),evidence.stateLater))return 2;
         evidence.alternate=evidence.stateLater;
-    } else if(!genericFirst && !originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;   // the first person's surface: family 1, camera 1 (2 in the weapon-camera cases)
+    } else if(!genericFirst && !poolLess && !originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;   // the first person's surface: family 1, camera 1 (2 in the weapon-camera cases)
     if(pieces) {
         // The same draw again, as the pieces of one mesh: 69 more, every one the same key (shaders, layout, buffers, indices, pool record).
         Snapshot pieceSnapshot{};
@@ -696,7 +703,41 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     ComPtr<ID3D11BlendState> hdrBlendState;
     if((blendedHdr||blendedHdrWorld) && !ok(device->CreateBlendState(&hdrBlend,&hdrBlendState),"blended HDR writer"))return 2;
     if(blendedHdrWorld)context->OMSetBlendState(hdrBlendState.Get(),nullptr,0xffffffffu);
-    if(!originalDraw(0,hdrRtv.Get(),evidence.writer))return 2;
+    if(poolLess) {
+        // The pool-less view's only draw: the captured full-screen pair (clip-space positions, a colour, no pool record: not a pool family)
+        // into the HDR and the depth with the world camera's constants bound. Terrain and sky are drawn by such passes; none of them is a
+        // pair the motion producer substitutes, so nothing in the frame names the world until the selector does.
+        std::vector<BYTE> wideVsCode,widePsCode;
+        if(!readShader(fixturePath,L"vs_FC1193AFFC596F74.dxbc",0xFC1193AFFC596F74ull,wideVsCode) ||
+           !readShader(fixturePath,L"ps_258B95AC99520C1F.dxbc",0x258B95AC99520C1Full,widePsCode))return 2;
+        ComPtr<ID3D11VertexShader> wideVs;ComPtr<ID3D11PixelShader> widePs;
+        if(!ok(device->CreateVertexShader(wideVsCode.data(),wideVsCode.size(),nullptr,&wideVs),"pool-less VS") ||
+           !ok(device->CreatePixelShader(widePsCode.data(),widePsCode.size(),nullptr,&widePs),"pool-less PS"))return 2;
+        const float wideVertices[3][8]={{-1,-1,.5f,1},{-1,3,.5f,1},{3,-1,.5f,1}};
+        ComPtr<ID3D11Buffer> wideBuffer;
+        if(!createDataBuffer(wideVertices,sizeof(wideVertices),D3D11_BIND_VERTEX_BUFFER,wideBuffer))return 2;
+        ComPtr<ID3D11ShaderReflection> wideReflected;
+        if(!ok(D3DReflect(wideVsCode.data(),wideVsCode.size(),IID_PPV_ARGS(&wideReflected)),"pool-less VS reflection"))return 2;
+        D3D11_SHADER_DESC wideDesc{};wideReflected->GetDesc(&wideDesc);
+        if(wideDesc.InputParameters!=2)return 2;
+        D3D11_SIGNATURE_PARAMETER_DESC wideSignature[2]{};
+        wideReflected->GetInputParameterDesc(0,&wideSignature[0]);wideReflected->GetInputParameterDesc(1,&wideSignature[1]);
+        const D3D11_INPUT_ELEMENT_DESC wideInput[2]={
+            {wideSignature[0].SemanticName,wideSignature[0].SemanticIndex,DXGI_FORMAT_R32G32B32A32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
+            {wideSignature[1].SemanticName,wideSignature[1].SemanticIndex,DXGI_FORMAT_R32G32B32A32_FLOAT,0,16,D3D11_INPUT_PER_VERTEX_DATA,0}};
+        ComPtr<ID3D11InputLayout> wideLayout;
+        if(!ok(device->CreateInputLayout(wideInput,2,wideVsCode.data(),wideVsCode.size(),&wideLayout),"pool-less input layout"))return 2;
+        ID3D11RenderTargetView* wideTarget=hdrRtv.Get();context->OMSetRenderTargets(1,&wideTarget,dsv.Get());
+        ID3D11Buffer* wideCamera=camera[0].Get();
+        context->VSSetConstantBuffers(1,1,&wideCamera);context->PSSetConstantBuffers(1,1,&wideCamera);
+        context->IASetInputLayout(wideLayout.Get());
+        ID3D11Buffer* wideVb=wideBuffer.Get();const UINT wideStride=sizeof(wideVertices[0]),wideZero=0;
+        context->IASetVertexBuffers(0,1,&wideVb,&wideStride,&wideZero);
+        context->VSSetShader(wideVs.Get(),nullptr,0);context->PSSetShader(widePs.Get(),nullptr,0);
+        context->Draw(3,0);
+        if(!snapshot(&evidence.writer,sizeof(evidence.writer)) || !snapshot(&evidence.world,sizeof(evidence.world)))return 2;
+        context->IASetVertexBuffers(0,2,vb,strides,offsets);
+    } else if(!originalDraw(0,hdrRtv.Get(),evidence.writer))return 2;
     if(blendedHdrWorld)context->OMSetBlendState(nullptr,nullptr,0xffffffffu);
     if(blendedHdr) {
         context->OMSetBlendState(hdrBlendState.Get(),nullptr,0xffffffffu);
@@ -721,6 +762,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     context->IASetInputLayout(nullptr);context->VSSetShader(consumerVertex.Get(),nullptr,0);
     context->PSSetShader(consumerPixel.Get(),nullptr,0);context->Draw(3,0);
     if(!snapshot(&evidence.consumer,sizeof(evidence.consumer)))return 2;
+    // The pool-less view names no world at its draws: the selection does, at the consumer, so the world's evidence is what the proxy holds after it.
+    if(poolLess)evidence.world=evidence.consumer;
     context->OMSetRenderTargets(0,nullptr,nullptr);
     const auto depthAfter=readPixels(device,context,depth.Get(),8);
     evidence.depthPixels=changedPixels(depthBefore,depthAfter,8);
@@ -752,9 +795,12 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     //   steady    slot 9 every frame: the control. Every first-person sample is matched, none rejected.
     //   moved     slots 9 and 10 alternating, two records with one identity: the repacked pool. Still none rejected: the map matches a draw to the
     //             frame before's by the record's identity, and the slot compared would reject every sample of every frame after the first.
-    //   different slots 9 and 12 alternating, two records with another bone base: from the second frame on every sample is rejected, and says why
-    //             (the identity differs): the control that this scene's map rejects at all.
-    struct RepackRun {unsigned drawn=0,treated=0,frames=0;uint64_t matched=0,rejected=0,identityDiffers=0,reasons[8]={};};
+    //   different slots 9 and 12 alternating, two records with another bone base and another place (the triangle swaps sides each frame): the map
+    //             refuses a draw whose prior is another record, and says why (the identity differs), until the identity sampler has read such a draw
+    //             (one in thirteen) and arms the sibling pass for the frames after: then the draw, which has no sibling, takes the view's own motion,
+    //             none. So the run holds rejected samples (the control that this scene's map rejects at all), then valid ones, and never a sample
+    //             that moves: a history taken from the other record would move the triangle by its whole displacement.
+    struct RepackRun {unsigned drawn=0,treated=0,frames=0;uint64_t matched=0,rejected=0,identityDiffers=0,moving=0,reasons[8]={};};
     bool repackPreviousCaptured=true;   // the frame before had its first-person draw captured (the measured frame did)
     RepackRun repackSteady,repackMoved,repackDifferent;
     Snapshot repackEnd{};   // the proxy's counters after the runs (reported: how many H attempts and qualifications the runs took, and the last verdict)
@@ -803,8 +849,10 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
                 ++count->frames;
                 for(size_t at=0;at+16<=texels.size();at+=16) {
                     float sample[4]{};std::memcpy(sample,texels.data()+at,16);
-                    if(sample[3]==1.f)++count->matched;
-                    else if(sample[3]==2.f) {
+                    if(sample[3]==1.f) {
+                        ++count->matched;
+                        if(std::fabs(sample[0])>=1.f/256 || std::fabs(sample[1])>=1.f/256)++count->moving;
+                    } else if(sample[3]==2.f) {
                         ++count->rejected;
                         if(sample[0]==float(kFlatMonoWeaponReasonIdentityDiffers))++count->identityDiffers;
                         if(sample[0]>=0.f && sample[0]<8.f && sample[0]==std::floor(sample[0]))++count->reasons[unsigned(sample[0])];
@@ -863,8 +911,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     // the naming draw and the HDR writer, and the case's own (inert_depth_write_world, stale_foreign_mark). Prepass
     // and laser draws with camera 0 before naming are predicted, not unmarked. Native TAA never plans anything.
     const unsigned worldDraws=2u+(inertWorld?1u:0u)+(staleMark?1u:0u);
-    const bool worldsUnmarked=taa || (!worldMarkerDelta && worldUnmarkedDelta==worldDraws);
-    const bool rasterReady=evidence.validDepthPixels>0 && evidence.poolPixels>0 && evidence.hdrPixels>0;
+    const bool worldsUnmarked=taa || poolLess || (!worldMarkerDelta && worldUnmarkedDelta==worldDraws);
+    const bool rasterReady=evidence.validDepthPixels>0 && evidence.hdrPixels>0 && (poolLess || evidence.poolPixels>0);
     const bool ownershipForeign=evidence.world.namedWorld && evidence.alternate.foreignSeen &&
         evidence.alternate.captured && evidence.alternate.gpuIdentitySubmitted && evidence.gpuForeignPixelsAtH>0;
     // The engine producer's own slots (the supported family-0 pair) mark the world; the shipping host has no producer.
@@ -873,8 +921,9 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool inertNoWriteMeasured=!inertNoWrite ||
         (evidence.inertStencilPixels>0 && !evidence.inertColorPixels && !evidence.inertDepthPixels &&
          !evidence.inert.firstFailureFrame);
-    const bool upstream=rasterReady && evidence.world.namedWorld && route && inertNoWriteMeasured &&
-        (taa || (ownership && after.hQualified>0));
+    // The pool-less view names no world at its draws: the selection does, at the trigger, and the snapshot after the consumer says so.
+    const bool upstream=poolLess?(rasterReady && after.namedWorld && route):
+        (rasterReady && evidence.world.namedWorld && route && inertNoWriteMeasured && (taa || (ownership && after.hQualified>0)));
     const bool inertWriterRefusal=depthGuard && after.hAttempts>0 && !after.hQualified &&
         evidence.inert.firstFailureVs==0xFC1193AFFC596F74ull &&
         evidence.inert.firstFailurePs==0x258B95AC99520C1Full &&
@@ -962,6 +1011,10 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         uint64_t(evidence.renderW)*2==uint64_t(evidence.outputW)*3 && uint64_t(evidence.renderH)*2==uint64_t(evidence.outputH)*3;
     const bool supersampleRule=supersampledSizes && attemptedDelta>0 && qualifiedDelta>0 && !surfaceDelta &&
         foreignDelta==1 && capturedDelta==1 && frameClean && !after.failureKinds;
+    // The pool-less view: no first-person draw and no source draw anywhere in the frame (nothing seen foreign, nothing captured), the world named
+    // from the selection, the sizes as planned, and no refusal. The backend half is the one every supersampled case shares.
+    const bool poolLessRule=poolLess && supersampledSizes && !surfaceDelta && !foreignDelta && !capturedDelta && frameClean &&
+        !after.failureKinds && after.namedWorld && !after.hAttempts;
     const bool supersampleBackendRan=!supersampledAny || (backendDelta>0 && !spatialDelta && !backendFailureDelta);
     // The first person's slot moves: the measured frame is the ordinary scene frame (its first-person draw captured, H qualified, no refusal), and
     // the map of the frames of the three runs after it that could have a history (at least six of each run, so a run that was not read cannot pass)
@@ -973,7 +1026,9 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         repackSteady.drawn==32 && repackMoved.drawn==32 && repackDifferent.drawn==31 &&
         repackSteady.frames>=6 && repackMoved.frames>=6 && repackDifferent.frames>=6 &&
         repackSteady.matched>0 && repackSteady.rejected==0 && repackMoved.matched>0 && repackMoved.rejected==0 &&
-        repackDifferent.matched==0 && repackDifferent.rejected>0 && repackDifferent.identityDiffers==repackDifferent.rejected;
+        !repackSteady.moving && !repackMoved.moving &&
+        repackDifferent.matched>0 && repackDifferent.rejected>0 && repackDifferent.identityDiffers==repackDifferent.rejected &&
+        !repackDifferent.moving;
     // The draws past the cap are covered per pixel, not the frame's refusal: no first failure anywhere on the frame, an empty refusal inventory,
     // H qualified with the covered draws counted, and the backend's frame (the verdict below needs the resolve to complete).
     const bool piecesRule=pieces && attemptedDelta>0 && qualifiedDelta>0 && !surfaceDelta &&
@@ -986,7 +1041,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const bool ruleConfirmed=worldsUnmarked && (inertNoWrite?inertNoWriteRule:colorInert?forwardedColorOnly:
         blendedNoDepth?forwardedBlended:(partialState||blendedState)?admittedState:blendedHdrWorld?worldHdrBlended:
         inertWorld?worldInertWriter:staleMark?staleMarkRule:settlement?settlementConfirmed:mismatch?scaleRecognised:
-        repacked?repackRule:pieces?piecesRule:genericFirst?genericRule:supersampledAny?supersampleRule:true);
+        repacked?repackRule:pieces?piecesRule:genericFirst?genericRule:poolLess?poolLessRule:supersampledAny?supersampleRule:true);
     const bool guardConfirmed=worldsUnmarked && (hostGuard?
         rasterReady && evidence.world.namedWorld && (taa || ownershipForeign) && after.hdrTriggered && !after.hAttempts &&
             std::strcmp(after.hdrVerdict,"engine-source-not-ready")==0:
@@ -1002,6 +1057,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         repacked?"first-person-history-kept-by-identity-across-slots":
         pieces?"first-person-draws-over-the-cap-covered-per-pixel-and-frame-resolved":
         genericFirst?"world-named-by-the-world-camera-not-the-first-persons-generic-draw":
+        poolLess?"pool-less-view-selected-source-free-and-resolved-at-render-size":
         supersampledAny?"supersampled-hdr-route-qualified-and-resolved-at-render-size":
         settlement?"predicted-world-prepass-planned-without-capture":"production-hdr-resolve-completed";
     if(guardCase) {
@@ -1058,7 +1114,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const auto repackJson=[](const RepackRun& run) {
         std::ostringstream o;
         o<<"{\"drawn\":"<<run.drawn<<",\"treated\":"<<run.treated<<",\"frames\":"<<run.frames<<",\"matched\":"<<run.matched<<",\"rejected\":"<<run.rejected
-         <<",\"identityDiffers\":"<<run.identityDiffers<<",\"reasons\":[";
+         <<",\"identityDiffers\":"<<run.identityDiffers<<",\"moving\":"<<run.moving<<",\"reasons\":[";
         for(unsigned r=0;r<8;++r)o<<(r?",":"")<<run.reasons[r];   // the rejected samples by the reason in x: 0 none, 1 invalid current ... 7 ambiguous
         o<<"]}";
         return o.str();
@@ -1145,6 +1201,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     if(pieces)result<<",\"Seventy draws of one reconstructed first-person mesh (one pool record); the 65th to 70th are refused their capture by the occurrence cap and covered per pixel\"";
     if(repacked)result<<",\"Pool records 10 and 12 are reconstructed copies of record 9 (same identity words; another bone base); the first-person map is the proxy's own, read through its test export. Every bench frame is a reset frame for the resolver, so its refusal census is not asked\"";
     if(supersampledAny)result<<",\"The scene targets are rendered above the swap chain's size (the HDR route's R > D): 1.5 x per axis; the game's own final copy that would downsample the result is not part of the bench\"";
+    if(poolLess)result<<",\"The measured frame draws one reconstructed full-screen colour and depth writer with the world camera and no pool-family draw; the warm-up frames before it are the ordinary scene's, which name the world and leave the engine its previous scene constants\"";
     if(supersampled4k)result<<",\"Hardware adapter only: 5760 x 3240 into 3840 x 2160 is impractical on WARP\"";
     result<<"]}";
     std::puts(result.str().c_str());
