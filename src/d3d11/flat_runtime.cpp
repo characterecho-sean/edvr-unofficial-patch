@@ -232,6 +232,10 @@ struct State {
             kinds[used++]={vs,ps,stage,reason,1,q,format};
         }
     } foregroundFailureKinds;
+    // A draw refused its capture whose pixels the owner plane marks first-person is not a frame refusal (FlatForegroundMotion::coverDraw):
+    // its kind is kept here, apart from the frame refusals above, so the two inventories stay readable. The latest frame that had any.
+    DomainFailureKinds foregroundCoveredKinds;
+    DomainFailure foregroundFirstCovered;
     struct DomainCandidate {
         Ptr<ID3D11Texture2D> depth;
         uint64_t frame=~0ull;
@@ -241,13 +245,15 @@ struct State {
         Ptr<ID3D11Resource> hdr;
         DomainFailure firstFailure{};
         DomainFailureKinds failureKinds{};
+        DomainFailure firstCovered{};
+        DomainFailureKinds coveredKinds{};
         // First-person (foreign) draws the domain planned into this depth this frame: the copy route's second witness that the frame is
         // mixed-camera (flatCopyMixedCamera), for a weapon whose draws the model cannot see. Zeroed with the frame.
         uint32_t foreignPlanned=0;
         void beginFrame(uint64_t next) {
             if(frame==next)return;
             frame=next;colorWritten=false;foreignPlanned=0;
-            pendingNull.beginFrame(next);hdr.Reset();firstFailure={};
+            pendingNull.beginFrame(next);hdr.Reset();firstFailure={};firstCovered={};
             motion.beginFrame(static_cast<unsigned>(next));
         }
     };
@@ -271,6 +277,9 @@ struct State {
         uint64_t foreignSeen=0,captured=0,worldMarkers=0,nullMarkers=0,markerRefused=0;
         uint64_t hAttempts=0,hQualified=0;
         uint64_t predictedWorld=0,worldUnmarked=0,surfacePreserving=0,surfacePreservingForeign=0;
+        // Draws refused their capture and covered per pixel, and the qualified frames that held at least one: the frames the whole-frame
+        // refusal would have lost (design section 104, the grenade hold).
+        uint64_t coveredDraws=0,hCoveredFrames=0;
     } foregroundCounts;
     // The prep's refusal census in flat: sampled while the motion-source view is on, and for a bounded window after the census key
     // (NumLock), so the per-class line names what the finish shows raw instead of the backend's result.
@@ -333,6 +342,14 @@ struct State {
     Ptr<ID3D11Resource> uavs[8];
     const void* namedDepth = nullptr, *namedConstants = nullptr;
     unsigned char namedCamera[kFlatCameraBytes]{};
+    // The draw that named the world this frame (its shaders), and how often the camera it named was not the one H selected (design
+    // section 104, the grenade hold: a first-person camera that names the world makes every world draw after it a "foreign" draw).
+    uint64_t namedVs = 0, namedPs = 0;
+    uint64_t namedNotSelected = 0;
+    uint32_t namedNotSelectedLogged = 0;
+    // Why a frame's untrusted-camera accounting failed (untrustedUnknown set): table overflow, an alternate draw no bucket completed, a
+    // same-depth draw without a camera, no alternate bucket to select. Events since the process started.
+    uint64_t untrustedUnknownCause[4] = {};
     FlatMonoFrame previous{}; bool havePrevious = false, treated = false;
     std::string mode; FlatMonoResolveMode engine = FlatMonoResolveMode::Taa;
     unsigned preset = ~0u, foveaPreset = ~0u;
@@ -608,7 +625,7 @@ static void reportForegroundDomain(State& s) {
     const auto& n=s.foregroundCounts;
     auto captures=s.foregroundRetiredCaptureStats;
     for(const auto& candidate:s.foregroundCandidates)captures.add(candidate.motion.stats());
-    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call; history of the submitted draws, cumulative: no-candidate found no record of its geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on (pool differs, near differs, the previous draw is not there), priors-one/several matched on the GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame",
+    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call; history of the submitted draws, cumulative: no-candidate found no record of its geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on (pool differs, near differs, the previous draw is not there), priors-one/several matched on the GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame",
         flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
         (unsigned long long)captures.attempts,(unsigned long long)captures.gpuAttempts,
         (unsigned long long)captures.submitted,(unsigned long long)captures.preflightRefused,
@@ -620,7 +637,10 @@ static void reportForegroundDomain(State& s) {
         (unsigned long long)n.predictedWorld,s.worldReference.nearPlane,(unsigned long long)s.predictedScaleRejectedWindow,
         (unsigned long long)n.worldUnmarked,
         (unsigned long long)n.surfacePreserving,(unsigned long long)n.surfacePreservingForeign,
-        (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,s.foregroundHRefusalWindow?s.foregroundHRefusalWindow:"none");
+        (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,(unsigned long long)n.hCoveredFrames,
+        (unsigned long long)n.coveredDraws,(unsigned long long)captures.coveredOccurrence,(unsigned long long)captures.coveredBudget,
+        (unsigned long long)captures.coveredOther,(unsigned long long)captures.windowed,
+        s.foregroundHRefusalWindow?s.foregroundHRefusalWindow:"none");
     // last-refusal is the most recent H refusal since the previous line. The per-frame field clears at every frame start, so it read
     // "none" here even while every frame was refused (section 104, supersampled 4K).
     s.foregroundHRefusalWindow=nullptr;
@@ -664,6 +684,24 @@ static void reportForegroundDomain(State& s) {
             (unsigned long long)inventory.frame,kind.firstQ,kind.count,(unsigned long long)kind.vs,(unsigned long long)kind.ps,
             kind.format,kind.stage?kind.stage:"none",kind.reason?kind.reason:"none");
     }
+    // The draws that were refused their capture and covered per pixel (the frame stayed qualified): the latest frame that had any.
+    // Their pixels are the census's weapon-refused pixels under reason 0 (a pixel with no map sample).
+    const auto& covered=s.foregroundCoveredKinds;
+    Log::get().note("flat foreground per-pixel refusal inventory: frame=%llu kinds=%u dropped=%u; every distinct draw refused its capture and covered per pixel on a candidate depth in the latest such frame; their pixels are marked first-person with no map sample (census: weapon-refused, reason unspecified)",
+        (unsigned long long)covered.frame,covered.used,covered.dropped);
+    for(unsigned i=0;i<covered.used;++i) {
+        const auto& kind=covered.kinds[i];
+        Log::get().note("flat foreground per-pixel refusal kind: frame=%llu first-q=%u count=%u VS=%016llX PS=%016llX format=%u stage=%s reason=%s",
+            (unsigned long long)covered.frame,kind.firstQ,kind.count,(unsigned long long)kind.vs,(unsigned long long)kind.ps,
+            kind.format,kind.stage?kind.stage:"none",kind.reason?kind.reason:"none");
+    }
+    const auto& cf=s.foregroundFirstCovered;
+    if(cf.frame!=~0ull)
+        Log::get().note("flat foreground per-pixel refusal first: frame=%llu q=%u VS=%016llX PS=%016llX format=%u reason=%s budget: valid=%u requested-bytes=%u record-limit=%u byte-limit=%u records=%u bytes=%u invalid=%u pending=%u current=%u prior=%u older=%u reclaimed-records=%u reclaimed-bytes=%u current-draws=%u previous-draws=%u",
+            (unsigned long long)cf.frame,cf.q,(unsigned long long)cf.vs,(unsigned long long)cf.ps,cf.format,cf.reason,cf.budget.valid,
+            cf.budget.requestedBytes,cf.budget.recordLimitHit,cf.budget.byteLimitHit,cf.budget.records,cf.budget.bytes,cf.budget.invalid,
+            cf.budget.pending,cf.budget.current,cf.budget.prior,cf.budget.older,cf.budget.reclaimedRecords,cf.budget.reclaimedBytes,
+            cf.budget.currentDraws,cf.budget.previousDraws);
 }
 static const FlatDomainShaderProof& domainShaderProof(State& s,uint64_t vs,uint64_t ps) {
     const auto key=std::make_pair(vs,ps);auto found=s.foregroundProofs.find(key);
@@ -699,6 +737,23 @@ template<class Key>static void domainFail(State& s,const char* stage,const char*
             if(stateReceipt)s.foregroundFirstFailure.state=*stateReceipt;
             if(budgetReceipt)s.foregroundFirstFailure.budget=*budgetReceipt;
         }
+    }
+}
+// A draw refused its capture (occurrence cap, history budget, any history-stage reason) whose pixels the owner plane marks first-person: the
+// frame stays qualified and the prep refuses those pixels' history (no map sample; never the camera term). Recorded, not refused: the draw's
+// kind under the stage "history-covered", and the first of the frame with its receipts.
+template<class Key>static void domainCovered(State& s,const char* reason,const Key& k,
+    const EdvrFlatForegroundStateReceipt* stateReceipt=nullptr,
+    const EdvrFlatForegroundBudgetReceipt* budgetReceipt=nullptr) {
+    auto* candidate=domainCandidate(s,k.depth);
+    if(!candidate)return;
+    const char* why=reason?reason:"foreground-contract";
+    ++s.foregroundCounts.coveredDraws;
+    candidate->coveredKinds.note(s.prefix.frame,k.vs,k.ps,"history-covered",why,s.prefix.sequence,k.format);
+    if(candidate->firstCovered.frame!=s.prefix.frame) {
+        candidate->firstCovered={s.prefix.frame,k.vs,k.ps,k.cameraHash,s.prefix.sequence,k.format,k.depth,"history-covered",why};
+        if(stateReceipt)candidate->firstCovered.state=*stateReceipt;
+        if(budgetReceipt)candidate->firstCovered.budget=*budgetReceipt;
     }
 }
 bool owner() { return state().thread == GetCurrentThreadId(); }
@@ -2701,6 +2756,24 @@ static void hdrSelectAtTrigger(State& s) {
         witnessSample?hdrAmbiguousSourceReport:nullptr,witnessSample?&s:nullptr,
         qualifiedUntrustedSource,&s);
     s.untrustedSupportedAlternate=sel.selected() && sel.mixedCamera;
+    // The camera a draw named the world with is not the camera H selected: the world's own draws are then every one a different camera
+    // from the named one (draws of a first-person camera after naming are the named camera's, and no bucket accounts for them). The
+    // grenade hold named a camera of near 0.0675 against the selected world's 0.025 for a run of 28 and 36 frames, each declined.
+    if(sel.selected() && s.namedDepth && flatCameraHash(s.namedCamera)!=sel.cameraHash) {
+        ++s.namedNotSelected;
+        if(s.namedNotSelectedLogged<12) {
+            ++s.namedNotSelectedLogged;
+            float named[6][4]{};std::memcpy(named,s.namedCamera,sizeof(named));
+            double np0=0,np1=0,sp0=0,sp1=0;
+            const bool namedScale=flatCameraProjectionScale(named,np0,np1);
+            const bool selectedScale=flatCameraProjectionScale(sel.camera,sp0,sp1);
+            Log::get().note("flat world naming disagrees with H %u/12: frame=%llu naming-q=%u naming-VS=%016llX naming-PS=%016llX named-camera=%016llX named-near=%.9g named-scale=%.6g,%.6g selected-camera=%016llX selected-near=%.9g selected-scale=%.6g,%.6g reference-near=%.9g; naming takes the first supported non-weapon-family scene draw's camera, whatever camera it is",
+                s.namedNotSelectedLogged,(unsigned long long)s.prefix.frame,s.namedWorldQ,(unsigned long long)s.namedVs,
+                (unsigned long long)s.namedPs,(unsigned long long)flatCameraHash(s.namedCamera),named[3][2],
+                namedScale?np0:0.0,namedScale?np1:0.0,(unsigned long long)sel.cameraHash,sel.camera[3][2],
+                selectedScale?sp0:0.0,selectedScale?sp1:0.0,s.worldReference.nearPlane);
+        }
+    }
     if(sel.selected()) {
         const auto* worldBytes=reinterpret_cast<const unsigned char*>(sel.camera);
         bool alternateObserved=false, missingCamera=false;
@@ -2716,7 +2789,7 @@ static void hdrSelectAtTrigger(State& s) {
                     (unsigned long long)first.writeEpoch,first.writeSeq,first.width,first.height);
             }
             if(s.untrusted.active() || sel.mixedCamera) {
-                s.untrustedUnknown=true;
+                s.untrustedUnknown=true;++s.untrustedUnknownCause[0];
                 s.untrusted.invalidate("unclassified-source-table-overflow");
             }
         }
@@ -2758,18 +2831,18 @@ static void hdrSelectAtTrigger(State& s) {
                         unknown.width,unknown.height,sel.renderWidth,sel.renderHeight);
                 } else if(distinct)++s.unclassifiedConsumerDiagnosticsDropped;
                 if(unknown.hasCamera && !accounted) {
-                    s.untrustedUnknown=true;
+                    s.untrustedUnknown=true;++s.untrustedUnknownCause[1];
                     s.untrusted.invalidate("unaccounted-alternate-source-draw");
                 }
             }
         }
         if(alternateObserved || sel.mixedCamera) {
             if(missingCamera) {
-                s.untrustedUnknown=true;
+                s.untrustedUnknown=true;++s.untrustedUnknownCause[2];
                 s.untrusted.invalidate("same-depth-source-missing-camera");
             }
             if(!s.untrusted.select(sel.depth,sel.dsv,worldBytes,
-                    s.phase.currentX,s.phase.currentY))s.untrustedUnknown=true;
+                    s.phase.currentX,s.phase.currentY)){s.untrustedUnknown=true;++s.untrustedUnknownCause[3];}
             if(!s.untrustedUnknown)sel.mixedCamera=true;
         }
     }
@@ -2887,7 +2960,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     s.untrusted.pollMask(s.context.Get());
     if(frame && frame%300==0 &&
        (s.untrustedAccepted || s.untrustedRefused || s.untrustedTreated || s.untrustedWorldExcluded)) {
-        Log::get().note("flat untrusted camera coverage summary: frame=%llu selected=%llu capture-refused=%llu world-excluded=%llu actually-treated=%llu configured=%s attempt-mode=%s last-draws=%u last-ready=%u last-unknown=%u nominee-witnesses=%u nominee-dropped=%u unclassified-witnesses=%u unclassified-dropped=%u last-selector=%s last-failure=%s audit-emitted=%u audit-dropped=%u supported-first=%u supported-second=%u last-qualification=%s",
+        Log::get().note("flat untrusted camera coverage summary: frame=%llu selected=%llu capture-refused=%llu world-excluded=%llu actually-treated=%llu configured=%s attempt-mode=%s last-draws=%u last-ready=%u last-unknown=%u nominee-witnesses=%u nominee-dropped=%u unclassified-witnesses=%u unclassified-dropped=%u last-selector=%s last-failure=%s audit-emitted=%u audit-dropped=%u supported-first=%u supported-second=%u last-qualification=%s unknown-causes(overflow,unaccounted-alternate-draw,missing-camera,no-alternate-bucket)=%llu,%llu,%llu,%llu named-camera-not-selected=%llu",
             (unsigned long long)frame,(unsigned long long)s.untrustedAccepted,
             (unsigned long long)s.untrustedRefused,(unsigned long long)s.untrustedWorldExcluded,
             (unsigned long long)s.untrustedTreated,
@@ -2901,7 +2974,10 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
              s.untrustedDiagnosticBudget.emitted(),s.untrustedDiagnosticBudget.dropped(),
              s.untrustedDiagnosticBudget.firstSupported()?1u:0u,
              s.untrustedDiagnosticBudget.secondSupported()?1u:0u,
-             s.untrustedLastQualification.c_str());
+             s.untrustedLastQualification.c_str(),
+             (unsigned long long)s.untrustedUnknownCause[0],(unsigned long long)s.untrustedUnknownCause[1],
+             (unsigned long long)s.untrustedUnknownCause[2],(unsigned long long)s.untrustedUnknownCause[3],
+             (unsigned long long)s.namedNotSelected);
         s.untrustedAccepted=s.untrustedRefused=s.untrustedTreated=s.untrustedWorldExcluded=0;
     }
     if (drawIngressAudit.active.load(std::memory_order_acquire) &&
@@ -4138,12 +4214,18 @@ static void foregroundContractAtH(State& s,ID3D11DeviceContext* ctx,const FlatMo
         s.foregroundFirstFailure=candidate->firstFailure;
     if(candidate && candidate->failureKinds.frame==s.prefix.frame)
         s.foregroundFailureKinds=candidate->failureKinds;
+    if(candidate && candidate->coveredKinds.frame==s.prefix.frame)
+        s.foregroundCoveredKinds=candidate->coveredKinds;
+    if(candidate && candidate->firstCovered.frame==s.prefix.frame)
+        s.foregroundFirstCovered=candidate->firstCovered;
     f.foregroundMotion=foregroundOutput.motion.Get();f.foregroundQualified=foregroundOutput.qualified;
     f.foregroundResetRequired=foregroundOutput.resetRequired;f.foregroundFrame=foregroundOutput.frame;
     f.foregroundDepthNear=foregroundOutput.depthNear;
     if(foregroundOutput.qualified) {
         ++s.foregroundCounts.hQualified;
         if(!f.hdr)++s.copyWeaponWindow.hQualified;
+        // A qualified frame that holds a covered draw is one the whole-frame refusal used to lose.
+        if(foregroundOutput.coveredDraws)++s.foregroundCounts.hCoveredFrames;
     }
 }
 
@@ -4716,7 +4798,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     if(sourceCandidate && !s.namedDepth) {
         FlatComputeInternalScope guard;
         flatcpu::Scope engine(flatcpu::kEngineDraw);
-        s.namedDepth=k.depth;s.namedConstants=k.b1;s.namedWorldQ=s.prefix.sequence;
+        s.namedDepth=k.depth;s.namedConstants=k.b1;s.namedWorldQ=s.prefix.sequence;s.namedVs=k.vs;s.namedPs=k.ps;
         std::memcpy(s.namedCamera,d.camera,sizeof(d.camera));
         {float namedRows[6][4];std::memcpy(namedRows,d.camera,sizeof(namedRows));s.worldReference=flatDomainWorldReference(namedRows);}
         engineVelocityNoteSource(static_cast<ID3D11Texture2D*>(const_cast<void*>(k.depth)),static_cast<ID3D11Buffer*>(const_cast<void*>(k.b1)));
@@ -5555,8 +5637,8 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
         dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
         if(depthState)depthState->GetDesc(&dd);
         EdvrFlatForegroundStateReceipt stateReceipt{};
-        auto failDomain=[&](const char* stage,const char* why){
-            if(candidate->firstFailure.frame!=s.prefix.frame) {
+        auto readStateReceipt=[&]{
+            if(!stateReceipt.valid) {
                 stateReceipt.valid=1;stateReceipt.boundColors=boundColors;
                 stateReceipt.independentBlend=bd.IndependentBlendEnable?1u:0u;
                 stateReceipt.alphaToCoverage=bd.AlphaToCoverageEnable?1u:0u;
@@ -5602,6 +5684,9 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                     slot.opAlpha=blend?rt.BlendOpAlpha:D3D11_BLEND_OP_ADD;
                 }
             }
+        };
+        auto failDomain=[&](const char* stage,const char* why){
+            if(candidate->firstFailure.frame!=s.prefix.frame)readStateReceipt();
             const auto& budget=candidate->motion.budgetReceipt();
             domainFail(s,stage,why,failureKey,stateReceipt.valid?&stateReceipt:nullptr,
                 why && std::strcmp(why,"history-budget")==0 && budget.valid?&budget:nullptr);
@@ -5622,6 +5707,7 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                 "foreground-original-shader-unavailable":indirectArgs?"foreground-indirect-writer":"foreground-active-query");
         } else {
             const char* phaseReason=nullptr;
+            const char* deferredCapture=nullptr;   // a capture refusal the owner mark below may turn into a per-pixel refusal
             const bool phaseKnown=flatForegroundBoundProjectionPhase(ctx,s.projection.get(),projection.projectionSlot,
                 projection.projectionRow,projection.projectionLayout,s.phase.currentX,s.phase.currentY,
                 domainWidth,domainHeight,domainCamera[3][2],&phaseReason);
@@ -5637,7 +5723,8 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                 if(weaponDrawKind!='X')failDomain("capture","foreground-draw-kind");
                 else if(candidate->motion.capture(ctx,&foregroundOriginalDraw,weaponDrawCount,weaponDrawInstances,weaponDrawStart,weaponDrawBase,
                     weaponDrawStartInstance,static_cast<unsigned>(s.prefix.frame),inputs))++s.foregroundCounts.captured;
-                else failDomain("history",candidate->motion.refusal());
+                // False with no draw refusal is a capture that succeeded under a frame refusal already standing: nothing more to say.
+                else deferredCapture=candidate->motion.drawRefusal();
             }
             if(!producer) {
                 const char* reason=nullptr;
@@ -5650,6 +5737,19 @@ void FlatRuntimeDrawScope::beginActualDraw(ID3D11Buffer* indirectArgs,UINT indir
                 else if(!domainForeign)++s.foregroundCounts.worldMarkers;
             } else if(domainForeign)failDomain("marker","foreground-foreign-old-producer");
             else if(gameHadTarget6)candidate->motion.fail("foreground-native-MRT6-conflict");
+            if(deferredCapture) {
+                // The draw is not in the map. Its pixels are the frame's loss only if nothing marks them: with the owner mark started
+                // (the marker writes the draw's first-person mark where its fragments pass) the prep reads each of them as first
+                // person with no sample and refuses its history, with no motion (the camera term never reaches a marked pixel). A
+                // marker that did not start (or ends abandoned: foreground-abandoned-writer) leaves the frame refused, as it always was.
+                if(domainStarted) {
+                    candidate->motion.coverDraw(deferredCapture);
+                    if(candidate->firstCovered.frame!=s.prefix.frame)readStateReceipt();
+                    const auto& budget=candidate->motion.budgetReceipt();
+                    domainCovered(s,deferredCapture,failureKey,stateReceipt.valid?&stateReceipt:nullptr,
+                        std::strcmp(deferredCapture,"history-budget")==0 && budget.valid?&budget:nullptr);
+                } else failDomain("history",deferredCapture);
+            }
         }
     }
     if(foregroundPlanned) foregroundStarted=state().foreground.beginDraw(ctx,state().prefix.frame);
@@ -5851,7 +5951,7 @@ FlatRuntimeDrawScope::~FlatRuntimeDrawScope() {
 extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
     EdvrFlatSdkBenchSnapshot* out, unsigned int bytes) {
     if (!out || bytes != sizeof(EdvrFlatSdkBenchSnapshot) ||
-        out->size != sizeof(EdvrFlatSdkBenchSnapshot) || out->version != 3 ||
+        out->size != sizeof(EdvrFlatSdkBenchSnapshot) || out->version != 4 ||
         !runtimeFlatProfile() || !owner())
         return 0;
     const auto& s = state();
@@ -5886,6 +5986,8 @@ extern "C" unsigned int __cdecl edvr_selftest_flat_sdk_snapshot(
     snap.worldUnmarked = s.foregroundCounts.worldUnmarked;
     snap.failureKinds = s.foregroundFailureKinds.used;
     snap.failureKindsDropped = s.foregroundFailureKinds.dropped;
+    snap.coveredDraws = s.foregroundCounts.coveredDraws;
+    snap.hCoveredFrames = s.foregroundCounts.hCoveredFrames;
     snap.hdrTriggered = s.hdr.triggered ? 1u : 0u;
     snap.hdrSelected = s.hdrSelected.selected() ? 1u : 0u;
     const auto resolver = flatMonoResolveStats();

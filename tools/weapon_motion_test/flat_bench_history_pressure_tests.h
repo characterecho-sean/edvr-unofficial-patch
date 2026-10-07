@@ -294,9 +294,11 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         }
         auto late=flatHistoryPressureInputs(cap+1);
         late.beforeWorld=false;
-        check(!motion.capture(ctx,issue,3,1,cap*3,0,0,601,late) &&
-              motion.refusal() && !std::strcmp(motion.refusal(),"history-budget"),
-              "late reconstructed foreign draw reaches allocator record budget");
+        // The refusal is the draw's, not the frame's: the runtime covers the draw per pixel when it has marked it (coverDraw), and makes
+        // it the frame's (fail) when it has not.
+        check(!motion.capture(ctx,issue,3,1,cap*3,0,0,601,late) && !motion.refusal() &&
+              motion.drawRefusal() && !std::strcmp(motion.drawRefusal(),"history-budget"),
+              "late reconstructed foreign draw reaches allocator record budget as the draw's refusal, not the frame's");
         const auto stats=motion.stats();
         check(stats.attempts==cap+1 && stats.gpuAttempts==cap+1 && stats.submitted==cap &&
               stats.preflightRefused==0 && stats.warmedAfterRefusal==0,
@@ -312,7 +314,11 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
               receipt.reclaimedRecords==0 && receipt.reclaimedBytes==0 &&
               receipt.knownMutations==0 && receipt.unknownMutations==0,
               "budget receipt preserves current/prior and provisional draw attribution");
-        result.records=receipt.records;result.bytes=receipt.bytes;result.firstRefusal=motion.refusal();
+        motion.coverDraw(motion.drawRefusal());
+        check(!motion.refusal() && motion.coveredDraws()==1 && motion.stats().coveredBudget==1 &&
+              motion.stats().coveredOccurrence==0 && motion.stats().coveredOther==0,
+              "a covered budget refusal counts once, under its cause, and leaves the frame unrefused");
+        result.records=receipt.records;result.bytes=receipt.bytes;result.firstRefusal=motion.drawRefusal();
         results.push_back(result);
         motion.beginFrame(602);
         check(!motion.budgetReceipt().valid && !motion.refusal(),
@@ -576,6 +582,150 @@ inline std::vector<FlatHistoryPressureResult> flatBenchHistoryPressureTests(
         check(history.capture(ctx,issue,3,1,0,0,0,501,prior) && prior.candidateCount==4,
               "next frame exposes four real prior occurrence candidates");
         result.priorCandidates=prior.candidateCount;
+        results.push_back(result);
+    }
+
+    // THE GRENADE HOLD (design section 104). Holding a grenade drew one mesh dozens of times in a frame (the log's refusal inventory: 28
+    // draws of one key refused for the occurrence cap, 10 of another), and the history refused every one beyond the fourth. The extended
+    // policy, the flat adapter's, allows 64 draws of a key and hands each the window of four priors nearest its own ordinal; the GPU map
+    // still matches by identity inside the window. The default policy (VR) is what duplicate_occurrence_cap pins and is unchanged.
+    {
+        std::vector<UINT> indices{0,1,2};
+        auto ib=flatHistoryPressureIndexBuffer(dev,indices);
+        ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        FlatHistoryPressureResult result{"extended_occurrence_window"};
+        constexpr unsigned pieces=9;
+        {
+            AnimatedVertexHistory plain;
+            for(unsigned i=0;i<5;++i) {
+                AnimatedVertexHistory::Capture capture;
+                const bool admitted=plain.capture(ctx,issue,3,1,0,0,0,1000,capture);
+                check(admitted==(i<4),"the default policy still admits four draws of one key and refuses the fifth");
+            }
+        }
+        AnimatedVertexHistory history;
+        std::vector<AnimatedVertexHistory::Capture> first(pieces);
+        for(unsigned i=0;i<pieces;++i) {
+            check(history.capture(ctx,issue,3,1,0,0,0,1000,first[i],false,true) && first[i].occurrences==i,
+                  "the extended policy admits more than four draws of one key in a frame, each its own record");
+            ++result.captures;
+        }
+        check(history.recordCount()==pieces && history.bytes()==pieces*3*32,
+              "nine draws of one key hold nine records of their own");
+        history.advance(1001);
+        for(unsigned k=0;k<pieces;++k) {
+            AnimatedVertexHistory::Capture next;
+            check(history.capture(ctx,issue,3,1,0,0,0,1001,next,false,true) && next.occurrences==k && next.priorRecords==pieces &&
+                  next.candidateCount==4,"the frame after has nine prior records and hands each draw a window of four");
+            const unsigned firstOfWindow=(std::min)(k>0?k-1:0u,pieces-4);
+            check(next.previousPositions[k-firstOfWindow]==first[k].currentPositions &&
+                  next.previousIdentity[k-firstOfWindow]==first[k].currentIdentity,
+                  "the window holds the draw's own previous record at its own ordinal");
+            result.priorCandidates=next.candidateCount;
+            ++result.captures;
+        }
+        {
+            AnimatedVertexHistory limited;
+            for(unsigned i=0;i<AnimatedVertexHistory::maxExtendedOccurrences+1;++i) {
+                AnimatedVertexHistory::Capture capture;
+                const bool admitted=limited.capture(ctx,issue,3,1,0,0,0,1100,capture,false,true);
+                if(i<AnimatedVertexHistory::maxExtendedOccurrences)check(admitted,"sixty-four draws of one key are admitted by the extended policy");
+                else {
+                    check(!admitted && capture.refusal && !std::strcmp(capture.refusal,"occurrence-cap"),
+                          "the sixty-fifth draw of one key is refused by the occurrence cap");
+                    result.firstRefusal=capture.refusal;
+                }
+            }
+            check(limited.recordCount()==AnimatedVertexHistory::maxExtendedOccurrences,"the refused draw allocates nothing");
+        }
+        result.records=unsigned(history.recordCount());result.bytes=history.bytes();
+        results.push_back(result);
+    }
+
+    // A record that no later frame can use as a prior is reclaimable under budget pressure. The log's budget receipt (frame 39036): 128
+    // records, 122 of them last used two frames before and none this frame, 15 percent of the bytes: the first draw of the frame was refused
+    // for the record limit. Under the extended policy those records give way to the fresh key; under the default policy they do not.
+    {
+        std::vector<UINT> indices((cap+1)*3);
+        for(unsigned i=0;i<cap+1;++i){indices[i*3]=0;indices[i*3+1]=1;indices[i*3+2]=2;}
+        auto ib=flatHistoryPressureIndexBuffer(dev,indices);
+        ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        FlatHistoryPressureResult result{"extended_spent_record_reclaim"};
+        auto seeded=[&](AnimatedVertexHistory& history,unsigned frame) {
+            for(unsigned i=0;i<cap;++i) {
+                AnimatedVertexHistory::Capture capture;
+                check(history.capture(ctx,issue,3,1,i*3,0,0,frame,capture,false,true),"the record budget fills with distinct keys");
+                ++result.captures;
+            }
+            check(history.recordCount()==cap,"the history holds the full record budget");
+        };
+        AnimatedVertexHistory plain,extended;
+        seeded(plain,1200);seeded(extended,1200);
+        plain.advance(1201);extended.advance(1201);plain.advance(1202);extended.advance(1202);
+        check(extended.recordCount()==cap && extended.accounting(1202).older==cap,
+              "two frames without a draw leave every record spent but not yet retired (age two)");
+        AnimatedVertexHistory::Capture refused,admitted;
+        check(!plain.capture(ctx,issue,3,1,cap*3,0,0,1202,refused,false,false) && refused.refusal &&
+              !std::strcmp(refused.refusal,"history-budget"),
+              "the default policy refuses a fresh key at the record limit although every record is spent");
+        result.firstRefusal=refused.refusal;
+        check(extended.capture(ctx,issue,3,1,cap*3,0,0,1202,admitted,false,true) && admitted.candidateCount==0,
+              "the extended policy reclaims a spent record for the fresh key");
+        const auto usage=extended.accounting(1202);
+        check(usage.recordCount==cap && usage.current==1 && usage.older==cap-1 && usage.reclaimedRecords==1 &&
+              usage.reclaimedBytes==3*32,"one spent record was reclaimed, and no more than the fresh key needed");
+        // A record the frame before used is a prior some draw of this frame may still need: never reclaimed.
+        AnimatedVertexHistory live;
+        seeded(live,1300);live.advance(1301);
+        AnimatedVertexHistory::Capture lateRefused;
+        check(!live.capture(ctx,issue,3,1,cap*3,0,0,1301,lateRefused,false,true) && lateRefused.refusal &&
+              !std::strcmp(lateRefused.refusal,"history-budget") && live.accounting(1301).reclaimedRecords==0,
+              "records the frame before used are priors and are not reclaimed: the fresh key is refused");
+        result.records=usage.recordCount;result.bytes=usage.bytes;result.retired=1;
+        results.push_back(result);
+    }
+
+    // The adapter: a draw refused its capture is the draw's refusal, not the frame's. The caller covers it per pixel when it marked the
+    // draw (coverDraw) and makes it the frame's (fail) when it did not. Real draws of one key past the cap are the refused ones here.
+    {
+        std::vector<UINT> indices{0,1,2};
+        auto ib=flatHistoryPressureIndexBuffer(dev,indices);
+        ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        FlatForegroundMotion motion;
+        FlatHistoryPressureResult result{"adapter_covered_refusals"};
+        unsigned token=0;
+        for(unsigned i=0;i<AnimatedVertexHistory::maxExtendedOccurrences;++i) {
+            check(motion.capture(ctx,issue,3,1,0,0,0,1400,flatHistoryPressureInputs(++token)) && !motion.drawRefusal(),
+                  "the adapter admits sixty-four draws of one key, as the flat policy allows");
+            ++result.captures;
+        }
+        check(!motion.capture(ctx,issue,3,1,0,0,0,1400,flatHistoryPressureInputs(++token)) && !motion.refusal() &&
+              motion.drawRefusal() && !std::strcmp(motion.drawRefusal(),"occurrence-cap"),
+              "the draw past the cap is refused as the draw's refusal, and the frame stands unrefused");
+        result.firstRefusal=motion.drawRefusal();
+        motion.coverDraw(motion.drawRefusal());
+        check(motion.coveredDraws()==1 && motion.stats().coveredOccurrence==1 && motion.stats().coveredBudget==0 &&
+              motion.stats().coveredOther==0 && !motion.refusal(),"a covered occurrence-cap refusal is counted under its cause and refuses nothing");
+        // A refusal does not poison the draws after it: a different key still captures.
+        ctx->IASetIndexBuffer(flatHistoryPressureIndexBuffer(dev,{0,1,2,0,1,2}).Get(),DXGI_FORMAT_R32_UINT,0);
+        check(motion.capture(ctx,issue,3,1,3,0,0,1400,flatHistoryPressureInputs(++token)) && !motion.drawRefusal() && !motion.refusal(),
+              "a draw after a covered refusal captures as usual");
+        // The same refusal with no owner mark to cover it is the frame's, as every capture failure once was.
+        motion.beginFrame(1401);
+        ctx->IASetIndexBuffer(ib.Get(),DXGI_FORMAT_R32_UINT,0);
+        for(unsigned i=0;i<AnimatedVertexHistory::maxExtendedOccurrences;++i)
+            check(motion.capture(ctx,issue,3,1,0,0,0,1401,flatHistoryPressureInputs(100+i)),"the next frame admits the same sixty-four");
+        check(!motion.capture(ctx,issue,3,1,0,0,0,1401,flatHistoryPressureInputs(200)) && motion.drawRefusal() && !motion.refusal(),
+              "the sixty-fifth is the draw's refusal again");
+        motion.fail(motion.drawRefusal());
+        check(motion.refusal() && !std::strcmp(motion.refusal(),"occurrence-cap") && motion.coveredDraws()==0,
+              "uncovered, the refusal is the frame's: prepareH refuses while it stands");
+        // The frame's own refusals do not defer: a draw that no owner mark could ever cover is the frame's at once.
+        motion.beginFrame(1402);
+        auto bad=flatHistoryPressureInputs(0);
+        check(!motion.capture(ctx,issue,3,1,0,0,0,1402,bad) && motion.refusal() &&
+              !std::strcmp(motion.refusal(),"foreground-writer-token-unavailable") && !motion.drawRefusal(),
+              "a draw with no writer token the owner plane could carry is the frame's refusal, never deferred");
         results.push_back(result);
     }
 

@@ -2,8 +2,9 @@
 
 ## Status
 
-- **State:** FLOWN OK (eccfce7a): DLAA/FSR on foot at any SS, the weapon and
-  aiming included; the weapon and the sight keep AA (104).
+- **State:** grenade hold (104, 2026-10-07): 67 frames lost in runs of 36 and
+  28, 64 of them because the grenade named the world with the first person's
+  camera; a refused history is now the draw's: BUILT, NOT FLOWN.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,13 +34,13 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** section 105: request existing supporter traces for AA refusal.
-  Open: weapon no-candidate bursts, the roof's highlight shimmer
-  (content), TAA at the roof standing still (104). Retain
-  102's color-clear fix; no per-weapon table; preserve Epic settings, 87's
-  native FSR comparison, 83's open items and high-G motion; do not repeat
-  qualified PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR
-  regression tests and `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
+- **Next:** the grenade flight (104); section 105: request existing supporter
+  traces for AA refusal. Open: weapon no-candidate bursts, the roof's highlight
+  shimmer (content), TAA at the roof standing still (104). Retain 102's
+  color-clear fix; no per-weapon table; preserve Epic settings, 87's native FSR
+  comparison, 83's open items and high-G motion; do not repeat qualified
+  PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR regression
+  tests and `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
@@ -13288,6 +13289,123 @@ cases".
 Open: the no-candidate bursts (which action rewrites the weapon's geometry);
 the roof's thin-highlight shimmer (content; the pre-upscaler filter is the
 remaining idea); EDVR's TAA standing still at the roof (2d8e6761, unflown).
+
+### 2026-10-07: holding a grenade; the first person names the world
+
+Reports. A user on v0.18.3: "if you have grenades, hold the X key. The hand
+animation temporarily drops in quality, with reduced resolution and no anti-
+aliasing for about 1-2 seconds. Once you throw the grenade, everything returns
+to normal." Sean reproduced it on Epic with the refusal view on
+(`advanced.temporal_aa_debug = motion_source`): while the grenade is held the
+view disengages entirely and the frame is untreated, with brief white flashes
+as the grenade comes up, as with weapons before they turn cyan.
+
+Flight `edvr_gfx_20261007_092120.log`, verified `v0.18.3` (build 6AC64ABB),
+flat, DLSS, render = output = 3840x2160. Two holds; the log accounts for every
+lost frame (frame numbers are the runtime's):
+
+| hold | frames | selector declines | then |
+|---|---|---|---|
+| 1 | 38999-39034 | 36 in a row | 39035 pending-null mismatch, 39036 `history-budget` |
+| 2 | 39749-39776 | 28 in a row | 39777 pending-null mismatch and `occurrence-cap` |
+
+64 frames were declined by the selector (`source-camera-or-depth-not-unique`)
+and 3 refused by the foreground contract: 67, in runs of 36 and 28 frames,
+about 1.2 and 0.9 s at the hold's 30 fps. The history refusals that the first
+reading took for the cause are the last frames of each run: 39036 and 39777
+(39035 is the stale-reference witness below). The 5 s untrusted-coverage
+summaries agree (frames 39001-39300: 34 declined; 39601-39900: 28; none
+elsewhere).
+
+What a run is. Every nominee line of frame 38999 is `role=post-name-mismatch`
+with `named-near=0.0675000027`; the world's draws have near 0.0250000004, and H
+selects the world camera. The world was NAMED with the first person's camera.
+`FlatRuntimeDrawScope` names it with the first supported scene draw that is not
+one of the five weapon vertex shaders (`weaponMotionFamilyVs`: 7B0DC42D,
+8B589D25, 114AF608, AACFDCF2, 174E8D76), whatever its camera. A grenade is not
+a weapon: it is drawn before the world, with a generic material shader, under
+the first person's camera. The draw itself is not in the log (a naming draw is
+excluded from the nominee lines by construction); the near plane, the scales
+and the five-hash list are. Consequences, all in the log:
+
+- Every world draw after the naming is a draw of another camera than the named
+  one. `foreign-seen` rose by 257,804 in the window with the 36 declined frames
+  (about 7,000 per declined frame, the whole frame's draws, against 26 in a
+  normal one) and `capture-attempts` by 171,856. The world's own G-buffer
+  prepass pieces (F516BF02/B40B0462, a settlement's repeated mesh: the 28 at
+  the occurrence cap in 39777) were taken for first-person draws.
+- The first-person draws after it have the named camera, so the untrusted
+  accounting finds `observed=7 completed=3` on the first-person camera (the
+  audit lines of 38999 and 39749, `qualification` / `record-draw-receipts`):
+  four draws no bucket accounts for, `untrustedUnknown`, the selector's
+  decline.
+- The frame after a run predicts its world from the reference the naming left:
+  near 0.0675, scale (-0.877, -0.887), against the selected world's 0.025,
+  (-0.712, -0.721), ratio 1.231 (the `pending-null mismatch` lines of 39035 and
+  39777). H refuses `foreground-pending-null-not-selected-world`. The budget
+  receipt of 39036 (128 records, 122 last used two frames before, 6 prior, 4.97
+  MB of 32 MiB) is the pile the run left.
+
+Ruled out: the history refusals as the cause (2 of 67 frames, themselves
+symptoms of the poisoned reference); a history bound that is too small (4.97 MB
+of 32 MiB, 122 of 128 records spent); adding the grenade to the weapon list (a
+per-item table: any first-person item that is not a weapon names the world).
+
+Built, NOT FLOWN. Part 1 (this commit): a draw refused its history is the
+draw's refusal, not the frame's. It is what the coordinator's task named, it is
+true of every capture refusal (the occurrence cap, the history budget, any
+other history-stage reason), and the frame it saves is the last of each run.
+Part 2 (the next commit): the first person cannot name the world.
+
+- `FlatForegroundMotion::capture()` returns the refusal as the draw's
+  (`drawRefusal()`), no longer as the frame's. The draw scope keeps it until
+  the owner marker has started. Marked (`engineVelocityFlatDomainBeginDraw`
+  true), it is covered (`coverDraw`): the draw's pixels carry the first-person
+  mark and no map sample, and the prep refuses their history with no motion (a
+  marked pixel never gets the camera term; census: `weapon-refused`, reason
+  `unspecified`; the refusal view paints them white). Not marked, nothing says
+  whose pixels they are and the refusal is the frame's, as before.
+- The frame refusals that remain: a missing context, a writer token the owner
+  plane cannot carry, a marker that did not start or was abandoned, a foreign
+  draw under the old producer, a non-indexed draw kind, an unknown projection
+  phase, and everything at H. The pending-null witness is the case no owner
+  mark can cover: its draw has none by construction.
+- The flat adapter uses the extended history policy. 64 draws of one geometry
+  key a frame (VR keeps 4); past four prior records each draw gets the window
+  of four nearest its ordinal (k-1 .. k+2), the identity still deciding among
+  them in the map, and a draw whose prior is outside the window is refused
+  locally. Records no later frame can use as a prior (last used two or more
+  frames ago; never a prior, never a pending record) are reclaimed under budget
+  pressure. `maxRecords` stays 128: the receipt's 122 were spent, not live.
+- Instruments: `H-qualified-with-per-pixel-refusals` (the frames the whole-
+  frame refusal used to lose), `per-pixel-refused-draws` by cause (`occurrence-
+  cap`, `history-budget`, other) and `windowed-priors` on the `flat foreground
+  SDK domain` line; `flat foreground per-pixel refusal inventory`, `kind` and
+  `first` lines (stage `history-covered`, with the budget receipt), apart from
+  the frame refusal inventory; `unknown-causes(...)` and `named-camera-not-
+  selected` on the untrusted summary, and `flat world naming disagrees with H`
+  lines naming the naming draw's shaders beside the two cameras.
+
+Tests. weapon_motion_test (WARP and `--hardware`): flat_covered_draw_tests.h
+scenes A-E (a draw over the occurrence cap, over the history budget, every draw
+refused, eight pieces of one mesh with eight identities in order, with two
+swapped and reversed, and the uncovered draw) and the history cases
+`extended_occurrence_window`, `extended_spent_record_reclaim` and
+`adapter_covered_refusals`. flat_mono_resolve_test: a first-person pixel with
+no sample (reject, no motion, its own depth, census reason 0) and two prep
+mutants. flat_temporal_test: wiring pins with mutation controls
+(flat_covered_draw_wiring_tests.h). The bench's `first_person_pieces`: 70 draws
+of one mesh in the real runtime, 64 captured, 6 covered, the frame the
+backend's (PASS on the RTX 5090 and on WARP, DLAA, DLSS and FSR). Private
+mutants of the C++: 10 of 10 caught by the WARP rig; 4 of 4 bench-proxy mutants
+caught.
+
+Flight pass signs (view on). Holding a grenade the frame keeps its colours and
+the hand is cyan, or white/pink only where per-pixel refusals remain; holster
+and unholster stay treated; `H-qualified-with-per-pixel-refusals` counts the
+frames the old rule would have lost; `foreground-contract-unqualified` for
+`history-budget` and `occurrence-cap` stops appearing in the runtime refusal
+line.
 
 ## 105. Different supporter: v0.18.2 AA selector refusal (2026-10-06)
 

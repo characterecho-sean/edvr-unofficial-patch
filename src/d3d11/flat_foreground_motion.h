@@ -39,6 +39,10 @@ public:
         Ptr<ID3D11ShaderResourceView> motion;
         bool qualified=false,resetRequired=false;
         unsigned frame=0;float depthNear=0;const char* refusal=nullptr;
+        // The draws of this frame that were refused their capture and are covered per pixel (coverDraw): marked first-person in the
+        // owner plane, without a sample in the map, so the prep refuses their pixels' history and gives them no motion. A qualified map
+        // with coveredDraws above zero is a frame the old whole-frame refusal would have lost.
+        unsigned coveredDraws=0;
     };
     struct CaptureStats {
         uint64_t attempts=0,gpuAttempts=0,submitted=0,preflightRefused=0,warmedAfterRefusal=0;
@@ -48,10 +52,15 @@ public:
         // draw is named by any candidate), priorsOne, priorsSeveral (the GPU map matches among them by identity). repeated counts the draws
         // that are not the first of their geometry in the frame (occurrence above 1), whichever of the above they are.
         uint64_t noCandidate=0,noPriorPool=0,noPriorNear=0,noPriorAbsent=0,priorsOne=0,priorsSeveral=0,repeated=0;
+        // Draws refused their capture and covered per pixel (coverDraw), by cause: the occurrence cap, the history budget, and every other
+        // refusal (a preflight bound, an unreadable identity, a draw shape the original-VS capture cannot take). windowed counts the draws
+        // that were handed the window of four priors out of more (the extended policy: a mesh drawn more than four times in a frame).
+        uint64_t coveredOccurrence=0,coveredBudget=0,coveredOther=0,windowed=0;
         void add(const CaptureStats& o) {
             attempts+=o.attempts;gpuAttempts+=o.gpuAttempts;submitted+=o.submitted;preflightRefused+=o.preflightRefused;
             warmedAfterRefusal+=o.warmedAfterRefusal;noCandidate+=o.noCandidate;noPriorPool+=o.noPriorPool;noPriorNear+=o.noPriorNear;
             noPriorAbsent+=o.noPriorAbsent;priorsOne+=o.priorsOne;priorsSeveral+=o.priorsSeveral;repeated+=o.repeated;
+            coveredOccurrence+=o.coveredOccurrence;coveredBudget+=o.coveredBudget;coveredOther+=o.coveredOther;windowed+=o.windowed;
         }
     };
     const CaptureStats& stats() const{return stats_;}
@@ -64,10 +73,23 @@ public:
         if(frame==frame_)return;
         if(frame==frame_+1)previous_=std::move(current_);else previous_.clear();
         current_.clear();frame_=frame;refusal_=nullptr;budgetReceipt_={};
-        knownMutations_=unknownMutations_=0;history_.advance(frame);
+        knownMutations_=unknownMutations_=0;covered_=0;gpuAttempted_=false;drawRefusal_=nullptr;history_.advance(frame);
     }
+    // The frame's refusal: sticky, the first reason wins, and prepareH refuses while it stands.
     void fail(const char* reason){if(!refusal_)refusal_=reason?reason:"foreground-contract";}
     const char* refusal() const{return refusal_;}
+    // Why the last capture() could not take its draw, or null (it did, whatever the frame's refusal). Not the frame's refusal: the draw is
+    // not in the map. The caller decides what the draw's pixels become. If it marked them first-person in the owner plane it calls
+    // coverDraw(), and they are refused per pixel (no sample: the prep gives them no history and no motion, never the camera term);
+    // if it did not mark them, nothing says whose pixels they are, and it calls fail() with the reason, as every capture failure once did.
+    const char* drawRefusal() const{return drawRefusal_;}
+    void coverDraw(const char* reason) {
+        ++covered_;
+        if(reason && !std::strcmp(reason,"occurrence-cap"))++stats_.coveredOccurrence;
+        else if(reason && !std::strcmp(reason,"history-budget"))++stats_.coveredBudget;
+        else ++stats_.coveredOther;
+    }
+    unsigned coveredDraws() const{return covered_;}
     void resourceWritten(ID3D11Resource* resource) {
         const unsigned kind=history_.resourceWritten(resource);
         // Count only geometry invalidations, not unrelated resource-write notifications.
@@ -81,11 +103,16 @@ public:
     }
     bool capture(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
                   unsigned start,int base,unsigned startInstance,unsigned frame,const Inputs& inputs) {
-        beginFrame(frame);++stats_.attempts;Draw d;d.inputs=inputs;
+        beginFrame(frame);++stats_.attempts;drawRefusal_=nullptr;Draw d;d.inputs=inputs;
+        // The map's empty clear follows the identity mode of the frame's draws, refused ones included (prepareH).
+        if(inputs.gpuIdentity)gpuAttempted_=true;
+        // reject: the frame's refusal (nothing says whose pixels these are). defer: this draw's alone (drawRefusal): the draw is not in
+        // the map, and the caller covers its pixels per pixel when it has marked them.
         auto reject=[&](const char* reason){++stats_.preflightRefused;fail(reason);return false;};
+        auto defer=[&](const char* reason){++stats_.preflightRefused;drawRefusal_=reason;return false;};
         if(!ctx)return reject("foreground-missing-context");
         if(!inputs.writerToken || inputs.writerToken>0xffffffu)return reject("foreground-writer-token-unavailable");
-        if(!count || count%3 || count>AnimatedVertexHistory::maxVertices)return reject("foreground-primitive-bound");
+        if(!count || count%3 || count>AnimatedVertexHistory::maxVertices)return defer("foreground-primitive-bound");
         // An unidentified draw cannot match any later draw's authoritative
         // identity. Do not submit SO just to retain an unusable history record.
         // Other sticky frame failures still permit valid next-frame warming.
@@ -93,15 +120,16 @@ public:
             inputs.identity.poolEpoch && inputs.identity.slot<=0x7ffffeu)) &&
             std::isfinite(inputs.camera[3][2]) && inputs.camera[3][2]>0 &&
             std::isfinite(inputs.phaseX) && std::isfinite(inputs.phaseY);
-        if(!d.identityKnown)return reject(inputs.identity.refusal?inputs.identity.refusal:"foreground-identity-or-camera");
+        if(!d.identityKnown)return defer(inputs.identity.refusal?inputs.identity.refusal:"foreground-identity-or-camera");
         Ptr<ID3D11VertexShader> activeVs;UINT classCount=0;ctx->VSGetShader(&activeVs,nullptr,&classCount);
-        if(classCount)return reject("foreground-dynamic-VS-linkage");
+        if(classCount)return defer("foreground-dynamic-VS-linkage");
         if(!inputs.gpuIdentity && (d.inputs.certificate.constants.size()>65536 || d.inputs.certificate.resourceCount>128)){
-            return reject("foreground-certificate-bound");}
-        if(current_.size()>=AnimatedVertexHistory::maxRecords)return reject("foreground-draw-bound");
+            return defer("foreground-certificate-bound");}
+        if(current_.size()>=AnimatedVertexHistory::maxRecords)return defer("foreground-draw-bound");
         const bool warming=refusal_!=nullptr;++stats_.gpuAttempts;
-        if(!history_.capture(ctx,draw,count,instances,start,base,startInstance,frame,d.capture,true)){
-            if(!refusal_ && d.capture.refusal && std::strcmp(d.capture.refusal,"history-budget")==0 &&
+        if(!history_.capture(ctx,draw,count,instances,start,base,startInstance,frame,d.capture,true,true)){
+            // The budget receipt names the first budget refusal of the frame, covered or not.
+            if(d.capture.refusal && std::strcmp(d.capture.refusal,"history-budget")==0 &&
                !budgetReceipt_.valid) {
                 const auto usage=history_.accounting(frame);
                 auto& r=budgetReceipt_;r.valid=1;r.requestedBytes=count*32;
@@ -116,8 +144,9 @@ public:
                 for(const auto& old:previous_)if(old.inputs.beforeWorld)++r.beforeWorldPrevious;
                 r.knownMutations=knownMutations_;r.unknownMutations=unknownMutations_;
             }
-            fail(d.capture.refusal);return false;}
+            drawRefusal_=d.capture.refusal?d.capture.refusal:"history-refused";return false;}
         ++stats_.submitted;if(warming)++stats_.warmedAfterRefusal;
+        if(d.capture.priorRecords>d.capture.candidateCount)++stats_.windowed;
         ctx->RSGetState(&d.raster);UINT n=1;ctx->RSGetViewports(&n,&d.viewport);
         d.scissorCount=16;ctx->RSGetScissorRects(&d.scissorCount,d.scissors.data());
         for(const auto& old:previous_) {
@@ -144,6 +173,7 @@ public:
         out=Output{};out.frame=frame;
         auto refuse=[&](const char* reason){out.refusal=reason;return false;};
         if(frame!=frame_ || refusal_)return refuse(refusal_?refusal_:"foreground-frame");
+        out.coveredDraws=covered_;
         if(!ctx || !owners || !rawDepth || !flatForegroundExtentAllowed(width,height))
             return refuse("foreground-H-resources");
         if(!textureExtent(owners,width,height,true) || !textureExtent(rawDepth,width,height,false))
@@ -190,7 +220,9 @@ public:
         ctx->OMGetRenderTargets(8,oldTargets,&oldDsv);ctx->IAGetPrimitiveTopology(&oldTopology);
         ctx->RSGetViewports(&oldViewportCount,oldViewport);ctx->RSGetScissorRects(&oldScissorCount,oldScissors);
         ctx->OMSetRenderTargets(1,target_.GetAddressOf(),nullptr);ctx->OMSetBlendState(blend_.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(depth_.Get(),0);
-        const bool gpuFrame=std::any_of(current_.begin(),current_.end(),[](const Draw& d){return d.inputs.gpuIdentity;});
+        // A frame whose draws were all refused has an empty current_, and its map still follows the GPU convention: z of -1 marks "no
+        // sample" so the prep keeps the pixel's own depth, where the legacy clear's z of 0 would hand it a depth of zero.
+        const bool gpuFrame=gpuAttempted_ || std::any_of(current_.begin(),current_.end(),[](const Draw& d){return d.inputs.gpuIdentity;});
         float empty[4]={0,0,gpuFrame?-1.0f:0.0f,0};ctx->ClearRenderTargetView(target_.Get(),empty);
         ctx->VSSetShader(vs_.Get(),nullptr,0);ctx->PSSetShader(ps_.Get(),nullptr,0);ctx->IASetInputLayout(nullptr);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -301,7 +333,7 @@ private:
         return true;
     }
     AnimatedVertexHistory history_;std::vector<Draw> current_,previous_;unsigned frame_=0,width_=0,height_=0;
-    const char* refusal_=nullptr;float previousNear_=0;
+    const char* refusal_=nullptr,*drawRefusal_=nullptr;float previousNear_=0;unsigned covered_=0;bool gpuAttempted_=false;
     Ptr<ID3D11VertexShader> vs_;Ptr<ID3D11PixelShader> ps_;Ptr<ID3D11Buffer> settings_;
     Ptr<ID3D11BlendState> blend_;Ptr<ID3D11DepthStencilState> depth_;
     Ptr<ID3D11Texture2D> texture_;Ptr<ID3D11RenderTargetView> target_;Ptr<ID3D11ShaderResourceView> view_;

@@ -27,20 +27,22 @@ MODES = ("taa", "dlaa", "dlss", "fsr")
 DEFAULT_CASES = ("unsupported_host", "scene", "inert_no_write", "inert_depth_write", "inert_color_write",
                  "state_partial_mask", "state_blended", "state_blended_no_depth", "state_blended_hdr",
                  "settlement_prepass", "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world",
-                 "inert_depth_write_world", "stale_foreign_mark", "first_person_slot_repacked", "supersampled_scene",
-                 "supersampled_scene_4k")
+                 "inert_depth_write_world", "stale_foreign_mark", "first_person_slot_repacked", "first_person_pieces",
+                 "supersampled_scene", "supersampled_scene_4k")
 # "renderer" cases must complete the production HDR resolve; "guard" cases must keep a refusal.
 CASE_PURPOSES = {"smoke": "entry", "unsupported_host": "guard", "scene": "renderer", "inert_no_write": "renderer",
                  "inert_depth_write": "guard", "inert_color_write": "renderer", "state_partial_mask": "renderer",
                  "state_blended": "renderer", "state_blended_no_depth": "renderer", "state_blended_hdr": "guard",
                  "settlement_prepass": "renderer", "predicted_world_mismatch": "renderer", "predicted_world_close_scale": "guard",
                  "state_blended_hdr_world": "renderer", "inert_depth_write_world": "renderer",
-                 "stale_foreign_mark": "renderer", "first_person_slot_repacked": "renderer", "supersampled_scene": "renderer",
+                 "stale_foreign_mark": "renderer", "first_person_slot_repacked": "renderer", "first_person_pieces": "renderer",
+                 "supersampled_scene": "renderer",
                  "supersampled_scene_4k": "renderer"}
 SDK_CASES = frozenset(("inert_no_write", "inert_depth_write", "inert_color_write", "state_partial_mask",
                        "state_blended", "state_blended_no_depth", "state_blended_hdr", "settlement_prepass",
                        "predicted_world_mismatch", "predicted_world_close_scale", "state_blended_hdr_world", "inert_depth_write_world",
-                       "stale_foreign_mark", "first_person_slot_repacked", "supersampled_scene", "supersampled_scene_4k"))
+                       "stale_foreign_mark", "first_person_slot_repacked", "first_person_pieces", "supersampled_scene",
+                       "supersampled_scene_4k"))
 PRODUCTION_CASES = frozenset(("unsupported_host",))
 # The real-size supersampled case (5760x3240 into 3840x2160: H alone is 75 MB at the render size, the owner plane and the foreground map
 # 300 MB each) is not run on WARP: it reports UNSUPPORTED there, with this cause, and no process starts. It runs for longer than the
@@ -128,6 +130,14 @@ RULE_COUNTERS["first_person_slot_repacked"] = {
     "@repack.moved.drawn": (32, 32), "@repack.moved.frames": (6, 32), "@repack.moved.matched": (1, None), "@repack.moved.rejected": (0, 0),
     "@repack.different.drawn": (31, 31), "@repack.different.frames": (6, 31), "@repack.different.matched": (0, 0),
     "@repack.different.rejected": (1, None), "@repack.different.identityDiffers": (1, None)}
+# The grenade hold (first_person_pieces): seventy draws of one first-person mesh in one frame. The flat adapter captures 64 of a key
+# (AnimatedVertexHistory::maxExtendedOccurrences); the six past it are refused their capture and covered per pixel (their owner marks stand,
+# the map holds no sample for them), so the frame stays qualified: H qualified with the covered draws counted, the backend's frame, and no
+# refusal anywhere (failureKinds 0: the covered ones are kept apart from the frame refusals).
+RULE_COUNTERS["first_person_pieces"] = {
+    "surfacePreserving": (0, 0), "foreignSeen": (70, 70), "captured": (64, 64), "coveredDraws": (6, 6), "hCoveredFrames": (1, None),
+    "worldUnmarked": (2, 2), "hAttempts": (1, None), "hQualified": (1, None), "backendCalls": (1, None), "hdrSpatial": (0, 0),
+    "backendFailures": (0, 0), **FIRST_PERSON_ONLY}
 # Facts a rule PASS must report as the boolean true.
 RULE_TRUE = {"stale_foreign_mark": ("@staleMark.planeUntouched",), "first_person_slot_repacked": ("@repack.ran",)}
 # The exact first-failure reason a guard that keeps its refusal must still report.
@@ -140,7 +150,8 @@ HISTORY_CASES = frozenset(("provisional_before_foreign", "byte_budget", "invalid
                             "transient_churn", "mutation_reset", "adapter_cross_frame_record_budget",
                             "adapter_invalidated_prior_occupancy", "invalidated_capture_snapshot_lifetime",
                             "outstanding_capture_record_index", "stale_capture_epoch_guard",
-                            "duplicate_occurrence_cap"))
+                            "duplicate_occurrence_cap", "extended_occurrence_window",
+                            "extended_spent_record_reclaim", "adapter_covered_refusals"))
 MAX_JSON = 1 << 20
 
 
@@ -634,6 +645,9 @@ def self_test():
             "first_person_slot_repacked": {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2,
                                            "hAttempts": 1, "hQualified": 1, "backendCalls": 1, "hdrSpatial": 0,
                                            "backendFailures": 0},
+            "first_person_pieces": {"surfacePreserving": 0, "foreignSeen": 70, "captured": 64, "coveredDraws": 6,
+                                    "hCoveredFrames": 1, "worldUnmarked": 2, "hAttempts": 1, "hQualified": 1,
+                                    "backendCalls": 1, "hdrSpatial": 0, "backendFailures": 0},
         }
         supersampled_frame = {"surfacePreserving": 0, "foreignSeen": 1, "captured": 1, "worldUnmarked": 2, "hAttempts": 1,
                               "hQualified": 1, "backendCalls": 1, "hdrSpatial": 0, "backendFailures": 0}
