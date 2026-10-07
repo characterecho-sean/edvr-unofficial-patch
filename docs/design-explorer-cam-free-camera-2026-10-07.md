@@ -28,9 +28,10 @@
     shared record (mode, speed, range).
   - H6 **READ + FLOWN:** +0x48C is 3 at TAB (first call), 4 relative lock,
     0 at exit; mirrored from a shared record, so watch it, never write it.
-  - H7 **CONFIRMED F0:** steered in, the camera stops at local (0, 1.70,
-    0.70); the first locked turn pushed it out to 0.93, so the commander's
-    body collides with it. 0a-2 finds that collision step.
+  - H7 **READ (0a-2):** the update's collision is a 0.4 m sphere sweep, or
+    a 0.8 m ray when the pose is static, in FUN 0x1091140, which only this
+    activity calls; 0.70 = 0.30 body surface + 0.40 radius. Neutralise it
+    with a CodeHook on 0x1091140 while placed (option A below).
 - **Ruled out:**
   - Counting presses as the source of truth, because it has no origin
     (6ac.6d), and the free camera can be moved by hand after the preset is
@@ -48,8 +49,9 @@
 - **F0 FLOWN** on Frontier, 2d103d84, `edvr_gfx_20261007_172543.log`,
   training scenario; findings at the end. Frontier's ini: probe off again,
   `head_offset_gate = 0`.
-- **Next:** 0a-2 (static): the update's collision step and when its camera
-  blob is consumed; then Phase 1 places the camera past the collision.
+- **Next:** I4, a log-only detour on 0x1091140 (which branch pushes, by how
+  much), then Phase 1: write +0x3B0 at the second update and hold 0x1091140
+  off while placed.
 - **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off;
   all three 0b instruments plus the VR camera census). Removed at arc close.
 
@@ -418,3 +420,86 @@ as measured: +y up, +z the way the commander faces.
   only 10 of 105 seconds. No census camera matched the free camera's
   world origin directly; the I3 world frame is the game's, not the
   render's.
+
+## 2026-10-07 Phase 0a-2: the collision step
+
+Build 332841. READ = seen in `analysis\decomp\explorer_cam\` decompiles
+or disassembly; INFERRED = reasoned. Line numbers are `decomp_1071980.txt`.
+
+**Pipeline (READ).** After input is applied (0x106DEC0), the update runs:
+1. Containment and range, lines 766/770: 0x108F420 puts the origin back into
+   the bound object's oriented box (object from handles +0x2B0/+0x340; null
+   skips it), 0x108F7E0 clamps to the target's max range (config +0x18/+0x1C
+   minus 0.5). Both edit the origin in place; other activities use them too.
+2. 0x1091140 (lines 881, 1019; call sites 0x1072710, 0x1072930; no other
+   caller in the exe). If the origin moved more than 1/1024 (0x518C738) it
+   sweeps a sphere of radius 0.4 (0x518C73C) through the physics world
+   (0x10A9E00) and writes the stop point. If it did not move it casts a
+   0.8 m ray centred on the camera along commander-to-camera and moves the
+   origin along that axis by (hit - 2 x 0.4); its sign was not resolved.
+   Stage 2 accepts the result unless containment objects, which sets
+   +0x478 and runs the recovery solver 0x1086C00 from then on.
+3. Lines 998-1019: 0x108F1B0 and 0x108EEE0 only count overlaps (other
+   entities, and the commander as a box expanded by 0.25 for a humanoid,
+   0x5F518B0; 1.0 SRV, 2.0 ship; 5 m neighbour box). Counts feed the shared
+   flag +0x1D and +0x47C, never the position; asm 0x10728B6-0x1072954
+   discards the edited copy.
+
+**Why 0.70 and 0.93 (INFERRED).** The commander is not ignored: the sweep
+passes the commander handle as its ignore entity only when 0x108EBC0 is
+false or +0x473 is set (0x1091194), and F0 stopped at 0.70 = 0.30 + 0.40.
+The turn push moved only z (x stayed -0.024), which fits the radial ray, not
+the chord of a sweep. The ray filter 0x1095F40 skips hits on the commander's
+own bodies unless a second component is present, so the pusher may be an
+attached entity (weapon) or the body itself; 0.934 - 0.4 = 0.53 m of reach.
+Nothing pulls the camera back, so the push ratchets. I4 decides.
+
+**Gate (READ).** `VanityCameraCheckForCameraCollision` and
+`VanityCameraInertialSimulation` are camera activity types (enter 0x109D3E0,
+0x109DD50), not options; the free camera's collision is hard-wired. No
+activity or shared-record field skips it. `+0x473` ignores the commander
+on the first update only.
+
+**Ordering (INFERRED).** No call in the update publishes the matrix; it
+ends by storing +0x70 and +0x370 and deriving +0x3B0 (line 1281 on), so the
+stack pulls the blob in a later job. A post-call overwrite lands before that
+pull unless the pull already ran this frame; the consumer is not named. A
+write to +0x3B0 is read by the next update's compose either way.
+
+**Options.** A (best): CodeHook 0x1091140, prologue `40 55 53 56 57 41 54
+41 56 41 57 48 8D AC 24 B0 FE FF FF 48 81 EC 50 02`, boundaries at 2, 3, 4,
+5, 7, 9, 11, 19, 26. rcx = activity, r9 = result pose; return `xor eax,eax`
+for rcx = ours while placed. Touches no game memory; the pose stays the
+activity's own, so the stack and culling follow as for any free-camera pose
+(H3, F1 checks). Risks: no wall stop (as in first person); the flag +0x1D
+can still go to 1 via the overlap counts. B: post-update write of +0x70,
++0x370, +0x3B0: the game re-pushes every frame, +0x478 recovery and
+0x1086C00 run, and the shared flags flicker. C: write +0x3B0 once at the
+second update (state 3, +0x473 = 0) with A on.
+
+**HMD (INFERRED).** The update reads no tracking pose; the game folds it in
+downstream ("the game moves its own camera", explorer-cam.md). EDVR's runtime
+reports poses in OpenXR LOCAL (`src/openxr/seated_space.h:29`,
+`session_binding.cpp:51`), zero at recentre, so an eye-height placement is
+not doubled; F1 confirms.
+
+**Inertia (READ + INFERRED).** The activity holds no velocity: 0x106DEC0 is
+dt x speed x input, with only the speed index +0x474 and timers. Damping is
+the separate InertialSimulation activity (enter 0x109DD50), switched by the
+bag key at +0x490, which the update sets 0 (line 502), then 1 under the
+live-frame lock (line 662). Its smoothing of a jump was not read.
+
+
+**Checked by the overseer against the exe on disk (2026-10-07).** The
+prologue bytes, 0.4 at 0x518C73C and 1/1024 at 0x518C738 all match, and the
+only direct references to 0x1091140 are the two calls at 0x1072710 and
+0x1072930. Before the first call, 0x10726B3-0x10726D8 copies the candidate
+pose (frame +0xF0..+0x120) into the result buffer and keeps it in
+xmm7-xmm10. A return of 0 then carries that candidate on unchanged at both
+sites: site 1 jumps to 0x107289C, which stores xmm7-xmm10, and site 2
+jumps to 0x1072A8D, which copies +0x40..+0x70 back. So returning 0 means
+"no collision edit": it neither freezes the camera nor exposes an unset
+pose. **0x1091140 takes a FIFTH argument on the stack** (a byte, `mov
+[rsp+0x20], al` before each call). A C replacement must declare and forward
+five arguments. Better, the relay returns `xor eax,eax; ret` itself for
+the placed activity and jumps to the trampoline for every other caller.
