@@ -36,24 +36,25 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** main `0d4bc714` integrates cleanly. The repaired merged tree passes
-  all 149 build jobs and installer checks, 17 fresh scoped assembly gates,
-  three deterministic child-exit controls, 32 NV fresh-child cases and six UI
-  cases. The child-pipe EOF/exit race is fixed under the same deadline. UI
-  proves one D-only composed path; NV uses typed X spies and real registered
-  Begin/End operations. The d6 caller comparison is historical; merged caller
-  timing remains unmeasured. Domain/frame/lifecycle accounting, held-boundary
-  frame cost and full coverage remain open. Keep the flight pair frozen:
-  `7bbe7d90` control and `6c63f6aa` candidate. Both October 7 flights match
-  their builds/environment and exit cleanly; Sean reports no visual changes.
-  NV-on sampled hook time per timed draw is 15.0% lower; other CPU ranges
-  overlap. Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its median above
-  the control range. Draw counts differ and the on-foot source has 4.175% more
-  pixels. Attribution/non-regression stay open. Independent NV legacy replay
-  already runs; whole-ladder actions must precede broader group migration.
-  Replay retains 482.4 MiB when enabled, none when off; NV blur reproduces on
-  `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
-  Scope control. V2 preserves V1/CPU limits. No Phase 1 acceptance or shipping.
+- **Next:** main is integrated through `0d4bc714`; the prior merged tree passes
+  149 build jobs, installer checks and 17 scoped assembly gates. The NV pilot's
+  legacy replay, 32 composed children and pixel coverage run. Whole-ladder
+  actions precede broader migration. The refreshed 814 caller is diagnostic:
+  its body gains 52 instruction bytes/14 records, raw equality fails and timing
+  remains unmeasured. New cold census sample/calibration rows and the strict
+  `edvr_log.py --plugin-cost` reader pass the full 149-job build and installer
+  checks, 344 focused census checks and 17 fresh scoped gates. The complete
+  main-based control `405b14cd` passes 129 jobs with identical census files.
+  Frozen flights: `7bbe7d90` control/`6c63f6aa` candidate, build/environment
+  matched; no visual changes. NV-on sampled hook time per timed draw is 15.0%
+  lower; other CPU ranges overlap. Carrier DLSS/NV-off EDVR GPU cost is 2.9%
+  higher, its median above the control range. Draw counts differ and the
+  on-foot source has 4.175% more pixels; normalization cannot establish GPU
+  attribution/non-regression. Domain/frame/lifecycle accounting, held-boundary
+  frame cost and full coverage remain open. Replay retains 482.4 MiB when
+  enabled, none when off; NV blur reproduces on `14a7ff70`. Temporary key:
+  `advanced.draw_replay` (off); removal requires Scope control. V2 preserves
+  V1/CPU limits. No Phase 1 acceptance or shipping.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -3263,4 +3264,80 @@ checks in 238 seconds. Its receipt is
 against the exact source tree. No window appears and foreground focus stays
 unchanged. Main integration is cut at `0d4bc714`; Steam/settings and the frozen
 flight interpretation stay unchanged. Pilot performance acceptance remains
+open; broader migration and shipping stay held.
+
+### Raw cost evidence and current caller diagnostic, 2026-10-07
+
+Luna audits the frozen October 7 flight reports without relabeling their
+builds. The five-hold normalization pins the three processed inputs and reports
+both occurrences/frame and estimated cost/occurrence. Carrier DLSS/NV-off EDVR
+cost rises 0.170794 ms/frame: two upscaler calls/frame remain constant while
+their estimated cost rises 0.118731 ms/frame; UI helper attempts rise 22.9% and
+their estimated cost rises 0.062104 ms/frame. Helper attempts are not admitted
+redraws or matched sample cohorts. The existing three-decimal rows lack
+per-scope raw sample totals and null calibration. Normalization cannot assign
+causality or establish non-regression; changing ship workload remains a
+plausible confounder. The report's self-test and read-only dry run pass. No
+additional useful normalization of these frozen reports is available.
+
+Luna refreshes the ignored static caller diagnostic against the merged 814
+tree, preserving the d6 artifacts as historical. The immutable f11 caller body
+is substituted into identical current surrounding code with shared header,
+prefix/suffix and roundtrip pins. Both native compilation stages succeed. The
+first comparator fails by subtracting return-location lists; mid-tier repair
+compares their lengths and adds signed/reversed/equal/moved-location controls.
+Those checks and report generation pass. The current body gains 52 instruction
+bytes and 14 records, with 95 raw instruction-row and 36 raw CFG differences;
+stack and switch-table byte counts match. Raw equality gates fail. This is a
+body diagnostic within current surrounding code, not a frozen full-hook cost
+benchmark. It explicitly keeps performance acceptance false. Mid-tier review
+also rejects a predicate-only synthetic timer as a whole-hook comparator,
+because it omits callers and measures extra setup.
+
+Luna adds cold per-scope v1 rows at the existing census window close, before
+reset. They expose completed timestamp sums/counts, helper occurrences, frames,
+raw owner/scope/attribution IDs and the existing shared null cohort. No query,
+rotation, cap, timer, hot-path operation or setting changes. Unmeasured,
+uncalibrated and null-floor states remain explicit; late completions may have
+zero current-window occurrences. Invalid deltas or zero-count positive sums
+produce rejectable diagnostics instead of fabricated zeros. Mid-tier review
+finds that fixed-decimal rounding can erase a just-above-floor difference;
+17-digit roundtrip formatting fixes it and literal near-floor/tie cases pin it.
+
+The sanctioned log reader gains `--plugin-cost`, after build-identity checking.
+Its strict parser rejects malformed/future schema, incoherent windows,
+duplicate scopes, inconsistent status and any invalid writer diagnostic. No
+rows exits with no instrument evidence. Unknown logical IDs remain raw, and the
+output labels estimates as sampled-helper cost, not accepted-work latency. The
+complete reader self-test passes. The focused native census passes 344 checks;
+fresh production codegen passes all 17 scoped gates. The initial focused
+wrapper lacked the required CFLAGS environment and refused to run; the
+corrected ignored wrapper passes. The full changed-source build passes all 149
+jobs, the 236-key config contract, exports and installer-resource checks. Its
+receipt `5bea0bcf318bf78874e40388712d5f5b9a6c945567eb6e516f8c7ff0deaad6ae`
+verifies against the exact source and compiler context. No window appears or
+foreground focus moves.
+
+The ignored cross-language diagnostic reads the actual focused rig output,
+explicitly not a flight log. All 70 normal writer rows parse singly both with
+and without a real-format timestamp prefix (140 parses). All nine invalid
+diagnostics fail reader mode in both forms (18 checks), covering all four
+statuses and all eight reasons. It records the exact fixture hash and counts.
+Its self-test and dry run pass, with the existing report unchanged by dry run.
+This proves the writer/reader contract, not GPU performance.
+
+Mid-tier review approves a matched telemetry-only control on the complete
+immutable `0d4bc714` tree. Only `gpu_census.cpp`, `gpu_census.h` and its rig
+are backported, with exact final SHA-256 pins; baseline scanner literals and
+build dependencies already match. Every other tracked file stays at main. The
+managed control worktree receives the same 50 cached dependency files with byte
+verification and its own `codex/plugin-telemetry-control-0d4` branch. The
+feature reader will read its logs externally; no feature Python tool is copied
+into the control. Its full absolute build passes all 129 jobs, the 235-key
+config contract, exports and installer-resource checks. Receipt
+`e83b9268ba5bfa1a20dcec36ac05ea7e8ff3950b35ebebfd6fbda2a039267486` verifies
+against the exact source/compiler context. Commit `405b14cd` has only the three
+reviewed census files and parent `0d4bc714`; its clean receipt verifies. Both
+builds await clean-version DLL promotion before a matched flight.
+Steam/settings stay unchanged. GPU attribution and Phase 1 acceptance remain
 open; broader migration and shipping stay held.

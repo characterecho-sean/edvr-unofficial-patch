@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -228,6 +229,59 @@ void logOwnerGpuSummaries(uint64_t frames) {
             "EDVR GPU census ownership note: FrameWeaponMotion is reported once under %s; %s consumes the "
             "service and is not split into a second cost row.",
             gpuCensusOwnerName(weapon.owner), weapon.sharedConsumer);
+    }
+}
+
+// Raw plugin-cost evidence for the existing census window. These are the
+// already-completed timestamp cohorts at window close; occurrences are helper
+// calls observed in this window, not accepted redraws or per-call latency.
+void logPluginCostEvidence(uint64_t now, uint64_t frames) {
+    for (size_t i = 0; i < kSections; ++i) {
+        const auto& st = g_section[i];
+        const auto section = static_cast<GpuCensusSection>(i);
+        const auto ownership = gpuCensusOwnership(section);
+        const auto& timed = st.sampler.totals;
+        const auto& nullSt = g_section[static_cast<size_t>(turnOwnerOf(section))];
+        const auto& null = nullSt.nullSampler.totals;
+        const bool timedSamplesValid = timed.samples >= st.baseSamples;
+        const bool nullSamplesValid = null.samples >= nullSt.nullBaseSamples;
+        const double timedDelta = timed.ms - st.baseMs;
+        const double nullDelta = null.ms - nullSt.nullBaseMs;
+        const bool timedMsValid = std::isfinite(timed.ms) && std::isfinite(st.baseMs) &&
+                                  std::isfinite(timedDelta) && timed.ms >= st.baseMs;
+        const bool nullMsValid = std::isfinite(null.ms) && std::isfinite(nullSt.nullBaseMs) &&
+                                 std::isfinite(nullDelta) && null.ms >= nullSt.nullBaseMs;
+        const bool timedCohortValid = timed.samples != st.baseSamples || timedDelta == 0.0;
+        const bool nullCohortValid = null.samples != nullSt.nullBaseSamples || nullDelta == 0.0;
+        if (!timedSamplesValid || !nullSamplesValid || !timedMsValid || !nullMsValid ||
+                !timedCohortValid || !nullCohortValid) {
+            const char* reason = !timedSamplesValid ? "sample-counter-regressed" :
+                                 !timedMsValid ? ((!std::isfinite(timed.ms) || !std::isfinite(st.baseMs) || !std::isfinite(timedDelta)) ?
+                                     "sample-ms-nonfinite" : "sample-ms-regressed") :
+                                 !nullSamplesValid ? "null-counter-regressed" :
+                                 !nullMsValid ? ((!std::isfinite(null.ms) || !std::isfinite(nullSt.nullBaseMs) || !std::isfinite(nullDelta)) ?
+                                     "null-ms-nonfinite" : "null-ms-regressed") :
+                                 !timedCohortValid ? "sample-ms-without-samples" : "null-ms-without-samples";
+            Log::get().note("EDVR plugin cost invalid v1: window_start_ms=%llu window_end_ms=%llu scope=%u owner=%u attribution=%u reason=%s",
+                static_cast<unsigned long long>(g_windowStartMs), static_cast<unsigned long long>(now),
+                static_cast<unsigned>(i), static_cast<unsigned>(ownership.owner),
+                static_cast<unsigned>(ownership.attribution), reason);
+            continue;
+        }
+        const unsigned completed = timed.samples - st.baseSamples;
+        const unsigned nullSamples = null.samples - nullSt.nullBaseSamples;
+        if (st.occurrences == 0 && completed == 0) continue;
+        const double timedMean = completed ? timedDelta / static_cast<double>(completed) : 0.0;
+        const double nullMean = nullSamples ? nullDelta / static_cast<double>(nullSamples) : 0.0;
+        const char* status = completed == 0 ? "unmeasured" :
+                             nullSamples == 0 ? "uncalibrated" :
+                             timedMean <= nullMean ? "null-floor" : "measured";
+        Log::get().note(
+            "EDVR plugin cost v1: window_start_ms=%llu window_end_ms=%llu scope=%u owner=%u attribution=%u frames=%llu occurrences=%llu completed_samples=%u raw_sample_ms=%.17g null_samples=%u null_ms=%.17g status=%s",
+            static_cast<unsigned long long>(g_windowStartMs), static_cast<unsigned long long>(now),
+            static_cast<unsigned>(i), static_cast<unsigned>(ownership.owner),
+            static_cast<unsigned>(ownership.attribution), static_cast<unsigned long long>(frames),
+            static_cast<unsigned long long>(st.occurrences), completed, timedDelta, nullSamples, nullDelta, status);
     }
 }
 
@@ -466,6 +520,7 @@ void logAndResetWindow(uint64_t now) {
     formatGapDetail(gapDetail, sizeof(gapDetail), gap);
     Log::get().note("%s", gapDetail);
     logOwnerGpuSummaries(frames);
+    logPluginCostEvidence(now, frames);
 
     for (auto& st : g_section) {
         st.baseMs = st.sampler.totals.ms;

@@ -23,6 +23,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -615,6 +616,155 @@ void logFormatCase() {
 
 void freshWindow(uint64_t start);
 const std::string* lineWith(const char* prefix);
+
+const std::string* pluginCostLine(unsigned scope, bool invalid = false) {
+    const char* prefix = invalid ? "EDVR plugin cost invalid v1:" : "EDVR plugin cost v1:";
+    const std::string wanted = " scope=" + std::to_string(scope) + " ";
+    for (const auto& line : g_lines)
+        if (line.rfind(prefix, 0) == 0 && line.find(wanted) != std::string::npos) return &line;
+    return nullptr;
+}
+
+void pluginCostEvidenceCases() {
+    const uint64_t start = 1000, end = 31000;
+    const auto engine = static_cast<unsigned>(GpuCensusSection::FrameEngineVelocity);
+    {
+        freshWindow(start);
+        g_windowFrames = 0; // a valid close with no denominator
+        auto& st = g_section[engine];
+        st.occurrences = 5;
+        st.baseMs = 1.0; st.baseSamples = 3;
+        st.sampler.totals.ms = 6.123456789123; st.sampler.totals.samples = 5;
+        st.nullBaseMs = 0.1; st.nullBaseSamples = 1;
+        st.nullSampler.totals.ms = 0.5; st.nullSampler.totals.samples = 3;
+        const unsigned nullPairsBefore = st.nullPairsTaken;
+        logAndResetWindow(end);
+        const std::string* line = pluginCostLine(engine);
+        check(line && *line == "EDVR plugin cost v1: window_start_ms=1000 window_end_ms=31000 scope=14 owner=0 attribution=0 frames=0 occurrences=5 completed_samples=2 raw_sample_ms=5.1234567891229998 null_samples=2 null_ms=0.40000000000000002 status=measured",
+              "plugin evidence: raw per-window deltas retain precision, schema order, enum IDs, and zero-frame denominator");
+        check(st.occurrences == 0 && st.baseMs == st.sampler.totals.ms && st.baseSamples == st.sampler.totals.samples &&
+                  st.nullBaseMs == st.nullSampler.totals.ms && st.nullBaseSamples == st.nullSampler.totals.samples &&
+                  st.sampler.totals.ms == 6.123456789123 && st.sampler.totals.samples == 5 && st.nullPairsTaken == nullPairsBefore,
+              "plugin evidence: line is emitted before reset and formatting changes no timer totals or calibration-pair count");
+    }
+    {
+        freshWindow(start);
+        const size_t owner = static_cast<size_t>(GpuCensusSection::AlteredFixFirst);
+        const unsigned scope = static_cast<unsigned>(GpuCensusSection::AlteredFixFirst) + 3;
+        auto& st = g_section[scope];
+        auto& nullSt = g_section[owner];
+        g_windowFrames = 12;
+        st.occurrences = 4;
+        st.sampler.totals.ms = 1.0; st.sampler.totals.samples = 1;
+        nullSt.nullBaseMs = 0.2; nullSt.nullBaseSamples = 2;
+        nullSt.nullSampler.totals.ms = 0.7; nullSt.nullSampler.totals.samples = 4;
+        st.nullSampler.totals.ms = 99.0; st.nullSampler.totals.samples = 99; // ignored: fixes share the first fix's pair
+        logAndResetWindow(end);
+        const std::string* line = pluginCostLine(scope);
+        check(line && line->find(" completed_samples=1 raw_sample_ms=1 null_samples=2 null_ms=0.49999999999999994 status=measured") != std::string::npos,
+              "plugin evidence: every altered fix uses the shared first-fix null baseline and sample cohort");
+    }
+    {
+        freshWindow(start);
+        auto& st = g_section[engine];
+        st.occurrences = 2; // helper ran, no timestamp completed
+        logAndResetWindow(end);
+        const std::string* line = pluginCostLine(engine);
+        check(line && line->find("completed_samples=0 raw_sample_ms=0 null_samples=0 null_ms=0 status=unmeasured") != std::string::npos,
+              "plugin evidence: observed helper calls without completed timestamps remain explicitly unmeasured");
+    }
+    {
+        freshWindow(start);
+        auto& st = g_section[engine];
+        st.occurrences = 1;
+        st.sampler.totals.ms = 1.0; st.sampler.totals.samples = 2;
+        logAndResetWindow(end);
+        const std::string* line = pluginCostLine(engine);
+        check(line && line->find("completed_samples=2 raw_sample_ms=1 null_samples=0 null_ms=0 status=uncalibrated") != std::string::npos,
+              "plugin evidence: completed samples without a null cohort are explicitly uncalibrated");
+    }
+    {
+        freshWindow(start);
+        auto& st = g_section[engine];
+        st.occurrences = 1;
+        st.sampler.totals.ms = 0.4; st.sampler.totals.samples = 2;
+        st.nullSampler.totals.ms = 0.5; st.nullSampler.totals.samples = 2;
+        logAndResetWindow(end);
+        const std::string* line = pluginCostLine(engine);
+        check(line && line->find("completed_samples=2 raw_sample_ms=0.40000000000000002 null_samples=2 null_ms=0.5 status=null-floor") != std::string::npos,
+              "plugin evidence: a raw per-sample mean at or below the null mean is identified as null-floor");
+    }
+    for (unsigned aboveFloor = 0; aboveFloor < 2; ++aboveFloor) {
+        freshWindow(start);
+        auto& st = g_section[engine];
+        st.occurrences = 1;
+        st.sampler.totals.ms = aboveFloor ? 1.0000000000001 : 1.0;
+        st.sampler.totals.samples = 1;
+        st.nullSampler.totals.ms = 1.0;
+        st.nullSampler.totals.samples = 1;
+        logAndResetWindow(end);
+        const std::string* line = pluginCostLine(engine);
+        const char* expected = aboveFloor ?
+            "completed_samples=1 raw_sample_ms=1.0000000000000999 null_samples=1 null_ms=1 status=measured" :
+            "completed_samples=1 raw_sample_ms=1 null_samples=1 null_ms=1 status=null-floor";
+        check(line && line->find(expected) != std::string::npos,
+              "plugin evidence: roundtrip sums preserve exact tie and just-above-floor status without an epsilon");
+    }
+    {
+        freshWindow(start);
+        auto& st = g_section[engine];
+        st.occurrences = 0; // completions can arrive after the call window rolled over
+        st.sampler.totals.ms = 1.0; st.sampler.totals.samples = 2;
+        st.nullSampler.totals.ms = 0.2; st.nullSampler.totals.samples = 2;
+        logAndResetWindow(end);
+        const std::string* line = pluginCostLine(engine);
+        check(line && line->find("frames=200 occurrences=0 completed_samples=2") != std::string::npos &&
+                  line->find("status=measured") != std::string::npos,
+              "plugin evidence: late completion is preserved with zero current-window helper occurrences, not attributed as a call");
+    }
+    {
+        freshWindow(start);
+        auto& st = g_section[engine];
+        st.occurrences = 1;
+        st.baseMs = 2.0;
+        st.sampler.totals.ms = 1.0;
+        logAndResetWindow(end);
+        const std::string* invalid = pluginCostLine(engine, true);
+        check(invalid && invalid->find("reason=sample-ms-regressed") != std::string::npos &&
+                  pluginCostLine(engine) == nullptr,
+              "plugin evidence: invalid cumulative deltas emit a rejectable diagnostic, never a fabricated zero row");
+    }
+    for (unsigned invalidCase = 0; invalidCase < 6; ++invalidCase) {
+        freshWindow(start);
+        auto& st = g_section[engine];
+        st.occurrences = 1;
+        const char* reason = nullptr;
+        switch (invalidCase) {
+        case 0: st.baseSamples = 1; reason = "reason=sample-counter-regressed"; break;
+        case 1: st.nullBaseSamples = 1; reason = "reason=null-counter-regressed"; break;
+        case 2: st.sampler.totals.ms = std::numeric_limits<double>::infinity(); reason = "reason=sample-ms-nonfinite"; break;
+        case 3: st.nullBaseMs = std::numeric_limits<double>::quiet_NaN(); reason = "reason=null-ms-nonfinite"; break;
+        case 4: st.baseMs = std::numeric_limits<double>::quiet_NaN(); reason = "reason=sample-ms-nonfinite"; break;
+        case 5: st.nullBaseMs = 2.0; st.nullSampler.totals.ms = 1.0; reason = "reason=null-ms-regressed"; break;
+        }
+        logAndResetWindow(end);
+        const std::string* invalid = pluginCostLine(engine, true);
+        check(invalid && reason && invalid->find(reason) != std::string::npos && pluginCostLine(engine) == nullptr,
+              "plugin evidence: counter underflow, nonfinite totals/baselines and null regression fail closed");
+    }
+    for (unsigned nullCohort = 0; nullCohort < 2; ++nullCohort) {
+        freshWindow(start);
+        auto& st = g_section[engine];
+        st.occurrences = 1;
+        if (nullCohort) st.nullSampler.totals.ms = 1.0;
+        else st.sampler.totals.ms = 1.0;
+        logAndResetWindow(end);
+        const std::string* invalid = pluginCostLine(engine, true);
+        const char* reason = nullCohort ? "reason=null-ms-without-samples" : "reason=sample-ms-without-samples";
+        check(invalid && invalid->find(reason) != std::string::npos && pluginCostLine(engine) == nullptr,
+              "plugin evidence: a positive sample sum with no completed samples is diagnostic-only");
+    }
+}
 
 void logicalOwnerReportCases() {
     using O = GpuCensusOwner;
@@ -1474,6 +1624,7 @@ void run() {
     estimatorMathCases();
     calibrationMathCases();
     logFormatCase();
+    pluginCostEvidenceCases();
     logicalOwnerReportCases();
     gapCases();
     alteredClassCases();
