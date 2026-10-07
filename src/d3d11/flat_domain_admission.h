@@ -242,6 +242,9 @@ inline const char* flatDomainRasterRefusal(const FlatDomainShaderProof& p,const 
 // 1.000 to 1.038 a frame at 50 fps; the weapon against the previous world 1.32 to 1.66 entering the sights and at least 1.18 leaving
 // them. 10% sits between the two, and is the VR role tracker's own cut (flat_camera_vr.h, 0.92 of the field of view).
 constexpr double kFlatDomainWorldScaleTolerance = 0.10;
+// The naming veto (flat_runtime.cpp, State::namingVetoedThisFrame): after this many frames in a row that vetoed a pre-naming draw and never
+// named the world, the world reference is given up, so a world camera that really changed names itself again within three frames.
+constexpr uint32_t kFlatNamingVetoFrames = 3;
 struct FlatDomainWorldReference {
     float nearPlane = 0;
     double p0 = 0, p1 = 0;   // the projection scale on x and on y

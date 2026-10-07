@@ -181,6 +181,7 @@ F4 vertex(int i,Pose p){const double x=i==0||i==3?-.6:.6,y=i<2?-.6:.6,t=i<2?0:1;
 #include "flat_gpu_identity_tests.h"
 #include "flat_identity_receipt_tests.h"
 #include "flat_bench_history_pressure_tests.h"
+#include "flat_covered_draw_tests.h"
 int main(int argc,char** argv){
  check(flatIdentityReceiptTests()==0,"identity receipt regressions pass");
  const UINT W=128,H=96;ComPtr<ID3D11Device> dev;ComPtr<ID3D11DeviceContext> ctx;D3D_FEATURE_LEVEL fl;
@@ -643,6 +644,33 @@ int main(int argc,char** argv){
   };
   flatGpuIdentityTests(ctx.Get(),ownerView.Get(),rawDepthView.Get(),W,H,flatInputs,worldCamera,
                        foreignOld,foreignNow,gpuRaster,readFloatMap,pool.Get(),poolData);
+  {
+   // The covered-draw scenes (flat_covered_draw_tests.h): a pool of twelve rows with one identity each (word 0 the bone base, word 7 the
+   // signature), and a marker per row writing that row's code with writer token row+1. Every draw of a frame is drawn into the same
+   // depth and owner plane, so the frame's draws share a depth buffer, and the pieces of a scene sit in screen regions of their own.
+   unsigned multiPoolData[12*84]{};for(unsigned r=0;r<12;++r){multiPoolData[r*84]=1000+r;multiPoolData[r*84+7]=1631;}
+   auto multiPool=buffer(multiPoolData,sizeof(multiPoolData),D3D11_BIND_SHADER_RESOURCE,336);
+   ComPtr<ID3D11ShaderResourceView> multiPoolView;hr(dev->CreateShaderResourceView(multiPool.Get(),nullptr,&multiPoolView));
+   ComPtr<ID3D11PixelShader> rowMarkers[12];
+   for(unsigned row=0;row<12;++row) {
+    const std::string source="float4 main(float4 p:SV_Position,uint primitive:SV_PrimitiveID):SV_Target{return float4(-"+std::to_string(row*2+3)+
+        ",p.z,float(primitive),"+std::to_string(row+1)+");}";
+    auto code=compile(source.c_str(),"ps_5_0");hr(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&rowMarkers[row]));
+   }
+   auto gpuRasterMulti=[&](Pose pose,unsigned row,unsigned token,bool first) {
+    check(row<12 && token==row+1,"covered-draw scenes draw row r with writer r+1");
+    if(first){bind(pose,false);float empty[4]={-1,0,0,0};ctx->ClearRenderTargetView(ownerTarget.Get(),empty);}
+    else {
+     ctx->UpdateSubresource(cb.Get(),0,nullptr,&pose,0,0);float b[8]={pose.nearBone,0,0,0,pose.farBone,0,0,0};
+     ctx->UpdateSubresource(bones.Get(),0,nullptr,b,0,0);
+    }
+    unsigned ids[4]={row,526606,0,0};ctx->UpdateSubresource(instance.Get(),0,nullptr,ids,0,0);
+    ctx->VSSetShaderResources(33,1,multiPoolView.GetAddressOf());
+    ctx->OMSetRenderTargets(1,ownerTarget.GetAddressOf(),dsv.Get());ctx->PSSetShader(rowMarkers[row].Get(),nullptr,0);
+    issue(ctx.Get(),9,1,0,0,0);
+   };
+   flatCoveredDrawTests(dev.Get(),ctx.Get(),ownerView.Get(),rawDepthView.Get(),W,H,flatInputs,worldCamera,ib.Get(),gpuRasterMulti,readFloatMap);
+  }
  }
  finalRaster(foreignOld);check(flat.capture(ctx.Get(),issue,9,1,0,0,0,600,flatInputs),"flat captures a new foreign identity before H");
  check(flat.prepareH(ctx.Get(),ownerView.Get(),rawDepthView.Get(),worldCamera,600,W,H,flatOutput) && flatOutput.resetRequired && flatOutput.depthNear==.025f,"new geometry requests one reset and common near spans foreign/world");

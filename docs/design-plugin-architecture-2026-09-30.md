@@ -36,22 +36,23 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** main `fcdc3c05` is integrated; reviewed `8fa6d443` will follow a
-  validated checkpoint. V2's 256 API sites preserve V1 and the 128-site CPU
-  limit. Focused collector, velocity (15,758 checks) and weapon (216,262
-  checks) rigs pass; the strict unsampled assembly/callback comparison passes.
-  Focused generated-header, source-pin and PanelDistance classifier checks
-  pass. The independent six-action claim ledger preserves the 38-site prefix;
-  all 148 full-build jobs and installer gates pass. Boundary-selector cost
-  remains outside the assembly proof. Keep the flight pair frozen: `7bbe7d90`
-  control and `6c63f6aa` candidate. Both October 7 flights match their
-  builds/environment and exit cleanly; Sean reports no visual changes. NV-on
-  sampled hook time per timed draw is 15.0% lower; other CPU ranges overlap.
-  Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its median above the
-  control range. Draw counts differ and the on-foot source has 4.175% more
-  pixels. Attribution/non-regression stay open. Finish coverage and selectors
-  offline before another flight. Whole-ladder actions remain open. Replay
-  retains 482.4 MiB when enabled, none when off; NV blur reproduces on
+- **Next:** checkpoint `445e0ef6` is validated and pushed. Main `84b6f760` is
+  integrated; all 149 full-build jobs, installer gates and the refreshed scoped
+  assembly proof pass. V2's 256 API sites preserve V1 and the 128-site CPU
+  limit. Collector, velocity (15,758 checks) and weapon (217,415 checks) rigs
+  pass; the strict unsampled assembly/callback comparison passes. Focused
+  generated-header, source-pin and PanelDistance classifier checks pass. The
+  independent six-action claim ledger preserves the 38-site prefix; the
+  checkpoint's 148 full-build jobs and installer gates also pass.
+  Boundary-selector cost remains outside the assembly proof. Keep the flight
+  pair frozen: `7bbe7d90` control and `6c63f6aa` candidate. Both October 7
+  flights match their builds/environment and exit cleanly; Sean reports no
+  visual changes. NV-on sampled hook time per timed draw is 15.0% lower; other
+  CPU ranges overlap. Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its
+  median above the control range. Draw counts differ and the on-foot source has
+  4.175% more pixels. Attribution/non-regression stay open. Finish coverage and
+  selectors offline before another flight. Whole-ladder actions remain open.
+  Replay retains 482.4 MiB when enabled, none when off; NV blur reproduces on
   `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
   Scope control. No Phase 1 acceptance, Phase 2 or shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
@@ -2932,7 +2933,31 @@ self-contained installer checks; its rig pool reports no shown windows,
 consoles or foreground changes (241 s). The fresh full-pass receipt fingerprint
 is `c55f15b0a2f4ae38943ef9b3deb4c07bc52a3ab8d52ad79d96bde230fcf97137`,
 independently verified before commit. The unchanged 17-input assembly proof
-also passes. Commit and the reviewed main refresh are next. No Steam install,
+also passes. Checkpoint `445e0ef6` is committed and pushed. No Steam install,
 config edit or flight occurred for this slice. The previous pair stays frozen;
 Phase 1 performance, whole-ladder/actions and remaining coverage remain open.
 Phase 2 and shipping stay held.
+
+The main refresh now targets `84b6f760`, including `8fa6d443`'s on-foot split,
+`8def3d66`'s draw-local history refusal and `4c69779f`'s first-person naming
+veto. The sole include conflict retains the required journal header without
+restoring the feature's removed scheduler/static headers or duplicate
+configuration. Automatic merges retain the query pins and 30-site API ledger
+alongside the new covered-draw fixtures. The occurrence-window extension is
+requested only by the flat foreground adapter; its legacy default stays four.
+Ruled out: rejecting the 64th prior record, because its pre-append index is 63;
+only a 65th prior reaches the refusal predicate.
+
+The fresh parent/current assembly comparison passes after compiling both stages
+with the merged shared headers (10.9/10.5 s). All 15 temporary source swaps
+restore exactly, and the 17 current inputs keep their hashes. This proves the
+scoped API erasure against common merged header inputs; it does not claim
+equality of the old and new flat history implementations or their performance.
+The pre-main proof and checkpoint receipt are archived in the ignored build
+directory. The full merged-tree build passes all 149 jobs and self-contained
+installer checks; its pool has no shown windows, consoles or foreground changes
+(246 s). The engine rig passes 15,758 checks, weapon motion passes 217,415 WARP
+checks including the new covered-draw cases, and the on-foot split passes 4,084
+checks. The fresh receipt fingerprint is
+`2779be20ffaf3c803f4f6f70a18bd9bf2181ab886b6659851de0aefe93f3a7e7`,
+independently verified before the merge commit. Steam remains unchanged.

@@ -152,15 +152,17 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         return 2;
     }
     Snapshot incompatible{};
-    incompatible.version=4;
+    incompatible.version=5;
     if(snapshot(&incompatible,sizeof(incompatible))) {
         std::fputs("flat SDK bench: snapshot accepted a future ABI version\n",stderr);return 2;
     }
-    incompatible.version=2;
-    if(snapshot(&incompatible,sizeof(incompatible))) {
-        std::fputs("flat SDK bench: snapshot accepted a retired ABI version\n",stderr);return 2;
+    for(const unsigned retired:{2u,3u}) {
+        incompatible.version=retired;
+        if(snapshot(&incompatible,sizeof(incompatible))) {
+            std::fputs("flat SDK bench: snapshot accepted a retired ABI version\n",stderr);return 2;
+        }
     }
-    incompatible.version=3;incompatible.size=sizeof(incompatible)-1;
+    incompatible.version=4;incompatible.size=sizeof(incompatible)-1;
     if(snapshot(&incompatible,sizeof(incompatible))) {
         std::fputs("flat SDK bench: snapshot accepted a wrong ABI size\n",stderr);return 2;
     }
@@ -193,6 +195,16 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     // steady (the control), the slot alternating between two records of one identity (the case), and the slot alternating between two
     // records of two identities (the control that the census sees a refused first-person pixel in this scene at all).
     const bool repacked=std::strcmp(name,"first_person_slot_repacked")==0;
+    // The grenade hold (section 104): one mesh drawn dozens of times by the first person in a frame, past the 64 draws of a key the flat
+    // adapter captures (AnimatedVertexHistory::maxExtendedOccurrences). The draws past it are refused their capture; their pixels are marked
+    // first-person all the same, so the frame stays qualified and the backend's. Before the fix the fifth draw of the key refused the frame.
+    const bool pieces=std::strcmp(name,"first_person_pieces")==0;
+    // The grenade hold's other half (section 104): a first-person draw with the WORLD family's generic material shaders (a grenade is not in the
+    // weapon family list, which is five vertex shaders), drawn before the world. The first supported scene draw that is not in that list names
+    // the world camera, whatever camera it has; here the first person's (near 0.0675). Every world draw after it was then a draw of "another
+    // camera", the frame was declined and the next frame's world prediction was the first person's. Camera 0 must name the world.
+    const bool genericFirst=std::strcmp(name,"first_person_generic_naming")==0;
+    constexpr unsigned pieceDraws=70,pieceCaptured=64;
     const bool inertWorld=std::strcmp(name,"inert_depth_write_world")==0;
     const bool prepassCase=settlement||weaponCamera;
     const bool stateDraw=partialState||blendedState||blendedNoDepth;
@@ -421,9 +433,10 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     // weapon-camera cases camera 2, whose near equals the world's.
     const unsigned familyCamera[2]={0u,weaponCamera?2u:1u};
     // `instanceData` replaces the family's own instance buffer (which pool record the draw reads) where a case moves it.
-    auto originalDraw=[&](unsigned family,ID3D11RenderTargetView* target,Snapshot& snap,ID3D11Buffer* instanceData=nullptr) {
+    // `cameraOverride` replaces the family's camera (a first-person draw with the world family's shaders, first_person_generic_naming).
+    auto originalDraw=[&](unsigned family,ID3D11RenderTargetView* target,Snapshot& snap,ID3D11Buffer* instanceData=nullptr,int cameraOverride=-1) {
         ID3D11RenderTargetView* view=target;context->OMSetRenderTargets(1,&view,dsv.Get());
-        ID3D11Buffer* cb=camera[familyCamera[family]].Get();context->VSSetConstantBuffers(1,1,&cb);
+        ID3D11Buffer* cb=camera[cameraOverride>=0?unsigned(cameraOverride):familyCamera[family]].Get();context->VSSetConstantBuffers(1,1,&cb);
         context->PSSetConstantBuffers(1,1,&cb);
         context->IASetInputLayout(layout[family].Get());
         vb[0]=instanceData?instanceData:instanceBuffer[family].Get();context->IASetVertexBuffers(0,2,vb,strides,offsets);
@@ -530,6 +543,12 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         if(!snapshot(&evidence.prepass,sizeof(evidence.prepass)))return 2;
         evidence.prepassDepthPixels=changedPixels(depthAfterFirstPerson,readPixels(device,context,depth.Get(),8),8);
     }
+    if(genericFirst) {
+        // Family 0's shaders, the first person's camera and pool record, before the world is named. It is the first person's only supported
+        // draw (a camera's supported draws are one source record, which the selector qualifies only if every draw has the record's first pair),
+        // so it stands for the standard first-person draw below, which this case does not make.
+        if(!originalDraw(0,poolRtv.Get(),evidence.alternate,instanceBuffer[1].Get(),1))return 2;
+    }
     // The world draw: family 0 with camera 0. It names the world and is counted unmarked, never planned or captured.
     if(!originalDraw(0,poolRtv.Get(),evidence.world))return 2;
     if(stateDraw) {
@@ -561,7 +580,12 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         context->OMSetDepthStencilState(depthState.Get(),0);
         if(!originalDraw(1,poolRtv.Get(),evidence.stateLater))return 2;
         evidence.alternate=evidence.stateLater;
-    } else if(!originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;   // the first person's surface: family 1, camera 1 (2 in the weapon-camera cases)
+    } else if(!genericFirst && !originalDraw(1,poolRtv.Get(),evidence.alternate))return 2;   // the first person's surface: family 1, camera 1 (2 in the weapon-camera cases)
+    if(pieces) {
+        // The same draw again, as the pieces of one mesh: 69 more, every one the same key (shaders, layout, buffers, indices, pool record).
+        Snapshot pieceSnapshot{};
+        for(unsigned i=1;i<pieceDraws;++i)if(!originalDraw(1,poolRtv.Get(),pieceSnapshot))return 2;
+    }
     if(staleMark) {
         // A world surface drawn over the first person's, in front of it (camera 0, record 11). It has the named world camera,
         // so nothing marks it: the owner plane must come out byte-identical, and the first-person marks it covers keep
@@ -821,6 +845,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     const uint64_t capturedDelta=since(after.captured,before.captured);
     const uint64_t attemptedDelta=since(after.hAttempts,before.hAttempts);
     const uint64_t qualifiedDelta=since(after.hQualified,before.hQualified);
+    const uint64_t coveredDelta=since(after.coveredDraws,before.coveredDraws);
+    const uint64_t coveredFramesDelta=since(after.hCoveredFrames,before.hCoveredFrames);
     const uint64_t backendDelta=since(after.hdrBackendCompleted,before.hdrBackendCompleted);
     const uint64_t resolverDelta=since(after.resolverCalls,before.resolverCalls);
     const uint64_t spatialDelta=since(after.hdrSpatial,before.hdrSpatial);
@@ -948,10 +974,19 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         repackSteady.frames>=6 && repackMoved.frames>=6 && repackDifferent.frames>=6 &&
         repackSteady.matched>0 && repackSteady.rejected==0 && repackMoved.matched>0 && repackMoved.rejected==0 &&
         repackDifferent.matched==0 && repackDifferent.rejected>0 && repackDifferent.identityDiffers==repackDifferent.rejected;
+    // The draws past the cap are covered per pixel, not the frame's refusal: no first failure anywhere on the frame, an empty refusal inventory,
+    // H qualified with the covered draws counted, and the backend's frame (the verdict below needs the resolve to complete).
+    const bool piecesRule=pieces && attemptedDelta>0 && qualifiedDelta>0 && !surfaceDelta &&
+        foreignDelta==pieceDraws && capturedDelta==pieceCaptured && coveredDelta==pieceDraws-pieceCaptured &&
+        coveredFramesDelta>0 && frameClean && !after.failureKinds;
+    // The world is named by the world's camera (near 0.025), not the first person's (0.0675) that drew first; the frame is the backend's.
+    const long namedNearMilli=std::lround(double(evidence.world.namedNear)*1000.0);
+    const bool genericRule=genericFirst && namedNearMilli==25 && attemptedDelta>0 && qualifiedDelta>0 && !surfaceDelta &&
+        frameClean && !after.failureKinds;
     const bool ruleConfirmed=worldsUnmarked && (inertNoWrite?inertNoWriteRule:colorInert?forwardedColorOnly:
         blendedNoDepth?forwardedBlended:(partialState||blendedState)?admittedState:blendedHdrWorld?worldHdrBlended:
         inertWorld?worldInertWriter:staleMark?staleMarkRule:settlement?settlementConfirmed:mismatch?scaleRecognised:
-        repacked?repackRule:supersampledAny?supersampleRule:true);
+        repacked?repackRule:pieces?piecesRule:genericFirst?genericRule:supersampledAny?supersampleRule:true);
     const bool guardConfirmed=worldsUnmarked && (hostGuard?
         rasterReady && evidence.world.namedWorld && (taa || ownershipForeign) && after.hdrTriggered && !after.hAttempts &&
             std::strcmp(after.hdrVerdict,"engine-source-not-ready")==0:
@@ -965,6 +1000,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
         staleMark?"stale-first-person-mark-kept-and-frame-resolved":
         mismatch?"weapon-camera-at-world-near-captured-by-projection-scale":
         repacked?"first-person-history-kept-by-identity-across-slots":
+        pieces?"first-person-draws-over-the-cap-covered-per-pixel-and-frame-resolved":
+        genericFirst?"world-named-by-the-world-camera-not-the-first-persons-generic-draw":
         supersampledAny?"supersampled-hdr-route-qualified-and-resolved-at-render-size":
         settlement?"predicted-world-prepass-planned-without-capture":"production-hdr-resolve-completed";
     if(guardCase) {
@@ -1042,6 +1079,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           <<",\"raster\":{\"depthPixels\":"<<evidence.depthPixels<<",\"validDepthPixels\":"<<evidence.validDepthPixels
           <<",\"depthMin\":"<<evidence.depthMin<<",\"depthMax\":"<<evidence.depthMax
           <<",\"poolPixels\":"<<evidence.poolPixels<<",\"hdrPixels\":"<<evidence.hdrPixels<<"}"
+          <<",\"named\":{\"nearMilli\":"<<namedNearMilli<<"}"
           <<",\"namedWorld\":"<<evidence.world.namedWorld<<",\"candidates\":"<<after.candidates
           <<",\"owner\":{\"foreignSeen\":"<<evidence.alternate.foreignSeen
           <<",\"captures\":"<<evidence.alternate.captured
@@ -1064,6 +1102,7 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
           <<",\"surfacePreserving\":"<<surfaceDelta<<",\"surfacePreservingForeign\":"<<surfaceForeignDelta
           <<",\"worldUnmarked\":"<<worldUnmarkedDelta<<",\"worldMarkers\":"<<worldMarkerDelta
           <<",\"foreignSeen\":"<<foreignDelta<<",\"captured\":"<<capturedDelta
+          <<",\"coveredDraws\":"<<coveredDelta<<",\"hCoveredFrames\":"<<coveredFramesDelta
           <<",\"hAttempts\":"<<attemptedDelta<<",\"hQualified\":"<<qualifiedDelta<<",\"backendCalls\":"<<backendDelta
           <<",\"hdrSpatial\":"<<spatialDelta<<",\"backendFailures\":"<<backendFailureDelta
           <<",\"failureKinds\":"<<after.failureKinds<<",\"failureKindsDropped\":"<<after.failureKindsDropped
@@ -1102,6 +1141,8 @@ int scene(const wchar_t* proxyPath, const wchar_t* fixturePath, D3D_DRIVER_TYPE 
     if(!hostGuard)result<<",\"Emit-hook availability reconstructed only in offline test-link proxy\"";
     if(prepassCase)result<<",\"Prepass order, shader pair and run length follow the 2026-10 settlement census; geometry, record contents and the alpha-test inputs are reconstructed\"";
     if(staleMark)result<<",\"The covering world surface is a reconstructed small pool record drawn with the prepass pair; the owner plane is read back through the proxy's test export\"";
+    if(genericFirst)result<<",\"A first-person draw with the world family's reconstructed shaders is drawn before the world; the case reads the near plane of the camera that named the world\"";
+    if(pieces)result<<",\"Seventy draws of one reconstructed first-person mesh (one pool record); the 65th to 70th are refused their capture by the occurrence cap and covered per pixel\"";
     if(repacked)result<<",\"Pool records 10 and 12 are reconstructed copies of record 9 (same identity words; another bone base); the first-person map is the proxy's own, read through its test export. Every bench frame is a reset frame for the resolver, so its refusal census is not asked\"";
     if(supersampledAny)result<<",\"The scene targets are rendered above the swap chain's size (the HDR route's R > D): 1.5 x per axis; the game's own final copy that would downsample the result is not part of the bench\"";
     if(supersampled4k)result<<",\"Hardware adapter only: 5760 x 3240 into 3840 x 2160 is impractical on WARP\"";

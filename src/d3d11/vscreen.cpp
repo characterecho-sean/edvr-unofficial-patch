@@ -9365,6 +9365,8 @@ void vScreenFrameBoundary() {
                     if (reg2[0]) Log::get().note("temporal aa registration, the rest: %s", reg2);
                     if (reg3[0]) Log::get().note("temporal aa registration, the probes: %s", reg3);
                 }
+                // The ship split on foot, with its zeros: the same interval, so the two read together.
+                temporalPassNoteFootTotals();
             }
         }
         // The trained pass's, when it runs.

@@ -45,6 +45,7 @@
 #include "cs_stage_save.h"
 #include "engine_velocity.h"
 #include "celestial_motion.h"   // planet patch motion: each body's own rigid motion on its pixels (decision path 12)
+#include "journal_watch.h"   // the ship split on foot: Status.json's word on whether the commander is on foot (temporal_mode.h)
 #include "perf_monitor.h"
 #include "shader_swap.h"
 #include "gpu_timing.h"
@@ -1529,6 +1530,7 @@ void writeEyeMotionTrace(const std::wstring& dir) {
     names("headR",12); names("headTv",4);
     fprintf(f, ",projectionA,projectionB,rowsBound,rowsFollow,sceneDraws");
     fprintf(f, ",celestialRecords,celestialBodies,celestialPatches,celestialMatched,celestialTx,celestialTy,celestialTz,celestialRotDeg,celestialDistance");
+    fprintf(f, ",shipSplit");   // the split the shader read this eye-frame, metres: the configured one, or a millimetre on foot
     fprintf(f, "\n");
     for (uint32_t i = 0; i < g_eyeMotionTraceCount; ++i) {
         const EyeMotionTrace& t = g_eyeMotionTrace[i];
@@ -1547,6 +1549,7 @@ void writeEyeMotionTrace(const std::wstring& dir) {
         fprintf(f, ",%.9g,%.9g,%d,%d,%u", p.knobs[0], p.knobs[2], t.rowsBound, t.rowsFollow, t.sceneDraws);
         fprintf(f, ",%u,%u,%u,%u,%.9g,%.9g,%.9g,%.9g,%.9g", t.celestialRecords, t.celestialBodies, t.celestialPatches, t.celestialMatched,
                 t.celestialT[0], t.celestialT[1], t.celestialT[2], t.celestialRotDeg, t.celestialDistance);
+        fprintf(f, ",%.9g", p.split[0]);
         fprintf(f, "\n");
     }
     const bool wrote = !ferror(f);
@@ -1780,6 +1783,52 @@ bool fssInterfaceLive() {
     // finished at its partner's submit, and the boundary may land between.
     return g_rowsFrame - g_fssChromeStampFrame <= 1;
 }
+
+// THE SHIP SPLIT ON FOOT (src/common/temporal_mode.h says what it is and why; docs/per-object-motion.md, 2026-10-07).
+// While Status.json says the commander is on foot and not seated, the split the shader reads is a millimetre, so every pixel with
+// a depth takes the camera's rows -- Explorer Cam's ground, 1.5 to 10 m away, is the world and not a cockpit. The state is the
+// journal watcher's, read per eye evaluation (a few relaxed loads and a clock read, nothing the render thread waits on); both
+// eyes of a frame read the same copy unless the watcher's tick lands between them, and one frame of disagreement is nothing.
+// The log says every change of mode once, and the totals line below says it every interval with its zeros, so a build without
+// this code, a mode that never came on and a journal that cannot tell are three different logs.
+TemporalFootTracker g_foot;                          // the mode, its reason, the staleness clock and the changes (temporal_mode.h)
+uint32_t        g_footEyeFrames = 0;                         // eye evaluations since the totals line last printed
+uint32_t        g_footOnFrames = 0;                          // ...with the mode on
+uint32_t        g_footWorldFrames = 0;                       // ...and the world path on too: the split mattered
+ULONGLONG       g_footLineMs = 0;                            // when the totals line last printed
+constexpr uint32_t kFootNoteCap = 40;                        // changes the log tells; later ones are counted, not told
+
+bool footSplitNow() {
+    TemporalFoot f;
+    f.watching = journalWatchActive();
+    f.gameplay = journalGameplay();
+    f.known = journalOnFootKnown();
+    f.onFoot = journalOnFoot();
+    f.vehicleKnown = journalSeatedKnown();
+    f.seated = journalSeated();
+    if (g_foot.step(GetTickCount64(), f, journalStatusSamples())) {
+        if (g_foot.changes <= kFootNoteCap) {
+            if (g_foot.on) {
+                Log::get().note(
+                    "temporal aa: on foot -- the ship split is off, near pixels take the world path (the game's camera rows, "
+                    "the head and the commander's walk together, at every depth; the far plane as before). Status.json says "
+                    "on foot and not seated (scene frame %u, change %u)%s",
+                    g_rowsFrame, g_foot.changes,
+                    g_shipMetres > 0.0f
+                        ? "; in a ship or SRV the split stays at advanced.temporal_aa_ship_metres."
+                        : "; advanced.temporal_aa_ship_metres is 0, so the world path is off and nothing changes.");
+            } else {
+                Log::get().note(
+                    "temporal aa: no longer on foot (%s) -- the ship split is back at %.0f m: pixels nearer take the head's "
+                    "delta, farther ones and the far plane the camera's (scene frame %u, change %u)%s",
+                    temporalFootWhyName(g_foot.why), static_cast<double>(g_shipMetres), g_rowsFrame, g_foot.changes,
+                    g_foot.changes == kFootNoteCap ? "; later changes of mode are counted on the totals line, not told." : ".");
+            }
+        }
+    }
+    return g_foot.on;
+}
+
 TemporalHistory<> g_temporalHistory;
 std::mutex g_temporalHistoryMutex;
 struct TemporalHistoryScope {
@@ -3820,7 +3869,17 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         // A floating-origin jump this frame: the eye run's motion trace and
         // the submission history carry it.
         const bool jumpedNow = g_originJumpFrame == g_rowsFrame;
-        p.split[0] = g_shipMetres;
+        // On foot (footSplitNow, beside fssInterfaceLive, says how that is known) the
+        // split is a millimetre and every pixel with a depth takes the camera's rows;
+        // in a ship, an SRV, a menu or with no journal it is the configured split, bit
+        // for bit.
+        const bool footSplit = footSplitNow();
+        ++g_footEyeFrames;
+        if (footSplit) {
+            ++g_footOnFrames;
+            if (worldOn) ++g_footWorldFrames;
+        }
+        p.split[0] = temporalShipSplitMetres(g_shipMetres, footSplit);
         p.split[1] = static_cast<float>(g_debugMode);
         p.split[2] = g_menuMetres;
         // The menu's assumed depth for depthless pixels: a menu-like scene by
@@ -6796,6 +6855,26 @@ bool temporalPassTotals(uint32_t* treated, double* avgMs, double* maxMs,
     return true;
 }
 
+void temporalPassNoteFootTotals() {
+    // No early return on zero eye-frames: the caller prints this only in an interval where the pass treated eye-submits, so
+    // "off for 0 of 0 eye-frames" says the pass ran and never reached the constants (it stood down: no depth, no scene), and a
+    // log with the totals line and no line from here is a build without this code.
+    const ULONGLONG now = GetTickCount64();
+    char span[48] = "";
+    if (g_footLineMs && now > g_footLineMs) {
+        snprintf(span, sizeof(span), " in the last %.0f s", static_cast<double>(now - g_footLineMs) / 1000.0);
+    }
+    Log::get().note(
+        "temporal aa on foot: the ship split was off for %u of %u eye-frames%s (the world path on for %u of them); the journal "
+        "says now: %s; in a ship or SRV the split is advanced.temporal_aa_ship_metres = %.0f m; %u change%s of mode this session.",
+        g_footOnFrames, g_footEyeFrames, span, g_footWorldFrames, temporalFootWhyName(g_foot.why),
+        static_cast<double>(g_shipMetres), g_foot.changes, g_foot.changes == 1 ? "" : "s");
+    g_footEyeFrames = 0;
+    g_footOnFrames = 0;
+    g_footWorldFrames = 0;
+    g_footLineMs = now;
+}
+
 void regAppend(char* buf, size_t n, size_t& used, const char* fmt, ...) {
     if (used >= n) return;
     va_list ap;
@@ -6863,7 +6942,8 @@ bool temporalPassRegistration(char* buf, size_t n, char* buf2, size_t n2, char* 
     // the camera rows against the head (docked: zero and zero).
     if (g_intervalPix) {
         regAppend(buf, n, used,
-                  ". The world path (the camera's delta beyond %.0f m and at the far plane) took "
+                  ". The world path (the camera's delta beyond %.0f m -- at every depth while on foot, "
+                  "the \"temporal aa on foot\" line says when -- and at the far plane) took "
                   "%.1f%% of pixels; %.1f%% of the bright pixels (luma over 0.6) had no depth",
                   static_cast<double>(g_shipMetres),
                   100.0 * static_cast<double>(g_worldPix) / static_cast<double>(g_intervalPix),

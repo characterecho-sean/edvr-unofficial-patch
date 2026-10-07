@@ -177,6 +177,28 @@ inline void sdkForegroundScenario(ID3D11Device* device, ID3D11DeviceContext* con
             map[4*center]=1.75f;map[4*center+1]=-.5f;map[4*center+3]=2;
             context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
         }
+        // A draw refused its capture (the occurrence cap or the history budget: the grenade hold, section 104) is not in the map, and the owner
+        // plane marks its pixels first-person all the same. The adapter's map holds no sample there (the GPU clear: x 0, y 0, z -1, w 0). The
+        // prep refuses the pixel's history with no motion, leaves it its own raw depth (the sample's canonical depth is what it has not), and
+        // never gives it the camera term, which is not zero in this frame (the camera is moved): the pixel is the weapon's, not the world's.
+        {
+            const float saved[4]={map[4*center],map[4*center+1],map[4*center+2],map[4*center+3]};
+            map[4*center]=0;map[4*center+1]=0;map[4*center+2]=-1;map[4*center+3]=0;
+            context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
+            f.previousCamera[5][0]=.05f;
+            (void)flatMonoResolveTakeRefusalCensus();
+            for(unsigned i=0;i<kFlatMonoRefusalEvery;++i) {
+                ++f.frame;f.foregroundFrame=f.frame;const int calls=backendCalls;
+                resolve(true,"SDK first-person pixel with no map sample stays admitted");
+                check(backendCalls==calls+1 && !backendReset && observedReject==255 && observedMotion==0 && observedMotionY==0 && observedDepth==.01f,
+                      "a first-person pixel whose draw was refused its capture has no history and no motion, keeps its own depth, and never takes the camera term");
+            }
+            const auto noSample=takeCensus();
+            check(noSample.frames>=1 && noSample.counts[kFlatMonoClassWeaponRefused]==noSample.frames && noSample.weaponReasons[0]==noSample.frames &&
+                  noSample.refused()==noSample.frames,
+                  "census: the pixel with no map sample is counted once per sampled frame as a refused first-person pixel, under reason 0");
+            map[4*center]=saved[0];map[4*center+1]=saved[1];map[4*center+2]=saved[2];map[4*center+3]=saved[3];
+        }
         f.refusalCensus=false;map[4*center+3]=1;
         context->UpdateSubresource(motion.Get(),0,nullptr,map.data(),w*16,0);
         camera(f.previousCamera);
@@ -249,6 +271,13 @@ inline void sdkForegroundGpuTests(ID3D11Device* device, ID3D11DeviceContext* con
          "if(!foregroundValid && foregroundSample.w==2 && foregroundSample.x>=1","if(!foregroundValid && foregroundSample.x>=1"},
         {"the reason is kept in the wrong bits (3-5)",
          "cls|=uint(foregroundSample.x)<<4;","cls|=uint(foregroundSample.x)<<3;"},
+        // A first-person pixel whose draw has no map sample (refused its capture, covered per pixel).
+        {"a first-person pixel with no map sample is the world's (the camera term)",
+         "foreground=owner.x < -1 && asuint(owner.y)==asuint(depth);",
+         "foreground=owner.x < -1 && asuint(owner.y)==asuint(depth) && FlatForegroundMotion.Load(int3(q,0)).w!=0;"},
+        {"a first-person pixel with no map sample keeps its history",
+         "reject=foregroundValid?0:1;expected=foregroundValid?depth:0;",
+         "reject=(foregroundValid||foregroundSample.w==0)?0:1;expected=foregroundValid?depth:0;"},
     };
     const std::string shipped=kFlatMonoShaderSource;
     auto runMutated=[&](const std::string& hlsl,int* failed,std::string* first) {

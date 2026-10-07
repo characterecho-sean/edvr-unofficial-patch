@@ -18,6 +18,10 @@ public:
     // the old bound of 64 (the budget receipt's records=64); 128 gives that transient room. The byte bound below is what limits large draws.
     static constexpr unsigned maxVertices = 131072, maxRecords = 128;
     static constexpr unsigned maxBytes = 32 * 1024 * 1024;
+    // How many records of one geometry key a frame may use. The default policy (VR: its map holds four priors) refuses the fifth. The
+    // extended policy (the flat adapter, design section 104) allows maxExtendedOccurrences and hands each draw the window of four priors
+    // nearest its own ordinal, so a mesh drawn dozens of times in a frame (the grenade's identical pieces) keeps a history per piece.
+    static constexpr unsigned maxOccurrences = 4, maxExtendedOccurrences = 64;
     inline static const GUID bytecodeKey = {0x65a40e9c,0xa4ee,0x473d,{0x85,0x4a,0xeb,0x10,0x35,0x8e,0x4f,0x20}};
     struct Geometry {
         Ptr<ID3D11VertexShader> original;
@@ -45,6 +49,9 @@ public:
         // How many records of this geometry key this frame had already used when this draw prepared: 0 for the first draw of the key,
         // 1 for the second, and so on. A draw's own occurrence number is occurrences+1.
         unsigned occurrences=0;
+        // How many records of this key the frame before used, whatever the four candidates below are: above four, the extended policy
+        // handed this draw the window of four nearest its ordinal (candidateCount stays at most four).
+        unsigned priorRecords=0;
         Ptr<ID3D11ShaderResourceView> currentPositions, currentIdentity;
         Ptr<ID3D11ShaderResourceView> previousPositions[4], previousIdentity[4];
         const char* refusal=nullptr;
@@ -83,7 +90,7 @@ public:
     // Split preparation/submission lets VR retain identity -> map clear -> SO
     // order and its existing exact stage timers. Flat may use capture() below.
     bool prepareCapture(ID3D11DeviceContext* ctx,unsigned count,unsigned instances,
-                         unsigned start,int base,unsigned startInstance,unsigned frame,Capture& out) {
+                         unsigned start,int base,unsigned startInstance,unsigned frame,Capture& out,bool extended=false) {
         out=Capture{};out.frame=frame;
         auto refuse=[&](const char* why){out.refusal=why;return false;};
         if(failed_ || !ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE ||
@@ -121,35 +128,55 @@ public:
         if(bd.StructureByteStride!=336 || pd.Buffer.NumElements!=bd.ByteWidth/336)return refuse("pool-layout");
         out.instanceByteOffset=UINT(address);key.count=count;key.start=start;key.base=base;
         const unsigned next=frame&1,previous=1-next;
-        unsigned occurrences=0;
-        for(const auto& r:records_)if(matches(r.geometry,key)) {
+        // The records of this key that the frame before used, in record order: with at most four, all of them are the candidates (the
+        // GPU map picks the draw's own by its identity). With more (the extended policy only), the draw's own previous record is the one
+        // at its own ordinal, since a steady frame draws the key's draws in the same order and the k-th takes the k-th record: the
+        // candidates are the four nearest that ordinal, k-1 .. k+2, and the identity still decides among them. A draw whose prior is
+        // outside the window finds none of its identity there and is refused locally by the map (no-prior or identity-differs).
+        const unsigned limit=extended?maxExtendedOccurrences:maxOccurrences;
+        unsigned prior[maxExtendedOccurrences];unsigned priorCount=0,occurrences=0;
+        for(size_t i=0;i<records_.size();++i) {
+            const Record& r=records_[i];
+            if(!matches(r.geometry,key))continue;
             if(r.frame[next]==frame)++occurrences;
             if(r.frame[previous]!=~0u && r.frame[previous]+1==frame) {
-                if(out.candidateCount==4)return refuse("occurrence-cap");
-                out.previousPositions[out.candidateCount]=r.views[previous];
-                out.previousIdentity[out.candidateCount++]=r.identityViews[previous];
+                if(priorCount==limit)return refuse("occurrence-cap");
+                prior[priorCount++]=unsigned(i);
             }
         }
-        out.occurrences=occurrences;
-        if(occurrences==4)return refuse("occurrence-cap");
+        out.occurrences=occurrences;out.priorRecords=priorCount;
+        if(occurrences>=limit)return refuse("occurrence-cap");
+        {
+            const unsigned take=(std::min)(priorCount,4u);
+            const unsigned first=priorCount>4?(std::min)(occurrences>0?occurrences-1:0u,priorCount-4):0u;
+            for(unsigned i=0;i<take;++i) {
+                const Record& r=records_[prior[first+i]];
+                out.previousPositions[i]=r.views[previous];out.previousIdentity[i]=r.identityViews[previous];
+            }
+            out.candidateCount=take;
+        }
         auto found=std::find_if(records_.begin(),records_.end(),[&](const Record& r){return matches(r.geometry,key) && r.frame[next]!=frame;});
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
         if(found==records_.end()) {
             const uint64_t requested=uint64_t(count)*32;
             auto overBudget=[&]{return records_.size()>=maxRecords || uint64_t(bytes_)+requested>maxBytes;};
+            // Under the extended policy a record that no frame from now on can use as a prior is reclaimable too (spentForHistory): the
+            // grenade flight's budget receipt (frame 39036) held 128 records, 122 of them last used two frames before and none this
+            // frame, and refused the first draw of the frame for the record limit with 15 percent of the bytes in use.
+            auto reclaimable=[&](const Record& r){return r.invalidated || (extended && spentForHistory(r,frame));};
             Ptr<ID3D11GeometryShader> reclaimedCapture;
             if(overBudget()) {
                 // Known writes invalidate correspondence immediately, but
                 // keep the allocation for cheap same-key reuse. Reclaim only
                 // when a different key actually needs its budget.
                 size_t invalidCount=0;uint64_t invalidBytes=0;
-                for(const auto& r:records_)if(r.invalidated) {
+                for(const auto& r:records_)if(reclaimable(r)) {
                     ++invalidCount;invalidBytes+=uint64_t(r.geometry.count)*32;
                 }
                 if(records_.size()-invalidCount>=maxRecords ||
                    uint64_t(bytes_)-invalidBytes+requested>maxBytes)return refuse("history-budget");
                 for(auto it=records_.begin();it!=records_.end() && overBudget();) {
-                    if(!it->invalidated){++it;continue;}
+                    if(!reclaimable(*it)){++it;continue;}
                     if(!reclaimedCapture && it->geometry.original==key.original)
                         reclaimedCapture=it->capture;
                     const unsigned released=it->geometry.count*32;
@@ -213,9 +240,9 @@ public:
         bindPositions(ctx,out);drawPositions(ctx,draw,startInstance,out);restorePositions(ctx,out);
     }
     bool capture(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned count,unsigned instances,
-                  unsigned start,int base,unsigned startInstance,unsigned frame,Capture& out,bool retainIndex=false) {
+                  unsigned start,int base,unsigned startInstance,unsigned frame,Capture& out,bool retainIndex=false,bool extended=false) {
         if(!draw){out=Capture{};out.refusal="missing-draw";return false;}
-        if(!prepareCapture(ctx,count,instances,start,base,startInstance,frame,out))return false;
+        if(!prepareCapture(ctx,count,instances,start,base,startInstance,frame,out,extended))return false;
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
         if(!initializeIdentity(ctx,dev.Get())){out.refusal="resource-creation";return false;}
         submitIdentity(ctx,out);submitPositions(ctx,draw,startInstance,out);
@@ -280,6 +307,19 @@ private:
         unsigned frame[2]={~0u,~0u};
         uint64_t mutationEpoch=0;bool invalidated=false;
     };
+    // A record no later frame can use as a prior: it has been used, none of its frames is this frame or the one before, so it is neither
+    // this frame's nor a candidate (a prior is a record used the frame before). A pending record (never published) is not spent: a
+    // prepared capture may still publish it.
+    static bool spentForHistory(const Record& r,unsigned frame) {
+        if(r.invalidated)return false;
+        bool used=false;
+        for(unsigned parity=0;parity<2;++parity) {
+            if(r.frame[parity]==~0u)continue;
+            used=true;
+            if(frame-r.frame[parity]<2)return false;
+        }
+        return used;
+    }
     static bool matches(const Geometry& a,const Geometry& b) {
         return a.original==b.original && a.layout==b.layout && a.vertices==b.vertices && a.indices==b.indices &&
                a.count==b.count && a.start==b.start && a.base==b.base && a.offset==b.offset && a.stride==b.stride &&

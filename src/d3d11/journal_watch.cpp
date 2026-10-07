@@ -105,6 +105,10 @@ struct Published {
     // shutdown states -- Status then carries only "Flags":0.
     bool     onFootKnown = false;
     bool     onFoot = false;
+    // Seated in a ship, a fighter, an SRV, a taxi or multicrew (journalSeatedFromFlags): the other half of "on foot, and
+    // not in a ship or SRV". Known whenever Flags is in the file.
+    bool     seatedKnown = false;
+    bool     seated = false;
     // GuiFocus from Status.json: 9 is the Full System Scanner. The game
     // states the MODE outright -- entry and exit by any path (keybind,
     // ESC, an interdiction yanking the player out of supercruise) all
@@ -129,6 +133,8 @@ struct Visible {
     std::atomic<bool>     fsdJumpLive{false};
     std::atomic<bool>     onFootKnown{false};
     std::atomic<bool>     onFoot{false};
+    std::atomic<bool>     seatedKnown{false};
+    std::atomic<bool>     seated{false};
     std::atomic<bool>     fssFocusKnown{false};
     std::atomic<bool>     fssFocus{false};
     std::atomic<uint32_t> guiFocus{0};
@@ -153,6 +159,8 @@ void applyPublished(const Published& p) {
     g_v.fsdJumpLive.store(p.fsdJumpLive, kRelaxed);
     g_v.onFootKnown.store(p.onFootKnown, kRelaxed);
     g_v.onFoot.store(p.onFoot, kRelaxed);
+    g_v.seatedKnown.store(p.seatedKnown, kRelaxed);
+    g_v.seated.store(p.seated, kRelaxed);
     g_v.fssFocusKnown.store(p.fssFocusKnown, kRelaxed);
     g_v.fssFocus.store(p.fssFocus, kRelaxed);
     g_v.guiFocus.store(p.guiFocus, kRelaxed);
@@ -359,10 +367,11 @@ void scanRange(Session& s, const char* p, uint32_t n) {
 }
 
 // Status.json, reread whole on the same cadence: it is a few hundred bytes,
-// rewritten by the game about once a second. Two facts are taken from it:
-// Flags2's OnFoot bit, and Flags' FSD-jump bit (30). A file without the
-// field -- the menu, shutdown -- answers "not known", and callers fall back
-// to keys and delays respectively.
+// rewritten by the game about once a second. Three facts are taken from it:
+// Flags2's OnFoot bit, Flags' FSD-jump bit (30), and the seat (journal_watch.h:
+// Flags bits 24-26, Flags2 bits 1-2). A file without the field -- the menu,
+// shutdown -- answers "not known", and callers fall back to keys and delays
+// respectively.
 void pollStatus(Session& s) {
     ioSite("status");
     const std::wstring path = s.dir + L"\\Status.json";
@@ -409,6 +418,10 @@ void pollStatus(Session& s) {
         ++s.pub.statusSamples;
         s.pub.onFootKnown = sawFlags2;
         s.pub.onFoot = sawFlags2 && (flags2 & 0x01u) != 0;
+        // The same sample's seat: Flags bits 24-26 and Flags2 bits 1-2 (journal_watch.h). A Flags2 that is absent is read
+        // as zero here; the pair is only consulted with onFootKnown too.
+        s.pub.seatedKnown = sawFlags;
+        s.pub.seated = sawFlags && journalSeatedFromFlags(flags, sawFlags2 ? flags2 : 0u);
         // Bit 30 of Flags: the FSD jump itself -- the tunnel, not the
         // countdown before it. The distinction is what scopes the witchspace
         // star fix off the forming-wormhole phase, where the game still
@@ -428,6 +441,7 @@ void pollStatus(Session& s) {
         s.pub.guiFocus = sawGui ? gui : 0;
     } else if (++s.statusMisses >= 3) {
         s.pub.onFootKnown = false;
+        s.pub.seatedKnown = false;
         s.pub.fsdJumpKnown = false;
         s.pub.fssFocusKnown = false;
         s.pub.fssFocus = false;
@@ -944,6 +958,8 @@ bool journalInJumpTunnel() {
 }
 bool journalOnFootKnown() { return journalWatchActive() && peek(g_v.onFootKnown); }
 bool journalOnFoot() { return peek(g_v.onFoot); }
+bool journalSeatedKnown() { return journalWatchActive() && peek(g_v.seatedKnown); }
+bool journalSeated() { return peek(g_v.seated); }
 uint32_t journalStatusSamples() { return peek(g_v.statusSamples); }
 
 void journalWatchShutdown() {

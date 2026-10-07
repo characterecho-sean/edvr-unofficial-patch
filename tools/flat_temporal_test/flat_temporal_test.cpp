@@ -35,6 +35,7 @@
 #include "flat_hdr_route_tests.h"
 #include "flat_copy_structure_tests.h"
 #include "flat_copy_weapon_tests.h"
+#include "flat_covered_draw_wiring_tests.h"
 #include "flat_hdr_crumbs_tests.h"
 #include "../../src/d3d11/flat_runtime.h"
 #include "../../src/d3d11/flat_foreground_probe_policy.h"
@@ -3434,7 +3435,7 @@ void testFlatHdrSourceWitnessWiring() {
           runtime.find("second-earliest=")!=std::string::npos,
           "the five-second report exposes whether automatic evidence was enabled and whether either sample completed");
     const std::string naming=segment(runtime,
-        "const bool sourceCandidate=", "if(sourceCandidate && !s.namedDepth)");
+        "const bool sourceShape=", "if(sourceCandidate && !s.namedDepth)");
     check(naming.find("d.supported && !weaponMotionFamilyVs(k.vs) && k.camera && k.depth && sceneExtent")!=std::string::npos,
           "world source naming excludes the existing first-person motion family before binding a depth and camera");
     std::string unguarded=naming;
@@ -3854,6 +3855,7 @@ int main(int argc, char** argv) {
     failures += flatCopyStructureTests();
     failures += flatCopyWeaponTests();
     failures += flatCopyWeaponWiringTests();
+    failures += flatCoveredDrawWiringTests();
     failures += flatHdrCrumbTests();
     failures += flatHdrCrumbWiringTests();
     if (failures) return 1;

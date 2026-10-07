@@ -1415,15 +1415,43 @@ int journalWorkerChecks() {
         appendTo(journal, ev("FSDJump"));
         verify(tickUntil([] { return !journalInJumpTunnel(); }, 10000), "FSDJump ends it");
 
+        // The seat (journalSeatedFromFlags): the same read's Flags bits 24-26 (main ship, fighter, SRV) and Flags2 bits 1-2
+        // (taxi, multicrew). On foot is Flags2 bit 0 with none of them, and a sample that says both is read as seated: the
+        // temporal pass's ship split (src/common/temporal_mode.h) turns off only for a clear yes. Each step differs from the
+        // one before in on-foot or seated, so a tick that answers is a tick that read the new file.
+        struct Seat { uint32_t flags; int flags2; bool onFoot; bool seated; const char* what; };
+        const Seat seats[] = {
+            {0x01000000u, 0, false, true, "Flags bit 24 (the main ship) seats the commander"},
+            {0x00000000u, 1, true, false, "Flags2 bit 0 alone is on foot, and nothing seats it"},
+            {0x04000000u, 0, false, true, "Flags bit 26 (an SRV) seats the commander"},
+            {0x00000000u, 1, true, false, "on foot again"},
+            {0x02000000u, 0, false, true, "Flags bit 25 (a fighter) seats the commander"},
+            {0x00000000u, 3, true, true, "Flags2 bit 1 (a taxi) beside OnFoot reads as seated"},
+            {0x00000000u, 1, true, false, "on foot once more"},
+            {0x00000000u, 2, false, true, "Flags2 bit 1 (a taxi) alone seats the commander"},
+            {0x00000000u, 1, true, false, "on foot a third time"},
+            {0x00000000u, 4, false, true, "Flags2 bit 2 (multicrew) seats the commander"},
+            {0x00000000u, 1, true, false, "on foot a fourth time"},
+            {0x40000010u, 0, false, false, "the FSD-jump and supercruise bits are not seats"},
+        };
+        for (const Seat& st : seats) {
+            writeWhole(statusFile, statusText(st.flags, st.flags2, 0));
+            verify(tickUntil([&] { return journalOnFoot() == st.onFoot && journalSeated() == st.seated; }, 10000), st.what);
+            verify(journalOnFootKnown() && journalSeatedKnown(), "...and both answers are known with it");
+        }
+
         // The menu: Flags and nothing else.
         writeWhole(statusFile, statusText(0, -1, -1));
         verify(tickUntil([] { return !journalOnFootKnown() && !journalFssFocusKnown(); }, 10000),
                "a Status.json without Flags2 or GuiFocus answers not-known");
         verify(!journalFssFocus() && !journalGuiFocus(nullptr),
                "...and the scanner is over");
+        verify(journalSeatedKnown() && !journalSeated(),
+               "...while Flags itself, in the file, still says nothing seats the commander");
         DeleteFileW(statusFile.c_str());
         verify(tickUntil([] { return !journalSupercruiseKnown(); }, 10000),
                "a Status.json that goes missing drops what was known, after three misses");
+        verify(!journalSeatedKnown(), "...the seat included");
 
         appendTo(journal, ev("Shutdown"));
         verify(tickUntil([] { return !journalGameplay(); }, 10000), "a Shutdown event ends gameplay");
