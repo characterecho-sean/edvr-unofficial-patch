@@ -2,63 +2,56 @@
 
 ## Status
 
-- **State: DESIGN, 2026-10-07. Only the Phase 0b log-only instruments are
-  built; nothing is flown.** Replaces
-  press counting and headset-pose offsets with a placement of Elite's own
-  free camera at the commander's head, and hides the head only while the
-  camera sits in it.
-- **Decision for Sean (D1):** phase 1 writes the game's free-camera state.
-  That is the first EDVR write into game-side camera controller memory, it
-  retires explorer-cam.md's "never writes", and it must not touch anything
-  the game replicates (H5). Phase 0 writes nothing and does not wait on D1.
-- **Hypotheses after Phase 0a** (static, 2026-10-07; the signature for each
-  is in Phase 0; RVAs are build 332841, exe SHA-256 e6be8bbe...e988, the
-  same in the Steam, Epic and Frontier installs; evidence in
-  `analysis\decomp\explorer_cam\INDEX.txt`):
-  - H1: **READ true.** `FreeCameraActivity`'s update (0x1071980) composes
-    world = commander-local (+0x3B0) x commander frame under the relative
-    lock and re-derives local every frame.
-  - H2: **READ true.** The state is the activity object (rcx at 0x1071980):
-    world pose +0x70, local +0x3B0, flags +0x470/+0x471/+0x473, state +0x48C.
-  - H3: open, flight F1. A write before the update is upstream of the
-    camera and culling view by ordering (stack not traced to 0x5921F0).
-  - H4: **no head flag found** (about 25% one exists). The game flips a
-    whole-body FirstPerson/ThirdPerson avatar pair (0x2A96740).
-  - H5: **inferred not replicated, about 65%.** The pose lives only in the
-    activity; the replicator holds handle slots. Write the activity, never
-    the shared record (mode, speed, range).
-  - H6: **READ, with a change.** Shared record +0x30 = activity +0x48C: 3
-    free, 4 relative lock, 5 world lock. Reloaded each frame: watch only.
-  - H7 (new): the update's camera collision runs between the compose and
-    the re-derive, so if it treats the commander's own body as an obstacle
-    it pushes a placement out of the head. Sean can check it by hand,
-    before any build: steer the free camera into the head and see if it
-    stops.
+- **State: Phase 0 instruments built and FLOWN (F0, 2026-10-07); no
+  placement built.** Replaces press counting and headset-pose offsets with a
+  placement of Elite's own free camera at the commander's head, and hides
+  the head only while the camera sits in it.
+- **Branch and scope (Sean, 2026-10-07):** this stays on
+  `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
+  old Explorer Cam route entirely; deleting the old route is authorized.
+- **Decision for Sean (D1):** phase 1 writes the game's free-camera state,
+  the first EDVR write into game-side camera controller memory; it retires
+  explorer-cam.md's "never writes" and must not touch anything replicated.
+- **Hypotheses** (RVAs are build 332841, exe SHA-256 e6be8bbe...e988, all
+  three installs; static evidence in `analysis\decomp\explorer_cam\`):
+  - H1 **READ + FLOWN F0:** `FreeCameraActivity`'s update (0x1071980)
+    composes world = commander-local (+0x3B0) x commander frame under the
+    relative lock; in F0 local held bit-identical through a 15 m walk and
+    turns of up to 166 degrees.
+  - H2 **READ + FLOWN:** the state is the activity (rcx at 0x1071980):
+    world +0x70, local +0x3B0, flags +0x470/1/3, state +0x48C.
+  - H3 open, flight F1: a write before the update is upstream of the camera
+    and culling view by ordering (stack not traced to 0x5921F0).
+  - H4 no head flag found (about 25% one exists); the game swaps whole-body
+    avatars (0x2A96740). Head hiding stays EDVR's draw skip.
+  - H5 inferred not replicated (about 65%): write the activity, never the
+    shared record (mode, speed, range).
+  - H6 **READ + FLOWN:** +0x48C is 3 at TAB (first call), 4 relative lock,
+    0 at exit; mirrored from a shared record, so watch it, never write it.
+  - H7 **CONFIRMED F0:** steered in, the camera stops at local (0, 1.70,
+    0.70); the first locked turn pushed it out to 0.93, so the commander's
+    body collides with it. 0a-2 finds that collision step.
 - **Ruled out:**
   - Counting presses as the source of truth, because it has no origin
     (6ac.6d), and the free camera can be moved by hand after the preset is
     chosen, which no count can see.
-  - Driving the camera with synthetic mouse input (SendInput), because the
-    head-steer probe on `claude/headlook-functionality-9bada8` moved the
-    camera zero at both 200 and 5000 counts.
-  - The branch's draw-count ownership test as proof a head is yours,
-    because it cannot tell yours from another of the same mesh when yours
-    is out of shot (review below).
+  - Synthetic mouse input (SendInput), because the head-steer probe moved
+    the camera zero at 200 and 5000 counts.
+  - The branch's draw-count test as proof a head is yours, because it
+    cannot tell yours from another of the same mesh with yours out of shot.
+  - I2's 5376-block fingerprint as the commander's position, because in F0
+    its translation tracked the free camera's own origin within 0.01-0.09
+    m; the commander's frame comes from I3 (world with local taken out).
 - **Set aside, not flown:** writing the origin inside the refresh detour at
-  `+0x592200`. The culling view (render context +0x40, frustum planes) is
-  built upstream of that call (design-occlusion-culling-2026-09-22.md), and
-  6s.9 saw holes and body culling from a downstream move.
-- **Branch and scope (Sean, 2026-10-07):** this work stays on
-  `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
-  old Explorer Cam route entirely; deleting the old route is authorized
-  (Phase 3).
-- **Next:** flight F0 on FRONTIER. 2d103d84 is installed and verified there
-  (2026-10-07 17:22). The live ini has `head_offset_gate = 0`, so the old
-  route cannot move the camera, and `explorer_cam_probe = on`; set the probe
-  off after F0. The log prefixes to grep are in the last section.
-- **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off)
-  switches on all three 0b instruments, and the VR camera census with them.
-  Removed when the arc closes. Any other key Phase 0 adds is listed here.
+  `+0x592200`; the culling view is built upstream of it
+  (design-occlusion-culling-2026-09-22.md), and 6s.9 saw holes from that.
+- **F0 FLOWN** on Frontier, 2d103d84, `edvr_gfx_20261007_172543.log`,
+  training scenario; findings at the end. Frontier's ini: probe off again,
+  `head_offset_gate = 0`.
+- **Next:** 0a-2 (static): the update's collision step and when its camera
+  blob is consumed; then Phase 1 places the camera past the collision.
+- **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off;
+  all three 0b instruments plus the VR camera census). Removed at arc close.
 
 ## Why today's Explorer Cam is half-baked
 
@@ -394,3 +387,34 @@ game is written. Every line starts `explorer cam probe`; F0 greps these:
 Yaw and pitch assume view x right, y up, z forward (unmeasured); the 3x3 is
 logged too, so F0 can recompute. The hook forwards four integer registers
 and snapshots after the original returns.
+## 2026-10-07 F0 flown: the free camera, measured
+
+Frontier, build v0.18.3-13-g2d103d84 (log version line checked),
+`edvr_gfx_20261007_172543.log`, the on-foot training scenario. Parsed with
+a scratch script over the `explorer cam probe` lines. Commander-local axes
+as measured: +y up, +z the way the commander faces.
+
+- **Hook.** Armed, 28/28 bytes. It saw no call before TAB, then one
+  activity on one thread (56076), called once per frame: 9,229 calls over
+  frames 12,535 to 21,764. No faults, drops or stale lines.
+- **State byte.** 3 at TAB, 3->4 at the relative lock, 4->3, 3->4, 4->0 at
+  exit; 5 (world lock) never appeared. The activity's first call is a
+  usable entry signal.
+- **Preset 0.** It opens at local (0, 1.50, 1.90), facing back at the
+  commander, the selfie Sean described.
+- **H7.** Steered in by hand, the camera stopped at local (±0.02, 1.70,
+  0.70). Sean saw it stop about 0.25 m in front of his face.
+- **H1.** Locked, local stayed at (-0.024, 1.705, 0.934), bit-identical
+  over 60 s, while the commander's root moved about 15 m and its frame
+  yawed by up to 166 degrees with zero tilt. Only once did local change
+  under the lock: from 0.70 to 0.93 at 17:28:29-31, during the first turn
+  after a walk, with the root standing still. That is the body pushing the
+  camera, not a radius.
+- **I2.** Its "nearest root" equals the free camera's world origin within
+  0.01-0.09 m (one second late while moving), so it is not the commander;
+  ruled out in Status.
+- **I1.** Kind 5 (the eyes, about 63 calls a frame) sits at about the
+  render origin, so the render frame is camera-relative. Kind 3 appeared in
+  only 10 of 105 seconds. No census camera matched the free camera's
+  world origin directly; the I3 world frame is the game's, not the
+  render's.
