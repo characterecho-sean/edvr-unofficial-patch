@@ -36,23 +36,24 @@
   the installer skips it and Elite stays on its stock VR path. Four changes
   first (section 10); no F8, AA, flash fix or Explorer Cam without the runtime;
   the first build needs a flight on a stock runtime.
-- **Next:** checkpoint `3c0783e8` is pushed. Main `d6ecc252` merges cleanly;
-  the combined tree passes all 149 jobs and installer checks, six fresh-child
-  UI forwarder cases, 16,279 held-restore checks and all 17 scoped assembly
-  gates. V2 preserves V1 and the 128-site CPU limit. UI proves one D-only
-  composed path; the held boundary's machine paths are measured, not runtime
-  timing. Domain-entry/frame/lifecycle restoration, runtime-caller cost and
-  full coverage remain open. Keep the flight pair frozen: `7bbe7d90` control
-  and `6c63f6aa` candidate. Both October 7 flights match their
-  builds/environment and exit cleanly; Sean reports no visual changes. NV-on
-  sampled hook time per timed draw is 15.0% lower; other CPU ranges overlap.
-  Carrier DLSS/NV-off EDVR GPU cost is 2.9% higher, its median above the
-  control range. Draw counts differ and the on-foot source has 4.175% more
-  pixels. Attribution/non-regression stay open. Finish coverage and selectors
-  offline before another flight. Whole-ladder actions remain open. Replay
-  retains 482.4 MiB when enabled, none when off; NV blur reproduces on
-  `14a7ff70`. Temporary key: `advanced.draw_replay` (off); removal requires
-  Scope control. No Phase 1 acceptance, Phase 2 or shipping approval.
+- **Next:** `37951e9f` integrates main `d6ecc252` and is pushed. The NV
+  precedence slice passes 32 fresh-child cases, the six UI cases, all 149 build
+  jobs and installer checks, and all 17 fresh scoped assembly gates. V2
+  preserves V1 and the 128-site CPU limit. UI proves one D-only composed path;
+  NV uses typed X forwarding spies and real registered Begin/End operations.
+  Held-boundary and caller machine paths are measured, not runtime timing.
+  Domain/frame/lifecycle accounting, held-boundary frame cost and full coverage
+  remain open. Keep the flight pair frozen: `7bbe7d90` control and `6c63f6aa`
+  candidate. Both October 7 flights match their builds/environment and exit
+  cleanly; Sean reports no visual changes. NV-on sampled hook time per timed
+  draw is 15.0% lower; other CPU ranges overlap. Carrier DLSS/NV-off EDVR GPU
+  cost is 2.9% higher, its median above the control range. Draw counts differ
+  and the on-foot source has 4.175% more pixels. Attribution/non-regression
+  stay open. Finish coverage and selectors offline before another flight.
+  Whole-ladder actions remain open. Replay retains 482.4 MiB when enabled, none
+  when off; NV blur reproduces on `14a7ff70`. Temporary key:
+  `advanced.draw_replay` (off); removal requires Scope control. No Phase 1
+  acceptance, Phase 2 or shipping approval.
 - **Ruled out while designing:** loading every DLL found in a folder (DLL
   planting; the installer's receipts already know what it installed), a stable
   ABI for first-party plugins (they ship with the core; freezing their
@@ -3107,3 +3108,84 @@ flags without swapping sources. Its first diagnostic parser fails closed on two
 indirect jumps (offsets `0xe3` and `0x1e0`); caller-path machine cost remains
 unproved while the mid-tier reviewer resolves their actual targets. No
 production change follows from that diagnostic failure.
+
+Both indirect jumps resolve to internal image-relative switch tables. The
+repaired parser separates 72 table-data bytes from instructions, enumerates
+their exact targets and represents the bounded overlay loop explicitly. Eleven
+negative controls reject changed bounds/targets/loop and mislabeled return
+paths. A body-only pair uses the immutable `f11d6e59` caller inside current
+main's surrounding source and headers, compiled sequentially at one ignored
+path with identical flags/version. Source prefix/suffix, headers, compiler
+input, wrapper and fresh listing pins all verify; tracked source is unchanged.
+
+The caller grows from 672 bytes/167 records to 724/181; stack allocation stays
+80 and table bytes stay 72. With overlay inactive, pending-false is thirty
+records/94 bytes/no calls in both. Owner refusal is 35/119/two calls, null
+context 43/156/two, foreign context 46/174/three in both. Callee order is
+unchanged, but exact quiet-path bytes fail equality: register allocation and
+return-branch displacements differ. Matching counts are not overhead proof.
+OtherDraw's complete caller is one record/five bytes smaller and each other
+flush cause one record/one byte smaller, excluding callee bodies. The new EV
+boundary still adds its own work to OtherDraw.
+
+The copied current and original-path current have identical encoded bytes and
+181 instruction records. Eight raw operand names differ through the compiler's
+anonymous-namespace seed (six callees/two data references); these remain
+visible and are not normalized away. Exact caller-byte and performance
+acceptance stay false. No production compensation follows from these static
+diagnostics.
+
+### Night Vision pilot precedence, 2026-10-07
+
+The next bounded gate enables actual registered cockpit operations in the
+full-classifier predicate seam, which previously forced dispatch off. Fresh
+children compare literal frozen NV hashes/shape, winners, callback tuples and
+actions for common foreign context, eye-range preemption, offscreen skip and
+fallthrough, the NV claim, a later X6 PanelDistance claim, shader mismatch and
+mode-off. The oracle must not derive expectations from manifest helpers. Each
+case runs with/without tracing and API sampling. No production capture or hot
+path change is needed.
+
+Ruled out: simultaneous NV and PanelDistance eligibility at X240, because the
+panel predicate refuses draw counts above 64. X6 instead proves NV's shape miss
+falls through to the actual later panel claim. Missing PS b1/b2 makes actual NV
+Begin decline replacement safely; this gate targets classification, real plugin
+dispatch and forwarding/state restoration. Existing NV rendering rigs remain
+the shader/pixel evidence. Live failed-mode coverage stays in the dispatch
+matrix. This does not close whole-ladder/actions or Phase 1 acceptance.
+
+The first focused compile fails: the new plain site-capture facade references
+fields that NoTrace does not expose. Mid-tier review also finds a V1 window
+read beyond its two mask words, action-count reporting after trace shutdown
+clears the token, missing explicit eye dimensions and omitted cold descriptor
+reads in the Core ledger. These are fixture inputs/oracles, not rendering-fix
+hypotheses. The mid-tier repair keeps the plain visitor as NoTrace and observes
+canonical sites through a test-only seam. It reads the four-word V2 report,
+saves action counts before shutdown, supplies explicit 64x64 eye dimensions and
+checks Core's independent descriptor reads (zero for foreign context, three for
+ordinary eye paths, six for the offscreen rule).
+
+The repair also restores the existing D-only real-GPU callback guard. NV's X
+cases use saved-original typed spies, with start seven, base vertex minus three
+and start instance eleven. Actual registered NV claim/Begin/End still execute;
+the new fixture makes no NV pixel claim. Mode-off expects zero claim callbacks
+because the active mask excludes wantsDraws. Foreign context expects no trace
+actions even when capture is armed, because it fails the owner gate. Cleanup
+restores borrowed state, clears registry pointers and closes child handles.
+
+Once Elite is observed stopped, the repaired focused predicate rig passes (12.9
+seconds), including all 32 NV combinations and six existing UI children. The
+eight literal cases each run Trace/NoTrace and sampled/unsampled in fresh
+processes. Sampled NV records exactly three CockpitVisuals reads at sites
+18-20, other owners remain zero, and unsampled cases record no API notes. The
+oracle checks the literal winner, callback tuple, ordered actions and complete
+host/binding restoration; its negative controls reject changed expectations. It
+does not prove runtime note order or complete route accounting.
+
+Fresh production assembly comparison passes all 17 scoped gates, with all 15
+source swaps restored and 17 input pins unchanged. The full build then passes
+all 149 jobs, config/export checks and installer-resource verification; its
+receipt is `2b5e9829c8ec700d5c241b5dbbd6acc49652366c897e375d735727b06fe655f1`.
+The build shows no window and does not take focus. Steam files and settings are
+unchanged. Full-ladder coverage, domain/frame/lifecycle API accounting and
+performance attribution remain open; Phase 2 and shipping stay held.

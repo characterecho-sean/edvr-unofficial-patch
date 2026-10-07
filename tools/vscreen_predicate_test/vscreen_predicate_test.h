@@ -88,6 +88,17 @@ struct VScreenPanelDistanceApiTestInput final {
     // Test-only full Common+Eye selector traversal. Requires a real panel-size
     // SRV/CB binding and uses the injected Map callback for the terminal miss.
     bool fullClassifier = false;
+    // Test-only real cockpit plugin dispatch; use only in a fresh child because
+    // registry registration/configuration is process-lifetime state.
+    // Fresh-child NV classification uses typed X saved-original spies and
+    // actual cockpit Begin/End with null PS b1/b2; no NV GPU pixel oracle.
+    // issueRealDraw remains restricted to the existing D-only UI fixture.
+    bool cockpitPluginDispatch = false;
+    bool cockpitNightVisionModeOff = false;
+    bool retainDrawGateDemand = false;
+    std::uint32_t initialEyeDraw = 0;
+    bool eyeRangeSkip = false;
+    bool offscreenSkip = false;
     // Isolated-child UI composition transaction: execute the real eye/panel
     // classifier and forwarder with the configured UI layer enabled.
     bool composedUi = false;
@@ -100,6 +111,10 @@ struct VScreenPanelDistanceApiTestInput final {
     void* panelSrv = nullptr;
     void* eyeRtv = nullptr;
     void* hostDsv = nullptr;
+    void* cockpitVs = nullptr;
+    void* cockpitPs = nullptr;
+    std::uint64_t cockpitVsHash = 0;
+    std::uint64_t cockpitPsHash = 0;
     char kind = 'I';
     std::uint32_t drawCount = 3;
     std::uint32_t drawInstances = 1;
@@ -151,6 +166,10 @@ struct VScreenPanelDistanceApiTestResult final {
     void* drawDepthTargets[2]{};
     bool drawTargetsValid = true;
     bool eventOverflow = false;
+    std::uint32_t cockpitClaimCalls = 0;
+    std::uint32_t cockpitClaimValue = 0;
+    std::uint32_t cockpitBeginCalls = 0;
+    std::uint32_t cockpitEndCalls = 0;
     std::uint8_t eventCount = 0;
     std::uint8_t events[5]{};
     std::uint32_t mappedBytes = 0;

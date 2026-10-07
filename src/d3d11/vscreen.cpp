@@ -6650,6 +6650,61 @@ struct VScreenPanelDistanceResultCapture final {
 thread_local const VScreenPanelDistanceApiTestInput* t_panelDistanceApiInput = nullptr;
 thread_local VScreenPanelDistanceApiTestResult* t_panelDistanceApiResult = nullptr;
 
+struct VScreenCockpitOpsTestState final {
+    const EdvrPluginOps* actual = nullptr;
+    VScreenPanelDistanceApiTestResult* result = nullptr;
+};
+
+uint32_t cockpitOpsTestWantsDraws(void* raw) {
+    auto* state = static_cast<VScreenCockpitOpsTestState*>(raw);
+    return state->actual->wantsDraws(state->actual->state);
+}
+uint32_t cockpitOpsTestClaim(void* raw, const char* id, uint8_t kind,
+                             uint32_t count, uint32_t instances) {
+    auto* state = static_cast<VScreenCockpitOpsTestState*>(raw);
+    ++state->result->cockpitClaimCalls;
+    state->result->cockpitClaimValue = state->actual->claimDraw(
+        state->actual->state, id, kind, count, instances);
+    return state->result->cockpitClaimValue;
+}
+uint32_t cockpitOpsTestClaimObserved(void* raw, const char* id, uint8_t kind,
+                                     uint32_t count, uint32_t instances,
+                                     EdvrPluginClaimObservation* observation) {
+    auto* state = static_cast<VScreenCockpitOpsTestState*>(raw);
+    ++state->result->cockpitClaimCalls;
+    state->result->cockpitClaimValue = state->actual->claimDrawObserved(
+        state->actual->state, id, kind, count, instances, observation);
+    return state->result->cockpitClaimValue;
+}
+void cockpitOpsTestBegin(void* raw, const char* id, ID3D11DeviceContext* context) {
+    auto* state = static_cast<VScreenCockpitOpsTestState*>(raw);
+    ++state->result->cockpitBeginCalls;
+    state->actual->begin(state->actual->state, id, context);
+}
+void cockpitOpsTestEnd(void* raw, const char* id, ID3D11DeviceContext* context) {
+    auto* state = static_cast<VScreenCockpitOpsTestState*>(raw);
+    ++state->result->cockpitEndCalls;
+    state->actual->end(state->actual->state, id, context);
+}
+void cockpitOpsTestShutdown(void* raw) {
+    auto* state = static_cast<VScreenCockpitOpsTestState*>(raw);
+    state->actual->shutdown(state->actual->state);
+}
+
+bool registerCockpitOpsTest(VScreenCockpitOpsTestState& state,
+                            EdvrPluginOps& wrapped) {
+    state.actual = cockpitVisualsPluginOps();
+    wrapped = *state.actual;
+    wrapped.state = &state;
+    wrapped.wantsDraws = &cockpitOpsTestWantsDraws;
+    wrapped.claimDraw = &cockpitOpsTestClaim;
+    wrapped.claimDrawObserved = &cockpitOpsTestClaimObserved;
+    wrapped.begin = &cockpitOpsTestBegin;
+    wrapped.end = &cockpitOpsTestEnd;
+    wrapped.shutdown = &cockpitOpsTestShutdown;
+    return pluginRegistryRegister(&wrapped);
+}
+
 void panelDistanceApiTestEvent(VScreenPanelDistanceApiTestEvent event) noexcept {
     auto* result = t_panelDistanceApiResult;
     if (!result) return;
@@ -7565,8 +7620,8 @@ bool vScreenPanelDistanceApiTransactionTest(
     const VScreenPanelDistanceApiTestInput& input,
     VScreenPanelDistanceApiTestResult* result) noexcept {
     if (!result || !input.context || !input.ownerContext ||
-        (input.issueRealDraw && (input.kind != 'D' || input.drawInstances != 1 ||
-                                 input.drawArgs.base < 0)) ||
+        (input.issueRealDraw &&
+         (input.kind != 'D' || input.drawInstances != 1 || input.drawArgs.base < 0)) ||
         input.shadowBytes > sizeof(input.shadow) ||
         static_cast<std::uint64_t>(input.distanceIndex) * sizeof(float) + sizeof(float) >
             input.shadowBytes ||
@@ -7574,6 +7629,10 @@ bool vScreenPanelDistanceApiTransactionTest(
          (!input.mappedStorage || input.mappedStorageBytes < input.shadowBytes)) ||
         (input.fullClassifier && (!input.panelSrv || !input.eyeRtv ||
                                   !input.compositeCb || !input.ourCb)) ||
+        (input.cockpitPluginDispatch && (!input.fullClassifier || !input.cockpitVs ||
+                                         !input.cockpitPs || !input.cockpitVsHash ||
+                                         !input.cockpitPsHash ||
+                                         !input.uiEyeWidth || !input.uiEyeHeight)) ||
         (input.composedUi && (!input.fullClassifier || !input.issueRealDraw ||
                               input.kind != 'D' || input.drawInstances != 1 ||
                               !input.hostDsv ||
@@ -7585,15 +7644,28 @@ bool vScreenPanelDistanceApiTransactionTest(
     static State fixture{};
     const uint32_t priorEyeW = fixture.eyeW;
     const uint32_t priorEyeH = fixture.eyeH;
+    const uint32_t priorEyeDraws = fixture.eyeDrawsThisFrame;
+    const uint32_t priorCensusRangeCount = fixture.censusSkipRangeCount;
+    State::SkipRange priorCensusRanges[4]{};
+    std::memcpy(priorCensusRanges, fixture.censusSkipRange, sizeof(priorCensusRanges));
+    const uint32_t priorCensusOffCount = fixture.censusSkipOffCount;
+    State::OffSkip priorCensusOff[4]{};
+    std::memcpy(priorCensusOff, fixture.censusSkipOff, sizeof(priorCensusOff));
+    const bool priorPluginDispatch = fixture.pluginDispatchEnabled;
+    const bool priorDrawGateDemand = drawGateWanted();
     const bool priorIntroCurve = fixture.introCurveThisDraw;
     const bool priorCurve = fixture.curveThisDraw;
     fixture.ownerCtx = input.ownerContext;
-    fixture.pluginDispatchEnabled = false;
+    fixture.pluginDispatchEnabled = input.cockpitPluginDispatch;
     fixture.rtv0Eye = false;
     // Restoring the borrowed binding slot makes its next test generation
     // repeat. Invalidate the paired answer before classifying the next RTV.
     fixture.rtv0EyeGen = 0;
-    fixture.eyeDrawsThisFrame = 0;
+    fixture.eyeDrawsThisFrame = input.initialEyeDraw;
+    fixture.censusSkipRangeCount = input.eyeRangeSkip ? 1u : 0u;
+    fixture.censusSkipRange[0] = {1u, 1u};
+    fixture.censusSkipOffCount = input.offscreenSkip ? 1u : 0u;
+    fixture.censusSkipOff[0] = {256u, 128u, 'X', 240u};
     fixture.fssHealOn = false;
     fixture.quadSkipArmed = false;
     fixture.curveThisDraw = false;
@@ -7650,9 +7722,13 @@ bool vScreenPanelDistanceApiTransactionTest(
     const auto psSrv0Slot = static_cast<std::size_t>(BindSlot::PsSrv0);
     const auto vsCb0Slot = static_cast<std::size_t>(BindSlot::VsCb0);
     const auto rtv0Slot = static_cast<std::size_t>(BindSlot::Rtv0);
+    const auto vsSlot = static_cast<std::size_t>(BindSlot::Vs);
+    const auto psSlot = static_cast<std::size_t>(BindSlot::Ps);
     const auto priorPsSrv0 = detail::g_bindingSlots[psSrv0Slot];
     const auto priorVsCb0 = detail::g_bindingSlots[vsCb0Slot];
     const auto priorRtv0 = detail::g_bindingSlots[rtv0Slot];
+    const auto priorVs = detail::g_bindingSlots[vsSlot];
+    const auto priorPs = detail::g_bindingSlots[psSlot];
     const auto priorReplayToken = t_activeDrawReplayToken;
     const auto priorLegacyInterestMask = input.fullClassifier
         ? detail::g_legacyDrawInterestMask.exchange(0, std::memory_order_relaxed)
@@ -7665,6 +7741,40 @@ bool vScreenPanelDistanceApiTransactionTest(
     auto* priorResult = t_panelDistanceApiResult;
     t_panelDistanceApiInput = &input;
     t_panelDistanceApiResult = result;
+    VScreenCockpitOpsTestState cockpitState{};
+    EdvrPluginOps wrappedCockpitOps{};
+    bool cockpitRegistered = false;
+    if (input.cockpitPluginDispatch) {
+        cockpitState.result = result;
+        Config& config = Config::get();
+        config.set("fix.night_vision_stability",
+                   input.cockpitNightVisionModeOff ? "off" : "on");
+        config.set("experimental.night_vision_realistic", "off");
+        cockpitRegistered = registerCockpitOpsTest(cockpitState, wrappedCockpitOps);
+        if (!cockpitRegistered) {
+            t_panelDistanceApiInput = priorInput;
+            t_panelDistanceApiResult = priorResult;
+            fixture.eyeW = priorEyeW;
+            fixture.eyeH = priorEyeH;
+            fixture.eyeDrawsThisFrame = priorEyeDraws;
+            fixture.censusSkipRangeCount = priorCensusRangeCount;
+            std::memcpy(fixture.censusSkipRange, priorCensusRanges, sizeof(priorCensusRanges));
+            fixture.censusSkipOffCount = priorCensusOffCount;
+            std::memcpy(fixture.censusSkipOff, priorCensusOff, sizeof(priorCensusOff));
+            fixture.pluginDispatchEnabled = priorPluginDispatch;
+            detail::g_legacyDrawInterestMask.store(priorLegacyInterestMask,
+                                                   std::memory_order_relaxed);
+            draw_ladder_trace::detail::g_captureActive.store(
+                priorTraceCapture, std::memory_order_relaxed);
+            return false;
+        }
+        pluginRegistryConfigure(&config);
+    }
+    if (input.retainDrawGateDemand) drawGateSet(true);
+    if (input.cockpitPluginDispatch) {
+        fixture.eyeW = input.uiEyeWidth;
+        fixture.eyeH = input.uiEyeHeight;
+    }
     result->finalBoundCb = input.compositeCb;
     detail::g_uiLayerIssueBlocked = false;
     detail::g_objectProbeLedgerOn = false;
@@ -7700,6 +7810,10 @@ bool vScreenPanelDistanceApiTransactionTest(
         ++detail::g_bindingSlots[vsCb0Slot].gen;
         detail::g_bindingSlots[rtv0Slot].ptr = input.eyeRtv;
         ++detail::g_bindingSlots[rtv0Slot].gen;
+        if (input.cockpitPluginDispatch) {
+            bindingSetShader(BindSlot::Vs, input.cockpitVs, input.cockpitVsHash);
+            bindingSetShader(BindSlot::Ps, input.cockpitPs, input.cockpitPsHash);
+        }
     }
     g_state = &fixture;
 
@@ -7719,9 +7833,22 @@ bool vScreenPanelDistanceApiTransactionTest(
                     capture, input.context, input.kind, input.drawCount,
                     input.drawInstances, args);
             } else {
-                decision = beginPanelOverride<Trace, Cpu, Api>(
-                    trace, input.context, input.kind, input.drawCount,
-                    input.drawInstances, args);
+                // Observe site results without changing the production visitor's
+                // NoTrace policy or instantiating trace-only fact accessors.
+                VScreenDrawLadderVisitor<Trace, Api> visitor{
+                    &fixture, input.context, input.kind, input.drawCount,
+                    input.drawInstances, args, trace};
+                VScreenPanelDistanceResultCapture capture{result->siteResult};
+                if (draw_ladder::visitOrdered(draw_ladder::CommonSequence{}, visitor,
+                        visitor, capture, cpu) == draw_ladder::Flow::Continue) {
+                    if (fixture.rtv0Eye)
+                        draw_ladder::visitOrdered(draw_ladder::EyeSequence{}, visitor,
+                            visitor, capture, cpu);
+                    else
+                        draw_ladder::visitOrdered(draw_ladder::OffscreenSequence{}, visitor,
+                            visitor, capture, cpu);
+                }
+                decision = visitor.decision;
             }
         } else {
             VScreenDrawLadderVisitor<Trace, Api> visitor{
@@ -7780,6 +7907,13 @@ bool vScreenPanelDistanceApiTransactionTest(
 
     t_panelDistanceApiInput = priorInput;
     t_panelDistanceApiResult = priorResult;
+    if (cockpitRegistered) {
+        bindingSetShader(BindSlot::Vs, priorVs.ptr, priorVs.hash);
+        bindingSetShader(BindSlot::Ps, priorPs.ptr, priorPs.hash);
+        pluginRegistryRefreshShaderCandidates();
+    }
+    if (cockpitRegistered) pluginRegistryShutdown();
+    drawGateSet(priorDrawGateDemand);
     t_activeDrawReplayToken = priorReplayToken;
     g_state = priorState;
     t_uiDepthThisDraw = priorUiDepth;
@@ -7800,11 +7934,19 @@ bool vScreenPanelDistanceApiTransactionTest(
     detail::g_uiDepthStoodDown = priorDepthStoodDown;
     fixture.eyeW = priorEyeW;
     fixture.eyeH = priorEyeH;
+    fixture.eyeDrawsThisFrame = priorEyeDraws;
+    fixture.censusSkipRangeCount = priorCensusRangeCount;
+    std::memcpy(fixture.censusSkipRange, priorCensusRanges, sizeof(priorCensusRanges));
+    fixture.censusSkipOffCount = priorCensusOffCount;
+    std::memcpy(fixture.censusSkipOff, priorCensusOff, sizeof(priorCensusOff));
+    fixture.pluginDispatchEnabled = priorPluginDispatch;
     uiLayerPredicateTestSetTemporalInput(priorTestTemporal);
     if (input.fullClassifier) {
         detail::g_bindingSlots[psSrv0Slot] = priorPsSrv0;
         detail::g_bindingSlots[vsCb0Slot] = priorVsCb0;
         detail::g_bindingSlots[rtv0Slot] = priorRtv0;
+        detail::g_bindingSlots[vsSlot] = priorVs;
+        detail::g_bindingSlots[psSlot] = priorPs;
         detail::g_legacyDrawInterestMask.store(priorLegacyInterestMask,
                                                std::memory_order_relaxed);
     }

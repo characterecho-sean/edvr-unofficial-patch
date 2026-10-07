@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <cmath>
@@ -1319,6 +1320,69 @@ bool panelDrawActionsMatch(const VScreenPanelDistanceApiTestResult& result,
     return true;
 }
 
+bool nvForwardActionsMatch(const VScreenPanelDistanceApiTestResult& result,
+                           const VScreenPanelDistanceApiTestInput& input,
+                           bool replace, bool panel, bool skip) {
+    using namespace draw_ladder;
+    const std::uint32_t literalCount = panel ? 6u : 240u;
+    const bool literalInput = input.kind == 'X' && input.drawCount == literalCount &&
+        input.drawInstances == 1 && input.drawArgs.start == 7 &&
+        input.drawArgs.base == -3 && input.drawArgs.startInstance == 11;
+    const ActionId drawIds[] = {ActionId::kDrawBegin, ActionId::kOriginalDraw,
+                                ActionId::kDrawEnd};
+    const ActionPhase drawPhases[] = {ActionPhase::Begin, ActionPhase::Issue,
+                                      ActionPhase::End};
+    const ActionOutcome drawOutcomes[] = {ActionOutcome::Applied,
+        ActionOutcome::Applied, ActionOutcome::Applied};
+    const ActionId replaceIds[] = {ActionId::kDrawBegin, ActionId::kReplaceDraw,
+        ActionId::kOriginalDraw, ActionId::kReplaceDraw, ActionId::kDrawEnd};
+    const ActionPhase replacePhases[] = {ActionPhase::Begin, ActionPhase::Begin,
+        ActionPhase::Issue, ActionPhase::End, ActionPhase::End};
+    const ActionOutcome replaceOutcomes[] = {ActionOutcome::Applied,
+        ActionOutcome::Attempted, ActionOutcome::Applied, ActionOutcome::Applied,
+        ActionOutcome::Applied};
+    const ActionId panelIds[] = {ActionId::kDrawBegin, ActionId::kReplaceDraw,
+        ActionId::kOriginalDraw, ActionId::kReplaceDraw,
+        ActionId::kPanelConstantBufferRestore, ActionId::kDrawEnd};
+    const ActionPhase panelPhases[] = {ActionPhase::Begin, ActionPhase::Begin,
+        ActionPhase::Issue, ActionPhase::End, ActionPhase::Restore, ActionPhase::End};
+    const ActionOutcome panelOutcomes[] = {ActionOutcome::Applied,
+        ActionOutcome::Attempted, ActionOutcome::Applied, ActionOutcome::Applied,
+        ActionOutcome::Applied, ActionOutcome::Applied};
+    const ActionId skipIds[] = {ActionId::kDrawBegin, ActionId::kSwallowOriginal,
+                                ActionId::kDrawEnd};
+    const ActionPhase skipPhases[] = {ActionPhase::Begin, ActionPhase::Issue,
+                                      ActionPhase::End};
+    const ActionOutcome skipOutcomes[] = {ActionOutcome::Applied,
+        ActionOutcome::Applied, ActionOutcome::Applied};
+    const ActionId* ids = panel ? panelIds : skip ? skipIds : replace ? replaceIds : drawIds;
+    const ActionPhase* phases = panel ? panelPhases : skip ? skipPhases : replace ? replacePhases : drawPhases;
+    const ActionOutcome* outcomes = panel ? panelOutcomes : skip ? skipOutcomes : replace ? replaceOutcomes : drawOutcomes;
+    const std::uint16_t size = panel ? 6 : skip || !replace ? 3 : 5;
+    if (!result.token.valid() || draw_ladder_trace::actionCountForTest(result.token) != size)
+        return false;
+    for (std::uint16_t i = 0; i < size; ++i) {
+        std::uint16_t id = 0;
+        ActionRecord record{};
+        if (!draw_ladder_trace::readActionForTest(result.token, i, &id, &record) ||
+            id != static_cast<std::uint16_t>(ids[i]) || record.phase != phases[i] ||
+            record.outcome != outcomes[i] ||
+            record.call != DrawCallKind::DrawIndexedInstanced ||
+            record.count != literalCount || record.instances != 1 ||
+            record.start != 7 || record.startInstance != 11 || record.baseVertex != -3 ||
+            record.flags != (id == static_cast<std::uint16_t>(ActionId::kReplaceDraw)
+                ? static_cast<std::uint16_t>(panel ? 1u : 6u) : 0u)) return false;
+        if (id == static_cast<std::uint16_t>(ActionId::kOriginalDraw)) {
+            if (record.issueCount != 1) return false;
+        } else if (record.issueCount != 0) {
+            return false;
+        }
+        if (id == static_cast<std::uint16_t>(ActionId::kReplaceDraw) &&
+            record.flags != (panel ? 1u : 6u)) return false;
+    }
+    return literalInput;
+}
+
 bool testFullClassifierTerminalPath(ID3D11Device* device,
                                     ID3D11DeviceContext* immediate) {
     using draw_ladder::SiteId;
@@ -2141,6 +2205,335 @@ bool runUiReissueChild(bool traceEnabled, bool apiSample, bool refusal) {
     return true;
 }
 
+enum class NvPrecedenceCase : unsigned {
+    NightVision, ForeignContext, EyeRange, OffscreenRule,
+    OffscreenNone, PanelDistance, ShaderMiss, ModeOff
+};
+
+struct NvExpected final {
+    std::int16_t winner;
+    std::int16_t verdict;
+    std::int16_t subsite;
+    std::uint32_t claim;
+    std::uint32_t claimCalls;
+    std::uint32_t beginCalls;
+    std::uint32_t endCalls;
+    bool replace;
+    bool panel;
+    bool skip;
+};
+
+// Literal selector oracle from the requested case matrix. Keep it independent
+// from dispatch helpers, the manifest, and the visitor's returned decision.
+constexpr NvExpected kNvExpected[] = {
+    {50, 6, 0, 0x1001, 1, 1, 1, true,  false, false},
+    {2,  0, 0, 0,      0, 0, 0, false, false, false},
+    {49, 2, 0, 0,      0, 0, 0, false, false, true },
+    {24, 2, 0, 0,      0, 0, 0, false, false, true },
+    {28, 0, 0, 0,      0, 0, 0, false, false, false},
+    {66, 1, 0, 0,      0, 0, 0, false, true,  false},
+    {67, 0, 0, 0,      0, 0, 0, false, false, false},
+    {68, 0, 1, 0,      0, 0, 0, false, false, false},
+};
+
+bool nvObservationMatches(unsigned rawCase, const VScreenPanelDistanceApiTestInput& input,
+                          const VScreenPanelDistanceApiTestResult& result) {
+    if (rawCase >= 8u) return false;
+    const NvExpected expected = kNvExpected[rawCase];
+    const std::uint32_t literalCount = expected.panel ? 6u : 240u;
+    const std::uint64_t literalPs = 0xF786D34B5E118D5Eull +
+        (rawCase == static_cast<unsigned>(NvPrecedenceCase::ShaderMiss) ? 1ull : 0ull);
+    return input.kind == 'X' && input.drawCount == literalCount &&
+        input.drawInstances == 1 && input.drawArgs.start == 7 &&
+        input.drawArgs.base == -3 && input.drawArgs.startInstance == 11 &&
+        input.cockpitPluginDispatch &&
+        input.cockpitVsHash == 0xFCF7BD2896751D96ull && input.cockpitPsHash == literalPs &&
+        result.winner == expected.winner && result.verdict == expected.verdict &&
+        result.siteResult.subsite == expected.subsite &&
+        result.cockpitClaimValue == expected.claim &&
+        result.cockpitClaimCalls == expected.claimCalls &&
+        result.cockpitBeginCalls == expected.beginCalls &&
+        result.cockpitEndCalls == expected.endCalls;
+}
+
+bool nvObservationNegativeControls() {
+    VScreenPanelDistanceApiTestInput input{};
+    VScreenPanelDistanceApiTestResult actual{};
+    input.kind = 'X'; input.drawCount = 240; input.drawInstances = 1;
+    input.drawArgs = {7, -3, 11}; input.cockpitVsHash = 0xFCF7BD2896751D96ull;
+    input.cockpitPsHash = 0xF786D34B5E118D5Eull;
+    input.cockpitPluginDispatch = true;
+    actual.winner = 50; actual.verdict = 6; actual.siteResult.subsite = 0;
+    actual.cockpitClaimValue = 0x1001; actual.cockpitClaimCalls = 1;
+    actual.cockpitBeginCalls = 1; actual.cockpitEndCalls = 1;
+    if (!nvObservationMatches(0, input, actual)) return false;
+    auto wrongWinner = actual; wrongWinner.winner = 49;
+    auto missingClaim = actual; missingClaim.cockpitClaimCalls = 0;
+    auto missingBegin = actual; missingBegin.cockpitBeginCalls = 0;
+    auto missingEnd = actual; missingEnd.cockpitEndCalls = 0;
+    if (nvObservationMatches(0, input, wrongWinner) ||
+        nvObservationMatches(1, input, actual) ||
+        nvObservationMatches(0, input, missingClaim) ||
+        nvObservationMatches(0, input, missingBegin) ||
+        nvObservationMatches(0, input, missingEnd)) return false;
+    input.drawCount = 6;
+    actual.winner = 66; actual.verdict = 1; actual.cockpitClaimValue = 0;
+    actual.cockpitClaimCalls = actual.cockpitBeginCalls = actual.cockpitEndCalls = 0;
+    if (!nvObservationMatches(5, input, actual)) return false;
+    input.drawCount = 240; // Wrong shape must fail the literal PanelDistance case.
+    if (nvObservationMatches(5, input, actual)) return false;
+    input.cockpitPsHash = 0xF786D34B5E118D5Eull + 1ull;
+    actual.winner = 67; actual.verdict = 0; actual.siteResult.subsite = 0;
+    if (!nvObservationMatches(6, input, actual)) return false;
+    input.cockpitPsHash = 0xF786D34B5E118D5Eull; // Missing +1 hash mismatch must fail.
+    return !nvObservationMatches(6, input, actual);
+}
+
+bool runNvPrecedenceChild(unsigned rawCase, bool traceEnabled, bool apiSample) {
+    if (rawCase >= 8u) return false;
+    const auto which = static_cast<NvPrecedenceCase>(rawCase);
+    const NvExpected expected = kNvExpected[rawCase];
+    UiCaseRig rig{};
+    if (!setupUiCaseRig(&rig)) return false;
+    struct NvCleanup final {
+        ID3D11DeviceContext* context;
+        std::wstring tracePath;
+        bool done = false;
+        void run() {
+            if (done) return;
+            done = true;
+            edvr::draw_ladder_trace::shutdown();
+            edvrPluginCostShutdown();
+            for (std::size_t i=0;i<static_cast<std::size_t>(edvr::BindSlot::Count);++i)
+                edvr::detail::g_bindingSlots[i] = edvr::detail::BindingSlot{};
+            context->ClearState();
+            if (!tracePath.empty()) DeleteFileW(tracePath.c_str());
+        }
+        ~NvCleanup() { run(); }
+    } cleanup{rig.context.Get()};
+    ComPtr<ID3D11RenderTargetView> offscreenRtv;
+    if (which == NvPrecedenceCase::OffscreenRule || which == NvPrecedenceCase::OffscreenNone) {
+        UiCaseTexture offscreen{};
+        if (!makeUiCaseTexture(rig.device.Get(), 256, 128, D3D11_BIND_RENDER_TARGET,
+                               &offscreen)) return false;
+        offscreenRtv = offscreen.rtv;
+        ID3D11RenderTargetView* rt = offscreenRtv.Get();
+        rig.context->OMSetRenderTargets(1, &rt, nullptr);
+        const D3D11_VIEWPORT vp{0, 0, 256.0f, 128.0f, 0, 1};
+        rig.context->RSSetViewports(1, &vp);
+        edvr::bindingSet(edvr::BindSlot::Rtv0, offscreenRtv.Get());
+    }
+    ComPtr<ID3D11DeviceContext> foreignContext;
+    if (which == NvPrecedenceCase::ForeignContext) {
+        if (FAILED(rig.device->CreateDeferredContext(0, &foreignContext))) return false;
+    }
+    D3D11_BUFFER_DESC cbDesc{};
+    cbDesc.ByteWidth = 16; cbDesc.Usage = D3D11_USAGE_DEFAULT;
+    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    ComPtr<ID3D11Buffer> compositeCb, overrideCb;
+    if (!uiCaseSucceeded(rig.device->CreateBuffer(&cbDesc, nullptr, &compositeCb), "nv-host-cb") ||
+        !uiCaseSucceeded(rig.device->CreateBuffer(&cbDesc, nullptr, &overrideCb), "nv-override-cb")) return false;
+
+    wchar_t temp[MAX_PATH + 1]{};
+    if (!GetTempPathW(MAX_PATH, temp)) return false;
+    const std::wstring tracePath = std::wstring(temp) + L"edvr_gfx_nv_precedence_" +
+        std::to_wstring(GetCurrentProcessId()) + L".log";
+    cleanup.tracePath = tracePath;
+    if (traceEnabled) {
+        HANDLE f = CreateFileW(tracePath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                               FILE_ATTRIBUTE_TEMPORARY, nullptr);
+        if (f == INVALID_HANDLE_VALUE) return false;
+        CloseHandle(f);
+        if (!armCapture(tracePath)) { DeleteFileW(tracePath.c_str()); return false; }
+    }
+    edvrPluginCostShutdown();
+    LARGE_INTEGER frequency{};
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return false;
+    edvrPluginCostConfigure(1u, static_cast<std::uint64_t>(frequency.QuadPart));
+    edvrPluginCostSetOwnerContext(rig.context.Get());
+    EdvrPluginCostWindowV1 discarded{};
+    edvrPluginCostFrameBoundary(0, 0, 0, apiSample ? 1 : 0, 0, &discarded);
+
+    const edvr::RuntimeProfile priorProfile = edvr::g_runtimeProfile;
+    edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
+    auto& config = edvr::Config::get();
+    const std::string priorStability = config.getString("fix.night_vision_stability", "on");
+    const std::string priorRealistic = config.getString("experimental.night_vision_realistic", "off");
+    config.set("fix.night_vision_stability",
+        which == NvPrecedenceCase::ModeOff ? "off" : "on");
+    config.set("experimental.night_vision_realistic", "off");
+
+    VScreenPanelDistanceApiTestInput input{};
+    input.context = which == NvPrecedenceCase::ForeignContext
+        ? foreignContext.Get() : rig.context.Get();
+    input.ownerContext = rig.context.Get();
+    input.traceEnabled = traceEnabled; input.cpuSample = false;
+    input.distanceEnabled = which == NvPrecedenceCase::PanelDistance ||
+                            which == NvPrecedenceCase::ModeOff;
+    input.fullClassifier = true; input.cockpitPluginDispatch = true;
+    input.uiEyeWidth = kUiEyeW; input.uiEyeHeight = kUiEyeH;
+    input.cockpitNightVisionModeOff = which == NvPrecedenceCase::ModeOff;
+    input.retainDrawGateDemand = which == NvPrecedenceCase::ModeOff;
+    input.eyeRangeSkip = which == NvPrecedenceCase::EyeRange;
+    input.offscreenSkip = which == NvPrecedenceCase::OffscreenRule;
+    // The typed saved-original spy proves X forwarding. The shared GPU
+    // callback is D-only; NV replacement pixels belong to night_vision_test.
+    input.issueRealDraw = false;
+    input.panelSrv = which == NvPrecedenceCase::ModeOff
+        ? static_cast<void*>(rig.eye.srv.Get())
+        : static_cast<void*>(rig.panel.srv.Get());
+    input.eyeRtv = (which == NvPrecedenceCase::OffscreenRule ||
+                    which == NvPrecedenceCase::OffscreenNone)
+        ? static_cast<void*>(offscreenRtv.Get()) : static_cast<void*>(rig.eye.rtv.Get());
+    input.hostDsv = rig.dsv.Get(); input.compositeCb = compositeCb.Get();
+    input.ourCb = overrideCb.Get();
+    input.cockpitVs = rig.vs.Get(); input.cockpitPs = rig.ps.Get();
+    input.cockpitVsHash = 0xFCF7BD2896751D96ull;
+    input.cockpitPsHash = 0xF786D34B5E118D5Eull +
+        (which == NvPrecedenceCase::ShaderMiss ? 1ull : 0ull);
+    input.kind = 'X'; input.drawCount = which == NvPrecedenceCase::PanelDistance ? 6u : 240u;
+    input.drawInstances = 1; input.drawArgs = {7, -3, 11};
+    input.shadowBytes = 16; input.distanceIndex = 3; input.distanceScale = 1.5f;
+    float mapped[4] = {1, 2, 3, 4};
+    input.mappedStorage = reinterpret_cast<std::uint8_t*>(mapped);
+    input.mappedStorageBytes = sizeof(mapped);
+    ID3D11Buffer* hostCb = compositeCb.Get();
+    rig.context->VSSetConstantBuffers(0, 1, &hostCb);
+    edvr::bindingSet(edvr::BindSlot::VsCb0, hostCb);
+    ID3D11ShaderResourceView* hostSrv = static_cast<ID3D11ShaderResourceView*>(input.panelSrv);
+    rig.context->PSSetShaderResources(0, 1, &hostSrv);
+    if (foreignContext.Get()) {
+        ID3D11RenderTargetView* foreignRt = rig.eye.rtv.Get();
+        ID3D11DepthStencilView* foreignDs = rig.dsv.Get();
+        foreignContext->OMSetRenderTargets(1, &foreignRt, foreignDs);
+        foreignContext->VSSetShader(rig.vs.Get(), nullptr, 0);
+        foreignContext->PSSetShader(rig.ps.Get(), nullptr, 0);
+        foreignContext->PSSetShaderResources(0, 1, &hostSrv);
+        foreignContext->VSSetConstantBuffers(0, 1, &hostCb);
+        const D3D11_VIEWPORT foreignVp{0, 0, static_cast<float>(kUiEyeW),
+                                      static_cast<float>(kUiEyeH), 0, 1};
+        foreignContext->RSSetViewports(1, &foreignVp);
+    }
+    if (which == NvPrecedenceCase::OffscreenRule || which == NvPrecedenceCase::OffscreenNone)
+        edvr::bindingSet(edvr::BindSlot::Dsv0, nullptr);
+    ID3D11Buffer* beforeNvCb[2]{};
+    rig.context->PSGetConstantBuffers(1, 2, beforeNvCb);
+    const bool nvCbSlotsInitiallyNull = !beforeNvCb[0] && !beforeNvCb[1];
+    for (ID3D11Buffer* cb : beforeNvCb) if (cb) cb->Release();
+    const std::size_t bindingCount = static_cast<std::size_t>(edvr::BindSlot::Count);
+    std::vector<edvr::detail::BindingSlot> bindingsBefore(bindingCount);
+    for (std::size_t i = 0; i < bindingCount; ++i)
+        bindingsBefore[i] = edvr::detail::g_bindingSlots[i];
+    const UiCaseSnapshot hostBefore = takeUiCaseSnapshot(rig.context.Get());
+    VScreenPanelDistanceApiTestResult result{};
+    const bool ran = vScreenPanelDistanceApiTransactionTest(input, &result);
+    bool bindingsRestored = true;
+    for (std::size_t i = 0; i < bindingCount; ++i) {
+        const auto& a = bindingsBefore[i]; const auto& b = edvr::detail::g_bindingSlots[i];
+        bindingsRestored = bindingsRestored && a.ptr == b.ptr && a.gen == b.gen && a.hash == b.hash;
+    }
+    const UiCaseSnapshot hostAfter = takeUiCaseSnapshot(rig.context.Get());
+    ID3D11Buffer* afterNvCb[2]{}; ID3D11Buffer* afterHostCb = nullptr;
+    rig.context->PSGetConstantBuffers(1, 2, afterNvCb);
+    rig.context->VSGetConstantBuffers(0, 1, &afterHostCb);
+    const bool hostRestored = sameUiCaseSnapshot(hostBefore, hostAfter) &&
+        afterNvCb[0] == nullptr && afterNvCb[1] == nullptr && afterHostCb == compositeCb.Get() &&
+        nvCbSlotsInitiallyNull;
+    for (ID3D11Buffer* cb : afterNvCb) if (cb) cb->Release();
+    if (afterHostCb) afterHostCb->Release();
+    const bool winnerMatch = nvObservationMatches(rawCase, input, result);
+    const bool callbackMatch = winnerMatch;
+    const bool actionsMatch = rawCase == static_cast<unsigned>(NvPrecedenceCase::ForeignContext)
+        ? draw_ladder_trace::actionCountForTest(result.token) == 0
+        : traceEnabled
+            ? nvForwardActionsMatch(result, input, expected.replace, expected.panel, expected.skip)
+            : draw_ladder_trace::actionCountForTest(result.token) == 0;
+    const bool inputTupleLiteral = input.kind == 'X' &&
+        input.drawCount == (expected.panel ? 6u : 240u) && input.drawInstances == 1 &&
+        input.drawArgs.start == 7 && input.drawArgs.base == -3 &&
+        input.drawArgs.startInstance == 11;
+    const bool drawMatch = expected.skip
+        ? result.originalDrawCalls == 0 && inputTupleLiteral
+        : result.drawArgumentsValid && result.originalDrawCalls == 1 && inputTupleLiteral;
+    EdvrPluginCostWindowV2 report{}; bool complete = false;
+    for (std::uint32_t frame = 1; frame <= 1800; ++frame)
+        complete = edvrPluginCostFrameBoundaryV2(frame, 0, apiSample ? 1 : 0,
+                                                apiSample ? 1 : 0, 0, &report) != 0;
+    const auto& cockpit = report.owners[static_cast<std::uint8_t>(edvr::plugin_cost::Owner::CockpitVisuals)];
+    const auto& core = report.owners[static_cast<std::uint8_t>(edvr::plugin_cost::Owner::Core)];
+    const auto& panelOwner = report.owners[static_cast<std::uint8_t>(edvr::plugin_cost::Owner::OnFootPanel)];
+    const std::uint64_t nvReadMask = (1ull << 18) | (1ull << 19) | (1ull << 20);
+    const std::uint64_t panelMask = (1ull << 58) | (1ull << 59) |
+                                    (1ull << 60) | (1ull << 61);
+    const bool nvSampled = apiSample && rawCase == static_cast<unsigned>(NvPrecedenceCase::NightVision);
+    const bool panelSampled = apiSample && rawCase == static_cast<unsigned>(NvPrecedenceCase::PanelDistance);
+    // Cold target recognition records Core112/113/115 once. Offscreen rule
+    // evaluation and X6 panel eligibility each perform one additional view
+    // inspection; the foreign-context exit precedes all descriptor work.
+    const std::uint64_t descriptorMask = (1ull << (112-64)) |
+        (1ull << (113-64)) | (1ull << (115-64));
+    const unsigned descriptorViews = which == NvPrecedenceCase::ForeignContext ? 0u :
+        (which == NvPrecedenceCase::OffscreenRule ||
+         which == NvPrecedenceCase::PanelDistance) ? 2u : 1u;
+    const bool costMatch = complete && report.version == 2 &&
+        report.completedApiSampleFrames == (apiSample ? 1800u : 0u) &&
+        cockpit.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::ReadQuery)] ==
+            (nvSampled ? 3ull : 0ull) &&
+        cockpit.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::State)] == 0 &&
+        cockpit.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::Transfer)] == 0 &&
+        cockpit.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::Work)] == 0 &&
+        cockpit.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::Instrumentation)] == 0 &&
+        cockpit.apiSiteMask[0] == (nvSampled ? nvReadMask : 0ull) && cockpit.apiSiteMask[1] == 0 &&
+        cockpit.apiSiteMask[2] == 0 && cockpit.apiSiteMask[3] == 0 &&
+        core.apiCalls[0] == 0 && core.apiCalls[1] == 0 && core.apiCalls[2] == 0 &&
+        core.apiCalls[3] == (apiSample ? descriptorViews*3ull : 0ull) && core.apiCalls[4] == 0 &&
+        core.apiSiteMask[0] == 0 &&
+        core.apiSiteMask[1] == (apiSample && descriptorViews ? descriptorMask : 0ull) &&
+        core.apiSiteMask[2] == 0 && core.apiSiteMask[3] == 0 &&
+        panelOwner.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::Transfer)] ==
+            (panelSampled ? 2ull : 0ull) &&
+        panelOwner.apiCalls[static_cast<std::uint8_t>(edvr::plugin_cost::ApiClass::State)] ==
+            (panelSampled ? 2ull : 0ull) &&
+        panelOwner.apiCalls[0] == 0 && panelOwner.apiCalls[3] == 0 && panelOwner.apiCalls[4] == 0 &&
+        panelOwner.apiSiteMask[0] == 0 &&
+        panelOwner.apiSiteMask[1] == (panelSampled ? panelMask : 0ull) &&
+        panelOwner.apiSiteMask[2] == 0 && panelOwner.apiSiteMask[3] == 0;
+
+    const unsigned actionCount = traceEnabled
+        ? static_cast<unsigned>(draw_ladder_trace::actionCountForTest(result.token)) : 0u;
+    if (foreignContext.Get()) foreignContext->ClearState();
+    cleanup.run();
+    config.set("fix.night_vision_stability", priorStability.c_str());
+    config.set("experimental.night_vision_realistic", priorRealistic.c_str());
+    edvr::g_runtimeProfile = priorProfile;
+    const bool okay = ran && winnerMatch && callbackMatch && actionsMatch && drawMatch &&
+        hostRestored && bindingsRestored && costMatch;
+    if (!okay) {
+        std::fprintf(stderr,
+            "NV_PRECEDENCE_FAIL case=%u trace=%u sample=%u ran=%u winner=%d/%d verdict=%d/%d sub=%u/%d claim=%x/%x callbacks=%u,%u,%u actions=%u draw=%u host=%u bindings=%u costs=%u reads=%llu mask=%llx corereads=%llu coremask=%llx\n",
+            rawCase, traceEnabled?1u:0u, apiSample?1u:0u, ran?1u:0u,
+            result.winner, expected.winner, result.verdict, expected.verdict,
+            result.siteResult.subsite, expected.subsite, result.cockpitClaimValue,
+            expected.claim, result.cockpitClaimCalls, result.cockpitBeginCalls,
+            result.cockpitEndCalls, actionsMatch?1u:0u, drawMatch?1u:0u,
+            hostRestored?1u:0u, bindingsRestored?1u:0u, costMatch?1u:0u,
+            static_cast<unsigned long long>(cockpit.apiCalls[3]),
+            static_cast<unsigned long long>(cockpit.apiSiteMask[0]),
+            static_cast<unsigned long long>(core.apiCalls[3]),
+            static_cast<unsigned long long>(core.apiSiteMask[1]));
+        return false;
+    }
+    std::printf("NV_PRECEDENCE_RESULT case=%u trace=%u sample=%u winner=%d verdict=%d sub=%u claim=%x claimcalls=%u begin=%u end=%u actions=%u original=%u reads=%llu mask=%llx host=1 bindings=1\n",
+        rawCase, traceEnabled?1u:0u, apiSample?1u:0u, result.winner, result.verdict,
+        result.siteResult.subsite, result.cockpitClaimValue, result.cockpitClaimCalls,
+        result.cockpitBeginCalls, result.cockpitEndCalls,
+        actionCount,
+        result.originalDrawCalls,
+        static_cast<unsigned long long>(cockpit.apiCalls[3]),
+        static_cast<unsigned long long>(cockpit.apiSiteMask[0]));
+    return true;
+}
+
 struct UiChildReport final {
     unsigned trace = 0, sample = 0, refusal = 0, actions = 0, callbacks = 0;
     unsigned long long reads = 0, states = 0, mask = 0;
@@ -2313,9 +2706,164 @@ bool testUiComposedActionSubprocesses() {
         reports[0].depth == reports[4].depth && reports[5].host != reports[0].host &&
         reports[5].output == 0;
 }
+
+struct NvChildReport final {
+    unsigned caseId = 0, trace = 0, sample = 0;
+    int winner = -1, verdict = -1;
+    unsigned subsite = 0, claim = 0, claimCalls = 0, beginCalls = 0, endCalls = 0;
+    unsigned actions = 0, original = 0;
+    unsigned long long reads = 0, mask = 0;
+};
+
+bool launchNvPrecedenceChild(unsigned caseId, bool trace, bool sample,
+                             NvChildReport* report) {
+    if (!report) return false;
+    wchar_t exe[MAX_PATH + 1]{};
+    const DWORD exeLen = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (!exeLen || exeLen >= MAX_PATH) return false;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE readPipe = nullptr, writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) return false;
+    if (!SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(readPipe); CloseHandle(writePipe); return false;
+    }
+    HANDLE nullInput = CreateFileW(L"NUL", GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (nullInput == INVALID_HANDLE_VALUE) {
+        CloseHandle(readPipe); CloseHandle(writePipe); return false;
+    }
+    SIZE_T attributeBytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
+    std::vector<std::uint8_t> attributeStorage(attributeBytes);
+    auto* attributes = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attributeStorage.data());
+    const bool attributesInitialized = attributeBytes &&
+        InitializeProcThreadAttributeList(attributes, 1, 0, &attributeBytes) != FALSE;
+    HANDLE inherited[2] = {writePipe, nullInput};
+    if (!attributesInitialized || !UpdateProcThreadAttribute(attributes, 0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr)) {
+        if (attributesInitialized) DeleteProcThreadAttributeList(attributes);
+        CloseHandle(nullInput); CloseHandle(readPipe); CloseHandle(writePipe); return false;
+    }
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup); startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = nullInput;
+    startup.StartupInfo.hStdOutput = startup.StartupInfo.hStdError = writePipe;
+    startup.lpAttributeList = attributes;
+    PROCESS_INFORMATION process{};
+    std::wstring command = L"\"" + std::wstring(exe, exeLen) +
+        L"\" --nv-precedence-child " + std::to_wstring(caseId) +
+        (trace ? L" 1 " : L" 0 ") + (sample ? L"1" : L"0");
+    const BOOL started = CreateProcessW(exe, &command[0], nullptr, nullptr, TRUE,
+        EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr, nullptr,
+        &startup.StartupInfo, &process);
+    const DWORD startError = GetLastError();
+    DeleteProcThreadAttributeList(attributes); CloseHandle(writePipe); CloseHandle(nullInput);
+    if (!started) { CloseHandle(readPipe); SetLastError(startError); return false; }
+    std::string output; char chunk[256]; bool overflow = false;
+    constexpr std::size_t maxBytes = 512;
+    const ULONGLONG deadline = GetTickCount64() + 120000;
+    DWORD wait = WAIT_TIMEOUT;
+    while (GetTickCount64() < deadline) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr)) {
+            wait = WaitForSingleObject(process.hProcess, 0);
+            break;
+        }
+        while (available) {
+            DWORD got = 0; const DWORD take = (std::min)(available, static_cast<DWORD>(sizeof(chunk)));
+            if (!ReadFile(readPipe, chunk, take, &got, nullptr) || !got) break;
+            if (output.size() + got > maxBytes) { overflow = true; break; }
+            output.append(chunk, got); available -= got;
+        }
+        if (overflow) break;
+        wait = WaitForSingleObject(process.hProcess, 0);
+        if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) break;
+        Sleep(10);
+    }
+    if (wait != WAIT_OBJECT_0 || overflow) {
+        TerminateProcess(process.hProcess, 1); WaitForSingleObject(process.hProcess, 5000);
+    }
+    DWORD exitCode = 1; GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread); CloseHandle(process.hProcess);
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) || !available) break;
+        DWORD got = 0; const DWORD take = (std::min)(available, static_cast<DWORD>(sizeof(chunk)));
+        if (!ReadFile(readPipe, chunk, take, &got, nullptr) || !got) break;
+        if (output.size() + got > maxBytes) { overflow = true; break; }
+        output.append(chunk, got);
+    }
+    CloseHandle(readPipe);
+    auto failedChild = [&](const char* reason) {
+        std::fprintf(stderr,"NV_PRECEDENCE_CHILD_DETAIL case=%u trace=%u sample=%u reason=%s wait=%lu exit=%lu overflow=%u bytes=%llu\n",
+            caseId,trace?1u:0u,sample?1u:0u,reason,
+            static_cast<unsigned long>(wait),static_cast<unsigned long>(exitCode),
+            overflow?1u:0u,static_cast<unsigned long long>(output.size()));
+        if (!output.empty()) {
+            std::fwrite(output.data(),1,output.size(),stderr);
+            if (output.back()!='\n') std::fputc('\n',stderr);
+        }
+        return false;
+    };
+    if (wait != WAIT_OBJECT_0 || overflow || exitCode != 0 || output.empty() ||
+        output.back() != '\n' || output.find('\n') != output.size() - 1 ||
+        output.rfind("NV_PRECEDENCE_RESULT ", 0) != 0) return failedChild("execution-or-framing");
+    int consumed = -1;
+    const int parsed = std::sscanf(output.c_str(),
+        "NV_PRECEDENCE_RESULT case=%u trace=%u sample=%u winner=%d verdict=%d sub=%u claim=%x claimcalls=%u begin=%u end=%u actions=%u original=%u reads=%llu mask=%llx host=1 bindings=1%n",
+        &report->caseId, &report->trace, &report->sample, &report->winner,
+        &report->verdict, &report->subsite, &report->claim, &report->claimCalls,
+        &report->beginCalls, &report->endCalls, &report->actions, &report->original,
+        &report->reads, &report->mask, &consumed);
+    const bool terminator = consumed >= 0 &&
+        ((output.size() == static_cast<std::size_t>(consumed) + 1 && output[consumed] == '\n') ||
+         (output.size() == static_cast<std::size_t>(consumed) + 2 && output[consumed] == '\r' &&
+          output[consumed + 1] == '\n'));
+    const NvExpected expected = kNvExpected[caseId];
+    const unsigned expectedActions = !trace || caseId == static_cast<unsigned>(NvPrecedenceCase::ForeignContext)
+        ? 0u : expected.panel ? 6u : expected.skip ? 3u :
+        expected.replace ? 5u : 3u;
+    const bool nvSampled = sample && caseId == static_cast<unsigned>(NvPrecedenceCase::NightVision);
+    const bool accepted = parsed == 14 && terminator && report->caseId == caseId &&
+        report->trace == (trace ? 1u : 0u) && report->sample == (sample ? 1u : 0u) &&
+        report->winner == expected.winner && report->verdict == expected.verdict &&
+        report->subsite == static_cast<unsigned>(expected.subsite) &&
+        report->claim == expected.claim && report->claimCalls == expected.claimCalls &&
+        report->beginCalls == expected.beginCalls && report->endCalls == expected.endCalls &&
+        report->actions == expectedActions && report->original == (expected.skip ? 0u : 1u) &&
+        report->reads == (nvSampled ? 3ull : 0ull) &&
+        report->mask == (nvSampled ? ((1ull << 18) | (1ull << 19) | (1ull << 20)) : 0ull);
+    return accepted ? true : failedChild("result-contract");
+}
+
+bool testNvPrecedenceSubprocesses() {
+    if (!nvObservationNegativeControls()) return false;
+    for (unsigned caseId = 0; caseId < 8; ++caseId) {
+        for (unsigned trace = 0; trace < 2; ++trace) {
+            for (unsigned sample = 0; sample < 2; ++sample) {
+                NvChildReport report{};
+                if (!launchNvPrecedenceChild(caseId, trace != 0, sample != 0, &report)) {
+                    std::fprintf(stderr, "NV_PRECEDENCE_CHILD_FAIL case=%u trace=%u sample=%u\n",
+                        caseId, trace, sample);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 5 && std::strcmp(argv[1], "--nv-precedence-child") == 0) {
+        char* end = nullptr;
+        const unsigned long caseId = std::strtoul(argv[2], &end, 10);
+        if (!end || *end || caseId >= 8 ||
+            (std::strcmp(argv[3], "0") != 0 && std::strcmp(argv[3], "1") != 0) ||
+            (std::strcmp(argv[4], "0") != 0 && std::strcmp(argv[4], "1") != 0)) return 2;
+        return runNvPrecedenceChild(static_cast<unsigned>(caseId),
+            std::strcmp(argv[3], "1") == 0, std::strcmp(argv[4], "1") == 0) ? 0 : 1;
+    }
     if (argc == 5 && std::strcmp(argv[1], "--ui-reissue-child") == 0) {
         const bool trace = std::strcmp(argv[2], "1") == 0;
         const bool sample = std::strcmp(argv[3], "1") == 0;
@@ -4026,6 +4574,8 @@ int main(int argc, char** argv) {
 
     okay &= check(testUiComposedActionSubprocesses(),
                   "isolated WARP children exercise production UI family routing, composed reissues, sampled API notes, and NoTrace parity");
+    okay &= check(testNvPrecedenceSubprocesses(),
+                  "fresh WARP children verify literal Night Vision precedence, real plugin forwarding callbacks, typed arguments, restoration, and sampled null-CB reads");
     if (deferred) deferred->Release();
     if (immediate) immediate->Release();
     if (device) device->Release();
