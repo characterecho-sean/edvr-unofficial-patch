@@ -39,6 +39,11 @@ std::atomic<bool> g_on{false};
 // frame path, never inside a create. The bits of a float, 0 while unknown.
 std::atomic<uint32_t> g_hmdBits{0};
 std::atomic<bool> g_hmdBusy{false};
+// Beside it, from the same pass (2026-10-07): Elite's Supersampling (the same .fxcfg's SSAAMultiplier, the
+// bits of a float) and the game window's width (DisplaySettings.xml), 0 while unknown. The panel factor and its
+// size budget read them (ui_sizing_math.h's "Supersampling and the size budget").
+std::atomic<uint32_t> g_ssaaBits{0};
+std::atomic<uint32_t> g_displayW{0};
 
 float hmdCached() {
     const uint32_t bits = g_hmdBits.load(std::memory_order_acquire);
@@ -48,11 +53,16 @@ float hmdCached() {
 }
 
 void hmdReadNow() {
-    float q = 0.0f;
-    if (!deviceHookHmdQuality(&q) || !(q > 0.0f) || !std::isfinite(q)) q = 0.0f;
-    uint32_t bits = 0;
+    float q = 0.0f, ss = 0.0f;
+    uint32_t dw = 0, dh = 0;
+    if (!deviceHookPanelSettings(&q, &ss, &dw, &dh) || !(q > 0.0f) || !std::isfinite(q)) q = 0.0f;
+    if (!(ss > 0.0f) || !std::isfinite(ss)) ss = 0.0f;
+    uint32_t bits = 0, ssBits = 0;
     std::memcpy(&bits, &q, sizeof(bits));
+    std::memcpy(&ssBits, &ss, sizeof(ssBits));
     g_hmdBits.store(bits, std::memory_order_release);
+    g_ssaaBits.store(ssBits, std::memory_order_release);
+    g_displayW.store(dw, std::memory_order_release);
 }
 
 VOID CALLBACK hmdRefresh(PTP_CALLBACK_INSTANCE, PVOID) {
@@ -236,23 +246,36 @@ void uiSurfacesNoteChain(const D3D11_TEXTURE2D_DESC& d) {
     // the create's size times f (ui_panel_scale.h).
     const bool engine = uiPanelScaleLive();
     const double f = engine ? uiPanelScaleFactor() : 1.0;
-    char rvas[160], verdict[320], sized[64] = "";
+    // The game's own panel width carries Elite's Supersampling above 1 (ui_sizing_math.h): the stage divides it out.
+    const float ssRead = uiSurfacesSupersampling();
+    const double ss = ssRead > 1.0f ? static_cast<double>(ssRead) : 1.0;
+    char rvas[160], verdict[320], sized[128] = "", ssText[64] = "";
     uiChainFormat(c.chain, rvas, sizeof(rvas));
     uiChainVerdictText(c.verdict, verdict, sizeof(verdict));
     if (engine) std::snprintf(sized, sizeof(sized), " (the engine sizing panels x%.4f)", 1.0 / f);
+    if (ss > 1.0) std::snprintf(ssText, sizeof(ssText), ", Supersampling %.2f in the game's width", ss);
     Log::get().note(
         "ui quality: sizing chain %u: frame %u, a %ux%u %s surface (DXGI format %u, bind 0x%X) -- "
-        "W %ux%u (%s), tangents up %.4f down %.4f, vFOV %.1f degrees, k %.4f, implied stage "
+        "W %ux%u (%s), tangents up %.4f down %.4f, vFOV %.1f degrees, k %.4f%s, implied stage "
         "%.0fx%.0f%s; %u game frames, innermost first: %s; verdict %s.",
         g_s.chainCount, g_frameNo.load(std::memory_order_relaxed), d.Width, d.Height,
         depth ? "depth" : "colour", static_cast<unsigned>(d.Format), d.BindFlags, b.W, b.H,
         !b.W ? "unknown" : b.asked ? "as the game is told" : "the frame's recommendation",
-        static_cast<double>(b.up), static_cast<double>(b.down), static_cast<double>(b.vfovDeg), k,
-        uiImpliedStage(d.Width, b.W, k) * f, uiImpliedStage(d.Height, b.W, k) * f, sized, c.chain.n,
-        c.chain.n ? rvas : "none", verdict);
+        static_cast<double>(b.up), static_cast<double>(b.down), static_cast<double>(b.vfovDeg), k, ssText,
+        uiImpliedStage(d.Width, b.W, k) * f / ss, uiImpliedStage(d.Height, b.W, k) * f / ss, sized,
+        c.chain.n, c.chain.n ? rvas : "none", verdict);
 }
 
 float uiSurfacesHmdQuality() { return hmdCached(); }
+
+float uiSurfacesSupersampling() {
+    const uint32_t bits = g_ssaaBits.load(std::memory_order_acquire);
+    float v = 0.0f;
+    std::memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+uint32_t uiSurfacesDisplayWidth() { return g_displayW.load(std::memory_order_acquire); }
 
 // ------------------------------------------------------------ the glyph atlas
 

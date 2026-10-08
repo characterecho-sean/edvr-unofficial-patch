@@ -20,8 +20,10 @@
 // stays the visible line's.
 //
 // WHEN: only while the panel patch is live (fix.ui_quality 100 or 125; never at off), in VR, with f < 1. The factor is
-// the panel patch's written one (uiPanelScaleFactor), read once a frame at the frame boundary into the one atomic
-// below, so every draw of a frame -- both eyes, the game's and the twin -- sees the same value.
+// the panel patch's written one before its size budget (uiPanelScaleLineFactor: Elite's Supersampling is in it, as
+// the scene is drawn S times wider; the budget, which thins panels and not the layer, is not), read once a frame at
+// the frame boundary into the one atomic below, so every draw of a frame -- both eyes, the game's and the twin --
+// sees the same value.
 //
 // THE LAYER (2026-10-07). The same draw is also the HDR layer's to take (ui_layer_math.h kOrbitLines): drawn into the eye's HDR
 // layer at the layer's density, composited after the upscale, so a line is no longer upscaled with the world. The width patch

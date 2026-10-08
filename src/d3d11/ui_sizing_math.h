@@ -19,6 +19,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace edvr {
 
@@ -239,6 +241,28 @@ inline bool uiPanelDisp(uint64_t next, uint64_t target, int32_t* disp) {
     return true;
 }
 
+// ------------------------------------------- Supersampling and the size budget --
+//
+// 2026-10-07. A Frontier VR launch at Elite's Supersampling 2.0 (left there by a flat session; the graphics
+// options are one file for every install) died within seconds: the panel patch asked D3D11 for a 19200x10800
+// render-to-texture panel and Elite aborts on any refused create. The mechanism, from the game's own code
+// (docs/ui-layer-2026-09-23.md, "2026-10-07: Supersampling and the panel budget"):
+//   * the UI screen record carries two sizes, +0x40 (the base: the VR manager's trunc(recommended x HMD
+//     Quality), the display, or a 2D-mode override) and +0x30 = trunc(+0x40 x scale), the scale being the
+//     SSAAMultiplier entry of the .fxcfg (FUN_14284CB70 and FUN_14288E3A0 write both; FUN_142842A70 reads
+//     c = max(+0x30, +0x40) x k). The scene's own views are sized from +0x30 too.
+//   * so the game's c is linear in Supersampling, per axis: at Supersampling S > 1 every panel the game makes
+//     is S times wider than W_ui x k says, and EDVR's f (made from W_ui x k) must carry the same S or the
+//     patch stacks its own density on the game's (S x 1/f instead of 1/f).
+//   * and no f, however small, may take any panel past D3D11's 16384 (D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION).
+//     The widest panel the formula can ask for is S x B / f, B the base c over the states the record takes
+//     (a stage the width of the 1920 one: the menu's 16:9 surface). The refused create is 19200 = 2.0 x B /
+//     0.4 with B = 3840, which is the one number every state of the record that a flight has seen agrees on;
+//     B is that, or larger where the display, the 2D screen's forced width or the scene say so.
+constexpr double kUiPanelTextureLimit = 16384.0;  // D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION
+constexpr double kUiPanelBudget = 14336.0;        // 7/8 of it: a stage 14% wider than the 1920 one still fits
+constexpr double kUiPanelObservedBase = 3840.0;   // B from the refused create (19200 x 0.4 / 2.0)
+
 // The factor's inputs, as EDVR has them.
 struct UiPanelInputs {
     uint32_t renderW = 0;     // W_ui: trunc(what the game is told x HMD Quality)
@@ -246,26 +270,120 @@ struct UiPanelInputs {
     uint32_t outputW = 0;     // W_out: the runtime's untrimmed recommendation
     float trueTangent = 0.0f; // 2 tan(vFOV/2) of the true display frustum
     float target = 0.0f;      // T: fix.ui_quality's 100 or 125, as 1.0 or 1.25
+    float supersampling = 0.0f;  // the .fxcfg's SSAAMultiplier; 0 while unknown (then there is no factor)
+    uint32_t displayW = 0;    // the game window's width (DisplaySettings.xml); 0 unknown (the observed base stands)
+    uint32_t screenW = 0;     // the 2D screen's forced width (fix.vscreen_res_width, applied); 0 none
 };
 
-enum class UiPanelClamp : uint8_t { kNone = 0, kCap, kFloor };
+enum class UiPanelClamp : uint8_t { kNone = 0, kCap, kFloor, kBudget };
+enum class UiPanelBase : uint8_t { kObserved = 0, kScene, kDisplay, kScreen };
 
-// f, clamped to [1/4, 1]; false when an input is missing.
-inline bool uiPanelFactor(const UiPanelInputs& in, double* f, UiPanelClamp* clamp = nullptr) {
-    if (clamp) *clamp = UiPanelClamp::kNone;
+// Everything one factor is made of, for the line and the tests.
+struct UiPanelPlan {
+    double f = 1.0;           // the factor the floats get
+    double formula = 1.0;     // (W_ui x k) / (W_out x k_out) / T: the factor before this change, unclamped
+    double beforeF = 1.0;     // ...clamped to [1/4, 1]: what the patch wrote before the Supersampling term
+    double ss = 1.0;          // max(Supersampling, 1)
+    double lineF = 1.0;       // formula x ss clamped to [1/4, 1], without the budget: the layer/render ratio the
+                              // orbit lines' width needs (the budget thins panels, it does not thin the layer)
+    double base = 0.0;        // B, px
+    UiPanelBase baseFrom = UiPanelBase::kObserved;
+    double largest = 0.0;     // the widest panel the formula could ask for at f: ss x B / f, px
+    double largestBefore = 0.0;  // ...at the factor without the Supersampling term (what crashed): ss x B / beforeF
+    bool ssActs = false;      // the Supersampling term changed the factor
+    bool budgetActs = false;  // the budget changed the factor
+    UiPanelClamp clamp = UiPanelClamp::kNone;
+};
+
+inline const char* uiPanelBaseName(UiPanelBase b) {
+    return b == UiPanelBase::kScene     ? "the scene's own width"
+           : b == UiPanelBase::kDisplay ? "the display's width"
+           : b == UiPanelBase::kScreen  ? "the 2D screen's forced width"
+                                        : "the width a refused create measured";
+}
+
+inline double uiPanelClampF(double v) { return v < 0.25 ? 0.25 : v > 1.0 ? 1.0 : v; }
+
+// f = clamp( max( formula x ss, ss x B / budget ), [1/4, 1] ). At Supersampling <= 1, ss is exactly 1 and the
+// budget is not binding (B <= 5734 at f 0.4), f is today's expression bit for bit. False when an input is missing.
+inline bool uiPanelPlanFor(const UiPanelInputs& in, UiPanelPlan* out) {
+    if (out) *out = UiPanelPlan{};
     if (!in.renderW || !in.outputW || !(in.target > 0.0f)) return false;
+    if (!(in.supersampling > 0.0f) || !std::isfinite(in.supersampling)) return false;
     const double k = uiSizingK(in.fovTangent), kOut = uiSizingK(in.trueTangent);
     if (!(k > 0.0) || !(kOut > 0.0)) return false;
-    double v = (static_cast<double>(in.renderW) * k) / (static_cast<double>(in.outputW) * kOut) /
-               static_cast<double>(in.target);
-    if (v < 0.25) {
-        v = 0.25;
-        if (clamp) *clamp = UiPanelClamp::kCap;
-    } else if (v > 1.0) {
-        v = 1.0;
-        if (clamp) *clamp = UiPanelClamp::kFloor;
+    UiPanelPlan p;
+    p.formula = (static_cast<double>(in.renderW) * k) / (static_cast<double>(in.outputW) * kOut) /
+                static_cast<double>(in.target);
+    p.ss = in.supersampling > 1.0f ? static_cast<double>(in.supersampling) : 1.0;
+    const double withSs = p.ss > 1.0 ? p.formula * p.ss : p.formula;
+    p.base = kUiPanelObservedBase;
+    p.baseFrom = UiPanelBase::kObserved;
+    const double scene = static_cast<double>(in.renderW) * k;
+    if (scene > p.base) {
+        p.base = scene;
+        p.baseFrom = UiPanelBase::kScene;
     }
-    if (f) *f = v;
+    if (static_cast<double>(in.displayW) > p.base) {
+        p.base = static_cast<double>(in.displayW);
+        p.baseFrom = UiPanelBase::kDisplay;
+    }
+    if (static_cast<double>(in.screenW) > p.base) {
+        p.base = static_cast<double>(in.screenW);
+        p.baseFrom = UiPanelBase::kScreen;
+    }
+    const double floorF = p.ss * p.base / kUiPanelBudget;
+    const double withBudget = withSs < floorF ? floorF : withSs;
+    p.beforeF = uiPanelClampF(p.formula);
+    p.lineF = uiPanelClampF(withSs);
+    p.f = uiPanelClampF(withBudget);
+    p.ssActs = p.lineF != p.beforeF;
+    p.budgetActs = p.f != p.lineF;
+    if (p.budgetActs)
+        p.clamp = UiPanelClamp::kBudget;
+    else if (withSs < 0.25)
+        p.clamp = UiPanelClamp::kCap;
+    else if (withSs > 1.0)
+        p.clamp = UiPanelClamp::kFloor;
+    p.largest = p.ss * p.base / p.f;
+    p.largestBefore = p.ss * p.base / p.beforeF;
+    if (out) *out = p;
+    return true;
+}
+
+// f, clamped to [1/4, 1] and raised by the budget; false when an input is missing.
+inline bool uiPanelFactor(const UiPanelInputs& in, double* f, UiPanelClamp* clamp = nullptr) {
+    UiPanelPlan p;
+    const bool ok = uiPanelPlanFor(in, &p);
+    if (clamp) *clamp = p.clamp;
+    if (ok && f) *f = p.f;
+    return ok;
+}
+
+// The game window's size from DisplaySettings.xml's text: <ScreenWidth> and <ScreenHeight>. False unless both
+// are there and sane (a window of 320 to 16384 a side).
+inline bool uiDisplaySizeFromXml(const char* text, size_t n, uint32_t* w, uint32_t* h) {
+    if (!text || !n) return false;
+    auto number = [&](const char* tag, uint32_t* v) {
+        const size_t len = std::strlen(tag);
+        for (size_t i = 0; i + len < n; ++i) {
+            if (std::memcmp(text + i, tag, len) != 0) continue;
+            char buf[16] = {};
+            size_t used = 0;
+            for (size_t j = i + len; j < n && used + 1 < sizeof(buf) && text[j] >= '0' && text[j] <= '9'; ++j)
+                buf[used++] = text[j];
+            if (!used) return false;
+            const long value = std::strtol(buf, nullptr, 10);
+            if (value < 320 || value > 16384) return false;
+            *v = static_cast<uint32_t>(value);
+            return true;
+        }
+        return false;
+    };
+    uint32_t ww = 0, hh = 0;
+    if (!number("<ScreenWidth>", &ww) || !number("<ScreenHeight>", &hh)) return false;
+    if (w) *w = ww;
+    if (h) *h = hh;
     return true;
 }
 

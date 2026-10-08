@@ -642,10 +642,18 @@ int main(int argc, char** argv) {
         in.fovTangent = in.trueTangent = 2.0f;
         in.outputW = 4032;
         in.target = 1.25f;
+        in.supersampling = 1.0f;  // this frame is the flight's at Elite's Supersampling 1.0
         double f = 0;
         check(edvr::uiPanelFactor(in, &f) && std::fabs(f - 0.4) < 1e-9, "the panel patch's factor for that frame is 0.4");
         const edvr::UiLayerMap m = edvr::uiLayerMapFromRegion(0.0f, 0.0f, 2016.0f, 1949.0f, ls.w, ls.h);
         check(std::fabs(f * double(ls.w) / 2016.0 - 1.0) < 1e-9, "f x (layer / render) is 1 across: the patched strip's 2wf render pixels are 2w layer pixels");
+        // 2026-10-07: at Elite's Supersampling 2.0 the scene is drawn twice as wide (the record's +0x30 = +0x40 x scale sizes the
+        // views), the panel patch's factor carries the Supersampling (0.8), and the identity holds against the scene's 4032.
+        in.supersampling = 2.0f;
+        double fSs = 0;
+        check(edvr::uiPanelFactor(in, &fSs) && std::fabs(fSs - 0.8) < 1e-9, "at Supersampling 2.0 the panel patch's factor is 0.8");
+        check(std::fabs(fSs * double(ls.w) / 4032.0 - 1.0) < 1e-9,
+              "f x (layer / render) is 1 at Supersampling 2.0 too: the render is the scene's 4032 wide, so the strip's 2wf render pixels are 2w layer pixels");
         const edvr::UiViewport gv{0, 0, 2016, 1949, 0, 1};
         const edvr::UiViewport lv = edvr::uiLayerMapViewport(m, gv, 0.0f, 0.0f);
         check(lv.w == 5040.0f && std::fabs(lv.h - 4873.0f) < 0.01f && lv.x == 0.0f && lv.y == 0.0f, "the game's viewport through the production map is the whole layer");

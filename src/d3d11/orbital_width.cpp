@@ -174,7 +174,9 @@ void orbitalWidthFrameBoundary(ID3D11DeviceContext* ctx) {
     in.vr = runtimeVrProfile();
     in.refused = g_refused.load(std::memory_order_acquire) != 0;
     in.panelLive = uiPanelScaleLive();
-    in.panelFactor = in.panelLive ? uiPanelScaleFactor() : 1.0;
+    // The layer/render density ratio: the panel factor with Supersampling in it, without the size budget (which
+    // thins panels, never the layer the lines are drawn into).
+    in.panelFactor = in.panelLive ? uiPanelScaleLineFactor() : 1.0;
     // The copy and the factor's buffer are made on the first frame they are wanted (a device call, so here, on the
     // render thread, and not in the creation hook), and kept; their failure is a refusal for the session.
     if (in.vr && !in.refused && in.panelLive && in.panelFactor < 1.0 - 1e-6 && g_cache.remembered()) {

@@ -45,6 +45,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "journal_watch.h"
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
+#include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
 #include "orbital_width.h" // orbitalWidthRememberVs: the orbit lines' shader, captured at its creation
 #include "xinput_watch.h"
 #include "elite_binds.h"
@@ -3184,6 +3185,36 @@ bool deviceHookHmdQuality(float* multiplier) {
     }
     if (multiplier) *multiplier = valid ? quality : 0.0f;
     return valid;
+}
+
+bool deviceHookPanelSettings(float* hmd, float* ssaa, uint32_t* displayW, uint32_t* displayH) {
+    float q = 0.0f, ss = 0.0f;
+    const bool got = eliteHmdMultiplier(&q, &ss, nullptr, 0);
+    if (hmd) *hmd = got ? q : 0.0f;
+    if (ssaa) *ssaa = got ? ss : 0.0f;
+    uint32_t w = 0, h = 0;
+    wchar_t appdata[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);
+    if (n != 0 && n < MAX_PATH) {
+        const std::wstring path = std::wstring(appdata) +
+            L"\\Frontier Developments\\Elite Dangerous\\Options\\Graphics\\DisplaySettings.xml";
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) {
+            const DWORD size = GetFileSize(f, nullptr);
+            if (size != INVALID_FILE_SIZE && size > 0 && size <= (1u << 16)) {
+                std::string text(size, '\0');
+                DWORD read = 0;
+                if (ReadFile(f, &text[0], size, &read, nullptr) && read > 0 &&
+                    !uiDisplaySizeFromXml(text.c_str(), read, &w, &h))
+                    w = h = 0;
+            }
+            CloseHandle(f);
+        }
+    }
+    if (displayW) *displayW = w;
+    if (displayH) *displayH = h;
+    return got;
 }
 
 bool deviceHookAutoBiasSource(float* multiplier, float* bias) {

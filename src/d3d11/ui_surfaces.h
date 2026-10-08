@@ -92,4 +92,11 @@ bool nativeTemporalTrueVerticalTangents(float* up, float* down);
 // cached, never read on the frame path); 0 while unknown. Lock-free.
 float uiSurfacesHmdQuality();
 
+// Elite's Supersampling (the same .fxcfg's SSAAMultiplier) and the game window's
+// width (DisplaySettings.xml), read in the same pass and cached the same way; 0
+// while unknown. Lock-free. The panel factor carries the one, its size budget
+// both (ui_sizing_math.h).
+float uiSurfacesSupersampling();
+uint32_t uiSurfacesDisplayWidth();
+
 }  // namespace edvr

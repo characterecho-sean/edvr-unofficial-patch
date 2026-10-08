@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -81,6 +82,8 @@ struct Site {
 Site g_sites[kMaxSites];
 size_t g_count = 0;
 bool g_applied = false;
+// The width written, for the panel patch's size budget (vscreenModeAppliedWidth): 0 while nothing is.
+std::atomic<uint32_t> g_appliedW{0};
 // What the game had before we touched it, so revert restores what was actually
 // there rather than a number this file assumed.
 uint32_t g_origW = 0, g_origH = 0;
@@ -297,6 +300,7 @@ bool applyVScreenModeResolution(uint32_t width, uint32_t height) {
     g_origW = srcW;
     g_origH = srcH;
     g_applied = true;
+    g_appliedW.store(width, std::memory_order_release);
     Log::get().note("vScreen resolution: %ux%u -> %ux%u at %zu site(s). This writes to game "
                     "CODE -- to %zu pairs of numbers and nothing else. It reverts when the "
                     "game closes.",
@@ -313,8 +317,11 @@ void revertVScreenModeResolution() {
     Log::get().note("vScreen resolution reverted to %ux%u at %zu site(s)",
                     g_origW, g_origH, g_count);
     g_applied = false;
+    g_appliedW.store(0, std::memory_order_release);
     g_count = 0;
 }
+
+uint32_t vscreenModeAppliedWidth() { return g_appliedW.load(std::memory_order_acquire); }
 
 // --- "auto": what each eye actually shows, from what the runtime rendered last time ---
 //

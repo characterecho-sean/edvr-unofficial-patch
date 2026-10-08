@@ -5,7 +5,8 @@
 
 #include "ui_quality_math.h"  // uiQualityFovTangent, uiQualityInternalDim, uiQualityRecommendedFromEyes
 #include "ui_sizing_math.h"
-#include "ui_surfaces.h"      // native temporal's lock-free accessors, uiSurfacesHmdQuality
+#include "ui_surfaces.h"      // native temporal's lock-free accessors, uiSurfacesHmdQuality/Supersampling/DisplayWidth
+#include "vscreen_res.h"      // vscreenModeAppliedWidth: one of the widths the panel budget starts from
 
 #include "../common/log.h"
 #include "../common/native_render_settings.h"  // edvrQueryNativeRenderSizing: W_out
@@ -27,6 +28,8 @@ std::atomic<uint8_t> g_patch{kUntried};
 std::atomic<float> g_target{0.0f};
 std::atomic<bool> g_live{false};
 std::atomic<uint64_t> g_factorBits{0};  // the written factor's double bits (0: 1.0)
+std::atomic<uint64_t> g_lineBits{0};    // the factor without the budget (uiPanelScaleLineFactor): the orbit lines' (0: 1.0)
+std::atomic<uint64_t> g_ssBits{0};      // max(Supersampling, 1) in the written factor (0: 1.0)
 
 volatile float* g_floats = nullptr;  // [0] 1080 x f, [1] 1920 x f, in a page within rel32
 uint8_t* g_operand[4] = {};          // site 0's 1080 and 1920 disp32s, then site 1's
@@ -40,6 +43,7 @@ uint32_t g_settle = 0;
 constexpr uint32_t kSettleFrames = 10;  // the inputs steady this long before a write
 uint32_t g_frame = 0, g_liveSince = 0, g_writes = 0;
 UiPanelInputs g_lastInputs;
+UiPanelPlan g_lastPlan;
 
 // ------------------------------------------------------------ the checks
 
@@ -196,8 +200,23 @@ bool writeDisp(uint8_t* at, int32_t disp) {
     return true;
 }
 
-// The two floats: data stores, aligned, each one atomic for the game's reads.
-bool writeFloats(double f) {
+uint64_t doubleBitsOrZero(double v) {
+    if (v == 1.0) return 0;
+    uint64_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return bits;
+}
+
+double doubleFromBitsOrOne(uint64_t bits) {
+    if (!bits) return 1.0;
+    double v = 1.0;
+    std::memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+// The two floats: data stores, aligned, each one atomic for the game's reads. `lineF` is the factor without the
+// budget and `ss` the Supersampling in it, for the readers beside the panels (the orbit lines, the chain line).
+bool writeFloats(double f, double lineF = 1.0, double ss = 1.0) {
     if (!g_floats) return false;
     float d1080 = 1080.0f, d1920 = 1920.0f;
     uiPanelDivisors(f, &d1080, &d1920);
@@ -207,9 +226,9 @@ bool writeFloats(double f) {
     g_floats[1] = d1920;
     DWORD ignored = 0;
     VirtualProtect(const_cast<float*>(g_floats), 8, PAGE_READONLY, &ignored);
-    uint64_t bits = 0;
-    std::memcpy(&bits, &f, sizeof(bits));
-    g_factorBits.store(f == 1.0 ? 0 : bits, std::memory_order_release);
+    g_lineBits.store(doubleBitsOrZero(lineF), std::memory_order_release);
+    g_ssBits.store(doubleBitsOrZero(ss), std::memory_order_release);
+    g_factorBits.store(doubleBitsOrZero(f), std::memory_order_release);
     return true;
 }
 
@@ -298,7 +317,13 @@ bool gatherInputs(UiPanelInputs* in, uint32_t* askW, uint32_t* askH, float* hmd,
     in->outputW = outW;
     in->trueTangent = uiQualityFovTangent(*trueUp, *trueDown);
     in->target = g_target.load(std::memory_order_acquire);
-    return in->renderW && in->outputW && in->fovTangent > 0.0f && in->trueTangent > 0.0f;
+    // The size budget's inputs: Elite's Supersampling is required (without it there is no telling how wide the
+    // game's own panels are, so no factor); the display and the 2D screen's forced width only widen the base.
+    in->supersampling = uiSurfacesSupersampling();
+    in->displayW = uiSurfacesDisplayWidth();
+    in->screenW = vscreenModeAppliedWidth();
+    return in->renderW && in->outputW && in->fovTangent > 0.0f && in->trueTangent > 0.0f &&
+           in->supersampling > 0.0f;
 }
 
 }  // namespace
@@ -315,13 +340,11 @@ void uiPanelScaleSetTarget(float target) {
 
 bool uiPanelScaleLive() { return g_live.load(std::memory_order_acquire); }
 
-double uiPanelScaleFactor() {
-    const uint64_t bits = g_factorBits.load(std::memory_order_acquire);
-    if (!bits) return 1.0;
-    double f = 1.0;
-    std::memcpy(&f, &bits, sizeof(f));
-    return f;
-}
+double uiPanelScaleFactor() { return doubleFromBitsOrOne(g_factorBits.load(std::memory_order_acquire)); }
+
+double uiPanelScaleLineFactor() { return doubleFromBitsOrOne(g_lineBits.load(std::memory_order_acquire)); }
+
+double uiPanelScaleSupersampling() { return doubleFromBitsOrOne(g_ssBits.load(std::memory_order_acquire)); }
 
 void uiPanelScaleFrameBoundary() {
     ++g_frame;
@@ -343,13 +366,14 @@ void uiPanelScaleFrameBoundary() {
     UiPanelInputs in;
     uint32_t askW = 0, askH = 0;
     float hmd = 0.0f, up = 0.0f, down = 0.0f, trueUp = 0.0f, trueDown = 0.0f;
-    double f = 0.0;
-    UiPanelClamp clamp = UiPanelClamp::kNone;
+    UiPanelPlan plan;
     if (!gatherInputs(&in, &askW, &askH, &hmd, &up, &down, &trueUp, &trueDown) ||
-        !uiPanelFactor(in, &f, &clamp)) {
+        !uiPanelPlanFor(in, &plan)) {
         g_settle = 0;
         return;
     }
+    const double f = plan.f;
+    const UiPanelClamp clamp = plan.clamp;
     // Written only once the inputs have settled on a new value: never per
     // frame, so the two runs of one view change read one factor.
     if (std::fabs(f - g_pending) > 1e-6) {
@@ -359,29 +383,53 @@ void uiPanelScaleFrameBoundary() {
     }
     if (++g_settle < kSettleFrames) return;
     if (g_live.load(std::memory_order_acquire) && std::fabs(f / g_written - 1.0) <= 0.001) return;
-    if (!writeFloats(f)) return;
+    if (!writeFloats(f, plan.lineF, plan.ss)) return;
     g_written = f;
     g_lastInputs = in;
+    g_lastPlan = plan;
     ++g_writes;
     if (!g_live.exchange(true, std::memory_order_acq_rel)) g_liveSince = g_frame;
     float d1080 = 0.0f, d1920 = 0.0f;
     uiPanelDivisors(f, &d1080, &d1920);
     const double k = uiSizingK(in.fovTangent), kOut = uiSizingK(in.trueTangent);
+    char ssText[48] = "";
+    if (plan.ss > 1.0) std::snprintf(ssText, sizeof(ssText), " x Supersampling %.2f", plan.ss);
     Log::get().note(
         "ui quality: panels: the engine now sizes every render-to-texture panel x%.4f (the four "
         "operands at 0x%X/0x%X and 0x%X/0x%X read 1080 -> %.2f, 1920 -> %.2f): f %.4f = (W_ui %u x k "
-        "%.4f) / (W_out %u x k_out %.4f) / target %.0f%%%s -- HMD Quality %.2f, the game told %ux%u, its "
-        "vertical FOV %.1f degrees, the headset's %.1f. From the next panel init or view change.",
+        "%.4f) / (W_out %u x k_out %.4f) / target %.0f%%%s%s -- HMD Quality %.2f, Elite's Supersampling "
+        "%.2f, the game told %ux%u, its vertical FOV %.1f degrees, the headset's %.1f. From the next "
+        "panel init or view change.",
         1.0 / f, kUiPanelSiteRva[0] + kUiPanel1080Disp, kUiPanelSiteRva[0] + kUiPanel1920Disp,
         kUiPanelSiteRva[1] + kUiPanel1080Disp, kUiPanelSiteRva[1] + kUiPanel1920Disp,
         static_cast<double>(d1080), static_cast<double>(d1920), f, in.renderW, k, in.outputW, kOut,
-        static_cast<double>(in.target) * 100.0,
-        clamp == UiPanelClamp::kCap     ? " (capped: no panel above four times its game size)"
-        : clamp == UiPanelClamp::kFloor ? " (at 1: HMD Quality is at or above the target)"
-                                        : "",
-        static_cast<double>(hmd), askW, askH,
+        static_cast<double>(in.target) * 100.0, ssText,
+        clamp == UiPanelClamp::kCap      ? " (capped: no panel above four times its game size)"
+        : clamp == UiPanelClamp::kFloor  ? " (at 1: the game's own panels are at or above the target already)"
+        : clamp == UiPanelClamp::kBudget ? " (raised by the size budget, next line)"
+                                         : "",
+        static_cast<double>(hmd), static_cast<double>(in.supersampling), askW, askH,
         (std::atan(up) + std::atan(down)) * 57.29577951308232,
         (std::atan(trueUp) + std::atan(trueDown)) * 57.29577951308232);
+    // The line that says the Supersampling term or the size budget changed the factor (2026-10-07): what was
+    // seen, the factor before and after, and the widest panel the formula could then ask for. Not written when
+    // neither acts, so its absence at Supersampling 1 is the same as before.
+    if (plan.ssActs || plan.budgetActs) {
+        char budgetText[160] = "";
+        if (plan.budgetActs)
+            std::snprintf(budgetText, sizeof(budgetText),
+                          ", then f %.4f (x%.4f) from the size budget (%.0f px at f %.4f would be over it)",
+                          plan.f, 1.0 / plan.f, plan.ss * plan.base / plan.lineF, plan.lineF);
+        Log::get().note(
+            "ui quality: panels: factor adjusted -- Elite's Supersampling is %.2f (the .fxcfg's "
+            "SSAAMultiplier), the game's own panels already %.2fx wider than HMD Quality makes them: f %.4f "
+            "(x%.4f) without that term, f %.4f (x%.4f) with it%s. The widest panel the formula could ask for "
+            "is %.0f px at the written f %.4f (%.0f px at f %.4f), from a %.0f px base (%s), against "
+            "D3D11's %.0f px limit and EDVR's %.0f px budget.",
+            plan.ss, plan.ss, plan.beforeF, 1.0 / plan.beforeF, plan.lineF, 1.0 / plan.lineF, budgetText,
+            plan.largest, plan.f, plan.largestBefore, plan.beforeF, plan.base, uiPanelBaseName(plan.baseFrom),
+            kUiPanelTextureLimit, kUiPanelBudget);
+    }
 }
 
 void uiPanelScaleShutdown() {
@@ -403,17 +451,20 @@ void uiPanelScaleLog() {
     if (!g_live.load(std::memory_order_acquire)) {
         Log::get().note("ui quality: panels: patched, not sizing -- %s.",
                         g_target.load(std::memory_order_acquire) > 0.0f
-                            ? "the factor's inputs are not all known yet (HMD Quality, the frame's "
-                              "frustum, the headset's, the runtime's size)"
+                            ? "the factor's inputs are not all known yet (HMD Quality, Elite's "
+                              "Supersampling, the frame's frustum, the headset's, the runtime's size); "
+                              "until they are the panels stay at the game's own size"
                             : "the key is off: the game's own sizes");
         return;
     }
     const UiPanelInputs& in = g_lastInputs;
+    const UiPanelPlan& plan = g_lastPlan;
     Log::get().note("ui quality: panels: the engine sizes panels x%.4f since frame %u (%u writes; f %.4f "
-                    "= (W_ui %u x k %.4f) / (W_out %u x k_out %.4f) / target %.0f%%).",
+                    "= (W_ui %u x k %.4f) / (W_out %u x k_out %.4f) / target %.0f%% x Supersampling %.2f; "
+                    "the widest panel the formula could ask for is %.0f px, D3D11's limit %.0f).",
                     1.0 / g_written, g_liveSince, g_writes, g_written, in.renderW,
                     uiSizingK(in.fovTangent), in.outputW, uiSizingK(in.trueTangent),
-                    static_cast<double>(in.target) * 100.0);
+                    static_cast<double>(in.target) * 100.0, plan.ss, plan.largest, kUiPanelTextureLimit);
 }
 
 }  // namespace edvr
