@@ -630,6 +630,9 @@ cbuffer Settings:register(b6){float4 shape;float4 extent;float4 engine;}
 cbuffer EngineSourceNow:register(b7){float4 SEN[277];}   // SEN[276].x: the frame stamp, as EN's
 cbuffer EngineSourceBefore:register(b8){float4 SEB[276];}
 RWStructuredBuffer<uint> PanelCounts:register(u1);
+// First-person reach as a raw source depth (reversed-Z, d = near / z): the same .075 as the flat prep's kFirstPersonReachDepth
+// (flat_mono_shader_source.h carries the measurement). The first-person camera's near plane is 0.0675 m, the world's 0.025 m.
+static const float kFirstPersonReachDepth=.075;
 // enginePixel's kinds for the source texel q: 0 no engine data, 1 joined
 // (prev = the surface's previous source UV), 2 masked, 3 not a rig record,
 // 4 stale slot, 5 corrupt slot code, 6 stale stamp (a joined marker from an
@@ -683,6 +686,10 @@ float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Targe
     // that mesh animated. Use its actual post-VS movement, including aiming.
     bool attached=false;
     if(extent.w>0)attached=(SourceStencil.Load(int3(clamp(int2(uv*float2(w,h)),0,int2(w,h)-1),0)).y&16)!=0;
+    // The bit is the game's characters' as well as the weapon's (flat_mono_shader_source.h, "attached" in prep: the same rule, the same
+    // bound). A character is a world surface the weapon map never covers (w 0), so it takes the world path below; only a texel the map
+    // covers, or one within first-person reach, is first-person.
+    if(attached && WeaponMotion.Load(int3(texel,0)).w==0 && z<kFirstPersonReachDepth)attached=false;
     if(!ui && attached) {
         float4 motion=WeaponMotion.Load(int3(clamp(int2(uv*float2(w,h)),0,int2(w,h)-1),0));
         // R16 depth has at most half a ULP of rounding. Missing, occluded,

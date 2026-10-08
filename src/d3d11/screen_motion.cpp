@@ -501,7 +501,7 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         if(ev.slots)ev.slots->Release();if(ev.pool)ev.pool->Release();if(ev.sceneNow)ev.sceneNow->Release();if(ev.scenePrev)ev.scenePrev->Release();
         if(engine && !g.engineNoted){g.engineNoted=true;Log::get().note("screen motion: the source pass's engine data is bound: certified rig records carry their own engine motion to their previous source UV before the panel mapping; masked ones keep no history%s.",g_countKinds?", counted per eye pixel":", counted on a sample (one frame in 300, one eye pixel in 16)");}
         e.written=true;
-        if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil selects original-vertex weapon motion; uncovered or invalid history rejected.");}
+        if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil selects original-vertex weapon motion where the weapon map covers a texel or it is within first-person reach; uncovered or invalid history there is rejected, and a stencil texel beyond reach that the map does not cover (a character) takes the world path.");}
         if(!g.noted){g.noted=true;Log::get().note("screen motion: source camera/depth projected through the actual screen mesh at %ux%u per eye; GPU-only history, no source colour copies.",e.width,e.height);}
     }
     for(int i=0;i<4;++i)e.shape[i]=curve?curve[i]:0;
