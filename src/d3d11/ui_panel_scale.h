@@ -25,6 +25,13 @@
 // Supersampling is read with HMD Quality (ui_surfaces.cpp) and without it there
 // is no factor.
 //
+// LIVE SUPERSAMPLING AND THE NET (2026-10-08). The Supersampling is read from the game's own render context every
+// frame (ctx+0x3564, found through two virtual slots EDVR's thunks remember the context from), and the .fxcfg's
+// value, read every 5 s, is the fallback with the reason said. The setter's thunk moves the factor to the new value
+// BEFORE the game's setter runs, so the panels its reconfigure recreates are made at the new factor. And behind all
+// of it, a last-resort net at the panel's CreateTexture2D (ui_surfaces.cpp): a render or depth target over D3D11's
+// 16384 a side is created shrunk to fit, aspect kept, never refused.
+//
 // SAFETY. Build-keyed: the PE stamp and image size, both sites' 30 bytes,
 // the two functions' prologues and the three constants they read must be
 // build 332841's exactly, or nothing is written and one line says which
@@ -76,6 +83,10 @@ double uiPanelScaleLineFactor();
 // max(Elite's Supersampling, 1) as the written factor carries it (1 when not live): the sizing chain's implied
 // stage divides it out, the game's own panel width having multiplied by it.
 double uiPanelScaleSupersampling();
+
+// The Supersampling the factor was last made from, as chosen (live from the game's render context, or the .fxcfg's),
+// and where it came from ("live", ".fxcfg" or "none"). 0 until the first choice. Lock-free.
+double uiPanelScaleChosenSupersampling(const char** source);
 
 // The operands written back (DLL unload). Idempotent.
 void uiPanelScaleShutdown();

@@ -866,6 +866,17 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_SUBRESOURCE_DATA* init,
                                                 ID3D11Texture2D** out) {
     const bool fromEdvr = addressInEdvr(_ReturnAddress());
+    // THE PANEL NET (2026-10-08, ui_sizing_math.h uiPanelNetShrink): a game create of a render or depth target over
+    // D3D11's 16384 on either axis -- which would be refused, and a refused create is fatal in Elite -- is created
+    // shrunk to fit with its aspect kept, and says so (ui_surfaces.cpp). Everything at or under the limit is
+    // forwarded as the game made it: the one compare below is all it costs.
+    D3D11_TEXTURE2D_DESC netDesc;
+    if (!fromEdvr && desc && self == g_state->device &&
+        (desc->Width > kUiPanelNetLimit || desc->Height > kUiPanelNetLimit)) {
+        bool shrunk = false;
+        guardedBudget(g_createBudget, [&] { shrunk = uiSurfacesPanelNet(*desc, init != nullptr, &netDesc); });
+        if (shrunk) desc = &netDesc;
+    }
     const HRESULT hr = createTexture2DForwarded(self, desc, init, out);
     if (self == g_state->device) {
         if (FAILED(hr)) {

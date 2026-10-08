@@ -452,6 +452,297 @@ void testDisplayXml() {
           "no display and no 2D screen known: the observed base stands, and the crash flight is still 0.8");
 }
 
+// ---- 2026-10-08: the live Supersampling, and the net ------------------------------------------------------------------------
+
+bool fitsLimit(uint32_t w, uint32_t h) { return w <= kUiPanelNetLimit && h <= kUiPanelNetLimit; }
+
+enum class NetVariant { kReal, kDropped, kOffByOne, kAxesClamped };
+// The net, and the wrong nets the comparator must catch: none at all, one that also touches a request of exactly 16384, one
+// that clamps each axis alone (the aspect changes).
+bool netOf(uint32_t w, uint32_t h, NetVariant v, uint32_t* ow, uint32_t* oh) {
+    switch (v) {
+        case NetVariant::kReal:
+            return uiPanelNetShrink(w, h, ow, oh);
+        case NetVariant::kDropped:
+            *ow = w;
+            *oh = h;
+            return false;
+        case NetVariant::kOffByOne: {
+            if (w >= kUiPanelNetLimit || h >= kUiPanelNetLimit) {
+                const uint32_t limit = kUiPanelNetLimit - 1;
+                const double s = static_cast<double>(limit) / (w > h ? w : h);
+                *ow = static_cast<uint32_t>(w * s);
+                *oh = static_cast<uint32_t>(h * s);
+                return true;
+            }
+            *ow = w;
+            *oh = h;
+            return false;
+        }
+        case NetVariant::kAxesClamped: {
+            const bool over = w > kUiPanelNetLimit || h > kUiPanelNetLimit;
+            *ow = w > kUiPanelNetLimit ? kUiPanelNetLimit : w;
+            *oh = h > kUiPanelNetLimit ? kUiPanelNetLimit : h;
+            return over;
+        }
+    }
+    return false;
+}
+
+struct NetCase { uint32_t w, h; };
+const NetCase kNetCases[] = {{19200, 10800}, {10800, 19200}, {16385, 16384}, {16384, 16385}, {16384, 16384}, {16384, 9000},
+                             {9000, 16384},  {16383, 16383}, {20000, 1},     {1, 20000},     {32768, 32768}, {4862, 2735},
+                             {1, 1},         {16385, 100},   {7680, 4320}};
+
+// The comparator: over the limit on either axis -> reported, fits, aspect kept (to a pixel); otherwise -> not reported, untouched.
+bool netCaseRight(const NetCase& c, NetVariant v) {
+    uint32_t ow = 0, oh = 0;
+    const bool fired = netOf(c.w, c.h, v, &ow, &oh);
+    const bool over = c.w > kUiPanelNetLimit || c.h > kUiPanelNetLimit;
+    if (!over) return !fired && ow == c.w && oh == c.h;
+    if (!fired || !fitsLimit(ow, oh) || ow < 1 || oh < 1) return false;
+    const double drift = std::fabs(static_cast<double>(ow) * c.h - static_cast<double>(oh) * c.w);
+    return drift <= static_cast<double>(c.w > c.h ? c.w : c.h);  // floor() of one axis: under one pixel of the longer side
+}
+bool netAllRight(NetVariant v) {
+    for (const NetCase& c : kNetCases)
+        if (!netCaseRight(c, v)) return false;
+    return true;
+}
+
+void testNet() {
+    uint32_t w = 0, h = 0;
+    check(uiPanelNetShrink(19200, 10800, &w, &h) && w == 16384 && h == 9216,
+          "the net: the refused 19200x10800 is created 16384x9216 (the longer side the limit, the aspect 16:9 kept)");
+    check(uiPanelNetShrink(10800, 19200, &w, &h) && w == 9216 && h == 16384, "...tall: 10800x19200 -> 9216x16384");
+    check(uiPanelNetShrink(16385, 16384, &w, &h) && w == 16384 && h == 16383, "...16385 wide is over: 16385x16384 -> 16384x16383");
+    check(uiPanelNetShrink(16384, 16385, &w, &h) && w == 16383 && h == 16384, "...16385 tall is over: 16384x16385 -> 16383x16384");
+    check(uiPanelNetShrink(20000, 1, &w, &h) && w == 16384 && h == 1, "...a sliver keeps one pixel: 20000x1 -> 16384x1");
+    check(!uiPanelNetShrink(16384, 16384, &w, &h) && w == 16384 && h == 16384, "exactly 16384 both ways is untouched");
+    check(!uiPanelNetShrink(16384, 9000, &w, &h) && w == 16384 && h == 9000, "exactly 16384 on one axis is untouched");
+    check(!uiPanelNetShrink(16383, 16383, &w, &h) && w == 16383 && h == 16383, "one under the limit is untouched");
+    check(!uiPanelNetShrink(4862, 2735, &w, &h) && w == 4862 && h == 2735 && !uiPanelNetShrink(1, 1, &w, &h) && w == 1 && h == 1,
+          "the menu's 4862x2735 and a 1x1 are untouched, byte for byte");
+    // The colour target and its depth partner are asked for the same size and shrunk the same way.
+    uint32_t cw = 0, ch = 0, dw = 0, dh = 0;
+    uiPanelNetShrink(19200, 10800, &cw, &ch);
+    uiPanelNetShrink(19200, 10800, &dw, &dh);
+    check(cw == dw && ch == dh, "colour and depth of one panel are shrunk to the same size (they stay a pair)");
+    // The sweep: every pair on a grid fits after the net, and is exactly itself when it fitted before.
+    unsigned n = 0, bad = 0;
+    const uint32_t axis[] = {1, 2, 3, 100, 1920, 4862, 8192, 16383, 16384, 16385, 17000, 19200, 20000, 32768, 65535};
+    for (uint32_t a : axis)
+        for (uint32_t b : axis) {
+            uint32_t ow = 0, oh = 0;
+            const bool fired = uiPanelNetShrink(a, b, &ow, &oh);
+            ++n;
+            const bool over = a > kUiPanelNetLimit || b > kUiPanelNetLimit;
+            if (fired != over || !fitsLimit(ow, oh) || ow < 1 || oh < 1 || (!over && (ow != a || oh != b))) ++bad;
+        }
+    char msg[200];
+    std::snprintf(msg, sizeof(msg), "net sweep of %u size pairs: always inside 16384, never under 1, untouched when it fitted (%u wrong)", n, bad);
+    check(bad == 0, msg);
+    // The crash flight's old factor, with the net behind it: the request that was refused is created.
+    const Rig crash{};
+    const double legacy = legacyFactor(inputsOf(crash));
+    const uint32_t reqW = requestWidth(3840.0 * 2.0, legacy), reqH = requestHeight(3840.0 * 2.0, legacy);
+    uint32_t nw = 0, nh = 0;
+    check(!fitsLimit(reqW, reqH) && uiPanelNetShrink(reqW, reqH, &nw, &nh) && fitsLimit(nw, nh) && nw == 16384 && nh == 9216,
+          "the pre-fix request (19200x10800), whatever made it, goes through the net as 16384x9216 and is not refused");
+    std::printf("  panel net: 19200x10800 -> %ux%u, 16384x16384 untouched, sweep of %u pairs %u wrong\n", nw, nh, n, bad);
+    // MUTANTS, each through the comparator the real net passes.
+    check(netAllRight(NetVariant::kReal), "comparator: the real net is right on all 15 cases");
+    check(!netAllRight(NetVariant::kDropped), "MUTANT, the net dropped: 19200x10800 reaches D3D11 as asked, over 16384 -- caught");
+    check(!netAllRight(NetVariant::kOffByOne), "MUTANT, the limit off by one (touches an exact 16384, shrinks to 16383) -- caught");
+    check(!netAllRight(NetVariant::kAxesClamped), "MUTANT, each axis clamped alone (16384x10800, the aspect lost) -- caught");
+}
+
+// ---- the live choice ----------------------------------------------------------------------------------------------------------
+
+enum class PickVariant { kReal, kNoFallback, kNoLive };
+UiSsPick pickOf(PickVariant v, UiSsRead read, float cur, float lo, float hi, float fxcfg) {
+    switch (v) {
+        case PickVariant::kReal:
+            return uiPickSupersampling(read, cur, lo, hi, fxcfg);
+        case PickVariant::kNoFallback: {  // the live value taken whenever something was read, the .fxcfg never
+            UiSsPick p;
+            if (read == UiSsRead::kOk) {
+                p.ss = cur;
+                p.source = UiSsSource::kLive;
+            }
+            return p;
+        }
+        case PickVariant::kNoLive: {  // the .fxcfg only: 6b1ce794
+            UiSsPick p;
+            if (fxcfg > 0.0f) {
+                p.ss = fxcfg;
+                p.source = UiSsSource::kFxcfg;
+            }
+            return p;
+        }
+    }
+    return UiSsPick{};
+}
+
+struct PickCase {
+    const char* what;
+    UiSsRead read;
+    float cur, lo, hi, fxcfg;
+    UiSsSource source;   // expected
+    float ss;            // expected
+    UiSsWhy why;         // expected
+};
+const float kNaN = std::numeric_limits<float>::quiet_NaN();
+const float kInf = std::numeric_limits<float>::infinity();
+const PickCase kPickCases[] = {
+    {"a believable live value (2.0 in 0.5..2.0) is used over the .fxcfg's 1.0", UiSsRead::kOk, 2.0f, 0.5f, 2.0f, 1.0f, UiSsSource::kLive, 2.0f, UiSsWhy::kNone},
+    {"a believable live value is used with no .fxcfg value at all", UiSsRead::kOk, 1.25f, 0.5f, 2.0f, 0.0f, UiSsSource::kLive, 1.25f, UiSsWhy::kNone},
+    {"live below 1 is used as read (the factor floors it at 1)", UiSsRead::kOk, 0.75f, 0.5f, 2.0f, 2.0f, UiSsSource::kLive, 0.75f, UiSsWhy::kNone},
+    {"live NaN falls back to the .fxcfg, says not a number", UiSsRead::kOk, kNaN, 0.5f, 2.0f, 1.5f, UiSsSource::kFxcfg, 1.5f, UiSsWhy::kNotFinite},
+    {"live infinite falls back", UiSsRead::kOk, kInf, 0.5f, 2.0f, 1.5f, UiSsSource::kFxcfg, 1.5f, UiSsWhy::kNotFinite},
+    {"a NaN range falls back", UiSsRead::kOk, 1.0f, kNaN, 2.0f, 1.5f, UiSsSource::kFxcfg, 1.5f, UiSsWhy::kNotFinite},
+    {"live above the game's own range (3.0 in 0.5..2.0) falls back", UiSsRead::kOk, 3.0f, 0.5f, 2.0f, 1.0f, UiSsSource::kFxcfg, 1.0f, UiSsWhy::kOutOfRange},
+    {"live below the game's own range (0.25 in 0.5..2.0) falls back", UiSsRead::kOk, 0.25f, 0.5f, 2.0f, 1.0f, UiSsSource::kFxcfg, 1.0f, UiSsWhy::kOutOfRange},
+    {"live zero falls back", UiSsRead::kOk, 0.0f, 0.5f, 2.0f, 1.0f, UiSsSource::kFxcfg, 1.0f, UiSsWhy::kOutOfRange},
+    {"live negative falls back", UiSsRead::kOk, -1.0f, 0.5f, 2.0f, 1.0f, UiSsSource::kFxcfg, 1.0f, UiSsWhy::kOutOfRange},
+    {"a range with min above max falls back", UiSsRead::kOk, 1.0f, 2.0f, 0.5f, 1.0f, UiSsSource::kFxcfg, 1.0f, UiSsWhy::kOutOfRange},
+    {"a range whose max is past the .fxcfg reader's own ceiling (9) falls back", UiSsRead::kOk, 1.0f, 0.5f, 9.0f, 1.0f, UiSsSource::kFxcfg, 1.0f, UiSsWhy::kOutOfRange},
+    {"a range with a zero minimum falls back", UiSsRead::kOk, 1.0f, 0.0f, 2.0f, 1.0f, UiSsSource::kFxcfg, 1.0f, UiSsWhy::kOutOfRange},
+    {"no render context known yet: the .fxcfg's, and why", UiSsRead::kNone, 0.0f, 0.0f, 0.0f, 1.0f, UiSsSource::kFxcfg, 1.0f, UiSsWhy::kNotCaptured},
+    {"a context that cannot be read: the .fxcfg's, and why", UiSsRead::kFault, 0.0f, 0.0f, 0.0f, 2.0f, UiSsSource::kFxcfg, 2.0f, UiSsWhy::kUnreadable},
+    {"live unavailable and no .fxcfg value: nothing, so no factor", UiSsRead::kNone, 0.0f, 0.0f, 0.0f, 0.0f, UiSsSource::kNone, 0.0f, UiSsWhy::kNotCaptured},
+    {"live implausible and a NaN .fxcfg value: nothing", UiSsRead::kOk, 3.0f, 0.5f, 2.0f, kNaN, UiSsSource::kNone, 0.0f, UiSsWhy::kOutOfRange},
+};
+bool pickCaseRight(const PickCase& c, PickVariant v) {
+    const UiSsPick p = pickOf(v, c.read, c.cur, c.lo, c.hi, c.fxcfg);
+    return p.source == c.source && p.ss == c.ss && (c.source == UiSsSource::kLive || p.why == c.why);
+}
+bool pickAllRight(PickVariant v) {
+    for (const PickCase& c : kPickCases)
+        if (!pickCaseRight(c, v)) return false;
+    return true;
+}
+
+void testLivePick() {
+    for (const PickCase& c : kPickCases) {
+        char msg[200];
+        std::snprintf(msg, sizeof(msg), "live choice: %s", c.what);
+        check(pickCaseRight(c, PickVariant::kReal), msg);
+    }
+    check(uiLiveSupersamplingValid(1.0f, 0.5f, 2.0f, nullptr) && uiLiveSupersamplingValid(2.0f + 5e-5f, 0.5f, 2.0f, nullptr) &&
+              !uiLiveSupersamplingValid(2.01f, 0.5f, 2.0f, nullptr),
+          "the live range test allows the float noise of the clamp's own edge and nothing more");
+    check(std::strlen(uiSsWhyName(UiSsWhy::kNotCaptured)) > 10 && std::strlen(uiSsWhyName(UiSsWhy::kUnreadable)) > 10 &&
+              std::strlen(uiSsWhyName(UiSsWhy::kNotFinite)) > 10 && std::strlen(uiSsWhyName(UiSsWhy::kOutOfRange)) > 10 &&
+              std::strcmp(uiSsSourceName(UiSsSource::kLive), "live") == 0 && std::strcmp(uiSsSourceName(UiSsSource::kFxcfg), ".fxcfg") == 0,
+          "every fallback reason has words for the log, and the two sources have names");
+    // MUTANTS through the same cases.
+    check(pickAllRight(PickVariant::kReal), "comparator: the real choice is right on all cases");
+    check(!pickAllRight(PickVariant::kNoFallback),
+          "MUTANT, the fallback dropped (NaN, out of range, unavailable all give nothing or garbage) -- caught");
+    check(!pickAllRight(PickVariant::kNoLive), "MUTANT, the live value ignored (the .fxcfg only: 6b1ce794) -- caught");
+    // THE MID-SESSION CHANGE: the game's menu moves the Supersampling 1.0 -> 2.0 -> 1.0; the .fxcfg still says 1.0 (written on
+    // apply, read every 5 s). The factor follows the live value on the frame it is read, not the .fxcfg's.
+    Rig r;
+    const float fxcfg = 1.0f;
+    double fs[3] = {};
+    double ssEff[3] = {};
+    const float live[3] = {1.0f, 2.0f, 1.0f};
+    for (int i = 0; i < 3; ++i) {
+        const UiSsPick pk = uiPickSupersampling(UiSsRead::kOk, live[i], 0.5f, 2.0f, fxcfg);
+        UiPanelInputs in = inputsOf(r);
+        in.supersampling = pk.ss;
+        UiPanelPlan p;
+        uiPanelPlanFor(in, &p);
+        fs[i] = p.f;
+        ssEff[i] = p.ss;
+    }
+    check(factorIs(fs[0], 0.4) && factorIs(fs[1], 0.8) && factorIs(fs[2], 0.4),
+          "a menu change 1.0 -> 2.0 -> 1.0 moves the factor 0.4 -> 0.8 -> 0.4 on the frame the live value is read");
+    check(uiPanelSsMoved(ssEff[0], ssEff[1]) && uiPanelSsMoved(ssEff[1], ssEff[2]) && !uiPanelSsMoved(ssEff[0], ssEff[0]) &&
+              !uiPanelSsMoved(1.0, 1.0 + 1e-9) && uiPanelSsMoved(1.0, 1.05),
+          "...and each move is seen as a move (written past the settle), a steady value and float noise are not");
+    const UiSsPick stale = pickOf(PickVariant::kNoLive, UiSsRead::kOk, 2.0f, 0.5f, 2.0f, fxcfg);
+    UiPanelInputs in = inputsOf(r);
+    in.supersampling = stale.ss;
+    UiPanelPlan p;
+    uiPanelPlanFor(in, &p);
+    check(!limitHolds(r, p.f) && limitHolds(r, fs[1]),
+          "the .fxcfg-only factor at that moment (0.4) would meet the game's 2.0 with a request over 16384; the live one does not");
+    // The setter thunk makes its factor from the plan the render thread published (formula, base) and the value about to be
+    // stored: it must be the very factor the frame boundary makes from the full inputs.
+    unsigned n = 0, differ = 0;
+    for (uint32_t out : {3070u, 4032u, 5000u})
+        for (float hmd : {0.5f, 0.65f, 1.0f})
+            for (float target : {1.0f, 1.25f})
+                for (float ss : {0.5f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f})
+                    for (uint32_t display : {0u, 3840u, 7680u}) {
+                        Rig g;
+                        g.askW = out; g.outW = out; g.hmd = hmd; g.target = target; g.ss = ss; g.displayW = display;
+                        UiPanelPlan full, quick;
+                        if (!uiPanelPlanFor(inputsOf(g), &full)) continue;
+                        uiPanelSolve(full.formula, full.base, UiPanelBase::kObserved, ss, &quick);
+                        ++n;
+                        if (!sameBits(full.f, quick.f) || !sameBits(full.lineF, quick.lineF) || !sameBits(full.ss, quick.ss)) ++differ;
+                    }
+    char msg[200];
+    std::snprintf(msg, sizeof(msg), "the setter thunk's factor (uiPanelSolve on the published plan) is the boundary's, bit for bit, on %u states (%u differ)", n, differ);
+    check(differ == 0, msg);
+    std::printf("  panel budget: live choice %u cases, mid-session 1.0 -> 2.0 -> 1.0 gives f %.2f -> %.2f -> %.2f; setter-thunk factor equals the plan on %u states, %u differ\n",
+                static_cast<unsigned>(sizeof(kPickCases) / sizeof(kPickCases[0])), fs[0], fs[1], fs[2], n, differ);
+}
+
+// The thunk's model of what the game's setter will store, ui_panel_scale.cpp's setterBeforeImpl: x below the minimum is the minimum,
+// else the smaller of the maximum and x (FUN_1428767D0).
+float modelStored(float lo, float hi, float x) { return (lo > x) ? lo : ((hi < x) ? hi : x); }
+
+// THE GAME'S OWN BYTES, executed: the 38 bytes of FUN_1428767D0 and the 13 of its sibling getter (the bytes the hook checks before it
+// writes anything), run on a fake interface object and context. The model above must say what they do, and the offsets the DLL reads
+// (this+0x18, ctx+0x3564 / 0x3568 / 0x356C / 0x359C) must be the ones they use.
+void testGameBytes() {
+    uint8_t* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    check(code != nullptr, "executable scratch memory for the game's own setter and getter bytes");
+    if (!code) return;
+    std::memcpy(code, kUiSsSetterBytes, sizeof(kUiSsSetterBytes));
+    std::memcpy(code + 64, kUiSsGetterBytes, sizeof(kUiSsGetterBytes));
+    using SetFn = void(__fastcall*)(void*, float);
+    using GetFn = float(__fastcall*)(void*);
+    const SetFn setter = reinterpret_cast<SetFn>(code);
+    const GetFn getter = reinterpret_cast<GetFn>(code + 64);
+    static uint8_t ctx[0x3600];
+    uint8_t object[0x40] = {};
+    void* ctxPtr = ctx;
+    std::memcpy(object + kUiSsCtxFromThis, &ctxPtr, sizeof(ctxPtr));
+    const float lo = 0.5f, hi = 2.0f;
+    std::memcpy(ctx + kUiSsOffMin, &lo, 4);
+    std::memcpy(ctx + kUiSsOffMax, &hi, 4);
+    unsigned wrong = 0;
+    const float xs[] = {-1.0f, 0.0f, 0.1f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 2.5f, 9.0f, kNaN};
+    for (float x : xs) {
+        setter(object, x);
+        float got = 0.0f;
+        std::memcpy(&got, ctx + kUiSsOffCur, 4);
+        const float model = modelStored(lo, hi, x);
+        const bool same = (std::isnan(got) && std::isnan(model)) || got == model;
+        if (!same) ++wrong;
+    }
+    char msg[200];
+    std::snprintf(msg, sizeof(msg), "the game's own setter bytes, run on 11 values (below, inside, above the range, NaN), store what the thunk's model says (%u differ)", wrong);
+    check(wrong == 0, msg);
+    // An inverted range (min above max) is refused as implausible by the live test, whatever the setter stored in it.
+    const float inv = 3.0f;
+    std::memcpy(ctx + kUiSsOffMin, &inv, 4);
+    std::memcpy(ctx + kUiSsOffMax, &lo, 4);
+    setter(object, 1.0f);
+    float stored = 0.0f;
+    std::memcpy(&stored, ctx + kUiSsOffCur, 4);
+    check(!uiLiveSupersamplingValid(stored, inv, lo, nullptr), "an inverted range in the context is not believed, whatever the setter stored in it");
+    const float cached = 1.75f;
+    std::memcpy(ctx + 0x359C, &cached, 4);
+    check(getter(object) == cached, "the sibling getter returns ctx+0x359C (the scale the last configure used), through this+0x18");
+    VirtualFree(code, 0, MEM_RELEASE);
+}
+
 // ---- the wiring, by source scan ---------------------------------------------------------------------------------------------
 
 struct Pin { const char* id; bool ok; const char* what; };
@@ -469,10 +760,47 @@ std::vector<Pin> pins(const std::string& scale, const std::string& surfaces, con
     const std::string reread = body(surfaces, "void hmdReadNow() {");
     const std::string orbFrame = body(orbit, "void orbitalWidthFrameBoundary(");
     const std::string panelSettings = body(hook, "bool deviceHookPanelSettings(");
+    const std::string choose = body(scale, "UiSsPick chooseSupersampling(");
+    const std::string install = body(scale, "void installLiveHooks(");
+    const std::string setterThunk = body(scale, "void __fastcall hookedSetter(");
+    const std::string getterThunk = body(scale, "float __fastcall hookedGetter(");
+    const std::string shutdown = body(scale, "void uiPanelScaleShutdown() {");
+    const std::string logFn = body(scale, "void uiPanelScaleLog() {");
+    const std::string apply = body(scale, "void apply() {");
+    const std::string netFn = body(surfaces, "bool uiSurfacesPanelNet(");
+    const std::string create = body(hook, "HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(");
+    using worldroute::countOf;
     using worldroute::has;
     using worldroute::inOrder;
-    out.push_back({"gather-ss", has(gather, "in->supersampling=uiSurfacesSupersampling();") && has(gather, "in->supersampling>0.0f"),
-                   "gatherInputs reads the Supersampling and returns false (no factor) without it"});
+    out.push_back({"gather-ss", has(gather, "in->supersampling=uiSurfacesSupersampling();"),
+                   "gatherInputs hands the boundary the .fxcfg's Supersampling (the fallback)"});
+    out.push_back({"pick-ss", has(frame, "constUiSsPickpick=chooseSupersampling(in.supersampling);") && has(frame, "in.supersampling=pick.ss;") &&
+                                  has(frame, "!(pick.ss>0.0f)"),
+                   "the frame boundary makes the factor from the chosen Supersampling every frame, and makes none without one"});
+    out.push_back({"fallback", has(choose, "uiPickSupersampling(read,cur,lo,hi,fxcfg)") && has(choose, "uiSsWhyName(pick.why)") &&
+                                   has(choose, "UiSsSource::kFxcfg") && has(choose, "readLiveSupersampling(&cur,&lo,&hi)"),
+                   "the live value is read every frame and the .fxcfg's takes over, with the reason said, when it is not believable"});
+    out.push_back({"ss-moved", has(frame, "constboolssMoved=g_live.load(std::memory_order_acquire)&&uiPanelSsMoved(g_lastSsEff,plan.ss);") &&
+                                   inOrder(frame, {"if(ssMoved){", "g_settle=kSettleFrames;", "}else{"}) &&
+                                   has(frame, "g_pubReady.store(true,std::memory_order_release);"),
+                   "a move of the Supersampling is written past the settle, and the plan is published for the setter thunk"});
+    out.push_back({"hook-checks", has(install, "std::memcmp(got,want[i],len[i])!=0") && has(install, "value!=reinterpret_cast<uint64_t>(fn[i])") &&
+                                      inOrder(apply, {"g_patch.store(kApplied,std::memory_order_release);", "installLiveHooks(base);"}),
+                   "the two slots are hooked only after the build is checked, and only when the functions' bytes and the slots' values are 332841's"});
+    out.push_back({"thunk-forwards", inOrder(setterThunk, {"guardedRun(setterBeforeThunk,self,x);", "orig(self,x);", "guardedRun(setterAfterThunk,self,x);"}) &&
+                                         has(getterThunk, "returng_origGetter.load(std::memory_order_acquire)(self);"),
+                   "the setter thunk moves the factor, then runs the game's setter, then checks what it stored; the getter thunk returns the game's value"});
+    out.push_back({"shutdown-restores", has(shutdown, "writeSlot(g_slotAt[i],g_slotOrig[i]);"),
+                   "the game's two virtual slots are put back on unload"});
+    out.push_back({"net-wired", inOrder(create, {"uiSurfacesPanelNet(*desc,init!=nullptr,&netDesc)", "desc=&netDesc;", "createTexture2DForwarded(self,desc,init,out)"}) &&
+                                    has(create, "desc->Width>kUiPanelNetLimit||desc->Height>kUiPanelNetLimit") && has(create, "!fromEdvr"),
+                   "a game create over 16384 on either axis goes through the net before it is forwarded; everything else is forwarded as made"});
+    out.push_back({"net-once", has(netFn, "uiPanelNetShrink(in.Width,in.Height,&nw,&nh)") && has(netFn, "if(!first)returntrue;") &&
+                                   has(surfaces, "ui quality: panel net: the game asked D3D11 for a"),
+                   "the net says each distinct requested size once, with the sizes, the factor and the Supersampling"});
+    out.push_back({"net-counted", has(logFn, "netText(net,sizeof(net));") && countOf(logFn, ",net);") >= 3 && has(scale, "panel net: %u create(s) over %u a side shrunk") &&
+                                      has(scale, "panel net: 0 create(s) over %u a side shrunk"),
+                   "the 30 s panel line carries the net's count in every state, a zero printed as a zero"});
     out.push_back({"gather-base", has(gather, "in->displayW=uiSurfacesDisplayWidth();") && has(gather, "in->screenW=vscreenModeAppliedWidth();"),
                    "gatherInputs hands the plan the display's width and the 2D screen's forced width"});
     out.push_back({"plan-written", inOrder(frame, {"uiPanelPlanFor(in,&plan)", "constdoublef=plan.f;", "writeFloats(f,plan.lineF,plan.ss)"}) &&
@@ -522,6 +850,18 @@ void testWiring() {
         {"reread", 1, "g_ssaaBits.store(ssBits, std::memory_order_release);", ""},
         {"orbit-line-factor", 2, "uiPanelScaleLineFactor()", "uiPanelScaleFactor()"},
         {"hook-reads", 3, "uiDisplaySizeFromXml(", "uiDisplaySizeFromXmlX("},
+        // 2026-10-08: the live Supersampling and the net. Dropping the fallback, the live read, the net, each fails the rig.
+        {"pick-ss", 0, "in.supersampling = pick.ss;", "in.supersampling = in.supersampling;"},
+        {"fallback", 0, "uiPickSupersampling(read, cur, lo, hi, fxcfg)", "UiSsPick{cur, UiSsSource::kLive, UiSsWhy::kNone}"},
+        {"fallback", 0, "readLiveSupersampling(&cur, &lo, &hi)", "UiSsRead::kNone"},
+        {"ss-moved", 0, "g_settle = kSettleFrames;", "g_settle = 0;"},
+        {"hook-checks", 0, "std::memcmp(got, want[i], len[i]) != 0", "false"},
+        {"thunk-forwards", 0, "if (orig) orig(self, x);", ""},
+        {"shutdown-restores", 0, "writeSlot(g_slotAt[i], g_slotOrig[i]);", ""},
+        {"net-wired", 3, "if (shrunk) desc = &netDesc;", ""},
+        {"net-wired", 3, "uiSurfacesPanelNet(*desc, init != nullptr, &netDesc)", "false"},
+        {"net-once", 1, "if (!first) return true;", ""},
+        {"net-counted", 0, "netText(net, sizeof(net));", ""},
     };
     for (const Control& c : controls) {
         std::string s = scale, su = surfaces, o = orbit, h = hook;
@@ -548,6 +888,9 @@ void testAll() {
     testMutants();
     testOrbitLines();
     testDisplayXml();
+    testNet();
+    testLivePick();
+    testGameBytes();
 }
 
 }  // namespace panelbudget

@@ -304,37 +304,19 @@ inline const char* uiPanelBaseName(UiPanelBase b) {
 
 inline double uiPanelClampF(double v) { return v < 0.25 ? 0.25 : v > 1.0 ? 1.0 : v; }
 
-// f = clamp( max( formula x ss, ss x B / budget ), [1/4, 1] ). At Supersampling <= 1, ss is exactly 1 and the
-// budget is not binding (B <= 5734 at f 0.4), f is today's expression bit for bit. False when an input is missing.
-inline bool uiPanelPlanFor(const UiPanelInputs& in, UiPanelPlan* out) {
-    if (out) *out = UiPanelPlan{};
-    if (!in.renderW || !in.outputW || !(in.target > 0.0f)) return false;
-    if (!(in.supersampling > 0.0f) || !std::isfinite(in.supersampling)) return false;
-    const double k = uiSizingK(in.fovTangent), kOut = uiSizingK(in.trueTangent);
-    if (!(k > 0.0) || !(kOut > 0.0)) return false;
+// The solve, from the two numbers the rest of the plan is made of: the formula (W_ui x k) / (W_out x k_out) / T
+// and the base B, and the Supersampling. Pure and separate so the game's own setter hook (ui_panel_scale.cpp) can
+// make the same factor from what the render thread last published, without the render thread's other inputs.
+inline void uiPanelSolve(double formula, double base, UiPanelBase baseFrom, float supersampling, UiPanelPlan* out) {
     UiPanelPlan p;
-    p.formula = (static_cast<double>(in.renderW) * k) / (static_cast<double>(in.outputW) * kOut) /
-                static_cast<double>(in.target);
-    p.ss = in.supersampling > 1.0f ? static_cast<double>(in.supersampling) : 1.0;
-    const double withSs = p.ss > 1.0 ? p.formula * p.ss : p.formula;
-    p.base = kUiPanelObservedBase;
-    p.baseFrom = UiPanelBase::kObserved;
-    const double scene = static_cast<double>(in.renderW) * k;
-    if (scene > p.base) {
-        p.base = scene;
-        p.baseFrom = UiPanelBase::kScene;
-    }
-    if (static_cast<double>(in.displayW) > p.base) {
-        p.base = static_cast<double>(in.displayW);
-        p.baseFrom = UiPanelBase::kDisplay;
-    }
-    if (static_cast<double>(in.screenW) > p.base) {
-        p.base = static_cast<double>(in.screenW);
-        p.baseFrom = UiPanelBase::kScreen;
-    }
-    const double floorF = p.ss * p.base / kUiPanelBudget;
+    p.formula = formula;
+    p.ss = supersampling > 1.0f ? static_cast<double>(supersampling) : 1.0;
+    const double withSs = p.ss > 1.0 ? formula * p.ss : formula;
+    p.base = base;
+    p.baseFrom = baseFrom;
+    const double floorF = p.ss * base / kUiPanelBudget;
     const double withBudget = withSs < floorF ? floorF : withSs;
-    p.beforeF = uiPanelClampF(p.formula);
+    p.beforeF = uiPanelClampF(formula);
     p.lineF = uiPanelClampF(withSs);
     p.f = uiPanelClampF(withBudget);
     p.ssActs = p.lineF != p.beforeF;
@@ -348,6 +330,34 @@ inline bool uiPanelPlanFor(const UiPanelInputs& in, UiPanelPlan* out) {
     p.largest = p.ss * p.base / p.f;
     p.largestBefore = p.ss * p.base / p.beforeF;
     if (out) *out = p;
+}
+
+// f = clamp( max( formula x ss, ss x B / budget ), [1/4, 1] ). At Supersampling <= 1, ss is exactly 1 and the
+// budget is not binding (B <= 5734 at f 0.4), f is today's expression bit for bit. False when an input is missing.
+inline bool uiPanelPlanFor(const UiPanelInputs& in, UiPanelPlan* out) {
+    if (out) *out = UiPanelPlan{};
+    if (!in.renderW || !in.outputW || !(in.target > 0.0f)) return false;
+    if (!(in.supersampling > 0.0f) || !std::isfinite(in.supersampling)) return false;
+    const double k = uiSizingK(in.fovTangent), kOut = uiSizingK(in.trueTangent);
+    if (!(k > 0.0) || !(kOut > 0.0)) return false;
+    const double formula = (static_cast<double>(in.renderW) * k) / (static_cast<double>(in.outputW) * kOut) /
+                           static_cast<double>(in.target);
+    double base = kUiPanelObservedBase;
+    UiPanelBase baseFrom = UiPanelBase::kObserved;
+    const double scene = static_cast<double>(in.renderW) * k;
+    if (scene > base) {
+        base = scene;
+        baseFrom = UiPanelBase::kScene;
+    }
+    if (static_cast<double>(in.displayW) > base) {
+        base = static_cast<double>(in.displayW);
+        baseFrom = UiPanelBase::kDisplay;
+    }
+    if (static_cast<double>(in.screenW) > base) {
+        base = static_cast<double>(in.screenW);
+        baseFrom = UiPanelBase::kScreen;
+    }
+    uiPanelSolve(formula, base, baseFrom, in.supersampling, out);
     return true;
 }
 
@@ -399,6 +409,114 @@ inline uint32_t uiPanelSize(uint32_t stage, double c, float divisor1920) {
     if (!(divisor1920 > 0.0f)) return 0;
     const float s = static_cast<float>(c) / divisor1920;
     return static_cast<uint32_t>(static_cast<float>(stage) * s);
+}
+
+// ------------------------------------------------- the game's LIVE Supersampling --
+//
+// 2026-10-08. 6b1ce794 read the Supersampling from the .fxcfg every 5 s, so a change in the game's graphics menu
+// could reach the panels before the factor knew. The value the game acts on is the scale entry of its render
+// context, ctx+0x3564 (docs/ui-layer-2026-09-23.md, "2026-10-07: Supersampling and the panel budget"), clamped
+// to [ctx+0x3568, ctx+0x356C] by FUN_1428767D0, the setter, which is virtual slot +0x90 of the context's
+// interface class (vtable 0x52E9020; slot RVA 0x52E90B0). The interface object holds the context at this+0x18;
+// the setter's sibling at +0x98 (0x28414E0) reads ctx+0x359C, the scale the last configure used. EDVR replaces
+// both slots with thunks that forward untouched and remember the context (and, at the setter, move the
+// factor before the original runs: the game's reconfigure follows the setter, never precedes it).
+constexpr uint32_t kUiSsSetterSlotRva = 0x52E90B0, kUiSsGetterSlotRva = 0x52E90B8;
+constexpr uint32_t kUiSsSetterRva = 0x28767D0, kUiSsGetterRva = 0x28414E0;
+constexpr uint32_t kUiSsCtxFromThis = 0x18;
+constexpr uint32_t kUiSsOffCur = 0x3564, kUiSsOffMin = 0x3568, kUiSsOffMax = 0x356C;
+constexpr uint8_t kUiSsSetterBytes[38] = {0x48, 0x8B, 0x41, 0x18, 0xF3, 0x0F, 0x10, 0x80, 0x68, 0x35, 0x00, 0x00, 0x0F,
+                                          0x2F, 0xC1, 0x77, 0x0C, 0xF3, 0x0F, 0x10, 0x80, 0x6C, 0x35, 0x00, 0x00, 0xF3,
+                                          0x0F, 0x5D, 0xC1, 0xF3, 0x0F, 0x11, 0x80, 0x64, 0x35, 0x00, 0x00, 0xC3};
+constexpr uint8_t kUiSsGetterBytes[13] = {0x48, 0x8B, 0x41, 0x18, 0xF3, 0x0F, 0x10, 0x80, 0x9C, 0x35, 0x00, 0x00, 0xC3};
+constexpr float kUiSsCeiling = 8.0f;  // the .fxcfg reader's own ceiling (device_hook.cpp eliteHmdMultiplier)
+
+enum class UiSsRead : uint8_t { kNone = 0, kFault, kOk };  // no render context known yet / a read faulted / read
+enum class UiSsSource : uint8_t { kNone = 0, kLive, kFxcfg };
+enum class UiSsWhy : uint8_t { kNone = 0, kNotCaptured, kUnreadable, kNotFinite, kOutOfRange };
+
+inline const char* uiSsSourceName(UiSsSource s) {
+    return s == UiSsSource::kLive ? "live" : s == UiSsSource::kFxcfg ? ".fxcfg" : "none";
+}
+inline const char* uiSsWhyName(UiSsWhy w) {
+    return w == UiSsWhy::kNotCaptured   ? "the game has not called its Supersampling setter or getter yet, so its render context is not known"
+           : w == UiSsWhy::kUnreadable  ? "the render context could not be read"
+           : w == UiSsWhy::kNotFinite   ? "the live value is not a number"
+           : w == UiSsWhy::kOutOfRange  ? "the live value is outside the game's own range"
+                                        : "";
+}
+
+// The live entry is believable: all three finite, the range the game clamps to sane and ordered, and the value
+// inside it (the setter makes it so; anything else is the wrong memory).
+inline bool uiLiveSupersamplingValid(float cur, float lo, float hi, UiSsWhy* why) {
+    if (why) *why = UiSsWhy::kNone;
+    if (!std::isfinite(cur) || !std::isfinite(lo) || !std::isfinite(hi)) {
+        if (why) *why = UiSsWhy::kNotFinite;
+        return false;
+    }
+    if (!(lo > 0.0f) || !(hi >= lo) || hi > kUiSsCeiling || !(cur > 0.0f) || cur < lo - 1e-4f || cur > hi + 1e-4f) {
+        if (why) *why = UiSsWhy::kOutOfRange;
+        return false;
+    }
+    return true;
+}
+
+struct UiSsPick {
+    float ss = 0.0f;                          // the Supersampling the factor is made from; 0 when neither source has one
+    UiSsSource source = UiSsSource::kNone;
+    UiSsWhy why = UiSsWhy::kNone;             // when source is the .fxcfg: why the live value was not used
+};
+
+// The choice: the live value when it was read and is believable, the .fxcfg's when not (and why), nothing when
+// neither is there. `fxcfg` is 0 while unknown.
+inline UiSsPick uiPickSupersampling(UiSsRead read, float cur, float lo, float hi, float fxcfg) {
+    UiSsPick p;
+    if (read == UiSsRead::kOk) {
+        UiSsWhy why = UiSsWhy::kNone;
+        if (uiLiveSupersamplingValid(cur, lo, hi, &why)) {
+            p.ss = cur;
+            p.source = UiSsSource::kLive;
+            return p;
+        }
+        p.why = why;
+    } else {
+        p.why = read == UiSsRead::kFault ? UiSsWhy::kUnreadable : UiSsWhy::kNotCaptured;
+    }
+    if (fxcfg > 0.0f && std::isfinite(fxcfg)) {
+        p.ss = fxcfg;
+        p.source = UiSsSource::kFxcfg;
+    }
+    return p;
+}
+
+// The Supersampling the panel factor sees changed (the effective one, max(S, 1)): write now, past the settle.
+inline bool uiPanelSsMoved(double lastEff, double nowEff) { return std::fabs(nowEff - lastEff) > 1e-6; }
+
+// ------------------------------------------------------------------- the net --
+//
+// Last resort at the panel's CreateTexture2D: whatever the factor, a render or depth target over D3D11's limit
+// on either axis is created shrunk to fit, aspect kept, so the create cannot be refused (a refused create is
+// fatal in Elite). The longer side becomes the limit exactly; the other is scaled the same and floored, never
+// under 1. Requests at or under the limit are not touched (false, outputs equal the inputs).
+constexpr uint32_t kUiPanelNetLimit = 16384;  // D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION
+
+inline bool uiPanelNetShrink(uint32_t w, uint32_t h, uint32_t* outW, uint32_t* outH) {
+    uint32_t nw = w, nh = h;
+    const bool over = w > kUiPanelNetLimit || h > kUiPanelNetLimit;
+    if (over) {
+        if (w >= h) {
+            nw = kUiPanelNetLimit;
+            nh = static_cast<uint32_t>(static_cast<uint64_t>(h) * kUiPanelNetLimit / w);
+        } else {
+            nh = kUiPanelNetLimit;
+            nw = static_cast<uint32_t>(static_cast<uint64_t>(w) * kUiPanelNetLimit / h);
+        }
+        if (nw < 1) nw = 1;
+        if (nh < 1) nh = 1;
+    }
+    if (outW) *outW = nw;
+    if (outH) *outH = nh;
+    return over;
 }
 
 }  // namespace edvr
