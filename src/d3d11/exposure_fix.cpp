@@ -21,6 +21,7 @@
 #include "draw_census.h"  // drawCensusDispatch: the census records compute
 #include "flat_runtime.h"
 #include "flat_temporal.h"  // flat discovery and capture-only dispatch forwarding
+#include "object_probe.h"   // objectProbeNoteDispatch: the skin ledger's view of the palette chain (armed eye runs only)
 #include "vr_world_route.h"  // g_vrWorldInternal: the VR world route's own dispatches pass straight through
 #include "../common/runtime_profile.h"
 #include "gpu_frame_timing.h"
@@ -761,6 +762,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
         // the record is honest for any context; only the fixes and probes
         // below stay owner-only.
         if (drawCensusArmed()) drawCensusDispatch(self, x, y, z, true, nullptr, 0);
+        if (objectProbeLedgerActive()) objectProbeNoteDispatch(self, x, y, z, true);   // the skin ledger: one bool unarmed
         s->realDispatch(self, x, y, z);
         return;
     }
@@ -773,6 +775,9 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // exists because the FSS body could legally be built by a compute writer
     // and no capture before 2026-08-25 could have seen it.
     if (drawCensusArmed()) drawCensusDispatch(self, x, y, z, false, nullptr, 0);
+    // The skin ledger (skin_ledger.h) reads the palette chain's inputs here, before the game's dispatch runs: an
+    // armed eye run only, one bool load otherwise, and what it copies is the game's own state, untouched.
+    if (objectProbeLedgerActive()) objectProbeNoteDispatch(self, x, y, z, false);
 
     // The dispatch-skip probe, after the census record (a census taken
     // while probing must record what the game SUBMITTED -- the draw skips'

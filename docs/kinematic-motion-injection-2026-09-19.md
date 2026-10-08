@@ -30,9 +30,9 @@
   entries describe coverage repairs. The 09-28 bytecode proof supersedes their
   native-marker/bypass interpretation: all five alleged native pairs and BA58
   were EDVR-generated.
-- **Other open work:** walkers (F10 entry at the end: keyed pairs, no per-part
-  builder; bones F2 open); ships, evaluated-but-undrawn movers, flat-source
-  aliasing; stale cockpit (low priority); ps_91F8/ps_A607 owner/coverage.
+- **Other open work:** walkers (F10, F1, F2 entries at the end); ships,
+  evaluated-but-undrawn movers, flat-source aliasing; stale cockpit (low
+  priority); ps_91F8/ps_A607 owner/coverage.
   Flight 5/6 and 162703 cover the fixed on-foot/hangar paths. Boarding flicker:
   LOD governor (removed 2026-10-08, branch claude/remove-settlement-detail,
   with `fix.settlement_detail`). Pending checks: diagnostics 1 vs 0, walker
@@ -58,7 +58,7 @@
   estimation or generic pool matching. NPC F1 (Sean 2026-10-08: NPC families
   only, if the dumps support it): BUILT on claude/explorer-cam-npc-motion, VR
   only, green, not flown ("F1 built" entry); gain 7-32% whole-mask (D3 1.36 ->
-  0.93-1.26 px, INFERRED), stale class (38%) gone. F2 (palette, unproven) needs F1.
+  0.93-1.26 px, INFERRED), stale class (38%) gone. F2: instrument built, unflown.
 
 ## Premise
 
@@ -4041,3 +4041,60 @@ engine_velocity_test 15,399 checks. Not flown, not installed, no config key.
 - Doubts: kRememberCap (engine_velocity.cpp:137) keeps 512 shader objects and
   drops the rest silently; the pairs are keyed for VR only, so the flat screen
   keeps its stale NPC refusal until a flat dump says otherwise.
+### 2026-10-08 F2 study: the previous bone palette is the game's other buffer, and the instrument that settles it
+
+Study notes and scripts: analysis\npc_blur\f2 (f2_feasibility.md, g1-g12). Verdict
+UNKNOWN, leaning FEASIBLE. Branch claude/explorer-cam-npc-motion, instrument BUILT,
+not flown, no config key.
+- t38 (MEASURED, D99AFDC2 and 61AE8EB0 bytecode): row = t33 word 0 + the vertex's
+  8-bit bone index, up to 4 influences, three float4 loads a row (3x4 row-major,
+  translation in .w, 48 B), applied before the record's quaternion (words 2-3) and
+  position (+16). At the NPC's 2,944 rows 100% are rotations. t33 holds no bone
+  count (an index is 8 bits: at most 256 rows a record).
+- The palette is written on the GPU (MEASURED, bytecode + census DCX #13):
+  cs_6FE04AF836BB1DBA, APPLY_BIND_POSE_TRANSFORMS_CS, one group a job:
+  `palette[dst+i] = joint[src+i] o invBind[bind+3i]` from a job table t0 (16 B:
+  src, dst, bind, count), CPU-written joints t2 (48 B) and bind poses t1; cs_7B2A
+  is CLEAR_TRANSFORM_DATA_CS (identity fill). The dst base is the running sum of
+  bone counts in the node's list order, restarted every frame (FUN_144C540E0).
+- The game keeps last frame's palette (code MEASURED, behaviour INFERRED):
+  fRenderSkinningProcessorNode::PrevGpuTransformData. FUN_144C54A20 (RVA
+  0x4C54A20, from the per-frame FUN_144C52CE0) swaps GpuTransformData and
+  PrevGpuTransformData and their views on every call; two persistent 8,388,624 B
+  buffers, not renamed. The ledger saw exactly one palette a frame, alternating.
+- Identity is the open half (MEASURED): the base is not an exact key. D3 frames
+  11718/11719: 107 bases new, 30 gone, 2 of 90 persisted bases jump 200.6 m (a base
+  reused by another character). Skinned records never reach the FUN_144312E00 emit
+  hook (log `tainted 0`), so the rigid path's certified joins cannot carry them; a
+  key needs the job list (entry pointer -> dst base), a hook at FUN_144C540E0.
+- The bones files read all zeros because of the COPY, not the buffer (MEASURED on
+  this GPU and WARP, analysis\npc_blur\f2\boxcopy.cpp): CopySubresourceRegion of a
+  box out of a stride-48 structured buffer returns nothing when the box is not a
+  multiple of 48, and 1,048,576 is not. A box of 1,048,560 reads the rows, so does
+  a whole CopyResource (the eyemesh dump's, which held real rows all along).
+  ruled out: the palette copies read zeros because the game discarded the buffers
+  before the boundary (per-object-motion.md, 09-10), because the draw-time copy
+  read zeros too and the box is the cause.
+- The instrument (skin_ledger.h, glue in object_probe.cpp and the dispatch hook in
+  exposure_fix.cpp): rides the eye-dump key, nothing unarmed (one bool load in the
+  dispatch hook). For the run's 20 frames: every learned palette copied WHOLE at
+  the frame's first pool draw (the first 3 MiB kept, bones<p>_<stamp>_<frame>.bin,
+  now both buffers every frame), and at each cs_6FE0 dispatch its t0 and t2 whole
+  (t1 once per buffer) plus the four views, into skin_<stamp>.bin. Per press about
+  150 MiB more (about 120 MiB of bones files, about 35 MiB in the skin file).
+  tools\skin_palette_check.py reads it: Prev (other buffer in frame n == the buffer
+  bound in n-1, bit for bit, on the rows n-1's jobs wrote), the recompute of every
+  row from t0/t1/t2, the running sum, t33 bases against job dst values, list
+  changes against identity swaps, the views. Rig skin_ledger_test (S1-S12, 36
+  mutants all caught) and the checker's own self-test with injected faults.
+- Flight: Frontier, any scene with skinned characters (the commander's own body
+  runs the chain, so an NPC is not required; a walking one makes the identity half
+  worth reading), the eye-dump key as for F10, then
+  `python analysis\npc_blur\f2\f2_check.py`. No holding still: the window is 20
+  frames. Log: `skin ledger: armed with eye run` at the press, then 20 `skin ledger
+  frame N:` lines and `skin ledger RESULT RAN|PARTIAL|NEVER RAN|BROKEN` at the
+  ledger write. No RESULT at all: the window never closed (the ledger write line is
+  missing too). NEVER RAN names why (no dispatch reached the hook, or none was the
+  chain); BROKEN counts lost, declined, skipped copies and groups with no job table.
+- Not in this build: the job-list hook, any use of the previous palette, any
+  change on screen.

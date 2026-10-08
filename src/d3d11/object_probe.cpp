@@ -1,5 +1,6 @@
 #include "object_probe.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -25,6 +26,8 @@
 #include "gui_draw_snapshot.h"
 #include "cull_gate_probe.h"
 #include "kinematic_eval_hook.h"
+#include "exposure_fix.h"   // lookupShaderHash: the compute dispatch's shader, for the skin ledger
+#include "skin_ledger.h"
 
 namespace edvr {
 
@@ -76,7 +79,13 @@ Slot g_ring[kRing];
 // and the write, some twenty frames; the copies ride the pool's own staging
 // pattern -- issued at the boundary, read back late, never waited on.
 constexpr int      kLedgerFrames = 20;          // the run's sixteen crops and slack either side
-constexpr uint32_t kLedgerBonesMax = 1u << 20;  // the palette's first megabyte: rows to 21845; the station's bases reached 16413 (2026-09-10)
+// What a palette copy KEEPS (2026-10-08: it is the kept prefix now, no longer the size of the copy): rows 0..65535.
+// The copy itself is the whole buffer. The old box of 1,048,576 bytes was not a multiple of the 48-byte stride, and
+// CopySubresourceRegion drops such a box out of a structured buffer without a word (skin_ledger.h says how it was
+// measured), which is why every bones file ever written read all zeros. The station's bases reached 16413 (2026-09-10),
+// the NPC's walk 29,573 rows used (2026-10-08).
+constexpr uint32_t kLedgerBonesMax = skin::kKeepPaletteBytes;
+static_assert(kLedgerFrames == static_cast<int>(skin::kFrames), "the skin ledger's window is the eye run ledger's");
 constexpr int      kLedgerRing = 4;
 constexpr int      kLedgerCrops = 32;
 // Row layout is versioned by the draws file's header (version 1 = 24-byte
@@ -122,10 +131,11 @@ uint32_t g_instBytes = 0, g_instStride = 0;
 // one, read all zeros at the bases the hub's records carry: the census of
 // 2026-09-09 counted four such buffers, and the hub's is another).
 constexpr int kLedgerPalettes = 4;
+static_assert(kLedgerPalettes == static_cast<int>(skin::kMaxPalettes), "the skin ledger holds the ledger's palettes");
 ID3D11Buffer* g_palette[kLedgerPalettes] = {};   // held while armed
 uint32_t g_paletteBytes[kLedgerPalettes] = {};
 int      g_paletteCount = 0;
-bool     g_paletteSeen[kLedgerPalettes] = {};   // copied at this frame's first pool draw binding it (not at the boundary: the run of 05:37 read zeros there, the game having discarded them for the next frame)
+bool     g_paletteSeen[kLedgerPalettes] = {};   // copied at this frame's first pool draw (every learned palette at once: the run of 2026-10-08 needs the one NOT bound as well; not at the boundary, where the run of 05:37 read zeros -- which was the box, not the timing)
 // [0] the instance stream's copies, [1..4] the palettes'
 LedgerCopy g_ledgerRing[1 + kLedgerPalettes][kLedgerRing];
 std::vector<uint8_t> g_ledgerPalette[kLedgerPalettes][kLedgerFrames];
@@ -151,6 +161,24 @@ struct AuxSlot {
 };
 AuxSlot g_aux[kLedgerAux];
 int     g_auxCount = 0;
+// THE SKIN LEDGER (skin_ledger.h): the palette chain's dispatches and the two palettes whole, for the same frames.
+// Armed and cleared with the eye run's ledger; every glue function below returns at its first line while unarmed.
+skin::SkinLedger g_skin;
+uint32_t g_skinPoolFrame = 0;                  // the ledger frame whose first pool draw was noted
+std::atomic<uint32_t> g_skinForeign{0};        // dispatches recorded on deferred contexts: any thread, so counted and never read
+// Whole-buffer copies staged at a chain dispatch (job table, joint matrices, bind poses), read back late like the rest.
+constexpr int kSkinPending = 48;               // a frame stages at most 4 x 2 + 4, and a copy is read two frames on
+struct SkinCopy {
+    ID3D11Buffer* staging = nullptr;
+    uint32_t bytes = 0;
+    uint32_t frame = 0;
+    int      idx = -1;                         // the frame's dispatch slot, or the bind-pose index
+    skin::Kind kind = skin::Kind::Jobs;
+    bool     inUse = false;
+};
+SkinCopy g_skinCopies[kSkinPending];
+FaultBudget g_skinBudget("skinLedger", 5);
+void skinReleaseCopies();                      // defined with the rest of the skin glue, after makeStaging
 EyeDrawSnapshot g_drawSnapshot;
 EyeTonemapSnapshot g_tonemapSnapshot;
 EyePanelSnapshot g_panelSnapshot;
@@ -317,6 +345,9 @@ void ledgerRelease() {
     for (auto& ring : g_ledgerRing) {
         for (LedgerCopy& c : ring) releaseCopy(c);
     }
+    skinReleaseCopies();        // the in-flight copies go with the pool they were learned on (counted as lost by the run)
+    g_skin.notePoolRelease();   // a no-op unless the run is armed: at the arm and at the write the ledger is not
+    g_skinPoolFrame = 0;
     for (AuxSlot& a : g_aux) {
         a.vs = 0;
         a.instances = a.count = 0;
@@ -473,6 +504,7 @@ void ledgerLearn(ID3D11DeviceContext* ctx) {
                         } else {
                             g_palette[g_paletteCount] = buf;   // the QueryInterface reference is the one held
                             g_paletteBytes[g_paletteCount] = info.a;
+                            g_skin.setPalette(static_cast<uint32_t>(g_paletteCount), reinterpret_cast<uintptr_t>(buf), info.a);
                             ++g_paletteCount;
                         }
                     }
@@ -579,11 +611,12 @@ void auxCapture(ID3D11DeviceContext* ctx, uint64_t vs, uint32_t count, uint32_t 
     if (dev) dev->Release();
 }
 
-// A palette's copy at this frame's first pool draw binding it, the megabyte
-// the bases reach into (kLedgerBonesMax): at the boundary the copies read
-// zeros, the game having discarded and rewritten them for the next frame
-// before present (the run of 05:37). Three COM calls a pool draw until every
-// palette in hand has been seen this frame.
+// EVERY learned palette, WHOLE, at this frame's first pool draw: the one bound at t38 (the frame's palette) and the
+// other persistent buffer (the game's PrevGpuTransformData, which is what the F2 question is about). A whole
+// CopyResource: the first megabyte as a box read zeros since 2026-09-10 (kLedgerBonesMax says why), and the ledger
+// keeps the first kLedgerBonesMax bytes of each readback. At the boundary the same copies read the NEXT frame's
+// buffers (the run of 05:37), so this is the draw's. Three COM calls a pool draw until every palette in hand has
+// been copied this frame; the second pool draw of a frame returns at its first line.
 void paletteCapture(ID3D11DeviceContext* ctx) {
     bool all = g_paletteCount > 0;
     for (int i = 0; i < g_paletteCount; ++i) all = all && g_paletteSeen[i];
@@ -591,6 +624,20 @@ void paletteCapture(ID3D11DeviceContext* ctx) {
     ID3D11ShaderResourceView* srv = nullptr;
     ctx->VSGetShaderResources(38, 1, &srv);
     if (!srv) return;
+    skin::View t38View;   // how the pool draws address the rows: FirstElement 0 = from the buffer's start
+    {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        srv->GetDesc(&sd);
+        if (sd.ViewDimension == D3D11_SRV_DIMENSION_BUFFER) {
+            t38View.first = sd.Buffer.FirstElement;
+            t38View.num = sd.Buffer.NumElements;
+            t38View.valid = 1;
+        } else if (sd.ViewDimension == D3D11_SRV_DIMENSION_BUFFEREX) {
+            t38View.first = sd.BufferEx.FirstElement;
+            t38View.num = sd.BufferEx.NumElements;
+            t38View.valid = 1;
+        }
+    }
     ID3D11Resource* res = nullptr;
     srv->GetResource(&res);
     srv->Release();
@@ -599,14 +646,100 @@ void paletteCapture(ID3D11DeviceContext* ctx) {
     res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf));
     res->Release();
     if (!buf) return;
-    for (int i = 0; i < g_paletteCount; ++i) {
-        if (g_palette[i] != buf || g_paletteSeen[i]) continue;
-        g_paletteSeen[i] = true;
-        ID3D11Device* dev = nullptr;
-        if (!auxStage(ctx, dev, g_ledgerRing[1 + i], buf, g_paletteBytes[i], kLedgerBonesMax)) ++g_ledgerSkipped;
-        if (dev) dev->Release();
+    const uint32_t frame = g_frame + 1;
+    if (g_skinPoolFrame != frame) {
+        g_skinPoolFrame = frame;
+        int bound = -1;
+        for (int i = 0; i < g_paletteCount; ++i) {
+            if (g_palette[i] == buf) bound = i;
+        }
+        t38View.stride = skin::kRowBytes;
+        g_skin.notePoolDraw(frame, bound, reinterpret_cast<uintptr_t>(buf), t38View);
     }
+    ID3D11Device* dev = nullptr;
+    for (int i = 0; i < g_paletteCount; ++i) {
+        if (g_paletteSeen[i]) continue;
+        g_paletteSeen[i] = true;
+        // whole = cap: auxStage takes CopyResource only when the copy is the whole buffer
+        const bool ok = auxStage(ctx, dev, g_ledgerRing[1 + i], g_palette[i], g_paletteBytes[i], g_paletteBytes[i]);
+        if (!ok) ++g_ledgerSkipped;
+        g_skin.notePaletteIssued(frame, ok);
+    }
+    if (dev) dev->Release();
     buf->Release();
+}
+
+// ---- THE SKIN LEDGER's glue (skin_ledger.h holds the rules; this reads the context and copies) -------------------
+
+void skinReleaseCopies() {
+    for (SkinCopy& c : g_skinCopies) {
+        if (c.staging) c.staging->Release();
+        c = SkinCopy();
+    }
+}
+
+// A whole-buffer copy of `src` (`bytes` is its ByteWidth) into a staging buffer, read back late like every other
+// copy here. False when no slot is free or no staging buffer can be made.
+bool skinStage(ID3D11DeviceContext* ctx, ID3D11Buffer* src, uint32_t bytes, skin::Kind kind, uint32_t frame, int idx) {
+    SkinCopy* c = nullptr;
+    for (SkinCopy& s : g_skinCopies) {
+        if (!s.inUse) { c = &s; break; }
+    }
+    if (!c || !src || !bytes) return false;
+    if (c->staging && c->bytes != bytes) {
+        c->staging->Release();
+        c->staging = nullptr;
+        c->bytes = 0;
+    }
+    if (!c->staging) {
+        ID3D11Device* dev = nullptr;
+        ctx->GetDevice(&dev);
+        const bool ok = dev && makeStaging(dev, bytes, &c->staging);
+        if (dev) dev->Release();
+        if (!ok) return false;
+        c->bytes = bytes;
+    }
+    ctx->CopyResource(c->staging, src);
+    c->frame = frame;   // as ledgerNoteDraw counts it: the frame whose draws are being submitted
+    c->idx = idx;
+    c->kind = kind;
+    c->inUse = true;
+    return true;
+}
+
+void skinPoll(ID3D11DeviceContext* ctx) {
+    for (SkinCopy& c : g_skinCopies) {
+        if (!c.inUse || g_frame - c.frame < kReadAfter) continue;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        const HRESULT hr = ctx->Map(c.staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            if (g_frame - c.frame > kDropAfter) { c.inUse = false; g_skin.noteLost(c.frame); }
+            continue;
+        }
+        if (FAILED(hr) || !m.pData) { c.inUse = false; g_skin.noteLost(c.frame); continue; }
+        g_skin.deliver(c.kind, c.frame, c.idx, static_cast<const uint8_t*>(m.pData), c.bytes);
+        ctx->Unmap(c.staging, 0);
+        c.inUse = false;
+    }
+}
+
+// The skin ledger's per-run files and report, at the ledger's write: skin_<stamp>.bin first, then the report, so the
+// RESULT line can say what became of the file. `pools` are the run's per-frame pool copies (the t33 bases).
+void writeSkinLedger(const std::wstring& dir, const char* how) {
+    if (!g_skin.armed() || g_skin.finished()) return;
+    std::string stamp;
+    for (const wchar_t* p = g_ledgerStamp; *p; ++p) stamp += static_cast<char>(*p < 128 ? *p : '?');
+    skin::PoolRef pools[skin::kFrames];
+    for (int i = 0; i < kLedgerFrames; ++i) {
+        pools[i].data = g_ledgerPool[i].empty() ? nullptr : g_ledgerPool[i].data();
+        pools[i].bytes = g_ledgerPool[i].size();
+    }
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\skin_%s.bin", dir.c_str(), g_ledgerStamp);
+    const bool ok = g_skin.writeFile(path);
+    g_skin.noteForeign(g_skinForeign.load(std::memory_order_relaxed));
+    g_skin.report(stamp, pools, how, ok ? "written" : "WRITE FAILED",
+                  [](const std::string& line) { Log::get().note("%s", line.c_str()); });
 }
 
 // One eye draw's row while armed. The pool question is asked of the context
@@ -744,7 +877,7 @@ void ledgerIssue(ID3D11DeviceContext* ctx) {
 // The late readbacks, kept by frame; a copy still in flight past kDropAfter
 // is given up like the pool's.
 // One copy's readback: 1 read, 0 not ready yet, -1 given up.
-int ledgerRead(ID3D11DeviceContext* ctx, LedgerCopy& c, std::vector<uint8_t>* into) {
+int ledgerRead(ID3D11DeviceContext* ctx, LedgerCopy& c, std::vector<uint8_t>* into, uint32_t keep = 0) {
     if (!c.inUse || g_frame - c.frame < kReadAfter) return 0;
     D3D11_MAPPED_SUBRESOURCE m{};
     const HRESULT hr = ctx->Map(c.staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
@@ -754,8 +887,9 @@ int ledgerRead(ID3D11DeviceContext* ctx, LedgerCopy& c, std::vector<uint8_t>* in
     }
     if (FAILED(hr) || !m.pData) { c.inUse = false; ++g_ledgerSkipped; return -1; }
     if (into) {
+        // keep: the prefix of a large copy worth holding (a palette's first kLedgerBonesMax bytes of its 8 MB)
         const uint8_t* b = static_cast<const uint8_t*>(m.pData);
-        into->assign(b, b + c.bytes);
+        into->assign(b, b + (keep && keep < c.bytes ? keep : c.bytes));
     }
     ctx->Unmap(c.staging, 0);
     c.inUse = false;
@@ -769,9 +903,11 @@ void ledgerPoll(ID3D11DeviceContext* ctx) {
                 !kept ? nullptr
                       : (what == 0 ? &g_ledgerInst[c.frame - g_ledgerFrame0]
                                    : &g_ledgerPalette[what - 1][c.frame - g_ledgerFrame0]);
-            ledgerRead(ctx, c, into);
+            const uint32_t frame = c.frame;
+            if (ledgerRead(ctx, c, into, what == 0 ? 0u : kLedgerBonesMax) == 1 && what != 0 && kept) g_skin.notePaletteGot(frame);
         }
     }
+    skinPoll(ctx);
     for (int s = 0; s < g_auxCount; ++s) {
         AuxSlot& a = g_aux[s];
         for (int what = 0; what < kAuxWhat; ++what) {
@@ -920,8 +1056,8 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     Log::get().note(
         "object probe: the eye run's LEDGER is on disk beside its crops -- %d frames from %u: %d pool copies "
         "(pool_%ls_<frame>.bin), %d instance streams (inst_%ls_<frame>.bin, %u bytes, stride %u), %d palette "
-        "copies of %d palettes of [%s] bytes (bones<p>_%ls_<frame>.bin, the first %u bytes of each, copied at the "
-        "draw), %d aux files "
+        "copies of %d palettes of [%s] bytes (bones<p>_%ls_<frame>.bin, every learned palette copied WHOLE at the "
+        "frame's first pool draw, the first %u bytes of each kept), %d aux files "
         "(aux_%ls_<frame>.bin: cb2, t0 and the first two vertex buffers of the %d shaders drawing %u+ instances "
         "in a draw: [%s]) and %u eye draws in draws_%ls.bin%s; the crops C%02d..C%02d were frames %d..%d. "
         "tools/eye_run_ledger.py reads them. %u copies were skipped.",
@@ -930,6 +1066,8 @@ void writeLedger(ID3D11DeviceContext* ctx) {
         rows, g_ledgerStamp, drawsOk ? "" : " (the draws file FAILED to write)", first < 0 ? 0 : first,
         last < 0 ? 0 : last, first < 0 ? -1 : g_ledgerCropFrame[first], last < 0 ? -1 : g_ledgerCropFrame[last],
         g_ledgerSkipped);
+    // The skin ledger reports with the ledger, before the pool copies it joins its t33 bases to are let go.
+    writeSkinLedger(dir, "window closed");
     for (int i = 0; i < kLedgerFrames; ++i) {
         std::vector<uint8_t>().swap(g_ledgerPool[i]);
         std::vector<uint8_t>().swap(g_ledgerInst[i]);
@@ -1148,6 +1286,7 @@ void writeLedger(ID3D11DeviceContext* ctx) {
     const bool guiOk=g_guiSnapshot.write(ctx,path,dir.c_str());
     Log::get().note("object probe: GUI source snapshot %ls: %u draws, %u range/budget/format declines, %u failed copies/shaders, %u missing layouts; %s. First matching source frame, square/wide GUI targets up to 2048, 96 MiB cap; original geometry, atlases, transforms and render state.",path,unsigned(g_guiSnapshot.count()),g_guiSnapshot.declined,g_guiSnapshot.failures,g_guiSnapshot.missingLayouts,guiOk?"written":"WRITE FAILED");
     detail::g_objectProbeLedgerOn = false;
+    g_skin.reset();   // its report went out above; a run that never reported is said at shutdown
     ledgerRelease();
     objectClassificationProbe.reset();
 }
@@ -1319,6 +1458,95 @@ void objectProbeOnEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, u
     srv->Release();
 }
 
+// One compute Dispatch, from the dispatch hook (exposure_fix.cpp hookedDispatch), BEFORE it is forwarded: the skin
+// ledger wants the palette chain's inputs as the game left them. The hook asks objectProbeLedgerActive() first, and
+// this asks again, so an unarmed run costs the hook one bool load and nothing else.
+void objectProbeNoteDispatch(ID3D11DeviceContext* ctx, uint32_t x, uint32_t y, uint32_t z, bool foreign) {
+    if (!detail::g_objectProbeLedgerOn || !ctx) return;
+    // A deferred context records on whichever thread the game chose, and the ledger's state is the owner thread's:
+    // those dispatches are counted (the RESULT line says how many), not read.
+    if (foreign) {
+        g_skinForeign.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const uint32_t frame = g_frame + 1;   // as ledgerNoteDraw counts it
+    if (!g_skin.inWindow(frame)) return;
+    guardedBudget(g_skinBudget, [&] {
+        ID3D11ComputeShader* cs = nullptr;
+        ctx->CSGetShader(&cs, nullptr, nullptr);
+        const uint64_t hash = cs ? lookupShaderHash(cs) : 0;
+        if (cs) cs->Release();
+        g_skin.noteDispatch(frame, hash);
+        if (hash != skin::kChainHash) return;
+
+        // t0 the job table, t1 the bind poses, t2 the joint matrices, u0 the palette being written.
+        ID3D11ShaderResourceView* sr[3] = {};
+        ID3D11UnorderedAccessView* uv[1] = {};
+        ctx->CSGetShaderResources(0, 3, sr);
+        ctx->CSGetUnorderedAccessViews(0, 1, uv);
+        skin::DispatchInfo info;
+        info.x = x;
+        info.y = y;
+        info.z = z;
+        info.foreign = foreign;
+        skin::View* views[4] = {&info.v0, &info.v1, &info.v2, &info.vu};
+        uint64_t* ids[4] = {&info.t0, &info.t1, &info.t2, &info.u0};
+        ID3D11Buffer* buf[4] = {};
+        uint32_t sizes[4] = {};
+        for (int i = 0; i < 4; ++i) {
+            ID3D11Resource* res = nullptr;
+            if (i < 3) {
+                if (!sr[i]) continue;
+                D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+                sr[i]->GetDesc(&sd);
+                if (sd.ViewDimension == D3D11_SRV_DIMENSION_BUFFER) {
+                    views[i]->first = sd.Buffer.FirstElement;
+                    views[i]->num = sd.Buffer.NumElements;
+                    views[i]->valid = 1;
+                } else if (sd.ViewDimension == D3D11_SRV_DIMENSION_BUFFEREX) {
+                    views[i]->first = sd.BufferEx.FirstElement;
+                    views[i]->num = sd.BufferEx.NumElements;
+                    views[i]->valid = 1;
+                }
+                sr[i]->GetResource(&res);
+            } else {
+                if (!uv[0]) continue;
+                D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+                uv[0]->GetDesc(&ud);
+                if (ud.ViewDimension == D3D11_UAV_DIMENSION_BUFFER) {
+                    views[i]->first = ud.Buffer.FirstElement;
+                    views[i]->num = ud.Buffer.NumElements;
+                    views[i]->valid = 1;
+                }
+                uv[0]->GetResource(&res);
+            }
+            if (!res) continue;
+            res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf[i]));
+            res->Release();
+            if (buf[i]) {
+                D3D11_BUFFER_DESC bd{};
+                buf[i]->GetDesc(&bd);
+                *ids[i] = reinterpret_cast<uintptr_t>(buf[i]);
+                sizes[i] = bd.ByteWidth;
+                views[i]->stride = bd.StructureByteStride;
+            }
+        }
+        const skin::ChainPlan plan = g_skin.planChain(frame, info, sizes[0], sizes[2], sizes[1]);
+        if (plan.disp >= 0) {
+            if (plan.stageJobs && !skinStage(ctx, buf[0], sizes[0], skin::Kind::Jobs, frame, plan.disp)) g_skin.noteSkipped();
+            if (plan.stageJoints && !skinStage(ctx, buf[2], sizes[2], skin::Kind::Joints, frame, plan.disp)) g_skin.noteSkipped();
+            if (plan.stageBind && !skinStage(ctx, buf[1], sizes[1], skin::Kind::Bind, frame, plan.bind)) g_skin.noteSkipped();
+        }
+        for (ID3D11Buffer* b : buf) {
+            if (b) b->Release();
+        }
+        for (ID3D11ShaderResourceView* v : sr) {
+            if (v) v->Release();
+        }
+        if (uv[0]) uv[0]->Release();
+    });
+}
+
 void objectProbeFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!detail::g_objectProbeOn && !detail::g_objectProbeLedgerOn) {
         if (cullGateProbe.armed()) closeGateProbe();   // switched off mid-window: release the relays
@@ -1391,6 +1619,16 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     g_ledgerSkipped = 0;
     ledgerRelease();
     detail::g_objectProbeLedgerOn = true;
+    // The F2 instrument rides this key and no other: no config, nothing on screen, nothing unarmed. The line below
+    // is the first of three that prove a run (armed, the per-frame lines with their RESULT, and the ledger write).
+    g_skin.arm(g_ledgerFrame0);
+    g_skinForeign.store(0, std::memory_order_relaxed);
+    Log::get().note("skin ledger: armed with eye run %ls for ledger frames %u..%u: the palette chain's dispatches "
+                    "(cs_%016llX: job table, joint matrices, bind poses) and both palette buffers WHOLE at each frame's "
+                    "first pool draw (skin_%ls.bin, bones<p>_%ls_<frame>.bin, the first %u bytes kept). A RESULT line "
+                    "follows the ledger write; none means the window never closed. Log and dump only, no rendering changes.",
+                    g_ledgerStamp, g_ledgerFrame0, g_ledgerLastFrame, static_cast<unsigned long long>(skin::kChainHash),
+                    g_ledgerStamp, g_ledgerStamp, kLedgerBonesMax);
     g_gateRun = false;
     g_eyeMeshSnapshot.armGeometry(0);
     if (cullGateProbe.enabled()) armGateProbe();   // advanced.cull_gate_capture rides the eye run
@@ -1419,6 +1657,15 @@ void objectProbeLedgerMark(int k) {
 }
 
 void objectProbeShutdown() {
+    // A skin ledger the window never closed on still reports what it holds (pending copies are abandoned, the
+    // dump files are not written): "fewer frames arrived" must not read as silence.
+    if (g_skin.armed() && !g_skin.finished()) {
+        std::string stamp;
+        for (const wchar_t* p = g_ledgerStamp; *p; ++p) stamp += static_cast<char>(*p < 128 ? *p : '?');
+        g_skin.noteForeign(g_skinForeign.load(std::memory_order_relaxed));
+        g_skin.report(stamp, nullptr, "SHUTDOWN before the window closed", "not written",
+                      [](const std::string& line) { Log::get().note("%s", line.c_str()); });
+    }
     if (cullGateProbe.armed()) closeGateProbe();
     g_gateRun = false;   // no run survives shutdown: its geometry arm is released, not kept
     objectClassificationProbe.reset();
