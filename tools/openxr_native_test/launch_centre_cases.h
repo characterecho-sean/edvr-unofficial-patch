@@ -199,6 +199,11 @@ template<class Check> void runFeatureHostCases(Check check) {
   ++h.previousReference;check(!h.sceneLayerAvailable(),"old reference cannot replay after recenter");--h.previousReference;
   h.previousSpace=view();check(!h.sceneLayerAvailable(),"different space cannot replay");h.previousSpace=local();
   h.featureFrame.resubmitEnabled=0;check(!h.sceneLayerAvailable(),"resubmit disabled uses zero layers");h.featureFrame.resubmitEnabled=1;
+  // Explorer Cam's comfort fade is read from the provider's last answer, and only while a provider is here: with none acquired, whatever the kept answer holds
+  // (the d3d11 half unloaded in the middle of a fade) reads 0, never black.
+  h.featureFrameKnown=true;h.featureFrame.fadeAlpha=1.0f;
+  check(h.comfortFade()==0.0f,"no provider acquired: a fade level left in the kept frame reads 0 (an unloaded d3d11 half never leaves the user in black)");
+  h.featureFrameKnown=false;h.featureFrame.fadeAlpha=0.0f;
   h.sceneFinished(false,XR_SUCCESS);check(h.emptyWithholds==1&&h.previousPairValid,"zero-layer withhold retains prior good pair");
   h.sceneFinished(true,XR_SUCCESS);check(h.replayedPairs==1&&h.previousPairValid,"replay does not overwrite saved stereo pair");
   h.sceneFinished(true,XR_ERROR_RUNTIME_FAILURE);check(!h.previousPairValid,"failed endFrame cannot commit a replay pair");

@@ -6,6 +6,7 @@
 #include <cstring>
 #include <algorithm>
 #include <exception>
+#include "../common/comfort_fade.h"
 
 namespace edvr::openxr {
 namespace {
@@ -124,7 +125,7 @@ XrResult D3D11Stereo::shutdown() {
   // Release any recorded work before destroying its runtime-owned images.
   // Never clear the caller's immediate pipeline state during cleanup.
   context_.Reset();
-  blitConstants_.Reset();blitSampler_.Reset();skyboxConstants_.Reset();skyboxSampler_.Reset();blitPixelShader_.Reset();blitVertexShader_.Reset();skyboxPixelShader_.Reset();skyboxVertexShader_.Reset();rasterizer_.Reset();depth_.Reset();
+  blitConstants_.Reset();blitSampler_.Reset();skyboxConstants_.Reset();skyboxSampler_.Reset();blitPixelShader_.Reset();blitVertexShader_.Reset();skyboxPixelShader_.Reset();skyboxVertexShader_.Reset();rasterizer_.Reset();depth_.Reset();fadeBlend_.Reset();
   for(auto& eye:eyes_){
     eye.rtvs.clear();eye.images.clear();
     if(eye.swapchain && dispatch_.destroySwapchain){const XrResult r=dispatch_.destroySwapchain(eye.swapchain);if(r!=XR_SUCCESS && first==XR_SUCCESS)first=r;}
@@ -227,12 +228,21 @@ XrResult D3D11Stereo::initialize(const StereoDispatch& d,XrSession session,ID3D1
   D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
   D3D11_DEPTH_STENCIL_DESC depth{};depth.DepthEnable=FALSE;
   if(FAILED(device->CreateRasterizerState(&raster,&rasterizer_))||FAILED(device->CreateDepthStencilState(&depth,&depth_)))return failed(XR_ERROR_RUNTIME_FAILURE);
+  // The comfort fade: black over the finished image is dest*(1-a), which the output merger does with no shader of its own -- the source is multiplied by zero and
+  // the destination by one minus the blend factor (the level, set at the draw). Alpha is left as drawn.
+  D3D11_BLEND_DESC fadeDesc{};
+  fadeDesc.RenderTarget[0].BlendEnable=TRUE;
+  fadeDesc.RenderTarget[0].SrcBlend=D3D11_BLEND_ZERO;fadeDesc.RenderTarget[0].DestBlend=D3D11_BLEND_INV_BLEND_FACTOR;fadeDesc.RenderTarget[0].BlendOp=D3D11_BLEND_OP_ADD;
+  fadeDesc.RenderTarget[0].SrcBlendAlpha=D3D11_BLEND_ZERO;fadeDesc.RenderTarget[0].DestBlendAlpha=D3D11_BLEND_ONE;fadeDesc.RenderTarget[0].BlendOpAlpha=D3D11_BLEND_OP_ADD;
+  fadeDesc.RenderTarget[0].RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_RED|D3D11_COLOR_WRITE_ENABLE_GREEN|D3D11_COLOR_WRITE_ENABLE_BLUE;
+  if(FAILED(device->CreateBlendState(&fadeDesc,&fadeBlend_)))return failed(XR_ERROR_RUNTIME_FAILURE);
   ready_=true;return XR_SUCCESS;
 }
 XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,const EyeCapture& capture,
                                    XrCompositionLayerProjection& layer, GpuWorkObserver* observer,
-                                   StereoWallTimes* times, const StereoPlacement* placement) {
+                                   StereoWallTimes* times, const StereoPlacement* placement, float fade) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+  fade=comfort::sanitize(fade);
   if(ownedImmediateScene_&&GetCurrentThreadId()!=sceneOwnerThread_)return XR_ERROR_CALL_ORDER_INVALID;
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
   if(!space)return XR_ERROR_HANDLE_INVALID;
@@ -321,6 +331,15 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     drawContext->RSSetViewports(1,&viewports[i]);
     drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
     drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
+    if(fade>=1.f) {
+      // Black: the whole image, not just the placed part.
+      const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);
+    } else if(fade>0.f) {
+      // The same triangle again under the fade blend: the source is multiplied by zero, so what it samples does not matter, and the destination keeps 1-fade.
+      const float factor[4]={fade,fade,fade,fade};
+      drawContext->OMSetBlendState(fadeBlend_.Get(),factor,~0u);drawContext->Draw(3,0);
+      drawContext->OMSetBlendState(nullptr,nullptr,~0u);
+    }
     ID3D11ShaderResourceView* nullSrv=nullptr;drawContext->PSSetShaderResources(0,1,&nullSrv);
     drawContext->OMSetRenderTargets(0,nullptr,nullptr);
     if(ownedImmediateScene_) {
@@ -343,8 +362,9 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
 
 XrResult D3D11Stereo::renderSkybox(const XrView (&views)[2], XrSpace space,
                                    const SkyboxCapture& capture,
-                                   XrCompositionLayerProjection& layer) {
+                                   XrCompositionLayerProjection& layer, float fade) {
   layer={XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+  fade=comfort::sanitize(fade);
   if(!ready_)return lastResult_==XR_SUCCESS?XR_ERROR_CALL_ORDER_INVALID:lastResult_;
   if(!space)return XR_ERROR_HANDLE_INVALID;
   if(!capture.ready())return XR_ERROR_VALIDATION_FAILURE;
@@ -404,6 +424,13 @@ XrResult D3D11Stereo::renderSkybox(const XrView (&views)[2], XrSpace space,
     context_->PSSetShaderResources(0,6,faceRaw);
     context_->UpdateSubresource(skyboxConstants_.Get(),0,nullptr,&constants[eye],0,0);
     context_->Draw(3,0);
+    if(fade>=1.f) {
+      const float black[]={0,0,0,1};context_->ClearRenderTargetView(rtv,black);
+    } else if(fade>0.f) {
+      const float factor[4]={fade,fade,fade,fade};
+      context_->OMSetBlendState(fadeBlend_.Get(),factor,~0u);context_->Draw(3,0);
+      context_->OMSetBlendState(nullptr,nullptr,~0u);
+    }
     ID3D11ShaderResourceView* nulls[6]{};context_->PSSetShaderResources(0,6,nulls);
     context_->OMSetRenderTargets(0,nullptr,nullptr);
     r=submitCommands();if(r!=XR_SUCCESS)return failed(r);

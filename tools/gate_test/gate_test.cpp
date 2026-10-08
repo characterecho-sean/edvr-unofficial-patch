@@ -830,6 +830,7 @@ int boundarySourceChecks(const std::string& root) {
         }
         body = hookText.substr(begin, i - begin);
     }
+    const std::string tickBody = body;   // the ticks, before they are taken out below
     // Every tick call out, then what is left.
     size_t pos = 0;
     int tickCalls = 0;
@@ -891,6 +892,37 @@ int boundarySourceChecks(const std::string& root) {
         }
     }
     verify(declared >= 50, "device_hook.cpp and vscreen.cpp declare their boundary ticks");
+
+    // EXPLORER CAM'S TICK IS THE DEVICE HOOK'S, NOT vSCREEN'S (review 2026-10-08, finding 3). It used to be run from vScreenFrameBoundary, which only exists when vScreen
+    // installs a State; with fix.black_void off, fix.panel_distance 1, fix.transition_flash 0, advanced.app_gpu_timing off and advanced.panel_hooks_always off vScreen installs
+    // transport-only, that function never runs, and F5 did nothing -- whatever hotkey.explorer_cam held. Moving it back under vScreen (or behind a condition) makes this fail.
+    // (tools\test_openxr_transport.py drives the same minimal config through the real d3d11.dll and asks for the boundary's lines: the behaviour, not just this text.)
+    const std::string flatTicks = withoutSpaces(tickBody);
+    verify(withoutSpaces(hookText).find("EDVR_BOUNDARY_TICK(tkExplorerCam,\"explorer_cam\");") != std::string::npos &&
+               flatTicks.find("tkExplorerCam.run([]{explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter));});") != std::string::npos,
+           "Explorer Cam's frame tick is declared in device_hook.cpp and run at the top level of presentFrameBoundary(), with the frame counter");
+    verify(withoutSpaces(hookText).find("EDVR_BOUNDARY_TICK(tkExplorerCamProbe,\"explorer_cam_probe\");") != std::string::npos &&
+               flatTicks.find("tkExplorerCamProbe.run([]{explorerCamProbeFrameBoundary(static_cast<uint32_t>(g_state->frameCounter));});") != std::string::npos,
+           "...and so is the probe's, with a budget of its own");
+    verify(flatTicks.find("tkExplorerCam.run(") < flatTicks.find("tkExplorerCamProbe.run(") && flatTicks.find("tkEliteBinds.run(") < flatTicks.find("tkExplorerCam.run(") &&
+               flatTicks.find("tkExplorerCam.run(") < flatTicks.find("tkMenu.run(") && flatTicks.find("tkExplorerCam.run(") < flatTicks.find("tkVscreenRest.run("),
+           "...after the Elite binds it reads, before the probe that attaches to its hook, and before the menu and vScreen's boundary");
+    verify(screenText.find("explorerCamFrameBoundary") == std::string::npos && screenText.find("explorerCamProbeFrameBoundary") == std::string::npos &&
+               screenText.find("tkExplorerCam") == std::string::npos,
+           "vscreen.cpp does not carry either of them: nothing about Explorer Cam depends on vScreen having installed");
+    {
+        // The ini's reload lives in vScreenRefreshConfig, the only place it is re-read. It must come BEFORE the State check: with vScreen transport-only there is no State, and a
+        // reload that waited for one never happened -- a hotkey.explorer_cam bound while the game runs (or any live edit, the F8 menu's writes) would never apply.
+        const size_t at = screenText.find("void vScreenRefreshConfig() {");
+        std::string flat;
+        if (at != std::string::npos) {
+            const size_t end = screenText.find("\n}", at);
+            if (end != std::string::npos) flat = withoutSpaces(screenText.substr(at, end - at));
+        }
+        const size_t reload = flat.find("cfg.reloadIfChanged()"), state = flat.find("if(!s)return;");
+        verify(reload != std::string::npos && state != std::string::npos && reload < state,
+               "vScreenRefreshConfig() re-reads the ini BEFORE it looks for vScreen's State, so a live edit applies when vScreen is transport-only");
+    }
     verify(hookText.find("g_frameBudget") == std::string::npos &&
                hookText.find("deviceHook.frameBoundary") == std::string::npos,
            "the boundary's one shared budget is gone");

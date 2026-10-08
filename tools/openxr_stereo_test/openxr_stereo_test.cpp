@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <limits>
 #include <thread>
 #include <algorithm>
 #include <d3dcompiler.h>
@@ -348,6 +349,101 @@ void skyboxSelfTest() {
     if(point[0]=='W')check(f.pixel(point[1]-'0',0,0,0)==0xffff00ff,"skybox timeout target remains untouched");
   }
 }
+
+// ---- Explorer Cam's comfort fade (the runtime's one blend pass; comfort_fade.h) ----------------------------------------------------------------------------
+// What a finished pixel becomes under fade a: black over it, out = in * (1 - a). In an sRGB swapchain the output merger blends in linear light, in a UNORM one on
+// the encoded bytes the shader wrote; alpha is left as drawn.
+uint32_t fadedPixel(uint32_t base,double a,bool unorm) {
+  uint32_t out=base&0xff000000u;
+  for(unsigned c=0;c<3;++c) {
+    const double v=double((base>>(8*c))&255u);
+    double value=0;
+    if(unorm)value=std::floor(v*(1-a)+.5);
+    else {const double n=v/255.;const double linear=n<=.04045?n/12.92:std::pow((n+.055)/1.055,2.4);value=double(encode(linear*(1-a)));}
+    out|=unsigned(value)<<(8*c);
+  }
+  return out;
+}
+void fadeSelfTest(bool owned) {
+  const unsigned xs[]={0,16,48,64,80,111,127},ys[]={0,16,48,64,80,111,127};
+  for(bool unorm:{false,true}) {
+    Fixture f;f.runtime.unorm=unorm;check(f.init(owned)==XR_SUCCESS,"fade initialize");
+    EyeCapture capture;check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"fade capture owner");
+    auto source=pattern(f,false);const vr::Texture_t texture{source.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+    check(capture.capture(vr::Eye_Left,&texture)==vr::VRCompositorError_None&&capture.capture(vr::Eye_Right,&texture)==vr::VRCompositorError_None,"fade pattern capture");
+    auto render=[&](bool pass,float fade,const StereoPlacement* placement=nullptr) {
+      XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
+      const XrResult r=pass?f.renderer.renderCaptured(f.views,space,capture,layer,nullptr,nullptr,placement,fade)
+                           :f.renderer.renderCaptured(f.views,space,capture,layer,nullptr,nullptr,placement);
+      check(r==XR_SUCCESS,"fade render");
+      std::vector<uint32_t> out;
+      for(unsigned eye=0;eye<2;++eye)for(unsigned y:ys)for(unsigned x:xs)out.push_back(f.pixel(eye,image,x,y));
+      return out;
+    };
+    const auto base=render(false,0);
+    bool pattern4=true;for(unsigned eye=0;eye<2;++eye)pattern4=pattern4&&base[eye*49+1*7+1]==0xff0000ffu&&base[eye*49+1*7+5]==0xff00ff00u;
+    check(pattern4,"(the baseline shows the pattern: red top-left, green top-right)");
+    check(render(true,0.0f)==base,"FADE 0 IS TODAY'S IMAGE, bit for bit (every sampled pixel of both eyes equals the render made without a fade argument)");
+    check(render(true,-0.0f)==base&&render(true,-1.0f)==base&&render(true,std::numeric_limits<float>::quiet_NaN())==base,"...so are a negative zero, a negative level and NaN: nothing that is not a level fades anything");
+    for(double a:{.25,.5,.75}) {
+      const auto faded=render(true,float(a));
+      bool all=true;
+      for(size_t i=0;i<base.size();++i) {
+        const uint32_t want=fadedPixel(base[i],a,unorm),got=faded[i];
+        bool within=true;for(unsigned c=0;c<4;++c)within=within&&std::abs(int((got>>(8*c))&255)-int((want>>(8*c))&255))<=2;
+        all=all&&within;
+      }
+      char what[160];std::snprintf(what,sizeof(what),"THE BLEND: fade %.2f is the image times %.2f (%s), alpha untouched, at 98 sampled pixels",a,1-a,unorm?"on the encoded bytes":"in linear light");
+      check(all,what);
+    }
+    {
+      const auto half=render(true,.5f);
+      check(base[1*7+1]==0xff0000ffu&&half[1*7+1]!=base[1*7+1]&&(half[1*7+1]>>24)==0xff,"(the midpoint really darkens the red corner and keeps its alpha at 255)");
+    }
+    {
+      bool black=true;for(float level:{1.0f,1.0001f,2.0f,1e9f,std::numeric_limits<float>::infinity()})for(auto pixel:render(true,level))black=black&&pixel==0xff000000u;
+      check(black,"FADE 1 (or more) IS BLACK: every sampled pixel of both eyes, corners included, is exactly 0xff000000");
+    }
+    check(render(true,0.0f)==base&&render(false,0)==base,"A RENDER AFTER A FADE is the plain image again: the level is an argument of each draw, not a state of the renderer (a replayed pair is faded by what this frame says)");
+    {
+      const StereoPlacement place[2]={{.25f,.25f,.75f,.75f},{.25f,.25f,.75f,.75f}};
+      const auto placedBase=render(false,0,place);
+      const auto placedHalf=render(true,.5f,place);
+      check(placedBase[0]==0xff000000u&&placedHalf[0]==0xff000000u&&placedBase[3*7+3]!=0xff000000u,"A TRIMMED PLACEMENT with a fade: the black border stays black and the placed image is inside it");
+      bool dim=true;for(size_t i=0;i<placedBase.size();++i) {
+        const uint32_t want=fadedPixel(placedBase[i],.5,unorm),got=placedHalf[i];
+        bool within=true;for(unsigned c=0;c<4;++c)within=within&&std::abs(int((got>>(8*c))&255)-int((want>>(8*c))&255))<=2;
+        dim=dim&&within;
+      }
+      check(dim,"...and the placed image is faded by the same amount");
+      for(auto pixel:render(true,1.0f,place))if(pixel!=0xff000000u){dim=false;break;}
+      check(dim,"...and fade 1 blackens the border and the image alike");
+    }
+    // ---- the skybox pass fades the same way -------------------------------------------------------------------------------------------------------------------------
+    SkyboxCapture sky;captureSky(f,sky);
+    auto renderSky=[&](float fade) {
+      XrCompositionLayerProjection layer{};const unsigned image=f.runtime.eyes[0].calls%2;
+      check(f.renderer.renderSkybox(f.views,space,sky,layer,fade)==XR_SUCCESS,"fade skybox render");
+      std::vector<uint32_t> out;
+      for(unsigned eye=0;eye<2;++eye)for(unsigned y:{13u,48u,99u})for(unsigned x:{9u,64u,105u})out.push_back(f.pixel(eye,image,x,y));
+      return out;
+    };
+    const auto skyBase=renderSky(0.0f);
+    check(renderSky(0.0f)==skyBase&&renderSky(-1.0f)==skyBase&&renderSky(std::numeric_limits<float>::quiet_NaN())==skyBase,"THE SKYBOX with fade 0 (or a non-level) is the plain skybox, bit for bit");
+    {
+      const auto faded=renderSky(.5f);bool all=true;
+      for(size_t i=0;i<skyBase.size();++i) {
+        const uint32_t want=fadedPixel(skyBase[i],.5,unorm),got=faded[i];
+        bool within=true;for(unsigned c=0;c<4;++c)within=within&&std::abs(int((got>>(8*c))&255)-int((want>>(8*c))&255))<=2;
+        all=all&&within;
+      }
+      check(all,"...at 0.5 it is the skybox times one half");
+      bool black=true;for(auto pixel:renderSky(1.0f))black=black&&pixel==0xff000000u;
+      check(black,"...at 1 it is black");
+    }
+  }
+}
+
 
 // The renderer is a diagnostic pass which must borrow the game's immediate
 // context without changing it.  Keep this probe deliberately independent of
@@ -707,6 +803,8 @@ int selfTest(){
   capturedSelfTest();
   capturedSelfTest(true);
   skyboxSelfTest();
+  fadeSelfTest(false);
+  fadeSelfTest(true);
   desktopStateSelfTest();
   embeddedShaderPin();
   std::printf("openxr_stereo_test: %u checks, %u failures\n",checks,failures);return failures?1:0;

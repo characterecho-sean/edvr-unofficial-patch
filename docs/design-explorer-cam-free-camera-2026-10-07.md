@@ -2,11 +2,13 @@
 
 ## Status
 
-- **State: F0-F7 FLOWN (2026-10-07/08).** F7: the latch worked and the
-  head is hidden; the cached +0x58 head follows stance, H2's walk is the
-  bind pose. BUILT, not flown (Phase 3): the eye FOLLOWS the head joint,
-  camera-suite ISOLATION, F5 with an absent GuiFocus, the hotkey kept as the
-  exit. Armed by `hotkey.explorer_cam` alone; `[fix] explorer_cam` is REMOVED.
+- **State: F0-F8 FLOWN (2026-10-07/08).** F8 (Phase 3): "It works so
+  well!" -- the eye follows the head joint, the camera suite is isolated, F5
+  works from first person. BUILT, not flown (Phase 4): the COMFORT FADE
+  (black while the mode is not locked and stable, on and off). Armed by
+  `hotkey.explorer_cam` alone; `[fix] explorer_cam` is REMOVED. The d66271df
+  review (2026-10-08) is answered, built not flown: the frame tick is
+  device_hook.cpp's, the probe's fault count, a pose not built yet retries.
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
   old Explorer Cam route entirely; deleting the old route is authorized.
@@ -16,21 +18,17 @@
 - **Hypotheses** (RVAs are build 332841, exe SHA-256 e6be8bbe...e988, all
   three installs; static evidence in `analysis\decomp\explorer_cam\`):
   - H1 **READ + FLOWN F0:** `FreeCameraActivity`'s update (0x1071980)
-    composes world = commander-local (+0x3B0) x commander frame under the
-    relative lock; in F0 local held bit-identical through a 15 m walk and
-    turns of up to 166 degrees.
+    composes world = commander-local (+0x3B0) x commander frame under the lock.
   - H2 **READ + FLOWN:** the state is the activity (rcx at 0x1071980):
     world +0x70, local +0x3B0, flags +0x470/1/3, state +0x48C.
   - H3 **FLOWN F1:** a write before the update reaches the camera and view.
-  - H4 no head flag found (about 25% one exists); head hiding is a draw skip.
-  - H5 inferred not replicated (about 65%): write the activity, never the
-    shared record (mode, speed, range).
+  - H4 no head flag found; head hiding is a draw skip.
+  - H5 inferred not replicated (about 65%): never write the shared record.
   - H6 **READ + FLOWN:** +0x48C is 3 at TAB (first call), 4 relative lock,
     0 at exit; mirrored from a shared record, so watch it, never write it.
   - H7 **READ (0a-3), RELAYED in 1c:** the push to y 2.150 is FUN 0x108F1B0
-    (commander's box + 0.25, edits the point in place), which the sweep
-    (0x1091140) was hiding; one caller, 0x10728B6. F1 saw it; 1c returns 0
-    for the placed activity. The F0 stop at 0.70 is probably the same box.
+    (commander's box + 0.25), one caller, 0x10728B6; 1c returns 0 for the
+    placed activity. The F0 stop at 0.70 is probably the same box.
 - **Ruled out:**
   - Counting presses as the source of truth: it has no origin (6ac.6d), and
     the free camera can be moved by hand after the preset is chosen.
@@ -49,16 +47,18 @@
 - **Set aside, not flown:** writing the origin inside the refresh detour at
   `+0x592200`; the culling view is built upstream (6s.9 saw holes from it).
 - **Flown** on Frontier: F0 172543, F1 194702, F2 211908, F3 94c467d3, F4
-  20764688, F5 60dd0eb2, F6 d0707af3, F7 e42e90dd; findings below.
-- **Next:** flight F8: crouch and weapon out (`head follow:` lines, the rest
-  offset near (0, 0.038, 0.112), heartbeat line 2), walking (no neck in
-  view), every camera key dead while placed (`camera suite isolated:`,
-  blocked counts, `zoom_hook_calls`), F5 from first person.
+  20764688, F5 60dd0eb2, F6 d0707af3, F7 e42e90dd, F8 (Phase 3); below.
+- **Next:** flight F9, comfort fade: F5 in, the view fades to black in 200
+  ms BEFORE the camera opens and back in once placed and steady (check the
+  `comfort fade:` lines, "black lasted"); F5 out the same; a stall; the 3 s
+  cap. Also F5 with the minimal config (black_void off, panel_distance 1).
+  Eye height: Sean finds it a bit low ("no neck"), is tuning
+  `explorer_cam_eye_trim_up` live and will send the value to bake.
 - **Temporary keys:** `[advanced] explorer_cam_probe` (removed at arc
   close). `[fix] explorer_cam_eye_trim_right/_up/_forward` (+-0.3 m) and
-  `explorer_cam_follow_smoothing_ms` (0 = exact; a comfort test): Sean tunes
-  the trims once and they go. `explorer_cam_eye_up/_forward/_right` are now
-  only the FALLBACK when no head joint is readable.
+  `explorer_cam_follow_smoothing_ms` (0 = exact): the trims become a constant
+  and go. `explorer_cam_eye_up/_forward/_right` are only the FALLBACK. The
+  comfort fade has NO key (durations are constants).
 
 ## Why today's Explorer Cam is half-baked
 
@@ -817,3 +817,49 @@ turning are another object. Three faults stand isolation down. One line per sess
 REMOVED: `[fix] explorer_cam = on|off`. Explorer Cam is armed exactly when `hotkey.explorer_cam` is set. A change or a clearing made while a session is on
 waits for the session to end (the old key stays the exit), and `explorerCamSessionActive()` tells the hotkey menu. Retired by exact name in config_test.
 F5: an absent GuiFocus with Flags2 present reads as 0.
+
+## 2026-10-08 Phase 4: the comfort fade
+
+Built and gated, not flown (Sean, after F8: black out the view until the mode is locked and stable, on and off, with a fade). No key: it always helps.
+
+TIMELINE (frame thread, `explorer_cam_fade_core.h`). ENTER: F5 fades to black over 200 ms and only THEN releases F5's request, so the first press (and the selfie
+preset, the camera UI) is never seen; black holds through open, TAB, placement, lock and the UI hide, then fades in over 300 ms once placed, +0x48C = 4, the
+camera UI's hide has settled, and the eye has been steady (under 2 cm an update, either source) for 10 updates. EXIT: 200 ms out, then the exit request; 300 ms in
+once the camera reads mode 0 and 10 controller updates passed. A detach with the session on: 100 ms out, black until placed again, 200 ms in. Black never lasts
+over 3 s from the press: at the cap it fades in and the line names the unmet condition. A refused or dropped request, a session ending under it, a cancel (F5
+again before the request went), a stand-down, a cleared hotkey or an unload: clear at once (or fading in without waiting). One line per transition, with how long
+black lasted. The ramp is a smoothstep of a linear clock, so an interrupted ramp turns round where it stands.
+
+SIGNAL. `EdvrNativeFrameOutput` gains `fadeAlpha` at the END (version 5, append-only like 2 to 4); d3d11.dll fills it at beginFrame from `comfort_fade.h`.
+A mismatched pair reads NO FADE: the client steps the version ladder down and zeroes the slot of any shape without it. A level not published for 200 ms decays to
+0 over 100 ms (a silent d3d11 half never leaves the user in black; a render-thread stall over 0.2 s while black lets the scene show through). NaN reads 0.
+
+BLEND (runtime). `renderCaptured` and `renderSkybox` take a `fade`; after the eye image is drawn, the same triangle is drawn again under a blend of
+dest * (1 - fade) (no new shader), or the target is cleared at 1. Exactly 0 runs no extra pass, so today's image is bit-identical; a replayed pair is faded by
+the current frame's level. The menu quad is another layer and is untouched. In an sRGB swapchain the blend is in linear light, in a UNORM one on the encoded bytes.
+
+## 2026-10-08 review round (independent review of d66271df)
+
+Findings 3 to 5 and the first conditional concern, from `reviews\explorer-cam-hotkeys-d66271df-2026-10-08.md`. Findings 1 and 2 (the hotkeys) and the
+`input_gate` concern are the hotkeys worktree's.
+
+- **3, the tick (P2), fixed.** `explorerCamFrameBoundary` rode vScreen's frame boundary, which exists only when vScreen installs a State. With `fix.black_void` off,
+  `fix.panel_distance` 1, `fix.transition_flash` 0, `advanced.app_gpu_timing` off and `advanced.panel_hooks_always` off vScreen installs transport-only, the boundary
+  never runs, and F5 did nothing. `tkExplorerCam` and `tkExplorerCamProbe` are now `EDVR_BOUNDARY_TICK`s in device_hook.cpp's `presentFrameBoundary()`
+  (after the Elite binds it reads, before the probe, the menu and vScreen), unconditional, so an EMPTY `hotkey.explorer_cam` is read every frame and binding it live arms
+  the feature on the next. A second hole of the same class: the ini's reload (`Config::reloadIfChanged`) lived in `vScreenRefreshConfig()` behind its `if (!s) return;`,
+  so with vScreen transport-only the ini was NEVER re-read (a hotkey bound live, every live edit); the reload now comes first and only
+  vScreen's own re-derivation waits for a State. Guards: `tools\gate_test` pins the declaration, the call with the frame counter, the order, that vscreen.cpp
+  carries neither, and the reload-before-State order; `tools\test_openxr_transport.py` runs the real d3d11.dll under WARP with that exact config and reads its log
+  for `hotkey bound: F5 (vk 0x74` then `Explorer Cam armed: F5 enters it` (default key) and for an empty key rewritten to F5 while presenting (`is empty`, then
+  `hotkey bound`, then `armed again`). Controls: the pre-change DLL fails the first case; the DLL with the tick moved but the reload still behind the State
+  passed the first case and failed the second (the log showed `is empty` and nothing after the rewrite).
+- **4, the docs (P2), fixed.** `docs\explorer-cam.md` and the `edvr.ini` comment now say what is built: the Explorer key starts and ends a session, TAB and the game's
+  camera key place nothing, the head is hidden, the head joint is the eye (the three fixed keys only the fallback), the camera's keys are blocked while placed, a key
+  changed or cleared mid-session stays the exit until it ends, and the fade. They keep the qualification line: F0 to F8 flown; the fade, the Hotkeys page and the retry not.
+  README.md's Explorer Cam section (lines 174 to 189) says the old thing too and is NOT touched here (out of the named scope).
+- **5, the probe (P3), fixed.** Past `kMaxFaults` (64) the guarded read stops, and the update used to be counted as a fault anyway, so `faults` rose forever. It is now
+  `skipped_reads`, counted apart; `faults` stays at the number of reads that really faulted (heartbeat: `faults=64 skipped_reads=N`).
+- **Conditional 1, a pose not built yet (P3), fixed as insurance.** `followDerive` cached a null pose or a zero joint count as a failure for the latched interface for
+  good. Those two (only) are retried every 60 placing updates, silently (the line is said once), until the read works; no head joint, too many joints and a fault are
+  unchanged. No flight evidence shows this lifecycle happens; a synthetic null/zero-then-valid skeleton proves the recovery.

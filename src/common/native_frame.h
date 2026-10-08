@@ -20,6 +20,12 @@
 // hand-copied-DLLs rule: a version 1, 2 or 3 caller simply gets the guard's
 // lie on both projection channels, exactly as before the key existed.
 #define EDVR_NATIVE_FRAME_VERSION_4 4u
+// Version 5 adds fadeAlpha to the END and nothing else (Explorer Cam's comfort
+// fade, comfort_fade.h), under the same hand-copied-DLLs rule: a version 1 to
+// 4 caller never learns of it, and a runtime that asks version 5 of a
+// d3d11.dll that refuses the shape steps down and reads "no fade" (0), never
+// black.
+#define EDVR_NATIVE_FRAME_VERSION_5 5u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -68,6 +74,12 @@ struct EdvrNativeFrameOutput {
     // widened frustum is told through (advanced.cull_guard_channel):
     // 0 both, 1 GetProjectionRaw only, 2 GetProjectionMatrix only.
     uint32_t cullChannel;
+    // Version 5 and later. How black the projection layer is, 0 (clear, the
+    // default and the only value an older provider can mean) to 1: the runtime
+    // blends black over each eye image by this much when it composes. Already
+    // freshness-checked by the provider (comfort_fade.h): a signal that went
+    // stale reads 0.
+    float fadeAlpha;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -84,6 +96,10 @@ struct EdvrNativeFrameOutput {
 // version 3 caller's struct is, with no tail padding before cullChannel.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_3 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, cullChannel))
+// The size the fields through cullChannel occupy, which is what a version 4
+// caller's struct is, with no tail padding before fadeAlpha.
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, fadeAlpha))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;

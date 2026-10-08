@@ -5604,11 +5604,14 @@ uint32_t vScreenEyeDrawsThisFrame() {
 
 void vScreenRefreshConfig() {
     State* s = g_state;
-    if (!s) return;
     Config& cfg = Config::get();
     // Cheap: one GetFileAttributesEx, and only when the write time moved.
     const int64_t reloadT0 = qpcNow();
+    // THE RELOAD COMES BEFORE THE STATE CHECK. This is the only place the ini is re-read, and its readers outside vScreen (hotkey.explorer_cam, the diagnostic keys,
+    // each read live from Config) need no vScreen State: with vScreen installed transport-only (no State) a reload that waited for one never happened, and a key
+    // bound or cleared while the game runs never applied (review 2026-10-08, finding 3; tools\gate_test pins the order, the transport fixture binds a key live).
     if (!cfg.reloadIfChanged()) return;
+    if (!s) return;   // nothing of vScreen's to re-derive
     const bool gpuTimingEnabled = cfg.getBool("advanced.app_gpu_timing", true);
     gpuFrameConfigure(gpuTimingEnabled);
     // A reload -- the parse of a 124 KB ini and every module's reconfigure,
@@ -5856,10 +5859,8 @@ EDVR_BOUNDARY_TICK(tkFssReveal, "fss_reveal");
 EDVR_BOUNDARY_TICK(tkFssDump, "fss_dump");
 EDVR_BOUNDARY_TICK(tkFssPacing, "fss_pacing");
 EDVR_BOUNDARY_TICK(tkRemlok, "remlok");
-// Explorer Cam (explorer_cam.h): reads its keys, installs its hooks, publishes the settings to the hook thread and writes its log lines.
-EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
-// advanced.explorer_cam_probe (explorer_cam_probe.h), a temporary log-only instrument: its own budget, so a fault in it stands it down alone.
-EDVR_BOUNDARY_TICK(tkExplorerCamProbe, "explorer_cam_probe");
+// (Explorer Cam's frame tick and its probe's are device_hook.cpp's: they must run whatever this file's options say, and when vScreen installs transport-only
+// there is no State here and no vScreenFrameBoundary to carry them. tools\gate_test pins that.)
 
 // The one line the surface strip adds when the intro ends, said once, at the first rendered scene: how many strip draws the intro had in all
 // (panel_curve.h counts every one it drew: the movie's, the splash's, and the splash dim's re-issues of either) and how many composite draws the
@@ -6817,11 +6818,6 @@ void vScreenFrameBoundary() {
     // entry, so the accumulators this call would otherwise finalise are
     // already clear.
     poseReaderWatchFrameBoundary(s->frameNo);
-    // Explorer Cam (Phase 1): before the probe below, which attaches to the free-camera hook this installs.
-    tkExplorerCam.run([&] { explorerCamFrameBoundary(s->frameNo); });
-    // advanced.explorer_cam_probe (Phase 0b, flight F0; temporary): reads the key, attaches to the free-camera hook when it is on, and
-    // prints the 5 s heartbeats, the change lines and the 1 Hz detail lines. Log only; with the key off it reads the key and returns.
-    tkExplorerCamProbe.run([&] { explorerCamProbeFrameBoundary(s->frameNo); });
     s->eyeDrawsThisFrame = 0;
     s->sceneDrawsThisFrame = 0;
     ++s->frameNo;

@@ -19,7 +19,7 @@ namespace edvr {
 // advanced.camera_buffer_bytes default).
 constexpr uint32_t kExplorerCamProbeSceneBlockBytes = 5376;
 
-// Once a frame at the Present boundary (vscreen.cpp, beside explorerCamFrameBoundary). Reads the key (so it is live), attaches to
+// Once a frame at the Present boundary (device_hook.cpp, tkExplorerCamProbe, right after explorerCamFrameBoundary). Reads the key (so it is live), attaches to
 // the free-camera hook (installed by explorer_cam.cpp the first time anyone wants it) when the key is on, and runs the consumer: the 5 s heartbeats, the immediate change lines and the
 // 1 Hz detail lines. Render thread. Never call it from inside a game hook.
 void explorerCamProbeFrameBoundary(uint32_t frameNo);

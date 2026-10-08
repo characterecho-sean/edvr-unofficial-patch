@@ -23,6 +23,7 @@
 // again.
 #include "explorer_cam.h"
 #include "explorer_cam_core.h"
+#include "explorer_cam_fade_core.h"
 #include "explorer_cam_follow_core.h"
 
 #include <windows.h>
@@ -36,6 +37,7 @@
 #include <string>
 
 #include "../common/code_hook.h"
+#include "../common/comfort_fade.h"
 #include "../common/config.h"
 #include "../common/hotkey.h"
 #include "../common/log.h"
@@ -129,6 +131,12 @@ std::atomic<uint64_t> g_headUpdates{0}, g_fixedUpdates{0};
 std::atomic<uint32_t> g_followWhy{0};            // ecm::FixedWhy of the latest fixed update
 std::atomic<uint32_t> g_followSource{0};         // 1 = the latest placing update took its eye from the head joint
 std::atomic<float> g_lastEye[3];                 // the latest eye written: up, forward, right
+// The comfort fade's facts from the hook threads (explorer_cam_fade_core.h): how many placing updates in a row the eye has moved under 2 cm, and whether the camera
+// UI's hide has run its course for this placement.
+std::atomic<uint32_t> g_steadyUpdates{0};
+std::atomic<bool> g_prevEyeValid{false};
+std::atomic<bool> g_uiSettled{false};
+std::atomic<uint32_t> g_fadeAlphaBits{0};        // the level the frame thread last published (the rig reads it back)
 TimerStat g_t58;                                 // the +0x58 call
 ecm::Ring<ecm::FollowNote, 8> g_followNotes;
 ecm::HeadTargets g_followT;
@@ -203,9 +211,11 @@ struct FrameState {
     uint64_t beatHideCalls = 0, beatZeroed = 0;
     // Phase 3.
     bool followArmTried = false, followCfgSaid = false, isoSaid = false, isoDownSaid = false;
+    ecm::ComfortTimeline fade;
     ecm::Trim lastTrim;
     float lastSmooth = 0.0f;
     uint64_t beatHeadUpdates = 0, beatFixedUpdates = 0, beatZoomCalls = 0;
+    uint32_t fadeAlphaBits = 0;
     uint64_t beatBlocked[ecm::kIsoHolderCount] = {};
 };
 FrameState g_frame;
@@ -418,6 +428,8 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
 
 // ---- events --------------------------------------------------------------------------------------------------------------------
 void publishIdle() {
+    g_prevEyeValid.store(false, std::memory_order_relaxed);   // the next placement's eye starts a new steady count
+    g_steadyUpdates.store(0, std::memory_order_relaxed);
     g_placedActivity.store(0, std::memory_order_release);
     g_phase.store(0, std::memory_order_release);
     g_trackedActivity.store(0, std::memory_order_relaxed);
@@ -723,7 +735,10 @@ SkVerify skVerify(uintptr_t iface, ecm::HeadKind expect, SkSlots* s) noexcept {
 
 struct FollowCache {                  // hook thread only (the free-camera hook's busy flag)
     uint64_t iface = 0;               // the skeleton the rest offset below belongs to
-    bool failed = false;              // its rest offset could not be derived: the fixed keys serve it until the latch moves
+    bool failed = false;              // its rest offset could not be derived: the fixed keys serve it until the latch moves (or, for a pose not built yet, until a retry works)
+    bool retryable = false;           // the failure is a pose that is not there yet (no pose, no joints): tried again every kFollowRetryUpdates updates
+    bool failNoted = false;           // the failure was said once; the retries are silent
+    uint32_t retryIn = 0;
     bool firstLive = false;
     ecm::HeadKind kind = ecm::HeadKind::None;
     uint32_t headIdx = ecm::kNoJoint, povIdx = ecm::kNoJoint, joints = 0;
@@ -784,11 +799,16 @@ ecm::FixedWhy followDerive(uint64_t iface, FollowCache& c) noexcept {
     note.hkind = static_cast<uint32_t>(sl.kind);
     note.povIdx = g_skelIndex[0].load(std::memory_order_relaxed) & 0xFFFFu;
     auto cacheFailure = [&](ecm::RestWhy why) {
-        c.iface = iface;   // do not try again until the latch moves
+        c.iface = iface;   // do not try again until the latch moves, unless the pose is simply not built yet
         c.failed = true;
-        note.kind = static_cast<uint32_t>(ecm::FollowNoteKind::RestFailed);
-        note.why = static_cast<uint32_t>(why);
-        g_followNotes.push(note);
+        c.retryable = why == ecm::RestWhy::NoPose || why == ecm::RestWhy::NoJoints;
+        c.retryIn = ecm::kFollowRetryUpdates;
+        if (!c.failNoted) {   // said once per skeleton; a retry that fails again is silent
+            c.failNoted = true;
+            note.kind = static_cast<uint32_t>(ecm::FollowNoteKind::RestFailed);
+            note.why = static_cast<uint32_t>(why);
+            g_followNotes.push(note);
+        }
         return FixedWhy::Unverified;
     };
     uintptr_t pose = 0;
@@ -823,6 +843,8 @@ ecm::FixedWhy followDerive(uint64_t iface, FollowCache& c) noexcept {
     if (w != ecm::RestWhy::Ok) return cacheFailure(w);
     c.iface = iface;
     c.failed = false;
+    c.retryable = false;
+    c.retryIn = 0;
     c.firstLive = false;
     c.kind = sl.kind;
     c.headIdx = headIdx;
@@ -853,7 +875,11 @@ bool followEye(ecm::Eye* eye, const ecm::Trim& trim) noexcept {
         const FixedWhy w = followDerive(iface, c);
         if (w != FixedWhy::None) return followFixed(w);
     } else if (c.failed) {
-        return followFixed(FixedWhy::Unverified);
+        // A pose that is not there yet (no pose, no joints) is tried again every kFollowRetryUpdates updates, silently, until it reads; any other failure stands.
+        if (!c.retryable || --c.retryIn != 0) return followFixed(FixedWhy::Unverified);
+        c.retryIn = ecm::kFollowRetryUpdates;   // a retry that faults or goes stale is tried again a window later, not never
+        const FixedWhy w = followDerive(iface, c);
+        if (w != FixedWhy::None) return followFixed(w);
     }
     SkSlots sl;
     const SkVerify v = skVerify(static_cast<uintptr_t>(iface), c.kind, &sl);
@@ -908,6 +934,20 @@ void followAfter(bool fromHead, ecm::Eye* eye) noexcept {
         g_fixedUpdates.fetch_add(1, std::memory_order_relaxed);
     }
     g_followSource.store(fromHead ? 1u : 0u, std::memory_order_relaxed);
+    {
+        // Steady: this eye is within 2 cm of the last one written (either source). The first eye of a placement has nothing to compare with and starts the count.
+        if (g_prevEyeValid.load(std::memory_order_relaxed)) {
+            ecm::Eye prev;
+            prev.up = g_lastEye[0].load(std::memory_order_relaxed);
+            prev.forward = g_lastEye[1].load(std::memory_order_relaxed);
+            prev.right = g_lastEye[2].load(std::memory_order_relaxed);
+            const bool still = ecm::eyeStepMetres(*eye, prev) < ecm::kFadeSteadyMetres;
+            g_steadyUpdates.store(still ? g_steadyUpdates.load(std::memory_order_relaxed) + 1 : 0u, std::memory_order_relaxed);
+        } else {
+            g_steadyUpdates.store(0, std::memory_order_relaxed);
+            g_prevEyeValid.store(true, std::memory_order_relaxed);
+        }
+    }
     g_lastEye[0].store(eye->up, std::memory_order_relaxed);
     g_lastEye[1].store(eye->forward, std::memory_order_relaxed);
     g_lastEye[2].store(eye->right, std::memory_order_relaxed);
@@ -1054,6 +1094,7 @@ void runUiPre(void* objectPtr, PreState& ps) {
     const bool wantHidden = active && g_sessionActive.load(std::memory_order_acquire) &&
                             g_placedActivity.load(std::memory_order_acquire) != 0 && !g_exiting.load(std::memory_order_acquire);
     const ecm::UiStep s = g_uiHider.step(object, o, wantHidden);
+    g_uiSettled.store(wantHidden && g_uiHider.settledForPlacement(), std::memory_order_release);
     g_uiHiddenByUs.store(g_uiHider.hiddenByUs(), std::memory_order_release);
     g_uiHeld.store(g_uiHider.hiddenByUs() || g_uiHider.pending(), std::memory_order_release);
     if (s.ev != ecm::UiEvent::None) pushEvent(kRingUi, ecm::EvKind::Ui, object, static_cast<uint32_t>(s.ev), 0, s.hidden, 0, nullptr, 0);
@@ -1672,6 +1713,8 @@ struct FrameInput {
     uint32_t focus = 0;
     bool readBindings = true;
     const wchar_t* bindsDir = nullptr;   // null: the live Elite bindings directory
+    bool comfortFade = true;             // production: always (no key). The legacy rig cells run without it, so F5's request goes out at once
+    uint64_t nowUs = 0;                  // a finer clock for the fade's ramps (0: nowMs)
 };
 
 uint64_t fingerprintOf(const wchar_t* dir) { return dir ? eliteBindsFingerprintDir(dir) : eliteBindsFingerprint(); }
@@ -2098,6 +2141,7 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
 
     // 5. F5.
     fs.ctlLive.tick(g_ctlCalls.load(std::memory_order_relaxed));
+    bool fadePressEnter = false, fadePressExit = false;
     {
         ecm::F5Inputs fi;
         fi.pressed = in.f5Pressed;
@@ -2115,9 +2159,15 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
             ecm::formatF5(line, sizeof(line), action, fi);
             sink(line);
             if (action == ecm::F5Action::Enter || action == ecm::F5Action::Exit) {
-                g_f5Request.store(static_cast<uint32_t>(action == ecm::F5Action::Enter ? ecm::F5Req::Enter : ecm::F5Req::Exit),
-                                  std::memory_order_release);
-                fs.f5SetFrame = frame;
+                if (in.comfortFade) {
+                    // The comfort fade holds the request until the view is black (step 6c), so the first press is never seen.
+                    fadePressEnter = action == ecm::F5Action::Enter;
+                    fadePressExit = action == ecm::F5Action::Exit;
+                } else {
+                    g_f5Request.store(static_cast<uint32_t>(action == ecm::F5Action::Enter ? ecm::F5Req::Enter : ecm::F5Req::Exit),
+                                      std::memory_order_release);
+                    fs.f5SetFrame = frame;
+                }
             }
         } else if (g_f5Request.load(std::memory_order_acquire) != 0 && frame - fs.f5SetFrame >= ecm::StaleWatch::kStaleFrames) {
             // Asked, and the controller never took it: the controller is not running, and the player is told so.
@@ -2147,6 +2197,41 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
     // 6b. The avatar fade global. Before the not-active clean-up below, so a feature turned off while the camera is closed puts it back.
     fadeTick(active, g_placedActivity.load(std::memory_order_acquire) != 0, g_sessionActive.load(std::memory_order_acquire), frame, false, sink);
     updateGates();
+
+    // 6c. The comfort fade: how black the view is this frame, and whether F5's request may go (not before the view is dark). Before the not-active return below, so
+    // a stand-down or a cleared hotkey clears the view at once.
+    if (in.comfortFade) {
+        ecm::ComfortInputs fin;
+        fin.nowUs = in.nowUs ? in.nowUs : nowMs * 1000ull;
+        fin.active = active;
+        fin.sessionActive = g_sessionActive.load(std::memory_order_acquire);
+        fin.requestPending = g_f5Request.load(std::memory_order_acquire) != 0;
+        fin.mode = static_cast<uint8_t>(g_ctlMode.load(std::memory_order_relaxed));
+        fin.placed = g_placedActivity.load(std::memory_order_acquire) != 0;
+        fin.state = static_cast<uint8_t>(g_lastState.load(std::memory_order_relaxed));
+        fin.steady = g_steadyUpdates.load(std::memory_order_relaxed);
+        fin.uiSettled = g_uiSettled.load(std::memory_order_acquire);
+        fin.ctlCalls = g_ctlCalls.load(std::memory_order_relaxed);
+        fin.pressEnter = fadePressEnter;
+        fin.pressExit = fadePressExit;
+        const ecm::ComfortStep st = fs.fade.step(fin);
+        if (st.releaseEnter || st.releaseExit) {
+            g_f5Request.store(static_cast<uint32_t>(st.releaseEnter ? ecm::F5Req::Enter : ecm::F5Req::Exit), std::memory_order_release);
+            fs.f5SetFrame = frame;
+        }
+        for (uint8_t i = 0; i < st.nev; ++i) {
+            ecm::formatComfort(line, sizeof(line), st.ev[i]);
+            sink(line);
+        }
+        std::memcpy(&fs.fadeAlphaBits, &st.alpha, sizeof(fs.fadeAlphaBits));
+        g_fadeAlphaBits.store(fs.fadeAlphaBits, std::memory_order_relaxed);
+        comfort::publish(st.alpha, nowMs);
+    } else {
+        fs.fade.reset();
+        g_fadeAlphaBits.store(0, std::memory_order_relaxed);
+        comfort::publish(0.0f, nowMs);
+    }
+    if (!g_sessionActive.load(std::memory_order_acquire)) g_uiSettled.store(false, std::memory_order_release);
 
     // 7. Not active: whatever the hook threads left published is withdrawn, every frame, until it is gone.
     uint32_t phase = g_phase.load(std::memory_order_acquire);
@@ -2295,6 +2380,9 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
             fb.zoomCalls = g_zoomCalls.load(std::memory_order_relaxed);
             fb.zoomCallsWindow = fb.zoomCalls - fs.beatZoomCalls;
             fb.zoomArmed = armed(kHkZoom);
+            fb.fadePhase = ecm::comfortPhaseText(fs.fade.phase());
+            fb.fadeKind = ecm::comfortKindText(fs.fade.kind());
+            fb.fadeAlpha = fs.fade.alpha();
             ecm::formatFollowBeat(line, sizeof(line), fb);
             sink(line);
             fs.beatHeadUpdates = fb.headUpdates;
@@ -2385,10 +2473,22 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
         in.focus = focus;
     }
     in.readBindings = cfg.getBool("hotkey.read_game_bindings", true);
+    {
+        // The fade's ramps want a finer clock than GetTickCount64's 15 ms.
+        static const uint64_t freq = [] {
+            LARGE_INTEGER f;
+            QueryPerformanceFrequency(&f);
+            return static_cast<uint64_t>(f.QuadPart > 0 ? f.QuadPart : 1);
+        }();
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        in.nowUs = static_cast<uint64_t>(t.QuadPart) * 1000000ull / freq;
+    }
     boundaryAt(frameNo, GetTickCount64(), in, sink);
 }
 
 void explorerCamShutdown() {
+    comfort::clear();   // an unload: the runtime reads no fade from here on
     // An unload (FreeLibrary): the dither-fade global goes back to -1 if EDVR still holds it at 0. A process exit does not come here, and
     // needs nothing: the global dies with the process.
     fadeTick(false, false, false, 0, true, ecm::Sink{&logSink, nullptr});
@@ -2526,6 +2626,8 @@ void boundary(uint32_t frame, uint64_t nowMs, const ExplorerCamTestFrame& t, Exp
     in.focusKnown = t.focusKnown;
     in.focus = t.focus;
     in.readBindings = t.readBindings;
+    in.comfortFade = t.comfortFade;
+    in.nowUs = t.nowUs;
     // Hermetic: a rig with no fixture directory must not read the real player's Elite bindings.
     in.bindsDir = t.bindsDir ? t.bindsDir : L"C:\\edvr_explorer_cam_test_no_such_bindings_dir";
     boundaryAt(frame, nowMs, in, ecm::Sink{fn, ctx});
@@ -2562,6 +2664,16 @@ void setHeadImage(uintptr_t base, size_t size) {
     g_testHeadSize = size;
 }
 void forcePlaceActive(bool on) { g_placeActive.store(on); }
+float fadeAlpha() {
+    const uint32_t bits = g_fadeAlphaBits.load();
+    float v = 0.0f;
+    std::memcpy(&v, &bits, 4);
+    return v;
+}
+uint32_t steadyUpdates() { return g_steadyUpdates.load(); }
+bool uiSettled() { return g_uiSettled.load(); }
+float comfortRead(uint64_t nowMs) { return comfort::read(nowMs); }
+bool comfortDefaultOn() { return FrameInput().comfortFade; }
 void setNowUs(uint64_t (*fn)()) { g_followNowUs = fn ? fn : &realNowUs; }
 uint64_t followHeadUpdates() { return g_headUpdates.load(); }
 uint64_t followFixedUpdates() { return g_fixedUpdates.load(); }
@@ -2694,6 +2806,11 @@ void reset() {
     g_fadeAmount = nullptr;
     g_testFadeMode = nullptr;
     g_testFadeAmount = nullptr;
+    g_steadyUpdates.store(0);
+    g_prevEyeValid.store(false);
+    g_uiSettled.store(false);
+    g_fadeAlphaBits.store(0);
+    comfort::clear();
     g_trimRight.store(0.0f);
     g_trimUp.store(0.0f);
     g_trimForward.store(0.0f);

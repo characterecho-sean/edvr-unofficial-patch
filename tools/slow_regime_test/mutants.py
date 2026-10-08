@@ -230,7 +230,7 @@ H_ENDMS = "    frame.vendorEndMs=info.ms;\n"
 H_OVERLAP = "    finishingOverlapped=true; // endFrameReturned names the path\n"
 H_FINISH = "    if(tracing)finishInstruments();\n"
 H_PERIODIC = "writeInstrumentSummaries(\"periodic\");}\n"
-H_WALL = "      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement);"
+H_WALL = "      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade);"
 H_MEASURE = "    const bool measure=counterNow(&dispatchBegan);\n"
 H_VRAM = "    {const char* why=nullptr;vramAdapter.Attach(vramAdapterOf(graphics.device(),&why));vramWhy=why?why:\"\";}\n"
 H_COPY = "    const double copy=scene?transferWall.producerDispatch+submitSample.receiveMs:0.0;\n"
@@ -433,7 +433,7 @@ MUTANTS = [
       "every call without a loading frame's flags is an empty end"),
     M("glue-close-unfinished", "G1", "host", [(H_FINISH, "")], "an open episode and regime are not ended at close"),
     M("glue-no-periodic-summary", "G1", "host", [(H_PERIODIC, "}\n")], "the summaries are never written while the session runs"),
-    M("glue-wall-only-while-open", "G1", "host", [(H_WALL, "      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,submitStats.full()?nullptr:&wall,framePlacement);")],
+    M("glue-wall-only-while-open", "G1", "host", [(H_WALL, "      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,submitStats.full()?nullptr:&wall,framePlacement,fade);")],
       "the swapchain calls are timed only while the submit window has room"),
     M("glue-treatments-only-while-open", "G1", "host", [(H_MEASURE, "    const bool measure=!submitStats.full()&&counterNow(&dispatchBegan);\n")], "the treatments are timed only while the submit window has room"),
     M("glue-no-vram", "G1", "host", [(H_VRAM, "")], "the SLOW line has no adapter to read"),

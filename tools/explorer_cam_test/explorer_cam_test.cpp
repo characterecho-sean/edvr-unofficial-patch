@@ -43,6 +43,8 @@
 #include "../../src/d3d11/explorer_cam.h"
 #include "../../src/d3d11/explorer_cam_core.h"
 #include "../../src/d3d11/explorer_cam_follow_core.h"
+#include "../../src/d3d11/explorer_cam_fade_core.h"
+#include "../../src/common/comfort_fade.h"
 
 using namespace edvr;
 
@@ -1074,6 +1076,39 @@ void testUiHider() {
     o.step(kUi, hiddenUi, true);
     s = o.step(kUi2, shown, true);
     check(s.press && !o.hiddenByUs(), "a different camera UI object starts clean: the old hide is forgotten and the new UI is hidden");
+}
+
+void testUiSettled() {
+    std::printf("the camera UI's hide: when it has run its course (pure)\n");
+    constexpr uint64_t kUi = 0x7100;
+    const ecm::UiObserved shown{true, 0}, hidden{true, 1}, noHandle{false, 0};
+    ecm::UiHider h;
+    check(!h.settledForPlacement(), "A FRESH HIDER is not settled");
+    h.step(kUi, shown, false);
+    check(!h.settledForPlacement(), "...nor when the hide is not wanted");
+    ecm::UiStep st = h.step(kUi, shown, true);
+    check(st.press && !h.settledForPlacement(), "THE PRESS IS OUT but its result is not read: not settled");
+    h.step(kUi, hidden, true);
+    check(h.settledForPlacement(), "...the next update reads the UI hidden: settled");
+    h.step(kUi, hidden, false);
+    check(!h.settledForPlacement(), "...and when the hide is no longer wanted (the exit) it is not");
+    ecm::UiHider again;
+    again.step(kUi, shown, true);
+    again.step(kUi, shown, true);   // the press did nothing
+    check(again.settledForPlacement(), "A PRESS THAT HAD NO EFFECT is settled too (the fade does not wait for what will not happen)");
+    ecm::UiHider mine;
+    mine.step(kUi, hidden, true);
+    check(mine.settledForPlacement(), "A UI THE PLAYER ALREADY HID is settled");
+    ecm::UiHider none;
+    none.step(kUi, noHandle, true);
+    check(none.settledForPlacement(), "NO HANDLE TO PRESS is settled (nothing will ever hide)");
+    ecm::UiHider fresh2;
+    fresh2.step(kUi, hidden, true);
+    fresh2.step(kUi + 0x100, shown, false);
+    check(!fresh2.settledForPlacement(), "A DIFFERENT UI OBJECT forgets the old one's state");
+    ecm::UiHider unwanted;
+    unwanted.step(kUi, hidden, false);
+    check(!unwanted.settledForPlacement(), "A UI THE PLAYER HID with the hide not wanted (no placement) is not settled: it counts only for the placement that wants it");
 }
 
 void testWatches() {
@@ -4106,7 +4141,11 @@ void testFollowPure() {
     fb.zoomArmed = true;
     fb.zoomCalls = 30;
     fb.zoomCallsWindow = 30;
+    fb.fadePhase = "black";
+    fb.fadeKind = "entering";
+    fb.fadeAlpha = 1.0f;
     ecm::formatFollowBeat(line, sizeof(line), fb);
+    check(has(line, "comfort_fade(phase=black kind=entering alpha=1.000)"), "THE SECOND HEARTBEAT LINE ends with the comfort fade's phase, kind and level");
     check(has(line, "explorer cam: heartbeat (follow, isolation):") && !has(line, "explorer cam: heartbeat:") && has(line, "eye_source=head-joint") && has(line, "last_eye(up=1.698 forward=0.142 right=0.000)") &&
               has(line, "head_joint_updates=450(+450)") && has(line, "read58_us(n/min/max/session_max)=450/1/3/9") && has(line, "free_camera=11(+11)") && has(line, "zoom=7(+7)") &&
               has(line, "zoom_hook=armed zoom_hook_calls=30(+30)") && has(line, "isolation=on"),
@@ -4429,6 +4468,97 @@ void testFollowGlue(const Pages& p) {
     g.freeFrame();
     g.freeFrame();
     check(t::followSource() == 1 && g_cr.lastModelIdx == 12 && eyeIs(0.0f, 1.698f, 0.142f), "FINDJOINT RETURNS A u16: garbage in the high half of eax is not part of the joint index");
+
+    // ---- a pose that is not built yet is tried again (review 2026-10-08, conditional concern 1) ---------------------------------------------------------------------
+    // A null pose or a zero joint count is transient: the first derive fails, said once, and the fixed keys serve until a retry (every kFollowRetryUpdates updates,
+    // silently) finds the pose built. Every other refusal (no head joint, too many joints, a fault) is for good, or counted, as before.
+    {
+        // Updates until the next GetPoseData call (a derive attempt); -1 when none came within `maxUpdates`.
+        auto windowOf = [&](int maxUpdates) {
+            const int before = g_cr.poseCalls;
+            int n = 0;
+            while (g_cr.poseCalls == before && n < maxUpdates) {
+                g.freeFrame();
+                ++n;
+            }
+            return g_cr.poseCalls == before ? -1 : n;
+        };
+        static_assert(ecm::kFollowRetryUpdates == 60, "the retry window is one second of updates at 60 Hz");
+        const uint64_t noPose = 0;
+
+        begin(true);
+        skel.init();
+        uint64_t realPose = 0;
+        std::memcpy(&realPose, skel.iface + 0x20, 8);
+        std::memcpy(skel.iface + 0x20, &noPose, 8);   // GetPoseData returns null: the pose is not built yet
+        latch(skel);
+        place();
+        g.freeFrame();
+        const int firstTry = windowOf(200);
+        rig.boundary();
+        check(firstTry >= 0 && t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::Unverified) && eyeIs(0.0f, 1.68f, 0.10f) && g_cr.modelCalls == 0 && t::followFaults() == 0,
+              "A NULL POSE: the fixed keys serve (up 1.68), +0x58 never called, not a fault");
+        check(windowOf(200) == static_cast<int>(ecm::kFollowRetryUpdates), "...tried AGAIN exactly kFollowRetryUpdates (60) updates after the last try, not every update and not never");
+        check(windowOf(200) == static_cast<int>(ecm::kFollowRetryUpdates) && g_cr.findHeadCalls == 0 && g_cr.modelCalls == 0, "...and again 60 updates later, still no head read");
+        rig.boundary();
+        check(rig.cap.count("cannot be used: GetPoseData returned no pose") == 1 && rig.cap.count("head follow: head joint of skeleton") == 0,
+              "...the failure is said ONCE across three tries (a retry that fails again is silent)");
+        std::memcpy(skel.iface + 0x20, &realPose, 8);   // the pose is built now
+        const int ok = windowOf(200);
+        rig.boundary();
+        check(ok >= 1 && ok <= static_cast<int>(ecm::kFollowRetryUpdates) && t::followSource() == 1 && eyeIs(0.0f, 1.698f, 0.142f) && g_cr.findHeadCalls == 1 && g_cr.modelCalls >= 1 &&
+                  rig.cap.count("head follow: head joint of skeleton") == 1 && rig.cap.count("the eye now comes from the head joint") == 1,
+              "THE POSE APPEARS: within one window the retry derives the rest offset, the head joint serves (up 1.698, forward 0.142), the rest line and the switch are said once");
+        const int posesAfter = g_cr.poseCalls;
+        for (int i = 0; i < 150; ++i) g.freeFrame();
+        check(g_cr.poseCalls == posesAfter && t::followSource() == 1, "...once derived the pose is not called again (a retry is only for a failure)");
+
+        // The same with a pose whose joint count is still 0.
+        begin(true);
+        skel.init(0, 0);
+        latch(skel);
+        place();
+        g.freeFrame();
+        windowOf(200);
+        check(t::followSource() == 0 && windowOf(200) == static_cast<int>(ecm::kFollowRetryUpdates) && g_cr.findHeadCalls == 0, "A POSE WITH NO JOINTS YET: tried again every 60 updates, no FindJoint while it has none");
+        const uint16_t sixtyFour = 64;
+        std::memcpy(skel.pose, &sixtyFour, 2);   // the pose is filled in
+        const int ok2 = windowOf(200);
+        check(ok2 >= 1 && ok2 <= static_cast<int>(ecm::kFollowRetryUpdates) && t::followSource() == 1 && eyeIs(0.0f, 1.698f, 0.142f), "...and when the joints exist the next retry follows the head joint");
+
+        // A retry that faults is counted and is tried again a window later (not never).
+        begin(true);
+        skel.init();
+        std::memcpy(&realPose, skel.iface + 0x20, 8);
+        std::memcpy(skel.iface + 0x20, &noPose, 8);
+        latch(skel);
+        place();
+        g.freeFrame();
+        windowOf(200);
+        g_cr.faultAt = 1;
+        g_cr.faultCount = 1;
+        const uint32_t faultsBefore = t::followFaults();
+        const int faultTry = windowOf(200);
+        check(faultTry >= 1 && t::followFaults() == faultsBefore + 1 && t::followSource() == 0, "A RETRY THAT FAULTS is counted as one head fault and the fixed keys keep serving");
+        std::memcpy(skel.iface + 0x20, &realPose, 8);
+        check(windowOf(200) == static_cast<int>(ecm::kFollowRetryUpdates) && t::followSource() == 1 && eyeIs(0.0f, 1.698f, 0.142f),
+              "...and the retry after a faulted one comes a window later and works (the countdown is re-armed before the try)");
+
+        // The refusals that are NOT transient stand: no head joint is tried once, however long the session runs.
+        begin(true);
+        g_cr.headIdx = 0xFFFF;
+        latch(skel);
+        place();
+        for (int i = 0; i < 200; ++i) g.freeFrame();
+        rig.boundary();
+        check(g_cr.poseCalls == 1 && g_cr.findHeadCalls == 1 && t::followSource() == 0 && rig.cap.count("cannot be used: FindJoint(\"def_c_head_joint\") found no head joint") == 1,
+              "NO HEAD JOINT IS FOR GOOD: 200 updates later still one GetPoseData and one FindJoint (only a null pose and a zero joint count retry)");
+        g_cr.headIdx = 12;
+        skel2.init();
+        latch(skel2);
+        g.freeFrame();
+        check(t::followSource() == 1 && eyeIs(0.0f, 1.698f, 0.142f), "...and a new skeleton is still tried afresh");
+    }
 
     // ---- the smoothing: 0 is exact; a time constant eases; the comfort key is live ----------------------------------------------------------------------------------
     begin(true);
@@ -4889,6 +5019,829 @@ void testHotkeyKeeper() {
     check(k.step("F7", false, &deferred) == "F7" && !deferred && k.pending().empty(), "...the session over: F7 applies");
 }
 
+
+// ================================ Phase 4: the comfort fade (the timeline, the signal) ================================
+
+// The timeline driven by hand: a clock in 10 ms steps, the facts as plain fields.
+struct TlRig {
+    ecm::ComfortTimeline tl;
+    ecm::ComfortInputs in;
+    uint64_t us = 5000000;
+    std::vector<ecm::ComfortLine> events;
+    uint32_t releasedEnter = 0, releasedExit = 0;
+    float alpha = 0.0f;
+    uint32_t ticks = 0, firstBlackTick = 0, releaseTick = 0;
+    TlRig() {
+        in.active = true;
+        in.ctlCalls = 100;
+    }
+    ecm::ComfortStep tick(uint32_t ms = 10) {
+        us += static_cast<uint64_t>(ms) * 1000;
+        in.nowUs = us;
+        const ecm::ComfortStep s = tl.step(in);
+        in.pressEnter = in.pressExit = false;
+        for (uint8_t i = 0; i < s.nev; ++i) events.push_back(s.ev[i]);
+        releasedEnter += s.releaseEnter ? 1u : 0u;
+        releasedExit += s.releaseExit ? 1u : 0u;
+        alpha = s.alpha;
+        ++ticks;
+        if (alpha == 1.0f && !firstBlackTick) firstBlackTick = ticks;
+        if ((s.releaseEnter || s.releaseExit) && !releaseTick) releaseTick = ticks;
+        return s;
+    }
+    void run(uint32_t ms) { for (uint32_t t = 0; t < ms; t += 10) tick(10); }
+    size_t count(ecm::ComfortEv ev) const {
+        size_t n = 0;
+        for (const auto& e : events) n += e.ev == ev ? 1 : 0;
+        return n;
+    }
+    const ecm::ComfortLine* find(ecm::ComfortEv ev, size_t nth = 0) const {
+        for (const auto& e : events)
+            if (e.ev == ev && nth-- == 0) return &e;
+        return nullptr;
+    }
+    // F5 on foot with the camera closed, up to and including the moment the request goes out. Returns the ms it took.
+    uint32_t pressEnterUntilReleased() {
+        in.pressEnter = true;
+        uint32_t ms = 0;
+        tick(10);
+        while (!releasedEnter && ms < 1000) { tick(10); ms += 10; }
+        return ms;
+    }
+    // The controller took the request, the session is on, and the placement came: everything the fade-in waits for.
+    void goodEntry() {
+        in.sessionActive = true;
+        in.requestPending = false;
+        in.mode = 4;
+        in.placed = true;
+        in.state = ecm::kStateRelativeLock;
+        in.steady = ecm::kFadeSteadyUpdates;
+        in.uiSettled = true;
+    }
+};
+
+void testComfortTimeline() {
+    std::printf("the comfort fade's timeline: enter, exit, re-attach, each timeout, the aborts (pure)\n");
+    static_assert(ecm::kFadeOutMs == 200 && ecm::kFadeInMs == 300 && ecm::kFadeReattachOutMs == 100 && ecm::kFadeReattachInMs == 200 && ecm::kFadeMaxBlackMs == 3000 &&
+                      ecm::kFadeSteadyUpdates == 10 && ecm::kFadeClosedUpdates == 10,
+                  "the durations Sean's brief names: 200 out, 300 in, 100/200 for a re-attach, 3 s at most, 10 updates");
+    check(ecm::kFadeSteadyMetres == 0.02f, "...and the eye is steady under 2 cm an update");
+
+    // ---- idle ---------------------------------------------------------------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        r.run(500);
+        check(r.alpha == 0.0f && r.events.empty() && !r.tl.busy() && r.releasedEnter == 0, "IDLE: alpha is exactly 0, no event, no request released");
+    }
+    // ---- enter: out, release, hold, in ----------------------------------------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        r.run(50);
+        r.in.pressEnter = true;
+        ecm::ComfortStep s = r.tick();
+        check(r.count(ecm::ComfortEv::Start) == 1 && r.find(ecm::ComfortEv::Start)->kind == ecm::ComfortKind::Enter && r.tl.phase() == ecm::ComfortPhase::Out && s.alpha == 0.0f &&
+                  !s.releaseEnter,
+              "ENTER, F5: one Start event, the fade out begins from clear, and the request is NOT released with the press");
+        std::string startLine;
+        {
+            char buf[ecm::kLineBytes];
+            ecm::formatComfort(buf, sizeof(buf), *r.find(ecm::ComfortEv::Start));
+            startLine = buf;
+        }
+        check(has(startLine.c_str(), "explorer cam: comfort fade: F5: fading to black over 200 ms BEFORE the camera opens") && has(startLine.c_str(), "3 s at most"),
+              "...the line says it fades BEFORE the camera opens, over 200 ms, for 3 s at most");
+        for (int i = 0; i < 9; ++i) s = r.tick();   // 90 ms in
+        check(std::fabs(s.alpha - 0.425f) < 0.01f && r.releasedEnter == 0, "...90 ms in, the view is part dark (the smoothstep of 0.45 is 0.425, not the linear 0.45) and no press has been released");
+        uint32_t ms = 90;
+        while (!r.releasedEnter && ms < 600) { r.tick(); ms += 10; }
+        check(r.releasedEnter == 1 && r.alpha == 1.0f && ms >= 200 && ms <= 230, "THE REQUEST IS RELEASED once the view is fully black, 200 ms after the press (a frame later at most), and never before");
+        check(r.firstBlackTick != 0 && r.releaseTick > r.firstBlackTick, "...on a frame AFTER the first one that was fully black, so the black level has been published once before the first press can happen");
+        check(r.tl.phase() == ecm::ComfortPhase::Black, "...and the view holds black");
+        // ---- the hold: nothing placed yet -----------------------------------------------------------------------------------------------------------------
+        r.in.sessionActive = true;
+        r.in.mode = 1;
+        r.run(500);
+        check(r.alpha == 1.0f && r.tl.phase() == ecm::ComfortPhase::Black && r.releasedEnter == 1, "BLACK HOLDS through the open and the wait for TAB (500 ms, session on, nothing placed)");
+        // ---- each condition alone keeps it black -------------------------------------------------------------------------------------------------------------------
+        r.goodEntry();
+        r.in.placed = false;
+        r.run(200);
+        check(r.alpha == 1.0f, "...NOT PLACED keeps it black even with the lock, the eye and the UI all fine");
+        r.goodEntry();
+        r.in.state = 3;
+        r.run(200);
+        check(r.alpha == 1.0f, "...THE LOCK NOT CONFIRMED (+0x48C = 3) keeps it black");
+        r.goodEntry();
+        r.in.steady = 9;
+        r.run(200);
+        check(r.alpha == 1.0f, "...AN EYE STEADY FOR ONLY 9 UPDATES keeps it black");
+        r.goodEntry();
+        r.in.uiSettled = false;
+        r.run(200);
+        check(r.alpha == 1.0f, "...THE CAMERA UI'S HIDE NOT SETTLED keeps it black");
+        // ---- all met: fade in ----------------------------------------------------------------------------------------------------------------------------------
+        r.goodEntry();
+        const size_t before = r.events.size();
+        s = r.tick();
+        check(r.count(ecm::ComfortEv::FadeIn) == 1 && r.tl.phase() == ecm::ComfortPhase::In && r.events.size() == before + 1,
+              "ALL FOUR MET (placed, lock 4, steady 10, UI settled): the fade in begins on that frame, one FadeIn event");
+        char buf[ecm::kLineBytes];
+        ecm::formatComfort(buf, sizeof(buf), *r.find(ecm::ComfortEv::FadeIn));
+        check(has(buf, "entering: placed, locked, the camera UI hidden and the eye steady for 10 updates") && has(buf, "black lasted 1.") && has(buf, "fading in over 300 ms"),
+              "...its line says what was met, how long black lasted, and the 300 ms");
+        float prev = s.alpha;
+        bool monotone = true;
+        uint32_t inMs = 0;
+        while (r.tl.phase() == ecm::ComfortPhase::In && inMs < 1000) {
+            s = r.tick();
+            monotone = monotone && s.alpha <= prev + 1e-6f;
+            prev = s.alpha;
+            inMs += 10;
+        }
+        check(monotone && inMs >= 290 && inMs <= 330 && s.alpha == 0.0f && r.count(ecm::ComfortEv::Cleared) == 1 && !r.tl.busy(),
+              "THE FADE IN takes 300 ms, only ever lightens, ends at EXACTLY 0, says it is clear once, and the timeline is idle again");
+        ecm::formatComfort(buf, sizeof(buf), *r.find(ecm::ComfortEv::Cleared));
+        check(has(buf, "clear again; the view was dark for ") && has(buf, "s in all (entering)"), "...with a line giving the total dark time");
+        r.run(300);
+        check(r.alpha == 0.0f && r.events.size() == before + 2 && r.releasedEnter == 1, "...and nothing more happens (no second release, no stray event)");
+    }
+    // ---- a second F5 press while the entry is under way ----------------------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        r.in.pressEnter = true;
+        r.tick();
+        r.run(80);
+        const float mid = r.alpha;
+        r.in.pressEnter = true;
+        r.tick();
+        check(r.count(ecm::ComfortEv::Cancelled) == 1 && r.tl.phase() == ecm::ComfortPhase::In && r.alpha <= mid + 0.1f, "A SECOND F5 BEFORE THE REQUEST WENT: the entry is cancelled and the view fades back in from where it stands");
+        r.run(600);
+        check(r.releasedEnter == 0 && r.alpha == 0.0f && !r.tl.busy() && r.count(ecm::ComfortEv::Cleared) == 1, "...the request is never released and the view ends clear");
+        char buf[ecm::kLineBytes];
+        ecm::formatComfort(buf, sizeof(buf), *r.find(ecm::ComfortEv::Cancelled));
+        check(has(buf, "pressed again before the camera opened") && has(buf, "cancelled"), "...with a line");
+        r.in.pressEnter = true;
+        r.tick();
+        check(r.count(ecm::ComfortEv::Start) == 2, "(and a new F5 starts a new entry)");
+    }
+    {
+        TlRig r;   // the controller has not taken the request yet: no session, the request still pending, nothing else true
+        r.pressEnterUntilReleased();
+        r.goodEntry();
+        r.in.sessionActive = false;
+        r.in.requestPending = true;
+        r.run(300);
+        check(r.alpha == 1.0f && r.count(ecm::ComfortEv::Aborted) == 0 && r.count(ecm::ComfortEv::FadeIn) == 0, "NO SESSION YET with the request still pending: black holds (every other fact true is not enough)");
+        r.in.pressEnter = true;
+        r.tick();
+        check(r.count(ecm::ComfortEv::Start) == 1 && r.count(ecm::ComfortEv::Cancelled) == 0 && r.tl.phase() == ecm::ComfortPhase::Black, "A SECOND F5 AFTER THE REQUEST WENT is ignored (the entry is under way)");
+    }
+    // ---- timeouts -------------------------------------------------------------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        const uint32_t releasedAfter = r.pressEnterUntilReleased();
+        (void)releasedAfter;
+        r.in.sessionActive = true;
+        r.in.requestPending = false;
+        r.in.mode = 3;
+        r.in.placed = true;
+        r.in.state = 3;     // never locks
+        r.in.steady = 4;    // never steady
+        r.in.uiSettled = false;
+        uint32_t ms = 0;
+        while (r.count(ecm::ComfortEv::TimedOut) == 0 && ms < 6000) { r.tick(); ms += 10; }
+        const ecm::ComfortLine* t = r.find(ecm::ComfortEv::TimedOut);
+        check(t && t->heldMs >= 3000 && t->heldMs <= 3030 && r.tl.phase() == ecm::ComfortPhase::In,
+              "THE 3 s CAP: nothing is ever met, and at 3.0 s from the press the view fades in regardless (one TimedOut event)");
+        check(t && (t->unmet & ecm::kComfortUnmetLock) && (t->unmet & ecm::kComfortUnmetSteady) && (t->unmet & ecm::kComfortUnmetUi) && !(t->unmet & ecm::kComfortUnmetPlaced) &&
+                  !(t->unmet & ecm::kComfortUnmetSession),
+              "...the event names exactly what was unmet: the lock, the steady eye, the UI hide (not the placement, not the session)");
+        char buf[ecm::kLineBytes];
+        if (t) ecm::formatComfort(buf, sizeof(buf), *t);
+        check(t && has(buf, "black reached the 3 s cap, so the view fades in anyway") && has(buf, "the lock is not confirmed (+0x48C = 3, want 4)") && has(buf, "the eye is not steady (4 of 10 updates)") &&
+                  has(buf, "the camera UI's hide has not settled") && !has(buf, "the view is not placed"),
+              "...and the line says why in words, with the numbers");
+        r.run(400);
+        check(r.alpha == 0.0f && !r.tl.busy(), "...and the view is clear again 300 ms later: black never outlasts 3.3 s");
+    }
+    {
+        TlRig r;
+        r.in.sessionActive = true;   // a session whose request never came out of the dark: still bounded
+        r.in.pressEnter = true;
+        r.tick();
+        uint32_t ms = 0;
+        while (r.count(ecm::ComfortEv::TimedOut) == 0 && ms < 6000) { r.tick(); ms += 10; }
+        check(r.find(ecm::ComfortEv::TimedOut) && r.find(ecm::ComfortEv::TimedOut)->heldMs <= 3030, "THE CAP HOLDS with the session on and nothing else true");
+    }
+    // ---- aborts: the request is not taken; the session ends under it -----------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        r.pressEnterUntilReleased();
+        r.in.requestPending = true;
+        r.run(100);
+        check(r.count(ecm::ComfortEv::Aborted) == 0 && r.alpha == 1.0f, "(the request is pending: the controller may still take it)");
+        r.in.requestPending = false;   // dropped by the watchdog, or refused: no session ever came
+        r.run(40);
+        check(r.count(ecm::ComfortEv::Aborted) == 0, "(a few frames with neither a request nor a session are not yet a refusal)");
+        r.run(60);
+        const ecm::ComfortLine* a = r.find(ecm::ComfortEv::Aborted);
+        check(a && a->why == ecm::ComfortWhy::NotTaken && r.tl.phase() == ecm::ComfortPhase::In, "A REQUEST NOBODY TOOK (no session ever, none pending): the view fades back in at once, well inside the cap");
+        char buf[ecm::kLineBytes];
+        if (a) ecm::formatComfort(buf, sizeof(buf), *a);
+        check(a && has(buf, "F5's request was not taken or was refused") && has(buf, "fades back in at once"), "...with a line");
+        r.run(400);
+        check(r.alpha == 0.0f && !r.tl.busy(), "...and the view is clear");
+    }
+    {
+        TlRig r;
+        r.pressEnterUntilReleased();
+        r.in.sessionActive = true;
+        r.in.requestPending = false;
+        r.in.mode = 1;
+        r.run(200);
+        r.in.sessionActive = false;   // the sequencer gave up (a timeout, a refusal) or the controller went silent
+        r.run(10);
+        check(r.count(ecm::ComfortEv::Aborted) == 0, "(one frame without the session is not yet an abort)");
+        r.run(10);
+        const ecm::ComfortLine* a = r.find(ecm::ComfortEv::Aborted);
+        check(a && a->why == ecm::ComfortWhy::SessionEnded && r.tl.phase() == ecm::ComfortPhase::In, "THE SESSION ENDS UNDER THE ENTRY: the view fades back in at once, on the second frame without it");
+        char buf[ecm::kLineBytes];
+        if (a) ecm::formatComfort(buf, sizeof(buf), *a);
+        check(a && has(buf, "the session ended under it") && has(buf, "Unmet: "), "...the line says so and names what was unmet");
+    }
+    // ---- Explorer Cam stands down, or the hotkey is cleared ----------------------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        r.pressEnterUntilReleased();
+        r.goodEntry();
+        r.in.steady = 3;
+        r.run(100);
+        check(r.alpha == 1.0f, "(black, entering)");
+        r.in.active = false;
+        const ecm::ComfortStep s = r.tick();
+        check(s.alpha == 0.0f && r.count(ecm::ComfortEv::Dropped) == 1 && !r.tl.busy(), "EXPLORER CAM STOOD DOWN (or the hotkey cleared) while black: the view is clear AT ONCE, one Dropped event");
+        char buf[ecm::kLineBytes];
+        ecm::formatComfort(buf, sizeof(buf), *r.find(ecm::ComfortEv::Dropped));
+        check(has(buf, "stood down or its hotkey was cleared while the view was dark") && has(buf, "the view is clear at once"), "...with a line");
+        r.run(100);
+        check(r.alpha == 0.0f && r.count(ecm::ComfortEv::Dropped) == 1, "...and stays clear, with no second line");
+        r.in.active = true;
+        r.run(100);
+        check(r.alpha == 0.0f && !r.tl.busy(), "...also when it comes back: nothing is dark until F5 asks");
+    }
+    // ---- exit -----------------------------------------------------------------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        r.goodEntry();
+        r.run(100);
+        check(r.alpha == 0.0f && !r.tl.busy(), "(a session is on, placed, locked and the view is clear)");
+        r.in.pressExit = true;
+        ecm::ComfortStep s = r.tick();
+        check(r.count(ecm::ComfortEv::Start) == 1 && r.find(ecm::ComfortEv::Start)->kind == ecm::ComfortKind::Exit && r.releasedExit == 0 && s.alpha == 0.0f,
+              "EXIT, F5 in a session: one Start event, the fade out begins, the exit request is NOT released with the press");
+        char buf[ecm::kLineBytes];
+        ecm::formatComfort(buf, sizeof(buf), *r.find(ecm::ComfortEv::Start));
+        check(has(buf, "BEFORE the camera's controls come back and the camera closes"), "...the line says the controls come back only after the view is dark");
+        uint32_t ms = 0;
+        while (!r.releasedExit && ms < 600) { r.tick(); ms += 10; }
+        check(r.releasedExit == 1 && r.alpha == 1.0f && ms >= 190 && ms <= 230, "...the exit request goes out once the view is black, 200 ms after the press");
+        r.in.pressExit = true;
+        r.tick();
+        check(r.count(ecm::ComfortEv::Start) == 1 && r.releasedExit == 1, "a second F5 while leaving is the same press (no second start, no second release)");
+        r.run(500);
+        check(r.alpha == 1.0f, "BLACK HOLDS while the camera is still open (mode 4)");
+        r.in.mode = 0;
+        r.in.sessionActive = false;
+        r.in.placed = false;
+        r.in.ctlCalls = 1000;
+        r.tick();
+        for (int i = 0; i < 9; ++i) { ++r.in.ctlCalls; r.tick(); }
+        check(r.alpha == 1.0f && r.count(ecm::ComfortEv::FadeIn) == 0, "...it reads closed but only 9 controller updates have passed: still black");
+        ++r.in.ctlCalls;
+        r.tick();
+        check(r.count(ecm::ComfortEv::FadeIn) == 1 && r.tl.phase() == ecm::ComfortPhase::In, "...the 10th update: the fade in begins");
+        ecm::formatComfort(buf, sizeof(buf), *r.find(ecm::ComfortEv::FadeIn));
+        check(has(buf, "leaving: the camera reads closed and 10 controller updates have passed") && has(buf, "fading in over 300 ms"), "...with its line");
+        r.run(400);
+        check(r.alpha == 0.0f && !r.tl.busy() && r.count(ecm::ComfortEv::Cleared) == 1, "...and the view is clear again");
+    }
+    {
+        TlRig r;
+        r.goodEntry();
+        r.in.pressExit = true;
+        r.tick();
+        while (!r.releasedExit) r.tick();
+        r.in.mode = 0;
+        r.in.sessionActive = false;
+        r.run(100);   // mode 0 but the controller is never called again (ctlCalls frozen)
+        check(r.alpha == 1.0f, "EXIT: mode 0 with the controller silent does not count as closed");
+        uint32_t ms = 100;
+        while (r.count(ecm::ComfortEv::TimedOut) == 0 && ms < 6000) { r.tick(); ms += 10; }
+        const ecm::ComfortLine* t = r.find(ecm::ComfortEv::TimedOut);
+        char buf[ecm::kLineBytes];
+        if (t) ecm::formatComfort(buf, sizeof(buf), *t);
+        check(t && t->heldMs >= 3000 && t->heldMs <= 3030 && has(buf, "leaving: black reached the 3 s cap") && has(buf, "only 0 of 10 controller updates since it closed"),
+              "EXIT TIMES OUT at 3 s too, and says how far the closed-camera count got");
+    }
+    {
+        TlRig r;
+        r.goodEntry();
+        r.in.pressExit = true;
+        r.tick();
+        while (!r.releasedExit) r.tick();
+        r.in.sessionActive = false;   // the exit sequence gave up with the camera still open
+        r.in.mode = 4;
+        r.run(30);
+        check(r.count(ecm::ComfortEv::Aborted) == 0, "(three frames without the session, the camera still open: not yet an abort)");
+        r.run(30);
+        const ecm::ComfortLine* a = r.find(ecm::ComfortEv::Aborted);
+        check(a && a->why == ecm::ComfortWhy::SessionEnded && r.tl.phase() == ecm::ComfortPhase::In, "EXIT ABORTED (the session is over and the camera is still open): the view fades in rather than wait out the cap");
+    }
+    {
+        TlRig r;   // an exit pressed with no session to leave (it ended while the view faded): nothing is released
+        r.goodEntry();
+        r.in.pressExit = true;
+        r.tick();
+        r.in.sessionActive = false;
+        r.in.mode = 0;
+        r.run(400);
+        check(r.releasedExit == 0, "EXIT when the session ended during the fade out: no request is released (there is nothing to leave)");
+        r.in.ctlCalls += 20;
+        r.run(30);
+        check(r.count(ecm::ComfortEv::FadeIn) == 1, "...and the fade in follows the closed camera as before");
+    }
+    // ---- exit pressed while the entry is black: no dip --------------------------------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        r.pressEnterUntilReleased();
+        r.in.sessionActive = true;
+        r.in.requestPending = false;
+        r.in.mode = 1;
+        r.run(100);
+        r.in.pressExit = true;
+        float lowest = 1.0f;
+        r.tick();
+        for (int i = 0; i < 30; ++i) {
+            lowest = (std::min)(lowest, r.alpha);
+            r.tick();
+        }
+        check(lowest == 1.0f && r.releasedExit == 1 && r.find(ecm::ComfortEv::Start, 1) && r.find(ecm::ComfortEv::Start, 1)->kind == ecm::ComfortKind::Exit,
+              "EXIT PRESSED WHILE THE ENTRY IS STILL BLACK: the view never lightens, the exit request goes out on the next frame, a second Start (Exit) is logged");
+    }
+    // ---- re-attach ------------------------------------------------------------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        r.goodEntry();
+        r.run(100);
+        check(!r.tl.busy(), "(placed and clear)");
+        r.in.placed = false;       // a detach: the placement is released, the session goes on
+        r.in.mode = 5;
+        r.in.state = 5;
+        r.tick();
+        check(r.count(ecm::ComfortEv::Start) == 1 && r.find(ecm::ComfortEv::Start)->kind == ecm::ComfortKind::Reattach, "A DETACH with the session on: a Reattach starts the frame the placement goes");
+        char buf[ecm::kLineBytes];
+        ecm::formatComfort(buf, sizeof(buf), *r.find(ecm::ComfortEv::Start));
+        check(has(buf, "the placement was released with the session still on (a detach): fading to black over 100 ms"), "...the line says 100 ms");
+        r.run(40);
+        check(r.alpha > 0.1f && r.alpha < 0.9f, "...40 ms in, the view is part dark (not instantly black)");
+        r.run(70);
+        check(r.alpha == 1.0f, "...fully black 110 ms after it began: the out is 100 ms, not the entry's 200");
+        check(r.releasedEnter == 0 && r.releasedExit == 0, "...no F5 request is released for a re-attach");
+        r.run(500);
+        check(r.alpha == 1.0f, "BLACK HOLDS until the view is placed again");
+        r.goodEntry();
+        r.tick();
+        check(r.count(ecm::ComfortEv::FadeIn) == 1, "...placed, locked, steady and the UI settled: the fade in begins");
+        float seen = 1.0f;
+        uint32_t inMs = 0;
+        while (r.tl.phase() == ecm::ComfortPhase::In && inMs < 1000) {
+            r.tick();
+            if (inMs == 90) seen = r.alpha;
+            inMs += 10;
+        }
+        check(inMs >= 190 && inMs <= 230 && seen > 0.3f && seen < 0.7f && r.alpha == 0.0f, "...over 200 ms (about half way at 100 ms), ending at exactly 0");
+    }
+    {
+        TlRig r;
+        r.goodEntry();
+        r.run(100);
+        r.in.placed = false;
+        r.in.state = 5;
+        r.tick();
+        uint32_t ms = 0;
+        while (r.count(ecm::ComfortEv::TimedOut) == 0 && ms < 6000) { r.tick(); ms += 10; }
+        check(r.find(ecm::ComfortEv::TimedOut) && r.find(ecm::ComfortEv::TimedOut)->heldMs <= 3030 && (r.find(ecm::ComfortEv::TimedOut)->unmet & ecm::kComfortUnmetPlaced),
+              "A RE-ATTACH that never places again: the 3 s cap, naming 'the view is not placed'");
+    }
+    {
+        TlRig r;
+        r.goodEntry();
+        r.run(100);
+        r.in.sessionActive = false;   // the session ended: the placement goes with it. That is no detach.
+        r.in.placed = false;
+        r.run(100);
+        check(r.count(ecm::ComfortEv::Start) == 0 && r.alpha == 0.0f, "A PLACEMENT LOST WITH THE SESSION is not a detach: no fade starts");
+    }
+    {
+        TlRig r;
+        r.goodEntry();
+        r.in.pressExit = true;
+        r.tick();
+        while (!r.releasedExit) r.tick();
+        r.in.placed = false;
+        r.run(100);
+        check(r.count(ecm::ComfortEv::Start) == 1, "...nor during an exit (the placement goes when the session does)");
+    }
+    {
+        TlRig r;   // the exit has faded back IN while the placement still stands; it goes a frame later with the session flag still up. That is the exit finishing.
+        r.goodEntry();
+        r.in.pressExit = true;
+        r.tick();
+        while (!r.releasedExit) r.tick();
+        r.in.mode = 0;
+        r.in.ctlCalls = 1000;
+        r.tick();
+        for (int i = 0; i < 10; ++i) {
+            ++r.in.ctlCalls;
+            r.tick();
+        }
+        check(r.count(ecm::ComfortEv::FadeIn) == 1 && r.tl.phase() == ecm::ComfortPhase::In && r.in.placed && r.in.sessionActive, "(the exit fades in with the placement and the session flag still up)");
+        const float before = r.alpha;
+        r.in.placed = false;
+        r.tick();
+        check(r.count(ecm::ComfortEv::Start) == 1 && r.tl.kind() == ecm::ComfortKind::Exit && r.tl.phase() == ecm::ComfortPhase::In && r.alpha <= before,
+              "...the placement released now is the exit finishing, NOT a detach: no Reattach starts and the view keeps fading in");
+        r.run(400);
+        check(r.alpha == 0.0f && r.count(ecm::ComfortEv::Start) == 1 && r.count(ecm::ComfortEv::Cleared) == 1, "...and ends clear with the one Start");
+    }
+    // ---- an interrupted ramp turns round where it stands ----------------------------------------------------------------------------------------------------------------
+    {
+        TlRig r;
+        r.pressEnterUntilReleased();
+        r.goodEntry();
+        r.tick();
+        r.run(100);   // a third of the way through the fade in
+        const float mid = r.alpha;
+        check(mid > 0.1f && mid < 0.9f && r.tl.phase() == ecm::ComfortPhase::In, "(half way through a fade in)");
+        r.in.pressExit = true;
+        const ecm::ComfortStep s = r.tick();
+        check(r.tl.phase() == ecm::ComfortPhase::Out && std::fabs(s.alpha - mid) < 0.2f && s.alpha >= mid - 0.01f, "F5 DURING A FADE IN: the ramp turns round from where it stands (no jump to clear or to black)");
+    }
+    // ---- the steady test --------------------------------------------------------------------------------------------------------------------------------------------------
+    {
+        ecm::Eye a, b;
+        b.up = a.up + 0.019f;
+        check(ecm::eyeStepMetres(a, b) < ecm::kFadeSteadyMetres, "THE STEP between two eyes: 1.9 cm is steady");
+        b.up = a.up + 0.021f;
+        check(ecm::eyeStepMetres(a, b) >= ecm::kFadeSteadyMetres, "...2.1 cm is not");
+        b = a;
+        b.up += 0.015f;
+        b.forward += 0.015f;
+        check(ecm::eyeStepMetres(a, b) > ecm::kFadeSteadyMetres - 0.001f, "...and the three axes combine (1.5 cm in two of them is 2.12 cm)");
+    }
+}
+
+void testComfortSignal() {
+    std::printf("the comfort fade's signal: fresh, stale, never published, garbage (pure)\n");
+    namespace cf = edvr::comfort;
+    const uint64_t t0 = 1000000;
+    check(cf::effective(0, t0) == 0.0f, "NEVER PUBLISHED reads 0");
+    uint64_t w = cf::pack(1.0f, t0);
+    check(cf::effective(w, t0) == 1.0f && cf::effective(w, t0 + 100) == 1.0f && cf::effective(w, t0 + 200) == 1.0f, "A FRESH LEVEL reads as published, up to 200 ms old");
+    check(std::fabs(cf::effective(w, t0 + 250) - 0.5f) < 1e-5f, "...a stale one decays: 250 ms old reads half");
+    check(cf::effective(w, t0 + 300) == 0.0f && cf::effective(w, t0 + 10000) == 0.0f, "...and is GONE at 300 ms: the user is never left in black by a silent publisher");
+    w = cf::pack(0.6f, t0);
+    check(std::fabs(cf::effective(w, t0) - 0.6f) < 1e-6f && std::fabs(cf::effective(w, t0 + 275) - 0.15f) < 1e-5f, "A PARTIAL LEVEL decays proportionally (0.6 at 275 ms reads 0.15)");
+    check(cf::effective(cf::pack(0.0f, t0), t0) == 0.0f, "a published 0 reads 0");
+    check(cf::effective(cf::pack(std::nanf(""), t0), t0) == 0.0f && cf::effective(cf::pack(-1.0f, t0), t0) == 0.0f, "NaN and a negative level read 0, never black");
+    check(cf::effective(cf::pack(7.0f, t0), t0) == 1.0f && cf::effective(cf::pack(std::numeric_limits<float>::infinity(), t0), t0) == 1.0f, "a level above 1 reads 1 (clamped)");
+    check(cf::effective(cf::pack(1.0f, t0 + 5), t0) == 1.0f, "a level published a moment AFTER the reader took its time reads fresh");
+    const uint64_t wrap = 0x7FFFFFFFull - 50;
+    check(cf::effective(cf::pack(1.0f, wrap), wrap + 100) == 1.0f && cf::effective(cf::pack(1.0f, wrap), wrap + 400) == 0.0f, "...also across the 31-bit millisecond wrap");
+    check(cf::sanitize(0.5f) == 0.5f && cf::sanitize(-0.0f) == 0.0f && cf::sanitize(1.0f) == 1.0f && cf::sanitize(std::nanf("")) == 0.0f, "sanitize: in range is itself, NaN is 0");
+    cf::clear();
+    check(cf::read(t0) == 0.0f, "the shared word reads 0 once cleared");
+    cf::publish(1.0f, t0);
+    check(cf::read(t0 + 50) == 1.0f && cf::read(t0 + 400) == 0.0f, "...publish then read: fresh 1, stale 0");
+    cf::clear();
+}
+
+// ================================ Phase 4, glue: the comfort fade around F5, end to end ================================
+
+void testComfortGlue(const Pages& p) {
+    std::printf("glue: the comfort fade around F5 (the request held until black, black held through placement, the signal, the aborts)\n");
+    namespace t = edvr::explorercamtest;
+    static Game g;
+    Rig rig;
+    auto begin = [&]() {
+        t::reset();
+        g.init();
+        rig = Rig();
+        installAll(p, rig, g);
+        rig.f.comfortFade = true;
+        g.ctlFrame();
+        rig.boundary();
+        g.ctlFrame();
+        rig.boundary();
+    };
+    // Boundaries until `cond`, at 16 ms each; the most it will wait is `limit`. Returns how many it took.
+    auto until = [&](auto cond, int limit) {
+        int n = 0;
+        while (!cond() && n < limit) {
+            rig.boundary();
+            ++n;
+        }
+        return n;
+    };
+    // The controller and the camera through F5's whole entry (as testF5FromClosed plays it), with the request already out.
+    auto openAndPlace = [&]() {
+        g.ctlFrame();                  // PhotoCameraToggle: the camera opens
+        g.ctlFrame();
+        g.ctlFrames(3);
+        g.ctlFrame();                  // ToggleFreeCam
+        g.freeFrame();                 // the free camera's first update
+        g.ctlFrame();
+        g.freeFrame();                 // placed, the lock pressed
+    };
+    auto linesWith = [&](const char* needle) { return rig.cap.count(needle); };
+
+    // ---- the request waits for the dark --------------------------------------------------------------------------------------------------------------------------
+    begin();
+    rig.cap.clear();
+    rig.boundary(true);
+    check(t::f5Request() == 0 && rig.cap.count("F5 pressed: entering Explorer Cam") == 1 && linesWith("comfort fade: F5: fading to black over 200 ms BEFORE the camera opens") == 1,
+          "F5 WITH THE FADE: pressed, the entry is announced and so is the fade out -- and the ENTER request is NOT set");
+    g.ctlFrame();
+    check(g.seenPhoto() == 0 && g.mode() == 0 && !t::sessionActive(), "...the controller's next update presses NOTHING: the camera does not open while the view is still visible");
+    float previous = t::fadeAlpha();
+    bool rising = true;
+    int n = 0;
+    while (t::f5Request() == 0 && n < 40) {
+        rig.boundary();
+        rising = rising && t::fadeAlpha() >= previous;
+        previous = t::fadeAlpha();
+        ++n;
+        if (t::f5Request() == 0) {
+            g.ctlFrame();
+            if (g.seenPhoto() != 0) rising = false;
+        }
+    }
+    check(rising && n >= 13 && n <= 15 && t::f5Request() == 1 && t::fadeAlpha() == 1.0f, "...the view darkens frame by frame and the request goes out after about 200 ms (13 to 15 boundaries of 16 ms), when the view is fully black");
+    check(t::comfortRead(rig.ms) == 1.0f, "THE SIGNAL the runtime reads is that level: 1.0, fresh");
+    check(t::comfortRead(rig.ms + 250) > 0.4f && t::comfortRead(rig.ms + 250) < 0.6f && t::comfortRead(rig.ms + 350) == 0.0f,
+          "...and if nobody publishes again it decays: about half at 250 ms and exactly 0 at 350 ms (a silent d3d11 half never leaves the user in black)");
+    g.ctlFrame();
+    check(g.seenPhoto() == 1 && g.mode() == 1 && t::sessionActive(), "THE FIRST PRESS (PhotoCameraToggle) happens only now, in the dark");
+
+    // ---- black holds through the open, TAB, placement, lock and the UI hide -------------------------------------------------------------------------------------------
+    g.ctlFrame();
+    rig.boundary();
+    check(t::fadeAlpha() == 1.0f, "BLACK HOLDS while the camera is open on its preset");
+    g.ctlFrames(3);
+    g.ctlFrame();
+    g.freeFrame();
+    g.ctlFrame();
+    rig.boundary();
+    check(t::fadeAlpha() == 1.0f && t::phase() == 1, "...through TAB and the free camera's first update (waiting, nothing placed)");
+    g.freeFrame();   // placed, the lock pressed
+    for (int i = 0; i < 4; ++i) g.freeFrame();
+    rig.boundary();
+    check(t::phase() == 2 && t::steadyUpdates() >= 4 && t::steadyUpdates() < 10 && t::fadeAlpha() == 1.0f, "...through the placement: placed, the eye steady for fewer than 10 updates: still black");
+    check(!t::uiSettled(), "(the camera UI's hide has not run yet)");
+    for (int i = 0; i < 12; ++i) g.freeFrame();
+    rig.boundary();
+    check(t::steadyUpdates() >= 10 && g.mode() == 4 && t::fadeAlpha() == 1.0f, "...the eye steady for 10 updates and the camera locked (mode 4), but the UI's hide has not run: STILL BLACK");
+    g.uiFrame();
+    rig.boundary();
+    check(t::fadeAlpha() == 1.0f && !t::uiSettled(), "...the hide press is out but its result is not read yet: black");
+    g.uiFrame();
+    check(t::uiSettled(), "(the next UI update reads it: settled)");
+    rig.cap.clear();
+    rig.boundary();
+    check(linesWith("comfort fade: entering: placed, locked, the camera UI hidden and the eye steady for 10 updates") == 1, "ONLY NOW the fade in begins: one line says what was met");
+    check(t::fadeAlpha() == 1.0f, "(that frame still shows black: the ramp's first step comes with the next)");
+    rig.boundary();
+    const float first = t::fadeAlpha();
+    rig.boundary();
+    check(first < 1.0f && first > 0.9f && t::fadeAlpha() < first, "...then the view lightens a little each frame");
+    check(until([&] { return t::fadeAlpha() == 0.0f; }, 60) >= 15, "...and takes about 300 ms (18 to 20 boundaries) to be clear");
+    check(t::fadeAlpha() == 0.0f && linesWith("comfort fade: clear again; the view was dark for ") == 1 && t::comfortRead(rig.ms) == 0.0f, "...ends at exactly 0, with a line giving the total dark time, and the signal reads 0");
+    check(t::phase() == 2 && t::sessionActive(), "(the session is on and the view is placed)");
+
+    // ---- eye steadiness: a 5 cm step resets the count, a 1.9 cm step does not ----------------------------------------------------------------------------------------
+    g.freeFrame();
+    g.freeFrame();
+    const uint32_t steadyBefore = t::steadyUpdates();
+    rig.f.up = 1.73f;
+    rig.boundary();
+    g.freeFrame();
+    check(t::steadyUpdates() == 0, "THE EYE MOVES 5 cm in one update (the fixed eye key 1.68 to 1.73): the steady count starts over");
+    g.freeFrame();
+    g.freeFrame();
+    check(t::steadyUpdates() == 2 && steadyBefore >= 10, "...and counts again from there");
+    rig.f.up = 1.749f;
+    rig.boundary();
+    g.freeFrame();
+    check(t::steadyUpdates() == 3, "A 1.9 cm step is still steady (the count goes on)");
+    rig.f.up = 1.68f;
+    rig.boundary();
+    g.freeFrame();
+
+    // ---- exit: dark first, then the controls come back and the camera closes ---------------------------------------------------------------------------------------------
+    rig.cap.clear();
+    rig.boundary(true);
+    check(t::f5Request() == 0 && linesWith("F5 pressed: leaving Explorer Cam") == 1 && linesWith("comfort fade: F5: fading to black over 200 ms BEFORE the camera's controls come back") == 1,
+          "EXIT, F5: announced, and the EXIT request is NOT set while the view is still visible");
+    g.ctlFrame();
+    g.uiFrame();
+    check(g.hidden() == 1 && g.mode() == 4 && g.seenPhoto() == 0, "...nothing happens to the camera or its UI yet");
+    until([&] { return t::f5Request() == 2; }, 40);
+    check(t::f5Request() == 2 && t::fadeAlpha() == 1.0f, "...the exit request goes out when the view is black");
+    g.ctlFrame();   // the exit begins: the UI is held
+    g.freeFrame();
+    g.uiFrame();    // the UI comes back, in the dark
+    rig.boundary();
+    check(g.hidden() == 0 && t::fadeAlpha() == 1.0f, "THE UI COMES BACK IN THE DARK, and the view stays black");
+    g.uiFrame();
+    g.ctlFrame();   // PhotoCameraToggle: the camera closes
+    check(g.mode() == 0, "(the camera closes)");
+    g.ctlFrame();
+    rig.boundary();
+    check(!t::sessionActive() && t::fadeAlpha() == 1.0f, "...the session ends; the view is still black (10 updates at mode 0 have not passed)");
+    for (int i = 0; i < 9; ++i) g.ctlFrame();
+    rig.boundary();
+    check(t::fadeAlpha() == 1.0f, "...nor have 9");
+    rig.cap.clear();
+    g.ctlFrame();
+    rig.boundary();
+    check(linesWith("comfort fade: leaving: the camera reads closed and 10 controller updates have passed") == 1, "...the 10th: the fade in begins, with its line");
+    until([&] { return t::fadeAlpha() == 0.0f; }, 60);
+    check(t::fadeAlpha() == 0.0f && linesWith("comfort fade: clear again") == 1, "...and the view is clear again");
+    check(t::steadyUpdates() == 0 && !t::uiSettled(), "THE FACTS RESET with the session: the next entry starts its steady count from 0 and finds the UI's hide unsettled");
+
+    // ---- a second F5 before the request went: a change of mind ---------------------------------------------------------------------------------------------------------
+    begin();
+    rig.cap.clear();
+    rig.boundary(true);
+    for (int i = 0; i < 6; ++i) rig.boundary();
+    check(t::fadeAlpha() > 0.0f && t::fadeAlpha() < 1.0f && t::f5Request() == 0, "(F5, and part way to black)");
+    rig.boundary(true);
+    check(linesWith("comfort fade: F5 pressed again before the camera opened") == 1, "F5 AGAIN before the request went: the entry is cancelled, with a line");
+    until([&] { return t::fadeAlpha() == 0.0f; }, 60);
+    g.ctlFrame();
+    check(t::fadeAlpha() == 0.0f && t::f5Request() == 0 && g.seenPhoto() == 0 && g.mode() == 0 && !t::sessionActive(), "...the view is clear again and the camera never opened");
+
+    // ---- a request nobody takes -------------------------------------------------------------------------------------------------------------------------------------------
+    begin();
+    rig.cap.clear();
+    rig.boundary(true);
+    until([&] { return t::f5Request() == 1; }, 40);
+    check(t::f5Request() == 1 && t::fadeAlpha() == 1.0f, "(the request is out and the controller is not called)");
+    int waited = until([&] { return t::fadeAlpha() < 1.0f; }, 120);
+    check(linesWith("the F5 request was dropped: the camera controller was not called within 30 frames") == 1 && linesWith("F5's request was not taken or was refused") == 1 && waited >= 30 && waited <= 45,
+          "A REQUEST THE CONTROLLER NEVER TAKES: dropped after 30 frames (said), and the view fades back in a few frames later (said) -- not left black for 3 s");
+    until([&] { return t::fadeAlpha() == 0.0f; }, 60);
+    check(t::fadeAlpha() == 0.0f, "...and is clear");
+
+    // ---- the 3 s cap, with the glue's own facts --------------------------------------------------------------------------------------------------------------------------
+    begin();
+    rig.cap.clear();
+    rig.boundary(true);
+    const uint64_t pressedAt = rig.ms;
+    until([&] { return t::f5Request() == 1; }, 40);
+    openAndPlace();
+    int boundaries = 0;
+    while (t::fadeAlpha() >= 1.0f && boundaries < 300) {   // the game keeps updating the controller and the free camera; the camera UI is never updated, so its hide never settles
+        g.ctlFrame();
+        g.freeFrame();
+        rig.boundary();
+        ++boundaries;
+    }
+    check(t::fadeAlpha() < 1.0f && t::phase() == 2 && t::sessionActive() && boundaries < 300, "THE CAP: placed, locked and steady, but the camera UI never reports: the fade in begins anyway");
+    const uint64_t blackMs = rig.ms - pressedAt;
+    check(blackMs >= 2990 && blackMs <= 3100, "...3.0 s after the F5 press (not before, not much after)");
+    check(linesWith("black reached the 3 s cap, so the view fades in anyway") == 1 && has(rig.cap.nth("black reached the 3 s cap", 0), "the camera UI's hide has not settled") &&
+              !has(rig.cap.nth("black reached the 3 s cap", 0), "the view is not placed") && !has(rig.cap.nth("black reached the 3 s cap", 0), "the lock is not confirmed"),
+          "...and its line names exactly the unmet condition: the camera UI's hide");
+
+    // ---- each fact alone, in the glue: the other three met, this one not -> still black -----------------------------------------------------------------------------------
+    // (the pure timeline pins each bit; these pin that the glue feeds it the real facts: the steady count, +0x48C and the camera UI's settle flag)
+    begin();
+    rig.boundary(true);
+    until([&] { return t::f5Request() == 1; }, 40);
+    openAndPlace();
+    for (int i = 0; i < 3; ++i) g.freeFrame();
+    g.uiFrame();
+    g.uiFrame();
+    for (int i = 0; i < 6; ++i) rig.boundary();
+    check(t::phase() == 2 && g.mode() == 4 && t::uiSettled() && t::steadyUpdates() >= 2 && t::steadyUpdates() < ecm::kFadeSteadyUpdates && t::fadeAlpha() == 1.0f,
+          "THE EYE ALONE: placed, locked (+0x48C = 4), the camera UI's hide settled, the eye steady for only a few updates: STILL BLACK");
+    for (int i = 0; i < 12; ++i) g.freeFrame();
+    until([&] { return t::fadeAlpha() < 1.0f; }, 5);
+    check(t::steadyUpdates() >= ecm::kFadeSteadyUpdates && t::fadeAlpha() < 1.0f, "...the tenth steady update lets the fade in begin");
+
+    begin();
+    rig.boundary(true);
+    until([&] { return t::f5Request() == 1; }, 40);
+    openAndPlace();
+    g.setMode(3);   // the lock did not hold (the player unlocked it): +0x48C = 3, the placement goes on and is not pressed again
+    for (int i = 0; i < 14; ++i) g.freeFrame();
+    g.uiFrame();
+    g.uiFrame();
+    for (int i = 0; i < 6; ++i) rig.boundary();
+    check(t::phase() == 2 && t::steadyUpdates() >= ecm::kFadeSteadyUpdates && t::uiSettled() && g.mode() == 3 && t::fadeAlpha() == 1.0f,
+          "THE LOCK ALONE: placed, steady for 10 updates, the UI's hide settled, but +0x48C = 3: STILL BLACK");
+    g.setMode(4);
+    g.freeFrame();
+    until([&] { return t::fadeAlpha() < 1.0f; }, 5);
+    check(t::fadeAlpha() < 1.0f, "...locked (+0x48C = 4): the fade in begins");
+
+    // ---- a detach after the entry, in the glue: 100 ms out, black until placed again, 200 ms in; then the game closes the camera ---------------------------------------------
+    begin();
+    rig.boundary(true);
+    until([&] { return t::f5Request() == 1; }, 40);
+    openAndPlace();
+    for (int i = 0; i < 12; ++i) g.freeFrame();
+    g.uiFrame();
+    g.uiFrame();
+    until([&] { return t::fadeAlpha() < 1.0f; }, 10);
+    until([&] { return t::fadeAlpha() == 0.0f; }, 60);
+    check(t::fadeAlpha() == 0.0f && t::phase() == 2 && t::uiSettled() && t::sessionActive(), "(entered: placed, clear, the camera UI's hide settled)");
+    rig.cap.clear();
+    g.setMode(5);   // the player takes the camera to the world lock: the placement is released, the session goes on
+    g.freeFrame();
+    g.ctlFrame();
+    rig.boundary();
+    check(t::placedActivity() == 0 && t::sessionActive() && linesWith("comfort fade: the placement was released with the session still on (a detach): fading to black over 100 ms") == 1,
+          "A DETACH with the fade on: the placement is released, the session stays, and the re-attach fade begins (one line, 100 ms)");
+    g.uiFrame();
+    g.uiFrame();
+    const int outBoundaries = until([&] { return t::fadeAlpha() == 1.0f; }, 20);
+    check(t::fadeAlpha() == 1.0f && outBoundaries >= 4 && outBoundaries <= 9, "...the view is black within about 100 ms (4 to 9 boundaries of 16 ms)");
+    for (int i = 0; i < 12; ++i) rig.boundary();
+    check(t::fadeAlpha() == 1.0f && t::placedActivity() == 0, "...and holds black while the camera is not placed");
+    g.setMode(3);
+    g.freeFrame();   // placed again, the lock pressed again
+    for (int i = 0; i < 12; ++i) g.freeFrame();
+    g.uiFrame();
+    g.uiFrame();
+    until([&] { return t::fadeAlpha() < 1.0f; }, 10);
+    check(t::placedActivity() != 0 && g.mode() == 4 && t::fadeAlpha() < 1.0f && linesWith("comfort fade: re-attaching: placed, locked, the camera UI hidden and the eye steady for 10 updates") == 1 &&
+              linesWith("fading in over 200 ms") == 1,
+          "...placed, locked, the UI hidden and the eye steady again: the fade in begins (200 ms, one line)");
+    until([&] { return t::fadeAlpha() == 0.0f; }, 60);
+    check(t::fadeAlpha() == 0.0f && linesWith("comfort fade: clear again") == 1, "...and the view is clear again");
+    g.setMode(0);   // the game closes the camera by its own hand: no further camera-UI update is called
+    g.ctlFrame();
+    rig.boundary();
+    rig.boundary();
+    check(!t::sessionActive() && !t::uiSettled() && t::steadyUpdates() == 0 && t::fadeAlpha() == 0.0f,
+          "THE FACTS RESET WITH THE SESSION even when the camera UI is not updated again: the settle flag is false and the steady count 0, and the view stays clear");
+
+    // ---- the hotkey cleared (or a hook stood down) while black: clear at once ------------------------------------------------------------------------------------------
+    begin();
+    rig.cap.clear();
+    rig.boundary(true);
+    until([&] { return t::f5Request() == 1; }, 40);
+    g.ctlFrame();
+    check(t::fadeAlpha() == 1.0f && t::sessionActive(), "(black, entering)");
+    rig.f.hotkey = "";   // hotkey.explorer_cam is emptied by hand -- the session's old key is kept (the keeper is the production wrapper's, not the rig's), so Explorer Cam is off
+    rig.boundary();
+    check(t::fadeAlpha() == 0.0f && t::comfortRead(rig.ms) == 0.0f && linesWith("stood down or its hotkey was cleared while the view was dark") == 1,
+          "THE HOTKEY CLEARED while black: the view is clear AT ONCE (published 0, the runtime reads 0), with a line");
+    rig.f.hotkey = "F5";
+    rig.boundary();
+    check(t::fadeAlpha() == 0.0f, "...and stays clear when it comes back");
+
+    // ---- an unload while black: the signal is withdrawn ----------------------------------------------------------------------------------------------------------------
+    begin();
+    rig.boundary(true);
+    until([&] { return t::f5Request() == 1; }, 40);
+    check(t::comfortRead(rig.ms) == 1.0f, "(black, and the runtime reads 1)");
+    t::shutdown();
+    check(t::comfortRead(rig.ms) == 0.0f, "AN UNLOAD (explorerCamShutdown) while black: the signal is withdrawn at once and the runtime reads 0, not a level that decays");
+
+    // ---- the heartbeat names the fade -------------------------------------------------------------------------------------------------------------------------------
+    begin();
+    rig.boundary(true);
+    until([&] { return t::f5Request() == 1; }, 40);
+    openAndPlace();
+    for (int i = 0; i < 12; ++i) g.freeFrame();
+    g.uiFrame();
+    g.uiFrame();
+    until([&] { return t::fadeAlpha() < 1.0f; }, 10);
+    until([&] { return t::fadeAlpha() == 0.0f; }, 60);
+    rig.advance(5200);
+    g.freeFrame();
+    g.ctlFrame();
+    rig.cap.clear();
+    rig.boundary();
+    check(has(rig.cap.nth("explorer cam: heartbeat (follow, isolation):", 0), "comfort_fade(phase=clear kind=idle alpha=0.000)"),
+          "THE HEARTBEAT names the fade (here clear, idle, 0.000: the cap is shorter than the heartbeat, so a black beat is checked on the line itself)");
+    check(edvr::explorercamtest::comfortDefaultOn(), "(and the production wrapper runs with the fade on: there is no key)");
+    t::reset();
+}
+
 void testGlue() {
     std::printf("glue, end to end (synthetic functions with the real prologues)\n");
     Pages p = makePages();
@@ -4917,6 +5870,7 @@ void testGlue() {
     testSkeletonLatch(p);
     testFollowGlue(p);
     testIsolationGlue(p);
+    testComfortGlue(p);
     testSessionEnds(p);
     testFaults(p);
     testObservers(p);
@@ -4955,6 +5909,7 @@ int main(int argc, char** argv) {
     testFadeGuard();
     testF5Decision();
     testUiHider();
+    testUiSettled();
     testWatches();
     testRing();
     testText();
@@ -4962,6 +5917,8 @@ int main(int argc, char** argv) {
     testHeadHidePure();
     testFollowPure();
     testHotkeyKeeper();
+    testComfortTimeline();
+    testComfortSignal();
     testGlue();
     if (g_failures) {
         std::printf("explorer cam: FAIL (%d)\n", g_failures);

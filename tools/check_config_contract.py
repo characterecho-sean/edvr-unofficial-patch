@@ -57,7 +57,7 @@ EARLY_RE = re.compile(r'readConfigStringEarly\s*\([^,]+,[^,]+,\s*"([^"]+)"', re.
 
 # A section we know about followed by a dotted name, anywhere in a string. Used
 # to catch key names mentioned in log text that nothing actually reads.
-SECTIONS = ('fix', 'advanced', 'hotkey', 'log', 'openvr', 'd3d11',
+SECTIONS = ('fix', 'advanced', 'hotkey', 'log', 'd3d11',
             'experimental', 'luminance', 'menu')
 # A dotted name INSIDE a string literal. The literals are pulled out first and
 # searched separately, because scanning the raw line let a match start at a

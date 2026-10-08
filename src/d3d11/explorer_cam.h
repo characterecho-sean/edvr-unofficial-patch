@@ -31,7 +31,7 @@
 
 namespace edvr {
 
-// Once a frame at the Present boundary (vscreen.cpp), before explorerCamProbeFrameBoundary. Reads hotkey.explorer_cam (Explorer Cam is
+// Once a frame at the Present boundary (device_hook.cpp's own tick, tkExplorerCam: it must run whatever vScreen installed, including transport-only), before explorerCamProbeFrameBoundary. Reads hotkey.explorer_cam (Explorer Cam is
 // armed exactly when it is non-empty), the eye keys, polls F5, installs the hooks the first time they are wanted, publishes the settings to the hook threads,
 // drains their events into the log, ends a session whose controller went silent, and writes the 5 s heartbeat while a session is on.
 // Render thread. Never call it from inside a game hook.
@@ -106,6 +106,8 @@ struct ExplorerCamTestFrame {
     uint32_t focus = 0;                   // ...and its value (0 = no panel)
     bool readBindings = true;             // hotkey.read_game_bindings
     const wchar_t* bindsDir = nullptr;    // an Elite bindings directory for the clash check (null: none, unchecked)
+    bool comfortFade = false;             // the comfort fade (production: always on). Off, F5's request goes out the frame it is pressed, as the older cells expect
+    uint64_t nowUs = 0;                   // the fade's clock in microseconds (0: nowMs * 1000)
 };
 namespace explorercamtest {
 void setTargets(const ExplorerCamTestTargets& targets);
@@ -151,7 +153,12 @@ void forceSession(bool on);         // an F5 session switched on or off by hand 
 // Phase 3: the head-joint eye source and the camera-suite isolation.
 void setHeadImage(uintptr_t base, size_t size);   // the rig's synthetic game image for the head source (base 0: the real module)
 void forcePlaceActive(bool on);                    // g_placeActive set by hand: Explorer Cam stood down under the hook threads, before the frame thread withdrew the placement
-void setNowUs(uint64_t (*fn)());                   // the clock the follow smoothing reads, in microseconds (null: the real one)
+void setNowUs(uint64_t (*fn)());
+float fadeAlpha();                 // the comfort fade's level as the frame thread last published it
+uint32_t steadyUpdates();          // consecutive placing updates whose eye moved under 2 cm
+bool uiSettled();                  // the camera UI's hide has run its course for this placement
+float comfortRead(uint64_t nowMs); // what the runtime's provider would read from the signal at nowMs (comfort_fade.h)
+bool comfortDefaultOn();           // the production wrapper's FrameInput runs the comfort fade (there is no key for it)                   // the clock the follow smoothing reads, in microseconds (null: the real one)
 uint64_t followHeadUpdates();      // placing updates whose eye came from the head joint
 uint64_t followFixedUpdates();     // ...and from the fixed keys
 uint32_t followSource();           // 1 = the latest update used the head joint

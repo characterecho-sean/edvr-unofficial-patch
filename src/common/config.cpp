@@ -313,8 +313,8 @@ void Config::parse() {
         trim(key);
         trim(val);
         if (key.empty()) continue;
-        // Section-qualified keys, so [openvr] hook_compositor reads as
-        // "openvr.hook_compositor". Bare "a.b = c" also works. Lowercased,
+        // Section-qualified keys, so [hotkey] menu reads as
+        // "hotkey.menu". Bare "a.b = c" also works. Lowercased,
         // matching the installer's merge: every key this build reads is
         // lowercase, so a hand-typed "FSS_Res = 1" used to be filed under a
         // spelling nothing looks up -- a line that does nothing and looks

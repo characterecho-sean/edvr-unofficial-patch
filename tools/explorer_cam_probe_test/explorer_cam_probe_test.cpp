@@ -254,7 +254,21 @@ void testChangeDetection() {
     busy.slots[0].sample.unlock();
     check(busy.dropped.load() == 1, "a call that finds the slot's writer lock held skips its snapshot and counts it (dropped), never waits");
     ecp::noteActivityCall(busy, 0x2000, 1, nullptr);
-    check(busy.faults.load() == 1, "a faulted read is counted (faults)");
+    check(busy.faults.load() == 1 && busy.skippedReads.load() == 0 && ecp::mayRead(busy), "a faulted read is counted (faults), not as a skipped one, and the reads go on");
+
+    // Past the fault limit (review 2026-10-08, finding 5): the reads stop at kMaxFaults, `faults` stays at the number of reads that really faulted, and the updates seen
+    // after that are counted as skipped reads. The loop is the hook's own: ask mayRead(), read (here: always fault) when allowed, note the call.
+    ecp::Shared past;
+    uint32_t reads = 0;
+    for (int i = 0; i < 200; ++i) {
+        const bool may = ecp::mayRead(past);
+        if (may) ++reads;
+        ecp::noteActivityCall(past, 0x3000, 1, nullptr, !may);
+    }
+    check(reads == ecp::kMaxFaults && past.faults.load() == ecp::kMaxFaults && past.skippedReads.load() == 200 - ecp::kMaxFaults && past.totalCalls.load() == 200 && !ecp::mayRead(past),
+          "PAST THE FAULT LIMIT: the reads stop at 64 and `faults` stays at the 64 that really faulted; the other 136 updates are skipped reads; every call is still counted");
+    ecp::noteActivityCall(past, 0x3000, 1, &idle, true);
+    check(past.faults.load() == ecp::kMaxFaults && past.skippedReads.load() == 200 - ecp::kMaxFaults, "(a sample that was supplied is recorded, not counted as either)");
 }
 
 void testEventRing() {
@@ -803,7 +817,19 @@ void testGlue() {
     cap.clear();
     t::boundary(15, 31000, true, &Capture::add, &cap);
     check(t::gateOpen() && cap.count("explorer cam probe: on again") == 1 && cap.count("explorer cam probe I3 armed:") == 0, "turned back on: the gate reopens with a short line, the hook is not installed twice");
-    t::boundary(16, 31100, false, &Capture::add, &cap);
+
+    // Past the fault limit through the real hook (review 2026-10-08, finding 5): 200 more faulting activity pointers. The reads stop at the limit, `faults` stays at 64,
+    // the rest are skipped reads, and the heartbeat says both.
+    const uint32_t faultsAtLimit = t::shared().faults.load();
+    for (int i = 0; i < 200; ++i) t::observe(reinterpret_cast<void*>(0x10));
+    check(t::shared().faults.load() == ecp::kMaxFaults && t::shared().skippedReads.load() == 200 - (ecp::kMaxFaults - faultsAtLimit),
+          "PAST THE FAULT LIMIT (the real hook): 200 faulting pointers, `faults` stops at 64, the others are counted as skipped reads");
+    cap.clear();
+    t::boundary(16, 37000, true, &Capture::add, &cap);
+    check(has(cap.nth("explorer cam probe I3 heartbeat:", 0), "faults=64 skipped_reads=") && !has(cap.nth("explorer cam probe I3 heartbeat:", 0), "faults=65") &&
+              !has(cap.nth("explorer cam probe I3 heartbeat:", 0), "skipped_reads=0 "),
+          "...and the heartbeat reports faults=64 beside the skipped_reads count");
+    t::boundary(17, 37100, false, &Capture::add, &cap);
 
     // Restore: the hook removes itself, the bytes come back.
     t::reset();

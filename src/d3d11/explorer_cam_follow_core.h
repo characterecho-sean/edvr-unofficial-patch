@@ -304,6 +304,7 @@ inline const char* fixedWhyText(FixedWhy w) {
     }
 }
 constexpr uint32_t kMaxFollowFaults = 8;   // faults of the head read before the head source (not the placement) stands down
+constexpr uint32_t kFollowRetryUpdates = 60;   // a skeleton whose pose is not built yet (no pose, or no joints) is tried again this many placing updates later
 
 enum class FollowNoteKind : uint32_t { None = 0, Rest, RestFailed, FirstLive, Switched, StoodDown };
 // One thing the camera-job thread says about the head source; the frame thread writes the line.
@@ -473,6 +474,9 @@ struct FollowBeatIn {
     uint64_t blocked[kIsoHolderCount] = {}, blockedWindow[kIsoHolderCount] = {};
     uint64_t zoomCalls = 0, zoomCallsWindow = 0;
     bool zoomArmed = false;
+    const char* fadePhase = "clear";       // the comfort fade (explorer_cam_fade_core.h)
+    const char* fadeKind = "idle";
+    float fadeAlpha = 0.0f;
 };
 inline void formatFollowBeat(char* out, size_t cap, const FollowBeatIn& h) {
     Line o(out, cap);
@@ -487,8 +491,8 @@ inline void formatFollowBeat(char* out, size_t cap, const FollowBeatIn& h) {
           h.smoothingMs, h.isoDown ? "stood down" : "on", h.isoFaults);
     for (int i = 0; i < kIsoHolderCount; ++i)
         o.put("%s%s=%llu(+%llu)", i ? " " : "", isoHolderName(i), static_cast<unsigned long long>(h.blocked[i]), static_cast<unsigned long long>(h.blockedWindow[i]));
-    o.put(") zoom_hook=%s zoom_hook_calls=%llu(+%llu)", h.zoomArmed ? "armed" : "not installed", static_cast<unsigned long long>(h.zoomCalls),
-          static_cast<unsigned long long>(h.zoomCallsWindow));
+    o.put(") zoom_hook=%s zoom_hook_calls=%llu(+%llu) comfort_fade(phase=%s kind=%s alpha=%.3f)", h.zoomArmed ? "armed" : "not installed",
+          static_cast<unsigned long long>(h.zoomCalls), static_cast<unsigned long long>(h.zoomCallsWindow), h.fadePhase, h.fadeKind, h.fadeAlpha);
 }
 
 }  // namespace ecm

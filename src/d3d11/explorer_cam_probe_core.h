@@ -338,15 +338,19 @@ struct Shared {
     std::atomic<uint64_t> totalCalls{0};
     std::atomic<uint32_t> slotsFull{0};   // calls from a 9th distinct activity: counted, not snapshotted
     std::atomic<uint32_t> dropped{0};     // publishes skipped because another writer held the slot
-    std::atomic<uint32_t> faults{0};      // guarded reads that faulted
+    std::atomic<uint32_t> faults{0};      // guarded reads that faulted (never past kMaxFaults: the reads stop there)
+    std::atomic<uint64_t> skippedReads{0};   // updates seen after the reads stopped: counted here, NOT as faults
     DistinctSet<8> windowActivities;
     DistinctSet<8> windowThreads;
     EventRing<kRingEvents> events;
 };
 
-// One call of the observed function, as the hook records it. `raw` is null when the guarded read faulted. Takes no
-// lock, allocates nothing and never waits.
-inline void noteActivityCall(Shared& sh, uint64_t activity, uint32_t threadId, const Raw* raw) noexcept {
+// May the hook still read the activity? Once kMaxFaults reads have faulted it stops (it keeps forwarding and counting calls).
+inline bool mayRead(const Shared& sh) noexcept { return sh.faults.load(std::memory_order_relaxed) < kMaxFaults; }
+
+// One call of the observed function, as the hook records it. `raw` is null when the read did not happen: it faulted, or (skipped) mayRead() said the reads had
+// stopped, which is counted apart so `faults` stays at the number of reads that really faulted. Takes no lock, allocates nothing and never waits.
+inline void noteActivityCall(Shared& sh, uint64_t activity, uint32_t threadId, const Raw* raw, bool skipped = false) noexcept {
     const uint64_t total = sh.totalCalls.fetch_add(1, std::memory_order_relaxed) + 1;
     sh.windowActivities.note(activity);
     sh.windowThreads.note(threadId);
@@ -358,7 +362,8 @@ inline void noteActivityCall(Shared& sh, uint64_t activity, uint32_t threadId, c
     Slot& slot = sh.slots[index];
     const uint64_t n = slot.calls.fetch_add(1, std::memory_order_relaxed) + 1;
     if (!raw) {
-        sh.faults.fetch_add(1, std::memory_order_relaxed);
+        if (skipped) sh.skippedReads.fetch_add(1, std::memory_order_relaxed);
+        else sh.faults.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     if (!slot.sample.lock()) {
@@ -885,8 +890,9 @@ private:
                 o.put("]");
             }
             if (actOverflow || tidOverflow) o.put(" set_overflow=%u/%u", actOverflow, tidOverflow);
-            o.put(" dropped=%u faults=%u slots_full=%u events_lost=%llu phase=%s",
+            o.put(" dropped=%u faults=%u skipped_reads=%llu slots_full=%u events_lost=%llu phase=%s",
                   sh.dropped.load(std::memory_order_relaxed), sh.faults.load(std::memory_order_relaxed),
+                  static_cast<unsigned long long>(sh.skippedReads.load(std::memory_order_relaxed)),
                   sh.slotsFull.load(std::memory_order_relaxed), static_cast<unsigned long long>(sh.events.lost()),
                   phaseName(m_phase));
             bool listed = false;

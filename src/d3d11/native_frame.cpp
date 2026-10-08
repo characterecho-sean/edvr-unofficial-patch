@@ -1,5 +1,6 @@
 #include "../common/native_frame.h"
 
+#include "../common/comfort_fade.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
 #include "../common/log.h"
@@ -307,38 +308,47 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1, 2 or 3 caller is an openvr_api.dll from before the
-    // channel probe (or, earlier, turbo pacing or the field-of-view trim)
-    // existed. Each gets exactly the fields it knows about, and whatever it
-    // cannot carry stays out of its struct entirely.
-    const bool wantsChannel = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
+    // A version 1, 2, 3 or 4 caller is an openvr_api.dll from before the
+    // comfort fade (or, earlier, the channel probe, turbo pacing or the
+    // field-of-view trim) existed. Each gets exactly the fields it knows
+    // about, and whatever it cannot carry stays out of its struct entirely.
+    const bool wantsFade = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
         output->size == sizeof(*output);
-    const bool wantsPacing = output && !wantsChannel &&
+    const bool wantsChannel = output && !wantsFade &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4;
+    const bool wantsPacing = output && !wantsFade && !wantsChannel &&
         output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3;
-    const bool wantsTrim = output && !wantsChannel && !wantsPacing &&
+    const bool wantsTrim = output && !wantsFade && !wantsChannel && !wantsPacing &&
         output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
-    const bool legacy = output && !wantsChannel && !wantsPacing && !wantsTrim &&
+    const bool legacy = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
+        (!wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsChannel ? sizeof(result)
+    result.size = wantsFade ? sizeof(result)
+                 : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
+    result.version = wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
+                    : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
                     : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
                                  : EDVR_NATIVE_FRAME_VERSION_1;
+    // Explorer Cam's comfort fade (comfort_fade.h): how black the view is
+    // this frame, 0 unless the frame thread published a fresh level. Only a
+    // version 5 caller has the slot; every older shape never learns of it.
+    result.fadeAlpha = edvr::comfort::read(GetTickCount64());
     // The old Explorer Cam's headset offset (headOffset, yawRadians,
     // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
     // runtime built before 2026-10-07 reads "no offset" and applies none.

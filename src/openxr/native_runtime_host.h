@@ -26,6 +26,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include "../common/comfort_fade.h"
 #include "../common/frame_flag.h"
 #include "../common/periodic_work.h"
 #include "native_device.h"
@@ -206,7 +207,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeCullGuard cullGuard;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_4};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_5};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
@@ -1092,7 +1093,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_4};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_5};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
@@ -2175,8 +2176,11 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         return XR_ERROR_RUNTIME_FAILURE;
     }
     StereoWallTimes wall{};
-    const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement):
-      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement);
+    // Explorer Cam's comfort fade, on a replayed pair as much as a fresh one: the level is told to each draw, so a hitch cannot flash the scene. Only a provider
+    // that is here and answered version 5 has one to give (native_frame_client.h zeroes the rest); the menu quad is another layer and is not touched.
+    const float fade=comfortFade();
+    const auto r=frameWithheld?stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,observer,nullptr,previousPlacement,fade):
+      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade);
     submitSample.xrAcquireMs=wall.acquire;submitSample.xrWaitMs=wall.wait;
     submitSample.xrDrawMs=wall.draw;submitSample.xrReleaseMs=wall.release;
     const auto composeClockEnd=QueryPerformanceCounter(&composeEnded);
@@ -2201,8 +2205,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     } else previousPairValid=false;
   }
   XrResult composeBackground(XrCompositionLayerProjection& layer) override {
-    return stereo.renderSkybox(frameViews,frameSpace,skybox,layer);
+    return stereo.renderSkybox(frameViews,frameSpace,skybox,layer,comfortFade());
   }
+  // The level the provider gave this frame, or 0: no provider, no frame read yet, or an answer that carried none.
+  float comfortFade() const {return features.acquired()&&featureFrameKnown?comfort::sanitize(featureFrame.fadeAlpha):0.f;}
   SystemRead read() const override {return geometry.read();}
   void noteProjection(uint64_t sequence,uint32_t eye,float nearZ,float farZ) noexcept override {
     temporal.noteProjection(sequence,eye,nearZ,farZ); // CPU only; never dispatch/wait on the XR owner

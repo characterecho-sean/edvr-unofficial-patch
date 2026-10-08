@@ -913,6 +913,11 @@ class UiHider {
 public:
     bool hiddenByUs() const { return m_hiddenByUs; }
     bool pending() const { return m_pending != Pending::None; }   // a press is set and its result not yet read
+    // The hide has run its course for this placement: it was wanted, no press is waiting for its result, and either EDVR hid the UI, a press was made, the player
+    // already had it hidden, or there is no handle to press (the comfort fade holds black until this).
+    bool settledForPlacement() const {
+        return m_lastWant && m_pending == Pending::None && (m_hiddenByUs || m_pressedThisPlacement || m_noHandleNoted || m_lastHidden);
+    }
     void reset() { *this = UiHider(); }
 
     UiStep step(uint64_t object, const UiObserved& o, bool wantHidden) {
@@ -924,6 +929,7 @@ public:
             m_noHandleNoted = noted;
             m_object = object;
         }
+        m_lastHidden = o.hidden != 0;
         if (m_pending == Pending::Hide) {
             if (o.hidden != 0) { m_hiddenByUs = true; s.ev = UiEvent::Hidden; }
             else s.ev = UiEvent::HideNoEffect;
@@ -969,6 +975,7 @@ private:
     bool m_pressedThisPlacement = false;
     bool m_lastWant = false;
     bool m_noHandleNoted = false;
+    bool m_lastHidden = false;
     Pending m_pending = Pending::None;
 };
 

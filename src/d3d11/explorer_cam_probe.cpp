@@ -66,9 +66,9 @@ __declspec(noinline) void observeActivity(void* a) noexcept {
         return;
     }
     ecp::Raw raw;
-    const bool read = g_shared.faults.load(std::memory_order_relaxed) < ecp::kMaxFaults &&
-                      sehCopyRaw(static_cast<const uint8_t*>(a), &raw);
-    ecp::noteActivityCall(g_shared, reinterpret_cast<uintptr_t>(a), GetCurrentThreadId(), read ? &raw : nullptr);
+    const bool may = ecp::mayRead(g_shared);
+    const bool read = may && sehCopyRaw(static_cast<const uint8_t*>(a), &raw);
+    ecp::noteActivityCall(g_shared, reinterpret_cast<uintptr_t>(a), GetCurrentThreadId(), read ? &raw : nullptr, !may);
     // The F2 instruments ride the same observer: the activity's pressed ints on change, and the neck's sample paired with this update.
     explorerCamF2FreeCamera(a);
 }
