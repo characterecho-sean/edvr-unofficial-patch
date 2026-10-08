@@ -39,7 +39,6 @@
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
-#include "lod_governor.h"     // fix.settlement_detail: the settlement LOD governor
 #include "fss_panel.h"
 #include "fss_panel_rect.h"
 #include "fss_reveal.h"
@@ -5708,7 +5707,6 @@ void vScreenRefreshConfig() {
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
-    lodGovernorConfigure(cfg);
     // Every fix.head_offset_* key, on the reload path as well as the startup
     // one. A config reader on only one of the two is a specific repeatable bug
     // -- reload-only means the value stays its C++ initialiser for the whole
@@ -5865,7 +5863,6 @@ EDVR_BOUNDARY_TICK(tkIntroCurve, "intro_curve");
 EDVR_BOUNDARY_TICK(tkIntroSkip, "intro_skip");
 EDVR_BOUNDARY_TICK(tkLoaderPanel, "loader_panel");
 EDVR_BOUNDARY_TICK(tkIntroProbe, "intro_probe");
-EDVR_BOUNDARY_TICK(tkLodGovernor, "lod_governor");
 EDVR_BOUNDARY_TICK(tkDrawCensusBoundary, "draw_census_boundary");
 EDVR_BOUNDARY_TICK(tkFssReveal, "fss_reveal");
 EDVR_BOUNDARY_TICK(tkFssDump, "fss_dump");
@@ -5983,11 +5980,6 @@ void vScreenFrameBoundary() {
     tkIntroProbe.run([&] {
         introProbeFrameBoundary(s->frameNo, s->eyeDrawsLastFrame >= kSceneEyeDraws);
     });
-
-    // The settlement LOD governor (fix.settlement_detail, shadow only): the
-    // frame's draw-builder and part-test counts, the producer's frame work,
-    // one policy step, its log lines. One atomic load while it is off.
-    tkLodGovernor.run([&] { lodGovernorFrameBoundary(); });
 
     // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
     // while the scanner's chrome is up is a zoom's first frame, and the
@@ -6964,7 +6956,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
-    lodGovernorConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
@@ -7266,9 +7257,6 @@ void shutdownVScreenFixes() {
     particleShutdown();
     objectProbeShutdown();
     pixelProbeShutdown();
-    // The settlement LOD governor: stop acting and write the game's LOD scale
-    // back to any render context still holding EDVR's.
-    lodGovernorShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;

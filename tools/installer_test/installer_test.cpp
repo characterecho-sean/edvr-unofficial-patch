@@ -829,6 +829,142 @@ static void testShippedIni(const std::wstring& root) {
                   "a file without the three lines carries nothing: the new file stands as shipped");
         }
     }
+
+    // 2026-10-08: the settlement LOD governor and the static prop gate removed, four keys: fix.settlement_detail (game | auto |
+    // reduced; shipped LIVE as `game` in [fix], so every install of the previous version has the line written out),
+    // advanced.settlement_detail_max and advanced.settlement_detail_observe (commented templates in [advanced]) and
+    // fix.static_prop_updates (a commented template in [fix]). The game's own detail and its own prop updates are what run now. A
+    // line somebody set is carried with its value, reported as retired and not as a key this version never shipped, and not
+    // adopted; the setting beside each keeps its tuned value; no documentation block is resurrected; a second merge adds no copy;
+    // a rig that left the templates commented carries only the live settlement_detail line. At run time the config audit names a
+    // carried line in the log (config.cpp: "name settings this build does not read ... a retired setting").
+    check(shipped.find("settlement_detail") == std::string::npos && shipped.find("static_prop_updates") == std::string::npos,
+          "the shipped ini documents none of the four removed settlement detail and static prop keys");
+    {
+        // The previous version's file: the shipped one with the two [fix] blocks put back after wake_pulse and the two [advanced]
+        // templates after the pixel probe, where each sat.
+        const std::string afterWake = "\nwake_pulse = off" + eol;
+        const std::string afterProbe = "\n#pixel_probe =" + eol;
+        const size_t atWake = shipped.find(afterWake);
+        const size_t atProbe = shipped.find(afterProbe);
+        const bool anchored = atWake != std::string::npos && atProbe != std::string::npos && atWake < atProbe;
+        check(anchored, "the shipped ini still has the two lines the removed-settlement-detail fixture anchors on, in this order");
+        if (anchored) {
+            std::string previous = shipped;
+            // Back to front, so the earlier offset stays valid.
+            previous.insert(atProbe + afterProbe.size(),
+                eol + "# How far fix.settlement_detail may move the game's level-of-detail" + eol +
+                "# distance, as a factor on the LOD scale the game holds: 1 changes nothing. Live." + eol +
+                "#settlement_detail_max = 6.0" + eol +
+                eol + "# Measurement mode for fix.settlement_detail (auto or reduced): 1 works out" + eol +
+                "# the factor and logs what it would drop. 0, the default, lets the setting act. Live." + eol +
+                "#settlement_detail_observe = 0" + eol);
+            previous.insert(atWake + afterWake.size(),
+                eol + "# Stop the engine re-composing settlement structures and props that have not" + eol +
+                "# changed. 1 on, 0 off (the shipped state). Live." + eol +
+                "#static_prop_updates = 0" + eol +
+                eol + "# Settlement detail: a higher frame rate at busy settlements." + eol +
+                "#   game    -- the default: the game's own detail, untouched." + eol +
+                "# ui: Settlement detail | choices game, auto=Auto, reduced | live | menu performance" + eol +
+                "settlement_detail = game" + eol);
+
+            const auto setLine = [&](std::string text, const std::string& oldLine, const std::string& newLine) {
+                const size_t p = text.find("\n" + oldLine + eol);
+                if (p != std::string::npos) text.replace(p + 1, oldLine.size(), newLine);
+                return text;
+            };
+            const auto copies = [](const std::string& text, const std::string& needle) {
+                size_t n = 0, from = 0;
+                while ((from = text.find(needle, from)) != std::string::npos) {
+                    ++n;
+                    from += 1;
+                }
+                return n;
+            };
+            const std::string carriedNote = "# carried over from your edvr.ini; this version no longer uses it";
+            const auto carriedAs = [&](const std::string& merged, const std::string& line) {
+                return merged.find(carriedNote + "\n" + line) != std::string::npos ||
+                       merged.find(carriedNote + "\r\n" + line) != std::string::npos;
+            };
+            // The settings beside the blocks, tuned, to show the merge leaves them alone.
+            const auto tuned = [&](std::string text) {
+                text = setLine(text, "wake_pulse = off", "wake_pulse = stock");
+                text = setLine(text, "#pixel_probe =", "pixel_probe = 0.5,0.5");
+                return text;
+            };
+
+            // 1. The previous version's own file: only the live settlement_detail line is there to carry.
+            {
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, tuned(previous), &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.settlement_detail"), "game",
+                         "the previous version's own settlement detail line is carried, not eaten");
+                check(rep.retired.size() == 1 && rep.carried.empty(),
+                      "...reported as a retired setting, not as a key this version never shipped",
+                      std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+                check(carriedAs(merged, "settlement_detail = game"),
+                      "...after a note saying this version no longer uses it");
+                expectEq(iniValue(merged, "fix.wake_pulse"), "stock", "the setting before the removed blocks keeps its tuned value");
+                expectEq(iniValue(merged, "advanced.pixel_probe"), "0.5,0.5", "...and so does the one after them");
+                check(iniValue(merged, "advanced.settlement_detail_max", "<unset>") == "<unset>" &&
+                          iniValue(merged, "advanced.settlement_detail_observe", "<unset>") == "<unset>" &&
+                          iniValue(merged, "fix.static_prop_updates", "<unset>") == "<unset>",
+                      "the three commented templates carry nothing");
+            }
+
+            // 2. A rig that flew all four: every line is carried with its value.
+            {
+                std::string flown = tuned(previous);
+                flown = setLine(flown, "settlement_detail = game", "settlement_detail = auto");
+                flown = setLine(flown, "#static_prop_updates = 0", "static_prop_updates = 1");
+                flown = setLine(flown, "#settlement_detail_max = 6.0", "settlement_detail_max = 4.5");
+                flown = setLine(flown, "#settlement_detail_observe = 0", "settlement_detail_observe = 1");
+                MergeReport rep;
+                const std::string merged = mergeIni(shipped, flown, &previous, {}, &rep);
+                expectEq(iniValue(merged, "fix.settlement_detail"), "auto", "a flown settlement detail setting is carried with its value");
+                expectEq(iniValue(merged, "fix.static_prop_updates"), "1", "...and so is the static prop gate's");
+                expectEq(iniValue(merged, "advanced.settlement_detail_max"), "4.5", "...and the ceiling");
+                expectEq(iniValue(merged, "advanced.settlement_detail_observe"), "1", "...and the observe switch");
+                check(rep.retired.size() == 4 && rep.carried.empty(),
+                      "all four are reported as retired settings, none as a key this version never shipped",
+                      std::to_string(rep.retired.size()) + " retired, " + std::to_string(rep.carried.size()) + " carried");
+                check(carriedAs(merged, "settlement_detail = auto") && carriedAs(merged, "static_prop_updates = 1") &&
+                          carriedAs(merged, "settlement_detail_max = 4.5") && carriedAs(merged, "settlement_detail_observe = 1"),
+                      "each carried line follows a note saying this version no longer uses it");
+                expectEq(iniValue(merged, "fix.wake_pulse"), "stock", "the setting before the removed blocks keeps its tuned value");
+                expectEq(iniValue(merged, "advanced.pixel_probe"), "0.5,0.5", "...and so does the one after them");
+                check(merged.find("Stop the engine re-composing") == std::string::npos &&
+                          merged.find("a higher frame rate at busy settlements") == std::string::npos &&
+                          merged.find("# ui: Settlement detail") == std::string::npos &&
+                          merged.find("How far fix.settlement_detail may move") == std::string::npos &&
+                          merged.find("Measurement mode for fix.settlement_detail") == std::string::npos,
+                      "the removed settings' documentation blocks and menu row are not resurrected");
+
+                // The merge is idempotent on the carried lines.
+                MergeReport again;
+                const std::string twice = mergeIni(shipped, merged, &shipped, {}, &again);
+                check(copies(twice, "settlement_detail = auto") == 1 && copies(twice, "static_prop_updates = 1") == 1 &&
+                          copies(twice, "settlement_detail_max = 4.5") == 1 && copies(twice, "settlement_detail_observe = 1") == 1,
+                      "a second merge does not duplicate a carried line");
+
+                // Hand-installed, no base copy: the same four lines are still carried and still inert, only the note differs.
+                MergeReport bareRep;
+                const std::string bare = mergeIni(shipped, flown, nullptr, {}, &bareRep);
+                check(iniValue(bare, "fix.settlement_detail") == "auto" && iniValue(bare, "fix.static_prop_updates") == "1" &&
+                          iniValue(bare, "advanced.settlement_detail_max") == "4.5" &&
+                          iniValue(bare, "advanced.settlement_detail_observe") == "1",
+                      "with no base copy the four removed settings are still carried with their values");
+                check(bareRep.carried.size() == 4 && bareRep.retired.empty(),
+                      "and reported as keys this version never shipped (the merge cannot know they once did)");
+            }
+
+            // A file with none of the lines (installed from this version, or the lines deleted) carries nothing.
+            MergeReport freshRep;
+            const std::string fresh = mergeIni(shipped, shipped, &previous, {}, &freshRep);
+            check(fresh == shipped && freshRep.retired.empty() && freshRep.carried.empty(),
+                  "a file without the four lines carries nothing: the new file stands as shipped");
+        }
+    }
 }
 
 // A shipped default that CHANGED, against the real edvr.ini: fix.ui_quality went

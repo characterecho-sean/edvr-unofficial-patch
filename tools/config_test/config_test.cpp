@@ -1045,11 +1045,19 @@ static void iniNameScan(const std::wstring& root) {
 // do). Nothing may still spell their names. A reader left behind would let a user's old line act, a log message would send people
 // to a setting that does nothing, and the shipped file would document one. The installer carries an old line over under "this
 // version no longer uses it" (installer_test holds that), so only the two tests spell the names.
+//
+// The four keys of the settlement LOD governor and the static prop gate, removed 2026-10-08, are held out the same way, but for a
+// different reason: the behaviour is gone with them (the game's own detail and its own prop updates are what run), so there is
+// nothing to keep permanent. "settlement_detail" is also a prefix of the governor's two [advanced] keys, settlement_detail_max
+// and settlement_detail_observe, so the one name holds all three.
 static const char* const kRetiredKeys[] = {
     "temporal_aa_on_foot_world_jitter",
     "temporal_aa_on_foot_world_steady_detail",
     "temporal_aa_jitter_follows_upscale",
+    "settlement_detail",
+    "static_prop_updates",
 };
+static const int kRetiredKeyCount = int(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
 
 // The first retired name `text` spells, or nullptr.
 static const char* spellsRetiredKey(const std::string& text) {
@@ -1073,19 +1081,21 @@ static void retiredKeyScan(const std::wstring& root) {
     const std::string live =
         "experimental.temporal_aa_on_foot_world = auto\n"    // the live route key: the retired names start with it
         "experimental.temporal_aa_jitter = on\n";             // the live global jitter key: one retired name starts with it
-    if (found == 3 && !spellsRetiredKey(live))
-        ok("the retired-key scan finds each of the three names in a read, a message and a comment, and passes the live keys beside them");
+    if (found == kRetiredKeyCount && !spellsRetiredKey(live))
+        ok(("the retired-key scan finds each of the " + std::to_string(kRetiredKeyCount) +
+            " names in a read, a message and a comment, and passes the live keys beside them").c_str());
     else
-        fail("the retired-key scan's own control", std::to_string(found) + " of 3 names found, or a live key was flagged");
+        fail("the retired-key scan's own control", std::to_string(found) + " of " + std::to_string(kRetiredKeyCount) +
+                                                       " names found, or a live key was flagged");
 
     // The shipped file: no template, no comment, no mention.
     const std::string ini = readRepoFile(root, L"edvr.ini");
     if (ini.empty()) {
         fail("edvr.ini is readable from the repo root (retired keys)", "could not read it");
     } else if (const char* name = spellsRetiredKey(ini)) {
-        fail("the shipped edvr.ini names none of the three retired keys", std::string("it spells ") + name);
+        fail("the shipped edvr.ini names none of the retired keys", std::string("it spells ") + name);
     } else {
-        ok("the shipped edvr.ini defines, documents and mentions none of the three retired keys");
+        ok("the shipped edvr.ini defines, documents and mentions none of the retired keys");
     }
 
     // Every production source, the installer's included: no reader, no allow-list entry, no log line.
@@ -1191,17 +1201,12 @@ int main(int argc, char** argv) {
     else
         fail("eye depth capture is documented but not live under [advanced]",
              "the shipped file defines it live");
-    // The settlement LOD governor is a shipped fix: fix.settlement_detail is
-    // live under the first [fix] and reads game (off), the compiled default too.
-    // Its two [advanced] tuning keys ship as commented templates, so the
-    // compiled defaults -- a ceiling of 6.0 (held to 1..8) and observe 0 --
-    // are what every user runs until they choose otherwise.
-    expectStr("fix.settlement_detail", "game",
-              "settlement detail ships live in [fix] and reads game (off)");
-    expectStr("advanced.settlement_detail_max", "<unset>",
-              "...its ceiling ships commented out: the compiled 6.0 is in force");
-    expectStr("advanced.settlement_detail_observe", "<unset>",
-              "...and so does its observe-only switch");
+    // The settlement LOD governor and the static prop gate were removed 2026-10-08: their four keys are gone, not merely off. The
+    // file's text and every source are held clear of the names by retiredKeyScan, and these read the file as the parser sees it.
+    expectStr("fix.settlement_detail", "<unset>", "the removed settlement detail key is absent");
+    expectStr("advanced.settlement_detail_max", "<unset>", "...and so is its ceiling");
+    expectStr("advanced.settlement_detail_observe", "<unset>", "...and its observe-only switch");
+    expectStr("fix.static_prop_updates", "<unset>", "the removed static prop gate's key is absent");
     // ui_quality (docs/ui-layer-2026-09-23.md) is one key for both halves:
     // the interface panels made at the target's size, and the game's
     // post-tonemap UI drawn into a per-eye layer after the upscale. Values
