@@ -2,13 +2,11 @@
 
 ## Status
 
-- **State: Phase 0 and F1 FLOWN (2026-10-07); Phase 1c BUILT, not flown:
-  F5 enters and leaves, the box push is bypassed, the camera UI is hidden,
-  and the F2 instruments (pressed ints, controller, neck) are in the probe.**
-  Replaces press counting and headset-pose offsets with a placement of
-  Elite's own free camera at the commander's head. Real keys:
-  `fix.explorer_cam`, `fix.explorer_cam_eye_up/_forward/_right`, and
-  `[hotkey] explorer_cam = F5`, the only way in.
+- **State: F0, F1, F2 FLOWN (2026-10-07).** F5 in and out, placement at
+  the set height, lock, and UI hide all work. BLOCKER: inside the body the
+  whole avatar dither-fades, and the fade stuck on the first-person weapon
+  after the exit. Keys: `[hotkey] explorer_cam = F5` (the only way in),
+  `fix.explorer_cam`, and the eye keys (temporary).
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
   old Explorer Cam route entirely; deleting the old route is authorized.
@@ -49,16 +47,16 @@
 - **Set aside, not flown:** writing the origin inside the refresh detour at
   `+0x592200`; the culling view is built upstream of it
   (design-occlusion-culling-2026-09-22.md), and 6s.9 saw holes from that.
-- **F0 and F1 FLOWN** on Frontier (logs 172543 and 194702); findings below.
-- **Next:** F2 on Frontier (0cff6a93 installed 21:10; F5 and probe in the
-  live ini), in a settlement and at a pad: does
-  0x2DF14C0 run with the camera CLOSED (its first-call line and the I4
-  heartbeat), which key is the world lock (I3 pressed), and where is the eye
-  (N lines: +0x268 in commander-local axes standing, crouched, weapon drawn).
-  Then 1d: place from the neck.
-- **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off;
-  the 0b instruments, the VR camera census, and I3 pressed, I4, N). Removed
-  at arc close.
+- **Flown** on Frontier: F0 172543, F1 194702, F2 211908; findings below.
+- **Next:** 0a-5 (static): the avatar fade and its reset, the third-person
+  head joint from the kinematic rig, and what gates TAB after opening. Then
+  1d: no fade on the body, a fade reset at exit, TAB on the real condition,
+  and placement from the head joint.
+- **Temporary keys:** `[advanced] explorer_cam_probe` (the instruments;
+  removed at arc close). `[fix] explorer_cam_eye_up/_forward/_right`: they
+  stand in for the head bone; Sean tunes the bone-to-eye offset once, it
+  becomes a constant, and they go. `fix.explorer_cam` is redundant with an
+  empty F5; ask Sean before removing it.
 
 ## Why today's Explorer Cam is half-baked
 
