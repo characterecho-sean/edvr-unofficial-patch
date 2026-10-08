@@ -1243,6 +1243,14 @@ int main() {
         check(codeInstructionLength(cameraController, sizeof(cameraController), &disp) == 5 && disp == 0,
               "...and the camera controller's update: `mov [rsp+8],rbx` is 5 bytes, no displacement",
               "Explorer Cam's controller hook would be refused or stolen at the wrong length");
+        // AvatarModelComponent's dither-fade update (+0x3DD6040, the fade counter's target under advanced.explorer_cam_probe): `4C 8B DC` is
+        // `mov r11,rsp` (REX.WR 8B /r, register ModRM, three bytes, no displacement), then `push rbx` and `push rsi`: 3+1+1 = five bytes. The
+        // `mov rax,[rip+d32]` that ends the 16-byte prologue lies beyond the patch, so the rip-relative displacement is never rewritten.
+        const uint8_t avatarFade[] = {0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
+        check(codeInstructionLength(avatarFade, sizeof(avatarFade), &disp) == 3 && disp == 0 &&
+                  codeInstructionLength(avatarFade + 3, sizeof(avatarFade) - 3, &disp) == 1 && codeInstructionLength(avatarFade + 4, sizeof(avatarFade) - 4, &disp) == 1,
+              "...and the avatar dither-fade update: `mov r11,rsp` is 3 bytes, no displacement, then two pushes: five bytes stolen",
+              "the fade counter's hook would be refused or stolen at the wrong length");
 
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.

@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1190,6 +1191,758 @@ void testF2Glue() {
     }
 }
 
+// ================================ Part D: the fade counter (F) ================================
+// AvatarModelComponent's per-frame dither-fade update, hooked after the original. The counter reads comp+0x378 (the block pointer),
+// block+0x90 (enabled), block+0x120 (amount) and comp+0x380 (eased), under SEH, and prints a 5 s heartbeat.
+static_assert(ecm::kAvatarFadeRva == 0x3DD6040 && ecm::kAvatarFadePrologueBytes == 16, "the fade update is +0x3DD6040 and its prologue is 16 bytes");
+static_assert(ecm::kOffAvatarFadeBlock == 0x378 && ecm::kOffAvatarFadeEased == 0x380 && ecm::kOffFadeBlockEnabled == 0x90 && ecm::kOffFadeBlockAmount == 0x120,
+              "the dither block is comp+0x378 -> +0x90 enabled, +0x120 amount; the eased level is comp+0x380");
+
+// A synthetic fade update that begins with the real 16 bytes (`mov r11,rsp; push rbx; push rsi; push rdi; sub rsp,110h; mov rax,[rip+d32]`). Its body
+// is what makes "the original runs FIRST" testable: when the flag at +0x108 is set it WRITES the block's enabled byte from the stamp at +0x100, so a
+// component whose block reads enabled = 0 before the call reads enabled = 1 after it, and only an observer that runs after the original sees that.
+// It returns the stamp.
+size_t buildFadeSynthetic(uint8_t* code, bool corrupt) {
+    size_t n = 0;
+    auto put = [&](std::initializer_list<uint8_t> bytes) { for (uint8_t b : bytes) code[n++] = b; };
+    for (uint8_t b : ecm::kAvatarFadePrologue) code[n++] = b;          // ...48 8B 05: the first three bytes of `mov rax,[rip+d32]`
+    put({0xEC, 0x00, 0x00, 0x00});                                      // d32: rip is +20, the stamp is at +0x100
+    put({0x48, 0x83, 0x3D, 0xEC, 0x00, 0x00, 0x00, 0x00});              // cmp qword ptr [rip+d32], 0   (rip +28 -> the write flag at +0x108)
+    put({0x74, 0x12});                                                  // je skip
+    put({0x48, 0x8B, 0x99, 0x78, 0x03, 0x00, 0x00});                    // mov rbx, [rcx+378h]
+    put({0x48, 0x85, 0xDB});                                            // test rbx, rbx
+    put({0x74, 0x06});                                                  // jz skip
+    put({0x88, 0x83, 0x90, 0x00, 0x00, 0x00});                          // mov [rbx+90h], al
+    put({0x48, 0x81, 0xC4, 0x10, 0x01, 0x00, 0x00});                    // skip: add rsp, 110h
+    put({0x5F, 0x5E, 0x5B, 0xC3});                                      // pop rdi; pop rsi; pop rbx; ret
+    if (corrupt) code[9] ^= 0x01;                                       // the sub's imm32: no longer build 332841's prologue
+    return n;
+}
+uint8_t* makeFadePage(const uint8_t* code, size_t n) {
+    auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    if (!page) return nullptr;
+    std::memcpy(page, code, n);
+    FlushInstructionCache(GetCurrentProcess(), page, n);
+    return page;
+}
+struct FadeComp {
+    alignas(16) uint8_t comp[0x400];
+    alignas(16) uint8_t block[0x140];
+    void init(float amount, float eased) {
+        std::memset(comp, 0, sizeof(comp));
+        std::memset(block, 0, sizeof(block));
+        const uint64_t b = reinterpret_cast<uint64_t>(block);
+        std::memcpy(comp + ecm::kOffAvatarFadeBlock, &b, 8);
+        std::memcpy(comp + ecm::kOffAvatarFadeEased, &eased, 4);
+        std::memcpy(block + ecm::kOffFadeBlockAmount, &amount, 4);
+    }
+    void setBlockPointer(uint64_t p) { std::memcpy(comp + ecm::kOffAvatarFadeBlock, &p, 8); }
+};
+using FadeFn = uint64_t (__fastcall*)(void*);
+
+void testFadeCounter() {
+    std::printf("the fade counter F end to end (a synthetic dither-fade update, synthetic components)\n");
+    namespace t = edvr::explorercamprobetest;
+    uint8_t good[256] = {}, bad[256] = {}, freeGood[128] = {};
+    const size_t nGood = buildFadeSynthetic(good, false);
+    buildFadeSynthetic(bad, true);
+    const size_t nFree = buildSynthetic(freeGood, false);
+    uint8_t* fadePage = makeFadePage(good, nGood);
+    uint8_t* badPage = makeFadePage(bad, nGood);
+    uint8_t* freePage = makeExecutable(freeGood, nFree);
+    check(fadePage && badPage && freePage, "(pages for the synthetic fade update, a corrupted copy and a free-camera update)");
+    if (!fadePage || !badPage || !freePage) return;
+    check(std::memcmp(good, ecm::kAvatarFadePrologue, 16) == 0 && std::memcmp(bad, ecm::kAvatarFadePrologue, 16) != 0, "the synthetic function carries the real 16-byte prologue; the corrupted copy does not");
+    auto* stamp = reinterpret_cast<uint64_t*>(fadePage + 0x100);
+    auto* writeFlag = reinterpret_cast<uint64_t*>(fadePage + 0x108);
+    auto callFade = reinterpret_cast<FadeFn>(fadePage);
+
+    static FadeComp comps[6];
+    comps[0].init(0.80f, 0.80f);   // A
+    comps[1].init(0.25f, 0.25f);   // B
+    comps[2].init(0.90f, 0.90f);   // C
+    comps[3].init(0.50f, 0.50f);   // D: no block
+    comps[3].setBlockPointer(0);
+    comps[4].init(0.50f, 0.50f);   // E: a block pointer into a PAGE_NOACCESS page (an address that is reserved, so nothing else can map it, and faults on a read)
+    void* noAccess = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    check(noAccess != nullptr, "(a PAGE_NOACCESS page for the unreadable block)");
+    comps[4].setBlockPointer(reinterpret_cast<uint64_t>(noAccess));
+    comps[5].init(0.50f, 0.50f);   // F: a small non-null "pointer" (0x10): not a block at all, counted as no_block, not as a fault
+    comps[5].setBlockPointer(0x10);
+
+    // Baseline: the synthetic function works unhooked, and its write is what makes the order testable.
+    *stamp = 0x1122334455667701ull;
+    *writeFlag = 1;
+    check(comps[0].block[0x90] == 0 && callFade(comps[0].comp) == 0x1122334455667701ull && comps[0].block[0x90] == 1, "baseline: unhooked, the function returns the stamp and writes enabled = 1 into the block");
+    comps[0].block[0x90] = 0;
+
+    ExplorerCamTestTargets targets;
+    targets.freeCamera = reinterpret_cast<uintptr_t>(freePage);
+    targets.avatarFade = reinterpret_cast<uintptr_t>(fadePage);
+    explorercamtest::setTargets(targets);
+    int32_t mode = -1;
+    float amount = 0.0f;
+    explorercamtest::setFadeGlobal(&mode, &amount);
+    uint8_t before[40];
+    std::memcpy(before, fadePage, sizeof(before));
+
+    Capture cap;
+    t::boundary(1, 1000, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe F armed:") == 1 && has(cap.nth("explorer cam probe F armed:", 0), "stolen=5 bytes") &&
+              has(cap.nth("explorer cam probe F armed:", 0), "the original runs FIRST") && has(cap.nth("explorer cam probe F armed:", 0), "comp+0x378 -> +0x90 enabled, +0x120 amount") &&
+              cap.count("explorer cam probe F stood down:") == 0,
+          "F ARMED: one line, 5 stolen bytes, the original-first order and the offsets it reads");
+    check(explorercamtest::stolenBytes(5) == 5 && fadePage[0] == 0xE9 && std::memcmp(before + 5, fadePage + 5, 35) == 0,
+          "...the function begins with the relay jump E9 and only the 5 stolen bytes changed");
+
+    // ---- nothing calls it yet: 'idle=no-call-yet' (the hook ran, saw nothing) --------------------------------------------------------------
+    cap.clear();
+    t::boundary(2, 6100, true, &Capture::add, &cap);
+    std::string beat = cap.nth("explorer cam probe F heartbeat:", 0);
+    check(has(beat, "hook=armed") && has(beat, "calls=0(+0)") && has(beat, "enabled_calls=0(+0)") && has(beat, "min_amount_enabled=none") && has(beat, "idle=no-call-yet"),
+          "HEARTBEAT, no call yet: 'idle=no-call-yet', calls 0, minimum 'none'");
+
+    // ---- the original runs FIRST --------------------------------------------------------------------------------------------------------
+    *stamp = 0x1122334455667701ull;   // low byte 1: the original WRITES enabled = 1
+    *writeFlag = 1;
+    comps[0].block[0x90] = 0;
+    const uint64_t r = callFade(comps[0].comp);
+    check(r == 0x1122334455667701ull && comps[0].block[0x90] == 1, "the hooked function returns the original's value unchanged and the original's write happened");
+    check(explorercamf2test::fadeCalls() == 1 && explorercamf2test::fadeEnabledCalls() == 1,
+          "THE ORIGINAL RUNS FIRST: the block read enabled = 0 before the call and the counter saw enabled = 1 on that very call (a read before the original would count 0)");
+    comps[1].block[0x90] = 0;
+    callFade(comps[1].comp);                 // B: enabled, amount 0.25
+    *stamp = 0x1122334455667700ull;          // low byte 0: the original writes enabled = 0
+    callFade(comps[2].comp);                 // C: not enabled
+    *stamp = 0x1122334455667701ull;
+    callFade(comps[0].comp);                 // A again
+    check(explorercamf2test::fadeCalls() == 4 && explorercamf2test::fadeEnabledCalls() == 3 && explorercamf2test::fadeDistinct() == 3, "four calls: three distinct components, three with enabled = 1");
+
+    cap.clear();
+    t::boundary(3, 11200, true, &Capture::add, &cap);
+    beat = cap.nth("explorer cam probe F heartbeat:", 0);
+    check(has(beat, "hook=armed") && has(beat, "calls=4(+4)") && has(beat, "distinct_components=3") && has(beat, "enabled_calls=3(+3)") && has(beat, "components_enabled=2") &&
+              has(beat, "min_amount_enabled=0.250") && has(beat, "global=-1 (auto, the game's own)") && has(beat, "enabled_while_global_zero=0(+0)") && has(beat, "no_block=0 read_faults=0") &&
+              !has(beat, "idle=") && !has(beat, "VERDICT"),
+          "HEARTBEAT: 4 calls, 3 distinct components, 3 calls with enabled = 1 from 2 components, the least amount among them 0.250, the global at -1 (no verdict)");
+
+    // ---- the global at 0: the verdict --------------------------------------------------------------------------------------------------------
+    mode = 0;
+    *stamp = 0x1122334455667700ull;   // the game honoured the global: the original writes enabled = 0
+    callFade(comps[0].comp);
+    callFade(comps[1].comp);
+    cap.clear();
+    t::boundary(4, 16300, true, &Capture::add, &cap);
+    beat = cap.nth("explorer cam probe F heartbeat:", 0);
+    check(has(beat, "calls=6(+2)") && has(beat, "enabled_calls=3(+0)") && has(beat, "components_enabled=0") && has(beat, "min_amount_enabled=none") && has(beat, "global=0 (0, held by Explorer Cam or someone)") &&
+              has(beat, "VERDICT: with the global at 0, enabled = 1 read 0 on every call of the window, as it must") && !has(beat, "does NOT switch"),
+          "GLOBAL AT 0, honoured: the window has calls and none read enabled = 1, and the VERDICT says so");
+    *stamp = 0x1122334455667701ull;   // the global was NOT honoured: enabled = 1 with the global at 0
+    callFade(comps[1].comp);
+    cap.clear();
+    t::boundary(5, 21400, true, &Capture::add, &cap);
+    beat = cap.nth("explorer cam probe F heartbeat:", 0);
+    check(has(beat, "enabled_while_global_zero=1(+1)") && has(beat, "components_enabled=1") && has(beat, "min_amount_enabled=0.250") && has(beat, "VERDICT: enabled = 1 was read while the global was 0, so the global does NOT switch the dither off"),
+          "GLOBAL AT 0, not honoured: enabled = 1 read with the global at 0 is counted and the VERDICT says the global does not switch the dither off");
+    cap.clear();
+    t::boundary(6, 26500, true, &Capture::add, &cap);
+    beat = cap.nth("explorer cam probe F heartbeat:", 0);
+    check(has(beat, "calls=7(+0)") && has(beat, "idle=no-call-in-window") && has(beat, "enabled_while_global_zero=1(+0)") && !has(beat, "VERDICT"),
+          "a window with no calls: 'idle=no-call-in-window', the cumulative counts stay, no verdict is claimed");
+
+    // ---- a component with no block, and one whose block pointer faults ---------------------------------------------------------------------
+    mode = -1;
+    *writeFlag = 0;   // the synthetic original must not touch the bad pointers itself
+    const uint64_t noBlock = callFade(comps[3].comp);
+    const uint64_t faults = callFade(comps[4].comp);
+    const uint64_t tiny = callFade(comps[5].comp);
+    check(noBlock == *stamp && faults == *stamp && tiny == *stamp, "calls with a NULL block pointer, a tiny one and an unreadable one return the original's value (no crash in the hook)");
+    cap.clear();
+    t::boundary(7, 31600, true, &Capture::add, &cap);
+    beat = cap.nth("explorer cam probe F heartbeat:", 0);
+    check(has(beat, "calls=10(+3)") && has(beat, "no_block=2") && has(beat, "read_faults=1") && has(beat, "enabled_calls=4"),
+          "...counted as no_block=2 (NULL and 0x10) and read_faults=1 (the PAGE_NOACCESS block), and not as enabled");
+    *writeFlag = 1;
+
+    // ---- two threads ---------------------------------------------------------------------------------------------------------------------
+    const uint64_t callsBefore = explorercamf2test::fadeCalls();
+    std::thread t1([&] { for (int i = 0; i < 4000; ++i) callFade(comps[i % 3].comp); });
+    std::thread t2([&] { for (int i = 0; i < 4000; ++i) callFade(comps[(i + 1) % 3].comp); });
+    t1.join();
+    t2.join();
+    check(explorercamf2test::fadeCalls() == callsBefore + 8000, "TWO THREADS, 8000 calls: every call is counted exactly once");
+    cap.clear();
+    t::boundary(8, 36700, true, &Capture::add, &cap);
+    beat = cap.nth("explorer cam probe F heartbeat:", 0);
+    check(has(beat, "(+8000)") && has(beat, "distinct_components=6"), "...and the heartbeat's window and distinct count follow (six components seen in all)");
+
+    // ---- the game's memory was only read ----------------------------------------------------------------------------------------------------
+    uint8_t blockBefore[0x140];
+    std::memcpy(blockBefore, comps[1].block, sizeof(blockBefore));
+    *writeFlag = 0;
+    callFade(comps[1].comp);
+    check(std::memcmp(blockBefore, comps[1].block, sizeof(blockBefore)) == 0, "NOTHING WRITTEN: a call whose original writes nothing leaves the block byte for byte as it was");
+    *writeFlag = 1;
+
+    // ---- key off: the observer detaches ------------------------------------------------------------------------------------------------------
+    cap.clear();
+    t::boundary(9, 41000, false, &Capture::add, &cap);
+    const uint64_t callsAtOff = explorercamf2test::fadeCalls();
+    const uint64_t rOff = callFade(comps[0].comp);
+    check(cap.count("explorer cam probe: off") == 1 && rOff == *stamp && explorercamf2test::fadeCalls() == callsAtOff, "KEY OFF: one line; the function still returns the original's value and the counter no longer runs");
+
+    // ---- restore -------------------------------------------------------------------------------------------------------------------------------
+    t::reset();
+    check(std::memcmp(before, fadePage, sizeof(before)) == 0, "RESET: uninstall puts the original bytes of the fade update back");
+
+    // ---- a wrong prologue stands down -----------------------------------------------------------------------------------------------------
+    uint8_t badBefore[40];
+    std::memcpy(badBefore, badPage, sizeof(badBefore));
+    targets.avatarFade = reinterpret_cast<uintptr_t>(badPage);
+    explorercamtest::setTargets(targets);
+    explorercamtest::setFadeGlobal(&mode, &amount);
+    cap.clear();
+    t::boundary(20, 50000, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe F stood down:") == 1 && has(cap.nth("explorer cam probe F stood down:", 0), "the game build differs") && has(cap.nth("explorer cam probe F stood down:", 0), "nothing was patched") &&
+              has(cap.nth("explorer cam probe F stood down:", 0), "F will not run") && cap.count("explorer cam probe F armed:") == 0,
+          "WRONG PROLOGUE: one 'F stood down' line saying the build differs; no 'armed' line");
+    check(std::memcmp(badBefore, badPage, sizeof(badBefore)) == 0 && explorercamtest::stolenBytes(5) == 0, "...and not one byte of the function was written");
+    cap.clear();
+    t::boundary(21, 55100, true, &Capture::add, &cap);
+    beat = cap.nth("explorer cam probe F heartbeat:", 0);
+    check(has(beat, "hook=stood down") && has(beat, "idle=the hook is stood down: no call can be seen"), "...and the heartbeat says the hook is stood down (never ran, distinguishable from ran and saw nothing)");
+    t::boundary(22, 55200, false, &Capture::add, &cap);
+    t::reset();
+}
+
+// ================================ Part E: the head joint (H) ================================
+// A synthetic game image: a reserved block whose offsets are the build's RVAs. It holds the humanoid component's vtable value, the two
+// skeleton interfaces' vtables (their slots point at trampolines placed at the EXACT RVAs the build has), the joint-name literals, the
+// skeleton type id and a container vtable. The functions behind the trampolines are native stubs that record how they were called, so the
+// rig checks the argument lists the exe's code was disassembled for: (iface, idx as a u32, a 64-byte buffer).
+constexpr size_t kHeadImageSize = 0x5F30000;
+uint8_t* g_himg = nullptr;
+
+struct HeadRec {
+    int lookup = 0, poseRR = 0, poseAO = 0, find = 0, modelRR = 0, modelAO = 0, worldRR = 0, worldAO = 0;
+    uint32_t lookupThread = 0, modelThread = 0, findThread = 0;
+    uintptr_t lastContainer = 0, lastModelIface = 0, lastModelOut = 0, lastWorldIface = 0, lastFindIface = 0;
+    uint32_t lastTypeId = 0, lastModelIdx = 0, lastWorldIdx = 0;
+    char names[8][40] = {};
+    int faultAt = 0;              // 1 lookup, 2 pose, 3 find, 4 model (+0x58), 5 world (+0x48)
+    bool swapWorldSlot = false;   // the +0x58 stub changes the RR vtable's +0x48 slot behind H's back
+    int swapSlotIn = 0;           // 1: GetPoseData changes the +0x30 slot; 2: the last FindJoint changes the +0x58 slot
+    uint32_t slowModelMs = 0;
+    uint32_t typeId = 0xBEEF;
+    uint32_t headIdx = 12, povIdx = 3;
+};
+HeadRec g_hr;
+
+void hrFault() {
+    volatile int* p = reinterpret_cast<volatile int*>(static_cast<uintptr_t>(0x8));
+    *p = 1;
+}
+void hrPutMatrix(float* out, float x, float y, float z) {
+    std::memset(out, 0, 64);
+    out[0] = out[5] = out[10] = out[15] = 1.0f;
+    out[12] = x;
+    out[13] = y;
+    out[14] = z;
+}
+void* __fastcall hrLookup(void* container, uint32_t id) {
+    ++g_hr.lookup;
+    g_hr.lookupThread = GetCurrentThreadId();
+    g_hr.lastContainer = reinterpret_cast<uintptr_t>(container);
+    g_hr.lastTypeId = id;
+    if (g_hr.faultAt == 1) hrFault();
+    if (id != g_hr.typeId) return nullptr;
+    return *reinterpret_cast<void**>(static_cast<uint8_t*>(container) + 0x10);
+}
+void hrSwapRrSlot(uint32_t slotIndex) {
+    *reinterpret_cast<uint64_t*>(g_himg + f2::kRrVtableRva + 8 * slotIndex) = reinterpret_cast<uint64_t>(g_himg + 0x3000000);
+}
+void* __fastcall hrPoseRR(void* iface) {
+    ++g_hr.poseRR;
+    if (g_hr.faultAt == 2) hrFault();
+    if (g_hr.swapSlotIn == 1) hrSwapRrSlot(6);
+    return *reinterpret_cast<void**>(static_cast<uint8_t*>(iface) + 0x20);
+}
+void* __fastcall hrPoseAO(void* iface) {
+    ++g_hr.poseAO;
+    if (g_hr.faultAt == 2) hrFault();
+    return *reinterpret_cast<void**>(static_cast<uint8_t*>(iface) + 0x20);
+}
+uint32_t __fastcall hrFind(void* iface, const char* name) {
+    if (g_hr.find < 8) std::snprintf(g_hr.names[g_hr.find], sizeof(g_hr.names[0]), "%s", name);
+    ++g_hr.find;
+    g_hr.findThread = GetCurrentThreadId();
+    g_hr.lastFindIface = reinterpret_cast<uintptr_t>(iface);
+    if (g_hr.faultAt == 3) hrFault();
+    if (g_hr.swapSlotIn == 2 && std::strcmp(name, f2::kPovName) == 0) hrSwapRrSlot(11);
+    if (std::strcmp(name, f2::kHeadName) == 0) return g_hr.headIdx;
+    if (std::strcmp(name, f2::kPovName) == 0) return g_hr.povIdx;
+    return 0xFFFF;
+}
+void hrModel(void* iface, uint32_t idx, float* out, bool rr) {
+    if (rr) ++g_hr.modelRR;
+    else ++g_hr.modelAO;
+    g_hr.modelThread = GetCurrentThreadId();
+    g_hr.lastModelIface = reinterpret_cast<uintptr_t>(iface);
+    g_hr.lastModelIdx = idx;
+    g_hr.lastModelOut = reinterpret_cast<uintptr_t>(out);
+    if (g_hr.faultAt == 4) hrFault();
+    if (g_hr.slowModelMs) Sleep(g_hr.slowModelMs);
+    hrPutMatrix(out, 0.0f, idx == g_hr.headIdx ? 1.60f : 1.55f, 0.02f);   // avatar-root relative
+    if (g_hr.swapWorldSlot) *reinterpret_cast<uint64_t*>(g_himg + 0x559CF90 + 8 * 9) = reinterpret_cast<uint64_t>(g_himg + 0x3000000);
+}
+void hrWorld(void* iface, uint32_t idx, float* out, bool rr) {
+    if (rr) ++g_hr.worldRR;
+    else ++g_hr.worldAO;
+    g_hr.lastWorldIface = reinterpret_cast<uintptr_t>(iface);
+    g_hr.lastWorldIdx = idx;
+    if (g_hr.faultAt == 5) hrFault();
+    if (idx == g_hr.headIdx) hrPutMatrix(out, 10.12f, 1.55f, 19.98f);   // = commander-local (right 0.02, up 1.55, forward 0.12) in the frame of testNeckMath
+    else hrPutMatrix(out, 10.12f, 1.60f, 20.00f);                       // = (0.00, 1.60, 0.12)
+}
+void __fastcall hrModelRR(void* iface, uint32_t idx, float* out) { hrModel(iface, idx, out, true); }
+void __fastcall hrModelAO(void* iface, uint32_t idx, float* out) { hrModel(iface, idx, out, false); }
+void __fastcall hrWorldRR(void* iface, uint32_t idx, float* out) { hrWorld(iface, idx, out, true); }
+void __fastcall hrWorldAO(void* iface, uint32_t idx, float* out) { hrWorld(iface, idx, out, false); }
+void __fastcall hrBogus() {}
+
+void himgCommit(size_t rva, size_t len) {
+    const size_t lo = rva & ~static_cast<size_t>(0xFFF), hi = (rva + len + 0xFFF) & ~static_cast<size_t>(0xFFF);
+    VirtualAlloc(g_himg + lo, hi - lo, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+}
+uint64_t* himgQ(size_t rva) {
+    himgCommit(rva, 8);
+    return reinterpret_cast<uint64_t*>(g_himg + rva);
+}
+void himgTramp(size_t rva, const void* target) {
+    himgCommit(rva, 16);
+    uint8_t* p = g_himg + rva;
+    p[0] = 0x48;
+    p[1] = 0xB8;   // mov rax, imm64
+    std::memcpy(p + 2, &target, 8);
+    p[10] = 0xFF;
+    p[11] = 0xE0;  // jmp rax
+}
+void himgInit() {
+    if (!g_himg) g_himg = static_cast<uint8_t*>(VirtualAlloc(nullptr, kHeadImageSize, MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    himgTramp(0x43FB900, reinterpret_cast<const void*>(&hrPoseRR));
+    himgTramp(0xFDDB10, reinterpret_cast<const void*>(&hrFind));
+    himgTramp(0x43F7180, reinterpret_cast<const void*>(&hrWorldRR));
+    himgTramp(0x43F6EB0, reinterpret_cast<const void*>(&hrModelRR));
+    himgTramp(0xFDE310, reinterpret_cast<const void*>(&hrPoseAO));
+    himgTramp(0xFDDEB0, reinterpret_cast<const void*>(&hrWorldAO));
+    himgTramp(0xFDDD10, reinterpret_cast<const void*>(&hrModelAO));
+    himgTramp(0x1000000, reinterpret_cast<const void*>(&hrLookup));
+    himgTramp(0x3000000, reinterpret_cast<const void*>(&hrBogus));
+    const uint64_t b = reinterpret_cast<uint64_t>(g_himg);
+    for (uint32_t i = 0; i < f2::kHeadSlots; ++i) {
+        *himgQ(f2::kRrVtableRva + 8 * f2::kHeadSlotIndex[i]) = b + f2::kRrFunctions[i];
+        *himgQ(f2::kAoVtableRva + 8 * f2::kHeadSlotIndex[i]) = b + f2::kAoFunctions[i];
+    }
+    *himgQ(0x2000000) = b + 0x1000000;   // the container's vtable: slot 0 is the component lookup
+    himgCommit(f2::kHeadNameRva, 32);
+    himgCommit(f2::kPovNameRva, 32);
+    std::memcpy(g_himg + f2::kHeadNameRva, f2::kHeadName, sizeof(f2::kHeadName));
+    std::memcpy(g_himg + f2::kPovNameRva, f2::kPovName, sizeof(f2::kPovName));
+    himgCommit(f2::kSkeletonIdRva, 4);
+    std::memcpy(g_himg + f2::kSkeletonIdRva, &g_hr.typeId, 4);
+}
+
+struct HeadWorld {
+    alignas(16) uint8_t hum[0x400];
+    alignas(16) uint8_t er[2][0x100];
+    alignas(16) uint8_t entity[2][0x80];
+    alignas(16) uint8_t iface[3][0x400];
+    alignas(16) uint8_t pose[3][0x40];
+    alignas(16) uint8_t activity[0x600];
+    void reset() {
+        g_hr = HeadRec();
+        std::memset(hum, 0, sizeof(hum));
+        std::memset(er, 0, sizeof(er));
+        std::memset(entity, 0, sizeof(entity));
+        std::memset(iface, 0, sizeof(iface));
+        std::memset(pose, 0, sizeof(pose));
+        std::memset(activity, 0, sizeof(activity));
+        himgInit();
+        const uint64_t b = reinterpret_cast<uint64_t>(g_himg);
+        auto q = [](uint8_t* at, uint64_t v) { std::memcpy(at, &v, 8); };
+        // TP = RR (flag +0x2C0 = 0, 60 joints), FP = AO (flag +0xF8 = 1, 40 joints), a spare RR for a changed interface.
+        q(iface[0], b + f2::kRrVtableRva);
+        iface[0][0x2C0] = 0;
+        q(iface[0] + 0x20, reinterpret_cast<uint64_t>(pose[0]));
+        const uint16_t j60 = 60, j40 = 40;
+        std::memcpy(pose[0], &j60, 2);
+        q(iface[1], b + f2::kAoVtableRva);
+        iface[1][0xF8] = 1;
+        q(iface[1] + 0x20, reinterpret_cast<uint64_t>(pose[1]));
+        std::memcpy(pose[1], &j40, 2);
+        q(iface[2], b + f2::kRrVtableRva);
+        q(iface[2] + 0x20, reinterpret_cast<uint64_t>(pose[2]));
+        std::memcpy(pose[2], &j60, 2);
+        for (int s = 0; s < 2; ++s) {
+            q(entity[s] + 8, b + 0x2000000);                          // the container (entity+8): its first qword is its vtable
+            q(entity[s] + 0x18, reinterpret_cast<uint64_t>(iface[s])); // container+0x10: what the lookup hands back
+            const int32_t live = 5;
+            std::memcpy(er[s] + f2::kOffErState, &live, 4);
+            q(er[s] + f2::kOffErEntity, reinterpret_cast<uint64_t>(entity[s]));
+        }
+        q(hum, b + f2::kHumVtableRva);
+        q(hum + f2::kOffHumThirdPerson, reinterpret_cast<uint64_t>(er[0]));
+        q(hum + f2::kOffHumFirstPerson, reinterpret_cast<uint64_t>(er[1]));
+        q(activity + f2::kOffActivityHum, reinterpret_cast<uint64_t>(hum) + f2::kHumFromInterface);
+        const float local[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.0f, 1.68f, 0.10f, 1};
+        const float world[16] = {0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 10.10f, 1.68f, 20.0f, 1};   // the frame of testNeckMath: root (10,0,20), facing +x
+        std::memcpy(activity + 0x3B0, local, 64);
+        std::memcpy(activity + 0x70, world, 64);
+    }
+};
+
+bool parseTiming(const std::string& beat, const char* name, unsigned out[4]) {
+    const size_t at = beat.find(name);
+    if (at == std::string::npos) return false;
+    return std::sscanf(beat.c_str() + at + std::strlen(name), "%u/%u/%u/%u", &out[0], &out[1], &out[2], &out[3]) == 4 ||
+           std::sscanf(beat.c_str() + at + std::strlen(name), "%u/-/-/%u", &out[0], &out[3]) == 2;
+}
+
+void testHeadJoint() {
+    std::printf("the head joint H end to end (a synthetic game image, synthetic skeleton interfaces)\n");
+    namespace t = edvr::explorercamprobetest;
+    static_assert(f2::kOffActivityHum == 0x368 && f2::kHumFromInterface == 0x70 && f2::kOffHumThirdPerson == 0x178 && f2::kOffHumFirstPerson == 0x170 &&
+                      f2::kOffErState == 0xC0 && f2::kOffErEntity == 0xC8 && f2::kErLive == 5 && f2::kOffEntityContainer == 8,
+                  "HUM = *(activity+0x368) - 0x70; slots HUM+0x178 / +0x170; ER+0xC0 >= 5, entity at ER+0xC8, container at entity+8");
+    static_assert(f2::kHumVtableRva == 0x5309EB8 && f2::kSkeletonIdRva == 0x5F2866C && f2::kRrVtableRva == 0x559CF90 && f2::kAoVtableRva == 0x517DC20 &&
+                      f2::kHeadNameRva == 0x554EE10 && f2::kPovNameRva == 0x51F9930 && f2::kRrCachedFlag == 0x2C0 && f2::kAoCachedFlag == 0xF8,
+                  "the build's RVAs");
+    static_assert(f2::kHeadSlotIndex[0] * 8 == 0x18 && f2::kHeadSlotIndex[1] * 8 == 0x30 && f2::kHeadSlotIndex[2] * 8 == 0x48 && f2::kHeadSlotIndex[3] * 8 == 0x58 &&
+                      f2::kRrFunctions[0] == 0x43FB900 && f2::kRrFunctions[1] == 0xFDDB10 && f2::kRrFunctions[2] == 0x43F7180 && f2::kRrFunctions[3] == 0x43F6EB0 &&
+                      f2::kAoFunctions[0] == 0xFDE310 && f2::kAoFunctions[1] == 0xFDDB10 && f2::kAoFunctions[2] == 0xFDDEB0 && f2::kAoFunctions[3] == 0xFDDD10,
+                  "the slots are +0x18 +0x30 +0x48 +0x58 and they hold the exe's functions (RR then AO)");
+    static HeadWorld w;
+    uint8_t freeGood[128] = {};
+    const size_t nFree = buildSynthetic(freeGood, false);
+    uint8_t* freePage = makeExecutable(freeGood, nFree);
+    check(freePage != nullptr, "(a page for the synthetic free-camera update)");
+    if (!freePage) return;
+    auto callFree = reinterpret_cast<ActivityFn>(freePage);
+    ExplorerCamTestTargets targets;
+    targets.freeCamera = reinterpret_cast<uintptr_t>(freePage);
+    Capture cap;
+    uint64_t clock = 1000;
+    uint32_t frame = 1;
+    // A fresh session: everything reset, the world rebuilt, the seam pointed at the synthetic image, H armed on a boundary.
+    auto arm = [&](uint32_t interval, bool knownBuild = true) {
+        t::reset();
+        w.reset();
+        explorercamtest::setTargets(targets);
+        explorercamf2test::HeadSeam seam;
+        if (knownBuild) {
+            seam.base = reinterpret_cast<uintptr_t>(g_himg);
+            seam.imageSize = kHeadImageSize;
+        }
+        explorercamf2test::setHeadTargets(seam);
+        explorercamf2test::setHeadInterval(interval);
+        cap.clear();
+        clock += 100000;
+        t::boundary(frame++, clock, true, &Capture::add, &cap);
+    };
+    auto tick = [&](uint64_t advanceMs = 1100) {
+        cap.clear();
+        clock += advanceMs;
+        t::boundary(frame++, clock, true, &Capture::add, &cap);
+    };
+    auto eval = [&]() { t::observe(w.activity); };
+    const std::string kHeadPrefix = "explorer cam probe H ";
+
+    // ---- armed ---------------------------------------------------------------------------------------------------------------------------
+    arm(0);
+    const std::string armed = cap.nth("explorer cam probe H armed:", 0);
+    check(cap.count("explorer cam probe H armed:") == 1 && has(armed, "at most once a second") && has(armed, "GAME CALL") && has(armed, "before EVERY call") &&
+              has(armed, "SEH throughout") && has(armed, "def_c_head_joint") && has(armed, "def_c_povCamera_joint") && has(armed, "nothing is written") && armed.size() < 1050,
+          "H ARMED: one line naming the path, the game call, the check before every call, SEH and the joints; it fits a log line");
+    check(explorercamf2test::headState() == 1 && cap.count("explorer cam probe H stood down:") == 0, "...and the state is armed");
+    check(explorercamf2test::headSteps() == 0 && g_hr.lookup == 0 && g_hr.find == 0, "nothing is called before the free camera has been updated");
+
+    // ---- the first evaluation ---------------------------------------------------------------------------------------------------------------
+    eval();
+    check(explorercamf2test::headSteps() == 1 && explorercamf2test::headFaults() == 0, "one free-camera update: one evaluation, no fault");
+    check(g_hr.lookup == 2 && g_hr.poseRR == 1 && g_hr.poseAO == 1 && g_hr.find == 4 && g_hr.modelRR == 2 && g_hr.worldRR == 2 && g_hr.modelAO == 2 && g_hr.worldAO == 2 &&
+              explorercamf2test::headCalls() == 16,
+          "per slot: one lookup, one GetPoseData, two FindJoint (once per interface), then +0x58 and +0x48 for both joints: 16 game calls in all, the right kind for each slot");
+    check(g_hr.lastTypeId == g_hr.typeId && g_hr.lastContainer == reinterpret_cast<uintptr_t>(w.entity[1]) + 8,
+          "THE LOOKUP'S ARGUMENTS: (the entity's container = entity+8, the u32 type id read from +0x5F2866C)");
+    check(std::strcmp(g_hr.names[0], f2::kHeadName) == 0 && std::strcmp(g_hr.names[1], f2::kPovName) == 0 && g_hr.lastFindIface == reinterpret_cast<uintptr_t>(w.iface[1]),
+          "FindJoint gets (the interface, \"def_c_head_joint\") then (the interface, \"def_c_povCamera_joint\")");
+    check(g_hr.lastModelIface == reinterpret_cast<uintptr_t>(w.iface[1]) && g_hr.lastModelIdx == g_hr.povIdx && (g_hr.lastModelOut & 15) == 0 && g_hr.lastWorldIface == g_hr.lastModelIface &&
+              g_hr.lastWorldIdx == g_hr.povIdx,
+          "THE MATRIX CALLS' ARGUMENTS: (the interface, the joint index as a u32, a 16-byte-aligned 64-byte buffer), for +0x58 and +0x48 alike");
+    check(g_hr.lookupThread == GetCurrentThreadId() && g_hr.modelThread == GetCurrentThreadId(), "the calls are made on the thread that calls the observer (the hook's own thread)");
+
+    tick();
+    const std::string slotTp = cap.nth("explorer cam probe H slot:", 0), slotFp = cap.nth("explorer cam probe H slot:", 1);
+    check(cap.count("explorer cam probe H slot:") == 2 && has(slotTp, "slot=third-person(HUM+0x178) state=resolved") && has(slotTp, "kind=RR (RuntimeRigComponent)") && has(slotTp, "joint_count=60") &&
+              has(slotTp, "joint_cache_flag=0") && has(slotTp, "head_joint(\"def_c_head_joint\")_idx=12") && has(slotTp, "pov_joint(\"def_c_povCamera_joint\")_idx=3") &&
+              has(slotTp, "container_lookup=EliteDangerous64.exe+0x1000000"),
+          "H SLOT, third-person: resolved, kind RR, 60 joints, cache flag 0, both indexes, and the lookup function's RVA (so the next build can pin it)");
+    check(has(slotFp, "slot=first-person(HUM+0x170) state=resolved") && has(slotFp, "kind=AO (AnimatedObject)") && has(slotFp, "joint_count=40") && has(slotFp, "joint_cache_flag=1"),
+          "H SLOT, first-person: kind AO, 40 joints, cache flag 1");
+    const std::string jTp = cap.nth("explorer cam probe H joints:", 0), jFp = cap.nth("explorer cam probe H joints:", 1);
+    check(cap.count("explorer cam probe H joints:") == 2 && has(jTp, "slot=third-person") && has(jTp, "head_model(+0x58)=(0.000,1.600,0.020)") && has(jTp, "head_world(+0x48)=(10.120,1.550,19.980)") &&
+              has(jTp, "head_in_commander_local(right,up,forward)=(0.020,1.550,0.120)") && has(jTp, "pov_model(+0x58)=(0.000,1.550,0.020)") && has(jTp, "pov_world(+0x48)=(10.120,1.600,20.000)") &&
+              has(jTp, "pov_in_commander_local(right,up,forward)=(0.000,1.600,0.120)") && has(jTp, "activity_world_origin(+0xA0)=(10.100,1.680,20.000)") && has(jTp, "ASSUMPTION"),
+          "H JOINTS: both joints' +0x58 and +0x48 translations, the head and pov in COMMANDER-LOCAL axes ((0.020,1.550,0.120) for the known frame), the raw +0x70 origin beside them");
+    check(has(jFp, "slot=first-person") && jTp.size() < 1000 && slotTp.size() < 1000, "...one line per live slot; the lines fit a log line");
+
+    // ---- a second second: indexes are cached, no new slot lines ---------------------------------------------------------------------------
+    eval();
+    tick();
+    check(g_hr.find == 4 && g_hr.lookup == 4 && g_hr.modelRR == 4 && cap.count("explorer cam probe H slot:") == 0 && cap.count("explorer cam probe H joints:") == 2,
+          "the next evaluation looks the joints up again NOT (the index is cached per interface), calls the matrices again, and prints joints lines but no slot lines");
+
+    // ---- the interface changes: a slot line, and the joints are looked up again for that slot only -------------------------------------------
+    const uint64_t spare = reinterpret_cast<uint64_t>(w.iface[2]);
+    std::memcpy(w.entity[0] + 0x18, &spare, 8);
+    eval();
+    tick();
+    check(g_hr.find == 6 && cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "slot=third-person"),
+          "a different interface for the third-person slot: ONE slot line and two FindJoint calls, the first-person slot untouched");
+
+    // ---- a slot that is not live ------------------------------------------------------------------------------------------------------------
+    const int32_t dead = 3;
+    std::memcpy(w.er[0] + f2::kOffErState, &dead, 4);
+    const int modelBefore = g_hr.modelRR + g_hr.modelAO;
+    eval();
+    tick();
+    check(cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "state=not live: the EntityRef's state (ER+0xC0) is below 5") &&
+              cap.count("explorer cam probe H joints:") == 1 && has(cap.nth("explorer cam probe H joints:", 0), "slot=first-person") && g_hr.modelRR + g_hr.modelAO == modelBefore + 2,
+          "ER state 3 on the third-person slot: a 'not live' slot line, no calls for it (only the first-person slot's two +0x58 calls), one joints line");
+    const int32_t live = 5;
+    std::memcpy(w.er[0] + f2::kOffErState, &live, 4);
+
+    // ---- no humanoid component cached yet ----------------------------------------------------------------------------------------------------
+    const uint64_t zero = 0;
+    uint64_t savedHum = 0;
+    std::memcpy(&savedHum, w.activity + f2::kOffActivityHum, 8);
+    std::memcpy(w.activity + f2::kOffActivityHum, &zero, 8);
+    const uint64_t callsBefore = explorercamf2test::headCalls();
+    eval();
+    tick();
+    check(cap.count("explorer cam probe H slot:") == 2 && has(cap.nth("explorer cam probe H slot:", 0), "the activity has no humanoid component cached yet") &&
+              cap.count("explorer cam probe H joints:") == 0 && explorercamf2test::headCalls() == callsBefore && explorercamf2test::headState() == 1,
+          "activity+0x368 = 0: both slots say 'waiting', no joints line and not one game call; H stays armed");
+    std::memcpy(w.activity + f2::kOffActivityHum, &savedHum, 8);
+
+    // ---- the type id is not assigned yet / the lookup finds nothing --------------------------------------------------------------------------
+    const uint32_t zeroId = 0;
+    std::memcpy(g_himg + f2::kSkeletonIdRva, &zeroId, 4);
+    const int lookupsBefore = g_hr.lookup;
+    eval();
+    check(g_hr.lookup == lookupsBefore && explorercamf2test::headState() == 1, "type id 0 (not assigned yet): the lookup is not called at all");
+    std::memcpy(g_himg + f2::kSkeletonIdRva, &g_hr.typeId, 4);
+    g_hr.typeId = 1;   // the stub now answers only id 1
+    const int poseBefore = g_hr.poseRR + g_hr.poseAO;
+    eval();
+    tick();
+    check(g_hr.lookup == lookupsBefore + 2 && g_hr.poseRR + g_hr.poseAO == poseBefore && cap.count("explorer cam probe H joints:") == 0 && explorercamf2test::headState() == 1,
+          "a lookup that returns NULL: counted, nothing else is called, no joints line, H stays armed");
+    g_hr.typeId = 0xBEEF;
+
+    // ---- an index the game does not have / one out of range / no pose object ---------------------------------------------------------------------
+    const uint64_t first = reinterpret_cast<uint64_t>(w.iface[0]);
+    std::memcpy(w.entity[0] + 0x18, &first, 8);   // back to the first RR interface
+    g_hr.headIdx = 100;   // beyond the 60 joints
+    g_hr.povIdx = 0xFFFF;
+    const int model2 = g_hr.modelRR;
+    eval();
+    tick();
+    check(g_hr.modelRR == model2 && has(cap.nth("explorer cam probe H slot:", 0), "head_joint(\"def_c_head_joint\")_idx=100") && has(cap.nth("explorer cam probe H slot:", 0), "pov_joint(\"def_c_povCamera_joint\")_idx=none"),
+          "an index past the joint count (100 of 60) and 0xFFFF ('none') are NEVER handed to the game: no +0x58 call for the third-person slot");
+    g_hr.headIdx = 12;
+    g_hr.povIdx = 3;
+    std::memcpy(w.entity[0] + 0x18, &spare, 8);
+    {
+        uint64_t nullPose = 0;
+        std::memcpy(w.iface[2] + 0x20, &nullPose, 8);
+        const int findBefore = g_hr.find;
+        const int modelNow = g_hr.modelRR;
+        eval();
+        tick();
+        check(g_hr.find == findBefore && g_hr.modelRR == modelNow && has(cap.nth("explorer cam probe H slot:", 0), "joint_count=0"),
+              "GetPoseData returning NULL (no pose object): joint count 0, no FindJoint, no matrix call (the game's own functions do nothing then either)");
+        const uint64_t again = reinterpret_cast<uint64_t>(w.pose[2]);
+        std::memcpy(w.iface[2] + 0x20, &again, 8);
+    }
+
+    // ---- the heartbeat (a fresh session, so the first window holds every call) ---------------------------------------------------------------------
+    auto beatLine = [&]() -> std::string {
+        for (int i = 0; i < 12; ++i) {
+            tick(1000);
+            const std::string b = cap.nth("explorer cam probe H heartbeat:", 0);
+            if (!b.empty()) return b;
+        }
+        return std::string();
+    };
+    arm(0);
+    eval();
+    const std::string beat = beatLine();
+    unsigned m58[4] = {}, m48[4] = {}, lk[4] = {}, fd[4] = {};
+    check(has(beat, "hook=armed") && has(beat, "faults=0") && has(beat, "last=ok") && has(beat, "steps=1(+1)") && has(beat, "game_calls=16(+16)") &&
+              parseTiming(beat, "model58_us(n/min/max/session_max)=", m58) && parseTiming(beat, "world48_us(n/min/max/session_max)=", m48) &&
+              parseTiming(beat, "lookup_us(n/min/max/session_max)=", lk) && parseTiming(beat, "find_us(n/min/max/session_max)=", fd) && m58[0] == 4 && m48[0] == 4 && lk[0] == 2 && fd[0] == 4 &&
+              m58[1] <= m58[2] && m58[2] <= m58[3] && !has(beat, "idle="),
+          "H HEARTBEAT: the state, steps, game calls, faults, the last result and n/min/max/session-max microseconds of the four kinds of call (4 +0x58, 4 +0x48, 2 lookups, 4 FindJoint)");
+    const std::string quiet = beatLine();
+    check(has(quiet, "idle=no-step-in-window") && has(quiet, "steps=1(+0)") && parseTiming(quiet, "model58_us(n/min/max/session_max)=", m58) && m58[0] == 0,
+          "a window with no free-camera update: 'idle=no-step-in-window', the window's call counts are back to 0");
+
+    // ---- the timing plumbing: a slow +0x58 shows in the maximum -------------------------------------------------------------------------------
+    g_hr.slowModelMs = 3;
+    eval();
+    g_hr.slowModelMs = 0;
+    const std::string slow = beatLine();
+    check(parseTiming(slow, "model58_us(n/min/max/session_max)=", m58) && m58[0] == 4 && m58[2] >= 1500 && m58[3] >= m58[2],
+          "TIMING: a +0x58 that takes 3 ms shows as a maximum of at least 1500 us in the heartbeat (and the session maximum keeps it)");
+
+    // ---- the key goes off: the instrument stops -------------------------------------------------------------------------------------------------
+    cap.clear();
+    clock += 1000;
+    t::boundary(frame++, clock, false, &Capture::add, &cap);
+    const uint64_t callsOff = explorercamf2test::headCalls();
+    eval();
+    check(explorercamf2test::headCalls() == callsOff, "KEY OFF: an observer call after the key goes off makes no game call");
+
+    // ---- at most once a second -------------------------------------------------------------------------------------------------------------------
+    arm(1000);
+    for (int i = 0; i < 50; ++i) eval();
+    check(explorercamf2test::headSteps() == 1 && g_hr.lookup == 2, "RATE: fifty updates inside a second make ONE evaluation (the +0x58 call takes a lock: never every frame)");
+
+    // ---- the hook's own thread ----------------------------------------------------------------------------------------------------------------
+    arm(0);
+    {
+        std::vector<uint8_t> act(sizeof(w.activity));
+        std::memcpy(act.data(), w.activity, sizeof(w.activity));
+        uint32_t workerId = 0;
+        std::thread worker([&] {
+            workerId = GetCurrentThreadId();
+            callFree(act.data());   // the real hook: the original, then the observers, on this thread
+        });
+        worker.join();
+        check(explorercamf2test::headSteps() == 1 && g_hr.modelThread == workerId && g_hr.lookupThread == workerId && workerId != GetCurrentThreadId(),
+              "THROUGH THE REAL HOOK: the evaluation and every game call ran on the thread that called the free-camera update (the camera-job thread), not the frame thread");
+        tick();
+        check(cap.count("explorer cam probe H joints:") == 2, "...and the frame thread (the tick) only prints what that thread published");
+    }
+
+    // ---- stand-downs: each stops H for the session with one line and no further call -------------------------------------------------------------
+    struct Down {
+        const char* name;
+        const char* expect;
+        std::function<void()> corrupt;
+    };
+    const uint64_t baseQ = reinterpret_cast<uint64_t>(g_himg);
+    const Down downs[] = {
+        {"HUM's vtable is wrong", "not the humanoid component's vtable", [&] { const uint64_t bad = 0x1234560; std::memcpy(w.hum, &bad, 8); }},
+        {"the container's vtable is outside the image", "component container (entity+8) has vtable", [&] { const uint64_t bad = 0x1234560; std::memcpy(w.entity[0] + 8, &bad, 8); }},
+        {"the container's slot 0 is outside the image", "which is not inside the game image", [&] { *himgQ(0x2000000) = 0x10000; }},
+        {"the interface's vtable is neither kind's", "neither RuntimeRigComponent's", [&] { const uint64_t bad = baseQ + 0x3000000; std::memcpy(w.iface[0], &bad, 8); }},
+        {"RR slot +0x58 differs", "vtable slot +0x58 holds", [&] { *himgQ(f2::kRrVtableRva + 8 * 11) = baseQ + 0x3000000; }},
+        {"RR slot +0x48 differs", "vtable slot +0x48 holds", [&] { *himgQ(f2::kRrVtableRva + 8 * 9) = baseQ + 0x3000000; }},
+        {"RR slot +0x30 differs", "vtable slot +0x30 holds", [&] { *himgQ(f2::kRrVtableRva + 8 * 6) = baseQ + 0x3000000; }},
+        {"RR slot +0x18 differs", "vtable slot +0x18 holds", [&] { *himgQ(f2::kRrVtableRva + 8 * 3) = baseQ + 0x3000000; }},
+        {"AO slot +0x58 differs (first-person)", "vtable slot +0x58 holds", [&] { *himgQ(f2::kAoVtableRva + 8 * 11) = baseQ + 0x3000000; }},
+        {"a fault in the lookup", "faulted while the component lookup call", [&] { g_hr.faultAt = 1; }},
+        {"a fault in GetPoseData", "faulted while the GetPoseData call", [&] { g_hr.faultAt = 2; }},
+        {"a fault in FindJoint", "faulted while the FindJoint call", [&] { g_hr.faultAt = 3; }},
+        {"a fault in +0x58", "faulted while the +0x58 model-matrix call", [&] { g_hr.faultAt = 4; }},
+        {"a fault in +0x48", "faulted while the +0x48 world-matrix call", [&] { g_hr.faultAt = 5; }},
+        {"a slot changed BETWEEN two calls", "vtable slot +0x48 holds", [&] { g_hr.swapWorldSlot = true; }},
+        {"a slot changed between GetPoseData and FindJoint", "vtable slot +0x30 holds", [&] { g_hr.swapSlotIn = 1; }},
+        {"a slot changed between FindJoint and +0x58", "vtable slot +0x58 holds", [&] { g_hr.swapSlotIn = 2; }},
+    };
+    for (const Down& d : downs) {
+        arm(0);
+        d.corrupt();
+        eval();
+        const uint64_t stopCalls = explorercamf2test::headCalls();
+        const uint64_t stopSteps = explorercamf2test::headSteps();
+        tick();
+        const std::string line = cap.nth("explorer cam probe H stood down:", 0);
+        char what[200];
+        std::snprintf(what, sizeof(what), "STAND DOWN, %s: ONE 'stood down' line naming it, state 2, no 'joints' line", d.name);
+        check(cap.count("explorer cam probe H stood down:") == 1 && has(line, d.expect) && has(line, "H will not run this session") && explorercamf2test::headState() == 2 &&
+                  cap.count("explorer cam probe H joints:") == 0 && stopCalls <= 16,
+              what);
+        const int modelsAt = g_hr.modelRR + g_hr.modelAO + g_hr.worldRR + g_hr.worldAO;
+        for (int i = 0; i < 3; ++i) eval();
+        tick();
+        char again[200];
+        std::snprintf(again, sizeof(again), "...%s: three more updates make no game call and print nothing more about it", d.name);
+        check(explorercamf2test::headCalls() == stopCalls && explorercamf2test::headSteps() == stopSteps && cap.count("explorer cam probe H stood down:") == 0 &&
+                  g_hr.modelRR + g_hr.modelAO + g_hr.worldRR + g_hr.worldAO == modelsAt,
+              again);
+        tick(5000);
+        check(has(cap.nth("explorer cam probe H heartbeat:", 0), "hook=stood down") && has(cap.nth("explorer cam probe H heartbeat:", 0), "idle=the instrument is stood down"),
+              "...the heartbeat says H is stood down (never ran, distinguishable from ran and saw nothing)");
+    }
+    // The exact call counts that the early stand-downs allow.
+    arm(0);
+    {
+        const uint64_t bad = 0x1234560;
+        std::memcpy(w.hum, &bad, 8);
+        eval();
+        check(g_hr.lookup == 0 && explorercamf2test::headCalls() == 0, "HUM's vtable wrong: not one game call was made");
+    }
+    arm(0);
+    *himgQ(0x2000000) = 0x10000;
+    eval();
+    check(g_hr.lookup == 0 && explorercamf2test::headCalls() == 0, "the container's lookup function outside the image: it is not called");
+    arm(0);
+    *himgQ(f2::kRrVtableRva + 8 * 11) = baseQ + 0x3000000;
+    eval();
+    check(g_hr.lookup == 1 && g_hr.poseRR == 0 && g_hr.find == 0 && g_hr.modelRR == 0 && g_hr.worldRR == 0,
+          "a wrong +0x58 slot: only the (unpinned) lookup was called; GetPoseData, FindJoint, +0x58 and +0x48 were not, because every slot is checked before the first");
+    arm(0);
+    g_hr.swapWorldSlot = true;
+    eval();
+    check(g_hr.modelRR == 1 && g_hr.worldRR == 0 && explorercamf2test::headState() == 2,
+          "THE CHECK BEFORE EVERY CALL: +0x58 ran, then the +0x48 slot was found changed, so +0x48 was NOT called");
+    arm(0);
+    g_hr.swapSlotIn = 2;
+    eval();
+    check(g_hr.find == 2 && g_hr.modelRR == 0 && g_hr.worldRR == 0 && explorercamf2test::headState() == 2,
+          "...the +0x58 slot changed by the last FindJoint: neither +0x58 nor +0x48 was called");
+    arm(0);
+    g_hr.swapSlotIn = 1;
+    eval();
+    check(g_hr.poseRR == 1 && g_hr.find == 0 && explorercamf2test::headState() == 2, "...the +0x30 slot changed by GetPoseData: FindJoint was not called");
+
+    // ---- an unknown build / a literal that is not there: nothing runs --------------------------------------------------------------------------
+    arm(0, false);
+    check(cap.count("explorer cam probe H armed:") == 0 && explorercamf2test::headState() == 2, "an exe that is not build 332841: H never arms");
+    check(cap.count("explorer cam probe H stood down:") == 1 && has(cap.nth("explorer cam probe H stood down:", 0), "the game build differs from build 332841"), "...and says so once");
+    eval();
+    check(explorercamf2test::headCalls() == 0, "...and makes no call");
+    t::reset();
+    w.reset();
+    g_himg[f2::kPovNameRva + 4] ^= 1;   // the pov literal is not what it should be
+    explorercamtest::setTargets(targets);
+    {
+        explorercamf2test::HeadSeam seam;
+        seam.base = reinterpret_cast<uintptr_t>(g_himg);
+        seam.imageSize = kHeadImageSize;
+        explorercamf2test::setHeadTargets(seam);
+    }
+    cap.clear();
+    t::boundary(frame++, clock += 100000, true, &Capture::add, &cap);
+    t::boundary(frame++, clock += 1100, true, &Capture::add, &cap);
+    check(explorercamf2test::headState() == 2 && cap.count("explorer cam probe H stood down:") == 1 && has(cap.nth("explorer cam probe H stood down:", 0), "joint-name literal"),
+          "a joint-name literal in the exe that is not the expected string: H stands down at arm");
+    t::reset();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1217,6 +1970,8 @@ int main(int argc, char** argv) {
     testNeckMath();
     testF2Core();
     testF2Glue();
+    testFadeCounter();
+    testHeadJoint();
     if (g_failures) {
         std::printf("explorer cam probe: FAIL (%d)\n", g_failures);
         return 1;

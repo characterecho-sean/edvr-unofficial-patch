@@ -36,7 +36,7 @@ void explorerCamFrameBoundary(uint32_t frameNo);
 // ---- diagnostic observers (advanced.explorer_cam_probe, temporary) ----------------------------------------------------------------
 // One target gets one CodeHook, so a diagnostic's observation of the same function rides this file's hook instead of installing its
 // own. A hook can carry several observers (kMaxObservers); the next instrument -- the neck -- adds its own the same way.
-enum class ExplorerCamHook : int { FreeCamera = 0, Controller = 1 };
+enum class ExplorerCamHook : int { FreeCamera = 0, Controller = 1, AvatarFade = 2 };
 struct ExplorerCamHookStatus {
     enum State : int { NotTried = 0, Armed = 1, StoodDown = 2 };
     int state = NotTried;
@@ -52,6 +52,12 @@ using ExplorerCamActivityObserver = void (*)(void* object) noexcept;
 constexpr int kExplorerCamMaxObservers = 4;
 ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivityObserver observer, bool attach);
 
+// An unload (FreeLibrary): puts the avatar dither-fade global back to -1 if EDVR still holds it at 0. Frame-thread context; SEH-guarded.
+void explorerCamShutdown();
+
+// Where the avatar dither-fade mode global is (null when the build is not known): for the probe's fade counter, which reads it.
+const int32_t* explorerCamFadeGlobalAddress();
+
 // The game image base, when its PE identity (timestamp and size) is build 332841's; false, with a sentence in `why`, otherwise. The
 // answer is cached for the session. For the F2 instruments, which patch a vtable slot instead of a function.
 bool explorerCamBuildKnown(uintptr_t* base, char* why, size_t whyCap);
@@ -61,7 +67,7 @@ bool explorerCamBuildKnown(uintptr_t* base, char* why, size_t whyCap);
 // inputs, synthetic functions in place of the game's, and the shared state to look at.
 using ExplorerCamSinkFn = void (*)(void* ctx, const char* line);
 struct ExplorerCamTestTargets {
-    uintptr_t freeCamera = 0, collision = 0, boxPush = 0, cameraUi = 0, controller = 0;
+    uintptr_t freeCamera = 0, collision = 0, boxPush = 0, cameraUi = 0, controller = 0, avatarFade = 0;
 };
 struct ExplorerCamTestFrame {
     bool on = true;
@@ -75,11 +81,14 @@ struct ExplorerCamTestFrame {
 };
 namespace explorercamtest {
 void setTargets(const ExplorerCamTestTargets& targets);
+void setFadeGlobal(int32_t* mode, float* amount);   // the synthetic dither-fade global and its amount float (null: the build's real addresses)
+bool fadeOurs();                                    // EDVR holds the global at 0
+void shutdown();                                    // explorerCamShutdown()
 void boundary(uint32_t frame, uint64_t nowMs, const ExplorerCamTestFrame& in, ExplorerCamSinkFn fn, void* ctx);
 bool gateOpen();                   // the free-camera relay's gate
 bool uiGateOpen();
 bool controllerGateOpen();
-size_t stolenBytes(int hook);      // 0 free, 1 collision, 2 box push, 3 camera UI, 4 controller
+size_t stolenBytes(int hook);      // 0 free, 1 collision, 2 box push, 3 camera UI, 4 controller, 5 avatar fade
 uint64_t placedActivity();
 uint64_t bypassed();               // the collision sweep
 uint64_t forwarded();

@@ -127,6 +127,12 @@ void testIdentity() {
     check(sizeof(ecm::kBoxPushPrologue) == 20 && std::memcmp(ecm::kBoxPushPrologue, box20, 20) == 0, "the box-push prologue is 48 8B C4 55 53 56 41 56 41 57 48 8B EC 48 81 EC 80 00 00 00");
     check(sizeof(ecm::kCameraUiPrologue) == 19 && std::memcmp(ecm::kCameraUiPrologue, ui19, 19) == 0, "the camera-UI prologue is 40 55 41 56 48 8D AC 24 48 FF FF FF 48 81 EC B8 01 00 00");
     check(sizeof(ecm::kControllerPrologue) == 15 && std::memcmp(ecm::kControllerPrologue, ctl15, 15) == 0, "the controller prologue is 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18");
+    const uint8_t fade16[16] = {0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
+    check(sizeof(ecm::kAvatarFadePrologue) == 16 && std::memcmp(ecm::kAvatarFadePrologue, fade16, 16) == 0 && ecm::kAvatarFadeRva == 0x3DD6040 && ecm::kAvatarFadeRva % 64 == 0,
+          "the avatar dither-fade prologue is 4C 8B DC 53 56 57 48 81 EC 10 01 00 00 48 8B 05 at +0x3DD6040 (64-byte aligned; the first 5 bytes are whole instructions)");
+    check(ecm::kFadeModeRva == 0x5E9DC28 && ecm::kFadeAmountRva == 0x601E088 && ecm::kFadeAuto == -1 && ecm::kOffAvatarFadeBlock == 0x378 && ecm::kOffAvatarFadeEased == 0x380 &&
+              ecm::kOffFadeBlockEnabled == 0x90 && ecm::kOffFadeBlockAmount == 0x120,
+          "the fade global is +0x5E9DC28 (-1 = auto), the amount float +0x601E088, the component's block pointer +0x378 and eased level +0x380, the block's enabled +0x90 and amount +0x120");
     check(ecm::kFreeCameraRva == 0x1071980 && ecm::kCollisionRva == 0x1091140 && ecm::kBoxPushRva == 0x108F1B0 && ecm::kCameraUiRva == 0x47C7640 &&
               ecm::kControllerRva == 0x2DF14C0,
           "the targets are EliteDangerous64.exe+0x1071980, +0x1091140, +0x108F1B0, +0x47C7640 and +0x2DF14C0");
@@ -327,60 +333,348 @@ void testMachineForeign() {
 using ecm::CtlPress;
 using ecm::F5Req;
 using ecm::SeqEvent;
+ecm::CtlView V(int mode, int pending = 0, int sharedFlag = 0) {
+    ecm::CtlView v;
+    v.mode = static_cast<uint8_t>(mode);
+    v.pending = static_cast<uint8_t>(pending);
+    v.sharedFlag = static_cast<int16_t>(sharedFlag);
+    return v;
+}
 bool hasEv(const ecm::SeqStep& s, SeqEvent e) {
     for (uint8_t i = 0; i < s.nev; ++i)
         if (s.ev[i] == e) return true;
     return false;
 }
+// Step the sequencer `n` times on the same view with no request; returns the last step, and the step on which a press happened (0 = none).
+ecm::SeqStep run(ecm::F5Sequencer& q, const ecm::CtlView& v, int n, int* pressedAt = nullptr, bool ui = false) {
+    ecm::SeqStep s;
+    if (pressedAt) *pressedAt = 0;
+    for (int i = 1; i <= n; ++i) {
+        s = q.step(v, F5Req::None, ui);
+        if (s.press != CtlPress::None && pressedAt && *pressedAt == 0) *pressedAt = i;
+    }
+    return s;
+}
 
 void testSequencerEnter() {
     std::printf("F5 sequencer: enter\n");
-    // From closed: press PhotoCameraToggle, wait for 1 or 2, press ToggleFreeCam, wait for 3, then it is the placement machine's.
+    // From closed: press PhotoCameraToggle, wait for 1 or 2, wait until the suite is READY, press ToggleFreeCam once, wait for 3.
     ecm::F5Sequencer q;
-    ecm::SeqStep s = q.step(0, F5Req::None, false);
+    ecm::SeqStep s = q.step(V(0), F5Req::None, false);
     check(s.press == CtlPress::None && !s.sessionActive && s.nev == 0, "idle: nothing is pressed and no session is on, whatever the mode");
-    s = q.step(0, F5Req::Enter, false);
+    s = q.step(V(0), F5Req::Enter, false);
     check(s.press == CtlPress::Photo && s.sessionActive && hasEv(s, SeqEvent::EnterFromClosed), "ENTER from mode 0: PhotoCameraToggle is pressed, the session is on");
-    s = q.step(0, F5Req::None, false);
+    s = q.step(V(0), F5Req::None, false);
     check(s.press == CtlPress::None && s.sessionActive, "...the next update waits (the mode has not moved yet): no press");
-    s = q.step(1, F5Req::None, false);
-    check(s.press == CtlPress::Free && hasEv(s, SeqEvent::EnterOpened), "...mode 1: ToggleFreeCam is pressed");
-    s = q.step(1, F5Req::None, false);
-    check(s.press == CtlPress::None, "...and only once: one press per update, the wait for 3 presses nothing");
-    s = q.step(3, F5Req::None, false);
-    check(s.press == CtlPress::None && s.sessionActive && hasEv(s, SeqEvent::EnterAttached) && q.stage() == ecm::F5Sequencer::Stage::Active, "...mode 3: the free camera is up, the sequence is Active");
-    s = q.step(4, F5Req::None, false);
+    s = q.step(V(1), F5Req::None, false);
+    check(s.press == CtlPress::None && hasEv(s, SeqEvent::EnterOpened), "...mode 1 (the suite just opened): NOT pressed yet -- the F2 failure was a ToggleFreeCam pressed the update after opening");
+    int at = 0;
+    s = run(q, V(1), 10, &at);
+    check(at == 4 && hasEv(s, SeqEvent::EnterReady) == false, "...it is pressed on the 5th update that looks ready (the opening update was the 1st), not before");
+    // Re-run to look at the ready step itself.
+    ecm::F5Sequencer r;
+    r.step(V(0), F5Req::Enter, false);
+    r.step(V(1), F5Req::None, false);
+    s = run(r, V(1), 3);
+    check(s.press == CtlPress::None, "...the 4th ready update: still no press");
+    s = r.step(V(1), F5Req::None, false);
+    check(s.press == CtlPress::Free && hasEv(s, SeqEvent::EnterReady) && s.readyAfter == 5, "...the 5th: ToggleFreeCam, once, 'ready after 5 updates'");
+    s = run(r, V(1), 30, &at);
+    check(at == 0, "...and never again while the wait for mode 3 runs (ready holds, nothing is re-pressed)");
+    s = r.step(V(3), F5Req::None, false);
+    check(s.press == CtlPress::None && s.sessionActive && hasEv(s, SeqEvent::EnterAttached) && s.readyAfter == 5 && s.toMode3 == 31 &&
+              r.stage() == ecm::F5Sequencer::Stage::Active,
+          "...mode 3 after 31 updates: the free camera is up, the line carries 'ready after 5, mode 3 after 31'");
+    s = r.step(V(4), F5Req::None, false);
     check(s.press == CtlPress::None && s.sessionActive && s.nev == 0, "...mode 4 (the lock took): Active, nothing to do");
-    // From a preset (mode 1 or 2): press ToggleFreeCam at once.
-    for (int modeInt : {1, 2}) {
-        const uint8_t mode = static_cast<uint8_t>(modeInt);
+    // From a preset (mode 1 or 2): the same readiness wait, no Photo press.
+    for (int mode : {1, 2}) {
         ecm::F5Sequencer p;
-        s = p.step(mode, F5Req::Enter, false);
-        check(s.press == CtlPress::Free && s.sessionActive && hasEv(s, SeqEvent::EnterFromPreset), mode == 1 ? "ENTER from mode 1: ToggleFreeCam at once" : "ENTER from mode 2: ToggleFreeCam at once");
-        s = p.step(3, F5Req::None, false);
+        s = p.step(V(mode), F5Req::Enter, false);
+        check(s.press == CtlPress::None && s.sessionActive && hasEv(s, SeqEvent::EnterFromPreset), mode == 1 ? "ENTER from mode 1: no press yet (the suite must look ready first)" : "ENTER from mode 2: no press yet");
+        s = run(p, V(mode), 4, &at);
+        check(at == 4, "...ToggleFreeCam on the 5th ready update, the ENTER update counting as the first");
+        s = p.step(V(3), F5Req::None, false);
         check(s.sessionActive && hasEv(s, SeqEvent::EnterAttached), "...and mode 3 attaches");
     }
     // From the free camera (3, 4): nothing to press.
-    for (int modeInt : {3, 4}) {
-        const uint8_t mode = static_cast<uint8_t>(modeInt);
+    for (int mode : {3, 4}) {
         ecm::F5Sequencer p;
-        s = p.step(mode, F5Req::Enter, false);
+        s = p.step(V(mode), F5Req::Enter, false);
         check(s.press == CtlPress::None && s.sessionActive && hasEv(s, SeqEvent::EnterFromFree), mode == 3 ? "ENTER from mode 3: the session starts, nothing pressed" : "ENTER from mode 4: the session starts, nothing pressed");
     }
     // From a detached camera (5) or a variant (6): refused, no session.
     {
         ecm::F5Sequencer p;
-        s = p.step(5, F5Req::Enter, false);
+        s = p.step(V(5), F5Req::Enter, false);
         check(s.press == CtlPress::None && !s.sessionActive && hasEv(s, SeqEvent::EnterRefusedDetached), "ENTER from mode 5 (detached): refused, 'leave it first', no session");
-        s = p.step(6, F5Req::Enter, false);
+        s = p.step(V(6), F5Req::Enter, false);
         check(!s.sessionActive && hasEv(s, SeqEvent::EnterRefusedVariant), "ENTER from mode 6 (variant): refused, no session");
     }
     // A second ENTER while a session is on does nothing.
     {
         ecm::F5Sequencer p;
-        p.step(3, F5Req::Enter, false);
-        s = p.step(3, F5Req::Enter, false);
+        p.step(V(3), F5Req::Enter, false);
+        s = p.step(V(3), F5Req::Enter, false);
         check(s.press == CtlPress::None && hasEv(s, SeqEvent::EnterIgnored) && s.sessionActive, "a second ENTER while the session is on is ignored");
+    }
+}
+
+void testTabWait() {
+    std::printf("F5 sequencer: the TAB wait (not ready, ready, pending, late completion, timeout)\n");
+    ecm::SeqStep s;
+    int at = 0;
+    // NOT READY: each condition, held off, keeps ToggleFreeCam from being pressed -- and one ready update in between restarts the count.
+    {
+        ecm::F5Sequencer q;
+        q.step(V(1), F5Req::Enter, false);
+        run(q, V(1), 3);
+        s = q.step(V(1, 1, 0), F5Req::None, false);
+        check(s.press == CtlPress::None, "NOT READY: +0x3E1 = 1 (the game's own retry is running) at the 4th update: no press");
+        run(q, V(1), 3);
+        s = q.step(V(1), F5Req::None, false);
+        check(s.press == CtlPress::None, "...and the count restarted: the 4th ready update since it is not the 5th");
+        s = run(q, V(1), 2, &at);
+        check(at == 1, "...five in a row since it: pressed");
+    }
+    {
+        ecm::F5Sequencer q;
+        q.step(V(1), F5Req::Enter, false);
+        s = run(q, V(1, 0, 1), 100, &at);
+        check(at == 0, "NOT READY: the shared record's +0x1D = 1: nothing pressed in 100 updates");
+        s = run(q, V(1, 0, 0), 5, &at);
+        check(at == 5, "...cleared: pressed on the 5th ready update after it");
+    }
+    {
+        ecm::F5Sequencer q;
+        q.step(V(1, 0, -1), F5Req::Enter, false);
+        s = run(q, V(1, 0, -1), 5, &at);
+        check(at == 4, "+0x1D not observable (-1): it does not hold the press back (the wait goes on mode and +0x3E1 alone)");
+    }
+    {
+        ecm::F5Sequencer q;
+        q.step(V(0), F5Req::Enter, false);
+        run(q, V(0), 3);
+        s = run(q, V(0), 1);
+        check(s.press == CtlPress::None && !s.nev, "NOT READY: mode 0 is not ready (the suite has not opened)");
+    }
+    // PENDING / LATE COMPLETION: pressed once; the game queues the entry itself and completes it 6 s later; the session is still there.
+    {
+        ecm::F5Sequencer q;
+        q.step(V(1), F5Req::Enter, false);
+        s = run(q, V(1), 4, &at);
+        check(at == 4, "(pressed at the 5th ready update)");
+        s = q.step(V(1, 1, 0), F5Req::None, false);
+        check(s.press == CtlPress::None && hasEv(s, SeqEvent::EnterQueued), "PENDING: +0x3E1 = 1 after the press: 'the game queued the entry itself', said once, not re-pressed");
+        bool again = false, queuedAgain = false;
+        for (int i = 0; i < 540; ++i) {
+            s = q.step(V(1, 1, 0), F5Req::None, false);
+            again = again || s.press != CtlPress::None;
+            queuedAgain = queuedAgain || hasEv(s, SeqEvent::EnterQueued);
+        }
+        check(!again && !queuedAgain && s.sessionActive, "...540 updates later (about 6 s) still not re-pressed, still said once, the session still alive");
+        s = q.step(V(3), F5Req::None, false);
+        check(s.sessionActive && hasEv(s, SeqEvent::EnterAttached) && s.readyAfter == 5 && s.toMode3 == 542,
+              "LATE COMPLETION: mode 3 arrives 542 updates after the press and the session places it: 'ready after 5, mode 3 after 542'");
+    }
+    // TIMEOUT after the press: 900 updates, the line names what was still unmet.
+    {
+        ecm::F5Sequencer q;
+        q.step(V(1), F5Req::Enter, false);
+        run(q, V(1), 4);
+        bool aborted = false;
+        uint32_t when = 0;
+        for (uint32_t i = 1; i <= 1000 && !aborted; ++i) {
+            s = q.step(V(1, 0, 0), F5Req::None, false);
+            if (hasEv(s, SeqEvent::EnterTimeoutFree)) { aborted = true; when = i; }
+        }
+        check(aborted && when == ecm::kSeqTabWaitUpdates && !s.sessionActive && (s.unmet & ecm::kUnmetMode) && !(s.unmet & ecm::kUnmetPending),
+              "TIMEOUT after the press: aborts at the 900th update (about 10 s), the session over, unmet = the mode never reached 3");
+        ecm::F5Sequencer w;
+        w.step(V(1), F5Req::Enter, false);
+        run(w, V(1), 4);
+        for (uint32_t i = 1; i <= 1000; ++i) {
+            s = w.step(V(1, 1, 0), F5Req::None, false);
+            if (hasEv(s, SeqEvent::EnterTimeoutFree)) break;
+        }
+        check((s.unmet & ecm::kUnmetMode) && (s.unmet & ecm::kUnmetPending), "...with +0x3E1 still 1 the line says the game's own retry was still running");
+    }
+    // TIMEOUT of the readiness wait: never ready.
+    {
+        ecm::F5Sequencer q;
+        q.step(V(1), F5Req::Enter, false);
+        bool aborted = false;
+        uint32_t when = 0;
+        for (uint32_t i = 1; i <= 1000 && !aborted; ++i) {
+            s = q.step(V(1, 0, 1), F5Req::None, false);
+            if (hasEv(s, SeqEvent::EnterTimeoutReady)) { aborted = true; when = i; }
+        }
+        check(aborted && when == ecm::kSeqTabWaitUpdates - 1 && !s.sessionActive && (s.unmet & ecm::kUnmetShared) && !(s.unmet & ecm::kUnmetMode),
+              "TIMEOUT of the readiness wait: the shared +0x1D never clears -> aborts at 900 updates from the ENTER, naming the shared record");
+        ecm::F5Sequencer w;
+        w.step(V(1), F5Req::Enter, false);
+        for (uint32_t i = 1; i <= 1000; ++i) {
+            s = w.step(V(1, 1, -1), F5Req::None, false);
+            if (hasEv(s, SeqEvent::EnterTimeoutReady)) break;
+        }
+        check((s.unmet & ecm::kUnmetPending) && (s.unmet & ecm::kSharedUnobserved), "...and with +0x1D unreadable the line says it could not be checked");
+    }
+    // The player's own TAB, or the camera closing, during the readiness wait.
+    {
+        ecm::F5Sequencer q;
+        q.step(V(1), F5Req::Enter, false);
+        run(q, V(1), 2);
+        s = q.step(V(3), F5Req::None, false);
+        check(s.press == CtlPress::None && s.sessionActive && hasEv(s, SeqEvent::EnterAttached), "the player's own TAB during the wait attaches (nothing pressed)");
+        ecm::F5Sequencer w;
+        w.step(V(1), F5Req::Enter, false);
+        run(w, V(1), 2);
+        s = w.step(V(0), F5Req::None, false);
+        check(!s.sessionActive && hasEv(s, SeqEvent::SessionEnded), "the camera closing during the wait ends the session");
+    }
+}
+
+void testFadeGuard() {
+    std::printf("the avatar fade global: write and restore\n");
+    using ecm::FadeEvent;
+    using Act = ecm::FadeStep::Act;
+    ecm::FadeGuard g;
+    ecm::FadeIn in;
+    in.active = true;
+    in.readOk = true;
+    in.value = -1;
+    ecm::FadeStep s = g.step(in);
+    check(s.act == Act::None && !g.ours(), "no placement: nothing is written");
+    in.placed = true;
+    in.session = true;
+    in.ctlMode = 4;
+    s = g.step(in);
+    check(s.act == Act::Write && s.ev == FadeEvent::Written && g.ours(), "a placement and the global reads -1 (auto): WRITE 0");
+    in.value = 0;
+    s = g.step(in);
+    check(s.act == Act::None && s.ev == FadeEvent::None && g.ours(), "...it holds while the placement stands (mode 4, the camera inside the body)");
+    // Never restore while the camera is still inside the body.
+    in.session = false;
+    s = g.step(in);
+    check(s.act == Act::None && g.ours(), "NEVER RESTORED while mode is 4 even though the session is over (the camera is still in the body)");
+    in.placed = false;
+    in.ctlMode = 3;
+    s = g.step(in);
+    check(s.act == Act::None && g.ours(), "...nor at mode 3 with the placement gone (a stale release): the camera is still in the body");
+    in.ctlMode = 0;
+    s = g.step(in);
+    check(s.act == Act::Restore && s.ev == FadeEvent::Restored && !g.ours(), "RESTORED to -1 once the session is over and the camera is closed (mode 0)");
+    in.value = -1;
+    s = g.step(in);
+    check(s.act == Act::None && s.ev == FadeEvent::None, "...and not again");
+
+    // A wrong initial value is refused, said once, and the next placement may try again.
+    ecm::FadeGuard f;
+    ecm::FadeIn fi;
+    fi.active = true; fi.placed = true; fi.session = true; fi.ctlMode = 3; fi.readOk = true; fi.value = 2;
+    s = f.step(fi);
+    check(s.act == Act::None && s.ev == FadeEvent::Foreign && !f.ours(), "WRONG INITIAL VALUE (2, not -1): refused, one 'someone else owns it' event, nothing written");
+    s = f.step(fi);
+    check(s.act == Act::None && s.ev == FadeEvent::None, "...said once, not every frame");
+    ecm::FadeGuard h;
+    fi.value = 0;
+    s = h.step(fi);
+    check(s.act == Act::None && s.ev == FadeEvent::Foreign && !h.ours(), "...and a 0 we did not write is someone else's too: refused");
+    fi.placed = false; fi.session = false;
+    f.step(fi);
+    fi.placed = true; fi.session = true; fi.value = -1;
+    s = f.step(fi);
+    check(s.act == Act::Write && f.ours(), "...the next placement, with the global back at -1: written");
+
+    // A detach (5, 6) with the placement released restores; the return writes again.
+    for (int mode : {5, 6}) {
+        ecm::FadeGuard d;
+        ecm::FadeIn di;
+        di.active = true; di.placed = true; di.session = true; di.ctlMode = 4; di.readOk = true; di.value = -1;
+        d.step(di);
+        di.value = 0;
+        di.ctlMode = static_cast<uint8_t>(mode);   // the controller says detached, the placement not yet released
+        s = d.step(di);
+        check(s.act == Act::None && d.ours(), mode == 5 ? "DETACH (5): not restored while the placement is still in force" : "VARIANT (6): not restored while the placement is still in force");
+        di.placed = false;
+        s = d.step(di);
+        check(s.act == Act::Restore && !d.ours(), "...restored the moment the placement is released with the camera detached");
+        di.ctlMode = 3; di.placed = true; di.value = -1;
+        s = d.step(di);
+        check(s.act == Act::Write && d.ours(), "...and written again when the camera is back and placed");
+    }
+
+    // Restore skipped if the value changed under us.
+    {
+        ecm::FadeGuard c;
+        ecm::FadeIn ci;
+        ci.active = true; ci.placed = true; ci.session = true; ci.ctlMode = 4; ci.readOk = true; ci.value = -1;
+        c.step(ci);
+        ci.value = 7; ci.session = false; ci.placed = false; ci.ctlMode = 0;
+        s = c.step(ci);
+        check(s.act == Act::None && s.ev == FadeEvent::ChangedUnderUs && !c.ours(), "CHANGED UNDER US (7, not the 0 we wrote): the restore is SKIPPED and said, and it is no longer ours");
+    }
+    // Unreadable: kept and retried, said once.
+    {
+        ecm::FadeGuard c;
+        ecm::FadeIn ci;
+        ci.active = true; ci.placed = true; ci.session = true; ci.ctlMode = 4; ci.readOk = true; ci.value = -1;
+        c.step(ci);
+        ci.session = false; ci.placed = false; ci.ctlMode = 0; ci.readOk = false;
+        s = c.step(ci);
+        check(s.ev == FadeEvent::Unreadable && c.ours(), "UNREADABLE when it is time to restore: said once, still ours");
+        s = c.step(ci);
+        check(s.ev == FadeEvent::None && c.ours(), "...not said again");
+        ci.readOk = true; ci.value = 0;
+        s = c.step(ci);
+        check(s.act == Act::Restore && !c.ours(), "...and restored the moment it can be read");
+        ecm::FadeGuard w;
+        ecm::FadeIn wi;
+        wi.active = true; wi.placed = true; wi.session = true; wi.readOk = true; wi.value = -1;
+        w.step(wi);
+        w.writeFailed();
+        check(!w.ours(), "a write that failed leaves it not ours");
+        ecm::FadeGuard r;
+        r.step(wi);
+        ecm::FadeIn ri;
+        ri.active = true; ri.session = false; ri.placed = false; ri.ctlMode = 0; ri.readOk = true; ri.value = 0;
+        r.step(ri);
+        r.restoreFailed();
+        check(r.ours(), "a restore that failed stays ours, to be tried again");
+    }
+    // The feature turning off while the camera is closed restores (the glue passes session = session && active = false).
+    {
+        ecm::FadeGuard c;
+        ecm::FadeIn ci;
+        ci.active = true; ci.placed = true; ci.session = true; ci.ctlMode = 4; ci.readOk = true; ci.value = -1;
+        c.step(ci);
+        ci.active = false; ci.session = false; ci.placed = false; ci.ctlMode = 4; ci.value = 0;
+        s = c.step(ci);
+        check(s.act == Act::None && c.ours(), "FEATURE OFF while the camera is still open inside the body: held (the camera must close first)");
+        ci.ctlMode = 0;
+        s = c.step(ci);
+        check(s.act == Act::Restore && !c.ours(), "...restored when the camera has closed, though the feature is off");
+    }
+    // UNLOAD.
+    {
+        ecm::FadeGuard u;
+        ecm::FadeIn ui;
+        ui.active = true; ui.placed = true; ui.session = true; ui.ctlMode = 4; ui.readOk = true; ui.value = -1;
+        u.step(ui);
+        ui.unload = true; ui.value = 0;
+        s = u.step(ui);
+        check(s.act == Act::Restore && s.ev == FadeEvent::RestoredAtUnload && !u.ours(), "UNLOAD with the global still 0: restored to -1, whatever the camera is doing");
+        ecm::FadeGuard v;
+        ecm::FadeIn vi;
+        vi.active = true; vi.placed = true; vi.session = true; vi.ctlMode = 4; vi.readOk = true; vi.value = -1;
+        v.step(vi);
+        vi.unload = true; vi.value = 9;
+        s = v.step(vi);
+        check(s.act == Act::None && s.ev == FadeEvent::ChangedUnderUs, "UNLOAD with the value changed under us: not touched");
+        ecm::FadeGuard x;
+        vi.value = 0;
+        s = x.step(vi);
+        check(s.act == Act::None && s.ev == FadeEvent::None, "UNLOAD when it was never ours: nothing");
     }
 }
 
@@ -390,41 +684,29 @@ void testSequencerTimeouts() {
     // The camera never opens.
     {
         ecm::F5Sequencer q;
-        q.step(0, F5Req::Enter, false);
+        q.step(V(0), F5Req::Enter, false);
         bool aborted = false;
         uint32_t at = 0;
         for (uint32_t i = 1; i <= 100 && !aborted; ++i) {
-            s = q.step(0, F5Req::None, false);
+            s = q.step(V(0), F5Req::None, false);
             if (hasEv(s, SeqEvent::EnterTimeoutOpen)) { aborted = true; at = i; }
         }
         check(aborted && at == ecm::kSeqWaitUpdates && !s.sessionActive, "the camera never opens: the sequence aborts after 90 updates with a line, and the session is over");
     }
-    // The free camera never comes up (preset kind 1: ToggleFreeCam only toggles 1 and 2).
-    {
-        ecm::F5Sequencer q;
-        q.step(1, F5Req::Enter, false);
-        bool aborted = false;
-        uint32_t at = 0;
-        for (uint32_t i = 1; i <= 100 && !aborted; ++i) {
-            s = q.step(i % 2 ? 2 : 1, F5Req::None, false);
-            if (hasEv(s, SeqEvent::EnterTimeoutFree)) { aborted = true; at = i; }
-        }
-        check(aborted && at == ecm::kSeqWaitUpdates && !s.sessionActive, "the free camera never comes up: aborts after 90 updates, the session is over");
-    }
     // The camera closes by the player's hand while waiting for the free camera: the session ends at once.
     {
         ecm::F5Sequencer q;
-        q.step(1, F5Req::Enter, false);
-        s = q.step(0, F5Req::None, false);
+        q.step(V(1), F5Req::Enter, false);
+        s = q.step(V(0), F5Req::None, false);
         check(hasEv(s, SeqEvent::SessionEnded) && !s.sessionActive, "the player closes the camera while the free camera is awaited: the session ends");
     }
     // The player's own camera key and TAB with no F5: nothing is pressed, no session.
     {
         ecm::F5Sequencer q;
         bool any = false;
-        const uint8_t modes[] = {0, 0, 1, 1, 3, 3, 4, 4, 3, 5, 3, 1, 0, 0};
-        for (uint8_t m : modes) {
-            s = q.step(m, F5Req::None, false);
+        const int modes[] = {0, 0, 1, 1, 3, 3, 4, 4, 3, 5, 3, 1, 0, 0};
+        for (int m : modes) {
+            s = q.step(V(m), F5Req::None, false);
             any = any || s.press != CtlPress::None || s.sessionActive || s.nev != 0;
         }
         check(!any, "the game's own camera key and TAB (modes walking 0,1,3,4,5,3,1,0) with no F5: no press, no session, no event");
@@ -432,10 +714,10 @@ void testSequencerTimeouts() {
     // Detach and re-attach inside a session: the session stays, nothing is pressed.
     {
         ecm::F5Sequencer q;
-        q.step(3, F5Req::Enter, false);
+        q.step(V(3), F5Req::Enter, false);
         bool pressed = false, ended = false;
         for (int m : {3, 4, 5, 5, 3, 4}) {
-            s = q.step(static_cast<uint8_t>(m), F5Req::None, false);
+            s = q.step(V(m), F5Req::None, false);
             pressed = pressed || s.press != CtlPress::None;
             ended = ended || !s.sessionActive;
         }
@@ -444,8 +726,8 @@ void testSequencerTimeouts() {
     // Mode 0 on its own ends an Active session.
     {
         ecm::F5Sequencer q;
-        q.step(4, F5Req::Enter, false);
-        s = q.step(0, F5Req::None, false);
+        q.step(V(4), F5Req::Enter, false);
+        s = q.step(V(0), F5Req::None, false);
         check(hasEv(s, SeqEvent::SessionEnded) && !s.sessionActive, "mode 0 by any route ends the session");
     }
 }
@@ -456,35 +738,35 @@ void testSequencerExit() {
     // UI hidden by EDVR: wait for it to be given back, then close with PhotoCameraToggle, then the session ends at mode 0.
     {
         ecm::F5Sequencer q;
-        q.step(4, F5Req::Enter, false);
-        s = q.step(4, F5Req::Exit, true);
+        q.step(V(4), F5Req::Enter, false);
+        s = q.step(V(4), F5Req::Exit, true);
         check(s.press == CtlPress::None && s.exiting && s.sessionActive && hasEv(s, SeqEvent::ExitStart) && hasEv(s, SeqEvent::ExitUnhiding),
               "EXIT with the UI hidden by EDVR: no press yet, 'giving the UI back first', exiting");
-        s = q.step(4, F5Req::None, true);
+        s = q.step(V(4), F5Req::None, true);
         check(s.press == CtlPress::None && s.exiting, "...it waits while the UI is still held");
-        s = q.step(4, F5Req::None, false);
+        s = q.step(V(4), F5Req::None, false);
         check(s.press == CtlPress::Photo && hasEv(s, SeqEvent::ExitClosing), "...the UI is back: PhotoCameraToggle is pressed to close");
-        s = q.step(4, F5Req::None, false);
+        s = q.step(V(4), F5Req::None, false);
         check(s.press == CtlPress::None && s.sessionActive, "...one press only; the close is awaited");
-        s = q.step(0, F5Req::None, false);
+        s = q.step(V(0), F5Req::None, false);
         check(hasEv(s, SeqEvent::ExitDone) && !s.sessionActive && !s.exiting, "...mode 0: the session is over");
     }
     // UI not hidden: close at once.
     {
         ecm::F5Sequencer q;
-        q.step(3, F5Req::Enter, false);
-        s = q.step(3, F5Req::Exit, false);
+        q.step(V(3), F5Req::Enter, false);
+        s = q.step(V(3), F5Req::Exit, false);
         check(s.press == CtlPress::Photo && hasEv(s, SeqEvent::ExitStart) && hasEv(s, SeqEvent::ExitClosing), "EXIT with the UI showing: PhotoCameraToggle at once");
     }
     // The UI never comes back: close anyway after the wait.
     {
         ecm::F5Sequencer q;
-        q.step(3, F5Req::Enter, false);
-        q.step(3, F5Req::Exit, true);
+        q.step(V(3), F5Req::Enter, false);
+        q.step(V(3), F5Req::Exit, true);
         bool closed = false;
         uint32_t at = 0;
         for (uint32_t i = 1; i <= 100 && !closed; ++i) {
-            s = q.step(3, F5Req::None, true);
+            s = q.step(V(3), F5Req::None, true);
             if (s.press == CtlPress::Photo) { closed = true; at = i; }
         }
         check(closed && at == ecm::kSeqWaitUpdates && hasEv(s, SeqEvent::ExitUnhideTimeout), "the UI never comes back: the camera is closed anyway after 90 updates, with a line");
@@ -492,29 +774,34 @@ void testSequencerExit() {
     // The camera never closes.
     {
         ecm::F5Sequencer q;
-        q.step(3, F5Req::Enter, false);
-        q.step(3, F5Req::Exit, false);
+        q.step(V(3), F5Req::Enter, false);
+        q.step(V(3), F5Req::Exit, false);
         bool aborted = false;
         for (uint32_t i = 1; i <= 100 && !aborted; ++i) {
-            s = q.step(3, F5Req::None, false);
+            s = q.step(V(3), F5Req::None, false);
             aborted = hasEv(s, SeqEvent::ExitTimeout);
         }
         check(aborted && !s.sessionActive, "the camera never closes: aborts after 90 updates, the session is over");
     }
-    // EXIT while still opening.
+    // EXIT while still opening, and while waiting for readiness.
     {
         ecm::F5Sequencer q;
-        q.step(0, F5Req::Enter, false);
-        s = q.step(1, F5Req::Exit, false);
+        q.step(V(0), F5Req::Enter, false);
+        s = q.step(V(1), F5Req::Exit, false);
         check(s.press == CtlPress::Photo && hasEv(s, SeqEvent::ExitStart), "EXIT in the middle of entering: stops entering and closes");
+        ecm::F5Sequencer w;
+        w.step(V(1), F5Req::Enter, false);
+        run(w, V(1), 2);
+        s = w.step(V(1), F5Req::Exit, false);
+        check(s.press == CtlPress::Photo && hasEv(s, SeqEvent::ExitStart), "EXIT during the readiness wait: stops waiting and closes");
     }
     // EXIT with the camera already closed, and EXIT with no session.
     {
         ecm::F5Sequencer q;
-        q.step(3, F5Req::Enter, false);
-        s = q.step(0, F5Req::Exit, false);
+        q.step(V(3), F5Req::Enter, false);
+        s = q.step(V(0), F5Req::Exit, false);
         check(hasEv(s, SeqEvent::ExitDone) && !s.sessionActive, "EXIT when the camera has already closed: done at once");
-        s = q.step(3, F5Req::Exit, false);
+        s = q.step(V(3), F5Req::Exit, false);
         check(hasEv(s, SeqEvent::ExitIgnored) && s.press == CtlPress::None, "EXIT with no session is ignored");
     }
 }
@@ -896,8 +1183,12 @@ struct Pages {
             *ctlG = nullptr, *ctlB = nullptr;
     bool ok() const { return freeG && freeB && colG && colB && boxG && boxB && uiG && uiB && ctlG && ctlB; }
 };
+uint8_t* g_leaPage = nullptr;     // `lea rax,[rcx+40h]; ret`: the shared record's accessor as a plain lea (the record at interface+0x40)
+uint8_t* g_otherPage = nullptr;   // `mov rax,[rcx+8]; ret`: an accessor that is not a plain lea
 Pages makePages() {
     Pages p;
+    g_leaPage = makeExecutable(Bytes{0x48, 0x8D, 0x81, 0x40, 0x00, 0x00, 0x00, 0xC3});
+    g_otherPage = makeExecutable(Bytes{0x48, 0x8B, 0x41, 0x08, 0xC3});
     p.freeGood = buildFreeSynthetic(false); p.freeBad = buildFreeSynthetic(true);
     p.colGood = buildCollisionSynthetic(false); p.colBad = buildCollisionSynthetic(true);
     p.boxGood = buildBoxSynthetic(false); p.boxBad = buildBoxSynthetic(true);
@@ -919,9 +1210,15 @@ struct Game {
     alignas(16) uint8_t photoAction[0x40] = {}, freeAction[0x40] = {}, quitAction[0x40] = {};
     alignas(16) uint8_t ui[0x600] = {};           // the camera UI
     alignas(16) uint8_t hideAction[0x40] = {};
+    alignas(16) uint8_t iface[0x100] = {};        // the interface cached at controller+0x108; the shared record is at iface+0x40
+    uintptr_t vtable[8] = {};                     // its vtable: slot 4 (+0x20) is the record's accessor
     FnObj freeUpdate = nullptr, ctlUpdate = nullptr, uiUpdate = nullptr;
     bool refuseOpen = false;                      // the game will not open the camera
     bool noHideHandle = false;                    // the camera UI's +0x1D8 is NULL
+    bool blockedByOther = false;                  // the object at controller+0x80 says no: ToggleFreeCam is simply lost
+    int queueDelay = 0;                           // > 0: ToggleFreeCam is QUEUED (+0x3E1 = 1) and the entry completes this many updates later
+    bool queued = false;
+    int queueLeft = 0;
 
     static int32_t& pressed(uint8_t* action) { return *reinterpret_cast<int32_t*>(action + 0x1C); }
     float& pose(int i) { return *reinterpret_cast<float*>(free + 0x3B0 + 4 * i); }
@@ -939,6 +1236,9 @@ struct Game {
     uint32_t uiCallsSeen() const { return rd<uint32_t>(ui, 0x308); }
     uint8_t mode() const { return ctl[0x3E0]; }
     uint8_t& hidden() { return ui[0x1A0]; }
+    bool sharedFlag() const { return iface[0x40 + 0x1D] != 0; }
+    void setShared(bool on) { iface[0x40 + 0x1D] = on ? 1 : 0; }
+    void useLeaAccessor(bool lea) { vtable[4] = reinterpret_cast<uintptr_t>(lea ? g_leaPage : g_otherPage); }
 
     void init() {
         std::memset(free, 0, sizeof(free));
@@ -951,6 +1251,15 @@ struct Game {
         std::memset(hideAction, 0, sizeof(hideAction));
         refuseOpen = false;
         noHideHandle = false;
+        blockedByOther = false;
+        queueDelay = 0;
+        queued = false;
+        queueLeft = 0;
+        std::memset(iface, 0, sizeof(iface));
+        for (uintptr_t& v : vtable) v = 0;
+        useLeaAccessor(true);
+        const uint64_t ifaceVptr = reinterpret_cast<uint64_t>(vtable), ifacePtr = reinterpret_cast<uint64_t>(iface);
+        std::memcpy(iface, &ifaceVptr, 8);
         const uint64_t lock = reinterpret_cast<uint64_t>(lockAction);
         std::memcpy(free + 0x508, &lock, 8);
         std::memcpy(free + 0x4F8, &lock, 8);   // the probe reads these two as well; any readable action object will do
@@ -960,6 +1269,7 @@ struct Game {
         std::memcpy(ctl + 0x310, &photo, 8);
         std::memcpy(ctl + 0x328, &fr, 8);
         std::memcpy(ctl + 0x340, &quit, 8);
+        std::memcpy(ctl + 0x108, &ifacePtr, 8);
         const uint64_t hide = reinterpret_cast<uint64_t>(hideAction);
         std::memcpy(ui + 0x1D8, &hide, 8);
         // The selfie preset: facing back, origin (0, 1.5, 1.9), a distinctive fourth float per row.
@@ -990,14 +1300,29 @@ struct Game {
         const uint8_t m2 = mode();
         if ((m2 == 1 || m2 == 2) && seenFree() != 0) {
             const int32_t kind = rd<int32_t>(ctl, 0x2E8);
-            if (kind == 0) {
+            if (blockedByOther || sharedFlag()) {
+                // SetMode(3) returns without latching: the press is simply lost (F2).
+            } else if (kind == 0 && queueDelay > 0) {
+                if (!queued) {
+                    queued = true;
+                    queueLeft = queueDelay;
+                    ctl[0x3E1] = 1;   // the game's own retry
+                }
+            } else if (kind == 0) {
                 setMode(3);
                 free[0x473] = 1;   // the free camera's first update seeds from the preset
             } else {
                 setMode(m2 == 1 ? 2 : 1);
             }
         }
+        if (queued && (mode() == 1 || mode() == 2) && --queueLeft <= 0) {
+            queued = false;
+            ctl[0x3E1] = 0;
+            setMode(3);
+            free[0x473] = 1;
+        }
     }
+    void ctlFrames(int n) { for (int i = 0; i < n; ++i) ctlFrame(); }
     void freeFrame() {
         freeUpdate(free);
         if (free[0x473] == 1) {
@@ -1185,9 +1510,13 @@ void testF5FromClosed(const Pages& p) {
     g.ctlFrame();   // PhotoCameraToggle pressed: the camera opens
     check(g.seenPhoto() == 1 && Game::pressed(g.photoAction) == 0 && g.mode() == 1 && t::sessionActive() && t::f5Request() == 0,
           "the controller's next update: PhotoCameraToggle's int was 1 for that update and is restored to 0; the game opened the camera (mode 1); the session is on");
+    g.ctlFrame();   // the suite has just opened: NOT pressed yet (the F2 failure pressed it here)
+    check(g.seenFree() == 0 && g.mode() == 1, "THE TAB WAIT: the update after the suite opened presses NOTHING (F2's ToggleFreeCam pressed here was lost)");
+    g.ctlFrames(3);
+    check(g.seenFree() == 0 && g.mode() == 1, "...nor the next three: the suite must look ready for 5 updates in a row");
     g.ctlFrame();   // ToggleFreeCam pressed
     check(g.seenFree() == 1 && Game::pressed(g.freeAction) == 0 && g.seenPhoto() == 0 && g.mode() == 3,
-          "the next update: ToggleFreeCam's int was 1 and is restored; PhotoCameraToggle was not pressed again; mode 3");
+          "the 5th ready update: ToggleFreeCam's int was 1 and is restored; PhotoCameraToggle was not pressed again; mode 3");
     g.freeFrame();  // the free camera's first update: pending preset
     check(g.seenLock() == 0 && t::placedActivity() == 0 && t::phase() == 1, "the free camera's first update (+0x473 = 1): entered and WAITING; no pose, no press, not yet placed");
     g.ctlFrame();
@@ -1222,7 +1551,7 @@ void testF5FromClosed(const Pages& p) {
     check(rig.cap.indexOf("F5 pressed: entering") >= 0 && rig.cap.indexOf("F5 enter: the camera is closed (mode 0)") > rig.cap.indexOf("F5 pressed: entering") &&
               rig.cap.indexOf("entered the free camera") > rig.cap.indexOf("F5 enter: the camera opened on a preset") && rig.cap.indexOf("explorer cam: placed:") > rig.cap.indexOf("entered the free camera") &&
               rig.cap.count("lock pressed:") == 1 && has(rig.cap.nth("lock pressed:", 0), "before=3 after=4") && rig.cap.count("the camera UI is hidden") == 1 &&
-              rig.cap.count("F5 enter: the free camera is up") == 1,
+              rig.cap.count("F5 enter: the free camera is up") == 1 && rig.cap.count("the suite was ready after 5 updates") == 1,
           "LOG, in the order it happened: F5 pressed, the camera opened, the free camera up, entered, placed, lock pressed (3 -> 4), the camera UI hidden");
     check(has(rig.cap.nth("explorer cam: placed:", 0), "eye(up=1.680 forward=0.100 right=0.000)"), "...'placed:' carries the eye");
 
@@ -1294,8 +1623,10 @@ void testF5FromOtherModes(const Pages& p) {
     g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
     rig.cap.clear();
     rig.boundary(true);
+    g.ctlFrames(4);
+    check(g.seenFree() == 0 && g.mode() == 1 && t::sessionActive(), "F5 from a preset (mode 1): not pressed for the first four updates (the suite must look ready for five)");
     g.ctlFrame();
-    check(g.seenPhoto() == 0 && g.seenFree() == 1 && g.mode() == 3 && t::sessionActive(), "F5 from a preset (mode 1): ToggleFreeCam only (the camera is not closed and reopened), mode 3, the session is on");
+    check(g.seenPhoto() == 0 && g.seenFree() == 1 && g.mode() == 3 && t::sessionActive(), "...then ToggleFreeCam only (the camera is not closed and reopened), mode 3, the session is on");
     g.freeFrame(); g.freeFrame(); g.ctlFrame();
     check(t::placedActivity() == reinterpret_cast<uint64_t>(g.free) && g.mode() == 4, "...placed and locked");
     rig.boundary();
@@ -1397,10 +1728,12 @@ void testSessionTimeoutsAndIdle(const Pages& p) {
     g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
     rig.cap.clear();
     rig.boundary(true);
-    for (int i = 0; i < 95; ++i) g.ctlFrame();
+    g.ctlFrames(500);
+    check(t::sessionActive(), "PRESET KIND 1: 500 updates in, the sequence is still waiting (it waits about 10 s, 900 updates, after the press)");
+    g.ctlFrames(420);
     rig.boundary();
-    check(!t::sessionActive() && rig.cap.count("F5 enter aborted: the free camera did not come up within 90 updates") == 1 && rig.cap.count("preset kind +0x2E8 = 1") >= 1,
-          "PRESET KIND 1: the free camera never comes up; aborts after 90 updates naming the preset kind");
+    check(!t::sessionActive() && rig.cap.count("F5 enter aborted: the free camera did not come up within 900 updates") == 1 && rig.cap.count("preset kind +0x2E8 = 1") >= 1,
+          "...and aborts after 900: the free camera never comes up; the line names the preset kind");
 
     // The controller is idle (not called): F5 says so.
     t::reset();
@@ -1485,8 +1818,9 @@ void testSessionEnds(const Pages& p) {
     check(t::placedActivity() != 0 && rig.cap.count("released:") == 0, "STALE: 29 frames without a free-camera update: still placed");
     g.ctlFrame();
     rig.boundary();
+    g.ctlFrame();   // a controller update after the release: the F5 session must survive it (the sequencer is not reset by a placement's release)
     check(t::placedActivity() == 0 && rig.cap.count("released:") == 1 && has(rig.cap.nth("released:", 0), "not called for 30 frames") && t::sessionActive(),
-          "...the 30th releases it ('not called for 30 frames'); the session is still on");
+          "...the 30th releases it ('not called for 30 frames'); the session is still on, even after the next controller update");
     t::reset();
 
     // A controller that stops being called ends the session.
@@ -1812,6 +2146,262 @@ void testConfigPath(const Pages& p) {
     for (const char* key : {"hotkey.explorer_cam", "fix.explorer_cam", "fix.explorer_cam_eye_up", "fix.explorer_cam_eye_forward", "fix.explorer_cam_eye_right"}) cfg.set(key, "");
 }
 
+// ToggleFreeCam waits for the suite to be ready (F2: pressed the update after opening, it was lost and the sequence aborted).
+void testTabWaitGlue(const Pages& p) {
+    std::printf("glue: the TAB wait against a controller that loses an early press\n");
+    namespace t = edvr::explorercamtest;
+    static Game g;
+    g.init();
+    Rig rig;
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+
+    // The shared record's +0x1D is set (the game would lose a ToggleFreeCam now): nothing is pressed; cleared, it is pressed after 5 ready updates.
+    g.setShared(true);
+    rig.cap.clear();
+    rig.boundary(true);
+    g.ctlFrame();   // PhotoCameraToggle: the suite opens
+    int presses = 0;
+    for (int i = 0; i < 60; ++i) {
+        g.ctlFrame();
+        presses += g.seenFree() != 0 ? 1 : 0;
+    }
+    check(presses == 0 && g.mode() == 1 && t::sessionActive(), "SHARED +0x1D SET: 60 updates in the opened suite, ToggleFreeCam is never pressed, and the session is waiting");
+    g.setShared(false);
+    int frames = 0;
+    while (g.mode() == 1 && frames < 20) {
+        g.ctlFrame();
+        presses += g.seenFree() != 0 ? 1 : 0;
+        ++frames;
+    }
+    check(frames == 5 && presses == 1 && g.mode() == 3, "...cleared: ToggleFreeCam is pressed on the 5th ready update, ONCE, and the game takes it (mode 3)");
+    rig.boundary();
+    check(rig.cap.count("the controller's shared record was reached through the interface cached at +0x108") == 1 && rig.cap.count("the suite was ready after") == 1 &&
+              rig.cap.count("ToggleFreeCam ONCE") == 1,
+          "LOG: the shared record is found and named once, the wait is logged ('the suite was ready after ...')");
+    t::reset();
+
+    // LATE COMPLETION: the game queues the entry itself (+0x3E1 = 1) and finishes it about 6 s later; pressed once, the session alive to place it.
+    g.init();
+    g.queueDelay = 540;
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+    rig.cap.clear();
+    rig.boundary(true);
+    g.ctlFrame();
+    presses = 0;
+    frames = 0;
+    while (g.mode() != 3 && frames < 700) {
+        g.ctlFrame();
+        presses += g.seenFree() != 0 ? 1 : 0;
+        ++frames;
+        if (frames == 300) {
+            check(t::sessionActive() && g.ctl[0x3E1] == 1 && presses == 1, "LATE COMPLETION: 300 updates after the press the game's own retry is running (+0x3E1 = 1), the session is alive, nothing re-pressed");
+        }
+    }
+    check(presses == 1 && g.mode() == 3 && frames > 500 && t::sessionActive(), "...mode 3 arrives about 6 s late, ToggleFreeCam was pressed exactly ONCE, and the session is still on");
+    g.freeFrame(); g.ctlFrame(); g.freeFrame();
+    rig.boundary();
+    check(t::placedActivity() == reinterpret_cast<uint64_t>(g.free) && g.mode() == 4, "...the late entry is placed and locked");
+    check(rig.cap.count("the game queued the entry itself (+0x3E1 = 1") == 1 && rig.cap.count("ready after 5 updates, mode 3 after") == 1,
+          "LOG: 'the game queued the entry itself' once, and 'ready after 5 updates, mode 3 after N more'");
+    t::reset();
+
+    // TIMEOUT after the press: the press is lost (the object the controller cannot show us said no); aborts at 900 updates and says what was unmet.
+    g.init();
+    g.blockedByOther = true;
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+    rig.cap.clear();
+    rig.boundary(true);
+    g.ctlFrames(1 + 5 + 899);
+    check(t::sessionActive(), "TIMEOUT: 899 updates after the press, still waiting");
+    g.ctlFrames(2);
+    rig.boundary();
+    check(!t::sessionActive() && rig.cap.count("F5 enter aborted: the free camera did not come up within 900 updates of the ToggleFreeCam press") == 1 &&
+              rig.cap.count("still unmet: mode is not what is wanted") == 1,
+          "...900: aborts with 'the free camera did not come up ... still unmet: mode is not what is wanted', the session over");
+    t::reset();
+
+    // TIMEOUT of the readiness wait: +0x1D never clears.
+    g.init();
+    g.setShared(true);
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+    rig.cap.clear();
+    rig.boundary(true);
+    g.ctlFrames(1 + 899);
+    check(t::sessionActive(), "TIMEOUT OF THE READINESS WAIT: 899 updates in, still waiting");
+    g.ctlFrames(3);
+    rig.boundary();
+    check(!t::sessionActive() && rig.cap.count("F5 enter aborted: the suite was not ready within 900 updates") == 1 && rig.cap.count("still unmet: the shared record's +0x1D = 1") == 1,
+          "...900: aborts with 'the suite was not ready ... still unmet: the shared record's +0x1D = 1'");
+    t::reset();
+
+    // THE SHARED RECORD CANNOT BE READ (its accessor is not a plain lea): said once with the accessor's bytes, and the wait goes on without it.
+    g.init();
+    g.useLeaAccessor(false);
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+    rig.cap.clear();
+    rig.boundary(true);
+    g.ctlFrame();
+    presses = 0;
+    for (int i = 0; i < 8; ++i) {
+        g.ctlFrame();
+        presses += g.seenFree() != 0 ? 1 : 0;
+    }
+    rig.boundary();
+    check(presses == 1 && rig.cap.count("could not be read as a plain `lea rax,[rcx+disp]; ret`") == 1 && rig.cap.count("48 8B 41 08 C3 00 00 00") == 1 &&
+              rig.cap.count("the controller's shared record was reached through") == 0,
+          "ACCESSOR NOT A PLAIN LEA: the press is not held back, and ONE line says so with the accessor's first 8 bytes (48 8B 41 08 C3 00 00 00)");
+    t::reset();
+}
+
+// The dither-fade global: written while a placement stands, put back when the camera is gone.
+void testFadeGlue(const Pages& p) {
+    std::printf("glue: the avatar dither-fade global\n");
+    namespace t = edvr::explorercamtest;
+    static Game g;
+    static int32_t fadeMode;
+    static float fadeAmount;
+    Rig rig;
+    auto begin = [&](int32_t initial) {
+        t::reset();
+        g.init();
+        fadeMode = initial;
+        fadeAmount = 0.0f;
+        rig = Rig();
+        installAll(p, rig, g);
+        t::setFadeGlobal(&fadeMode, &fadeAmount);
+    };
+    // Into the free camera by F5 from mode 3, placed, locked, UI hidden.
+    auto place = [&]() {
+        g.setMode(3);
+        g.free[0x473] = 1;
+        g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+        rig.boundary(true);
+        g.ctlFrame();
+        g.freeFrame(); g.freeFrame(); g.ctlFrame(); g.uiFrame(); g.uiFrame();
+    };
+
+    // ---- the whole F5 round trip ------------------------------------------------------------------------------------------------------
+    begin(-1);
+    place();
+    check(fadeMode == -1, "(placed, locked, hidden; the frame thread has not looked yet: the global still reads -1)");
+    rig.cap.clear();
+    rig.boundary();
+    check(fadeMode == 0 && t::fadeOurs() && rig.cap.count("avatar fade: wrote 0 to the dither-fade mode global") == 1 && has(rig.cap.nth("avatar fade: wrote 0", 0), "was -1 = auto") &&
+              has(rig.cap.nth("avatar fade: wrote 0", 0), "amount float at +0x601E088 reads 0"),
+          "WRITTEN: a placement stands and the global read -1: it is 0 now, one line says so (and what the amount float reads)");
+    rig.boundary();
+    rig.boundary();
+    check(fadeMode == 0 && rig.cap.count("avatar fade:") == 1, "...once, not every frame");
+    rig.advance(5200);
+    g.freeFrame();
+    rig.cap.clear();
+    rig.boundary();
+    check(has(rig.cap.nth("explorer cam: heartbeat:", 0), "fade_global_held_by_edvr=yes"), "the heartbeat says EDVR holds the fade global");
+    // Leaving: the global stays 0 until the camera has CLOSED.
+    rig.cap.clear();
+    rig.boundary(true);
+    g.ctlFrame();   // the exit begins (the UI is held)
+    g.freeFrame();
+    g.uiFrame(); g.uiFrame();
+    g.ctlFrame();   // the close is pressed: mode 0 in the game, the sequencer has not seen it yet
+    rig.boundary();
+    check(fadeMode == 0 && g.mode() == 0, "F5 EXIT: the close was pressed but the controller has not yet read mode 0: the global is still 0 (never restored while the camera could be inside the body)");
+    g.ctlFrame();   // mode 0 read: the session is over
+    rig.boundary();
+    check(fadeMode == -1 && !t::fadeOurs() && rig.cap.count("avatar fade: put the dither-fade mode global back to -1 (auto)") == 1 && has(rig.cap.nth("avatar fade: put", 0), "closed (controller mode 0)"),
+          "...mode 0 read, the session over: RESTORED to -1, one line");
+    check(rig.cap.indexOf("F5 exit: closing the camera") < rig.cap.indexOf("avatar fade: put the dither-fade") && rig.cap.indexOf("F5 exit: giving the camera UI back first") < rig.cap.indexOf("F5 exit: closing the camera"),
+          "LOG ORDER of the exit: the UI given back, then the close, then the fade restored");
+    rig.boundary();
+    check(fadeMode == -1 && rig.cap.count("avatar fade:") == 1, "...and not touched again");
+
+    // ---- someone else owns it -------------------------------------------------------------------------------------------------------------
+    begin(7);
+    place();
+    rig.cap.clear();
+    rig.boundary();
+    rig.boundary();
+    check(fadeMode == 7 && !t::fadeOurs() && rig.cap.count("avatar fade: the dither-fade mode global reads 7, not -1 (auto), so someone else owns it") == 1,
+          "FOREIGN VALUE (7): left alone, one line says someone else owns it");
+    g.userPresses(g.photoAction, &Game::ctlFrame);
+    g.ctlFrame();
+    rig.boundary();
+    check(fadeMode == 7, "...and still 7 after the camera closes (never restored, never ours)");
+
+    // ---- a detach releases the placement: restored; the return writes again -----------------------------------------------------------------
+    begin(-1);
+    place();
+    rig.boundary();
+    check(fadeMode == 0, "(placed: 0)");
+    g.setMode(5);
+    g.freeFrame();
+    g.ctlFrame();
+    rig.cap.clear();
+    rig.boundary();
+    check(fadeMode == -1 && t::sessionActive() && rig.cap.count("put the dither-fade mode global back to -1 (auto)") == 1 && has(rig.cap.nth("put the dither-fade", 0), "detached (controller mode 5)"),
+          "DETACH (mode 5): the placement released, the camera detached: restored to -1, the session still on");
+    g.setMode(3);
+    g.freeFrame(); g.freeFrame(); g.ctlFrame();
+    rig.boundary();
+    check(fadeMode == 0 && t::fadeOurs(), "...the return to 3: placed again, 0 again");
+
+    // ---- the feature turned off while the camera is open inside the body: held until it closes ------------------------------------------------
+    rig.cap.clear();
+    rig.f.on = false;
+    rig.boundary();
+    check(fadeMode == 0 && t::fadeOurs() && !t::placeActive(), "FEATURE OFF with the camera still open (mode 4): the global is HELD at 0 (the camera is inside the body)");
+    g.ctlFrame();
+    g.userPresses(g.photoAction, &Game::ctlFrame);   // the player closes the camera by hand
+    g.ctlFrame();
+    check(g.mode() == 0, "(the player closes the camera)");
+    rig.boundary();
+    check(fadeMode == -1 && !t::fadeOurs() && rig.cap.count("avatar fade: put the dither-fade mode global back to -1 (auto)") == 1,
+          "...the camera closed (the controller hook still publishes the mode while EDVR holds the global): restored to -1 though the feature is off");
+    rig.f.on = true;
+
+    // ---- changed under us ---------------------------------------------------------------------------------------------------------------------
+    begin(-1);
+    place();
+    rig.boundary();
+    fadeMode = 5;   // someone else sets it
+    rig.boundary(true);
+    g.ctlFrame(); g.freeFrame(); g.uiFrame(); g.uiFrame(); g.ctlFrame(); g.ctlFrame();
+    rig.cap.clear();
+    rig.boundary();
+    check(fadeMode == 5 && !t::fadeOurs() && rig.cap.count("now reads 5, not the 0 Explorer Cam wrote, so it is left alone") == 1,
+          "CHANGED UNDER US (5): the restore is skipped and said, the value is left as it was");
+
+    // ---- a stale release with the camera still inside: held -------------------------------------------------------------------------------------
+    begin(-1);
+    place();
+    rig.boundary();
+    g.freeFrame();
+    g.ctlFrame();
+    rig.boundary();
+    for (int i = 0; i < 31; ++i) { g.ctlFrame(); rig.boundary(); }
+    check(t::phase() == 0 && t::sessionActive() && fadeMode == 0 && t::fadeOurs(),
+          "STALE RELEASE (the activity went silent) with the camera still in the body (mode 4): the placement is released but the global stays 0");
+
+    // ---- unload ----------------------------------------------------------------------------------------------------------------------------------
+    t::shutdown();
+    check(fadeMode == -1 && !t::fadeOurs(), "UNLOAD: the global goes back to -1");
+    begin(-1);
+    place();
+    rig.boundary();
+    fadeMode = 9;
+    t::shutdown();
+    check(fadeMode == 9, "UNLOAD with the value changed under us: not touched");
+    begin(-1);
+    t::shutdown();
+    check(fadeMode == -1, "UNLOAD when it was never ours: nothing written");
+    t::reset();
+}
+
 void testGlue() {
     std::printf("glue, end to end (synthetic functions with the real prologues)\n");
     Pages p = makePages();
@@ -1834,6 +2424,8 @@ void testGlue() {
     testF5FromOtherModes(p);
     testDetachAndReattach(p);
     testSessionTimeoutsAndIdle(p);
+    testTabWaitGlue(p);
+    testFadeGlue(p);
     testSessionEnds(p);
     testFaults(p);
     testObservers(p);
@@ -1867,6 +2459,8 @@ int main(int argc, char** argv) {
     testSequencerEnter();
     testSequencerTimeouts();
     testSequencerExit();
+    testTabWait();
+    testFadeGuard();
     testF5Decision();
     testUiHider();
     testWatches();

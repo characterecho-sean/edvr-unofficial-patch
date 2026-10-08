@@ -17,7 +17,8 @@
 // writes no log line and calls nothing of the game's. Every access to the game's memory is under SEH.
 //
 // THE FLAGS THEY SHARE are atomics. Each hook thread owns its state machine (explorer_cam_core.h); the frame thread asks them to
-// start over by bumping g_resetRequest, which each acts on at its next call, and clears the published state (g_placedActivity,
+// start over by bumping g_resetRequest (the placement machine) or g_resetCtlRequest (the F5 sequencer), which each acts on at its next call,
+// and clears the published state (g_placedActivity,
 // g_phase, g_sessionActive) itself whenever placement is not active, every frame, so an end never depends on a hook being called
 // again.
 #include "explorer_cam.h"
@@ -42,8 +43,8 @@
 namespace edvr {
 namespace {
 
-// ---- the five hooks ------------------------------------------------------------------------------------------------------------
-enum Hk : int { kHkFree = 0, kHkCollision, kHkBox, kHkUi, kHkCtl, kHkCount };
+// ---- the six hooks ------------------------------------------------------------------------------------------------------------
+enum Hk : int { kHkFree = 0, kHkCollision, kHkBox, kHkUi, kHkCtl, kHkFade, kHkCount };
 struct HookSpec {
     const char* label;      // the log's name for it
     const char* what;       // what the prologue belongs to
@@ -62,6 +63,8 @@ const HookSpec kSpec[kHkCount] = {
      ecm::kCameraUiPrologueBytes, false},
     {"controller", "VesselCameraMountControl update", "explorer-cam-controller", ecm::kControllerRva, ecm::kControllerPrologue,
      ecm::kControllerPrologueBytes, false},
+    {"avatar-fade", "AvatarModelComponent dither-fade update", "explorer-cam-avatar-fade", ecm::kAvatarFadeRva, ecm::kAvatarFadePrologue,
+     ecm::kAvatarFadePrologueBytes, false},
 };
 
 // ---- state shared between the threads --------------------------------------------------------------------------------------
@@ -71,10 +74,11 @@ alignas(8) std::atomic<uint64_t> g_bypassed[2];         // [0] collision, [1] bo
 alignas(8) std::atomic<uint64_t> g_forwarded[2];        // ...and calls passed to the original
 alignas(8) std::atomic<uintptr_t> g_gate[kHkCount];     // a callback relay's gate: open = the callback runs, closed = straight on
 std::atomic<uintptr_t> g_forward[kHkCount];             // a callback relay's trampoline
-std::atomic<ExplorerCamActivityObserver> g_observers[2][kExplorerCamMaxObservers];
+std::atomic<ExplorerCamActivityObserver> g_observers[3][kExplorerCamMaxObservers];   // free camera, controller, avatar fade
 
 std::atomic<bool> g_placeActive{false};                 // on, every required hook armed, not stood down by faults (frame thread)
-std::atomic<uint32_t> g_resetRequest{0};
+std::atomic<uint32_t> g_resetRequest{0};                // the free-camera hook's placement machine starts over
+std::atomic<uint32_t> g_resetCtlRequest{0};             // the controller hook's F5 sequencer starts over (a session ended, or placement toggled)
 std::atomic<float> g_eyeUp{ecm::kEyeUpDefault}, g_eyeForward{ecm::kEyeForwardDefault}, g_eyeRight{ecm::kEyeRightDefault};
 
 std::atomic<bool> g_busy[3];                            // free camera, camera UI, controller: a call is inside that hook's pre..post
@@ -97,6 +101,7 @@ std::atomic<uint32_t> g_ctlMode{0};
 std::atomic<uint64_t> g_uiCalls{0};
 std::atomic<bool> g_uiHeld{false};                      // EDVR hid the UI (or a hide is in flight): the sequence waits for it to clear
 std::atomic<bool> g_uiHiddenByUs{false};
+std::atomic<bool> g_fadeOurs{false};                    // EDVR holds the dither-fade global at 0 (the frame thread writes, the controller gate reads)
 
 std::atomic<uint64_t> g_eventSeq{0};
 enum Ring : int { kRingFree = 0, kRingUi = 1, kRingCtl = 2 };
@@ -110,6 +115,7 @@ ecm::F5Sequencer g_seq;
 uint32_t g_ctlResetSeen = 0;
 bool g_ctlFirstNoted = false;
 ecm::UiHider g_uiHider;
+bool g_ctlSharedNoted = false;
 
 // ---- frame-thread state ------------------------------------------------------------------------------------------------------
 struct FrameState {
@@ -137,8 +143,16 @@ struct FrameState {
 };
 FrameState g_frame;
 
+// The avatar fade global (frame thread only): the guard, and where the global and its amount float live.
+ecm::FadeGuard g_fade;
+int32_t* g_fadeMode = nullptr;
+float* g_fadeAmount = nullptr;
+
+
 #ifdef EDVR_EXPLORER_CAM_TEST
 uintptr_t g_testTargets[kHkCount] = {};   // the rig's synthetic functions, installed in place of the game's
+int32_t* g_testFadeMode = nullptr;        // ...and its synthetic fade global
+float* g_testFadeAmount = nullptr;
 #endif
 
 // ---- guarded access to the game's memory (nothing with a destructor lives in a function that has a __try) ------------------
@@ -180,6 +194,75 @@ __declspec(noinline) bool sehReadByte(const uint8_t* a, uint32_t offset, uint8_t
 __declspec(noinline) bool sehReadInt(const uint8_t* a, uint32_t offset, int32_t* out) noexcept {
     __try {
         std::memcpy(out, a + offset, 4);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The controller's mode byte and its pending-retry byte (+0x3E0, +0x3E1).
+__declspec(noinline) bool sehReadCtlView(const uint8_t* c, uint8_t* mode, uint8_t* pending) noexcept {
+    __try {
+        *mode = c[ecm::kOffCtlMode];
+        *pending = c[ecm::kOffCtlPending];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// The controller's shared record is NOT embedded in it (see explorer_cam_core.h, kOffCtlInterface): the controller reaches it by a virtual
+// call, slot +0x20, on the interface cached at +0x108. If that accessor is a plain `lea rax,[rcx+disp]; ret` the record is interface+disp and
+// its +0x1D can be read without calling anything. 0 = read (flag set), 1 = no interface cached or implausible pointers, 2 = the accessor is
+// not a plain lea (its first 8 bytes are returned), 3 = a fault.
+bool plausibleUserPointer(uint64_t p) { return p >= 0x10000u && p < 0x00007FFF00000000ull; }
+__declspec(noinline) int sehReadSharedRecord(const uint8_t* ctl, int32_t* flag, uint64_t* accessor) noexcept {
+    __try {
+        uint64_t iface = 0;
+        std::memcpy(&iface, ctl + ecm::kOffCtlInterface, 8);
+        if (!plausibleUserPointer(iface) || (iface & 7u) != 0) return 1;
+        uint64_t vptr = 0;
+        std::memcpy(&vptr, reinterpret_cast<const void*>(iface), 8);
+        if (!plausibleUserPointer(vptr) || (vptr & 7u) != 0) return 1;
+        uint64_t fn = 0;
+        std::memcpy(&fn, reinterpret_cast<const void*>(vptr + 8u * (ecm::kSharedAccessorSlot / 8u)), 8);
+        if (!plausibleUserPointer(fn)) return 1;
+        uint8_t code[8] = {};
+        std::memcpy(code, reinterpret_cast<const void*>(fn), 8);
+        std::memcpy(accessor, code, 8);
+        int64_t disp = -1;
+        if (code[0] == 0x48 && code[1] == 0x8D && code[2] == 0x81 && code[7] == 0xC3) {          // lea rax,[rcx+disp32]; ret
+            int32_t d = 0;
+            std::memcpy(&d, code + 3, 4);
+            disp = d;
+        } else if (code[0] == 0x48 && code[1] == 0x8D && code[2] == 0x41 && code[4] == 0xC3) {   // lea rax,[rcx+disp8]; ret
+            disp = static_cast<int8_t>(code[3]);
+        }
+        if (disp < 0 || disp > 0x4000) return 2;
+        *flag = *reinterpret_cast<const uint8_t*>(iface + static_cast<uint64_t>(disp) + ecm::kOffSharedFlag);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 3;
+    }
+}
+// The fade global and its amount float: plain data in the exe's .data, read and written under SEH.
+__declspec(noinline) bool sehReadInt32(const int32_t* p, int32_t* out) noexcept {
+    __try {
+        *out = *reinterpret_cast<const volatile int32_t*>(p);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) bool sehReadFloat(const float* p, float* out) noexcept {
+    __try {
+        *out = *reinterpret_cast<const volatile float*>(p);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) bool sehWriteInt32(int32_t* p, int32_t value) noexcept {
+    __try {
+        *reinterpret_cast<volatile int32_t*>(p) = value;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -292,6 +375,23 @@ void pushEvent(Ring ring, ecm::EvKind kind, uint64_t object, uint32_t why, uint3
         e.eye[2] = eye->right;
     }
     g_rings[ring].push(e);
+}
+
+// A Seq event carries its detail in the spare fields (explorer_cam_core.h, formatEvent): before = the readiness wait, updates = the wait for
+// mode 3, flags = the unmet conditions.
+void pushSeqEvent(ecm::SeqEvent ev, uint64_t controller, uint32_t mode, uint32_t presetKind, uint32_t readyAfter, uint32_t toMode3, uint32_t unmet) {
+    ecm::Event e;
+    e.seq = g_eventSeq.fetch_add(1, std::memory_order_relaxed);
+    e.kind = static_cast<uint32_t>(ecm::EvKind::Seq);
+    e.activity = controller;
+    e.threadId = GetCurrentThreadId();
+    e.why = static_cast<uint32_t>(ev);
+    e.before = readyAfter;
+    e.after = mode;
+    e.flags = unmet;
+    e.count = presetKind;
+    e.updates = toMode3;
+    g_rings[kRingCtl].push(e);
 }
 
 // A guarded access faulted: count it, say where, end what that hook was doing. The 8th fault ends the feature for the session.
@@ -503,33 +603,56 @@ __declspec(noinline) uint64_t __fastcall cameraUiHooked(void* a, void* b, void* 
 
 // ---- the controller hook --------------------------------------------------------------------------------------------------------
 void runCtlPre(void* controllerPtr, PreState& ps) {
-    const uint32_t request = g_resetRequest.load(std::memory_order_acquire);
+    const uint32_t request = g_resetCtlRequest.load(std::memory_order_acquire);
     if (request != g_ctlResetSeen) {
         g_ctlResetSeen = request;
         g_seq.reset();
+        g_ctlSharedNoted = false;
     }
-    if (!g_placeActive.load(std::memory_order_acquire) || g_faults.load(std::memory_order_relaxed) >= ecm::kMaxFaults) return;
+    const bool active = g_placeActive.load(std::memory_order_acquire) && g_faults.load(std::memory_order_relaxed) < ecm::kMaxFaults;
+    // The mode byte is published for the avatar-fade restore as long as EDVR holds the fade global, even with the feature off.
+    if (!active && !g_fadeOurs.load(std::memory_order_acquire)) return;
     const uint64_t controller = reinterpret_cast<uint64_t>(controllerPtr);
     const uint8_t* const bytes = static_cast<const uint8_t*>(controllerPtr);
-    uint8_t mode = 0;
-    if (!sehReadByte(bytes, ecm::kOffCtlMode, &mode)) {
+    uint8_t mode = 0, pending = 0;
+    if (!sehReadCtlView(bytes, &mode, &pending)) {
         onFault(kRingCtl, ecm::FaultSite::ReadController, controller);
         return;
     }
     g_ctlMode.store(mode, std::memory_order_relaxed);
+    if (!active) return;
     if (!g_ctlFirstNoted) {
         g_ctlFirstNoted = true;
         pushEvent(kRingCtl, ecm::EvKind::ControllerFirstCall, controller, 0, 0, mode, 0, nullptr, 0);
     }
     const ecm::F5Req req = static_cast<ecm::F5Req>(g_f5Request.exchange(0, std::memory_order_acq_rel));
-    const ecm::SeqStep s = g_seq.step(mode, req, g_uiHeld.load(std::memory_order_acquire));
+    ecm::CtlView view;
+    view.mode = mode;
+    view.pending = pending;
+    view.sharedFlag = -1;
+    // The TAB wait looks at the shared record's +0x1D when it can be read: only on a preset, only while a session wants the free camera.
+    if ((mode == 1 || mode == 2) && (g_seq.sessionActive() || req == ecm::F5Req::Enter)) {
+        int32_t flag = 0;
+        uint64_t accessor = 0;
+        const int how = sehReadSharedRecord(bytes, &flag, &accessor);
+        if (how == 0) view.sharedFlag = static_cast<int16_t>(flag);
+        if (!g_ctlSharedNoted && how != 3) {
+            g_ctlSharedNoted = true;
+            if (how == 0)
+                pushSeqEvent(ecm::SeqEvent::SharedRecordFound, controller, mode, 0, 0, 0, static_cast<uint32_t>(flag));
+            else
+                pushSeqEvent(ecm::SeqEvent::SharedRecordUnreadable, controller, mode, 0, 0, static_cast<uint32_t>(accessor >> 32),
+                             static_cast<uint32_t>(accessor & 0xFFFFFFFFu));
+        }
+    }
+    const ecm::SeqStep s = g_seq.step(view, req, g_uiHeld.load(std::memory_order_acquire));
     g_sessionActive.store(s.sessionActive, std::memory_order_release);
     g_exiting.store(s.exiting, std::memory_order_release);
+    if (!s.sessionActive) g_ctlSharedNoted = false;
     if (s.nev) {
         int32_t kind = 0;
         sehReadInt(bytes, ecm::kOffCtlPresetKind, &kind);   // for the line only; a failed read leaves 0
-        for (uint8_t i = 0; i < s.nev; ++i)
-            pushEvent(kRingCtl, ecm::EvKind::Seq, controller, static_cast<uint32_t>(s.ev[i]), 0, mode, 0, nullptr, static_cast<uint32_t>(kind));
+        for (uint8_t i = 0; i < s.nev; ++i) pushSeqEvent(s.ev[i], controller, mode, static_cast<uint32_t>(kind), s.readyAfter, s.toMode3, s.unmet);
     }
     if (s.press != ecm::CtlPress::None) {
         const uint32_t handle = s.press == ecm::CtlPress::Photo ? ecm::kOffCtlPhotoAction : ecm::kOffCtlFreeAction;
@@ -556,6 +679,15 @@ __declspec(noinline) uint64_t __fastcall controllerHooked(void* a, void* b, void
     const uint64_t result = forward(a, b, c, d);
     postFor(ps);
     runObservers(1, a);
+    return result;
+}
+
+// ---- the avatar-fade hook (the probe's fade counter rides it; nothing here writes) ---------------------------------------------
+__declspec(noinline) uint64_t __fastcall avatarFadeHooked(void* a, void* b, void* c, void* d) noexcept {
+    const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkFade].load(std::memory_order_acquire));
+    if (!forward) return 0;
+    const uint64_t result = forward(a, b, c, d);   // the original FIRST: the observers read what it left
+    runObservers(2, a);
     return result;
 }
 
@@ -663,6 +795,7 @@ const void* callbackFor(int id) {
         case kHkFree: return reinterpret_cast<const void*>(&freeCameraHooked);
         case kHkUi: return reinterpret_cast<const void*>(&cameraUiHooked);
         case kHkCtl: return reinterpret_cast<const void*>(&controllerHooked);
+        case kHkFade: return reinterpret_cast<const void*>(&avatarFadeHooked);
         default: return nullptr;
     }
 }
@@ -713,6 +846,8 @@ const char* armedRole(int id) {
         case kHkBox:
             return "it answers 0 (no box push: the point is left alone) for the placed activity only and hands every other call to the "
                    "original";
+        case kHkFade:
+            return "LOG ONLY, for advanced.explorer_cam_probe's fade counter: the original runs first, then the component's dither block is read";
         case kHkUi:
             return "FreeCamToggleHUD is pressed for one update when a placement begins, and again to give the UI back; the original runs "
                    "between, and the press is restored after it";
@@ -727,6 +862,7 @@ const char* downConsequence(int id) {
         case kHkCollision: return "Explorer Cam placement does not run (without it the free camera would stop 0.70 m from the face).";
         case kHkBox: return "Explorer Cam placement does not run (without it the free camera would be lifted onto the helmet).";
         case kHkCtl: return "Explorer Cam does not run: F5 has nothing to press.";
+        case kHkFade: return "advanced.explorer_cam_probe's fade counter does not run.";
         default: return "the camera UI stays up while placed; everything else runs.";
     }
 }
@@ -751,7 +887,7 @@ void tryHook(int id, const ecm::Sink& sink) {
 
 bool armed(int id) { return g_hooks[id].state == ExplorerCamHookStatus::Armed; }
 
-int observerCount(int which) {
+int observerCount(int which) {   // 0 free camera, 1 controller, 2 avatar fade
     int n = 0;
     for (int i = 0; i < kExplorerCamMaxObservers; ++i) n += g_observers[which][i].load(std::memory_order_relaxed) != nullptr ? 1 : 0;
     return n;
@@ -760,7 +896,9 @@ int observerCount(int which) {
 void updateGates() {
     const bool active = g_placeActive.load(std::memory_order_relaxed);
     g_gate[kHkFree].store(armed(kHkFree) && (active || observerCount(0) > 0) ? 1u : 0u, std::memory_order_release);
-    g_gate[kHkCtl].store(armed(kHkCtl) && (active || observerCount(1) > 0) ? 1u : 0u, std::memory_order_release);
+    g_gate[kHkCtl].store(armed(kHkCtl) && (active || observerCount(1) > 0 || g_fadeOurs.load(std::memory_order_relaxed)) ? 1u : 0u,
+                         std::memory_order_release);
+    g_gate[kHkFade].store(armed(kHkFade) && observerCount(2) > 0 ? 1u : 0u, std::memory_order_release);
     g_gate[kHkUi].store(armed(kHkUi) && (active || g_uiHeld.load(std::memory_order_relaxed)) ? 1u : 0u, std::memory_order_release);
 }
 
@@ -857,6 +995,64 @@ void checkHotkeyClash(FrameState& fs, const FrameInput& in, uint64_t nowMs, cons
     }
 }
 
+// ---- the avatar fade global (frame thread) -------------------------------------------------------------------------------------------
+bool fadeResolve() {
+    if (g_fadeMode) return true;
+#ifdef EDVR_EXPLORER_CAM_TEST
+    if (g_testFadeMode) {
+        g_fadeMode = g_testFadeMode;
+        g_fadeAmount = g_testFadeAmount;
+        return true;
+    }
+#endif
+    uintptr_t base = 0;
+    char why[160] = {};
+    if (!explorerCamBuildKnown(&base, why, sizeof(why))) return false;   // an unknown build: the global is not touched
+    g_fadeMode = reinterpret_cast<int32_t*>(base + ecm::kFadeModeRva);
+    g_fadeAmount = reinterpret_cast<float*>(base + ecm::kFadeAmountRva);
+    return true;
+}
+bool fadeStore(int32_t value) {
+    if (!writableRange(g_fadeMode, 4)) return false;
+    return sehWriteInt32(g_fadeMode, value);
+}
+
+// One evaluation: write 0 while a placement stands (only if the global reads -1), put -1 back once the session is over or the placement was
+// released for a detach AND the camera is closed or detached (never while it is still inside the body), and at unload.
+void fadeTick(bool active, bool placed, bool session, uint32_t frame, bool unload, const ecm::Sink& sink) {
+    if (!fadeResolve()) return;
+    ecm::FadeIn in;
+    in.active = active;
+    in.placed = placed;
+    in.session = session && active;
+    in.ctlMode = static_cast<uint8_t>(g_ctlMode.load(std::memory_order_relaxed));
+    in.unload = unload;
+    if (g_fade.ours() || (active && placed) || unload) in.readOk = sehReadInt32(g_fadeMode, &in.value);
+    const ecm::FadeStep st = g_fade.step(in);
+    ecm::FadeEvent ev = st.ev;
+    float amount = 0.0f;
+    if (st.act == ecm::FadeStep::Act::Write) {
+        sehReadFloat(g_fadeAmount, &amount);
+        if (!fadeStore(0)) {
+            g_fade.writeFailed();
+            g_faults.fetch_add(1, std::memory_order_relaxed);
+            ev = ecm::FadeEvent::WriteFailed;
+        }
+    } else if (st.act == ecm::FadeStep::Act::Restore) {
+        if (!fadeStore(ecm::kFadeAuto)) {
+            g_fade.restoreFailed();
+            g_faults.fetch_add(1, std::memory_order_relaxed);
+            ev = ecm::FadeEvent::RestoreFailed;
+        }
+    }
+    g_fadeOurs.store(g_fade.ours(), std::memory_order_release);
+    if (ev != ecm::FadeEvent::None) {
+        char line[ecm::kLineBytes];
+        ecm::formatFade(line, sizeof(line), ev, st.seen, in.ctlMode, amount, frame);
+        sink(line);
+    }
+}
+
 void releaseFromFrame(ecm::Why why, uint32_t frame, const ecm::Sink& sink) {
     ecm::Event e;
     e.kind = static_cast<uint32_t>(ecm::EvKind::Released);
@@ -868,7 +1064,7 @@ void releaseFromFrame(ecm::Why why, uint32_t frame, const ecm::Sink& sink) {
     ecm::formatEvent(line, sizeof(line), e, frame);
     sink(line);
     publishIdle();
-    g_resetRequest.fetch_add(1, std::memory_order_release);
+    g_resetRequest.fetch_add(1, std::memory_order_release);   // the placement machine only: the F5 session carries on
 }
 
 void endSessionFromFrame(const char* why, const ecm::Sink& sink) {
@@ -876,6 +1072,7 @@ void endSessionFromFrame(const char* why, const ecm::Sink& sink) {
     g_exiting.store(false, std::memory_order_release);
     g_f5Request.store(0, std::memory_order_release);
     g_resetRequest.fetch_add(1, std::memory_order_release);
+    g_resetCtlRequest.fetch_add(1, std::memory_order_release);
     say(sink, "%s the Explorer Cam session ended: %s", ecm::prefix(), why);
 }
 
@@ -949,6 +1146,7 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
     if (active != g_placeActive.load(std::memory_order_relaxed)) {
         g_placeActive.store(active, std::memory_order_release);
         g_resetRequest.fetch_add(1, std::memory_order_release);
+        g_resetCtlRequest.fetch_add(1, std::memory_order_release);
     }
     updateGates();
 
@@ -996,6 +1194,10 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
             sink(line);
         }
     }
+
+    // 6b. The avatar fade global. Before the not-active clean-up below, so a feature turned off while the camera is closed puts it back.
+    fadeTick(active, g_placedActivity.load(std::memory_order_acquire) != 0, g_sessionActive.load(std::memory_order_acquire), frame, false, sink);
+    updateGates();
 
     // 7. Not active: whatever the hook threads left published is withdrawn, every frame, until it is gone.
     uint32_t phase = g_phase.load(std::memory_order_acquire);
@@ -1064,6 +1266,7 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         h.ctlCalls = g_ctlCalls.load(std::memory_order_relaxed);
         h.ctlMode = g_ctlMode.load(std::memory_order_relaxed);
         h.uiHiddenByUs = g_uiHiddenByUs.load(std::memory_order_relaxed);
+        h.fadeOurs = g_fadeOurs.load(std::memory_order_relaxed);
         h.uiCalls = g_uiCalls.load(std::memory_order_relaxed);
         h.updatesWindow = h.updates - fs.beatUpdates;
         h.bypassedWindow = h.bypassed - fs.beatBypassed;
@@ -1146,6 +1349,15 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
     boundaryAt(frameNo, GetTickCount64(), in, sink);
 }
 
+void explorerCamShutdown() {
+    // An unload (FreeLibrary): the dither-fade global goes back to -1 if EDVR still holds it at 0. A process exit does not come here, and
+    // needs nothing: the global dies with the process.
+    fadeTick(false, false, false, 0, true, ecm::Sink{&logSink, nullptr});
+    g_fadeOurs.store(g_fade.ours(), std::memory_order_release);
+}
+
+const int32_t* explorerCamFadeGlobalAddress() { return fadeResolve() ? g_fadeMode : nullptr; }
+
 bool explorerCamBuildKnown(uintptr_t* baseOut, char* why, size_t whyCap) {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (!base) {
@@ -1166,8 +1378,8 @@ bool explorerCamBuildKnown(uintptr_t* baseOut, char* why, size_t whyCap) {
 }
 
 ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivityObserver observer, bool attach) {
-    const int which = hook == ExplorerCamHook::Controller ? 1 : 0;
-    const int id = which == 1 ? kHkCtl : kHkFree;
+    const int which = hook == ExplorerCamHook::AvatarFade ? 2 : hook == ExplorerCamHook::Controller ? 1 : 0;
+    const int id = which == 2 ? kHkFade : which == 1 ? kHkCtl : kHkFree;
     if (attach && g_hooks[id].state == ExplorerCamHookStatus::NotTried) tryHook(id, ecm::Sink{&logSink, nullptr});
     if (attach) {
         if (armed(id) && observer) {
@@ -1202,7 +1414,14 @@ void setTargets(const ExplorerCamTestTargets& t) {
     g_testTargets[kHkBox] = t.boxPush;
     g_testTargets[kHkUi] = t.cameraUi;
     g_testTargets[kHkCtl] = t.controller;
+    g_testTargets[kHkFade] = t.avatarFade;
 }
+void setFadeGlobal(int32_t* mode, float* amount) {
+    g_testFadeMode = mode;
+    g_testFadeAmount = amount;
+}
+bool fadeOurs() { return g_fadeOurs.load(); }
+void shutdown() { explorerCamShutdown(); }
 void boundary(uint32_t frame, uint64_t nowMs, const ExplorerCamTestFrame& t, ExplorerCamSinkFn fn, void* ctx) {
     FrameInput in;
     in.on = t.on;
@@ -1270,7 +1489,7 @@ void reset() {
         g_gate[i].store(0);
         g_testTargets[i] = 0;
     }
-    for (int w = 0; w < 2; ++w)
+    for (int w = 0; w < 3; ++w)
         for (int i = 0; i < kExplorerCamMaxObservers; ++i) g_observers[w][i].store(nullptr);
     g_placedActivity.store(0);
     for (int i = 0; i < 2; ++i) {
@@ -1279,6 +1498,7 @@ void reset() {
     }
     g_placeActive.store(false);
     g_resetRequest.store(0);
+    g_resetCtlRequest.store(0);
     g_eyeUp.store(ecm::kEyeUpDefault);
     g_eyeForward.store(ecm::kEyeForwardDefault);
     g_eyeRight.store(ecm::kEyeRightDefault);
@@ -1301,6 +1521,7 @@ void reset() {
     g_uiCalls.store(0);
     g_uiHeld.store(false);
     g_uiHiddenByUs.store(false);
+    g_fadeOurs.store(false);
     g_eventSeq.store(0);
     ecm::Event drop;
     for (auto& ring : g_rings)
@@ -1312,6 +1533,12 @@ void reset() {
     g_ctlResetSeen = 0;
     g_ctlFirstNoted = false;
     g_uiHider = ecm::UiHider();
+    g_ctlSharedNoted = false;
+    g_fade = ecm::FadeGuard();
+    g_fadeMode = nullptr;
+    g_fadeAmount = nullptr;
+    g_testFadeMode = nullptr;
+    g_testFadeAmount = nullptr;
     g_frame = FrameState();
     g_identity = 0;
     g_f5Configured = false;

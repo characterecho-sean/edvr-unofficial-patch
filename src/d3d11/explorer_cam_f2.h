@@ -22,6 +22,8 @@ void explorerCamF2Disarm();
 // sample. Hook thread; takes no lock, allocates nothing, logs nothing.
 void explorerCamF2FreeCamera(void* activity) noexcept;
 void explorerCamF2Controller(void* controller) noexcept;
+// The avatar fade counter's observer (after the dither-fade update): hook threads, many components a frame. Takes no lock, logs nothing.
+void explorerCamF2Fade(void* component) noexcept;
 // Once a frame, on the frame thread: the change lines, the 5 s heartbeats and the 1 Hz neck lines.
 void explorerCamF2Tick(uint32_t frame, uint64_t nowMs, const ecm::Sink& sink);
 
@@ -31,6 +33,20 @@ struct NeckSeam {
     uintptr_t vtable = 0, slot = 0, getter = 0, localSite = 0;
 };
 void setNeckTargets(const NeckSeam& targets);   // the synthetic vtable, its accessor and the return address that counts as local
+struct HeadSeam {
+    uintptr_t base = 0;       // a synthetic "game image": the head instrument's addresses are this + the build's RVAs
+    size_t imageSize = 0;
+};
+void setHeadTargets(const HeadSeam& targets);
+void setHeadInterval(uint32_t ms);              // the rig evaluates every free-camera call (0), not once a second
+uint64_t headSteps();
+uint64_t headCalls();
+uint64_t headFaults();
+uint32_t headState();                           // 0 not tried, 1 armed, 2 stood down
+uint64_t fadeCalls();
+uint64_t fadeEnabledCalls();
+uint64_t fadeEnabledWhileZero();
+size_t fadeDistinct();
 uint64_t neckCalls();
 uint64_t neckLocalSiteCalls();
 uintptr_t neckLocalEye();

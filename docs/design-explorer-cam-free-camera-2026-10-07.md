@@ -2,10 +2,11 @@
 
 ## Status
 
-- **State: F0, F1, F2 FLOWN (2026-10-07).** F5 in and out, placement at
-  the set height, lock, and UI hide all work. BLOCKER: inside the body the
-  whole avatar dither-fades, and the fade stuck on the first-person weapon
-  after the exit. Keys: `[hotkey] explorer_cam = F5` (the only way in),
+- **State: F0-F2 FLOWN (2026-10-07); Phase 1d BUILT, not flown
+  (2026-10-08).** F5 in and out, placement, lock, UI hide work. The F2
+  blocker (the avatar dither-fades inside the body, stuck on the weapon
+  after the exit) is answered in 1d by the fade global and a real TAB wait.
+  Keys: `[hotkey] explorer_cam = F5` (the only way in),
   `fix.explorer_cam`, and the eye keys (temporary).
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
@@ -48,10 +49,11 @@
   `+0x592200`; the culling view is built upstream of it
   (design-occlusion-culling-2026-09-22.md), and 6s.9 saw holes from that.
 - **Flown** on Frontier: F0 172543, F1 194702, F2 211908; findings below.
-- **Next:** 0a-5 (static): the avatar fade and its reset, the third-person
-  head joint from the kinematic rig, and what gates TAB after opening. Then
-  1d: no fade on the body, a fade reset at exit, TAB on the real condition,
-  and placement from the head joint.
+- **Next:** flight F3 on Frontier: `avatar fade: wrote 0` on entering and
+  `put ... back to -1` after the exit (the weapon opaque again), the probe's
+  `F heartbeat:` VERDICT, F5 from first person reaching mode 3 (`the suite
+  was ready after N updates`), and `H joints:` standing, crouched, weapon
+  drawn and holstered (`H heartbeat:` has the call microseconds).
 - **Temporary keys:** `[advanced] explorer_cam_probe` (the instruments;
   removed at arc close). `[fix] explorer_cam_eye_up/_forward/_right`: they
   stand in for the head bone; Sean tunes the bone-to-eye offset once, it
@@ -694,3 +696,33 @@ Frontier, v0.18.3-21-g0cff6a93 (version line checked),
   kinematic rig instead.
 - **Detach key.** I3 pressed logged only its first sight; Sean did not
   detach this flight.
+
+## 2026-10-08 Phase 1d: the fade global, the TAB wait
+
+Built and gated, not flown. The dither-fade int at 0x5E9DC28 (-1 = auto) is written 0 while a placement stands, only if it reads -1 first
+(else `avatar fade: ... someone else owns it`), and put back to -1 only if it still reads 0, once the session ended or the placement
+released for a detach AND the camera is closed (mode 0) or detached (5/6), never in 3/4. The F5 exit is unhide, close, restore. Also
+restored at DLL unload (FreeLibrary path) and when `fix.explorer_cam` goes off.
+
+TAB: ToggleFreeCam waits for mode 1/2, +0x3E1 = 0 and the shared record's +0x1D = 0, five updates running (`the suite was ready after N
+updates`), presses once, then waits up to 900 updates for mode 3 (`the game queued the entry itself` if +0x3E1 goes to 1); an abort names
+the unmet condition. The shared record is not embedded: the controller caches an interface at +0x108 and gets the record by a virtual call
+(slot +0x20). We decode that accessor (`lea rax,[rcx+d]; ret`) and read +0x1D at interface + d; any other shape logs its bytes once and
+leaves +0x1D unchecked.
+
+Probe `F` (advanced.explorer_cam_probe only): hook 0x3DD6040 (steals 5), original first, then comp+0x378 -> block +0x90 enabled, +0x120
+amount, comp+0x380 eased; `F heartbeat:` every 5 s, and with the global at 0 enabled = 1 must read 0 (`VERDICT`). Epic's exe bytes match.
+
+## 2026-10-08 Phase 1d: instrument H, the head joint
+
+Built and gated, not flown; log-only, `advanced.explorer_cam_probe`. In the free-camera hook's post-call (the camera-job thread, nothing
+held), at most once a second: HUM = *(activity+0x368) - 0x70 (its vtable, +0x5309EB8, checked first), the EntityRefs HUM+0x178 (third-person)
+and +0x170 (first-person; live when ER+0xC0 >= 5, entity at ER+0xC8), the entity container's component lookup (a game call; its function is
+not pinned, only required to lie in the image, and its RVA is logged), the skeleton interface (RR vtable +0x559CF90 or AO +0x517DC20),
+FindJoint for both names once per interface, then +0x58 and +0x48 for each. Before every call the vtable and slots +0x18 +0x30 +0x48 +0x58
+are compared with the exe's functions; a mismatch or an SEH fault stands H down for the session.
+
+ABI, disassembled on the exe: +0x58 and +0x48 take rcx = interface, edx = joint index (u32), r8 = a 64-byte buffer, void. +0x48 calls
++0x58, so it is never the cheaper; RR's +0x58 reserves 0x3080 bytes through __chkstk and takes the CRITICAL_SECTION at iface+0x348. An index
+past the joint count, or 0xFFFF, is never passed. Lines: `H armed:`, `H slot:` (on change), `H joints:` (1 Hz: both matrices, the world
+translations in commander-local axes, the raw +0xA0 origin), `H heartbeat:` (calls, faults, n/min/max/session-max microseconds), `H stood down:`.

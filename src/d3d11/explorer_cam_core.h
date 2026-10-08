@@ -39,6 +39,10 @@ constexpr uintptr_t kCollisionRva = 0x1091140;    // the camera's sweep/ray coll
 constexpr uintptr_t kBoxPushRva = 0x108F1B0;      // pushes the point out of the commander's box (+0.25); one caller, 0x10728B6
 constexpr uintptr_t kCameraUiRva = 0x47C7640;     // VanityCameraUIActivity's update (rcx = the object), reached by a job thunk
 constexpr uintptr_t kControllerRva = 0x2DF14C0;   // VesselCameraMountControl's update (rcx = the controller), vtable only
+constexpr uintptr_t kAvatarFadeRva = 0x3DD6040;   // AvatarModelComponent's per-frame dither fade (rcx = the component, void): the F fade counter's hook
+constexpr uintptr_t kFadeModeRva = 0x5E9DC28;     // int, .data: the dither fade's mode, -1 = auto (the game's own); when not -1 every avatar gets
+                                                  // enabled = (mode != 0) and amount = the float at kFadeAmountRva
+constexpr uintptr_t kFadeAmountRva = 0x601E088;   // float, .data (zero-initialised, so 0)
 constexpr uint32_t kExpectedTimestamp = 1788384820u;   // the PE TimeDateStamp and SizeOfImage the other build-keyed hooks use
 constexpr uint32_t kExpectedImageSize = 104894464u;
 
@@ -76,6 +80,12 @@ constexpr size_t kControllerPrologueBytes = 15;
 inline constexpr uint8_t kControllerPrologue[kControllerPrologueBytes] = {
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18};
 
+constexpr size_t kAvatarFadePrologueBytes = 16;
+// `mov r11,rsp; push rbx; push rsi; push rdi; sub rsp,110h; mov rax,[rip+disp32]`: CodeHook steals 5 (`mov r11,rsp`, `push rbx`, `push rsi`), no
+// rip-relative byte among them (the disp32 is past byte 16, which is not compared). The entry is 64-byte aligned.
+inline constexpr uint8_t kAvatarFadePrologue[kAvatarFadePrologueBytes] = {
+    0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
+
 // ---- the free-camera activity's fields (Phase 0a, "The object") -------------------------------------------------------------
 constexpr uint32_t kOffLocalPose = 0x3B0;      // 16 floats, row-major 4x4: rows 0-2 = right, up, forward; row 3 = origin (x right, y up, z forward)
 constexpr uint32_t kOffRelative = 0x470;       // 1 = relative to the commander's frame, 0 = world
@@ -94,7 +104,16 @@ constexpr uint32_t kOffUiHidden = 0x1A0;       // a byte; the update toggles it 
 constexpr uint32_t kOffUiHideAction = 0x1D8;   // a qword, NULL unless the game stored FreeCamToggleHUD's handle
 constexpr uint32_t kUiBytes = 0x1E0;
 
+// The avatar component's dither block (read by the fade counter): comp+0x378 -> a shader-parameter block (+0x90 the enabled byte, +0x120 the
+// amount float), comp+0x380 the eased level.
+constexpr uint32_t kOffAvatarFadeBlock = 0x378, kOffAvatarFadeEased = 0x380, kOffFadeBlockEnabled = 0x90, kOffFadeBlockAmount = 0x120;
+constexpr uint32_t kAvatarBytes = 0x388;
+
 // The camera controller (VesselCameraMountControl).
+// The shared record (the +0x30 mode and the +0x1D "free camera overlaps something" flag) is NOT embedded in it: the controller copies the
+// record's +0x30 into +0x3E0 at the start of an update and back at its end, and gets the record by a virtual call (slot +0x20) on the
+// interface cached at +0xF8 (the cache's key at +0x100, the interface pointer at +0x108). See readSharedFlag in explorer_cam.cpp.
+constexpr uint32_t kOffCtlInterface = 0x108, kOffCtlPending = 0x3E1, kOffSharedFlag = 0x1D, kSharedAccessorSlot = 0x20;
 constexpr uint32_t kOffCtlPresetKind = 0x2E8;  // an int: 0 = ToggleFreeCam from a preset gives the free camera; 1 = it toggles presets 1 and 2
 constexpr uint32_t kOffCtlPhotoAction = 0x310; // PhotoCameraToggle: opens the camera when the mode is 0, closes it otherwise
 constexpr uint32_t kOffCtlFreeAction = 0x328;  // ToggleFreeCam (TAB), read only in modes 1 and 2
@@ -380,26 +399,36 @@ constexpr uint32_t kMaxFaults = 8;   // after this many faulting guarded accesse
 
 // ---- F5: the sequence that opens the camera and switches to the free camera ---------------------------------------------------
 // The controller's pre-call, one decision per update (VesselCameraMountControl's update, mode byte +0x3E0):
-//   ENTER from mode 0 : press PhotoCameraToggle, wait for 1 or 2, press ToggleFreeCam, wait for 3. A session is on from the request.
-//   ENTER from 1 or 2 : press ToggleFreeCam, wait for 3.      From 3 or 4: nothing to press, the placement machine takes over.
+//   ENTER from mode 0 : press PhotoCameraToggle, wait for 1 or 2, WAIT until the suite is ready, press ToggleFreeCam ONCE, wait for
+//                       3. A session is on from the request.
+//   ENTER from 1 or 2 : the same, from the readiness wait.   From 3 or 4: nothing to press, the placement machine takes over.
 //   ENTER from 5, 6   : refused (a detached camera must be left first); no session.
 //   EXIT              : unhide the camera UI if EDVR hid it (the UI hook does it, this waits), then press PhotoCameraToggle, which
 //                       closes the camera from any mode; the session ends at mode 0.
 //   Mode 0 by ANY route ends the session once the camera has been open; a detach (5) mid-session keeps it.
-// One press per update. Each wait is kWaitUpdates updates; past it the sequence aborts with a line.
+// One press per update. THE TAB WAIT (F2: ToggleFreeCam pressed the update after the suite opened was not taken): ToggleFreeCam is
+// pressed only when the suite looks ready -- mode 1 or 2, the controller's pending-retry byte (+0x3E1) clear, and the shared
+// record's +0x1D clear when that can be read -- for kSeqReadyUpdates updates in a row. SetMode(3) returns without latching when
+// the shared +0x1D is set or an object the controller cannot show us says no, so a press made too early is simply lost. Pressed
+// once; then up to kSeqTabWaitUpdates (about 10 s) for mode 3, never re-pressed: while +0x3E1 is 1 the game is retrying the entry
+// itself (F2 saw it complete about 6 s late), and the session stays alive to place it. Each wait that runs out aborts with a line that
+// names the condition still unmet. The open wait is kSeqWaitUpdates.
 enum class F5Req : uint32_t { None = 0, Enter = 1, Exit = 2 };
 enum class CtlPress : uint8_t { None = 0, Photo = 1, Free = 2 };
 enum class SeqEvent : uint32_t {
     None = 0,
     EnterFromClosed,        // mode 0: opening the camera
-    EnterFromPreset,        // mode 1 or 2: switching to the free camera
+    EnterFromPreset,        // mode 1 or 2: waiting for the suite to be ready, then the free camera
     EnterFromFree,          // mode 3 or 4: already in the free camera
-    EnterOpened,            // the camera is open on a preset: pressing ToggleFreeCam
+    EnterOpened,            // the camera opened on a preset: waiting for it to be ready
+    EnterReady,             // the suite looked ready for kSeqReadyUpdates updates: pressing ToggleFreeCam once
+    EnterQueued,            // the game queued the entry itself (+0x3E1 = 1): not pressing again
     EnterAttached,          // the free camera is up: the placement machine takes over
     EnterRefusedDetached,   // mode 5
     EnterRefusedVariant,    // mode 6 or unknown
     EnterTimeoutOpen,       // the camera did not open
-    EnterTimeoutFree,       // the free camera did not come up
+    EnterTimeoutReady,      // the suite was never ready
+    EnterTimeoutFree,       // the free camera did not come up after the press
     EnterIgnored,           // a second ENTER while a session is on
     ExitStart,
     ExitUnhiding,           // waiting for the UI hook to give the camera UI back
@@ -408,50 +437,70 @@ enum class SeqEvent : uint32_t {
     ExitDone,               // mode 0 after the close
     ExitTimeout,            // the camera did not close
     ExitIgnored,            // EXIT with no session
-    SessionEnded            // mode 0 on its own (the user closed the camera, or it closed)
+    SessionEnded,           // mode 0 on its own (the user closed the camera, or it closed)
+    SharedRecordFound,      // (the glue's, not the sequencer's) the shared record was reached; flags = its +0x1D
+    SharedRecordUnreadable  // (the glue's) it could not be: the accessor's first 8 bytes are in the event
 };
 constexpr uint32_t kSeqWaitUpdates = 90;
+constexpr uint32_t kSeqReadyUpdates = 5;
+constexpr uint32_t kSeqTabWaitUpdates = 900;
+// Which conditions of the TAB wait were unmet (a bit mask carried by the timeout events).
+constexpr uint32_t kUnmetMode = 1, kUnmetPending = 2, kUnmetShared = 4, kSharedUnobserved = 8;
+
+// What the controller shows on this update. `sharedFlag` is the shared record's +0x1D, or -1 when it cannot be read.
+struct CtlView {
+    uint8_t mode = 0;
+    uint8_t pending = 0;       // controller+0x3E1: the game's own retry of the entry is running
+    int16_t sharedFlag = -1;
+};
 
 struct SeqStep {
     CtlPress press = CtlPress::None;
     SeqEvent ev[3] = {SeqEvent::None, SeqEvent::None, SeqEvent::None};
     uint8_t nev = 0;
     uint8_t mode = 0;
+    uint8_t pending = 0;
     bool sessionActive = false;   // after this step
     bool exiting = false;         // after this step: the EXIT part of the sequence is running
+    uint32_t readyAfter = 0;      // EnterReady / EnterAttached: updates the readiness wait took
+    uint32_t toMode3 = 0;         // EnterAttached: updates from the press to mode 3
+    uint32_t unmet = 0;           // the timeouts: kUnmet* bits
     void add(SeqEvent e) { if (nev < 3) ev[nev++] = e; }
 };
 
 class F5Sequencer {
 public:
-    enum class Stage : uint8_t { Idle, OpenWait, FreeWait, Active, ExitUnhide, ExitClose };
+    enum class Stage : uint8_t { Idle, OpenWait, ReadyWait, FreeWait, Active, ExitUnhide, ExitClose };
 
     Stage stage() const { return m_stage; }
     bool sessionActive() const { return m_stage != Stage::Idle; }
     bool exiting() const { return m_stage == Stage::ExitUnhide || m_stage == Stage::ExitClose; }
     void reset() { *this = F5Sequencer(); }
 
-    // One controller update. `mode` is the mode byte as the previous update left it; `uiHiddenByUs` is the UI hook's word.
-    SeqStep step(uint8_t mode, F5Req req, bool uiHiddenByUs) {
+    // One controller update. `view` is the controller as the previous update left it; `uiHiddenByUs` is the UI hook's word.
+    SeqStep step(const CtlView& view, F5Req req, bool uiHiddenByUs) {
         SeqStep s;
-        s.mode = mode;
+        s.mode = view.mode;
+        s.pending = view.pending;
         if (m_stage == Stage::Idle) {
-            if (req == F5Req::Enter) begin(s, mode);
+            if (req == F5Req::Enter) begin(s, view);
             else if (req == F5Req::Exit) s.add(SeqEvent::ExitIgnored);
             return finish(s);
         }
         if (req == F5Req::Exit && !exiting()) {
-            beginExit(s, mode, uiHiddenByUs);
+            beginExit(s, view.mode, uiHiddenByUs);
             return finish(s);
         }
         if (req == F5Req::Enter) s.add(SeqEvent::EnterIgnored);
+        const uint8_t mode = view.mode;
         switch (m_stage) {
             case Stage::OpenWait:
                 if (mode == 1 || mode == 2) {
-                    m_stage = Stage::FreeWait;
+                    m_stage = Stage::ReadyWait;
                     m_waited = 0;
-                    s.press = CtlPress::Free;
+                    m_ready = 0;
                     s.add(SeqEvent::EnterOpened);
+                    readyStep(s, view);
                 } else if (mode >= 3) {
                     m_stage = Stage::Active;
                     s.add(SeqEvent::EnterAttached);
@@ -460,16 +509,26 @@ public:
                     end();
                 }
                 break;
+            case Stage::ReadyWait:
+                readyStep(s, view);
+                break;
             case Stage::FreeWait:
+                ++m_waited;
                 if (mode >= 3) {
                     m_stage = Stage::Active;
+                    s.readyAfter = m_readyAfter;
+                    s.toMode3 = m_waited;
                     s.add(SeqEvent::EnterAttached);
                 } else if (mode == 0) {
                     s.add(SeqEvent::SessionEnded);
                     end();
-                } else if (++m_waited >= kSeqWaitUpdates) {
+                } else if (m_waited >= kSeqTabWaitUpdates) {
+                    s.unmet = unmetOf(view, true);
                     s.add(SeqEvent::EnterTimeoutFree);
                     end();
+                } else if (view.pending && !m_queuedNoted) {
+                    m_queuedNoted = true;
+                    s.add(SeqEvent::EnterQueued);
                 }
                 break;
             case Stage::Active:
@@ -501,6 +560,45 @@ public:
     }
 
 private:
+    // The conditions of the TAB wait, as a mask of those still unmet.
+    static uint32_t unmetOf(const CtlView& v, bool wantMode3) {
+        uint32_t m = 0;
+        const bool modeOk = wantMode3 ? v.mode >= 3 : (v.mode == 1 || v.mode == 2);
+        if (!modeOk) m |= kUnmetMode;
+        if (v.pending) m |= kUnmetPending;
+        if (v.sharedFlag > 0) m |= kUnmetShared;
+        if (v.sharedFlag < 0) m |= kSharedUnobserved;
+        return m;
+    }
+    void readyStep(SeqStep& s, const CtlView& v) {
+        if (v.mode >= 3) {
+            m_stage = Stage::Active;
+            s.readyAfter = m_waited;
+            s.add(SeqEvent::EnterAttached);
+            return;
+        }
+        if (v.mode == 0) {
+            s.add(SeqEvent::SessionEnded);
+            end();
+            return;
+        }
+        ++m_waited;
+        const bool ready = v.pending == 0 && v.sharedFlag <= 0;   // mode is 1 or 2 here: 0 and 3+ returned above
+        m_ready = ready ? m_ready + 1 : 0;
+        if (m_ready >= kSeqReadyUpdates) {
+            m_stage = Stage::FreeWait;
+            m_readyAfter = m_waited;
+            m_waited = 0;
+            m_queuedNoted = false;
+            s.readyAfter = m_readyAfter;
+            s.press = CtlPress::Free;
+            s.add(SeqEvent::EnterReady);
+        } else if (m_waited >= kSeqTabWaitUpdates) {
+            s.unmet = unmetOf(v, false);
+            s.add(SeqEvent::EnterTimeoutReady);
+            end();
+        }
+    }
     SeqStep finish(SeqStep& s) {
         s.sessionActive = m_stage != Stage::Idle;
         s.exiting = exiting();
@@ -509,9 +607,10 @@ private:
     void end() {
         m_stage = Stage::Idle;
         m_waited = 0;
+        m_ready = 0;
     }
-    void begin(SeqStep& s, uint8_t mode) {
-        switch (mode) {
+    void begin(SeqStep& s, const CtlView& v) {
+        switch (v.mode) {
             case 0:
                 m_stage = Stage::OpenWait;
                 m_waited = 0;
@@ -520,10 +619,11 @@ private:
                 break;
             case 1:
             case 2:
-                m_stage = Stage::FreeWait;
+                m_stage = Stage::ReadyWait;
                 m_waited = 0;
-                s.press = CtlPress::Free;
+                m_ready = 0;
                 s.add(SeqEvent::EnterFromPreset);
+                readyStep(s, v);
                 break;
             case 3:
             case 4:
@@ -565,6 +665,9 @@ private:
 
     Stage m_stage = Stage::Idle;
     uint32_t m_waited = 0;
+    uint32_t m_ready = 0;
+    uint32_t m_readyAfter = 0;
+    bool m_queuedNoted = false;
 };
 
 // What F5 does when pressed. Pure, so the table is a test.
@@ -586,6 +689,106 @@ inline F5Action decideF5(const F5Inputs& in) {
     if (in.mode == 0 && in.onFootKnown && !in.onFoot) return F5Action::RefuseNotOnFoot;
     return F5Action::Enter;
 }
+
+// ---- the avatar fade global ---------------------------------------------------------------------------------------------------
+// Placed inside the commander, the game's dither fade (AvatarModelComponent's per-frame update) fades the whole avatar away, and after
+// the camera closes it can leave the first-person weapon faded (F2). The fade has a mode global, -1 = auto; when it is not -1 every
+// avatar gets enabled = (mode != 0), amount = a float that is 0. So 0 is the plain opaque draw. While a placement stands, write 0, but
+// only if it reads -1 first (anything else means someone else owns it); put -1 back only if it still reads 0, when the session is over
+// or the placement was released for a detach, AND the camera is closed or detached -- never while the camera is still in the body
+// (mode 3 or 4), because the fade only recomputes in third-person mode and closing then would latch the faded state onto shared
+// blocks. Also restored at unload.
+enum class FadeEvent : uint32_t { None = 0, Written, Foreign, Restored, RestoredAtUnload, ChangedUnderUs, Unreadable, WriteFailed, RestoreFailed };
+constexpr int32_t kFadeAuto = -1;
+struct FadeIn {
+    bool active = false;      // Explorer Cam on with every required hook armed
+    bool placed = false;      // a placement is in force (a pose is being written)
+    bool session = false;     // an F5 session is on
+    uint8_t ctlMode = 0;      // the controller's mode byte as last read
+    bool readOk = false;      // the global could be read
+    int32_t value = 0;
+    bool unload = false;      // the DLL is going away
+};
+struct FadeStep {
+    enum class Act : uint8_t { None, Write, Restore };
+    Act act = Act::None;
+    FadeEvent ev = FadeEvent::None;
+    int32_t seen = 0;
+};
+class FadeGuard {
+public:
+    bool ours() const { return m_ours; }
+    void reset() { *this = FadeGuard(); }
+
+    FadeStep step(const FadeIn& in) {
+        FadeStep s;
+        s.seen = in.value;
+        if (in.unload) {
+            if (m_ours) {
+                if (in.readOk && in.value == 0) {
+                    s.act = FadeStep::Act::Restore;
+                    s.ev = FadeEvent::RestoredAtUnload;
+                } else if (in.readOk) {
+                    s.ev = FadeEvent::ChangedUnderUs;
+                }
+                m_ours = false;
+            }
+            return s;
+        }
+        if (m_ours) {
+            const bool sessionOver = !in.session;
+            const bool detachedRelease = !in.placed && (in.ctlMode == 5 || in.ctlMode == 6);
+            const bool cameraGone = in.ctlMode == 0 || in.ctlMode == 5 || in.ctlMode == 6;
+            if ((sessionOver || detachedRelease) && cameraGone) {
+                if (!in.readOk) {
+                    if (!m_unreadableNoted) {
+                        m_unreadableNoted = true;
+                        s.ev = FadeEvent::Unreadable;
+                    }
+                } else if (in.value == 0) {
+                    s.act = FadeStep::Act::Restore;
+                    s.ev = FadeEvent::Restored;
+                    m_ours = false;
+                } else {
+                    s.ev = FadeEvent::ChangedUnderUs;   // someone else changed it: not ours to put back
+                    m_ours = false;
+                }
+            }
+            return s;
+        }
+        if (!(in.active && in.placed)) {
+            m_refused = false;   // the next placement may try again
+            m_unreadableNoted = false;
+            return s;
+        }
+        if (m_refused) return s;
+        if (!in.readOk) {
+            if (!m_unreadableNoted) {
+                m_unreadableNoted = true;
+                s.ev = FadeEvent::Unreadable;
+            }
+            return s;
+        }
+        if (in.value == kFadeAuto) {
+            s.act = FadeStep::Act::Write;
+            s.ev = FadeEvent::Written;
+            m_ours = true;
+        } else {
+            s.ev = FadeEvent::Foreign;
+            m_refused = true;
+        }
+        return s;
+    }
+    // The caller could not do what step() said: a write that failed leaves it not ours and the placement refused; a restore that
+    // failed stays ours so the next frame tries again.
+    void writeFailed() { m_ours = false; m_refused = true; }
+    void restoreFailed() { m_ours = true; }
+
+private:
+    bool m_ours = false;
+    bool m_refused = false;
+    bool m_unreadableNoted = false;
+};
 
 // ---- the camera UI ------------------------------------------------------------------------------------------------------------
 // FreeCamToggleHUD toggles +0x1A0 (1 = hidden) when the pressed-int at *(+0x1D8)+0x1C is nonzero. The hider presses it once per
@@ -775,22 +978,48 @@ struct Sink {
     void operator()(const char* line) const { if (fn) fn(ctx, line); }
 };
 
-inline void putSeqEvent(Line& o, SeqEvent e, uint32_t mode, uint32_t presetKind) {
+inline void putUnmet(Line& o, uint32_t unmet) {
+    bool any = false;
+    if (unmet & kUnmetMode) { o.put("%smode is not what is wanted", any ? ", " : ""); any = true; }
+    if (unmet & kUnmetPending) { o.put("%s+0x3E1 = 1 (the game's own retry is still running)", any ? ", " : ""); any = true; }
+    if (unmet & kUnmetShared) { o.put("%sthe shared record's +0x1D = 1", any ? ", " : ""); any = true; }
+    if (!any) o.put("none of the observable conditions");
+    if (unmet & kSharedUnobserved) o.put(" (the shared record's +0x1D cannot be read here, so it could not be checked)");
+}
+struct SeqDetail {
+    uint32_t readyAfter = 0, toMode3 = 0, unmet = 0;
+};
+
+inline void putSeqEvent(Line& o, SeqEvent e, uint32_t mode, uint32_t presetKind, const SeqDetail& d = SeqDetail()) {
     switch (e) {
         case SeqEvent::EnterFromClosed:
             o.put("F5 enter: the camera is closed (mode 0); opening it (PhotoCameraToggle), then the free camera (ToggleFreeCam)");
             break;
         case SeqEvent::EnterFromPreset:
-            o.put("F5 enter: the camera is open on a preset (mode %u); pressing ToggleFreeCam (preset kind +0x2E8 = %u)", mode, presetKind);
+            o.put("F5 enter: the camera is open on a preset (mode %u); waiting for the suite to be ready, then ToggleFreeCam (preset kind +0x2E8 = %u)",
+                  mode, presetKind);
             break;
         case SeqEvent::EnterFromFree:
             o.put("F5 enter: already in the free camera (mode %u); nothing to press, the pose is placed on the next update", mode);
             break;
         case SeqEvent::EnterOpened:
-            o.put("F5 enter: the camera opened on a preset (mode %u); pressing ToggleFreeCam (preset kind +0x2E8 = %u)", mode, presetKind);
+            o.put("F5 enter: the camera opened on a preset (mode %u); waiting until the suite is ready (mode 1 or 2, +0x3E1 clear, the shared "
+                  "+0x1D clear when readable, %u updates in a row) before ToggleFreeCam (preset kind +0x2E8 = %u)",
+                  mode, kSeqReadyUpdates, presetKind);
+            break;
+        case SeqEvent::EnterReady:
+            o.put("F5 enter: the suite was ready after %u updates (mode %u, +0x3E1 clear); pressing ToggleFreeCam ONCE and waiting up to %u updates for mode 3",
+                  d.readyAfter, mode, kSeqTabWaitUpdates);
+            break;
+        case SeqEvent::EnterQueued:
+            o.put("F5 enter: the game queued the entry itself (+0x3E1 = 1, its own retry): not pressing again, waiting for mode 3");
             break;
         case SeqEvent::EnterAttached:
-            o.put("F5 enter: the free camera is up (mode %u, %s); the pose is placed on the next update", mode, modeText(mode));
+            if (d.toMode3)
+                o.put("F5 enter: the free camera is up (mode %u, %s): ready after %u updates, mode 3 after %u more; the pose is placed on the next update",
+                      mode, modeText(mode), d.readyAfter, d.toMode3);
+            else
+                o.put("F5 enter: the free camera is up (mode %u, %s); the pose is placed on the next update", mode, modeText(mode));
             break;
         case SeqEvent::EnterRefusedDetached:
             o.put("F5 enter refused: the camera is detached (mode 5, the world lock); leave it first (the game's own camera key), then press F5");
@@ -801,10 +1030,29 @@ inline void putSeqEvent(Line& o, SeqEvent e, uint32_t mode, uint32_t presetKind)
         case SeqEvent::EnterTimeoutOpen:
             o.put("F5 enter aborted: the camera did not open within %u updates (mode still %u); the game would not open it just now", kSeqWaitUpdates, mode);
             break;
+        case SeqEvent::EnterTimeoutReady:
+            o.put("F5 enter aborted: the suite was not ready within %u updates (about 10 s; mode %u); still unmet: ", kSeqTabWaitUpdates, mode);
+            putUnmet(o, d.unmet);
+            break;
         case SeqEvent::EnterTimeoutFree:
-            o.put("F5 enter aborted: the free camera did not come up within %u updates (mode %u, preset kind +0x2E8 = %u; kind 1 makes "
-                  "ToggleFreeCam toggle presets 1 and 2 instead)",
-                  kSeqWaitUpdates, mode, presetKind);
+            o.put("F5 enter aborted: the free camera did not come up within %u updates of the ToggleFreeCam press (about 10 s; mode %u, preset kind "
+                  "+0x2E8 = %u; kind 1 makes ToggleFreeCam toggle presets 1 and 2 instead); still unmet: ",
+                  kSeqTabWaitUpdates, mode, presetKind);
+            putUnmet(o, d.unmet);
+            break;
+        case SeqEvent::SharedRecordFound:
+            o.put("the controller's shared record was reached through the interface cached at +0x108 (its slot +0x20 is a plain `lea rax,[rcx+disp]; "
+                  "ret`): +0x1D = %u, so the TAB wait checks it",
+                  d.unmet);
+            break;
+        case SeqEvent::SharedRecordUnreadable:
+            o.put("the controller's shared record is reached by a virtual call (slot +0x20 of the interface cached at +0x108), not embedded in the "
+                  "controller; its accessor could not be read as a plain `lea rax,[rcx+disp]; ret` (first bytes %02X %02X %02X %02X %02X %02X %02X %02X), "
+                  "so +0x1D cannot be checked and the TAB wait goes on mode and +0x3E1 alone",
+                  static_cast<unsigned>(d.readyAfter & 0xFF), static_cast<unsigned>((d.readyAfter >> 8) & 0xFF),
+                  static_cast<unsigned>((d.readyAfter >> 16) & 0xFF), static_cast<unsigned>((d.readyAfter >> 24) & 0xFF),
+                  static_cast<unsigned>(d.toMode3 & 0xFF), static_cast<unsigned>((d.toMode3 >> 8) & 0xFF),
+                  static_cast<unsigned>((d.toMode3 >> 16) & 0xFF), static_cast<unsigned>((d.toMode3 >> 24) & 0xFF));
             break;
         case SeqEvent::EnterIgnored:
             o.put("F5 enter ignored: an Explorer Cam session is already on");
@@ -891,11 +1139,26 @@ inline void formatEvent(char* out, size_t cap, const Event& e, uint32_t frame) {
                   "the game's position edits are the game's again",
                   prefix(), e.count);
             break;
-        case EvKind::Seq:
+        case EvKind::Seq: {
+            // A Seq event carries its detail in the spare fields: before = the readiness wait, updates = the wait for mode 3 (or the
+            // accessor's high four bytes), flags = the unmet conditions (or +0x1D, or the accessor's low four bytes).
+            SeqDetail d;
+            const SeqEvent se = static_cast<SeqEvent>(e.why);
+            if (se == SeqEvent::SharedRecordFound) {
+                d.unmet = e.flags;
+            } else if (se == SeqEvent::SharedRecordUnreadable) {
+                d.readyAfter = e.flags;
+                d.toMode3 = static_cast<uint32_t>(e.updates);
+            } else {
+                d.readyAfter = e.before;
+                d.toMode3 = static_cast<uint32_t>(e.updates);
+                d.unmet = e.flags;
+            }
             o.put("%s ", prefix());
-            putSeqEvent(o, static_cast<SeqEvent>(e.why), e.after, e.count);
+            putSeqEvent(o, se, e.after, e.count, d);
             o.put(" (ctl=0x%llX frame=%u)", act, frame);
             break;
+        }
         case EvKind::Ui:
             o.put("%s %s (ui=0x%llX frame=%u)", prefix(), uiEventText(static_cast<UiEvent>(e.why)), act, frame);
             break;
@@ -906,6 +1169,50 @@ inline void formatEvent(char* out, size_t cap, const Event& e, uint32_t frame) {
             break;
         default:
             o.put("%s event %u (unnamed)", prefix(), e.kind);
+            break;
+    }
+}
+
+inline void formatFade(char* out, size_t cap, FadeEvent ev, int32_t value, uint32_t mode, float amount, uint32_t frame) {
+    Line o(out, cap);
+    switch (ev) {
+        case FadeEvent::Written:
+            o.put("%s avatar fade: wrote 0 to the dither-fade mode global (EliteDangerous64.exe+0x5E9DC28, was -1 = auto; the amount float at +0x601E088 "
+                  "reads %g): while the camera is inside the body every avatar draws opaque instead of dithering away; it is put back to -1 when the "
+                  "session is over and the camera is closed or detached (frame=%u)",
+                  prefix(), static_cast<double>(amount), frame);
+            break;
+        case FadeEvent::Foreign:
+            o.put("%s avatar fade: the dither-fade mode global reads %d, not -1 (auto), so someone else owns it: Explorer Cam leaves it alone and the "
+                  "body may dither away while the camera is inside it (frame=%u)",
+                  prefix(), value, frame);
+            break;
+        case FadeEvent::Restored:
+            o.put("%s avatar fade: put the dither-fade mode global back to -1 (auto): the session is over or the placement released, and the camera is "
+                  "%s (controller mode %u) (frame=%u)",
+                  prefix(), mode == 0 ? "closed" : "detached", mode, frame);
+            break;
+        case FadeEvent::RestoredAtUnload:
+            o.put("%s avatar fade: put the dither-fade mode global back to -1 (auto) at unload", prefix());
+            break;
+        case FadeEvent::ChangedUnderUs:
+            o.put("%s avatar fade: the dither-fade mode global now reads %d, not the 0 Explorer Cam wrote, so it is left alone (someone else changed it) "
+                  "(frame=%u)",
+                  prefix(), value, frame);
+            break;
+        case FadeEvent::Unreadable:
+            o.put("%s avatar fade: the dither-fade mode global could not be read (a fault); it is retried", prefix());
+            break;
+        case FadeEvent::WriteFailed:
+            o.put("%s avatar fade: the dither-fade mode global could not be written (not committed read-write, or a fault); the body may dither away "
+                  "while the camera is inside it",
+                  prefix());
+            break;
+        case FadeEvent::RestoreFailed:
+            o.put("%s avatar fade: the dither-fade mode global could not be put back to -1 (a fault); it is retried", prefix());
+            break;
+        default:
+            o.put("%s avatar fade: event %u (unnamed)", prefix(), static_cast<uint32_t>(ev));
             break;
     }
 }
@@ -952,6 +1259,7 @@ struct HeartbeatIn {
     uint64_t ctlCalls = 0, ctlCallsWindow = 0;
     uint32_t ctlMode = 0;
     bool session = false;
+    bool fadeOurs = false;            // EDVR holds the dither-fade global at 0
     bool uiHiddenByUs = false;
     uint64_t uiCalls = 0;
     uint64_t waiting = 0, contended = 0, foreign = 0, lost = 0;
@@ -962,7 +1270,7 @@ inline void formatHeartbeat(char* out, size_t cap, const HeartbeatIn& h) {
     Line o(out, cap);
     o.put("%s heartbeat: phase=%s session=%s act=0x%llX +0x48C=%u window=%.1fs updates_placed=%llu(+%llu) collision_bypassed=%llu(+%llu) "
           "collision_forwarded=%llu(+%llu) box_bypassed=%llu(+%llu) box_forwarded=%llu(+%llu) hook_calls=%llu(+%llu) "
-          "controller_calls=%llu(+%llu) controller_mode=%u ui_hidden_by_edvr=%s ui_calls=%llu faults=%u waiting_updates=%llu contended=%llu "
+          "controller_calls=%llu(+%llu) controller_mode=%u fade_global_held_by_edvr=%s ui_hidden_by_edvr=%s ui_calls=%llu faults=%u waiting_updates=%llu contended=%llu "
           "foreign=%llu events_lost=%llu eye(up=%.3f forward=%.3f right=%.3f)",
           prefix(), h.phase, h.session ? "on" : "off", static_cast<unsigned long long>(h.activity), h.state, h.windowSeconds,
           static_cast<unsigned long long>(h.updates), static_cast<unsigned long long>(h.updatesWindow),
@@ -972,7 +1280,7 @@ inline void formatHeartbeat(char* out, size_t cap, const HeartbeatIn& h) {
           static_cast<unsigned long long>(h.boxForwarded), static_cast<unsigned long long>(h.boxForwardedWindow),
           static_cast<unsigned long long>(h.hookCalls), static_cast<unsigned long long>(h.hookCallsWindow),
           static_cast<unsigned long long>(h.ctlCalls), static_cast<unsigned long long>(h.ctlCallsWindow), h.ctlMode,
-          h.uiHiddenByUs ? "yes" : "no", static_cast<unsigned long long>(h.uiCalls), h.faults,
+          h.fadeOurs ? "yes" : "no", h.uiHiddenByUs ? "yes" : "no", static_cast<unsigned long long>(h.uiCalls), h.faults,
           static_cast<unsigned long long>(h.waiting), static_cast<unsigned long long>(h.contended),
           static_cast<unsigned long long>(h.foreign), static_cast<unsigned long long>(h.lost), h.eye.up, h.eye.forward, h.eye.right);
 }
