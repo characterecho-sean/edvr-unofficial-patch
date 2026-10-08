@@ -71,7 +71,7 @@ class SystemSource {
       vr::ETrackedPropertyError,float,unsigned) noexcept {}
   virtual void notePropertyQuery(unsigned,vr::TrackedDeviceIndex_t,
       vr::ETrackedDeviceProperty,vr::ETrackedPropertyError) noexcept {}
-  virtual void noteHiddenMesh(unsigned,uint64_t,uint32_t,const char*) noexcept {}
+  virtual void noteHiddenMesh(unsigned,uint64_t,uint32_t,const char*,uint32_t) noexcept {}
   virtual void unsupported(unsigned slot) noexcept=0;
 };
 }

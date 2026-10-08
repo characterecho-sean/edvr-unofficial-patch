@@ -318,33 +318,44 @@ bool OpenVRSystem::PollNextEventWithPose(ETrackingUniverseOrigin origin,VREvent_
   if(!source_.pollEvent(s.generation,origin,next,atEvent))return false;
   *event=next;if(pose)*pose=atEvent;return true;
 }
+const OpenVRSystem::MeshEntry* OpenVRSystem::eyeMesh(const SystemRead& s,unsigned e,const char*& failure) {
+  // Keep temporal jitter out of the retained mesh; its conservative inset
+  // leaves the unjittered visible region unmasked.
+  const RawFov fov=geometryValid(s)?s.geometry.raw[e]:s.optics.raw[e];
+  for(auto& entry:meshes_)if(entry->masks==s.hiddenMasks&&entry->eye==e&&
+      std::memcmp(&entry->fov,&fov,sizeof(fov))==0)return entry.get();
+  if(meshes_.size()>=64){failure="retention_limit";return nullptr;}
+  auto entry=std::make_unique<MeshEntry>();entry->masks=s.hiddenMasks;entry->eye=e;entry->fov=fov;
+  if(!projectHiddenMask(s.hiddenMasks->eyes[e],fov,s.hiddenMasks->guard[e][0],
+                        s.hiddenMasks->guard[e][1],entry->vertices,&entry->dropped)){
+    failure="invalid_mesh";return nullptr;
+  }
+  meshes_.push_back(std::move(entry));return meshes_.back().get();
+}
 HiddenAreaMesh_t OpenVRSystem::GetHiddenAreaMesh(EVREye eye) {
   if(!eyeValid(eye))return {};
   const auto s=source_.read();HiddenAreaMesh_t result{};const unsigned e=unsigned(eye);
-  const char* reason="unavailable";uint64_t revision=s.hiddenMasks?s.hiddenMasks->revision:0;
+  const char* reason="unavailable";uint64_t revision=s.hiddenMasks?s.hiddenMasks->revision:0;uint32_t dropped=0;
   try {
     if(opticsAvailable(s)&&s.hiddenMasksCompatible&&s.hiddenMasks&&s.hiddenMasks->generation==s.generation) {
-      // Keep temporal jitter out of the retained mesh; its conservative inset
-      // leaves the unjittered visible region unmasked.
-      const RawFov fov=geometryValid(s)?s.geometry.raw[e]:s.optics.raw[e];
-      std::lock_guard<std::mutex> lock(meshMutex_);MeshEntry* selected=nullptr;
-      for(auto& entry:meshes_)if(entry->masks==s.hiddenMasks&&entry->eye==e&&
-          std::memcmp(&entry->fov,&fov,sizeof(fov))==0){selected=entry.get();break;}
-      if(!selected&&meshes_.size()<64) {
-        auto entry=std::make_unique<MeshEntry>();entry->masks=s.hiddenMasks;entry->eye=e;entry->fov=fov;
-        if(projectHiddenMask(s.hiddenMasks->eyes[e],fov,s.hiddenMasks->guard[e][0],
-                             s.hiddenMasks->guard[e][1],entry->vertices)) {
-          selected=entry.get();meshes_.push_back(std::move(entry));
-        } else reason="invalid_mesh";
-      } else if(!selected)reason="retention_limit";
-      if(selected) {
-        result.unTriangleCount=uint32_t(selected->vertices.size()/3);
-        result.pVertexData=result.unTriangleCount?selected->vertices.data():nullptr;
-        reason=result.unTriangleCount?"runtime":"empty";
+      std::lock_guard<std::mutex> lock(meshMutex_);const char* otherFailure="";
+      const MeshEntry* mine=eyeMesh(s,e,reason);const MeshEntry* other=eyeMesh(s,1-e,otherFailure);
+      if(mine) {
+        dropped=mine->dropped;
+        // Elite makes one vertex buffer per eye from the counts it is given, and
+        // a zero-byte buffer is a CreateBuffer failure it treats as fatal. An
+        // eye is served a mesh only when the other eye is served one as well; a
+        // headset whose two eyes disagree gets neither, as one with no mask does.
+        if(mine->vertices.empty())reason="empty";
+        else if(!other||other->vertices.empty())reason="unpaired";
+        else {
+          result.unTriangleCount=uint32_t(mine->vertices.size()/3);
+          result.pVertexData=mine->vertices.data();reason="runtime";
+        }
       }
     } else if(!s.hiddenMasksCompatible)reason="modified_frustum";
   } catch(...) {reason="allocation_failure";result={};}
-  if(meshProbe_[e].take(GetTickCount64()))source_.noteHiddenMesh(e,revision,result.unTriangleCount,reason);
+  if(meshProbe_[e].take(GetTickCount64()))source_.noteHiddenMesh(e,revision,result.unTriangleCount,reason,dropped);
   return result;
 }
 bool OpenVRSystem::GetControllerState(TrackedDeviceIndex_t,VRControllerState_t* state) {if(state)*state={};return false;}

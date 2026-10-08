@@ -684,10 +684,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     nativeTracePrintf("property_query,slot=%u,index=%u,property=%u,error=%u,game_frames=%u,game_rvas=%s\n",
       slot,index,unsigned(property),unsigned(error),stack.gameFrames,stack.rvas);
   }
-  void noteHiddenMesh(unsigned eye,uint64_t revision,uint32_t triangles,const char* reason) noexcept override {
+  void noteHiddenMesh(unsigned eye,uint64_t revision,uint32_t triangles,const char* reason,uint32_t dropped) noexcept override {
     const auto stack=edvr::captureGameCallStack();
-    nativeTracePrintf("hidden_mesh_query,eye=%u,revision=%llu,triangles=%u,reason=%s,game_frames=%u,game_rvas=%s\n",
-      eye,(unsigned long long)revision,triangles,reason,stack.gameFrames,stack.rvas);
+    nativeTracePrintf("hidden_mesh_query,eye=%u,revision=%llu,triangles=%u,dropped=%u,reason=%s,game_frames=%u,game_rvas=%s\n",
+      eye,(unsigned long long)revision,triangles,dropped,reason,stack.gameFrames,stack.rvas);
   }
   vr::EVRInitError start(uint32_t token,const std::atomic<bool>& cancelled,RuntimeInterfaces& out) override {
     ++starts;
