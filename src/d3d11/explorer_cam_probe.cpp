@@ -23,6 +23,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "explorer_cam.h"
+#include "explorer_cam_f2.h"
 #include "flat_camera_inject.h"
 #include "vr_camera_census.h"
 
@@ -68,6 +69,8 @@ __declspec(noinline) void observeActivity(void* a) noexcept {
     const bool read = g_shared.faults.load(std::memory_order_relaxed) < ecp::kMaxFaults &&
                       sehCopyRaw(static_cast<const uint8_t*>(a), &raw);
     ecp::noteActivityCall(g_shared, reinterpret_cast<uintptr_t>(a), GetCurrentThreadId(), read ? &raw : nullptr);
+    // The F2 instruments ride the same observer: the activity's pressed ints on change, and the neck's sample paired with this update.
+    explorerCamF2FreeCamera(a);
 }
 
 // ---- I1's feed from the census ---------------------------------------------------------------------------------------------
@@ -97,7 +100,7 @@ void arm(uint64_t nowMs, const ecp::Sink& sink) {
     g_announced = true;
     // The hook is explorer_cam.cpp's (one target gets one CodeHook); the probe attaches its observer to it. Attaching is idempotent,
     // and a hook that stood down stays down.
-    const ExplorerCamHookStatus hook = explorerCamProbeAttach(true, &observeActivity);
+    const ExplorerCamHookStatus hook = explorerCamObserve(ExplorerCamHook::FreeCamera, &observeActivity, true);
     if (g_i3 == I3State::NotTried) {
         if (hook.state == ExplorerCamHookStatus::Armed) {
             g_i3 = I3State::Armed;
@@ -113,13 +116,17 @@ void arm(uint64_t nowMs, const ecp::Sink& sink) {
                 ecp::prefixI3Down(), hook.why);
         }
     }
+    // I4 (the camera controller) and N (the commander's eye): the F2 instruments, in their own file; they say what they did once.
+    explorerCamF2Arm(ecm::Sink{sink.fn, sink.ctx});
     g_i2On.store(true, std::memory_order_release);
     detail::g_vrCensusCameraNote = &censusNote;
     g_consumer.start(nowMs, g_shared.totalCalls.load(std::memory_order_relaxed));
     if (first) {
         say(sink, "%s (advanced.explorer_cam_probe): a temporary, log-only instrument for the Explorer Cam redesign (Phase 0b, "
-                  "flight F0), removed when the arc closes; it writes nothing to the game. Lines: 'explorer cam probe I3|I1|I2 "
+                  "flights F0 and F2), removed when the arc closes; it writes nothing to the game except the one vtable slot of the eye "
+                  "interface that N swaps for a getter returning what the original returns. Lines: 'explorer cam probe I3|I1|I2|I4|N "
                   "armed/stood down' once, '... heartbeat:' every 5 s, 'I3 change:' at once on a change of +0x48C/+0x470/+0x471/+0x473, "
+                  "'I3 pressed:' on a change of the three action ints, 'I4 change:' on every controller mode transition, 'N local:' 'N matrix:' "
                   "and 'I3 pose:' 'I1 cam:' 'I2 root:' at 1 Hz while +0x48C != 0 and for 2 s after.",
             ecp::prefixOn());
         say(sink, "%s the VR camera census is the source (advanced.vr_camera_census is %s; this probe switches the census on "
@@ -137,7 +144,8 @@ void arm(uint64_t nowMs, const ecp::Sink& sink) {
 
 void disarm(const ecp::Sink& sink) {
     g_on = false;
-    explorerCamProbeAttach(false, nullptr);   // the observer detaches; the hook stays in place and its gate closes unless placement uses it
+    explorerCamObserve(ExplorerCamHook::FreeCamera, &observeActivity, false);   // the observer detaches; the hook stays in place and its gate closes unless placement uses it
+    explorerCamF2Disarm();
     g_i2On.store(false, std::memory_order_release);
     detail::g_vrCensusCameraNote = nullptr;
     say(sink, "%s (advanced.explorer_cam_probe turned off while running): the I3 observer is detached (the hook stays in place, "
@@ -163,6 +171,7 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, bool want, const ecp::Sink& sink
     in.injectStatus = flatCameraInjectObserveStatus();
     in.i2Armed = g_i2On.load(std::memory_order_acquire);
     g_consumer.tick(g_shared, g_skin, g_cam, in, sink);
+    explorerCamF2Tick(frame, nowMs, ecm::Sink{sink.fn, sink.ctx});
 }
 
 }  // namespace
@@ -183,15 +192,20 @@ void explorerCamProbeNoteSceneBlock(const void* resource, const void* data, uint
 // The rig's seam (tools\explorer_cam_probe_test): the same boundary with a scripted clock and key, the shared state, and a
 // synthetic target in place of the game's function (installed through explorer_cam.cpp's own seam).
 namespace explorercamprobetest {
-void setTarget(uintptr_t target) { explorercamtest::setTargets(target, 0); }
+void setTarget(uintptr_t target) {
+    ExplorerCamTestTargets t;
+    t.freeCamera = target;
+    explorercamtest::setTargets(t);
+}
 void boundary(uint32_t frame, uint64_t nowMs, bool want, ecp::SinkFn fn, void* ctx) { boundaryAt(frame, nowMs, want, ecp::Sink{fn, ctx}); }
 ecp::Shared& shared() { return g_shared; }
 ecp::SkinTee& skin() { return g_skin; }
 ecp::CamTee& cam() { return g_cam; }
-size_t stolenBytes() { return explorercamtest::freeStolen(); }
+size_t stolenBytes() { return explorercamtest::stolenBytes(0); }
 bool gateOpen() { return explorercamtest::gateOpen(); }
 // Back to a session that has not tried the hook: the CodeHook is uninstalled (the original bytes return), the one-shot latches clear.
 void reset() {
+    explorercamf2test::reset();
     explorercamtest::reset();
     g_i3 = I3State::NotTried;
     g_on = false;

@@ -1,33 +1,42 @@
 #pragma once
-// Explorer Cam (fix.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a: placement built").
+// Explorer Cam (fix.explorer_cam, hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a" and "Phase 1c").
 //
-// In Elite's on-foot free camera (TAB), put the view in the commander's head, facing their way, and lock it to them. All of it goes
-// through the game's own free-camera object, FreeCameraActivity, and is exactly three writes into game memory (Sean's decision D1,
-// 2026-10-07): its commander-local pose, its collision step made to return "no edit" for that one activity, and one press of its
-// relative lock. explorer_cam_core.h holds the decisions; this file's .cpp holds the two hooks, the config and the log.
+// F5 is the only way in. Pressed on foot in first person, in the stock camera on any preset or in the free camera, it puts the
+// view in the commander's head, facing their way, locked to them, with the camera's own UI hidden; pressed again it gives the UI
+// back and closes the camera. The game's own camera key and TAB place nothing: placement needs a session F5 started. All of it
+// goes through the game's own camera objects, and all of it is writes into game memory that Sean approved (D1, 2026-10-07):
+//   the free camera's commander-local pose, and its two position edits (the collision sweep and the commander's box push) made
+//   to return "no edit" for that one camera; and the game's own actions pressed for ONE update each -- the relative lock, the
+//   camera UI's FreeCamToggleHUD, and the camera controller's PhotoCameraToggle and ToggleFreeCam.
+// explorer_cam_core.h holds the decisions; this file's .cpp holds the five hooks, the config, the F5 key and the log.
 //
 // THE HOOKS (build 332841 only; any PE or prologue mismatch stands the feature down with one line and patches nothing):
-//   EliteDangerous64.exe+0x1071980  the free camera's update. Placement runs BEFORE the original (the pose write and the lock press),
-//                                   the lock's pressed-int is restored AFTER it returns, then the probe's snapshot, if it is on.
-//   EliteDangerous64.exe+0x1091140  the camera's collision step, only ever called by that update. A relay in machine code returns 0
-//                                   (no collision edit) when rcx is the placed activity and jumps to the original otherwise.
+//   +0x1071980  the free camera's update. Placement runs BEFORE the original (the pose write and the lock press), the lock's
+//               pressed-int is restored AFTER it returns, then the observers.
+//   +0x1091140  the camera's collision sweep, only ever called by that update.     } relays in machine code: return 0
+//   +0x108F1B0  the commander's box push, only ever called by that update.        } when rcx is the placed activity
+//   +0x47C7640  the camera UI's update: FreeCamToggleHUD pressed once per placement, and again to give the UI back.
+//   +0x2DF14C0  the camera controller's update (vtable only): F5's sequence of presses, and the mode byte.
 //
-// THREADS. The free-camera hook runs on whichever thread the game's job system calls the update from. It takes no lock (a try-flag
-// serialises a second caller out), allocates nothing, writes no log line and calls nothing of the game's: it talks to the frame
-// thread through atomics and a small event ring. Config is read on the frame thread only, in explorerCamFrameBoundary.
+// THREADS. The hooks run on whichever thread the game's job system calls the functions from. Each takes no lock (a try-flag keeps a
+// second concurrent caller out), allocates nothing, writes no log line and calls nothing of the game's: it talks to the frame thread
+// through atomics and a small event ring of its own. Config, the F5 key and the Elite bindings are read on the frame thread only,
+// in explorerCamFrameBoundary.
 #include <cstddef>
 #include <cstdint>
 
 namespace edvr {
 
-// Once a frame at the Present boundary (vscreen.cpp), before explorerCamProbeFrameBoundary. Reads fix.explorer_cam and the three eye
-// keys, installs the hooks the first time they are wanted, publishes the settings to the hook thread, drains the hook thread's events
-// into the log, releases a session whose activity went silent, and writes the 5 s heartbeat while a session is on. Render thread.
-// Never call it from inside a game hook.
+// Once a frame at the Present boundary (vscreen.cpp), before explorerCamProbeFrameBoundary. Reads fix.explorer_cam, the eye keys
+// and hotkey.explorer_cam, polls F5, installs the hooks the first time they are wanted, publishes the settings to the hook threads,
+// drains their events into the log, ends a session whose controller went silent, and writes the 5 s heartbeat while a session is on.
+// Render thread. Never call it from inside a game hook.
 void explorerCamFrameBoundary(uint32_t frameNo);
 
-// ---- the probe's seam (advanced.explorer_cam_probe, temporary) -----------------------------------------------------------------
-// One target gets one CodeHook, so the probe's observation of the same update rides this file's hook instead of installing its own.
+// ---- diagnostic observers (advanced.explorer_cam_probe, temporary) ----------------------------------------------------------------
+// One target gets one CodeHook, so a diagnostic's observation of the same function rides this file's hook instead of installing its
+// own. A hook can carry several observers (kMaxObservers); the next instrument -- the neck -- adds its own the same way.
+enum class ExplorerCamHook : int { FreeCamera = 0, Controller = 1 };
 struct ExplorerCamHookStatus {
     enum State : int { NotTried = 0, Armed = 1, StoodDown = 2 };
     int state = NotTried;
@@ -36,32 +45,64 @@ struct ExplorerCamHookStatus {
     uintptr_t relay = 0;     // Armed: the relay's address
     char why[400] = {};      // StoodDown: one sentence
 };
-// Called by the probe's own boundary (the frame thread). The observer, if any, runs after the original returns and after the lock
-// press has been restored, with the activity (rcx). `want` false detaches it. Installs the free-camera hook the first time anyone
-// wants it. Returns the hook's status.
-using ExplorerCamActivityObserver = void (*)(void* activity) noexcept;
-ExplorerCamHookStatus explorerCamProbeAttach(bool want, ExplorerCamActivityObserver observer);
+// Called by the probe's own boundary (the frame thread). The observer runs after the original returns and after every press has
+// been restored, with the object (rcx). `attach` false removes it. Installs the hook the first time anyone wants it. Returns the
+// hook's status.
+using ExplorerCamActivityObserver = void (*)(void* object) noexcept;
+constexpr int kExplorerCamMaxObservers = 4;
+ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivityObserver observer, bool attach);
+
+// The game image base, when its PE identity (timestamp and size) is build 332841's; false, with a sentence in `why`, otherwise. The
+// answer is cached for the session. For the F2 instruments, which patch a vtable slot instead of a function.
+bool explorerCamBuildKnown(uintptr_t* base, char* why, size_t whyCap);
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 // The rigs' seam (tools\explorer_cam_test, tools\explorer_cam_probe_test): the same boundary with a scripted clock and scripted
-// settings, synthetic functions in place of the game's, and the shared state to look at.
+// inputs, synthetic functions in place of the game's, and the shared state to look at.
 using ExplorerCamSinkFn = void (*)(void* ctx, const char* line);
+struct ExplorerCamTestTargets {
+    uintptr_t freeCamera = 0, collision = 0, boxPush = 0, cameraUi = 0, controller = 0;
+};
+struct ExplorerCamTestFrame {
+    bool on = true;
+    float up = 1.68f, forward = 0.10f, right = 0.0f;
+    const char* hotkey = "F5";            // hotkey.explorer_cam
+    bool f5Pressed = false;               // the key's edge this frame
+    bool gameplay = true;
+    bool onFootKnown = true, onFoot = true;
+    bool readBindings = true;             // hotkey.read_game_bindings
+    const wchar_t* bindsDir = nullptr;    // an Elite bindings directory for the clash check (null: none, unchecked)
+};
 namespace explorercamtest {
-void setTargets(uintptr_t freeCamera, uintptr_t collision);
-void boundary(uint32_t frame, uint64_t nowMs, bool on, float up, float forward, float right, ExplorerCamSinkFn fn, void* ctx);
-bool gateOpen();
-size_t freeStolen();
-size_t collisionStolen();
+void setTargets(const ExplorerCamTestTargets& targets);
+void boundary(uint32_t frame, uint64_t nowMs, const ExplorerCamTestFrame& in, ExplorerCamSinkFn fn, void* ctx);
+bool gateOpen();                   // the free-camera relay's gate
+bool uiGateOpen();
+bool controllerGateOpen();
+size_t stolenBytes(int hook);      // 0 free, 1 collision, 2 box push, 3 camera UI, 4 controller
 uint64_t placedActivity();
-uint64_t bypassed();
+uint64_t bypassed();               // the collision sweep
 uint64_t forwarded();
+uint64_t boxBypassed();
+uint64_t boxForwarded();
 uint64_t updatesPlaced();
 uint64_t hookCalls();
+uint64_t controllerCalls();
+uint32_t controllerMode();
+uint64_t uiCalls();
+bool uiHiddenByEdvr();
 uint32_t faults();
 uint32_t phase();                  // 0 idle, 1 waiting, 2 placed
 bool placeActive();
-void preThenPost(void* activity);  // the hook's pre half and post half with no original between them (the fault cells)
-void reset();                      // both hooks uninstalled, every latch and counter cleared
+bool sessionActive();
+bool exiting();
+uint32_t f5Request();              // 0 none, 1 enter, 2 exit
+int hotkeyVk();                    // the F5 key's virtual key after explorerCamFrameBoundary read the config
+void preThenPost(void* activity);  // the free-camera hook's pre half and post half with no original between them (the fault cells)
+void controllerPreThenPost(void* controller);
+void forceSession(bool on);         // an F5 session switched on or off by hand (the config cells cannot press the real key)
+void uiPreThenPost(void* object);
+void reset();                      // every hook uninstalled, every latch and counter cleared
 }  // namespace explorercamtest
 #endif
 

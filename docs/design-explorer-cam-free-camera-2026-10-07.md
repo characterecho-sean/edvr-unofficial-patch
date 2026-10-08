@@ -2,12 +2,13 @@
 
 ## Status
 
-- **State: Phase 0 FLOWN (F0, 2026-10-07); Phase 1a placement BUILT and
-  Phase 1b old route DELETED (Sean, 2026-10-07), neither flown (flight F1
-  next).** Replaces press counting and headset-pose offsets with a placement
-  of Elite's own free camera at the commander's head, and hides the head only
-  while the camera sits in it. Keys `fix.explorer_cam`
-  and `fix.explorer_cam_eye_up/_forward/_right` are real, user-facing.
+- **State: Phase 0 and F1 FLOWN (2026-10-07); Phase 1c BUILT, not flown:
+  F5 enters and leaves, the box push is bypassed, the camera UI is hidden,
+  and the F2 instruments (pressed ints, controller, neck) are in the probe.**
+  Replaces press counting and headset-pose offsets with a placement of
+  Elite's own free camera at the commander's head. Real keys:
+  `fix.explorer_cam`, `fix.explorer_cam_eye_up/_forward/_right`, and
+  `[hotkey] explorer_cam = F5`, the only way in.
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
   old Explorer Cam route entirely; deleting the old route is authorized.
@@ -30,10 +31,10 @@
     shared record (mode, speed, range).
   - H6 **READ + FLOWN:** +0x48C is 3 at TAB (first call), 4 relative lock,
     0 at exit; mirrored from a shared record, so watch it, never write it.
-  - H7 **READ (0a-3):** the push to y 2.150 is FUN 0x108F1B0 (commander's
-    box + 0.25, edits the point in place), which the sweep (0x1091140) was
-    hiding; one caller, 0x10728B6. Relay it too while placed. The F0 stop at
-    0.70 is probably the same box (INFERRED).
+  - H7 **READ (0a-3), RELAYED in 1c:** the push to y 2.150 is FUN 0x108F1B0
+    (commander's box + 0.25, edits the point in place), which the sweep
+    (0x1091140) was hiding; one caller, 0x10728B6. F1 saw it; 1c returns 0
+    for the placed activity. The F0 stop at 0.70 is probably the same box.
 - **Ruled out:**
   - Counting presses as the source of truth, because it has no origin
     (6ac.6d), and the free camera can be moved by hand after the preset is
@@ -48,15 +49,15 @@
 - **Set aside, not flown:** writing the origin inside the refresh detour at
   `+0x592200`; the culling view is built upstream of it
   (design-occlusion-culling-2026-09-22.md), and 6s.9 saw holes from that.
-- **F0 FLOWN** on Frontier, 2d103d84, `edvr_gfx_20261007_172543.log`,
-  training scenario; findings at the end. Frontier's ini: probe off again,
-  `head_offset_gate = 0`.
-- **Next:** relay 0x108F1B0 (F1b) and press FreeCamToggleHUD (UI activity
-  0x47C7640); then F2 logs the eye matrix (Eye interface id 0x5F501E8,
-  +0x268) and the call rate and mode byte of 0x2DF14C0 on foot, for a single
-  F5 key. Details in the 0a-3 section.
+- **F0 and F1 FLOWN** on Frontier (logs 172543 and 194702); findings below.
+- **Next:** flight F2 with the probe on, in a settlement and at a pad: does
+  0x2DF14C0 run with the camera CLOSED (its first-call line and the I4
+  heartbeat), which key is the world lock (I3 pressed), and where is the eye
+  (N lines: +0x268 in commander-local axes standing, crouched, weapon drawn).
+  Then 1d: place from the neck.
 - **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off;
-  all three 0b instruments plus the VR camera census). Removed at arc close.
+  the 0b instruments, the VR camera census, and I3 pressed, I4, N). Removed
+  at arc close.
 
 ## Why today's Explorer Cam is half-baked
 
@@ -645,3 +646,21 @@ Frontier, v0.18.3-18-gdb609243 (log version line checked),
 8-byte aligned. 0x108F1B0's only reference is the call at 0x10728B6, and
 0x47C7640's is the job thunk's jmp at 0x4761903. 0x2DF14C0 has no direct
 reference (vtable only).
+
+## 2026-10-07 Phase 1c: F5, the box push, the camera UI
+
+Built and gated, not flown. `[hotkey] explorer_cam = F5` (empty = off) is the only way in: watched, never captured, game-focus and
+journal-gated, checked against the player's live Elite bindings at launch and on a rebind (`hotkey F5 CLASHES with ...` names the
+element). The game's own camera key and TAB place nothing. Hooks added (5 in all): box push 0x108F1B0 (a relay like the sweep's,
+counted in the heartbeat), camera UI 0x47C7640 (steals 12), controller 0x2DF14C0 (vtable only).
+
+**Sequence (controller pre-call, one press per update, 90-update waits).** ENTER: mode 0 press PhotoCameraToggle, wait for 1/2, press
+ToggleFreeCam, wait for 3; from 1/2 the second only; from 3/4 nothing; from 5/6 refused. EXIT: wait for the UI hook to give the UI back,
+press PhotoCameraToggle, session ends at mode 0. Mode 0 by any route ends it; a detach (5) releases the placement and keeps the
+session, and the return to 3/4 places, locks and hides again. The controller idle: `the camera controller is idle: open the camera
+first`. The camera UI: FreeCamToggleHUD pressed once per placement, restored after the update, given back when the placement ends.
+
+**F2, grep `explorer cam`.** `controller update reached the hook ... mode=0` (it runs closed), `F5 enter/exit`, `hotkey ... CLASHES|is
+free`, heartbeat `box_bypassed`, `controller_calls`, `ui_hidden_by_edvr`. Probe lines: `I3 pressed:` (the three action ints), `I4
+change:` and `I4 heartbeat:`, `N matrix:` (+0x268 and three more, the vec4), `N local:` (the eye in commander-local axes; the shared
+world frame with +0x70 is an assumption, printed with both raw origins), `N heartbeat:`. N swaps one vtable slot (0x51FCE98+0x20).

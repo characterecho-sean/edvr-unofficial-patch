@@ -147,6 +147,7 @@ public:
         return false;
     }
     uint32_t publishes() const noexcept { return m_seq.load(std::memory_order_acquire) / 2u; }
+    void clear() noexcept { m_seq.store(0, std::memory_order_release); m_busy.store(0, std::memory_order_release); }   // the rigs' reset
 private:
     std::atomic<uint32_t> m_seq{0};
     std::atomic<uint32_t> m_busy{0};
@@ -172,6 +173,7 @@ public:
         return -1;
     }
     uint64_t key(size_t i) const noexcept { return i < N ? m_key[i].load(std::memory_order_acquire) : 0; }
+    void clear() noexcept { for (size_t i = 0; i < N; ++i) m_key[i].store(0, std::memory_order_release); }   // the rigs' reset
 private:
     std::atomic<uint64_t> m_key[N]{};
 };

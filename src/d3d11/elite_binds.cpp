@@ -192,6 +192,87 @@ bool collectActiveBindsFiles(const std::wstring& dir, std::vector<Cand>* out) {
     return true;
 }
 
+// Every keyboard slot in one file's text, with the element it belongs to. A small tag walker rather than a search per element: the
+// elements are unknown here. An element is a tag with no attributes (<HeadlookToggle>), its slots are <Primary ...> and <Secondary
+// ...> inside it, and a slot's <Modifier ...> tags follow it before the next slot or the element's close.
+int scanKeyboardUsesIn(const std::string& text, EliteKeyboardUse* out, int max) {
+    int n = 0;
+    std::string element;
+    struct Slot {
+        bool open = false;
+        bool keyboard = false;
+        std::string key;
+        std::string prefix;
+    } slot;
+    auto flush = [&]() {
+        if (slot.open && slot.keyboard && !slot.key.empty() && !element.empty() && n < max) {
+            char keyName[32];
+            if (eliteBindsTranslateKey(slot.key.c_str(), keyName, sizeof(keyName))) {
+                snprintf(out[n].element, sizeof(out[n].element), "%s", element.c_str());
+                snprintf(out[n].binding, sizeof(out[n].binding), "%s%s", slot.prefix.c_str(), keyName);
+                ++n;
+            }
+        }
+        slot = Slot();
+    };
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t lt = text.find('<', pos);
+        if (lt == std::string::npos) break;
+        const size_t gt = text.find('>', lt);
+        if (gt == std::string::npos) break;
+        pos = gt + 1;
+        const char first = lt + 1 < text.size() ? text[lt + 1] : '\0';
+        if (first == '?' || first == '!') continue;
+        size_t nameStart = lt + 1;
+        const bool closing = first == '/';
+        if (closing) ++nameStart;
+        size_t nameEnd = nameStart;
+        while (nameEnd < gt && text[nameEnd] != ' ' && text[nameEnd] != '\t' && text[nameEnd] != '\r' && text[nameEnd] != '\n' &&
+               text[nameEnd] != '/' && text[nameEnd] != '>') {
+            ++nameEnd;
+        }
+        const std::string name = text.substr(nameStart, nameEnd - nameStart);
+        if (closing) {
+            if (name == element) {
+                flush();
+                element.clear();
+            }
+            continue;
+        }
+        const bool selfClosing = gt > lt && text[gt - 1] == '/';
+        const bool hasAttrs = nameEnd < gt && text[nameEnd] != '/' && text[nameEnd] != '>';
+        if (name == "Primary" || name == "Secondary") {
+            flush();
+            std::string device, key;
+            slot.open = true;
+            if (attrAfter(text, lt, gt - lt, "Device", &device)) slot.keyboard = _stricmp(device.c_str(), "Keyboard") == 0;
+            if (attrAfter(text, lt, gt - lt, "Key", &key)) slot.key = key;
+            // A self-closing slot has no modifiers to wait for.
+            if (selfClosing) flush();
+        } else if (name == "Modifier") {
+            std::string mdev, mkey;
+            if (slot.open && attrAfter(text, lt, gt - lt, "Device", &mdev) && _stricmp(mdev.c_str(), "Keyboard") == 0 &&
+                attrAfter(text, lt, gt - lt, "Key", &mkey)) {
+                const char* mn = mkey.c_str();
+                if (strncmp(mn, "Key_", 4) == 0) mn += 4;
+                for (const KeyMap& mm : kModMap) {
+                    if (_stricmp(mn, mm.elite) == 0) {
+                        slot.prefix += mm.ours;
+                        slot.prefix += "+";
+                        break;
+                    }
+                }
+            }
+        } else if (!hasAttrs && !selfClosing && !name.empty()) {
+            flush();
+            element = name;
+        }
+    }
+    flush();
+    return n;
+}
+
 }  // namespace
 
 bool eliteBindsTranslateKey(const char* eliteKey, char* out, size_t outLen) {
@@ -539,6 +620,25 @@ bool eliteBindsLookupSlots(const char* element, unsigned flags,
                            EliteKeySlots* out) {
     return eliteBindsLookupSlotsDir(bindingsDir().c_str(), element, flags,
                                     out);
+}
+
+int eliteBindsKeyboardUsesDir(const wchar_t* dirC, EliteKeyboardUse* out, int max, char* file, size_t fileLen) {
+    if (file && fileLen) file[0] = '\0';
+    if (!dirC || !dirC[0] || !out || max <= 0) return -1;
+    const std::wstring dir(dirC);
+    std::vector<Cand> cands;
+    if (!collectActiveBindsFiles(dir, &cands)) return -1;
+    for (const Cand& c : cands) {
+        std::string text;
+        if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
+        if (file && fileLen) snprintf(file, fileLen, "%s", c.utf8);
+        return scanKeyboardUsesIn(text, out, max);
+    }
+    return -1;
+}
+
+int eliteBindsKeyboardUses(EliteKeyboardUse* out, int max, char* file, size_t fileLen) {
+    return eliteBindsKeyboardUsesDir(bindingsDir().c_str(), out, max, file, fileLen);
 }
 
 unsigned long long eliteBindsFingerprintDir(const wchar_t* dir) {

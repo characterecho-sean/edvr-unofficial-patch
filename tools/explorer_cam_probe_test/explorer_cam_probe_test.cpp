@@ -26,6 +26,9 @@
 #include <thread>
 #include <vector>
 
+#include "../../src/d3d11/explorer_cam.h"
+#include "../../src/d3d11/explorer_cam_f2.h"
+#include "../../src/d3d11/explorer_cam_f2_core.h"
 #include "../../src/d3d11/explorer_cam_probe.h"
 #include "../../src/d3d11/explorer_cam_probe_core.h"
 #include "../../src/d3d11/flat_camera_inject.h"
@@ -37,6 +40,11 @@ using namespace edvr;
 // ---- stubs for what the glue calls -------------------------------------------------------------------------------------
 namespace edvr {
 void breadcrumb(const char*) {}   // production guard.cpp's crash-channel dependency (proxy.cpp), as the other rigs stub it
+// explorer_cam.cpp (the shared hook) asks the journal; this rig has none.
+bool journalWatchActive() { return false; }
+bool journalGameplay() { return true; }
+bool journalOnFootKnown() { return false; }
+bool journalOnFoot() { return false; }
 bool vrCameraCensusWanted() { return true; }
 const char* flatCameraInjectObserveStatus() { return "installed"; }
 namespace explorercamprobetest {
@@ -799,6 +807,389 @@ void testGlue() {
     check(std::memcmp(after, ecp::kPrologue, 5) == 0, "uninstall puts the original five bytes back");
 }
 
+
+// ================================ Part C: the F2 instruments ================================
+// I3 pressed (the activity's three action ints), I4 (the camera controller) and N (the commander's eye: a vtable slot swap whose
+// replacement notes its callers' return addresses). Pure math first, then the glue on a synthetic vtable.
+
+void testNeckMath() {
+    std::printf("the neck: the commander's frame and the eye in commander-local axes\n");
+    // A commander facing +x at world (10, 0, 20): F's rows are right (0,0,-1), up (0,1,0), forward (1,0,0).
+    const float F[9] = {0, 0, -1, 0, 1, 0, 1, 0, 0};
+    const float root[3] = {10, 0, 20};
+    // The free camera under the relative lock: local L (a rotation, origin = the eye placement), world W = L x F, origin = lo x F + root.
+    auto build = [&](const float L[9], const float lo[3], float local[16], float world[16]) {
+        std::memset(local, 0, 64);
+        std::memset(world, 0, 64);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) local[r * 4 + c] = L[r * 3 + c];
+        for (int c = 0; c < 3; ++c) local[12 + c] = lo[c];
+        local[15] = 1;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                float sum = 0;
+                for (int k = 0; k < 3; ++k) sum += L[r * 3 + k] * F[k * 3 + c];   // (L x F)[r][c]
+                world[r * 4 + c] = sum;
+            }
+        for (int c = 0; c < 3; ++c) {
+            float sum = root[c];
+            for (int k = 0; k < 3; ++k) sum += lo[k] * F[k * 3 + c];
+            world[12 + c] = sum;
+        }
+        world[15] = 1;
+    };
+    const float ident[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const float back[9] = {-1, 0, 0, 0, 1, 0, 0, 0, -1};   // the selfie preset's facing
+    const float lo[3] = {0.0f, 1.68f, 0.10f};
+    const float eyeLocal[3] = {0.02f, 1.55f, 0.12f};
+    // The eye in world space: e x F + root.
+    float eyeWorld[3];
+    for (int c = 0; c < 3; ++c) {
+        float sum = root[c];
+        for (int k = 0; k < 3; ++k) sum += eyeLocal[k] * F[k * 3 + c];
+        eyeWorld[c] = sum;
+    }
+    check(closeTo(eyeWorld[0], 10.12f) && closeTo(eyeWorld[1], 1.55f) && closeTo(eyeWorld[2], 19.98f), "(the known frame puts the local eye (0.02, 1.55, 0.12) at world (10.12, 1.55, 19.98))");
+    for (int variant = 0; variant < 2; ++variant) {
+        float local[16], world[16];
+        build(variant == 0 ? ident : back, lo, local, world);
+        const f2::CommanderFrame c = f2::commanderFrame(local, world);
+        bool frameOk = c.valid;
+        for (int i = 0; i < 9; ++i) frameOk = frameOk && closeTo(c.f[i], F[i]);
+        check(frameOk, variant == 0 ? "F = L^T x W recovers the commander's frame (identity local rotation)" : "F = L^T x W recovers the commander's frame (local rotation facing back)");
+        check(closeTo(c.root[0], 10.0f) && closeTo(c.root[1], 0.0f) && closeTo(c.root[2], 20.0f), "...and the root = W.origin - L.origin x F is (10, 0, 20)");
+        float out[3];
+        f2::worldToCommanderLocal(c, eyeWorld, out);
+        check(closeTo(out[0], 0.02f) && closeTo(out[1], 1.55f) && closeTo(out[2], 0.12f), "...the eye comes back in commander-local axes as (right 0.02, up 1.55, forward 0.12): the stance test's figure");
+    }
+    float local[16], world[16];
+    build(ident, lo, local, world);
+    local[0] = 5.0f;   // not a rotation
+    check(!f2::commanderFrame(local, world).valid, "rows that are not near unit length give no frame (no figure rather than a wrong one)");
+    local[0] = std::nanf("");
+    check(!f2::commanderFrame(local, world).valid, "...and neither does a NaN");
+}
+
+void testF2Core() {
+    std::printf("the neck: identity, the slot and the return-address filter\n");
+    const uint8_t code[8] = {0x48, 0x8D, 0x81, 0x68, 0x02, 0x00, 0x00, 0xC3};
+    check(std::memcmp(f2::kEyeGetterCode, code, 8) == 0 && f2::neckCodeOk(code), "the accessor is `lea rax,[rcx+268h]; ret` (48 8D 81 68 02 00 00 C3)");
+    uint8_t other[8];
+    std::memcpy(other, code, 8);
+    other[3] ^= 1;
+    check(!f2::neckCodeOk(other), "...one byte different is not it");
+    check(f2::kEyeVtableRva == 0x51FCE98 && f2::kEyeGetterSlot == 4 && f2::kEyeGetterRva == 0xF88330 && f2::kLocalEyeSiteRva == 0x1073946 && f2::kOffEyeMatrix == 0x268 &&
+              f2::kOffEyeB == 0x1A8 && f2::kOffEyeC == 0x1E8 && f2::kOffEyeD == 0x228 && f2::kOffEyeVec == 0x2A8,
+          "the vtable is +0x51FCE98, slot 4 holds +0xF88330, the local site returns to +0x1073946, the matrices are at +0x268 +0x1A8 +0x1E8 +0x228 and the vec4 at +0x2A8");
+    const f2::NeckTargets t = f2::neckTargetsFromBase(0x140000000ull);
+    check(t.vtable == 0x140000000ull + 0x51FCE98 && t.slot == t.vtable + 0x20 && t.getter == 0x140000000ull + 0xF88330 && t.localSite == 0x140000000ull + 0x1073946,
+          "the targets derive from the image base: slot = vtable + 0x20");
+    check(f2::neckSlotOk(t.getter, t) && !f2::neckSlotOk(t.getter + 8, t), "the slot must hold the build's accessor, nothing else");
+    check(f2::isLocalEyeSite(t.localSite, t) && !f2::isLocalEyeSite(t.localSite + 1, t) && !f2::isLocalEyeSite(0, t), "only the first-person camera activity's return address is the local site");
+    check(f2::neckInterfaceOk(t.vtable, t) && !f2::neckInterfaceOk(t.vtable + 8, t) && !f2::neckInterfaceOk(0, t), "an interface is live only while its first qword is the eye vtable");
+}
+
+// A function the rig calls the way the game calls the accessor: rcx = the interface, rdx = its vtable, `call [rdx+20h]`. The return
+// address (thunk + 7) identifies the caller.
+struct Thunks {
+    uint8_t* page = nullptr;
+    uintptr_t localReturn() const { return reinterpret_cast<uintptr_t>(page) + 7; }
+    using Call = void* (__fastcall*)(void* self, void* vtable);
+    Call local() const { return reinterpret_cast<Call>(page); }
+    Call other() const { return reinterpret_cast<Call>(page + 0x40); }
+};
+Thunks makeThunks() {
+    Thunks t;
+    t.page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (!t.page) return t;
+    const uint8_t thunk[12] = {0x48, 0x83, 0xEC, 0x28, 0xFF, 0x52, 0x20, 0x48, 0x83, 0xC4, 0x28, 0xC3};   // sub rsp,28h; call [rdx+20h]; add rsp,28h; ret
+    std::memcpy(t.page, thunk, sizeof(thunk));
+    std::memcpy(t.page + 0x40, thunk, sizeof(thunk));
+    DWORD old = 0;
+    VirtualProtect(t.page, 4096, PAGE_EXECUTE_READ, &old);
+    FlushInstructionCache(GetCurrentProcess(), t.page, 4096);
+    return t;
+}
+
+uint8_t* makeCode(const std::vector<uint8_t>& bytes) {
+    auto* page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (!page) return nullptr;
+    std::memcpy(page, bytes.data(), bytes.size());
+    DWORD old = 0;
+    VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &old);
+    FlushInstructionCache(GetCurrentProcess(), page, bytes.size());
+    return page;
+}
+
+// The camera controller's update: the real 15-byte prologue, then what restores what it saved.
+uint8_t* makeControllerPage() {
+    std::vector<uint8_t> b(ecm::kControllerPrologue, ecm::kControllerPrologue + sizeof(ecm::kControllerPrologue));
+    const uint8_t tail[] = {0x48, 0x8B, 0x5C, 0x24, 0x08, 0x48, 0x8B, 0x6C, 0x24, 0x10, 0x48, 0x8B, 0x74, 0x24, 0x18, 0x31, 0xC0, 0xC3};
+    b.insert(b.end(), tail, tail + sizeof(tail));
+    return makeCode(b);
+}
+
+struct EyeInterface {
+    alignas(16) uint8_t bytes[0x2C0] = {};
+    void setMatrix(uint32_t off, float ox, float oy, float oz) {
+        const float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, ox, oy, oz, 1};
+        std::memcpy(bytes + off, m, 64);
+    }
+};
+
+void testF2Glue() {
+    std::printf("the F2 instruments end to end (a synthetic vtable, synthetic callers, a synthetic controller)\n");
+    namespace t = edvr::explorercamprobetest;
+    const Thunks th = makeThunks();
+    const std::vector<uint8_t> getterCode(f2::kEyeGetterCode, f2::kEyeGetterCode + 8);
+    uint8_t* getterPage = makeCode(getterCode);
+    uint8_t* controllerPage = makeControllerPage();
+    uint8_t good[128] = {};
+    const size_t nGood = buildSynthetic(good, false);
+    uint8_t* freePage = makeExecutable(good, nGood);
+    auto* vtable = static_cast<uintptr_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    check(th.page && getterPage && controllerPage && freePage && vtable, "(pages for the thunks, the accessor, the controller, the free-camera update and a vtable)");
+    if (!th.page || !getterPage || !controllerPage || !freePage || !vtable) return;
+    for (int i = 0; i < 8; ++i) vtable[i] = 0xDEAD0000u + i;
+    vtable[4] = reinterpret_cast<uintptr_t>(getterPage);
+
+    static EyeInterface ifaceA, ifaceB;
+    ifaceA = EyeInterface();
+    ifaceB = EyeInterface();
+    const uint64_t vt = reinterpret_cast<uint64_t>(vtable);
+    std::memcpy(ifaceA.bytes, &vt, 8);
+    std::memcpy(ifaceB.bytes, &vt, 8);
+    // The known frame of testNeckMath: the eye at world (10.12, 1.55, 19.98); the other matrices carry marker origins.
+    ifaceA.setMatrix(f2::kOffEyeMatrix, 10.12f, 1.55f, 19.98f);
+    ifaceA.setMatrix(f2::kOffEyeB, 1, 2, 3);
+    ifaceA.setMatrix(f2::kOffEyeC, 4, 5, 6);
+    ifaceA.setMatrix(f2::kOffEyeD, 7, 8, 9);
+    const float vec4[4] = {0.5f, 0.25f, 0.125f, 1.0f};
+    std::memcpy(ifaceA.bytes + f2::kOffEyeVec, vec4, 16);
+
+    // The free-camera activity: local pose (identity, origin (0,1.68,0.10)), world pose = local x F + root, and three action objects.
+    static uint8_t activity[0x600];
+    static uint8_t actRot[0x40], actWorld[0x40], actRel[0x40];
+    std::memset(activity, 0, sizeof(activity));
+    std::memset(actRot, 0, sizeof(actRot));
+    std::memset(actWorld, 0, sizeof(actWorld));
+    std::memset(actRel, 0, sizeof(actRel));
+    const uint64_t pRot = reinterpret_cast<uint64_t>(actRot), pWorld = reinterpret_cast<uint64_t>(actWorld), pRel = reinterpret_cast<uint64_t>(actRel);
+    std::memcpy(activity + 0x4F8, &pRot, 8);
+    std::memcpy(activity + 0x500, &pWorld, 8);
+    std::memcpy(activity + 0x508, &pRel, 8);
+    const float local[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.0f, 1.68f, 0.10f, 1};
+    const float world[16] = {0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 10.10f, 1.68f, 20.0f, 1};   // L x F, and lo x F + root
+    std::memcpy(activity + 0x3B0, local, 64);
+    std::memcpy(activity + 0x70, world, 64);
+    activity[0x48C] = 4;
+    auto pressedInt = [](uint8_t* action) -> int32_t& { return *reinterpret_cast<int32_t*>(action + 0x1C); };
+
+    // The controller: a mode byte and three action objects.
+    static uint8_t controller[0x600];
+    static uint8_t actPhoto[0x40], actFree[0x40], actQuit[0x40];
+    std::memset(controller, 0, sizeof(controller));
+    std::memset(actPhoto, 0, sizeof(actPhoto));
+    std::memset(actFree, 0, sizeof(actFree));
+    std::memset(actQuit, 0, sizeof(actQuit));
+    const uint64_t pPhoto = reinterpret_cast<uint64_t>(actPhoto), pFree = reinterpret_cast<uint64_t>(actFree), pQuit = reinterpret_cast<uint64_t>(actQuit);
+    std::memcpy(controller + 0x310, &pPhoto, 8);
+    std::memcpy(controller + 0x328, &pFree, 8);
+    std::memcpy(controller + 0x340, &pQuit, 8);
+    auto callController = reinterpret_cast<uint64_t (__fastcall*)(void*)>(controllerPage);
+
+    ExplorerCamTestTargets targets;
+    targets.freeCamera = reinterpret_cast<uintptr_t>(freePage);
+    targets.controller = reinterpret_cast<uintptr_t>(controllerPage);
+    explorercamtest::setTargets(targets);
+    explorercamf2test::NeckSeam seam;
+    seam.vtable = reinterpret_cast<uintptr_t>(vtable);
+    seam.slot = reinterpret_cast<uintptr_t>(&vtable[4]);
+    seam.getter = reinterpret_cast<uintptr_t>(getterPage);
+    seam.localSite = th.localReturn();
+    explorercamf2test::setNeckTargets(seam);
+
+    Capture cap;
+    // ---- armed -----------------------------------------------------------------------------------------------------------------------
+    t::boundary(1, 1000, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe I4 armed:") == 1 && has(cap.nth("explorer cam probe I4 armed:", 0), "stolen=5 bytes"), "I4 ARMED: one line (the controller hook, 5 stolen bytes)");
+    check(cap.count("explorer cam probe N armed:") == 1 && has(cap.nth("explorer cam probe N armed:", 0), "is the first-person camera activity's own read") &&
+              has(cap.nth("explorer cam probe N armed:", 0), "SLOT is replaced and the code is not hooked"),
+          "N ARMED: one line, naming the slot swap, why the code is not hooked, and the local site");
+    check(explorercamf2test::neckInstalled() && vtable[4] == explorercamf2test::neckReplacement() && vtable[3] == 0xDEAD0003u && vtable[5] == 0xDEAD0005u,
+          "the swap wrote ONE slot: vtable[4] is the replacement, its neighbours are untouched");
+    check(*reinterpret_cast<uint64_t*>(getterPage) == *reinterpret_cast<const uint64_t*>(f2::kEyeGetterCode), "...and the accessor's own code was not touched");
+
+    // ---- the replacement: returns exactly what the original returns, and the return-address filter -----------------------------------
+    void* r = th.other()(ifaceA.bytes, vtable);
+    check(r == ifaceA.bytes + 0x268 && explorercamf2test::neckCalls() == 1 && explorercamf2test::neckLocalSiteCalls() == 0 && explorercamf2test::neckLocalEye() == 0 &&
+              explorercamf2test::neckDistinct() == 1,
+          "a call from any other return address returns self+0x268 (what the original returns), is counted, and does NOT set the local eye");
+    r = th.local()(ifaceA.bytes, vtable);
+    check(r == ifaceA.bytes + 0x268 && explorercamf2test::neckCalls() == 2 && explorercamf2test::neckLocalSiteCalls() == 1 &&
+              explorercamf2test::neckLocalEye() == reinterpret_cast<uintptr_t>(ifaceA.bytes),
+          "a call that returns to the first-person camera activity's site returns the same value, counts as a local-site call, and KEEPS the interface");
+    r = th.other()(ifaceB.bytes, vtable);
+    check(r == ifaceB.bytes + 0x268 && explorercamf2test::neckDistinct() == 2 && explorercamf2test::neckLocalEye() == reinterpret_cast<uintptr_t>(ifaceA.bytes),
+          "another humanoid's interface is a second distinct pointer and does not replace the local eye");
+    th.other()(ifaceB.bytes, vtable);
+    check(explorercamf2test::neckDistinct() == 2 && explorercamf2test::neckCalls() == 4, "...and a repeat is counted, not re-counted as distinct");
+
+    // ---- the first 1 Hz tick: the local site was called, no free-camera update has paired a sample yet --------------------------------------
+    cap.clear();
+    t::boundary(2, 2050, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe N matrix:") == 5 && has(cap.nth("explorer cam probe N matrix:", 0), "phase=local-site") && cap.count("explorer cam probe N local:") == 1 &&
+              has(cap.nth("explorer cam probe N local:", 0), "no free-camera update has paired a sample"),
+          "the local site called and no free-camera sample yet: the matrices print (phase=local-site) and ONE notice says the commander-local figure waits for the free camera");
+
+    // ---- I3 pressed ------------------------------------------------------------------------------------------------------------------------
+    cap.clear();
+    t::observe(activity);
+    t::boundary(2, 2100, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe I3 pressed:") == 1 && has(cap.nth("explorer cam probe I3 pressed:", 0), "first-sight") && has(cap.nth("explorer cam probe I3 pressed:", 0), "rotation_lock(+0x4F8)=0") &&
+              has(cap.nth("explorer cam probe I3 pressed:", 0), "world_fix(+0x500)=0") && has(cap.nth("explorer cam probe I3 pressed:", 0), "relative_fix(+0x508)=0"),
+          "I3 PRESSED: the first sight prints the three ints (0 0 0)");
+    cap.clear();
+    t::observe(activity);
+    t::boundary(3, 2150, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe I3 pressed:") == 0, "...nothing while they do not change");
+    pressedInt(actWorld) = 1;
+    t::observe(activity);
+    t::boundary(4, 2200, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe I3 pressed:") == 1 && has(cap.nth("explorer cam probe I3 pressed:", 0), "world_fix(+0x500)=1") && has(cap.nth("explorer cam probe I3 pressed:", 0), "(was 0/0/0)"),
+          "the player's FixCameraWorldToggle (+0x500) going to 1 is a change line, 'was 0/0/0'");
+    pressedInt(actWorld) = 0;
+    const uint64_t nothing = 0;
+    std::memcpy(activity + 0x508, &nothing, 8);
+    cap.clear();
+    t::observe(activity);
+    t::boundary(5, 2250, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe I3 pressed:") == 1 && has(cap.nth("explorer cam probe I3 pressed:", 0), "relative_fix(+0x508)=unreadable"), "a NULL action pointer reads 'unreadable', not a fault");
+    std::memcpy(activity + 0x508, &pRel, 8);
+
+    // ---- the neck's paired sample, 1 Hz, in commander-local axes ----------------------------------------------------------------------
+    cap.clear();
+    t::observe(activity);                                    // publishes the paired sample (the local eye is known)
+    t::boundary(6, 3100, true, &Capture::add, &cap);         // due (a second after the last 1 Hz tick)
+    check(cap.count("explorer cam probe N matrix:") == 5, "1 Hz: five N matrix lines (the four matrices and the vec4)");
+    check(has(cap.nth("explorer cam probe N matrix:", 0), "+0x268(eye) origin=(10.120,1.550,19.980)") && has(cap.nth("explorer cam probe N matrix:", 1), "+0x1A8 origin=(1.000,2.000,3.000)") &&
+              has(cap.nth("explorer cam probe N matrix:", 2), "+0x1E8 origin=(4.000,5.000,6.000)") && has(cap.nth("explorer cam probe N matrix:", 3), "+0x228 origin=(7.000,8.000,9.000)") &&
+              has(cap.nth("explorer cam probe N matrix:", 4), "vec4(+0x2A8)=(0.500,0.250,0.125,1.000)"),
+          "...each with its origin and rows, and the vec4");
+    const std::string local1 = cap.nth("explorer cam probe N local:", 0);
+    check(!local1.empty() && has(local1, "eye_in_commander_local(right,up,forward)=(0.020,1.550,0.120)") && has(local1, "root=(10.000,0.000,20.000)") &&
+              has(local1, "eye_world(+0x268)=(10.120,1.550,19.980)") && has(local1, "activity_world_origin(+0xA0)=(10.100,1.680,20.000)") &&
+              has(local1, "ASSUMPTION: +0x268 is in the same world frame as the activity's +0x70"),
+          "N LOCAL: the eye in the commander's axes (0.020, 1.550, 0.120), the root, both raw world origins, and the ASSUMPTION said in the line");
+    // Local-site-only phase: no free-camera sample for a while, but the first-person camera activity reads the eye.
+    cap.clear();
+    th.local()(ifaceA.bytes, vtable);
+    t::boundary(7, 4700, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe N matrix:") == 5 && has(cap.nth("explorer cam probe N matrix:", 0), "phase=local-site") && cap.count("explorer cam probe N local:") == 0,
+          "with no free-camera update for 1.5 s but the local site called: the matrices print (phase=local-site) and there is no commander-local line (no fresh pair)");
+    // Nothing at all happening: silence at 1 Hz.
+    cap.clear();
+    t::boundary(8, 5800, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe N matrix:") == 0 && cap.count("explorer cam probe N local:") == 0, "neither the free camera nor the local site in the last second: no matrix lines");
+
+    // ---- the heartbeats (5 s) -------------------------------------------------------------------------------------------------------------
+    cap.clear();
+    t::boundary(9, 6100, true, &Capture::add, &cap);
+    const std::string nbeat = cap.nth("explorer cam probe N heartbeat:", 0);
+    check(!nbeat.empty() && has(nbeat, "hook=armed") && has(nbeat, "calls=5(") && has(nbeat, "local_site_calls=2(") && has(nbeat, "distinct_interfaces=2") && has(nbeat, "local_eye=set (0x") &&
+              has(nbeat, "local_site_last_seen="),
+          "N HEARTBEAT: calls, local-site calls, distinct interfaces, whether the local eye is set, when the local site was last seen");
+    const std::string ibeat = cap.nth("explorer cam probe I4 heartbeat:", 0);
+    check(!ibeat.empty() && has(ibeat, "hook=armed") && has(ibeat, "total_calls=0") && has(ibeat, "idle=no-call-yet"), "I4 HEARTBEAT before any controller call: 'idle=no-call-yet'");
+
+    // ---- I4: the controller, through the hook ------------------------------------------------------------------------------------------------
+    cap.clear();
+    callController(controller);
+    t::boundary(10, 6200, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe I4 change:") == 1 && has(cap.nth("explorer cam probe I4 change:", 0), "first-sight") && has(cap.nth("explorer cam probe I4 change:", 0), "mode(+0x3E0) 0->0 (closed)"),
+          "I4: the first controller call is a first-sight line (mode 0, closed): whether it runs with the camera closed is answered in the log");
+    controller[0x3E0] = 1;
+    pressedInt(actPhoto) = 1;
+    cap.clear();
+    callController(controller);
+    t::boundary(11, 6300, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe I4 change:") == 1 && has(cap.nth("explorer cam probe I4 change:", 0), "mode(+0x3E0) 0->1") && has(cap.nth("explorer cam probe I4 change:", 0), "photo(+0x310)=1") &&
+              has(cap.nth("explorer cam probe I4 change:", 0), "(suite open on a preset)"),
+          "I4: mode 0 -> 1 with PhotoCameraToggle's int at 1 is one change line naming both");
+    pressedInt(actPhoto) = 0;
+    cap.clear();
+    callController(controller);
+    callController(controller);
+    t::boundary(12, 6400, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe I4 change:") == 1 && has(cap.nth("explorer cam probe I4 change:", 0), "photo(+0x310)=0"), "...and the int going back to 0 is one more; calls that change nothing print nothing");
+    cap.clear();
+    t::boundary(13, 11200, true, &Capture::add, &cap);
+    const std::string ibeat2 = cap.nth("explorer cam probe I4 heartbeat:", 0);
+    check(has(ibeat2, "calls=4") && has(ibeat2, "total_calls=4") && has(ibeat2, "+0x3E0=1") && !has(ibeat2, "idle="), "I4 HEARTBEAT after calls: the window's calls, the total and the mode, no 'idle'");
+
+    // ---- stale: the interface's vtable pointer no longer matches -------------------------------------------------------------------------
+    cap.clear();
+    const uint64_t garbage = 0x1234;
+    std::memcpy(ifaceA.bytes, &garbage, 8);
+    t::observe(activity);
+    t::boundary(14, 11300, true, &Capture::add, &cap);
+    check(explorercamf2test::neckLocalEye() == 0 && cap.count("explorer cam probe N stale:") == 1 && has(cap.nth("explorer cam probe N stale:", 0), "was stale"),
+          "STALE: an interface whose vtable is not the eye vtable is cleared, and said once");
+    cap.clear();
+    t::observe(activity);
+    t::boundary(15, 11400, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe N stale:") == 0, "...and not said again");
+    std::memcpy(ifaceA.bytes, &vt, 8);
+    th.local()(ifaceA.bytes, vtable);
+    check(explorercamf2test::neckLocalEye() == reinterpret_cast<uintptr_t>(ifaceA.bytes), "...the next local-site call re-learns it");
+
+    // ---- key off: the observers detach, the swap stays (a faithful getter) --------------------------------------------------------------------------
+    cap.clear();
+    t::boundary(16, 12000, false, &Capture::add, &cap);
+    const uint64_t callsOff = explorercamf2test::neckCalls();
+    void* rr = th.other()(ifaceB.bytes, vtable);
+    check(cap.count("explorer cam probe: off") == 1 && rr == ifaceB.bytes + 0x268 && explorercamf2test::neckCalls() == callsOff + 1 && vtable[4] == explorercamf2test::neckReplacement(),
+          "KEY OFF: one line; the swapped getter still returns exactly what the original returns");
+    callController(controller);
+    pressedInt(actPhoto) = 1;
+    cap.clear();
+    callController(controller);
+    t::boundary(17, 12100, false, &Capture::add, &cap);
+    check(cap.count("explorer cam probe I4 change:") == 0, "...and the controller observer is detached: a change prints nothing");
+    pressedInt(actPhoto) = 0;
+
+    // ---- unload: the original goes back --------------------------------------------------------------------------------------------------------
+    t::reset();
+    check(!explorercamf2test::neckInstalled() && vtable[4] == reinterpret_cast<uintptr_t>(getterPage), "RESET: the original accessor is back in the slot");
+
+    // ---- stand-downs: a slot or code that is not build 332841's ----------------------------------------------------------------------------------
+    for (int variant = 0; variant < 2; ++variant) {
+        vtable[4] = reinterpret_cast<uintptr_t>(getterPage);
+        explorercamtest::setTargets(targets);
+        explorercamf2test::NeckSeam s2 = seam;
+        if (variant == 0) {
+            vtable[4] = 0xFEEDF00Dull;
+        } else {
+            const uint8_t wrong[8] = {0x48, 0x8D, 0x81, 0x78, 0x02, 0x00, 0x00, 0xC3};
+            uint8_t* badGetter = makeCode(std::vector<uint8_t>(wrong, wrong + 8));
+            vtable[4] = reinterpret_cast<uintptr_t>(badGetter);
+            s2.getter = reinterpret_cast<uintptr_t>(badGetter);
+        }
+        explorercamf2test::setNeckTargets(s2);
+        cap.clear();
+        t::boundary(20, 20000, true, &Capture::add, &cap);
+        check(cap.count("explorer cam probe N stood down:") == 1 && has(cap.nth("explorer cam probe N stood down:", 0), "the game build differs") &&
+                  has(cap.nth("explorer cam probe N stood down:", 0), "nothing was patched") && !explorercamf2test::neckInstalled() && vtable[4] != explorercamf2test::neckReplacement(),
+              variant == 0 ? "WRONG SLOT VALUE: one 'N stood down' line, nothing patched" : "WRONG ACCESSOR CODE: one 'N stood down' line, nothing patched");
+        t::boundary(21, 26000, true, &Capture::add, &cap);
+        check(cap.count("explorer cam probe N heartbeat:") >= 1 && has(cap.nth("explorer cam probe N heartbeat:", 0), "hook=stood down") &&
+                  has(cap.nth("explorer cam probe N heartbeat:", 0), "idle=the hook is stood down"),
+              "...and the heartbeat says the hook is stood down (never ran, distinguishable from ran and saw nothing)");
+        t::boundary(22, 26100, false, &Capture::add, &cap);
+        t::reset();
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -823,6 +1214,9 @@ int main(int argc, char** argv) {
     testConsumerEngaged();
     testConsumerStale();
     testGlue();
+    testNeckMath();
+    testF2Core();
+    testF2Glue();
     if (g_failures) {
         std::printf("explorer cam probe: FAIL (%d)\n", g_failures);
         return 1;

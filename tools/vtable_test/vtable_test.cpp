@@ -1221,6 +1221,29 @@ int main() {
               "...followed by three one-byte pushes, so five bytes are stolen",
               "the collision hook would steal a wrong length");
 
+        // Explorer Cam's other three targets (explorer_cam.cpp in the d3d11 half), build 332841.
+        // The commander's box push (EliteDangerous64.exe+0x108F1B0): `48 8B C4` is `mov rax, rsp` (REX.W 8B /r with a register
+        // ModRM, three bytes, no displacement), then `push rbp` and `push rbx`: 3+1+1 = five bytes. The trampoline re-runs the
+        // `mov rax, rsp`, which is why the bypass relay may clobber RAX.
+        const uint8_t boxPush[] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x41, 0x56, 0x41, 0x57,
+                                   0x48, 0x8B, 0xEC, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00};
+        check(codeInstructionLength(boxPush, sizeof(boxPush), &disp) == 3 && disp == 0 &&
+                  codeInstructionLength(boxPush + 3, sizeof(boxPush) - 3, &disp) == 1 && codeInstructionLength(boxPush + 4, sizeof(boxPush) - 4, &disp) == 1,
+              "...and the commander's box push: `mov rax,rsp` is 3 bytes, no displacement, then two pushes: five bytes stolen",
+              "Explorer Cam's box-push hook would be refused or stolen at the wrong length");
+        // The camera UI's update (+0x47C7640): two REX/push pairs, then `lea rbp,[rsp-0B8h]` with a SIB and a disp32 (8 bytes, not
+        // rip-relative): the five-byte patch lands inside the lea, so twelve bytes are stolen.
+        const uint8_t cameraUi[] = {0x40, 0x55, 0x41, 0x56, 0x48, 0x8D, 0xAC, 0x24, 0x48, 0xFF, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xB8, 0x01, 0x00, 0x00};
+        check(codeInstructionLength(cameraUi, sizeof(cameraUi), &disp) == 2 && codeInstructionLength(cameraUi + 2, sizeof(cameraUi) - 2, &disp) == 2 &&
+                  codeInstructionLength(cameraUi + 4, sizeof(cameraUi) - 4, &disp) == 8 && disp == 0,
+              "...and the camera UI's update: `push rbp`, `push r14`, then an 8-byte `lea rbp,[rsp-0B8h]` with no displacement to rewrite: twelve bytes stolen",
+              "Explorer Cam's camera-UI hook would be refused or stolen at the wrong length");
+        // The camera controller's update (+0x2DF14C0): the free camera's first instruction again, `mov [rsp+8], rbx`, five bytes.
+        const uint8_t cameraController[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18};
+        check(codeInstructionLength(cameraController, sizeof(cameraController), &disp) == 5 && disp == 0,
+              "...and the camera controller's update: `mov [rsp+8],rbx` is 5 bytes, no displacement",
+              "Explorer Cam's controller hook would be refused or stolen at the wrong length");
+
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.
         const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};
