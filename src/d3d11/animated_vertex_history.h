@@ -228,12 +228,11 @@ public:
             }
             if(overBudget())return refuseKeyed("history-budget",HistoryLedger::RefusedBudget);
             Record record;record.geometry=key;record.capture=std::move(reclaimedCapture);
-            indexRange(key,record.ibFirst,record.ibEnd);
+            indexRange(key,record.ibFirst,record.ibEnd);record.bornFrame=frame;
             if(!allocate(dev.Get(),record)){failed_=true;return refuseKeyed("resource-creation",HistoryLedger::RefusedOther);}
             bytes_+=count*32;records_.push_back(std::move(record));found=records_.end()-1;
             peakRecords_=(std::max)(peakRecords_,unsigned(records_.size()));peakBytes_=(std::max)(peakBytes_,bytes_);
         }
-        if(found->invalidated){found->extentState=0;found->extentSlot=-1;}
         found->invalidated=false;found->invalidReasons=0;
         if(extended)out.ledgerToken=ledger_.note(frame,ledgerKey,HistoryLedger::Captured);
         out.recordEpoch=found->mutationEpoch;
@@ -294,7 +293,7 @@ public:
         if(!initializeIdentity(ctx,dev.Get())){out.refusal="resource-creation";return false;}
         submitIdentity(ctx,out);submitPositions(ctx,draw,startInstance,out);
         if(retainIndex && !retainInstanceIndex(ctx,out)){out.refusal="index-snapshot-creation";return false;}
-        if(extended)issueExtent(ctx,out);
+        if(extended)ensureVertexSet(ctx,out);
         return true;
     }
     // One instance per admitted draw: a single four-byte index describes every
@@ -352,8 +351,9 @@ public:
     // Returns the adapter's existing diagnostic reason bits: unknown / VB / IB.
     //
     // A write that carries a byte range ([first,end) of the resource: UpdateSubresource's box, CopySubresourceRegion's destination) invalidates
-    // only the records that read bytes of it (section 104): the exact index range, or the vertex extent, which counts as the whole buffer until
-    // it is read back. Without a range, and for a nullptr resource, every record that reads the resource falls, as before. `entry` and `timing`
+    // only the records that read bytes of it (section 104): the exact index range, or a vertex of the set its indices name (a record whose set is
+    // not yet read is treated as reading its indices alone, and the write is checked against the set when it arrives). Without a range, and for
+    // a nullptr resource, every record that reads the resource falls, as before. `entry` and `timing`
     // only name the write for the counters; `tally` false invalidates without counting (a second notification of a write already counted).
     unsigned resourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0),
                              HistoryWriteEntry entry=HistoryWriteEntry::Other,HistoryWriteTiming timing=HistoryWriteTiming::Gap,
@@ -361,21 +361,40 @@ public:
         unsigned reasons=0;
         const unsigned e=resource?unsigned(entry):unsigned(HistoryWriteEntry::Unknown),t=unsigned(timing);
         const bool ranged=resource && end!=~uint64_t(0);
-        unsigned liveV=0,liveI=0,hitV=0,hitI=0,hitRecords=0,spared=0,unknownHits=0;
+        unsigned liveV=0,liveI=0,hitV=0,hitI=0,hitRecords=0,spared=0;
+        bool deferredLogged=false;
         if(tally)++writeStats_.observed[e];
+        // The index bytes may have changed: the sets read from them, and the reads in flight, are stale.
+        if(!resource || isIndexBuffer(resource))dropSets(resource,first,end);
         for(auto& r:records_) {
             const bool isV=resource && resource==r.geometry.vertices.Get(),isI=resource && resource==r.geometry.indices.Get();
             if(resource && !isV && !isI)continue;
             const bool live=!r.invalidated;
             if(live){liveV+=isV;liveI+=isI && !isV;}
-            bool unknownExtent=false;
-            if(ranged && !readsBytesOf(r.geometry,r.extentState==2,r.vbFirst,r.vbEnd,resource,first,end,unknownExtent)){
-                if(live)++spared;
+            unsigned vcase=0;
+            bool hit=true;
+            if(ranged)hit=meets(r.geometry,r.vset.get(),resource,first,end,vcase);
+            if(r.vset && (!resource || (isI && (!ranged || historyRangesOverlap(first,end,r.ibFirst,r.ibEnd)))))r.vset.reset();
+            if(!hit) {
+                if(live) {
+                    ++spared;
+                    // Spared because the set is unknown: the write is kept for the check when it arrives, whichever report brought it.
+                    if(vcase==1 && !deferredLogged){logDeferred(resource,first,end);deferredLogged=true;}
+                    if(tally && vcase) {
+                        if(vcase==1)++writeStats_.vertexUnknown;
+                        else if(vcase==2)++writeStats_.vertexInGap;
+                        else ++writeStats_.vertexOutside;
+                        if(vcase<=2)noteExample(vcase==1?HistoryWriteCase::Unknown:HistoryWriteCase::InGap,entry,resource,first,end,r);
+                    }
+                }
                 continue;
             }
             const unsigned why=!resource?1:isV?2:4;
             reasons|=why;
-            if(live){++hitRecords;hitV+=isV;hitI+=isI && !isV;if(unknownExtent)++unknownHits;r.invalidatedAt=lastFrame_;}
+            if(live) {
+                ++hitRecords;hitV+=isV;hitI+=isI && !isV;r.invalidatedAt=lastFrame_;
+                if(tally && ranged && vcase==4){++writeStats_.vertexGenuine;noteExample(HistoryWriteCase::Genuine,entry,resource,first,end,r);}
+            }
             r.frame[0]=r.frame[1]=~0u;r.invalidated=true;r.invalidReasons|=why;++r.mutationEpoch;
         }
         if(!tally)return reasons;
@@ -390,46 +409,63 @@ public:
                 noteTop(resource,hitRecords!=0,ranged && !hitRecords);
             }
         } else if(hitRecords)++writeStats_.unknownInvalidating[t];
-        writeStats_.recordsInvalidated[e]+=hitRecords;writeStats_.sparedRecords+=spared;writeStats_.extentUnknownHits+=unknownHits;
+        writeStats_.recordsInvalidated[e]+=hitRecords;writeStats_.sparedRecords+=spared;
         return reasons;
     }
-    // Whether a write of [first,end) to `resource` touched bytes this capture's geometry reads (its record's vertex extent when it has one):
-    // the adapter drops the draws of its own lists that a write touched, and keeps the rest.
+    // Whether a write of [first,end) to `resource` touched bytes this capture's geometry reads (its record's vertex set when it has one): the
+    // adapter drops the draws of its own lists that a write touched, and keeps the rest. It mirrors resourceWritten's decision for the record.
     bool captureHitBy(const Capture& c,ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)) const {
         if(!resource)return true;
-        bool known=false;uint64_t vbFirst=0,vbEnd=0;
-        for(const auto& r:records_)if(r.extentState==2 && matches(r.geometry,c.geometry)){known=true;vbFirst=r.vbFirst;vbEnd=r.vbEnd;break;}
-        bool unknown=false;
-        return readsBytesOf(c.geometry,known,vbFirst,vbEnd,resource,first,end,unknown);
+        const HistoryVertexSet* set=nullptr;
+        for(const auto& r:records_)if(r.vset && matches(r.geometry,c.geometry)){set=r.vset.get();break;}
+        unsigned vertexCase=0;
+        return meets(c.geometry,set,resource,first,end,vertexCase);
     }
-    // Reads the vertex extents that are ready: at most two a frame, none waited for (all of them, waiting, in a rig).
+    // Reads the vertex sets that are ready: at most three a frame, none waited for (all of them, waiting, in a rig). A set read is cached by its
+    // index range and given to every record of the key that does not have it; a record that was published while its set was unknown is
+    // invalidated now if a write spared in that time met a vertex of it (the deferred check), or if the log of such writes no longer reaches back.
     void pollExtents(ID3D11DeviceContext* ctx,unsigned frame,bool wait=false) {
         if(!ctx)return;
-        unsigned budget=wait?kExtentSlots:2;
+        unsigned budget=wait?kExtentSlots:3;
         for(unsigned i=0;i<extentSlots_.size() && budget;++i) {
             ExtentSlot& s=extentSlots_[i];
             if(!s.pending)continue;
-            if(!wait && frame-s.frame<3)continue;
+            if(!wait && frame-s.frame<1)continue;
+            if(s.cancelled){s.pending=false;s.stage.Reset();++writeStats_.setCancelled;continue;}
             D3D11_MAPPED_SUBRESOURCE m{};
             const HRESULT hr=ctx->Map(s.stage.Get(),0,D3D11_MAP_READ,wait?0u:D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
             if(FAILED(hr) || !m.pData) {
-                if(frame-s.frame>16)finishExtent(i,false,0,0);
+                if(frame-s.frame>16)failSet(s,frame);
                 continue;
             }
             --budget;
             const bool wide=s.format!=DXGI_FORMAT_R16_UINT;
-            const size_t n=size_t(s.bytes/(wide?4:2));
-            uint32_t low=~0u,high=0;bool bad=n==0;
-            for(size_t k=0;k<n && !bad;++k) {
-                const uint32_t v=wide?static_cast<const uint32_t*>(m.pData)[k]:uint32_t(static_cast<const uint16_t*>(m.pData)[k]);
-                if(v==(wide?0xFFFFFFFFu:0xFFFFu)){bad=true;break;}
-                low=(std::min)(low,v);high=(std::max)(high,v);
-            }
+            auto set=buildSet(m.pData,size_t(s.bytes/(wide?4:2)),wide);
             ctx->Unmap(s.stage.Get(),0);
-            finishExtent(i,!bad,low,high);
+            if(!set){failSet(s,frame);continue;}
+            ++writeStats_.extentRead;if(!set->exact)++writeStats_.setApproximate;
+            const uint64_t key=s.key;
+            storeSet(key,s.indices,s.ibFirst,s.ibEnd,set);
+            s.pending=false;s.stage.Reset();
+            for(auto& r:records_)if((!r.vset || r.vset==wholeVertexSet()) && setKeyOf(r.geometry,r.ibFirst,r.ibEnd)==key)adoptSet(r,set);
         }
     }
+    // The few examples of ranged writes that met a live record's vertex buffer, per case, since the last call; forgets them.
+    unsigned takeWriteExamples(HistoryWriteExample* out,unsigned capacity) {
+        unsigned n=0;
+        for(unsigned k=0;k<kHistoryWriteCases;++k) {
+            for(unsigned j=0;j<exampleCount_[k] && n<capacity;++j)out[n++]=examples_[k][j];
+            exampleCount_[k]=0;
+        }
+        return n;
+    }
     const HistoryWriteStats& writeStats() const{return writeStats_;}
+    // FOR THE RIGS: the vertex set a capture's record holds (null while unknown), and how many sets the cache holds.
+    const HistoryVertexSet* vertexSetOf(const Capture& c) const {
+        for(const auto& r:records_)if(r.vset && r.vset!=wholeVertexSet() && matches(r.geometry,c.geometry))return r.vset.get();
+        return nullptr;
+    }
+    size_t cachedSets() const{return sets_.size();}
     // The resources written most in the window, most first, and forgets them. A resource is listed with the writes that touched a live record
     // of it, the ones that invalidated, and the ranged ones that invalidated none.
     unsigned takeTopResources(HistoryWriteTop* out,unsigned capacity) {
@@ -485,11 +521,12 @@ private:
         uint64_t mutationEpoch=0;bool invalidated=false;
         unsigned invalidReasons=0;   // the writes that invalidated it (resourceWritten's bits), until its key draws again
         unsigned claimFrame=~0u;     // the frame a draw of another key took it as its one candidate (the offset-shift rescue)
-        // The bytes the draw reads (section 104, range-aware invalidation). The index range is exact from the key. The vertex extent is the
-        // envelope of the vertices the indices name, read back a few frames after the record was made (issueExtent, pollExtents); until it
-        // is, or if it never is, the whole vertex buffer counts as read. 0 unknown, 1 requested, 2 known, 3 failed (both whole).
-        uint64_t ibFirst=0,ibEnd=0,vbFirst=0,vbEnd=0;
-        uint8_t extentState=0;int8_t extentSlot=-1;unsigned extentFrame=0;
+        // The bytes the draw reads (section 104, range-aware invalidation). The index range is exact from the key. The vertices are the set
+        // its indices name (HistoryVertexSet), read back from a staging copy of the indices once per index range and cached beyond the record
+        // (sets_), so a record that is invalidated and made again is born knowing them; null while unknown.
+        uint64_t ibFirst=0,ibEnd=0;
+        std::shared_ptr<const HistoryVertexSet> vset;
+        unsigned bornFrame=0,setRetryAt=0;
         unsigned invalidatedAt=0;    // the history's frame when a write invalidated it: how long advance() keeps it for its key to draw again
     };
     // The index range a geometry reads, in bytes of its index buffer.
@@ -497,23 +534,36 @@ private:
         const uint64_t size=g.format==DXGI_FORMAT_R16_UINT?2u:4u;
         first=uint64_t(g.indexOffset)+uint64_t(g.start)*size;end=first+uint64_t(g.count)*size;
     }
-    // Whether a write of [first,end) bytes to `resource` touches bytes this geometry reads. Without a range the whole resource is written.
-    // `unknownExtent` is set when the answer is yes only because the vertex extent is not known.
-    static bool readsBytesOf(const Geometry& g,bool extentKnown,uint64_t vbFirst,uint64_t vbEnd,
-                             ID3D11Resource* resource,uint64_t first,uint64_t end,bool& unknownExtent) {
-        unknownExtent=false;
+    // How a write of [first,end) bytes to `resource` meets what this geometry reads; `set` is its vertex set, null when unknown. The result is
+    // whether the write invalidates. For a ranged write to the vertex buffer `vertexCase` says what it met: 1 the set is unknown (spared; checked
+    // again when the set is read), 2 inside the envelope of the vertices but between them (spared), 3 outside the envelope (spared), 4 on a
+    // vertex (invalidates: a genuine rewrite), 5 the indices could not be read (invalidates, not counted as a rewrite). Without a range the whole resource is written: it hits, unclassified.
+    static bool meets(const Geometry& g,const HistoryVertexSet* set,ID3D11Resource* resource,uint64_t first,uint64_t end,unsigned& vertexCase) {
+        vertexCase=0;
         const bool isV=resource==g.vertices.Get(),isI=resource==g.indices.Get();
         if(!isV && !isI)return false;
         if(end==~uint64_t(0))return true;
-        if(isI){uint64_t a=0,b=0;indexRange(g,a,b);if(historyRangesOverlap(first,end,a,b))return true;}
-        if(isV){
-            if(!extentKnown){unknownExtent=true;return true;}
-            if(historyRangesOverlap(first,end,vbFirst,vbEnd))return true;
+        bool hit=false;
+        if(isI){uint64_t a=0,b=0;indexRange(g,a,b);if(historyRangesOverlap(first,end,a,b))hit=true;}
+        if(isV) {
+            if(!set)vertexCase=1;
+            else if(set==wholeVertexSet().get()){vertexCase=5;hit=true;}   // its indices could not be read: any write to the buffer meets it
+            else {
+                bool inSpan=false;
+                const int64_t vb0=int64_t(g.offset)+int64_t(g.base)*int64_t(g.stride);
+                if(historyVertexSetMeets(*set,vb0,g.stride,first,end,inSpan)){vertexCase=4;hit=true;}
+                else vertexCase=inSpan?2:3;
+            }
         }
-        return false;
+        return hit;
     }
     static constexpr unsigned kInvalidKeepFrames=3,kExtentSlots=24,kTombstones=128;
-    struct ExtentSlot {Ptr<ID3D11Buffer> stage;bool pending=false;unsigned frame=0;uint64_t bytes=0,key=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;};
+    struct ExtentSlot {Ptr<ID3D11Buffer> stage;bool pending=false,cancelled=false;unsigned frame=0;uint64_t bytes=0,key=0,ibFirst=0,ibEnd=0;
+        const void* indices=nullptr;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;};
+    struct SetEntry {uint64_t key=0;const void* indices=nullptr;uint64_t ibFirst=0,ibEnd=0;std::shared_ptr<const HistoryVertexSet> set;unsigned lastUsed=0;};
+    struct DeferredWrite {const void* resource=nullptr;uint64_t first=0,end=0;unsigned frame=0;};
+    static constexpr unsigned kMaxSets=256,kDeferredWrites=128,kMaxRuns=4096;
+    static constexpr uint64_t kMaxSetSpan=4u*1024*1024;
     struct Tombstone {uint64_t key=0;unsigned frame=0;uint8_t cause=0;};
     // A record no later frame can use as a prior: it has been used, none of its frames is this frame or the one before, so it is neither
     // this frame's nor a candidate (a prior is a record used the frame before). A pending record (never published) is not spent: a
@@ -608,52 +658,194 @@ private:
         }
         return 0;
     }
-    // The draw's vertex extent is the envelope of the vertices its indices name. The indices are copied to a staging buffer at capture and read
-    // back a few frames later (no wait, no pipeline state touched); the scan runs once per record. The buffer starts as a sentinel, so a copy
-    // that did not happen reads as a failure rather than as indices.
-    void issueExtent(ID3D11DeviceContext* ctx,const Capture& out) {
+    // The vertices a draw reads are the set its indices name. The indices are copied to a staging buffer at capture and read back a few frames
+    // later (no wait, no pipeline state touched), once per index range: the set is cached by the range (sets_), outlives the record, and is
+    // ended only by a write to the indices. There is no synchronous source: the arenas' index buffers are default-usage, filled by uploads and
+    // copies from other buffers, so no CPU copy of their bytes exists, and reading the copy back at once would stall the render thread on every
+    // GPU command queued before it. Until a record's set is read it is treated as reading its indices alone; the writes to the vertices spared in
+    // that time are logged, and checked against the set when it arrives (adoptSet). The buffer starts as a sentinel, so a copy that did not
+    // happen reads as a failure rather than as indices.
+    static uint64_t setKeyOf(const Geometry& g,uint64_t ibFirst,uint64_t ibEnd) {
+        uint64_t h=1469598103934665603ull;
+        const auto mix=[&h](uint64_t v){for(int i=0;i<8;++i){h^=(v>>(8*i))&0xFF;h*=1099511628211ull;}};
+        mix(bufferId(g.indices.Get()));mix(ibFirst);mix(ibEnd);mix(uint64_t(g.format));
+        return h;
+    }
+    // A buffer's identity for the cache: a number kept with the buffer itself (private data), not its address, which a buffer made after
+    // another was released can reuse (design doc section 104: a cached set must never be given to a different buffer at the same address).
+    static uint64_t bufferId(ID3D11Buffer* buffer) {
+        static const GUID kId={0x5d1c1f0a,0x91c3,0x4b7e,{0x8f,0x54,0x2a,0x73,0x0e,0x66,0xa1,0x7d}};
+        static uint64_t next=0;
+        if(!buffer)return 0;
+        uint64_t id=0;UINT size=sizeof(id);
+        if(SUCCEEDED(buffer->GetPrivateData(kId,&size,&id)) && size==sizeof(id) && id)return id;
+        id=++next;
+        buffer->SetPrivateData(kId,sizeof(id),&id);
+        return id;
+    }
+    // The set of a record whose indices could not be read: every vertex. A write to its vertex buffer anywhere meets it, as before this
+    // build; it is replaced when a later request succeeds (the retry is 30 frames on), and ended by a write to the indices as any set is.
+    static const std::shared_ptr<const HistoryVertexSet>& wholeVertexSet() {
+        static const std::shared_ptr<const HistoryVertexSet> whole=[]{
+            auto w=std::make_shared<HistoryVertexSet>();w->runs={0u,0xFFFFFFFFu};w->low=0;w->high=0xFFFFFFFFu;w->exact=false;
+            return std::shared_ptr<const HistoryVertexSet>(w);
+        }();
+        return whole;
+    }
+    bool isIndexBuffer(const void* resource) const {
+        for(const void* b:indexBuffers_)if(b==resource)return true;
+        return false;
+    }
+    // The index buffers a set or a read in flight belongs to: a write is checked against sets only if it is to one of these. A buffer past the cap
+    // would be a set no write could end, so at the cap everything held is forgotten first (the records' sets too) and the new buffer registered after.
+    void noteIndexBuffer(const void* resource) {
+        if(isIndexBuffer(resource))return;
+        if(indexBuffers_.size()>=256) {
+            indexBuffers_.clear();sets_.clear();
+            for(auto& s:extentSlots_)if(s.pending)s.cancelled=true;
+            for(auto& r:records_)r.vset.reset();
+        }
+        indexBuffers_.push_back(resource);
+    }
+    std::shared_ptr<const HistoryVertexSet> findSet(uint64_t key) {
+        for(auto& e:sets_)if(e.key==key){e.lastUsed=lastFrame_;return e.set;}
+        return nullptr;
+    }
+    void storeSet(uint64_t key,const void* indices,uint64_t ibFirst,uint64_t ibEnd,std::shared_ptr<const HistoryVertexSet> set) {
+        for(auto& e:sets_)if(e.key==key){e.set=std::move(set);e.lastUsed=lastFrame_;return;}
+        if(sets_.size()>=kMaxSets) {
+            size_t oldest=0;
+            for(size_t i=1;i<sets_.size();++i)if(sets_[i].lastUsed<sets_[oldest].lastUsed)oldest=i;
+            sets_.erase(sets_.begin()+oldest);
+        }
+        noteIndexBuffer(indices);
+        SetEntry e;e.key=key;e.indices=indices;e.ibFirst=ibFirst;e.ibEnd=ibEnd;e.set=std::move(set);e.lastUsed=lastFrame_;
+        sets_.push_back(std::move(e));
+    }
+    // A write to the index buffer (a range, or all of it; nullptr is every buffer): the sets that overlap it are gone, and so are the reads in flight.
+    void dropSets(ID3D11Resource* resource,uint64_t first,uint64_t end) {
+        if(!resource){sets_.clear();for(auto& s:extentSlots_)if(s.pending)s.cancelled=true;return;}
+        const bool whole=end==~uint64_t(0);
+        for(size_t i=0;i<sets_.size();) {
+            if(sets_[i].indices==resource && (whole || historyRangesOverlap(first,end,sets_[i].ibFirst,sets_[i].ibEnd)))sets_.erase(sets_.begin()+i);
+            else ++i;
+        }
+        for(auto& s:extentSlots_)
+            if(s.pending && s.indices==resource && (whole || historyRangesOverlap(first,end,s.ibFirst,s.ibEnd)))s.cancelled=true;
+    }
+    // A write to the vertices spared because the record's set was unknown: kept, with its frame, for the check when the set arrives.
+    void logDeferred(const void* resource,uint64_t first,uint64_t end) {
+        if(deferred_.empty())deferred_.resize(kDeferredWrites);
+        DeferredWrite& d=deferred_[deferredNext_++%kDeferredWrites];
+        d.resource=resource;d.first=first;d.end=end;d.frame=lastFrame_;
+    }
+    // A record gets its set. If it was published while the set was unknown, a write to its vertices spared in that time may have changed what its
+    // stamped positions correspond to: the log says, and if the log no longer reaches back to the record's last publish it is assumed.
+    void adoptSet(Record& r,std::shared_ptr<const HistoryVertexSet> set) {
+        r.vset=std::move(set);
+        unsigned since=0;bool published=false;
+        for(unsigned p=0;p<2;++p)if(r.frame[p]!=~0u){published=true;since=(std::max)(since,r.frame[p]);}
+        if(!published || r.invalidated)return;
+        bool overlap=false,conservative=false;
+        const size_t kept=(std::min<size_t>)(deferredNext_,deferred_.size());
+        const int64_t vb0=int64_t(r.geometry.offset)+int64_t(r.geometry.base)*int64_t(r.geometry.stride);
+        for(size_t i=0;i<kept && !overlap;++i) {
+            const DeferredWrite& d=deferred_[i];
+            bool inSpan=false;
+            if(d.resource==r.geometry.vertices.Get() && d.frame>=since && historyVertexSetMeets(*r.vset,vb0,r.geometry.stride,d.first,d.end,inSpan))overlap=true;
+        }
+        if(!overlap && deferredNext_>deferred_.size()) {
+            unsigned oldest=~0u;
+            for(const DeferredWrite& d:deferred_)oldest=(std::min)(oldest,d.frame);
+            conservative=oldest>=since;   // the lost writes are no newer than the oldest kept, and one at the record's own stamp counts
+        }
+        if(!overlap && !conservative)return;
+        r.frame[0]=r.frame[1]=~0u;r.invalidated=true;r.invalidReasons|=2;++r.mutationEpoch;r.invalidatedAt=lastFrame_;
+        ++(overlap?writeStats_.deferredInvalidated:writeStats_.deferredConservative);
+    }
+    void failSet(ExtentSlot& s,unsigned frame) {
+        s.pending=false;s.stage.Reset();++writeStats_.extentFailed;
+        for(auto& r:records_)
+            if((!r.vset || r.vset==wholeVertexSet()) && setKeyOf(r.geometry,r.ibFirst,r.ibEnd)==s.key){adoptSet(r,wholeVertexSet());r.setRetryAt=frame+30;}
+    }
+    // The set of the vertices named by `n` indices (16 or 32 bit). Null when the bytes are not indices (the sentinel survived).
+    static std::shared_ptr<const HistoryVertexSet> buildSet(const void* data,size_t n,bool wide) {
+        if(!n)return nullptr;
+        const uint32_t sentinel=wide?0xFFFFFFFFu:0xFFFFu;
+        const auto at=[&](size_t k)->uint32_t{return wide?static_cast<const uint32_t*>(data)[k]:uint32_t(static_cast<const uint16_t*>(data)[k]);};
+        uint32_t lo=~0u,hi=0;
+        for(size_t k=0;k<n;++k){const uint32_t v=at(k);if(v==sentinel)return nullptr;lo=(std::min)(lo,v);hi=(std::max)(hi,v);}
+        auto set=std::make_shared<HistoryVertexSet>();
+        set->low=lo;set->high=hi;
+        const uint64_t span=uint64_t(hi)-lo+1;
+        const auto envelope=[&]{set->runs={lo,hi};set->exact=false;};
+        if(span>kMaxSetSpan){envelope();return set;}
+        std::vector<uint64_t> bits(size_t((span+63)/64),0);
+        for(size_t k=0;k<n;++k){const uint64_t i=uint64_t(at(k))-lo;bits[size_t(i>>6)]|=uint64_t(1)<<(i&63);}
+        const auto get=[&](uint64_t i){return (bits[size_t(i>>6)]>>(i&63))&1u;};
+        for(uint64_t i=0;i<span;) {
+            if(!get(i)){if((i&63)==0 && bits[size_t(i>>6)]==0){i+=64;continue;}++i;continue;}
+            const uint64_t start=i;
+            while(i<span && get(i)){if((i&63)==0 && bits[size_t(i>>6)]==~uint64_t(0) && i+64<=span){i+=64;continue;}++i;}
+            set->runs.push_back(uint32_t(lo+start));set->runs.push_back(uint32_t(lo+i-1));
+            if(set->runs.size()>size_t(kMaxRuns)*2){envelope();return set;}
+        }
+        return set;
+    }
+    // The record's set: from the cache when the key has been read, otherwise asked for (once per key while it is in flight).
+    void ensureVertexSet(ID3D11DeviceContext* ctx,const Capture& out) {
         if(out.recordIndex>=records_.size())return;
         Record& r=records_[out.recordIndex];
-        if(r.extentState!=0 || r.invalidated || !r.geometry.indices)return;
+        if((r.vset && r.vset!=wholeVertexSet()) || r.invalidated || !r.geometry.indices || out.frame<r.setRetryAt)return;
+        const uint64_t key=setKeyOf(r.geometry,r.ibFirst,r.ibEnd);
+        // From the cache at the end of the record's own capture: every write logged so far came before the draw's positions were captured, so none
+        // of them can be stale for it, and no deferred check is made.
+        if(auto cached=findSet(key)){r.vset=std::move(cached);++writeStats_.setFromCache;return;}
         if(extentSlots_.empty())extentSlots_.resize(kExtentSlots);
         int index=-1;
-        for(unsigned i=0;i<kExtentSlots;++i)if(!extentSlots_[i].pending){index=int(i);break;}
+        for(unsigned i=0;i<kExtentSlots;++i) {
+            if(extentSlots_[i].pending && !extentSlots_[i].cancelled && extentSlots_[i].key==key){++writeStats_.setPending;return;}
+            if(index<0 && !extentSlots_[i].pending)index=int(i);
+        }
         if(index<0)return;
         const uint64_t bytes=r.ibEnd-r.ibFirst;
         D3D11_BUFFER_DESC ib{};r.geometry.indices->GetDesc(&ib);
-        if(!bytes || r.ibEnd>ib.ByteWidth || bytes>uint64_t(maxVertices)*4){r.extentState=3;return;}
+        if(!bytes || r.ibEnd>ib.ByteWidth || bytes>uint64_t(maxVertices)*4){adoptSet(r,wholeVertexSet());r.setRetryAt=out.frame+30;return;}
         Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
         std::vector<unsigned char> sentinel(size_t((bytes+15)&~uint64_t(15)),0xFF);
         D3D11_BUFFER_DESC d{};d.ByteWidth=UINT(sentinel.size());d.Usage=D3D11_USAGE_STAGING;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
         D3D11_SUBRESOURCE_DATA init{};init.pSysMem=sentinel.data();
         ExtentSlot& slot=extentSlots_[index];
         slot.stage.Reset();
-        if(FAILED(dev->CreateBuffer(&d,&init,&slot.stage))){r.extentState=3;return;}
+        if(FAILED(dev->CreateBuffer(&d,&init,&slot.stage))){adoptSet(r,wholeVertexSet());r.setRetryAt=out.frame+30;return;}
         const D3D11_BOX box{UINT(r.ibFirst),0,0,UINT(r.ibEnd),1,1};
         ctx->CopySubresourceRegion(slot.stage.Get(),0,0,0,0,r.geometry.indices.Get(),0,&box);
-        slot.pending=true;slot.frame=out.frame;slot.bytes=bytes;slot.key=historyKeyHash(historyKeyOf(r.geometry));slot.format=r.geometry.format;
-        r.extentState=1;r.extentSlot=int8_t(index);r.extentFrame=out.frame;++writeStats_.extentIssued;
+        slot.pending=true;slot.cancelled=false;slot.frame=out.frame;slot.bytes=bytes;slot.key=key;slot.ibFirst=r.ibFirst;slot.ibEnd=r.ibEnd;
+        slot.indices=r.geometry.indices.Get();slot.format=r.geometry.format;
+        noteIndexBuffer(slot.indices);++writeStats_.extentIssued;
     }
-    void finishExtent(unsigned slotIndex,bool ok,uint32_t lowest,uint32_t highest) {
-        ExtentSlot& slot=extentSlots_[slotIndex];
-        slot.pending=false;slot.stage.Reset();
-        for(auto& r:records_) {
-            if(r.extentState!=1 || r.extentSlot!=int8_t(slotIndex) || r.extentFrame!=slot.frame)continue;
-            if(historyKeyHash(historyKeyOf(r.geometry))!=slot.key)continue;
-            r.extentSlot=-1;
-            // base + index can be negative (a base that points before the buffer): the extent is then not one this arithmetic can state.
-            const int64_t low=int64_t(r.geometry.base)+int64_t(lowest),high=int64_t(r.geometry.base)+int64_t(highest);
-            if(!ok || low<0 || high<low){r.extentState=3;++writeStats_.extentFailed;continue;}
-            r.vbFirst=uint64_t(r.geometry.offset)+uint64_t(low)*r.geometry.stride;
-            r.vbEnd=uint64_t(r.geometry.offset)+uint64_t(high+1)*r.geometry.stride;
-            r.extentState=2;++writeStats_.extentRead;
+    // Keeps a few examples of the writes that met a vertex buffer: what the write was, what the record's set was, where in it the write fell.
+    void noteExample(HistoryWriteCase kind,HistoryWriteEntry entry,ID3D11Resource* resource,uint64_t first,uint64_t end,const Record& r) {
+        unsigned& n=exampleCount_[unsigned(kind)];
+        if(n>=kHistoryExamplesPerCase)return;
+        HistoryWriteExample& x=examples_[unsigned(kind)][n++];
+        x=HistoryWriteExample{};
+        x.kind=kind;x.entry=entry;x.resource=resource;x.first=first;x.end=end;x.known=r.vset && r.vset!=wholeVertexSet();
+        if(x.known) {
+            const int64_t vb0=int64_t(r.geometry.offset)+int64_t(r.geometry.base)*int64_t(r.geometry.stride);
+            const int64_t a=vb0+int64_t(r.vset->low)*int64_t(r.geometry.stride),b=vb0+(int64_t(r.vset->high)+1)*int64_t(r.geometry.stride);
+            x.spanFirst=a<0?0:uint64_t(a);x.spanEnd=b<0?0:uint64_t(b);x.exact=r.vset->exact;x.runs=unsigned(r.vset->runs.size()/2);
         }
+        x.age=lastFrame_-r.bornFrame;x.key=historyKeyOf(r.geometry);
     }
     std::vector<Record> records_;
     HistoryLedger ledger_;
     HistoryWriteStats writeStats_;
     HistoryWriteTop top_[kHistoryTopResources];
     std::vector<ExtentSlot> extentSlots_;   // made at the first extended capture, so the default policy (VR) and every rig that never asks hold none
+    std::vector<SetEntry> sets_;std::vector<const void*> indexBuffers_;
+    std::vector<DeferredWrite> deferred_;unsigned deferredNext_=0;
+    HistoryWriteExample examples_[kHistoryWriteCases][kHistoryExamplesPerCase];unsigned exampleCount_[kHistoryWriteCases]={};
     std::vector<Tombstone> tombs_;unsigned tombNext_=0;
     unsigned lastFrame_=0,peakRecords_=0,peakBytes_=0;bool retainInvalid_=false;
     Ptr<ID3D11Buffer> retain_;Ptr<ID3D11ShaderResourceView> retainViews_[retainSlots];

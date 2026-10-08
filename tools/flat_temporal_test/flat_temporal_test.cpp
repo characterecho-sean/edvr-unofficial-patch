@@ -39,6 +39,7 @@
 #include "flat_hdr_crumbs_tests.h"
 #include "flat_no_candidate_tests.h"
 #include "flat_range_invalidate_tests.h"
+#include "flat_vertex_set_tests.h"
 #include "flat_source_free_tests.h"
 #include "flat_sibling_policy_tests.h"
 #include "flat_shadow_model_tests.h"
@@ -3922,6 +3923,8 @@ int main(int argc, char** argv) {
     failures += flatNoCandidateWiringTests();
     failures += flatRangeInvalidateTests();
     failures += flatRangeInvalidateWiringTests();
+    failures += flatVertexSetTests();
+    failures += flatVertexSetWiringTests();
     failures += flatSourceFreeTests();
     failures += flatSourceFreeWiringTests();
     failures += flatSiblingPolicyTests();

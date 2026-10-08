@@ -100,7 +100,7 @@ inline void flatRangeInvalidateTests(ID3D11Device* dev, ID3D11DeviceContext* ctx
               "range 1: an update of bytes [12,24) of the index buffer reports an index-buffer hit");
         const auto& s = h.writeStats();
         check(s.observed[kUpdate] == 1 && s.ranged[kUpdate] == 1 && s.savedWrites[kUpdate] == 0 && s.recordsInvalidated[kUpdate] == 1 &&
-                  s.sparedRecords == 1 && s.extentUnknownHits == 0 && flatRangeOnlyCell(s, kUpdate, kIndices, kGap, 1, 1),
+                  s.sparedRecords == 1 && s.vertexUnknown == 0 && s.vertexGenuine == 0 && flatRangeOnlyCell(s, kUpdate, kIndices, kGap, 1, 1),
               "range 1: the write is observed once, ranged, touched live records of the index buffer, invalidated one and spared the other");
         Hist::Capture a, b;
         check(h.capture(ctx, issue, 3, 1, 0, 0, 0, 101, a, true, true) && a.candidateCount == 1 && !a.missed,
@@ -177,8 +177,9 @@ inline void flatRangeInvalidateTests(ID3D11Device* dev, ID3D11DeviceContext* ctx
                 for (unsigned e2 = 0; e2 < edvr::kHistoryWriteEntries; ++e2)
                     onlyEntry = onlyEntry && s.observed[e2] == (e2 == e ? 1u : 0u) && s.recordsInvalidated[e2] == (e2 == e ? 2u : 0u) &&
                                 s.ranged[e2] == 0 && s.savedWrites[e2] == 0;
-                check(onlyEntry && flatRangeOnlyCell(s, e, role, t, 1, 1) && s.sparedRecords == 0 && s.extentUnknownHits == 0 &&
-                          s.unknownInvalidating[kGap] == 0 && s.unknownInvalidating[kWindow] == 0, what);
+                // A write with no range is classified as nothing: none of the three-way vertex counters moves, whichever buffer it was.
+                check(onlyEntry && flatRangeOnlyCell(s, e, role, t, 1, 1) && s.sparedRecords == 0 && s.vertexUnknown == 0 && s.vertexInGap == 0 &&
+                          s.vertexOutside == 0 && s.vertexGenuine == 0 && s.unknownInvalidating[kGap] == 0 && s.unknownInvalidating[kWindow] == 0, what);
                 const Probe p = probePair(h, 151);
                 check(!p.aKept && !p.bKept && p.aGap == (role == kVertices ? edvr::HistoryGap::InvalidatedVertices : edvr::HistoryGap::InvalidatedIndices) &&
                           p.bGap == p.aGap, "range 1b: both keys are misses named for the buffer that was written");
@@ -233,45 +234,79 @@ inline void flatRangeInvalidateTests(ID3D11Device* dev, ID3D11DeviceContext* ctx
         publishPair(h, 180);
         h.pollExtents(ctx, 183, true);
         h.advance(181);
-        check(h.resourceWritten(ib.Get(), 12, 24, edvr::HistoryWriteEntry::Update) == 4 &&
-                  h.resourceWritten(vb.Get(), 48, 64, edvr::HistoryWriteEntry::Update) == 2,
-              "range 1c: B is hit by an index write and then a vertex write; A is touched by neither");
+        // The vertex write comes first: B's set is known, vertex 3 is B's and not A's, so the write is genuine for B and outside A's span.
+        check(h.resourceWritten(vb.Get(), 48, 64, edvr::HistoryWriteEntry::Update) == 2 &&
+                  h.resourceWritten(ib.Get(), 12, 24, edvr::HistoryWriteEntry::Update) == 4,
+              "range 1c: B is hit by a vertex write and then an index write; A is touched by neither");
         const Probe p = probePair(h, 181);
         check(p.aKept && !p.bKept && p.bGap == edvr::HistoryGap::InvalidatedVertices,
               "range 1c: B's label is the vertex write's (the later write adds its reason and vertices outrank indices); A keeps its prior");
     }
+    {
+        // The other order: the index write takes B and ends the set read from those indices, so the vertex write that follows meets a record that is
+        // already down and has no set to classify it by; it reports nothing and B keeps the label it has. (A's set is a different index range and
+        // stays: the write to bytes [12,24) did not overlap it.)
+        Hist h;
+        publishPair(h, 185);
+        h.pollExtents(ctx, 188, true);
+        h.advance(186);
+        check(h.resourceWritten(ib.Get(), 12, 24, edvr::HistoryWriteEntry::Update) == 4 &&
+                  h.resourceWritten(vb.Get(), 48, 64, edvr::HistoryWriteEntry::Update) == 0,
+              "range 1c: after an index write took B and ended its set, a vertex write finds a record that is down and reports nothing; A is outside its span");
+        const Probe p = probePair(h, 186);
+        check(p.aKept && !p.bKept && p.bGap == edvr::HistoryGap::InvalidatedIndices,
+              "range 1c: B keeps the label of the write that took it (indices); A keeps its prior");
+    }
 
-    // ---- 2. the vertex extent: read back from the draw's own indices, and until then the whole buffer ------------------------------------
+    // ---- 2. the vertex set: read back from the draw's own indices, and until then the record is read as its indices alone -----------------
     {
         Hist h;
         publishPair(h, 200);
-        check(h.writeStats().extentIssued == 2 && h.writeStats().extentRead == 0, "range 2: the extent of each new record is requested and not yet read");
+        check(h.writeStats().extentIssued == 2 && h.writeStats().extentRead == 0, "range 2: the vertex set of each new record is requested and not yet read");
         h.advance(201);
-        check(h.resourceWritten(vb.Get(), 1000, 1004, edvr::HistoryWriteEntry::Update) == 2,
-              "range 2: before the extent is read a write anywhere on the vertex buffer hits, even a range beyond its end");
-        check(h.writeStats().extentUnknownHits == 2 && h.writeStats().recordsInvalidated[kUpdate] == 2 &&
-                  flatRangeOnlyCell(h.writeStats(), kUpdate, kVertices, kGap, 1, 1),
-              "range 2: and the two hits are counted as hits of the unread extent");
+        check(h.resourceWritten(vb.Get(), 1000, 1004, edvr::HistoryWriteEntry::Update) == 0 && h.resourceWritten(vb.Get(), 0, 16, edvr::HistoryWriteEntry::Update) == 0,
+              "range 2: before the set is read a ranged write to the vertex buffer is spared, one beyond its end and one on the first vertex alike");
+        check(h.writeStats().vertexUnknown == 4 && h.writeStats().vertexGenuine == 0 && h.writeStats().recordsInvalidated[kUpdate] == 0 &&
+                  h.writeStats().sparedRecords == 4 && h.writeStats().savedWrites[kUpdate] == 2 &&
+                  flatRangeOnlyCell(h.writeStats(), kUpdate, kVertices, kGap, 2, 0),
+              "range 2: and the four spares are counted as writes met with an unknown set, touching two writes' worth of live records, invalidating none");
         const Probe first = probePair(h, 201);
-        check(!first.aKept && !first.bKept && first.aGap == edvr::HistoryGap::InvalidatedVertices && first.bGap == edvr::HistoryGap::InvalidatedVertices,
-              "range 2: both keys are misses named invalidated-vertices");
-        check(h.writeStats().extentIssued == 4, "range 2: the two revived records forgot their extents and asked again");
-        // The revived records are unknown again: the same write beyond the buffer takes them again, and asks again.
+        check(first.aKept && first.bKept, "range 2: both keys keep their priors");
+        check(h.writeStats().extentIssued == 2 && h.writeStats().setPending == 2,
+              "range 2: the draws of the next frame asked again and found the key's read already in flight: no second copy");
         h.advance(202);
-        check(h.resourceWritten(vb.Get(), 1000, 1004, edvr::HistoryWriteEntry::Update) == 2 && h.writeStats().extentUnknownHits == 4,
-              "range 2: a record revived after a write has no extent until it is read again");
-        const Probe second = probePair(h, 202);
-        check(!second.aKept && !second.bKept && h.writeStats().extentIssued == 6, "range 2: and they fall and ask once more");
         h.pollExtents(ctx, 205, true);
-        check(h.writeStats().extentRead == 2 && h.writeStats().extentFailed == 0,
-              "range 2: the stale requests of the earlier lives are dropped and only the live ones set an extent");
+        check(h.writeStats().extentRead == 2 && h.writeStats().extentFailed == 0 && h.writeStats().setCancelled == 0,
+              "range 2: both sets are read");
+        // Both writes of the unknown window were on vertex 0 or beyond the buffer: the one on vertex 0 met both sets, but both records were
+        // published again at frame 201, after those writes (the write at frame 201 is not older than the stamp, so it is checked): the first
+        // vertex is in both sets, so the deferred check takes both records.
+        check(h.writeStats().deferredInvalidated == 2 && h.writeStats().deferredConservative == 0,
+              "range 2: the write on vertex 0 spared while the sets were unknown met both when they arrived: the deferred check takes both records");
+        const Probe afterDeferred = probePair(h, 202);
+        check(!afterDeferred.aKept && !afterDeferred.bKept && afterDeferred.aGap == edvr::HistoryGap::InvalidatedVertices &&
+                  afterDeferred.bGap == edvr::HistoryGap::InvalidatedVertices,
+              "range 2: and both keys are misses named invalidated-vertices");
         h.advance(203);
-        check(h.resourceWritten(vb.Get(), 1000, 1004, edvr::HistoryWriteEntry::Update) == 0 && h.writeStats().extentUnknownHits == 4,
-              "range 2: once read, the same write beyond the buffer spares both");
+        check(h.resourceWritten(vb.Get(), 1000, 1004, edvr::HistoryWriteEntry::Update) == 0 && h.writeStats().vertexOutside == 2,
+              "range 2: once read, the same write beyond the buffer spares both and says it fell outside the sets");
         const Probe kept = probePair(h, 203);
-        check(kept.aKept && kept.bKept, "range 2: and both keep their priors");
+        check(kept.aKept && kept.bKept && h.writeStats().extentIssued == 2, "range 2: both keep their priors, and the revived records were given their sets: no new read");
     }
-    // The control table: the extent is the envelope of the vertices the indices name, plus the vertex buffer offset and the draw's base.
+    {
+        // The same window, a write that met no vertex: nothing is taken when the sets arrive.
+        Hist h;
+        publishPair(h, 210);
+        h.advance(211);
+        check(h.resourceWritten(vb.Get(), 1000, 1004, edvr::HistoryWriteEntry::Update) == 0 && h.writeStats().vertexUnknown == 2,
+              "range 2: a write beyond the buffer is spared while the sets are unknown");
+        h.pollExtents(ctx, 214, true);
+        check(h.writeStats().extentRead == 2 && h.writeStats().deferredInvalidated == 0 && h.writeStats().deferredConservative == 0,
+              "range 2: and it is checked against the sets when they arrive, finds no vertex, and takes nothing");
+        const Probe p = probePair(h, 211);
+        check(p.aKept && p.bKept, "range 2: both keep their priors");
+    }
+    // The control table: the set is the vertices the indices name, placed by the vertex buffer offset and the draw's base; a write hits a record iff it meets one.
     const auto runRows = [&](const char* label, ID3D11Buffer* target, bool vertexRole, const FlatRangeRow* rows, size_t count, int base, bool polled) {
         for (size_t i = 0; i < count; ++i) {
             const FlatRangeRow& row = rows[i];
@@ -292,7 +327,14 @@ inline void flatRangeInvalidateTests(ID3D11Device* dev, ID3D11DeviceContext* ctx
             std::snprintf(what, sizeof(what), "%s: bytes [%llu,%llu): %u records invalidated, %u spared, %s", label, (unsigned long long)row.first,
                           (unsigned long long)row.end, hits, 2 - hits, hits ? "the write is not saved" : "the write is saved");
             check(s.recordsInvalidated[kUpdate] == hits && s.sparedRecords == 2 - hits && s.savedWrites[kUpdate] == (hits ? 0u : 1u) &&
-                      s.extentUnknownHits == 0, what);
+                      s.vertexUnknown == 0, what);
+            if (vertexRole && polled) {
+                // With the sets read, every live record the write reached is classified: genuine for a hit, in the gap or outside for a spare.
+                // A write of no bytes is classified as outside (it meets no vertex and no envelope).
+                std::snprintf(what, sizeof(what), "%s: bytes [%llu,%llu): the three-way counters add up to the records, %u genuine", label,
+                              (unsigned long long)row.first, (unsigned long long)row.end, hits);
+                check(s.vertexGenuine == hits && s.vertexInGap + s.vertexOutside == 2 - hits, what);
+            }
             const Probe p = probePair(h, 301, base);
             const edvr::HistoryGap want = vertexRole ? edvr::HistoryGap::InvalidatedVertices : edvr::HistoryGap::InvalidatedIndices;
             std::snprintf(what, sizeof(what), "%s: bytes [%llu,%llu): A keeps its prior iff untouched, B likewise, a lost one is named for the buffer",
@@ -301,21 +343,31 @@ inline void flatRangeInvalidateTests(ID3D11Device* dev, ID3D11DeviceContext* ctx
         }
     };
     {
-        // Rig vertex buffer: A reads vertices 0..2 = [0,48), B reads 0..3 = [0,64).
+        // Rig vertex buffer: A reads vertices {0,1,2} = bytes [0,48); B reads {0,2,3} = [0,16) and [32,64) -- vertex 1, bytes [16,32), is a gap in B.
         const FlatRangeRow rows[] = {
-            {0, 16, true, true},   {0, 48, true, true},   {32, 48, true, true},  {47, 49, true, true},  {16, 17, true, true},   {48, 49, false, true},
-            {48, 64, false, true}, {63, 64, false, true}, {64, 80, false, false}, {1000, 1004, false, false}, {48, 48, false, false}, {0, 64, true, true}};
+            {0, 16, true, true},   {0, 48, true, true},   {32, 48, true, true},  {47, 49, true, true},  {16, 17, true, false},  {48, 49, false, true},
+            {48, 64, false, true}, {63, 64, false, true}, {64, 80, false, false}, {1000, 1004, false, false}, {48, 48, false, false}, {0, 64, true, true},
+            {15, 17, true, true},  {16, 32, true, false}, {31, 32, true, false}, {31, 33, true, true},  {17, 31, true, false}, {15, 16, true, true}};
         runRows("range 2 vertex rows", vb.Get(), true, rows, sizeof(rows) / sizeof(rows[0]), 0, true);
     }
     {
-        // The same buffer with the extents NOT read: every row hits both, the row beyond the buffer included.
-        const FlatRangeRow rows[] = {{48, 64, true, true}, {64, 80, true, true}, {1000, 1004, true, true}};
+        // The same buffer with the sets NOT read: a record is read as its indices alone, so every row is spared and filed as met with an unknown set.
+        // The rows include vertices both keys read and the whole buffer; this is the behaviour before this build turned inside out (an unread extent
+        // used to count as the whole buffer and take both records).
+        const FlatRangeRow rows[] = {{48, 64, true, true}, {64, 80, true, true}, {1000, 1004, true, true}, {0, 64, true, true}, {0, 16, true, true}};
         for (const FlatRangeRow& row : rows) {
             Hist u;
             publishPair(u, 310);
             u.advance(311);
-            check(u.resourceWritten(vb.Get(), row.first, row.end, edvr::HistoryWriteEntry::Update) == 2 && u.writeStats().extentUnknownHits == 2,
-                  "range 2 control: an unread extent makes every vertex write a hit of the whole buffer, and counts it as such");
+            check(u.resourceWritten(vb.Get(), row.first, row.end, edvr::HistoryWriteEntry::Update) == 0 && u.writeStats().vertexUnknown == 2 &&
+                      u.writeStats().sparedRecords == 2 && u.writeStats().recordsInvalidated[kUpdate] == 0,
+                  "range 2 control: an unread set makes every ranged vertex write a spare, filed as met with an unknown set");
+            // And an unranged write still takes both, unclassified: the whole buffer is written whatever the set.
+            Hist w;
+            publishPair(w, 310);
+            w.advance(311);
+            check(w.resourceWritten(vb.Get()) == 2 && w.writeStats().vertexUnknown == 0 && w.writeStats().recordsInvalidated[unsigned(edvr::HistoryWriteEntry::Other)] == 2,
+                  "range 2 control: with no range the same unread records both fall, unclassified");
         }
     }
     {
@@ -326,8 +378,10 @@ inline void flatRangeInvalidateTests(ID3D11Device* dev, ID3D11DeviceContext* ctx
         auto vb6 = flatRangeBuffer(dev, six, sizeof(six), D3D11_BIND_VERTEX_BUFFER);
         struct Route { UINT offset; int base; const char* name; };
         const Route routes[] = {{32, 0, "range 2 offset 32 base 0"}, {0, 2, "range 2 offset 0 base 2"}, {16, 1, "range 2 offset 16 base 1"}};
+        // B has a gap at the vertex after the first (bytes [48,64) here).
         const FlatRangeRow rows[] = {{80, 96, false, true}, {79, 80, true, true}, {80, 81, false, true}, {95, 96, false, true}, {16, 32, false, false},
-                                     {0, 32, false, false}, {31, 33, true, true}, {96, 128, false, false}, {32, 33, true, true}};
+                                     {0, 32, false, false}, {31, 33, true, true}, {96, 128, false, false}, {32, 33, true, true}, {48, 64, true, false},
+                                     {63, 64, true, false}, {47, 49, true, true}, {49, 50, true, false}, {64, 65, true, true}};
         for (const Route& route : routes) {
             ID3D11Buffer* buffers[1] = {vb6.Get()};
             ctx->IASetVertexBuffers(1, 1, buffers, &stride, &route.offset);
@@ -344,7 +398,7 @@ inline void flatRangeInvalidateTests(ID3D11Device* dev, ID3D11DeviceContext* ctx
         ctx->IASetIndexBuffer(ib16.Get(), DXGI_FORMAT_R16_UINT, 0);
         const FlatRangeRow indexRows[] = {{0, 6, true, false}, {6, 12, false, true}, {5, 7, true, true}, {12, 16, false, false}, {11, 12, false, true}};
         runRows("range 2 R16 index rows", ib16.Get(), false, indexRows, sizeof(indexRows) / sizeof(indexRows[0]), 0, false);
-        const FlatRangeRow vertexRows[] = {{48, 64, false, true}, {0, 16, true, true}, {64, 80, false, false}};
+        const FlatRangeRow vertexRows[] = {{48, 64, false, true}, {0, 16, true, true}, {64, 80, false, false}, {16, 32, true, false}};
         runRows("range 2 R16 vertex rows", vb.Get(), true, vertexRows, sizeof(vertexRows) / sizeof(vertexRows[0]), 0, true);
         // An index buffer bound at a byte offset: the range starts there, and the extent is read from there (the two leading words are decoys that
         // would name vertices 7 and 7 and widen A to the whole buffer if the copy began at byte 0).
@@ -532,12 +586,12 @@ inline void flatRangeInvalidateTests(ID3D11Device* dev, ID3D11DeviceContext* ctx
         check(records == 2 && bytes == 2 * 3 * 32, "range 5: the peak of a history that made two records is two records and 192 bytes");
         h.advance(601);
         check(h.resourceWritten(ib.Get(), 12, 24, edvr::HistoryWriteEntry::Update) == 4 && h.resourceWritten(ib.Get(), 100, 104, edvr::HistoryWriteEntry::Update) == 0 &&
-                  h.resourceWritten(vb.Get(), 1000, 1004, edvr::HistoryWriteEntry::Update) == 2,
-              "range 5: three writes: one that hit, one that was saved and one that hit the unread extent");
+                  h.resourceWritten(vb.Get(), 1000, 1004, edvr::HistoryWriteEntry::Update) == 0,
+              "range 5: three writes: one that hit, one that was saved and one that was spared because the vertex sets were not read yet");
         edvr::HistoryWriteTop top[edvr::kHistoryTopResources]{};
         const unsigned n = h.takeTopResources(top, edvr::kHistoryTopResources);
         check(n == 2 && top[0].resource == ib.Get() && top[0].touching == 2 && top[0].invalidating == 1 && top[0].saved == 1 && top[1].resource == vb.Get() &&
-                  top[1].touching == 1 && top[1].invalidating == 1 && top[1].saved == 0,
+                  top[1].touching == 1 && top[1].invalidating == 0 && top[1].saved == 1,
               "range 5: the resources written most come back most first with touching, invalidating and saved counts");
         check(h.takeTopResources(top, edvr::kHistoryTopResources) == 0, "range 5: and the table is forgotten once taken");
         h.advance(605);

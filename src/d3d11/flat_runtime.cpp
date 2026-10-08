@@ -268,6 +268,7 @@ struct State {
     // Section 104, the pistol's no-candidate bursts: the cumulative counters as of the last `flat foreground no-candidate 5s:` line (the
     // line prints the window's), and the example lines said this session (each kind is capped).
     FlatForegroundMotion::CaptureStats foregroundMissReported;
+    unsigned historyExampleLines=0;
     uint32_t foregroundMissExampleLines=0,foregroundIdentityExampleLines=0;
     // Section 104, the training mission's turned-left view: the spell tracker (flat_source_spell.h), and what the last frame refused for
     // no motion source held on the scene's depth.
@@ -689,10 +690,15 @@ static HistoryWriteStats historyWindowDelta(const HistoryWriteStats& now,const H
         }
     }
     for(unsigned t=0;t<kHistoryWriteTimings;++t)w.unknownInvalidating[t]=d(now.unknownInvalidating[t],was.unknownInvalidating[t]);
-    w.sparedRecords=d(now.sparedRecords,was.sparedRecords);w.extentUnknownHits=d(now.extentUnknownHits,was.extentUnknownHits);
+    w.sparedRecords=d(now.sparedRecords,was.sparedRecords);
     for(unsigned i=0;i<static_cast<unsigned>(HistoryErase::Count);++i)w.erased[i]=d(now.erased[i],was.erased[i]);
     w.allocations=d(now.allocations,was.allocations);w.allocationFailures=d(now.allocationFailures,was.allocationFailures);
     w.extentIssued=d(now.extentIssued,was.extentIssued);w.extentRead=d(now.extentRead,was.extentRead);w.extentFailed=d(now.extentFailed,was.extentFailed);
+    w.setFromCache=d(now.setFromCache,was.setFromCache);w.setPending=d(now.setPending,was.setPending);
+    w.setApproximate=d(now.setApproximate,was.setApproximate);w.setCancelled=d(now.setCancelled,was.setCancelled);
+    w.vertexUnknown=d(now.vertexUnknown,was.vertexUnknown);w.vertexInGap=d(now.vertexInGap,was.vertexInGap);
+    w.vertexOutside=d(now.vertexOutside,was.vertexOutside);w.vertexGenuine=d(now.vertexGenuine,was.vertexGenuine);
+    w.deferredInvalidated=d(now.deferredInvalidated,was.deferredInvalidated);w.deferredConservative=d(now.deferredConservative,was.deferredConservative);
     return w;
 }
 static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::CaptureStats& captures) {
@@ -719,6 +725,7 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
     history.writes=historyWindowDelta(captures.history,was.history);
     const ShadowStats shadowWindow=flatShadowDelta(captures.shadow,was.shadow);
     HistoryWriteTop tops[kHistoryTopResources*State::kDomainCandidateCap]{};unsigned topCount=0;
+    HistoryWriteExample examples[kHistoryWriteCases*kHistoryExamplesPerCase*State::kDomainCandidateCap]{};unsigned exampleCount=0;
     std::array<Taken,State::kDomainCandidateCap> taken{};
     for(unsigned i=0;i<s.foregroundCandidates.size();++i) {
         auto& motion=s.foregroundCandidates[i].motion;
@@ -730,6 +737,7 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
         history.records+=motion.historyRecords();history.bytes+=motion.historyBytes();
         history.peakRecords+=peakRecords;history.peakBytes+=peakBytes;
         topCount+=motion.takeWriteTop(tops+topCount,kHistoryTopResources);
+        exampleCount+=motion.takeWriteExamples(examples+exampleCount,kHistoryWriteCases*kHistoryExamplesPerCase);
     }
     // The three resources written most, over the candidates.
     std::sort(tops,tops+topCount,[](const HistoryWriteTop& a,const HistoryWriteTop& b){return a.touching>b.touching;});
@@ -741,7 +749,14 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
     flatIdentityLine(line,sizeof(line),w);Log::get().note("%s",line);
     flatSiblingLine(line,sizeof(line),sibling);Log::get().note("%s",line);
     flatHistoryLine(line,sizeof(line),history);Log::get().note("%s",line);
-    flatShadowLine(line,sizeof(line),shadowWindow);Log::get().note("%s",line);
+    for(unsigned part=0;part<kFlatHistoryWriteLines;++part){flatHistoryWritesLine(line,sizeof(line),history,part);Log::get().note("%s",line);}
+    flatHistoryVertexLine(line,sizeof(line),history);Log::get().note("%s",line);
+    for(unsigned i=0;i<exampleCount && s.historyExampleLines<96;++i,++s.historyExampleLines){
+        flatHistoryExampleLine(line,sizeof(line),examples[i]);Log::get().note("%s",line);
+    }
+    // The shadow is off unless a rig or a build switches it on: no line then, and the lines say so by their absence.
+    if(shadowWindow.sampledFrames || shadowWindow.failed || shadowWindow.notReady)
+        for(unsigned part=0;part<kFlatShadowLineParts;++part){flatShadowLine(line,sizeof(line),shadowWindow,part);Log::get().note("%s",line);}
     for(const auto& t:taken) {
         for(unsigned i=0;i<t.misses && s.foregroundMissExampleLines<48;++i,++s.foregroundMissExampleLines) {
             const auto& e=t.miss[i];

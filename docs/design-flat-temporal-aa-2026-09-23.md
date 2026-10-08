@@ -2,9 +2,8 @@
 
 ## Status
 
-- **State:** range-aware invalidation of the weapon's vertex history, its
-  labels, write instrument and the sibling model's shadow (104, 2026-10-07):
-  BUILT, NOT FLOWN. e5207abe flew (a record-reclaimed storm). Grenade: FLOWN OK.
+- **State:** 104, 4th build (2026-10-07): the weapon history's vertex set
+  exact at creation: BUILT, NOT FLOWN. 45b5a373 flew: the storm stayed.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,14 +32,15 @@
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
-  capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** walk the settlement with the 104 third build: weapon no-prior
-  falls to the standing level; read `flat foreground history 5s` (saved-writes,
-  entries) and `shadow 5s` (apply the affine fit only on its bins); 105 traces.
-  Open: roof shimmer/TAA. Retain 102's color-clear fix; no per-weapon table;
-  preserve Epic settings, 87's native FSR comparison, 83's open items and
-  high-G motion; do not repeat qualified PS91/BFE or stale-resize hypotheses.
-  Menu hangar-floor P1 open; VR tests and `d9f86b09` belong to main/openxr-perf-gaps.
+  capture; raising the 64-draw/64-record bounds; a weapon-only cause;
+  identity-pooled sibling motion (mean or affine) as the cover for lost history.
+- **Next:** walk the settlement with the 104 fourth build: weapon no-prior
+  falls to the standing level; read `history vertex writes 5s` (extent-unknown,
+  in-gap, genuine) and its examples; 105 traces. Open: roof shimmer/TAA.
+  Retain 102's color-clear fix; no per-weapon table; preserve Epic settings,
+  87's native FSR comparison, 83's open items and high-G motion; do not repeat
+  qualified PS91/BFE or stale-resize hypotheses.
+  Menu hangar-floor P1 open; VR tests, `d9f86b09`: main/openxr-perf-gaps.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
@@ -14265,6 +14265,106 @@ ruled out: unspecified-weapon-refused as the white seen at the settlement, becau
 the same fraction of the frame (0.01-0.12 percent) is in the SS 0.75 windows that
 looked clean, and the walking windows' no-prior (reason 3) pixels are 10 to 100
 times larger.
+
+### 2026-10-07, fourth build: the vertex set known at creation, exact; short lines; the shadow retired from the frame
+
+**The flight (45b5a373, Epic, log 21:14).** FIX A spared most ranged writes and left the storm where it was.
+Weapon-refused pixels while walking were 0.04-2.57 percent of the frame (21:16:48 2.57, :58 1.91; the last
+flight 0.17-2.9), standing 0.01. In `flat foreground history 5s`: the arena writes are CopySubresourceRegion and
+nothing else (map, update, copy-resource, clear and dispatch-uav touch no live record); at :48 its 561 ranged
+writes spared 391 whole (`saved-writes`), 165 invalidated through the vertex role and 5 through the index role,
+and those 170 writes invalidated 1,782 records, 10.5 a write (:58: 176 writes, 2,198 records, 12.5). The
+no-candidate patterns are now almost all `invalidated-vertices` (1,558 at :48, 2,174 at :58, 926 at :03).
+`erased` says what happens next: advance-invalidated 236 at :48 (a record invalidated and not redrawn in three
+frames), `allocations=276` in 5 s, peak 68 records and 14.9 MB: against 128 records and 32 MiB the history is
+nowhere near full, it is churning. Two of the three fields that would name the cause were lost: the log cuts a
+line at about 1,167 characters (`...[truncated]`; src/common/log.cpp), and the history line was 3 KB, so
+`spared-records`, `extent-unknown-hits`, the extent counters and the top resources never reached the file,
+and neither did the shadow line's tail.
+
+**Reading (a hypothesis; the count that decides it is built).** A vertex write hit 10 to 12 records because
+their vertex extents overlapped it, or were unknown. The extent of the previous build was read back three or more
+frames after the record was made, forgotten whenever the record was invalidated and revived, and lost with an
+erased record; an unknown extent counted as the whole vertex buffer. A record that a write invalidates every few
+frames and that ages out and is made again (236 and 276 in a window) therefore spends most of its life with an
+unknown extent, which is hit by every write to its arena: a loop. The fix is not a better envelope: the set of
+vertices a draw reads depends on its index bytes only, so it can be kept for the index range, beyond the record.
+
+**ruled out: identity-pooled sibling motion (the mean, or the affine fit) as the cover for lost history.** The
+shadow on real data: the donors' own fit residual is mostly in the `more` bin (379, 507, 745, 504 draws in four
+windows), conditioning fails on 316 to 410, there are 20 to 30 donor draws and 73,000 to 165,000 donor vertices
+per draw (an identity group pools the weapon with skinned parts of the body), and the draws the affine gate
+would accept out of those the current policy refuses are 0 to 4. The shadow's code, rigs and shaders stay; it is
+off by default (`kFlatShadowDefaultEvery` 0, a rig sets `RigShadowEvery`), samples nothing, makes no resource and
+prints no line.
+
+**Built (no new key).**
+1. Short lines. Every line of the history report is a formatter held under `kFlatLogLineBudget` (1,000
+   characters) with 12-digit counters, and the explanatory paragraphs are gone from the lines (they are here):
+   `flat foreground history 5s` (sizes, peaks, allocations, erase paths, the vertex sets' reads),
+   `... history writes 5s (1/3)..(3/3)` (the entries), `... history vertex writes 5s` (the three-way count, the
+   deferred checks, the top resources) and `... history write example`.
+2. The vertex set, at creation, exact. No synchronous source exists: the arenas' index buffers are default-usage,
+   filled by uploads and copies from other buffers, so no CPU copy of their bytes can be shadowed, and reading the
+   copy back at once would stall the render thread on every GPU command queued before it. So the set is read once per
+   index range (a staging copy of the indices at capture, read without waiting one frame or more later) and CACHED by
+   the range, outside the record: a record that is invalidated, aged out and made again, or made for a key seen
+   before, is given its set at capture (`from-cache`). It is the exact set of vertices the indices name, as
+   sorted runs (a mesh's vertices are mostly contiguous: a few runs); past 4M span or 4,096 runs it is the envelope
+   alone, which is a superset and sound. Only a write to the index range (overlapping, whole, or unknown) ends it
+   and cancels a read in flight; a write to the vertices never does, since the indices did not change.
+3. The vertex write is judged against the set. A ranged write to a record's vertex buffer meets a vertex of the
+   set (a genuine rewrite: the record is invalidated), falls inside the envelope between the vertices (`in-gap`), or
+   outside it (`outside-span`); the last two spare the record. The first sight of a key, before its set is read,
+   is the one case that cannot be judged: the record is treated as reading its INDICES ALONE (the three-way
+   count's `extent-unknown`), not the whole buffer, and the write is logged in a ring of 128. When the set arrives
+   a record that was published since such a write is invalidated then if the write meets a vertex
+   (`deferred-invalidated`), or if the ring no longer reaches back to its last publish (`deferred-conservative`).
+   So the unknown window costs a late invalidation, never a wrong prior. A record whose indices could not be read
+   (a copy that did not happen, a range past the buffer) holds a set of every vertex, as the previous build did,
+   and asks again 30 frames later.
+4. The instrument. The three-way count names any remainder: `extent-unknown`, `in-gap`, `outside-span` (spared)
+   and `genuine` (invalidated), per live record a ranged vertex write met; `spared-records`; two examples per
+   case per window, each with the write's bytes and entry, the record's set (span, exact or envelope-only, runs),
+   where in the span the write starts, the record's age in frames and its key.
+
+**Tests.** The weapon-motion rig (WARP) is 229,669 checks (227,221 before): the exact set (about 110 byte rows over
+{0,1,2,6,7,8} including the run edges, one-byte and unaligned writes; three routes to the same bytes; a negative
+base; 16-bit indices; an index buffer bound at an offset; the span bound 4,194,304 exact and 4,194,305 envelope-only,
+4,096 runs exact and 4,097 envelope-only, where a gap write then hits), the loop (12 frames of a write on a vertex
+of one record and one in a gap of another: the second keeps its prior 12 of 12 frames, the first is invalidated 12
+times and `extentIssued` stays 2), the unknown window (a genuine write taken by the deferred check, a gap write spared
+for good, a write older than the last publish ignored, a ring of 127 or 128 writes not conservative and 129 or
+more conservative, a write that cancels the read in flight and the re-read returning the new indices), the cache
+(a record made again takes its set; thirteen kinds of write, seven end the set and six do not; R16 and R32 of the
+same bytes are two entries; 300 keys leave 256; the 257th buffer resets the cache), the buffer id (kept in the
+buffer's private data; a buffer made at a freed buffer's address gets no cached set), the failure roads (an
+unreadable range holds the whole-buffer set through the deferred check and retries at 30 frames), the examples (two
+a case, ordered, with the set's span, runs, age and key; none for outside writes or uncounted reports), the
+adapter's lists, and the shadow's default (a two-draw frame at a multiple of 8 samples nothing and makes no
+shader). The pure rig: `historyVertexSetMeets` against a 72-row table and a byte-by-byte oracle over nine strides,
+every formatter of the report with every counter printed once, a window of zeros printing zeros, and each line
+under 1,000 characters at 12-digit counters (history 473, writes 843, 853 and 574, vertex 570, example 505, shadow
+647, 440 and 748; at 2^64-1 all at most 999). 119 private mutants of the new code, 118 killed (92 by the WARP rig,
+26 by the pure rig only: wiring pins, lines, constants); the survivor, `char entries[960]` raised, is equivalent. The
+rigs found four defects before the flight, now fixed: a ring that wrapped inside the record's publish frame lost
+its first write (the test is `oldest>=since`); a failed read assigned the whole-buffer set without the deferred
+check; the cache keyed a buffer by its address, which a later buffer can reuse (now a per-buffer id); a record made
+again from the cache was checked against writes that came before its own capture. The cost of the design the
+rigs pin: the deferred check protects the frames after the set arrives, so a key's first sight, a frame or two
+before the read lands, may take a prior across a write that genuinely rewrote its vertices.
+
+**Flight pass signs.**
+- Walking the settlement: the census' weapon-refused no-prior falls and stays near the standing 0.01 percent;
+  the no-candidate patterns `invalidated-vertices` fall with it; `allocations` and `advance-invalidated` fall to
+  the keys that really leave.
+- The three-way count names any remainder. `genuine` is the game rewriting the weapon's own vertices: if it
+  carries the invalidations, nothing here can cure it (the examples name the entry, the bytes and the age; a
+  rewrite every frame of a record's vertices is then the question to ask of the game). `extent-unknown` large
+  with `from-cache` small means keys are new every frame (the LOD churn), and `deferred-invalidated`
+  says what the unknown window cost. `in-gap` and `outside-span` are what the exact set spared over the envelope.
+- `vertex sets: failed` and `approximate` stay 0 or small; `cancelled` is the index writes that raced a read.
+- No line of any report ends in `...[truncated]`.
 
 ## 105. Different supporter: v0.18.2 AA selector refusal (2026-10-06)
 

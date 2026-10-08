@@ -50,7 +50,11 @@ inline constexpr float kFlatShadowHullMargin = 0.05f;
 inline constexpr float kFlatShadowHullFloor = 0.01f;
 inline constexpr float kFlatShadowDepthRatio = 1.25f;
 inline constexpr float kFlatShadowMovingPixels = 1.0f;
+// The cadence when the shadow is switched on (one frame in this many). It is OFF by default (kFlatShadowDefaultEvery): the 10-07 flight of the
+// first build showed the affine sibling model failing on real data (the identity groups pool the weapon with skinned parts of the body), so the
+// passes cost nothing in the frame until a rig or a build asks for them.
 inline constexpr unsigned kFlatShadowEveryFrames = 8;
+inline constexpr unsigned kFlatShadowDefaultEvery = 0;
 inline constexpr unsigned kFlatShadowBins = 6;
 inline constexpr float kFlatShadowEdges[kFlatShadowBins - 1] = {0.25f, 0.5f, 1.0f, 2.0f, 4.0f};
 // The bin an error falls in: <=0.25, <=0.5, <=1, <=2, <=4, more.
@@ -333,42 +337,49 @@ inline std::vector<ShadowRecord> flatShadowReference(const std::vector<ShadowDra
     return out;
 }
 
-// The window's counters, as the log line prints them.
-inline int flatShadowLine(char* out, size_t n, const ShadowStats& w) {
-    char bins[6][160];
-    const uint64_t* sets[6] = {w.meanAll, w.meanAccepted, w.affineAll, w.affineAccepted, w.residualBins, w.residualBins};
-    for (unsigned s = 0; s < 5; ++s) {
-        std::snprintf(bins[s], sizeof(bins[s]), "<=0.25=%llu <=0.5=%llu <=1=%llu <=2=%llu <=4=%llu more=%llu",
-            static_cast<unsigned long long>(sets[s][0]), static_cast<unsigned long long>(sets[s][1]), static_cast<unsigned long long>(sets[s][2]),
-            static_cast<unsigned long long>(sets[s][3]), static_cast<unsigned long long>(sets[s][4]), static_cast<unsigned long long>(sets[s][5]));
+// The window's counters, as the log lines print them: three lines (the logger cuts at about 1167 characters), each part self-describing.
+inline constexpr unsigned kFlatShadowLineParts = 3;
+inline int flatShadowLine(char* out, size_t n, const ShadowStats& w, unsigned part = 0) {
+    const auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+    const auto bins = [&](char* text, size_t size, const uint64_t* set) {
+        std::snprintf(text, size, "<=0.25=%llu <=0.5=%llu <=1=%llu <=2=%llu <=4=%llu more=%llu", u(set[0]), u(set[1]), u(set[2]), u(set[3]), u(set[4]), u(set[5]));
+    };
+    char first[200], second[200];
+    if (part == 0) {
+        bins(first, sizeof(first), w.meanAll);
+        bins(second, sizeof(second), w.meanAccepted);
+        return std::snprintf(out, n,
+            "flat foreground shadow 5s (1/3): sampled-frames=%llu draws-read=%llu (frames unread=%llu failed=%llu) by kind: matched-with-donors=%llu "
+            "matched-alone=%llu receiver-with-donors=%llu receiver-alone=%llu identity-unreadable=%llu; leave-one-out error in pixels, draws by RMS over "
+            "the draw's vertices: mean-model all {%s} mean-model where the current policy accepts {%s}",
+            u(w.sampledFrames), u(w.drawsRead), u(w.notReady), u(w.failed), u(w.byKind[1]), u(w.byKind[2]), u(w.byKind[3]), u(w.byKind[4]),
+            u(w.byKind[5]), first, second);
     }
-    const double leave = static_cast<double>(w.byKind[static_cast<unsigned>(ShadowKind::MatchedWithDonors)]);
-    const double withDonors = leave + static_cast<double>(w.byKind[static_cast<unsigned>(ShadowKind::ReceiverWithDonors)]);
-    return std::snprintf(out, n,
-        "flat foreground shadow 5s: sampled-frames=%llu draws-read=%llu (frames unread=%llu failed=%llu) by kind: matched-with-donors=%llu "
-        "matched-alone=%llu receiver-with-donors=%llu receiver-alone=%llu identity-unreadable=%llu; "
-        "leave-one-out error in pixels, draws by RMS over the draw's vertices: mean-model all {%s} mean-model where the current policy accepts {%s} "
-        "affine-model all {%s} affine-model where its gate accepts {%s}; donors' own fit residual {%s}; "
-        "accepts over leave-one-out draws: current=%llu affine=%llu both=%llu neither=%llu; affine gate failures (a draw can fail several): "
-        "fit-vertices=%llu conditioning=%llu residual=%llu hull=%llu depth=%llu; donors per draw with donors: draws=%.1f vertices=%.0f; "
-        "receivers with donors: current-accepts=%llu current-refuses(disagree)=%llu affine-would-accept-of-refused=%llu affine-would-accept-of-accepted=%llu; "
-        "view-attached (receiver with no donor of its identity) fires=%llu while-matched-draws-moved-over-1px=%llu (frames with such motion=%llu); "
-        "computed on one frame in %u, applied to nothing",
-        static_cast<unsigned long long>(w.sampledFrames), static_cast<unsigned long long>(w.drawsRead),
-        static_cast<unsigned long long>(w.notReady), static_cast<unsigned long long>(w.failed),
-        static_cast<unsigned long long>(w.byKind[1]), static_cast<unsigned long long>(w.byKind[2]),
-        static_cast<unsigned long long>(w.byKind[3]), static_cast<unsigned long long>(w.byKind[4]), static_cast<unsigned long long>(w.byKind[5]),
-        bins[0], bins[1], bins[2], bins[3], bins[4],
-        static_cast<unsigned long long>(w.currentAccepts), static_cast<unsigned long long>(w.affineAccepts),
-        static_cast<unsigned long long>(w.bothAccept), static_cast<unsigned long long>(w.neitherAccept),
-        static_cast<unsigned long long>(w.gateFailed[0]), static_cast<unsigned long long>(w.gateFailed[1]),
-        static_cast<unsigned long long>(w.gateFailed[2]), static_cast<unsigned long long>(w.gateFailed[3]),
-        static_cast<unsigned long long>(w.gateFailed[4]),
-        withDonors > 0 ? static_cast<double>(w.donorDrawsSum) / withDonors : 0.0, withDonors > 0 ? static_cast<double>(w.donorVerticesSum) / withDonors : 0.0,
-        static_cast<unsigned long long>(w.receiverCurrentAccepts), static_cast<unsigned long long>(w.receiverCurrentRefuses),
-        static_cast<unsigned long long>(w.receiverRefusedAffineAccepts), static_cast<unsigned long long>(w.receiverAcceptedAffineAccepts),
-        static_cast<unsigned long long>(w.modeTwoFires), static_cast<unsigned long long>(w.modeTwoWhileMoving),
-        static_cast<unsigned long long>(w.movingFrames), kFlatShadowEveryFrames);
+    if (part == 1) {
+        char third[200];
+        bins(first, sizeof(first), w.affineAll);
+        bins(second, sizeof(second), w.affineAccepted);
+        bins(third, sizeof(third), w.residualBins);
+        return std::snprintf(out, n,
+            "flat foreground shadow 5s (2/3): affine-model all {%s} affine-model where its gate accepts {%s} donors' own fit residual {%s}",
+            first, second, third);
+    }
+    if (part == 2) {
+        const double leave = static_cast<double>(w.byKind[static_cast<unsigned>(ShadowKind::MatchedWithDonors)]);
+        const double withDonors = leave + static_cast<double>(w.byKind[static_cast<unsigned>(ShadowKind::ReceiverWithDonors)]);
+        return std::snprintf(out, n,
+            "flat foreground shadow 5s (3/3): accepts over leave-one-out draws: current=%llu affine=%llu both=%llu neither=%llu; affine gate failures (a draw "
+            "can fail several): fit-vertices=%llu conditioning=%llu residual=%llu hull=%llu depth=%llu; donors per draw with donors: draws=%.1f "
+            "vertices=%.0f; receivers with donors: current-accepts=%llu current-refuses(disagree)=%llu affine-would-accept-of-refused=%llu "
+            "affine-would-accept-of-accepted=%llu; view-attached (receiver with no donor of its identity) fires=%llu "
+            "while-matched-draws-moved-over-1px=%llu (frames with such motion=%llu); computed on one frame in %u, applied to nothing",
+            u(w.currentAccepts), u(w.affineAccepts), u(w.bothAccept), u(w.neitherAccept), u(w.gateFailed[0]), u(w.gateFailed[1]),
+            u(w.gateFailed[2]), u(w.gateFailed[3]), u(w.gateFailed[4]), withDonors > 0 ? static_cast<double>(w.donorDrawsSum) / withDonors : 0.0,
+            withDonors > 0 ? static_cast<double>(w.donorVerticesSum) / withDonors : 0.0, u(w.receiverCurrentAccepts), u(w.receiverCurrentRefuses),
+            u(w.receiverRefusedAffineAccepts), u(w.receiverAcceptedAffineAccepts), u(w.modeTwoFires), u(w.modeTwoWhileMoving), u(w.movingFrames),
+            kFlatShadowEveryFrames);
+    }
+    return 0;
 }
 
 }  // namespace edvr

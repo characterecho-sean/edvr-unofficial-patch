@@ -662,12 +662,39 @@ void flatShadowAdapterTests(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11S
     const auto qualify = [&](FlatForegroundMotion& motion, unsigned frame, FlatForegroundMotion::Output& out) { return motion.prepareH(ctx, owners, depth, world, frame, width, height, out); };
     const auto drained = [&](FlatForegroundMotion& motion, unsigned frame) { motion.rigShadow().poll(ctx, frame + 8, true); return motion.stats().shadow; };
     const float pr = .3f;
-    const unsigned f = 7000;   // a multiple of 8: the default interval samples it
+    const unsigned f = 7000;   // a multiple of 8: the cadence a rig turns the shadow on at samples it
     FlatForegroundMotion motion;
     FlatForegroundMotion::Output out;
     const Pose body = place(-.45f, pr), detail = place(.05f, pr);
     Pose bodyNow = body, detailNow = detail;
     bodyNow.mouse += .1f; detailNow.mouse += .1f;
+    {
+        // THE SHADOW COSTS NOTHING BY DEFAULT (kFlatShadowDefaultEvery = 0). Two draws at a frame that is a multiple of 8, the very frame the old default
+        // took, with no override in force: nothing is sampled, the shadow made no shader and no table (the rig counts the shaders the shadow asks the
+        // device for), nothing is waiting to be read, and the frame qualifies exactly as it would with the shadow gone. The control is the same scene with
+        // the cadence switched on: the shadow runs, makes its shaders, and samples the frame.
+        FlatForegroundMotion idle;
+        const unsigned made = shadowShaderCreations;
+        const unsigned g = f + 32;
+        piece(idle, body, 0, g, true, 9, 0); piece(idle, detail, 1, g, false, 9, 9);
+        check(qualify(idle, g, out) && out.qualified, "shadow default: a two-draw frame at a multiple of 8 qualifies with no override in force");
+        const edvr::ShadowStats none = drained(idle, g);
+        check(none.sampledFrames == 0 && none.drawsRead == 0 && none.failed == 0 && none.notReady == 0 && idle.rigShadow().lastRecords().empty() &&
+                  shadowShaderCreations == made,
+              "shadow default: the shadow sampled nothing and made no shader: it costs nothing until a rig or a build asks for it");
+        for (unsigned k = 1; k <= 8; ++k) {
+            piece(idle, bodyNow, 0, g + k, true, 9, 0); piece(idle, detailNow, 1, g + k, false, 6, 9);
+            check(qualify(idle, g + k, out), "shadow default: the following frames, a multiple of 8 among them, qualify");
+        }
+        check(drained(idle, g + 8).sampledFrames == 0 && shadowShaderCreations == made,
+              "shadow default: and eight more frames, one a multiple of 8, still sample nothing and make nothing");
+        FlatForegroundMotion switchedOn;
+        FlatForegroundMotion::RigShadowEvery every(8);
+        const unsigned h = f + 48;
+        piece(switchedOn, body, 0, h, true, 9, 0); piece(switchedOn, detail, 1, h, false, 9, 9);
+        check(qualify(switchedOn, h, out) && drained(switchedOn, h).sampledFrames == 1 && shadowShaderCreations > made,
+              "shadow default control: the same scene with the cadence switched on samples the frame and makes its shaders");
+    }
     {
         FlatForegroundMotion::RigShadowEvery every(1);
         // the seed frame: two draws with no history
@@ -715,21 +742,23 @@ void flatShadowAdapterTests(ID3D11Device* dev, ID3D11DeviceContext* ctx, ID3D11S
         check(drained(motion, f + 3).sampledFrames == 2, "shadow adapter: RigShadowEvery(0) turns the sampling off: no frame is taken");
     }
     {
-        FlatForegroundMotion::RigShadowEvery eight(8);
+        FlatForegroundMotion::RigShadowEvery eight(8);   // the cadence kFlatShadowEveryFrames names, switched on by the rig
         for (unsigned frame = f + 8; frame < f + 8 + 8; ++frame) {
             piece(motion, bodyNow, 0, frame, true, 9, 0); piece(motion, detailNow, 1, frame, false, 6, 9);
-            check(qualify(motion, frame, out), "shadow adapter: a frame qualifies at the default interval");
+            check(qualify(motion, frame, out), "shadow adapter: a frame qualifies at an interval of eight");
         }
-        check(drained(motion, f + 15).sampledFrames == 3, "shadow adapter: at the default interval one frame in eight is sampled: of eight frames from a multiple of 8, one");
-    }
-    {
-        // no override in force: the constant's interval, eight. A multiple of four that is not a multiple of eight is skipped, a multiple of eight is taken.
-        piece(motion, bodyNow, 0, f + 12, true, 9, 0); piece(motion, detailNow, 1, f + 12, false, 6, 9);
-        check(qualify(motion, f + 12, out), "shadow adapter: a frame at a multiple of four qualifies");
-        check(drained(motion, f + 12).sampledFrames == 3, "shadow adapter: and is not sampled with no override in force (a multiple of four, not of eight)");
+        check(drained(motion, f + 15).sampledFrames == 3, "shadow adapter: at an interval of eight one frame in eight is sampled: of eight frames from a multiple of 8, one");
         piece(motion, bodyNow, 0, f + 16, true, 9, 0); piece(motion, detailNow, 1, f + 16, false, 6, 9);
         check(qualify(motion, f + 16, out), "shadow adapter: the frame at the next multiple of eight qualifies");
-        check(drained(motion, f + 16).sampledFrames == 4, "shadow adapter: and is sampled with no override in force (kFlatShadowEveryFrames = 8)");
+        check(drained(motion, f + 16).sampledFrames == 4, "shadow adapter: and is sampled at an interval of eight (kFlatShadowEveryFrames)");
+    }
+    {
+        // no override in force again: the default is off, so the next multiple of eight (and the multiples of four between) are not taken.
+        piece(motion, bodyNow, 0, f + 20, true, 9, 0); piece(motion, detailNow, 1, f + 20, false, 6, 9);
+        check(qualify(motion, f + 20, out), "shadow adapter: a frame at a multiple of four qualifies");
+        piece(motion, bodyNow, 0, f + 24, true, 9, 0); piece(motion, detailNow, 1, f + 24, false, 6, 9);
+        check(qualify(motion, f + 24, out), "shadow adapter: a frame at a multiple of eight qualifies");
+        check(drained(motion, f + 24).sampledFrames == 4, "shadow adapter: and neither is sampled with no override in force: the default is off");
     }
     {   // a receiver listed before its donors: the frame's draw count is what lets the second shader scan past the receiver's own index
         FlatForegroundMotion::RigShadowEvery every(1);

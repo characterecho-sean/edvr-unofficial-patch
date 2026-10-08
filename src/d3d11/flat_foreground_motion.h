@@ -213,6 +213,7 @@ public:
     // The window's history gauges and write instrument (section 104): the resources written most, the records and bytes at their peak, and what is
     // held now. Each Take forgets what it hands over.
     unsigned takeWriteTop(HistoryWriteTop* out,unsigned capacity){return history_.takeTopResources(out,capacity);}
+    unsigned takeWriteExamples(HistoryWriteExample* out,unsigned capacity){return history_.takeWriteExamples(out,capacity);}
     void takeHistoryPeaks(unsigned& records,unsigned& bytes){history_.takePeaks(records,bytes);}
     unsigned historyRecords() const{return unsigned(history_.recordCount());}
     unsigned historyBytes() const{return history_.bytes();}
@@ -473,8 +474,8 @@ private:
     };
     struct FitSettings {uint32_t counts[4]{};float limits[4]{};};
     static bool& siblingPassEnabled(){static bool on=true;return on;}
-    // The shadow samples one frame in this many (0: none). A rig that wants every frame sets 1.
-    static unsigned& shadowEvery(){static unsigned every=kFlatShadowEveryFrames;return every;}
+    // The shadow samples one frame in this many (0: none, the default). A rig that wants every frame sets 1.
+    static unsigned& shadowEvery(){static unsigned every=kFlatShadowDefaultEvery;return every;}
     static constexpr unsigned kSiblingArmedFrames=30,kSiblingSlots=4;
     static constexpr unsigned kSiblingDraws=AnimatedVertexHistory::maxRecords;
     // What the map's shaders are told about a draw (the sibling fields are the caller's).

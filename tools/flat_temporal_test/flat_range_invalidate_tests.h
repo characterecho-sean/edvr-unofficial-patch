@@ -4,7 +4,7 @@
 // The history itself runs on WARP in tools\weapon_motion_test (flat_range_invalidate_tests.h there). Here:
 //   - the overlap test and the key digest, which are plain functions, each held to a table and shown to fail for the mistakes a table must catch;
 //   - the ledger's labels for a published key whose record is gone, and the order they take in the classifier;
-//   - HistoryWriteStats::add summing every counter, and the history line printing every counter under the name the log reader greps;
+//   - HistoryWriteStats::add summing every counter (the log lines and the vertex set are in flat_vertex_set_tests.h beside this);
 //   - the wiring pins: the hooks, the adapter and the history are sources the rigs cannot drive end to end (the hooks live in the game's process),
 //     so each decision is held to its text, with a mutation control that fails it.
 #include <cctype>
@@ -80,6 +80,12 @@ inline int flatRangeInvalidateTests() {
                    !std::strcmp(historyEraseName(2), "pressure-invalidated") && !std::strcmp(historyEraseName(3), "pressure-spent") &&
                    !std::strcmp(historyEraseName(4), "advance-aged"),
                "the four erase paths carry their names");
+        // The three cases an example is filed under, in enum order, and how many a window keeps.
+        expect(kHistoryWriteCases == 3 && kHistoryExamplesPerCase == 2 && static_cast<unsigned>(HistoryWriteCase::Unknown) == 0 &&
+                   static_cast<unsigned>(HistoryWriteCase::InGap) == 1 && static_cast<unsigned>(HistoryWriteCase::Genuine) == 2 &&
+                   !std::strcmp(historyWriteCaseName(0), "extent-unknown") && !std::strcmp(historyWriteCaseName(1), "in-gap") &&
+                   !std::strcmp(historyWriteCaseName(2), "genuine") && !std::strcmp(historyWriteCaseName(3), "unknown"),
+               "the three example cases carry their names in enum order, and two examples of each are kept");
         const HistoryWriteExtent whole = historyWholeWrite(HistoryWriteEntry::CopyResource);
         const HistoryWriteExtent ranged = historyRangedWrite(HistoryWriteEntry::Update, 4, 8);
         expect(!whole.ranged() && whole.entry == HistoryWriteEntry::CopyResource && whole.first == 0 && whole.end == ~uint64_t(0) &&
@@ -184,168 +190,29 @@ inline int flatRangeInvalidateTests() {
         };
         expect(summed([](HistoryWriteStats& a, const HistoryWriteStats& b) { a.add(b); }), "add() sums every counter of the window's statistics");
         expect(!summed([](HistoryWriteStats& a, const HistoryWriteStats& b) {   // the mutation: one counter forgotten
-                   HistoryWriteStats keep = a; a.add(b); a.extentFailed = keep.extentFailed; }),
+                   HistoryWriteStats keep = a; a.add(b); a.deferredConservative = keep.deferredConservative; }),
                "mutation control: an add() that forgets the last counter fails the check");
+        expect(!summed([](HistoryWriteStats& a, const HistoryWriteStats& b) {
+                   HistoryWriteStats keep = a; a.add(b); a.extentFailed = keep.extentFailed; }),
+               "mutation control: an add() that forgets a vertex-set counter fails the check");
+        expect(!summed([](HistoryWriteStats& a, const HistoryWriteStats& b) {
+                   HistoryWriteStats keep = a; a.add(b); a.setCancelled = keep.setCancelled; }),
+               "mutation control: an add() that forgets the cancelled-read counter fails the check");
+        expect(!summed([](HistoryWriteStats& a, const HistoryWriteStats& b) {
+                   HistoryWriteStats keep = a; a.add(b); a.vertexInGap = keep.vertexInGap; }),
+               "mutation control: an add() that forgets the in-gap counter fails the check");
+        expect(!summed([](HistoryWriteStats& a, const HistoryWriteStats& b) {
+                   HistoryWriteStats keep = a; a.add(b); a.vertexUnknown = keep.vertexUnknown; a.vertexOutside = keep.vertexOutside; a.vertexGenuine = keep.vertexGenuine; }),
+               "mutation control: an add() that forgets the unknown, outside and genuine counters fails the check");
+        expect(!summed([](HistoryWriteStats& a, const HistoryWriteStats& b) {
+                   HistoryWriteStats keep = a; a.add(b); a.deferredInvalidated = keep.deferredInvalidated; a.setFromCache = keep.setFromCache; a.setPending = keep.setPending; }),
+               "mutation control: an add() that forgets the deferred, from-cache or pending counters fails the check");
         expect(!summed([](HistoryWriteStats& a, const HistoryWriteStats& b) {
                    HistoryWriteStats keep = a; a.add(b); a.erased[1] = keep.erased[1]; }),
                "mutation control: an add() that forgets an erase path fails the check");
         expect(!summed([](HistoryWriteStats& a, const HistoryWriteStats& b) {
                    HistoryWriteStats keep = a; a.add(b); a.invalidating[7][1][1] = keep.invalidating[7][1][1]; }),
                "mutation control: an add() that forgets one cell of the last entry fails the check");
-    }
-
-    // -- the history line: every counter, under the name the log reader greps --
-    {
-        const auto hasNumber = [](const std::string& text, uint64_t v) {
-            const std::string digits = std::to_string(static_cast<unsigned long long>(v));
-            size_t at = 0;
-            while ((at = text.find(digits, at)) != std::string::npos) {
-                const bool before = at == 0 || !std::isdigit(static_cast<unsigned char>(text[at - 1]));
-                const bool after = at + digits.size() >= text.size() || !std::isdigit(static_cast<unsigned char>(text[at + digits.size()]));
-                if (before && after) return true;
-                at += digits.size();
-            }
-            return false;
-        };
-        // Distinct values: a field printed under another's name, or not at all, cannot pass.
-        FlatHistoryWindow w;
-        uint64_t next = 1000003;
-        const auto take = [&] { next += 7919; return next; };
-        HistoryWriteStats& s = w.writes;
-        for (unsigned e = 0; e < kHistoryWriteEntries; ++e) {
-            s.observed[e] = take(); s.ranged[e] = take(); s.savedWrites[e] = take(); s.recordsInvalidated[e] = take();
-            for (unsigned r = 0; r < kHistoryWriteRoles; ++r)
-                for (unsigned t = 0; t < kHistoryWriteTimings; ++t) { s.touching[e][r][t] = take(); s.invalidating[e][r][t] = take(); }
-        }
-        s.unknownInvalidating[0] = take(); s.unknownInvalidating[1] = take();
-        s.sparedRecords = take(); s.extentUnknownHits = take();
-        for (unsigned i = 0; i < static_cast<unsigned>(HistoryErase::Count); ++i) s.erased[i] = take();
-        s.allocations = take(); s.allocationFailures = take(); s.extentIssued = take(); s.extentRead = take(); s.extentFailed = take();
-        w.records = 111; w.bytes = 222222; w.peakRecords = 128; w.peakBytes = 33333333;
-        w.topCount = 3;
-        for (unsigned i = 0; i < 3; ++i) {
-            w.top[i].resource = reinterpret_cast<const void*>(uintptr_t(0x1000) * (i + 1));
-            w.top[i].touching = take(); w.top[i].invalidating = take(); w.top[i].saved = take();
-        }
-        char line[4096];
-        const int n = flatHistoryLine(line, sizeof(line), w);
-        const std::string text(line);
-        expect(n > 0 && n < static_cast<int>(sizeof(line)) - 1 && static_cast<size_t>(n) == text.size(), "the history line fits its buffer and is not cut");
-        expect(text.rfind("flat foreground history 5s: ", 0) == 0, "the history line carries the key the log is read by");
-        expect(text.find("records=111 bytes=222222 peak-records=128 peak-bytes=33333333 allocations=") != std::string::npos &&
-                   text.find(" allocation-failures=") != std::string::npos,
-               "the history line leads with the size gauges and the allocation counters, in the order the reader parses them");
-        char want[256];
-        std::snprintf(want, sizeof(want), " allocations=%llu allocation-failures=%llu;", (unsigned long long)s.allocations, (unsigned long long)s.allocationFailures);
-        expect(text.find(want) != std::string::npos, "allocations and allocation-failures carry their own values");
-        std::snprintf(want, sizeof(want), "; erased: advance-invalidated=%llu pressure-invalidated=%llu pressure-spent=%llu advance-aged=%llu;",
-                      (unsigned long long)s.erased[1], (unsigned long long)s.erased[2], (unsigned long long)s.erased[3], (unsigned long long)s.erased[4]);
-        expect(text.find(want) != std::string::npos, "every erase path is on the line by name with its own count");
-        bool entries = true;
-        for (unsigned e = 0; e < kHistoryWriteEntries; ++e) {
-            // vertices-gap / vertices-window / indices-gap / indices-window, as the line's own legend says.
-            std::snprintf(want, sizeof(want),
-                          " %s=%llu touching=%llu/%llu/%llu/%llu invalidating=%llu/%llu/%llu/%llu ranged=%llu saved-writes=%llu records-invalidated=%llu;",
-                          historyWriteEntryName(e), (unsigned long long)s.observed[e],
-                          (unsigned long long)s.touching[e][0][0], (unsigned long long)s.touching[e][0][1],
-                          (unsigned long long)s.touching[e][1][0], (unsigned long long)s.touching[e][1][1],
-                          (unsigned long long)s.invalidating[e][0][0], (unsigned long long)s.invalidating[e][0][1],
-                          (unsigned long long)s.invalidating[e][1][0], (unsigned long long)s.invalidating[e][1][1],
-                          (unsigned long long)s.ranged[e], (unsigned long long)s.savedWrites[e], (unsigned long long)s.recordsInvalidated[e]);
-            entries = entries && text.find(want) != std::string::npos;
-        }
-        expect(entries, "each of the eight entries is on the line with its observed count and the four touching, four invalidating, ranged, saved-writes and records-invalidated values in order");
-        std::snprintf(want, sizeof(want), " unknown-invalidating=%llu/%llu (gap/window); spared-records=%llu",
-                      (unsigned long long)s.unknownInvalidating[0], (unsigned long long)s.unknownInvalidating[1], (unsigned long long)s.sparedRecords);
-        expect(text.find(want) != std::string::npos, "unknown-invalidating and spared-records carry their own values");
-        std::snprintf(want, sizeof(want), "; extent-unknown-hits=%llu; vertex extents: issued=%llu read=%llu failed=%llu;",
-                      (unsigned long long)s.extentUnknownHits, (unsigned long long)s.extentIssued, (unsigned long long)s.extentRead, (unsigned long long)s.extentFailed);
-        expect(text.find(want) != std::string::npos, "the extent counters carry their own values");
-        std::snprintf(want, sizeof(want), "top resources written (touching/invalidating/saved): %p=%llu/%llu/%llu", w.top[0].resource,
-                      (unsigned long long)w.top[0].touching, (unsigned long long)w.top[0].invalidating, (unsigned long long)w.top[0].saved);
-        expect(text.find(want) != std::string::npos, "the resources written most are listed most first, with touching, invalidating and saved");
-        bool every = true;
-        for (unsigned e = 0; e < kHistoryWriteEntries; ++e) {
-            every = every && hasNumber(text, s.observed[e]) && hasNumber(text, s.ranged[e]) && hasNumber(text, s.savedWrites[e]) && hasNumber(text, s.recordsInvalidated[e]);
-            for (unsigned r = 0; r < kHistoryWriteRoles; ++r)
-                for (unsigned t = 0; t < kHistoryWriteTimings; ++t) every = every && hasNumber(text, s.touching[e][r][t]) && hasNumber(text, s.invalidating[e][r][t]);
-        }
-        every = every && hasNumber(text, s.unknownInvalidating[0]) && hasNumber(text, s.unknownInvalidating[1]) && hasNumber(text, s.sparedRecords) &&
-                hasNumber(text, s.extentUnknownHits) && hasNumber(text, s.allocations) && hasNumber(text, s.allocationFailures) && hasNumber(text, s.extentIssued) &&
-                hasNumber(text, s.extentRead) && hasNumber(text, s.extentFailed);
-        for (unsigned i = 1; i < static_cast<unsigned>(HistoryErase::Count); ++i) every = every && hasNumber(text, s.erased[i]);
-        expect(every, "every counter of the statistics appears on the line: nothing the window measured is dropped");
-        // The control: the same values, one counter changed, is a different line.
-        FlatHistoryWindow changed = w;
-        changed.writes.sparedRecords += 1;
-        char other[4096];
-        flatHistoryLine(other, sizeof(other), changed);
-        expect(std::string(other) != text && std::string(other).find(std::to_string(static_cast<unsigned long long>(s.sparedRecords + 1))) != std::string::npos,
-               "mutation control: a changed counter changes the line (the value is printed, not a constant)");
-        FlatHistoryWindow swapped = w;
-        std::swap(swapped.writes.touching[1][0][1], swapped.writes.touching[1][1][0]);
-        flatHistoryLine(other, sizeof(other), swapped);
-        expect(std::string(other).find(" update=") != std::string::npos && std::string(other) != text,
-               "mutation control: swapping a vertices-window and an indices-gap count changes the line (the legend's order is real)");
-
-        // An empty window prints every counter at zero: the line's absence must mean the code did not run, never that nothing happened.
-        flatHistoryLine(line, sizeof(line), FlatHistoryWindow{});
-        const std::string zeros(line);
-        expect(zeros.rfind("flat foreground history 5s: records=0 bytes=0 peak-records=0 peak-bytes=0 allocations=0 allocation-failures=0; erased: "
-                           "advance-invalidated=0 pressure-invalidated=0 pressure-spent=0 advance-aged=0;", 0) == 0,
-               "an empty window prints the gauges, the allocation counters and every erase path at zero");
-        bool allZero = true;
-        for (unsigned e = 0; e < kHistoryWriteEntries; ++e) {
-            std::snprintf(want, sizeof(want), " %s=0 touching=0/0/0/0 invalidating=0/0/0/0 ranged=0 saved-writes=0 records-invalidated=0;", historyWriteEntryName(e));
-            allZero = allZero && zeros.find(want) != std::string::npos;
-        }
-        expect(allZero, "an empty window prints every entry with all of its counters at zero");
-        expect(zeros.find(" unknown-invalidating=0/0 (gap/window); spared-records=0") != std::string::npos &&
-                   zeros.find("; extent-unknown-hits=0; vertex extents: issued=0 read=0 failed=0;") != std::string::npos &&
-                   zeros.find("top resources written (touching/invalidating/saved): none; the gap is every write") != std::string::npos,
-               "an empty window prints the extent counters at zero and says none for the resources written");
-        // The largest counts: bounded, terminated, and the gauges and erase paths ahead of the entries are intact.
-        FlatHistoryWindow most;
-        const uint64_t big = ~uint64_t(0);
-        for (unsigned e = 0; e < kHistoryWriteEntries; ++e) {
-            most.writes.observed[e] = most.writes.ranged[e] = most.writes.savedWrites[e] = most.writes.recordsInvalidated[e] = big;
-            for (unsigned r = 0; r < kHistoryWriteRoles; ++r)
-                for (unsigned t = 0; t < kHistoryWriteTimings; ++t) most.writes.touching[e][r][t] = most.writes.invalidating[e][r][t] = big;
-        }
-        most.writes.unknownInvalidating[0] = most.writes.unknownInvalidating[1] = most.writes.sparedRecords = most.writes.extentUnknownHits = big;
-        for (auto& x : most.writes.erased) x = big;
-        most.writes.allocations = most.writes.allocationFailures = most.writes.extentIssued = most.writes.extentRead = most.writes.extentFailed = big;
-        most.records = most.bytes = most.peakRecords = most.peakBytes = ~0u;
-        most.topCount = 3;
-        for (auto& t : most.top) { t.resource = reinterpret_cast<const void*>(~uintptr_t(0)); t.touching = t.invalidating = t.saved = big; }
-        char largest[4096];
-        std::memset(largest, 'x', sizeof(largest));
-        const int m = flatHistoryLine(largest, sizeof(largest), most);
-        expect(m > 0 && m < static_cast<int>(sizeof(largest)) && largest[m] == 0 && std::strlen(largest) == static_cast<size_t>(m) &&
-                   std::string(largest).rfind("flat foreground history 5s: records=4294967295 bytes=4294967295 peak-records=4294967295 peak-bytes=4294967295 allocations=", 0) == 0,
-               "the line with the largest possible counts is bounded by its buffer and terminated, the gauges intact");
-        // A window can hold far more than any real one (a trillion writes in each cell) and every entry, the trailing counters and the legend survive.
-        FlatHistoryWindow trillion = most;
-        const uint64_t t12 = 999999999999ull;
-        for (unsigned e = 0; e < kHistoryWriteEntries; ++e) {
-            trillion.writes.observed[e] = trillion.writes.ranged[e] = trillion.writes.savedWrites[e] = trillion.writes.recordsInvalidated[e] = t12;
-            for (unsigned r = 0; r < kHistoryWriteRoles; ++r)
-                for (unsigned t = 0; t < kHistoryWriteTimings; ++t) trillion.writes.touching[e][r][t] = trillion.writes.invalidating[e][r][t] = t12;
-        }
-        for (auto& t : trillion.top) t.touching = t.invalidating = t.saved = t12;
-        for (auto& x : trillion.writes.erased) x = t12;
-        trillion.writes.unknownInvalidating[0] = trillion.writes.unknownInvalidating[1] = trillion.writes.sparedRecords = trillion.writes.extentUnknownHits = t12;
-        trillion.writes.allocations = trillion.writes.allocationFailures = trillion.writes.extentIssued = trillion.writes.extentRead = trillion.writes.extentFailed = t12;
-        const int k = flatHistoryLine(largest, sizeof(largest), trillion);
-        const std::string huge(largest);
-        bool all8 = true;
-        for (unsigned e = 0; e < kHistoryWriteEntries; ++e) {
-            std::snprintf(want, sizeof(want), " %s=999999999999 touching=", historyWriteEntryName(e));
-            all8 = all8 && huge.find(want) != std::string::npos;
-        }
-        expect(k > 0 && k < static_cast<int>(sizeof(largest)) - 1 && all8 && huge.find("vertex extents: issued=999999999999 read=999999999999 failed=999999999999;") != std::string::npos &&
-                   huge.find("one found gone by reclaimed-by-advance or reclaimed-by-pressure") != std::string::npos,
-               "twelve-digit counts in every cell: all eight entries, the extent counters and the legend survive within 4096 bytes");
     }
 
     // -- the no-candidate line carries the history's gauges and allocations --
@@ -442,24 +309,43 @@ inline int flatRangeInvalidateWiringTests() {
     const std::string written = compact(member(historySource, "unsigned resourceWritten("));
     const auto writtenValid = [&](const std::string& text) {
         return ordered(text, {"const bool ranged=resource&&end!=~uint64_t(0);", "if(tally)++writeStats_.observed[e];",
+                              "if(!resource||isIndexBuffer(resource))dropSets(resource,first,end);",
                               "for(auto&r:records_){",
-                              "if(ranged&&!readsBytesOf(r.geometry,r.extentState==2,r.vbFirst,r.vbEnd,resource,first,end,unknownExtent)){if(live)++spared;continue;}",
+                              "if(ranged)hit=meets(r.geometry,r.vset.get(),resource,first,end,vcase);",
+                              "if(r.vset&&(!resource||(isI&&(!ranged||historyRangesOverlap(first,end,r.ibFirst,r.ibEnd)))))r.vset.reset();",
+                              "if(!hit){", "if(live){", "++spared;",
+                              "if(vcase==1&&!deferredLogged){logDeferred(resource,first,end);deferredLogged=true;}",
                               "const unsigned why=!resource?1:isV?2:4;",
-                              "if(live){++hitRecords;hitV+=isV;hitI+=isI&&!isV;if(unknownExtent)++unknownHits;r.invalidatedAt=lastFrame_;}",
+                              "if(live){++hitRecords;hitV+=isV;hitI+=isI&&!isV;r.invalidatedAt=lastFrame_;",
                               "r.invalidated=true;r.invalidReasons|=why;", "if(!tally)return reasons;", "++writeStats_.touching[e]"});
     };
-    expect(writtenValid(written), "a ranged write that misses a record spares it before anything is invalidated; a hit keeps its reason and stamps its frame");
-    expect(!writtenValid(without(written, "if(ranged&&!readsBytesOf(r.geometry,r.extentState==2,r.vbFirst,r.vbEnd,resource,first,end,unknownExtent)){if(live)++spared;continue;}")),
+    expect(writtenValid(written), "a ranged write that misses a record spares it before anything is invalidated; a spare on an unknown set is logged; a hit keeps its reason and stamps its frame");
+    expect(!writtenValid(without(written, "if(ranged)hit=meets(r.geometry,r.vset.get(),resource,first,end,vcase);")),
            "mutation control: a write that never consults the range fails the wiring");
     expect(!writtenValid(replaced(written, "const bool ranged=resource&&end!=~uint64_t(0);", "const bool ranged=end!=~uint64_t(0);")),
            "mutation control: a range on a null resource (which can spare nothing) fails the wiring");
-    expect(!writtenValid(replaced(written, "r.extentState==2,r.vbFirst,r.vbEnd,", "true,r.vbFirst,r.vbEnd,")),
-           "mutation control: a vertex extent trusted before it was read fails the wiring");
+    expect(!writtenValid(replaced(written, "r.vset.get(),resource,first,end,vcase", "nullptr,resource,first,end,vcase")),
+           "mutation control: a write judged against no set (every vertex write spared as unknown, or the old whole-buffer rule) fails the wiring");
     expect(!writtenValid(without(written, "r.invalidated=true;r.invalidReasons|=why;")), "mutation control: an invalidation that drops the write's reason fails the wiring");
     expect(!writtenValid(without(written, "r.invalidatedAt=lastFrame_;")), "mutation control: an invalidation that does not stamp its frame (the keep window's start) fails the wiring");
     expect(!writtenValid(without(written, "if(!tally)return reasons;")), "mutation control: a second notification of one write that is counted again fails the wiring");
     expect(!writtenValid(without(written, "if(tally)++writeStats_.observed[e];")), "mutation control: a write that is never observed fails the wiring");
-
+    expect(!writtenValid(without(written, "if(!resource||isIndexBuffer(resource))dropSets(resource,first,end);")),
+           "mutation control: a write to the indices that does not end the sets read from them fails the wiring");
+    expect(!writtenValid(replaced(written, "if(!resource||isIndexBuffer(resource))dropSets(", "if(isIndexBuffer(resource))dropSets(")),
+           "mutation control: the write nothing could name (a null resource) that leaves the sets standing fails the wiring");
+    expect(!writtenValid(without(written, "if(r.vset&&(!resource||(isI&&(!ranged||historyRangesOverlap(first,end,r.ibFirst,r.ibEnd)))))r.vset.reset();")),
+           "mutation control: a record that keeps its set across a write to its indices fails the wiring");
+    expect(!writtenValid(replaced(written, "if(r.vset&&(!resource||(isI&&(!ranged||historyRangesOverlap(first,end,r.ibFirst,r.ibEnd)))))r.vset.reset();",
+                                  "if(r.vset&&(!resource||isV||isI))r.vset.reset();")),
+           "mutation control: a record that forgets its set on any write to either buffer (a vertex write included) fails the wiring");
+    expect(!writtenValid(replaced(written, "if(r.vset&&(!resource||(isI&&(!ranged||historyRangesOverlap(first,end,r.ibFirst,r.ibEnd)))))r.vset.reset();",
+                                  "if(r.vset&&(!resource||isI))r.vset.reset();")),
+           "mutation control: a record that forgets its set on a write to the indices that did not touch its range fails the wiring");
+    expect(!writtenValid(without(written, "if(vcase==1&&!deferredLogged){logDeferred(resource,first,end);deferredLogged=true;}")),
+           "mutation control: a write spared on an unknown set that is not kept for the check fails the wiring");
+    expect(!writtenValid(replaced(written, "if(vcase==1&&!deferredLogged)", "if(vcase&&!deferredLogged)")),
+           "mutation control: a write kept for the check whatever it met (gap and outside writes fill the log) fails the wiring");
     // -- the frame boundary keeps an invalidated record for its key, under the extended policy only --
     const std::string advance = compact(member(historySource, "void advance(unsigned frame)"));
     const auto advanceValid = [&](const std::string& text) {
@@ -507,37 +393,25 @@ inline int flatRangeInvalidateWiringTests() {
         return ordered(text, {"if(extended&&priorCount==0){", "out.missed=true;", "if(!facts.exactPresent)facts.goneBy=goneBy(ledgerKey,frame);",
                               "out.miss=ledger_.classify(frame,ledgerKey,facts);"}) &&
             ordered(text, {"noteErased(*it,it->invalidated?HistoryErase::PressureInvalidated:HistoryErase::PressureSpent,frame);", "it=records_.erase(it);"}) &&
-            ordered(text, {"if(found->invalidated){found->extentState=0;found->extentSlot=-1;}", "found->invalidated=false;found->invalidReasons=0;"});
+            ordered(text, {"found->invalidated=false;found->invalidReasons=0;"}) && count(text, "vset") == 0 && count(text, "extentState") == 0;
     };
-    expect(prepareValid(prepare), "a draw that missed asks how its record went before it is classified, the reclaim notes what it takes, and a revived record forgets its extent");
+    expect(prepareValid(prepare), "a draw that missed asks how its record went before it is classified, the reclaim notes what it takes, and a revived record is not touched but for its flag: it keeps its set");
     expect(!prepareValid(without(prepare, "if(!facts.exactPresent)facts.goneBy=goneBy(ledgerKey,frame);")), "mutation control: a classification that never asks how the record went fails the wiring");
     expect(!prepareValid(without(prepare, "noteErased(*it,it->invalidated?HistoryErase::PressureInvalidated:HistoryErase::PressureSpent,frame);")),
            "mutation control: a reclaim that takes records without noting them fails the wiring");
-    expect(!prepareValid(without(prepare, "if(found->invalidated){found->extentState=0;found->extentSlot=-1;}")),
-           "mutation control: a revived record that keeps a stale extent fails the wiring");
-    expect(has(prepare, "indexRange(key,record.ibFirst,record.ibEnd);") && has(prepare, "if(extended)out.ledgerToken=ledger_.note(frame,ledgerKey,HistoryLedger::Captured);"),
-           "a new record is given the exact index range of its key");
+    expect(!prepareValid(replaced(prepare, "found->invalidated=false;found->invalidReasons=0;", "if(found->invalidated)found->vset.reset();found->invalidated=false;found->invalidReasons=0;")),
+           "mutation control: a revived record that forgets its set (and asks the device for it again, every frame the loop repeats) fails the wiring");
+    expect(has(prepare, "indexRange(key,record.ibFirst,record.ibEnd);record.bornFrame=frame;") && has(prepare, "if(extended)out.ledgerToken=ledger_.note(frame,ledgerKey,HistoryLedger::Captured);"),
+           "a new record is given the exact index range of its key and the frame it was made in (the age an example names)");
+    expect(!has(without(prepare, "record.bornFrame=frame;"), "indexRange(key,record.ibFirst,record.ibEnd);record.bornFrame=frame;"),
+           "mutation control: a record that is not given its birth frame is not what the text says");
 
-    // -- the extent the vertex role is judged by --
-    const std::string extentFinish = compact(member(historySource, "void finishExtent("));
-    expect(has(extentFinish, "constint64_tlow=int64_t(r.geometry.base)+int64_t(lowest),high=int64_t(r.geometry.base)+int64_t(highest);") &&
-               has(extentFinish, "if(!ok||low<0||high<low){r.extentState=3;++writeStats_.extentFailed;continue;}") &&
-               has(extentFinish, "r.vbFirst=uint64_t(r.geometry.offset)+uint64_t(low)*r.geometry.stride;") &&
-               has(extentFinish, "r.vbEnd=uint64_t(r.geometry.offset)+uint64_t(high+1)*r.geometry.stride;"),
-           "the vertex extent is the envelope of the vertices the indices name, shifted by the base and the buffer offset, and a negative or empty one is a failure");
-    expect(!has(replaced(extentFinish, "uint64_t(high+1)*r.geometry.stride;", "uint64_t(high)*r.geometry.stride;"), "r.vbEnd=uint64_t(r.geometry.offset)+uint64_t(high+1)*r.geometry.stride;"),
-           "mutation control: an extent that ends on the last vertex's first byte is not what the text says");
+    // -- the index range the index role is judged by --
     const std::string rangeOf = compact(member(historySource, "static void indexRange("));
     expect(has(rangeOf, "constuint64_tsize=g.format==DXGI_FORMAT_R16_UINT?2u:4u;") && has(rangeOf, "first=uint64_t(g.indexOffset)+uint64_t(g.start)*size;end=first+uint64_t(g.count)*size;"),
            "the index range is in bytes from the buffer offset, in two- or four-byte indices");
-    const std::string reads = compact(member(historySource, "static bool readsBytesOf("));
-    const auto readsValid = [&](const std::string& text) {
-        return ordered(text, {"if(!isV&&!isI)returnfalse;", "if(end==~uint64_t(0))returntrue;", "if(isI){", "historyRangesOverlap(first,end,a,b)", "if(isV){",
-                              "if(!extentKnown){unknownExtent=true;returntrue;}", "historyRangesOverlap(first,end,vbFirst,vbEnd)", "returnfalse;"});
-    };
-    expect(readsValid(reads), "a record reads the bytes of its index range exactly and of its vertex extent when it is known, and the whole vertex buffer until then");
-    expect(!readsValid(without(reads, "if(end==~uint64_t(0))returntrue;")) && !readsValid(without(reads, "if(!extentKnown){unknownExtent=true;returntrue;}")),
-           "mutation control: a test with no whole-resource case, or no unknown-extent case, fails the wiring");
+    expect(!has(replaced(rangeOf, "uint64_t(g.indexOffset)+", ""), "first=uint64_t(g.indexOffset)+uint64_t(g.start)*size;") && !has(replaced(rangeOf, "?2u:4u", "?4u:4u"), "?2u:4u"),
+           "mutation control: an index range with no buffer offset, or in four-byte units for every format, is not what the text says");
 
     // -- the adapter: the draws its lists keep are the ones the write did not touch; the write is filed by where it falls --
     const std::string adapter = compact(member(motionSource, "void resourceWritten("));
@@ -712,10 +586,14 @@ inline int flatRangeInvalidateWiringTests() {
     };
     unsigned fieldCount = 0;
     for (char c : fields) fieldCount += c == ',';
-    expect(fieldCount == 15 && carries(delta, "w.") && carries(addText, "o."),
-           "the window delta and add() each carry all fifteen counters of the statistics struct, by name");
+    expect(fieldCount == 24 && carries(delta, "w.") && carries(addText, "o."),
+           "the window delta and add() each carry all twenty-four counters of the statistics struct, by name");
     expect(!carries(replaced(delta, "w.extentFailed", "w.nothing"), "w.") && !carries(replaced(addText, "o.extentRead", "o.nothing"), "o.") &&
                !carries(replaced(delta, "w.allocationFailures", "w.allocations"), "w."),
            "mutation control: a delta or an add() that forgets one counter fails the check");
+    expect(!carries(replaced(delta, "w.deferredConservative", "w.nothing"), "w.") && !carries(replaced(addText, "o.setCancelled", "o.nothing"), "o.") &&
+               !carries(replaced(delta, "w.vertexInGap", "w.nothing"), "w.") && !carries(replaced(addText, "o.vertexGenuine", "o.nothing"), "o.") &&
+               !carries(replaced(delta, "w.setFromCache", "w.nothing"), "w.") && !carries(replaced(delta, "w.deferredInvalidated", "w.deferredConservative"), "w."),
+           "mutation control: a delta or an add() that forgets one of the vertex-set or three-way counters fails the check");
     return failures;
 }

@@ -14,6 +14,8 @@
 #include <string>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
+// The compute shaders the flat foreground shadow asked the device for (its roles all begin "flat foreground shadow"): a shadow that never ran asks for none.
+unsigned shadowShaderCreations=0;
 void check(bool b,const char* s){++checks;if(!b){std::printf("FAIL: %s\n",s);std::exit(1);}}
 void hr(HRESULT h){if(FAILED(h))std::printf("HRESULT %08X\n",unsigned(h));check(SUCCEEDED(h),"D3D operation");}
 ComPtr<ID3DBlob> compile(const char* s,const char* profile){ComPtr<ID3DBlob> c,e;auto h=D3DCompile(s,strlen(s),nullptr,nullptr,nullptr,"main",profile,D3DCOMPILE_ENABLE_STRICTNESS,0,&c,&e);if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;}
@@ -26,7 +28,8 @@ ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytes
     ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* shader=nullptr;
     if(FAILED(dev->CreatePixelShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
 }
-ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
+ID3D11ComputeShader* shaderSwapCreateCs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char* role,const char*) {
+    if(role && !std::strncmp(role,"flat foreground shadow",22))++::shadowShaderCreations;
     ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* shader=nullptr;
     if(FAILED(dev->CreateComputeShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
 }
@@ -48,6 +51,7 @@ F4 vertex(int i,Pose p){const double x=i==0||i==3?-.6:.6,y=i<2?-.6:.6,t=i<2?0:1;
 #include "flat_identity_receipt_tests.h"
 #include "flat_bench_history_pressure_tests.h"
 #include "flat_range_invalidate_tests.h"
+#include "flat_vertex_set_tests.h"
 #include "flat_covered_draw_tests.h"
 #include "flat_sibling_tests.h"
 #include "flat_shadow_gpu_tests.h"
@@ -609,6 +613,74 @@ int main(int argc,char** argv){
   {const auto st=flat.stats();
    check(st.missBy[unsigned(HistoryGap::InvalidatedIndices)]==1 && st.noCandidate==2,
          "range adapter control: and finds its prior taken by the gap write: a miss named invalidated-indices with no candidate");}
+  // The vertex buffer's writes at the adapter (the vertex set build). The draw's vertices are the set its nine indices name, {0,1,2,3}: bytes [0,64) of the
+  // rig's vertex buffer at stride 16. The set is read back at least a frame after the capture. While it is unknown a ranged write to the vertex buffer
+  // is spared (and logged for the check when the set arrives); once it is known the write is judged by it. The draw lists follow the history's decision.
+  {
+   constexpr unsigned kVertices=unsigned(HistoryWriteRole::Vertices);
+   // Unknown: one capture, the write in its window, no frame has polled.
+   const uint64_t onVertexOne[2]={16,32},beyond[2]={1000,1004},unknownWorld[2][2]={{16,32},{1000,1004}};
+   for(const auto& range:unknownWorld) {
+    flat.reset();finalRaster(offscreenOld);
+    check(flat.capture(ctx.Get(),issue,9,1,0,0,0,1600,flatInputs),"vertex adapter: a draw captures and its set is not yet read");
+    flat.resourceWritten(vb.Get(),ranged(range[0],range[1]));
+    const auto st=flat.stats();
+    check(!flat.refusal() && st.history.vertexUnknown==1 && st.history.vertexGenuine==0 && st.history.recordsInvalidated[kUpdate]==0 && st.history.sparedRecords==1 &&
+          st.history.touching[kUpdate][kVertices][kWindow]==1 && st.history.invalidating[kUpdate][kVertices][kWindow]==0 && st.history.savedWrites[kUpdate]==1,
+          "vertex adapter: a ranged write to the vertex buffer while the draw's set is unknown spares it, in the window: the frame is not refused, and the draw stays in its list");
+   }
+   // Two frames and H, whichever of the two worlds the poll leaves us in: a ranged write beyond the vertices is spared either way (outside the set, or
+   // while the set is unknown) and the frame still qualifies.
+   check(armed(1650),"vertex adapter: two frames of one draw capture");
+   flat.resourceWritten(vb.Get(),ranged(beyond[0],beyond[1]));
+   check(!flat.refusal() && qualifies(1651) && flat.stats().history.vertexUnknown+flat.stats().history.vertexOutside==1,
+         "vertex adapter: a ranged write beyond the draw's vertices leaves the frame qualified, whether the set has been read by then (outside) or not (unknown)");
+   // Unknown, a whole-buffer write is not a ranged one: it takes the draw, and refuses the frame.
+   flat.reset();finalRaster(offscreenOld);
+   check(flat.capture(ctx.Get(),issue,9,1,0,0,0,1610,flatInputs),"vertex adapter control: a draw captures and its set is not yet read");
+   flat.resourceWritten(vb.Get(),historyWholeWrite(HistoryWriteEntry::Update));
+   check(refused() && flat.stats().history.vertexUnknown==0 && flat.stats().history.recordsInvalidated[kUpdate]==1,
+         "vertex adapter control: the same buffer written with no range takes the draw and refuses the frame as captured geometry written, unclassified");
+   // A write that names no resource takes it too.
+   flat.reset();finalRaster(offscreenOld);
+   check(flat.capture(ctx.Get(),issue,9,1,0,0,0,1620,flatInputs),"vertex adapter control: a draw captures");
+   flat.resourceWritten(nullptr,ranged(16,32));
+   check(flat.refusal() && !std::strcmp(flat.refusal(),"foreground-unknown-resource-write"),"vertex adapter control: a write to a null resource, ranged or not, refuses the frame as an unknown write");
+   // The overlap of an index range is still exact and the vertex set does not change it: a write over the draw's INDEX bytes refuses the frame.
+   flat.reset();finalRaster(offscreenOld);
+   check(flat.capture(ctx.Get(),issue,9,1,0,0,0,1630,flatInputs),"vertex adapter control: a draw captures");
+   flat.resourceWritten(ib.Get(),ranged(16,20));
+   check(refused() && flat.stats().history.vertexUnknown==0,"vertex adapter control: a ranged write over the draw's index bytes refuses the frame whatever its set");
+   // Known: two frames of the draw and H, the GPU waited for (a map read back), then the next frame's first capture polls the set.
+   const auto setKnown=[&](unsigned frame) {
+    flat.reset();finalRaster(offscreenOld);
+    const bool first=flat.capture(ctx.Get(),issue,9,1,0,0,0,frame,flatInputs);finalRaster(foreignNow);
+    const bool second=flat.capture(ctx.Get(),issue,9,1,0,0,0,frame+1,flatInputs);
+    const bool h=second && qualifies(frame+1);
+    readFloatMap(flatOutput.motion.Get());
+    finalRaster(foreignNow);
+    return first && h && flat.capture(ctx.Get(),issue,9,1,0,0,0,frame+2,flatInputs);
+   };
+   check(setKnown(1700),"vertex adapter: three frames of the draw capture, with H and a wait for the GPU between the second and the third");
+   flat.resourceWritten(vb.Get(),ranged(beyond[0],beyond[1]));
+   {const auto st=flat.stats();
+    check(!flat.refusal() && st.history.vertexOutside==1 && st.history.vertexUnknown==0 && st.history.vertexGenuine==0 && st.history.savedWrites[kUpdate]==1,
+          "vertex adapter: with the set read, a ranged write beyond the draw's vertices is classified outside and spares it: the frame is not refused");}
+   flat.resourceWritten(vb.Get(),ranged(64,80));
+   {const auto st=flat.stats();
+    check(!flat.refusal() && st.history.vertexOutside==2,"vertex adapter: and so is one on the first byte past its last vertex");}
+   flat.resourceWritten(vb.Get(),ranged(63,64));
+   {const auto st=flat.stats();
+    check(refused() && st.history.vertexGenuine==1 && st.history.recordsInvalidated[kUpdate]==1 && st.history.invalidating[kUpdate][kVertices][kWindow]==1,
+          "vertex adapter: and one on the last byte of its last vertex is a genuine rewrite: it takes the record, drops the draw and refuses the frame");}
+   check(setKnown(1800),"vertex adapter: three frames of the draw capture again");
+   flat.resourceWritten(vb.Get(),ranged(onVertexOne[0],onVertexOne[1]));
+   {const auto st=flat.stats();
+    check(refused() && st.history.vertexGenuine==1 && st.history.vertexUnknown==0,"vertex adapter: with the set read, a ranged write on vertex 1 refuses the frame (the unknown world spared the same write)");}
+   check(setKnown(1900),"vertex adapter: three frames of the draw capture again");
+   flat.resourceWritten(vb.Get(),ranged(0,1));
+   check(refused(),"vertex adapter: a write on the first byte of the first vertex refuses the frame");
+  }
  }
  // A triangle may straddle either camera's eye plane. Its visible current
  // fragments still have actual finite correspondence through old.xy/old.w;
@@ -710,6 +782,7 @@ int main(int argc,char** argv){
  }
  flatBenchHistoryPressureTests(dev.Get(),ctx.Get(),bind,false);
  flatRangeInvalidateTests(dev.Get(),ctx.Get(),bind);
+ flatVertexSetTests(dev.Get(),ctx.Get(),bind);
  flatShadowGpuTests(dev.Get(),ctx.Get());
  ctx->ClearState();
  if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessagesAllowedByRetrievalFilter();++i){SIZE_T n=0;queue->GetMessage(i,nullptr,&n);std::vector<char> bytes(n);auto* m=reinterpret_cast<D3D11_MESSAGE*>(bytes.data());hr(queue->GetMessage(i,m,&n));if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"no D3D warnings/errors");}}

@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 #include "../../src/d3d11/flat_foreground_shadow.h"
+#include "../../src/d3d11/flat_history_report.h"
 
 namespace flatshadow_test {
 
@@ -803,8 +804,8 @@ inline int flatShadowAccumulateTests() {
 
     // -- the model's numbers are the ones this arc was designed with --
     expect(kFlatShadowMinFitVertices == 24 && kFlatShadowResidualPixels == 0.5f && kFlatShadowConditioning == 0.005f && kFlatShadowHullMargin == 0.05f &&
-               kFlatShadowHullFloor == 0.01f && kFlatShadowDepthRatio == 1.25f && kFlatShadowMovingPixels == 1.0f && kFlatShadowEveryFrames == 8,
-           "the shadow's constants: 24 fit vertices, 0.5 px residual, 0.005 conditioning, hull margin 0.05 and floor 0.01, depth ratio 1.25, moving 1 px, one frame in 8");
+               kFlatShadowHullFloor == 0.01f && kFlatShadowDepthRatio == 1.25f && kFlatShadowMovingPixels == 1.0f && kFlatShadowEveryFrames == 8 && kFlatShadowDefaultEvery == 0,
+           "the shadow's constants: 24 fit vertices, 0.5 px residual, 0.005 conditioning, hull margin 0.05 and floor 0.01, depth ratio 1.25, moving 1 px, one frame in 8 when it is on, and off by default");
     expect(kFlatShadowBins == 6 && kFlatShadowEdges[0] == 0.25f && kFlatShadowEdges[1] == 0.5f && kFlatShadowEdges[2] == 1.0f && kFlatShadowEdges[3] == 2.0f &&
                kFlatShadowEdges[4] == 4.0f,
            "the bins are <=0.25, <=0.5, <=1, <=2, <=4 and more");
@@ -982,7 +983,7 @@ inline int flatShadowAccumulateTests() {
         expect(read(second) == read(once), "the window of a second identical frame is that frame's counters");
     }
 
-    // -- the line --
+    // -- the lines: three parts, each under the logger's budget, each key in exactly the part that prints it --
     {
         ShadowStats w;
         w.sampledFrames = 101; w.drawsRead = 102; w.notReady = 103; w.failed = 104;
@@ -996,78 +997,124 @@ inline int flatShadowAccumulateTests() {
         w.donorDrawsSum = 500; w.donorVerticesSum = 60000;
         w.receiverCurrentAccepts = 401; w.receiverCurrentRefuses = 402; w.receiverRefusedAffineAccepts = 403; w.receiverAcceptedAffineAccepts = 404;
         w.modeTwoFires = 501; w.modeTwoWhileMoving = 502; w.movingFrames = 503;
-        char line[4096];
-        const int n = flatShadowLine(line, sizeof(line), w);
-        expect(n > 0 && n < int(sizeof(line)), "the line fits its buffer");
-        const std::string text(line);
-        const auto has = [&](const char* needle) { return text.find(needle) != std::string::npos; };
+        expect(kFlatShadowLineParts == 3 && flatShadowLine(nullptr, 0, w, 3) == 0 && flatShadowLine(nullptr, 0, w, 99) == 0,
+               "the shadow report is three parts, and a part past the third prints nothing");
+        std::string part[kFlatShadowLineParts];
+        for (unsigned p = 0; p < kFlatShadowLineParts; ++p) {
+            char line[4096];
+            const int n = flatShadowLine(line, sizeof(line), w, p);
+            expect(n > 0 && n < int(sizeof(line)) && static_cast<size_t>(n) == std::strlen(line), "each part fits its buffer and is terminated");
+            expect(static_cast<size_t>(n) <= kFlatLogLineBudget, "each part is under the logger's budget with ordinary counts");
+            part[p] = line;
+        }
+        const auto has = [&](unsigned p, const char* needle) { return part[p].find(needle) != std::string::npos; };
         const auto bins = [](const char* label, unsigned base) {
             char out[200];
             std::snprintf(out, sizeof(out), "%s {<=0.25=%u <=0.5=%u <=1=%u <=2=%u <=4=%u more=%u}", label, base, base + 1, base + 2, base + 3, base + 4, base + 5);
             return std::string(out);
         };
-        expect(text.rfind("flat foreground shadow 5s: sampled-frames=101 draws-read=102 (frames unread=103 failed=104) by kind: matched-with-donors=100 "
-                          "matched-alone=111 receiver-with-donors=100 receiver-alone=113 identity-unreadable=115;", 0) == 0,
-               "the line opens with the window's frames, draws and the five kinds, each with its own count");
-        expect(has(bins("mean-model all", 200).c_str()) && has(bins("mean-model where the current policy accepts", 210).c_str()) &&
-                   has(bins("affine-model all", 220).c_str()) && has(bins("affine-model where its gate accepts", 230).c_str()) &&
-                   has(bins("donors' own fit residual", 240).c_str()),
-               "then the five bin sets in their order: each of the six bins with its own count");
-        expect(has("accepts over leave-one-out draws: current=301 affine=302 both=303 neither=304;"), "the accept counts");
-        expect(has("affine gate failures (a draw can fail several): fit-vertices=311 conditioning=312 residual=313 hull=314 depth=315;"), "the five gate failures in their order");
-        expect(has("donors per draw with donors: draws=2.5 vertices=300;"), "the donors per draw are the sums over the (matched + receiver) draws with donors: 500 / 200 and 60000 / 200");
-        expect(has("receivers with donors: current-accepts=401 current-refuses(disagree)=402 affine-would-accept-of-refused=403 affine-would-accept-of-accepted=404;"),
-               "the receivers' four counts, the disagreement named");
-        expect(has("view-attached (receiver with no donor of its identity) fires=501 while-matched-draws-moved-over-1px=502 (frames with such motion=503);"),
+        expect(part[0].rfind("flat foreground shadow 5s (1/3): sampled-frames=101 draws-read=102 (frames unread=103 failed=104) by kind: matched-with-donors=100 "
+                             "matched-alone=111 receiver-with-donors=100 receiver-alone=113 identity-unreadable=115;", 0) == 0,
+               "part 1 opens with the window's frames, draws and the five kinds, each with its own count");
+        expect(part[1].rfind("flat foreground shadow 5s (2/3): ", 0) == 0 && part[2].rfind("flat foreground shadow 5s (3/3): ", 0) == 0,
+               "parts 2 and 3 carry their own numbers: a part cut out of the log stands alone");
+        expect(has(0, bins("mean-model all", 200).c_str()) && has(0, bins("mean-model where the current policy accepts", 210).c_str()),
+               "part 1 holds the mean model's two bin sets, each of the six bins with its own count");
+        expect(has(1, bins("affine-model all", 220).c_str()) && has(1, bins("affine-model where its gate accepts", 230).c_str()) &&
+                   has(1, bins("donors' own fit residual", 240).c_str()),
+               "part 2 holds the affine model's two bin sets and the donors' residual, in their order");
+        expect(has(2, "accepts over leave-one-out draws: current=301 affine=302 both=303 neither=304;"), "part 3 holds the accept counts");
+        expect(has(2, "affine gate failures (a draw can fail several): fit-vertices=311 conditioning=312 residual=313 hull=314 depth=315;"), "and the five gate failures in their order");
+        expect(has(2, "donors per draw with donors: draws=2.5 vertices=300;"), "and the donors per draw: the sums over the (matched + receiver) draws with donors: 500 / 200 and 60000 / 200");
+        expect(has(2, "receivers with donors: current-accepts=401 current-refuses(disagree)=402 affine-would-accept-of-refused=403 affine-would-accept-of-accepted=404;"),
+               "and the receivers' four counts, the disagreement named");
+        expect(has(2, "view-attached (receiver with no donor of its identity) fires=501 while-matched-draws-moved-over-1px=502 (frames with such motion=503);"),
                "and the view-attached counts");
-        expect(has("computed on one frame in 8, applied to nothing"), "and the line says it changes nothing and how often it samples");
-        // The mutation control for the mapping: swapping two counters changes the line.
+        expect(has(2, "computed on one frame in 8, applied to nothing"), "and the last part says it changes nothing and how often it samples when it is on");
+        // Each key is printed by exactly one part: none is lost to the split, none is repeated.
+        const char* const keys[] = {"sampled-frames=", "draws-read=", "frames unread=", "matched-with-donors=", "matched-alone=", "receiver-with-donors=", "receiver-alone=",
+                                    "identity-unreadable=", "mean-model all", "mean-model where the current policy accepts", "affine-model all", "affine-model where its gate accepts",
+                                    "donors' own fit residual", "accepts over leave-one-out draws: current=", "fit-vertices=", "conditioning=", "residual=", "hull=", "depth=",
+                                    "donors per draw with donors: draws=", "current-accepts=", "current-refuses(disagree)=", "affine-would-accept-of-refused=",
+                                    "affine-would-accept-of-accepted=", "fires=", "while-matched-draws-moved-over-1px=", "frames with such motion="};
+        bool once = true;
+        for (const char* key : keys) {
+            unsigned parts = 0;
+            for (unsigned p = 0; p < kFlatShadowLineParts; ++p) parts += part[p].find(key) != std::string::npos;
+            once = once && parts == 1;
+        }
+        expect(once, "every key the log is read by appears in exactly one of the three parts");
+        // The mutation controls for the mapping: swapping two counters changes the part that prints them, and only that part.
         ShadowStats swapped = w;
         std::swap(swapped.currentAccepts, swapped.affineAccepts);
+        std::swap(swapped.meanAccepted[2], swapped.affineAccepted[2]);
         char other[4096];
-        flatShadowLine(other, sizeof(other), swapped);
-        expect(std::string(other) != text, "mutation control: a line whose counters are swapped differs from this one");
+        flatShadowLine(other, sizeof(other), swapped, 0);
+        expect(std::string(other) != part[0], "mutation control: part 1 with a mean-model bin swapped for an affine-model one differs from this one");
+        flatShadowLine(other, sizeof(other), swapped, 1);
+        expect(std::string(other) != part[1], "mutation control: part 2 with an affine-model bin swapped for a mean-model one differs from this one");
+        flatShadowLine(other, sizeof(other), swapped, 2);
+        expect(std::string(other) != part[2], "mutation control: part 3 with two accept counts swapped differs from this one");
+        ShadowStats framesOnly = w;
+        framesOnly.sampledFrames += 1;
+        flatShadowLine(other, sizeof(other), framesOnly, 1);
+        expect(std::string(other) == part[1], "mutation control: part 2 does not print the frame counts (a change to one leaves it as it was): the parts do not overlap");
     }
     {
         // An empty window prints every counter at zero, without a division by zero.
-        char line[4096];
-        const int n = flatShadowLine(line, sizeof(line), ShadowStats{});
-        const std::string text(line);
-        expect(n > 0 && text.find("nan") == std::string::npos && text.find("inf") == std::string::npos && text.find("donors per draw with donors: draws=0.0 vertices=0;") != std::string::npos,
+        std::string whole;
+        for (unsigned p = 0; p < kFlatShadowLineParts; ++p) {
+            char line[4096];
+            const int n = flatShadowLine(line, sizeof(line), ShadowStats{}, p);
+            expect(n > 0 && static_cast<size_t>(n) == std::strlen(line), "an empty window prints each part");
+            whole += line;
+            whole += '\n';
+        }
+        expect(whole.find("nan") == std::string::npos && whole.find("inf") == std::string::npos && whole.find("donors per draw with donors: draws=0.0 vertices=0;") != std::string::npos,
                "an empty window prints donors per draw as zero, not nan");
         unsigned values = 0;
         bool zero = true;
-        for (size_t i = 0; i < text.size(); ++i) {
-            if (text[i] != '=' || (i && text[i - 1] == '<')) continue;
+        for (size_t i = 0; i < whole.size(); ++i) {
+            if (whole[i] != '=' || (i && whole[i - 1] == '<')) continue;
             size_t j = i + 1;
             bool digits = false, nonzero = false;
-            while (j < text.size() && (std::isdigit(static_cast<unsigned char>(text[j])) || text[j] == '.')) {
+            while (j < whole.size() && (std::isdigit(static_cast<unsigned char>(whole[j])) || whole[j] == '.')) {
                 digits = true;
-                if (text[j] != '0' && text[j] != '.') nonzero = true;
+                if (whole[j] != '0' && whole[j] != '.') nonzero = true;
                 ++j;
             }
             if (!digits) continue;
             ++values;
             zero = zero && !nonzero;
         }
-        expect(zero && values == 57, "every number in the line is zero, and there are 57 of them: the 58 counters less byKind[0] (kind none is never printed), the donor sums as two averages");
-        // At the widest.
+        expect(zero && values == 57, "every number in the three parts is zero, and there are 57 of them: the 58 counters less byKind[0] (kind none is never printed), the donor sums as two averages");
+        // At the widest, with twelve digits in every field (the budget holds) and with every counter ~0 (the logger's cut is not reached, nothing overruns).
         ShadowStats widest;
-        const uint64_t big = ~0ull;
-        widest.sampledFrames = widest.drawsRead = widest.notReady = widest.failed = big;
-        for (auto& k : widest.byKind) k = big;
-        for (unsigned i = 0; i < kFlatShadowBins; ++i) widest.meanAll[i] = widest.meanAccepted[i] = widest.affineAll[i] = widest.affineAccepted[i] = widest.residualBins[i] = big;
-        widest.currentAccepts = widest.affineAccepts = widest.bothAccept = widest.neitherAccept = big;
-        for (auto& g : widest.gateFailed) g = big;
-        widest.donorDrawsSum = widest.donorVerticesSum = big;
-        widest.receiverCurrentAccepts = widest.receiverCurrentRefuses = widest.receiverRefusedAffineAccepts = widest.receiverAcceptedAffineAccepts = big;
-        widest.modeTwoFires = widest.modeTwoWhileMoving = widest.movingFrames = big;
-        char wide[4096];
-        const int wideN = flatShadowLine(wide, sizeof(wide), widest);
-        expect(wideN > 0 && wideN < int(sizeof(wide)) && std::string(wide).find("applied to nothing") != std::string::npos,
-               "at its widest (every counter ~0) the line fits the runtime's 4096 bytes, untruncated");
+        const uint64_t t12 = 999999999999ull, big = ~0ull;
+        for (const uint64_t v : {t12, big}) {
+            widest.sampledFrames = widest.drawsRead = widest.notReady = widest.failed = v;
+            for (auto& k : widest.byKind) k = v;
+            for (unsigned i = 0; i < kFlatShadowBins; ++i) widest.meanAll[i] = widest.meanAccepted[i] = widest.affineAll[i] = widest.affineAccepted[i] = widest.residualBins[i] = v;
+            widest.currentAccepts = widest.affineAccepts = widest.bothAccept = widest.neitherAccept = v;
+            for (auto& g : widest.gateFailed) g = v;
+            widest.donorDrawsSum = widest.donorVerticesSum = v;
+            widest.receiverCurrentAccepts = widest.receiverCurrentRefuses = widest.receiverRefusedAffineAccepts = widest.receiverAcceptedAffineAccepts = v;
+            widest.modeTwoFires = widest.modeTwoWhileMoving = widest.movingFrames = v;
+            for (unsigned p = 0; p < kFlatShadowLineParts; ++p) {
+                char wide[4096];
+                std::memset(wide, 'x', sizeof(wide));
+                const int wideN = flatShadowLine(wide, sizeof(wide), widest, p);
+                expect(wideN > 0 && wideN < int(sizeof(wide)) && wide[wideN] == 0 && std::strlen(wide) == static_cast<size_t>(wideN),
+                       "at its widest each part is terminated within the runtime's 4096 bytes");
+                expect(static_cast<size_t>(wideN) <= (v == t12 ? kFlatLogLineBudget : size_t(1167)),
+                       v == t12 ? "with twelve digits in every field each part is still under the logger's budget"
+                                : "with every counter at 2^64-1 each part is still under the point where the logger cuts a line");
+            }
+        }
         char tight[64];
-        expect(flatShadowLine(tight, sizeof(tight), widest) > 0 && std::strlen(tight) == sizeof(tight) - 1, "a buffer too small for the line is truncated, not overrun");
+        expect(flatShadowLine(tight, sizeof(tight), widest, 0) > 0 && std::strlen(tight) == sizeof(tight) - 1 &&
+                   flatShadowLine(tight, sizeof(tight), widest, 2) > 0 && std::strlen(tight) == sizeof(tight) - 1,
+               "a buffer too small for a part is truncated, not overrun");
     }
     return failures;
 }
@@ -1324,22 +1371,50 @@ inline int flatShadowWiringTests() {
            "mutation control: a use of the shadow's records, or of a sixth call, fails the pin");
     expect(count(motion, "lastRecords") == 0 && count(compact(runtimeSource), "lastRecords") == 0, "no production source reads lastRecords(): it is for the rigs");
     expect(ordered(motion, {"explicit RigShadowEvery(unsigned every):was(shadowEvery()){shadowEvery()=every;}", "~RigShadowEvery(){shadowEvery()=was;}",
-                            "static unsigned& shadowEvery(){static unsigned every=kFlatShadowEveryFrames;return every;}"}),
-           "the sampling interval is kFlatShadowEveryFrames, and the rig's override restores it");
+                            "static unsigned& shadowEvery(){static unsigned every=kFlatShadowDefaultEvery;return every;}"}),
+           "the sampling interval is kFlatShadowDefaultEvery (zero: off), and the rig's override restores it");
+    expect(!ordered(replaced(motion, "static unsigned every=kFlatShadowDefaultEvery;", "static unsigned every=kFlatShadowEveryFrames;"),
+                    {"static unsigned& shadowEvery(){static unsigned every=kFlatShadowDefaultEvery;return every;}"}),
+           "mutation control: a default that is the cadence (the shadow on for everyone) is not what the text says");
+    {
+        // The shadow costs nothing by default: runShadow returns before it touches the shadow, its inputs or its constants when the interval is zero,
+        // so nothing is made, bound or dispatched (the rig counts the shaders the shadow asks the device for: tools\weapon_motion_test).
+        const std::string guardText = "if(!shadowEvery() || n<2 || n>FlatForegroundShadow::kDraws || frame%shadowEvery()!=0)return;";
+        const auto guardFirst = [&](const std::string& text) {
+            const size_t guard = text.find(compact(guardText)), use = text.find("shadowInputs_");
+            return guard != std::string::npos && use != std::string::npos && guard < use && count(text, "return;") == 1 && count(text, "shadow_.") == 1;
+        };
+        expect(guardFirst(runShadow), "runShadow leaves before it touches the shadow or its inputs when the interval is zero: its one return is the guard, and it comes first");
+        expect(!guardFirst(replaced(without(runShadow, guardText.c_str()), "shadowInputs_.assign(n,FlatForegroundShadow::DrawInput{});",
+                                    ("shadowInputs_.assign(n,FlatForegroundShadow::DrawInput{});" + compact(guardText)).c_str())),
+               "mutation control: the same function with the inputs built before the guard fails the pin");
+        expect(count(compact(runtimeSource), "kFlatShadowEveryFrames") == 0 && count(motion, "kFlatShadowEveryFrames") == 0 && count(motion, "kFlatShadowDefaultEvery") == 1,
+               "nothing in the capture class or the runtime turns the shadow on: the cadence constant is named by the rig and the line only");
+        expect(count(replaced(motion, "static unsigned every=kFlatShadowDefaultEvery;", "static unsigned every=kFlatShadowEveryFrames;"), "kFlatShadowDefaultEvery") == 0,
+               "mutation control: a default that is the cadence (the shadow on for everyone) is not what the text says");
+    }
     expect(ordered(motion, {"if(polledFrame_!=frame){polledFrame_=frame;pollIdentity(ctx,frame);pollSibling(ctx,frame);history_.pollExtents(ctx,frame);shadow_.poll(ctx,frame);}"}),
            "the shadow's readback is polled once a frame beside the others");
     expect(ordered(motion, {"history.add(o.history);shadow.add(o.shadow);", "stats_.history=history_.writeStats();stats_.shadow=shadow_.stats();"}),
            "the capture statistics carry the shadow's counters and add them across candidates");
     // -- the 5 s report prints it --
     const std::string runtime = compact(runtimeSource);
+    const std::string printShadow = "if(shadowWindow.sampledFrames||shadowWindow.failed||shadowWindow.notReady)for(unsigned part=0;part<kFlatShadowLineParts;++part)"
+                                    "{flatShadowLine(line,sizeof(line),shadowWindow,part);Log::get().note(\"%s\",line);}";
     const auto reportValid = [&](const std::string& text) {
         return ordered(text, {"const ShadowStats shadowWindow=flatShadowDelta(captures.shadow,was.shadow);",
-                              "flatHistoryLine(line,sizeof(line),history);Log::get().note(\"%s\",line);",
-                              "flatShadowLine(line,sizeof(line),shadowWindow);Log::get().note(\"%s\",line);"});
+                              "flatHistoryLine(line,sizeof(line),history);Log::get().note(\"%s\",line);", printShadow.c_str()});
     };
-    expect(reportValid(runtime), "the 5 s foreground report prints the shadow line from the window of the capture counters, after the history line");
+    expect(reportValid(runtime), "the 5 s foreground report prints the shadow's three parts from the window of the capture counters, after the history lines, and only for a window that sampled or tried to");
     expect(!reportValid(replaced(runtime, "flatShadowDelta(captures.shadow,was.shadow)", "captures.shadow")), "mutation control: a line of cumulative counters, not the window, fails the pin");
-    expect(!reportValid(without(runtime, "flatShadowLine(line,sizeof(line),shadowWindow);Log::get().note(\"%s\",line);")), "mutation control: a report that never prints the line fails the pin");
+    expect(!reportValid(without(runtime, printShadow.c_str())), "mutation control: a report that never prints the shadow fails the pin");
+    expect(!reportValid(without(runtime, "if(shadowWindow.sampledFrames||shadowWindow.failed||shadowWindow.notReady)")),
+           "mutation control: a report that prints the shadow's lines for every window, sampled or not, fails the pin");
+    expect(!reportValid(replaced(runtime, "part<kFlatShadowLineParts;", "part<kFlatShadowLineParts-1;")), "mutation control: a report that drops the last part fails the pin");
+    expect(!reportValid(replaced(runtime, "flatShadowLine(line,sizeof(line),shadowWindow,part)", "flatShadowLine(line,sizeof(line),shadowWindow,0)")),
+           "mutation control: a report that prints the first part three times fails the pin");
+    expect(!reportValid(replaced(runtime, "shadowWindow.sampledFrames||shadowWindow.failed||shadowWindow.notReady", "shadowWindow.sampledFrames")),
+           "mutation control: a report that stays silent on a window whose frames all failed or never came back fails the pin");
 
     // -- the dispatcher --
     const std::string run = compact(member(gpuSource, "bool run("));
