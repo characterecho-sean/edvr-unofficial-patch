@@ -665,3 +665,34 @@ first`. The camera UI: FreeCamToggleHUD pressed once per placement, restored aft
 free`, heartbeat `box_bypassed`, `controller_calls`, `ui_hidden_by_edvr`. Probe lines: `I3 pressed:` (the three action ints), `I4
 change:` and `I4 heartbeat:`, `N matrix:` (+0x268 and three more, the vec4), `N local:` (the eye in commander-local axes; the shared
 world frame with +0x70 is an assumption, printed with both raw origins), `N heartbeat:`. N swaps one vtable slot (0x51FCE98+0x20).
+
+## 2026-10-07 F2 flown: F5 works; the body fades, the eye is fixed
+
+Frontier, v0.18.3-21-g0cff6a93 (version line checked),
+`edvr_gfx_20261007_211908.log`; Sean's screenshot afterwards.
+
+- **The controller runs with the camera closed**, so F5 works from first
+  person: "the camera controller update reached the hook ... mode=0".
+- **TAB pressed too early.** PhotoCameraToggle opened the suite on the first
+  update (mode 0->1), but ToggleFreeCam pressed on the very next update was
+  ignored for 90 updates, so the sequencer aborted and Sean saw the selfie
+  preset. A later F5, a few seconds into mode 1, brought mode 3 on the next
+  update. Something gates TAB just after opening (0a-5 is looking).
+- **The box bypass works.** Placed, the post-update local origin was exactly
+  (0.000, 1.680, 0.100); after each release it went straight back to 2.150.
+  Lock, UI hide and unhide all logged as designed, with no faults.
+- **The whole avatar fades.** Placed inside the commander, the whole
+  third-person body vanishes in a screen-door dither, except the backpack
+  attachment (the torch). After the F5 exit closed the camera with the
+  camera still inside, the dither PERSISTED in first person: the drawn
+  weapon was mostly transparent. A state the game never reaches on its own,
+  since the box push keeps the camera out. Must be fixed before anything
+  else ships.
+- **The eye is a fixed point.** N found the local eye (16k getter calls a
+  second across all humanoids, 21 interfaces) and paired 78 samples. The eye
+  sat at local (0.000, 1.600, 0.000) through the whole stay, walking and
+  turning, +-0.017 once: a fixed point, not the animated head. Neck
+  following needs the third-person avatar's head or neck joint from the
+  kinematic rig instead.
+- **Detach key.** I3 pressed logged only its first sight; Sean did not
+  detach this flight.
