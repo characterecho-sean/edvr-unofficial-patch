@@ -42,7 +42,7 @@ StructuredBuffer<HoloRecord> HR : register(t13);
 #define EDVR_CELESTIAL 1
 #endif
 #if EDVR_CELESTIAL
-struct CelestialRecord { float4 m0; float4 m1; float4 m2; float4 box; float4 span; };
+struct CelestialRecord { float4 m0; float4 m1; float4 m2; float4 box; float4 span; float4 ctr; };
 StructuredBuffer<CelestialRecord> CR : register(t15);   // planet patch motion: one record per body, this eye (probe.w bit 8192)
 #endif
 )HLSL"
@@ -514,24 +514,38 @@ R"HLSL(
 // translation (normal space) or not (supercruise, where they lose it and a planet closes at km a frame). Where two
 // volumes hold a pixel the one with the narrower depth span wins -- a moon in front of its planet. d is the pixel's
 // ray (d.z = -1) and z its depth in metres; dp comes back as the pixel's point in last frame's view.
+// A record whose span.w (rMax) is above 0 also holds a pixel only where its view-space point P lies between ctr.w (rMin) and
+// span.w (rMax) from the body's centre ctr.xyz (2026-10-08). Those are the records of a body whose patch boxes reach the eye
+// plane: their volume is the whole eye from depth 0, which holds a hangar's wall as much as the planet, and the shell is what
+// tells them apart -- the planet's surface lies at its own radius from its centre, the wall at the eye's distance from it.
+// FLOAT32: the centre can be 1.7e7 m away (a 4,478 km planet seen from 12,000 km), where one ulp is 1-2 m, so P - ctr and its
+// length are good to a few metres and the shell is a percent of the radius (tens of km) wide: metres of error, not kilometres.
+// The shell is widened by three pixels' footprint at the pixel's own depth (slack): a pixel beside the silhouette carries the
+// nearest depth of its 3x3 (the body's), so its ray is up to 1.4 pixels off the point that depth belongs to, and at planetary
+// range a pixel is tens of km across -- more than the percent. At a hangar wall's 30 m the same slack is a metre.
 bool celestialPixel(float2 p, float3 d, float z, out float3 dp) {
     dp = 0;
     if ((uint(probe.w + 0.5) & 8192u) == 0u) return false;
     int hit = -1;
     float narrow = 3.0e38;
+    float3 P = d * z;
     [loop] for (int i = 0; i < 16; ++i) {
         CelestialRecord r = CR[i];
         if (r.span.z == 0.0) break;
         float span = r.span.y - r.span.x;
         if (p.x >= r.box.x && p.x <= r.box.z && p.y >= r.box.y && p.y <= r.box.w &&
             z >= r.span.x && z <= r.span.y && span < narrow) {
+            if (r.span.w > 0.0) {
+                float slack = 3.0 * z * max((tanNow.y - tanNow.x) / float(size.x), (tanNow.w - tanNow.z) / float(size.y));
+                float radial = length(P - r.ctr.xyz);
+                if (!(radial >= r.ctr.w - slack && radial <= r.span.w + slack)) continue;
+            }
             hit = i;
             narrow = span;
         }
     }
     if (hit < 0) return false;
     CelestialRecord r = CR[hit];
-    float3 P = d * z;
     dp = float3(dot(r.m0.xyz, P) + r.m0.w, dot(r.m1.xyz, P) + r.m1.w, dot(r.m2.xyz, P) + r.m2.w);
     return all(isfinite(dp));
 }

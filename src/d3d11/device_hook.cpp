@@ -1309,6 +1309,9 @@ void tickJournalGate() {
                                 journalStatusSamples());
     headOffsetGateSetWakeLive(journalSupercruiseKnown(), journalSupercruise(),
                               journalInJumpTunnel());
+    // Planet patch motion runs only in supercruise (celestial_motion.h, the supercruise gate): the same Status.json word, once a
+    // frame. Unknown counts as not supercruise. A no-op while the module is configured off.
+    celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());
 }
 
 // The camera keys and pads (tkCameraKeysPads), and the two settings only they read.

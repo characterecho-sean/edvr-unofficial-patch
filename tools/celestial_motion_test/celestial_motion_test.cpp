@@ -13,7 +13,12 @@
 //       without the celestial code;
 //   (d) the CPU tee: Map/Unmap, UpdateSubresource and the copies that invalidate, the capture at the draw, the consumer's
 //       records and the census it feeds;
-//   (e) the build's edge cases, each refusal reached by its own reason.
+//   (e) the build's edge cases, each refusal reached by its own reason;
+//   (f) the radial shell of a body whose patch boxes reach the eye plane (shell_tests.h): a station 12,213 km from a 4,478 km planet, a ship
+//       landed 2 m above it, the float32 the shader subtracts in, the real bodies' radii inside their shells, and the legacy whole-eye
+//       record plus five shader mutants that the same judge must refuse;
+//   (g) the supercruise gate and the bodies named in the log (gate_tests.h): every (known, supercruise) state, a closed gate's silence, nothing
+//       carried across a gap, line budgets, the journal wiring pinned to its text, and mutants of the table and the pin.
 // The module under test (src/d3d11/celestial_motion.cpp) is included whole, its dependencies stubbed below, so the tees and the
 // capture run as vscreen.cpp calls them.
 // Run from the repository root (the fixture is read at a repo-relative path). Exit 0 all passed, 1 a check failed.
@@ -34,8 +39,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -403,6 +410,7 @@ void testRealConstants(const Fixture& fx) {
 
 #include "edge_tests.h"
 #include "tee_tests.h"
+#include "gate_tests.h"
 #include "warp_tests.h"
 
 }  // namespace
@@ -417,6 +425,7 @@ int main(int argc, char** argv) {
     testRealConstants(fx);
     edge::all(fx);
     tee::all(fx);
+    gate::all(fx);
     warp::all(fx);
     std::printf("PASS: celestial_motion_test, %u checks\n", g_checks);
     return 0;

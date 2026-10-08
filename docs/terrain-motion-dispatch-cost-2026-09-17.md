@@ -15,6 +15,13 @@
   rows lose the ship's translation, so every body took the camera's motion,
   under 1% of its real growth (2.3e-3 a frame). The retired hook is not back:
   no GPU copy, no reissue, no extra draw; `advanced.terrain_motion` stays gone.
+- 2026-10-08, BUILT, NOT FLOWN (branch claude/celestial-supercruise-gate): the
+  Quest 3 hangar report (v0.18.3, docked, planet 12,000 km off, the station
+  background grainy, v0.18.2 fine). A body whose boxes reach the eye plane had
+  the whole eye from depth 0 as its volume and took every world pixel nearer
+  than its far corners. Now the path runs only while Status.json says
+  supercruise (unknown = off) and a straddling record holds only its radial
+  shell (record 20 -> 24 floats). Journal top entry; a gate line per change.
 - Verified offline, no flight (numbers in the top journal entry): the moon's
   delta reproduces the doc's D references to 1.73 m (limit 2); the shader's
   arithmetic reproduces the game's own jitter-free motion to 0.0002 px (limit
@@ -30,10 +37,9 @@
 - Open: the volume is the union of the patches' boxes (a pixel rectangle and a
   depth interval, margins 3 px and 1%), about 30% loose around the disc; the
   VS's LOD morph (cb2[0..3]) moves vertices non-rigidly and no rigid transform
-  covers it; a body wholly behind the eye (the dump's five far bodies) or off
-  its pixels gets no record. The GPU cost is unmeasured (a 1280-byte upload and
-  a 2-record loop per world pixel per eye). The colour pass is used, not
-  ACE405's depth pass.
+  covers it; a body wholly behind the eye or off its pixels gets no record. The
+  GPU cost is unmeasured (a 1536-byte upload and a 2-record loop per world
+  pixel per eye). The colour pass is used, not ACE405's depth pass.
 - ruled out: the retired hook's route (per-patch GPU copies, a coverage reissue,
   GPU p50 +0.27 ms, CPU p50 +0.51 ms): replaced by the CPU shadow, 8.6 us a
   build and 0.16 us a draw on the rig's core; a rotation read off an
@@ -55,6 +61,114 @@
   write-combined mapped memory.
 
 ## Journal
+
+### 2026-10-08 -- the hangar fault: a straddling body claimed every world pixel; the path now runs in supercruise only
+
+Branch claude/celestial-supercruise-gate, cut from main 593832de. Built, not
+flown, not installed. Every number is the rig's (`tools\celestial_motion_test`,
+43,364 checks, about 25 s).
+
+**The report.** Quest 3, SteamVR, RTX 5070, v0.18.3, docked in a Coriolis
+hangar with a planet (radius 4,478 km) about 12,000 km off: the station
+background a grainy mess. v0.18.2 is fine at the same 45 Hz. Their log has a
+celestial record bound every frame, with behind=0 and off-screen=0 in every
+5 s window. I have the description of that log, not the log.
+
+**The mechanism, read in the code and reproduced on the rig.**
+- `volume()` calls a body straddling when any corner of any patch box is at or
+  behind the eye plane. Its volume was then the whole eye (box -4..w+4) from
+  depth 0 to the far corners' depth, and `build()` never counted it off-screen.
+- So every world-path pixel nearer than those corners took the planet's rigid
+  [R|t]: a hangar wall at 30 m as much as the planet. Engine-path pixels
+  override path 12, so only world pixels were hit.
+- The rig's station (an eye 12,213 km from the nearest patch of a 4,478 km
+  body, 80 degrees off the view axis, patch boxes made from the sphere
+  itself) with the old record, shell stripped: 12,096 of 12,096 interior
+  pixels of a 30 m wall took the body's motion, and every one lost its
+  history, because the body's translation (5 km in the rig) put the wall's
+  point behind last frame's eye (dp.z >= 0, no projection, path 0). A small
+  translation would give a wrong vector instead. Either is the grain.
+- Outside supercruise the camera term already carries the ship's translation
+  (v0.18.2 flew there without this path and drew no smear report), so the path
+  was only ever needed in supercruise.
+
+**Part A: the supercruise gate.** `celestialMotionNoteStatus(known,
+supercruise)`, pushed once a frame from `tickJournalGate` (device_hook.cpp)
+with Status.json's Flags bit 4 (`journalSupercruiseKnown/journalSupercruise`).
+Unknown counts as off. Closed, the module is not live (the draw path's one
+load), the write tees are unwatched (`clearWatches`), `celestialMotionRecords`
+returns no SRV (probe.w bit 8192 clear, zero path-12 pixels), and both eyes'
+captured frames are dropped, so the first frame after it opens takes the
+no-previous-frame fallback (the rig also shuts and reopens it inside one frame,
+where the stamps alone would pair the stale list). The module's own switch
+(`celestialMotionConfigure`) is the same gap. Log: one line per change,
+
+    celestial motion: gate ON at frame N, was off (status unknown) (Status.json Flags says supercruise). Planet patch draws are read ...
+    celestial motion: gate OFF at frame N, was on (Status.json Flags says not supercruise). No planet patch capture, no records bound, ...
+    celestial motion: gate OFF at frame N, was ... (supercruise status unknown: no Flags read from Status.json (menus, a missing file) or the journal watcher is off). ...
+
+32 lines at most a session. The 5 s census is now three lines (the longest was
+993 characters at 20-digit counters; now 373, 453, 518): `celestial motion 5s:`
+carries `gated-off=N`, `(2/3)` the consumer, `(3/3)` the records (`N with a
+shell`), the tee, the cost and `gate=...`. A window the gate held shut
+throughout is one short line (`frames=N gated-off=N (supercruise gate: ...)`).
+If the gate or the push never ran, the log has no gate line and the 5 s lines
+read `gate=off (no status yet)`; if it ran and held, they read
+`gate=off (not supercruise)` with the transition line before them.
+A consequence to know: with the journal watcher off or Status.json unreadable
+the path never runs, in supercruise too.
+
+**Part B: the shell.** The record is 24 floats now (`kRecordFloats`, six
+float4; was 20): `span.w` = rMax (0 = no shell) and `ctr` = (the body's centre
+in the shader's view space, rMin). The centre is cb2[12] through A^T, z
+flipped. rMax is the farthest any corner of either box of any patch is from it,
+rMin the nearest either box comes (exact point-to-box; the nearest CORNER of a
+wide flat box is beyond the sphere it holds, so it can sit above the surface),
+margins 1% + 4 m + 6 ulp of |centre|. The shader (`celestialPixel`, mv and
+main) takes a straddling body's pixel only where its point P = d z lies in the
+shell, widened by 3 pixels' footprint at the pixel's depth (a silhouette
+pixel carries its neighbour's depth). Non-straddling bodies are as flown: box,
+depth slab, no shell (their silhouette pixels sit outside a thin shell at
+planetary range). EDVR_CELESTIAL 0 is byte for byte the old shader (all eight
+entry/diagnostic/trace mixes hashed against the old text).
+- Station: no world pixel from 25 m to 1,000 km in front of the planet, or in
+  it, takes path 12; the planet's own pixels do (20,252 of 20,252 interior
+  ones). Landed 2 m above the surface: 120,000 of 120,000 ground pixels from
+  2 m to the horizon take it. Real constants: all 216 body-frames of the dump
+  have their own radius and every patch centre inside their shell; the moon's
+  D (1.73 m) and the shader's motion (0.0002 px) are unchanged.
+- Float32: the centre is 1.7e7 m off (ulp 1-2 m). |P - centre| in float32 is
+  off by 0.92 m worst over 22,916 planet pixels and 0.96 m on a 30 m wall; the
+  centre's own rounding is 0.35 m; on WARP, with the slack taken out, a pixel
+  is misjudged only within 0.12 m of the shell's edge. The margin is 44.8 km.
+- Controls: the old record (no shell) is caught by the judge; five one-token
+  breaks of the shell test are each caught; the gate's decision table fails
+  four mutants and the journal wiring pin three. By hand: record without a
+  shell, gate out of `setLive`, captured frames kept across the gate each stop
+  the rig.
+
+CPU: `cel::build` of the dump's eye-frame is 18 us (16 before); the shell is one more
+pass over the corners.
+
+**Part C: bodies named.** `celestial motion: body N of 16 named: radius R km,
+nearest patch D km away, P patch(es), straddles the eye plane: yes/no/n/a;
+<record or why not>` once per distinct radius to a km, 16 at most. Before, only
+the first body of a session was named. It answers which bodies (landable,
+non-landable, gas giants) the patch shader draws.
+
+**ruled out (design, not flown):** a shell cut at the nearest patch-box corner
+(a wide patch's corners lie beyond its sphere); the shell on every record (a
+silhouette pixel's nearest-depth point is up to 1.4 pixels off the body, tens
+of km at planetary range, outside a percent-thick shell, and the non-straddle
+volumes flew OK); one flight per part (all three go in the same flight).
+
+**Next flight.** (1) Docked, planet in view, 45 Hz: the log should say gate
+OFF (not supercruise), `gated-off` equal to `frames` in every 5 s line, no
+records, the hangar clean. (2) A supercruise approach: gate ON, records as on
+10-07 (`N with a shell` > 0 only when the planet's boxes reach the eye plane),
+the planet as good as before. (3) Landed on a planet and on foot: the gate is
+off, the ground is the camera term's, as in v0.18.2. (4) Read the `body N of
+16` lines.
 
 ### 2026-10-07 -- planet patch motion flown OK
 
