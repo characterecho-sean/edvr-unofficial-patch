@@ -378,8 +378,8 @@ void pushEvent(Ring ring, ecm::EvKind kind, uint64_t object, uint32_t why, uint3
 }
 
 // A Seq event carries its detail in the spare fields (explorer_cam_core.h, formatEvent): before = the readiness wait, updates = the wait for
-// mode 3, flags = the unmet conditions.
-void pushSeqEvent(ecm::SeqEvent ev, uint64_t controller, uint32_t mode, uint32_t presetKind, uint32_t readyAfter, uint32_t toMode3, uint32_t unmet) {
+// mode 3, flags = the unmet conditions, the queued bit and the press count (ecm::packSeqFlags).
+void pushSeqEvent(ecm::SeqEvent ev, uint64_t controller, uint32_t mode, uint32_t presetKind, uint32_t readyAfter, uint32_t toMode3, uint32_t flags) {
     ecm::Event e;
     e.seq = g_eventSeq.fetch_add(1, std::memory_order_relaxed);
     e.kind = static_cast<uint32_t>(ecm::EvKind::Seq);
@@ -388,7 +388,7 @@ void pushSeqEvent(ecm::SeqEvent ev, uint64_t controller, uint32_t mode, uint32_t
     e.why = static_cast<uint32_t>(ev);
     e.before = readyAfter;
     e.after = mode;
-    e.flags = unmet;
+    e.flags = flags;
     e.count = presetKind;
     e.updates = toMode3;
     g_rings[kRingCtl].push(e);
@@ -652,7 +652,8 @@ void runCtlPre(void* controllerPtr, PreState& ps) {
     if (s.nev) {
         int32_t kind = 0;
         sehReadInt(bytes, ecm::kOffCtlPresetKind, &kind);   // for the line only; a failed read leaves 0
-        for (uint8_t i = 0; i < s.nev; ++i) pushSeqEvent(s.ev[i], controller, mode, static_cast<uint32_t>(kind), s.readyAfter, s.toMode3, s.unmet);
+        for (uint8_t i = 0; i < s.nev; ++i) pushSeqEvent(s.ev[i], controller, mode, static_cast<uint32_t>(kind), s.readyAfter, s.toMode3,
+                                                          ecm::packSeqFlags(s.unmet, s.queued, s.presses));
     }
     if (s.press != ecm::CtlPress::None) {
         const uint32_t handle = s.press == ecm::CtlPress::Photo ? ecm::kOffCtlPhotoAction : ecm::kOffCtlFreeAction;

@@ -409,10 +409,14 @@ constexpr uint32_t kMaxFaults = 8;   // after this many faulting guarded accesse
 // One press per update. THE TAB WAIT (F2: ToggleFreeCam pressed the update after the suite opened was not taken): ToggleFreeCam is
 // pressed only when the suite looks ready -- mode 1 or 2, the controller's pending-retry byte (+0x3E1) clear, and the shared
 // record's +0x1D clear when that can be read -- for kSeqReadyUpdates updates in a row. SetMode(3) returns without latching when
-// the shared +0x1D is set or an object the controller cannot show us says no, so a press made too early is simply lost. Pressed
-// once; then up to kSeqTabWaitUpdates (about 10 s) for mode 3, never re-pressed: while +0x3E1 is 1 the game is retrying the entry
-// itself (F2 saw it complete about 6 s late), and the session stays alive to place it. Each wait that runs out aborts with a line that
-// names the condition still unmet. The open wait is kSeqWaitUpdates.
+// the shared +0x1D is set or an object the controller cannot show us says no, so a press made too early is simply lost -- and F3
+// showed the suite drops it for seconds after opening although every condition it shows is clear (the one press that worked in F2
+// came about 4 s in). So the press is REPEATED: every kSeqRepressUpdates updates after a press, if the pre-call mode is still 1 or 2
+// and +0x3E1 is clear, ToggleFreeCam is pressed again; an accepted press shows as mode 3 on the very next update, long before the
+// next one is due, so there is no double toggle. Pressing stops at mode 3/4, at +0x3E1 = 1 (the game is retrying the entry itself;
+// F2 saw it complete about 6 s late; the session stays alive to place it), or after kSeqTabWaitUpdates (about 10 s) from the first
+// press. Each wait that runs out aborts with a line that names the condition still unmet, and the end of a successful wait is
+// logged once with the presses made. The open wait is kSeqWaitUpdates.
 enum class F5Req : uint32_t { None = 0, Enter = 1, Exit = 2 };
 enum class CtlPress : uint8_t { None = 0, Photo = 1, Free = 2 };
 enum class SeqEvent : uint32_t {
@@ -444,6 +448,7 @@ enum class SeqEvent : uint32_t {
 constexpr uint32_t kSeqWaitUpdates = 90;
 constexpr uint32_t kSeqReadyUpdates = 5;
 constexpr uint32_t kSeqTabWaitUpdates = 900;
+constexpr uint32_t kSeqRepressUpdates = 10;   // ToggleFreeCam is pressed again this many updates after a press the suite dropped
 // Which conditions of the TAB wait were unmet (a bit mask carried by the timeout events).
 constexpr uint32_t kUnmetMode = 1, kUnmetPending = 2, kUnmetShared = 4, kSharedUnobserved = 8;
 
@@ -465,6 +470,8 @@ struct SeqStep {
     uint32_t readyAfter = 0;      // EnterReady / EnterAttached: updates the readiness wait took
     uint32_t toMode3 = 0;         // EnterAttached: updates from the press to mode 3
     uint32_t unmet = 0;           // the timeouts: kUnmet* bits
+    uint32_t presses = 0;         // EnterAttached (after a press) / EnterTimeoutFree: ToggleFreeCam presses made
+    bool queued = false;          // EnterAttached / EnterTimeoutFree: the game had queued the entry itself (+0x3E1 was seen at 1)
     void add(SeqEvent e) { if (nev < 3) ev[nev++] = e; }
 };
 
@@ -514,21 +521,34 @@ public:
                 break;
             case Stage::FreeWait:
                 ++m_waited;
+                ++m_sincePress;
                 if (mode >= 3) {
                     m_stage = Stage::Active;
                     s.readyAfter = m_readyAfter;
                     s.toMode3 = m_waited;
+                    s.presses = m_presses;
+                    s.queued = m_queuedNoted;
                     s.add(SeqEvent::EnterAttached);
                 } else if (mode == 0) {
                     s.add(SeqEvent::SessionEnded);
                     end();
                 } else if (m_waited >= kSeqTabWaitUpdates) {
                     s.unmet = unmetOf(view, true);
+                    s.presses = m_presses;
+                    s.queued = m_queuedNoted;
                     s.add(SeqEvent::EnterTimeoutFree);
                     end();
-                } else if (view.pending && !m_queuedNoted) {
-                    m_queuedNoted = true;
-                    s.add(SeqEvent::EnterQueued);
+                } else if (view.pending || m_queuedNoted) {
+                    // The game is retrying the entry itself: no more presses for this session, only the wait.
+                    if (view.pending && !m_queuedNoted) {
+                        m_queuedNoted = true;
+                        s.add(SeqEvent::EnterQueued);
+                    }
+                } else if ((mode == 1 || mode == 2) && m_sincePress >= kSeqRepressUpdates) {
+                    // The suite dropped the last press (it still shows a preset and +0x3E1 is clear, a full interval later): press again.
+                    s.press = CtlPress::Free;
+                    ++m_presses;
+                    m_sincePress = 0;
                 }
                 break;
             case Stage::Active:
@@ -590,6 +610,8 @@ private:
             m_readyAfter = m_waited;
             m_waited = 0;
             m_queuedNoted = false;
+            m_presses = 1;
+            m_sincePress = 0;
             s.readyAfter = m_readyAfter;
             s.press = CtlPress::Free;
             s.add(SeqEvent::EnterReady);
@@ -608,6 +630,8 @@ private:
         m_stage = Stage::Idle;
         m_waited = 0;
         m_ready = 0;
+        m_presses = 0;
+        m_sincePress = 0;
     }
     void begin(SeqStep& s, const CtlView& v) {
         switch (v.mode) {
@@ -667,6 +691,8 @@ private:
     uint32_t m_waited = 0;
     uint32_t m_ready = 0;
     uint32_t m_readyAfter = 0;
+    uint32_t m_presses = 0;       // ToggleFreeCam presses in this wait
+    uint32_t m_sincePress = 0;    // updates since the last of them
     bool m_queuedNoted = false;
 };
 
@@ -987,8 +1013,14 @@ inline void putUnmet(Line& o, uint32_t unmet) {
     if (unmet & kSharedUnobserved) o.put(" (the shared record's +0x1D cannot be read here, so it could not be checked)");
 }
 struct SeqDetail {
-    uint32_t readyAfter = 0, toMode3 = 0, unmet = 0;
+    uint32_t readyAfter = 0, toMode3 = 0, unmet = 0, presses = 0;
+    bool queued = false;
 };
+// A Seq event's flags: the unmet bits (0-3), the queued bit (4), the press count (8 and up).
+constexpr uint32_t kSeqFlagQueued = 0x10;
+inline uint32_t packSeqFlags(uint32_t unmet, bool queued, uint32_t presses) {
+    return (unmet & 0xF) | (queued ? kSeqFlagQueued : 0u) | ((presses > 0xFFFFFFu ? 0xFFFFFFu : presses) << 8);
+}
 
 inline void putSeqEvent(Line& o, SeqEvent e, uint32_t mode, uint32_t presetKind, const SeqDetail& d = SeqDetail()) {
     switch (e) {
@@ -1008,16 +1040,18 @@ inline void putSeqEvent(Line& o, SeqEvent e, uint32_t mode, uint32_t presetKind,
                   mode, kSeqReadyUpdates, presetKind);
             break;
         case SeqEvent::EnterReady:
-            o.put("F5 enter: the suite was ready after %u updates (mode %u, +0x3E1 clear); pressing ToggleFreeCam ONCE and waiting up to %u updates for mode 3",
-                  d.readyAfter, mode, kSeqTabWaitUpdates);
+            o.put("F5 enter: the suite was ready after %u updates (mode %u, +0x3E1 clear); pressing ToggleFreeCam, and again every %u updates while the suite "
+                  "still shows a preset with +0x3E1 clear (a press during its opening is dropped), for up to %u updates, until mode 3",
+                  d.readyAfter, mode, kSeqRepressUpdates, kSeqTabWaitUpdates);
             break;
         case SeqEvent::EnterQueued:
             o.put("F5 enter: the game queued the entry itself (+0x3E1 = 1, its own retry): not pressing again, waiting for mode 3");
             break;
         case SeqEvent::EnterAttached:
             if (d.toMode3)
-                o.put("F5 enter: the free camera is up (mode %u, %s): ready after %u updates, mode 3 after %u more; the pose is placed on the next update",
-                      mode, modeText(mode), d.readyAfter, d.toMode3);
+                o.put("F5 enter: the free camera is up (mode %u, %s) result=%s presses=%u: ready after %u updates, mode 3 %u updates after the first press "
+                      "(%u from the suite opening); the pose is placed on the next update",
+                      mode, modeText(mode), d.queued ? "pending then accepted" : "accepted", d.presses, d.readyAfter, d.toMode3, d.readyAfter + d.toMode3);
             else
                 o.put("F5 enter: the free camera is up (mode %u, %s); the pose is placed on the next update", mode, modeText(mode));
             break;
@@ -1035,9 +1069,9 @@ inline void putSeqEvent(Line& o, SeqEvent e, uint32_t mode, uint32_t presetKind,
             putUnmet(o, d.unmet);
             break;
         case SeqEvent::EnterTimeoutFree:
-            o.put("F5 enter aborted: the free camera did not come up within %u updates of the ToggleFreeCam press (about 10 s; mode %u, preset kind "
-                  "+0x2E8 = %u; kind 1 makes ToggleFreeCam toggle presets 1 and 2 instead); still unmet: ",
-                  kSeqTabWaitUpdates, mode, presetKind);
+            o.put("F5 enter aborted: the free camera did not come up within %u updates of the first ToggleFreeCam press (about 10 s) result=timeout presses=%u%s "
+                  "(mode %u, preset kind +0x2E8 = %u; kind 1 makes ToggleFreeCam toggle presets 1 and 2 instead); still unmet: ",
+                  kSeqTabWaitUpdates, d.presses, d.queued ? ", the game had queued the entry itself" : "", mode, presetKind);
             putUnmet(o, d.unmet);
             break;
         case SeqEvent::SharedRecordFound:
@@ -1152,7 +1186,9 @@ inline void formatEvent(char* out, size_t cap, const Event& e, uint32_t frame) {
             } else {
                 d.readyAfter = e.before;
                 d.toMode3 = static_cast<uint32_t>(e.updates);
-                d.unmet = e.flags;
+                d.unmet = e.flags & 0xF;
+                d.queued = (e.flags & kSeqFlagQueued) != 0;
+                d.presses = e.flags >> 8;
             }
             o.put("%s ", prefix());
             putSeqEvent(o, se, e.after, e.count, d);

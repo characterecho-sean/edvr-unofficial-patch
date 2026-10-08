@@ -379,12 +379,15 @@ void testSequencerEnter() {
     check(s.press == CtlPress::None, "...the 4th ready update: still no press");
     s = r.step(V(1), F5Req::None, false);
     check(s.press == CtlPress::Free && hasEv(s, SeqEvent::EnterReady) && s.readyAfter == 5, "...the 5th: ToggleFreeCam, once, 'ready after 5 updates'");
-    s = run(r, V(1), 30, &at);
-    check(at == 0, "...and never again while the wait for mode 3 runs (ready holds, nothing is re-pressed)");
+    s = run(r, V(1), 9, &at);
+    check(at == 0, "...nothing in the 9 updates after it (the suite may be about to take it)");
+    s = r.step(V(1), F5Req::None, false);
+    check(s.press == CtlPress::Free && s.nev == 0, "...the 10th update after it, the suite still on a preset with +0x3E1 clear: ToggleFreeCam AGAIN (a repeat is not logged on its own)");
+    s = run(r, V(1), 20, &at);
     s = r.step(V(3), F5Req::None, false);
-    check(s.press == CtlPress::None && s.sessionActive && hasEv(s, SeqEvent::EnterAttached) && s.readyAfter == 5 && s.toMode3 == 31 &&
+    check(s.press == CtlPress::None && s.sessionActive && hasEv(s, SeqEvent::EnterAttached) && s.readyAfter == 5 && s.toMode3 == 31 && s.presses == 4 && !s.queued &&
               r.stage() == ecm::F5Sequencer::Stage::Active,
-          "...mode 3 after 31 updates: the free camera is up, the line carries 'ready after 5, mode 3 after 31'");
+          "...mode 3 after 31 updates and 4 presses (at 0, 10, 20, 30): the free camera is up, the line carries 'ready after 5, mode 3 after 31, 4 presses, accepted'");
     s = r.step(V(4), F5Req::None, false);
     check(s.press == CtlPress::None && s.sessionActive && s.nev == 0, "...mode 4 (the lock took): Active, nothing to do");
     // From a preset (mode 1 or 2): the same readiness wait, no Photo press.
@@ -417,6 +420,109 @@ void testSequencerEnter() {
         p.step(V(3), F5Req::Enter, false);
         s = p.step(V(3), F5Req::Enter, false);
         check(s.press == CtlPress::None && hasEv(s, SeqEvent::EnterIgnored) && s.sessionActive, "a second ENTER while the session is on is ignored");
+    }
+}
+
+
+// F3: a single press is dropped during the suite's opening transition. ToggleFreeCam is pressed again every kSeqRepressUpdates updates.
+void testRepress() {
+    std::printf("F5 sequencer: re-pressing ToggleFreeCam (dropped press, accepted on press N, pending after press N, first press, timeout, never outside mode 1/2)\n");
+    ecm::SeqStep s;
+    // Helper: open the session on a preset and step to the first press; returns the sequencer ready to count updates since it.
+    auto ready = [&](ecm::F5Sequencer& q) {
+        q.step(V(1), F5Req::Enter, false);
+        run(q, V(1), 3);
+        s = q.step(V(1), F5Req::None, false);
+        return s.press == CtlPress::Free;
+    };
+    // DROP THEN ACCEPT: presses 1 and 2 are dropped (the suite still shows mode 1), press 3 is taken: mode 3 on the next update.
+    {
+        ecm::F5Sequencer q;
+        check(ready(q), "(the first press, at the 5th ready update)");
+        int updates = 0, pressesSeen = 1;
+        std::vector<int> at = {0};
+        while (pressesSeen < 3 && updates < 100) {
+            ++updates;
+            s = q.step(V(1), F5Req::None, false);
+            if (s.press == CtlPress::Free) { ++pressesSeen; at.push_back(updates); }
+        }
+        check(pressesSeen == 3 && at.size() == 3 && at[1] == 10 && at[2] == 20, "DROP THEN ACCEPT: presses go out 10 updates apart (updates 0, 10, 20 after the first)");
+        s = q.step(V(3), F5Req::None, false);
+        check(s.press == CtlPress::None && hasEv(s, SeqEvent::EnterAttached) && s.presses == 3 && !s.queued && s.toMode3 == 21 && s.readyAfter == 5 && s.sessionActive,
+              "...press 3 is taken: mode 3 on the next update -> attached, presses=3, accepted, 21 updates after the first press (26 from the suite opening)");
+        s = q.step(V(3), F5Req::None, false);
+        check(s.press == CtlPress::None && s.nev == 0, "...and nothing is pressed once the free camera is up");
+    }
+    // ACCEPT ON THE VERY FIRST PRESS.
+    {
+        ecm::F5Sequencer q;
+        ready(q);
+        s = q.step(V(3), F5Req::None, false);
+        check(hasEv(s, SeqEvent::EnterAttached) && s.presses == 1 && s.toMode3 == 1 && !s.queued, "ACCEPT ON THE FIRST PRESS: attached on the very next update, presses=1, no repeat");
+    }
+    // PENDING AFTER PRESS N: the second press makes the game queue the entry; no third press, however long it takes.
+    {
+        ecm::F5Sequencer q;
+        ready(q);
+        run(q, V(1), 9);
+        s = q.step(V(1), F5Req::None, false);
+        check(s.press == CtlPress::Free, "(press 2 at 10)");
+        s = q.step(V(1, 1, 0), F5Req::None, false);
+        check(s.press == CtlPress::None && hasEv(s, SeqEvent::EnterQueued), "PENDING AFTER PRESS 2: +0x3E1 = 1 -> 'the game queued the entry itself', not pressed");
+        bool again = false;
+        for (int i = 0; i < 300; ++i) {
+            s = q.step(V(1, i % 2, 0), F5Req::None, false);   // +0x3E1 even flickers back to 0: the pressing stays stopped
+            again = again || s.press != CtlPress::None;
+        }
+        check(!again && s.sessionActive, "...300 updates later (including updates where +0x3E1 reads 0 again) nothing is re-pressed, the session is alive");
+        s = q.step(V(3), F5Req::None, false);
+        check(hasEv(s, SeqEvent::EnterAttached) && s.presses == 2 && s.queued, "...mode 3: attached, presses=2, pending then accepted");
+    }
+    // PENDING AT THE DUE UPDATE: the press that would be due is not made while +0x3E1 is 1.
+    {
+        ecm::F5Sequencer q;
+        ready(q);
+        run(q, V(1), 9);
+        s = q.step(V(1, 1, 0), F5Req::None, false);
+        check(s.press == CtlPress::None && hasEv(s, SeqEvent::EnterQueued), "PRESSING WHILE PENDING: at the update where press 2 is due, +0x3E1 = 1 -> no press");
+    }
+    // TIMEOUT: every press dropped; 90 presses in about 10 s and then the abort.
+    {
+        ecm::F5Sequencer q;
+        ready(q);
+        int n = 1;
+        uint32_t when = 0;
+        for (uint32_t i = 1; i <= 1000 && when == 0; ++i) {
+            s = q.step(V(1), F5Req::None, false);
+            if (s.press == CtlPress::Free) ++n;
+            if (hasEv(s, SeqEvent::EnterTimeoutFree)) when = i;
+        }
+        check(when == ecm::kSeqTabWaitUpdates && n == 90 && s.presses == 90 && !s.sessionActive, "TIMEOUT: 90 presses, then aborted at the 900th update; the due update at 900 presses nothing");
+    }
+    // NEVER OUTSIDE MODE 1/2, and either of 1 and 2 will do.
+    for (int m : {0, 3, 4, 5, 6, 7, 255}) {
+        ecm::F5Sequencer q;
+        ready(q);
+        run(q, V(1), 9);
+        s = q.step(V(m), F5Req::None, false);
+        char what[160];
+        std::snprintf(what, sizeof(what), "NEVER OUTSIDE MODE 1/2: at the due update with mode %d, ToggleFreeCam is not pressed", m);
+        check(s.press == CtlPress::None, what);
+    }
+    {
+        ecm::F5Sequencer q;
+        ready(q);
+        run(q, V(1), 9);
+        s = q.step(V(2), F5Req::None, false);
+        check(s.press == CtlPress::Free, "...mode 2 at the due update is a preset too: pressed");
+    }
+    // The due update that the player's own TAB beat: mode 3 at the due update attaches and presses nothing.
+    {
+        ecm::F5Sequencer q;
+        ready(q);
+        run(q, V(1), 9);
+        s = q.step(V(3), F5Req::None, false);
+        check(s.press == CtlPress::None && hasEv(s, SeqEvent::EnterAttached) && s.presses == 1, "...and mode 3 at the due update attaches, presses=1, nothing pressed");
     }
 }
 
@@ -474,8 +580,8 @@ void testTabWait() {
         }
         check(!again && !queuedAgain && s.sessionActive, "...540 updates later (about 6 s) still not re-pressed, still said once, the session still alive");
         s = q.step(V(3), F5Req::None, false);
-        check(s.sessionActive && hasEv(s, SeqEvent::EnterAttached) && s.readyAfter == 5 && s.toMode3 == 542,
-              "LATE COMPLETION: mode 3 arrives 542 updates after the press and the session places it: 'ready after 5, mode 3 after 542'");
+        check(s.sessionActive && hasEv(s, SeqEvent::EnterAttached) && s.readyAfter == 5 && s.toMode3 == 542 && s.presses == 1 && s.queued,
+              "LATE COMPLETION: mode 3 arrives 542 updates after the press and the session places it: 'ready after 5, mode 3 after 542', one press, pending then accepted");
     }
     // TIMEOUT after the press: 900 updates, the line names what was still unmet.
     {
@@ -488,8 +594,8 @@ void testTabWait() {
             s = q.step(V(1, 0, 0), F5Req::None, false);
             if (hasEv(s, SeqEvent::EnterTimeoutFree)) { aborted = true; when = i; }
         }
-        check(aborted && when == ecm::kSeqTabWaitUpdates && !s.sessionActive && (s.unmet & ecm::kUnmetMode) && !(s.unmet & ecm::kUnmetPending),
-              "TIMEOUT after the press: aborts at the 900th update (about 10 s), the session over, unmet = the mode never reached 3");
+        check(aborted && when == ecm::kSeqTabWaitUpdates && !s.sessionActive && (s.unmet & ecm::kUnmetMode) && !(s.unmet & ecm::kUnmetPending) && s.presses == 90 && !s.queued,
+              "TIMEOUT after the press: aborts at the 900th update (about 10 s), the session over, unmet = the mode never reached 3, 90 presses (every 10 updates)");
         ecm::F5Sequencer w;
         w.step(V(1), F5Req::Enter, false);
         run(w, V(1), 4);
@@ -497,7 +603,8 @@ void testTabWait() {
             s = w.step(V(1, 1, 0), F5Req::None, false);
             if (hasEv(s, SeqEvent::EnterTimeoutFree)) break;
         }
-        check((s.unmet & ecm::kUnmetMode) && (s.unmet & ecm::kUnmetPending), "...with +0x3E1 still 1 the line says the game's own retry was still running");
+        check((s.unmet & ecm::kUnmetMode) && (s.unmet & ecm::kUnmetPending) && s.presses == 1 && s.queued,
+              "...with +0x3E1 still 1 the line says the game's own retry was still running, after ONE press (pending stops the pressing)");
     }
     // TIMEOUT of the readiness wait: never ready.
     {
@@ -1216,6 +1323,8 @@ struct Game {
     bool refuseOpen = false;                      // the game will not open the camera
     bool noHideHandle = false;                    // the camera UI's +0x1D8 is NULL
     bool blockedByOther = false;                  // the object at controller+0x80 says no: ToggleFreeCam is simply lost
+    int dropPresses = 0;                          // the suite is still opening: this many ToggleFreeCam presses are dropped (F3)
+    int pressesTaken = 0;                         // ToggleFreeCam presses the game saw in modes 1/2, dropped or not
     int queueDelay = 0;                           // > 0: ToggleFreeCam is QUEUED (+0x3E1 = 1) and the entry completes this many updates later
     bool queued = false;
     int queueLeft = 0;
@@ -1252,6 +1361,8 @@ struct Game {
         refuseOpen = false;
         noHideHandle = false;
         blockedByOther = false;
+        dropPresses = 0;
+        pressesTaken = 0;
         queueDelay = 0;
         queued = false;
         queueLeft = 0;
@@ -1300,7 +1411,10 @@ struct Game {
         const uint8_t m2 = mode();
         if ((m2 == 1 || m2 == 2) && seenFree() != 0) {
             const int32_t kind = rd<int32_t>(ctl, 0x2E8);
-            if (blockedByOther || sharedFlag()) {
+            ++pressesTaken;
+            if (dropPresses > 0) {
+                --dropPresses;   // the suite's opening transition ignores the press; nothing in +0x3E1 or the shared record shows it (F3)
+            } else if (blockedByOther || sharedFlag()) {
                 // SetMode(3) returns without latching: the press is simply lost (F2).
             } else if (kind == 0 && queueDelay > 0) {
                 if (!queued) {
@@ -2174,10 +2288,10 @@ void testTabWaitGlue(const Pages& p) {
         presses += g.seenFree() != 0 ? 1 : 0;
         ++frames;
     }
-    check(frames == 5 && presses == 1 && g.mode() == 3, "...cleared: ToggleFreeCam is pressed on the 5th ready update, ONCE, and the game takes it (mode 3)");
+    check(frames == 5 && presses == 1 && g.mode() == 3, "...cleared: ToggleFreeCam is pressed on the 5th ready update, and the game takes it (mode 3)");
     rig.boundary();
     check(rig.cap.count("the controller's shared record was reached through the interface cached at +0x108") == 1 && rig.cap.count("the suite was ready after") == 1 &&
-              rig.cap.count("ToggleFreeCam ONCE") == 1,
+              rig.cap.count("pressing ToggleFreeCam, and again every 10 updates") == 1,
           "LOG: the shared record is found and named once, the wait is logged ('the suite was ready after ...')");
     t::reset();
 
@@ -2199,12 +2313,12 @@ void testTabWaitGlue(const Pages& p) {
             check(t::sessionActive() && g.ctl[0x3E1] == 1 && presses == 1, "LATE COMPLETION: 300 updates after the press the game's own retry is running (+0x3E1 = 1), the session is alive, nothing re-pressed");
         }
     }
-    check(presses == 1 && g.mode() == 3 && frames > 500 && t::sessionActive(), "...mode 3 arrives about 6 s late, ToggleFreeCam was pressed exactly ONCE, and the session is still on");
+    check(presses == 1 && g.mode() == 3 && frames > 500 && t::sessionActive(), "...mode 3 arrives about 6 s late, ToggleFreeCam was pressed exactly once (the game queued it), and the session is still on");
     g.freeFrame(); g.ctlFrame(); g.freeFrame();
     rig.boundary();
     check(t::placedActivity() == reinterpret_cast<uint64_t>(g.free) && g.mode() == 4, "...the late entry is placed and locked");
-    check(rig.cap.count("the game queued the entry itself (+0x3E1 = 1") == 1 && rig.cap.count("ready after 5 updates, mode 3 after") == 1,
-          "LOG: 'the game queued the entry itself' once, and 'ready after 5 updates, mode 3 after N more'");
+    check(rig.cap.count("the game queued the entry itself (+0x3E1 = 1") == 1 && rig.cap.count("result=pending then accepted presses=1: ready after 5 updates, mode 3 ") == 1,
+          "LOG: 'the game queued the entry itself' once, and 'result=pending then accepted presses=1: ready after 5 updates, mode 3 N updates after the first press'");
     t::reset();
 
     // TIMEOUT after the press: the press is lost (the object the controller cannot show us said no); aborts at 900 updates and says what was unmet.
@@ -2218,9 +2332,54 @@ void testTabWaitGlue(const Pages& p) {
     check(t::sessionActive(), "TIMEOUT: 899 updates after the press, still waiting");
     g.ctlFrames(2);
     rig.boundary();
-    check(!t::sessionActive() && rig.cap.count("F5 enter aborted: the free camera did not come up within 900 updates of the ToggleFreeCam press") == 1 &&
-              rig.cap.count("still unmet: mode is not what is wanted") == 1,
-          "...900: aborts with 'the free camera did not come up ... still unmet: mode is not what is wanted', the session over");
+    check(!t::sessionActive() && rig.cap.count("F5 enter aborted: the free camera did not come up within 900 updates of the first ToggleFreeCam press") == 1 &&
+              rig.cap.count("result=timeout presses=90") == 1 && rig.cap.count("still unmet: mode is not what is wanted") == 1 && g.pressesTaken == 90,
+          "...900: aborts with 'the free camera did not come up ... result=timeout presses=90 ... still unmet: mode is not what is wanted', the session over; the game saw 90 presses");
+    t::reset();
+
+    // F3: THE SUITE DROPS THE FIRST TWO PRESSES. ToggleFreeCam is pressed again every 10 updates; press 3 is taken; one summary line at the end.
+    g.init();
+    g.dropPresses = 2;
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+    rig.cap.clear();
+    rig.boundary(true);
+    g.ctlFrame();   // PhotoCameraToggle: the suite opens
+    std::vector<int> pressFrames;
+    frames = 0;
+    while (g.mode() == 1 && frames < 200) {
+        g.ctlFrame();
+        ++frames;
+        if (g.seenFree() != 0) pressFrames.push_back(frames);
+    }
+    check(g.mode() == 3 && g.pressesTaken == 3 && pressFrames.size() == 3 && pressFrames[0] == 5 && pressFrames[1] == 15 && pressFrames[2] == 25 && frames == 25 && t::sessionActive(),
+          "DROPPED, THEN ACCEPTED: the suite drops presses 1 and 2; ToggleFreeCam goes out at updates 5, 15 and 25 (10 apart) and press 3 gives mode 3");
+    g.freeFrame(); g.ctlFrame(); g.freeFrame();
+    rig.boundary();
+    check(t::placedActivity() == reinterpret_cast<uint64_t>(g.free) && g.mode() == 4, "...the free camera is placed and locked");
+    check(rig.cap.count("result=accepted presses=3") == 1 && rig.cap.count("the suite was ready after 5 updates") == 1 && rig.cap.count("the game queued the entry itself") == 0 &&
+              rig.cap.count("F5 enter aborted") == 0,
+          "LOG: ONE summary line at the end ('result=accepted presses=3'), the ready line once, no line per repeat");
+    t::reset();
+
+    // ACCEPTED ON THE VERY FIRST PRESS (no repeat, presses=1) is the cell above; PENDING AFTER PRESS 2: the second press makes the game queue the entry.
+    g.init();
+    g.dropPresses = 1;
+    g.queueDelay = 300;
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+    rig.cap.clear();
+    rig.boundary(true);
+    g.ctlFrame();
+    frames = 0;
+    while (g.mode() != 3 && frames < 700) {
+        g.ctlFrame();
+        ++frames;
+    }
+    check(g.mode() == 3 && g.pressesTaken == 2 && frames > 300 && t::sessionActive(), "PENDING AFTER PRESS 2: press 1 dropped, press 2 queued by the game (+0x3E1 = 1), nothing pressed again, mode 3 about 300 updates later");
+    g.ctlFrame();   // the controller update that sees mode 3
+    rig.boundary();
+    check(rig.cap.count("result=pending then accepted presses=2") == 1 && rig.cap.count("the game queued the entry itself (+0x3E1 = 1") == 1, "LOG: 'result=pending then accepted presses=2', 'queued' once");
     t::reset();
 
     // TIMEOUT of the readiness wait: +0x1D never clears.
@@ -2460,6 +2619,7 @@ int main(int argc, char** argv) {
     testSequencerTimeouts();
     testSequencerExit();
     testTabWait();
+    testRepress();
     testFadeGuard();
     testF5Decision();
     testUiHider();

@@ -49,11 +49,11 @@
   `+0x592200`; the culling view is built upstream of it
   (design-occlusion-culling-2026-09-22.md), and 6s.9 saw holes from that.
 - **Flown** on Frontier: F0 172543, F1 194702, F2 211908; findings below.
-- **Next:** flight F3 on Frontier: `avatar fade: wrote 0` on entering and
-  `put ... back to -1` after the exit (the weapon opaque again), the probe's
-  `F heartbeat:` VERDICT, F5 from first person reaching mode 3 (`the suite
-  was ready after N updates`), and `H joints:` standing, crouched, weapon
-  drawn and holstered (`H heartbeat:` has the call microseconds).
+- **Next:** flight F4 on Frontier. F3 (94c467d3) never placed: the one
+  ToggleFreeCam press was dropped by the suite; F5 now re-presses every 10
+  updates (`result=... presses=N`). Then read what F3 could not: `avatar
+  fade: wrote 0` and `put ... back to -1`, the `F heartbeat:` VERDICT, and
+  `H joints:` standing, crouched, weapon drawn and holstered.
 - **Temporary keys:** `[advanced] explorer_cam_probe` (the instruments;
   removed at arc close). `[fix] explorer_cam_eye_up/_forward/_right`: they
   stand in for the head bone; Sean tunes the bone-to-eye offset once, it
@@ -705,13 +705,18 @@ released for a detach AND the camera is closed (mode 0) or detached (5/6), never
 restored at DLL unload (FreeLibrary path) and when `fix.explorer_cam` goes off.
 
 TAB: ToggleFreeCam waits for mode 1/2, +0x3E1 = 0 and the shared record's +0x1D = 0, five updates running (`the suite was ready after N
-updates`), presses once, then waits up to 900 updates for mode 3 (`the game queued the entry itself` if +0x3E1 goes to 1); an abort names
+updates`), presses (and re-presses, see F3 below), then waits up to 900 updates for mode 3 (`the game queued the entry itself` if +0x3E1 goes to 1); an abort names
 the unmet condition. The shared record is not embedded: the controller caches an interface at +0x108 and gets the record by a virtual call
 (slot +0x20). We decode that accessor (`lea rax,[rcx+d]; ret`) and read +0x1D at interface + d; any other shape logs its bytes once and
 leaves +0x1D unchecked.
 
 Probe `F` (advanced.explorer_cam_probe only): hook 0x3DD6040 (steals 5), original first, then comp+0x378 -> block +0x90 enabled, +0x120
 amount, comp+0x380 eased; `F heartbeat:` every 5 s, and with the global at 0 enabled = 1 must read 0 (`VERDICT`). Epic's exe bytes match.
+
+F3 (94c467d3): a single press is dropped during the suite's opening transition; F5 now re-presses every 10 updates. Four runs: the readiness
+passed after 5 updates (mode 1, +0x3E1 clear, +0x1D = 0), the one press was ignored for up to 7 s, and neither +0x1D nor +0x3E1 showed why
+(F2's working press came about 223 updates in). Now: press, and again each 10 updates while the pre-call mode is 1/2 and +0x3E1 is clear;
+stop at mode 3/4, at +0x3E1 = 1 (then only wait), or 900 updates from the first press. One end line: `result=accepted|pending then accepted|timeout presses=N`.
 
 ## 2026-10-08 Phase 1d: instrument H, the head joint
 
