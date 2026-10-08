@@ -43,7 +43,7 @@
   assumptions, fetch cost, cockpit depth pre-pass/bias, motion-cost
   interpretations, wrong joined station motion, close-range
   reconstruction-floor-only diagnosis; F10: DE54 as the NPC's, the pixel probe
-  naming it, a per-part rotation model.
+  naming it, per-part rotation, rigid-only keying under 1 px, own body gain.
 - **Validation / delivery:** absolute build.bat --jobs 4 passed all gates:
   production DLLs, 82 pooled jobs + 4 quiet, 262-key contract and installer
   resources. Focused/full-build engine rig: 1686 checks; prior real corpus:
@@ -56,9 +56,9 @@
   motion/coverage; inspect remaining WORLD and building pixels separately.
   Visual verification is open. Native primary records stay unchanged; no bones,
   estimation or generic pool matching. NPC F1 (Sean 2026-10-08: NPC families
-  only, if the dumps support it): the F10 entry plans four keyed pairs and
-  kMaxFamilies 10 -> 16, unbuilt; rigid parts gain motion, skinned ones lose
-  only the stale-slot refusal. Skinned limbs wait for a previous palette (F2).
+  only, if the dumps support it): the F10 entry plans four keyed pairs, unbuilt;
+  whole-mask gain 7-32% (D3 1.36 -> 0.93-1.26 px, share INFERRED), stale class
+  (38%) gone. F2 (previous palette, unproven) needs F1 first.
 
 ## Premise
 
@@ -3887,9 +3887,13 @@ pair below was in it by hash).
   (D1); the log has a 196.9 ms frame at the arming and 34 head updates a second
   through the window. Only pair k=1 is a live-sized step. Pairs k>=2 are 3-12 x
   as far, which inflates every px/frame figure from a crop run (b5.py, 120917:
-  its 0.71 px was not checked against record steps).
-- Residual at the live-sized pair, median of blocks, px/frame, D3 (336 blocks,
-  5.1 m) / D1 (42, 10.9 m), against the motion measured beyond the camera term:
+  its 0.71 px/frame is INFERRED inflated by k>=2 hitch pairs; never checked
+  against record steps).
+- Residual at the live-sized pair, median over only the blocks that have a
+  nearest rigid record (D3 336 of 379 blocks, 5.1 m; D1 42 of 74, 10.9 m), px/
+  frame, against the motion measured beyond the camera term. NOT a whole-mask
+  number: every such block is moved by its nearest rigid record, as if the
+  whole NPC were rigid:
   camera only (today) 1.40 / 0.93; one root translation (median record) 0.77 /
   0.48; each pixel moved by its own record's pose pair 0.61 / 0.49; by its own
   record's translation only 0.59 / 0.49; oracle uniform shift 0.58 / 0.42;
@@ -3897,10 +3901,23 @@ pair below was in it by hash).
   pose): torso 1.65 -> 0.54, pelvis 1.41 -> 0.52, head and shoulders 0.90 ->
   0.93 (skinned neck and arms: no gain). Pairs k=4-9 agree (own record 0.59-0.89,
   one root 0.51-0.80).
-- So F1 leaves about 0.5-0.8 px/frame, near this method's floor, inside Sean's
-  rule. A slot per draw already is per-part: the consumer reprojects each pixel
-  with its own record's pose pair, which beat one root pose at 5 m (0.59 vs
-  0.77) and tied it at 11 m.
+- Whole-mask medians under F1 (f36.py, k=1; rigid pixels take their record's
+  pose pair, skinned pixels keep the camera term; today D3 1.36, D1 0.98). The
+  rigid pixel share is INFERRED: no dump attributes a pixel to a draw (vertex
+  capture declined), so 17% (colour-pass index count), 50%, and the best case
+  (everything above the pelvis rigid, 66% of the D3 mask, 52% of D1's). D3:
+  1.26 / 1.02 / 0.93; D1: 0.90 / 0.75 / 0.80. F1 gains 7-32%, not 56%, and does
+  not reach ~1 px at close range unless the share is high. A slot per draw is
+  per-part already: each pixel is reprojected with its own record's pose pair.
+- The stale-class change does not depend on the share, MEASURED: 38.7% (D3) /
+  37.5% (D1) of the mask leave engineKind 4 whichever pair draws them.
+- ruled out: keying the NPC's rigid families alone brings it under ~1 px at
+  close range, because skinned meshes (limbs, head, body) have no previous pose
+  and hold 34-83% of the mask; D3 whole-mask 1.0-1.26 px after.
+- ruled out: the commander's own body improves under F1, because it is skinned
+  (kind 3, camera term): within 2.5 m of the camera, 46 rigid certified records
+  (props; the big 8B58 draws there look like the tent, INFERRED), all still,
+  and 8-14 skinned unmarked ones, all still, in every dump.
 - ruled out: a separate per-part rotation model on the rigid parts, because
   they fit one rigid body to 0.2-0.8 mm and rotation scored 0.61 against 0.59
   for each record's translation alone.
@@ -3948,9 +3965,22 @@ word != 0).
    Expected: NPC engineKind 4 -> 0, kind 1 on the rigid share, kind 3 on the
    skinned share; stale-refused with the NPC in view back to <= 1.4k px a
    frame. Watch the commander's own gear (D2's 418,854 px) and props, which
-   share these pairs and change class (stale or unmarked to joined or kind 3):
-   either the 2.08 px/frame own-body mis-registration improves or it regresses.
-   Cost: about 200 more substituted draws a frame on about 3k today.
-5. Not in F1: the skinned limbs and head (0.9 px a frame by band). F2 needs the
-   previous bone palette; the bones0/1 copies of this flight read all zeros, so
-   the other ping-pong buffer holding it is unproven (the base list is stable).
+   share these pairs: standing still they keep the camera term (joined-still or
+   kind 3), so INFERRED no change except no stale refusal. Worse than today
+   only where a record is masked (kind 2: no history; none of the 167 near
+   records was) or an unkeyed draw (A4A19FAF/BE3EA29C, blends) overdraws a
+   keyed one and leaves a new stale slot. The 0x10 first-person rule
+   (flat_mono_shader_source.h:203, fixed_shader_source.h:692) runs first, so
+   gear in the weapon map or within reach is unchanged.
+   Cost, INFERRED: about 200 more substituted draws a frame (196/142/109 in
+   D1/D2/D3) on about 3.3k keyed today: at most 0.05-0.08 ms render thread
+   (F10 log, `engine motion CPU, render thread`, 13:45:02-13:46:32: draw side
+   p50 0.02-0.06 ms over 47-259 calls, 0.2-0.4 us a slow-half visit; the inline
+   half is unclocked, openxr-performance-review-2026-09-14.md:1174-1175) against
+   about 0.65 ms for all engine motion. GPU cost of the extra MRT6 export is
+   not measured.
+5. Not in F1: the skinned limbs, head and body (0.9 px a frame by band). F2
+   facts: keying D99A only turns its stale refusal into kind 3; F1 is a
+   prerequisite for any F2, since a skinned draw must be keyed to carry its
+   record at all; F2 needs a previous bone palette, unproven because the
+   bones0/1 copies of this flight read all zeros (the base list is stable).
