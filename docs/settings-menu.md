@@ -7,18 +7,18 @@ the journal below; the current timing and overlay qualification is linked separa
 and the ruled-out list: "Status detail", straight after this block.*
 
 - **Current code state (2026-10-08; dated notes in Status detail):**
-  - Hotkeys page (2026-10-08): `hotkey.menu`, `.explorer_cam`, `.toggle_exposure`,
-    `.dump_camera` (+ `.dump_draws`, `.dump_eyes` in developer mode): Enter, then
-    press a key, pad button or HOTAS button. BUILT, NOT FLOWN; section "Hotkeys
-    page (2026-10-08)" below. (The 2026-09-29 retirements: Status detail.)
+  - Explorer Cam page (2026-10-08): Eye height / forward / sideways and
+    Head-follow smoothing, live, for everyone. BUILT, NOT FLOWN.
+  - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, Explorer
+    Cam, exposure and history keys. FLOWN OK ("worked great"). Sections
+    "Hotkeys page" and "Explorer Cam page" below.
   - Performance page: one `UI quality` row (`fix.ui_quality`, off / 100% /
     125%; default 100) drives the cockpit panels' size and the UI layer;
     BUILT, NOT FLOWN as of its 2026-09-23 entry. Gone: the `HUD quality` row,
     `advanced.ui_replay` (retired 48ad7689), the Foveation centre row
     (`experimental.foveation_centre`) and the three `Trim view` rows (ini-only
     since 2026-09-29). Its `Settlement detail` row: removed 2026-10-08 (claude/remove-settlement-detail).
-  - Monitor page drops the rows the compositor's frame timing filled
-    instead of showing "--" (frame_flag v34).
+  - Monitor page: no rows the compositor's frame timing filled (frame_flag v34).
   - Single-line overlay: fits its text, keeps its font size across OpenXR
     resolutions, shows application GPU/CPU timings. Full desktop gates
     passed; headset checks: [combined test guide](native-render-benchmark-2026-09-15.md).
@@ -193,6 +193,19 @@ GetDeviceState/GetDeviceData after they return (joy_watch.h), makes no device,
 and calls only GetCapabilities and GetDeviceInfo. The four diagnostic keys
 re-resolve live. A flight checks the `joystick watch:` log line, the Joy_N
 against the .binds, and no stall.
+### Explorer Cam page (2026-10-08)
+
+BUILT, NOT FLOWN. The `menu explorer_cam` rows of edvr.ini (generator page
+`explorer_cam`), for everyone: Eye height, Eye forward, Eye sideways
+(`fix.explorer_cam_eye_trim_up`, `_forward`, `_right`; -0.5..0.5 m, step 0.01,
+shown "+0.15 m") and Head-follow smoothing (`fix.explorer_cam_follow_smoothing_ms`;
+0..200 ms, step 10, "0 ms (exact)"). They are Sean's personal-preference
+settings, shipped at his tuning (0.15, -0.08, 0.0; 0), live, and they work
+while placed in Explorer Cam. R resets a row to the shipped value. The `ui:`
+line's `step`, `unit`, `signed` and `zero` tokens shape a number row; the
+absolute fallback eye keys stay `ui: hidden` (no row). The Explorer Cam KEY is
+on the Hotkeys page only.
+
 ## The ask
 
 *A design document, written before the code. It supersedes and extends
@@ -818,6 +831,17 @@ they were there (flown 2026-09-07).
 2. **Fixes.** Every other `[fix]` row tagged `menu`, under the ini's own
    headings ("When the eyes disagree", ...), scrolling. Restart rows are
    shown, badged, and editable: the badge is the point of showing them.
+   Pages in order: Performance, Fixes, Explorer Cam, Hotkeys, Monitor, Status
+   (and, in developer mode, Advanced, Experimental, Instruments). Two pages
+   were added on 2026-10-08, between Fixes and Monitor, without renumbering
+   this list:
+   - **Explorer Cam** (everyone): the rows tagged `menu explorer_cam` -- Eye
+     height, Eye forward, Eye sideways (`fix.explorer_cam_eye_trim_up`,
+     `_forward`, `_right`, metres, step 0.01, shown "+0.15 m") and Head-follow
+     smoothing (`fix.explorer_cam_follow_smoothing_ms`, 0..200 ms in steps of
+     10, "0 ms (exact)"). Live, also while placed in Explorer Cam. The key
+     stays on the Hotkeys page only.
+   - **Hotkeys**: the rows of "Hotkeys page (2026-10-08)" above.
 3. **Monitor.** fpsVR's readout, gathered as cheaply as it can be, and
    where each number comes from:
    - frame rate, frame time, the 1% low (the 99th-percentile frame time)

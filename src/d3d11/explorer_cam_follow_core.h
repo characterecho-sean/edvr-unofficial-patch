@@ -240,11 +240,17 @@ inline float rotationDiff(const float m[16], const float rest[9]) {
     return worst;
 }
 
-// The trims: commander-local metres added after the joint (right, up, forward). Temporary keys.
+// The trims: commander-local metres added after the joint (right, up, forward). PERMANENT user settings since 2026-10-08 (Sean flew them and kept them):
+// fix.explorer_cam_eye_trim_right, _up and _forward, personal preference for where the eye sits in the head, tuned live from the F8 menu's Explorer Cam page.
 struct Trim {
-    float right = 0.0f, up = 0.0f, forward = 0.0f;
+    float right = 0.0f, up = 0.0f, forward = 0.0f;   // the arithmetic's neutral element; the SHIPPED values are the defaults below
 };
-constexpr float kTrimLimit = 0.3f;
+// What the trims ship as: Sean's own tuning (2026-10-08). The shipped edvr.ini carries the same three numbers, the code falls back to them for an ini that
+// lacks the keys, and tools/config_test holds the three places to one value.
+constexpr float kTrimRightDefault = 0.0f, kTrimUpDefault = 0.15f, kTrimForwardDefault = -0.08f;
+// Held to +-0.5 m on every axis (it was +-0.3 while they were test keys): 0.15 up is half of the old range, and a taller or shorter commander, or a wider
+// helmet, can want more. Past half a metre the eye is outside the head whichever way it goes.
+constexpr float kTrimLimit = 0.5f;
 inline float clampTrim(float v) {
     if (!(v == v)) return 0.0f;
     return v < -kTrimLimit ? -kTrimLimit : (v > kTrimLimit ? kTrimLimit : v);
@@ -257,8 +263,10 @@ inline Eye eyeFromModelPoint(const float p[3], const Trim& t) {
     e.forward = p[2] + t.forward;
     return e;
 }
-// The follow smoothing (temporary key, milliseconds; 0 = exact follow, the default). An exponential approach with time constant `tau`; at 0 the target is
-// returned unchanged, bit for bit, and the state is forgotten.
+// The follow smoothing (fix.explorer_cam_follow_smoothing_ms, a permanent user setting since 2026-10-08; milliseconds; 0 = exact follow, the default).
+// An exponential approach with time constant `tau`; at 0 the target is returned unchanged, bit for bit, and the state is forgotten. The F8 menu offers
+// 0..200 in steps of 10; the file may say up to 1000.
+constexpr int kSmoothingMsDefault = 0;
 constexpr float kSmoothingMsMax = 1000.0f;
 inline float clampSmoothingMs(float ms) {
     if (!(ms == ms) || ms <= 0.0f) return 0.0f;

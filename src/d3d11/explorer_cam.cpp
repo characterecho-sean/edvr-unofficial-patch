@@ -118,7 +118,7 @@ std::atomic<uint32_t> g_resetCtlRequest{0};             // the controller hook's
 std::atomic<float> g_eyeUp{ecm::kEyeUpDefault}, g_eyeForward{ecm::kEyeForwardDefault}, g_eyeRight{ecm::kEyeRightDefault};
 
 // Phase 3: the head-joint eye source (docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 3: the camera follows the head joint"). The frame thread publishes
-// the temporary keys and arms the source; the free-camera hook (the camera-job thread) reads the latched local skeleton's head joint with +0x58 before each placing
+// the trims and the smoothing and arms the source; the free-camera hook (the camera-job thread) reads the latched local skeleton's head joint with +0x58 before each placing
 // update, and falls back to the fixed eye keys when it cannot.
 struct TimerStat {
     std::atomic<uint32_t> n{0}, minUs{0xFFFFFFFFu}, maxUs{0}, allMaxUs{0};
@@ -1704,7 +1704,9 @@ void updateGates() {
 struct FrameInput {
     bool on = true;
     float up = ecm::kEyeUpDefault, forward = ecm::kEyeForwardDefault, right = ecm::kEyeRightDefault;
-    float trimRight = 0.0f, trimUp = 0.0f, trimForward = 0.0f, smoothingMs = 0.0f;   // the temporary follow keys
+    // The follow keys. 0 here is "no trim, no smoothing": the neutral FrameInput the rig starts from. Production never sees these defaults:
+    // explorerCamFrameBoundary fills all four from Config, falling back to ecm::kTrim*Default and ecm::kSmoothingMsDefault.
+    float trimRight = 0.0f, trimUp = 0.0f, trimForward = 0.0f, smoothingMs = 0.0f;
     const char* hotkey = "";
     bool f5Pressed = false;
     bool gameplay = true;
@@ -2041,7 +2043,7 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
     g_eyeForward.store(eye.forward, std::memory_order_relaxed);
     g_eyeRight.store(eye.right, std::memory_order_relaxed);
     {
-        // The temporary follow keys: the trims added after the joint, and the comfort smoothing (0 = exact follow).
+        // The follow settings: the trims added after the joint, and the comfort smoothing (0 = exact follow). Live, and tuned from the F8 menu's Explorer Cam page.
         ecm::Trim trim;
         trim.right = ecm::clampTrim(in.trimRight);
         trim.up = ecm::clampTrim(in.trimUp);
@@ -2052,11 +2054,13 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         g_trimForward.store(trim.forward, std::memory_order_relaxed);
         g_followSmoothMs.store(smooth, std::memory_order_relaxed);
         const bool changed = trim.right != fs.lastTrim.right || trim.up != fs.lastTrim.up || trim.forward != fs.lastTrim.forward || smooth != fs.lastSmooth;
-        const bool nonDefault = trim.right != 0.0f || trim.up != 0.0f || trim.forward != 0.0f || smooth > 0.0f;
+        // Said when they differ from what ships, and from then on whenever they change (the shipped values are not news).
+        const bool nonDefault = trim.right != ecm::kTrimRightDefault || trim.up != ecm::kTrimUpDefault || trim.forward != ecm::kTrimForwardDefault ||
+                                smooth != static_cast<float>(ecm::kSmoothingMsDefault);
         if (on && changed && (nonDefault || fs.followCfgSaid)) {
             fs.followCfgSaid = true;
             say(sink, "%s trims right=%.3f up=%.3f forward=%.3f m (fix.explorer_cam_eye_trim_right, _up, _forward; live, +-%.1f, in the commander's axes, added after the head "
-                      "joint), follow smoothing %.0f ms (fix.explorer_cam_follow_smoothing_ms; live, 0 = exact follow); all temporary",
+                      "joint), follow smoothing %.0f ms (fix.explorer_cam_follow_smoothing_ms; live, 0 = exact follow); personal preference, set from the F8 menu's Explorer Cam page",
                 ecm::prefixFollow(), trim.right, trim.up, trim.forward, ecm::kTrimLimit, smooth);
         }
         fs.lastTrim = trim;
@@ -2440,10 +2444,10 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
     in.up = cfg.getFloat("fix.explorer_cam_eye_up", ecm::kEyeUpDefault);
     in.forward = cfg.getFloat("fix.explorer_cam_eye_forward", ecm::kEyeForwardDefault);
     in.right = cfg.getFloat("fix.explorer_cam_eye_right", ecm::kEyeRightDefault);
-    in.trimRight = cfg.getFloat("fix.explorer_cam_eye_trim_right", 0.0f);
-    in.trimUp = cfg.getFloat("fix.explorer_cam_eye_trim_up", 0.0f);
-    in.trimForward = cfg.getFloat("fix.explorer_cam_eye_trim_forward", 0.0f);
-    in.smoothingMs = cfg.getFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f);
+    in.trimRight = cfg.getFloat("fix.explorer_cam_eye_trim_right", ecm::kTrimRightDefault);
+    in.trimUp = cfg.getFloat("fix.explorer_cam_eye_trim_up", ecm::kTrimUpDefault);
+    in.trimForward = cfg.getFloat("fix.explorer_cam_eye_trim_forward", ecm::kTrimForwardDefault);
+    in.smoothingMs = static_cast<float>(cfg.getInt("fix.explorer_cam_follow_smoothing_ms", ecm::kSmoothingMsDefault));
     static std::string hotkeyName;
     {
         bool deferred = false;
@@ -2584,6 +2588,10 @@ void setSkeleton(int site, uint64_t iface, uint32_t index) {   // a latched pair
     g_skelLatches.fetch_add(1);
 }
 void setWitnessInterval(uint32_t ms) { g_witnessIntervalMs.store(ms); g_witnessNextMs.store(0); }
+float followTrimRight() { return g_trimRight.load(); }
+float followTrimUp() { return g_trimUp.load(); }
+float followTrimForward() { return g_trimForward.load(); }
+float followSmoothingMs() { return g_followSmoothMs.load(); }
 bool headHideOn() { return g_hideOn.load(); }
 bool headHideDown() { return g_hideDown.load(); }
 int partNamesState() { return g_partNames.load(); }

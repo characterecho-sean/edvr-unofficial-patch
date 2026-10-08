@@ -2609,6 +2609,30 @@ void testConfigPath(const Pages& p) {
     g.setMode(3);
     g.freeFrame();
     check(closeTo(g.seen(kSeenX), 0.0f) && closeTo(g.seen(kSeenY), 1.68f) && closeTo(g.seen(kSeenZ), 0.10f), "a placement with no keys set puts the eye at up 1.68, forward 0.10, right 0.0");
+    // The follow settings, read from Config under their real names, with the code's own defaults when nothing is set (the shipped edvr.ini holds the same
+    // numbers: tools/config_test), live, and held to their clamps. The frame thread publishes them; the hook thread reads what is published.
+    check(closeTo(t::followTrimUp(), 0.15f) && closeTo(t::followTrimForward(), -0.08f) && closeTo(t::followTrimRight(), 0.0f) && t::followSmoothingMs() == 0.0f,
+          "NOTHING SET: the trims are Sean's defaults (up 0.15, forward -0.08, right 0) and the smoothing is 0");
+    cfg.set("fix.explorer_cam_eye_trim_up", "0.22");
+    cfg.set("fix.explorer_cam_eye_trim_forward", "-0.01");
+    cfg.set("fix.explorer_cam_eye_trim_right", "0.04");
+    cfg.set("fix.explorer_cam_follow_smoothing_ms", "40");
+    explorerCamFrameBoundary(2);
+    check(closeTo(t::followTrimUp(), 0.22f) && closeTo(t::followTrimForward(), -0.01f) && closeTo(t::followTrimRight(), 0.04f) && t::followSmoothingMs() == 40.0f,
+          "fix.explorer_cam_eye_trim_up / _forward / _right and fix.explorer_cam_follow_smoothing_ms are read from the ini and applied on the next frame (the menu page's rows)");
+    cfg.set("fix.explorer_cam_eye_trim_up", "0.9");
+    cfg.set("fix.explorer_cam_eye_trim_forward", "-0.9");
+    cfg.set("fix.explorer_cam_follow_smoothing_ms", "5000");
+    explorerCamFrameBoundary(3);
+    check(closeTo(t::followTrimUp(), 0.5f) && closeTo(t::followTrimForward(), -0.5f) && t::followSmoothingMs() == 1000.0f,
+          "...held to +-0.5 m and to 1000 ms, whatever the file says");
+    cfg.set("fix.explorer_cam_follow_smoothing_ms", "-20");
+    explorerCamFrameBoundary(3);
+    check(t::followSmoothingMs() == 0.0f, "...a negative smoothing is 0");
+    for (const char* key : {"fix.explorer_cam_eye_trim_up", "fix.explorer_cam_eye_trim_forward", "fix.explorer_cam_eye_trim_right", "fix.explorer_cam_follow_smoothing_ms"}) cfg.set(key, "");
+    explorerCamFrameBoundary(3);
+    check(closeTo(t::followTrimUp(), 0.15f) && closeTo(t::followTrimForward(), -0.08f) && t::followSmoothingMs() == 0.0f,
+          "...and keys removed again fall back to the defaults, not to zero");
     cfg.set("fix.explorer_cam_eye_up", "1.55");
     cfg.set("fix.explorer_cam_eye_forward", "0.25");
     cfg.set("fix.explorer_cam_eye_right", "-0.04");
@@ -3952,8 +3976,14 @@ void testFollowPure() {
     ecm::headEyeModel(m, f7.local, e);
     const ecm::Eye trimmed = ecm::eyeFromModelPoint(e, trim);
     check(closeTo(trimmed.right, 0.05f, 2e-5f) && closeTo(trimmed.up, 1.678f, 2e-5f) && closeTo(trimmed.forward, 0.172f, 2e-5f), "THE TRIMS are added after the joint, in the commander's right, up, forward");
-    check(ecm::clampTrim(0.5f) == 0.3f && ecm::clampTrim(-0.5f) == -0.3f && ecm::clampTrim(0.1f) == 0.1f && ecm::clampTrim(std::nanf("")) == 0.0f && ecm::clampTrim(0.3f) == 0.3f,
-          "...held to +-0.3 m, and a NaN reads as 0");
+    check(ecm::kTrimLimit == 0.5f && ecm::clampTrim(0.9f) == 0.5f && ecm::clampTrim(-0.9f) == -0.5f && ecm::clampTrim(0.5f) == 0.5f && ecm::clampTrim(-0.5f) == -0.5f &&
+              ecm::clampTrim(0.1f) == 0.1f && ecm::clampTrim(0.3f) == 0.3f && ecm::clampTrim(std::nanf("")) == 0.0f,
+          "...held to +-0.5 m (widened from 0.3 when they became user settings), and a NaN reads as 0");
+    check(ecm::kTrimUpDefault == 0.15f && ecm::kTrimForwardDefault == -0.08f && ecm::kTrimRightDefault == 0.0f && ecm::kSmoothingMsDefault == 0,
+          "THE SHIPPED DEFAULTS are Sean's own tuning: up 0.15, forward -0.08, right 0.0, smoothing 0 (exact follow)");
+    check(ecm::clampTrim(ecm::kTrimUpDefault) == ecm::kTrimUpDefault && ecm::clampTrim(ecm::kTrimForwardDefault) == ecm::kTrimForwardDefault &&
+              ecm::clampTrim(ecm::kTrimRightDefault) == ecm::kTrimRightDefault && ecm::clampSmoothingMs(static_cast<float>(ecm::kSmoothingMsDefault)) == 0.0f,
+          "...and every one of them is inside its clamp (a default the clamp changed would not be the default)");
 
     // ---- the rest offset refuses what it cannot trust ------------------------------------------------------------------------------------------------------------
     ecm::RestOffset junk;
@@ -4313,7 +4343,7 @@ void testFollowGlue(const Pages& p) {
         setHead(0.00f, 1.66f, 0.03f);
     }
 
-    // ---- the trims, live, held to +-0.3, added after the joint -------------------------------------------------------------------------------------------------
+    // ---- the trims, live, held to +-0.5, added after the joint -------------------------------------------------------------------------------------------------
     rig.f.trimRight = 0.05f;
     rig.f.trimUp = -0.02f;
     rig.f.trimForward = 0.03f;
@@ -4325,11 +4355,33 @@ void testFollowGlue(const Pages& p) {
     rig.f.trimUp = 0.9f;
     rig.boundary();
     g.freeUpdate(g.free);
-    check(eyeIs(0.05f, 1.998f, 0.172f), "...held to +-0.3: a trim of 0.9 is 0.3");
+    check(eyeIs(0.05f, 2.198f, 0.172f), "...held to +-0.5: a trim of 0.9 is 0.5");
     rig.f.trimRight = rig.f.trimUp = rig.f.trimForward = 0.0f;
     rig.boundary();
     g.freeUpdate(g.free);
     check(eyeIs(0.0f, 1.698f, 0.142f), "...and back to zero");
+    // The SHIPPED trims (0.15 up, -0.08 forward) with the eye already placed: the next update sits at the head + the rest offset + them, and ONE trim changed
+    // live (the menu's Explorer Cam page does exactly this, a hundredth at a time, in the headset) moves the eye on the very next update with the session going.
+    rig.f.trimRight = ecm::kTrimRightDefault;
+    rig.f.trimUp = ecm::kTrimUpDefault;
+    rig.f.trimForward = ecm::kTrimForwardDefault;
+    rig.boundary();
+    g.freeUpdate(g.free);
+    check(eyeIs(0.0f, 1.848f, 0.062f), "THE SHIPPED TRIMS (up 0.15, forward -0.08, right 0) lift the placed eye by 0.15 and bring it back 0.08 from the head joint's own");
+    const uint64_t placedBefore = t::updatesPlaced();
+    rig.f.trimUp = 0.16f;   // one step of the menu row
+    rig.boundary();
+    g.freeUpdate(g.free);
+    check(eyeIs(0.0f, 1.858f, 0.062f) && t::updatesPlaced() == placedBefore + 1 && t::phase() == 2,
+          "A LIVE CHANGE WHILE PLACED (eye height +0.01) takes effect on the next update, forward and right untouched, the session undisturbed");
+    rig.f.trimUp = 0.14f;
+    rig.f.trimRight = -0.03f;
+    rig.boundary();
+    g.freeUpdate(g.free);
+    check(eyeIs(-0.03f, 1.838f, 0.062f), "...and two at once, a step down and a step sideways, on the next one");
+    rig.f.trimRight = rig.f.trimUp = rig.f.trimForward = 0.0f;
+    rig.boundary();
+    g.freeUpdate(g.free);
 
     // ---- the absolute keys are only the fallback -------------------------------------------------------------------------------------------------------------
     rig.f.up = 1.50f;

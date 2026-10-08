@@ -53,6 +53,7 @@
 #include "../../src/common/runtime_profile.h"
 #include "../../src/common/temporal_mode.h"
 #include "../../src/common/log.h"
+#include "../../src/d3d11/explorer_cam_follow_core.h"   // the Explorer Cam trims' and smoothing defaults: header-only, no link
 #include "config_contract_gen.h"   // build\gen: the tables the DLLs register, from the real edvr.ini
 
 using namespace edvr;
@@ -1505,10 +1506,57 @@ int main(int argc, char** argv) {
     expectFloat("fix.explorer_cam_eye_up", 1.68f, "...the fallback eye keys ship at 1.68 up,");
     expectFloat("fix.explorer_cam_eye_forward", 0.10f, "...0.10 forward,");
     expectFloat("fix.explorer_cam_eye_right", 0.0f, "...and 0.0 right");
-    expectFloat("fix.explorer_cam_eye_trim_right", 0.0f, "the temporary trims ship at 0.0 (right,");
-    expectFloat("fix.explorer_cam_eye_trim_up", 0.0f, "...up,");
-    expectFloat("fix.explorer_cam_eye_trim_forward", 0.0f, "...forward)");
-    expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the temporary follow smoothing ships at 0 (exact follow)");
+    // The trims and the smoothing are PERMANENT user settings (Sean, 2026-10-08) and ship with his own tuning. Three places must say the same three numbers: the
+    // shipped file, the constants in explorer_cam_follow_core.h, and the code's fallback for an ini that lacks the keys (which must USE those constants).
+    expectFloat("fix.explorer_cam_eye_trim_up", 0.15f, "the Explorer Cam eye trims ship at Sean's tuning: up 0.15,");
+    expectFloat("fix.explorer_cam_eye_trim_forward", -0.08f, "...forward -0.08,");
+    expectFloat("fix.explorer_cam_eye_trim_right", 0.0f, "...right 0.0,");
+    expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the follow smoothing at 0 (exact follow)");
+    expectFloat("fix.explorer_cam_eye_trim_up", ecm::kTrimUpDefault, "the shipped up trim is the code constant ecm::kTrimUpDefault");
+    expectFloat("fix.explorer_cam_eye_trim_forward", ecm::kTrimForwardDefault, "...the shipped forward trim is ecm::kTrimForwardDefault");
+    expectFloat("fix.explorer_cam_eye_trim_right", ecm::kTrimRightDefault, "...the shipped right trim is ecm::kTrimRightDefault");
+    expectFloat("fix.explorer_cam_follow_smoothing_ms", static_cast<float>(ecm::kSmoothingMsDefault), "...the shipped smoothing is ecm::kSmoothingMsDefault");
+    {
+        const float trims[3] = {ecm::kTrimUpDefault, ecm::kTrimForwardDefault, ecm::kTrimRightDefault};
+        bool inside = true;
+        for (float v : trims) inside = inside && v >= -ecm::kTrimLimit && v <= ecm::kTrimLimit && ecm::clampTrim(v) == v;
+        if (inside && static_cast<float>(ecm::kSmoothingMsDefault) >= 0.0f && static_cast<float>(ecm::kSmoothingMsDefault) <= ecm::kSmoothingMsMax)
+            ok("every shipped Explorer Cam default is inside its clamp (+-0.5 m, 0..1000 ms)");
+        else
+            fail("every shipped Explorer Cam default is inside its clamp", "a default sits outside what the code would let through");
+    }
+    {
+        // The code's fallback must be the constant, not a number that happens to match today. The control rewrites each call to a literal that
+        // differs and must be caught.
+        const std::string source = readRepoFile(dir, L"src\\d3d11\\explorer_cam.cpp");
+        struct Read { const char* key; const char* call; const char* expr; };
+        const Read reads[] = {
+            {"fix.explorer_cam_eye_trim_up", "getFloat", "ecm::kTrimUpDefault"},
+            {"fix.explorer_cam_eye_trim_forward", "getFloat", "ecm::kTrimForwardDefault"},
+            {"fix.explorer_cam_eye_trim_right", "getFloat", "ecm::kTrimRightDefault"},
+            {"fix.explorer_cam_follow_smoothing_ms", "getInt", "ecm::kSmoothingMsDefault"},
+        };
+        auto usesConstant = [](const std::string& text, const Read& r) {
+            return text.find(std::string(r.call) + "(\"" + r.key + "\", " + r.expr + ")") != std::string::npos;
+        };
+        if (source.empty()) {
+            fail("explorer_cam.cpp is readable from the repo root", "could not read it");
+        } else {
+            bool all = true, controlsCaught = true;
+            for (const Read& r : reads) {
+                all = all && usesConstant(source, r);
+                std::string flipped = source;
+                const std::string from = std::string(r.call) + "(\"" + r.key + "\", " + r.expr + ")";
+                const size_t at = flipped.find(from);
+                if (at != std::string::npos) flipped.replace(at, from.size(), std::string(r.call) + "(\"" + r.key + "\", 0.0f)");
+                controlsCaught = controlsCaught && at != std::string::npos && !usesConstant(flipped, r);
+            }
+            if (all) ok("explorer_cam.cpp reads each trim and the smoothing with the code constant as its fallback (the shipped value, not a copy of it)");
+            else fail("explorer_cam.cpp reads each trim and the smoothing with the code constant as its fallback", "a read uses another fallback");
+            if (controlsCaught) ok("control: a read rewritten to a literal fallback is caught");
+            else fail("control: a read rewritten to a literal fallback is caught", "the rewritten source still passed, or the call was not found");
+        }
+    }
     expectBool("hotkey.read_game_bindings", true,
                "a key under a repeated [hotkey] reads");
 

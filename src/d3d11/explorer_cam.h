@@ -96,8 +96,8 @@ struct ExplorerCamTestTargets {
 };
 struct ExplorerCamTestFrame {
     float up = 1.68f, forward = 0.10f, right = 0.0f;   // the FALLBACK eye (fix.explorer_cam_eye_up/_forward/_right)
-    float trimRight = 0.0f, trimUp = 0.0f, trimForward = 0.0f;   // fix.explorer_cam_eye_trim_right/_up/_forward (temporary)
-    float smoothingMs = 0.0f;             // fix.explorer_cam_follow_smoothing_ms (temporary)
+    float trimRight = 0.0f, trimUp = 0.0f, trimForward = 0.0f;   // fix.explorer_cam_eye_trim_right/_up/_forward (user settings; 0 here is the rig's neutral, not the shipped value)
+    float smoothingMs = 0.0f;             // fix.explorer_cam_follow_smoothing_ms (a user setting)
     const char* hotkey = "F5";            // hotkey.explorer_cam: Explorer Cam is armed exactly when this is non-empty
     bool f5Pressed = false;               // the key's edge this frame
     bool gameplay = true;
@@ -159,6 +159,10 @@ uint32_t steadyUpdates();          // consecutive placing updates whose eye move
 bool uiSettled();                  // the camera UI's hide has run its course for this placement
 float comfortRead(uint64_t nowMs); // what the runtime's provider would read from the signal at nowMs (comfort_fade.h)
 bool comfortDefaultOn();           // the production wrapper's FrameInput runs the comfort fade (there is no key for it)                   // the clock the follow smoothing reads, in microseconds (null: the real one)
+float followTrimRight();           // the trims and the smoothing as the frame thread last published them (clamped), for the config cells
+float followTrimUp();
+float followTrimForward();
+float followSmoothingMs();
 uint64_t followHeadUpdates();      // placing updates whose eye came from the head joint
 uint64_t followFixedUpdates();     // ...and from the fixed keys
 uint32_t followSource();           // 1 = the latest update used the head joint

@@ -20,10 +20,12 @@
 - **Armed by `hotkey.explorer_cam` alone** (default `F5`); empty turns it off.
   The old `[fix] explorer_cam` switch is gone. It is a VR setting and supports
   only Elite build 332841.
-- **Temporary keys:** `fix.explorer_cam_eye_trim_right`, `_up` and `_forward`
-  and `fix.explorer_cam_follow_smoothing_ms` (the trims become a constant and
-  go), and `advanced.explorer_cam_probe` (a log-only instrument). The comfort
-  fade has no key.
+- **Your settings (2026-10-08):** `fix.explorer_cam_eye_trim_up`, `_forward`
+  and `_right` and `fix.explorer_cam_follow_smoothing_ms` are permanent personal
+  preferences, shipped at Sean's own tuning (0.15, -0.08, 0.0 m; 0 ms) and
+  set on the F8 menu's Explorer Cam page (built, not flown). The one
+  temporary key left is `advanced.explorer_cam_probe` (a log-only instrument).
+  The comfort fade has no key.
 
 Explorer Cam puts your viewpoint at your commander's head while you are on foot
 in Elite's free camera, which renders in proper stereo. This page covers setting
@@ -92,10 +94,14 @@ described below.
    fix.explorer_cam_eye_right   = 0.0    + is to their right, -0.5..0.5
    ```
 
-   To nudge the head-joint eye, `fix.explorer_cam_eye_trim_right`, `_up` and
-   `_forward` add metres along your commander's own axes (held to -0.3..0.3),
-   and `fix.explorer_cam_follow_smoothing_ms` eases it (0, the default, follows
-   the head exactly). Both are temporary.
+   To move the head-joint eye to your taste, open the F8 menu's **Explorer Cam**
+   page and use its four rows, live and also during a session: Eye height,
+   Eye forward and Eye sideways (metres, in steps of 0.01, held to +-0.5;
+   `fix.explorer_cam_eye_trim_up`, `_forward` and `_right`, shipped at +0.15,
+   -0.08 and 0.00) and Head-follow smoothing (0 to 200 ms in steps of 10;
+   `fix.explorer_cam_follow_smoothing_ms`, 0 follows the head exactly). R on a
+   row puts back the shipped value. The page tunes the head-joint eye only; the
+   three fixed-eye keys above stay in the file.
 
 ## What it does under the hood
 

@@ -183,8 +183,11 @@ void testSeqlock() {
         }
     });
     uint64_t good = 0, torn = 0, refused = 0;
-    const DWORD until = GetTickCount() + 300;
-    while (GetTickCount() < until) {
+    // 300 ms at least, and until a thousand reads were seen (up to ten seconds): the invariant is torn == 0, and "thousands read" only keeps it from being
+    // vacuous. A fixed window with a fixed count failed 1 run in 4 with sixteen copies of this rig sharing the machine (the build runs rigs in parallel).
+    const DWORD begun = GetTickCount();
+    const DWORD until = begun + 300;
+    while (GetTickCount() < until || (good <= 1000 && GetTickCount() - begun < 10000)) {
         Wide got;
         if (wide.read(got, 4)) {
             bool same = true;
@@ -300,8 +303,10 @@ void testEventRing() {
         });
     }
     uint64_t delivered = 0, inconsistent = 0;
-    const DWORD until = GetTickCount() + 250;
-    while (GetTickCount() < until) {
+    // 250 ms at least, and until a thousand events were delivered (up to ten seconds), for the reason the single-writer cell gives.
+    const DWORD begun = GetTickCount();
+    const DWORD until = begun + 250;
+    while (GetTickCount() < until || (delivered <= 1000 && GetTickCount() - begun < 10000)) {
         while (busy.take(&got)) {
             ++delivered;
             const bool whole = got.activity >= 1 && got.activity <= 4 && (got.slotCalls >> 40) == got.activity &&

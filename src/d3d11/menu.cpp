@@ -379,20 +379,8 @@ std::string boolWord(bool on, const std::string& current) {
     return on ? "on" : "off";
 }
 
-std::string formatNumber(double v, int precision) {
-    char buf[48];
-    snprintf(buf, sizeof(buf), "%.*f", precision > 0 ? precision : 0, v);
-    if (precision > 0) {
-        // Trim trailing zeros past the first decimal: 0.30 -> 0.3, 1.00 -> 1.0.
-        std::string s(buf);
-        const size_t dot = s.find('.');
-        if (dot != std::string::npos) {
-            while (s.size() > dot + 2 && s.back() == '0') s.pop_back();
-        }
-        return s;
-    }
-    return std::string(buf);
-}
+// What a step or a typed value writes into the file (menu_schema.h): 0.30 -> 0.3, 1.00 -> 1.0.
+std::string formatNumber(double v, int precision) { return menuFileNumber(v, precision); }
 
 bool isOpenxrRenderScaleRow(const MenuRowDef& d) {
     return strcmp(d.section, "fix") == 0 &&
@@ -906,23 +894,8 @@ bool rowPending(const MenuRowDef& d, const std::string& value, const std::string
     return value != snapshot;
 }
 
-// A step a person would choose: the range in about twenty steps, rounded to
-// 1, 2 or 5 times a power of ten. A number with no bounds steps by one, or a
-// tenth for a decimal.
-double stepOf(const MenuRowDef& d) {
-    const bool haveBounds = d.lo[0] && d.hi[0];
-    if (!haveBounds) return d.precision > 0 ? 0.1 : 1.0;
-    const double range = atof(d.hi) - atof(d.lo);
-    if (!(range > 0.0)) return d.precision > 0 ? 0.1 : 1.0;
-    const double raw = range / 20.0;
-    const double mag = pow(10.0, floor(log10(raw)));
-    double best = mag;
-    for (double m : {1.0, 2.0, 5.0, 10.0}) {
-        if (fabs(m * mag - raw) < fabs(best - raw)) best = m * mag;
-    }
-    if (d.precision == 0 && best < 1.0) best = 1.0;
-    return best;
-}
+// (A number row's step is menuStepOf in menu_schema.h: the row's own `step` -- 0.01 m for an eye trim, 10 ms for the smoothing -- else the range in about
+// twenty steps rounded to 1, 2 or 5 times a power of ten.)
 
 struct ChoiceItem {
     std::string value;
@@ -1011,11 +984,9 @@ std::string displayValue(const MenuRowDef& d, const std::string& v) {
     switch (d.kind) {
         case MenuKind::Toggle:
             return boolOf(v, boolOf(d.shipped, false)) ? "on" : "off";
-        case MenuKind::Number: {
-            const double x = atof(v.c_str());
-            if (d.percent) return formatNumber(x * 100.0, 0) + "%";
-            return formatNumber(x, d.precision);
-        }
+        case MenuKind::Number:
+            // menu_schema.h: "+0.15 m", "0 ms (exact)", "30%", or the plain number.
+            return menuFormatNumber(d, atof(v.c_str()));
         case MenuKind::Choice: {
             for (const ChoiceItem& c : choicesOf(d)) {
                 if (_stricmp(c.value.c_str(), v.c_str()) == 0) return c.label;
@@ -1468,6 +1439,15 @@ void buildPages() {
         Page p;
         p.name = "Fixes";
         addSettingRows(p, MenuTier::Fix, "fixes", true);
+        firstSelectable(p);
+        s.pages.push_back(p);
+    }
+    {
+        // Explorer Cam (2026-10-08): the eye trims and the follow smoothing, personal preference, live, for everyone.
+        // The rows are the `menu explorer_cam` rows of edvr.ini; no group headings, the page is the group.
+        Page p;
+        p.name = "Explorer Cam";
+        addSettingRows(p, MenuTier::Fix, "explorer_cam", false);
         firstSelectable(p);
         s.pages.push_back(p);
     }
@@ -2197,7 +2177,7 @@ void buildContent(MenuContent& c) {
                     body += std::string("\"auto\", or a width in pixels from ") + d.lo +
                             " to " + d.hi + ". The height always follows it at 16:9.  ";
                 } else if (d.kind == MenuKind::Number && d.lo[0] && d.hi[0]) {
-                    body += std::string("Range ") + d.lo + " to " + d.hi + ".  ";
+                    body += std::string("Range ") + d.lo + " to " + d.hi + (d.unit[0] ? std::string(" ") + d.unit : std::string()) + ".  ";
                 } else if (d.kind == MenuKind::Choice) {
                     std::string list;
                     for (const ChoiceItem& ch : choicesOf(d)) {
@@ -2645,13 +2625,8 @@ void stepRow(int defIndex, int dir, int mult) {
             break;
         }
         case MenuKind::Number: {
-            double v = atof(cur.empty() ? d.shipped : cur.c_str());
-            const double step = stepOf(d) * mult;
-            v += dir * step;
-            // Snap to the step grid so 0.3 does not become 0.30000001 after a few presses.
-            v = floor(v / step + 0.5) * step;
-            if (d.lo[0] && v < atof(d.lo)) v = atof(d.lo);
-            if (d.hi[0] && v > atof(d.hi)) v = atof(d.hi);
+            // The step, the snap to the step grid and the bounds are menu_schema.h's, where a rig holds them.
+            const double v = menuSteppedNumber(d, atof(cur.empty() ? d.shipped : cur.c_str()), dir, mult);
             applyChange(defIndex, formatNumber(v, d.precision));
             break;
         }

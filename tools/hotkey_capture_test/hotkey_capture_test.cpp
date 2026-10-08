@@ -1504,6 +1504,26 @@ void testCaptureWiringPins(const char* root) {
           "menu.cpp: handleCapture decides, then ends the capture, then applies the decision");
     const std::string start = bodyOf("void startCapture(int entryIndex, int defIndex) {");
     check(start.find("hotkeysSuspend(true)") != std::string::npos, "menu.cpp: a capture that starts suspends the hotkeys");
+
+    // The Explorer Cam page (2026-10-08): built for everyone -- ahead of, and outside, the developer pages -- from the `explorer_cam` rows, and its numbers
+    // are shown and stepped by menu_schema.h's helpers (the ones testExplorerPage holds to "+0.15 m" and 0.01).
+    {
+        const std::string pages = bodyOf("void buildPages() {");
+        const size_t at = pages.find("p.name = \"Explorer Cam\";");
+        const size_t rows = at == std::string::npos ? at : pages.find("addSettingRows(p, MenuTier::Fix, \"explorer_cam\", false);", at);
+        const size_t developer = pages.find("if (s.developer) {");
+        check(at != std::string::npos && rows != std::string::npos && rows - at < 200,
+              "menu.cpp: buildPages makes a page named Explorer Cam from the Fix-tier rows of the explorer_cam page");
+        check(at != std::string::npos && developer != std::string::npos && at < developer,
+              "...for everyone: it is built before, and outside, the developer-mode pages");
+        check(bodyOf("std::string displayValue(const MenuRowDef& d, const std::string& v) {").find("menuFormatNumber(d, atof(v.c_str()))") !=
+                  std::string::npos,
+              "menu.cpp: a number row is shown by menuFormatNumber (\"+0.15 m\", \"0 ms (exact)\")");
+        check(bodyOf("void stepRow(int defIndex, int dir, int mult) {").find("menuSteppedNumber(d, ") != std::string::npos,
+              "menu.cpp: Left and Right step a number row with menuSteppedNumber (0.01 m, 10 ms)");
+        check(bodyOf("void stepRow(int defIndex, int dir, int mult) {").find("d.shipped") != std::string::npos,
+              "menu.cpp: a row that is empty steps from its shipped value (R writes d.shipped)");
+    }
 }
 // ---------------------------------------------------------------------------
 // 7. Elite's bindings, read for keyboard, pad and joystick
@@ -1674,6 +1694,121 @@ void testEliteBinds(const char* root) {
 }
 
 // ---------------------------------------------------------------------------
+// 8b. The Explorer Cam page (2026-10-08): the generated rows, how they step, and what they show
+
+void testExplorerPage() {
+    printf("explorer cam page\n");
+    constexpr int kCount = static_cast<int>(sizeof(kMenuRows) / sizeof(kMenuRows[0]));
+    auto find = [&](const char* section, const char* key) {
+        for (int i = 0; i < kCount; ++i) {
+            if (strcmp(kMenuRows[i].section, section) == 0 && strcmp(kMenuRows[i].key, key) == 0) return i;
+        }
+        return -1;
+    };
+    // The page: exactly four rows, in the ini's order, for everyone (the Fix tier), live, numbers.
+    const char* want[4] = {"explorer_cam_eye_trim_up", "explorer_cam_eye_trim_forward", "explorer_cam_eye_trim_right",
+                           "explorer_cam_follow_smoothing_ms"};
+    int onPage[16];
+    int n = 0;
+    for (int i = 0; i < kCount; ++i) {
+        if (strcmp(kMenuRows[i].page, "explorer_cam") == 0 && n < 16) onPage[n++] = i;
+    }
+    check(n == 4, "the Explorer Cam page has four rows");
+    for (int k = 0; k < 4 && k < n; ++k) {
+        const MenuRowDef& d = kMenuRows[onPage[k]];
+        checkf(strcmp(d.key, want[k]) == 0, "row %s is in the ini's order", want[k]);
+        checkf(strcmp(d.section, "fix") == 0 && d.tier == MenuTier::Fix, "%s is a [fix] row of the Fix tier (everyone, not the developer pages)", want[k]);
+        checkf(d.kind == MenuKind::Number && d.applies == 1, "%s is a LIVE number row", want[k]);
+    }
+    check(n == 4 && strcmp(kMenuRows[onPage[0]].label, "Eye height") == 0 && strcmp(kMenuRows[onPage[1]].label, "Eye forward") == 0 &&
+              strcmp(kMenuRows[onPage[2]].label, "Eye sideways") == 0 && strcmp(kMenuRows[onPage[3]].label, "Head-follow smoothing") == 0,
+          "the labels: Eye height, Eye forward, Eye sideways, Head-follow smoothing");
+    // The absolute fallback keys have no row anywhere, and neither does the Explorer Cam key outside its own page.
+    for (const char* hidden : {"explorer_cam_eye_up", "explorer_cam_eye_forward", "explorer_cam_eye_right"}) {
+        checkf(find("fix", hidden) < 0, "the fallback key fix.%s has no menu row (ini-only)", hidden);
+    }
+    check(find("fix", "explorer_cam") < 0, "no [fix] explorer_cam row (the key is hotkey.explorer_cam)");
+    const int key = find("hotkey", "explorer_cam");
+    check(key >= 0 && strcmp(kMenuRows[key].page, "hotkeys") == 0, "the Explorer Cam KEY stays on the Hotkeys page only (not duplicated on this one)");
+
+    // Shipped values, bounds and steps.
+    if (n == 4) {
+        const MenuRowDef& up = kMenuRows[onPage[0]];
+        const MenuRowDef& fwd = kMenuRows[onPage[1]];
+        const MenuRowDef& right = kMenuRows[onPage[2]];
+        const MenuRowDef& smooth = kMenuRows[onPage[3]];
+        check(atof(up.shipped) == 0.15 && atof(fwd.shipped) == -0.08 && atof(right.shipped) == 0.0 && atof(smooth.shipped) == 0.0,
+              "shipped: 0.15 up, -0.08 forward, 0.0 sideways, smoothing 0 (Sean's tuning)");
+        for (int k = 0; k < 3; ++k) {
+            const MenuRowDef& d = kMenuRows[onPage[k]];
+            checkf(atof(d.lo) == -0.5 && atof(d.hi) == 0.5 && d.precision == 2, "%s is -0.5..0.5 m at two decimals", d.key);
+            checkf(menuStepOf(d) == 0.01, "%s steps by 0.01 m", d.key);
+        }
+        check(atof(smooth.lo) == 0.0 && atof(smooth.hi) == 200.0 && smooth.precision == 0 && menuStepOf(smooth) == 10.0,
+              "the smoothing is 0..200 ms, whole numbers, in steps of 10");
+        // What the rows show.
+        check(menuFormatNumber(up, 0.15) == "+0.15 m", "Eye height 0.15 reads \"+0.15 m\"");
+        check(menuFormatNumber(fwd, -0.08) == "-0.08 m", "Eye forward -0.08 reads \"-0.08 m\"");
+        check(menuFormatNumber(right, 0.0) == "0.00 m", "Eye sideways 0 reads \"0.00 m\" (no sign on a zero)");
+        check(menuFormatNumber(up, 0.1) == "+0.10 m", "a trailing zero stays on a metre row: \"+0.10 m\"");
+        check(menuFormatNumber(up, -0.004) == "0.00 m", "-0.004 rounds to a plain zero, not \"-0.00 m\"");
+        check(menuFormatNumber(up, 0.5) == "+0.50 m" && menuFormatNumber(up, -0.5) == "-0.50 m", "the limits read \"+0.50 m\" and \"-0.50 m\"");
+        check(menuFormatNumber(smooth, 0.0) == "0 ms (exact)", "smoothing 0 reads \"0 ms (exact)\"");
+        check(menuFormatNumber(smooth, 50.0) == "50 ms" && menuFormatNumber(smooth, 200.0) == "200 ms", "smoothing 50 reads \"50 ms\"");
+        // The arrow keys: a step, the grid, the bounds; Shift is five steps; R is the shipped value.
+        double v = atof(up.shipped);
+        for (int i = 0; i < 10; ++i) v = menuSteppedNumber(up, v, +1, 1);
+        check(menuFileNumber(v, up.precision) == "0.25", "ten presses of Right from 0.15 write 0.25 (the grid, not 0.25000000000000006)");
+        for (int i = 0; i < 40; ++i) v = menuSteppedNumber(up, v, +1, 1);
+        check(menuFileNumber(v, up.precision) == "0.5", "...and the row stops at +0.5");
+        v = menuSteppedNumber(up, 0.5, +1, 1);
+        check(menuFileNumber(v, up.precision) == "0.5", "(one more Right at the limit stays)");
+        for (int i = 0; i < 120; ++i) v = menuSteppedNumber(fwd, v, -1, 1);
+        check(menuFileNumber(v, fwd.precision) == "-0.5", "Left runs down to -0.5 and stops");
+        check(menuFileNumber(menuSteppedNumber(up, 0.15, +1, 5), 2) == "0.2" && menuFileNumber(menuSteppedNumber(up, 0.15, -1, 1), 2) == "0.14",
+              "Shift+Right is five steps (0.2), Left one step down (0.14)");
+        check(menuFileNumber(menuSteppedNumber(fwd, -0.08, +1, 1), 2) == "-0.07", "-0.08 + one step is -0.07");
+        double s = 0.0;
+        s = menuSteppedNumber(smooth, s, -1, 1);
+        check(s == 0.0, "smoothing: Left at 0 stays at 0");
+        for (int i = 0; i < 3; ++i) s = menuSteppedNumber(smooth, s, +1, 1);
+        check(menuFileNumber(s, smooth.precision) == "30", "...three presses of Right are 30");
+        check(menuFileNumber(menuSteppedNumber(smooth, 0.0, +1, 5), smooth.precision) == "50", "...Shift+Right from 0 is 50 (five steps)");
+        for (int i = 0; i < 30; ++i) s = menuSteppedNumber(smooth, s, +1, 1);
+        check(menuFileNumber(s, smooth.precision) == "200", "...and the row stops at 200 ms (the file may say more; the menu offers 200)");
+        // A value that is off the grid (a hand edit) lands back on it: the snap that also keeps 0.3 from becoming 0.30000001 over a run of presses.
+        check(menuFileNumber(menuSteppedNumber(smooth, 24.0, +1, 1), smooth.precision) == "30" &&
+                  menuFileNumber(menuSteppedNumber(up, 0.12, +1, 5), 2) == "0.15",
+              "an off-grid value lands on the step grid (24 ms + one step is 30; 0.12 m + five steps is 0.15)");
+        // R resets to the shipped text, which the file already holds in the form it reads.
+        check(strcmp(up.shipped, "0.15") == 0 && strcmp(fwd.shipped, "-0.08") == 0 && strcmp(smooth.shipped, "0") == 0, "R writes \"0.15\", \"-0.08\" and \"0\"");
+    }
+    // The rows every OTHER page already had keep their look: the plain rule trims trailing zeros, a percentage scales and gets its sign.
+    {
+        MenuRowDef plain = {};
+        plain.lo = "";
+        plain.hi = "";
+        plain.step = "";
+        plain.unit = "";
+        plain.zero = "";
+        plain.precision = 2;
+        check(menuFormatNumber(plain, 0.30) == "0.3" && menuFormatNumber(plain, 1.0) == "1.0" && menuFormatNumber(plain, 0.25) == "0.25" &&
+                  menuFormatNumber(plain, -0.5) == "-0.5",
+              "an unshaped decimal row keeps the older rule (0.30 reads 0.3, 1.00 reads 1.0)");
+        MenuRowDef whole = plain;
+        whole.precision = 0;
+        check(menuFormatNumber(whole, 7.0) == "7", "an unshaped whole-number row reads as a whole number");
+        MenuRowDef pct = plain;
+        pct.percent = true;
+        check(menuFormatNumber(pct, 0.3) == "30%" && menuFormatNumber(pct, 1.0) == "100%", "a percent row reads 30%");
+        check(menuStepOf(plain) == 0.1 && menuStepOf(whole) == 1.0, "an unbounded row steps by a tenth, or by one");
+        MenuRowDef ranged = plain;
+        ranged.lo = "0";
+        ranged.hi = "1";
+        check(menuStepOf(ranged) == 0.05, "a 0..1 decimal row steps by a twentieth (the older rule)");
+    }
+}
+// ---------------------------------------------------------------------------
 // 8. The generated rows: which are on the Hotkeys page, in which tier
 
 void testRows() {
@@ -1751,6 +1886,7 @@ int main(int argc, char** argv) {
     testCaptureWiringPins(argc > 1 ? argv[1] : "");
     testEliteBinds(argc > 1 ? argv[1] : "");
     testRows();
+    testExplorerPage();
     if (failures) {
         printf("hotkey_capture_test: %d of %d checks FAILED\n", failures, checks);
         return 1;

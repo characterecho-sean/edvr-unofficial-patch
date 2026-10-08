@@ -52,13 +52,13 @@
   ms BEFORE the camera opens and back in once placed and steady (check the
   `comfort fade:` lines, "black lasted"); F5 out the same; a stall; the 3 s
   cap. Also F5 with the minimal config (black_void off, panel_distance 1).
-  Eye height: Sean finds it a bit low ("no neck"), is tuning
-  `explorer_cam_eye_trim_up` live and will send the value to bake.
-- **Temporary keys:** `[advanced] explorer_cam_probe` (removed at arc
-  close). `[fix] explorer_cam_eye_trim_right/_up/_forward` (+-0.3 m) and
-  `explorer_cam_follow_smoothing_ms` (0 = exact): the trims become a constant
-  and go. `explorer_cam_eye_up/_forward/_right` are only the FALLBACK. The
-  comfort fade has NO key (durations are constants).
+- **Temporary keys:** only `[advanced] explorer_cam_probe` (removed at arc
+  close). The trims and the smoothing are PERMANENT user settings (Sean,
+  2026-10-08), shipped at his tuning: `[fix] explorer_cam_eye_trim_up` 0.15,
+  `_forward` -0.08, `_right` 0.0 (m, commander axes, held to +-0.5, was +-0.3)
+  and `explorer_cam_follow_smoothing_ms` 0, tuned on the F8 menu's Explorer Cam
+  page (built, not flown). `explorer_cam_eye_up/_forward/_right` are FALLBACK
+  only, ini-only. The comfort fade has NO key.
 
 ## Why today's Explorer Cam is half-baked
 

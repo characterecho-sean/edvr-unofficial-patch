@@ -66,6 +66,16 @@ tier: `# ui: Menu key | hotkey | live` is a row for everyone, and
 `# dev: label Draw census key | hotkey` is a row only while menu.developer is on.
 The section names the page, so neither line does. See HOTKEY_SECTION.
 
+THE EXPLORER CAM PAGE (2026-10-08) is `menu explorer_cam`: the eye trims and the
+follow smoothing, for everyone. Four more tokens shape a NUMBER row there and
+nowhere else: `step 0.01` (the arrow keys' step, instead of the range's
+twentieth), `unit m` (the text after the number), `signed` (an explicit + on a
+positive one) and `zero exact` (the word in brackets after a zero, so `0 ms
+(exact)`). A step that is not a positive number, or any of the four on a
+row the code does not read as a number, fails the build. The older absolute
+fallback eye (`explorer_cam_eye_up/_forward/_right`) stays `ui: hidden`: neither
+schema gets a row for it.
+
 The menu's restart flagging is derived here too, from the same prose the
 window reads: a menu row on the Fixes or Performance page that does not say
 when it takes effect is a build error (as for the window); a developer-tier
@@ -174,7 +184,8 @@ UI_RE = re.compile(r'^ui\s*:\s*(.*)$', re.I)
 DEV_RE = re.compile(r'^dev\s*:\s*(.*)$', re.I)
 # The sections the menu's developer tier lists in full.
 DEV_SECTIONS = ('advanced', 'experimental')
-MENU_PAGES = ('fixes', 'performance')
+# Pages a `menu <page>` token can name. 'explorer_cam' is the Explorer Cam page (2026-10-08): the eye trims and the follow smoothing, for everyone.
+MENU_PAGES = ('fixes', 'performance', 'explorer_cam')
 # A heading in edvr.ini: a rule, the title, a rule. The heading a person
 # reads in the file is the heading the window shows, so there is no second
 # list of group names to keep in step with this one.
@@ -323,6 +334,13 @@ class Setting(object):
         # dev: line's `label <text>`, for a developer row with no ui: line.
         self.hotkey = False
         self.devLabel = ''
+        # How a menu NUMBER row is stepped and shown (2026-10-08, the Explorer Cam page): `step 0.01` is the arrow keys' step in place of the range's
+        # twentieth, `unit m` the text after the number, `signed` an explicit + on a positive one, `zero exact` the word that follows a
+        # zero in brackets (`0 ms (exact)`). The installer's window ignores all four.
+        self.step = ''
+        self.unit = ''
+        self.zero = ''
+        self.signed = False
         # Migration metadata from the annotation lines the installer's merge
         # reads (iniedit.cpp movedKeys / retiredDefaults): kept off the prose.
         self.movedFrom = []
@@ -534,6 +552,14 @@ def apply_annotation(setting, text):
             # The value is a key, a pad button or a HOTAS button, captured by
             # the menu's Hotkeys page rather than typed.
             setting.hotkey = True
+        elif lower.startswith('step '):
+            setting.step = part.split(None, 1)[1].strip()
+        elif lower.startswith('unit '):
+            setting.unit = part.split(None, 1)[1].strip()
+        elif lower.startswith('zero '):
+            setting.zero = part.split(None, 1)[1].strip()
+        elif lower == 'signed':
+            setting.signed = True
         elif lower == 'menu' or lower.startswith('menu '):
             # The in-headset menu's page: bare `menu` is the Fixes page,
             # `menu performance` the Performance page.
@@ -818,6 +844,34 @@ def run(root, out, check):
             print('  edvr.ini:%d  %s.%s  (menu %s)' % (s.line, s.section, s.key, s.menuPage))
         return 1
 
+    # ---- how a number row is stepped and shown (step / unit / zero / signed) ----
+    #
+    # They shape a menu NUMBER row and nothing else: on a switch, a choice or a text row the
+    # words would be dropped without a sound, and a step that is not a positive plain number
+    # would be read by atof as 0 -- one press of Left or Right would then not move the row at all.
+    badShape = []
+    for s in settings:
+        if not (s.step or s.unit or s.zero or s.signed):
+            continue
+        dotted = '%s.%s' % (s.section, s.key)
+        if dotted not in code:
+            continue
+        faults = []
+        if code[dotted][0] != 'number':
+            faults.append('the code reads it as a %s, and these tokens shape a number row' % code[dotted][0])
+        if s.step:
+            plain = number_text(s.step)
+            if plain is None or float(plain) <= 0:
+                faults.append('`step %s` is not a positive number' % s.step)
+        if faults:
+            badShape.append((s, faults))
+    if badShape:
+        print('gen_settings_schema: ERROR: %d setting(s) carry a step, unit, zero or signed token the menu '
+              'cannot use.' % len(badShape))
+        for s, faults in badShape:
+            print('  edvr.ini:%d  %s.%s  %s' % (s.line, s.section, s.key, '; '.join(faults)))
+        return 1
+
     missing = [s for s in settings
                if s.live and s.section in EXPOSED_SECTIONS and not s.annotated]
     if missing:
@@ -1083,7 +1137,7 @@ def run(root, out, check):
         label = s.label if s.annotated else (s.devLabel or s.key)
         menuOut.append(
             '    {%s, %s, %s, %s,\n     %s,\n     MenuKind::%s, %s, %s, %s, %d, %s, %s, %s, %d,\n'
-            '     MenuTier::%s, %s, %s},' % (
+            '     MenuTier::%s, %s, %s, %s, %s, %s, %s},' % (
                 c_string(s.section), c_string(s.key),
                 c_string(label),
                 c_string(summarise(s.description)),
@@ -1095,7 +1149,9 @@ def run(root, out, check):
                 'true' if s.percent else 'false',
                 'true' if s.headset else 'false',
                 {None: 0, 'live': 1, 'restart': 2}[applies],
-                tier, c_string(page), c_string(s.group)))
+                tier, c_string(page), c_string(s.group),
+                c_string(number_text(s.step) or ''), c_string(s.unit), c_string(s.zero),
+                'true' if s.signed else 'false'))
     os.makedirs(out, exist_ok=True)
     menu_path = os.path.join(out, 'menu_schema.inc')
     with open(menu_path, 'w', encoding='utf-8', newline='\r\n') as f:
@@ -1656,6 +1712,53 @@ def self_test():
                  hotkey_reads, 0)
     expect_not_in(name, wrote, 'census')
 
+    # The Explorer Cam page (2026-10-08): `menu explorer_cam` puts a [fix] number row on its own page for everyone (Fix tier), and
+    # step / unit / zero / signed shape the row (0.01 m, "+0.15 m", "0 ms (exact)"). The two fallback keys the head joint replaced
+    # are `ui: hidden`: neither schema gets a row for them, however the neighbours are annotated.
+    explorer_ini = ('[fix]\n'
+                    '# Fallback eye height, used only when the head joint cannot be read. Live.\n'
+                    '# ui: hidden -- fallback only | range 0.5..2.5 | recommended 1.68\n'
+                    'eye_up = 1.68\n\n'
+                    '# Eye height: raises or lowers the view, in metres. Live.\n'
+                    '# ui: Eye height | range -0.5..0.5 | step 0.01 | unit m | signed | recommended 0.15 | live | menu explorer_cam\n'
+                    'trim_up = 0.15\n\n'
+                    '# Smoothing in milliseconds, 0 = exact. Live.\n'
+                    '# ui: Smoothing | range 0..200 | step 10 | unit ms | zero exact | recommended 0 | live | menu explorer_cam\n'
+                    'smooth = 0\n')
+    explorer_reads = {'a.cpp': ('float u = cfg.getFloat("fix.eye_up", 1.68f);\n'
+                                'float t = cfg.getFloat("fix.trim_up", 0.15f);\n'
+                                'int s = cfg.getInt("fix.smooth", 0);\n')}
+    name = 'explorer-page'
+    wrote = case(name, explorer_ini, explorer_reads, 0)
+    expect_in(name, wrote, 'MenuKind::Number, "0.15", "-0.5", "0.5", 2, "", false, false, 1,\n'
+                           '     MenuTier::Fix, "explorer_cam", "", "0.01", "m", "", true}')
+    expect_in(name, wrote, 'MenuKind::Number, "0", "0", "200", 0, "", false, false, 1,\n'
+                           '     MenuTier::Fix, "explorer_cam", "", "10", "ms", "exact", false}')
+    expect_not_in(name, wrote, 'eye_up')
+    if wrote.count('"explorer_cam"') != 2:
+        failures.append('%s: expected exactly two rows on the explorer_cam page, found %d'
+                        % (name, wrote.count('"explorer_cam"')))
+    # A row that does not use the tokens carries empty ones, so every other page is unchanged.
+    name = 'explorer-page-plain-rows'
+    wrote = case(name, '[fix]\n# A thing. Live.\n# ui: Thing | range 0..5 | menu fixes\nthing = 2\n',
+                 {'a.cpp': 'int t = cfg.getInt("fix.thing", 2);\n'}, 0)
+    expect_in(name, wrote, 'MenuTier::Fix, "fixes", "", "", "", "", false}')
+    # The tokens belong to number rows, and a step is a positive number.
+    name = 'explorer-step-on-a-switch'
+    said = case(name, '[fix]\n# A switch. Live.\n# ui: Switch | unit m | menu fixes\nswitch = 1\n',
+                {'a.cpp': 'bool b = cfg.getBool("fix.switch", true);\n'}, 1)
+    expect_in(name, said, 'fix.switch')
+    expect_in(name, said, 'shape a number row')
+    for bad in ('0', '-0.01', 'abc', '0.0'):
+        name = 'explorer-bad-step-' + bad
+        said = case(name, ('[fix]\n# A number. Live.\n# ui: Number | range 0..5 | step %s | menu fixes\nnumber = 2\n' % bad),
+                    {'a.cpp': 'int n = cfg.getInt("fix.number", 2);\n'}, 1)
+        expect_in(name, said, '`step %s` is not a positive number' % bad)
+    # A page nobody built is refused by name, as ever.
+    name = 'explorer-unknown-page'
+    said = case(name, '[fix]\n# A number. Live.\n# ui: Number | range 0..5 | menu explorer\nnumber = 2\n',
+                {'a.cpp': 'int n = cfg.getInt("fix.number", 2);\n'}, 1)
+    expect_in(name, said, 'explorer_cam')
     shutil.rmtree(base, ignore_errors=True)
     if failures:
         print('gen_settings_schema: self-test FAILED')
