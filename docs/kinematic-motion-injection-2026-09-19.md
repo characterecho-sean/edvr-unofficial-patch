@@ -31,7 +31,7 @@
   native-marker/bypass interpretation: all five alleged native pairs and BA58
   were EDVR-generated.
 - **Other open work:** phase 2 rigid builder/per-part history and bones for
-  walkers/articulated parts; ships, evaluated-but-undrawn movers, flat-source
+  walkers/articulated parts (2026-10-08 NPC diagnosis, entry at the end); ships, evaluated-but-undrawn movers, flat-source
   aliasing; stale cockpit (low priority); ps_91F8/ps_A607 owner/coverage.
   Flight 5/6 and 162703 cover the fixed on-foot/hangar paths. Boarding flicker:
   LOD governor (removed 2026-10-08, branch claude/remove-settlement-detail,
@@ -54,7 +54,8 @@
   rows/scatter, actual EP/EN ownership exports and correct brace
   motion/coverage; inspect remaining WORLD and building pixels separately.
   Visual verification is open. Native primary records stay unchanged; no bones,
-  estimation, generic pool matching or new shader admission.
+  estimation or generic pool matching. New shader admission: NPC skinned
+  families only, approved by Sean 2026-10-08 IF walking-NPC dumps support F1.
 
 ## Premise
 
@@ -3684,3 +3685,39 @@ exports actual consumed EP ownership and EN private-pool bytes on its first
 frame; it must show these named rigid braces gaining accurate engine motion.
 Top-building attribution, incomplete captured geometry/material visibility and
 any remaining reconstruction softness remain explicit limits.
+
+## 2026-10-08 NPCs blur in Explorer Cam, pixelate on the flat screen: walkers get camera-only motion
+
+Sean, on the Explorer Cam branch (build 9dab1fdc, log
+`edvr_gfx_20261008_111125.log`, eye dump `eye_111351_FinalCrisp`, settlement
+NPC standing and gesturing): the NPC blurs in Explorer Cam (stereo eyes,
+DLSS Performance) and looks pixelated on the flat first-person screen.
+Diagnosis by a read-only pass over the dump and log (notes and scripts in the
+worktree's `analysis\npc_blur\`):
+
+- **Eyes, MEASURED.** Of the NPC's 13,945 pixels (stencil 0x10), 13,943 take
+  path 2 (camera through depth) and 2 take engine records. 83% are unmarked,
+  14% stale and 2.6% pool-not-rig. Hidden and masked are 0, so history is
+  never refused. The DLSS input MV on the NPC is a median of 0.834 px, the
+  same as the static floor. Bias (reactive) is zero everywhere. The camera
+  path is healthy (rowsOk 16/16). The error sits on the moving limbs: the
+  head and arm's low-pass |T-C| is 2-3x the static baseline, while the
+  standing torso and legs sit at baseline. A WALKING NPC would be worse.
+- **Flat first person, INFERRED.** The VR world route runs flat DLAA. Stale
+  engine slots are REFUSED there (raw jittered pixels) unless steady detail
+  forgives them. Unslotted pixels take the camera term. That predicts blur
+  inside the NPC and raw pixels at its silhouette. There is no NPC-specific
+  pixel evidence yet.
+- **ruled out:** the avatar dither fade (EDVR's global write), because F's
+  heartbeat reads enabled_calls=0 in every window from 11:12 to 11:14:26,
+  with the global at -1 and at 0.
+- **Predates the Explorer Cam branch.** The branch changes no temporal,
+  engine-velocity, flat, weapon, screen-motion or world-route source (git
+  diff e1e8f82c..9dab1fdc).
+- **Plan (Sean, 2026-10-08): data first, then F1.** The next combined flight
+  takes two eye dumps with a WALKING NPC, one in Explorer Cam and one in plain
+  first person. F1 admits the NPC's skinned shading families to the
+  engine-record path, so the rig record's root pose pair gives root motion.
+  Admission is approved for those families only, if the dumps show the limb
+  residual after root motion is about 1 px or less. F2, per-vertex skinned
+  motion generalised from weapon motion, follows only if the limbs need it.
