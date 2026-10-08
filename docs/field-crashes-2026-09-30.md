@@ -5,6 +5,9 @@ block first.
 
 ## Status
 
+- **Removed 2026-10-08 (branch claude/remove-settlement-detail):**
+  `fix.settlement_detail` no longer exists, so the "set it to game" steps
+  below are moot and an old line is carried over as a retired setting.
 - **State (2026-09-30):** one open report, user 5: v0.18.0-rc.4 (build
   6ABC3FAC) in VR on Windows 10, WMR's OpenXR runtime at 60 Hz (2048x2556
   per eye), RTX 3080 10 GB, DLSS preset K at HMD Quality 0.85,
