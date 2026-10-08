@@ -22,7 +22,23 @@ namespace cel = edvr::celestial;
 
 bool g_enabled = false, g_failed = false;
 FaultBudget g_budget("celestial motion", 3);
-void setLive() { detail::g_celestialLive = g_enabled && !g_failed; }
+
+// The supercruise gate (celestial_motion.h): what Status.json said at the last celestialMotionNoteStatus. Unset until the first
+// one arrives, which counts as off. Render thread writes it; setLive (any thread, from Configure) only reads it.
+enum Gate : uint8_t { kGateUnset = 0, kGateOn, kGateOffNormal, kGateOffUnknown };
+Gate g_gate = kGateUnset;
+constexpr uint32_t kMaxGateLines = 32;
+uint32_t g_gateLines = 0;
+bool g_resetPending = false;   // Configure (any thread) changed the module's own switch: the render thread drops the old frames' state
+const char* gateName(Gate g) {
+    switch (g) {
+        case kGateOn: return "on";
+        case kGateOffNormal: return "off (not supercruise)";
+        case kGateOffUnknown: return "off (status unknown)";
+        default: return "off (no status yet)";
+    }
+}
+void setLive() { detail::g_celestialLive = g_enabled && !g_failed && g_gate == kGateOn; }
 
 uint64_t qpc() {
     LARGE_INTEGER v{};
@@ -100,6 +116,8 @@ struct Counters {
     uint64_t frames = 0, draws = 0, captured = 0;
     uint64_t declined[kDecCount] = {};
     uint64_t consumerCalls = 0, eyeFrames = 0, patches = 0, matched = 0, unmatched = 0, bodies = 0, behind = 0, offscreen = 0, records = 0, uploads = 0;
+    uint64_t gatedFrames = 0;   // boundaries with the supercruise gate closed: no capture, no records
+    uint64_t shellRecords = 0;  // records of a body whose boxes reach the eye plane: the shell holds their pixels
     uint64_t fallbacks[cel::kFbCount] = {};
     double maxDisplacement = 0.0;
     uint64_t pixels = 0;
@@ -134,6 +152,28 @@ uint32_t g_stamp = 0;               // the boundary count; a frame's draws and i
 uint64_t g_lastReport = 0;
 bool g_declineNoted[kDecCount] = {};
 bool g_fallbackNoted[cel::kFbCount] = {};
+constexpr uint32_t kMaxBodyNames = 16;   // distinct radii (to a km) named in the log per session
+long long g_bodyKm[kMaxBodyNames] = {};
+uint32_t g_bodiesNamed = 0;
+
+// What was captured does not cross a change of the gate (or of the module's own switch): both eyes' lists and stamps, so the next
+// frame's first patch finds no previous frame. The record buffers stay; they are not bound while the gate is closed.
+void dropCaptured() {
+    for (EyeState& e : g_eye) {
+        e.uploadedValid = false;
+        e.n[0] = e.n[1] = 0;
+        e.stamp[0] = e.stamp[1] = kNever;
+        e.cur = 0;
+        e.builtStamp = kNever;
+    }
+}
+// The watched buffers and their shadows, emptied: the write tees' first test (celestialMotionAnyWatched) goes false and every
+// Map/Unmap the game makes passes them by with one load.
+void clearWatches() {
+    for (Watch& w : g_watch) { w.res = nullptr; w.role = kRoleNone; w.valid = false; w.bytes = 0; w.mapped = nullptr; }
+    g_watched = 0;
+    detail::g_celestialAnyWatched = false;
+}
 
 void fail(const char* why) {
     if (!g_failed) Log::get().note("celestial motion: stood down (%s); planets keep the camera's motion.", why);
@@ -284,6 +324,34 @@ void noteFallbacks(int eye, const EyeState& e) {
     }
 }
 
+// Each distinct body radius (to a km) the patch draws show, named once per session, 16 at most: how far its nearest patch is, whether its
+// boxes reach the eye plane (a straddling body's pixels are held to its radial shell), and what the build did with it. Only the first body of
+// a session used to be named; this answers which bodies -- landable, non-landable, gas giants -- the patch shader draws.
+void noteBodies(int eye, const EyeState& e) {
+    const cel::BuildResult& r = e.result;
+    for (uint32_t b = 0; b < r.bodies && b < cel::kMaxGroups; ++b) {
+        const cel::BodyResult& body = r.body[b];
+        const long long km = std::llround(static_cast<double>(body.radius) / 1000.0);
+        bool seen = false;
+        for (uint32_t i = 0; i < g_bodiesNamed && !seen; ++i) seen = g_bodyKm[i] == km;
+        if (seen) continue;
+        if (g_bodiesNamed >= kMaxBodyNames) return;
+        g_bodyKm[g_bodiesNamed++] = km;
+        char outcome[96];
+        if (body.ok) std::snprintf(outcome, sizeof outcome, "record bound, delta %.1f m", body.displacement);
+        else if (body.skip == cel::kSkipBehind) std::snprintf(outcome, sizeof outcome, "wholly behind the eye, no record");
+        else if (body.skip == cel::kSkipOffscreen) std::snprintf(outcome, sizeof outcome, "off the eye's pixels, no record");
+        else std::snprintf(outcome, sizeof outcome, "no record (%s)", cel::fallbackName(body.fallback));
+        Log::get().note("celestial motion: body %u of %u named: radius %lld km, nearest patch %.0f km away, %u patch(es), %s; %s (eye %d, frame %u). "
+                        "Said once per radius, to a km, 16 at most.%s",
+                        g_bodiesNamed, kMaxBodyNames, km, body.nearest / 1000.0, body.patches,
+                        body.skip == cel::kSkipBehind ? "straddles the eye plane: n/a, wholly behind it"
+                                                      : (body.straddle ? "straddles the eye plane: yes, its pixels are held to the radial shell"
+                                                                       : "straddles the eye plane: no"),
+                        outcome, eye, g_stamp, g_bodiesNamed == kMaxBodyNames ? " The 16th: no more radii are named." : "");
+    }
+}
+
 bool recordsImpl(ID3D11DeviceContext* ctx, int eye, const float tanNow[4], int w, int h, CelestialEyeRecords* out) {
     ++g_win.consumerCalls;
     EyeState& e = g_eye[eye];
@@ -311,9 +379,11 @@ bool recordsImpl(ID3D11DeviceContext* ctx, int eye, const float tanNow[4], int w
         g_win.behind += r.behind;
         g_win.offscreen += r.offscreen;
         g_win.records += r.records;
+        for (uint32_t k = 0; k < r.records; ++k) g_win.shellRecords += r.body[r.order[k]].shell ? 1u : 0u;
         for (uint32_t k = 0; k < cel::kFbCount; ++k) g_win.fallbacks[k] += r.fallbacks[k];
         if (r.maxDisplacement > g_win.maxDisplacement) g_win.maxDisplacement = r.maxDisplacement;
         noteFallbacks(eye, e);
+        noteBodies(eye, e);
         if (r.records && !g_noted[1]) {
             g_noted[1] = true;
             const cel::BodyResult& nb = r.body[r.order[0]];
@@ -367,28 +437,42 @@ void report() {
     const double buildUs = c.eyeFrames ? static_cast<double>(c.buildTicks) * usPerTick() / eyeFrames : 0.0;
     const double teeUs = c.teeCopies ? static_cast<double>(c.teeTicks) * usPerTick() / static_cast<double>(c.teeCopies) : 0.0;
     const double totalMs = (static_cast<double>(c.captureTicks) + static_cast<double>(c.buildTicks) + static_cast<double>(c.teeTicks)) * usPerTick() / 1000.0 / frames;
+    using ull = unsigned long long;
+    // A window the gate held closed throughout has nothing else to say: one short line. A line that never appears means the
+    // module never ran; this one says it ran and stood aside (and the transition lines say why).
+    if (c.frames > 0 && c.gatedFrames >= c.frames) {
+        Log::get().note("celestial motion 5s: frames=%llu gated-off=%llu (supercruise gate: %s); no planet patch capture, no records, no path-12 pixels this window",
+                        static_cast<ull>(c.frames), static_cast<ull>(c.gatedFrames), gateName(g_gate));
+        return;
+    }
+    // Three lines, each well under the 1000-character budget at 20-digit counters (the rig prints and pins the worst): the capture, then
+    // the consumer's census, then the records, the tee, the cost and the gate. The first keeps the old key and now carries the gate's count.
     Log::get().note(
-        "celestial motion 5s: frames=%llu draws=%llu captured=%llu declined[off-eye=%llu unwatched=%llu no-b0=%llu no-b2=%llu size=%llu "
-        "constants=%llu duplicate=%llu cap=%llu]; consumer=%llu eye-frames=%llu patches/frame=%.1f bodies/frame=%.1f (behind=%llu off-screen=%llu) "
-        "matched/frame=%.1f unmatched=%llu; fallback[no-previous-frame=%llu no-previous-body=%llu no-match=%llu implausible=%llu disagree=%llu]; "
-        "records=%llu (%.2f/frame) uploads=%llu max|t|=%.1f m/frame pixels=%s; tee[map=%llu update=%llu invalidated=%llu watched=%u copy=%.2fus]; "
-        "cpu[capture=%.2fus/draw build=%.1fus/eye-frame total=%.3f ms/frame]",
-        static_cast<unsigned long long>(c.frames), static_cast<unsigned long long>(c.draws), static_cast<unsigned long long>(c.captured),
-        static_cast<unsigned long long>(c.declined[kDecOffEye]), static_cast<unsigned long long>(c.declined[kDecUnwatched]),
-        static_cast<unsigned long long>(c.declined[kDecNoB0]), static_cast<unsigned long long>(c.declined[kDecNoB2]),
-        static_cast<unsigned long long>(c.declined[kDecSize]), static_cast<unsigned long long>(c.declined[kDecConstants]),
-        static_cast<unsigned long long>(c.declined[kDecDuplicate]), static_cast<unsigned long long>(c.declined[kDecCap]),
-        static_cast<unsigned long long>(c.consumerCalls), static_cast<unsigned long long>(c.eyeFrames),
+        "celestial motion 5s: frames=%llu gated-off=%llu draws=%llu captured=%llu declined[off-eye=%llu unwatched=%llu no-b0=%llu no-b2=%llu size=%llu "
+        "constants=%llu duplicate=%llu cap=%llu]",
+        static_cast<ull>(c.frames), static_cast<ull>(c.gatedFrames), static_cast<ull>(c.draws), static_cast<ull>(c.captured),
+        static_cast<ull>(c.declined[kDecOffEye]), static_cast<ull>(c.declined[kDecUnwatched]),
+        static_cast<ull>(c.declined[kDecNoB0]), static_cast<ull>(c.declined[kDecNoB2]),
+        static_cast<ull>(c.declined[kDecSize]), static_cast<ull>(c.declined[kDecConstants]),
+        static_cast<ull>(c.declined[kDecDuplicate]), static_cast<ull>(c.declined[kDecCap]));
+    Log::get().note(
+        "celestial motion 5s (2/3): consumer=%llu eye-frames=%llu patches/frame=%.1f bodies/frame=%.1f (behind=%llu off-screen=%llu) "
+        "matched/frame=%.1f unmatched=%llu; fallback[no-previous-frame=%llu no-previous-body=%llu no-match=%llu implausible=%llu disagree=%llu]",
+        static_cast<ull>(c.consumerCalls), static_cast<ull>(c.eyeFrames),
         static_cast<double>(c.patches) / eyeFrames, static_cast<double>(c.bodies) / eyeFrames,
-        static_cast<unsigned long long>(c.behind), static_cast<unsigned long long>(c.offscreen),
-        static_cast<double>(c.matched) / eyeFrames, static_cast<unsigned long long>(c.unmatched),
-        static_cast<unsigned long long>(c.fallbacks[cel::kFbNoPrevFrame]), static_cast<unsigned long long>(c.fallbacks[cel::kFbNoPrevBody]),
-        static_cast<unsigned long long>(c.fallbacks[cel::kFbNoMatch]), static_cast<unsigned long long>(c.fallbacks[cel::kFbImplausible]),
-        static_cast<unsigned long long>(c.fallbacks[cel::kFbDisagree]),
-        static_cast<unsigned long long>(c.records), static_cast<double>(c.records) / eyeFrames, static_cast<unsigned long long>(c.uploads),
+        static_cast<ull>(c.behind), static_cast<ull>(c.offscreen),
+        static_cast<double>(c.matched) / eyeFrames, static_cast<ull>(c.unmatched),
+        static_cast<ull>(c.fallbacks[cel::kFbNoPrevFrame]), static_cast<ull>(c.fallbacks[cel::kFbNoPrevBody]),
+        static_cast<ull>(c.fallbacks[cel::kFbNoMatch]), static_cast<ull>(c.fallbacks[cel::kFbImplausible]),
+        static_cast<ull>(c.fallbacks[cel::kFbDisagree]));
+    Log::get().note(
+        "celestial motion 5s (3/3): records=%llu (%.2f/frame, %llu with a shell) uploads=%llu max|t|=%.1f m/frame pixels=%s; "
+        "tee[map=%llu update=%llu invalidated=%llu watched=%u copy=%.2fus]; cpu[capture=%.2fus/draw build=%.1fus/eye-frame total=%.3f ms/frame]; "
+        "gate=%s (%llu of %llu frames gated off)",
+        static_cast<ull>(c.records), static_cast<double>(c.records) / eyeFrames, static_cast<ull>(c.shellRecords), static_cast<ull>(c.uploads),
         c.maxDisplacement, pixels,
-        static_cast<unsigned long long>(c.teeMap), static_cast<unsigned long long>(c.teeUpdate), static_cast<unsigned long long>(c.teeInvalid),
-        g_watched, teeUs, captureUs, buildUs, totalMs);
+        static_cast<ull>(c.teeMap), static_cast<ull>(c.teeUpdate), static_cast<ull>(c.teeInvalid),
+        g_watched, teeUs, captureUs, buildUs, totalMs, gateName(g_gate), static_cast<ull>(c.gatedFrames), static_cast<ull>(c.frames));
 }
 }  // namespace
 
@@ -396,8 +480,43 @@ void report() {
 // The public surface
 // ---------------------------------------------------------------------------------------------------------------
 void celestialMotionConfigure(bool enabled) {
-    g_enabled = enabled;
+    // Turning the module on or off (the pass came or went) is a gap in the frames like any other: the gate decides afresh at the next
+    // status (until then the module is not live), and the render thread drops what was captured before it does. Only flags move here,
+    // as before. A repeat of the same setting changes nothing.
+    if (g_enabled != enabled) {
+        g_enabled = enabled;
+        g_gate = kGateUnset;
+        g_resetPending = true;
+    }
     setLive();
+}
+
+void celestialMotionNoteStatus(bool known, bool supercruise) {
+    if (!g_enabled) return;
+    if (g_resetPending) {
+        g_resetPending = false;   // (the 32-line cap on the gate's own lines is the session's: a pass that comes and goes does not reset it)
+        dropCaptured();
+        clearWatches();
+    }
+    const Gate want = !known ? kGateOffUnknown : (supercruise ? kGateOn : kGateOffNormal);
+    if (want == g_gate) return;
+    const Gate was = g_gate;
+    g_gate = want;
+    // Whatever the direction, what was captured does not cross the change; closing also unwatches every buffer, so the game's
+    // thousand Maps a frame pass the tees by with their first test.
+    dropCaptured();
+    if (want != kGateOn) clearWatches();
+    setLive();
+    if (g_gateLines >= kMaxGateLines) return;
+    ++g_gateLines;
+    const char* why = want == kGateOn ? "Status.json Flags says supercruise"
+                    : want == kGateOffNormal ? "Status.json Flags says not supercruise"
+                                             : "supercruise status unknown: no Flags read from Status.json (menus, a missing file) or the journal watcher is off";
+    Log::get().note("celestial motion: gate %s at frame %u, was %s (%s).%s%s",
+                    want == kGateOn ? "ON" : "OFF", g_stamp, gateName(was), why,
+                    want == kGateOn ? " Planet patch draws are read and bodies take their own motion."
+                                    : " No planet patch capture, no records bound, no path-12 pixels; the camera term carries the world.",
+                    g_gateLines == kMaxGateLines ? " (the last gate line this session; later changes are not logged)" : "");
 }
 
 void celestialMotionNoteDraw(ID3D11DeviceContext* ctx) {
@@ -488,9 +607,12 @@ void celestialMotionNotePixels(uint32_t pixels) {
 }
 
 void celestialMotionFrameBoundary() {
-    if (!detail::g_celestialLive) return;
+    // Armed (configured on, not stood down), live or not: a closed gate still counts its frames and keeps the 5 s line alive, so a
+    // log can tell "the gate held" from "the module never ran".
+    if (!g_enabled || g_failed) return;
     ++g_stamp;
     ++g_win.frames;
+    if (g_gate != kGateOn) ++g_win.gatedFrames;
     const uint64_t now = qpc();
     LARGE_INTEGER q{};
     QueryPerformanceFrequency(&q);
@@ -506,20 +628,20 @@ void celestialMotionShutdown() {
     for (EyeState& e : g_eye) {
         e.buffer.Reset();
         e.srv.Reset();
-        e.uploadedValid = false;
-        e.n[0] = e.n[1] = 0;
-        e.stamp[0] = e.stamp[1] = kNever;
-        e.cur = 0;
-        e.builtStamp = kNever;
     }
-    for (Watch& w : g_watch) { w.res = nullptr; w.role = kRoleNone; w.valid = false; w.bytes = 0; w.mapped = nullptr; }
-    g_watched = 0;
-    detail::g_celestialAnyWatched = false;
+    dropCaptured();
+    clearWatches();
     g_win = Counters{};
     std::memset(g_noted, 0, sizeof g_noted);
     std::memset(g_declineNoted, 0, sizeof g_declineNoted);
     std::memset(g_fallbackNoted, 0, sizeof g_fallbackNoted);
     g_lastReport = 0;
+    g_stamp = 0;
+    g_gate = kGateUnset;
+    g_gateLines = 0;
+    g_resetPending = false;
+    g_bodiesNamed = 0;
+    setLive();
 }
 
 }  // namespace edvr
