@@ -30,10 +30,10 @@
     shared record (mode, speed, range).
   - H6 **READ + FLOWN:** +0x48C is 3 at TAB (first call), 4 relative lock,
     0 at exit; mirrored from a shared record, so watch it, never write it.
-  - H7 **READ (0a-2):** the update's collision is a 0.4 m sphere sweep, or
-    a 0.8 m ray when the pose is static, in FUN 0x1091140, which only this
-    activity calls; 0.70 = 0.30 body surface + 0.40 radius. Neutralise it
-    with a CodeHook on 0x1091140 while placed (option A below).
+  - H7 **READ (0a-3):** the push to y 2.150 is FUN 0x108F1B0 (commander's
+    box + 0.25, edits the point in place), which the sweep (0x1091140) was
+    hiding; one caller, 0x10728B6. Relay it too while placed. The F0 stop at
+    0.70 is probably the same box (INFERRED).
 - **Ruled out:**
   - Counting presses as the source of truth, because it has no origin
     (6ac.6d), and the free camera can be moved by hand after the preset is
@@ -51,12 +51,10 @@
 - **F0 FLOWN** on Frontier, 2d103d84, `edvr_gfx_20261007_172543.log`,
   training scenario; findings at the end. Frontier's ini: probe off again,
   `head_offset_gate = 0`.
-- **Next: F1 on Frontier.** db609243 is installed and verified there
-  (2026-10-07 19:30). The live ini has `explorer_cam = on`, the eye keys at
-  their defaults, and the probe on. F1 checks H3 (no holes, no body
-  culling), the pop at entry, the lock press, walking and turning, and that
-  the HMD pose is not doubled. Grep `explorer cam:`. Then tune the eye keys
-  and start Phase 2 (hide the head).
+- **Next:** relay 0x108F1B0 (F1b) and press FreeCamToggleHUD (UI activity
+  0x47C7640); then F2 logs the eye matrix (Eye interface id 0x5F501E8,
+  +0x268) and the call rate and mode byte of 0x2DF14C0 on foot, for a single
+  F5 key. Details in the 0a-3 section.
 - **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off;
   all three 0b instruments plus the VR camera census). Removed at arc close.
 
@@ -447,8 +445,8 @@ or disassembly; INFERRED = reasoned. Line numbers are `decomp_1071980.txt`.
 3. Lines 998-1019: 0x108F1B0 and 0x108EEE0 only count overlaps (other
    entities, and the commander as a box expanded by 0.25 for a humanoid,
    0x5F518B0; 1.0 SRV, 2.0 ship; 5 m neighbour box). Counts feed the shared
-   flag +0x1D and +0x47C, never the position; asm 0x10728B6-0x1072954
-   discards the edited copy.
+   flag +0x1D and +0x47C. CORRECTED in 0a-3: 0x108F1B0 also edits the point
+   and writes it back, and 0x1072A8D adopts it.
 
 **Why 0.70 and 0.93 (INFERRED).** The commander is not ignored: the sweep
 passes the commander handle as its ignore entity only when 0x108EBC0 is
@@ -547,3 +545,103 @@ Keys removed: `[fix]` head_offset_gate, head_offset_view_count, head_offset_inte
 `[advanced]` head_offset_view, dump_camera_on_external_cam; `[openvr]` (whole section) head_offset_right, _up, _forward,
 head_yaw_degrees, head_offset_external_only, _game_poses, _max_stale_frames; `[experimental]` keyless_camera,
 hold_frames_on_external_cam. Listed in `config_test`'s `kRetiredKeys`.
+
+## 2026-10-07 Phase 0a-3: the box push, the neck, the camera UI
+
+Build 332841, READ or INFERRED as marked. Tools: `analysis\decomp\explorer_cam\`.
+
+**1. The y = 2.150 push (READ).** It is FUN 0x108F1B0, not 0x108F420, and
+0a-2 was wrong that it only counts: it pushes a copy of the point out of
+each nearby entity's box and writes the copy back (`movups [r15],xmm0` at
+0x108F40C). One caller (0x10728B6, return address 0x10728BB), no data refs;
+its pusher 0x1410905C0 is called only from it. For the commander (context
+4) the box is grown by 0.25 (global 0x5F518B0, from 0x4DEB258; SRV 1.0,
+ship 2.0) and the point leaves by the nearest face, so the top is height +
+0.25 and 2.150 means height 1.90 (box from the bounds component
+DAT_145F02CF8 +0x110, else the humanoid component +0x1E0/+0x200,
+INFERRED). The F0 stop at z 0.70 fits half-width 0.45 + 0.25.
+Flow after the call: count 0 and 0x108EEE0 count 0 -> 0x1072ABF, no change.
+Total >= 2 -> 0x107295C, flag only. Total 1 -> 0x108F420 and 0x108F7E0 (a
+move jumps to 0x107295C, edit dead), then if the sweep returns 0 (relay) or
+r12b is set -> 0x1072A8D reloads the pose from [rbp+0x40..0x70], pushed
+origin included. A real sweep hit reloads the old pose instead, which hid
+this in F0. 0x108F420 is a keep-inside clamp and cannot raise y to a
+constant from below.
+Bypass: relay 0x108F1B0, return 0 for rcx = placed activity, [rsp] ==
+0x10728BB, leaving [rdx] untouched. Prologue `48 8B C4 55 53 56 41 56 41 57
+48 8B EC 48 81 EC 80 00 00 00`; boundaries 3, 4, 5, 6, 8, 10, 13, 20; no
+rip-relative bytes. Loses only keep-out from other ships and SRVs.
+
+**2. The neck (INFERRED, not yet read at runtime).** The commander has a
+HumanoidEyeComponent (pool block 0x9A0, ctor 0x19D2310). Its view-point
+interface (type id global 0x5F501E8, vtable 0x51FCE98, at component +0x58)
+returns, at slot +0x20, a 4x4 at interface +0x268 (also +0x1A8, +0x1E8,
++0x228, and a vec4 at +0x2A8). Camera activity 0x1073830 copies that matrix
+straight to its pose +0x70 (READ), so it is world space, like the free
+camera's. Root-relative eye = eye x inverse(target frame), both reachable
+from the activity: entity = 0x647D90(handle at +0x410), component =
+`(*(entity+8))->vtable[0](entity+8, id)`, the idiom of 0x1093140. That
+activity also lerps FOV by an aim value, so it may be the on-foot first-person
+camera. Whether it follows stance and weapon draw is unread; F2 logs its
+y relative to the root through crouch and draw.
+
+**3. Camera UI and a label correction (READ).** `OnEnter` 0x1099C45/8A/CF:
++0x4F8 = ToggleRotationLock, +0x500 = FixCameraWorldToggle, +0x508 =
+FixCameraRelativeToggle. ToggleFreeCam is read only by the vanity controller
+and only in modes 1 and 2, so TAB cannot take 4 to 5. Sean's binds: World is
+GamePad_LThumb only, Relative is F9/RThumb, TAB is ToggleFreeCam. F2 should
+log the three pressed ints. Hide UI is `FreeCamToggleHUD` (Sean: LeftControl,
+pad FaceUp = Y). The VanityCameraUIActivity update 0x47C7640 (rcx = object;
+`40 55 41 56 48 8D AC 24 48 FF FF FF 48 81 EC B8 01 00 00`, stolen 19) polls
+the handle at +0x1D8 (pressed int at +0x1C) and toggles byte +0x1A0 (1 =
+hidden, INFERRED), calls Flash "HideUI" and fires VanityCamGui_Hide/Show.
+Read +0x1A0 first so the press is not a second toggle.
+
+**4. F5 from anywhere (READ + INFERRED).** The camera suite is class
+VesselCameraMountControl (name at 0x532FBC8, vtable 0x532FB98, ctor
+0x2DEBFB0), the only reader of ToggleFreeCam. Its update is 0x2DF14C0 (rcx =
+controller; `48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18`, stolen 15, then
+rbx, rcx, add rcx 0xF8). Handles, pressed int at +0x1C: +0x310
+PhotoCameraToggle (open when mode 0, close otherwise), +0x318/+0x320 scroll,
++0x328 ToggleFreeCam, +0x340 QuitCamera, +0x350..+0x398 VanityCameraOne..Ten.
+State: mode byte +0x3E0 (= shared record +0x30): 0 closed, 1 or 2 suite on a
+preset, 3 attached free, 4 relative lock, 5 world fixed (detached); +0x3E1
+free-cam pending; +0x2E8 preset kind (0: TAB gives 3; 1: TAB toggles 1 and
+2). Opening needs 0x2DFDE90 true; TAB needs shared +0x1D clear. A second
+press next frame is allowed: SetMode runs at once and no timer is read.
+Closing: +0x310 from any mode. Not proven: that 0x2DF14C0 runs every frame on
+foot with the suite closed; the function must poll +0x310 in mode 0, so I
+expect it. Fallback if it does not: 0x2DF4A00 (humanoid controls, per
+frame on foot, `40 55 41 54 41 55 41 56 41 57 48 81 EC 10 05 00 00`, stolen
+17).
+
+
+## 2026-10-07 F1 flown: placed, but lifted onto the helmet
+
+Frontier, v0.18.3-18-gdb609243 (log version line checked),
+`edvr_gfx_20261007_194702.log`.
+
+- **What worked.** Placement began on the second update after entry (TAB at
+  frame 12277). The lock press took (3->4), the pose was written 2,755
+  times, the collision relay bypassed 2 calls per update and forwarded 1
+  in total, and there were no faults.
+- **The defect.** The post-update local origin read (0.000, 2.150, 0.100)
+  every second, with up set live to 1.68, then 1.62, then 1.58. Sean saw the
+  camera sitting on top of his helmet, and his eye dump at 19:50:04 shows
+  it. 0a-3 names the cause: 0x108F1B0 pushes the point out of the
+  commander's box (height 1.90 + 0.25 pad).
+- **Release.** At 19:49:49 +0x48C went 4->5 and Explorer Cam released, as
+  designed. Sean pressed what he calls his free-camera key; 0a-3 reads mode
+  5 as FixCameraWorldToggle (pad LThumb in his binds). F2 logs the pressed
+  ints.
+- **Sean's asks.** Follow the neck through the weapon stance. Hide the
+  camera UI. Use one EDVR key, F5 (free in his binds and all 30 stock
+  schemes): it enters Explorer Cam from first person or from the stock
+  camera, and leaves to first person. The game's own camera key and TAB
+  stay stock.
+
+**0a-3 checked by the overseer against the exe.** The prologues of
+0x108F1B0, 0x47C7640, 0x2DF14C0 and 0x2DF4A00 match, and all four are
+8-byte aligned. 0x108F1B0's only reference is the call at 0x10728B6, and
+0x47C7640's is the job thunk's jmp at 0x4761903. 0x2DF14C0 has no direct
+reference (vtable only).
