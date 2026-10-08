@@ -30,8 +30,8 @@
   entries describe coverage repairs. The 09-28 bytecode proof supersedes their
   native-marker/bypass interpretation: all five alleged native pairs and BA58
   were EDVR-generated.
-- **Other open work:** phase 2 rigid builder/per-part history and bones for
-  walkers/articulated parts (2026-10-08 NPC diagnosis, entry at the end); ships, evaluated-but-undrawn movers, flat-source
+- **Other open work:** walkers (F10 entry at the end: keyed pairs, no per-part
+  builder; bones F2 open); ships, evaluated-but-undrawn movers, flat-source
   aliasing; stale cockpit (low priority); ps_91F8/ps_A607 owner/coverage.
   Flight 5/6 and 162703 cover the fixed on-foot/hangar paths. Boarding flicker:
   LOD governor (removed 2026-10-08, branch claude/remove-settlement-detail,
@@ -42,7 +42,8 @@
   content-pairing A, fix-round five hypotheses, on-foot camera/packing
   assumptions, fetch cost, cockpit depth pre-pass/bias, motion-cost
   interpretations, wrong joined station motion, close-range
-  reconstruction-floor-only diagnosis.
+  reconstruction-floor-only diagnosis; F10: DE54 as the NPC's, the pixel probe
+  naming it, a per-part rotation model.
 - **Validation / delivery:** absolute build.bat --jobs 4 passed all gates:
   production DLLs, 82 pooled jobs + 4 quiet, 262-key contract and installer
   resources. Focused/full-build engine rig: 1686 checks; prior real corpus:
@@ -54,8 +55,10 @@
   rows/scatter, actual EP/EN ownership exports and correct brace
   motion/coverage; inspect remaining WORLD and building pixels separately.
   Visual verification is open. Native primary records stay unchanged; no bones,
-  estimation or generic pool matching. New shader admission: NPC skinned
-  families only, approved by Sean 2026-10-08 IF walking-NPC dumps support F1.
+  estimation or generic pool matching. NPC F1 (Sean 2026-10-08: NPC families
+  only, if the dumps support it): the F10 entry plans four keyed pairs and
+  kMaxFamilies 10 -> 16, unbuilt; rigid parts gain motion, skinned ones lose
+  only the stale-slot refusal. Skinned limbs wait for a previous palette (F2).
 
 ## Premise
 
@@ -3792,3 +3795,162 @@ translation and up to 12.2 degrees of rotation per record. INFERRED: those are
 the NPC's per-part records (the projection onto the image was not verified).
 If so, F1 is per-part rigid motion, not root-only, and its limb residual should
 sit below the 0.71 px a root-only model leaves.
+
+### 2026-10-08 F10 (6f47ea53): the NPC is one rigid body plus a skinned body, and its pairs are unkeyed
+
+Log edvr_gfx_20261008_133931.log (v0.18.3-54-g6f47ea53, build matched),
+Frontier, Explorer Cam. Dumps 134235 (NPC walking at 10.9 m, not the planned
+6 m: raw depth .0023, 4,394 px of stencil 0x10), 134247 (head turned: no NPC
+pixel; 418,854 px of 0x10 are the commander's own gear), 134323 (NPC walking
+away at 5.1 m, 21,724 px). Scripts f1-f35.py, f10lib.py, ev_candidates.cpp (the
+patcher and WARP identity harness) are in analysis\npc_blur; no DLL was built.
+
+**Which draws (Q1).**
+- Pixel probe, MEASURED: it cannot name them. Its atlas takes the first
+  target's format (the HDR colour, rt 890/1259/775) and declines every draw
+  into another target. The ledger's colour pass runs in rt 124/500 (D3: 9,434
+  rows) against 176 rows in rt 890, and the probe copied 174 draws. Its 5/3/5
+  "changed" draws are blend and post draws (vs 7E38A6AA, 963B52C7, 24DE25E4,
+  0357BBB2 particles, F8FA801F quad; in D3 also 7F9B650E, a pool record 0.4 m
+  behind the camera). None is the NPC's.
+- Record route, MEASURED: the moving, certified-joined records that project
+  onto the NPC (Q3) are read through the instance stream (inst_<stamp>_<frame>
+  .bin: 8 bytes an instance, the record index first; StartInstanceLocation picks
+  the entry; one instance a draw). D3 eye A colour pass (census frame 0 =
+  ledger frame 11711; its listing reaches #4282 of 9,990, so eye B and all of
+  D1's colour pass lie past the truncation): vs 8B589D25B2A0ADDC + ps
+  7268762D11A610F2, 15 draws (index counts 411, 5928, 4662, 2115, 1032, 168,
+  5967, 1344, 1344, 192, 159, 426, 579, 426, 579), stencil ref 121 = 0x79, the
+  0x10 bit; vs 7B0DC42D383F694C + ps 0DF03E64DF9DBEF1, 2 draws (10842, 60),
+  ref 0x79; vs 114AF608F86D9ED8 + ps A17504A2627767F2, 2 draws (78, 78), ref
+  0x4E7 (no 0x10). Each part also draws depth-only (vs F516BF02... + ps
+  B40B0462..., no colour output). Eye B repeats in rt 500; D1 in rt 231/769.
+- Diff, MEASURED: all 12 distinct index counts of the 15 8B58 draws are absent
+  from D2 (its other D3-only keys: 123, 180, 267, 57729). The diff alone cannot
+  split NPC from props (the pairs draw 68/34/45 a frame in D1/D2/D3 and the
+  commander's gear: 18 7B0D and 4 8B58 draws in D2 use records within 2.5 m of
+  the camera); the record link does.
+- Skinned half, MEASURED: 20 more records (base word != 0, palette bases
+  7656-10383, the same list in D1, D3 and every ledger frame) sit at the NPC's
+  feet, 1.1 m under the rigid parts, and move with it (11.4 mm in step one).
+  They are read by 17 draws of 7B0D/0DF03E64 (index sum 141,936, max 22,344), 3
+  of 114A/A175 (8136, 9222, 426), 1 of vs D99AFDC250D19A3F + ps
+  E86271E464CCDC1D (10,932) and 1 of vs 61AE8EB0 + ps 451A82D4 (510, the one
+  pair already keyed). Colour-pass index count, rigid : skinned = 36,390 :
+  171,162. INFERRED as the pixel share (17 : 83): the eyemesh vertex capture was
+  declined (0 bytes) and no tool rasterises a draw.
+- ruled out: the DE54 draws (ps 3AF0, 91F8, 03B1) are the NPC's, because their
+  records sit 24 m to 10 km from the camera (medians 65-200 m), none of the
+  14/17 NPC records is read by any of their 107/169 draws, and the pair draws
+  with the NPC out of view (D2: 74 draws, 3 with the 0x10 bit).
+- ruled out: the pixel probe names the opaque NPC draws, because it declined
+  the whole G-buffer pass (rt 124/500) on its format rule.
+
+**The shaders (Q2).** MEASURED from the dumped bytecode (the shaders folder
+holds 1,199 files written on nine dates since 9/6; this run wrote 16, and every
+pair below was in it by hash).
+- vs 8B58, 7B0D, 114A (and F516) declare t33 (336 B) and t38 (48 B) and index
+  t33 with INSTANCEANDMODELDATAINDEX.x (v0.x, the stream's first word): pose at
+  +16, quaternion at +8, palette path only when record word 0 (the base) is not
+  0. They export FACEINVARIANT.x = bfi(31,0,v0.x,flag) at register 0 and
+  SV_POSITION at register 4; the pixel shaders take v0.xy, write SV_Target0-3
+  and discard.
+- Patcher, MEASURED (ev_candidates.cpp, the corpus_identity harness over this
+  dump on WARP, under the build lock): derive, patch, create, reflect, o0..o3 +
+  depth bit-identical and MRT6 = 2 slot + 1 with the fragment's depth, all PASS
+  for 8B58/7268762D, 7B0D/0DF03E64, 114A/A175 and D99A/E86271E4 (controls 61AE/
+  451A, DE54/E46E, 03B1, 91F8 pass as before). Refused: DE54/3AF0 ("output
+  target 6 or above occupied": it already writes target 6), F516/B40B ("no
+  colour output"), D8FC/E875 ("no INSTANCEANDMODELDATAINDEX.x at v0").
+  The patcher is not what leaves the NPC alone: none of its pairs is in
+  kFamilies (ten vertex shaders; kMaxFamilies is 10). The old "position input
+  register holds another semantic" was DE54/91F8, which the harness patches.
+
+**Do the records land on the NPC, and what is left (Q3).**
+- Projection, MEASURED (d7.py read the VP rows as tangents; the form that
+  works is clip = (p - EN[275]) . rows 270..273, NDC onto the 2016 x 1949 eye):
+  D1 14 of 14 moving records land at x 1206-1238, y 960-1010, depth 10.9-11.4
+  m, inside the mask box (x 1178-1243, y 944-1100). D3 17 of 17 at x 1176-1252,
+  y 644-760, depth 5.0-5.6 m, inside x 1155-1282, y 608-952 (raw depth says
+  5.1 m). They cover head, torso and arms; none sits on the legs.
+- One body, MEASURED: a Kabsch fit of all moving NPC records, previous pose to
+  current, leaves a median 0.2-0.8 mm (max 0.8-3.5) at ordinary steps (D3 11711,
+  11712, 11715-11722; D1 8970, 8971, 8975); 3.7-5.7 mm only on the 97-134 mm
+  hitch frames. At 11712, 15 of 17 records share one 0.93 degree yaw step
+  (the other two 0.0 and 0.12). The rigid parts do not articulate; the walking
+  is in the skinned half. All NPC rigid
+  records are certified joined at the frame token (14/14, 17/17), as is every
+  moving record in the pool (29/29, 30/30); all 154/120 skinned records in the
+  pool carry no marker and previous = now.
+- The crops are not live steps, MEASURED: the NPC records advance 8.9, 10.7 mm,
+  then 119, 44, 30-41 mm per ledger frame (D3) and 9.8, 12.9, 134, 97, 40-50 mm
+  (D1); the log has a 196.9 ms frame at the arming and 34 head updates a second
+  through the window. Only pair k=1 is a live-sized step. Pairs k>=2 are 3-12 x
+  as far, which inflates every px/frame figure from a crop run (b5.py, 120917:
+  its 0.71 px was not checked against record steps).
+- Residual at the live-sized pair, median of blocks, px/frame, D3 (336 blocks,
+  5.1 m) / D1 (42, 10.9 m), against the motion measured beyond the camera term:
+  camera only (today) 1.40 / 0.93; one root translation (median record) 0.77 /
+  0.48; each pixel moved by its own record's pose pair 0.61 / 0.49; by its own
+  record's translation only 0.59 / 0.49; oracle uniform shift 0.58 / 0.42;
+  static-background floor 0.2-0.3. By band in D3 (camera only -> own record's
+  pose): torso 1.65 -> 0.54, pelvis 1.41 -> 0.52, head and shoulders 0.90 ->
+  0.93 (skinned neck and arms: no gain). Pairs k=4-9 agree (own record 0.59-0.89,
+  one root 0.51-0.80).
+- So F1 leaves about 0.5-0.8 px/frame, near this method's floor, inside Sean's
+  rule. A slot per draw already is per-part: the consumer reprojects each pixel
+  with its own record's pose pair, which beat one root pose at 5 m (0.59 vs
+  0.77) and tied it at 11 m.
+- ruled out: a separate per-part rotation model on the rigid parts, because
+  they fit one rigid body to 0.2-0.8 mm and rotation scored 0.61 against 0.59
+  for each record's translation alone.
+- not supported: a root translation for the skinned parts. The oracle shift
+  made the D3 shin and foot band worse (0.93 -> 1.23, n=29), the D1 band better
+  (1.66 -> 1.07, n=32) and left the head band alone.
+
+**What is wrong besides motion, MEASURED.** On the D00 flags of the NPC mask,
+D3: 12,587 px unmarked (58.0%), 8,415 stale (38.7%, engineKind 4: a background
+slot under the NPC's pixel, because its draws never write MRT6), 722
+pool-not-rig (3.3%, the keyed 61AE piece); D1: 2,588 / 1,646 (37.5%) / 160. The
+VR world route and the flat route refuse a stale slot unless the steady-detail
+rule keeps it. Keying the NPC's pairs gives those pixels their own slot and
+depth.
+
+**Fix A check (Q4), MEASURED.** vr world route refusal 5s, 19 treated windows
+13:44:03-13:45:33 (1,871 sampled frames): weapon = 0 in every one, against
+6,750 / 10,084 / 7,987 / 6,786 / 10,481 / 10,562 / 8,280 px per sampled frame
+at 12:08:27-12:08:57 in the pre-fix flight 120441 (NPC in view). The log has
+no in-view marker, but stale-refused per sampled frame follows the NPC: 7,568,
+3,591, 5,433 at 13:44:08-:18 and 7,102 at 13:45:33, against 0.6-1.4k at
+13:44:23-:53 (ground) and 0-134 at 13:44:58-13:45:28 (sky); pre-fix the same
+class read 5,616 / 7,006 / 3,809 at 12:08:32-:42. INFERRED: those are the NPC
+windows. The first-person refusal is gone; the stale class (+3-7k px a frame)
+remains, and it is what F1 removes.
+
+**F1, revised by the data (plan only; no key, no build).** Key the NPC's pool
+pairs. Admission is not "skinned families": the rigid body's pair 8B58/7268762D
+is the one that gains motion; the skinned pairs gain a slot write (stale to
+pool-not-rig, camera term, no refusal) and nothing else, because skinned
+records get no previous pose by design (engine_velocity_emit.h taints header
+word != 0).
+1. engine_velocity_families.h: four rows, 8B58/7268762D, 7B0D/0DF03E64,
+   114A/A175, D99A/E86271E4 (A4A19FAF/BE3EA29C also passes, needs the VS patch;
+   leave it out: 4 small draws near the camera).
+2. engine_velocity.h:112 kMaxFamilies 10 -> 16 (the static_assert at
+   engine_velocity.cpp:114 fails the build otherwise).
+3. Rig: the four pairs join the corpus list in engine_velocity_test.cpp (they
+   pass whole as of this entry); a consumer case that a base != 0 record under a
+   keyed pair lands in kind 3 (camera term, not 2/4/6) and a certified moving
+   base 0 record in kind 1. Mutants: kMaxFamilies left at 10 (build fails); a
+   row dropped (supportedPair assertion); the base != 0 record taken as joined
+   (the new case fails). No new config key.
+4. Flight on Frontier: the same three dumps plus a plain first-person pass.
+   Expected: NPC engineKind 4 -> 0, kind 1 on the rigid share, kind 3 on the
+   skinned share; stale-refused with the NPC in view back to <= 1.4k px a
+   frame. Watch the commander's own gear (D2's 418,854 px) and props, which
+   share these pairs and change class (stale or unmarked to joined or kind 3):
+   either the 2.08 px/frame own-body mis-registration improves or it regresses.
+   Cost: about 200 more substituted draws a frame on about 3k today.
+5. Not in F1: the skinned limbs and head (0.9 px a frame by band). F2 needs the
+   previous bone palette; the bones0/1 copies of this flight read all zeros, so
+   the other ping-pong buffer holding it is unproven (the base list is stable).
