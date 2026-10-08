@@ -130,6 +130,9 @@ void testIdentity() {
     const uint8_t fade16[16] = {0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
     check(sizeof(ecm::kAvatarFadePrologue) == 16 && std::memcmp(ecm::kAvatarFadePrologue, fade16, 16) == 0 && ecm::kAvatarFadeRva == 0x3DD6040 && ecm::kAvatarFadeRva % 64 == 0,
           "the avatar dither-fade prologue is 4C 8B DC 53 56 57 48 81 EC 10 01 00 00 48 8B 05 at +0x3DD6040 (64-byte aligned; the first 5 bytes are whole instructions)");
+    const uint8_t find16[16] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xFA};
+    check(sizeof(ecm::kFindJointPrologue) == 16 && std::memcmp(ecm::kFindJointPrologue, find16, 16) == 0 && ecm::kFindJointRva == 0xFDDB10 && ecm::kFindJointRva % 16 == 0,
+          "the skeleton FindJoint prologue is 48 89 5C 24 08 57 48 83 EC 20 48 8B 01 48 8B FA at +0xFDDB10 (16-byte aligned; the first 5 bytes are one whole instruction)");
     check(ecm::kFadeModeRva == 0x5E9DC28 && ecm::kFadeAmountRva == 0x601E088 && ecm::kFadeAuto == -1 && ecm::kOffAvatarFadeBlock == 0x378 && ecm::kOffAvatarFadeEased == 0x380 &&
               ecm::kOffFadeBlockEnabled == 0x90 && ecm::kOffFadeBlockAmount == 0x120,
           "the fade global is +0x5E9DC28 (-1 = auto), the amount float +0x601E088, the component's block pointer +0x378 and eased level +0x380, the block's enabled +0x90 and amount +0x120");

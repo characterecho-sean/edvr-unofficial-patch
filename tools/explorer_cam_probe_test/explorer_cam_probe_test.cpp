@@ -1415,25 +1415,27 @@ void testFadeCounter() {
     t::reset();
 }
 
-// ================================ Part E: the head joint (H) ================================
-// A synthetic game image: a reserved block whose offsets are the build's RVAs. It holds the humanoid component's vtable value, the two
-// skeleton interfaces' vtables (their slots point at trampolines placed at the EXACT RVAs the build has), the joint-name literals, the
-// skeleton type id and a container vtable. The functions behind the trampolines are native stubs that record how they were called, so the
-// rig checks the argument lists the exe's code was disassembled for: (iface, idx as a u32, a 64-byte buffer).
+// ================================ Part E: the head joint (H), route B ================================
+// A synthetic game image: a reserved block whose offsets are the build's RVAs. It holds the two skeleton interfaces' vtables (their slots point at
+// trampolines placed at the EXACT RVAs the build has, to native stubs that record how they were called), the joint-name literals, a REAL
+// FindJoint at +0xFDDB10 (it begins with the build's 16-byte prologue, so the hook installs on it the way it does on the game), and three thunks
+// whose `call r8` returns to +0x19B12D5 (site 1), +0x19B1359 (site 2) and to an address that is neither. A thunk calls the function it is handed in
+// r8 with rcx and rdx as given, which is how FUN 0x19B1240 calls FindJoint. The stubs check the argument lists the exe's code was disassembled for:
+// (iface, idx as a u32, a 64-byte buffer).
 constexpr size_t kHeadImageSize = 0x5F30000;
 uint8_t* g_himg = nullptr;
+constexpr size_t kFindFnRva = 0xFDDB10;
 
 struct HeadRec {
-    int lookup = 0, poseRR = 0, poseAO = 0, find = 0, modelRR = 0, modelAO = 0, worldRR = 0, worldAO = 0;
-    uint32_t lookupThread = 0, modelThread = 0, findThread = 0;
-    uintptr_t lastContainer = 0, lastModelIface = 0, lastModelOut = 0, lastWorldIface = 0, lastFindIface = 0;
-    uint32_t lastTypeId = 0, lastModelIdx = 0, lastWorldIdx = 0;
-    char names[8][40] = {};
-    int faultAt = 0;              // 1 lookup, 2 pose, 3 find, 4 model (+0x58), 5 world (+0x48)
+    int poseRR = 0, poseAO = 0, find = 0, modelRR = 0, modelAO = 0, worldRR = 0, worldAO = 0;
+    uint32_t modelThread = 0, findThread = 0;
+    uintptr_t lastModelIface = 0, lastModelOut = 0, lastWorldIface = 0, lastFindIface = 0;
+    uint32_t lastModelIdx = 0, lastWorldIdx = 0;
+    char names[64][40] = {};
+    int faultAt = 0;              // 2 pose, 3 FindJoint(head), 4 model (+0x58), 5 world (+0x48)
     bool swapWorldSlot = false;   // the +0x58 stub changes the RR vtable's +0x48 slot behind H's back
-    int swapSlotIn = 0;           // 1: GetPoseData changes the +0x30 slot; 2: the last FindJoint changes the +0x58 slot
+    int swapSlotIn = 0;           // 1: GetPoseData changes the +0x30 slot; 2: FindJoint(head) changes the +0x58 slot
     uint32_t slowModelMs = 0;
-    uint32_t typeId = 0xBEEF;
     uint32_t headIdx = 12, povIdx = 3;
 };
 HeadRec g_hr;
@@ -1442,24 +1444,15 @@ void hrFault() {
     volatile int* p = reinterpret_cast<volatile int*>(static_cast<uintptr_t>(0x8));
     *p = 1;
 }
+void hrSwapRrSlot(uint32_t slotIndex) {
+    *reinterpret_cast<uint64_t*>(g_himg + f2::kRrVtableRva + 8 * slotIndex) = reinterpret_cast<uint64_t>(g_himg + 0x3000000);
+}
 void hrPutMatrix(float* out, float x, float y, float z) {
     std::memset(out, 0, 64);
     out[0] = out[5] = out[10] = out[15] = 1.0f;
     out[12] = x;
     out[13] = y;
     out[14] = z;
-}
-void* __fastcall hrLookup(void* container, uint32_t id) {
-    ++g_hr.lookup;
-    g_hr.lookupThread = GetCurrentThreadId();
-    g_hr.lastContainer = reinterpret_cast<uintptr_t>(container);
-    g_hr.lastTypeId = id;
-    if (g_hr.faultAt == 1) hrFault();
-    if (id != g_hr.typeId) return nullptr;
-    return *reinterpret_cast<void**>(static_cast<uint8_t*>(container) + 0x10);
-}
-void hrSwapRrSlot(uint32_t slotIndex) {
-    *reinterpret_cast<uint64_t*>(g_himg + f2::kRrVtableRva + 8 * slotIndex) = reinterpret_cast<uint64_t>(g_himg + 0x3000000);
 }
 void* __fastcall hrPoseRR(void* iface) {
     ++g_hr.poseRR;
@@ -1472,14 +1465,16 @@ void* __fastcall hrPoseAO(void* iface) {
     if (g_hr.faultAt == 2) hrFault();
     return *reinterpret_cast<void**>(static_cast<uint8_t*>(iface) + 0x20);
 }
+// What the game's FindJoint does: the index of a name (0xFFFF none). The synthetic function at +0xFDDB10 calls this with rcx and rdx as it got them.
 uint32_t __fastcall hrFind(void* iface, const char* name) {
-    if (g_hr.find < 8) std::snprintf(g_hr.names[g_hr.find], sizeof(g_hr.names[0]), "%s", name);
+    if (g_hr.find < 64) std::snprintf(g_hr.names[g_hr.find], sizeof(g_hr.names[0]), "%s", name);
     ++g_hr.find;
     g_hr.findThread = GetCurrentThreadId();
     g_hr.lastFindIface = reinterpret_cast<uintptr_t>(iface);
-    if (g_hr.faultAt == 3) hrFault();
-    if (g_hr.swapSlotIn == 2 && std::strcmp(name, f2::kPovName) == 0) hrSwapRrSlot(11);
-    if (std::strcmp(name, f2::kHeadName) == 0) return g_hr.headIdx;
+    const bool head = std::strcmp(name, f2::kHeadName) == 0;
+    if (head && g_hr.faultAt == 3) hrFault();
+    if (head && g_hr.swapSlotIn == 2) hrSwapRrSlot(11);
+    if (head) return g_hr.headIdx;
     if (std::strcmp(name, f2::kPovName) == 0) return g_hr.povIdx;
     return 0xFFFF;
 }
@@ -1493,7 +1488,7 @@ void hrModel(void* iface, uint32_t idx, float* out, bool rr) {
     if (g_hr.faultAt == 4) hrFault();
     if (g_hr.slowModelMs) Sleep(g_hr.slowModelMs);
     hrPutMatrix(out, 0.0f, idx == g_hr.headIdx ? 1.60f : 1.55f, 0.02f);   // avatar-root relative
-    if (g_hr.swapWorldSlot) *reinterpret_cast<uint64_t*>(g_himg + 0x559CF90 + 8 * 9) = reinterpret_cast<uint64_t>(g_himg + 0x3000000);
+    if (g_hr.swapWorldSlot) hrSwapRrSlot(9);
 }
 void hrWorld(void* iface, uint32_t idx, float* out, bool rr) {
     if (rr) ++g_hr.worldRR;
@@ -1527,50 +1522,84 @@ void himgTramp(size_t rva, const void* target) {
     p[10] = 0xFF;
     p[11] = 0xE0;  // jmp rax
 }
+// FUN 0x19B1240's way of calling FindJoint: `call r8` at callRva (returning to callRva+3) with rcx = the interface, rdx = the name.
+void himgThunk(size_t entryRva, size_t callRva) {
+    himgCommit(entryRva, 32);
+    uint8_t* p = g_himg + entryRva;
+    size_t n = 0;
+    p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xEC; p[n++] = 0x28;           // sub rsp, 28h
+    while (entryRva + n < callRva) p[n++] = 0x90;
+    p[n++] = 0x41; p[n++] = 0xFF; p[n++] = 0xD0;                          // call r8
+    p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xC4; p[n++] = 0x28; p[n++] = 0xC3;   // add rsp, 28h; ret
+}
+// The game's FindJoint: the build's real 16-byte prologue, then a call to the stub with rcx and rdx as they came in.
+void himgFindJoint() {
+    himgCommit(kFindFnRva, 64);
+    uint8_t* p = g_himg + kFindFnRva;
+    size_t n = 0;
+    for (uint8_t b : ecm::kFindJointPrologue) p[n++] = b;   // mov [rsp+8],rbx; push rdi; sub rsp,20h; mov rax,[rcx]; mov rdi,rdx
+    // Undo the prologue and TAIL-JUMP to the stub with rcx and rdx as they came in: no frame of this unwind-less code sits under the stub, so an
+    // exception in the stub unwinds straight to whoever called FindJoint (the rig's SEH guard), as it does through the game's own function.
+    p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xC4; p[n++] = 0x20;   // add rsp, 20h
+    p[n++] = 0x5F;                                          // pop rdi
+    p[n++] = 0x48; p[n++] = 0x8B; p[n++] = 0x5C; p[n++] = 0x24; p[n++] = 0x08;   // mov rbx, [rsp+8]
+    const uint64_t target = reinterpret_cast<uint64_t>(&hrFind);
+    p[n++] = 0x48; p[n++] = 0xB8;                           // mov rax, imm64
+    std::memcpy(p + n, &target, 8);
+    n += 8;
+    p[n++] = 0xFF; p[n++] = 0xE0;                           // jmp rax
+}
 void himgInit() {
     if (!g_himg) g_himg = static_cast<uint8_t*>(VirtualAlloc(nullptr, kHeadImageSize, MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     himgTramp(0x43FB900, reinterpret_cast<const void*>(&hrPoseRR));
-    himgTramp(0xFDDB10, reinterpret_cast<const void*>(&hrFind));
     himgTramp(0x43F7180, reinterpret_cast<const void*>(&hrWorldRR));
     himgTramp(0x43F6EB0, reinterpret_cast<const void*>(&hrModelRR));
     himgTramp(0xFDE310, reinterpret_cast<const void*>(&hrPoseAO));
     himgTramp(0xFDDEB0, reinterpret_cast<const void*>(&hrWorldAO));
     himgTramp(0xFDDD10, reinterpret_cast<const void*>(&hrModelAO));
-    himgTramp(0x1000000, reinterpret_cast<const void*>(&hrLookup));
     himgTramp(0x3000000, reinterpret_cast<const void*>(&hrBogus));
+    himgFindJoint();
+    himgThunk(0x19B12CA, 0x19B12D2);
+    himgThunk(0x19B134E, 0x19B1356);
+    himgThunk(0x1A00000, 0x1A00008);   // a caller that is neither attach site
     const uint64_t b = reinterpret_cast<uint64_t>(g_himg);
     for (uint32_t i = 0; i < f2::kHeadSlots; ++i) {
         *himgQ(f2::kRrVtableRva + 8 * f2::kHeadSlotIndex[i]) = b + f2::kRrFunctions[i];
         *himgQ(f2::kAoVtableRva + 8 * f2::kHeadSlotIndex[i]) = b + f2::kAoFunctions[i];
     }
-    *himgQ(0x2000000) = b + 0x1000000;   // the container's vtable: slot 0 is the component lookup
     himgCommit(f2::kHeadNameRva, 32);
     himgCommit(f2::kPovNameRva, 32);
     std::memcpy(g_himg + f2::kHeadNameRva, f2::kHeadName, sizeof(f2::kHeadName));
     std::memcpy(g_himg + f2::kPovNameRva, f2::kPovName, sizeof(f2::kPovName));
-    himgCommit(f2::kSkeletonIdRva, 4);
-    std::memcpy(g_himg + f2::kSkeletonIdRva, &g_hr.typeId, 4);
 }
 
+using FindCall = uint64_t (__fastcall*)(void* iface, const void* name, void* fn);
+using FindDirect = uint32_t (__fastcall*)(void* iface, const char* name);
+
 struct HeadWorld {
-    alignas(16) uint8_t hum[0x400];
-    alignas(16) uint8_t er[2][0x100];
-    alignas(16) uint8_t entity[2][0x80];
     alignas(16) uint8_t iface[3][0x400];
     alignas(16) uint8_t pose[3][0x40];
+    alignas(16) uint8_t blob[0x300];       // what *(activity+0x368) points into: the dead route's diagnostic
     alignas(16) uint8_t activity[0x600];
+    const void* povName() const { return g_himg + f2::kPovNameRva; }
+    const void* headName() const { return g_himg + f2::kHeadNameRva; }
+    void* findFn() const { return g_himg + kFindFnRva; }
+    // The game's attach: FindJoint(iface, "def_c_povCamera_joint") called from site 1 or site 2 (or from somewhere else).
+    uint64_t attach(int site, void* ifc, const void* name) const {
+        const size_t entry = site == 0 ? 0x19B12CA : site == 1 ? 0x19B134E : 0x1A00000;
+        return reinterpret_cast<FindCall>(g_himg + entry)(ifc, name, findFn());
+    }
+    uint32_t direct(void* ifc, const void* name) const { return reinterpret_cast<FindDirect>(findFn())(ifc, static_cast<const char*>(name)); }
     void reset() {
         g_hr = HeadRec();
-        std::memset(hum, 0, sizeof(hum));
-        std::memset(er, 0, sizeof(er));
-        std::memset(entity, 0, sizeof(entity));
         std::memset(iface, 0, sizeof(iface));
         std::memset(pose, 0, sizeof(pose));
+        std::memset(blob, 0, sizeof(blob));
         std::memset(activity, 0, sizeof(activity));
         himgInit();
         const uint64_t b = reinterpret_cast<uint64_t>(g_himg);
         auto q = [](uint8_t* at, uint64_t v) { std::memcpy(at, &v, 8); };
-        // TP = RR (flag +0x2C0 = 0, 60 joints), FP = AO (flag +0xF8 = 1, 40 joints), a spare RR for a changed interface.
+        // iface[0] = RR (flag +0x2C0 = 0, 60 joints), iface[1] = AO (flag +0xF8 = 1, 40 joints), iface[2] = a spare RR for a changed interface.
         q(iface[0], b + f2::kRrVtableRva);
         iface[0][0x2C0] = 0;
         q(iface[0] + 0x20, reinterpret_cast<uint64_t>(pose[0]));
@@ -1583,17 +1612,10 @@ struct HeadWorld {
         q(iface[2], b + f2::kRrVtableRva);
         q(iface[2] + 0x20, reinterpret_cast<uint64_t>(pose[2]));
         std::memcpy(pose[2], &j60, 2);
-        for (int s = 0; s < 2; ++s) {
-            q(entity[s] + 8, b + 0x2000000);                          // the container (entity+8): its first qword is its vtable
-            q(entity[s] + 0x18, reinterpret_cast<uint64_t>(iface[s])); // container+0x10: what the lookup hands back
-            const int32_t live = 5;
-            std::memcpy(er[s] + f2::kOffErState, &live, 4);
-            q(er[s] + f2::kOffErEntity, reinterpret_cast<uint64_t>(entity[s]));
-        }
-        q(hum, b + f2::kHumVtableRva);
-        q(hum + f2::kOffHumThirdPerson, reinterpret_cast<uint64_t>(er[0]));
-        q(hum + f2::kOffHumFirstPerson, reinterpret_cast<uint64_t>(er[1]));
-        q(activity + f2::kOffActivityHum, reinterpret_cast<uint64_t>(hum) + f2::kHumFromInterface);
+        // F4: *(activity+0x368) pointed at something whose qword 0x70 below was 0. Here: h = blob+0x100, a vtable-looking value at h, 0 at h-0x70.
+        q(blob + 0x100, b + 0x1234560);
+        q(blob + 0x100 - 0x70, 0);
+        q(activity + f2::kOffActivityHum, reinterpret_cast<uint64_t>(blob) + 0x100);
         const float local[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.0f, 1.68f, 0.10f, 1};
         const float world[16] = {0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 10.10f, 1.68f, 20.0f, 1};   // the frame of testNeckMath: root (10,0,20), facing +x
         std::memcpy(activity + 0x3B0, local, 64);
@@ -1609,13 +1631,13 @@ bool parseTiming(const std::string& beat, const char* name, unsigned out[4]) {
 }
 
 void testHeadJoint() {
-    std::printf("the head joint H end to end (a synthetic game image, synthetic skeleton interfaces)\n");
+    std::printf("the head joint H (route B) end to end: a FindJoint hook, a synthetic game image, synthetic skeleton interfaces\n");
     namespace t = edvr::explorercamprobetest;
-    static_assert(f2::kOffActivityHum == 0x368 && f2::kHumFromInterface == 0x70 && f2::kOffHumThirdPerson == 0x178 && f2::kOffHumFirstPerson == 0x170 &&
-                      f2::kOffErState == 0xC0 && f2::kOffErEntity == 0xC8 && f2::kErLive == 5 && f2::kOffEntityContainer == 8,
-                  "HUM = *(activity+0x368) - 0x70; slots HUM+0x178 / +0x170; ER+0xC0 >= 5, entity at ER+0xC8, container at entity+8");
-    static_assert(f2::kHumVtableRva == 0x5309EB8 && f2::kSkeletonIdRva == 0x5F2866C && f2::kRrVtableRva == 0x559CF90 && f2::kAoVtableRva == 0x517DC20 &&
-                      f2::kHeadNameRva == 0x554EE10 && f2::kPovNameRva == 0x51F9930 && f2::kRrCachedFlag == 0x2C0 && f2::kAoCachedFlag == 0xF8,
+    static_assert(f2::kOffActivityHum == 0x368 && f2::kHumFromInterface == 0x70 && f2::kFindSite1Rva == 0x19B12D5 && f2::kFindSite2Rva == 0x19B1359 &&
+                      ecm::kFindJointRva == 0xFDDB10 && ecm::kFindJointPrologueBytes == 16,
+                  "the sites return to +0x19B12D5 and +0x19B1359; FindJoint is +0xFDDB10 with a 16-byte prologue");
+    static_assert(f2::kRrVtableRva == 0x559CF90 && f2::kAoVtableRva == 0x517DC20 && f2::kHeadNameRva == 0x554EE10 && f2::kPovNameRva == 0x51F9930 &&
+                      f2::kRrCachedFlag == 0x2C0 && f2::kAoCachedFlag == 0xF8,
                   "the build's RVAs");
     static_assert(f2::kHeadSlotIndex[0] * 8 == 0x18 && f2::kHeadSlotIndex[1] * 8 == 0x30 && f2::kHeadSlotIndex[2] * 8 == 0x48 && f2::kHeadSlotIndex[3] * 8 == 0x58 &&
                       f2::kRrFunctions[0] == 0x43FB900 && f2::kRrFunctions[1] == 0xFDDB10 && f2::kRrFunctions[2] == 0x43F7180 && f2::kRrFunctions[3] == 0x43F6EB0 &&
@@ -1634,9 +1656,10 @@ void testHeadJoint() {
     uint64_t clock = 1000;
     uint32_t frame = 1;
     // A fresh session: everything reset, the world rebuilt, the seam pointed at the synthetic image, H armed on a boundary.
-    auto arm = [&](uint32_t interval, bool knownBuild = true) {
+    auto arm = [&](uint32_t interval, bool knownBuild = true, bool goodFindHook = true) {
         t::reset();
         w.reset();
+        targets.findJoint = goodFindHook ? reinterpret_cast<uintptr_t>(g_himg) + kFindFnRva : reinterpret_cast<uintptr_t>(g_himg) + 0x3000000;
         explorercamtest::setTargets(targets);
         explorercamf2test::HeadSeam seam;
         if (knownBuild) {
@@ -1655,128 +1678,200 @@ void testHeadJoint() {
         t::boundary(frame++, clock, true, &Capture::add, &cap);
     };
     auto eval = [&]() { t::observe(w.activity); };
-    const std::string kHeadPrefix = "explorer cam probe H ";
+    auto attachBoth = [&]() {
+        w.attach(0, w.iface[0], w.povName());
+        w.attach(1, w.iface[1], w.povName());
+    };
 
-    // ---- armed ---------------------------------------------------------------------------------------------------------------------------
+    // ---- armed -----------------------------------------------------------------------------------------------------------------------------------
     arm(0);
     const std::string armed = cap.nth("explorer cam probe H armed:", 0);
-    check(cap.count("explorer cam probe H armed:") == 1 && has(armed, "at most once a second") && has(armed, "GAME CALL") && has(armed, "before EVERY call") &&
-              has(armed, "SEH throughout") && has(armed, "def_c_head_joint") && has(armed, "def_c_povCamera_joint") && has(armed, "nothing is written") && armed.size() < 1050,
-          "H ARMED: one line naming the path, the game call, the check before every call, SEH and the joints; it fits a log line");
-    check(explorercamf2test::headState() == 1 && cap.count("explorer cam probe H stood down:") == 0, "...and the state is armed");
-    check(explorercamf2test::headSteps() == 0 && g_hr.lookup == 0 && g_hr.find == 0, "nothing is called before the free camera has been updated");
+    check(cap.count("explorer cam probe H armed:") == 1 && has(armed, "route B") && has(armed, "FindJoint (EliteDangerous64.exe+0xFDDB10") && has(armed, "stolen=5 bytes") &&
+              has(armed, "installed NOW") && has(armed, "the original runs FIRST") && has(armed, "+0x19B12D5") && has(armed, "+0x19B1359") && has(armed, "def_c_povCamera_joint") &&
+              has(armed, "before EVERY call") && has(armed, "SEH throughout") && has(armed, "nothing is written") && armed.size() < 1100,
+          "H ARMED: one line naming the hook, the 5 stolen bytes, original-first, the two return addresses, the literal, the check before every call, SEH; it fits a log line");
+    check(explorercamf2test::headState() == 1 && explorercamtest::stolenBytes(6) == 5 && g_himg[kFindFnRva] == 0xE9 && cap.count("explorer cam probe H stood down:") == 0,
+          "...the FindJoint hook stole 5 bytes (the function now begins with the relay jump E9) and the state is armed");
+    check(explorercamf2test::headSteps() == 0 && g_hr.find == 0 && explorercamf2test::findSeen() == 0, "nothing is called or seen before anything happens");
 
-    // ---- the first evaluation ---------------------------------------------------------------------------------------------------------------
+    // ---- NO CAPTURE: the evaluation makes no game call; the heartbeat says why ---------------------------------------------------------------------
     eval();
-    check(explorercamf2test::headSteps() == 1 && explorercamf2test::headFaults() == 0, "one free-camera update: one evaluation, no fault");
-    check(g_hr.lookup == 2 && g_hr.poseRR == 1 && g_hr.poseAO == 1 && g_hr.find == 4 && g_hr.modelRR == 2 && g_hr.worldRR == 2 && g_hr.modelAO == 2 && g_hr.worldAO == 2 &&
-              explorercamf2test::headCalls() == 16,
-          "per slot: one lookup, one GetPoseData, two FindJoint (once per interface), then +0x58 and +0x48 for both joints: 16 game calls in all, the right kind for each slot");
-    check(g_hr.lastTypeId == g_hr.typeId && g_hr.lastContainer == reinterpret_cast<uintptr_t>(w.entity[1]) + 8,
-          "THE LOOKUP'S ARGUMENTS: (the entity's container = entity+8, the u32 type id read from +0x5F2866C)");
-    check(std::strcmp(g_hr.names[0], f2::kHeadName) == 0 && std::strcmp(g_hr.names[1], f2::kPovName) == 0 && g_hr.lastFindIface == reinterpret_cast<uintptr_t>(w.iface[1]),
-          "FindJoint gets (the interface, \"def_c_head_joint\") then (the interface, \"def_c_povCamera_joint\")");
-    check(g_hr.lastModelIface == reinterpret_cast<uintptr_t>(w.iface[1]) && g_hr.lastModelIdx == g_hr.povIdx && (g_hr.lastModelOut & 15) == 0 && g_hr.lastWorldIface == g_hr.lastModelIface &&
-              g_hr.lastWorldIdx == g_hr.povIdx,
-          "THE MATRIX CALLS' ARGUMENTS: (the interface, the joint index as a u32, a 16-byte-aligned 64-byte buffer), for +0x58 and +0x48 alike");
-    check(g_hr.lookupThread == GetCurrentThreadId() && g_hr.modelThread == GetCurrentThreadId(), "the calls are made on the thread that calls the observer (the hook's own thread)");
-
+    check(explorercamf2test::headSteps() == 1 && explorercamf2test::headCalls() == 0 && g_hr.poseRR + g_hr.poseAO + g_hr.modelRR + g_hr.modelAO == 0 &&
+              explorercamf2test::headFaults() == 0 && explorercamf2test::headState() == 1,
+          "NO CAPTURE: one free-camera update, one evaluation, NOT ONE game call, no fault, H still armed");
     tick();
-    const std::string slotTp = cap.nth("explorer cam probe H slot:", 0), slotFp = cap.nth("explorer cam probe H slot:", 1);
-    check(cap.count("explorer cam probe H slot:") == 2 && has(slotTp, "slot=third-person(HUM+0x178) state=resolved") && has(slotTp, "kind=RR (RuntimeRigComponent)") && has(slotTp, "joint_count=60") &&
-              has(slotTp, "joint_cache_flag=0") && has(slotTp, "head_joint(\"def_c_head_joint\")_idx=12") && has(slotTp, "pov_joint(\"def_c_povCamera_joint\")_idx=3") &&
-              has(slotTp, "container_lookup=EliteDangerous64.exe+0x1000000"),
-          "H SLOT, third-person: resolved, kind RR, 60 joints, cache flag 0, both indexes, and the lookup function's RVA (so the next build can pin it)");
-    check(has(slotFp, "slot=first-person(HUM+0x170) state=resolved") && has(slotFp, "kind=AO (AnimatedObject)") && has(slotFp, "joint_count=40") && has(slotFp, "joint_cache_flag=1"),
-          "H SLOT, first-person: kind AO, 40 joints, cache flag 1");
-    const std::string jTp = cap.nth("explorer cam probe H joints:", 0), jFp = cap.nth("explorer cam probe H joints:", 1);
-    check(cap.count("explorer cam probe H joints:") == 2 && has(jTp, "slot=third-person") && has(jTp, "head_model(+0x58)=(0.000,1.600,0.020)") && has(jTp, "head_world(+0x48)=(10.120,1.550,19.980)") &&
-              has(jTp, "head_in_commander_local(right,up,forward)=(0.020,1.550,0.120)") && has(jTp, "pov_model(+0x58)=(0.000,1.550,0.020)") && has(jTp, "pov_world(+0x48)=(10.120,1.600,20.000)") &&
-              has(jTp, "pov_in_commander_local(right,up,forward)=(0.000,1.600,0.120)") && has(jTp, "activity_world_origin(+0xA0)=(10.100,1.680,20.000)") && has(jTp, "ASSUMPTION"),
-          "H JOINTS: both joints' +0x58 and +0x48 translations, the head and pov in COMMANDER-LOCAL axes ((0.020,1.550,0.120) for the known frame), the raw +0x70 origin beside them");
-    check(has(jFp, "slot=first-person") && jTp.size() < 1000 && slotTp.size() < 1000, "...one line per live slot; the lines fit a log line");
-
-    // ---- a second second: indexes are cached, no new slot lines ---------------------------------------------------------------------------
+    check(cap.count("explorer cam probe H slot:") == 2 && has(cap.nth("explorer cam probe H slot:", 0), "site1(ret +0x19B12D5, avatar-set index 1) state=waiting: FindJoint(\"def_c_povCamera_joint\") has not been seen") &&
+              has(cap.nth("explorer cam probe H slot:", 1), "site2(ret +0x19B1359, avatar-set index 0) state=waiting") && cap.count("explorer cam probe H joints:") == 0,
+          "...both sites say 'waiting: FindJoint(povCamera) has not been seen from this site since launch', no joints line");
+    const std::string hum = cap.nth("explorer cam probe H hum:", 0);
+    check(cap.count("explorer cam probe H hum:") == 1 && has(hum, "first qword there is EliteDangerous64.exe+0x1234560") && has(hum, "0x70 below it") && has(hum, "is 0x0 ") && has(hum, "HUM route is dead"),
+          "THE HUM CHECK IS NON-FATAL: *(activity+0x368) and the qwords at it and 0x70 below it are logged once (an RVA when inside the image, 0x0 as F4 found), H carries on");
     eval();
     tick();
-    check(g_hr.find == 4 && g_hr.lookup == 4 && g_hr.modelRR == 4 && cap.count("explorer cam probe H slot:") == 0 && cap.count("explorer cam probe H joints:") == 2,
-          "the next evaluation looks the joints up again NOT (the index is cached per interface), calls the matrices again, and prints joints lines but no slot lines");
-
-    // ---- the interface changes: a slot line, and the joints are looked up again for that slot only -------------------------------------------
-    const uint64_t spare = reinterpret_cast<uint64_t>(w.iface[2]);
-    std::memcpy(w.entity[0] + 0x18, &spare, 8);
-    eval();
-    tick();
-    check(g_hr.find == 6 && cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "slot=third-person"),
-          "a different interface for the third-person slot: ONE slot line and two FindJoint calls, the first-person slot untouched");
-
-    // ---- a slot that is not live ------------------------------------------------------------------------------------------------------------
-    const int32_t dead = 3;
-    std::memcpy(w.er[0] + f2::kOffErState, &dead, 4);
-    const int modelBefore = g_hr.modelRR + g_hr.modelAO;
-    eval();
-    tick();
-    check(cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "state=not live: the EntityRef's state (ER+0xC0) is below 5") &&
-              cap.count("explorer cam probe H joints:") == 1 && has(cap.nth("explorer cam probe H joints:", 0), "slot=first-person") && g_hr.modelRR + g_hr.modelAO == modelBefore + 2,
-          "ER state 3 on the third-person slot: a 'not live' slot line, no calls for it (only the first-person slot's two +0x58 calls), one joints line");
-    const int32_t live = 5;
-    std::memcpy(w.er[0] + f2::kOffErState, &live, 4);
-
-    // ---- no humanoid component cached yet ----------------------------------------------------------------------------------------------------
-    const uint64_t zero = 0;
-    uint64_t savedHum = 0;
-    std::memcpy(&savedHum, w.activity + f2::kOffActivityHum, 8);
-    std::memcpy(w.activity + f2::kOffActivityHum, &zero, 8);
-    const uint64_t callsBefore = explorercamf2test::headCalls();
-    eval();
-    tick();
-    check(cap.count("explorer cam probe H slot:") == 2 && has(cap.nth("explorer cam probe H slot:", 0), "the activity has no humanoid component cached yet") &&
-              cap.count("explorer cam probe H joints:") == 0 && explorercamf2test::headCalls() == callsBefore && explorercamf2test::headState() == 1,
-          "activity+0x368 = 0: both slots say 'waiting', no joints line and not one game call; H stays armed");
-    std::memcpy(w.activity + f2::kOffActivityHum, &savedHum, 8);
-
-    // ---- the type id is not assigned yet / the lookup finds nothing --------------------------------------------------------------------------
-    const uint32_t zeroId = 0;
-    std::memcpy(g_himg + f2::kSkeletonIdRva, &zeroId, 4);
-    const int lookupsBefore = g_hr.lookup;
-    eval();
-    check(g_hr.lookup == lookupsBefore && explorercamf2test::headState() == 1, "type id 0 (not assigned yet): the lookup is not called at all");
-    std::memcpy(g_himg + f2::kSkeletonIdRva, &g_hr.typeId, 4);
-    g_hr.typeId = 1;   // the stub now answers only id 1
-    const int poseBefore = g_hr.poseRR + g_hr.poseAO;
-    eval();
-    tick();
-    check(g_hr.lookup == lookupsBefore + 2 && g_hr.poseRR + g_hr.poseAO == poseBefore && cap.count("explorer cam probe H joints:") == 0 && explorercamf2test::headState() == 1,
-          "a lookup that returns NULL: counted, nothing else is called, no joints line, H stays armed");
-    g_hr.typeId = 0xBEEF;
-
-    // ---- an index the game does not have / one out of range / no pose object ---------------------------------------------------------------------
-    const uint64_t first = reinterpret_cast<uint64_t>(w.iface[0]);
-    std::memcpy(w.entity[0] + 0x18, &first, 8);   // back to the first RR interface
-    g_hr.headIdx = 100;   // beyond the 60 joints
-    g_hr.povIdx = 0xFFFF;
-    const int model2 = g_hr.modelRR;
-    eval();
-    tick();
-    check(g_hr.modelRR == model2 && has(cap.nth("explorer cam probe H slot:", 0), "head_joint(\"def_c_head_joint\")_idx=100") && has(cap.nth("explorer cam probe H slot:", 0), "pov_joint(\"def_c_povCamera_joint\")_idx=none"),
-          "an index past the joint count (100 of 60) and 0xFFFF ('none') are NEVER handed to the game: no +0x58 call for the third-person slot");
-    g_hr.headIdx = 12;
-    g_hr.povIdx = 3;
-    std::memcpy(w.entity[0] + 0x18, &spare, 8);
+    check(cap.count("explorer cam probe H hum:") == 0 && explorercamf2test::headState() == 1, "...and not again while they do not change");
     {
-        uint64_t nullPose = 0;
-        std::memcpy(w.iface[2] + 0x20, &nullPose, 8);
-        const int findBefore = g_hr.find;
-        const int modelNow = g_hr.modelRR;
+        const uint64_t other = reinterpret_cast<uint64_t>(g_himg) + 0x2222220;
+        std::memcpy(w.blob + 0x100 - 0x70, &other, 8);
         eval();
         tick();
-        check(g_hr.find == findBefore && g_hr.modelRR == modelNow && has(cap.nth("explorer cam probe H slot:", 0), "joint_count=0"),
-              "GetPoseData returning NULL (no pose object): joint count 0, no FindJoint, no matrix call (the game's own functions do nothing then either)");
-        const uint64_t again = reinterpret_cast<uint64_t>(w.pose[2]);
-        std::memcpy(w.iface[2] + 0x20, &again, 8);
+        check(cap.count("explorer cam probe H hum:") == 1 && has(cap.nth("explorer cam probe H hum:", 0), "EliteDangerous64.exe+0x2222220") && explorercamf2test::headState() == 1,
+              "...it is said again when what it points at changes");
+        const uint64_t zero = 0;
+        std::memcpy(w.blob + 0x100 - 0x70, &zero, 8);
+    }
+    {
+        const uint64_t bad = 0x10;   // an activity+0x368 that points at unreadable memory: logged as unreadable, no stand-down
+        std::memcpy(w.activity + f2::kOffActivityHum, &bad, 8);
+        eval();
+        tick();
+        check(cap.count("explorer cam probe H hum:") == 1 && has(cap.nth("explorer cam probe H hum:", 0), "first qword there is unreadable") && explorercamf2test::headState() == 1 && explorercamf2test::headFaults() == 0,
+              "...an unreadable *(activity+0x368) is logged as unreadable (not a fault, not a stand-down)");
+        const uint64_t h = reinterpret_cast<uint64_t>(w.blob) + 0x100;
+        std::memcpy(w.activity + f2::kOffActivityHum, &h, 8);
+    }
+    tick(5000);
+    {
+        const std::string b0 = cap.nth("explorer cam probe H heartbeat:", 0);
+        check(has(b0, "hook=armed") && has(b0, "findjoint_calls_seen=0") && has(b0, "captures_site1=0 captures_site2=0") && has(b0, "idle=no avatar attach seen since launch: load or disembark on foot after the game starts"),
+              "NO-CAPTURE HEARTBEAT: 'idle=no avatar attach seen since launch: load or disembark on foot after the game starts', capture counts 0 and 0");
     }
 
-    // ---- the heartbeat (a fresh session, so the first window holds every call) ---------------------------------------------------------------------
+    // ---- THE RETURN-ADDRESS FILTER and the capture store ------------------------------------------------------------------------------------------
+    w.direct(w.iface[0], w.povName());
+    check(explorercamf2test::findSeen() == 1 && explorercamf2test::captureCount(0) == 0 && explorercamf2test::captureCount(1) == 0 && explorercamf2test::capturedInterface(0) == 0,
+          "OTHER CALLERS ARE IGNORED: FindJoint(iface, povCamera) called from anywhere else is counted as seen but not stored");
+    w.attach(2, w.iface[0], w.povName());
+    check(explorercamf2test::findSeen() == 2 && explorercamf2test::captureCount(0) == 0 && explorercamf2test::captureCount(1) == 0,
+          "...also from a thunk whose `call r8` returns to an address that is neither attach site");
+    w.attach(0, w.iface[0], w.headName());
+    w.attach(1, w.iface[1], w.headName());
+    check(explorercamf2test::findSeen() == 4 && explorercamf2test::captureCount(0) == 0 && explorercamf2test::captureCount(1) == 0,
+          "OTHER NAMES ARE IGNORED: FindJoint(iface, \"def_c_head_joint\") from either site is not stored");
+    {
+        char copy[40];
+        std::snprintf(copy, sizeof(copy), "%s", f2::kPovName);
+        w.attach(0, w.iface[0], copy);
+        check(explorercamf2test::captureCount(0) == 0, "...nor the same text at another address (the filter is the literal's address, rdx == base+0x51F9930)");
+    }
+    g_hr.povIdx = 7;
+    const uint64_t r1 = w.attach(0, w.iface[0], w.povName());
+    check(r1 == 7 && explorercamf2test::captureCount(0) == 1 && explorercamf2test::capturedInterface(0) == reinterpret_cast<uint64_t>(w.iface[0]) && explorercamf2test::capturedIndex(0) == 7 &&
+              explorercamf2test::captureCount(1) == 0,
+          "SITE 1: the call returning to +0x19B12D5 with the povCamera literal stores the interface (rcx) and the index the ORIGINAL returned (7), and returns 7 unchanged");
+    g_hr.povIdx = 3;
+    const uint64_t r2 = w.attach(1, w.iface[1], w.povName());
+    check(r2 == 3 && explorercamf2test::captureCount(1) == 1 && explorercamf2test::capturedInterface(1) == reinterpret_cast<uint64_t>(w.iface[1]) && explorercamf2test::capturedIndex(1) == 3 &&
+              explorercamf2test::captureCount(0) == 1,
+          "SITE 2: the call returning to +0x19B1359 stores into site 2's own slot (interface, index 3, one capture), site 1's is untouched");
+    check(g_hr.lastFindIface == reinterpret_cast<uintptr_t>(w.iface[1]) && std::strcmp(g_hr.names[g_hr.find - 1], f2::kPovName) == 0,
+          "...the original ran with the arguments the game passed (the interface in rcx, the name in rdx)");
+    w.attach(0, w.iface[0], w.povName());   // back to index 3 for site 1
+    check(explorercamf2test::capturedIndex(0) == 3 && explorercamf2test::captureCount(0) == 2, "...a second attach re-stores (index 3 again) and counts: two captures at site 1");
+
+    // ---- H on the captured interfaces ------------------------------------------------------------------------------------------------------------
+    const int find0 = g_hr.find, pose0 = g_hr.poseRR + g_hr.poseAO;
+    eval();
+    check(explorercamf2test::headFaults() == 0 && explorercamf2test::headState() == 1, "THE FIRST EVALUATION ON THE CAPTURES: no fault, H armed");
+    check(g_hr.poseRR == 1 && g_hr.poseAO == 1 && g_hr.find - find0 == 2 && g_hr.modelRR == 2 && g_hr.worldRR == 2 && g_hr.modelAO == 2 && g_hr.worldAO == 2 && g_hr.poseRR + g_hr.poseAO - pose0 == 2 &&
+              explorercamf2test::headCalls() == 12,
+          "per site: one GetPoseData, one FindJoint (the HEAD only: the povCamera index is the capture's), then +0x58 and +0x48 for both joints: 12 game calls, each kind on the right site");
+    check(std::strcmp(g_hr.names[find0], f2::kHeadName) == 0 && std::strcmp(g_hr.names[find0 + 1], f2::kHeadName) == 0, "...and the FindJoint calls H made were for \"def_c_head_joint\"");
+    check(g_hr.lastModelIface == reinterpret_cast<uintptr_t>(w.iface[1]) && g_hr.lastModelIdx == 3 && (g_hr.lastModelOut & 15) == 0 && g_hr.lastWorldIface == g_hr.lastModelIface && g_hr.lastWorldIdx == 3,
+          "THE MATRIX CALLS' ARGUMENTS: (the interface, the joint index as a u32, a 16-byte-aligned 64-byte buffer), for +0x58 and +0x48 alike");
+    check(g_hr.modelThread == GetCurrentThreadId(), "the calls are made on the thread that calls the observer (the hook's own thread)");
+
+    tick();
+    const std::string slot1 = cap.nth("explorer cam probe H slot:", 0), slot2 = cap.nth("explorer cam probe H slot:", 1);
+    check(cap.count("explorer cam probe H slot:") == 2 && has(slot1, "site1(ret +0x19B12D5") && has(slot1, "state=resolved captures=2") && has(slot1, "kind=RR (RuntimeRigComponent)") && has(slot1, "joint_count=60") &&
+              has(slot1, "joint_cache_flag=0") && has(slot1, "head_joint(\"def_c_head_joint\")_idx=12") && has(slot1, "pov_joint(\"def_c_povCamera_joint\")_idx=3"),
+          "H SLOT, site 1: resolved, two captures, kind RR, 60 joints, cache flag 0, the head index (12, from H's own FindJoint) and the povCamera index (3, from the capture)");
+    check(has(slot2, "site2(ret +0x19B1359") && has(slot2, "state=resolved captures=1") && has(slot2, "kind=AO (AnimatedObject)") && has(slot2, "joint_count=40") && has(slot2, "joint_cache_flag=1"),
+          "H SLOT, site 2: kind AO, 40 joints, cache flag 1, one capture");
+    const std::string jA = cap.nth("explorer cam probe H joints:", 0), jB = cap.nth("explorer cam probe H joints:", 1);
+    check(cap.count("explorer cam probe H joints:") == 2 && has(jA, "site1") && has(jA, "head_model(+0x58)=(0.000,1.600,0.020)") && has(jA, "head_world(+0x48)=(10.120,1.550,19.980)") &&
+              has(jA, "head_in_commander_local(right,up,forward)=(0.020,1.550,0.120)") && has(jA, "pov_model(+0x58)=(0.000,1.550,0.020)") && has(jA, "pov_world(+0x48)=(10.120,1.600,20.000)") &&
+              has(jA, "pov_in_commander_local(right,up,forward)=(0.000,1.600,0.120)") && has(jA, "activity_world_origin(+0xA0)=(10.100,1.680,20.000)") && has(jA, "ASSUMPTION") && has(jB, "site2"),
+          "H JOINTS, both sites: the head's and the povCamera's +0x58 and +0x48 translations, the head and pov in COMMANDER-LOCAL axes ((0.020,1.550,0.120) for the known frame), the raw +0x70 origin");
+    check(jA.size() < 1000 && slot1.size() < 1000, "...the lines fit a log line");
+
+    // ---- a second second: the head index is cached, no new slot lines ---------------------------------------------------------------------------------
+    eval();
+    tick();
+    check(g_hr.find - find0 == 2 && cap.count("explorer cam probe H slot:") == 0 && cap.count("explorer cam probe H joints:") == 2 && g_hr.modelRR == 4,
+          "the next evaluation does NOT look the head up again (cached per interface), calls the matrices again, and prints joints lines but no slot lines");
+
+    // ---- the game attaches again with a different interface at site 1 ------------------------------------------------------------------------------
+    const int findBefore = g_hr.find;
+    w.attach(0, w.iface[2], w.povName());
+    eval();
+    tick();
+    check(g_hr.find - findBefore == 2 && cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "site1") && explorercamf2test::capturedInterface(0) == reinterpret_cast<uint64_t>(w.iface[2]),
+          "A NEW CAPTURE at site 1 (another interface): ONE slot line, one more FindJoint for it (plus the attach's own), site 2's cache untouched");
+
+    // ---- a stale capture: the avatar was destroyed, the memory no longer starts with a skeleton vtable ---------------------------------------------
+    {
+        const uint64_t garbage = 0x1234;
+        std::memcpy(w.iface[2], &garbage, 8);
+        const uint64_t callsBefore = explorercamf2test::headCalls();
+        const int models = g_hr.modelRR + g_hr.modelAO;
+        eval();
+        tick();
+        check(explorercamf2test::headState() == 1 && explorercamf2test::headFaults() == 0 && explorercamf2test::capturedInterface(0) == 0 && cap.count("explorer cam probe H stood down:") == 0 &&
+                  cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "state=stale") && g_hr.modelRR + g_hr.modelAO - models == 2 &&
+                  explorercamf2test::headCalls() - callsBefore == 5,
+              "STALE CAPTURE: an interface whose first qword is neither vtable is dropped with one 'stale' slot line, NO call is made on it (only site 2's five calls), no stand-down, no fault");
+        w.attach(0, w.iface[0], w.povName());
+        eval();
+        tick();
+        check(explorercamf2test::headState() == 1 && has(cap.nth("explorer cam probe H slot:", 0), "state=resolved"), "...and the next capture resolves again");
+    }
+    // A capture whose memory is gone altogether (unmapped / no access): the read of its vtable faults under SEH; that is STALE too, not a stand-down.
+    {
+        void* page = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        check(page != nullptr, "(a page for an interface that goes away)");
+        if (page) {
+            const uint64_t rrv = reinterpret_cast<uint64_t>(g_himg) + f2::kRrVtableRva;
+            std::memcpy(page, &rrv, 8);
+            w.attach(0, page, w.povName());   // the memory is fine when the game attaches
+            DWORD oldProtect = 0;
+            VirtualProtect(page, 4096, PAGE_NOACCESS, &oldProtect);
+            const uint64_t callsBefore = explorercamf2test::headCalls();
+            eval();
+            tick();
+            check(explorercamf2test::headState() == 1 && explorercamf2test::headFaults() == 0 && explorercamf2test::capturedInterface(0) == 0 && cap.count("explorer cam probe H stood down:") == 0 &&
+                      cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "site1") && has(cap.nth("explorer cam probe H slot:", 0), "state=stale"),
+                  "UNREADABLE CAPTURE: an interface whose memory is gone is dropped as stale (one slot line), not a fault and not a stand-down");
+            check(explorercamf2test::headCalls() - callsBefore == 5, "...and the only game calls were site 2's five");
+            VirtualFree(page, 0, MEM_RELEASE);
+        }
+        w.attach(0, w.iface[0], w.povName());
+    }
+
+    // ---- an index the game does not have / one out of range / no pose object ------------------------------------------------------------------
+    {
+        const uint64_t rr = reinterpret_cast<uint64_t>(g_himg) + f2::kRrVtableRva;
+        std::memcpy(w.iface[2], &rr, 8);   // iface[2] is a valid RR again
+        g_hr.headIdx = 100;                // beyond the 60 joints
+        g_hr.povIdx = 0xFFFF;
+        w.attach(0, w.iface[2], w.povName());
+        const int model2 = g_hr.modelRR;
+        eval();
+        tick();
+        check(g_hr.modelRR == model2 && has(cap.nth("explorer cam probe H slot:", 0), "head_joint(\"def_c_head_joint\")_idx=100") && has(cap.nth("explorer cam probe H slot:", 0), "pov_joint(\"def_c_povCamera_joint\")_idx=none"),
+              "an index past the joint count (100 of 60) and 0xFFFF ('none') are NEVER handed to the game: no +0x58 call for that site");
+        g_hr.headIdx = 12;
+        g_hr.povIdx = 3;
+        uint64_t nullPose = 0;
+        std::memcpy(w.iface[2] + 0x20, &nullPose, 8);
+        w.attach(0, w.iface[2], w.povName());
+        const int findNow = g_hr.find, modelNow = g_hr.modelRR;
+        eval();
+        tick();
+        check(g_hr.find - findNow == 0 && g_hr.modelRR == modelNow && has(cap.nth("explorer cam probe H slot:", 0), "joint_count=0"),
+              "GetPoseData returning NULL (no pose object): joint count 0, no FindJoint, no matrix call (the game's own functions do nothing then either)");
+    }
+
+    // ---- the heartbeat (a fresh session, so the first window holds every call) -------------------------------------------------------------------------
     auto beatLine = [&]() -> std::string {
         for (int i = 0; i < 12; ++i) {
             tick(1000);
@@ -1786,19 +1881,19 @@ void testHeadJoint() {
         return std::string();
     };
     arm(0);
+    attachBoth();
     eval();
     const std::string beat = beatLine();
-    unsigned m58[4] = {}, m48[4] = {}, lk[4] = {}, fd[4] = {};
-    check(has(beat, "hook=armed") && has(beat, "faults=0") && has(beat, "last=ok") && has(beat, "steps=1(+1)") && has(beat, "game_calls=16(+16)") &&
-              parseTiming(beat, "model58_us(n/min/max/session_max)=", m58) && parseTiming(beat, "world48_us(n/min/max/session_max)=", m48) &&
-              parseTiming(beat, "lookup_us(n/min/max/session_max)=", lk) && parseTiming(beat, "find_us(n/min/max/session_max)=", fd) && m58[0] == 4 && m48[0] == 4 && lk[0] == 2 && fd[0] == 4 &&
-              m58[1] <= m58[2] && m58[2] <= m58[3] && !has(beat, "idle="),
-          "H HEARTBEAT: the state, steps, game calls, faults, the last result and n/min/max/session-max microseconds of the four kinds of call (4 +0x58, 4 +0x48, 2 lookups, 4 FindJoint)");
+    unsigned m58[4] = {}, m48[4] = {}, fd[4] = {};
+    check(has(beat, "hook=armed") && has(beat, "faults=0") && has(beat, "last=ok") && has(beat, "steps=1(+1)") && has(beat, "game_calls=12(+12)") && has(beat, "captures_site1=1 captures_site2=1") &&
+              has(beat, "findjoint_calls_seen=4") && parseTiming(beat, "model58_us(n/min/max/session_max)=", m58) && parseTiming(beat, "world48_us(n/min/max/session_max)=", m48) &&
+              parseTiming(beat, "find_us(n/min/max/session_max)=", fd) && m58[0] == 4 && m48[0] == 4 && fd[0] == 2 && m58[1] <= m58[2] && m58[2] <= m58[3] && !has(beat, "idle="),
+          "H HEARTBEAT: the state, steps, game calls, faults, the last result, the FindJoint calls seen (2 attaches + H's own 2), the captures per site and n/min/max/session-max microseconds");
     const std::string quiet = beatLine();
     check(has(quiet, "idle=no-step-in-window") && has(quiet, "steps=1(+0)") && parseTiming(quiet, "model58_us(n/min/max/session_max)=", m58) && m58[0] == 0,
           "a window with no free-camera update: 'idle=no-step-in-window', the window's call counts are back to 0");
 
-    // ---- the timing plumbing: a slow +0x58 shows in the maximum -------------------------------------------------------------------------------
+    // ---- the timing plumbing: a slow +0x58 shows in the maximum ----------------------------------------------------------------------------------
     g_hr.slowModelMs = 3;
     eval();
     g_hr.slowModelMs = 0;
@@ -1806,21 +1901,30 @@ void testHeadJoint() {
     check(parseTiming(slow, "model58_us(n/min/max/session_max)=", m58) && m58[0] == 4 && m58[2] >= 1500 && m58[3] >= m58[2],
           "TIMING: a +0x58 that takes 3 ms shows as a maximum of at least 1500 us in the heartbeat (and the session maximum keeps it)");
 
-    // ---- the key goes off: the instrument stops -------------------------------------------------------------------------------------------------
+    // ---- the key goes off: the observer detaches, the hook stays in place and passes calls through --------------------------------------------------
     cap.clear();
     clock += 1000;
     t::boundary(frame++, clock, false, &Capture::add, &cap);
-    const uint64_t callsOff = explorercamf2test::headCalls();
+    const uint64_t seenOff = explorercamf2test::findSeen(), callsOff = explorercamf2test::headCalls();
+    const uint64_t rOff = w.attach(0, w.iface[0], w.povName());
     eval();
-    check(explorercamf2test::headCalls() == callsOff, "KEY OFF: an observer call after the key goes off makes no game call");
+    check(explorercamf2test::findSeen() == seenOff && explorercamf2test::headCalls() == callsOff && rOff == 3 && explorercamtest::stolenBytes(6) == 5,
+          "KEY OFF: the FindJoint hook stays in place but its observer is detached (no call seen), the function still returns the original's value, and H makes no game call");
+    cap.clear();
+    clock += 1000;
+    t::boundary(frame++, clock, true, &Capture::add, &cap);
+    w.attach(1, w.iface[1], w.povName());
+    check(explorercamf2test::findSeen() == seenOff + 1 && explorercamf2test::headState() == 1 && cap.count("explorer cam probe H armed:") == 0, "...turned back on: the observer is attached again (no second install, no second 'armed' line)");
 
-    // ---- at most once a second -------------------------------------------------------------------------------------------------------------------
+    // ---- at most once a second --------------------------------------------------------------------------------------------------------------------
     arm(1000);
+    attachBoth();
     for (int i = 0; i < 50; ++i) eval();
-    check(explorercamf2test::headSteps() == 1 && g_hr.lookup == 2, "RATE: fifty updates inside a second make ONE evaluation (the +0x58 call takes a lock: never every frame)");
+    check(explorercamf2test::headSteps() == 1 && explorercamf2test::headCalls() == 12, "RATE: fifty updates inside a second make ONE evaluation (the +0x58 call takes a lock: never every frame)");
 
-    // ---- the hook's own thread ----------------------------------------------------------------------------------------------------------------
+    // ---- the hook's own thread ---------------------------------------------------------------------------------------------------------------------
     arm(0);
+    attachBoth();
     {
         std::vector<uint8_t> act(sizeof(w.activity));
         std::memcpy(act.data(), w.activity, sizeof(w.activity));
@@ -1830,13 +1934,21 @@ void testHeadJoint() {
             callFree(act.data());   // the real hook: the original, then the observers, on this thread
         });
         worker.join();
-        check(explorercamf2test::headSteps() == 1 && g_hr.modelThread == workerId && g_hr.lookupThread == workerId && workerId != GetCurrentThreadId(),
+        check(explorercamf2test::headSteps() == 1 && g_hr.modelThread == workerId && workerId != GetCurrentThreadId(),
               "THROUGH THE REAL HOOK: the evaluation and every game call ran on the thread that called the free-camera update (the camera-job thread), not the frame thread");
         tick();
         check(cap.count("explorer cam probe H joints:") == 2, "...and the frame thread (the tick) only prints what that thread published");
     }
+    // The FindJoint hook from another thread: the capture lands too.
+    {
+        arm(0);
+        uint64_t got = 0;
+        std::thread worker([&] { got = w.attach(1, w.iface[1], w.povName()); });
+        worker.join();
+        check(got == 3 && explorercamf2test::captureCount(1) == 1 && explorercamf2test::capturedInterface(1) == reinterpret_cast<uint64_t>(w.iface[1]), "A CAPTURE FROM ANOTHER THREAD lands in the same slot");
+    }
 
-    // ---- stand-downs: each stops H for the session with one line and no further call -------------------------------------------------------------
+    // ---- stand-downs: each stops H for the session with one line and no further call -------------------------------------------------------------------
     struct Down {
         const char* name;
         const char* expect;
@@ -1844,16 +1956,11 @@ void testHeadJoint() {
     };
     const uint64_t baseQ = reinterpret_cast<uint64_t>(g_himg);
     const Down downs[] = {
-        {"HUM's vtable is wrong", "not the humanoid component's vtable", [&] { const uint64_t bad = 0x1234560; std::memcpy(w.hum, &bad, 8); }},
-        {"the container's vtable is outside the image", "component container (entity+8) has vtable", [&] { const uint64_t bad = 0x1234560; std::memcpy(w.entity[0] + 8, &bad, 8); }},
-        {"the container's slot 0 is outside the image", "which is not inside the game image", [&] { *himgQ(0x2000000) = 0x10000; }},
-        {"the interface's vtable is neither kind's", "neither RuntimeRigComponent's", [&] { const uint64_t bad = baseQ + 0x3000000; std::memcpy(w.iface[0], &bad, 8); }},
         {"RR slot +0x58 differs", "vtable slot +0x58 holds", [&] { *himgQ(f2::kRrVtableRva + 8 * 11) = baseQ + 0x3000000; }},
         {"RR slot +0x48 differs", "vtable slot +0x48 holds", [&] { *himgQ(f2::kRrVtableRva + 8 * 9) = baseQ + 0x3000000; }},
         {"RR slot +0x30 differs", "vtable slot +0x30 holds", [&] { *himgQ(f2::kRrVtableRva + 8 * 6) = baseQ + 0x3000000; }},
         {"RR slot +0x18 differs", "vtable slot +0x18 holds", [&] { *himgQ(f2::kRrVtableRva + 8 * 3) = baseQ + 0x3000000; }},
-        {"AO slot +0x58 differs (first-person)", "vtable slot +0x58 holds", [&] { *himgQ(f2::kAoVtableRva + 8 * 11) = baseQ + 0x3000000; }},
-        {"a fault in the lookup", "faulted while the component lookup call", [&] { g_hr.faultAt = 1; }},
+        {"AO slot +0x58 differs (site 2)", "vtable slot +0x58 holds", [&] { *himgQ(f2::kAoVtableRva + 8 * 11) = baseQ + 0x3000000; }},
         {"a fault in GetPoseData", "faulted while the GetPoseData call", [&] { g_hr.faultAt = 2; }},
         {"a fault in FindJoint", "faulted while the FindJoint call", [&] { g_hr.faultAt = 3; }},
         {"a fault in +0x58", "faulted while the +0x58 model-matrix call", [&] { g_hr.faultAt = 4; }},
@@ -1864,6 +1971,7 @@ void testHeadJoint() {
     };
     for (const Down& d : downs) {
         arm(0);
+        attachBoth();
         d.corrupt();
         eval();
         const uint64_t stopCalls = explorercamf2test::headCalls();
@@ -1873,7 +1981,7 @@ void testHeadJoint() {
         char what[200];
         std::snprintf(what, sizeof(what), "STAND DOWN, %s: ONE 'stood down' line naming it, state 2, no 'joints' line", d.name);
         check(cap.count("explorer cam probe H stood down:") == 1 && has(line, d.expect) && has(line, "H will not run this session") && explorercamf2test::headState() == 2 &&
-                  cap.count("explorer cam probe H joints:") == 0 && stopCalls <= 16,
+                  cap.count("explorer cam probe H joints:") == 0 && stopCalls <= 12,
               what);
         const int modelsAt = g_hr.modelRR + g_hr.modelAO + g_hr.worldRR + g_hr.worldAO;
         for (int i = 0; i < 3; ++i) eval();
@@ -1887,47 +1995,42 @@ void testHeadJoint() {
         check(has(cap.nth("explorer cam probe H heartbeat:", 0), "hook=stood down") && has(cap.nth("explorer cam probe H heartbeat:", 0), "idle=the instrument is stood down"),
               "...the heartbeat says H is stood down (never ran, distinguishable from ran and saw nothing)");
     }
-    // The exact call counts that the early stand-downs allow.
+    // The exact call counts the early stand-downs allow: every slot is checked before the first call.
     arm(0);
-    {
-        const uint64_t bad = 0x1234560;
-        std::memcpy(w.hum, &bad, 8);
-        eval();
-        check(g_hr.lookup == 0 && explorercamf2test::headCalls() == 0, "HUM's vtable wrong: not one game call was made");
-    }
-    arm(0);
-    *himgQ(0x2000000) = 0x10000;
-    eval();
-    check(g_hr.lookup == 0 && explorercamf2test::headCalls() == 0, "the container's lookup function outside the image: it is not called");
-    arm(0);
+    attachBoth();
     *himgQ(f2::kRrVtableRva + 8 * 11) = baseQ + 0x3000000;
     eval();
-    check(g_hr.lookup == 1 && g_hr.poseRR == 0 && g_hr.find == 0 && g_hr.modelRR == 0 && g_hr.worldRR == 0,
-          "a wrong +0x58 slot: only the (unpinned) lookup was called; GetPoseData, FindJoint, +0x58 and +0x48 were not, because every slot is checked before the first");
+    check(g_hr.poseRR == 0 && g_hr.find == 2 && g_hr.modelRR == 0 && g_hr.worldRR == 0 && explorercamf2test::headCalls() == 0,
+          "a wrong +0x58 slot: not one H call on that interface (GetPoseData, FindJoint, +0x58 and +0x48 all unmade; the two FindJoint calls counted are the attaches), because every slot is checked before the first");
     arm(0);
+    attachBoth();
     g_hr.swapWorldSlot = true;
     eval();
-    check(g_hr.modelRR == 1 && g_hr.worldRR == 0 && explorercamf2test::headState() == 2,
-          "THE CHECK BEFORE EVERY CALL: +0x58 ran, then the +0x48 slot was found changed, so +0x48 was NOT called");
+    check(g_hr.modelRR == 1 && g_hr.worldRR == 0 && explorercamf2test::headState() == 2, "THE CHECK BEFORE EVERY CALL: +0x58 ran, then the +0x48 slot was found changed, so +0x48 was NOT called");
     arm(0);
+    attachBoth();
     g_hr.swapSlotIn = 2;
     eval();
-    check(g_hr.find == 2 && g_hr.modelRR == 0 && g_hr.worldRR == 0 && explorercamf2test::headState() == 2,
-          "...the +0x58 slot changed by the last FindJoint: neither +0x58 nor +0x48 was called");
+    check(g_hr.modelRR == 0 && g_hr.worldRR == 0 && explorercamf2test::headState() == 2, "...the +0x58 slot changed by the head FindJoint: neither +0x58 nor +0x48 was called");
     arm(0);
+    attachBoth();
     g_hr.swapSlotIn = 1;
     eval();
-    check(g_hr.poseRR == 1 && g_hr.find == 0 && explorercamf2test::headState() == 2, "...the +0x30 slot changed by GetPoseData: FindJoint was not called");
+    check(g_hr.poseRR == 1 && g_hr.find == 2 && explorercamf2test::headState() == 2, "...the +0x30 slot changed by GetPoseData: H's FindJoint was not called (only the attaches')");
 
-    // ---- an unknown build / a literal that is not there: nothing runs --------------------------------------------------------------------------
+    // ---- an unknown build / a literal that is not there / a FindJoint hook that cannot install: nothing runs -------------------------------------------
     arm(0, false);
-    check(cap.count("explorer cam probe H armed:") == 0 && explorercamf2test::headState() == 2, "an exe that is not build 332841: H never arms");
+    check(cap.count("explorer cam probe H armed:") == 0 && explorercamf2test::headState() == 2 && explorercamtest::stolenBytes(6) == 0, "an exe that is not build 332841: H never arms and no FindJoint hook is installed");
     check(cap.count("explorer cam probe H stood down:") == 1 && has(cap.nth("explorer cam probe H stood down:", 0), "the game build differs from build 332841"), "...and says so once");
-    eval();
-    check(explorercamf2test::headCalls() == 0, "...and makes no call");
+    arm(0, true, false);
+    check(cap.count("explorer cam probe H armed:") == 0 && explorercamf2test::headState() == 2 && explorercamtest::stolenBytes(6) == 0 && cap.count("explorer cam probe H stood down:") == 1 &&
+              has(cap.nth("explorer cam probe H stood down:", 0), "the FindJoint hook (EliteDangerous64.exe+0xFDDB10) is not in place") && has(cap.nth("explorer cam probe H stood down:", 0), "the game build differs") &&
+              g_himg[0x3000000] == 0x48,
+          "A FINDJOINT WHOSE PROLOGUE IS NOT THE BUILD'S: the hook stands down with the reason in the line, not a byte of the function is written, and H stands down");
     t::reset();
     w.reset();
     g_himg[f2::kPovNameRva + 4] ^= 1;   // the pov literal is not what it should be
+    targets.findJoint = reinterpret_cast<uintptr_t>(g_himg) + kFindFnRva;
     explorercamtest::setTargets(targets);
     {
         explorercamf2test::HeadSeam seam;
@@ -1938,8 +2041,8 @@ void testHeadJoint() {
     cap.clear();
     t::boundary(frame++, clock += 100000, true, &Capture::add, &cap);
     t::boundary(frame++, clock += 1100, true, &Capture::add, &cap);
-    check(explorercamf2test::headState() == 2 && cap.count("explorer cam probe H stood down:") == 1 && has(cap.nth("explorer cam probe H stood down:", 0), "joint-name literal"),
-          "a joint-name literal in the exe that is not the expected string: H stands down at arm");
+    check(explorercamf2test::headState() == 2 && cap.count("explorer cam probe H stood down:") == 1 && has(cap.nth("explorer cam probe H stood down:", 0), "joint-name literal") && explorercamtest::stolenBytes(6) == 0,
+          "a joint-name literal in the exe that is not the expected string: H stands down at arm, before the hook is installed");
     t::reset();
 }
 

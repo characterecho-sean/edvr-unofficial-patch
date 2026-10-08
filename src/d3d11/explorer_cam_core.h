@@ -86,6 +86,14 @@ constexpr size_t kAvatarFadePrologueBytes = 16;
 inline constexpr uint8_t kAvatarFadePrologue[kAvatarFadePrologueBytes] = {
     0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
 
+// The skeleton interface's FindJoint(const char* name) -> u16 (0xFFFF = none), shared by RuntimeRigComponent and AnimatedObject (rcx = the
+// interface, rdx = the name): the probe's H instrument hooks it (callback relay, original first) to learn which interfaces the game attaches the local
+// player's avatars to. `mov [rsp+8],rbx` is the first instruction, five bytes with no rip-relative displacement: CodeHook steals exactly five.
+constexpr uintptr_t kFindJointRva = 0xFDDB10;
+constexpr size_t kFindJointPrologueBytes = 16;
+inline constexpr uint8_t kFindJointPrologue[kFindJointPrologueBytes] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xFA};
+
 // ---- the free-camera activity's fields (Phase 0a, "The object") -------------------------------------------------------------
 constexpr uint32_t kOffLocalPose = 0x3B0;      // 16 floats, row-major 4x4: rows 0-2 = right, up, forward; row 3 = origin (x right, y up, z forward)
 constexpr uint32_t kOffRelative = 0x470;       // 1 = relative to the commander's frame, 0 = world

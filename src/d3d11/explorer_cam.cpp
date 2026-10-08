@@ -25,6 +25,7 @@
 #include "explorer_cam_core.h"
 
 #include <windows.h>
+#include <intrin.h>
 
 #include <algorithm>
 #include <atomic>
@@ -43,8 +44,8 @@
 namespace edvr {
 namespace {
 
-// ---- the six hooks ------------------------------------------------------------------------------------------------------------
-enum Hk : int { kHkFree = 0, kHkCollision, kHkBox, kHkUi, kHkCtl, kHkFade, kHkCount };
+// ---- the seven hooks ------------------------------------------------------------------------------------------------------------
+enum Hk : int { kHkFree = 0, kHkCollision, kHkBox, kHkUi, kHkCtl, kHkFade, kHkFind, kHkCount };
 struct HookSpec {
     const char* label;      // the log's name for it
     const char* what;       // what the prologue belongs to
@@ -65,6 +66,8 @@ const HookSpec kSpec[kHkCount] = {
      ecm::kControllerPrologueBytes, false},
     {"avatar-fade", "AvatarModelComponent dither-fade update", "explorer-cam-avatar-fade", ecm::kAvatarFadeRva, ecm::kAvatarFadePrologue,
      ecm::kAvatarFadePrologueBytes, false},
+    {"find-joint", "skeleton interface FindJoint(name)", "explorer-cam-find-joint", ecm::kFindJointRva, ecm::kFindJointPrologue,
+     ecm::kFindJointPrologueBytes, false},
 };
 
 // ---- state shared between the threads --------------------------------------------------------------------------------------
@@ -75,6 +78,7 @@ alignas(8) std::atomic<uint64_t> g_forwarded[2];        // ...and calls passed t
 alignas(8) std::atomic<uintptr_t> g_gate[kHkCount];     // a callback relay's gate: open = the callback runs, closed = straight on
 std::atomic<uintptr_t> g_forward[kHkCount];             // a callback relay's trampoline
 std::atomic<ExplorerCamActivityObserver> g_observers[3][kExplorerCamMaxObservers];   // free camera, controller, avatar fade
+std::atomic<ExplorerCamFindObserver> g_findObserver{nullptr};                         // the FindJoint hook's one observer (the probe's H)
 
 std::atomic<bool> g_placeActive{false};                 // on, every required hook armed, not stood down by faults (frame thread)
 std::atomic<uint32_t> g_resetRequest{0};                // the free-camera hook's placement machine starts over
@@ -683,6 +687,20 @@ __declspec(noinline) uint64_t __fastcall controllerHooked(void* a, void* b, void
     return result;
 }
 
+// ---- the FindJoint hook (the probe's H rides it; nothing here writes) -------------------------------------------------------------
+// FindJoint is called by many systems, so this stays trivial: the original FIRST (its result is what the observer is told, and it is returned
+// unchanged), then one observer call carrying rcx, rdx, the result and the caller's return address. The callback relay JUMPS here, so the
+// return address on entry is the caller's own.
+__declspec(noinline) uint64_t __fastcall findJointHooked(void* a, void* b, void* c, void* d) noexcept {
+    const uintptr_t returnAddress = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkFind].load(std::memory_order_acquire));
+    if (!forward) return 0;
+    const uint64_t result = forward(a, b, c, d);
+    const ExplorerCamFindObserver observer = g_findObserver.load(std::memory_order_acquire);
+    if (observer) observer(a, b, result, returnAddress);
+    return result;
+}
+
 // ---- the avatar-fade hook (the probe's fade counter rides it; nothing here writes) ---------------------------------------------
 __declspec(noinline) uint64_t __fastcall avatarFadeHooked(void* a, void* b, void* c, void* d) noexcept {
     const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkFade].load(std::memory_order_acquire));
@@ -797,6 +815,7 @@ const void* callbackFor(int id) {
         case kHkUi: return reinterpret_cast<const void*>(&cameraUiHooked);
         case kHkCtl: return reinterpret_cast<const void*>(&controllerHooked);
         case kHkFade: return reinterpret_cast<const void*>(&avatarFadeHooked);
+        case kHkFind: return reinterpret_cast<const void*>(&findJointHooked);
         default: return nullptr;
     }
 }
@@ -849,6 +868,9 @@ const char* armedRole(int id) {
                    "original";
         case kHkFade:
             return "LOG ONLY, for advanced.explorer_cam_probe's fade counter: the original runs first, then the component's dither block is read";
+        case kHkFind:
+            return "LOG ONLY, for advanced.explorer_cam_probe's H: the original runs first and its result is returned unchanged; the observer is told the "
+                   "interface, the name, the result and the caller's return address";
         case kHkUi:
             return "FreeCamToggleHUD is pressed for one update when a placement begins, and again to give the UI back; the original runs "
                    "between, and the press is restored after it";
@@ -864,6 +886,7 @@ const char* downConsequence(int id) {
         case kHkBox: return "Explorer Cam placement does not run (without it the free camera would be lifted onto the helmet).";
         case kHkCtl: return "Explorer Cam does not run: F5 has nothing to press.";
         case kHkFade: return "advanced.explorer_cam_probe's fade counter does not run.";
+        case kHkFind: return "advanced.explorer_cam_probe's H (the head joint) does not run.";
         default: return "the camera UI stays up while placed; everything else runs.";
     }
 }
@@ -900,6 +923,7 @@ void updateGates() {
     g_gate[kHkCtl].store(armed(kHkCtl) && (active || observerCount(1) > 0 || g_fadeOurs.load(std::memory_order_relaxed)) ? 1u : 0u,
                          std::memory_order_release);
     g_gate[kHkFade].store(armed(kHkFade) && observerCount(2) > 0 ? 1u : 0u, std::memory_order_release);
+    g_gate[kHkFind].store(armed(kHkFind) && g_findObserver.load(std::memory_order_relaxed) != nullptr ? 1u : 0u, std::memory_order_release);
     g_gate[kHkUi].store(armed(kHkUi) && (active || g_uiHeld.load(std::memory_order_relaxed)) ? 1u : 0u, std::memory_order_release);
 }
 
@@ -1407,6 +1431,24 @@ ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivi
     return status;
 }
 
+ExplorerCamHookStatus explorerCamObserveFind(ExplorerCamFindObserver observer, bool attach) {
+    if (attach && g_hooks[kHkFind].state == ExplorerCamHookStatus::NotTried) tryHook(kHkFind, ecm::Sink{&logSink, nullptr});
+    if (attach) {
+        if (armed(kHkFind) && observer) g_findObserver.store(observer, std::memory_order_release);
+    } else {
+        ExplorerCamFindObserver current = g_findObserver.load();
+        if (current && (!observer || current == observer)) g_findObserver.store(nullptr, std::memory_order_release);
+    }
+    updateGates();
+    ExplorerCamHookStatus status;
+    status.state = g_hooks[kHkFind].state;
+    status.stolen = g_hooks[kHkFind].stolen;
+    status.target = g_hooks[kHkFind].target;
+    status.relay = reinterpret_cast<uintptr_t>(g_hooks[kHkFind].relay);
+    std::snprintf(status.why, sizeof(status.why), "%s", g_hooks[kHkFind].why);
+    return status;
+}
+
 #ifdef EDVR_EXPLORER_CAM_TEST
 namespace explorercamtest {
 void setTargets(const ExplorerCamTestTargets& t) {
@@ -1416,6 +1458,7 @@ void setTargets(const ExplorerCamTestTargets& t) {
     g_testTargets[kHkUi] = t.cameraUi;
     g_testTargets[kHkCtl] = t.controller;
     g_testTargets[kHkFade] = t.avatarFade;
+    g_testTargets[kHkFind] = t.findJoint;
 }
 void setFadeGlobal(int32_t* mode, float* amount) {
     g_testFadeMode = mode;
@@ -1492,6 +1535,7 @@ void reset() {
     }
     for (int w = 0; w < 3; ++w)
         for (int i = 0; i < kExplorerCamMaxObservers; ++i) g_observers[w][i].store(nullptr);
+    g_findObserver.store(nullptr);
     g_placedActivity.store(0);
     for (int i = 0; i < 2; ++i) {
         g_bypassed[i].store(0);

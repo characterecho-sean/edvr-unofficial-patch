@@ -67,25 +67,33 @@ ecp::DistinctSet<64> g_fadeEnabledSet;              // the components that read 
 const int32_t* g_fadeGlobal = nullptr;              // Explorer Cam's dither-fade mode global, for the verdict
 const char* g_fadeStatus = "not tried";
 
-// H: the third-person avatar's head joint. Evaluated on the hook thread (the free-camera hook's post-call), at most once a second.
+// H: the local commander's skeleton, route B (explorer_cam_f2_core.h). The FindJoint hook stores the interfaces the game attaches the local player's
+// avatars to; the free-camera hook's post-call reads them at most once a second.
 struct TimerStat {
     std::atomic<uint32_t> n{0}, minUs{0xFFFFFFFFu}, maxUs{0}, allMaxUs{0};
 };
 struct HeadCache {
     uint64_t iface = 0;
-    uint16_t headIdx = f2::kNoJoint, povIdx = f2::kNoJoint;
+    uint16_t headIdx = f2::kNoJoint;
+};
+struct Skel {   // one attach site's capture
+    std::atomic<uint64_t> iface{0};
+    std::atomic<uint32_t> index{0xFFFF};
+    std::atomic<uint32_t> captures{0};
 };
 std::atomic<bool> g_busyH{false};
-f2::HeadTargets g_head;                          // set at arm before the state goes to 1; read-only after
+f2::HeadTargets g_head;                          // set at arm before the FindJoint observer is attached; read-only after
 std::atomic<uint32_t> g_headState{0};            // 0 not tried, 1 armed, 2 stood down
-std::atomic<uint64_t> g_headSteps{0}, g_headCalls{0}, g_headFaults{0};
+std::atomic<uint64_t> g_headSteps{0}, g_headCalls{0}, g_headFaults{0}, g_findSeen{0};
 std::atomic<uint64_t> g_headNextMs{0};           // GetTickCount64 at which the next evaluation may run
 std::atomic<const char*> g_headLast{"none"};
 f2::HeadDown g_headDown;                         // written once, before g_headDownSet is released
 std::atomic<uint32_t> g_headDownSet{0};
+std::atomic<uint32_t> g_headDownClaim{0};
 ecp::SeqSlot<f2::HeadSample> g_headSample;
+Skel g_skel[2];
 HeadCache g_headCache[2];                        // hook thread only (g_busyH)
-TimerStat g_t58, g_t48, g_tLookup, g_tFind;
+TimerStat g_t58, g_t48, g_tFind;
 uint32_t g_headIntervalMs = f2::kHeadIntervalMs;
 
 // The arm lines say what happened once per session.
@@ -210,9 +218,11 @@ __declspec(noinline) bool sehStoreQword(uintptr_t address, uintptr_t value) noex
     }
 }
 
-// ---- H: the head joint ---------------------------------------------------------------------------------------------------------
-// Everything here runs on the game's camera-job thread, inside the free-camera hook's post-call: the update has returned, every press is
-// restored and nothing of ours is held. Every read and every call into the game is under SEH, in a function of its own with no destructors.
+// ---- H: the local commander's skeleton ---------------------------------------------------------------------------------------------
+// The FindJoint observer runs on whichever thread the game calls FindJoint from (many systems, many calls): it counts, compares the return address
+// with the two attach sites and the name with the literal, and stores. Everything else here runs on the game's camera-job thread, inside the
+// free-camera hook's post-call: the update has returned, every press is restored and nothing of ours is held. Every read and every call into the
+// game is under SEH, in a function of its own with no destructors.
 __declspec(noinline) bool sehReadU32(uintptr_t address, uint32_t* out) noexcept {
     __try {
         std::memcpy(out, reinterpret_cast<const void*>(address), 4);
@@ -255,18 +265,9 @@ __declspec(noinline) bool sehReadSlots(uintptr_t vtable, uint64_t* out) noexcept
         return false;
     }
 }
-using HeadLookupFn = void* (__fastcall*)(void* container, uint32_t typeId);
 using HeadPoseFn = void* (__fastcall*)(void* iface);
 using HeadFindFn = uint32_t (__fastcall*)(void* iface, const char* name);
 using HeadMatrixFn = void (__fastcall*)(void* iface, uint32_t index, float* out);
-__declspec(noinline) bool sehCallLookup(uintptr_t fn, uintptr_t container, uint32_t typeId, uintptr_t* out) noexcept {
-    __try {
-        *out = reinterpret_cast<uintptr_t>(reinterpret_cast<HeadLookupFn>(fn)(reinterpret_cast<void*>(container), typeId));
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
 __declspec(noinline) bool sehCallPose(uintptr_t fn, uintptr_t iface, uintptr_t* out) noexcept {
     __try {
         *out = reinterpret_cast<uintptr_t>(reinterpret_cast<HeadPoseFn>(fn)(reinterpret_cast<void*>(iface)));
@@ -329,8 +330,7 @@ f2::HeadTiming drainTimer(TimerStat& t) noexcept {
 }
 
 // H stops for the session: the first reason wins, and the tick says it once.
-std::atomic<uint32_t> g_headDownClaim{0};
-void headStandDown(f2::HeadWhy why, uint32_t slot, uint64_t a, uint64_t b, uint64_t c, bool fault) noexcept {
+void headStandDown(f2::HeadWhy why, uint32_t slot, uint64_t a, uint64_t b, uint64_t c, bool fault, const char* text = nullptr) noexcept {
     if (fault) g_headFaults.fetch_add(1, std::memory_order_relaxed);
     if (g_headDownClaim.exchange(1, std::memory_order_acq_rel) != 0) return;
     g_headDown.why = why;
@@ -338,6 +338,7 @@ void headStandDown(f2::HeadWhy why, uint32_t slot, uint64_t a, uint64_t b, uint6
     g_headDown.a = a;
     g_headDown.b = b;
     g_headDown.c = c;
+    if (text) std::snprintf(g_headDown.text, sizeof(g_headDown.text), "%s", text);
     g_headLast.store("stood down", std::memory_order_relaxed);
     g_headState.store(2, std::memory_order_release);
     g_headDownSet.store(1, std::memory_order_release);
@@ -347,156 +348,107 @@ bool headFault(f2::HeadStage stage, uint32_t slot) noexcept {
     return false;
 }
 
-// BEFORE every call into the game: the interface's vtable pointer is its kind's and every slot H uses holds exactly the expected function.
-// False = H has been stood down (the reason is recorded).
-bool headVerify(uint32_t slotIdx, uintptr_t iface, f2::HeadKind kind, uint64_t* fn) noexcept {
+// BEFORE every call into the game: the interface's vtable pointer is a skeleton interface's (RR or AO, and the same kind as before) and every slot H
+// uses holds exactly the expected function. A captured pointer may go stale when the game destroys the avatar: an unreadable interface, or one whose
+// first qword is no longer RR's or AO's vtable, is STALE (dropped, a later capture replaces it); a slot that differs in a vtable that IS RR's or AO's
+// is a different build, and stands H down.
+enum class Verify { Ok, Stale, Down };
+Verify headVerify(uint32_t site, uintptr_t iface, f2::HeadKind expect, uint64_t* fn, f2::HeadKind* kindOut) noexcept {
     const f2::HeadTargets& T = g_head;
     uint64_t vptr = 0;
-    if (!sehReadQword(iface, &vptr)) return headFault(f2::HeadStage::ReadInterface, slotIdx);
-    if (f2::headKindOfVtable(vptr, T) != kind) {
-        headStandDown(f2::HeadWhy::IfaceVtable, slotIdx, vptr, slotIdx, iface, false);
-        return false;
+    if (!sehReadQword(iface, &vptr)) return Verify::Stale;
+    const f2::HeadKind kind = f2::headKindOfVtable(vptr, T);
+    if (kind == f2::HeadKind::None || (expect != f2::HeadKind::None && kind != expect)) return Verify::Stale;
+    if (!sehReadSlots(static_cast<uintptr_t>(vptr), fn)) {
+        headFault(f2::HeadStage::ReadSlots, site);
+        return Verify::Down;
     }
-    if (!sehReadSlots(static_cast<uintptr_t>(vptr), fn)) return headFault(f2::HeadStage::ReadInterface, slotIdx);
     uint32_t bad = 0;
     uint64_t found = 0;
-    const int r = f2::headVerifySlots(vptr, fn, kind, T, &bad, &found);
-    if (r == 1) {
-        headStandDown(f2::HeadWhy::IfaceVtable, slotIdx, vptr, slotIdx, iface, false);
-        return false;
+    if (f2::headVerifySlots(vptr, fn, kind, T, &bad, &found) != 0) {
+        headStandDown(f2::HeadWhy::SlotMismatch, site, 8u * f2::kHeadSlotIndex[bad], found, f2::headExpectedFunction(kind, bad, T), false);
+        return Verify::Down;
     }
-    if (r == 2) {
-        headStandDown(f2::HeadWhy::SlotMismatch, slotIdx, 8u * f2::kHeadSlotIndex[bad], found, f2::headExpectedFunction(kind, bad, T), false);
-        return false;
-    }
+    *kindOut = kind;
+    return Verify::Ok;
+}
+bool headStale(uint32_t site, uint64_t iface, f2::HeadSlot& S) noexcept {
+    uint64_t expected = iface;
+    g_skel[site].iface.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    g_headCache[site] = HeadCache();
+    S.state = static_cast<uint8_t>(f2::HeadSlotState::Stale);
     return true;
 }
 
-// One avatar slot of HUM: EntityRef, entity, the component lookup, the interface's identity, the joint indexes and the four matrices. True while H
-// goes on (a slot that is simply not live yet is not a failure).
-bool headSlot(uint32_t idx, uintptr_t hum, f2::HeadSlot& S) noexcept {
-    const f2::HeadTargets& T = g_head;
-    HeadCache& C = g_headCache[idx];
-    S.state = static_cast<uint8_t>(f2::HeadSlotState::NoRef);
-    uint64_t er = 0;
-    if (!sehReadQword(hum + (idx == 0 ? f2::kOffHumThirdPerson : f2::kOffHumFirstPerson), &er)) return headFault(f2::HeadStage::ReadSlot, idx);
-    S.er = er;
-    if (er == 0) {
-        C = HeadCache();
-        return true;
-    }
-    uint32_t st = 0;
-    if (!sehReadU32(er + f2::kOffErState, &st)) return headFault(f2::HeadStage::ReadSlot, idx);
-    S.erState = static_cast<int32_t>(st);
-    if (S.erState < f2::kErLive) {
-        S.state = static_cast<uint8_t>(f2::HeadSlotState::NotLive);
-        C = HeadCache();
-        return true;
-    }
-    uint64_t entity = 0;
-    if (!sehReadQword(er + f2::kOffErEntity, &entity)) return headFault(f2::HeadStage::ReadSlot, idx);
-    S.entity = entity;
-    if (entity == 0) {
-        S.state = static_cast<uint8_t>(f2::HeadSlotState::NoEntity);
-        C = HeadCache();
-        return true;
-    }
-    // The component container: entity+8, a vtable whose slot 0 looks a component up by type id. Not pinned to an address (it was not READ), so it
-    // must at least be inside the game image; its RVA is logged so the next build can pin it.
-    const uintptr_t container = static_cast<uintptr_t>(entity) + f2::kOffEntityContainer;
-    uint64_t cvt = 0, fn0 = 0;
-    if (!sehReadQword(container, &cvt)) return headFault(f2::HeadStage::ReadEntity, idx);
-    if (!T.inImage(static_cast<uintptr_t>(cvt)) || (cvt & 7u) != 0) {
-        headStandDown(f2::HeadWhy::ContainerVtable, idx, cvt, 0, 0, false);
-        return false;
-    }
-    if (!sehReadQword(static_cast<uintptr_t>(cvt), &fn0)) return headFault(f2::HeadStage::ReadEntity, idx);
-    if (!T.inImage(static_cast<uintptr_t>(fn0))) {
-        headStandDown(f2::HeadWhy::ContainerVtable, idx, cvt, fn0, 0, false);
-        return false;
-    }
-    S.lookupRva = fn0 - T.base;
-    uint32_t typeId = 0;
-    if (!sehReadU32(T.skeletonId, &typeId)) return headFault(f2::HeadStage::ReadEntity, idx);
-    S.state = static_cast<uint8_t>(f2::HeadSlotState::NoIface);
-    if (typeId == 0) {
-        C = HeadCache();
-        return true;
-    }
-    uintptr_t iface = 0;
-    const uint64_t l0 = qpcNow();
-    const bool lookedUp = sehCallLookup(static_cast<uintptr_t>(fn0), container, typeId, &iface);
-    noteTimer(g_tLookup, l0, qpcNow());
-    g_headCalls.fetch_add(1, std::memory_order_relaxed);
-    if (!lookedUp) return headFault(f2::HeadStage::Lookup, idx);
+// One attach site: its capture, the interface's identity, the joint indexes and the four matrices. True while H goes on (a site with nothing
+// captured yet, or a stale capture, is not a failure).
+bool headSite(uint32_t site, f2::HeadSlot& S) noexcept {
+    HeadCache& C = g_headCache[site];
+    S.captures = g_skel[site].captures.load(std::memory_order_relaxed);
+    const uint64_t iface = g_skel[site].iface.load(std::memory_order_acquire);
+    S.povIdx = static_cast<uint16_t>(g_skel[site].index.load(std::memory_order_relaxed) & 0xFFFFu);
     if (iface == 0) {
+        S.state = static_cast<uint8_t>(f2::HeadSlotState::NotCaptured);
         C = HeadCache();
         return true;
     }
     S.iface = iface;
-    uint64_t vptr = 0;
-    if (!sehReadQword(iface, &vptr)) return headFault(f2::HeadStage::ReadInterface, idx);
-    const f2::HeadKind kind = f2::headKindOfVtable(vptr, T);
-    if (kind == f2::HeadKind::None) {
-        headStandDown(f2::HeadWhy::IfaceVtable, idx, vptr, idx, iface, false);
-        return false;
-    }
+    uint64_t fn[f2::kHeadSlots] = {};
+    f2::HeadKind kind = f2::HeadKind::None;
+    Verify v = headVerify(site, static_cast<uintptr_t>(iface), f2::HeadKind::None, fn, &kind);
+    if (v == Verify::Down) return false;
+    if (v == Verify::Stale) return headStale(site, iface, S);
     S.kind = static_cast<uint8_t>(kind);
     uint8_t flag = 0;
-    if (!sehReadU8(iface + f2::headCachedFlagOffset(kind), &flag)) return headFault(f2::HeadStage::ReadInterface, idx);
+    if (!sehReadU8(static_cast<uintptr_t>(iface) + f2::headCachedFlagOffset(kind), &flag)) return headStale(site, iface, S);
     S.cached = flag;
 
-    uint64_t fn[f2::kHeadSlots] = {};
-    if (!headVerify(idx, iface, kind, fn)) return false;
     uintptr_t pose = 0;
     g_headCalls.fetch_add(1, std::memory_order_relaxed);
-    if (!sehCallPose(static_cast<uintptr_t>(fn[0]), iface, &pose)) return headFault(f2::HeadStage::PoseCall, idx);
+    if (!sehCallPose(static_cast<uintptr_t>(fn[0]), static_cast<uintptr_t>(iface), &pose)) return headFault(f2::HeadStage::PoseCall, site);
     uint16_t joints = 0;
-    if (pose != 0 && !sehReadU16(pose, &joints)) return headFault(f2::HeadStage::PoseCall, idx);
+    if (pose != 0 && !sehReadU16(pose, &joints)) return headFault(f2::HeadStage::PoseCall, site);
     S.joints = joints;
     S.state = static_cast<uint8_t>(f2::HeadSlotState::Resolved);
     if (pose == 0 || joints == 0) return true;   // the game's own matrix functions do nothing without a pose object: neither does H
 
-    if (C.iface != iface) {   // a new interface: look the two joints up once
+    if (C.iface != iface) {   // a new interface: look the head joint up once (the povCamera index is the capture's)
         uint32_t r = f2::kNoJoint;
-        if (!headVerify(idx, iface, kind, fn)) return false;
-        uint64_t f0 = qpcNow();
+        v = headVerify(site, static_cast<uintptr_t>(iface), kind, fn, &kind);
+        if (v == Verify::Down) return false;
+        if (v == Verify::Stale) return headStale(site, iface, S);
+        const uint64_t f0 = qpcNow();
         g_headCalls.fetch_add(1, std::memory_order_relaxed);
-        bool ok = sehCallFind(static_cast<uintptr_t>(fn[1]), iface, f2::kHeadName, &r);
+        const bool ok = sehCallFind(static_cast<uintptr_t>(fn[1]), static_cast<uintptr_t>(iface), f2::kHeadName, &r);
         noteTimer(g_tFind, f0, qpcNow());
-        if (!ok) return headFault(f2::HeadStage::FindCall, idx);
-        const uint16_t headIdx = static_cast<uint16_t>(r & 0xFFFFu);
-        if (!headVerify(idx, iface, kind, fn)) return false;
-        f0 = qpcNow();
-        g_headCalls.fetch_add(1, std::memory_order_relaxed);
-        ok = sehCallFind(static_cast<uintptr_t>(fn[1]), iface, f2::kPovName, &r);
-        noteTimer(g_tFind, f0, qpcNow());
-        if (!ok) return headFault(f2::HeadStage::FindCall, idx);
+        if (!ok) return headFault(f2::HeadStage::FindCall, site);
         C.iface = iface;
-        C.headIdx = headIdx;
-        C.povIdx = static_cast<uint16_t>(r & 0xFFFFu);
+        C.headIdx = static_cast<uint16_t>(r & 0xFFFFu);
     }
     S.headIdx = C.headIdx;
-    S.povIdx = C.povIdx;
-    const uint16_t index[2] = {C.headIdx, C.povIdx};
+    const uint16_t index[2] = {C.headIdx, S.povIdx};
     for (uint32_t j = 0; j < 2; ++j) {
         if (index[j] == f2::kNoJoint || index[j] >= joints) continue;   // absent, or out of range: never handed to the game
         alignas(16) float buf[16] = {};
-        if (!headVerify(idx, iface, kind, fn)) return false;
+        v = headVerify(site, static_cast<uintptr_t>(iface), kind, fn, &kind);
+        if (v == Verify::Down) return false;
+        if (v == Verify::Stale) return headStale(site, iface, S);
         uint64_t t0 = qpcNow();
         g_headCalls.fetch_add(1, std::memory_order_relaxed);
-        bool ok = sehCallMatrix(static_cast<uintptr_t>(fn[3]), iface, index[j], buf);
+        bool ok = sehCallMatrix(static_cast<uintptr_t>(fn[3]), static_cast<uintptr_t>(iface), index[j], buf);
         noteTimer(g_t58, t0, qpcNow());
-        if (!ok) return headFault(f2::HeadStage::ModelCall, idx);
+        if (!ok) return headFault(f2::HeadStage::ModelCall, site);
         std::memcpy(S.model[j], buf, 64);
         S.have = static_cast<uint8_t>(S.have | (1u << j));
         std::memset(buf, 0, sizeof(buf));
-        if (!headVerify(idx, iface, kind, fn)) return false;
+        v = headVerify(site, static_cast<uintptr_t>(iface), kind, fn, &kind);
+        if (v == Verify::Down) return false;
+        if (v == Verify::Stale) return headStale(site, iface, S);
         t0 = qpcNow();
         g_headCalls.fetch_add(1, std::memory_order_relaxed);
-        ok = sehCallMatrix(static_cast<uintptr_t>(fn[2]), iface, index[j], buf);
+        ok = sehCallMatrix(static_cast<uintptr_t>(fn[2]), static_cast<uintptr_t>(iface), index[j], buf);
         noteTimer(g_t48, t0, qpcNow());
-        if (!ok) return headFault(f2::HeadStage::WorldCall, idx);
+        if (!ok) return headFault(f2::HeadStage::WorldCall, site);
         std::memcpy(S.world[j], buf, 64);
         S.have = static_cast<uint8_t>(S.have | (4u << j));
     }
@@ -505,7 +457,6 @@ bool headSlot(uint32_t idx, uintptr_t hum, f2::HeadSlot& S) noexcept {
 
 // One evaluation, at most once a second, on the hook thread (g_busyH held).
 void headEvaluate(const uint8_t* a, void* activity) noexcept {
-    const f2::HeadTargets& T = g_head;
     f2::HeadSample smp;
     smp.activity = reinterpret_cast<uint64_t>(activity);
     smp.steps = g_headSteps.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -513,32 +464,33 @@ void headEvaluate(const uint8_t* a, void* activity) noexcept {
         headFault(f2::HeadStage::ReadFrame, 0);
         return;
     }
+    // The dead route's diagnostic, non-fatal: what *(activity+0x368) really points at, for a later static pass.
     uint64_t h = 0;
     if (!sehReadQword(reinterpret_cast<uintptr_t>(a) + f2::kOffActivityHum, &h)) {
         headFault(f2::HeadStage::ReadActivity, 0);
         return;
     }
-    smp.h = h;
-    if (h == 0) {
-        smp.slot[0].state = smp.slot[1].state = static_cast<uint8_t>(f2::HeadSlotState::NoHum);
-        g_headLast.store("waiting: no humanoid component cached", std::memory_order_relaxed);
-        g_headSample.tryPublish(smp);
-        return;
+    smp.humH = h;
+    if (h != 0) {
+        smp.humFlags |= 1u;
+        uint64_t v = 0;
+        if (sehReadQword(static_cast<uintptr_t>(h), &v)) {
+            smp.humAtH = v;
+            smp.humFlags |= 2u;
+        }
+        if (h > f2::kHumFromInterface && sehReadQword(static_cast<uintptr_t>(h) - f2::kHumFromInterface, &v)) {
+            smp.humBelow = v;
+            smp.humFlags |= 4u;
+        }
     }
-    const uintptr_t hum = static_cast<uintptr_t>(h) - f2::kHumFromInterface;
-    smp.hum = hum;
-    uint64_t humVtable = 0;
-    if (!sehReadQword(hum, &humVtable)) {
-        headFault(f2::HeadStage::ReadHum, 0);
-        return;
+    bool resolved = false, stale = false, captured = false;
+    for (uint32_t s = 0; s < 2; ++s) {
+        if (!headSite(s, smp.slot[s])) return;
+        resolved = resolved || smp.slot[s].state == static_cast<uint8_t>(f2::HeadSlotState::Resolved);
+        stale = stale || smp.slot[s].state == static_cast<uint8_t>(f2::HeadSlotState::Stale);
+        captured = captured || smp.slot[s].captures != 0;
     }
-    if (humVtable != T.humVtable) {
-        headStandDown(f2::HeadWhy::HumVtable, 0, humVtable, T.humVtable, h, false);
-        return;
-    }
-    for (uint32_t s = 0; s < 2; ++s)
-        if (!headSlot(s, hum, smp.slot[s])) return;
-    g_headLast.store(smp.slot[0].state == static_cast<uint8_t>(f2::HeadSlotState::Resolved) ? "ok" : "waiting: third-person avatar not resolved",
+    g_headLast.store(resolved ? "ok" : stale ? "waiting: a captured interface is stale" : captured ? "waiting: nothing resolved" : "waiting: no avatar attach seen yet",
                      std::memory_order_relaxed);
     g_headSample.tryPublish(smp);
 }
@@ -657,14 +609,18 @@ struct F2Frame {
     int64_t lastHeadMs = -1;
     bool slotSaid[2] = {false, false};
     f2::HeadSlot slotKey[2];                   // what the last slot line said (compared on a few fields)
+    bool humSaid = false;
+    uint64_t humH = 0, humAtH = 0, humBelow = 0;
+    uint32_t humFlags = 0;
     uint64_t beatHeadSteps = 0, beatHeadCalls = 0;
 };
 F2Frame g_f2;
 
-// A slot line is due when its identity changes: state, kind, interface, joint count, cache flag, the two indexes.
+// A slot line is due when its identity changes: state, kind, interface, joint count, cache flag, the two indexes (not the capture count, which may
+// climb every second if the game attaches every frame).
 bool slotChanged(const f2::HeadSlot& a, const f2::HeadSlot& b) {
     return a.state != b.state || a.kind != b.kind || a.iface != b.iface || a.joints != b.joints || a.cached != b.cached || a.headIdx != b.headIdx ||
-           a.povIdx != b.povIdx || a.er != b.er;
+           a.povIdx != b.povIdx;
 }
 
 }  // namespace
@@ -709,46 +665,58 @@ void explorerCamF2Arm(const ecm::Sink& sink) {
         }
     }
 
-    // H: the head joint rides the free-camera observer; nothing is installed, only the build's addresses are established (once per session).
-    if (g_headState.load(std::memory_order_acquire) == 0) {
-        uintptr_t base = 0;
-        size_t size = 0;
-        char why[300] = {};
-        bool known = false;
+    // H (route B): a FindJoint hook learns the interfaces the game attaches the local avatars to; the reads ride the free-camera observer. The build's
+    // addresses are established once per session.
+    {
+        const uint32_t headState = g_headState.load(std::memory_order_acquire);
+        if (headState == 0) {
+            uintptr_t base = 0;
+            size_t size = 0;
+            char why[300] = {};
+            bool known = false;
 #ifdef EDVR_EXPLORER_CAM_TEST
-        if (g_testHead.base) {
-            base = g_testHead.base;
-            size = g_testHead.imageSize;
-            known = true;
-        }
+            if (g_testHead.base) {
+                base = g_testHead.base;
+                size = g_testHead.imageSize;
+                known = true;
+            }
 #endif
-        if (!known) {
-            known = explorerCamBuildKnown(&base, why, sizeof(why));
-            if (known) {
-                size = imageSizeOf(base);
-                known = size != 0;
+            if (!known) {
+                known = explorerCamBuildKnown(&base, why, sizeof(why));
+                if (known) {
+                    size = imageSizeOf(base);
+                    known = size != 0;
+                }
             }
-        }
-        if (!known) {
-            headStandDown(f2::HeadWhy::BuildUnknown, 0, 0, 0, 0, false);
-        } else {
-            g_head = f2::headTargetsFromBase(base, size);
-            const bool headOk = sehBytesEqual(g_head.headName, reinterpret_cast<const uint8_t*>(f2::kHeadName), sizeof(f2::kHeadName));
-            const bool povOk = sehBytesEqual(g_head.povName, reinterpret_cast<const uint8_t*>(f2::kPovName), sizeof(f2::kPovName));
-            if (!headOk || !povOk) {
-                headStandDown(f2::HeadWhy::LiteralMismatch, 0, headOk ? 2 : 1, 0, 0, false);
+            if (!known) {
+                headStandDown(f2::HeadWhy::BuildUnknown, 0, 0, 0, 0, false);
             } else {
-                g_headNextMs.store(0, std::memory_order_relaxed);
-                g_headState.store(1, std::memory_order_release);
-                say(sink, "%s reads the local commander's skeleton at most once a second, on the game's camera-job thread after the free-camera update returned: "
-                          "HUM = *(activity+0x368) - 0x70 (vtable checked against +0x%llX); EntityRefs HUM+0x178 (third-person) and +0x170 (first-person), live when "
-                          "ER+0xC0 >= 5, entity at ER+0xC8; the entity container's component lookup (a GAME CALL, type id at +0x%llX) must return RR (vtable +0x%llX) or "
-                          "AO (+0x%llX); before EVERY call the vtable and slots +0x18 +0x30 +0x48 +0x58 are checked against build 332841; FindJoint(\"%s\") and "
-                          "(\"%s\") once per interface, then +0x58 (avatar-root relative) and +0x48 (world) for each; SEH throughout, a mismatch or fault stands H "
-                          "down; +0x58 is heavy (a lock, a 0x3080-byte frame): per-call microseconds are in the heartbeat; nothing is written",
-                    f2::prefixHArmed(), static_cast<unsigned long long>(f2::kHumVtableRva), static_cast<unsigned long long>(f2::kSkeletonIdRva),
-                    static_cast<unsigned long long>(f2::kRrVtableRva), static_cast<unsigned long long>(f2::kAoVtableRva), f2::kHeadName, f2::kPovName);
+                g_head = f2::headTargetsFromBase(base, size);
+                const bool headOk = sehBytesEqual(g_head.headName, reinterpret_cast<const uint8_t*>(f2::kHeadName), sizeof(f2::kHeadName));
+                const bool povOk = sehBytesEqual(g_head.povName, reinterpret_cast<const uint8_t*>(f2::kPovName), sizeof(f2::kPovName));
+                if (!headOk || !povOk) {
+                    headStandDown(f2::HeadWhy::LiteralMismatch, 0, headOk ? 2 : 1, 0, 0, false);
+                } else {
+                    const ExplorerCamHookStatus fj = explorerCamObserveFind(&explorerCamF2FindJoint, true);
+                    if (fj.state != ExplorerCamHookStatus::Armed) {
+                        headStandDown(f2::HeadWhy::FindHookDown, 0, 0, 0, 0, false, fj.why);
+                    } else {
+                        g_headNextMs.store(0, std::memory_order_relaxed);
+                        g_headState.store(1, std::memory_order_release);
+                        say(sink, "%s route B: FindJoint (EliteDangerous64.exe+0x%llX, many callers) hooked at 0x%llX, stolen=%zu bytes, relay at 0x%llX, installed NOW "
+                                  "(an avatar attach before this is not seen); the original runs FIRST; a call returning to +0x%llX or +0x%llX (FUN 0x19B1240's two avatar "
+                                  "attaches) with \"%s\" stores the interface (rcx) and the index. H reads those at most once a second on the camera-job thread; before "
+                                  "EVERY call the vtable (RR +0x%llX or AO +0x%llX) and slots +0x18 +0x30 +0x48 +0x58 are checked; GetPoseData, FindJoint(\"%s\") once per "
+                                  "interface, +0x58 and +0x48 for both joints of BOTH sites; SEH throughout; nothing is written",
+                            f2::prefixHArmed(), static_cast<unsigned long long>(ecm::kFindJointRva), static_cast<unsigned long long>(fj.target), fj.stolen,
+                            static_cast<unsigned long long>(fj.relay), static_cast<unsigned long long>(f2::kFindSite1Rva),
+                            static_cast<unsigned long long>(f2::kFindSite2Rva), f2::kPovName, static_cast<unsigned long long>(f2::kRrVtableRva),
+                            static_cast<unsigned long long>(f2::kAoVtableRva), f2::kHeadName);
+                    }
+                }
             }
+        } else if (headState == 1) {
+            explorerCamObserveFind(&explorerCamF2FindJoint, true);   // the key was off and is on again: the hook is still in place, its gate was closed
         }
     }
 
@@ -794,6 +762,7 @@ void explorerCamF2Disarm() {
     if (!g_armed.exchange(false, std::memory_order_acq_rel)) return;
     explorerCamObserve(ExplorerCamHook::Controller, &explorerCamF2Controller, false);
     explorerCamObserve(ExplorerCamHook::AvatarFade, &explorerCamF2Fade, false);
+    explorerCamObserveFind(&explorerCamF2FindJoint, false);
     g_f2.started = false;
 }
 
@@ -844,6 +813,15 @@ void explorerCamF2FreeCamera(void* activity) noexcept {
     g_busy3.store(false, std::memory_order_release);
     // H: after the try-flag is given back, so the lock-taking calls never keep the other instruments out.
     headMaybeStep(a, activity);
+}
+
+void explorerCamF2FindJoint(void* iface, const void* name, uint64_t result, uintptr_t returnAddress) noexcept {
+    g_findSeen.fetch_add(1, std::memory_order_relaxed);
+    const int site = f2::headCaptureSite(returnAddress, reinterpret_cast<uintptr_t>(name), g_head);
+    if (site < 0) return;
+    g_skel[site].index.store(static_cast<uint32_t>(result & 0xFFFFu), std::memory_order_relaxed);
+    g_skel[site].iface.store(reinterpret_cast<uint64_t>(iface), std::memory_order_release);
+    g_skel[site].captures.fetch_add(1, std::memory_order_relaxed);
 }
 
 void explorerCamF2Fade(void* component) noexcept {
@@ -1014,7 +992,8 @@ void explorerCamF2Tick(uint32_t frame, uint64_t nowMs, const ecm::Sink& sink) {
         }
     }
 
-    // 4b. H: the stand-down, said once; the slot lines when a slot's identity changes; the joint lines each time the hook thread published (at most 1 Hz).
+    // 4b. H: the stand-down, said once; the hum line when what *(activity+0x368) points at changes; the slot lines when a site's identity changes; the
+    // joint lines each time the hook thread published (at most 1 Hz).
     if (g_headDownSet.load(std::memory_order_acquire) != 0 && !fs.headDownSaid) {
         fs.headDownSaid = true;
         f2::formatHeadDown(line, sizeof(line), g_headDown, g_head);
@@ -1027,6 +1006,16 @@ void explorerCamF2Tick(uint32_t frame, uint64_t nowMs, const ecm::Sink& sink) {
             fs.lastHeadMs = static_cast<int64_t>(nowMs);
             f2::HeadSample hs;
             if (g_headSample.read(hs)) {
+                if ((hs.humFlags & 1u) != 0 &&
+                    (!fs.humSaid || hs.humH != fs.humH || hs.humAtH != fs.humAtH || hs.humBelow != fs.humBelow || hs.humFlags != fs.humFlags)) {
+                    fs.humSaid = true;
+                    fs.humH = hs.humH;
+                    fs.humAtH = hs.humAtH;
+                    fs.humBelow = hs.humBelow;
+                    fs.humFlags = hs.humFlags;
+                    f2::formatHeadHum(line, sizeof(line), hs, g_head);
+                    sink(line);
+                }
                 const f2::CommanderFrame cf = f2::commanderFrame(hs.local, hs.actWorld);
                 for (int i = 0; i < 2; ++i) {
                     if (!fs.slotSaid[i] || slotChanged(hs.slot[i], fs.slotKey[i])) {
@@ -1115,9 +1104,11 @@ void explorerCamF2Tick(uint32_t frame, uint64_t nowMs, const ecm::Sink& sink) {
         fs.beatHeadCalls = hh.calls;
         hh.faults = g_headFaults.load(std::memory_order_relaxed);
         hh.last = g_headLast.load(std::memory_order_relaxed);
+        hh.captures[0] = g_skel[0].captures.load(std::memory_order_relaxed);
+        hh.captures[1] = g_skel[1].captures.load(std::memory_order_relaxed);
+        hh.findSeen = g_findSeen.load(std::memory_order_relaxed);
         hh.m58 = drainTimer(g_t58);
         hh.m48 = drainTimer(g_t48);
-        hh.lookup = drainTimer(g_tLookup);
         hh.find = drainTimer(g_tFind);
         f2::formatHeadHeartbeat(line, sizeof(line), hh);
         sink(line);
@@ -1136,6 +1127,10 @@ uint64_t headSteps() { return g_headSteps.load(); }
 uint64_t headCalls() { return g_headCalls.load(); }
 uint64_t headFaults() { return g_headFaults.load(); }
 uint32_t headState() { return g_headState.load(); }
+uint64_t findSeen() { return g_findSeen.load(); }
+uint32_t captureCount(int site) { return g_skel[site].captures.load(); }
+uint64_t capturedInterface(int site) { return g_skel[site].iface.load(); }
+uint32_t capturedIndex(int site) { return g_skel[site].index.load(); }
 uint64_t fadeCalls() { return g_fadeCalls.load(); }
 uint64_t fadeEnabledCalls() { return g_fadeEnabledCalls.load(); }
 uint64_t fadeEnabledWhileZero() { return g_fadeEnabledWhileZero.load(); }
@@ -1214,7 +1209,13 @@ void reset() {
     g_headSample.clear();
     g_headCache[0] = HeadCache();
     g_headCache[1] = HeadCache();
-    for (TimerStat* t : {&g_t58, &g_t48, &g_tLookup, &g_tFind}) {
+    g_findSeen.store(0);
+    for (Skel& k : g_skel) {
+        k.iface.store(0);
+        k.index.store(0xFFFFu);
+        k.captures.store(0);
+    }
+    for (TimerStat* t : {&g_t58, &g_t48, &g_tFind}) {
         t->n.store(0);
         t->minUs.store(0xFFFFFFFFu);
         t->maxUs.store(0);

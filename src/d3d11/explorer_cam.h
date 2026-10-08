@@ -52,6 +52,12 @@ using ExplorerCamActivityObserver = void (*)(void* object) noexcept;
 constexpr int kExplorerCamMaxObservers = 4;
 ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivityObserver observer, bool attach);
 
+// The skeleton interface's FindJoint(name) (EliteDangerous64.exe+0xFDDB10, called by many systems): ONE observer, told after the original returned
+// (and with its result unchanged) the interface (rcx), the name (rdx), the u16 it returned (in the low bits) and the caller's return address.
+// Hook threads, many calls a second: it must be trivial. Installs the hook the first time anyone wants it. Returns the hook's status.
+using ExplorerCamFindObserver = void (*)(void* iface, const void* name, uint64_t result, uintptr_t returnAddress) noexcept;
+ExplorerCamHookStatus explorerCamObserveFind(ExplorerCamFindObserver observer, bool attach);
+
 // An unload (FreeLibrary): puts the avatar dither-fade global back to -1 if EDVR still holds it at 0. Frame-thread context; SEH-guarded.
 void explorerCamShutdown();
 
@@ -67,7 +73,7 @@ bool explorerCamBuildKnown(uintptr_t* base, char* why, size_t whyCap);
 // inputs, synthetic functions in place of the game's, and the shared state to look at.
 using ExplorerCamSinkFn = void (*)(void* ctx, const char* line);
 struct ExplorerCamTestTargets {
-    uintptr_t freeCamera = 0, collision = 0, boxPush = 0, cameraUi = 0, controller = 0, avatarFade = 0;
+    uintptr_t freeCamera = 0, collision = 0, boxPush = 0, cameraUi = 0, controller = 0, avatarFade = 0, findJoint = 0;
 };
 struct ExplorerCamTestFrame {
     bool on = true;
@@ -88,7 +94,7 @@ void boundary(uint32_t frame, uint64_t nowMs, const ExplorerCamTestFrame& in, Ex
 bool gateOpen();                   // the free-camera relay's gate
 bool uiGateOpen();
 bool controllerGateOpen();
-size_t stolenBytes(int hook);      // 0 free, 1 collision, 2 box push, 3 camera UI, 4 controller, 5 avatar fade
+size_t stolenBytes(int hook);      // 0 free, 1 collision, 2 box push, 3 camera UI, 4 controller, 5 avatar fade, 6 FindJoint
 uint64_t placedActivity();
 uint64_t bypassed();               // the collision sweep
 uint64_t forwarded();

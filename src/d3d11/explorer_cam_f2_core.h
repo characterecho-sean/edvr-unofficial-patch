@@ -323,27 +323,24 @@ inline void formatNeckLocal(char* out, size_t cap, const NeckSample& s, const Co
           s.world[12], s.world[13], s.world[14], s.local[12], s.local[13], s.local[14]);
 }
 
-// ---- H: the third-person avatar's head joint (build 332841) -----------------------------------------------------------------------
-// Where the head is, for the stance test: the local commander's humanoid component HUM (constructor 0x2A90D40) is reached from the free-camera
-// activity's cached interface, h = *(activity+0x368) = HUM+0x70 (the offset READ; that +0x368 holds exactly that pointer is INFERRED, so HUM's
-// own vtable is checked before anything else is read). HUM+0x178 is the third-person avatar's EntityRef slot (INFERRED), +0x170 the first-person's.
-// A slot is an EntityRef*: live when ER != 0 and *(int32*)(ER+0xC0) >= 5, the entity at *(void**)(ER+0xC8). The entity's component container
-// (entity+8) answers a lookup by type id (a GAME CALL: container.vtable[0](container, id), id = the u32 at 0x5F2866C), which returns the skeleton
-// interface: RuntimeRigComponent's (RR, vtable 0x559CF90) or AnimatedObject's (AO, vtable 0x517DC20). Their slots (all READ, each address
+// ---- H: the local commander's skeleton, ROUTE B (build 332841) ---------------------------------------------------------------------
+// F4 showed the HUM route wrong (*(activity+0x368) minus 0x70 does not begin with the humanoid component's vtable), so H no longer walks from
+// the activity. The game itself hands the local player's two avatars to their skeleton interface once: FUN 0x19B1240 calls
+// interface.FindJoint("def_c_povCamera_joint") and then SetAttachJoint for each avatar, `call r8` at +0x19B12D2 (returns to +0x19B12D5, "site 1", the
+// avatar-set's index 1) and at +0x19B1356 (returns to +0x19B1359, "site 2", index 0), with rdx = the literal at +0x51F9930. FindJoint is
+// +0xFDDB10, shared by both implementers, so a callback-relay hook there (explorer_cam.cpp, the original first) hands this file every call as
+// (interface, name, the index it returned, the return address); a call from one of the two sites with that literal stores the interface and the
+// index. H then reads those interfaces at most once a second on the game's camera-job thread (the free-camera hook's post-call).
+// The skeleton interface is RuntimeRigComponent's (vtable +0x559CF90) or AnimatedObject's (+0x517DC20). Their slots (all READ, each address
 // checked on the exe by the overseer and again here): +0x18 GetPoseData() -> P (the u16 at P+0 is the joint count), +0x30 FindJoint(const char*)
 // -> u16 (0xFFFF none), +0x48 GetJointTransform(idx, float[16]*) = the joint's world matrix (+0x58's result x the entity transform), +0x58
 // GetJointModelMatrix(idx, float[16]*) = avatar-root relative. ARGUMENTS (disassembled, 0x43F6EB0 / 0xFDDD10 / 0x43F7180 / 0xFDDEB0): rcx = the
-// interface, edx = the joint index as a u32 (`mov edi,edx` / `mov esi,edx`), r8 = a 64-byte buffer (four unaligned 16-byte stores), void return.
-// RR's +0x58 reserves a 0x3080-byte frame through __chkstk and takes CRITICAL_SECTION iface+0x348 (= RR+0x400); +0x48 calls +0x58 itself, so it is
-// never the cheaper of the two.
-constexpr uint32_t kOffActivityHum = 0x368;
+// interface, edx = the joint index as a u32, r8 = a 64-byte buffer (four unaligned 16-byte stores), void return. RR's +0x58 reserves a 0x3080-byte
+// frame through __chkstk and takes CRITICAL_SECTION iface+0x348 (= RR+0x400); +0x48 calls +0x58 itself, so it is never the cheaper of the two.
+// Which site is the third-person avatar is not known: both are read and logged.
+constexpr uintptr_t kFindSite1Rva = 0x19B12D5, kFindSite2Rva = 0x19B1359;
+constexpr uint32_t kOffActivityHum = 0x368;                                           // the dead route's cache, read only for the diagnostic line
 constexpr uint32_t kHumFromInterface = 0x70;
-constexpr uintptr_t kHumVtableRva = 0x5309EB8;
-constexpr uint32_t kOffHumThirdPerson = 0x178, kOffHumFirstPerson = 0x170;
-constexpr uint32_t kOffErState = 0xC0, kOffErEntity = 0xC8;
-constexpr int32_t kErLive = 5;
-constexpr uint32_t kOffEntityContainer = 8;
-constexpr uintptr_t kSkeletonIdRva = 0x5F2866C;
 constexpr uintptr_t kRrVtableRva = 0x559CF90, kAoVtableRva = 0x517DC20;
 constexpr uint32_t kHeadSlots = 4;                                                    // the slots used: +0x18, +0x30, +0x48, +0x58
 constexpr uint32_t kHeadSlotIndex[kHeadSlots] = {3, 6, 9, 11};
@@ -357,23 +354,22 @@ constexpr uint32_t kNoJoint = 0xFFFF;
 constexpr uint32_t kHeadIntervalMs = 1000;                                            // at most one evaluation a second: the calls take a lock
 
 enum class HeadKind : uint8_t { None = 0, Runtime = 1, Animated = 2 };
-enum class HeadSlotState : uint8_t { NotTried = 0, Resolved, NoHum, NoRef, NotLive, NoEntity, NoIface };
+enum class HeadSlotState : uint8_t { NotCaptured = 0, Resolved, Stale };
 enum class HeadWhy : uint32_t {
     None = 0,
     BuildUnknown,       // the exe is not build 332841
     LiteralMismatch,    // a joint-name literal in the exe is not what it should be (a = 1 head, 2 pov)
-    HumVtable,          // *(HUM) is not HUM's vtable (a = found, b = expected, c = h)
-    ContainerVtable,    // the entity's container vtable or its slot 0 is not inside the image (a = vtable, b = slot 0)
-    IfaceVtable,        // the skeleton interface's vtable is neither RR's nor AO's (a = found, b = slot index, c = iface)
-    SlotMismatch,       // a slot does not hold the expected function (a = slot byte offset, b = found, c = expected)
+    FindHookDown,       // the FindJoint hook could not be installed (the sentence is in HeadDown::text)
+    SlotMismatch,       // a slot of an RR/AO vtable does not hold the expected function (a = slot byte offset, b = found, c = expected)
     Fault,              // a read or a call faulted (a = HeadStage)
 };
-enum class HeadStage : uint32_t { ReadActivity = 1, ReadHum, ReadSlot, ReadEntity, Lookup, ReadInterface, PoseCall, FindCall, ModelCall, WorldCall, ReadFrame };
+enum class HeadStage : uint32_t { ReadActivity = 1, ReadSlots, PoseCall, FindCall, ModelCall, WorldCall, ReadFrame, ReadInterface };
 
 struct HeadTargets {
     uintptr_t base = 0;
     size_t imageSize = 0;
-    uintptr_t humVtable = 0, skeletonId = 0, rrVtable = 0, aoVtable = 0, headName = 0, povName = 0;
+    uintptr_t rrVtable = 0, aoVtable = 0, headName = 0, povName = 0;
+    uintptr_t site[2] = {};
     uintptr_t rrFn[kHeadSlots] = {}, aoFn[kHeadSlots] = {};
     bool inImage(uintptr_t p) const { return base != 0 && p >= base && p < base + imageSize; }
 };
@@ -381,17 +377,25 @@ inline HeadTargets headTargetsFromBase(uintptr_t base, size_t imageSize) {
     HeadTargets t;
     t.base = base;
     t.imageSize = imageSize;
-    t.humVtable = base + kHumVtableRva;
-    t.skeletonId = base + kSkeletonIdRva;
     t.rrVtable = base + kRrVtableRva;
     t.aoVtable = base + kAoVtableRva;
     t.headName = base + kHeadNameRva;
     t.povName = base + kPovNameRva;
+    t.site[0] = base + kFindSite1Rva;
+    t.site[1] = base + kFindSite2Rva;
     for (uint32_t i = 0; i < kHeadSlots; ++i) {
         t.rrFn[i] = base + kRrFunctions[i];
         t.aoFn[i] = base + kAoFunctions[i];
     }
     return t;
+}
+// Which capture a FindJoint call is: the site (0 or 1) when the caller is one of the two attach sites AND the name is the povCamera literal, else -1.
+// Trivial on purpose: the hook sees every FindJoint call of every system.
+inline int headCaptureSite(uintptr_t returnAddress, uintptr_t name, const HeadTargets& t) {
+    if (t.povName == 0 || name != t.povName) return -1;
+    if (returnAddress == t.site[0]) return 0;
+    if (returnAddress == t.site[1]) return 1;
+    return -1;
 }
 inline HeadKind headKindOfVtable(uint64_t vptr, const HeadTargets& t) {
     if (vptr == 0) return HeadKind::None;
@@ -419,10 +423,10 @@ inline int headVerifySlots(uint64_t vptr, const uint64_t found[kHeadSlots], Head
     return 0;
 }
 
-// One skeleton interface's reading: the state of the slot, what was found, and the four matrices.
+// One attach site's reading: its capture, the state, what was found, and the four matrices.
 struct HeadSlot {
-    uint64_t er = 0, entity = 0, iface = 0, lookupRva = 0;
-    int32_t erState = 0;
+    uint64_t iface = 0;
+    uint32_t captures = 0;   // how many times FindJoint(povCamera) was seen from this site since launch
     uint8_t state = 0;       // HeadSlotState
     uint8_t kind = 0;        // HeadKind
     uint8_t cached = 0;      // the joint-matrix cache flag
@@ -432,17 +436,21 @@ struct HeadSlot {
     float world[2][16] = {};   // +0x48
 };
 struct HeadSample {
-    uint64_t activity = 0, hum = 0, h = 0, steps = 0;
+    uint64_t activity = 0, steps = 0;
+    uint64_t humH = 0, humAtH = 0, humBelow = 0;   // the dead route's diagnostic: *(activity+0x368), its first qword, the first qword 0x70 below it
+    uint32_t humFlags = 0;                         // bit 0 h != 0, bit 1 the qword at h was readable, bit 2 the one below was
+    uint32_t pad = 0;
     float local[16] = {};      // the activity's +0x3B0
     float actWorld[16] = {};   // the activity's +0x70
-    HeadSlot slot[2];          // [0] third-person, [1] first-person
+    HeadSlot slot[2];          // [0] site 1, [1] site 2
 };
 static_assert(std::is_trivially_copyable<HeadSample>::value && sizeof(HeadSample) % 4 == 0 && sizeof(HeadSlot) % 4 == 0, "a sample is published as words");
-// Why H stopped for the session: written once by the hook thread, said once by the tick.
+// Why H stopped for the session: written once by whichever thread found it, said once by the tick.
 struct HeadDown {
     HeadWhy why = HeadWhy::None;
     uint32_t slot = 0;
     uint64_t a = 0, b = 0, c = 0;
+    char text[300] = {};
 };
 // The time the calls took, in microseconds, over a window and over the session.
 struct HeadTiming {
@@ -453,33 +461,27 @@ inline const char* prefixHArmed() { return "explorer cam probe H armed:"; }
 inline const char* prefixHDown() { return "explorer cam probe H stood down:"; }
 inline const char* prefixHSlot() { return "explorer cam probe H slot:"; }
 inline const char* prefixHJoints() { return "explorer cam probe H joints:"; }
+inline const char* prefixHHum() { return "explorer cam probe H hum:"; }
 inline const char* prefixHHeartbeat() { return "explorer cam probe H heartbeat:"; }
 inline const char* headKindName(uint8_t k) { return k == 1 ? "RR (RuntimeRigComponent)" : k == 2 ? "AO (AnimatedObject)" : "unknown"; }
-inline const char* headSlotName(int i) { return i == 0 ? "third-person(HUM+0x178)" : "first-person(HUM+0x170)"; }
+inline const char* headSiteName(int i) { return i == 0 ? "site1(ret +0x19B12D5, avatar-set index 1)" : "site2(ret +0x19B1359, avatar-set index 0)"; }
 inline const char* headStateText(uint8_t s) {
     switch (static_cast<HeadSlotState>(s)) {
         case HeadSlotState::Resolved: return "resolved";
-        case HeadSlotState::NoHum: return "waiting: the activity has no humanoid component cached yet (+0x368 is 0)";
-        case HeadSlotState::NoRef: return "waiting: the slot's EntityRef is null";
-        case HeadSlotState::NotLive: return "not live: the EntityRef's state (ER+0xC0) is below 5";
-        case HeadSlotState::NoEntity: return "waiting: the live EntityRef has no entity (ER+0xC8 is 0)";
-        case HeadSlotState::NoIface: return "waiting: the component lookup returned no skeleton interface (the type id at +0x5F2866C is 0, or the entity has none)";
-        default: return "not tried";
+        case HeadSlotState::Stale: return "stale: the captured interface no longer has a skeleton interface's vtable (the avatar was probably destroyed); waiting for the next capture";
+        default: return "waiting: FindJoint(\"def_c_povCamera_joint\") has not been seen from this site since launch";
     }
 }
 inline const char* headStageName(uint32_t s) {
     switch (static_cast<HeadStage>(s)) {
         case HeadStage::ReadActivity: return "reading the activity's +0x368";
-        case HeadStage::ReadHum: return "reading the humanoid component";
-        case HeadStage::ReadSlot: return "reading an avatar slot's EntityRef";
-        case HeadStage::ReadEntity: return "reading the entity's component container";
-        case HeadStage::Lookup: return "the component lookup call";
-        case HeadStage::ReadInterface: return "reading the skeleton interface's vtable";
+        case HeadStage::ReadSlots: return "reading an interface's vtable slots";
         case HeadStage::PoseCall: return "the GetPoseData call";
         case HeadStage::FindCall: return "the FindJoint call";
         case HeadStage::ModelCall: return "the +0x58 model-matrix call";
         case HeadStage::WorldCall: return "the +0x48 world-matrix call";
         case HeadStage::ReadFrame: return "reading the activity's two poses";
+        case HeadStage::ReadInterface: return "reading an interface";
         default: return "an unknown step";
     }
 }
@@ -495,25 +497,14 @@ inline void formatHeadDown(char* out, size_t cap, const HeadDown& d, const HeadT
             o.put("the game build differs: the %s joint-name literal at EliteDangerous64.exe+0x%llX is not \"%s\"", d.a == 1 ? "head" : "pov",
                   static_cast<unsigned long long>(d.a == 1 ? kHeadNameRva : kPovNameRva), d.a == 1 ? kHeadName : kPovName);
             break;
-        case HeadWhy::HumVtable:
-            o.put("the first qword of HUM (0x%llX = *(activity+0x368) 0x%llX minus 0x70) is 0x%llX, not the humanoid component's vtable 0x%llX "
-                  "(EliteDangerous64.exe+0x%llX): the +0x368 cache is not HUM+0x70 as inferred",
-                  static_cast<unsigned long long>(d.c - kHumFromInterface), c, a, b, static_cast<unsigned long long>(kHumVtableRva));
-            break;
-        case HeadWhy::ContainerVtable:
-            o.put("the entity's component container (entity+8) has vtable 0x%llX with slot 0 = 0x%llX, which is not inside the game image [0x%llX, 0x%llX): "
-                  "the component lookup is not called",
-                  a, b, static_cast<unsigned long long>(t.base), static_cast<unsigned long long>(t.base + t.imageSize));
-            break;
-        case HeadWhy::IfaceVtable:
-            o.put("the skeleton interface 0x%llX (%s slot) has vtable 0x%llX, neither RuntimeRigComponent's 0x%llX nor AnimatedObject's 0x%llX", c,
-                  b == 0 ? "third-person" : "first-person", a, static_cast<unsigned long long>(t.rrVtable), static_cast<unsigned long long>(t.aoVtable));
+        case HeadWhy::FindHookDown:
+            o.put("the FindJoint hook (EliteDangerous64.exe+0xFDDB10) is not in place, so no avatar attach can be seen: %s", d.text);
             break;
         case HeadWhy::SlotMismatch:
             o.put("vtable slot +0x%llX holds 0x%llX, not the build-332841 function 0x%llX (RVA +0x%llX)", a, b, c, c - t.base);
             break;
         case HeadWhy::Fault:
-            o.put("a read or call faulted while %s (the %s slot)", headStageName(static_cast<uint32_t>(d.a)), d.slot == 0 ? "third-person" : "first-person");
+            o.put("a read or call faulted while %s (the %s)", headStageName(static_cast<uint32_t>(d.a)), headSiteName(static_cast<int>(d.slot & 1)));
             break;
         default:
             o.put("unnamed reason %u", static_cast<uint32_t>(d.why));
@@ -521,14 +512,27 @@ inline void formatHeadDown(char* out, size_t cap, const HeadDown& d, const HeadT
     }
     o.put(". H will not run this session; nothing was changed.");
 }
-// Once per change of a slot's identity (kind, interface, joint count, cache flag, indexes) and when it stops being live.
+inline void putHeadQword(ecp::Line& o, uint64_t v, bool readable, const HeadTargets& t) {
+    if (!readable) o.put("unreadable");
+    else if (t.inImage(static_cast<uintptr_t>(v))) o.put("EliteDangerous64.exe+0x%llX", static_cast<unsigned long long>(v - t.base));
+    else o.put("0x%llX", static_cast<unsigned long long>(v));
+}
+// F4's finding, kept for a later static pass: what *(activity+0x368) really points at. Printed when it changes. Not used by H.
+inline void formatHeadHum(char* out, size_t cap, const HeadSample& s, const HeadTargets& t) {
+    ecp::Line o(out, cap);
+    o.put("%s *(activity+0x368)=0x%llX; the first qword there is ", prefixHHum(), static_cast<unsigned long long>(s.humH));
+    putHeadQword(o, s.humAtH, (s.humFlags & 2) != 0, t);
+    o.put("; the first qword 0x70 below it (where a humanoid component would begin) is ");
+    putHeadQword(o, s.humBelow, (s.humFlags & 4) != 0, t);
+    o.put(" (F4: that was 0, not a vtable, so the HUM route is dead; this line is only for a static pass)");
+}
+// Once per change of a site's identity (state, kind, interface, joint count, cache flag, indexes).
 inline void formatHeadSlot(char* out, size_t cap, const HeadSlot& s, int index) {
     ecp::Line o(out, cap);
-    o.put("%s slot=%s state=%s er=0x%llX er_state=%d entity=0x%llX", prefixHSlot(), headSlotName(index), headStateText(s.state), static_cast<unsigned long long>(s.er),
-          s.erState, static_cast<unsigned long long>(s.entity));
+    o.put("%s %s state=%s captures=%u", prefixHSlot(), headSiteName(index), headStateText(s.state), s.captures);
+    if (s.iface != 0) o.put(" skeleton_iface=0x%llX", static_cast<unsigned long long>(s.iface));
     if (static_cast<HeadSlotState>(s.state) != HeadSlotState::Resolved) return;
-    o.put(" container_lookup=EliteDangerous64.exe+0x%llX skeleton_iface=0x%llX kind=%s joint_count=%u joint_cache_flag=%u head_joint(\"%s\")_idx=", static_cast<unsigned long long>(s.lookupRva),
-          static_cast<unsigned long long>(s.iface), headKindName(s.kind), s.joints, s.cached, kHeadName);
+    o.put(" kind=%s joint_count=%u joint_cache_flag=%u head_joint(\"%s\")_idx=", headKindName(s.kind), s.joints, s.cached, kHeadName);
     if (s.headIdx == kNoJoint) o.put("none");
     else o.put("%u", s.headIdx);
     o.put(" pov_joint(\"%s\")_idx=", kPovName);
@@ -544,7 +548,7 @@ inline void putHeadPoint(ecp::Line& o, const char* name, const float m[16], bool
 inline void formatHeadJoints(char* out, size_t cap, const HeadSample& smp, int index, const CommanderFrame& cf) {
     const HeadSlot& s = smp.slot[index];
     ecp::Line o(out, cap);
-    o.put("%s slot=%s kind=%s iface=0x%llX step=%llu", prefixHJoints(), headSlotName(index), headKindName(s.kind), static_cast<unsigned long long>(s.iface),
+    o.put("%s %s kind=%s iface=0x%llX step=%llu", prefixHJoints(), headSiteName(index), headKindName(s.kind), static_cast<unsigned long long>(s.iface),
           static_cast<unsigned long long>(smp.steps));
     putHeadPoint(o, "head_model(+0x58)", s.model[0], (s.have & 1) != 0);
     putHeadPoint(o, "head_world(+0x48)", s.world[0], (s.have & 4) != 0);
@@ -569,10 +573,12 @@ struct HeadHeartbeatIn {
     double windowSeconds = 0;
     const char* state = "armed";             // "armed" | "stood down" | "not tried"
     uint64_t steps = 0, stepsWindow = 0;     // evaluations (at most one a second)
-    uint64_t calls = 0, callsWindow = 0;     // game calls made: lookup, GetPoseData, FindJoint, +0x58, +0x48
+    uint64_t calls = 0, callsWindow = 0;     // game calls made: GetPoseData, FindJoint, +0x58, +0x48
     uint64_t faults = 0;
     const char* last = "none";
-    HeadTiming m58, m48, lookup, find;       // microseconds, this window (allMax over the session)
+    uint32_t captures[2] = {0, 0};           // FindJoint(povCamera) calls seen from site 1 / site 2
+    uint64_t findSeen = 0;                   // every FindJoint call the hook has seen (proof it is alive)
+    HeadTiming m58, m48, find;               // microseconds, this window (allMax over the session)
 };
 inline void putHeadTiming(ecp::Line& o, const char* name, const HeadTiming& t) {
     if (t.n == 0) o.put(" %s_us(n/min/max/session_max)=0/-/-/%u", name, t.allMaxUs);
@@ -580,14 +586,16 @@ inline void putHeadTiming(ecp::Line& o, const char* name, const HeadTiming& t) {
 }
 inline void formatHeadHeartbeat(char* out, size_t cap, const HeadHeartbeatIn& h) {
     ecp::Line o(out, cap);
-    o.put("%s window=%.1fs hook=%s steps=%llu(+%llu) game_calls=%llu(+%llu) faults=%llu last=%s", prefixHHeartbeat(), h.windowSeconds, h.state,
-          static_cast<unsigned long long>(h.steps), static_cast<unsigned long long>(h.stepsWindow), static_cast<unsigned long long>(h.calls),
-          static_cast<unsigned long long>(h.callsWindow), static_cast<unsigned long long>(h.faults), h.last);
+    o.put("%s window=%.1fs hook=%s steps=%llu(+%llu) game_calls=%llu(+%llu) faults=%llu last=%s findjoint_calls_seen=%llu captures_site1=%u captures_site2=%u",
+          prefixHHeartbeat(), h.windowSeconds, h.state, static_cast<unsigned long long>(h.steps), static_cast<unsigned long long>(h.stepsWindow),
+          static_cast<unsigned long long>(h.calls), static_cast<unsigned long long>(h.callsWindow), static_cast<unsigned long long>(h.faults), h.last,
+          static_cast<unsigned long long>(h.findSeen), h.captures[0], h.captures[1]);
     putHeadTiming(o, "model58", h.m58);
     putHeadTiming(o, "world48", h.m48);
-    putHeadTiming(o, "lookup", h.lookup);
     putHeadTiming(o, "find", h.find);
     if (std::strcmp(h.state, "armed") != 0) o.put(" idle=the instrument is %s: no step can run", h.state);
+    else if (h.captures[0] == 0 && h.captures[1] == 0)
+        o.put(" idle=no avatar attach seen since launch: load or disembark on foot after the game starts");
     else if (h.steps == 0) o.put(" idle=no-step-yet (the free camera has not been updated since H armed)");
     else if (h.stepsWindow == 0) o.put(" idle=no-step-in-window (the free camera is not running)");
 }

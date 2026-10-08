@@ -24,6 +24,9 @@ void explorerCamF2FreeCamera(void* activity) noexcept;
 void explorerCamF2Controller(void* controller) noexcept;
 // The avatar fade counter's observer (after the dither-fade update): hook threads, many components a frame. Takes no lock, logs nothing.
 void explorerCamF2Fade(void* component) noexcept;
+// H's FindJoint observer (after the original returned, its result unchanged): every FindJoint call of every system, on any thread. Counts, compares
+// the return address with the two avatar-attach sites and the name with "def_c_povCamera_joint", and stores the interface and the index. Trivial.
+void explorerCamF2FindJoint(void* iface, const void* name, uint64_t result, uintptr_t returnAddress) noexcept;
 // Once a frame, on the frame thread: the change lines, the 5 s heartbeats and the 1 Hz neck lines.
 void explorerCamF2Tick(uint32_t frame, uint64_t nowMs, const ecm::Sink& sink);
 
@@ -43,6 +46,10 @@ uint64_t headSteps();
 uint64_t headCalls();
 uint64_t headFaults();
 uint32_t headState();                           // 0 not tried, 1 armed, 2 stood down
+uint64_t findSeen();                            // every FindJoint call the hook reported
+uint32_t captureCount(int site);                // FindJoint(povCamera) calls seen from site 0 / 1
+uint64_t capturedInterface(int site);
+uint32_t capturedIndex(int site);
 uint64_t fadeCalls();
 uint64_t fadeEnabledCalls();
 uint64_t fadeEnabledWhileZero();

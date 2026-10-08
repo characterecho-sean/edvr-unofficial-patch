@@ -1252,6 +1252,13 @@ int main() {
               "...and the avatar dither-fade update: `mov r11,rsp` is 3 bytes, no displacement, then two pushes: five bytes stolen",
               "the fade counter's hook would be refused or stolen at the wrong length");
 
+        // The skeleton interface's FindJoint (+0xFDDB10, shared by RuntimeRigComponent and AnimatedObject; the H instrument's route-B hook): `mov [rsp+8],rbx`
+        // is its first instruction, five bytes with no rip-relative displacement, so CodeHook steals exactly five.
+        const uint8_t findJoint[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xFA};
+        check(codeInstructionLength(findJoint, sizeof(findJoint), &disp) == 5 && disp == 0,
+              "...and the skeleton FindJoint: `mov [rsp+8],rbx` is 5 bytes, no displacement",
+              "the FindJoint hook would be refused or stolen at the wrong length");
+
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.
         const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};

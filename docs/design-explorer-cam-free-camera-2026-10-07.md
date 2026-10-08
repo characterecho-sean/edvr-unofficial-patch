@@ -2,12 +2,11 @@
 
 ## Status
 
-- **State: F0-F2 FLOWN (2026-10-07); Phase 1d BUILT, not flown
-  (2026-10-08).** F5 in and out, placement, lock, UI hide work. The F2
-  blocker (the avatar dither-fades inside the body, stuck on the weapon
-  after the exit) is answered in 1d by the fade global and a real TAB wait.
-  Keys: `[hotkey] explorer_cam = F5` (the only way in),
-  `fix.explorer_cam`, and the eye keys (temporary).
+- **State: F0-F4 FLOWN (2026-10-07/08).** F4: F5 accepted after 4 presses,
+  the fade global was written and the dither read 0, and the body shows.
+  H's HUM route was wrong (it stood down at its first step); route B (a
+  FindJoint hook) is BUILT, not flown. Keys: `[hotkey] explorer_cam = F5`
+  (the only way in), `fix.explorer_cam`, and the eye keys (temporary).
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
   old Explorer Cam route entirely; deleting the old route is authorized.
@@ -48,12 +47,12 @@
 - **Set aside, not flown:** writing the origin inside the refresh detour at
   `+0x592200`; the culling view is built upstream of it
   (design-occlusion-culling-2026-09-22.md), and 6s.9 saw holes from that.
-- **Flown** on Frontier: F0 172543, F1 194702, F2 211908; findings below.
-- **Next:** flight F4 on Frontier. F3 (94c467d3) never placed: the one
-  ToggleFreeCam press was dropped by the suite; F5 now re-presses every 10
-  updates (`result=... presses=N`). Then read what F3 could not: `avatar
-  fade: wrote 0` and `put ... back to -1`, the `F heartbeat:` VERDICT, and
-  `H joints:` standing, crouched, weapon drawn and holstered.
+- **Flown** on Frontier: F0 172543, F1 194702, F2 211908, F3 (94c467d3), F4
+  (20764688); findings below.
+- **Next:** flight F5 with the probe key on at LAUNCH: `H slot:` for both
+  sites, then `H joints:` standing, crouched, weapon drawn, holstered (the
+  site whose head moves with stance is the third-person avatar), and the
+  H heartbeat's captures (does the attach run per frame?) and +0x58 us.
 - **Temporary keys:** `[advanced] explorer_cam_probe` (the instruments;
   removed at arc close). `[fix] explorer_cam_eye_up/_forward/_right`: they
   stand in for the head bone; Sean tunes the bone-to-eye offset once, it
@@ -731,3 +730,12 @@ ABI, disassembled on the exe: +0x58 and +0x48 take rcx = interface, edx = joint 
 +0x58, so it is never the cheaper; RR's +0x58 reserves 0x3080 bytes through __chkstk and takes the CRITICAL_SECTION at iface+0x348. An index
 past the joint count, or 0xFFFF, is never passed. Lines: `H armed:`, `H slot:` (on change), `H joints:` (1 Hz: both matrices, the world
 translations in commander-local axes, the raw +0xA0 origin), `H heartbeat:` (calls, faults, n/min/max/session-max microseconds), `H stood down:`.
+
+F4 (20764688): H stood down at its first step. *(activity+0x368) minus 0x70 began with 0, not the humanoid component's vtable, so that route is
+dead; H made no game call. ROUTE B: FUN 0x19B1240 attaches the local player's two avatars through the skeleton interface, calling FindJoint
+("def_c_povCamera_joint", literal +0x51F9930) at +0x19B12D2 and +0x19B1356, returning to +0x19B12D5 (site 1) and +0x19B1359 (site 2). A
+callback-relay hook on FindJoint (+0xFDDB10, shared by RR and AO; prologue `48 89 5C 24 08 57 48 83 EC 20 48 8B 01 48 8B FA`, steals 5) runs the
+original first, then stores rcx and the returned index when the return address is a site and rdx is the literal. It is installed with the other
+probe hooks at the first frame boundary with the key on, so the key must be on at launch. H reads the captured interfaces as before, with the same
+per-call checks; a stale capture is dropped, not fatal. `H hum:` keeps the old pointer's findings for a static pass; the heartbeat counts
+captures per site and says `no avatar attach seen since launch` when there are none.
