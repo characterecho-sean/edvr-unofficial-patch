@@ -2,17 +2,17 @@
 
 ## Status
 
-- **State: F0-F6 FLOWN (2026-10-07/08).** F5 enters and places, the body
-  shows; F6: the head stayed visible, the "local" avatar was an NPC's. BUILT,
-  not flown: the local-avatar LATCH (site 1 + site 2 of one invocation), its
-  log-only witness, H2, and F5 only on foot with no panel. Keys:
-  `hotkey.explorer_cam`, `fix.explorer_cam`, the eye keys (temporary).
+- **State: F0-F7 FLOWN (2026-10-07/08).** F7: the latch worked and the
+  head is hidden; the cached +0x58 head follows stance, H2's walk is the
+  bind pose. BUILT, not flown (Phase 3): the eye FOLLOWS the head joint,
+  camera-suite ISOLATION, F5 with an absent GuiFocus, the hotkey kept as the
+  exit. Armed by `hotkey.explorer_cam` alone; `[fix] explorer_cam` is REMOVED.
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
   old Explorer Cam route entirely; deleting the old route is authorized.
-- **Decision for Sean (D1):** phase 1 writes the game's free-camera state,
-  the first EDVR write into game-side camera controller memory; it retires
-  explorer-cam.md's "never writes" and must not touch anything replicated.
+- **Decision for Sean (D1):** phase 1 writes the free-camera state, the
+  first EDVR write into game-side camera memory; it retires explorer-cam.md's
+  "never writes" and must not touch anything replicated.
 - **Hypotheses** (RVAs are build 332841, exe SHA-256 e6be8bbe...e988, all
   three installs; static evidence in `analysis\decomp\explorer_cam\`):
   - H1 **READ + FLOWN F0:** `FreeCameraActivity`'s update (0x1071980)
@@ -22,8 +22,7 @@
   - H2 **READ + FLOWN:** the state is the activity (rcx at 0x1071980):
     world +0x70, local +0x3B0, flags +0x470/1/3, state +0x48C.
   - H3 **FLOWN F1:** a write before the update reaches the camera and view.
-  - H4 no head flag found (about 25% one exists); the game swaps whole-body
-    avatars (0x2A96740). Head hiding stays EDVR's draw skip.
+  - H4 no head flag found (about 25% one exists); head hiding is a draw skip.
   - H5 inferred not replicated (about 65%): write the activity, never the
     shared record (mode, speed, range).
   - H6 **READ + FLOWN:** +0x48C is 3 at TAB (first call), 4 relative lock,
@@ -33,9 +32,8 @@
     (0x1091140) was hiding; one caller, 0x10728B6. F1 saw it; 1c returns 0
     for the placed activity. The F0 stop at 0.70 is probably the same box.
 - **Ruled out:**
-  - Counting presses as the source of truth, because it has no origin
-    (6ac.6d), and the free camera can be moved by hand after the preset is
-    chosen, which no count can see.
+  - Counting presses as the source of truth: it has no origin (6ac.6d), and
+    the free camera can be moved by hand after the preset is chosen.
   - Synthetic mouse input (SendInput), because the head-steer probe moved
     the camera zero at 200 and 5000 counts.
   - The branch's draw-count test as proof a head is yours, because it
@@ -43,22 +41,24 @@
   - I2's 5376-block fingerprint as the commander's position, because in F0
     its translation tracked the free camera's own origin within 0.01-0.09
     m; the commander's frame comes from I3 (world with local taken out).
-  - The cached +0x58 head or pov joint as the stance signal, because a 5 s
-    crouch in F5 moved neither (1.64-1.685, 1.69-1.73); +0x48 drifted 12 m.
+  - The H2 pose walk as a stance signal, because the P+0x48 locals are the
+    bind pose (F7: head constant at (0, 1.675, 0.003)). The cached +0x58 head
+    DOES follow stance on the true local skeleton; F5 read an NPC's.
   - The last raw site-1 capture as the local avatar, because 0x19B1240
     attaches every humanoid's avatars (F6: head visible, an NPC's AMC).
 - **Set aside, not flown:** writing the origin inside the refresh detour at
   `+0x592200`; the culling view is built upstream (6s.9 saw holes from it).
 - **Flown** on Frontier: F0 172543, F1 194702, F2 211908, F3 94c467d3, F4
-  20764688, F5 60dd0eb2, F6 d0707af3; findings below.
-- **Next:** flight F7, probe key on: the latch line (`local avatar's
-  skeleton pair changed`), the witness distance (near 0 = the right AMC),
-  `explorer cam head hide:` looking down at the body, F5 refuse lines on a
-  panel, then `H2 joints:` standing and crouched.
+  20764688, F5 60dd0eb2, F6 d0707af3, F7 e42e90dd; findings below.
+- **Next:** flight F8: crouch and weapon out (`head follow:` lines, the rest
+  offset near (0, 0.038, 0.112), heartbeat line 2), walking (no neck in
+  view), every camera key dead while placed (`camera suite isolated:`,
+  blocked counts, `zoom_hook_calls`), F5 from first person.
 - **Temporary keys:** `[advanced] explorer_cam_probe` (removed at arc
-  close). `[fix] explorer_cam_eye_up/_forward/_right` stand in for the head
-  bone; Sean tunes the offset once, it becomes a constant, and they go.
-  `fix.explorer_cam` is redundant with an empty F5; ask Sean before removing.
+  close). `[fix] explorer_cam_eye_trim_right/_up/_forward` (+-0.3 m) and
+  `explorer_cam_follow_smoothing_ms` (0 = exact; a comfort test): Sean tunes
+  the trims once and they go. `explorer_cam_eye_up/_forward/_right` are now
+  only the FALLBACK when no head joint is readable.
 
 ## Why today's Explorer Cam is half-baked
 
@@ -799,3 +799,21 @@ still does not follow crouch or weapon (placement still on the eye keys).
 - **F5 guard bug.** On foot, Status.json carries no GuiFocus field, so F5
   refused from first person four times ("focus unknown"). An absent
   GuiFocus with Flags2 present must read as 0.
+
+## 2026-10-08 Phase 3: the camera follows the head joint
+
+Built and gated, not flown. In the free-camera hook's pre-call each placing update reads the latched local skeleton's head joint with +0x58 (vtable and slots
++0x18 +0x30 +0x58 checked before every call, SEH, the camera-job thread, never the frame thread). eye = head position + head rotation x offset + trims; the
+offset (povCamera minus head at rest, in the head's own axes, expected (0, 0.038, 0.112)) is derived once per skeleton from the bind pose, H2's walk moved
+into the feature. No smoothing. The fixed eye keys serve only when no head joint is readable (nothing latched, stale, an implausible matrix, a fault; 8
+faults stand the head source down, not the placement). The first live read logs the live rotation's distance from the rest rotation (it checks the
+quaternion convention). Heartbeat line 2: source, last eye, +0x58 min/max us. H2 now prints once per skeleton, labelled rest pose. Temporary keys:
+`explorer_cam_eye_trim_right/_up/_forward` (+-0.3 m) and `explorer_cam_follow_smoothing_ms` (0).
+
+ISOLATION. While a session has placed the view, each camera object's action fields are saved, zeroed, the original runs, and the saved values go back: free
+camera 11 actions, controller 15, camera UI 1, and a new zoom/DOF hook (0x1078990) 7; 34 across 4. EDVR's own presses go in after the clear; walking and
+turning are another object. Three faults stand isolation down. One line per session, blocked presses per holder in the heartbeat.
+
+REMOVED: `[fix] explorer_cam = on|off`. Explorer Cam is armed exactly when `hotkey.explorer_cam` is set. A change or a clearing made while a session is on
+waits for the session to end (the old key stays the exit), and `explorerCamSessionActive()` tells the hotkey menu. Retired by exact name in config_test.
+F5: an absent GuiFocus with Flags2 present reads as 0.

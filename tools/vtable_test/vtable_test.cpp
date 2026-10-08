@@ -1204,7 +1204,7 @@ int main() {
               "wrong length");
 
         // The free camera's collision step (EliteDangerous64.exe+0x1091140, build 332841), Explorer
-        // Cam's second target (fix.explorer_cam, explorer_cam.cpp in the d3d11 half): it begins
+        // Cam's second target (hotkey.explorer_cam, explorer_cam.cpp in the d3d11 half): it begins
         // `40 55` -- push rbp WITH a REX prefix -- then three one-byte pushes, so the first four
         // instructions are 2+1+1+1 = five bytes with no rip-relative displacement, and CodeHook
         // steals exactly five. A decoder that took `40` for the start of a different instruction

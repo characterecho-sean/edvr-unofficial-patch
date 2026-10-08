@@ -2850,7 +2850,7 @@ exit /b 0
 
 :rig_explorer_cam_test
 echo [edvr] === explorer_cam_test.exe ===
-REM Build gate for Explorer Cam (fix.explorer_cam, hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a", "Phase 1c").
+REM Build gate for Explorer Cam (hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a", "Phase 1c").
 REM Part A drives src\d3d11\explorer_cam_core.h, the pure half the DLL compiles: the build-332841 identity and CodeHook's reading of all five
 REM prologues, the eye keys' clamp, the exact 16 floats written into the free camera's commander-local pose, the placement machine on
 REM scripted state sequences, the F5 sequencer on scripted mode sequences (enter from every mode, timeouts, the player's own TAB engaging

@@ -1,4 +1,4 @@
-// Explorer Cam's pure half (fix.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a" and "Phase 1c").
+// Explorer Cam's pure half (hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a" and "Phase 1c").
 //
 // Everything here is decisions, bytes and text, with no Windows, no game and no Config, so tools\explorer_cam_test drives the same
 // code the DLL compiles: the build-332841 identity, the eye keys' clamp, the sixteen floats written into the free camera's
@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <type_traits>
 
 namespace edvr {
@@ -93,6 +94,14 @@ constexpr uintptr_t kFindJointRva = 0xFDDB10;
 constexpr size_t kFindJointPrologueBytes = 16;
 inline constexpr uint8_t kFindJointPrologue[kFindJointPrologueBytes] = {
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xFA};
+
+// VanityCameraDofAndZoomControls' update (rcx = the activity; Camera job table slot 16, job thunk 0x102FA80 sets rcx = rdx - 0x150 first): the zoom, aperture and focus
+// keys. Isolation clears its seven action handles (+0x250..+0x280) before the original and puts them back after it. `push rbx` (REX 40 53); `sub rsp,60h`;
+// `mov rax,[rcx+210h]`; `mov rbx,rcx`. Boundaries 2, 6, 13, 16; no rip-relative byte, so CodeHook steals 6 (the first two instructions).
+constexpr uintptr_t kZoomDofRva = 0x1078990;
+constexpr size_t kZoomDofPrologueBytes = 16;
+inline constexpr uint8_t kZoomDofPrologue[kZoomDofPrologueBytes] = {
+    0x40, 0x53, 0x48, 0x83, 0xEC, 0x60, 0x48, 0x8B, 0x81, 0x10, 0x02, 0x00, 0x00, 0x48, 0x8B, 0xD9};
 
 // ---- the free-camera activity's fields (Phase 0a, "The object") -------------------------------------------------------------
 constexpr uint32_t kOffLocalPose = 0x3B0;      // 16 floats, row-major 4x4: rows 0-2 = right, up, forward; row 3 = origin (x right, y up, z forward)
@@ -193,7 +202,7 @@ enum class Why : uint32_t {
     WorldLock = 2,        // +0x48C became 5
     Variant = 3,          // +0x48C became 6
     UnexpectedState = 4,  // +0x48C became something the design does not know
-    KeyOff = 5,           // the Explorer Cam session ended, or fix.explorer_cam turned off (or the feature stood down)
+    KeyOff = 5,           // the Explorer Cam session ended, or hotkey.explorer_cam was cleared (or the feature stood down)
     Stale = 6,            // the activity was not called for kStaleFrames frames
     Fault = 7,            // a guarded access to the activity faulted
     FaultLimit = 8,       // the fault budget ran out: the feature is off for the session
@@ -205,7 +214,7 @@ inline const char* whyText(Why w) {
         case Why::WorldLock: return "the world lock took over (+0x48C = 5, the camera is detached)";
         case Why::Variant: return "the variant state took over (+0x48C = 6)";
         case Why::UnexpectedState: return "+0x48C is a state the design does not know";
-        case Why::KeyOff: return "the Explorer Cam session ended (F5, the camera closed, or fix.explorer_cam turned off)";
+        case Why::KeyOff: return "the Explorer Cam session ended (F5, the camera closed, or hotkey.explorer_cam cleared)";
         case Why::Stale: return "the activity was not called for 30 frames";
         case Why::Fault: return "a guarded access to the activity faulted";
         case Why::FaultLimit: return "the fault budget ran out; Explorer Cam is off for the session";
@@ -401,6 +410,42 @@ private:
     uint64_t m_last = 0;
     uint32_t m_idle = 0;
     bool m_everMoved = false;
+};
+
+// The key Explorer Cam watches. Explorer Cam is armed exactly when hotkey.explorer_cam is set, and that key is also the way OUT: so a hand edit of the ini
+// that clears or changes it while a session is on must not take the exit away. The old key stays the watched one until the session ends; then the new value
+// applies (empty disarms, another key rebinds). One notice per deferred value.
+class HotkeyKeeper {
+public:
+    // `desired` is what the config says now. Returns the key to watch this frame. `deferredNow` is set the first frame a change is held back.
+    const std::string& step(const std::string& desired, bool sessionActive, bool* deferredNow) {
+        *deferredNow = false;
+        if (!m_have) {
+            m_have = true;
+            m_effective = desired;
+        } else if (desired == m_effective) {
+            m_pending.clear();   // back to the key in force (or never changed): nothing is waiting
+            m_pendingSet = false;
+        } else if (sessionActive) {
+            if (!m_pendingSet || m_pending != desired) {
+                m_pendingSet = true;
+                m_pending = desired;
+                *deferredNow = true;
+            }
+        } else {
+            m_effective = desired;
+            m_pending.clear();
+            m_pendingSet = false;
+        }
+        return m_effective;
+    }
+    const std::string& pending() const { return m_pending; }   // the value held back (empty = the key was cleared)
+
+private:
+    bool m_have = false;
+    std::string m_effective;
+    std::string m_pending;
+    bool m_pendingSet = false;
 };
 
 constexpr uint32_t kMaxFaults = 8;   // after this many faulting guarded accesses the feature is off for the session
@@ -709,28 +754,25 @@ enum class F5Action : uint32_t { None = 0, Enter, Exit, RefuseOff, RefuseControl
 struct F5Inputs {
     bool pressed = false;           // the key's edge this frame (Hotkey: foreground-gated, never captured)
     bool gameplay = false;          // the journal says gameplay has started (or there is no journal to ask)
-    bool active = false;            // fix.explorer_cam on and every hook it needs armed
+    bool active = false;            // hotkey.explorer_cam set and every hook it needs armed
     bool sessionActive = false;     // an Explorer Cam session is on
     bool controllerAlive = false;   // the camera controller's update has been called within the last 30 frames
     uint8_t mode = 0;               // the controller's mode byte as last read
     bool onFootKnown = false, onFoot = false;   // Status.json Flags2 bit 0
-    bool focusKnown = false;        // Status.json GuiFocus is in the file
+    bool focusKnown = false;        // Status.json carries a GuiFocus field
     uint32_t focus = 0;             // ...and its value (0 = no panel)
 };
 // ENTER needs ALL of: gameplay; on foot, known and true, in EVERY controller mode (the camera suite open in a ship or an SRV never enters, and an unknown
-// state does not either); and no panel: GuiFocus known and 0. An UNKNOWN focus refuses with the camera closed (mode 0: first person cannot be told from a
-// panel) and is allowed in the camera suite (modes 1-4), where on foot is known true by then. Status.json's OnFoot lags about 6 s after a disembark, which
-// only delays the first F5 after stepping out. EXIT is always allowed while a session is on: any mode, any focus, whatever the journal says.
+// state does not either); and no panel. F7: on foot, Status.json has NO GuiFocus field at all when nothing has the focus, so with on foot known (Flags2 is
+// in the file) an ABSENT GuiFocus reads as 0; only a KNOWN non-zero focus (inventory, maps, station services, the FSS and so on) refuses. A fully absent
+// Status.json has no on-foot answer either, and refuses on that. Status.json's OnFoot lags about 6 s after a disembark, which only delays the first F5 after
+// stepping out. EXIT is always allowed while a session is on: any mode, any focus, whatever the journal says.
 inline F5Action decideF5(const F5Inputs& in) {
     if (!in.pressed || !in.gameplay) return F5Action::None;
     if (!in.active) return F5Action::RefuseOff;
     if (in.sessionActive) return F5Action::Exit;
     if (!in.onFootKnown || !in.onFoot) return F5Action::RefuseNotOnFoot;
-    if (in.focusKnown) {
-        if (in.focus != 0) return F5Action::RefuseFocus;
-    } else if (in.mode == 0) {
-        return F5Action::RefuseFocus;
-    }
+    if (in.focusKnown && in.focus != 0) return F5Action::RefuseFocus;
     if (!in.controllerAlive) return F5Action::RefuseControllerIdle;
     return F5Action::Enter;
 }
@@ -1293,7 +1335,7 @@ inline void formatFade(char* out, size_t cap, FadeEvent ev, int32_t value, uint3
 // The F5 key's own lines (frame thread).
 inline void putGuiFocus(Line& o, bool known, uint32_t focus) {
     if (known) o.put("%u (%s)", focus, guiFocusName(focus));
-    else o.put("unknown (Status.json has no GuiFocus)");
+    else o.put("absent (on foot the game leaves GuiFocus out when no panel has the focus: taken as 0)");
 }
 inline void formatF5(char* out, size_t cap, F5Action a, const F5Inputs& in) {
     Line o(out, cap);
@@ -1310,7 +1352,7 @@ inline void formatF5(char* out, size_t cap, F5Action a, const F5Inputs& in) {
             o.put("%s F5 pressed: leaving Explorer Cam (camera mode %u, %s)", prefix(), mode, modeText(mode));
             break;
         case F5Action::RefuseOff:
-            o.put("%s F5 pressed, but Explorer Cam is not running (fix.explorer_cam is off, or a hook stood down: the lines above say which)", prefix());
+            o.put("%s F5 pressed, but Explorer Cam is not running (a hook it needs stood down: the lines above say which)", prefix());
             break;
         case F5Action::RefuseControllerIdle:
             o.put("%s F5 pressed, but the camera controller is idle: open the camera first (it is not being called with the camera closed; "
@@ -1325,11 +1367,10 @@ inline void formatF5(char* out, size_t cap, F5Action a, const F5Inputs& in) {
             o.put(". A ship's or SRV's camera never enters. Status.json's OnFoot lags about 6 s after you step out, so the first F5 after disembarking may need a moment");
             break;
         case F5Action::RefuseFocus:
-            o.put("%s F5 pressed, but a panel may have the focus: Status.json GuiFocus = ", prefix());
+            o.put("%s F5 pressed, but a panel has the focus: Status.json GuiFocus = ", prefix());
             putGuiFocus(o, in.focusKnown, in.focus);
             o.put(" with on foot = yes (camera mode %u, %s). ", mode, modeText(mode));
-            if (!in.focusKnown) o.put("With the camera closed, first person cannot be told from an open panel without it. ");
-            else if (mode >= 1 && mode <= 4) o.put("The game reports a non-zero GuiFocus while its own camera suite is open; if that is not a panel, this line is how to see it. ");
+            if (mode >= 1 && mode <= 4) o.put("The game reports a non-zero GuiFocus while its own camera suite is open; if that is not a panel, this line is how to see it. ");
             o.put("Close the panel (inventory, maps, station services, the FSS and so on) and press again");
             break;
         default:

@@ -1043,7 +1043,7 @@ static void iniNameScan(const std::wstring& root) {
 // while the route owns the world; experimental.temporal_aa_jitter off still stops it), the depth-validated steady detail (always on,
 // in the VR world route and in the flat runtime) and the switch that made the jitter phases follow the upscale ratio (they always
 // do). The fifteen keys of the old Explorer Cam route went on 2026-10-07 (docs/design-explorer-cam-free-camera-2026-10-07.md): the
-// press-counting gate, its camera-key adoption and the headset-pose offset, replaced by fix.explorer_cam. Nothing may still spell
+// press-counting gate, its camera-key adoption and the headset-pose offset, replaced by Explorer Cam's redesign. Nothing may still spell
 // their names. A reader left behind would let a user's old line act, a log message would send people
 // to a setting that does nothing, and the shipped file would document one. The installer carries an old line over under "this
 // version no longer uses it" (installer_test holds that), so only the two tests spell the names.
@@ -1076,10 +1076,32 @@ static const char* const kRetiredKeys[] = {
 };
 static const int kRetiredKeyCount = int(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
 
+// Retired by EXACT name, because the bare name is a substring of live keys. [fix] explorer_cam, the on/off switch of the redesigned Explorer Cam, was removed
+// 2026-10-08: Explorer Cam is armed exactly when hotkey.explorer_cam is set. Its qualified name "fix.explorer_cam" is also the beginning of every live
+// fix.explorer_cam_* key (_eye_up, _eye_trim_right, _follow_smoothing_ms ...), so a match counts only when the next character is not part of a name. A hotkey
+// line spells "hotkey.explorer_cam", which never contains "fix.". The shipped file's [fix] section is held out by the key lookup in main (expectStr, "<unset>"),
+// because there the key is the bare "explorer_cam", which sits in [hotkey] too.
+static const char* const kRetiredExactKeys[] = {
+    "fix.explorer_cam",
+};
+static const int kRetiredExactKeyCount = int(sizeof(kRetiredExactKeys) / sizeof(kRetiredExactKeys[0]));
+
+// True when `text` spells `name` followed by something that is not part of a key name.
+static bool spellsExactKey(const std::string& text, const char* name) {
+    const size_t n = std::strlen(name);
+    for (size_t at = text.find(name); at != std::string::npos; at = text.find(name, at + 1)) {
+        const char next = at + n < text.size() ? text[at + n] : '\0';
+        if (!(std::isalnum(static_cast<unsigned char>(next)) || next == '_')) return true;
+    }
+    return false;
+}
+
 // The first retired name `text` spells, or nullptr.
 static const char* spellsRetiredKey(const std::string& text) {
     for (const char* name : kRetiredKeys)
         if (text.find(name) != std::string::npos) return name;
+    for (const char* name : kRetiredExactKeys)
+        if (spellsExactKey(text, name)) return name;
     return nullptr;
 }
 
@@ -1104,6 +1126,36 @@ static void retiredKeyScan(const std::wstring& root) {
     else
         fail("the retired-key scan's own control", std::to_string(found) + " of " + std::to_string(kRetiredKeyCount) +
                                                        " names found, or a live key was flagged");
+
+    // The exact-name scan's own control: it finds the retired switch in a read, a message, a comment and at the end of a sentence or of the text, and passes
+    // every live key that begins with it or shares its tail (the hotkey, the eye keys, the trims, the smoothing).
+    {
+        const std::string retired[] = {
+            "Config::get().getBool(\"fix.explorer_cam\", true)",
+            "the log says set fix.explorer_cam to off",
+            "# fix.explorer_cam = on\n",
+            "turns it off (fix.explorer_cam).",
+            "fix.explorer_cam",
+        };
+        const std::string liveKeys[] = {
+            "Config::get().getString(\"hotkey.explorer_cam\", \"F5\")",
+            "[hotkey]\nexplorer_cam = F5\n",
+            "hotkey.explorer_cam)",
+            "cfg.getFloat(\"fix.explorer_cam_eye_up\", 1.68f)",
+            "fix.explorer_cam_eye_forward fix.explorer_cam_eye_right",
+            "fix.explorer_cam_eye_trim_right, _up, _forward",
+            "fix.explorer_cam_follow_smoothing_ms",
+            "advanced.explorer_cam_probe = on\n",
+        };
+        bool foundAll = true, passedAll = true;
+        for (const std::string& t : retired) foundAll = foundAll && spellsRetiredKey(t) != nullptr && std::strcmp(spellsRetiredKey(t), kRetiredExactKeys[0]) == 0;
+        for (const std::string& t : liveKeys) passedAll = passedAll && spellsRetiredKey(t) == nullptr;
+        if (foundAll && passedAll && kRetiredExactKeyCount == 1)
+            ok("the exact-name scan finds fix.explorer_cam in a read, a message, a comment and at the end of a sentence, and passes hotkey.explorer_cam, "
+               "fix.explorer_cam_eye_*, the trims, the smoothing and advanced.explorer_cam_probe beside it");
+        else
+            fail("the exact-name scan's own control", std::string(foundAll ? "" : "a retired spelling was missed; ") + (passedAll ? "" : "a live key was flagged"));
+    }
 
     // The shipped file: no template, no comment, no mention.
     const std::string ini = readRepoFile(root, L"edvr.ini");
@@ -1448,7 +1500,15 @@ int main(int argc, char** argv) {
 
     // The Explorer Cam switch reads from the shipped file, and the keys of the
     // old route it replaced are not defined there (kRetiredKeys, above).
-    expectBool("fix.explorer_cam", true, "the shipped Explorer Cam switch reads on");
+    expectStr("fix.explorer_cam", "<unset>", "the retired [fix] explorer_cam switch is absent from the shipped file (Explorer Cam is armed by its hotkey alone)");
+    expectStr("hotkey.explorer_cam", "F5", "...and the hotkey that arms Explorer Cam ships as F5");
+    expectFloat("fix.explorer_cam_eye_up", 1.68f, "...the fallback eye keys ship at 1.68 up,");
+    expectFloat("fix.explorer_cam_eye_forward", 0.10f, "...0.10 forward,");
+    expectFloat("fix.explorer_cam_eye_right", 0.0f, "...and 0.0 right");
+    expectFloat("fix.explorer_cam_eye_trim_right", 0.0f, "the temporary trims ship at 0.0 (right,");
+    expectFloat("fix.explorer_cam_eye_trim_up", 0.0f, "...up,");
+    expectFloat("fix.explorer_cam_eye_trim_forward", 0.0f, "...forward)");
+    expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the temporary follow smoothing ships at 0 (exact follow)");
     expectBool("hotkey.read_game_bindings", true,
                "a key under a repeated [hotkey] reads");
 

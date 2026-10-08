@@ -177,8 +177,8 @@ On foot, Elite renders the world once, flat, and shows that image to both eyes.
 There is no depth because none is drawn. The free camera renders in proper
 stereo, and that is where Explorer Cam works: open the camera on foot and press
 TAB, and EDVR puts the view in your commander's head, facing their way, and
-presses the game's lock for you, so you walk with it. `fix.explorer_cam` turns
-it off. **It cannot make first person 3D** and does not try; the flat screen
+presses the game's lock for you, so you walk with it. Clearing
+`hotkey.explorer_cam` turns it off. **It cannot make first person 3D** and does not try; the flat screen
 stays flat. Your commander's head is still visible from inside, and hiding it
 is the next step.
 

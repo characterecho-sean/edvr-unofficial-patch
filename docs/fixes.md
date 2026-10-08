@@ -238,8 +238,8 @@ and press TAB, and Explorer Cam puts your viewpoint at your commander's head and
 locks it to them, so the surface, your ship and the room have depth. It cannot
 make first person 3D and does not try, and it gives you no capability you do not
 already have. On by default in VR; the commander's head is still visible from
-inside: [Explorer Cam](explorer-cam.md). `fix.explorer_cam` (default `on`) and
-`fix.explorer_cam_eye_up`, `_eye_forward`, `_eye_right`.
+inside: [Explorer Cam](explorer-cam.md). `hotkey.explorer_cam` (default `F5`) arms it and clearing it turns it off;
+`fix.explorer_cam_eye_up`, `_eye_forward`, `_eye_right` set the fallback eye.
 
 ---
 

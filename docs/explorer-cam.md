@@ -43,10 +43,10 @@ pose, lock and collision, described below.
    way they face, and presses the game's own "lock relative to the commander"
    for you, so you walk with it. You set no hotkeys and cycle to no preset.
 
-2. `fix.explorer_cam` (default `on`) turns it on or off, live: off releases the
-   camera at the next frame. It is a VR setting, and it supports only Elite
-   build 332841. On any other build it leaves the game untouched and the log
-   says so.
+2. `hotkey.explorer_cam` (default `F5`) arms it, and clearing it turns it off,
+   live: the camera is released at the next frame. There is no other switch. It
+   is a VR setting, and it supports only Elite build 332841. On any other build
+   it leaves the game untouched and the log says so.
 
 3. Tune the eye with the headset on. The three keys are metres from your
    commander's feet, and they reload about once a second:
@@ -86,7 +86,7 @@ These safeguards are the reason to trust it:
   the first bytes at each hook point match build 332841, and it stands down with
   one log line otherwise.
 - It writes only while placed. It lets go when you leave the free camera, when
-  you turn `fix.explorer_cam` off, when the game stops calling the camera's
+  you clear `hotkey.explorer_cam`, when the game stops calling the camera's
   update, or on a fault; eight faults end it for the session.
 - Every access to the game's memory is under a fault guard, and the code that
   runs inside the game's own call takes no lock, allocates nothing and logs

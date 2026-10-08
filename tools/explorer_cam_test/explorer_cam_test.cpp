@@ -1,4 +1,4 @@
-// Explorer Cam's rig (src/d3d11/explorer_cam_core.h, explorer_cam.cpp, elite_binds.cpp; fix.explorer_cam, hotkey.explorer_cam).
+// Explorer Cam's rig (src/d3d11/explorer_cam_core.h, explorer_cam.cpp, elite_binds.cpp; hotkey.explorer_cam).
 //
 // Part A drives the pure half the DLL compiles: the build-332841 identity and CodeHook's reading of all five prologues, the eye
 // keys' clamp, the sixteen floats written into the free camera's commander-local pose, the placement machine on scripted state
@@ -42,6 +42,7 @@
 #include "../../src/d3d11/elite_binds.h"
 #include "../../src/d3d11/explorer_cam.h"
 #include "../../src/d3d11/explorer_cam_core.h"
+#include "../../src/d3d11/explorer_cam_follow_core.h"
 
 using namespace edvr;
 
@@ -956,7 +957,8 @@ void testF5Decision() {
     in = base();
     in.onFootKnown = true; in.onFoot = false; in.focusKnown = false; in.controllerAlive = false;
     check(ecm::decideF5(in) == F5Action::RefuseNotOnFoot, "...on foot is checked before the panel and before the idle controller");
-    // THE PANEL: a known non-zero focus refuses in every mode; an unknown focus refuses with the camera closed and passes inside the camera suite.
+    // THE PANEL: a known non-zero focus refuses in every mode. An ABSENT GuiFocus (F7: on foot, Status.json has no GuiFocus field at all when no panel has the
+    // focus) with on foot known true reads as 0 and enters in every mode.
     bool focusRefused = true;
     for (uint32_t f : {1u, 5u, 6u, 7u, 9u, 11u}) {
         for (int m : {0, 1, 2, 3, 4}) {
@@ -967,22 +969,27 @@ void testF5Decision() {
         }
     }
     check(focusRefused, "GUI FOCUS KNOWN AND NON-ZERO (a panel, the maps, station services, the FSS...): refused in modes 0, 1, 2, 3 and 4");
-    in = base();
-    in.focusKnown = false;
-    check(ecm::decideF5(in) == F5Action::RefuseFocus, "GUI FOCUS UNKNOWN, camera closed (mode 0): refused -- first person cannot be told from a panel");
-    bool unknownInSuite = true;
-    for (int m : {1, 2, 3, 4}) {
+    bool absentEnters = true;
+    for (int m : {0, 1, 2, 3, 4, 5, 6}) {
         in = base();
         in.mode = static_cast<uint8_t>(m);
         in.focusKnown = false;
-        unknownInSuite = unknownInSuite && ecm::decideF5(in) == F5Action::Enter;
+        absentEnters = absentEnters && ecm::decideF5(in) == F5Action::Enter;
     }
-    check(unknownInSuite, "GUI FOCUS UNKNOWN inside the camera suite (modes 1-4, on foot known true): ENTER");
+    check(absentEnters, "GUI FOCUS ABSENT (no GuiFocus field, on foot known true), F7's case: ENTER in every mode, first person included -- the field is left out when nothing has the focus");
+    in = base();
+    in.focusKnown = false;
+    in.focus = 9;   // a stale value next to an absent field is not read
+    check(ecm::decideF5(in) == F5Action::Enter, "...an absent field is 0 whatever the value next to it holds");
     in = base();
     in.focusKnown = false;
     in.onFootKnown = false;
     in.mode = 2;
-    check(ecm::decideF5(in) == F5Action::RefuseNotOnFoot, "...but never with on foot unknown as well");
+    check(ecm::decideF5(in) == F5Action::RefuseNotOnFoot, "...but never with on foot unknown as well (a fully absent Status.json has no Flags2 either)");
+    in = base();
+    in.focusKnown = true;
+    in.focus = 0;
+    check(ecm::decideF5(in) == F5Action::Enter, "GUI FOCUS KNOWN AND 0: ENTER");
     // EXIT is always allowed while a session is on.
     bool exitAlways = true;
     for (int m : {0, 1, 2, 3, 4, 5, 6}) {
@@ -1207,17 +1214,18 @@ void testText() {
           "THE NOT-ON-FOOT REFUSAL names the on-foot value (no) and the GuiFocus (5, station services) and says Status.json's OnFoot lags about 6 s after a disembark");
     f5in.onFootKnown = false; f5in.focusKnown = false;
     ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseNotOnFoot, f5in);
-    check(has(line, "on foot = unknown (Status.json has no Flags2") && has(line, "GuiFocus = unknown") && has(line, "lags about 6 s"), "...and for an unknown on-foot state (and an unknown focus) says unknown, and the same lag");
+    check(has(line, "on foot = unknown (Status.json has no Flags2") && has(line, "GuiFocus = absent") && has(line, "taken as 0") && has(line, "lags about 6 s"),
+          "...and for an unknown on-foot state (and an absent GuiFocus) says unknown and absent (taken as 0), and the same lag");
     f5in.onFootKnown = true; f5in.onFoot = true; f5in.focusKnown = true; f5in.focus = 9;
     ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseFocus, f5in);
-    check(has(line, "a panel may have the focus") && has(line, "GuiFocus = 9 (the FSS)") && has(line, "on foot = yes") && !has(line, "while its own camera suite is open"),
+    check(has(line, "a panel has the focus") && has(line, "GuiFocus = 9 (the FSS)") && has(line, "on foot = yes") && !has(line, "while its own camera suite is open"),
           "THE PANEL REFUSAL names the focus (9, the FSS) and on foot = yes");
     f5in.mode = 2;
     ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseFocus, f5in);
     check(has(line, "The game reports a non-zero GuiFocus while its own camera suite is open"), "...inside the camera suite it adds that the game reports a non-zero GuiFocus while its own camera suite is open");
     f5in.mode = 0; f5in.focusKnown = false;
-    ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseFocus, f5in);
-    check(has(line, "GuiFocus = unknown") && has(line, "first person cannot be told from an open panel"), "...and for an unknown focus with the camera closed says why it cannot allow it");
+    ecm::formatF5(line, sizeof(line), ecm::F5Action::Enter, f5in);
+    check(has(line, "entering Explorer Cam") && has(line, "GuiFocus: absent") && has(line, "taken as 0"), "THE ENTER LINE for an absent GuiFocus says absent, taken as 0");
 
     ecm::HeartbeatIn h;
     h.windowSeconds = 5.0; h.phase = "placed"; h.activity = 0xABC; h.state = 4; h.session = true;
@@ -1267,12 +1275,36 @@ using Bytes = std::vector<uint8_t>;
 void emit(Bytes& b, std::initializer_list<uint8_t> bytes) { for (uint8_t x : bytes) b.push_back(x); }
 void prologue(Bytes& b, const uint8_t* p, size_t n) { for (size_t i = 0; i < n; ++i) b.push_back(p[i]); }
 
+// A snippet every synthetic update carries right after its prologue: it calls a C++ probe (when one is set) with rcx = the object, WHILE the original runs, so a
+// cell sees what the game's own update would read. `saveReg` 0 = rbx, 1 = r14 (a register the prologue saves), -1 = rbx already holds rcx; `align` adds the
+// 28h of stack a frameless function needs for the call.
+using ProbeFn = void (__fastcall*)(void*);
+ProbeFn g_probeFree = nullptr, g_probeCtl = nullptr, g_probeUi = nullptr, g_probeZoom = nullptr;
+void emitProbe(Bytes& b, ProbeFn* slot, int saveReg, bool align) {
+    if (saveReg == 0) emit(b, {0x48, 0x89, 0xCB});          // mov rbx, rcx
+    else if (saveReg == 1) emit(b, {0x49, 0x89, 0xCE});     // mov r14, rcx
+    emit(b, {0x48, 0xB8});
+    const uint64_t at = reinterpret_cast<uint64_t>(slot);
+    for (int i = 0; i < 8; ++i) b.push_back(static_cast<uint8_t>(at >> (8 * i)));   // mov rax, imm64 (&slot)
+    emit(b, {0x48, 0x8B, 0x00});                            // mov rax, [rax]
+    emit(b, {0x48, 0x85, 0xC0});                            // test rax, rax
+    const size_t jeAt = b.size();
+    emit(b, {0x74, 0x00});                                  // je skip (patched)
+    if (align) emit(b, {0x48, 0x83, 0xEC, 0x28});           // sub rsp, 28h
+    emit(b, {0xFF, 0xD0});                                  // call rax
+    if (align) emit(b, {0x48, 0x83, 0xC4, 0x28});           // add rsp, 28h
+    b[jeAt + 1] = static_cast<uint8_t>(b.size() - (jeAt + 2));
+    if (saveReg == 1) emit(b, {0x4C, 0x89, 0xF1});          // mov rcx, r14
+    else emit(b, {0x48, 0x89, 0xD9});                       // mov rcx, rbx
+}
+
 // The free-camera update: the real 28-byte prologue, then a body that records what it saw.
 //   activity+0x540 = the lock action's pressed-int; +0x544 += 1 (calls); +0x548/54C/550 = the pose's origin; +0x554 = the state byte.
 constexpr uint32_t kSeenInt = 0x540, kSeenCalls = 0x544, kSeenX = 0x548, kSeenY = 0x54C, kSeenZ = 0x550, kSeenState = 0x554, kRan = 0x558;
 Bytes buildFreeSynthetic(bool corrupt) {
     Bytes b;
     prologue(b, ecm::kFreeCameraPrologue, sizeof(ecm::kFreeCameraPrologue));
+    emitProbe(b, &g_probeFree, 0, false);
     emit(b, {0x48, 0x8B, 0x81, 0x08, 0x05, 0x00, 0x00});          // mov rax, [rcx+508h]
     emit(b, {0x8B, 0x40, 0x1C});                                  // mov eax, [rax+1Ch]
     emit(b, {0x89, 0x81, 0x40, 0x05, 0x00, 0x00});                // mov [rcx+540h], eax
@@ -1330,6 +1362,7 @@ Bytes buildBoxSynthetic(bool corrupt) {
 Bytes buildUiSynthetic(bool corrupt) {
     Bytes b;
     prologue(b, ecm::kCameraUiPrologue, sizeof(ecm::kCameraUiPrologue));
+    emitProbe(b, &g_probeUi, 1, false);
     emit(b, {0x48, 0x8B, 0x81, 0xD8, 0x01, 0x00, 0x00});          // mov rax, [rcx+1D8h]
     emit(b, {0x48, 0x85, 0xC0});                                  // test rax, rax
     emit(b, {0x74, 0x09});                                        // je skip
@@ -1348,6 +1381,7 @@ Bytes buildUiSynthetic(bool corrupt) {
 Bytes buildControllerSynthetic(bool corrupt) {
     Bytes b;
     prologue(b, ecm::kControllerPrologue, sizeof(ecm::kControllerPrologue));
+    emitProbe(b, &g_probeCtl, 0, true);
     emit(b, {0x48, 0x8B, 0x81, 0x10, 0x03, 0x00, 0x00, 0x8B, 0x40, 0x1C, 0x89, 0x81, 0x00, 0x04, 0x00, 0x00});   // photo
     emit(b, {0x48, 0x8B, 0x81, 0x28, 0x03, 0x00, 0x00, 0x8B, 0x40, 0x1C, 0x89, 0x81, 0x04, 0x04, 0x00, 0x00});   // free
     emit(b, {0x48, 0x8B, 0x81, 0x40, 0x03, 0x00, 0x00, 0x8B, 0x40, 0x1C, 0x89, 0x81, 0x08, 0x04, 0x00, 0x00});   // quit
@@ -1356,6 +1390,17 @@ Bytes buildControllerSynthetic(bool corrupt) {
     emit(b, {0x48, 0xB8, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22});   // mov rax, 2233445566778899h
     emit(b, {0x48, 0x8B, 0x5C, 0x24, 0x08, 0x48, 0x8B, 0x6C, 0x24, 0x10, 0x48, 0x8B, 0x74, 0x24, 0x18, 0xC3});   // restore rbx, rbp, rsi; ret
     if (corrupt) b[13] ^= 0x01;
+    return b;
+}
+// The zoom/DOF update: the real 16-byte prologue (it leaves rbx = rcx), the probe, then a count of its runs in the activity (+0x300).
+Bytes buildZoomSynthetic(bool corrupt) {
+    Bytes b;
+    prologue(b, ecm::kZoomDofPrologue, sizeof(ecm::kZoomDofPrologue));
+    emitProbe(b, &g_probeZoom, -1, false);
+    emit(b, {0xFF, 0x83, 0x00, 0x03, 0x00, 0x00});                // inc dword ptr [rbx+300h]
+    emit(b, {0x48, 0xB8, 0x55, 0x44, 0x33, 0x22, 0x11, 0xEE, 0xDD, 0xCC});   // mov rax, 0CCDDEE1122334455h
+    emit(b, {0x48, 0x83, 0xC4, 0x60, 0x5B, 0xC3});                // add rsp, 60h; pop rbx; ret
+    if (corrupt) b[7] ^= 0x01;
     return b;
 }
 uint8_t* makeExecutable(const Bytes& code) {
@@ -1372,9 +1417,9 @@ using CollisionFn = uint64_t (__fastcall*)(void*, uint64_t, uint64_t, uint64_t, 
 using BoxFn = int (__fastcall*)(void*, uint32_t*);
 
 struct Pages {
-    Bytes freeGood, freeBad, colGood, colBad, boxGood, boxBad, uiGood, uiBad, ctlGood, ctlBad;
+    Bytes freeGood, freeBad, colGood, colBad, boxGood, boxBad, uiGood, uiBad, ctlGood, ctlBad, zoomGood, zoomBad;
     uint8_t *freeG = nullptr, *freeB = nullptr, *colG = nullptr, *colB = nullptr, *boxG = nullptr, *boxB = nullptr, *uiG = nullptr, *uiB = nullptr,
-            *ctlG = nullptr, *ctlB = nullptr;
+            *ctlG = nullptr, *ctlB = nullptr, *zoomG = nullptr, *zoomB = nullptr;
     bool ok() const { return freeG && freeB && colG && colB && boxG && boxB && uiG && uiB && ctlG && ctlB; }
 };
 uint8_t* g_leaPage = nullptr;     // `lea rax,[rcx+40h]; ret`: the shared record's accessor as a plain lea (the record at interface+0x40)
@@ -1388,13 +1433,70 @@ Pages makePages() {
     p.boxGood = buildBoxSynthetic(false); p.boxBad = buildBoxSynthetic(true);
     p.uiGood = buildUiSynthetic(false); p.uiBad = buildUiSynthetic(true);
     p.ctlGood = buildControllerSynthetic(false); p.ctlBad = buildControllerSynthetic(true);
+    p.zoomGood = buildZoomSynthetic(false); p.zoomBad = buildZoomSynthetic(true);
     p.freeG = makeExecutable(p.freeGood); p.freeB = makeExecutable(p.freeBad);
     p.colG = makeExecutable(p.colGood); p.colB = makeExecutable(p.colBad);
     p.boxG = makeExecutable(p.boxGood); p.boxB = makeExecutable(p.boxBad);
     p.uiG = makeExecutable(p.uiGood); p.uiB = makeExecutable(p.uiBad);
     p.ctlG = makeExecutable(p.ctlGood); p.ctlB = makeExecutable(p.ctlBad);
+    p.zoomG = makeExecutable(p.zoomGood); p.zoomB = makeExecutable(p.zoomBad);
     return p;
 }
+
+// The camera suite's action handles as the static notes (analysis\decomp\explorer_cam\NOTES_actions.txt) give them, written out AGAIN here and not taken from
+// the production tables, so a wrong offset or a wrong field in those is a failing cell. kind: 'A' float axis at +0x18, 'P' int pressed at +0x1C, 'H' byte held at +0x24.
+struct ExpField {
+    uint16_t handle;
+    char kind;
+};
+const ExpField kExpFree[] = {{0x4B8, 'H'}, {0x4C0, 'H'}, {0x4C8, 'A'}, {0x4D0, 'A'}, {0x4F0, 'A'}, {0x4D8, 'A'}, {0x4E0, 'A'}, {0x4E8, 'A'}, {0x4F8, 'P'}, {0x500, 'P'}, {0x508, 'P'}};
+const ExpField kExpCtl[] = {{0x310, 'P'}, {0x318, 'P'}, {0x320, 'P'}, {0x328, 'P'}, {0x340, 'P'}, {0x350, 'P'}, {0x358, 'P'}, {0x360, 'P'},
+                            {0x368, 'P'}, {0x370, 'P'}, {0x378, 'P'}, {0x380, 'P'}, {0x388, 'P'}, {0x390, 'P'}, {0x398, 'P'}};
+const ExpField kExpUi[] = {{0x1D8, 'P'}};
+const ExpField kExpZoom[] = {{0x250, 'H'}, {0x258, 'H'}, {0x260, 'P'}, {0x268, 'H'}, {0x270, 'H'}, {0x278, 'H'}, {0x280, 'H'}};
+constexpr int kExpCount[4] = {11, 15, 1, 7};
+const ExpField* const kExpTable[4] = {kExpFree, kExpCtl, kExpUi, kExpZoom};
+// What a cell sets in a field: a value no other field shares, so a clear of the wrong field or an object restored from another's value shows.
+uint32_t isoPatternAxis(uint32_t h) { return 0x3F000000u | h; }
+uint32_t isoPatternPressed(uint32_t h) { return 0x1000u + h; }
+uint8_t isoPatternHeld(uint32_t h) { return static_cast<uint8_t>(0x80u | (h & 0x3Fu)); }
+// The value of the spec'd field of `kind` in an action object.
+uint32_t actionField(const uint8_t* object, char kind) {
+    uint32_t v = 0;
+    if (kind == 'H') v = object[0x24];
+    else std::memcpy(&v, object + (kind == 'A' ? 0x18 : 0x1C), 4);
+    return v;
+}
+// What the original saw, per holder: the spec'd field of every handle (0xFFFFFFFF = no object behind the handle).
+struct SeenIso {
+    uint32_t v[16];
+    int calls = 0;
+    uint32_t canary = 0xFFFFFFFFu;   // the pressed int of a canary action object behind an unlisted slot, as the original saw it
+    uint32_t nb[16];                 // a held field's three neighbour bytes (+0x25..+0x27), as the original saw them
+};
+SeenIso g_seenIso[4];
+const uint8_t* g_canaryObj[4] = {};
+void snapIso(void* holder, int which) {
+    SeenIso& out = g_seenIso[which];
+    ++out.calls;
+    if (g_canaryObj[which]) out.canary = actionField(g_canaryObj[which], 'P');
+    for (int i = 0; i < kExpCount[which]; ++i) {
+        uint64_t ptr = 0;
+        std::memcpy(&ptr, static_cast<const uint8_t*>(holder) + kExpTable[which][i].handle, 8);
+        const bool real = ptr >= 0x10000 && (ptr & 7) == 0 && ptr < 0x00007FFF00000000ull;
+        out.v[i] = real ? actionField(reinterpret_cast<const uint8_t*>(ptr), kExpTable[which][i].kind) : 0xFFFFFFFFu;
+        out.nb[i] = 0xFFFFFFFFu;
+        if (real && kExpTable[which][i].kind == 'H') {
+            uint32_t w = 0;
+            std::memcpy(&w, reinterpret_cast<const uint8_t*>(ptr) + 0x24, 4);
+            out.nb[i] = w >> 8;
+        }
+    }
+}
+void __fastcall probeFreeCb(void* o) { snapIso(o, 0); }
+void __fastcall probeCtlCb(void* o) { snapIso(o, 1); }
+void __fastcall probeUiCb(void* o) { snapIso(o, 2); }
+void __fastcall probeZoomCb(void* o) { snapIso(o, 3); }
 
 // The rig is the game between calls. Three objects and the action objects they point at.
 struct Game {
@@ -1404,9 +1506,11 @@ struct Game {
     alignas(16) uint8_t photoAction[0x40] = {}, freeAction[0x40] = {}, quitAction[0x40] = {};
     alignas(16) uint8_t ui[0x600] = {};           // the camera UI
     alignas(16) uint8_t hideAction[0x40] = {};
+    alignas(16) uint8_t zoom[0x600] = {};         // the zoom/DOF activity
+    alignas(16) uint8_t iso[40][0x40] = {};       // action objects for the isolation cells (every handle not already wired to an action above)
     alignas(16) uint8_t iface[0x100] = {};        // the interface cached at controller+0x108; the shared record is at iface+0x40
     uintptr_t vtable[8] = {};                     // its vtable: slot 4 (+0x20) is the record's accessor
-    FnObj freeUpdate = nullptr, ctlUpdate = nullptr, uiUpdate = nullptr;
+    FnObj freeUpdate = nullptr, ctlUpdate = nullptr, uiUpdate = nullptr, zoomUpdate = nullptr;
     bool refuseOpen = false;                      // the game will not open the camera
     bool noHideHandle = false;                    // the camera UI's +0x1D8 is NULL
     bool blockedByOther = false;                  // the object at controller+0x80 says no: ToggleFreeCam is simply lost
@@ -1445,6 +1549,8 @@ struct Game {
         std::memset(freeAction, 0, sizeof(freeAction));
         std::memset(quitAction, 0, sizeof(quitAction));
         std::memset(hideAction, 0, sizeof(hideAction));
+        std::memset(zoom, 0, sizeof(zoom));
+        std::memset(iso, 0, sizeof(iso));
         refuseOpen = false;
         noHideHandle = false;
         blockedByOther = false;
@@ -1474,6 +1580,68 @@ struct Game {
         const float preset[16] = {-1, 0, 0, 0.5f, 0, 1, 0, 0.25f, 0, 0, -1, 0.125f, 0, 1.5f, 1.9f, 1.0f};
         std::memcpy(free + 0x3B0, preset, 64);
     }
+    // Every handle of the four holders pointed at an action object of its own (the lock, photo, free, quit and hide actions keep their places), all three fields of
+    // every object cleared. Returns the object behind (holder, index).
+    uint8_t* isoObject(int which, int i) {
+        uint8_t* holder = which == 0 ? free : which == 1 ? ctl : which == 2 ? ui : zoom;
+        uint64_t ptr = 0;
+        std::memcpy(&ptr, holder + kExpTable[which][i].handle, 8);
+        return reinterpret_cast<uint8_t*>(ptr);
+    }
+    void isoWire() {
+        std::memset(iso, 0, sizeof(iso));
+        int k = 0;
+        auto wire = [](uint8_t* holder, uint32_t handle, uint8_t* object) {
+            const uint64_t ptr = reinterpret_cast<uint64_t>(object);
+            std::memcpy(holder + handle, &ptr, 8);
+        };
+        for (const ExpField& f : kExpFree) wire(free, f.handle, f.handle == 0x508 ? lockAction : iso[k++]);
+        for (const ExpField& f : kExpCtl) wire(ctl, f.handle, f.handle == 0x310 ? photoAction : f.handle == 0x328 ? freeAction : f.handle == 0x340 ? quitAction : iso[k++]);
+        wire(ui, 0x1D8, hideAction);
+        for (const ExpField& f : kExpZoom) wire(zoom, f.handle, iso[k++]);
+    }
+    // All three fields of every object a holder points at, set to that handle's own patterns (the game "holds every key down").
+    void isoFill(int which) {
+        for (int i = 0; i < kExpCount[which]; ++i) {
+            uint8_t* o = isoObject(which, i);
+            const uint32_t h = kExpTable[which][i].handle;
+            const uint32_t axis = isoPatternAxis(h), pressed = isoPatternPressed(h);
+            std::memcpy(o + 0x18, &axis, 4);
+            std::memcpy(o + 0x1C, &pressed, 4);
+            o[0x24] = isoPatternHeld(h);
+        }
+    }
+    // Is every field of every object of a holder exactly what isoFill left?
+    bool isoIntact(int which) {
+        for (int i = 0; i < kExpCount[which]; ++i) {
+            const uint8_t* o = isoObject(which, i);
+            const uint32_t h = kExpTable[which][i].handle;
+            uint32_t axis = 0, pressed = 0;
+            std::memcpy(&axis, o + 0x18, 4);
+            std::memcpy(&pressed, o + 0x1C, 4);
+            if (axis != isoPatternAxis(h) || pressed != isoPatternPressed(h) || o[0x24] != isoPatternHeld(h)) return false;
+        }
+        return true;
+    }
+    // The spec'd field of handle i as the original saw it, against what isoFill set: 0 = zero (blocked), 1 = the pattern, 2 = something else.
+    int isoSeen(int which, int i) const {
+        const uint32_t v = g_seenIso[which].v[i], h = kExpTable[which][i].handle;
+        const char kind = kExpTable[which][i].kind;
+        const uint32_t pat = kind == 'A' ? isoPatternAxis(h) : kind == 'P' ? isoPatternPressed(h) : isoPatternHeld(h);
+        return v == 0 ? 0 : v == pat ? 1 : 2;
+    }
+    int isoSeenZeroCount(int which) const {
+        int n = 0;
+        for (int i = 0; i < kExpCount[which]; ++i) n += isoSeen(which, i) == 0 ? 1 : 0;
+        return n;
+    }
+    int isoSeenPatternCount(int which) const {
+        int n = 0;
+        for (int i = 0; i < kExpCount[which]; ++i) n += isoSeen(which, i) == 1 ? 1 : 0;
+        return n;
+    }
+    void zoomFrame() { zoomUpdate(zoom); }
+    uint32_t zoomCallsSeen() const { return rd<uint32_t>(zoom, 0x300); }
     // The shared mode record: the controller's byte and the free camera's state byte are the same number.
     void setMode(uint8_t m) {
         ctl[0x3E0] = m;
@@ -1591,13 +1759,14 @@ void testStandDowns(const Pages& p) {
 
     // ---- key off from the start: nothing is installed -----------------------------------------------------------------------
     t::setTargets(good);
-    rig.f.on = false;
+    rig.f.hotkey = "";
     rig.boundary();
     rig.boundary();
     rig.advance(6000);
     rig.boundary();
-    check(rig.cap.lines.size() >= 1 && std::strncmp(rig.cap.lines[0].c_str(), "explorer cam: off (fix.explorer_cam = off)", 42) == 0 && rig.cap.count("explorer cam: off") == 1,
-          "KEY OFF: three boundaries print ONE 'explorer cam: off' line");
+    check(rig.cap.lines.size() >= 1 && std::strncmp(rig.cap.lines[0].c_str(), "explorer cam: hotkey.explorer_cam is empty: Explorer Cam is off", 63) == 0 &&
+              rig.cap.count("hotkey.explorer_cam is empty: Explorer Cam is off") == 1,
+          "HOTKEY EMPTY: three boundaries print ONE 'hotkey.explorer_cam is empty: Explorer Cam is off' line");
     bool untouched = true;
     for (int i = 0; i < 5; ++i) untouched = untouched && std::memcmp(before[i], goodPages[i], 40) == 0;
     check(untouched && !t::gateOpen() && !t::uiGateOpen() && !t::controllerGateOpen() && !t::placeActive(), "KEY OFF: no function was touched, every gate is closed, placement is not active");
@@ -1625,7 +1794,7 @@ void testStandDowns(const Pages& p) {
         uint8_t badBefore[40];
         std::memcpy(badBefore, badPages[c.hook], 40);
         t::setTargets(targets);
-        rig.f.on = true;
+        rig.f.hotkey = "F5";
         rig.boundary();
         rig.boundary();
         std::snprintf(what, sizeof(what), "WRONG %s PROLOGUE: one '%s' line saying the game build differs and nothing was patched", c.name, c.line);
@@ -1661,7 +1830,8 @@ void testF5FromClosed(const Pages& p) {
     const FnObj bareFree = reinterpret_cast<FnObj>(p.freeG);
     (void)bareFree;
 
-    check(rig.cap.count("explorer cam: on (fix.explorer_cam = on)") == 1 && rig.cap.count("hook armed:") == 5, "ARMED: one 'on' line and five 'hook armed' lines (free-camera, collision, box-push, controller, camera-UI)");
+    check(rig.cap.count("explorer cam: Explorer Cam armed: F5 enters it") == 1 && rig.cap.count("hook armed:") == 5,
+          "ARMED: one 'Explorer Cam armed: F5 enters it' line and five 'hook armed' lines (free-camera, collision, box-push, controller, camera-UI)");
     check(has(rig.cap.nth("free-camera hook armed:", 0), "stolen=5 bytes") && has(rig.cap.nth("free-camera hook armed:", 0), "28/28 bytes verified") &&
               has(rig.cap.nth("collision hook armed:", 0), "26/26 bytes verified") && has(rig.cap.nth("box-push hook armed:", 0), "20/20 bytes verified") &&
               has(rig.cap.nth("camera-UI hook armed:", 0), "stolen=12 bytes") && has(rig.cap.nth("camera-UI hook armed:", 0), "19/19 bytes verified") &&
@@ -1832,12 +2002,18 @@ void testF5FromOtherModes(const Pages& p) {
     check(t::placedActivity() == reinterpret_cast<uint64_t>(g.free) && g.mode() == 4, "...placed and locked");
     rig.boundary();
     check(rig.cap.count("F5 pressed: entering Explorer Cam (camera mode 1, suite open on a preset") == 1 && rig.cap.count("F5 enter: the camera is open on a preset (mode 1)") == 1, "LOG: the preset mode is named");
-    // End the session by the player closing the camera by hand: mode 0 by any route ends it.
+    // The player's own camera key does nothing now (the isolation swallows it while the view is placed); mode 0 by ANY OTHER route (the game closing the camera
+    // itself) still ends the session.
     rig.cap.clear();
     g.userPresses(g.photoAction, &Game::ctlFrame);
     g.ctlFrame();
     rig.boundary();
-    check(g.mode() == 0 && !t::sessionActive() && t::placedActivity() == 0 && rig.cap.count("the camera closed (mode 0)") == 1, "MODE 0 BY THE PLAYER'S OWN HAND ends the session and releases the placement, with a line");
+    check(g.mode() == 4 && t::sessionActive() && t::placedActivity() == reinterpret_cast<uint64_t>(g.free) && g.seenPhoto() == 0,
+          "THE PLAYER'S OWN CAMERA KEY, placed: swallowed (the controller reads 0), the camera stays open, the session and the placement stand");
+    g.setMode(0);
+    g.ctlFrame();
+    rig.boundary();
+    check(g.mode() == 0 && !t::sessionActive() && t::placedActivity() == 0 && rig.cap.count("the camera closed (mode 0)") == 1, "MODE 0 BY THE GAME'S OWN HAND ends the session and releases the placement, with a line");
 
     // From the free camera (mode 4: locked).
     g.init();
@@ -1973,12 +2149,18 @@ void testSessionTimeoutsAndIdle(const Pages& p) {
     rig.f.focus = 5;   // station services
     rig.cap.clear();
     rig.boundary(true);
-    check(rig.cap.count("a panel may have the focus") == 1 && has(rig.cap.nth("a panel may have the focus", 0), "GuiFocus = 5 (station services)") && t::f5Request() == 0,
+    check(rig.cap.count("a panel has the focus") == 1 && has(rig.cap.nth("a panel has the focus", 0), "GuiFocus = 5 (station services)") && t::f5Request() == 0,
           "A PANEL OPEN (GuiFocus 5), camera closed: refused with one line naming the focus");
     rig.f.focusKnown = false;
     rig.cap.clear();
     rig.boundary(true);
-    check(rig.cap.count("a panel may have the focus") == 1 && has(rig.cap.nth("a panel may have the focus", 0), "GuiFocus = unknown") && t::f5Request() == 0, "GUI FOCUS UNKNOWN, camera closed: refused with one line");
+    check(t::f5Request() == 1 && rig.cap.count("a panel has the focus") == 0 && rig.cap.count("F5 pressed: entering Explorer Cam") == 1 &&
+              has(rig.cap.nth("entering Explorer Cam", 0), "GuiFocus: absent"),
+          "GUI FOCUS ABSENT from Status.json (F7: on foot, no panel), camera closed, on foot known true: the press ENTERS (the request is set), and the line says absent");
+    t::reset();
+    g.init();
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
     rig.f.focusKnown = true; rig.f.focus = 0;
     rig.cap.clear();
     rig.boundary(true);
@@ -2001,7 +2183,7 @@ void testSessionTimeoutsAndIdle(const Pages& p) {
     rig.f.focusKnown = false;   // unknown focus, on foot known true
     rig.cap.clear();
     rig.boundary(true);
-    check(t::f5Request() == 1 && rig.cap.count("a panel may have the focus") == 0, "...on foot with an UNKNOWN focus inside the camera suite (mode 1): ENTER");
+    check(t::f5Request() == 1 && rig.cap.count("a panel has the focus") == 0, "...on foot with an ABSENT focus inside the camera suite (mode 1): ENTER");
     t::reset();
     g.init();
     installAll(p, rig, g);
@@ -2012,8 +2194,8 @@ void testSessionTimeoutsAndIdle(const Pages& p) {
     rig.f.focusKnown = true; rig.f.focus = 6;   // the galaxy map
     rig.cap.clear();
     rig.boundary(true);
-    check(rig.cap.count("a panel may have the focus") == 1 && has(rig.cap.nth("a panel may have the focus", 0), "GuiFocus = 6 (the galaxy map)") &&
-              has(rig.cap.nth("a panel may have the focus", 0), "while its own camera suite is open") && t::f5Request() == 0,
+    check(rig.cap.count("a panel has the focus") == 1 && has(rig.cap.nth("a panel has the focus", 0), "GuiFocus = 6 (the galaxy map)") &&
+              has(rig.cap.nth("a panel has the focus", 0), "while its own camera suite is open") && t::f5Request() == 0,
           "A NON-ZERO GUI FOCUS while the camera suite is open (mode 1): refused, and the line says the game reports it while its own suite is open");
     rig.f.focus = 0;
     // EXIT is never refused: a session on, then the journal says everything wrong.
@@ -2025,7 +2207,7 @@ void testSessionTimeoutsAndIdle(const Pages& p) {
     rig.f.onFootKnown = false; rig.f.focusKnown = true; rig.f.focus = 9;
     rig.cap.clear();
     rig.boundary(true);
-    check(rig.cap.count("F5 pressed: leaving Explorer Cam") == 1 && rig.cap.count("only starts on foot") == 0 && rig.cap.count("a panel may have the focus") == 0,
+    check(rig.cap.count("F5 pressed: leaving Explorer Cam") == 1 && rig.cap.count("only starts on foot") == 0 && rig.cap.count("a panel has the focus") == 0,
           "EXIT with on foot unknown and a panel open is not refused: 'leaving Explorer Cam'");
     rig.f.onFootKnown = true; rig.f.onFoot = true; rig.f.focus = 0;
     t::reset();
@@ -2061,9 +2243,9 @@ void testSessionEnds(const Pages& p) {
     goToPlaced();
     check(t::placedActivity() != 0 && t::sessionActive() && g.hidden() == 1, "(placed and hidden)");
 
-    // fix.explorer_cam turning off: the placement is released, the session ended, and the UI is given back through the open gate.
+    // The hotkey cleared: the placement is released, the session ended, and the UI is given back through the open gate.
     rig.cap.clear();
-    rig.f.on = false;
+    rig.f.hotkey = "";
     rig.boundary();
     check(t::placedActivity() == 0 && !t::placeActive() && !t::sessionActive() && rig.cap.count("released:") == 1 && rig.cap.count("the Explorer Cam session ended: Explorer Cam is off") == 1,
           "KEY OFF while placed: released at once, the session ended, one line each");
@@ -2077,7 +2259,7 @@ void testSessionEnds(const Pages& p) {
 
     // A silent activity: released after 30 frames.
     g.init();
-    rig.f.on = true;
+    rig.f.hotkey = "F5";
     installAll(p, rig, g);
     goToPlaced();
     g.freeFrame();
@@ -2095,7 +2277,7 @@ void testSessionEnds(const Pages& p) {
 
     // A controller that stops being called ends the session.
     g.init();
-    rig.f.on = true;
+    rig.f.hotkey = "F5";
     installAll(p, rig, g);
     goToPlaced();
     g.ctlFrame();
@@ -2111,7 +2293,7 @@ void testSessionEnds(const Pages& p) {
 
     // The key goes off while the hide press is in flight: the UI still comes back.
     g.init();
-    rig.f.on = true;
+    rig.f.hotkey = "F5";
     installAll(p, rig, g);
     g.setMode(3);
     g.free[0x473] = 1;
@@ -2120,7 +2302,7 @@ void testSessionEnds(const Pages& p) {
     g.ctlFrame(); g.freeFrame(); g.freeFrame(); g.ctlFrame();
     g.uiFrame();   // FreeCamToggleHUD pressed: the game hid the UI, EDVR has not yet read the result
     check(g.hidden() == 1 && !t::uiHiddenByEdvr(), "(the hide press is in flight: the UI is hidden, EDVR has not read the result)");
-    rig.f.on = false;
+    rig.f.hotkey = "";
     rig.boundary();
     check(t::uiGateOpen(), "KEY OFF with a hide in flight: the camera UI hook's gate stays open");
     g.uiFrame();   // reads the result, then gives it back in the same update
@@ -2383,7 +2565,7 @@ void testConfigPath(const Pages& p) {
     g.freeUpdate = reinterpret_cast<FnObj>(p.freeG);
     g.ctlUpdate = reinterpret_cast<FnObj>(p.ctlG);
     g.uiUpdate = reinterpret_cast<FnObj>(p.uiG);
-    // Defaults: nothing set. The ini ships `explorer_cam = on` and `hotkey.explorer_cam = F5`; the code defaults agree.
+    // Defaults: nothing set. The ini ships `hotkey.explorer_cam = F5`, which arms Explorer Cam; the code default agrees.
     explorerCamFrameBoundary(1);
     check(t::placeActive(), "no keys set: Explorer Cam is ON by default");
     check(t::hotkeyVk() == VK_F5, "...and hotkey.explorer_cam defaults to F5");
@@ -2403,17 +2585,61 @@ void testConfigPath(const Pages& p) {
     cfg.set("hotkey.explorer_cam", "");
     explorerCamFrameBoundary(5);
     check(t::hotkeyVk() == 0, "hotkey.explorer_cam = (empty): no key bound");
+    check(!t::placeActive(), "...and Explorer Cam is OFF: placement inactive (the hotkey is what arms it; there is no other switch)");
     cfg.set("hotkey.explorer_cam", "F6");
     explorerCamFrameBoundary(6);
     check(t::hotkeyVk() == VK_F6, "hotkey.explorer_cam = F6: bound to F6");
-    cfg.set("fix.explorer_cam", "off");
-    explorerCamFrameBoundary(7);
-    check(!t::placeActive(), "fix.explorer_cam = off: placement inactive");
-    cfg.set("fix.explorer_cam", "on");
-    explorerCamFrameBoundary(8);
-    check(t::placeActive(), "fix.explorer_cam = on: active again");
+    check(t::placeActive(), "...and Explorer Cam is armed again");
+
+    // ---- the key is also the way out: a change or a clearing made while a session is on waits for the session to end ------------------------------------------------
+    Capture cap;
+    t::setFrameSink(&Capture::add, &cap);
+    check(!explorerCamSessionActive(), "explorerCamSessionActive(): false with no session");
+    t::forceSession(true);
+    check(explorerCamSessionActive(), "...true while a session is on (the hotkey menu locks the key's row on it)");
+    cfg.set("hotkey.explorer_cam", "");
+    cap.clear();
+    explorerCamFrameBoundary(10);
+    check(t::hotkeyVk() == VK_F6 && t::placeActive() && cap.count("hotkey.explorer_cam changed during Explorer Cam: F6 stays the exit until you leave") == 1 &&
+              has(cap.nth("changed during Explorer Cam", 0), "empty: Explorer Cam turns off"),
+          "HOTKEY CLEARED MID-SESSION: F6 stays bound and Explorer Cam stays armed (the old key still exits), one line says so");
+    cap.clear();
+    explorerCamFrameBoundary(11);
+    explorerCamFrameBoundary(12);
+    check(t::hotkeyVk() == VK_F6 && t::placeActive() && cap.count("changed during Explorer Cam") == 0, "...said ONCE, and the old key stays bound while the session lasts");
+    t::forceSession(false);
+    explorerCamFrameBoundary(13);
+    check(t::hotkeyVk() == 0 && !t::placeActive(), "...the session over: the cleared key applies, Explorer Cam is disarmed");
+    cfg.set("hotkey.explorer_cam", "F6");
+    explorerCamFrameBoundary(14);
+    check(t::hotkeyVk() == VK_F6 && t::placeActive(), "(F6 armed again)");
+    t::forceSession(true);
+    cfg.set("hotkey.explorer_cam", "F7");
+    cap.clear();
+    explorerCamFrameBoundary(15);
+    check(t::hotkeyVk() == VK_F6 && t::placeActive() && cap.count("hotkey.explorer_cam changed during Explorer Cam: F6 stays the exit until you leave") == 1 && has(cap.nth("changed during Explorer Cam", 0), "the new value (F7)"),
+          "HOTKEY CHANGED MID-SESSION (F6 to F7): F6 stays bound and exits, one line says so and names the new value");
+    explorerCamFrameBoundary(16);
+    check(t::hotkeyVk() == VK_F6, "...still F6 the next frame");
+    t::forceSession(false);
+    explorerCamFrameBoundary(17);
+    check(t::hotkeyVk() == VK_F7 && t::placeActive(), "...the session over: F7 is bound and live");
+    t::forceSession(true);
+    cfg.set("hotkey.explorer_cam", "F8");
+    cap.clear();
+    explorerCamFrameBoundary(18);
+    cfg.set("hotkey.explorer_cam", "F7");
+    cap.clear();
+    explorerCamFrameBoundary(19);
+    check(t::hotkeyVk() == VK_F7 && cap.count("changed during Explorer Cam") == 0, "A CHANGE REVERTED BEFORE THE SESSION ENDS says nothing more and changes nothing");
+    cfg.set("hotkey.explorer_cam", "F8");
+    cap.clear();
+    explorerCamFrameBoundary(20);
+    check(cap.count("changed during Explorer Cam") == 1, "...and a new change is held back and said again");
+    t::forceSession(false);
+    t::setFrameSink(nullptr, nullptr);
     t::reset();
-    for (const char* key : {"hotkey.explorer_cam", "fix.explorer_cam", "fix.explorer_cam_eye_up", "fix.explorer_cam_eye_forward", "fix.explorer_cam_eye_right"}) cfg.set(key, "");
+    for (const char* key : {"hotkey.explorer_cam", "fix.explorer_cam_eye_up", "fix.explorer_cam_eye_forward", "fix.explorer_cam_eye_right"}) cfg.set(key, "");
 }
 
 // ToggleFreeCam waits for the suite to be ready (F2: pressed the update after opening, it was lost and the sequence aborted).
@@ -2667,7 +2893,7 @@ void testFadeGlue(const Pages& p) {
 
     // ---- the feature turned off while the camera is open inside the body: held until it closes ------------------------------------------------
     rig.cap.clear();
-    rig.f.on = false;
+    rig.f.hotkey = "";
     rig.boundary();
     check(fadeMode == 0 && t::fadeOurs() && !t::placeActive(), "FEATURE OFF with the camera still open (mode 4): the global is HELD at 0 (the camera is inside the body)");
     g.ctlFrame();
@@ -2677,7 +2903,7 @@ void testFadeGlue(const Pages& p) {
     rig.boundary();
     check(fadeMode == -1 && !t::fadeOurs() && rig.cap.count("avatar fade: put the dither-fade mode global back to -1 (auto)") == 1,
           "...the camera closed (the controller hook still publishes the mode while EDVR holds the global): restored to -1 though the feature is off");
-    rig.f.on = true;
+    rig.f.hotkey = "F5";
 
     // ---- changed under us ---------------------------------------------------------------------------------------------------------------------
     begin(-1);
@@ -2893,6 +3119,84 @@ void cimgInvoke() {
     put({0x41, 0xFF, 0xD0});                           // call r8        (returns to +0x19B1359)
     put({0x48, 0x83, 0xC4, 0x48, 0xC3});               // end: add rsp, 48h; ret
 }
+// ---- the synthetic skeleton interfaces (Phase 3: the head-joint eye) -------------------------------------------------------------------------------
+// RR's and AO's vtables with the build's slots (+0x18 pose, +0x30 FindJoint, +0x48 world, +0x58 model) pointing at trampolines placed at the EXACT RVAs the build has,
+// to native stubs; FindJoint (+0xFDDB10) is the real hook target. A stub records how it was called; a fault can be injected in each.
+struct CamRec {
+    uint32_t headIdx = 12;
+    uint32_t headJunk = 0;           // OR-ed into FindJoint(head)'s result: the part of eax above the u16 the game returns
+    int poseCalls = 0, modelCalls = 0, findHeadCalls = 0, worldCalls = 0;
+    uintptr_t lastModelIface = 0, lastModelOut = 0;
+    uint32_t lastModelIdx = 0xFFFFFFFFu, modelThread = 0;
+    int faultAt = 0;                 // 1 GetPoseData, 2 FindJoint(head), 3 the model matrix (+0x58)
+    int faultCount = 0;              // > 0: only that many calls fault (then they work again); 0 with faultAt set: every call
+    float headM[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.0f, 1.66f, 0.03f, 1};   // the live +0x58 head matrix: identity rotation, standing
+    float otherM[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.0f, 1.0f, 0.0f, 1};
+    bool swapModelSlot = false;      // the +0x58 stub changes the RR vtable's +0x48 slot behind the hook's back
+};
+CamRec g_cr;
+void crFault() {
+    if (g_cr.faultCount > 0 && --g_cr.faultCount == 0) g_cr.faultAt = 0;
+    volatile int* bad = reinterpret_cast<volatile int*>(static_cast<uintptr_t>(0x8));
+    *bad = 1;
+}
+void* __fastcall crPose(void* iface) {
+    ++g_cr.poseCalls;
+    if (g_cr.faultAt == 1) crFault();
+    return *reinterpret_cast<void**>(static_cast<uint8_t*>(iface) + 0x20);
+}
+uint32_t __fastcall crFind(void*, const char* name) {
+    if (std::strcmp(name, ecm::kHeadName) == 0) {
+        ++g_cr.findHeadCalls;
+        if (g_cr.faultAt == 2) crFault();
+        return g_cr.headIdx | g_cr.headJunk;
+    }
+    return 3;   // the povCamera joint (and, as before, every other name)
+}
+void __fastcall crModel(void* iface, uint32_t idx, float* out) {
+    ++g_cr.modelCalls;
+    g_cr.modelThread = GetCurrentThreadId();
+    g_cr.lastModelIface = reinterpret_cast<uintptr_t>(iface);
+    g_cr.lastModelIdx = idx;
+    g_cr.lastModelOut = reinterpret_cast<uintptr_t>(out);
+    if (g_cr.faultAt == 3) crFault();
+    std::memcpy(out, idx == g_cr.headIdx ? g_cr.headM : g_cr.otherM, 64);
+    if (g_cr.swapModelSlot) *reinterpret_cast<uint64_t*>(g_cimg + ecm::kRrVtableRva + 8 * 9) = reinterpret_cast<uint64_t>(g_cimg) + 0x3000000;
+}
+void __fastcall crWorld(void*, uint32_t, float* out) {
+    ++g_cr.worldCalls;
+    std::memset(out, 0, 64);
+}
+uint64_t* cimgQ(size_t rva) {
+    cimgCommit(rva, 8);
+    return reinterpret_cast<uint64_t*>(g_cimg + rva);
+}
+void cimgTramp(size_t rva, const void* target) {
+    cimgCommit(rva, 16);
+    uint8_t* q = g_cimg + rva;
+    q[0] = 0x48;
+    q[1] = 0xB8;   // mov rax, imm64
+    std::memcpy(q + 2, &target, 8);
+    q[10] = 0xFF;
+    q[11] = 0xE0;  // jmp rax
+}
+void cimgFollowInit() {
+    g_cr = CamRec();
+    cimgTramp(0x43FB900, reinterpret_cast<const void*>(&crPose));    // RR +0x18
+    cimgTramp(0x43F7180, reinterpret_cast<const void*>(&crWorld));   // RR +0x48
+    cimgTramp(0x43F6EB0, reinterpret_cast<const void*>(&crModel));   // RR +0x58
+    cimgTramp(0xFDE310, reinterpret_cast<const void*>(&crPose));     // AO +0x18
+    cimgTramp(0xFDDEB0, reinterpret_cast<const void*>(&crWorld));    // AO +0x48
+    cimgTramp(0xFDDD10, reinterpret_cast<const void*>(&crModel));    // AO +0x58
+    cimgTramp(0x3000100, reinterpret_cast<const void*>(&crWorld));   // a function that is none of the slots'
+    const uint64_t b = reinterpret_cast<uint64_t>(g_cimg);
+    for (uint32_t i = 0; i < ecm::kHeadSlots; ++i) {
+        *cimgQ(ecm::kRrVtableRva + 8 * ecm::kHeadSlotIndex[i]) = b + ecm::kRrFunctions[i];
+        *cimgQ(ecm::kAoVtableRva + 8 * ecm::kHeadSlotIndex[i]) = b + ecm::kAoFunctions[i];
+    }
+    cimgCommit(ecm::kHeadNameRva, 32);
+    std::memcpy(g_cimg + ecm::kHeadNameRva, ecm::kHeadName, sizeof(ecm::kHeadName));
+}
 void cimgInit(int corruptName = -1) {
     if (!g_cimg) g_cimg = static_cast<uint8_t*>(VirtualAlloc(nullptr, kCImgSize, MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     // The dither fade: the real prologue, a rip-relative displacement of 0, then the matching epilogue. It does nothing: the rig plays the game's masks.
@@ -2911,15 +3215,19 @@ void cimgInit(int corruptName = -1) {
         p[n++] = 0x5F; p[n++] = 0x5E; p[n++] = 0x5B; p[n++] = 0xC3;                                                // pop rdi; pop rsi; pop rbx; ret
         p[0x40] = 0;   // the flag
     }
-    // FindJoint: the real prologue, then eax = 3 (the index every name gets) and the matching epilogue.
+    // FindJoint: the real prologue, undone, and a TAIL jump to a stub with rcx and rdx as they came in (3 for every name but the head's, which the follow cells set).
     cimgCommit(ecm::kFindJointRva, 64);
     {
         uint8_t* p = g_cimg + ecm::kFindJointRva;
         size_t n = 0;
         for (uint8_t b : ecm::kFindJointPrologue) p[n++] = b;
-        p[n++] = 0xB8; p[n++] = 0x03; p[n++] = 0; p[n++] = 0; p[n++] = 0;                                          // mov eax, 3
         p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xC4; p[n++] = 0x20; p[n++] = 0x5F;                                 // add rsp,20h; pop rdi
-        p[n++] = 0x48; p[n++] = 0x8B; p[n++] = 0x5C; p[n++] = 0x24; p[n++] = 0x08; p[n++] = 0xC3;                  // mov rbx,[rsp+8]; ret
+        p[n++] = 0x48; p[n++] = 0x8B; p[n++] = 0x5C; p[n++] = 0x24; p[n++] = 0x08;                                 // mov rbx,[rsp+8]
+        const uint64_t stub = reinterpret_cast<uint64_t>(&crFind);
+        p[n++] = 0x48; p[n++] = 0xB8;                                                                              // mov rax, imm64
+        std::memcpy(p + n, &stub, 8);
+        n += 8;
+        p[n++] = 0xFF; p[n++] = 0xE0;                                                                              // jmp rax
     }
     cimgCommit(0x3000000, 64);         // a function that is not FindJoint (a prologue of 0xCC)
     std::memset(g_cimg + 0x3000000, 0xCC, 64);
@@ -2936,6 +3244,7 @@ void cimgInit(int corruptName = -1) {
         const uint64_t abs = reinterpret_cast<uint64_t>(s);
         std::memcpy(g_cimg + ecm::kPartNameTableRva + 8 * i, &abs, 8);
     }
+    cimgFollowInit();
 }
 using ImgFade = uint64_t (__fastcall*)(void*);
 using ImgFind = uint64_t (__fastcall*)(void* iface, const void* name, void* fn);
@@ -3035,7 +3344,7 @@ void testHeadHideGlue(const Pages& p) {
         g.init();
         cimgInit(corruptName);
         rig = Rig();
-        rig.f.on = on;
+        rig.f.hotkey = on ? "F5" : "";
         ExplorerCamTestTargets tt;
         tt.freeCamera = reinterpret_cast<uintptr_t>(p.freeG);
         tt.collision = reinterpret_cast<uintptr_t>(p.colG);
@@ -3162,7 +3471,7 @@ void testHeadHideGlue(const Pages& p) {
     place();
     imgFade(local.b);
     check(t::partNamesState() == 2 && !t::headHideOn() && local.allMasksIntact() && t::hideCalls() == 0 && rig.cap.count("the part-name table at EliteDangerous64.exe+0x5E9C7D0 differs") == 1 &&
-              has(rig.cap.nth("differs", 0), "index 3, which is not \"Helmet\"") && has(rig.cap.nth("differs", 0), "nothing is hidden"),
+              has(rig.cap.nth("the part-name table at EliteDangerous64.exe+0x5E9C7D0 differs", 0), "index 3, which is not \"Helmet\"") && has(rig.cap.nth("the part-name table at EliteDangerous64.exe+0x5E9C7D0 differs", 0), "nothing is hidden"),
           "A NAME THAT DIFFERS (index 3 reads \"Xead\"): one line names it, head hiding does not run, nothing is hidden even when placed");
 
     // ---- the FindJoint hook cannot install: head hiding does not run (and placement does) ----------------------------------------------------------------------
@@ -3473,6 +3782,1113 @@ void testSkeletonLatch(const Pages& p) {
     t::reset();
 }
 
+// ================================ Phase 3: the head-joint eye, the trims, the smoothing, the isolation tables ================================
+
+// A bind pose with the local transforms and parents the pose walk reads: every joint under the root at the origin with an identity rotation (x,y,z,w = 0,0,0,1).
+struct FlatPose {
+    float locals[64 * 8];
+    uint16_t parents[64];
+    FlatPose() {
+        std::memset(locals, 0, sizeof(locals));
+        for (int j = 0; j < 64; ++j) {
+            parents[j] = 0;
+            locals[j * 8 + 7] = 1.0f;
+        }
+        parents[0] = 0xFFFF;
+    }
+    void pos(int j, float x, float y, float z) {
+        locals[j * 8 + 0] = x;
+        locals[j * 8 + 1] = y;
+        locals[j * 8 + 2] = z;
+    }
+};
+// The head matrix +0x58 hands back: rows 0-2 the joint's axes in the avatar's model space, row 3 its position.
+void headMatrix(float m[16], const float rows[9], float x, float y, float z) {
+    std::memset(m, 0, 64);
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) m[i * 4 + j] = rows[i * 3 + j];
+    m[12] = x;
+    m[13] = y;
+    m[14] = z;
+    m[15] = 1.0f;
+}
+const float kIdentityRows[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+void testFollowPure() {
+    std::printf("the eye from the head joint: the rest offset, the live eye, the trims, the smoothing, the isolation tables (pure)\n");
+    static_assert(ecm::kZoomDofRva == 0x1078990 && ecm::kZoomDofPrologueBytes == 16 && ecm::kZoomDofPrologue[0] == 0x40 && ecm::kZoomDofPrologue[1] == 0x53,
+                  "the zoom/DOF update is +0x1078990 and begins `push rbx` (REX 40 53)");
+    check(stolenOf(ecm::kZoomDofPrologue, ecm::kZoomDofPrologueBytes) == 6, "THE ZOOM/DOF PROLOGUE: CodeHook steals 6 bytes (push rbx; sub rsp,60h), no rip-relative displacement among them");
+
+    // ---- the rest offset on a skeleton with a turned joint (hand-worked) ---------------------------------------------------------------------------------------
+    // j0 root at (1,2,3); j1 under it at (0,1,0), turned +90 degrees about Y (rows (0,0,-1) (0,1,0) (1,0,0)); the povCamera joint j3 at (0.1,0,0) and the head j12 at
+    // (0,0.05,0.05), both under j1. Model space (row vectors): pov (1,3,2.9), head (1.05,3.05,3). The head's rest rotation is j1's.
+    FlatPose sk;
+    sk.pos(0, 1.0f, 2.0f, 3.0f);
+    sk.pos(1, 0.0f, 1.0f, 0.0f);
+    sk.locals[1 * 8 + 5] = 0.70710678f;
+    sk.locals[1 * 8 + 7] = 0.70710678f;
+    sk.parents[1] = 0;
+    sk.parents[3] = 1;
+    sk.parents[12] = 1;
+    sk.pos(3, 0.1f, 0.0f, 0.0f);
+    sk.pos(12, 0.0f, 0.05f, 0.05f);
+    ecm::RestOffset r;
+    check(ecm::deriveRestOffset(sk.locals, sk.parents, 64, 12, 3, &r) == ecm::RestWhy::Ok, "THE REST OFFSET derives on a skeleton with a turned joint");
+    check(closeTo(r.headRest[0], 1.05f) && closeTo(r.headRest[1], 3.05f) && closeTo(r.headRest[2], 3.0f) && closeTo(r.povRest[0], 1.0f) && closeTo(r.povRest[1], 3.0f) &&
+              closeTo(r.povRest[2], 2.9f) && r.headDepth == 2 && r.povDepth == 2,
+          "...the rest head is at (1.05,3.05,3) and the rest povCamera at (1,3,2.9) in model space, two ancestors each");
+    check(closeTo(r.delta[0], -0.05f) && closeTo(r.delta[1], -0.05f) && closeTo(r.delta[2], -0.1f), "...the offset in model space is pov - head = (-0.05,-0.05,-0.1)");
+    const float restRows[9] = {0, 0, -1, 0, 1, 0, 1, 0, 0};
+    bool rowsOk = true;
+    for (int i = 0; i < 9; ++i) rowsOk = rowsOk && closeTo(r.headRot[i], restRows[i], 1e-5f);
+    check(rowsOk, "...the head's rest rotation rows are j1's turn: (0,0,-1) (0,1,0) (1,0,0)");
+    check(closeTo(r.local[0], 0.1f) && closeTo(r.local[1], -0.05f) && closeTo(r.local[2], -0.05f),
+          "...and the offset in the head joint's OWN axes is the dot of the model offset with each row: (0.1,-0.05,-0.05)");
+    float m[16], e[3];
+    headMatrix(m, kIdentityRows, 0.2f, 1.5f, 0.1f);
+    ecm::headEyeModel(m, r.local, e);
+    check(closeTo(e[0], 0.3f) && closeTo(e[1], 1.45f) && closeTo(e[2], 0.05f), "A LIVE HEAD WITH AN IDENTITY ROTATION: eye = position + (0.1,-0.05,-0.05) = (0.3,1.45,0.05)");
+    headMatrix(m, restRows, 0.2f, 1.5f, 0.1f);
+    ecm::headEyeModel(m, r.local, e);
+    check(closeTo(e[0], 0.15f) && closeTo(e[1], 1.45f) && closeTo(e[2], 0.0f), "...a head still in its rest rotation: eye = position + the model offset (-0.05,-0.05,-0.1) = (0.15,1.45,0.0)");
+    check(closeTo(ecm::rotationDiff(m, r.headRot), 0.0f), "...and its rotation differs from the rest rotation by 0");
+    const float turned[9] = {-1, 0, 0, 0, 1, 0, 0, 0, -1};   // yawed 180 degrees about Y
+    headMatrix(m, turned, 0.2f, 1.5f, 0.1f);
+    ecm::headEyeModel(m, r.local, e);
+    check(closeTo(e[0], 0.1f) && closeTo(e[1], 1.45f) && closeTo(e[2], 0.15f), "...a head turned 180 degrees: the offset turns with it, (-0.1,-0.05,+0.05) from the position = (0.1,1.45,0.15)");
+    check(closeTo(ecm::rotationDiff(m, r.headRot), 1.0f), "...and its rotation differs from the rest rotation by 1.0 at most (the convention self-check the first live line prints)");
+
+    // ---- two turns that do not commute: the order of the composition and the convention agree with the position walk ---------------------------------------------------------
+    {
+        // j5 turned 90 degrees about Y under j6 (a root) turned 90 degrees about X; j7 under j5 at (1,0,0).
+        FlatPose two;
+        two.parents[5] = 6;
+        two.parents[6] = 0xFFFF;
+        two.parents[7] = 5;
+        two.locals[5 * 8 + 5] = 0.70710678f;
+        two.locals[5 * 8 + 7] = 0.70710678f;
+        two.locals[6 * 8 + 4] = 0.70710678f;
+        two.locals[6 * 8 + 7] = 0.70710678f;
+        two.pos(7, 1.0f, 0.0f, 0.0f);
+        float rot[9], pos[3];
+        uint32_t depth = 0;
+        const float want[9] = {0, 1, 0, 0, 0, 1, 1, 0, 0};   // R(j5) x R(j6), own turn first
+        bool same = ecm::walkJointRotationToModel(two.locals, two.parents, 64, 5, rot);
+        for (int i = 0; i < 9; ++i) same = same && closeTo(rot[i], want[i], 1e-5f);
+        check(same, "THE ROTATION COMPOSES OWN TURN FIRST, THEN THE PARENT'S: j5 (Y 90) under j6 (X 90) gives rows (0,1,0) (0,0,1) (1,0,0) -- not the reverse order");
+        check(ecm::walkJointToModel(two.locals, two.parents, 64, 7, pos, &depth) && closeTo(pos[0], 0.0f) && closeTo(pos[1], 1.0f) && closeTo(pos[2], 0.0f) && depth == 2 &&
+                  closeTo(pos[0], 1.0f * rot[0], 1e-5f) && closeTo(pos[1], 1.0f * rot[1], 1e-5f) && closeTo(pos[2], 1.0f * rot[2], 1e-5f),
+              "...and it is the same convention as the position walk: a child at (1,0,0) lands on the first row of that rotation, (0,1,0)");
+        const float zeros[16] = {};
+        check(closeTo(ecm::rotationDiff(zeros, kIdentityRows), 1.0f), "...rotationDiff is absolute: a rotation every element of which is BELOW the rest's still differs by 1.0");
+    }
+
+    // ---- the F7 skeleton: head (0,1.675,0.003) and povCamera (0,1.713,0.115) under the root, identity rotations --------------------------------------------------
+    FlatPose real;
+    real.pos(12, 0.0f, 1.675f, 0.003f);
+    real.pos(3, 0.0f, 1.713f, 0.115f);
+    ecm::RestOffset f7;
+    check(ecm::deriveRestOffset(real.locals, real.parents, 64, 12, 3, &f7) == ecm::RestWhy::Ok && closeTo(f7.local[0], 0.0f) && closeTo(f7.local[1], 0.038f, 1e-5f) &&
+              closeTo(f7.local[2], 0.112f, 1e-5f),
+          "THE F7 SKELETON: the eye sits (0, 0.038, 0.112) from the head in its own axes");
+    struct Stance {
+        const char* name;
+        float head[3];
+        float want[3];   // right, up, forward
+    };
+    const Stance stances[] = {{"standing", {0.00f, 1.66f, 0.03f}, {0.00f, 1.698f, 0.142f}},
+                              {"crouched", {0.09f, 0.94f, 0.19f}, {0.09f, 0.978f, 0.302f}},
+                              {"weapon out", {0.10f, 1.38f, 0.19f}, {0.10f, 1.418f, 0.302f}}};
+    for (const Stance& st : stances) {
+        headMatrix(m, kIdentityRows, st.head[0], st.head[1], st.head[2]);
+        ecm::headEyeModel(m, f7.local, e);
+        const ecm::Eye eye = ecm::eyeFromModelPoint(e, ecm::Trim());
+        char what[200];
+        std::snprintf(what, sizeof(what), "F7's %s head (%.2f,%.2f,%.2f) gives the eye right %.3f, up %.3f, forward %.3f", st.name, st.head[0], st.head[1], st.head[2], st.want[0],
+                      st.want[1], st.want[2]);
+        check(closeTo(eye.right, st.want[0], 2e-5f) && closeTo(eye.up, st.want[1], 2e-5f) && closeTo(eye.forward, st.want[2], 2e-5f), what);
+    }
+    ecm::Trim trim;
+    trim.right = 0.05f;
+    trim.up = -0.02f;
+    trim.forward = 0.03f;
+    headMatrix(m, kIdentityRows, 0.0f, 1.66f, 0.03f);
+    ecm::headEyeModel(m, f7.local, e);
+    const ecm::Eye trimmed = ecm::eyeFromModelPoint(e, trim);
+    check(closeTo(trimmed.right, 0.05f, 2e-5f) && closeTo(trimmed.up, 1.678f, 2e-5f) && closeTo(trimmed.forward, 0.172f, 2e-5f), "THE TRIMS are added after the joint, in the commander's right, up, forward");
+    check(ecm::clampTrim(0.5f) == 0.3f && ecm::clampTrim(-0.5f) == -0.3f && ecm::clampTrim(0.1f) == 0.1f && ecm::clampTrim(std::nanf("")) == 0.0f && ecm::clampTrim(0.3f) == 0.3f,
+          "...held to +-0.3 m, and a NaN reads as 0");
+
+    // ---- the rest offset refuses what it cannot trust ------------------------------------------------------------------------------------------------------------
+    ecm::RestOffset junk;
+    check(ecm::deriveRestOffset(sk.locals, sk.parents, 0, 12, 3, &junk) == ecm::RestWhy::NoJoints, "NO JOINTS: refused");
+    check(ecm::deriveRestOffset(sk.locals, sk.parents, 513, 12, 3, &junk) == ecm::RestWhy::TooManyJoints, "513 JOINTS (the walk's buffer holds 512): refused");
+    check(ecm::deriveRestOffset(sk.locals, sk.parents, 64, 0xFFFF, 3, &junk) == ecm::RestWhy::HeadMissing && ecm::deriveRestOffset(sk.locals, sk.parents, 64, 64, 3, &junk) == ecm::RestWhy::HeadMissing,
+          "THE HEAD NOT FOUND (0xFFFF) or past the joint count: refused");
+    check(ecm::deriveRestOffset(sk.locals, sk.parents, 64, 12, 0xFFFF, &junk) == ecm::RestWhy::PovMissing && ecm::deriveRestOffset(sk.locals, sk.parents, 64, 12, 64, &junk) == ecm::RestWhy::PovMissing,
+          "THE POVCAMERA INDEX missing or past the joint count: refused");
+    {
+        FlatPose c = sk;
+        c.parents[12] = 1;
+        c.parents[1] = 12;   // 12 -> 1 -> 12
+        check(ecm::deriveRestOffset(c.locals, c.parents, 64, 12, 3, &junk) == ecm::RestWhy::HeadWalk, "A PARENT CYCLE above the head: refused, no hang");
+        FlatPose d = sk;
+        d.parents[3] = 200;
+        check(ecm::deriveRestOffset(d.locals, d.parents, 64, 12, 3, &junk) == ecm::RestWhy::PovWalk, "A PARENT OUT OF RANGE above the povCamera joint: refused");
+        FlatPose n = sk;
+        n.locals[1 * 8 + 7] = 2.0f;   // a quaternion that is not a rotation
+        check(ecm::deriveRestOffset(n.locals, n.parents, 64, 12, 3, &junk) == ecm::RestWhy::NotRotation, "A QUATERNION THAT IS NOT UNIT LENGTH: the rest rotation is refused");
+        FlatPose nanPose = sk;
+        nanPose.locals[12 * 8 + 4] = std::nanf("");
+        check(ecm::deriveRestOffset(nanPose.locals, nanPose.parents, 64, 12, 3, &junk) == ecm::RestWhy::NotRotation, "A NaN IN THE HEAD'S ROTATION: refused");
+        FlatPose distant = real;
+        distant.pos(3, 5.0f, 1.713f, 0.115f);
+        check(ecm::deriveRestOffset(distant.locals, distant.parents, 64, 12, 3, &junk) == ecm::RestWhy::ImplausibleOffset, "A POVCAMERA JOINT 5 m FROM THE HEAD: refused as implausible");
+    }
+
+    // ---- the live matrix must look like a head ------------------------------------------------------------------------------------------------------------------
+    headMatrix(m, kIdentityRows, 0.0f, 1.66f, 0.03f);
+    check(ecm::headMatrixPlausible(m), "A PLAUSIBLE HEAD MATRIX: finite, unit rows, inside the avatar's surroundings");
+    {
+        float b[16];
+        std::memcpy(b, m, 64);
+        b[13] = 5.0f;
+        check(!ecm::headMatrixPlausible(b), "...a head 5 m up is not");
+        std::memcpy(b, m, 64);
+        b[13] = 0.05f;
+        check(!ecm::headMatrixPlausible(b), "...nor one 5 cm off the ground");
+        std::memcpy(b, m, 64);
+        b[12] = 3.0f;
+        check(!ecm::headMatrixPlausible(b), "...nor one 3 m to the side");
+        std::memcpy(b, m, 64);
+        b[14] = std::nanf("");
+        check(!ecm::headMatrixPlausible(b), "...nor a NaN");
+        std::memcpy(b, m, 64);
+        b[3] = std::nanf("");
+        check(!ecm::headMatrixPlausible(b), "...nor a NaN in the fourth column, which nothing else reads");
+        std::memcpy(b, m, 64);
+        b[5] = 0.0f;
+        b[0] = 0.0f;
+        check(!ecm::headMatrixPlausible(b), "...nor rows that are not near unit length");
+        std::memcpy(b, m, 64);
+        b[3] = 1.0e9f;
+        check(!ecm::headMatrixPlausible(b), "...nor a huge number anywhere in the sixteen");
+    }
+
+    // ---- the smoothing: 0 is exact ----------------------------------------------------------------------------------------------------------------------------
+    ecm::Eye a;
+    a.up = 1.698f;
+    a.forward = 0.142f;
+    a.right = 0.0f;
+    ecm::Eye b2;
+    b2.up = 0.978f;
+    b2.forward = 0.302f;
+    b2.right = 0.09f;
+    ecm::EyeSmoother sm;
+    ecm::Eye out = ecm::smoothEye(sm, a, 16.0, 0.0f);
+    check(std::memcmp(&out, &a, sizeof(ecm::Eye)) == 0 && !sm.have, "SMOOTHING 0: the target comes back BIT FOR BIT and no state is kept");
+    out = ecm::smoothEye(sm, b2, 16.0, 0.0f);
+    check(std::memcmp(&out, &b2, sizeof(ecm::Eye)) == 0, "...also after another target: the unsmoothed eye");
+    out = ecm::smoothEye(sm, a, 0.0, 100.0f);
+    check(std::memcmp(&out, &a, sizeof(ecm::Eye)) == 0 && sm.have, "SMOOTHING 100 ms: the first eye snaps to the target");
+    out = ecm::smoothEye(sm, b2, 0.0, 100.0f);
+    check(std::memcmp(&out, &a, sizeof(ecm::Eye)) == 0, "...no time passed: the eye stays");
+    out = ecm::smoothEye(sm, b2, 100.0, 100.0f);
+    {
+        const float k = static_cast<float>(1.0 - std::exp(-1.0));
+        check(closeTo(out.up, 1.698f + (0.978f - 1.698f) * k, 1e-5f) && closeTo(out.right, 0.09f * k, 1e-5f) && closeTo(out.forward, 0.142f + (0.302f - 0.142f) * k, 1e-5f),
+              "...one time constant later it has covered 1 - 1/e (63.2%) of the way");
+    }
+    out = ecm::smoothEye(sm, b2, 60000.0, 100.0f);
+    check(closeTo(out.up, 0.978f, 1e-3f), "...a long pause lands on the target");
+    ecm::smoothEye(sm, a, 16.0, 0.0f);          // forget the history
+    out = ecm::smoothEye(sm, a, 0.0, 1000.0f);   // ...and start again from  with a 1 s time constant
+    out = ecm::smoothEye(sm, b2, 60000.0, 1000.0f);
+    check(closeTo(out.up, 0.978f, 1e-3f), "...also with a long time constant (1 s) and a 60 s pause: no cap on the step");
+    out = ecm::smoothEye(sm, a, 16.0, 0.0f);
+    check(std::memcmp(&out, &a, sizeof(ecm::Eye)) == 0 && !sm.have, "...and turning the smoothing back to 0 gives the unsmoothed eye at once, bit for bit");
+    check(ecm::clampSmoothingMs(-5.0f) == 0.0f && ecm::clampSmoothingMs(std::nanf("")) == 0.0f && ecm::clampSmoothingMs(250.0f) == 250.0f && ecm::clampSmoothingMs(5000.0f) == 1000.0f,
+          "THE SMOOTHING KEY is held to 0..1000 ms and a NaN or a negative reads as 0");
+
+    // ---- the isolation tables, against the static notes -------------------------------------------------------------------------------------------------------
+    bool tablesOk = true;
+    for (int h = 0; h < ecm::kIsoHolderCount; ++h) {
+        tablesOk = tablesOk && static_cast<int>(ecm::kIsoCounts[h]) == kExpCount[h];
+        for (int i = 0; i < kExpCount[h] && tablesOk; ++i) {
+            const ecm::IsoField& f = ecm::isoFields(h)[i];
+            const char kind = f.kind == ecm::IsoKind::Axis ? 'A' : f.kind == ecm::IsoKind::Pressed ? 'P' : 'H';
+            tablesOk = f.handle == kExpTable[h][i].handle && kind == kExpTable[h][i].kind;
+        }
+    }
+    check(tablesOk, "THE ISOLATION TABLES match the static notes handle by handle and field by field (free camera 11, controller 15, camera UI 1, zoom/DOF 7)");
+    check(ecm::isoFieldOffset(ecm::IsoKind::Axis) == 0x18 && ecm::isoFieldOffset(ecm::IsoKind::Pressed) == 0x1C && ecm::isoFieldOffset(ecm::IsoKind::Held) == 0x24 &&
+              ecm::isoFieldWidth(ecm::IsoKind::Axis) == 4 && ecm::isoFieldWidth(ecm::IsoKind::Pressed) == 4 && ecm::isoFieldWidth(ecm::IsoKind::Held) == 1,
+          "...an axis is the float at +0x18, a press the int at +0x1C, a hold the byte at +0x24");
+
+    // ---- the lines ---------------------------------------------------------------------------------------------------------------------------------------------
+    char line[ecm::kLineBytes];
+    ecm::formatIsolation(line, sizeof(line), true, "F5");
+    check(has(line, "explorer cam: camera suite isolated: 34 actions blocked across 4 holders (free camera 11, camera controller 15, camera UI 1, zoom/DOF 7)") && has(line, "until you press F5 again") &&
+              has(line, "EDVR's own presses") && has(line, "Walking and turning are not touched") && !has(line, "not in place") && std::strlen(line) < ecm::kLineBytes - 1,
+          "THE SESSION LINE: 'camera suite isolated: 34 actions blocked across 4 holders', the own presses, walking untouched");
+    ecm::formatIsolation(line, sizeof(line), false, "F6");
+    check(has(line, "27 actions blocked across 3 holders (free camera 11, camera controller 15, camera UI 1)") && has(line, "until you press F6 again") && has(line, "zoom/DOF hook is not in place"),
+          "...with the zoom/DOF hook down: 27 actions across 3 holders, and it says why the zoom keys are not blocked");
+
+    ecm::FollowNote n;
+    n.kind = static_cast<uint32_t>(ecm::FollowNoteKind::Rest);
+    n.iface = 0x23A812307C8ull;
+    n.hkind = static_cast<uint32_t>(ecm::HeadKind::Runtime);
+    n.joints = 185;
+    n.headIdx = 44;
+    n.povIdx = 15;
+    n.headDepth = 9;
+    n.povDepth = 10;
+    std::memcpy(n.headRest, f7.headRest, 12);
+    std::memcpy(n.povRest, f7.povRest, 12);
+    std::memcpy(n.delta, f7.delta, 12);
+    std::memcpy(n.local, f7.local, 12);
+    ecm::formatFollowNote(line, sizeof(line), n);
+    check(has(line, "explorer cam: head follow: head joint of skeleton 0x23A812307C8 (RR (RuntimeRigComponent), 185 joints) verified: head idx 44 rest (0.000,1.675,0.003) depth 9") &&
+              has(line, "povCamera idx 15 rest (0.000,1.713,0.115) depth 10") && has(line, "(0.000,0.038,0.112) from the head in model space, which is (0.000,0.038,0.112) in the head joint's own axes") &&
+              has(line, "+ the trims"),
+          "THE REST LINE names the skeleton, the joints, both rest positions and the offset in model space and in the head's own axes");
+    n.kind = static_cast<uint32_t>(ecm::FollowNoteKind::RestFailed);
+    n.why = static_cast<uint32_t>(ecm::RestWhy::HeadMissing);
+    ecm::formatFollowNote(line, sizeof(line), n);
+    check(has(line, "cannot be used: FindJoint(\"def_c_head_joint\") found no head joint") && has(line, "the fixed eye keys place the view for this skeleton"), "THE FAILURE LINE says why the head joint cannot be used and that the fixed keys serve");
+    n.kind = static_cast<uint32_t>(ecm::FollowNoteKind::FirstLive);
+    n.live[0] = 0.0f;
+    n.live[1] = 1.66f;
+    n.live[2] = 0.03f;
+    n.eye[0] = 1.698f;
+    n.eye[1] = 0.142f;
+    n.eye[2] = 0.0f;
+    n.rotDiff = 0.012f;
+    ecm::formatFollowNote(line, sizeof(line), n);
+    check(has(line, "first live head joint (+0x58)") && has(line, "head (0.000,1.660,0.030)") && has(line, "at most 0.012 per element") && has(line, "up=1.698 forward=0.142 right=0.000"),
+          "THE FIRST LIVE LINE gives the head, the rotation difference from rest (the convention check) and the eye");
+    n.kind = static_cast<uint32_t>(ecm::FollowNoteKind::Switched);
+    n.why = static_cast<uint32_t>(ecm::FixedWhy::None);
+    ecm::formatFollowNote(line, sizeof(line), n);
+    check(has(line, "the eye now comes from the head joint of skeleton 0x23A812307C8"), "A SWITCH to the head joint says so");
+    n.why = static_cast<uint32_t>(ecm::FixedWhy::NothingLatched);
+    ecm::formatFollowNote(line, sizeof(line), n);
+    check(has(line, "the eye now comes from the FIXED keys") && has(line, "no local skeleton pair is latched yet"), "...a switch to the fixed keys says why");
+    n.kind = static_cast<uint32_t>(ecm::FollowNoteKind::StoodDown);
+    n.why = 0;
+    n.faults = 8;
+    ecm::formatFollowNote(line, sizeof(line), n);
+    check(has(line, "stood down for the session: 8 reads or calls of the head joint faulted") && has(line, "the placement goes on"), "THE FAULT STAND-DOWN names the 8 faults and says the placement goes on");
+    n.why = 1;
+    n.a = 0x48;
+    n.b = 0x3000000;
+    n.c = 0x43F7180;
+    ecm::formatFollowNote(line, sizeof(line), n);
+    check(has(line, "vtable slot +0x48 of skeleton 0x23A812307C8 holds 0x3000000, not the build-332841 function 0x43F7180"), "...a vtable slot that differs names the slot, what it holds and what it should");
+
+    ecm::FollowBeatIn fb;
+    fb.windowSeconds = 5.0;
+    fb.source = "head-joint";
+    fb.lastEye.up = 1.698f;
+    fb.lastEye.forward = 0.142f;
+    fb.headUpdates = 450;
+    fb.headWindow = 450;
+    fb.t58n = 450;
+    fb.t58min = 1;
+    fb.t58max = 3;
+    fb.t58allMax = 9;
+    fb.blocked[0] = 11;
+    fb.blockedWindow[0] = 11;
+    fb.blocked[3] = 7;
+    fb.blockedWindow[3] = 7;
+    fb.zoomArmed = true;
+    fb.zoomCalls = 30;
+    fb.zoomCallsWindow = 30;
+    ecm::formatFollowBeat(line, sizeof(line), fb);
+    check(has(line, "explorer cam: heartbeat (follow, isolation):") && !has(line, "explorer cam: heartbeat:") && has(line, "eye_source=head-joint") && has(line, "last_eye(up=1.698 forward=0.142 right=0.000)") &&
+              has(line, "head_joint_updates=450(+450)") && has(line, "read58_us(n/min/max/session_max)=450/1/3/9") && has(line, "free_camera=11(+11)") && has(line, "zoom=7(+7)") &&
+              has(line, "zoom_hook=armed zoom_hook_calls=30(+30)") && has(line, "isolation=on"),
+          "THE SECOND HEARTBEAT LINE names the eye source, the last eye, the +0x58 call's n/min/max/session max in microseconds, the blocked presses per holder and the zoom hook's calls");
+}
+
+// ================================ Phase 3, glue: the head-joint eye end to end ================================
+
+// A synthetic skeleton interface in the synthetic game image: the RR (or AO) vtable at the build's address, a pose with 64 joints, the F7 bind pose (every joint under
+// the root; the head j12 at (0,1.675,0.003), the povCamera joint j3 at (0,1.713,0.115)).
+struct CamSkel {
+    alignas(16) uint8_t iface[0x400];
+    alignas(16) uint8_t pose[0x80];
+    alignas(16) float locals[64 * 8];
+    alignas(16) uint16_t parents[64];
+    void init(int kind = 0, uint16_t joints = 64) {
+        std::memset(this, 0, sizeof(*this));
+        const uint64_t vt = reinterpret_cast<uint64_t>(g_cimg) + (kind == 0 ? ecm::kRrVtableRva : ecm::kAoVtableRva);
+        std::memcpy(iface, &vt, 8);
+        const uint64_t pp = reinterpret_cast<uint64_t>(pose), lp = reinterpret_cast<uint64_t>(locals), pa = reinterpret_cast<uint64_t>(parents);
+        std::memcpy(iface + 0x20, &pp, 8);
+        std::memcpy(pose, &joints, 2);
+        std::memcpy(pose + ecm::kPoseLocalsOff, &lp, 8);
+        std::memcpy(pose + ecm::kPoseParentsOff, &pa, 8);
+        for (int j = 0; j < 64; ++j) {
+            parents[j] = 0;
+            locals[j * 8 + 7] = 1.0f;
+        }
+        parents[0] = 0xFFFF;
+        pos(12, 0.0f, 1.675f, 0.003f);
+        pos(3, 0.0f, 1.713f, 0.115f);
+    }
+    void pos(int j, float x, float y, float z) {
+        locals[j * 8 + 0] = x;
+        locals[j * 8 + 1] = y;
+        locals[j * 8 + 2] = z;
+    }
+};
+uint64_t g_fakeUs = 0;
+uint64_t fakeNowUs() { return g_fakeUs; }
+void setHead(float x, float y, float z, const float rows[9] = kIdentityRows) { headMatrix(g_cr.headM, rows, x, y, z); }
+
+void testFollowGlue(const Pages& p) {
+    std::printf("glue: the eye follows the head joint (a synthetic skeleton in a synthetic game image, the real FindJoint hook)\n");
+    namespace t = edvr::explorercamtest;
+    static Game g;
+    static CamSkel skel, skel2, first;
+    Rig rig;
+    const void* pov = nullptr;
+    auto begin = [&](bool image = true, bool corruptLiteral = false) {
+        t::reset();
+        g.init();
+        cimgInit();
+        if (corruptLiteral) g_cimg[ecm::kHeadNameRva] ^= 1;   // the exe's "def_c_head_joint" is not what it should be
+        rig = Rig();
+        ExplorerCamTestTargets tt;
+        tt.freeCamera = reinterpret_cast<uintptr_t>(p.freeG);
+        tt.collision = reinterpret_cast<uintptr_t>(p.colG);
+        tt.boxPush = reinterpret_cast<uintptr_t>(p.boxG);
+        tt.cameraUi = reinterpret_cast<uintptr_t>(p.uiG);
+        tt.controller = reinterpret_cast<uintptr_t>(p.ctlG);
+        tt.avatarFade = reinterpret_cast<uintptr_t>(g_cimg) + ecm::kAvatarFadeRva;
+        tt.findJoint = reinterpret_cast<uintptr_t>(g_cimg) + ecm::kFindJointRva;
+        t::setTargets(tt);
+        t::setHeadImage(image ? reinterpret_cast<uintptr_t>(g_cimg) : 0, kCImgSize);
+        g.freeUpdate = reinterpret_cast<FnObj>(p.freeG);
+        g.ctlUpdate = reinterpret_cast<FnObj>(p.ctlG);
+        g.uiUpdate = reinterpret_cast<FnObj>(p.uiG);
+        pov = g_cimg + ecm::kPovNameRva;
+        skel.init();
+        skel2.init();
+        first.init(1);
+        setHead(0.00f, 1.66f, 0.03f);
+        rig.boundary();
+        rig.boundary();
+    };
+    auto place = [&]() {
+        g.setMode(3);
+        g.free[0x473] = 1;
+        g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+        rig.boundary(true);
+        g.ctlFrame();
+        g.freeFrame(); g.freeFrame(); g.ctlFrame(); g.uiFrame(); g.uiFrame();
+        rig.boundary();
+    };
+    auto latch = [&](CamSkel& s) { imgInvoke(s.iface, first.iface, pov); };
+    auto eyeIs = [&](float right, float up, float forward, float tol = 3e-5f) {
+        return closeTo(g.seen(kSeenX), right, tol) && closeTo(g.seen(kSeenY), up, tol) && closeTo(g.seen(kSeenZ), forward, tol);
+    };
+
+    // ---- arming ----------------------------------------------------------------------------------------------------------------------------------------
+    begin(false);
+    check(!t::followReady() && rig.cap.count("explorer cam: head follow: the head-joint source is not armed") == 1,
+          "THE BUILD IS NOT KNOWN: one line says the head-joint source is not armed and the fixed keys place the view");
+    latch(skel);
+    place();
+    g.freeFrame();
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::NotArmed) && eyeIs(0.0f, 1.68f, 0.10f) && g_cr.modelCalls == 0,
+          "...a latched skeleton changes nothing: the eye is the fixed one (up 1.68, forward 0.10), no game call was made, the reason is 'not armed'");
+
+    begin(true, true);
+    check(!t::followReady() && rig.cap.count("the head-joint source is not armed: the joint-name literals at EliteDangerous64.exe+0x554EE10 / +0x51F9930 are not") == 1,
+          "THE HEAD LITERAL DIFFERS (\"def_c_head_joint\" is not what the exe holds): not armed, one line names the two literals, the fixed keys place the view");
+    begin(true);
+    check(t::followReady() && rig.cap.count("explorer cam: head follow: armed (build 332841)") == 1, "ARMED on the synthetic image: one line, once");
+    check(has(rig.cap.nth("head follow: armed", 0), "+0x559CF90") && has(rig.cap.nth("head follow: armed", 0), "+0x517DC20") && has(rig.cap.nth("head follow: armed", 0), "8 faults stand the head source down"),
+          "...it names the two vtables, the checks before every call and the 8-fault stand-down that never touches the placement");
+
+    // ---- nothing latched: the fixed keys ------------------------------------------------------------------------------------------------------------------
+    place();
+    g.freeFrame();
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::NothingLatched) && eyeIs(0.0f, 1.68f, 0.10f) && g_cr.modelCalls == 0 && g_cr.poseCalls == 0,
+          "NOTHING LATCHED: the fixed eye (the absolute keys are the fallback), and the skeleton is not called");
+    check(rig.cap.count("the eye now comes from the FIXED keys") == 1 && has(rig.cap.nth("the eye now comes from the FIXED keys", 0), "no local skeleton pair is latched yet"),
+          "...one line says the eye comes from the fixed keys and why");
+
+    // ---- a latched RR skeleton: verified once, then the head joint ---------------------------------------------------------------------------------------------
+    latch(skel);
+    check(explorerCamSkeleton(0).iface == reinterpret_cast<uint64_t>(skel.iface), "(the local pair is latched by the real FindJoint hook)");
+    const int updates0 = static_cast<int>(t::updatesPlaced());
+    g.freeFrame();
+    check(t::followSource() == 1 && eyeIs(0.00f, 1.698f, 0.142f), "THE STANDING HEAD (0.00,1.66,0.03): the eye is up 1.698, forward 0.142 (the F7 rest offset 0.038 up, 0.112 forward)");
+    check(g_cr.poseCalls == 1 && g_cr.findHeadCalls == 1 && g_cr.modelCalls == 1 && g_cr.lastModelIdx == 12 && g_cr.lastModelIface == reinterpret_cast<uintptr_t>(skel.iface) &&
+              (g_cr.lastModelOut & 15) == 0 && g_cr.modelThread == GetCurrentThreadId(),
+          "...one GetPoseData and one FindJoint(head) to derive it, then +0x58 for joint 12 with a 16-byte aligned buffer, on the calling (camera-job) thread");
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("explorer cam: head follow: head joint of skeleton 0x") == 1 && has(rig.cap.nth("head follow: head joint of skeleton", 0), "(RR (RuntimeRigComponent), 64 joints) verified: head idx 12 rest (0.000,1.675,0.003)") &&
+              has(rig.cap.nth("head follow: head joint of skeleton", 0), "povCamera idx 3 rest (0.000,1.713,0.115)") && has(rig.cap.nth("head follow: head joint of skeleton", 0), "(0.000,0.038,0.112) in the head joint's own axes"),
+          "THE REST OFFSET IS LOGGED ONCE: head idx 12, povCamera idx 3, the offset (0, 0.038, 0.112) in the head's own axes");
+    check(rig.cap.count("first live head joint (+0x58)") == 1 && has(rig.cap.nth("first live head joint", 0), "at most 0.000 per element") && has(rig.cap.nth("first live head joint", 0), "up=1.698 forward=0.142 right=0.000") &&
+              rig.cap.count("the eye now comes from the head joint of skeleton") == 1,
+          "...and the first live read once (the rotation matches the rest pose), and the switch to the head joint once");
+    setHead(0.09f, 0.94f, 0.19f);
+    g.freeFrame();
+    check(eyeIs(0.09f, 0.978f, 0.302f), "CROUCHED (0.09,0.94,0.19): up 0.978, forward 0.302, right 0.09 -- the camera follows the body down");
+    setHead(0.10f, 1.38f, 0.19f);
+    g.freeFrame();
+    check(eyeIs(0.10f, 1.418f, 0.302f), "WEAPON OUT (0.10,1.38,0.19): up 1.418, forward 0.302, right 0.10");
+    setHead(0.00f, 1.66f, 0.03f);
+    g.freeFrame();
+    check(eyeIs(0.00f, 1.698f, 0.142f) && g_cr.poseCalls == 1 && g_cr.findHeadCalls == 1 && g_cr.modelCalls == 4,
+          "STANDING AGAIN: back to up 1.698; the rest offset was derived once (still one GetPoseData and one FindJoint), +0x58 once per update (4)");
+    const int modelsBefore = g_cr.modelCalls;
+    rig.boundary();
+    rig.boundary();
+    rig.boundary();
+    check(g_cr.modelCalls == modelsBefore && g_cr.poseCalls == 1, "NEVER FROM THE FRAME THREAD: three boundaries made no skeleton call");
+    check(static_cast<int>(t::updatesPlaced()) - updates0 == 4 && t::followHeadUpdates() >= 4, "(every placing update used the head joint)");
+
+    // ---- the pre-call: the original saw THIS update's eye ----------------------------------------------------------------------------------------------------
+    setHead(0.30f, 1.20f, 0.10f);
+    g.freeUpdate(g.free);
+    check(eyeIs(0.30f, 1.238f, 0.212f), "THE READ IS IN THE PRE-CALL: the game's own update saw the eye of the head as it was just before it ran");
+
+    // ---- a head turned 90 degrees: the rest offset turns with it -----------------------------------------------------------------------------------------------------
+    {
+        const float yaw90[9] = {0, 0, -1, 0, 1, 0, 1, 0, 0};
+        setHead(0.00f, 1.66f, 0.03f, yaw90);
+        g.freeUpdate(g.free);
+        // eye = pos + 0*row0 + 0.038*row1 + 0.112*row2 = (0.112, 1.698, 0.03)
+        check(eyeIs(0.112f, 1.698f, 0.030f), "A HEAD TURNED 90 DEGREES: the offset (0,0.038,0.112) is carried by the head's own axes: right 0.112, up 1.698, forward 0.03");
+        rig.cap.clear();
+        rig.boundary();
+        setHead(0.00f, 1.66f, 0.03f);
+    }
+
+    // ---- the trims, live, held to +-0.3, added after the joint -------------------------------------------------------------------------------------------------
+    rig.f.trimRight = 0.05f;
+    rig.f.trimUp = -0.02f;
+    rig.f.trimForward = 0.03f;
+    rig.cap.clear();
+    rig.boundary();
+    g.freeUpdate(g.free);
+    check(eyeIs(0.05f, 1.678f, 0.172f) && rig.cap.count("explorer cam: head follow: trims right=0.050 up=-0.020 forward=0.030 m") == 1,
+          "THE TRIMS (right 0.05, up -0.02, forward 0.03) are added after the joint, live, and said once");
+    rig.f.trimUp = 0.9f;
+    rig.boundary();
+    g.freeUpdate(g.free);
+    check(eyeIs(0.05f, 1.998f, 0.172f), "...held to +-0.3: a trim of 0.9 is 0.3");
+    rig.f.trimRight = rig.f.trimUp = rig.f.trimForward = 0.0f;
+    rig.boundary();
+    g.freeUpdate(g.free);
+    check(eyeIs(0.0f, 1.698f, 0.142f), "...and back to zero");
+
+    // ---- the absolute keys are only the fallback -------------------------------------------------------------------------------------------------------------
+    rig.f.up = 1.50f;
+    rig.f.forward = 0.20f;
+    rig.f.right = 0.05f;
+    rig.boundary();
+    g.freeUpdate(g.free);
+    check(eyeIs(0.0f, 1.698f, 0.142f), "THE ABSOLUTE EYE KEYS DO NOTHING while the head joint serves (up 1.50 changes nothing)");
+
+    // ---- stale: the avatar was destroyed ---------------------------------------------------------------------------------------------------------------------
+    const int modelsStale = g_cr.modelCalls;
+    uint64_t vtSave = 0;
+    std::memcpy(&vtSave, skel.iface, 8);
+    const uint64_t garbage = 0x1234;
+    std::memcpy(skel.iface, &garbage, 8);
+    rig.cap.clear();
+    g.freeUpdate(g.free);
+    rig.boundary();
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::Stale) && eyeIs(0.05f, 1.50f, 0.20f) && g_cr.modelCalls == modelsStale && t::followFaults() == 0,
+          "A STALE INTERFACE (its vtable is gone): the FALLBACK keys serve (right 0.05, up 1.50, forward 0.20), +0x58 is not called, no fault is counted");
+    check(rig.cap.count("the eye now comes from the FIXED keys") == 1 && has(rig.cap.nth("the eye now comes from the FIXED keys", 0), "no longer a skeleton interface"), "...one line says why");
+    std::memcpy(skel.iface, &vtSave, 8);
+    rig.cap.clear();
+    g.freeUpdate(g.free);
+    rig.boundary();
+    check(t::followSource() == 1 && eyeIs(0.0f, 1.698f, 0.142f) && rig.cap.count("head follow: head joint of skeleton") == 1 && rig.cap.count("the eye now comes from the head joint") == 1,
+          "...the interface valid again: the rest offset is derived again and the head joint serves");
+    rig.f.up = ecm::kEyeUpDefault;
+    rig.f.forward = ecm::kEyeForwardDefault;
+    rig.f.right = ecm::kEyeRightDefault;
+    rig.boundary();
+
+    // ---- an implausible matrix: the fixed eye for that update, no fault -------------------------------------------------------------------------------------------
+    setHead(0.0f, 5.0f, 0.03f);
+    g.freeUpdate(g.free);
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::Implausible) && eyeIs(0.0f, 1.68f, 0.10f) && t::followFaults() == 0,
+          "AN IMPLAUSIBLE HEAD (5 m up): the fixed eye for that update, counted as no fault");
+    setHead(std::nanf(""), 1.66f, 0.03f);
+    g.freeUpdate(g.free);
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::Implausible), "...also a NaN");
+    setHead(0.0f, 1.66f, 0.03f);
+    g.freeUpdate(g.free);
+    check(t::followSource() == 1 && eyeIs(0.0f, 1.698f, 0.142f), "...and the next good matrix is followed again");
+
+    // ---- a fault in +0x58: the fixed eye for that update, counted, the placement untouched ------------------------------------------------------------------------
+    g_cr.faultAt = 3;
+    g_cr.faultCount = 1;
+    const uint64_t placedUpdates = t::updatesPlaced();
+    g.freeUpdate(g.free);
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::Fault) && t::followFaults() == 1 && eyeIs(0.0f, 1.68f, 0.10f) && t::faults() == 0 &&
+              t::updatesPlaced() == placedUpdates + 1,
+          "A FAULT IN THE +0x58 CALL: caught, the fixed eye for that update, one head fault counted, the placement's own fault budget untouched and the pose still written");
+    g.freeUpdate(g.free);
+    check(t::followSource() == 1 && eyeIs(0.0f, 1.698f, 0.142f) && !t::followDown(), "...the next update reads the head again");
+
+    // ---- eight faults stand the head source down, not the placement -------------------------------------------------------------------------------------------------
+    g_cr.faultAt = 3;
+    g_cr.faultCount = 0;
+    rig.cap.clear();
+    for (int i = 0; i < 8; ++i) g.freeUpdate(g.free);
+    rig.boundary();
+    check(t::followDown() && t::followFaults() == 8 && rig.cap.count("the head-joint source stood down for the session: 8 reads or calls") == 1 && t::faults() == 0 && t::placeActive() &&
+              t::phase() == 2,
+          "THE EIGHTH FAULT stands the head source down for the session (said once); the placement's budget is untouched and the camera is still placed");
+    g_cr.faultAt = 0;
+    const int modelsDown = g_cr.modelCalls;
+    g.freeUpdate(g.free);
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::StoodDown) && eyeIs(0.0f, 1.68f, 0.10f) && g_cr.modelCalls == modelsDown,
+          "...from then on the fixed keys serve and the skeleton is not called again");
+
+    // ---- a vtable slot that differs: another build ----------------------------------------------------------------------------------------------------------------
+    begin(true);
+    latch(skel);
+    place();
+    g_cr.swapModelSlot = true;
+    g.freeFrame();   // derives, reads the head; the +0x58 stub swaps the RR vtable's +0x48 slot behind our back
+    rig.cap.clear();
+    g.freeFrame();   // the check before the next call sees it
+    rig.boundary();
+    check(t::followDown() && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::StoodDown) && rig.cap.count("vtable slot +0x48 of skeleton 0x") == 1 &&
+              has(rig.cap.nth("vtable slot +0x48", 0), "not the build-332841 function") && t::followFaults() == 0 && eyeIs(0.0f, 1.68f, 0.10f),
+          "A VTABLE SLOT THAT DIFFERS (+0x48 swapped): the head source stands down before the next call, naming the slot, and the fixed keys serve");
+    g_cr.swapModelSlot = false;
+
+    // ---- the head joint is not found -----------------------------------------------------------------------------------------------------------------------------
+    begin(true);
+    g_cr.headIdx = 0xFFFF;
+    latch(skel);
+    place();
+    g.freeFrame();
+    g.freeFrame();
+    rig.boundary();
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::Unverified) && eyeIs(0.0f, 1.68f, 0.10f) && g_cr.findHeadCalls == 1 && g_cr.poseCalls == 1 &&
+              g_cr.modelCalls == 0 && t::followFaults() == 0,
+          "NO HEAD JOINT FOUND (0xFFFF): the fixed keys serve this skeleton, tried ONCE (one FindJoint, one GetPoseData across several updates), +0x58 never called, not a fault");
+    check(rig.cap.count("cannot be used: FindJoint(\"def_c_head_joint\") found no head joint") == 1, "...one line says why");
+    g_cr.headIdx = 12;
+    skel2.init();
+    latch(skel2);
+    g.freeFrame();
+    check(t::followSource() == 1 && eyeIs(0.0f, 1.698f, 0.142f), "...a NEW skeleton is tried afresh and works");
+
+    // ---- no joints, an unreadable pose, an AO skeleton ----------------------------------------------------------------------------------------------------------
+    begin(true);
+    skel.init(0, 0);
+    latch(skel);
+    place();
+    g.freeFrame();
+    g.freeFrame();
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::Unverified) && g_cr.findHeadCalls == 0 && g_cr.modelCalls == 0,
+          "A POSE WITH NO JOINTS: refused once, no FindJoint, no +0x58");
+    begin(true);
+    skel.init();
+    const uint64_t none = 0;
+    std::memcpy(skel.pose + ecm::kPoseLocalsOff, &none, 8);
+    latch(skel);
+    place();
+    g.freeFrame();
+    check(t::followSource() == 0 && t::followWhy() == static_cast<uint32_t>(ecm::FixedWhy::Fault) && t::followFaults() >= 1 && g_cr.modelCalls == 0,
+          "UNREADABLE POSE ARRAYS: counted as a fault of the head read (never as the placement's), the fixed keys serve");
+    begin(true);
+    skel.init(1);
+    latch(skel);
+    place();
+    g.freeFrame();
+    setHead(0.00f, 1.50f, 0.10f);
+    g.freeFrame();
+    rig.boundary();
+    check(t::followSource() == 1 && eyeIs(0.0f, 1.538f, 0.212f) && g_cr.lastModelIface == reinterpret_cast<uintptr_t>(skel.iface),
+          "AN AO (AnimatedObject) SKELETON works the same through its own slots");
+    check(rig.cap.count("(AO (AnimatedObject), 64 joints) verified") == 1, "...and the line names the kind");
+    begin(true);
+    g_cr.headJunk = 0x00DE0000u;   // FindJoint returns a u16 in ax: the high half of eax is whatever it was
+    latch(skel);
+    place();
+    g.freeFrame();
+    g.freeFrame();
+    check(t::followSource() == 1 && g_cr.lastModelIdx == 12 && eyeIs(0.0f, 1.698f, 0.142f), "FINDJOINT RETURNS A u16: garbage in the high half of eax is not part of the joint index");
+
+    // ---- the smoothing: 0 is exact; a time constant eases; the comfort key is live ----------------------------------------------------------------------------------
+    begin(true);
+    latch(skel);
+    place();
+    t::setNowUs(&fakeNowUs);
+    g_fakeUs = 1000000;
+    setHead(0.00f, 1.66f, 0.03f);
+    g.freeUpdate(g.free);
+    float expectUp = 0, expectFwd = 0;
+    {
+        FlatPose bind;
+        bind.pos(12, 0.0f, 1.675f, 0.003f);
+        bind.pos(3, 0.0f, 1.713f, 0.115f);
+        ecm::RestOffset ro;
+        ecm::deriveRestOffset(bind.locals, bind.parents, 64, 12, 3, &ro);
+        float c2[16], p2[3];
+        headMatrix(c2, kIdentityRows, 0.09f, 0.94f, 0.19f);
+        ecm::headEyeModel(c2, ro.local, p2);
+        const ecm::Eye want = ecm::eyeFromModelPoint(p2, ecm::Trim());
+        setHead(0.09f, 0.94f, 0.19f);
+        g.freeUpdate(g.free);
+        const float gotX = g.seen(kSeenX), gotY = g.seen(kSeenY), gotZ = g.seen(kSeenZ);
+        check(std::memcmp(&gotX, &want.right, 4) == 0 && std::memcmp(&gotY, &want.up, 4) == 0 && std::memcmp(&gotZ, &want.forward, 4) == 0,
+              "SMOOTHING 0 (the default): the pose origin the game's update saw is BIT-IDENTICAL to the unsmoothed eye computed from the same arithmetic");
+        expectUp = want.up;
+        expectFwd = want.forward;
+    }
+    rig.f.smoothingMs = 100.0f;
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("follow smoothing 100 ms") == 1, "(the smoothing key is live and said once)");
+    setHead(0.00f, 1.66f, 0.03f);
+    g.freeUpdate(g.free);   // the first smoothed eye snaps (no history yet)
+    check(eyeIs(0.0f, 1.698f, 0.142f), "SMOOTHING 100 ms: the first eye snaps to the head");
+    setHead(0.09f, 0.94f, 0.19f);
+    g_fakeUs += 100000;   // one time constant
+    g.freeUpdate(g.free);
+    {
+        const float k = static_cast<float>(1.0 - std::exp(-1.0));
+        check(eyeIs(0.09f * k, 1.698f + (expectUp - 1.698f) * k, 0.142f + (expectFwd - 0.142f) * k, 5e-5f), "...a crouch 100 ms later has covered 1 - 1/e of the way: the camera trails the head");
+    }
+    g.freeUpdate(g.free);
+    check(eyeIs(0.09f * static_cast<float>(1.0 - std::exp(-1.0)), 1.698f + (expectUp - 1.698f) * static_cast<float>(1.0 - std::exp(-1.0)), 0.142f + (expectFwd - 0.142f) * static_cast<float>(1.0 - std::exp(-1.0)), 5e-5f),
+          "...no time passed: it stays where it was");
+    {
+        // A trip through the fixed keys forgets the smoothing's history: coming back, the eye starts from the head.
+        uint64_t vt = 0;
+        std::memcpy(&vt, skel.iface, 8);
+        const uint64_t bad = 0x1234;
+        std::memcpy(skel.iface, &bad, 8);
+        g_fakeUs += 1000;
+        g.freeUpdate(g.free);
+        std::memcpy(skel.iface, &vt, 8);
+        g_fakeUs += 1000;
+        g.freeUpdate(g.free);
+        check(eyeIs(0.09f, expectUp, expectFwd, 2e-5f), "SWITCHING BACK to the head joint after the fixed keys starts from the head, not from a stale smoothed eye");
+    }
+    rig.f.smoothingMs = 0.0f;
+    rig.boundary();
+    g.freeUpdate(g.free);
+    {
+        const float gotX = g.seen(kSeenX), gotY = g.seen(kSeenY);
+        check(std::memcmp(&gotY, &expectUp, 4) == 0 && closeTo(gotX, 0.09f, 1e-6f), "...and the key back at 0 is the exact head eye on the very next update, bit for bit");
+    }
+    t::setNowUs(nullptr);
+
+    // ---- the heartbeat names the source and the +0x58 cost -----------------------------------------------------------------------------------------------------
+    begin(true);
+    latch(skel);
+    place();
+    for (int i = 0; i < 5; ++i) g.freeUpdate(g.free);
+    rig.advance(5200);
+    rig.cap.clear();
+    rig.boundary();
+    const std::string beat2 = rig.cap.nth("explorer cam: heartbeat (follow, isolation):", 0);
+    check(has(beat2, "eye_source=head-joint") && has(beat2, "head_joint_updates=") && has(beat2, "head_source=on") && has(beat2, "head_faults=0") && has(beat2, "read58_us(n/min/max/session_max)=") &&
+              !has(beat2, "read58_us(n/min/max/session_max)=0/") && has(beat2, "last_eye(up=1.698 forward=0.142 right=0.000)"),
+          "THE HEARTBEAT says the eye comes from the head joint, the last eye, the counts and the +0x58 call's n/min/max/session max in microseconds");
+    check(rig.cap.count("explorer cam: heartbeat:") == 1, "...beside the main heartbeat, which keeps its own line");
+    t::reset();
+}
+
+// ================================ Phase 3, glue: the camera suite is isolated while the view is placed ================================
+
+// A probe that also makes the page its action object lives on read-only while the original runs, so the restore after it faults.
+uint8_t* g_protectPage = nullptr;
+void __fastcall probeFreeProtect(void* o) {
+    snapIso(o, 0);
+    DWORD old = 0;
+    VirtualProtect(g_protectPage, 4096, PAGE_READONLY, &old);
+}
+
+void testIsolationGlue(const Pages& p) {
+    std::printf("glue: the camera suite is isolated while the view is placed (save, zero, original, restore; EDVR's own presses survive)\n");
+    namespace t = edvr::explorercamtest;
+    static Game g;
+    Rig rig;
+    auto begin = [&](bool zoomHook = true, bool zoomBadPrologue = false) {
+        t::reset();
+        g.init();
+        g.isoWire();
+        rig = Rig();
+        ExplorerCamTestTargets tt;
+        tt.freeCamera = reinterpret_cast<uintptr_t>(p.freeG);
+        tt.collision = reinterpret_cast<uintptr_t>(p.colG);
+        tt.boxPush = reinterpret_cast<uintptr_t>(p.boxG);
+        tt.cameraUi = reinterpret_cast<uintptr_t>(p.uiG);
+        tt.controller = reinterpret_cast<uintptr_t>(p.ctlG);
+        tt.zoomDof = zoomHook ? reinterpret_cast<uintptr_t>(zoomBadPrologue ? p.zoomB : p.zoomG) : 0;
+        t::setTargets(tt);
+        g.freeUpdate = reinterpret_cast<FnObj>(p.freeG);
+        g.ctlUpdate = reinterpret_cast<FnObj>(p.ctlG);
+        g.uiUpdate = reinterpret_cast<FnObj>(p.uiG);
+        g.zoomUpdate = reinterpret_cast<FnObj>(p.zoomG);
+        g_probeFree = &probeFreeCb;
+        g_probeCtl = &probeCtlCb;
+        g_probeUi = &probeUiCb;
+        g_probeZoom = &probeZoomCb;
+        std::memset(g_seenIso, 0, sizeof(g_seenIso));
+        for (const uint8_t*& c : g_canaryObj) c = nullptr;
+        rig.boundary();
+        rig.boundary();
+    };
+    auto place = [&]() {
+        g.setMode(3);
+        g.free[0x473] = 1;
+        g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+        rig.boundary(true);
+        g.ctlFrame();
+        g.freeFrame(); g.freeFrame(); g.ctlFrame(); g.uiFrame(); g.uiFrame();
+        rig.boundary();
+    };
+    auto fillAll = [&]() { for (int h = 0; h < 4; ++h) g.isoFill(h); };
+    auto runAll = [&]() {
+        g.freeUpdate(g.free);
+        g.ctlUpdate(g.ctl);
+        g.uiUpdate(g.ui);
+        g.zoomUpdate(g.zoom);
+    };
+    auto exitSession = [&]() {
+        rig.boundary(true);
+        for (int i = 0; i < 24 && g.mode() != 0; ++i) {
+            g.ctlFrame();
+            g.uiFrame();
+            rig.boundary();
+        }
+        g.ctlUpdate(g.ctl);   // the update after it sees mode 0: the session is over
+        rig.boundary();
+    };
+
+    // ---- the hook is installed like the others, and its prologue is checked -----------------------------------------------------------------------------------
+    begin();
+    check(t::stolenBytes(7) == 6 && p.zoomG[0] == 0xE9 && rig.cap.count("zoom/DOF hook armed:") == 1 && has(rig.cap.nth("zoom/DOF hook armed:", 0), "stolen=6 bytes") &&
+              has(rig.cap.nth("zoom/DOF hook armed:", 0), "16/16 bytes verified") && has(rig.cap.nth("zoom/DOF hook armed:", 0), "ISOLATION only"),
+          "THE ZOOM/DOF HOOK: installed (6 bytes stolen, 16/16 prologue bytes verified), said once, and described as isolation only");
+    check(t::zoomGateOpen(), "...its gate is open while Explorer Cam is active");
+
+    // ---- nothing is blocked outside a session ------------------------------------------------------------------------------------------------------------
+    fillAll();
+    runAll();
+    bool outside = true;
+    for (int h = 0; h < 4; ++h) outside = outside && g.isoSeenPatternCount(h) == kExpCount[h] && g.isoIntact(h) && t::isoBlocked(h) == 0;
+    check(outside, "NO SESSION: every key of all four holders (11, 15, 1 and 7 actions) reaches the game's own update untouched, and nothing is counted as blocked");
+    check(t::zoomCalls() == 1 && g.zoomCallsSeen() == 1, "...the zoom/DOF update was called through the hook and ran (1 call, 1 run)");
+
+    // ---- a session whose view is not placed yet (F5's own entry sequence): nothing is blocked --------------------------------------------------------------------
+    begin();
+    g.ctlUpdate(g.ctl);
+    rig.boundary();
+    g.ctlUpdate(g.ctl);
+    rig.boundary();
+    g.isoFill(1);
+    rig.boundary(true);
+    g.ctlUpdate(g.ctl);   // the sequencer's first update: EDVR presses PhotoCameraToggle (+0x310)
+    check(t::sessionActive() && t::placedActivity() == 0, "(a session is on, the view is not placed)");
+    bool entryOk = g.isoSeen(1, 0) == 2 && g_seenIso[1].v[0] == 1;   // EDVR's own press replaces the user's value for that one update
+    for (int i = 1; i < 15; ++i) entryOk = entryOk && g.isoSeen(1, i) == 1;
+    check(entryOk && t::isoBlocked(1) == 0 && g.isoIntact(1), "F5's ENTRY SEQUENCE blocks nothing: the other fourteen controller keys are the player's, EDVR's own press is the one that changed, and every value is back after");
+
+    // ---- placed: every holder, every field --------------------------------------------------------------------------------------------------------------------
+    begin();
+    place();
+    check(t::placedActivity() == reinterpret_cast<uint64_t>(g.free) && t::sessionActive(), "(placed)");
+    fillAll();
+    runAll();
+    check(g.isoSeenZeroCount(0) == 11 && g.isoIntact(0) && t::isoBlocked(0) == 11, "PLACED, THE FREE CAMERA: all 11 actions (speed inc/dec held, the six move/look axes, the three lock toggles) read 0 inside the original, and are back exactly after; 11 blocked");
+    check(g.isoSeenZeroCount(1) == 15 && g.isoIntact(1) && t::isoBlocked(1) == 15, "PLACED, THE CONTROLLER: all 15 (camera toggle, two scrolls, free-cam toggle, quit, presets one to ten) read 0 and are back exactly; 15 blocked");
+    check(g.isoSeenZeroCount(2) == 1 && g.isoIntact(2) && t::isoBlocked(2) == 1, "PLACED, THE CAMERA UI: FreeCamToggleHud reads 0 and is back exactly; 1 blocked");
+    check(g.isoSeenZeroCount(3) == 7 && g.isoIntact(3) && t::isoBlocked(3) == 7 && t::zoomCalls() == 1 && g.zoomCallsSeen() == 1,
+          "PLACED, ZOOM/DOF: all 7 (zoom, aperture, focus holds; the advance-mode toggle) read 0 and are back exactly; 7 blocked; the update ran");
+    g.freeUpdate(g.free);
+    check(t::isoBlocked(0) == 22 && g.isoSeenZeroCount(0) == 11 && g.isoIntact(0), "...every update does it again (22 blocked after the second)");
+    {
+        // The held byte and the axis float: bit for bit, including a negative axis and a held byte with the high bit set.
+        uint8_t* axisObj = g.isoObject(0, 2);
+        uint8_t* heldObj = g.isoObject(0, 0);   // +0x4B8, a held byte
+        const uint32_t negative = 0xBF4CCCCDu;   // -0.8
+        std::memcpy(axisObj + 0x18, &negative, 4);
+        axisObj[0x24] = 0xFF;
+        axisObj[0x1C] = 0x7F;
+        heldObj[0x25] = 0xAA;
+        heldObj[0x26] = 0xBB;
+        g.freeUpdate(g.free);
+        uint32_t back = 0;
+        std::memcpy(&back, axisObj + 0x18, 4);
+        check(g_seenIso[0].v[2] == 0 && back == negative && axisObj[0x24] == 0xFF && axisObj[0x1C] == 0x7F, "...a negative axis (-0.8), a held byte of 0xFF and a pressed int are restored BIT FOR BIT");
+        check(g_seenIso[0].v[0] == 0 && g_seenIso[0].nb[0] == 0x00BBAAu && heldObj[0x25] == 0xAA && heldObj[0x26] == 0xBB && heldObj[0x24] == isoPatternHeld(0x4B8),
+              "...a held field is ONE BYTE: the bytes beside it (+0x25, +0x26) are untouched inside the original and after");
+    }
+
+    // ---- nothing but the listed handles is touched ----------------------------------------------------------------------------------------------------------
+    {
+        struct Canary {
+            uint8_t* holder;
+            uint32_t offset;
+        };
+        // Unlisted slots next to the listed ones: the game keeps other pointers there, and an object behind them must come through the update unchanged.
+        const Canary canaries[4] = {{g.free, 0x4A8}, {g.ctl, 0x330}, {g.ui, 0x1E0}, {g.zoom, 0x288}};
+        bool all = true;
+        for (int h = 0; h < 4; ++h) {
+            uint8_t* obj = g.iso[36 + h];
+            const uint32_t v = 0x4141u + h, held = 0x70u + h;
+            std::memcpy(obj + 0x18, &v, 4);
+            std::memcpy(obj + 0x1C, &v, 4);
+            obj[0x24] = static_cast<uint8_t>(held);
+            const uint64_t ptr = reinterpret_cast<uint64_t>(obj);
+            std::memcpy(canaries[h].holder + canaries[h].offset, &ptr, 8);
+            g_canaryObj[h] = obj;
+        }
+        runAll();
+        for (int h = 0; h < 4; ++h) {
+            const uint8_t* obj = g.iso[36 + h];
+            uint32_t a = 0, b = 0;
+            std::memcpy(&a, obj + 0x18, 4);
+            std::memcpy(&b, obj + 0x1C, 4);
+            all = all && a == 0x4141u + h && b == 0x4141u + h && obj[0x24] == 0x70u + h && g_seenIso[h].canary == 0x4141u + h;
+        }
+        check(all, "NO COLLATERAL: an action object behind an UNLISTED slot (free +0x4A8, controller +0x330, UI +0x1E0, zoom +0x288) keeps all three fields, inside the original too");
+        for (const uint8_t*& c : g_canaryObj) c = nullptr;
+    }
+
+    // ---- EDVR's own presses go in AFTER the clear ------------------------------------------------------------------------------------------------------------
+    begin();
+    g.setMode(3);
+    g.free[0x473] = 1;
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+    rig.boundary(true);
+    g.ctlFrame();
+    g.freeFrame();   // seeds from the preset
+    Game::pressed(g.lockAction) = 7;   // the player presses "lock relative" at the very update EDVR places and presses it too
+    g.freeFrame();
+    check(g.seenLock() == 1 && Game::pressed(g.lockAction) == 7 && g.mode() == 4 && t::placedActivity() == reinterpret_cast<uint64_t>(g.free),
+          "THE LOCK PRESS SURVIVES THE CLEAR: with the player's own value (7) in the lock action, the update saw EDVR's press (1), the player's value is back after, the camera locked (mode 4)");
+    Game::pressed(g.lockAction) = 0;
+    g.ctlFrame();
+    Game::pressed(g.hideAction) = 4;   // the player presses "hide the camera UI" when EDVR does
+    g.uiFrame();
+    check(g.seenHide() == 1 && Game::pressed(g.hideAction) == 4 && g.hidden() == 1, "THE UI HIDE PRESS SURVIVES THE CLEAR: the update saw EDVR's press (1), the player's value (4) is back after, the UI is hidden");
+    g.uiFrame();
+    check(g.seenHide() == 0 && Game::pressed(g.hideAction) == 4 && g.hidden() == 1, "...and the player's own press alone does nothing: the UI stays hidden (the update read 0), the player's value is back after");
+    // The controller: the player holds the camera key; it does nothing until EDVR's own exit.
+    g.ctlFrame();
+    check(g.mode() == 4, "(the free camera is locked: mode 4)");
+    Game::pressed(g.photoAction) = 9;
+    g.ctlFrame(); g.ctlFrame(); g.ctlFrame();
+    check(g.mode() == 4 && t::sessionActive() && g.seenPhoto() == 0, "THE PLAYER'S CAMERA KEY, held for three updates: nothing happens, the camera stays open in mode 4");
+    exitSession();
+    check(g.mode() == 0 && !t::sessionActive() && Game::pressed(g.photoAction) == 9,
+          "EDVR'S OWN EXIT PRESS SURVIVES THE CLEAR: with the player holding the camera key (9), F5 still closes the camera, the session ends, and the player's value is back after");
+
+    // ---- after the session, and with the hotkey cleared: nothing is blocked ----------------------------------------------------------------------------------------
+    {
+        const uint64_t before = t::isoBlocked(0) + t::isoBlocked(1) + t::isoBlocked(2) + t::isoBlocked(3);
+        fillAll();
+        runAll();
+        bool after = true;
+        for (int h = 0; h < 4; ++h) after = after && g.isoSeenPatternCount(h) == kExpCount[h] && g.isoIntact(h);
+        check(after && t::isoBlocked(0) + t::isoBlocked(1) + t::isoBlocked(2) + t::isoBlocked(3) == before, "AFTER THE SESSION: every key reaches the game again, nothing more is counted");
+    }
+    begin();
+    place();
+    rig.f.hotkey = "";
+    rig.boundary();
+    check(!t::placeActive() && !t::zoomGateOpen(), "(the hotkey is cleared: Explorer Cam is off, the zoom hook's gate is closed)");
+    g.uiFrame();   // EDVR gives the camera UI back through its open gate (its own press), as it did with the old key
+    g.uiFrame();
+    rig.boundary();
+    check(g.hidden() == 0 && !t::uiHiddenByEdvr(), "(EDVR gave the camera UI back)");
+    fillAll();
+    runAll();
+    bool offOk = true;
+    for (int h = 0; h < 4; ++h) offOk = offOk && g.isoSeenPatternCount(h) == kExpCount[h] && g.isoIntact(h) && t::isoBlocked(h) == 0;
+    check(offOk, "THE HOTKEY CLEARED mid-session: nothing is blocked from the next update (the camera suite is the game's again)");
+
+    // ---- the session ends (the game closes the camera) before the frame thread has withdrawn the placement: nothing is blocked from that update on ----------------------
+    begin();
+    place();
+    fillAll();
+    g.setMode(0);
+    g.ctlUpdate(g.ctl);   // the controller sees mode 0: the session is over
+    check(!t::sessionActive() && t::placedActivity() != 0 && g.isoSeenPatternCount(1) == 15, "THE SESSION ENDS under a standing placement: the very update that ended it already sees all 15 controller keys");
+    g.zoomUpdate(g.zoom);
+    check(g.isoSeenPatternCount(3) == 7 && t::isoBlocked(3) == 0, "...and the zoom/DOF update that follows, before any frame boundary, sees its 7 keys: blocking is a property of the SESSION");
+    begin();
+    place();
+    fillAll();
+    t::forcePlaceActive(false);   // Explorer Cam stood down under the hook threads' feet; the frame thread has not withdrawn the placement yet
+    g.zoomUpdate(g.zoom);
+    check(g.isoSeenPatternCount(3) == 7 && t::isoBlocked(3) == 0, "EXPLORER CAM STOOD DOWN under a standing session: the zoom/DOF update sees its 7 keys (nothing is blocked when the feature is not active)");
+
+    // ---- the zoom/DOF handles: any may be null; a bad pointer is not an object; handles are read again on every call ------------------------------------
+    begin();
+    place();
+    g.isoFill(3);
+    uint8_t* const o1 = g.isoObject(3, 1);   // +0x258
+    uint8_t* const o3 = g.isoObject(3, 3);   // +0x268
+    uint8_t* const o4 = g.isoObject(3, 4);   // +0x270
+    uint8_t* const o5 = g.isoObject(3, 5);   // +0x278
+    const uint64_t zero = 0, tiny = 0x1234, odd = reinterpret_cast<uint64_t>(o5) + 1;
+    std::memcpy(g.zoom + 0x258, &zero, 8);
+    std::memcpy(g.zoom + 0x270, &zero, 8);
+    std::memcpy(g.zoom + 0x268, &tiny, 8);
+    std::memcpy(g.zoom + 0x278, &odd, 8);
+    g.zoomUpdate(g.zoom);
+    check(g_seenIso[3].v[0] == 0 && g_seenIso[3].v[2] == 0 && g_seenIso[3].v[6] == 0 && g_seenIso[3].v[1] == 0xFFFFFFFFu && g_seenIso[3].v[4] == 0xFFFFFFFFu && t::isoBlocked(3) == 3 &&
+              g.zoomCallsSeen() == 1,
+          "ZOOM/DOF WITH NULL HANDLES (+0x258, +0x270), an implausible one (+0x268 = 0x1234) and a misaligned one (+0x278): no crash, only the three real objects are cleared (3 blocked)");
+    check(o1[0x24] == isoPatternHeld(0x258) && o3[0x24] == isoPatternHeld(0x268) && o4[0x24] == isoPatternHeld(0x270) && o5[0x24] == isoPatternHeld(0x278),
+          "...the objects behind the null, implausible and misaligned handles were not touched");
+    std::memcpy(g.zoom + 0x278, &o5, 8);
+    uint8_t* const fresh = g.iso[39];
+    std::memset(fresh, 0, 0x40);
+    fresh[0x24] = 0x55;
+    uint8_t* const old0 = g.isoObject(3, 0);
+    const uint64_t freshPtr = reinterpret_cast<uint64_t>(fresh);
+    std::memcpy(g.zoom + 0x250, &freshPtr, 8);   // the binder re-resolved the handle to another object
+    g.zoomUpdate(g.zoom);
+    check(g_seenIso[3].v[0] == 0 && fresh[0x24] == 0x55 && old0[0x24] == isoPatternHeld(0x250), "HANDLES ARE READ AGAIN ON EVERY CALL: a handle re-pointed to another object clears THAT object (and puts its 0x55 back), and the old one is left alone");
+
+    // ---- a clear that faults stands the isolation down after three, never the placement -----------------------------------------------------------------------
+    begin();
+    place();
+    fillAll();
+    uint8_t* const f0 = g.isoObject(0, 0);   // +0x4B8, cleared before the fault
+    uint8_t* const f1 = g.isoObject(0, 1);   // +0x4C0
+    const uint64_t unmapped = 0x00006FFF00000000ull;
+    const uint64_t goodPtr = reinterpret_cast<uint64_t>(g.isoObject(0, 2));
+    std::memcpy(g.free + 0x4C8, &unmapped, 8);
+    g_probeFree = nullptr;
+    const uint64_t updatesBefore = t::updatesPlaced();
+    g.freeUpdate(g.free);
+    check(t::isoFaults() == 1 && !t::isoDown() && f0[0x24] == isoPatternHeld(0x4B8) && f1[0x24] == isoPatternHeld(0x4C0) && t::faults() == 0,
+          "A FAULT IN THE CLEAR (a handle to unmapped memory): counted as an isolation fault, what was cleared before it is PUT BACK, the placement's own fault budget untouched");
+    g.freeUpdate(g.free);
+    g.freeUpdate(g.free);
+    rig.boundary();
+    check(t::isoFaults() == 3 && t::isoDown() && rig.cap.count("isolation stood down for the session: 3 guarded accesses") == 1 && t::placeActive() && t::phase() == 2 && t::faults() == 0 &&
+              t::updatesPlaced() >= updatesBefore + 3,
+          "THREE FAULTS stand the isolation down (said once); the placement goes on, still placed, its budget untouched, the pose still written");
+    std::memcpy(g.free + 0x4C8, &goodPtr, 8);
+    g_probeFree = &probeFreeCb;
+    fillAll();
+    g.freeUpdate(g.free);
+    check(g.isoSeenPatternCount(0) == 11 && g.isoIntact(0), "...from then on the camera's own keys reach the game's update again");
+
+    // ---- a restore that faults is counted, not fatal ---------------------------------------------------------------------------------------------------------
+    begin();
+    place();
+    fillAll();
+    g_protectPage = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (g_protectPage) {
+        uint8_t* obj = g_protectPage + 0x100;
+        const uint32_t pat = 0x2468;
+        std::memcpy(obj + 0x18, &pat, 4);
+        const uint64_t ptr = reinterpret_cast<uint64_t>(obj);
+        std::memcpy(g.free + 0x4C8, &ptr, 8);
+        g_probeFree = &probeFreeProtect;
+        g.freeUpdate(g.free);
+        DWORD old = 0;
+        VirtualProtect(g_protectPage, 4096, PAGE_READWRITE, &old);
+        check(t::isoFaults() == 1 && !t::isoDown() && t::faults() == 0 && t::placeActive(), "A RESTORE THAT FAULTS (the object's page went read-only inside the update): counted as one isolation fault, no crash, the placement untouched");
+        g_probeFree = &probeFreeCb;
+        VirtualFree(g_protectPage, 0, MEM_RELEASE);
+        g_protectPage = nullptr;
+    } else {
+        check(false, "(a page for the restore-fault cell)");
+    }
+
+    // ---- the lines: once per session start, and the heartbeat ----------------------------------------------------------------------------------------------------
+    begin();
+    check(rig.cap.count("camera suite isolated") == 0, "(no session: no isolation line)");
+    place();
+    check(rig.cap.count("explorer cam: camera suite isolated: 34 actions blocked across 4 holders (free camera 11, camera controller 15, camera UI 1, zoom/DOF 7)") == 1 &&
+              has(rig.cap.nth("camera suite isolated", 0), "until you press F5 again"),
+          "THE SESSION LINE, once at the session start: 'camera suite isolated: 34 actions blocked across 4 holders'");
+    fillAll();
+    runAll();
+    rig.advance(5200);
+    rig.cap.clear();
+    rig.boundary();
+    {
+        const std::string beat = rig.cap.nth("explorer cam: heartbeat (follow, isolation):", 0);
+        check(has(beat, "blocked_presses(free_camera=11(+11) controller=15(+15) camera_ui=1(+1) zoom=7(+7))") && has(beat, "zoom_hook=armed zoom_hook_calls=") && has(beat, "isolation=on") &&
+                  has(beat, "isolation_faults=0"),
+              "THE HEARTBEAT counts the blocked presses per holder in the window (11, 15, 1, 7: only the fields that were non-zero when zeroed), the zoom hook's calls and the isolation's state");
+    }
+    runAll();
+    rig.advance(5200);
+    rig.cap.clear();
+    rig.boundary();
+    check(has(rig.cap.nth("explorer cam: heartbeat (follow, isolation):", 0), "blocked_presses(free_camera=22(+11) controller=30(+15) camera_ui=2(+1) zoom=14(+7))"),
+          "...and the next window counts its own (+11, +15, +1, +7 on top of the totals)");
+    exitSession();
+    rig.cap.clear();
+    Game::pressed(g.photoAction) = 0;   // the player let go of the camera key
+    place();
+    check(rig.cap.count("explorer cam: camera suite isolated: 34 actions blocked across 4 holders") == 1, "A SECOND SESSION says it again");
+
+    // ---- the zoom/DOF hook cannot install: the rest is isolated, and the line says so -----------------------------------------------------------------------------
+    begin(true, true);
+    check(t::stolenBytes(7) == 0 && rig.cap.count("zoom/DOF hook stood down:") == 1 && has(rig.cap.nth("zoom/DOF hook stood down:", 0), "the game build differs") &&
+              has(rig.cap.nth("zoom/DOF hook stood down:", 0), "nothing was patched") && has(rig.cap.nth("zoom/DOF hook stood down:", 0), "zoom, aperture and focus keys are not blocked") && t::placeActive(),
+          "A WRONG ZOOM/DOF PROLOGUE: one stand-down line saying the build differs and nothing was patched, and Explorer Cam still runs");
+    place();
+    fillAll();
+    runAll();
+    check(g.isoSeenZeroCount(0) == 11 && g.isoSeenZeroCount(1) == 15 && g.isoSeenZeroCount(2) == 1 && g.isoSeenPatternCount(3) == 7 && t::zoomCalls() == 0,
+          "...the free camera, the controller and the camera UI are still isolated; the zoom keys are not, and the hook saw no call");
+    check(rig.cap.count("explorer cam: camera suite isolated: 27 actions blocked across 3 holders") == 1 && has(rig.cap.nth("camera suite isolated", 0), "zoom/DOF hook is not in place"),
+          "...and the session line says 27 actions across 3 holders and why the zoom keys are not blocked");
+    begin(false);   // no target for it at all: the real module, which is not Elite
+    place();
+    fillAll();
+    runAll();
+    check(g.isoSeenZeroCount(0) == 11 && g.isoSeenPatternCount(3) == 7, "(an unknown build for the zoom hook is the same)");
+
+    g_probeFree = g_probeCtl = g_probeUi = g_probeZoom = nullptr;
+    t::reset();
+    check(std::memcmp(p.zoomG, p.zoomGood.data(), 6) == 0, "RESET put the zoom/DOF function's original bytes back");
+}
+
+// The pure rule behind it.
+void testHotkeyKeeper() {
+    std::printf("the hotkey that is also the exit: a change or a clearing waits for the session to end (pure)\n");
+    ecm::HotkeyKeeper k;
+    bool deferred = true;
+    check(k.step("F5", false, &deferred) == "F5" && !deferred, "the first value is taken as it is");
+    check(k.step("F5", true, &deferred) == "F5" && !deferred, "UNCHANGED during a session: nothing to say");
+    check(k.step("", true, &deferred) == "F5" && deferred && k.pending().empty(), "CLEARED during a session: the old key is kept, deferred once");
+    check(k.step("", true, &deferred) == "F5" && !deferred, "...and not said again");
+    check(k.step("", false, &deferred) == "" && !deferred, "...the session over: the cleared value applies (Explorer Cam disarms)");
+    check(k.step("F6", false, &deferred) == "F6" && !deferred, "a change with no session applies at once");
+    check(k.step("F7", true, &deferred) == "F6" && deferred && k.pending() == "F7", "CHANGED during a session: the old key is kept and the new value is named");
+    check(k.step("F8", true, &deferred) == "F6" && deferred && k.pending() == "F8", "...another change is a new deferral");
+    check(k.step("F6", true, &deferred) == "F6" && !deferred && k.pending().empty(), "...a change back to the key in force clears it");
+    check(k.step("F7", true, &deferred) == "F6" && deferred, "...a new one is held back again");
+    check(k.step("F7", false, &deferred) == "F7" && !deferred && k.pending().empty(), "...the session over: F7 applies");
+}
+
 void testGlue() {
     std::printf("glue, end to end (synthetic functions with the real prologues)\n");
     Pages p = makePages();
@@ -3499,6 +4915,8 @@ void testGlue() {
     testFadeGlue(p);
     testHeadHideGlue(p);
     testSkeletonLatch(p);
+    testFollowGlue(p);
+    testIsolationGlue(p);
     testSessionEnds(p);
     testFaults(p);
     testObservers(p);
@@ -3542,6 +4960,8 @@ int main(int argc, char** argv) {
     testText();
     testRelayBytes();
     testHeadHidePure();
+    testFollowPure();
+    testHotkeyKeeper();
     testGlue();
     if (g_failures) {
         std::printf("explorer cam: FAIL (%d)\n", g_failures);

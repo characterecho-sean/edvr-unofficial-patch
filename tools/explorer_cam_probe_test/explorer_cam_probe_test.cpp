@@ -1929,23 +1929,23 @@ void testHeadJoint() {
     check(cap.count("explorer cam probe H2 joints:") == 2 && has(h2A, "local-third-person") && has(h2A, "joints=60") && has(h2A, "head(12) walked=(1.500,3.500,3.000) depth=2 cached(+0x58)=(0.000,1.600,0.020)") &&
               has(h2A, "pov(3) walked=(1.000,3.000,2.000) depth=2 cached(+0x58)=(0.000,1.550,0.020)") && has(h2A, "lfoot(20) walked=(1.200,2.000,3.000) depth=1") &&
               has(h2A, "rfoot(21) walked=(0.800,2.050,3.000) depth=1") && has(h2A, "foot_y=2.050 (the higher foot)") && has(h2A, "head_y-foot_y=1.450") && has(h2A, "pov_y-foot_y=0.950") &&
-              has(h2A, "cached_head_y-foot_y=-0.450") && has(h2A, "cached_pov_y-foot_y=-0.500") && has(h2B, "local-first-person") && has(h2B, "joints=40") && h2A.size() < 1000,
+              has(h2A, "cached_head_y-foot_y=-0.450") && has(h2A, "cached_pov_y-foot_y=-0.500") && has(h2A, "REST POSE") && has(h2B, "local-first-person") && has(h2B, "joints=40") && h2A.size() < 1000,
           "H2 JOINTS: the head, pov and both feet walked from the animated pose (head (1.5,3.5,3), pov (1,3,2)), the cached +0x58 beside them, the higher foot and the stance differences");
     // ---- a second second: the head index is cached, no new slot lines ---------------------------------------------------------------------------------
     eval();
     tick();
-    check(g_hr.find - find0 == 6 && cap.count("explorer cam probe H slot:") == 0 && cap.count("explorer cam probe H joints:") == 2 && g_hr.modelRR == 4,
-          "the next evaluation does NOT look the head up again (cached per interface), calls the matrices again, and prints joints lines but no slot lines");
+    check(g_hr.find - find0 == 6 && cap.count("explorer cam probe H slot:") == 0 && cap.count("explorer cam probe H joints:") == 2 && cap.count("explorer cam probe H2 joints:") == 0 &&
+              g_hr.modelRR == 4,
+          "the next evaluation does NOT look the head up again (cached per interface), calls the matrices again, and prints joints lines but no slot lines and no H2 line (the rest pose is said once per skeleton)");
 
-    // THE STANCE TEST: the animated pose crouches (the spine joint drops 0.6 m); the walked head follows, the cached +0x58 head (a stub that never moves) does not.
+    // THE REST POSE IS SAID ONCE: even if the pose arrays change (the spine joint drops 0.6 m), the REST line is not said again for the same skeleton; the cached
+    // +0x58 lines (H's, 1 Hz) go on.
     w.locals[0][1 * 8 + 1] = 0.4f;
     w.locals[1][1 * 8 + 1] = 0.4f;
     eval();
     tick();
-    const std::string h2C = cap.nth("explorer cam probe H2 joints:", 0);
-    check(has(h2C, "head(12) walked=(1.500,2.900,3.000) depth=2 cached(+0x58)=(0.000,1.600,0.020)") && has(h2C, "head_y-foot_y=0.850") && has(h2C, "pov_y-foot_y=0.350") &&
-              has(h2C, "cached_head_y-foot_y=-0.450"),
-          "THE CROUCH: the walked head drops from 3.500 to 2.900 (head_y-foot_y 1.450 -> 0.850) while the cached +0x58 head stays at 1.600 (cached_head_y-foot_y unchanged): H2 follows the pose");
+    check(cap.count("explorer cam probe H2 joints:") == 0 && cap.count("explorer cam probe H joints:") == 2,
+          "THE REST POSE IS SAID ONCE PER SKELETON: a changed pose array (a crouch in the stub) does not reprint the H2 line, while H's cached +0x58 lines still come each second");
     w.locals[0][1 * 8 + 1] = 1.0f;
     w.locals[1][1 * 8 + 1] = 1.0f;
     // Unreadable pose arrays: nothing walked, said in the line; H goes on and the matrices still come.
@@ -1981,7 +1981,11 @@ void testHeadJoint() {
         const std::string h2E = cap.nth("explorer cam probe H2 joints:", 0);
         check(has(h2E, "head(12) walked=unread") && has(h2E, "pov(3) walked=(1.000,3.000,2.000)") && has(h2E, "lfoot(20) walked=(1.200,2.000,3.000)") && !has(h2E, " head_y-foot_y="),
               "A PARENT OUT OF RANGE (200 of 60): that joint reads 'unread', the others are walked, no head difference is claimed");
-        w.parents[0][12] = 1;
+        w.parents[0][12] = 1;   // whole again: the line comes back once (what it walked changed)
+        eval();
+        tick();
+        check(cap.count("explorer cam probe H2 joints:") >= 1 && has(cap.nth("explorer cam probe H2 joints:", 0), "head(12) walked=(1.500,3.500,3.000)"),
+              "(the parent restored: the walk is whole again and the H2 line is said again because what it walked changed)");
         w.parents[0][1] = 12;   // 12 -> 1 -> 12
         eval();
         tick();

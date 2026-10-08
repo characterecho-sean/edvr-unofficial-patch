@@ -28,6 +28,7 @@
 #include <type_traits>
 
 #include "explorer_cam_core.h"
+#include "explorer_cam_follow_core.h"
 #include "explorer_cam_probe_core.h"
 
 namespace edvr {
@@ -302,21 +303,28 @@ inline void formatNeckLocal(char* out, size_t cap, const NeckSample& s, const Co
 constexpr uintptr_t kFindSite1Rva = ecm::kFindSite1Rva, kFindSite2Rva = ecm::kFindSite2Rva;   // the capture itself is explorer_cam.cpp's (head hiding needs it too)
 constexpr uint32_t kOffActivityHum = 0x368;                                           // the dead route's cache, read only for the diagnostic line
 constexpr uint32_t kHumFromInterface = 0x70;
-constexpr uintptr_t kRrVtableRva = 0x559CF90, kAoVtableRva = 0x517DC20;
-constexpr uint32_t kHeadSlots = 4;                                                    // the slots used: +0x18, +0x30, +0x48, +0x58
-constexpr uint32_t kHeadSlotIndex[kHeadSlots] = {3, 6, 9, 11};
-constexpr uintptr_t kRrFunctions[kHeadSlots] = {0x43FB900, 0xFDDB10, 0x43F7180, 0x43F6EB0};
-constexpr uintptr_t kAoFunctions[kHeadSlots] = {0xFDE310, 0xFDDB10, 0xFDDEB0, 0xFDDD10};
-constexpr uint32_t kRrCachedFlag = 0x2C0, kAoCachedFlag = 0xF8;                      // iface+: the joint matrices are cached when it is non-zero
-constexpr uintptr_t kHeadNameRva = 0x554EE10, kPovNameRva = ecm::kPovNameRva, kFootLNameRva = 0x5564118, kFootRNameRva = 0x5564130;
-inline constexpr char kHeadName[] = "def_c_head_joint";
-inline constexpr char kPovName[] = "def_c_povCamera_joint";
-inline constexpr char kFootLName[] = "def_l_foot_joint";
-inline constexpr char kFootRName[] = "def_r_foot_joint";
-constexpr uint32_t kNoJoint = 0xFFFF;
+// The skeleton interface's constants, the pose walk and the slot checks live in explorer_cam_follow_core.h (namespace ecm), where the feature's own head-joint
+// source uses them too; H here uses the same ones through these declarations.
+using ecm::kRrVtableRva;
+using ecm::kAoVtableRva;
+using ecm::kHeadSlots;
+using ecm::kHeadSlotIndex;
+using ecm::kRrFunctions;
+using ecm::kAoFunctions;
+using ecm::kRrCachedFlag;
+using ecm::kAoCachedFlag;
+using ecm::kHeadNameRva;
+using ecm::kPovNameRva;
+using ecm::kFootLNameRva;
+using ecm::kFootRNameRva;
+using ecm::kHeadName;
+using ecm::kPovName;
+using ecm::kFootLName;
+using ecm::kFootRName;
+using ecm::kNoJoint;
 constexpr uint32_t kHeadIntervalMs = 1000;                                            // at most one evaluation a second: the calls take a lock
 
-enum class HeadKind : uint8_t { None = 0, Runtime = 1, Animated = 2 };
+using ecm::HeadKind;
 enum class HeadSlotState : uint8_t { NotCaptured = 0, Resolved, Stale };
 enum class HeadWhy : uint32_t {
     None = 0,
@@ -328,101 +336,22 @@ enum class HeadWhy : uint32_t {
 };
 enum class HeadStage : uint32_t { ReadActivity = 1, ReadSlots, PoseCall, FindCall, ModelCall, WorldCall, ReadFrame, ReadInterface };
 
-// ---- H2: the joints by WALKING THE ANIMATED POSE ---------------------------------------------------------------------------------------------------
-// F5: the cached +0x58 head did not drop when the commander crouched, and +0x48 drifted 12 m (a frame that is not the free camera's). The cached matrices
-// are only maintained for joints the game asked for (SetAttachJoint marks a joint and its ancestors), so H2 composes the joints from the animated pose
-// itself, exactly as the game's uncached path does (FUN 0xFDE0D0, read and its quaternion constants evaluated against the exe's own data):
-//   P = GetPoseData(): the u16 at P+0 is the joint count; *(P+0x48) -> the local transforms, 32 bytes a joint: position vec4 at +0 (x,y,z,w), rotation
-//   quaternion (x,y,z,w) at +0x10; *(P+0x50) -> the u16 parent of each joint (0xFFFF = root); *(P+0x18) -> the u16 name hashes.
-//   Row-vector convention: the joint's matrix is R(q) with its position as the fourth row, and the model-space matrix is joint x parent x grandparent ...
-//   R(q) is DirectXMath's XMMatrixRotationQuaternion for row vectors. So a point p in joint j is carried up with  p = p x R(q_a) + pos_a  for each ancestor a.
-// This reads game memory and calls nothing: the arrays are copied (under SEH) and walked here.
-constexpr uint32_t kPoseJointCountOff = 0, kPoseNamesOff = 0x18, kPoseLocalsOff = 0x48, kPoseParentsOff = 0x50;
-constexpr uint32_t kJointBytes = 32, kJointFloats = 8, kMaxWalkJoints = 512;
-// The rotation rows of a unit quaternion q = (x, y, z, w), laid out as the exe's code lays them out (w*w2 - 1 + x*x2 on the diagonal).
-inline void quatRows(const float q[4], float r[9]) {
-    const float x = q[0], y = q[1], z = q[2], w = q[3];
-    const float d = 2.0f * w * w - 1.0f;
-    r[0] = d + 2.0f * x * x;
-    r[1] = 2.0f * w * z + 2.0f * x * y;
-    r[2] = -2.0f * w * y + 2.0f * x * z;
-    r[3] = -2.0f * w * z + 2.0f * y * x;
-    r[4] = d + 2.0f * y * y;
-    r[5] = 2.0f * w * x + 2.0f * y * z;
-    r[6] = 2.0f * w * y + 2.0f * z * x;
-    r[7] = -2.0f * w * x + 2.0f * z * y;
-    r[8] = d + 2.0f * z * z;
-}
-// The model-space position of joint `idx`: its local position carried up through its ancestors. False for an index out of range, a parent out of range, or
-// a chain longer than the joint count (a cycle). `depth` = the number of ancestors walked.
-inline bool walkJointToModel(const float* locals, const uint16_t* parents, uint32_t joints, uint32_t idx, float out[3], uint32_t* depth) {
-    if (idx >= joints) return false;
-    float p[3] = {locals[idx * kJointFloats + 0], locals[idx * kJointFloats + 1], locals[idx * kJointFloats + 2]};
-    uint32_t steps = 0;
-    for (uint32_t a = parents[idx]; a != 0xFFFFu; a = parents[a]) {
-        if (a >= joints || ++steps > joints) return false;
-        float r[9];
-        quatRows(locals + a * kJointFloats + 4, r);
-        const float x = p[0], y = p[1], z = p[2];
-        p[0] = x * r[0] + y * r[3] + z * r[6] + locals[a * kJointFloats + 0];
-        p[1] = x * r[1] + y * r[4] + z * r[7] + locals[a * kJointFloats + 1];
-        p[2] = x * r[2] + y * r[5] + z * r[8] + locals[a * kJointFloats + 2];
-    }
-    out[0] = p[0];
-    out[1] = p[1];
-    out[2] = p[2];
-    *depth = steps;
-    return true;
-}
-
-struct HeadTargets {
-    uintptr_t base = 0;
-    size_t imageSize = 0;
-    uintptr_t rrVtable = 0, aoVtable = 0, headName = 0, povName = 0, footLName = 0, footRName = 0;
-    uintptr_t rrFn[kHeadSlots] = {}, aoFn[kHeadSlots] = {};
-    bool inImage(uintptr_t p) const { return base != 0 && p >= base && p < base + imageSize; }
-};
-inline HeadTargets headTargetsFromBase(uintptr_t base, size_t imageSize) {
-    HeadTargets t;
-    t.base = base;
-    t.imageSize = imageSize;
-    t.rrVtable = base + kRrVtableRva;
-    t.aoVtable = base + kAoVtableRva;
-    t.headName = base + kHeadNameRva;
-    t.povName = base + kPovNameRva;
-    t.footLName = base + kFootLNameRva;
-    t.footRName = base + kFootRNameRva;
-    for (uint32_t i = 0; i < kHeadSlots; ++i) {
-        t.rrFn[i] = base + kRrFunctions[i];
-        t.aoFn[i] = base + kAoFunctions[i];
-    }
-    return t;
-}
-inline HeadKind headKindOfVtable(uint64_t vptr, const HeadTargets& t) {
-    if (vptr == 0) return HeadKind::None;
-    if (vptr == t.rrVtable) return HeadKind::Runtime;
-    if (vptr == t.aoVtable) return HeadKind::Animated;
-    return HeadKind::None;
-}
-// The function slot i (0 pose, 1 find, 2 world, 3 model) must hold for this kind.
-inline uintptr_t headExpectedFunction(HeadKind k, uint32_t i, const HeadTargets& t) {
-    if (i >= kHeadSlots) return 0;
-    return k == HeadKind::Runtime ? t.rrFn[i] : k == HeadKind::Animated ? t.aoFn[i] : 0;
-}
-inline uintptr_t headVtableOf(HeadKind k, const HeadTargets& t) { return k == HeadKind::Runtime ? t.rrVtable : k == HeadKind::Animated ? t.aoVtable : 0; }
-inline uint32_t headCachedFlagOffset(HeadKind k) { return k == HeadKind::Runtime ? kRrCachedFlag : kAoCachedFlag; }
-// The checks that come before a call: the vtable pointer is the kind's and every slot used holds exactly the expected function. 0 = fine,
-// 1 = the vtable differs, 2 = slot i differs (slotOut = its index, foundOut = what it holds).
-inline int headVerifySlots(uint64_t vptr, const uint64_t found[kHeadSlots], HeadKind k, const HeadTargets& t, uint32_t* slotOut, uint64_t* foundOut) {
-    if (k == HeadKind::None || vptr != headVtableOf(k, t)) return 1;
-    for (uint32_t i = 0; i < kHeadSlots; ++i)
-        if (found[i] != headExpectedFunction(k, i, t)) {
-            *slotOut = i;
-            *foundOut = found[i];
-            return 2;
-        }
-    return 0;
-}
+using ecm::kPoseJointCountOff;
+using ecm::kPoseNamesOff;
+using ecm::kPoseLocalsOff;
+using ecm::kPoseParentsOff;
+using ecm::kJointBytes;
+using ecm::kJointFloats;
+using ecm::kMaxWalkJoints;
+using ecm::quatRows;
+using ecm::walkJointToModel;
+using ecm::HeadTargets;
+using ecm::headTargetsFromBase;
+using ecm::headKindOfVtable;
+using ecm::headExpectedFunction;
+using ecm::headVtableOf;
+using ecm::headCachedFlagOffset;
+using ecm::headVerifySlots;
 
 // One attach site's reading: its capture, the state, what was found, and the four matrices.
 struct HeadSlot {
@@ -592,8 +521,9 @@ inline void putWalked(ecp::Line& o, const char* name, uint16_t idx, const HeadSl
 inline void formatH2Joints(char* out, size_t cap, const HeadSample& smp, int index) {
     const HeadSlot& s = smp.slot[index];
     ecp::Line o(out, cap);
-    o.put("%s %s kind=%s iface=0x%llX step=%llu joints=%u", prefixH2Joints(), headSiteName(index), headKindName(s.kind), static_cast<unsigned long long>(s.iface),
-          static_cast<unsigned long long>(smp.steps), s.joints);
+    o.put("%s REST POSE (the bind pose: it does not move with stance, so it is said once per skeleton; the live cached +0x58 is beside it) %s kind=%s iface=0x%llX step=%llu "
+          "joints=%u",
+          prefixH2Joints(), headSiteName(index), headKindName(s.kind), static_cast<unsigned long long>(s.iface), static_cast<unsigned long long>(smp.steps), s.joints);
     if (s.h2State == 2) {
         o.put(" the pose arrays (P+0x48 locals, P+0x50 parents) could not be read: nothing walked");
         return;

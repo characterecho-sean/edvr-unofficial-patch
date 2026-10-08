@@ -660,6 +660,8 @@ struct F2Frame {
     uint32_t seenHeadPublishes = 0;
     int64_t lastHeadMs = -1;
     bool slotSaid[2] = {false, false};
+    uint64_t h2Iface[2] = {0, 0};              // H2's REST POSE line is said once per skeleton (and again when its state or what it walked changes)
+    uint8_t h2State[2] = {0, 0}, h2WalkOk[2] = {0, 0};
     f2::HeadSlot slotKey[2];                   // what the last slot line said (compared on a few fields)
     bool humSaid = false;
     uint64_t humH = 0, humAtH = 0, humBelow = 0;
@@ -1078,7 +1080,12 @@ void explorerCamF2Tick(uint32_t frame, uint64_t nowMs, const ecm::Sink& sink) {
                         f2::formatHeadJoints(line, sizeof(line), hs, i, cf);
                         sink(line);
                     }
-                    if (hs.slot[i].state == static_cast<uint8_t>(f2::HeadSlotState::Resolved) && hs.slot[i].h2State != 0) {
+                    // H2 walks the BIND pose (F7), which never moves: one line per skeleton, and another only when its state or what it could walk changes.
+                    if (hs.slot[i].state == static_cast<uint8_t>(f2::HeadSlotState::Resolved) && hs.slot[i].h2State != 0 &&
+                        (hs.slot[i].iface != fs.h2Iface[i] || hs.slot[i].h2State != fs.h2State[i] || hs.slot[i].walkOk != fs.h2WalkOk[i])) {
+                        fs.h2Iface[i] = hs.slot[i].iface;
+                        fs.h2State[i] = hs.slot[i].h2State;
+                        fs.h2WalkOk[i] = hs.slot[i].walkOk;
                         f2::formatH2Joints(line, sizeof(line), hs, i);
                         sink(line);
                     }

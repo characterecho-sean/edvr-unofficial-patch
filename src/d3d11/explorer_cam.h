@@ -1,5 +1,5 @@
 #pragma once
-// Explorer Cam (fix.explorer_cam, hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a" and "Phase 1c").
+// Explorer Cam (hotkey.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a" and "Phase 1c").
 //
 // F5 is the only way in. Pressed on foot in first person, in the stock camera on any preset or in the free camera, it puts the
 // view in the commander's head, facing their way, locked to them, with the camera's own UI hidden; pressed again it gives the UI
@@ -31,8 +31,8 @@
 
 namespace edvr {
 
-// Once a frame at the Present boundary (vscreen.cpp), before explorerCamProbeFrameBoundary. Reads fix.explorer_cam, the eye keys
-// and hotkey.explorer_cam, polls F5, installs the hooks the first time they are wanted, publishes the settings to the hook threads,
+// Once a frame at the Present boundary (vscreen.cpp), before explorerCamProbeFrameBoundary. Reads hotkey.explorer_cam (Explorer Cam is
+// armed exactly when it is non-empty), the eye keys, polls F5, installs the hooks the first time they are wanted, publishes the settings to the hook threads,
 // drains their events into the log, ends a session whose controller went silent, and writes the 5 s heartbeat while a session is on.
 // Render thread. Never call it from inside a game hook.
 void explorerCamFrameBoundary(uint32_t frameNo);
@@ -73,6 +73,10 @@ ExplorerCamSkeleton explorerCamSkeleton(int site);
 void explorerCamSkeletonDrop(int site, uint64_t iface);      // a captured interface that went stale: forgotten unless a newer capture replaced it
 uint64_t explorerCamFindJointSeen();                         // every FindJoint call the hook has seen (proof it is alive)
 
+// Is an Explorer Cam session on? True from F5's request until the session ends (the camera closed, F5 pressed again, or Explorer Cam stood down). An atomic read,
+// safe from any thread: the hotkey menu uses it to lock the Explorer Cam key's row, because that key is also the way out.
+bool explorerCamSessionActive();
+
 // An unload (FreeLibrary): puts the avatar dither-fade global back to -1 if EDVR still holds it at 0. Frame-thread context; SEH-guarded.
 void explorerCamShutdown();
 
@@ -88,12 +92,13 @@ bool explorerCamBuildKnown(uintptr_t* base, char* why, size_t whyCap);
 // inputs, synthetic functions in place of the game's, and the shared state to look at.
 using ExplorerCamSinkFn = void (*)(void* ctx, const char* line);
 struct ExplorerCamTestTargets {
-    uintptr_t freeCamera = 0, collision = 0, boxPush = 0, cameraUi = 0, controller = 0, avatarFade = 0, findJoint = 0;
+    uintptr_t freeCamera = 0, collision = 0, boxPush = 0, cameraUi = 0, controller = 0, avatarFade = 0, findJoint = 0, zoomDof = 0;
 };
 struct ExplorerCamTestFrame {
-    bool on = true;
-    float up = 1.68f, forward = 0.10f, right = 0.0f;
-    const char* hotkey = "F5";            // hotkey.explorer_cam
+    float up = 1.68f, forward = 0.10f, right = 0.0f;   // the FALLBACK eye (fix.explorer_cam_eye_up/_forward/_right)
+    float trimRight = 0.0f, trimUp = 0.0f, trimForward = 0.0f;   // fix.explorer_cam_eye_trim_right/_up/_forward (temporary)
+    float smoothingMs = 0.0f;             // fix.explorer_cam_follow_smoothing_ms (temporary)
+    const char* hotkey = "F5";            // hotkey.explorer_cam: Explorer Cam is armed exactly when this is non-empty
     bool f5Pressed = false;               // the key's edge this frame
     bool gameplay = true;
     bool onFootKnown = true, onFoot = true;
@@ -111,7 +116,7 @@ void boundary(uint32_t frame, uint64_t nowMs, const ExplorerCamTestFrame& in, Ex
 bool gateOpen();                   // the free-camera relay's gate
 bool uiGateOpen();
 bool controllerGateOpen();
-size_t stolenBytes(int hook);      // 0 free, 1 collision, 2 box push, 3 camera UI, 4 controller, 5 avatar fade, 6 FindJoint
+size_t stolenBytes(int hook);      // 0 free, 1 collision, 2 box push, 3 camera UI, 4 controller, 5 avatar fade, 6 FindJoint, 7 zoom/DOF
 uint64_t placedActivity();
 uint64_t bypassed();               // the collision sweep
 uint64_t forwarded();
@@ -143,6 +148,24 @@ int hotkeyVk();                    // the F5 key's virtual key after explorerCam
 void preThenPost(void* activity);  // the free-camera hook's pre half and post half with no original between them (the fault cells)
 void controllerPreThenPost(void* controller);
 void forceSession(bool on);         // an F5 session switched on or off by hand (the config cells cannot press the real key)
+// Phase 3: the head-joint eye source and the camera-suite isolation.
+void setHeadImage(uintptr_t base, size_t size);   // the rig's synthetic game image for the head source (base 0: the real module)
+void forcePlaceActive(bool on);                    // g_placeActive set by hand: Explorer Cam stood down under the hook threads, before the frame thread withdrew the placement
+void setNowUs(uint64_t (*fn)());                   // the clock the follow smoothing reads, in microseconds (null: the real one)
+uint64_t followHeadUpdates();      // placing updates whose eye came from the head joint
+uint64_t followFixedUpdates();     // ...and from the fixed keys
+uint32_t followSource();           // 1 = the latest update used the head joint
+uint32_t followWhy();              // ecm::FixedWhy of the latest fixed update
+bool followReady();                // armed: the build and the joint-name literals checked
+bool followDown();                 // the head source stood down for the session
+uint32_t followFaults();           // faults of the head read
+uint64_t isoBlocked(int holder);   // presses swallowed: 0 free camera, 1 controller, 2 camera UI, 3 zoom/DOF
+bool isoDown();                    // the isolation stood down for the session
+uint32_t isoFaults();
+uint64_t zoomCalls();              // the zoom/DOF update reached its hook
+bool zoomGateOpen();
+void setFrameSink(ExplorerCamSinkFn fn, void* ctx);   // where explorerCamFrameBoundary's own lines go (null: the log)
+void zoomPreThenPost(void* object);   // the zoom/DOF hook's pre half and post half with no original between them
 void uiPreThenPost(void* object);
 void reset();                      // every hook uninstalled, every latch and counter cleared
 }  // namespace explorercamtest
