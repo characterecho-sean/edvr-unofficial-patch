@@ -56,9 +56,9 @@
   motion/coverage; inspect remaining WORLD and building pixels separately.
   Visual verification is open. Native primary records stay unchanged; no bones,
   estimation or generic pool matching. NPC F1 (Sean 2026-10-08: NPC families
-  only, if the dumps support it): BUILT on claude/explorer-cam-npc-motion, VR
-  only, green, not flown ("F1 built" entry); gain 7-32% whole-mask (D3 1.36 ->
-  0.93-1.26 px, INFERRED), stale class (38%) gone. F2: instrument built, unflown.
+  only, if the dumps support it): FLOWN 154553 (F11 entry): stale class 38.7% ->
+  0.8%, weapons good, history gaps are the scene; the body blur is NOT fixed (85%
+  of the NPC mask is skinned, kind 3; rigid 14% took 0.2 px). F2: built, unflown.
 
 ## Premise
 
@@ -4098,3 +4098,63 @@ not flown, no config key.
   chain); BROKEN counts lost, declined, skipped copies and groups with no job table.
 - Not in this build: the job-list hook, any use of the previous palette, any
   change on screen.
+
+### 2026-10-08 F11 (93d388c1): F1 flown -- the stale class is gone, the NPC body is not fixed
+
+Log edvr_gfx_20261008_154553.log (v0.18.3-64-g93d388c1, build matched), Frontier.
+Plain first person from 15:47:37, F5 in at 15:48:06, eye run 154827 at 15:48:27 (a
+walking NPC at 10.4 m carrying a rifle, 5,883 px of stencil 0x10), weapon drawn and
+holstered in Explorer Cam, F5 out at 15:49:35, then plain first person. Sean: "weapons
+look good, definitely need F2, the blur on the npc body is distracting." Scripts
+f41-f44 in analysis\npc_blur.
+- Ran, MEASURED: the four family lines read `live` from 15:47:54, patched [the four
+  pixel shaders], 30 s windows of 8B58 115-160k, 7B0D 120-170k, 114A 23-33k, D99A
+  6-12k draws (about 180 a frame, as priced); no family STOOD DOWN (the 12 matches
+  are `stood down 0` counters). In the three windows before the scene loaded (to
+  15:47:24) 8B58 and 7B0D read "not created by the game this session", as expected.
+- The NPC, eye run 154827, MEASURED. By kind (D00 flags): 85.3% kind 3, 13.9% kind 1,
+  0.8% stale (48 px), 0% unmarked; F10 D3 was 58.0% unmarked, 38.7% stale. All 5,017
+  px whose slot names a base != 0 record are kind 3 (the camera term stands, no
+  refusal); D99A reads such a record, so its pixels are kind 3 (INFERRED for D99A
+  itself: no pixel->draw attribution). The 48 stale px are base-0 (rows 990-1001), a
+  later draw over a keyed one. Rigid parts: 34 moving records, 34 certified joined;
+  the 818 joined px took an engine MV that differs from the camera term by a median
+  0.18-0.23 px/frame at the live-sized steps (records 6.7 and 8.2 mm) and 0.7-4.8 px at
+  the hitch crops (steps 41-123 mm), so the certified motion is right and small.
+- Whole-mask error, f42.py (the MV the pass used against the camera-only MV): k=1 0.56
+  -> 0.56 px (the background's block-match floor is 0.53); k=5-9 (steps 40-52 mm)
+  1.00, 1.63, 1.05, 1.09, 1.04 -> 0.99, 1.61, 1.04, 1.09, 1.04. The rigid-dominated
+  blocks (3-10 a pair) improved in three pairs (0.80 -> 0.43, 0.75 -> 0.29, 1.20 ->
+  0.32), worsened in two (0.30 -> 0.62, 0.36 -> 0.85) and tied in five. The rigid share
+  is 13.9%, under the 17% the index count gave and far under the 50-66% best case.
+- ruled out: F1 as the fix for the NPC body blur, because 85.3% of the mask is skinned
+  and keeps the camera term, the 13.9% that took engine motion moved 0.2 px a frame,
+  and the whole-mask median did not move (0.56 -> 0.56 at the live step); Sean's
+  verdict agrees.
+- ruled out: F1 raised the history-gap bursts, because the `history gaps` lines peak
+  where F10's did (F11 28,287 gaps in 288 burst frames at 15:47:54, 73,891 in 636 at
+  15:48:24; F10 58,222 in 542 at 13:42:31, 60,652 in 488 at 13:43:01), each window
+  holding an F5 entry or an eye run, and the later windows fall to 4-33k with 11-195
+  bursts; F1 changes no emit file, and these counters sit on the job threads. The
+  peak is 22% over F10's, one window each, not a trend.
+- ruled out: a weapon regression, because `weapon=` is 0 in all 17 world-route windows
+  and the on-foot camera rule declined 1,493 of 1,493 source frames as another camera
+  (rows 270..273 changed), by family vs_7B0DC42D 1,493: exactly one 7B0D draw a frame,
+  the weapon, left unsubstituted (15:49:54). Trained-path line 15:48:54: masked 0,
+  corrupt 0, stale stamp 0.
+- World route, plain first person after F5 out, stale-refused per sampled frame, MEASURED:
+  10,182 (partial window, 65 frames), 1,980, 114, 96, then 0 in the sky windows
+  (15:50:00-15:50:20; sentinel 0). F10's NPC windows read 7,568, 3,591, 5,433 and
+  7,102. The log has no in-view marker: I read 114 and 96 as the NPC windows (INFERRED;
+  the eye run's 0.8% on an NPC of 8,000 px predicts about 70), and the first two as
+  the re-own after F5 (F10's first window read 1,338 of 35 frames). So not uniformly
+  at or under 1.4k; the class result above is the firm one.
+- Cost, F11 against F10 in matched Explorer Cam windows, MEASURED: render-thread draw
+  side p50 0.07 / p95 0.10 ms at 268-277 calls a frame (F10 0.07 / 0.10 at 263-265);
+  plain first person 0.05 / 0.10 at 230 calls (F10 0.02-0.06 / 0.04-0.10). GPU
+  `Elite's own draws that EDVR alters`, pool-family draws 0.175 ms at 7,889 a frame
+  (F10 0.146 at 7,348); outliers of 0.905 (F11) and 1.096 and 5.320 (F10) are the
+  timer's noise. `engine velocity` 0.209-0.244 ms (F10 0.181-0.191), application
+  render p50 12.1-12.8 ms (F10 12.6-13.4). Nothing measurable beyond the +180 draws.
+- F2: the skin ledger also ran in this window (`RESULT RAN`, chain, pool draw and
+  palettes 19/20); its reading belongs to the F2 study. F1 stays the prerequisite.
