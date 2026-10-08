@@ -3753,3 +3753,42 @@ fade's black frame, then the photo preset). Scripts in the worktree's
   The cause is open. Three world-route releases ("engine-views-unavailable")
   this flight against 0-1 before: test with advanced.explorer_cam_probe off,
   which also switches the camera census off.
+
+### 2026-10-08 step A built: a stencil-0x10 pixel is first-person only where the weapon map covers it or within reach
+
+Branch claude/explorer-cam-npc-motion, full build.bat green, not flown, not
+installed. The flat prep (flat_mono_shader_source.h, "attached" in prep) and
+the eye route's screen shader (fixed_shader_source.h, kScreenMotionPs) shared
+one rule: stencil bit 0x10 means the weapon, so the weapon map's motion or no
+history. Characters carry the bit too (the walking NPC 8,359 px, the commander's
+body 785,022 px), and the map never covers them. Now a 0x10 texel is
+first-person only if the map covers it (w 1 or 2) or its raw depth is at least
+kFirstPersonReachDepth = .075; any other 0x10 texel takes the world path (the
+engine record if joined, else the camera term). The first-person camera's near
+plane is 0.0675 m and the world's 0.025 m, so .075 is 0.9 m for a first-person
+draw and 0.33 m for the world camera. The weapon map measured on 2026-10-08
+(eye_121052_WeaponMotion.bin, 245,865 texels) spans raw depth .1134-.1948, i.e.
+0.35-0.60 m. The bound protects a weapon or arm the matcher missed on a frame
+it declined (more than four mesh occurrences, an arena write): it stays
+first-person and keeps no history instead of taking a camera term that would
+ghost it. No first-person arm depth has been measured; the bound rests on the
+weapon's. The two shaders carry the same literal; the screen shader's
+source-hash pin (fixed_core_shader_variants.h) was re-pinned on purpose.
+Rigs: the flat first-person scenario gained World, joined-World and
+near-uncovered cells, the reach boundary on three sides, and TAA cells (28 of
+28 mutants caught); the screen-motion rig gained the same cells and a mutation
+harness of its own (7 mutants and a control, each caught).
+
+Correction to the entry above: the DE54 draws with stencil ref bit 0x10 (ps
+3AF0, 91F8, 03B1: 16, 13 and 3 a frame) are NOT shown to be the NPC's. They are
+small instanced meshes (startInstance 14.9k-22.3k, past the 13,312-record
+pool), the counts are the same in both NPC dumps, and the census listed only
+3,288 of about 12.5k main-eye draws (truncated=29,051), so the NPC's colour
+draws are not in this log. What the pool does show (eye_120917_EnginePool.bin
+and EngineNow.bin, MEASURED): 82 moving rig records, all certified-joined at
+the frame token; 43 within 6-12 m of the camera in an NPC-sized volume
+(0.72 x 0.86 x 0.33 m) at 8.5-8.9 m, 25 distinct poses, 5.5-8.2 mm of
+translation and up to 12.2 degrees of rotation per record. INFERRED: those are
+the NPC's per-part records (the projection onto the image was not verified).
+If so, F1 is per-part rigid motion, not root-only, and its limb residual should
+sit below the 0.71 px a root-only model leaves.

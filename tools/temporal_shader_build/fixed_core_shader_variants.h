@@ -94,7 +94,9 @@ static std::vector<LegacyContract> coreLegacyContracts() {
         {"orbital coverage", "main", "vs_5_0", nullptr, 0xE791DFD3733D1EBAull},
         {"ui_depth_corona_ps", "main", "ps_5_0", nullptr, 0x0372DA1389F36CE0ull},
         {"night exterior", "main", "cs_5_0", nullptr, 0x28453D6A0BAB0138ull},
-        {"screen motion", "main", "ps_5_0", nullptr, 0x422615E32B4FE096ull},
+        // Re-pinned 2026-10-08 on purpose: the character rule (an uncovered stencil texel beyond kFirstPersonReachDepth is a world
+        // pixel), the same rule as the flat prep's. Was 0x422615E32B4FE096.
+        {"screen motion", "main", "ps_5_0", nullptr, 0x8C2F828BE3751ABBull},
         {"weapon motion", "main", "vs_5_0", nullptr, 0x7232767DAC4ADBD4ull},
         {"weapon motion", "main", "ps_5_0", nullptr, 0xF948E51A2E036952ull},
         {"weapon identity", "main", "cs_5_0", nullptr, 0x10E05DE79500471Dull},

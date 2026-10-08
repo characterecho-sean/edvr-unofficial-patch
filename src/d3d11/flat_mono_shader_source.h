@@ -59,6 +59,14 @@ static const uint kClassNone=0, kClassJoined=1, kClassMasked=2, kClassNotRig=3, 
     kClassSentinel=7, kClassUnreprojectable=8, kClassCamera=9, kClassRange=10, kClassDepth=11, kClassWeapon=12,
     kClassWeaponRefused=13, kClassReset=14;
 
+// First-person reach, as the raw depth the depth texture holds (reversed-Z, d = near / z). The game's first-person draws use their own
+// camera, near plane 0.0675 m against the world camera's 0.025 m, so one raw depth is two distances: .075 is 0.9 m for a first-person draw
+// and 0.33 m for the world camera. The weapon the VR weapon map measured on 2026-10-08 (eye_121052_WeaponMotion.bin, 245,865 map texels
+// at 3808x2142) spans raw depth .1134 to .1948, 0.35 to 0.60 m in first-person units, so .075 keeps every measured weapon texel and half
+// again its reach; nothing in the world can be nearer than 0.33 m to the eye, which the player's own collision keeps clear of any
+// character. It decides only a texel the map does not cover (see "attached" in prep).
+static const float kFirstPersonReachDepth=.075;
+
 // Under the upstream camera injector the game derives the b1 rows from a jittered
 // frustum, so rows 0..3 carry the raster phase (x += ndc.x*w, y += ndc.y*w, w =
 // component 3, the same terms flat_camera_phase.h subtracts and the legacy scope
@@ -185,6 +193,14 @@ void prep(uint3 id:SV_DispatchThreadID) {
         foreground=owner.x < -1 && asuint(owner.y)==asuint(depth);
     }
     bool attached=route.z!=0 && (FirstPersonStencil.Load(int3(q,0)).y&16)!=0;
+    // The bit is not the weapon's alone: the game's characters carry it too (measured 2026-10-08 in the eye depth stencil: a walking NPC's
+    // whole silhouette, 8,359 px, and the commander's own body, 785,022 px, read 0x10). A character is a world surface drawn by a shader
+    // the weapon map never captures, so the map holds nothing (w 0) under it, and it must take the world path, an engine record if joined,
+    // else the camera term, as every other world pixel does. A texel is first-person only if the map covers it (w 1 valid or 2 new: the
+    // matcher saw a weapon mesh there, whether or not it could place it) or it is within reach (kFirstPersonReachDepth): a weapon or arm
+    // the matcher missed on a frame it declined (more than four mesh occurrences, an arena write) stays first-person and keeps no history,
+    // never the camera term, which would ghost it.
+    if(attached && FirstPersonMotion.Load(int3(q,0)).w==0 && depth<kFirstPersonReachDepth)attached=false;
     if(untrusted) {
         // A later world draw may have overwritten the same encoded depth.
         // Coverage remains a conservative camera-ambiguity veto.
