@@ -59,7 +59,10 @@ struct FakeSource final : SystemSource {
   void notePropertyQuery(unsigned,vr::TrackedDeviceIndex_t,vr::ETrackedDeviceProperty p,vr::ETrackedPropertyError e) noexcept override {
     std::lock_guard<std::mutex> lock(mutex);++propertyNotes;lastProperty=p;lastError=e;
   }
-  void noteHiddenMesh(unsigned,uint64_t,uint32_t,const char*) noexcept override {++meshNotes;}
+  const char* lastMeshReason="";uint32_t lastMeshTriangles=0,lastMeshDropped=0;
+  void noteHiddenMesh(unsigned,uint64_t,uint32_t triangles,const char* reason,uint32_t dropped) noexcept override {
+    ++meshNotes;lastMeshReason=reason;lastMeshTriangles=triangles;lastMeshDropped=dropped;
+  }
   void noteFrequencyQuery(const SystemRead&,vr::TrackedDeviceIndex_t,vr::ETrackedPropertyError error,
       float value,unsigned) noexcept override {
     std::lock_guard<std::mutex> lock(mutex);++frequencyNotes;frequencyError=error;frequencyValue=value;
@@ -222,6 +225,44 @@ void capabilityTests() {
     system.GetHiddenAreaMesh(vr::Eye_Left);
   }
   check(!system.GetHiddenAreaMesh(vr::Eye_Left).pVertexData&&left.pVertexData[1].v[1]==oldVertex.v[1],"mask retention limit refuses new data without dangling old pointers");
+  {
+    // Elite makes one vertex buffer per eye from the counts it is handed, and a
+    // zero-byte buffer fails CreateBuffer with E_INVALIDARG, which Elite treats
+    // as fatal (a Reverb G2 on SteamVR: left 29 triangles, right none, crash 4 s
+    // in). An eye is therefore served a mesh only when the other eye is too.
+    const NativeHiddenMask triangle=masks->eyes[0];
+    NativeHiddenMask none,broken=triangle,sliver=triangle;
+    broken.indices[0]=999;
+    // Three nearly collinear points: a nonzero area, but the inset corners land
+    // millions of units away. One such triangle used to discard the whole eye.
+    sliver.vertices.push_back({-2,-1});sliver.vertices.push_back({1,3});sliver.vertices.push_back({-.5f,1.0000001f});
+    sliver.indices.push_back(3);sliver.indices.push_back(4);sliver.indices.push_back(5);
+    struct Served{vr::HiddenAreaMesh_t eye[2];const char* reason;uint32_t dropped;};
+    const auto serve=[&](const NativeHiddenMask& l,const NativeHiddenMask& r)->Served {
+      FakeSource paired;OpenVRSystem pairedSystem(paired);paired.state=source.state;
+      auto both=std::make_shared<NativeHiddenMasks>(*masks);both->revision=1;both->eyes[0]=l;both->eyes[1]=r;
+      paired.state.hiddenMasks=both;
+      Served out{};out.eye[0]=pairedSystem.GetHiddenAreaMesh(vr::Eye_Left);
+      out.eye[1]=pairedSystem.GetHiddenAreaMesh(vr::Eye_Right);
+      out.reason=paired.lastMeshReason;out.dropped=paired.lastMeshDropped;return out;
+    };
+    auto served=serve(triangle,triangle);
+    check(served.eye[0].unTriangleCount==1&&served.eye[1].unTriangleCount==1&&!std::strcmp(served.reason,"runtime"),
+      "two populated eyes are both served");
+    served=serve(triangle,none);
+    check(!served.eye[0].pVertexData&&!served.eye[0].unTriangleCount&&!served.eye[1].pVertexData&&!served.eye[1].unTriangleCount,
+      "a populated left with an empty right serves neither eye (the zero-byte vertex buffer)");
+    check(!std::strcmp(served.reason,"empty"),"the empty eye says empty");
+    served=serve(none,triangle);
+    check(!served.eye[0].pVertexData&&!served.eye[1].pVertexData&&!std::strcmp(served.reason,"unpaired"),
+      "an empty left with a populated right serves neither eye, and the populated one says unpaired");
+    served=serve(triangle,broken);
+    check(!served.eye[0].pVertexData&&!served.eye[1].pVertexData&&!std::strcmp(served.reason,"invalid_mesh"),
+      "a malformed right eye takes the left eye's mesh with it");
+    served=serve(triangle,sliver);
+    check(served.eye[0].unTriangleCount==1&&served.eye[1].unTriangleCount==1&&served.dropped==1&&!std::strcmp(served.reason,"runtime"),
+      "a sliver triangle is dropped alone, the eye's other triangle and the other eye stay");
+  }
   source.state.connected=false;
   check(!system.GetHiddenAreaMesh(vr::Eye_Right).pVertexData&&
     system.GetFloatTrackedDeviceProperty(0,vr::Prop_UserIpdMeters_Float,&error)==0&&error==vr::TrackedProp_InvalidDevice,"retirement removes current IPD and mask availability");
