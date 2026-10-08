@@ -4,7 +4,6 @@
 #include "gpu_frame_timing.h"
 #include "gpu_census.h"       // issue #38: the per-feature GPU cost census
 #include "../common/d3d11_gpu_command_slots.h"
-#include "head_offset_gate.h"
 #include "vr_runtime.h"
 
 #include <windows.h>
@@ -759,13 +758,8 @@ struct State {
 
     uint32_t eyeDrawsThisFrame = 0;
     uint32_t eyeDrawsLastFrame = 0;
-    // Draws that sampled the flat on-foot panel this frame. The head-offset
-    // gate's other input: the panel being composited is direct evidence of
-    // on-foot first person, which is what tells it from the external camera
-    // that mode turns into.
-    uint32_t panelCompositeDraws = 0;
-    // Frames since the hooks were installed. Only the gate's log lines use it,
-    // to say when the panel was first counted.
+    // Frames since the hooks were installed. The per-frame instruments' log
+    // lines use it to say which frame they mean.
     uint32_t frameNo = 0;
     // Keep counting eye draws even when the panel distance fix is off, because
     // the transition-flash detector cannot act without the count.
@@ -1701,7 +1695,7 @@ __declspec(noinline) bool ensureOurCompositeCb(ID3D11DeviceContext* self, State*
 // Narrow that probe's on-condition and both belong here.
 bool drawGateSubscribed(State* s) {
     return s->distanceEnabled || s->countForFlashFix ||
-        headOffsetGateWantsPanel() || s->censusSkipCount != 0 ||
+        s->censusSkipCount != 0 ||
         s->censusSkipRangeCount != 0 || s->censusSkipOffCount != 0 ||
         s->quadSkipArmed ||
         s->censusAutoW != 0 || fssResActive() ||
@@ -1956,24 +1950,18 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
     // install -- never withheld a single frame. It reported itself as armed
     // throughout. Two features that have nothing to do with each other, and one
     // silently switched the other off.
-    // Three subscribers now, and this early return has learned each one late.
+    // Two subscribers learned this early return late.
     //
-    // It predates both the flash fix and the head-offset gate, and each time it
-    // was the SAME bug: a feature whose only source of eye-draw and panel counts
-    // is this function, silently starved because two unrelated settings were
-    // off. The flash fix added countForFlashFix; the gate is the third, and it
-    // starves in the configuration a user reaches by turning the panel distance
-    // fix off and leaving the flash fix off -- the gate then sees zeros forever,
-    // never arms, and nothing anywhere says why.
-    //
-    // The install-time gate already asked headOffsetGateWantsPanel(); this
-    // per-draw one did not, so the hooks were installed and then fed nothing.
+    // It predates the flash fix, and the flash fix hit the bug above: a
+    // feature whose only source of eye-draw counts is this function, silently
+    // starved because two unrelated settings were off. (The head-offset gate,
+    // deleted 2026-10-07 with the old Explorer Cam route, was a second.)
     //
     // The real fix is structural: counters this load-bearing belong in frame
     // state that features subscribe to, not inside one fix's fast path, so the
-    // next feature cannot make this mistake a fourth time.
-    // The census and its skip probe are subscribers four and five, added the
-    // way the paragraph above says the next one should not be. The structural
+    // next feature cannot make this mistake again.
+    // The census and its skip probe are later subscribers, added the way the
+    // paragraph above says the next one should not be. The structural
     // fix -- counters in frame state that features subscribe to -- is still
     // owed; until it lands, both at least fail towards silence: unarmed and
     // unset (the permanent state) they add nothing to this condition's
@@ -2648,23 +2636,6 @@ DrawVerdict beginPanelOverride(ID3D11DeviceContext* self, char kind, UINT count,
             }
             if (s->glareClamp) return DrawVerdict::kGlareClamp;
         }
-    }
-
-    // The head-offset gate's signal, recorded BEFORE the "does anything want to
-    // act" test below, and NOT conditional on the distance fix.
-    //
-    // This is an observation, not an intervention: it says the flat panel was
-    // on screen this frame. Putting it after the early return would tie one
-    // feature's inputs to another feature's setting, so turning the panel
-    // distance off would silently stop the head offset ever arming -- with
-    // every other part of it working and nothing saying why.
-    //
-    // srv0IsPanelSized memoises against the binding generation, so asking here
-    // and again below is one resolve per draw, not two. It is skipped entirely
-    // when the gate is off, because the answer costs a GetDesc and nothing
-    // wants it.
-    if (headOffsetGateWantsPanel() && srv0IsPanelSized(s, kind, count)) {
-        ++s->panelCompositeDraws;
     }
 
     // The curved screen, recognised here and acted on in forwardWithVerdict.
@@ -5732,12 +5703,6 @@ void vScreenRefreshConfig() {
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
     lodGovernorConfigure(cfg);
-    // Every fix.head_offset_* key, on the reload path as well as the startup
-    // one. A config reader on only one of the two is a specific repeatable bug
-    // -- reload-only means the value stays its C++ initialiser for the whole
-    // session -- and it cost a flight when fix.head_offset_gate did exactly
-    // that.
-    headOffsetGateConfigure();
 
     if (wasVoid != s->blackVoid || wasScale != s->distanceScale) {
         Log::get().note("vScreen config reloaded: black void %s, panel distance x%.3f "
@@ -6263,8 +6228,7 @@ void vScreenFrameBoundary() {
         // with them OFF is the settings -- and accusing a healthy
         // exposure-only install of being hooked over, with a solicited bug
         // report, is exactly the kind of lie this notice exists to end.
-        const bool perDrawAskers = s->distanceEnabled || s->countForFlashFix ||
-                                   headOffsetGateWantsPanel();
+        const bool perDrawAskers = s->distanceEnabled || s->countForFlashFix;
         char adviceBuf[1100];
         const char* advice;
         // The runtime paragraph goes on its own line AFTER the notice, not
@@ -6279,10 +6243,9 @@ void vScreenFrameBoundary() {
             // whether the clearing worked.
             advice =
                 "Eye draws are only counted when a fix that needs them per "
-                "draw is on, and none is: the panel distance is at 1.0, the "
-                "flash detector is not counting, and the head-offset gate is "
-                "idle. The black void fix does not count draws -- the totals "
-                "lines say whether it is clearing. This zero is those "
+                "draw is on, and none is: the panel distance is at 1.0 and the "
+                "flash detector is not counting. The black void fix does not "
+                "count draws -- the totals lines say whether it is clearing. This zero is those "
                 "settings, not a fault.";
         } else if (s->recogniserAsks == 0) {
             advice =
@@ -6862,15 +6825,11 @@ void vScreenFrameBoundary() {
     // entry, so the accumulators this call would otherwise finalise are
     // already clear.
     poseReaderWatchFrameBoundary(s->frameNo);
-    // The gate decides on the counts for the frame that just ended, so it is
-    // told before they reset -- same rule as the flash detector above.
-    headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, sceneDraws);
     // fix.explorer_cam (Explorer Cam, Phase 1): before the probe below, which attaches to the free-camera hook this installs.
     tkExplorerCam.run([&] { explorerCamFrameBoundary(s->frameNo); });
     // advanced.explorer_cam_probe (Phase 0b, flight F0; temporary): reads the key, attaches to the free-camera hook when it is on, and
     // prints the 5 s heartbeats, the change lines and the 1 Hz detail lines. Log only; with the key off it reads the key and returns.
     tkExplorerCamProbe.run([&] { explorerCamProbeFrameBoundary(s->frameNo); });
-    s->panelCompositeDraws = 0;
     s->eyeDrawsThisFrame = 0;
     s->sceneDrawsThisFrame = 0;
     ++s->frameNo;
@@ -6893,7 +6852,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     if (!device || g_state || g_transportSelected) return;
 
     Config& cfg = Config::get();
-    headOffsetGateConfigure();
     const bool wantVoid = cfg.getBool("fix.black_void", true);
     const float scale = cfg.getFloat("fix.panel_distance", 1.0f);
     // Install the hooks whenever EITHER fix could be wanted now or later. Both
@@ -6910,7 +6868,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     // them: armed in the log, then nothing, and not even the give-up notice,
     // because the frame counter it waits on also lives in here.
     if (!wantVoid && scale == 1.0f && !glitchFrameNeedsEyeDraws() &&
-        !headOffsetGateWantsPanel() &&
         !cfg.getBool("advanced.app_gpu_timing", true) &&
         !cfg.getBool("advanced.panel_hooks_always", true)) {
         // The optional fixes are deliberately dormant, but native discovery

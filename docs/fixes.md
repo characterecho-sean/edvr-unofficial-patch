@@ -245,12 +245,13 @@ memory: read [What the fixes touch](#what-the-fixes-touch) first.
 `fix.vscreen_res_width = auto` (default); `1920` turns it off, same as stock.
 
 **On foot not being in 3D — Explorer Cam.** First person on foot is a flat image
-shown to both eyes; the external camera renders real stereo. Explorer Cam puts
-your viewpoint at your commander's head while you are in that camera, so the
-surface, your ship and the room have depth. It cannot make first person 3D and
-does not try, and it gives you no capability you do not already have. Off until
-you configure it, and worth the few minutes:
-[Explorer Cam](explorer-cam.md). `fix.head_offset_*`, unset.
+shown to both eyes; the free camera renders real stereo. Open the camera on foot
+and press TAB, and Explorer Cam puts your viewpoint at your commander's head and
+locks it to them, so the surface, your ship and the room have depth. It cannot
+make first person 3D and does not try, and it gives you no capability you do not
+already have. On by default in VR; the commander's head is still visible from
+inside: [Explorer Cam](explorer-cam.md). `fix.explorer_cam` (default `on`) and
+`fix.explorer_cam_eye_up`, `_eye_forward`, `_eye_right`.
 
 ---
 
@@ -329,9 +330,9 @@ update (build 332753) moved the second of them and left the first alone;
   fix disables itself and says so. It also switches off for the session if it
   ever withholds continuously, because permanent judder would be worse than the
   flash.
-- Explorer Cam's camera marker will also move on update, and did in 332753.
-  Reading the preset is now off by default and Explorer Cam counts key presses
-  instead; [explorer-cam.md](explorer-cam.md) says what that costs.
+- Explorer Cam is built for one game build (332841). On any other build it
+  leaves the game untouched and the log says so;
+  [explorer-cam.md](explorer-cam.md) has the detail.
 
 The transition flash fix also recognises recurring false jumps and leaves them
 alone. Flying low over terrain, the game alternates between shadow cameras
@@ -407,7 +408,8 @@ the true region, copied from the game's own frame. The cull guard edits
 answers, never memory, so the runtime and anything else that asks always
 receive the truth, and before changing anything it validates the runtime's
 projection against the shape it expects, standing down loudly on a mismatch.
-Explorer Cam and the cull guard do nothing until you configure them.
+The cull guard does nothing until you configure it. Explorer Cam works when you
+open the on-foot camera and press TAB.
 
 Two changes are always made, and no setting turns them off. At load EDVR
 redirects two of the game's imports in memory: `LoadLibraryW`, so that Elite's

@@ -285,9 +285,10 @@ the hold. Whether a hold now covers the bad frames instead of postponing them
 is an open question that has not been re-measured; the switch still ships at 0,
 and the measurement above stands as the record of why it was 0 before.
 
-The switch survives as `hold_frames_on_external_cam`, defaulting to 0, with that
-history written beside it so the idea is neither rediscovered from scratch nor
-dismissed on a measurement whose premise has moved.
+The switch survived as `hold_frames_on_external_cam`, defaulting to 0, until
+2026-10-07, when it was removed with the old Explorer Cam route whose camera
+key pressed it. The history stays here so the idea is neither rediscovered from
+scratch nor dismissed on a measurement whose premise has moved.
 
 **If you see a flash that got through:** press **Pause** immediately, then quit
 and send `edvr_logs\`. That writes the last ten seconds of viewpoint history,

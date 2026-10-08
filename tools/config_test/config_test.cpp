@@ -1042,14 +1042,32 @@ static void iniNameScan(const std::wstring& root) {
 // The three experimental keys retired on 2026-10-01 chose behaviour that is now permanent: the VR world route's jitter (always on
 // while the route owns the world; experimental.temporal_aa_jitter off still stops it), the depth-validated steady detail (always on,
 // in the VR world route and in the flat runtime) and the switch that made the jitter phases follow the upscale ratio (they always
-// do). Nothing may still spell their names. A reader left behind would let a user's old line act, a log message would send people
+// do). The fifteen keys of the old Explorer Cam route went on 2026-10-07 (docs/design-explorer-cam-free-camera-2026-10-07.md): the
+// press-counting gate, its camera-key adoption and the headset-pose offset, replaced by fix.explorer_cam. Nothing may still spell
+// their names. A reader left behind would let a user's old line act, a log message would send people
 // to a setting that does nothing, and the shipped file would document one. The installer carries an old line over under "this
 // version no longer uses it" (installer_test holds that), so only the two tests spell the names.
 static const char* const kRetiredKeys[] = {
     "temporal_aa_on_foot_world_jitter",
     "temporal_aa_on_foot_world_steady_detail",
     "temporal_aa_jitter_follows_upscale",
+    // The old Explorer Cam route, 2026-10-07. head_offset_view also covers head_offset_view_count.
+    "head_offset_gate",
+    "head_offset_view",
+    "head_offset_intent_grace_ms",
+    "head_offset_enter_window_ms",
+    "head_offset_right",
+    "head_offset_up",
+    "head_offset_forward",
+    "head_yaw_degrees",
+    "head_offset_external_only",
+    "head_offset_game_poses",
+    "head_offset_max_stale_frames",
+    "dump_camera_on_external_cam",
+    "keyless_camera",
+    "hold_frames_on_external_cam",
 };
+static const int kRetiredKeyCount = static_cast<int>(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
 
 // The first retired name `text` spells, or nullptr.
 static const char* spellsRetiredKey(const std::string& text) {
@@ -1073,19 +1091,20 @@ static void retiredKeyScan(const std::wstring& root) {
     const std::string live =
         "experimental.temporal_aa_on_foot_world = auto\n"    // the live route key: the retired names start with it
         "experimental.temporal_aa_jitter = on\n";             // the live global jitter key: one retired name starts with it
-    if (found == 3 && !spellsRetiredKey(live))
-        ok("the retired-key scan finds each of the three names in a read, a message and a comment, and passes the live keys beside them");
+    if (found == kRetiredKeyCount && !spellsRetiredKey(live))
+        ok("the retired-key scan finds each retired name in a read, a message and a comment, and passes the live keys beside them");
     else
-        fail("the retired-key scan's own control", std::to_string(found) + " of 3 names found, or a live key was flagged");
+        fail("the retired-key scan's own control", std::to_string(found) + " of " + std::to_string(kRetiredKeyCount) +
+                                                       " names found, or a live key was flagged");
 
     // The shipped file: no template, no comment, no mention.
     const std::string ini = readRepoFile(root, L"edvr.ini");
     if (ini.empty()) {
         fail("edvr.ini is readable from the repo root (retired keys)", "could not read it");
     } else if (const char* name = spellsRetiredKey(ini)) {
-        fail("the shipped edvr.ini names none of the three retired keys", std::string("it spells ") + name);
+        fail("the shipped edvr.ini names none of the retired keys", std::string("it spells ") + name);
     } else {
-        ok("the shipped edvr.ini defines, documents and mentions none of the three retired keys");
+        ok("the shipped edvr.ini defines, documents and mentions none of the retired keys");
     }
 
     // Every production source, the installer's included: no reader, no allow-list entry, no log line.
@@ -1424,15 +1443,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The Explorer Cam block, under a SECOND [fix] and a second [hotkey].
-    // This is the claim that a repeated section header is not a parse error
-    // and does not silently discard everything after it.
-    expectBool("fix.head_offset_gate", true, "a key under a REPEATED [fix] reads");
-    // The preset it applies to moved to [advanced] and ships commented out,
-    // so the shipped file must NOT define it -- the compiled default is the
-    // one in force. -999999 is this file's "the key is not there" sentinel.
-    expectInt("advanced.head_offset_view", -999999,
-              "...and the preset it applies to is an expert setting now, not shipped live");
+    // The Explorer Cam switch reads from the shipped file, and the keys of the
+    // old route it replaced are not defined there (kRetiredKeys, above).
+    expectBool("fix.explorer_cam", true, "the shipped Explorer Cam switch reads on");
     expectBool("hotkey.read_game_bindings", true,
                "a key under a repeated [hotkey] reads");
 
@@ -1460,7 +1473,7 @@ int main(int argc, char** argv) {
             "[d3d11]\r\n"
             "inventory = no\r\n"
             "[fix]\r\n"             // repeated, as the shipped file does it
-            "head_offset_view = 3\r\n"
+            "fixture_value = 3\r\n"
             // A STRAY KEYSTROKE, which strtol used to read as a deliberate
             // setting. Found in a player ini as
             // transition_flash_max_consecutive = 3w: it parsed to 3, which
@@ -1468,7 +1481,7 @@ int main(int argc, char** argv) {
             // whole budget and opened a two-second window in which nothing
             // could be withheld. The flash the fix exists to hide came back,
             // and the cause was one invisible character.
-            "head_offset_view_count = 4w\r\n"
+            "fixture_stray = 4w\r\n"
             "panel_distance_index = 12 or 13\r\n"
             "black_void = 0\r\n";   // duplicate: the later one must win
         if (!writeIni(scratch, kIni)) {
@@ -1478,9 +1491,9 @@ int main(int argc, char** argv) {
             expectBool("fix.share_exposure", true, "getBool accepts YES");
             expectBool("d3d11.inventory", false, "...and no");
             expectFloat("fix.panel_distance", 2.5f, "a ; comment is not part of the value");
-            expectInt("fix.head_offset_view", 3,
+            expectInt("fix.fixture_value", 3,
                       "a BOM does not swallow the first section");
-            expectInt("fix.head_offset_view_count", -999999,
+            expectInt("fix.fixture_stray", -999999,
                       "a trailing letter is refused, not silently truncated");
             expectInt("fix.panel_distance_index", -999999,
                       "...and so is a value with words after the number");
@@ -2037,7 +2050,7 @@ int main(int argc, char** argv) {
     expectStr("advanced.vr_camera_census", "off", "flat scope refuses the VR camera census's key");
     Config::get().set("fix.temporal_aa", "dlss");
     Config::get().set("fix.black_void", "on");
-    Config::get().set("fix.head_offset_forward", "12");
+    Config::get().set("fix.explorer_cam_eye_forward", "12");
     Config::get().set("experimental.night_vision_realistic", "on");
     Config::get().set("advanced.real_dll", "d3d11_edhm.dll");
     expectStr("fix.temporal_aa", "off", "flat discovery cannot activate stereo temporal AA");
@@ -2061,9 +2074,9 @@ int main(int argc, char** argv) {
     Config::get().set("advanced.eye_depth_capture", "on");
     expectBool("advanced.eye_depth_capture", false,
                "flat profile: eye depth capture reads off, so it cannot arm the depth probe or hold the draw gate open");
-    expectInt("fix.head_offset_forward", 0, "flat profile suppresses numeric fix");
-    expectFloat("fix.head_offset_forward", 0.0f, "flat profile suppresses float fix");
-    if (Config::get().getIntInRange("fix.head_offset_forward", 12, 1, 100) != 0)
+    expectInt("fix.explorer_cam_eye_forward", 0, "flat profile suppresses numeric fix");
+    expectFloat("fix.explorer_cam_eye_forward", 0.0f, "flat profile suppresses float fix");
+    if (Config::get().getIntInRange("fix.explorer_cam_eye_forward", 12, 1, 100) != 0)
         fail("flat bounded getter", "minimum reactivated disabled feature");
     else ok("flat scope precedes bounded numeric defaults");
     expectStr("advanced.real_dll", "d3d11_edhm.dll", "flat scope preserves mod chaining");

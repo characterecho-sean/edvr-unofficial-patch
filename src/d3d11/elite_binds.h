@@ -1,11 +1,11 @@
 // The player's own Elite keybindings, read from where the game keeps them.
 //
 // Elite stores bindings as XML in Options\Bindings\*.binds under its local
-// appdata, with StartPreset.start naming the active preset. The two bindings
-// EDVR watches for -- the external-camera toggle and the next-vanity-view
-// cycle -- are in there, already answered, for every player who has ever
-// bound them in the game. Reading them removes the last piece of manual
-// setup: no ini editing at all for keyboard players.
+// appdata, with StartPreset.start naming the active preset. The bindings
+// EDVR watches for -- the FSS enter, quit and zoom keys -- are in there,
+// already answered, for every player who has ever bound them in the game.
+// Reading them removes the last piece of manual setup: no ini editing at all
+// for keyboard players.
 //
 // Read at startup and RE-READ when the files change: Elite rewrites this
 // directory the moment a rebind or preset switch is applied, so a slow stat
@@ -21,30 +21,29 @@
 // uses in the cockpit. That reader wants every slot of an element, not the
 // first watchable one, and it is the only caller allowed to see a modifier
 // key (Key_LeftControl...) as a MAIN key: under kEliteKeyAllowModifierMain
-// the translation answers "0xA2" where the camera path refuses. The camera
-// path never passes the flag -- a bare Ctrl as a camera watch would fire on
-// every chord the player types. The slot parser also bounds each slot's
-// <Modifier> by the NEXT slot's tag, while parseElementIn (the camera's)
-// deliberately scans to the element's end: changing the camera parser would
-// change its answer for a bare-Primary/chorded-Secondary element, and that
-// answer is pinned by the smoke fixtures.
+// the translation answers "0xA2" where the watched-key path refuses. That
+// path never passes the flag -- a bare Ctrl watch would fire on every chord
+// the player types. The slot parser also bounds each slot's <Modifier> by the
+// NEXT slot's tag, while parseElementIn deliberately scans to the element's
+// end: changing parseElementIn would change its answer for a
+// bare-Primary/chorded-Secondary element, and that answer is pinned by the
+// smoke fixtures.
 #pragma once
 
 #include <cstddef>
 
 namespace edvr {
 
-// Look up an Elite binding element (e.g. "PhotoCameraToggle_Humanoid",
-// "VanityCameraScrollRight") in the active preset's files and translate it
+// Look up an Elite binding element (e.g. "ExplorationFSSEnter",
+// "ExplorationFSSQuit") in the active preset's files and translate it
 // to an EDVR binding string ("F11", "SHIFT+RIGHT", "["). Returns true and
 // fills `out` when a keyboard binding was found; false when the element is
 // unbound, bound to a non-keyboard device, or the files cannot be read.
 //
 // `fallbackElement`, when given, is consulted ONLY where the primary
-// element is entirely ABSENT from the chosen file. On foot the game acts
-// on PhotoCameraToggle_Humanoid exclusively -- a Humanoid entry bound to a
-// controller must NOT fall through to the ship element's keyboard key,
-// because that key does nothing on foot and watching it is the
+// element is entirely ABSENT from the chosen file. A primary element bound
+// to a controller must NOT fall through to the fallback's keyboard key,
+// because the game does not act on that key there and watching it is the
 // missed-press desync class.
 bool eliteBindsLookup(const char* element, char* out, size_t outLen,
                       const char* fallbackElement = nullptr);
@@ -56,14 +55,6 @@ bool eliteBindsLookup(const char* element, char* out, size_t outLen,
 // ignores. Same preset/file selection rules as the keyboard lookup.
 bool eliteBindsLookupPad(const char* element, char* out, size_t outLen);
 
-// The MODIFIER of an element's gamepad slot, when it has one -- the half
-// eliteBindsLookupPad throws away by skipping chorded slots.
-//
-// Wanted by a binding that shares a button with a chord and has to know when
-// to stand aside: watching DPad-Right for the view cycle means nothing unless
-// you can also tell that this particular DPad-Right came with Face-Right and
-// belongs to the camera toggle.
-bool eliteBindsLookupPadMod(const char* element, char* out, size_t outLen);
 bool eliteBindsLookupPadDir(const wchar_t* dir, const char* element,
                             char* out, size_t outLen);
 

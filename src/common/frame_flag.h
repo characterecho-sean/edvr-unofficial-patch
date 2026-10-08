@@ -24,7 +24,7 @@ namespace edvr {
 //
 // Both DLLs compile frame_flag.cpp, and the shared block's layout changes
 // with it, so the block's name carries the version
-// (Local\edvr_glitch_frame_v36_<pid>): halves from different builds never
+// (Local\edvr_glitch_frame_v37_<pid>): halves from different builds never
 // share one. That kept a mismatched pair inert, but silently. Since v34
 // each half also signs a small version-independent roll-call with the
 // version it was built with, and looks for the last unsigned layout's
@@ -32,7 +32,7 @@ namespace edvr {
 // version REFUSES the channel -- from then on every call here reads as "no
 // answer" and writes nothing -- and frameFlagPeerMismatch() names the
 // partner's version so the caller's log can say both.
-constexpr uint32_t kFrameFlagVersion = 36;
+constexpr uint32_t kFrameFlagVersion = 37;
 
 // The partner half's layout version when it differs from kFrameFlagVersion,
 // else 0. Nonzero means the channel is refused. Each half asks on a cadence
@@ -162,61 +162,16 @@ bool glitchConsumerPresent();
 void noteJumpVerdict(uint32_t verdict);
 uint32_t jumpVerdictPacked();
 
-// The player is on foot in the external camera, having arrived there from the
-// flat panel -- the one state where moving the head pose is wanted.
-//
-// Set by d3d11.dll, which is the only half that can tell the modes apart: it
-// watches the panel composite, and the panel stopping while a full scene is
-// drawn into the eyes is what the transition looks like. Read by
-// openvr_api.dll, which is the only half that can act on it, because the head
-// pose passes through there. Neither can do the other's job, which is why this
-// is a channel rather than a local.
-//
-// UNLIKE the glitch flag, this one is a STATE and persists across frames. It is
-// not cleared at the frame boundary; it is cleared when the panel comes back.
-// Call this EVERY frame, with the current answer, not only when it changes. The
-// repetition is the point: it is also the heartbeat that externalCameraOnFootLive
-// reads, so "d3d11 says no" and "d3d11 has stopped saying anything" stay
-// distinguishable.
-void setExternalCameraOnFoot(bool on);
-
-// The last value written, whenever it was written.
-//
-// Prefer externalCameraOnFootLive for anything that MOVES THE PLAYER. This one
-// cannot tell a current "yes" from a "yes" left behind by a writer that has
-// since stopped, and the header used to say as much without doing anything
-// about it: "a wrong answer here does not expire on its own".
-bool externalCameraOnFoot();
-
-// True only if d3d11.dll says yes AND has said something within maxAgeFrames
-// calls of this function.
-//
-// WHY A HEARTBEAT. The writer runs inside a fault-budgeted SEH guard on the
-// Present path, and that guard stops running its body permanently after a few
-// faults. The gate would then freeze at whatever it last published. Frozen ON
-// means the head offset stays applied in every mode -- including the cockpit --
-// for the rest of the session, with both logs still saying it is gated, because
-// no line is printed for a decision that is never re-made. The same freeze
-// follows from the d3d11 hook being lost to a recreated device or swapchain.
-//
-// This is the argument the openvr half already makes for keeping the offset
-// itself outside its own budgeted guard: a fault budget is right for logging,
-// where losing a line costs nothing, and wrong for anything that changes what
-// the player sees. The writer here cannot move out of its guard -- it is
-// derived from the render state the guard exists to inspect -- so the reader
-// stops trusting it instead.
-//
-// Counted in READER frames rather than time. Both halves run once per rendered
-// frame, so the units match without a clock, and a stall that freezes both
-// halves together does not age the flag while nothing is being drawn anyway.
-bool externalCameraOnFootLive(uint32_t maxAgeFrames);
-
 // Ask the openvr half to decline the next `frames` frames.
 //
+// NO PRODUCTION CALLER since 2026-10-07: its only caller was the old Explorer
+// Cam's frame-hold setting, deleted with that route. The channel and its reader (takeSubmitHoldFrame, native_frame.cpp's
+// latchSubmit) are kept for now; native_frame_test still drives them.
+//
 // NOT A DETECTION, and that is the whole point of it. Everything else across
-// this channel is one half telling the other what it inferred; this is the
-// player saying so. They pressed the external-camera key, so a transition is
-// starting -- there is nothing to recognise and nothing to be wrong about.
+// this channel is one half telling the other what it inferred; this is a
+// request made on a known event, with nothing to recognise and nothing to be
+// wrong about.
 //
 // It exists because during that transition Elite draws several frames from
 // somewhere the player is not -- confirmed with fix.transition_flash = 0, so it
@@ -314,7 +269,7 @@ PoseReaderCall poseReaderCall();
 // WHY THIS IS A CHANNEL AND NOT A CONSTANT. The d3d11 half has to decide, per
 // render target, whether it is one of the eyes -- everything downstream of that
 // answer (the black void, the panel distance, the transition-flash detector's
-// "is a scene being drawn", and the head-offset gate) is fed by it. It cannot
+// "is a scene being drawn") is fed by it. It cannot
 // see a Submit, so it guessed by size: 2048x2048 or larger. A guess is what the
 // openvr half never has to make, because the texture is handed to it by name.
 //
@@ -427,9 +382,8 @@ void setMenuHeadLock(bool on, float yawDeg, float pitchDeg);
 bool menuHeadLock(float* yawDeg, float* pitchDeg);
 
 // VISIBLE: written by d3d11 EVERY FRAME while the menu machinery runs, with
-// the panel's fade alpha (0..1) -- and the stamp moves on every write, the
-// externalCam discipline, so "closed" and "d3d11 stopped saying" stay
-// distinguishable. The openvr half draws when alpha > 0 and the stamp moved
+// the panel's fade alpha (0..1) -- and the stamp moves on every write, so
+// "closed" and "d3d11 stopped saying" stay distinguishable. The openvr half draws when alpha > 0 and the stamp moved
 // within the last few frames.
 void setMenuVisible(float alpha);
 bool menuVisible(float* alpha, uint32_t* stamp);

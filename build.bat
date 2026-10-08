@@ -529,7 +529,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\pose_reader_watch.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\explorer_cam.cpp" "src\d3d11\explorer_cam_probe.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
-    "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
+    "src\d3d11\binding_shadow.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
     "src\d3d11\journal_watch.cpp" "src\d3d11\terrain_checkerboard.cpp" ^
     "src\d3d11\elite_binds.cpp" "src\d3d11\draw_census.cpp" ^
@@ -1484,7 +1484,6 @@ if not exist "%OBJ%\gatetest" mkdir "%OBJ%\gatetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\gatetest"\ /Fe"%BUILD%\gate_test.exe" ^
     "tools\gate_test\gate_test.cpp" ^
-    "src\d3d11\head_offset_gate.cpp" "src\d3d11\vr_runtime.cpp" ^
     "src\common\config.cpp" ^
     "src\common\log.cpp" "src\common\frame_flag.cpp" ^
     "src\common\guard.cpp" ^
@@ -1492,7 +1491,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
 if errorlevel 1 ( echo [edvr] ERROR: gate_test build failed & exit /b 1 )
 "%BUILD%\gate_test.exe" "%ROOT%" || (
-    echo [edvr] ERROR: the head-offset gate arms where it should not
+    echo [edvr] ERROR: gate_test failed: the journal watcher, timing, periodic work or logged-note checks
     exit /b 1
 )
 exit /b 0

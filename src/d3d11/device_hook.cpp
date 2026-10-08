@@ -40,7 +40,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
-#include "head_offset_gate.h"
 #include "fss_res.h"
 #include "journal_watch.h"
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
@@ -257,34 +256,12 @@ struct State {
     // The eye dump key: both eyes as the headset receives them, to
     // edvr_logs\eyes as BMP (temporalPassArmEyeDump). Unbound by default.
     Hotkey eyesKey;
-    // The external camera key, and only that one.
-    //
-    // A keypress is not a heuristic, and it is the whole reason this feature can
-    // tell entering the external camera from boarding a ship: render state alone
-    // cannot. Unbound by default, and the gate does nothing at all without it.
-    //
-    // There is no next-camera-view key here. It existed as a fallback for
-    // counting the camera preset by hand, and EDVR reads the preset from the
-    // game instead -- so it was a second binding to explain, to get wrong, and
-    // to keep in step, in exchange for nothing a working install uses.
-    Hotkey externalCamKey;
-    Hotkey extCamNextKey;
-    // And the other way round the ring. Elite binds the two directions
-    // separately, so watching only one counts only half of what the player
-    // does with the cycle.
-    Hotkey extCamPrevKey;
     // The player's own FSS enter/quit keys, adopted from their Elite
-    // bindings like the camera keys above; they give the FSS mode latch its
-    // frame-exact edges.
+    // bindings; they give the FSS mode latch its frame-exact edges.
     Hotkey fssEnterKey;
     Hotkey fssQuitKey;
     Hotkey fssZoomStepKey;
     Hotkey fssZoomKey;
-    // The camera cycle on a gamepad. Elite's own defaults put the view
-    // cycle on the D-pad and the camera toggle on the SAME D-pad direction
-    // with a modifier, so these carry a veto as well as a button.
-    XinputBinding extCamNextPad;
-    XinputBinding extCamPrevPad;
     XinputBinding fssEnterPad;
     XinputBinding fssQuitPad;
     XinputBinding fssZoomStepPad;
@@ -296,18 +273,15 @@ struct State {
     uint64_t fssLatchMs = 0;
     uint64_t fssQuitMs = 0;
     uint32_t fssLatchNotes = 0;
-    // Both camera hotkeys come from the GAME's bindings files and follow
-    // them live (0.7.1 removed the ini overrides outright) -- Elite
-    // rewrites Options\Bindings the moment a rebind or preset switch is
-    // applied, and a slow stat (below) notices within seconds.
+    // The FSS hotkeys come from the GAME's bindings files and follow them
+    // live -- Elite rewrites Options\Bindings the moment a rebind or preset
+    // switch is applied, and a slow stat (below) notices within seconds.
     uint64_t bindsFingerprint = 0;
     uint64_t bindsPending = 0;       // a change waiting to hold for one beat
     // When the bindings directory was last stat'd. Was a 450-frame countdown
     // duplicating kBindsCheckFrames as a literal, so converting the constant
     // alone would have left the FIRST interval on the old value.
     uint64_t bindsCheckMs = 0;
-    uint32_t lastJournalDisembarks = 0;
-    uint32_t lastJournalEmbarks = 0;
     // THE frame number for this session, in the numbering every instrument
     // prints: frame N is everything between Present N-1 returning and Present N
     // returning, so this is the frame IN PROGRESS and it starts at 1 -- the
@@ -320,17 +294,11 @@ struct State {
     uint64_t lastPresentMs = 0;
     uint64_t presentingMs = 0;
 
-    // Dump the camera history on every external-camera keypress. Diagnostic,
-    // off by default: one line per frame of the ring, every press.
-    bool     dumpOnExternalCam = false;
     // When the delayed dump is due. 0 means none is armed.
     uint64_t dumpDueMs = 0;
     uint32_t missedDumpNotes = 0;
     uint32_t missedCensusNotes = 0;
     bool     threadNoted = false;
-    // Frames to hold across an external-camera transition. 0 = off, and it stays
-    // there: see the note beside the setting in edvr.ini.
-    uint32_t holdFramesOnExternalCam = 0;
 
     // Crash sentinel for the d3d11 half.
     //
@@ -441,13 +409,11 @@ constexpr uint64_t kSentinelConfirmMs = 6000;
 // separate those two populations, and they are four orders of magnitude apart.
 constexpr uint64_t kSentinelMaxFrameMs = 250;
 
-// Frames to wait after an external-camera keypress before dumping the history.
+// How long after a history-key press the second dump is taken.
 //
-// Two seconds, which is comfortably past the mode change: the panel-to-scene
-// delay alone has been measured at 2 to 86 frames, and the flash being chased
-// is on the transition itself. The ring holds at least ten seconds at every
-// supported rate, so this still leaves eight seconds of ordinary flight in
-// front of the event to compare against.
+// Two seconds, which is comfortably past a reaction-time capture. The ring
+// holds at least ten seconds at every supported rate, so this still leaves
+// eight seconds of ordinary flight in front of the event to compare against.
 //
 // The openvr half's kPoseDumpDelayMs is held EQUAL to this, and the equality
 // still matters for the same reason it always did: the two logs are read side
@@ -1137,8 +1103,6 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT c
 //                     below it: a probe's dump must not take the fix's switch along.
 //   hotkeys           the diagnostic keys (history, census, eye dump), their
 //                     missed-press notes and the delayed dump: one instrument.
-//   journal_gate      everything the journal tells the head-offset gate.
-//   camera_keys_pads  the camera keys and pads, with the two settings only they read.
 //   config_refresh    the reload and the settings derived from what it re-read.
 //   hook_reclaim      three detection-only passes over the device, swapchain and
 //                     factory hooks: one kind of pass, and none reads another's result.
@@ -1162,8 +1126,6 @@ EDVR_BOUNDARY_TICK(tkToggleKey, "toggle_key");
 EDVR_BOUNDARY_TICK(tkHotkeys, "hotkeys");
 EDVR_BOUNDARY_TICK(tkEliteBinds, "elite_binds");
 EDVR_BOUNDARY_TICK(tkJournalWatch, "journal_watch");
-EDVR_BOUNDARY_TICK(tkJournalGate, "journal_gate");
-EDVR_BOUNDARY_TICK(tkCameraKeysPads, "camera_keys_pads");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
 EDVR_BOUNDARY_TICK(tkBindingBoundary, "binding_boundary");
@@ -1225,7 +1187,7 @@ void tickHotkeys() {
             "%u times a session.",
             kMissedDumpNotes);
     }
-    // The delayed dump, armed by either key.
+    // The delayed dump, armed by the history key.
     if (g_state->dumpDueMs != 0 && nowMs() >= g_state->dumpDueMs) {
         g_state->dumpDueMs = 0;
         dumpCameraRing("a key you pressed two seconds ago",
@@ -1286,132 +1248,11 @@ void tickEliteBinds() {
     }
 }
 
-// What the journal tells the head-offset gate (tkJournalGate).
-void tickJournalGate() {
-    if (journalWatchActive()) {
-        const uint32_t d = journalDisembarks();
-        if (d != g_state->lastJournalDisembarks) {
-            g_state->lastJournalDisembarks = d;
-            headOffsetGateNewFootSession(
-                "the game's journal says you disembarked",
-                /*journalSaysSo=*/true);
-        }
-        const uint32_t e = journalEmbarks();
-        if (e != g_state->lastJournalEmbarks) {
-            g_state->lastJournalEmbarks = e;
-            headOffsetGateNoteEmbark();
-        }
-    }
-    // The game's live on-foot word: what makes a KEYLESS install work at all
-    // (the gate turns it into intent, 6bb).
-    headOffsetGateSetOnFootLive(journalOnFootKnown(), journalOnFoot(),
-                                journalStatusSamples());
-    headOffsetGateSetWakeLive(journalSupercruiseKnown(), journalSupercruise(),
-                              journalInJumpTunnel());
-}
-
-// The camera keys and pads (tkCameraKeysPads), and the two settings only they read.
-void tickCameraKeysPads() {
-    // The two settings below are read by this tick alone, so they are re-read here
-    // and not beside the diagnostic keys they used to sit among.
-    //
-    // Deliberately not part of the toggle: it reports, it does not change
-    // anything, so there is no reason for it to follow the fix being off.
-    // The two diagnostic settings, re-read every frame.
-    //
-    // They were read once at install, like everything else in ensureState,
-    // and both are numbers you find by FEEL from inside a headset -- which
-    // means a relaunch per guess, which is not tuning. The same argument the
-    // head offset made when it moved onto the reload path, and vscreen.h
-    // records the same mistake before that: two settings documented as
-    // changeable while the game runs that were never re-read, reported as
-    // the fix being broken.
-    //
-    // Every frame rather than on a poll, because the cost is two lookups in
-    // a map that is already in memory -- vScreenRefreshConfig does the file
-    // check, so nothing here touches the disk.
-    g_state->dumpOnExternalCam =
-        Config::get().getBool("advanced.dump_camera_on_external_cam", false);
-    g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
-        Config::get().getIntInRange("experimental.hold_frames_on_external_cam", 0, 0, 120));
-
-    // Camera keys mean the CAMERA only once gameplay has started. Before
-    // LoadGame every press is menu navigation -- and the next-view key is
-    // typically an arrow, which menus eat by the dozen; counting those
-    // walked the view count away from reality before the game even began
-    // (6ba). Without the journal, behaviour is exactly as before.
-    const bool keysMeanGame = !journalWatchActive() || journalGameplay();
-    // Told to the gate, not acted on here. These keys are the player's OWN
-    // Elite bindings: EDVR does not send them, press them or interfere with
-    // them -- it watches for the same press the game gets, so it knows
-    // which mode the player just asked for.
-    if (keysMeanGame && g_state->externalCamKey.pressed()) {
-        headOffsetGateKeyPressed();
-        // The camera history, triggered by the press but taken AFTER it.
-        //
-        // Entering and leaving the external camera is reported as flashing,
-        // and it is a transition nobody can press Pause during: by the time
-        // they reach that key the ten seconds of history are the ten seconds
-        // after the thing they wanted.
-        //
-        // Dumping ON the press has the same fault in the other direction --
-        // the ring holds the frames BEFORE it, so it would capture ten
-        // seconds of standing still and none of the transition. The delay is
-        // the whole point: two seconds later the ring holds the press, the
-        // mode change and the flash, with eight seconds of ordinary flight
-        // in front of them for comparison.
-        if (g_state->dumpOnExternalCam) g_state->dumpDueMs = nowMs() + kDumpDelayMs;
-        // Hold the last good frame across the transition.
-        //
-        // Asked for on the PRESS, which is the earliest possible moment and
-        // the only one that is not a guess: the player has just told us a
-        // transition is starting. Everything the detector does downstream of
-        // this is inference; this is not.
-        // ON FOOT ONLY, and the same state Explorer Cam gates on.
-        //
-        // This is the player's own Elite binding and it opens the SHIP's
-        // vanity camera too. Holding frames there costs 83 ms each for a
-        // transition this was never measured against and does not claim to
-        // fix -- and a hold in the cockpit is the same shape of mistake as
-        // the head offset arming there, which is the failure the gate exists
-        // to prevent.
-        //
-        // Two ways to be in the right place, because the press means
-        // opposite things at each end: entering, the flat panel is up and
-        // settled; leaving, the gate is already published as on-foot
-        // external. Neither alone covers both directions.
-        const bool onFootContext =
-            headOffsetGatePanelSettled() || externalCameraOnFoot();
-        if (g_state->holdFramesOnExternalCam > 0 && onFootContext) {
-            requestSubmitHold(g_state->holdFramesOnExternalCam);
-        }
-    }
-    // The next-view key, promoted to the public build on 2026-08-15. With
-    // this bound, the count follows each press, so the offset drops the
-    // moment you cycle off the wanted view and returns when you cycle back.
-    if (keysMeanGame && g_state->extCamNextKey.pressed()) {
-        headOffsetGateViewBumped();
-    }
-    if (keysMeanGame && g_state->extCamPrevKey.pressed()) {
-        headOffsetGateViewUnbumped();
-    }
-    // AND THE SAME PRESSES ON A GAMEPAD. Elite binds the view cycle to
-    // the D-pad by default and the keyboard arrows only as a secondary,
-    // so watching the keyboard alone misses every press a pad player
-    // makes -- which reads downstream as a count that is quietly one or
-    // two behind, with nothing to say why (field, 2026-09-02).
-    if (keysMeanGame && xinputPressed(g_state->extCamNextPad)) {
-        headOffsetGateViewBumped();
-    }
-    if (keysMeanGame && xinputPressed(g_state->extCamPrevPad)) {
-        headOffsetGateViewUnbumped();
-    }
-}
-
 // The FSS mode latch (tkFssModeLatch).
 void tickFssModeLatch() {
-    // The same word tickCameraKeysPads reads: key presses mean the game only once
-    // gameplay has started (see there for why).
+    // Key presses mean the GAME only once gameplay has started. Before
+    // LoadGame every press is menu navigation, and menus eat arrow keys by
+    // the dozen. Without the journal, every press counts.
     const bool keysMeanGame = !journalWatchActive() || journalGameplay();
     // The FSS mode latch: the player's own FSS keys give
     // frame-exact edges -- press enter and the screen is up THIS
@@ -1618,12 +1459,9 @@ void presentFrameBoundary() {
     tkHotkeys.run(tickHotkeys);
     tkEliteBinds.run(tickEliteBinds);
     // The game's own journal, polled about once a second: it states the
-    // two boundaries EDVR used to infer -- gameplay starting (LoadGame)
-    // and on-foot sessions beginning (Disembark, where the game resets
-    // its camera view to 0).
+    // boundaries EDVR used to infer -- gameplay starting (LoadGame) and
+    // on-foot sessions beginning (Disembark).
     tkJournalWatch.run([] { journalWatchTick(); });
-    tkJournalGate.run(tickJournalGate);
-    tkCameraKeysPads.run(tickCameraKeysPads);
     tkFssModeLatch.run(tickFssModeLatch);
     // The settings menu (docs/settings-menu.md): its summon key, its
     // navigation keys and head-aim, its fade, the keyboard gate that
@@ -1911,72 +1749,12 @@ HRESULT STDMETHODCALLTYPE hookedCreateSwapChainForHwnd(
 // longer acts on would flip EDVR's idea of where you are while the game
 // stands still, which is the missed-press desync class.
 void readoptGameBindings() {
-    char b[48];
     bool changed = false;
     perfMonitorNoteEvent(kEvBinds);
     {
-        const auto before = g_state->externalCamKey.key();
-        // The ON-FOOT element first: the game acts on _Humanoid on foot,
-        // and the ship's PhotoCameraToggle only agrees by coincidence --
-        // measured 12:14, a Humanoid rebind EDVR missed entirely while
-        // faithfully watching the unchanged ship key.
-        if (eliteBindsLookup("PhotoCameraToggle_Humanoid", b, sizeof(b),
-                             "PhotoCameraToggle")) {
-            g_state->externalCamKey.setBinding(b);
-            if (g_state->externalCamKey.key() != before) {
-                changed = true;
-                Log::get().note("hotkey: your Elite bindings changed -- "
-                                "external_camera is now %s.", b);
-            }
-        } else if (before != 0) {
-            changed = true;
-            g_state->externalCamKey.setBinding("");
-            Log::get().note(
-                "hotkey: your Elite bindings changed and the external camera "
-                "is no longer on a keyboard key, so the old key is no longer "
-                "watched. Bind a keyboard key for it in Elite to use Explorer "
-                "Cam.");
-        }
-        headOffsetGateSetKeyBound(g_state->externalCamKey.key() != 0);
-    }
-    {
-        const auto before = g_state->extCamNextKey.key();
-        if (eliteBindsLookup("VanityCameraScrollRight", b, sizeof(b))) {
-            g_state->extCamNextKey.setBinding(b);
-            if (g_state->extCamNextKey.key() != before) {
-                changed = true;
-                Log::get().note("hotkey: your Elite bindings changed -- "
-                                "external_camera_next is now %s.", b);
-            }
-        } else if (before != 0) {
-            changed = true;
-            g_state->extCamNextKey.setBinding("");
-            Log::get().note(
-                "hotkey: your Elite bindings changed and the next-view key is "
-                "no longer on a keyboard key, so the old key is no longer "
-                "watched.");
-        }
-    }
-    {
-        const auto before = g_state->extCamPrevKey.key();
-        if (eliteBindsLookup("VanityCameraScrollLeft", b, sizeof(b))) {
-            g_state->extCamPrevKey.setBinding(b);
-            if (g_state->extCamPrevKey.key() != before) {
-                changed = true;
-                Log::get().note("hotkey: your Elite bindings changed -- "
-                                "external_camera_prev is now %s.", b);
-            }
-        } else if (before != 0) {
-            changed = true;
-            g_state->extCamPrevKey.setBinding("");
-            Log::get().note(
-                "hotkey: your Elite bindings changed and the previous-view key "
-                "is no longer on a keyboard key, so the old key is no longer "
-                "watched.");
-        }
-    }
-    {
         char fb[48];
+        const auto enterBefore = g_state->fssEnterKey.key();
+        const auto quitBefore = g_state->fssQuitKey.key();
         if (eliteBindsLookup("ExplorationFSSEnter", fb, sizeof(fb))) {
             g_state->fssEnterKey.setBinding(fb);
         } else {
@@ -1987,21 +1765,11 @@ void readoptGameBindings() {
         } else {
             g_state->fssQuitKey.setBinding("");
         }
-        char camMod2[40] = {0};
-        const bool haveCamMod2 =
-            eliteBindsLookupPadMod("PhotoCameraToggle_Humanoid", camMod2,
-                                   sizeof(camMod2)) ||
-            eliteBindsLookupPadMod("PhotoCameraToggle", camMod2,
-                                   sizeof(camMod2));
-        g_state->extCamNextPad = XinputBinding{};
-        if (eliteBindsLookupPad("VanityCameraScrollRight", fb, sizeof(fb)) &&
-            xinputTranslate(fb, &g_state->extCamNextPad) && haveCamMod2) {
-            xinputVeto(camMod2, &g_state->extCamNextPad);
-        }
-        g_state->extCamPrevPad = XinputBinding{};
-        if (eliteBindsLookupPad("VanityCameraScrollLeft", fb, sizeof(fb)) &&
-            xinputTranslate(fb, &g_state->extCamPrevPad) && haveCamMod2) {
-            xinputVeto(camMod2, &g_state->extCamPrevPad);
+        if (g_state->fssEnterKey.key() != enterBefore ||
+            g_state->fssQuitKey.key() != quitBefore) {
+            changed = true;
+            Log::get().note("hotkey: your Elite bindings changed -- the FSS "
+                            "enter and quit keys were re-read.");
         }
         g_state->fssEnterPad = XinputBinding{};
         if (eliteBindsLookupPad("ExplorationFSSEnter", fb, sizeof(fb))) {
@@ -2011,7 +1779,6 @@ void readoptGameBindings() {
         if (eliteBindsLookupPad("ExplorationFSSQuit", fb, sizeof(fb))) {
             xinputTranslate(fb, &g_state->fssQuitPad);
         }
-        headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
     }
     // Silence here cost a field session: the files changed, the re-read ran,
     // the answers matched -- and nothing said so, which is indistinguishable
@@ -2019,7 +1786,7 @@ void readoptGameBindings() {
     // each answer came from.
     if (!changed) {
         Log::get().note(
-            "hotkey: your Elite bindings files changed, but both camera keys "
+            "hotkey: your Elite bindings files changed, but the FSS keys "
             "read the same as before.");
     }
     // The menu's panel keys follow the same rebind; reached only while
@@ -2038,9 +1805,6 @@ void menuActionCensus(void*) {
     drawCensusRequest();
     quadProbeRequest();
     perfMonitorNoteEvent(kEvCensus);
-}
-void menuActionResetView(void*) {
-    headOffsetGateNewFootSession("the settings menu", /*journalSaysSo=*/false);
 }
 void menuActionDumpEyes(void*) {
     temporalPassArmEyeDump();
@@ -2069,9 +1833,6 @@ State& ensureState() {
         menuRegisterAction("Take a draw census and quad probe",
                            "The dump_draws key's job: every draw into the eyes for a few frames.",
                            &menuActionCensus, nullptr);
-        menuRegisterAction("Reset Explorer Cam's counted view to 0",
-                           "For a keypress count that desynced: the manual twin of the wake reset.",
-                           &menuActionResetView, nullptr);
         menuRegisterAction("Write a marker line to the graphics log",
                            "So a moment you noticed can be found in the log afterwards.",
                            &menuActionMarker, nullptr);
@@ -2126,43 +1887,19 @@ State& ensureState() {
                                 "armed this session (the settings menu's row still can).");
             }
         }
-        // The camera keys come from the GAME's own key configuration, and
-        // only from there (0.7.1 removed the ini overrides: two keys nobody
-        // needed to set once adoption read the right element from the right
-        // file). Non-keyboard bindings skip with a log line, and the keys
+        // The FSS keys come from the GAME's own key configuration, and only
+        // from there. Non-keyboard bindings skip with a log line, and the keys
         // FOLLOW the game's files: rebind in Elite mid-session and the stat
         // cadence in the frame path picks it up within seconds.
-        // These two mirror the GAME's own keys, so they are not filtered by
+        // These mirror the GAME's own keys, so they are not filtered by
         // which window has focus -- Elite acts on them unfocused, and EDVR
         // disagreeing with the game is what a swallowed press costs. EDVR's
         // own keys above (the exposure toggle, the history dump) keep the
         // focus rule. See hotkey.h.
-        g_state->externalCamKey.setGameMirrored(true);
-        g_state->extCamNextKey.setGameMirrored(true);
-        g_state->extCamPrevKey.setGameMirrored(true);
         g_state->fssEnterKey.setGameMirrored(true);
         g_state->fssQuitKey.setGameMirrored(true);
         if (Config::get().getBool("hotkey.read_game_bindings", true)) {
             char b[48];
-            if (eliteBindsLookup("PhotoCameraToggle_Humanoid", b, sizeof(b),
-                                 "PhotoCameraToggle")) {
-                g_state->externalCamKey.setBinding(b);
-                Log::get().note("hotkey: external_camera adopted from your "
-                                "Elite bindings: %s", b);
-            }
-            if (eliteBindsLookup("VanityCameraScrollRight", b, sizeof(b))) {
-                g_state->extCamNextKey.setBinding(b);
-                Log::get().note("hotkey: external_camera_next adopted from "
-                                "your Elite bindings: %s", b);
-            }
-            if (eliteBindsLookup("VanityCameraScrollLeft", b, sizeof(b))) {
-                g_state->extCamPrevKey.setBinding(b);
-                Log::get().note("hotkey: external_camera_prev adopted from "
-                                "your Elite bindings: %s. Cycling backwards "
-                                "now moves the counted view backwards too; "
-                                "before this it moved the game and not the "
-                                "count.", b);
-            }
             if (eliteBindsLookup("ExplorationFSSEnter", b, sizeof(b))) {
                 g_state->fssEnterKey.setBinding(b);
                 Log::get().note("hotkey: the FSS enter key adopted from "
@@ -2186,38 +1923,6 @@ State& ensureState() {
             }
             {
                 char pk[40];
-                // The camera toggle's gamepad chord, if it has one. Not
-                // watched as a binding -- it is read only so the view-cycle
-                // bindings know which presses are not theirs.
-                char camMod[40] = {0};
-                const bool haveCamMod =
-                    eliteBindsLookupPadMod("PhotoCameraToggle_Humanoid",
-                                           camMod, sizeof(camMod)) ||
-                    eliteBindsLookupPadMod("PhotoCameraToggle", camMod,
-                                           sizeof(camMod));
-                g_state->extCamNextPad = XinputBinding{};
-                if (eliteBindsLookupPad("VanityCameraScrollRight", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->extCamNextPad)) {
-                    const bool vetoed =
-                        haveCamMod &&
-                        xinputVeto(camMod, &g_state->extCamNextPad);
-                    Log::get().note(
-                        "hotkey: the next-view key is also on your gamepad: "
-                        "%s.%s", pk,
-                        vetoed ? " Your camera toggle chords on the same "
-                                 "button, so a press with that modifier held "
-                                 "is left to the toggle."
-                               : "");
-                }
-                g_state->extCamPrevPad = XinputBinding{};
-                if (eliteBindsLookupPad("VanityCameraScrollLeft", pk,
-                                        sizeof(pk)) &&
-                    xinputTranslate(pk, &g_state->extCamPrevPad)) {
-                    if (haveCamMod) xinputVeto(camMod, &g_state->extCamPrevPad);
-                    Log::get().note("hotkey: the previous-view key is also on "
-                                    "your gamepad: %s.", pk);
-                }
                 g_state->fssEnterPad = XinputBinding{};
                 if (eliteBindsLookupPad("ExplorationFSSEnter", pk,
                                         sizeof(pk)) &&
@@ -2249,26 +1954,16 @@ State& ensureState() {
             }
             g_state->bindsFingerprint = eliteBindsFingerprint();
         }
-        // The settings menu's Elite panel keys, after the camera keys and
+        // The settings menu's Elite panel keys, after the FSS keys and
         // OUTSIDE the block above: unconditional, so the disabled case logs
         // its own "menu keys:" line too, and a session log with none means
         // this call never ran. menuConfigure has already placed the summon
         // key and the menu's own keys, which the rules check against.
         menuAdoptGameBindings(Config::get().getBool("hotkey.read_game_bindings", true), nullptr);
-        headOffsetGateSetNextKeyBound(g_state->extCamNextKey.key() != 0);
         journalWatchConfigure();
         g_state->fssModeLatchWanted =
             eyeSyncFromConfig(Config::get()).any();
         journalWatchSetEagerStatus(g_state->fssModeLatchWanted);
-        g_state->dumpOnExternalCam =
-            Config::get().getBool("advanced.dump_camera_on_external_cam", false);
-        g_state->holdFramesOnExternalCam = static_cast<uint32_t>(
-            Config::get().getIntInRange("experimental.hold_frames_on_external_cam", 0, 0, 120));
-        // A CONFIGURED key, not a pressed one. The gate refuses to arm without
-        // this, so a fresh install with nothing bound is genuinely inert rather
-        // than falling back to a heuristic that cannot tell the external camera
-        // from the inside of your own ship.
-        headOffsetGateSetKeyBound(g_state->externalCamKey.key() != 0);
     }
     return *g_state;
 }
@@ -2653,7 +2348,7 @@ void hookDevice(ID3D11Device* device) {
                 "hooks are installed on the device or on its context, this session "
                 "or any other: the black void, the panel distance, the exposure "
                 "share, the transition flash detector, the anti-aliasing passes, "
-                "the shader replacements and Explorer Cam's half of the gate are "
+                "the shader replacements and Explorer Cam are "
                 "all inert, and the game renders as it would without this half "
                 "installed. What is still hooked is the swapchain's Present and "
                 "the DXGI factory, which carry the frame boundary the openvr half "
@@ -2683,7 +2378,7 @@ void hookDevice(ID3D11Device* device) {
             "ended in the first few seconds looks the same from here. EVERY fix in "
             "d3d11.dll is off for THIS session only, on every device, and it will try again next "
             "launch: the black void, the panel distance, the exposure share, the "
-            "transition flash detector and Explorer Cam's half of the gate. The game "
+            "transition flash detector and Explorer Cam. The game "
             "renders without EDVR's graphics treatments; the EDVR menu is unavailable "
             "until the next launch. The OpenVR half has its own recovery guard.\n"
             "  If this keeps happening, the hooks really are crashing and the log is "

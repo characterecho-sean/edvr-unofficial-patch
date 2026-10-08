@@ -168,7 +168,7 @@ instead of standing in the world, or sized for a screen you are not looking at.
   change.
 - On foot, the grey surround is made properly black, the screen is moved, bent
   and raised above its forced 1920x1080, and Explorer Cam gives you a real
-  stereo view of your commander in the external camera.
+  stereo view from your commander's head in the free camera.
 
 [docs/fixes.md](docs/fixes.md) covers each fix in full: what it costs, what it
 is measured at, and which setting turns it off. The defaults are what most
@@ -178,16 +178,19 @@ menu.
 ## Explorer Cam
 
 On foot, Elite renders the world once, flat, and shows that image to both eyes.
-There is no depth because none is drawn. The external camera renders in proper
-stereo, and that is where Explorer Cam works: while you are in that camera, it
-moves your viewpoint to your commander's head. **It cannot make first person
-3D** and does not try; the flat screen stays flat.
+There is no depth because none is drawn. The free camera renders in proper
+stereo, and that is where Explorer Cam works: open the camera on foot and press
+TAB, and EDVR puts the view in your commander's head, facing their way, and
+presses the game's lock for you, so you walk with it. `fix.explorer_cam` turns
+it off. **It cannot make first person 3D** and does not try; the flat screen
+stays flat. Your commander's head is still visible from inside, and hiding it
+is the next step.
 
-It takes over one camera preset, Commander Right Shoulder, and gives you no
-capability you do not already have: inside the external camera you cannot act,
-and Explorer Cam changes only where the camera is.
-[docs/explorer-cam.md](docs/explorer-cam.md) covers setting it up and what it
-does under the hood, safeguards included.
+It gives you no capability you do not already have: inside the camera you
+cannot act, and Explorer Cam changes only where the camera is. It writes the
+free camera's pose, lock press and collision skip for that one camera and
+touches nothing shared. [docs/explorer-cam.md](docs/explorer-cam.md) covers
+setting it up and what it does under the hood, safeguards included.
 
 ## The terrain fix (cull guard)
 

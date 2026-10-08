@@ -77,17 +77,9 @@ int wmain(int argc, wchar_t** argv) {
     edvr::clearGlitchFrame();
     edvr::announceCullGuardState(0, 1.0f, 1.0f);
     edvr::requestSubmitHold(0);
-    edvr::setExternalCameraOnFoot(false);
     // Published after acquire; doing so also exercises the device identity
     // check without making setup depend on a pre-existing channel mapping.
 
-    edvr::Config::get().set("openvr.head_offset_right", "12");
-    edvr::Config::get().set("openvr.head_offset_up", "-11");
-    edvr::Config::get().set("openvr.head_offset_forward", "2.5");
-    edvr::Config::get().set("openvr.head_yaw_degrees", "450");
-    edvr::Config::get().set("openvr.head_offset_game_poses", "0");
-    edvr::Config::get().set("openvr.head_offset_external_only", "0");
-    edvr::Config::get().set("openvr.head_offset_max_stale_frames", "1");
     edvr::Config::get().set("fix.cull_guard", "PeRcEnT");
     edvr::Config::get().set("fix.cull_guard_percent", "75");
     edvr::Config::get().set("fix.cull_guard_fraction_h", "-1");
@@ -153,14 +145,12 @@ int wmain(int argc, wchar_t** argv) {
     owner.join();
     check(workerBegin == S_OK, "XR owner can begin after producer acquire");
     check(workerLatch == S_OK, "XR owner can latch after producer acquire");
-    check(firstOutput.headOffset[0] == 10.0f &&
-              firstOutput.headOffset[1] == -10.0f &&
-              firstOutput.headOffset[2] == -2.5f,
-          "offsets clamp and negate forward once");
-    check(std::fabs(firstOutput.yawRadians - 1.57079632679f) < 0.0001f,
-          "yaw wraps to radians");
-    check(firstOutput.offsetEnabled && !firstOutput.offsetGamePoses,
-          "offset flags reflect config");
+    // The old Explorer Cam's headset offset is retired (2026-10-07): its slots stay in the
+    // struct for layout and are always zero, so a runtime that still reads them applies nothing.
+    check(firstOutput.reservedOffset[0] == 0.0f && firstOutput.reservedOffset[1] == 0.0f &&
+              firstOutput.reservedOffset[2] == 0.0f && firstOutput.reservedYaw == 0.0f &&
+              firstOutput.reservedOffsetEnabled == 0 && firstOutput.reservedOffsetGamePoses == 0,
+          "the retired offset slots are zero");
     check(firstOutput.cullMode == 2 && firstOutput.cullPercent == 50.0f &&
               firstOutput.cullHorizontalFraction == 0.0f &&
               firstOutput.cullVerticalFraction == 1.0f,
@@ -197,17 +187,14 @@ int wmain(int argc, wchar_t** argv) {
     check(edvr::glitchConsumerPresent(), "valid latch announces consumer");
 
     // Invalid physical tracking is a valid frame boundary but does not
-    // publish a new pose and closes the external-only offset gate.
-    edvr::Config::get().set("openvr.head_offset_external_only", "1");
-    edvr::setExternalCameraOnFoot(true);
+    // publish a new pose.
     edvr::markGlitchFrame();
     EdvrNativeFrameInput lost = input(41, 7, 2, false);
     lost.physicalHead[0] = std::numeric_limits<float>::quiet_NaN();
     EdvrNativeFrameOutput lostOutput{sizeof(lostOutput),
                                      EDVR_NATIVE_FRAME_VERSION_4};
-    check(table.beginFrame(table.context, &lost, &lostOutput) == S_OK &&
-              !lostOutput.offsetEnabled,
-          "lost pose succeeds but disables offset gate");
+    check(table.beginFrame(table.context, &lost, &lostOutput) == S_OK,
+          "lost pose succeeds");
     EdvrNativeFrameDecision lostDecision{
         sizeof(lostDecision), EDVR_NATIVE_FRAME_VERSION_1};
     check(table.latchSubmit(table.context, 2, &lostDecision) == S_OK &&
@@ -433,7 +420,7 @@ int wmain(int argc, wchar_t** argv) {
     // frame_flag's layout check (the roll-call, since v34). Last, because a refusal it provokes
     // is meant to outlast it. This process holds one half, so the roll-call
     // has one signature and there is nothing to name...
-    check(edvr::kFrameFlagVersion == 36, "frame_flag layout is v36");
+    check(edvr::kFrameFlagVersion == 37, "frame_flag layout is v37");
     check(edvr::frameFlagPeerMismatch() == 0, "one half alone is no mismatch");
     {
         wchar_t name[64];

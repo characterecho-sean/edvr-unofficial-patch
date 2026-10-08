@@ -29,7 +29,6 @@ def configuration(mode: str, probe: str, directory: Path) -> str:
 black_void = 0
 panel_distance = 1
 transition_flash = 0
-head_offset_gate = 0
 temporal_aa = off
 share_exposure = 0
 [advanced]

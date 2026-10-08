@@ -209,7 +209,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_4};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
-  uint64_t offsetFrames=0,fssHealedEyes[2]{},featureChanges=0;
+  uint64_t fssHealedEyes[2]{},featureChanges=0;
   uint64_t fssDeferredEyes=0;
   // The heal's target eye, held from its own submit until the donor eye's
   // treat delivers the heal; its sharpen, menu and capture run then.
@@ -1096,18 +1096,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
-      const bool offsetChanged=featureFrameKnown &&
-        (next.offsetEnabled!=featureFrame.offsetEnabled ||
-         (next.offsetEnabled && (next.offsetGamePoses!=featureFrame.offsetGamePoses || next.yawRadians!=featureFrame.yawRadians ||
-           std::memcmp(next.headOffset,featureFrame.headOffset,sizeof(next.headOffset)))));
       if(featureFrameKnown&&next.resubmitEnabled!=featureFrame.resubmitEnabled)previousPairValid=false;
       featureFrame=next;featureFrameKnown=true;
-      if(offsetChanged){invalidateEyeTreatments();menu.invalidate();previousPairValid=false;++featureChanges;}
-      if(featureFrame.offsetEnabled) {
-        applyNativeHeadOffset(render.pose,featureFrame.headOffset,featureFrame.yawRadians);
-        if(featureFrame.offsetGamePoses)applyNativeHeadOffset(game.pose,featureFrame.headOffset,featureFrame.yawRadians);
-        ++offsetFrames;
-      }
       if(locatedValid) {
         NativeCullSettings settings{};settings.mode=static_cast<NativeCullMode>(featureFrame.cullMode);
         settings.percent=featureFrame.cullPercent;settings.horizontalFraction=featureFrame.cullHorizontalFraction;
@@ -2452,8 +2442,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(FAILED(temporal.close()))return clean=false;
     if(FAILED(sharpen.close()))return clean=false;
     if(FAILED(fss.close())||FAILED(features.close()))return clean=false;
-    if(tracing)nativeTracePrintf("native_features_summary,offset_frames=%llu,changes=%llu,fss_healed=%llu/%llu,fss_deferred=%llu,withheld=%llu,replayed=%llu,empty=%llu,cull_stage=%u\n",
-      (unsigned long long)offsetFrames,(unsigned long long)featureChanges,(unsigned long long)fssHealedEyes[0],(unsigned long long)fssHealedEyes[1],
+    if(tracing)nativeTracePrintf("native_features_summary,changes=%llu,fss_healed=%llu/%llu,fss_deferred=%llu,withheld=%llu,replayed=%llu,empty=%llu,cull_stage=%u\n",
+      (unsigned long long)featureChanges,(unsigned long long)fssHealedEyes[0],(unsigned long long)fssHealedEyes[1],
       (unsigned long long)fssDeferredEyes,(unsigned long long)withheldPairs,(unsigned long long)replayedPairs,(unsigned long long)emptyWithholds,unsigned(cullGuard.stage()));
     if(tracing)nativeTracePrintf("native_pacing_summary,changes=%llu,deferred=%llu,synthesized=%llu,ready_at_wait=%llu,kicks=%llu,drained_frames=%llu,drained_waits=%llu,late_frames=%llu,perf_settings_events=%llu\n",
       (unsigned long long)pacingChanges,(unsigned long long)boundary.deferredFrames(),(unsigned long long)boundary.synthesized(),

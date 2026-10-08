@@ -97,9 +97,8 @@ static bool modsSatisfied(uint32_t want, uint32_t held) {
 // the better match.
 //
 // Subset matching alone lets ONE physical press fire TWO bindings: with SHIFT+F
-// and bare F both bound, pressing SHIFT+F satisfies both. For this feature that
-// is not cosmetic -- external_camera is a toggle, so a double fire sets the
-// intent and immediately clears it, and the offset never arms.
+// and bare F both bound, pressing SHIFT+F satisfies both. For a toggle that
+// is not cosmetic: a double fire sets the intent and immediately clears it.
 //
 // A registry rather than an ordering rule, because the bindings are independent
 // objects polled in whatever order the frame loop happens to use, and a rule

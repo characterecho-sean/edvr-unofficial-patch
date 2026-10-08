@@ -51,10 +51,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # same shape -- called from the reload poll in vscreen.cpp AND from its install
 # path -- take their place.
 READERS = [
-    # The head-offset gate (fix.head_offset_gate): the very reader whose
-    # reload-only call site shipped the do-nothing release described above,
-    # now on the d3d11 side.
-    ('headOffsetGateConfigure', os.path.join('src', 'd3d11', 'vscreen.cpp')),
+    # The curved screen (fix.panel_curvature): a reader of the same shape as the
+    # one whose reload-only call site shipped the do-nothing release described
+    # above (the head-offset gate's, deleted 2026-10-07), on the d3d11 side.
+    ('panelCurveConfigure', os.path.join('src', 'd3d11', 'vscreen.cpp')),
 ]
 
 
@@ -119,7 +119,7 @@ def main():
             continue
         text = open(path, encoding='utf-8', errors='replace').read()
         # Definitions and declarations are not calls. A call may pass the
-        # config object (headOffsetGateConfigure(cfg)); a declaration's
+        # config object (panelCurveConfigure(cfg)); a declaration's
         # parameter list has a type in it, which a name-only argument does not.
         calls = [m.start() for m in re.finditer(
             r'(?<![\w:])%s\s*\(\s*(?:[A-Za-z_]\w*)?\s*\)\s*;' % reader, text)]

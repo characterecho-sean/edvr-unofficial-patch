@@ -78,9 +78,9 @@ public:
     // Set a value in memory, without touching the file.
     //
     // For tests, which need to ask what a module does when a setting CHANGES --
-    // the gate freezing its latch on fix.head_offset_gate = 0 was a real
+    // a module freezing its latch when its setting went to 0 was a real
     // defect, and reproducing it by writing an ini and waiting for a write-time
-    // poll would test the file watcher rather than the gate.
+    // poll would test the file watcher rather than the module.
     //
     // Not used by the DLLs: a setting the game can change behind the file would
     // make the log and the ini disagree about what is running.

@@ -18,7 +18,6 @@
 
 namespace {
 constexpr unsigned kPoolSize = 16;
-constexpr float kPi = 3.14159265358979323846f;
 
 struct State {
     ID3D11Device* device = nullptr; // borrowed; the host owns its lifetime
@@ -35,7 +34,6 @@ struct State {
     uint32_t beginCount = 0;
     uint32_t latchCount = 0;
     uint32_t invalidationCount = 0;
-    uint32_t lastOffsetEnabled = 0;
     uint32_t lastTransitionEnabled = 0;
     uint32_t lastResubmitEnabled = 0;
     uint32_t lastCullMode = 0;
@@ -101,17 +99,6 @@ bool rigidPose(const float* m) {
         m[1] * (m[4] * m[10] - m[6] * m[8]) +
         m[2] * (m[4] * m[9] - m[5] * m[8]);
     return std::fabs(determinant - 1.0f) <= 0.004f;
-}
-
-float boundedOffset(float value) {
-    if (!std::isfinite(value)) return 0.0f;
-    if (value < -10.0f) return -10.0f;
-    return value > 10.0f ? 10.0f : value;
-}
-
-float wrappedYawRadians(float degrees) {
-    if (!std::isfinite(degrees)) degrees = 0.0f;
-    return std::fmod(degrees, 360.0f) * kPi / 180.0f;
 }
 
 uint32_t cullMode(const std::string& value) {
@@ -352,29 +339,10 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
                     : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
                                  : EDVR_NATIVE_FRAME_VERSION_1;
-    result.headOffset[0] = boundedOffset(edvr::Config::get().getFloat(
-        "openvr.head_offset_right", 0.0f));
-    result.headOffset[1] = boundedOffset(edvr::Config::get().getFloat(
-        "openvr.head_offset_up", 0.0f));
-    result.headOffset[2] = -boundedOffset(edvr::Config::get().getFloat(
-        "openvr.head_offset_forward", 0.0f));
-    result.yawRadians = wrappedYawRadians(edvr::Config::get().getFloat(
-        "openvr.head_yaw_degrees", 0.0f));
-    result.offsetGamePoses = edvr::Config::get().getBool(
-        "openvr.head_offset_game_poses", true) ? 1u : 0u;
-
-    const bool externalOnly = edvr::Config::get().getBool(
-        "openvr.head_offset_external_only", true);
-    const uint32_t maxStale = static_cast<uint32_t>(edvr::Config::get().getIntInRange(
-        "openvr.head_offset_max_stale_frames", 90, 2, 900));
-    const bool modeGate = edvr::externalCameraOnFootLive(maxStale);
+    // The old Explorer Cam's headset offset (headOffset, yawRadians,
+    // offsetEnabled, offsetGamePoses) is retired: those slots stay zero, so a
+    // runtime built before 2026-10-07 reads "no offset" and applies none.
     const bool physicalValid = input->valid != 0;
-    const bool anyOffset = result.headOffset[0] != 0.0f ||
-                           result.headOffset[1] != 0.0f ||
-                           result.headOffset[2] != 0.0f ||
-                           result.yawRadians != 0.0f;
-    result.offsetEnabled =
-        (anyOffset && physicalValid && (!externalOnly || modeGate)) ? 1u : 0u;
 
     result.cullMode = cullMode(edvr::Config::get().getString(
         "fix.cull_guard", "off"));
@@ -445,24 +413,21 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     state->latched = false;
     state->cachedDecision = {};
     ++state->beginCount;
-    if (!state->configNoted || state->lastOffsetEnabled != result.offsetEnabled ||
+    if (!state->configNoted ||
         state->lastTransitionEnabled != result.transitionEnabled ||
         state->lastResubmitEnabled != result.resubmitEnabled ||
         state->lastCullMode != result.cullMode ||
         state->lastCullChannel != result.cullChannel ||
         state->lastDeferredPacing != result.deferredPacing) {
         edvr::Log::get().note(
-            "native frame: begin #%u seq=%llu offsets=%s (%+.3f,%+.3f,%+.3f), "
-            "cull=%u, channel=%u, transition=%s, resubmit=%s, pacing=%s.", state->beginCount,
-            static_cast<unsigned long long>(input->sequence),
-            result.offsetEnabled ? "on" : "off", result.headOffset[0],
-            result.headOffset[1], result.headOffset[2], result.cullMode,
+            "native frame: begin #%u seq=%llu cull=%u, channel=%u, transition=%s, "
+            "resubmit=%s, pacing=%s.", state->beginCount,
+            static_cast<unsigned long long>(input->sequence), result.cullMode,
             result.cullChannel,
             result.transitionEnabled ? "on" : "off",
             result.resubmitEnabled ? "on" : "off",
             result.deferredPacing ? "turbo" : "runtime");
         state->configNoted = true;
-        state->lastOffsetEnabled = result.offsetEnabled;
         state->lastTransitionEnabled = result.transitionEnabled;
         state->lastResubmitEnabled = result.resubmitEnabled;
         state->lastCullMode = result.cullMode;

@@ -121,11 +121,12 @@ import sys
 # the log names one when it wants you to change it, and that is the only way
 # anybody should arrive at them. Offering them in a list invites changing things
 # nobody asked you to change, and turns a support thread into a guessing game.
-# The remaining sections ([hotkey], [log], [openvr], [d3d11]) are plumbing named
+# The remaining sections ([hotkey], [log], [d3d11]) are plumbing named
 # after the halves of EDVR that read them, not fixes somebody came here to turn
 # on. Explorer Cam's own switches live in [fix] and are exposed; the metre
-# offsets it is tuned with are not, because tuning them means wearing the
-# headset and watching, which is what the ini's hot reload is for.
+# offsets it is tuned with (fix.explorer_cam_eye_*) are not, because tuning
+# them means wearing the headset and watching, which is what the ini's hot
+# reload is for.
 EXPOSED_SECTIONS = ('fix',)
 # The sections whose keys may carry a `ui:` line at all. The installer's
 # window still shows only EXPOSED_SECTIONS; what a ui: line buys a developer

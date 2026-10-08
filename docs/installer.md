@@ -261,7 +261,7 @@ real_dll =
 and developer instruments — the log names one when it wants you to change it,
 and that is the only way anybody should arrive at them; a list that offers them
 invites changing things nobody asked you to change. The remaining sections
-(`[hotkey]`, `[log]`, `[openvr]`, `[d3d11]`) are plumbing named after the
+(`[hotkey]`, `[log]`, `[d3d11]`) are plumbing named after the
 halves of EDVR that read them. A `ui:` line outside `[fix]` is a build error,
 so the rule cannot drift by accident.
 

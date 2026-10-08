@@ -2,10 +2,11 @@
 
 ## Status
 
-- **State: Phase 0 FLOWN (F0, 2026-10-07); Phase 1a placement BUILT, not
-  flown (flight F1 next).** Replaces press counting and headset-pose offsets
-  with a placement of Elite's own free camera at the commander's head, and
-  hides the head only while the camera sits in it. Keys `fix.explorer_cam`
+- **State: Phase 0 FLOWN (F0, 2026-10-07); Phase 1a placement BUILT and
+  Phase 1b old route DELETED (Sean, 2026-10-07), neither flown (flight F1
+  next).** Replaces press counting and headset-pose offsets with a placement
+  of Elite's own free camera at the commander's head, and hides the head only
+  while the camera sits in it. Keys `fix.explorer_cam`
   and `fix.explorer_cam_eye_up/_forward/_right` are real, user-facing.
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
@@ -52,8 +53,7 @@
   `head_offset_gate = 0`.
 - **Next:** F1 on Frontier (install, grep `explorer cam:`; checks H3: no
   holes, no body culling, no pop at entry, walking and turning, HMD pose not
-  doubled), tune the eye keys, then Phase 2 (hide the head) and the old
-  route's deletion.
+  doubled), tune the eye keys, then Phase 2 (hide the head).
 - **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off;
   all three 0b instruments plus the VR camera census). Removed at arc close.
 
@@ -528,3 +528,19 @@ hook armed` and `collision hook armed` (stolen=5, 28/28 and 26/26) or `... stood
 reached the hook` (the hook ran); `entered the free camera`; `placed: ... eye(...)`; `lock pressed: ... before=3
 after=4` (read on the next update); `heartbeat:` every 5 s while placed (`updates_placed`, `collision_bypassed`,
 `collision_forwarded`, `hook_calls`, `faults`); `released: ... why=`; `eye changed`; `fault N of 8`.
+
+## 2026-10-07 Phase 1b: old route deleted
+
+Built, not flown. Gone: `head_offset_gate.{h,cpp}` and its `vscreen.cpp` feeds (frame feed, config calls, panel count,
+draw-gate term); in `device_hook.cpp` the camera-key and pad adoption, the `journal_gate` and `camera_keys_pads` ticks and
+the menu row "Reset Explorer Cam's counted view to 0"; `eliteBindsLookupPadMod`, `xinputVeto`; the `externalCam` channel
+(frame_flag layout now v37); the pose offset (`native_frame.cpp`, `applyNativeHeadOffset`); the gate half of `gate_test`.
+Kept: the journal watch and counters, `eliteBindsLookup`/`Pad`, `xinputTranslate`, `hotkey.read_game_bindings`,
+Status.json's on-foot flag, supercruise and tunnel flags, `publishHeadPose`/`headForward`, and `requestSubmitHold` (now
+callerless; `native_frame_test` drives it). `EdvrNativeFrameOutput`'s offset slots stay as zeroed `reserved*`, so
+hand-copied DLLs keep the layout.
+
+Keys removed: `[fix]` head_offset_gate, head_offset_view_count, head_offset_intent_grace_ms, head_offset_enter_window_ms;
+`[advanced]` head_offset_view, dump_camera_on_external_cam; `[openvr]` (whole section) head_offset_right, _up, _forward,
+head_yaw_degrees, head_offset_external_only, _game_poses, _max_stale_frames; `[experimental]` keyless_camera,
+hold_frames_on_external_cam. Listed in `config_test`'s `kRetiredKeys`.

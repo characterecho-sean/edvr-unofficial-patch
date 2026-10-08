@@ -1046,10 +1046,10 @@ gains the "live" or "restart" word the generator derived.
    which is why the tier exists and is off by default.
 6. **Instruments.** Action rows for the things that today need a hotkey
    bound: dump the camera history (the `PAUSE` key's job), take a draw
-   census with the quad probe, reload `edvr.ini` now, write a marker line
-   to both logs, and reset Explorer Cam's counted view to zero (the planned
-   camera-index reset, which has needed a key of its own and gets a row
-   instead). Each fires the same function its hotkey fires.
+   census with the quad probe, reload `edvr.ini` now and write a marker line
+   to both logs. (A row that reset Explorer Cam's counted view to zero went
+   with the old Explorer Cam route on 2026-10-07.) Each fires the same
+   function its hotkey fires.
 
 **Toasts.** When a live setting changes -- from the menu, the installer's
 window, or a hand edit -- one line fades through the view for a couple of
@@ -1331,9 +1331,8 @@ real eye offset, calls the export, submits what came back. Publishes one
 new word: the runtime kind, for the Status page.
 
 **Channel** (`frame_flag.h`): `publishMenuAnchor(m12)` / `menuAnchor()`,
-`setMenuVisible(bool, alpha)` written every frame (a heartbeat, the
-`externalCameraOnFoot` discipline, so "closed" and "d3d11 stopped saying"
-stay distinguishable), `bumpMenuDrawn()` / `menuDrawnValue()` the other way,
+`setMenuVisible(bool, alpha)` written every frame (a heartbeat with a
+moving stamp, so "closed" and "d3d11 stopped saying" stay distinguishable), `bumpMenuDrawn()` / `menuDrawnValue()` the other way,
 and `announceRuntimeKind(k)`.
 
 **Common**: `iniedit` and `mirrorDirFor` move in; `iat_hook.h` is new.

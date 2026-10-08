@@ -203,14 +203,6 @@ template<class Check> void runFeatureHostCases(Check check) {
   h.sceneFinished(true,XR_SUCCESS);check(h.replayedPairs==1&&h.previousPairValid,"replay does not overwrite saved stereo pair");
   h.sceneFinished(true,XR_ERROR_RUNTIME_FAILURE);check(!h.previousPairValid,"failed endFrame cannot commit a replay pair");
   h.previousPairValid=true;h.invalidateOrigin("feature_fixture");check(!h.previousPairValid,"reference reset retires transition image");
-  vr::TrackedDevicePose_t pose=invalidHeadPose(true);pose.bPoseIsValid=true;
-  pose.mDeviceToAbsoluteTracking.m[0][3]=10;pose.mDeviceToAbsoluteTracking.m[1][3]=20;pose.mDeviceToAbsoluteTracking.m[2][3]=30;
-  const float offset[3]={-.25f,.25f,-1.25f};auto physical=pose;
-  applyNativeHeadOffset(pose,offset,1.57079632679f);
-  const auto& m=pose.mDeviceToAbsoluteTracking.m;
-  check(std::fabs(m[0][2]-1)<.0001f&&std::fabs(m[2][0]+1)<.0001f&&m[0][3]==9.75f&&m[1][3]==20.25f&&m[2][3]==28.75f,
-    "Explorer yaw rotates orientation but adds tracking-coordinate translation without rotating origin");
-  check(physical.mDeviceToAbsoluteTracking.m[2][3]==30&&physical.mDeviceToAbsoluteTracking.m[0][0]==1,"game offset leaves physical pose untouched");
   const vr::VRTextureBounds_t reversed{.9f,.8f,.1f,.2f};
   const auto crop=nativeCropBounds(&reversed,.25f,.1f,.75f,.9f);
   check(std::fabs(crop.uMin-.7f)<.0001f&&std::fabs(crop.uMax-.3f)<.0001f&&std::fabs(crop.vMin-.74f)<.0001f&&std::fabs(crop.vMax-.26f)<.0001f,

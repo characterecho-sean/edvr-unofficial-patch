@@ -40,10 +40,15 @@ struct EdvrNativeFrameInput {
 
 struct EdvrNativeFrameOutput {
     uint32_t size, version;
-    // Tracking coordinates: +right, +up, -forward.
-    float headOffset[3];
-    float yawRadians;
-    uint32_t offsetEnabled, offsetGamePoses;
+    // RETIRED 2026-10-07 with the old Explorer Cam route (a headset-pose offset
+    // and yaw, applied while a key-counting gate said the external camera was
+    // up). Always zero now: the provider writes nothing here and the runtime
+    // reads nothing. The slots stay so the struct, and the four versions that
+    // name its prefixes, keep their layout -- the two DLLs are copied apart by
+    // hand, and a runtime from before the change then reads "offset off".
+    float reservedOffset[3];
+    float reservedYaw;
+    uint32_t reservedOffsetEnabled, reservedOffsetGamePoses;
     uint32_t cullMode; // 0 off, 1 symmetric, 2 percent
     float cullPercent, cullHorizontalFraction, cullVerticalFraction;
     uint32_t cullSignatureCount;
