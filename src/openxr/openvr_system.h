@@ -74,7 +74,11 @@ class OpenVRSystem final : public vr::IVRSystem {
     std::shared_ptr<const NativeHiddenMasks> masks;
     RawFov fov{};unsigned eye=0;
     std::vector<HmdVector2_t> vertices;
+    uint32_t dropped=0;
   };
+  // One eye's retained mesh for this snapshot, projecting it on first use.
+  // Null with `failure` set when it cannot be served. Caller holds meshMutex_.
+  const MeshEntry* eyeMesh(const SystemRead& s,unsigned eye,const char*& failure);
   // Callers may keep the legacy raw pointer. Retain immutable revisions until
   // this interface is destroyed; refuse new revisions at the bounded limit.
   std::mutex meshMutex_;

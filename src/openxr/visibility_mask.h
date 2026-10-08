@@ -53,9 +53,14 @@ inline XrResult readHiddenMask(PFN_xrGetVisibilityMaskKHR query,XrSession sessio
 // Use each eye's actual asymmetric frustum; cant is already in its view pose.
 // Inset each triangle, never enlarge it, to leave room for jitter/filter taps.
 // Thin triangles disappear and internal seams may draw extra pixels safely.
+// A triangle whose inset has no representable corner is thin in that sense: a
+// runtime that triangulates almost collinear boundary points emits slivers
+// whose inset corners land millions of units out, and one of them must not
+// discard the eye's whole mesh. `dropped` counts the triangles left out.
 inline bool projectHiddenMask(const NativeHiddenMask& mask,const RawFov& fov,
-                              float guardU,float guardV,std::vector<vr::HmdVector2_t>& out) {
-  out.clear();RawFov checked{};
+                              float guardU,float guardV,std::vector<vr::HmdVector2_t>& out,
+                              uint32_t* dropped=nullptr) {
+  out.clear();RawFov checked{};uint32_t skipped=0;if(dropped)*dropped=0;
   if(!shiftedRawFov(fov,0,0,checked)||!finite(guardU)||!finite(guardV)||guardU<=0||guardV<=0||
      mask.indices.size()%3||mask.indices.size()>24576)return false;
   const double width=double(fov.right)-fov.left,height=double(fov.bottom)-fov.top;
@@ -71,7 +76,7 @@ inline bool projectHiddenMask(const NativeHiddenMask& mask,const RawFov& fov,
     }
     const double area=(x[1]-x[0])*(y[2]-y[0])-(y[1]-y[0])*(x[2]-x[0]);
     if(!std::isfinite(area))return false;
-    if(std::fabs(area)<1e-12)continue;
+    if(std::fabs(area)<1e-12){++skipped;continue;}
     const double sign=area>0?1:-1;
     double a[3],b[3],c[3];bool valid=true;
     for(unsigned j=0;j<3;++j) {
@@ -80,7 +85,7 @@ inline bool projectHiddenMask(const NativeHiddenMask& mask,const RawFov& fov,
       a[j]=sign*(y[j]-y[k])/length;b[j]=sign*(x[k]-x[j])/length;
       c[j]=a[j]*x[j]+b[j]*y[j]+1;
     }
-    if(!valid)continue;
+    if(!valid){++skipped;continue;}
     vr::HmdVector2_t triangle[3]{};
     for(unsigned j=0;j<3&&valid;++j) {
       const unsigned k=(j+2)%3;const double det=a[j]*b[k]-a[k]*b[j];
@@ -88,11 +93,12 @@ inline bool projectHiddenMask(const NativeHiddenMask& mask,const RawFov& fov,
       const double px=(c[j]*b[k]-c[k]*b[j])/det,py=(a[j]*c[k]-a[k]*c[j])/det;
       for(unsigned edge=0;edge<3;++edge)if(a[edge]*px+b[edge]*py<c[edge]-1e-7)valid=false;
       const double u=px*guardU,v=py*guardV;
-      if(!std::isfinite(u)||!std::isfinite(v)||std::fabs(u)>16||std::fabs(v)>16)return false;
+      if(!std::isfinite(u)||!std::isfinite(v)||std::fabs(u)>16||std::fabs(v)>16){valid=false;break;}
       triangle[j].v[0]=float(u);triangle[j].v[1]=float(v);
     }
-    if(valid)candidate.insert(candidate.end(),triangle,triangle+3);
+    if(valid)candidate.insert(candidate.end(),triangle,triangle+3);else ++skipped;
   }
+  if(dropped)*dropped=skipped;
   out.swap(candidate);return true;
 }
 }
