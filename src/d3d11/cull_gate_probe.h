@@ -41,8 +41,7 @@
 // its plane array, the context's LOD scale (+0x30) and bit table (+0x1A840).
 //
 // A third function, through its own patch (kinematic_eval_hook.cpp, installed
-// only for this probe and the settlement LOD governor after a build-keyed
-// signature): FUN_1442B3FC0, which the
+// only for this probe after a build-keyed signature): FUN_1442B3FC0, which the
 // builder calls per (sub-item, admitted view) from its sub-item loop
 // (decomp_42B4420.txt:504-523) -- the per-PART admission. It tests the part's
 // own sphere: param_1[0] -> the world centre the builder composed from the

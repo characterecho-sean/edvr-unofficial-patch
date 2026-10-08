@@ -55,6 +55,7 @@
 #include "lifecycle_tests.h"
 #include "flat_lazy_tests.h"
 #include "flat_domain_tests.h"
+#include "source_free_tests.h"
 #include "pin_tests.h"
 #include "copier_tests.h"
 #include "unkeyed_tests.h"
@@ -380,6 +381,7 @@ int wmain(int argc, wchar_t** argv) {
     lifecycle_tests::run({device.Get(), context.Get(), &check});
     flat_lazy_tests::run({device.Get(), context.Get(), &check});
     flat_domain_tests::run({device.Get(), context.Get(), &check});
+    source_free_tests::run({device.Get(), context.Get(), &check});
     pin_tests::run({device.Get(), context.Get(), &check});
     copier_tests::run({device.Get(), context.Get(), &check});
     unkeyed_tests::run({&check});

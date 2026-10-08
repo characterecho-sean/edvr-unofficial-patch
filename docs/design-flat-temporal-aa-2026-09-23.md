@@ -2,9 +2,8 @@
 
 ## Status
 
-- **State:** pistol no-candidate instruments, the offset-shift rescue and the
-  training mission's `flat source 5s` line (104): BUILT, NOT FLOWN. Grenade hold
-  (104): FLOWN OK (4c69779f, log 115209); its world naming is vetoed.
+- **State:** 104, 4th build a909f494: FLOWN OK 2026-10-08, settlement walk.
+  no-prior about 0, against 11-15M px a window; writes outside-span, genuine 0-4.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -33,14 +32,15 @@
   estimates and the nonexistent engine velocity buffer. Reuse engine-record
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
-  capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** fly the pistol (which no-candidate pattern carries the bursts) and
-  the training mission turned left (`flat source 5s`); decide the source-less
-  selection (104 B); 105 traces. Open: roof shimmer/TAA (104). Retain 102's
-  color-clear fix; no per-weapon table; preserve Epic settings, 87's native FSR
-  comparison, 83's open items and high-G motion; do not repeat qualified
-  PS91/BFE or stale-resize hypotheses. Menu hangar-floor P1 open; VR regression
-  tests and `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
+  capture; raising the 64-draw/64-record bounds; a weapon-only cause;
+  identity-pooled sibling motion (mean or affine) as the cover for lost history.
+- **Next:** split the still-long lines (SDK domain, sibling, no-candidate,
+  engine motion: 114 truncated in log 0455xx). 105 traces. Open: the
+  `unspecified` remainder (0.01-0.15%), roof shimmer/TAA.
+  Retain 102's color-clear fix; no per-weapon table; preserve Epic settings,
+  87's native FSR comparison, 83's open items and high-G motion; do not repeat
+  qualified PS91/BFE or stale-resize hypotheses.
+  Menu hangar-floor P1 open; VR tests, `d9f86b09`: main/openxr-perf-gaps.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
@@ -13806,6 +13806,628 @@ window, zeros included, in the pistol and the training mission. In the pistol:
 `rescued-offset-shift` and the identity line's `match` follows it; the census'
 no-prior pixels fall with it. In the training mission: the spell is counted and
 named, and it ends with a recovery of two warm frames.
+
+### 2026-10-07, second build: pool-less views, the pistol's LOD swap
+
+One build, four items, from `edvr_gfx_20261007_143943.log`
+(v0.18.3-10-g0d4bc714, build 6AC6A82A, Epic, SS 2.0: 7680x4320 into 3840x2160,
+DLSS, the HDR route). Sean approved all four; it installs on Epic when green.
+
+**Part A. The view with no source (items 2 and 3)**
+
+One missing thing, two refusals. Both selectors need a draw of a pool family
+the motion producer substitutes to name the scene's depth, camera and constants
+(the copy route: no-supported-motion-source-pair, the training mission's
+turned-left view, reproduced every time); a view of ground and sky has none. On
+the HDR route the same view refused `conflicting-hdr-target-or-camera` instead,
+which is checked first.
+
+The HDR route's refusal, from the log. `flat runtime refusal 5s` reads 167
+(14:44:50), 448, 438, 367 (14:45:05) and 108 (14:45:45), all
+`cause=hdr-camera-changed`. The three detailed lines (frames 54484, 55372,
+58213) name the same pair every time: the reference is the HDR's first camera
+draw (VS 68DDDEF04D9894AF, PS 06332CA168B6DA63, q 4209), the conflicting draw
+VS 025B4B9FF54622ED, PS 46F92DC71BF8DFA5 (q 4262) in the same target, depth and
+constants buffer with the constants rewritten between (write 4208 to 4261). The
+camera line says how: rows 270 to 273 differ and row 273.2 goes from 0.025 to
+0.0675, the first person's near plane against the world's. The pair is a clean
+forward-columns pair (`generic-recipe`, slot 1 row 270): the one the overlay
+admission takes.
+
+What the log pins. `flat late overlay 5s` reads `planned-draws` of 270 to 320
+in the windows that were treated, about one a frame: the pass is drawn every
+frame and admitted as a protected overlay. In the windows that refused it is
+not: 208 planned and 167 conflicts at 14:44:50 (375 frames, all accounted for),
+0 planned and 448 and 438 conflicts at 14:44:55 and 14:45:00, 62 and 367 at
+14:45:05, 252 and 108 at 14:45:45. Every frame of those windows drew the pass
+and it was admitted in some and not in others, so it is a state of the frame
+that decides. The windows' edges carry `engine-source-not-ready` (2 at
+14:45:05, 3 at 14:45:45), the first pool-bearing frame after a spell with no
+pool draw (the watch of the scene constants was not kept: fixed in this build),
+and the long stare at empty terrain is the 0-planned windows. The admission
+judged a draw only against a named world (`k.depth == s.namedDepth`), which a
+view without a pool-family draw never has. That is the reading that fits; what
+the log cannot show is the other gates (about twenty are chained; the camera
+injector sits in `warming` through the refused windows, injected=0, and a
+refused frame never ends a clean close, so a gate that depends on it could hold
+the loop shut).
+
+Two things are done. The overlay admission now also judges a draw against the
+HDR target's own first camera when no draw has named the world and the model
+has seen no source, no first-person cohort draw and no stock family draw so
+far, counted in `overlays-without-named-world`. And the first draw that makes
+an HDR target a second camera logs every gate, as it stood:
+
+```text
+flat overlay admission refused: frame=.. seq=.. VS=.. PS=..
+  route=hdr|copy key-auto=. copy-weapon=. work-full=. projection=.
+  jitter-wanted=. phase-ok=. frame-coverage=. injector-owns=.
+  foreign-work=. uncertain=. supported=. color-depth-dsv-camera=.
+  viewport=. hdr-could-consume=. camera-current=. world-named=.
+  depth-is-named=. pool-less-so-far=. (sources=.. first-person=..
+  stock-family=..) target-hdr-camera=. target-drawn=.
+  target-layout-changed=. target-menu=. target-depth-same=.
+  target-dsv-same=. target-tone-current=. overlay-target-found=.
+  depth-write=. stencil-write=. stencil-mask-04=.
+  phase-applied-or-zero=.
+```
+
+Six lines at most, ten seconds apart. The gate that reads 0 where the pair
+needs a 1 is the refusal, and `world-named=0` with `pool-less-so-far=1` says
+the view was pool-less. If the relaxation is inert,
+`overlays-without-named-world` stays 0 while the conflicts persist.
+
+The change for the pool-less view itself.
+`FlatMonoFrameInput.unsupportedFamilyDraws` counts the draws of a pool family's
+vertex shader left stock (an unkeyed pixel shader) into a scene-sized depth,
+flagged by the draw scope (`FlatRuntimeDraw.poolFamilyVs`, trace flag bit 12)
+and counted by the model before it looks for a colour target, so a depth
+pre-pass counts. A frame with no supported draw and none of those is selected
+with `sourceFree` and its HDR's own depth, constants and camera; one with a
+stock family draw is refused for no source as before, because it moves and
+nothing tracks it. The first person's pistol pair (F516BF0201303B87,
+B40B0462256E31C2) is not a pool family, so it is no veto. The world is then
+named from the selection (`nameSourceFree`, once, at the HDR trigger's
+selection, at the copy route's resolve and at the HDR route's treatment,
+comparing a world a draw already named), and before the views are asked for the
+engine makes them from nothing (`engineVelocityPrepareSourceFree`): the slot
+target is the flat marker plane, cleared at its first use of the frame, so no
+pixel names a record; the pool is one record nothing points into; the scene
+constants are the selected camera's rows 270 to 275 and this frame's stamp, in
+snapshots of the size a pool draw makes them (found by the rig: smaller ones
+are re-made by the next pool-bearing frame and its history dropped) and with
+the watch following the constants buffer (without it the first pool draw after
+a spell is declined, `the naming's rows not seen`). Every pixel then takes the
+camera term, as a pixel with no slot always has.
+
+range (item 3's question). The refusal census' `range` class is a pixel whose
+previous position, by the camera term, is outside the previous raster: the band
+the camera's motion brings in at the leading edge, with no history anywhere. It
+is 99% of the refused pixels in every window with no weapon refusal of this
+log, 0.0034% standing still (14:40:40: 88 thousand in 80 sampled frames) and
+0.7 to 2.3% of 33.2 million pixels in the windows of fast turns (13.6 million
+at 14:44:50, 45.8 million at 14:45:45: 740 thousand a frame, a band about 170
+pixels wide at 7680, a turn of about two degrees a frame at a hundred degree
+field of view). At SS 2.0 the same turn is four times the pixels of SS 1.0.
+Expected, then, and the only class that scales with motion; with DLSS or FSR it
+shows the raw current frame for those pixels, one frame each.
+
+The pink fringe. Pink is the `stale` class (a keyed draw wrote the slot,
+something not marked drew over it: the slot's depth is not the pixel's). It is
+not `range`: stale is 1.9 to 2.5 thousand pixels a window with the pistol away
+(14:40:40 to 14:44:05, about 25 a sampled frame) and 40 thousand to 1.1 million
+while it is up (14:45:15 on: 659 742, 605 865, 767 493, 1 113 565), up to 16
+thousand a frame, and unrelated to the turns (range). So the fringe is the
+stale class and it follows the pistol. Whether it is the trailing edge, or a
+disocclusion of the world behind the pistol, the census cannot say (it has no
+position); what it says is that the pixels are refused for a slot overdrawn
+this frame, not for want of history. Not touched by this build.
+
+**Part B. The pistol's LOD swap (item 1)**
+
+The tally named the cause in the windows with the pistol up
+(rescued-offset-shift 0 throughout, H1 stays ruled out): 4 to 66 misses of 4500
+to 6200 draws a window, in 1 to 21 of about 310 frames, count-change 4 to 40,
+absent-long 6 to 25, absent-short 1 to 4, new-key 3 to 5 (14:45:10 to
+14:46:55). The same mesh drawn under another count is a LOD swap: no same-key
+record, and a different vertex count, so no prior positions to take. It is not
+a lost object: the object's other pieces, drawn this frame under the same pool
+identity, matched theirs.
+
+The pass (`flat_foreground_sibling.h`, the shaders in
+`flat_foreground_motion_shader.h`, the class in `flat_foreground_motion.h`).
+When a frame holds a draw with no prior (the CPU knows), or for 30 frames after
+the identity sampler read a draw that had priors and no identity match (only
+the GPU knows), H runs two compute passes before the map is drawn: one thread
+group a draw that matched, running the map's own decision for every vertex (one
+shared text, `resolveGpuIdentity`) and recording the mean and the extremes of
+the motion in pixels it would have written, with no atomics; then one thread a
+draw, which looks for donors of its identity (x and y with byte 30 left out, as
+the history compares) among the others and decides. The map's vertex shader
+then gives a draw with reasons 3, 5 or 6 the fit as a valid sample: the
+previous position is this vertex moved by the motion in homogeneous clip space
+(exact at every pixel) and the previous phase is this frame's. The decision
+(`siblingDecide`, plain C++, the rig holds the shader to it for every draw of
+every scene):
+
+- donors that agree to within one pixel per axis (largest less smallest motion
+  over every donor vertex, `kFlatSiblingSpreadPixels`): their mean, weighted by
+  vertices (mode 1, sibling);
+- no donor, or fewer vertices than a triangle: the view's own motion, none,
+  history kept (mode 2, view-attached). A first-person draw is attached to the
+  view; the object it belongs to has no matched piece, so nothing in the frame
+  says it moved;
+- donors that disagree: refused as before (mode 3). A held object swung through
+  the view moves its pieces differently, and a translation would be wrong by
+  the difference; the parallax of a deep object is the same effect (motion goes
+  as one over depth), so fast lateral sway refuses too;
+- refused as before in every case: a current draw that is not valid (1), a pool
+  row that is not authentic (2), prior positions unreadable or ambiguous (4,
+  7), and an identity the pool cannot read (mode 4). Nothing says what their
+  motion would be.
+
+Not chosen: a rigid fit (four clip-space vertices fix a rigid motion exactly,
+but a skinned piece is not rigid, and the residual check it needs is a second
+pass over the vertices and a numerically poor difference of large sums at this
+size); a borrow across identities (the rig has the sibling of another object,
+and it does not borrow). The one-pixel limit is the resampling's own blur (the
+history is read bilinearly); it is a model bound, not tuned by a flight.
+
+Instrument, every window, zeros included:
+
+```text
+flat foreground sibling 5s: engaged-frames=N dispatches=N
+  draws-read=N (frames read=N unread=N failed=N) sibling=N
+  view-attached=N disagree=N identity-unreadable=N; by pattern
+  (sibling/view-attached/disagree/identity-unreadable):
+  previous-frame-empty=a/b/c/d ... count-change=.. absent-short=..
+  absent-long=.. new-key=.. prior-filtered=.. identity-differs=..;
+  (explanation)
+```
+
+Counts are draws, read back from the GPU two frames or more late through a
+staging ring. A frame in which every draw matched dispatches nothing.
+
+A consequence worth knowing: the first frame of an object (an equip, the first
+frame of the log's session) has no donor, so every piece is view-attached:
+valid with no motion where it was refused to the raw frame (`weapon-refused`
+reason 3). The seed frames count as view-attached in the line; whether a static
+guess beats the raw frame there is a flight's answer (the census' no-prior
+pixels fall, and ghosting on a pistol drawn from the holster would show in the
+debug view).
+
+Not this build's, seen in the same log: 14:43:15 to 14:43:50,
+`record-reclaimed` 800 to 4300 misses a window, weapon-refused no-prior 19 to
+137 million pixels a window. Whole-weapon history loss for 35 seconds, a
+different pattern from the LOD swap; the sibling pass would make it
+view-attached (no donor) rather than refused. The reclaim after an invalidation
+is the suspect (the ledger files an invalidated-then-erased record as
+reclaimed), not investigated.
+
+**Part C. The allocation (item 4)**
+
+`AnimatedVertexHistory::retainInstanceIndex` made a 4-byte buffer and a shader
+view for every captured draw, every frame (about 5000 draws a window: 10
+thousand creations in 5 s). It now keeps one buffer of 128 elements
+(`maxRecords`) and 128 one-element views, made on first use, and a draw's copy
+goes to the next element of its frame; the 129th draw is refused as the history
+is. The rig (`retained_index_ring`) holds: 128 draws read their own pool index
+right after capture; `retainCreated` is 129 after the first frame and still 129
+after the second; the next frame reuses the same view objects; each draw of a
+frame has a view of its own; the 129th takes no slot; a VR capture makes no
+ring.
+
+**Tests**
+
+- flat_temporal_test: the selector in both routes (source-free, vetoed by a
+  stock family draw, a sourced scene unchanged), the model's count (a pre-pass
+  counts), the trace flag and an older trace, the counters and the line, the
+  sibling policy case by case (limit inclusive, weights, byte 30, matched
+  draws, unreadable identity), and wiring pins with mutation controls for the
+  naming, both routes' preparation, the overlay admission, the flag, the
+  counters, the engine's views, the shaders (reasons served, identity compared,
+  limits) and the class (when the pass runs, the compute stage kept, the fit
+  unbound before the map reads it).
+- engine_velocity_test (`source_free_tests.h`): the views from nothing on WARP:
+  the slot target empty, one structured record, this frame's rows and stamp and
+  the last frame's, the pool and its view the same objects frame after frame,
+  the two constant buffers alternating, a pool draw's views not overwritten,
+  the walk onto open ground and back, the source let go after 120 idle frames
+  and made again, outside the flat profile nothing.
+- flat_mono_resolve_test: an empty slot target and a one-record pool of zeros
+  or of garbage give the same texture, the camera term.
+- weapon_motion_test (WARP and `--hardware`, `flat_sibling_tests.h`): S1 to
+  S11, the compute stage kept, every draw's fit held to the policy. 218821
+  checks, WARP and hardware.
+- Private mutants: 56 (the sibling pass's shaders, class and policy, the
+  engine's views, both selectors, the model, the trace flag, the counters and
+  the runtime's wiring): 54 killed by the rigs, 2 equivalent (a donor test the
+  vertex test already makes: an unmatched draw takes no vertex; the engine's
+  snapshot re-creation by size, which differs only if the game's constants
+  buffer changes size).
+- The bench: on the hardware adapter the whole matrix passes (67 results),
+  pool_less_view in DLAA, DLSS and FSR through the real runtime (the HDR route
+  at 96x96 into 64x64: selected source-free, the world named, the views from
+  nothing, the backend's frame); first_person_slot_repacked's control is
+  reworked, because a draw whose prior is another record is now served: refused
+  (reason 5) until the identity sampler arms the pass, then valid with no
+  motion, and no sample ever moves (the records now sit on opposite sides).
+  WARP: 31 pass, 36 unsupported (no NGX), none fails.
+
+**Flight pass signs**
+
+The pistol: the `flat foreground sibling 5s:` line every window; `sibling` and
+`view-attached` rise where `count-change`, `absent-*` and `new-key` misses
+were, `disagree` stays near 0 while aiming; the census' weapon-refused no-prior
+and identity-differs pixels fall with them; no ghosting on the pistol in the
+debug view. The pool-less view: `flat source 5s:` carries `source-free-frames`
+and `source-free-treated` (equal when the resolver ran), the refusal counts of
+`conflicting-hdr-target-or-camera` and `no-supported-motion-source-pair` fall
+to the frames that hold a stock family draw, and `engine motion: source-free
+views at present frame N` appears once. If the HDR route still refuses, `flat
+overlay admission refused:` names the gate.
+
+ruled out: a cost of the sibling pass to the quiet frame, because a frame in
+which every draw matched dispatches nothing (rig scene S7).
+
+### 2026-10-07, third build: range-aware invalidation, the history's size, the shadow of the sibling model
+
+**The flight (17:16, e5207abe, Epic).** The settlement walk is the sourced stretch
+17:18:19-17:19:54 at SS 1.0 (3840x2160), not the SS 2.0 terrain windows after it.
+Weapon-refused no-prior pixels were 0.17-1.20 percent of the frame while he
+walked (6.9M of 7.0M at 17:18:39), 2.9 percent at 17:19:54 (22.0M no-prior),
+and 0.00-0.01 percent standing (17:19:29-39, 1,121 frames, zero misses). The
+`unspecified` bucket (0.01-0.12 percent of the frame, the same in the SS 0.75
+terrain windows that looked clean) is not what he sees: its split instrument
+stays unbuilt.
+
+**What the log says about the misses.** `record-reclaimed` is 94.5 to 100
+percent of every window's same-key misses (5,546 of 5,870 at :39, 6,774 of
+6,818 at :49); the invalidated-vertices, invalidated-indices and
+invalidated-unknown patterns are 0 in all 48 windows; refused-last-frame-budget
+and -cap are 0, no draw was refused for the 128-record or 32 MiB bounds
+(`last-refusal=none`, H qualified every frame), and the budget receipts are
+`valid=0` because they fill only at a refusal, so records and bytes against the
+caps were not in the log at all. The misses are persistent: 250 of 282 frames
+have one at :39, the longest run is 251 frames, and 25 to 57 frames per window at
+17:18:19-:34 lost every draw at once. The 21 reclaimed example keys all sit on
+one of two index buffers: 000001293AFA5560 (17:18:19-:39; vertex buffers
+00000128B46C6CE0, 0000012CA3C9DB20, 0000012CA377BDA0) and 0000012CB7FBF620
+(:44-17:19:23; 0000012C7AF02A20, 0000012CA3C9DB20); the switch lines up with
+all-missed frames stopping. The keys are the weapon's own pieces (7B0DC42D and
+114AF608, the weapon vertex shaders, and the F516BF02/B40B0462 depth prepass at
+a count chain 57729, 38709, 29760, 28092, 24819, 16002, 6516, 2727, 876, 651,
+78) and 114AF608's base moves by -198, -304, -102 between windows: the arena
+re-places the mesh. The 36-draw windows (17:18:24-:49, 17:19:44-:54) and the
+19-draw windows (:54-17:19:39) are two different weapons (a rifle and a pistol,
+by the draw counts and the count chains); both lose records the same way, the
+pistol 3.5 a frame, the rifle 10 to 21.
+
+**Mechanism (code reading; the writer is not in the log).** A record leaves the
+history by two paths that touch one published the frame before, and both need it
+invalidated first: `resourceWritten` resets its stamps, and then `advance()`
+erased it at the next frame boundary (its erase test is true for stamps of
+`~0u`) or a different key's allocation reclaimed it under pressure. The prior is
+lost at the invalidation itself (a prior needs `stamp+1==frame`); the erase
+decides the label. invalidated-* being 0 while reclaimed is in the thousands
+says the writes land after the frame's last capture and before the next one's
+first (the invalidated record never survives to its key's next draw), which is
+what `advance()` does to every one of them. `resourceWritten` is per resource:
+any write to a shared arena buffer invalidates every record that reads it, the
+weapon's included, whether or not the write touches the weapon's bytes. Walking
+streams and relocates meshes in the arenas; standing does not.
+
+ruled out: the spent-record reclaim of the grenade build as the cause, because
+`spentForHistory` reclaims only records whose every stamp is two frames old or
+more, and the lost records were published the frame before.
+ruled out: the 128-record and 32 MiB bounds, because refused-last-frame-budget
+and -cap are 0 and no `history-budget` refusal appears in any window.
+open: whether every F516BF02/B40B0462 key among the misses is the weapon's own
+(the world's depth prepass is the same shader pair): the weapon-family keys among
+the misses and the 19 draws a frame standing say so, and the shadow's identity
+pooling will show world pieces if they are mixed in.
+open: which API writes the arenas (Map, UpdateSubresource, a copy or a compute
+UAV) and whether the weapon's own bytes are touched. The log of this build
+carries both.
+
+**Built (no new key, no behaviour of the map changed).**
+1. FIX A, range-aware invalidation, live. A write that carries a byte range
+   invalidates only the records that read bytes of it: UpdateSubresource's box
+   and CopySubresourceRegion's destination (the box, or the whole source's size
+   when the copy has none) are ranged; Map and Unmap, CopyResource, Clear, a
+   compute dispatch's UAV and an unknown write are the whole resource, as
+   before. A record's index range is exact from its key; its vertex extent (the
+   envelope of the vertices its indices name) is read back from a staging copy
+   of its indices three or more frames after the record is made, and until then
+   or if it never is, the whole vertex buffer counts. The adapter drops only the
+   draws of its own lists that a write touched (it dropped every one that used the
+   buffer), and a write that touches a draw captured this frame still fails the
+   frame. Under the extended policy an invalidated record keeps its allocation
+   until its key draws again or three frames pass (the reclaim's own comment
+   said it always should), so a redrawn key creates no buffers and reads as
+   `invalidated-*`, not as gone. The default policy (VR) is unchanged.
+2. FIX C, labels and sizes. `record-reclaimed` is split into
+   `reclaimed-by-advance` (a write invalidated it, its key did not draw in time,
+   the boundary aged it out) and `reclaimed-by-pressure` (another key's budget
+   took it); `record-reclaimed` is now the path nobody remembered (the
+   tombstone ring rolled) and must read 0. The no-candidate line gains
+   `records= bytes= peak-records= peak-bytes= allocations=`.
+3. The write instrument, `flat foreground history 5s:`, every zero printed:
+   erase paths; writes by entry (map, update, copy-region, copy-resource, clear,
+   dispatch-uav, other, unknown) observed, touching a live record's buffer as
+   vertices or indices, by gap or capture window, invalidating, ranged, ranged
+   and invalidating nothing (`saved-writes`: what the range kept whole), records
+   invalidated, `spared-records`, `extent-unknown-hits`, extent requests, reads
+   and failures, and the three resources written most. A write is counted once,
+   by the API-level report.
+4. The shadow of FIX B, `flat foreground shadow 5s:`, computed on one frame in
+   eight and applied to nothing (two compute passes a draw, the results read
+   back late). For every draw that matched its own history it predicts the
+   draw's own per-vertex motion from the other same-identity draws, with the
+   production mean model and with an affine screen-space model
+   (m = m0 + A(p - p0), least squares on every donor vertex, p in half-extents).
+   Affine, not rigid view-space: the donors' clip x, y and w are in both frames,
+   but a rigid fit needs the camera's projection scale and a pose solve. The
+   affine fit is a normal-equation solve over moments both shaders merge, exact
+   for roll, zoom and translation, and its failure to explain a donor set is a
+   number (the residual), not a threshold on the motion. It is only first order
+   for a pitch or a yaw: a rotation of a plane is a homography, and the rig
+   measures the perspective residual it leaves (below). If the flight's residual
+   bins are wide on a weapon that only turns in pitch and yaw, the next model is
+   the rigid view-space fit, not a looser gate. Gates: 24 donor vertices, conditioning
+   det/tr^2 of the donors' screen covariance at least 0.005, the donors' own
+   RMS residual at most 0.5 px, the receiver inside the donors' extent (5
+   percent and 0.01 wider) and depth range (25 percent wider). The error is the RMS
+   over the draw's vertices; bins 0.25 / 0.5 / 1 / 2 / 4 / more. Receivers
+   (draws with no history) are only classified: how many the current policy
+   refuses (`disagree`) that the affine gate would accept, and how often the
+   no-donor case (mode 2: zero motion, painted valid) fires while the draws that
+   did match moved over a pixel.
+
+**Tests.** The weapon-motion rig (WARP) is 227,221 checks (218,821 before): on
+the real history under the extended policy, the range cases (twelve byte ranges
+around two keys in one index buffer; every entry, role and timing; adjacent,
+empty and whole-buffer writes), the vertex extents (before and after the
+readback, three routes to the same bytes, 16-bit indices, an index buffer bound
+at an offset, a revived record forgetting its extent), retention (kept through
+the third boundary, gone at the fourth; the default policy unchanged),
+pressure (the cap filled and invalidated, one taken for a new key, the
+`reclaimed-by-pressure` label, a record published the frame before never
+taken), the top-resource and peak accessors, and the adapter (a disjoint range
+leaves H qualified and counts `saved-writes`; an overlapping one fails the
+frame; one API call reported twice is counted once; Window against Gap). The
+shadow's GPU parity runs on synthetic buffers with no VS and no adapter: 24
+random scenes, a 128-draw table and about twenty named scenes (rigid roll, yaw,
+step field, collinear donors, out-of-hull and depth receivers, a lone piece,
+unreadable identity, byte 30 and byte 31, triangles refused one at a time),
+kinds, donors and gate bits exact and floats within 5e-3 px (largest 0.0028),
+17 record mutations each failing the check; the dispatcher refuses 129 draws,
+fills its four slots and drains them, and puts back every compute binding the
+game had. The flat-temporal rig has the ledger labels, the line formats (every
+counter distinct, an empty window all zeros, the 4096 buffer), source-text pins
+with controls for the range gate, retention, the tombstone causes, the two
+write reports (counted once) and the shadow's isolation from the map, and the
+model: a 36x40 lattice in six pieces through a pinhole (60 degrees, 2560x1440)
+under a true rigid motion. Roll at 0.3 to 2 degrees: the affine model's RMS
+error is under 1e-5 px where the mean model's is 0.77 to 5.12 px and the
+donors' spread 2.4 to 16.1. Pitch, yaw and a diagonal axis at the same angles,
+448 px weapon: 0.025 to 0.234 px (ratio to the mean model at most 0.11), and
+the affine gate accepts every one while the current policy refuses from 1
+degree. A homography is not affine: the residual is first order in the angle
+and second in the weapon's width (0.518 px for 896 px at 1 degree, 1.88 px for
+1152 px at 2 degrees, where `kGateResidual` fails alone). Refusals, each with
+its control: a step field, oppositely rotating or different-pivot halves, exactly
+and nearly collinear donors, 23 against 24 donor vertices, a receiver beyond the
+hull margin and a depth beyond the ratio (edges bracketed), world parallax. A
+long-hand oracle (two-pass long-double sums) agrees with the model on 400
+random scenes. Private mutants against the real sources: 69 on the range,
+retention, tombstone and counter code, 76 on the model, counters and line, 38
+on the shader text, motion class, dispatcher and runtime, 30 on the compute
+shaders recompiled, 14 on the adapter: all killed, bar five that are equivalent
+by construction.
+- The shadow's gates refuse the end pieces of a strip-cut weapon by design (the
+  hull), so a tip or end piece's LOD swap shows as a hull failure and never an
+  affine accept; and `while-matched-draws-moved-over-1px` needs some matched
+  draw in the frame, so a frame where every draw lost history cannot fire it.
+- `reclaimed-by-advance` is nearly unreachable in a flight: `advance(frame)`
+  runs before any capture of the frame, so a record invalidated since the key's
+  last publish is at most a frame old; `reclaimed-by-pressure` is the live label
+  and `record-reclaimed` (the tombstone ring rolled) must read 0. `map=` counts
+  Map and Unmap, so it is about twice the Map calls.
+- A buffer a record reads as both its vertices and its indices counts as its
+  vertices (a hit on only its index bytes is labelled `invalidated-vertices`).
+
+**Flight pass signs.**
+- Walking the settlement: the census' weapon-refused no-prior pixels fall and
+  stay near the standing level (0.00-0.01 percent), and `record-reclaimed`,
+  `reclaimed-by-advance` and `reclaimed-by-pressure` are 0 or small in the
+  no-candidate line.
+- `saved-writes` and `spared-records` are what FIX A saved: if update and
+  copy-region carry the invalidating writes and `saved-writes` is a large part of
+  their `touching`, the over-invalidation was real and is cured. If the writes
+  that touch the weapon's buffers are map, copy-resource or dispatch-uav, FIX A
+  is inert and the counters say so; the next lever is then to validate
+  correspondence by content, not to invalidate by buffer.
+- `extent-unknown-hits` stays small (the readback lag) and `failed=0`;
+  `allocations` falls with the redraw of invalidated keys; `peak-records` and
+  `peak-bytes` give the real position against 128 records and 32 MiB.
+- The shadow: apply FIX B next only if, on the leave-one-out draws, the affine
+  model's error bins sit at or under 0.5 px where the mean model's sit at 1 px
+  or more, the affine gate accepts most of what the current policy refuses
+  (`affine-would-accept-of-refused` against `current-refuses`), and its
+  refusals are the residual, hull and depth gates (parts that move against each
+  other, other depths), not the fit-vertex count. If the residual bins are wide
+  the disagreement is not a rigid weapon's, and cross-object pooling by identity
+  is the next suspect. `view-attached ... fires ... while-matched-draws-moved`
+  counts how often mode 2's zero motion was wrong.
+
+ruled out: unspecified-weapon-refused as the white seen at the settlement, because
+the same fraction of the frame (0.01-0.12 percent) is in the SS 0.75 windows that
+looked clean, and the walking windows' no-prior (reason 3) pixels are 10 to 100
+times larger.
+
+### 2026-10-07, fourth build: the vertex set known at creation, exact; short lines; the shadow retired from the frame
+
+**The flight (45b5a373, Epic, log 21:14).** FIX A spared most ranged writes and left the storm where it was.
+Weapon-refused pixels while walking were 0.04-2.57 percent of the frame (21:16:48 2.57, :58 1.91; the last
+flight 0.17-2.9), standing 0.01. In `flat foreground history 5s`: the arena writes are CopySubresourceRegion and
+nothing else (map, update, copy-resource, clear and dispatch-uav touch no live record); at :48 its 561 ranged
+writes spared 391 whole (`saved-writes`), 165 invalidated through the vertex role and 5 through the index role,
+and those 170 writes invalidated 1,782 records, 10.5 a write (:58: 176 writes, 2,198 records, 12.5). The
+no-candidate patterns are now almost all `invalidated-vertices` (1,558 at :48, 2,174 at :58, 926 at :03).
+`erased` says what happens next: advance-invalidated 236 at :48 (a record invalidated and not redrawn in three
+frames), `allocations=276` in 5 s, peak 68 records and 14.9 MB: against 128 records and 32 MiB the history is
+nowhere near full, it is churning. Two of the three fields that would name the cause were lost: the log cuts a
+line at about 1,167 characters (`...[truncated]`; src/common/log.cpp), and the history line was 3 KB, so
+`spared-records`, `extent-unknown-hits`, the extent counters and the top resources never reached the file,
+and neither did the shadow line's tail.
+
+**Reading (a hypothesis; the count that decides it is built).** A vertex write hit 10 to 12 records because
+their vertex extents overlapped it, or were unknown. The extent of the previous build was read back three or more
+frames after the record was made, forgotten whenever the record was invalidated and revived, and lost with an
+erased record; an unknown extent counted as the whole vertex buffer. A record that a write invalidates every few
+frames and that ages out and is made again (236 and 276 in a window) therefore spends most of its life with an
+unknown extent, which is hit by every write to its arena: a loop. The fix is not a better envelope: the set of
+vertices a draw reads depends on its index bytes only, so it can be kept for the index range, beyond the record.
+
+**ruled out: identity-pooled sibling motion (the mean, or the affine fit) as the cover for lost history.** The
+shadow on real data: the donors' own fit residual is mostly in the `more` bin (379, 507, 745, 504 draws in four
+windows), conditioning fails on 316 to 410, there are 20 to 30 donor draws and 73,000 to 165,000 donor vertices
+per draw (an identity group pools the weapon with skinned parts of the body), and the draws the affine gate
+would accept out of those the current policy refuses are 0 to 4. The shadow's code, rigs and shaders stay; it is
+off by default (`kFlatShadowDefaultEvery` 0, a rig sets `RigShadowEvery`), samples nothing, makes no resource and
+prints no line.
+
+**Built (no new key).**
+1. Short lines. Every line of the history report is a formatter held under `kFlatLogLineBudget` (1,000
+   characters) with 12-digit counters, and the explanatory paragraphs are gone from the lines (they are here):
+   `flat foreground history 5s` (sizes, peaks, allocations, erase paths, the vertex sets' reads),
+   `... history writes 5s (1/3)..(3/3)` (the entries), `... history vertex writes 5s` (the three-way count, the
+   deferred checks, the top resources) and `... history write example`.
+2. The vertex set, at creation, exact. No synchronous source exists: the arenas' index buffers are default-usage,
+   filled by uploads and copies from other buffers, so no CPU copy of their bytes can be shadowed, and reading the
+   copy back at once would stall the render thread on every GPU command queued before it. So the set is read once per
+   index range (a staging copy of the indices at capture, read without waiting one frame or more later) and CACHED by
+   the range, outside the record: a record that is invalidated, aged out and made again, or made for a key seen
+   before, is given its set at capture (`from-cache`). It is the exact set of vertices the indices name, as
+   sorted runs (a mesh's vertices are mostly contiguous: a few runs); past 4M span or 4,096 runs it is the envelope
+   alone, which is a superset and sound. Only a write to the index range (overlapping, whole, or unknown) ends it
+   and cancels a read in flight; a write to the vertices never does, since the indices did not change.
+3. The vertex write is judged against the set. A ranged write to a record's vertex buffer meets a vertex of the
+   set (a genuine rewrite: the record is invalidated), falls inside the envelope between the vertices (`in-gap`), or
+   outside it (`outside-span`); the last two spare the record. The first sight of a key, before its set is read,
+   is the one case that cannot be judged: the record is treated as reading its INDICES ALONE (the three-way
+   count's `extent-unknown`), not the whole buffer, and the write is logged in a ring of 128. When the set arrives
+   a record that was published since such a write is invalidated then if the write meets a vertex
+   (`deferred-invalidated`), or if the ring no longer reaches back to its last publish (`deferred-conservative`).
+   So the unknown window costs a late invalidation, never a wrong prior. A record whose indices could not be read
+   (a copy that did not happen, a range past the buffer) holds a set of every vertex, as the previous build did,
+   and asks again 30 frames later.
+4. The instrument. The three-way count names any remainder: `extent-unknown`, `in-gap`, `outside-span` (spared)
+   and `genuine` (invalidated), per live record a ranged vertex write met; `spared-records`; two examples per
+   case per window, each with the write's bytes and entry, the record's set (span, exact or envelope-only, runs),
+   where in the span the write starts, the record's age in frames and its key.
+
+**Tests.** The weapon-motion rig (WARP) is 229,669 checks (227,221 before): the exact set (about 110 byte rows over
+{0,1,2,6,7,8} including the run edges, one-byte and unaligned writes; three routes to the same bytes; a negative
+base; 16-bit indices; an index buffer bound at an offset; the span bound 4,194,304 exact and 4,194,305 envelope-only,
+4,096 runs exact and 4,097 envelope-only, where a gap write then hits), the loop (12 frames of a write on a vertex
+of one record and one in a gap of another: the second keeps its prior 12 of 12 frames, the first is invalidated 12
+times and `extentIssued` stays 2), the unknown window (a genuine write taken by the deferred check, a gap write spared
+for good, a write older than the last publish ignored, a ring of 127 or 128 writes not conservative and 129 or
+more conservative, a write that cancels the read in flight and the re-read returning the new indices), the cache
+(a record made again takes its set; thirteen kinds of write, seven end the set and six do not; R16 and R32 of the
+same bytes are two entries; 300 keys leave 256; the 257th buffer resets the cache), the buffer id (kept in the
+buffer's private data; a buffer made at a freed buffer's address gets no cached set), the failure roads (an
+unreadable range holds the whole-buffer set through the deferred check and retries at 30 frames), the examples (two
+a case, ordered, with the set's span, runs, age and key; none for outside writes or uncounted reports), the
+adapter's lists, and the shadow's default (a two-draw frame at a multiple of 8 samples nothing and makes no
+shader). The pure rig: `historyVertexSetMeets` against a 72-row table and a byte-by-byte oracle over nine strides,
+every formatter of the report with every counter printed once, a window of zeros printing zeros, and each line
+under 1,000 characters at 12-digit counters (history 473, writes 843, 853 and 574, vertex 570, example 505, shadow
+647, 440 and 748; at 2^64-1 all at most 999). 119 private mutants of the new code, 118 killed (92 by the WARP rig,
+26 by the pure rig only: wiring pins, lines, constants); the survivor, `char entries[960]` raised, is equivalent. The
+rigs found four defects before the flight, now fixed: a ring that wrapped inside the record's publish frame lost
+its first write (the test is `oldest>=since`); a failed read assigned the whole-buffer set without the deferred
+check; the cache keyed a buffer by its address, which a later buffer can reuse (now a per-buffer id); a record made
+again from the cache was checked against writes that came before its own capture. The cost of the design the
+rigs pin: the deferred check protects the frames after the set arrives, so a key's first sight, a frame or two
+before the read lands, may take a prior across a write that genuinely rewrote its vertices.
+
+**Flight pass signs.**
+- Walking the settlement: the census' weapon-refused no-prior falls and stays near the standing 0.01 percent;
+  the no-candidate patterns `invalidated-vertices` fall with it; `allocations` and `advance-invalidated` fall to
+  the keys that really leave.
+- The three-way count names any remainder. `genuine` is the game rewriting the weapon's own vertices: if it
+  carries the invalidations, nothing here can cure it (the examples name the entry, the bytes and the age; a
+  rewrite every frame of a record's vertices is then the question to ask of the game). `extent-unknown` large
+  with `from-cache` small means keys are new every frame (the LOD churn), and `deferred-invalidated`
+  says what the unknown window cost. `in-gap` and `outside-span` are what the exact set spared over the envelope.
+- `vertex sets: failed` and `approximate` stay 0 or small; `cancelled` is the index writes that raced a read.
+- No line of any report ends in `...[truncated]`.
+
+### 2026-10-08, fifth build: no line of any report is cut
+
+The Epic log of the fourth build (v0.18.3-16-ga909f494) still held 114 lines ending `...[truncated]`: the logger keeps
+about 1,167 characters of a line, and 38 `flat foreground SDK domain`, 38 `flat foreground sibling 5s`, 38 `flat
+foreground no-candidate 5s` (the sibling line was 3 KB, the no-candidate line 3.5 KB) and 4 `engine motion: movers
+joined` were longer. Every periodic flat and engine-motion report now stays under `kFlatLogLineBudget` (1,000) at
+counters of 20 digits, and the build gates on it. No field was removed or renamed and no behaviour changed. The first
+part of every split keeps the old key, so a grep for `flat foreground sibling 5s:` still finds the window; the later
+parts read `(2/4)`, `(cont.)` and so on. A reader joins the parts of one window in print order.
+
+| Line | Parts | Worst part, 20 digits / 12 digits |
+|---|---|---|
+| `flat foreground SDK domain:` | 3 | 589 / 477 |
+| `flat foreground sibling 5s:` | 4: the head, then the 24 patterns in groups of 8 | 957 / 701 |
+| `flat foreground no-candidate 5s:` | 3: the head with records, bytes, peaks and allocations, then the 22 patterns in two groups of 11 | 572 / 486 |
+| `flat foreground identity 5s:` | 1 (legend only removed) | 348 / 276 |
+| `flat source 5s:` | 2: the fields, then `(2/2): top:` pairs | 726 / 606 |
+| `flat cpu 5s:` | the packer's lines, `kLineLimit` 1090 to 1000, `kMaxLines` 4 to 5 | 983 at the worst plausible window |
+| `engine motion: movers joined` | 4: `movers joined`, `(2/4)`, `(3/4)`, `(4/4)` | 897 / 873 |
+| `engine motion: on foot:` | 3, and a fourth `on foot, another camera:` only when another camera moved the rows | 915 / 835 |
+
+The history and shadow lines of the third and fourth builds are unchanged (the longest, `history-writes`, is 999 at 20
+digits). The legends that trailed the old lines are comments above the formatters now (`flat_foreground_sibling.h`,
+`flat_no_candidate_report.h`, `flat_source_spell.h`, `reportForegroundDomain` in `flat_runtime.cpp`), and here:
+- SDK domain: the counts cover all depth candidates; `scale-rejected-5s` is the draws at the world's near plane whose
+  projection scale was not the world's, taken as first-person, since the last line; qualification alone is not a
+  completed SDK call; the history of the submitted draws is cumulative (`no-candidate` found no record of its geometry
+  from the frame before, `no-prior-pool`, `no-prior-near` and `no-prior-absent` had candidates and the adapter passed
+  none on, `priors-one` and `priors-several` matched on the GPU by identity, `repeated-geometry` is the draws after
+  the first of their geometry in a frame).
+- Sibling: a draw the history has no record for (the pattern) takes the mean motion of this frame's draws of the same
+  pool identity that matched theirs (`sibling`) when those agree to within one pixel per axis; with none it is attached
+  to the view and its history is kept (`view-attached`); donors that disagree and an identity the pool cannot read stay
+  refused, as reasons 3, 5 and 6 of the refusal census; the counts are of draws, read back a few frames late.
+- No-candidate: a miss is a submitted draw with no record of its exact geometry key that the frame before used; the
+  patterns are exclusive and sum to `same-key-misses`; `offset-shift` is the one the history acts on and
+  `rescued-offset-shift` must equal it; `record-unusable` must be 0; `records` and `bytes` are what the history holds
+  now against 128 records and 32 MiB, the peaks the window's highest.
+- Identity: one draw in thirteen that the map matches by identity has its identity words and its priors' read back a
+  few frames later and classified by the map's two tests; `match` means the map takes the history, `x-differs`,
+  `parameter-differs` and `both-differ` are the reason-5 causes, `current-unauthentic` and `priors-unreadable` are
+  reasons 2 and 6.
+- Source: a spell is a run of frames refused for no supported motion source pair; `source-free-frames` held no pool
+  family draw at all and take the camera term alone; `recoveries` end a spell with a treated frame and `warm-frames`
+  count the zero-phase frames after it (two, by `FlatLivePhase`); `abandoned` ends one with another refusal.
+
+Left whole on purpose, each with its reason in the rig's table: `flat map bounce 5s:` (parsed by `tools\edvr_log.py
+--map-bounce`; about 900 characters in the log, 1,121 at 12-digit counters, out of reach at 20; a split needs the
+parser to join the parts, a separate change), `flat foreground ownership:` (a one-time probe, `kLimit` 2 reports;
+1,051 at 20 digits), `flat overlay admission refused:` (at most six a session; 1,074), `flat runtime conflict:` (962),
+`flat untrusted camera coverage summary:` (955), `engine motion: emit (` (1,038) and `engine motion: history gaps`
+(750), all under the cut at 20 digits.
+
+**Pin.** `tools/flat_temporal_test/flat_log_line_tests.h` (pure): every formatter part at 2^64-1 and at 12 digits is at
+most 1,000 characters, carries its prefix, and prints every field once across its parts; an all-zero window prints
+zeros; a short buffer truncates; the flat cpu packer's worst plausible window packs into at most five lines of 1,000
+without splitting a token; a source scan estimates the inline notes at their worst width (the engine lists are
+bounded from the name tables) and a net over every `note(` call in `flat_*` and `engine_velocity*` fails on a new
+long line unless it is on a six-entry allow-list of one-time or non-periodic notices (three stand-down formatters, the
+copy window line, two query fallback notices); wiring pins for the loops over the parts. Mutation controls: an
+over-long format, the SDK domain or the on-foot notes re-merged into one string, a group of patterns dropped, the
+cpu limit back at 1,090, a part renamed and a guard dropped all fail.
 
 ## 105. Different supporter: v0.18.2 AA selector refusal (2026-10-06)
 

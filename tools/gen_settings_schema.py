@@ -1483,7 +1483,7 @@ def self_test():
                        '#thing = both\n'), thing, 1)
     expect_in(name, said, 'start like a setting')
     expect_in(name, said, 'edvr.ini:3  advanced.thing')
-    # The shape settlement_detail's block had in [fix]: a dotted name, not a key
+    # The shape the retired settlement-detail block had in [fix]: a dotted name, not a key
     # the code reads, so no duplicate and no row -- but it cut the paragraph
     # above it off from the real key, whose hint became "changing anything."
     name = 'sentence-with-dotted-name'

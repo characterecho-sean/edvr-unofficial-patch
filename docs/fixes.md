@@ -201,18 +201,6 @@ field on Quest 3 via Virtual Desktop, where the missing tiles reproduced and
 are now gone, and on Pimax via PiOpenXR. Real SteamVR is unmeasured so far, so
 a log from there is a useful report whether the guard works or not.
 
-**Frame rate dropping at busy settlements.** *Off by default.* At a crowded
-settlement Elite draws tens of thousands of small parts a frame, enough on its
-own to hold the frame over the headset's refresh rate — the cheapest thing to
-give back is distant detail. `auto` lowers settlement detail only while the
-frame runs long, a step at a time, and gives it back once there is headroom;
-back to the game's own detail the moment you leave the settlement. `reduced`
-keeps detail down the whole time you are at a settlement, whether or not the
-frame is running long. Parts beyond about 100 m thin out and can pop as it
-steps; cockpit only for now. Measured at one settlement: 45-50 fps to 70-80,
-with no visible change from the cockpit. `fix.settlement_detail = game`
-(default, the game's own detail), `auto` or `reduced`.
-
 ---
 
 ## On foot
@@ -389,13 +377,9 @@ EDVR owns. What they draw into the game's own targets is unchanged, bit for
 bit.
 
 Other fixes do more too, and each is described in full. The resolution fix
-(below) rewrites twelve numbers in the game's code. The settlement detail fix,
-set to `auto` or `reduced`, hooks the game's own detail setter and changes one
-number, the game's level-of-detail distance. `ui_quality` (100 by default;
-`off` leaves the panels alone) sizes panels inside the game's own panel code,
-and `static_prop_updates` (off by default) hooks the game's update of
-settlement structures and props and skips it for those that have not
-changed. `intro_video = skip` answers the
+(below) rewrites twelve numbers in the game's code. `ui_quality` (100 by
+default; `off` leaves the panels alone) sizes panels inside the game's own
+panel code. `intro_video = skip` answers the
 game's open of the launch movie with "not found" through its import table; the
 default, `screen`, does not. Some advanced settings, all off by default, hook
 the game for diagnosis or experiments, and `edvr.ini` describes each. Explorer
@@ -448,7 +432,6 @@ follows at 16:9. These safeguards are the reason to trust it:
 
 If you would rather EDVR changed as little of the game as possible, set
 `vscreen_res_width` to `1920` (the stock size, meaning "do not patch"), keep
-`settlement_detail` at `game` and `intro_video` at `screen`, and leave
-`temporal_aa`, `ui_quality`, `static_prop_updates` and the advanced settings
-off. The two import redirects above still apply, because they are how EDVR
+`intro_video` at `screen`, and leave `temporal_aa`, `ui_quality` and the
+advanced settings off. The two import redirects above still apply, because they are how EDVR
 takes over VR startup and the menu's keyboard.

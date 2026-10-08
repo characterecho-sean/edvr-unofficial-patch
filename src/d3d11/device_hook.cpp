@@ -45,6 +45,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "explorer_cam.h"   // explorerCamShutdown: the avatar dither-fade global goes back at an unload
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
+#include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
 #include "orbital_width.h" // orbitalWidthRememberVs: the orbit lines' shader, captured at its creation
 #include "xinput_watch.h"
 #include "elite_binds.h"
@@ -64,7 +65,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "kinematic_eval_probe.h"
 #include "engine_velocity.h"
 #include "scheduler_stack_probe.h"
-#include "static_prop_gate.h"
 #include "temporal_pass.h"   // temporalPassArmEyeDump: the eye dump key's job
 #include "flat_runtime.h"
 #include "flat_hdr_crumbs.h"   // the flat HDR route's crash-safe breadcrumbs: the real Present's pair
@@ -832,6 +832,17 @@ HRESULT STDMETHODCALLTYPE hookedCreateTexture2D(ID3D11Device* self,
                                                 const D3D11_SUBRESOURCE_DATA* init,
                                                 ID3D11Texture2D** out) {
     const bool fromEdvr = addressInEdvr(_ReturnAddress());
+    // THE PANEL NET (2026-10-08, ui_sizing_math.h uiPanelNetShrink): a game create of a render or depth target over
+    // D3D11's 16384 on either axis -- which would be refused, and a refused create is fatal in Elite -- is created
+    // shrunk to fit with its aspect kept, and says so (ui_surfaces.cpp). Everything at or under the limit is
+    // forwarded as the game made it: the one compare below is all it costs.
+    D3D11_TEXTURE2D_DESC netDesc;
+    if (!fromEdvr && desc && self == g_state->device &&
+        (desc->Width > kUiPanelNetLimit || desc->Height > kUiPanelNetLimit)) {
+        bool shrunk = false;
+        guardedBudget(g_createBudget, [&] { shrunk = uiSurfacesPanelNet(*desc, init != nullptr, &netDesc); });
+        if (shrunk) desc = &netDesc;
+    }
     const HRESULT hr = createTexture2DForwarded(self, desc, init, out);
     if (self == g_state->device) {
         if (FAILED(hr)) {
@@ -1120,13 +1131,13 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT c
 EDVR_BOUNDARY_TICK(tkKinematicProbe, "kinematic_probe");
 EDVR_BOUNDARY_TICK(tkEngineVelocityClock, "engine_velocity_clock");
 EDVR_BOUNDARY_TICK(tkSchedulerProbe, "scheduler_probe");
-EDVR_BOUNDARY_TICK(tkStaticPropGate, "static_prop_gate");
 EDVR_BOUNDARY_TICK(tkVtableWatch, "vtable_watch");
 EDVR_BOUNDARY_TICK(tkVrRuntime, "vr_runtime");
 EDVR_BOUNDARY_TICK(tkToggleKey, "toggle_key");
 EDVR_BOUNDARY_TICK(tkHotkeys, "hotkeys");
 EDVR_BOUNDARY_TICK(tkEliteBinds, "elite_binds");
 EDVR_BOUNDARY_TICK(tkJournalWatch, "journal_watch");
+EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
 EDVR_BOUNDARY_TICK(tkBindingBoundary, "binding_boundary");
@@ -1247,6 +1258,13 @@ void tickEliteBinds() {
             }
         }
     }
+}
+
+// The supercruise word for planet patch motion (tkCelestialStatus): Status.json's Flags, once a frame. Unknown counts as not
+// supercruise (celestial_motion.h). It rode the head-offset gate's journal tick until that tick went with the old Explorer Cam
+// route (2026-10-07); the call and its once-a-frame cadence are unchanged.
+void tickCelestialStatus() {
+    celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());
 }
 
 // The FSS mode latch (tkFssModeLatch).
@@ -1429,12 +1447,6 @@ void presentFrameBoundary() {
     tkSchedulerProbe.run([] {
         schedulerStackProbe.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
     });
-    // The static prop gate's frame clock, journal-boundary poll and 20 s
-    // report tick, same call site and the same one-atomic-load-when-off
-    // cost.
-    tkStaticPropGate.run([] {
-        staticPropGate.notePresentFrame(static_cast<uint32_t>(g_state->frameCounter));
-    });
     // The write watch's per-frame work, here rather than inside
     // vScreenReclaimTick where the re-arm used to sit behind
     // `if (!g_state) return;`. In the two context probes vScreen never
@@ -1463,6 +1475,7 @@ void presentFrameBoundary() {
     // boundaries EDVR used to infer -- gameplay starting (LoadGame) and
     // on-foot sessions beginning (Disembark).
     tkJournalWatch.run([] { journalWatchTick(); });
+    tkCelestialStatus.run(tickCelestialStatus);
     tkFssModeLatch.run(tickFssModeLatch);
     // The settings menu (docs/settings-menu.md): its summon key, its
     // navigation keys and head-aim, its fade, the keyboard gate that
@@ -2880,6 +2893,36 @@ bool deviceHookHmdQuality(float* multiplier) {
     }
     if (multiplier) *multiplier = valid ? quality : 0.0f;
     return valid;
+}
+
+bool deviceHookPanelSettings(float* hmd, float* ssaa, uint32_t* displayW, uint32_t* displayH) {
+    float q = 0.0f, ss = 0.0f;
+    const bool got = eliteHmdMultiplier(&q, &ss, nullptr, 0);
+    if (hmd) *hmd = got ? q : 0.0f;
+    if (ssaa) *ssaa = got ? ss : 0.0f;
+    uint32_t w = 0, h = 0;
+    wchar_t appdata[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH);
+    if (n != 0 && n < MAX_PATH) {
+        const std::wstring path = std::wstring(appdata) +
+            L"\\Frontier Developments\\Elite Dangerous\\Options\\Graphics\\DisplaySettings.xml";
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) {
+            const DWORD size = GetFileSize(f, nullptr);
+            if (size != INVALID_FILE_SIZE && size > 0 && size <= (1u << 16)) {
+                std::string text(size, '\0');
+                DWORD read = 0;
+                if (ReadFile(f, &text[0], size, &read, nullptr) && read > 0 &&
+                    !uiDisplaySizeFromXml(text.c_str(), read, &w, &h))
+                    w = h = 0;
+            }
+            CloseHandle(f);
+        }
+    }
+    if (displayW) *displayW = w;
+    if (displayH) *displayH = h;
+    return got;
 }
 
 bool deviceHookAutoBiasSource(float* multiplier, float* bias) {

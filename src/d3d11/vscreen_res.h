@@ -51,6 +51,10 @@ bool applyVScreenModeResolution(uint32_t width, uint32_t height);
 // Restores 1920x1080 everywhere. Safe to call if nothing was patched.
 void revertVScreenModeResolution();
 
+// The width the 2D screen's override is forced to right now; 0 while nothing is written. The panel patch's size
+// budget (ui_sizing_math.h) takes it as one of the widths the panel formula's c can start from. Lock-free.
+uint32_t vscreenModeAppliedWidth();
+
 // Resolves fix.vscreen_res_width -- "auto", or an explicit width in pixels --
 // into the width and height to force. (0, 0) means "leave the game's own
 // panel alone": the ini asks for the stock size, the value does not parse, or

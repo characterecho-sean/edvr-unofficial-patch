@@ -3,6 +3,9 @@
 #include "flat_animated_identity_ledger.h"
 #include "flat_foreground_identity_sample.h"
 #include "flat_foreground_receipt.h"
+#include "flat_foreground_sibling.h"
+#include "flat_foreground_shadow_gpu.h"
+#include "cs_stage_save.h"
 #include <d3d11_1.h>
 #include <array>
 #include <cmath>
@@ -74,6 +77,15 @@ public:
         // The sampled identity readback (flat_foreground_identity_sample.h): the draws sampled, by what the map will have decided for them.
         uint64_t identitySamples=0;
         uint64_t identityBy[kIdentityVerdictCount]={};
+        // The sibling pass (flat_foreground_sibling.h): the frames it ran for, its dispatches, the frames read back, unread or failed (a resource
+        // it could not make), and every draw without history by the pattern the history gave it and what the pass made of it (draws, read back
+        // from the GPU a few frames late).
+        uint64_t siblingFrames=0,siblingDispatches=0,siblingReads=0,siblingNotReady=0,siblingFailed=0;
+        uint64_t siblingBy[kSiblingPatterns][kSiblingOutcomes]={};
+        // The history's write instrument and erase paths (animated_history_writes.h), copied in by stats().
+        HistoryWriteStats history;
+        // The sibling model's shadow (flat_foreground_shadow.h), copied in by stats().
+        ShadowStats shadow;
         void add(const CaptureStats& o) {
             attempts+=o.attempts;gpuAttempts+=o.gpuAttempts;submitted+=o.submitted;preflightRefused+=o.preflightRefused;
             warmedAfterRefusal+=o.warmedAfterRefusal;noCandidate+=o.noCandidate;noPriorPool+=o.noPriorPool;noPriorNear+=o.noPriorNear;
@@ -83,12 +95,21 @@ public:
             acrossOffset+=o.acrossOffset;frames+=o.frames;framesMissing+=o.framesMissing;framesAllMissing+=o.framesAllMissing;
             resetFrames+=o.resetFrames;nearChanges+=o.nearChanges;rescueCancelled+=o.rescueCancelled;identitySamples+=o.identitySamples;
             for(unsigned i=0;i<kIdentityVerdictCount;++i)identityBy[i]+=o.identityBy[i];
+            siblingFrames+=o.siblingFrames;siblingDispatches+=o.siblingDispatches;siblingReads+=o.siblingReads;
+            siblingNotReady+=o.siblingNotReady;siblingFailed+=o.siblingFailed;
+            for(unsigned p=0;p<kSiblingPatterns;++p)for(unsigned k=0;k<kSiblingOutcomes;++k)siblingBy[p][k]+=o.siblingBy[p][k];
+            history.add(o.history);shadow.add(o.shadow);
         }
     };
     // The first draws of a window that found no same-key prior, one per pattern, with the whole key and the nearest entry's (section 104).
     struct MissExample {
         unsigned frame=0;HistoryClass miss;HistoryKey key;bool rescued=false;uint64_t vs=0,ps=0;
     };
+    // The constants the map's shaders (and the sibling pass's and the shadow's) read for a draw: the render extent and the draw's phase, the previous
+    // phase and the common near, the expected identity, the provenance, the priors' phases, the identity mode and prior count, and the sibling
+    // pass's draw index, vertex count and the frame's draw count. Public for the rigs that drive the shadow's shaders on their own.
+    struct Settings {float extentPhase[4]{},previousPhaseDepth[4]{};uint32_t expected[4]{},provenance[4]{};
+        float priorPhase[4][4]{};uint32_t identityMode[4]{};uint32_t sibling[4]{};};
     static constexpr unsigned kMissExamples=6,kIdentityExamples=4;
     // Hands over (and forgets) the examples gathered since the last call.
     unsigned takeMissExamples(MissExample* out,unsigned capacity) {
@@ -110,10 +131,92 @@ public:
     void pollIdentity(ID3D11DeviceContext* ctx,unsigned frame,bool wait=false) {
         sampler_.poll(ctx,frame,wait,[&](const FlatIdentitySampler::Sample& s){
             ++stats_.identitySamples;++stats_.identityBy[unsigned(s.verdict)];
+            // A draw that had priors and no identity match is a receiver the pass cannot see coming: the CPU knows only draws with no prior.
+            // Arm it for a while, so the next frames' draws with priors are matched against their siblings too.
+            if(s.verdict!=IdentityVerdict::Match && s.frame+kSiblingArmedFrames>siblingArmedUntil_)siblingArmedUntil_=s.frame+kSiblingArmedFrames;
             if(s.verdict!=IdentityVerdict::Match && identityExampleCount_<kIdentityExamples)identityExamples_[identityExampleCount_++]=s;
         });
     }
-    const CaptureStats& stats() const{return stats_;}
+    // Reads the sibling outcomes that are ready (all of them, waiting, in a rig). The capture does it once a frame beside the identity samples.
+    void pollSibling(ID3D11DeviceContext* ctx,unsigned frame,bool wait=false) {
+        if(!ctx)return;
+        for(SiblingSlot& s:siblingSlots_) {
+            if(!s.pending)continue;
+            if(!wait && frame-s.frame<2)continue;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            const HRESULT hr=ctx->Map(s.stage.Get(),0,D3D11_MAP_READ,wait?0u:D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
+            if(FAILED(hr) || !m.pData) {
+                if(frame-s.frame>8){s.pending=false;++stats_.siblingNotReady;}
+                continue;
+            }
+            const float* fit=static_cast<const float*>(m.pData);
+            for(unsigned d=0;d<s.draws;++d) {
+                const float mode=fit[d*8+2],matched=fit[d*8+6];
+                if(matched!=0)continue;
+                const unsigned outcome=unsigned(mode+.5f);
+                if(outcome>=1 && outcome<=kSiblingOutcomes)++stats_.siblingBy[s.pattern[d]][outcome-1];
+            }
+            ctx->Unmap(s.stage.Get(),0);
+            s.pending=false;++stats_.siblingReads;
+        }
+    }
+    // Whether the last prepareH ran the sibling pass for its frame (a rig asks).
+    bool siblingRan() const{return siblingFrame_==frame_ && siblingOk_;}
+    // FOR THE RIGS ONLY: the donors' records and the fit table of the last frame the pass ran for, read back and waited for. `draws` is the
+    // frame's draw count; donors[i] is draw i's record as the first shader wrote it, fit[i] its two float4 (x, y, mode, spread; donor draws,
+    // donor vertices, matched, 0). False when the pass has not run.
+    bool readSiblingTables(ID3D11DeviceContext* ctx,std::vector<SiblingDonor>& donors,std::vector<std::array<float,8>>& fit,unsigned& draws) {
+        draws=0;donors.clear();fit.clear();
+        if(!ctx || !siblingOk_ || !donors_ || !fit_)return false;
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        const unsigned n=siblingDraws_;
+        const auto readBack=[&](ID3D11Buffer* source,unsigned elements,std::vector<uint32_t>& words) {
+            D3D11_BUFFER_DESC d{};d.ByteWidth=elements*16;d.Usage=D3D11_USAGE_STAGING;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;d.StructureByteStride=16;
+            Ptr<ID3D11Buffer> stage;if(FAILED(dev->CreateBuffer(&d,nullptr,&stage)))return false;
+            const D3D11_BOX box{0,0,0,elements*16,1,1};ctx->CopySubresourceRegion(stage.Get(),0,0,0,0,source,0,&box);
+            D3D11_MAPPED_SUBRESOURCE m{};if(FAILED(ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&m)))return false;
+            words.assign(static_cast<const uint32_t*>(m.pData),static_cast<const uint32_t*>(m.pData)+elements*4);ctx->Unmap(stage.Get(),0);return true;
+        };
+        std::vector<uint32_t> d,f;
+        if(!readBack(donors_.Get(),n*3,d) || !readBack(fit_.Get(),n*2,f))return false;
+        const auto real=[](uint32_t bits){float v;std::memcpy(&v,&bits,4);return v;};
+        for(unsigned i=0;i<n;++i) {
+            SiblingDonor s;const uint32_t* r=&d[i*12];
+            s.matched=r[0]!=0;s.vertices=r[1];s.identityX=r[2];s.identityY=r[3];
+            s.mean[0]=real(r[4]);s.mean[1]=real(r[5]);
+            s.lo[0]=real(r[8]);s.lo[1]=real(r[9]);s.hi[0]=real(r[10]);s.hi[1]=real(r[11]);
+            donors.push_back(s);
+            std::array<float,8> row{};for(unsigned k=0;k<8;++k)row[k]=real(f[i*8+k]);fit.push_back(row);
+        }
+        draws=n;return true;
+    }
+    // FOR THE RIGS ONLY. The base map's reasons (3, 5, 6 for a draw with no history of its own) are what the sibling pass replaces for a draw
+    // that has none; a rig that holds the base contract apart (tools\weapon_motion_test, the identity and covered-draw scenes) turns the pass
+    // off for its scenes and on again. The runtime never calls it: the pass is on.
+    static void rigSiblingPass(bool on){siblingPassEnabled()=on;}
+    struct RigSiblingPass {
+        bool was;
+        explicit RigSiblingPass(bool on):was(siblingPassEnabled()){siblingPassEnabled()=on;}
+        ~RigSiblingPass(){siblingPassEnabled()=was;}
+        RigSiblingPass(const RigSiblingPass&)=delete;RigSiblingPass& operator=(const RigSiblingPass&)=delete;
+    };
+    // FOR THE RIGS ONLY: the shadow, to read what it measured (poll waits) and to take every frame.
+    FlatForegroundShadow& rigShadow(){return shadow_;}
+    struct RigShadowEvery {
+        unsigned was;
+        explicit RigShadowEvery(unsigned every):was(shadowEvery()){shadowEvery()=every;}
+        ~RigShadowEvery(){shadowEvery()=was;}
+        RigShadowEvery(const RigShadowEvery&)=delete;RigShadowEvery& operator=(const RigShadowEvery&)=delete;
+    };
+    const CaptureStats& stats() const{stats_.history=history_.writeStats();stats_.shadow=shadow_.stats();return stats_;}
+    // The window's history gauges and write instrument (section 104): the resources written most, the records and bytes at their peak, and what is
+    // held now. Each Take forgets what it hands over.
+    unsigned takeWriteTop(HistoryWriteTop* out,unsigned capacity){return history_.takeTopResources(out,capacity);}
+    unsigned takeWriteExamples(HistoryWriteExample* out,unsigned capacity){return history_.takeWriteExamples(out,capacity);}
+    void takeHistoryPeaks(unsigned& records,unsigned& bytes){history_.takePeaks(records,bytes);}
+    unsigned historyRecords() const{return unsigned(history_.recordCount());}
+    unsigned historyBytes() const{return history_.bytes();}
     // The map the last prepareH drew (RGBA32F at its render size), or null before the first. For the offline bench's test export, which reads it
     // back in its own process; the next prepareH rewrites it.
     Ptr<ID3D11ShaderResourceView> mapView() const{return view_;}
@@ -151,13 +254,18 @@ public:
         else ++stats_.coveredOther;
     }
     unsigned coveredDraws() const{return covered_;}
-    void resourceWritten(ID3D11Resource* resource) {
-        const unsigned kind=history_.resourceWritten(resource);
+    // A write to a resource, with the bytes it touched when the call has them (section 104, range-aware invalidation): the history invalidates
+    // the records that read those bytes, and the adapter drops the draws of its own lists that read them. The rest keep their priors. A write
+    // before the frame's H, once a draw is captured, is in the capture window; every other write is in the gap, where the next frame's draws find
+    // what it cost them.
+    void resourceWritten(ID3D11Resource* resource,const HistoryWriteExtent& extent=HistoryWriteExtent{},bool tally=true) {
+        const HistoryWriteTiming timing=(!current_.empty() && hFrame_!=frame_)?HistoryWriteTiming::Window:HistoryWriteTiming::Gap;
+        const unsigned kind=history_.resourceWritten(resource,extent.first,extent.end,extent.entry,timing,tally);
         // Count only geometry invalidations, not unrelated resource-write notifications.
         if(!resource)++unknownMutations_;else if(kind&6)++knownMutations_;
         if(!kind)return;
         auto erase=[&](std::vector<Draw>& draws){draws.erase(std::remove_if(draws.begin(),draws.end(),[&](const Draw& d){
-            return !resource || d.capture.geometry.vertices.Get()==resource || d.capture.geometry.indices.Get()==resource;}),draws.end());};
+            return history_.captureHitBy(d.capture,resource,extent.first,extent.end);}),draws.end());};
         erase(previous_);const size_t before=current_.size();erase(current_);
         if(kind&1)fail("foreground-unknown-resource-write");
         else if(before!=current_.size())fail("foreground-captured-geometry-written");
@@ -166,7 +274,7 @@ public:
                   unsigned start,int base,unsigned startInstance,unsigned frame,const Inputs& inputs) {
         beginFrame(frame);++stats_.attempts;drawRefusal_=nullptr;Draw d;d.inputs=inputs;
         // The identity samples a few frames old are read once a frame, here, without waiting.
-        if(polledFrame_!=frame){polledFrame_=frame;pollIdentity(ctx,frame);}
+        if(polledFrame_!=frame){polledFrame_=frame;pollIdentity(ctx,frame);pollSibling(ctx,frame);history_.pollExtents(ctx,frame);shadow_.poll(ctx,frame);}
         // The map's empty clear follows the identity mode of the frame's draws, refused ones included (prepareH).
         if(inputs.gpuIdentity)gpuAttempted_=true;
         // reject: the frame's refusal (nothing says whose pixels these are). defer: this draw's alone (drawRefusal): the draw is not in
@@ -252,7 +360,7 @@ public:
     }
     bool prepareH(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* owners,ID3D11ShaderResourceView* rawDepth,
                   const float worldCamera[6][4],unsigned frame,unsigned width,unsigned height,Output& out) {
-        out=Output{};out.frame=frame;
+        out=Output{};out.frame=frame;hFrame_=frame;
         auto refuse=[&](const char* reason){out.refusal=reason;return false;};
         if(frame!=frame_ || refusal_)return refuse(refusal_?refusal_:"foreground-frame");
         out.coveredDraws=covered_;
@@ -287,6 +395,10 @@ public:
         if(!initialize(ctx,width,height))return refuse("foreground-map-create");
         if(previousNear_ && previousNear_!=commonNear){out.resetRequired=true;++stats_.nearChanges;}
         previousNear_=commonNear;
+        // The sibling pass (flat_foreground_sibling.h): the draws with no history of their own take their siblings' motion. Compute only: the
+        // map's state is bound after it, so nothing of it needs undoing but the compute stage, which the pass saves and restores itself.
+        const bool siblings=runSibling(ctx,width,height,commonNear,frame);
+        runShadow(ctx,width,height,commonNear,frame);
         // H is bracketed independently of original geometry capture. Restore
         // every binding touched here, including all eight OM render targets.
         Ptr<ID3D11VertexShader> oldVs;Ptr<ID3D11PixelShader> oldPs;Ptr<ID3D11InputLayout> oldLayout;
@@ -314,13 +426,10 @@ public:
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->VSSetConstantBuffers(0,1,settings_.GetAddressOf());ctx->PSSetConstantBuffers(0,1,settings_.GetAddressOf());
         ID3D11ShaderResourceView* psViews[2]={owners,rawDepth};ctx->PSSetShaderResources(0,2,psViews);
-        for(const auto& d:current_) {
-            Settings c{};c.extentPhase[0]=float(width);c.extentPhase[1]=float(height);c.extentPhase[2]=d.inputs.phaseX;c.extentPhase[3]=d.inputs.phaseY;
-            c.previousPhaseDepth[0]=d.oldInputs.phaseX;c.previousPhaseDepth[1]=d.oldInputs.phaseY;c.previousPhaseDepth[2]=commonNear;
-            c.expected[0]=d.inputs.identity.slot;c.expected[1]=d.inputs.identity.skeleton;c.expected[2]=d.inputs.identity.allocation;c.expected[3]=d.oldPositions?1u:2u;
-            c.provenance[0]=d.inputs.writerToken;
-            c.identityMode[0]=d.inputs.gpuIdentity?1u:0u;c.identityMode[1]=d.priorCount;
-            for(unsigned i=0;i<d.priorCount;++i){c.priorPhase[i][0]=d.priors[i].phaseX;c.priorPhase[i][1]=d.priors[i].phaseY;}
+        for(unsigned drawIndex=0;drawIndex<current_.size();++drawIndex) {
+            const Draw& d=current_[drawIndex];
+            Settings c=settingsFor(d,width,height,commonNear);
+            c.sibling[0]=(siblings && d.inputs.gpuIdentity)?1u:0u;c.sibling[1]=drawIndex;c.sibling[2]=d.capture.geometry.count;
             ctx->UpdateSubresource(settings_.Get(),0,nullptr,&c,0,0);
             ID3D11ShaderResourceView* vsViews[15]{};
             vsViews[0]=d.capture.currentPositions.Get();
@@ -328,7 +437,9 @@ public:
             // priors' slots are not bound: the match is by identity (flat_foreground_motion_shader.h), a slot is not an identity.
             if(d.inputs.gpuIdentity){for(unsigned i=0;i<d.priorCount;++i){vsViews[1+i]=d.priors[i].positions.Get();
                     vsViews[6+i]=d.priors[i].identity.Get();}
-                vsViews[5]=d.capture.currentIdentity.Get();vsViews[10]=d.capture.instanceIndex.Get();}
+                vsViews[5]=d.capture.currentIdentity.Get();vsViews[10]=d.capture.instanceIndex.Get();
+                // t11 the sibling pass's fit, one pair of float4 a draw by its index in the frame (flat_foreground_motion_shader.h).
+                if(siblings)vsViews[11]=fitSrv_.Get();}
             else {vsViews[1]=d.oldPositions.Get();vsViews[5]=d.capture.currentIdentity.Get();
                 vsViews[6]=d.oldIdentity.Get();vsViews[10]=d.capture.instanceIndex.Get();}
             ctx->VSSetShaderResources(0,15,vsViews);ctx->RSSetState(d.raster.Get());ctx->RSSetViewports(1,&d.viewport);ctx->RSSetScissorRects(d.scissorCount,d.scissors.data());
@@ -349,7 +460,8 @@ public:
         return true;
     }
 private:
-    CaptureStats stats_{};
+    mutable CaptureStats stats_{};
+    unsigned hFrame_=~0u;   // the frame prepareH last ran for: the end of its capture window
     EdvrFlatForegroundBudgetReceipt budgetReceipt_{};
     unsigned knownMutations_=0,unknownMutations_=0;
     struct Draw {
@@ -360,8 +472,23 @@ private:
         D3D11_VIEWPORT viewport{};std::array<D3D11_RECT,16> scissors{};UINT scissorCount=0;
         bool identityKnown=false,ambiguous=false;
     };
-    struct Settings {float extentPhase[4]{},previousPhaseDepth[4]{};uint32_t expected[4]{},provenance[4]{};
-        float priorPhase[4][4]{};uint32_t identityMode[4]{};};
+    struct FitSettings {uint32_t counts[4]{};float limits[4]{};};
+    static bool& siblingPassEnabled(){static bool on=true;return on;}
+    // The shadow samples one frame in this many (0: none, the default). A rig that wants every frame sets 1.
+    static unsigned& shadowEvery(){static unsigned every=kFlatShadowDefaultEvery;return every;}
+    static constexpr unsigned kSiblingArmedFrames=30,kSiblingSlots=4;
+    static constexpr unsigned kSiblingDraws=AnimatedVertexHistory::maxRecords;
+    // What the map's shaders are told about a draw (the sibling fields are the caller's).
+    static Settings settingsFor(const Draw& d,unsigned width,unsigned height,float commonNear) {
+        Settings c{};c.extentPhase[0]=float(width);c.extentPhase[1]=float(height);c.extentPhase[2]=d.inputs.phaseX;c.extentPhase[3]=d.inputs.phaseY;
+        c.previousPhaseDepth[0]=d.oldInputs.phaseX;c.previousPhaseDepth[1]=d.oldInputs.phaseY;c.previousPhaseDepth[2]=commonNear;
+        c.expected[0]=d.inputs.identity.slot;c.expected[1]=d.inputs.identity.skeleton;c.expected[2]=d.inputs.identity.allocation;c.expected[3]=d.oldPositions?1u:2u;
+        c.provenance[0]=d.inputs.writerToken;
+        c.identityMode[0]=d.inputs.gpuIdentity?1u:0u;c.identityMode[1]=d.priorCount;
+        for(unsigned i=0;i<d.priorCount;++i){c.priorPhase[i][0]=d.priors[i].phaseX;c.priorPhase[i][1]=d.priors[i].phaseY;}
+        return c;
+    }
+    struct SiblingSlot {Ptr<ID3D11Buffer> stage;bool pending=false;unsigned frame=0,draws=0;uint8_t pattern[kSiblingDraws]{};};
     static bool sameIdentity(const FlatAnimatedIdentityLedger::Identity& a,const FlatAnimatedIdentityLedger::Identity& b) {
         return a.slot==b.slot && a.skeleton==b.skeleton && a.allocation==b.allocation;
     }
@@ -425,12 +552,141 @@ private:
             width_=width;height_=height;}
         return true;
     }
+    // The sibling pass's resources, made when the first frame needs them: the two compute shaders, the donors' records (three uint4 a draw,
+    // written by the first), the draws' own identity words (copied in), the fit table (two float4 a draw, written by the second and read by the
+    // map's vertex shader), the second's limits, and the staging the fit is read back through.
+    bool createSibling(ID3D11DeviceContext* ctx) {
+        if(donorCs_ && fitCs_ && donors_ && receivers_ && fit_ && fitSettings_)return true;
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        if(!donorCs_)donorCs_.Attach(shaderSwapCreateCs(ctx,kFlatForegroundDonorBytecode,sizeof(kFlatForegroundDonorBytecode),"flat foreground donor","flat foreground motion"));
+        if(!fitCs_)fitCs_.Attach(shaderSwapCreateCs(ctx,kFlatForegroundFitBytecode,sizeof(kFlatForegroundFitBytecode),"flat foreground fit","flat foreground motion"));
+        if(!donorCs_ || !fitCs_)return false;
+        const auto structured=[&](unsigned elements,UINT bind,Ptr<ID3D11Buffer>& buffer) {
+            D3D11_BUFFER_DESC d{};d.ByteWidth=elements*16;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=bind;
+            d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;d.StructureByteStride=16;
+            return SUCCEEDED(dev->CreateBuffer(&d,nullptr,&buffer));
+        };
+        const auto views=[&](ID3D11Buffer* buffer,unsigned elements,Ptr<ID3D11ShaderResourceView>& srv,Ptr<ID3D11UnorderedAccessView>* uav) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC s{};s.Format=DXGI_FORMAT_UNKNOWN;s.ViewDimension=D3D11_SRV_DIMENSION_BUFFER;s.Buffer.NumElements=elements;
+            if(FAILED(dev->CreateShaderResourceView(buffer,&s,&srv)))return false;
+            if(!uav)return true;
+            D3D11_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=DXGI_FORMAT_UNKNOWN;u.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;u.Buffer.NumElements=elements;
+            return SUCCEEDED(dev->CreateUnorderedAccessView(buffer,&u,&*uav));
+        };
+        if(!donors_ && (!structured(kSiblingDraws*3,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,donors_) ||
+                        !views(donors_.Get(),kSiblingDraws*3,donorsSrv_,&donorsUav_))){donors_.Reset();return false;}
+        if(!receivers_ && (!structured(kSiblingDraws,D3D11_BIND_SHADER_RESOURCE,receivers_) ||
+                           !views(receivers_.Get(),kSiblingDraws,receiversSrv_,nullptr))){receivers_.Reset();return false;}
+        if(!fit_ && (!structured(kSiblingDraws*2,D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS,fit_) ||
+                     !views(fit_.Get(),kSiblingDraws*2,fitSrv_,&fitUav_))){fit_.Reset();return false;}
+        if(!fitSettings_){D3D11_BUFFER_DESC d{};d.ByteWidth=sizeof(FitSettings);d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+            if(FAILED(dev->CreateBuffer(&d,nullptr,&fitSettings_)))return false;}
+        return true;
+    }
+    // The shadow of the sibling model (flat_foreground_shadow.h): on one frame in shadowEvery(), the two compute passes over the frame's draws, with
+    // the results read back a few frames later into the stats. It reads what the sibling pass reads and writes tables of its own; nothing the map,
+    // the fit or the backend reads depends on it.
+    void runShadow(ID3D11DeviceContext* ctx,unsigned width,unsigned height,float commonNear,unsigned frame) {
+        const unsigned n=unsigned(current_.size());
+        if(!shadowEvery() || n<2 || n>FlatForegroundShadow::kDraws || frame%shadowEvery()!=0)return;
+        shadowInputs_.assign(n,FlatForegroundShadow::DrawInput{});
+        shadowConstants_.assign(n,Settings{});
+        for(unsigned i=0;i<n;++i) {
+            const Draw& d=current_[i];
+            shadowConstants_[i]=settingsFor(d,width,height,commonNear);
+            shadowConstants_[i].sibling[1]=i;shadowConstants_[i].sibling[2]=d.capture.geometry.count;shadowConstants_[i].sibling[3]=n;
+            auto& in=shadowInputs_[i];
+            in.views[0]=d.capture.currentPositions.Get();
+            for(unsigned k=0;k<d.priorCount;++k){in.views[1+k]=d.priors[k].positions.Get();in.views[6+k]=d.priors[k].identity.Get();}
+            in.views[5]=d.capture.currentIdentity.Get();in.views[10]=d.capture.instanceIndex.Get();
+            in.constants=&shadowConstants_[i];in.constantBytes=sizeof(Settings);
+            in.dispatchMoments=d.inputs.gpuIdentity && d.priorCount>0;
+        }
+        shadow_.run(ctx,shadowInputs_.data(),n,frame);
+    }
+    // The pass, once a frame and only when a draw needs it: a draw with no prior (the CPU knows), or any draw for a while after the identity
+    // sampler saw one that had priors and no match (only the GPU knows). The first shader runs once for each draw that has priors; the
+    // second once over every draw. Returns whether the fit table is the frame's.
+    bool runSibling(ID3D11DeviceContext* ctx,unsigned width,unsigned height,float commonNear,unsigned frame) {
+        const unsigned n=unsigned(current_.size());
+        if(!n || n>kSiblingDraws)return false;
+        if(!siblingPassEnabled())return false;
+        if(siblingFrame_==frame && siblingDraws_==n)return siblingOk_;
+        siblingFrame_=frame;siblingDraws_=n;siblingOk_=false;
+        bool receiver=frame<=siblingArmedUntil_;
+        for(const auto& d:current_)if(d.inputs.gpuIdentity && d.priorCount==0)receiver=true;
+        if(!receiver)return false;
+        if(!createSibling(ctx)){++stats_.siblingFailed;return false;}
+        SiblingSlot* slot=nullptr;
+        for(SiblingSlot& s:siblingSlots_)if(!s.pending){slot=&s;break;}
+        if(slot && !slot->stage) {
+            Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+            D3D11_BUFFER_DESC d{};d.ByteWidth=kSiblingDraws*2*16;d.Usage=D3D11_USAGE_STAGING;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+            d.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;d.StructureByteStride=16;
+            if(FAILED(dev->CreateBuffer(&d,nullptr,&slot->stage)))slot=nullptr;
+        }
+        CsStageSave saved;saved.save(ctx);
+        const UINT zero[4]{};ctx->ClearUnorderedAccessViewUint(donorsUav_.Get(),zero);
+        ctx->CSSetShader(donorCs_.Get(),nullptr,0);
+        ctx->CSSetConstantBuffers(0,1,settings_.GetAddressOf());
+        ID3D11UnorderedAccessView* uav=donorsUav_.Get();ctx->CSSetUnorderedAccessViews(0,1,&uav,nullptr);
+        unsigned dispatches=0;
+        for(unsigned i=0;i<n;++i) {
+            const Draw& d=current_[i];
+            if(d.capture.currentIdentity) {
+                Ptr<ID3D11Resource> identity;d.capture.currentIdentity->GetResource(&identity);
+                const D3D11_BOX box{0,0,0,16,1,1};
+                if(identity)ctx->CopySubresourceRegion(receivers_.Get(),0,i*16,0,0,identity.Get(),0,&box);
+            }
+            if(!d.inputs.gpuIdentity || !d.priorCount)continue;
+            Settings c=settingsFor(d,width,height,commonNear);
+            c.sibling[1]=i;c.sibling[2]=d.capture.geometry.count;
+            ctx->UpdateSubresource(settings_.Get(),0,nullptr,&c,0,0);
+            ID3D11ShaderResourceView* views[11]{};
+            views[0]=d.capture.currentPositions.Get();
+            for(unsigned k=0;k<d.priorCount;++k){views[1+k]=d.priors[k].positions.Get();views[6+k]=d.priors[k].identity.Get();}
+            views[5]=d.capture.currentIdentity.Get();views[10]=d.capture.instanceIndex.Get();
+            ctx->CSSetShaderResources(0,11,views);
+            ctx->Dispatch(1,1,1);++dispatches;
+        }
+        ID3D11ShaderResourceView* noViews[11]{};ctx->CSSetShaderResources(0,11,noViews);
+        ID3D11UnorderedAccessView* noUav=nullptr;ctx->CSSetUnorderedAccessViews(0,1,&noUav,nullptr);
+        FitSettings limits{};limits.counts[0]=n;limits.limits[0]=kFlatSiblingSpreadPixels;limits.limits[1]=float(kFlatSiblingMinVertices);
+        ctx->UpdateSubresource(fitSettings_.Get(),0,nullptr,&limits,0,0);
+        ctx->CSSetShader(fitCs_.Get(),nullptr,0);
+        ctx->CSSetConstantBuffers(0,1,fitSettings_.GetAddressOf());
+        ID3D11ShaderResourceView* inputs[2]={donorsSrv_.Get(),receiversSrv_.Get()};ctx->CSSetShaderResources(0,2,inputs);
+        uav=fitUav_.Get();ctx->CSSetUnorderedAccessViews(0,1,&uav,nullptr);
+        ctx->Dispatch((n+63)/64,1,1);++dispatches;
+        ctx->CSSetUnorderedAccessViews(0,1,&noUav,nullptr);ctx->CSSetShaderResources(0,2,noViews);
+        saved.restore(ctx);
+        stats_.siblingDispatches+=dispatches;++stats_.siblingFrames;
+        if(slot) {
+            // Each draw filed under what the history gave it: the pattern for a draw with no prior, the draw's own candidates for one the adapter
+            // passed none of, and identity-differs for one with priors (it counts only if the GPU found no match).
+            for(unsigned i=0;i<n;++i) {
+                const Draw& d=current_[i];
+                slot->pattern[i]=uint8_t(d.priorCount?kSiblingIdentityDiffers:d.capture.missed?unsigned(d.capture.miss.gap):kSiblingPriorFiltered);
+            }
+            const D3D11_BOX box{0,0,0,n*2*16,1,1};
+            ctx->CopySubresourceRegion(slot->stage.Get(),0,0,0,0,fit_.Get(),0,&box);
+            slot->pending=true;slot->frame=frame;slot->draws=n;
+        }
+        siblingOk_=true;return true;
+    }
     // Section 104's frame counters and examples: the draws this frame submitted and the ones among them that missed, the run of
     // consecutive missing frames, the examples not yet handed over, and the sampled identity readback.
     unsigned frameSubmitted_=0,frameMissed_=0,missRun_=0,longestRun_=0,lastMissFrame_=0,polledFrame_=~0u;
     MissExample missExamples_[kMissExamples];unsigned missExampleCount_=0;
     FlatIdentitySampler::Sample identityExamples_[kIdentityExamples];unsigned identityExampleCount_=0;
     FlatIdentitySampler sampler_;
+    Ptr<ID3D11ComputeShader> donorCs_,fitCs_;
+    Ptr<ID3D11Buffer> donors_,receivers_,fit_,fitSettings_;
+    Ptr<ID3D11ShaderResourceView> donorsSrv_,receiversSrv_,fitSrv_;
+    Ptr<ID3D11UnorderedAccessView> donorsUav_,fitUav_;
+    std::array<SiblingSlot,kSiblingSlots> siblingSlots_{};
+    FlatForegroundShadow shadow_;std::vector<FlatForegroundShadow::DrawInput> shadowInputs_;std::vector<Settings> shadowConstants_;
+    unsigned siblingFrame_=~0u,siblingDraws_=~0u,siblingArmedUntil_=0;bool siblingOk_=false;
     AnimatedVertexHistory history_;std::vector<Draw> current_,previous_;unsigned frame_=0,width_=0,height_=0;
     const char* refusal_=nullptr,*drawRefusal_=nullptr;float previousNear_=0;unsigned covered_=0;bool gpuAttempted_=false;
     Ptr<ID3D11VertexShader> vs_;Ptr<ID3D11PixelShader> ps_;Ptr<ID3D11Buffer> settings_;

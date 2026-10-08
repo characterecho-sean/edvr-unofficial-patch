@@ -57,6 +57,18 @@ static std::vector<Variant> supercruiseVariants() {
     };
 }
 
+// The sibling pass of the flat foreground map (src/d3d11/flat_foreground_motion_shader.h, design doc section 104): four compute shaders, new, held to
+// their own contract (symbol, source name, entry, profile, the text they compile and the thread groups and bindings their DXBC reflects).
+static std::vector<Variant> siblingVariants() {
+    return {
+        {"kFlatForegroundDonorBytecode", "flat foreground donor", "main", nullptr, {}, false, edvr::kFlatForegroundDonorCs, "cs_5_0"},
+        {"kFlatForegroundFitBytecode", "flat foreground fit", "main", nullptr, {}, false, edvr::kFlatForegroundFitCs, "cs_5_0"},
+        // The sibling model's shadow (flat_foreground_shadow.h): the moments of each draw that matched, then each draw's leave-one-out measurement.
+        {"kFlatForegroundShadowMomentsBytecode", "flat foreground shadow moments", "main", nullptr, {}, false, edvr::kFlatForegroundShadowMomentsCs, "cs_5_0"},
+        {"kFlatForegroundShadowEvalBytecode", "flat foreground shadow evaluation", "main", nullptr, {}, false, edvr::kFlatForegroundShadowEvalCs, "cs_5_0"},
+    };
+}
+
 static std::vector<LegacyContract> coreLegacyContracts() {
     return {
         {"ui_layer_composite_cs", "main", "cs_5_0", nullptr, 0x237EEBB920BC9015ull},

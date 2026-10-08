@@ -22,6 +22,9 @@ namespace edvr {
 struct FlatSourceSpellWindow {
     uint64_t frames = 0, noSourceFrames = 0, spells = 0, recoveries = 0, abandoned = 0, warmDone = 0, warmFrames = 0, warmMax = 0, warmAborted = 0;
     uint64_t longestSpell = 0;
+    // Source-free frames (FlatMonoFrame::sourceFree): the scene held no pool draw and was treated from the camera term alone. Counted at
+    // the Present, whether the resolver ran on them or not; the overlay count is the weapon glow passes admitted while no world was named.
+    uint64_t sourceFreeFrames = 0, sourceFreeTreated = 0, overlaysUnnamed = 0;
     bool inSpell = false;
     uint64_t openSpell = 0;
 };
@@ -51,6 +54,10 @@ public:
             else { ++w_.warmAborted; warming_ = false; }
         }
     }
+    // A frame the selector took with no motion source (the view is the camera term alone), and whether the resolver treated it.
+    void sourceFreeFrame(bool treated) { ++w_.sourceFreeFrames; if (treated) ++w_.sourceFreeTreated; }
+    // A weapon glow pass admitted as an overlay although no draw had named the world: the HDR target's own first camera was the world's.
+    void overlayUnnamed() { ++w_.overlaysUnnamed; }
     // The window since the last take (the state, an open spell and a warm-up in progress, carries over).
     FlatSourceSpellWindow take() {
         FlatSourceSpellWindow out = w_;
@@ -71,8 +78,15 @@ private:
 // whether the flat projection recipes know the pair. The runtime fills them; the selector's summary cannot (it is plain data).
 struct FlatSourcelessPairNote { bool familyVs = false, recipe = false; };
 
+// Two lines (the logger cuts a line at about 1167 characters and this one was 1,020 with a legend and up to four pairs): the fields, and the top
+// pairs. What the legend said: a spell is a run of frames refused for no supported motion source pair (the view holds a draw of a pool family the
+// motion producer leaves stock); source-free frames held no pool-family draw at all (open ground and sky) and take the camera term alone, treated
+// counts those the resolver ran on; recoveries end a spell with a treated frame and warm-frames count the zero-phase frames after it until the
+// first non-zero phase (two, by FlatLivePhase), abandoned ends one with another refusal (a menu or a loading screen); family-vs is a pool-family
+// vertex shader drawn with an unkeyed pixel shader, recipe a pair the projection recipes know.
+inline constexpr unsigned kFlatSourceLineParts = 2;
 inline int flatSourceSpellLine(char* out, size_t n, const FlatSourceSpellWindow& w, const FlatMonoSourceless& last, uint64_t lastFrame,
-                               const FlatSourcelessPairNote (&notes)[4]) {
+                               const FlatSourcelessPairNote (&notes)[4], unsigned part = 0) {
     char pairs[1200];
     size_t at = 0;
     pairs[0] = 0;
@@ -86,21 +100,22 @@ inline int flatSourceSpellLine(char* out, size_t n, const FlatSourceSpellWindow&
         at += static_cast<size_t>(k);
     }
     if (!at) std::snprintf(pairs, sizeof(pairs), "none");
+    if (part == 1) return std::snprintf(out, n, "flat source 5s (2/2): top: %s", pairs);
+    if (part >= kFlatSourceLineParts) return 0;
     return std::snprintf(out, n,
         "flat source 5s: frames=%llu no-source-frames=%llu spells=%llu longest-spell=%llu open-spell=%llu recoveries=%llu abandoned=%llu "
-        "warm-ups-done=%llu warm-frames-total=%llu warm-frames-max=%llu warm-ups-aborted=%llu; last no-source frame=%llu: "
-        "records-on-scene-depth=%u draws=%u same-camera-draws=%u pool-kind-records=%u distinct-pairs=%u top: %s; a spell is a run of frames "
-        "refused for no supported motion source pair (the view holds no draw of a pool family the motion producer substitutes); "
-        "recoveries end a spell with a treated frame and warm-frames count the zero-phase frames after it until the first non-zero phase "
-        "(two, by FlatLivePhase), abandoned ends one with another refusal (a menu or a loading screen); family-vs is a pool-family vertex "
-        "shader drawn with an unkeyed pixel shader, recipe a pair the projection recipes know",
+        "warm-ups-done=%llu warm-frames-total=%llu warm-frames-max=%llu warm-ups-aborted=%llu source-free-frames=%llu source-free-treated=%llu "
+        "overlays-without-named-world=%llu; last no-source frame=%llu: "
+        "records-on-scene-depth=%u draws=%u same-camera-draws=%u pool-kind-records=%u distinct-pairs=%u; top pairs in the next line",
         static_cast<unsigned long long>(w.frames), static_cast<unsigned long long>(w.noSourceFrames),
         static_cast<unsigned long long>(w.spells), static_cast<unsigned long long>(w.longestSpell),
         static_cast<unsigned long long>(w.openSpell), static_cast<unsigned long long>(w.recoveries),
         static_cast<unsigned long long>(w.abandoned), static_cast<unsigned long long>(w.warmDone),
         static_cast<unsigned long long>(w.warmFrames), static_cast<unsigned long long>(w.warmMax),
-        static_cast<unsigned long long>(w.warmAborted), static_cast<unsigned long long>(lastFrame),
-        last.records, last.draws, last.sameCameraDraws, last.poolRecords, last.distinctPairs, pairs);
+        static_cast<unsigned long long>(w.warmAborted), static_cast<unsigned long long>(w.sourceFreeFrames),
+        static_cast<unsigned long long>(w.sourceFreeTreated), static_cast<unsigned long long>(w.overlaysUnnamed),
+        static_cast<unsigned long long>(lastFrame),
+        last.records, last.draws, last.sameCameraDraws, last.poolRecords, last.distinctPairs);
 }
 
 }  // namespace edvr

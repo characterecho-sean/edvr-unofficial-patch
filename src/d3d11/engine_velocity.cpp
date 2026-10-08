@@ -264,6 +264,7 @@ struct Eye {
     uint32_t sceneFrame[2] = {~0u, ~0u};
     UINT sceneBytes = 0;
     Ptr<ID3D11Buffer> stampCell;         // 16 bytes: the frame stamp's carrier into scene[slot]
+    Ptr<ID3D11Buffer> rowsCell;          // rows 270..275 and the stamp: the source-free frame's scene constants (engineVelocityPrepareSourceFree)
     uint32_t frame = ~0u;                // the present frame this eye's data belongs to
     uint32_t rtvGen = 0, dsvGen = 0;     // the pass binding MRT6 was added to
     bool bindingStale = false;           // an internal flat restore removed MRT6 without a game generation
@@ -409,6 +410,7 @@ struct DrawStats {
     // The on-foot source: its eye-frames (also counted in eyeFrames above),
     // the screen shader's view requests and refusals, and its panel pixels.
     uint64_t sourceFrames = 0, sourceFramesBound = 0;
+    uint64_t sourceFreeFrames = 0;   // eye-frames made from nothing (engineVelocityPrepareSourceFree)
     uint64_t sourceViewsAsked = 0, sourceViewsGiven = 0;
     uint64_t sourceRefusedNoEmit = 0, sourceRefusedDepth = 0, sourceRefusedFrame = 0, sourceRefusedInvalid = 0,
              sourceRefusedUnwritten = 0, sourceRefusedPrevious = 0;
@@ -1851,23 +1853,25 @@ void summaryLocked(uint64_t now) {
                     engineVelocityBindRefusalName(static_cast<EngineVelocityBindRefusal>(i)), u(g_draw.bindRefused[i]));
         refusedText += t;
     }
+    // Four lines, because the logger cuts a line at about 1167 characters and this one was 1,330 with its two lists (the first keeps the key
+    // `engine motion: movers joined`). Every figure is where it was, in the same order.
     Log::get().note("engine motion: movers joined %.1f records/frame (moving rig records the emit wrote a previous pose for); "
                     "eye-frames %llu, with MRT6 bound %llu (prepared only for an eligible draw: %llu eye-frames "
-                    "had a pool family draw, %llu a substitution; prepared for nothing %llu, under the old order %llu); "
-                    "invalidated "
-                    "%llu (%s); kept: scene constants re-mapped with rows 270..275 unchanged %llu, pool appended and "
-                    "refreshed %llu; MRT6 refused: target 6 occupied %llu, UAV bound %llu, %s, runtime rejected the set "
-                    "%llu; depth not single-sample %llu, slot target create failed %llu; blend: derived state bound %llu "
-                    "times, refused %llu%s%s%s, shadow disagreed %llu; views asked %llu, given %llu, refused: stood down "
-                    "%llu, other depth %llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene "
-                    "constants %llu.",
+                    "had a pool family draw, %llu a substitution; prepared for nothing %llu, under the old order %llu)",
                     double(g_emit.recordsMoving.load()) / frames,
                     u(g_draw.eyeFrames), u(g_draw.eyeFramesBound), u(g_draw.eyeFramesSeen), u(g_draw.eyeFramesSubstituted),
                     u(g_draw.eyeFrames > g_draw.eyeFramesSubstituted ? g_draw.eyeFrames - g_draw.eyeFramesSubstituted : 0),
-                    u(g_draw.eyeFramesSeen > g_draw.eyeFramesSubstituted ? g_draw.eyeFramesSeen - g_draw.eyeFramesSubstituted : 0),
-                    u(invalid), invalidText.c_str(),
-                    u(g_draw.sceneRowsKept), u(g_draw.poolRefreshed), u(g_draw.targetOccupied), u(g_draw.uavBound),
-                    refusedText.c_str(), u(g_draw.bindRejected), u(g_draw.depthUnsupported), u(g_draw.createFailed),
+                    u(g_draw.eyeFramesSeen > g_draw.eyeFramesSubstituted ? g_draw.eyeFramesSeen - g_draw.eyeFramesSubstituted : 0));
+    Log::get().note("engine motion: movers (2/4): invalidated %llu (%s); kept: scene constants re-mapped with rows 270..275 unchanged %llu, "
+                    "pool appended and refreshed %llu",
+                    u(invalid), invalidText.c_str(), u(g_draw.sceneRowsKept), u(g_draw.poolRefreshed));
+    Log::get().note("engine motion: movers (3/4): MRT6 refused: target 6 occupied %llu, UAV bound %llu, %s, runtime rejected the set "
+                    "%llu; depth not single-sample %llu, slot target create failed %llu",
+                    u(g_draw.targetOccupied), u(g_draw.uavBound), refusedText.c_str(), u(g_draw.bindRejected),
+                    u(g_draw.depthUnsupported), u(g_draw.createFailed));
+    Log::get().note("engine motion: movers (4/4): blend: derived state bound %llu times, refused %llu%s%s%s, shadow disagreed %llu; views "
+                    "asked %llu, given %llu, refused: stood down %llu, other depth %llu, other frame %llu, invalidated %llu, unwritten "
+                    "%llu, no previous scene constants %llu.",
                     u(g_draw.blendApplied), u(g_draw.blendRefused), g_draw.blendRefusedWhy ? " (" : "",
                     g_draw.blendRefusedWhy ? g_draw.blendRefusedWhy : "", g_draw.blendRefusedWhy ? ")" : "",
                     u(g_draw.blendShadowDisagreed), u(g_draw.viewsAsked), u(g_draw.viewsGiven), u(g_draw.refusedNoEmit),
@@ -1961,7 +1965,7 @@ void summaryLocked(uint64_t now) {
             if (g_draw.sourceDeclinedFamily[f]) add(families, kFamilies[f].name, g_draw.sourceDeclinedFamily[f]);
         char other[768] = "";
         if (g_draw.sourceDeclined[kOtherCamera])
-            _snprintf_s(other, _TRUNCATE, "; another camera changed rows 270..272 on %llu, 273 on %llu, 274 on %llu, 275 "
+            _snprintf_s(other, _TRUNCATE, "changed rows 270..272 on %llu, 273 on %llu, 274 on %llu, 275 "
                         "on %llu, its position up to %.3f m from the naming's, by family: %s",
                         u(g_draw.sourceOtherRows[0]), u(g_draw.sourceOtherRows[1]), u(g_draw.sourceOtherRows[2]),
                         u(g_draw.sourceOtherRows[3]), g_draw.sourceOtherShiftMax, families.c_str());
@@ -1988,20 +1992,26 @@ void summaryLocked(uint64_t now) {
                         "source's views are given; every pixel with advanced.temporal_aa_diagnostics = 1 or the "
                         "motion_source view; not a zero count)", kPanelSampleFrames);
         }
+        // Three lines and, when another camera moved the rows, a fourth (the logger cuts a line at about 1167 characters and this one was 1,554
+        // with its lists): the first keeps the key `engine motion: on foot:`; the camera rule's figures, then the other camera's, then the panel's
+        // pixels. Every figure is where it was, in the same order.
         Log::get().note("engine motion: on foot: source frames %llu, with MRT6 bound %llu (slot target %ux%u), "
                         "frames dropped: %s; screen views asked %llu, given %llu, refused: stood down %llu, other depth "
-                        "%llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene constants %llu; "
-                        "camera rule: namings %llu (by terrain or a scene draw %llu, by the screen's own depth %llu; rows "
-                        "not seen %llu), checks held to the naming's camera %llu, "
-                        "declined %llu in %llu frames (%s)%s; %s.",
+                        "%llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene constants %llu",
                         u(g_draw.sourceFrames), u(g_draw.sourceFramesBound), source.width, source.height,
                         dropped.empty() ? "none" : dropped.c_str(),
                         u(g_draw.sourceViewsAsked), u(g_draw.sourceViewsGiven), u(g_draw.sourceRefusedNoEmit),
                         u(g_draw.sourceRefusedDepth), u(g_draw.sourceRefusedFrame), u(g_draw.sourceRefusedInvalid),
-                        u(g_draw.sourceRefusedUnwritten), u(g_draw.sourceRefusedPrevious), u(g_draw.sourceNamings),
-                        u(g_draw.sourceNamingsBy[0]), u(g_draw.sourceNamingsBy[1]),
+                        u(g_draw.sourceRefusedUnwritten), u(g_draw.sourceRefusedPrevious));
+        Log::get().note("engine motion: on foot (2/3): camera rule: namings %llu (by terrain or a scene draw %llu, by the "
+                        "screen's own depth %llu; rows not seen %llu), checks held to the naming's camera %llu, "
+                        "declined %llu in %llu frames (%s)",
+                        u(g_draw.sourceNamings), u(g_draw.sourceNamingsBy[0]), u(g_draw.sourceNamingsBy[1]),
                         u(g_draw.sourceNamingsUnseen), u(g_draw.sourceHeld), u(declinedAll),
-                        u(g_draw.sourceDeclineFrames), declined.c_str(), other, pixels);
+                        u(g_draw.sourceDeclineFrames), declined.c_str());
+        if (other[0])
+            Log::get().note("engine motion: on foot, another camera: %s", other);
+        Log::get().note("engine motion: on foot (3/3): %s.", pixels);
     }
     if (g_draw.overlayCopies || g_draw.overlayGuardedDraws || g_draw.overlayDeclinedState ||
         g_draw.overlayDeclinedCreate || g_draw.overlayDeclinedShader)
@@ -2814,6 +2824,96 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
                            {g_draw.sourceViewsAsked, g_draw.sourceViewsGiven, g_draw.sourceRefusedNoEmit,
                             g_draw.sourceRefusedDepth, g_draw.sourceRefusedFrame, g_draw.sourceRefusedInvalid,
                             g_draw.sourceRefusedUnwritten, g_draw.sourceRefusedPrevious});
+}
+
+bool engineVelocityPrepareSourceFree(ID3D11DeviceContext* ctx, ID3D11Texture2D* sceneDepth, ID3D11Buffer* sceneConstants,
+                                     const float (&rows)[6][4]) {
+    if (!ctx || !sceneDepth || !runtimeFlatProfile() || !live.load(std::memory_order_acquire) ||
+        !g_emitLive.load(std::memory_order_acquire)) return false;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    Eye& e = g_eyes[kEngineVelocitySourceEye];
+    const uint32_t frame = frameNow();
+    // A pool draw already made this frame's views: they stand.
+    if (e.frame == frame && e.written) return e.depth.Get() == sceneDepth && !e.invalid;
+    // The watch follows the constants buffer from now on, so the next frame's pool draws find its rows written (engineVelocityNoteSource).
+    // Its size is the size the snapshots are made at, the one a pool draw would make them at: the two kinds of frame share the buffers, and
+    // snapshots of another size are re-made (their history dropped) by whichever kind of frame comes next.
+    UINT sceneBytes = kStampBytes;
+    if (sceneConstants) {
+        D3D11_BUFFER_DESC sd{};
+        sceneConstants->GetDesc(&sd);
+        if (sd.ByteWidth >= (kRowsFirst + 6u) * 16u && sd.ByteWidth <= 65536u) {
+            assignWatch(static_cast<unsigned>(kEngineVelocitySourceEye) * 2u + 1u, sceneConstants);
+            sceneBytes = sd.ByteWidth;
+        }
+    }
+    Ptr<ID3D11Device> dev;
+    ctx->GetDevice(&dev);
+    if (!ensureSlots(ctx, e, kEngineVelocitySourceEye, sceneDepth)) return false;
+    // The eye-frame, as slowPath starts one (the flat marker plane was cleared at its first use this frame).
+    ++g_draw.eyeFrames;
+    e.frame = frame;
+    e.bound = e.boundCounted = e.written = e.invalid = e.consumed = false;
+    e.overlayGroup = false;
+    e.rtvGen = e.dsvGen = 0;
+    e.bindingStale = false;
+    // The pool: one record, made once. No marker in the slot target points into it.
+    if (!e.pool || !e.poolSrv) {
+        e.poolOutput = {}; e.pool.Reset(); e.poolSrv.Reset();
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = emit::kItemBytes; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        d.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; d.StructureByteStride = emit::kItemBytes;
+        if (FAILED(dev->CreateBuffer(&d, nullptr, &e.pool)) || FAILED(dev->CreateShaderResourceView(e.pool.Get(), nullptr, &e.poolSrv))) {
+            e.pool.Reset(); e.poolSrv.Reset(); e.poolBytes = 0; ++g_draw.createFailed;
+            invalidate(e, kCreate);
+            return false;
+        }
+        e.poolBytes = emit::kItemBytes;
+    }
+    // The scene constants: rows 270..275 and the stamp in one 112-byte cell, copied into this frame's buffer.
+    const unsigned slot = frame & 1u;
+    if (!e.scene[slot] || e.sceneBytes != sceneBytes) {
+        for (auto& b : e.scene) b.Reset();
+        e.sceneFrame[0] = e.sceneFrame[1] = ~0u;
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = std::max<UINT>(sceneBytes, kStampBytes); d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        for (auto& b : e.scene) if (FAILED(dev->CreateBuffer(&d, nullptr, &b))) {
+            for (auto& c : e.scene) c.Reset();
+            e.sceneBytes = 0; ++g_draw.createFailed;
+            invalidate(e, kCreate);
+            return false;
+        }
+        e.sceneBytes = sceneBytes;
+    }
+    if (!e.rowsCell) {
+        D3D11_BUFFER_DESC cd{};
+        cd.ByteWidth = kRowsBytes + 16; cd.Usage = D3D11_USAGE_DEFAULT;
+        if (FAILED(dev->CreateBuffer(&cd, nullptr, &e.rowsCell))) { ++g_draw.createFailed; invalidate(e, kCreate); return false; }
+    }
+    uint8_t cell[kRowsBytes + 16] = {};
+    std::memcpy(cell, rows, kRowsBytes);
+    const uint32_t stamp[4] = {frame, 0, 0, 0};
+    std::memcpy(cell + kRowsBytes, stamp, sizeof(stamp));
+    ctx->UpdateSubresource(e.rowsCell.Get(), 0, nullptr, cell, 0, 0);
+    const D3D11_BOX box{0, 0, 0, kRowsBytes + 16, 1, 1};
+    ctx->CopySubresourceRegion(e.scene[slot].Get(), 0, kRowsFirst * 16u, 0, 0, e.rowsCell.Get(), 0, &box);
+    engineVelocityNoteStateCalls(2);
+    e.sceneFrame[slot] = frame;
+    e.sceneRowsKnown = true;
+    std::memcpy(e.sceneRows, rows, kRowsBytes);
+    // The views need an eye-frame that was written; the source stays named for as long as source-free frames come.
+    e.written = true;
+    g_sourceDepth = sceneDepth;
+    g_sourceNoted = frame;
+    if (g_draw.sourceFreeFrames++ == 0)
+        Log::get().note("engine motion: source-free views at present frame %u (%ux%u): no pool draw this frame, so the slot target holds no "
+                        "record, the pool is one empty record and the scene constants are the selected camera's; every pixel takes the camera term.",
+                        frame, e.width, e.height);
+    return true;
+}
+uint64_t engineVelocitySourceFreeFrames() {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    return g_draw.sourceFreeFrames;
 }
 
 bool engineVelocitySourceIsNamed(const ID3D11Texture2D* depth) {

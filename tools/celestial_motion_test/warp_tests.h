@@ -306,14 +306,25 @@ float at(const std::vector<uint8_t>& v, size_t index) {
     return f;
 }
 
-// Which records hold a pixel, the shader's own test and tie rule: the narrowest depth span wins, the first of equals.
-int recordAt(const float rec[cel::kMaxBodies][cel::kRecordFloats], double px, double py, float z) {
+// Which records hold a pixel, the shader's own test and tie rule: the narrowest depth span wins, the first of equals. A record with a
+// shell (rec[19] > 0) holds the pixel only where its view-space point is rMin..rMax from the body's centre, widened by three pixels'
+// footprint at the pixel's depth (the shader's slack), in double here.
+int recordAt(const float rec[cel::kMaxBodies][cel::kRecordFloats], const float tan[4], double px, double py, float z) {
     int hit = -1;
     float narrow = 3.0e38f;
     for (int i = 0; i < 16; ++i) {
         if (rec[i][18] == 0.0f) break;
         const float span = rec[i][17] - rec[i][16];
         if (px >= rec[i][12] && px <= rec[i][14] && py >= rec[i][13] && py <= rec[i][15] && z >= rec[i][16] && z <= rec[i][17] && span < narrow) {
+            if (rec[i][19] > 0.0f) {
+                const double dx = tan[0] + (px + 0.5) / kVW * (double(tan[1]) - tan[0]);
+                const double dy = tan[3] - (py + 0.5) / kVH * (double(tan[3]) - tan[2]);
+                const double P[3] = {dx * z, dy * z, -double(z)};
+                const double c[3] = {rec[i][20], rec[i][21], rec[i][22]};
+                const double radial = cel::dist3(P, c);
+                const double slack = cel::shellSlack(tan, kVW, kVH, z);
+                if (!(radial >= double(rec[i][23]) - slack && radial <= double(rec[i][19]) + slack)) continue;
+            }
             hit = i;
             narrow = span;
         }
@@ -330,6 +341,7 @@ struct Case {
     ComPtr<ID3D11Buffer> crBuf;
     ComPtr<ID3D11ShaderResourceView> crSrv;
     Params off{}, on{};
+    float split = kSplit;                 // the ship/world split the scene runs with (split.x): a pixel nearer is the head's, not the world's
     ID3D11ShaderResourceView* withRecords[16] = {};
     ID3D11ShaderResourceView* without[16] = {};
 };
@@ -426,7 +438,7 @@ Verdict judge(const Case& c, const Outputs& A, const Outputs& Bb, const Outputs&
             const float z = isFar ? 0.0f : kDepthB / zr;
             const uint32_t pathA = static_cast<uint32_t>(at(A.v[kSlotU7], i * 4 + 3)) & 15u;
             const uint32_t pathC = static_cast<uint32_t>(at(C.v[kSlotU7], i * 4 + 3)) & 15u;
-            const int hit = (!isFar && z > kSplit) ? recordAt(c.build.gpu, x, y, z) : -1;
+            const int hit = (!isFar && z > c.split) ? recordAt(c.build.gpu, c.in.tan, x, y, z) : -1;
             if (hit >= 0) {
                 ++v.expected;
                 if (pathA != 2u) bad(&v.inside, fmt("pixel (%d,%d): the reference has it on path %u, not the world path", x, y, pathA));
@@ -452,17 +464,8 @@ Verdict judge(const Case& c, const Outputs& A, const Outputs& Bb, const Outputs&
 
 // Mutated shaders, each the production text with one token broken; the judge must refuse every one of them (a green run cannot mean the
 // harness cannot see the path), and the unmutated shader it just passed.
-void controls(Rig& R, const std::vector<const Case*>& cases, const std::vector<const Outputs*>& refs) {
-    struct Mutant { const char* name; const char* anchor; const char* mutated; };
-    const Mutant ms[] = {
-        {"the probe bit's gate removed", "    if ((uint(probe.w + 0.5) & 8192u) == 0u) return false;\n    int hit = -1;", "    int hit = -1;"},
-        {"the translation's sign flipped", "dp = float3(dot(r.m0.xyz, P) + r.m0.w,", "dp = float3(dot(r.m0.xyz, P) - r.m0.w,"},
-        {"the depth interval dropped", "z >= r.span.x && z <= r.span.y && span < narrow", "span < narrow"},
-        {"the decision path left at 2", "                        count39 = 1;\n", ""},
-        {"the rectangle dropped", "p.x >= r.box.x && p.x <= r.box.z && p.y >= r.box.y && p.y <= r.box.w &&\n            ", ""},
-        {"the narrower span's rule inverted (the widest wins)", "float span = r.span.y - r.span.x;", "float span = r.span.x - r.span.y;"},
-    };
-    constexpr size_t kN = sizeof(ms) / sizeof(ms[0]);
+struct Mutant { const char* name; const char* anchor; const char* mutated; };
+void controls(Rig& R, const std::vector<const Case*>& cases, const std::vector<const Outputs*>& refs, const Mutant* ms, size_t kN) {
     std::vector<std::string> text(kN);
     std::vector<ComPtr<ID3DBlob>> code(kN);
     std::vector<HRESULT> result(kN, E_FAIL);
@@ -502,6 +505,8 @@ void controls(Rig& R, const std::vector<const Case*>& cases, const std::vector<c
         std::printf("    control '%s': caught -- %s\n", ms[k].name, how.c_str());
     }
 }
+
+#include "shell_tests.h"   // the radial shell of a straddling body (2026-10-08): its scenes, controls and float32 figures
 
 void all(const Fixture& fx) {
     // ---- the six compiles, concurrently ------------------------------------------------------------------------------
@@ -603,7 +608,7 @@ void all(const Fixture& fx) {
                             for (int ox = -1; ox <= 1; ++ox)
                                 zr = std::max(zr, c.sc.z[static_cast<size_t>(std::min(std::max(y + oy, 0), kVH - 1)) * kVW + std::min(std::max(x + ox, 0), kVW - 1)]);
                         const float z = zr > 0.0f ? kDepthB / zr : 0.0f;
-                        const bool inVolume = zr > 0.0f && z > kSplit && recordAt(c.build.gpu, x, y, z) >= 0;
+                        const bool inVolume = zr > 0.0f && z > kSplit && recordAt(c.build.gpu, c.in.tan, x, y, z) >= 0;
                         if (differ) {
                             ++changed;
                             check(inVolume, fmt("frame %u eye %u pixel (%d,%d): main changed a pixel outside every volume", frame, eye, x, y));
@@ -631,8 +636,17 @@ void all(const Fixture& fx) {
         // the wide record holds pixels the moon's does not (the off-rectangle block takes ITS motion), the moon's pixels keep the moon's
         check(vd.expected >= controlExpected + 300, fmt("the second volume claims the block at the moon's depth that the moon's rectangle left alone (%zu against %zu)", vd.expected, controlExpected));
     }
-    controls(R, {&controlCase, &overA}, {&controlRef, &controlRef});
+    const Mutant base[] = {
+        {"the probe bit's gate removed", "    if ((uint(probe.w + 0.5) & 8192u) == 0u) return false;\n    int hit = -1;", "    int hit = -1;"},
+        {"the translation's sign flipped", "dp = float3(dot(r.m0.xyz, P) + r.m0.w,", "dp = float3(dot(r.m0.xyz, P) - r.m0.w,"},
+        {"the depth interval dropped", "z >= r.span.x && z <= r.span.y && span < narrow", "span < narrow"},
+        {"the decision path left at 2", "                        count39 = 1;\n", ""},
+        {"the rectangle dropped", "p.x >= r.box.x && p.x <= r.box.z && p.y >= r.box.y && p.y <= r.box.w &&\n            ", ""},
+        {"the narrower span's rule inverted (the widest wins)", "float span = r.span.y - r.span.x;", "float span = r.span.x - r.span.y;"},
+    };
+    controls(R, {&controlCase, &overA}, {&controlRef, &controlRef}, base, sizeof(base) / sizeof(base[0]));
     std::printf("(c) two volumes over one pixel: the narrower span's record wins in either order; 6 controls: one token of the path broken each, every one caught by the same judge\n");
+    shell::all(R, v, fx);
 }
 
 }  // namespace warp

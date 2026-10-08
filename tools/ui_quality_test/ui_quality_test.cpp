@@ -74,11 +74,13 @@
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/temporal_math.h"
+#include "../../src/d3d11/orbital_width.h"  // the orbit lines' width decision, for the panel factor's Supersampling term
 #include "../../src/d3d11/ui_layer_seed.h"
 #include "../../src/d3d11/ui_layer_seed_census.h"
 #include "../../src/d3d11/ui_layer_math.h"
@@ -860,6 +862,7 @@ double panelFactor(uint32_t askW, float hmd, float up, float down, uint32_t outW
     in.outputW = outW;
     in.trueTangent = uiQualityFovTangent(trueUp, trueDown);
     in.target = target;
+    in.supersampling = 1.0f;  // these flights ran at Supersampling 1.0; panelbudget:: (ui_panel_budget_test.h) holds the rest
     double f = 0.0;
     return uiPanelFactor(in, &f, clamp) ? f : -1.0;
 }
@@ -955,7 +958,11 @@ void testPanelScale() {
           "Quest 3 trimmed 2/2/7: k from the narrower frustum it is told, k_out from the headset's");
     // The cap and the floor.
     f = panelFactor(3070, 0.2f, pimax, pimax, 3070, pimax, pimax, 1.25f, &clamp);
-    check(f == 0.25 && clamp == UiPanelClamp::kCap, "HMD Quality 0.2 -> 1.25 would be x6.25: capped at 4x");
+    check(std::fabs(f - kUiPanelObservedBase / kUiPanelBudget) < 1e-9 && clamp == UiPanelClamp::kBudget,
+          "HMD Quality 0.2 -> 1.25 would be x6.25: the 4x cap's 0.25 would ask for a 15360 px panel, over the size budget, so f is raised to x3.73");
+    f = panelFactor(3070, 0.2f, pimax, pimax, 3070, pimax, pimax, 1.0f, &clamp);
+    check(std::fabs(f - kUiPanelObservedBase / kUiPanelBudget) < 1e-9 && clamp == UiPanelClamp::kBudget,
+          "...and at 100: the budget's floor (x3.73) is above the 4x cap's, so it is the budget that holds, never the 4x cap alone");
     f = panelFactor(3070, 1.5f, pimax, pimax, 3070, pimax, pimax, 1.25f, &clamp);
     check(f == 1.0 && clamp == UiPanelClamp::kFloor, "HMD Quality 1.5 above 1.25: 1, never smaller than the game's");
     f = panelFactor(2458, 1.25f, trim, trim, 3070, pimax, pimax, 1.25f, &clamp);
@@ -2779,6 +2786,7 @@ void testWriteBack(Gpu& g) {
 #include "ui_world_route_test.h"
 #include "ui_world_route_wiring_test.h"
 #include "ui_intro_curve_wiring_test.h"
+#include "ui_panel_budget_test.h"
 
 }  // namespace
 
@@ -2828,6 +2836,8 @@ int main(int argc, char** argv) {
     testHudParity();
     testChains();
     testPanelScale();
+    panelbudget::testAll();
+    panelbudget::testWiring();
     Gpu g;
     if (!setup(g, hardware)) {
         check(false, "a device and the production composite shader");

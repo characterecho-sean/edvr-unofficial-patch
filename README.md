@@ -162,10 +162,6 @@ instead of standing in the world, or sized for a screen you are not looking at.
 - Over planets, Elite culls against a narrower frustum than it renders, so
   squares of ground at the edges of view go undrawn. The fix is off by default
   and costs about 6% GPU at the tested values.
-- At busy settlements, `fix.settlement_detail = auto` thins distant detail only
-  while the frame runs long, in the cockpit for now. It is off by default; at
-  one settlement it took the frame rate from 45-50 fps to 70-80 with no visible
-  change.
 - On foot, the grey surround is made properly black, the screen is moved, bent
   and raised above its forced 1920x1080, and Explorer Cam gives you a real
   stereo view from your commander's head in the free camera.

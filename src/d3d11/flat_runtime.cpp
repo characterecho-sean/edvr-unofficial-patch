@@ -24,6 +24,8 @@
 #include "flat_foreground_probe.h"
 #include "flat_foreground_motion.h"
 #include "flat_no_candidate_report.h"
+#include "flat_history_report.h"
+#include "flat_foreground_shadow.h"
 #include "flat_source_spell.h"
 #include "flat_foreground_phase.h"
 #include "flat_domain_admission.h"
@@ -266,12 +268,15 @@ struct State {
     // Section 104, the pistol's no-candidate bursts: the cumulative counters as of the last `flat foreground no-candidate 5s:` line (the
     // line prints the window's), and the example lines said this session (each kind is capped).
     FlatForegroundMotion::CaptureStats foregroundMissReported;
+    unsigned historyExampleLines=0;
     uint32_t foregroundMissExampleLines=0,foregroundIdentityExampleLines=0;
     // Section 104, the training mission's turned-left view: the spell tracker (flat_source_spell.h), and what the last frame refused for
     // no motion source held on the scene's depth.
     FlatSourceSpell sourceSpell;
     FlatMonoSourceless sourcelessLast;
     uint64_t sourcelessLastFrame=0;
+    bool frameSourceFree=false;   // this frame's selection took no motion source and named the world from itself (nameSourceFree)
+    uint32_t admissionLines=0;uint64_t lastAdmissionMs=0;   // the overlay admission trace's line budget (see beginActualDraw)
     const void* foregroundSelectedDepth=nullptr;
     struct DomainHReceipt {
         uint64_t frame=~0ull;const void* depth=nullptr;
@@ -636,10 +641,35 @@ static State::DomainCandidate* observeDomainCandidate(State& s,const void* depth
 }
 // Only a write to the depth itself (or an unknown one) can change which
 // surface a pixel shows; colour copies and compute writes cannot.
-static void domainResourceWritten(State& s,ID3D11Resource* resource,const char* depthReason) {
+// The bytes a copy or an update wrote, when the destination is a buffer and the call says where (section 104, range-aware invalidation).
+// A copy with no box writes the whole source into the destination at dstX, so the source's size is the range; anything the call does not say
+// is the whole resource.
+static uint64_t flatBufferBytes(const void* resource) {
+    if(!resource)return 0;
+    auto* r=static_cast<ID3D11Resource*>(const_cast<void*>(resource));
+    D3D11_RESOURCE_DIMENSION dim=D3D11_RESOURCE_DIMENSION_UNKNOWN;r->GetType(&dim);
+    if(dim!=D3D11_RESOURCE_DIMENSION_BUFFER)return 0;
+    D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(r)->GetDesc(&d);return d.ByteWidth;
+}
+// What a mutation report says about the bytes it wrote: the same extents, from the details the hook already carries.
+static HistoryWriteExtent mutationExtent(FlatOverlayMutationOp op,const FlatMutationDetails& d) {
+    switch(op) {
+    case FlatOverlayMutationOp::Map: case FlatOverlayMutationOp::Unmap: return historyWholeWrite(HistoryWriteEntry::Map);
+    case FlatOverlayMutationOp::ClearRtv: case FlatOverlayMutationOp::ClearDsv: case FlatOverlayMutationOp::ClearUav:
+        return historyWholeWrite(HistoryWriteEntry::Clear);
+    case FlatOverlayMutationOp::CopyResource: return historyWholeWrite(HistoryWriteEntry::CopyResource);
+    case FlatOverlayMutationOp::CopyRegion:
+        return flatRuntimeCopyExtent(d.dstSub,d.dstX,d.source,d.hasBox?&d.box:nullptr);
+    case FlatOverlayMutationOp::UpdateSubresource: return flatRuntimeUpdateExtent(d.dstSub,d.hasBox?&d.box:nullptr);
+    default: return historyWholeWrite(HistoryWriteEntry::Other);
+    }
+}
+// `tally` false is a write the mutation report counts too: the prefix model's own notification of the same API call.
+static void domainResourceWritten(State& s,ID3D11Resource* resource,const char* depthReason,
+                                  const HistoryWriteExtent& extent=HistoryWriteExtent{},bool tally=true) {
     if(!resource)s.foregroundRoute.noteUnknownMutation(s.prefix.frame);
     for(auto& candidate:s.foregroundCandidates)if(candidate.depth) {
-        candidate.motion.resourceWritten(resource);
+        candidate.motion.resourceWritten(resource,extent,tally);
         if(candidate.frame!=s.prefix.frame)continue;
         if(!resource || candidate.depth.Get()==resource)candidate.motion.fail(depthReason);
     }
@@ -648,6 +678,29 @@ static void domainResourceWritten(State& s,ID3D11Resource* resource,const char* 
 // before used (every pattern, zeros included), the draws with priors that the map will not match by identity (the same for the identity
 // words), and the first draw of each pattern with its whole key. All of it is read from counters the capture already keeps; the window is
 // the difference of the cumulative counters from the last line.
+static HistoryWriteStats historyWindowDelta(const HistoryWriteStats& now,const HistoryWriteStats& was) {
+    const auto d=[](uint64_t a,uint64_t b){return a>b?a-b:uint64_t(0);};
+    HistoryWriteStats w;
+    for(unsigned e=0;e<kHistoryWriteEntries;++e) {
+        w.observed[e]=d(now.observed[e],was.observed[e]);w.recordsInvalidated[e]=d(now.recordsInvalidated[e],was.recordsInvalidated[e]);
+        w.ranged[e]=d(now.ranged[e],was.ranged[e]);w.savedWrites[e]=d(now.savedWrites[e],was.savedWrites[e]);
+        for(unsigned r=0;r<kHistoryWriteRoles;++r)for(unsigned t=0;t<kHistoryWriteTimings;++t) {
+            w.touching[e][r][t]=d(now.touching[e][r][t],was.touching[e][r][t]);
+            w.invalidating[e][r][t]=d(now.invalidating[e][r][t],was.invalidating[e][r][t]);
+        }
+    }
+    for(unsigned t=0;t<kHistoryWriteTimings;++t)w.unknownInvalidating[t]=d(now.unknownInvalidating[t],was.unknownInvalidating[t]);
+    w.sparedRecords=d(now.sparedRecords,was.sparedRecords);
+    for(unsigned i=0;i<static_cast<unsigned>(HistoryErase::Count);++i)w.erased[i]=d(now.erased[i],was.erased[i]);
+    w.allocations=d(now.allocations,was.allocations);w.allocationFailures=d(now.allocationFailures,was.allocationFailures);
+    w.extentIssued=d(now.extentIssued,was.extentIssued);w.extentRead=d(now.extentRead,was.extentRead);w.extentFailed=d(now.extentFailed,was.extentFailed);
+    w.setFromCache=d(now.setFromCache,was.setFromCache);w.setPending=d(now.setPending,was.setPending);
+    w.setApproximate=d(now.setApproximate,was.setApproximate);w.setCancelled=d(now.setCancelled,was.setCancelled);
+    w.vertexUnknown=d(now.vertexUnknown,was.vertexUnknown);w.vertexInGap=d(now.vertexInGap,was.vertexInGap);
+    w.vertexOutside=d(now.vertexOutside,was.vertexOutside);w.vertexGenuine=d(now.vertexGenuine,was.vertexGenuine);
+    w.deferredInvalidated=d(now.deferredInvalidated,was.deferredInvalidated);w.deferredConservative=d(now.deferredConservative,was.deferredConservative);
+    return w;
+}
 static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::CaptureStats& captures) {
     const auto& was=s.foregroundMissReported;
     const auto delta=[](uint64_t now,uint64_t before){return now>before?now-before:uint64_t(0);};
@@ -660,8 +713,19 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
     for(unsigned i=0;i<kHistoryGapCount;++i)w.missBy[i]=delta(captures.missBy[i],was.missBy[i]);
     w.identitySamples=delta(captures.identitySamples,was.identitySamples);
     for(unsigned i=0;i<kIdentityVerdictCount;++i)w.identityBy[i]=delta(captures.identityBy[i],was.identityBy[i]);
+    w.allocations=delta(captures.history.allocations,was.history.allocations);
+    FlatSiblingWindow sibling;
+    sibling.engagedFrames=delta(captures.siblingFrames,was.siblingFrames);sibling.dispatches=delta(captures.siblingDispatches,was.siblingDispatches);
+    sibling.readbacks=delta(captures.siblingReads,was.siblingReads);sibling.notReady=delta(captures.siblingNotReady,was.siblingNotReady);
+    sibling.failed=delta(captures.siblingFailed,was.siblingFailed);
+    for(unsigned p=0;p<kSiblingPatterns;++p)for(unsigned o=0;o<kSiblingOutcomes;++o)sibling.by[p][o]=delta(captures.siblingBy[p][o],was.siblingBy[p][o]);
     struct Taken {FlatForegroundMotion::MissExample miss[FlatForegroundMotion::kMissExamples];unsigned misses=0;
                   FlatIdentitySampler::Sample identity[FlatForegroundMotion::kIdentityExamples];unsigned identities=0;};
+    FlatHistoryWindow history;
+    history.writes=historyWindowDelta(captures.history,was.history);
+    const ShadowStats shadowWindow=flatShadowDelta(captures.shadow,was.shadow);
+    HistoryWriteTop tops[kHistoryTopResources*State::kDomainCandidateCap]{};unsigned topCount=0;
+    HistoryWriteExample examples[kHistoryWriteCases*kHistoryExamplesPerCase*State::kDomainCandidateCap]{};unsigned exampleCount=0;
     std::array<Taken,State::kDomainCandidateCap> taken{};
     for(unsigned i=0;i<s.foregroundCandidates.size();++i) {
         auto& motion=s.foregroundCandidates[i].motion;
@@ -669,11 +733,30 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
         w.identitySkipped+=motion.identitySkipped();w.identityUnread+=motion.identityNotReady();
         taken[i].misses=motion.takeMissExamples(taken[i].miss,FlatForegroundMotion::kMissExamples);
         taken[i].identities=motion.takeIdentityExamples(taken[i].identity,FlatForegroundMotion::kIdentityExamples);
+        unsigned peakRecords=0,peakBytes=0;motion.takeHistoryPeaks(peakRecords,peakBytes);
+        history.records+=motion.historyRecords();history.bytes+=motion.historyBytes();
+        history.peakRecords+=peakRecords;history.peakBytes+=peakBytes;
+        topCount+=motion.takeWriteTop(tops+topCount,kHistoryTopResources);
+        exampleCount+=motion.takeWriteExamples(examples+exampleCount,kHistoryWriteCases*kHistoryExamplesPerCase);
     }
+    // The three resources written most, over the candidates.
+    std::sort(tops,tops+topCount,[](const HistoryWriteTop& a,const HistoryWriteTop& b){return a.touching>b.touching;});
+    for(unsigned i=0;i<topCount && history.topCount<3;++i)history.top[history.topCount++]=tops[i];
+    w.records=history.records;w.bytes=history.bytes;w.peakRecords=history.peakRecords;w.peakBytes=history.peakBytes;
     s.foregroundMissReported=captures;
     char line[4096];
-    flatNoCandidateLine(line,sizeof(line),w);Log::get().note("%s",line);
+    for(unsigned part=0;part<kFlatNoCandidateLineParts;++part){flatNoCandidateLine(line,sizeof(line),w,part);Log::get().note("%s",line);}
     flatIdentityLine(line,sizeof(line),w);Log::get().note("%s",line);
+    for(unsigned part=0;part<kFlatSiblingLineParts;++part){flatSiblingLine(line,sizeof(line),sibling,part);Log::get().note("%s",line);}
+    flatHistoryLine(line,sizeof(line),history);Log::get().note("%s",line);
+    for(unsigned part=0;part<kFlatHistoryWriteLines;++part){flatHistoryWritesLine(line,sizeof(line),history,part);Log::get().note("%s",line);}
+    flatHistoryVertexLine(line,sizeof(line),history);Log::get().note("%s",line);
+    for(unsigned i=0;i<exampleCount && s.historyExampleLines<96;++i,++s.historyExampleLines){
+        flatHistoryExampleLine(line,sizeof(line),examples[i]);Log::get().note("%s",line);
+    }
+    // The shadow is off unless a rig or a build switches it on: no line then, and the lines say so by their absence.
+    if(shadowWindow.sampledFrames || shadowWindow.failed || shadowWindow.notReady)
+        for(unsigned part=0;part<kFlatShadowLineParts;++part){flatShadowLine(line,sizeof(line),shadowWindow,part);Log::get().note("%s",line);}
     for(const auto& t:taken) {
         for(unsigned i=0;i<t.misses && s.foregroundMissExampleLines<48;++i,++s.foregroundMissExampleLines) {
             const auto& e=t.miss[i];
@@ -695,27 +778,38 @@ static void reportSourceSpell(State& s) {
         notes[i].recipe=flatProjectionDrawRecipes(s.sourcelessLast.top[i].vs,s.sourcelessLast.top[i].ps).count!=0;
     }
     char line[3072];
-    flatSourceSpellLine(line,sizeof(line),w,s.sourcelessLast,s.sourcelessLastFrame,notes);
-    Log::get().note("%s",line);
+    for(unsigned part=0;part<kFlatSourceLineParts;++part) {
+        flatSourceSpellLine(line,sizeof(line),w,s.sourcelessLast,s.sourcelessLastFrame,notes,part);
+        Log::get().note("%s",line);
+    }
 }
 static void reportForegroundDomain(State& s) {
     const auto& n=s.foregroundCounts;
     auto captures=s.foregroundRetiredCaptureStats;
     for(const auto& candidate:s.foregroundCandidates)captures.add(candidate.motion.stats());
     reportForegroundNoCandidate(s,captures);
-    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call; history of the submitted draws, cumulative: no-candidate found no record of its geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on (pool differs, near differs, the previous draw is not there), priors-one/several matched on the GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame",
+    // Three lines, because the logger cuts a line at about 1167 characters and this one was 1,300: the first keeps the key
+    // `flat foreground SDK domain:`. The explanation that trailed it is in the design doc (section 104): counts cover all depth candidates;
+    // scale-rejected-5s is the draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last
+    // line; qualification alone is not a completed SDK call; the history of the submitted draws is cumulative (no-candidate found no record of its
+    // geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on, priors-one/several matched on the
+    // GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame).
+    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu",
         flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
         (unsigned long long)captures.attempts,(unsigned long long)captures.gpuAttempts,
         (unsigned long long)captures.submitted,(unsigned long long)captures.preflightRefused,
         (unsigned long long)captures.warmedAfterRefusal,
         (unsigned long long)captures.noCandidate,(unsigned long long)captures.noPriorPool,(unsigned long long)captures.noPriorNear,
         (unsigned long long)captures.noPriorAbsent,(unsigned long long)captures.priorsOne,(unsigned long long)captures.priorsSeveral,
-        (unsigned long long)captures.repeated,
+        (unsigned long long)captures.repeated);
+    Log::get().note("flat foreground SDK domain (2/3): world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu",
         (unsigned long long)n.worldMarkers,(unsigned long long)n.nullMarkers,(unsigned long long)n.markerRefused,
         (unsigned long long)n.predictedWorld,s.worldReference.nearPlane,(unsigned long long)s.predictedScaleRejectedWindow,
         (unsigned long long)n.worldUnmarked,
         (unsigned long long)n.surfacePreserving,(unsigned long long)n.surfacePreservingForeign,
-        (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,(unsigned long long)n.hCoveredFrames,
+        (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified);
+    Log::get().note("flat foreground SDK domain (3/3): H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu last-refusal=%s",
+        (unsigned long long)n.hCoveredFrames,
         (unsigned long long)n.coveredDraws,(unsigned long long)captures.coveredOccurrence,(unsigned long long)captures.coveredBudget,
         (unsigned long long)captures.coveredOther,(unsigned long long)captures.windowed,
         (unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,
@@ -2848,6 +2942,22 @@ static void reportUntrustedAtH(State& s,const FlatMonoFrame& sel) {
         (unsigned long long)firstGap->writeEpoch,firstGap->writeSeq,
         firstGap->draws,firstGapCompleted);
 }
+// Section 104, the pool-less view. A selection that holds no motion source (FlatMonoFrame::sourceFree: the scene drew no pool-family
+// draw at all) is named from the selection itself, because no draw named the world. The depth, scene constants and camera are the ones
+// the selector took from the HDR's first camera draw, so every comparison against the naming after this (the identity check at the
+// resolve, the overlay admission of what draws next) is the selection against itself. Idempotent: a world a draw named stands, and is
+// compared. The frame's engine views follow from engineVelocityPrepareSourceFree, at the resolve.
+static bool nameSourceFree(State& s, const FlatMonoFrame& sel) {
+    if(!sel.selected() || !sel.sourceFree) return false;
+    if(s.namedDepth) return s.namedDepth==sel.depth && s.namedConstants==sel.sceneConstants;
+    s.namedDepth=sel.depth;s.namedConstants=sel.sceneConstants;s.namedWorldQ=s.prefix.sequence;s.namedVs=s.namedPs=0;
+    static_assert(sizeof(sel.camera)==kFlatCameraBytes,"the selected camera is the 96 bytes of rows 270..275");
+    std::memcpy(s.namedCamera,sel.camera,sizeof(sel.camera));
+    const auto reference=flatDomainWorldReference(sel.camera);
+    if(reference.valid())s.worldReference=reference;
+    s.frameSourceFree=true;
+    return true;
+}
 static void hdrSelectAtTrigger(State& s) {
     const bool witnessEligible=overlayOpen(s) && s.overlay.markedDraws()!=0;
     if(witnessEligible)++s.sourceWitnessEligibleWindow;
@@ -2862,6 +2972,7 @@ static void hdrSelectAtTrigger(State& s) {
     if(sel.selected()) {
         const auto reference=flatDomainWorldReference(sel.camera);
         if(reference.valid())s.worldReference=reference;
+        nameSourceFree(s,sel);
     }
     // The camera a draw named the world with is not the camera H selected: the world's own draws are then every one a different camera
     // from the named one (draws of a first-person camera after naming are the named camera's, and no bucket accounts for them). The
@@ -3456,6 +3567,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 static_cast<unsigned long>(hr));
         }
     }
+    if (s.frameSourceFree) s.sourceSpell.sourceFreeFrame(s.treated && SUCCEEDED(hr));
     if (!s.treated || FAILED(hr)) reset();
     Ptr<ID3D11Texture2D> output; if (FAILED(swap->GetBuffer(0, IID_PPV_ARGS(&output)))) return;
     // Swapchain image rotation does not change render scale. Resize/device
@@ -3534,7 +3646,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         else if(++s.namingVetoStreak>=kFlatNamingVetoFrames){s.worldReference=FlatDomainWorldReference{};s.namingVetoStreak=0;++s.namingVetoReleases;}
         s.namingVetoedThisFrame=false;
     } else s.namingVetoStreak=0;
-    s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;
+    s.namedDepth = s.namedConstants = nullptr;s.namedWorldQ=0; s.treated = false;s.frameSourceFree=false;
     flatHdrBeginFrame(s.hdr, d.Width, d.Height); s.hdrTreated = false;
     s.observingQualifiedHandoff = false;
     s.drawCapture.begin(frame+1,s.phaseDepth.Get(),s.phaseWidth,s.phaseHeight);
@@ -3956,7 +4068,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
     }
     for (const auto& u : s.uavs) if (u) {
         if(s.engine!=FlatMonoResolveMode::Taa) {
-            domainResourceWritten(s,u.Get(),"foreground-dispatch-depth-write");
+            domainResourceWritten(s,u.Get(),"foreground-dispatch-depth-write",historyWholeWrite(HistoryWriteEntry::Dispatch));
         }
         { flatcpu::Scope trace(flatcpu::kTrace); flatTraceMark(s.traceRing, kFlatTraceEventDispatchWritten, u.Get()); }
         flatRuntimeDispatchObserveWritten(s.prefix, u.Get());
@@ -3976,9 +4088,11 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 // What a write to a resource does to the prefix model, the camera table and the shadows -- the
 // body flatRuntimeWritten, Map and Update share, timed by the caller's scope.
 static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
-                            FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written) {
+                            FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written,
+                            const HistoryWriteExtent& extent=HistoryWriteExtent{}) {
+    // The mutation report (flatRuntimeOverlayResourceMutation) counts the same API call for the history; this notification only invalidates.
     if(s.engine!=FlatMonoResolveMode::Taa)
-        domainResourceWritten(s,res,"foreground-depth-or-unknown-mutation");
+        domainResourceWritten(s,res,"foreground-depth-or-unknown-mutation",extent,false);
     if(s.untrusted.active())s.untrusted.noteMutation(res,
         FlatMutationDetails::named(provenance,entry),s.prefix.sequence);
     if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
@@ -3993,10 +4107,31 @@ static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
     if (auto* c = camera(res, false)) s.cameras.invalidate(*c);
     if (s.projection) { flatcpu::Scope shadows(flatcpu::kShadows); s.projection->invalidate(res); }
 }
+// The extents the hooks pass (declared in flat_runtime.h; defined here, outside the anonymous namespace the mutation report is in).
+HistoryWriteExtent flatRuntimeCopyExtent(UINT dstSub,UINT dstX,const void* src,const D3D11_BOX* box) {
+    if(dstSub!=0)return historyWholeWrite(HistoryWriteEntry::CopyRegion);
+    if(box) {
+        if(box->right<=box->left)return historyWholeWrite(HistoryWriteEntry::CopyRegion);
+        return historyRangedWrite(HistoryWriteEntry::CopyRegion,dstX,uint64_t(dstX)+(box->right-box->left));
+    }
+    const uint64_t bytes=flatBufferBytes(src);
+    return bytes?historyRangedWrite(HistoryWriteEntry::CopyRegion,dstX,uint64_t(dstX)+bytes):historyWholeWrite(HistoryWriteEntry::CopyRegion);
+}
+HistoryWriteExtent flatRuntimeUpdateExtent(UINT dstSub,const D3D11_BOX* box) {
+    if(dstSub!=0 || !box || box->right<=box->left)return historyWholeWrite(HistoryWriteEntry::Update);
+    return historyRangedWrite(HistoryWriteEntry::Update,box->left,box->right);
+}
 void flatRuntimeWritten(ID3D11Resource* res,FlatOverlayMutationOp provenance) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);   // prefix target and source lookup, camera lookup
-    resourceWritten(state(), res,"flatRuntimeWritten",provenance);
+    const bool clear=provenance==FlatOverlayMutationOp::ClearRtv || provenance==FlatOverlayMutationOp::ClearDsv ||
+                     provenance==FlatOverlayMutationOp::ClearUav;
+    resourceWritten(state(), res,"flatRuntimeWritten",provenance,historyWholeWrite(clear?HistoryWriteEntry::Clear:HistoryWriteEntry::Other));
+}
+void flatRuntimeWrittenExtent(ID3D11Resource* res,const HistoryWriteExtent& extent) {
+    if (!owner() || state().work == FlatWork::Paused) return;
+    flatcpu::Scope lookup(flatcpu::kResource);
+    resourceWritten(state(), res,"flatRuntimeWritten",FlatOverlayMutationOp::Written,extent);
 }
 namespace {
 const char* overlayMutationOpName(FlatOverlayMutationOp op) {
@@ -4030,7 +4165,8 @@ void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMut
     if(foregroundDomainActive.load(std::memory_order_acquire)) {
         if(!owner())foreignWork.store(true,std::memory_order_release);
         else {
-            domainResourceWritten(state(),resource,"foreground-depth-or-unknown-mutation");
+            // The API-level report of every mutation: the history counts the write here, with the bytes the call carried.
+            domainResourceWritten(state(),resource,"foreground-depth-or-unknown-mutation",mutationExtent(op,details),true);
         }
     }
     if(untrustedCoverageActive.load(std::memory_order_acquire)) {
@@ -4182,7 +4318,7 @@ void flatRuntimeMapBounceNoteKind(ID3D11Resource* resource, bool buffer) {
 void flatRuntimeMap(ID3D11Resource* res, D3D11_MAP type, void* bytes) {
     if (!owner() || type == D3D11_MAP_READ || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
-    resourceWritten(state(), res,"flatRuntimeMap"); if (auto* c = camera(res, false)) state().cameras.setMapped(*c, bytes);
+    resourceWritten(state(), res,"flatRuntimeMap",FlatOverlayMutationOp::Written,historyWholeWrite(HistoryWriteEntry::Map)); if (auto* c = camera(res, false)) state().cameras.setMapped(*c, bytes);
     if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows); state().projection->observeMap(res,type,bytes); }
 }
 void flatRuntimeUnmap(ID3D11Resource* res) {
@@ -4197,7 +4333,7 @@ void flatRuntimeUnmap(ID3D11Resource* res) {
 void flatRuntimeUpdate(ID3D11Resource* res, const void* bytes, const D3D11_BOX* box) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
-    resourceWritten(state(), res,"flatRuntimeUpdate");
+    resourceWritten(state(), res,"flatRuntimeUpdate",FlatOverlayMutationOp::Written,flatRuntimeUpdateExtent(0,box));
     if (auto* c = camera(res, false)) {
         if (!box || (box->left == 0 && box->right == c->width)) { capture(*c, bytes); if (state().work == FlatWork::Full) cameraWitness(res); }
     }
@@ -4535,6 +4671,10 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         }
     }
     d.supported = engineVelocityPoolFamilyPair(k.vs, k.ps); d.instances = instances;
+    // A pool family's vertex shader left stock (an unkeyed pixel shader), drawn into the scene's depth: it moves with no motion source, so a
+    // scene holding one is never source-free (design section 104; the selector's unsupportedFamilyDraws).
+    d.poolFamilyVs = !d.supported && k.depth && engineVelocityPoolFamilyVs(k.vs) &&
+        flatContractKind(false, k.depth, k.depth, k.depthWidth, k.depthHeight, 26, s.prefix.width, s.prefix.height, false) == kFlatContractScreen;
     // A draw that is not a pool-family draw cannot be a substituted producer: it sees the game's state, and so does
     // everything EDVR reads of the context for it below.
     if (!d.supported) flatRuntimeSubstitution(context, FlatSubstEvent::kOtherDraw);
@@ -4633,13 +4773,20 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     // copy route judges the frame the same tests admit the draw as an alternate
     // HDR writer instead (d.alternateHdr), with no overlay: the key's value
     // never bars it there, because the HDR route is not the one that treats it.
+    // Section 104, the pool-less view: no draw has named the world (a view of ground and sky holds no pool-family draw), and nothing the
+    // model saw so far is a source, a first-person cohort draw or a pool-family draw left stock. The HDR target's own first camera is then the
+    // world's, and the glow pass is judged against it with the depth the target was drawn with (the search below), as a pool-bearing frame's
+    // is against the named one. Without this the pass was a second camera in the HDR, and every frame of such a view was refused as
+    // conflicting-hdr-target-or-camera.
+    const bool unnamedWorldDepth=!s.namedDepth && s.prefix.sourcesUsed==0 && s.prefix.firstPersonDraws==0 &&
+        s.prefix.unsupportedFamilyDraws==0;
     const FlatRuntimeTarget* overlayTarget=nullptr;
     if(s.work==FlatWork::Full && (s.hdrKey==FlatHdrKey::Auto || copyWeapon()) && s.projection &&
        s.jitterWanted && !s.phase.failed && s.frameCoverage &&
        flatCameraInjectUpstreamOwns() && !foreignWork.load(std::memory_order_acquire) &&
        !s.prefix.uncertain && !d.supported && !tone && !copy &&
        k.format==26 && k.color && k.depth && k.dsv && k.camera &&
-       k.depth==s.namedDepth && flat_mono_detail::hdrViewport(k,k.width,k.height) &&
+       (k.depth==s.namedDepth || unnamedWorldDepth) && flat_mono_detail::hdrViewport(k,k.width,k.height) &&
        !flatHdrCouldConsume(s.hdr,k) &&
        flatRuntimeCameraCurrent(d,s.prefix.sequence+1,s.prefix.frame)) {
         for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
@@ -4682,6 +4829,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             if((pair.vs==FlatVsProjectionClass::ForwardColumns ||
                 pair.vs==FlatVsProjectionClass::ForwardDp4) &&
                 pair.ps==FlatPsProjectionSafety::Clean) {
+                if(!s.namedDepth)s.sourceSpell.overlayUnnamed();
                 if(copyWeapon()) {
                     // The copy route resolves after the game's post chain, so the glow is in the picture the SDK is handed and
                     // there is no clean H to restore: no private MRT bracket, no open suffix, nothing to seal or to fail.
@@ -4756,6 +4904,37 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             witness.cause==FlatRuntimeConflict::CameraChange && witness.sequence==s.prefix.sequence?1u:0u);
         break;
     }
+    // Section 104, the HDR route's second camera. A draw that made its HDR target a second camera (the model's first camera change) and every gate
+    // that would have admitted it as a protected overlay, or on the copy route as an alternate HDR writer, as the draw stood. The 2026-10-07 log
+    // (v0.18.3-10-g0d4bc714) named the pair (VS 025B4B9F, PS 46F92DC7: the first person's camera, near 0.0675 against the world's 0.025) and
+    // not why nothing admitted it: planned-draws was 0 in every window of it. A few lines of this say which gate refused, and whether a world
+    // had been named when it did.
+    if(k.format==26 && k.camera && !tone && !copy && s.admissionLines<6 && GetTickCount64()-s.lastAdmissionMs>=10000)
+        for(uint32_t i=0;i<s.prefix.targetsUsed;++i) {
+            const auto& target=s.prefix.targets[i];
+            if(target.resource!=k.color)continue;
+            if(target.firstBad.cause!=FlatRuntimeConflict::CameraChange || target.firstBad.sequence!=s.prefix.sequence)break;
+            ++s.admissionLines;s.lastAdmissionMs=GetTickCount64();
+            const auto flag=[](bool v){return v?1u:0u;};
+            const bool hdrCamera=target.hdrCamera,drawn=target.writes.draws!=0;
+            Log::get().note("flat overlay admission refused: frame=%llu seq=%u VS=%016llX PS=%016llX route=%s key-auto=%u copy-weapon=%u work-full=%u projection=%u "
+                "jitter-wanted=%u phase-ok=%u frame-coverage=%u injector-owns=%u foreign-work=%u uncertain=%u supported=%u color-depth-dsv-camera=%u "
+                "viewport=%u hdr-could-consume=%u camera-current=%u world-named=%u depth-is-named=%u pool-less-so-far=%u (sources=%u first-person=%u stock-family=%u) "
+                "target-hdr-camera=%u target-drawn=%u target-layout-changed=%u target-menu=%u target-depth-same=%u target-dsv-same=%u target-tone-current=%u "
+                "overlay-target-found=%u depth-write=%u stencil-write=%u stencil-mask-04=%u phase-applied-or-zero=%u; the model made this draw the HDR's first second camera, "
+                "so none of the admissions took it",
+                (unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)k.vs,(unsigned long long)k.ps,copyWeapon()?"copy":"hdr",
+                flag(s.hdrKey==FlatHdrKey::Auto),flag(copyWeapon()),flag(s.work==FlatWork::Full),flag(s.projection!=nullptr),flag(s.jitterWanted),
+                flag(!s.phase.failed),flag(s.frameCoverage),flag(flatCameraInjectUpstreamOwns()),flag(foreignWork.load(std::memory_order_acquire)),
+                flag(s.prefix.uncertain),flag(d.supported),flag(k.color && k.depth && k.dsv && k.camera),
+                flag(flat_mono_detail::hdrViewport(k,k.width,k.height)),flag(flatHdrCouldConsume(s.hdr,k)),
+                flag(flatRuntimeCameraCurrent(d,s.prefix.sequence,s.prefix.frame)),flag(s.namedDepth!=nullptr),flag(k.depth==s.namedDepth),
+                flag(unnamedWorldDepth),s.prefix.sourcesUsed,s.prefix.firstPersonDraws,s.prefix.unsupportedFamilyDraws,
+                flag(hdrCamera),flag(drawn),flag(target.hdrLayoutChanged),flag(target.menuInherited),flag(target.writes.key.depth==k.depth),
+                flag(target.writes.key.dsv==k.dsv),flag(flat_mono_detail::cameraCurrent(target.tone,s.prefix.frame)),flag(overlayTarget!=nullptr),
+                flag(d.effectiveDepthWrite),flag(d.effectiveStencilWrite),flag(effectiveDepth.StencilWriteMask==0x04u),flag(!nonzeroPhase(s) || s.phase.applied));
+            break;
+        }
     if(weaponFootprintStarted)for(uint32_t i=0;i<s.prefix.targetsUsed;++i)
         if(s.prefix.targets[i].resource==k.color){
             const auto& bad=s.prefix.targets[i].firstBad;
@@ -5195,6 +5374,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         if(s.phase.applied)recover(s.reason);
         refuse(s); return;
     }
+    nameSourceFree(s, selected);
     if (s.treated || selected.depth != s.namedDepth || selected.sceneConstants != s.namedConstants) {
         s.reason = s.treated ? "already-treated-this-frame" : "producer-source-identity-mismatch";
         if(!s.treated && s.phase.applied)recover(s.reason);
@@ -5358,6 +5538,13 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     f.previousRowsJitterY=f.reset?rowsNow.y:s.previousRowsY;
     const auto now = GetTickCount64(); f.deltaMs = s.lastMs ? static_cast<float>(now - s.lastMs) : 16.667f;
     if(s.phase.needsSpatialFallback()) {s.reason="incomplete-jitter-frame";recover(s.reason);refuse(s);return;}
+    // A scene with no pool-family draw has no views a draw made: they are made from nothing for the camera term
+    // (engineVelocityPrepareSourceFree). A refusal there leaves the views unprepared, and the request below declines as ever.
+    if (selected.sourceFree) {
+        float sourceFreeRows[6][4]; std::memcpy(sourceFreeRows, selected.camera, sizeof(sourceFreeRows));
+        engineVelocityPrepareSourceFree(ctx, static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)),
+            static_cast<ID3D11Buffer*>(const_cast<void*>(selected.sceneConstants)), sourceFreeRows);
+    }
     if (!engineVelocitySourceViews(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)), &f.engine)) {
         s.reason="engine-source-not-ready";if(s.phase.applied)recover(s.reason);refuse(s);return;
     }
@@ -5495,6 +5682,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         overlayFail(s,"overlay-foreign-mutation",selected.hdr);
         decline("overlay-foreign-mutation"); return;
     }
+    nameSourceFree(s, selected);
     if (selected.depth != s.namedDepth || selected.sceneConstants != s.namedConstants) {
         decline("producer-source-identity-mismatch"); return;
     }
@@ -5639,6 +5827,13 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         s.reason = "incomplete-jitter-frame";
         if (recoverHdr(s.reason, f)) { refuse(s); } else decline("incomplete-jitter-frame");
         return;
+    }
+    // A scene with no pool-family draw has no views a draw made: they are made from nothing for the camera term
+    // (engineVelocityPrepareSourceFree). A refusal there leaves the views unprepared, and the request below declines as ever.
+    if (selected.sourceFree) {
+        float sourceFreeRows[6][4]; std::memcpy(sourceFreeRows, selected.camera, sizeof(sourceFreeRows));
+        engineVelocityPrepareSourceFree(ctx, static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)),
+            static_cast<ID3D11Buffer*>(const_cast<void*>(selected.sceneConstants)), sourceFreeRows);
     }
     if (!engineVelocitySourceViews(static_cast<ID3D11Texture2D*>(const_cast<void*>(selected.depth)), &f.engine)) {
         s.reason = "engine-source-not-ready";

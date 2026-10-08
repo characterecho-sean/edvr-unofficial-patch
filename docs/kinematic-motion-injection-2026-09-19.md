@@ -34,8 +34,9 @@
   walkers/articulated parts; ships, evaluated-but-undrawn movers, flat-source
   aliasing; stale cockpit (low priority); ps_91F8/ps_A607 owner/coverage.
   Flight 5/6 and 162703 cover the fixed on-foot/hangar paths. Boarding flicker:
-  LOD governor. Pending checks: diagnostics 1 vs 0, walker near drone with
-  motion_source.
+  LOD governor (removed 2026-10-08, branch claude/remove-settlement-detail,
+  with `fix.settlement_detail`). Pending checks: diagnostics 1 vs 0, walker
+  near drone with motion_source.
 - **Ruled-out pointer:** dated entries close estimation/shape/slot identity,
   four flag routes, velocity buffers, record+0x1C0 previous poses,
   content-pairing A, fix-round five hypotheses, on-foot camera/packing

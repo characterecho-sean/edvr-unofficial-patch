@@ -16,7 +16,7 @@ and the ruled-out list: "Status detail", straight after this block.*
     BUILT, NOT FLOWN as of its 2026-09-23 entry. Gone: the `HUD quality` row,
     `advanced.ui_replay` (retired 48ad7689), the Foveation centre row
     (`experimental.foveation_centre`) and the three `Trim view` rows (ini-only
-    since 2026-09-29). `fix.settlement_detail` has a row (game, auto, reduced).
+    since 2026-09-29). Its `Settlement detail` row: removed 2026-10-08 (claude/remove-settlement-detail).
   - Monitor page drops the rows the compositor's frame timing filled
     instead of showing "--" (frame_flag v34).
   - Single-line overlay: fits its text, keeps its font size across OpenXR
@@ -765,7 +765,7 @@ they were there (flown 2026-09-07).
 1. **Performance.** The rows tagged `menu performance` in `edvr.ini`, in
    the ini's own order:
    `temporal_aa`, `temporal_aa_model` (labelled **DLSS preset**, default K),
-   `render_sharpness`, `foveation`, `settlement_detail`,
+   `render_sharpness`, `foveation`,
    `ui_quality` (labelled **UI quality**, off / 100% / 125%, default 100:
    the interface panels' size and the UI layer, one row), and `render_scale`
    when its branch lands. Costs where they are measured:

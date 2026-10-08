@@ -305,6 +305,8 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), foreground.begin(), foreground.end());
     const auto supercruise = supercruiseVariants();
     variants.insert(variants.end(), supercruise.begin(), supercruise.end());
+    const auto sibling = siblingVariants();
+    variants.insert(variants.end(), sibling.begin(), sibling.end());
     return variants;
 }
 
@@ -523,8 +525,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 65 && coreLegacy.size() + 10 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders and the supercruise bars' geometry shader are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 69 && coreLegacy.size() + 14 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader and the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two) are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -656,6 +658,66 @@ static void selfTest() {
                   bind.BindPoint == 0 && bind.BindCount == 1 && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == 16 &&
                   desc.ConstantBuffers == 1 && desc.BoundResources == 1,
                   "...reading one 16-byte constant buffer, Strip at b0, and nothing else");
+        }
+    }
+
+    // The flat foreground map's sibling pass (src/d3d11/flat_foreground_motion_shader.h, design doc section 104): two new compute shaders, held to
+    // their own contract -- the symbol, source name, entry, profile and flags, the text they compile (the donor pass is the map's own match text
+    // and a body), the thread groups the passes are dispatched with, and the bindings the runtime sets them at (flat_foreground_motion.h).
+    {
+        struct SiblingContract { const char* symbol; const char* name; const char* source; UINT x; };
+        const SiblingContract contracts[] = {
+            {"kFlatForegroundDonorBytecode", "flat foreground donor", edvr::kFlatForegroundDonorCs, 256},
+            {"kFlatForegroundFitBytecode", "flat foreground fit", edvr::kFlatForegroundFitCs, 64},
+            {"kFlatForegroundShadowMomentsBytecode", "flat foreground shadow moments", edvr::kFlatForegroundShadowMomentsCs, 256},
+            {"kFlatForegroundShadowEvalBytecode", "flat foreground shadow evaluation", edvr::kFlatForegroundShadowEvalCs, 256},
+        };
+        for (size_t i = 0; i < 4; ++i) {
+            auto& shader = coreFixed[coreLegacy.size() + 10 + i];
+            check(!std::strcmp(shader.symbol, contracts[i].symbol) && !std::strcmp(shader.sourceName, contracts[i].name) &&
+                  !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == contracts[i].source &&
+                  shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each sibling-pass shader has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each sibling-pass shader compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection),
+                                           reinterpret_cast<void**>(reflection.GetAddressOf()));
+                UINT x = 0, y = 0, z = 0;
+                const UINT threads = reflection ? reflection->GetThreadGroupSize(&x, &y, &z) : 0;
+                check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) &&
+                      D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_COMPUTE_SHADER && D3D11_SHVER_GET_MAJOR(desc.Version) == 5 &&
+                      threads == contracts[i].x && x == contracts[i].x && y == 1 && z == 1,
+                      "each sibling-pass shader reflects as a Shader Model 5 compute shader with the group size it is dispatched with");
+                struct Binding { const char* name; D3D_SHADER_INPUT_TYPE type; UINT slot; };
+                const Binding donor[] = {{"Now", D3D_SIT_TEXTURE, 0}, {"Before0", D3D_SIT_TEXTURE, 1}, {"Before3", D3D_SIT_TEXTURE, 4},
+                                         {"Identity", D3D_SIT_STRUCTURED, 5}, {"PreviousIdentity0", D3D_SIT_STRUCTURED, 6},
+                                         {"PreviousIdentity3", D3D_SIT_STRUCTURED, 9}, {"InstanceIndex", D3D_SIT_TEXTURE, 10},
+                                         {"Settings", D3D_SIT_CBUFFER, 0}, {"Donors", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding fit[] = {{"Donors", D3D_SIT_STRUCTURED, 0}, {"Receivers", D3D_SIT_STRUCTURED, 1},
+                                       {"FitSettings", D3D_SIT_CBUFFER, 0}, {"Fit", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding moments[] = {{"Now", D3D_SIT_TEXTURE, 0}, {"Before0", D3D_SIT_TEXTURE, 1}, {"Before3", D3D_SIT_TEXTURE, 4},
+                                           {"Identity", D3D_SIT_STRUCTURED, 5}, {"PreviousIdentity0", D3D_SIT_STRUCTURED, 6},
+                                           {"PreviousIdentity3", D3D_SIT_STRUCTURED, 9}, {"InstanceIndex", D3D_SIT_TEXTURE, 10},
+                                           {"Settings", D3D_SIT_CBUFFER, 0}, {"Moments", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding evaluation[] = {{"Now", D3D_SIT_TEXTURE, 0}, {"Before0", D3D_SIT_TEXTURE, 1}, {"Before3", D3D_SIT_TEXTURE, 4},
+                                              {"Identity", D3D_SIT_STRUCTURED, 5}, {"PreviousIdentity0", D3D_SIT_STRUCTURED, 6},
+                                              {"PreviousIdentity3", D3D_SIT_STRUCTURED, 9}, {"InstanceIndex", D3D_SIT_TEXTURE, 10},
+                                              {"Moments", D3D_SIT_STRUCTURED, 11}, {"Settings", D3D_SIT_CBUFFER, 0},
+                                              {"Results", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding* bindings = i == 0 ? donor : i == 1 ? fit : i == 2 ? moments : evaluation;
+                const size_t bindingCount = i == 0 ? sizeof(donor) / sizeof(donor[0]) : i == 1 ? sizeof(fit) / sizeof(fit[0]) :
+                                            i == 2 ? sizeof(moments) / sizeof(moments[0]) : sizeof(evaluation) / sizeof(evaluation[0]);
+                bool bound = reflection != nullptr;
+                for (size_t j = 0; reflection && j < bindingCount; ++j) {
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    bound = bound && SUCCEEDED(reflection->GetResourceBindingDescByName(bindings[j].name, &bind)) &&
+                            bind.Type == bindings[j].type && bind.BindPoint == bindings[j].slot && bind.BindCount == 1;
+                }
+                check(bound, "each sibling-pass shader keeps its inputs and outputs at the slots the runtime sets them at");
+            }
         }
     }
 

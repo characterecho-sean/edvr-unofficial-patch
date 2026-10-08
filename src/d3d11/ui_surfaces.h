@@ -92,4 +92,20 @@ bool nativeTemporalTrueVerticalTangents(float* up, float* down);
 // cached, never read on the frame path); 0 while unknown. Lock-free.
 float uiSurfacesHmdQuality();
 
+// Elite's Supersampling (the same .fxcfg's SSAAMultiplier) and the game window's
+// width (DisplaySettings.xml), read in the same pass and cached the same way; 0
+// while unknown. Lock-free. The panel factor carries the one, its size budget
+// both (ui_sizing_math.h).
+float uiSurfacesSupersampling();
+uint32_t uiSurfacesDisplayWidth();
+
+// The panel net (2026-10-08): a render or depth target the game asks for over D3D11's 16384 on either axis is
+// created shrunk to fit, aspect kept (ui_sizing_math.h's uiPanelNetShrink), because a refused create is fatal in
+// Elite. True when `out` was filled with the shrunk desc; false (and `out` untouched) for everything else: a request
+// at or under the limit, a texture that is no target, one with initial data. Counts every shrink and names each
+// distinct requested size once, with the factor and Supersampling at that moment. Called on the game's creating thread.
+bool uiSurfacesPanelNet(const D3D11_TEXTURE2D_DESC& in, bool initialData, D3D11_TEXTURE2D_DESC* out);
+// ...how many shrinks, of how many distinct requested sizes, so far. Lock-free; the 30 s panel line carries them.
+void uiSurfacesPanelNetCounts(uint32_t* fired, uint32_t* distinct);
+
 }  // namespace edvr

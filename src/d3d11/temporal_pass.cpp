@@ -46,7 +46,6 @@
 #include "engine_velocity.h"
 #include "celestial_motion.h"   // planet patch motion: each body's own rigid motion on its pixels (decision path 12)
 #include "scheduler_stack_probe.h"
-#include "static_prop_gate.h"
 #include "journal_watch.h"   // the ship split on foot: Status.json's word on whether the commander is on foot (temporal_mode.h)
 #include "perf_monitor.h"
 #include "shader_swap.h"
@@ -6214,11 +6213,6 @@ void temporalPassConfigure(Config& cfg) {
     // tables hide from static RE. Independent of the temporal pass fixes:
     // it observes the engine, not the renderer, so it arms on its own key.
     schedulerStackProbeConfigure(cfg.getBool("advanced.scheduler_probe", false));
-    // The static prop gate (docs/engine-render-performance-2026-09-19.md,
-    // 2026-09-21 design entry): change-gated render-data updates at the
-    // job-0 entry. Default off; Phase 1 build, the Phase-2 flight must show
-    // census draw-count equality before this can default on.
-    staticPropGateConfigure(cfg.getBool("fix.static_prop_updates", false));
     const std::string cur = cfg.getString("advanced.temporal_aa_current", "filtered");
     g_filterCurrent = _stricmp(cur.c_str(), "raw") != 0;
     float c = cfg.getFloat("advanced.temporal_aa_history_sharp", 0.5f);

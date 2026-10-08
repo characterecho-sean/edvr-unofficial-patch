@@ -16,6 +16,8 @@ void flatGpuIdentityTests(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* own
                          Pose oldPose,Pose nowPose,Raster raster,ReadMap readMap,
                          ID3D11Buffer* pool,unsigned (&poolData)[168]) {
     using edvr::FlatForegroundMotion;
+    // The base map's contract: reasons 3, 5 and 6 for a draw with no history (the sibling pass, flat_foreground_sibling.h, replaces them).
+    FlatForegroundMotion::RigSiblingPass baseMap(false);
     inputs.gpuIdentity=true;inputs.identity={};
     inputs.identity.refusal="identity-pool-slot-unobserved";
     inputs.certificate={};inputs.phaseX=inputs.phaseY=0;

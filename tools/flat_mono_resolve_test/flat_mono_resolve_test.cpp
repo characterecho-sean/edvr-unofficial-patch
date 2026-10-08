@@ -793,6 +793,27 @@ int main(int argc,char** argv) {
             std::printf("flat mono resolve: static scene: stale block %u/%u texels refused with the policy off, %u/%u with it on; "
                         "on vs no-slot texture difference %.5f px, block camera motion %.3f px\n",
                         rejectedOff,blockTexels,rejectedOn,blockTexels,maxDiff(on,bare),blockMotion);
+            // ---- Source-free views (design section 104, the pool-less view). ----
+            // A scene that drew no pool-family draw has its views made from nothing (engineVelocityPrepareSourceFree): the slot target holds
+            // the empty marker at every texel, the pool is one record nothing points into, and the scene constants are the selected camera's
+            // with this frame's stamp. No pixel names the record, so nothing in the pool may reach the output: a record of garbage gives the very
+            // texture a record of zeros gives, which is the camera term of this moved and turned camera (not zero), as any pixel with no slot takes.
+            {
+                noSlots();upload();
+                uint32_t keep[84];std::memcpy(keep,record,sizeof(keep));
+                std::memset(record,0,sizeof(record));context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);
+                const auto zeros=resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"source-free: a one-record pool of zeros");
+                for(size_t i=0;i<84;++i)record[i]=(i&1)?0x7FC0DEADu:0x5F3759DFu;      // a NaN payload and a huge float, alternating
+                context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);
+                const auto garbage=resolveWith(epicNow,epicPrev,sceneNowReal.Get(),scenePrevReal.Get(),0,0,0,0,"source-free: a one-record pool of garbage");
+                std::memcpy(record,keep,sizeof(keep));context->UpdateSubresource(pool.Get(),0,nullptr,record,0,0);
+                float cameraMotion=0;for(float v:zeros.motion)cameraMotion=std::max(cameraMotion,std::abs(v));
+                check(cameraMotion>.05f,"source-free: the camera term of the moved and turned camera is not zero, so a refused pixel's zero cannot pass for it");
+                check(zeros.mask==garbage.mask && maxDiff(zeros,garbage)<=kSame,
+                      "source-free: a pool of garbage gives exactly the texture a pool of zeros gives: no pixel names the record");
+                std::printf("flat mono resolve: source-free views: zero vs garbage pool difference %.5f px, camera motion %.3f px\n",
+                            maxDiff(zeros,garbage),cameraMotion);
+            }
             // Leave the fixture as the pixel-capture tests below expect it.
             noSlots();upload();z[texel(12,12)]=.01f;context->UpdateSubresource(depth.Get(),0,nullptr,z.data(),w*4,0);
             g.staticScene=false;

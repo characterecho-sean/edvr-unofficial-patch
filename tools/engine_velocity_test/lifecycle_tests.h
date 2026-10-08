@@ -173,6 +173,30 @@ inline std::string lastLine(const char* prefix, size_t from = 0) {
         if (g_log[i - 1].rfind(prefix, 0) == 0) return g_log[i - 1];
     return {};
 }
+// The movers summary is four log lines (the logger cuts a line at about 1167 characters; the first keeps the key `engine motion: movers joined`):
+// the last of each since `from`, joined in print order (empty if the first is absent, as lastLine is).
+inline std::string moversLine(size_t from = 0) {
+    std::string all = lastLine("engine motion: movers joined", from);
+    if (all.empty()) return all;
+    for (const char* part : {"engine motion: movers (2/4):", "engine motion: movers (3/4):", "engine motion: movers (4/4):"}) {
+        all += " ; ";
+        all += lastLine(part, from);
+    }
+    return all;
+}
+// The on-foot summary is three log lines and, when another camera moved the rows, a fourth (the first keeps the key `engine motion: on foot:`): the
+// last of each since `from`, joined in print order, so a figure is looked for in the text the old single line held (empty if the first is absent).
+inline std::string onFootLine(size_t from = 0) {
+    std::string all = lastLine("engine motion: on foot:", from);
+    if (all.empty()) return all;
+    for (const char* part : {"engine motion: on foot (2/3):", "engine motion: on foot, another camera:", "engine motion: on foot (3/3):"}) {
+        const std::string one = lastLine(part, from);
+        if (one.empty()) continue;   // the other camera's line is printed only when another camera moved the rows
+        all += " ; ";
+        all += one;
+    }
+    return all;
+}
 inline bool logged(const char* fragment, size_t from) {
     for (size_t i = from; i < g_log.size(); ++i) if (g_log[i].find(fragment) != std::string::npos) return true;
     return false;
@@ -634,7 +658,6 @@ inline void run(const Harness& h) {
     // P1 (the 2026-09-23 performance review, item 1): the emit holds the
     // shared hooks itself (the legacy tracker retired 2026-09-23).
     h.check(lifecycle_fake::g_emitAttaches == 1, "P1: configure attaches the emit's own want on the hook set");
-    const char* joined = "engine motion: movers joined";
     auto body = [&] {
         g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0);
         g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
@@ -674,6 +697,15 @@ inline void run(const Harness& h) {
             "C: the movers line reads without a tracker comparison");
     h.check(logged("(the census is off: it runs only with engine motion's diagnostics", mark),
             "P1: the emit's census is off without diagnostics, and says its zeros are not counts");
+    {
+        // The movers summary is four lines under the logger's cut (about 1167 characters): each present, each under the repo's budget of 1000.
+        bool four = true;
+        for (const char* part : {"engine motion: movers joined", "engine motion: movers (2/4):", "engine motion: movers (3/4):", "engine motion: movers (4/4):"}) {
+            const std::string one = lastLine(part, mark);
+            four = four && !one.empty() && one.size() <= 1000;
+        }
+        h.check(four, "movers: the summary is four lines, each present and under the log budget");
+    }
 
     // F7 (rc-since-rc2 review, 2026-09-27): the sampled shadow probe meets
     // EDVR's own installed substitution, the generated patch registered in
@@ -759,7 +791,7 @@ inline void run(const Harness& h) {
         g.writeScene(g.sceneA.Get(), g.rows[0]); g.draw();
         g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
     }, &e0, &e1, true);
-    std::string line = lastLine(joined, mark);
+    std::string line = moversLine(mark);
     h.check(e0 && e1, "F1: cb1 re-mapped inside the pass with rows 270..275 unchanged keeps the eye-frame");
     h.check(number(line, "rows 270..275 unchanged ") == 2, "F1: both re-maps counted as kept");
 
@@ -772,7 +804,7 @@ inline void run(const Harness& h) {
         g.writeScene(g.sceneA.Get(), moved); g.draw();
         g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
     }, &e0, &e1, true);
-    line = lastLine(joined, mark);
+    line = moversLine(mark);
     h.check(!e0 && e1, "F1: rows 270..275 changed then drawn drops that eye-frame only");
     h.check(number(line, "scene rows 270..275 changed ") == 1, "F1: the drop counted by reason");
 
@@ -785,7 +817,7 @@ inline void run(const Harness& h) {
         g.writeScene(g.sceneA.Get(), g.rows[0]); g.pass(0, 3);
         g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1, 3);
     }, &e0, &e1, true);
-    line = lastLine(joined, mark);
+    line = moversLine(mark);
     h.check(e0 && e1, "F1: interleaved eye passes through one cb1 keep both eye-frames");
     h.check(number(line, "invalidated ") == 0, "F1: nothing invalidated by the other eye's rows");
 
@@ -824,7 +856,7 @@ inline void run(const Harness& h) {
         g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
     }, &e0, &e1, true);
     h.check(!e0 && e1, "R3: a view with another FirstElement drops the eye-frame");
-    line = lastLine(joined, mark);
+    line = moversLine(mark);
     h.check(number(line, "pool rebound ") == 1 && number(line, "scene constants rebound ") == 1 &&
             number(line, "pool view changed ") == 1, "R3: each drop counted by its reason");
 
@@ -848,7 +880,7 @@ inline void run(const Harness& h) {
         g.writeScene(g.sceneA.Get(), g.rows[1]); g.pass(1);
     }, &e0, &e1, true);
     h.check(e0 && e1, "R3b: a pool replaced after the eye's last draw keeps it");
-    line = lastLine(joined, mark);
+    line = moversLine(mark);
     h.check(number(line, "pool appended and refreshed ") == 1 && number(line, "pool rewritten ") == 1,
             "R3b: refresh and drop counted");
 
@@ -913,7 +945,7 @@ inline void run(const Harness& h) {
     g.makeEye(0, kW, kH, DXGI_FORMAT_D24_UNORM_S8_UINT);
     g.ordinaryFrame();
     g.frameWithViews(body, &e0, &e1, true);
-    line = lastLine(joined, mark);
+    line = moversLine(mark);
     h.check(!e0 && e1, "F3: a depth that is not 32-bit float gets no MRT6 and gives nothing");
     h.check(number(line, "depth not 32-bit float ") >= 2, "F3: the refusal counted");
     mark = g_log.size();
@@ -963,11 +995,21 @@ inline void run(const Harness& h) {
         h.check(!g.views(0) && !g.views(1), "S1: on foot the eyes get nothing: their passes drew no pool draw");
     }
     g.endFrame(true);
-    line = lastLine("engine motion: on foot:", mark);
+    line = onFootLine(mark);
     h.check(number(line, "source frames ") >= 2 && number(line, "with MRT6 bound ") >= 2,
             "S1: the on-foot line counts the source frames, MRT6 bound in each");
     h.check(number(line, "screen views asked ") >= 2 && number(line, "given ") >= 1, "S1: and the screen's views asked and given");
-    h.check(number(lastLine(joined, mark), "eye-frames ") >= 2 && number(lastLine(joined, mark), "with MRT6 bound ") >= 2,
+    {
+        // The on-foot summary is split under the logger's cut (about 1167 characters): each line present, each under the repo's budget of 1000.
+        bool three = true;
+        for (const char* part : {"engine motion: on foot:", "engine motion: on foot (2/3):", "engine motion: on foot (3/3):"}) {
+            const std::string one = lastLine(part, mark);
+            three = three && !one.empty() && one.size() <= 1000;
+        }
+        h.check(three, "on foot: the summary is three lines, each present and under the log budget");
+        h.check(lastLine("engine motion: on foot, another camera:", mark).empty(), "on foot: no other camera moved the rows, so no line for it");
+    }
+    h.check(number(moversLine(mark), "eye-frames ") >= 2 && number(moversLine(mark), "with MRT6 bound ") >= 2,
             "S1: the movers line's eye-frames include the source's, bound");
     // Flat capture brackets source draws too. The source is not an eye RTV:
     // screen_motion names its depth, and engineVelocityBeforeDraw sees
@@ -1066,7 +1108,7 @@ inline void run(const Harness& h) {
         g.pass(1);
         h.check(!g.views(0) && g.views(1), "S2: the flight's interleaving in an eye pass still drops that eye-frame (the eyes' rule)");
         g.endFrame(true);
-        h.check(number(lastLine(joined, mark), "scene rows 270..275 changed ") == 1, "S2: counted as the flight counted it");
+        h.check(number(moversLine(mark), "scene rows 270..275 changed ") == 1, "S2: counted as the flight counted it");
         mark = g_log.size();
         g.makeSource(40, 24);
         const auto walk = [&](int k, bool walking, bool staleFirst) {
@@ -1129,7 +1171,7 @@ inline void run(const Harness& h) {
         // Counted per CHECK -- a slow-path visit: a new binding or a cb1
         // write; a draw repeating the last one's state is its twin -- so one
         // world check a frame, one other-camera check, the early one.
-        line = lastLine("engine motion: on foot:", mark);
+        line = onFootLine(mark);
         const auto shown = [&](bool ok) { if (!ok) std::printf("    on-foot line| %s\n", line.c_str()); return ok; };
         h.check(shown(line.find("frames dropped: none") != std::string::npos), "S2: no source frame dropped");
         h.check(shown(number(line, "namings ") == 4 && number(line, "rows not seen ") == 0), "S2: four namings, their rows seen");
@@ -1141,11 +1183,16 @@ inline void run(const Harness& h) {
                       number(line, "274 on ") == 0), "S2: the other camera changed row 275 only");
         h.check(shown(line.find("its position up to 0.040 m") != std::string::npos), "S2: by the bob's 4 cm");
         h.check(shown(line.find("by family: vs_EB5234DB6ADB491D 4") != std::string::npos), "S2: counted by family");
+        {
+            const std::string otherLine = lastLine("engine motion: on foot, another camera:", mark);
+            h.check(shown(!otherLine.empty() && otherLine.size() <= 1000), "S2: the other camera's figures are a line of their own, under the log budget");
+        }
         mark = g_log.size();
         for (int k = 0; k < 2; ++k) { walk(5, false, false); g.sourceViews(); g.endFrame(k == 1); }
-        line = lastLine("engine motion: on foot:", mark);
+        line = onFootLine(mark);
         h.check(shown(number(line, "declined ") == 0 && number(line, "held to the naming's camera ") == 4),
                 "S2: standing still every check is held and none declined");
+        h.check(shown(lastLine("engine motion: on foot, another camera:", mark).empty()), "S2: and no other camera line is printed when none moved the rows");
         // S3 (flight 6, the hangar): a source named by its own depth -- no
         // terrain or scene draw -- is held by the same camera rule and counted
         // under its own signal on the on-foot line.
@@ -1159,7 +1206,7 @@ inline void run(const Harness& h) {
             h.check(g.sourceViews(), "S3: the screen's depth names a source frame like terrain does (given)");
             g.endFrame(k == 1);
         }
-        line = lastLine("engine motion: on foot:", mark);
+        line = onFootLine(mark);
         h.check(shown(number(line, "namings ") == 2 && number(line, "by the screen's own depth ") == 2 &&
                       number(line, "by terrain or a scene draw ") == 0 && line.find("frames dropped: none") != std::string::npos),
                 "S3: the on-foot line counts the namings by the screen's own depth under their signal");
@@ -1188,7 +1235,7 @@ inline void run(const Harness& h) {
     h.check(!g.views(0), "P2: an eye with only unkeyed pool draws prepares nothing and gives nothing");
     h.check(g.views(1), "P2: the other eye is untouched");
     g.endFrame(true);
-    line = lastLine(joined, mark);
+    line = moversLine(mark);
     h.check(number(line, "prepared for nothing ") == 0, "P2: no eye-frame is prepared for nothing");
     h.check(number(line, "under the old order ") >= 1, "P2: the old order would have prepared the unkeyed-only eye-frame");
     // C1 (the census, 2026-09-29): the pair that bound unkeyed in that frame is named
@@ -1223,7 +1270,7 @@ inline void run(const Harness& h) {
     g.pass(1);
     h.check(!g.views(0), "P2: the first accepted frame has no previous scene constants for that eye: refused");
     g.endFrame(true);
-    line = lastLine(joined, mark);
+    line = moversLine(mark);
     h.check(number(line, "no previous scene constants ") >= 1, "P2: and the refusal says why");
     g.beginFrame();
     g.writeScene(g.sceneA.Get(), g.rows[0]);
@@ -1261,7 +1308,7 @@ inline void run(const Harness& h) {
     g.writeScene(g.sceneA.Get(), g.rows[1]);
     g.pass(1);
     g.endFrame(true);
-    line = lastLine(joined, mark);
+    line = moversLine(mark);
     // The draw side's CPU and driver-call figures are a line of their own (the 2026-09-29 motion-CPU
     // review, C5): they were the tail of the movers line, past the 1,160 characters a log line keeps.
     const std::string drawSide = lastLine("engine motion: draw side over ", mark);
@@ -1332,7 +1379,7 @@ inline void run(const Harness& h) {
     const size_t windowMark = g_log.size();
     g.endFrame(true);
     h.check(logged("engine motion: STOOD DOWN", windowMark), "R6: the 30 s block repeats the stand-down");
-    line = lastLine(joined, windowMark);
+    line = moversLine(windowMark);
     h.check(number(line, "refused: stood down ") >= 1, "R6: the refusals counted");
     mark = g_log.size();
     lifecycle_fake::g_hookLive = true;

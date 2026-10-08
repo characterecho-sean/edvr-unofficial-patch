@@ -13,6 +13,25 @@
 // untrimmed size at HMD Quality = the key's target. The scene, the eye
 // targets, the UI screen record and its 28 readers are not touched.
 //
+// SUPERSAMPLING AND THE SIZE BUDGET (2026-10-07). The game's c is the UI
+// screen record's width times k, and the record's +0x30 is its +0x40 times
+// Elite's Supersampling, so at Supersampling S > 1 every panel the game makes is
+// S times wider: f carries the same S (the game is already denser by S), and
+// the factor is raised, if need be, until the widest panel the formula could
+// ask for (S x B / f, B the base c over the record's states) is within 7/8 of
+// D3D11's 16384. A refused create is fatal in Elite, so it must never be this
+// patch's doing: a launch at Supersampling 2.0 and ui_quality 125 asked for a
+// 19200x10800 panel and died. ui_sizing_math.h holds the arithmetic; the
+// Supersampling is read with HMD Quality (ui_surfaces.cpp) and without it there
+// is no factor.
+//
+// LIVE SUPERSAMPLING AND THE NET (2026-10-08). The Supersampling is read from the game's own render context every
+// frame (ctx+0x3564, found through two virtual slots EDVR's thunks remember the context from), and the .fxcfg's
+// value, read every 5 s, is the fallback with the reason said. The setter's thunk moves the factor to the new value
+// BEFORE the game's setter runs, so the panels its reconfigure recreates are made at the new factor. And behind all
+// of it, a last-resort net at the panel's CreateTexture2D (ui_surfaces.cpp): a render or depth target over D3D11's
+// 16384 a side is created shrunk to fit, aspect kept, never refused.
+//
 // SAFETY. Build-keyed: the PE stamp and image size, both sites' 30 bytes,
 // the two functions' prologues and the three constants they read must be
 // build 332841's exactly, or nothing is written and one line says which
@@ -55,6 +74,19 @@ bool uiPanelScaleLive();
 
 // The factor the floats hold (1 when not live).
 double uiPanelScaleFactor();
+
+// The factor before the size budget (1 when not live): formula x Supersampling, clamped to [1/4, 1]. The orbit
+// lines' width reads this one: it is the render/layer density ratio, which the budget (it thins the panels, never
+// the layer) does not change. Equal to uiPanelScaleFactor() except where the budget raised that.
+double uiPanelScaleLineFactor();
+
+// max(Elite's Supersampling, 1) as the written factor carries it (1 when not live): the sizing chain's implied
+// stage divides it out, the game's own panel width having multiplied by it.
+double uiPanelScaleSupersampling();
+
+// The Supersampling the factor was last made from, as chosen (live from the game's render context, or the .fxcfg's),
+// and where it came from ("live", ".fxcfg" or "none"). 0 until the first choice. Lock-free.
+double uiPanelScaleChosenSupersampling(const char** source);
 
 // The operands written back (DLL unload). Idempotent.
 void uiPanelScaleShutdown();

@@ -538,8 +538,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
-    "src\d3d11\static_prop_gate.cpp" "src\d3d11\cull_gate_probe.cpp" ^
-    "src\d3d11\lod_governor.cpp" ^
+    "src\d3d11\cull_gate_probe.cpp" ^
     "src\d3d11\engine_velocity.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\fss_res.cpp" ^
@@ -2914,46 +2913,6 @@ if errorlevel 1 ( echo [edvr] ERROR: scheduler stack probe test build failed & e
 "%BUILD%\scheduler_stack_probe_test.exe" --self-test || exit /b 1
 exit /b 0
 
-:rig_static_prop_gate_test
-echo [edvr] === static_prop_gate_test.exe ===
-REM Build gate for the StaticPropGate's cache logic: the change test
-REM (hit/miss/first-sight), the forced-refresh failsafe, invalidation
-REM epochs, oldest-evict at capacity and the SEH fault tolerance. These run
-REM at ~432 calls/frame in flight; a cache defect costs a test flight AND
-REM can read as invisible success (a wrong skip just costs CPU), so the rig
-REM drives the production decide() on synthetic record arrays, including a
-REM VirtualProtect guard-page fixture.
-if not exist "%OBJ%\staticgate" mkdir "%OBJ%\staticgate"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
-    /Fo"%OBJ%\staticgate\\" /Fe"%BUILD%\static_prop_gate_test.exe" ^
-    "tools\static_prop_gate_test\static_prop_gate_test.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: static prop gate test build failed & exit /b 1 )
-"%BUILD%\static_prop_gate_test.exe" --dry-run || exit /b 1
-"%BUILD%\static_prop_gate_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_static_prop_gate_json_test
-echo [edvr] === static_prop_gate_json_test.exe ===
-REM Build gate for the production StaticPropGate JSON writer: the kinematic
-REM writer shipped three serialization failures before its gate existed,
-REM and compilation cannot catch a dropped quote. The exe serializes a
-REM deterministic fixture through the real writeJson; the python gate
-REM strict-parses it and asserts every value round-trips.
-if not exist "%OBJ%\staticgatejson" mkdir "%OBJ%\staticgatejson"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
-    /Fo"%OBJ%\staticgatejson\\" /Fe"%BUILD%\static_prop_gate_json_test.exe" ^
-    "tools\static_prop_gate_json_test\static_prop_gate_json_test.cpp" ^
-    "src\d3d11\static_prop_gate.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: static prop gate JSON writer test build failed & exit /b 1 )
-"%BUILD%\static_prop_gate_json_test.exe" --dry-run || exit /b 1
-"%BUILD%\static_prop_gate_json_test.exe" --self-test || exit /b 1
-python "tools\static_prop_gate_json_selftest.py" --self-test || exit /b 1
-exit /b 0
-
 :rig_cull_gate_probe_test
 echo [edvr] === cull_gate_probe_test.exe ===
 REM Build gate for the cull gate probe (advanced.cull_gate_capture): the
@@ -2979,36 +2938,6 @@ if errorlevel 1 ( echo [edvr] ERROR: cull gate probe test build failed & exit /b
 python "tools\cull_gate_probe.py" --self-test || exit /b 1
 python "tools\cull_gate_probe.py" --verify-fixture "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
 python "tools\cull_gate_probe.py" --tables-only "%OBJ%\cullgate\gate_fixture.bin" || exit /b 1
-exit /b 0
-
-:rig_lod_governor_test
-echo [edvr] === lod_governor_test.exe ===
-REM Build gate for the settlement LOD governor (fix.settlement_detail: auto and
-REM reduced scale the game's LOD scale right after FUN_142819D90 stores it;
-REM advanced.settlement_detail_observe = 1 never writes): the policy's steps
-REM and hysteresis, reduced's k_max at once; the engine arithmetic the shadow
-REM repeats (FUN_1442B3FC0 / FUN_144308B30's rsqrt(rcp) distance, LOD
-REM distance, LOD pick, the screen-size term); the observers on synthetic
-REM engine memory laid out as the decompiles read it; the setter's bracket
-REM against a fake context and a fake setter (only the builder's context is
-REM written, k = 1 and observe leave the game's value, the table's limit and
-REM an unwritable page stand acting down, off writes the game's value back);
-REM the acting counts; the per-thread counters under four threads; and the
-REM frame boundary end to end against a stub native timing feed, a fake
-REM engine and a captured log -- the configure line naming the mechanism,
-REM the first write, step lines, 30-second summaries, NOT ACTING, "k stayed
-REM 1", and silence while off. It prints the observers' cost per call. A
-REM governor that writes when it should not, or never counts, fails here,
-REM not in the flight that was meant to price it.
-if not exist "%OBJ%\lodgov" mkdir "%OBJ%\lodgov"
-cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
-    /Fo"%OBJ%\lodgov\\" /Fe"%BUILD%\lod_governor_test.exe" ^
-    "tools\lod_governor_test\lod_governor_test.cpp" ^
-    /link /INCREMENTAL:NO kernel32.lib user32.lib
-if errorlevel 1 ( echo [edvr] ERROR: LOD governor test build failed & exit /b 1 )
-"%BUILD%\lod_governor_test.exe" --dry-run || exit /b 1
-"%BUILD%\lod_governor_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_ui_layer_coverage_test

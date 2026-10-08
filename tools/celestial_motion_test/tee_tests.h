@@ -85,6 +85,7 @@ void updateWrite(Dev& d, ID3D11Buffer* b, const std::vector<uint8_t>& bytes) {
 void reset() {
     celestialMotionShutdown();
     celestialMotionConfigure(true);
+    celestialMotionNoteStatus(true, true);   // the supercruise gate open: the tee's cases run in supercruise (the gate has its own, gate_tests.h)
     g_logLines.clear();
     g_stubEyeDsv[0] = reinterpret_cast<ID3D11DepthStencilView*>(0x1000);
     g_stubEyeDsv[1] = reinterpret_cast<ID3D11DepthStencilView*>(0x2000);
@@ -333,20 +334,25 @@ void all(const Fixture& fx) {
                   "a second ask in a frame answers from the first");
         }
         check(g_win.uploads == 2 && g_win.records == 2, "one upload and one record per eye");
-        // the 5 s line, with everything in it
+        // the 5 s census, with everything in it: three lines now (the capture, the consumer, then the records, the tee, the cost and the gate)
+        g_logLines.clear();
         report();
-        check(!g_logLines.empty(), "the census line is written");
-        const std::string line = g_logLines.back();
-        check(line.rfind("celestial motion 5s: ", 0) == 0, "the census line starts 'celestial motion 5s: '");
-        check(line.size() < 1100, fmt("the census line fits the log's line (%zu bytes)", line.size()));
-        std::printf("    the census line of two eye-frames of real constants (the CPU figures are this rig's, WARP, one core):\n    %s\n", line.c_str());
-        for (const char* want : {"draws=145", "captured=144", "records=2", "uploads=2", "eye-frames=2", "patches/frame=36.0", "bodies/frame=6.0", "behind=10",
-                                 "tee[map=", "cpu[capture=", "pixels=n/a (diagnostics off)", "no-previous-frame=0"})
-            check(line.find(want) != std::string::npos, fmt("the census line carries '%s': %s", want, line.c_str()));
+        check(g_logLines.size() == 3, fmt("the census is three lines (%zu)", g_logLines.size()));
+        const std::string line1 = g_logLines[0], line2 = g_logLines[1], line3 = g_logLines[2];
+        check(line1.rfind("celestial motion 5s: ", 0) == 0, "the census line starts 'celestial motion 5s: '");
+        check(line2.rfind("celestial motion 5s (2/3): ", 0) == 0 && line3.rfind("celestial motion 5s (3/3): ", 0) == 0, "its later parts start 'celestial motion 5s (2/3): ' and '(3/3): '");
+        check(line1.size() < 800 && line2.size() < 800 && line3.size() < 800, fmt("each part of the census is well under the 1000-character budget (%zu, %zu, %zu bytes)", line1.size(), line2.size(), line3.size()));
+        std::printf("    the census of two eye-frames of real constants (the CPU figures are this rig's, WARP, one core):\n    %s\n    %s\n    %s\n", line1.c_str(), line2.c_str(), line3.c_str());
+        for (const char* want : {"draws=145", "captured=144", "gated-off=0", "off-eye=0 unwatched=1"})
+            check(line1.find(want) != std::string::npos, fmt("the census line carries '%s': %s", want, line1.c_str()));
+        for (const char* want : {"eye-frames=2", "patches/frame=36.0", "bodies/frame=6.0", "behind=10", "no-previous-frame=0"})
+            check(line2.find(want) != std::string::npos, fmt("the census line's second part carries '%s': %s", want, line2.c_str()));
+        for (const char* want : {"records=2", "uploads=2", "0 with a shell", "pixels=n/a (diagnostics off)", "tee[map=", "cpu[capture=", "gate=on (0 of "})
+            check(line3.find(want) != std::string::npos, fmt("the census line's third part carries '%s': %s", want, line3.c_str()));
         celestialMotionNotePixels(1234);
         g_win.frames = 1;
         report();
-        check(g_logLines.back().find("pixels=1234") != std::string::npos, "the pass's pixel count reaches the line");
+        check(g_logLines[g_logLines.size() - 1].find("pixels=1234") != std::string::npos, "the pass's pixel count reaches the line");
         // a frame later the eyes' captures are stale: no records until they draw again
         celestialMotionFrameBoundary();
         celestialMotionFrameBoundary();
@@ -389,9 +395,10 @@ void all(const Fixture& fx) {
         CelestialEyeRecords rec;
         check(g_win.draws == 0 && !celestialMotionRecords(d.ctx.Get(), 0, in.tan, in.w, in.h, &rec), "off: no capture, no records, nothing counted");
         celestialMotionConfigure(true);
+        celestialMotionNoteStatus(true, true);
         g_logLines.clear();
         report();
-        check(g_logLines.size() == 1 && g_logLines[0].find("draws=0 captured=0") != std::string::npos && g_logLines[0].find("records=0") != std::string::npos,
+        check(g_logLines.size() == 3 && g_logLines[0].find("draws=0 captured=0") != std::string::npos && g_logLines[2].find("records=0") != std::string::npos,
               "live with no patch draws: the line says draws=0 (a line that never appears means the module never ran)");
         ++cases;
     }

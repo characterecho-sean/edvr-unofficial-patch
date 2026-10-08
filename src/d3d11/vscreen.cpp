@@ -38,7 +38,6 @@
 #include "draw_gate.h"    // the sampled subscriber gate the draw path reads
 #include "object_probe.h"     // tier 2 stage 1: the instanced-mesh pool, read on two frames
 #include "pixel_probe.h"      // advanced.pixel_probe: who drew this pixel, during an eye dump
-#include "lod_governor.h"     // fix.settlement_detail: the settlement LOD governor
 #include "fss_panel.h"
 #include "fss_panel_rect.h"
 #include "fss_reveal.h"
@@ -4374,7 +4373,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource,
             FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyResource,"CopyResource",src));
-        flatRuntimeWritten(dst);
+        flatRuntimeWrittenExtent(dst,historyWholeWrite(HistoryWriteEntry::CopyResource));
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'R');
     if (drawCensusArmed()) {
@@ -4556,7 +4555,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyRegion,
             FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyRegion,"CopySubresourceRegion",
                 src,srcSub,dstSub,box,dstX,dstY,dstZ));
-        flatRuntimeWritten(dst);
+        flatRuntimeWrittenExtent(dst,flatRuntimeCopyExtent(dstSub,dstX,src,box));
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'C');
     if (drawCensusArmed()) {
@@ -5702,7 +5701,6 @@ void vScreenRefreshConfig() {
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
-    lodGovernorConfigure(cfg);
 
     if (wasVoid != s->blackVoid || wasScale != s->distanceScale) {
         Log::get().note("vScreen config reloaded: black void %s, panel distance x%.3f "
@@ -5853,7 +5851,6 @@ EDVR_BOUNDARY_TICK(tkIntroCurve, "intro_curve");
 EDVR_BOUNDARY_TICK(tkIntroSkip, "intro_skip");
 EDVR_BOUNDARY_TICK(tkLoaderPanel, "loader_panel");
 EDVR_BOUNDARY_TICK(tkIntroProbe, "intro_probe");
-EDVR_BOUNDARY_TICK(tkLodGovernor, "lod_governor");
 EDVR_BOUNDARY_TICK(tkDrawCensusBoundary, "draw_census_boundary");
 EDVR_BOUNDARY_TICK(tkFssReveal, "fss_reveal");
 EDVR_BOUNDARY_TICK(tkFssDump, "fss_dump");
@@ -5975,11 +5972,6 @@ void vScreenFrameBoundary() {
     tkIntroProbe.run([&] {
         introProbeFrameBoundary(s->frameNo, s->eyeDrawsLastFrame >= kSceneEyeDraws);
     });
-
-    // The settlement LOD governor (fix.settlement_detail, shadow only): the
-    // frame's draw-builder and part-test counts, the producer's frame work,
-    // one policy step, its log lines. One atomic load while it is off.
-    tkLodGovernor.run([&] { lodGovernorFrameBoundary(); });
 
     // The ARRIVAL census (advanced.census_fss_jump): a world-camera jump
     // while the scanner's chrome is up is a zoom's first frame, and the
@@ -6953,7 +6945,6 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     particleConfigure(cfg);
     objectProbeConfigure(cfg);
     pixelProbeConfigure(cfg);
-    lodGovernorConfigure(cfg);
     // installGlitchFrameFix is called before this, deliberately, so this is its
     // settled answer rather than a guess about config it has not read yet.
     g_state->countForFlashFix = glitchFrameNeedsEyeDraws();
@@ -7255,9 +7246,6 @@ void shutdownVScreenFixes() {
     particleShutdown();
     objectProbeShutdown();
     pixelProbeShutdown();
-    // The settlement LOD governor: stop acting and write the game's LOD scale
-    // back to any render context still holding EDVR's.
-    lodGovernorShutdown();
     if (g_state->ourCb) {
         g_state->ourCb->Release();
         g_state->ourCb = nullptr;

@@ -39,6 +39,11 @@ std::atomic<bool> g_on{false};
 // frame path, never inside a create. The bits of a float, 0 while unknown.
 std::atomic<uint32_t> g_hmdBits{0};
 std::atomic<bool> g_hmdBusy{false};
+// Beside it, from the same pass (2026-10-07): Elite's Supersampling (the same .fxcfg's SSAAMultiplier, the
+// bits of a float) and the game window's width (DisplaySettings.xml), 0 while unknown. The panel factor and its
+// size budget read them (ui_sizing_math.h's "Supersampling and the size budget").
+std::atomic<uint32_t> g_ssaaBits{0};
+std::atomic<uint32_t> g_displayW{0};
 
 float hmdCached() {
     const uint32_t bits = g_hmdBits.load(std::memory_order_acquire);
@@ -48,11 +53,16 @@ float hmdCached() {
 }
 
 void hmdReadNow() {
-    float q = 0.0f;
-    if (!deviceHookHmdQuality(&q) || !(q > 0.0f) || !std::isfinite(q)) q = 0.0f;
-    uint32_t bits = 0;
+    float q = 0.0f, ss = 0.0f;
+    uint32_t dw = 0, dh = 0;
+    if (!deviceHookPanelSettings(&q, &ss, &dw, &dh) || !(q > 0.0f) || !std::isfinite(q)) q = 0.0f;
+    if (!(ss > 0.0f) || !std::isfinite(ss)) ss = 0.0f;
+    uint32_t bits = 0, ssBits = 0;
     std::memcpy(&bits, &q, sizeof(bits));
+    std::memcpy(&ssBits, &ss, sizeof(ssBits));
     g_hmdBits.store(bits, std::memory_order_release);
+    g_ssaaBits.store(ssBits, std::memory_order_release);
+    g_displayW.store(dw, std::memory_order_release);
 }
 
 VOID CALLBACK hmdRefresh(PTP_CALLBACK_INSTANCE, PVOID) {
@@ -236,23 +246,95 @@ void uiSurfacesNoteChain(const D3D11_TEXTURE2D_DESC& d) {
     // the create's size times f (ui_panel_scale.h).
     const bool engine = uiPanelScaleLive();
     const double f = engine ? uiPanelScaleFactor() : 1.0;
-    char rvas[160], verdict[320], sized[64] = "";
+    // The game's own panel width carries Elite's Supersampling above 1 (ui_sizing_math.h): the stage divides it out.
+    const float ssRead = uiSurfacesSupersampling();
+    const double ss = ssRead > 1.0f ? static_cast<double>(ssRead) : 1.0;
+    char rvas[160], verdict[320], sized[128] = "", ssText[64] = "";
     uiChainFormat(c.chain, rvas, sizeof(rvas));
     uiChainVerdictText(c.verdict, verdict, sizeof(verdict));
     if (engine) std::snprintf(sized, sizeof(sized), " (the engine sizing panels x%.4f)", 1.0 / f);
+    if (ss > 1.0) std::snprintf(ssText, sizeof(ssText), ", Supersampling %.2f in the game's width", ss);
     Log::get().note(
         "ui quality: sizing chain %u: frame %u, a %ux%u %s surface (DXGI format %u, bind 0x%X) -- "
-        "W %ux%u (%s), tangents up %.4f down %.4f, vFOV %.1f degrees, k %.4f, implied stage "
+        "W %ux%u (%s), tangents up %.4f down %.4f, vFOV %.1f degrees, k %.4f%s, implied stage "
         "%.0fx%.0f%s; %u game frames, innermost first: %s; verdict %s.",
         g_s.chainCount, g_frameNo.load(std::memory_order_relaxed), d.Width, d.Height,
         depth ? "depth" : "colour", static_cast<unsigned>(d.Format), d.BindFlags, b.W, b.H,
         !b.W ? "unknown" : b.asked ? "as the game is told" : "the frame's recommendation",
-        static_cast<double>(b.up), static_cast<double>(b.down), static_cast<double>(b.vfovDeg), k,
-        uiImpliedStage(d.Width, b.W, k) * f, uiImpliedStage(d.Height, b.W, k) * f, sized, c.chain.n,
-        c.chain.n ? rvas : "none", verdict);
+        static_cast<double>(b.up), static_cast<double>(b.down), static_cast<double>(b.vfovDeg), k, ssText,
+        uiImpliedStage(d.Width, b.W, k) * f / ss, uiImpliedStage(d.Height, b.W, k) * f / ss, sized,
+        c.chain.n, c.chain.n ? rvas : "none", verdict);
+}
+
+// ------------------------------------------------------------------- the panel net
+
+namespace {
+struct NetSeen {
+    uint32_t w = 0, h = 0;
+};
+constexpr uint32_t kNetSeen = 16;  // distinct requested sizes named; the rest are counted
+std::atomic<uint32_t> g_netFired{0}, g_netDistinct{0};
+NetSeen g_netSeen[kNetSeen];       // under g_lock
+uint32_t g_netSeenCount = 0;       // under g_lock
+}  // namespace
+
+bool uiSurfacesPanelNet(const D3D11_TEXTURE2D_DESC& in, bool initialData, D3D11_TEXTURE2D_DESC* out) {
+    if (!out || initialData) return false;
+    if ((in.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) == 0) return false;
+    uint32_t nw = in.Width, nh = in.Height;
+    if (!uiPanelNetShrink(in.Width, in.Height, &nw, &nh)) return false;
+    *out = in;
+    out->Width = nw;
+    out->Height = nh;
+    g_netFired.fetch_add(1, std::memory_order_relaxed);
+    bool first = false;
+    {
+        Lock lock;
+        bool seen = false;
+        for (uint32_t i = 0; i < g_netSeenCount; ++i)
+            if (g_netSeen[i].w == in.Width && g_netSeen[i].h == in.Height) seen = true;
+        if (!seen && g_netSeenCount < kNetSeen) {
+            g_netSeen[g_netSeenCount].w = in.Width;
+            g_netSeen[g_netSeenCount].h = in.Height;
+            ++g_netSeenCount;
+            first = true;
+        }
+    }
+    if (!first) return true;
+    g_netDistinct.fetch_add(1, std::memory_order_relaxed);
+    const bool depth = (in.BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
+    char verdict[64];
+    std::snprintf(verdict, sizeof(verdict), "%s", uiChainVerdictShort(uiChainVerdict(captureChain())));
+    const char* source = "none";
+    const double ss = uiPanelScaleChosenSupersampling(&source);
+    const double f = uiPanelScaleLive() ? uiPanelScaleFactor() : 1.0;
+    Log::get().note(
+        "ui quality: panel net: the game asked D3D11 for a %ux%u %s target (DXGI format %u, bind 0x%X; creating "
+        "chain: %s), over D3D11's limit of %u a side, and was given a %ux%u one (aspect kept) so the create is not "
+        "refused. At that moment the panel factor was f %.4f (x%.4f)%s and Supersampling %.2f (%s). The game still "
+        "lays the panel out at the size it asked for, so what lies past the created size is clipped and the panel "
+        "shows cropped (right and bottom) and enlarged, not as an abort. This is the last-resort net: the factor "
+        "and its budget should have kept the request under the limit, and this line says they did not.",
+        in.Width, in.Height, depth ? "depth" : "colour", static_cast<unsigned>(in.Format), in.BindFlags, verdict,
+        kUiPanelNetLimit, nw, nh, f, 1.0 / f, uiPanelScaleLive() ? "" : " (the panel patch is not live)", ss, source);
+    return true;
+}
+
+void uiSurfacesPanelNetCounts(uint32_t* fired, uint32_t* distinct) {
+    if (fired) *fired = g_netFired.load(std::memory_order_relaxed);
+    if (distinct) *distinct = g_netDistinct.load(std::memory_order_relaxed);
 }
 
 float uiSurfacesHmdQuality() { return hmdCached(); }
+
+float uiSurfacesSupersampling() {
+    const uint32_t bits = g_ssaaBits.load(std::memory_order_acquire);
+    float v = 0.0f;
+    std::memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+uint32_t uiSurfacesDisplayWidth() { return g_displayW.load(std::memory_order_acquire); }
 
 // ------------------------------------------------------------ the glyph atlas
 

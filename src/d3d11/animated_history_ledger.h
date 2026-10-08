@@ -23,6 +23,16 @@ struct HistoryKey {
     int base = 0;
 };
 
+// A 64-bit digest of a key (FNV-1a over its fields), for the places that remember a key without holding the whole of it.
+inline uint64_t historyKeyHash(const HistoryKey& k) {
+    uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](uint64_t v) { for (int i = 0; i < 8; ++i) { h ^= (v >> (8 * i)) & 0xFF; h *= 1099511628211ull; } };
+    mix(reinterpret_cast<uintptr_t>(k.vs)); mix(reinterpret_cast<uintptr_t>(k.layout));
+    mix(reinterpret_cast<uintptr_t>(k.vertices)); mix(reinterpret_cast<uintptr_t>(k.indices));
+    mix(k.count); mix(k.start); mix(k.offset); mix(k.stride); mix(k.indexOffset); mix(k.format); mix(static_cast<uint64_t>(static_cast<int64_t>(k.base)));
+    return h;
+}
+
 // One bit per key field that differs between two keys.
 enum HistoryKeyDiff : unsigned {
     kDiffVs = 1, kDiffLayout = 2, kDiffVertices = 4, kDiffIndices = 8, kDiffCount = 16, kDiffStart = 32, kDiffBase = 64,
@@ -61,7 +71,9 @@ enum class HistoryGap : uint8_t {
     InvalidatedUnknown,        // the record was invalidated by a write nothing could name (every record falls with it)
     InvalidatedVertices,       // ... by a write to its vertex buffer
     InvalidatedIndices,        // ... by a write to its index buffer
-    RecordReclaimed,           // published the frame before, and gone: reclaimed under budget pressure
+    RecordReclaimed,           // published the frame before, and gone, by a path the history did not remember (the tombstone ring rolled)
+    ReclaimedByAdvance,        // ... a write invalidated it, its key did not draw again in time, and the frame boundary aged it out
+    ReclaimedByPressure,       // ... taken for a different key's budget
     RecordUnusable,            // published, present, not invalidated, and still not a prior (must be zero)
     OffsetShift,               // the same mesh was drawn the frame before at another place in the same buffers, one record: matched
     OffsetShiftAmbiguous,      // ... but several records, or the record is already another draw's: refused
@@ -79,7 +91,7 @@ inline const char* historyGapName(HistoryGap g) {
     static const char* const names[kHistoryGapCount] = {
         "previous-frame-empty", "previous-frame-not-captured", "refused-last-frame-cap", "refused-last-frame-budget",
         "refused-last-frame-other", "unpublished-last-frame", "invalidated-unknown", "invalidated-vertices", "invalidated-indices",
-        "record-reclaimed", "record-unusable", "offset-shift", "offset-shift-ambiguous", "offset-shift-unusable", "count-change",
+        "record-reclaimed", "reclaimed-by-advance", "reclaimed-by-pressure", "record-unusable", "offset-shift", "offset-shift-ambiguous", "offset-shift-unusable", "count-change",
         "buffer-change", "format-change", "absent-short", "absent-long", "new-key"};
     const unsigned i = static_cast<unsigned>(g);
     return i < kHistoryGapCount ? names[i] : "unknown";
@@ -92,6 +104,7 @@ struct HistoryRecordFacts {
     unsigned exactInvalidReasons = 0;   // ... by these writes (bit 0 unknown, bit 1 vertex buffer, bit 2 index buffer)
     unsigned shiftUsable = 0;           // records of the same mesh at another placement that the frame before used and nothing invalidated
     unsigned shiftClaimed = 0;          // of those, records another draw of this frame already used or claimed
+    unsigned goneBy = 0;                // how a published key's record left the history (HistoryErase: 1 aged out after invalidation, 2 budget pressure), 0 unknown
 };
 
 struct HistoryClass {
@@ -181,7 +194,9 @@ public:
                 return at(exactEntry, exactRefusal == RefusedOccurrence ? HistoryGap::RefusedLastFrame :
                                        exactRefusal == RefusedBudget ? HistoryGap::RefusedBudget : HistoryGap::RefusedOther);
             if (!exactPublished) return at(exactEntry, HistoryGap::UnpublishedLastFrame);
-            if (!facts.exactPresent) return at(exactEntry, HistoryGap::RecordReclaimed);
+            if (!facts.exactPresent)
+                return at(exactEntry, facts.goneBy == 1 ? HistoryGap::ReclaimedByAdvance :
+                                       facts.goneBy == 2 ? HistoryGap::ReclaimedByPressure : HistoryGap::RecordReclaimed);
             if (facts.exactInvalidated)
                 return at(exactEntry, (facts.exactInvalidReasons & 1u) ? HistoryGap::InvalidatedUnknown :
                                        (facts.exactInvalidReasons & 2u) ? HistoryGap::InvalidatedVertices :

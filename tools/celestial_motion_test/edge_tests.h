@@ -236,6 +236,19 @@ void all(const Fixture& fx) {
         if (r.records) {
             const float* g = r.gpu[0];
             check(g[12] < 0 && g[14] > base.eye.w && g[16] == 0.0f, "a straddling volume is the whole eye with zmin 0");
+            // ...and, since 2026-10-08, it is held to the body's radial shell: rMax in span.w, the centre and rMin in ctr
+            check(r.body[0].shell && g[19] > 0.0f && g[19] == float(r.body[0].rMax) && g[23] == float(r.body[0].rMin) && g[23] < g[19],
+                  "a straddling record carries its shell (rMax in span.w, rMin in ctr.w)");
+            check(g[20] == float(r.body[0].shellCentre[0]) && g[21] == float(r.body[0].shellCentre[1]) && g[22] == float(r.body[0].shellCentre[2]),
+                  "and the body's centre in the shader's view space");
+        }
+        // a body wholly in front of the eye plane keeps its box and depth slab and carries no shell
+        {
+            cel::BuildResult& n = run(base, base.cur, base.prev);
+            check(n.records == 1 && !n.body[0].straddle && !n.body[0].shell, "a body wholly in front of the eye plane does not straddle");
+            const float* g = n.gpu[0];
+            check(g[19] == 0.0f && g[20] == 0.0f && g[21] == 0.0f && g[22] == 0.0f && g[23] == 0.0f, "...and its record has no shell (span.w and ctr are 0)");
+            check(n.body[0].rMax > 0.0 && n.body[0].rMin <= double(kMoon) && double(kMoon) <= n.body[0].rMax, "...though the shell is computed for it and holds the moon's radius");
         }
         ++cases;
     }
