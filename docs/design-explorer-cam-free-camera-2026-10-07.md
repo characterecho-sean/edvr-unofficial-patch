@@ -777,3 +777,25 @@ Sean's rule. ENTER needs gameplay, Status.json on foot known true in every mode 
 focus refuses in mode 0 and is allowed in modes 1-4 only with on foot known true. EXIT is always allowed. A refusal says its reason once per press, naming
 both values; Status.json's OnFoot lags about 6 s after a disembark, which only delays the first F5. If the game reports a non-zero GuiFocus with its own
 camera suite open, F7's refuse line shows it.
+
+## 2026-10-08 F7 flown: the head is gone; the cached head joint follows stance
+
+Frontier, v0.18.3-29-ge42e90dd (version line checked),
+`edvr_gfx_20261008_085841.log`. Sean: "head is gone!", but the camera
+still does not follow crouch or weapon (placement still on the eye keys).
+
+- **Latch.** The local pair was latched once at 09:00:25 (third person
+  0x23A812307C8, 185 joints, head idx 44). It matched the local AMC, and
+  Phase 2's head hiding worked on Sean's own avatar.
+- **The cached +0x58 head follows stance** on the TRUE local skeleton:
+  standing (0.00, 1.66, 0.03); crouch 09:01:00-03 down to (0.09, 0.94,
+  0.19); standing again 1.66; weapon out from 09:01:12 at (0.10, 1.38,
+  0.19). F5's "no crouch" was an NPC. Model axes: +x right (right foot
+  +0.107), +y up, +z forward.
+- **H2's pose walk is the REST pose:** a constant head (0.00, 1.675, 0.003)
+  and pov (0.00, 1.713, 0.115). So the P+0x48 locals are the bind pose,
+  useful only for the head-to-eye offset (pov - head = (0, 0.038, 0.112)
+  at rest).
+- **F5 guard bug.** On foot, Status.json carries no GuiFocus field, so F5
+  refused from first person four times ("focus unknown"). An absent
+  GuiFocus with Flags2 present must read as 0.
