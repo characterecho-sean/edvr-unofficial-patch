@@ -115,8 +115,10 @@ bool hotkeyClashes(const HotkeyBinding& a, const HotkeyBinding& b);
 bool eliteElementIsOnFoot(const char* element);
 
 // A key the menu's own navigation uses (Up, Down, Left, Right, Enter, Space, Tab,
-// Page Up, Page Down, Home, End, R, Escape), bare or with Shift alone. With Ctrl
-// or Alt held it is a different press and free.
+// Page Up, Page Down, Home, End, R, Escape), with ANY modifiers: the menu reads them raw, so
+// a chord on one of them is still that key to the menu and the hotkey would fire with it.
+// Refused for every hotkey, the menu key included (CTRL+ALT+ESCAPE would open the panel and
+// close it in the same tick).
 bool hotkeyReservedByMenu(const HotkeyBinding& b);
 
 BindCheck hotkeyCheckBinding(const HotkeyBinding& b, const HotkeyOther* others, int nOthers,

@@ -3291,7 +3291,8 @@ void applyDecision(int def, const CaptureDecision& dec) {
             Log::get().note("menu: %s: %s refused -- it is one of the menu's own navigation keys.", dotted.c_str(),
                             text.c_str());
             setHotkeyNote(def, "the menu's own key",
-                          text + " is a key this menu navigates with; pick another (Ctrl or Alt makes it a chord).");
+                          text + " has a key this menu navigates with (arrows, Enter, Space, Tab, PageUp/Down, Home, End, R, Esc), "
+                          "with any modifier; pick another key.");
             return;
         case CaptureOutcome::Duplicate: {
             const int other = hotkeyRowByDotted(dec.check.duplicateOf);

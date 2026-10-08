@@ -349,6 +349,8 @@ void testHotkeyEdge() {
         Hotkey joyKey, padKey, kbKey;
         joyKey.setGameMirrored(true);
         padKey.setGameMirrored(true);
+        kbKey.setGameMirrored(true);
+        hotkeySetKeyboardReaderForTest([](int vk) { return g_held && vk == VK_F20; });
         g_held = false;
         joyKey.setBinding("231D0200:Joy_12");
         padKey.setBinding("GamePad_Back");
@@ -357,17 +359,22 @@ void testHotkeyEdge() {
         check(hotkeysSuspended(), "suspension is on");
         g_held = true;
         check(!joyKey.pressed() && !padKey.pressed(), "suspended: a pad or HOTAS press fires nothing");
-        check(!kbKey.pressedWith(true, 0, true), "suspended: a key press fires nothing");
+        check(!kbKey.pressed(), "suspended: a key press fires nothing");
         hotkeysSuspend(false);
         check(!hotkeysSuspended(), "suspension is off");
-        check(!joyKey.pressed() && !kbKey.pressedWith(true, 0, true),
+        check(!joyKey.pressed() && !padKey.pressed() && !kbKey.pressed(),
               "...and a press that began while suspended is not a press when it ends");
         g_held = false;
         joyKey.pressed();
-        kbKey.pressedWith(false, 0, true);
+        padKey.pressed();
+        kbKey.pressed();
         g_held = true;
-        check(joyKey.pressed() && kbKey.pressedWith(true, 0, true), "...the next press fires");
+        check(joyKey.pressed() && padKey.pressed() && kbKey.pressed(), "...the next press fires");
         g_held = false;
+        joyKey.pressed();
+        padKey.pressed();
+        kbKey.pressed();
+        hotkeySetKeyboardReaderForTest(nullptr);
     }
     // The registry counts live hotkeys.
     {
@@ -943,10 +950,35 @@ void testChecks() {
     }
     check(hotkeyCheckBinding(key(VK_TAB, kHotkeyShift), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Reserved,
           "Shift+Tab is the menu's previous page: refused");
-    check(hotkeyCheckBinding(key(VK_TAB, kHotkeyCtrl), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok,
-          "Ctrl+Tab is not: allowed");
-    check(hotkeyCheckBinding(key('R', kHotkeyAlt), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok,
-          "Alt+R is allowed");
+    // ...WHATEVER the modifiers: the menu reads these keys raw and never asks what else is held, so a
+    // chord on one is still that key to the menu, and the hotkey would fire with it.
+    {
+        int bad = 0;
+        const int mains[] = {VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_SPACE, VK_TAB, VK_PRIOR, VK_NEXT, VK_HOME,
+                             VK_END, VK_ESCAPE, 'R'};
+        for (int vk : mains) {
+            for (uint32_t mods = 0; mods < 8; ++mods) {
+                if (hotkeyCheckBinding(key(vk, mods), others, n, nullptr, 0, ClashScope::AnyContext).verdict != BindVerdict::Reserved) {
+                    ++bad;
+                    printf("    vk 0x%02X with mods %u is not refused\n", vk, mods);
+                }
+            }
+        }
+        check(bad == 0, "every menu navigation or control key is refused with ANY of the eight modifier sets");
+    }
+    check(hotkeyCheckBinding(key(VK_RETURN, kHotkeyCtrl), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Reserved,
+          "CTRL+ENTER (it is also the menu's Enter) is refused");
+    check(hotkeyCheckBinding(key(VK_ESCAPE, kHotkeyCtrl | kHotkeyAlt), others, n, nullptr, 0, ClashScope::AnyContext).verdict ==
+              BindVerdict::Reserved,
+          "CTRL+ALT+ESCAPE (it would open the panel and close it in the same tick) is refused");
+    check(hotkeyCheckBinding(key(VK_UP, kHotkeyCtrl), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Reserved,
+          "CTRL+UP (it also moves the selection) is refused");
+    check(hotkeyCheckBinding(key(VK_F9, kHotkeyCtrl | kHotkeyShift), others, n, nullptr, 0, ClashScope::AnyContext).verdict ==
+              BindVerdict::Ok,
+          "CTRL+SHIFT+F9 still binds");
+    check(hotkeyCheckBinding(key(VK_BACK, kHotkeyCtrl), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok &&
+              hotkeyCheckBinding(key(VK_F12, kHotkeyAlt), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok,
+          "...and so do the chords on keys the menu does not read");
     check(hotkeyCheckBinding(pad(kPadA), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok &&
               hotkeyCheckBinding(joy(kGladiator, 0), others, n, nullptr, 0, ClashScope::AnyContext).verdict == BindVerdict::Ok,
           "a pad or HOTAS button is never the menu's key (the menu is navigated by the keyboard)");
@@ -1060,7 +1092,9 @@ void testDecide() {
                            use("Hyperspace", key(VK_F7))};
     // The glue lists every hotkey row but the one being captured; so does this.
     auto ctxFor = [&](const char* row, const char* current, ClashScope scope) {
-        static HotkeyOther mine[5];
+        static HotkeyOther pool[16][5];   // one list per call: a context outlives the next call
+        static int nextPool = 0;
+        HotkeyOther* mine = pool[nextPool++ % 16];
         int n = 0;
         char self[64];
         snprintf(self, sizeof(self), "hotkey.%s", row);
@@ -1147,6 +1181,17 @@ void testDecide() {
         check(hotkeyDecide(forced, c).outcome == CaptureOutcome::ClearRefusedMenu, "...whatever the step says");
         d = hotkeyDecide(stepFor(pressing(VK_F12, kHotkeyCtrl)), c);
         check(d.outcome == CaptureOutcome::Bind && d.binding.mods == kHotkeyCtrl, "the menu key can be changed (to Ctrl+F12)");
+        d = hotkeyDecide(stepFor(pressing(VK_F9, kHotkeyCtrl | kHotkeyShift)), c);
+        check(d.outcome == CaptureOutcome::Bind && format(d.binding) == "CTRL+SHIFT+F9", "...and to Ctrl+Shift+F9");
+        d = hotkeyDecide(stepFor(pressing(VK_ESCAPE, kHotkeyCtrl | kHotkeyAlt)), c);
+        check(d.outcome == CaptureOutcome::Reserved, "the menu key cannot become CTRL+ALT+ESCAPE: refused as a menu key");
+        d = hotkeyDecide(stepFor(pressing(VK_RETURN, kHotkeyCtrl)), c);
+        check(d.outcome == CaptureOutcome::Reserved, "...nor CTRL+ENTER");
+        const HotkeyRowContext toggleCtx = ctxFor("toggle_exposure", "SCROLLLOCK", ClashScope::AnyContext);
+        d = hotkeyDecide(stepFor(pressing(VK_RETURN, kHotkeyCtrl)), toggleCtx);
+        check(d.outcome == CaptureOutcome::Reserved, "a diagnostic hotkey cannot become CTRL+ENTER either");
+        d = hotkeyDecide(stepFor(pressing(VK_F9, kHotkeyCtrl | kHotkeyShift)), toggleCtx);
+        check(d.outcome == CaptureOutcome::Bind, "...but CTRL+SHIFT+F9 binds");
         d = hotkeyDecide(stepFor(pressing(VK_F8)), c);
         check(d.outcome == CaptureOutcome::Unchanged, "F8 on the menu key is what it already is");
         d = hotkeyDecide(stepFor(pressing(VK_SCROLL)), c);
@@ -1180,6 +1225,286 @@ void testDecide() {
     g_session = false;
 }
 
+// ---------------------------------------------------------------------------
+// 6c. The capture-ending press must not reach a hotkey polled LATER in the same frame
+//
+// The review of 2026-10-08, finding 1. device_hook runs the menu BEFORE vScreenFrameBoundary,
+// which polls Explorer Cam's F5 latch; that latch had not seen the press that ended a capture,
+// and suspension was already lifted, so capturing F5 on another row (refused as a duplicate)
+// entered Explorer Cam. These cells run the REAL Hotkey, the real state machine and the real
+// decision in the frame's real order -- earlier poll, menu tick (step, decide, end the capture),
+// later poll -- against a keyboard, a pad and a HOTAS the cell controls.
+
+struct World {
+    bool     keys[256] = {};
+    uint16_t padButtons = 0;
+    uint8_t  padTriggers = 0;
+    uint32_t joyDevice = 0;
+    int      joyInput = -1;
+} g_world;
+
+bool worldKey(int vk) { return vk > 0 && vk < 256 && g_world.keys[vk]; }
+bool worldHeld(const HotkeyBinding& b) {
+    if (b.kind == HotkeyKind::Pad) {
+        if (b.padButtons) return (g_world.padButtons & b.padButtons) == b.padButtons;
+        return (g_world.padTriggers & (b.padTrigger == 1 ? 1 : 2)) != 0;
+    }
+    if (b.kind == HotkeyKind::Joy) return g_world.joyInput == b.joyInput && g_world.joyDevice == b.joyDevice;
+    return false;
+}
+
+void setHeld(const HotkeyBinding& b, bool down) {
+    switch (b.kind) {
+        case HotkeyKind::Key:
+            g_world.keys[b.vk] = down;
+            if (b.mods & kHotkeyCtrl) g_world.keys[VK_CONTROL] = down;
+            if (b.mods & kHotkeyAlt) g_world.keys[VK_MENU] = down;
+            if (b.mods & kHotkeyShift) g_world.keys[VK_SHIFT] = down;
+            break;
+        case HotkeyKind::Pad:
+            if (b.padButtons) {
+                if (down) g_world.padButtons = static_cast<uint16_t>(g_world.padButtons | b.padButtons);
+                else g_world.padButtons = static_cast<uint16_t>(g_world.padButtons & ~b.padButtons);
+            } else {
+                const uint8_t bit = b.padTrigger == 1 ? 1 : 2;
+                g_world.padTriggers = static_cast<uint8_t>(down ? (g_world.padTriggers | bit) : (g_world.padTriggers & ~bit));
+            }
+            break;
+        case HotkeyKind::Joy:
+            g_world.joyDevice = down ? b.joyDevice : 0;
+            g_world.joyInput = down ? b.joyInput : -1;
+            break;
+        default:
+            break;
+    }
+}
+
+CaptureSnapshot snapshotOfWorld() {
+    CaptureSnapshot s;
+    for (int vk = 1; vk < 256; ++vk) {
+        if (hotkeyCaptureKeyEligible(vk) && g_world.keys[vk]) s.keyDown[vk] = 1;
+    }
+    if (g_world.keys[VK_CONTROL]) s.mods |= kHotkeyCtrl;
+    if (g_world.keys[VK_MENU]) s.mods |= kHotkeyAlt;
+    if (g_world.keys[VK_SHIFT]) s.mods |= kHotkeyShift;
+    s.padButtons = g_world.padButtons;
+    s.padTriggers = g_world.padTriggers;
+    if (g_world.joyInput >= 0) {
+        s.joy.count = 1;
+        s.joy.dev[0].id = g_world.joyDevice;
+        if (g_world.joyInput < kJoyPovBase) s.joy.dev[0].bits[g_world.joyInput >> 6] |= 1ull << (g_world.joyInput & 63);
+        else s.joy.dev[0].bits[2] |= 1ull << (g_world.joyInput - kJoyPovBase);
+    }
+    return s;
+}
+
+struct LeakCell {
+    const char*   name;
+    const char*   explorer;      // hotkey.explorer_cam, as the ini holds it
+    const char*   rowKey;        // the row being captured
+    const char*   rowCurrent;    // ...and what it holds
+    HotkeyBinding pressed;       // the input that ends the capture
+    CaptureOutcome expect;
+};
+
+void runLeakCell(const LeakCell& c) {
+    g_world = World();
+    hotkeySetKeyboardReaderForTest(&worldKey);
+    hotkeySetNonKeyboardReader(&worldHeld);
+    HotkeyBinding e;
+    hotkeyParseBinding(c.explorer, &e, true);
+
+    Hotkey early;      // a diagnostic key, polled BEFORE the menu in the frame
+    Hotkey explorer;   // Explorer Cam's F5, polled AFTER it (vScreenFrameBoundary)
+    early.setGameMirrored(true);
+    explorer.setGameMirrored(true);
+    early.setBinding(c.explorer);
+    explorer.setBinding(c.explorer);
+
+    // Frame 0: the capture begins (Enter on the row).
+    early.pressed();
+    explorer.pressed();
+    HotkeyCapture capture;
+    capture.begin(snapshotOfWorld());
+    hotkeysSuspend(true);
+
+    // Frame 1: the press lands.
+    setHeld(c.pressed, true);
+    check(!early.pressed(), "(earlier poll, capture waiting: nothing fires)");
+    const CaptureStep step = capture.step(snapshotOfWorld(), strcmp(c.rowKey, "menu") != 0);
+    HotkeyOther others[2];
+    int nOthers = 0;
+    const bool isExplorerRow = strcmp(c.rowKey, "explorer_cam") == 0;
+    if (!isExplorerRow) others[nOthers++] = HotkeyOther{"hotkey.explorer_cam", e};
+    HotkeyRowContext ctx;
+    ctx.rowKey = c.rowKey;
+    ctx.currentText = c.rowCurrent;
+    ctx.others = others;
+    ctx.nOthers = nOthers;
+    ctx.scope = isExplorerRow ? ClashScope::OnFoot : ClashScope::AnyContext;
+    const CaptureDecision dec = hotkeyDecide(step, ctx);
+    capture.end();
+    hotkeysSuspend(false);   // endCapture(): the capture is over, EDVR's hotkeys work again
+    char what[240];
+    snprintf(what, sizeof(what), "%s: the capture ends as expected", c.name);
+    check(dec.outcome == c.expect, what);
+    const bool leaked = explorer.pressed();   // the later poll in the same frame
+    snprintf(what, sizeof(what), "%s: the capture-ending press does not fire Explorer Cam's latch in that frame", c.name);
+    check(!leaked, what);
+    snprintf(what, sizeof(what), "%s: ...nor the earlier one's, a frame later", c.name);
+    check(!early.pressed(), what);
+    // Frame 2 and on, the press still held, then released.
+    snprintf(what, sizeof(what), "%s: ...nor while it stays held", c.name);
+    check(!explorer.pressed() && !explorer.pressed() && !early.pressed(), what);
+    setHeld(c.pressed, false);
+    check(!explorer.pressed() && !early.pressed(), "(released: nothing)");
+    // The next fresh press of Explorer Cam's own input still works, once.
+    setHeld(e, true);
+    snprintf(what, sizeof(what), "%s: a fresh press afterwards still fires", c.name);
+    check(explorer.pressed() && early.pressed(), what);
+    check(!explorer.pressed() && !early.pressed(), "...once");
+    setHeld(e, false);
+    explorer.pressed();
+    early.pressed();
+    hotkeySetKeyboardReaderForTest(nullptr);
+    hotkeySetNonKeyboardReader(&fakeReader);
+}
+
+void testCaptureLeak() {
+    printf("capture-ending press\n");
+    const char* explorers[3] = {"F5", "GamePad_Back", "231D0200:Joy_12"};
+    const char* kinds[3] = {"keyboard", "pad", "HOTAS"};
+    for (int k = 0; k < 3; ++k) {
+        HotkeyBinding e;
+        hotkeyParseBinding(explorers[k], &e, true);
+        char name[96];
+        // The press is the Explorer binding itself, captured on ANOTHER row: refused as a duplicate,
+        // and it must not also be Explorer Cam's key press.
+        snprintf(name, sizeof(name), "Duplicate (%s)", kinds[k]);
+        runLeakCell({name, explorers[k], "toggle_exposure", "SCROLLLOCK", e, CaptureOutcome::Duplicate});
+        // ...captured on the Explorer row itself: unchanged.
+        snprintf(name, sizeof(name), "Unchanged (%s)", kinds[k]);
+        runLeakCell({name, explorers[k], "explorer_cam", explorers[k], e, CaptureOutcome::Unchanged});
+        // Esc cancels. (The cell for a keyboard Explorer key that IS Esc is below.)
+        snprintf(name, sizeof(name), "Cancelled (%s)", kinds[k]);
+        runLeakCell({name, explorers[k], "toggle_exposure", "SCROLLLOCK", key(VK_ESCAPE), CaptureOutcome::Cancelled});
+    }
+    // A successful Bind that is a different press of the same key: Explorer = F5 is a subset of CTRL+F5.
+    runLeakCell({"Bind (keyboard, CTRL+F5 over an F5 Explorer key)", "F5", "toggle_exposure", "SCROLLLOCK", key(VK_F5, kHotkeyCtrl),
+                 CaptureOutcome::Bind});
+    runLeakCell({"Bind (pad, Start over a Back Explorer key)", "GamePad_Back", "toggle_exposure", "SCROLLLOCK", pad(kPadStart),
+                 CaptureOutcome::Bind});
+    runLeakCell({"Bind (HOTAS, Joy_3 over a Joy_12 Explorer key)", "231D0200:Joy_12", "toggle_exposure", "SCROLLLOCK",
+                 joy(kGladiator, 2), CaptureOutcome::Bind});
+    runLeakCell({"Bind (HOTAS, a hat over a Joy_12 Explorer key)", "231D0200:Joy_12", "dump_camera", "PAUSE",
+                 joy(kGladiator, kJoyPovBase), CaptureOutcome::Bind});
+    // The same press ending a capture on the MENU row.
+    runLeakCell({"Unchanged (keyboard, menu row)", "F5", "menu", "F8", key(VK_F8), CaptureOutcome::Unchanged});
+    // An Explorer key that is itself the cancelling key (an ini edit): the Esc that cancels is not a press of it.
+    runLeakCell({"Cancelled (keyboard Explorer key IS Esc)", "ESCAPE", "toggle_exposure", "SCROLLLOCK", key(VK_ESCAPE),
+                 CaptureOutcome::Cancelled});
+
+    // The registry behind it: every Hotkey is in it, wherever it lives, and copies and
+    // assignments do not double or lose an entry.
+    {
+        const int before = hotkeysLiveCount();
+        {
+            Hotkey a, b(VK_F19);
+            Hotkey c = a;
+            a = b;
+            b = Hotkey();
+            check(hotkeysLiveCount() == before + 3, "three live Hotkeys are three registry entries (construct, int, copy)");
+        }
+        check(hotkeysLiveCount() == before, "...and none is left behind");
+        static Hotkey staticLike;   // a file-scope Hotkey, like Explorer Cam's
+        check(hotkeysLiveCount() == before + 1, "...a Hotkey with static storage registers itself too");
+    }
+    // Priming reaches a pad and a HOTAS latch, and a key latch, whichever binding they hold, and
+    // lifting a suspension is what primes: a latch lifted past with the key held does not fire.
+    {
+        g_world = World();
+        hotkeySetKeyboardReaderForTest(&worldKey);
+        hotkeySetNonKeyboardReader(&worldHeld);
+        Hotkey k, p, j;
+        k.setGameMirrored(true);
+        p.setGameMirrored(true);
+        j.setGameMirrored(true);
+        k.setBinding("F6");
+        p.setBinding("GamePad_Start");
+        j.setBinding("231D0200:Joy_POV1Left");
+        hotkeysSuspend(true);
+        setHeld(key(VK_F6), true);
+        setHeld(pad(kPadStart), true);
+        setHeld(joy(kGladiator, kJoyPovBase + 3), true);
+        check(!k.pressed() && !p.pressed() && !j.pressed(), "(suspended: nothing fires)");
+        setHeld(key(VK_F6), false);
+        setHeld(pad(kPadStart), false);
+        setHeld(joy(kGladiator, kJoyPovBase + 3), false);
+        // Everything released and re-pressed WHILE suspended and held at the lift:
+        setHeld(key(VK_F6), true);
+        setHeld(pad(kPadStart), true);
+        setHeld(joy(kGladiator, kJoyPovBase + 3), true);
+        hotkeysSuspend(false);
+        check(!k.pressed() && !p.pressed() && !j.pressed(), "held at the lift: no latch, key, pad or HOTAS, makes an edge of it");
+        setHeld(key(VK_F6), false);
+        setHeld(pad(kPadStart), false);
+        setHeld(joy(kGladiator, kJoyPovBase + 3), false);
+        k.pressed();
+        p.pressed();
+        j.pressed();
+        setHeld(key(VK_F6), true);
+        setHeld(pad(kPadStart), true);
+        setHeld(joy(kGladiator, kJoyPovBase + 3), true);
+        check(k.pressed() && p.pressed() && j.pressed(), "...and the next fresh press of each fires");
+        g_world = World();
+        hotkeySetKeyboardReaderForTest(nullptr);
+        hotkeySetNonKeyboardReader(&fakeReader);
+    }
+}
+
+// The wiring the cells above assume, pinned in the source: the menu lifts the suspension when a
+// capture ends (which is what primes), and decides BEFORE it ends the capture and writes.
+void testCaptureWiringPins(const char* root) {
+    printf("capture wiring\n");
+    std::string text;
+    {
+        const std::string path = std::string(root) + "\\src\\d3d11\\menu.cpp";
+        FILE* f = fopen(path.c_str(), "rb");
+        if (f) {
+            char buf[65536];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+            fclose(f);
+        }
+    }
+    if (text.empty()) {
+        printf("    (no menu.cpp at \"%s\": the source pins are skipped)\n", root);
+        return;
+    }
+    auto bodyOf = [&](const char* signature) {
+        const size_t at = text.find(signature);
+        if (at == std::string::npos) return std::string();
+        const size_t open = text.find('{', at);
+        int depth = 0;
+        for (size_t i = open; i < text.size(); ++i) {
+            if (text[i] == '{') ++depth;
+            else if (text[i] == '}' && --depth == 0) return text.substr(open, i - open + 1);
+        }
+        return std::string();
+    };
+    const std::string end = bodyOf("void endCapture() {");
+    check(!end.empty() && end.find("hotkeysSuspend(false)") != std::string::npos,
+          "menu.cpp: endCapture lifts the suspension (hotkeysSuspend(false), which primes every latch)");
+    const std::string handle = bodyOf("void handleCapture(uint64_t now) {");
+    const size_t decide = handle.find("hotkeyDecide(");
+    const size_t ending = decide == std::string::npos ? std::string::npos : handle.find("endCapture();", decide);
+    const size_t applying = handle.find("applyDecision(");
+    check(decide != std::string::npos && ending != std::string::npos && applying != std::string::npos &&
+              decide < ending && ending < applying,
+          "menu.cpp: handleCapture decides, then ends the capture, then applies the decision");
+    const std::string start = bodyOf("void startCapture(int entryIndex, int defIndex) {");
+    check(start.find("hotkeysSuspend(true)") != std::string::npos, "menu.cpp: a capture that starts suspends the hotkeys");
+}
 // ---------------------------------------------------------------------------
 // 7. Elite's bindings, read for keyboard, pad and joystick
 
@@ -1422,6 +1747,8 @@ int main(int argc, char** argv) {
     testCapture();
     testChecks();
     testDecide();
+    testCaptureLeak();
+    testCaptureWiringPins(argc > 1 ? argv[1] : "");
     testEliteBinds(argc > 1 ? argv[1] : "");
     testRows();
     if (failures) {

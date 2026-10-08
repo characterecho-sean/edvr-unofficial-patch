@@ -96,8 +96,26 @@ void   hotkeyJoyDeviceText(uint32_t device, char out[9]);
 // dump, F5 entering Explorer Cam, the exposure key toggling -- on the way to being
 // bound. A press that began while suspended is not a press afterwards either (the
 // latch saw it go down). The menu clears it on every path that ends a capture.
+//
+// LIFTING IT PRIMES EVERY LIVE HOTKEY (the review of 2026-10-08, finding 1). The latches
+// are polled at different places in the frame -- the diagnostic keys before the menu,
+// Explorer Cam's F5 after it -- so a latch polled after the capture ended saw the
+// capture-ending press for the first time with suspension already lifted, and made an
+// edge of it: capturing F5 on another row (refused as a duplicate) entered Explorer
+// Cam. Priming sets every latch to what is held at that moment (a key, a pad button, a
+// HOTAS button alike), so the press that ended the capture is consumed wherever the
+// latch sits in the frame, and the next fresh press after a release still fires.
 void hotkeysSuspend(bool on);
 bool hotkeysSuspended();
+// Every live Hotkey takes the held state of its own binding as its latch. hotkeysSuspend(false)
+// calls it; it is public so a caller that rebinds many at once can too.
+void hotkeysPrimeAll();
+// How many Hotkey objects are alive (the rig counts them; the registry holds 128).
+int  hotkeysLiveCount();
+// The keyboard, read through GetAsyncKeyState unless a reader is set. Only a rig sets one: it lets
+// the real Hotkey run in the frame's real poll order against a keyboard it controls.
+typedef bool (*HotkeyKeyDownFn)(int vk);
+void hotkeySetKeyboardReaderForTest(HotkeyKeyDownFn fn);
 
 // The held-state reader for pad and joystick bindings. Installed once by the
 // d3d11 half; until then (and in a rig that does not install one) a pad or
@@ -108,9 +126,9 @@ void hotkeySetNonKeyboardReader(HotkeyHeldFn fn);
 
 class Hotkey {
 public:
-    Hotkey() = default;
+    Hotkey();
     // vk is a Windows virtual-key code; 0 disables.
-    explicit Hotkey(int vk) { setKey(vk); }
+    explicit Hotkey(int vk);
     // The registry of keyboard bindings (hotkeyRegisteredKeys, and the better-
     // match rule) counts LIVE hotkeys: a binding that changes, or a Hotkey that
     // goes away, gives its entry back. It used to be append-only, which was
@@ -180,6 +198,9 @@ public:
     bool bound() const { return m_bind.kind != HotkeyKind::None; }
     HotkeyKind kind() const { return m_bind.kind; }
     const HotkeyBinding& binding() const { return m_bind; }
+
+    // The latch takes whatever its binding holds right now (hotkeysPrimeAll, for every live one).
+    void primeToHeldNow() { m_down = readDownNow(); }
 
     // True exactly once per physical press, with the modifiers held.
     bool pressed();

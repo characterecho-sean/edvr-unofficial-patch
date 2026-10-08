@@ -174,19 +174,24 @@ menu.
 ## Explorer Cam
 
 On foot, Elite renders the world once, flat, and shows that image to both eyes.
-There is no depth because none is drawn. The free camera renders in proper
-stereo, and that is where Explorer Cam works: open the camera on foot and press
-TAB, and EDVR puts the view in your commander's head, facing their way, and
-presses the game's lock for you, so you walk with it. Clearing
-`hotkey.explorer_cam` turns it off. **It cannot make first person 3D** and does not try; the flat screen
-stays flat. Your commander's head is still visible from inside, and hiding it
-is the next step.
+There is no depth because none is drawn. The game's free camera renders in
+proper stereo, and that is where Explorer Cam works. Press F5 on foot: the view
+fades to black, EDVR opens the camera, puts it at your commander's eyes facing
+their way, locks it to them so you walk with it, hides their head and the
+camera's on-screen controls, and fades back in. The view follows your
+commander's head, so it crouches and drops into a weapon stance with you. F5
+again takes you back to first person. While you are in it, the camera's own
+keys do nothing, so it behaves as a mode of its own. The key is on the menu's
+Hotkeys page, and leaving it empty turns Explorer Cam off. **It cannot make
+first person 3D** and does not try; the flat screen stays flat.
 
 It gives you no capability you do not already have: inside the camera you
-cannot act, and Explorer Cam changes only where the camera is. It writes the
-free camera's pose, lock press and collision skip for that one camera and
-touches nothing shared. [docs/explorer-cam.md](docs/explorer-cam.md) covers
-setting it up and what it does under the hood, safeguards included.
+cannot act, and Explorer Cam changes only where the camera is and what you see
+from it. While it is on, it writes the free camera's pose, the camera's own
+key presses, and how your commander's avatar is drawn, on your machine only,
+and gives them back when you leave; it touches nothing shared.
+[docs/explorer-cam.md](docs/explorer-cam.md) covers setting it up and what it
+does under the hood, safeguards included.
 
 ## The terrain fix (cull guard)
 
