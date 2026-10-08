@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** 104, 4th build (2026-10-07): the weapon history's vertex set
-  exact at creation: BUILT, NOT FLOWN. 45b5a373 flew: the storm stayed.
+- **State:** 104, 4th build a909f494: FLOWN OK 2026-10-08, settlement walk.
+  no-prior about 0, against 11-15M px a window; writes outside-span, genuine 0-4.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -34,9 +34,9 @@
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause;
   identity-pooled sibling motion (mean or affine) as the cover for lost history.
-- **Next:** walk the settlement with the 104 fourth build: weapon no-prior
-  falls to the standing level; read `history vertex writes 5s` (extent-unknown,
-  in-gap, genuine) and its examples; 105 traces. Open: roof shimmer/TAA.
+- **Next:** split the still-long lines (SDK domain, sibling, no-candidate,
+  engine motion: 114 truncated in log 0455xx). 105 traces. Open: the
+  `unspecified` remainder (0.01-0.15%), roof shimmer/TAA.
   Retain 102's color-clear fix; no per-weapon table; preserve Epic settings,
   87's native FSR comparison, 83's open items and high-G motion; do not repeat
   qualified PS91/BFE or stale-resize hypotheses.
