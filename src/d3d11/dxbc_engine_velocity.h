@@ -30,6 +30,7 @@
 // with a reason and produce no bytecode.
 
 #include "dxbc_container.h"
+#include "dxbc_skin_clone.h"
 
 #include <algorithm>
 
@@ -53,6 +54,11 @@ struct EngineVelocityInputs {
     uint32_t identityComponent = ~0u;  // ...and its component
     uint32_t positionRegister = ~0u;   // VS SV_POSITION output; PS may use a different free input register
     bool slotFromVsPatch = false;      // the VS must be patched to export EDVRPOOLSLOT there
+    // F2 (dxbc_skin_clone.h): a vertex shader that passes the skin analysis can export the previous-frame
+    // difference E at skinRegister (the register after its last output); a pixel shader with skinExport
+    // writes it to target 7. Derived for every capable VS; skinExport is the caller's, per keyed pair.
+    uint32_t skinRegister = ~0u;
+    bool skinExport = false;
 };
 
 namespace dxbc_engine_velocity_detail {
@@ -278,6 +284,11 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
                                 in.positionRegister, 1u}; // dcl_input_ps_siv linear noperspective v.xyz, position
     const uint32_t slotDecl[] = {0x03000862u, 0x00101012u, in.identityRegister};    // dcl_input_ps constant v.x
     const uint32_t outDecl[] = {0x03000065u, rgba?0x001020f2u:0x00102032u, kEngineVelocityTarget};
+    // F2: E arrives interpolated (perspective-correct: it is linear in object space) in v<skinRegister>.xyzw and
+    // goes to target 7 untouched. dcl_input_ps linear v.xyzw / dcl_output o7.xyzw / mov o7.xyzw, v.xyzw.
+    const uint32_t skinInDecl[] = {0x03001062u, 0x001010F2u, in.skinRegister};
+    const uint32_t skinOutDecl[] = {0x03000065u, 0x001020F2u, kSkinTarget};
+    const uint32_t skinTail[] = {0x05000036u, 0x001020F2u, kSkinTarget, 0x00101E46u, in.skinRegister};
     const uint32_t primitiveDecl[] = {0x04000863u,0x00101012u,primitiveRegister,7u};
     const uint32_t tokenDecl[] = {0x04000059u,0x00208e46u,tokenSlot,1u};
     const uint32_t provenanceTail[] = {
@@ -339,6 +350,7 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
             if (guardOverlayDepth) out.insert(out.end(), std::begin(overlayResource), std::end(overlayResource));
             if (!positionDeclared) out.insert(out.end(), posDecl, posDecl + 4);
             if (in.slotFromVsPatch) out.insert(out.end(), slotDecl, slotDecl + 3);
+            if (in.skinExport) out.insert(out.end(), skinInDecl, skinInDecl + 3);
             if(provenance) {
                 out.insert(out.end(),tokenDecl,tokenDecl+4);
                 if(!primitiveDeclared)out.insert(out.end(),primitiveDecl,primitiveDecl+4);
@@ -346,12 +358,14 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
         }
         if (tempAt && at == tempAt) {
             out.insert(out.end(), outDecl, outDecl + 3);
+            if (in.skinExport) out.insert(out.end(), skinOutDecl, skinOutDecl + 3);
             outputDeclared = true;
             out.push_back(t[at]);
             out.push_back(tempCount + (guardOverlayDepth ? 2u : 1u));
         } else {
             if (!tempAt && at == firstExecutable) {
                 out.insert(out.end(), outDecl, outDecl + 3);
+                if (in.skinExport) out.insert(out.end(), skinOutDecl, skinOutDecl + 3);
                 out.push_back(0x02000068u);
                 out.push_back(guardOverlayDepth ? 2u : 1u);
                 outputDeclared = true;
@@ -363,6 +377,7 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
                 else out.insert(out.end(), std::begin(tail), std::end(tail));
                 if(provenance)out.insert(out.end(),provenanceTail,provenanceTail+11);
                 else if(rgba)out.insert(out.end(),clearProvenanceTail,clearProvenanceTail+5);
+                if (in.skinExport) out.insert(out.end(), skinTail, skinTail + 5);
             }
             out.insert(out.end(), t.begin() + at, t.begin() + at + length);
         }
@@ -425,6 +440,11 @@ inline bool engineVelocityDeriveInputs(const void* data, size_t bytes, EngineVel
             output.identityRegister = maxOutput + 1;
             output.identityComponent = 0;
             output.slotFromVsPatch = true;
+        }
+        // F2: a shader with the game's skinning chain can also export the previous-frame difference.
+        if (!output.slotFromVsPatch && maxOutput + 1 < 32) {
+            std::string skinWhy;
+            if (engineVelocitySkinCapable(data, bytes, skinWhy)) output.skinRegister = maxOutput + 1;
         }
         return true;
     } catch (const std::exception& e) {
@@ -490,6 +510,12 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
         reason = "invalid shader inputs";
         return false;
     }
+    if (inputs.skinExport && (inputs.skinRegister >= 32 || inputs.skinRegister == inputs.identityRegister ||
+                              inputs.skinRegister == inputs.positionRegister || guardOverlayDepth ||
+                              flatMarker != dxbc_engine_velocity_detail::FlatMarkerKind::None)) {
+        reason = "invalid skin export inputs";
+        return false;
+    }
     try {
         auto chunks = parseContainer(data, bytes, kPs50);
         const bool provenance=flatMarker==FlatMarkerKind::ForeignPoolProvenance;
@@ -521,7 +547,8 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
         else if (usedInput[psInputs.positionRegister]) {
             uint32_t freeRegister = 0;
             while (freeRegister < 32 &&
-                   (usedInput[freeRegister] || freeRegister == psInputs.identityRegister)) ++freeRegister;
+                   (usedInput[freeRegister] || freeRegister == psInputs.identityRegister ||
+                    (psInputs.skinExport && freeRegister == psInputs.skinRegister))) ++freeRegister;
             if (freeRegister == 32) throw std::runtime_error("no free position input register");
             psInputs.positionRegister = freeRegister;
         }
@@ -576,6 +603,16 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                 } else if (!identity && flatMarker != FlatMarkerKind::World) {
                     throw std::runtime_error("identity input absent");
                 }
+                if (psInputs.skinExport) {
+                    for (const auto& e : elements)
+                        if (e.registerIndex == psInputs.skinRegister) throw std::runtime_error("skin input register occupied");
+                    SignatureElement skin;
+                    skin.name = kSkinSemantic;
+                    skin.componentType = 3;                  // float
+                    skin.registerIndex = psInputs.skinRegister;
+                    skin.masks = 0x0F0Fu;                    // xyzw, all read
+                    elements.push_back(std::move(skin));
+                }
                 if (!position) {
                     SignatureElement p;
                     p.name = "SV_Position";
@@ -625,6 +662,16 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                 velocity.registerIndex = kEngineVelocityTarget;
                 velocity.masks = rgba?0x000fu:0x0C03u;
                 elements.push_back(std::move(velocity));
+                if (psInputs.skinExport) {
+                    SignatureElement skin;
+                    skin.name = "SV_TARGET";
+                    skin.semanticIndex = kSkinTarget;
+                    skin.systemValue = targetSystemValue;
+                    skin.componentType = 3;
+                    skin.registerIndex = kSkinTarget;
+                    skin.masks = 0x000fu;
+                    elements.push_back(std::move(skin));
+                }
                 chunk.bytes = makeSignature(elements);
             } else if (isProgram(chunk.tag)) {
                 if (program) throw std::runtime_error("duplicate program");
