@@ -3721,3 +3721,35 @@ worktree's `analysis\npc_blur\`):
   Admission is approved for those families only, if the dumps show the limb
   residual after root motion is about 1 px or less. F2, per-vertex skinned
   motion generalised from weapon motion, follows only if the limbs need it.
+
+### 2026-10-08 follow-up: the walking NPC passes F1's rule; the flat screen refuses 0x10
+
+Build v0.18.3-50-g8f2946f7, log `edvr_gfx_20261008_120441.log`, dumps
+120917 (walking NPC, Explorer Cam), 120929 (own body, looking down), 121052
+(flat screen at a route release); 120851 captured the F5 entry instead (the
+fade's black frame, then the photo preset). Scripts in the worktree's
+`analysis\npc_blur\` (b5.py estimator).
+
+- **Walking NPC, MEASURED.** All 8,359 px take path 2 with 0 joined. The MV
+  is the camera field (spread 0.017 px). Root motion is 1.53 px/frame
+  (1.25 m/s at 8.6 m). The limb residual after the root is a median of
+  0.71 px/frame (p90 1.5; legs 1.15; static noise floor 0.26). By Sean's rule
+  (about 1 px or less) F1 suffices. It cuts the error by about 60%; the leg
+  swing stays above 1 px.
+- **NPC shading draws, INFERRED.** The main-eye draws carrying stencil 0x10
+  are vs DE545DC8EE4FBB87 with ps 3AF0C44DA1B245D9 (x16), 91F8937EDA723663
+  (x13) and 03B17F89B31C4788 (x3). Only E46E/03B1 are patched; 91F8 was
+  refused by the patcher ("position input register holds another
+  semantic"). Decider: advanced.pixel_probe on NPC pixels.
+- **Flat screen, INFERRED (strong).** flat_mono_shader_source.h:187 treats
+  every stencil-0x10 pixel as first-person attached (the weapon map's motion
+  or refused). Characters carry 0x10 and are not in the weapon map, so NPC
+  pixels are refused and show raw jittered input. That is the pixelation.
+- **ruled out:** "Sean's own body rides the near-field head path". Its
+  268,856 px take path 2, mis-registered by a median of 2.08 px/frame
+  against the ground's 0.28. It only looks clean (dark, smooth, near).
+- **Weapon refusals in the VR route** (41k-189k px per sampled frame)
+  predate the Explorer Cam branch (pre-branch b4d9d6ab shows up to 148,675).
+  The cause is open. Three world-route releases ("engine-views-unavailable")
+  this flight against 0-1 before: test with advanced.explorer_cam_probe off,
+  which also switches the camera census off.
