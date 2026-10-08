@@ -68,50 +68,11 @@ inline bool isLocalEyeSite(uintptr_t returnAddress, const NeckTargets& t) { retu
 // An interface pointer is live only while its first qword is the one vtable.
 inline bool neckInterfaceOk(uintptr_t vptr, const NeckTargets& t) { return vptr != 0 && vptr == t.vtable; }
 
-// ---- the commander's frame from the free camera's two poses ----------------------------------------------------------------
-// The free-camera activity holds its pose twice: commander-local at +0x3B0 and world at +0x70, and under the relative lock
-// world = local x F + root, rows being axes (row vectors times matrices). With L the local axes (3x3, rows 0-2) and W the world
-// axes: W = L x F, so F = L^T x W for an orthonormal L; F's rows are the commander's right, up and forward in world space. The
-// root is what is left of the world origin once the local origin has been carried through F:  root = W.origin - L.origin x F.
-// A point in world space is in commander-local axes at  local[i] = dot(point - root, F.row(i)).
-struct CommanderFrame {
-    float f[9] = {};        // F, row-major 3x3
-    float root[3] = {};
-    bool valid = false;     // both 3x3s finite and their rows near unit length
-};
-inline bool rowsNearUnit(const float m16[16]) {
-    for (int r = 0; r < 3; ++r) {
-        const float x = m16[r * 4], y = m16[r * 4 + 1], z = m16[r * 4 + 2];
-        const float len2 = x * x + y * y + z * z;
-        if (!(len2 > 0.25f && len2 < 4.0f)) return false;   // also false for NaN
-    }
-    return true;
-}
-inline CommanderFrame commanderFrame(const float local[16], const float world[16]) {
-    CommanderFrame c;
-    if (!rowsNearUnit(local) || !rowsNearUnit(world)) return c;
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) {
-            float sum = 0;
-            for (int k = 0; k < 3; ++k) sum += local[k * 4 + i] * world[k * 4 + j];   // (L^T x W)[i][j]
-            c.f[i * 3 + j] = sum;
-        }
-    for (int j = 0; j < 3; ++j) {
-        float carried = 0;
-        for (int i = 0; i < 3; ++i) carried += local[12 + i] * c.f[i * 3 + j];       // (L.origin x F)[j]
-        c.root[j] = world[12 + j] - carried;
-    }
-    c.valid = true;
-    return c;
-}
-// A world point in the commander's axes: x right, y up, z forward (the +0x3B0 pose's convention).
-inline void worldToCommanderLocal(const CommanderFrame& c, const float point[3], float out[3]) {
-    for (int i = 0; i < 3; ++i) {
-        float sum = 0;
-        for (int j = 0; j < 3; ++j) sum += (point[j] - c.root[j]) * c.f[i * 3 + j];
-        out[i] = sum;
-    }
-}
+// ---- the commander's frame from the free camera's two poses: explorer_cam_core.h (ecm), shared with head hiding's witness ------------------
+using ecm::CommanderFrame;
+using ecm::rowsNearUnit;
+using ecm::commanderFrame;
+using ecm::worldToCommanderLocal;
 
 // ---- what the free-camera hook's post-call publishes for the neck ------------------------------------------------------------
 struct NeckSample {
@@ -512,12 +473,12 @@ inline const char* prefixH2Joints() { return "explorer cam probe H2 joints:"; }
 inline const char* prefixH2Note() { return "explorer cam probe H2:"; }
 inline const char* prefixHHeartbeat() { return "explorer cam probe H heartbeat:"; }
 inline const char* headKindName(uint8_t k) { return k == 1 ? "RR (RuntimeRigComponent)" : k == 2 ? "AO (AnimatedObject)" : "unknown"; }
-inline const char* headSiteName(int i) { return i == 0 ? "site1(ret +0x19B12D5, avatar-set index 1)" : "site2(ret +0x19B1359, avatar-set index 0)"; }
+inline const char* headSiteName(int i) { return i == 0 ? "local-third-person(site 1, ret +0x19B12D5)" : "local-first-person(site 2, ret +0x19B1359)"; }
 inline const char* headStateText(uint8_t s) {
     switch (static_cast<HeadSlotState>(s)) {
         case HeadSlotState::Resolved: return "resolved";
         case HeadSlotState::Stale: return "stale: the captured interface no longer has a skeleton interface's vtable (the avatar was probably destroyed); waiting for the next capture";
-        default: return "waiting: FindJoint(\"def_c_povCamera_joint\") has not been seen from this site since launch";
+        default: return "waiting: the local avatar's skeleton pair has not been latched (a humanoid attaching BOTH avatars: site 1 then site 2 on one thread)";
     }
 }
 inline const char* headStageName(uint32_t s) {
@@ -667,7 +628,8 @@ struct HeadHeartbeatIn {
     uint64_t calls = 0, callsWindow = 0;     // game calls made: GetPoseData, FindJoint, +0x58, +0x48
     uint64_t faults = 0;
     const char* last = "none";
-    uint32_t captures[2] = {0, 0};           // FindJoint(povCamera) calls seen from site 1 / site 2
+    uint32_t captures[2] = {0, 0};           // FindJoint(povCamera) calls seen from site 1 / site 2: EVERY humanoid's, not only the local one
+    uint32_t latches = 0;                    // times a site-1 then site-2 pair on one thread was latched as the local avatar's
     uint64_t findSeen = 0;                   // every FindJoint call the hook has seen (proof it is alive)
     HeadTiming m58, m48, find, walk;         // microseconds, this window (allMax over the session); walk = H2's pose-array walk (no game call)
 };
@@ -677,10 +639,10 @@ inline void putHeadTiming(ecp::Line& o, const char* name, const HeadTiming& t) {
 }
 inline void formatHeadHeartbeat(char* out, size_t cap, const HeadHeartbeatIn& h) {
     ecp::Line o(out, cap);
-    o.put("%s window=%.1fs hook=%s steps=%llu(+%llu) game_calls=%llu(+%llu) faults=%llu last=%s findjoint_calls_seen=%llu captures_site1=%u captures_site2=%u",
+    o.put("%s window=%.1fs hook=%s steps=%llu(+%llu) game_calls=%llu(+%llu) faults=%llu last=%s findjoint_calls_seen=%llu attaches_site1=%u attaches_site2=%u latches=%u",
           prefixHHeartbeat(), h.windowSeconds, h.state, static_cast<unsigned long long>(h.steps), static_cast<unsigned long long>(h.stepsWindow),
           static_cast<unsigned long long>(h.calls), static_cast<unsigned long long>(h.callsWindow), static_cast<unsigned long long>(h.faults), h.last,
-          static_cast<unsigned long long>(h.findSeen), h.captures[0], h.captures[1]);
+          static_cast<unsigned long long>(h.findSeen), h.captures[0], h.captures[1], h.latches);
     putHeadTiming(o, "model58", h.m58);
     putHeadTiming(o, "world48", h.m48);
     putHeadTiming(o, "find", h.find);
@@ -688,6 +650,8 @@ inline void formatHeadHeartbeat(char* out, size_t cap, const HeadHeartbeatIn& h)
     if (std::strcmp(h.state, "armed") != 0) o.put(" idle=the instrument is %s: no step can run", h.state);
     else if (h.captures[0] == 0 && h.captures[1] == 0)
         o.put(" idle=no avatar attach seen since launch: load or disembark on foot after the game starts");
+    else if (h.latches == 0)
+        o.put(" idle=avatar attaches seen but no local pair (a site-1 then a site-2 attach on one thread) yet: no skeleton is latched");
     else if (h.steps == 0) o.put(" idle=no-step-yet (the free camera has not been updated since H armed)");
     else if (h.stepsWindow == 0) o.put(" idle=no-step-in-window (the free camera is not running)");
 }

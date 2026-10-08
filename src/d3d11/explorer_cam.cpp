@@ -78,10 +78,22 @@ alignas(8) std::atomic<uint64_t> g_forwarded[2];        // ...and calls passed t
 alignas(8) std::atomic<uintptr_t> g_gate[kHkCount];     // a callback relay's gate: open = the callback runs, closed = straight on
 std::atomic<uintptr_t> g_forward[kHkCount];             // a callback relay's trampoline
 std::atomic<ExplorerCamActivityObserver> g_observers[3][kExplorerCamMaxObservers];   // free camera, controller, avatar fade
-// The FindJoint hook's capture (any thread): the skeleton interface and index of the local player's two avatar attaches, set by the hook's post-call.
-alignas(8) std::atomic<uint64_t> g_skelIface[2];
-std::atomic<uint32_t> g_skelIndex[2], g_skelCaptures[2];
+// The FindJoint hook's capture. 0x19B1240 attaches EVERY humanoid's avatars (F6: site 1 alone is whichever humanoid ran last, usually an NPC). Only the
+// local player has a first-person avatar, so a pair is latched as THE local avatar when one thread makes a site-1 attach and then a site-2 attach at the same
+// stack location (one invocation does both, from one frame, with no other site-1 attach on that thread between). Everything that wants "the local
+// third-person skeleton" reads the latch and never a raw capture.
+alignas(8) std::atomic<uint64_t> g_skelIface[2];     // LATCHED: [0] the local third-person skeleton, [1] the local first-person one (0 = none yet / dropped)
+std::atomic<uint32_t> g_skelIndex[2];                // the povCamera index the original returned for each, at the latch
+std::atomic<uint32_t> g_skelCaptures[2];             // RAW attaches seen at site 1 / site 2 (every humanoid's), for the log
+std::atomic<uint32_t> g_skelLatches{0};              // times a pair was latched
 std::atomic<uint64_t> g_findSeen{0};
+struct Site1Seen {                                   // this thread's last site-1 attach, waiting for its site 2
+    uint64_t iface = 0;
+    uint32_t index = 0;
+    uintptr_t where = 0;                             // the stack slot of the return address, identical for the two calls of one invocation
+    bool valid = false;
+};
+thread_local Site1Seen t_site1;
 std::atomic<uintptr_t> g_findSite[2], g_findPov{0};   // the two return addresses and the literal's address; set before the gate can open
 std::atomic<uint32_t> g_findWant{0};                   // bit 0 the probe, bit 1 Explorer Cam (placement active)
 
@@ -161,6 +173,7 @@ struct FrameState {
     uint64_t bindsFp = 0, bindsPending = 0;
     bool ctlAnnounced = false;
     bool amcMatchSaid = false, amcNoMatchSaid = false, amcDownSaid = false;
+    uint64_t latchedThirdSeen = 0;
     uint64_t beatHideCalls = 0, beatZeroed = 0;
 };
 FrameState g_frame;
@@ -711,16 +724,30 @@ __declspec(noinline) uint64_t __fastcall controllerHooked(void* a, void* b, void
 // return address on entry is the caller's own.
 __declspec(noinline) uint64_t __fastcall findJointHooked(void* a, void* b, void* c, void* d) noexcept {
     const uintptr_t returnAddress = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const uintptr_t where = reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());   // the relay JUMPS here, so this is the caller's own stack slot
     const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkFind].load(std::memory_order_acquire));
     if (!forward) return 0;
     const uint64_t result = forward(a, b, c, d);
     g_findSeen.fetch_add(1, std::memory_order_relaxed);
     const int site = ecm::findCaptureSite(returnAddress, reinterpret_cast<uintptr_t>(b), g_findSite[0].load(std::memory_order_relaxed),
                                           g_findSite[1].load(std::memory_order_relaxed), g_findPov.load(std::memory_order_relaxed));
-    if (site >= 0) {
-        g_skelIndex[site].store(static_cast<uint32_t>(result & 0xFFFFu), std::memory_order_relaxed);
-        g_skelIface[site].store(reinterpret_cast<uint64_t>(a), std::memory_order_release);
-        g_skelCaptures[site].fetch_add(1, std::memory_order_relaxed);
+    if (site == 0) {
+        g_skelCaptures[0].fetch_add(1, std::memory_order_relaxed);
+        t_site1.iface = reinterpret_cast<uint64_t>(a);
+        t_site1.index = static_cast<uint32_t>(result & 0xFFFFu);
+        t_site1.where = where;
+        t_site1.valid = true;
+    } else if (site == 1) {
+        g_skelCaptures[1].fetch_add(1, std::memory_order_relaxed);
+        const Site1Seen third = t_site1;
+        t_site1.valid = false;
+        if (ecm::isLocalPair(third.valid, third.where, where, third.iface, reinterpret_cast<uint64_t>(a))) {
+            g_skelIndex[0].store(third.index, std::memory_order_relaxed);
+            g_skelIndex[1].store(static_cast<uint32_t>(result & 0xFFFFu), std::memory_order_relaxed);
+            g_skelIface[1].store(reinterpret_cast<uint64_t>(a), std::memory_order_release);
+            g_skelIface[0].store(third.iface, std::memory_order_release);
+            g_skelLatches.fetch_add(1, std::memory_order_relaxed);
+        }
     }
     return result;
 }
@@ -799,6 +826,64 @@ __declspec(noinline) bool sehReadCensus(const uint8_t* amc, ecm::AmcCensus* c) n
         return false;
     }
 }
+// The second witness (log only): the AMC's world origin the way the fade code reads it, against the commander root of the free camera's two poses.
+std::atomic<uint64_t> g_witnessNextMs{0};
+std::atomic<uint32_t> g_witnessIntervalMs{1000}, g_witnessUnrooted{0}, g_witnessFaults{0};
+std::atomic<bool> g_busyWitness{false};
+ecm::Ring<ecm::AmcWitness, 4> g_witnessRing;
+bool plausiblePointer(uint64_t p) noexcept { return p >= 0x10000u && p < 0x00007FFF00000000ull; }
+// rcx = *(AMC+0x208); rdx = *rcx; call [rdx+0x20] returns a matrix pointer whose origin is at +0x30 (FUN 0x3DD6040 at 0x3DD61A2..0x3DD61AF, same call).
+// 1 = read, 0 = not available (a pointer along the chain is null or implausible: nothing was called), -1 = a fault.
+__declspec(noinline) int sehAmcOrigin(const uint8_t* amc, float* out3) noexcept {
+    __try {
+        uint64_t obj = 0, vt = 0, fn = 0;
+        std::memcpy(&obj, amc + ecm::kOffAmcTransform, 8);
+        if (!plausiblePointer(obj)) return 0;
+        std::memcpy(&vt, reinterpret_cast<const void*>(obj), 8);
+        if (!plausiblePointer(vt)) return 0;
+        std::memcpy(&fn, reinterpret_cast<const void*>(vt + ecm::kTransformMatrixSlot), 8);
+        if (!plausiblePointer(fn)) return 0;
+        const uint64_t m = reinterpret_cast<uint64_t(__fastcall*)(uint64_t)>(fn)(obj);
+        if (!plausiblePointer(m)) return 0;
+        std::memcpy(out3, reinterpret_cast<const void*>(m + ecm::kMatrixOriginOff), 12);
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+__declspec(noinline) bool sehReadPoses(const uint8_t* activity, float* local, float* world) noexcept {
+    __try {
+        std::memcpy(local, activity + ecm::kOffLocalPose, 64);
+        std::memcpy(world, activity + 0x70, 64);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+void witnessStep(uint8_t* amc) noexcept {
+    if (g_witnessFaults.load(std::memory_order_relaxed) >= 3) return;   // three faults in the transform call: the witness stops (head hiding does not)
+    ecm::AmcWitness w;
+    w.amc = reinterpret_cast<uint64_t>(amc);
+    {
+        const int got = sehAmcOrigin(amc, w.origin);
+        if (got > 0) w.flags |= 1u;
+        else if (got < 0) g_witnessFaults.fetch_add(1, std::memory_order_relaxed);   // three real faults stop the witness; "not available" does not count
+    }
+    const uint64_t activity = g_trackedActivity.load(std::memory_order_relaxed);
+    float local[16], world[16];
+    if (activity != 0 && sehReadPoses(reinterpret_cast<const uint8_t*>(activity), local, world)) {
+        const ecm::CommanderFrame cf = ecm::commanderFrame(local, world);
+        if (cf.valid) {
+            w.flags |= 2u;
+            std::memcpy(w.root, cf.root, sizeof(w.root));
+        }
+        std::memcpy(w.camera, world + 12, sizeof(w.camera));
+        w.flags |= 4u;
+    }
+    // On foot, outside the free camera, there is no root to compare with: say so a couple of times, then only the rooted ones.
+    if ((w.flags & 2u) == 0 && g_witnessUnrooted.fetch_add(1, std::memory_order_relaxed) >= 2) return;
+    g_witnessRing.push(w);
+}
 void hideFault() noexcept {
     if (g_hideFaults.fetch_add(1, std::memory_order_relaxed) + 1 >= ecm::kMaxHideFaults) g_hideDown.store(true, std::memory_order_release);
 }
@@ -840,7 +925,16 @@ void headHideStep(void* amcPtr) noexcept {
         }
         g_busyAmc.store(false, std::memory_order_release);
     }
-    if (g_hideDown.load(std::memory_order_acquire) || g_placedActivity.load(std::memory_order_acquire) == 0) return;
+    if (g_hideDown.load(std::memory_order_acquire)) return;
+    {
+        const uint64_t now = GetTickCount64();
+        if (now >= g_witnessNextMs.load(std::memory_order_relaxed) && !g_busyWitness.exchange(true, std::memory_order_acquire)) {
+            g_witnessNextMs.store(now + g_witnessIntervalMs.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            witnessStep(amc);
+            g_busyWitness.store(false, std::memory_order_release);
+        }
+    }
+    if (g_placedActivity.load(std::memory_order_acquire) == 0) return;
     uint32_t zeroed = 0;
     if (!sehZeroHeadMasks(amc, &zeroed)) {
         hideFault();
@@ -1100,6 +1194,8 @@ struct FrameInput {
     bool f5Pressed = false;
     bool gameplay = true;
     bool onFootKnown = false, onFoot = false;
+    bool focusKnown = false;             // Status.json GuiFocus
+    uint32_t focus = 0;
     bool readBindings = true;
     const wchar_t* bindsDir = nullptr;   // null: the live Elite bindings directory
 };
@@ -1283,24 +1379,42 @@ void checkPartNames(const ecm::Sink& sink) {
 void reportAmc(FrameState& fs, const ecm::Sink& sink) {
     ecm::AmcCensus census;
     while (g_censusRing.take(&census)) ecm::formatAmcCensus(census, sink);
+    ecm::AmcWitness witness;
+    while (g_witnessRing.take(&witness)) {
+        char wline[ecm::kLineBytes];
+        ecm::formatWitness(wline, sizeof(wline), witness);
+        sink(wline);
+    }
+    // The latched local skeleton pair: one line whenever the third-person one changes (it should be stable for an on-foot session).
+    const uint64_t third = g_skelIface[0].load(std::memory_order_acquire);
+    if (third != fs.latchedThirdSeen) {
+        say(sink, "%s the local avatar's skeleton pair %s: third-person 0x%llX (was 0x%llX), first-person 0x%llX; latched from a humanoid that attached BOTH avatars on one "
+                  "thread (a site-1 attach then a site-2 attach at one stack location; NPCs have no first-person avatar); latches %u, raw attaches seen: site 1 %u, "
+                  "site 2 %u (every humanoid's)",
+            ecm::prefixHide(), third ? "changed" : "was dropped", static_cast<unsigned long long>(third), static_cast<unsigned long long>(fs.latchedThirdSeen),
+            static_cast<unsigned long long>(g_skelIface[1].load(std::memory_order_relaxed)), g_skelLatches.load(std::memory_order_relaxed),
+            g_skelCaptures[0].load(std::memory_order_relaxed), g_skelCaptures[1].load(std::memory_order_relaxed));
+        fs.latchedThirdSeen = third;
+    }
     const uint64_t matches = g_amcLocalMatches.load(std::memory_order_relaxed);
     const uint64_t skeleton = g_skelIface[0].load(std::memory_order_relaxed);
     if (matches > 0 && !fs.amcMatchSaid) {
         fs.amcMatchSaid = true;
         say(sink, "%s the local third-person avatar is AMC 0x%llX: its AvatarPose handle is resolved (+0x260 reads 0xFFFFFFFF), +0x268 = 0x%llX minus 0x30 = 0x%llX is "
-                  "the skeleton interface FindJoint(povCamera) was called on at site 1 (+0x19B12D5), and its creation mode is 3. The relation holds.",
+                  "the local avatar's third-person skeleton (latched from the attach that also attached a first-person avatar), and its creation mode is 3. The relation holds.",
             ecm::prefixHide(), static_cast<unsigned long long>(g_amcLocal.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(g_amcLocalPose.load(std::memory_order_relaxed)),
             static_cast<unsigned long long>(g_amcLocalPose.load(std::memory_order_relaxed) - ecm::kAvatarPoseToSkeleton));
     } else if (matches == 0 && !fs.amcNoMatchSaid && g_amcCalls.load(std::memory_order_relaxed) >= ecm::kAmcNoMatchCalls) {
         fs.amcNoMatchSaid = true;
         if (skeleton == 0)
-            say(sink, "%s no AMC can be tested yet: %llu avatar fade calls were seen but FindJoint(povCamera) has not been seen from site 1 (+0x19B12D5), so the "
-                      "local skeleton is unknown; nothing is hidden. (Explorer Cam must be on at launch, and the avatar attached after it.)",
+            say(sink, "%s no AMC can be tested yet: %llu avatar fade calls were seen but no local skeleton pair is latched (no humanoid attached BOTH a third-person and a "
+                      "first-person avatar on one thread since launch), so the local skeleton is unknown; nothing is hidden. (Explorer Cam must be on at launch, and the "
+                      "avatars attached after it.)",
                 ecm::prefixHide(), static_cast<unsigned long long>(g_amcCalls.load(std::memory_order_relaxed)));
         else
             say(sink, "%s NO AMC matched the local skeleton in %llu avatar fade calls (%llu with a resolved AvatarPose handle, %llu of those in mode 3; the last such "
-                      "AMC 0x%llX has +0x268 = 0x%llX, minus 0x30 = 0x%llX; the site-1 skeleton is 0x%llX): the relation +0x268 - 0x30 == skeleton does not hold "
+                      "AMC 0x%llX has +0x268 = 0x%llX, minus 0x30 = 0x%llX; the latched local skeleton is 0x%llX): the relation +0x268 - 0x30 == skeleton does not hold "
                       "here, so nothing is hidden",
                 ecm::prefixHide(), static_cast<unsigned long long>(g_amcCalls.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(g_amcIdOk.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_amcMode3.load(std::memory_order_relaxed)),
@@ -1431,9 +1545,11 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         fi.mode = static_cast<uint8_t>(g_ctlMode.load(std::memory_order_relaxed));
         fi.onFootKnown = in.onFootKnown;
         fi.onFoot = in.onFoot;
+        fi.focusKnown = in.focusKnown;
+        fi.focus = in.focus;
         const ecm::F5Action action = ecm::decideF5(fi);
         if (action != ecm::F5Action::None) {
-            ecm::formatF5(line, sizeof(line), action, fi.mode, in.onFootKnown, in.onFoot);
+            ecm::formatF5(line, sizeof(line), action, fi);
             sink(line);
             if (action == ecm::F5Action::Enter || action == ecm::F5Action::Exit) {
                 g_f5Request.store(static_cast<uint32_t>(action == ecm::F5Action::Enter ? ecm::F5Req::Enter : ecm::F5Req::Exit),
@@ -1552,6 +1668,7 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         h.lost = g_rings[0].lost() + g_rings[1].lost() + g_rings[2].lost();
         h.faults = g_faults.load(std::memory_order_relaxed);
         h.eye = eye;
+        h.latches = g_skelLatches.load(std::memory_order_relaxed);
         h.hide = g_hideDown.load(std::memory_order_relaxed) ? "stood down" : g_hideOn.load(std::memory_order_relaxed) ? "on" : "off";
         h.localAmc = g_amcLocal.load(std::memory_order_relaxed);
         h.amcCalls = g_amcCalls.load(std::memory_order_relaxed);
@@ -1627,6 +1744,11 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
     in.gameplay = !journalWatchActive() || journalGameplay();
     in.onFootKnown = journalOnFootKnown();
     in.onFoot = journalOnFoot();
+    {
+        uint32_t focus = 0;
+        in.focusKnown = journalGuiFocus(&focus);
+        in.focus = focus;
+    }
     in.readBindings = cfg.getBool("hotkey.read_game_bindings", true);
     boundaryAt(frameNo, GetTickCount64(), in, sink);
 }
@@ -1708,6 +1830,7 @@ ExplorerCamSkeleton explorerCamSkeleton(int site) {
     s.iface = g_skelIface[site].load(std::memory_order_acquire);
     s.index = g_skelIndex[site].load(std::memory_order_relaxed);
     s.captures = g_skelCaptures[site].load(std::memory_order_relaxed);
+    s.latches = g_skelLatches.load(std::memory_order_relaxed);
     return s;
 }
 void explorerCamSkeletonDrop(int site, uint64_t iface) {
@@ -1719,11 +1842,12 @@ uint64_t explorerCamFindJointSeen() { return g_findSeen.load(std::memory_order_r
 
 #ifdef EDVR_EXPLORER_CAM_TEST
 namespace explorercamtest {
-void setSkeleton(int site, uint64_t iface, uint32_t index) {
+void setSkeleton(int site, uint64_t iface, uint32_t index) {   // a latched pair member set by hand
     g_skelIndex[site].store(index);
     g_skelIface[site].store(iface);
-    g_skelCaptures[site].fetch_add(1);
+    g_skelLatches.fetch_add(1);
 }
+void setWitnessInterval(uint32_t ms) { g_witnessIntervalMs.store(ms); g_witnessNextMs.store(0); }
 bool headHideOn() { return g_hideOn.load(); }
 bool headHideDown() { return g_hideDown.load(); }
 int partNamesState() { return g_partNames.load(); }
@@ -1758,6 +1882,8 @@ void boundary(uint32_t frame, uint64_t nowMs, const ExplorerCamTestFrame& t, Exp
     in.gameplay = t.gameplay;
     in.onFootKnown = t.onFootKnown;
     in.onFoot = t.onFoot;
+    in.focusKnown = t.focusKnown;
+    in.focus = t.focus;
     in.readBindings = t.readBindings;
     // Hermetic: a rig with no fixture directory must not read the real player's Elite bindings.
     in.bindsDir = t.bindsDir ? t.bindsDir : L"C:\\edvr_explorer_cam_test_no_such_bindings_dir";
@@ -1821,6 +1947,17 @@ void reset() {
         g_skelIndex[i].store(0xFFFF);
         g_skelCaptures[i].store(0);
         g_findSite[i].store(0);
+    }
+    g_skelLatches.store(0);
+    t_site1 = Site1Seen();
+    g_witnessNextMs.store(0);
+    g_witnessIntervalMs.store(1000);
+    g_witnessUnrooted.store(0);
+    g_witnessFaults.store(0);
+    g_busyWitness.store(false);
+    {
+        ecm::AmcWitness drop;
+        while (g_witnessRing.take(&drop)) {}
     }
     g_findPov.store(0);
     g_findSeen.store(0);

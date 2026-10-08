@@ -46,6 +46,10 @@ bool journalWatchActive() { return false; }
 bool journalGameplay() { return true; }
 bool journalOnFootKnown() { return false; }
 bool journalOnFoot() { return false; }
+bool journalGuiFocus(uint32_t* focus) {
+    if (focus) *focus = 0;
+    return false;
+}
 bool vrCameraCensusWanted() { return true; }
 const char* flatCameraInjectObserveStatus() { return "installed"; }
 namespace explorercamprobetest {
@@ -1591,6 +1595,36 @@ void himgThunk(size_t entryRva, size_t callRva) {
     p[n++] = 0x41; p[n++] = 0xFF; p[n++] = 0xD0;                          // call r8
     p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xC4; p[n++] = 0x28; p[n++] = 0xC3;   // add rsp, 28h; ret
 }
+// FUN 0x19B1240 for ONE humanoid, in machine code at its real address: block 1 (the third-person avatar) calls `r8` (FindJoint) at +0x19B12D2, returning to
+// +0x19B12D5 (site 1); block 2 (the first-person avatar) calls it at +0x19B1356, returning to +0x19B1359 (site 2). One frame, no push between: both calls
+// have the same return-address slot. rcx = the third-person interface (0 skips block 1), rdx = the name, r8 = FindJoint, r9 = the first-person interface (0 skips
+// block 2: an NPC has none).
+void himgInvoke() {
+    himgCommit(0x19B1240, 0x200);
+    uint8_t* const base = g_himg + 0x19B1240;
+    size_t n = 0;
+    auto put = [&](std::initializer_list<uint8_t> b) { for (uint8_t x : b) base[n++] = x; };
+    std::memset(base, 0x90, 0x200);
+    put({0x48, 0x83, 0xEC, 0x48});                     // sub rsp, 48h   (the callee's 20h shadow space, then three saved registers above it)
+    put({0x4C, 0x89, 0x4C, 0x24, 0x30});               // mov [rsp+30h], r9
+    put({0x4C, 0x89, 0x44, 0x24, 0x28});               // mov [rsp+28h], r8
+    put({0x48, 0x89, 0x54, 0x24, 0x20});               // mov [rsp+20h], rdx
+    put({0x48, 0x85, 0xC9});                           // test rcx, rcx
+    put({0x74, static_cast<uint8_t>(0x95 - (n + 2))}); // je block2
+    n = 0x92;
+    put({0x41, 0xFF, 0xD0});                           // call r8        (returns to +0x19B12D5)
+    put({0x4C, 0x8B, 0x4C, 0x24, 0x30});               // block2: mov r9, [rsp+30h]
+    put({0x4D, 0x85, 0xC9});                           // test r9, r9
+    const size_t jeAt = n;
+    put({0x74, 0x00});                                 // je end (patched)
+    put({0x4C, 0x89, 0xC9});                           // mov rcx, r9
+    put({0x48, 0x8B, 0x54, 0x24, 0x20});               // mov rdx, [rsp+20h]
+    put({0x4C, 0x8B, 0x44, 0x24, 0x28});               // mov r8, [rsp+28h]
+    base[jeAt + 1] = static_cast<uint8_t>(0x119 - (jeAt + 2));
+    n = 0x116;
+    put({0x41, 0xFF, 0xD0});                           // call r8        (returns to +0x19B1359)
+    put({0x48, 0x83, 0xC4, 0x48, 0xC3});               // end: add rsp, 48h; ret
+}
 // The game's FindJoint: the build's real 16-byte prologue, then a call to the stub with rcx and rdx as they came in.
 void himgFindJoint() {
     himgCommit(kFindFnRva, 64);
@@ -1618,8 +1652,7 @@ void himgInit() {
     himgTramp(0xFDDD10, reinterpret_cast<const void*>(&hrModelAO));
     himgTramp(0x3000000, reinterpret_cast<const void*>(&hrBogus));
     himgFindJoint();
-    himgThunk(0x19B12CA, 0x19B12D2);
-    himgThunk(0x19B134E, 0x19B1356);
+    himgInvoke();
     himgThunk(0x1A00000, 0x1A00008);   // a caller that is neither attach site
     const uint64_t b = reinterpret_cast<uint64_t>(g_himg);
     for (uint32_t i = 0; i < f2::kHeadSlots; ++i) {
@@ -1637,6 +1670,7 @@ void himgInit() {
 }
 
 using FindCall = uint64_t (__fastcall*)(void* iface, const void* name, void* fn);
+using InvokeCall = uint64_t (__fastcall*)(void* third, const void* name, void* fn, void* first);
 using FindDirect = uint32_t (__fastcall*)(void* iface, const char* name);
 
 struct HeadWorld {
@@ -1650,9 +1684,13 @@ struct HeadWorld {
     const void* headName() const { return g_himg + f2::kHeadNameRva; }
     void* findFn() const { return g_himg + kFindFnRva; }
     // The game's attach: FindJoint(iface, "def_c_povCamera_joint") called from site 1 or site 2 (or from somewhere else).
+    // One invocation of 0x19B1240 for a humanoid with BOTH avatars (the local player): the third-person at site 1, then the first-person at site 2.
+    uint64_t invoke(void* third, void* first, const void* name) const { return reinterpret_cast<InvokeCall>(g_himg + 0x19B1240)(third, name, findFn(), first); }
+    // A LONE attach: site 0 = an invocation with only the third-person avatar (an NPC's), site 1 = only the first-person, site 2 = a call from somewhere else.
     uint64_t attach(int site, void* ifc, const void* name) const {
-        const size_t entry = site == 0 ? 0x19B12CA : site == 1 ? 0x19B134E : 0x1A00000;
-        return reinterpret_cast<FindCall>(g_himg + entry)(ifc, name, findFn());
+        if (site == 0) return invoke(ifc, nullptr, name);
+        if (site == 1) return invoke(nullptr, ifc, name);
+        return reinterpret_cast<FindCall>(g_himg + 0x1A00000)(ifc, name, findFn());
     }
     uint32_t direct(void* ifc, const void* name) const { return reinterpret_cast<FindDirect>(findFn())(ifc, static_cast<const char*>(name)); }
     void reset() {
@@ -1771,10 +1809,9 @@ void testHeadJoint() {
         t::boundary(frame++, clock, true, &Capture::add, &cap);
     };
     auto eval = [&]() { t::observe(w.activity); };
-    auto attachBoth = [&]() {
-        w.attach(0, w.iface[0], w.povName());
-        w.attach(1, w.iface[1], w.povName());
-    };
+    auto attachBoth = [&]() { w.invoke(w.iface[0], w.iface[1], w.povName()); };
+    // One invocation of 0x19B1240 for the local player: the third-person avatar at site 1, then the first-person avatar at site 2, from one frame.
+    auto attachPair = [&](void* third, void* first) { w.invoke(third, first, w.povName()); };
 
     // ---- armed -----------------------------------------------------------------------------------------------------------------------------------
     arm(0);
@@ -1793,9 +1830,9 @@ void testHeadJoint() {
               explorercamf2test::headFaults() == 0 && explorercamf2test::headState() == 1,
           "NO CAPTURE: one free-camera update, one evaluation, NOT ONE game call, no fault, H still armed");
     tick();
-    check(cap.count("explorer cam probe H slot:") == 2 && has(cap.nth("explorer cam probe H slot:", 0), "site1(ret +0x19B12D5, avatar-set index 1) state=waiting: FindJoint(\"def_c_povCamera_joint\") has not been seen") &&
-              has(cap.nth("explorer cam probe H slot:", 1), "site2(ret +0x19B1359, avatar-set index 0) state=waiting") && cap.count("explorer cam probe H joints:") == 0,
-          "...both sites say 'waiting: FindJoint(povCamera) has not been seen from this site since launch', no joints line");
+    check(cap.count("explorer cam probe H slot:") == 2 && has(cap.nth("explorer cam probe H slot:", 0), "local-third-person(site 1, ret +0x19B12D5) state=waiting: the local avatar's skeleton pair has not been latched") &&
+              has(cap.nth("explorer cam probe H slot:", 1), "local-first-person(site 2, ret +0x19B1359) state=waiting") && cap.count("explorer cam probe H joints:") == 0,
+          "...both say 'waiting: the local avatar's skeleton pair has not been latched', no joints line");
     const std::string hum = cap.nth("explorer cam probe H hum:", 0);
     check(cap.count("explorer cam probe H hum:") == 1 && has(hum, "first qword there is EliteDangerous64.exe+0x1234560") && has(hum, "0x70 below it") && has(hum, "is 0x0 ") && has(hum, "HUM route is dead"),
           "THE HUM CHECK IS NON-FATAL: *(activity+0x368) and the qwords at it and 0x70 below it are logged once (an RVA when inside the image, 0x0 as F4 found), H carries on");
@@ -1825,7 +1862,7 @@ void testHeadJoint() {
     tick(5000);
     {
         const std::string b0 = cap.nth("explorer cam probe H heartbeat:", 0);
-        check(has(b0, "hook=armed") && has(b0, "findjoint_calls_seen=0") && has(b0, "captures_site1=0 captures_site2=0") && has(b0, "idle=no avatar attach seen since launch: load or disembark on foot after the game starts"),
+        check(has(b0, "hook=armed") && has(b0, "findjoint_calls_seen=0") && has(b0, "attaches_site1=0 attaches_site2=0 latches=0") && has(b0, "idle=no avatar attach seen since launch: load or disembark on foot after the game starts"),
               "NO-CAPTURE HEARTBEAT: 'idle=no avatar attach seen since launch: load or disembark on foot after the game starts', capture counts 0 and 0");
     }
 
@@ -1848,18 +1885,18 @@ void testHeadJoint() {
     }
     g_hr.povIdx = 7;
     const uint64_t r1 = w.attach(0, w.iface[0], w.povName());
-    check(r1 == 7 && explorercamf2test::captureCount(0) == 1 && explorercamf2test::capturedInterface(0) == reinterpret_cast<uint64_t>(w.iface[0]) && explorercamf2test::capturedIndex(0) == 7 &&
-              explorercamf2test::captureCount(1) == 0,
-          "SITE 1: the call returning to +0x19B12D5 with the povCamera literal stores the interface (rcx) and the index the ORIGINAL returned (7), and returns 7 unchanged");
+    check(r1 == 7 && explorercamf2test::captureCount(0) == 1 && explorercamf2test::capturedInterface(0) == 0 && explorercamf2test::captureCount(1) == 0,
+          "SITE 1 ALONE: the call returning to +0x19B12D5 with the povCamera literal is counted and returns the original's 7 unchanged, but a lone site-1 attach is any humanoid's: nothing is latched");
+    w.invoke(w.iface[0], w.iface[1], w.povName());
+    check(explorercamf2test::captureCount(1) == 1 && explorercamf2test::captureCount(0) == 2 && explorercamf2test::capturedInterface(0) == reinterpret_cast<uint64_t>(w.iface[0]) &&
+              explorercamf2test::capturedInterface(1) == reinterpret_cast<uint64_t>(w.iface[1]) && explorercamf2test::capturedIndex(0) == 7 && explorercamf2test::capturedIndex(1) == 7,
+          "SITE 2 AFTER SITE 1 in ONE invocation (one frame): the PAIR is latched (third-person iface[0], first-person iface[1], each with the index the original returned, 7)");
     g_hr.povIdx = 3;
-    const uint64_t r2 = w.attach(1, w.iface[1], w.povName());
-    check(r2 == 3 && explorercamf2test::captureCount(1) == 1 && explorercamf2test::capturedInterface(1) == reinterpret_cast<uint64_t>(w.iface[1]) && explorercamf2test::capturedIndex(1) == 3 &&
-              explorercamf2test::captureCount(0) == 1,
-          "SITE 2: the call returning to +0x19B1359 stores into site 2's own slot (interface, index 3, one capture), site 1's is untouched");
     check(g_hr.lastFindIface == reinterpret_cast<uintptr_t>(w.iface[1]) && std::strcmp(g_hr.names[g_hr.find - 1], f2::kPovName) == 0,
           "...the original ran with the arguments the game passed (the interface in rcx, the name in rdx)");
-    w.attach(0, w.iface[0], w.povName());   // back to index 3 for site 1
-    check(explorercamf2test::capturedIndex(0) == 3 && explorercamf2test::captureCount(0) == 2, "...a second attach re-stores (index 3 again) and counts: two captures at site 1");
+    w.invoke(w.iface[0], w.iface[1], w.povName());   // back to index 3
+    check(explorercamf2test::capturedIndex(0) == 3 && explorercamf2test::capturedIndex(1) == 3 && explorercamf2test::captureCount(0) == 3 && explorercamf2test::captureCount(1) == 2,
+          "...a second pair re-latches (index 3 now) and counts: three attaches at site 1, two at site 2");
 
     // ---- H on the captured interfaces ------------------------------------------------------------------------------------------------------------
     const int find0 = g_hr.find, pose0 = g_hr.poseRR + g_hr.poseAO;
@@ -1877,22 +1914,22 @@ void testHeadJoint() {
 
     tick();
     const std::string slot1 = cap.nth("explorer cam probe H slot:", 0), slot2 = cap.nth("explorer cam probe H slot:", 1);
-    check(cap.count("explorer cam probe H slot:") == 2 && has(slot1, "site1(ret +0x19B12D5") && has(slot1, "state=resolved captures=2") && has(slot1, "kind=RR (RuntimeRigComponent)") && has(slot1, "joint_count=60") &&
+    check(cap.count("explorer cam probe H slot:") == 2 && has(slot1, "local-third-person(site 1, ret +0x19B12D5") && has(slot1, "state=resolved captures=3") && has(slot1, "kind=RR (RuntimeRigComponent)") && has(slot1, "joint_count=60") &&
               has(slot1, "joint_cache_flag=0") && has(slot1, "head_joint(\"def_c_head_joint\")_idx=12") && has(slot1, "pov_joint(\"def_c_povCamera_joint\")_idx=3"),
-          "H SLOT, site 1: resolved, two captures, kind RR, 60 joints, cache flag 0, the head index (12, from H's own FindJoint) and the povCamera index (3, from the capture)");
-    check(has(slot2, "site2(ret +0x19B1359") && has(slot2, "state=resolved captures=1") && has(slot2, "kind=AO (AnimatedObject)") && has(slot2, "joint_count=40") && has(slot2, "joint_cache_flag=1"),
-          "H SLOT, site 2: kind AO, 40 joints, cache flag 1, one capture");
+          "H SLOT, third-person: resolved, three raw attaches, kind RR, 60 joints, cache flag 0, the head index (12, from H's own FindJoint) and the povCamera index (3, from the capture)");
+    check(has(slot2, "local-first-person(site 2, ret +0x19B1359") && has(slot2, "state=resolved captures=2") && has(slot2, "kind=AO (AnimatedObject)") && has(slot2, "joint_count=40") && has(slot2, "joint_cache_flag=1"),
+          "H SLOT, first-person: kind AO, 40 joints, cache flag 1, two raw attaches");
     const std::string jA = cap.nth("explorer cam probe H joints:", 0), jB = cap.nth("explorer cam probe H joints:", 1);
-    check(cap.count("explorer cam probe H joints:") == 2 && has(jA, "site1") && has(jA, "head_model(+0x58)=(0.000,1.600,0.020)") && has(jA, "head_world(+0x48)=(10.120,1.550,19.980)") &&
+    check(cap.count("explorer cam probe H joints:") == 2 && has(jA, "local-third-person") && has(jA, "head_model(+0x58)=(0.000,1.600,0.020)") && has(jA, "head_world(+0x48)=(10.120,1.550,19.980)") &&
               has(jA, "head_in_commander_local(right,up,forward)=(0.020,1.550,0.120)") && has(jA, "pov_model(+0x58)=(0.000,1.550,0.020)") && has(jA, "pov_world(+0x48)=(10.120,1.600,20.000)") &&
-              has(jA, "pov_in_commander_local(right,up,forward)=(0.000,1.600,0.120)") && has(jA, "activity_world_origin(+0xA0)=(10.100,1.680,20.000)") && has(jA, "ASSUMPTION") && has(jB, "site2"),
+              has(jA, "pov_in_commander_local(right,up,forward)=(0.000,1.600,0.120)") && has(jA, "activity_world_origin(+0xA0)=(10.100,1.680,20.000)") && has(jA, "ASSUMPTION") && has(jB, "local-first-person"),
           "H JOINTS, both sites: the head's and the povCamera's +0x58 and +0x48 translations, the head and pov in COMMANDER-LOCAL axes ((0.020,1.550,0.120) for the known frame), the raw +0x70 origin");
     check(jA.size() < 1000 && slot1.size() < 1000, "...the lines fit a log line");
     const std::string h2A = cap.nth("explorer cam probe H2 joints:", 0), h2B = cap.nth("explorer cam probe H2 joints:", 1);
-    check(cap.count("explorer cam probe H2 joints:") == 2 && has(h2A, "site1") && has(h2A, "joints=60") && has(h2A, "head(12) walked=(1.500,3.500,3.000) depth=2 cached(+0x58)=(0.000,1.600,0.020)") &&
+    check(cap.count("explorer cam probe H2 joints:") == 2 && has(h2A, "local-third-person") && has(h2A, "joints=60") && has(h2A, "head(12) walked=(1.500,3.500,3.000) depth=2 cached(+0x58)=(0.000,1.600,0.020)") &&
               has(h2A, "pov(3) walked=(1.000,3.000,2.000) depth=2 cached(+0x58)=(0.000,1.550,0.020)") && has(h2A, "lfoot(20) walked=(1.200,2.000,3.000) depth=1") &&
               has(h2A, "rfoot(21) walked=(0.800,2.050,3.000) depth=1") && has(h2A, "foot_y=2.050 (the higher foot)") && has(h2A, "head_y-foot_y=1.450") && has(h2A, "pov_y-foot_y=0.950") &&
-              has(h2A, "cached_head_y-foot_y=-0.450") && has(h2A, "cached_pov_y-foot_y=-0.500") && has(h2B, "site2") && has(h2B, "joints=40") && h2A.size() < 1000,
+              has(h2A, "cached_head_y-foot_y=-0.450") && has(h2A, "cached_pov_y-foot_y=-0.500") && has(h2B, "local-first-person") && has(h2B, "joints=40") && h2A.size() < 1000,
           "H2 JOINTS: the head, pov and both feet walked from the animated pose (head (1.5,3.5,3), pov (1,3,2)), the cached +0x58 beside them, the higher foot and the stance differences");
     // ---- a second second: the head index is cached, no new slot lines ---------------------------------------------------------------------------------
     eval();
@@ -1920,7 +1957,7 @@ void testHeadJoint() {
         eval();
         tick();
         const std::string h2D = cap.nth("explorer cam probe H2 joints:", 0);
-        check(has(h2D, "site1") && has(h2D, "the pose arrays (P+0x48 locals, P+0x50 parents) could not be read: nothing walked") && cap.count("explorer cam probe H joints:") == 2 &&
+        check(has(h2D, "local-third-person") && has(h2D, "the pose arrays (P+0x48 locals, P+0x50 parents) could not be read: nothing walked") && cap.count("explorer cam probe H joints:") == 2 &&
                   explorercamf2test::headState() == 1 && explorercamf2test::headFaults() == 0,
               "UNREADABLE POSE ARRAYS (P+0x48 is 0): the H2 line says nothing was walked; the matrices still print, H stays armed, no fault");
         std::memcpy(w.pose[0] + f2::kPoseLocalsOff, &keep, 8);
@@ -1932,7 +1969,7 @@ void testHeadJoint() {
         eval();
         tick();
         const std::string h2G = cap.nth("explorer cam probe H2 joints:", 0);
-        check(has(h2G, "site1") && has(h2G, "joints=600 more than 512 joints: nothing walked") && explorercamf2test::headState() == 1 && explorercamf2test::headFaults() == 0,
+        check(has(h2G, "local-third-person") && has(h2G, "joints=600 more than 512 joints: nothing walked") && explorercamf2test::headState() == 1 && explorercamf2test::headFaults() == 0,
               "MORE JOINTS THAN THE BUFFER (600 of 512): the H2 line says nothing was walked; H goes on");
         std::memcpy(w.pose[0], &normal, 2);
     }
@@ -1957,11 +1994,11 @@ void testHeadJoint() {
 
     // ---- the game attaches again with a different interface at site 1 ------------------------------------------------------------------------------
     const int findBefore = g_hr.find;
-    w.attach(0, w.iface[2], w.povName());
+    attachPair(w.iface[2], w.iface[1]);
     eval();
     tick();
-    check(g_hr.find - findBefore == 4 && cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "site1") && explorercamf2test::capturedInterface(0) == reinterpret_cast<uint64_t>(w.iface[2]),
-          "A NEW CAPTURE at site 1 (another interface): ONE slot line, three more FindJoint for it (head and both feet; plus the attach's own), site 2's cache untouched");
+    check(g_hr.find - findBefore == 5 && cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "local-third-person") && explorercamf2test::capturedInterface(0) == reinterpret_cast<uint64_t>(w.iface[2]),
+          "A NEW LATCH of the third-person skeleton (another interface): ONE slot line, three more FindJoint for it (head and both feet; plus the two attaches' own), the first-person cache untouched");
 
     // ---- a stale capture: the avatar was destroyed, the memory no longer starts with a skeleton vtable ---------------------------------------------
     {
@@ -1975,10 +2012,10 @@ void testHeadJoint() {
                   cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "state=stale") && g_hr.modelRR + g_hr.modelAO - models == 2 &&
                   explorercamf2test::headCalls() - callsBefore == 5,
               "STALE CAPTURE: an interface whose first qword is neither vtable is dropped with one 'stale' slot line, NO call is made on it (only site 2's five calls), no stand-down, no fault");
-        w.attach(0, w.iface[0], w.povName());
+        attachPair(w.iface[0], w.iface[1]);
         eval();
         tick();
-        check(explorercamf2test::headState() == 1 && has(cap.nth("explorer cam probe H slot:", 0), "state=resolved"), "...and the next capture resolves again");
+        check(explorercamf2test::headState() == 1 && has(cap.nth("explorer cam probe H slot:", 0), "state=resolved"), "...and the next latch resolves again");
     }
     // A capture whose memory is gone altogether (unmapped / no access): the read of its vtable faults under SEH; that is STALE too, not a stand-down.
     {
@@ -1987,19 +2024,19 @@ void testHeadJoint() {
         if (page) {
             const uint64_t rrv = reinterpret_cast<uint64_t>(g_himg) + f2::kRrVtableRva;
             std::memcpy(page, &rrv, 8);
-            w.attach(0, page, w.povName());   // the memory is fine when the game attaches
+            attachPair(page, w.iface[1]);   // the memory is fine when the game attaches
             DWORD oldProtect = 0;
             VirtualProtect(page, 4096, PAGE_NOACCESS, &oldProtect);
             const uint64_t callsBefore = explorercamf2test::headCalls();
             eval();
             tick();
             check(explorercamf2test::headState() == 1 && explorercamf2test::headFaults() == 0 && explorercamf2test::capturedInterface(0) == 0 && cap.count("explorer cam probe H stood down:") == 0 &&
-                      cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "site1") && has(cap.nth("explorer cam probe H slot:", 0), "state=stale"),
+                      cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "local-third-person") && has(cap.nth("explorer cam probe H slot:", 0), "state=stale"),
                   "UNREADABLE CAPTURE: an interface whose memory is gone is dropped as stale (one slot line), not a fault and not a stand-down");
             check(explorercamf2test::headCalls() - callsBefore == 5, "...and the only game calls were site 2's five");
             VirtualFree(page, 0, MEM_RELEASE);
         }
-        w.attach(0, w.iface[0], w.povName());
+        attachPair(w.iface[0], w.iface[1]);
     }
 
     // ---- an index the game does not have / one out of range / no pose object ------------------------------------------------------------------
@@ -2008,7 +2045,7 @@ void testHeadJoint() {
         std::memcpy(w.iface[2], &rr, 8);   // iface[2] is a valid RR again
         g_hr.headIdx = 100;                // beyond the 60 joints
         g_hr.povIdx = 0xFFFF;
-        w.attach(0, w.iface[2], w.povName());
+        attachPair(w.iface[2], w.iface[1]);
         const int model2 = g_hr.modelRR;
         eval();
         tick();
@@ -2018,7 +2055,7 @@ void testHeadJoint() {
         g_hr.povIdx = 3;
         uint64_t nullPose = 0;
         std::memcpy(w.iface[2] + 0x20, &nullPose, 8);
-        w.attach(0, w.iface[2], w.povName());
+        attachPair(w.iface[2], w.iface[1]);
         const int findNow = g_hr.find, modelNow = g_hr.modelRR;
         eval();
         tick();
@@ -2040,7 +2077,7 @@ void testHeadJoint() {
     eval();
     const std::string beat = beatLine();
     unsigned m58[4] = {}, m48[4] = {}, fd[4] = {};
-    check(has(beat, "hook=armed") && has(beat, "faults=0") && has(beat, "last=ok") && has(beat, "steps=1(+1)") && has(beat, "game_calls=16(+16)") && has(beat, "captures_site1=1 captures_site2=1") &&
+    check(has(beat, "hook=armed") && has(beat, "faults=0") && has(beat, "last=ok") && has(beat, "steps=1(+1)") && has(beat, "game_calls=16(+16)") && has(beat, "attaches_site1=1 attaches_site2=1 latches=1") &&
               has(beat, "findjoint_calls_seen=8") && parseTiming(beat, "model58_us(n/min/max/session_max)=", m58) && parseTiming(beat, "world48_us(n/min/max/session_max)=", m48) &&
               parseTiming(beat, "find_us(n/min/max/session_max)=", fd) && m58[0] == 4 && m48[0] == 4 && fd[0] == 6 && m58[1] <= m58[2] && m58[2] <= m58[3] && !has(beat, "idle="),
           "H HEARTBEAT: the state, steps, game calls, faults, the last result, the FindJoint calls seen (2 attaches + H's own 6), the captures per site and n/min/max/session-max microseconds");
@@ -2098,9 +2135,11 @@ void testHeadJoint() {
     {
         arm(0);
         uint64_t got = 0;
-        std::thread worker([&] { got = w.attach(1, w.iface[1], w.povName()); });
+        std::thread worker([&] { got = w.invoke(w.iface[0], w.iface[1], w.povName()); });
         worker.join();
-        check(got == 3 && explorercamf2test::captureCount(1) == 1 && explorercamf2test::capturedInterface(1) == reinterpret_cast<uint64_t>(w.iface[1]), "A CAPTURE FROM ANOTHER THREAD lands in the same slot");
+        check(got == 3 && explorercamf2test::captureCount(1) == 1 && explorercamf2test::capturedInterface(1) == reinterpret_cast<uint64_t>(w.iface[1]) &&
+                  explorercamf2test::capturedInterface(0) == reinterpret_cast<uint64_t>(w.iface[0]),
+              "A PAIR ATTACHED ON ANOTHER THREAD latches into the same slots");
     }
 
     // ---- stand-downs: each stops H for the session with one line and no further call -------------------------------------------------------------------

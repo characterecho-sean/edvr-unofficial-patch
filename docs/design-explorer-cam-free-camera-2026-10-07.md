@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State: F0-F5 FLOWN (2026-10-07/08).** F5 enters and places, the body
-  shows, the FindJoint capture works (site 1 = the third-person body), but
-  the cached joints did not follow a crouch. BUILT, not flown: Phase 2 head
-  hiding (no new key) and H2 (joints walked from the animated pose). Keys:
+- **State: F0-F6 FLOWN (2026-10-07/08).** F5 enters and places, the body
+  shows; F6: the head stayed visible, the "local" avatar was an NPC's. BUILT,
+  not flown: the local-avatar LATCH (site 1 + site 2 of one invocation), its
+  log-only witness, H2, and F5 only on foot with no panel. Keys:
   `hotkey.explorer_cam`, `fix.explorer_cam`, the eye keys (temporary).
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
@@ -45,20 +45,20 @@
     m; the commander's frame comes from I3 (world with local taken out).
   - The cached +0x58 head or pov joint as the stance signal, because a 5 s
     crouch in F5 moved neither (1.64-1.685, 1.69-1.73); +0x48 drifted 12 m.
+  - The last raw site-1 capture as the local avatar, because 0x19B1240
+    attaches every humanoid's avatars (F6: head visible, an NPC's AMC).
 - **Set aside, not flown:** writing the origin inside the refresh detour at
-  `+0x592200`; the culling view is built upstream of it
-  (design-occlusion-culling-2026-09-22.md), and 6s.9 saw holes from that.
+  `+0x592200`; the culling view is built upstream (6s.9 saw holes from it).
 - **Flown** on Frontier: F0 172543, F1 194702, F2 211908, F3 94c467d3, F4
-  20764688, F5 60dd0eb2; findings below.
-- **Next:** flight F6, probe key on at launch: `explorer cam head hide:`
-  (the census names the helmet part; the relation line; masks zeroed in the
-  heartbeat) looking down at the body, then `H2 joints:` standing and
-  crouched. Placement from the walked head follows.
-- **Temporary keys:** `[advanced] explorer_cam_probe` (the instruments;
-  removed at arc close). `[fix] explorer_cam_eye_up/_forward/_right`: they
-  stand in for the head bone; Sean tunes the bone-to-eye offset once, it
-  becomes a constant, and they go. `fix.explorer_cam` is redundant with an
-  empty F5; ask Sean before removing it.
+  20764688, F5 60dd0eb2, F6 d0707af3; findings below.
+- **Next:** flight F7, probe key on: the latch line (`local avatar's
+  skeleton pair changed`), the witness distance (near 0 = the right AMC),
+  `explorer cam head hide:` looking down at the body, F5 refuse lines on a
+  panel, then `H2 joints:` standing and crouched.
+- **Temporary keys:** `[advanced] explorer_cam_probe` (removed at arc
+  close). `[fix] explorer_cam_eye_up/_forward/_right` stand in for the head
+  bone; Sean tunes the offset once, it becomes a constant, and they go.
+  `fix.explorer_cam` is redundant with an empty F5; ask Sean before removing.
 
 ## Why today's Explorer Cam is half-baked
 
@@ -761,3 +761,19 @@ H2 (probe only, 1 Hz, camera-job thread): head, pov and both feet walked from th
 (the two feet, once per interface). P+0 joint count; *(P+0x48) the local transforms, 32 bytes (position xyzw, quaternion xyzw); *(P+0x50) the u16
 parents; p = p x R(q) + pos for each ancestor, R as DirectXMath's row-vector layout. Read off FUN 0xFDE0D0 and its constants evaluated against the exe:
 3e-8 from that layout, 1.97 from its transpose. `H2 joints:` prints walked beside cached, head_y-foot_y and pov_y-foot_y.
+
+## 2026-10-08 F6: the local avatar is the one with a first-person avatar
+
+F6 (d0707af3): the head stayed visible. FUN 0x19B1240 attaches EVERY humanoid's avatars, so the last site-1 capture was whichever humanoid ran last
+(an NPC), and the AMC matched to it was not the commander's. Only the local player has a first-person avatar, and one invocation's site 1 and site 2 share
+one call frame. The capture now LATCHES only when a site-2 capture follows a site-1 capture on the same thread at the same return-address slot, with a
+different interface and no other site-1 between. Head hiding, H and H2 read the latch, never the raw capture; later NPC captures leave it be. One line
+logs each change. Residual hole: a lone site-2 attach at the same depth right after an NPC's site 1 would pair. A log-only witness (no gate) prints the
+matched AMC's world origin distance to the commander root; the census prints once per local AMC change.
+
+## 2026-10-08 F5 enters only on foot with no panel open
+
+Sean's rule. ENTER needs gameplay, Status.json on foot known true in every mode (a ship's or SRV's camera suite never enters) and GuiFocus known 0; unknown
+focus refuses in mode 0 and is allowed in modes 1-4 only with on foot known true. EXIT is always allowed. A refusal says its reason once per press, naming
+both values; Status.json's OnFoot lags about 6 s after a disembark, which only delays the first F5. If the game reports a non-zero GuiFocus with its own
+camera suite open, F7's refuse line shows it.

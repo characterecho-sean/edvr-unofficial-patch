@@ -1160,6 +1160,7 @@ void explorerCamF2Tick(uint32_t frame, uint64_t nowMs, const ecm::Sink& sink) {
         hh.last = g_headLast.load(std::memory_order_relaxed);
         hh.captures[0] = explorerCamSkeleton(0).captures;
         hh.captures[1] = explorerCamSkeleton(1).captures;
+        hh.latches = explorerCamSkeleton(0).latches;
         hh.findSeen = explorerCamFindJointSeen();
         hh.m58 = drainTimer(g_t58);
         hh.m48 = drainTimer(g_t48);

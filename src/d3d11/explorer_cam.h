@@ -58,12 +58,15 @@ ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivi
 
 // The skeleton interface's FindJoint(name) (EliteDangerous64.exe+0xFDDB10, called by many systems). Explorer Cam hooks it (the original first, its result
 // unchanged) to learn which skeleton interfaces the game attaches the local player's two avatars to: FUN 0x19B1240 calls FindJoint("def_c_povCamera_joint")
-// from two sites, and the hook stores the interface (rcx) and the index it returned per site. Site 1 (returning to +0x19B12D5) is the third-person body, site 2
-// the first-person arms (F5). Head hiding needs site 1; the probe's H reads both. The hook is installed when Explorer Cam is on or the probe asks.
+// from two sites for EVERY humanoid (F6: the last site-1 attach is usually an NPC's). Site 1 (returning to +0x19B12D5) is a humanoid's third-person avatar,
+// site 2 its first-person avatar, which only the local player has. So the hook LATCHES a pair only when one thread makes a site-1 attach and then a site-2
+// attach at the same stack location (one invocation of 0x19B1240 does both); sites 0 and 1 below are the latched local third-person and first-person
+// skeletons. Head hiding and the probe's H use the latched pair only. The hook is installed when Explorer Cam is on or the probe asks.
 struct ExplorerCamSkeleton {
-    uint64_t iface = 0;       // 0 = none captured (or dropped as stale)
-    uint32_t index = 0xFFFF;  // the povCamera joint index the original returned
-    uint32_t captures = 0;    // how many attaches were seen since launch
+    uint64_t iface = 0;       // the LATCHED local avatar's skeleton for this site (0 = none latched yet, or dropped as stale)
+    uint32_t index = 0xFFFF;  // the povCamera joint index the original returned for it
+    uint32_t captures = 0;    // RAW attaches seen at this site since launch: EVERY humanoid's, not only the local one
+    uint32_t latches = 0;     // times a local pair was latched
 };
 ExplorerCamHookStatus explorerCamWantFindJoint(bool want);   // the probe's request: installs the hook the first time, opens or closes its share of the gate
 ExplorerCamSkeleton explorerCamSkeleton(int site);
@@ -94,6 +97,8 @@ struct ExplorerCamTestFrame {
     bool f5Pressed = false;               // the key's edge this frame
     bool gameplay = true;
     bool onFootKnown = true, onFoot = true;
+    bool focusKnown = true;               // Status.json GuiFocus is in the file
+    uint32_t focus = 0;                   // ...and its value (0 = no panel)
     bool readBindings = true;             // hotkey.read_game_bindings
     const wchar_t* bindsDir = nullptr;    // an Elite bindings directory for the clash check (null: none, unchecked)
 };
@@ -119,7 +124,8 @@ uint32_t controllerMode();
 uint64_t uiCalls();
 bool uiHiddenByEdvr();
 uint32_t faults();
-void setSkeleton(int site, uint64_t iface, uint32_t index);   // a capture made by hand (the cells that need no FindJoint hook)
+void setSkeleton(int site, uint64_t iface, uint32_t index);   // a latched pair member set by hand (the cells that need no FindJoint hook)
+void setWitnessInterval(uint32_t ms);                          // the witness measures every N ms (the rigs: 0)
 bool headHideOn();                 // the fade hook's post-call hides the head parts of the local AMC (Explorer Cam on, hooks armed, names verified)
 bool headHideDown();               // stood down for the session (guarded accesses faulted)
 int partNamesState();              // 0 not checked, 1 the table matches, 2 it does not

@@ -56,6 +56,10 @@ bool journalWatchActive() { return g_journalActive; }
 bool journalGameplay() { return g_journalGameplay; }
 bool journalOnFootKnown() { return g_journalOnFootKnown; }
 bool journalOnFoot() { return g_journalOnFoot; }
+bool journalGuiFocus(uint32_t* focus) {
+    if (focus) *focus = 0;
+    return false;   // the rig's boundary gets its focus from ExplorerCamTestFrame, not from here
+}
 }  // namespace edvr
 
 namespace {
@@ -917,33 +921,91 @@ void testSequencerExit() {
 }
 
 void testF5Decision() {
-    std::printf("F5's decision table\n");
+    std::printf("F5's decision table (ENTER only on foot, in first person or the on-foot camera, with no panel open)\n");
     using ecm::F5Action;
-    ecm::F5Inputs in;
-    in.pressed = true; in.gameplay = true; in.active = true; in.controllerAlive = true; in.mode = 0; in.onFootKnown = true; in.onFoot = true;
-    check(ecm::decideF5(in) == F5Action::Enter, "on foot, camera closed, controller alive: ENTER");
-    in.mode = 1;
-    in.onFoot = false;
-    check(ecm::decideF5(in) == F5Action::Enter, "in the stock camera on a preset (not on foot): ENTER");
-    in.mode = 3;
-    check(ecm::decideF5(in) == F5Action::Enter, "in the free camera: ENTER");
-    in.mode = 0;
-    check(ecm::decideF5(in) == F5Action::RefuseNotOnFoot, "camera closed and not on foot (in a ship): refused, said so");
+    auto base = []() {
+        ecm::F5Inputs in;
+        in.pressed = true; in.gameplay = true; in.active = true; in.controllerAlive = true; in.mode = 0;
+        in.onFootKnown = true; in.onFoot = true; in.focusKnown = true; in.focus = 0;
+        return in;
+    };
+    ecm::F5Inputs in = base();
+    check(ecm::decideF5(in) == F5Action::Enter, "on foot, first person (camera closed), no panel: ENTER");
+    // The camera suite and the free camera, on foot with no panel.
+    bool allEnter = true;
+    for (int m : {1, 2, 3, 4, 5, 6}) {
+        in = base();
+        in.mode = static_cast<uint8_t>(m);
+        allEnter = allEnter && ecm::decideF5(in) == F5Action::Enter;
+    }
+    check(allEnter, "...and in every camera mode 1-6 on foot with no panel: ENTER (the sequence itself refuses a detached camera in its own words)");
+    // ON FOOT: unknown and false refuse in EVERY mode (the camera suite open in a ship or an SRV never enters).
+    bool unknownRefused = true, falseRefused = true;
+    for (int m : {0, 1, 2, 3, 4}) {
+        in = base();
+        in.mode = static_cast<uint8_t>(m);
+        in.onFootKnown = false;
+        unknownRefused = unknownRefused && ecm::decideF5(in) == F5Action::RefuseNotOnFoot;
+        in = base();
+        in.mode = static_cast<uint8_t>(m);
+        in.onFoot = false;
+        falseRefused = falseRefused && ecm::decideF5(in) == F5Action::RefuseNotOnFoot;
+    }
+    check(unknownRefused, "ON FOOT UNKNOWN (no Status.json Flags2): refused in modes 0, 1, 2, 3 and 4");
+    check(falseRefused, "ON FOOT FALSE (in a ship, an SRV): refused in modes 0, 1, 2, 3 and 4 -- the camera suite open in a ship never enters");
+    in = base();
+    in.onFootKnown = true; in.onFoot = false; in.focusKnown = false; in.controllerAlive = false;
+    check(ecm::decideF5(in) == F5Action::RefuseNotOnFoot, "...on foot is checked before the panel and before the idle controller");
+    // THE PANEL: a known non-zero focus refuses in every mode; an unknown focus refuses with the camera closed and passes inside the camera suite.
+    bool focusRefused = true;
+    for (uint32_t f : {1u, 5u, 6u, 7u, 9u, 11u}) {
+        for (int m : {0, 1, 2, 3, 4}) {
+            in = base();
+            in.mode = static_cast<uint8_t>(m);
+            in.focus = f;
+            focusRefused = focusRefused && ecm::decideF5(in) == F5Action::RefuseFocus;
+        }
+    }
+    check(focusRefused, "GUI FOCUS KNOWN AND NON-ZERO (a panel, the maps, station services, the FSS...): refused in modes 0, 1, 2, 3 and 4");
+    in = base();
+    in.focusKnown = false;
+    check(ecm::decideF5(in) == F5Action::RefuseFocus, "GUI FOCUS UNKNOWN, camera closed (mode 0): refused -- first person cannot be told from a panel");
+    bool unknownInSuite = true;
+    for (int m : {1, 2, 3, 4}) {
+        in = base();
+        in.mode = static_cast<uint8_t>(m);
+        in.focusKnown = false;
+        unknownInSuite = unknownInSuite && ecm::decideF5(in) == F5Action::Enter;
+    }
+    check(unknownInSuite, "GUI FOCUS UNKNOWN inside the camera suite (modes 1-4, on foot known true): ENTER");
+    in = base();
+    in.focusKnown = false;
     in.onFootKnown = false;
-    check(ecm::decideF5(in) == F5Action::Enter, "camera closed and on-foot unknown (no Status.json): ENTER");
-    in.onFootKnown = true; in.onFoot = true;
-    in.sessionActive = true;
-    check(ecm::decideF5(in) == F5Action::Exit, "in an Explorer Cam session: EXIT");
-    in.sessionActive = false;
+    in.mode = 2;
+    check(ecm::decideF5(in) == F5Action::RefuseNotOnFoot, "...but never with on foot unknown as well");
+    // EXIT is always allowed while a session is on.
+    bool exitAlways = true;
+    for (int m : {0, 1, 2, 3, 4, 5, 6}) {
+        for (int k = 0; k < 4; ++k) {
+            in = base();
+            in.sessionActive = true;
+            in.mode = static_cast<uint8_t>(m);
+            in.onFootKnown = k != 0; in.onFoot = k == 2;
+            in.focusKnown = k != 1; in.focus = k == 3 ? 5 : 0;
+            exitAlways = exitAlways && ecm::decideF5(in) == F5Action::Exit;
+        }
+    }
+    check(exitAlways, "EXIT in an Explorer Cam session: allowed in every mode with on foot unknown, false, true and any focus, known, unknown or a panel");
+    in = base();
     in.controllerAlive = false;
-    check(ecm::decideF5(in) == F5Action::RefuseControllerIdle, "the controller is not being called: refused with 'the camera controller is idle: open the camera first'");
-    in.controllerAlive = true;
+    check(ecm::decideF5(in) == F5Action::RefuseControllerIdle, "the controller is not being called (on foot, no panel): refused with 'the camera controller is idle: open the camera first'");
+    in = base();
     in.gameplay = false;
     check(ecm::decideF5(in) == F5Action::None, "the journal says not in gameplay (menus): the press is ignored");
-    in.gameplay = true;
+    in = base();
     in.active = false;
     check(ecm::decideF5(in) == F5Action::RefuseOff, "Explorer Cam off or a hook stood down: refused, said so");
-    in.active = true;
+    in = base();
     in.pressed = false;
     check(ecm::decideF5(in) == F5Action::None, "no press, no action");
 }
@@ -1130,10 +1192,32 @@ void testText() {
     ecm::formatEvent(line, sizeof(line), q, 12);
     check(!has(line, "runs with the camera closed"), "...and says nothing of the sort at mode 1");
 
-    ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseControllerIdle, 0, true, true);
+    ecm::F5Inputs f5in;
+    f5in.pressed = true; f5in.gameplay = true; f5in.active = true; f5in.controllerAlive = true; f5in.mode = 0;
+    f5in.onFootKnown = true; f5in.onFoot = true; f5in.focusKnown = true; f5in.focus = 0;
+    ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseControllerIdle, f5in);
     check(has(line, "the camera controller is idle: open the camera first"), "F5 on an idle controller: 'the camera controller is idle: open the camera first'");
-    ecm::formatF5(line, sizeof(line), ecm::F5Action::Enter, 3, true, false);
-    check(has(line, "F5 pressed: entering Explorer Cam (camera mode 3") && has(line, "on foot: no"), "F5 ENTER names the camera mode and on-foot");
+    f5in.mode = 3;
+    ecm::formatF5(line, sizeof(line), ecm::F5Action::Enter, f5in);
+    check(has(line, "F5 pressed: entering Explorer Cam (camera mode 3") && has(line, "on foot: yes") && has(line, "GuiFocus: 0 (none)"), "F5 ENTER names the camera mode, on-foot and the GuiFocus");
+    f5in.mode = 0; f5in.onFoot = false;
+    f5in.focusKnown = true; f5in.focus = 5;
+    ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseNotOnFoot, f5in);
+    check(has(line, "only starts on foot") && has(line, "on foot = no") && has(line, "GuiFocus = 5 (station services)") && has(line, "lags about 6 s after you step out") && has(line, "may need a moment"),
+          "THE NOT-ON-FOOT REFUSAL names the on-foot value (no) and the GuiFocus (5, station services) and says Status.json's OnFoot lags about 6 s after a disembark");
+    f5in.onFootKnown = false; f5in.focusKnown = false;
+    ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseNotOnFoot, f5in);
+    check(has(line, "on foot = unknown (Status.json has no Flags2") && has(line, "GuiFocus = unknown") && has(line, "lags about 6 s"), "...and for an unknown on-foot state (and an unknown focus) says unknown, and the same lag");
+    f5in.onFootKnown = true; f5in.onFoot = true; f5in.focusKnown = true; f5in.focus = 9;
+    ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseFocus, f5in);
+    check(has(line, "a panel may have the focus") && has(line, "GuiFocus = 9 (the FSS)") && has(line, "on foot = yes") && !has(line, "while its own camera suite is open"),
+          "THE PANEL REFUSAL names the focus (9, the FSS) and on foot = yes");
+    f5in.mode = 2;
+    ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseFocus, f5in);
+    check(has(line, "The game reports a non-zero GuiFocus while its own camera suite is open"), "...inside the camera suite it adds that the game reports a non-zero GuiFocus while its own camera suite is open");
+    f5in.mode = 0; f5in.focusKnown = false;
+    ecm::formatF5(line, sizeof(line), ecm::F5Action::RefuseFocus, f5in);
+    check(has(line, "GuiFocus = unknown") && has(line, "first person cannot be told from an open panel"), "...and for an unknown focus with the camera closed says why it cannot allow it");
 
     ecm::HeartbeatIn h;
     h.windowSeconds = 5.0; h.phase = "placed"; h.activity = 0xABC; h.state = 4; h.session = true;
@@ -1623,7 +1707,7 @@ void testF5FromClosed(const Pages& p) {
     g.ctlFrame();
     rig.boundary();
     rig.boundary(true);
-    check(rig.cap.count("F5 pressed: entering Explorer Cam (camera mode 0, closed; on foot: yes)") == 1 && t::f5Request() == 1, "F5 PRESSED on foot with the camera closed: 'entering Explorer Cam', the ENTER request is set");
+    check(rig.cap.count("F5 pressed: entering Explorer Cam (camera mode 0, closed; on foot: yes; GuiFocus: 0 (none))") == 1 && t::f5Request() == 1, "F5 PRESSED on foot with the camera closed: 'entering Explorer Cam', the ENTER request is set");
     g.ctlFrame();   // PhotoCameraToggle pressed: the camera opens
     check(g.seenPhoto() == 1 && Game::pressed(g.photoAction) == 0 && g.mode() == 1 && t::sessionActive() && t::f5Request() == 0,
           "the controller's next update: PhotoCameraToggle's int was 1 for that update and is restored to 0; the game opened the camera (mode 1); the session is on");
@@ -1878,7 +1962,76 @@ void testSessionTimeoutsAndIdle(const Pages& p) {
     rig.cap.clear();
     rig.f.onFoot = false;
     rig.boundary(true);
-    check(rig.cap.count("you are not on foot and the camera is closed") == 1 && t::f5Request() == 0, "NOT ON FOOT, camera closed: refused with a line");
+    check(rig.cap.count("F5 pressed, but Explorer Cam only starts on foot") == 1 && has(rig.cap.nth("only starts on foot", 0), "on foot = no") && has(rig.cap.nth("only starts on foot", 0), "GuiFocus = 0 (none)") &&
+              has(rig.cap.nth("only starts on foot", 0), "lags about 6 s") && t::f5Request() == 0 && !t::sessionActive(),
+          "NOT ON FOOT, camera closed: refused with ONE line naming on foot = no and the focus, and the 6 s lag");
+    rig.f.onFootKnown = false;
+    rig.cap.clear();
+    rig.boundary(true);
+    check(rig.cap.count("only starts on foot") == 1 && has(rig.cap.nth("only starts on foot", 0), "on foot = unknown") && t::f5Request() == 0, "ON FOOT UNKNOWN, camera closed: refused with one line saying unknown");
+    rig.f.onFootKnown = true; rig.f.onFoot = true;
+    rig.f.focus = 5;   // station services
+    rig.cap.clear();
+    rig.boundary(true);
+    check(rig.cap.count("a panel may have the focus") == 1 && has(rig.cap.nth("a panel may have the focus", 0), "GuiFocus = 5 (station services)") && t::f5Request() == 0,
+          "A PANEL OPEN (GuiFocus 5), camera closed: refused with one line naming the focus");
+    rig.f.focusKnown = false;
+    rig.cap.clear();
+    rig.boundary(true);
+    check(rig.cap.count("a panel may have the focus") == 1 && has(rig.cap.nth("a panel may have the focus", 0), "GuiFocus = unknown") && t::f5Request() == 0, "GUI FOCUS UNKNOWN, camera closed: refused with one line");
+    rig.f.focusKnown = true; rig.f.focus = 0;
+    rig.cap.clear();
+    rig.boundary(true);
+    check(t::f5Request() == 1 && rig.cap.count("F5 pressed: entering Explorer Cam") == 1 && has(rig.cap.nth("entering Explorer Cam", 0), "GuiFocus: 0 (none)"),
+          "ON FOOT, focus 0: the same press ENTERS (the request is set)");
+    // The camera suite open on a preset: in a ship it never enters, on foot with an unknown focus it does, with a panel it does not.
+    t::reset();
+    g.init();
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+    g.userPresses(g.photoAction, &Game::ctlFrame);   // the game's own camera opens: mode 1
+    g.ctlFrame();
+    rig.boundary();
+    check(g.mode() == 1, "(the game's own camera suite is open: mode 1)");
+    rig.f.onFoot = false;   // a ship
+    rig.cap.clear();
+    rig.boundary(true);
+    check(rig.cap.count("only starts on foot") == 1 && has(rig.cap.nth("only starts on foot", 0), "camera mode 1") && t::f5Request() == 0, "THE CAMERA SUITE OPEN IN A SHIP (mode 1, not on foot): refused");
+    rig.f.onFoot = true;
+    rig.f.focusKnown = false;   // unknown focus, on foot known true
+    rig.cap.clear();
+    rig.boundary(true);
+    check(t::f5Request() == 1 && rig.cap.count("a panel may have the focus") == 0, "...on foot with an UNKNOWN focus inside the camera suite (mode 1): ENTER");
+    t::reset();
+    g.init();
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+    g.userPresses(g.photoAction, &Game::ctlFrame);
+    g.ctlFrame();
+    rig.boundary();
+    rig.f.focusKnown = true; rig.f.focus = 6;   // the galaxy map
+    rig.cap.clear();
+    rig.boundary(true);
+    check(rig.cap.count("a panel may have the focus") == 1 && has(rig.cap.nth("a panel may have the focus", 0), "GuiFocus = 6 (the galaxy map)") &&
+              has(rig.cap.nth("a panel may have the focus", 0), "while its own camera suite is open") && t::f5Request() == 0,
+          "A NON-ZERO GUI FOCUS while the camera suite is open (mode 1): refused, and the line says the game reports it while its own suite is open");
+    rig.f.focus = 0;
+    // EXIT is never refused: a session on, then the journal says everything wrong.
+    rig.boundary(true);
+    g.ctlFrame();
+    g.ctlFrame();
+    rig.boundary();
+    check(t::sessionActive(), "(an Explorer Cam session is on)");
+    rig.f.onFootKnown = false; rig.f.focusKnown = true; rig.f.focus = 9;
+    rig.cap.clear();
+    rig.boundary(true);
+    check(rig.cap.count("F5 pressed: leaving Explorer Cam") == 1 && rig.cap.count("only starts on foot") == 0 && rig.cap.count("a panel may have the focus") == 0,
+          "EXIT with on foot unknown and a panel open is not refused: 'leaving Explorer Cam'");
+    rig.f.onFootKnown = true; rig.f.onFoot = true; rig.f.focus = 0;
+    t::reset();
+    g.init();
+    installAll(p, rig, g);
+    g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
     rig.f.onFoot = true;
     rig.f.gameplay = false;
     rig.cap.clear();
@@ -2699,6 +2852,47 @@ void cimgThunk(size_t entryRva, size_t callRva) {   // `call r8` at callRva (ret
     p[n++] = 0x41; p[n++] = 0xFF; p[n++] = 0xD0;
     p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xC4; p[n++] = 0x28; p[n++] = 0xC3;
 }
+// FUN 0x19B1240 for ONE humanoid, in machine code at its real address: block 1 (third-person avatar) calls r8 (FindJoint) at +0x19B12D2, returning to +0x19B12D5
+// (site 1); block 2 (first-person avatar) calls it at +0x19B1356, returning to +0x19B1359 (site 2). One frame, no push between. rcx = the third-person interface
+// (0 skips block 1), rdx = the name, r8 = FindJoint, r9 = the first-person interface (0 skips block 2: an NPC has none).
+// g_cimgBetween, when set, is called between the two attaches of a local invocation (the rig's way to run another thread's attach INSIDE the invocation).
+void (*g_cimgBetween)() = nullptr;
+void cimgInvoke() {
+    cimgCommit(0x19B1240, 0x200);
+    uint8_t* const base = g_cimg + 0x19B1240;
+    std::memset(base, 0x90, 0x200);
+    size_t n = 0;
+    auto put = [&](std::initializer_list<uint8_t> b) { for (uint8_t x : b) base[n++] = x; };
+    put({0x48, 0x83, 0xEC, 0x48});                     // sub rsp, 48h
+    put({0x4C, 0x89, 0x4C, 0x24, 0x30});               // mov [rsp+30h], r9
+    put({0x4C, 0x89, 0x44, 0x24, 0x28});               // mov [rsp+28h], r8
+    put({0x48, 0x89, 0x54, 0x24, 0x20});               // mov [rsp+20h], rdx
+    put({0x48, 0x85, 0xC9});                           // test rcx, rcx
+    put({0x74, static_cast<uint8_t>(0x95 - (n + 2))}); // je block2
+    n = 0x92;
+    put({0x41, 0xFF, 0xD0});                           // call r8        (returns to +0x19B12D5)
+    put({0x4C, 0x8B, 0x4C, 0x24, 0x30});               // block2: mov r9, [rsp+30h]
+    put({0x4D, 0x85, 0xC9});                           // test r9, r9
+    const size_t jeAt = n;
+    put({0x74, 0x00});                                 // je end (patched)
+    {   // between the two attaches the rig can run code (another thread's attach): `mov rax, [&g_cimgBetween]; test rax, rax; je +2; call rax`, then r9 is reloaded
+        put({0x48, 0xB8});
+        const uint64_t at = reinterpret_cast<uint64_t>(&g_cimgBetween);
+        for (int i = 0; i < 8; ++i) base[n++] = static_cast<uint8_t>(at >> (8 * i));
+        put({0x48, 0x8B, 0x00});                       // mov rax, [rax]
+        put({0x48, 0x85, 0xC0});                       // test rax, rax
+        put({0x74, 0x02});                             // je +2
+        put({0xFF, 0xD0});                             // call rax
+        put({0x4C, 0x8B, 0x4C, 0x24, 0x30});           // mov r9, [rsp+30h]
+    }
+    put({0x4C, 0x89, 0xC9});                           // mov rcx, r9
+    put({0x48, 0x8B, 0x54, 0x24, 0x20});               // mov rdx, [rsp+20h]
+    put({0x4C, 0x8B, 0x44, 0x24, 0x28});               // mov r8, [rsp+28h]
+    base[jeAt + 1] = static_cast<uint8_t>(0x119 - (jeAt + 2));
+    n = 0x116;
+    put({0x41, 0xFF, 0xD0});                           // call r8        (returns to +0x19B1359)
+    put({0x48, 0x83, 0xC4, 0x48, 0xC3});               // end: add rsp, 48h; ret
+}
 void cimgInit(int corruptName = -1) {
     if (!g_cimg) g_cimg = static_cast<uint8_t*>(VirtualAlloc(nullptr, kCImgSize, MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     // The dither fade: the real prologue, a rip-relative displacement of 0, then the matching epilogue. It does nothing: the rig plays the game's masks.
@@ -2729,8 +2923,7 @@ void cimgInit(int corruptName = -1) {
     }
     cimgCommit(0x3000000, 64);         // a function that is not FindJoint (a prologue of 0xCC)
     std::memset(g_cimg + 0x3000000, 0xCC, 64);
-    cimgThunk(0x19B12CA, 0x19B12D2);   // site 1
-    cimgThunk(0x19B134E, 0x19B1356);   // site 2
+    cimgInvoke();                      // sites 1 and 2
     cimgThunk(0x1A00000, 0x1A00008);   // neither
     cimgCommit(ecm::kPovNameRva, 32);
     std::memcpy(g_cimg + ecm::kPovNameRva, "def_c_povCamera_joint", 22);
@@ -2746,9 +2939,21 @@ void cimgInit(int corruptName = -1) {
 }
 using ImgFade = uint64_t (__fastcall*)(void*);
 using ImgFind = uint64_t (__fastcall*)(void* iface, const void* name, void* fn);
+using ImgInvoke = uint64_t (__fastcall*)(void* third, const void* name, void* fn, void* first);
+// One invocation for a humanoid with BOTH avatars (the local player): third-person at site 1, then first-person at site 2, from one frame.
+uint64_t imgInvoke(void* third, void* first, const void* name) { return reinterpret_cast<ImgInvoke>(g_cimg + 0x19B1240)(third, name, g_cimg + ecm::kFindJointRva, first); }
+// A LONE attach: site 0 = an invocation with only the third-person avatar (an NPC's), site 1 = only the first-person one, site 2 = a call from somewhere else.
 uint64_t imgAttach(int site, void* iface, const void* name) {
-    const size_t entry = site == 0 ? 0x19B12CA : site == 1 ? 0x19B134E : 0x1A00000;
-    return reinterpret_cast<ImgFind>(g_cimg + entry)(iface, name, g_cimg + ecm::kFindJointRva);
+    if (site == 0) return imgInvoke(iface, nullptr, name);
+    if (site == 1) return imgInvoke(nullptr, iface, name);
+    return reinterpret_cast<ImgFind>(g_cimg + 0x1A00000)(iface, name, g_cimg + ecm::kFindJointRva);
+}
+// ...from a deeper stack frame (the same call, but its return-address slot is somewhere else).
+__declspec(noinline) uint64_t imgDeep(int depth, int site, void* iface, const void* name) {
+    volatile uint8_t pad[128];
+    pad[0] = static_cast<uint8_t>(depth);
+    pad[1] = 0;
+    return (depth > 0 ? imgDeep(depth - 1, site, iface, name) : imgAttach(site, iface, name)) + pad[1];
 }
 void imgFade(void* amc) { reinterpret_cast<ImgFade>(g_cimg + ecm::kAvatarFadeRva)(amc); }
 
@@ -2783,6 +2988,10 @@ struct AmcBuf {
             std::memcpy(b + ecm::kOffAmcPartCurrent + at, &current, 4);
         }
         refillMasks();
+    }
+    void setTransform(const void* obj) {
+        const uint64_t p = reinterpret_cast<uint64_t>(obj);
+        std::memcpy(b + ecm::kOffAmcTransform, &p, 8);
     }
     // What the game's visibility job does every frame: every mask non-zero.
     void refillMasks() {
@@ -2871,11 +3080,10 @@ void testHeadHideGlue(const Pages& p) {
 
     // ---- the capture: through the real FindJoint hook -----------------------------------------------------------------------------------------------
     const void* pov = g_cimg + ecm::kPovNameRva;
-    imgAttach(0, skelA, pov);
-    imgAttach(1, skelB, pov);
+    imgInvoke(skelA, skelB, pov);
     check(explorerCamSkeleton(0).iface == reinterpret_cast<uint64_t>(skelA) && explorerCamSkeleton(0).index == 3 && explorerCamSkeleton(1).iface == reinterpret_cast<uint64_t>(skelB) &&
               explorerCamFindJointSeen() == 2,
-          "THE CAPTURE (explorer_cam.cpp's own, no probe): the attach from site 1 stored its interface and index, site 2 its own");
+          "THE CAPTURE (explorer_cam.cpp's own, no probe): one invocation that attached both avatars latched its third-person and first-person skeletons with their indexes");
 
     // ---- not placed: the census and the match line, nothing hidden ------------------------------------------------------------------------------------
     imgFade(local.b);
@@ -2943,14 +3151,14 @@ void testHeadHideGlue(const Pages& p) {
     // ---- feature off ------------------------------------------------------------------------------------------------------------------------------------
     begin(-1, false);
     fresh();
-    imgAttach(0, skelA, g_cimg + ecm::kPovNameRva);
+    imgInvoke(skelA, skelB, g_cimg + ecm::kPovNameRva);
     imgFade(local.b);
     check(!t::headHideOn() && local.allMasksIntact() && t::stolenBytes(5) == 0 && t::stolenBytes(6) == 0, "FEATURE OFF: neither hook is installed, nothing is hidden, nothing is touched");
 
     // ---- the name table does not match -----------------------------------------------------------------------------------------------------------------
     begin(3);
     fresh();
-    imgAttach(0, skelA, g_cimg + ecm::kPovNameRva);
+    imgInvoke(skelA, skelB, g_cimg + ecm::kPovNameRva);
     place();
     imgFade(local.b);
     check(t::partNamesState() == 2 && !t::headHideOn() && local.allMasksIntact() && t::hideCalls() == 0 && rig.cap.count("the part-name table at EliteDangerous64.exe+0x5E9C7D0 differs") == 1 &&
@@ -2969,7 +3177,7 @@ void testHeadHideGlue(const Pages& p) {
     // ---- the -0x30 relation never holds -------------------------------------------------------------------------------------------------------------------
     begin();
     fresh();
-    imgAttach(0, skelA, g_cimg + ecm::kPovNameRva);
+    imgInvoke(skelA, skelB, g_cimg + ecm::kPovNameRva);
     place();
     for (int i = 0; i < 100; ++i) imgFade(wrongPose.b);
     rig.cap.clear();
@@ -3001,13 +3209,13 @@ void testHeadHideGlue(const Pages& p) {
     for (int i = 0; i < 205; ++i) imgFade(local.b);
     rig.cap.clear();
     rig.boundary();
-    check(local.allMasksIntact() && rig.cap.count("no AMC can be tested yet: 305 avatar fade calls were seen but FindJoint(povCamera) has not been seen from site 1") == 1,
+    check(local.allMasksIntact() && rig.cap.count("no AMC can be tested yet: 305 avatar fade calls were seen but no local skeleton pair is latched") == 1,
           "NO CAPTURE AT ALL (Explorer Cam turned on after the avatars attached): ONE line says no AMC can be tested, nothing is hidden");
 
     // ---- guarded accesses: an AMC whose memory is unmapped -----------------------------------------------------------------------------------------------
     begin();
     fresh();
-    imgAttach(0, skelA, g_cimg + ecm::kPovNameRva);
+    imgInvoke(skelA, skelB, g_cimg + ecm::kPovNameRva);
     place();
     {
         // A block shaped like an AMC with its mask pages for the head parts taken away (PAGE_NOACCESS): the header reads, the writes fault.
@@ -3031,6 +3239,236 @@ void testHeadHideGlue(const Pages& p) {
             check(local.allMasksIntact(), "...and a good AMC is no longer written to");
             VirtualFree(block, 0, MEM_RELEASE);
         }
+    }
+    t::reset();
+}
+
+// What the fade code reads for an avatar's world origin: rcx = *(AMC+0x208) (an object whose first qword is a vtable), call [vtable+0x20] -> a matrix, origin at +0x30.
+float g_xform[16];
+int g_xformCalls = 0;
+uint64_t __fastcall xformMatrix(uint64_t) {
+    ++g_xformCalls;
+    return reinterpret_cast<uint64_t>(g_xform);
+}
+
+void testSkeletonLatch(const Pages& p) {
+    std::printf("glue: the FindJoint capture latches only the local humanoid (a site-1 then a site-2 attach in ONE invocation of 0x19B1240)\n");
+    namespace t = edvr::explorercamtest;
+    static Game g;
+    static AmcBuf localAmc, npcAmc, localAmc2;
+    static alignas(16) uint8_t npcA[0x100], npcB[0x100], npcC[0x100], skelL[0x100], skelF[0x100], skelL2[0x100], skelF2[0x100], skelQ[0x100];
+    static alignas(16) uint64_t xformVtable[8], xformObj[2];
+    Rig rig;
+    auto begin = [&]() {
+        t::reset();
+        g.init();
+        cimgInit();
+        rig = Rig();
+        ExplorerCamTestTargets tt;
+        tt.freeCamera = reinterpret_cast<uintptr_t>(p.freeG);
+        tt.collision = reinterpret_cast<uintptr_t>(p.colG);
+        tt.boxPush = reinterpret_cast<uintptr_t>(p.boxG);
+        tt.cameraUi = reinterpret_cast<uintptr_t>(p.uiG);
+        tt.controller = reinterpret_cast<uintptr_t>(p.ctlG);
+        tt.avatarFade = reinterpret_cast<uintptr_t>(g_cimg) + ecm::kAvatarFadeRva;
+        tt.findJoint = reinterpret_cast<uintptr_t>(g_cimg) + ecm::kFindJointRva;
+        t::setTargets(tt);
+        g.freeUpdate = reinterpret_cast<FnObj>(p.freeG);
+        g.ctlUpdate = reinterpret_cast<FnObj>(p.ctlG);
+        g.uiUpdate = reinterpret_cast<FnObj>(p.uiG);
+        rig.boundary();
+        rig.boundary();
+    };
+    auto place = [&]() {
+        g.setMode(3);
+        g.free[0x473] = 1;
+        g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+        rig.boundary(true);
+        g.ctlFrame();
+        g.freeFrame(); g.freeFrame(); g.ctlFrame(); g.uiFrame(); g.uiFrame();
+        rig.boundary();
+    };
+    begin();
+    const void* pov = g_cimg + ecm::kPovNameRva;
+    auto third = [&]() { return explorerCamSkeleton(0).iface; };
+    auto first = [&]() { return explorerCamSkeleton(1).iface; };
+    const uint64_t L = reinterpret_cast<uint64_t>(skelL), F = reinterpret_cast<uint64_t>(skelF);
+
+    // ---- an NPC (no first-person avatar) never latches -------------------------------------------------------------------------------------------------
+    imgAttach(0, npcA, pov);
+    imgAttach(0, npcB, pov);
+    imgAttach(0, npcC, pov);
+    check(third() == 0 && first() == 0 && explorerCamSkeleton(0).captures == 3 && explorerCamSkeleton(0).latches == 0 && explorerCamFindJointSeen() == 3,
+          "AN NPC-ONLY INVOCATION (site 1 alone, three humanoids in a row) never latches: three raw attaches, nothing latched");
+    begin();   // a fresh session for the counts below
+
+    // ---- a local invocation (site 1 then site 2, one frame) latches ----------------------------------------------------------------------------------
+    imgAttach(0, npcA, pov);
+    imgAttach(0, npcB, pov);
+    imgInvoke(skelL, skelF, pov);
+    check(third() == L && first() == F && explorerCamSkeleton(0).index == 3 && explorerCamSkeleton(1).index == 3 && explorerCamSkeleton(0).latches == 1 && explorerCamSkeleton(0).captures == 3 &&
+              explorerCamSkeleton(1).captures == 1,
+          "A LOCAL INVOCATION (site 1 then site 2 in one frame) latches: third-person = skelL, first-person = skelF, with their indexes; three raw site-1 attaches, one site-2");
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("the local avatar's skeleton pair changed: third-person 0x") == 1 && has(rig.cap.nth("skeleton pair changed", 0), "(was 0x0)") &&
+              has(rig.cap.nth("skeleton pair changed", 0), "latches 1, raw attaches seen: site 1 3, site 2 1"),
+          "LOG: one line when the latched third-person skeleton changes (from 0), with the latch count and the raw attach counts");
+    // A lone site-2 attach right after the pair: no site-1 attach is pending, so nothing latches.
+    imgAttach(1, skelQ, pov);
+    check(third() == L && first() == F && explorerCamSkeleton(0).latches == 1, "A SITE-2 ATTACH WITH NO SITE 1 PENDING never latches (the pair cleared the pending site 1)");
+
+    // ---- the latch survives later NPC captures ----------------------------------------------------------------------------------------------------------
+    imgAttach(0, npcA, pov);
+    imgAttach(0, npcB, pov);
+    imgAttach(0, npcC, pov);
+    rig.cap.clear();
+    rig.boundary();
+    check(third() == L && first() == F && explorerCamSkeleton(0).latches == 1 && explorerCamSkeleton(0).captures == 6 && rig.cap.count("skeleton pair changed") == 0,
+          "THE LATCH SURVIVES LATER NPC SITE-1 CAPTURES: three more raw attaches, the latched pair unchanged, no new line");
+
+    // ---- one interface at both sites is not a pair of avatars ---------------------------------------------------------------------------------------------
+    imgInvoke(skelQ, skelQ, pov);
+    check(third() == L && first() == F && explorerCamSkeleton(0).latches == 1, "THE SAME INTERFACE AT BOTH SITES does not latch (a pair is two different skeletons)");
+
+    // ---- site 1 from one humanoid, site 2 from a DIFFERENT FRAME: no latch ----------------------------------------------------------------------------------
+    imgAttach(0, npcA, pov);
+    imgDeep(3, 1, skelQ, pov);
+    check(third() == L && first() == F && explorerCamSkeleton(0).latches == 1 && explorerCamSkeleton(1).captures == 4,
+          "A SITE-2 ATTACH FROM A DIFFERENT STACK FRAME than the pending site 1 does not latch (raw count still goes up)");
+
+    // ---- the AMC match uses the latch, never a raw capture ---------------------------------------------------------------------------------------------------
+    place();
+    npcAmc.init(reinterpret_cast<uint64_t>(npcC), 3);       // the LAST raw site-1 capture: what F6 mistook for the local avatar
+    localAmc.init(L, 3);
+    imgFade(npcAmc.b);
+    check(npcAmc.allMasksIntact() && t::hideCalls() == 0, "THE F6 BUG: an AMC whose skeleton is the last RAW site-1 capture (an NPC) is NOT hidden");
+    imgFade(localAmc.b);
+    check(localAmc.onlyHeadZeroed() && t::hideCalls() == 1, "...the AMC of the latched local skeleton is");
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("census of the local third-person avatar AMC 0x") == 1, "THE CENSUS runs once, for the local AMC only (the NPC's AMC was never matched)");
+    localAmc.refillMasks();
+    imgFade(localAmc.b);
+    imgFade(npcAmc.b);
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("census of the local third-person avatar") == 0, "...and not again while the local AMC stays the same");
+
+    // ---- interleaving on two threads ------------------------------------------------------------------------------------------------------------------------
+    {
+        std::atomic<int> stage{0};
+        const uint32_t latchesBefore = explorerCamSkeleton(0).latches;
+        std::thread npcThread([&] {
+            imgAttach(0, npcA, pov);   // a site-1 attach pending on THIS thread
+            stage = 1;
+            while (stage < 2) std::this_thread::yield();
+            imgAttach(0, npcB, pov);
+            stage = 3;
+        });
+        while (stage < 1) std::this_thread::yield();
+        imgAttach(1, skelQ, pov);      // a lone site 2 on the main thread while ANOTHER thread has a site 1 pending: nothing pairs across threads
+        check(third() == L && explorerCamSkeleton(0).latches == latchesBefore, "TWO THREADS: a site-2 attach on one thread never pairs with a site-1 attach pending on another");
+        imgInvoke(skelL2, skelF2, pov);   // the local player's invocation on the main thread, between the NPC thread's two attaches
+        stage = 2;
+        while (stage < 3) std::this_thread::yield();
+        npcThread.join();
+        check(third() == reinterpret_cast<uint64_t>(skelL2) && first() == reinterpret_cast<uint64_t>(skelF2) && explorerCamSkeleton(0).latches == latchesBefore + 1,
+              "...the local pair on the main thread latches while the other thread's NPC attaches go on around it, and the NPC thread's later site-1 attach does not disturb it");
+    }
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("the local avatar's skeleton pair changed: third-person 0x") == 1 && has(rig.cap.nth("skeleton pair changed", 0), "was 0x") && !has(rig.cap.nth("skeleton pair changed", 0), "(was 0x0)"),
+          "LOG: a second line when the third-person skeleton changes again (a new local avatar), naming the one it replaced");
+    // The old AMC no longer matches; the new local AMC gets its own census.
+    localAmc2.init(reinterpret_cast<uint64_t>(skelL2), 3);
+    localAmc.refillMasks();
+    imgFade(localAmc.b);
+    check(localAmc.allMasksIntact(), "AFTER THE LATCH MOVED: the previous local AMC is no longer matched");
+    imgFade(localAmc2.b);
+    rig.cap.clear();
+    rig.boundary();
+    check(localAmc2.onlyHeadZeroed() && rig.cap.count("census of the local third-person avatar AMC 0x") == 1, "...the new one is hidden and gets its own census (one census per LOCAL AMC change)");
+
+    // ---- another thread's attach INSIDE the local invocation, between its site 1 and its site 2 -------------------------------------------------------------
+    {
+        static alignas(16) uint8_t skelL4[0x100], skelF4[0x100];
+        static const void* s_pov = nullptr;
+        s_pov = pov;
+        g_cimgBetween = [] { std::thread worker([] { imgAttach(0, npcC, s_pov); }); worker.join(); };   // an NPC's site 1 on another thread, mid-invocation
+        const uint32_t latchesBefore = explorerCamSkeleton(0).latches, rawBefore = explorerCamSkeleton(0).captures;
+        imgInvoke(skelL4, skelF4, pov);
+        g_cimgBetween = nullptr;
+        check(third() == reinterpret_cast<uint64_t>(skelL4) && first() == reinterpret_cast<uint64_t>(skelF4) && explorerCamSkeleton(0).latches == latchesBefore + 1 &&
+                  explorerCamSkeleton(0).captures == rawBefore + 2,
+              "AN NPC ATTACH ON ANOTHER THREAD INSIDE THE LOCAL INVOCATION (between its site 1 and its site 2) does not break the latch: the pending site 1 is per thread");
+    }
+
+    // ---- the second witness: the AMC's world origin against the commander root ---------------------------------------------------------------------------
+    begin();
+    imgInvoke(skelL, skelF, pov);
+    localAmc.init(L, 3);
+    xformVtable[4] = reinterpret_cast<uint64_t>(&xformMatrix);
+    xformObj[0] = reinterpret_cast<uint64_t>(xformVtable);
+    localAmc.setTransform(xformObj);
+    for (int i = 0; i < 16; ++i) g_xform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+    t::setWitnessInterval(0);
+    g_xformCalls = 0;
+    for (int i = 0; i < 6; ++i) imgFade(localAmc.b);
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("witness (log only, not a gate): local AMC 0x") == 2 && has(rig.cap.nth("witness (log only", 0), "no commander root to compare with") && g_xformCalls == 6,
+          "THE WITNESS, on foot (no free camera): the AMC's origin is read through its transform handle (6 calls), and only the first TWO 'no commander root' lines are logged");
+    place();
+    // A valid frame in the activity's world pose; the placement has written the local pose.
+    {
+        float* world = reinterpret_cast<float*>(g.free + 0x70);
+        for (int i = 0; i < 16; ++i) world[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+        world[12] = 10.0f; world[13] = 0.0f; world[14] = 20.0f;
+        float localPose[16], worldPose[16];
+        std::memcpy(localPose, g.free + ecm::kOffLocalPose, 64);
+        std::memcpy(worldPose, g.free + 0x70, 64);
+        const ecm::CommanderFrame cf = ecm::commanderFrame(localPose, worldPose);
+        check(cf.valid, "(the activity's two poses make a commander frame)");
+        g_xform[12] = cf.root[0] + 3.0f; g_xform[13] = cf.root[1]; g_xform[14] = cf.root[2] + 4.0f;
+        t::setWitnessInterval(0);
+        rig.cap.clear();
+        imgFade(localAmc.b);
+        rig.boundary();
+        const std::string w = rig.cap.nth("witness (log only", 0);
+        check(has(w, "is 5.000 m from the commander root") && has(w, "about 0 means the frames agree") && has(w, "the free camera is at (10.000,0.000,20.000)") && has(w, "m from the AMC"),
+              "...in the free camera it prints the distance from the commander root (an AMC 3 m right and 4 m forward of the root is 5.000 m away) and the camera's own origin");
+        g_xform[12] = cf.root[0]; g_xform[13] = cf.root[1]; g_xform[14] = cf.root[2];
+        rig.cap.clear();
+        imgFade(localAmc.b);
+        rig.boundary();
+        check(has(rig.cap.nth("witness (log only", 0), "is 0.000 m from the commander root"), "...and 0.000 m when the AMC is at the root (the frames agree)");
+    }
+    // An AMC whose transform handle is not readable: the line says so, nothing faults.
+    localAmc.setTransform(nullptr);
+    const uint64_t callsBefore = static_cast<uint64_t>(g_xformCalls);
+    rig.cap.clear();
+    imgFade(localAmc.b);
+    rig.boundary();
+    check(has(rig.cap.nth("witness (log only", 0), "world origin could not be read") && static_cast<uint64_t>(g_xformCalls) == callsBefore && !t::headHideDown(),
+          "AN UNREADABLE TRANSFORM HANDLE (+0x208 is 0): 'world origin could not be read', no call is made, head hiding is unaffected");
+    // A transform handle whose vtable slot faults: counted as a fault of the witness only; three of them stop the witness, head hiding is untouched.
+    {
+        static alignas(16) uint64_t badVtable[8], badObj[2];
+        badVtable[4] = 0x10;   // a "function" that is not mapped: the call faults under SEH (implausible pointers are refused before the call, so use a plausible unmapped one)
+        badVtable[4] = reinterpret_cast<uint64_t>(g_cimg) + 0x2000000;   // inside the image reservation but never committed: executing it faults
+        badObj[0] = reinterpret_cast<uint64_t>(badVtable);
+        localAmc.setTransform(badObj);
+        rig.cap.clear();
+        for (int i = 0; i < 6; ++i) imgFade(localAmc.b);
+        rig.boundary();
+        check(rig.cap.count("witness (log only") == 3 && has(rig.cap.nth("witness (log only", 0), "world origin could not be read") && !t::headHideDown() && t::faults() == 0,
+              "A FAULT IN THE TRANSFORM CALL: each is caught (SEH), the line says the origin could not be read, no crash; head hiding and Explorer Cam's own fault budget are untouched");
+        const std::string after = rig.cap.nth("witness (log only", 2);
+        rig.cap.clear();
+        imgFade(localAmc.b);
+        rig.boundary();
+        check(!after.empty() && rig.cap.count("witness (log only") == 0, "...and after three faults the witness stops calling");
     }
     t::reset();
 }
@@ -3060,6 +3498,7 @@ void testGlue() {
     testTabWaitGlue(p);
     testFadeGlue(p);
     testHeadHideGlue(p);
+    testSkeletonLatch(p);
     testSessionEnds(p);
     testFaults(p);
     testObservers(p);

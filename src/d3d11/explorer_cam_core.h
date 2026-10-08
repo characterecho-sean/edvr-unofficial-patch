@@ -705,7 +705,7 @@ private:
 };
 
 // What F5 does when pressed. Pure, so the table is a test.
-enum class F5Action : uint32_t { None = 0, Enter, Exit, RefuseOff, RefuseControllerIdle, RefuseNotOnFoot };
+enum class F5Action : uint32_t { None = 0, Enter, Exit, RefuseOff, RefuseControllerIdle, RefuseNotOnFoot, RefuseFocus };
 struct F5Inputs {
     bool pressed = false;           // the key's edge this frame (Hotkey: foreground-gated, never captured)
     bool gameplay = false;          // the journal says gameplay has started (or there is no journal to ask)
@@ -713,15 +713,44 @@ struct F5Inputs {
     bool sessionActive = false;     // an Explorer Cam session is on
     bool controllerAlive = false;   // the camera controller's update has been called within the last 30 frames
     uint8_t mode = 0;               // the controller's mode byte as last read
-    bool onFootKnown = false, onFoot = false;   // Status.json
+    bool onFootKnown = false, onFoot = false;   // Status.json Flags2 bit 0
+    bool focusKnown = false;        // Status.json GuiFocus is in the file
+    uint32_t focus = 0;             // ...and its value (0 = no panel)
 };
+// ENTER needs ALL of: gameplay; on foot, known and true, in EVERY controller mode (the camera suite open in a ship or an SRV never enters, and an unknown
+// state does not either); and no panel: GuiFocus known and 0. An UNKNOWN focus refuses with the camera closed (mode 0: first person cannot be told from a
+// panel) and is allowed in the camera suite (modes 1-4), where on foot is known true by then. Status.json's OnFoot lags about 6 s after a disembark, which
+// only delays the first F5 after stepping out. EXIT is always allowed while a session is on: any mode, any focus, whatever the journal says.
 inline F5Action decideF5(const F5Inputs& in) {
     if (!in.pressed || !in.gameplay) return F5Action::None;
     if (!in.active) return F5Action::RefuseOff;
     if (in.sessionActive) return F5Action::Exit;
+    if (!in.onFootKnown || !in.onFoot) return F5Action::RefuseNotOnFoot;
+    if (in.focusKnown) {
+        if (in.focus != 0) return F5Action::RefuseFocus;
+    } else if (in.mode == 0) {
+        return F5Action::RefuseFocus;
+    }
     if (!in.controllerAlive) return F5Action::RefuseControllerIdle;
-    if (in.mode == 0 && in.onFootKnown && !in.onFoot) return F5Action::RefuseNotOnFoot;
     return F5Action::Enter;
+}
+// Status.json GuiFocus values (the Elite Journal documentation's list).
+inline const char* guiFocusName(uint32_t f) {
+    switch (f) {
+        case 0: return "none";
+        case 1: return "the right (internal) panel";
+        case 2: return "the left (external) panel";
+        case 3: return "the comms panel";
+        case 4: return "the role panel";
+        case 5: return "station services";
+        case 6: return "the galaxy map";
+        case 7: return "the system map";
+        case 8: return "the orrery";
+        case 9: return "the FSS";
+        case 10: return "the SAA";
+        case 11: return "the codex";
+        default: return "an unnamed panel";
+    }
 }
 
 // ---- the avatar fade global ---------------------------------------------------------------------------------------------------
@@ -1262,12 +1291,20 @@ inline void formatFade(char* out, size_t cap, FadeEvent ev, int32_t value, uint3
 }
 
 // The F5 key's own lines (frame thread).
-inline void formatF5(char* out, size_t cap, F5Action a, uint32_t mode, bool onFootKnown, bool onFoot) {
+inline void putGuiFocus(Line& o, bool known, uint32_t focus) {
+    if (known) o.put("%u (%s)", focus, guiFocusName(focus));
+    else o.put("unknown (Status.json has no GuiFocus)");
+}
+inline void formatF5(char* out, size_t cap, F5Action a, const F5Inputs& in) {
     Line o(out, cap);
+    const uint32_t mode = in.mode;
+    const bool onFootKnown = in.onFootKnown, onFoot = in.onFoot;
     switch (a) {
         case F5Action::Enter:
-            o.put("%s F5 pressed: entering Explorer Cam (camera mode %u, %s; on foot: %s)", prefix(), mode, modeText(mode),
+            o.put("%s F5 pressed: entering Explorer Cam (camera mode %u, %s; on foot: %s; GuiFocus: ", prefix(), mode, modeText(mode),
                   onFootKnown ? (onFoot ? "yes" : "no") : "unknown");
+            putGuiFocus(o, in.focusKnown, in.focus);
+            o.put(")");
             break;
         case F5Action::Exit:
             o.put("%s F5 pressed: leaving Explorer Cam (camera mode %u, %s)", prefix(), mode, modeText(mode));
@@ -1281,7 +1318,19 @@ inline void formatF5(char* out, size_t cap, F5Action a, uint32_t mode, bool onFo
                   prefix());
             break;
         case F5Action::RefuseNotOnFoot:
-            o.put("%s F5 pressed, but you are not on foot and the camera is closed: Explorer Cam starts on foot, or from inside the camera", prefix());
+            o.put("%s F5 pressed, but Explorer Cam only starts on foot, in first person or in the on-foot camera: Status.json says on foot = %s (camera mode %u, %s), "
+                  "GuiFocus = ",
+                  prefix(), onFootKnown ? (onFoot ? "yes" : "no") : "unknown (Status.json has no Flags2: no journal yet, or the menus)", mode, modeText(mode));
+            putGuiFocus(o, in.focusKnown, in.focus);
+            o.put(". A ship's or SRV's camera never enters. Status.json's OnFoot lags about 6 s after you step out, so the first F5 after disembarking may need a moment");
+            break;
+        case F5Action::RefuseFocus:
+            o.put("%s F5 pressed, but a panel may have the focus: Status.json GuiFocus = ", prefix());
+            putGuiFocus(o, in.focusKnown, in.focus);
+            o.put(" with on foot = yes (camera mode %u, %s). ", mode, modeText(mode));
+            if (!in.focusKnown) o.put("With the camera closed, first person cannot be told from an open panel without it. ");
+            else if (mode >= 1 && mode <= 4) o.put("The game reports a non-zero GuiFocus while its own camera suite is open; if that is not a panel, this line is how to see it. ");
+            o.put("Close the panel (inventory, maps, station services, the FSS and so on) and press again");
             break;
         default:
             o.put("%s F5 pressed: nothing to do", prefix());
@@ -1302,6 +1351,7 @@ struct HeartbeatIn {
     uint64_t hookCalls = 0, hookCallsWindow = 0;
     uint64_t ctlCalls = 0, ctlCallsWindow = 0;
     // Phase 2: hiding the head parts.
+    uint32_t latches = 0;             // times the local avatar's skeleton pair was latched
     const char* hide = "off";         // "on" | "off" | "stood down"
     uint64_t localAmc = 0;
     uint64_t amcCalls = 0, amcMatches = 0;
@@ -1322,7 +1372,7 @@ inline void formatHeartbeat(char* out, size_t cap, const HeartbeatIn& h) {
     o.put("%s heartbeat: phase=%s session=%s act=0x%llX +0x48C=%u window=%.1fs updates_placed=%llu(+%llu) collision_bypassed=%llu(+%llu) "
           "collision_forwarded=%llu(+%llu) box_bypassed=%llu(+%llu) box_forwarded=%llu(+%llu) hook_calls=%llu(+%llu) "
           "controller_calls=%llu(+%llu) controller_mode=%u fade_global_held_by_edvr=%s ui_hidden_by_edvr=%s ui_calls=%llu faults=%u waiting_updates=%llu contended=%llu "
-          "foreign=%llu events_lost=%llu eye(up=%.3f forward=%.3f right=%.3f) head_hide=%s local_amc=0x%llX amc_calls=%llu local_matches=%llu "
+          "foreign=%llu events_lost=%llu eye(up=%.3f forward=%.3f right=%.3f) skeleton_latches=%u head_hide=%s local_amc=0x%llX amc_calls=%llu local_matches=%llu "
           "hide_calls=%llu(+%llu) masks_zeroed=%llu(+%llu) hide_faults=%u",
           prefix(), h.phase, h.session ? "on" : "off", static_cast<unsigned long long>(h.activity), h.state, h.windowSeconds,
           static_cast<unsigned long long>(h.updates), static_cast<unsigned long long>(h.updatesWindow),
@@ -1334,10 +1384,55 @@ inline void formatHeartbeat(char* out, size_t cap, const HeartbeatIn& h) {
           static_cast<unsigned long long>(h.ctlCalls), static_cast<unsigned long long>(h.ctlCallsWindow), h.ctlMode,
           h.fadeOurs ? "yes" : "no", h.uiHiddenByUs ? "yes" : "no", static_cast<unsigned long long>(h.uiCalls), h.faults,
           static_cast<unsigned long long>(h.waiting), static_cast<unsigned long long>(h.contended),
-          static_cast<unsigned long long>(h.foreign), static_cast<unsigned long long>(h.lost), h.eye.up, h.eye.forward, h.eye.right, h.hide,
+          static_cast<unsigned long long>(h.foreign), static_cast<unsigned long long>(h.lost), h.eye.up, h.eye.forward, h.eye.right, h.latches, h.hide,
           static_cast<unsigned long long>(h.localAmc), static_cast<unsigned long long>(h.amcCalls), static_cast<unsigned long long>(h.amcMatches),
           static_cast<unsigned long long>(h.hideCalls), static_cast<unsigned long long>(h.hideCallsWindow), static_cast<unsigned long long>(h.zeroed),
           static_cast<unsigned long long>(h.zeroedWindow), h.hideFaults);
+}
+
+// ---- the commander's frame from the free camera's two poses ----------------------------------------------------------------
+// The free-camera activity holds its pose twice: commander-local at +0x3B0 and world at +0x70, and under the relative lock
+// world = local x F + root, rows being axes (row vectors times matrices). With L the local axes (3x3, rows 0-2) and W the world
+// axes: W = L x F, so F = L^T x W for an orthonormal L; F's rows are the commander's right, up and forward in world space. The
+// root is what is left of the world origin once the local origin has been carried through F:  root = W.origin - L.origin x F.
+// A point in world space is in commander-local axes at  local[i] = dot(point - root, F.row(i)).
+struct CommanderFrame {
+    float f[9] = {};        // F, row-major 3x3
+    float root[3] = {};
+    bool valid = false;     // both 3x3s finite and their rows near unit length
+};
+inline bool rowsNearUnit(const float m16[16]) {
+    for (int r = 0; r < 3; ++r) {
+        const float x = m16[r * 4], y = m16[r * 4 + 1], z = m16[r * 4 + 2];
+        const float len2 = x * x + y * y + z * z;
+        if (!(len2 > 0.25f && len2 < 4.0f)) return false;   // also false for NaN
+    }
+    return true;
+}
+inline CommanderFrame commanderFrame(const float local[16], const float world[16]) {
+    CommanderFrame c;
+    if (!rowsNearUnit(local) || !rowsNearUnit(world)) return c;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            float sum = 0;
+            for (int k = 0; k < 3; ++k) sum += local[k * 4 + i] * world[k * 4 + j];   // (L^T x W)[i][j]
+            c.f[i * 3 + j] = sum;
+        }
+    for (int j = 0; j < 3; ++j) {
+        float carried = 0;
+        for (int i = 0; i < 3; ++i) carried += local[12 + i] * c.f[i * 3 + j];       // (L.origin x F)[j]
+        c.root[j] = world[12 + j] - carried;
+    }
+    c.valid = true;
+    return c;
+}
+// A world point in the commander's axes: x right, y up, z forward (the +0x3B0 pose's convention).
+inline void worldToCommanderLocal(const CommanderFrame& c, const float point[3], float out[3]) {
+    for (int i = 0; i < 3; ++i) {
+        float sum = 0;
+        for (int j = 0; j < 3; ++j) sum += (point[j] - c.root[j]) * c.f[i * 3 + j];
+        out[i] = sum;
+    }
 }
 
 // ---- Phase 2: hiding the head parts of the local third-person avatar ----------------------------------------------------------------
@@ -1391,6 +1486,13 @@ inline int findCaptureSite(uintptr_t returnAddress, uintptr_t name, uintptr_t si
     if (returnAddress == site2) return 1;
     return -1;
 }
+// Is a site-2 attach the second half of the same invocation as the thread's last site-1 attach? 0x19B1240 attaches ONE humanoid's avatars per call: index 1
+// (third person) at site 1, then index 0 (first person) at site 2, both from one frame (no push between: the return-address slot is the same address), and only
+// the local player has a first-person avatar. A pair is the local avatar's when the site-1 attach is still pending on this thread, sits at the same stack slot,
+// and is a different interface. A lone site-1 attach is any humanoid's (an NPC's) and never latches.
+inline bool isLocalPair(bool site1Valid, uintptr_t site1Where, uintptr_t site2Where, uint64_t site1Iface, uint64_t site2Iface) {
+    return site1Valid && site1Where == site2Where && site1Where != 0 && site1Iface != 0 && site2Iface != 0 && site1Iface != site2Iface;
+}
 
 // What a local AMC holds, taken once when it is first seen: which parts have instances, which variants, their state and flags.
 struct PartCensus {
@@ -1416,6 +1518,35 @@ struct AmcCensus {
 };
 static_assert(std::is_trivially_copyable<AmcCensus>::value, "the census is copied through a ring");
 inline const char* prefixHide() { return "explorer cam head hide:"; }
+// The second witness that an AMC is the local one (log only, not a gate): its world origin, read the way the fade code reads it (rcx = *(AMC+0x208), a call
+// through that object's vtable slot +0x20 returns a matrix whose origin is at +0x30), against the commander root the free camera's two poses give. About 0
+// when the frames agree.
+constexpr uint32_t kOffAmcTransform = 0x208, kTransformMatrixSlot = 0x20, kMatrixOriginOff = 0x30;
+struct AmcWitness {
+    uint64_t amc = 0;
+    uint32_t flags = 0;       // bit 0 the AMC's origin was read, bit 1 the commander root is known, bit 2 the free camera's origin was read
+    float origin[3] = {};     // the AMC's world origin
+    float root[3] = {};       // the commander root (the free camera's frame)
+    float camera[3] = {};     // the free camera's world origin (activity +0xA0)
+};
+static_assert(std::is_trivially_copyable<AmcWitness>::value, "the witness is copied through a ring");
+inline float dist3(const float a[3], const float b[3]) {
+    const float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2];
+    return std::sqrt(x * x + y * y + z * z);
+}
+inline void formatWitness(char* out, size_t cap, const AmcWitness& w) {
+    Line o(out, cap);
+    o.put("%s witness (log only, not a gate): local AMC 0x%llX ", prefixHide(), static_cast<unsigned long long>(w.amc));
+    if (!(w.flags & 1)) {
+        o.put("world origin could not be read (the transform handle at +0x208 or its vtable slot +0x20 did not answer)");
+        return;
+    }
+    o.put("world origin (%.3f,%.3f,%.3f)", w.origin[0], w.origin[1], w.origin[2]);
+    if (w.flags & 2) o.put(" is %.3f m from the commander root (%.3f,%.3f,%.3f): about 0 means the frames agree", static_cast<double>(dist3(w.origin, w.root)), w.root[0], w.root[1], w.root[2]);
+    else o.put("; no commander root to compare with (the free camera is not tracked, or its poses are not a frame)");
+    if (w.flags & 4) o.put("; the free camera is at (%.3f,%.3f,%.3f), %.3f m from the AMC", w.camera[0], w.camera[1], w.camera[2], static_cast<double>(dist3(w.origin, w.camera)));
+}
+
 inline void putVariants(Line& o, uint8_t bits) {
     for (uint32_t k = 0; k < kPartVariants; ++k)
         if (bits & (1u << k)) o.put("%u", k);
