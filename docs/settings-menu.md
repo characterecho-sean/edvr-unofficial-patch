@@ -167,28 +167,32 @@ ruled-out list); the summary above points here.
 
 BUILT, NOT FLOWN. A page after Fixes: `hotkey.menu`, `.explorer_cam`,
 `.toggle_exposure`, `.dump_camera`, and with `menu.developer` also
-`.dump_draws`, `.dump_eyes`. In edvr.ini `# ui: ... | hotkey | live` is a row
-for everyone and `# dev: label ... | hotkey` a developer-only one (the
-generator's tiers; the section names the page). Enter waits for the NEXT
-input: a key with Ctrl/Shift/Alt held, a pad button or trigger, or a HOTAS
-button or hat. Esc cancels; Delete or Backspace clears, except `hotkey.menu`
-(changed, never cleared). While it waits the menu's navigation does not run,
-so binding Up or Enter cannot move the highlight, and keys held at the end are
-primed. Navigation keys (arrows, Enter, Space, Tab, PageUp/Down, Home, End, R,
-Esc) are refused bare; Ctrl or Alt frees them. An exact copy of another hotkey
-is refused, naming it; a press Elite also binds WARNS (badge "also in
-Elite"), since keys are watched, never captured. `hotkey.explorer_cam` is the
-Explorer Cam switch (empty = off), checked against on-foot bindings, and
-locked while a session is on.
+`.dump_draws`, `.dump_eyes` (`# ui: ... | hotkey | live` is a row for
+everyone, `# dev: label ... | hotkey` a developer-only one). Enter waits for
+the NEXT input: a key with Ctrl/Shift/Alt held, a pad button or trigger, or a
+HOTAS button or hat. Esc cancels; Delete or Backspace clears, except
+`hotkey.menu` (changed, never cleared). The menu's navigation does not run
+meanwhile. Arrows, Enter, Space, Tab, PageUp/Down, Home, End, R and Esc are
+refused WITH ANY MODIFIER, for every hotkey, the menu key too: the menu reads
+them raw, so CTRL+ENTER would also be its Enter and CTRL+ALT+ESCAPE would
+open the panel and close it in one tick. An exact copy of another hotkey is
+refused, naming it; a press Elite also binds WARNS ("also in Elite"): keys are
+watched, never captured. `hotkey.explorer_cam` is the Explorer Cam switch
+(empty = off), checked against on-foot bindings, locked while a session is on.
+
+Ending a capture PRIMES every live Hotkey (`hotkeysSuspend(false)`): each
+latch takes what is held, key, pad or HOTAS. The menu ticks before Explorer
+Cam's F5 is polled, so the press that ended a capture (a refused duplicate, an
+unchanged F5) was a fresh edge there. The rig runs the real `Hotkey` in that
+poll order for each outcome and each kind of Explorer key.
 
 Values: `F5`, `CTRL+SHIFT+F9`; `GamePad_Back`; `231D0200:Joy_12`,
 `231D0200:Joy_POV1Up` (vendor then product, as Elite's .binds write it). HOTAS
 is watched: input_gate copies buttons and hats out of the game's own
 GetDeviceState/GetDeviceData after they return (joy_watch.h), makes no device,
-and calls only GetCapabilities and, once a second, GetDeviceInfo. The four
-diagnostic keys now re-resolve live. A flight checks the `joystick watch:`
-log line (state or data), the Joy_N against the .binds, and no stall.
-
+and calls only GetCapabilities and GetDeviceInfo. The four diagnostic keys
+re-resolve live. A flight checks the `joystick watch:` log line, the Joy_N
+against the .binds, and no stall.
 ## The ask
 
 *A design document, written before the code. It supersedes and extends

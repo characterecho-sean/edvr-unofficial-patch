@@ -127,7 +127,11 @@ bool eliteElementIsOnFoot(const char* element) {
 
 bool hotkeyReservedByMenu(const HotkeyBinding& b) {
     if (b.kind != HotkeyKind::Key) return false;
-    if (b.mods & (kHotkeyCtrl | kHotkeyAlt)) return false;
+    // WHATEVER THE MODIFIERS (review 2026-10-08, finding 2). The menu reads these keys raw
+    // (GetAsyncKeyState) and never asks what else is held, so CTRL+ENTER pressed in the
+    // menu is also its Enter, and CTRL+ALT+ESCAPE is also its Escape: a chord does not move
+    // the key out of the menu's reach. An exemption for Ctrl and Alt here would be a rule the
+    // dispatch does not keep.
     switch (b.vk) {
         case VK_UP: case VK_DOWN: case VK_LEFT: case VK_RIGHT:
         case VK_RETURN: case VK_SPACE: case VK_TAB:

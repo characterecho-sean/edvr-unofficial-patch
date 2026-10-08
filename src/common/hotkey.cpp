@@ -67,12 +67,19 @@ static bool gameHasFocus() {
     return pid == GetCurrentProcessId();
 }
 
+// The keyboard. GetAsyncKeyState, unless a rig has put a reader of its own in (hotkey.h).
+static HotkeyKeyDownFn g_keyReader = nullptr;
+void hotkeySetKeyboardReaderForTest(HotkeyKeyDownFn fn) { g_keyReader = fn; }
+static bool rawKeyDown(int vk) {
+    return g_keyReader ? g_keyReader(vk) : (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
 // Which modifiers are physically down right now.
 static uint32_t heldMods() {
     uint32_t m = 0;
-    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) m |= kHotkeyCtrl;
-    if (GetAsyncKeyState(VK_MENU) & 0x8000) m |= kHotkeyAlt;
-    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) m |= kHotkeyShift;
+    if (rawKeyDown(VK_CONTROL)) m |= kHotkeyCtrl;
+    if (rawKeyDown(VK_MENU)) m |= kHotkeyAlt;
+    if (rawKeyDown(VK_SHIFT)) m |= kHotkeyShift;
     return m;
 }
 
@@ -156,8 +163,55 @@ static HotkeyHeldFn g_nonKeyboardReader = nullptr;
 
 void hotkeySetNonKeyboardReader(HotkeyHeldFn fn) { g_nonKeyboardReader = fn; }
 
+// Every live Hotkey, so a suspension that lifts can prime them all (hotkey.h). A fixed array of
+// pointers and a lock, both constant-initialised: a Hotkey in another file's static storage
+// (Explorer Cam's F5) registers itself from its constructor whatever the order the files
+// initialise in, and the registry needs nothing from the CRT to be ready.
+constexpr int kLiveMax = 128;
+static Hotkey*  g_live[kLiveMax];
+static SRWLOCK  g_liveLock = SRWLOCK_INIT;
+
+static void liveAdd(Hotkey* h) {
+    AcquireSRWLockExclusive(&g_liveLock);
+    for (Hotkey*& slot : g_live) {
+        if (!slot) {
+            slot = h;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_liveLock);
+}
+
+static void liveRemove(Hotkey* h) {
+    AcquireSRWLockExclusive(&g_liveLock);
+    for (Hotkey*& slot : g_live) {
+        if (slot == h) slot = nullptr;
+    }
+    ReleaseSRWLockExclusive(&g_liveLock);
+}
+
+void hotkeysPrimeAll() {
+    AcquireSRWLockExclusive(&g_liveLock);
+    for (Hotkey* h : g_live) {
+        if (h) h->primeToHeldNow();
+    }
+    ReleaseSRWLockExclusive(&g_liveLock);
+}
+
+int hotkeysLiveCount() {
+    int n = 0;
+    AcquireSRWLockExclusive(&g_liveLock);
+    for (const Hotkey* h : g_live) n += h != nullptr;
+    ReleaseSRWLockExclusive(&g_liveLock);
+    return n;
+}
+
 static std::atomic<bool> g_suspended{false};
-void hotkeysSuspend(bool on) { g_suspended.store(on, std::memory_order_relaxed); }
+// Lifting primes first, while still suspended, so no poll can fall between the two.
+void hotkeysSuspend(bool on) {
+    if (!on && g_suspended.load(std::memory_order_relaxed)) hotkeysPrimeAll();
+    g_suspended.store(on, std::memory_order_relaxed);
+}
 bool hotkeysSuspended() { return g_suspended.load(std::memory_order_relaxed); }
 
 bool hotkeyBindingsEqual(const HotkeyBinding& a, const HotkeyBinding& b) {
@@ -176,7 +230,7 @@ bool hotkeyBindingsEqual(const HotkeyBinding& a, const HotkeyBinding& b) {
 // pressedWith); the others come from the reader.
 bool Hotkey::readDownNow() const {
     switch (m_bind.kind) {
-        case HotkeyKind::Key: return (GetAsyncKeyState(m_bind.vk) & 0x8000) != 0;
+        case HotkeyKind::Key: return rawKeyDown(m_bind.vk);
         case HotkeyKind::Pad:
         case HotkeyKind::Joy: return g_nonKeyboardReader && g_nonKeyboardReader(m_bind);
         default: return false;
@@ -195,9 +249,17 @@ void Hotkey::giveRegistryEntry() {
     m_registered = false;
 }
 
+Hotkey::Hotkey() { liveAdd(this); }
+
+Hotkey::Hotkey(int vk) {
+    liveAdd(this);
+    setKey(vk);
+}
+
 Hotkey::Hotkey(const Hotkey& o)
     : m_bind(o.m_bind), m_down(o.m_down), m_missedUnfocused(o.m_missedUnfocused),
       m_gameMirrored(o.m_gameMirrored) {
+    liveAdd(this);
     if (o.m_registered) takeRegistryEntry();
 }
 
@@ -212,7 +274,10 @@ Hotkey& Hotkey::operator=(const Hotkey& o) {
     return *this;
 }
 
-Hotkey::~Hotkey() { giveRegistryEntry(); }
+Hotkey::~Hotkey() {
+    liveRemove(this);
+    giveRegistryEntry();
+}
 
 // setKey does not register (it never did): a key set by number is not a binding
 // the better-match rule or the menu's adoption check should hear about.
