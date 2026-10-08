@@ -56,9 +56,9 @@
   motion/coverage; inspect remaining WORLD and building pixels separately.
   Visual verification is open. Native primary records stay unchanged; no bones,
   estimation or generic pool matching. NPC F1 (Sean 2026-10-08: NPC families
-  only, if the dumps support it): the F10 entry plans four keyed pairs, unbuilt;
-  whole-mask gain 7-32% (D3 1.36 -> 0.93-1.26 px, share INFERRED), stale class
-  (38%) gone. F2 (previous palette, unproven) needs F1 first.
+  only, if the dumps support it): BUILT on claude/explorer-cam-npc-motion, VR
+  only, green, not flown ("F1 built" entry); gain 7-32% whole-mask (D3 1.36 ->
+  0.93-1.26 px, INFERRED), stale class (38%) gone. F2 (palette, unproven) needs F1.
 
 ## Premise
 
@@ -3984,3 +3984,60 @@ word != 0).
    prerequisite for any F2, since a skinned draw must be keyed to carry its
    record at all; F2 needs a previous bone palette, unproven because the
    bones0/1 copies of this flight read all zeros (the base list is stable).
+
+### 2026-10-08 F1 built: the NPC's four pool pairs keyed, VR only
+
+Branch claude/explorer-cam-npc-motion on the Explorer Cam branch a6dc34a9 (merge
+7774f09b, no conflict). Full build.bat green with its receipt;
+engine_velocity_test 15,399 checks. Not flown, not installed, no config key.
+- engine_velocity_families.h: rows 8B589D25B2A0ADDC/7268762D11A610F2,
+  7B0DC42D383F694C/0DF03E64DF9DBEF1, 114AF608F86D9ED8/A17504A2627767F2,
+  D99AFDC250D19A3F/E86271E464CCDC1D, each hash recomputed (FNV-1a 64) from the
+  dumped bytecode (analysis\npc_blur\f38_hashes.py), and a new Family::vrOnly
+  that familyForProfile and keyedPs honour; engine_velocity.h kMaxFamilies 10 ->
+  16. The family index is a plain int everywhere (engine_velocity.h:110,
+  engine_velocity.cpp:125,178); 14 families fit every array.
+- Flat decision, VR only: 7B0D, 8B58 and 114A are weapon_motion's first-person
+  families (weapon_motion.cpp:92), and flat routes a supported pair of one into
+  its foreground and source shapes (flat_runtime.cpp:4756, 4986, 5102;
+  supportedPair also feeds flat_hdr_route.h:231). Keying them in flat changes
+  the weapon path that was FLOWN OK with them unkeyed, and no flat dump holds
+  the pairs. In VR a weapon draw under its own camera is declined by
+  sourceCameraHolds (engine_velocity.cpp:1554), screen_motion.cpp:270 skips
+  weapon families, and the world route tests attached and foreground before
+  engineBefore (flat_mono_shader_source.h:195-247): INFERRED, unflown.
+- Rig (engine_velocity_test): the VR/flat table checks for the four pairs and
+  their cross-pairings, a skinned record (word 0 != 0, no marker, hostile
+  previous block) in the consumer case at pxSkin (kind 3, baseline, flags,
+  Stats[52] = 2), an emit check that a base != 0 record is never emitted (the old
+  line only compared the native copy, which a primary sink never writes), and
+  the four pairs in the --corpus list. Mutants, each built and run in a mirror
+  (analysis\npc_blur\f1_mutants.py), control 15,399 checks passed: kMaxFamilies
+  left at 10 -- compile error (static_assert); a row dropped (8B58, D99A) --
+  "each NPC pair is keyed in VR"; base != 0 taken as rigid in the emit -- the
+  new emit check (the old rig did NOT catch it); base != 0 taken as joined in
+  the consumer HLSL -- the capture-flag and Stats checks; vrOnly dropped from a
+  row, or ignored by familyForProfile -- "stay unkeyed in flat".
+- Log signatures on a Frontier flight. Success: `engine motion: family vs_8B58...:
+  live; substituted N binds, M draws; patched [ps_7268762D11A610F2]` and the
+  same for 7B0D, 114A, D99A (M > 0 even without an NPC: props use them, D2 had
+  142 draws a frame); `pixels per eye-frame on the trained path` stale slot
+  down by about the NPC's stale pixels (D3 8,415 per eye-frame), pool surface
+  not a rig record and engine-joined up; world route stale-refused per sampled
+  frame in NPC windows <= 1.4k (was 3.6-7.6k). Never ran: the four lines read
+  "not created by the game this session ... 0 binds, 0 draws; patched []" (a
+  hash that matches nothing: the game does create these shaders) or "unkeyed
+  pixel shader ps_X left stock" (a PS variant not keyed); stale numbers stay.
+  Regression: "STOOD DOWN" on a new family; `masked` or `stale stamp` above 0
+  on the trained-path line (both 0 in F10); stale-refused above 1.4k in a
+  window with no NPC; `weapon=` above 0 with the weapon holstered.
+- Price lines that exist: CPU `engine motion CPU, render thread` draw side p50
+  0.02-0.06 ms (F10); GPU `EDVR GPU census, Elite's own draws that EDVR alters`
+  pool-family draws 0.167 ms at 7824.10 a frame and `engine velocity` 0.197 ms
+  in the in-frame list. That GPU figure times each game draw whole, so the
+  change is a same-scene delta, and there is no line for EDVR's share alone.
+  Correction to the plan: 7,824 substituted draws a frame today, not 3.3k, so
+  +200 is +2.6%.
+- Doubts: kRememberCap (engine_velocity.cpp:137) keeps 512 shader objects and
+  drops the rest silently; the pairs are keyed for VR only, so the flat screen
+  keeps its stale NPC refusal until a flat dump says otherwise.

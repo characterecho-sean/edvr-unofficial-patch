@@ -290,11 +290,12 @@ inline void run(const Harness& h,const uint32_t* primaryRecord=nullptr,uint32_t 
     // reused from a -- irrelevant, since a masked kind never reaches the
     // reprojection math), 2 an unmoved JOINED record (c), 3 a record with a
     // garbage marker: a valid pose, not a rig record (kind 3), 4 a JOINED
-    // record stamped with an OLDER frame (h): the stale-stamp decline. 5..7
-    // unused.
+    // record stamped with an OLDER frame (h): the stale-stamp decline, 5 a
+    // SKINNED record (F10, 2026-10-08), 6..7 unused.
     std::vector<Record> pool(8);
     const uint16_t* ident = identLanes();
 
+    const Px pxSkin{8, 8};   // off the 4-px grid below: the consumer reads ES at the pixel itself, so its neighbours do not matter
     const Px pxA{2, 2}, pxB{2, 6}, pxC{2, 10};
     const Px pxD1{6, 2}, pxD2{6, 6}, pxD3{6, 10};
     const Px pxE{10, 2}, pxF{10, 6}, pxG{10, 10}, pxNotRig{13, 13}, pxStamp{13, 2};
@@ -330,6 +331,16 @@ inline void run(const Harness& h,const uint32_t* primaryRecord=nullptr,uint32_t 
     pool[4] = pool[0];
     pool[4].mark(ev::kJoined, stampFrame - 1);
 
+    // 5: a SKINNED record as the game writes it (F10, the walking NPC's body: 20 records, palette bases 7656..10383):
+    // word 0, the palette base, is not 0, scale 1.0, and the marker word is 0 -- EDVR's emit leaves a base != 0
+    // record native, so it carries no previous pose and no marker. The previous block is made hostile on purpose
+    // (case a's 2 / -1 / 3 m delta): were the consumer to read this record as a rig record, the pixel would replay a
+    // phantom motion, and the F10 plan (key the skinned pairs so their pixels stop carrying a stale slot) would
+    // paint the NPC's body with it. Kind 3: the camera term stands, exactly like the no-engine baseline.
+    pool[5].pose(posANow, ident, 1.0f, false);
+    pool[5].pose(posAPrev, ident, 1.0f, true);
+    pool[5].w[0] = 7656u;
+
     // ES (t21): x = 2*slot+1 (the patched pool draw's slot code), y = the
     // depth that draw wrote, raw bits. Z (t2): the scene's own depth.
     // Background: cleared (-1, 0) everywhere -- case (f) is simply the
@@ -352,6 +363,7 @@ inline void run(const Harness& h,const uint32_t* primaryRecord=nullptr,uint32_t 
     setEs(pxG, 199.0f, kZBg);          // 2*99+1: slot 99 >= the pool's 8 records
     setEs(pxNotRig, 7.0f, kZBg);       // 2*3+1: a real, in-range slot with a garbage marker
     setEs(pxStamp, 9.0f, kZBg);        // 2*4+1: joined, but stamped with an older frame
+    setEs(pxSkin, 11.0f, kZBg);        // 2*5+1: a skinned record, no marker
 
     // The self-marking fallback (the game's own target-6 channel, G6 t19,
     // probe.w bit 4096): pxS joins through G6 with ES cleared; pxP has BOTH
@@ -567,9 +579,10 @@ inline void run(const Harness& h,const uint32_t* primaryRecord=nullptr,uint32_t 
     expectBaseline(pxG, "slot >= the pool's record count: declines exactly like the no-engine baseline");
     expectBaseline(pxNotRig, "a pool record that is not a rig record (garbage marker): declines exactly like the no-engine baseline");
     expectBaseline(pxStamp, "STALE STAMP (a joined marker from an older frame): declines to the camera term exactly like the no-engine baseline");
+    expectBaseline(pxSkin, "F10: a SKINNED record (word 0 != 0, no marker, hostile previous block) is kind 3: the camera term stands exactly like the no-engine baseline");
 
     // -------------------------- plain vs EDVR_TEMPORAL_DIAGNOSTICS-1: must agree --------------------------
-    for (Px p : {pxA, pxB, pxC, pxD1, pxD2, pxD3, pxE, pxF, pxG, pxNotRig, pxStamp}) {
+    for (Px p : {pxA, pxB, pxC, pxD1, pxD2, pxD3, pxE, pxF, pxG, pxNotRig, pxStamp, pxSkin}) {
         const auto pv = mvAt(plainArmed.first, p);
         const auto dv = mvAt(armedMv, p);
         h.check(pv.first == dv.first && pv.second == dv.second, "the plain and EDVR_TEMPORAL_DIAGNOSTICS-1 compiles of mv agree on MV at every constructed pixel");
@@ -588,11 +601,11 @@ inline void run(const Harness& h,const uint32_t* primaryRecord=nullptr,uint32_t 
     h.context->CSSetUnorderedAccessViews(7,1,decisionUav.GetAddressOf(),nullptr);
     const auto captured=dispatchAndRead(traceCs.Get(),2048.0f);
     const auto decisions=readTex(decisionTex.Get(),4);
-    for(Px p:{pxA,pxB,pxC,pxE,pxF,pxNotRig,pxStamp}) {
+    for(Px p:{pxA,pxB,pxC,pxE,pxF,pxNotRig,pxStamp,pxSkin}) {
         h.check(mvAt(captured.first,p)==mvAt(armedMv,p) && mkAt(captured.second,p)==mkAt(armedMk,p),
                 "capture diagnostics preserve exact production vectors and history masks");
     }
-    for(const auto& item:std::vector<std::pair<Px,unsigned>>{{pxA,1},{pxNotRig,3},{pxE,4},{pxStamp,6}}) {
+    for(const auto& item:std::vector<std::pair<Px,unsigned>>{{pxA,1},{pxNotRig,3},{pxSkin,3},{pxE,4},{pxStamp,6}}) {
         const size_t i=(size_t(item.first.y)*kDim+item.first.x)*4;
         const unsigned bits=static_cast<unsigned>(decisions[i+3]);
         h.check(decisions[i+3]==float(bits) && ((bits>>12)&7)==item.second,
@@ -608,7 +621,8 @@ inline void run(const Harness& h,const uint32_t* primaryRecord=nullptr,uint32_t 
 
     // -------------------------- Stats[50..55]: the diagnostics compile's own counters --------------------------
     // 50 joined (a, c, and pxP's ES marker -- the precedence pixel is a joined
-    // unmoved record through ES), 51 masked (b), 52 not-a-rig-record (notRig),
+    // unmoved record through ES), 51 masked (b), 52 not-a-rig-record (notRig and
+    // the skinned record, F10),
     // 53 stale (e, and the two overlap pixels o1/o2 whose ES marker is stale:
     // with bit 4096 clear the G6 channel is not read), 54 corrupt (d1 even,
     // d2 fractional), 55 stale stamp (h). d3's code 0 fails the ES.x >= 1 gate
@@ -618,7 +632,7 @@ inline void run(const Harness& h,const uint32_t* primaryRecord=nullptr,uint32_t 
     // here. The G6 pixels read baseline with bit 4096 clear, tallying nothing.
     h.check(stats[50] == 3, "Stats[50] (JOINED pixels) == 3 (a, c, pxP)");
     h.check(stats[51] == 1, "Stats[51] (MASKED pixels) == 1 (b)");
-    h.check(stats[52] == 1, "Stats[52] (pool records that are not rig records) == 1 (notRig)");
+    h.check(stats[52] == 2, "Stats[52] (pool records that are not rig records) == 2 (notRig, and the skinned record)");
     h.check(stats[53] == 3, "Stats[53] (STALE pixels) == 3 (e, and the overlap pixels o1/o2, G6 unread without bit 4096)");
     h.check(stats[54] == 2, "Stats[54] (CORRUPT pixels) == 2 (d1, d2)");
     h.check(stats[55] == 1, "Stats[55] (STALE-STAMP pixels) == 1 (h: a joined marker from an older frame)");
