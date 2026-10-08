@@ -29,7 +29,8 @@
 // binding (pin_tests.h), and the pool copier's observer running on job threads
 // without the engine mutex (copier_tests.h). build.bat links
 // src\d3d11\engine_velocity.cpp with EDVR_ENGINE_VELOCITY_RIG and the binding
-// shadow external; lifecycle_tests.h supplies the stubs.
+// shadow external; lifecycle_tests.h supplies the stubs. remember_cap_tests.h runs last: the remember
+// tables' cap, and the one line a full table writes per kind.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -59,6 +60,7 @@
 #include "pin_tests.h"
 #include "copier_tests.h"
 #include "unkeyed_tests.h"
+#include "remember_cap_tests.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/engine_velocity_families.h"   // kSelfMarking
 #include "../../third_party/dxbc_hash/DxilHash.cpp"
@@ -391,6 +393,8 @@ int wmain(int argc, wchar_t** argv) {
               "captured DE54/PS91 real VS link and G-buffer equivalence");
     }
     if (!corpusRoot.empty()) corpus(device.Get(), context.Get(), corpusRoot);
+    // Last: it fills both remember tables to their cap for the rest of the process.
+    remember_cap_tests::run({device.Get(), context.Get(), &check});
     std::printf("engine_velocity_test: %u checks passed%s%s%s.\n", g_checks,
                 corpusRoot.empty() ? "" : (g_absent ? " including the real shader corpus (PARTIAL: some pairs absent from the dump)"
                                                     : " including the real shader corpus"),
