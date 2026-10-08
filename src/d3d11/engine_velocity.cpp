@@ -1853,23 +1853,25 @@ void summaryLocked(uint64_t now) {
                     engineVelocityBindRefusalName(static_cast<EngineVelocityBindRefusal>(i)), u(g_draw.bindRefused[i]));
         refusedText += t;
     }
+    // Four lines, because the logger cuts a line at about 1167 characters and this one was 1,330 with its two lists (the first keeps the key
+    // `engine motion: movers joined`). Every figure is where it was, in the same order.
     Log::get().note("engine motion: movers joined %.1f records/frame (moving rig records the emit wrote a previous pose for); "
                     "eye-frames %llu, with MRT6 bound %llu (prepared only for an eligible draw: %llu eye-frames "
-                    "had a pool family draw, %llu a substitution; prepared for nothing %llu, under the old order %llu); "
-                    "invalidated "
-                    "%llu (%s); kept: scene constants re-mapped with rows 270..275 unchanged %llu, pool appended and "
-                    "refreshed %llu; MRT6 refused: target 6 occupied %llu, UAV bound %llu, %s, runtime rejected the set "
-                    "%llu; depth not single-sample %llu, slot target create failed %llu; blend: derived state bound %llu "
-                    "times, refused %llu%s%s%s, shadow disagreed %llu; views asked %llu, given %llu, refused: stood down "
-                    "%llu, other depth %llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene "
-                    "constants %llu.",
+                    "had a pool family draw, %llu a substitution; prepared for nothing %llu, under the old order %llu)",
                     double(g_emit.recordsMoving.load()) / frames,
                     u(g_draw.eyeFrames), u(g_draw.eyeFramesBound), u(g_draw.eyeFramesSeen), u(g_draw.eyeFramesSubstituted),
                     u(g_draw.eyeFrames > g_draw.eyeFramesSubstituted ? g_draw.eyeFrames - g_draw.eyeFramesSubstituted : 0),
-                    u(g_draw.eyeFramesSeen > g_draw.eyeFramesSubstituted ? g_draw.eyeFramesSeen - g_draw.eyeFramesSubstituted : 0),
-                    u(invalid), invalidText.c_str(),
-                    u(g_draw.sceneRowsKept), u(g_draw.poolRefreshed), u(g_draw.targetOccupied), u(g_draw.uavBound),
-                    refusedText.c_str(), u(g_draw.bindRejected), u(g_draw.depthUnsupported), u(g_draw.createFailed),
+                    u(g_draw.eyeFramesSeen > g_draw.eyeFramesSubstituted ? g_draw.eyeFramesSeen - g_draw.eyeFramesSubstituted : 0));
+    Log::get().note("engine motion: movers (2/4): invalidated %llu (%s); kept: scene constants re-mapped with rows 270..275 unchanged %llu, "
+                    "pool appended and refreshed %llu",
+                    u(invalid), invalidText.c_str(), u(g_draw.sceneRowsKept), u(g_draw.poolRefreshed));
+    Log::get().note("engine motion: movers (3/4): MRT6 refused: target 6 occupied %llu, UAV bound %llu, %s, runtime rejected the set "
+                    "%llu; depth not single-sample %llu, slot target create failed %llu",
+                    u(g_draw.targetOccupied), u(g_draw.uavBound), refusedText.c_str(), u(g_draw.bindRejected),
+                    u(g_draw.depthUnsupported), u(g_draw.createFailed));
+    Log::get().note("engine motion: movers (4/4): blend: derived state bound %llu times, refused %llu%s%s%s, shadow disagreed %llu; views "
+                    "asked %llu, given %llu, refused: stood down %llu, other depth %llu, other frame %llu, invalidated %llu, unwritten "
+                    "%llu, no previous scene constants %llu.",
                     u(g_draw.blendApplied), u(g_draw.blendRefused), g_draw.blendRefusedWhy ? " (" : "",
                     g_draw.blendRefusedWhy ? g_draw.blendRefusedWhy : "", g_draw.blendRefusedWhy ? ")" : "",
                     u(g_draw.blendShadowDisagreed), u(g_draw.viewsAsked), u(g_draw.viewsGiven), u(g_draw.refusedNoEmit),
@@ -1963,7 +1965,7 @@ void summaryLocked(uint64_t now) {
             if (g_draw.sourceDeclinedFamily[f]) add(families, kFamilies[f].name, g_draw.sourceDeclinedFamily[f]);
         char other[768] = "";
         if (g_draw.sourceDeclined[kOtherCamera])
-            _snprintf_s(other, _TRUNCATE, "; another camera changed rows 270..272 on %llu, 273 on %llu, 274 on %llu, 275 "
+            _snprintf_s(other, _TRUNCATE, "changed rows 270..272 on %llu, 273 on %llu, 274 on %llu, 275 "
                         "on %llu, its position up to %.3f m from the naming's, by family: %s",
                         u(g_draw.sourceOtherRows[0]), u(g_draw.sourceOtherRows[1]), u(g_draw.sourceOtherRows[2]),
                         u(g_draw.sourceOtherRows[3]), g_draw.sourceOtherShiftMax, families.c_str());
@@ -1990,20 +1992,26 @@ void summaryLocked(uint64_t now) {
                         "source's views are given; every pixel with advanced.temporal_aa_diagnostics = 1 or the "
                         "motion_source view; not a zero count)", kPanelSampleFrames);
         }
+        // Three lines and, when another camera moved the rows, a fourth (the logger cuts a line at about 1167 characters and this one was 1,554
+        // with its lists): the first keeps the key `engine motion: on foot:`; the camera rule's figures, then the other camera's, then the panel's
+        // pixels. Every figure is where it was, in the same order.
         Log::get().note("engine motion: on foot: source frames %llu, with MRT6 bound %llu (slot target %ux%u), "
                         "frames dropped: %s; screen views asked %llu, given %llu, refused: stood down %llu, other depth "
-                        "%llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene constants %llu; "
-                        "camera rule: namings %llu (by terrain or a scene draw %llu, by the screen's own depth %llu; rows "
-                        "not seen %llu), checks held to the naming's camera %llu, "
-                        "declined %llu in %llu frames (%s)%s; %s.",
+                        "%llu, other frame %llu, invalidated %llu, unwritten %llu, no previous scene constants %llu",
                         u(g_draw.sourceFrames), u(g_draw.sourceFramesBound), source.width, source.height,
                         dropped.empty() ? "none" : dropped.c_str(),
                         u(g_draw.sourceViewsAsked), u(g_draw.sourceViewsGiven), u(g_draw.sourceRefusedNoEmit),
                         u(g_draw.sourceRefusedDepth), u(g_draw.sourceRefusedFrame), u(g_draw.sourceRefusedInvalid),
-                        u(g_draw.sourceRefusedUnwritten), u(g_draw.sourceRefusedPrevious), u(g_draw.sourceNamings),
-                        u(g_draw.sourceNamingsBy[0]), u(g_draw.sourceNamingsBy[1]),
+                        u(g_draw.sourceRefusedUnwritten), u(g_draw.sourceRefusedPrevious));
+        Log::get().note("engine motion: on foot (2/3): camera rule: namings %llu (by terrain or a scene draw %llu, by the "
+                        "screen's own depth %llu; rows not seen %llu), checks held to the naming's camera %llu, "
+                        "declined %llu in %llu frames (%s)",
+                        u(g_draw.sourceNamings), u(g_draw.sourceNamingsBy[0]), u(g_draw.sourceNamingsBy[1]),
                         u(g_draw.sourceNamingsUnseen), u(g_draw.sourceHeld), u(declinedAll),
-                        u(g_draw.sourceDeclineFrames), declined.c_str(), other, pixels);
+                        u(g_draw.sourceDeclineFrames), declined.c_str());
+        if (other[0])
+            Log::get().note("engine motion: on foot, another camera: %s", other);
+        Log::get().note("engine motion: on foot (3/3): %s.", pixels);
     }
     if (g_draw.overlayCopies || g_draw.overlayGuardedDraws || g_draw.overlayDeclinedState ||
         g_draw.overlayDeclinedCreate || g_draw.overlayDeclinedShader)

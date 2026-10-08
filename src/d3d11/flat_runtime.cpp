@@ -745,9 +745,9 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
     w.records=history.records;w.bytes=history.bytes;w.peakRecords=history.peakRecords;w.peakBytes=history.peakBytes;
     s.foregroundMissReported=captures;
     char line[4096];
-    flatNoCandidateLine(line,sizeof(line),w);Log::get().note("%s",line);
+    for(unsigned part=0;part<kFlatNoCandidateLineParts;++part){flatNoCandidateLine(line,sizeof(line),w,part);Log::get().note("%s",line);}
     flatIdentityLine(line,sizeof(line),w);Log::get().note("%s",line);
-    flatSiblingLine(line,sizeof(line),sibling);Log::get().note("%s",line);
+    for(unsigned part=0;part<kFlatSiblingLineParts;++part){flatSiblingLine(line,sizeof(line),sibling,part);Log::get().note("%s",line);}
     flatHistoryLine(line,sizeof(line),history);Log::get().note("%s",line);
     for(unsigned part=0;part<kFlatHistoryWriteLines;++part){flatHistoryWritesLine(line,sizeof(line),history,part);Log::get().note("%s",line);}
     flatHistoryVertexLine(line,sizeof(line),history);Log::get().note("%s",line);
@@ -778,27 +778,38 @@ static void reportSourceSpell(State& s) {
         notes[i].recipe=flatProjectionDrawRecipes(s.sourcelessLast.top[i].vs,s.sourcelessLast.top[i].ps).count!=0;
     }
     char line[3072];
-    flatSourceSpellLine(line,sizeof(line),w,s.sourcelessLast,s.sourcelessLastFrame,notes);
-    Log::get().note("%s",line);
+    for(unsigned part=0;part<kFlatSourceLineParts;++part) {
+        flatSourceSpellLine(line,sizeof(line),w,s.sourcelessLast,s.sourcelessLastFrame,notes,part);
+        Log::get().note("%s",line);
+    }
 }
 static void reportForegroundDomain(State& s) {
     const auto& n=s.foregroundCounts;
     auto captures=s.foregroundRetiredCaptureStats;
     for(const auto& candidate:s.foregroundCandidates)captures.add(candidate.motion.stats());
     reportForegroundNoCandidate(s,captures);
-    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu last-refusal=%s; counts cover all depth candidates (scale-rejected-5s: draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last line), qualification alone is not a completed SDK call; history of the submitted draws, cumulative: no-candidate found no record of its geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on (pool differs, near differs, the previous draw is not there), priors-one/several matched on the GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame",
+    // Three lines, because the logger cuts a line at about 1167 characters and this one was 1,300: the first keeps the key
+    // `flat foreground SDK domain:`. The explanation that trailed it is in the design doc (section 104): counts cover all depth candidates;
+    // scale-rejected-5s is the draws at the world's near plane whose projection scale was not the world's, taken as first-person, since the last
+    // line; qualification alone is not a completed SDK call; the history of the submitted draws is cumulative (no-candidate found no record of its
+    // geometry from the frame before, no-prior-pool/near/absent had candidates and the adapter passed none on, priors-one/several matched on the
+    // GPU by identity, repeated-geometry is the draws after the first of their geometry in a frame).
+    Log::get().note("flat foreground SDK domain: configured=%s foreign-seen=%llu captured=%llu capture-attempts=%llu gpu-identity-attempts=%llu gpu-identity-submitted=%llu preflight-refused=%llu warmed-after-refusal=%llu no-candidate=%llu no-prior-pool=%llu no-prior-near=%llu no-prior-absent=%llu priors-one=%llu priors-several=%llu repeated-geometry=%llu",
         flatMonoResolveModeName(s.engine),(unsigned long long)n.foreignSeen,(unsigned long long)n.captured,
         (unsigned long long)captures.attempts,(unsigned long long)captures.gpuAttempts,
         (unsigned long long)captures.submitted,(unsigned long long)captures.preflightRefused,
         (unsigned long long)captures.warmedAfterRefusal,
         (unsigned long long)captures.noCandidate,(unsigned long long)captures.noPriorPool,(unsigned long long)captures.noPriorNear,
         (unsigned long long)captures.noPriorAbsent,(unsigned long long)captures.priorsOne,(unsigned long long)captures.priorsSeveral,
-        (unsigned long long)captures.repeated,
+        (unsigned long long)captures.repeated);
+    Log::get().note("flat foreground SDK domain (2/3): world-markers=%llu null-markers=%llu marker-refused=%llu predicted-world=%llu predicted-near=%.9g scale-rejected-5s=%llu world-unmarked=%llu surface-preserving=%llu (foreign-camera=%llu) H-attempts=%llu H-qualified=%llu",
         (unsigned long long)n.worldMarkers,(unsigned long long)n.nullMarkers,(unsigned long long)n.markerRefused,
         (unsigned long long)n.predictedWorld,s.worldReference.nearPlane,(unsigned long long)s.predictedScaleRejectedWindow,
         (unsigned long long)n.worldUnmarked,
         (unsigned long long)n.surfacePreserving,(unsigned long long)n.surfacePreservingForeign,
-        (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified,(unsigned long long)n.hCoveredFrames,
+        (unsigned long long)n.hAttempts,(unsigned long long)n.hQualified);
+    Log::get().note("flat foreground SDK domain (3/3): H-qualified-with-per-pixel-refusals=%llu per-pixel-refused-draws=%llu (occurrence-cap=%llu history-budget=%llu other=%llu) windowed-priors=%llu naming-vetoes=%llu naming-veto-releases=%llu last-refusal=%s",
+        (unsigned long long)n.hCoveredFrames,
         (unsigned long long)n.coveredDraws,(unsigned long long)captures.coveredOccurrence,(unsigned long long)captures.coveredBudget,
         (unsigned long long)captures.coveredOther,(unsigned long long)captures.windowed,
         (unsigned long long)s.namingVetoes,(unsigned long long)s.namingVetoReleases,

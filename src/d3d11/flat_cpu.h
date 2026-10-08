@@ -667,12 +667,14 @@ private:
 };
 
 // ---- the text ------------------------------------------------------------------------------------
-// The log truncates a line at about 1,160 characters after its timestamp. The text is built as
+// The log truncates a line at about 1,167 characters after its timestamp. The text is built as
 // tokens (a family and its figures, one GPU span) and packed into lines of at most kLineLimit
 // characters; a token never splits. The first line starts "flat cpu 5s:", the rest
-// "flat cpu 5s (cont.):". A typical window is two lines.
-constexpr size_t kLineLimit = 1090;
-constexpr int kMaxLines = 4;
+// "flat cpu 5s (cont.):". A typical window is three lines. kLineLimit is the repo's line budget
+// (kFlatLogLineBudget, 1000), no longer the truncation limit less a margin: a line near the cut
+// loses its tail when a figure grows a digit.
+constexpr size_t kLineLimit = 1000;
+constexpr int kMaxLines = 5;
 constexpr int kMaxTokens = 64;
 struct Lines {
     char line[kMaxLines][1400];

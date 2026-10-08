@@ -78,8 +78,15 @@ private:
 // whether the flat projection recipes know the pair. The runtime fills them; the selector's summary cannot (it is plain data).
 struct FlatSourcelessPairNote { bool familyVs = false, recipe = false; };
 
+// Two lines (the logger cuts a line at about 1167 characters and this one was 1,020 with a legend and up to four pairs): the fields, and the top
+// pairs. What the legend said: a spell is a run of frames refused for no supported motion source pair (the view holds a draw of a pool family the
+// motion producer leaves stock); source-free frames held no pool-family draw at all (open ground and sky) and take the camera term alone, treated
+// counts those the resolver ran on; recoveries end a spell with a treated frame and warm-frames count the zero-phase frames after it until the
+// first non-zero phase (two, by FlatLivePhase), abandoned ends one with another refusal (a menu or a loading screen); family-vs is a pool-family
+// vertex shader drawn with an unkeyed pixel shader, recipe a pair the projection recipes know.
+inline constexpr unsigned kFlatSourceLineParts = 2;
 inline int flatSourceSpellLine(char* out, size_t n, const FlatSourceSpellWindow& w, const FlatMonoSourceless& last, uint64_t lastFrame,
-                               const FlatSourcelessPairNote (&notes)[4]) {
+                               const FlatSourcelessPairNote (&notes)[4], unsigned part = 0) {
     char pairs[1200];
     size_t at = 0;
     pairs[0] = 0;
@@ -93,16 +100,13 @@ inline int flatSourceSpellLine(char* out, size_t n, const FlatSourceSpellWindow&
         at += static_cast<size_t>(k);
     }
     if (!at) std::snprintf(pairs, sizeof(pairs), "none");
+    if (part == 1) return std::snprintf(out, n, "flat source 5s (2/2): top: %s", pairs);
+    if (part >= kFlatSourceLineParts) return 0;
     return std::snprintf(out, n,
         "flat source 5s: frames=%llu no-source-frames=%llu spells=%llu longest-spell=%llu open-spell=%llu recoveries=%llu abandoned=%llu "
         "warm-ups-done=%llu warm-frames-total=%llu warm-frames-max=%llu warm-ups-aborted=%llu source-free-frames=%llu source-free-treated=%llu "
         "overlays-without-named-world=%llu; last no-source frame=%llu: "
-        "records-on-scene-depth=%u draws=%u same-camera-draws=%u pool-kind-records=%u distinct-pairs=%u top: %s; a spell is a run of frames "
-        "refused for no supported motion source pair (the view holds a draw of a pool family the motion producer leaves stock); "
-        "source-free frames held no pool-family draw at all (open ground and sky) and take the camera term alone, treated counts those the resolver ran on; "
-        "recoveries end a spell with a treated frame and warm-frames count the zero-phase frames after it until the first non-zero phase "
-        "(two, by FlatLivePhase), abandoned ends one with another refusal (a menu or a loading screen); family-vs is a pool-family vertex "
-        "shader drawn with an unkeyed pixel shader, recipe a pair the projection recipes know",
+        "records-on-scene-depth=%u draws=%u same-camera-draws=%u pool-kind-records=%u distinct-pairs=%u; top pairs in the next line",
         static_cast<unsigned long long>(w.frames), static_cast<unsigned long long>(w.noSourceFrames),
         static_cast<unsigned long long>(w.spells), static_cast<unsigned long long>(w.longestSpell),
         static_cast<unsigned long long>(w.openSpell), static_cast<unsigned long long>(w.recoveries),
@@ -111,7 +115,7 @@ inline int flatSourceSpellLine(char* out, size_t n, const FlatSourceSpellWindow&
         static_cast<unsigned long long>(w.warmAborted), static_cast<unsigned long long>(w.sourceFreeFrames),
         static_cast<unsigned long long>(w.sourceFreeTreated), static_cast<unsigned long long>(w.overlaysUnnamed),
         static_cast<unsigned long long>(lastFrame),
-        last.records, last.draws, last.sameCameraDraws, last.poolRecords, last.distinctPairs, pairs);
+        last.records, last.draws, last.sameCameraDraws, last.poolRecords, last.distinctPairs);
 }
 
 }  // namespace edvr

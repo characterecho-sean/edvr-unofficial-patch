@@ -6,6 +6,7 @@
 // `flat foreground no-candidate 5s:` carries, for the 5 s window, every pattern of animated_history_ledger.h (HistoryGap), zeros included:
 // the patterns are exclusive and sum to same-key-misses. `flat foreground identity 5s:` carries every verdict of
 // flat_foreground_identity_verdict.h, zeros included. The example lines follow, the first draw of each pattern with its whole key.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include "animated_history_ledger.h"
@@ -45,41 +46,47 @@ inline int flatHistoryDiffText(unsigned diff, char* out, size_t n) {
     return static_cast<int>(at);
 }
 
-inline int flatNoCandidateLine(char* out, size_t n, const FlatNoCandidateWindow& w) {
-    char head[1024];
-    std::snprintf(head, sizeof(head),
-        "flat foreground no-candidate 5s: submitted=%llu same-key-misses=%llu rescued-offset-shift=%llu rescue-cancelled=%llu still-no-candidate=%llu "
-        "frames=%llu frames-with-misses=%llu frames-all-missed=%llu longest-miss-run=%u reset-frames=%llu near-changes=%llu "
-        "records=%u bytes=%u peak-records=%u peak-bytes=%u allocations=%llu",
-        static_cast<unsigned long long>(w.submitted), static_cast<unsigned long long>(w.misses()),
-        static_cast<unsigned long long>(w.acrossOffset), static_cast<unsigned long long>(w.rescueCancelled),
-        static_cast<unsigned long long>(w.noCandidate),
-        static_cast<unsigned long long>(w.frames), static_cast<unsigned long long>(w.framesMissing),
-        static_cast<unsigned long long>(w.framesAllMissing), w.longestRun,
-        static_cast<unsigned long long>(w.resetFrames), static_cast<unsigned long long>(w.nearChanges),
-        w.records, w.bytes, w.peakRecords, w.peakBytes, static_cast<unsigned long long>(w.allocations));
-    char patterns[1536];
+// The logger cuts a line at about 1167 characters and this one was 3.5 KB: three lines, the head and the patterns in two groups of eleven, each under
+// kFlatLogLineBudget (1000) at 20-digit counters. The first keeps the key `flat foreground no-candidate 5s:`. What its legend said: a miss is a
+// submitted draw with no record of its exact geometry key that the frame before used; the patterns are exclusive and sum to same-key-misses;
+// offset-shift (the same mesh at another place in the same buffers, one record) is the one pattern the history acts on and rescued-offset-shift
+// must equal it; rescue-cancelled counts rescues withdrawn at the end of the frame because another draw used the donor record (two parts of one
+// object, not a move); record-unusable must be 0; still-no-candidate is what stayed without a prior; frames-all-missed counts frames in which every
+// submitted draw missed (a whole-set cause), longest-miss-run the consecutive frames with a miss; reset-frames are frames H asked the backend to
+// reset history for, near-changes those caused by the common near plane; records and bytes are what the history holds now against 128 records and
+// 32 MiB, the peaks the window's highest, allocations the records made new (a record's buffers) in the window; reclaimed-by-advance is a record a
+// write invalidated and the frame boundary then aged out, reclaimed-by-pressure one taken for another key's budget, record-reclaimed one whose path
+// was not remembered.
+inline constexpr unsigned kFlatNoCandidateLineParts = 3;
+inline int flatNoCandidateLine(char* out, size_t n, const FlatNoCandidateWindow& w, unsigned part = 0) {
+    const auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+    if (part == 0) {
+        return std::snprintf(out, n,
+            "flat foreground no-candidate 5s: submitted=%llu same-key-misses=%llu rescued-offset-shift=%llu rescue-cancelled=%llu still-no-candidate=%llu "
+            "frames=%llu frames-with-misses=%llu frames-all-missed=%llu longest-miss-run=%u reset-frames=%llu near-changes=%llu "
+            "records=%u bytes=%u peak-records=%u peak-bytes=%u allocations=%llu; by pattern in the next two lines",
+            u(w.submitted), u(w.misses()), u(w.acrossOffset), u(w.rescueCancelled), u(w.noCandidate), u(w.frames), u(w.framesMissing),
+            u(w.framesAllMissing), w.longestRun, u(w.resetFrames), u(w.nearChanges), w.records, w.bytes, w.peakRecords, w.peakBytes,
+            u(w.allocations));
+    }
+    if (part >= kFlatNoCandidateLineParts) return 0;
+    const unsigned per = (kHistoryGapCount + 1) / 2;
+    const unsigned first = (part - 1) * per, last = (std::min)(first + per, kHistoryGapCount);
+    char patterns[1000];
     size_t at = 0;
     patterns[0] = 0;
-    for (unsigned i = 0; i < kHistoryGapCount; ++i) {
-        const int k = std::snprintf(patterns + at, sizeof(patterns) - at, " %s=%llu", historyGapName(static_cast<HistoryGap>(i)),
-                                    static_cast<unsigned long long>(w.missBy[i]));
+    for (unsigned i = first; i < last; ++i) {
+        const int k = std::snprintf(patterns + at, sizeof(patterns) - at, " %s=%llu", historyGapName(static_cast<HistoryGap>(i)), u(w.missBy[i]));
         if (k < 0 || at + static_cast<size_t>(k) >= sizeof(patterns)) break;
         at += static_cast<size_t>(k);
     }
-    return std::snprintf(out, n,
-        "%s; by pattern:%s; a miss is a submitted draw with no record of its exact geometry key that the frame before used; the patterns are "
-        "exclusive and sum to same-key-misses; offset-shift (the same mesh at another place in the same buffers, one record) is the one pattern "
-        "the history acts on and rescued-offset-shift must equal it; rescue-cancelled counts rescues withdrawn at the end of the frame because "
-        "another draw used the donor record (two parts of one object, not a move); record-unusable must be 0; still-no-candidate is what stayed without a "
-        "prior; frames-all-missed counts frames in which every submitted draw missed (a whole-set cause), longest-miss-run the consecutive "
-        "frames with a miss; reset-frames are frames H asked the backend to reset history for, near-changes those caused by the common near plane; "
-        "records and bytes are what the history holds now against 128 records and 32 MiB, the peaks the window's highest, allocations the records "
-        "made new (a record's buffers) in the window; reclaimed-by-advance is a record a write invalidated and the frame boundary then aged out, "
-        "reclaimed-by-pressure one taken for another key's budget, record-reclaimed one whose path was not remembered",
-        head, patterns);
+    return std::snprintf(out, n, "flat foreground no-candidate 5s (%u/%u): by pattern:%s", part + 1, kFlatNoCandidateLineParts, patterns);
 }
 
+// What its legend said: one draw in thirteen that the map matches by identity has its identity words and its priors' read back a few frames later and
+// classified by the map's own two tests: match means the map takes the history, x-differs / parameter-differs / both-differ are the reason-5
+// (identity-differs) causes (the first word, the signature word without byte 30, or both), current-unauthentic and priors-unreadable are reasons 2
+// and 6.
 inline int flatIdentityLine(char* out, size_t n, const FlatNoCandidateWindow& w) {
     char verdicts[512];
     size_t at = 0;
@@ -90,11 +97,7 @@ inline int flatIdentityLine(char* out, size_t n, const FlatNoCandidateWindow& w)
         if (k < 0 || at + static_cast<size_t>(k) >= sizeof(verdicts)) break;
         at += static_cast<size_t>(k);
     }
-    return std::snprintf(out, n,
-        "flat foreground identity 5s: sampled=%llu by verdict:%s skipped-total=%llu unread-total=%llu; one draw in thirteen that the map matches by "
-        "identity has its identity words and its priors' read back a few frames later and classified by the map's own two tests: match means the "
-        "map takes the history, x-differs / parameter-differs / both-differ are the reason-5 (identity-differs) causes (the first word, the "
-        "signature word without byte 30, or both), current-unauthentic and priors-unreadable are reasons 2 and 6",
+    return std::snprintf(out, n, "flat foreground identity 5s: sampled=%llu by verdict:%s skipped-total=%llu unread-total=%llu",
         static_cast<unsigned long long>(w.identitySamples), verdicts, static_cast<unsigned long long>(w.identitySkipped),
         static_cast<unsigned long long>(w.identityUnread));
 }

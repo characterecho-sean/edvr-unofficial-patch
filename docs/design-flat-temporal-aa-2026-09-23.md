@@ -14366,6 +14366,69 @@ before the read lands, may take a prior across a write that genuinely rewrote it
 - `vertex sets: failed` and `approximate` stay 0 or small; `cancelled` is the index writes that raced a read.
 - No line of any report ends in `...[truncated]`.
 
+### 2026-10-08, fifth build: no line of any report is cut
+
+The Epic log of the fourth build (v0.18.3-16-ga909f494) still held 114 lines ending `...[truncated]`: the logger keeps
+about 1,167 characters of a line, and 38 `flat foreground SDK domain`, 38 `flat foreground sibling 5s`, 38 `flat
+foreground no-candidate 5s` (the sibling line was 3 KB, the no-candidate line 3.5 KB) and 4 `engine motion: movers
+joined` were longer. Every periodic flat and engine-motion report now stays under `kFlatLogLineBudget` (1,000) at
+counters of 20 digits, and the build gates on it. No field was removed or renamed and no behaviour changed. The first
+part of every split keeps the old key, so a grep for `flat foreground sibling 5s:` still finds the window; the later
+parts read `(2/4)`, `(cont.)` and so on. A reader joins the parts of one window in print order.
+
+| Line | Parts | Worst part, 20 digits / 12 digits |
+|---|---|---|
+| `flat foreground SDK domain:` | 3 | 589 / 477 |
+| `flat foreground sibling 5s:` | 4: the head, then the 24 patterns in groups of 8 | 957 / 701 |
+| `flat foreground no-candidate 5s:` | 3: the head with records, bytes, peaks and allocations, then the 22 patterns in two groups of 11 | 572 / 486 |
+| `flat foreground identity 5s:` | 1 (legend only removed) | 348 / 276 |
+| `flat source 5s:` | 2: the fields, then `(2/2): top:` pairs | 726 / 606 |
+| `flat cpu 5s:` | the packer's lines, `kLineLimit` 1090 to 1000, `kMaxLines` 4 to 5 | 983 at the worst plausible window |
+| `engine motion: movers joined` | 4: `movers joined`, `(2/4)`, `(3/4)`, `(4/4)` | 897 / 873 |
+| `engine motion: on foot:` | 3, and a fourth `on foot, another camera:` only when another camera moved the rows | 915 / 835 |
+
+The history and shadow lines of the third and fourth builds are unchanged (the longest, `history-writes`, is 999 at 20
+digits). The legends that trailed the old lines are comments above the formatters now (`flat_foreground_sibling.h`,
+`flat_no_candidate_report.h`, `flat_source_spell.h`, `reportForegroundDomain` in `flat_runtime.cpp`), and here:
+- SDK domain: the counts cover all depth candidates; `scale-rejected-5s` is the draws at the world's near plane whose
+  projection scale was not the world's, taken as first-person, since the last line; qualification alone is not a
+  completed SDK call; the history of the submitted draws is cumulative (`no-candidate` found no record of its geometry
+  from the frame before, `no-prior-pool`, `no-prior-near` and `no-prior-absent` had candidates and the adapter passed
+  none on, `priors-one` and `priors-several` matched on the GPU by identity, `repeated-geometry` is the draws after
+  the first of their geometry in a frame).
+- Sibling: a draw the history has no record for (the pattern) takes the mean motion of this frame's draws of the same
+  pool identity that matched theirs (`sibling`) when those agree to within one pixel per axis; with none it is attached
+  to the view and its history is kept (`view-attached`); donors that disagree and an identity the pool cannot read stay
+  refused, as reasons 3, 5 and 6 of the refusal census; the counts are of draws, read back a few frames late.
+- No-candidate: a miss is a submitted draw with no record of its exact geometry key that the frame before used; the
+  patterns are exclusive and sum to `same-key-misses`; `offset-shift` is the one the history acts on and
+  `rescued-offset-shift` must equal it; `record-unusable` must be 0; `records` and `bytes` are what the history holds
+  now against 128 records and 32 MiB, the peaks the window's highest.
+- Identity: one draw in thirteen that the map matches by identity has its identity words and its priors' read back a
+  few frames later and classified by the map's two tests; `match` means the map takes the history, `x-differs`,
+  `parameter-differs` and `both-differ` are the reason-5 causes, `current-unauthentic` and `priors-unreadable` are
+  reasons 2 and 6.
+- Source: a spell is a run of frames refused for no supported motion source pair; `source-free-frames` held no pool
+  family draw at all and take the camera term alone; `recoveries` end a spell with a treated frame and `warm-frames`
+  count the zero-phase frames after it (two, by `FlatLivePhase`); `abandoned` ends one with another refusal.
+
+Left whole on purpose, each with its reason in the rig's table: `flat map bounce 5s:` (parsed by `tools\edvr_log.py
+--map-bounce`; about 900 characters in the log, 1,121 at 12-digit counters, out of reach at 20; a split needs the
+parser to join the parts, a separate change), `flat foreground ownership:` (a one-time probe, `kLimit` 2 reports;
+1,051 at 20 digits), `flat overlay admission refused:` (at most six a session; 1,074), `flat runtime conflict:` (962),
+`flat untrusted camera coverage summary:` (955), `engine motion: emit (` (1,038) and `engine motion: history gaps`
+(750), all under the cut at 20 digits.
+
+**Pin.** `tools/flat_temporal_test/flat_log_line_tests.h` (pure): every formatter part at 2^64-1 and at 12 digits is at
+most 1,000 characters, carries its prefix, and prints every field once across its parts; an all-zero window prints
+zeros; a short buffer truncates; the flat cpu packer's worst plausible window packs into at most five lines of 1,000
+without splitting a token; a source scan estimates the inline notes at their worst width (the engine lists are
+bounded from the name tables) and a net over every `note(` call in `flat_*` and `engine_velocity*` fails on a new
+long line unless it is on a six-entry allow-list of one-time or non-periodic notices (three stand-down formatters, the
+copy window line, two query fallback notices); wiring pins for the loops over the parts. Mutation controls: an
+over-long format, the SDK domain or the on-foot notes re-merged into one string, a group of patterns dropped, the
+cpu limit back at 1,090, a part renamed and a guard dropped all fail.
+
 ## 105. Different supporter: v0.18.2 AA selector refusal (2026-10-06)
 
 State: AA initializes and treats earlier frames, then fails frame selection.

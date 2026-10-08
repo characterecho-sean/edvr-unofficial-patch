@@ -220,6 +220,12 @@ inline int flatRangeInvalidateTests() {
         FlatNoCandidateWindow w;
         w.records = 97; w.bytes = 123456; w.peakRecords = 128; w.peakBytes = 7654321; w.allocations = 4242;
         char line[4096];
+        // The line is printed in parts (kFlatNoCandidateLineParts): the head carries the gauges, the patterns follow; the parts are read together.
+        const auto joined = [&](const FlatNoCandidateWindow& window) {
+            std::string all;
+            for (unsigned part = 0; part < kFlatNoCandidateLineParts; ++part) { flatNoCandidateLine(line, sizeof(line), window, part); all += line; all += '\n'; }
+            return all;
+        };
         const int n = flatNoCandidateLine(line, sizeof(line), w);
         const std::string text(line);
         expect(n > 0 && n < static_cast<int>(sizeof(line)) - 1 &&
@@ -231,9 +237,9 @@ inline int flatRangeInvalidateTests() {
         FlatNoCandidateWindow patterns;
         patterns.missBy[static_cast<unsigned>(HistoryGap::ReclaimedByAdvance)] = 11;
         patterns.missBy[static_cast<unsigned>(HistoryGap::ReclaimedByPressure)] = 22;
-        flatNoCandidateLine(line, sizeof(line), patterns);
-        expect(std::string(line).find(" reclaimed-by-advance=11") != std::string::npos && std::string(line).find(" reclaimed-by-pressure=22") != std::string::npos &&
-                   std::string(line).find("same-key-misses=33") != std::string::npos,
+        const std::string patternText = joined(patterns);
+        expect(patternText.find(" reclaimed-by-advance=11") != std::string::npos && patternText.find(" reclaimed-by-pressure=22") != std::string::npos &&
+                   patternText.find("same-key-misses=33") != std::string::npos,
                "the two new patterns are on the line with their counts and are part of the same-key misses");
     }
     return failures;
@@ -530,8 +536,9 @@ inline int flatRangeInvalidateWiringTests() {
     const auto reportValid = [&](const std::string& text) {
         return ordered(text, {"history.writes=historyWindowDelta(captures.history,was.history);", "takeHistoryPeaks(peakRecords,peakBytes);",
                               "takeWriteTop(tops+topCount,kHistoryTopResources);", "w.records=history.records;w.bytes=history.bytes;w.peakRecords=history.peakRecords;w.peakBytes=history.peakBytes;",
-                              "s.foregroundMissReported=captures;", "flatNoCandidateLine(line,sizeof(line),w);Log::get().note(\"%s\",line);",
-                              "flatSiblingLine(line,sizeof(line),sibling);Log::get().note(\"%s\",line);",
+                              "s.foregroundMissReported=captures;",
+                              "for(unsigned part=0;part<kFlatNoCandidateLineParts;++part){flatNoCandidateLine(line,sizeof(line),w,part);Log::get().note(\"%s\",line);}",
+                              "for(unsigned part=0;part<kFlatSiblingLineParts;++part){flatSiblingLine(line,sizeof(line),sibling,part);Log::get().note(\"%s\",line);}",
                               "flatHistoryLine(line,sizeof(line),history);Log::get().note(\"%s\",line);"}) &&
             has(text, "w.allocations=delta(captures.history.allocations,was.history.allocations);");
     };

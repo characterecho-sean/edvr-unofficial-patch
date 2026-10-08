@@ -43,6 +43,7 @@
 #include "flat_source_free_tests.h"
 #include "flat_sibling_policy_tests.h"
 #include "flat_shadow_model_tests.h"
+#include "flat_log_line_tests.h"
 #include "../../src/d3d11/flat_runtime.h"
 #include "../../src/d3d11/flat_foreground_probe_policy.h"
 
@@ -3932,6 +3933,7 @@ int main(int argc, char** argv) {
     failures += flatShadowModelTests();
     failures += flatShadowAccumulateTests();
     failures += flatShadowWiringTests();
+    failures += flatLogLineTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

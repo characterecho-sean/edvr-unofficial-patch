@@ -125,27 +125,44 @@ inline int flatSiblingPolicyTests() {
         w.by[unsigned(HistoryGap::NewKey)][1] = 2;
         w.by[kSiblingIdentityDiffers][2] = 4;
         w.by[unsigned(HistoryGap::AbsentLong)][3] = 1;
+        // The line is printed in kFlatSiblingLineParts parts (the logger cuts a line at about 1167 characters): the head, then the patterns in groups.
+        // Its fields are asked of the parts together; flat_log_line_tests.h pins the length of each part and that each pattern is on exactly one.
+        const auto joined = [&](const FlatSiblingWindow& window, char* buffer, size_t size, bool& fits) {
+            std::string all;
+            for (unsigned part = 0; part < kFlatSiblingLineParts; ++part) {
+                const int k = flatSiblingLine(buffer, size, window, part);
+                fits = fits && k > 0 && k < int(size);
+                all += buffer;
+                all += '\n';
+            }
+            return all;
+        };
         char line[4096];
-        const int n = flatSiblingLine(line, sizeof(line), w);
-        expect(n > 0 && n < int(sizeof(line)) && w.draws() == 12,
+        bool fits = true;
+        const std::string text = joined(w, line, sizeof(line), fits);
+        expect(fits && w.draws() == 12,
                "the line fits its buffer, and the window counts every draw once");
-        expect(std::strstr(line, "engaged-frames=3 dispatches=7 draws-read=12 (frames read=3 unread=1 failed=0) sibling=5 view-attached=2 disagree=4 identity-unreadable=1;") != nullptr,
+        expect(text.find("engaged-frames=3 dispatches=7 draws-read=12 (frames read=3 unread=1 failed=0) sibling=5 view-attached=2 disagree=4 identity-unreadable=1;") != std::string::npos,
                "the line carries the totals by outcome, the frames and the dispatches");
-        expect(std::strstr(line, " count-change=5/0/0/0") && std::strstr(line, " new-key=0/2/0/0") && std::strstr(line, " identity-differs=0/0/4/0") &&
-                   std::strstr(line, " absent-long=0/0/0/1") && std::strstr(line, " prior-filtered=0/0/0/0"),
+        expect(text.rfind("flat foreground sibling 5s: ", 0) == 0, "the first part keeps the key the log is read by");
+        expect(text.find(" count-change=5/0/0/0") != std::string::npos && text.find(" new-key=0/2/0/0") != std::string::npos &&
+                   text.find(" identity-differs=0/0/4/0") != std::string::npos &&
+                   text.find(" absent-long=0/0/0/1") != std::string::npos && text.find(" prior-filtered=0/0/0/0") != std::string::npos,
                "and every pattern with its four counts, zeros included");
         bool all = true;
-        for (unsigned p = 0; p < kSiblingPatterns; ++p) all = all && std::strstr(line, siblingPatternName(p)) != nullptr;
+        for (unsigned p = 0; p < kSiblingPatterns; ++p) all = all && text.find(siblingPatternName(p)) != std::string::npos;
         expect(all, "the line names all twenty-two patterns");
-        // The runtime prints it into 4096 bytes: every counter at its widest.
+        // The runtime prints each part into 4096 bytes: every counter at its widest.
         FlatSiblingWindow widest;
         widest.engagedFrames = widest.dispatches = widest.readbacks = widest.notReady = widest.failed = ~0ull;
         for (auto& row : widest.by) for (auto& cell : row) cell = ~0ull / 64;
         char wide[4096];
-        const int wideN = flatSiblingLine(wide, sizeof(wide), widest);
-        expect(wideN > 0 && wideN < int(sizeof(wide)), "and the line at its widest fits the runtime's buffer, untruncated");
+        bool wideFits = true;
+        joined(widest, wide, sizeof(wide), wideFits);
+        expect(wideFits, "and each part at its widest fits the runtime's buffer, untruncated");
         char tight[64];
         expect(flatSiblingLine(tight, sizeof(tight), w) > 0, "a buffer too small for the line is truncated, not overrun");
+        expect(flatSiblingLine(tight, sizeof(tight), w, kFlatSiblingLineParts) == 0, "a part past the last prints nothing");
     }
     return failures;
 }
@@ -304,7 +321,7 @@ inline int flatSiblingWiringTests() {
     expect(count(motion, "kFlatSiblingSpreadPixels") == 1 && count(motion, "kFlatSiblingMinVertices") == 1 &&
                count(motion, "limits.limits[0]=kFlatSiblingSpreadPixels") == 1,
            "the policy's two constants reach the shader from one place each");
-    expect(runtime.find("flatSiblingLine(line,sizeof(line),sibling);Log::get().note(\"%s\",line);") != std::string::npos &&
+    expect(runtime.find(compact("for(unsigned part=0;part<kFlatSiblingLineParts;++part){flatSiblingLine(line,sizeof(line),sibling,part);Log::get().note(\"%s\",line);}")) != std::string::npos &&
                runtime.find("sibling.by[p][o]=delta(captures.siblingBy[p][o],was.siblingBy[p][o]);") != std::string::npos,
            "the 5 s foreground report prints the sibling line from the window of the capture counters");
     return failures;

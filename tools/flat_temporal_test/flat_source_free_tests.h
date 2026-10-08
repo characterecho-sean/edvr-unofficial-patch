@@ -93,7 +93,9 @@ inline int flatSourceFreeTests() {
         flatSourceSpellLine(line, sizeof(line), w, none, 0, notes);
         expect(std::strstr(line, "source-free-frames=3 source-free-treated=2 overlays-without-named-world=2;") != nullptr,
                "the 5 s line prints them");
-        // The runtime prints it into 3072 bytes with the four pairs of a source-less frame and every counter at its widest.
+        expect(std::strncmp(line, "flat source 5s: frames=", 23) == 0, "the first part keeps the key the log is read by");
+        // The line is two parts (kFlatSourceLineParts): the fields, then the top pairs. The runtime prints each into 3072 bytes with the four pairs
+        // of a source-less frame and every counter at its widest.
         FlatSourceSpellWindow widest;
         widest.frames = widest.noSourceFrames = widest.spells = widest.recoveries = widest.abandoned = widest.warmDone = widest.warmFrames = ~0ull;
         widest.warmMax = widest.warmAborted = widest.longestSpell = widest.openSpell = widest.sourceFreeFrames = widest.sourceFreeTreated = ~0ull;
@@ -105,8 +107,12 @@ inline int flatSourceFreeTests() {
         FlatSourcelessPairNote loud[4];
         for (auto& note : loud) note.familyVs = note.recipe = true;
         char wide[3072]{};
-        const int widest_n = flatSourceSpellLine(wide, sizeof(wide), widest, busy, ~0ull, loud);
-        expect(widest_n > 0 && widest_n < int(sizeof(wide)), "and the line at its widest still fits the runtime's buffer, untruncated");
+        bool wideFits = true;
+        for (unsigned part = 0; part < kFlatSourceLineParts; ++part) {
+            const int widest_n = flatSourceSpellLine(wide, sizeof(wide), widest, busy, ~0ull, loud, part);
+            wideFits = wideFits && widest_n > 0 && widest_n < int(sizeof(wide));
+        }
+        expect(wideFits, "and each part at its widest still fits the runtime's buffer, untruncated");
     }
     return failures;
 }

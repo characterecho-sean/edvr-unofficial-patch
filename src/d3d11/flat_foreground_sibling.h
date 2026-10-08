@@ -24,6 +24,7 @@
 // WHAT STAYS REFUSED. A current draw that is not valid (reason 1), a pool row that is not authentic (2), prior positions that cannot be read
 // or are ambiguous (4, 7): nothing says what the draw's motion would be. And a draw whose own identity cannot be read (mode 4), which could
 // not be matched to siblings by identity.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include "animated_history_ledger.h"
@@ -122,29 +123,37 @@ struct FlatSiblingWindow {
     uint64_t draws() const { uint64_t n = 0; for (unsigned o = 0; o < kSiblingOutcomes; ++o) n += total(o); return n; }
 };
 
-inline int flatSiblingLine(char* out, size_t n, const FlatSiblingWindow& w) {
-    char patterns[2048];
+// The logger cuts a line at about 1167 characters, and this one was 3 KB (the patterns alone are 24 groups of four counts): four lines, the head
+// and the patterns in three groups of eight, each under kFlatLogLineBudget (1000) at 20-digit counters. The first keeps the key `flat foreground
+// sibling 5s:`. What the legend said: a draw the history has no record for (the pattern) takes the mean motion of this frame's draws of the same
+// pool identity that matched theirs (sibling), when those agree to within one pixel per axis; with none it is attached to the view and its
+// history is kept (view-attached); donors that disagree (disagree) and an identity the pool cannot read (identity-unreadable) stay refused, as the
+// reasons 3, 5 and 6 of the refusal census; the counts are of draws, read back from the GPU a few frames late.
+inline constexpr unsigned kFlatSiblingLineParts = 4;
+inline int flatSiblingLine(char* out, size_t n, const FlatSiblingWindow& w, unsigned part = 0) {
+    const auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
+    if (part == 0) {
+        return std::snprintf(out, n,
+            "flat foreground sibling 5s: engaged-frames=%llu dispatches=%llu draws-read=%llu (frames read=%llu unread=%llu failed=%llu) sibling=%llu "
+            "view-attached=%llu disagree=%llu identity-unreadable=%llu; by pattern (sibling/view-attached/disagree/identity-unreadable) in the next "
+            "three lines",
+            u(w.engagedFrames), u(w.dispatches), u(w.draws()), u(w.readbacks), u(w.notReady), u(w.failed), u(w.total(0)), u(w.total(1)),
+            u(w.total(2)), u(w.total(3)));
+    }
+    if (part >= kFlatSiblingLineParts) return 0;
+    const unsigned per = (kSiblingPatterns + kFlatSiblingLineParts - 2) / (kFlatSiblingLineParts - 1);
+    const unsigned first = (part - 1) * per, last = (std::min)(first + per, kSiblingPatterns);
+    char patterns[1000];
     size_t at = 0;
     patterns[0] = 0;
-    for (unsigned p = 0; p < kSiblingPatterns; ++p) {
+    for (unsigned p = first; p < last; ++p) {
         const int k = std::snprintf(patterns + at, sizeof(patterns) - at, " %s=%llu/%llu/%llu/%llu", siblingPatternName(p),
-            static_cast<unsigned long long>(w.by[p][0]), static_cast<unsigned long long>(w.by[p][1]),
-            static_cast<unsigned long long>(w.by[p][2]), static_cast<unsigned long long>(w.by[p][3]));
+            u(w.by[p][0]), u(w.by[p][1]), u(w.by[p][2]), u(w.by[p][3]));
         if (k < 0 || at + static_cast<size_t>(k) >= sizeof(patterns)) break;
         at += static_cast<size_t>(k);
     }
-    return std::snprintf(out, n,
-        "flat foreground sibling 5s: engaged-frames=%llu dispatches=%llu draws-read=%llu (frames read=%llu unread=%llu failed=%llu) sibling=%llu "
-        "view-attached=%llu disagree=%llu identity-unreadable=%llu; by pattern (sibling/view-attached/disagree/identity-unreadable):%s; a draw "
-        "the history has no record for (the pattern) takes the mean motion of this frame's draws of the same pool identity that matched theirs "
-        "(sibling), when those agree to within one pixel per axis; with none it is attached to the view and its history is kept "
-        "(view-attached); donors that disagree (disagree) and an identity the pool cannot read (identity-unreadable) stay refused, as the "
-        "reasons 3, 5 and 6 of the refusal census; the counts are of draws, read back from the GPU a few frames late",
-        static_cast<unsigned long long>(w.engagedFrames), static_cast<unsigned long long>(w.dispatches),
-        static_cast<unsigned long long>(w.draws()), static_cast<unsigned long long>(w.readbacks),
-        static_cast<unsigned long long>(w.notReady), static_cast<unsigned long long>(w.failed),
-        static_cast<unsigned long long>(w.total(0)), static_cast<unsigned long long>(w.total(1)),
-        static_cast<unsigned long long>(w.total(2)), static_cast<unsigned long long>(w.total(3)), patterns);
+    return std::snprintf(out, n, "flat foreground sibling 5s (%u/%u): by pattern%s:%s", part + 1, kFlatSiblingLineParts,
+        part == 1 ? " (sibling/view-attached/disagree/identity-unreadable)" : "", patterns);
 }
 
 }  // namespace edvr
