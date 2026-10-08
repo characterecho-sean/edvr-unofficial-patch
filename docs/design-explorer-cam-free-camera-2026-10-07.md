@@ -50,7 +50,8 @@
   `+0x592200`; the culling view is built upstream of it
   (design-occlusion-culling-2026-09-22.md), and 6s.9 saw holes from that.
 - **F0 and F1 FLOWN** on Frontier (logs 172543 and 194702); findings below.
-- **Next:** flight F2 with the probe on, in a settlement and at a pad: does
+- **Next:** F2 on Frontier (0cff6a93 installed 21:10; F5 and probe in the
+  live ini), in a settlement and at a pad: does
   0x2DF14C0 run with the camera CLOSED (its first-call line and the I4
   heartbeat), which key is the world lock (I3 pressed), and where is the eye
   (N lines: +0x268 in commander-local axes standing, crouched, weapon drawn).
