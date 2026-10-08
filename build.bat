@@ -2746,7 +2746,9 @@ REM (EDVR_ENGINE_VELOCITY_RIG: no engine image to verify; the binding shadow
 REM external) and drives its draw half through the flight's and the review's
 REM cases -- cb1 re-maps, interleaved eyes, source swaps, pool writes, blend
 REM states, depth formats, the stand-down -- plus the temporal pass's
-REM compute-state save, sentinel by sentinel.
+REM compute-state save, sentinel by sentinel. It ends with the remember cap (remember_cap_tests.h: a full
+REM table of keyed shader objects writes one line per kind on the first drop, never below the cap);
+REM tools\engine_velocity_test\mutants.py --self-test holds that line's mutation list to the source as it is.
 if not exist "%OBJ%\enginevelocity" mkdir "%OBJ%\enginevelocity"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
@@ -2758,6 +2760,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
 if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b 1 )
 "%OBJ%\enginevelocity\engine_velocity_test.exe" --dry-run || exit /b 1
 "%OBJ%\enginevelocity\engine_velocity_test.exe" --self-test || exit /b 1
+python "tools\engine_velocity_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_engine_motion_cpu_test
