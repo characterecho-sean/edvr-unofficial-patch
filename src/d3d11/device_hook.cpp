@@ -48,6 +48,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
 #include "orbital_width.h" // orbitalWidthRememberVs: the orbit lines' shader, captured at its creation
 #include "xinput_watch.h"
+#include "joy_watch.h"
 #include "elite_binds.h"
 #include "../common/log.h"
 #include "../common/proxy.h"
@@ -257,6 +258,11 @@ struct State {
     // The eye dump key: both eyes as the headset receives them, to
     // edvr_logs\eyes as BMP (temporalPassArmEyeDump). Unbound by default.
     Hotkey eyesKey;
+    // What each of those four was last bound from (the ini text), so a reload
+    // that changes one re-resolves it and one that does not says nothing: the
+    // settings menu's Hotkeys page writes them while the game runs.
+    std::string toggleKeyText, dumpKeyText, censusKeyText, eyesKeyText;
+    bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
     Hotkey fssEnterKey;
@@ -1153,6 +1159,8 @@ EDVR_BOUNDARY_TICK(tkContextReclaim, "context_reclaim");
 EDVR_BOUNDARY_TICK(tkProbeCensus, "probe_census");
 EDVR_BOUNDARY_TICK(tkFormatSupport, "format_support");
 
+void configureDiagnosticHotkeys();   // defined beside ensureState
+
 // The diagnostic keys (tkHotkeys). The exposure toggle is its own tick.
 void tickHotkeys() {
     // The history key dumps TWICE: now, and again two seconds from now.
@@ -1538,6 +1546,8 @@ void presentFrameBoundary() {
         // stood down there is nothing new to derive from.
         tkConfigRefresh.run([] {
             vScreenRefreshConfig();
+            // The four diagnostic keys follow the file too (the menu's Hotkeys page).
+            configureDiagnosticHotkeys();
             g_state->fssModeLatchWanted =
                 eyeSyncFromConfig(Config::get()).any();
             journalWatchSetEagerStatus(g_state->fssModeLatchWanted);
@@ -1828,16 +1838,117 @@ void menuActionMarker(void*) {
     Log::get().note("----- marker %u, from the settings menu -----", ++n);
 }
 
+// Pad and joystick hotkeys (hotkey.h): the held state, which Hotkey turns into an
+// edge. A pad is the XInput watcher's, polled once a frame however many ask; a
+// joystick is the table the DirectInput wrappers fill from the game's own reads
+// (joy_watch.h) -- EDVR opens no device of its own for either.
+bool nonKeyboardHotkeyHeld(const HotkeyBinding& b) {
+    if (b.kind == HotkeyKind::Pad) {
+        xinputWatchTick();
+        XinputBinding x;
+        x.buttons = b.padButtons;
+        x.trigger = b.padTrigger;
+        x.valid = true;
+        return xinputHeld(x);
+    }
+    if (b.kind == HotkeyKind::Joy) return joyWatchHeld(b.joyDevice, b.joyInput, stampMs());
+    return false;
+}
+
+// "SCROLLLOCK (vk 0x91)", "GamePad_Back (gamepad)", "231D0200:Joy_12 (joystick)".
+std::string hotkeyDescribe(const Hotkey& k) {
+    char text[64] = "";
+    hotkeyFormatBinding(k.binding(), text, sizeof(text));
+    char out[160];
+    switch (k.kind()) {
+        case HotkeyKind::Key: snprintf(out, sizeof(out), "%s (vk 0x%02X, mods 0x%X)", text, k.key(), k.mods()); break;
+        case HotkeyKind::Pad: snprintf(out, sizeof(out), "%s (gamepad)", text); break;
+        case HotkeyKind::Joy: snprintf(out, sizeof(out), "%s (joystick or HOTAS)", text); break;
+        default: snprintf(out, sizeof(out), "nothing"); break;
+    }
+    return out;
+}
+
+// The four diagnostic keys, bound at launch and RE-bound whenever the ini says
+// something else: the settings menu's Hotkeys page writes these while the game
+// runs, so (like hotkey.menu and hotkey.explorer_cam) they re-resolve live. A
+// reload that changed none of them says nothing.
+//
+// The bind is SAID, because it failed silently once: dump_draws was set to
+// CTRL+SCROLLLOCK, which parsed and registered cleanly -- and the physical chord
+// never arrived as Scroll Lock with Ctrl held (on the classic keyboard matrix
+// Ctrl+ScrollLock is Break, exactly like Ctrl+Pause). Every path in EDVR stayed
+// quiet: nothing matched, so not even the missed-while-unfocused note had
+// anything to say, and the field session bought nothing. A diagnostic that can
+// be dead must say what it is watching, in the log it exists to write.
+void configureDiagnosticHotkeys() {
+    if (!g_state) return;
+    State& s = *g_state;
+    const bool first = !s.diagnosticKeysBound;
+    struct Item {
+        Hotkey*      key;
+        std::string* applied;
+        std::string  value;
+        const char*  dotted;
+        const char*  what;
+        const char*  unboundNote;   // said when it is set to something that binds nothing
+        const char*  detail;        // what a press does, said with the bind
+    };
+    Item items[] = {
+        {&s.toggleKey, &s.toggleKeyText, Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK"),
+         "hotkey.toggle_exposure", "brightness fix toggle", nullptr, ""},
+        {&s.dumpKey, &s.dumpKeyText, Config::get().getString("hotkey.dump_camera", "PAUSE"),
+         "hotkey.dump_camera", "camera history", nullptr, ""},
+        // Empty default: the census is chased-bug instrumentation, and an unbound key is how
+        // "off" is spelled for a hotkey. A retained older INI may not contain this key; flat
+        // discovery still needs a re-arm key without overwriting that user's file.
+        {&s.censusKey, &s.censusKeyText,
+         Config::get().getString("hotkey.dump_draws", runtimeFlatProfile() ? "NUMLOCK" : ""),
+         "hotkey.dump_draws", "draw census",
+         "hotkey: dump_draws is set but bound nothing (the line above says why), so the draw census "
+         "cannot be armed this session.",
+         " Costs nothing until pressed."},
+        // The eye dump key: both eyes as the headset receives them, to edvr_logs\eyes as BMP --
+        // what the player sees, readable off the desk (asked for 2026-09-09, with a debug view
+        // up). The census key's shape: empty is off, and a bind is said.
+        {&s.eyesKey, &s.eyesKeyText, Config::get().getString("hotkey.dump_eyes", ""),
+         "hotkey.dump_eyes", "eye dump",
+         "hotkey: dump_eyes is set but bound nothing, so the eye dump cannot be armed this session "
+         "(the settings menu's row still can).",
+         " Both eyes go to edvr_logs\\eyes as BMP on each press, one hitch each."},
+    };
+    for (Item& it : items) {
+        if (!first && *it.applied == it.value) continue;
+        const std::string before = hotkeyDescribe(*it.key);
+        *it.applied = it.value;
+        it.key->setBinding(it.value.c_str());
+        if (it.key->bound()) {
+            Log::get().note(
+                "hotkey: %s key %s: %s.%s Prefer a bare key for the diagnostic instruments -- chords on the "
+                "Pause/ScrollLock cluster can reach Windows as a different key entirely.",
+                it.what, first ? "bound" : "changed", hotkeyDescribe(*it.key).c_str(), it.detail);
+        } else if (!it.value.empty() && it.unboundNote) {
+            Log::get().note("%s", it.unboundNote);
+        } else if (!first) {
+            Log::get().note("hotkey: %s key cleared (was %s); %s is off until it is bound again.", it.what,
+                            before.c_str(), it.dotted);
+        }
+    }
+    s.diagnosticKeysBound = true;
+}
+
 State& ensureState() {
     if (!g_state) {
         g_state = new State();
+        // Before any hotkey is bound: a binding primes its edge latch from the
+        // device it is read from.
+        hotkeySetNonKeyboardReader(&nonKeyboardHotkeyHeld);
         if (!Config::get().getBool("advanced.d3d11_fixes", true)) {
             disableGraphicsRuntime();
             inputGateShutdown();
             return *g_state;
         }
-        g_state->toggleKey.setBinding(Config::get().getString("hotkey.toggle_exposure", "SCROLLLOCK").c_str());
-        g_state->dumpKey.setBinding(Config::get().getString("hotkey.dump_camera", "PAUSE").c_str());
+        configureDiagnosticHotkeys();
         // The settings menu, read here for install and on vScreen's reload
         // path for live changes; its Instruments page gets the diagnostic
         // keys' functions as rows.
@@ -1854,53 +1965,6 @@ State& ensureState() {
                            "The dump_eyes key's job: the treated frame, both eyes, to edvr_logs\\eyes as BMP.",
                            &menuActionDumpEyes, nullptr);
         menuConfigure(Config::get());
-        // Empty default: the census is chased-bug instrumentation, and an
-        // unbound key is how "off" is spelled for a hotkey.
-        //
-        // The bind is then SAID, because it failed silently once: dump_draws
-        // was set to CTRL+SCROLLLOCK, which parsed and registered cleanly --
-        // and the physical chord never arrived as Scroll Lock with Ctrl held
-        // (on the classic keyboard matrix Ctrl+ScrollLock is Break, exactly
-        // like Ctrl+Pause). Every path in EDVR stayed quiet: nothing matched,
-        // so not even the missed-while-unfocused note had anything to say,
-        // and the field session bought nothing. A diagnostic that can be
-        // dead must say what it is watching, in the log it exists to write.
-        {
-            // A retained older INI may not contain this key. Flat discovery
-            // still needs a re-arm key without overwriting that user's file.
-            const std::string b = Config::get().getString("hotkey.dump_draws",
-                runtimeFlatProfile() ? "NUMLOCK" : "");
-            g_state->censusKey.setBinding(b.c_str());
-            if (g_state->censusKey.key() != 0) {
-                Log::get().note(
-                    "hotkey: draw census key bound: %s (vk 0x%02X, mods 0x%X). "
-                    "Prefer a bare key here -- chords on the Pause/ScrollLock "
-                    "cluster can reach Windows as a different key entirely.",
-                    b.c_str(), g_state->censusKey.key(),
-                    g_state->censusKey.mods());
-            } else if (!b.empty()) {
-                Log::get().note(
-                    "hotkey: dump_draws is set but bound nothing (the line "
-                    "above says why), so the draw census cannot be armed this "
-                    "session.");
-            }
-        }
-        // The eye dump key: both eyes as the headset receives them, to
-        // edvr_logs\eyes as BMP -- what the player sees, readable off the
-        // desk (asked for 2026-09-09, with a debug view up). The census
-        // key's shape: empty is off, and a bind is said.
-        {
-            const std::string b = Config::get().getString("hotkey.dump_eyes", "");
-            g_state->eyesKey.setBinding(b.c_str());
-            if (g_state->eyesKey.key() != 0) {
-                Log::get().note("hotkey: eye dump key bound: %s (vk 0x%02X, mods 0x%X) -- both eyes to "
-                                "edvr_logs\\eyes as BMP on each press, one hitch each.",
-                                b.c_str(), g_state->eyesKey.key(), g_state->eyesKey.mods());
-            } else if (!b.empty()) {
-                Log::get().note("hotkey: dump_eyes is set but bound nothing, so the eye dump cannot be "
-                                "armed this session (the settings menu's row still can).");
-            }
-        }
         // The FSS keys come from the GAME's own key configuration, and only
         // from there. Non-keyboard bindings skip with a log line, and the keys
         // FOLLOW the game's files: rebind in Elite mid-session and the stat

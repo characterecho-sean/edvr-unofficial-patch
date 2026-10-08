@@ -32,6 +32,8 @@
 
 #include <cstddef>
 
+#include "../common/hotkey.h"
+
 namespace edvr {
 
 // Look up an Elite binding element (e.g. "ExplorationFSSEnter",
@@ -137,6 +139,21 @@ struct EliteKeyboardUse {
 };
 int eliteBindsKeyboardUses(EliteKeyboardUse* out, int max, char* file, size_t fileLen);
 int eliteBindsKeyboardUsesDir(const wchar_t* dir, EliteKeyboardUse* out, int max, char* file, size_t fileLen);
+
+// The same walk for EVERY kind of binding a hotkey can share a press with (2026-10-08, the settings menu's Hotkeys page): the
+// keyboard (with its modifiers), the XInput pad ("GamePad_Back"), and the joysticks and HOTAS -- a Device written as eight hex
+// digits, vendor then product ("231D0200"), with a Key of Joy_N or Joy_POV1Up. Each use is returned as the parsed HotkeyBinding,
+// so a captured binding is compared with it field by field and never as text. Axes (Joy_XAxis), the mouse, a slot with no key and
+// a key this build has no name for are left out; a slot's own <Modifier> is read for the keyboard only (a pad or joystick
+// button that Elite acts on with a modifier held is still that button, and still shares the press). Same file rule as every
+// lookup here: the maintained file answers alone. Returns the number written (at most `max`), or -1 with no preset or no
+// readable file; `file` (optional) receives the answering basename.
+struct EliteBindUse {
+    char          element[64];   // the binding's name in the file: "HumanoidJumpButton", "ToggleFreeCam"
+    HotkeyBinding binding;
+};
+int eliteBindsAllUses(EliteBindUse* out, int max, char* file, size_t fileLen);
+int eliteBindsAllUsesDir(const wchar_t* dir, EliteBindUse* out, int max, char* file, size_t fileLen);
 
 // A cheap stamp over the bindings directory: names, sizes and write times of
 // its files, folded together. It changes when the player applies a rebind or

@@ -8,7 +8,9 @@
 #include <string>
 #include <vector>
 
+#include "../common/hotkey.h"
 #include "../common/log.h"
+#include "../common/pad_names.h"
 
 namespace edvr {
 namespace {
@@ -192,26 +194,23 @@ bool collectActiveBindsFiles(const std::wstring& dir, std::vector<Cand>* out) {
     return true;
 }
 
-// Every keyboard slot in one file's text, with the element it belongs to. A small tag walker rather than a search per element: the
+// Every slot in one file's text, with the element it belongs to. A small tag walker rather than a search per element: the
 // elements are unknown here. An element is a tag with no attributes (<HeadlookToggle>), its slots are <Primary ...> and <Secondary
-// ...> inside it, and a slot's <Modifier ...> tags follow it before the next slot or the element's close.
-int scanKeyboardUsesIn(const std::string& text, EliteKeyboardUse* out, int max) {
-    int n = 0;
+// ...> inside it, and a slot's <Modifier ...> tags follow it before the next slot or the element's close. `emit(element, device,
+// key, prefix)` is called once per slot with a device and a key: `device` is the Device attribute as written ("Keyboard",
+// "GamePad", "Mouse", "231D0200"), `prefix` the keyboard modifiers in EDVR's spelling ("CTRL+").
+template <class Emit>
+void walkSlots(const std::string& text, Emit emit) {
     std::string element;
     struct Slot {
         bool open = false;
-        bool keyboard = false;
+        std::string device;
         std::string key;
         std::string prefix;
     } slot;
     auto flush = [&]() {
-        if (slot.open && slot.keyboard && !slot.key.empty() && !element.empty() && n < max) {
-            char keyName[32];
-            if (eliteBindsTranslateKey(slot.key.c_str(), keyName, sizeof(keyName))) {
-                snprintf(out[n].element, sizeof(out[n].element), "%s", element.c_str());
-                snprintf(out[n].binding, sizeof(out[n].binding), "%s%s", slot.prefix.c_str(), keyName);
-                ++n;
-            }
+        if (slot.open && !slot.device.empty() && !slot.key.empty() && !element.empty()) {
+            emit(element, slot.device, slot.key, slot.prefix);
         }
         slot = Slot();
     };
@@ -246,7 +245,7 @@ int scanKeyboardUsesIn(const std::string& text, EliteKeyboardUse* out, int max) 
             flush();
             std::string device, key;
             slot.open = true;
-            if (attrAfter(text, lt, gt - lt, "Device", &device)) slot.keyboard = _stricmp(device.c_str(), "Keyboard") == 0;
+            if (attrAfter(text, lt, gt - lt, "Device", &device)) slot.device = device;
             if (attrAfter(text, lt, gt - lt, "Key", &key)) slot.key = key;
             // A self-closing slot has no modifiers to wait for.
             if (selfClosing) flush();
@@ -270,6 +269,56 @@ int scanKeyboardUsesIn(const std::string& text, EliteKeyboardUse* out, int max) 
         }
     }
     flush();
+}
+
+// The keyboard bindings alone (Explorer Cam's launch-time clash check reads these).
+int scanKeyboardUsesIn(const std::string& text, EliteKeyboardUse* out, int max) {
+    int n = 0;
+    walkSlots(text, [&](const std::string& element, const std::string& device, const std::string& key,
+                        const std::string& prefix) {
+        if (n >= max || _stricmp(device.c_str(), "Keyboard") != 0) return;
+        char keyName[32];
+        if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName))) return;
+        snprintf(out[n].element, sizeof(out[n].element), "%s", element.c_str());
+        snprintf(out[n].binding, sizeof(out[n].binding), "%s%s", prefix.c_str(), keyName);
+        ++n;
+    });
+    return n;
+}
+
+// Every binding a hotkey could share a press with: the keyboard, the XInput pad, and the joysticks (a device written as eight
+// hex digits, a Joy_N button or a Joy_POV hat). An axis, the mouse and a key this build has no name for are left out.
+int scanAllUsesIn(const std::string& text, EliteBindUse* out, int max) {
+    int n = 0;
+    walkSlots(text, [&](const std::string& element, const std::string& device, const std::string& key,
+                        const std::string& prefix) {
+        if (n >= max) return;
+        HotkeyBinding b;
+        if (_stricmp(device.c_str(), "Keyboard") == 0) {
+            char keyName[32];
+            if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName))) return;
+            if (!hotkeyParseBinding((prefix + keyName).c_str(), &b, /*quiet=*/true)) return;
+        } else if (_stricmp(device.c_str(), "GamePad") == 0) {
+            const PadName* p = padNameFind(key.c_str());
+            if (!p) return;
+            b.kind = HotkeyKind::Pad;
+            b.padButtons = p->buttons;
+            b.padTrigger = p->trigger;
+        } else {
+            uint32_t id = 0;
+            uint16_t input = 0;
+            if (!hotkeyJoyDeviceFromText(device.c_str(), &id) || device.size() != 8 ||
+                !hotkeyJoyInputFromEliteKey(key.c_str(), &input)) {
+                return;
+            }
+            b.kind = HotkeyKind::Joy;
+            b.joyDevice = id;
+            b.joyInput = input;
+        }
+        snprintf(out[n].element, sizeof(out[n].element), "%s", element.c_str());
+        out[n].binding = b;
+        ++n;
+    });
     return n;
 }
 
@@ -639,6 +688,25 @@ int eliteBindsKeyboardUsesDir(const wchar_t* dirC, EliteKeyboardUse* out, int ma
 
 int eliteBindsKeyboardUses(EliteKeyboardUse* out, int max, char* file, size_t fileLen) {
     return eliteBindsKeyboardUsesDir(bindingsDir().c_str(), out, max, file, fileLen);
+}
+
+int eliteBindsAllUsesDir(const wchar_t* dirC, EliteBindUse* out, int max, char* file, size_t fileLen) {
+    if (file && fileLen) file[0] = '\0';
+    if (!dirC || !dirC[0] || !out || max <= 0) return -1;
+    const std::wstring dir(dirC);
+    std::vector<Cand> cands;
+    if (!collectActiveBindsFiles(dir, &cands)) return -1;
+    for (const Cand& c : cands) {
+        std::string text;
+        if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
+        if (file && fileLen) snprintf(file, fileLen, "%s", c.utf8);
+        return scanAllUsesIn(text, out, max);
+    }
+    return -1;
+}
+
+int eliteBindsAllUses(EliteBindUse* out, int max, char* file, size_t fileLen) {
+    return eliteBindsAllUsesDir(bindingsDir().c_str(), out, max, file, fileLen);
 }
 
 unsigned long long eliteBindsFingerprintDir(const wchar_t* dir) {

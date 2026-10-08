@@ -2,15 +2,15 @@
 
 ## Status
 
-*Updated 2026-09-29 (previously 2026-09-15). Historical findings summarize
+*Updated 2026-10-08 (previously 2026-09-29). Historical findings summarize
 the journal below; the current timing and overlay qualification is linked separately. Dated notes
 and the ruled-out list: "Status detail", straight after this block.*
 
-- **Current code state (2026-09-29; dated notes in Status detail):**
-  - Retired 2026-09-29: the door GPU bracket (`edvrDoorGpuBegin`/`End`, the
-    per-eye query ring, the Monitor's "EDVR's GPU time at the door" tile;
-    e3109af4) and the `edvrMenuPanel` export with `edvrEyeCaptureArm` and
-    `edvrFssTheater` (6ecbd241). Their design text below is history.
+- **Current code state (2026-10-08; dated notes in Status detail):**
+  - Hotkeys page (2026-10-08): `hotkey.menu`, `.explorer_cam`, `.toggle_exposure`,
+    `.dump_camera` (+ `.dump_draws`, `.dump_eyes` in developer mode): Enter, then
+    press a key, pad button or HOTAS button. BUILT, NOT FLOWN; section "Hotkeys
+    page (2026-10-08)" below. (The 2026-09-29 retirements: Status detail.)
   - Performance page: one `UI quality` row (`fix.ui_quality`, off / 100% /
     125%; default 100) drives the cockpit panels' size and the UI layer;
     BUILT, NOT FLOWN as of its 2026-09-23 entry. Gone: the `HUD quality` row,
@@ -162,6 +162,32 @@ ruled-out list); the summary above points here.
   deferred UI replay it switched (retired the same day, 48ad7689): the
   developer tier no longer has the row, and the cockpit HUD stays in the
   picture the upscaler reconstructs.
+
+### Hotkeys page (2026-10-08)
+
+BUILT, NOT FLOWN. A page after Fixes: `hotkey.menu`, `.explorer_cam`,
+`.toggle_exposure`, `.dump_camera`, and with `menu.developer` also
+`.dump_draws`, `.dump_eyes`. In edvr.ini `# ui: ... | hotkey | live` is a row
+for everyone and `# dev: label ... | hotkey` a developer-only one (the
+generator's tiers; the section names the page). Enter waits for the NEXT
+input: a key with Ctrl/Shift/Alt held, a pad button or trigger, or a HOTAS
+button or hat. Esc cancels; Delete or Backspace clears, except `hotkey.menu`
+(changed, never cleared). While it waits the menu's navigation does not run,
+so binding Up or Enter cannot move the highlight, and keys held at the end are
+primed. Navigation keys (arrows, Enter, Space, Tab, PageUp/Down, Home, End, R,
+Esc) are refused bare; Ctrl or Alt frees them. An exact copy of another hotkey
+is refused, naming it; a press Elite also binds WARNS (badge "also in
+Elite"), since keys are watched, never captured. `hotkey.explorer_cam` is the
+Explorer Cam switch (empty = off), checked against on-foot bindings, and
+locked while a session is on.
+
+Values: `F5`, `CTRL+SHIFT+F9`; `GamePad_Back`; `231D0200:Joy_12`,
+`231D0200:Joy_POV1Up` (vendor then product, as Elite's .binds write it). HOTAS
+is watched: input_gate copies buttons and hats out of the game's own
+GetDeviceState/GetDeviceData after they return (joy_watch.h), makes no device,
+and calls only GetCapabilities and, once a second, GetDeviceInfo. The four
+diagnostic keys now re-resolve live. A flight checks the `joystick watch:`
+log line (state or data), the Joy_N against the .binds, and no stall.
 
 ## The ask
 
@@ -353,7 +379,9 @@ choice of key that causes it.
 
 - **The mouse.** Never touched; the menu has no pointer.
 - **DirectInput joysticks, throttles, pedals.** Never touched; the ship
-  flies.
+  flies. (Since 2026-10-08 their buttons and hats are WATCHED for the Hotkeys
+  page: the gate's wrappers copy what the game's own read returned, after it
+  returns -- see "Hotkeys page (2026-10-08)". The game's data is not altered.)
 - **XInput pads, in v1.** `XInputGetState` is imported and IAT-patchable
   the same way, and phase B masks the d-pad and face buttons while the menu
   is open and leaves sticks, triggers and bumpers to the game. In v1 pads are

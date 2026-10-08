@@ -2334,7 +2334,7 @@ void applyHotkey(const std::string& name, const ecm::Sink& sink) {
     g_f5.setBinding(name.c_str());
     if (name.empty()) {
         // Nothing to say here: an empty hotkey IS "Explorer Cam is off", and the frame's own line says so.
-    } else if (g_f5.key() == 0)
+    } else if (!g_f5.bound())   // a pad button or a HOTAS button is bound too, with key() == 0 (hotkey.h)
         say(sink, "%s hotkey.explorer_cam = \"%s\" bound nothing (the line above says why), so there is no way into Explorer Cam this session",
             ecm::prefix(), name.c_str());
     else

@@ -7,6 +7,7 @@
 #include <Xinput.h>
 
 #include "../common/log.h"
+#include "../common/pad_names.h"
 #include "../common/periodic_work.h"
 #include "../common/timing.h"
 
@@ -40,39 +41,17 @@ struct Slot {
 };
 Slot g_slot[4];
 
-struct PadMap {
-    const char* elite;
-    uint16_t    buttons;
-    uint8_t     trigger;
-};
-// Elite's GamePad key names, from a field bindings file (FaceRight is B:
-// the faces are named by position). Variants seen in the wild included.
-constexpr PadMap kPadMap[] = {
-    {"GamePad_FaceDown", XINPUT_GAMEPAD_A, 0},
-    {"GamePad_FaceRight", XINPUT_GAMEPAD_B, 0},
-    {"GamePad_FaceLeft", XINPUT_GAMEPAD_X, 0},
-    {"GamePad_FaceUp", XINPUT_GAMEPAD_Y, 0},
-    {"GamePad_A", XINPUT_GAMEPAD_A, 0},
-    {"GamePad_B", XINPUT_GAMEPAD_B, 0},
-    {"GamePad_X", XINPUT_GAMEPAD_X, 0},
-    {"GamePad_Y", XINPUT_GAMEPAD_Y, 0},
-    {"GamePad_DPadUp", XINPUT_GAMEPAD_DPAD_UP, 0},
-    {"GamePad_DPadDown", XINPUT_GAMEPAD_DPAD_DOWN, 0},
-    {"GamePad_DPadLeft", XINPUT_GAMEPAD_DPAD_LEFT, 0},
-    {"GamePad_DPadRight", XINPUT_GAMEPAD_DPAD_RIGHT, 0},
-    {"GamePad_Back", XINPUT_GAMEPAD_BACK, 0},
-    {"GamePad_Start", XINPUT_GAMEPAD_START, 0},
-    {"GamePad_LBumper", XINPUT_GAMEPAD_LEFT_SHOULDER, 0},
-    {"GamePad_RBumper", XINPUT_GAMEPAD_RIGHT_SHOULDER, 0},
-    {"GamePad_LShoulder", XINPUT_GAMEPAD_LEFT_SHOULDER, 0},
-    {"GamePad_RShoulder", XINPUT_GAMEPAD_RIGHT_SHOULDER, 0},
-    {"GamePad_LThumb", XINPUT_GAMEPAD_LEFT_THUMB, 0},
-    {"GamePad_RThumb", XINPUT_GAMEPAD_RIGHT_THUMB, 0},
-    {"GamePad_LStick", XINPUT_GAMEPAD_LEFT_THUMB, 0},
-    {"GamePad_RStick", XINPUT_GAMEPAD_RIGHT_THUMB, 0},
-    {"GamePad_LTrigger", 0, 1},
-    {"GamePad_RTrigger", 0, 2},
-};
+// Elite's GamePad key names live in src/common/pad_names.h, shared with the
+// hotkey parser; the masks there are XInput's own, checked here.
+static_assert(kPadUp == XINPUT_GAMEPAD_DPAD_UP && kPadDown == XINPUT_GAMEPAD_DPAD_DOWN &&
+                  kPadLeft == XINPUT_GAMEPAD_DPAD_LEFT && kPadRight == XINPUT_GAMEPAD_DPAD_RIGHT &&
+                  kPadStart == XINPUT_GAMEPAD_START && kPadBack == XINPUT_GAMEPAD_BACK &&
+                  kPadLeftThumb == XINPUT_GAMEPAD_LEFT_THUMB &&
+                  kPadRightThumb == XINPUT_GAMEPAD_RIGHT_THUMB &&
+                  kPadLeftShoulder == XINPUT_GAMEPAD_LEFT_SHOULDER &&
+                  kPadRightShoulder == XINPUT_GAMEPAD_RIGHT_SHOULDER && kPadA == XINPUT_GAMEPAD_A &&
+                  kPadB == XINPUT_GAMEPAD_B && kPadX == XINPUT_GAMEPAD_X && kPadY == XINPUT_GAMEPAD_Y,
+              "pad_names.h's masks are XInput's");
 
 bool ensureLoaded() {
     if (g_getState) return true;
@@ -118,18 +97,17 @@ bool held(const XINPUT_STATE& st, const XinputBinding& b) {
 bool xinputTranslate(const char* eliteKey, XinputBinding* out) {
     if (!eliteKey || !out) return false;
     // Axis bindings carry a direction prefix ("Pos_GamePad_RTrigger");
-    // the trigger threshold reads the positive direction either way.
+    // padNameFind drops it, the trigger threshold reading the positive
+    // direction either way.
+    if (const PadName* m = padNameFind(eliteKey)) {
+        out->buttons = m->buttons;
+        out->trigger = m->trigger;
+        out->valid = true;
+        return true;
+    }
     if (_strnicmp(eliteKey, "Pos_", 4) == 0 ||
         _strnicmp(eliteKey, "Neg_", 4) == 0) {
         eliteKey += 4;
-    }
-    for (const PadMap& m : kPadMap) {
-        if (_stricmp(eliteKey, m.elite) == 0) {
-            out->buttons = m.buttons;
-            out->trigger = m.trigger;
-            out->valid = true;
-            return true;
-        }
     }
     static bool s_unmappedNoted = false;
     if (!s_unmappedNoted) {
@@ -144,6 +122,18 @@ bool xinputTranslate(const char* eliteKey, XinputBinding* out) {
 
 void xinputWatchTick() {
     if (!ensureLoaded()) return;
+    // One poll per frame, however many callers ask. The FSS latch tick and the
+    // hotkeys (a pad hotkey, the settings menu's capture) all call this, and
+    // every real poll copies `cur` into `prev`: a second poll in the same frame
+    // would make the frame's edge invisible to whoever reads second. The guard
+    // is a few milliseconds, well under any frame time this runs at and well
+    // over two calls from one frame.
+    {
+        const uint64_t now = stampMs();
+        static uint64_t s_lastPollMs = 0;
+        if (s_lastPollMs && now - s_lastPollMs < 3) return;
+        s_lastPollMs = now;
+    }
     int64_t probeTicks = 0;    // clock ticks spent in XInputGetState on empty slots
     uint32_t probedSlots = 0;  // and how many of them there were this tick
     for (DWORD i = 0; i < 4; ++i) {
@@ -193,6 +183,29 @@ bool xinputPressed(const XinputBinding& b) {
         if (held(s.cur, b) && !held(s.prev, b)) return true;
     }
     return false;
+}
+
+bool xinputHeld(const XinputBinding& b) {
+    if (!b.valid || !g_getState) return false;
+    for (const Slot& s : g_slot) {
+        if (s.connected && held(s.cur, b)) return true;
+    }
+    return false;
+}
+
+void xinputSnapshot(uint16_t* buttons, uint8_t* triggers) {
+    uint16_t b = 0;
+    uint8_t t = 0;
+    if (g_getState) {
+        for (const Slot& s : g_slot) {
+            if (!s.connected) continue;
+            b = static_cast<uint16_t>(b | s.cur.Gamepad.wButtons);
+            if (s.cur.Gamepad.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD) t |= 1;
+            if (s.cur.Gamepad.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD) t |= 2;
+        }
+    }
+    if (buttons) *buttons = b;
+    if (triggers) *triggers = t;
 }
 
 }  // namespace edvr

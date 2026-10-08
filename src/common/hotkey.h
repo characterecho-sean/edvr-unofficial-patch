@@ -4,8 +4,17 @@
 // keyboard hook: a low-level hook is a process-wide input tap, which is more
 // privilege than a timestamp marker needs and more than this project wants to
 // be seen taking. Frame-granularity timing is plenty for annotating a trace.
+//
+// A hotkey is a KEYBOARD key with optional Ctrl/Shift/Alt, an XInput PAD
+// button, or a HOTAS/joystick BUTTON or POV direction (2026-10-08; the in-
+// headset menu writes all three, docs/settings-menu.md "Hotkeys page"). The
+// keyboard is read here; the other two are read through a reader the d3d11
+// half installs (hotkeySetNonKeyboardReader), because their state lives
+// there: the pad is polled by xinput_watch, the joystick table is filled from
+// the game's own DirectInput reads (joy_watch.h) and never by EDVR's devices.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace edvr {
@@ -18,20 +27,113 @@ enum HotkeyMods : uint32_t {
     kHotkeyShift = 1u << 2,
 };
 
+enum class HotkeyKind : uint8_t { None = 0, Key, Pad, Joy };
+
+// Joystick inputs are numbered once, for the ini grammar, Elite's .binds and
+// the observation table alike: 0..127 are Joy_1..Joy_128, and a POV hat is
+// kJoyPovBase + hat * 4 + direction (Up, Right, Down, Left) -- Joy_POV1Up is
+// 128. A pad has no such number: it is a button mask or a trigger.
+constexpr int      kJoyButtonCount = 128;
+constexpr int      kJoyHatCount = 4;
+constexpr uint16_t kJoyPovBase = 128;
+constexpr uint16_t kJoyInputCount = kJoyPovBase + kJoyHatCount * 4;
+
+// What one hotkey value in edvr.ini says, parsed.
+//
+//   Key  "F5", "CTRL+ALT+SPACE", "0x78"           vk, mods
+//   Pad  "GamePad_Back"                            padButtons / padTrigger
+//   Joy  "231D0200:Joy_12", "231D0200:Joy_POV1Up"  joyDevice, joyInput
+//
+// A joystick's device is written the way Elite writes it in its .binds:
+// eight hex digits, the vendor id then the product id ("231D0200" is vendor
+// 231D, product 0200), so a value can be compared with a binding of the
+// player's as text.
+struct HotkeyBinding {
+    HotkeyKind kind = HotkeyKind::None;
+    int        vk = 0;
+    uint32_t   mods = 0;
+    uint16_t   padButtons = 0;
+    uint8_t    padTrigger = 0;
+    uint32_t   joyDevice = 0;   // vendor << 16 | product
+    uint16_t   joyInput = 0;
+};
+
+bool hotkeyBindingsEqual(const HotkeyBinding& a, const HotkeyBinding& b);
+
+// Parse any hotkey value. True for an empty value (kind None: an empty
+// setting is a choice) and for one that names a binding; false, with *out
+// None, for text that names nothing. A keyboard name that is not one is said
+// in the log (virtualKeyFromName's line) unless `quiet`; so is an unknown pad
+// or joystick spelling.
+bool hotkeyParseBinding(const char* text, HotkeyBinding* out, bool quiet = false);
+
+// The ini text of a binding, canonical: parse(format(b)) is b for every
+// binding the parser can produce. Returns the length written, 0 for None.
+size_t hotkeyFormatBinding(const HotkeyBinding& b, char* out, size_t cap);
+
+// A keyboard key's canonical name ("F5", "SPACE", "A", "0x91" for one with no
+// name); never fails, and virtualKeyFromName reads the answer back to the same
+// key. The punctuation row is written as its NAME (SEMICOLON, HASH...) because
+// ';' and '#' after "= " are eaten by the ini's trailing-comment rule.
+size_t hotkeyKeyName(int vk, char* out, size_t cap);
+
+// Is this text a pad or joystick spelling, not a keyboard name? The keyboard
+// parser answers 0 for these WITHOUT the "not a key name" line.
+bool hotkeyLooksNonKeyboard(const char* text);
+
+// Joystick pieces, shared with elite_binds.cpp (the .binds spell the same
+// things). "Joy_12" / "Joy_POV1Up" <-> the input number above; false for
+// anything else (an axis, "Joy_RZAxis").
+bool   hotkeyJoyInputFromEliteKey(const char* key, uint16_t* input);
+size_t hotkeyJoyInputName(uint16_t input, char* out, size_t cap);
+// "231D0200" <-> vendor << 16 | product. The text is exactly eight hex digits.
+bool   hotkeyJoyDeviceFromText(const char* text, uint32_t* device);
+void   hotkeyJoyDeviceText(uint32_t device, char out[9]);
+
+// While the settings menu waits for a key, pad button or HOTAS button to bind, every
+// hotkey is held still: its latch follows the key as always, but it reports no press.
+// Otherwise the very key being chosen would also do its job -- Pause writing a camera
+// dump, F5 entering Explorer Cam, the exposure key toggling -- on the way to being
+// bound. A press that began while suspended is not a press afterwards either (the
+// latch saw it go down). The menu clears it on every path that ends a capture.
+void hotkeysSuspend(bool on);
+bool hotkeysSuspended();
+
+// The held-state reader for pad and joystick bindings. Installed once by the
+// d3d11 half; until then (and in a rig that does not install one) a pad or
+// joystick binding never fires. It answers "is this binding held right now",
+// and Hotkey makes the edge, with the same latch and focus rules a key has.
+typedef bool (*HotkeyHeldFn)(const HotkeyBinding& b);
+void hotkeySetNonKeyboardReader(HotkeyHeldFn fn);
+
 class Hotkey {
 public:
     Hotkey() = default;
     // vk is a Windows virtual-key code; 0 disables.
-    explicit Hotkey(int vk) : m_vk(vk) {}
+    explicit Hotkey(int vk) { setKey(vk); }
+    // The registry of keyboard bindings (hotkeyRegisteredKeys, and the better-
+    // match rule) counts LIVE hotkeys: a binding that changes, or a Hotkey that
+    // goes away, gives its entry back. It used to be append-only, which was
+    // right while a binding was set once at launch; the settings menu rebinds
+    // them while the game runs, and sixteen stale entries would have starved it.
+    Hotkey(const Hotkey& o);
+    Hotkey& operator=(const Hotkey& o);
+    ~Hotkey();
 
-    void setKey(int vk) { m_vk = vk; m_mods = 0; }
-    void setKey(int vk, uint32_t mods) { m_vk = vk; m_mods = mods; }
-    // Parse a config string and take BOTH halves of the answer.
+    void setKey(int vk) { setKey(vk, 0); }
+    void setKey(int vk, uint32_t mods);
+    // Parse a config string and take ALL of the answer: the key AND its
+    // modifiers, or the pad button, or the joystick input.
     //
     // The two-step form -- setKey(virtualKeyFromName(s)) -- compiles fine and
     // silently discards the modifiers, turning CTRL+ALT+SPACE into a bare
     // SPACE. That is a binding that fires when it should not, which is worse
     // than one that never fires, so there is one call that cannot do it.
+    //
+    // A binding that CHANGES starts with its edge latch set to whatever is
+    // held now: the key pressed to bind it in the settings menu is still down
+    // when the ini reloads, and a press that finished before the binding
+    // existed must not fire it.
     void setBinding(const char* name);
 
     // Does this binding MIRROR A GAME ACTION, or is it EDVR's own control?
@@ -70,8 +172,14 @@ public:
         return m;
     }
 
-    int  key() const { return m_vk; }
-    uint32_t mods() const { return m_mods; }
+    // The keyboard half of the answer: 0 and 0 for a pad or joystick binding.
+    int  key() const { return m_bind.kind == HotkeyKind::Key ? m_bind.vk : 0; }
+    uint32_t mods() const { return m_bind.kind == HotkeyKind::Key ? m_bind.mods : 0; }
+    // Is anything bound -- a key, a pad button or a joystick input? key() == 0
+    // does NOT mean unbound any more.
+    bool bound() const { return m_bind.kind != HotkeyKind::None; }
+    HotkeyKind kind() const { return m_bind.kind; }
+    const HotkeyBinding& binding() const { return m_bind; }
 
     // True exactly once per physical press, with the modifiers held.
     bool pressed();
@@ -84,15 +192,20 @@ public:
     // were released, inverting a toggle from a press the player had finished
     // with. Threading the inputs through one function makes that testable
     // without a keyboard, and leaves pressed() as the thin part that reads
-    // them.
+    // them. For a pad or joystick binding `keyDown` is the held state and
+    // `held` (the keyboard's modifiers) is ignored.
     bool pressedWith(bool keyDown, uint32_t held, bool focused);
 
 private:
-    int      m_vk = 0;
-    uint32_t m_mods = 0;
-    bool     m_down = false;
-    bool     m_missedUnfocused = false;
-    bool     m_gameMirrored = false;
+    bool readDownNow() const;
+    void takeRegistryEntry();
+    void giveRegistryEntry();
+
+    HotkeyBinding m_bind;
+    bool          m_down = false;
+    bool          m_missedUnfocused = false;
+    bool          m_gameMirrored = false;
+    bool          m_registered = false;   // holds one entry of the registry
 };
 
 // Maps a config string to a virtual-key code, with optional modifiers.
@@ -108,7 +221,8 @@ private:
 //
 // Separators are '+' or '-', spaces are ignored, and case does not matter.
 // Returns 0 if the main key is unrecognised; *mods receives the modifier flags
-// and may be null.
+// and may be null. A pad or joystick spelling is not a keyboard name and
+// answers 0 silently.
 int virtualKeyFromName(const char* name, uint32_t* mods);
 int virtualKeyFromName(const char* name);
 

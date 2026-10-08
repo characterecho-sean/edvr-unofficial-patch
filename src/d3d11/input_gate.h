@@ -49,6 +49,15 @@
 // WHAT IS NOT CAPTURED: the mouse, DirectInput joysticks, XInput pads (a
 // phase-B door of the same shape). Nothing here reads a key EDVR does not
 // already read through hotkey.cpp; nothing here injects anything.
+//
+// JOYSTICKS ARE WATCHED, since 2026-10-08 (joy_watch.h): the wrappers below, and
+// an observer-only door made at CreateDevice for a controller on a table of its
+// own, COPY the buttons and hats out of what the game's own GetDeviceState or
+// GetDeviceData just returned, after the call, into a table the Hotkeys page's
+// pad/HOTAS hotkeys read. Never the game's buffer (read-only), never a device of
+// EDVR's own, never a call on the device beyond GetCapabilities and, once a second,
+// GetDeviceInfo (issue 45: a wheel's force-feedback driver stalled the render
+// thread inside DirectInput; no new traffic there). Its fault budget is its own.
 #pragma once
 
 #include <cstdint>

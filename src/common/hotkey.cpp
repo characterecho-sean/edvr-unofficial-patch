@@ -1,14 +1,17 @@
 #include "hotkey.h"
 
+#include <atomic>
 #include <cctype>
 #include <string>
 
 #include <windows.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "log.h"
+#include "pad_names.h"
 
 namespace edvr {
 
@@ -103,16 +106,36 @@ static bool modsSatisfied(uint32_t want, uint32_t held) {
 // A registry rather than an ordering rule, because the bindings are independent
 // objects polled in whatever order the frame loop happens to use, and a rule
 // that depends on the combo being polled first would be right only by accident.
-struct Registered { int vk; uint32_t mods; };
+//
+// COUNTED, since 2026-10-08: an entry is one live Hotkey's binding (two Hotkeys
+// on the same key share it), and it goes when the last of them rebinds or is
+// destroyed. The registry was append-only while a binding was set once at launch;
+// the settings menu's Hotkeys page rebinds them while the game runs, so a stale
+// entry would keep suppressing a bare key that a long-gone chord once shadowed,
+// and sixteen of them would have starved every later binding.
+struct Registered { int vk; uint32_t mods; int refs; };
 static Registered g_bindings[16];
 static unsigned   g_bindingCount = 0;
 
 static void registerBinding(int vk, uint32_t mods) {
     if (!vk) return;
     for (unsigned i = 0; i < g_bindingCount; ++i) {
-        if (g_bindings[i].vk == vk && g_bindings[i].mods == mods) return;
+        if (g_bindings[i].vk == vk && g_bindings[i].mods == mods) {
+            ++g_bindings[i].refs;
+            return;
+        }
     }
-    if (g_bindingCount < 16) g_bindings[g_bindingCount++] = {vk, mods};
+    if (g_bindingCount < 16) g_bindings[g_bindingCount++] = {vk, mods, 1};
+}
+
+static void unregisterBinding(int vk, uint32_t mods) {
+    for (unsigned i = 0; i < g_bindingCount; ++i) {
+        if (g_bindings[i].vk != vk || g_bindings[i].mods != mods) continue;
+        if (--g_bindings[i].refs <= 0) {
+            g_bindings[i] = g_bindings[--g_bindingCount];
+        }
+        return;
+    }
 }
 
 // Is some OTHER binding on this key a strictly better match right now?
@@ -127,11 +150,97 @@ static bool betterMatchExists(int vk, uint32_t mine, uint32_t held) {
     return false;
 }
 
+// The pad / joystick state reader (hotkey.h). One pointer, set once by the
+// d3d11 half before any hotkey is polled.
+static HotkeyHeldFn g_nonKeyboardReader = nullptr;
+
+void hotkeySetNonKeyboardReader(HotkeyHeldFn fn) { g_nonKeyboardReader = fn; }
+
+static std::atomic<bool> g_suspended{false};
+void hotkeysSuspend(bool on) { g_suspended.store(on, std::memory_order_relaxed); }
+bool hotkeysSuspended() { return g_suspended.load(std::memory_order_relaxed); }
+
+bool hotkeyBindingsEqual(const HotkeyBinding& a, const HotkeyBinding& b) {
+    if (a.kind != b.kind) return false;
+    switch (a.kind) {
+        case HotkeyKind::None: return true;
+        case HotkeyKind::Key: return a.vk == b.vk && a.mods == b.mods;
+        case HotkeyKind::Pad: return a.padButtons == b.padButtons && a.padTrigger == b.padTrigger;
+        case HotkeyKind::Joy: return a.joyDevice == b.joyDevice && a.joyInput == b.joyInput;
+    }
+    return false;
+}
+
+// Is this binding held at this moment? The keyboard answer is the raw key (the
+// modifiers are not part of "held": m_down latches the key alone, see
+// pressedWith); the others come from the reader.
+bool Hotkey::readDownNow() const {
+    switch (m_bind.kind) {
+        case HotkeyKind::Key: return (GetAsyncKeyState(m_bind.vk) & 0x8000) != 0;
+        case HotkeyKind::Pad:
+        case HotkeyKind::Joy: return g_nonKeyboardReader && g_nonKeyboardReader(m_bind);
+        default: return false;
+    }
+}
+
+void Hotkey::takeRegistryEntry() {
+    if (m_registered || m_bind.kind != HotkeyKind::Key) return;
+    registerBinding(m_bind.vk, m_bind.mods);
+    m_registered = true;
+}
+
+void Hotkey::giveRegistryEntry() {
+    if (!m_registered) return;
+    unregisterBinding(m_bind.vk, m_bind.mods);
+    m_registered = false;
+}
+
+Hotkey::Hotkey(const Hotkey& o)
+    : m_bind(o.m_bind), m_down(o.m_down), m_missedUnfocused(o.m_missedUnfocused),
+      m_gameMirrored(o.m_gameMirrored) {
+    if (o.m_registered) takeRegistryEntry();
+}
+
+Hotkey& Hotkey::operator=(const Hotkey& o) {
+    if (this == &o) return *this;
+    giveRegistryEntry();
+    m_bind = o.m_bind;
+    m_down = o.m_down;
+    m_missedUnfocused = o.m_missedUnfocused;
+    m_gameMirrored = o.m_gameMirrored;
+    if (o.m_registered) takeRegistryEntry();
+    return *this;
+}
+
+Hotkey::~Hotkey() { giveRegistryEntry(); }
+
+// setKey does not register (it never did): a key set by number is not a binding
+// the better-match rule or the menu's adoption check should hear about.
+void Hotkey::setKey(int vk, uint32_t mods) {
+    HotkeyBinding b;
+    if (vk) {
+        b.kind = HotkeyKind::Key;
+        b.vk = vk;
+        b.mods = mods;
+    }
+    const bool changed = !hotkeyBindingsEqual(b, m_bind);
+    giveRegistryEntry();
+    m_bind = b;
+    if (changed) m_down = readDownNow();
+}
+
 void Hotkey::setBinding(const char* name) {
-    uint32_t m = 0;
-    m_vk = virtualKeyFromName(name, &m);
-    m_mods = m_vk ? m : 0;
-    registerBinding(m_vk, m_mods);
+    HotkeyBinding b;
+    hotkeyParseBinding(name, &b);
+    const bool changed = !hotkeyBindingsEqual(b, m_bind);
+    giveRegistryEntry();
+    m_bind = b;
+    takeRegistryEntry();
+    // A new binding starts with its latch at the key's real state. The menu
+    // writes the ini while the key it just captured is still down; without
+    // this the reload's first poll saw a press that began before the binding
+    // existed, and Explorer Cam would have been entered by binding its key.
+    if (changed) m_down = readDownNow();
 }
 
 bool hotkeyWouldFire(int vk, uint32_t mods, uint32_t held) {
@@ -147,17 +256,20 @@ int hotkeyRegisteredKeys(int* vks, int max) {
 }
 
 bool Hotkey::pressed() {
-    if (m_vk == 0) return false;
+    if (m_bind.kind == HotkeyKind::None) return false;
     // A game-mirrored binding is never filtered by focus; see the note above.
-    return pressedWith((GetAsyncKeyState(m_vk) & 0x8000) != 0, heldMods(),
+    // A pad or joystick binding takes the same rule: neither device has a
+    // window, so "focused" is whether the game has it, as for a key.
+    return pressedWith(readDownNow(), m_bind.kind == HotkeyKind::Key ? heldMods() : 0,
                        m_gameMirrored || gameHasFocus());
 }
 
 bool Hotkey::pressedWith(bool keyDown, uint32_t held, bool focused) {
-    if (m_vk == 0) return false;
-    const bool matches = keyDown && hotkeyWouldFire(m_vk, m_mods, held);
+    if (m_bind.kind == HotkeyKind::None) return false;
+    const bool matches =
+        keyDown && (m_bind.kind != HotkeyKind::Key || hotkeyWouldFire(m_bind.vk, m_bind.mods, held));
     const bool fire = matches && focused;
-    const bool edge = fire && !m_down;
+    const bool edge = fire && !m_down && !hotkeysSuspended();
 
     // A press that matched the binding and was thrown away only because
     // another window had focus is recorded so somebody can be told. Only
@@ -187,11 +299,132 @@ bool Hotkey::pressedWith(bool keyDown, uint32_t held, bool focused) {
     return edge;
 }
 
+// ---------------------------------------------------------------------------
+// Key names. Hoisted out of virtualKeyFromName (2026-10-08) so the settings
+// menu can write a captured key back as a name this parser reads to the same
+// key: one table, both directions.
+
+namespace {
+
+struct KeyNameEntry { const char* name; int vk; };
+// The FIRST name listed for a key is the one a capture writes.
+const KeyNameEntry kNamedKeys[] = {
+    {"F1", VK_F1},   {"F2", VK_F2},   {"F3", VK_F3},   {"F4", VK_F4},
+    {"F5", VK_F5},   {"F6", VK_F6},   {"F7", VK_F7},   {"F8", VK_F8},
+    {"F9", VK_F9},   {"F10", VK_F10}, {"F11", VK_F11}, {"F12", VK_F12},
+    {"F13", VK_F13}, {"F14", VK_F14}, {"F15", VK_F15}, {"F16", VK_F16},
+    {"F17", VK_F17}, {"F18", VK_F18}, {"F19", VK_F19}, {"F20", VK_F20},
+    {"F21", VK_F21}, {"F22", VK_F22}, {"F23", VK_F23}, {"F24", VK_F24},
+    {"SCROLLLOCK", VK_SCROLL}, {"SCROLL", VK_SCROLL},
+    {"PAUSE", VK_PAUSE},       {"NUMLOCK", VK_NUMLOCK},
+    {"INSERT", VK_INSERT},     {"HOME", VK_HOME},
+    {"END", VK_END},           {"DELETE", VK_DELETE},
+    {"PAGEUP", VK_PRIOR},      {"PAGEDOWN", VK_NEXT},
+    {"NUMPAD0", VK_NUMPAD0},   {"NUMPAD1", VK_NUMPAD1},
+    {"NUMPAD2", VK_NUMPAD2},   {"NUMPAD3", VK_NUMPAD3},
+    {"NUMPAD4", VK_NUMPAD4},   {"NUMPAD5", VK_NUMPAD5},
+    {"NUMPAD6", VK_NUMPAD6},   {"NUMPAD7", VK_NUMPAD7},
+    {"NUMPAD8", VK_NUMPAD8},   {"NUMPAD9", VK_NUMPAD9},
+    {"MULTIPLY", VK_MULTIPLY}, {"DIVIDE", VK_DIVIDE},
+    {"ADD", VK_ADD},           {"SUBTRACT", VK_SUBTRACT},
+    // The arrow keys were missing, and Elite binds the camera-view cycle to
+    // one of them by default. Asking for RIGHT fell through to the
+    // unrecognised path below, which returned "no key" in silence -- so the
+    // feature simply never fired and nothing said why.
+    {"RIGHT", VK_RIGHT},       {"LEFT", VK_LEFT},
+    {"UP", VK_UP},             {"DOWN", VK_DOWN},
+    {"RIGHTARROW", VK_RIGHT},  {"LEFTARROW", VK_LEFT},
+    {"UPARROW", VK_UP},        {"DOWNARROW", VK_DOWN},
+    {"SPACE", VK_SPACE},       {"TAB", VK_TAB},
+    {"ENTER", VK_RETURN},      {"RETURN", VK_RETURN},
+    {"BACKSPACE", VK_BACK},    {"ESCAPE", VK_ESCAPE},
+    {"ESC", VK_ESCAPE},        {"CAPSLOCK", VK_CAPITAL},
+    {"PRINTSCREEN", VK_SNAPSHOT}, {"APPS", VK_APPS},
+    {"MENU_KEY", VK_APPS},     {"DECIMAL", VK_DECIMAL},
+    {"NUMPADDOT", VK_DECIMAL},
+};
+
+// The punctuation row, by NAME. Resolved through the character rather than
+// through a hard-coded VK_OEM_* code, because the OEM codes are positions
+// on a US keyboard and these names describe CHARACTERS -- on another
+// layout the character lives on a different physical key, and the one the
+// player actually presses is the one that types it.
+struct CharName { const char* name; wchar_t ch; };
+const CharName kCharNames[] = {
+    {"BACKSLASH", L'\\'},   {"SLASH", L'/'},
+    {"LEFTBRACKET", L'['},  {"RIGHTBRACKET", L']'},
+    {"SEMICOLON", L';'},    {"APOSTROPHE", L'\''},
+    {"QUOTE", L'\''},       {"COMMA", L','},
+    {"PERIOD", L'.'},       {"DOT", L'.'},
+    {"GRAVE", L'`'},        {"BACKTICK", L'`'},
+    {"TILDE", L'`'},        {"MINUS", L'-'},
+    {"DASH", L'-'},         {"EQUALS", L'='},
+    {"PLUS", L'='},
+    // '#' by name, because bare ';' and '#' after "= " are eaten by the
+    // ini's own trailing-comment rule -- SEMICOLON and HASH are the
+    // reliable spellings in a config value, and the ini says so. (On a
+    // UK layout '#' is its own physical key, so it is a real binding.)
+    {"HASH", L'#'},         {"POUND", L'#'},
+};
+
+// Set while the formatter checks its own output, and by a quiet parse: the
+// "not a key name" line is for a person's typo, not for a probe.
+thread_local int t_quietKeyNames = 0;
+struct QuietScope {
+    QuietScope() { ++t_quietKeyNames; }
+    ~QuietScope() { --t_quietKeyNames; }
+};
+
+bool isVkOem(int vk) {
+    return (vk >= 0xBA && vk <= 0xC0) || (vk >= 0xDB && vk <= 0xDF) || vk == 0xE2;
+}
+
+}  // namespace
+
+size_t hotkeyKeyName(int vk, char* out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    char name[24];
+    name[0] = 0;
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+        snprintf(name, sizeof(name), "%c", vk);
+    } else {
+        for (const KeyNameEntry& e : kNamedKeys) {
+            if (e.vk == vk) {
+                snprintf(name, sizeof(name), "%s", e.name);
+                break;
+            }
+        }
+    }
+    if (!name[0] && isVkOem(vk)) {
+        // The character this key types on the active layout, and the first
+        // name for it. The round trip below is the check that the layout
+        // agrees; a key it cannot name falls through to the raw code.
+        const UINT ch = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_CHAR) & 0x7FFFFFFFu;
+        for (const CharName& e : kCharNames) {
+            if (static_cast<UINT>(e.ch) == ch) {
+                snprintf(name, sizeof(name), "%s", e.name);
+                break;
+            }
+        }
+    }
+    if (name[0]) {
+        QuietScope quiet;
+        uint32_t m = 0;
+        if (virtualKeyFromName(name, &m) != vk || m != 0) name[0] = 0;
+    }
+    if (!name[0]) snprintf(name, sizeof(name), "0x%02X", vk & 0xFF);
+    snprintf(out, cap, "%s", name);
+    return strlen(out);
+}
+
 int virtualKeyFromName(const char* name) { return virtualKeyFromName(name, nullptr); }
 
 int virtualKeyFromName(const char* name, uint32_t* mods) {
     if (mods) *mods = 0;
     if (!name || !*name) return 0;
+    // A pad or joystick spelling is a hotkey value too, just not a keyboard
+    // one: say nothing, the caller that asked for a keyboard key gets "none".
+    if (hotkeyLooksNonKeyboard(name)) return 0;
 
     // Modifiers are PEELED FROM THE FRONT, not split out of the whole string.
     //
@@ -239,10 +472,11 @@ int virtualKeyFromName(const char* name, uint32_t* mods) {
                                    ? std::string()
                                    : s.substr(b, e - b + 1);
             if (last.empty()) {
-                Log::get().note("hotkey: \"%s\" has modifiers but no key. "
-                                "Modifiers are CTRL, ALT and SHIFT, joined with "
-                                "'+', and the key comes last -- CTRL+ALT+SPACE.",
-                                name);
+                if (!t_quietKeyNames)
+                    Log::get().note("hotkey: \"%s\" has modifiers but no key. "
+                                    "Modifiers are CTRL, ALT and SHIFT, joined with "
+                                    "'+', and the key comes last -- CTRL+ALT+SPACE.",
+                                    name);
                 return 0;
             }
             const int vk = virtualKeyFromName(last.c_str(), nullptr);
@@ -255,69 +489,10 @@ int virtualKeyFromName(const char* name, uint32_t* mods) {
         return static_cast<int>(strtol(name, nullptr, 16));
     }
 
-    struct Entry { const char* name; int vk; };
-    static const Entry kTable[] = {
-        {"F1", VK_F1},   {"F2", VK_F2},   {"F3", VK_F3},   {"F4", VK_F4},
-        {"F5", VK_F5},   {"F6", VK_F6},   {"F7", VK_F7},   {"F8", VK_F8},
-        {"F9", VK_F9},   {"F10", VK_F10}, {"F11", VK_F11}, {"F12", VK_F12},
-        {"F13", VK_F13}, {"F14", VK_F14}, {"F15", VK_F15}, {"F16", VK_F16},
-        {"F17", VK_F17}, {"F18", VK_F18}, {"F19", VK_F19}, {"F20", VK_F20},
-        {"F21", VK_F21}, {"F22", VK_F22}, {"F23", VK_F23}, {"F24", VK_F24},
-        {"SCROLLLOCK", VK_SCROLL}, {"SCROLL", VK_SCROLL},
-        {"PAUSE", VK_PAUSE},       {"NUMLOCK", VK_NUMLOCK},
-        {"INSERT", VK_INSERT},     {"HOME", VK_HOME},
-        {"END", VK_END},           {"DELETE", VK_DELETE},
-        {"PAGEUP", VK_PRIOR},      {"PAGEDOWN", VK_NEXT},
-        {"NUMPAD0", VK_NUMPAD0},   {"NUMPAD1", VK_NUMPAD1},
-        {"NUMPAD2", VK_NUMPAD2},   {"NUMPAD3", VK_NUMPAD3},
-        {"NUMPAD4", VK_NUMPAD4},   {"NUMPAD5", VK_NUMPAD5},
-        {"NUMPAD6", VK_NUMPAD6},   {"NUMPAD7", VK_NUMPAD7},
-        {"NUMPAD8", VK_NUMPAD8},   {"NUMPAD9", VK_NUMPAD9},
-        {"MULTIPLY", VK_MULTIPLY}, {"DIVIDE", VK_DIVIDE},
-        {"ADD", VK_ADD},           {"SUBTRACT", VK_SUBTRACT},
-        // The arrow keys were missing, and Elite binds the camera-view cycle to
-        // one of them by default. Asking for RIGHT fell through to the
-        // unrecognised path below, which returned "no key" in silence -- so the
-        // feature simply never fired and nothing said why.
-        {"RIGHT", VK_RIGHT},       {"LEFT", VK_LEFT},
-        {"UP", VK_UP},             {"DOWN", VK_DOWN},
-        {"RIGHTARROW", VK_RIGHT},  {"LEFTARROW", VK_LEFT},
-        {"UPARROW", VK_UP},        {"DOWNARROW", VK_DOWN},
-        {"SPACE", VK_SPACE},       {"TAB", VK_TAB},
-        {"ENTER", VK_RETURN},      {"RETURN", VK_RETURN},
-        {"BACKSPACE", VK_BACK},    {"ESCAPE", VK_ESCAPE},
-        {"ESC", VK_ESCAPE},        {"CAPSLOCK", VK_CAPITAL},
-        {"PRINTSCREEN", VK_SNAPSHOT}, {"APPS", VK_APPS},
-        {"MENU_KEY", VK_APPS},     {"DECIMAL", VK_DECIMAL},
-        {"NUMPADDOT", VK_DECIMAL},
-    };
-
-    for (const Entry& e : kTable) {
+    for (const KeyNameEntry& e : kNamedKeys) {
         if (_stricmp(name, e.name) == 0) return e.vk;
     }
 
-    // The punctuation row, by NAME. Resolved through the character rather than
-    // through a hard-coded VK_OEM_* code, because the OEM codes are positions
-    // on a US keyboard and these names describe CHARACTERS -- on another
-    // layout the character lives on a different physical key, and the one the
-    // player actually presses is the one that types it.
-    struct CharName { const char* name; wchar_t ch; };
-    static const CharName kCharNames[] = {
-        {"BACKSLASH", L'\\'},   {"SLASH", L'/'},
-        {"LEFTBRACKET", L'['},  {"RIGHTBRACKET", L']'},
-        {"SEMICOLON", L';'},    {"APOSTROPHE", L'\''},
-        {"QUOTE", L'\''},       {"COMMA", L','},
-        {"PERIOD", L'.'},       {"DOT", L'.'},
-        {"GRAVE", L'`'},        {"BACKTICK", L'`'},
-        {"TILDE", L'`'},        {"MINUS", L'-'},
-        {"DASH", L'-'},         {"EQUALS", L'='},
-        {"PLUS", L'='},
-        // '#' by name, because bare ';' and '#' after "= " are eaten by the
-        // ini's own trailing-comment rule -- SEMICOLON and HASH are the
-        // reliable spellings in a config value, and the ini says so. (On a
-        // UK layout '#' is its own physical key, so it is a real binding.)
-        {"HASH", L'#'},         {"POUND", L'#'},
-    };
     wchar_t toScan = 0;
     for (const CharName& e : kCharNames) {
         if (_stricmp(name, e.name) == 0) { toScan = e.ch; break; }
@@ -349,16 +524,203 @@ int virtualKeyFromName(const char* name, uint32_t* mods) {
     // heard of, produced a feature that silently never fired. An empty setting
     // is a choice and returns 0 above, without comment; getting here means
     // somebody asked for something specific and did not get it.
-    Log::get().note("hotkey \"%s\" is not a key name EDVR knows, so nothing is "
-                    "bound. Try F1-F24, SCROLLLOCK, PAUSE, NUMLOCK, CAPSLOCK, "
-                    "PRINTSCREEN, INSERT, HOME, END, DELETE, PAGEUP, PAGEDOWN, "
-                    "LEFT, RIGHT, UP, DOWN, SPACE, TAB, ENTER, ESCAPE, "
-                    "NUMPAD0-9, DECIMAL, any single character your keyboard "
-                    "types (letters, digits, punctuation like \\ [ ] ; ' , . "
-                    "/ ` - =), names for those (BACKSLASH, LEFTBRACKET, "
-                    "SEMICOLON, ...), or 0x## for a raw virtual-key code.",
-                    name);
+    if (!t_quietKeyNames)
+        Log::get().note("hotkey \"%s\" is not a key name EDVR knows, so nothing is "
+                        "bound. Try F1-F24, SCROLLLOCK, PAUSE, NUMLOCK, CAPSLOCK, "
+                        "PRINTSCREEN, INSERT, HOME, END, DELETE, PAGEUP, PAGEDOWN, "
+                        "LEFT, RIGHT, UP, DOWN, SPACE, TAB, ENTER, ESCAPE, "
+                        "NUMPAD0-9, DECIMAL, any single character your keyboard "
+                        "types (letters, digits, punctuation like \\ [ ] ; ' , . "
+                        "/ ` - =), names for those (BACKSLASH, LEFTBRACKET, "
+                        "SEMICOLON, ...), or 0x## for a raw virtual-key code. A "
+                        "gamepad button is GamePad_Back and the like; a HOTAS or "
+                        "joystick button is the device and the button, "
+                        "231D0200:Joy_12 (the settings menu's Hotkeys page "
+                        "writes these for you).",
+                        name);
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Pad and joystick spellings, and the parse/format of a whole hotkey value.
+
+namespace {
+
+bool isHexDigit(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+const char* skipSpaces(const char* s) {
+    while (*s == ' ' || *s == '\t') ++s;
+    return s;
+}
+
+const char* const kPovDirName[4] = {"Up", "Right", "Down", "Left"};
+
+}  // namespace
+
+bool hotkeyJoyInputFromEliteKey(const char* key, uint16_t* input) {
+    if (!key || _strnicmp(key, "Joy_", 4) != 0) return false;
+    const char* r = key + 4;
+    if (_strnicmp(r, "POV", 3) == 0) {
+        r += 3;
+        if (*r < '1' || *r > '0' + kJoyHatCount) return false;
+        const int hat = *r - '1';
+        ++r;
+        for (int dir = 0; dir < 4; ++dir) {
+            if (_stricmp(r, kPovDirName[dir]) == 0) {
+                if (input) *input = static_cast<uint16_t>(kJoyPovBase + hat * 4 + dir);
+                return true;
+            }
+        }
+        return false;
+    }
+    // Joy_12: a plain decimal 1..128, no sign, no leading zero, nothing after.
+    if (*r < '1' || *r > '9') return false;
+    int n = 0;
+    for (; *r; ++r) {
+        if (*r < '0' || *r > '9') return false;
+        n = n * 10 + (*r - '0');
+        if (n > kJoyButtonCount) return false;
+    }
+    if (input) *input = static_cast<uint16_t>(n - 1);
+    return true;
+}
+
+size_t hotkeyJoyInputName(uint16_t input, char* out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    out[0] = 0;
+    if (input < kJoyButtonCount) {
+        snprintf(out, cap, "Joy_%d", input + 1);
+    } else if (input < kJoyInputCount) {
+        const int k = input - kJoyPovBase;
+        snprintf(out, cap, "Joy_POV%d%s", k / 4 + 1, kPovDirName[k % 4]);
+    }
+    return strlen(out);
+}
+
+bool hotkeyJoyDeviceFromText(const char* text, uint32_t* device) {
+    if (!text) return false;
+    uint32_t v = 0;
+    for (int i = 0; i < 8; ++i) {
+        if (!isHexDigit(text[i])) return false;
+        const char c = text[i];
+        v = (v << 4) | static_cast<uint32_t>(c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10);
+    }
+    if (text[8] != 0 && text[8] != ':') return false;
+    if (device) *device = v;
+    return true;
+}
+
+void hotkeyJoyDeviceText(uint32_t device, char out[9]) {
+    snprintf(out, 9, "%08X", device);
+}
+
+bool hotkeyLooksNonKeyboard(const char* text) {
+    if (!text) return false;
+    text = skipSpaces(text);
+    if (_strnicmp(text, "GamePad_", 8) == 0) return true;
+    for (int i = 0; i < 8; ++i) {
+        if (!isHexDigit(text[i])) return false;
+    }
+    return text[8] == ':';
+}
+
+bool hotkeyParseBinding(const char* text, HotkeyBinding* out, bool quiet) {
+    HotkeyBinding b;
+    bool ok = true;
+    if (text) text = skipSpaces(text);
+    if (!text || !*text) {
+        // Empty: an unbound hotkey, which is a choice and says nothing.
+    } else if (_strnicmp(text, "GamePad_", 8) == 0) {
+        std::string name(text);
+        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+        const PadName* p = padNameFind(name.c_str());
+        if (p) {
+            b.kind = HotkeyKind::Pad;
+            b.padButtons = p->buttons;
+            b.padTrigger = p->trigger;
+        } else {
+            ok = false;
+            if (!quiet)
+                Log::get().note("hotkey \"%s\" is not a gamepad button EDVR knows, so nothing is "
+                                "bound. Try GamePad_FaceDown, _FaceRight, _FaceLeft, _FaceUp, "
+                                "_DPadUp, _DPadDown, _DPadLeft, _DPadRight, _Back, _Start, "
+                                "_LBumper, _RBumper, _LThumb, _RThumb, _LTrigger or _RTrigger.",
+                                name.c_str());
+        }
+    } else if (hotkeyLooksNonKeyboard(text)) {
+        uint32_t device = 0;
+        uint16_t input = 0;
+        std::string rest(text + 9);
+        const size_t first = rest.find_first_not_of(" \t");
+        rest = first == std::string::npos ? std::string() : rest.substr(first);
+        while (!rest.empty() && (rest.back() == ' ' || rest.back() == '\t')) rest.pop_back();
+        if (hotkeyJoyDeviceFromText(text, &device) && hotkeyJoyInputFromEliteKey(rest.c_str(), &input)) {
+            b.kind = HotkeyKind::Joy;
+            b.joyDevice = device;
+            b.joyInput = input;
+        } else {
+            ok = false;
+            if (!quiet)
+                Log::get().note("hotkey \"%s\" is not a joystick button EDVR knows, so nothing is "
+                                "bound. It is the device Elite writes in your bindings (eight hex "
+                                "digits: vendor then product) and a button, 231D0200:Joy_12, or a "
+                                "hat, 231D0200:Joy_POV1Up (Right, Down, Left).",
+                                text);
+        }
+    } else {
+        uint32_t mods = 0;
+        int vk = 0;
+        if (quiet) {
+            QuietScope scope;
+            vk = virtualKeyFromName(text, &mods);
+        } else {
+            vk = virtualKeyFromName(text, &mods);
+        }
+        if (vk) {
+            b.kind = HotkeyKind::Key;
+            b.vk = vk;
+            b.mods = mods;
+        } else {
+            ok = false;
+        }
+    }
+    if (out) *out = b;
+    return ok;
+}
+
+size_t hotkeyFormatBinding(const HotkeyBinding& b, char* out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    out[0] = 0;
+    switch (b.kind) {
+        case HotkeyKind::Key: {
+            std::string s;
+            if (b.mods & kHotkeyCtrl) s += "CTRL+";
+            if (b.mods & kHotkeyAlt) s += "ALT+";
+            if (b.mods & kHotkeyShift) s += "SHIFT+";
+            char name[24];
+            hotkeyKeyName(b.vk, name, sizeof(name));
+            s += name;
+            snprintf(out, cap, "%s", s.c_str());
+            break;
+        }
+        case HotkeyKind::Pad: {
+            const char* name = padNameOf(b.padButtons, b.padTrigger);
+            if (name) snprintf(out, cap, "%s", name);
+            break;
+        }
+        case HotkeyKind::Joy: {
+            char dev[9];
+            char key[24];
+            hotkeyJoyDeviceText(b.joyDevice, dev);
+            if (hotkeyJoyInputName(b.joyInput, key, sizeof(key))) snprintf(out, cap, "%s:%s", dev, key);
+            break;
+        }
+        default:
+            break;
+    }
+    return strlen(out);
 }
 
 }  // namespace edvr

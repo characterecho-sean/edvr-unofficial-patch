@@ -19,6 +19,7 @@
 #include "../common/frame_flag.h"
 #include "../common/guard.h"
 #include "../common/hotkey.h"
+#include "explorer_cam.h"   // explorerCamSessionActive(): the Explorer Cam key row locks while a session is on
 #include "../common/iniedit.h"
 #include "../common/log.h"
 #include "../common/native_render_settings.h"
@@ -33,7 +34,9 @@
 #include "flat_elite_settings.h"
 #include "flat_runtime.h"
 #include "flat_wrapper_note.h"
+#include "hotkey_capture.h"
 #include "input_gate.h"
+#include "joy_watch.h"
 #include "menu_flat_rows.h"
 #include "menu_keys.h"
 #include "menu_panel.h"
@@ -47,6 +50,7 @@
 #include "terrain_checkerboard.h"   // Elite's terrain checkerboard rendering in VR: the worker's tick and the word it publishes
 #include "vscreen.h"        // vScreenRenderBelowEye: Elite's Supersampling below 1, from the sizes
 #include "vscreen_res.h"
+#include "xinput_watch.h"   // the Hotkeys page's capture reads the pad
 // fsr3_engine.h is deliberately NOT included: the Temporal AA status line
 // reaches AMD's price and its name through temporal_pass.h's
 // temporalPassTrainedTotals, which answers for the engine in force (F6).
@@ -118,6 +122,10 @@ struct RowState {
     std::string snapshot;  // restart rows: the value at launch
     bool        pending = false;
     bool        auditNoted = false;
+    // A hotkey row: the Elite bindings the same press also triggers, as the last
+    // check found them (hotkey_capture.h). Zero is clear or not yet checked.
+    int         clashCount = 0;
+    char        clashList[160] = "";
 };
 
 // The keys a typed value can be built from: the digits (top row and the
@@ -250,6 +258,23 @@ struct State {
     bool        editBad = false;     // the buffer is out of bounds or not a number
     KeyRepeat   editKeys[kEditKeyCount];
 
+    // Capturing a hotkey (hotkey_capture.h; docs/settings-menu.md, "Hotkeys
+    // page"): Enter on a hotkey row waits for the NEXT key, pad button or HOTAS
+    // button and makes it the value. While it waits the menu's own navigation is
+    // suspended -- every key is the capture's, so binding Up or Enter cannot also
+    // move the highlight -- and Escape cancels it instead of closing the menu.
+    // The note is what the row (short) and the footer (long) say afterwards.
+    HotkeyCapture capture;
+    int           captureEntry = -1;      // an entry index on the current page, or -1
+    int           captureDef = -1;
+    int           noteDef = -1;
+    uint64_t      noteUntilMs = 0;
+    std::string   noteRow;                // fits the value column
+    std::string   noteFooter;             // fits the footer's second line
+    bool          clashStale = true;      // Elite's bindings changed (or have not been read) since the last check
+    uint32_t      registeredSig = 0;      // the live hotkey registry, to notice a rebind elsewhere
+    bool          explorerSessionShown = false;   // what the last raster said about Explorer Cam's key row's lock
+
     bool aimParked = false;
     int  aimSameCount = 0;
     int  aimLast = -1;
@@ -311,6 +336,12 @@ FaultBudget g_budget("menuTick", 6);
 
 std::string dottedOf(const MenuRowDef& d) {
     return std::string(d.section) + "." + d.key;
+}
+
+// Is this row Explorer Cam's KEY (hotkey.explorer_cam, a Hotkey row) while a session is on?
+// Only a Hotkey row: [fix] explorer_cam shares the key name and is not this.
+bool rowLocked(int def) {
+    return kMenuRows[def].kind == MenuKind::Hotkey && hotkeyRowLocked(kMenuRows[def].key, explorerCamSessionActive());
 }
 
 std::string rowValue(const MenuRowDef& d) {
@@ -991,6 +1022,10 @@ std::string displayValue(const MenuRowDef& d, const std::string& v) {
             }
             return v.empty() ? "(empty)" : v;
         }
+        case MenuKind::Hotkey:
+            // An empty hotkey is an unbound one -- and for Explorer Cam's key, Explorer Cam off.
+            if (v.empty()) return "(none)";
+            return v.size() > 28 ? v.substr(0, 27) + "~" : v;
         case MenuKind::Text:
         default:
             if (v.empty()) return "(empty)";
@@ -1437,6 +1472,24 @@ void buildPages() {
         s.pages.push_back(p);
     }
     {
+        // The hotkeys: the rows the generator made from [hotkey]'s annotations. A
+        // `# ui:` row is here always, a `# dev:` row only with developer mode on
+        // (hotkeyPageRows says which, and a rig pins it). No group headings: the
+        // [hotkey] block's own title is a paragraph.
+        Page p;
+        p.name = "Hotkeys";
+        int rows[32];
+        const int n = hotkeyPageRows(kMenuRows, kRowDefCount, s.developer, rows, 32);
+        for (int i = 0; i < n; ++i) {
+            Entry e;
+            e.kind = EntryKind::Setting;
+            e.def = rows[i];
+            p.entries.push_back(e);
+        }
+        firstSelectable(p);
+        s.pages.push_back(p);
+    }
+    {
         Page p;
         p.name = "Monitor";
         p.status = true;
@@ -1453,14 +1506,15 @@ void buildPages() {
         {
             Page p;
             p.name = "Advanced";
-            addSettingRows(p, MenuTier::Advanced, nullptr, true);
+            // By page name: a developer hotkey row is Advanced tier too, and belongs to the Hotkeys page.
+            addSettingRows(p, MenuTier::Advanced, "advanced", true);
             firstSelectable(p);
             s.pages.push_back(p);
         }
         {
             Page p;
             p.name = "Experimental";
-            addSettingRows(p, MenuTier::Experimental, nullptr, true);
+            addSettingRows(p, MenuTier::Experimental, "experimental", true);
             firstSelectable(p);
             s.pages.push_back(p);
         }
@@ -2016,6 +2070,9 @@ void buildContent(MenuContent& c) {
             const MenuRowDef& d = kMenuRows[e.def];
             const RowState& r = g_rows[e.def];
             const bool editingThis = (s.editEntry == i);
+            const bool capturingThis = (s.captureEntry == i);
+            const bool hotkeyRow = d.kind == MenuKind::Hotkey;
+            const bool noteOnThis = hotkeyRow && s.noteDef == e.def && s.noteUntilMs > s.tickMs;
             const bool dlssRow = isDlssPresetRow(d);
             const bool sharpenRow = isSharpenRow(d);
             const bool dim = (dlssRow && dlssPresetDisabled()) ||
@@ -2056,6 +2113,20 @@ void buildContent(MenuContent& c) {
             } else if (d.applies == 0) {
                 l.badge = kBadgeUnknown;
             }
+            if (hotkeyRow) {
+                // A hotkey row speaks for itself: waiting for the input, then (for a few
+                // seconds) what became of it; and while it stands, a badge when Elite's own
+                // bindings use the same press. The words that did not fit are the footer's.
+                char lockedText[96];
+                if (capturingThis) v = "press a key / button...";
+                else if (noteOnThis) v = s.noteRow;
+                else if (rowLocked(e.def)) {
+                    // Explorer Cam is on: its key row is locked, and says so on the row (the
+                    // footer, while the row is highlighted, has the whole sentence).
+                    hotkeyLockedText(r.value.c_str(), lockedText, sizeof(lockedText));
+                    v = lockedText;
+                } else if (r.clashCount) l.badge = kBadgeClash;
+            }
             strncpy(l.right, v.c_str(), sizeof(l.right) - 1);
             // Anything with two states is a switch, drawn where the value
             // would be: a plain boolean, and a two-way choice where one
@@ -2076,7 +2147,7 @@ void buildContent(MenuContent& c) {
                     l.right[sizeof(l.right) - 1] = 0;
                 }
             }
-            l.style = editingThis ? kMenuRowEdit
+            l.style = (editingThis || capturingThis) ? kMenuRowEdit
                       : hi        ? kMenuRowHi
                       : dim       ? kMenuDim
                                   : kMenuRow;
@@ -2172,6 +2243,16 @@ void buildContent(MenuContent& c) {
                     body += "\nInactive: only DLSS and DLAA read this preset.";
                 } else if (s.resetArmedEntry == i) {
                     body += "\nPress R again to reset it to the shipped value.";
+                } else if (capturingThis) {
+                    body += "\nPress the key (with Ctrl, Shift or Alt for a chord), the pad button or the HOTAS "
+                            "button. Esc cancels; Delete clears it.";
+                } else if (hotkeyRow) {
+                    // The menu key is the one hotkey that cannot be cleared from here: with it gone nothing
+                    // in the headset could open this menu again.
+                    body += strcmp(d.key, "menu") == 0
+                                ? "\nEnter, then press a key, pad button or HOTAS button. This key can be "
+                                  "changed here but not cleared; clear it in the ini if you must."
+                                : "\nEnter, then press a key, pad button or HOTAS button. Delete clears it.";
                 } else if (aliasesLive) {
                     // The keys the player already uses in the ship, named
                     // only while they act here.
@@ -2183,6 +2264,16 @@ void buildContent(MenuContent& c) {
                     body += "\nEnter or Left/Right changes it.";
                 } else {
                     body += "\nEnter types a value; Left/Right steps it.";
+                }
+                if (hotkeyRow && !editingThis) {
+                    if (r.clashCount) {
+                        body += std::string("\nElite also uses this press: ") + r.clashList +
+                                (strcmp(d.key, "menu") == 0 && s.summon.kind() == HotkeyKind::Key
+                                     ? ". EDVR keeps the menu key from the game, so those are masked while it is installed."
+                                     : ". The key is watched, not captured: the game sees the press too, so one press does both.");
+                    } else if (!s.readGameBindings) {
+                        body += "\nNot checked against your Elite bindings (hotkey.read_game_bindings is off).";
+                    }
                 }
                 body += std::string("\n\n") + (d.detail[0] ? d.detail : d.hint);
                 strncpy(c.popup, body.c_str(), sizeof(c.popup) - 1);
@@ -2261,6 +2352,21 @@ void buildContent(MenuContent& c) {
     {
         MenuFooterInput in = {};
         in.editing = s.editEntry >= 0;
+        in.capturing = s.captureEntry >= 0;
+        in.canClear = in.capturing && s.captureDef >= 0 && strcmp(kMenuRows[s.captureDef].key, "menu") != 0;
+        // A locked hotkey row, highlighted, says so in full (the row has what fits). A note from
+        // something just done comes first.
+        std::string lockedNote;
+        if (!p.status && p.highlight >= 0 && p.highlight < static_cast<int>(p.entries.size()) &&
+            p.entries[p.highlight].kind == EntryKind::Setting) {
+            const int hd = p.entries[p.highlight].def;
+            if (rowLocked(hd)) {
+                char lt[96];
+                hotkeyLockedText(g_rows[hd].value.c_str(), lt, sizeof(lt));
+                lockedNote = lt;
+            }
+        }
+        in.note = (!p.status && s.noteUntilMs > s.tickMs) ? s.noteFooter.c_str() : lockedNote.c_str();
         in.statusPage = p.status;
         in.pageName = p.name;
         in.privateWanted = s.privateWanted;
@@ -2549,6 +2655,7 @@ void stepRow(int defIndex, int dir, int mult) {
             applyChange(defIndex, formatNumber(v, d.precision));
             break;
         }
+        case MenuKind::Hotkey:   // captured, not stepped
         case MenuKind::Text:
         default:
             break;
@@ -2559,6 +2666,8 @@ void stepRow(int defIndex, int dir, int mult) {
 void beginEdit(int entryIndex, int defIndex);
 void cancelEdit();
 void commitEdit();
+// Capturing a hotkey, defined after the keys.
+void beginCapture(int entryIndex, int defIndex);
 
 void activateEntry() {
     State& s = g_s;
@@ -2577,6 +2686,9 @@ void activateEntry() {
         const MenuRowDef& d = kMenuRows[e.def];
         if (d.kind == MenuKind::Toggle || d.kind == MenuKind::Choice) {
             stepRow(e.def, +1, 1);
+        } else if (d.kind == MenuKind::Hotkey) {
+            // A hotkey is never typed: the next key, pad button or HOTAS button is the value.
+            beginCapture(p.highlight, e.def);
         } else {
             // A number or a free string: type it. Enter again commits.
             beginEdit(p.highlight, e.def);
@@ -2953,6 +3065,301 @@ bool handleEditKeys(uint64_t now, bool focused) {
     return any;
 }
 
+// ---------------------------------------------------------------------------
+// Capturing a hotkey (hotkey_capture.h)
+
+std::string bindingText(const HotkeyBinding& b) {
+    char text[64];
+    hotkeyFormatBinding(b, text, sizeof(text));
+    return text;
+}
+
+HotkeyBinding hotkeyOfRow(int def) {
+    HotkeyBinding b;
+    hotkeyParseBinding(g_rows[def].value.c_str(), &b, /*quiet=*/true);
+    return b;
+}
+
+ClashScope clashScopeOf(const MenuRowDef& d) {
+    // Explorer Cam is entered on foot; the other keys work wherever the player is.
+    return strcmp(d.key, "explorer_cam") == 0 ? ClashScope::OnFoot : ClashScope::AnyContext;
+}
+
+// Every hotkey row but one, for the duplicate check. The developer rows are in it
+// whether or not the page shows them: a hidden hotkey fires all the same.
+struct HotkeyOthers {
+    std::vector<std::string> names;
+    std::vector<HotkeyOther> list;
+};
+void collectOtherHotkeys(int exceptDef, HotkeyOthers* out) {
+    out->names.clear();
+    out->list.clear();
+    std::vector<int> defs;
+    for (int i = 0; i < kRowDefCount; ++i) {
+        if (i == exceptDef || kMenuRows[i].kind != MenuKind::Hotkey) continue;
+        defs.push_back(i);
+        out->names.push_back(dottedOf(kMenuRows[i]));
+    }
+    for (size_t k = 0; k < defs.size(); ++k) {
+        out->list.push_back(HotkeyOther{out->names[k].c_str(), hotkeyOfRow(defs[k])});
+    }
+}
+
+// Elite's bindings against every hotkey row's value: the badge and the tooltip's
+// "Elite also uses this". Run when the menu opens, when Elite rewrites its
+// bindings, and after a capture; reading the file is the cost, so never per frame.
+void refreshHotkeyClashes() {
+    State& s = g_s;
+    s.clashStale = false;
+    static EliteBindUse uses[1024];
+    int n = 0;
+    if (s.readGameBindings) {
+        n = eliteBindsAllUses(uses, 1024, nullptr, 0);
+        if (n < 0) n = 0;
+    }
+    for (int i = 0; i < kRowDefCount; ++i) {
+        if (kMenuRows[i].kind != MenuKind::Hotkey) continue;
+        RowState& r = g_rows[i];
+        r.clashCount = 0;
+        r.clashList[0] = 0;
+        const HotkeyBinding b = hotkeyOfRow(i);
+        if (b.kind == HotkeyKind::None || n == 0) continue;
+        const BindCheck c = hotkeyCheckBinding(b, nullptr, 0, uses, n, clashScopeOf(kMenuRows[i]));
+        r.clashCount = c.clashCount;
+        snprintf(r.clashList, sizeof(r.clashList), "%s", c.clashList);
+    }
+    s.contentDirty = true;
+}
+
+// One look at every input a capture reads. Keys need the game focused (a press in
+// another window is not for this panel); the pad and the joystick table are the
+// game's own state.
+void captureSnapshotNow(bool focused, CaptureSnapshot* out) {
+    *out = CaptureSnapshot();
+    if (focused) {
+        for (int vk = 8; vk < 255; ++vk) {
+            if (hotkeyCaptureKeyEligible(vk) && rawKeyDown(vk)) out->keyDown[vk] = 1;
+        }
+        if (rawKeyDown(VK_CONTROL)) out->mods |= kHotkeyCtrl;
+        if (rawKeyDown(VK_MENU)) out->mods |= kHotkeyAlt;
+        if (rawKeyDown(VK_SHIFT)) out->mods |= kHotkeyShift;
+    }
+    xinputWatchTick();
+    xinputSnapshot(&out->padButtons, &out->padTriggers);
+    joyWatchSnapshot(&out->joy, stampMs());
+}
+
+// Whatever is down now must not act on the menu's navigation when the capture
+// ends: the key that was just bound is held, and it may be Up or Enter.
+void primeNavigationKeys() {
+    State& s = g_s;
+    for (KeyRepeat& k : s.keys) keyRepeatPrime(k, rawKeyDown(k.vk));
+    for (KeyRepeat& k : s.editKeys) keyRepeatPrime(k, rawKeyDown(k.vk));
+    for (int i = 0; i < s.aliases.count; ++i) keyRepeatPrime(s.aliasKeys[i], rawKeyDown(s.aliasKeys[i].vk));
+}
+
+void endCapture() {
+    State& s = g_s;
+    if (s.captureEntry < 0 && !s.capture.active()) return;
+    s.capture.end();
+    s.captureEntry = -1;
+    s.captureDef = -1;
+    hotkeysSuspend(false);   // EDVR's own hotkeys work again (hotkey.h)
+    primeNavigationKeys();
+    s.contentDirty = true;
+}
+
+// What the row and the footer say for a while afterwards. The row has a value
+// column's worth of words; the footer's second line has the rest.
+void setHotkeyNote(int def, const std::string& row, const std::string& footer, uint64_t ms = 6000) {
+    State& s = g_s;
+    s.noteDef = def;
+    s.noteRow = row;
+    s.noteFooter = footer;
+    s.noteUntilMs = s.tickMs + ms;
+    s.lastWrite = footer.empty() ? row : footer;
+    s.contentDirty = true;
+}
+
+int hotkeyRowByDotted(const char* dotted) {
+    for (int i = 0; i < kRowDefCount; ++i) {
+        if (kMenuRows[i].kind == MenuKind::Hotkey && dottedOf(kMenuRows[i]) == dotted) return i;
+    }
+    return -1;
+}
+
+void startCapture(int entryIndex, int defIndex) {
+    State& s = g_s;
+    if (s.capture.active()) return;
+    CaptureSnapshot snap;
+    captureSnapshotNow(gameHasFocus(), &snap);
+    s.capture.begin(snap);   // what is held now (the Enter that got here) waits for a release
+    s.captureEntry = entryIndex;
+    s.captureDef = defIndex;
+    hotkeysSuspend(true);    // the key about to be chosen must not also do its job on the way (hotkey.h)
+    s.noteDef = -1;
+    s.noteUntilMs = 0;
+    s.resetArmedEntry = -1;
+    s.contentDirty = true;
+    Log::get().note("menu: waiting for a key, pad button or HOTAS button for %s (Esc cancels%s).",
+                    dottedOf(kMenuRows[defIndex]).c_str(),
+                    strcmp(kMenuRows[defIndex].key, "menu") == 0 ? "" : ", Delete clears");
+}
+
+// What a row's decision is made from: the row, its value now, every other hotkey, Elite's
+// bindings, and whether Explorer Cam's key is locked. `others` and `names` outlive the call.
+struct RowDecisionInput {
+    HotkeyOthers others;
+    std::vector<EliteBindUse> uses;
+    HotkeyRowContext ctx;
+};
+void buildRowContext(int def, RowDecisionInput* in) {
+    State& s = g_s;
+    collectOtherHotkeys(def, &in->others);
+    in->uses.clear();
+    if (s.readGameBindings) {
+        in->uses.resize(1024);
+        const int n = eliteBindsAllUses(in->uses.data(), 1024, nullptr, 0);
+        in->uses.resize(n > 0 ? static_cast<size_t>(n) : 0);
+    }
+    in->ctx.rowKey = kMenuRows[def].key;
+    in->ctx.currentText = g_rows[def].value.c_str();
+    in->ctx.others = in->others.list.data();
+    in->ctx.nOthers = static_cast<int>(in->others.list.size());
+    in->ctx.uses = in->uses.data();
+    in->ctx.nUses = static_cast<int>(in->uses.size());
+    in->ctx.scope = clashScopeOf(kMenuRows[def]);
+    in->ctx.explorerCamSession = explorerCamSessionActive();
+}
+
+// A locked row says so on the row, in the footer and in the log, and nothing is written.
+void noteLocked(int def) {
+    char text[96];
+    hotkeyLockedText(g_rows[def].value.c_str(), text, sizeof(text));
+    Log::get().note("menu: %s is locked while Explorer Cam is on: %s.", dottedOf(kMenuRows[def]).c_str(), text);
+    setHotkeyNote(def, text, text);
+}
+
+// Enter on a hotkey row. Explorer Cam's key is locked while a session is on (the key being
+// edited is the key that gets the player out): the row says so and nothing starts.
+void beginCapture(int entryIndex, int defIndex) {
+    HotkeyRowContext c;
+    c.rowKey = kMenuRows[defIndex].key;
+    c.explorerCamSession = explorerCamSessionActive();
+    if (kMenuRows[defIndex].kind == MenuKind::Hotkey && !hotkeyCaptureMayBegin(c)) {
+        noteLocked(defIndex);
+        return;
+    }
+    startCapture(entryIndex, defIndex);
+}
+
+// Carry out a decision. The checks and the order they run in are hotkey_capture.cpp's
+// (hotkeyDecide, which a rig drives); this is the side effects.
+void applyDecision(int def, const CaptureDecision& dec) {
+    const MenuRowDef& d = kMenuRows[def];
+    const std::string dotted = dottedOf(d);
+    const std::string text = bindingText(dec.binding);
+    switch (dec.outcome) {
+        case CaptureOutcome::Waiting:
+            return;
+        case CaptureOutcome::Cancelled:
+            Log::get().note("menu: %s left as it was (Esc).", dotted.c_str());
+            setHotkeyNote(def, "cancelled", std::string(), 2000);
+            return;
+        case CaptureOutcome::Locked:
+            noteLocked(def);
+            return;
+        case CaptureOutcome::ClearAlready:
+            setHotkeyNote(def, "already empty", std::string(), 2500);
+            return;
+        case CaptureOutcome::ClearRefusedMenu:
+            Log::get().note("menu: hotkey.menu cannot be cleared from the menu (nothing could open it again).");
+            setHotkeyNote(def, "can't clear the menu key",
+                          "The menu key can be changed here but not cleared; clear hotkey.menu in the ini if you must.");
+            return;
+        case CaptureOutcome::Clear:
+            Log::get().note("menu: %s cleared.", dotted.c_str());
+            g_rows[def].clashCount = 0;
+            g_rows[def].clashList[0] = 0;
+            applyChange(def, std::string());
+            setHotkeyNote(def, "cleared",
+                          strcmp(d.key, "explorer_cam") == 0
+                              ? "hotkey.explorer_cam cleared -- Explorer Cam is off until a key is set."
+                              : dotted + " cleared.");
+            return;
+        case CaptureOutcome::Reserved:
+            Log::get().note("menu: %s: %s refused -- it is one of the menu's own navigation keys.", dotted.c_str(),
+                            text.c_str());
+            setHotkeyNote(def, "the menu's own key",
+                          text + " is a key this menu navigates with; pick another (Ctrl or Alt makes it a chord).");
+            return;
+        case CaptureOutcome::Duplicate: {
+            const int other = hotkeyRowByDotted(dec.check.duplicateOf);
+            const char* what = other >= 0 ? kMenuRows[other].label : dec.check.duplicateOf;
+            Log::get().note("menu: %s: %s refused -- already %s.", dotted.c_str(), text.c_str(), dec.check.duplicateOf);
+            setHotkeyNote(def, std::string("used by ") + what,
+                          text + " is already " + dec.check.duplicateOf + "; nothing changed.");
+            return;
+        }
+        case CaptureOutcome::Unchanged:
+            setHotkeyNote(def, "unchanged", std::string(), 2500);
+            return;
+        case CaptureOutcome::Bind:
+            break;
+    }
+    const bool masksElite = strcmp(d.key, "menu") == 0 && dec.binding.kind == HotkeyKind::Key;
+    RowState& r = g_rows[def];
+    r.clashCount = dec.check.clashCount;
+    snprintf(r.clashList, sizeof(r.clashList), "%s", dec.check.clashList);
+    Log::get().note("menu: %s captured %s%s%s%s.", dotted.c_str(), text.c_str(),
+                    dec.binding.kind == HotkeyKind::Key ? " (keyboard)"
+                    : dec.binding.kind == HotkeyKind::Pad ? " (gamepad)" : " (joystick or HOTAS)",
+                    dec.check.clashCount ? "; Elite also uses it: " : "; Elite does not use it",
+                    dec.check.clashCount ? dec.check.clashList : "");
+    applyChange(def, text);
+    if (dec.check.clashCount) {
+        setHotkeyNote(def, "set - also used in Elite",
+                      masksElite ? std::string("Elite's ") + dec.check.clashList +
+                                       " is masked by the menu key; EDVR keeps it from the game."
+                                 : std::string("Elite also uses ") + text + ": " + dec.check.clashList +
+                                       ". The game sees the press too.");
+    } else {
+        setHotkeyNote(def, "set",
+                      strcmp(d.key, "menu") == 0 ? std::string("Menu key is now ") + text + "." : dotted + " = " + text);
+    }
+}
+
+// One tick of a waiting capture. The whole keyboard, the pad and the joystick
+// table are read; the menu's navigation does not run, so no key is two things.
+void handleCapture(uint64_t now) {
+    State& s = g_s;
+    // The row must still be the row (a developer switch rebuilds the pages).
+    Page& p = s.pages[s.page];
+    if (s.captureEntry < 0 || s.captureEntry >= static_cast<int>(p.entries.size()) ||
+        p.entries[s.captureEntry].def != s.captureDef) {
+        endCapture();
+        return;
+    }
+    const bool focused = gameHasFocus();
+    CaptureSnapshot snap;
+    captureSnapshotNow(focused, &snap);
+    if (!focused) {
+        // Another window has the keyboard: nothing here is for this panel, and what
+        // is held when focus comes back is not a press.
+        s.capture.begin(snap);
+        return;
+    }
+    const int def = s.captureDef;
+    const CaptureStep st = s.capture.step(snap, strcmp(kMenuRows[def].key, "menu") != 0);
+    if (st.kind == CaptureKind::Waiting) return;
+    s.lastInputMs = now;
+    s.aimParked = true;
+    RowDecisionInput in;
+    buildRowContext(def, &in);
+    const CaptureDecision dec = hotkeyDecide(st, in.ctx);
+    endCapture();
+    applyDecision(def, dec);
+}
 void closeMenu(const char* why);
 
 // The one dispatcher: every fixed key and every adopted Elite key is a
@@ -2996,6 +3403,14 @@ void dispatchNav(MenuNav nav, uint64_t now) {
             break;
         case kNavReset:
             if (!p.status && !p.entries.empty() && p.entries[p.highlight].kind == EntryKind::Setting) {
+                {
+                    // Explorer Cam's key row is locked while a session is on: a reset is a change.
+                    const int lockedDef = p.entries[p.highlight].def;
+                    if (rowLocked(lockedDef)) {
+                        noteLocked(lockedDef);
+                        break;
+                    }
+                }
                 if (s.resetArmedEntry == p.highlight && now - s.resetArmedMs < kResetArmMs) {
                     const int def = p.entries[p.highlight].def;
                     const MenuRowDef& d = kMenuRows[def];
@@ -3033,6 +3448,14 @@ void dispatchNav(MenuNav nav, uint64_t now) {
 
 void handleKeys(uint64_t now) {
     State& s = g_s;
+    // A hotkey row is waiting for its input: every key, the pad and the HOTAS are the
+    // capture's, and the menu's navigation does not run. (So binding Up or Enter cannot
+    // also move the highlight; the keys held when the capture ends are primed so they
+    // do not act on it afterwards either.)
+    if (s.captureEntry >= 0) {
+        handleCapture(now);
+        return;
+    }
     const bool focused = gameHasFocus();
     s.shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     bool any = false;
@@ -3171,8 +3594,8 @@ void handleAim(uint64_t now) {
     State& s = g_s;
     if (s.aimMode == 1) return;
     // A look that wanders must not take the row out from under a value
-    // being typed.
-    if (s.editEntry >= 0) return;
+    // being typed, or one waiting for its key.
+    if (s.editEntry >= 0 || s.captureEntry >= 0) return;
     Page& p = s.pages[s.page];
     if (p.status || p.entries.empty()) return;
     float org[3], dir[3];
@@ -3323,6 +3746,11 @@ void openMenu(uint64_t now) {
     }
     if (s.developer != s.developerBuilt) buildPages();
     refreshRowValues();
+    // Elite's bindings are read for the Hotkeys page's badges when the menu opens (and again
+    // when Elite rewrites them), never per frame; nothing from a capture survives a close.
+    s.clashStale = true;
+    s.captureEntry = -1;
+    s.noteUntilMs = 0;
     s.open = true;
     s.openedMs = now;
     s.lastInputMs = now;
@@ -3345,6 +3773,7 @@ void closeMenu(const char* why) {
     if (!s.open) return;
     s.open = false;
     cancelEdit();
+    endCapture();
     s.resetArmedEntry = -1;
     inputGateSetPrivate(false);
     perfMonitorNoteEvent(kEvMenu);
@@ -3358,6 +3787,7 @@ void closeMenu(const char* why) {
 void menuAdoptGameBindings(bool enabled, const char* why) {
     State& s = g_s;
     s.readGameBindings = enabled;
+    s.clashStale = true;   // the Hotkeys page checks its keys against these same files
     if (!enabled) {
         memset(s.aliasSlots, 0, sizeof(s.aliasSlots));
         memset(&s.aliases, 0, sizeof(s.aliases));
@@ -3426,7 +3856,7 @@ void menuConfigure(Config& cfg) {
     if (summonChanged) {
         s.summonName = key;
         s.summon.setBinding(key.c_str());
-        if (s.summon.key() == 0 && !key.empty()) {
+        if (!s.summon.bound() && !key.empty()) {
             Log::get().note("menu: hotkey.menu = \"%s\" bound nothing (the line above says "
                             "why), so the menu cannot be summoned this session.",
                             key.c_str());
@@ -3438,8 +3868,8 @@ void menuConfigure(Config& cfg) {
     // fingerprint still matches and that poll never re-reads. A summon key
     // change re-resolves the cached slots without a file read (R3: a
     // panel key that is the new menu key, or half of its chord, is dropped;
-    // the old key stays in hotkey.cpp's append-only registry, so a panel
-    // key on it stays refused as an EDVR hotkey until the next launch).
+    // the old key leaves hotkey.cpp's registry with the binding, and the tick
+    // below re-resolves the aliases when the registry changes).
     {
         const bool read = cfg.getBool("hotkey.read_game_bindings", true);
         if (s.configured && s.aliasSource != 0 && read != s.readGameBindings) {
@@ -3745,6 +4175,40 @@ void menuTick(ID3D11Device* dev) {
         // Writes the worker finished since last frame.
         drainWrites();
 
+        // The Hotkeys page's upkeep. A hotkey rebound anywhere (this page, the ini, a rewrite of
+        // the registry by the reload) changes which keys are EDVR's: the panel keys adopted from
+        // Elite are resolved against that set (rule R5), so they are resolved again when it moves.
+        {
+            int vks[16];
+            const int n = hotkeyRegisteredKeys(vks, 16);
+            uint32_t sig = 2166136261u ^ static_cast<uint32_t>(n);
+            for (int i = 0; i < n; ++i) sig = (sig ^ static_cast<uint32_t>(vks[i])) * 16777619u;
+            sig |= 1u;   // never 0: 0 is "not yet looked"
+            if (s.registeredSig && sig != s.registeredSig && s.aliasSource >= 3) {
+                if (resolveAliases()) logAliasOutcome("your hotkeys changed -- ");
+            }
+            s.registeredSig = sig;
+        }
+        if (s.noteUntilMs && s.tickMs >= s.noteUntilMs) {
+            s.noteUntilMs = 0;
+            s.noteDef = -1;
+            s.contentDirty = true;
+        }
+        // A belt for the suspension of EDVR's hotkeys (hotkey.h): it is only ever on while a row waits.
+        if (s.captureEntry < 0 && hotkeysSuspended()) hotkeysSuspend(false);
+        if (s.open) {
+            const bool sessionNow = explorerCamSessionActive();
+            if (sessionNow != s.explorerSessionShown) {
+                s.explorerSessionShown = sessionNow;
+                s.contentDirty = true;   // Explorer Cam's key row locks and unlocks
+            }
+            const Page& page = s.pages[s.page];
+            if (s.clashStale && !page.entries.empty() && page.entries[0].kind == EntryKind::Setting &&
+                kMenuRows[page.entries[0].def].kind == MenuKind::Hotkey) {
+                refreshHotkeyClashes();   // only the page that shows the badges reads the files
+            }
+        }
+
         // Elite's Supersampling below 1.0 (vr_supersample_notice.h, design section 83): once vScreen has measured the world
         // rendered under the eye texture, the headset says so once a session as a toast (the menu's own notice, with the log
         // line vScreen wrote; the open menu keeps it as the Status page's hint). Gated on menu.toasts like every toast, and
@@ -3789,8 +4253,11 @@ void menuTick(ID3D11Device* dev) {
             }
         }
 
-        // The summon key: EDVR's own, focus-gated. With Shift, recentre.
-        if (s.summon.pressed()) {
+        // The summon key: EDVR's own, focus-gated. With Shift, recentre. While a hotkey row
+        // waits for its input the key is a candidate for the capture (the menu key can be
+        // rebound to itself, or taken for another row and refused), not a command: the
+        // edge is still consumed here so it cannot close the menu when the capture ends.
+        if (s.summon.pressed() && s.captureEntry < 0) {
             const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             if (!s.open) {
                 openMenu(now);
@@ -3841,7 +4308,9 @@ void menuTick(ID3D11Device* dev) {
             // value can be abandoned without losing the panel.
             static bool escDown = false;
             const bool esc = gameHasFocus() && (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-            if (esc && !escDown) {
+            // A hotkey row waiting for its input owns Escape (it cancels the capture, in handleCapture);
+            // the edge is still tracked, so the Esc that cancelled it cannot close the menu a tick later.
+            if (esc && !escDown && s.captureEntry < 0) {
                 if (s.editEntry >= 0) {
                     cancelEdit();
                     s.lastInputMs = now;
@@ -4022,14 +4491,16 @@ void menuTick(ID3D11Device* dev) {
         if (dev) menuPanelTick(dev);
     });
     if (!g_budget.shouldRun()) {
-        // A faulting tick must not leave the keyboard taken.
+        // A faulting tick must not leave the keyboard taken, or EDVR's hotkeys held still.
         inputGateSetPrivate(false);
+        hotkeysSuspend(false);
         setMenuVisible(0.0f);
     }
 }
 
 void menuShutdown() {
     inputGateSetPrivate(false);
+    hotkeysSuspend(false);
     setMenuVisible(0.0f);
     setMenuHeadLock(false, 0.0f, 0.0f);
     inputGateShutdown();
