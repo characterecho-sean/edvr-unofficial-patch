@@ -2564,6 +2564,477 @@ void testFadeGlue(const Pages& p) {
     t::reset();
 }
 
+// ================================ Phase 2: hiding the head parts ================================
+void testHeadHidePure() {
+    std::printf("head hiding: the hide list, the local-AMC test, the capture filter, the census text\n");
+    static_assert(ecm::kPartCount == 54 && ecm::kPartStride == 0x680 && ecm::kOffAmcInstances == 0x11C0 && ecm::kOffAmcMasks == 0x17A0 && ecm::kOffAmcPartFlags == 0x1814 &&
+                      ecm::kOffAmcPartState == 0x1820 && ecm::kOffAmcAvatarPoseId == 0x260 && ecm::kOffAmcAvatarPose == 0x268 && ecm::kOffAmcParams == 0x50 && ecm::kOffParamsMode == 0x14 &&
+                      ecm::kAvatarPoseToSkeleton == 0x30 && ecm::kPartNameTableRva == 0x5E9C7D0,
+                  "the AMC layout of NOTES_p2");
+    // The masks: AMC + 0x17A0 + idx*0x680 + 8k, which is entry+0x5F0+8k with the entry at AMC+0x11B0.
+    check(ecm::kOffAmcMasks == 0x11B0 + 0x5F0 && ecm::kOffAmcInstances == 0x11B0 + 0x10, "the instance and mask arrays are entry+0x10 and entry+0x5F0 of the part array at AMC+0x11B0");
+    const uint32_t expect[12] = {0, 2, 3, 4, 5, 12, 13, 15, 20, 25, 26, 32};
+    bool same = ecm::kHeadPartCount == 12;
+    for (uint32_t i = 0; i < 12; ++i) same = same && ecm::kHeadParts[i] == expect[i];
+    check(same, "the hide list is exactly parts 0 2 3 4 5 12 13 15 20 25 26 32");
+    check(std::strcmp(ecm::kPartNames[0], "Head") == 0 && std::strcmp(ecm::kPartNames[2], "Eyes") == 0 && std::strcmp(ecm::kPartNames[3], "Helmet") == 0 &&
+              std::strcmp(ecm::kPartNames[4], "SkullCap") == 0 && std::strcmp(ecm::kPartNames[5], "Hair") == 0 && std::strcmp(ecm::kPartNames[12], "Beard") == 0 &&
+              std::strcmp(ecm::kPartNames[13], "Teeth") == 0 && std::strcmp(ecm::kPartNames[15], "Hat") == 0 && std::strcmp(ecm::kPartNames[20], "EyeWear") == 0 &&
+              std::strcmp(ecm::kPartNames[25], "EVASuit_Helmet") == 0 && std::strcmp(ecm::kPartNames[26], "EVASuit_Eyewear") == 0 &&
+              std::strcmp(ecm::kPartNames[32], "EVASuit_Gear_Head") == 0 && std::strcmp(ecm::kPartNames[49], "FirstPersonSkeleton") == 0 && std::strcmp(ecm::kPartNames[53], "EVASuit_Gear_Legs") == 0,
+          "...and their names are Head Eyes Helmet SkullCap Hair Beard Teeth Hat EyeWear EVASuit_Helmet EVASuit_Eyewear EVASuit_Gear_Head (and 49 is FirstPersonSkeleton, 53 EVASuit_Gear_Legs)");
+    bool onlyHead = true;
+    for (uint32_t i = 0; i < ecm::kPartCount; ++i) {
+        bool inList = false;
+        for (uint32_t h : expect) inList = inList || h == i;
+        onlyHead = onlyHead && ecm::isHeadPart(i) == inList;
+    }
+    check(onlyHead && !ecm::isHeadPart(1) && !ecm::isHeadPart(24) && !ecm::isHeadPart(33) && !ecm::isHeadPart(49), "isHeadPart is true for those twelve and for no other of the 54 (not Body, EVASuit, Gear_Neck, FirstPersonSkeleton)");
+
+    // The local AMC test.
+    const uint64_t skel = 0x1000000;
+    check(ecm::isLocalAmc(0xFFFFFFFFu, skel + 0x30, skel, 3), "LOCAL AMC: handle resolved, +0x268 minus 0x30 is the site-1 skeleton, mode 3");
+    check(!ecm::isLocalAmc(0x5F2867Cu, skel + 0x30, skel, 3), "...not with the handle unresolved (the id dword is not 0xFFFFFFFF)");
+    check(!ecm::isLocalAmc(0xFFFFFFFFu, skel + 0x38, skel, 3) && !ecm::isLocalAmc(0xFFFFFFFFu, skel + 0x28, skel, 3) && !ecm::isLocalAmc(0xFFFFFFFFu, skel, skel, 3),
+          "...not when +0x268 minus 0x30 is anything but the skeleton (off by 8 either way, or not offset at all)");
+    check(!ecm::isLocalAmc(0xFFFFFFFFu, skel + 0x30, skel, 1) && !ecm::isLocalAmc(0xFFFFFFFFu, skel + 0x30, skel, -1) && !ecm::isLocalAmc(0xFFFFFFFFu, skel + 0x30, skel, 4),
+          "...not in any mode but 3 (first person is 1, unreadable params -1)");
+    check(!ecm::isLocalAmc(0xFFFFFFFFu, 0x30, 0, 3) && !ecm::isLocalAmc(0xFFFFFFFFu, 0, 0, 3) && !ecm::isLocalAmc(0xFFFFFFFFu, 0x10, skel, 3),
+          "...and never against a skeleton of 0 (nothing captured), nor a pose pointer below 0x30");
+
+    // The capture filter.
+    const uintptr_t s1 = 0x140000000ull + ecm::kFindSite1Rva, s2 = 0x140000000ull + ecm::kFindSite2Rva, lit = 0x140000000ull + ecm::kPovNameRva;
+    check(ecm::findCaptureSite(s1, lit, s1, s2, lit) == 0 && ecm::findCaptureSite(s2, lit, s1, s2, lit) == 1, "CAPTURE FILTER: site 1 is 0, site 2 is 1");
+    check(ecm::findCaptureSite(s1 + 1, lit, s1, s2, lit) == -1 && ecm::findCaptureSite(0x1234, lit, s1, s2, lit) == -1, "...any other caller is -1");
+    check(ecm::findCaptureSite(s1, lit + 1, s1, s2, lit) == -1 && ecm::findCaptureSite(s2, 0, s1, s2, lit) == -1, "...any other name pointer is -1, however right the caller");
+    check(ecm::findCaptureSite(s1, lit, s1, s2, 0) == -1 && ecm::findCaptureSite(0, 0, 0, 0, 0) == -1, "...and nothing matches while the literal's address is unset (0)");
+
+    // The census text.
+    ecm::AmcCensus c;
+    c.amc = 0x7FF612340000ull;
+    c.avatarPose = skel + 0x30;
+    c.skeleton = skel;
+    c.mode = 3;
+    c.viewFilter = 1;
+    c.alpha = 1.0f;
+    c.context = 7;
+    c.flagBytes[3] = 0x14;
+    const uint8_t idxs[] = {0, 1, 2, 3, 24, 25, 32, 49};
+    for (uint8_t i : idxs) {
+        ecm::PartCensus& p = c.part[c.count++];
+        p.idx = i;
+        p.variants = i == 2 ? 0x0F : 0x01;
+        p.maskBits = i == 3 ? 0 : p.variants;
+        p.flags = i == 24 ? 0x14 : 0x05;
+        p.state = 1;
+        p.pending = -1;
+        p.current = 100 + i;
+    }
+    Capture cap;
+    ecm::formatAmcCensus(c, ecm::Sink{&Capture::add, &cap});
+    const std::string head = cap.nth("census of the local third-person avatar", 0), parts = cap.nth("census parts:", 0);
+    check(cap.lines.size() == 2 && has(head, "AMC 0x7FF612340000") && has(head, "mode 3") && has(head, "8 of 54 parts have instances") && has(head, "view_filter(+0x2A8)=1") &&
+              has(head, "context(+0x334)=7") && has(head, "flag_bytes(+0x320..323)=00 00 00 14"),
+          "CENSUS: a header line names the AMC, the mode, how many of the 54 parts have instances, the view filter, the context and the flag bytes");
+    check(has(parts, "[0 Head v=0 st=1 fl=0x05 item=-1/100 m=0 HIDE]") && has(parts, "[1 Body v=0 ") && !has(parts, "[1 Body v=0 st=1 fl=0x05 item=-1/101 m=0 HIDE]") &&
+              has(parts, "[2 Eyes v=0123 st=1 fl=0x05 item=-1/102 m=0123 HIDE]") && has(parts, "[3 Helmet v=0 st=1 fl=0x05 item=-1/103 m= HIDE]") &&
+              has(parts, "[24 EVASuit v=0 st=1 fl=0x14 item=-1/124 m=0 EXCLUDED]") && has(parts, "[25 EVASuit_Helmet v=0") && has(parts, "[32 EVASuit_Gear_Head v=0") &&
+              has(parts, "[49 FirstPersonSkeleton v=0"),
+          "...each part with an instance: index, name, which variants exist, state, flags, items, which masks are non-zero, HIDE for the head set, EXCLUDED for flag 0x10");
+    // Many parts split across lines under the log's line length.
+    ecm::AmcCensus big;
+    big.amc = 0x1000;
+    for (uint32_t i = 0; i < ecm::kPartCount; ++i) {
+        ecm::PartCensus& p = big.part[big.count++];
+        p.idx = static_cast<uint8_t>(i);
+        p.variants = 0x0F;
+        p.maskBits = 0x0F;
+        p.flags = 0x05;
+        p.state = 1;
+        p.pending = -1;
+        p.current = 12345;
+    }
+    Capture cap2;
+    ecm::formatAmcCensus(big, ecm::Sink{&Capture::add, &cap2});
+    size_t longest = 0;
+    int partsLines = 0;
+    for (const std::string& l : cap2.lines) {
+        longest = std::max(longest, l.size());
+        partsLines += has(l, "census parts:") ? 1 : 0;
+    }
+    check(cap2.lines.size() == 1 + static_cast<size_t>(partsLines) && partsLines >= 2 && longest < ecm::kLineBytes && cap2.count("[53 EVASuit_Gear_Legs ") == 1 && cap2.count("[0 Head ") == 1,
+          "...all 54 parts at four variants split over several 'census parts' lines, none past the line length, every part exactly once");
+    // The heartbeat carries the hide counters.
+    ecm::HeartbeatIn hb;
+    hb.hide = "on";
+    hb.localAmc = 0x7FF612340000ull;
+    hb.amcCalls = 500;
+    hb.amcMatches = 120;
+    hb.hideCalls = 100;
+    hb.hideCallsWindow = 40;
+    hb.zeroed = 4800;
+    hb.zeroedWindow = 1920;
+    hb.hideFaults = 1;
+    char line[ecm::kLineBytes];
+    ecm::formatHeartbeat(line, sizeof(line), hb);
+    const std::string beat(line);
+    check(has(beat, "head_hide=on local_amc=0x7FF612340000 amc_calls=500 local_matches=120 hide_calls=100(+40) masks_zeroed=4800(+1920) hide_faults=1"),
+          "the 5 s heartbeat carries head_hide, the local AMC, the calls, the matches, the hide calls and zeroed masks per window, and the faults");
+}
+
+// A synthetic game image for head hiding: the avatar fade update at its RVA (the real 16-byte prologue), a FindJoint at its RVA, the two attach thunks, the
+// povCamera literal and the 54-name part table. Offsets are the build's RVAs, so the hooks' derived addresses (site returns, literal, table) are the real ones.
+constexpr size_t kCImgSize = 0x5F30000;
+uint8_t* g_cimg = nullptr;
+void cimgCommit(size_t rva, size_t len) {
+    const size_t lo = rva & ~static_cast<size_t>(0xFFF), hi = (rva + len + 0xFFF) & ~static_cast<size_t>(0xFFF);
+    VirtualAlloc(g_cimg + lo, hi - lo, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+}
+void cimgThunk(size_t entryRva, size_t callRva) {   // `call r8` at callRva (returns to callRva+3), rcx and rdx as given
+    cimgCommit(entryRva, 32);
+    uint8_t* p = g_cimg + entryRva;
+    size_t n = 0;
+    p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xEC; p[n++] = 0x28;
+    while (entryRva + n < callRva) p[n++] = 0x90;
+    p[n++] = 0x41; p[n++] = 0xFF; p[n++] = 0xD0;
+    p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xC4; p[n++] = 0x28; p[n++] = 0xC3;
+}
+void cimgInit(int corruptName = -1) {
+    if (!g_cimg) g_cimg = static_cast<uint8_t*>(VirtualAlloc(nullptr, kCImgSize, MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    // The dither fade: the real prologue, a rip-relative displacement of 0, then the matching epilogue. It does nothing: the rig plays the game's masks.
+    cimgCommit(ecm::kAvatarFadeRva, 64);
+    {
+        uint8_t* p = g_cimg + ecm::kAvatarFadeRva;
+        size_t n = 0;
+        for (uint8_t b : ecm::kAvatarFadePrologue) p[n++] = b;
+        p[n++] = 0; p[n++] = 0; p[n++] = 0; p[n++] = 0;
+        // The body: when the flag byte at +0x40 is set, write 0xFF into part 0 variant 0's view mask (as if the game's data changed during the call), so a test
+        // can tell whether the hide ran AFTER the original: cmp byte ptr [rip+37], 0; je +11; mov qword ptr [rcx+17A0h], 0FFh.
+        p[n++] = 0x80; p[n++] = 0x3D; p[n++] = 37; p[n++] = 0; p[n++] = 0; p[n++] = 0; p[n++] = 0x00;
+        p[n++] = 0x74; p[n++] = 0x0B;
+        p[n++] = 0x48; p[n++] = 0xC7; p[n++] = 0x81; p[n++] = 0xA0; p[n++] = 0x17; p[n++] = 0x00; p[n++] = 0x00; p[n++] = 0xFF; p[n++] = 0x00; p[n++] = 0x00; p[n++] = 0x00;
+        p[n++] = 0x48; p[n++] = 0x81; p[n++] = 0xC4; p[n++] = 0x10; p[n++] = 0x01; p[n++] = 0x00; p[n++] = 0x00;   // add rsp, 110h
+        p[n++] = 0x5F; p[n++] = 0x5E; p[n++] = 0x5B; p[n++] = 0xC3;                                                // pop rdi; pop rsi; pop rbx; ret
+        p[0x40] = 0;   // the flag
+    }
+    // FindJoint: the real prologue, then eax = 3 (the index every name gets) and the matching epilogue.
+    cimgCommit(ecm::kFindJointRva, 64);
+    {
+        uint8_t* p = g_cimg + ecm::kFindJointRva;
+        size_t n = 0;
+        for (uint8_t b : ecm::kFindJointPrologue) p[n++] = b;
+        p[n++] = 0xB8; p[n++] = 0x03; p[n++] = 0; p[n++] = 0; p[n++] = 0;                                          // mov eax, 3
+        p[n++] = 0x48; p[n++] = 0x83; p[n++] = 0xC4; p[n++] = 0x20; p[n++] = 0x5F;                                 // add rsp,20h; pop rdi
+        p[n++] = 0x48; p[n++] = 0x8B; p[n++] = 0x5C; p[n++] = 0x24; p[n++] = 0x08; p[n++] = 0xC3;                  // mov rbx,[rsp+8]; ret
+    }
+    cimgCommit(0x3000000, 64);         // a function that is not FindJoint (a prologue of 0xCC)
+    std::memset(g_cimg + 0x3000000, 0xCC, 64);
+    cimgThunk(0x19B12CA, 0x19B12D2);   // site 1
+    cimgThunk(0x19B134E, 0x19B1356);   // site 2
+    cimgThunk(0x1A00000, 0x1A00008);   // neither
+    cimgCommit(ecm::kPovNameRva, 32);
+    std::memcpy(g_cimg + ecm::kPovNameRva, "def_c_povCamera_joint", 22);
+    // The part-name table: 54 absolute pointers at +0x5E9C7D0, the strings after them.
+    cimgCommit(ecm::kPartNameTableRva, ecm::kPartCount * 8);
+    cimgCommit(0x5E9D000, ecm::kPartCount * 0x40);
+    for (uint32_t i = 0; i < ecm::kPartCount; ++i) {
+        char* s = reinterpret_cast<char*>(g_cimg + 0x5E9D000 + i * 0x40);
+        std::snprintf(s, 0x40, "%s", static_cast<int>(i) == corruptName ? "Xead" : ecm::kPartNames[i]);
+        const uint64_t abs = reinterpret_cast<uint64_t>(s);
+        std::memcpy(g_cimg + ecm::kPartNameTableRva + 8 * i, &abs, 8);
+    }
+}
+using ImgFade = uint64_t (__fastcall*)(void*);
+using ImgFind = uint64_t (__fastcall*)(void* iface, const void* name, void* fn);
+uint64_t imgAttach(int site, void* iface, const void* name) {
+    const size_t entry = site == 0 ? 0x19B12CA : site == 1 ? 0x19B134E : 0x1A00000;
+    return reinterpret_cast<ImgFind>(g_cimg + entry)(iface, name, g_cimg + ecm::kFindJointRva);
+}
+void imgFade(void* amc) { reinterpret_cast<ImgFade>(g_cimg + ecm::kAvatarFadeRva)(amc); }
+
+// An AMC the way the rig plays it: the handle slot, the creation params, parts with instances, every view mask non-zero (the game's visibility job just ran).
+struct AmcBuf {
+    alignas(16) uint8_t b[0x1E000];
+    alignas(16) uint8_t params[0x40];
+    void init(uint64_t skeleton, int32_t mode, uint32_t id = 0xFFFFFFFFu, uint64_t poseOffset = 0x30) {
+        std::memset(b, 0, sizeof(b));
+        std::memset(params, 0, sizeof(params));
+        const uint64_t pose = skeleton + poseOffset, pp = reinterpret_cast<uint64_t>(params);
+        std::memcpy(b + ecm::kOffAmcAvatarPoseId, &id, 4);
+        std::memcpy(b + ecm::kOffAmcAvatarPose, &pose, 8);
+        std::memcpy(b + ecm::kOffAmcParams, &pp, 8);
+        std::memcpy(params + ecm::kOffParamsMode, &mode, 4);
+        const int32_t viewFilter = 1, context = 7;
+        std::memcpy(b + ecm::kOffAmcViewFilter, &viewFilter, 4);
+        std::memcpy(b + ecm::kOffAmcContext, &context, 4);
+        const float alpha = 1.0f;
+        std::memcpy(b + ecm::kOffAmcAlpha, &alpha, 4);
+        static const uint32_t withInstance[] = {0, 1, 2, 3, 5, 12, 24, 25, 32, 49};
+        for (uint32_t idx : withInstance) {
+            const uint32_t at = idx * ecm::kPartStride;
+            for (uint32_t k = 0; k < (idx == 2 ? 4u : 1u); ++k) {
+                const uint64_t inst = 0x2000 + idx * 16 + k;
+                std::memcpy(b + ecm::kOffAmcInstances + at + 8 * k, &inst, 8);
+            }
+            b[ecm::kOffAmcPartFlags + at] = idx == 24 ? 0x14 : 0x05;
+            const int32_t state = 1, pending = -1, current = 100 + static_cast<int32_t>(idx);
+            std::memcpy(b + ecm::kOffAmcPartState + at, &state, 4);
+            std::memcpy(b + ecm::kOffAmcPartPending + at, &pending, 4);
+            std::memcpy(b + ecm::kOffAmcPartCurrent + at, &current, 4);
+        }
+        refillMasks();
+    }
+    // What the game's visibility job does every frame: every mask non-zero.
+    void refillMasks() {
+        for (uint32_t idx = 0; idx < ecm::kPartCount; ++idx)
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+                const uint64_t m = 0x8000000000000001ull + idx;
+                std::memcpy(b + ecm::kOffAmcMasks + idx * ecm::kPartStride + 8 * k, &m, 8);
+            }
+    }
+    uint64_t mask(uint32_t idx, uint32_t k) const {
+        uint64_t m = 0;
+        std::memcpy(&m, b + ecm::kOffAmcMasks + idx * ecm::kPartStride + 8 * k, 8);
+        return m;
+    }
+    // Head masks zero / everything else untouched?
+    bool onlyHeadZeroed() const {
+        for (uint32_t idx = 0; idx < ecm::kPartCount; ++idx)
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+                const bool zero = mask(idx, k) == 0;
+                if (zero != ecm::isHeadPart(idx)) return false;
+            }
+        return true;
+    }
+    bool allMasksIntact() const {
+        for (uint32_t idx = 0; idx < ecm::kPartCount; ++idx)
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k)
+                if (mask(idx, k) != 0x8000000000000001ull + idx) return false;
+        return true;
+    }
+};
+
+void testHeadHideGlue(const Pages& p) {
+    std::printf("glue: head hiding (the avatar-fade hook's post-call, the FindJoint capture, a synthetic game image)\n");
+    namespace t = edvr::explorercamtest;
+    static Game g;
+    static AmcBuf local, npc, firstPerson, wrongPose;
+    static alignas(16) uint8_t skelA[0x100], skelB[0x100];   // the interfaces the "game" attaches to (only their addresses matter)
+    Rig rig;
+    auto begin = [&](int corruptName = -1, bool on = true, bool badFind = false) {
+        t::reset();
+        g.init();
+        cimgInit(corruptName);
+        rig = Rig();
+        rig.f.on = on;
+        ExplorerCamTestTargets tt;
+        tt.freeCamera = reinterpret_cast<uintptr_t>(p.freeG);
+        tt.collision = reinterpret_cast<uintptr_t>(p.colG);
+        tt.boxPush = reinterpret_cast<uintptr_t>(p.boxG);
+        tt.cameraUi = reinterpret_cast<uintptr_t>(p.uiG);
+        tt.controller = reinterpret_cast<uintptr_t>(p.ctlG);
+        tt.avatarFade = reinterpret_cast<uintptr_t>(g_cimg) + ecm::kAvatarFadeRva;
+        tt.findJoint = reinterpret_cast<uintptr_t>(g_cimg) + (badFind ? 0x3000000 : ecm::kFindJointRva);
+        t::setTargets(tt);
+        g.freeUpdate = reinterpret_cast<FnObj>(p.freeG);
+        g.ctlUpdate = reinterpret_cast<FnObj>(p.ctlG);
+        g.uiUpdate = reinterpret_cast<FnObj>(p.uiG);
+        rig.boundary();
+        rig.boundary();
+    };
+    auto fresh = [&]() {
+        local.init(reinterpret_cast<uint64_t>(skelA), 3);
+        npc.init(reinterpret_cast<uint64_t>(skelB) + 0x400, 3);
+        firstPerson.init(reinterpret_cast<uint64_t>(skelA), 1);
+        wrongPose.init(reinterpret_cast<uint64_t>(skelA), 3, 0xFFFFFFFFu, 0x38);
+    };
+    auto place = [&]() {
+        g.setMode(3);
+        g.free[0x473] = 1;
+        g.ctlFrame(); rig.boundary(); g.ctlFrame(); rig.boundary();
+        rig.boundary(true);
+        g.ctlFrame();
+        g.freeFrame(); g.freeFrame(); g.ctlFrame(); g.uiFrame(); g.uiFrame();
+        rig.boundary();
+    };
+
+    // ---- the hooks are installed because Explorer Cam is on (no probe), and the names are checked ------------------------------------------------
+    begin();
+    fresh();
+    check(t::stolenBytes(5) == 5 && t::stolenBytes(6) == 5 && g_cimg[ecm::kAvatarFadeRva] == 0xE9 && g_cimg[ecm::kFindJointRva] == 0xE9,
+          "BOTH HOOKS ARE INSTALLED because Explorer Cam is on, with no probe: the avatar fade and FindJoint each stole 5 bytes");
+    check(rig.cap.count("avatar-fade hook armed") == 1 && rig.cap.count("find-joint hook armed") == 1, "...each said once");
+    check(t::partNamesState() == 1 && rig.cap.count("explorer cam head hide: the part-name table at EliteDangerous64.exe+0x5E9C7D0 holds the 54 names") == 1 &&
+              has(rig.cap.nth("the part-name table at", 0), "Head Eyes Helmet SkullCap Hair Beard Teeth Hat EyeWear EVASuit_Helmet EVASuit_Eyewear EVASuit_Gear_Head"),
+          "THE NAME TABLE IS CHECKED: the exe's 54 names match, one line says what is hidden");
+    check(t::headHideOn() && !t::headHideDown(), "...head hiding is on");
+
+    // ---- the capture: through the real FindJoint hook -----------------------------------------------------------------------------------------------
+    const void* pov = g_cimg + ecm::kPovNameRva;
+    imgAttach(0, skelA, pov);
+    imgAttach(1, skelB, pov);
+    check(explorerCamSkeleton(0).iface == reinterpret_cast<uint64_t>(skelA) && explorerCamSkeleton(0).index == 3 && explorerCamSkeleton(1).iface == reinterpret_cast<uint64_t>(skelB) &&
+              explorerCamFindJointSeen() == 2,
+          "THE CAPTURE (explorer_cam.cpp's own, no probe): the attach from site 1 stored its interface and index, site 2 its own");
+
+    // ---- not placed: the census and the match line, nothing hidden ------------------------------------------------------------------------------------
+    imgFade(local.b);
+    check(local.allMasksIntact(), "NOT PLACED: the local AMC's masks are untouched (nothing is hidden outside a placement)");
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("explorer cam head hide: census of the local third-person avatar AMC 0x") == 1 && has(rig.cap.nth("census of the local", 0), "10 of 54 parts have instances") &&
+              rig.cap.count("census parts:") == 1 && has(rig.cap.nth("census parts:", 0), "[2 Eyes v=0123 st=1 fl=0x05 item=-1/102 m=0123 HIDE]") &&
+              has(rig.cap.nth("census parts:", 0), "[24 EVASuit v=0 st=1 fl=0x14 item=-1/124 m=0 EXCLUDED]") && has(rig.cap.nth("census parts:", 0), "[49 FirstPersonSkeleton"),
+          "THE CENSUS, once, before any placement: 10 parts have instances, their names, variants, state, flags and which masks are live");
+    check(rig.cap.count("the local third-person avatar is AMC 0x") == 1 && has(rig.cap.nth("the local third-person avatar is AMC", 0), "The relation holds"),
+          "...and ONE line says how the local AMC was found (the -0x30 relation holds)");
+    imgFade(local.b);
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("census") == 0 && rig.cap.count("the local third-person avatar is AMC") == 0, "...not repeated for the same AMC");
+
+    // ---- only the local AMC is touched ----------------------------------------------------------------------------------------------------------------
+    place();
+    check(t::placedActivity() == reinterpret_cast<uint64_t>(g.free), "(placed)");
+    local.refillMasks();
+    imgFade(npc.b);
+    imgFade(firstPerson.b);
+    imgFade(wrongPose.b);
+    check(npc.allMasksIntact() && firstPerson.allMasksIntact() && wrongPose.allMasksIntact() && t::hideCalls() == 0,
+          "ONLY THE LOCAL AMC: another avatar (a different skeleton), the first-person one (mode 1) and one whose +0x268 is off by 8 keep every mask");
+    imgFade(local.b);
+    check(local.onlyHeadZeroed(), "PLACED: the local AMC's 12 head parts have all four variants' masks zero, every other part's masks are untouched");
+    check(t::hideCalls() == 1 && t::hideZeroed() == 48 && t::amcLocal() == reinterpret_cast<uint64_t>(local.b), "...one hide call that zeroed 48 mask words (12 parts x 4 variants), and it knows the local AMC");
+    local.refillMasks();   // the game's visibility job rewrote them
+    imgFade(local.b);
+    check(local.onlyHeadZeroed() && t::hideCalls() == 2 && t::hideZeroed() == 96, "...every frame: the game rewrites the masks, the post-call zeroes them again");
+    // A mask that is already zero is not a write and not counted.
+    imgFade(local.b);
+    check(t::hideCalls() == 3 && t::hideZeroed() == 96, "...masks already zero add nothing to the zeroed count");
+    // AFTER the original: the synthetic fade update writes part 0's mask during the call (flag set); the post-call must still leave it zero.
+    g_cimg[ecm::kAvatarFadeRva + 0x40] = 1;
+    local.refillMasks();
+    imgFade(local.b);
+    g_cimg[ecm::kAvatarFadeRva + 0x40] = 0;
+    check(local.mask(0, 0) == 0 && local.onlyHeadZeroed(), "THE HIDE FOLLOWS THE ORIGINAL: a mask the fade update itself wrote during the call is zero when the hooked call returns");
+    local.refillMasks();
+    imgFade(local.b);
+    check(local.onlyHeadZeroed(), "(back to the plain case)");
+
+    // ---- the heartbeat ----------------------------------------------------------------------------------------------------------------------------------
+    rig.advance(5200);
+    g.freeFrame();
+    rig.cap.clear();
+    rig.boundary();
+    const std::string beat = rig.cap.nth("explorer cam: heartbeat:", 0);
+    check(has(beat, "head_hide=on") && has(beat, "hide_calls=5(+5)") && has(beat, "masks_zeroed=192(+192)") && has(beat, "local_matches=") && has(beat, "hide_faults=0"),
+          "THE HEARTBEAT counts the hide calls and the zeroed masks per window");
+
+    // ---- stops with the placement -----------------------------------------------------------------------------------------------------------------------
+    rig.boundary(true);   // F5 leaves
+    g.ctlFrame(); g.freeFrame(); g.uiFrame(); g.uiFrame(); g.ctlFrame(); g.ctlFrame();
+    rig.boundary();
+    rig.boundary();
+    check(t::placedActivity() == 0, "(the placement ended)");
+    local.refillMasks();
+    imgFade(local.b);
+    check(local.allMasksIntact() && t::hideCalls() == 5, "THE PLACEMENT ENDED: the masks are left alone from the next frame on (nothing to restore)");
+
+    // ---- feature off ------------------------------------------------------------------------------------------------------------------------------------
+    begin(-1, false);
+    fresh();
+    imgAttach(0, skelA, g_cimg + ecm::kPovNameRva);
+    imgFade(local.b);
+    check(!t::headHideOn() && local.allMasksIntact() && t::stolenBytes(5) == 0 && t::stolenBytes(6) == 0, "FEATURE OFF: neither hook is installed, nothing is hidden, nothing is touched");
+
+    // ---- the name table does not match -----------------------------------------------------------------------------------------------------------------
+    begin(3);
+    fresh();
+    imgAttach(0, skelA, g_cimg + ecm::kPovNameRva);
+    place();
+    imgFade(local.b);
+    check(t::partNamesState() == 2 && !t::headHideOn() && local.allMasksIntact() && t::hideCalls() == 0 && rig.cap.count("the part-name table at EliteDangerous64.exe+0x5E9C7D0 differs") == 1 &&
+              has(rig.cap.nth("differs", 0), "index 3, which is not \"Helmet\"") && has(rig.cap.nth("differs", 0), "nothing is hidden"),
+          "A NAME THAT DIFFERS (index 3 reads \"Xead\"): one line names it, head hiding does not run, nothing is hidden even when placed");
+
+    // ---- the FindJoint hook cannot install: head hiding does not run (and placement does) ----------------------------------------------------------------------
+    begin(-1, true, true);
+    fresh();
+    t::setSkeleton(0, reinterpret_cast<uint64_t>(skelA), 3);   // even with a capture made by hand
+    place();
+    imgFade(local.b);
+    check(t::stolenBytes(6) == 0 && !t::headHideOn() && local.allMasksIntact() && t::hideCalls() == 0 && t::placeActive() && rig.cap.count("find-joint hook stood down") == 1,
+          "THE FINDJOINT HOOK STANDS DOWN (a wrong prologue): said once, head hiding does not run, nothing is hidden, and Explorer Cam's placement is unaffected");
+
+    // ---- the -0x30 relation never holds -------------------------------------------------------------------------------------------------------------------
+    begin();
+    fresh();
+    imgAttach(0, skelA, g_cimg + ecm::kPovNameRva);
+    place();
+    for (int i = 0; i < 100; ++i) imgFade(wrongPose.b);
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("NO AMC matched") == 0 && rig.cap.count("no AMC can be tested yet") == 0, "...100 fade calls without a match say nothing yet (the verdict waits for 300)");
+    for (int i = 0; i < 205; ++i) imgFade(wrongPose.b);
+    rig.cap.clear();
+    rig.boundary();
+    check(wrongPose.allMasksIntact() && t::hideCalls() == 0 && rig.cap.count("NO AMC matched the local skeleton in 305 avatar fade calls") == 1 &&
+              has(rig.cap.nth("NO AMC matched", 0), "does not hold here, so nothing is hidden"),
+          "THE RELATION NEVER MATCHES: after 300+ fade calls ONE line says so (with the numbers it saw) and nothing is hidden");
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("NO AMC matched") == 0, "...said once");
+    // Later it does match (the avatar is recreated): the match line, and hiding starts.
+    imgFade(local.b);
+    rig.cap.clear();
+    rig.boundary();
+    check(local.onlyHeadZeroed() && rig.cap.count("the local third-person avatar is AMC 0x") == 1, "...and when an AMC does match later, the match line is said and the hide starts");
+
+    // ---- nothing captured at all ---------------------------------------------------------------------------------------------------------------------------
+    begin();
+    fresh();
+    place();
+    for (int i = 0; i < 100; ++i) imgFade(local.b);
+    rig.cap.clear();
+    rig.boundary();
+    check(rig.cap.count("no AMC can be tested yet") == 0, "...100 fade calls with no capture say nothing yet");
+    for (int i = 0; i < 205; ++i) imgFade(local.b);
+    rig.cap.clear();
+    rig.boundary();
+    check(local.allMasksIntact() && rig.cap.count("no AMC can be tested yet: 305 avatar fade calls were seen but FindJoint(povCamera) has not been seen from site 1") == 1,
+          "NO CAPTURE AT ALL (Explorer Cam turned on after the avatars attached): ONE line says no AMC can be tested, nothing is hidden");
+
+    // ---- guarded accesses: an AMC whose memory is unmapped -----------------------------------------------------------------------------------------------
+    begin();
+    fresh();
+    imgAttach(0, skelA, g_cimg + ecm::kPovNameRva);
+    place();
+    {
+        // A block shaped like an AMC with its mask pages for the head parts taken away (PAGE_NOACCESS): the header reads, the writes fault.
+        uint8_t* block = static_cast<uint8_t*>(VirtualAlloc(nullptr, 0x20000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        check(block != nullptr, "(a block for an AMC with unmapped masks)");
+        if (block) {
+            std::memcpy(block, local.b, 0x1E000);
+            const uint64_t pp = reinterpret_cast<uint64_t>(local.params);
+            std::memcpy(block + ecm::kOffAmcParams, &pp, 8);
+            DWORD old = 0;
+            VirtualProtect(block + 0xE000, 0x1000, PAGE_NOACCESS, &old);   // part 32's instances (0xE1C0) and masks (0xE7A0) both live on this page
+            const uint64_t before = t::hideCalls();
+            for (int i = 0; i < 6; ++i) imgFade(block);
+            rig.cap.clear();
+            rig.boundary();
+            check(t::headHideDown() && t::hideCalls() == before && rig.cap.count("stood down for the session: 3 guarded accesses of the avatar component faulted") == 1,
+                  "A FAULT IN THE AMC: counted, never a crash; the third stands head hiding down for the session with ONE line (the six calls made three faults)");
+            check(!t::headHideOn() && t::faults() == 0, "...head hiding is off, and Explorer Cam's own fault budget is untouched (placement goes on)");
+            local.refillMasks();
+            imgFade(local.b);
+            check(local.allMasksIntact(), "...and a good AMC is no longer written to");
+            VirtualFree(block, 0, MEM_RELEASE);
+        }
+    }
+    t::reset();
+}
+
 void testGlue() {
     std::printf("glue, end to end (synthetic functions with the real prologues)\n");
     Pages p = makePages();
@@ -2588,6 +3059,7 @@ void testGlue() {
     testSessionTimeoutsAndIdle(p);
     testTabWaitGlue(p);
     testFadeGlue(p);
+    testHeadHideGlue(p);
     testSessionEnds(p);
     testFaults(p);
     testObservers(p);
@@ -2630,6 +3102,7 @@ int main(int argc, char** argv) {
     testRing();
     testText();
     testRelayBytes();
+    testHeadHidePure();
     testGlue();
     if (g_failures) {
         std::printf("explorer cam: FAIL (%d)\n", g_failures);

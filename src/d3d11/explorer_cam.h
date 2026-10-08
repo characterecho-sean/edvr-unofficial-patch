@@ -17,6 +17,10 @@
 //   +0x108F1B0  the commander's box push, only ever called by that update.        } when rcx is the placed activity
 //   +0x47C7640  the camera UI's update: FreeCamToggleHUD pressed once per placement, and again to give the UI back.
 //   +0x2DF14C0  the camera controller's update (vtable only): F5's sequence of presses, and the mode byte.
+//   +0x3DD6040  the avatar's dither fade (rcx = the AvatarModelComponent), inside the submit job: HEAD HIDING runs in its post-call, zeroing the view masks
+//               of the local third-person avatar's head parts while a placement stands. Optional: a stand-down costs the hiding, never placement.
+//   +0xFDDB10  the skeleton interface's FindJoint (called by many systems): the capture of the skeletons the game attaches the local avatars to, which is
+//               how the local third-person avatar is told from the others. Optional likewise.
 //
 // THREADS. The hooks run on whichever thread the game's job system calls the functions from. Each takes no lock (a try-flag keeps a
 // second concurrent caller out), allocates nothing, writes no log line and calls nothing of the game's: it talks to the frame thread
@@ -52,11 +56,19 @@ using ExplorerCamActivityObserver = void (*)(void* object) noexcept;
 constexpr int kExplorerCamMaxObservers = 4;
 ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivityObserver observer, bool attach);
 
-// The skeleton interface's FindJoint(name) (EliteDangerous64.exe+0xFDDB10, called by many systems): ONE observer, told after the original returned
-// (and with its result unchanged) the interface (rcx), the name (rdx), the u16 it returned (in the low bits) and the caller's return address.
-// Hook threads, many calls a second: it must be trivial. Installs the hook the first time anyone wants it. Returns the hook's status.
-using ExplorerCamFindObserver = void (*)(void* iface, const void* name, uint64_t result, uintptr_t returnAddress) noexcept;
-ExplorerCamHookStatus explorerCamObserveFind(ExplorerCamFindObserver observer, bool attach);
+// The skeleton interface's FindJoint(name) (EliteDangerous64.exe+0xFDDB10, called by many systems). Explorer Cam hooks it (the original first, its result
+// unchanged) to learn which skeleton interfaces the game attaches the local player's two avatars to: FUN 0x19B1240 calls FindJoint("def_c_povCamera_joint")
+// from two sites, and the hook stores the interface (rcx) and the index it returned per site. Site 1 (returning to +0x19B12D5) is the third-person body, site 2
+// the first-person arms (F5). Head hiding needs site 1; the probe's H reads both. The hook is installed when Explorer Cam is on or the probe asks.
+struct ExplorerCamSkeleton {
+    uint64_t iface = 0;       // 0 = none captured (or dropped as stale)
+    uint32_t index = 0xFFFF;  // the povCamera joint index the original returned
+    uint32_t captures = 0;    // how many attaches were seen since launch
+};
+ExplorerCamHookStatus explorerCamWantFindJoint(bool want);   // the probe's request: installs the hook the first time, opens or closes its share of the gate
+ExplorerCamSkeleton explorerCamSkeleton(int site);
+void explorerCamSkeletonDrop(int site, uint64_t iface);      // a captured interface that went stale: forgotten unless a newer capture replaced it
+uint64_t explorerCamFindJointSeen();                         // every FindJoint call the hook has seen (proof it is alive)
 
 // An unload (FreeLibrary): puts the avatar dither-fade global back to -1 if EDVR still holds it at 0. Frame-thread context; SEH-guarded.
 void explorerCamShutdown();
@@ -107,6 +119,15 @@ uint32_t controllerMode();
 uint64_t uiCalls();
 bool uiHiddenByEdvr();
 uint32_t faults();
+void setSkeleton(int site, uint64_t iface, uint32_t index);   // a capture made by hand (the cells that need no FindJoint hook)
+bool headHideOn();                 // the fade hook's post-call hides the head parts of the local AMC (Explorer Cam on, hooks armed, names verified)
+bool headHideDown();               // stood down for the session (guarded accesses faulted)
+int partNamesState();              // 0 not checked, 1 the table matches, 2 it does not
+uint64_t hideCalls();              // post-calls that zeroed the masks (a local AMC, placed)
+uint64_t hideZeroed();             // mask words that were non-zero and were zeroed
+uint64_t amcCalls();               // fade calls seen with the hide on
+uint64_t amcLocalMatches();        // ...that were the local third-person AMC
+uint64_t amcLocal();               // the local AMC pointer last matched
 uint32_t phase();                  // 0 idle, 1 waiting, 2 placed
 bool placeActive();
 bool sessionActive();

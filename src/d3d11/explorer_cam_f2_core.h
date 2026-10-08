@@ -338,7 +338,7 @@ inline void formatNeckLocal(char* out, size_t cap, const NeckSample& s, const Co
 // interface, edx = the joint index as a u32, r8 = a 64-byte buffer (four unaligned 16-byte stores), void return. RR's +0x58 reserves a 0x3080-byte
 // frame through __chkstk and takes CRITICAL_SECTION iface+0x348 (= RR+0x400); +0x48 calls +0x58 itself, so it is never the cheaper of the two.
 // Which site is the third-person avatar is not known: both are read and logged.
-constexpr uintptr_t kFindSite1Rva = 0x19B12D5, kFindSite2Rva = 0x19B1359;
+constexpr uintptr_t kFindSite1Rva = ecm::kFindSite1Rva, kFindSite2Rva = ecm::kFindSite2Rva;   // the capture itself is explorer_cam.cpp's (head hiding needs it too)
 constexpr uint32_t kOffActivityHum = 0x368;                                           // the dead route's cache, read only for the diagnostic line
 constexpr uint32_t kHumFromInterface = 0x70;
 constexpr uintptr_t kRrVtableRva = 0x559CF90, kAoVtableRva = 0x517DC20;
@@ -347,9 +347,11 @@ constexpr uint32_t kHeadSlotIndex[kHeadSlots] = {3, 6, 9, 11};
 constexpr uintptr_t kRrFunctions[kHeadSlots] = {0x43FB900, 0xFDDB10, 0x43F7180, 0x43F6EB0};
 constexpr uintptr_t kAoFunctions[kHeadSlots] = {0xFDE310, 0xFDDB10, 0xFDDEB0, 0xFDDD10};
 constexpr uint32_t kRrCachedFlag = 0x2C0, kAoCachedFlag = 0xF8;                      // iface+: the joint matrices are cached when it is non-zero
-constexpr uintptr_t kHeadNameRva = 0x554EE10, kPovNameRva = 0x51F9930;
+constexpr uintptr_t kHeadNameRva = 0x554EE10, kPovNameRva = ecm::kPovNameRva, kFootLNameRva = 0x5564118, kFootRNameRva = 0x5564130;
 inline constexpr char kHeadName[] = "def_c_head_joint";
 inline constexpr char kPovName[] = "def_c_povCamera_joint";
+inline constexpr char kFootLName[] = "def_l_foot_joint";
+inline constexpr char kFootRName[] = "def_r_foot_joint";
 constexpr uint32_t kNoJoint = 0xFFFF;
 constexpr uint32_t kHeadIntervalMs = 1000;                                            // at most one evaluation a second: the calls take a lock
 
@@ -365,11 +367,57 @@ enum class HeadWhy : uint32_t {
 };
 enum class HeadStage : uint32_t { ReadActivity = 1, ReadSlots, PoseCall, FindCall, ModelCall, WorldCall, ReadFrame, ReadInterface };
 
+// ---- H2: the joints by WALKING THE ANIMATED POSE ---------------------------------------------------------------------------------------------------
+// F5: the cached +0x58 head did not drop when the commander crouched, and +0x48 drifted 12 m (a frame that is not the free camera's). The cached matrices
+// are only maintained for joints the game asked for (SetAttachJoint marks a joint and its ancestors), so H2 composes the joints from the animated pose
+// itself, exactly as the game's uncached path does (FUN 0xFDE0D0, read and its quaternion constants evaluated against the exe's own data):
+//   P = GetPoseData(): the u16 at P+0 is the joint count; *(P+0x48) -> the local transforms, 32 bytes a joint: position vec4 at +0 (x,y,z,w), rotation
+//   quaternion (x,y,z,w) at +0x10; *(P+0x50) -> the u16 parent of each joint (0xFFFF = root); *(P+0x18) -> the u16 name hashes.
+//   Row-vector convention: the joint's matrix is R(q) with its position as the fourth row, and the model-space matrix is joint x parent x grandparent ...
+//   R(q) is DirectXMath's XMMatrixRotationQuaternion for row vectors. So a point p in joint j is carried up with  p = p x R(q_a) + pos_a  for each ancestor a.
+// This reads game memory and calls nothing: the arrays are copied (under SEH) and walked here.
+constexpr uint32_t kPoseJointCountOff = 0, kPoseNamesOff = 0x18, kPoseLocalsOff = 0x48, kPoseParentsOff = 0x50;
+constexpr uint32_t kJointBytes = 32, kJointFloats = 8, kMaxWalkJoints = 512;
+// The rotation rows of a unit quaternion q = (x, y, z, w), laid out as the exe's code lays them out (w*w2 - 1 + x*x2 on the diagonal).
+inline void quatRows(const float q[4], float r[9]) {
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float d = 2.0f * w * w - 1.0f;
+    r[0] = d + 2.0f * x * x;
+    r[1] = 2.0f * w * z + 2.0f * x * y;
+    r[2] = -2.0f * w * y + 2.0f * x * z;
+    r[3] = -2.0f * w * z + 2.0f * y * x;
+    r[4] = d + 2.0f * y * y;
+    r[5] = 2.0f * w * x + 2.0f * y * z;
+    r[6] = 2.0f * w * y + 2.0f * z * x;
+    r[7] = -2.0f * w * x + 2.0f * z * y;
+    r[8] = d + 2.0f * z * z;
+}
+// The model-space position of joint `idx`: its local position carried up through its ancestors. False for an index out of range, a parent out of range, or
+// a chain longer than the joint count (a cycle). `depth` = the number of ancestors walked.
+inline bool walkJointToModel(const float* locals, const uint16_t* parents, uint32_t joints, uint32_t idx, float out[3], uint32_t* depth) {
+    if (idx >= joints) return false;
+    float p[3] = {locals[idx * kJointFloats + 0], locals[idx * kJointFloats + 1], locals[idx * kJointFloats + 2]};
+    uint32_t steps = 0;
+    for (uint32_t a = parents[idx]; a != 0xFFFFu; a = parents[a]) {
+        if (a >= joints || ++steps > joints) return false;
+        float r[9];
+        quatRows(locals + a * kJointFloats + 4, r);
+        const float x = p[0], y = p[1], z = p[2];
+        p[0] = x * r[0] + y * r[3] + z * r[6] + locals[a * kJointFloats + 0];
+        p[1] = x * r[1] + y * r[4] + z * r[7] + locals[a * kJointFloats + 1];
+        p[2] = x * r[2] + y * r[5] + z * r[8] + locals[a * kJointFloats + 2];
+    }
+    out[0] = p[0];
+    out[1] = p[1];
+    out[2] = p[2];
+    *depth = steps;
+    return true;
+}
+
 struct HeadTargets {
     uintptr_t base = 0;
     size_t imageSize = 0;
-    uintptr_t rrVtable = 0, aoVtable = 0, headName = 0, povName = 0;
-    uintptr_t site[2] = {};
+    uintptr_t rrVtable = 0, aoVtable = 0, headName = 0, povName = 0, footLName = 0, footRName = 0;
     uintptr_t rrFn[kHeadSlots] = {}, aoFn[kHeadSlots] = {};
     bool inImage(uintptr_t p) const { return base != 0 && p >= base && p < base + imageSize; }
 };
@@ -381,21 +429,13 @@ inline HeadTargets headTargetsFromBase(uintptr_t base, size_t imageSize) {
     t.aoVtable = base + kAoVtableRva;
     t.headName = base + kHeadNameRva;
     t.povName = base + kPovNameRva;
-    t.site[0] = base + kFindSite1Rva;
-    t.site[1] = base + kFindSite2Rva;
+    t.footLName = base + kFootLNameRva;
+    t.footRName = base + kFootRNameRva;
     for (uint32_t i = 0; i < kHeadSlots; ++i) {
         t.rrFn[i] = base + kRrFunctions[i];
         t.aoFn[i] = base + kAoFunctions[i];
     }
     return t;
-}
-// Which capture a FindJoint call is: the site (0 or 1) when the caller is one of the two attach sites AND the name is the povCamera literal, else -1.
-// Trivial on purpose: the hook sees every FindJoint call of every system.
-inline int headCaptureSite(uintptr_t returnAddress, uintptr_t name, const HeadTargets& t) {
-    if (t.povName == 0 || name != t.povName) return -1;
-    if (returnAddress == t.site[0]) return 0;
-    if (returnAddress == t.site[1]) return 1;
-    return -1;
 }
 inline HeadKind headKindOfVtable(uint64_t vptr, const HeadTargets& t) {
     if (vptr == 0) return HeadKind::None;
@@ -434,6 +474,12 @@ struct HeadSlot {
     uint16_t joints = 0, headIdx = 0xFFFF, povIdx = 0xFFFF, pad = 0;
     float model[2][16] = {};   // +0x58: [0] head, [1] pov
     float world[2][16] = {};   // +0x48
+    // H2: the joints walked from the animated pose. [0] head, [1] pov, [2] left foot, [3] right foot.
+    uint16_t footL = 0xFFFF, footR = 0xFFFF;
+    uint8_t h2State = 0;       // 0 not run, 1 walked, 2 the pose arrays were unreadable, 3 more joints than the walk's buffer
+    uint8_t walkOk = 0;        // bit j: walked[j] is valid
+    uint16_t depth[4] = {};
+    float walked[4][3] = {};
 };
 struct HeadSample {
     uint64_t activity = 0, steps = 0;
@@ -462,6 +508,8 @@ inline const char* prefixHDown() { return "explorer cam probe H stood down:"; }
 inline const char* prefixHSlot() { return "explorer cam probe H slot:"; }
 inline const char* prefixHJoints() { return "explorer cam probe H joints:"; }
 inline const char* prefixHHum() { return "explorer cam probe H hum:"; }
+inline const char* prefixH2Joints() { return "explorer cam probe H2 joints:"; }
+inline const char* prefixH2Note() { return "explorer cam probe H2:"; }
 inline const char* prefixHHeartbeat() { return "explorer cam probe H heartbeat:"; }
 inline const char* headKindName(uint8_t k) { return k == 1 ? "RR (RuntimeRigComponent)" : k == 2 ? "AO (AnimatedObject)" : "unknown"; }
 inline const char* headSiteName(int i) { return i == 0 ? "site1(ret +0x19B12D5, avatar-set index 1)" : "site2(ret +0x19B1359, avatar-set index 0)"; }
@@ -569,6 +617,49 @@ inline void formatHeadJoints(char* out, size_t cap, const HeadSample& smp, int i
           smp.actWorld[12], smp.actWorld[13], smp.actWorld[14], cf.root[0], cf.root[1], cf.root[2]);
 }
 
+inline void putWalked(ecp::Line& o, const char* name, uint16_t idx, const HeadSlot& s, int j) {
+    if (idx == kNoJoint) {
+        o.put(" %s(none)", name);
+        return;
+    }
+    o.put(" %s(%u)", name, idx);
+    if (s.walkOk & (1u << j)) o.put(" walked=(%.3f,%.3f,%.3f) depth=%u", s.walked[j][0], s.walked[j][1], s.walked[j][2], s.depth[j]);
+    else o.put(" walked=unread");
+}
+// H2 at 1 Hz per site: each joint's model-space position walked from the animated pose, the cached +0x58 one beside it (head and pov only: those are the two
+// the cached path is asked for), and the stance numbers: head_y minus the higher foot, pov_y minus the higher foot, walked and cached.
+inline void formatH2Joints(char* out, size_t cap, const HeadSample& smp, int index) {
+    const HeadSlot& s = smp.slot[index];
+    ecp::Line o(out, cap);
+    o.put("%s %s kind=%s iface=0x%llX step=%llu joints=%u", prefixH2Joints(), headSiteName(index), headKindName(s.kind), static_cast<unsigned long long>(s.iface),
+          static_cast<unsigned long long>(smp.steps), s.joints);
+    if (s.h2State == 2) {
+        o.put(" the pose arrays (P+0x48 locals, P+0x50 parents) could not be read: nothing walked");
+        return;
+    }
+    if (s.h2State == 3) {
+        o.put(" more than %u joints: nothing walked", kMaxWalkJoints);
+        return;
+    }
+    putWalked(o, "head", s.headIdx, s, 0);
+    if (s.have & 1) o.put(" cached(+0x58)=(%.3f,%.3f,%.3f)", s.model[0][12], s.model[0][13], s.model[0][14]);
+    putWalked(o, "pov", s.povIdx, s, 1);
+    if (s.have & 2) o.put(" cached(+0x58)=(%.3f,%.3f,%.3f)", s.model[1][12], s.model[1][13], s.model[1][14]);
+    putWalked(o, "lfoot", s.footL, s, 2);
+    putWalked(o, "rfoot", s.footR, s, 3);
+    const bool l = (s.walkOk & 4) != 0, r = (s.walkOk & 8) != 0;
+    if (!l && !r) {
+        o.put(" foot_y=none (no foot joint walked)");
+        return;
+    }
+    const float footY = l && r ? (s.walked[2][1] > s.walked[3][1] ? s.walked[2][1] : s.walked[3][1]) : l ? s.walked[2][1] : s.walked[3][1];
+    o.put(" foot_y=%.3f (the higher foot)", footY);
+    if (s.walkOk & 1) o.put(" head_y-foot_y=%.3f", s.walked[0][1] - footY);
+    if (s.walkOk & 2) o.put(" pov_y-foot_y=%.3f", s.walked[1][1] - footY);
+    if (s.have & 1) o.put(" cached_head_y-foot_y=%.3f", s.model[0][13] - footY);
+    if (s.have & 2) o.put(" cached_pov_y-foot_y=%.3f", s.model[1][13] - footY);
+}
+
 struct HeadHeartbeatIn {
     double windowSeconds = 0;
     const char* state = "armed";             // "armed" | "stood down" | "not tried"
@@ -578,7 +669,7 @@ struct HeadHeartbeatIn {
     const char* last = "none";
     uint32_t captures[2] = {0, 0};           // FindJoint(povCamera) calls seen from site 1 / site 2
     uint64_t findSeen = 0;                   // every FindJoint call the hook has seen (proof it is alive)
-    HeadTiming m58, m48, find;               // microseconds, this window (allMax over the session)
+    HeadTiming m58, m48, find, walk;         // microseconds, this window (allMax over the session); walk = H2's pose-array walk (no game call)
 };
 inline void putHeadTiming(ecp::Line& o, const char* name, const HeadTiming& t) {
     if (t.n == 0) o.put(" %s_us(n/min/max/session_max)=0/-/-/%u", name, t.allMaxUs);
@@ -593,6 +684,7 @@ inline void formatHeadHeartbeat(char* out, size_t cap, const HeadHeartbeatIn& h)
     putHeadTiming(o, "model58", h.m58);
     putHeadTiming(o, "world48", h.m48);
     putHeadTiming(o, "find", h.find);
+    putHeadTiming(o, "h2walk", h.walk);
     if (std::strcmp(h.state, "armed") != 0) o.put(" idle=the instrument is %s: no step can run", h.state);
     else if (h.captures[0] == 0 && h.captures[1] == 0)
         o.put(" idle=no avatar attach seen since launch: load or disembark on foot after the game starts");

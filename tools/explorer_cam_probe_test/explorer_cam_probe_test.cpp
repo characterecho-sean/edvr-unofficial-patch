@@ -1191,6 +1191,63 @@ void testF2Glue() {
     }
 }
 
+// ================================ Part C2: H2's pose walk (pure) ================================
+void testH2Walk() {
+    std::printf("H2: the joints composed from the animated pose (known transforms, the quaternion order and convention)\n");
+    // j0 root (1,2,3) identity; j1 under it at (0,1,0) turned +90 degrees about Y; j2 under j1 at (1,0,0); j3 a second root at (5,6,7), turned 180 about X; j4 under j3 at (0,0,2).
+    const float s45 = 0.70710678f;
+    float L[8 * 8] = {};
+    uint16_t P[8] = {0xFFFF, 0, 1, 0xFFFF, 3, 0, 0, 0};
+    for (int j = 0; j < 8; ++j) L[j * 8 + 7] = 1.0f;                                     // identity (x,y,z,w) = (0,0,0,1)
+    auto setPos = [&](int j, float x, float y, float z) { L[j * 8] = x; L[j * 8 + 1] = y; L[j * 8 + 2] = z; };
+    setPos(0, 1, 2, 3);
+    setPos(1, 0, 1, 0);
+    L[1 * 8 + 5] = s45;   // quaternion y
+    L[1 * 8 + 7] = s45;   // quaternion w
+    setPos(2, 1, 0, 0);
+    setPos(3, 5, 6, 7);
+    setPos(4, 0, 0, 2);
+    L[3 * 8 + 4] = 1.0f;  // j3's quaternion x = 1, w = 0: a half turn about X, carried by j4's parent
+    L[3 * 8 + 7] = 0.0f;
+    float out[3] = {};
+    uint32_t depth = 99;
+    check(f2::walkJointToModel(L, P, 8, 0, out, &depth) && depth == 0 && out[0] == 1 && out[1] == 2 && out[2] == 3, "THE WALK: a root joint is its own local position, depth 0");
+    check(f2::walkJointToModel(L, P, 8, 1, out, &depth) && depth == 1 && closeTo(out[0], 1) && closeTo(out[1], 3) && closeTo(out[2], 3), "...a child of the root: local + root (its own rotation does not move itself)");
+    check(f2::walkJointToModel(L, P, 8, 2, out, &depth) && depth == 2 && closeTo(out[0], 1) && closeTo(out[1], 3) && closeTo(out[2], 2),
+          "...a grandchild: (1,0,0) carried through the +90 degree turn about Y (x becomes -z) plus (0,1,0) plus (1,2,3) = (1,3,2)");
+    check(!(closeTo(out[0], 1) && closeTo(out[1], 3) && closeTo(out[2], 4)), "...NOT (1,3,4): the transposed convention (the turn the other way) is refused");
+    check(f2::walkJointToModel(L, P, 8, 4, out, &depth) && depth == 1 && closeTo(out[0], 5) && closeTo(out[1], 6) && closeTo(out[2], 7 - 2), "...a half turn about X flips the child's z: (0,0,2) -> (0,0,-2), plus (5,6,7)");
+    // The quaternion component order: x, y, z, w. A reader that took w first would turn about the wrong axis.
+    float M[2 * 8] = {};
+    M[7] = 1.0f;
+    M[8 + 7] = 1.0f;
+    M[8 + 0] = 1.0f;   // position (1,0,0)
+    M[0 + 4] = 0.0f;
+    M[0 + 5] = 0.0f;
+    M[0 + 6] = s45;    // parent rotation: z = s45, w = s45: +90 degrees about Z
+    M[0 + 7] = s45;
+    const uint16_t MP[2] = {0xFFFF, 0};
+    check(f2::walkJointToModel(M, MP, 2, 1, out, &depth) && closeTo(out[0], 0) && closeTo(out[1], 1) && closeTo(out[2], 0),
+          "QUATERNION ORDER x,y,z,w: (1,0,0) under a +90 degree turn about Z (z = w = 0.7071) lands on (0,1,0)");
+    float R[9];
+    const float ident[4] = {0, 0, 0, 1};
+    f2::quatRows(ident, R);
+    check(R[0] == 1 && R[4] == 1 && R[8] == 1 && R[1] == 0 && R[2] == 0 && R[3] == 0 && R[5] == 0 && R[6] == 0 && R[7] == 0, "quatRows of the identity is the identity");
+    const float qz[4] = {0, 0, s45, s45};
+    f2::quatRows(qz, R);
+    check(closeTo(R[0], 0) && closeTo(R[1], 1) && closeTo(R[3], -1) && closeTo(R[4], 0) && closeTo(R[8], 1), "quatRows of +90 degrees about Z: row 0 = (0,1,0), row 1 = (-1,0,0) (DirectXMath's row-vector layout, as the exe's code computes)");
+    // Bad input is refused, not walked.
+    check(!f2::walkJointToModel(L, P, 8, 8, out, &depth) && !f2::walkJointToModel(L, P, 8, 0xFFFF, out, &depth), "an index at or past the joint count is refused");
+    uint16_t bad[4] = {0xFFFF, 0, 200, 0};
+    check(!f2::walkJointToModel(L, bad, 4, 2, out, &depth), "a parent past the joint count is refused");
+    uint16_t loop[4] = {1, 0, 0xFFFF, 0};
+    check(!f2::walkJointToModel(L, loop, 4, 0, out, &depth) && !f2::walkJointToModel(L, loop, 4, 1, out, &depth), "a parent cycle (0 -> 1 -> 0) is refused after at most the joint count of steps");
+    uint16_t self[2] = {0, 0xFFFF};
+    check(!f2::walkJointToModel(L, self, 2, 0, out, &depth), "a joint that is its own parent is refused");
+    check(f2::kJointBytes == 32 && f2::kJointFloats == 8 && f2::kPoseLocalsOff == 0x48 && f2::kPoseParentsOff == 0x50 && f2::kPoseJointCountOff == 0 && f2::kPoseNamesOff == 0x18,
+          "the pose layout is P+0 count, +0x18 name hashes, +0x48 locals (32 bytes a joint), +0x50 parents");
+}
+
 // ================================ Part D: the fade counter (F) ================================
 // AvatarModelComponent's per-frame dither-fade update, hooked after the original. The counter reads comp+0x378 (the block pointer),
 // block+0x90 (enabled), block+0x120 (amount) and comp+0x380 (eased), under SEH, and prints a 5 s heartbeat.
@@ -1436,7 +1493,7 @@ struct HeadRec {
     bool swapWorldSlot = false;   // the +0x58 stub changes the RR vtable's +0x48 slot behind H's back
     int swapSlotIn = 0;           // 1: GetPoseData changes the +0x30 slot; 2: FindJoint(head) changes the +0x58 slot
     uint32_t slowModelMs = 0;
-    uint32_t headIdx = 12, povIdx = 3;
+    uint32_t headIdx = 12, povIdx = 3, footL = 20, footR = 21;
 };
 HeadRec g_hr;
 
@@ -1476,6 +1533,8 @@ uint32_t __fastcall hrFind(void* iface, const char* name) {
     if (head && g_hr.swapSlotIn == 2) hrSwapRrSlot(11);
     if (head) return g_hr.headIdx;
     if (std::strcmp(name, f2::kPovName) == 0) return g_hr.povIdx;
+    if (std::strcmp(name, f2::kFootLName) == 0) return g_hr.footL;
+    if (std::strcmp(name, f2::kFootRName) == 0) return g_hr.footR;
     return 0xFFFF;
 }
 void hrModel(void* iface, uint32_t idx, float* out, bool rr) {
@@ -1571,6 +1630,10 @@ void himgInit() {
     himgCommit(f2::kPovNameRva, 32);
     std::memcpy(g_himg + f2::kHeadNameRva, f2::kHeadName, sizeof(f2::kHeadName));
     std::memcpy(g_himg + f2::kPovNameRva, f2::kPovName, sizeof(f2::kPovName));
+    himgCommit(f2::kFootLNameRva, 32);
+    himgCommit(f2::kFootRNameRva, 32);
+    std::memcpy(g_himg + f2::kFootLNameRva, f2::kFootLName, sizeof(f2::kFootLName));
+    std::memcpy(g_himg + f2::kFootRNameRva, f2::kFootRName, sizeof(f2::kFootRName));
 }
 
 using FindCall = uint64_t (__fastcall*)(void* iface, const void* name, void* fn);
@@ -1578,7 +1641,9 @@ using FindDirect = uint32_t (__fastcall*)(void* iface, const char* name);
 
 struct HeadWorld {
     alignas(16) uint8_t iface[3][0x400];
-    alignas(16) uint8_t pose[3][0x40];
+    alignas(16) uint8_t pose[3][0x80];
+    alignas(16) float locals[3][64 * 8];    // the pose's local transforms: 32 bytes a joint, position xyzw then quaternion xyzw
+    alignas(16) uint16_t parents[3][64];
     alignas(16) uint8_t blob[0x300];       // what *(activity+0x368) points into: the dead route's diagnostic
     alignas(16) uint8_t activity[0x600];
     const void* povName() const { return g_himg + f2::kPovNameRva; }
@@ -1594,6 +1659,8 @@ struct HeadWorld {
         g_hr = HeadRec();
         std::memset(iface, 0, sizeof(iface));
         std::memset(pose, 0, sizeof(pose));
+        std::memset(locals, 0, sizeof(locals));
+        std::memset(parents, 0, sizeof(parents));
         std::memset(blob, 0, sizeof(blob));
         std::memset(activity, 0, sizeof(activity));
         himgInit();
@@ -1612,6 +1679,32 @@ struct HeadWorld {
         q(iface[2], b + f2::kRrVtableRva);
         q(iface[2] + 0x20, reinterpret_cast<uint64_t>(pose[2]));
         std::memcpy(pose[2], &j60, 2);
+        // The skeleton of the walk cells (the same in all three poses): j0 root at (1,2,3); j1 under it at (0,1,0), turned +90 degrees about Y; the
+        // povCamera joint j3 and the head j12 under j1 at (1,0,0) and (0,0.5,0.5); the feet j20 / j21 under the root at (0.2,0,0) and (-0.2,0.05,0).
+        // Model space (row vectors, p x R + parent): pov (1,3,2), head (1.5,3.5,3), left foot (1.2,2,3), right foot (0.8,2.05,3).
+        for (int k = 0; k < 3; ++k) {
+            for (int j = 0; j < 64; ++j) {
+                parents[k][j] = 0;
+                locals[k][j * 8 + 7] = 1.0f;   // identity rotation (x,y,z,w) = (0,0,0,1)
+            }
+            parents[k][0] = 0xFFFF;
+            auto put = [&](int j, uint16_t parent, float x, float y, float z) {
+                parents[k][j] = parent;
+                locals[k][j * 8 + 0] = x;
+                locals[k][j * 8 + 1] = y;
+                locals[k][j * 8 + 2] = z;
+            };
+            put(0, 0xFFFF, 1.0f, 2.0f, 3.0f);
+            put(1, 0, 0.0f, 1.0f, 0.0f);
+            locals[k][1 * 8 + 5] = 0.70710678f;   // quaternion y
+            locals[k][1 * 8 + 7] = 0.70710678f;   // quaternion w
+            put(3, 1, 1.0f, 0.0f, 0.0f);
+            put(12, 1, 0.0f, 0.5f, 0.5f);
+            put(20, 0, 0.2f, 0.0f, 0.0f);
+            put(21, 0, -0.2f, 0.05f, 0.0f);
+            q(pose[k] + f2::kPoseLocalsOff, reinterpret_cast<uint64_t>(locals[k]));
+            q(pose[k] + f2::kPoseParentsOff, reinterpret_cast<uint64_t>(parents[k]));
+        }
         // F4: *(activity+0x368) pointed at something whose qword 0x70 below was 0. Here: h = blob+0x100, a vtable-looking value at h, 0 at h-0x70.
         q(blob + 0x100, b + 0x1234560);
         q(blob + 0x100 - 0x70, 0);
@@ -1688,7 +1781,7 @@ void testHeadJoint() {
     const std::string armed = cap.nth("explorer cam probe H armed:", 0);
     check(cap.count("explorer cam probe H armed:") == 1 && has(armed, "route B") && has(armed, "FindJoint (EliteDangerous64.exe+0xFDDB10") && has(armed, "stolen=5 bytes") &&
               has(armed, "installed NOW") && has(armed, "the original runs FIRST") && has(armed, "+0x19B12D5") && has(armed, "+0x19B1359") && has(armed, "def_c_povCamera_joint") &&
-              has(armed, "before EVERY call") && has(armed, "SEH throughout") && has(armed, "nothing is written") && armed.size() < 1100,
+              has(armed, "before EVERY call") && has(armed, "H2 also walks the animated pose") && has(armed, "SEH throughout") && armed.size() < 1099 && armed.compare(armed.size() - 18, 18, "nothing is written") == 0,
           "H ARMED: one line naming the hook, the 5 stolen bytes, original-first, the two return addresses, the literal, the check before every call, SEH; it fits a log line");
     check(explorercamf2test::headState() == 1 && explorercamtest::stolenBytes(6) == 5 && g_himg[kFindFnRva] == 0xE9 && cap.count("explorer cam probe H stood down:") == 0,
           "...the FindJoint hook stole 5 bytes (the function now begins with the relay jump E9) and the state is armed");
@@ -1772,10 +1865,12 @@ void testHeadJoint() {
     const int find0 = g_hr.find, pose0 = g_hr.poseRR + g_hr.poseAO;
     eval();
     check(explorercamf2test::headFaults() == 0 && explorercamf2test::headState() == 1, "THE FIRST EVALUATION ON THE CAPTURES: no fault, H armed");
-    check(g_hr.poseRR == 1 && g_hr.poseAO == 1 && g_hr.find - find0 == 2 && g_hr.modelRR == 2 && g_hr.worldRR == 2 && g_hr.modelAO == 2 && g_hr.worldAO == 2 && g_hr.poseRR + g_hr.poseAO - pose0 == 2 &&
-              explorercamf2test::headCalls() == 12,
-          "per site: one GetPoseData, one FindJoint (the HEAD only: the povCamera index is the capture's), then +0x58 and +0x48 for both joints: 12 game calls, each kind on the right site");
-    check(std::strcmp(g_hr.names[find0], f2::kHeadName) == 0 && std::strcmp(g_hr.names[find0 + 1], f2::kHeadName) == 0, "...and the FindJoint calls H made were for \"def_c_head_joint\"");
+    check(g_hr.poseRR == 1 && g_hr.poseAO == 1 && g_hr.find - find0 == 6 && g_hr.modelRR == 2 && g_hr.worldRR == 2 && g_hr.modelAO == 2 && g_hr.worldAO == 2 && g_hr.poseRR + g_hr.poseAO - pose0 == 2 &&
+              explorercamf2test::headCalls() == 16,
+          "per site: one GetPoseData, three FindJoint (the head and H2's two feet; the povCamera index is the capture's), then +0x58 and +0x48 for both joints: 16 game calls, each kind on the right site");
+    check(std::strcmp(g_hr.names[find0], f2::kHeadName) == 0 && std::strcmp(g_hr.names[find0 + 1], f2::kFootLName) == 0 && std::strcmp(g_hr.names[find0 + 2], f2::kFootRName) == 0 &&
+              std::strcmp(g_hr.names[find0 + 3], f2::kHeadName) == 0,
+          "...and the FindJoint calls H made were for \"def_c_head_joint\", \"def_l_foot_joint\", \"def_r_foot_joint\" (site 1) and again for site 2");
     check(g_hr.lastModelIface == reinterpret_cast<uintptr_t>(w.iface[1]) && g_hr.lastModelIdx == 3 && (g_hr.lastModelOut & 15) == 0 && g_hr.lastWorldIface == g_hr.lastModelIface && g_hr.lastWorldIdx == 3,
           "THE MATRIX CALLS' ARGUMENTS: (the interface, the joint index as a u32, a 16-byte-aligned 64-byte buffer), for +0x58 and +0x48 alike");
     check(g_hr.modelThread == GetCurrentThreadId(), "the calls are made on the thread that calls the observer (the hook's own thread)");
@@ -1793,20 +1888,80 @@ void testHeadJoint() {
               has(jA, "pov_in_commander_local(right,up,forward)=(0.000,1.600,0.120)") && has(jA, "activity_world_origin(+0xA0)=(10.100,1.680,20.000)") && has(jA, "ASSUMPTION") && has(jB, "site2"),
           "H JOINTS, both sites: the head's and the povCamera's +0x58 and +0x48 translations, the head and pov in COMMANDER-LOCAL axes ((0.020,1.550,0.120) for the known frame), the raw +0x70 origin");
     check(jA.size() < 1000 && slot1.size() < 1000, "...the lines fit a log line");
-
+    const std::string h2A = cap.nth("explorer cam probe H2 joints:", 0), h2B = cap.nth("explorer cam probe H2 joints:", 1);
+    check(cap.count("explorer cam probe H2 joints:") == 2 && has(h2A, "site1") && has(h2A, "joints=60") && has(h2A, "head(12) walked=(1.500,3.500,3.000) depth=2 cached(+0x58)=(0.000,1.600,0.020)") &&
+              has(h2A, "pov(3) walked=(1.000,3.000,2.000) depth=2 cached(+0x58)=(0.000,1.550,0.020)") && has(h2A, "lfoot(20) walked=(1.200,2.000,3.000) depth=1") &&
+              has(h2A, "rfoot(21) walked=(0.800,2.050,3.000) depth=1") && has(h2A, "foot_y=2.050 (the higher foot)") && has(h2A, "head_y-foot_y=1.450") && has(h2A, "pov_y-foot_y=0.950") &&
+              has(h2A, "cached_head_y-foot_y=-0.450") && has(h2A, "cached_pov_y-foot_y=-0.500") && has(h2B, "site2") && has(h2B, "joints=40") && h2A.size() < 1000,
+          "H2 JOINTS: the head, pov and both feet walked from the animated pose (head (1.5,3.5,3), pov (1,3,2)), the cached +0x58 beside them, the higher foot and the stance differences");
     // ---- a second second: the head index is cached, no new slot lines ---------------------------------------------------------------------------------
     eval();
     tick();
-    check(g_hr.find - find0 == 2 && cap.count("explorer cam probe H slot:") == 0 && cap.count("explorer cam probe H joints:") == 2 && g_hr.modelRR == 4,
+    check(g_hr.find - find0 == 6 && cap.count("explorer cam probe H slot:") == 0 && cap.count("explorer cam probe H joints:") == 2 && g_hr.modelRR == 4,
           "the next evaluation does NOT look the head up again (cached per interface), calls the matrices again, and prints joints lines but no slot lines");
+
+    // THE STANCE TEST: the animated pose crouches (the spine joint drops 0.6 m); the walked head follows, the cached +0x58 head (a stub that never moves) does not.
+    w.locals[0][1 * 8 + 1] = 0.4f;
+    w.locals[1][1 * 8 + 1] = 0.4f;
+    eval();
+    tick();
+    const std::string h2C = cap.nth("explorer cam probe H2 joints:", 0);
+    check(has(h2C, "head(12) walked=(1.500,2.900,3.000) depth=2 cached(+0x58)=(0.000,1.600,0.020)") && has(h2C, "head_y-foot_y=0.850") && has(h2C, "pov_y-foot_y=0.350") &&
+              has(h2C, "cached_head_y-foot_y=-0.450"),
+          "THE CROUCH: the walked head drops from 3.500 to 2.900 (head_y-foot_y 1.450 -> 0.850) while the cached +0x58 head stays at 1.600 (cached_head_y-foot_y unchanged): H2 follows the pose");
+    w.locals[0][1 * 8 + 1] = 1.0f;
+    w.locals[1][1 * 8 + 1] = 1.0f;
+    // Unreadable pose arrays: nothing walked, said in the line; H goes on and the matrices still come.
+    {
+        uint64_t keep = 0;
+        std::memcpy(&keep, w.pose[0] + f2::kPoseLocalsOff, 8);
+        const uint64_t none = 0;
+        std::memcpy(w.pose[0] + f2::kPoseLocalsOff, &none, 8);
+        eval();
+        tick();
+        const std::string h2D = cap.nth("explorer cam probe H2 joints:", 0);
+        check(has(h2D, "site1") && has(h2D, "the pose arrays (P+0x48 locals, P+0x50 parents) could not be read: nothing walked") && cap.count("explorer cam probe H joints:") == 2 &&
+                  explorercamf2test::headState() == 1 && explorercamf2test::headFaults() == 0,
+              "UNREADABLE POSE ARRAYS (P+0x48 is 0): the H2 line says nothing was walked; the matrices still print, H stays armed, no fault");
+        std::memcpy(w.pose[0] + f2::kPoseLocalsOff, &keep, 8);
+    }
+    // More joints than the walk's buffer: nothing is walked, said in the line; the matrices still come.
+    {
+        const uint16_t big = 600, normal = 60;
+        std::memcpy(w.pose[0], &big, 2);
+        eval();
+        tick();
+        const std::string h2G = cap.nth("explorer cam probe H2 joints:", 0);
+        check(has(h2G, "site1") && has(h2G, "joints=600 more than 512 joints: nothing walked") && explorercamf2test::headState() == 1 && explorercamf2test::headFaults() == 0,
+              "MORE JOINTS THAN THE BUFFER (600 of 512): the H2 line says nothing was walked; H goes on");
+        std::memcpy(w.pose[0], &normal, 2);
+    }
+    // A parent out of range and a cycle: that joint is not walked, the others are.
+    {
+        w.parents[0][12] = 200;
+        eval();
+        tick();
+        const std::string h2E = cap.nth("explorer cam probe H2 joints:", 0);
+        check(has(h2E, "head(12) walked=unread") && has(h2E, "pov(3) walked=(1.000,3.000,2.000)") && has(h2E, "lfoot(20) walked=(1.200,2.000,3.000)") && !has(h2E, " head_y-foot_y="),
+              "A PARENT OUT OF RANGE (200 of 60): that joint reads 'unread', the others are walked, no head difference is claimed");
+        w.parents[0][12] = 1;
+        w.parents[0][1] = 12;   // 12 -> 1 -> 12
+        eval();
+        tick();
+        const std::string h2F = cap.nth("explorer cam probe H2 joints:", 0);
+        check(has(h2F, "head(12) walked=unread") && explorercamf2test::headState() == 1, "A PARENT CYCLE: the joint reads 'unread' (the walk is capped at the joint count), no hang, H stays armed");
+        w.parents[0][12] = 1;
+        w.parents[0][1] = 0;
+    }
+
 
     // ---- the game attaches again with a different interface at site 1 ------------------------------------------------------------------------------
     const int findBefore = g_hr.find;
     w.attach(0, w.iface[2], w.povName());
     eval();
     tick();
-    check(g_hr.find - findBefore == 2 && cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "site1") && explorercamf2test::capturedInterface(0) == reinterpret_cast<uint64_t>(w.iface[2]),
-          "A NEW CAPTURE at site 1 (another interface): ONE slot line, one more FindJoint for it (plus the attach's own), site 2's cache untouched");
+    check(g_hr.find - findBefore == 4 && cap.count("explorer cam probe H slot:") == 1 && has(cap.nth("explorer cam probe H slot:", 0), "site1") && explorercamf2test::capturedInterface(0) == reinterpret_cast<uint64_t>(w.iface[2]),
+          "A NEW CAPTURE at site 1 (another interface): ONE slot line, three more FindJoint for it (head and both feet; plus the attach's own), site 2's cache untouched");
 
     // ---- a stale capture: the avatar was destroyed, the memory no longer starts with a skeleton vtable ---------------------------------------------
     {
@@ -1885,10 +2040,10 @@ void testHeadJoint() {
     eval();
     const std::string beat = beatLine();
     unsigned m58[4] = {}, m48[4] = {}, fd[4] = {};
-    check(has(beat, "hook=armed") && has(beat, "faults=0") && has(beat, "last=ok") && has(beat, "steps=1(+1)") && has(beat, "game_calls=12(+12)") && has(beat, "captures_site1=1 captures_site2=1") &&
-              has(beat, "findjoint_calls_seen=4") && parseTiming(beat, "model58_us(n/min/max/session_max)=", m58) && parseTiming(beat, "world48_us(n/min/max/session_max)=", m48) &&
-              parseTiming(beat, "find_us(n/min/max/session_max)=", fd) && m58[0] == 4 && m48[0] == 4 && fd[0] == 2 && m58[1] <= m58[2] && m58[2] <= m58[3] && !has(beat, "idle="),
-          "H HEARTBEAT: the state, steps, game calls, faults, the last result, the FindJoint calls seen (2 attaches + H's own 2), the captures per site and n/min/max/session-max microseconds");
+    check(has(beat, "hook=armed") && has(beat, "faults=0") && has(beat, "last=ok") && has(beat, "steps=1(+1)") && has(beat, "game_calls=16(+16)") && has(beat, "captures_site1=1 captures_site2=1") &&
+              has(beat, "findjoint_calls_seen=8") && parseTiming(beat, "model58_us(n/min/max/session_max)=", m58) && parseTiming(beat, "world48_us(n/min/max/session_max)=", m48) &&
+              parseTiming(beat, "find_us(n/min/max/session_max)=", fd) && m58[0] == 4 && m48[0] == 4 && fd[0] == 6 && m58[1] <= m58[2] && m58[2] <= m58[3] && !has(beat, "idle="),
+          "H HEARTBEAT: the state, steps, game calls, faults, the last result, the FindJoint calls seen (2 attaches + H's own 6), the captures per site and n/min/max/session-max microseconds");
     const std::string quiet = beatLine();
     check(has(quiet, "idle=no-step-in-window") && has(quiet, "steps=1(+0)") && parseTiming(quiet, "model58_us(n/min/max/session_max)=", m58) && m58[0] == 0,
           "a window with no free-camera update: 'idle=no-step-in-window', the window's call counts are back to 0");
@@ -1920,7 +2075,7 @@ void testHeadJoint() {
     arm(1000);
     attachBoth();
     for (int i = 0; i < 50; ++i) eval();
-    check(explorercamf2test::headSteps() == 1 && explorercamf2test::headCalls() == 12, "RATE: fifty updates inside a second make ONE evaluation (the +0x58 call takes a lock: never every frame)");
+    check(explorercamf2test::headSteps() == 1 && explorercamf2test::headCalls() == 16, "RATE: fifty updates inside a second make ONE evaluation (the +0x58 call takes a lock: never every frame)");
 
     // ---- the hook's own thread ---------------------------------------------------------------------------------------------------------------------
     arm(0);
@@ -1981,7 +2136,7 @@ void testHeadJoint() {
         char what[200];
         std::snprintf(what, sizeof(what), "STAND DOWN, %s: ONE 'stood down' line naming it, state 2, no 'joints' line", d.name);
         check(cap.count("explorer cam probe H stood down:") == 1 && has(line, d.expect) && has(line, "H will not run this session") && explorercamf2test::headState() == 2 &&
-                  cap.count("explorer cam probe H joints:") == 0 && stopCalls <= 12,
+                  cap.count("explorer cam probe H joints:") == 0 && stopCalls <= 16,
               what);
         const int modelsAt = g_hr.modelRR + g_hr.modelAO + g_hr.worldRR + g_hr.worldAO;
         for (int i = 0; i < 3; ++i) eval();
@@ -2027,6 +2182,28 @@ void testHeadJoint() {
               has(cap.nth("explorer cam probe H stood down:", 0), "the FindJoint hook (EliteDangerous64.exe+0xFDDB10) is not in place") && has(cap.nth("explorer cam probe H stood down:", 0), "the game build differs") &&
               g_himg[0x3000000] == 0x48,
           "A FINDJOINT WHOSE PROLOGUE IS NOT THE BUILD'S: the hook stands down with the reason in the line, not a byte of the function is written, and H stands down");
+    // The foot literals are not what they should be: H2 is off with one line, H goes on (the head and pov still read).
+    t::reset();
+    w.reset();
+    g_himg[f2::kFootLNameRva + 4] ^= 1;
+    targets.findJoint = reinterpret_cast<uintptr_t>(g_himg) + kFindFnRva;
+    explorercamtest::setTargets(targets);
+    {
+        explorercamf2test::HeadSeam seam;
+        seam.base = reinterpret_cast<uintptr_t>(g_himg);
+        seam.imageSize = kHeadImageSize;
+        explorercamf2test::setHeadTargets(seam);
+        explorercamf2test::setHeadInterval(0);
+    }
+    cap.clear();
+    t::boundary(frame++, clock += 100000, true, &Capture::add, &cap);
+    check(cap.count("explorer cam probe H2: not run: the foot joint-name literals") == 1 && explorercamf2test::headState() == 1 && cap.count("explorer cam probe H armed:") == 1,
+          "A FOOT LITERAL THAT IS WRONG: one line says H2 does not run, H itself arms");
+    attachBoth();
+    eval();
+    tick();
+    check(cap.count("explorer cam probe H2 joints:") == 0 && cap.count("explorer cam probe H joints:") == 2 && g_hr.find == 2 + 2 && explorercamf2test::headCalls() == 12,
+          "...no H2 line, no foot lookup (head only: 12 game calls), and the head and pov lines still come");
     t::reset();
     w.reset();
     g_himg[f2::kPovNameRva + 4] ^= 1;   // the pov literal is not what it should be
@@ -2072,6 +2249,7 @@ int main(int argc, char** argv) {
     testGlue();
     testNeckMath();
     testF2Core();
+    testH2Walk();
     testF2Glue();
     testFadeCounter();
     testHeadJoint();

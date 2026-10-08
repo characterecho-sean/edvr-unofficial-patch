@@ -78,7 +78,23 @@ alignas(8) std::atomic<uint64_t> g_forwarded[2];        // ...and calls passed t
 alignas(8) std::atomic<uintptr_t> g_gate[kHkCount];     // a callback relay's gate: open = the callback runs, closed = straight on
 std::atomic<uintptr_t> g_forward[kHkCount];             // a callback relay's trampoline
 std::atomic<ExplorerCamActivityObserver> g_observers[3][kExplorerCamMaxObservers];   // free camera, controller, avatar fade
-std::atomic<ExplorerCamFindObserver> g_findObserver{nullptr};                         // the FindJoint hook's one observer (the probe's H)
+// The FindJoint hook's capture (any thread): the skeleton interface and index of the local player's two avatar attaches, set by the hook's post-call.
+alignas(8) std::atomic<uint64_t> g_skelIface[2];
+std::atomic<uint32_t> g_skelIndex[2], g_skelCaptures[2];
+std::atomic<uint64_t> g_findSeen{0};
+std::atomic<uintptr_t> g_findSite[2], g_findPov{0};   // the two return addresses and the literal's address; set before the gate can open
+std::atomic<uint32_t> g_findWant{0};                   // bit 0 the probe, bit 1 Explorer Cam (placement active)
+
+// Phase 2: head hiding (hook threads write; the frame thread reads and logs).
+std::atomic<bool> g_hideOn{false};                     // the fade hook's post-call hides: active, both hooks armed, the part names verified
+std::atomic<bool> g_hideDown{false};                   // stood down for the session: guarded accesses of the AMC faulted
+std::atomic<uint32_t> g_hideFaults{0};
+std::atomic<int> g_partNames{0};                       // 0 not checked, 1 the exe's name table matches kPartNames, 2 it does not
+std::atomic<uint64_t> g_amcCalls{0}, g_amcLocalMatches{0}, g_amcIdOk{0}, g_amcMode3{0}, g_hideCalls{0}, g_hideZeroed{0};
+std::atomic<uint64_t> g_amcLocal{0}, g_amcLocalPose{0}, g_amcCand{0}, g_amcCandPose{0};
+std::atomic<bool> g_busyAmc{false};
+uint64_t g_amcCensused = 0;                            // g_busyAmc
+ecm::Ring<ecm::AmcCensus, 2> g_censusRing;
 
 std::atomic<bool> g_placeActive{false};                 // on, every required hook armed, not stood down by faults (frame thread)
 std::atomic<uint32_t> g_resetRequest{0};                // the free-camera hook's placement machine starts over
@@ -144,6 +160,8 @@ struct FrameState {
     uint64_t nextBindsMs = 0;
     uint64_t bindsFp = 0, bindsPending = 0;
     bool ctlAnnounced = false;
+    bool amcMatchSaid = false, amcNoMatchSaid = false, amcDownSaid = false;
+    uint64_t beatHideCalls = 0, beatZeroed = 0;
 };
 FrameState g_frame;
 
@@ -696,16 +714,148 @@ __declspec(noinline) uint64_t __fastcall findJointHooked(void* a, void* b, void*
     const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkFind].load(std::memory_order_acquire));
     if (!forward) return 0;
     const uint64_t result = forward(a, b, c, d);
-    const ExplorerCamFindObserver observer = g_findObserver.load(std::memory_order_acquire);
-    if (observer) observer(a, b, result, returnAddress);
+    g_findSeen.fetch_add(1, std::memory_order_relaxed);
+    const int site = ecm::findCaptureSite(returnAddress, reinterpret_cast<uintptr_t>(b), g_findSite[0].load(std::memory_order_relaxed),
+                                          g_findSite[1].load(std::memory_order_relaxed), g_findPov.load(std::memory_order_relaxed));
+    if (site >= 0) {
+        g_skelIndex[site].store(static_cast<uint32_t>(result & 0xFFFFu), std::memory_order_relaxed);
+        g_skelIface[site].store(reinterpret_cast<uint64_t>(a), std::memory_order_release);
+        g_skelCaptures[site].fetch_add(1, std::memory_order_relaxed);
+    }
     return result;
+}
+
+// ---- Phase 2: hiding the head parts (the avatar-fade hook's post-call) -------------------------------------------------------------
+// Runs inside the game's submit job, right after the dither fade and before the loop that reads the view masks, on the same thread: a zero written here is
+// seen by that loop and by nothing racing it. Local third-person AMC only; masks of the head set only; only while a placement stands. Every access is
+// under SEH; three faults stand head hiding down for the session (it never counts against Explorer Cam's own fault budget).
+struct AmcIdent {
+    uint32_t id = 0;
+    uint64_t pose = 0;
+    int32_t mode = -1;
+};
+__declspec(noinline) bool sehReadAmcIdent(const uint8_t* amc, AmcIdent* o) noexcept {
+    __try {
+        std::memcpy(&o->id, amc + ecm::kOffAmcAvatarPoseId, 4);
+        std::memcpy(&o->pose, amc + ecm::kOffAmcAvatarPose, 8);
+        uint64_t params = 0;
+        std::memcpy(&params, amc + ecm::kOffAmcParams, 8);
+        o->mode = -1;
+        if (params >= 0x10000u && params < 0x00007FFF00000000ull) std::memcpy(&o->mode, reinterpret_cast<const uint8_t*>(params) + ecm::kOffParamsMode, 4);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// Zero the four view masks of every head part. `zeroed` counts the words that were not already zero.
+__declspec(noinline) bool sehZeroHeadMasks(uint8_t* amc, uint32_t* zeroed) noexcept {
+    __try {
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < ecm::kHeadPartCount; ++i) {
+            volatile uint64_t* masks = reinterpret_cast<volatile uint64_t*>(amc + ecm::kOffAmcMasks + ecm::kHeadParts[i] * ecm::kPartStride);
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+                if (masks[k] != 0) {
+                    masks[k] = 0;
+                    ++n;
+                }
+            }
+        }
+        *zeroed = n;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+__declspec(noinline) bool sehReadCensus(const uint8_t* amc, ecm::AmcCensus* c) noexcept {
+    __try {
+        std::memcpy(&c->viewFilter, amc + ecm::kOffAmcViewFilter, 4);
+        std::memcpy(&c->alpha, amc + ecm::kOffAmcAlpha, 4);
+        std::memcpy(&c->context, amc + ecm::kOffAmcContext, 4);
+        std::memcpy(c->flagBytes, amc + ecm::kOffAmcFlagBytes, 4);
+        uint32_t n = 0;
+        for (uint32_t idx = 0; idx < ecm::kPartCount; ++idx) {
+            const uint32_t at = idx * ecm::kPartStride;
+            uint8_t variants = 0, maskBits = 0;
+            for (uint32_t k = 0; k < ecm::kPartVariants; ++k) {
+                uint64_t inst = 0, mask = 0;
+                std::memcpy(&inst, amc + ecm::kOffAmcInstances + at + 8 * k, 8);
+                std::memcpy(&mask, amc + ecm::kOffAmcMasks + at + 8 * k, 8);
+                if (inst != 0) variants = static_cast<uint8_t>(variants | (1u << k));
+                if (mask != 0 && inst != 0) maskBits = static_cast<uint8_t>(maskBits | (1u << k));
+            }
+            if (variants == 0) continue;
+            ecm::PartCensus& p = c->part[n++];
+            p.idx = static_cast<uint8_t>(idx);
+            p.variants = variants;
+            p.maskBits = maskBits;
+            p.flags = amc[ecm::kOffAmcPartFlags + at];
+            std::memcpy(&p.state, amc + ecm::kOffAmcPartState + at, 4);
+            std::memcpy(&p.pending, amc + ecm::kOffAmcPartPending + at, 4);
+            std::memcpy(&p.current, amc + ecm::kOffAmcPartCurrent + at, 4);
+        }
+        c->count = n;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+void hideFault() noexcept {
+    if (g_hideFaults.fetch_add(1, std::memory_order_relaxed) + 1 >= ecm::kMaxHideFaults) g_hideDown.store(true, std::memory_order_release);
+}
+void headHideStep(void* amcPtr) noexcept {
+    if (!amcPtr || g_hideDown.load(std::memory_order_acquire)) return;
+    g_amcCalls.fetch_add(1, std::memory_order_relaxed);
+    uint8_t* const amc = static_cast<uint8_t*>(amcPtr);
+    AmcIdent id;
+    if (!sehReadAmcIdent(amc, &id)) {
+        hideFault();
+        return;
+    }
+    const bool idOk = id.id == 0xFFFFFFFFu;
+    if (idOk) g_amcIdOk.fetch_add(1, std::memory_order_relaxed);
+    if (idOk && id.mode == 3) {
+        g_amcMode3.fetch_add(1, std::memory_order_relaxed);
+        g_amcCand.store(reinterpret_cast<uint64_t>(amcPtr), std::memory_order_relaxed);
+        g_amcCandPose.store(id.pose, std::memory_order_relaxed);
+    }
+    const uint64_t skeleton = g_skelIface[0].load(std::memory_order_acquire);
+    if (!ecm::isLocalAmc(id.id, id.pose, skeleton, id.mode)) return;
+    g_amcLocalMatches.fetch_add(1, std::memory_order_relaxed);
+    g_amcLocal.store(reinterpret_cast<uint64_t>(amcPtr), std::memory_order_relaxed);
+    g_amcLocalPose.store(id.pose, std::memory_order_relaxed);
+    // The census, once per local AMC (a new AMC, a new census). One thread at a time takes it.
+    if (reinterpret_cast<uint64_t>(amcPtr) != g_amcCensused && !g_busyAmc.exchange(true, std::memory_order_acquire)) {
+        if (reinterpret_cast<uint64_t>(amcPtr) != g_amcCensused) {
+            ecm::AmcCensus census;
+            census.amc = reinterpret_cast<uint64_t>(amcPtr);
+            census.avatarPose = id.pose;
+            census.skeleton = skeleton;
+            census.mode = id.mode;
+            if (sehReadCensus(amc, &census)) {
+                g_censusRing.push(census);
+                g_amcCensused = census.amc;
+            } else {
+                hideFault();
+            }
+        }
+        g_busyAmc.store(false, std::memory_order_release);
+    }
+    if (g_hideDown.load(std::memory_order_acquire) || g_placedActivity.load(std::memory_order_acquire) == 0) return;
+    uint32_t zeroed = 0;
+    if (!sehZeroHeadMasks(amc, &zeroed)) {
+        hideFault();
+        return;
+    }
+    g_hideCalls.fetch_add(1, std::memory_order_relaxed);
+    g_hideZeroed.fetch_add(zeroed, std::memory_order_relaxed);
 }
 
 // ---- the avatar-fade hook (the probe's fade counter rides it; nothing here writes) ---------------------------------------------
 __declspec(noinline) uint64_t __fastcall avatarFadeHooked(void* a, void* b, void* c, void* d) noexcept {
     const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkFade].load(std::memory_order_acquire));
     if (!forward) return 0;
-    const uint64_t result = forward(a, b, c, d);   // the original FIRST: the observers read what it left
+    const uint64_t result = forward(a, b, c, d);   // the original FIRST: the observers read what it left, and the hide follows it
+    if (g_hideOn.load(std::memory_order_acquire)) headHideStep(a);
     runObservers(2, a);
     return result;
 }
@@ -869,8 +1019,8 @@ const char* armedRole(int id) {
         case kHkFade:
             return "LOG ONLY, for advanced.explorer_cam_probe's fade counter: the original runs first, then the component's dither block is read";
         case kHkFind:
-            return "LOG ONLY, for advanced.explorer_cam_probe's H: the original runs first and its result is returned unchanged; the observer is told the "
-                   "interface, the name, the result and the caller's return address";
+            return "LOG ONLY: the original runs first and its result is returned unchanged; a call from one of the two avatar-attach sites with the "
+                   "povCamera literal stores the skeleton interface (rcx) and the index, for head hiding and the probe's H";
         case kHkUi:
             return "FreeCamToggleHUD is pressed for one update when a placement begins, and again to give the UI back; the original runs "
                    "between, and the press is restored after it";
@@ -885,8 +1035,8 @@ const char* downConsequence(int id) {
         case kHkCollision: return "Explorer Cam placement does not run (without it the free camera would stop 0.70 m from the face).";
         case kHkBox: return "Explorer Cam placement does not run (without it the free camera would be lifted onto the helmet).";
         case kHkCtl: return "Explorer Cam does not run: F5 has nothing to press.";
-        case kHkFade: return "advanced.explorer_cam_probe's fade counter does not run.";
-        case kHkFind: return "advanced.explorer_cam_probe's H (the head joint) does not run.";
+        case kHkFade: return "head hiding does not run, and advanced.explorer_cam_probe's fade counter does not either.";
+        case kHkFind: return "head hiding does not run, and advanced.explorer_cam_probe's H does not either.";
         default: return "the camera UI stays up while placed; everything else runs.";
     }
 }
@@ -897,6 +1047,13 @@ void tryHook(int id, const ecm::Sink& sink) {
     char why[400] = {};
     if (installHook(id, why, sizeof(why))) {
         entry.state = ExplorerCamHookStatus::Armed;
+        if (id == kHkFind) {
+            // The image base is the target minus its RVA (production: target = base + RVA; the rigs place their synthetic functions the same way).
+            const uintptr_t base = entry.target - ecm::kFindJointRva;
+            g_findSite[0].store(base + ecm::kFindSite1Rva, std::memory_order_relaxed);
+            g_findSite[1].store(base + ecm::kFindSite2Rva, std::memory_order_relaxed);
+            g_findPov.store(base + ecm::kPovNameRva, std::memory_order_release);
+        }
         say(sink, "%s %s hook armed: EliteDangerous64.exe+0x%llX (%s, build 332841) at 0x%llX, stolen=%zu bytes, prologue %zu/%zu bytes verified, "
                   "relay at 0x%llX; %s",
             ecm::prefix(), spec.label, static_cast<unsigned long long>(spec.rva), spec.what, static_cast<unsigned long long>(entry.target),
@@ -922,8 +1079,14 @@ void updateGates() {
     g_gate[kHkFree].store(armed(kHkFree) && (active || observerCount(0) > 0) ? 1u : 0u, std::memory_order_release);
     g_gate[kHkCtl].store(armed(kHkCtl) && (active || observerCount(1) > 0 || g_fadeOurs.load(std::memory_order_relaxed)) ? 1u : 0u,
                          std::memory_order_release);
-    g_gate[kHkFade].store(armed(kHkFade) && observerCount(2) > 0 ? 1u : 0u, std::memory_order_release);
-    g_gate[kHkFind].store(armed(kHkFind) && g_findObserver.load(std::memory_order_relaxed) != nullptr ? 1u : 0u, std::memory_order_release);
+    // Head hiding needs both optional hooks, the part names verified, and a placement-capable Explorer Cam; it also needs the FindJoint capture from
+    // launch (the attach runs every frame, but the hook must be in place), so the capture's share of the gate is open whenever Explorer Cam is active.
+    const bool hideOn = active && armed(kHkFade) && armed(kHkFind) && g_partNames.load(std::memory_order_relaxed) == 1 && !g_hideDown.load(std::memory_order_relaxed);
+    g_hideOn.store(hideOn, std::memory_order_release);
+    if (active) g_findWant.fetch_or(2u, std::memory_order_relaxed);
+    else g_findWant.fetch_and(~2u, std::memory_order_relaxed);
+    g_gate[kHkFade].store(armed(kHkFade) && (observerCount(2) > 0 || hideOn) ? 1u : 0u, std::memory_order_release);
+    g_gate[kHkFind].store(armed(kHkFind) && g_findWant.load(std::memory_order_relaxed) != 0 ? 1u : 0u, std::memory_order_release);
     g_gate[kHkUi].store(armed(kHkUi) && (active || g_uiHeld.load(std::memory_order_relaxed)) ? 1u : 0u, std::memory_order_release);
 }
 
@@ -1078,6 +1241,79 @@ void fadeTick(bool active, bool placed, bool session, uint32_t frame, bool unloa
     }
 }
 
+// ---- head hiding, frame-thread half ------------------------------------------------------------------------------------------------
+__declspec(noinline) bool sehNameIs(uintptr_t tableEntry, const char* expected) noexcept {
+    __try {
+        uint64_t p = 0;
+        std::memcpy(&p, reinterpret_cast<const void*>(tableEntry), 8);
+        if (p < 0x10000u || p >= 0x00007FFF00000000ull) return false;
+        return std::strcmp(reinterpret_cast<const char*>(p), expected) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+// Once the fade hook is armed: does the exe's part-name table hold the 54 names the head set's indexes were read against? If not, nothing is hidden.
+void checkPartNames(const ecm::Sink& sink) {
+    if (g_partNames.load(std::memory_order_relaxed) != 0 || !armed(kHkFade)) return;
+    const uintptr_t base = g_hooks[kHkFade].target - ecm::kAvatarFadeRva;
+    uint32_t bad = 0, first = 0;
+    for (uint32_t i = 0; i < ecm::kPartCount; ++i) {
+        if (sehNameIs(base + ecm::kPartNameTableRva + 8u * i, ecm::kPartNames[i])) continue;
+        if (bad++ == 0) first = i;
+    }
+    if (bad == 0) {
+        g_partNames.store(1, std::memory_order_release);
+        std::string heads;
+        for (uint32_t h : ecm::kHeadParts) {
+            if (!heads.empty()) heads += " ";
+            heads += ecm::kPartNames[h];
+        }
+        say(sink, "%s the part-name table at EliteDangerous64.exe+0x%llX holds the %u names the hide list was written against; while a placement stands the view "
+                  "masks of these %u head parts of the LOCAL third-person avatar are zeroed after the dither fade (nothing is restored: the game rewrites the masks "
+                  "every frame): %s",
+            ecm::prefixHide(), static_cast<unsigned long long>(ecm::kPartNameTableRva), ecm::kPartCount, ecm::kHeadPartCount, heads.c_str());
+    } else {
+        g_partNames.store(2, std::memory_order_release);
+        say(sink, "%s the part-name table at EliteDangerous64.exe+0x%llX differs from the one the hide list was written against (%u of %u names; the first is index %u, "
+                  "which is not \"%s\"): head hiding does not run and nothing is hidden",
+            ecm::prefixHide(), static_cast<unsigned long long>(ecm::kPartNameTableRva), bad, ecm::kPartCount, first, ecm::kPartNames[first]);
+    }
+}
+// The census (once per local AMC, from the hook thread), and the verdict on the -0x30 relation that picks the local AMC out.
+void reportAmc(FrameState& fs, const ecm::Sink& sink) {
+    ecm::AmcCensus census;
+    while (g_censusRing.take(&census)) ecm::formatAmcCensus(census, sink);
+    const uint64_t matches = g_amcLocalMatches.load(std::memory_order_relaxed);
+    const uint64_t skeleton = g_skelIface[0].load(std::memory_order_relaxed);
+    if (matches > 0 && !fs.amcMatchSaid) {
+        fs.amcMatchSaid = true;
+        say(sink, "%s the local third-person avatar is AMC 0x%llX: its AvatarPose handle is resolved (+0x260 reads 0xFFFFFFFF), +0x268 = 0x%llX minus 0x30 = 0x%llX is "
+                  "the skeleton interface FindJoint(povCamera) was called on at site 1 (+0x19B12D5), and its creation mode is 3. The relation holds.",
+            ecm::prefixHide(), static_cast<unsigned long long>(g_amcLocal.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_amcLocalPose.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_amcLocalPose.load(std::memory_order_relaxed) - ecm::kAvatarPoseToSkeleton));
+    } else if (matches == 0 && !fs.amcNoMatchSaid && g_amcCalls.load(std::memory_order_relaxed) >= ecm::kAmcNoMatchCalls) {
+        fs.amcNoMatchSaid = true;
+        if (skeleton == 0)
+            say(sink, "%s no AMC can be tested yet: %llu avatar fade calls were seen but FindJoint(povCamera) has not been seen from site 1 (+0x19B12D5), so the "
+                      "local skeleton is unknown; nothing is hidden. (Explorer Cam must be on at launch, and the avatar attached after it.)",
+                ecm::prefixHide(), static_cast<unsigned long long>(g_amcCalls.load(std::memory_order_relaxed)));
+        else
+            say(sink, "%s NO AMC matched the local skeleton in %llu avatar fade calls (%llu with a resolved AvatarPose handle, %llu of those in mode 3; the last such "
+                      "AMC 0x%llX has +0x268 = 0x%llX, minus 0x30 = 0x%llX; the site-1 skeleton is 0x%llX): the relation +0x268 - 0x30 == skeleton does not hold "
+                      "here, so nothing is hidden",
+                ecm::prefixHide(), static_cast<unsigned long long>(g_amcCalls.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_amcIdOk.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_amcMode3.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_amcCand.load(std::memory_order_relaxed)), static_cast<unsigned long long>(g_amcCandPose.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_amcCandPose.load(std::memory_order_relaxed) - ecm::kAvatarPoseToSkeleton), static_cast<unsigned long long>(skeleton));
+    }
+    if (g_hideDown.load(std::memory_order_relaxed) && !fs.amcDownSaid) {
+        fs.amcDownSaid = true;
+        say(sink, "%s stood down for the session: %u guarded accesses of the avatar component faulted; the head parts are no longer touched", ecm::prefixHide(),
+            g_hideFaults.load(std::memory_order_relaxed));
+    }
+}
+
 void releaseFromFrame(ecm::Why why, uint32_t frame, const ecm::Sink& sink) {
     ecm::Event e;
     e.kind = static_cast<uint32_t>(ecm::EvKind::Released);
@@ -1163,6 +1399,11 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
             }
         }
         if (allArmed && g_hooks[kHkUi].state == ExplorerCamHookStatus::NotTried) tryHook(kHkUi, sink);
+        // Head hiding's two hooks, at launch like the rest: the FindJoint capture must be in place before the on-foot avatars attach. Optional: a stand-down
+        // here costs the head hiding (said once, with its consequence) and never placement.
+        if (allArmed && g_hooks[kHkFind].state == ExplorerCamHookStatus::NotTried) tryHook(kHkFind, sink);
+        if (allArmed && g_hooks[kHkFade].state == ExplorerCamHookStatus::NotTried) tryHook(kHkFade, sink);
+        checkPartNames(sink);
     }
 
     // 3. Active = on, every required hook armed, and the fault budget not spent. A change starts the hook threads' machines over.
@@ -1220,6 +1461,9 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         }
     }
 
+    // 6a. Head hiding: the census of the local AMC and the verdict on how it was found.
+    reportAmc(fs, sink);
+
     // 6b. The avatar fade global. Before the not-active clean-up below, so a feature turned off while the camera is closed puts it back.
     fadeTick(active, g_placedActivity.load(std::memory_order_acquire) != 0, g_sessionActive.load(std::memory_order_acquire), frame, false, sink);
     updateGates();
@@ -1272,6 +1516,8 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         fs.beatBoxForwarded = g_forwarded[1].load(std::memory_order_relaxed);
         fs.beatHookCalls = g_hookCalls.load(std::memory_order_relaxed);
         fs.beatCtlCalls = g_ctlCalls.load(std::memory_order_relaxed);
+        fs.beatHideCalls = g_hideCalls.load(std::memory_order_relaxed);
+        fs.beatZeroed = g_hideZeroed.load(std::memory_order_relaxed);
     }
     fs.lastPhase = phase;
     fs.lastSession = sessionNow;
@@ -1306,6 +1552,15 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         h.lost = g_rings[0].lost() + g_rings[1].lost() + g_rings[2].lost();
         h.faults = g_faults.load(std::memory_order_relaxed);
         h.eye = eye;
+        h.hide = g_hideDown.load(std::memory_order_relaxed) ? "stood down" : g_hideOn.load(std::memory_order_relaxed) ? "on" : "off";
+        h.localAmc = g_amcLocal.load(std::memory_order_relaxed);
+        h.amcCalls = g_amcCalls.load(std::memory_order_relaxed);
+        h.amcMatches = g_amcLocalMatches.load(std::memory_order_relaxed);
+        h.hideCalls = g_hideCalls.load(std::memory_order_relaxed);
+        h.hideCallsWindow = h.hideCalls - fs.beatHideCalls;
+        h.zeroed = g_hideZeroed.load(std::memory_order_relaxed);
+        h.zeroedWindow = h.zeroed - fs.beatZeroed;
+        h.hideFaults = g_hideFaults.load(std::memory_order_relaxed);
         ecm::formatHeartbeat(line, sizeof(line), h);
         sink(line);
         fs.beatUpdates = h.updates;
@@ -1315,6 +1570,8 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         fs.beatBoxForwarded = h.boxForwarded;
         fs.beatHookCalls = h.hookCalls;
         fs.beatCtlCalls = h.ctlCalls;
+        fs.beatHideCalls = h.hideCalls;
+        fs.beatZeroed = h.zeroed;
         fs.lastBeatMs = nowMs;
         fs.nextBeatMs = nowMs + 5000;
     }
@@ -1431,14 +1688,10 @@ ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivi
     return status;
 }
 
-ExplorerCamHookStatus explorerCamObserveFind(ExplorerCamFindObserver observer, bool attach) {
-    if (attach && g_hooks[kHkFind].state == ExplorerCamHookStatus::NotTried) tryHook(kHkFind, ecm::Sink{&logSink, nullptr});
-    if (attach) {
-        if (armed(kHkFind) && observer) g_findObserver.store(observer, std::memory_order_release);
-    } else {
-        ExplorerCamFindObserver current = g_findObserver.load();
-        if (current && (!observer || current == observer)) g_findObserver.store(nullptr, std::memory_order_release);
-    }
+ExplorerCamHookStatus explorerCamWantFindJoint(bool want) {
+    if (want && g_hooks[kHkFind].state == ExplorerCamHookStatus::NotTried) tryHook(kHkFind, ecm::Sink{&logSink, nullptr});
+    if (want) g_findWant.fetch_or(1u, std::memory_order_relaxed);
+    else g_findWant.fetch_and(~1u, std::memory_order_relaxed);
     updateGates();
     ExplorerCamHookStatus status;
     status.state = g_hooks[kHkFind].state;
@@ -1449,8 +1702,36 @@ ExplorerCamHookStatus explorerCamObserveFind(ExplorerCamFindObserver observer, b
     return status;
 }
 
+ExplorerCamSkeleton explorerCamSkeleton(int site) {
+    ExplorerCamSkeleton s;
+    if (site < 0 || site > 1) return s;
+    s.iface = g_skelIface[site].load(std::memory_order_acquire);
+    s.index = g_skelIndex[site].load(std::memory_order_relaxed);
+    s.captures = g_skelCaptures[site].load(std::memory_order_relaxed);
+    return s;
+}
+void explorerCamSkeletonDrop(int site, uint64_t iface) {
+    if (site < 0 || site > 1) return;
+    uint64_t expected = iface;
+    g_skelIface[site].compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+}
+uint64_t explorerCamFindJointSeen() { return g_findSeen.load(std::memory_order_relaxed); }
+
 #ifdef EDVR_EXPLORER_CAM_TEST
 namespace explorercamtest {
+void setSkeleton(int site, uint64_t iface, uint32_t index) {
+    g_skelIndex[site].store(index);
+    g_skelIface[site].store(iface);
+    g_skelCaptures[site].fetch_add(1);
+}
+bool headHideOn() { return g_hideOn.load(); }
+bool headHideDown() { return g_hideDown.load(); }
+int partNamesState() { return g_partNames.load(); }
+uint64_t hideCalls() { return g_hideCalls.load(); }
+uint64_t hideZeroed() { return g_hideZeroed.load(); }
+uint64_t amcCalls() { return g_amcCalls.load(); }
+uint64_t amcLocalMatches() { return g_amcLocalMatches.load(); }
+uint64_t amcLocal() { return g_amcLocal.load(); }
 void setTargets(const ExplorerCamTestTargets& t) {
     g_testTargets[kHkFree] = t.freeCamera;
     g_testTargets[kHkCollision] = t.collision;
@@ -1535,7 +1816,35 @@ void reset() {
     }
     for (int w = 0; w < 3; ++w)
         for (int i = 0; i < kExplorerCamMaxObservers; ++i) g_observers[w][i].store(nullptr);
-    g_findObserver.store(nullptr);
+    for (int i = 0; i < 2; ++i) {
+        g_skelIface[i].store(0);
+        g_skelIndex[i].store(0xFFFF);
+        g_skelCaptures[i].store(0);
+        g_findSite[i].store(0);
+    }
+    g_findPov.store(0);
+    g_findSeen.store(0);
+    g_findWant.store(0);
+    g_hideOn.store(false);
+    g_hideDown.store(false);
+    g_hideFaults.store(0);
+    g_partNames.store(0);
+    g_amcCalls.store(0);
+    g_amcLocalMatches.store(0);
+    g_amcIdOk.store(0);
+    g_amcMode3.store(0);
+    g_hideCalls.store(0);
+    g_hideZeroed.store(0);
+    g_amcLocal.store(0);
+    g_amcLocalPose.store(0);
+    g_amcCand.store(0);
+    g_amcCandPose.store(0);
+    g_busyAmc.store(false);
+    g_amcCensused = 0;
+    {
+        ecm::AmcCensus drop;
+        while (g_censusRing.take(&drop)) {}
+    }
     g_placedActivity.store(0);
     for (int i = 0; i < 2; ++i) {
         g_bypassed[i].store(0);

@@ -75,25 +75,23 @@ struct TimerStat {
 struct HeadCache {
     uint64_t iface = 0;
     uint16_t headIdx = f2::kNoJoint;
-};
-struct Skel {   // one attach site's capture
-    std::atomic<uint64_t> iface{0};
-    std::atomic<uint32_t> index{0xFFFF};
-    std::atomic<uint32_t> captures{0};
+    uint16_t footL = f2::kNoJoint, footR = f2::kNoJoint;   // H2's two feet (looked up once per interface)
 };
 std::atomic<bool> g_busyH{false};
 f2::HeadTargets g_head;                          // set at arm before the FindJoint observer is attached; read-only after
 std::atomic<uint32_t> g_headState{0};            // 0 not tried, 1 armed, 2 stood down
-std::atomic<uint64_t> g_headSteps{0}, g_headCalls{0}, g_headFaults{0}, g_findSeen{0};
+std::atomic<uint64_t> g_headSteps{0}, g_headCalls{0}, g_headFaults{0};
+std::atomic<bool> g_h2On{false};                 // H2 walks the animated pose too (the foot literals were verified); a part of H, it stands down with it
 std::atomic<uint64_t> g_headNextMs{0};           // GetTickCount64 at which the next evaluation may run
 std::atomic<const char*> g_headLast{"none"};
 f2::HeadDown g_headDown;                         // written once, before g_headDownSet is released
 std::atomic<uint32_t> g_headDownSet{0};
 std::atomic<uint32_t> g_headDownClaim{0};
 ecp::SeqSlot<f2::HeadSample> g_headSample;
-Skel g_skel[2];
 HeadCache g_headCache[2];                        // hook thread only (g_busyH)
-TimerStat g_t58, g_t48, g_tFind;
+TimerStat g_t58, g_t48, g_tFind, g_tWalk;
+float g_walkLocals[f2::kMaxWalkJoints * f2::kJointFloats];   // hook thread only (g_busyH): the pose arrays, copied
+uint16_t g_walkParents[f2::kMaxWalkJoints];
 uint32_t g_headIntervalMs = f2::kHeadIntervalMs;
 
 // The arm lines say what happened once per session.
@@ -265,6 +263,20 @@ __declspec(noinline) bool sehReadSlots(uintptr_t vtable, uint64_t* out) noexcept
         return false;
     }
 }
+// H2: copy the pose's local transforms and parents (P+0x48 and P+0x50 point at them) into our buffers.
+__declspec(noinline) bool sehReadPoseArrays(uintptr_t pose, uint32_t joints, float* locals, uint16_t* parents) noexcept {
+    __try {
+        uint64_t lp = 0, pp = 0;
+        std::memcpy(&lp, reinterpret_cast<const void*>(pose + f2::kPoseLocalsOff), 8);
+        std::memcpy(&pp, reinterpret_cast<const void*>(pose + f2::kPoseParentsOff), 8);
+        if (lp < 0x10000u || lp >= 0x00007FFF00000000ull || pp < 0x10000u || pp >= 0x00007FFF00000000ull) return false;
+        std::memcpy(locals, reinterpret_cast<const void*>(lp), static_cast<size_t>(joints) * f2::kJointBytes);
+        std::memcpy(parents, reinterpret_cast<const void*>(pp), static_cast<size_t>(joints) * 2u);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 using HeadPoseFn = void* (__fastcall*)(void* iface);
 using HeadFindFn = uint32_t (__fastcall*)(void* iface, const char* name);
 using HeadMatrixFn = void (__fastcall*)(void* iface, uint32_t index, float* out);
@@ -373,20 +385,44 @@ Verify headVerify(uint32_t site, uintptr_t iface, f2::HeadKind expect, uint64_t*
     return Verify::Ok;
 }
 bool headStale(uint32_t site, uint64_t iface, f2::HeadSlot& S) noexcept {
-    uint64_t expected = iface;
-    g_skel[site].iface.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    explorerCamSkeletonDrop(static_cast<int>(site), iface);
     g_headCache[site] = HeadCache();
     S.state = static_cast<uint8_t>(f2::HeadSlotState::Stale);
     return true;
+}
+
+// H2: the four joints (head, pov, feet) composed from the animated pose. No game call: the arrays are copied under SEH and walked here.
+void h2Walk(f2::HeadSlot& S, uintptr_t pose, uint16_t joints, const HeadCache& C) noexcept {
+    S.footL = C.footL;
+    S.footR = C.footR;
+    if (joints > f2::kMaxWalkJoints) {
+        S.h2State = 3;
+        return;
+    }
+    const uint64_t t0 = qpcNow();
+    if (!sehReadPoseArrays(pose, joints, g_walkLocals, g_walkParents)) {
+        S.h2State = 2;
+        return;
+    }
+    const uint16_t idx[4] = {C.headIdx, S.povIdx, C.footL, C.footR};
+    for (uint32_t j = 0; j < 4; ++j) {
+        uint32_t depth = 0;
+        if (idx[j] == f2::kNoJoint || !f2::walkJointToModel(g_walkLocals, g_walkParents, joints, idx[j], S.walked[j], &depth)) continue;
+        S.walkOk = static_cast<uint8_t>(S.walkOk | (1u << j));
+        S.depth[j] = static_cast<uint16_t>(depth);
+    }
+    S.h2State = 1;
+    noteTimer(g_tWalk, t0, qpcNow());
 }
 
 // One attach site: its capture, the interface's identity, the joint indexes and the four matrices. True while H goes on (a site with nothing
 // captured yet, or a stale capture, is not a failure).
 bool headSite(uint32_t site, f2::HeadSlot& S) noexcept {
     HeadCache& C = g_headCache[site];
-    S.captures = g_skel[site].captures.load(std::memory_order_relaxed);
-    const uint64_t iface = g_skel[site].iface.load(std::memory_order_acquire);
-    S.povIdx = static_cast<uint16_t>(g_skel[site].index.load(std::memory_order_relaxed) & 0xFFFFu);
+    const ExplorerCamSkeleton cap = explorerCamSkeleton(static_cast<int>(site));
+    S.captures = cap.captures;
+    const uint64_t iface = cap.iface;
+    S.povIdx = static_cast<uint16_t>(cap.index & 0xFFFFu);
     if (iface == 0) {
         S.state = static_cast<uint8_t>(f2::HeadSlotState::NotCaptured);
         C = HeadCache();
@@ -424,6 +460,21 @@ bool headSite(uint32_t site, f2::HeadSlot& S) noexcept {
         if (!ok) return headFault(f2::HeadStage::FindCall, site);
         C.iface = iface;
         C.headIdx = static_cast<uint16_t>(r & 0xFFFFu);
+        C.footL = C.footR = f2::kNoJoint;
+        if (g_h2On.load(std::memory_order_relaxed)) {
+            for (int foot = 0; foot < 2; ++foot) {
+                v = headVerify(site, static_cast<uintptr_t>(iface), kind, fn, &kind);
+                if (v == Verify::Down) return false;
+                if (v == Verify::Stale) return headStale(site, iface, S);
+                const uint64_t f1 = qpcNow();
+                g_headCalls.fetch_add(1, std::memory_order_relaxed);
+                uint32_t fr = f2::kNoJoint;
+                const bool fok = sehCallFind(static_cast<uintptr_t>(fn[1]), static_cast<uintptr_t>(iface), foot == 0 ? f2::kFootLName : f2::kFootRName, &fr);
+                noteTimer(g_tFind, f1, qpcNow());
+                if (!fok) return headFault(f2::HeadStage::FindCall, site);
+                (foot == 0 ? C.footL : C.footR) = static_cast<uint16_t>(fr & 0xFFFFu);
+            }
+        }
     }
     S.headIdx = C.headIdx;
     const uint16_t index[2] = {C.headIdx, S.povIdx};
@@ -452,6 +503,7 @@ bool headSite(uint32_t site, f2::HeadSlot& S) noexcept {
         std::memcpy(S.world[j], buf, 64);
         S.have = static_cast<uint8_t>(S.have | (4u << j));
     }
+    if (g_h2On.load(std::memory_order_relaxed)) h2Walk(S, pose, joints, C);
     return true;
 }
 
@@ -694,10 +746,16 @@ void explorerCamF2Arm(const ecm::Sink& sink) {
                 g_head = f2::headTargetsFromBase(base, size);
                 const bool headOk = sehBytesEqual(g_head.headName, reinterpret_cast<const uint8_t*>(f2::kHeadName), sizeof(f2::kHeadName));
                 const bool povOk = sehBytesEqual(g_head.povName, reinterpret_cast<const uint8_t*>(f2::kPovName), sizeof(f2::kPovName));
+                const bool footOk = sehBytesEqual(g_head.footLName, reinterpret_cast<const uint8_t*>(f2::kFootLName), sizeof(f2::kFootLName)) &&
+                                    sehBytesEqual(g_head.footRName, reinterpret_cast<const uint8_t*>(f2::kFootRName), sizeof(f2::kFootRName));
+                g_h2On.store(footOk, std::memory_order_relaxed);
+                if (!footOk) say(sink, "%s not run: the foot joint-name literals at EliteDangerous64.exe+0x%llX / +0x%llX are not \"%s\" / \"%s\"; H goes on without H2",
+                                 f2::prefixH2Note(), static_cast<unsigned long long>(f2::kFootLNameRva), static_cast<unsigned long long>(f2::kFootRNameRva),
+                                 f2::kFootLName, f2::kFootRName);
                 if (!headOk || !povOk) {
                     headStandDown(f2::HeadWhy::LiteralMismatch, 0, headOk ? 2 : 1, 0, 0, false);
                 } else {
-                    const ExplorerCamHookStatus fj = explorerCamObserveFind(&explorerCamF2FindJoint, true);
+                    const ExplorerCamHookStatus fj = explorerCamWantFindJoint(true);
                     if (fj.state != ExplorerCamHookStatus::Armed) {
                         headStandDown(f2::HeadWhy::FindHookDown, 0, 0, 0, 0, false, fj.why);
                     } else {
@@ -707,7 +765,8 @@ void explorerCamF2Arm(const ecm::Sink& sink) {
                                   "(an avatar attach before this is not seen); the original runs FIRST; a call returning to +0x%llX or +0x%llX (FUN 0x19B1240's two avatar "
                                   "attaches) with \"%s\" stores the interface (rcx) and the index. H reads those at most once a second on the camera-job thread; before "
                                   "EVERY call the vtable (RR +0x%llX or AO +0x%llX) and slots +0x18 +0x30 +0x48 +0x58 are checked; GetPoseData, FindJoint(\"%s\") once per "
-                                  "interface, +0x58 and +0x48 for both joints of BOTH sites; SEH throughout; nothing is written",
+                                  "interface, +0x58 and +0x48 for both joints of BOTH sites; H2 also walks the animated pose (P+0x48/+0x50) for head, pov and both feet; SEH throughout; "
+                                  "nothing is written",
                             f2::prefixHArmed(), static_cast<unsigned long long>(ecm::kFindJointRva), static_cast<unsigned long long>(fj.target), fj.stolen,
                             static_cast<unsigned long long>(fj.relay), static_cast<unsigned long long>(f2::kFindSite1Rva),
                             static_cast<unsigned long long>(f2::kFindSite2Rva), f2::kPovName, static_cast<unsigned long long>(f2::kRrVtableRva),
@@ -716,7 +775,7 @@ void explorerCamF2Arm(const ecm::Sink& sink) {
                 }
             }
         } else if (headState == 1) {
-            explorerCamObserveFind(&explorerCamF2FindJoint, true);   // the key was off and is on again: the hook is still in place, its gate was closed
+            explorerCamWantFindJoint(true);   // the key was off and is on again: the hook is still in place, its probe share of the gate was closed
         }
     }
 
@@ -762,7 +821,7 @@ void explorerCamF2Disarm() {
     if (!g_armed.exchange(false, std::memory_order_acq_rel)) return;
     explorerCamObserve(ExplorerCamHook::Controller, &explorerCamF2Controller, false);
     explorerCamObserve(ExplorerCamHook::AvatarFade, &explorerCamF2Fade, false);
-    explorerCamObserveFind(&explorerCamF2FindJoint, false);
+    explorerCamWantFindJoint(false);
     g_f2.started = false;
 }
 
@@ -813,15 +872,6 @@ void explorerCamF2FreeCamera(void* activity) noexcept {
     g_busy3.store(false, std::memory_order_release);
     // H: after the try-flag is given back, so the lock-taking calls never keep the other instruments out.
     headMaybeStep(a, activity);
-}
-
-void explorerCamF2FindJoint(void* iface, const void* name, uint64_t result, uintptr_t returnAddress) noexcept {
-    g_findSeen.fetch_add(1, std::memory_order_relaxed);
-    const int site = f2::headCaptureSite(returnAddress, reinterpret_cast<uintptr_t>(name), g_head);
-    if (site < 0) return;
-    g_skel[site].index.store(static_cast<uint32_t>(result & 0xFFFFu), std::memory_order_relaxed);
-    g_skel[site].iface.store(reinterpret_cast<uint64_t>(iface), std::memory_order_release);
-    g_skel[site].captures.fetch_add(1, std::memory_order_relaxed);
 }
 
 void explorerCamF2Fade(void* component) noexcept {
@@ -1028,6 +1078,10 @@ void explorerCamF2Tick(uint32_t frame, uint64_t nowMs, const ecm::Sink& sink) {
                         f2::formatHeadJoints(line, sizeof(line), hs, i, cf);
                         sink(line);
                     }
+                    if (hs.slot[i].state == static_cast<uint8_t>(f2::HeadSlotState::Resolved) && hs.slot[i].h2State != 0) {
+                        f2::formatH2Joints(line, sizeof(line), hs, i);
+                        sink(line);
+                    }
                 }
             }
         }
@@ -1104,12 +1158,13 @@ void explorerCamF2Tick(uint32_t frame, uint64_t nowMs, const ecm::Sink& sink) {
         fs.beatHeadCalls = hh.calls;
         hh.faults = g_headFaults.load(std::memory_order_relaxed);
         hh.last = g_headLast.load(std::memory_order_relaxed);
-        hh.captures[0] = g_skel[0].captures.load(std::memory_order_relaxed);
-        hh.captures[1] = g_skel[1].captures.load(std::memory_order_relaxed);
-        hh.findSeen = g_findSeen.load(std::memory_order_relaxed);
+        hh.captures[0] = explorerCamSkeleton(0).captures;
+        hh.captures[1] = explorerCamSkeleton(1).captures;
+        hh.findSeen = explorerCamFindJointSeen();
         hh.m58 = drainTimer(g_t58);
         hh.m48 = drainTimer(g_t48);
         hh.find = drainTimer(g_tFind);
+        hh.walk = drainTimer(g_tWalk);
         f2::formatHeadHeartbeat(line, sizeof(line), hh);
         sink(line);
         fs.beatNeckCalls = hn.calls;
@@ -1127,10 +1182,10 @@ uint64_t headSteps() { return g_headSteps.load(); }
 uint64_t headCalls() { return g_headCalls.load(); }
 uint64_t headFaults() { return g_headFaults.load(); }
 uint32_t headState() { return g_headState.load(); }
-uint64_t findSeen() { return g_findSeen.load(); }
-uint32_t captureCount(int site) { return g_skel[site].captures.load(); }
-uint64_t capturedInterface(int site) { return g_skel[site].iface.load(); }
-uint32_t capturedIndex(int site) { return g_skel[site].index.load(); }
+uint64_t findSeen() { return explorerCamFindJointSeen(); }
+uint32_t captureCount(int site) { return explorerCamSkeleton(site).captures; }
+uint64_t capturedInterface(int site) { return explorerCamSkeleton(site).iface; }
+uint32_t capturedIndex(int site) { return explorerCamSkeleton(site).index; }
 uint64_t fadeCalls() { return g_fadeCalls.load(); }
 uint64_t fadeEnabledCalls() { return g_fadeEnabledCalls.load(); }
 uint64_t fadeEnabledWhileZero() { return g_fadeEnabledWhileZero.load(); }
@@ -1209,13 +1264,8 @@ void reset() {
     g_headSample.clear();
     g_headCache[0] = HeadCache();
     g_headCache[1] = HeadCache();
-    g_findSeen.store(0);
-    for (Skel& k : g_skel) {
-        k.iface.store(0);
-        k.index.store(0xFFFFu);
-        k.captures.store(0);
-    }
-    for (TimerStat* t : {&g_t58, &g_t48, &g_tFind}) {
+    g_h2On.store(false);
+    for (TimerStat* t : {&g_t58, &g_t48, &g_tFind, &g_tWalk}) {
         t->n.store(0);
         t->minUs.store(0xFFFFFFFFu);
         t->maxUs.store(0);

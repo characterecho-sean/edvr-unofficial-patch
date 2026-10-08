@@ -1301,6 +1301,13 @@ struct HeartbeatIn {
     uint64_t boxForwarded = 0, boxForwardedWindow = 0;
     uint64_t hookCalls = 0, hookCallsWindow = 0;
     uint64_t ctlCalls = 0, ctlCallsWindow = 0;
+    // Phase 2: hiding the head parts.
+    const char* hide = "off";         // "on" | "off" | "stood down"
+    uint64_t localAmc = 0;
+    uint64_t amcCalls = 0, amcMatches = 0;
+    uint64_t hideCalls = 0, hideCallsWindow = 0;
+    uint64_t zeroed = 0, zeroedWindow = 0;
+    uint32_t hideFaults = 0;
     uint32_t ctlMode = 0;
     bool session = false;
     bool fadeOurs = false;            // EDVR holds the dither-fade global at 0
@@ -1315,7 +1322,8 @@ inline void formatHeartbeat(char* out, size_t cap, const HeartbeatIn& h) {
     o.put("%s heartbeat: phase=%s session=%s act=0x%llX +0x48C=%u window=%.1fs updates_placed=%llu(+%llu) collision_bypassed=%llu(+%llu) "
           "collision_forwarded=%llu(+%llu) box_bypassed=%llu(+%llu) box_forwarded=%llu(+%llu) hook_calls=%llu(+%llu) "
           "controller_calls=%llu(+%llu) controller_mode=%u fade_global_held_by_edvr=%s ui_hidden_by_edvr=%s ui_calls=%llu faults=%u waiting_updates=%llu contended=%llu "
-          "foreign=%llu events_lost=%llu eye(up=%.3f forward=%.3f right=%.3f)",
+          "foreign=%llu events_lost=%llu eye(up=%.3f forward=%.3f right=%.3f) head_hide=%s local_amc=0x%llX amc_calls=%llu local_matches=%llu "
+          "hide_calls=%llu(+%llu) masks_zeroed=%llu(+%llu) hide_faults=%u",
           prefix(), h.phase, h.session ? "on" : "off", static_cast<unsigned long long>(h.activity), h.state, h.windowSeconds,
           static_cast<unsigned long long>(h.updates), static_cast<unsigned long long>(h.updatesWindow),
           static_cast<unsigned long long>(h.bypassed), static_cast<unsigned long long>(h.bypassedWindow),
@@ -1326,7 +1334,128 @@ inline void formatHeartbeat(char* out, size_t cap, const HeartbeatIn& h) {
           static_cast<unsigned long long>(h.ctlCalls), static_cast<unsigned long long>(h.ctlCallsWindow), h.ctlMode,
           h.fadeOurs ? "yes" : "no", h.uiHiddenByUs ? "yes" : "no", static_cast<unsigned long long>(h.uiCalls), h.faults,
           static_cast<unsigned long long>(h.waiting), static_cast<unsigned long long>(h.contended),
-          static_cast<unsigned long long>(h.foreign), static_cast<unsigned long long>(h.lost), h.eye.up, h.eye.forward, h.eye.right);
+          static_cast<unsigned long long>(h.foreign), static_cast<unsigned long long>(h.lost), h.eye.up, h.eye.forward, h.eye.right, h.hide,
+          static_cast<unsigned long long>(h.localAmc), static_cast<unsigned long long>(h.amcCalls), static_cast<unsigned long long>(h.amcMatches),
+          static_cast<unsigned long long>(h.hideCalls), static_cast<unsigned long long>(h.hideCallsWindow), static_cast<unsigned long long>(h.zeroed),
+          static_cast<unsigned long long>(h.zeroedWindow), h.hideFaults);
+}
+
+// ---- Phase 2: hiding the head parts of the local third-person avatar ----------------------------------------------------------------
+// The avatar (AvatarModelComponent, "AMC") keeps 54 parts at AMC+0x11B0, 0x680 bytes each (the part enum is the index; the names are the table at
+// +0x5E9C7D0). A part has up to four instances (variants k = 0..3 at entry+0x10+8k) and, per instance, a VIEW MASK qword at entry+0x5F0+8k that the game's
+// visibility job zeroes and ORs every frame and the submit job (the one that calls the dither fade, 0x3DD6040, at 0x3DA1E3B) reads right after the fade:
+// an instance whose mask is zero is skipped (cmp qword ptr [r14],0 at 0x3DA20DE). So a zero written after the fade returns removes the instance from every
+// view for that frame, race-free (the same thread), and nothing is restored: the game rewrites the masks next frame. (NOTES_p2.txt.)
+constexpr uintptr_t kPartNameTableRva = 0x5E9C7D0;
+constexpr uint32_t kPartCount = 54;
+constexpr uint32_t kPartStride = 0x680, kPartVariants = 4;
+constexpr uint32_t kOffAmcInstances = 0x11C0;      // AMC + this + idx*stride + 8k: instance k of part idx (0 = none)
+constexpr uint32_t kOffAmcMasks = 0x17A0;          // ...the view mask of instance k
+constexpr uint32_t kOffAmcPartFlags = 0x1814;      // a byte: 0x10 = the part is EXCLUDED, |5 set when built
+constexpr uint32_t kOffAmcPartPending = 0x1818;    // an int32: the pending item (-1 once consumed)
+constexpr uint32_t kOffAmcPartCurrent = 0x181C;    // an int32: the current item
+constexpr uint32_t kOffAmcPartState = 0x1820;      // an int32: 0 never visible, 1 visible, 2 shadow-ish views only, 3 main views only
+constexpr uint32_t kOffAmcAvatarPoseId = 0x260, kOffAmcAvatarPose = 0x268;   // the AvatarPose handle slot: id dword (-1 once resolved) and the resolved pointer
+constexpr uint32_t kOffAmcParams = 0x50, kOffParamsMode = 0x14;              // AMC+0x50 -> creation params; +0x14 = 3 for the third-person view
+constexpr uint32_t kOffAmcViewFilter = 0x2A8, kOffAmcAlpha = 0x314, kOffAmcContext = 0x334, kOffAmcFlagBytes = 0x320;
+constexpr uint32_t kAvatarPoseToSkeleton = 0x30;   // RuntimeRigComponent exports the skeleton interface at RR+0xB8 and AvatarPose at RR+0xE8
+constexpr uint32_t kAmcBytes = 0x1D100;            // the highest byte read: the last mask qword of part 53, +0x1D040
+constexpr uint32_t kHeadPartCount = 12;
+constexpr uint32_t kHeadParts[kHeadPartCount] = {0, 2, 3, 4, 5, 12, 13, 15, 20, 25, 26, 32};   // Head Eyes Helmet SkullCap Hair Beard Teeth Hat EyeWear EVASuit_Helmet EVASuit_Eyewear EVASuit_Gear_Head
+constexpr uint32_t kMaxHideFaults = 3;             // guarded accesses of the AMC that may fault before head hiding stands down for the session
+constexpr uint64_t kAmcNoMatchCalls = 300;         // fade calls without one matching AMC before the log says nothing is being hidden
+inline constexpr const char* kPartNames[kPartCount] = {
+    "Head", "Body", "Eyes", "Helmet", "SkullCap", "Hair", "BodyAccessory_01", "BodyAccessory_02", "BodyAccessory_03", "BodyAccessory_04", "BodyAccessory_05",
+    "PortraitBackground", "Beard", "Teeth", "ShoulderPads", "Hat", "FlightSuit_Legs", "FlightSuit_Torso", "OuterClothing_Legs", "OuterClothing_Torso", "EyeWear",
+    "FlightSuit_Arms", "FlightSuit_Hands", "OuterClothing_Arms", "EVASuit", "EVASuit_Helmet", "EVASuit_Eyewear", "EVASuit_Torso", "EVASuit_Arms", "EVASuit_Hands",
+    "EVASuit_Legs", "EVASuit_Feet", "EVASuit_Gear_Head", "EVASuit_Gear_Neck", "EVASuit_Gear_Shoulders", "EVASuit_Gear_UpperArms", "EVASuit_Gear_UpperArmL",
+    "EVASuit_Gear_UpperArmR", "EVASuit_Gear_LowerArms", "EVASuit_Gear_LowerArmL", "EVASuit_Gear_LowerArmR", "EVASuit_Gear_Chest", "EVASuit_Gear_Waist",
+    "EVASuit_Gear_Thighs", "EVASuit_Gear_Knees", "EVASuit_Gear_KneeL", "EVASuit_Gear_KneeR", "EVASuit_Gear_Feet", "EVASuit_Gear_Back", "FirstPersonSkeleton",
+    "Shoulder_Left", "Shoulder_Right", "EVASuit_Gear_Arms", "EVASuit_Gear_Legs"};
+inline bool isHeadPart(uint32_t idx) {
+    for (uint32_t h : kHeadParts)
+        if (h == idx) return true;
+    return false;
+}
+// The local third-person avatar: its AvatarPose handle is resolved (the id dword reads 0xFFFFFFFF), the resolved pointer minus 0x30 is the skeleton
+// interface the game called FindJoint on for the local player's third-person body (site 1), and its creation parameters say third person (mode 3).
+inline bool isLocalAmc(uint32_t avatarPoseId, uint64_t avatarPose, uint64_t skeleton, int32_t mode) {
+    return avatarPoseId == 0xFFFFFFFFu && skeleton != 0 && avatarPose >= kAvatarPoseToSkeleton && avatarPose - kAvatarPoseToSkeleton == skeleton && mode == 3;
+}
+// Which FindJoint call is an avatar attach: the caller is one of the two attach sites AND the name is the povCamera literal. Trivial on purpose: the hook sees
+// every FindJoint call of every system. 0 = site 1, 1 = site 2, -1 = neither.
+constexpr uintptr_t kFindSite1Rva = 0x19B12D5, kFindSite2Rva = 0x19B1359, kPovNameRva = 0x51F9930;
+inline int findCaptureSite(uintptr_t returnAddress, uintptr_t name, uintptr_t site1, uintptr_t site2, uintptr_t povName) {
+    if (povName == 0 || name != povName) return -1;
+    if (returnAddress == site1) return 0;
+    if (returnAddress == site2) return 1;
+    return -1;
+}
+
+// What a local AMC holds, taken once when it is first seen: which parts have instances, which variants, their state and flags.
+struct PartCensus {
+    uint8_t idx = 0;
+    uint8_t variants = 0;    // bit k: instance k exists
+    uint8_t maskBits = 0;    // bit k: instance k's view mask is non-zero right now
+    uint8_t flags = 0;       // the part's flag byte (0x10 = excluded)
+    int32_t state = 0;
+    int32_t pending = 0;
+    int32_t current = 0;
+};
+struct AmcCensus {
+    uint64_t amc = 0;
+    uint64_t avatarPose = 0;
+    uint64_t skeleton = 0;
+    int32_t mode = 0;
+    int32_t viewFilter = 0;
+    float alpha = 0;
+    uint32_t context = 0;
+    uint8_t flagBytes[4] = {};
+    uint32_t count = 0;
+    PartCensus part[kPartCount];
+};
+static_assert(std::is_trivially_copyable<AmcCensus>::value, "the census is copied through a ring");
+inline const char* prefixHide() { return "explorer cam head hide:"; }
+inline void putVariants(Line& o, uint8_t bits) {
+    for (uint32_t k = 0; k < kPartVariants; ++k)
+        if (bits & (1u << k)) o.put("%u", k);
+}
+// The census as log lines: a header, then the parts, as many to a line as fit under the log's line length.
+inline void formatAmcCensus(const AmcCensus& c, const Sink& sink) {
+    char line[kLineBytes];
+    {
+        Line o(line, sizeof(line));
+        o.put("%s census of the local third-person avatar AMC 0x%llX (mode %d, AvatarPose 0x%llX minus 0x30 = skeleton 0x%llX): %u of %u parts have instances; "
+              "view_filter(+0x2A8)=%d alpha(+0x314)=%.3f context(+0x334)=%u flag_bytes(+0x320..323)=%02X %02X %02X %02X. Per part: idx name variants(k) state "
+              "flags pending/current item; HIDE = in the head set, its masks are zeroed while placed; m = view mask non-zero now",
+              prefixHide(), static_cast<unsigned long long>(c.amc), c.mode, static_cast<unsigned long long>(c.avatarPose),
+              static_cast<unsigned long long>(c.skeleton), c.count, kPartCount, c.viewFilter, static_cast<double>(c.alpha), c.context, c.flagBytes[0],
+              c.flagBytes[1], c.flagBytes[2], c.flagBytes[3]);
+        sink(line);
+    }
+    Line o(line, sizeof(line));
+    bool open = false;
+    for (uint32_t i = 0; i < c.count && i < kPartCount; ++i) {
+        const PartCensus& p = c.part[i];
+        char item[200];
+        Line it(item, sizeof(item));
+        it.put("[%u %s v=", p.idx, p.idx < kPartCount ? kPartNames[p.idx] : "?");
+        putVariants(it, p.variants);
+        it.put(" st=%d fl=0x%02X item=%d/%d m=", p.state, p.flags, p.pending, p.current);
+        putVariants(it, p.maskBits);
+        it.put("%s%s]", p.idx < kPartCount && isHeadPart(p.idx) ? " HIDE" : "", (p.flags & 0x10) != 0 ? " EXCLUDED" : "");
+        if (open && o.n + std::strlen(item) + 2 > 900) {
+            sink(line);
+            o = Line(line, sizeof(line));
+            open = false;
+        }
+        if (!open) {
+            o.put("%s census parts:", prefixHide());
+            open = true;
+        }
+        o.put(" %s", item);
+    }
+    if (open) sink(line);
 }
 
 // ---- the relays' machine code ------------------------------------------------------------------------------------------------

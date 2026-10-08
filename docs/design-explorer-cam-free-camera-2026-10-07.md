@@ -2,11 +2,11 @@
 
 ## Status
 
-- **State: F0-F4 FLOWN (2026-10-07/08).** F4: F5 accepted after 4 presses,
-  the fade global was written and the dither read 0, and the body shows.
-  H's HUM route was wrong (it stood down at its first step); route B (a
-  FindJoint hook) is BUILT, not flown. Keys: `[hotkey] explorer_cam = F5`
-  (the only way in), `fix.explorer_cam`, and the eye keys (temporary).
+- **State: F0-F5 FLOWN (2026-10-07/08).** F5 enters and places, the body
+  shows, the FindJoint capture works (site 1 = the third-person body), but
+  the cached joints did not follow a crouch. BUILT, not flown: Phase 2 head
+  hiding (no new key) and H2 (joints walked from the animated pose). Keys:
+  `hotkey.explorer_cam`, `fix.explorer_cam`, the eye keys (temporary).
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
   old Explorer Cam route entirely; deleting the old route is authorized.
@@ -21,8 +21,7 @@
     turns of up to 166 degrees.
   - H2 **READ + FLOWN:** the state is the activity (rcx at 0x1071980):
     world +0x70, local +0x3B0, flags +0x470/1/3, state +0x48C.
-  - H3 open, flight F1: a write before the update is upstream of the camera
-    and culling view by ordering (stack not traced to 0x5921F0).
+  - H3 **FLOWN F1:** a write before the update reaches the camera and view.
   - H4 no head flag found (about 25% one exists); the game swaps whole-body
     avatars (0x2A96740). Head hiding stays EDVR's draw skip.
   - H5 inferred not replicated (about 65%): write the activity, never the
@@ -44,15 +43,17 @@
   - I2's 5376-block fingerprint as the commander's position, because in F0
     its translation tracked the free camera's own origin within 0.01-0.09
     m; the commander's frame comes from I3 (world with local taken out).
+  - The cached +0x58 head or pov joint as the stance signal, because a 5 s
+    crouch in F5 moved neither (1.64-1.685, 1.69-1.73); +0x48 drifted 12 m.
 - **Set aside, not flown:** writing the origin inside the refresh detour at
   `+0x592200`; the culling view is built upstream of it
   (design-occlusion-culling-2026-09-22.md), and 6s.9 saw holes from that.
-- **Flown** on Frontier: F0 172543, F1 194702, F2 211908, F3 (94c467d3), F4
-  (20764688); findings below.
-- **Next:** flight F5 with the probe key on at LAUNCH: `H slot:` for both
-  sites, then `H joints:` standing, crouched, weapon drawn, holstered (the
-  site whose head moves with stance is the third-person avatar), and the
-  H heartbeat's captures (does the attach run per frame?) and +0x58 us.
+- **Flown** on Frontier: F0 172543, F1 194702, F2 211908, F3 94c467d3, F4
+  20764688, F5 60dd0eb2; findings below.
+- **Next:** flight F6, probe key on at launch: `explorer cam head hide:`
+  (the census names the helmet part; the relation line; masks zeroed in the
+  heartbeat) looking down at the body, then `H2 joints:` standing and
+  crouched. Placement from the walked head follows.
 - **Temporary keys:** `[advanced] explorer_cam_probe` (the instruments;
   removed at arc close). `[fix] explorer_cam_eye_up/_forward/_right`: they
   stand in for the head bone; Sean tunes the bone-to-eye offset once, it
@@ -739,3 +740,24 @@ original first, then stores rcx and the returned index when the return address i
 probe hooks at the first frame boundary with the key on, so the key must be on at launch. H reads the captured interfaces as before, with the same
 per-call checks; a stale capture is dropped, not fatal. `H hum:` keeps the old pointer's findings for a static pass; the heartbeat counts
 captures per site and says `no avatar attach seen since launch` when there are none.
+
+F5 (60dd0eb2): route B worked. Site 1 (+0x19B12D5) is RR, 184 joints, head index 41, pov index 15: the third-person body. Site 2 is RR, 91 joints, no
+head: the first-person arms. The attach runs every frame and the calls cost under 1 us. A 5 s crouch in place moved neither the cached +0x58 head
+(1.64-1.685) nor the pov joint (1.69-1.73), and +0x48 drifted 12 m with the body still, so it is not the free camera's frame. The cache is kept only for
+joints the game asked for; the animated pose itself should hold the crouch.
+
+## 2026-10-08 Phase 2: hide the head parts; H2
+
+Built and gated, not flown. HEAD HIDING (no new key; active with `fix.explorer_cam`): while a placement stands, the 0x3DD6040 hook's post-call zeroes the
+four view masks (AMC+0x17A0+idx*0x680+8k) of Head, Eyes, Helmet, SkullCap, Hair, Beard, Teeth, Hat, EyeWear, EVASuit_Helmet, EVASuit_Eyewear and
+EVASuit_Gear_Head of the LOCAL third-person AMC. The submit job skips an instance whose mask is zero (0x3DA20DE) and the game rewrites the masks every
+frame, so nothing is restored. Local AMC: id dword +0x260 reads -1, +0x268 minus 0x30 is the skeleton FindJoint saw at site 1, creation mode (+0x50 ->
++0x14) is 3; one line says the relation held, or that none matched in 300 calls and nothing is hidden. The fade and FindJoint hooks now install whenever
+Explorer Cam is on (at launch); the name table at 0x5E9C7D0 is checked against the 54 names first; three faults in the AMC stand head hiding down, not
+placement. `explorer cam head hide:` carries the once-per-AMC census (parts, variants, state, flags: which of 3, 24, 25 holds the helmet); the heartbeat
+has `head_hide`, `hide_calls`, `masks_zeroed`.
+
+H2 (probe only, 1 Hz, camera-job thread): head, pov and both feet walked from the animated pose, with no game call beyond GetPoseData and FindJoint
+(the two feet, once per interface). P+0 joint count; *(P+0x48) the local transforms, 32 bytes (position xyzw, quaternion xyzw); *(P+0x50) the u16
+parents; p = p x R(q) + pos for each ancestor, R as DirectXMath's row-vector layout. Read off FUN 0xFDE0D0 and its constants evaluated against the exe:
+3e-8 from that layout, 1.97 from its transpose. `H2 joints:` prints walked beside cached, head_y-foot_y and pov_y-foot_y.
