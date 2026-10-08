@@ -51,9 +51,12 @@
 - **F0 FLOWN** on Frontier, 2d103d84, `edvr_gfx_20261007_172543.log`,
   training scenario; findings at the end. Frontier's ini: probe off again,
   `head_offset_gate = 0`.
-- **Next:** F1 on Frontier (install, grep `explorer cam:`; checks H3: no
-  holes, no body culling, no pop at entry, walking and turning, HMD pose not
-  doubled), tune the eye keys, then Phase 2 (hide the head).
+- **Next: F1 on Frontier.** db609243 is installed and verified there
+  (2026-10-07 19:30). The live ini has `explorer_cam = on`, the eye keys at
+  their defaults, and the probe on. F1 checks H3 (no holes, no body
+  culling), the pop at entry, the lock press, walking and turning, and that
+  the HMD pose is not doubled. Grep `explorer cam:`. Then tune the eye keys
+  and start Phase 2 (hide the head).
 - **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off;
   all three 0b instruments plus the VR camera census). Removed at arc close.
 
