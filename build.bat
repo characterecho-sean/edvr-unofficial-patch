@@ -527,7 +527,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
     "src\d3d11\pose_reader_watch.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
-    "src\d3d11\explorer_cam_probe.cpp" ^
+    "src\d3d11\explorer_cam.cpp" "src\d3d11\explorer_cam_probe.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" "src\d3d11\head_offset_gate.cpp" ^
     "src\d3d11\vr_runtime.cpp" ^
@@ -2835,15 +2835,42 @@ REM the yaw and pitch decode of known rotations, the camera tally, every log lin
 REM clock. Part B compiles the REAL glue (explorer_cam_probe.cpp, EDVR_EXPLORER_CAM_PROBE_TEST) with the real CodeHook and installs
 REM it on a synthetic function that begins with the real 28-byte prologue: 5 stolen bytes, the original runs first, the return value
 REM and the game's memory are untouched, a wrong prologue stands down without a patch, key off installs nothing and closes the gate.
+REM The free-camera hook itself is explorer_cam.cpp's (Explorer Cam's placement shares it; the probe attaches an observer), so this
+REM rig compiles that file too, with EDVR_EXPLORER_CAM_TEST, and the probe's seam installs the synthetic function through it.
 if not exist "%OBJ%\explorercamprobe" mkdir "%OBJ%\explorercamprobe"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_EXPLORER_CAM_PROBE_TEST /I"%GEN%" ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_EXPLORER_CAM_PROBE_TEST /DEDVR_EXPLORER_CAM_TEST /I"%GEN%" ^
     /Fo"%OBJ%\explorercamprobe"\ /Fe"%BUILD%\explorer_cam_probe_test.exe" ^
-    "tools\explorer_cam_probe_test\explorer_cam_probe_test.cpp" "src\d3d11\explorer_cam_probe.cpp" ^
+    "tools\explorer_cam_probe_test\explorer_cam_probe_test.cpp" "src\d3d11\explorer_cam_probe.cpp" "src\d3d11\explorer_cam.cpp" ^
     "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edvr] ERROR: explorer cam probe test build failed & exit /b 1 )
 "%BUILD%\explorer_cam_probe_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_explorer_cam_test
+echo [edvr] === explorer_cam_test.exe ===
+REM Build gate for Explorer Cam (fix.explorer_cam; docs\design-explorer-cam-free-camera-2026-10-07.md, "Phase 1a: placement built").
+REM Part A drives src\d3d11\explorer_cam_core.h, the pure half the DLL compiles: the build-332841 identity and CodeHook's reading of both
+REM prologues (the collision step's begins with a REX push), the eye keys' clamp, the exact 16 floats written into the free camera's
+REM commander-local pose, the per-activity state machine on scripted state sequences (entry, the pending first update, the lock pressed
+REM once, the user's own unlock, the world lock, a fresh session, a second activity, the key off, a fault), the stale watch, the event
+REM ring, every log line's text and the relays' machine code. Part B compiles the REAL glue (explorer_cam.cpp, EDVR_EXPLORER_CAM_TEST) with
+REM the real CodeHook and installs both hooks on synthetic functions that begin with the real 28- and 26-byte prologues: the pose is
+REM written before the original and visible to it, the lock's pressed-int is 1 for exactly one call and restored after it, the collision
+REM relay answers 0 without running the function for the placed activity only and hands every other call, with its fifth stack
+REM argument, to the original, a wrong prologue stands down with one line and no patch, the live eye keys reach the next update, a silent
+REM activity is released after 30 frames, the key off releases, faults are counted and the eighth ends the feature, and the keys are
+REM read from the config under their real names.
+if not exist "%OBJ%\explorercam" mkdir "%OBJ%\explorercam"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_EXPLORER_CAM_TEST /I"%GEN%" ^
+    /Fo"%OBJ%\explorercam"\ /Fe"%BUILD%\explorer_cam_test.exe" ^
+    "tools\explorer_cam_test\explorer_cam_test.cpp" "src\d3d11\explorer_cam.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: explorer cam test build failed & exit /b 1 )
+"%BUILD%\explorer_cam_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_scheduler_stack_json_test

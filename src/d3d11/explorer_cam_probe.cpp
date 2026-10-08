@@ -1,15 +1,16 @@
 // advanced.explorer_cam_probe: the glue (explorer_cam_probe.h says what it is; explorer_cam_probe_core.h holds every decision
 // and the text of every line, driven by tools\explorer_cam_probe_test).
 //
-// THREADS. The I3 hook runs on whichever thread the game's job system calls FreeCameraActivity's update from: it takes no lock,
-// allocates nothing, writes no log line and calls nothing of the game's. It publishes through a seqlock and a small event ring
-// (both in the core). I2's tee runs on whichever thread unmaps a 5376-byte scene block (a try-lock, never a wait). I1's tally
-// runs on the render thread inside the census's observer. The consumer (explorerCamProbeFrameBoundary) is the render thread's
-// Present boundary and is the only code that logs.
+// THREADS. The I3 observer runs on whichever thread the game's job system calls FreeCameraActivity's update from, after the original
+// has returned: it takes no lock, allocates nothing, writes no log line and calls nothing of the game's. It publishes through a
+// seqlock and a small event ring (both in the core). The hook itself is explorer_cam.cpp's (one target gets one CodeHook, and
+// Explorer Cam's placement runs in the same hook); the probe attaches its observer to it. I2's tee runs on whichever thread unmaps
+// a 5376-byte scene block (a try-lock, never a wait). I1's tally runs on the render thread inside the census's observer. The
+// consumer (explorerCamProbeFrameBoundary) is the render thread's Present boundary and is the only code that logs.
 //
-// KEY OFF. explorerCamProbeFrameBoundary reads the key, finds it off, says so once and returns: no hook is installed, the
-// census's note pointer stays null, the tee flag stays false and nothing is allocated. Turning the key off while it runs closes
-// the relay's gate (the game's call runs straight through to the original) and detaches I1 and I2.
+// KEY OFF. explorerCamProbeFrameBoundary reads the key, finds it off, says so once and returns: the probe asks for no hook, the
+// census's note pointer stays null, the tee flag stays false and nothing is allocated. Turning the key off while it runs detaches
+// the observer (the hook stays in place; its relay gate closes unless Explorer Cam placement is using it) and detaches I1 and I2.
 #include "explorer_cam_probe.h"
 #include "explorer_cam_probe_core.h"
 
@@ -19,9 +20,9 @@
 #include <cstdio>
 #include <cstring>
 
-#include "../common/code_hook.h"
 #include "../common/config.h"
 #include "../common/log.h"
+#include "explorer_cam.h"
 #include "flat_camera_inject.h"
 #include "vr_camera_census.h"
 
@@ -40,10 +41,6 @@ bool g_announced = false;          // the armed lines are printed once per sessi
 enum class I3State { NotTried, Armed, StoodDown };
 I3State g_i3 = I3State::NotTried;
 
-#ifdef EDVR_EXPLORER_CAM_PROBE_TEST
-uintptr_t g_testTarget = 0;        // the rig's synthetic function, installed in place of the game's
-#endif
-
 // ---- guarded reads of the game's memory (nothing with a destructor lives in a function that has a __try) --------------
 __declspec(noinline) bool sehCopyRaw(const uint8_t* a, ecp::Raw* out) noexcept {
     __try {
@@ -59,110 +56,9 @@ __declspec(noinline) bool sehCopyRaw(const uint8_t* a, ecp::Raw* out) noexcept {
         return false;
     }
 }
-__declspec(noinline) bool sehCheckBytes(uintptr_t address, const uint8_t* expected, size_t n) noexcept {
-    __try {
-        return std::memcmp(reinterpret_cast<const void*>(address), expected, n) == 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-// PE TimeDateStamp + SizeOfImage (base+0x3C -> e_lfanew, +8 and +0x50), the pair every build-keyed hook here checks.
-__declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexcept {
-    __try {
-        uint32_t peOff = 0;
-        std::memcpy(&peOff, reinterpret_cast<const void*>(base + 0x3C), 4);
-        if (peOff > 0x1000) { *why = "the PE header offset is implausible"; return false; }
-        uint32_t timestamp = 0, imageSize = 0;
-        std::memcpy(&timestamp, reinterpret_cast<const void*>(base + peOff + 8), 4);
-        std::memcpy(&imageSize, reinterpret_cast<const void*>(base + peOff + 0x50), 4);
-        if (timestamp != ecp::kExpectedTimestamp || imageSize != ecp::kExpectedImageSize) {
-            *why = "the PE timestamp or image size is not build 332841's";
-            return false;
-        }
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        *why = "a read faulted while checking the PE header";
-        return false;
-    }
-}
-
-// ---- the relay: this DLL loads more than two gigabytes from the game, so a five-byte E9 cannot reach the replacement ----
-// Copied from pose_reader_watch.cpp / object_record_writer_hook.cpp (grep kRelayBytes for the copies; if one changes, look at
-// the others). mov rax,&gate; cmp qword ptr [rax],0; je original; jmp [callback]; original: jmp [trampoline]. RAX and the
-// flags are volatile and the observed function does not read RAX on entry.
-constexpr size_t kRelayBytes = 44, kOriginalLiteral = 36;
-
-uint8_t* allocateRelay(uintptr_t target) noexcept {
-    SYSTEM_INFO info{}; GetSystemInfo(&info);
-    const uintptr_t granularity = info.dwAllocationGranularity;
-    const uintptr_t floor = reinterpret_cast<uintptr_t>(info.lpMinimumApplicationAddress);
-    const uintptr_t ceiling = reinterpret_cast<uintptr_t>(info.lpMaximumApplicationAddress);
-    const uintptr_t distance = uintptr_t(INT32_MAX) - 0x10000u;
-    uintptr_t at = target > distance ? target - distance : floor;
-    if (at < floor) at = floor;
-    const uintptr_t limit = target > ceiling - distance ? ceiling : target + distance;
-    while (at < limit) {
-        MEMORY_BASIC_INFORMATION region{};
-        if (!VirtualQuery(reinterpret_cast<void*>(at), &region, sizeof(region))) break;
-        const uintptr_t start = reinterpret_cast<uintptr_t>(region.BaseAddress);
-        if (region.RegionSize > UINTPTR_MAX - start) break;
-        const uintptr_t end = start + region.RegionSize;
-        if (region.State == MEM_FREE) {
-            uintptr_t candidate = at > start ? at : start;
-            if (candidate > UINTPTR_MAX - (granularity - 1)) break;
-            candidate = (candidate + granularity - 1) & ~(granularity - 1);
-            if (candidate < limit && candidate < end && end - candidate >= 4096) {
-                auto* p = static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(candidate), 4096,
-                                                             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-                if (p) return p;
-            }
-        }
-        if (end <= at) break;
-        at = end;
-    }
-    return nullptr;
-}
-
-void buildRelay(uint8_t* code, const void* gate, void* callback) noexcept {
-    const uint8_t body[kRelayBytes] = {
-        0x48,0xB8,0,0,0,0,0,0,0,0, 0x48,0x83,0x38,0,
-        0x74,0x0E, 0xFF,0x25,0,0,0,0, 0,0,0,0,0,0,0,0,
-        0xFF,0x25,0,0,0,0, 0,0,0,0,0,0,0,0};
-    std::memcpy(code, body, sizeof(body));
-    const uintptr_t gateAddress = reinterpret_cast<uintptr_t>(gate);
-    const uintptr_t callbackAddress = reinterpret_cast<uintptr_t>(callback);
-    std::memcpy(code + 2, &gateAddress, 8);
-    std::memcpy(code + 22, &callbackAddress, 8);
-}
-
-struct HookEntry {
-    CodeHook hook;
-    uint8_t* relay = nullptr;
-    std::atomic<uintptr_t> forward{0};
-    uintptr_t target = 0;
-};
-HookEntry g_hook;
-// Open while the key is on, closed (the relay jumps straight to the trampoline) while it is off.
-alignas(8) std::atomic<uintptr_t> g_relayGate{0};
-
-bool prepareRelay(void* trampoline, void* context) noexcept {
-    auto& entry = *static_cast<HookEntry*>(context);
-    const uintptr_t address = reinterpret_cast<uintptr_t>(trampoline);
-    std::memcpy(entry.relay + kOriginalLiteral, &address, 8);
-    DWORD oldProtect = 0;
-    if (!VirtualProtect(entry.relay, 4096, PAGE_EXECUTE_READ, &oldProtect) ||
-        !FlushInstructionCache(GetCurrentProcess(), entry.relay, kRelayBytes)) return false;
-    entry.forward.store(address, std::memory_order_release);
-    return true;
-}
-
-// ---- the I3 hook ----------------------------------------------------------------------------------------------------------
-// Ghidra shows one parameter (rcx = the activity), a return value in rax and no float-register parameter read, so four
-// integer registers are forwarded and nothing else is declared: declaring a float parameter would read an xmm register the
-// caller never set. The original runs FIRST; the snapshot is taken after it returns, so it describes the state the update
-// left; the return value goes back unchanged.
-using ForwardFn = uint64_t (__fastcall*)(void*, void*, void*, void*);
-
+// ---- the I3 observer ------------------------------------------------------------------------------------------------------
+// explorer_cam.cpp's hook calls this after the original returns (and after the lock press is restored), with rcx = the activity.
+// The snapshot is taken after the original, so it describes the state the update left.
 __declspec(noinline) void observeActivity(void* a) noexcept {
     if (!a) {
         g_shared.totalCalls.fetch_add(1, std::memory_order_relaxed);
@@ -172,61 +68,6 @@ __declspec(noinline) void observeActivity(void* a) noexcept {
     const bool read = g_shared.faults.load(std::memory_order_relaxed) < ecp::kMaxFaults &&
                       sehCopyRaw(static_cast<const uint8_t*>(a), &raw);
     ecp::noteActivityCall(g_shared, reinterpret_cast<uintptr_t>(a), GetCurrentThreadId(), read ? &raw : nullptr);
-}
-
-__declspec(noinline) uint64_t __fastcall freeCameraObserved(void* a, void* b, void* c, void* d) noexcept {
-    const auto forward = reinterpret_cast<ForwardFn>(g_hook.forward.load(std::memory_order_acquire));
-    if (!forward) return 0;   // unreachable: the relay exists only after the install published a trampoline
-    const uint64_t result = forward(a, b, c, d);
-    observeActivity(a);
-    return result;
-}
-
-// Verify the build, verify the prologue, place the relay and hook. On failure `why` says why in one sentence, nothing was patched.
-bool installHook(char* why, size_t whyCap, size_t* stolen, uintptr_t* targetOut) {
-    uintptr_t target = 0;
-#ifdef EDVR_EXPLORER_CAM_PROBE_TEST
-    if (g_testTarget) target = g_testTarget;
-#endif
-    if (!target) {
-        const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-        if (!base) {
-            std::snprintf(why, whyCap, "the game module could not be resolved");
-            return false;
-        }
-        const char* peWhy = nullptr;
-        if (!checkIdentity(base, &peWhy)) {
-            std::snprintf(why, whyCap, "the game build differs (%s); EliteDangerous64.exe+0x%llX was not touched",
-                          peWhy, static_cast<unsigned long long>(ecp::kTargetRva));
-            return false;
-        }
-        target = base + ecp::kTargetRva;
-    }
-    if (!sehCheckBytes(target, ecp::kPrologue, ecp::kPrologueBytes)) {
-        std::snprintf(why, whyCap,
-                      "the game build differs (the %zu bytes at EliteDangerous64.exe+0x%llX are not build 332841's FreeCameraActivity "
-                      "update prologue); nothing was patched",
-                      ecp::kPrologueBytes, static_cast<unsigned long long>(ecp::kTargetRva));
-        return false;
-    }
-    g_hook.target = target;
-    g_hook.relay = allocateRelay(target);
-    if (!g_hook.relay) {
-        std::snprintf(why, whyCap, "no executable memory could be placed within two gigabytes of the target; nothing was patched");
-        return false;
-    }
-    buildRelay(g_hook.relay, &g_relayGate, reinterpret_cast<void*>(&freeCameraObserved));
-    if (!g_hook.hook.install(reinterpret_cast<void*>(target), g_hook.relay, nullptr, "explorer-cam-free-camera-update",
-                             &prepareRelay, &g_hook)) {
-        VirtualFree(g_hook.relay, 0, MEM_RELEASE);
-        g_hook.relay = nullptr;
-        std::snprintf(why, whyCap, "CodeHook refused it (its own line above, tagged explorer-cam-free-camera-update, names why); nothing was patched");
-        return false;
-    }
-    *stolen = g_hook.hook.stolenBytes();
-    *targetOut = target;
-    return true;
-    // Process-lifetime storage: the relay and trampoline are never freed, so a call already inside them can finish.
 }
 
 // ---- I1's feed from the census ---------------------------------------------------------------------------------------------
@@ -254,25 +95,24 @@ void arm(uint64_t nowMs, const ecp::Sink& sink) {
     g_offLogged = false;
     const bool first = !g_announced;
     g_announced = true;
+    // The hook is explorer_cam.cpp's (one target gets one CodeHook); the probe attaches its observer to it. Attaching is idempotent,
+    // and a hook that stood down stays down.
+    const ExplorerCamHookStatus hook = explorerCamProbeAttach(true, &observeActivity);
     if (g_i3 == I3State::NotTried) {
-        char why[400] = {};
-        size_t stolen = 0;
-        uintptr_t target = 0;
-        if (installHook(why, sizeof(why), &stolen, &target)) {
+        if (hook.state == ExplorerCamHookStatus::Armed) {
             g_i3 = I3State::Armed;
             say(sink, "%s EliteDangerous64.exe+0x%llX (FreeCameraActivity update, build 332841) hooked at 0x%llX, stolen=%zu bytes, "
                       "prologue %zu/%zu bytes verified, relay at 0x%llX; the original runs first, then rcx's activity is copied (pose "
                       "+0x70 and +0x3B0, bytes +0x470 +0x471 +0x473 +0x48C, the raw qword +0x2C8) through a seqlock; four integer "
                       "registers are forwarded and the return value is unchanged",
-                ecp::prefixI3Armed(), static_cast<unsigned long long>(ecp::kTargetRva), static_cast<unsigned long long>(target), stolen,
-                ecp::kPrologueBytes, ecp::kPrologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(g_hook.relay)));
+                ecp::prefixI3Armed(), static_cast<unsigned long long>(ecp::kTargetRva), static_cast<unsigned long long>(hook.target), hook.stolen,
+                ecp::kPrologueBytes, ecp::kPrologueBytes, static_cast<unsigned long long>(hook.relay));
         } else {
             g_i3 = I3State::StoodDown;
             say(sink, "%s %s. I3 will not run; I1 and I2 do, but their detail lines are gated on I3 and will not print.",
-                ecp::prefixI3Down(), why);
+                ecp::prefixI3Down(), hook.why);
         }
     }
-    g_relayGate.store(g_i3 == I3State::Armed ? 1u : 0u, std::memory_order_release);
     g_i2On.store(true, std::memory_order_release);
     detail::g_vrCensusCameraNote = &censusNote;
     g_consumer.start(nowMs, g_shared.totalCalls.load(std::memory_order_relaxed));
@@ -297,11 +137,11 @@ void arm(uint64_t nowMs, const ecp::Sink& sink) {
 
 void disarm(const ecp::Sink& sink) {
     g_on = false;
-    g_relayGate.store(0, std::memory_order_release);   // the game's call runs straight through to the original
+    explorerCamProbeAttach(false, nullptr);   // the observer detaches; the hook stays in place and its gate closes unless placement uses it
     g_i2On.store(false, std::memory_order_release);
     detail::g_vrCensusCameraNote = nullptr;
-    say(sink, "%s (advanced.explorer_cam_probe turned off while running): the I3 relay's gate is closed (the hook stays in place, "
-              "inert), I1 and I2 are detached.", ecp::prefixOff());
+    say(sink, "%s (advanced.explorer_cam_probe turned off while running): the I3 observer is detached (the hook stays in place, "
+              "inert for the probe), I1 and I2 are detached.", ecp::prefixOff());
 }
 
 void boundaryAt(uint32_t frame, uint64_t nowMs, bool want, const ecp::Sink& sink) {
@@ -341,26 +181,22 @@ void explorerCamProbeNoteSceneBlock(const void* resource, const void* data, uint
 
 #ifdef EDVR_EXPLORER_CAM_PROBE_TEST
 // The rig's seam (tools\explorer_cam_probe_test): the same boundary with a scripted clock and key, the shared state, and a
-// synthetic target in place of the game's function.
+// synthetic target in place of the game's function (installed through explorer_cam.cpp's own seam).
 namespace explorercamprobetest {
-void setTarget(uintptr_t target) { g_testTarget = target; }
+void setTarget(uintptr_t target) { explorercamtest::setTargets(target, 0); }
 void boundary(uint32_t frame, uint64_t nowMs, bool want, ecp::SinkFn fn, void* ctx) { boundaryAt(frame, nowMs, want, ecp::Sink{fn, ctx}); }
 ecp::Shared& shared() { return g_shared; }
 ecp::SkinTee& skin() { return g_skin; }
 ecp::CamTee& cam() { return g_cam; }
-size_t stolenBytes() { return g_hook.hook.stolenBytes(); }
-bool gateOpen() { return g_relayGate.load() != 0; }
+size_t stolenBytes() { return explorercamtest::freeStolen(); }
+bool gateOpen() { return explorercamtest::gateOpen(); }
 // Back to a session that has not tried the hook: the CodeHook is uninstalled (the original bytes return), the one-shot latches clear.
 void reset() {
-    g_hook.hook.uninstall();
-    g_hook.relay = nullptr;   // process-lifetime storage by design: the rig leaks the page
-    g_hook.forward.store(0);
-    g_hook.target = 0;
+    explorercamtest::reset();
     g_i3 = I3State::NotTried;
     g_on = false;
     g_offLogged = false;
     g_announced = false;
-    g_relayGate.store(0);
     g_i2On.store(false);
     detail::g_vrCensusCameraNote = nullptr;
 }

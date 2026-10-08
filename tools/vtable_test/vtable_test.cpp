@@ -1203,6 +1203,24 @@ int main() {
               "the Explorer Cam probe's hook target would be refused or stolen at the "
               "wrong length");
 
+        // The free camera's collision step (EliteDangerous64.exe+0x1091140, build 332841), Explorer
+        // Cam's second target (fix.explorer_cam, explorer_cam.cpp in the d3d11 half): it begins
+        // `40 55` -- push rbp WITH a REX prefix -- then three one-byte pushes, so the first four
+        // instructions are 2+1+1+1 = five bytes with no rip-relative displacement, and CodeHook
+        // steals exactly five. A decoder that took `40` for the start of a different instruction
+        // would refuse the hook (placement stands down) or steal a wrong length.
+        const uint8_t collisionStep[] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D,
+                                         0xAC, 0x24, 0xB0, 0xFE, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0x50, 0x02, 0x00, 0x00};
+        check(codeInstructionLength(collisionStep, sizeof(collisionStep), &disp) == 2 && disp == 0,
+              "...and the free camera's collision step: `40 55` (REX push rbp) is a 2-byte "
+              "instruction with no displacement",
+              "Explorer Cam's collision hook would be refused and placement would stand down");
+        check(codeInstructionLength(collisionStep + 2, sizeof(collisionStep) - 2, &disp) == 1 &&
+                  codeInstructionLength(collisionStep + 3, sizeof(collisionStep) - 3, &disp) == 1 &&
+                  codeInstructionLength(collisionStep + 4, sizeof(collisionStep) - 4, &disp) == 1,
+              "...followed by three one-byte pushes, so five bytes are stolen",
+              "the collision hook would steal a wrong length");
+
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.
         const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};

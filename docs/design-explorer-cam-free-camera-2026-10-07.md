@@ -2,10 +2,11 @@
 
 ## Status
 
-- **State: Phase 0 instruments built and FLOWN (F0, 2026-10-07); no
-  placement built.** Replaces press counting and headset-pose offsets with a
-  placement of Elite's own free camera at the commander's head, and hides
-  the head only while the camera sits in it.
+- **State: Phase 0 FLOWN (F0, 2026-10-07); Phase 1a placement BUILT, not
+  flown (flight F1 next).** Replaces press counting and headset-pose offsets
+  with a placement of Elite's own free camera at the commander's head, and
+  hides the head only while the camera sits in it. Keys `fix.explorer_cam`
+  and `fix.explorer_cam_eye_up/_forward/_right` are real, user-facing.
 - **Branch and scope (Sean, 2026-10-07):** this stays on
   `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
   old Explorer Cam route entirely; deleting the old route is authorized.
@@ -49,9 +50,10 @@
 - **F0 FLOWN** on Frontier, 2d103d84, `edvr_gfx_20261007_172543.log`,
   training scenario; findings at the end. Frontier's ini: probe off again,
   `head_offset_gate = 0`.
-- **Next:** I4, a log-only detour on 0x1091140 (which branch pushes, by how
-  much), then Phase 1: write +0x3B0 at the second update and hold 0x1091140
-  off while placed.
+- **Next:** F1 on Frontier (install, grep `explorer cam:`; checks H3: no
+  holes, no body culling, no pop at entry, walking and turning, HMD pose not
+  doubled), tune the eye keys, then Phase 2 (hide the head) and the old
+  route's deletion.
 - **Temporary keys:** `[advanced] explorer_cam_probe = off|on` (default off;
   all three 0b instruments plus the VR camera census). Removed at arc close.
 
@@ -503,3 +505,26 @@ pose. **0x1091140 takes a FIFTH argument on the stack** (a byte, `mov
 [rsp+0x20], al` before each call). A C replacement must declare and forward
 five arguments. Better, the relay returns `xor eax,eax; ret` itself for
 the placed activity and jumps to the trampoline for every other caller.
+
+## 2026-10-07 Phase 1a: placement built
+
+Compiled and gated, not flown. Keys (VR profile; flat reads them off): `[fix] explorer_cam = on|off` (default on),
+`explorer_cam_eye_up = 1.68`, `_eye_forward = 0.10`, `_eye_right = 0.0` (metres from the commander's feet, live,
+clamped 0.5..2.5 and -0.5..0.5). Code: `explorer_cam_core.h` (pure), `explorer_cam.{h,cpp}` (hooks, config, log); the
+probe attaches to the same 0x1071980 hook. Rig: `tools\explorer_cam_test`.
+
+**Writes (D1), nothing else.** Before each free-camera update: the 16 floats at +0x3B0 (identity rows, origin right/up/
+forward, each row's 4th float the game's) and, once per entry, the int at `*(+0x508)+0x1C` set to 1 and restored after
+the update. A relay on 0x1091140 returns 0 when rcx is the placed activity.
+
+**State machine, per activity (hook thread).** (1) Idle until a fresh session (+0x48C 0, +0x473 1, or a new pointer)
+shows +0x48C = 3. (2) Entered; waits for +0x473 = 0 and +0x470 != 0. (3) First write: publishes the activity to the
+relay and presses the lock if +0x48C = 3, once per session even after the user unlocks. (4) Every update at +0x48C 3 or
+4 writes. (5) Releases on +0x48C 0, 5, 6 or unknown, key off, 30 silent frames (frame thread) or a fault (8 faults end it
+for the session); after 5, 6 or a fault it re-enters only after a 0.
+
+**F1: grep `explorer cam:`** (the probe's lines start `explorer cam probe`). `on (fix.explorer_cam = on)`; `free-camera
+hook armed` and `collision hook armed` (stolen=5, 28/28 and 26/26) or `... stood down`; `first free-camera update
+reached the hook` (the hook ran); `entered the free camera`; `placed: ... eye(...)`; `lock pressed: ... before=3
+after=4` (read on the next update); `heartbeat:` every 5 s while placed (`updates_placed`, `collision_bypassed`,
+`collision_forwarded`, `hook_calls`, `faults`); `released: ... why=`; `eye changed`; `fault N of 8`.

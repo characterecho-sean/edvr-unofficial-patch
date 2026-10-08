@@ -25,28 +25,28 @@
 #include <cstring>
 #include <type_traits>
 
+#include "explorer_cam_core.h"
+
 namespace edvr {
 namespace ecp {
 
 // ---- identity: build 332841 ---------------------------------------------------------------------------------------
-constexpr uintptr_t kTargetRva = 0x1071980;
-constexpr uint32_t kExpectedTimestamp = 1788384820u;   // the PE TimeDateStamp and SizeOfImage the other build-keyed hooks use
-constexpr uint32_t kExpectedImageSize = 104894464u;
-constexpr size_t kPrologueBytes = 28;
-// `mov [rsp+20h],rbx; push rbp; push rdi; push r13; push r14; push r15; lea rbp,[rsp-2C0h]; sub rsp,3C0h`. No
-// rip-relative byte in it; the instruction boundaries are 5, 6, 7, 9, 11, 13, 21, 28, so CodeHook steals 5.
-inline constexpr uint8_t kPrologue[kPrologueBytes] = {
-    0x48, 0x89, 0x5C, 0x24, 0x20, 0x55, 0x57, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48,
-    0x8D, 0xAC, 0x24, 0x40, 0xFD, 0xFF, 0xFF, 0x48, 0x81, 0xEC, 0xC0, 0x03, 0x00, 0x00};
+// Explorer Cam owns the hook on this function now (explorer_cam.cpp; explorer_cam_core.h holds the identity once), so these are its
+// constants under the probe's old names. The rig compares them to the bytes spelled out again in its own source.
+constexpr uintptr_t kTargetRva = ecm::kFreeCameraRva;
+constexpr uint32_t kExpectedTimestamp = ecm::kExpectedTimestamp;
+constexpr uint32_t kExpectedImageSize = ecm::kExpectedImageSize;
+constexpr size_t kPrologueBytes = ecm::kFreeCameraPrologueBytes;
+inline constexpr const uint8_t (&kPrologue)[kPrologueBytes] = ecm::kFreeCameraPrologue;
 
 // ---- the activity's fields (Phase 0a, "The object") ----------------------------------------------------------------
 constexpr uint32_t kOffWorldPose = 0x70;      // 16 floats, row-major 4x4: axes rows 0-2, origin row 3 (+0xA0/+0xA4/+0xA8)
 constexpr uint32_t kOffTarget = 0x2C8;        // a qword: the target's transform. RAW VALUE ONLY, never dereferenced.
-constexpr uint32_t kOffLocalPose = 0x3B0;     // 16 floats, commander-local; origin row 3 (+0x3E0/+0x3E4/+0x3E8)
-constexpr uint32_t kOffRelative = 0x470;      // 1 relative, 0 world
-constexpr uint32_t kOffRotationLock = 0x471;  // 1 = live frame
-constexpr uint32_t kOffPresetPending = 0x473;
-constexpr uint32_t kOffState = 0x48C;         // a byte: 0 off, 3 free, 4 relative lock, 5 world lock, 6 variant
+constexpr uint32_t kOffLocalPose = ecm::kOffLocalPose;          // 16 floats, commander-local; origin row 3 (+0x3E0/+0x3E4/+0x3E8)
+constexpr uint32_t kOffRelative = ecm::kOffRelative;            // 1 relative, 0 world
+constexpr uint32_t kOffRotationLock = ecm::kOffRotationLock;    // 1 = live frame
+constexpr uint32_t kOffPresetPending = ecm::kOffPresetPending;
+constexpr uint32_t kOffState = ecm::kOffState;                  // a byte: 0 off, 3 free, 4 relative lock, 5 world lock, 6 variant
 
 // What the hook copies out of the activity, before any decoding.
 struct Raw {

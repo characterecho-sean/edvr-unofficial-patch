@@ -55,6 +55,7 @@
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "glitch_frame.h"
 #include "pose_reader_watch.h"
+#include "explorer_cam.h"        // fix.explorer_cam: the free camera placed at the commander's head and locked (the Explorer Cam redesign)
 #include "explorer_cam_probe.h"  // advanced.explorer_cam_probe: the Explorer Cam redesign's log-only F0 instruments (temporary)
 #include "transition_flash_eye_base.h"
 #include "holo_fix.h"
@@ -5893,6 +5894,8 @@ EDVR_BOUNDARY_TICK(tkFssReveal, "fss_reveal");
 EDVR_BOUNDARY_TICK(tkFssDump, "fss_dump");
 EDVR_BOUNDARY_TICK(tkFssPacing, "fss_pacing");
 EDVR_BOUNDARY_TICK(tkRemlok, "remlok");
+// fix.explorer_cam (explorer_cam.h): reads its keys, installs its hooks, publishes the settings to the hook thread and writes its log lines.
+EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
 // advanced.explorer_cam_probe (explorer_cam_probe.h), a temporary log-only instrument: its own budget, so a fault in it stands it down alone.
 EDVR_BOUNDARY_TICK(tkExplorerCamProbe, "explorer_cam_probe");
 
@@ -6862,7 +6865,9 @@ void vScreenFrameBoundary() {
     // The gate decides on the counts for the frame that just ended, so it is
     // told before they reset -- same rule as the flash detector above.
     headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, sceneDraws);
-    // advanced.explorer_cam_probe (Phase 0b, flight F0; temporary): reads the key, installs the I3 hook the first time it is on, and
+    // fix.explorer_cam (Explorer Cam, Phase 1): before the probe below, which attaches to the free-camera hook this installs.
+    tkExplorerCam.run([&] { explorerCamFrameBoundary(s->frameNo); });
+    // advanced.explorer_cam_probe (Phase 0b, flight F0; temporary): reads the key, attaches to the free-camera hook when it is on, and
     // prints the 5 s heartbeats, the change lines and the 1 Hz detail lines. Log only; with the key off it reads the key and returns.
     tkExplorerCamProbe.run([&] { explorerCamProbeFrameBoundary(s->frameNo); });
     s->panelCompositeDraws = 0;
