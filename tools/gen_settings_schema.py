@@ -59,6 +59,13 @@ number, and a getString read is read-only unless a `# dev: choices a, b, c`
 line above it names its values (the mirror of ui:, allowed only OUTSIDE
 [fix]). `# dev: hidden` keeps a key off the menu entirely.
 
+THE HOTKEYS PAGE (2026-10-08) takes its rows from [hotkey] by the same two
+annotations, the `hotkey` token marking a row whose value is a key, a pad button
+or a HOTAS button the menu CAPTURES (it is never typed). The annotation is the
+tier: `# ui: Menu key | hotkey | live` is a row for everyone, and
+`# dev: label Draw census key | hotkey` is a row only while menu.developer is on.
+The section names the page, so neither line does. See HOTKEY_SECTION.
+
 The menu's restart flagging is derived here too, from the same prose the
 window reads: a menu row on the Fixes or Performance page that does not say
 when it takes effect is a build error (as for the window); a developer-tier
@@ -133,7 +140,14 @@ EXPOSED_SECTIONS = ('fix',)
 # key is its LABEL and its CHOICES in the in-headset menu, so that demoting a
 # setting from [fix] to [experimental] costs it its tier and its page but not
 # the words somebody already wrote for it.
-UI_SECTIONS = ('fix', 'advanced', 'experimental', 'menu')
+UI_SECTIONS = ('fix', 'advanced', 'experimental', 'menu', 'hotkey')
+# [hotkey] is the one section whose keys are rows by annotation alone, and whose
+# TIER is the annotation that carries the `hotkey` token (2026-10-08, the F8
+# menu's Hotkeys page): a `# ui:` line is a row everyone sees, a `# dev:` line is a
+# row only in developer mode. The section decides the page ("hotkeys"), so neither
+# line names one; the installer's window still shows [fix] and nothing else.
+HOTKEY_SECTION = 'hotkey'
+HOTKEY_PAGE = 'hotkeys'
 # The sections whose keys may be ordinary rows of the in-headset menu -- the
 # fixes, and the menu's own switches, which are the only [menu] keys anyone
 # would reach for while wearing the headset. Both are Fix tier: neither is a
@@ -304,6 +318,11 @@ class Setting(object):
         self.devAnnotated = False
         self.devChoices = []
         self.devHidden = False
+        # `hotkey` on a ui: or dev: line: the value is a key, pad button or
+        # HOTAS button the menu captures (MenuKind::Hotkey). devLabel is the
+        # dev: line's `label <text>`, for a developer row with no ui: line.
+        self.hotkey = False
+        self.devLabel = ''
         # Migration metadata from the annotation lines the installer's merge
         # reads (iniedit.cpp movedKeys / retiredDefaults): kept off the prose.
         self.movedFrom = []
@@ -441,6 +460,10 @@ def apply_dev_annotation(setting, text):
             setting.devChoices = [c.strip() for c in rest.split(',') if c.strip()]
         elif lower.startswith('range'):
             read_range(setting, part)
+        elif lower == 'hotkey':
+            setting.hotkey = True
+        elif lower.startswith('label '):
+            setting.devLabel = part.split(None, 1)[1].strip()
 
 
 def read_range(setting, part):
@@ -507,6 +530,10 @@ def apply_annotation(setting, text):
             setting.applies = 'restart'
         elif lower == 'live':
             setting.applies = 'live'
+        elif lower == 'hotkey':
+            # The value is a key, a pad button or a HOTAS button, captured by
+            # the menu's Hotkeys page rather than typed.
+            setting.hotkey = True
         elif lower == 'menu' or lower.startswith('menu '):
             # The in-headset menu's page: bare `menu` is the Fixes page,
             # `menu performance` the Performance page.
@@ -891,6 +918,58 @@ def run(root, out, check):
             devSilent.append(s)
         menuRows.append((s, s.section, 'Advanced' if s.section == 'advanced' else 'Experimental'))
 
+    # ---- the Hotkeys page (HOTKEY_SECTION) ----------------------------------
+    #
+    # The tier is the annotation that carries `hotkey`: `# ui:` is Fix (every
+    # player), `# dev:` is Advanced (developer mode only). The menu's Hotkeys page
+    # lists the first always and the second with menu.developer on. Four ways to get
+    # this wrong are build errors, each naming the key and the ini line, because the
+    # menu cannot repair any of them at run time: the token anywhere but [hotkey];
+    # an annotated [hotkey] key without it (a row that was meant and is silently
+    # absent); a key the code does not read as text (the capture writes a string);
+    # and a Fix-tier row that does not say when a change applies.
+    strayHotkey = [s for s in settings if s.hotkey and s.section != HOTKEY_SECTION]
+    if strayHotkey:
+        print('gen_settings_schema: ERROR: the `hotkey` token belongs to a [%s] setting.'
+              % HOTKEY_SECTION)
+        for s in strayHotkey:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+    unmarked = [s for s in settings if s.section == HOTKEY_SECTION and
+                ((s.annotated and not s.hidden) or (s.devAnnotated and not s.devHidden)) and not s.hotkey]
+    if unmarked:
+        print('gen_settings_schema: ERROR: an annotated [%s] setting needs the `hotkey` token '
+              '(its value is a key, a pad button or a HOTAS button the menu captures); '
+              '`dev: hidden` keeps a key off the menu.' % HOTKEY_SECTION)
+        for s in unmarked:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+    hotkeyRows = [s for s in settings if s.section == HOTKEY_SECTION and s.hotkey]
+    notText = [s for s in hotkeyRows
+               if '%s.%s' % (s.section, s.key) not in code
+               or code['%s.%s' % (s.section, s.key)][0] != 'text']
+    if notText:
+        print('gen_settings_schema: ERROR: a `hotkey` row is a string the code reads with '
+              'getString; nothing in src/ does for:')
+        for s in notText:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+    hotkeySilent = [s for s in hotkeyRows if s.annotated and when_it_applies(s) is None]
+    if hotkeySilent:
+        print('gen_settings_schema: ERROR: %d hotkey row(s) do not say when they take effect.'
+              % len(hotkeySilent))
+        print('End the comment block with "Live." or put `| live` on the ui: line.')
+        for s in hotkeySilent:
+            print('  edvr.ini:%d  %s.%s' % (s.line, s.section, s.key))
+        return 1
+    for s in hotkeyRows:
+        if s.annotated:
+            menuRows.append((s, HOTKEY_PAGE, 'Fix'))
+        else:
+            menuRows.append((s, HOTKEY_PAGE, 'Advanced'))
+            if when_it_applies(s) is None:
+                devSilent.append(s)
+
     # ---- what was taken off the menu stays off it (OFF_MENU) ---------------
     onMenu = []
     seenOff = set()
@@ -976,13 +1055,16 @@ def run(root, out, check):
 
     if check or not out:
         restarts = len([s for s in exposed if when_it_applies(s) == 'restart'])
+        hotkeyFix = len([r for r in menuRows if r[1] == HOTKEY_PAGE and r[2] == 'Fix'])
         print('gen_settings_schema: %d exposed, %d of them needing a game restart; '
-              '%d live in [%s]; menu: %d fix rows on %s, %d developer rows'
+              '%d live in [%s]; menu: %d fix rows on %s, %d hotkey rows (%d for everyone), '
+              '%d developer rows'
               % (len(exposed), restarts,
                  len([s for s in settings if s.live and s.section in EXPOSED_SECTIONS]),
                  ']/['.join(EXPOSED_SECTIONS), len(menuFix),
                  '/'.join(sorted(set(s.menuPage for s in menuFix))) or 'no page',
-                 len(menuRows) - len(menuFix)))
+                 len([r for r in menuRows if r[1] == HOTKEY_PAGE]), hotkeyFix,
+                 len(menuRows) - len(menuFix) - len([r for r in menuRows if r[1] == HOTKEY_PAGE])))
         return 0
 
     menuOut = []
@@ -995,16 +1077,19 @@ def run(root, out, check):
         choices = s.choices if s.choices else s.devChoices
         if choices:
             kind = 'choice'
+        if s.hotkey:
+            kind = 'hotkey'
         applies = when_it_applies(s)
+        label = s.label if s.annotated else (s.devLabel or s.key)
         menuOut.append(
             '    {%s, %s, %s, %s,\n     %s,\n     MenuKind::%s, %s, %s, %s, %d, %s, %s, %s, %d,\n'
             '     MenuTier::%s, %s, %s},' % (
                 c_string(s.section), c_string(s.key),
-                c_string(s.label if s.annotated else s.key),
+                c_string(label),
                 c_string(summarise(s.description)),
                 c_string(s.description),
                 {'toggle': 'Toggle', 'number': 'Number', 'text': 'Text',
-                 'choice': 'Choice'}[kind],
+                 'choice': 'Choice', 'hotkey': 'Hotkey'}[kind],
                 c_string(s.value), c_string(lo or ''), c_string(hi or ''), precision,
                 c_string('|'.join(choices)),
                 'true' if s.percent else 'false',
@@ -1510,6 +1595,66 @@ def self_test():
     name = 'commented-setting-is-a-setting'
     wrote = case(name, '[advanced]\n# A thing, and what it does. Live.\n#thing = 1\n', thing, 0)
     expect_in(name, wrote, '{"advanced", "thing", "thing", "A thing, and what it does."')
+
+    # The Hotkeys page (2026-10-08): in [hotkey] the annotation that carries
+    # `hotkey` IS the tier -- ui: a row for everyone (Fix), dev: a row only in
+    # developer mode (Advanced) -- and the section is the page. The fixture is the
+    # shape of the shipped block: two ui: keys, a dev: key with its own label, a
+    # plain key beside them (a row of nobody's), all read as text.
+    hotkey_ini = ('[hotkey]\n'
+                  '# Open the menu. Live.\n'
+                  '# ui: Menu key | hotkey | live\n'
+                  'menu = F8\n\n'
+                  '# Toggle it. Live.\n'
+                  '# ui: Toggle key | hotkey\n'
+                  'toggle = SCROLLLOCK\n\n'
+                  '# Log a census. Empty is off. Live.\n'
+                  '# dev: label Census key | hotkey\n'
+                  '#census =\n\n'
+                  '# Read the game\'s bindings. Live.\n'
+                  'read_game_bindings = 1\n')
+    hotkey_reads = {'a.cpp': ('auto m = cfg.getString("hotkey.menu", "F8");\n'
+                              'auto t = cfg.getString("hotkey.toggle", "SCROLLLOCK");\n'
+                              'auto c = cfg.getString("hotkey.census", "");\n'
+                              'bool r = cfg.getBool("hotkey.read_game_bindings", true);\n')}
+    name = 'hotkey-tiers'
+    wrote = case(name, hotkey_ini, hotkey_reads, 0)
+    expect_in(name, wrote, 'MenuKind::Hotkey, "F8", "", "", 2, "", false, false, 1,\n     MenuTier::Fix, "hotkeys", ""')
+    expect_in(name, wrote, 'MenuKind::Hotkey, "SCROLLLOCK"')
+    expect_in(name, wrote, '{"hotkey", "census", "Census key"')
+    expect_in(name, wrote, 'MenuKind::Hotkey, "", "", "", 2, "", false, false, 1,\n     MenuTier::Advanced, "hotkeys", ""')
+    expect_not_in(name, wrote, 'read_game_bindings')
+    expect_not_in(name, wrote, 'SettingKind::Hotkey')   # the installer's window shows [fix] only
+    if wrote.count('MenuTier::Advanced, "hotkeys"') != 1 or wrote.count('MenuTier::Fix, "hotkeys"') != 2:
+        failures.append('%s: expected two Fix-tier hotkey rows and one Advanced' % name)
+    # The token is the contract: an annotated [hotkey] key without it is a row
+    # that was meant and would be silently absent.
+    name = 'hotkey-token-missing'
+    said = case(name, hotkey_ini.replace('# ui: Menu key | hotkey | live', '# ui: Menu key | live'),
+                hotkey_reads, 1)
+    expect_in(name, said, 'needs the `hotkey` token')
+    expect_in(name, said, 'hotkey.menu')
+    # ...and it belongs to [hotkey] and nowhere else.
+    name = 'hotkey-token-elsewhere'
+    said = case(name, '[fix]\n# A key. Live.\n# ui: A key | hotkey\nkeyish = F9\n',
+                {'a.cpp': 'auto k = cfg.getString("fix.keyish", "");\n'}, 1)
+    expect_in(name, said, 'belongs to a [hotkey] setting')
+    # A hotkey row is a string the code reads with getString.
+    name = 'hotkey-not-a-string'
+    said = case(name, hotkey_ini, {'a.cpp': hotkey_reads['a.cpp'].replace(
+        'cfg.getString("hotkey.menu", "F8")', 'cfg.getInt("hotkey.menu", 0)')}, 1)
+    expect_in(name, said, 'hotkey.menu')
+    # A Fix-tier hotkey row has to say when a change applies, like every other.
+    name = 'hotkey-silent'
+    said = case(name, hotkey_ini.replace('# Open the menu. Live.', '# Open the menu.')
+                .replace('# ui: Menu key | hotkey | live', '# ui: Menu key | hotkey'), hotkey_reads, 1)
+    expect_in(name, said, 'do not say when they take effect')
+    expect_in(name, said, 'hotkey.menu')
+    # `dev: hidden` keeps a developer key off the page entirely.
+    name = 'hotkey-dev-hidden'
+    wrote = case(name, hotkey_ini.replace('# dev: label Census key | hotkey', '# dev: hidden'),
+                 hotkey_reads, 0)
+    expect_not_in(name, wrote, 'census')
 
     shutil.rmtree(base, ignore_errors=True)
     if failures:

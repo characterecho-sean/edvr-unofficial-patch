@@ -40,4 +40,13 @@ void xinputWatchTick();
 // any connected pad?
 bool xinputPressed(const XinputBinding& b);
 
+// Is it held right now, on any connected pad (as of the last tick)? The pad
+// hotkeys read this and make their own edge (hotkey.h); xinputWatchTick is
+// once-per-frame however many callers there are.
+bool xinputHeld(const XinputBinding& b);
+
+// Every connected pad's buttons ORed, and its triggers past the threshold (bit
+// 0 left, bit 1 right), as of the last tick: the settings menu's capture.
+void xinputSnapshot(uint16_t* buttons, uint8_t* triggers);
+
 }  // namespace edvr

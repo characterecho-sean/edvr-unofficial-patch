@@ -213,6 +213,16 @@ While the menu is open the game sees no keyboard at all, though your HOTAS and
 mouse still do. Every change is written to `edvr.ini` and applies the way a
 hand edit would, and a row that only takes effect at the next launch says so.
 
+EDVR's own keys have a page of their own, **Hotkeys**: the menu key, Explorer
+Cam's key (clear it and Explorer Cam is off), the brightness-fix key and the
+camera-history key. Pick a row, press Enter, then press the key you want, with
+Ctrl, Shift or Alt for a chord, a gamepad button, or a button or hat on your
+HOTAS. Escape cancels and Delete clears (the menu key can be changed but never
+cleared from the menu). A choice that Elite also binds is flagged "also in
+Elite", because EDVR watches these keys and never takes them from the game. In
+`edvr.ini` they read `F5`, `CTRL+SHIFT+F9`, `GamePad_Back` or `231D0200:Joy_12`
+(the device is the vendor and product, as Elite's own bindings file spells it).
+
 The Monitor page is fpsVR's readout with a frame-time strip, and
 `menu.fps_overlay = on` pins a one-line version of it to your view while the
 menu is closed. `menu.developer = on` adds the advanced and experimental

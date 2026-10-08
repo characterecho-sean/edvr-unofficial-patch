@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "../common/hotkey.h"
 
@@ -610,7 +611,14 @@ void menuComposeFooter(const MenuFooterInput& in, MenuMeasureFn measure, void* c
     // there; the other items follow the live predicate.
     char page[48];
     pageItem(in, page, sizeof(page));
-    if (in.editing) {
+    if (in.capturing) {
+        // A hotkey row is waiting: the next key (Ctrl, Shift and Alt make a chord), pad button or HOTAS
+        // button is the value. Esc is the capture's, not the menu's.
+        item("Press a key or button", 0);
+        item("Esc cancels", 0);
+        if (in.canClear) item("Delete clears", 2);
+        else item("this key can't be cleared", 1);
+    } else if (in.editing) {
         item("Type a value", 1);
         item("Backspace deletes", 2);
         item("Enter writes", 0);
@@ -649,6 +657,18 @@ void menuComposeFooter(const MenuFooterInput& in, MenuMeasureFn measure, void* c
     char pair[32];
     if (in.privateWanted && !in.statusPage && !in.gatePrivate) {
         snprintf(line2, sizeof(line2), "KEYS SHARED WITH THE GAME");
+    } else if (in.note && in.note[0] && !in.statusPage) {
+        // The Hotkeys page's word about a row: cut with "..." to the width, because a refusal that
+        // vanishes for being a few characters long is a refusal nobody read.
+        snprintf(line2, sizeof(line2), "%s", in.note);
+        for (size_t len = strlen(line2); len > 8 && !fits(line2); ) {
+            len -= 1;
+            line2[len] = 0;
+            if (fits((std::string(line2) + "...").c_str())) {
+                strncat(line2, "...", sizeof(line2) - strlen(line2) - 1);
+                break;
+            }
+        }
     } else if (in.statusPage) {
         // No "off" note here: the legend above names only the page pair,
         // and that pair is on.

@@ -15,6 +15,8 @@ enum class MenuKind : unsigned char {
     Number,   // getInt / getFloat, stepped within its bounds, or typed
     Choice,   // an enumerated string: cycled
     Text,     // a free string: typed
+    Hotkey,   // a hotkey.* value: the next key, pad button or HOTAS button pressed
+              // is the value (hotkey_capture.h); never typed
 };
 
 enum class MenuTier : unsigned char {
@@ -44,7 +46,7 @@ struct MenuRowDef {
     bool        headset;
     int         applies;   // 0 not documented, 1 live, 2 needs a game restart
     MenuTier    tier;
-    const char* page;      // "performance" | "fixes" | the section for developer rows
+    const char* page;      // "performance" | "fixes" | "hotkeys" | the section for developer rows
     const char* group;     // the ini's heading above it
 };
 

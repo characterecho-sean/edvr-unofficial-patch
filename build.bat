@@ -502,7 +502,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
     "src\common\frame_flag.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
-    "src\d3d11\input_gate.cpp" "src\d3d11\menu.cpp" ^
+    "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
     "src\d3d11\menu_panel.cpp" "src\d3d11\perf_monitor.cpp" "src\d3d11\native_perf_history.cpp" "src\d3d11\native_benchmark_collector.cpp" ^
@@ -868,7 +868,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /Fo"%OBJ%\native_menu\\" /Fe"%BUILD%\native_menu_test.exe" ^
     "tools\native_menu_test\native_menu_test.cpp" "src\d3d11\native_menu.cpp" ^
     "src\openxr\eye_capture.cpp" "src\openxr\shared_texture_transfer.cpp" "src\openxr\producer_gpu_timing.cpp" ^
-    "src\d3d11\input_gate.cpp" "src\d3d11\menu_panel.cpp" ^
+    "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\menu_panel.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\d3d11\menu_keys.cpp" "src\d3d11\shader_swap.cpp" ^
     "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
@@ -1466,13 +1466,35 @@ if not exist "%OBJ%\inputgatetest" mkdir "%OBJ%\inputgatetest"
 cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /Fo"%OBJ%\inputgatetest"\ ^
     /Fe"%BUILD%\input_gate_test.exe" "tools\input_gate_test\input_gate_test.cpp" ^
-    "src\common\iat_hook.cpp" "src\common\vtable_hook.cpp" ^
+    "src\d3d11\joy_watch.cpp" "src\common\iat_hook.cpp" "src\common\vtable_hook.cpp" ^
     "src\common\hotkey.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
     "src\common\guard.cpp" "src\common\frame_flag.cpp" "src\common\proxy.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib dinput8.lib
 if errorlevel 1 ( echo [edvr] ERROR: input_gate_test build failed & exit /b 1 )
 "%BUILD%\input_gate_test.exe" || (
     echo [edvr] ERROR: the menu keyboard gate failed its device or release checks
+    exit /b 1
+)
+exit /b 0
+
+:rig_hotkey_capture_test
+echo [edvr] === hotkey_capture_test.exe ===
+REM The F8 menu's Hotkeys page below the menu: the three hotkey value formats and their round trip
+REM through edvr.ini, the pad and joystick edge, the joystick table against synthetic DIJOYSTATE2
+REM buffers on a read-only page, the capture state machine, the checks on a captured binding
+REM (duplicate, reserved, Elite clash, the Explorer Cam lock), Elite's bindings read for keyboard,
+REM pad and joystick, and which generated rows are on the page in which tier. Nothing is opened:
+REM no device, no window, no game.
+if not exist "%OBJ%\hotkeycapturetest" mkdir "%OBJ%\hotkeycapturetest"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\hotkeycapturetest"\ ^
+    /Fe"%BUILD%\hotkey_capture_test.exe" "tools\hotkey_capture_test\hotkey_capture_test.cpp" ^
+    "src\common\hotkey.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" ^
+    "src\d3d11\elite_binds.cpp" "src\common\iniedit.cpp" "src\common\config.cpp" "src\common\log.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: hotkey_capture_test build failed & exit /b 1 )
+"%BUILD%\hotkey_capture_test.exe" "%ROOT%" || (
+    echo [edvr] ERROR: the Hotkeys page failed its format, capture, joystick or row checks
     exit /b 1
 )
 exit /b 0
