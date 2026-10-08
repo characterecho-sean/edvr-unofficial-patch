@@ -525,8 +525,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 67 && coreLegacy.size() + 12 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader and the foreground map's two sibling-pass compute shaders are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 69 && coreLegacy.size() + 14 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader and the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two) are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -669,8 +669,10 @@ static void selfTest() {
         const SiblingContract contracts[] = {
             {"kFlatForegroundDonorBytecode", "flat foreground donor", edvr::kFlatForegroundDonorCs, 256},
             {"kFlatForegroundFitBytecode", "flat foreground fit", edvr::kFlatForegroundFitCs, 64},
+            {"kFlatForegroundShadowMomentsBytecode", "flat foreground shadow moments", edvr::kFlatForegroundShadowMomentsCs, 256},
+            {"kFlatForegroundShadowEvalBytecode", "flat foreground shadow evaluation", edvr::kFlatForegroundShadowEvalCs, 256},
         };
-        for (size_t i = 0; i < 2; ++i) {
+        for (size_t i = 0; i < 4; ++i) {
             auto& shader = coreFixed[coreLegacy.size() + 10 + i];
             check(!std::strcmp(shader.symbol, contracts[i].symbol) && !std::strcmp(shader.sourceName, contracts[i].name) &&
                   !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == contracts[i].source &&
@@ -696,8 +698,18 @@ static void selfTest() {
                                          {"Settings", D3D_SIT_CBUFFER, 0}, {"Donors", D3D_SIT_UAV_RWSTRUCTURED, 0}};
                 const Binding fit[] = {{"Donors", D3D_SIT_STRUCTURED, 0}, {"Receivers", D3D_SIT_STRUCTURED, 1},
                                        {"FitSettings", D3D_SIT_CBUFFER, 0}, {"Fit", D3D_SIT_UAV_RWSTRUCTURED, 0}};
-                const Binding* bindings = i == 0 ? donor : fit;
-                const size_t bindingCount = i == 0 ? sizeof(donor) / sizeof(donor[0]) : sizeof(fit) / sizeof(fit[0]);
+                const Binding moments[] = {{"Now", D3D_SIT_TEXTURE, 0}, {"Before0", D3D_SIT_TEXTURE, 1}, {"Before3", D3D_SIT_TEXTURE, 4},
+                                           {"Identity", D3D_SIT_STRUCTURED, 5}, {"PreviousIdentity0", D3D_SIT_STRUCTURED, 6},
+                                           {"PreviousIdentity3", D3D_SIT_STRUCTURED, 9}, {"InstanceIndex", D3D_SIT_TEXTURE, 10},
+                                           {"Settings", D3D_SIT_CBUFFER, 0}, {"Moments", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding evaluation[] = {{"Now", D3D_SIT_TEXTURE, 0}, {"Before0", D3D_SIT_TEXTURE, 1}, {"Before3", D3D_SIT_TEXTURE, 4},
+                                              {"Identity", D3D_SIT_STRUCTURED, 5}, {"PreviousIdentity0", D3D_SIT_STRUCTURED, 6},
+                                              {"PreviousIdentity3", D3D_SIT_STRUCTURED, 9}, {"InstanceIndex", D3D_SIT_TEXTURE, 10},
+                                              {"Moments", D3D_SIT_STRUCTURED, 11}, {"Settings", D3D_SIT_CBUFFER, 0},
+                                              {"Results", D3D_SIT_UAV_RWSTRUCTURED, 0}};
+                const Binding* bindings = i == 0 ? donor : i == 1 ? fit : i == 2 ? moments : evaluation;
+                const size_t bindingCount = i == 0 ? sizeof(donor) / sizeof(donor[0]) : i == 1 ? sizeof(fit) / sizeof(fit[0]) :
+                                            i == 2 ? sizeof(moments) / sizeof(moments[0]) : sizeof(evaluation) / sizeof(evaluation[0]);
                 bool bound = reflection != nullptr;
                 for (size_t j = 0; reflection && j < bindingCount; ++j) {
                     D3D11_SHADER_INPUT_BIND_DESC bind{};

@@ -2,9 +2,9 @@
 
 ## Status
 
-- **State:** pool-less views, the pistol's sibling motion and the retained-
-  index ring (104, 2026-10-07): BUILT, NOT FLOWN, over the pistol and `flat
-  source 5s` instruments. Grenade hold (104): FLOWN OK (4c69779f); naming vetoed.
+- **State:** range-aware invalidation of the weapon's vertex history, its
+  labels, write instrument and the sibling model's shadow (104, 2026-10-07):
+  BUILT, NOT FLOWN. e5207abe flew (a record-reclaimed storm). Grenade: FLOWN OK.
 - Established or qualified: camera ownership/jitter (26-28); F8 and menu
   treatment (34-37); cockpit projection and smoother DLSS edges (40-43); PS91
   motion ownership and rigid BFE shell motion (49-51); on-foot weapon camera
@@ -34,13 +34,13 @@
   motion; do not revive estimation or the retired deferred UI replay.
 - **Ruled out (103-104):** dormant SRC1 false rejection; forced-early UAV
   capture; raising the 64-draw/64-record bounds; a weapon-only cause.
-- **Next:** fly the pistol aiming at debris and the training mission turned
-  left (104's sibling, source and admission lines); 105 traces. Open: roof
-  shimmer/TAA, record-reclaimed storms (104). Retain 102's color-clear fix; no
-  per-weapon table; preserve Epic settings, 87's native FSR comparison, 83's
-  open items and high-G motion; do not repeat qualified PS91/BFE or
-  stale-resize hypotheses. Menu hangar-floor P1 open; VR regression tests and
-  `d9f86b09`'s concourse NPC belong to main/openxr-perf-gaps.
+- **Next:** walk the settlement with the 104 third build: weapon no-prior
+  falls to the standing level; read `flat foreground history 5s` (saved-writes,
+  entries) and `shadow 5s` (apply the affine fit only on its bins); 105 traces.
+  Open: roof shimmer/TAA. Retain 102's color-clear fix; no per-weapon table;
+  preserve Epic settings, 87's native FSR comparison, 83's open items and
+  high-G motion; do not repeat qualified PS91/BFE or stale-resize hypotheses.
+  Menu hangar-floor P1 open; VR tests and `d9f86b09` belong to main/openxr-perf-gaps.
 - **Test target (Sean):** all in-game tests on the Epic install under
   `C:\Program Files\Epic Games\EliteDangerous\Products`; keep its INI.
 - **Field reports (79-83):** users 1-2 refused every frame, 3 at 7-13 fps, 4
@@ -14069,6 +14069,202 @@ overlay admission refused:` names the gate.
 
 ruled out: a cost of the sibling pass to the quiet frame, because a frame in
 which every draw matched dispatches nothing (rig scene S7).
+
+### 2026-10-07, third build: range-aware invalidation, the history's size, the shadow of the sibling model
+
+**The flight (17:16, e5207abe, Epic).** The settlement walk is the sourced stretch
+17:18:19-17:19:54 at SS 1.0 (3840x2160), not the SS 2.0 terrain windows after it.
+Weapon-refused no-prior pixels were 0.17-1.20 percent of the frame while he
+walked (6.9M of 7.0M at 17:18:39), 2.9 percent at 17:19:54 (22.0M no-prior),
+and 0.00-0.01 percent standing (17:19:29-39, 1,121 frames, zero misses). The
+`unspecified` bucket (0.01-0.12 percent of the frame, the same in the SS 0.75
+terrain windows that looked clean) is not what he sees: its split instrument
+stays unbuilt.
+
+**What the log says about the misses.** `record-reclaimed` is 94.5 to 100
+percent of every window's same-key misses (5,546 of 5,870 at :39, 6,774 of
+6,818 at :49); the invalidated-vertices, invalidated-indices and
+invalidated-unknown patterns are 0 in all 48 windows; refused-last-frame-budget
+and -cap are 0, no draw was refused for the 128-record or 32 MiB bounds
+(`last-refusal=none`, H qualified every frame), and the budget receipts are
+`valid=0` because they fill only at a refusal, so records and bytes against the
+caps were not in the log at all. The misses are persistent: 250 of 282 frames
+have one at :39, the longest run is 251 frames, and 25 to 57 frames per window at
+17:18:19-:34 lost every draw at once. The 21 reclaimed example keys all sit on
+one of two index buffers: 000001293AFA5560 (17:18:19-:39; vertex buffers
+00000128B46C6CE0, 0000012CA3C9DB20, 0000012CA377BDA0) and 0000012CB7FBF620
+(:44-17:19:23; 0000012C7AF02A20, 0000012CA3C9DB20); the switch lines up with
+all-missed frames stopping. The keys are the weapon's own pieces (7B0DC42D and
+114AF608, the weapon vertex shaders, and the F516BF02/B40B0462 depth prepass at
+a count chain 57729, 38709, 29760, 28092, 24819, 16002, 6516, 2727, 876, 651,
+78) and 114AF608's base moves by -198, -304, -102 between windows: the arena
+re-places the mesh. The 36-draw windows (17:18:24-:49, 17:19:44-:54) and the
+19-draw windows (:54-17:19:39) are two different weapons (a rifle and a pistol,
+by the draw counts and the count chains); both lose records the same way, the
+pistol 3.5 a frame, the rifle 10 to 21.
+
+**Mechanism (code reading; the writer is not in the log).** A record leaves the
+history by two paths that touch one published the frame before, and both need it
+invalidated first: `resourceWritten` resets its stamps, and then `advance()`
+erased it at the next frame boundary (its erase test is true for stamps of
+`~0u`) or a different key's allocation reclaimed it under pressure. The prior is
+lost at the invalidation itself (a prior needs `stamp+1==frame`); the erase
+decides the label. invalidated-* being 0 while reclaimed is in the thousands
+says the writes land after the frame's last capture and before the next one's
+first (the invalidated record never survives to its key's next draw), which is
+what `advance()` does to every one of them. `resourceWritten` is per resource:
+any write to a shared arena buffer invalidates every record that reads it, the
+weapon's included, whether or not the write touches the weapon's bytes. Walking
+streams and relocates meshes in the arenas; standing does not.
+
+ruled out: the spent-record reclaim of the grenade build as the cause, because
+`spentForHistory` reclaims only records whose every stamp is two frames old or
+more, and the lost records were published the frame before.
+ruled out: the 128-record and 32 MiB bounds, because refused-last-frame-budget
+and -cap are 0 and no `history-budget` refusal appears in any window.
+open: whether every F516BF02/B40B0462 key among the misses is the weapon's own
+(the world's depth prepass is the same shader pair): the weapon-family keys among
+the misses and the 19 draws a frame standing say so, and the shadow's identity
+pooling will show world pieces if they are mixed in.
+open: which API writes the arenas (Map, UpdateSubresource, a copy or a compute
+UAV) and whether the weapon's own bytes are touched. The log of this build
+carries both.
+
+**Built (no new key, no behaviour of the map changed).**
+1. FIX A, range-aware invalidation, live. A write that carries a byte range
+   invalidates only the records that read bytes of it: UpdateSubresource's box
+   and CopySubresourceRegion's destination (the box, or the whole source's size
+   when the copy has none) are ranged; Map and Unmap, CopyResource, Clear, a
+   compute dispatch's UAV and an unknown write are the whole resource, as
+   before. A record's index range is exact from its key; its vertex extent (the
+   envelope of the vertices its indices name) is read back from a staging copy
+   of its indices three or more frames after the record is made, and until then
+   or if it never is, the whole vertex buffer counts. The adapter drops only the
+   draws of its own lists that a write touched (it dropped every one that used the
+   buffer), and a write that touches a draw captured this frame still fails the
+   frame. Under the extended policy an invalidated record keeps its allocation
+   until its key draws again or three frames pass (the reclaim's own comment
+   said it always should), so a redrawn key creates no buffers and reads as
+   `invalidated-*`, not as gone. The default policy (VR) is unchanged.
+2. FIX C, labels and sizes. `record-reclaimed` is split into
+   `reclaimed-by-advance` (a write invalidated it, its key did not draw in time,
+   the boundary aged it out) and `reclaimed-by-pressure` (another key's budget
+   took it); `record-reclaimed` is now the path nobody remembered (the
+   tombstone ring rolled) and must read 0. The no-candidate line gains
+   `records= bytes= peak-records= peak-bytes= allocations=`.
+3. The write instrument, `flat foreground history 5s:`, every zero printed:
+   erase paths; writes by entry (map, update, copy-region, copy-resource, clear,
+   dispatch-uav, other, unknown) observed, touching a live record's buffer as
+   vertices or indices, by gap or capture window, invalidating, ranged, ranged
+   and invalidating nothing (`saved-writes`: what the range kept whole), records
+   invalidated, `spared-records`, `extent-unknown-hits`, extent requests, reads
+   and failures, and the three resources written most. A write is counted once,
+   by the API-level report.
+4. The shadow of FIX B, `flat foreground shadow 5s:`, computed on one frame in
+   eight and applied to nothing (two compute passes a draw, the results read
+   back late). For every draw that matched its own history it predicts the
+   draw's own per-vertex motion from the other same-identity draws, with the
+   production mean model and with an affine screen-space model
+   (m = m0 + A(p - p0), least squares on every donor vertex, p in half-extents).
+   Affine, not rigid view-space: the donors' clip x, y and w are in both frames,
+   but a rigid fit needs the camera's projection scale and a pose solve. The
+   affine fit is a normal-equation solve over moments both shaders merge, exact
+   for roll, zoom and translation, and its failure to explain a donor set is a
+   number (the residual), not a threshold on the motion. It is only first order
+   for a pitch or a yaw: a rotation of a plane is a homography, and the rig
+   measures the perspective residual it leaves (below). If the flight's residual
+   bins are wide on a weapon that only turns in pitch and yaw, the next model is
+   the rigid view-space fit, not a looser gate. Gates: 24 donor vertices, conditioning
+   det/tr^2 of the donors' screen covariance at least 0.005, the donors' own
+   RMS residual at most 0.5 px, the receiver inside the donors' extent (5
+   percent and 0.01 wider) and depth range (25 percent wider). The error is the RMS
+   over the draw's vertices; bins 0.25 / 0.5 / 1 / 2 / 4 / more. Receivers
+   (draws with no history) are only classified: how many the current policy
+   refuses (`disagree`) that the affine gate would accept, and how often the
+   no-donor case (mode 2: zero motion, painted valid) fires while the draws that
+   did match moved over a pixel.
+
+**Tests.** The weapon-motion rig (WARP) is 227,221 checks (218,821 before): on
+the real history under the extended policy, the range cases (twelve byte ranges
+around two keys in one index buffer; every entry, role and timing; adjacent,
+empty and whole-buffer writes), the vertex extents (before and after the
+readback, three routes to the same bytes, 16-bit indices, an index buffer bound
+at an offset, a revived record forgetting its extent), retention (kept through
+the third boundary, gone at the fourth; the default policy unchanged),
+pressure (the cap filled and invalidated, one taken for a new key, the
+`reclaimed-by-pressure` label, a record published the frame before never
+taken), the top-resource and peak accessors, and the adapter (a disjoint range
+leaves H qualified and counts `saved-writes`; an overlapping one fails the
+frame; one API call reported twice is counted once; Window against Gap). The
+shadow's GPU parity runs on synthetic buffers with no VS and no adapter: 24
+random scenes, a 128-draw table and about twenty named scenes (rigid roll, yaw,
+step field, collinear donors, out-of-hull and depth receivers, a lone piece,
+unreadable identity, byte 30 and byte 31, triangles refused one at a time),
+kinds, donors and gate bits exact and floats within 5e-3 px (largest 0.0028),
+17 record mutations each failing the check; the dispatcher refuses 129 draws,
+fills its four slots and drains them, and puts back every compute binding the
+game had. The flat-temporal rig has the ledger labels, the line formats (every
+counter distinct, an empty window all zeros, the 4096 buffer), source-text pins
+with controls for the range gate, retention, the tombstone causes, the two
+write reports (counted once) and the shadow's isolation from the map, and the
+model: a 36x40 lattice in six pieces through a pinhole (60 degrees, 2560x1440)
+under a true rigid motion. Roll at 0.3 to 2 degrees: the affine model's RMS
+error is under 1e-5 px where the mean model's is 0.77 to 5.12 px and the
+donors' spread 2.4 to 16.1. Pitch, yaw and a diagonal axis at the same angles,
+448 px weapon: 0.025 to 0.234 px (ratio to the mean model at most 0.11), and
+the affine gate accepts every one while the current policy refuses from 1
+degree. A homography is not affine: the residual is first order in the angle
+and second in the weapon's width (0.518 px for 896 px at 1 degree, 1.88 px for
+1152 px at 2 degrees, where `kGateResidual` fails alone). Refusals, each with
+its control: a step field, oppositely rotating or different-pivot halves, exactly
+and nearly collinear donors, 23 against 24 donor vertices, a receiver beyond the
+hull margin and a depth beyond the ratio (edges bracketed), world parallax. A
+long-hand oracle (two-pass long-double sums) agrees with the model on 400
+random scenes. Private mutants against the real sources: 69 on the range,
+retention, tombstone and counter code, 76 on the model, counters and line, 38
+on the shader text, motion class, dispatcher and runtime, 30 on the compute
+shaders recompiled, 14 on the adapter: all killed, bar five that are equivalent
+by construction.
+- The shadow's gates refuse the end pieces of a strip-cut weapon by design (the
+  hull), so a tip or end piece's LOD swap shows as a hull failure and never an
+  affine accept; and `while-matched-draws-moved-over-1px` needs some matched
+  draw in the frame, so a frame where every draw lost history cannot fire it.
+- `reclaimed-by-advance` is nearly unreachable in a flight: `advance(frame)`
+  runs before any capture of the frame, so a record invalidated since the key's
+  last publish is at most a frame old; `reclaimed-by-pressure` is the live label
+  and `record-reclaimed` (the tombstone ring rolled) must read 0. `map=` counts
+  Map and Unmap, so it is about twice the Map calls.
+- A buffer a record reads as both its vertices and its indices counts as its
+  vertices (a hit on only its index bytes is labelled `invalidated-vertices`).
+
+**Flight pass signs.**
+- Walking the settlement: the census' weapon-refused no-prior pixels fall and
+  stay near the standing level (0.00-0.01 percent), and `record-reclaimed`,
+  `reclaimed-by-advance` and `reclaimed-by-pressure` are 0 or small in the
+  no-candidate line.
+- `saved-writes` and `spared-records` are what FIX A saved: if update and
+  copy-region carry the invalidating writes and `saved-writes` is a large part of
+  their `touching`, the over-invalidation was real and is cured. If the writes
+  that touch the weapon's buffers are map, copy-resource or dispatch-uav, FIX A
+  is inert and the counters say so; the next lever is then to validate
+  correspondence by content, not to invalidate by buffer.
+- `extent-unknown-hits` stays small (the readback lag) and `failed=0`;
+  `allocations` falls with the redraw of invalidated keys; `peak-records` and
+  `peak-bytes` give the real position against 128 records and 32 MiB.
+- The shadow: apply FIX B next only if, on the leave-one-out draws, the affine
+  model's error bins sit at or under 0.5 px where the mean model's sit at 1 px
+  or more, the affine gate accepts most of what the current policy refuses
+  (`affine-would-accept-of-refused` against `current-refuses`), and its
+  refusals are the residual, hull and depth gates (parts that move against each
+  other, other depths), not the fit-vertex count. If the residual bins are wide
+  the disagreement is not a rigid weapon's, and cross-object pooling by identity
+  is the next suspect. `view-attached ... fires ... while-matched-draws-moved`
+  counts how often mode 2's zero motion was wrong.
+
+ruled out: unspecified-weapon-refused as the white seen at the settlement, because
+the same fraction of the frame (0.01-0.12 percent) is in the SS 0.75 windows that
+looked clean, and the walking windows' no-prior (reason 3) pixels are 10 to 100
+times larger.
 
 ## 105. Different supporter: v0.18.2 AA selector refusal (2026-10-06)
 

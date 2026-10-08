@@ -38,8 +38,10 @@
 #include "flat_covered_draw_wiring_tests.h"
 #include "flat_hdr_crumbs_tests.h"
 #include "flat_no_candidate_tests.h"
+#include "flat_range_invalidate_tests.h"
 #include "flat_source_free_tests.h"
 #include "flat_sibling_policy_tests.h"
+#include "flat_shadow_model_tests.h"
 #include "../../src/d3d11/flat_runtime.h"
 #include "../../src/d3d11/flat_foreground_probe_policy.h"
 
@@ -2546,8 +2548,8 @@ void testStandDownWiring() {
         {&runtimeCpp, "if (s.work == FlatWork::Probe) return;", 1, "a Probe frame ends after the contract observation"},
         // The per-draw and per-call pieces, Paused frames.
         {&runtimeCpp, "if (s.work == FlatWork::Paused) return;", 3, "draw scope, dispatch scope and flatRuntimeUnknown return in a Paused frame"},
-        {&runtimeCpp, "if (!owner() || state().work == FlatWork::Paused) return;", 4,
-         "Written, Uavs, Unmap and Update return after owner() in a Paused frame"},
+        {&runtimeCpp, "if (!owner() || state().work == FlatWork::Paused) return;", 5,
+         "Written, WrittenExtent, Uavs, Unmap and Update return after owner() in a Paused frame"},
         {&runtimeCpp, "if (!owner() || type == D3D11_MAP_READ || state().work == FlatWork::Paused) return;", 1,
          "Map returns after owner() in a Paused frame"},
         // The camera witness runs in Full frames only.
@@ -2786,7 +2788,7 @@ void testFlatCpuWiring() {
         {&runtimeCpp, "flatcpu::kCopyChecks", 2, "the exact-shader verifications and the F10 captures are timed"},
         {&runtimeCpp, "flatcpu::kCameraRows", 2, "the camera lookup and hash, and capture()"},
         {&runtimeCpp, "flatcpu::kTrace", 5, "every trace-ring copy is timed: capture, dispatch, write, record and the HDR route's resolve marker"},
-        {&runtimeCpp, "flatcpu::kResource", 4, "Written, Map, Unmap and Update time their lookups"},
+        {&runtimeCpp, "flatcpu::kResource", 5, "Written, WrittenExtent, Map, Unmap and Update time their lookups"},
         {&runtimeCpp, "flatcpu::kCoverage", 1, "coverage classification"},
         {&runtimeCpp, "flatcpu::kProjection", 3, "qualifyProjection, the private binding and its restore"},
         {&runtimeCpp, "flatcpu::kShadows", 7, "the constant-buffer shadow observers and map-cache install/flush"},
@@ -3918,10 +3920,15 @@ int main(int argc, char** argv) {
     failures += flatNoCandidateTests();
     failures += flatSourceSpellTests();
     failures += flatNoCandidateWiringTests();
+    failures += flatRangeInvalidateTests();
+    failures += flatRangeInvalidateWiringTests();
     failures += flatSourceFreeTests();
     failures += flatSourceFreeWiringTests();
     failures += flatSiblingPolicyTests();
     failures += flatSiblingWiringTests();
+    failures += flatShadowModelTests();
+    failures += flatShadowAccumulateTests();
+    failures += flatShadowWiringTests();
     if (failures) return 1;
     std::puts("flat temporal collector policy: PASS");
     return 0;

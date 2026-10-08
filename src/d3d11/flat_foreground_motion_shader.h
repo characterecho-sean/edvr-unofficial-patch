@@ -252,12 +252,212 @@ void main(uint3 t:SV_DispatchThreadID){
  Fit[d*2+1]=float4(donors,n,0,0);
 }
 )HLSL";
+// THE SHADOW OF THE SIBLING MODEL, the two compute shaders (flat_foreground_shadow.h states what it measures and why; flat_foreground_shadow_gpu.h
+// dispatches them). Both are the map's match text (Now, Before0..3, Identity, PreviousIdentity0..3, InstanceIndex, Settings, resolveGpuIdentity) and
+// a body, so a vertex's motion is exactly the one the donor pass and the map take. Nothing here is read by the map: the tables are the shadow's own.
+//
+// The first, one thread group a draw that has priors: the draw's vertices (those the map would give a valid sample, the donor pass's own test) are
+// accumulated into centered moments over (u, v, mx, my) -- u and v the screen position in units of half the render size, mx and my the motion in
+// pixels -- by Welford's update in each thread and Chan's merge across the group. Eight uint4 a draw (floats as bit patterns): (n, identity.x,
+// identity.y without byte 30, matched), the mean, (Suu, Suv, Svv, Sxx), (Sux, Suy, Svx, Svy), Syy, the minimum, the maximum, and the view depth range.
+// The second, one thread group a draw of the frame: the draws of its identity that matched, others than itself, are merged into the donors it would
+// have had; the mean model and the affine model are formed from them; and the group measures both against the draw's own vertices when it matched
+// (leave-one-out), or only the draw's extent when it did not. Three uint4 a draw: (kind, donor draws, rms error of the mean model, rms error of the
+// affine model), (the donors' fit residual, their spread, their vertices, the gate bits), (the draw's own mean motion, vertices compared, 0).
+inline constexpr char kFlatForegroundShadowCommon[]=R"HLSL(
+static const float kMotionLimit=256.0;
+static const uint kMinVertices=3,kMinFitVertices=24;
+static const float kSpreadLimit=1.0,kResidualLimit=0.5,kConditioning=0.005,kHullMargin=0.05,kHullFloor=0.01,kDepthRatio=1.25;
+struct Acc{float n;float4 mean;float4 a;float4 b;float c;float4 lo;float4 hi;float2 w;};
+Acc emptyAcc(){Acc s;s.n=0;s.mean=0;s.a=0;s.b=0;s.c=0;s.lo=float4(1e30,1e30,1e30,1e30);s.hi=-s.lo;s.w=float2(1e30,-1e30);return s;}
+void addSample(inout Acc s,float4 x,float w){
+ s.n+=1;float4 d=x-s.mean;s.mean+=d/s.n;float4 e=x-s.mean;
+ s.a+=float4(d.x*e.x,d.x*e.y,d.y*e.y,d.z*e.z);
+ s.b+=float4(d.x*e.z,d.x*e.w,d.y*e.z,d.y*e.w);
+ s.c+=d.w*e.w;
+ s.lo=min(s.lo,x);s.hi=max(s.hi,x);s.w=float2(min(s.w.x,w),max(s.w.y,w));
+}
+Acc mergeAcc(Acc p,Acc q){
+ if(q.n==0)return p;
+ if(p.n==0)return q;
+ Acc r;r.n=p.n+q.n;float4 d=q.mean-p.mean;float f=p.n*q.n/r.n;
+ r.mean=p.mean+d*(q.n/r.n);
+ r.a=p.a+q.a+f*float4(d.x*d.x,d.x*d.y,d.y*d.y,d.z*d.z);
+ r.b=p.b+q.b+f*float4(d.x*d.z,d.x*d.w,d.y*d.z,d.y*d.w);
+ r.c=p.c+q.c+f*d.w*d.w;
+ r.lo=min(p.lo,q.lo);r.hi=max(p.hi,q.hi);r.w=float2(min(p.w.x,q.w.x),max(p.w.y,q.w.y));
+ return r;
+}
+// A vertex of the draw as the donor pass takes it: its screen position (u, v in half-extents), motion in pixels, view depth. False when the map would
+// give it no valid sample.
+bool shadowVertex(uint id,out float4 x,out float w){
+ x=0;w=0;
+ const uint first=id-id%3;
+ const float4 now=Now[id],n0=Now[first],n1=Now[first+1],n2=Now[first+2];
+ const bool currentValid=validPosition(n0) && validPosition(n1) && validPosition(n2) &&
+  asuint(n1.z)==asuint(n0.z) && asuint(n2.z)==asuint(n0.z);
+ const Resolved r=resolveGpuIdentity(id,currentValid);
+ if(r.valid!=1 || !(r.old.w>0) || !(now.w>0) || !all(isfinite(r.old)))return false;
+ const float2 cur=(now.xy/now.w*float2(.5,-.5)+.5)*extentPhase.xy;
+ const float2 prev=(r.old.xy/r.old.w*float2(.5,-.5)+.5)*extentPhase.xy;
+ const float2 m=(prev-r.oldPhase)-(cur-extentPhase.zw);
+ if(!all(isfinite(m)) || any(abs(m)>kMotionLimit))return false;
+ x=float4(cur/extentPhase.xy*2-1,m);w=now.w;
+ return true;
+}
+)HLSL";
+inline constexpr char kFlatForegroundShadowMomentsBody[]=R"HLSL(
+RWStructuredBuffer<uint4> Moments:register(u0);
+groupshared Acc gAcc[256];
+[numthreads(256,1,1)]
+void main(uint tid:SV_GroupIndex){
+ const uint draw=sibling.y,count=sibling.z;
+ Acc acc=emptyAcc();
+ for(uint id=tid;id<count;id+=256){
+  float4 x;float w;
+  if(shadowVertex(id,x,w))addSample(acc,x,w);
+ }
+ gAcc[tid]=acc;
+ GroupMemoryBarrierWithGroupSync();
+ [unroll]for(uint s=128;s>0;s>>=1){
+  if(tid<s)gAcc[tid]=mergeAcc(gAcc[tid],gAcc[tid+s]);
+  GroupMemoryBarrierWithGroupSync();
+ }
+ if(tid==0){
+  const Acc t=gAcc[0];
+  const uint4 identity=Identity[0];const uint raw=InstanceIndex[0],slot=raw&0x007fffff;
+  uint readable;
+  const bool authentic=raw==slot && slot<0x007fffff && identity.z!=0;
+  const uint matched=(authentic && matchedPriors(identity,readable)!=0)?1u:0u;
+  const uint b=draw*8;
+  Moments[b]=uint4(asuint(t.n),identity.x,identity.y&kIdentityParameterMask,matched);
+  Moments[b+1]=asuint(t.mean);
+  Moments[b+2]=asuint(t.a);
+  Moments[b+3]=asuint(t.b);
+  Moments[b+4]=uint4(asuint(t.c),0,0,0);
+  Moments[b+5]=asuint(t.lo);
+  Moments[b+6]=asuint(t.hi);
+  Moments[b+7]=uint4(asuint(t.w.x),asuint(t.w.y),0,0);
+ }
+}
+)HLSL";
+inline constexpr char kFlatForegroundShadowEvalBody[]=R"HLSL(
+StructuredBuffer<uint4> Moments:register(t11);
+RWStructuredBuffer<uint4> Results:register(u0);
+Acc loadAcc(uint j){
+ Acc q;const uint b=j*8;
+ q.n=asfloat(Moments[b].x);q.mean=asfloat(Moments[b+1]);q.a=asfloat(Moments[b+2]);q.b=asfloat(Moments[b+3]);
+ q.c=asfloat(Moments[b+4].x);q.lo=asfloat(Moments[b+5]);q.hi=asfloat(Moments[b+6]);
+ const uint4 w=Moments[b+7];q.w=float2(asfloat(w.x),asfloat(w.y));
+ return q;
+}
+groupshared Acc gPool;
+groupshared uint gDonors;
+groupshared float4 gModel;      // m0.x, m0.y, u0, v0
+groupshared float4 gAffine;     // ax, bx, ay, by
+groupshared float4 gFit;        // residual rms, spread, conditioning, solved
+groupshared float4 gSum[256];   // sum of the mean model's squared error, the affine's, vertices compared, 0
+groupshared float4 gLo[256];    // u, v, w minima of the draw's valid current vertices
+groupshared float4 gHi[256];
+[numthreads(256,1,1)]
+void main(uint tid:SV_GroupIndex){
+ const uint self=sibling.y,count=sibling.z,total=sibling.w;
+ const uint4 identity=Identity[0];
+ const bool unreadable=identity.z==0;
+ const uint4 own0=Moments[self*8];
+ const bool matchedFlag=own0.w!=0;
+ const bool hasOwn=matchedFlag && asfloat(own0.x)>0 && !unreadable;
+ if(tid==0){
+  Acc p=emptyAcc();uint donors=0;
+  for(uint j=0;j<total && !unreadable;++j){
+   if(j==self)continue;
+   const uint4 r0=Moments[j*8];
+   if(r0.w==0 || !(asfloat(r0.x)>0) || r0.y!=identity.x || r0.z!=(identity.y&kIdentityParameterMask))continue;
+   p=mergeAcc(p,loadAcc(j));++donors;
+  }
+  gPool=p;gDonors=donors;
+  const float det=p.a.x*p.a.z-p.a.y*p.a.y,tr=p.a.x+p.a.z;
+  const bool solved=det>0 && tr>0;
+  float ax=0,bx=0,ay=0,by=0,resid=0;
+  if(solved){
+   ax=(p.a.z*p.b.x-p.a.y*p.b.z)/det;bx=(-p.a.y*p.b.x+p.a.x*p.b.z)/det;
+   ay=(p.a.z*p.b.y-p.a.y*p.b.w)/det;by=(-p.a.y*p.b.y+p.a.x*p.b.w)/det;
+   const float rssx=p.a.w-(ax*p.b.x+bx*p.b.z),rssy=p.c-(ay*p.b.y+by*p.b.w);
+   resid=sqrt(max(rssx+rssy,0)/p.n);
+  }
+  gModel=float4(p.mean.z,p.mean.w,p.mean.x,p.mean.y);
+  gAffine=float4(ax,bx,ay,by);
+  gFit=float4(resid,max(p.hi.z-p.lo.z,p.hi.w-p.lo.w),tr>0?det/(tr*tr):0,solved?1:0);
+ }
+ GroupMemoryBarrierWithGroupSync();
+ const uint donors=gDonors;
+ float4 sum=0,lo=float4(1e30,1e30,1e30,0),hi=float4(-1e30,-1e30,-1e30,0);
+ for(uint id=tid;id<count;id+=256){
+  const float4 now=Now[id];
+  if(unreadable || !(validPosition(now) && now.w>0))continue;
+  const float2 cur=(now.xy/now.w*float2(.5,-.5)+.5)*extentPhase.xy;
+  const float2 uv=cur/extentPhase.xy*2-1;
+  lo=float4(min(lo.xy,uv),min(lo.z,now.w),0);hi=float4(max(hi.xy,uv),max(hi.z,now.w),0);
+  if(hasOwn && donors>0){
+   float4 x;float w;
+   if(shadowVertex(id,x,w)){
+    const float2 em=x.zw-gModel.xy;
+    const float2 fm=gModel.xy+float2(gAffine.x*(x.x-gModel.z)+gAffine.y*(x.y-gModel.w),gAffine.z*(x.x-gModel.z)+gAffine.w*(x.y-gModel.w));
+    const float2 ea=x.zw-fm;
+    sum+=float4(dot(em,em),dot(ea,ea),1,0);
+   }
+  }
+ }
+ gSum[tid]=sum;gLo[tid]=lo;gHi[tid]=hi;
+ GroupMemoryBarrierWithGroupSync();
+ [unroll]for(uint s=128;s>0;s>>=1){
+  if(tid<s){gSum[tid]+=gSum[tid+s];gLo[tid]=min(gLo[tid],gLo[tid+s]);gHi[tid]=max(gHi[tid],gHi[tid+s]);}
+  GroupMemoryBarrierWithGroupSync();
+ }
+ if(tid==0){
+  const Acc p=gPool;
+  float kind=0;
+  if(unreadable)kind=5.0;
+  else if(matchedFlag)kind=!hasOwn?0.0:(donors>0?1.0:2.0);
+  else kind=donors>0?3.0:4.0;
+  uint gates=0;
+  float rmsMean=0,rmsAffine=0,evaluated=0;
+  if(donors>0){
+   if(p.n>=kMinVertices)gates|=1;
+   if(gFit.y<=kSpreadLimit)gates|=2;
+   if(p.n>=kMinFitVertices)gates|=4;
+   if(gFit.w!=0 && gFit.z>=kConditioning)gates|=8;
+   if(gFit.w!=0 && gFit.x<=kResidualLimit)gates|=16;
+   const float mu=kHullMargin*(p.hi.x-p.lo.x)+kHullFloor,mv=kHullMargin*(p.hi.y-p.lo.y)+kHullFloor;
+   const float3 rl=gLo[0].xyz,rh=gHi[0].xyz;
+   if(rl.x<=rh.x && rl.x>=p.lo.x-mu && rh.x<=p.hi.x+mu && rl.y>=p.lo.y-mv && rh.y<=p.hi.y+mv)gates|=32;
+   if(rl.x<=rh.x && rl.z>=p.w.x/kDepthRatio && rh.z<=p.w.y*kDepthRatio)gates|=64;
+  }
+  if(kind==1.0){
+   const float nv=max(gSum[0].z,1.0);
+   evaluated=gSum[0].z;rmsMean=sqrt(gSum[0].x/nv);rmsAffine=gFit.w!=0?sqrt(gSum[0].y/nv):rmsMean;
+  }
+  Results[self*3]=uint4(asuint(kind),asuint(float(donors)),asuint(rmsMean),asuint(rmsAffine));
+  Results[self*3+1]=uint4(asuint(gFit.x),asuint(gFit.y),asuint(p.n),asuint(float(gates)));
+  Results[self*3+2]=uint4(asuint(matchedFlag?asfloat(Moments[self*8+1].z):0.0),asuint(matchedFlag?asfloat(Moments[self*8+1].w):0.0),asuint(evaluated),0);
+ }
+}
+)HLSL";
 namespace flat_foreground_detail {
 template<std::size_t A,std::size_t B>
 constexpr std::array<char,A+B-1> concat(const char (&a)[A],const char (&b)[B]) {
     std::array<char,A+B-1> r{};
     for(std::size_t i=0;i+1<A;++i)r[i]=a[i];
     for(std::size_t i=0;i<B;++i)r[A-1+i]=b[i];
+    return r;
+}
+// The same for three pieces: the shadow's shaders are the map's match text, the shadow's common text and a body.
+template<std::size_t A,std::size_t B,std::size_t C>
+constexpr std::array<char,A+B+C-2> concat3(const char (&a)[A],const char (&b)[B],const char (&c)[C]) {
+    std::array<char,A+B+C-2> r{};
+    for(std::size_t i=0;i+1<A;++i)r[i]=a[i];
+    for(std::size_t i=0;i+1<B;++i)r[A-1+i]=b[i];
+    for(std::size_t i=0;i<C;++i)r[A+B-2+i]=c[i];
     return r;
 }
 } // namespace flat_foreground_detail
@@ -267,4 +467,8 @@ inline constexpr auto kFlatForegroundDonorCsText=flat_foreground_detail::concat(
 inline constexpr const char* kFlatForegroundMotionVs=kFlatForegroundMotionVsText.data();
 inline constexpr const char* kFlatForegroundDonorCs=kFlatForegroundDonorCsText.data();
 inline constexpr const char* kFlatForegroundFitCs=kFlatForegroundFitBody;
+inline constexpr auto kFlatForegroundShadowMomentsCsText=flat_foreground_detail::concat3(kFlatForegroundMatchHlsl,kFlatForegroundShadowCommon,kFlatForegroundShadowMomentsBody);
+inline constexpr auto kFlatForegroundShadowEvalCsText=flat_foreground_detail::concat3(kFlatForegroundMatchHlsl,kFlatForegroundShadowCommon,kFlatForegroundShadowEvalBody);
+inline constexpr const char* kFlatForegroundShadowMomentsCs=kFlatForegroundShadowMomentsCsText.data();
+inline constexpr const char* kFlatForegroundShadowEvalCs=kFlatForegroundShadowEvalCsText.data();
 } // namespace edvr

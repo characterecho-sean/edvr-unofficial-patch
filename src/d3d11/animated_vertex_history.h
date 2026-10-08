@@ -2,9 +2,11 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
 #include "animated_history_ledger.h"
+#include "animated_history_writes.h"
 #include "panel_curve.h"
 #include "shader_swap.h"
 #include "temporal_shader_bytecode.h"
@@ -101,6 +103,7 @@ public:
     bool prepareCapture(ID3D11DeviceContext* ctx,unsigned count,unsigned instances,
                          unsigned start,int base,unsigned startInstance,unsigned frame,Capture& out,bool extended=false) {
         out=Capture{};out.frame=frame;
+        if(extended)retainInvalid_=true;
         // A refusal before the key is built is the ledger's "offered, no key" (section 104); one after it is the key's refusal, noted with it.
         auto refuse=[&](const char* why){out.refusal=why;if(extended)ledger_.noteUnkeyed(frame);return false;};
         if(failed_ || !ctx || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE ||
@@ -177,6 +180,7 @@ public:
             // The record is handed over as the draw's one candidate and the GPU identity still decides whether it is the draw's own; every
             // other pattern stays as it was.
             out.missed=true;
+            if(!facts.exactPresent)facts.goneBy=goneBy(ledgerKey,frame);
             out.miss=ledger_.classify(frame,ledgerKey,facts);
             if(out.miss.gap==HistoryGap::OffsetShift && shiftIndex<records_.size()) {
                 prior[priorCount++]=shiftIndex;out.priorRecords=priorCount;out.acrossOffset=true;
@@ -217,15 +221,19 @@ public:
                     if(!reclaimedCapture && it->geometry.original==key.original)
                         reclaimedCapture=it->capture;
                     const unsigned released=it->geometry.count*32;
+                    noteErased(*it,it->invalidated?HistoryErase::PressureInvalidated:HistoryErase::PressureSpent,frame);
                     bytes_-=released;++reclaimedRecords_;reclaimedBytes_+=released;
                     it=records_.erase(it);
                 }
             }
             if(overBudget())return refuseKeyed("history-budget",HistoryLedger::RefusedBudget);
             Record record;record.geometry=key;record.capture=std::move(reclaimedCapture);
+            indexRange(key,record.ibFirst,record.ibEnd);
             if(!allocate(dev.Get(),record)){failed_=true;return refuseKeyed("resource-creation",HistoryLedger::RefusedOther);}
             bytes_+=count*32;records_.push_back(std::move(record));found=records_.end()-1;
+            peakRecords_=(std::max)(peakRecords_,unsigned(records_.size()));peakBytes_=(std::max)(peakBytes_,bytes_);
         }
+        if(found->invalidated){found->extentState=0;found->extentSlot=-1;}
         found->invalidated=false;found->invalidReasons=0;
         if(extended)out.ledgerToken=ledger_.note(frame,ledgerKey,HistoryLedger::Captured);
         out.recordEpoch=found->mutationEpoch;
@@ -286,6 +294,7 @@ public:
         if(!initializeIdentity(ctx,dev.Get())){out.refusal="resource-creation";return false;}
         submitIdentity(ctx,out);submitPositions(ctx,draw,startInstance,out);
         if(retainIndex && !retainInstanceIndex(ctx,out)){out.refusal="index-snapshot-creation";return false;}
+        if(extended)issueExtent(ctx,out);
         return true;
     }
     // One instance per admitted draw: a single four-byte index describes every
@@ -325,22 +334,115 @@ public:
     // Resources made for the retained scalars over this history's life (the buffer and its views, once) and the draws that used a slot.
     uint64_t retainCreated() const{return retainCreated_;}
     uint64_t retainUsed() const{return retainUsed_;}
+    //
+    // Under the extended policy an invalidated record keeps its allocation until its key draws again or kInvalidKeepFrames pass (section 104:
+    // the comment at the reclaim says it was always meant to; this loop erased every record whose stamps a write had reset, one frame boundary
+    // after the write). A prior is lost by the invalidation, not by the erase; what the keep saves is the four buffers and six views a
+    // redrawn key would otherwise create again, and the label: a record found invalidated names the write, one found gone names nothing.
     void advance(unsigned frame) {
+        lastFrame_=frame;
         reclaimedRecords_=reclaimedBytes_=0;
         for(auto it=records_.begin();it!=records_.end();)
-            if((it->frame[0]==~0u || frame-it->frame[0]>2) && (it->frame[1]==~0u || frame-it->frame[1]>2)) {
+            if((it->frame[0]==~0u || frame-it->frame[0]>2) && (it->frame[1]==~0u || frame-it->frame[1]>2) &&
+               (!retainInvalid_ || !it->invalidated || frame-it->invalidatedAt>kInvalidKeepFrames)) {
+                noteErased(*it,it->invalidated?HistoryErase::AdvanceInvalidated:HistoryErase::AdvanceAged,frame);
                 bytes_-=it->geometry.count*32;it=records_.erase(it);
             } else ++it;
     }
     // Returns the adapter's existing diagnostic reason bits: unknown / VB / IB.
-    unsigned resourceWritten(ID3D11Resource* resource) {
+    //
+    // A write that carries a byte range ([first,end) of the resource: UpdateSubresource's box, CopySubresourceRegion's destination) invalidates
+    // only the records that read bytes of it (section 104): the exact index range, or the vertex extent, which counts as the whole buffer until
+    // it is read back. Without a range, and for a nullptr resource, every record that reads the resource falls, as before. `entry` and `timing`
+    // only name the write for the counters; `tally` false invalidates without counting (a second notification of a write already counted).
+    unsigned resourceWritten(ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0),
+                             HistoryWriteEntry entry=HistoryWriteEntry::Other,HistoryWriteTiming timing=HistoryWriteTiming::Gap,
+                             bool tally=true) {
         unsigned reasons=0;
-        for(auto& r:records_)if(!resource || resource==r.geometry.vertices.Get() || resource==r.geometry.indices.Get()) {
-            const unsigned why=!resource?1:resource==r.geometry.vertices.Get()?2:4;
+        const unsigned e=resource?unsigned(entry):unsigned(HistoryWriteEntry::Unknown),t=unsigned(timing);
+        const bool ranged=resource && end!=~uint64_t(0);
+        unsigned liveV=0,liveI=0,hitV=0,hitI=0,hitRecords=0,spared=0,unknownHits=0;
+        if(tally)++writeStats_.observed[e];
+        for(auto& r:records_) {
+            const bool isV=resource && resource==r.geometry.vertices.Get(),isI=resource && resource==r.geometry.indices.Get();
+            if(resource && !isV && !isI)continue;
+            const bool live=!r.invalidated;
+            if(live){liveV+=isV;liveI+=isI && !isV;}
+            bool unknownExtent=false;
+            if(ranged && !readsBytesOf(r.geometry,r.extentState==2,r.vbFirst,r.vbEnd,resource,first,end,unknownExtent)){
+                if(live)++spared;
+                continue;
+            }
+            const unsigned why=!resource?1:isV?2:4;
             reasons|=why;
+            if(live){++hitRecords;hitV+=isV;hitI+=isI && !isV;if(unknownExtent)++unknownHits;r.invalidatedAt=lastFrame_;}
             r.frame[0]=r.frame[1]=~0u;r.invalidated=true;r.invalidReasons|=why;++r.mutationEpoch;
         }
+        if(!tally)return reasons;
+        if(resource) {
+            if(liveV)++writeStats_.touching[e][unsigned(HistoryWriteRole::Vertices)][t];
+            if(liveI)++writeStats_.touching[e][unsigned(HistoryWriteRole::Indices)][t];
+            if(hitV)++writeStats_.invalidating[e][unsigned(HistoryWriteRole::Vertices)][t];
+            if(hitI)++writeStats_.invalidating[e][unsigned(HistoryWriteRole::Indices)][t];
+            if(liveV+liveI) {
+                if(ranged)++writeStats_.ranged[e];
+                if(ranged && !hitRecords)++writeStats_.savedWrites[e];
+                noteTop(resource,hitRecords!=0,ranged && !hitRecords);
+            }
+        } else if(hitRecords)++writeStats_.unknownInvalidating[t];
+        writeStats_.recordsInvalidated[e]+=hitRecords;writeStats_.sparedRecords+=spared;writeStats_.extentUnknownHits+=unknownHits;
         return reasons;
+    }
+    // Whether a write of [first,end) to `resource` touched bytes this capture's geometry reads (its record's vertex extent when it has one):
+    // the adapter drops the draws of its own lists that a write touched, and keeps the rest.
+    bool captureHitBy(const Capture& c,ID3D11Resource* resource,uint64_t first=0,uint64_t end=~uint64_t(0)) const {
+        if(!resource)return true;
+        bool known=false;uint64_t vbFirst=0,vbEnd=0;
+        for(const auto& r:records_)if(r.extentState==2 && matches(r.geometry,c.geometry)){known=true;vbFirst=r.vbFirst;vbEnd=r.vbEnd;break;}
+        bool unknown=false;
+        return readsBytesOf(c.geometry,known,vbFirst,vbEnd,resource,first,end,unknown);
+    }
+    // Reads the vertex extents that are ready: at most two a frame, none waited for (all of them, waiting, in a rig).
+    void pollExtents(ID3D11DeviceContext* ctx,unsigned frame,bool wait=false) {
+        if(!ctx)return;
+        unsigned budget=wait?kExtentSlots:2;
+        for(unsigned i=0;i<extentSlots_.size() && budget;++i) {
+            ExtentSlot& s=extentSlots_[i];
+            if(!s.pending)continue;
+            if(!wait && frame-s.frame<3)continue;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            const HRESULT hr=ctx->Map(s.stage.Get(),0,D3D11_MAP_READ,wait?0u:D3D11_MAP_FLAG_DO_NOT_WAIT,&m);
+            if(FAILED(hr) || !m.pData) {
+                if(frame-s.frame>16)finishExtent(i,false,0,0);
+                continue;
+            }
+            --budget;
+            const bool wide=s.format!=DXGI_FORMAT_R16_UINT;
+            const size_t n=size_t(s.bytes/(wide?4:2));
+            uint32_t low=~0u,high=0;bool bad=n==0;
+            for(size_t k=0;k<n && !bad;++k) {
+                const uint32_t v=wide?static_cast<const uint32_t*>(m.pData)[k]:uint32_t(static_cast<const uint16_t*>(m.pData)[k]);
+                if(v==(wide?0xFFFFFFFFu:0xFFFFu)){bad=true;break;}
+                low=(std::min)(low,v);high=(std::max)(high,v);
+            }
+            ctx->Unmap(s.stage.Get(),0);
+            finishExtent(i,!bad,low,high);
+        }
+    }
+    const HistoryWriteStats& writeStats() const{return writeStats_;}
+    // The resources written most in the window, most first, and forgets them. A resource is listed with the writes that touched a live record
+    // of it, the ones that invalidated, and the ranged ones that invalidated none.
+    unsigned takeTopResources(HistoryWriteTop* out,unsigned capacity) {
+        std::sort(top_,top_+kHistoryTopResources,[](const HistoryWriteTop& a,const HistoryWriteTop& b){return a.touching>b.touching;});
+        unsigned n=0;
+        for(unsigned i=0;i<kHistoryTopResources && n<capacity;++i)if(top_[i].resource)out[n++]=top_[i];
+        for(auto& t:top_)t=HistoryWriteTop{};
+        return n;
+    }
+    // The records and bytes the history held at its highest since the last call, then the current ones.
+    void takePeaks(unsigned& records,unsigned& bytes) {
+        records=(std::max)(peakRecords_,unsigned(records_.size()));bytes=(std::max)(peakBytes_,bytes_);
+        peakRecords_=unsigned(records_.size());peakBytes_=bytes_;
     }
     // Whether an offset-shift rescue still stands at the end of the frame (section 104). A mesh that moved vacates its old place; if another
     // draw has used the donor record this frame, the old place is drawn again and nothing moved: the two draws are siblings (two parts of one
@@ -383,7 +485,36 @@ private:
         uint64_t mutationEpoch=0;bool invalidated=false;
         unsigned invalidReasons=0;   // the writes that invalidated it (resourceWritten's bits), until its key draws again
         unsigned claimFrame=~0u;     // the frame a draw of another key took it as its one candidate (the offset-shift rescue)
+        // The bytes the draw reads (section 104, range-aware invalidation). The index range is exact from the key. The vertex extent is the
+        // envelope of the vertices the indices name, read back a few frames after the record was made (issueExtent, pollExtents); until it
+        // is, or if it never is, the whole vertex buffer counts as read. 0 unknown, 1 requested, 2 known, 3 failed (both whole).
+        uint64_t ibFirst=0,ibEnd=0,vbFirst=0,vbEnd=0;
+        uint8_t extentState=0;int8_t extentSlot=-1;unsigned extentFrame=0;
+        unsigned invalidatedAt=0;    // the history's frame when a write invalidated it: how long advance() keeps it for its key to draw again
     };
+    // The index range a geometry reads, in bytes of its index buffer.
+    static void indexRange(const Geometry& g,uint64_t& first,uint64_t& end) {
+        const uint64_t size=g.format==DXGI_FORMAT_R16_UINT?2u:4u;
+        first=uint64_t(g.indexOffset)+uint64_t(g.start)*size;end=first+uint64_t(g.count)*size;
+    }
+    // Whether a write of [first,end) bytes to `resource` touches bytes this geometry reads. Without a range the whole resource is written.
+    // `unknownExtent` is set when the answer is yes only because the vertex extent is not known.
+    static bool readsBytesOf(const Geometry& g,bool extentKnown,uint64_t vbFirst,uint64_t vbEnd,
+                             ID3D11Resource* resource,uint64_t first,uint64_t end,bool& unknownExtent) {
+        unknownExtent=false;
+        const bool isV=resource==g.vertices.Get(),isI=resource==g.indices.Get();
+        if(!isV && !isI)return false;
+        if(end==~uint64_t(0))return true;
+        if(isI){uint64_t a=0,b=0;indexRange(g,a,b);if(historyRangesOverlap(first,end,a,b))return true;}
+        if(isV){
+            if(!extentKnown){unknownExtent=true;return true;}
+            if(historyRangesOverlap(first,end,vbFirst,vbEnd))return true;
+        }
+        return false;
+    }
+    static constexpr unsigned kInvalidKeepFrames=3,kExtentSlots=24,kTombstones=128;
+    struct ExtentSlot {Ptr<ID3D11Buffer> stage;bool pending=false;unsigned frame=0;uint64_t bytes=0,key=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;};
+    struct Tombstone {uint64_t key=0;unsigned frame=0;uint8_t cause=0;};
     // A record no later frame can use as a prior: it has been used, none of its frames is this frame or the one before, so it is neither
     // this frame's nor a candidate (a prior is a record used the frame before). A pending record (never published) is not spent: a
     // prepared capture may still publish it.
@@ -421,6 +552,12 @@ private:
         return !r.invalidated && r.frame[previous]!=~0u && r.frame[previous]+1==frame;
     }
     bool allocate(ID3D11Device* dev,Record& r) {
+        ++writeStats_.allocations;
+        const bool ok=allocateBuffers(dev,r);
+        if(!ok)++writeStats_.allocationFailures;
+        return ok;
+    }
+    bool allocateBuffers(ID3D11Device* dev,Record& r) {
         for(const auto& cached:records_)if(cached.geometry.original==r.geometry.original){r.capture=cached.capture;break;}
         if(!r.capture) {
             UINT size=0;
@@ -442,8 +579,83 @@ private:
                               FAILED(dev->CreateUnorderedAccessView(r.identity[i].Get(),nullptr,&r.identityUavs[i])))return false;
         return true;
     }
+    void noteTop(const void* resource,bool invalidating,bool saved) {
+        HistoryWriteTop* slot=nullptr;
+        for(auto& t:top_)if(t.resource==resource){slot=&t;break;}
+        if(!slot)for(auto& t:top_)if(!t.resource){slot=&t;break;}
+        if(!slot) {   // the table is full: the quietest entry makes room
+            slot=&top_[0];
+            for(auto& t:top_)if(t.touching<slot->touching)slot=&t;
+            *slot=HistoryWriteTop{};
+        }
+        slot->resource=resource;++slot->touching;if(invalidating)++slot->invalidating;if(saved)++slot->saved;
+    }
+    // A record leaves the history here or in advance(): counted by path, and remembered so the ledger can say how a published key's record went.
+    void noteErased(const Record& r,HistoryErase why,unsigned frame) {
+        ++writeStats_.erased[unsigned(why)];
+        if(tombs_.empty())tombs_.resize(kTombstones);
+        Tombstone& t=tombs_[tombNext_++%kTombstones];
+        t.key=historyKeyHash(historyKeyOf(r.geometry));t.frame=frame;
+        t.cause=(why==HistoryErase::AdvanceInvalidated || why==HistoryErase::AdvanceAged)?1:2;
+    }
+    // How the newest record of this key left the history in the last two frames: 1 at the frame boundary, 2 for budget pressure, 0 unknown.
+    unsigned goneBy(const HistoryKey& key,unsigned frame) const {
+        const uint64_t hash=historyKeyHash(key);
+        for(unsigned i=0;i<kTombstones && i<tombNext_ && !tombs_.empty();++i) {
+            const Tombstone& t=tombs_[(tombNext_-1-i)%kTombstones];
+            if(frame-t.frame>2)continue;
+            if(t.key==hash)return t.cause;
+        }
+        return 0;
+    }
+    // The draw's vertex extent is the envelope of the vertices its indices name. The indices are copied to a staging buffer at capture and read
+    // back a few frames later (no wait, no pipeline state touched); the scan runs once per record. The buffer starts as a sentinel, so a copy
+    // that did not happen reads as a failure rather than as indices.
+    void issueExtent(ID3D11DeviceContext* ctx,const Capture& out) {
+        if(out.recordIndex>=records_.size())return;
+        Record& r=records_[out.recordIndex];
+        if(r.extentState!=0 || r.invalidated || !r.geometry.indices)return;
+        if(extentSlots_.empty())extentSlots_.resize(kExtentSlots);
+        int index=-1;
+        for(unsigned i=0;i<kExtentSlots;++i)if(!extentSlots_[i].pending){index=int(i);break;}
+        if(index<0)return;
+        const uint64_t bytes=r.ibEnd-r.ibFirst;
+        D3D11_BUFFER_DESC ib{};r.geometry.indices->GetDesc(&ib);
+        if(!bytes || r.ibEnd>ib.ByteWidth || bytes>uint64_t(maxVertices)*4){r.extentState=3;return;}
+        Ptr<ID3D11Device> dev;ctx->GetDevice(&dev);
+        std::vector<unsigned char> sentinel(size_t((bytes+15)&~uint64_t(15)),0xFF);
+        D3D11_BUFFER_DESC d{};d.ByteWidth=UINT(sentinel.size());d.Usage=D3D11_USAGE_STAGING;d.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+        D3D11_SUBRESOURCE_DATA init{};init.pSysMem=sentinel.data();
+        ExtentSlot& slot=extentSlots_[index];
+        slot.stage.Reset();
+        if(FAILED(dev->CreateBuffer(&d,&init,&slot.stage))){r.extentState=3;return;}
+        const D3D11_BOX box{UINT(r.ibFirst),0,0,UINT(r.ibEnd),1,1};
+        ctx->CopySubresourceRegion(slot.stage.Get(),0,0,0,0,r.geometry.indices.Get(),0,&box);
+        slot.pending=true;slot.frame=out.frame;slot.bytes=bytes;slot.key=historyKeyHash(historyKeyOf(r.geometry));slot.format=r.geometry.format;
+        r.extentState=1;r.extentSlot=int8_t(index);r.extentFrame=out.frame;++writeStats_.extentIssued;
+    }
+    void finishExtent(unsigned slotIndex,bool ok,uint32_t lowest,uint32_t highest) {
+        ExtentSlot& slot=extentSlots_[slotIndex];
+        slot.pending=false;slot.stage.Reset();
+        for(auto& r:records_) {
+            if(r.extentState!=1 || r.extentSlot!=int8_t(slotIndex) || r.extentFrame!=slot.frame)continue;
+            if(historyKeyHash(historyKeyOf(r.geometry))!=slot.key)continue;
+            r.extentSlot=-1;
+            // base + index can be negative (a base that points before the buffer): the extent is then not one this arithmetic can state.
+            const int64_t low=int64_t(r.geometry.base)+int64_t(lowest),high=int64_t(r.geometry.base)+int64_t(highest);
+            if(!ok || low<0 || high<low){r.extentState=3;++writeStats_.extentFailed;continue;}
+            r.vbFirst=uint64_t(r.geometry.offset)+uint64_t(low)*r.geometry.stride;
+            r.vbEnd=uint64_t(r.geometry.offset)+uint64_t(high+1)*r.geometry.stride;
+            r.extentState=2;++writeStats_.extentRead;
+        }
+    }
     std::vector<Record> records_;
     HistoryLedger ledger_;
+    HistoryWriteStats writeStats_;
+    HistoryWriteTop top_[kHistoryTopResources];
+    std::vector<ExtentSlot> extentSlots_;   // made at the first extended capture, so the default policy (VR) and every rig that never asks hold none
+    std::vector<Tombstone> tombs_;unsigned tombNext_=0;
+    unsigned lastFrame_=0,peakRecords_=0,peakBytes_=0;bool retainInvalid_=false;
     Ptr<ID3D11Buffer> retain_;Ptr<ID3D11ShaderResourceView> retainViews_[retainSlots];
     unsigned retainFrame_=~0u,retainNext_=0;uint64_t retainCreated_=0,retainUsed_=0;
     Ptr<ID3D11ComputeShader> identify_;Ptr<ID3D11Buffer> instance_;Ptr<ID3D11ShaderResourceView> instanceView_;

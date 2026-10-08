@@ -194,7 +194,7 @@ inline int flatNoCandidateTests() {
             nonEmpty = nonEmpty && name && name[0] && std::strcmp(name, "unknown") != 0;
             for (unsigned b = a + 1; b < kHistoryGapCount; ++b) unique = unique && std::strcmp(name, historyGapName(static_cast<HistoryGap>(b))) != 0;
         }
-        expect(unique && nonEmpty && kHistoryGapCount == 20, "the twenty patterns each carry one name");
+        expect(unique && nonEmpty && kHistoryGapCount == 22, "the twenty-two patterns each carry one name");
         expect(!std::strcmp(historyGapName(HistoryGap::OffsetShift), "offset-shift") && !std::strcmp(historyGapName(HistoryGap::NewKey), "new-key") &&
                !std::strcmp(historyGapName(HistoryGap::RefusedLastFrame), "refused-last-frame-cap"),
                "the names a log reader greps for are the ones the line prints");

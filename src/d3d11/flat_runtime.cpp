@@ -24,6 +24,8 @@
 #include "flat_foreground_probe.h"
 #include "flat_foreground_motion.h"
 #include "flat_no_candidate_report.h"
+#include "flat_history_report.h"
+#include "flat_foreground_shadow.h"
 #include "flat_source_spell.h"
 #include "flat_foreground_phase.h"
 #include "flat_domain_admission.h"
@@ -638,10 +640,35 @@ static State::DomainCandidate* observeDomainCandidate(State& s,const void* depth
 }
 // Only a write to the depth itself (or an unknown one) can change which
 // surface a pixel shows; colour copies and compute writes cannot.
-static void domainResourceWritten(State& s,ID3D11Resource* resource,const char* depthReason) {
+// The bytes a copy or an update wrote, when the destination is a buffer and the call says where (section 104, range-aware invalidation).
+// A copy with no box writes the whole source into the destination at dstX, so the source's size is the range; anything the call does not say
+// is the whole resource.
+static uint64_t flatBufferBytes(const void* resource) {
+    if(!resource)return 0;
+    auto* r=static_cast<ID3D11Resource*>(const_cast<void*>(resource));
+    D3D11_RESOURCE_DIMENSION dim=D3D11_RESOURCE_DIMENSION_UNKNOWN;r->GetType(&dim);
+    if(dim!=D3D11_RESOURCE_DIMENSION_BUFFER)return 0;
+    D3D11_BUFFER_DESC d{};static_cast<ID3D11Buffer*>(r)->GetDesc(&d);return d.ByteWidth;
+}
+// What a mutation report says about the bytes it wrote: the same extents, from the details the hook already carries.
+static HistoryWriteExtent mutationExtent(FlatOverlayMutationOp op,const FlatMutationDetails& d) {
+    switch(op) {
+    case FlatOverlayMutationOp::Map: case FlatOverlayMutationOp::Unmap: return historyWholeWrite(HistoryWriteEntry::Map);
+    case FlatOverlayMutationOp::ClearRtv: case FlatOverlayMutationOp::ClearDsv: case FlatOverlayMutationOp::ClearUav:
+        return historyWholeWrite(HistoryWriteEntry::Clear);
+    case FlatOverlayMutationOp::CopyResource: return historyWholeWrite(HistoryWriteEntry::CopyResource);
+    case FlatOverlayMutationOp::CopyRegion:
+        return flatRuntimeCopyExtent(d.dstSub,d.dstX,d.source,d.hasBox?&d.box:nullptr);
+    case FlatOverlayMutationOp::UpdateSubresource: return flatRuntimeUpdateExtent(d.dstSub,d.hasBox?&d.box:nullptr);
+    default: return historyWholeWrite(HistoryWriteEntry::Other);
+    }
+}
+// `tally` false is a write the mutation report counts too: the prefix model's own notification of the same API call.
+static void domainResourceWritten(State& s,ID3D11Resource* resource,const char* depthReason,
+                                  const HistoryWriteExtent& extent=HistoryWriteExtent{},bool tally=true) {
     if(!resource)s.foregroundRoute.noteUnknownMutation(s.prefix.frame);
     for(auto& candidate:s.foregroundCandidates)if(candidate.depth) {
-        candidate.motion.resourceWritten(resource);
+        candidate.motion.resourceWritten(resource,extent,tally);
         if(candidate.frame!=s.prefix.frame)continue;
         if(!resource || candidate.depth.Get()==resource)candidate.motion.fail(depthReason);
     }
@@ -650,6 +677,24 @@ static void domainResourceWritten(State& s,ID3D11Resource* resource,const char* 
 // before used (every pattern, zeros included), the draws with priors that the map will not match by identity (the same for the identity
 // words), and the first draw of each pattern with its whole key. All of it is read from counters the capture already keeps; the window is
 // the difference of the cumulative counters from the last line.
+static HistoryWriteStats historyWindowDelta(const HistoryWriteStats& now,const HistoryWriteStats& was) {
+    const auto d=[](uint64_t a,uint64_t b){return a>b?a-b:uint64_t(0);};
+    HistoryWriteStats w;
+    for(unsigned e=0;e<kHistoryWriteEntries;++e) {
+        w.observed[e]=d(now.observed[e],was.observed[e]);w.recordsInvalidated[e]=d(now.recordsInvalidated[e],was.recordsInvalidated[e]);
+        w.ranged[e]=d(now.ranged[e],was.ranged[e]);w.savedWrites[e]=d(now.savedWrites[e],was.savedWrites[e]);
+        for(unsigned r=0;r<kHistoryWriteRoles;++r)for(unsigned t=0;t<kHistoryWriteTimings;++t) {
+            w.touching[e][r][t]=d(now.touching[e][r][t],was.touching[e][r][t]);
+            w.invalidating[e][r][t]=d(now.invalidating[e][r][t],was.invalidating[e][r][t]);
+        }
+    }
+    for(unsigned t=0;t<kHistoryWriteTimings;++t)w.unknownInvalidating[t]=d(now.unknownInvalidating[t],was.unknownInvalidating[t]);
+    w.sparedRecords=d(now.sparedRecords,was.sparedRecords);w.extentUnknownHits=d(now.extentUnknownHits,was.extentUnknownHits);
+    for(unsigned i=0;i<static_cast<unsigned>(HistoryErase::Count);++i)w.erased[i]=d(now.erased[i],was.erased[i]);
+    w.allocations=d(now.allocations,was.allocations);w.allocationFailures=d(now.allocationFailures,was.allocationFailures);
+    w.extentIssued=d(now.extentIssued,was.extentIssued);w.extentRead=d(now.extentRead,was.extentRead);w.extentFailed=d(now.extentFailed,was.extentFailed);
+    return w;
+}
 static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::CaptureStats& captures) {
     const auto& was=s.foregroundMissReported;
     const auto delta=[](uint64_t now,uint64_t before){return now>before?now-before:uint64_t(0);};
@@ -662,6 +707,7 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
     for(unsigned i=0;i<kHistoryGapCount;++i)w.missBy[i]=delta(captures.missBy[i],was.missBy[i]);
     w.identitySamples=delta(captures.identitySamples,was.identitySamples);
     for(unsigned i=0;i<kIdentityVerdictCount;++i)w.identityBy[i]=delta(captures.identityBy[i],was.identityBy[i]);
+    w.allocations=delta(captures.history.allocations,was.history.allocations);
     FlatSiblingWindow sibling;
     sibling.engagedFrames=delta(captures.siblingFrames,was.siblingFrames);sibling.dispatches=delta(captures.siblingDispatches,was.siblingDispatches);
     sibling.readbacks=delta(captures.siblingReads,was.siblingReads);sibling.notReady=delta(captures.siblingNotReady,was.siblingNotReady);
@@ -669,6 +715,10 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
     for(unsigned p=0;p<kSiblingPatterns;++p)for(unsigned o=0;o<kSiblingOutcomes;++o)sibling.by[p][o]=delta(captures.siblingBy[p][o],was.siblingBy[p][o]);
     struct Taken {FlatForegroundMotion::MissExample miss[FlatForegroundMotion::kMissExamples];unsigned misses=0;
                   FlatIdentitySampler::Sample identity[FlatForegroundMotion::kIdentityExamples];unsigned identities=0;};
+    FlatHistoryWindow history;
+    history.writes=historyWindowDelta(captures.history,was.history);
+    const ShadowStats shadowWindow=flatShadowDelta(captures.shadow,was.shadow);
+    HistoryWriteTop tops[kHistoryTopResources*State::kDomainCandidateCap]{};unsigned topCount=0;
     std::array<Taken,State::kDomainCandidateCap> taken{};
     for(unsigned i=0;i<s.foregroundCandidates.size();++i) {
         auto& motion=s.foregroundCandidates[i].motion;
@@ -676,12 +726,22 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
         w.identitySkipped+=motion.identitySkipped();w.identityUnread+=motion.identityNotReady();
         taken[i].misses=motion.takeMissExamples(taken[i].miss,FlatForegroundMotion::kMissExamples);
         taken[i].identities=motion.takeIdentityExamples(taken[i].identity,FlatForegroundMotion::kIdentityExamples);
+        unsigned peakRecords=0,peakBytes=0;motion.takeHistoryPeaks(peakRecords,peakBytes);
+        history.records+=motion.historyRecords();history.bytes+=motion.historyBytes();
+        history.peakRecords+=peakRecords;history.peakBytes+=peakBytes;
+        topCount+=motion.takeWriteTop(tops+topCount,kHistoryTopResources);
     }
+    // The three resources written most, over the candidates.
+    std::sort(tops,tops+topCount,[](const HistoryWriteTop& a,const HistoryWriteTop& b){return a.touching>b.touching;});
+    for(unsigned i=0;i<topCount && history.topCount<3;++i)history.top[history.topCount++]=tops[i];
+    w.records=history.records;w.bytes=history.bytes;w.peakRecords=history.peakRecords;w.peakBytes=history.peakBytes;
     s.foregroundMissReported=captures;
     char line[4096];
     flatNoCandidateLine(line,sizeof(line),w);Log::get().note("%s",line);
     flatIdentityLine(line,sizeof(line),w);Log::get().note("%s",line);
     flatSiblingLine(line,sizeof(line),sibling);Log::get().note("%s",line);
+    flatHistoryLine(line,sizeof(line),history);Log::get().note("%s",line);
+    flatShadowLine(line,sizeof(line),shadowWindow);Log::get().note("%s",line);
     for(const auto& t:taken) {
         for(unsigned i=0;i<t.misses && s.foregroundMissExampleLines<48;++i,++s.foregroundMissExampleLines) {
             const auto& e=t.miss[i];
@@ -3982,7 +4042,7 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
     }
     for (const auto& u : s.uavs) if (u) {
         if(s.engine!=FlatMonoResolveMode::Taa) {
-            domainResourceWritten(s,u.Get(),"foreground-dispatch-depth-write");
+            domainResourceWritten(s,u.Get(),"foreground-dispatch-depth-write",historyWholeWrite(HistoryWriteEntry::Dispatch));
         }
         { flatcpu::Scope trace(flatcpu::kTrace); flatTraceMark(s.traceRing, kFlatTraceEventDispatchWritten, u.Get()); }
         flatRuntimeDispatchObserveWritten(s.prefix, u.Get());
@@ -4002,9 +4062,11 @@ FlatRuntimeDispatchScope::FlatRuntimeDispatchScope(ID3D11DeviceContext* ctx) {
 // What a write to a resource does to the prefix model, the camera table and the shadows -- the
 // body flatRuntimeWritten, Map and Update share, timed by the caller's scope.
 static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
-                            FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written) {
+                            FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written,
+                            const HistoryWriteExtent& extent=HistoryWriteExtent{}) {
+    // The mutation report (flatRuntimeOverlayResourceMutation) counts the same API call for the history; this notification only invalidates.
     if(s.engine!=FlatMonoResolveMode::Taa)
-        domainResourceWritten(s,res,"foreground-depth-or-unknown-mutation");
+        domainResourceWritten(s,res,"foreground-depth-or-unknown-mutation",extent,false);
     if(s.untrusted.active())s.untrusted.noteMutation(res,
         FlatMutationDetails::named(provenance,entry),s.prefix.sequence);
     if (overlayOpen(s)) for (uint32_t i=0; i<s.prefix.targetsUsed; ++i) {
@@ -4019,10 +4081,31 @@ static void resourceWritten(State& s, ID3D11Resource* res,const char* entry,
     if (auto* c = camera(res, false)) s.cameras.invalidate(*c);
     if (s.projection) { flatcpu::Scope shadows(flatcpu::kShadows); s.projection->invalidate(res); }
 }
+// The extents the hooks pass (declared in flat_runtime.h; defined here, outside the anonymous namespace the mutation report is in).
+HistoryWriteExtent flatRuntimeCopyExtent(UINT dstSub,UINT dstX,const void* src,const D3D11_BOX* box) {
+    if(dstSub!=0)return historyWholeWrite(HistoryWriteEntry::CopyRegion);
+    if(box) {
+        if(box->right<=box->left)return historyWholeWrite(HistoryWriteEntry::CopyRegion);
+        return historyRangedWrite(HistoryWriteEntry::CopyRegion,dstX,uint64_t(dstX)+(box->right-box->left));
+    }
+    const uint64_t bytes=flatBufferBytes(src);
+    return bytes?historyRangedWrite(HistoryWriteEntry::CopyRegion,dstX,uint64_t(dstX)+bytes):historyWholeWrite(HistoryWriteEntry::CopyRegion);
+}
+HistoryWriteExtent flatRuntimeUpdateExtent(UINT dstSub,const D3D11_BOX* box) {
+    if(dstSub!=0 || !box || box->right<=box->left)return historyWholeWrite(HistoryWriteEntry::Update);
+    return historyRangedWrite(HistoryWriteEntry::Update,box->left,box->right);
+}
 void flatRuntimeWritten(ID3D11Resource* res,FlatOverlayMutationOp provenance) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);   // prefix target and source lookup, camera lookup
-    resourceWritten(state(), res,"flatRuntimeWritten",provenance);
+    const bool clear=provenance==FlatOverlayMutationOp::ClearRtv || provenance==FlatOverlayMutationOp::ClearDsv ||
+                     provenance==FlatOverlayMutationOp::ClearUav;
+    resourceWritten(state(), res,"flatRuntimeWritten",provenance,historyWholeWrite(clear?HistoryWriteEntry::Clear:HistoryWriteEntry::Other));
+}
+void flatRuntimeWrittenExtent(ID3D11Resource* res,const HistoryWriteExtent& extent) {
+    if (!owner() || state().work == FlatWork::Paused) return;
+    flatcpu::Scope lookup(flatcpu::kResource);
+    resourceWritten(state(), res,"flatRuntimeWritten",FlatOverlayMutationOp::Written,extent);
 }
 namespace {
 const char* overlayMutationOpName(FlatOverlayMutationOp op) {
@@ -4056,7 +4139,8 @@ void flatRuntimeOverlayResourceMutation(ID3D11Resource* resource, FlatOverlayMut
     if(foregroundDomainActive.load(std::memory_order_acquire)) {
         if(!owner())foreignWork.store(true,std::memory_order_release);
         else {
-            domainResourceWritten(state(),resource,"foreground-depth-or-unknown-mutation");
+            // The API-level report of every mutation: the history counts the write here, with the bytes the call carried.
+            domainResourceWritten(state(),resource,"foreground-depth-or-unknown-mutation",mutationExtent(op,details),true);
         }
     }
     if(untrustedCoverageActive.load(std::memory_order_acquire)) {
@@ -4208,7 +4292,7 @@ void flatRuntimeMapBounceNoteKind(ID3D11Resource* resource, bool buffer) {
 void flatRuntimeMap(ID3D11Resource* res, D3D11_MAP type, void* bytes) {
     if (!owner() || type == D3D11_MAP_READ || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
-    resourceWritten(state(), res,"flatRuntimeMap"); if (auto* c = camera(res, false)) state().cameras.setMapped(*c, bytes);
+    resourceWritten(state(), res,"flatRuntimeMap",FlatOverlayMutationOp::Written,historyWholeWrite(HistoryWriteEntry::Map)); if (auto* c = camera(res, false)) state().cameras.setMapped(*c, bytes);
     if (state().projection) { flatcpu::Scope shadows(flatcpu::kShadows); state().projection->observeMap(res,type,bytes); }
 }
 void flatRuntimeUnmap(ID3D11Resource* res) {
@@ -4223,7 +4307,7 @@ void flatRuntimeUnmap(ID3D11Resource* res) {
 void flatRuntimeUpdate(ID3D11Resource* res, const void* bytes, const D3D11_BOX* box) {
     if (!owner() || state().work == FlatWork::Paused) return;
     flatcpu::Scope lookup(flatcpu::kResource);
-    resourceWritten(state(), res,"flatRuntimeUpdate");
+    resourceWritten(state(), res,"flatRuntimeUpdate",FlatOverlayMutationOp::Written,flatRuntimeUpdateExtent(0,box));
     if (auto* c = camera(res, false)) {
         if (!box || (box->left == 0 && box->right == c->width)) { capture(*c, bytes); if (state().work == FlatWork::Full) cameraWitness(res); }
     }

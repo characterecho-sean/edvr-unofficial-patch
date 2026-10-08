@@ -4,6 +4,7 @@
 #include "flat_foreground_identity_sample.h"
 #include "flat_foreground_receipt.h"
 #include "flat_foreground_sibling.h"
+#include "flat_foreground_shadow_gpu.h"
 #include "cs_stage_save.h"
 #include <d3d11_1.h>
 #include <array>
@@ -81,6 +82,10 @@ public:
         // from the GPU a few frames late).
         uint64_t siblingFrames=0,siblingDispatches=0,siblingReads=0,siblingNotReady=0,siblingFailed=0;
         uint64_t siblingBy[kSiblingPatterns][kSiblingOutcomes]={};
+        // The history's write instrument and erase paths (animated_history_writes.h), copied in by stats().
+        HistoryWriteStats history;
+        // The sibling model's shadow (flat_foreground_shadow.h), copied in by stats().
+        ShadowStats shadow;
         void add(const CaptureStats& o) {
             attempts+=o.attempts;gpuAttempts+=o.gpuAttempts;submitted+=o.submitted;preflightRefused+=o.preflightRefused;
             warmedAfterRefusal+=o.warmedAfterRefusal;noCandidate+=o.noCandidate;noPriorPool+=o.noPriorPool;noPriorNear+=o.noPriorNear;
@@ -93,12 +98,18 @@ public:
             siblingFrames+=o.siblingFrames;siblingDispatches+=o.siblingDispatches;siblingReads+=o.siblingReads;
             siblingNotReady+=o.siblingNotReady;siblingFailed+=o.siblingFailed;
             for(unsigned p=0;p<kSiblingPatterns;++p)for(unsigned k=0;k<kSiblingOutcomes;++k)siblingBy[p][k]+=o.siblingBy[p][k];
+            history.add(o.history);shadow.add(o.shadow);
         }
     };
     // The first draws of a window that found no same-key prior, one per pattern, with the whole key and the nearest entry's (section 104).
     struct MissExample {
         unsigned frame=0;HistoryClass miss;HistoryKey key;bool rescued=false;uint64_t vs=0,ps=0;
     };
+    // The constants the map's shaders (and the sibling pass's and the shadow's) read for a draw: the render extent and the draw's phase, the previous
+    // phase and the common near, the expected identity, the provenance, the priors' phases, the identity mode and prior count, and the sibling
+    // pass's draw index, vertex count and the frame's draw count. Public for the rigs that drive the shadow's shaders on their own.
+    struct Settings {float extentPhase[4]{},previousPhaseDepth[4]{};uint32_t expected[4]{},provenance[4]{};
+        float priorPhase[4][4]{};uint32_t identityMode[4]{};uint32_t sibling[4]{};};
     static constexpr unsigned kMissExamples=6,kIdentityExamples=4;
     // Hands over (and forgets) the examples gathered since the last call.
     unsigned takeMissExamples(MissExample* out,unsigned capacity) {
@@ -190,7 +201,21 @@ public:
         ~RigSiblingPass(){siblingPassEnabled()=was;}
         RigSiblingPass(const RigSiblingPass&)=delete;RigSiblingPass& operator=(const RigSiblingPass&)=delete;
     };
-    const CaptureStats& stats() const{return stats_;}
+    // FOR THE RIGS ONLY: the shadow, to read what it measured (poll waits) and to take every frame.
+    FlatForegroundShadow& rigShadow(){return shadow_;}
+    struct RigShadowEvery {
+        unsigned was;
+        explicit RigShadowEvery(unsigned every):was(shadowEvery()){shadowEvery()=every;}
+        ~RigShadowEvery(){shadowEvery()=was;}
+        RigShadowEvery(const RigShadowEvery&)=delete;RigShadowEvery& operator=(const RigShadowEvery&)=delete;
+    };
+    const CaptureStats& stats() const{stats_.history=history_.writeStats();stats_.shadow=shadow_.stats();return stats_;}
+    // The window's history gauges and write instrument (section 104): the resources written most, the records and bytes at their peak, and what is
+    // held now. Each Take forgets what it hands over.
+    unsigned takeWriteTop(HistoryWriteTop* out,unsigned capacity){return history_.takeTopResources(out,capacity);}
+    void takeHistoryPeaks(unsigned& records,unsigned& bytes){history_.takePeaks(records,bytes);}
+    unsigned historyRecords() const{return unsigned(history_.recordCount());}
+    unsigned historyBytes() const{return history_.bytes();}
     // The map the last prepareH drew (RGBA32F at its render size), or null before the first. For the offline bench's test export, which reads it
     // back in its own process; the next prepareH rewrites it.
     Ptr<ID3D11ShaderResourceView> mapView() const{return view_;}
@@ -228,13 +253,18 @@ public:
         else ++stats_.coveredOther;
     }
     unsigned coveredDraws() const{return covered_;}
-    void resourceWritten(ID3D11Resource* resource) {
-        const unsigned kind=history_.resourceWritten(resource);
+    // A write to a resource, with the bytes it touched when the call has them (section 104, range-aware invalidation): the history invalidates
+    // the records that read those bytes, and the adapter drops the draws of its own lists that read them. The rest keep their priors. A write
+    // before the frame's H, once a draw is captured, is in the capture window; every other write is in the gap, where the next frame's draws find
+    // what it cost them.
+    void resourceWritten(ID3D11Resource* resource,const HistoryWriteExtent& extent=HistoryWriteExtent{},bool tally=true) {
+        const HistoryWriteTiming timing=(!current_.empty() && hFrame_!=frame_)?HistoryWriteTiming::Window:HistoryWriteTiming::Gap;
+        const unsigned kind=history_.resourceWritten(resource,extent.first,extent.end,extent.entry,timing,tally);
         // Count only geometry invalidations, not unrelated resource-write notifications.
         if(!resource)++unknownMutations_;else if(kind&6)++knownMutations_;
         if(!kind)return;
         auto erase=[&](std::vector<Draw>& draws){draws.erase(std::remove_if(draws.begin(),draws.end(),[&](const Draw& d){
-            return !resource || d.capture.geometry.vertices.Get()==resource || d.capture.geometry.indices.Get()==resource;}),draws.end());};
+            return history_.captureHitBy(d.capture,resource,extent.first,extent.end);}),draws.end());};
         erase(previous_);const size_t before=current_.size();erase(current_);
         if(kind&1)fail("foreground-unknown-resource-write");
         else if(before!=current_.size())fail("foreground-captured-geometry-written");
@@ -243,7 +273,7 @@ public:
                   unsigned start,int base,unsigned startInstance,unsigned frame,const Inputs& inputs) {
         beginFrame(frame);++stats_.attempts;drawRefusal_=nullptr;Draw d;d.inputs=inputs;
         // The identity samples a few frames old are read once a frame, here, without waiting.
-        if(polledFrame_!=frame){polledFrame_=frame;pollIdentity(ctx,frame);pollSibling(ctx,frame);}
+        if(polledFrame_!=frame){polledFrame_=frame;pollIdentity(ctx,frame);pollSibling(ctx,frame);history_.pollExtents(ctx,frame);shadow_.poll(ctx,frame);}
         // The map's empty clear follows the identity mode of the frame's draws, refused ones included (prepareH).
         if(inputs.gpuIdentity)gpuAttempted_=true;
         // reject: the frame's refusal (nothing says whose pixels these are). defer: this draw's alone (drawRefusal): the draw is not in
@@ -329,7 +359,7 @@ public:
     }
     bool prepareH(ID3D11DeviceContext* ctx,ID3D11ShaderResourceView* owners,ID3D11ShaderResourceView* rawDepth,
                   const float worldCamera[6][4],unsigned frame,unsigned width,unsigned height,Output& out) {
-        out=Output{};out.frame=frame;
+        out=Output{};out.frame=frame;hFrame_=frame;
         auto refuse=[&](const char* reason){out.refusal=reason;return false;};
         if(frame!=frame_ || refusal_)return refuse(refusal_?refusal_:"foreground-frame");
         out.coveredDraws=covered_;
@@ -367,6 +397,7 @@ public:
         // The sibling pass (flat_foreground_sibling.h): the draws with no history of their own take their siblings' motion. Compute only: the
         // map's state is bound after it, so nothing of it needs undoing but the compute stage, which the pass saves and restores itself.
         const bool siblings=runSibling(ctx,width,height,commonNear,frame);
+        runShadow(ctx,width,height,commonNear,frame);
         // H is bracketed independently of original geometry capture. Restore
         // every binding touched here, including all eight OM render targets.
         Ptr<ID3D11VertexShader> oldVs;Ptr<ID3D11PixelShader> oldPs;Ptr<ID3D11InputLayout> oldLayout;
@@ -428,7 +459,8 @@ public:
         return true;
     }
 private:
-    CaptureStats stats_{};
+    mutable CaptureStats stats_{};
+    unsigned hFrame_=~0u;   // the frame prepareH last ran for: the end of its capture window
     EdvrFlatForegroundBudgetReceipt budgetReceipt_{};
     unsigned knownMutations_=0,unknownMutations_=0;
     struct Draw {
@@ -439,10 +471,10 @@ private:
         D3D11_VIEWPORT viewport{};std::array<D3D11_RECT,16> scissors{};UINT scissorCount=0;
         bool identityKnown=false,ambiguous=false;
     };
-    struct Settings {float extentPhase[4]{},previousPhaseDepth[4]{};uint32_t expected[4]{},provenance[4]{};
-        float priorPhase[4][4]{};uint32_t identityMode[4]{};uint32_t sibling[4]{};};
     struct FitSettings {uint32_t counts[4]{};float limits[4]{};};
     static bool& siblingPassEnabled(){static bool on=true;return on;}
+    // The shadow samples one frame in this many (0: none). A rig that wants every frame sets 1.
+    static unsigned& shadowEvery(){static unsigned every=kFlatShadowEveryFrames;return every;}
     static constexpr unsigned kSiblingArmedFrames=30,kSiblingSlots=4;
     static constexpr unsigned kSiblingDraws=AnimatedVertexHistory::maxRecords;
     // What the map's shaders are told about a draw (the sibling fields are the caller's).
@@ -550,6 +582,27 @@ private:
             if(FAILED(dev->CreateBuffer(&d,nullptr,&fitSettings_)))return false;}
         return true;
     }
+    // The shadow of the sibling model (flat_foreground_shadow.h): on one frame in shadowEvery(), the two compute passes over the frame's draws, with
+    // the results read back a few frames later into the stats. It reads what the sibling pass reads and writes tables of its own; nothing the map,
+    // the fit or the backend reads depends on it.
+    void runShadow(ID3D11DeviceContext* ctx,unsigned width,unsigned height,float commonNear,unsigned frame) {
+        const unsigned n=unsigned(current_.size());
+        if(!shadowEvery() || n<2 || n>FlatForegroundShadow::kDraws || frame%shadowEvery()!=0)return;
+        shadowInputs_.assign(n,FlatForegroundShadow::DrawInput{});
+        shadowConstants_.assign(n,Settings{});
+        for(unsigned i=0;i<n;++i) {
+            const Draw& d=current_[i];
+            shadowConstants_[i]=settingsFor(d,width,height,commonNear);
+            shadowConstants_[i].sibling[1]=i;shadowConstants_[i].sibling[2]=d.capture.geometry.count;shadowConstants_[i].sibling[3]=n;
+            auto& in=shadowInputs_[i];
+            in.views[0]=d.capture.currentPositions.Get();
+            for(unsigned k=0;k<d.priorCount;++k){in.views[1+k]=d.priors[k].positions.Get();in.views[6+k]=d.priors[k].identity.Get();}
+            in.views[5]=d.capture.currentIdentity.Get();in.views[10]=d.capture.instanceIndex.Get();
+            in.constants=&shadowConstants_[i];in.constantBytes=sizeof(Settings);
+            in.dispatchMoments=d.inputs.gpuIdentity && d.priorCount>0;
+        }
+        shadow_.run(ctx,shadowInputs_.data(),n,frame);
+    }
     // The pass, once a frame and only when a draw needs it: a draw with no prior (the CPU knows), or any draw for a while after the identity
     // sampler saw one that had priors and no match (only the GPU knows). The first shader runs once for each draw that has priors; the
     // second once over every draw. Returns whether the fit table is the frame's.
@@ -631,6 +684,7 @@ private:
     Ptr<ID3D11ShaderResourceView> donorsSrv_,receiversSrv_,fitSrv_;
     Ptr<ID3D11UnorderedAccessView> donorsUav_,fitUav_;
     std::array<SiblingSlot,kSiblingSlots> siblingSlots_{};
+    FlatForegroundShadow shadow_;std::vector<FlatForegroundShadow::DrawInput> shadowInputs_;std::vector<Settings> shadowConstants_;
     unsigned siblingFrame_=~0u,siblingDraws_=~0u,siblingArmedUntil_=0;bool siblingOk_=false;
     AnimatedVertexHistory history_;std::vector<Draw> current_,previous_;unsigned frame_=0,width_=0,height_=0;
     const char* refusal_=nullptr,*drawRefusal_=nullptr;float previousNear_=0;unsigned covered_=0;bool gpuAttempted_=false;

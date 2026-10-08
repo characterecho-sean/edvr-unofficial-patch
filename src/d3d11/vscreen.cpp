@@ -4380,7 +4380,7 @@ void STDMETHODCALLTYPE hookedCopyResource(ID3D11DeviceContext* self,
         flatRuntimeSubstitution(self, FlatSubstEvent::kCopy);
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyResource,
             FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyResource,"CopyResource",src));
-        flatRuntimeWritten(dst);
+        flatRuntimeWrittenExtent(dst,historyWholeWrite(HistoryWriteEntry::CopyResource));
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'R');
     if (drawCensusArmed()) {
@@ -4562,7 +4562,7 @@ void STDMETHODCALLTYPE hookedCopySubresourceRegion(
         flatRuntimeOverlayResourceMutation(dst, FlatOverlayMutationOp::CopyRegion,
             FlatMutationDetails::transfer(FlatOverlayMutationOp::CopyRegion,"CopySubresourceRegion",
                 src,srcSub,dstSub,box,dstX,dstY,dstZ));
-        flatRuntimeWritten(dst);
+        flatRuntimeWrittenExtent(dst,flatRuntimeCopyExtent(dstSub,dstX,src,box));
     }
     if (!foreignContext(self) && flatTemporalCapturing()) flatTemporalTransfer(dst, src, 'C');
     if (drawCensusArmed()) {

@@ -16,6 +16,10 @@ namespace edvr {
 struct FlatNoCandidateWindow {
     uint64_t submitted = 0, noCandidate = 0, acrossOffset = 0, frames = 0, framesMissing = 0, framesAllMissing = 0, resetFrames = 0, nearChanges = 0;
     uint64_t rescueCancelled = 0;
+    // The history's size at the end of the window and its peaks, and the allocate() calls of the window (section 104): the budget receipt only
+    // fills at a refusal, so without these the records and bytes against the 128 and 32 MiB caps are not in a log that never refused.
+    unsigned records = 0, bytes = 0, peakRecords = 0, peakBytes = 0;
+    uint64_t allocations = 0;
     uint64_t missBy[kHistoryGapCount] = {};
     unsigned longestRun = 0;
     uint64_t identitySamples = 0, identitySkipped = 0, identityUnread = 0;
@@ -45,13 +49,15 @@ inline int flatNoCandidateLine(char* out, size_t n, const FlatNoCandidateWindow&
     char head[1024];
     std::snprintf(head, sizeof(head),
         "flat foreground no-candidate 5s: submitted=%llu same-key-misses=%llu rescued-offset-shift=%llu rescue-cancelled=%llu still-no-candidate=%llu "
-        "frames=%llu frames-with-misses=%llu frames-all-missed=%llu longest-miss-run=%u reset-frames=%llu near-changes=%llu",
+        "frames=%llu frames-with-misses=%llu frames-all-missed=%llu longest-miss-run=%u reset-frames=%llu near-changes=%llu "
+        "records=%u bytes=%u peak-records=%u peak-bytes=%u allocations=%llu",
         static_cast<unsigned long long>(w.submitted), static_cast<unsigned long long>(w.misses()),
         static_cast<unsigned long long>(w.acrossOffset), static_cast<unsigned long long>(w.rescueCancelled),
         static_cast<unsigned long long>(w.noCandidate),
         static_cast<unsigned long long>(w.frames), static_cast<unsigned long long>(w.framesMissing),
         static_cast<unsigned long long>(w.framesAllMissing), w.longestRun,
-        static_cast<unsigned long long>(w.resetFrames), static_cast<unsigned long long>(w.nearChanges));
+        static_cast<unsigned long long>(w.resetFrames), static_cast<unsigned long long>(w.nearChanges),
+        w.records, w.bytes, w.peakRecords, w.peakBytes, static_cast<unsigned long long>(w.allocations));
     char patterns[1536];
     size_t at = 0;
     patterns[0] = 0;
@@ -67,7 +73,10 @@ inline int flatNoCandidateLine(char* out, size_t n, const FlatNoCandidateWindow&
         "the history acts on and rescued-offset-shift must equal it; rescue-cancelled counts rescues withdrawn at the end of the frame because "
         "another draw used the donor record (two parts of one object, not a move); record-unusable must be 0; still-no-candidate is what stayed without a "
         "prior; frames-all-missed counts frames in which every submitted draw missed (a whole-set cause), longest-miss-run the consecutive "
-        "frames with a miss; reset-frames are frames H asked the backend to reset history for, near-changes those caused by the common near plane",
+        "frames with a miss; reset-frames are frames H asked the backend to reset history for, near-changes those caused by the common near plane; "
+        "records and bytes are what the history holds now against 128 records and 32 MiB, the peaks the window's highest, allocations the records "
+        "made new (a record's buffers) in the window; reclaimed-by-advance is a record a write invalidated and the frame boundary then aged out, "
+        "reclaimed-by-pressure one taken for another key's budget, record-reclaimed one whose path was not remembered",
         head, patterns);
 }
 

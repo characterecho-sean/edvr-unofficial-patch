@@ -7,6 +7,7 @@
 #include "flat_substitution.h"
 #include "flat_map_bounce.h"
 #include "flat_mutation_diagnostic.h"
+#include "animated_history_writes.h"
 #include <optional>
 namespace edvr {
 struct FlatMapBounceD3DDriver {
@@ -80,6 +81,10 @@ void flatRuntimeMap(ID3D11Resource*, D3D11_MAP, void*);
 void flatRuntimeUnmap(ID3D11Resource*);
 void flatRuntimeUpdate(ID3D11Resource*, const void*, const D3D11_BOX*);
 void flatRuntimeWritten(ID3D11Resource*, FlatOverlayMutationOp provenance=FlatOverlayMutationOp::Written);
+// A write whose bytes the hook knows (section 104, range-aware invalidation of the first-person history): the extents the hooks pass.
+void flatRuntimeWrittenExtent(ID3D11Resource*, const HistoryWriteExtent&);
+HistoryWriteExtent flatRuntimeCopyExtent(UINT dstSub, UINT dstX, const void* src, const D3D11_BOX* box);
+HistoryWriteExtent flatRuntimeUpdateExtent(UINT dstSub, const D3D11_BOX* box);
 enum class FlatOverlayMutationRole : unsigned char { Unrelated, Hdr, Depth, Unknown };
 inline FlatOverlayMutationRole flatRuntimeOverlayMutationRole(
     const void* resource, const void* hdr, const void* depth) {
