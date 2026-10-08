@@ -1222,6 +1222,33 @@ if errorlevel 1 ( echo [edvr] ERROR: vram_watch_test build failed & exit /b 1 )
 python "tools\vram_watch_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_skin_ledger_test
+echo [edvr] === skin_ledger_test.exe ===
+REM Build gate for the skin ledger (src\d3d11\skin_ledger.h, the F2 settling instrument that rides an armed eye run;
+REM docs\kinematic-motion-injection-2026-09-19.md, "F2 study"): the rules (unarmed is silent and stateless, the 20-frame window and its
+REM edges, the copy plan, the numbers, a whole run, a run of fewer frames than the window, never-ran told from broken, a run the process
+REM ended, finished only after the report), the file layout written by the production serialiser, and by source text the glue that
+REM reads the context (the dispatch hook asks before it acts, one arm, the report before the pool copies are let go, whole palette
+REM copies). The rig writes a fixture run; tools\skin_palette_check.py (the offline checker) reads it with its own reader and
+REM requires its verdicts, and --self-test builds synthetic runs with injected faults. It links nothing of the DLLs and needs no device.
+REM tools\skin_ledger_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig
+REM against each edit and needs the MSVC toolchain.
+if not exist "%OBJ%\skinledger" mkdir "%OBJ%\skinledger"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\skinledger"\ /Fe"%OBJ%\skinledger\skin_ledger_test.exe" ^
+    "tools\skin_ledger_test\skin_ledger_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: skin_ledger_test build failed & exit /b 1 )
+"%OBJ%\skinledger\skin_ledger_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinledger\skin_ledger_test.exe" --self-test "%ROOT%" || exit /b 1
+if not exist "%OBJ%\skinledger\fixture" mkdir "%OBJ%\skinledger\fixture"
+"%OBJ%\skinledger\skin_ledger_test.exe" --fixture "%OBJ%\skinledger\fixture" || exit /b 1
+python "tools\skin_palette_check.py" --self-test || exit /b 1
+python "tools\skin_palette_check.py" --verify-fixture "%OBJ%\skinledger\fixture" || exit /b 1
+python "tools\skin_ledger_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_slow_regime_test
 echo [edvr] === slow_regime_test.exe ===
 REM Build gate for the runtime's vendor instruments (src\openxr\vendor_events.h, end_frame_episodes.h, slow_regime.h,
