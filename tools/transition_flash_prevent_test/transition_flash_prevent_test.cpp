@@ -1589,82 +1589,71 @@ void caseGapConsumeAndStretch() {
     check(big.length == 0xFFFFFFFFu, "stretch: the length saturates");
 }
 
-void caseDryRunGate() {
-    using S = tfeb::DryRunState;
-    check(tfeb::dryRunGate(true, 2, 0, false) == S::Go, "dryRunGate: valid ctrl, pending handle = go");
-    check(tfeb::dryRunGate(true, 1, 0, false) == S::Go, "dryRunGate: an active handle also goes");
-    check(tfeb::dryRunGate(true, 0, 0, false) == S::SkipHandleNone,
-          "dryRunGate: handle state 0 (supercruise) is skipped");
-    check(tfeb::dryRunGate(false, 2, 0, false) == S::SkipNoCtrl, "dryRunGate: no valid ctrl is skipped");
-    check(tfeb::dryRunGate(true, 2, tfeb::kMaxDryRunsPerSession - 1, false) == S::Go,
-          "dryRunGate: the 40th attempt still goes");
-    check(tfeb::dryRunGate(true, 2, tfeb::kMaxDryRunsPerSession, false) == S::SkipCap,
-          "dryRunGate: the 41st is capped");
-    check(tfeb::dryRunGate(true, 2, 0, true) == S::SkipStoodDown, "dryRunGate: a fault stands it down");
-    check(tfeb::dryRunGate(false, 0, 99, true) == S::SkipStoodDown,
-          "dryRunGate: stood down is named first");
-    check(tfeb::dryRunGate(false, 0, 99, false) == S::SkipNoCtrl,
-          "dryRunGate: no ctrl is named before handle state and cap");
-    check(tfeb::kMaxDryRunsPerSession == 40, "dryRunGate: the spec's cap is 40");
-    // Every state has its own text (a missing case would print "?").
-    for (int i = 0; i <= static_cast<int>(S::Faulted); ++i) {
-        check(std::strcmp(tfeb::dryRunStateText(static_cast<S>(i)), "?") != 0, "dryRunStateText: every state named");
-    }
-    check(static_cast<int>(S::Faulted) == 9, "dryRunState: the cpp's counter array is sized for 10 states");
-}
-
-void caseClassifyTickMailbox() {
-    using S = tfeb::DryRunState;
+void caseEngineBaseUsable() {
     float m[16];
     std::memcpy(m, tfeb::kResetMailbox, sizeof(m));
-    check(tfeb::classifyTickMailbox(m) == S::NotWritten, "tickMailbox: still the identity = the writer wrote nothing");
-    m[12] = 1234.5f; m[13] = -6.0f; m[14] = 7.0f;
-    check(tfeb::classifyTickMailbox(m) == S::Wrote, "tickMailbox: a real base = wrote");
-    m[13] = NAN;
-    check(tfeb::classifyTickMailbox(m) == S::WroteImplausible, "tickMailbox: NaN in it = wrote an implausible base");
-    m[13] = 0.0f; m[12] = 5e7f;
-    check(tfeb::classifyTickMailbox(m) == S::WroteImplausible, "tickMailbox: a 5e7 m translation is implausible");
-    std::memcpy(m, tfeb::kResetMailbox, sizeof(m));
-    m[3] = -0.0f;
-    check(tfeb::classifyTickMailbox(m) == S::Wrote, "tickMailbox: a -0.0 where the identity holds +0.0 has been written");
+    check(!tfeb::engineBaseUsable(m), "engineBaseUsable: the reset identity is not a base");
+    m[12] = 0.770f; m[13] = 13.074f; m[14] = 3.377f;
+    check(tfeb::engineBaseUsable(m),
+          "engineBaseUsable: an identity rotation with a translation is a base (flight 050558's 17130 shape)");
+    // A real rotation: 90 degrees about Y plus a translation.
+    float r[16] = {0, 0, -1, 0,   0, 1, 0, 0,   1, 0, 0, 0,   -1.5f, 2.5f, 3.5f, 1};
+    check(tfeb::engineBaseUsable(r), "engineBaseUsable: an orthonormal rotation is usable");
+    float scaled[16];
+    std::memcpy(scaled, r, sizeof(scaled));
+    scaled[0] *= 1.2f; scaled[2] *= 1.2f;
+    check(!tfeb::engineBaseUsable(scaled), "engineBaseUsable: a scaled 3x3 is refused");
+    float skew[16];
+    std::memcpy(skew, r, sizeof(skew));
+    skew[1] = 0.3f;
+    check(!tfeb::engineBaseUsable(skew), "engineBaseUsable: a non-perpendicular 3x3 is refused");
+    float nanM[16];
+    std::memcpy(nanM, r, sizeof(nanM));
+    nanM[13] = NAN;
+    check(!tfeb::engineBaseUsable(nanM), "engineBaseUsable: NaN is refused");
+    float farM[16];
+    std::memcpy(farM, r, sizeof(farM));
+    farM[12] = 5e7f;
+    check(!tfeb::engineBaseUsable(farM), "engineBaseUsable: a 5e7 m translation is refused");
+    float zero[16] = {};
+    check(!tfeb::engineBaseUsable(zero), "engineBaseUsable: a zero block is refused");
+    check(std::strcmp(tfeb::engineBaseReason(tfeb::EngineBase::NoTickYet), "?") != 0 &&
+              std::strcmp(tfeb::engineBaseReason(tfeb::EngineBase::TickUnusable), "?") != 0 &&
+              std::strcmp(tfeb::engineBaseReason(tfeb::EngineBase::Have), "?") != 0,
+          "engineBaseReason: every state is named");
 }
 
-void caseTickComparison() {
-    const float a[3] = {1.0f, 2.0f, 3.0f};
-    const float b[3] = {1.0f, 2.0f, 3.05f};
-    check(std::fabs(tfeb::distance3(a, b) - 0.05f) < 1e-5f, "distance3: the Euclidean distance");
-    check(tfeb::tickMatchesChosen(0.099f) && !tfeb::tickMatchesChosen(0.10f) && !tfeb::tickMatchesChosen(1614.0f),
-          "tickMatchesChosen: under 0.10 m matches, 0.10 m and a 1614 m scene-old miss do not");
-    check(!tfeb::tickMatchesChosen(NAN), "tickMatchesChosen: NaN never matches");
-    const float nan3[3] = {NAN, NAN, NAN};
-    check(std::isnan(tfeb::distance3(nan3, a)), "distance3: a NaN candidate gives NaN (n/a, not 0)");
-    check(tfeb::distance3(a, a) == 0.0f, "distance3: identical points are 0");
+void caseEngineActFrame() {
+    // A one-frame skip at S=100: the consume of 100 was the only gap consume.
+    check(tfeb::engineActFrame(101, 100, 100), "engineActFrame: skip+1 acts");
+    check(!tfeb::engineActFrame(100, 100, 100), "engineActFrame: the skip frame's own tap is not a bad render");
+    check(!tfeb::engineActFrame(102, 100, 100), "engineActFrame: skip+2 does not act when the gap closed");
+    // A two-frame gap (flight 050558's 15117): consume 101 was a gap consume too.
+    check(tfeb::engineActFrame(101, 100, 101) && tfeb::engineActFrame(102, 100, 101),
+          "engineActFrame: a still-open gap acts on skip+1 and skip+2");
+    // A long gap (supercruise): never more than two frames.
+    check(!tfeb::engineActFrame(103, 100, 5000), "engineActFrame: at most two frames per event");
+    check(tfeb::engineActFrame(102, 100, 5000), "engineActFrame: a long gap still acts on skip+2");
+    check(!tfeb::engineActFrame(5, 100, 100), "engineActFrame: a frame before the skip never acts");
+    // A stale gapLastConsume from an earlier event cannot open this one.
+    check(!tfeb::engineActFrame(101, 100, 90), "engineActFrame: a gap marker older than the skip does not act");
+    check(tfeb::kEngineMaxFrames == 2, "engineActFrame: the spec's cap is 2");
+    // Wraparound-safe at the top of the range.
+    check(!tfeb::engineActFrame(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu), "engineActFrame: skip+1 overflow does not act");
+}
 
-    using SC = tfeb::SceneChoice;
-    check(tfeb::tickChosenSource(1, SC::Old, false, true) == 1 && tfeb::tickChosenSource(2, SC::New, true, false) == 2,
-          "tickChosenSource: a latched base wins over the boundary choice");
-    check(tfeb::tickChosenSource(0, SC::New, true, true) == 1, "tickChosenSource: boundary scene-new = live");
-    check(tfeb::tickChosenSource(0, SC::Old, true, true) == 2, "tickChosenSource: boundary scene-old = held (22726)");
-    check(tfeb::tickChosenSource(0, SC::Unclear, true, true) == 0, "tickChosenSource: unclear = no referee");
-    check(tfeb::tickChosenSource(0, SC::New, false, true) == 0, "tickChosenSource: scene-new without a live probe = none");
-    check(tfeb::tickChosenSource(0, SC::Old, true, false) == 0, "tickChosenSource: scene-old without a held base = none");
-    // The comparison as the sim line does it: B_tick and the chosen base are
-    // both premultiplied onto the same head-only P, so equal bases give 0 and
-    // a translation apart gives that distance.
-    float bTick[16], bChosen[16];
-    std::memcpy(bTick, tfeb::kResetMailbox, sizeof(bTick));
-    std::memcpy(bChosen, tfeb::kResetMailbox, sizeof(bChosen));
-    bTick[12] = 100.0f; bTick[13] = -40.0f; bTick[14] = 7.0f;
-    bChosen[12] = 100.0f; bChosen[13] = -40.0f; bChosen[14] = 7.0f;
-    const float P[3] = {0.05f, 0.1f, -0.2f};
-    float eT[3], eC[3];
-    tfeb::patchEyeOrigin(bTick, P, eT);
-    tfeb::patchEyeOrigin(bChosen, P, eC);
-    check(tfeb::tickMatchesChosen(tfeb::distance3(eT, eC)), "tick comparison: equal bases agree");
-    bChosen[14] = 1621.0f;   // the held base 1614 m off (flight 134813's skip 22726)
-    tfeb::patchEyeOrigin(bChosen, P, eC);
-    check(!tfeb::tickMatchesChosen(tfeb::distance3(eT, eC)) && std::fabs(tfeb::distance3(eT, eC) - 1614.0f) < 0.01f,
-          "tick comparison: a base 1614 m apart is a miss of 1614 m");
+void caseEngineFillMatches() {
+    const float p[3] = {0.0512f, -0.0163f, 0.0159f};
+    const float same[3] = {0.0512f, -0.0163f, 0.0159f};
+    const float near3[3] = {0.0572f, -0.0163f, 0.0159f};   // 6 mm
+    const float far3[3] = {0.0712f, -0.0163f, 0.0159f};    // 2 cm
+    const float world[3] = {6.119f, -3.432f, 11.511f};
+    check(tfeb::engineFillMatches(same, p), "engineFillMatches: the same P matches");
+    check(tfeb::engineFillMatches(near3, p), "engineFillMatches: 6 mm matches (within 0.01 m)");
+    check(!tfeb::engineFillMatches(far3, p), "engineFillMatches: 2 cm does not");
+    check(!tfeb::engineFillMatches(world, p), "engineFillMatches: another view's world-space row 275 does not");
+    const float nan3[3] = {NAN, 0, 0};
+    check(!tfeb::engineFillMatches(nan3, p), "engineFillMatches: NaN never matches");
 }
 
 }  // namespace
@@ -1740,9 +1729,9 @@ int wmain(int argc, wchar_t** argv) {
     caseCorrectViewColumnMajor();
     caseHandleWordDecode();
     caseGapConsumeAndStretch();
-    caseDryRunGate();
-    caseClassifyTickMailbox();
-    caseTickComparison();
+    caseEngineBaseUsable();
+    caseEngineActFrame();
+    caseEngineFillMatches();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

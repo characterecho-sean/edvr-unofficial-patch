@@ -827,79 +827,57 @@ inline GapEdge updateGapStretch(GapStretch& s, bool gap, uint32_t frame, uint32_
     return GapEdge::None;
 }
 
-// What the dry run did (or why it did not) at a consume. NoGap: no gap
-// stretch started at this consume, so there was nothing to try.
-enum class DryRunState : uint8_t {
-    NoGap, Go, Wrote, NotWritten, WroteImplausible,
-    SkipNoCtrl, SkipHandleNone, SkipCap, SkipStoodDown, Faulted
-};
+// ---------------------------------------------------------------------------
+// CHANGE 19 (2026-10-09, Build 2a "the supercruise fix"). Flight 050558
+// (design doc, "Flight 050558") settled the mechanism: the HMDCamera is
+// deactivated at S-1 and re-activated AFTER the S consume, so the controller
+// tick is absent exactly on the frame whose mailbox the consume reads, and the
+// first tick that follows writes the base the engine meant (it equals the next
+// frame's eye, to the centimetre, on every event). The render-time patch now
+// takes that base instead of choosing between the live and held candidates
+// with the pool selector (which declined all five events), and a frame it has
+// no base for is withheld.
 
-inline const char* dryRunStateText(DryRunState s) noexcept {
-    switch (s) {
-    case DryRunState::NoGap:            return "no-gap";
-    case DryRunState::Go:               return "go";
-    case DryRunState::Wrote:            return "wrote";
-    case DryRunState::NotWritten:       return "not-written";
-    case DryRunState::WroteImplausible: return "implausible";
-    case DryRunState::SkipNoCtrl:       return "skip:no-ctrl";
-    case DryRunState::SkipHandleNone:   return "skip:hstate0";
-    case DryRunState::SkipCap:          return "skip:cap";
-    case DryRunState::SkipStoodDown:    return "skip:stood-down";
-    case DryRunState::Faulted:          return "FAULT";
+// The base the first tick after the skip wrote: a base, not a leftover -- not
+// the reset identity, finite and plausible, and a rotation (orthonormal 3x3;
+// the engine's own mailbox is, and a half-written or stale block is not).
+inline constexpr float kEngineBaseOrthoTol = 0.01f;
+inline bool engineBaseUsable(const float m[16]) noexcept {
+    return !isResetMailbox(m) && mailboxPlausible(m) && isOrtho3x3(m, kEngineBaseOrthoTol);
+}
+
+// Where the event's base stands when a render asks for it.
+enum class EngineBase : uint8_t {
+    NoTickYet,      // the controller has not ticked since the skip
+    TickUnusable,   // it ticked, and the mailbox it left was not a usable base
+    Have            // B_new is held
+};
+inline const char* engineBaseReason(EngineBase b) noexcept {
+    switch (b) {
+    case EngineBase::NoTickYet:    return "no controller tick since the skip";
+    case EngineBase::TickUnusable: return "the first tick left an unusable mailbox";
+    case EngineBase::Have:         return "base held";
     }
     return "?";
 }
 
-inline constexpr uint32_t kMaxDryRunsPerSession = 40;
-
-// The first-gap-consume gate for the dry run: a valid (not destroyed)
-// controller, a handle that is not state 0, under the session cap, and no
-// earlier fault. The order is the order the reasons are checked in, so the
-// log names the first one that failed.
-inline DryRunState dryRunGate(bool ctrlValid, uint32_t handleStateNow, uint32_t attemptedSoFar,
-                              bool stoodDown) noexcept {
-    if (stoodDown) return DryRunState::SkipStoodDown;
-    if (!ctrlValid) return DryRunState::SkipNoCtrl;
-    if (handleStateNow == kHandleStateNone) return DryRunState::SkipHandleNone;
-    if (attemptedSoFar >= kMaxDryRunsPerSession) return DryRunState::SkipCap;
-    return DryRunState::Go;
+// At most two bad renders per event, and only while the gap lasts. The render
+// whose tap frame is T drew from the consume of frame T-1 (the skew the
+// patch sim measured, 6 of 6 on flight 134813): T = skip+1 always, and
+// T = skip+2 exactly when the consume of skip+1 was still a gap consume.
+// `gapLastConsume` is the last gap (un-refilled mode-2) consume of the run.
+inline constexpr uint32_t kEngineMaxFrames = 2;
+inline bool engineActFrame(uint32_t tapFrame, uint32_t skipFrame, uint32_t gapLastConsume) noexcept {
+    if (tapFrame < skipFrame + 1u || tapFrame > skipFrame + kEngineMaxFrames) return false;
+    return gapLastConsume >= skipFrame && tapFrame - 1u <= gapLastConsume;
 }
 
-// What the mailbox read back after the tick means: still the reset identity =
-// the writer wrote nothing (the tick's own gates, or the writer's name gate,
-// refused); otherwise a base, usable only if it passes the same plausibility
-// gate the live-mailbox probe uses.
-inline DryRunState classifyTickMailbox(const float after[16]) noexcept {
-    if (isResetMailbox(after)) return DryRunState::NotWritten;
-    return mailboxPlausible(after) ? DryRunState::Wrote : DryRunState::WroteImplausible;
-}
-
-// The comparison threshold the flight's pass criterion uses.
-inline constexpr float kTickMatchMeters = 0.10f;
-
-inline float distance3(const float a[3], const float b[3]) noexcept {
-    const float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
-// NaN (no tick candidate, or no chosen candidate) never matches and never
-// counts as a mismatch: the caller counts those separately.
-inline bool tickMatchesChosen(float distanceMeters) noexcept {
-    return !std::isnan(distanceMeters) && distanceMeters < kTickMatchMeters;
-}
-
-// Which candidate the tick is compared against: the act latch's base when the
-// event latched one (1 live, 2 held), otherwise the base the boundary-time
-// selector would pick (the same rule the latch applies), so a watched event
-// still has a referee. 0 = none.
-inline uint8_t tickChosenSource(uint8_t latchedBase, SceneChoice boundaryChoice, bool haveLive,
-                                bool haveHeld) noexcept {
-    if (latchedBase == 1 || latchedBase == 2) return latchedBase;
-    switch (choosePatchBase(boundaryChoice, haveLive, haveHeld)) {
-    case PatchBaseChoice::UseLive: return 1;
-    case PatchBaseChoice::UseHeld: return 2;
-    case PatchBaseChoice::NoPatch: break;
-    }
-    return 0;
+// The fills of the bad frame all carry one head-only eye P; only a fill whose
+// row 275 is that P (to float noise) is rewritten.
+inline constexpr float kEngineFillMatchMeters = 0.01f;
+inline bool engineFillMatches(const float row275[3], const float firstP[3]) noexcept {
+    const float dx = row275[0] - firstP[0], dy = row275[1] - firstP[1], dz = row275[2] - firstP[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz) <= kEngineFillMatchMeters;
 }
 
 }  // namespace tfeb

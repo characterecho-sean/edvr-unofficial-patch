@@ -14,19 +14,34 @@ static chain: see "Flight 184826".*
   stays because `transition_flash_eye_base_core.h` reuses its Mode, Treatment,
   pose classifier and guard table.
 
-- **Acting-patch history (2026-09-23/24), newest first; full text in Status
-  detail below, per-flight in the flight sections:** 160557 (c321631e): the
-  view write was corrupting (column-major w-lane translation; the finder hit
-  prev-view), fixed with w-lane read, B^-1 premultiply and an orthonormality
-  guard. 151942 (e5daea6b): the pilot block (rows 275-279) was the residual
-  flash, premultiplied by B too. Review finding FIXED 2026-09-24: one
-  latched, all-or-nothing decision at the frame's first head-only fill.
-  134813 (7eb4a536): locator VALIDATED, the selector is the decision (skip
-  22726). 125237 (e9fefca0): LIVE-READ VALIDATED to the millimetre.
+- **History of the acting patch (2026-09-23/24):** 125237 live read
+  validated, 134813 locator validated (the selector decided, skip 22726),
+  151942 pilot block, 160557 view write fixed; per-flight text below.
 
-- **Goal (Sean, 2026-09-23):** stop trapping the bad frame and stop Elite
-  rendering it at all, by fixing the order inside the game. The trap stays
-  on as referee until the acting build verifies.
+- **BUILD 2a (2026-10-09, branch transition-flash-engine-patch; NOT FLOWN):
+  the supercruise fix.** Flight 050558 (build 888f27db) settled the cause:
+  the HMDCamera is deactivated at S-1 and re-activated AFTER the S consume,
+  so the controller tick is absent on exactly the frame whose mailbox the
+  consume reads, and the FIRST tick after it writes the base the engine meant
+  (equal to the next frame's eye on every event). `fix.transition_flash = 1`
+  now arms the engine fix: B_new = the mailbox read right after the first
+  tick following the skip; at the bad renders (skip+1, skip+2 while the gap
+  lasts) the fills whose row 275 is the frame's head-only eye (0.01 m) get the
+  fac3d17a correction, and a frame with no B_new is WITHHELD. The pool
+  selector is not consulted. The old detector is dormant while armed and is
+  the fallback when identity or a hook fails. One always-on log line per bad
+  frame. `advanced.transition_flash_eye_base` is no longer read; the
+  temporary `advanced.transition_flash_diagnostics = off|on` gates the
+  writer watch, rings, dumps, passive sim, lifecycle hooks and `pool=`.
+- **Open for the next flight (050558's pass criteria):** every in-flight
+  event reads `patched` (or `withheld` with a reason that names a real race);
+  no flash seen; no `NOT held`. Known open risk: a hyperspace ENTRY can be
+  scene-old (134813 skip 22726: the held base was right, a live base ~1.6 km
+  wrong) -- B_new there is the new frame's base, not handled in 2a. The
+  twelve detector tuning keys stay until Build 2b.
+- **Dead ends, do not retry (details in Ruled out):** the catch-up tick at
+  the consume (no live controller at the gap), the pool selector as the act
+  gate (declined 5 of 5), a consume-time write, `ship+0x130`.
 - **What the bad frame is (measured):** `cb1[275]` of the 5376-byte scene
   CB lands on the head pose alone for one frame (within ~14 cm of the frame
   origin); the ship/seat transform under the head is missing because the
@@ -37,12 +52,6 @@ static chain: see "Flight 184826".*
   the refill the bad render needs is already LIVE in the mailbox at the tap;
   the sim's window starts at N+1, not N, and the act fires at tap frame
   skip+1 (6/6 on 134813).
-- **The render-time patch is on main** (simulation 310d9883, live read
-  e9fefca0, locator 7eb4a536, the acting build 9a243675 plus the review
-  fixes): `advanced.transition_flash_eye_base = off|watch|on|alternate`.
-  The Steam copy runs the acting build, trap OFF, `alternate` (two marked
-  ini lines). Read each flight with `--expect-build` set to the stamped
-  commit its section names.
 - **Hyperspace exits can be scene-new too** (125237): the second scene-new
   event on record after 100043's f23338. 22726 then proved the selector is
   NOT demotable: scene-old and scene-new both occur at hyperspace entries.
@@ -50,9 +59,7 @@ static chain: see "Flight 184826".*
   104,894,464), the same exe in both installs. Independent of VR runtime,
   headset, eye size and DLSS: the code is Elite's camera, below all of them.
 - **Old chain (compose `0x23BC8A0` / recompute `0x3CEE650`):** REFUTED
-  (flight 184826); its hooks stay inert until Sean says to remove them.
-- **Instrument history:** the journal below; each flight section carries its
-  own as-installed note.
+  (flight 184826). Instrument history: each flight section.
 - **Ruled out:** see the list at the end.
 
 ## Status detail (moved out of Status 2026-09-29)
@@ -263,6 +270,43 @@ showing one act per transition and none anywhere else.
   nothing waits. The eye copy stays with the runtime.
 - The branches `transition-flash-run-radius` (PR #16) and `flash-cap-one`
   (PR #18) were never merged, and this supersedes both.
+
+## Flight 050558 (2026-10-09 05:05, build 888f27db) and static round 8
+
+Build 1 (the instrument build: lifecycle hooks, gap lines, a dry run of the
+original tick). Sean flew a supercruise entry and exit and one low wake;
+all three flashed.
+
+- **Every event DECLINED, nothing patched:** 15029 `noPatch:poolLate` (cam=0
+  pool=0), 15117 `noPatch:thin` (live=RESET), 17128 (the entry) `noPatch:thin`
+  (cam=299.8 pool=118.9, ratio 0.40), 17970 (the exit) `noPatch:thin`
+  (boundary selector scene-new, latch thin). 18561 is the quit.
+- **The live base, the first refill after the skip, equals the next frame's
+  eye on every event:** 17130 `live->(+0.770 +13.074 +3.377)` = 17131 P;
+  17972 `live->(-0.749 +19.299 +5.508)` = 17973 P; 15031 live ~ 15032 P (1 cm).
+  At 17970 the boundary read of live was ok but the fill-time read was
+  RESET: the S+1 consume had already reset the mailbox before the render's
+  fill. So the base must be read when the tick writes it, not at the render.
+- **Lifecycle at every in-flight event:** `hmdcam deactivate f=S-1`, `hmdcam
+  destroyed f=S-1` (`0x1069F40` fires every time, the same ctrl address
+  reused), a gap at the S consume with ctrl=null, then `hmdcam activate f=S
+  hstate=2(pending)` AFTER that consume. 15117 was a two-frame gap (activate
+  at 15118).
+- **Static round 8** (dumps `analysis\decomp\flash\r8\`): the camera
+  controller is class HMDCamera (vtable `0x51897D0`; destructor slot 0,
+  Activate `0x109A1D0` slot 12, Deactivate `0x1088B10` slot 13). Its tick
+  `0x10730A0` is not a slot of it: the job system calls it through a
+  function pointer, and only while the handle at `ctrl+0x150` is subscribed.
+  Handle word: bits 1-3 the state (0 none, 1 active, 2 pending), the
+  generation in the high dword. Activate sets `ctrl+0x1E0 = 1` and
+  subscribes (pending); Deactivate and the destructor unsubscribe. Deferral
+  past the consume is refuted: writer, mode-1 peek and mode-2 consume all run
+  on the main thread, in that order. The tick takes its base from the
+  entity named by `(ctrl+0x1A8)->vtable[0x18]()`, falling back to its own
+  previous product at `ctrl+0x70`, and hands it to the writer.
+- **Consequence for the fix:** the catch-up tick is dead (there is no live
+  controller to call at the gap). The base to use is the one the first tick
+  writes after the re-activation, read right after that tick returns.
 
 ## Flight 160557 (2026-09-24 16:05, Steam copy, build c321631e)
 
@@ -647,6 +691,13 @@ through `pdata_functions.csv`.
   cockpit VR camera's.
 
 ## Ruled out
+
+- **Ruled out (050558): the catch-up tick at the consume.** At every gap the
+  HMDCamera is deactivated and destroyed (`ctrl=null`, handle state 0); there
+  is no live controller to call, and the dry run never had a ctrl.
+- **Ruled out (050558): the pool selector as the act gate.** 0 of 5 events
+  decided: poolLate (no pool upload yet at the first head-only fill) or thin
+  (ratio 0.40 against a 0.5-2.0 band). The live base was exact on all of them.
 
 Each was ruled out on 2026-09-23 from existing flight data and static
 analysis, or from flight 184826 or 195435 where marked:

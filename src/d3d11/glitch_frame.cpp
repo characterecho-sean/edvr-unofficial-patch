@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -1452,6 +1453,52 @@ void validate() {
 // re-install that finds State::observing already true from a previous
 // install/shutdown cycle on the same static State is not missed. Called at
 // every site that changes g_state or State::observing.
+// The engine fix's handshake (glitchFrameNoteEngineFix, glitch_frame.h). While
+// the engine fix is ARMED the detector below is DORMANT: it records and
+// observes exactly as it does with the fix switched off, and judges, marks and
+// un-marks nothing -- an un-mark would cancel the engine fix's own withhold.
+// Starts false, i.e. the detector runs, and stays so unless the eye-base
+// module reports Armed: a module that never reports (fix off, identity or a
+// hook failing) leaves the detector in charge, which is the safe side.
+static std::atomic<bool> g_engineFixArmed{false};
+static std::atomic<bool> g_engineFixDiagnostics{false};
+static inline bool engineFixDormant() {
+    return g_engineFixArmed.load(std::memory_order_relaxed);
+}
+// The pool and scene-draw recording exists to feed the detector's scene
+// verdict, and (advanced.transition_flash_diagnostics) the engine fix's
+// pool=<choice> comparison. Dormant without diagnostics, nothing reads it, so
+// the per-draw and per-Map reads are skipped.
+static inline bool poolRecordingWanted() {
+    return !engineFixDormant() || g_engineFixDiagnostics.load(std::memory_order_relaxed);
+}
+
+void glitchFrameNoteEngineFix(bool armed, bool diagnostics) {
+    const bool was = g_engineFixArmed.exchange(armed, std::memory_order_relaxed);
+    g_engineFixDiagnostics.store(diagnostics, std::memory_order_relaxed);
+    if (was != armed) {
+        Log::get().note(
+            armed ? "transition flash: the engine fix is armed, so the detector is dormant "
+                    "(it still records the camera history; it judges and withholds nothing)."
+                  : "transition flash: the engine fix is not armed, so the detector is in charge.");
+    }
+}
+
+bool glitchFrameEngineFixEvent(bool withhold) {
+    State* s = g_state;
+    // A camera jump either way: the FSS arrival trigger and the openvr half
+    // key on it exactly as they do on a detector mark.
+    noteWorldJump();
+    if (!withhold) return true;
+    if (s) s->verdictThisFrame = kVerdictSceneReset;
+    markGlitchFrame();
+    // The camera STAYED at the new base (a change of reference frame, the
+    // next frame is coherent): the temporal pass keeps its history instead
+    // of waiting for a verdict that nothing else will publish.
+    noteJumpVerdict(2);
+    return glitchConsumerPresent();
+}
+
 static void syncGlitchFrameDetail() {
     detail::g_glitchFrameInstalled = g_state != nullptr;
     detail::g_glitchFrameObserving = g_state && g_state->observing;
@@ -1869,7 +1916,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 
     // Everything above is observation. Everything below can withhold a frame,
     // so a fix that has stood down -- or was never switched on -- stops here.
-    if (!s->enabled || s->disabledForSession) return;
+    if (!s->enabled || s->disabledForSession || engineFixDormant()) return;
 
     // The first recognised eye draw has stronger evidence than an auxiliary
     // pass. Later writes must not reverse its verdict before either Submit.
@@ -2133,7 +2180,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
 // glitchFrameIsSceneDraw: inline in glitch_frame.h (the same five hashes).
 bool glitchFrameWantsSceneDraw(uint64_t hash) {
     State* s=g_state;
-    if(!s || !s->observing || s->sceneDrawFrame==s->frameNo)return false;
+    if(!s || !s->observing || s->sceneDrawFrame==s->frameNo || !poolRecordingWanted())return false;
     return glitchFrameIsSceneDraw(hash);
 }
 // True once the camera validation behind "transition flash fix ACTIVE" has
@@ -2146,7 +2193,7 @@ bool glitchFrameCameraValidated() {
 }
 bool glitchFrameNoteSceneDraw(const void* resource,float* sampledPosition) {
     State* s=g_state;
-    if(!s || !s->observing || !resource || s->sceneDrawFrame==s->frameNo)return false;
+    if(!s || !s->observing || !resource || s->sceneDrawFrame==s->frameNo || !poolRecordingWanted())return false;
     for(const auto& w:s->sceneWrites)if(w.resource==resource && w.frame==s->frameNo && w.valid){
         s->sceneDrawFrame=s->frameNo;
         for(unsigned a=0;a<3;++a){s->sceneDrawPos[a]=w.pos[a];if(sampledPosition)sampledPosition[a]=w.pos[a];}
@@ -2394,7 +2441,7 @@ void eyeOriginTraceBoundary(State* s,uint32_t frame,bool withheldClass,bool scen
 }
 }
 uint32_t glitchFrameWantsPool(const void* resource){
-    State* s=g_state;if(!s || !s->observing || !resource || s->scenePoolFrame==s->frameNo)return 0;
+    State* s=g_state;if(!s || !s->observing || !resource || s->scenePoolFrame==s->frameNo || !poolRecordingWanted())return 0;
     for(const auto& p:s->scenePools)if(p.resource==resource && s->frameNo-p.lastBound<=2)return p.bytes;
     return 0;
 }
@@ -2443,7 +2490,7 @@ bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchS
 void glitchFrameNoteScenePool(const void* resource,uint32_t bytes){
     State* s=g_state;
     if(!s || !s->observing || !resource || !bytes || bytes%glitch_scene_detail::kPoolStride ||
-       s->sceneDrawFrame!=s->frameNo || s->scenePoolFrame==s->frameNo)return;
+       s->sceneDrawFrame!=s->frameNo || s->scenePoolFrame==s->frameNo || !poolRecordingWanted())return;
     uint32_t at=0;
     for(uint32_t i=0;i<4;++i){
         if(s->scenePools[i].resource==resource){at=i;break;}
@@ -2466,7 +2513,7 @@ void glitchFrameNoteScenePool(const void* resource,uint32_t bytes){
             "jump; an unmatched reset into head space can mark before Submit. "
             "Missing pairs report matched=0 and retain the legacy decision.");}
     }
-    if(!s->enabled || s->disabledForSession || !s->validated || s->lastEyeDraws<s->minEyeDraws)return;
+    if(!s->enabled || s->disabledForSession || engineFixDormant() || !s->validated || s->lastEyeDraws<s->minEyeDraws)return;
     const auto decision=glitchSceneDecision(s->sceneGeometry,s->sceneDrawPos);
     if(decision==GlitchSceneDecision::Unknown)return;
     s->sceneDecision=decision;s->sceneDecisionFrame=s->frameNo;
@@ -2526,7 +2573,7 @@ void glitchFrameBoundary(uint32_t eyeDraws) {
     // any business running for a fix the player has switched off. The ring does,
     // because a history is the whole reason to run with it off: nothing withheld
     // means anything seen was somebody else's.
-    if (!s->enabled) {
+    if (!s->enabled || engineFixDormant()) {
         if (s->frameFarMag2 >= 0.0f || s->sceneDrawFrame+1==s->frameNo) {
             RingEntry& e = s->ring[s->ringHead % kRingFrames];
             e.qpc = static_cast<uint64_t>(qpcNow());

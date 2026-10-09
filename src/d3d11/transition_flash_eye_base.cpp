@@ -314,6 +314,12 @@ HookEntry g_ctrlDtorEntry{"transition-flash-eye-base-hmdcam-dtor", kCtrlDtorRva,
 // --- Module state ------------------------------------------------------
 std::atomic<uint8_t> g_fixMode{uint8_t(tfp::Mode::Off)};
 std::atomic<bool> g_armed{false};       // install has been attempted (once)
+// advanced.transition_flash_diagnostics (CHANGE 19, TEMPORARY): the writer
+// watch, the rings and dumps, the passive sim lines, the lifecycle hooks and
+// the pool comparison. Off, the module is the engine fix and its one log line
+// per event, nothing else. Hot-reloadable.
+std::atomic<bool> g_diag{false};
+std::atomic<bool> g_engineArmed{false};   // the engine fix is live (the detector is dormant)
 std::atomic<bool> g_offLogged{false};
 std::atomic<uintptr_t> g_base{0};
 std::atomic<uint32_t> g_frame{0};
@@ -388,17 +394,6 @@ bool g_haveLastRefilled = false;
 // memory; the sim computes what the ACTING build (after this validation
 // flies) would premultiply into the bad frame's eye and logs it, once per
 // covered render frame, never per consume.
-// CHANGE 18: what the catch-up-tick dry run (hmdGapConsume, Part C) produced
-// at one consume, carried to the patch sim armed on that same consume.
-// state NoGap = no gap stretch started there (the controller ticked, or the
-// mailbox was refilled); B is B_tick, meaningful only when state == Wrote.
-struct TickProbe {
-    tfeb::DryRunState state = tfeb::DryRunState::NoGap;
-    uint32_t frame = 0;       // the consume's frame
-    uint32_t hstate = 0;      // the handle state read at that consume
-    float B[16] = {};
-};
-
 struct PatchSimPending {
     bool active = false;
     uint32_t skipFrame = 0;   // N: the un-refilled ENTRY-edge consume's frame
@@ -423,12 +418,15 @@ struct PatchSimPending {
     float prevCorrOrigin[3] = {NAN, NAN, NAN};
     float prevCorrViewT[3] = {NAN, NAN, NAN};
     bool havePrevCorr = false;
-    // CHANGE 18: the dry run's result for this event (state NoGap when none
-    // ran at the arming consume), and the previous covered line's tick->
-    // eye, which the NEXT line's P is measured against (tickVsNext).
-    TickProbe tick;
-    float prevTickEye[3] = {NAN, NAN, NAN};
-    bool tickScored = false;   // the event's one tickVsChosen verdict has been counted
+    // CHANGE 19 (Build 2a): the event's base. B_new is the mailbox the FIRST
+    // controller tick after the skip left (controllerObserved reads it right
+    // after the original returns -- before the next consume can reset it);
+    // baseState says why it is absent when it is (tfeb::EngineBase).
+    tfeb::EngineBase baseState = tfeb::EngineBase::NoTickYet;
+    float baseNew[16] = {};
+    uint32_t baseTickFrame = 0;   // g_frame when the tick that left it ran
+    uint32_t baseTicksSeen = 0;   // ticks since the skip (the base tick is the first usable one)
+    bool engineOpen = false;      // the event has not yet been closed by serviceEngineEvent
 };
 std::mutex g_patchSimMutex;
 PatchSimPending g_patchSim;
@@ -440,6 +438,36 @@ std::atomic<uint64_t> g_patchSimExpired{0};    // windows that passed with no co
 // armed). Written only under g_patchSimMutex, at arm and at retire/expire.
 std::atomic<bool> g_patchSimPending{false};
 std::atomic<uint32_t> g_patchSimPendingSkip{0};
+
+// CHANGE 19 (Build 2a): the engine fix's event plumbing, outside the diag sim.
+// gapLastConsume: the last gap (un-refilled mode-2) consume of the armed
+// event's run, so a render tap knows whether its consume was still a gap.
+// waitingForBase: an armed event has no base yet (the controller hook reads
+// the mailbox after its next tick). outstanding: an event, or an unlogged act
+// record, is live (the per-frame service takes its lock only then).
+std::atomic<uint32_t> g_engineGapLastConsume{0};
+std::atomic<bool> g_engineWaitingForBase{false};
+std::atomic<bool> g_engineEventOutstanding{false};
+std::atomic<uint64_t> g_engineEvents{0}, g_engineFramesPatched{0}, g_engineFramesWithheld{0};
+std::atomic<uint64_t> g_engineWithheldNoTick{0}, g_engineWithheldUnusable{0};
+std::atomic<uint64_t> g_engineFramesNoFill{0}, g_engineEventsNoHeadOnly{0}, g_engineNotHonoured{0};
+
+// One bad frame the fix acted on (two slots per event, indexed by tapFrame -
+// skipFrame - 1), written by the render-tap path under g_patchSimMutex and
+// logged by serviceEngineEvent a frame after its fills closed. outcome: 0
+// had a base but no fill matched, 1 patched, 2 withheld.
+struct EngineActRecord {
+    bool used = false;
+    bool logged = false;
+    uint8_t outcome = 0;
+    uint8_t poolChoice = 0;        // diagnostics only: 0 not asked, 1 new, 2 old, 3 unclear, 4 no evidence
+    bool consumerPresent = true;
+    tfeb::EngineBase baseState = tfeb::EngineBase::NoTickYet;
+    uint32_t skipFrame = 0, tapFrame = 0, baseTickFrame = 0, baseTicksSeen = 0;
+    uint32_t fillsHeadOnly = 0, fillsPatched = 0, fillsViewWritten = 0;
+};
+EngineActRecord g_actRecords[tfeb::kEngineMaxFrames];
+void logEngineRecord(const EngineActRecord& r) noexcept;   // Part C3
 
 // CHANGE 14: the buffer-row locator's per-tap-frame accumulation, consumed
 // by the boundary sim block (which logs it one line per covered frame).
@@ -527,6 +555,7 @@ struct PatchSimCBAccum {
     uint8_t latchReason = 0;
     uint8_t latchChoice = 2;          // the SceneChoice the decision saw
     float latchB[16] = {};
+    float latchP[3] = {};             // CHANGE 19: the first head-only fill's row 275 -- the frame's eye
     // Finding 1c's number: head-only fills of the act frame AFTER the first
     // whose per-fill re-evaluation (with the evidence present AT THAT FILL)
     // would have chosen a different base than the latch. Non-zero means the
@@ -582,30 +611,42 @@ const char* patchSimLiveStateText(uint8_t s) noexcept {
 const char* latchText(uint8_t base, uint8_t reason) noexcept {
     if (base == 1) return "live";
     if (base == 2) return "held";
+    if (base == 3) return "base1";
     if (reason == 0) return "sim";
-    return reason == 1 ? "noPatch:poolLate" : "noPatch:thin";
+    return reason == 1 ? "noPatch:poolLate" : reason == 3 ? "withheld:noBase" : "noPatch:thin";
 }
 
 // The frame-level base token: DERIVED FROM THE LATCH, never from a per-fill
 // or would-differ side. 151942's dump showed base=held beside latch=live --
 // the frame-level report must be incapable of disagreeing with itself.
 const char* latchedBaseText(uint8_t base) noexcept {
-    return base == 1 ? "live" : base == 2 ? "held" : "none";
+    return base == 1 ? "live" : base == 2 ? "held" : base == 3 ? "base1" : "none";
 }
 
 void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase, uint64_t ship,
-                 bool eventPatched, const TickProbe& tick) noexcept {
+                 bool eventPatched) noexcept {
     uint32_t replacedSkip = 0;
     bool replaced = false;
+    EngineActRecord orphaned[tfeb::kEngineMaxFrames];   // unlogged records of the event this replaces
+    uint32_t orphanedCount = 0;
     {
         std::lock_guard<std::mutex> lock(g_patchSimMutex);
+        for (const EngineActRecord& r : g_actRecords) {
+            if (r.used && !r.logged) orphaned[orphanedCount++] = r;
+        }
         replaced = g_patchSim.active;
         if (replaced) replacedSkip = g_patchSim.skipFrame;
         g_patchSim.active = true;
         g_patchSim.skipFrame = frame;
-        g_patchSim.tick = tick;
-        for (float& v : g_patchSim.prevTickEye) v = NAN;
-        g_patchSim.tickScored = false;
+        g_patchSim.baseState = tfeb::EngineBase::NoTickYet;
+        g_patchSim.baseTickFrame = 0;
+        g_patchSim.baseTicksSeen = 0;
+        g_patchSim.engineOpen = true;
+        g_engineGapLastConsume.store(frame, std::memory_order_relaxed);
+        for (EngineActRecord& r : g_actRecords) r = EngineActRecord{};
+        g_engineWaitingForBase.store(true, std::memory_order_release);
+        g_engineEventOutstanding.store(true, std::memory_order_release);
+        g_engineEvents.fetch_add(1, std::memory_order_relaxed);
         g_patchSim.haveHeld = haveHeldBase;
         if (haveHeldBase) std::memcpy(g_patchSim.heldM, heldM, sizeof(g_patchSim.heldM));
         g_patchSim.ship = ship;
@@ -618,6 +659,7 @@ void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase, uint6
         g_patchSimPending.store(true, std::memory_order_release);
         g_patchSimPendingSkip.store(frame, std::memory_order_release);
     }
+    for (uint32_t i = 0; i < orphanedCount; ++i) logEngineRecord(orphaned[i]);
     if (replaced) {
         g_patchSimReplaced.fetch_add(1, std::memory_order_relaxed);
         Log::get().note(
@@ -917,6 +959,7 @@ void addReason(PendingDump& d, const char* reason) noexcept {
 }
 
 void requestDump(const char* reason, uint32_t triggerFrame) noexcept {
+    if (!g_diag.load(std::memory_order_relaxed)) return;   // CHANGE 19: dumps are diagnostics
     std::lock_guard<std::mutex> lock(g_dumpMutex);
     const bool creatingNew = !g_pendingDump.window.active;
     if (creatingNew && g_dumpsThisSession.load(std::memory_order_relaxed) >= kMaxDumpsPerSession) return;
@@ -1463,17 +1506,6 @@ std::atomic<uint64_t> g_writerHitsTotal{0};
 // transitionFlashEyeBaseNoteSceneCamera into the frame ring's row.
 std::atomic<uint32_t> g_writerHitsThisFrame{0};
 
-// CHANGE 18: set on the thread that is inside the catch-up-tick dry run
-// (hmdGapConsume). The tick it calls reaches the writer, whose mailbox store
-// the DR0 write watch and whose entry the DR1 execute watch both see; those
-// hits are not the game's own and must not reach the writer table, the
-// "writer wrote since last consume" flags or the frame counters, or the dry
-// run would make the very consume it probes look as if the writer had run.
-// The VEH only counts and resumes (and sets RF for a DR1 fault, or the CPU
-// would re-trap the same instruction forever).
-thread_local bool t_dryRunActive = false;
-std::atomic<uint64_t> g_dryRunHitsSuppressed{0};
-
 // RtlLookupFunctionEntry + RtlVirtualUnwind from a copy of the faulting
 // context -- crash_context.h's emitUnwind shape, SEH-guarded, POD locals
 // only, safe from a VEH handler. Self-contained (no coupling to the pose
@@ -1598,15 +1630,6 @@ LONG CALLBACK writerWatchVeh(EXCEPTION_POINTERS* ep) {
     const bool slot1Hit = tfeb::dr6HasSlot1Hit(dr6);
     if (!slot0Hit && !slot1Hit) return EXCEPTION_CONTINUE_SEARCH;
     ep->ContextRecord->Dr6 = 0;  // sticky; clear before anything else, same rule pose_reader_watch.cpp states
-
-    if (t_dryRunActive) {
-        // CHANGE 18: our own dry-run call of the controller tick -- see
-        // t_dryRunActive. Slot 0 is a trap (already retired, nothing to do);
-        // slot 1 is a fault and needs RF exactly as the real path below.
-        g_dryRunHitsSuppressed.fetch_add(1, std::memory_order_relaxed);
-        if (slot1Hit) ep->ContextRecord->EFlags |= 0x10000u;
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
 
     const uint64_t base = g_gameBase.load(std::memory_order_relaxed);
     const uint64_t size = g_gameSize.load(std::memory_order_relaxed);
@@ -1741,7 +1764,7 @@ void frameBoundaryWriterWatch(uint32_t frameNo) noexcept {
     (void)frameNo;
     const tfp::Mode fixMode = static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed));
     if (fixMode == tfp::Mode::Off) {
-        if (g_wwHwArmed) disarmWriterWatch("advanced.transition_flash_eye_base turned off");
+        if (g_wwHwArmed) disarmWriterWatch("advanced.transition_flash_diagnostics turned off");
         return;
     }
     if (g_wwHwDisarmedForSession) return;
@@ -1808,12 +1831,12 @@ uint32_t takeFrameWriterMask() noexcept {
 // fired".
 // =====================================================================
 
-// CHANGE 18 (Build 1): the tick's bookkeeping, noted at the top of the hook.
-// Which controller, when, and how many ticks since the last mode-2 consume --
-// the "did the tick run" half of the gap test. Ticks are counted for the
-// lifecycle-known HMDCamera when there is one (another camera class sharing
-// this function must not hide a gap), for any controller until then; the
-// other ones are counted apart so the gap line can show them.
+// CHANGE 18/19: the tick's bookkeeping, noted at the top of the hook
+// (diagnostics only). Which controller, when, and how many ticks since the
+// last mode-2 consume -- the "did the tick run" half of the gap test. Ticks
+// are counted for the lifecycle-known HMDCamera when there is one (another
+// camera class sharing this function must not hide a gap), for any controller
+// until then; the other ones are counted apart so the gap line can show them.
 constexpr uint32_t kTickCtrlSlots = 4;
 std::atomic<uintptr_t> g_tickLastCtrl{0};
 std::atomic<int64_t> g_tickLastFrame{-1};
@@ -1841,51 +1864,58 @@ void noteControllerTick(uintptr_t ctrl) noexcept {
     else g_otherTicksSinceConsume.fetch_add(1, std::memory_order_relaxed);
 }
 
+// CHANGE 19 (Build 2a), the engine fix's base: called right AFTER the original
+// tick returns, on the thread that ran it, while an armed event waits for its
+// base. The tick has just written the mailbox (ship+0x3330) and nothing else
+// has run on that thread since, so the next consume's reset cannot have
+// happened yet (flight 050558: that reset is what made the render-time read
+// RESET on the exit). Usable = a base, not a leftover (tfeb::engineBaseUsable).
+// The FIRST tick after the skip normally leaves it; a tick that left nothing
+// usable (another camera class, a writer that refused) is counted and the
+// next tick tries again until the event's window closes.
+void noteBaseTick() noexcept {
+    std::lock_guard<std::mutex> lock(g_patchSimMutex);
+    if (!g_patchSim.active) { g_engineWaitingForBase.store(false, std::memory_order_release); return; }
+    if (g_patchSim.baseState == tfeb::EngineBase::Have) {
+        g_engineWaitingForBase.store(false, std::memory_order_release);
+        return;
+    }
+    ++g_patchSim.baseTicksSeen;
+    float m[16] = {};
+    if (g_patchSim.ship != 0 &&
+        sehReadBlock64(static_cast<uintptr_t>(g_patchSim.ship) + 0x3330, m) && tfeb::engineBaseUsable(m)) {
+        std::memcpy(g_patchSim.baseNew, m, sizeof(m));
+        g_patchSim.baseState = tfeb::EngineBase::Have;
+        g_patchSim.baseTickFrame = g_frame.load(std::memory_order_relaxed);
+        g_engineWaitingForBase.store(false, std::memory_order_release);
+    } else {
+        g_patchSim.baseState = tfeb::EngineBase::TickUnusable;
+    }
+}
+
 uint64_t __fastcall controllerObserved(uintptr_t param1) noexcept {
     const auto forward = reinterpret_cast<ControllerFn>(g_controllerEntry.forward.load(std::memory_order_acquire));
     if (!forward) return 0;  // stood down at install; the relay is unreachable then
-    if (static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) != tfp::Mode::Off) {
+    const bool on = static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) != tfp::Mode::Off;
+    if (on && g_diag.load(std::memory_order_relaxed)) {
         g_controllerCallsTotal.fetch_add(1, std::memory_order_relaxed);
         g_controllerCallsThisFrame.fetch_add(1, std::memory_order_relaxed);
         noteControllerTick(param1);
     }
-    return forward(param1);
+    const uint64_t result = forward(param1);
+    if (on && g_engineWaitingForBase.load(std::memory_order_acquire)) noteBaseTick();
+    return result;
 }
 
 // =====================================================================
-// Part C2 (CHANGE 18, Build 1): the HMDCamera lifecycle record, the gap
-// stretches, and the catch-up-tick DRY RUN. Nothing here changes what the
-// driver composes: the dry run calls the original tick once at the first
-// consume of a gap stretch, reads what it would have written into the
-// mailbox, and puts every byte it touched back.
+// Part C2 (CHANGE 18, diagnostics only): the HMDCamera lifecycle record and
+// the gap stretches. Log-only: nothing here changes what the game does, and
+// nothing here ever calls a game function (the Build 1 dry run is gone).
 // =====================================================================
 
-// Layout facts, all from analysis\decomp\flash\r7\resolved_10730A0.txt and
-// r8\chan\ (line numbers are the resolved_ file's): the job-system handle is
-// the qword at ctrl+0x150 (Activate: FUN_1410a9d20(param_1+0x150, ...)). The
-// tick writes, directly:
-//   ctrl+0x70..+0xAF   the product block        (lines 283-298)
-//   ctrl+0xF0..+0x12F  the head pose it read    (lines 299-314)
-//   ctrl+0x30          one dword (local_f4)     (line 315)
-// and, before that, FUN_141066d80(ctrl+0x30) assigns a whole camera-params
-// blob into ctrl+0x30..+0x138 from *(ctrl+0x140)+... when both are set (line
-// 163; explorer_cam/INDEX.txt names the blob). That assign rewrites every
-// plain value in ctrl+0x70..+0x12F -- the gap between the two blocks included
-// -- and ctrl+0x30..+0x3D, so the saved extents are the two plain-value runs
-// ctrl+0x30..+0x3F and ctrl+0x70..+0x12F. NOT restored, deliberately: the
-// sub-object at ctrl+0x40..+0x6F and the ref-counted pointer at ctrl+0x130
-// (a byte restore of a ref-counted pointer is how a double free starts; the
-// assign from the same source is idempotent there), the entity floats at
-// lVar4+0x38..+0x40 (lines 319-324, rewritten by every real tick), and the
-// writer's notify call to *(ship+0x7B8) (vtable+0xC8, handed the same base).
-// The mailbox is ship+0x3330..+0x336F, 64 bytes, as everywhere in this file.
-constexpr uintptr_t kCtrlHandleOffset = 0x150;
-constexpr uintptr_t kCtrlHeadOffset = 0x30, kCtrlHeadBytes = 0x10;
-constexpr uintptr_t kCtrlPoseOffset = 0x70, kCtrlPoseBytes = 0xC0;
-constexpr uintptr_t kMailboxOffset = 0x3330;
-constexpr size_t kMailboxBytes = 64;
+constexpr uintptr_t kCtrlHandleOffset = 0x150;   // the job-system handle word (Activate: FUN_1410a9d20(param_1+0x150, ...))
 constexpr uint32_t kMaxHmdLifecycleLines = 40;
-constexpr uint32_t kMaxHmdGapLines = 80;       // gap start + end + dry-run lines together
+constexpr uint32_t kMaxHmdGapLines = 80;         // gap start + end lines together
 
 std::atomic<int64_t> g_hmdActFrame{-1}, g_hmdDeactFrame{-1};
 std::atomic<uint64_t> g_hmdActivates{0}, g_hmdDeactivates{0};
@@ -1893,16 +1923,11 @@ std::atomic<uint64_t> g_hmdDtorCalls{0}, g_hmdDtorOfKnown{0};
 std::atomic<uint32_t> g_hmdLifecycleLines{0};
 std::atomic<uint32_t> g_hmdGapLines{0};
 
-std::mutex g_gapMutex;                          // guards g_gapStretch and the dry-run decision
+std::mutex g_gapMutex;                          // guards g_gapStretch
 tfeb::GapStretch g_gapStretch;
 std::atomic<bool> g_gapActive{false};           // mirror: the fast path takes no lock
 std::atomic<uint64_t> g_gapStarted{0}, g_gapConsumes{0};
 std::atomic<uint64_t> g_gapByHandle[4] = {};    // stretches by handle state at the start: none/active/pending/other
-std::atomic<uint32_t> g_dryAttempts{0};
-std::atomic<bool> g_dryStoodDown{false};
-constexpr uint32_t kDryRunStates = 10;          // tfeb::DryRunState's enumerators, NoGap..Faulted
-std::atomic<uint64_t> g_dryStateCounts[kDryRunStates] = {};
-std::atomic<uint64_t> g_tickMatched{0}, g_tickMismatched{0};   // events' tickVsChosen < 0.10 m / not
 
 const char* ptrText(char (&buf)[24], uintptr_t p) noexcept {
     if (p == 0) std::snprintf(buf, sizeof(buf), "null");
@@ -1922,6 +1947,7 @@ uintptr_t resolveHmdCtrl(const char** src) noexcept {
 
 void noteLifecycle(bool activate, uintptr_t ctrl) noexcept {
     if (static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) == tfp::Mode::Off) return;
+    if (!g_diag.load(std::memory_order_relaxed)) return;
     const uint32_t frame = g_frame.load(std::memory_order_relaxed);
     uint64_t word = 0;
     const bool haveWord = sehReadU64(ctrl + kCtrlHandleOffset, word);
@@ -1960,13 +1986,13 @@ void __fastcall deactivateObserved(uintptr_t ctrl) noexcept {
 }
 
 // The destructor (ctrl, flags): forget the object BEFORE the original runs --
-// after it the pointer is dangling, and the dry run must never call a tick on
-// it. Returns the original's own return value (the scalar-deleting
-// destructor's `this`).
+// after it the pointer is dangling. Returns the original's own return value
+// (the scalar-deleting destructor's `this`).
 uint64_t __fastcall ctrlDtorObserved(uintptr_t ctrl, uint64_t flags) noexcept {
     const auto forward = reinterpret_cast<CtrlDtorFn>(g_ctrlDtorEntry.forward.load(std::memory_order_acquire));
     if (!forward) return 0;
-    if (static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) != tfp::Mode::Off) {
+    if (static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) != tfp::Mode::Off &&
+        g_diag.load(std::memory_order_relaxed)) {
         g_hmdDtorCalls.fetch_add(1, std::memory_order_relaxed);
         uintptr_t expected = ctrl;
         if (g_hmdCtrl.compare_exchange_strong(expected, 0, std::memory_order_relaxed)) {
@@ -1985,64 +2011,19 @@ uint64_t __fastcall ctrlDtorObserved(uintptr_t ctrl, uint64_t flags) noexcept {
     return forward(ctrl, flags);
 }
 
-// The dry run's one game-touching step: POD locals and no destructors only,
-// so SEH can wrap it (the sehRead* rule above). Saves the mailbox and the
-// tick's own blocks, calls the original tick with the VEH suppression raised,
-// reads the mailbox back, restores everything. 0 ok; 1 a save faulted (the
-// tick was NOT called); 2 the tick faulted (restored); 3 a restore faulted.
-__declspec(noinline) int sehDryRunTick(ControllerFn tick, uintptr_t ctrl, uintptr_t mailbox,
-                                       float after[16]) noexcept {
-    uint8_t savedMail[kMailboxBytes];
-    uint8_t savedHead[kCtrlHeadBytes];
-    uint8_t savedPose[kCtrlPoseBytes];
-    __try {
-        std::memcpy(savedMail, reinterpret_cast<const void*>(mailbox), sizeof(savedMail));
-        std::memcpy(savedHead, reinterpret_cast<const void*>(ctrl + kCtrlHeadOffset), sizeof(savedHead));
-        std::memcpy(savedPose, reinterpret_cast<const void*>(ctrl + kCtrlPoseOffset), sizeof(savedPose));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 1;
-    }
-    int result = 0;
-    t_dryRunActive = true;
-    __try {
-        tick(ctrl);
-        std::memcpy(after, reinterpret_cast<const void*>(mailbox), kMailboxBytes);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        result = 2;
-    }
-    __try {
-        std::memcpy(reinterpret_cast<void*>(mailbox), savedMail, sizeof(savedMail));
-        std::memcpy(reinterpret_cast<void*>(ctrl + kCtrlHeadOffset), savedHead, sizeof(savedHead));
-        std::memcpy(reinterpret_cast<void*>(ctrl + kCtrlPoseOffset), savedPose, sizeof(savedPose));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        result = 3;
-    }
-    t_dryRunActive = false;
-    return result;
-}
-
-void noteDryRunState(tfeb::DryRunState s) noexcept {
-    const uint32_t i = static_cast<uint32_t>(s);
-    if (i < kDryRunStates) g_dryStateCounts[i].fetch_add(1, std::memory_order_relaxed);
-}
-
-// Called for EVERY mode-2 consume that read the mailbox (consumerObserved).
-// Folds the consume into the gap-stretch tracker; on the first consume of a
-// stretch logs the gap line and, when the gate allows, runs the dry run.
-// Returns the probe for the patch sim the same consume arms (state NoGap when
-// this consume started no stretch). The fast path -- no gap, no stretch open
-// -- is one atomic exchange pair and a branch.
-TickProbe hmdGapConsume(uint32_t frame, uint64_t ship, bool mailboxIsReset) noexcept {
-    TickProbe probe;
-    probe.frame = frame;
+// Called for EVERY mode-2 consume that read the mailbox while diagnostics are
+// on. Folds the consume into the gap-stretch tracker and logs one line at a
+// stretch's start and one at its end, never one per consume. The fast path --
+// no gap, no stretch open -- is one atomic exchange pair and a branch.
+void hmdGapConsume(uint32_t frame, bool mailboxIsReset) noexcept {
     // Without the controller hook nothing counts ticks, and every reset
     // mailbox would read as a gap: say nothing instead (the armed line and
     // the summary's hooks= field name the stood-down hook).
-    if (!g_controllerEntry.ready.load(std::memory_order_acquire)) return probe;
+    if (!g_controllerEntry.ready.load(std::memory_order_acquire)) return;
     const uint32_t ticks = g_ticksSinceConsume.exchange(0, std::memory_order_relaxed);
     const uint32_t otherTicks = g_otherTicksSinceConsume.exchange(0, std::memory_order_relaxed);
     const bool gap = tfeb::isHmdGapConsume(2, mailboxIsReset, ticks);
-    if (!gap && !g_gapActive.load(std::memory_order_relaxed)) return probe;
+    if (!gap && !g_gapActive.load(std::memory_order_relaxed)) return;
     if (gap) g_gapConsumes.fetch_add(1, std::memory_order_relaxed);
 
     const char* src = "none";
@@ -2053,7 +2034,6 @@ TickProbe hmdGapConsume(uint32_t frame, uint64_t ship, bool mailboxIsReset) noex
 
     tfeb::GapEdge edge;
     tfeb::GapStretch ended;
-    tfeb::DryRunState gate = tfeb::DryRunState::NoGap;
     {
         std::lock_guard<std::mutex> lock(g_gapMutex);
         edge = tfeb::updateGapStretch(g_gapStretch, gap, frame, hstate);
@@ -2062,29 +2042,18 @@ TickProbe hmdGapConsume(uint32_t frame, uint64_t ship, bool mailboxIsReset) noex
         if (edge == tfeb::GapEdge::Start) {
             g_gapStarted.fetch_add(1, std::memory_order_relaxed);
             g_gapByHandle[tfeb::handleStateBucket(hstate)].fetch_add(1, std::memory_order_relaxed);
-            gate = tfeb::dryRunGate(haveWord, hstate, g_dryAttempts.load(std::memory_order_relaxed),
-                                    g_dryStoodDown.load(std::memory_order_relaxed));
-            if (gate ==tfeb::DryRunState::Go) g_dryAttempts.fetch_add(1, std::memory_order_relaxed);
         }
     }
-
-    char ctrlBuf[24], tickCtrlBuf[24];
     if (edge == tfeb::GapEdge::End) {
         if (g_hmdGapLines.fetch_add(1, std::memory_order_relaxed) < kMaxHmdGapLines) {
             Log::get().note(
                 "transition flash eye base: hmdcam gap end f=%u start_f=%u len=%u hstate_at_start=%u.",
                 frame, ended.startFrame, ended.length, ended.hstate);
         }
-        return probe;
+        return;
     }
-    if (edge != tfeb::GapEdge::Start) return probe;
-
-    probe.hstate = hstate;
-    if (gate != tfeb::DryRunState::Go) {
-        probe.state = gate;
-        noteDryRunState(gate);
-    }
-    char hs[16], hg[16];
+    if (edge != tfeb::GapEdge::Start) return;
+    char ctrlBuf[24], tickCtrlBuf[24], hs[16], hg[16];
     if (haveWord) {
         std::snprintf(hs, sizeof(hs), "%u", hstate);
         std::snprintf(hg, sizeof(hg), "%u", tfeb::handleGeneration(word));
@@ -2096,51 +2065,18 @@ TickProbe hmdGapConsume(uint32_t frame, uint64_t ship, bool mailboxIsReset) noex
     if (gapLine < kMaxHmdGapLines) {
         Log::get().note(
             "transition flash eye base: hmdcam gap f=%u ctrl=%s hstate=%s hgen=%s act_f=%lld deact_f=%lld "
-            "ticks_since=%u other_ticks=%u tickctrl=%s tick_f=%lld src=%s dry=%s%s",
+            "ticks_since=%u other_ticks=%u tickctrl=%s tick_f=%lld src=%s%s",
             frame, ptrText(ctrlBuf, ctrl), hs, hg,
             (long long)g_hmdActFrame.load(std::memory_order_relaxed),
             (long long)g_hmdDeactFrame.load(std::memory_order_relaxed), ticks, otherTicks,
             ptrText(tickCtrlBuf, g_tickLastCtrl.load(std::memory_order_relaxed)),
             (long long)g_tickLastFrame.load(std::memory_order_relaxed), src,
-            gate == tfeb::DryRunState::Go ? "attempting" : tfeb::dryRunStateText(gate),
             gapLine + 1 == kMaxHmdGapLines ? " (gap line cap reached; counts continue)" : "");
     }
-    if (gate != tfeb::DryRunState::Go) return probe;
-
-    // The dry run. A ship we could not read (0) has no mailbox to probe.
-    const ControllerFn tick = reinterpret_cast<ControllerFn>(g_controllerEntry.forward.load(std::memory_order_acquire));
-    float after[16] = {};
-    int code = 1;
-    if (ship != 0 && tick) code = sehDryRunTick(tick, ctrl, static_cast<uintptr_t>(ship) + kMailboxOffset, after);
-    if (code == 0) {
-        probe.state = tfeb::classifyTickMailbox(after);
-        if (probe.state == tfeb::DryRunState::Wrote) std::memcpy(probe.B, after, sizeof(probe.B));
-    } else {
-        probe.state = tfeb::DryRunState::Faulted;
-        g_dryStoodDown.store(true, std::memory_order_relaxed);
-        Log::get().note(
-            "transition flash eye base: hmdcam dry run %s at f=%u ctrl=0x%llX -- standing the dry run down "
-            "for the session.",
-            code == 1 ? "could not read its save blocks (the tick was NOT called)"
-                      : code == 2 ? "FAULTED inside the tick (state restored)"
-                                  : "FAULTED while restoring (state may differ!)",
-            frame, (unsigned long long)ctrl);
-    }
-    noteDryRunState(probe.state);
-    if (code == 0 && g_hmdGapLines.fetch_add(1, std::memory_order_relaxed) < kMaxHmdGapLines) {
-        Log::get().note(
-            "transition flash eye base: hmdcam dry run f=%u ctrl=0x%llX hstate=%u result=%s "
-            "B_tick_t=(%+.3f %+.3f %+.3f) (%u/%u dry runs).",
-            frame, (unsigned long long)ctrl, hstate, tfeb::dryRunStateText(probe.state),
-            after[12], after[13], after[14], g_dryAttempts.load(std::memory_order_relaxed),
-            tfeb::kMaxDryRunsPerSession);
-    }
-    return probe;
 }
 
-// The summary, always printed with the periodic line and at shutdown: a build
-// where none of this ran reads differently from one where nothing happened --
-// hook results first, then zeros that mean "ran, saw none".
+// The diagnostics summary: hook results first, then zeros that mean "ran,
+// saw none".
 void hmdSummaryLine(const char* prefix) noexcept {
     char ctrlBuf[24];
     char tickCtrls[160];
@@ -2154,17 +2090,11 @@ void hmdSummaryLine(const char* prefix) noexcept {
                            (unsigned long long)g_tickCtrlCalls[i].load(std::memory_order_relaxed));
         if (n >= static_cast<int>(sizeof(tickCtrls)) - 40) break;
     }
-    const auto dry = [](tfeb::DryRunState s) {
-        return (unsigned long long)g_dryStateCounts[static_cast<uint32_t>(s)].load(std::memory_order_relaxed);
-    };
     const auto life = [](bool ready) { return ready ? "ok" : "DOWN"; };
     Log::get().note(
         "%s hmdcam: hooks tick/activate/deactivate/dtor=%s/%s/%s/%s; ticks=%llu ctrls=[%s]%s hmd_ctrl=%s; "
         "lifecycle activate/deactivate=%llu/%llu destroyed=%llu(of known %llu); "
-        "gap stretches=%llu consumes=%llu by handle none/active/pending/other=%llu/%llu/%llu/%llu; "
-        "dry runs=%u/%u wrote=%llu not-written=%llu implausible=%llu faulted=%llu "
-        "skipped(no-ctrl/hstate0/cap/stood-down)=%llu/%llu/%llu/%llu suppressed_hits=%llu; "
-        "tickVsChosen <0.10m=%llu else=%llu.",
+        "gap stretches=%llu consumes=%llu by handle none/active/pending/other=%llu/%llu/%llu/%llu.",
         prefix, life(g_controllerEntry.ready.load(std::memory_order_relaxed)),
         life(g_activateEntry.ready.load(std::memory_order_relaxed)),
         life(g_deactivateEntry.ready.load(std::memory_order_relaxed)),
@@ -2181,15 +2111,108 @@ void hmdSummaryLine(const char* prefix) noexcept {
         (unsigned long long)g_gapByHandle[0].load(std::memory_order_relaxed),
         (unsigned long long)g_gapByHandle[1].load(std::memory_order_relaxed),
         (unsigned long long)g_gapByHandle[2].load(std::memory_order_relaxed),
-        (unsigned long long)g_gapByHandle[3].load(std::memory_order_relaxed),
-        g_dryAttempts.load(std::memory_order_relaxed), tfeb::kMaxDryRunsPerSession,
-        dry(tfeb::DryRunState::Wrote), dry(tfeb::DryRunState::NotWritten),
-        dry(tfeb::DryRunState::WroteImplausible), dry(tfeb::DryRunState::Faulted),
-        dry(tfeb::DryRunState::SkipNoCtrl), dry(tfeb::DryRunState::SkipHandleNone),
-        dry(tfeb::DryRunState::SkipCap), dry(tfeb::DryRunState::SkipStoodDown),
-        (unsigned long long)g_dryRunHitsSuppressed.load(std::memory_order_relaxed),
-        (unsigned long long)g_tickMatched.load(std::memory_order_relaxed),
-        (unsigned long long)g_tickMismatched.load(std::memory_order_relaxed));
+        (unsigned long long)g_gapByHandle[3].load(std::memory_order_relaxed));
+}
+
+// =====================================================================
+// Part C3 (CHANGE 19): the engine fix's own accounting and its always-on log
+// lines. One line per bad frame the fix acted on (at most two per event), and
+// one for an event whose window held no head-only fill at all, so a run in
+// which the fix never fired reads differently from one in which it never
+// armed: the armed line says which, the periodic line carries the counts.
+// =====================================================================
+
+constexpr uint32_t kMaxEngineLines = 60;
+constexpr uint32_t kMaxEngineNoFillLines = 8;
+std::atomic<uint32_t> g_engineLines{0}, g_engineNoFillLines{0};
+
+// Logs one finished record.
+void logEngineRecord(const EngineActRecord& r) noexcept {
+    const uint32_t already = g_engineLines.fetch_add(1, std::memory_order_relaxed);
+    if (already >= kMaxEngineLines) return;
+    char pool[24] = "";
+    if (r.poolChoice != 0) {
+        std::snprintf(pool, sizeof(pool), " pool=%s",
+                      r.poolChoice == 1 ? "new" : r.poolChoice == 2 ? "old" : r.poolChoice == 3 ? "unclear" : "none");
+    }
+    const char* tail = already + 1 == kMaxEngineLines ? " (line cap reached; counts continue)" : "";
+    if (r.outcome == 2) {
+        Log::get().note(
+            "transition flash: frame %u withheld (no base by the render: %s) (event skip %u, ticks seen %u%s)%s%s",
+            r.tapFrame, tfeb::engineBaseReason(r.baseState), r.skipFrame, r.baseTicksSeen, pool,
+            r.consumerPresent ? "" : " -- NOT held: no compositor was in a position to hold it", tail);
+    } else if (r.outcome == 1) {
+        Log::get().note(
+            "transition flash: frame %u patched (base first tick f=%u, fills %u/%u, view %u) (event skip %u%s)%s",
+            r.tapFrame, r.baseTickFrame, r.fillsPatched, r.fillsHeadOnly, r.fillsViewWritten, r.skipFrame,
+            pool, tail);
+    } else {
+        Log::get().note(
+            "transition flash: frame %u had a base but no fill matched its head-only eye (fills %u/%u, "
+            "event skip %u) -- nothing changed.%s",
+            r.tapFrame, r.fillsPatched, r.fillsHeadOnly, r.skipFrame, tail);
+    }
+}
+
+void engineSummaryLine(const char* prefix) noexcept {
+    Log::get().note(
+        "%s engine fix %s: events=%llu frames patched=%llu withheld=%llu (no tick yet/unusable base=%llu/%llu) "
+        "base-but-no-fill=%llu events with no head-only fill=%llu withhold not honoured=%llu.",
+        prefix, g_engineArmed.load(std::memory_order_relaxed) ? "ARMED" : "NOT armed (detector in charge)",
+        (unsigned long long)g_engineEvents.load(std::memory_order_relaxed),
+        (unsigned long long)g_engineFramesPatched.load(std::memory_order_relaxed),
+        (unsigned long long)g_engineFramesWithheld.load(std::memory_order_relaxed),
+        (unsigned long long)g_engineWithheldNoTick.load(std::memory_order_relaxed),
+        (unsigned long long)g_engineWithheldUnusable.load(std::memory_order_relaxed),
+        (unsigned long long)g_engineFramesNoFill.load(std::memory_order_relaxed),
+        (unsigned long long)g_engineEventsNoHeadOnly.load(std::memory_order_relaxed),
+        (unsigned long long)g_engineNotHonoured.load(std::memory_order_relaxed));
+}
+
+// Called once a frame from transitionFlashEyeBaseFrameBoundary: logs the
+// finished records (their fills closed a frame ago) and, when the event's
+// window has passed, retires the event and notes one that held no head-only
+// fill. Takes the mutex only while an event is outstanding.
+void serviceEngineEvent(uint32_t nowFrame) noexcept {
+    if (!g_engineEventOutstanding.load(std::memory_order_acquire)) return;
+    EngineActRecord done[2];
+    uint32_t doneCount = 0;
+    bool noFill = false;
+    uint32_t noFillSkip = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_patchSimMutex);
+        for (EngineActRecord& r : g_actRecords) {
+            if (r.used && !r.logged && nowFrame >= r.tapFrame + 2u) {
+                r.logged = true;
+                done[doneCount++] = r;
+            }
+        }
+        // The event is over once its window (and the diag sim's, which runs a
+        // frame longer) has passed; an event that held no act record at all
+        // never saw a head-only fill.
+        if (g_patchSim.engineOpen && nowFrame > g_patchSim.skipFrame + tfeb::kPatchSimWindowFrames + 2u) {
+            bool any = false;
+            for (const EngineActRecord& r : g_actRecords) any = any || r.used;
+            if (!any && g_patchSim.eventPatched) { noFill = true; noFillSkip = g_patchSim.skipFrame; }
+            g_patchSim.engineOpen = false;
+            g_patchSim.active = false;
+            g_patchSimPending.store(false, std::memory_order_release);
+            g_engineWaitingForBase.store(false, std::memory_order_release);
+        }
+        bool pendingRecord = false;
+        for (const EngineActRecord& r : g_actRecords) pendingRecord = pendingRecord || (r.used && !r.logged);
+        if (!g_patchSim.engineOpen && !pendingRecord) g_engineEventOutstanding.store(false, std::memory_order_release);
+    }
+    for (uint32_t i = 0; i < doneCount; ++i) logEngineRecord(done[i]);
+    if (noFill) {
+        g_engineEventsNoHeadOnly.fetch_add(1, std::memory_order_relaxed);
+        if (g_engineNoFillLines.fetch_add(1, std::memory_order_relaxed) < kMaxEngineNoFillLines) {
+            Log::get().note(
+                "transition flash: event at frame %u held no head-only fill in its window (frames %u..%u) -- "
+                "nothing changed.",
+                noFillSkip, noFillSkip + 1, noFillSkip + tfeb::kEngineMaxFrames);
+        }
+    }
 }
 
 // =====================================================================
@@ -2201,28 +2224,32 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
     if (!forward) return;  // stood down at install; the relay is unreachable then
     const tfp::Mode fixMode = static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed));
     if (fixMode == tfp::Mode::Off) { forward(cameraObj, gameMode, ptr3); return; }
-    // CHANGE 18: a consume reached from inside our own dry-run tick is the
-    // game's code running under our probe, not a consume of the frame --
-    // pass it through unrecorded.
-    if (t_dryRunActive) { forward(cameraObj, gameMode, ptr3); return; }
+    // CHANGE 19: with advanced.transition_flash_diagnostics off this hook does
+    // the engine fix's part only -- read the mailbox, classify the consume,
+    // arm the event -- and none of the instrument below it.
+    const bool diag = g_diag.load(std::memory_order_relaxed);
 
     const uint32_t frame = g_frame.load(std::memory_order_relaxed);
-    const uint64_t seq = g_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
-    g_totalCalls.fetch_add(1, std::memory_order_relaxed);
-    g_callsThisFrame.fetch_add(1, std::memory_order_relaxed);
-    noteGameMode(gameMode);
+    uint64_t seq = 0;
+    bool writerSinceLast = false;
+    if (diag) {
+        seq = g_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+        g_totalCalls.fetch_add(1, std::memory_order_relaxed);
+        g_callsThisFrame.fetch_add(1, std::memory_order_relaxed);
+        noteGameMode(gameMode);
 
-    const bool writerSinceLast = g_writerHitSincePriorConsume.exchange(false, std::memory_order_acq_rel);
-    g_writerSinceLastConsumeThisFrame.store(writerSinceLast, std::memory_order_relaxed);
-    // CHANGE 7: the substitute policy's own two "since previous consume"
-    // inputs -- see their declarations for what sets each.
-    const bool writerEnteredSinceLast = g_writerEnteredSincePriorConsume.exchange(false, std::memory_order_acq_rel);
-    const bool writerWroteSinceLast = g_writerWroteSincePriorConsume.exchange(false, std::memory_order_acq_rel);
+        writerSinceLast = g_writerHitSincePriorConsume.exchange(false, std::memory_order_acq_rel);
+        g_writerSinceLastConsumeThisFrame.store(writerSinceLast, std::memory_order_relaxed);
+        // CHANGE 7: the "since previous consume" flags the writer watch sets;
+        // reset here so they keep meaning "since the previous consume".
+        g_writerEnteredSincePriorConsume.store(false, std::memory_order_relaxed);
+        g_writerWroteSincePriorConsume.store(false, std::memory_order_relaxed);
+    }
 
     uint64_t ship = 0;
     const bool haveShip = sehReadU64(cameraObj + 0x50, ship);
     bool shipChanged = false;
-    if (haveShip) {
+    if (diag && haveShip) {
         g_lastShip.store(ship, std::memory_order_relaxed);
         const uint64_t previous = g_previousShipForChangeTest.exchange(ship, std::memory_order_acq_rel);
         if (previous != 0 && previous != ship) {
@@ -2237,13 +2264,13 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
             }
         }
     }
-    g_shipChangedThisFrame.store(shipChanged, std::memory_order_relaxed);
+    if (diag) g_shipChangedThisFrame.store(shipChanged, std::memory_order_relaxed);
 
     float m[16] = {}, f[16] = {};
     const bool haveM = haveShip && sehReadBlock64(ship + 0x3330, m);
     // CHANGE 1: F (ship+0x130) is read and logged for the record only -- it
     // no longer gates or supplies the act-path write.
-    const bool haveF = haveShip && sehReadBlock64(ship + 0x130, f);
+    const bool haveF = diag && haveShip && sehReadBlock64(ship + 0x130, f);
 
     bool unrefilled = false;
     uint8_t treatmentOutcome = 0;  // 0 none, 1 watched, 2 acted
@@ -2259,7 +2286,7 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
         // CHANGE 2: the writer-watch gate's consecutive-refilled count. A CAS
         // loop, not load-then-store: FUN_142868c30 and FUN_14287b030 can both
         // consume on one frame, so this is not single-writer.
-        {
+        if (diag) {
             uint32_t cur = g_wwConsecutiveRefilled.load(std::memory_order_relaxed);
             uint32_t next;
             do {
@@ -2287,7 +2314,10 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
                 next = tfeb::updateConsecutiveUnrefilled(cur, gameMode, unrefilled);
             } while (!g_ebConsecutiveUnrefilled.compare_exchange_weak(cur, next, std::memory_order_relaxed));
             modeSwitchEdge = edge;
-            if (edge == tfeb::ModeSwitchEdge::Entry) {
+            if (!diag) {
+                // The engine fix needs the edge itself (it arms the event below)
+                // and none of the dump requests or log lines.
+            } else if (edge == tfeb::ModeSwitchEdge::Entry) {
                 requestDump("a mode-switch entry", frame);
                 const uint32_t already = g_modeSwitchEdgeLinesLogged.fetch_add(1, std::memory_order_relaxed);
                 if (already < kMaxModeSwitchEdgeLines) {
@@ -2306,7 +2336,7 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
 
         // CHANGE 1: cache every refilled mode!=1 mailbox -- the held base an
         // un-refilled call's act guard judges below.
-        if (gameMode != 1 && !unrefilled) {
+        if (diag && gameMode != 1 && !unrefilled) {
             std::lock_guard<std::mutex> lock(g_heldBaseMutex);
             std::memcpy(g_heldBaseM, m, sizeof(g_heldBaseM));
             g_heldBaseFrame = frame;
@@ -2326,15 +2356,9 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
         }
     }
 
-    // CHANGE 18: the gap-stretch tracker and, on a stretch's first consume,
-    // the catch-up-tick dry run. Mode-2 consumes only (the eye path, the
-    // consume the patch sim arms on); it runs before the sim arms below so
-    // the event carries its own probe, and it runs BEFORE the original driver
-    // so a faulting probe is over before the driver reads the mailbox it
-    // restored. Observe-only: the mailbox and the tick's blocks are put back
-    // byte for byte.
-    TickProbe tickProbe;
-    if (haveM && gameMode == 2) tickProbe = hmdGapConsume(frame, haveShip ? ship : 0, unrefilled);
+    // CHANGE 18 (diagnostics): the gap-stretch tracker -- one log line at a
+    // stretch's start and one at its end. Mode-2 consumes only (the eye path).
+    if (diag && haveM && gameMode == 2) hmdGapConsume(frame, unrefilled);
 
     // The held base as it now stands. For an un-refilled call the cache
     // above was untouched this call, so this is exactly the render patch's
@@ -2344,7 +2368,7 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
     uint32_t heldFrame = 0;
     uint64_t heldShip = 0;
     bool haveHeldBase = false;
-    {
+    if (diag) {
         std::lock_guard<std::mutex> lock(g_heldBaseMutex);
         haveHeldBase = g_haveHeldBase;
         std::memcpy(heldM, g_heldBaseM, sizeof(heldM));
@@ -2399,8 +2423,15 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
         // Arming itself never writes anything; in watch mode nothing ever
         // does. CHANGE 13: the ship local (0 when the +0x50 read faulted)
         // rides along for the tap's live-mailbox probe.
-        if (gameMode == 2 && modeSwitchEdge == tfeb::ModeSwitchEdge::Entry) {
-            armPatchSim(frame, heldM, haveHeldBase, ship, treatment == tfp::Treatment::Act, tickProbe);
+        if (gameMode == 2) {
+            if (modeSwitchEdge == tfeb::ModeSwitchEdge::Entry) {
+                armPatchSim(frame, heldM, haveHeldBase, ship, treatment == tfp::Treatment::Act);
+            } else if (g_patchSimPending.load(std::memory_order_acquire)) {
+                // CHANGE 19: a further gap consume of the armed event's run --
+                // the render of the NEXT frame was still drawn from a reset
+                // mailbox (tfeb::engineActFrame reads this).
+                g_engineGapLastConsume.store(frame, std::memory_order_relaxed);
+            }
         }
 
         // CHANGE 7: the offered matrix -- what the writer was about to copy
@@ -2414,11 +2445,11 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
         float offeredM[16] = {};
         uint32_t offeredFrame = 0;
         uint64_t offeredSeq = 0;
-        const bool haveOffered = readOffered(offeredM, offeredFrame, offeredSeq);
+        const bool haveOffered = diag && readOffered(offeredM, offeredFrame, offeredSeq);
         const int32_t offeredAgeFrames =
             haveOffered ? (frame >= offeredFrame ? static_cast<int32_t>(frame - offeredFrame) : -1) : -1;
 
-        if (isNewEvent) {
+        if (diag && isNewEvent) {
             char heldText[64];
             if (haveHeldBase) {
                 std::snprintf(heldText, sizeof(heldText), "(%+.3f %+.3f %+.3f) age=%d",
@@ -2449,12 +2480,14 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
                 m[12], m[13], m[14], haveF ? f[12] : NAN, haveF ? f[13] : NAN, haveF ? f[14] : NAN,
                 controllerCallsNow, writerEnteredNow, writerWroteNow);
         }
-    } else if (haveM && haveF && gameMode != 1) {
+    } else if (diag && haveM && haveF && gameMode != 1) {
         const tfeb::EyeBaseDelta d = tfeb::compareEyeBase(m, f);
         dt = d.dt; dr = d.dr;
         std::lock_guard<std::mutex> lock(g_guardMutex);
         if (tfeb::eyeBaseAgrees(d)) ++g_validation.agree; else ++g_validation.disagree;
     }
+
+    if (!diag) { forward(cameraObj, gameMode, ptr3); return; }
 
     g_treatmentThisFrame.store(treatmentOutcome, std::memory_order_relaxed);
     {
@@ -2486,7 +2519,10 @@ void __fastcall consumerObserved(uintptr_t cameraObj, int32_t gameMode, uintptr_
 
 // --- Install ------------------------------------------------------------
 
-void doInstall(tfp::Mode mode) noexcept {
+// The diagnostics' storage: the call ring and the per-frame ring. Allocated
+// when advanced.transition_flash_diagnostics is first on (at install, or on a
+// later reload), never otherwise; pushRing/pushFrameRing do nothing without it.
+void ensureDiagStorage() noexcept {
     if (!g_ring.load(std::memory_order_acquire)) {
         auto* ring = new (std::nothrow) EyeBaseRingEntry[kEyeBaseRingCapacity];
         if (ring) g_ring.store(ring, std::memory_order_release);
@@ -2495,14 +2531,36 @@ void doInstall(tfp::Mode mode) noexcept {
         auto* ring = new (std::nothrow) EyeBaseFrameRecord[kEyeBaseFrameRingCapacity];
         if (ring) g_frameRing.store(ring, std::memory_order_release);
     }
+}
+
+// The three HMDCamera lifecycle hooks, diagnostics only. Tried once; each is
+// independent, and the result is what the armed line reports.
+bool g_lifecycleTried = false;
+bool g_lifecycleOk[3] = {false, false, false};
+void installLifecycleHooks(uintptr_t base) noexcept {
+    if (g_lifecycleTried || base == 0) return;
+    g_lifecycleTried = true;
+    g_lifecycleOk[0] = installOne(g_activateEntry, base, kActivateBytes);
+    g_lifecycleOk[1] = installOne(g_deactivateEntry, base, kDeactivateBytes);
+    g_lifecycleOk[2] = installOne(g_ctrlDtorEntry, base, kCtrlDtorBytes);
+}
+
+
+// The handshake's one report, from install: Armed when identity matched and
+// both hooks the fix cannot work without (the consumer and the controller)
+// installed; otherwise Lost, with the reason the armed line quotes, and the
+// detector keeps running exactly as before.
+void doInstall(bool diag) noexcept {
+    if (diag) ensureDiagStorage();
 
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const char* why = nullptr;
     if (!base || !checkIdentity(base, &why)) {
         Log::get().note(
-            "transition flash eye base: standing down entirely -- %s. Nothing installed, "
+            "transition flash: engine fix NOT armed -- fallback: detector (%s). Nothing installed, "
             "nothing changed.", why ? why : "module base unavailable");
         g_armed.store(true, std::memory_order_release);
+        glitchFrameNoteEngineFix(false, diag);
         return;
     }
     g_base.store(base, std::memory_order_relaxed);
@@ -2510,18 +2568,11 @@ void doInstall(tfp::Mode mode) noexcept {
     publishGameModule(base);
 
     const bool consumerOk = installOne(g_consumerEntry, base, kConsumerBytes);
-    // CHANGE 6: the controller counter -- read-only, shares g_relayGate with
-    // the consumer above (one master on/off switch for every hook this
-    // module installs).
+    // CHANGE 6: the controller hook -- shares g_relayGate with the consumer
+    // above (one master on/off switch for every hook this module installs).
+    // CHANGE 19: it is also where the event's base is read.
     const bool controllerOk = installOne(g_controllerEntry, base, kControllerBytes);
-    // CHANGE 18: the HMDCamera lifecycle. Each is independent of the others
-    // and of the consumer: a mismatch stands that one hook down and the armed
-    // line below names it, and the gap/dry-run instrument degrades to what
-    // is left (no ctrl from the lifecycle -> the tick's own ctrl; no
-    // controller trampoline -> no dry run, only the gap lines).
-    const bool activateOk = installOne(g_activateEntry, base, kActivateBytes);
-    const bool deactivateOk = installOne(g_deactivateEntry, base, kDeactivateBytes);
-    const bool ctrlDtorOk = installOne(g_ctrlDtorEntry, base, kCtrlDtorBytes);
+    if (diag) installLifecycleHooks(base);
     // CHANGE 5: the writer is never CodeHooked (see kWriterBytes' own
     // comment), but its bytes are still verified before DR1 is ever allowed
     // to arm at its address -- the same belt-and-suspenders role installOne's
@@ -2533,22 +2584,42 @@ void doInstall(tfp::Mode mode) noexcept {
     g_wwArmSlot1 = writerBytesOk;
     g_armed.store(true, std::memory_order_release);
 
-    Log::get().note(
-        "transition flash eye base: armed, mode=%s. identity: build match (timestamp %u, image "
-        "%u bytes) -- OK. consumer 0x28431D0: %s. controller 0x10730A0: %s. writer 0x2874B20 "
-        "(DR1 target) bytes: %s. hmdcam activate 0x109A1D0: %s. deactivate 0x1088B10: %s. "
-        "destructor 0x1069F40: %s. Ring %u entries.",
-        modeName(mode), kExpectedTimestamp, kExpectedImageSize,
-        consumerOk ? "installed" : g_consumerEntry.failReason,
-        controllerOk ? "installed" : g_controllerEntry.failReason,
-        writerBytesOk ? "verified" : "MISMATCH -- DR1 will not arm",
-        activateOk ? "installed" : g_activateEntry.failReason,
-        deactivateOk ? "installed" : g_deactivateEntry.failReason,
-        ctrlDtorOk ? "installed" : g_ctrlDtorEntry.failReason, kEyeBaseRingCapacity);
+    const bool engineOk = consumerOk && controllerOk;
+    char diagText[480] = "";
+    if (diag) {
+        std::snprintf(diagText, sizeof(diagText),
+                      " Diagnostics ON: writer 0x2874B20 (DR1 target) bytes: %s. hmdcam activate 0x109A1D0: %s. "
+                      "deactivate 0x1088B10: %s. destructor 0x1069F40: %s. Ring %u entries.",
+                      writerBytesOk ? "verified" : "MISMATCH -- DR1 will not arm",
+                      g_lifecycleOk[0] ? "installed" : g_activateEntry.failReason,
+                      g_lifecycleOk[1] ? "installed" : g_deactivateEntry.failReason,
+                      g_lifecycleOk[2] ? "installed" : g_ctrlDtorEntry.failReason, kEyeBaseRingCapacity);
+    }
+    if (engineOk) {
+        g_fixMode.store(uint8_t(tfp::Mode::On), std::memory_order_relaxed);
+        g_engineArmed.store(true, std::memory_order_release);
+        glitchFrameNoteEngineFix(true, diag);
+        Log::get().note(
+            "transition flash: engine fix armed (fix.transition_flash on; the detector is dormant). "
+            "identity: build match (timestamp %u, image %u bytes) -- OK. consumer 0x28431D0: installed. "
+            "controller 0x10730A0: installed.%s",
+            kExpectedTimestamp, kExpectedImageSize, diagText);
+    } else {
+        glitchFrameNoteEngineFix(false, diag);
+        Log::get().note(
+            "transition flash: engine fix NOT armed -- fallback: detector (%s). consumer 0x28431D0: %s. "
+            "controller 0x10730A0: %s.%s",
+            !consumerOk ? "the consumer hook did not install" : "the controller hook did not install",
+            consumerOk ? "installed" : g_consumerEntry.failReason,
+            controllerOk ? "installed" : g_controllerEntry.failReason, diagText);
+    }
 }
 
 // --- Periodic (~20s) reporting, only when something moved -----------------
 void reportLine(const char* prefix) noexcept {
+    // The engine fix's counts are always on; the rest is the diagnostics'.
+    engineSummaryLine(prefix);
+    if (!g_diag.load(std::memory_order_relaxed)) return;
     tfeb::EyeBaseValidation validationSnapshot;
     {
         std::lock_guard<std::mutex> lock(g_guardMutex);
@@ -2571,7 +2642,6 @@ void reportLine(const char* prefix) noexcept {
         (unsigned long long)g_consumerResetHitsTotal.load(std::memory_order_relaxed),
         (unsigned long long)g_shipPointerChangesTotal.load(std::memory_order_relaxed),
         g_wwHwArmed ? "yes" : "no");
-    // CHANGE 18: the HMDCamera gap / dry-run summary rides every report line.
     hmdSummaryLine(prefix);
 }
 
@@ -2581,9 +2651,6 @@ uint64_t g_lastReportBits[kReportBits] = {};
 
 uint64_t reportBit(uint32_t i) noexcept {
     switch (i) {
-    case 8: return g_gapStarted.load(std::memory_order_relaxed);
-    case 9: return g_hmdActivates.load(std::memory_order_relaxed) + g_hmdDeactivates.load(std::memory_order_relaxed);
-    case 10: return g_dryAttempts.load(std::memory_order_relaxed);
     case 0: return g_totalCalls.load(std::memory_order_relaxed);
     case 1: return g_totalUnrefilled.load(std::memory_order_relaxed);
     case 2: return g_eventsWatched.load(std::memory_order_relaxed);
@@ -2591,6 +2658,10 @@ uint64_t reportBit(uint32_t i) noexcept {
     case 4: return g_writerHitsTotal.load(std::memory_order_relaxed);
     case 5: return g_consumerResetHitsTotal.load(std::memory_order_relaxed);
     case 6: return g_shipPointerChangesTotal.load(std::memory_order_relaxed);
+    case 8: return g_engineEvents.load(std::memory_order_relaxed);
+    case 9: return g_engineFramesPatched.load(std::memory_order_relaxed) +
+                   g_engineFramesWithheld.load(std::memory_order_relaxed);
+    case 10: return g_gapStarted.load(std::memory_order_relaxed) + g_hmdActivates.load(std::memory_order_relaxed);
     default: return g_wwHwArmed ? 1 : 0;
     }
 }
@@ -2612,37 +2683,49 @@ void maybeReportPeriodic() noexcept {
 
 // --- Public API ------------------------------------------------------------
 
+// CHANGE 19 (Build 2a): fix.transition_flash arms the engine fix. Read once,
+// at the first call (the detector reads the same key once at install, and a
+// reload cannot swap one fix for the other mid-session); advanced.
+// transition_flash_diagnostics is read on every call. advanced.
+// transition_flash_eye_base is no longer read.
 void transitionFlashEyeBaseConfigure(Config& cfg) {
-    bool recognized = true;
-    const std::string text = cfg.getString("advanced.transition_flash_eye_base", "off");
-    const tfp::Mode mode = tfp::parseMode(text.c_str(), &recognized);
-    if (!recognized) {
-        static std::atomic<bool> warned{false};
-        if (!warned.exchange(true, std::memory_order_relaxed)) {
-            Log::get().note(
-                "transition flash eye base: advanced.transition_flash_eye_base = \"%s\" is not "
-                "off, watch, on or alternate -- treated as off.", text.c_str());
-        }
-    }
+    const bool diag = cfg.getBool("advanced.transition_flash_diagnostics", false);
+    const bool wasDiag = g_diag.exchange(diag, std::memory_order_relaxed);
 
-    if (mode == tfp::Mode::Off) {
-        g_fixMode.store(uint8_t(tfp::Mode::Off), std::memory_order_relaxed);
-        if (!g_offLogged.exchange(true, std::memory_order_relaxed)) {
-            Log::get().note("transition flash eye base: off (advanced.transition_flash_eye_base = off).");
+    if (!g_armed.load(std::memory_order_acquire)) {
+        if (!cfg.getBool("fix.transition_flash", true)) {
+            g_fixMode.store(uint8_t(tfp::Mode::Off), std::memory_order_relaxed);
+            if (!g_offLogged.exchange(true, std::memory_order_relaxed)) {
+                Log::get().note("transition flash: engine fix off (fix.transition_flash = 0).");
+            }
+            return;
         }
+        doInstall(diag);
         return;
     }
-
-    g_fixMode.store(uint8_t(mode), std::memory_order_relaxed);
-    if (!g_armed.load(std::memory_order_acquire)) doInstall(mode);
+    if (g_engineArmed.load(std::memory_order_acquire) && diag != wasDiag) {
+        if (diag) {
+            ensureDiagStorage();
+            installLifecycleHooks(g_base.load(std::memory_order_relaxed));
+        }
+        glitchFrameNoteEngineFix(true, diag);
+        Log::get().note("transition flash: diagnostics %s (advanced.transition_flash_diagnostics).",
+                        diag ? "on" : "off");
+    }
 }
 
 void transitionFlashEyeBaseFrameBoundary(uint32_t frameNo) {
     g_frame.store(frameNo, std::memory_order_relaxed);
     if (!g_armed.load(std::memory_order_relaxed)) return;
+    serviceEngineEvent(frameNo);
+    maybeReportPeriodic();
+    if (!g_diag.load(std::memory_order_relaxed)) {
+        // Diagnostics went off with the watch armed: take it down.
+        if (g_wwHwArmed) disarmWriterWatch("advanced.transition_flash_diagnostics turned off");
+        return;
+    }
     frameBoundaryWriterWatch(frameNo);
     serviceDump(frameNo);
-    maybeReportPeriodic();
 }
 
 void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVerdict) {
@@ -2670,7 +2753,9 @@ void transitionFlashEyeBaseNoteDetectorVerdict(uint32_t frame, bool sceneResetVe
 void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], bool valid,
                                             const GlitchSceneGeometry& geometry, bool geometryFresh,
                                             GlitchSceneDecision decision) {
-    if (!g_armed.load(std::memory_order_relaxed)) return;
+    // CHANGE 19: the per-frame record and the passive sim lines are
+    // diagnostics (advanced.transition_flash_diagnostics).
+    if (!g_armed.load(std::memory_order_relaxed) || !g_diag.load(std::memory_order_relaxed)) return;
     EyeBaseFrameRecord r;
     r.frame = frame;
     r.sceneValid = valid;
@@ -2805,7 +2890,6 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                     uint8_t cbVP = 0, cbActChoice = 2;
                     uint8_t cbLatchBase = 0, cbLatchReason = 0;
                     bool cbPoolEarly = false;
-                    float latchEye[3] = {NAN, NAN, NAN};   // CHANGE 18: P through the LATCHED base
                     if ((g_cbAccum.tapFrame + 1 == frame || g_cbAccum.tapFrame == frame) &&
                         g_cbAccum.fillsSeen) {
                         PatchSimCBAccum& a = g_cbAccum;
@@ -2837,7 +2921,6 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         cbPoolLate = a.fillsPoolLate;
                         cbLatchBase = a.latchBase;
                         cbLatchReason = a.latchReason;
-                        if (a.latchBase != 0) tfeb::patchEyeOrigin(a.latchB, P, latchEye);
                         cbPoolEarly = a.latchPoolEarly;
                         cbWouldDiffer = a.wouldDiffer;
                         cbViewWritten = a.fillsViewWritten;
@@ -2875,41 +2958,12 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         }
                         a.tapFrame = 0xFFFFFFFFu;   // consumed
                     }
-                    // CHANGE 18: the catch-up tick's candidate, computed exactly
-                    // like held->/new->/live-> (the eye-origin correction of
-                    // the head-only P by the base) and refereed against the
-                    // base the event actually used: the act's latched base
-                    // when it latched one, otherwise the base the boundary
-                    // selector would pick (watched events still get a
-                    // referee). tickVsNext measures the PREVIOUS covered
-                    // line's tick-> against THIS line's P -- the engine's own
-                    // next frame; it is n/a on an event's first line.
-                    const TickProbe& tp = g_patchSim.tick;
-                    float patchTick[3] = {NAN, NAN, NAN};
-                    if (tp.state == tfeb::DryRunState::Wrote) tfeb::patchEyeOrigin(tp.B, P, patchTick);
-                    const uint8_t chosenSrc =
-                        tfeb::tickChosenSource(cbLatchBase, choice, liveState == LiveOk, haveHeld);
-                    const float* chosenEye = cbLatchBase != 0 ? latchEye
-                                           : chosenSrc == 1 ? patchLive
-                                           : chosenSrc == 2 ? patchHeld : nullptr;
-                    const float tickVsChosen = chosenEye ? tfeb::distance3(patchTick, chosenEye) : NAN;
-                    const float tickVsNext = tfeb::distance3(g_patchSim.prevTickEye, P);
-                    if (!g_patchSim.tickScored && tp.state == tfeb::DryRunState::Wrote &&
-                        P[0] * P[0] + P[1] * P[1] + P[2] * P[2] < kCBHeadOnlyRadius2 &&
-                        !std::isnan(tickVsChosen)) {
-                        // The event's one verdict: its bad (head-only) line.
-                        g_patchSim.tickScored = true;
-                        (tfeb::tickMatchesChosen(tickVsChosen) ? g_tickMatched : g_tickMismatched)
-                            .fetch_add(1, std::memory_order_relaxed);
-                    }
-                    for (int k = 0; k < 3; ++k) g_patchSim.prevTickEye[k] = patchTick[k];
-                    char tickVsChosenText[16], tickVsNextText[16], tickHsText[16];
-                    if (std::isnan(tickVsChosen)) std::snprintf(tickVsChosenText, sizeof(tickVsChosenText), "n/a");
-                    else std::snprintf(tickVsChosenText, sizeof(tickVsChosenText), "%.3f", tickVsChosen);
-                    if (std::isnan(tickVsNext)) std::snprintf(tickVsNextText, sizeof(tickVsNextText), "n/a");
-                    else std::snprintf(tickVsNextText, sizeof(tickVsNextText), "%.3f", tickVsNext);
-                    if (tp.state == tfeb::DryRunState::NoGap) std::snprintf(tickHsText, sizeof(tickHsText), "n/a");
-                    else std::snprintf(tickHsText, sizeof(tickHsText), "%u", tp.hstate);
+                    // CHANGE 19: the engine fix's own candidate (the first tick's
+                    // base), computed exactly like held->/new->/live-> -- the
+                    // act uses it, never the three above.
+                    float patchBaseNew[3] = {NAN, NAN, NAN};
+                    const bool haveBaseNew = g_patchSim.baseState == tfeb::EngineBase::Have;
+                    if (haveBaseNew) tfeb::patchEyeOrigin(g_patchSim.baseNew, P, patchBaseNew);
                     char cbCrossOText[24], cbCrossVText[24];
                     if (std::isnan(cbCrossO)) std::snprintf(cbCrossOText, sizeof(cbCrossOText), "n/a");
                     else std::snprintf(cbCrossOText, sizeof(cbCrossOText), "%.3f", cbCrossO);
@@ -2940,7 +2994,7 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         "view=%d corrO=(%+.3f %+.3f %+.3f) crossO=%s crossV=%s live=%s "
                         "act=[patched=%u skipNM=%u skipNV=%u skipNP=%u view=%u guard=%u base=%s "
                         "choice=%s vp=%s latch=%s poolEarly=%s wouldDiffer=%u]] "
-                        "tick->(%s%+.3f %+.3f %+.3f) tickVsChosen=%s tickVsNext=%s tickdry=%s hs=%s chosen=%s",
+                        "base1->(%s%+.3f %+.3f %+.3f) basestate=%s",
                         frame, g_patchSim.skipFrame, P[0], P[1], P[2],
                         haveHeld ? "" : "n/a ", patchHeld[0], patchHeld[1], patchHeld[2],
                         haveNew ? "" : "n/a ", patchNew[0], patchNew[1], patchNew[2],
@@ -2960,10 +3014,9 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         latchText(cbLatchBase, cbLatchReason),
                         cbPoolEarly ? "yes" : "no",
                         cbWouldDiffer,
-                        tp.state == tfeb::DryRunState::Wrote ? "" : "n/a ",
-                        patchTick[0], patchTick[1], patchTick[2], tickVsChosenText, tickVsNextText,
-                        tfeb::dryRunStateText(tp.state), tickHsText,
-                        chosenSrc == 1 ? "live" : chosenSrc == 2 ? "held" : "none");
+                        haveBaseNew ? "" : "n/a ",
+                        patchBaseNew[0], patchBaseNew[1], patchBaseNew[2],
+                        tfeb::engineBaseReason(g_patchSim.baseState));
                     r.patchSim = true;
                     r.patchSimSkipFrame = g_patchSim.skipFrame;
                     r.patchSimP[0] = P[0]; r.patchSimP[1] = P[1]; r.patchSimP[2] = P[2];
@@ -3030,6 +3083,7 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
     if (!tfeb::patchSimWindowCovers(frame + 1, skip)) return;
 
     const float* cb = static_cast<const float*>(mapped);
+    const bool diag = g_diag.load(std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(g_patchSimMutex);
     if (!g_patchSim.active || !tfeb::patchSimWindowCovers(frame + 1, g_patchSim.skipFrame)) return;
 
@@ -3062,106 +3116,102 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
 
     // CHANGE 13's path, per fill: the locator is only meaningful while the
     // live base is usable -- on this fill, at this moment.
-    float liveM[16] = {};
-    uint8_t liveState = LiveUnavailable;
-    if (g_patchSim.ship != 0 &&
-        sehReadBlock64(static_cast<uintptr_t>(g_patchSim.ship) + 0x3330, liveM)) {
-        if (tfeb::isResetMailbox(liveM)) {
-            liveState = LiveReset;
-        } else if (tfeb::mailboxPlausible(liveM)) {
-            liveState = LiveOk;
-        }
-    }
-    a.lastLiveState = liveState;
-    d.liveState = liveState;
-
-    if (liveState == LiveOk) {
-        // Locate THIS frame's current view structurally: orthonormal 3x3
-        // plus a translation locked to this fill's row-275 origin (the
-        // previous frame's view is orthonormal too, but its translation
-        // belongs to the previous frame's eye -- rejected by the origin
-        // test).
-        a.find = tfeb::locateSceneCBView(cb, tfeb::kSceneCBSimFloat4Rows, origin,
-                                         kCBViewOrthoTol, kCBViewOriginTol);
-        a.analyzed = true;
-        d.viewRow = a.find.startRow;
-        d.originMatch = a.find.startRow >= 0 ? a.find.originMatch : NAN;
-        // The correction the acting build would write: the premultiplied
-        // origin, and the stored view POSTmultiplied by liveM^-1 (corrected
-        // eye = liveM x P, so view' = P^-1 x liveM^-1 = V_bad x liveM^-1).
-        tfeb::patchEyeOrigin(liveM, origin, a.correctedOrigin);
-        if (a.find.startRow >= 0) {
-            float vBad[16], liveInv[16], vCorr[16];
-            std::memcpy(vBad, cb + a.find.startRow * 4, sizeof(vBad));
-            tfeb::affineInverse4x4(liveM, liveInv);
-            tfeb::postmul4x4(vBad, liveInv, vCorr);
-            a.correctedViewT[0] = vCorr[12];
-            a.correctedViewT[1] = vCorr[13];
-            a.correctedViewT[2] = vCorr[14];
-        } else {
-            a.correctedViewT[0] = NAN; a.correctedViewT[1] = NAN; a.correctedViewT[2] = NAN;
-        }
-        a.haveCorrection = true;
-        // Cross-frame validation: the PREVIOUS covered head-only fill's
-        // correction against THIS fill's actual rows. On the bad frame
-        // itself the chain is empty (nothing to compare against); the
-        // residual appears on the next covered frame -- the engine's own
-        // correct frame.
-        if (g_patchSim.havePrevCorr) {
-            const float dox = g_patchSim.prevCorrOrigin[0] - origin[0];
-            const float doy = g_patchSim.prevCorrOrigin[1] - origin[1];
-            const float doz = g_patchSim.prevCorrOrigin[2] - origin[2];
-            a.crossOrigin = std::sqrt(dox * dox + doy * doy + doz * doz);
-            if (a.find.startRow >= 0) {
-                const float* actualT = cb + a.find.startRow * 4 + 12;
-                const float dvx = g_patchSim.prevCorrViewT[0] - actualT[0];
-                const float dvy = g_patchSim.prevCorrViewT[1] - actualT[1];
-                const float dvz = g_patchSim.prevCorrViewT[2] - actualT[2];
-                a.crossView = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
-            } else {
-                a.crossView = NAN;
+    if (diag) {
+        float liveM[16] = {};
+        uint8_t liveState = LiveUnavailable;
+        if (g_patchSim.ship != 0 &&
+            sehReadBlock64(static_cast<uintptr_t>(g_patchSim.ship) + 0x3330, liveM)) {
+            if (tfeb::isResetMailbox(liveM)) {
+                liveState = LiveReset;
+            } else if (tfeb::mailboxPlausible(liveM)) {
+                liveState = LiveOk;
             }
-            a.crossDone = true;
         }
-        // Chain forward -- but only from a head-only row 275: the
-        // premultiply expects P in head space, and on the control fills
-        // (N+1/N+3's ordinary eye) the "correction" is not meaningful.
-        if (o2 < kCBHeadOnlyRadius2) {
-            g_patchSim.prevCorrOrigin[0] = a.correctedOrigin[0];
-            g_patchSim.prevCorrOrigin[1] = a.correctedOrigin[1];
-            g_patchSim.prevCorrOrigin[2] = a.correctedOrigin[2];
-            g_patchSim.prevCorrViewT[0] = a.correctedViewT[0];
-            g_patchSim.prevCorrViewT[1] = a.correctedViewT[1];
-            g_patchSim.prevCorrViewT[2] = a.correctedViewT[2];
-            g_patchSim.havePrevCorr = true;
-        }
-    } else {
-        a.analyzed = false;
-    }
+        a.lastLiveState = liveState;
+        d.liveState = liveState;
 
-    // CHANGE 15 (review-fixed): THE ACT. Only on a patched event, only on
-    // the bad render's own tap frame (skip+1 -- the measured skew rule, 6/6
-    // on flight 134813), only on fills whose row 275 is head-only. The
-    // frame's base is chosen ONCE, at its FIRST head-only fill, and latched
-    // for every fill of the frame -- the review's finding 1: evidence read
-    // per fill arrives mid-frame (the pool's geometry only exists after the
-    // first eye draw), and per-fill decisions would draw one frame from two
-    // cameras kilometres apart. All-or-nothing: a latched NoPatch means NO
-    // fill of the frame is patched, even if evidence arrives later.
-    //
-    // The decision's evidence is the pool's OWN upload for this counter
-    // frame when it is already in the store (glitchFrameScenePoolEvidence:
-    // the detector's own compare on a copy, camera = this fill's row 275 --
-    // the same value sceneDrawPos will get at the draw). No upload yet ->
-    // latch NoPatch:poolLate and count it -- the review's ordering
-    // measurement, answered per frame by the log.
-    //
+        if (liveState == LiveOk) {
+            // Locate THIS frame's current view structurally: orthonormal 3x3
+            // plus a translation locked to this fill's row-275 origin (the
+            // previous frame's view is orthonormal too, but its translation
+            // belongs to the previous frame's eye -- rejected by the origin
+            // test).
+            a.find = tfeb::locateSceneCBView(cb, tfeb::kSceneCBSimFloat4Rows, origin,
+                                             kCBViewOrthoTol, kCBViewOriginTol);
+            a.analyzed = true;
+            d.viewRow = a.find.startRow;
+            d.originMatch = a.find.startRow >= 0 ? a.find.originMatch : NAN;
+            // The correction the acting build would write: the premultiplied
+            // origin, and the stored view POSTmultiplied by liveM^-1 (corrected
+            // eye = liveM x P, so view' = P^-1 x liveM^-1 = V_bad x liveM^-1).
+            tfeb::patchEyeOrigin(liveM, origin, a.correctedOrigin);
+            if (a.find.startRow >= 0) {
+                float vBad[16], liveInv[16], vCorr[16];
+                std::memcpy(vBad, cb + a.find.startRow * 4, sizeof(vBad));
+                tfeb::affineInverse4x4(liveM, liveInv);
+                tfeb::postmul4x4(vBad, liveInv, vCorr);
+                a.correctedViewT[0] = vCorr[12];
+                a.correctedViewT[1] = vCorr[13];
+                a.correctedViewT[2] = vCorr[14];
+            } else {
+                a.correctedViewT[0] = NAN; a.correctedViewT[1] = NAN; a.correctedViewT[2] = NAN;
+            }
+            a.haveCorrection = true;
+            // Cross-frame validation: the PREVIOUS covered head-only fill's
+            // correction against THIS fill's actual rows. On the bad frame
+            // itself the chain is empty (nothing to compare against); the
+            // residual appears on the next covered frame -- the engine's own
+            // correct frame.
+            if (g_patchSim.havePrevCorr) {
+                const float dox = g_patchSim.prevCorrOrigin[0] - origin[0];
+                const float doy = g_patchSim.prevCorrOrigin[1] - origin[1];
+                const float doz = g_patchSim.prevCorrOrigin[2] - origin[2];
+                a.crossOrigin = std::sqrt(dox * dox + doy * doy + doz * doz);
+                if (a.find.startRow >= 0) {
+                    const float* actualT = cb + a.find.startRow * 4 + 12;
+                    const float dvx = g_patchSim.prevCorrViewT[0] - actualT[0];
+                    const float dvy = g_patchSim.prevCorrViewT[1] - actualT[1];
+                    const float dvz = g_patchSim.prevCorrViewT[2] - actualT[2];
+                    a.crossView = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
+                } else {
+                    a.crossView = NAN;
+                }
+                a.crossDone = true;
+            }
+            // Chain forward -- but only from a head-only row 275: the
+            // premultiply expects P in head space, and on the control fills
+            // (N+1/N+3's ordinary eye) the "correction" is not meaningful.
+            if (o2 < kCBHeadOnlyRadius2) {
+                g_patchSim.prevCorrOrigin[0] = a.correctedOrigin[0];
+                g_patchSim.prevCorrOrigin[1] = a.correctedOrigin[1];
+                g_patchSim.prevCorrOrigin[2] = a.correctedOrigin[2];
+                g_patchSim.prevCorrViewT[0] = a.correctedViewT[0];
+                g_patchSim.prevCorrViewT[1] = a.correctedViewT[1];
+                g_patchSim.prevCorrViewT[2] = a.correctedViewT[2];
+                g_patchSim.havePrevCorr = true;
+            }
+        } else {
+            a.analyzed = false;
+        }
+    }
+    // CHANGE 19 (Build 2a): THE ACT. Only on a patched event's bad renders
+    // (tfeb::engineActFrame: skip+1, and skip+2 while the gap lasted), only on
+    // fills whose row 275 is head-only. The frame's base is decided ONCE, at
+    // its FIRST head-only fill, and latched for every fill of the frame, so
+    // one frame can never be drawn from two cameras and a withheld frame is
+    // never half-patched:
+    //   B_new held  -> patch (the fac3d17a math, below) every fill whose row
+    //                  275 is the first fill's P to within 0.01 m;
+    //   B_new absent -> patch nothing and WITHHOLD the frame.
+    // The pool selector is not consulted (flight 050558: it declined every
+    // event); with diagnostics on it is still asked, and logged as pool=.
     // The writes land in this same mapped buffer -- the game's own writable
     // Map pointer at the pre-Unmap tap, so no SEH -- and the detector's own
-    // record of this fill (sceneWrites, above in glitchFrameObserve) has
-    // already taken the ORIGINAL values, so its verdict still referees the
-    // bad frame.
-    if (g_patchSim.eventPatched && frame == g_patchSim.skipFrame + 1) {
+    // record of this fill has already taken the ORIGINAL values.
+    if (g_patchSim.eventPatched &&
+        tfeb::engineActFrame(frame, g_patchSim.skipFrame,
+                             g_engineGapLastConsume.load(std::memory_order_relaxed))) {
+        EngineActRecord& rec = g_actRecords[frame - g_patchSim.skipFrame - 1];
         if (o2 >= kCBHeadOnlyRadius2) {
             // A fill of the bad frame whose row 275 is NOT the bad eye (the
             // 4-25% "other views" the locator flight measured): leave it.
@@ -3170,70 +3220,45 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
             if (!a.latchDecided) {
                 // The FIRST head-only fill of the frame: decide and latch.
                 a.latchDecided = true;
-                GlitchSceneGeometry ev = {};
-                glitch_scene_detail::Sample snapshot[3];
-                a.latchPoolEarly = glitchFrameScenePoolEvidence(frame, origin, &ev, snapshot);
-                if (a.latchPoolEarly) {
-                    // The latch-time history, for the would-differ re-
-                    // evaluations below.
-                    a.latchSnapshot = true;
-                    a.latchPrev = snapshot[1];
-                    a.latchOlder = snapshot[2];
+                a.latchP[0] = origin[0]; a.latchP[1] = origin[1]; a.latchP[2] = origin[2];
+                rec.used = true;
+                rec.skipFrame = g_patchSim.skipFrame;
+                rec.tapFrame = frame;
+                rec.baseState = g_patchSim.baseState;
+                rec.baseTickFrame = g_patchSim.baseTickFrame;
+                rec.baseTicksSeen = g_patchSim.baseTicksSeen;
+                if (diag) {
+                    GlitchSceneGeometry ev = {};
+                    glitch_scene_detail::Sample snapshot[3];
+                    if (glitchFrameScenePoolEvidence(frame, origin, &ev, snapshot)) {
+                        const tfeb::SceneChoice pc =
+                            tfeb::patchSceneChoice(ev.matched, ev.predicted, ev.cameraStep, ev.poolStep, true);
+                        rec.poolChoice = pc == tfeb::SceneChoice::New ? 1 : pc == tfeb::SceneChoice::Old ? 2 : 3;
+                    } else {
+                        rec.poolChoice = 4;
+                    }
                 }
-                const tfeb::SceneChoice choice = tfeb::patchSceneChoice(
-                    ev.matched, ev.predicted, ev.cameraStep, ev.poolStep, a.latchPoolEarly);
-                const tfeb::PatchBaseChoice base =
-                    tfeb::choosePatchBase(choice, liveState == LiveOk, g_patchSim.haveHeld);
-                a.latchChoice = static_cast<uint8_t>(choice);
-                a.latchBase = base == tfeb::PatchBaseChoice::UseLive ? 1
-                            : base == tfeb::PatchBaseChoice::UseHeld ? 2 : 0;
-                a.baseUsed = a.latchBase;          // frame-level report: the
-                a.actChoice = a.latchChoice;       // latch, never a later fill
-                if (!a.latchPoolEarly) {
-                    a.latchReason = 1;             // NoPatch:poolLate
-                } else if (base == tfeb::PatchBaseChoice::NoPatch) {
-                    a.latchReason = 2;             // NoPatch:thin
+                if (g_patchSim.baseState == tfeb::EngineBase::Have) {
+                    a.latchBase = 3;                       // the first tick's base
+                    std::memcpy(a.latchB, g_patchSim.baseNew, sizeof(a.latchB));
                 } else {
-                    // CHANGE 17: the latch no longer depends on locating a
-                    // view -- origin+pilot are written on every gated fill
-                    // regardless (they are validated and self-consistent),
-                    // and the view group is added per fill only when the
-                    // FIXED finder locates one and the write-time guard
-                    // passes. Only the base rides here.
-                    const float* B = a.latchBase == 1 ? liveM : g_patchSim.heldM;
-                    std::memcpy(a.latchB, B, sizeof(a.latchB));
-                }
-            } else if (a.latchSnapshot) {
-                // A LATER head-only fill: finding 1c's would-differ count,
-                // re-evaluated against the LATCH-TIME pool history. The
-                // live store is never read for this: glitchFrameNoteScenePool
-                // advances it (p.prev := p.write) after the detector's own
-                // compare, so a re-query there compares the frame's upload
-                // against ITSELF -- poolStep ~= 0, scene-old, held -- and
-                // counts noise (151942: wouldDiffer=76 beside latch=live).
-                // Here the newer upload that arrived by this fill (if any)
-                // is compared against the latched prev/older: a real
-                // evidence change, which is what the count is for. No
-                // latch-time snapshot (a poolLate latch) -> not counted,
-                // the same rule as no-evidence.
-                glitch_scene_detail::Sample newer[3];
-                GlitchSceneGeometry reEval = {};
-                if (glitchFrameScenePoolEvidence(frame, origin, &reEval, newer)) {
-                    const GlitchSceneGeometry evNow = glitch_scene_detail::compare(newer[0], a.latchPrev, a.latchOlder);
-                    const tfeb::SceneChoice choiceNow = tfeb::patchSceneChoice(
-                        evNow.matched, evNow.predicted, evNow.cameraStep, evNow.poolStep, true);
-                    const tfeb::PatchBaseChoice baseNow =
-                        tfeb::choosePatchBase(choiceNow, liveState == LiveOk, g_patchSim.haveHeld);
-                    const uint8_t baseNowCode = baseNow == tfeb::PatchBaseChoice::UseLive ? 1
-                                              : baseNow == tfeb::PatchBaseChoice::UseHeld ? 2 : 0;
-                    if (baseNowCode != a.latchBase) ++a.wouldDiffer;
+                    a.latchBase = 0;
+                    a.latchReason = 3;                     // noPatch:noBase
+                    rec.outcome = 2;
+                    rec.consumerPresent = glitchFrameEngineFixEvent(true);
+                    g_engineFramesWithheld.fetch_add(1, std::memory_order_relaxed);
+                    (g_patchSim.baseState == tfeb::EngineBase::NoTickYet ? g_engineWithheldNoTick
+                                                                         : g_engineWithheldUnusable)
+                        .fetch_add(1, std::memory_order_relaxed);
+                    if (!rec.consumerPresent) g_engineNotHonoured.fetch_add(1, std::memory_order_relaxed);
                 }
             }
-
+            ++rec.fillsHeadOnly;
             if (a.latchBase == 0) {
                 // All-or-nothing: the latch says this frame patches nothing.
-                if (a.latchReason == 1) ++a.fillsPoolLate;
-                else ++a.fillsSkippedNoPatch;
+                ++a.fillsSkippedNoPatch;
+            } else if (!tfeb::engineFillMatches(origin, a.latchP)) {
+                ++a.fillsSkippedNoMatch;
             } else {
                 // CHANGE 17 row scope: origin + pilot block are written on
                 // EVERY gated fill -- they are validated and self-consistent,
@@ -3348,9 +3373,17 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
                 writable[tfeb::kSceneCBSimBasisFloat + 14] = pilot[14];
                 std::memcpy(d.basisAfter, cb + tfeb::kSceneCBSimSurveyFloat, sizeof(d.basisAfter));
                 ++a.fillsPatched;
+                rec.fillsPatched = a.fillsPatched;
+                rec.fillsViewWritten = a.fillsViewWritten;
+                if (rec.outcome == 0) {
+                    // The frame's first patched fill: one patched frame.
+                    rec.outcome = 1;
+                    g_engineFramesPatched.fetch_add(1, std::memory_order_relaxed);
+                    glitchFrameEngineFixEvent(false);
+                }
             }
         }
-    } else if (frame == g_patchSim.skipFrame + 2 &&
+    } else if (diag && frame == g_patchSim.skipFrame + 2 &&
                tfeb::patchSimWindowCovers(frame + 1, g_patchSim.skipFrame)) {
         // The pass-matched next-frame slots: each of the first
         // kCBAccumDetailMax fills of the frame AFTER the act frame records
@@ -3388,6 +3421,7 @@ EyeBaseFrameSnapshot transitionFlashEyeBaseFrameSnapshot() {
 
 void transitionFlashEyeBaseShutdown() {
     if (!g_armed.load(std::memory_order_relaxed)) return;
+    serviceEngineEvent(0xFFFFFFFFu);   // flush any unlogged act record
     reportLine("--- transition flash eye base, session total:");
 }
 

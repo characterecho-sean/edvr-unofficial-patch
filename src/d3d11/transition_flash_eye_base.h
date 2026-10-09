@@ -22,31 +22,34 @@
 // offeredSubstituteUsable and heldBaseRefusal. ship+0x130 is still read and
 // logged, for the record, but no longer gates or supplies the write.
 //
-//   advanced.transition_flash_eye_base = off | watch | on | alternate
-//     off        nothing installed. One log line.
-//     watch      fully passive: the consumer hook, the writer watch and the
-//                render-time patch SIMULATION run -- what a patch would
-//                write, logged per covered frame. Nothing the game renders
-//                is ever changed.
-//     on         the render-time patch ACTS: at every mode==2 mode-switch
-//                ENTRY event, on the bad render's own camera-CB fills
-//                (pre-Unmap), the selector-chosen base is premultiplied
-//                into row 275 and the structurally-located current-view
-//                matrix (and a cleanly-identified VP group): scene-new ->
-//                the LIVE mailbox, scene-old/unclear -> the HELD base.
-//     alternate  transition EVENTS alternate unpatched/patched (the first
-//                is unpatched), the verification-flight shape.
+// BUILD 2a (2026-10-09, "the supercruise fix"; docs/design-transition-flash-
+// engine-fix-2026-09-23.md, "Flight 050558"): this module is now the fix
+// itself, armed by fix.transition_flash (on by default), and the old
+// advanced.transition_flash_eye_base switch (off | watch | on | alternate) is
+// no longer read. Flight 050558 settled the mechanism: the HMDCamera is
+// deactivated at S-1 and re-activated after the S consume, so the controller
+// tick is absent exactly on the frame whose mailbox the consume reads, and the
+// first tick that follows writes the base the engine meant. So:
+//   * the consumer hook arms an event at the mode-2 ENTRY edge;
+//   * the controller hook, right AFTER the original tick returns, reads the
+//     mailbox as the event's base B_new (race-free with the consume's reset);
+//   * at the render tap (bad frames skip+1, and skip+2 while the gap lasted),
+//     B_new present -> the fills whose row 275 is the frame's head-only eye
+//     get the eye-origin/view correction; B_new absent -> the frame is
+//     WITHHELD (glitchFrameEngineFixEvent). The pool selector is not asked.
+//   * one always-on log line per bad frame acted on.
+// While the fix is armed the transition-flash DETECTOR (glitch_frame.cpp) is
+// dormant; when identity or a hook fails, doInstall reports Lost
+// (glitchFrameNoteEngineFix) and the detector runs exactly as before.
 //
-// CHANGE 15 (2026-09-24, flight 134813's conclusion): on/alternate now mean
-// the render-time patch. The consume-time mailbox write this key originally
-// described -- the +0x130 stand-in, then the held base through
-// sehWriteBlock64 -- is SUPERSEDED and REMOVED: flight 134813's skip 22726
-// proved it cannot serve scene-new transitions (the base the scene wants is
-// in no consume-indexed record), and flights 125237/134813 proved the
-// render-time patch with the live mailbox and the pool/camera selector.
-// watch's simulation is unchanged and still runs in every non-off mode --
-// on acted frames it doubles as the post-patch telemetry (corrO/crossV
-// against the engine's own next frame).
+//   advanced.transition_flash_diagnostics = off | on   (TEMPORARY, default off)
+//     on         the instrument: the writer watch (DR0/DR1), the call and
+//                frame rings and their dumps, the passive patch-sim lines
+//                (base1-> beside held-> new-> live->), the HMDCamera
+//                lifecycle hooks and gap lines, and the pool comparison
+//                logged as pool=<choice> beside each act. Off, none of it
+//                runs and none of its storage is allocated.
+//
 // See transition_flash_eye_base_core.h for the pure logic (the bit-exact
 // reset check, the M/F validation arithmetic, the base selector, the view
 // locator and the correction math) -- it has no game or Windows dependency
@@ -63,13 +66,12 @@ namespace edvr {
 
 class Config;
 
-// Read on every config reload (vscreen.cpp, both call sites, beside
-// poseReaderWatchConfigure). Off: one log line, nothing installed. The first
-// call that sees a non-off value installs the consumer hook (build- and
-// prologue-keyed; stands down on its own on a mismatch and says why) and
-// arms; later calls only move the live mode -- hot among watch/on/alternate.
-// The writer watch arms and disarms on its own schedule from
-// transitionFlashEyeBaseFrameBoundary, not from here.
+// Called on every config reload (vscreen.cpp, both call sites, beside
+// poseReaderWatchConfigure). The FIRST call reads fix.transition_flash: off,
+// one log line and nothing installed; on, it installs the consumer and
+// controller hooks (build- and prologue-keyed; each stands down on a mismatch
+// and says why) and reports Armed or Lost to the detector exactly once.
+// Later calls only move advanced.transition_flash_diagnostics, which is hot.
 void transitionFlashEyeBaseConfigure(Config& cfg);
 
 // Once a frame, from vscreen.cpp beside glitchFrameBoundary/

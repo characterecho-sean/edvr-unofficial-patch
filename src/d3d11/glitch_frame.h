@@ -26,6 +26,25 @@ namespace edvr {
 
 void installGlitchFrameFix();
 
+// The engine fix's handshake with this detector (transition_flash_eye_base.cpp
+// reports; docs/design-transition-flash-engine-fix-2026-09-23.md, Build 2a).
+// ARMED: the engine fix is live and the detector goes dormant -- it keeps
+// recording the camera history and judges, marks and un-marks nothing (an
+// un-mark would cancel the engine fix's withhold). Not armed -- the default,
+// and what a stand-down or a failed hook reports -- the detector runs exactly
+// as it does with no engine fix at all. `diagnostics` keeps the pool and
+// scene-draw recording going while dormant, for the engine fix's pool=
+// comparison; off, those per-draw reads are skipped.
+void glitchFrameNoteEngineFix(bool armed, bool diagnostics);
+
+// The engine fix acted on a frame it found bad. Always notes the camera jump
+// (the FSS arrival trigger keys on it). `withhold`: mark the frame so the
+// compositor does not show it, with the verdict the detector itself uses for
+// a scene-judged eye-camera reset (kVerdictSceneReset). Returns whether a
+// compositor was in a position to honour the mark (frame_flag.h's
+// glitchConsumerPresent); a patched frame (withhold false) returns true.
+bool glitchFrameEngineFixEvent(bool withhold);
+
 // glitchFrameInvalidatePool's own and only test (glitch_frame.cpp): the fix
 // is installed at all. Necessary and sufficient -- unlike the functions
 // below, it does not also ask State::observing.
