@@ -55,7 +55,20 @@ class HeadLocator {
     }
     if((offset>0&&time>(std::numeric_limits<XrTime>::max)()-offset)||
        (offset<0&&time<(std::numeric_limits<XrTime>::min)()-offset))return XR_ERROR_TIME_INVALID;
-    const XrTime target=time+offset;
+    return finish(d,view,origin,time+offset,out,exact,stage);
+  }
+  // The same locate at an instant the caller has already formed (advanced.cull_pose: a frame's display time, or one period later),
+  // with no clock read and no prediction. Everything the pose is checked for is what locate() checks.
+  XrResult locateAt(const LocatorDispatch& d,XrSpace view,XrSpace origin,XrTime target,XrSpaceLocation& out,
+                    XrTime* exact=nullptr,HeadLocatorStage* stage=nullptr) const {
+    if(stage)*stage=HeadLocatorStage::None;
+    if(!d.locate)return XR_ERROR_FUNCTION_UNSUPPORTED;
+    if(!view||!origin)return XR_ERROR_HANDLE_INVALID;
+    return finish(d,view,origin,target,out,exact,stage);
+  }
+ private:
+  static XrResult finish(const LocatorDispatch& d,XrSpace view,XrSpace origin,XrTime target,XrSpaceLocation& out,
+                         XrTime* exact,HeadLocatorStage* stage) {
     XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
     const XrResult r=d.locate(view,origin,target,&location);
     if(r!=XR_SUCCESS){if(stage)*stage=HeadLocatorStage::Locate;return r;}

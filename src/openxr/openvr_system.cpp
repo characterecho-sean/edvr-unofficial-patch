@@ -293,13 +293,20 @@ void OpenVRSystem::GetDXGIOutputInfo(int32_t* index) {const auto s=source_.read(
 bool OpenVRSystem::IsDisplayOnDesktop() { return false; }
 bool OpenVRSystem::SetDisplayVisibility(bool) { unavailable(9);return false; }
 void OpenVRSystem::GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin origin,float prediction,TrackedDevicePose_t* poses,uint32_t count) {
+  // Who is asking, taken here on the caller's own thread: the owner thread the locate hops to cannot tell. The return address decides
+  // which instant a call is located at (advanced.cull_pose): only Elite's one direct pose call, on build 332841, and only when the
+  // host has published a mode; every other caller, and every call with the key off, is located as it always was.
+  const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
   NativeCpuTraceSpan trace(EdvrCpuGetDeviceToAbsoluteTrackingPose);
   if(!poses||!count){trace.finishVoid(0);return;}
   const auto s=source_.read();for(uint32_t i=0;i<count;++i)poses[i]=invalidPose();
-  if(!live(s)){trace.finishVoid(0);return;}poses[0]=invalidPose(true);
-  if(!originValid(origin)||!std::isfinite(prediction)){trace.finishVoid(0);return;}
+  const ExeModule module=callers_.module();
+  HeadCall call;call.thread=GetCurrentThreadId();call.rva=frameRva(module,caller);
+  call.time=cullpose::timeForCall(cullpose::modeFromCode(s.cullPose),isBuild332841(module),call.rva);
+  if(!live(s)){source_.noteHeadCallFailed(call,prediction);trace.finishVoid(0);return;}poses[0]=invalidPose(true);
+  if(!originValid(origin)||!std::isfinite(prediction)){source_.noteHeadCallFailed(call,prediction);trace.finishVoid(0);return;}
   TrackedDevicePose_t p=invalidPose(true);
-  const bool located=source_.locateHead(s.generation,origin,prediction,p);if(located)poses[0]=p;
+  const bool located=source_.locateHeadFor(s.generation,origin,prediction,call,p);if(located)poses[0]=p;
   trace.finishVoid(located?1:0);
 }
 void OpenVRSystem::ResetSeatedZeroPose() { const auto s=source_.read();if(!live(s)||!source_.resetSeated(s.generation))unavailable(11); }

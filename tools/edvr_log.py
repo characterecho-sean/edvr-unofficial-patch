@@ -8,6 +8,7 @@
     python tools/edvr_log.py --target frontier --tally vh
     python tools/edvr_log.py --target frontier --tally vh --frame 1
     python tools/edvr_log.py --target steam --tally cull --max-head 20
+    python tools/edvr_log.py --target steam --tally pose
     python tools/edvr_log.py --target frontier --tally periodic --expect-build HEAD
     python tools/edvr_log.py --target frontier --tally periodic --window-ms 250
     python tools/edvr_log.py --target frontier --tally periodic --infer-runs
@@ -63,6 +64,11 @@ rather than printing an empty table.
 --tally cull tables the terrain-culling arc's probe cycle (advanced.cull_probe = cycle): every `cull cycle:` window line in the graphics
 log by group, and each group paired against the two off windows beside it, mean +/- sd over n pairs; --max-head (deg/s, default 20)
 leaves out the windows in which the head moved. Exit 1 when the log has no window line (the status lines say why the cycle did not run).
+
+--tally pose tables the terrain-culling arc's pose-gap instrument (advanced.cull_pose): every `pose gap:` line in the RUNTIME log (it reads --tag openxr
+unless you name a tag or a file) by mode and caller (thread, return address): how far Elite's game-thread head pose is located from the drawn frame's
+display time, how far it is turned from the drawn pose, and the correlation of that angle with head speed across the windows. Exit 1 when the log has no
+such line.
 
 --tally periodic answers one question about one flight: which periodic work
 coincides with long frames. It reads the graphics log and the runtime log
@@ -838,6 +844,126 @@ def print_cull_tally(text, max_head):
                   "probe cycle would say nothing.")
     return 0
 
+
+# --tally pose: the terrain-culling arc's pose-gap instrument (advanced.cull_pose; src/openxr/pose_gap.h writes every line, and tools\openxr_pose_test
+# holds tools\pose_gap_fixture.log, which this script's --self-test reads, to exactly what it writes). The lines are in the RUNTIME log:
+#
+#   pose gap: mode <m> tid T calls n from exe+0xRVA prediction p ms target-minus-display mean a ms (min b max c) angle-to-drawn mean d max e deg
+#       head f deg/s waitgetposes w failed k[ fallback f]
+#   pose gap: mode <m> more than 16 callers in a window; N calls not counted
+#
+# One line is one caller (thread, return RVA) over a 2.0 s window of WaitGetPoses; "target-minus-display" is the instant its pose was located at
+# less the latest frame's predictedDisplayTime, "angle-to-drawn" the angle between the pose it got and the pose that frame was drawn with, "head"
+# the render pose's angular speed. Any of the three reads n/a when none of the window's calls had it. Elite's one direct pose call returns to
+# exe+0x4E3881 (the game thread); anything else is another caller.
+
+POSE_GAP_RE = re.compile(
+    r"pose gap: mode (?P<mode>\w+) tid (?P<tid>\d+) calls (?P<calls>\d+) from (?P<frm>exe\+0x[0-9A-Fa-f]+|outside|\?) "
+    r"prediction (?P<pred>[-+0-9.]+) ms target-minus-display "
+    r"(?:mean (?P<gm>[-+0-9.]+) ms \(min (?P<gmin>[-+0-9.]+) max (?P<gmax>[-+0-9.]+)\)|n/a) "
+    r"angle-to-drawn (?:mean (?P<am>[-+0-9.]+) max (?P<amax>[-+0-9.]+) deg|n/a) "
+    r"head (?:(?P<head>[-+0-9.]+) deg/s|n/a) waitgetposes (?P<waits>\d+) failed (?P<failed>\d+)(?: fallback (?P<fb>\d+))?")
+POSE_GAP_MORE_RE = re.compile(r"pose gap: mode (?P<mode>\w+) more than (?P<limit>\d+) callers in a window; (?P<dropped>\d+) calls not counted")
+POSE_MODES = ("off", "display", "next", "display_direct", "next_direct")
+POSE_GAME_THREAD = "exe+0x4E3881"
+
+
+def parse_pose_gap(text):
+    """Every `pose gap:` line, in order. Returns (windows, notes): a window is a dict of mode, tid, calls, frm, pred (ms), gm/gmin/gmax (ms) and am/amax
+    (deg) and head (deg/s) each None when the line said n/a, waits, failed, fb; a note is the text of an over-the-limit line."""
+    windows = []
+    notes = []
+    for line in text.splitlines():
+        m = POSE_GAP_RE.search(line)
+        if m:
+            def num(name):
+                v = m.group(name)
+                return float(v) if v is not None else None
+            windows.append({
+                "mode": m.group("mode"), "tid": int(m.group("tid")), "calls": int(m.group("calls")), "frm": m.group("frm"), "pred": float(m.group("pred")),
+                "gm": num("gm"), "gmin": num("gmin"), "gmax": num("gmax"), "am": num("am"), "amax": num("amax"), "head": num("head"),
+                "waits": int(m.group("waits")), "failed": int(m.group("failed")), "fb": int(m.group("fb") or 0)})
+            continue
+        if POSE_GAP_MORE_RE.search(line):
+            notes.append(line.split("pose gap:", 1)[1].strip())
+    return windows, notes
+
+
+def _pearson(pairs):
+    """Pearson's r over (x, y) pairs, None when there are fewer than three or either side does not vary."""
+    n = len(pairs)
+    if n < 3:
+        return None
+    mx = sum(p[0] for p in pairs) / float(n)
+    my = sum(p[1] for p in pairs) / float(n)
+    sxx = sum((p[0] - mx) ** 2 for p in pairs)
+    syy = sum((p[1] - my) ** 2 for p in pairs)
+    if sxx <= 1e-12 or syy <= 1e-12:
+        return None
+    return sum((p[0] - mx) * (p[1] - my) for p in pairs) / math.sqrt(sxx * syy)
+
+
+def tally_pose(windows):
+    """The --tally pose numbers: one row per (mode, tid, return address), in mode order then by thread, each over that caller's windows: n windows,
+    calls, failed, fallbacks, and (mean, sd) pairs of the windows' mean gap (ms), mean angle (deg) and head speed (deg/s), the range of the angle
+    means, and r, the correlation of a window's mean angle with its head speed (None when it cannot be told)."""
+    groups = {}
+    for w in windows:
+        groups.setdefault((w["mode"], w["tid"], w["frm"]), []).append(w)
+
+    def order(key):
+        return (POSE_MODES.index(key[0]) if key[0] in POSE_MODES else len(POSE_MODES), key[1], key[2])
+
+    rows = []
+    for key in sorted(groups, key=order):
+        ws = groups[key]
+        angles = [w["am"] for w in ws if w["am"] is not None]
+        rows.append({
+            "mode": key[0], "tid": key[1], "frm": key[2], "n": len(ws), "calls": sum(w["calls"] for w in ws),
+            "failed": sum(w["failed"] for w in ws), "fallbacks": sum(w["fb"] for w in ws),
+            "gap": _mean_sd([w["gm"] for w in ws if w["gm"] is not None]),
+            "angle": _mean_sd(angles), "angle_range": (min(angles), max(angles)) if angles else None,
+            "head": _mean_sd([w["head"] for w in ws if w["head"] is not None]),
+            "r": _pearson([(w["am"], w["head"]) for w in ws if w["am"] is not None and w["head"] is not None])})
+    return rows
+
+
+def print_pose_tally(text):
+    """The --tally pose report. Returns the process exit code."""
+    windows, notes = parse_pose_gap(text)
+    for note in notes:
+        print("[edvr] pose gap: %s" % note)
+    if not windows:
+        print("[edvr] no `pose gap:` lines in this log. The instrument is always on and writes them from the runtime's WaitGetPoses; they are in the "
+              "runtime log (--tag openxr), not the graphics log, and need a build with the pose-gap instrument.")
+        return 1
+    rows = tally_pose(windows)
+    print("[edvr] tally pose: %d window line(s) over %d caller row(s); modes seen: %s"
+          % (len(windows), len(rows), ", ".join(m for m in POSE_MODES if any(r["mode"] == m for r in rows))))
+    print("[edvr] per mode and caller (thread, return address), mean +/- sd over that caller's windows of each window's mean:")
+    print("%-15s %7s %-14s %4s %7s %6s  %-20s %-22s %-11s %s"
+          % ("mode", "tid", "from", "n", "calls", "failed", "gap ms (target-disp)", "angle deg (to drawn)", "head deg/s", "r(angle,head)"))
+    for r in rows:
+        print("%-15s %7d %-14s %4d %7d %6d  %-20s %-22s %-11s %s"
+              % (r["mode"], r["tid"], r["frm"], r["n"], r["calls"], r["failed"], _cull_cell(r["gap"], True, 2), _cull_cell(r["angle"], False, 3),
+                 ("%.1f" % r["head"][0]) if r["head"][0] is not None else "n/a", ("%+.2f" % r["r"]) if r["r"] is not None else "n/a"))
+    for r in rows:
+        if r["fallbacks"]:
+            print("[edvr] %s, tid %d: %d call(s) could not be located at the mode's instant (no frame yet, or no positive period) and were located at now + prediction."
+                  % (r["mode"], r["tid"], r["fallbacks"]))
+    for r in rows:
+        if r["frm"] != POSE_GAME_THREAD or r["gap"][0] is None:
+            continue
+        spread = ""
+        if r["angle_range"] is not None:
+            spread = " (%.3f to %.3f across windows)" % r["angle_range"]
+        print("[edvr] %s, the game thread (%s, tid %d): its pose is located %+.2f ms from the drawn frame's display time, and is turned %s deg from the "
+              "drawn pose%s; angle against head speed r = %s over %d window(s)."
+              % (r["mode"], r["frm"], r["tid"], r["gap"][0], ("%.3f" % r["angle"][0]) if r["angle"][0] is not None else "n/a", spread,
+                 ("%+.2f" % r["r"]) if r["r"] is not None else "n/a", r["n"]))
+    print("[edvr] the decisive pair is the `off` row of the game thread: a gap well above 0 ms with an angle that grows with head speed (r near +1) is a "
+          "pose older than the one drawn; under display and next the gap should read 0 and one period and the angle should fall.")
+    return 0
 
 # --camera-census: the VR camera census (advanced.vr_camera_census), one flight
 # in the VR profile with the key on. The question it answers (design doc section
@@ -9641,8 +9767,10 @@ def main(argv=None):
                     help="print only lines matching this regular expression")
     ap.add_argument("--tail", type=int, default=None,
                     help="print only the last N lines (after --grep)")
-    ap.add_argument("--tally", choices=["vh", "periodic", "cull"], default=None,
-                    help="aggregate instead of dumping: cull tables the `cull cycle:` "
+    ap.add_argument("--tally", choices=["vh", "periodic", "cull", "pose"], default=None,
+                    help="aggregate instead of dumping: pose tables the `pose gap:` "
+                         "lines of the runtime log (advanced.cull_pose) by mode and "
+                         "caller; cull tables the `cull cycle:` "
                          "windows of advanced.cull_probe = cycle by group, with each "
                          "group paired against its adjacent off windows (--max-head); "
                          "vh counts eye-texture "
@@ -9764,6 +9892,10 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    # The pose-gap lines are written by the runtime, not the graphics half: --tally pose reads its log unless a tag was named.
+    if args.tally == "pose" and args.tag.lower() == "gfx":
+        args.tag = "openxr"
+
     if args.tally == "periodic":
         if not args.file and args.tag.lower() != "gfx":
             print("[edvr] --tally periodic reads the graphics log (--tag gfx) "
@@ -9871,6 +10003,8 @@ def main(argv=None):
         return print_periodic_report(path, text, ver, want, args, native_dirs)
     if args.tally == "cull":
         return print_cull_tally(text, args.max_head)
+    if args.tally == "pose":
+        return print_pose_tally(text)
     if args.tally:
         return print_vh_tally(text, args.frame)
 
@@ -10321,6 +10455,8 @@ def self_test():
         ok = False
     if not self_test_cull():
         ok = False
+    if not self_test_pose():
+        ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
     return 0 if ok else 1
@@ -10521,6 +10657,124 @@ def self_test_cull():
         shutil.rmtree(tmp, ignore_errors=True)
     return ok
 
+
+POSE_FIXTURE = "pose_gap_fixture.log"
+
+
+def self_test_pose():
+    """--tally pose on tools\\pose_gap_fixture.log (which tools\\openxr_pose_test holds to exactly what src/openxr/pose_gap.h writes for the scripted
+    flight: 28 lines -- eight windows of two callers with the key off, the game thread's angle 0.01 deg per deg/s of head speed; six of the game
+    thread with display, gap 0, one fallback; six with next, gap one period, three failed calls), then on lines altered to break each thing the
+    report depends on. Returns ok."""
+    ok = True
+
+    def fail(message):
+        nonlocal ok
+        print("self_test_pose: %s" % message)
+        ok = False
+
+    import contextlib
+    import io
+    import shutil
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), POSE_FIXTURE)
+    if not os.path.isfile(fixture):
+        fail("the fixture %s is missing beside this script" % POSE_FIXTURE)
+        return False
+    text = read_text(fixture)
+    windows, notes = parse_pose_gap(text)
+    if len(windows) != 28 or notes:
+        fail("the fixture parsed to %d windows and %d notes, want 28 and none" % (len(windows), len(notes)))
+        return False
+    w0, w1 = windows[0], windows[1]
+    if (w0["mode"], w0["tid"], w0["calls"], w0["frm"], w0["waits"], w0["failed"], w0["fb"]) != ("off", 24212, 120, "exe+0x4E3881", 180, 0, 0) \
+            or w0["pred"] != 0.0 or w0["gm"] != 9.5 or w0["gmin"] != 9.0 or w0["gmax"] != 10.0 or w0["am"] != 0.1 or w0["amax"] != 0.1 or w0["head"] != 10.0:
+        fail("window 1 parsed to %r" % (w0,))
+    if (w1["tid"], w1["calls"], w1["frm"]) != (7001, 60, "outside") or w1["pred"] != 11.0:
+        fail("window 2 (the other caller, outside the image, prediction 11 ms) parsed to %r" % (w1,))
+
+    def close(a, b, eps=0.005):
+        return a is not None and abs(a - b) <= eps
+
+    rows = {(r["mode"], r["tid"]): r for r in tally_pose(windows)}
+    if sorted(rows) != [("display", 24212), ("next", 24212), ("off", 7001), ("off", 24212)]:
+        fail("the rows -> %r" % (sorted(rows),))
+        return False
+    off = rows[("off", 24212)]
+    if off["n"] != 8 or off["calls"] != 960 or off["failed"] != 0 or off["fallbacks"] != 0 or not close(off["gap"][0], 9.5) or not close(off["gap"][1], 0.0) \
+            or not close(off["angle"][0], 0.45) or not close(off["angle"][1], 0.2449, 0.001) or not close(off["head"][0], 45.0) or off["angle_range"] != (0.1, 0.8) \
+            or not close(off["r"], 1.0, 1e-9):
+        fail("the game thread under off -> %r" % (off,))
+    other = rows[("off", 7001)]
+    if other["n"] != 8 or other["calls"] != 480 or not close(other["gap"][0], 9.0) or not close(other["angle"][0], 0.9) or not close(other["r"], 1.0, 1e-9):
+        fail("the other caller under off -> %r" % (other,))
+    display = rows[("display", 24212)]
+    if display["n"] != 6 or display["calls"] != 720 or display["failed"] != 0 or display["fallbacks"] != 1 or not close(display["gap"][0], 0.0) \
+            or not close(display["angle"][0], 0.055) or not close(display["head"][0], 52.5) or not close(display["r"], 0.2927, 0.001):
+        fail("the game thread under display -> %r" % (display,))
+    nxt = rows[("next", 24212)]
+    if nxt["n"] != 6 or nxt["failed"] != 3 or not close(nxt["gap"][0], 11.1) or not close(nxt["angle"][0], 0.1) or nxt["r"] is not None:
+        fail("the game thread under next -> %r (a flat angle has no correlation)" % (nxt,))
+    # The correlation needs three windows and a spread on both sides.
+    two = [w for w in windows if w["mode"] == "off" and w["tid"] == 24212][:2]
+    if tally_pose(two)[0]["r"] is not None:
+        fail("two windows gave a correlation")
+    if _pearson([(1.0, 1.0), (2.0, 4.0), (3.0, 9.0)]) is None or abs(_pearson([(1.0, 3.0), (2.0, 2.0), (3.0, 1.0)]) + 1.0) > 1e-9:
+        fail("_pearson of a rising and a falling line")
+    # A line altered: n/a figures parse as None and stay out of every mean.
+    altered = text.replace("target-minus-display mean 9.50 ms (min 9.00 max 10.00)", "target-minus-display n/a", 1)
+    aw, _ = parse_pose_gap(altered)
+    if aw[0]["gm"] is not None or aw[0]["gmin"] is not None or aw[0]["gmax"] is not None:
+        fail("an n/a gap parsed as a number: %r" % (aw[0],))
+    ar = {(r["mode"], r["tid"]): r for r in tally_pose(aw)}[("off", 24212)]
+    if ar["n"] != 8 or not close(ar["gap"][0], 9.5):
+        fail("an n/a window changed the gap mean -> %r" % (ar,))
+    # The over-the-limit line is a note, not a window.
+    more = text + "[00:00:00.000] pose gap: mode off more than 16 callers in a window; 4 calls not counted\n"
+    mw, mn = parse_pose_gap(more)
+    if len(mw) != 28 or mn != ["mode off more than 16 callers in a window; 4 calls not counted"]:
+        fail("the over-the-limit line -> %d windows, notes %r" % (len(mw), mn))
+    # Through main(), on a directory the tool discovers on its own: the runtime log is read by default.
+    tmp = tempfile.mkdtemp(prefix="edvr_pose_selftest_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+        with open(os.path.join(logs, "edvr_openxr_20261009_120000_123_77.log"), "wb") as f:
+            f.write(("[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n" + text).encode("utf-8"))
+        with open(os.path.join(logs, "edvr_gfx_20261009_120001.log"), "wb") as f:
+            f.write(b"[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- x\n[00:00:01.000] nothing here\n")
+
+        def run(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        rc, out = run(["--dir", logs, "--tally", "pose"])
+        for want in ("tally pose: 28 window line(s) over 4 caller row(s); modes seen: off, display, next",
+                     "off               24212 exe+0x4E3881      8     960      0  +9.50 +/- 0.00",
+                     "0.450 +/- 0.245", "+1.00", "+0.29", "display           24212 exe+0x4E3881      6     720      0  +0.00 +/- 0.00", "next              24212 exe+0x4E3881      6     720      3  +11.10 +/- 0.00",
+                     "off, the game thread (exe+0x4E3881, tid 24212): its pose is located +9.50 ms from the drawn frame's display time, and is turned 0.450 deg "
+                     "from the drawn pose (0.100 to 0.800 across windows); angle against head speed r = +1.00 over 8 window(s).",
+                     "display, the game thread (exe+0x4E3881, tid 24212): its pose is located +0.00 ms",
+                     "next, the game thread (exe+0x4E3881, tid 24212): its pose is located +11.10 ms",
+                     "1 call(s) could not be located at the mode's instant", "the decisive pair is the `off` row of the game thread"):
+            if want not in out:
+                fail("--tally pose output lacks %r:\n%s" % (want, out))
+        if "the game thread (outside" in out or "tid 7001): its pose" in out:
+            fail("--tally pose named a caller outside the game's image as the game thread:\n%s" % out)
+        if rc != 0:
+            fail("--tally pose exited %d" % rc)
+        with open(os.path.join(logs, "edvr_openxr_20261009_130000_123_77.log"), "wb") as f:
+            f.write(b"[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- x\n[00:00:01.000] nothing here\n")
+        rc, out = run(["--dir", logs, "--tally", "pose", "--nth", "0"])
+        if rc != 1 or "no `pose gap:` lines" not in out:
+            fail("a log with no pose gap line -> rc %d:\n%s" % (rc, out))
+        rc, out = run(["--dir", logs, "--tally", "pose", "--tag", "gfx"])
+        if rc != 1 or "no `pose gap:` lines" not in out:
+            fail("an explicit --tag gfx reads the graphics log, which has none -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
 
 def self_test_flat_upscale():
     """--flat-upscale on the checked-in synthetic flight (tools\\flat_upscale_fixture.log, which tools\\flat_temporal_test holds to exactly what the DLL's

@@ -20,6 +20,9 @@ extern "C" int openxrAbiOuterRaw(vr::IVRSystem*, vr::EVREye, float*);   // calls
 extern "C" int openxrAbiCallSize(vr::IVRSystem*, unsigned*, unsigned*);
 extern "C" int openxrAbiCallMatrix(vr::IVRSystem*, vr::EVREye, vr::HmdMatrix44_t*);
 extern "C" int openxrAbiCallEyeToHead(vr::IVRSystem*, vr::EVREye, vr::HmdMatrix34_t*);
+// (windows.h stays out of this rig: its `near` macro breaks the headers the rig includes.)
+extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
+extern "C" int openxrAbiCallPose(vr::IVRSystem*, vr::ETrackingUniverseOrigin, float, vr::TrackedDevicePose_t*, uint32_t);
 
 
 namespace {
@@ -117,6 +120,18 @@ struct FakeSource final : SystemSource {
     out.mDeviceToAbsoluteTracking.m[0][0] = float(generation);
     out.mDeviceToAbsoluteTracking.m[0][3] = prediction;
     return generation == state.generation && state.connected;
+  }
+  // The pose-time filter (advanced.cull_pose): the call the system made, as locateHeadFor was handed it, and the calls that never got there.
+  unsigned forCalls = 0, failedNotes = 0;
+  edvr::openxr::HeadCall lastCall{}, lastFailed{};
+  float lastFailedPrediction = 0;
+  bool locateHeadFor(uint64_t generation, vr::ETrackingUniverseOrigin origin, float prediction,
+                     const edvr::openxr::HeadCall& call, vr::TrackedDevicePose_t& out) override {
+    { std::lock_guard<std::mutex> lock(mutex); ++forCalls; lastCall = call; }
+    return locateHead(generation, origin, prediction, out);
+  }
+  void noteHeadCallFailed(const edvr::openxr::HeadCall& call, float prediction) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex); ++failedNotes; lastFailed = call; lastFailedPrediction = prediction;
   }
   bool resetSeated(uint64_t generation) override {
     std::lock_guard<std::mutex> lock(mutex); ++resetCalls; return generation == state.generation;
@@ -637,6 +652,74 @@ __declspec(noinline) void callerCensusTests(vr::IVRSystem* system, FakeSource& s
       }
       check(told == 2 && exactLine, "the aspect is said once per change of group (all, then other), as 'cull probe: all also told aspect 1.5420 (true 1.4351) at the fov getter'");
     }
+    concrete.callers().useModule(real);
+  }
+  // ---- advanced.cull_pose: which instant a GetDeviceToAbsoluteTrackingPose call is located at (docs\terrain-culling.md round 6) ----
+  {
+    namespace cp = edvr::cullpose;
+    concrete.callers().useModule(real);
+    source.state.cullPose = 0;
+    vr::TrackedDevicePose_t poses[3]{};
+    const unsigned callsBefore = [&] { std::lock_guard<std::mutex> lock(source.mutex); return source.forCalls; }();
+    openxrAbiCallPose(system, vr::TrackingUniverseSeated, -0.25f, poses, 3);
+    edvr::openxr::HeadCall learned{};
+    unsigned callsAfter = 0;
+    { std::lock_guard<std::mutex> lock(source.mutex); learned = source.lastCall; callsAfter = source.forCalls; }
+    const uintptr_t poseCaller = reinterpret_cast<uintptr_t>(&openxrAbiCallPose);
+    check(callsAfter == callsBefore + 1 && learned.thread == GetCurrentThreadId() && learned.time == cp::Time::Now &&
+              learned.rva < edvr::openxr::kFrameUnknown && real.base + learned.rva > poseCaller && real.base + learned.rva - poseCaller < 0x100,
+          "the pose call reaches the source with the CALLER's thread and its return address as an RVA (a few bytes into the game-side caller), located as always with the key off");
+    const uintptr_t poseSite = real.base + learned.rva;
+    const auto askPose = [&](uint32_t mode, uint32_t rva, bool build) {
+      source.state.cullPose = mode;
+      concrete.callers().useModule(ExeModule{poseSite - rva, 0x40000000, edvr::openxr::kBuild332841Stamp + (build ? 0u : 1u), edvr::openxr::kBuild332841ImageSize});
+      vr::TrackedDevicePose_t p[2]{};
+      openxrAbiCallPose(system, vr::TrackingUniverseSeated, 0.0f, p, 2);
+      std::lock_guard<std::mutex> lock(source.mutex);
+      return source.lastCall;
+    };
+    const uint32_t exact = 0x4E3881u;   // (by hand from the disassembly: `call rbx` at 0x4E387F is two bytes)
+    check(cp::kDirectPoseReturnRva == exact, "(the filter's constant is 0x4E3881)");
+    bool times = true, others = true, build = true, offIsNow = true;
+    const cp::Time want[5] = {cp::Time::Now, cp::Time::Display, cp::Time::Next, cp::Time::Display, cp::Time::Next};
+    for (uint32_t mode = 0; mode < 5; ++mode) {
+      const auto at = askPose(mode, exact, true);
+      times = times && at.time == want[mode] && at.rva == exact;
+      for (uint32_t rva : {exact - 1, exact + 1, exact - 2, 0x5000u, 0x4E3715u, 0x4E387Fu, 0u})
+        others = others && askPose(mode, rva, true).time == cp::Time::Now;
+      build = build && askPose(mode, exact, false).time == cp::Time::Now;
+    }
+    offIsNow = askPose(0, exact, true).time == cp::Time::Now;
+    check(times, "with the game image mapped so the call returns to 0x4E3881: off locates at now, display and display_direct at the display time, next and next_direct one period later");
+    check(others, "...and a call that returns to 0x4E3880, 0x4E3882, 0x4E387F, 0x4E3715, 0x5000 or 0 is located at now in every mode, bit for bit as before");
+    check(build && offIsNow, "...on another build (a stamp one off) the filter never matches, whatever the mode");
+    check(askPose(7, exact, true).time == cp::Time::Now && askPose(0xFFFFFFFFu, exact, true).time == cp::Time::Now, "a mode code past 4 is off");
+    // The answer is the source's, untouched: the filter changes the instant, never the pose.
+    source.state.cullPose = 1;
+    concrete.callers().useModule(ExeModule{poseSite - exact, 0x40000000, edvr::openxr::kBuild332841Stamp, edvr::openxr::kBuild332841ImageSize});
+    vr::TrackedDevicePose_t shifted[3]{};
+    openxrAbiCallPose(system, vr::TrackingUniverseSeated, -0.25f, shifted, 3);
+    check(shifted[0].bPoseIsValid && shifted[0].mDeviceToAbsoluteTracking.m[0][3] == -0.25f && !shifted[1].bPoseIsValid && !shifted[2].bPoseIsValid,
+          "the pose a Display call is handed back is the source's, and the other poses stay invalid");
+    // Calls that never reach the source are counted, with who asked.
+    unsigned notesBefore = 0;
+    { std::lock_guard<std::mutex> lock(source.mutex); notesBefore = source.failedNotes; }
+    openxrAbiCallPose(system, static_cast<vr::ETrackingUniverseOrigin>(99), 0.0f, poses, 1);
+    openxrAbiCallPose(system, vr::TrackingUniverseSeated, NAN, poses, 1);
+    unsigned notes = 0;
+    edvr::openxr::HeadCall failed{};
+    float failedPrediction = 0;
+    { std::lock_guard<std::mutex> lock(source.mutex); notes = source.failedNotes; failed = source.lastFailed; failedPrediction = source.lastFailedPrediction; }
+    check(notes == notesBefore + 2 && failed.thread == GetCurrentThreadId() && failed.rva == exact && std::isnan(failedPrediction),
+          "a bad origin and a prediction that is not a number are counted as failed pose calls, with the caller's thread and RVA");
+    const bool wasConnected = source.state.connected;
+    source.state.connected = false;
+    unsigned countedBefore = 0;
+    { std::lock_guard<std::mutex> lock(source.mutex); countedBefore = source.failedNotes; }
+    openxrAbiCallPose(system, vr::TrackingUniverseSeated, 0.0f, poses, 1);
+    { std::lock_guard<std::mutex> lock(source.mutex); check(source.failedNotes == countedBefore + 1, "...and so is a call with no live session"); }
+    source.state.connected = wasConnected;
+    source.state.cullPose = 0;
     concrete.callers().useModule(real);
   }
   // Nothing else changes: not the matrix, not the eye transform.

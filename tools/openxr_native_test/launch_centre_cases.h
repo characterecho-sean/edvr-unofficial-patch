@@ -17,6 +17,7 @@ struct Fake {
   // wait that actually admits pixels.
   bool shouldRender=false;
   XrTime sampleTime=0,verifyTime=0;
+  XrTime lastTime=0;   // the instant of the most recent locate, whichever space it was against (the pose-time cases)
   XrSpace lastDestroyed=XR_NULL_HANDLE;
 };
 inline Fake* active=nullptr;
@@ -56,7 +57,7 @@ inline XrResult XRAPI_PTR destroy(XrSpace space) {
   ++active->destroys;active->lastDestroyed=space;return XR_SUCCESS;
 }
 inline XrResult XRAPI_PTR locate(XrSpace target,XrSpace base,XrTime time,XrSpaceLocation* out) {
-  ++active->locates;active->argumentsValid&=target==view()&&(base==local()||base==owned());
+  ++active->locates;active->lastTime=time;active->argumentsValid&=target==view()&&(base==local()||base==owned());
   if(active->locateResult!=XR_SUCCESS)return active->locateResult;
   out->locationFlags=active->flags;out->pose=active->head;
   if(base==local())active->sampleTime=time;

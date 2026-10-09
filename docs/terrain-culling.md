@@ -2,60 +2,61 @@
 
 ## Status
 
-- **State (2026-10-09, round 5):** the culler's input is **unidentified**. The
-  fov-getter patch (hook RVA 0x4E2F50) is **WITHDRAWN**; the old guard (h=0.25,
-  v=0) removes about 6% of the squares. Round 5 is built, **NOT FLOWN**: a lie
-  on the MONO camera's aspect (`cull_probe = mono`, and the cycle's last window)
-  with observe-only hooks on who reads and who writes camera aspects. Dated
-  entry at the bottom.
-- **H-cam (INFERRED):** the culler is a centred frustum from some camera's
-  aspect and vFOV; it explains the old guard working with v=0 (its horizontal
-  widening came in as render-size inflation, i.e. aspect). It was written for
-  the eye camera, which round 4 contradicts (next bullet): the carrier, if H-cam
-  holds, is another camera, and the mono camera is the one found.
-- **Static eliminations, rounds 3-5** (READ, build 332841, nothing flown; dumps
-  in `analysis\decomp\`): the controller tick 0x107346A reads only out[1] of
-  `GetProjectionRaw`, into controller+0x30. Eye cameras build their frustum from
-  the kind-5 matrix (4F3770 inverts +0x1B0), so it is exact, not a centred
-  (aspect, vFOV) one. FUN_13ACC40 is "FSSRenderingComponent", not a culler. A
-  mono camera exists (2871D30, kind 0/3): its aspect is B+0x80, written only by
-  FUN_28634E0, default 16/9, and no terrain reader of it was found. The
-  AstroSurface chain uses camera 0's pose, a fov setting in degrees and the
-  viewport height (a LOD gate).
-- **UNRELIABLE (demoted 2026-10-09):** the 09-23 verdict "the culler follows
-  `GetProjectionRaw`, not the matrix". It rests on a pilot's judgement of
-  squares flickering at the periphery, in windows with a 10-degree outer trim
-  on and a 1.6% raw-versus-matrix difference. Do not build on it.
+- **State (2026-10-09, round 6):** the culler's input is **unidentified** and the
+  squares are **temporal** (next bullet). Round 6 is built, **NOT FLOWN**: an
+  always-on pose-gap instrument and the live switch `advanced.cull_pose`. The
+  fov-getter patch (RVA 0x4E2F50) is **WITHDRAWN**; the old guard (h=0.25, v=0)
+  removes about 6% of the squares. Dated entries at the bottom.
+- **Pilot report 2026-10-09 (Crystal Super, Pimax OpenXR):** the squares show
+  only on descent into a landable planet, come and go with head movement as the
+  gaze switches, and fill in quickly once the head is steady. **Ruled out on this
+  rig:** a static frustum deficit (the centred-cull models, H-cam included),
+  because a steady head shows no squares. The 447de48f steady-view protocol
+  (`cull_probe = measure | cycle | mono`, `--tally cull`) cannot see a lag and
+  was NOT flown; its counter, census and mono observers stay available.
+- **Round 6, READ** (build 332841; `analysis\decomp\verify_20261009_cull6_*`).
+  Elite's head-pose function 0x4E3690 has two sources. *Render thread* (arg6 =
+  1): WaitGetPoses' render pose (call 0x4E3715), latched at [W+0x111] until
+  Present clears it; EDVR locates it at the frame's predictedDisplayTime, so it
+  is the drawn pose. *Game thread* (arg6 = 0, the controller tick, tid 24212):
+  IVRSystem::GetDeviceToAbsoluteTrackingPose (`call rbx` at 0x4E387F, return RVA
+  0x4E3881), prediction about 0 s, i.e. "now"; with the latch set it reuses the
+  cached WaitGetPoses pose instead, by `je 0x4E384F` at 0x4E36EE (0F 84 5B 01 00
+  00; reached with arg6 = 0 only). EDVR's runtime (openvr_system.cpp,
+  native_runtime_host.h locateHead, head_locator.h) located that call at
+  QPC-now + prediction.
+- **Round 6, INFERRED (H-lag):** the planet-terrain culler takes the game-thread
+  camera, so its tiles are chosen with a pose at least a frame older than the
+  drawn one and a head turn's leading edge goes missing. (Census: eye cameras
+  are built twice a frame, via wrapper slot 16 and a second thread via slot 26.)
+- **Instrument (always on):** one `pose gap:` line per caller (thread, return
+  RVA) every 2.0 s in the RUNTIME log: calls, prediction, target-minus-display
+  (the located instant less the latest frame's display time), angle-to-drawn
+  (the pose handed back against the drawn pose), head speed, WaitGetPoses, failed.
+- **Switch (live, temporary):** `advanced.cull_pose` = off | display | next |
+  display_direct | next_direct. `display` / `next` locate ONLY the call returning
+  to 0x4E3881 at the display time / one period later (the arithmetic of the
+  game-pose array); every other caller is answered as ever. `_direct` also writes
+  `90 E9` over `0F 84` at 0x4E36EE (one atomic eight-byte store at a frame
+  boundary, gated on the PE stamp and the six bytes, restored on leaving): the
+  game thread never takes the latched pose. Build 332841 only.
+- **Next flight** (Crystal Super or Quest 3): on a descent where squares show,
+  `fix.cull_guard` off, deliberate left-right gaze switches. Walk `cull_pose`
+  off -> display -> next -> display_direct -> next_direct -> off, about 30 s
+  each, live; note when squares appear. Read it with `edvr_log.py --tally pose`
+  (the runtime log; the `cull pose:` change lines are in the graphics log).
+  **The decisive numbers:** target-minus-display under `off` together with
+  angle-to-drawn against head speed; display should read 0 ms and next one
+  period, with the angle falling.
 - **Ruled out** (evidence under "Status detail"): the getter as the culler's
-  input, the 09-23 "same +19.4% ask" premise, H3, the union model, H2,
-  FUN_13ACC40 as the consumer. Corrections to the old getter notes and the
-  established call sites moved to "Status detail" (2026-10-09, round 5).
-- **Flown 2026-10-09:** the manual probe cycle was unreadable by eye (squares
-  flicker with head motion); the census found a caller, 0x1073470, off-thread.
-- **Temporary key:** `advanced.cull_probe` = off | all | camera | ui | sky |
-  sizes | other | mono | cycle | measure, live. Lies need `fix.cull_guard` off
-  and build 332841; a selected group also widens the aspect call's width. `all`
-  is GetProjectionRaw plus the aspect lie only: it does not include `mono`.
-  `measure` counts with no lie, guard running or not. With cycle, measure or
-  mono set, two hooks go in once (build 332841 only, one log line says whether):
-  the mono camera's aspect getter (RVA 0x2841190; only its call returning to
-  0x2871D89, the mono filler, is lied to, by 1.30) and an observe-only one on
-  the aspect writer (0x28634E0).
-- **Pilot report 2026-10-09 (Crystal Super, Pimax OpenXR) — reframes the
-  arc:** the squares show only on descent into a landable planet, come and go
-  with head movement as the gaze switches, and fill in quickly once the head
-  is steady. So the defect is temporal: culling (or tile readiness) lags the
-  head, and the old guard's margin worked by covering a typical head-turn
-  speed. **Ruled out on this rig:** a static frustum deficit (the centred-cull
-  models), because a steady head shows no squares. Leading hypothesis
-  **H-lag:** Elite builds eye cameras twice a frame (census: render thread via
-  wrapper slot 16; a second thread via slot 26, which takes a time offset), and
-  culls with the predicted second-thread pose while drawing with a later one.
-  EDVR's runtime answers both pose queries, so the gap may be set, and fixed,
-  there. Under investigation (round 6 + runtime pose survey).
-- **The steady-view protocol (447de48f: `cull_probe = measure | cycle | mono`,
-  `edvr_log.py --tally cull`) cannot see a lag and was NOT flown.** Its
-  counter, census and mono observers stay available for the next instrument.
+  input, the 09-23 "same +19.4% ask" premise, H3, the union model, H2, FUN_13ACC40
+  as the consumer. **UNRELIABLE:** the 09-23 verdict "the culler follows
+  `GetProjectionRaw`, not the matrix" (a pilot's judgement under periphery
+  flicker, a 10-degree trim and a 1.6% difference).
+- **Earlier instruments** (rounds 3-5): `advanced.cull_probe` = off | all | camera
+  | ui | sky | sizes | other | mono | cycle | measure (lies need `fix.cull_guard`
+  off and build 332841): the caller census, the selective lie, the terrain-draw
+  counter, the mono camera hooks; their eliminations are in the rounds 3-5 entry.
 
 ## The bug in short
 
@@ -742,3 +743,60 @@ caller of the getter and every call of the writer, which is where to look next.
 A mono window with `mono reads` 0 says nothing (the filler was not reached in
 that scene). The positive control (`measure`, flight A) still has to show live
 above off first.
+
+## 2026-10-09, round 6 — the squares follow the head: two poses, and the test build
+
+Offline disassembly of Elite build 332841 (`analysis\decomp\verify_20261009_cull6_*`), then a test build. Nothing here is flown. **READ** is what
+the instructions say; **INFERRED** is what follows from them.
+
+**READ**
+
+- The function at 0x4E3690 hands Elite a head pose. Its entry sets `[r9] = 0`, loads the IVRCompositor (`[rcx+0x108]`) and, at 0x4E36DE, tests
+  arg6 (`[rbp+0xE0]`): non-zero jumps to 0x4E36F4. For arg6 = 0 it tests the latch `[rsi+0x111]` at 0x4E36E7 and, when it is clear, branches at
+  0x4E36EE to 0x4E384F.
+- 0x4E36F4 tests the latch again: set goes to 0x4E37E8 (the cached pose); clear falls through to `call [rax+0x10]` at 0x4E3715, WaitGetPoses.
+  So the render thread (arg6 = 1) always takes WaitGetPoses' pose, and the game thread (arg6 = 0) takes it only while the latch is set.
+- 0x4E384F loads the IVRSystem (`[rsi+8]`), reads its vtable slot 0x50 (GetDeviceToAbsoluteTrackingPose, slot 10) into rbx, forms the prediction
+  as arg3 (a double) less the result of a call through `[rax+0x50]` at 0x4E3860, narrows it to float (`cvtsd2ss xmm2` at 0x4E387B) and calls
+  at 0x4E387F (`FF D3`). The return address is 0x4E3881. The prediction is about 0 s in practice, so the pose is "now". A missing compositor
+  (`test rcx,rcx` at 0x4E36D5) also goes to 0x4E384F.
+- The branch at 0x4E36EE is `0F 84 5B 01 00 00`: `je` with displacement 0x15B, ending at 0x4E36F4, so its target is 0x4E384F. The bytes at
+  0x4E36E8..0x4E36F7 are `BE 11 01 00 00 00 0F 84 5B 01 00 00 80 BE 11 01` (the tail of the `cmp` at 0x4E36E7, the branch, the start of the `cmp` at
+  0x4E36F4). Both opcode bytes are in the aligned word 0x4E36E8..0x4E36EF.
+- The caller that asks with arg6 = 0 is the controller tick on tid 24212, which reaches 0x4E3690 through V+0x60 (round 6 trace).
+
+**The patch.** Replace `0F 84` with `90 E9`. The displacement that follows is untouched, so the result reads `nop` at 0x4E36EE and `jmp rel32` at
+0x4E36EF, ending at 0x4E36F4 with the same 0x15B: the same target, 0x4E384F. The branch becomes unconditional, so an arg6 = 0 caller never reaches
+0x4E36F4's latch test and never takes the cached pose; arg6 != 0 callers jump over this code at 0x4E36E5 and are unaffected.
+
+**INFERRED**
+
+- The planet-terrain culler takes the game-thread camera (H-lag): its tiles are chosen with a pose at least one frame older than the drawn one.
+  The pilot's pattern (squares only while the head moves, filled in when it is steady) is what a lag of that size would do and a static frustum
+  would not.
+
+**What the test build does.**
+
+- *Instrument, always on.* GetDeviceToAbsoluteTrackingPose records, before the hop to the owner thread, the caller's thread, its return address as an
+  RVA in the game's image and the prediction. After the locate it takes the located instant less the latest frame's predictedDisplayTime (ms), the angle
+  between the pose handed back and the pose that frame was drawn with, and the head's angular speed from the render pose. Per (thread, return RVA)
+  and 2.0 s window, flushed from the WaitGetPoses publish point (a mode change closes the window at once):
+  `pose gap: mode <m> tid T calls n from exe+0x… prediction p ms target-minus-display mean a ms (min b max c) angle-to-drawn mean d max e deg head f deg/s
+  waitgetposes w failed k`, with ` fallback n` appended when a call could not be formed. Failed locates, including the silent busy-gate path, are in
+  `failed`. `from` reads `outside` or `?` for a caller that is not in the image or was not captured.
+- *Switch.* `advanced.cull_pose` is read by the graphics half and carried to the runtime in `EdvrNativeFrameOutput::cullPose` (version 8, under the
+  same hand-copied-DLLs rule as the others: an older runtime reads off). The runtime acts on it: the call returning to 0x4E3881, on build 332841, is
+  located at the latest frame's display time (`display`, `display_direct`) or one period later (`next`, `next_direct`) instead of now + prediction;
+  every other caller is unchanged, bit for bit. A Display or Next instant that cannot be formed (no frame yet, no positive period) falls back to
+  today's answer and is counted.
+- *Patch.* The `_direct` modes make the graphics half write the 2-byte patch above as one interlocked eight-byte store over 0x4E36E8..0x4E36EF, gated
+  on the PE stamp, the image size and the six original bytes, from its frame boundary (the owner thread inside WaitGetPoses, which every pose call
+  hops to as well, so it is never inside one), and put the original bytes back when the mode leaves `_direct`. A refusal is final until the mode leaves
+  `_direct`.
+- *The line a change writes* (graphics log): `cull pose: <mode> -- Elite's game-thread head pose is located at <now+prediction | the frame's display
+  time | display time + one period>; latched-pose bypass <on|off|refused: why>`. On another build a time mode adds `(standing down: not build 332841)`
+  after the instant it falls back to.
+
+**Reading it.** Under `off` the game thread's gap should be near the time since the last frame began (several ms) and its angle should grow with
+head speed (r near +1 in `--tally pose`); display should read 0 ms and next one period. If squares go with a smaller angle, the culler is on that
+pose; if the squares do not change under any mode, it is not (and the instrument has still said how stale the pose was).

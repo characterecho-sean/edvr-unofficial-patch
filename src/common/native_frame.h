@@ -39,6 +39,13 @@
 // and reads the probe as off. Version 6 was already on main, so it is not
 // extended in place.
 #define EDVR_NATIVE_FRAME_VERSION_7 7u
+// Version 8 adds cullPose to the END and nothing else (the terrain-culling arc's
+// pose-time switch, advanced.cull_pose, src\common\cull_pose.h), under the same
+// hand-copied-DLLs rule: a version 1 to 7 caller never learns of it, and a
+// runtime that asks version 8 of a d3d11.dll that refuses the shape steps down
+// and reads the switch as off (Elite's game-thread head pose located as today).
+// Version 7 was already on the branch, so it is not extended in place.
+#define EDVR_NATIVE_FRAME_VERSION_8 8u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -105,6 +112,14 @@ struct EdvrNativeFrameOutput {
     // (advanced.cull_probe): 0 off, 1 all, 2 camera, 3 ui, 4 sky, 5 sizes,
     // 6 other. Anything else reads as off.
     uint32_t cullProbe;
+    // Version 8 and later (TEMPORARY, the terrain-culling arc). The instant the
+    // runtime locates Elite's game-thread head pose at (advanced.cull_pose):
+    // 0 off (now + the prediction Elite passes), 1 display (the latest frame's
+    // display time), 2 next (display time + one period), 3 display_direct,
+    // 4 next_direct. The graphics half applies the engine patch the _direct
+    // modes name itself; the runtime reads 3 and 4 as 1 and 2. Anything else
+    // reads as off.
+    uint32_t cullPose;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -133,6 +148,10 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before cullProbe.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, cullProbe))
+// The size the fields through cullProbe occupy, which is what a version 7
+// caller's struct is, with no tail padding before cullPose.
+#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 \
+    ((uint32_t)offsetof(EdvrNativeFrameOutput, cullPose))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;
