@@ -52,6 +52,8 @@ constexpr uint32_t kSkinTarget = 7;             // the render target the pixel s
 constexpr char kSkinSemantic[] = "EDVRSKINPREV";
 constexpr float kSkinCentimetres = 100.0f;      // E is previous - current, metres to centimetres
 constexpr float kSkinLimitSquared = 3.6e9f;     // |E| above 60000 cm is not a motion; it is invalid
+// The engine path binds the three views with one VSSetShaderResources call (engine_velocity.cpp), and the patch declares them in this order.
+static_assert(kSkinJoinSlot == kSkinPrevPaletteSlot + 1 && kSkinPoseSlot == kSkinPrevPaletteSlot + 2, "t108, t109 and t110 are bound with one call: they must be contiguous");
 
 namespace dxbc_skin_detail {
 

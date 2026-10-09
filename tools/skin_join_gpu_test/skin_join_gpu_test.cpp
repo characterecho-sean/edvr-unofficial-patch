@@ -375,7 +375,7 @@ void caseNumbers() {
         {"SJ_STAT_FAIL_NO_PREV", kStatFailNoPrevEntity}, {"SJ_STAT_FAIL_RANGE", kStatFailRange}, {"SJ_STAT_FAIL_LAYOUT", kStatFailLayout}, {"SJ_STAT_FAIL_PREFIX", kStatFailPrefix},
         {"SJ_STAT_FAIL_POSE", kStatFailPose}, {"SJ_STAT_FAIL_CAP", kStatFailCap}, {"SJ_STAT_DUP_BASE", kStatDupBase}, {"SJ_STAT_PREV_HOOK_OK", kStatPrevHookOk},
         {"SJ_STAT_MISMATCH_BITS", kStatMismatchBits}, {"SJ_STAT_POSE_RECORDS", kStatPoseRecords}, {"SJ_STAT_POSE_CONFLICTS", kStatPoseConflicts},
-        {"SJ_STAT_LAST_JOBS", kStatLastJobs}, {"SJ_STAT_LAST_ENTITIES", kStatLastEntities}, {"SJ_STAT_WORDS", kStatWords}};
+        {"SJ_STAT_LAST_JOBS", kStatLastJobs}, {"SJ_STAT_LAST_ENTITIES", kStatLastEntities}, {"SJ_STAT_FAIL_PREV_ROWS", kStatFailPrevRows}, {"SJ_STAT_WORDS", kStatWords}};
     bool all = true;
     for (const auto& s : stats) all = all && defineOf(s.name) == s.value;
     check(all, "G1.d the counters' indices in the HLSL are the header's");
@@ -467,6 +467,12 @@ void caseScripted(Pair& p) {
     outside.jobs.push_back(JobRow{0, 300, 77, 5});
     if (t.empty()) t = q.frame(outside);
     check(t.empty() && q.cpu.result.stats[kStatHookDisagree] == 1 && q.cpu.result.stats[kStatMismatchBits] == kMmNotInRange, "G3.h a job outside every entity's range is a disagreement on the GPU as on the CPU");
+    // the previous palette buffer holds only 64 rows (word 7 of the plan): the jobs whose previous rows run past it fail on that, the same on both sides
+    for (unsigned i = 19; i <= 21 && t.empty(); ++i) t = q.frame(build(a, i));
+    q.cpu.prevRows = 64;
+    if (t.empty()) t = q.frame(build(a, 22));
+    check(t.empty() && q.cpu.result.stats[kStatFailPrevRows] == 3 && q.cpu.result.stats[kStatJoined] == 3, "G3.i jobs whose previous rows run past the previous palette buffer are counted and not joined, alike on the GPU and the CPU");
+    q.cpu.prevRows = kMaxRows;
     if (!t.empty()) std::printf("    %s\n", t.c_str());
 }
 
@@ -486,6 +492,7 @@ World randomWorld(Rng& r, uint64_t& nextKey) {
 }
 void caseRandom(Pair& p) {
     Rng r(2026);
+    Rng rowsRng(77);   // its own stream: the worlds above stay what they were
     uint64_t nextKey = 0x7000;
     World w = randomWorld(r, nextKey);
     uint64_t seq = 0;
@@ -501,6 +508,7 @@ void caseRandom(Pair& p) {
         if (r.chance(6)) { Ent& e = w[r.below(uint32_t(w.size()))]; e.key = nextKey += 8; }
         Built b = build(w, ++seq, r.chance(30), 1);
         const bool history = !r.chance(8), pose = !r.chance(6), offer = !r.chance(10);
+        p.cpu.prevRows = rowsRng.chance(10) ? 20 + rowsRng.below(120) : kMaxRows;   // now and then a previous palette buffer that is small
         if (r.chance(7)) b.jobs.erase(b.jobs.begin() + r.below(uint32_t(b.jobs.size())));        // the table loses a job the list still names
         if (r.chance(5) && b.jobs.size() > 1) b.jobs[1].count += 1 + r.below(3);                    // a count the list does not know
         if (r.chance(4)) b.snap.flags = kSnapFault;

@@ -203,9 +203,10 @@ void caseProtocol() {
         f.step(&b.snap, 1, true, uint32_t(b.jobs.size()), 1, p);
         Built b2 = build(w, 2);
         f.step(&b2.snap, 1, true, uint32_t(b2.jobs.size()), 0, p);
+        p.prevRows = 777;
         p.words(words);
         check(words.size() == kPlanWords && words[0] == (kPlanHistory | kPlanHook) && words[1] == 3 && words[3] == p.end && words[5] == 6 && words[6] == 6 &&
-              words[7] == 0 && words[kPlanRsAt + 1] == p.rs[1] && words[kPlanCountAt + 2] == 30 && words[kPlanPrevIdxAt + 1] == 1 && words[kPlanPrevRsAt + 3] == p.prevEnd,
+              words[7] == 777 && words[kPlanRsAt + 1] == p.rs[1] && words[kPlanCountAt + 2] == 30 && words[kPlanPrevIdxAt + 1] == 1 && words[kPlanPrevRsAt + 3] == p.prevEnd,
               "J2.v the plan's words are laid out where JoinCS reads them");
     }
 }
@@ -222,6 +223,13 @@ void caseHistory() {
     check(h.note(16, 0xA, big, 1000, true) == kHistoryShrunk, "J3.f the previous buffer cannot hold the rows in use");
     check(h.note(17, 0xB, big, 1000, false) == kHistoryPose, "J3.g no pose table from the previous frame");
     check(h.counters().frames == 7 && h.counters().verdict[kHistoryOk] == 2 && h.counters().verdict[kHistoryGap] == 1, "J3.h the verdicts are counted");
+    {
+        // no usable list from the hook: the rows in use are not known (0), and the whole-frame verdict does not guess; the plan's per-job guard does the work
+        PaletteHistory u;
+        const uint64_t small = 48ull * 64;
+        u.note(1, 0xA, small, 0, true);
+        check(u.note(2, 0xB, small, 0, true) == kHistoryOk && u.lastBytes() == small, "J3.i with the rows in use unknown a small previous buffer is not called shrunk");
+    }
 }
 
 // ---- J4 ------------------------------------------------------------------------------------------------------------------
@@ -503,6 +511,22 @@ void caseLimits() {
         r.frame(build(a, 5), false);
         check(r.result.stats[kStatNoHistory] == 1 && r.result.stats[kStatJoined] == 0, "J8.f history off twice in a row joins nothing");
         check(r.result.dstInfo[b.jobs[0].dst].count == b.jobs[0].count, "J8.g but the by-base table is still built for the next frame");
+    }
+    {
+        // the previous palette buffer holds only 64 rows: a job whose previous rows run past it has no history, whichever source named the previous base
+        for (const bool hookOffered : {true, false}) {
+            Run r;
+            warm(r);
+            r.prevRows = 64;
+            r.frame(build(a, 4), true, true, hookOffered);
+            const uint32_t* s = r.result.stats;
+            check(s[kStatFailPrevRows] == 3 && s[kStatJoined] == 3, hookOffered ? "J8.h a job whose previous rows run past the previous buffer fails on that, from the hook's join" : "J8.i ... and from the prefix join");
+        }
+        Run r;
+        warm(r);
+        r.prevRows = 10;
+        r.frame(build(a, 4));
+        check(r.result.stats[kStatFailPrevRows] == 6 && r.result.stats[kStatJoined] == 0, "J8.j a buffer smaller than every job fails them all");
     }
 }
 

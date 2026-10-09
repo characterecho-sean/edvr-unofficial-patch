@@ -105,12 +105,14 @@ constexpr uint32_t kPlanCountAt = kPlanRsAt + kMaxEntries + 1;           // coun
 constexpr uint32_t kPlanPrevIdxAt = kPlanCountAt + kMaxEntries;          // prevIdx[0..m-1]
 constexpr uint32_t kPlanPrevRsAt = kPlanPrevIdxAt + kMaxEntries;         // prevRs[0..prevM]
 constexpr uint32_t kPlanWords = kPlanPrevRsAt + kMaxEntries + 1;
-// header: [0] flags [1] m [2] prevM [3] end [4] prevEnd [5] jobs [6] prevJobs [7] frame parity
+// header: [0] flags [1] m [2] prevM [3] end [4] prevEnd [5] jobs [6] prevJobs [7] prevRows (the previous palette buffer's capacity in rows;
+// a job whose previous rows would run past it has no history: the guard that needs no list)
 
 struct Plan {
     uint32_t flags = 0;
     uint32_t m = 0, prevM = 0, end = 0, prevEnd = 0;
-    uint32_t jobs = 0, prevJobs = 0, parity = 0;
+    uint32_t jobs = 0, prevJobs = 0, parity = 0;   // parity stays on the CPU side (which of the two pose and by-base tables is this frame's)
+    uint32_t prevRows = kMaxRows;                  // the previous palette buffer's capacity in rows (JoinCS word 7)
     uint32_t rs[kMaxEntries + 1]{};
     uint32_t count[kMaxEntries]{};
     uint32_t prevIdx[kMaxEntries]{};
@@ -118,7 +120,7 @@ struct Plan {
     void words(std::vector<uint32_t>& out) const {
         out.assign(kPlanWords, 0);
         out[0] = flags; out[1] = m; out[2] = prevM; out[3] = end; out[4] = prevEnd;
-        out[5] = jobs; out[6] = prevJobs; out[7] = parity;
+        out[5] = jobs; out[6] = prevJobs; out[7] = prevRows;
         std::memcpy(&out[kPlanRsAt], rs, sizeof(rs));
         std::memcpy(&out[kPlanCountAt], count, sizeof(count));
         std::memcpy(&out[kPlanPrevIdxAt], prevIdx, sizeof(prevIdx));
@@ -254,14 +256,15 @@ public:
     };
     // `frame` increases by one per presented frame; `bufferId` identifies the buffer the chain wrote (u0); `byteWidth` is
     // that buffer's size; `rowsInUse` the rows this frame's jobs cover (the largest dst + count).
-    // `poseBuiltLastFrame` says EDVR built a pose table from the previous frame's pool.
+    // `poseBuiltLastFrame` says EDVR built a pose table from the previous frame's pool. `rowsInUse` 0 = not known (no usable list from the hook):
+    // the per-job guard on the GPU (the plan's prevRows) then does what this verdict does for the whole frame.
     uint32_t note(uint64_t frame, uint64_t bufferId, uint64_t byteWidth, uint32_t rowsInUse, bool poseBuiltLastFrame) {
         ++c_.frames;
         uint32_t v = kHistoryOk;
         if (!have_) v = kHistoryFirst;
         else if (frame != lastFrame_ + 1) v = kHistoryGap;
         else if (bufferId == lastBuffer_) v = kHistorySame;
-        else if (lastBytes_ / 48 < rowsInUse) v = kHistoryShrunk;
+        else if (rowsInUse && lastBytes_ / 48 < rowsInUse) v = kHistoryShrunk;
         else if (!poseBuiltLastFrame) v = kHistoryPose;
         have_ = true;
         lastFrame_ = frame;
@@ -271,6 +274,7 @@ public:
         return v;
     }
     uint64_t previousBuffer() const { return previousBuffer_; }
+    uint64_t lastBytes() const { return lastBytes_; }   // the byte width of the buffer noted last (the previous palette when asked before note())
     void rememberPrevious() { previousBuffer_ = lastBuffer_; }
     void reset() { have_ = false; c_ = Counters{}; }
     const Counters& counters() const { return c_; }
@@ -304,6 +308,7 @@ enum Stat : uint32_t {
     kStatPoseConflicts,      // records that disagreed with another record of the same base
     kStatLastJobs,           // the last frame's job count (not a counter)
     kStatLastEntities,       // the last frame's entity count (not a counter)
+    kStatFailPrevRows,       // the job's previous rows run past the previous palette buffer
     kStatWords = 24
 };
 enum MismatchBits : uint32_t {
@@ -413,6 +418,7 @@ inline JoinResult cpuJoin(const Plan& plan, const std::vector<JobRow>& jobs, con
             if (j >= prefix) { ++s[kStatFailPrefix]; continue; }
             prevDst = prevJobs[j].dst;
         }
+        if (prevDst < kMaxRows && uint64_t(prevDst) + jb.count > plan.prevRows) { ++s[kStatFailPrevRows]; continue; }
         if (prevDst == 0 || prevDst >= kMaxRows || prevPoseW0[prevDst] != prevDst) { ++s[kStatFailPose]; continue; }
         r.join[jb.dst] = prevDst;
         ++s[kStatJoined];
@@ -433,11 +439,11 @@ inline std::string joinLine(const uint32_t (&d)[kStatWords], const WindowCpu& c,
     char b[1024];
     std::snprintf(b, sizeof(b),
         "skin join: source=%s hook=%s frames=%u (hook %u, prefix %u, no history %u) jobs=%u joined=%u failed: new-entity %u, range %u, layout %u, "
-        "prefix %u, pose %u, cap %u, dup-base %u | hook/t0 disagreements %u (causes 0x%x), unverified-previous %u | offered %llu, declined "
+        "prefix %u, pose %u, cap %u, dup-base %u, prev-rows %u | hook/t0 disagreements %u (causes 0x%x), unverified-previous %u | offered %llu, declined "
         "[%s %llu, %s %llu, %s %llu, %s %llu, %s %llu, %s %llu], threads same %llu other %llu | history [%s %llu, %s %llu, %s %llu, %s %llu, %s %llu] | "
         "pose records %u conflicts %u | last frame: %u jobs, %u entities",
         source, hookArmed ? hookState : "off", frames, d[kStatHookUsed], d[kStatPrefixUsed], d[kStatNoHistory], d[kStatJobs], d[kStatJoined],
-        d[kStatFailNoPrevEntity], d[kStatFailRange], d[kStatFailLayout], d[kStatFailPrefix], d[kStatFailPose], d[kStatFailCap], d[kStatDupBase],
+        d[kStatFailNoPrevEntity], d[kStatFailRange], d[kStatFailLayout], d[kStatFailPrefix], d[kStatFailPose], d[kStatFailCap], d[kStatDupBase], d[kStatFailPrevRows],
         d[kStatHookDisagree], d[kStatMismatchBits], d[kStatPrevNotVerified], (unsigned long long)c.offered,
         declineName(kDeclineNoHistory), (unsigned long long)c.decline[kDeclineNoHistory], declineName(kDeclineNoSnapshot), (unsigned long long)c.decline[kDeclineNoSnapshot],
         declineName(kDeclineStale), (unsigned long long)c.decline[kDeclineStale], declineName(kDeclineGap), (unsigned long long)c.decline[kDeclineGap],

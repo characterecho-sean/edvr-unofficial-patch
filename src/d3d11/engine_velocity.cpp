@@ -1802,7 +1802,9 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     // still bound (the game has not set another since). F2: with target 7 bound too, the derived state also says whether THIS draw
     // writes it (a skinned pair's pixel shader that exports E) or not (any other draw of the pass, which would leave undefined values
     // there): when only that changed under a derived state still bound, it is derived again from the game's own state it kept.
-    const int skinMode = skinDraw && e.skinBound ? (exportsE ? 2 : 1) : 0;
+    // Every other substituted draw of the pass (a rigid family's, or a skinned family's pixel shader that exports no E) turns target 7's writes off:
+    // it would otherwise leave undefined values there, and pay the bandwidth of writing them.
+    const int skinMode = e.skinBound ? (exportsE ? 2 : 1) : 0;
     const bool derivedBound = g_bound.derivedBlend && bindingGeneration(BindSlot::Blend) == g_bound.blendGen;
     if (!derivedBound || g_bound.skinMode != skinMode) {
         Ptr<ID3D11BlendState> game;
@@ -1994,7 +1996,7 @@ void skinSummaryLocked(ID3D11DeviceContext* ctx) {
                     u(g_skinStats.draws), u(g_skinStats.drawsOff), u(g_skinStats.eyeFrames), u(g_skinStats.slotTaken), u(g_skinStats.notLive),
                     u(g_skinStats.vsCreateFailed), u(g_skinStats.composeJoined), u(g_skinStats.composeMasked), medText, p99Text,
                     u(g_skinStats.viewsGiven), u(g_skinStats.viewsLive));
-    Log::get().note("skin join: hook %s: calls %llu, lists usable %llu (faulted %llu, overflowed %llu, implausible %llu, other %llu), node changes %llu, "
+    Log::get().note("skin join: hook window: %s, calls %llu, lists usable %llu (faulted %llu, overflowed %llu, implausible %llu, other %llu), node changes %llu, "
                     "threads %u (first %u, last %u; the chain dispatch runs on %u), last list %u entries to row %u%s%s.",
                     hookState, u(hook.calls), u(hook.usable), u(hook.faulted), u(hook.overflowed), u(hook.implausible), u(hook.otherUnusable),
                     u(hook.nodeChanges), hook.threads, hook.firstTid, hook.lastTid, static_cast<unsigned>(GetCurrentThreadId()), hook.lastEntries, hook.lastEnd,

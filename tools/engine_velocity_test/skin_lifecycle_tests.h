@@ -1,0 +1,605 @@
+#pragma once
+// skin_lifecycle_tests: the engine's draw half (the linked engine_velocity.cpp) with the second skin live, end to end on WARP. A skinned character is
+// drawn in both eyes through the REAL path -- the game's palette chain is told about (a job table at t0, a palette at u0, the chain dispatch hook's
+// call), the pool is written and torn the way the game's Map tees report it, the patched vertex and pixel shaders are made and bound, target 7 is
+// created, cleared, bound and read back through the view the compose gets. Nothing here is a model of the engine: the engine runs. Cases (every
+// check carries a label "L<case>.<what>"; tools\skin_engine_test\mutants.py names the case that must catch each mutation):
+//   L1  arming: configure arms the second skin (the hook asked once, its gate opened), and before any frame nothing is bound
+//   L2  the first frame has no history: the drawn pixels carry valid 0 and E 0, never a stale answer; target 7 is zero outside the drawn pixels
+//   L3  a steady second frame (the prefix join, the hook stood down): E is EXACTLY zero and valid 1 at every drawn pixel, in both eyes
+//   L4  the character moves: E = 100 x (previous - current position) in centimetres
+//   L5  the job table changes shape: no history for that frame, then the next frame has it again
+//   L6  what the draw binds and what is put back: target 7 and the three views while the patched pair draws, the blend state's mask for target 7
+//       (all four channels for the pair that exports E, none for a skinned family's other pixel shader and for a rigid family), and nothing left
+//       bound at the frame boundary; a game that binds its own target 7 keeps it
+//   L7  the hook's list as the identity (the stubbed hook hands the join the entry list): the same frames join by the hook, a list that disagrees
+//       with the job table falls back to the prefix and says so
+//   L8  the periodic lines: the join's counters read back from the GPU, the second-skin line, the hook's line
+//   L9  a previous palette buffer too small to hold a job's previous rows: no history for those jobs, with no list at all
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "lifecycle_tests.h"
+#include "skin_clone_tests.h"
+#include "../skin_clone_test/synthetic_skin.h"
+#include "../skin_join_test/skin_join_world.h"
+
+namespace skin_lifecycle_tests {
+using Microsoft::WRL::ComPtr;
+namespace lt = lifecycle_tests;
+namespace sct = skin_clone_tests;
+namespace sjw = skin_join_world;
+
+constexpr uint64_t kPairVs = 0xD99AFDC250D19A3Full, kPairPs = 0xE86271E464CCDC1Dull;    // a skinned family and its E-exporting pixel shader
+constexpr uint64_t kPlainVs = 0x61AE8EB05FDC18DDull, kPlainPs = 0xFC43E42710010343ull;  // another skinned family, a pixel shader that exports no E
+
+inline float halfToFloat(uint16_t v) {
+    const uint32_t sign = (v >> 15) & 1u, exp = (v >> 10) & 31u, mant = v & 1023u;
+    float out;
+    if (exp == 0) out = std::ldexp(float(mant), -24);
+    else if (exp == 31) out = mant ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+    else out = std::ldexp(float(mant + 1024u), int(exp) - 25);
+    return sign ? -out : out;
+}
+
+// What the draw bound, read from the context between the engine's call and the game's draw.
+struct Seen {
+    bool rt7 = false;               // target 7 is bound
+    bool rt7IsOurs = false;
+    UINT blend7 = 99, blend6 = 99;  // the derived blend state's write masks for targets 7 and 6
+    bool vsPatched = false;
+    bool srv[3] = {};               // t108 t109 t110 bound
+    bool derived = false;
+};
+
+struct Fixture {
+    const lt::Harness& h;
+    lt::Game& g;
+    ID3D11Device* dev;
+    ID3D11DeviceContext* ctx;
+    ComPtr<ID3D11VertexShader> vsPair, vsPlain;
+    ComPtr<ID3D11PixelShader> psPair, psPlain;
+    ComPtr<ID3D11InputLayout> layout;
+    ComPtr<ID3D11Buffer> verts, instances, jobs, palette[2];
+    ComPtr<ID3D11ShaderResourceView> jobsSrv, paletteSrv[2];
+    ComPtr<ID3D11UnorderedAccessView> paletteUav[2];
+    sct::Vertex tri[3];
+    sct::State state;
+    uint32_t slot = 5, bones = 3, base = 1;
+    unsigned count = 0;                  // frames drawn
+    std::vector<float> rows[2];
+    sjw::Built built;                    // the world the job table and the hook's list come from
+    uint64_t hookSeq = 0;
+    bool useHookList = false;
+    uint32_t paletteRows = 64;
+    Seen seen;
+
+    Fixture(const lt::Harness& harness, lt::Game& game) : h(harness), g(game), dev(harness.device), ctx(harness.context) {}
+
+    ComPtr<ID3D11Buffer> structured(const void* data, UINT stride, UINT count_, UINT bind) {
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = stride * count_; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = bind;
+        d.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; d.StructureByteStride = stride;
+        D3D11_SUBRESOURCE_DATA init{data, 0, 0};
+        ComPtr<ID3D11Buffer> b;
+        h.check(SUCCEEDED(dev->CreateBuffer(&d, data ? &init : nullptr, &b)), "L: a structured buffer");
+        return b;
+    }
+
+    bool setup() {
+        const lt::Harness& hh = h;
+        const shader_tests::Harness sh{dev, ctx, hh.check};
+        const auto vsCode = shader_tests::compile(sh, skin_clone_synthetic::vertexSource(false), "vs_5_0");
+        const auto psCode = shader_tests::compile(sh, skin_clone_synthetic::pixelSource(), "ps_5_0");
+        if (!vsCode || !psCode) return false;
+        h.check(SUCCEEDED(dev->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), nullptr, &vsPair)) &&
+                SUCCEEDED(dev->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), nullptr, &vsPlain)) &&
+                SUCCEEDED(dev->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), nullptr, &psPair)) &&
+                SUCCEEDED(dev->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), nullptr, &psPlain)), "L: the skinned shaders create");
+        // device_hook's creation tees
+        edvr::engineVelocityRememberVs(vsPair.Get(), kPairVs, vsCode->GetBufferPointer(), vsCode->GetBufferSize(), false);
+        edvr::engineVelocityRememberVs(vsPlain.Get(), kPlainVs, vsCode->GetBufferPointer(), vsCode->GetBufferSize(), false);
+        edvr::engineVelocityRememberPs(psPair.Get(), kPairPs, psCode->GetBufferPointer(), psCode->GetBufferSize(), false);
+        edvr::engineVelocityRememberPs(psPlain.Get(), kPlainPs, psCode->GetBufferPointer(), psCode->GetBufferSize(), false);
+        const D3D11_INPUT_ELEMENT_DESC elements[] = {
+            {"INSTANCEANDMODELDATAINDEX", 0, DXGI_FORMAT_R32G32_UINT, 1, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+            {"PACKEDVERTEXDATAA", 0, DXGI_FORMAT_R32G32B32A32_UINT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"PACKEDVERTEXDATAB", 0, DXGI_FORMAT_R32G32B32A32_UINT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"PACKEDVERTEXDATAC", 0, DXGI_FORMAT_R32G32B32A32_UINT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        };
+        h.check(SUCCEEDED(dev->CreateInputLayout(elements, 4, vsCode->GetBufferPointer(), vsCode->GetBufferSize(), &layout)), "L: the skinned input layout");
+        sct::Rng rng(31);
+        sct::makeVertices(rng, bones, tri);
+        state = sct::makeState(rng, bones, base);
+        D3D11_BUFFER_DESC vd{};
+        vd.ByteWidth = sizeof(tri); vd.Usage = D3D11_USAGE_DEFAULT; vd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA vinit{tri, 0, 0};
+        h.check(SUCCEEDED(dev->CreateBuffer(&vd, &vinit, &verts)), "L: the vertices");
+        const uint32_t instance[2] = {slot, 0};
+        vd.ByteWidth = sizeof(instance);
+        D3D11_SUBRESOURCE_DATA iinit{instance, 0, 0};
+        h.check(SUCCEEDED(dev->CreateBuffer(&vd, &iinit, &instances)), "L: the instance");
+        jobs = structured(nullptr, 16, 8, D3D11_BIND_SHADER_RESOURCE);
+        h.check(SUCCEEDED(dev->CreateShaderResourceView(jobs.Get(), nullptr, &jobsSrv)), "L: the job table's view");
+        for (int i = 0; i < 2; ++i) {
+            palette[i] = structured(nullptr, 48, paletteRows, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+            h.check(SUCCEEDED(dev->CreateShaderResourceView(palette[i].Get(), nullptr, &paletteSrv[i])) &&
+                    SUCCEEDED(dev->CreateUnorderedAccessView(palette[i].Get(), nullptr, &paletteUav[i])), "L: a palette buffer's views");
+        }
+        for (int eye = 0; eye < 2; ++eye) rows[eye].assign(lt::kSceneFloats, 0.0f);
+        setWorld(bones);
+        return true;
+    }
+
+    // The world the chain and the hook describe: one character (one entity, one job of `n` bones).
+    void setWorld(uint32_t n) {
+        bones = n;
+        sjw::World w;
+        w.push_back(sjw::Ent{900, 0xA11CE, 0, {{77, n}}});
+        built = sjw::build(w, 1);
+        base = built.jobs.front().dst;
+    }
+
+    void writeSceneRows() {
+        for (int eye = 0; eye < 2; ++eye) {
+            auto& r = rows[eye];
+            std::fill(r.begin(), r.end(), 0.0f);
+            r[270 * 4 + 0] = 0.4f;
+            r[271 * 4 + 1] = 0.4f;
+            r[273 * 4 + 2] = 0.5f;
+            r[273 * 4 + 3] = 1.0f;
+            r[273 * 4 + 0] = eye ? 0.01f : 0.0f;   // the eyes' own offsets
+            std::memcpy(&r[275 * 4], state.pos, 12);
+        }
+    }
+
+    // The game's palette chain for this frame: the palette written into one of its two buffers, the job table at t0, the chain's dispatch.
+    void chain(unsigned frameIndex) {
+        const unsigned k = frameIndex & 1u;
+        std::vector<float> cur(size_t(paletteRows) * 12, 0.0f);
+        for (size_t i = 0; i < state.rows.size() && size_t(base) * 12 + i < cur.size(); ++i) cur[size_t(base) * 12 + i] = state.rows[i];   // (rows past the buffer are the game's to lose)
+        ctx->UpdateSubresource(palette[k].Get(), 0, nullptr, cur.data(), 0, 0);
+        std::vector<sjw::JobRow> table = built.jobs;
+        table.resize(8);
+        ctx->UpdateSubresource(jobs.Get(), 0, nullptr, table.data(), 0, 0);
+        ID3D11ShaderResourceView* t0 = jobsSrv.Get();
+        ctx->CSSetShaderResources(0, 1, &t0);
+        ID3D11UnorderedAccessView* u0 = paletteUav[k].Get();
+        ctx->CSSetUnorderedAccessViews(0, 1, &u0, nullptr);
+        edvr::engineVelocityNoteChainDispatch(ctx, uint32_t(built.jobs.size()));
+        ID3D11ShaderResourceView* none = nullptr;
+        ctx->CSSetShaderResources(0, 1, &none);
+        ID3D11UnorderedAccessView* noUav = nullptr;
+        ctx->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+    }
+
+    // The triangle at `scale` of its size (the pixels it covered before are no longer drawn: target 7 must be zero there again).
+    void setTriangleScale(float scale) {
+        static const int px[3] = {-700, 700, 0}, py[3] = {-700, -700, 700};
+        for (int k = 0; k < 3; ++k) {
+            const uint32_t x = uint32_t((px[k] * scale + 1000) * 65535 / 2000), y = uint32_t((py[k] * scale + 1000) * 65535 / 2000);
+            tri[k].a[0] = x | (y << 16);
+        }
+        ctx->UpdateSubresource(verts.Get(), 0, nullptr, tri, 0, 0);
+    }
+
+    void writePool() {
+        uint8_t rec[336];
+        sct::writeRecord(state, 99u, rec);
+        std::memcpy(g.pool[slot].words, rec, 336);
+        g.writePool(g.poolA.Get(), D3D11_MAP_WRITE_DISCARD);
+    }
+
+    // One eye's pass with the skinned pair (or the plain skinned family): the game's state, the engine's call, what it bound, the draw.
+    void pass(int eye, bool pair = true, bool observe = false) {
+        g.setTargets(eye);
+        ctx->OMSetDepthStencilState(g.depthState.Get(), 0);
+        D3D11_VIEWPORT vp{0, 0, float(lt::kW), float(lt::kH), 0, 1};
+        ctx->RSSetViewports(1, &vp);
+        ctx->RSSetState(g.raster.Get());
+        ctx->IASetInputLayout(layout.Get());
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D11Buffer* vbs[2] = {verts.Get(), instances.Get()};
+        UINT strides[2] = {sizeof(sct::Vertex), 8}, offsets[2] = {0, 0};
+        ctx->IASetVertexBuffers(0, 2, vbs, strides, offsets);
+        ID3D11ShaderResourceView* t38 = paletteSrv[count & 1u].Get();
+        ctx->VSSetShaderResources(38, 1, &t38);
+        if (pair) { g.setVs(vsPair.Get(), kPairVs); g.setPs(psPair.Get(), kPairPs); }
+        else { g.setVs(vsPlain.Get(), kPlainVs); g.setPs(psPlain.Get(), kPlainPs); }
+        edvr::engineVelocityBeforeDraw(ctx, true);
+        if (observe) look();
+        ctx->DrawInstanced(3, 1, 0, 0);
+    }
+
+    // What the engine bound for the draw about to be issued.
+    void look() {
+        seen = Seen{};
+        ID3D11RenderTargetView* rt[8] = {};
+        ComPtr<ID3D11DepthStencilView> dsv;
+        ctx->OMGetRenderTargets(8, rt, &dsv);
+        seen.rt7 = rt[7] != nullptr;
+        for (auto* r : rt) if (r) r->Release();
+        ComPtr<ID3D11BlendState> bs;
+        float f[4];
+        UINT mask;
+        ctx->OMGetBlendState(&bs, f, &mask);
+        if (bs) {
+            D3D11_BLEND_DESC d{};
+            bs->GetDesc(&d);
+            seen.blend7 = d.RenderTarget[7].RenderTargetWriteMask;
+            seen.blend6 = d.RenderTarget[6].RenderTargetWriteMask;
+            seen.derived = d.IndependentBlendEnable != FALSE;
+        }
+        ComPtr<ID3D11VertexShader> vs;
+        ctx->VSGetShader(&vs, nullptr, nullptr);
+        seen.vsPatched = vs && vs.Get() != vsPair.Get() && vs.Get() != vsPlain.Get();
+        ID3D11ShaderResourceView* srv[3] = {};
+        ctx->VSGetShaderResources(108, 3, srv);
+        for (int i = 0; i < 3; ++i) { seen.srv[i] = srv[i] != nullptr; if (srv[i]) srv[i]->Release(); }
+    }
+
+    // A whole frame: the chain, the pool, the scene rows, both eyes; the hook's list when asked; then `after` before the boundary.
+    template <class After> void frame(bool pair, After after, bool summary = false, bool observe = true) {
+        g.beginFrame();
+        writeSceneRows();
+        chain(count);
+        if (useHookList) {
+            sjw::Built b = built;
+            b.snap.seq = ++hookSeq;
+            hookSnapshot = b.snap;
+            lifecycle_fake::g_hookSnap = &hookSnapshot;
+        } else {
+            lifecycle_fake::g_hookSnap = nullptr;
+        }
+        writePool();
+        g.writeScene(g.sceneA.Get(), rows[0]);
+        pass(0, pair, observe);
+        g.writeScene(g.sceneA.Get(), rows[1]);
+        pass(1, pair, false);
+        after();
+        g.endFrame(summary);
+        ctx->Flush();   // (a present would: the counters' staging copies finish)
+        ++count;
+    }
+    template <class After> void frame(After after) { frame(true, after); }
+    edvr::skinjoin::Snapshot hookSnapshot;
+
+    // Target 7 of `eye` as the compose gets it (null view: nothing was written this frame), as floats, and the drawn pixels from the eye's depth.
+    struct Eye { bool given = false; std::vector<float> e; std::vector<float> depth; UINT w = 0; };
+    Eye read(int eye) {
+        Eye out;
+        ID3D11ShaderResourceView* view = edvr::engineVelocitySkinView(eye, g.depth[eye].Get());
+        out.given = view != nullptr;
+        if (!view) return out;
+        ComPtr<ID3D11Resource> res;
+        view->GetResource(&res);
+        view->Release();
+        ComPtr<ID3D11Texture2D> tex;
+        res.As(&tex);
+        D3D11_TEXTURE2D_DESC d{};
+        tex->GetDesc(&d);
+        h.check(d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT, "L: target 7 is R16G16B16A16_FLOAT");
+        d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ; d.MiscFlags = 0;
+        ComPtr<ID3D11Texture2D> staging;
+        h.check(SUCCEEDED(dev->CreateTexture2D(&d, nullptr, &staging)), "L: a staging texture for target 7");
+        ctx->CopyResource(staging.Get(), tex.Get());
+        D3D11_MAPPED_SUBRESOURCE m{};
+        h.check(SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)), "L: map target 7");
+        out.w = d.Width;
+        out.e.resize(size_t(d.Width) * d.Height * 4);
+        for (UINT y = 0; y < d.Height; ++y) {
+            const uint16_t* row = reinterpret_cast<const uint16_t*>(static_cast<const BYTE*>(m.pData) + y * m.RowPitch);
+            for (UINT x = 0; x < d.Width * 4; ++x) out.e[size_t(y) * d.Width * 4 + x] = halfToFloat(row[x]);
+        }
+        ctx->Unmap(staging.Get(), 0);
+        UINT dw = 0;
+        out.depth = lt::readTexture(h, g.depth[eye].Get(), 1, &dw);
+        return out;
+    }
+};
+
+// Over the drawn pixels: how many, how many carry valid 1, and the worst deviation of E from `expect` (cm).
+struct Judged { unsigned drawn = 0, valid = 0, invalid = 0; double worst = 0.0; double outside = 0.0; };
+inline Judged judge(const Fixture::Eye& eye, const float (&expect)[3]) {
+    Judged j;
+    for (size_t p = 0; p < eye.depth.size(); ++p) {
+        const float* e = &eye.e[p * 4];
+        if (!(eye.depth[p] > 0.0f)) {
+            j.outside = std::max<double>(j.outside, std::max({std::fabs(double(e[0])), std::fabs(double(e[1])), std::fabs(double(e[2])), std::fabs(double(e[3]))}));
+            continue;
+        }
+        ++j.drawn;
+        if (e[3] > 0.99f && e[3] < 1.01f) ++j.valid;
+        else if (e[3] == 0.0f) ++j.invalid;
+        for (int c = 0; c < 3; ++c) j.worst = std::max(j.worst, std::fabs(double(e[c]) - double(expect[c])));
+    }
+    return j;
+}
+
+// The first line since `from` that starts with prefix (the first window holds the counters; a later one with no new read-back reports zeros).
+inline std::string firstLine(const char* prefix, size_t from) {
+    for (size_t i = from; i < lt::g_log.size(); ++i)
+        if (lt::g_log[i].rfind(prefix, 0) == 0) return lt::g_log[i];
+    return {};
+}
+
+inline void run(const lt::Harness& h) {
+    edvr::g_clockForTest = &lifecycle_fake::fakeClock;
+    const size_t mark = lt::g_log.size();
+    lifecycle_fake::g_hookSnap = nullptr;
+    lifecycle_fake::g_hookArmed = false;
+    lifecycle_fake::g_hookArms = 0;
+    lt::Game g(h);
+    g.setup();
+    edvr::engineVelocityConfigure(true);
+    Fixture f(h, g);
+    if (!f.setup()) return;
+    const float zero[3] = {0, 0, 0};
+
+    // L1
+    h.check(lt::logged("skin join: the second skin is live (VR)", mark), "L1.a configure says the second skin is live");
+    h.check(lifecycle_fake::g_hookArms == 1 && lifecycle_fake::g_hookGate, "L1.b the hook is asked to arm once and its gate is opened");
+    h.check(lt::logged("skin join: the hook stood down", mark) || lt::logged("skin join: rig: the entity hook is not linked", mark), "L1.c the stand-down of the hook is said, with its reason");
+    h.check(edvr::engineVelocitySkinWanted(), "L1.d the chain dispatch hook is told to feed the join");
+
+    // L2: the first frame
+    Fixture::Eye first0, first1;
+    f.frame([&] { first0 = f.read(0); first1 = f.read(1); });
+    h.check(f.seen.rt7 && f.seen.vsPatched, "L6.a the first skinned draw has target 7 bound and its patched vertex shader");
+    h.check(first0.given && first1.given, "L2.a both eyes give the compose a target-7 view after a frame that wrote E");
+    {
+        const Judged a = judge(first0, zero), b = judge(first1, zero);
+        h.check(a.drawn > 20 && b.drawn > 20, "L2.b the triangle is drawn in both eyes");
+        h.check(a.valid == 0 && b.valid == 0 && a.worst == 0.0 && b.worst == 0.0, "L2.c with no history every drawn pixel carries valid 0 and E 0 (no stale answer)");
+        h.check(a.outside == 0.0 && b.outside == 0.0, "L2.d target 7 is zero where nothing was drawn (cleared with the eye-frame)");
+    }
+
+    // L3: a steady second frame, the prefix join
+    Fixture::Eye steady0, steady1;
+    f.frame([&] { steady0 = f.read(0); steady1 = f.read(1); });
+    {
+        const Judged a = judge(steady0, zero), b = judge(steady1, zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && b.valid == b.drawn, "L3.a a steady frame: valid 1 at every drawn pixel in both eyes");
+        h.check(a.worst == 0.0 && b.worst == 0.0, "L3.b and E is exactly zero (previous state = current state through the whole engine path)");
+        h.check(a.outside == 0.0, "L3.c and still zero outside the drawn pixels");
+    }
+    // a smaller triangle: the pixels the larger one wrote are zero again (target 7 is cleared with every eye-frame)
+    {
+        f.setTriangleScale(0.5f);
+        Fixture::Eye smaller0;
+        f.frame([&] { smaller0 = f.read(0); });
+        f.setTriangleScale(1.0f);
+        const Judged a = judge(smaller0, zero), larger = judge(steady0, zero);
+        h.check(a.drawn > 5 && a.drawn < larger.drawn && a.valid == a.drawn && a.outside == 0.0, "L3.d a smaller triangle: its pixels are valid and the pixels the larger one wrote are zero again (cleared per eye-frame)");
+    }
+    // the compose's view counts: a frame with no exporting draw gives none
+    {
+        f.frame(false, [&] { const auto e0 = f.read(0); h.check(!e0.given, "L6.b a skinned family's other pixel shader writes no E: the compose is given no target-7 view"); });
+    }
+
+    // L4: the character moves 0.15 m, -0.1 m, 0.05 m between frames
+    f.frame([&] {});
+    sct::State was = f.state;
+    for (int c = 0; c < 3; ++c) f.state.pos[c] += (c == 0 ? 0.15f : c == 1 ? -0.1f : 0.05f);
+    Fixture::Eye moved0, moved1;
+    f.frame([&] { moved0 = f.read(0); moved1 = f.read(1); });
+    {
+        const float expect[3] = {100.0f * (was.pos[0] - f.state.pos[0]), 100.0f * (was.pos[1] - f.state.pos[1]), 100.0f * (was.pos[2] - f.state.pos[2])};
+        const Judged a = judge(moved0, expect), b = judge(moved1, expect);
+        if (a.worst > 0.1) std::fprintf(stderr, "  L4: worst deviation %.4f cm from (%.2f %.2f %.2f)\n", a.worst, expect[0], expect[1], expect[2]);
+        h.check(a.drawn > 20 && a.valid == a.drawn && b.valid == b.drawn, "L4.a a moving character is valid in both eyes");
+        h.check(a.worst <= 0.1 && b.worst <= 0.1, "L4.b E = 100 x (previous - current position), within half-float rounding");
+        h.check(std::fabs(expect[0]) > 10.0, "L4.c (and the move was large enough to tell from zero)");
+    }
+    f.frame([&] {});   // the move is over: steady again
+
+    // L5: the job table changes shape (the character gains a bone: its job count differs from last frame's)
+    f.setWorld(4);
+    {
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 4, scratch);
+        f.state = sct::makeState(rng, 4, f.base);
+    }
+    Fixture::Eye changed0;
+    f.frame([&] { changed0 = f.read(0); });
+    {
+        const Judged a = judge(changed0, zero);
+        h.check(a.drawn > 20 && a.valid == 0 && a.worst == 0.0, "L5.a a job whose bone count changed has no history for that frame (valid 0, E 0)");
+    }
+    Fixture::Eye again0;
+    f.frame([&] {});
+    f.frame([&] { again0 = f.read(0); });
+    {
+        const Judged a = judge(again0, zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L5.b and two frames on the character has history again");
+    }
+
+    // L6: what is bound for the draws, and put back
+    {
+        f.frame(true, [&] {}, false, true);
+        const Seen pair = f.seen;
+        h.check(pair.rt7 && pair.vsPatched && pair.srv[0] && pair.srv[1] && pair.srv[2], "L6.c the E-exporting pair draws with target 7 bound, the patched vertex shader, and the previous palette, join and pose views");
+        h.check(pair.derived && pair.blend7 == D3D11_COLOR_WRITE_ENABLE_ALL && pair.blend6 == (D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN),
+                "L6.d its derived blend state writes target 7's four channels and target 6's R and G");
+        f.frame(false, [&] {}, false, true);
+        const Seen plain = f.seen;
+        h.check(plain.rt7 && plain.vsPatched && plain.derived && plain.blend7 == 0, "L6.e a skinned family's other pixel shader draws with target 7 write-masked off");
+        // a rigid family's draw: target 7 bound for the eye, its writes off
+        g.beginFrame();
+        f.writeSceneRows();
+        g.writeScene(g.sceneA.Get(), f.rows[0]);
+        g.pass(0);
+        f.look();
+        h.check(f.seen.derived && f.seen.blend7 == 0, "L6.f a rigid family's substituted draw leaves target 7 alone (write mask 0)");
+        g.endFrame();
+        // after the frame boundary the game's own state is back: no target 7, no skin views
+        ComPtr<ID3D11RenderTargetView> rt[8];
+        ID3D11RenderTargetView* raw[8] = {};
+        h.context->OMGetRenderTargets(8, raw, nullptr);
+        for (int i = 0; i < 8; ++i) rt[i].Attach(raw[i]);
+        ID3D11ShaderResourceView* srv[3] = {};
+        h.context->VSGetShaderResources(108, 3, srv);
+        bool none = true;
+        for (auto* s : srv) { none = none && s == nullptr; if (s) s->Release(); }
+        ComPtr<ID3D11BlendState> bs;
+        float bf[4];
+        UINT bm;
+        h.context->OMGetBlendState(&bs, bf, &bm);
+        ComPtr<ID3D11VertexShader> vsNow;
+        h.context->VSGetShader(&vsNow, nullptr, nullptr);
+        h.check(none && !bs && vsNow.Get() == g.vs.Get(), "L6.g at the frame boundary the three skin views are let go and the game's blend state and vertex shader are back");
+    }
+    // a game that binds its own target 7 keeps it
+    {
+        f.frame([&] {});   // a normal frame first so the eye is set up
+        g.beginFrame();
+        f.writeSceneRows();
+        f.chain(f.count);
+        f.writePool();
+        g.writeScene(g.sceneA.Get(), f.rows[0]);
+        ComPtr<ID3D11Texture2D> gameTarget;
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = lt::kW; td.Height = lt::kH; td.MipLevels = 1; td.ArraySize = 1; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        ComPtr<ID3D11RenderTargetView> gameRtv;
+        h.check(SUCCEEDED(h.device->CreateTexture2D(&td, nullptr, &gameTarget)) && SUCCEEDED(h.device->CreateRenderTargetView(gameTarget.Get(), nullptr, &gameRtv)), "L: a target of the game's own");
+        ID3D11RenderTargetView* r[8] = {g.rtv[0][0].Get(), g.rtv[0][1].Get(), g.rtv[0][2].Get(), g.rtv[0][3].Get(), nullptr, nullptr, nullptr, gameRtv.Get()};
+        h.context->OMSetRenderTargets(8, r, g.dsv[0].Get());
+        lifecycle_fake::g_slots[static_cast<unsigned>(edvr::BindSlot::Rtv0)].ptr = r[0];
+        ++lifecycle_fake::g_slots[static_cast<unsigned>(edvr::BindSlot::Rtv0)].gen;
+        lifecycle_fake::g_slots[static_cast<unsigned>(edvr::BindSlot::Dsv0)].ptr = g.dsv[0].Get();
+        ++lifecycle_fake::g_slots[static_cast<unsigned>(edvr::BindSlot::Dsv0)].gen;
+        h.context->OMSetDepthStencilState(g.depthState.Get(), 0);
+        D3D11_VIEWPORT vp{0, 0, float(lt::kW), float(lt::kH), 0, 1};
+        h.context->RSSetViewports(1, &vp);
+        h.context->RSSetState(g.raster.Get());
+        h.context->IASetInputLayout(f.layout.Get());
+        h.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D11Buffer* vbs[2] = {f.verts.Get(), f.instances.Get()};
+        UINT strides[2] = {sizeof(sct::Vertex), 8}, offsets[2] = {0, 0};
+        h.context->IASetVertexBuffers(0, 2, vbs, strides, offsets);
+        ID3D11ShaderResourceView* t38 = f.paletteSrv[f.count & 1u].Get();
+        h.context->VSSetShaderResources(38, 1, &t38);
+        g.setVs(f.vsPair.Get(), kPairVs);
+        g.setPs(f.psPair.Get(), kPairPs);
+        edvr::engineVelocityBeforeDraw(h.context, true);
+        ID3D11RenderTargetView* now[8] = {};
+        h.context->OMGetRenderTargets(8, now, nullptr);
+        const bool kept = now[7] == gameRtv.Get();
+        for (auto* x : now) if (x) x->Release();
+        h.check(kept, "L6.h a game that binds its own target 7 keeps it: the engine does not replace it");
+        h.context->DrawInstanced(3, 1, 0, 0);
+        g.endFrame();
+        ++f.count;
+    }
+
+    // L7: the hook's list as the identity
+    lifecycle_fake::g_hookArmed = true;
+    f.useHookList = true;
+    f.setWorld(3);
+    {
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 3, scratch);
+        f.state = sct::makeState(rng, 3, f.base);
+    }
+    for (int i = 0; i < 3; ++i) f.frame([&] {});
+    Fixture::Eye hooked0;
+    f.frame([&] { hooked0 = f.read(0); });
+    {
+        const Judged a = judge(hooked0, zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L7.a with the hook's list the steady frames join: valid 1, E exactly zero");
+    }
+    // the table disagrees with the (well formed) list: the GPU finds it, the frame uses the prefix join (which sees a job whose bone count changed:
+    // no history) and the counters say so (L8 reads them)
+    {
+        const sjw::Built keep = f.built;
+        f.built.jobs[0].count -= 1;
+        Fixture::Eye fallback0;
+        f.frame([&] { fallback0 = f.read(0); });
+        f.built = keep;
+        const Judged a = judge(fallback0, zero);
+        h.check(a.drawn > 20 && a.valid == 0, "L7.b a job table that disagrees with the hook's list is not joined by the list: that frame has no history (the prefix saw the table change)");
+    }
+    for (int i = 0; i < 3; ++i) f.frame([&] {});
+    Fixture::Eye recovered0;
+    f.frame([&] { recovered0 = f.read(0); });
+    {
+        const Judged a = judge(recovered0, zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L7.c and the frames after it join by the hook again");
+    }
+
+    // L8: the periodic lines (the counters come back from the GPU after 120 chain frames, never waited for; the summary is due every 30 s)
+    // (WARP runs behind the CPU: each frame reads target 7 back, which waits for everything queued, the counters' staging copy included)
+    while (f.count < 128) f.frame(true, [&] { f.read(0); }, false, false);
+    for (int i = 0; i < 3; ++i) f.frame(true, [&] { f.read(0); }, true, false);
+    {
+        const std::string join = firstLine("skin join: source=", mark);
+        h.check(!join.empty(), "L8.a the join line is logged once the first counters are read back");
+        h.check(join.find("hook=armed") != std::string::npos && lt::number(join, "frames=") >= 100 && lt::number(join, "joined=") > 0 && lt::number(join, "jobs=") > 0,
+                "L8.b it names the hook's state, the frames the join ran and the jobs it joined");
+        h.check(join.find("source=hook") != std::string::npos, "L8.c the source is the hook's list (with the prefix where the table disagreed)");
+        h.check(lt::number(join, "hook/t0 disagreements ") >= 1, "L8.d the disagreement of L7.b is counted");
+        const std::string second = firstLine("skin join: second skin this window:", mark);
+        h.check(!second.empty() && lt::number(second, "binds writing E ") > 0, "L8.e the second-skin line counts the binds that wrote E");
+        h.check(!firstLine("skin join: hook window:", mark).empty(), "L8.f the hook's line says what the hook saw in the window");
+        if (join.empty() || join.find("hook=armed") == std::string::npos || lt::number(join, "hook/t0 disagreements ") < 1)
+            std::fprintf(stderr, "  join line: %s\n", join.c_str());
+        if (join.empty())
+            for (size_t i = mark; i < lt::g_log.size(); ++i)
+                if (lt::g_log[i].rfind("skin join:", 0) == 0) std::fprintf(stderr, "  log: %.300s\n", lt::g_log[i].c_str());
+    }
+
+    // L9: a small previous palette buffer, no list: the job at a row near the end of the 64-row buffer
+    lifecycle_fake::g_hookSnap = nullptr;
+    f.useHookList = false;
+    lifecycle_fake::g_hookArmed = false;
+    {
+        sjw::World w;
+        w.push_back(sjw::Ent{901, 0xA11CE, 0, {{78, 37}}});
+        w.push_back(sjw::Ent{902, 0xA11CE, 0, {{79, 3}}});
+        f.built = sjw::build(w, 1);
+        f.bones = 3;
+        f.base = f.built.jobs[1].dst;   // 38: rows 38..40
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 3, scratch);
+        f.state = sct::makeState(rng, 3, f.base);
+    }
+    for (int i = 0; i < 3; ++i) f.frame([&] {});
+    Fixture::Eye fits0;
+    f.frame([&] { fits0 = f.read(0); });
+    h.check(judge(fits0, zero).valid == judge(fits0, zero).drawn && judge(fits0, zero).drawn > 20, "L9.a a job whose previous rows lie inside the previous palette buffer has history with no list at all");
+    {
+        // the same job, but the buffers are only 40 rows: row 40 (the job's third) is past their end
+        f.paletteRows = 40;
+        for (int i = 0; i < 2; ++i) {
+            f.palette[i] = f.structured(nullptr, 48, f.paletteRows, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
+            f.paletteSrv[i].Reset(); f.paletteUav[i].Reset();
+            h.device->CreateShaderResourceView(f.palette[i].Get(), nullptr, &f.paletteSrv[i]);
+            h.device->CreateUnorderedAccessView(f.palette[i].Get(), nullptr, &f.paletteUav[i]);
+        }
+        // (the character's third bone reads past the current buffer too -- zeros -- so the picture is a little smaller; the point of the case is the join)
+        for (int i = 0; i < 3; ++i) f.frame([&] {});
+        Fixture::Eye small0;
+        f.frame([&] { small0 = f.read(0); });
+        const Judged a = judge(small0, zero);
+        if (!(a.drawn > 20 && a.valid == 0)) std::fprintf(stderr, "  L9.b: drawn %u valid %u invalid %u worst %.3f\n", a.drawn, a.valid, a.invalid, a.worst);
+        h.check(a.drawn > 20 && a.valid == 0, "L9.b a job whose previous rows run past the previous palette buffer has no history, with no list");
+    }
+    std::printf("  skin lifecycle: %u frames through the engine, E exact in both eyes, the hook's list and the prefix, the guard on a small buffer\n", f.count);
+    edvr::engineVelocityShutdown();
+    h.context->ClearState();
+    lifecycle_fake::g_hookSnap = nullptr;
+    lifecycle_fake::g_hookArmed = false;
+}
+
+}  // namespace skin_lifecycle_tests

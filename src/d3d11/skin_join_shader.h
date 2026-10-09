@@ -46,6 +46,7 @@ constexpr char kSkinJoinCsHlsl[] = R"HLSL(
 #define SJ_STAT_POSE_CONFLICTS 18u
 #define SJ_STAT_LAST_JOBS 19u
 #define SJ_STAT_LAST_ENTITIES 20u
+#define SJ_STAT_FAIL_PREV_ROWS 21u
 #define SJ_STAT_WORDS 24u
 #define SJ_MM_NOT_IN_RANGE 1u
 #define SJ_MM_HEAD_COUNT 2u
@@ -86,7 +87,7 @@ uint EntityOf(uint dst, uint m) {
 
 [numthreads(256,1,1)]
 void join(uint tid : SV_GroupIndex) {
- const uint flags = PW(0u), m = PW(1u), prevM = PW(2u), endRow = PW(3u);
+ const uint flags = PW(0u), m = PW(1u), prevM = PW(2u), endRow = PW(3u), prevRows = PW(7u);
  const uint n = min(PW(5u), SJ_MAX_JOBS), prevN = min(PW(6u), SJ_MAX_JOBS);
  const bool history = (flags & SJ_PLAN_HISTORY) != 0u, offered = (flags & SJ_PLAN_HOOK) != 0u;
  const uint prevHookOk = Stats.Load(SJ_STAT_PREV_HOOK_OK * 4u);
@@ -160,7 +161,7 @@ void join(uint tid : SV_GroupIndex) {
  }
  AllMemoryBarrierWithGroupSync();
  // D: the join
- uint fNoPrev = 0u, fRange = 0u, fLayout = 0u, fPrefix = 0u, fPose = 0u, nJoined = 0u;
+ uint fNoPrev = 0u, fRange = 0u, fLayout = 0u, fPrefix = 0u, fPose = 0u, fPrevRows = 0u, nJoined = 0u;
  if (history) {
   [loop] for (uint jd = tid; jd < n; jd += 256u) {
    uint4 row = Jobs[jd];
@@ -180,6 +181,7 @@ void join(uint tid : SV_GroupIndex) {
     if (jd >= gPrefix) { fPrefix += 1u; continue; }
     prevDst = PrevJobs[jd].y;
    }
+   if (prevDst < SJ_MAX_ROWS && prevDst + row.w > prevRows) { fPrevRows += 1u; continue; }
    if (prevDst == 0u || prevDst >= SJ_MAX_ROWS || PrevPose[prevDst].a.x != prevDst) { fPose += 1u; continue; }
    JoinOut[row.y] = prevDst;
    nJoined += 1u;
@@ -192,6 +194,7 @@ void join(uint tid : SV_GroupIndex) {
   InterlockedAdd(gStat[SJ_STAT_FAIL_LAYOUT], fLayout, o);
   InterlockedAdd(gStat[SJ_STAT_FAIL_PREFIX], fPrefix, o);
   InterlockedAdd(gStat[SJ_STAT_FAIL_POSE], fPose, o);
+  InterlockedAdd(gStat[SJ_STAT_FAIL_PREV_ROWS], fPrevRows, o);
   InterlockedAdd(gStat[SJ_STAT_JOINED], nJoined, o);
  }
  AllMemoryBarrierWithGroupSync();

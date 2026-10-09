@@ -24,6 +24,9 @@ previous-minus-current motion XY, source depth Z, validity W (1 valid,
 ScreenMotion is RGBA16_FLOAT: previous-minus-current raster motion XY,
 source reversed Z, validity (0 outside, 1 valid, 2 source disocclusion,
 3 source UI requiring current reconstruction).
+SkinE (F2, the second skin; VR only) is RGBA16_FLOAT at the eye's depth size: the skinned characters' exact previous-minus-current position in
+CENTIMETRES (xyz), computed by the game's own skinning chain from last frame's palette and pose, and validity W (1 valid, 0 none: no history for that
+character this frame, or no skinned pixel). Where W is 0 xyz is exactly 0. analysis/npc_blur/f2/h1_skin_e.py checks a capture against that contract.
 UI-flags bit 32 means this map was supplied to temporal reconstruction.
 UI-flags bit 8192 means planet patch records (celestial motion) were bound
 for this eye's motion pass: decision path 12 in D can only appear then.

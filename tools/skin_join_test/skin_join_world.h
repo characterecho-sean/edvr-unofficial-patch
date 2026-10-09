@@ -60,6 +60,7 @@ struct Run {
     std::vector<uint32_t> prevPose = std::vector<uint32_t>(kMaxRows, 0);
     uint32_t prevHookOk = 0;
     uint32_t parity = 0;
+    uint32_t prevRows = kMaxRows;   // the previous palette buffer's capacity the plan carries (a test shrinks it)
     Plan plan;
     JoinResult result;
     uint32_t decline = 0;
@@ -67,6 +68,7 @@ struct Run {
     // history: whether the certificates pass for this frame; poseAll: every job base has a pose record
     void frame(const Built& b, bool history = true, bool poseAll = true, bool offerSnapshot = true, uint32_t consumerTid = 1) {
         decline = feeder.step(offerSnapshot ? &b.snap : nullptr, consumerTid, history, uint32_t(b.jobs.size()), parity, plan);
+        plan.prevRows = prevRows;
         result = cpuJoin(plan, b.jobs, prevJobs, prevInfo, prevPose, prevHookOk);
         prevHookOk = result.prevHookOk;
         prevJobs = b.jobs;

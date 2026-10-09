@@ -229,7 +229,9 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
     // The hook's newest list, and what it says about the rows in use.
     Snapshot& snap = *s.snapshot;
     const bool haveSnap = skinEntityHookLatest(snap);
-    const uint32_t rowsInUse = haveSnap && checkSnapshot(snap) ? snap.end : kMaxRows;
+    // The rows the list says are in use (0 = no usable list: the plan's prevRows, checked per job on the GPU, covers that case).
+    const uint32_t rowsInUse = haveSnap && checkSnapshot(snap) ? snap.end : 0;
+    const uint64_t previousBytes = s.history.lastBytes();   // the previous palette buffer, before this frame is noted
     const bool poseLast = s.poseBuiltPresent == present - 1u;
     const uint32_t verdict = s.history.note(present, reinterpret_cast<uint64_t>(paletteBuffer.Get()), pd.ByteWidth, rowsInUse, poseLast);
     s.prevPalette = s.curPalette;
@@ -238,6 +240,7 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
     s.parity ^= 1u;
     Plan& plan = *s.plan_;
     s.feeder.step(haveSnap ? &snap : nullptr, GetCurrentThreadId(), history, jobs, s.parity, plan);
+    plan.prevRows = uint32_t(std::min<uint64_t>(previousBytes / 48u, kMaxRows));
     std::vector<uint32_t> words;
     plan.words(words);
     // The pass.

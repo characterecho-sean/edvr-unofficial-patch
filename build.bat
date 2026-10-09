@@ -1307,6 +1307,32 @@ if errorlevel 1 ( echo [edvr] ERROR: skin_clone_test build failed & exit /b 1 )
 python "tools\skin_clone_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_skin_engine_test
+echo [edvr] === skin_engine_test.exe ===
+REM Build gate for the second skin's engine side (docs\kinematic-motion-injection-2026-09-19.md, "F2 built"), on WARP. The compose: the shipped HLSL's
+REM skinned reprojection against a double reference (previous position = world + camera term + E), the production mv pass on real ES/EP/scene-depth/target-7
+REM resources (a valid E takes its exact motion, E = 0 is the camera term, no valid E keeps no history, rigid records never read target 7, the counters and
+REM the |E| bins), and the derived blend state's target-7 modes. The engine: the linked engine_velocity.cpp and skin_join_gpu.cpp draw a skinned character
+REM in both eyes through the real path (the palette chain's dispatch told to the join, the pool torn the way the game's tees report it, the patched pair
+REM made and bound, target 7 created, cleared and read back through the view the compose gets): the first frame has honest no-history, a steady character
+REM has E exactly zero in both eyes, a moving one has 100 x (previous - current), a changed job table has none for a frame, the three views and target 7
+REM are bound for the draw and let go at the boundary, the hook's list and the prefix both identify the character, the periodic lines carry the GPU's
+REM counters, a previous palette buffer too small for a job's previous rows gives no history. tools\skin_engine_test\mutants.py --self-test holds the
+REM mutation list to the sources as they are; --run (needs this build's generated shader header) rebuilds the rig against each edit.
+if not exist "%OBJ%\skinengine" mkdir "%OBJ%\skinengine"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_BINDING_SHADOW_EXTERNAL /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\skinengine"\ /Fe"%OBJ%\skinengine\skin_engine_test.exe" ^
+    "tools\skin_engine_test\skin_engine_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: skin_engine_test build failed & exit /b 1 )
+"%OBJ%\skinengine\skin_engine_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinengine\skin_engine_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_engine_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_skin_entity_hook_test
 echo [edvr] === skin_entity_hook_test.exe ===
 REM Build gate for the read-only hook on the game's skinning-job assembly (src\d3d11\skin_entity_hook.cpp, EDVR_SKIN_HOOK_TEST; docs\kinematic-motion-

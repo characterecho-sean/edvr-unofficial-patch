@@ -254,6 +254,13 @@ void numberCases() {
     m.deliver(Kind::Jobs, 0, p.disp, two.data(), static_cast<uint32_t>(two.size()));
     st = m.analyse(0, nullptr);
     check(st.groups == 5 && st.jobs == 2 && st.jobsMissing == 3, "S5.missing: five groups and a table of two jobs is three groups with no job");
+    // a frame with a pool copy and no job table (the chain was not dispatched in it): its bases have no jobs to be compared with, so none is "not a job dst"
+    SkinLedger n;
+    n.arm(0);
+    const std::vector<uint8_t> poolN = poolOf({0, 5, 9, 9});
+    PoolRef pn{poolN.data(), poolN.size()};
+    st = n.analyse(0, &pn);
+    check(st.poolKnown && st.poolSkinned == 2 && st.jobs == 0 && st.poolNotDst == 0, "S5.noJobTable: a frame with no job table does not call its t33 bases not a job dst");
     // a job of count 0 advances nothing and is not a gap
     SkinLedger z;
     z.arm(0);

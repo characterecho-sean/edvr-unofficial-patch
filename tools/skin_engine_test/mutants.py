@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""The mutation proof for tools\\skin_engine_test: the rig fails when a rule of the second skin's engine side is broken.
+
+The rig (skin_engine_test.cpp, with tools\\engine_velocity_test\\skin_compose_tests.h and skin_lifecycle_tests.h) holds the compose's half of the second
+skin (C1 the arithmetic, C2 the production mv pass on real resources, C3 the derived blend state) and the engine's draw half end to end (L1..L9: the
+linked engine_velocity.cpp and skin_join_gpu.cpp drawing a skinned character in both eyes through the real path). Every check carries a label
+"C<case>.<what>" or "L<case>.<what>". A rig that passes proves little until it is seen to FAIL on a source that breaks the rule it pins: for each
+mutation below the machinery (tools\\rig_mutants_lib.py) edits a copy of the source in a temp directory OUTSIDE the repo and requires a FAIL on a check
+of the case that belongs to the rule. The shipped HLSL (temporal_shader_source.h) is read by the rig as text, so a mutation of it runs through the
+unmutated rig against a temp root holding the edited copy; the C++ sources are rebuilt into a fresh rig.
+
+  python tools\\skin_engine_test\\mutants.py --self-test       text only: every anchor is found exactly once, every case named is in the rig, and
+                                                               build.bat compiles the rig the way the machinery does and runs this self-test
+  python tools\\skin_engine_test\\mutants.py --run [--only a,b] [--jobs N] [--keep] [--verbose]     (needs a finished build: it reads build\\gen)
+  python tools\\skin_engine_test\\mutants.py --list
+  python tools\\skin_engine_test\\mutants.py --run --dry-run   the plan; writes nothing, starts nothing
+"""
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import rig_mutants_lib as lib  # noqa: E402
+
+ROOT = HERE.parents[1]
+D3D = ROOT / "src" / "d3d11"
+FILES = {
+    "hlsl": D3D / "temporal_shader_source.h",
+    "state": D3D / "engine_velocity_state.h",
+    "engine": D3D / "engine_velocity.cpp",
+    "gpu": D3D / "skin_join_gpu.cpp",
+    "join": D3D / "skin_join.h",
+}
+HEADER_KEYS = ("state", "engine", "gpu", "join")
+PIN_KEYS = ("hlsl",)
+
+
+def tree_files():
+    """Everything else the rig compiles or includes, copied into the temp tree unmutated: the source headers, the test suites, the generated shaders."""
+    skip = {FILES[k].resolve() for k in HEADER_KEYS}
+    out = []
+    for pattern in ("src/d3d11/*.h", "src/common/*.h", "src/d3d11/gpu_timing.cpp", "src/d3d11/gpu_span_d3d11.cpp", "tools/engine_velocity_test/*.h",
+                    "tools/skin_join_test/skin_join_world.h", "tools/skin_clone_test/synthetic_skin.h", "tools/skin_engine_test/skin_engine_test.cpp",
+                    "third_party/dxbc_hash/DxilHash.cpp", "build/gen/*.h", "build/gen/*.inc"):
+        for p in sorted(ROOT.glob(pattern)):
+            if p.resolve() in skip or not p.is_file():
+                continue
+            out.append((p.relative_to(ROOT).as_posix(), p))
+    return out
+
+
+UNITS = [("src/d3d11/engine_velocity.cpp", "engine"), ("src/d3d11/skin_join_gpu.cpp", "gpu"), ("src/d3d11/gpu_timing.cpp", None), ("src/d3d11/gpu_span_d3d11.cpp", None)]
+CL_FLAGS = lib.DEFAULT_CL_FLAGS + ["/DUNICODE", "/D_UNICODE", "/utf-8", "/DEDVR_ENGINE_VELOCITY_RIG", "/DEDVR_BINDING_SHADOW_EXTERNAL"]
+CONFIG = lib.Config(
+    here=__file__, files=FILES, header_keys=HEADER_KEYS, pin_keys=PIN_KEYS, rig=HERE / "skin_engine_test.cpp",
+    rig_label=":rig_skin_engine_test", rig_source_in_bat="tools\\skin_engine_test\\skin_engine_test.cpp", rig_exe_in_bat="skin_engine_test.exe",
+    case_prefix="[CL]", include_dirs=("build/gen", "src/d3d11"), include_aliases={"build/gen": '/I"%GEN%"'}, cl_flags=CL_FLAGS, units=UNITS,
+    link_args=["d3d11.lib", "d3dcompiler.lib", "dxguid.lib"], min_mutants=30, run_timeout=300.0, tree_extra=tree_files(), rig_in_tree=True)
+
+M = lib.M
+MUTANTS = [
+    # ---- C1, C2: the compose (the shipped HLSL, read as text) ----
+    M("skinned-taken-as-rigid", "C2", "hlsl", [("if ((uint(probe.w + 0.5) & 16384u) != 0u && r.data[0].x != 0u) {", "if (false) {")],
+      "a skinned record goes down the rigid path: no marker, no E"),
+    M("rigid-reads-target-7", "C2", "hlsl", [("if ((uint(probe.w + 0.5) & 16384u) != 0u && r.data[0].x != 0u) {", "if ((uint(probe.w + 0.5) & 16384u) != 0u) {")],
+      "a rigid record reads target 7 too"),
+    M("bit-16384-ignored", "C2", "hlsl", [("if ((uint(probe.w + 0.5) & 16384u) != 0u && r.data[0].x != 0u) {", "if (r.data[0].x != 0u) {")],
+      "target 7 is read whether the pass says it exists or not"),
+    M("valid-flag-ignored", "C2", "hlsl", [("if (!(sk.w > 0.5) || !all(isfinite(sk.xyz))) return 2u;", "if (!all(isfinite(sk.xyz))) return 2u;")],
+      "a pixel with valid 0 takes its E anyway"),
+    M("unreprojectable-not-masked", "C2", "hlsl", [("if (!engineReprojectSkinned(r, sk.xyz, skNdc, zr, skBefore)) return 2u;", "if (!engineReprojectSkinned(r, sk.xyz, skNdc, zr, skBefore)) return 0u;")],
+      "a previous position behind last frame's camera keeps the camera term instead of no history"),
+    M("skinned-count-wrong", "C2", "hlsl", [("        gSkinKind = 1u;\n        gSkinMagnitudeCm", "        gSkinKind = 2u;\n        gSkinMagnitudeCm")],
+      "a joined skinned pixel is counted as masked"),
+    M("masked-count-wrong", "C2", "hlsl", [("InterlockedAdd(gCount[55], 1u);", "InterlockedAdd(gCount[54], 1u);")], "a masked skinned pixel is counted as joined"),
+    M("bins-wrong", "C2", "hlsl", [("4.0 * log10(max(gSkinMagnitudeCm, 1e-6) / 0.01)", "2.0 * log10(max(gSkinMagnitudeCm, 1e-6) / 0.01)")],
+      "the |E| histogram's bins are twice as wide"),
+    M("sign-flipped", ("C1", "C2"), "hlsl", [("prevWorld = world + (nCam - bCam) + skinMove;", "prevWorld = world + (nCam - bCam) - skinMove;")],
+      "the surface goes forward in time"),
+    M("camera-term-dropped", "C1", "hlsl", [("prevWorld = world + (nCam - bCam) + skinMove;", "prevWorld = world + skinMove;")],
+      "the camera's own motion is not carried"),
+    M("centimetres-as-decimetres", "C1", "hlsl", [("engineReprojectRowsE(r, true, skinCm * 0.01,", "engineReprojectRowsE(r, true, skinCm * 0.1,")], "E is read as decimetres"),
+    M("skinned-flag-dropped", "C1", "hlsl", [("engineReprojectRowsE(r, true, skinCm * 0.01,", "engineReprojectRowsE(r, false, skinCm * 0.01,")],
+      "the skinned reprojection reads the record's pose blocks"),
+    M("skinned-branch-never-taken", "C1", "hlsl", [("    if (skinned) {\n        prevWorld", "    if (false) {\n        prevWorld")], "the skinned arithmetic is unreachable"),
+    # ---- C3: the derived blend state ----
+    M("mode-1-writes-target-7", ("C3", "L6"), "state", [("k.RenderTargetWriteMask = skinMode == 2 ? D3D11_COLOR_WRITE_ENABLE_ALL : 0;", "k.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;")],
+      "a draw that exports nothing to target 7 leaves undefined values there"),
+    M("mode-2-writes-red-only", ("C3", "L6"), "state", [("k.RenderTargetWriteMask = skinMode == 2 ? D3D11_COLOR_WRITE_ENABLE_ALL : 0;", "k.RenderTargetWriteMask = skinMode == 2 ? D3D11_COLOR_WRITE_ENABLE_RED : 0;")],
+      "E is written to one channel"),
+    M("mode-0-touches-target-7", "C3", "state", [("    if (skinMode != 0) {\n        D3D11_RENDER_TARGET_BLEND_DESC& k", "    if (true) {\n        D3D11_RENDER_TARGET_BLEND_DESC& k")],
+      "the derived state overrides target 7 where the pass has no second skin"),
+    # ---- L: the engine ----
+    M("rigid-draws-leave-target-7-open", "L6", "engine", [("const int skinMode = e.skinBound ? (exportsE ? 2 : 1) : 0;", "const int skinMode = e.skinBound && skinDraw ? (exportsE ? 2 : 1) : 0;")],
+      "a rigid family's draw writes undefined values into target 7"),
+    M("plain-skinned-pixel-shader-writes", "L6", "engine", [("const int skinMode = e.skinBound ? (exportsE ? 2 : 1) : 0;", "const int skinMode = e.skinBound ? 2 : 0;")],
+      "a skinned family's pixel shader that exports no E writes target 7 anyway"),
+    M("skin-views-not-bound", ("L2", "L3", "L6"), "engine", [("        ctx->VSSetShaderResources(kSkinPrevPaletteSlot, 3, skinViews);\n        engineVelocityNoteStateCalls(1);\n        g_bound.skinSrvs = true;",
+                                                               "        g_bound.skinSrvs = true;")],
+      "the cloned vertex shader reads unbound views"),
+    M("skin-views-kept-at-the-boundary", "L6", "engine", [("    if (ctx && g_bound.skinSrvs) {\n        ID3D11ShaderResourceView* none[3] = {};", "    if (false && ctx && g_bound.skinSrvs) {\n        ID3D11ShaderResourceView* none[3] = {};")],
+      "the three skin views stay bound across the frame"),
+    M("target-7-not-cleared", "L3", "engine", [("ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);", "(void)zero;")],
+      "target 7 keeps last frame's answers where nothing is drawn"),
+    M("view-not-offered", "L2", "engine", [("if (exportsE) { e.skinWrittenFrame = frame; ++g_skinStats.draws; }", "if (exportsE) { ++g_skinStats.draws; }")],
+      "the compose is never given target 7"),
+    M("pose-table-not-built", ("L2", "L3"), "engine", [("            g_skin.scatterPose(ctx, e.poolSrv.Get(), pd.ByteWidth / emit::kItemBytes, frame);", ";")],
+      "the previous pose table is never made: no character has history"),
+    M("games-target-7-replaced", "L6", "engine", [("if (!gameRt7) { rt[kSkinTarget] = e.skinRtv.Get(); e.skinBound = true; }\n        else ++g_skinStats.slotTaken;", "{ rt[kSkinTarget] = e.skinRtv.Get(); e.skinBound = true; }")],
+      "a game that binds its own target 7 loses it"),
+    M("chain-dispatch-not-fed", ("L2", "L3"), "engine", [("    g_skin.onChain(ctx, frameNow(), groups);", "    (void)groups;")],
+      "the palette chain's dispatch never reaches the join"),
+    M("hook-gate-not-opened", "L1", "engine", [("    skinEntityHookSetGate(true);\n    if (state == SkinHookState::Armed)", "    if (state == SkinHookState::Armed)")],
+      "the hook is armed and its gate stays shut"),
+    M("second-skin-not-wanted", "L1", "engine", [("    g_skinWanted.store(true, std::memory_order_release);\n    Log::get().note(\"skin join: the second skin is live", "    Log::get().note(\"skin join: the second skin is live")],
+      "configure says it is live and the chain dispatch hook is never told"),
+    M("periodic-lines-dropped", "L8", "engine", [("    skinSummaryLocked(ctx);\n    g_emit.clear();", "    g_emit.clear();")], "the window ends without the second skin's lines"),
+    # ---- L: the join's GPU half ----
+    M("previous-rows-unknown", "L9", "gpu", [("plan.prevRows = uint32_t(std::min<uint64_t>(previousBytes / 48u, kMaxRows));", "plan.prevRows = kMaxRows;")],
+      "the previous palette buffer's size is not told to the join"),
+    M("rows-in-use-guessed-without-a-list", ("L2", "L3"), "gpu", [("snap.end : 0;", "snap.end : kMaxRows;")],
+      "with no list the previous buffer is compared with the whole table and found small: no history whenever the hook is down"),
+    M("previous-job-table-never-refreshed", "L5", "gpu", [("        ctx->CopySubresourceRegion(s.prevJobs.Get(), 0, 0, 0, 0, jobsBuffer.Get(), 0, &box);", "        if (chainFrames_ == 1) ctx->CopySubresourceRegion(s.prevJobs.Get(), 0, 0, 0, 0, jobsBuffer.Get(), 0, &box);")],
+      "last frame's job table is the first frame's: a changed character never has history again"),
+    M("hook-plan-has-no-previous-entities", "L7", "join", [("if (q.vtable == e.vtable && q.mesh == e.mesh && q.count == e.count) plan.prevIdx[i] = p->second;", "if (q.vtable == e.vtable && q.mesh == e.mesh && q.count == e.count) plan.prevIdx[i] = kNone;")],
+      "the hook's list names no entity from one frame to the next: nothing joins by it"),
+    M("tables-not-alternated", ("L3", "L4"), "gpu", [("    s.parity ^= 1u;\n    Plan& plan", "    Plan& plan")],
+      "this frame's by-base and pose tables are last frame's"),
+    M("counters-never-read-back", "L8", "gpu", [("if (chainFrames_ % 120 == 0) {", "if (chainFrames_ % 100000 == 0) {")], "the periodic line never gets the GPU's counters"),
+]
+
+if __name__ == "__main__":
+    sys.exit(lib.main(CONFIG, MUTANTS))

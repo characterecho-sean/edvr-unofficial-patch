@@ -321,8 +321,10 @@ public:
             bases.erase(std::unique(bases.begin(), bases.end()), bases.end());
             std::sort(dsts.begin(), dsts.end());
             s.poolSkinned = static_cast<uint32_t>(bases.size());
+            // A frame with no job table (the chain was not dispatched in it, or its tables never arrived) has no dst to compare the bases with:
+            // every base would be "not a job dst" and the finding would be the frame, not the pool (run 154827: a false positive).
             for (uint32_t b : bases) {
-                if (!std::binary_search(dsts.begin(), dsts.end(), b)) ++s.poolNotDst;
+                if (!dsts.empty() && !std::binary_search(dsts.begin(), dsts.end(), b)) ++s.poolNotDst;
             }
         }
         return s;
@@ -370,11 +372,11 @@ public:
             std::snprintf(line, sizeof(line),
                           "skin ledger frame %u: %u dispatches (chain %u kept %u over %u, identity fill %u), %u groups, %u jobs "
                           "(%u missing), %llu bones, dst end row %u, running sum gaps %u overlaps %u; pool draw %s (t38 = palette %d); "
-                          "palettes copied %u read back %u; t33 skinned bases %s%u (not a job dst %u); t0 %u B t2 %u B; copies lost %u declined %u",
+                          "palettes copied %u read back %u; t33 skinned bases %s%u (not a job dst %u%s); t0 %u B t2 %u B; copies lost %u declined %u",
                           frame0_ + i, fr.dispatches, fr.chainSeen, static_cast<unsigned>(fr.d.size()), fr.chainOver, fr.clears,
                           s.groups, s.jobs, s.jobsMissing, static_cast<unsigned long long>(s.bones), s.dstEnd, s.gaps, s.overlaps,
                           fr.pool ? "yes" : "NO", fr.bound, fr.palIssued, fr.palGot, s.poolKnown ? "" : "? ", s.poolSkinned,
-                          s.poolNotDst, t0Bytes, t2Bytes, fr.lost, fr.declined);
+                          s.poolNotDst, s.poolKnown && s.jobs == 0 ? ", no job table to compare with" : "", t0Bytes, t2Bytes, fr.lost, fr.declined);
             sink(line);
         }
         const char* verdict;

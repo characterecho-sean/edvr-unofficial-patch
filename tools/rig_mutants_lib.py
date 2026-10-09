@@ -47,7 +47,7 @@ class Config:
 
     def __init__(self, here, files, header_keys, pin_keys, rig, rig_label, rig_source_in_bat, rig_exe_in_bat, case_prefix,
                  include_dirs=("src/d3d11",), units=(), cl_flags=None, defines=(), link_args=(), min_mutants=1, run_timeout=180.0,
-                 rig_args=lambda root: ["--self-test", str(root)], bat_run_checks=None, tree_extra=(), rig_in_tree=False, ignore_cases=()):
+                 rig_args=lambda root: ["--self-test", str(root)], bat_run_checks=None, tree_extra=(), rig_in_tree=False, ignore_cases=(), include_aliases=None):
         self.here = Path(here).resolve().parent
         self.root = self.here.parents[1]
         self.files = files                       # key -> absolute Path
@@ -67,6 +67,7 @@ class Config:
         self.rig_args = rig_args
         self.bat_run_checks = bat_run_checks     # extra strings the rig's build.bat block must contain
         self.tree_extra = tuple(tree_extra)      # (relative path, source) copied into the tree unmutated (headers the rig includes)
+        self.include_aliases = dict(include_aliases or {})   # include dir (as the tree has it) -> the /I text build.bat uses for it (e.g. build/gen -> /I"%GEN%")
         self.ignore_cases = tuple(ignore_cases)  # case ids in the rig that no run can reach (a local-only mode), exempt from the coverage rule
         self.rig_in_tree = rig_in_tree           # compile the rig from its copy in the tree: its own includes are relative (../../src/...) and must find the mutated headers
         self.build_bat = self.root / "build.bat"
@@ -331,7 +332,8 @@ def self_test(cfg, mutants_all, build_bat=None):
         for flag in cfg.cl_flags:
             check(flag in cl, "build.bat's rig compile has %s" % flag)
         for d in cfg.include_dirs:
-            check('/I"%s"' % d.replace("/", "\\") in cl, "build.bat's rig finds the headers through /I %s (the mutated tree is found the same way)" % d)
+            want = cfg.include_aliases.get(d, '/I"%s"' % d.replace("/", "\\"))
+            check(want in cl, "build.bat's rig finds the headers through %s (the mutated tree is found the same way)" % want)
         check(cfg.rig_source_in_bat in cl, "build.bat's rig compile has the rig's source")
         for rel, _ in cfg.units:
             check(rel.replace("/", "\\") in cl, "build.bat's rig compile has the unit %s" % rel)
