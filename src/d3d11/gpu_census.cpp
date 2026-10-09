@@ -69,9 +69,18 @@ static_assert(kAlteredClassSections == 2, "one name for each altered-draw class"
 // before they existed.
 constexpr size_t kWorldFirst = static_cast<size_t>(GpuCensusSection::FrameWorldResolve);
 constexpr size_t kWorldSections = static_cast<size_t>(GpuCensusSection::FrameWorldLayer) - kWorldFirst + 1;
-static_assert(kAlteredFirst == kDoorSections + kFrameSections, "one name for each in-frame section, and the altered sections follow them");
-static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kAlteredFirst && kWorldSections == 3,
-              "the seed is followed by the three world-route sections, which are the last in-frame ones");
+// The second skin's five items (gpu_census.h) come right after the world route's and are the last in-frame sections. Each is nested inside an engine velocity
+// span, so none is in kFrameBreakdownNames or in any total: they are priced on a line of their own (logAndResetWindow), and, like the world route's, have no turn
+// in the rotation until called this window.
+constexpr size_t kSkinFirst = static_cast<size_t>(GpuCensusSection::FrameSkinSourceClear);
+constexpr size_t kSkinSections = static_cast<size_t>(GpuCensusSection::FrameSkinPose) - kSkinFirst + 1;
+constexpr const char* kSkinNames[] = {
+    "source target 7 clear", "eye target 7 clear", "join dispatch (3-table clear included)", "join 3-table clear alone (probe on scratch buffers)", "pose table"
+};
+static_assert(kAlteredFirst == kDoorSections + kFrameSections + kSkinSections, "one name for each in-frame section, and the altered sections follow them");
+static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst && kWorldSections == 3 &&
+                  kSkinSections == 5 && sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
+              "the seed is followed by the three world-route sections and the second skin's five, which are the last in-frame ones");
 static_assert(kAlteredFixFirst + kAlteredFixCount == kSections, "the fix sections are the last ones");
 
 struct SectionState {
@@ -195,15 +204,17 @@ uint64_t turnOccurrences(GpuCensusSection owner) noexcept {
     for (size_t i = 0; i < static_cast<size_t>(kAlteredFixCount); ++i) total += g_section[kAlteredFixFirst + i].occurrences;
     return total;
 }
-// The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route
-// section has none until it has been called this window (its first call counts whether or not it is on turn).
+// A world-route or second-skin section has no turn until it has been called this window (its first call counts whether or not it is on turn).
+bool hasNoTurnYet(size_t i) noexcept {
+    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || (i >= kSkinFirst && i < kSkinFirst + kSkinSections)) && g_section[i].occurrences == 0;
+}
+// The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route or second-skin
+// section has none until it has been called this window.
 int nextTurnOwner(int current) noexcept {
     int next = current;
     do {
         next = (next + 1) % static_cast<int>(kSections);
-    } while (turnOwnerOf(static_cast<GpuCensusSection>(next)) != static_cast<GpuCensusSection>(next) ||
-             (static_cast<size_t>(next) >= kWorldFirst && static_cast<size_t>(next) < kWorldFirst + kWorldSections &&
-              g_section[static_cast<size_t>(next)].occurrences == 0));
+    } while (turnOwnerOf(static_cast<GpuCensusSection>(next)) != static_cast<GpuCensusSection>(next) || hasNoTurnYet(static_cast<size_t>(next)));
     return next;
 }
 
@@ -273,6 +284,18 @@ void formatSeedDetail(char* out, size_t n, const Snapshot& s, uint64_t notes, bo
                   "EDVR GPU census, the HDR HUD depth-stencil seed above (the copy of the game's depth-stencil, then the passes "
                   "that write it into the HUD layer's own): %.2f seeds a frame, %s; %s.",
                   s.perFrame, cost, target);
+}
+
+// The second skin's line (gpu_census.h, FrameSkinSourceClear..FrameSkinPose): "-" for an item that did not run this window. Each item is also inside the engine velocity
+// figure on the main line, so it is a breakdown of that figure and never an addition to a total.
+void formatSkinDetail(char* out, size_t n, const Snapshot (&items)[kSkinSections], double edvrTotal) {
+    std::string list;
+    for (size_t i = 0; i < kSkinSections; ++i) appendItem(list, kSkinNames[i], items[i]);
+    std::snprintf(out, n,
+                  "EDVR GPU census, the second skin's GPU work (F2); each item is already inside the engine velocity figure above, so none of it is added to EDVR ~%.3f: "
+                  "%s; the join dispatch holds its 3-table clear as the first phase of it, and the clear alone is timed on scratch buffers (the same loop) on its own turn, "
+                  "so the rest of the join is the join minus the probe; \"-\" means that work did not run this window.",
+                  edvrTotal, list.c_str());
 }
 
 void logAndResetWindow(uint64_t now) {
@@ -408,6 +431,20 @@ void logAndResetWindow(uint64_t now) {
         char seedDetail[1024];
         formatSeedDetail(seedDetail, sizeof(seedDetail), seedSnap, g_seedNotes, g_seedMixed, g_seedFirst, g_seedOther);
         Log::get().note("%s", seedDetail);
+    }
+    // The second skin's own line, only when some of that work ran this window (a window with no skinned character prints nothing of it, as before F16).
+    {
+        Snapshot skin[kSkinSections];
+        bool any = false;
+        for (size_t i = 0; i < kSkinSections; ++i) {
+            skin[i] = snapshotOf(g_section[kSkinFirst + i], frames);
+            any = any || skin[i].occurred;
+        }
+        if (any) {
+            char skinDetail[1024];
+            formatSkinDetail(skinDetail, sizeof(skinDetail), skin, doorTotal + frameTotal);
+            Log::get().note("%s", skinDetail);
+        }
     }
     // Elite's own draws that EDVR alters: what the AA path's GPU cost looks like from
     // outside, inside draws the census would otherwise count as the game's. Each is the
