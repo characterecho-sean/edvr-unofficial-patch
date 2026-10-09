@@ -209,7 +209,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   NativeFrameClient features;
   NativeFssClient fss;
   NativeCullGuard cullGuard;
-  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_8};
+  EdvrNativeFrameOutput featureFrame{sizeof(featureFrame),EDVR_NATIVE_FRAME_VERSION_7};
   EdvrNativeFrameDecision featureDecision{sizeof(featureDecision),EDVR_NATIVE_FRAME_VERSION_1};
   bool featureFrameKnown=false;
   uint64_t fssHealedEyes[2]{},featureChanges=0;
@@ -402,16 +402,16 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t poseFailures=0;
   DWORD ownerThread=GetCurrentThreadId();
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
-  // advanced.cull_pose and its instrument (docs\terrain-culling.md round 6; TEMPORARY). `latestPoseFrame` is the frame the game was last
-  // given by WaitGetPoses -- the pose that is drawn -- kept for the game thread's pose calls to be located against and measured against.
-  // Written and read on the owner thread only. `poseMode` is the cullpose::Mode code published to the game's reads for this frame.
+  // The head-pose answer and its diagnostic (head_pose_time.h, pose_gap.h; docs\terrain-culling.md). `latestPoseFrame` is the frame the game
+  // was last given by WaitGetPoses -- the pose that is drawn -- kept for Elite's "now" pose calls to be located at and measured against.
+  // Written and read on the owner thread only.
   struct PoseFrame {
     bool valid=false,orientationKnown=false,speedKnown=false;
     XrTime displayTime=0;XrDuration period=0;
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
   } latestPoseFrame;
-  uint32_t poseMode=0;bool poseStandDownNoted=false;
+  HeadPoseSightings poseSightings;
   PoseGapStats poseGap;
   // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md).
   uint64_t headLocateFailures=0,headLocateConsecutiveFailures=0;
@@ -939,8 +939,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     }
     geometry.setCullProbe(status==CullProbeStatus::Active?static_cast<uint32_t>(requested):0u);
   }
-  // The frame the game now holds, for its game-thread pose calls to be located and measured against (advanced.cull_pose), and the
-  // pose-gap instrument's window: counted here, written here, so the lines come from the one thread that already logs per frame.
+  // The frame the game now holds, for Elite's "now" pose calls to be located at and measured against, and the pose-gap instrument's
+  // window: counted here, written here, so the lines come from the one thread that already logs per frame.
   template<class Sink>
   void publishPoseGap(XrTime displayTime,XrDuration period,const XrPosef& headPose,bool poseValid,XrSpaceVelocityFlags velocityFlags,
                       const XrVector3f& angularVelocity,uint64_t nowMs,Sink&& sink) {
@@ -951,20 +951,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     latestPoseFrame.speedKnown=(velocityFlags&XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)!=0;
     latestPoseFrame.speedDegPerSec=latestPoseFrame.speedKnown?angularSpeedDegrees(angularVelocity.x,angularVelocity.y,angularVelocity.z):0.0;
     poseGap.noteWait();
-    poseGap.flushIfDue(nowMs,poseMode,sink);
-  }
-  // advanced.cull_pose as the host acts on it (src\common\cull_pose.h): the mode the graphics half asked for, or off on any build but
-  // 332841, whose return RVA the filter keys on. The graphics half writes the user-facing line and the engine patch; this says only
-  // that the runtime stood down. Published to the game's reads every frame, like the probe above.
-  void publishCullPose() {
-    const cullpose::Mode requested=cullpose::modeFromCode(featureFrame.cullPose);
-    const bool standDown=requested!=cullpose::Mode::Off&&!isBuild332841(systemInterface.callers().module());
-    if(standDown!=poseStandDownNoted) {
-      poseStandDownNoted=standDown;
-      if(standDown)nativeTracePuts("cull pose: the runtime stands down -- not build 332841");
-    }
-    poseMode=standDown?0u:static_cast<uint32_t>(requested);
-    geometry.setCullPose(poseMode);
+    poseGap.flushIfDue(nowMs,sink);
   }
   // Whether the runtime's hidden-area mesh may be handed to the game this frame.
   // It is cut for the runtime's own frustum and Elite reads it once, so a cull
@@ -1236,7 +1223,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       gameGeometry.width[eye]=dims.width;gameGeometry.height[eye]=dims.height;
     }
     if(features.acquired()) {
-      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_8};
+      EdvrNativeFrameOutput next{sizeof(next),EDVR_NATIVE_FRAME_VERSION_7};
       if(features.begin(located,poses.read().originGeneration,next)!=S_OK) {
         boundary.clear();return fail(XR_ERROR_VALIDATION_FAILURE);
       }
@@ -1244,7 +1231,6 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       featureFrame=next;featureFrameKnown=true;
       publishCantedEyeFix(featureFrame.cantedEyeFix!=0);
       publishCullProbe();
-      publishCullPose();
       if(locatedValid) {
         NativeCullSettings settings{};settings.mode=static_cast<NativeCullMode>(featureFrame.cullMode);
         settings.percent=featureFrame.cullPercent;settings.horizontalFraction=featureFrame.cullHorizontalFraction;
@@ -2374,13 +2360,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
     return located;
   }
-  // The instant a Display or Next call is located at, formed from the latest frame; false when it cannot be (no frame yet, a period that is
-  // not positive, a reference change in between) and the call is located at now + prediction as it always was.
-  bool poseTargetFor(cullpose::Time time,XrTime& target) {
-    if(time==cullpose::Time::Now||!latestPoseFrame.valid)return false;
+  // The instant an Elite "now" call is located at: the latest frame's display time; false when there is none yet (no frame waited, a display
+  // time that is not positive), and the call is located at now + prediction as it always was.
+  bool poseTargetFor(bool display,XrTime& target) {
+    if(!display||!latestPoseFrame.valid)return false;
     int64_t at=0;
-    if(!cullpose::targetTime(time,latestPoseFrame.displayTime,latestPoseFrame.period,&at))return false;
-    if(time==cullpose::Time::Next&&changes.crosses(latestPoseFrame.displayTime,at))return false;
+    if(!displayTimeTarget(latestPoseFrame.displayTime,&at))return false;
     target=at;return true;
   }
   bool locateHeadOwned(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out,
@@ -2394,8 +2379,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     HeadLocatorStage headLocateStage=HeadLocatorStage::None;
     XrTime explicitTarget=0;
-    const bool explicitTime=poseTargetFor(call.time,explicitTarget);
-    sample.fallback=call.time!=cullpose::Time::Now&&!explicitTime;
+    const bool explicitTime=poseTargetFor(call.display,explicitTarget);
+    sample.fallback=call.display&&!explicitTime;
     const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
     lastHeadResult=explicitTime
       ?HeadLocator{}.locateAt(dispatch,view,seated.space(),explicitTarget,head,&lastHeadTime,&headLocateStage)
@@ -2416,6 +2401,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           (unsigned long long)headLocateConsecutiveFailures,(unsigned long long)headLocateFailures);
       headLocateConsecutiveFailures=0;
     }
+    // Said when the fix acts, and for each further distinct Elite caller (a new one after a game update shows up here).
+    if(explicitTime)poseSightings.note(call.rva,[](const char* sighting){nativeTracePuts(sighting);});
     vr::TrackedDevicePose_t pose{};pose.bDeviceIsConnected=true;
     pose.mDeviceToAbsoluteTracking.m[0][0]=pose.mDeviceToAbsoluteTracking.m[1][1]=pose.mDeviceToAbsoluteTracking.m[2][2]=1;
     constexpr auto valid=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;

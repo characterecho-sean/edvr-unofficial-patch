@@ -3,7 +3,6 @@
 #include "cull_cycle.h"
 #include "mono_camera_core.h"
 #include "mono_camera_hook.h"
-#include "pose_latch_patch.h"
 #include "../common/comfort_fade.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
@@ -358,19 +357,14 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1, 2, 3, 4, 5, 6 or 7 caller is an openvr_api.dll from before the
-    // pose-time switch (or, earlier, the cull probe, the canted-display test keys,
-    // the comfort fade, the channel probe, turbo pacing or the field-of-view trim)
-    // existed. Each gets exactly the fields it knows about, and whatever it cannot
-    // carry stays out of its struct entirely. A version 7 caller has the cull probe
-    // and not cullPose, so it runs the cycle but never gets a pose mode or a patch.
-    const bool wantsPose = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_8 &&
-        output->size == sizeof(*output);
-    const bool wantsProbe7 = output && !wantsPose &&
+    // A version 1, 2, 3, 4, 5 or 6 caller is an openvr_api.dll from before the
+    // cull probe (or, earlier, the canted-display test keys, the comfort fade,
+    // the channel probe, turbo pacing or the field-of-view trim) existed. Each
+    // gets exactly the fields it knows about, and whatever it cannot carry
+    // stays out of its struct entirely.
+    const bool wantsProbe = output &&
         output->version == EDVR_NATIVE_FRAME_VERSION_7 &&
-        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_7;
-    const bool wantsProbe = wantsPose || wantsProbe7;
+        output->size == sizeof(*output);
     const bool wantsCant = output && !wantsProbe &&
         output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_6;
@@ -397,16 +391,14 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsPose ? sizeof(result)
-                 : wantsProbe7 ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_7
+    result.size = wantsProbe ? sizeof(result)
                  : wantsCant ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6
                  : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
                  : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsPose ? EDVR_NATIVE_FRAME_VERSION_8
-                    : wantsProbe7 ? EDVR_NATIVE_FRAME_VERSION_7
+    result.version = wantsProbe ? EDVR_NATIVE_FRAME_VERSION_7
                     : wantsCant ? EDVR_NATIVE_FRAME_VERSION_6
                     : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
@@ -468,14 +460,6 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // The runtime is told group 0 for a mono window; the mono camera's lie is this half's switch.
     if (cycleRequested) result.cullProbe = cycleMono ? 0u : cycleGroup;
     edvr::monocam::g_lie.store(cycleMono || steadyMono, std::memory_order_relaxed);
-    // advanced.cull_pose (src\common\cull_pose.h, docs\terrain-culling.md round 6): the instant the runtime locates Elite's game-thread
-    // head pose at, and for the _direct modes the 2-byte engine patch (pose_latch_patch.h). Only a version 8 caller has the slot: an older
-    // runtime is told nothing, never has the patch applied, and has one that was applied put back. The patch is written here, at the
-    // frame boundary the owner thread reaches inside WaitGetPoses, and never from inside a pose call.
-    const edvr::cullpose::Mode poseRequested = wantsPose
-        ? edvr::cullpose::parseMode(edvr::Config::get().getString("advanced.cull_pose", "off").c_str())
-        : edvr::cullpose::Mode::Off;
-    result.cullPose = edvr::cullpose::frame(poseRequested, eliteIsBuild332841(), logLine);
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
     uint32_t trim[kTrimCount] = {0, 0, 0};

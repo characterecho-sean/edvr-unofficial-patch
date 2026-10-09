@@ -57,7 +57,7 @@ class HeadLocator {
        (offset<0&&time<(std::numeric_limits<XrTime>::min)()-offset))return XR_ERROR_TIME_INVALID;
     return finish(d,view,origin,time+offset,out,exact,stage);
   }
-  // The same locate at an instant the caller has already formed (advanced.cull_pose: a frame's display time, or one period later),
+  // The same locate at an instant the caller has already formed (the head-pose answer: the drawn frame's display time),
   // with no clock read and no prediction. Everything the pose is checked for is what locate() checks.
   XrResult locateAt(const LocatorDispatch& d,XrSpace view,XrSpace origin,XrTime target,XrSpaceLocation& out,
                     XrTime* exact=nullptr,HeadLocatorStage* stage=nullptr) const {

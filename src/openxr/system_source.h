@@ -1,7 +1,6 @@
 #pragma once
 #include "geometry_snapshot.h"
 #include "visibility_mask.h"
-#include "../common/cull_pose.h"
 
 namespace edvr::openxr {
 // Session-generation optics that remain meaningful when the current tracking
@@ -50,18 +49,15 @@ struct SystemRead {
   // answered with the symmetric superset, 0 when off, ignored (a cull guard is
   // configured) or stood down (not build 332841).
   uint32_t cullProbe=0;
-  // advanced.cull_pose (TEMPORARY, docs\terrain-culling.md round 6), as the host decided it for this frame: the cullpose::Mode code
-  // that says which instant a game-thread head-pose call (the one returning to RVA 0x4E3881) is located at; 0 when off or stood down
-  // (not build 332841).
-  uint32_t cullPose=0;
 };
 
 // Who called GetDeviceToAbsoluteTrackingPose and which instant it is to be located at. Taken on the CALLER's thread before the hop to
 // the owner thread, since the owner is the wrong place to ask "who called". `rva` is the game executable's return RVA (or
-// kFrameOutside/kFrameUnknown), `time` the filter's verdict (cull_pose.h timeForCall), Now for every caller but the one it names.
+// kFrameOutside/kFrameUnknown); `display` is the filter's verdict (head_pose_time.h answeredAtDisplayTime): Elite's own request for
+// "now" is located at the latest frame's display time, everyone else at now + prediction.
 struct HeadCall {
   uint32_t thread=0,rva=0;
-  cullpose::Time time=cullpose::Time::Now;
+  bool display=false;
 };
 
 // The source outlives the concrete IVRSystem object and protects its resources
@@ -74,9 +70,8 @@ class SystemSource {
   virtual SystemRead read() const =0;
   virtual bool locateHead(uint64_t generation,vr::ETrackingUniverseOrigin origin,
                           float prediction,vr::TrackedDevicePose_t& out)=0;
-  // The same, for a caller that is known: the instrument records `call` and a Display/Next call is located at the latest frame's
-  // display time (or one period later) instead of now + prediction. The default is the plain call, so a source with no use for either
-  // keeps working unchanged.
+  // The same, for a caller that is known: the instrument records `call`, and a call with `display` set is located at the latest frame's
+  // display time instead of now + prediction. The default is the plain call, so a source with no use for either keeps working unchanged.
   virtual bool locateHeadFor(uint64_t generation,vr::ETrackingUniverseOrigin origin,
                              float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out) {
     (void)call;return locateHead(generation,origin,prediction,out);

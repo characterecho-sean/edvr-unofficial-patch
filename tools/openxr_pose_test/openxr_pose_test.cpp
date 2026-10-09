@@ -1,5 +1,6 @@
 #include "../../src/openxr/space_pose.h"
 #include "pose_gap_cases.h"
+#include "head_pose_time_cases.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -179,6 +180,7 @@ int main(int argc, char** argv) {
   if (argc != 2 || std::string(argv[1]) != "--self-test") return 2;
   conversionTests(); locateTests(); timeTests();
   pose_gap_cases::runPoseGapCases(check);
+  head_pose_time_cases::runHeadPoseTimeCases(check);
   std::cout << "openxr_pose_test: " << checks << " checks, " << failures << " failures\n";
   return failures ? 1 : 0;
 }

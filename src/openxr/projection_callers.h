@@ -13,6 +13,7 @@
 // allocates, waits on anything but a few-instruction spin flag, or logs under
 // that flag. The stack capture and the log sink are passed in, so a rig drives
 // every case.
+#include "exe_module.h"
 #include "projection_math.h"
 #include <intrin.h>
 #include <atomic>
@@ -61,29 +62,11 @@ inline const char* cullProbeLine(CullProbeStatus status, CullProbe requested, ch
   }
 }
 
-// The game's executable, as its own PE headers say. No shared helper exists:
-// every build-keyed hook in this repo re-reads the pair from its own copy of
-// the constants (explorer_cam_core.h, transition_flash_eye_base.cpp, ...).
-struct ExeModule {
-  uintptr_t base = 0, size = 0;
-  uint32_t stamp = 0, imageSize = 0;
-};
 // Build 332841: EliteDangerous64.exe, PE TimeDateStamp and SizeOfImage.
 constexpr uint32_t kBuild332841Stamp = 1788384820u;
 constexpr uint32_t kBuild332841ImageSize = 104894464u;
 inline bool isBuild332841(const ExeModule& module) {
   return module.base && module.stamp == kBuild332841Stamp && module.imageSize == kBuild332841ImageSize;
-}
-// This process's executable (openvr_system.cpp: the Windows headers stay out of
-// this one, whose `near` macro would break the rigs that include it).
-ExeModule readExeModule() noexcept;
-
-// A return address as an RVA in the game's executable. 0 is "not captured".
-constexpr uint32_t kFrameOutside = 0xFFFFFFFFu, kFrameUnknown = 0xFFFFFFFEu;
-inline uint32_t frameRva(const ExeModule& module, uintptr_t address) {
-  if (!address) return kFrameUnknown;
-  if (!module.base || address < module.base || address - module.base >= module.size) return kFrameOutside;
-  return static_cast<uint32_t>(address - module.base);
 }
 
 // The six GetProjectionRaw call sites named by the 2026-10-09 disassembly of

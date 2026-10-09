@@ -293,16 +293,16 @@ void OpenVRSystem::GetDXGIOutputInfo(int32_t* index) {const auto s=source_.read(
 bool OpenVRSystem::IsDisplayOnDesktop() { return false; }
 bool OpenVRSystem::SetDisplayVisibility(bool) { unavailable(9);return false; }
 void OpenVRSystem::GetDeviceToAbsoluteTrackingPose(ETrackingUniverseOrigin origin,float prediction,TrackedDevicePose_t* poses,uint32_t count) {
-  // Who is asking, taken here on the caller's own thread: the owner thread the locate hops to cannot tell. The return address decides
-  // which instant a call is located at (advanced.cull_pose): only Elite's one direct pose call, on build 332841, and only when the
-  // host has published a mode; every other caller, and every call with the key off, is located as it always was.
+  // Who is asking, taken here on the caller's own thread: the owner thread the locate hops to cannot tell. Elite's own request for "now"
+  // (a return address inside the game's mapped image, a prediction under 5 ms either way) is located at the latest frame's display
+  // time, the instant the pose it DRAWS with is located at (head_pose_time.h); every other caller is located as it always was.
   const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
   NativeCpuTraceSpan trace(EdvrCpuGetDeviceToAbsoluteTrackingPose);
   if(!poses||!count){trace.finishVoid(0);return;}
   const auto s=source_.read();for(uint32_t i=0;i<count;++i)poses[i]=invalidPose();
-  const ExeModule module=callers_.module();
+  const ExeModule module=exe_;
   HeadCall call;call.thread=GetCurrentThreadId();call.rva=frameRva(module,caller);
-  call.time=cullpose::timeForCall(cullpose::modeFromCode(s.cullPose),isBuild332841(module),call.rva);
+  call.display=answeredAtDisplayTime(call.rva,prediction);
   if(!live(s)){source_.noteHeadCallFailed(call,prediction);trace.finishVoid(0);return;}poses[0]=invalidPose(true);
   if(!originValid(origin)||!std::isfinite(prediction)){source_.noteHeadCallFailed(call,prediction);trace.finishVoid(0);return;}
   TrackedDevicePose_t p=invalidPose(true);

@@ -1,18 +1,18 @@
 #pragma once
 
-// The pose-gap instrument (docs\terrain-culling.md round 6). TEMPORARY with advanced.cull_pose. Always on, cheap: one mutex-held update per
-// GetDeviceToAbsoluteTrackingPose call, one flush line per active caller every 2.0 s.
+// The pose-gap diagnostic (docs\terrain-culling.md). Always on, cheap: one mutex-held update per GetDeviceToAbsoluteTrackingPose call, one
+// line per caller (thread, return RVA) every 60 s, written from the WaitGetPoses publish point.
 //
 // WHAT IT MEASURES. Elite's game thread asks IVRSystem::GetDeviceToAbsoluteTrackingPose for "now"; the render thread draws the pose
-// WaitGetPoses gave it, located at the frame's predictedDisplayTime. If the planet-terrain culler takes the game-thread camera (INFERRED),
-// the gap between the two instants is the lag its tiles are chosen with. Per call this records who asked (thread, return RVA), the
-// prediction passed, the located instant minus the latest frame's display time, the angle between the pose handed back and the pose
-// that frame was drawn with, and how fast the head was turning; the line is written from the WaitGetPoses publish point.
+// WaitGetPoses gave it, located at the frame's predictedDisplayTime. The gap between the two instants is the lag Elite's terrain culling was
+// working with (41-44 ms before the fix, flight 3); the fix (head_pose_time.h) answers Elite's own "now" at the display time, so under it the
+// gap reads 0 for Elite and shows the true lag for any other caller. Per call this records who asked (thread, return RVA), the prediction
+// passed, the located instant minus the latest frame's display time, the angle between the pose handed back and the pose that frame was
+// drawn with, and how fast the head was turning. It is a diagnostic that stays: a caller that appears after a game update, or a fix that
+// stops acting, shows here.
 //
 // Pure: the clock and the sink are passed in, so tools\openxr_pose_test drives every case and holds tools\pose_gap_fixture.log to exactly
 // what this writes (tools\edvr_log.py --tally pose reads it).
-#include "../common/cull_pose.h"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -37,7 +37,7 @@ inline double angularSpeedDegrees(float x,float y,float z) {
 
 // How many callers (thread, return RVA) one window keeps; more are counted and said.
 constexpr unsigned kPoseGapKeys=16;
-constexpr uint64_t kPoseGapWindowMs=2000;
+constexpr uint64_t kPoseGapWindowMs=60000;
 
 class PoseGapStats {
  public:
@@ -69,26 +69,26 @@ class PoseGapStats {
   }
   // One WaitGetPoses completed.
   void noteWait() {std::lock_guard<std::mutex> lock(mutex_);++waits_;}
-  // From the WaitGetPoses publish point: write the window's lines when it is 2.0 s old, or when the mode changed under it (so a line's mode
-  // is the mode its calls were located under). The first call only opens a window. Lines are made under the lock and written outside it.
+  // From the WaitGetPoses publish point: write the window's lines when it is 60 s old. The first call only opens a window. Lines are made under
+  // the lock and written outside it.
   template<class Sink>
-  void flushIfDue(uint64_t nowMs,uint32_t mode,Sink&& sink) {
+  void flushIfDue(uint64_t nowMs,Sink&& sink) {
     Out out;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if(!started_){started_=true;startMs_=nowMs;windowMode_=mode;return;}
-      if(nowMs-startMs_<kPoseGapWindowMs&&mode==windowMode_)return;
-      collect(out,windowMode_);startMs_=nowMs;windowMode_=mode;
+      if(!started_){started_=true;startMs_=nowMs;return;}
+      if(nowMs-startMs_<kPoseGapWindowMs)return;
+      collect(out);startMs_=nowMs;
     }
     for(unsigned i=0;i<out.count;++i)sink(out.lines[i]);
   }
-  // The window as it stands, now, written under `mode` (the end of a run, a rig).
+  // The window as it stands, now (the end of a run, a rig).
   template<class Sink>
-  void flushNow(uint64_t nowMs,uint32_t mode,Sink&& sink) {
+  void flushNow(uint64_t nowMs,Sink&& sink) {
     Out out;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      collect(out,mode);startMs_=nowMs;windowMode_=mode;started_=true;
+      collect(out);startMs_=nowMs;started_=true;
     }
     for(unsigned i=0;i<out.count;++i)sink(out.lines[i]);
   }
@@ -96,7 +96,7 @@ class PoseGapStats {
   uint64_t waits() const {std::lock_guard<std::mutex> lock(mutex_);return waits_;}
 
   // The line for one caller. `from` reads exe+0xRVA, outside (the caller is not in the game''s image) or ? (not captured).
-  static const char* line(char (&buffer)[352],const char* mode,uint32_t thread,uint32_t rva,uint64_t calls,double predictionMs,
+  static const char* line(char (&buffer)[352],uint32_t thread,uint32_t rva,uint64_t calls,double predictionMs,
                           bool gapKnown,double gapMean,double gapMin,double gapMax,bool angleKnown,double angleMean,double angleMax,
                           bool speedKnown,double speed,uint64_t waits,uint64_t failed,uint64_t fallbacks) {
     char from[32],gap[96],angle[80],head[40],tail[40]="";
@@ -108,8 +108,8 @@ class PoseGapStats {
     if(speedKnown)std::snprintf(head,sizeof(head),"%.1f deg/s",speed);else std::snprintf(head,sizeof(head),"n/a");
     if(fallbacks)std::snprintf(tail,sizeof(tail)," fallback %llu",(unsigned long long)fallbacks);
     std::snprintf(buffer,sizeof(buffer),
-      "pose gap: mode %s tid %lu calls %llu from %s prediction %.1f ms target-minus-display %s angle-to-drawn %s head %s waitgetposes %llu failed %llu%s",
-      mode,(unsigned long)thread,(unsigned long long)calls,from,predictionMs,gap,angle,head,(unsigned long long)waits,(unsigned long long)failed,tail);
+      "pose gap: tid %lu calls %llu from %s prediction %.1f ms target-minus-display %s angle-to-drawn %s head %s waitgetposes %llu failed %llu%s",
+      (unsigned long)thread,(unsigned long long)calls,from,predictionMs,gap,angle,head,(unsigned long long)waits,(unsigned long long)failed,tail);
     return buffer;
   }
 
@@ -120,24 +120,22 @@ class PoseGapStats {
     double predictionSum=0,gapSum=0,gapMin=0,gapMax=0,angleSum=0,angleMax=0,speedSum=0;
   };
   struct Out {unsigned count=0;char lines[kPoseGapKeys+1][352]{};};
-  void collect(Out& out,uint32_t label) {
-    const char* mode=cullpose::modeName(cullpose::modeFromCode(label));
+  void collect(Out& out) {
     for(unsigned i=0;i<used_;++i) {
       const Key& k=keys_[i];
-      line(out.lines[out.count++],mode,k.thread,k.rva,k.calls,k.calls?k.predictionSum/double(k.calls)*1000.0:0.0,
+      line(out.lines[out.count++],k.thread,k.rva,k.calls,k.calls?k.predictionSum/double(k.calls)*1000.0:0.0,
         k.gapN!=0,k.gapN?k.gapSum/double(k.gapN):0.0,k.gapMin,k.gapMax,k.angleN!=0,k.angleN?k.angleSum/double(k.angleN):0.0,k.angleMax,
         k.speedN!=0,k.speedN?k.speedSum/double(k.speedN):0.0,waits_,k.failed,k.fallbacks);
     }
     if(dropped_&&out.count<kPoseGapKeys+1)
-      std::snprintf(out.lines[out.count++],sizeof(out.lines[0]),"pose gap: mode %s more than %u callers in a window; %llu calls not counted",
-        mode,kPoseGapKeys,(unsigned long long)dropped_);
+      std::snprintf(out.lines[out.count++],sizeof(out.lines[0]),"pose gap: more than %u callers in a window; %llu calls not counted",
+        kPoseGapKeys,(unsigned long long)dropped_);
     used_=0;dropped_=0;waits_=0;
   }
   mutable std::mutex mutex_;
   Key keys_[kPoseGapKeys]{};
   unsigned used_=0;
   uint64_t dropped_=0,waits_=0,startMs_=0;
-  uint32_t windowMode_=0;
   bool started_=false;
 };
 }

@@ -5,10 +5,8 @@
 #include "../../src/common/native_render_settings.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/journal_watch.h"
-#include "../../src/d3d11/pose_latch_patch.h"
 #include "cull_cycle_cases.h"
 #include "mono_camera_cases.h"
-#include "pose_latch_cases.h"
 
 #include <d3d11.h>
 #include <fcntl.h>
@@ -73,7 +71,6 @@ int wmain(int argc, wchar_t** argv) {
     };
 
     cull_cases::runCullCycleCases(check);   // the probe cycle's own logic: schedule, windows, discard, pairs, statuses, the log tool's fixture
-    pose_cases::runPoseLatchCases(check);   // advanced.cull_pose: the modes, the RVA filter, the target time, the engine patch, its gate and its atomic store
     mono_cases::runMonoCameraCases(check);  // the mono camera hooks: the detour's decision, the gate, the lazy install, the observer, the real hooks
 
     // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
@@ -150,7 +147,7 @@ int wmain(int argc, wchar_t** argv) {
     // a different XR-owner thread.  The provider must not use a producer-ID
     // gate for callbacks.
     EdvrNativeFrameOutput firstOutput{sizeof(firstOutput),
-                                      EDVR_NATIVE_FRAME_VERSION_8};
+                                      EDVR_NATIVE_FRAME_VERSION_7};
     HRESULT workerBegin = E_FAIL;
     HRESULT workerLatch = E_FAIL;
     EdvrNativeFrameDecision firstDecision{
@@ -183,7 +180,7 @@ int wmain(int argc, wchar_t** argv) {
     check(firstOutput.sceneReady && firstOutput.transitionEnabled &&
               !firstOutput.resubmitEnabled,
           "scene and transition outputs");
-    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_8 &&
+    check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_7 &&
               firstOutput.size == sizeof(firstOutput),
           "version 7 answered in kind");
     check(firstOutput.cullChannel == 2,
@@ -211,7 +208,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput lost = input(41, 7, 2, false);
     lost.physicalHead[0] = std::numeric_limits<float>::quiet_NaN();
     EdvrNativeFrameOutput lostOutput{sizeof(lostOutput),
-                                     EDVR_NATIVE_FRAME_VERSION_8};
+                                     EDVR_NATIVE_FRAME_VERSION_7};
     check(table.beginFrame(table.context, &lost, &lostOutput) == S_OK,
           "lost pose succeeds");
     EdvrNativeFrameDecision lostDecision{
@@ -222,7 +219,7 @@ int wmain(int argc, wchar_t** argv) {
     EdvrNativeFrameInput bad = input(41, 7, 3);
     bad.physicalHead[0] = 2.0f;
     EdvrNativeFrameOutput badOutput{sizeof(badOutput),
-                                    EDVR_NATIVE_FRAME_VERSION_8};
+                                    EDVR_NATIVE_FRAME_VERSION_7};
     check(table.beginFrame(table.context, &bad, &badOutput) == E_INVALIDARG,
           "non-rigid physical pose rejected");
 
@@ -316,11 +313,8 @@ int wmain(int argc, wchar_t** argv) {
               EDVR_NATIVE_FRAME_OUTPUT_SIZE_6,
           "version 6 adds exactly the handedness flag and the simulated cant");
     check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_6 + sizeof(uint32_t) ==
-              EDVR_NATIVE_FRAME_OUTPUT_SIZE_7,
-          "version 7 adds exactly the cull probe");
-    check(EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 + sizeof(uint32_t) ==
               sizeof(EdvrNativeFrameOutput),
-          "version 8 adds exactly the pose-time switch");
+          "version 7 adds exactly the cull probe");
 
     // A runtime-only entry applies to any headset on that runtime with no
     // entry of its own; a key with no entry for the worn headset is no trim,
@@ -328,7 +322,7 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("experimental.fov_trim_vertical", "oculus:3");
     edvr::Config::get().set("experimental.fov_trim_outer", "");
     edvr::Config::get().set("experimental.fov_trim_nasal", "virtualdesktopxr/meta-quest-3:9");
-    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_8};
+    EdvrNativeFrameOutput trimOutput{sizeof(trimOutput), EDVR_NATIVE_FRAME_VERSION_7};
     EdvrNativeFrameInput trimFrame = input(41, 7, 10);
     check(table.beginFrame(table.context, &trimFrame, &trimOutput) == S_OK &&
               trimOutput.trimVerticalDeg == 3.0f && trimOutput.trimOuterDeg == 0.0f &&
@@ -352,14 +346,14 @@ int wmain(int argc, wchar_t** argv) {
           "a version 3 caller is answered in kind, its absent tail untouched");
 
     g_journalActive = g_onFootKnown = g_onFoot = true;
-    EdvrNativeFrameOutput onFootOutput{sizeof(onFootOutput), EDVR_NATIVE_FRAME_VERSION_8};
+    EdvrNativeFrameOutput onFootOutput{sizeof(onFootOutput), EDVR_NATIVE_FRAME_VERSION_7};
     EdvrNativeFrameInput onFootFrame = input(41, 7, 12);
     check(table.beginFrame(table.context, &onFootFrame, &onFootOutput) == S_OK &&
               onFootOutput.deferredPacing == 1,
           "weapon stability on foot defers pacing");
 
     g_onFoot = false;
-    EdvrNativeFrameOutput inShipOutput{sizeof(inShipOutput), EDVR_NATIVE_FRAME_VERSION_8};
+    EdvrNativeFrameOutput inShipOutput{sizeof(inShipOutput), EDVR_NATIVE_FRAME_VERSION_7};
     EdvrNativeFrameInput inShipFrame = input(41, 7, 13);
     check(table.beginFrame(table.context, &inShipFrame, &inShipOutput) == S_OK &&
               inShipOutput.deferredPacing == 0,
@@ -367,7 +361,7 @@ int wmain(int argc, wchar_t** argv) {
 
     g_onFoot = true;
     edvr::Config::get().set("fix.weapon_stability", "0");
-    EdvrNativeFrameOutput disabledOutput{sizeof(disabledOutput), EDVR_NATIVE_FRAME_VERSION_8};
+    EdvrNativeFrameOutput disabledOutput{sizeof(disabledOutput), EDVR_NATIVE_FRAME_VERSION_7};
     EdvrNativeFrameInput disabledFrame = input(41, 7, 14);
     check(table.beginFrame(table.context, &disabledFrame, &disabledOutput) == S_OK &&
               disabledOutput.deferredPacing == 0,
@@ -399,7 +393,7 @@ int wmain(int argc, wchar_t** argv) {
     // An unknown channel value is both, the guard's historical behaviour.
     edvr::Config::get().set("advanced.cull_guard_channel", "junk");
     EdvrNativeFrameOutput unknownChannel{sizeof(unknownChannel),
-                                         EDVR_NATIVE_FRAME_VERSION_8};
+                                         EDVR_NATIVE_FRAME_VERSION_7};
     EdvrNativeFrameInput unknownFrame = input(41, 7, 17);
     check(table.beginFrame(table.context, &unknownFrame, &unknownChannel) ==
               S_OK && unknownChannel.cullChannel == 0,
@@ -414,7 +408,7 @@ int wmain(int argc, wchar_t** argv) {
     // in a file still works -- Config reads it as the new name through the
     // moved-from map, which this rig does not register; tools/config_test does,
     // with the shipped tables.)
-    EdvrNativeFrameOutput newNames{sizeof(newNames), EDVR_NATIVE_FRAME_VERSION_8};
+    EdvrNativeFrameOutput newNames{sizeof(newNames), EDVR_NATIVE_FRAME_VERSION_7};
     EdvrNativeFrameInput newNamesFrame = input(41, 7, 18);
     check(table.beginFrame(table.context, &newNamesFrame, &newNames) == S_OK &&
               newNames.trimVerticalDeg == 3.0f,
@@ -425,7 +419,7 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("fix.fov_trim_vertical", "oculus/meta-quest-3:9");
     edvr::Config::get().set("fix.fov_trim_outer", "oculus/meta-quest-3:9");
     edvr::Config::get().set("fix.fov_trim_nasal", "oculus/meta-quest-3:9");
-    EdvrNativeFrameOutput retiredNames{sizeof(retiredNames), EDVR_NATIVE_FRAME_VERSION_8};
+    EdvrNativeFrameOutput retiredNames{sizeof(retiredNames), EDVR_NATIVE_FRAME_VERSION_7};
     EdvrNativeFrameInput retiredFrame = input(41, 7, 19);
     check(table.beginFrame(table.context, &retiredFrame, &retiredNames) == S_OK &&
               retiredNames.trimVerticalDeg == 0.0f && retiredNames.trimOuterDeg == 0.0f &&
@@ -547,25 +541,9 @@ int wmain(int argc, wchar_t** argv) {
         EdvrNativeFrameOutput v5AsV6{EDVR_NATIVE_FRAME_OUTPUT_SIZE_5, EDVR_NATIVE_FRAME_VERSION_6};
         EdvrNativeFrameInput v5AsV6Frame = input(41, 7, ++seq);
         check(table.beginFrame(table.context, &v5AsV6Frame, &v5AsV6) == E_INVALIDARG, "...and a version 5 sized struct claiming version 6 is refused: never half-answered");
-        edvr::Config::get().set("advanced.cull_probe", "all");
-        edvr::Config::get().set("advanced.cull_pose", "display_direct");
-        EdvrNativeFrameOutput v7{EDVR_NATIVE_FRAME_OUTPUT_SIZE_7, EDVR_NATIVE_FRAME_VERSION_7};
-        v7.cullProbe = 0xA5A5A5A5u;
-        EdvrNativeFrameInput v7Frame = input(41, 7, ++seq);
-        check(table.beginFrame(table.context, &v7Frame, &v7) == S_OK && v7.version == EDVR_NATIVE_FRAME_VERSION_7 && v7.size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_7 &&
-                  v7.cullProbe == 1u && edvr::cullpose::driver().latch().kind() == edvr::cullpose::LatchBypass::Kind::Off,
-              "A VERSION 7 CALLER is answered in its own shape, the cull probe included, and is never given a pose mode or the engine patch, whatever advanced.cull_pose says");
-        EdvrNativeFrameOutput fullAsV7{sizeof(fullAsV7), EDVR_NATIVE_FRAME_VERSION_7};
-        EdvrNativeFrameInput fullAsV7Frame = input(41, 7, ++seq);
-        check(table.beginFrame(table.context, &fullAsV7Frame, &fullAsV7) == E_INVALIDARG, "A FULL-SIZE STRUCT CLAIMING VERSION 7 is refused (the size contradicts the version)");
-        EdvrNativeFrameOutput v7AsV8{EDVR_NATIVE_FRAME_OUTPUT_SIZE_7, EDVR_NATIVE_FRAME_VERSION_8};
-        EdvrNativeFrameInput v7AsV8Frame = input(41, 7, ++seq);
-        check(table.beginFrame(table.context, &v7AsV8Frame, &v7AsV8) == E_INVALIDARG, "...and a version 7 sized struct claiming version 8 is refused: never half-answered");
-        edvr::Config::get().set("advanced.cull_probe", "");
-        edvr::Config::get().set("advanced.cull_pose", "");
         // ---- advanced.cull_probe (the terrain-culling arc, docs\terrain-culling.md; EdvrNativeFrameOutput::cullProbe, version 7) ------------------------------------
         auto ask7 = [&](uint32_t* probe) {
-            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_8};
+            EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_7};
             o.cullProbe = 0xA5A5A5A5u;   // a sentinel the answer must overwrite
             EdvrNativeFrameInput f = input(41, 7, ++seq);
             const HRESULT r = table.beginFrame(table.context, &f, &o);
@@ -732,38 +710,6 @@ int wmain(int argc, wchar_t** argv) {
             check(askAt(t) == S_OK && probe == 0u && !edvr::monocam::g_lie.load() && g_driver.status() == Status::Idle && g_steadyMono.status() == Status::Idle,
                   "the key back at off: the lie flag is down and both statuses are idle");
             edvr::monocam::uninstallForTest();
-            // advanced.cull_pose through beginFrame: the code the runtime is told, and what the engine patch does on an executable that is not Elite.
-            {
-                namespace cpose = edvr::cullpose;
-                cpose::resetForTest();
-                g_buildOverride.store(1);
-                uint32_t told = 0;
-                const auto askPose = [&](const char* text) {
-                    edvr::Config::get().set("advanced.cull_pose", text);
-                    EdvrNativeFrameOutput o{sizeof(o), EDVR_NATIVE_FRAME_VERSION_8};
-                    o.cullPose = 0xA5A5A5A5u;   // a sentinel the answer must overwrite
-                    EdvrNativeFrameInput f = input(41, 7, ++seq);
-                    const HRESULT r = table.beginFrame(table.context, &f, &o);
-                    told = o.cullPose;
-                    return r;
-                };
-                struct PoseCase { const char* text; uint32_t code; };
-                const PoseCase poseCases[] = {{"off", 0}, {"display", 1}, {"next", 2}, {"display_direct", 3}, {"next_direct", 4}, {"DISPLAY", 1}, {"Next_Direct", 4},
-                                              {"displays", 0}, {"2", 0}, {"junk", 0}, {"", 0}};
-                bool codes = true;
-                for (const PoseCase& c : poseCases) codes = codes && askPose(c.text) == S_OK && told == c.code;
-                check(codes, "advanced.cull_pose reaches a version 8 caller as 0 off, 1 display, 2 next, 3 display_direct, 4 next_direct (any case); a near miss, a number and junk are 0, and the sentinel is overwritten");
-                check(askPose("display_direct") == S_OK && told == 3u && cpose::driver().latch().kind() == cpose::LatchBypass::Kind::Refused &&
-                          std::strcmp(cpose::driver().latch().why(), "not build 332841") == 0,
-                      "display_direct on an executable that is not Elite (this rig): the code is still told, and the engine patch is refused with the reason, nothing written");
-                check(askPose("next") == S_OK && told == 2u && cpose::driver().latch().kind() == cpose::LatchBypass::Kind::Off, "leaving _direct clears the refusal");
-                g_buildOverride.store(0);
-                check(askPose("display") == S_OK && told == 0u && askPose("next_direct") == S_OK && told == 0u, "on another build the time modes stand down: the runtime is told 0, display and next_direct alike");
-                check(askPose("off") == S_OK && told == 0u && cpose::driver().latch().kind() == cpose::LatchBypass::Kind::Off, "...and the key back at off is off");
-                g_buildOverride.store(1);
-                edvr::Config::get().set("advanced.cull_pose", "");
-                cpose::resetForTest();
-            }
             table.setCullState(table.context, 0, 1.0f, 1.0f);            g_clockOverrideUs.store(0);
             g_buildOverride.store(-1);
             edvr::Config::get().set("fix.cull_guard", "PeRcEnT");

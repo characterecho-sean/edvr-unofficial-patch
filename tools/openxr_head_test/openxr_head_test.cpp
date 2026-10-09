@@ -76,7 +76,7 @@ int selfTest(){
   check(out.locationFlags==0&&out.pose.orientation.w==1&&out.pose.position.x==0,"partial tracking initialized invalid");
   fake={};fake.time=(std::numeric_limits<XrTime>::max)()-500000000;check(attempt(api,instance,view,origin,.5f,now)==XR_SUCCESS&&time==(std::numeric_limits<XrTime>::max)(),"exact upper addition boundary");
   fake={};fake.time=(std::numeric_limits<XrTime>::min)()+500000000;check(attempt(api,instance,view,origin,-.5f,now)==XR_SUCCESS&&time==(std::numeric_limits<XrTime>::min)(),"exact lower addition boundary");
-  // ---- locateAt: the same locate at an instant the caller formed (advanced.cull_pose: a frame's display time, or one period later) ------------
+  // ---- locateAt: the same locate at an instant the caller formed (the head-pose answer: the drawn frame's display time) ------------
   {
     XrSpaceLocation at{XR_TYPE_SPACE_LOCATION};XrTime exact=0;HeadLocatorStage stage=HeadLocatorStage::Convert;
     fake={};
