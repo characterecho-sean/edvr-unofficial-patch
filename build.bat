@@ -2064,15 +2064,6 @@ REM self-test here, after both parents' fixtures ran.
 python "tools\hud_parity.py" --self-test || exit /b 1
 exit /b 0
 
-:rig_vr_census_test
-if not exist "%OBJ%\vrcensus" mkdir "%OBJ%\vrcensus"
-cl.exe /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
-    /Fo"%OBJ%\vrcensus\\" /Fe"%BUILD%\vr_census_test.exe" ^
-    "tools\vr_census_test\vr_census_test.cpp" /link /INCREMENTAL:NO
-if errorlevel 1 ( echo [edvr] ERROR: VR census budget test build failed & exit /b 1 )
-"%BUILD%\vr_census_test.exe" --self-test || exit /b 1
-exit /b 0
-
 :rig_gpu_span_state_test
 REM CPU policy prototype only: no shipping proxy calls this state machine yet.
 if not exist "%OBJ%\gpuspanstate" mkdir "%OBJ%\gpuspanstate"

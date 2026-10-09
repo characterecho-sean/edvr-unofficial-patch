@@ -75,7 +75,7 @@ ID3D11GeometryShader* shaderSwapCreateGs(ID3D11DeviceContext* ctx,
 // only in those opt-in configurations (LoadLibraryW on demand: the proxy has no
 // static import of it, which the build's PE gate holds). The compute form was
 // removed on 2026-10-01: nothing called it -- the FSS series reducer, its last
-// user, has been a precompiled shader (kFssSeriesBytecode) for some time.
+// user, has been a precompiled shader for some time.
 //
 // Compile HLSL and create a vertex shader from it, or return null having
 // said why in the log. `who` names the caller in those messages ("sun

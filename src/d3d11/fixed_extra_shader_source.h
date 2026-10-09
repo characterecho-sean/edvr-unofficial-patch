@@ -445,27 +445,6 @@ void main(uint3 id : SV_DispatchThreadID) {
 
 }
 
-namespace fss_dump {
-
-constexpr char kSeriesCsHlsl[] = R"HLSL(
-Texture2D<float4> src : register(t0);
-RWTexture2D<float> outt : register(u0);
-cbuffer P : register(b0) { uint4 off; }   // x = yOffset, y = tw, z = th
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= off.y || id.y >= off.z) return;
-    float s = 0;
-    for (uint j = 0; j < 16; ++j)
-        for (uint i = 0; i < 16; ++i) {
-            float4 c = src.Load(int3(id.x * 16 + i, id.y * 16 + j, 0));
-            s += dot(c.rgb, float3(0.299, 0.587, 0.114));
-        }
-    outt[uint2(id.x, off.x + id.y)] = s / 256.0;
-}
-)HLSL";
-
-}
-
 namespace depth_probe {
 
 constexpr char kSampleCsHlsl[] = R"HLSL(

@@ -459,7 +459,7 @@ struct State {
     uint64_t spatialFallbacks = 0, spatialFallbackFailures = 0;
     FlatLivePhase phase;
     Ptr<ID3D11Resource> phaseDepth,phaseHdr;
-    bool jitterWanted = true, frameCoverage = true, temporalAccepted = false;
+    bool frameCoverage = true, temporalAccepted = false;
     // advanced.temporal_aa_jitter_phases as of the last read (8 to 64, default 8), and the one value the log has said it could not use,
     // so a bad value is said once and not every frame. The count a frame runs is flatCameraPhaseCount(route, jitterPhases).
     uint32_t jitterPhases = kTemporalJitterCount;
@@ -1162,7 +1162,7 @@ void reportMapBounce(uint64_t frame, uint64_t now, bool periodic) {
 bool nonzeroPhase(const State& s) { return s.phase.currentX!=0 || s.phase.currentY!=0; }
 void reportProjectionFailure(const State& s, const FlatProjectionRecipes& recipes,
     uint64_t vs, uint64_t ps, uint64_t cs) {
-    if(!s.projection || !s.jitterWanted || !nonzeroPhase(s))return;
+    if(!s.projection || !nonzeroPhase(s))return;
     // Failure-only, independent of F10. Startup cannot consume the live-draw
     // budget, and resource resets cannot restart either process-wide budget.
     static uint32_t appliedEvents=0, earlyEvents=0;
@@ -1197,7 +1197,7 @@ void reportProjectionFailure(const State& s, const FlatProjectionRecipes& recipe
     }
 }
 void failPhase(State& s,const char* reason) {
-    s.frameCoverage=false;if(!s.jitterWanted)return;
+    s.frameCoverage=false;
     s.phase.fail();s.jitterReason=reason;++s.jitterRefusals;
     if(s.phaseCensusPending) {
         s.phaseCensusFailed=true;
@@ -3262,7 +3262,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // prefix clears its identity. A resize flush sees no pending frame twice.
     finishPhaseCensusFrame(s);
     // Part B coverage census: close out the frame that just ended. Always
-    // on, independent of jitterWanted -- see the 5s report
+    // on -- see the 5s report
     // below.
     ++s.covFrames;
     if (s.observing) ++s.covFramesObserving;
@@ -3396,7 +3396,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     // The completed frame is a draw-capture sample only if it was live: the resolver did not reset
     // it, and it ran at a nonzero phase unless the jitter is off on purpose. The two frames after an
     // F10 arm were neither, and their constants carry no phase (2026-09-29).
-    s.drawCapture.present(s.context.Get(),frame,flatCaptureFrameLive(flatMonoResolveLastReset(),s.frameHadPhase,s.jitterWanted));
+    s.drawCapture.present(s.context.Get(),frame,flatCaptureFrameLive(flatMonoResolveLastReset(),s.frameHadPhase));
     {FlatComputeInternalScope internal;s.drawPackets.present(s.context.Get(),frame);}
     if(s.drawPackets.finished()!=s.drawPacketsReported) {
         s.drawPacketsReported=s.drawPackets.finished();
@@ -3644,7 +3644,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     }
     s.drawPacketFrame=frame+1;s.drawPacketSequence=0;
     s.drawPacketContext=s.context;s.drawPacketThread=GetCurrentThreadId();s.drawPacketOutput=output;
-    s.phaseCensusPending=s.jitterWanted && s.work != FlatWork::Paused;
+    s.phaseCensusPending=s.work != FlatWork::Paused;
     s.phaseCensusFailed=false;
     s.prefix.output = output.Get(); s.prefix.width = d.Width; s.prefix.height = d.Height; s.prefix.format = d.Format;
     flatUiLayerFrame();   // fix.ui_quality's flat layer: its 30 s lines (flat_ui_layer.h)
@@ -3737,7 +3737,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             Log::get().note("%s",unkeyed);
         }
         Log::get().note("flat jitter: enabled=%u wanted=%u phases=%u phase=(%.5g,%.5g) previous=(%.5g,%.5g) warm=%u frames=%llu draws=%llu dispatches=%llu refusals=%llu state=%s history-valid=%u",
-            enabled?1u:0u,s.jitterWanted?1u:0u,s.phase.phaseCount,
+            enabled?1u:0u,1u,s.phase.phaseCount,
             s.phase.currentX,s.phase.currentY,s.phase.previousX,s.phase.previousY,s.phase.warmFrames,
             (unsigned long long)s.jitteredFrames,(unsigned long long)s.jitterDraws,(unsigned long long)s.jitterDispatches,
             (unsigned long long)s.jitterRefusals,s.jitterReason,s.phase.previousAcceptedValid?1u:0u);
@@ -4257,7 +4257,7 @@ void flatRuntimeMapBounceNoteMap(ID3D11DeviceContext* context, ID3D11Resource* r
     if (type!=D3D11_MAP_WRITE_DISCARD) { ++w.notDiscard; return; }
     if (context!=state().context.Get()) { ++w.foreignContext; return; }
     if (!owner()) { ++w.foreignThread; return; }
-    if (state().work!=FlatWork::Full || !state().jitterWanted || !state().projection) {
+    if (state().work!=FlatWork::Full || !state().projection) {
         ++w.paused; return;
     }
 }
@@ -4266,7 +4266,7 @@ void* flatRuntimeMapBounceInstall(ID3D11DeviceContext* context, ID3D11Resource* 
     auto& bounce=mapBounce();
     if (bounce.decision()!=flatmap::State::On || !flatRuntimeActive() || !real || sub!=0 ||
         type!=D3D11_MAP_WRITE_DISCARD || context!=state().context.Get() ||
-        !owner() || state().work!=FlatWork::Full || !state().jitterWanted ||
+        !owner() || state().work!=FlatWork::Full ||
         !state().projection) return real;
     const auto source=state().projection->bounceSource(resource);
     if (!source.eligible) {
@@ -4791,7 +4791,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         s.prefix.unsupportedFamilyDraws==0;
     const FlatRuntimeTarget* overlayTarget=nullptr;
     if(s.work==FlatWork::Full && (s.hdrKey==FlatHdrKey::Auto || copyWeapon()) && s.projection &&
-       s.jitterWanted && !s.phase.failed && s.frameCoverage &&
+       !s.phase.failed && s.frameCoverage &&
        flatCameraInjectUpstreamOwns() && !foreignWork.load(std::memory_order_acquire) &&
        !s.prefix.uncertain && !d.supported && !tone && !copy &&
        k.format==26 && k.color && k.depth && k.dsv && k.camera &&
@@ -4933,7 +4933,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
                 "overlay-target-found=%u depth-write=%u stencil-write=%u stencil-mask-04=%u phase-applied-or-zero=%u; the model made this draw the HDR's first second camera, "
                 "so none of the admissions took it",
                 (unsigned long long)s.prefix.frame,s.prefix.sequence,(unsigned long long)k.vs,(unsigned long long)k.ps,copyWeapon()?"copy":"hdr",
-                flag(s.hdrKey==FlatHdrKey::Auto),flag(copyWeapon()),flag(s.work==FlatWork::Full),flag(s.projection!=nullptr),flag(s.jitterWanted),
+                flag(s.hdrKey==FlatHdrKey::Auto),flag(copyWeapon()),flag(s.work==FlatWork::Full),flag(s.projection!=nullptr),flag(true),
                 flag(!s.phase.failed),flag(s.frameCoverage),flag(flatCameraInjectUpstreamOwns()),flag(foreignWork.load(std::memory_order_acquire)),
                 flag(s.prefix.uncertain),flag(d.supported),flag(k.color && k.depth && k.dsv && k.camera),
                 flag(flat_mono_detail::hdrViewport(k,k.width,k.height)),flag(flatHdrCouldConsume(s.hdr,k)),
@@ -5000,11 +5000,11 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
     const auto alternate=flatUntrustedNomination(d,s.namedDepth,
         s.namedDepth?s.namedCamera:nullptr,sceneExtent,
         s.work==FlatWork::Full && s.hdrKey==FlatHdrKey::Auto &&
-            !s.untrusted.finished() && s.jitterWanted,
+            !s.untrusted.finished(),
         s.prefix.sequence,s.prefix.frame,sourceCandidate && !s.namedDepth);
     const bool inertSource=alternate.candidate &&
         flatUntrustedProvenCameraIndependent(classifyFlatProjectionPair(s,k.vs,k.ps));
-    if(s.work==FlatWork::Full && s.hdrKey==FlatHdrKey::Auto && s.jitterWanted &&
+    if(s.work==FlatWork::Full && s.hdrKey==FlatHdrKey::Auto &&
        !s.untrusted.finished() && !inertSource && k.format==23 && sceneExtent &&
        k.color && k.depth) {
         bool inserted=false;
@@ -5587,7 +5587,7 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         (s.previous.outputWidth != selected.outputWidth || s.previous.outputHeight != selected.outputHeight ||
          s.previous.renderWidth != selected.renderWidth || s.previous.renderHeight != selected.renderHeight);
     f.reset = resetMissing || resetGap || resetDepth || resetColor || resetExtent ||
-        (s.jitterWanted && (s.phase.failed || !s.phase.previousAcceptedValid));
+        (s.phase.failed || !s.phase.previousAcceptedValid);
     f.jitterX=s.phase.currentX;f.jitterY=s.phase.currentY;
     f.previousJitterX=f.reset?f.jitterX:s.phase.previousX;
     f.previousJitterY=f.reset?f.jitterY:s.phase.previousY;
@@ -5886,7 +5886,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         (s.previous.outputWidth != selected.outputWidth || s.previous.outputHeight != selected.outputHeight ||
          s.previous.renderWidth != selected.renderWidth || s.previous.renderHeight != selected.renderHeight);
     f.reset = resetMissing || resetGap || resetDepth || resetColor || resetExtent ||
-        (s.jitterWanted && (s.phase.failed || !s.phase.previousAcceptedValid));
+        (s.phase.failed || !s.phase.previousAcceptedValid);
     f.jitterX = s.phase.currentX; f.jitterY = s.phase.currentY;
     f.previousJitterX = f.reset ? f.jitterX : s.phase.previousX;
     f.previousJitterY = f.reset ? f.jitterY : s.phase.previousY;
