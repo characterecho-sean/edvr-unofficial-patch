@@ -123,6 +123,7 @@ struct RowState {
     std::string snapshot;  // restart rows: the value at launch
     bool        pending = false;
     bool        auditNoted = false;
+    EditGeneration edits;  // every edit of the row takes a number; a failed write rolls the row back only if its job still holds the latest (menu_edit_hold.h)
     // A hotkey row: the Elite bindings the same press also triggers, as the last
     // check found them (hotkey_capture.h). Zero is clear or not yet checked.
     int         clashCount = 0;
@@ -1276,6 +1277,7 @@ struct WriteJob {
     std::string fromValue;
     std::string toValue;
     std::string dropped;
+    uint32_t    gen = 0;   // the row's edit number when this edit was made (EditGeneration): the rollback of a failed write asks whether a newer edit exists
 };
 struct WriteDone {
     WriteJob    job;
@@ -2409,6 +2411,7 @@ void enqueueChange(WriteJob& job, bool held = false) {
     if (!held) g_held.flush(EditFlush::Other);
     const MenuRowDef& d = kMenuRows[job.def];
     job.before = g_rows[job.def].value;
+    job.gen = g_rows[job.def].edits.next();
     // Show it now; the worker writes it; the reload that follows confirms it.
     g_rows[job.def].value = job.value;
     if (d.applies == 2) {
@@ -2565,10 +2568,14 @@ void drainWrites() {
             s.lastWrite = "FAILED: " + w.err;
             Log::get().note("menu: %s = %s could not be written: %s.", w.job.dotted.c_str(),
                             w.job.value.c_str(), w.err.c_str());
-            g_rows[w.job.def].value = rowValue(d);
-            if (d.applies == 2) {
-                g_rows[w.job.def].pending = rowPending(d, g_rows[w.job.def].value,
-                                                       g_rows[w.job.def].snapshot);
+            // The row goes back to what the file holds only if this was its latest edit. A newer one (held, queued, or written already) is what the row shows now, and
+            // its own result decides: putting the file's value back here would drop the steps made since (menu_edit_hold.h, EditGeneration).
+            if (g_rows[w.job.def].edits.rollbackDue(w.job.gen)) {
+                g_rows[w.job.def].value = rowValue(d);
+                if (d.applies == 2) {
+                    g_rows[w.job.def].pending = rowPending(d, g_rows[w.job.def].value,
+                                                           g_rows[w.job.def].snapshot);
+                }
             }
         }
         s.contentDirty = true;

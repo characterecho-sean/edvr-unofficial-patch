@@ -24,6 +24,8 @@
 //   H11 the glue (menu.cpp) is wired: held steps, flushes, the reload that must not put a held value back, the worker that writes what was queued before a quit (read as text)
 //   H12 the refresh budget: a five-second hold is 12 to 22 writes at any frame rate, a third of the old cost or less
 //   H13 the config refresh window line: counts as counted, the closing sentence only for a window with nothing in it; the glue prints it through the formatter (read as text)
+//   H14 a write that fails while a NEWER edit of the row exists (the 0.19.0 release review, "existing limitation"): the row keeps showing the newer value, the next repeat steps from
+//       it (the review's case ends at 6, not 1), the newer edit's own failure still rolls the row back, an older job never does, and the edit counters are per row
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -90,6 +92,7 @@ struct Job {
     int value = 0;     // the last step's value
     int before = 0;    // what the file held before the burst's first step
     unsigned step = 0; // the sequence number of the step that made it
+    uint32_t gen = 0;  // the row's edit number when the step was made (EditGeneration)
 };
 struct Write {
     Job job;
@@ -114,6 +117,7 @@ struct Sim {
     int file = 100;          // what the file holds: what the writes landed
     unsigned steps = 0;
     bool limited = false;    // the row is at its limit: the key is down and no step is made
+    EditGeneration rowEdits;   // menu.cpp's RowState::edits for this row
     EditCoalescer<Job> held{&Sim::sink, this, &mergeJob};
     static void sink(void* ctx, const Job& job, EditFlush why) {
         Sim* s = static_cast<Sim*>(ctx);
@@ -127,7 +131,12 @@ struct Sim {
         j.value = ++shown;
         j.before = shown - 1;
         j.step = steps;
+        j.gen = rowEdits.next();   // menu.cpp's enqueueChange
         held.hold(j, def, page, now);
+    }
+    // menu.cpp's drainWrites on a write that failed: the row goes back to what the file holds unless the row has been edited since.
+    void writeFailed(const Write& w) {
+        if (rowEdits.rollbackDue(w.job.gen)) shown = file;
     }
     void frame(uint32_t dt, bool keyDown) {
         now += dt;
@@ -307,6 +316,74 @@ void caseRollback() {
     check(s.writes.size() == before + 1 && s.writes.back().job.before == s.file && s.writes.back().job.value == s.file + 1, "H9.c ...and is written as a burst of its own");
 }
 
+// ---- H14 --------------------------------------------------------------------------------------------------------------------------
+// menu.cpp's drainWrites on a write that failed while a NEWER edit of the row exists. The review's scratch case is the first block: the file holds 0, a held key steps every 83 ms
+// from 1000, the 250 ms bound writes A = 4 at 1250, B = 5 is made at 1332 and held, and A's write fails. The row went to 0 and the next repeat stepped to 1: the burst's last write
+// was 1, not 6.
+void caseFailedWhileNewer() {
+    {
+        Sim s;
+        s.shown = s.file = 0;
+        for (uint64_t at : {1000u, 1083u, 1166u, 1249u}) { s.now = at; s.step(); }
+        s.now = 1250;
+        s.held.tick(s.now, true, s.highlight, s.page);
+        check(s.writes.size() == 1 && s.writes[0].job.value == 4 && s.writes[0].why == EditFlush::MaxWait, "H14.pre the bound writes A = 4 at 1250 ms");
+        s.now = 1332;
+        s.step();
+        check(s.shown == 5 && s.held.pending(), "H14.pre2 B = 5 is shown and held");
+        s.now = 1350;
+        s.held.tick(s.now, true, s.highlight, s.page);
+        s.writeFailed(s.writes[0]);   // the worker reports A failed
+        check(s.shown == 5, "H14.a A's write fails while the newer B is held: the row keeps showing 5, not the file's 0");
+        s.now = 1415;
+        s.step();
+        check(s.shown == 6, "H14.b ...so the next repeat steps from there: 6, not 1");
+        s.now = 1498;
+        s.held.tick(s.now, false, s.highlight, s.page);   // the key comes up
+        check(s.writes.size() == 2 && s.writes[1].job.value == 6 && s.writes[1].job.before == 4 && s.writes[1].why == EditFlush::Release,
+              "H14.c ...and the write on release carries 6 (one burst, 4 to 6)");
+    }
+    {
+        // the newer edit is already queued behind the failed one (written on release, not yet reported): the failed one still leaves the row alone, and the newer one's failure rolls it back
+        Sim s;
+        s.shown = s.file = 0;
+        for (uint64_t at : {1000u, 1083u, 1166u, 1249u}) { s.now = at; s.step(); }
+        s.now = 1250;
+        s.held.tick(s.now, true, s.highlight, s.page);
+        s.now = 1332;
+        s.step();
+        s.now = 1400;
+        s.held.tick(s.now, false, s.highlight, s.page);
+        check(s.writes.size() == 2 && !s.held.pending() && s.shown == 5, "H14.pre3 A = 4 and B = 5 are both queued");
+        s.writeFailed(s.writes[0]);
+        check(s.shown == 5, "H14.d the older of two queued writes fails: the row keeps showing 5");
+        s.writeFailed(s.writes[1]);
+        check(s.shown == 0, "H14.e ...and the newer one's failure, the row's latest edit, still puts the row back to what the file holds");
+    }
+    {
+        Sim s;
+        s.shown = s.file = 0;
+        s.now = 1000; s.step();
+        s.now = 1083; s.step();
+        s.now = 1100;
+        s.held.tick(s.now, false, s.highlight, s.page);
+        check(s.writes.size() == 1 && s.writes[0].job.value == 2 && !s.held.pending(), "H14.pre4 a burst of two is written on release");
+        s.writeFailed(s.writes[0]);
+        check(s.shown == 0, "H14.f a failed write that was the row's latest edit puts the row back, as before (H9)");
+    }
+    {
+        // the counters: strictly increasing, an older job is never the latest, and one row's edits do not count against another's
+        EditGeneration a, b;
+        const uint32_t a1 = a.next();
+        const uint32_t a2 = a.next();
+        const uint32_t b1 = b.next();
+        check(a1 != a2 && !a.rollbackDue(a1) && a.rollbackDue(a2) && b.rollbackDue(b1), "H14.g an edit counter is per row: an older job never rolls back, the latest does, another row's edit counts for nothing");
+        b.next();
+        b.next();
+        check(a.rollbackDue(a2), "H14.h ...and edits of other rows after it change nothing");
+    }
+}
+
 // ---- H10 --------------------------------------------------------------------------------------------------------------------------
 void caseMerge() {
     Sim s;
@@ -366,6 +443,10 @@ void caseGlue(const std::string& root) {
     check(occurrences(menu, "if (g_writer.queue.empty()) return;") == 1 && !has(menu, "if (g_writer.quit) return;"), "H11.p9 the writer, told to quit, still writes what was queued before");
     check(occurrences(menu, "if (g_held.pending() && g_held.def() == i) continue;") == 1, "H11.p10 a reload of an earlier write does not put a held row back to the file's value");
     check(occurrences(menu, "g_rows[w.job.def].value = rowValue(d);") == 1, "H11.p11 a failed write still puts the row back to what the file holds");
+    check(occurrences(menu, "job.gen = g_rows[job.def].edits.next();") == 1 && occurrences(menu, "EditGeneration edits;") == 1 && occurrences(menu, "uint32_t    gen = 0;") == 1,
+          "H11.p13 every edit takes the row's next edit number, and the job carries it");
+    check(occurrences(menu, "if (g_rows[w.job.def].edits.rollbackDue(w.job.gen)) {\n                g_rows[w.job.def].value = rowValue(d);") == 1,
+          "H11.p14 ...and a failed write puts the row back only if no newer edit of the row has been made since");
     check(occurrences(menu, "    pending.before = before;\n    pending.fromValue = fromValue;\n    pending.dropped = dropped;") == 1, "H11.p12 a burst keeps the first step's old value for the log");
     check(occurrences(perf, "formatConfigRefreshWindow(refreshLine, sizeof(refreshLine), s.frameNo, reloads, reloadMs, reloadMaxMs, edits);") == 1 && !has(perf, "All zero"),
           "H13.p1 the monitor prints the config refresh line through the formatter, with no sentence of its own");
@@ -397,6 +478,7 @@ int main(int argc, char** argv) {
     caseOther();
     caseNoDouble();
     caseRollback();
+    caseFailedWhileNewer();
     caseMerge();
     caseBudget();
     caseLine();
