@@ -3081,7 +3081,7 @@ void testFlatSubstitutionWiring() {
         // Who reaches the runtime's scopes.
         {&vscreenCpp, "FlatRuntimeDrawScope flatDraw(self,", 7, "every draw entry point (D, A, I, N, X, and the two indirect ones) opens the draw scope"},
         {&exposureCpp, "FlatRuntimeDispatchScope flatDispatch(self);", 2, "Dispatch and DispatchIndirect open the dispatch scope"},
-        {&deviceCpp, "menuFlatResize(); flatRuntimeResize(); }", 2, "both ResizeBuffers hooks tell the runtime before the real call"},
+        {&deviceCpp, "menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }", 2, "both ResizeBuffers hooks tell the runtime (then measure the back buffer's references) before the real call"},
     };
     for (const Pin& pin : pins) {
         check(count(*pin.text, pin.needle) == pin.times, pin.what);

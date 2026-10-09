@@ -156,9 +156,10 @@ bool schemaHasRow(const std::string& schema, const char* section, const char* ke
 
 void panelTable(const std::string& root, const std::string& gen) {
     using namespace edvr;
-    check(kFlatPageRowCount >= 3 && flatPageHasRow("fix", "temporal_aa") &&
-              flatPageHasRow("fix", "temporal_aa_model") && flatPageHasRow("fix", "render_sharpness"),
-          "the flat page has the mode, the DLSS preset and the sharpening");
+    check(kFlatPageRowCount >= 4 && flatPageHasRow("fix", "temporal_aa") &&
+              flatPageHasRow("fix", "temporal_aa_model") && flatPageHasRow("fix", "render_sharpness") &&
+              flatPageHasRow("fix", "ui_quality"),
+          "the flat page has the mode, the DLSS preset, the sharpening and the UI quality");
     check(!flatPageHasRow("fix", "black_void") && !flatPageHasRow("fix", "panel_distance"),
           "no unrelated fix is a row of the flat page");
 
@@ -194,6 +195,12 @@ void panelTable(const std::string& root, const std::string& gen) {
     const FlatPageRow* m2 = flatPageFirstRefused(lacksModel);
     check(m2 && std::strcmp(m2->key, "temporal_aa_model") == 0,
           "control: a gate without fix.temporal_aa_model is caught, by name");
+    const auto lacksUiQuality = [](const char* dotted) {
+        return runtimeProfileAllowsKey(dotted) && std::strcmp(dotted, "fix.ui_quality") != 0;
+    };
+    const FlatPageRow* m3 = flatPageFirstRefused(lacksUiQuality);
+    check(m3 && std::strcmp(m3->key, "ui_quality") == 0,
+          "control: a gate without fix.ui_quality is caught, by name");
     check(flatPageFirstRefused([](const char*) { return false; }) != nullptr,
           "control: a gate that refuses everything is caught");
     // And the gate as shipped really does refuse what it should, so the check above

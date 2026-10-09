@@ -560,6 +560,18 @@ bool nativeTemporalEyeGeometry(uint32_t eye, uint64_t* sequence, float frustum[4
   if (shift) { shift[0] = s.shift[eye][0]; shift[1] = s.shift[eye][1]; }
   return true;
 }
+// The omission counters the close() summary prints, for the current channel (temporal_pass.h): skipped counts one per
+// omitted EYE per omitted frame; history_kept (spared) counts once per resolved omission RUN per eye. FOR TESTS and the
+// glue rig: a flight is judged on unjudged_resets == 0 and on runs per eye, not on held frames == history_kept.
+bool nativeTemporalOmissionCounters(uint64_t* skipped, uint64_t* historyKept, uint64_t* returnedResets, uint64_t* unjudgedResets) {
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!current || !current->active) return false;
+  if (skipped) *skipped = current->skipped;
+  if (historyKept) *historyKept = current->spared;
+  if (returnedResets) *returnedResets = current->returned;
+  if (unjudgedResets) *unjudgedResets = current->unjudged;
+  return true;
+}
 // fix.ui_quality's panels and instruments (ui_surfaces.h): the size, max over eyes, the
 // runtime's beginFrame says the frame being drawn was rendered for (the
 // host's treatedGeometry: the FOV trim included). Outside

@@ -526,7 +526,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\render_boundary.cpp" ^
     "src\d3d11\exposure_fix.cpp" "src\d3d11\vscreen.cpp" ^
     "src\d3d11\glitch_frame.cpp" ^
-    "src\d3d11\pose_reader_watch.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
+    "src\d3d11\transition_flash_eye_base.cpp" ^
     "src\d3d11\explorer_cam.cpp" ^
     "src\d3d11\vscreen_res.cpp" "src\common\vscreen_auto_state.cpp" "src\d3d11\vscreen_footprint.cpp" ^
     "src\d3d11\binding_shadow.cpp" ^
@@ -569,7 +569,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
     "src\d3d11\sharpen_pass.cpp" ^
-    "src\d3d11\flat_sharpen.cpp" ^
+    "src\d3d11\flat_sharpen.cpp" "src\d3d11\flat_ui_layer.cpp" ^
     "src\d3d11\loader_panel.cpp" ^
     "src\d3d11\splash_dim.cpp" ^
     "src\d3d11\billboard_fix.cpp" ^
@@ -971,6 +971,8 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_temporal\\" /Fe"%BUILD%\native_temporal_test.exe" ^
     "tools\native_temporal_test\native_temporal_test.cpp" "src\d3d11\native_temporal.cpp" ^
+    "src\d3d11\glitch_frame.cpp" "src\d3d11\vr_runtime.cpp" "src\d3d11\transition_flash_eye_base.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib dxgi.lib
 if errorlevel 1 ( echo [edvr] ERROR: native temporal test build failed & exit /b 1 )
@@ -2309,6 +2311,9 @@ for %%T in (native stereo) do (
     "%BUILD%\openxr_%%T_test.exe" --dry-run || exit /b 1
     "%BUILD%\openxr_%%T_test.exe" --self-test || exit /b 1
 )
+REM tools\openxr_stereo_test\mutants.py --self-test holds the mutation list to d3d11_stereo.cpp as it is (a fully black frame draws nothing: case B1); --run builds the
+REM rig against each edit.
+python "tools\openxr_stereo_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_openxr_capture_test
@@ -3025,6 +3030,26 @@ if errorlevel 1 ( echo [edvr] ERROR: explorer_cam_fade_test build failed & exit 
 python "tools\explorer_cam_fade_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_menu_edit_hold_test
+echo [edvr] === menu_edit_hold_test.exe ===
+REM Build gate for the F8 menu's held numeric edits (src\d3d11\menu_edit_hold.h) and the config refresh window line (config_refresh_line.h). Holding a Number row steps
+REM it every 83 ms; each step is shown at once, and a burst of steps is one write and so one config refresh on the frame thread (F16 priced the hold at 100 refreshes in
+REM five seconds). The rig drives the coalescer with a frame clock and the tracker's repeat: a tap writes once on release, a long hold a bounded few, a row or page
+REM switch, a close, a shutdown and any other change write what is held, nothing is written twice, a failed write puts the row back; menu.cpp's wiring and the monitor's
+REM use of the formatter are read as text. No device needed.
+REM tools\menu_edit_hold_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\menueditHold" mkdir "%OBJ%\menueditHold"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\menueditHold"\ /Fe"%OBJ%\menueditHold\menu_edit_hold_test.exe" ^
+    "tools\menu_edit_hold_test\menu_edit_hold_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: menu_edit_hold_test build failed & exit /b 1 )
+"%OBJ%\menueditHold\menu_edit_hold_test.exe" --dry-run || exit /b 1
+"%OBJ%\menueditHold\menu_edit_hold_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\menu_edit_hold_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_scheduler_stack_json_test
 echo [edvr] === scheduler_stack_json_test.exe ===
 REM Build gate for the production SchedulerStackProbe JSON writer: the
@@ -3184,6 +3209,29 @@ cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
 if errorlevel 1 ( echo [edvr] ERROR: ui layer world test build failed & exit /b 1 )
 "%OBJ%\uilayerworld\ui_layer_world_test.exe" --dry-run || exit /b 1
 "%OBJ%\uilayerworld\ui_layer_world_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_ui_layer_device_test
+echo [edvr] === ui_layer_device_test.exe ===
+REM The shared UI layer across a D3D11 device change (review 2026-10-09, P2): src\d3d11\ui_layer.cpp compiled WHOLE (through
+REM tools\ui_layer_device_test\ui_layer_device_bridge.cpp, which only exposes which device each retained cache belongs to) with the
+REM world rig's neighbour stubs, on two WARP devices. A frame on device A (door, the crisp take's dependencies, a HUD frame through
+REM the production coverage pass, the production composite, read back), the production device-change reset (uiLayerDeviceReset),
+REM the same frame on device B: every retained child -- blend cache, coverage shaders and deferred context, seeder context,
+REM composite shader and parameter buffer, both layers, the composite output -- is B's, the pixels are the HUD over the frame,
+REM the caller's bindings come back. Then a same-device resize (uiLayerFlatRelease) at another size: the pixel again, nothing
+REM device-bound rebuilt. Built outside build\ like the world rig.
+if not exist "%OBJ%\uilayerdevice" mkdir "%OBJ%\uilayerdevice"
+cl.exe /I"%GEN%" /nologo /O2 /MT /std:c++17 /EHsc /W4 ^
+    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
+    /Fo"%OBJ%\uilayerdevice\\" /Fe"%OBJ%\uilayerdevice\ui_layer_device_test.exe" ^
+    "tools\ui_layer_device_test\ui_layer_device_test.cpp" "tools\ui_layer_device_test\ui_layer_device_bridge.cpp" ^
+    "src\common\config.cpp" "src\common\log.cpp" "src\common\guard.cpp" ^
+    "third_party\dxbc_hash\DxilHash.cpp" ^
+    /link /INCREMENTAL:NO d3dcompiler.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: ui layer device test build failed & exit /b 1 )
+"%OBJ%\uilayerdevice\ui_layer_device_test.exe" --dry-run || exit /b 1
+"%OBJ%\uilayerdevice\ui_layer_device_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_on_foot_maps_test

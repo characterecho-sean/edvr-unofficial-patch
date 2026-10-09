@@ -162,26 +162,19 @@ struct Shared {
     //                current head pose", taken (cleared) by the vr half's
     //                own poll. See frame_flag.h.
     volatile LONG     introRecentre;
-    // advanced.eye_origin_readers (docs/design-transition-flash-engine-fix-
-    // 2026-09-23.md, part A1): d3d11 -> openvr, the request to start
-    // capturing the runtime's own WaitGetPoses/GetLastPoses call stack.
-    volatile LONG     poseReaderRequest;
-    // The rest of this family runs openvr -> d3d11, published at EVERY
-    // WaitGetPoses/GetLastPoses call: PoseReaderCall's fields (frame_flag.h)
-    // packed the same way submitTex/gameDev use LONG64 for a pointer. seq is
-    // bumped last, so a reader who samples it before and after a read can
-    // tell a torn snapshot from a fresh one (it never blocks on it -- this
-    // is a diagnostic, not a lock).
-    volatile LONG     poseReaderSeq;
-    volatile LONG64   poseReaderRenderPtr;
-    volatile LONG64   poseReaderGamePtr;
-    volatile LONG64   poseReaderQpc;
-    volatile LONG     poseReaderRenderCount;
-    volatile LONG     poseReaderGameCount;
-    volatile LONG     poseReaderThreadId;
-    // bit0 render ptr on the calling thread's stack, bit1 game ptr on it,
-    // bit2 this publish came from GetLastPoses rather than WaitGetPoses.
-    volatile LONG     poseReaderFlags;
+    // UNUSED since advanced.eye_origin_readers was removed (2026-10-09): the
+    // pose-reader hunt's request flag and per-call snapshot. Kept as padding
+    // so the layout -- and the mapping name the two halves agree on -- does
+    // not change; nothing reads or writes them.
+    volatile LONG     reservedPoseReader0;
+    volatile LONG     reservedPoseReader1;
+    volatile LONG64   reservedPoseReader2;
+    volatile LONG64   reservedPoseReader3;
+    volatile LONG64   reservedPoseReader4;
+    volatile LONG     reservedPoseReader5;
+    volatile LONG     reservedPoseReader6;
+    volatile LONG     reservedPoseReader7;
+    volatile LONG     reservedPoseReader8;
     // advanced.slow_test_ms: d3d11 -> openvr, the milliseconds the runtime
     // holds every xrEndFrame for, inside the call's timed region, while the
     // test is running; 0 is no hold (requestEndFrameHold, frame_flag.h).
@@ -740,17 +733,6 @@ void clearIntroRecentreRequest() {
     if (s) InterlockedExchange(&s->introRecentre, 0);
 }
 
-void requestPoseReaderTrace(bool on) {
-    Shared* s = map();
-    if (!s) return;
-    InterlockedExchange(&s->poseReaderRequest, on ? 1 : 0);
-}
-
-bool poseReaderTraceRequested() {
-    Shared* s = map();
-    return s && InterlockedCompareExchange(&s->poseReaderRequest, 0, 0) != 0;
-}
-
 void requestEndFrameHold(uint32_t ms) {
     Shared* s = map();
     if (!s) return;
@@ -762,43 +744,6 @@ uint32_t endFrameHoldMs() {
     if (!s) return 0;
     const LONG v = InterlockedCompareExchange(&s->endFrameHold, 0, 0);
     return v > 0 ? static_cast<uint32_t>(v) : 0u;
-}
-
-void publishPoseReaderCall(const PoseReaderCall& call) {
-    Shared* s = map();
-    if (!s) return;
-    s->poseReaderRenderPtr = static_cast<LONG64>(call.renderPtr);
-    s->poseReaderGamePtr = static_cast<LONG64>(call.gamePtr);
-    s->poseReaderQpc = static_cast<LONG64>(call.qpc);
-    s->poseReaderRenderCount = static_cast<LONG>(call.renderCount);
-    s->poseReaderGameCount = static_cast<LONG>(call.gameCount);
-    s->poseReaderThreadId = static_cast<LONG>(call.threadId);
-    LONG flags = 0;
-    if (call.renderOnStack) flags |= 1;
-    if (call.gameOnStack) flags |= 2;
-    if (call.wasGetLastPoses) flags |= 4;
-    s->poseReaderFlags = flags;
-    // Last: a reader that samples seq before touching the rest of the
-    // fields and again after can tell a torn read from a fresh one.
-    InterlockedIncrement(&s->poseReaderSeq);
-}
-
-PoseReaderCall poseReaderCall() {
-    PoseReaderCall out{};
-    Shared* s = map();
-    if (!s) return out;
-    out.seq = static_cast<uint32_t>(s->poseReaderSeq);
-    out.renderPtr = static_cast<uint64_t>(s->poseReaderRenderPtr);
-    out.gamePtr = static_cast<uint64_t>(s->poseReaderGamePtr);
-    out.qpc = static_cast<uint64_t>(s->poseReaderQpc);
-    out.renderCount = static_cast<uint32_t>(s->poseReaderRenderCount);
-    out.gameCount = static_cast<uint32_t>(s->poseReaderGameCount);
-    out.threadId = static_cast<uint32_t>(s->poseReaderThreadId);
-    const LONG flags = s->poseReaderFlags;
-    out.renderOnStack = (flags & 1) != 0;
-    out.gameOnStack = (flags & 2) != 0;
-    out.wasGetLastPoses = (flags & 4) != 0;
-    return out;
 }
 
 }  // namespace edvr

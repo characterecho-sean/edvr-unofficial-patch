@@ -32,7 +32,7 @@ struct CpuAt {                                  // the CPU's counters as they st
 struct SkinJoinGpu::Impl {
     // device-bound resources
     ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11ComputeShader> join, poseClear, poseRefMark, poseScatter, poseScatterRest, poseVerify, poseFinish;
+    ComPtr<ID3D11ComputeShader> join, joinClear, poseClear, poseRefMark, poseScatter, poseScatterRest, poseVerify, poseFinish;
     ComPtr<ID3D11Buffer> jobs, plan, info[2], joinTable, stats, owner, pose[2], poseCb, nullJoin;
     ComPtr<ID3D11Buffer> instCopy, ranges, refBits, baseState;
     ComPtr<ID3D11ShaderResourceView> jobsSrv, planSrv, infoSrv[2], poseSrv[2], joinSrv, nullJoinSrv, instSrv, rangesSrv;
@@ -141,6 +141,7 @@ bool create(SkinJoinGpu::Impl& s, ID3D11Device* dev) {
     const UINT raw = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, structured = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     const UINT srvUav = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
     if (FAILED(dev->CreateComputeShader(kSkinJoinBytecode, sizeof(kSkinJoinBytecode), nullptr, &s.join)) ||
+        FAILED(dev->CreateComputeShader(kSkinJoinClearBytecode, sizeof(kSkinJoinClearBytecode), nullptr, &s.joinClear)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseClearBytecode, sizeof(kSkinPoseClearBytecode), nullptr, &s.poseClear)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseRefMarkBytecode, sizeof(kSkinPoseRefMarkBytecode), nullptr, &s.poseRefMark)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseScatterBytecode, sizeof(kSkinPoseScatterBytecode), nullptr, &s.poseScatter)) ||
@@ -381,12 +382,22 @@ void SkinJoinGpu::runJoin(ID3D11DeviceContext* ctx) {
     // The pass.
     {
         GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
-        ctx->UpdateSubresource(s.plan.Get(), 0, nullptr, words.data(), 0, 0);
         CsStageSave saved;
         saved.save(ctx);
         const uint32_t cur = s.parity & 1u, prev = cur ^ 1u;
         ID3D11ShaderResourceView* srvs[5] = {s.frameJobsSrv.Get(), s.prevJobsSrv.Get(), s.planSrv.Get(), s.infoSrv[prev].Get(), s.poseSrv[prev].Get()};
         ID3D11UnorderedAccessView* uavs[4] = {s.joinUav.Get(), s.infoUav[cur].Get(), s.statsUav.Get(), s.ownerUav.Get()};
+        {
+            // F17: the join's three tables, ALL kMaxRows rows of them, cleared by a pass of kClearGroups groups of their own, issued on this context right before the join
+            // on the same views: D3D11 orders the two dispatches (the join's owner minima and by-base writes need the cleared tables), and the stale rows of a frame
+            // whose entity or job count shrank read as cleared. (F16 priced the in-kernel clear at 0.015 ms, half the join, one group of 256 threads.)
+            GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinJoinClear);   // (nested in the engine velocity span; priced on the second skin's line)
+            ctx->CSSetShader(s.joinClear.Get(), nullptr, 0);
+            ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
+            ctx->Dispatch(kClearGroups, 1, 1);
+        }
+        GpuCensusScope joinCensus(ctx, GpuCensusSection::FrameSkinJoin);   // (F16: nested in the engine velocity span; priced on the second skin's line)
+        ctx->UpdateSubresource(s.plan.Get(), 0, nullptr, words.data(), 0, 0);
         ctx->CSSetShader(s.join.Get(), nullptr, 0);
         ctx->CSSetShaderResources(0, 5, srvs);
         ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
@@ -469,6 +480,7 @@ void SkinJoinGpu::buildPose(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* 
     if (!refs.complete || !exact) { ++s.poseIncomplete; inexactWhy_ = why; }
     else inexactWhy_ = "";
     GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
+    GpuCensusScope poseCensus(ctx, GpuCensusSection::FrameSkinPose);   // (F16: nested in the engine velocity span; priced on the second skin's line)
     CsStageSave saved;
     saved.save(ctx);
     if (exact && refs.pairs) ctx->CopySubresourceRegion(s.instCopy.Get(), 0, 0, 0, 0, refs.stream, 0, &box);

@@ -88,7 +88,6 @@ int wmain(int argc, wchar_t** argv) {
     edvr::Config::get().set("fix.cull_guard_headsets",
                             "94x99, 120x130junk, 95X84, 10x20, 95x84 ");
     edvr::Config::get().set("fix.transition_flash", "1");
-    edvr::Config::get().set("advanced.transition_flash_resubmit", "0");
     edvr::Config::get().set("advanced.cull_guard_channel", "Matrix");
     // The three field-of-view trims are per-headset lists keyed like
     // fix.openxr_resolution, resolved against the headset the last v2
@@ -160,7 +159,7 @@ int wmain(int argc, wchar_t** argv) {
     check(retiredGuardSlotsZero(firstOutput),
           "the terrain guard's retired slots are zero although the ini still carries all six of its old keys");
     check(firstOutput.sceneReady && firstOutput.transitionEnabled &&
-              !firstOutput.resubmitEnabled,
+              firstOutput.resubmitEnabled,
           "scene and transition outputs");
     check(firstOutput.version == EDVR_NATIVE_FRAME_VERSION_5 &&
               firstOutput.size == sizeof(firstOutput),

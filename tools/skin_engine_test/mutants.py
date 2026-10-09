@@ -104,8 +104,8 @@ MUTANTS = [
       "the cloned vertex shader reads unbound views"),
     M("skin-views-kept-at-the-boundary", "L6", "engine", [("    if (ctx && g_bound.skinSrvs) {\n        ID3D11ShaderResourceView* none[3] = {};", "    if (false && ctx && g_bound.skinSrvs) {\n        ID3D11ShaderResourceView* none[3] = {};")],
       "the three skin views stay bound across the frame"),
-    M("target-7-not-cleared", "L3", "engine", [("ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);\n                engineVelocityNoteStateCalls(1);\n                ++g_skinStats.eyeFrames;",
-                                                "(void)zero;\n                engineVelocityNoteStateCalls(1);\n                ++g_skinStats.eyeFrames;")],
+    M("target-7-not-cleared", "L3", "engine", [("ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);\n                }\n                engineVelocityNoteStateCalls(1);\n                ++g_skinStats.eyeFrames;",
+                                                "(void)zero;\n                }\n                engineVelocityNoteStateCalls(1);\n                ++g_skinStats.eyeFrames;")],
       "target 7 keeps last frame's answers where nothing is drawn"),
     M("view-not-offered", "L2", "engine", [("if (exportsE) { e.skinWrittenFrame = frame; ++g_skinStats.draws; }", "if (exportsE) { ++g_skinStats.draws; }")],
       "the compose is never given target 7"),
@@ -211,6 +211,28 @@ MUTANTS = [
       "the source's pool snapshot is not scattered into the pose table: the source's characters have no pose to join to"),
     M("source-target-7-creation-unsaid", "L13", "engine", [("    if (eye == kEngineVelocitySourceEye)\n        Log::get().note(\"skin join: on-foot source target 7 created", "    if (false)\n        Log::get().note(\"skin join: on-foot source target 7 created")],
       "the log does not say the source's target 7 was made, so a flight cannot tell the first-person route read E from the route that never had it"),
+    # ---- L14: the GPU census slots of the second skin (F16) ----
+    M("source-clear-uncensused", "L14", "engine", [("                GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinSourceClear);\n", "")],
+      "the on-foot source's target 7 clear is not begun in the census: F16 could not price the 68 MB clear apart from the rest of engine velocity"),
+    M("eye-clear-uncensused", "L14", "engine", [("                    GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinEyeClear);\n", "")],
+      "an eye's target 7 clear is not begun in the census"),
+    M("eye-clear-in-the-sources-slot", "L14", "engine", [("GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinEyeClear);", "GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinSourceClear);")],
+      "the eyes' clears are priced as the source's: the two figures would be one number"),
+    M("join-uncensused", "L14", "gpu", [("        GpuCensusScope joinCensus(ctx, GpuCensusSection::FrameSkinJoin);   // (F16: nested in the engine velocity span; priced on the second skin's line)\n", "")],
+      "the join dispatch is not begun in the census"),
+    M("pose-uncensused", "L14", "gpu", [("    GpuCensusScope poseCensus(ctx, GpuCensusSection::FrameSkinPose);   // (F16: nested in the engine velocity span; priced on the second skin's line)\n", "")],
+      "the pose table build is not begun in the census"),
+    # ---- L14, L3, L5: the join's clear pass (F17) ----
+    M("join-clear-pass-uncensused", "L14", "gpu", [("            GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinJoinClear);   // (nested in the engine velocity span; priced on the second skin's line)\n", "")],
+      "the join's clear pass is not begun in the census: F17 could not see the clear apart from the join"),
+    M("join-clear-pass-not-dispatched", ("L3", "L5"), "gpu", [("            ctx->Dispatch(kClearGroups, 1, 1);\n", "")],
+      "the join's tables are never cleared: a job that fails its checks keeps last frame's join entry, and a changed job table still has history"),
+    # (a clear pass of one group instead of kClearGroups is not an engine-rig mutant: this rig's palette has 64 rows and one group covers rows 0..255. It is held where the rows
+    # are: tools\gpu_census_test's scan of the call site ("fewer groups") and skin_join_gpu_test G1.g / G8, which use the same constant.)
+    M("join-clear-pass-after-the-join", ("L3", "L5"), "gpu",
+      [("            ctx->CSSetShader(s.joinClear.Get(), nullptr, 0);\n            ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);\n            ctx->Dispatch(kClearGroups, 1, 1);\n", ""),
+       ("        ctx->Dispatch(1, 1, 1);\n        ID3D11UnorderedAccessView* none[4] = {};", "        ctx->Dispatch(1, 1, 1);\n        ctx->CSSetShader(s.joinClear.Get(), nullptr, 0);\n        ctx->Dispatch(kClearGroups, 1, 1);\n        ID3D11UnorderedAccessView* none[4] = {};")],
+      "the join reads the tables before the clear pass clears them, and the clear then wipes what the join wrote: every character seen has no history"),
 ]
 
 if __name__ == "__main__":

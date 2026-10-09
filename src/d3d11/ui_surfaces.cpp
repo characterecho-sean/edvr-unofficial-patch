@@ -11,6 +11,7 @@
 #include "ui_panel_scale.h"   // uiPanelScaleLive/Factor: a chain's stage under the engine's sizing
 
 #include "../common/log.h"
+#include "../common/runtime_profile.h"  // the VR instruments do not run in the flat profile
 
 #include <windows.h>
 
@@ -32,6 +33,10 @@ struct Lock {
 };
 
 std::atomic<bool> g_on{false};
+
+// The chain, atlas and HMD Quality instruments are VR's: the flat profile's panel factor reads the flat runtime's own
+// render and display sizes (ui_panel_scale.cpp), and its 2026-10-09 census observation is retired.
+bool instrumentsOn() { return g_on.load(std::memory_order_acquire) && !runtimeFlatProfile(); }
 
 // HMD Quality, cached (review P3-2): read from the game's newest .fxcfg --
 // a folder scan and a file read -- on configure, and while the key is on
@@ -202,7 +207,7 @@ uint32_t g_atlasNotes = 0;  // creation lines (under g_lock), capped
 void uiSurfacesSetTarget(float target) {
     // Configure is the one place HMD Quality is read on this thread: it runs
     // when the ini changes, not every frame.
-    if (target > 0.0f) hmdReadNow();
+    if (target > 0.0f && !runtimeFlatProfile()) hmdReadNow();
     g_on.store(target > 0.0f, std::memory_order_release);
 }
 
@@ -211,7 +216,7 @@ bool uiSurfacesWantsChain(const D3D11_TEXTURE2D_DESC& d, bool initialData) {
     // render size (read only past this): single mip, no MSAA, no initial
     // data, and neither side a power of two (atlases, icon caches and
     // shadow maps are) or a sliver.
-    return g_on.load(std::memory_order_acquire) && !initialData && d.ArraySize == 1 &&
+    return instrumentsOn() && !initialData && d.ArraySize == 1 &&
            d.SampleDesc.Count == 1 && d.MipLevels <= 1 &&
            (d.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) != 0 && d.Width >= 16 &&
            d.Height >= 16 && (d.Width & (d.Width - 1)) != 0 && (d.Height & (d.Height - 1)) != 0;
@@ -343,7 +348,7 @@ bool g_uiAtlasWatching = false;
 }
 
 bool uiSurfacesWantsAtlas(const D3D11_TEXTURE2D_DESC& d) {
-    return g_on.load(std::memory_order_acquire) && d.Format == DXGI_FORMAT_A8_UNORM &&
+    return instrumentsOn() && d.Format == DXGI_FORMAT_A8_UNORM &&
            (d.Width >= 1024 || d.Height >= 1024);
 }
 
@@ -419,7 +424,7 @@ void uiSurfacesLogAtlas() {
 
 void uiSurfacesFrameBoundary() {
     g_frameNo.fetch_add(1, std::memory_order_relaxed);
-    if (!g_on.load(std::memory_order_acquire)) return;
+    if (!instrumentsOn()) return;
     // The render thread's own: HMD Quality for the next five seconds, read on
     // a pool thread (review P3-2: no folder scan on the render thread).
     static uint64_t lastTickMs = 0;

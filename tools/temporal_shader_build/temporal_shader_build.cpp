@@ -374,6 +374,7 @@ static int generateTemporal(const Options& o) {
         {"kEnginePrimaryCopyScatterBytecode", "engine_primary_copy_scatter_cs", "main", nullptr, {}, false, edvr::kEnginePrimaryCopyScatterCsHlsl},
         // F2 (skin_join_shader.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"): the identity join and the pose table passes, one HLSL text.
         {"kSkinJoinBytecode", "skin_join_cs", "join", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinJoinClearBytecode", "skin_join_clear_cs", "joinClear", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinPoseClearBytecode", "skin_pose_clear_cs", "poseClear", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinPoseRefMarkBytecode", "skin_pose_refmark_cs", "poseRefMark", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinPoseScatterBytecode", "skin_pose_scatter_cs", "poseScatter", nullptr, {}, false, edvr::kSkinJoinCsHlsl},

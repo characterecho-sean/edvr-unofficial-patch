@@ -10,6 +10,7 @@
 
 #include "../common/log.h"
 #include "../common/native_render_settings.h"  // edvrQueryNativeRenderSizing: W_out
+#include "../common/runtime_profile.h"         // runtimeFlatProfile: the flat profile's inputs
 
 #include <windows.h>
 
@@ -20,6 +21,9 @@
 #include <cstring>
 
 namespace edvr {
+
+// flat_runtime.h's: the scene's and the output's sizes as the flat runtime's final copy last measured them. Any thread.
+bool flatRuntimeSceneSizes(uint32_t* renderWidth, uint32_t* renderHeight, uint32_t* outputWidth, uint32_t* outputHeight);
 
 namespace {
 
@@ -71,6 +75,16 @@ UiSsSource g_srcLogged = UiSsSource::kNone;
 UiSsWhy g_whyLogged = UiSsWhy::kNone;
 UiSsPick g_pick;                                    // the last choice, for the 30 s line
 float g_liveCur = 0.0f, g_liveLo = 0.0f, g_liveHi = 0.0f, g_fxcfgSs = 0.0f;
+
+// ------------------------------------------- the flat profile (2026-10-09; ui_sizing_math.h's uiFlatPanelPlanFor)
+std::atomic<bool> g_flatTemporal{false};      // the flat profile's anti-aliasing is on (uiPanelScaleSetFlatTemporal)
+std::atomic<bool> g_pubFlat{false};           // the published plan is the flat one: the setter thunk scales it by the move
+std::atomic<uint32_t> g_pubFlatSsBits{0};     // ...from the live Supersampling it was made beside
+// The render thread's own.
+UiFlatPanelInputs g_flatLastIn;               // the inputs of the last write
+UiFlatPanelRefuse g_flatRefuse = UiFlatPanelRefuse::kUnknown;  // this frame's refusal (kNone: the inputs make a plan)
+uint64_t g_flatRefusedFrames = 0;             // frames the inputs were refused, this 30 s window
+bool g_flatAaOff = false;                     // the factor is held at 1 because the anti-aliasing is off
 
 // ------------------------------------------------------------ the checks
 
@@ -291,7 +305,15 @@ void moveFactorTo(float ss) {
     std::memcpy(&base, &bb, sizeof(base));
     if (!(formula > 0.0) || !(base > 0.0)) return;
     UiPanelPlan p;
-    uiPanelSolve(formula, base, UiPanelBase::kObserved, ss, &p);
+    if (g_pubFlat.load(std::memory_order_acquire)) {
+        // Flat: R carries the Supersampling, so the plan scales by its move (ui_sizing_math.h's uiFlatPanelMove).
+        const uint32_t sb = g_pubFlatSsBits.load(std::memory_order_acquire);
+        float from = 0.0f;
+        std::memcpy(&from, &sb, sizeof(from));
+        if (!uiFlatPanelMove(formula, base, from, ss, &p)) return;
+    } else {
+        uiPanelSolve(formula, base, UiPanelBase::kObserved, ss, &p);
+    }
     if (std::fabs(p.f - uiPanelScaleFactor()) <= 1e-9 && std::fabs(p.lineF - uiPanelScaleLineFactor()) <= 1e-9) return;
     if (writeFloats(p.f, p.lineF, p.ss)) g_preWrites.fetch_add(1, std::memory_order_relaxed);
 }
@@ -608,6 +630,9 @@ bool gatherInputs(UiPanelInputs* in, uint32_t* askW, uint32_t* askH, float* hmd,
     return in->renderW && in->outputW && in->fovTangent > 0.0f && in->trueTangent > 0.0f;
 }
 
+// The flat profile's frame boundary (defined after uiPanelScaleFrameBoundary, which calls it with the key on).
+void flatFrameBoundary(float target);
+
 }  // namespace
 
 void uiPanelScaleSetTarget(float target) {
@@ -644,6 +669,11 @@ void uiPanelScaleFrameBoundary() {
         }
         g_pending = -1.0;
         g_settle = 0;
+        return;
+    }
+    // The flat profile has its own inputs (the render and display sizes; no HMD, frustum or .fxcfg).
+    if (runtimeFlatProfile()) {
+        flatFrameBoundary(target);
         return;
     }
     UiPanelInputs in;
@@ -743,6 +773,136 @@ void uiPanelScaleFrameBoundary() {
     }
 }
 
+void uiPanelScaleSetFlatTemporal(bool on) { g_flatTemporal.store(on, std::memory_order_release); }
+
+namespace {
+
+const char* flatClampText(UiPanelClamp clamp) {
+    return clamp == UiPanelClamp::kCap     ? " (capped: no panel above four times its game size)"
+           : clamp == UiPanelClamp::kFloor ? " (at 1: the render is at or above the display times the target, so the "
+                                             "game's own panels are that size already)"
+           : clamp == UiPanelClamp::kBudget ? " (raised by the size budget)"
+                                            : "";
+}
+
+// The render thread, once a frame with the key on, in the flat profile. The same settle and the same floats as VR's;
+// the inputs are R and D (ui_sizing_math.h's uiFlatPanelPlanFor).
+void flatFrameBoundary(float target) {
+    if (!g_flatTemporal.load(std::memory_order_acquire)) {
+        // Anti-aliasing off: the game's own sizes (ui_panel_scale.h says why).
+        g_pubReady.store(false, std::memory_order_release);
+        g_flatAaOff = true;
+        if (g_live.load(std::memory_order_acquire) || g_written != 1.0) {
+            writeFloats(1.0);
+            g_written = 1.0;
+            g_live.store(false, std::memory_order_release);
+            Log::get().note("ui quality: panels (flat): anti-aliasing is off -- the floats read 1080 and 1920 again, "
+                            "the game's own panel sizes from the next panel init or view change.");
+        }
+        g_pending = -1.0;
+        g_settle = 0;
+        return;
+    }
+    g_flatAaOff = false;
+    UiFlatPanelInputs in;
+    if (!flatRuntimeSceneSizes(&in.renderW, &in.renderH, &in.outputW, &in.outputH)) in = UiFlatPanelInputs{};
+    in.target = target;
+    UiPanelPlan plan;
+    g_flatRefuse = uiFlatPanelPlanFor(in, &plan);
+    if (g_flatRefuse != UiFlatPanelRefuse::kNone) {
+        // A frame with no scene (a loading screen) or one unlike the screen (a 512x512 preview): the floats hold.
+        ++g_flatRefusedFrames;
+        g_settle = 0;
+        return;
+    }
+    // Only a value the inputs have held for kSettleFrames is written (the two runs of one view change read one factor).
+    if (std::fabs(plan.f - g_pending) > 1e-6) {
+        g_pending = plan.f;
+        g_settle = 0;
+        return;
+    }
+    if (++g_settle < kSettleFrames) return;
+    // Settled: what the setter thunk scales when the game's menu moves the Supersampling before R follows. Published only
+    // beside a believable live value (the scale needs the value the plan was made at); without one the thunk does nothing.
+    {
+        float cur = 0.0f, lo = 0.0f, hi = 0.0f;
+        if (readLiveSupersampling(&cur, &lo, &hi) == UiSsRead::kOk && uiLiveSupersamplingValid(cur, lo, hi, nullptr)) {
+            uint64_t fb = 0, bb = 0;
+            uint32_t sb = 0;
+            std::memcpy(&fb, &plan.formula, sizeof(fb));
+            std::memcpy(&bb, &plan.base, sizeof(bb));
+            std::memcpy(&sb, &cur, sizeof(sb));
+            g_pubReady.store(false, std::memory_order_release);
+            g_pubFormulaBits.store(fb, std::memory_order_release);
+            g_pubBaseBits.store(bb, std::memory_order_release);
+            g_pubFlatSsBits.store(sb, std::memory_order_release);
+            g_pubFlat.store(true, std::memory_order_release);
+            g_pubReady.store(true, std::memory_order_release);
+        } else {
+            g_pubReady.store(false, std::memory_order_release);
+        }
+    }
+    if (g_live.load(std::memory_order_acquire) && std::fabs(plan.f / uiPanelScaleFactor() - 1.0) <= 0.001) return;
+    if (!writeFloats(plan.f, plan.lineF, 1.0)) return;
+    g_written = plan.f;
+    g_lastSsEff = 1.0;
+    g_flatLastIn = in;
+    g_lastPlan = plan;
+    ++g_writes;
+    if (!g_live.exchange(true, std::memory_order_acq_rel)) g_liveSince = g_frame;
+    float d1080 = 0.0f, d1920 = 0.0f;
+    uiPanelDivisors(plan.f, &d1080, &d1920);
+    const bool heightAxis = uiFlatPanelHeightAxis(in.renderW, in.renderH);
+    Log::get().note(
+        "ui quality: panels (flat): the engine now sizes every render-to-texture panel x%.4f (the four operands at "
+        "0x%X/0x%X and 0x%X/0x%X read 1080 -> %.2f, 1920 -> %.2f): f %.4f = render %ux%u / display %ux%u on the %s "
+        "axis / target %.0f%%%s. A panel the game made WxH at the game's own divisors is now made about %.2fW x %.2fH; "
+        "the widest the formula can ask for is %.0f px (D3D11's limit %.0f, EDVR's budget %.0f). From the next panel "
+        "init or view change.",
+        1.0 / plan.f, kUiPanelSiteRva[0] + kUiPanel1080Disp, kUiPanelSiteRva[0] + kUiPanel1920Disp,
+        kUiPanelSiteRva[1] + kUiPanel1080Disp, kUiPanelSiteRva[1] + kUiPanel1920Disp, static_cast<double>(d1080),
+        static_cast<double>(d1920), plan.f, in.renderW, in.renderH, in.outputW, in.outputH,
+        heightAxis ? "height (1080)" : "width (1920)", static_cast<double>(target) * 100.0, flatClampText(plan.clamp),
+        1.0 / plan.f, 1.0 / plan.f, plan.largest, kUiPanelTextureLimit, kUiPanelBudget);
+}
+
+// The flat profile's 30 s line.
+void flatLog(const char* net) {
+    const uint64_t refused = g_flatRefusedFrames;
+    g_flatRefusedFrames = 0;
+    // The game's Supersampling setter, through which a menu change moves the factor before R follows.
+    char live[200];
+    if (g_hookState != kHookInstalled)
+        std::snprintf(live, sizeof(live), "not hooked (%s): a change follows R once it holds",
+                      g_hookState == kHookRefused ? g_hookWhy : "not installed");
+    else
+        std::snprintf(live, sizeof(live), "hooked, called %u time(s), %u factor move(s) made in it, the plan %s published to it",
+                      g_setterCalls.load(std::memory_order_relaxed), g_preWrites.load(std::memory_order_relaxed),
+                      g_pubReady.load(std::memory_order_acquire) && g_pubFlat.load(std::memory_order_acquire) ? "is" : "is not");
+    if (!g_live.load(std::memory_order_acquire)) {
+        const char* why = g_target.load(std::memory_order_acquire) <= 0.0f ? "the key is off: the game's own sizes"
+                          : g_flatAaOff ? "anti-aliasing is off: the game's own sizes until it is on"
+                          : g_flatRefuse != UiFlatPanelRefuse::kNone
+                              ? uiFlatPanelRefuseName(g_flatRefuse)
+                              : "waiting for the render size to hold for ten frames";
+        Log::get().note("ui quality: panels (flat): patched, not sizing -- %s; %llu frame(s) this window refused the "
+                        "inputs. The game's Supersampling setter: %s. %s.",
+                        why, static_cast<unsigned long long>(refused), live, net);
+        return;
+    }
+    const UiFlatPanelInputs& in = g_flatLastIn;
+    Log::get().note("ui quality: panels (flat): the engine sizes panels x%.4f since frame %u (%u writes; f %.4f = "
+                    "render %ux%u / display %ux%u / target %.0f%%; the widest panel the formula could ask for is %.0f "
+                    "px, D3D11's limit %.0f); %llu frame(s) this window refused the inputs (now: %s). The game's Supersampling setter: "
+                    "%s. %s.",
+                    1.0 / uiPanelScaleFactor(), g_liveSince, g_writes, uiPanelScaleFactor(), in.renderW, in.renderH,
+                    in.outputW, in.outputH, static_cast<double>(in.target) * 100.0, g_lastPlan.largest,
+                    kUiPanelTextureLimit, static_cast<unsigned long long>(refused), uiFlatPanelRefuseName(g_flatRefuse),
+                    live, net);
+}
+
+}  // namespace
+
 double uiPanelScaleChosenSupersampling(const char** source) {
     if (source) {
         const uint8_t s = g_chosenSource.load(std::memory_order_acquire);
@@ -815,6 +975,10 @@ void uiPanelScaleLog() {
     }
     char live[400];
     liveStatusText(live, sizeof(live));
+    if (runtimeFlatProfile()) {
+        flatLog(net);
+        return;
+    }
     if (!g_live.load(std::memory_order_acquire)) {
         Log::get().note("ui quality: panels: patched, not sizing -- %s. Supersampling: %s. %s.",
                         g_target.load(std::memory_order_acquire) > 0.0f

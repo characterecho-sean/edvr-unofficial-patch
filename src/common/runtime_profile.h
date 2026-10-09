@@ -112,6 +112,9 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         std::strcmp(key, "fix.temporal_aa_model") == 0 ||
         std::strcmp(key, "hotkey.dump_draws") == 0 ||
         std::strcmp(key, "fix.render_sharpness") == 0 ||
+        // The interface quality (flat panel row; ui_panel_scale.cpp's flat factor and the flat UI layer). The VR layer reads it
+        // too, but stays inert in flat: it is live only with fix.temporal_aa on through this gate, which refuses that key.
+        std::strcmp(key, "fix.ui_quality") == 0 ||
         std::strcmp(key, "experimental.temporal_aa_jitter") == 0 ||
         std::strcmp(key, "experimental.temporal_aa_partial") == 0 ||
         // The HDR route's key (flat_hdr_route.h, design doc section 81; auto by default); developer tier, no flat panel row.

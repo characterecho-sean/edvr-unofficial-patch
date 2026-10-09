@@ -24,13 +24,20 @@
 //       (the frame boundary's input and realNowUs) both call it (read as text)
 //   M12 the timeline does not depend on a monotonic clock: a reading below the one before is no time passing and the caps run on from there, also for the
 //       entry after the resets that clear one
+//   M13 the frame settings (explorer_cam_settings_core.h): read through the source once per configuration generation, never per frame, and re-read the frame the
+//       generation moves; explorer_cam.cpp takes them from the cache and reads none of its keys itself (read as text)
+//   M14 the engine's motion is asked for only while the timeline can read it (ComfortTimeline::wantsMotion): an entry or a re-attach that is fading out or black.
+//       Eight scenarios run twice, with the motion handed over every tick and through the glue's gate, and must agree bit for bit; the glue's gate is read as text
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "explorer_cam_fade_core.h"
+#include "explorer_cam_settings_core.h"
 
 using namespace edvr;
 
@@ -63,6 +70,11 @@ struct Rig {
     uint64_t (*clock)(uint64_t, uint64_t) = nullptr;
     uint64_t clockFreq = 0, startTicks = 0, elapsedMs = 0, lastNow = 0;
     bool stepped = false;   // the clock handed the timeline a reading below the one before it
+    // The glue's gate (explorer_cam.cpp asks the engine for its motion only while the timeline wants it): with `gated` set, the motion inputs reach the timeline only
+    // on a tick whose step could read them, as the production wrapper hands them; `asks` counts those ticks.
+    bool gated = false;
+    unsigned asks = 0;
+    std::vector<int> alphaTrace;
     Rig() {
         in.active = true;
         in.ctlCalls = 100;
@@ -84,12 +96,22 @@ struct Rig {
         if (us < lastNow) stepped = true;
         lastNow = us;
         in.nowUs = us;
-        const ecm::ComfortStep s = tl.step(in);
+        ecm::ComfortInputs given = in;
+        if (gated) {
+            if (tl.wantsMotion()) ++asks;
+            else {
+                given.motionArmed = false;
+                given.viewsRun = 0;
+                given.skinJobs = given.skinLive = false;
+            }
+        }
+        const ecm::ComfortStep s = tl.step(given);
         in.pressEnter = in.pressExit = false;
         for (uint8_t i = 0; i < s.nev; ++i) events.push_back(s.ev[i]);
         releasedEnter += s.releaseEnter ? 1u : 0u;
         releasedExit += s.releaseExit ? 1u : 0u;
         alpha = s.alpha;
+        alphaTrace.push_back(int(s.alpha * 1000.0f));
         if (in.mode == 0 && in.sessionActive) ++in.ctlCalls;
         return s;
     }
@@ -561,6 +583,182 @@ void caseBackwards() {
     const ecm::ComfortLine* td = d.find(ecm::ComfortEv::TimedOut);
     check(td && td->heldMs >= 2990 && td->heldMs <= 3030, "M12.e after the stand-down reset the next entry's 3 s cap fires on time");
 }
+
+// ---- M13 --------------------------------------------------------------------------------------------------------------------------
+// The frame settings: read from the source once per configuration generation, not once per frame.
+struct ScriptSource final : ecm::SettingsSource {
+    std::map<std::string, std::string> kv;
+    mutable unsigned reads = 0;   // questions asked of the source
+    const std::string* find(const char* key) const {
+        ++reads;
+        const auto it = kv.find(key);
+        return it == kv.end() || it->second.empty() ? nullptr : &it->second;
+    }
+    float getFloat(const char* key, float def) const override { const std::string* v = find(key); return v ? std::strtof(v->c_str(), nullptr) : def; }
+    int getInt(const char* key, int def) const override { const std::string* v = find(key); return v ? int(std::strtol(v->c_str(), nullptr, 10)) : def; }
+    bool getBool(const char* key, bool def) const override { const std::string* v = find(key); return v ? (*v != "0" && *v != "false") : def; }
+    std::string getString(const char* key, const char* def) const override { const std::string* v = find(key); return v ? *v : std::string(def); }
+};
+bool sameFloat(float a, float b) { return std::fabs(a - b) < 1e-6f; }
+
+void caseSettings(const std::string& root) {
+    {
+        ecm::SettingsCache c;
+        ScriptSource s;
+        const ecm::FrameSettings& d = c.get(0, s);   // a first call reads, whatever the number it is given (0 is the number a fresh cache holds)
+        check(c.reads() == 1 && s.reads == 9, "M13.a the first call reads the source through, once, nine questions (generation 0 too: a fresh cache holds 0 and still reads)");
+        check(sameFloat(d.up, 1.68f) && sameFloat(d.forward, 0.10f) && sameFloat(d.right, 0.0f) && sameFloat(d.trimRight, 0.0f) && sameFloat(d.trimUp, 0.15f) &&
+                  sameFloat(d.trimForward, -0.08f) && sameFloat(d.smoothingMs, 0.0f) && d.hotkey == "F5" && d.readBindings,
+              "M13.b with nothing set the settings are the shipped defaults (eye up 1.68, forward 0.10, right 0; trims 0, 0.15, -0.08; smoothing 0; hotkey F5; read bindings on)");
+    }
+    {
+        ecm::SettingsCache c;
+        ScriptSource s;
+        s.kv = {{"fix.explorer_cam_eye_up", "1.55"}, {"fix.explorer_cam_eye_forward", "0.25"}, {"fix.explorer_cam_eye_right", "-0.04"},
+                {"fix.explorer_cam_eye_trim_right", "0.04"}, {"fix.explorer_cam_eye_trim_up", "0.22"}, {"fix.explorer_cam_eye_trim_forward", "-0.01"},
+                {"fix.explorer_cam_follow_smoothing_ms", "40"}, {"hotkey.explorer_cam", "F6"}, {"hotkey.read_game_bindings", "false"}};
+        const ecm::FrameSettings& v = c.get(1, s);
+        check(sameFloat(v.up, 1.55f) && sameFloat(v.forward, 0.25f) && sameFloat(v.right, -0.04f), "M13.c the three eye keys reach the settings under their real names");
+        check(sameFloat(v.trimRight, 0.04f) && sameFloat(v.trimUp, 0.22f) && sameFloat(v.trimForward, -0.01f) && sameFloat(v.smoothingMs, 40.0f),
+              "M13.d ...and so do the three trims and the smoothing");
+        check(v.hotkey == "F6" && !v.readBindings, "M13.e ...and the hotkey and the bindings switch");
+        const unsigned before = s.reads;
+        s.kv["fix.explorer_cam_eye_trim_up"] = "0.9";   // the source changes underneath, the generation does not
+        for (int frame = 0; frame < 1000; ++frame) c.get(1, s);
+        check(c.reads() == 1 && s.reads == before && sameFloat(c.get(1, s).trimUp, 0.22f),
+              "M13.f A THOUSAND FRAMES at the same generation read nothing (the source is not asked a single question) and keep the settings read under it");
+        const ecm::FrameSettings& w = c.get(2, s);
+        check(c.reads() == 2 && s.reads == before + 9 && sameFloat(w.trimUp, 0.9f), "M13.g the generation moves: one re-read, nine questions, and the new trim is the one served at once");
+        c.get(2, s);
+        check(c.reads() == 2, "M13.h ...and the next frame at that generation reads nothing");
+        c.get(0xFFFFFFFFu, s);
+        c.get(0, s);
+        check(c.reads() == 4, "M13.i any different number re-reads, up or down, across the wrap (2 -> 4294967295 -> 0)");
+        c.reset();
+        c.get(0, s);
+        check(c.reads() == 1, "M13.j a reset cache reads again at the number it had");
+    }
+    if (root.empty()) return;   // --dry-run has no repository root
+    std::string text;
+    if (!readText(root + "/src/d3d11/explorer_cam.cpp", &text)) return;   // M11.p0 has said so
+    check(occurrences(text, "g_settings.get(cfg.generation(), ConfigSource(cfg))") == 1, "M13.p1 explorerCamFrameBoundary takes its settings from the cache, under Config::generation()");
+    check(!has(text, "cfg.getFloat(\"fix.explorer_cam_") && !has(text, "cfg.getInt(\"fix.explorer_cam_") && !has(text, "cfg.getString(\"hotkey.explorer_cam\"") &&
+              !has(text, "cfg.getBool(\"hotkey.read_game_bindings\""),
+          "M13.p2 ...and reads none of its keys from Config itself, frame after frame");
+}
+
+// ---- M14 --------------------------------------------------------------------------------------------------------------------------
+// The engine's motion is asked for only while the timeline can read it, and the timeline behaves exactly as if it had always been told.
+// The scenarios script the facts as the earlier cases do; each runs twice, with the facts handed over every tick and handed over by the glue's gate.
+using Scenario = void (*)(Rig&);
+void scenEarly(Rig& r) { r.motion(true, 3, false, false); r.pressAndGoBlack(); r.goodEntry(); r.run(600); }
+void scenLate(Rig& r) { r.motion(true, 0, false, false); r.pressAndGoBlack(); r.goodEntry(); r.run(400); r.motion(true, 3, false, false); r.run(600); }
+void scenNever(Rig& r) { r.motion(true, 1, true, false); r.pressAndGoBlack(); r.goodEntry(); r.run(1600); }
+void scenUnarmed(Rig& r) { r.motion(false, 0, true, false); r.pressAndGoBlack(); r.goodEntry(); r.run(600); }
+void scenCancel(Rig& r) { r.motion(true, 0, false, false); r.in.pressEnter = true; r.tick(); r.run(30); r.in.pressEnter = true; r.tick(); r.run(800); }
+void scenReattachLate(Rig& r) {
+    r.motion(true, 5, false, false); r.pressAndGoBlack(); r.goodEntry(); r.run(700);
+    r.in.placed = false; r.tick(); r.motion(true, 0, false, false); r.run(300); r.goodEntry(); r.run(1500);
+}
+void scenReattachQuick(Rig& r) {   // placed again while the re-attach is still fading out: the step that reaches black can fade in, and must see the motion
+    r.motion(true, 5, false, false); r.pressAndGoBlack(); r.goodEntry(); r.run(700);
+    r.in.placed = false; r.tick(); r.motion(true, 0, false, false); r.goodEntry(); r.run(1500);
+}
+void scenExit(Rig& r) {
+    r.motion(true, 5, false, false); r.pressAndGoBlack(); r.goodEntry(); r.run(700);
+    r.motion(true, 0, true, false); r.in.pressExit = true; r.tick();
+    for (uint32_t ms = 0; !r.releasedExit && ms < 1000; ms += 10) r.tick();
+    r.in.mode = 0; r.run(600);
+}
+std::string signatureOf(const Rig& r) {
+    std::string s;
+    char b[160];
+    // What the log and the glue see of each event: its numbers, and its text (which carries the motion facts only on the two events that read them; the other lines
+    // copy the inputs into their struct but never print them).
+    for (const auto& e : r.events) {
+        std::snprintf(b, sizeof(b), "%d/%d/%d/%u/%u/%u/%u;", int(e.ev), int(e.kind), int(e.why), e.heldMs, e.unmet, e.motionMs, unsigned(e.released));
+        s += b;
+        char text[ecm::kLineBytes];
+        ecm::formatComfort(text, sizeof(text), e);
+        s += text;
+        s += ";";
+    }
+    s += "|";
+    for (int a : r.alphaTrace) { std::snprintf(b, sizeof(b), "%d,", a); s += b; }
+    return s;
+}
+
+void caseMotionGate(const std::string& root) {
+    {
+        Rig r;
+        r.motion(true, 0, false, false);
+        check(!r.tl.wantsMotion(), "M14.a idle: the timeline does not want the engine's motion");
+        r.in.pressEnter = true;
+        r.tick();
+        check(r.tl.wantsMotion(), "M14.b an entry fading out wants it");
+        for (uint32_t ms = 0; !r.releasedEnter && ms < 1000; ms += 10) r.tick();
+        r.goodEntry();
+        r.tick();
+        check(r.tl.phase() == ecm::ComfortPhase::Black && r.tl.wantsMotion(), "M14.c ...and so does an entry that is black and otherwise ready, waiting on it");
+        r.motion(true, 3, false, false);
+        r.tick();
+        check(r.tl.phase() == ecm::ComfortPhase::In && !r.tl.wantsMotion(), "M14.d a fade in (the motion was live) does not");
+        r.run(400);
+        check(!r.tl.busy() && !r.tl.wantsMotion(), "M14.e ...nor does a timeline that is clear again");
+        r.in.pressExit = true;
+        r.tick();
+        check(r.tl.kind() == ecm::ComfortKind::Exit && !r.tl.wantsMotion(), "M14.f an exit fading out does not");
+        r.run(300);
+        check(r.tl.phase() == ecm::ComfortPhase::Black && !r.tl.wantsMotion(), "M14.g ...nor does an exit that is black");
+        Rig d;
+        scenEarly(d);
+        d.in.placed = false;
+        d.tick();
+        check(d.tl.kind() == ecm::ComfortKind::Reattach && d.tl.wantsMotion(), "M14.h a re-attach fading out wants it");
+    }
+    {
+        struct Named { const char* what; Scenario run; bool fadesInOnTheMotion; };
+        const Named all[] = {{"early signals", scenEarly, true}, {"late signals", scenLate, true}, {"signals that never come", scenNever, true}, {"engine motion not armed", scenUnarmed, true},
+                             {"a cancelled entry", scenCancel, false}, {"a late re-attach", scenReattachLate, true}, {"a quick re-attach", scenReattachQuick, true}, {"an exit", scenExit, true}};
+        for (const Named& n : all) {
+            Rig a;
+            n.run(a);
+            Rig b;
+            b.gated = true;
+            n.run(b);
+            char what[200];
+            std::snprintf(what, sizeof(what), "M14.i %s: the timeline behaves bit for bit as if it had been given the motion every tick (every event, every alpha)", n.what);
+            check(signatureOf(a) == signatureOf(b), what);
+            std::snprintf(what, sizeof(what), "M14.j %s: the scenario reaches the motion (a fade in or a hold)", n.what);
+            check(!n.fadesInOnTheMotion || a.count(ecm::ComfortEv::FadeIn) + a.count(ecm::ComfortEv::MotionTimedOut) >= 1, what);
+        }
+    }
+    {
+        Rig idle;
+        idle.gated = true;
+        idle.motion(true, 3, true, true);
+        idle.run(2000);
+        check(idle.asks == 0, "M14.k two seconds with no fade ask the engine nothing");
+        Rig r;
+        r.gated = true;
+        scenEarly(r);
+        const unsigned entryAsks = r.asks;
+        r.run(1000);
+        check(entryAsks > 0 && r.asks == entryAsks && r.tl.phase() == ecm::ComfortPhase::Clear, "M14.l an entry asks while it fades out and waits, and not at all once it is fading in or clear");
+        r.motion(true, 0, true, false);
+        r.in.pressExit = true;
+        r.tick();
+        for (uint32_t ms = 0; !r.releasedExit && ms < 1000; ms += 10) r.tick();
+        r.in.mode = 0;
+        r.run(600);
+        check(r.asks == entryAsks, "M14.m ...and an exit asks never");
+    }
+    if (root.empty()) return;
+    std::string text;
+    if (!readText(root + "/src/d3d11/explorer_cam.cpp", &text)) return;
+    check(occurrences(text, "in.motion = g_frame.fade.wantsMotion() ? engineMotionReady() : EngineMotionReady{};") == 1,
+          "M14.p1 explorerCamFrameBoundary asks the engine for its motion only when the timeline wants it");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -594,6 +792,8 @@ int main(int argc, char** argv) {
     caseWrapTimeline();
     caseGlue(root);
     caseBackwards();
+    caseSettings(root);
+    caseMotionGate(root);
     if (g_failures) {
         std::printf("FAIL: explorer cam fade: %u of %u checks failed\n", g_failures, g_checks);
         return 1;

@@ -329,6 +329,7 @@ void Config::parse() {
         auditResolve(&parsed);
         m_impl->values.swap(parsed);
         m_impl->noteNoted.clear();
+        m_generation.fetch_add(1, std::memory_order_release);   // after the swap: a reader that sees the new number sees the new values
         // Stamped only now, on the success path.
         //
         // Stamping it up front meant a read that failed -- an editor holding
@@ -584,6 +585,7 @@ void Config::set(const char* key, const char* value) {
     m_impl->values[k] = value;
     // A new value is a new thing to say about the key, as a parse would be.
     m_impl->noteNoted.erase(k);
+    m_generation.fetch_add(1, std::memory_order_release);
 }
 
 // Does the whole value parse, or only a prefix of it?

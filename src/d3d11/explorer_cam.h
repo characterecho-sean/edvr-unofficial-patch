@@ -126,6 +126,7 @@ bool sessionActive();
 bool exiting();
 uint32_t f5Request();              // 0 none, 1 enter, 2 exit
 int hotkeyVk();                    // the F5 key's virtual key after explorerCamFrameBoundary read the config
+uint32_t settingsReads();          // how many times explorerCamFrameBoundary read its settings through Config (once per configuration change, not per frame)
 void preThenPost(void* activity);  // the free-camera hook's pre half and post half with no original between them (the fault cells)
 void controllerPreThenPost(void* controller);
 void forceSession(bool on);         // an F5 session switched on or off by hand (the config cells cannot press the real key)

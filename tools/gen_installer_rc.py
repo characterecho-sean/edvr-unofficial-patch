@@ -336,7 +336,7 @@ def main(argv=None):
                     b'# F8 opens the AA menu: Off / TAA / DLSS / FSR3 and DLSS model presets.\r\n'
                     b'# temporal_aa: off, on (TAA), dlaa (native SS), dlss, fsr. Game SS controls render scale.\r\n'
                     b'# Press NumLock while the issue is visible to collect a diagnostic capture.\r\n'
-                    b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\n\r\n'
+                    b'[fix]\r\ntemporal_aa = off\r\ntemporal_aa_model = k\r\nui_quality = 100\r\n\r\n'
                     b'[hotkey]\r\nmenu = F8\r\ndump_draws = NUMLOCK\r\n\r\n'
                     b'[log]\r\nenabled = 1\r\n\r\n'
                     b'[advanced]\r\nreal_dll =\r\n')

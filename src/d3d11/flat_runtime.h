@@ -8,6 +8,7 @@
 #include "flat_map_bounce.h"
 #include "flat_mutation_diagnostic.h"
 #include "animated_history_writes.h"
+#include "flat_ui_layer.h"   // fix.ui_quality's flat layer: the draw scope's second issues (uiReissue)
 #include <optional>
 namespace edvr {
 struct FlatMapBounceD3DDriver {
@@ -134,6 +135,11 @@ struct FlatRuntimeDrawScope {
     bool overlayReplayPending = false;
     bool foregroundPlanned = false, foregroundStarted = false, foregroundEnded = false;
     bool untrustedPlanned = false, untrustedStarted = false, untrustedEnded = false;
+    // fix.ui_quality's flat layer (flat_ui_layer.h): a cockpit HUD draw the shared decision took (uiTake; uiTaken once
+    // Begin bound the layer), the game's tonemap admitted for its re-issue (uiTone), the output copy that composites
+    // (uiComposite).
+    bool uiTake=false,uiTaken=false,uiEnded=false,uiTone=false,uiComposite=false;
+    uint64_t uiVs=0,uiPs=0;
     bool domainPlanned=false,domainStarted=false,domainForeign=false,domainPool=false;
     bool domainProtectedOverlay=false;
     bool domainHdrWriter=false;
@@ -146,8 +152,17 @@ struct FlatRuntimeDrawScope {
     unsigned domainFormat=0;
     unsigned domainWidth=0,domainHeight=0;
     float domainCamera[6][4]{};
-    bool needsActualDraw() const { return drawPacket || domainPlanned || flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
+    bool needsActualDraw() const { return drawPacket || domainPlanned || uiTake || uiComposite ||
+                                          flatRuntimeNeedsActualDraw(weaponFootprintStarted, overlayPlanned,
                                                                      foregroundPlanned, untrustedPlanned); }
+    // After the game's own issue and endActualDraw: the second issues fix.ui_quality's flat layer asks for, each the game's
+    // draw again through `issue` (the hook's own real call, same arguments) -- a taken draw's colourless depth/stencil
+    // write-back into the game's buffer, and the admitted tonemap's re-issue over the HDR HUD layer. Nothing otherwise.
+    template <class Issue> void uiReissue(Issue issue) {
+        if (!ctx) return;
+        if (uiTaken && flatUiLayerWriteBackBegin(ctx)) { issue(); flatUiLayerWriteBackEnd(ctx); }
+        if (uiTone && flatUiLayerToneBegin(ctx)) { issue(); flatUiLayerToneEnd(ctx); }
+    }
     ID3D11Texture2D* overlayHdr = nullptr;
     ID3D11DepthStencilView* overlayDsv = nullptr;
     uint32_t weaponFootprintSeq = 0;
