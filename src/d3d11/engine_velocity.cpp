@@ -235,7 +235,6 @@ struct MotionReadyState {
     uint64_t viewsGiven[2] = {0, 0}, viewsSeen[2] = {0, 0};   // views handed out per eye, ever / at the last boundary
     uint32_t viewsRun = 0;                                    // consecutive boundaries at which both eyes had been given views since the one before
     uint64_t chainCalls = 0, chainSeen = 0;                   // chain dispatches the join took (with jobs), ever / at the last boundary
-    bool chainLive = false;                                   // the join was live for the last of them
     bool skinJobs = false, skinLive = false;                  // as of the last boundary
     uint64_t asked = 0, askedSeen = 0;                        // engineVelocityViews calls (either eye), ever / at the last boundary: somebody is consuming the views
     uint32_t sinceAsk = kMotionNeverAsked;                    // boundaries since the last one at which the views were asked for
@@ -1960,6 +1959,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     // F2: the three views the cloned vertex shader reads (t108 the previous palette, t109 the join, t110 the previous pose), bound once
     // with it; with no live join they are the empty table, so every valid flag is 0 (no stale answer). Released by restore().
     if (skinDraw && useVs != vs) {
+        g_skin.flush(ctx, frame);   // the frame's chain dispatches are all in by the first skinned draw (F13 ledger: the palette is final at the first pool draw): the one join runs now
         const SkinViews sv = g_skin.views(frame);
         ID3D11ShaderResourceView* skinViews[3] = {sv.prevPalette, sv.join, sv.prevPose};
         ctx->VSSetShaderResources(kSkinPrevPaletteSlot, 3, skinViews);
@@ -2027,6 +2027,11 @@ void skinSummaryLocked(ID3D11DeviceContext* ctx) {
         char text[1100];
         std::snprintf(text, sizeof(text), "%s", line.c_str());
         Log::get().note("%s", text);
+        // the chain's dispatches over the joins: two or more in a frame is the game's doing (one join over the union), not a gap
+        const std::string chain = skinjoin::chainLine(w.gpu, w.cpu);
+        char chainText[1100];
+        std::snprintf(chainText, sizeof(chainText), "%s", chain.c_str());
+        Log::get().note("%s", chainText);
         // which record of a base was the live one (and why the draw list was not exact when it was not): the pose table's witness
         const std::string pose = skinjoin::poseLine(w.gpu, w.cpu);
         const char* inexact = g_skin.lastInexactWhy();
@@ -2035,8 +2040,8 @@ void skinSummaryLocked(ID3D11DeviceContext* ctx) {
         else std::snprintf(poseText, sizeof(poseText), "%s", pose.c_str());
         Log::get().note("%s", poseText);
     } else {
-        Log::get().note("skin join: no counters read back this window (chain dispatches seen %llu, pose tables built %llu, refused %u, hook %s): "
-                        "if the chain count is zero the join never ran.",
+        Log::get().note("skin join: no counters read back this window (joins run %llu, pose tables built %llu, refused %u, hook %s): "
+                        "if the join count is zero the join never ran.",
                         static_cast<unsigned long long>(g_skin.chainFrames()), static_cast<unsigned long long>(g_skin.poseScatters()), w.chainRefused, hookState);
     }
     const auto u = [](uint64_t v) { return static_cast<unsigned long long>(v); };
@@ -3074,6 +3079,9 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!live.load(std::memory_order_acquire)) return;
     cache = DrawCache{};
     ++g_draw.frames;
+    // The frame's palette-chain dispatches are joined once: at the first skinned draw that needed the views, or here when no draw did (the history chain must
+    // not skip a frame because a character was out of view).
+    if (ctx) g_skin.flushPending(ctx);
     {
         // The entry fade's signals for the frame that just ended (engineMotionReady): both eyes handed the views since the last boundary, and the skinned jobs.
         const bool both = g_motion.viewsGiven[0] != g_motion.viewsSeen[0] && g_motion.viewsGiven[1] != g_motion.viewsSeen[1];
@@ -3081,7 +3089,7 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
         g_motion.viewsSeen[0] = g_motion.viewsGiven[0];
         g_motion.viewsSeen[1] = g_motion.viewsGiven[1];
         g_motion.skinJobs = g_motion.chainCalls != g_motion.chainSeen;
-        g_motion.skinLive = g_motion.skinJobs && g_motion.chainLive;
+        g_motion.skinLive = g_motion.skinJobs && g_skin.lastJoinLive();   // (the frame's join has run: a draw needed it, or the flush above)
         g_motion.chainSeen = g_motion.chainCalls;
         if (g_motion.asked != g_motion.askedSeen) g_motion.sinceAsk = 0;
         else if (g_motion.sinceAsk < kMotionNeverAsked) ++g_motion.sinceAsk;
@@ -3379,12 +3387,9 @@ bool engineVelocitySkinWanted() noexcept { return g_skinWanted.load(std::memory_
 void engineVelocityNoteChainDispatch(ID3D11DeviceContext* ctx, uint32_t groups) {
     if (!g_skinWanted.load(std::memory_order_acquire) || !live.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    const uint64_t before = g_skin.chainFrames();
-    g_skin.onChain(ctx, frameNow(), groups);
-    if (g_skin.chainFrames() != before) {   // the join took this dispatch (it has jobs): the fade's "a character is loaded" and "its join is live"
-        ++g_motion.chainCalls;
-        g_motion.chainLive = g_skin.liveNow(frameNow());
-    }
+    // One dispatch of the frame's palette chain (the game makes one or two a frame): noted here, joined once per present frame (SkinJoinGpu::noteChain). A
+    // dispatch the join took is the fade's "a character is loaded"; "its join is live" is read at the boundary, after the frame's one join.
+    if (g_skin.noteChain(ctx, frameNow(), groups)) ++g_motion.chainCalls;
 }
 
 ID3D11ShaderResourceView* engineVelocitySkinView(int eye, ID3D11Texture2D* sceneDepth) {

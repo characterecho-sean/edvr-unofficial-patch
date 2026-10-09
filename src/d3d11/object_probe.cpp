@@ -27,6 +27,7 @@
 #include "cull_gate_probe.h"
 #include "kinematic_eval_hook.h"
 #include "exposure_fix.h"   // lookupShaderHash: the compute dispatch's shader, for the skin ledger
+#include "gpu_census.h"     // gpuCensusNoteEyeRun: the census window an eye run falls in says so
 #include "skin_ledger.h"
 
 namespace edvr {
@@ -1622,6 +1623,7 @@ void objectProbeArmLedger(const wchar_t* stamp) {
     // The F2 instrument rides this key and no other: no config, nothing on screen, nothing unarmed. The line below
     // is the first of three that prove a run (armed, the per-frame lines with their RESULT, and the ledger write).
     g_skin.arm(g_ledgerFrame0);
+    gpuCensusNoteEyeRun();
     g_skinForeign.store(0, std::memory_order_relaxed);
     Log::get().note("skin ledger: armed with eye run %ls for ledger frames %u..%u: the palette chain's dispatches "
                     "(cs_%016llX: job table, joint matrices, bind poses) and both palette buffers WHOLE at each frame's "

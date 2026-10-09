@@ -25,6 +25,7 @@ struct CpuAt {                                  // the CPU's counters as they st
     JoinFeeder::Counters feeder;
     PaletteHistory::Counters history;
     uint64_t poseBuilds = 0, poseIncomplete = 0;
+    uint64_t chainDispatches = 0, chainMulti = 0, chainLate = 0, chainMixed = 0;
 };
 }  // namespace
 
@@ -52,12 +53,24 @@ struct SkinJoinGpu::Impl {
     PaletteHistory history;
     std::unique_ptr<Snapshot> snapshot = std::make_unique<Snapshot>();
     std::unique_ptr<Plan> plan_ = std::make_unique<Plan>();
-    uint32_t parity = 1;                       // flips at each chain dispatch: the tables of THIS frame are [parity], last frame's [parity ^ 1]
+    uint32_t parity = 1;                       // flips at each join (one a present frame): the tables of THIS frame are [parity], last frame's [parity ^ 1]
     uint32_t joinPresent = ~0u;                // the present frame JoinCS last ran in
     bool joinHistory = false;                  // ...with its history certified
     uint32_t poseBuiltPresent = ~0u;           // the present frame the pose table [parity] was built for
     ComPtr<ID3D11Buffer> prevJobs;
     ComPtr<ID3D11ShaderResourceView> prevJobsSrv;
+    ComPtr<ID3D11Buffer> frameJobs;                  // the present frame's job tables, the chain's dispatches concatenated in dispatch order (kMaxJobs rows)
+    ComPtr<ID3D11ShaderResourceView> frameJobsSrv;
+    // The chain dispatches of one present frame, waiting for their join (noteChain accumulates, runJoin runs it once).
+    bool pending = false, pendingMixed = false;
+    uint32_t pendingPresent = 0;
+    uint32_t pendingJobs = 0;                        // rows copied into frameJobs
+    uint32_t pendingGroups = 0;                      // the dispatches' groups in all (uncapped)
+    uint32_t pendingDispatches = 0;
+    ComPtr<ID3D11Buffer> pendingPalette;             // the buffer the first dispatch wrote (u0)
+    UINT pendingPaletteBytes = 0;
+    uint32_t ranPresent = ~0u;                       // the present frame the last join ran for (a dispatch of it after that is late)
+    uint64_t chainDispatches = 0, chainMulti = 0, chainLate = 0, chainMixed = 0;   // dispatches taken / frames with two or more / late ones / frames on two palette buffers
     ComPtr<ID3D11Buffer> curPalette, prevPalette;
     std::map<ID3D11Buffer*, std::pair<ComPtr<ID3D11Buffer>, ComPtr<ID3D11ShaderResourceView>>> paletteViews;
     // counters
@@ -136,6 +149,7 @@ bool create(SkinJoinGpu::Impl& s, ID3D11Device* dev) {
         FAILED(dev->CreateComputeShader(kSkinPoseFinishBytecode, sizeof(kSkinPoseFinishBytecode), nullptr, &s.poseFinish))) return false;
     s.jobs = nullptr;
     s.prevJobs = makeBuffer(dev, kMaxJobs * 16, D3D11_BIND_SHADER_RESOURCE, structured, 16);
+    s.frameJobs = makeBuffer(dev, kMaxJobs * 16, D3D11_BIND_SHADER_RESOURCE, structured, 16);
     s.plan = makeBuffer(dev, kPlanWords * 4, D3D11_BIND_SHADER_RESOURCE, raw, 0);
     s.joinTable = makeBuffer(dev, kMaxRows * 4, srvUav, structured, 4);
     s.nullJoin = makeBuffer(dev, 64, D3D11_BIND_SHADER_RESOURCE, structured, 4);
@@ -160,9 +174,10 @@ bool create(SkinJoinGpu::Impl& s, ID3D11Device* dev) {
         s.info[i] = makeBuffer(dev, kMaxRows * 8, srvUav, raw, 0);
         s.pose[i] = makeBuffer(dev, kMaxRows * 32, srvUav, structured, 32);
     }
-    if (!s.prevJobs || !s.plan || !s.joinTable || !s.nullJoin || !s.stats || !s.owner || !s.poseCb || !s.info[0] || !s.info[1] || !s.pose[0] || !s.pose[1] ||
+    if (!s.prevJobs || !s.frameJobs || !s.plan || !s.joinTable || !s.nullJoin || !s.stats || !s.owner || !s.poseCb || !s.info[0] || !s.info[1] || !s.pose[0] || !s.pose[1] ||
         !s.instCopy || !s.refBits || !s.baseState || !s.ranges) return false;
     s.prevJobsSrv = structuredSrv(dev, s.prevJobs.Get(), kMaxJobs);
+    s.frameJobsSrv = structuredSrv(dev, s.frameJobs.Get(), kMaxJobs);
     s.planSrv = rawSrv(dev, s.plan.Get(), kPlanWords);
     s.joinSrv = structuredSrv(dev, s.joinTable.Get(), kMaxRows);
     s.nullJoinSrv = structuredSrv(dev, s.nullJoin.Get(), 16);
@@ -179,7 +194,7 @@ bool create(SkinJoinGpu::Impl& s, ID3D11Device* dev) {
         s.poseSrv[i] = structuredSrv(dev, s.pose[i].Get(), kMaxRows);
         s.poseUav[i] = structuredUav(dev, s.pose[i].Get(), kMaxRows);
     }
-    if (!s.prevJobsSrv || !s.planSrv || !s.joinSrv || !s.nullJoinSrv || !s.joinUav || !s.statsUav || !s.ownerUav || !s.instSrv || !s.rangesSrv || !s.refUav || !s.stateUav) return false;
+    if (!s.prevJobsSrv || !s.frameJobsSrv || !s.planSrv || !s.joinSrv || !s.nullJoinSrv || !s.joinUav || !s.statsUav || !s.ownerUav || !s.instSrv || !s.rangesSrv || !s.refUav || !s.stateUav) return false;
     for (int i = 0; i < 2; ++i) if (!s.infoSrv[i] || !s.infoUav[i] || !s.poseSrv[i] || !s.poseUav[i]) return false;
     for (uint32_t i = 0; i < kStatStages; ++i) {
         D3D11_BUFFER_DESC d{};
@@ -233,10 +248,14 @@ ComPtr<ID3D11ShaderResourceView> paletteView(SkinJoinGpu::Impl& s, ID3D11Buffer*
 }
 }  // namespace
 
-void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t groups) {
+// One dispatch of the game's palette chain. The game dispatches it once per frame, or twice (F13, the settlement: a second job table with other characters'
+// jobs into the same palette buffer, the jobs' rows interleaved with the first's, the buffer swapped once per frame, both dispatches complete before the first
+// pool draw). The join is one per PRESENT FRAME over the union: each dispatch's job table is copied, in dispatch order, behind the last one's into the
+// frame's table, and JoinCS runs once (runJoin), at the first skinned draw that needs it (flush) or, with no such draw, at the frame boundary (flushPending).
+// A dispatch that comes after that run is late: counted, its jobs get no join this frame.
+bool SkinJoinGpu::noteChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t groups) {
     Impl& s = *impl_;
-    s.joinHistory = false;
-    if (s.failed || !ctx || !groups) return;
+    if (s.failed || !ctx || !groups) return false;
     ComPtr<ID3D11Device> dev;
     ctx->GetDevice(&dev);
     if (!s.created) {
@@ -244,12 +263,12 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
             s.failed = true;
             ++s.createFailed;
             Log::get().note("skin join: the GPU resources could not be made; the join is off (no history for any skinned character).");
-            return;
+            return false;
         }
         s.created = true;
     } else if (s.device.Get() != dev.Get()) {
         s.failed = true;
-        return;
+        return false;
     }
     // The game's own bindings at the chain dispatch: t0 the job table, u0 the palette it writes.
     ComPtr<ID3D11ShaderResourceView> t0;
@@ -277,13 +296,71 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
             s.chainRefusedNoted = true;
             Log::get().note("skin join: the palette chain's bindings are not what the ledger measured (t0 a 16-byte structured job table, u0 a 48-byte structured palette); no join this frame.");
         }
+        return false;
+    }
+    // The earlier present frame's dispatches were never joined (no draw needed them and no boundary came between): they run first, in their own frame.
+    if (s.pending && s.pendingPresent != present) runJoin(ctx);
+    ++s.chainDispatches;
+    if (!s.pending && s.ranPresent == present) {   // the frame's join has run: this dispatch's jobs are not in it
+        ++s.chainLate;
+        return true;
+    }
+    if (!s.pending) {
+        s.pending = true;
+        s.pendingPresent = present;
+        s.pendingJobs = s.pendingGroups = s.pendingDispatches = 0;
+        s.pendingMixed = false;
+        s.pendingPalette = paletteBuffer;
+        s.pendingPaletteBytes = pd.ByteWidth;
+    } else if (paletteBuffer.Get() != s.pendingPalette.Get()) {
+        s.pendingMixed = true;   // two palette buffers in one frame: nothing measured says which is "last frame's" for which job
+    }
+    const uint32_t room = s.pendingJobs < kMaxJobs ? kMaxJobs - s.pendingJobs : 0u;
+    const uint32_t take = std::min<uint32_t>(groups, room);
+    if (take) {
+        const D3D11_BOX box{0, 0, 0, take * 16u, 1, 1};   // (a boxed copy: a whole number of 16-byte rows)
+        ctx->CopySubresourceRegion(s.frameJobs.Get(), 0, s.pendingJobs * 16u, 0, 0, jobsBuffer.Get(), 0, &box);
+    }
+    if (take < groups) ++s.overJobs;
+    s.pendingJobs += take;
+    s.pendingGroups += groups;
+    ++s.pendingDispatches;
+    return true;
+}
+
+void SkinJoinGpu::flush(ID3D11DeviceContext* ctx, uint32_t present) {
+    Impl& s = *impl_;
+    if (s.pending && s.pendingPresent == present) runJoin(ctx);
+}
+
+void SkinJoinGpu::flushPending(ID3D11DeviceContext* ctx) {
+    if (impl_->pending) runJoin(ctx);
+}
+
+bool SkinJoinGpu::lastJoinLive() const {
+    return views(impl_->joinPresent).live;
+}
+
+// The join of the pending present frame's dispatches: once, over the union of their job tables.
+void SkinJoinGpu::runJoin(ID3D11DeviceContext* ctx) {
+    Impl& s = *impl_;
+    s.pending = false;
+    s.joinHistory = false;
+    if (s.failed || !ctx || !s.created || !s.pendingJobs) {
+        s.pendingPalette.Reset();
         return;
     }
+    const uint32_t present = s.pendingPresent;
+    const uint32_t groups = s.pendingGroups;
+    const uint32_t dispatches = s.pendingDispatches;
+    ComPtr<ID3D11Buffer> paletteBuffer = std::move(s.pendingPalette);
+    s.ranPresent = present;
     ++chainFrames_;
-    const uint32_t jobs = std::min<uint32_t>(groups, kMaxJobs);
-    if (groups > kMaxJobs) ++s.overJobs;
-    // The hook's newest list, and what it says about the rows in use. The dispatch tells the hook first that its job table has jobs: an empty list is
-    // evidence against the hook's offsets only against such a table (a stand-down it causes ends the newest list here).
+    if (dispatches > 1) ++s.chainMulti;
+    if (s.pendingMixed) ++s.chainMixed;
+    const uint32_t jobs = s.pendingJobs;   // (rows of the union in the frame's table; the caps are in noteChain)
+    // The hook's newest list (one a frame, whatever the dispatch count), and what it says about the rows in use. The join tells the hook first that its job
+    // table has jobs: an empty list is evidence against the hook's offsets only against such a table (a stand-down it causes ends the newest list here).
     Snapshot& snap = *s.snapshot;
     skinEntityHookNoteChain(groups);
     const bool haveSnap = skinEntityHookLatest(snap);
@@ -291,10 +368,10 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
     const uint32_t rowsInUse = haveSnap && checkSnapshot(snap) ? snap.end : 0;
     const uint64_t previousBytes = s.history.lastBytes();   // the previous palette buffer, before this frame is noted
     const bool poseLast = s.poseBuiltPresent == present - 1u;
-    const uint32_t verdict = s.history.note(present, reinterpret_cast<uint64_t>(paletteBuffer.Get()), pd.ByteWidth, rowsInUse, poseLast);
+    const uint32_t verdict = s.history.note(present, reinterpret_cast<uint64_t>(paletteBuffer.Get()), s.pendingPaletteBytes, rowsInUse, poseLast);
     s.prevPalette = s.curPalette;
     s.curPalette = paletteBuffer;
-    const bool history = verdict == kHistoryOk && groups <= kMaxJobs;
+    const bool history = verdict == kHistoryOk && groups <= kMaxJobs && !s.pendingMixed;
     s.parity ^= 1u;
     Plan& plan = *s.plan_;
     s.feeder.step(haveSnap ? &snap : nullptr, GetCurrentThreadId(), history, jobs, s.parity, plan);
@@ -308,7 +385,7 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
         CsStageSave saved;
         saved.save(ctx);
         const uint32_t cur = s.parity & 1u, prev = cur ^ 1u;
-        ID3D11ShaderResourceView* srvs[5] = {t0.Get(), s.prevJobsSrv.Get(), s.planSrv.Get(), s.infoSrv[prev].Get(), s.poseSrv[prev].Get()};
+        ID3D11ShaderResourceView* srvs[5] = {s.frameJobsSrv.Get(), s.prevJobsSrv.Get(), s.planSrv.Get(), s.infoSrv[prev].Get(), s.poseSrv[prev].Get()};
         ID3D11UnorderedAccessView* uavs[4] = {s.joinUav.Get(), s.infoUav[cur].Get(), s.statsUav.Get(), s.ownerUav.Get()};
         ctx->CSSetShader(s.join.Get(), nullptr, 0);
         ctx->CSSetShaderResources(0, 5, srvs);
@@ -319,13 +396,13 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
         ID3D11ShaderResourceView* noSrv[5] = {};
         ctx->CSSetShaderResources(0, 5, noSrv);
         saved.restore(ctx);
-        // last frame's job table for the next frame's prefix compare (a boxed copy: a whole number of 16-byte rows)
+        // this frame's job table (the union) for the next frame's prefix compare (a boxed copy: a whole number of 16-byte rows)
         const D3D11_BOX box{0, 0, 0, jobs * 16u, 1, 1};
-        ctx->CopySubresourceRegion(s.prevJobs.Get(), 0, 0, 0, 0, jobsBuffer.Get(), 0, &box);
+        ctx->CopySubresourceRegion(s.prevJobs.Get(), 0, 0, 0, 0, s.frameJobs.Get(), 0, &box);
     }
     s.joinPresent = present;
     s.joinHistory = history;
-    // Counters back to the CPU at EVERY chain frame, never waited for: the finished read-backs are taken first, then this frame's copy goes into a free
+    // Counters back to the CPU at EVERY join, never waited for: the finished read-backs are taken first, then this frame's copy goes into a free
     // slot with this chain frame's number and the CPU's counters as they stand now (this frame's history verdict and feeder step are in them). A
     // window is the span between two finished read-backs, so its GPU and CPU halves are the same frames (the F12 flight's line paired the GPU's counters
     // with those of a window later and read "no history 1320 of 1320" beside "views live 2315").
@@ -338,6 +415,10 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
         st.cpu.history = s.history.counters();
         st.cpu.poseBuilds = s.poseBuilds;
         st.cpu.poseIncomplete = s.poseIncomplete;
+        st.cpu.chainDispatches = s.chainDispatches;
+        st.cpu.chainMulti = s.chainMulti;
+        st.cpu.chainLate = s.chainLate;
+        st.cpu.chainMixed = s.chainMixed;
         break;
     }
 }
@@ -463,6 +544,10 @@ SkinWindow SkinJoinGpu::takeWindow(ID3D11DeviceContext* ctx) {
     for (uint32_t k = 0; k < kHistoryCount; ++k) w.cpu.history[k] = h.verdict[k] - hl.verdict[k];
     w.cpu.poseBuilds = s.cpuNewest.poseBuilds - s.cpuLast.poseBuilds;
     w.cpu.poseIncomplete = s.cpuNewest.poseIncomplete - s.cpuLast.poseIncomplete;
+    w.cpu.chainDispatches = s.cpuNewest.chainDispatches - s.cpuLast.chainDispatches;
+    w.cpu.chainMulti = s.cpuNewest.chainMulti - s.cpuLast.chainMulti;
+    w.cpu.chainLate = s.cpuNewest.chainLate - s.cpuLast.chainLate;
+    w.cpu.chainMixed = s.cpuNewest.chainMixed - s.cpuLast.chainMixed;
     s.cpuLast = s.cpuNewest;
     w.chainRefused = s.chainRefused;
     w.overJobs = s.overJobs;

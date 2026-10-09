@@ -63,6 +63,8 @@ constexpr char kSkinJoinCsHlsl[] = R"HLSL(
 #define SJ_STAT_POSE_DROPPED 23u
 #define SJ_STAT_POSE_LISTS_EXACT 24u
 #define SJ_STAT_POSE_LISTS_BAD 25u
+#define SJ_STAT_POSE_IDLE 26u
+#define SJ_STAT_POSE_UNRESOLVED 27u
 #define SJ_STAT_WORDS 28u
 #define SJ_REF_WORDS 2048u
 #define SJ_MAX_RANGE_INSTANCES 1024u
@@ -335,6 +337,8 @@ void poseFinish(uint3 id : SV_DispatchThreadID) {
  Pose z; z.a = uint4(0u,0u,0u,0u); z.b = uint4(0u,0u,0u,0u);
  PoseOut[id.x] = z;
  uint o; Stats.InterlockedAdd(SJ_STAT_POSE_DROPPED * 4u, 1u, o);
+ // Of the dropped bases: with an exact draw list, one a draw read (two or more of its read records disagree) or one no draw read (every record decided)
+ if (RefValid()) Stats.InterlockedAdd(((BaseState.Load(id.x * 4u) & SJ_POSE_LIVE) != 0u ? SJ_STAT_POSE_UNRESOLVED : SJ_STAT_POSE_IDLE) * 4u, 1u, o);
 }
 )HLSL";
 }

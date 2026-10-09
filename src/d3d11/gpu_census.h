@@ -243,6 +243,10 @@ private:
 // window. No ini key: this is always on.
 void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept;
 
+// An eye run (the ledger, the draw census, the pool and palette copies) was armed: the window it falls in carries its extra GPU copies and its census, and
+// its summary lines say so, so a window without that sentence is the one to price a feature from (F13: both windows after the entry held a run).
+void gpuCensusNoteEyeRun() noexcept;
+
 // Quiescent cleanup, alongside the other feature modules' Shutdown().
 void gpuCensusShutdown() noexcept;
 

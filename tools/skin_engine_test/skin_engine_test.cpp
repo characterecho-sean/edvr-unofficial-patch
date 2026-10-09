@@ -13,6 +13,7 @@
 //       identity, the periodic lines, the guard on a small previous palette buffer (tools\engine_velocity_test\skin_lifecycle_tests.h)
 //   L10, L11  the live record of a base (a stale second record in the pool; the draws' instance-stream entries decide) and the no-history write of a
 //       skinned family's pixel shader that exports no E
+//   L12  the palette chain dispatched twice in one present frame (the game does): one join over the union, whichever dispatch holds the character
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -42,7 +43,7 @@ namespace edvr { thread_local bool g_flatComputeInternal = false; }
 // The case ids the suites label their checks with (tools\skin_engine_test\mutants.py reads this list to hold each case to a mutation).
 static const char* const kCases[] = {"C1.arithmetic", "C2.production-mv", "C3.blend",      "L1.arming",    "L2.first-frame", "L3.steady",
                                      "L4.moving",     "L5.job-table",     "L6.bindings",   "L7.hook-list", "L8.periodic-lines", "L9.small-buffer",
-                                     "L10.live-record", "L11.no-history-write"};
+                                     "L10.live-record", "L11.no-history-write", "L12.chain-dispatches"};
 
 namespace {
 unsigned g_checks = 0, g_failures = 0;
