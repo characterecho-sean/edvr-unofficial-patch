@@ -39,6 +39,7 @@ namespace skinjoin {
 constexpr uint64_t kChainHash = 0x6FE04AF836BB1DBAull;   // cs_6FE04AF836BB1DBA, APPLY_BIND_POSE_TRANSFORMS_CS: one group per job (skin_ledger.h's kChainHash)
 constexpr uint32_t kMaxEntries = 1024;     // entries one snapshot can hold
 constexpr uint32_t kMaxRows = 65536;       // palette rows the tables cover (the ledger's kept rows)
+constexpr uint32_t kClearGroups = 64;      // groups of 256 threads in the join's clear pass (skin_join_shader.h SJ_CLEAR_GROUPS): all kMaxRows rows of all three tables, every frame
 constexpr uint32_t kMaxJobs = 8192;        // dispatch groups the join reads
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 constexpr uint32_t kMaxBonesPerJob = 4096;
@@ -80,11 +81,13 @@ struct Snapshot {
 };
 
 // Does the list look like what the game's assembly makes? Each entity's primary job inside its own range (which also forces the bases to
-// increase: a base at or below its predecessor's leaves that primary job no room), the last range ending at `end`.
+// increase: a base at or below its predecessor's leaves that primary job no room), the last range ending at `end`. A walk that flagged anything (a fault,
+// an overflow, a value it could not believe, another node) is refused whole. The range test is written without the sum dst + count: both are the game's
+// 32-bit values, and a base near 2^32 would wrap the sum back under `next`.
 inline bool checkSnapshot(const Snapshot& s, const char** why = nullptr) {
     const char* w = "";
     bool ok = true;
-    if (s.flags & (kSnapFault | kSnapOverflow | kSnapNodeChanged)) { w = "walk flags"; ok = false; }
+    if (s.flags & (kSnapFault | kSnapOverflow | kSnapImplausible | kSnapNodeChanged)) { w = "walk flags"; ok = false; }
     else if (s.n == 0 || s.n > kMaxEntries) { w = "entry count"; ok = false; }
     else if (s.end == 0 || s.end > kMaxRows) { w = "end row"; ok = false; }
     else {
@@ -92,7 +95,7 @@ inline bool checkSnapshot(const Snapshot& s, const char** why = nullptr) {
             const Entry& e = s.e[i];
             const uint32_t next = i + 1 < s.n ? s.e[i + 1].dst : s.end;
             if (!e.key || !e.mesh || e.count == 0 || e.count > kMaxBonesPerJob) { w = "entry fields"; ok = false; }
-            else if (e.dst + e.count > next) { w = "range"; ok = false; }
+            else if (e.dst > next || e.count > next - e.dst) { w = "range"; ok = false; }
         }
         if (ok && s.e[0].dst > s.end) { w = "first base"; ok = false; }
     }

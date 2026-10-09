@@ -1781,7 +1781,11 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             // (3808x2142 in the F14 flight, 65 MB) is cleared at its first skinned draw instead (below): most frames on foot draw no character.
             if (e.skinRtv && eye != kEngineVelocitySourceEye) {
                 const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
+                {
+                    // (F16: this clear alone, nested in the engine velocity span above: the census prices it on its own line)
+                    GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinEyeClear);
+                    ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
+                }
                 engineVelocityNoteStateCalls(1);
                 ++g_skinStats.eyeFrames;
             }
@@ -1983,7 +1987,11 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         if (eye == kEngineVelocitySourceEye && e.skinClearedFrame != frame && e.skinRtv) {
             const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
             GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
-            ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
+            {
+                // (F16: this clear alone, nested in the engine velocity span above: the census prices it on its own line)
+                GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinSourceClear);
+                ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
+            }
             engineVelocityNoteStateCalls(1);
             e.skinClearedFrame = frame;
             ++g_skinStats.sourceClears;

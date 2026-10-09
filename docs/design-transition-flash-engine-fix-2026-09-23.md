@@ -6,53 +6,54 @@ static chain: see "Flight 184826".*
 
 ## Status
 
-- **State: the module retired 2026-09-29 (code removed, 68bddaaa).**
-  transition_flash_prevent.cpp and `advanced.transition_flash_prevent` (off,
-  watch, on, alternate) are deleted: flight 184826 refuted the engine chain
-  they hooked, and the key defaulted off. The entries below describe the module
-  as it was; the code is at `68bddaaa^`. `transition_flash_prevent_core.h`
-  stays because `transition_flash_eye_base_core.h` reuses its Mode, Treatment,
-  pose classifier and guard table.
-
-- **Acting-patch history (2026-09-23/24), newest first; full text in Status
-  detail below, per-flight in the flight sections:** 160557 (c321631e): the
-  view write was corrupting (column-major w-lane translation; the finder hit
-  prev-view), fixed with w-lane read, B^-1 premultiply and an orthonormality
-  guard. 151942 (e5daea6b): the pilot block (rows 275-279) was the residual
-  flash, premultiplied by B too. Review finding FIXED 2026-09-24: one
-  latched, all-or-nothing decision at the frame's first head-only fill.
-  134813 (7eb4a536): locator VALIDATED, the selector is the decision (skip
-  22726). 125237 (e9fefca0): LIVE-READ VALIDATED to the millimetre.
-
-- **Goal (Sean, 2026-09-23):** stop trapping the bad frame and stop Elite
-  rendering it at all, by fixing the order inside the game. The trap stays
-  on as referee until the acting build verifies.
-- **What the bad frame is (measured):** `cb1[275]` of the 5376-byte scene
-  CB lands on the head pose alone for one frame (within ~14 cm of the frame
-  origin); the ship/seat transform under the head is missing because the
-  eye-base mailbox (ship+0x3330, consumer `0x28431D0`, writer `0x2874B20`)
-  is not refilled that frame. Every flash is a one-frame writer skip
-  (100043, 125237).
-- **Consume frame numbers lag render taps by ~1 wall-clock frame** (125237):
-  the refill the bad render needs is already LIVE in the mailbox at the tap;
-  the sim's window starts at N+1, not N, and the act fires at tap frame
-  skip+1 (6/6 on 134813).
-- **The render-time patch is on main** (simulation 310d9883, live read
-  e9fefca0, locator 7eb4a536, the acting build 9a243675 plus the review
-  fixes): `advanced.transition_flash_eye_base = off|watch|on|alternate`.
-  The Steam copy runs the acting build, trap OFF, `alternate` (two marked
-  ini lines). Read each flight with `--expect-build` set to the stamped
-  commit its section names.
-- **Hyperspace exits can be scene-new too** (125237): the second scene-new
-  event on record after 100043's f23338. 22726 then proved the selector is
-  NOT demotable: scene-old and scene-new both occur at hyperspace entries.
+- **State: SHIPPED (2026-10-09, build 33ffc76e; flight 095137 clean; Build 2d
+  is the cleanup).** An EXACT WITHHOLD. The HMDCamera is deactivated at S-1 and
+  re-activated AFTER the S consume, so the controller tick is absent on the
+  frame whose mailbox the consume reads (050558) and the frame is drawn from
+  the wrong place. `fix.transition_flash = 1` (default) arms it: the consumer
+  hook (`0x28431D0`, build- and prologue-keyed) arms an event at the ENTRY of a
+  run of reset mailboxes; at tap frames skip+1 (and skip+2 while the gap lasts)
+  the first camera-CB fill with a head-only row 275 (< 1 m) withholds the
+  frame; the frame boundary behind it publishes the temporal verdict "stayed".
+  One held frame per transition; no write to the game's buffer, no game call.
+- **Evidence (flight 095137, diagnostics off):** supercruise, low wakes and
+  hyperspace, no flash seen. 12 events, 13 frames held, `hold not honoured=0`,
+  `skipped=26, history_kept=22, returned_resets=0, unjudged_resets=0`.
+- **Armed means the whole chain** (review of 33ffc76e): identity, the consumer
+  hook AND a camera-buffer tap that can deliver (the detector must observe a
+  5376-byte buffer). Else `engine fix NOT armed -- the camera-buffer tap is
+  unavailable (<why>)`, and the line says whether ANY protection runs.
+- **Judge the next flight by** `unjudged_resets=0` and omission RUNS per eye,
+  not `history_kept = held frames`: `skipped` is one per omitted eye per frame,
+  `history_kept` one per resolved run per eye (two consecutive holds of an eye:
+  skipped +2, kept +1; native_temporal_test asserts it).
+- **The old detector** is dormant while armed and only the FALLBACK when
+  identity, the hook or the tap fails (Armed/Lost, once, from install). Its
+  twelve tuning keys are gone; it runs on constants. Armed and idle it records
+  no camera history, so the history key says so; `fix.transition_flash = 0`
+  (restart) records it, the clean control for a flash report.
+- **Ruled out (details at the end):** the catch-up tick, the pool selector as
+  the gate, in-place correction (builds 2a/2b), a consume-time write,
+  `ship+0x130`. Hyperspace needs no base choice: a hold has none to make.
+- **Cost (an ESTIMATE, not an A/B measurement; Sean 2026-10-09):** the old trap
+  ran every frame even with the fix off. Engine fix, no transition pending: a
+  64-byte compare per consume; per camera-buffer Unmap the shared Map size memo
+  and nomination (the temporal pass and sun-glare fix use them too), the
+  guarded Unmap dispatch and glitchFrameObserve's idle test; nothing per draw;
+  no controller-tick hook. About 0.1-0.4 ms of render-thread CPU a frame
+  (1-4% of 11.1 ms at 90 Hz), mostly visible when CPU-bound.
+- **Tests:** the glue rig (`native_temporal_test`) drives consume -> event ->
+  tap -> mark -> both submits -> boundary verdict -> resumed treatment: one- and
+  two-frame gaps, duplicate and non-head-only fills, no-head-only events,
+  failed activation, overlapping events.
+- **What the bad frame is (measured):** `cb1[275]` of the 5376-byte scene CB
+  lands on the head pose alone for one frame; the mailbox (ship+0x3330) is not
+  refilled that frame. Render taps lag consume frames by ~1.
 - **Environment:** game build 332841 (PE TimeDateStamp 1788384820, image
   104,894,464), the same exe in both installs. Independent of VR runtime,
   headset, eye size and DLSS: the code is Elite's camera, below all of them.
 - **Old chain (compose `0x23BC8A0` / recompute `0x3CEE650`):** REFUTED
-  (flight 184826); its hooks stay inert until Sean says to remove them.
-- **Instrument history:** the journal below; each flight section carries its
-  own as-installed note.
+  (flight 184826). Instrument history: each flight section.
 - **Ruled out:** see the list at the end.
 
 ## Status detail (moved out of Status 2026-09-29)
@@ -123,6 +124,19 @@ happens here; the trap only swaps pointers. Its own work per frame:
 
 It runs even with `fix.transition_flash = 0` (`glitch_frame.cpp:1577-1618`,
 "Off, but still watching").
+
+**Estimated saving of the engine fix over the trap (2026-10-09; an ESTIMATE
+from the figures above, not an A/B measurement -- Sean: the estimate is
+enough).** Per frame the trap also paid per-eye-draw hash compares and the
+scene-draw and pool recording on top of the pool reads (up to 4 a frame,
+0.133 ms at the cap) and the per-Map size compare and pool lookup (up to
+~0.4 ms before its memo). The engine fix with no transition pending costs a
+64-byte compare at the camera driver's consumes and, per camera-buffer
+Unmap, the shared Map size memo and nomination (owned by the temporal pass and
+the sun-glare fix too), the guarded Unmap dispatch and one idle test; nothing
+per draw. About 0.1-0.4 ms of render-thread CPU a frame, 1-4% of
+an 11.1 ms frame at 90 Hz, mostly visible when CPU-bound. Correctness (flight
+095137): exactly one held frame per transition, no misses and no false holds.
 
 The real price is correctness. Each catch shows a repeated frame. The
 recognisers exist because false positives cost frames. A miss shows the flash
@@ -263,6 +277,131 @@ showing one act per transition and none anywhere else.
   nothing waits. The eye copy stays with the runtime.
 - The branches `transition-flash-run-radius` (PR #16) and `flash-cap-one`
   (PR #18) were never merged, and this supersedes both.
+
+## Flight 095137 (2026-10-09, edvr_gfx_20261009_095137.log, build 33ffc76e)
+
+Build 2c, the exact withhold, diagnostics off. Sean flew every transition:
+supercruise entries and exits, low wakes, hyperspace. **He saw no flash.**
+
+- 12 events, 13 frames held (one transition held two frames while its gap
+  lasted), `hold not honoured=0`.
+- `native temporal omissions: skipped=26, history_kept=22, returned_resets=0,
+  unjudged_resets=0` (flight 091951 had 4 unjudged resets): publishing the
+  verdict at the frame boundary behind the held frame, after the compositor
+  latched the verdict word, keeps the DLSS history on every hold.
+- Nothing was written to the game's constant buffer and no game function was
+  called; the cost armed and idle is in the Status block.
+- Build 2d then deleted everything that built the fix: the writer watch, the
+  HMDCamera lifecycle hooks and the controller-tick hook, the rings and dumps,
+  the full-CB capture, the passive patch sim, the pool comparison, the
+  correction maths, the temporary diagnostics key, the twelve detector tuning
+  keys (the detector keeps today's defaults as constants), and with Sean's
+  approval the `advanced.eye_origin_trace` and `advanced.eye_origin_readers`
+  instruments (pose_reader_watch, eye_origin_trace.h, the runtime's
+  WaitGetPoses call-stack plumbing). The module went from 3,378 to ~500 lines.
+
+## Flight 091951 (2026-10-09 09:19, edvr_gfx_20261009_091951.log) and the decision
+
+Build 2b (patched entries). Sean: the patched entries still flashed ("a
+different part of the skybox"); the withheld exits were clean every time.
+
+- **The view-group write hit a constant group.** At rows 64-66 of the eye
+  fills the located "view group" is a CONSTANT rotation-only group (before =
+  skip+2 = skip+4 to 1e-5: (-0.284 -0.181 0.942 / -0.575 -0.754 -0.318 /
+  0.767 -0.632 0.110), t = 0). The patch wrote a 95-degree-off rotation with
+  t = (-8.0 10.9 -0.32) into it. 64/68/85/160/287/298 are constant groups.
+- **The bad frame carries other wrong structures** (cbfull_092227_f13161.txt
+  and its siblings): the centre-camera fills 0/1 about 4 degrees off; other
+  cameras' row 275 off by 17 m and 5.3 km; 140-degree garbage in fills 8/9 at
+  13161 that the |row 275| gate misses; rows 328-330; the previous-pose
+  group at rows 229-242 stale for 3-4 frames. A correction would have to
+  find and fix every one.
+- **Temporal history:** the log read `native temporal omissions: skipped=12,
+  history_kept=4, returned_resets=0, unjudged_resets=4`. Some withholds ended
+  in a DLSS history reset (a visible blink and ~0.33 s of re-accumulation).
+  Cause: Build 2a published the verdict word ("stayed") at the mark, BEFORE
+  native_frame latched the word for the withheld eye (native_temporal.cpp
+  skipEye); the pass reads a CHANGE since the latch as the verdict, so the
+  published word read as none and the fourth treat reset the history. The
+  detector publishes after: one frame later, when the next camera says
+  which. Build 2c publishes at the frame boundary behind the held frame
+  (`glitchFrameEngineFixVerdict`), and native_temporal_test proves both
+  orders (published before the latch: reset on the fourth treat; after, also
+  across two held frames: history kept).
+- **Decision (Sean, 2026-10-09): ship the exact withhold, not an in-place
+  patch.** See the Status block for what it does. Per-Map and per-draw cost
+  while armed and idle: see the Status block (glitchFrameObserve returns on an
+  idle test; pool and scene-draw recording and the draw-gate subscription off).
+
+## Flight 060721 (2026-10-09 06:07, build 201aa517)
+
+Build 2a with the fill match widened to 0.10 m (both eyes' fills). Sean flew
+supercruise entries and exits.
+
+- **Entries (15525, 17839):** patched, fills 68/68, view 68. The patched eye
+  matched the engine's next frame to 1 mm. **Exit:** withheld, and fine.
+  **Sean still saw a brief flash in the periphery on the entry.**
+- **Cause, from the dumps (fit over the 7 act fills that have a next frame;
+  eyebase_060955, 061024, 174848, 174929; the numbers are in the rig case
+  `caseClipRowsAgainstRealDump`):** the patch left the camera-relative clip
+  rows head-only. Row 274.xyz == row 279.xyz on every frame (14 of 14,
+  residual 1e-4, w = 0), and on the bad frame it kept the head-only 279. Row
+  272 fits (fx*P02 + sx*P22, fy*P12 + sy*P22, 0, P22) with fx 0.9394, fy
+  0.9715, sx 0.1784 identical across flights; rotating its three lane vectors
+  (x, y, w over rows 270-272) by R(B) lands on the next frame's row 272 with
+  residual 0.0008, where the unpatched row is 0.67-0.86 off. The convention
+  is the pilot basis' own (`v . R(B)`); R(B)^T misses by more than 0.1.
+- **Ruled out (060721): EDVR's temporal pass motion as the cause.** It reads
+  the patched rows, and the 878 m / 3.6 km base jump is dropped by its 50 m
+  gate (temporal_math.h lines 431-434).
+- **Open:** rows 282-284 hold the held (previous) base on the bad frame
+  (prev-view?), and the located view group may be camera-relative (t = 0 on
+  every bad frame) while the patch writes ~13 m into it. The new full-CB
+  capture (diagnostics) settles both; this build does not touch 282-284 or
+  the view-group write.
+- **Instrument:** `advanced.transition_flash_diagnostics = on` writes
+  edvr_logs\flash\cbfull_HHMMSS_f<skip>.txt per engine event (6 a session):
+  all 336 rows for fills 0..9 of tap frames skip+1 (before and after the
+  patch), skip+2, skip+3, skip+4. The eyebase dump's survey now prints rows
+  268-285 on two lines (`rows268-276`, `rows277-285`), and the sim's crossV
+  compares the view group's w lanes (it read [12..14]).
+
+## Flight 050558 (2026-10-09 05:05, build 888f27db) and static round 8
+
+Build 1 (the instrument build: lifecycle hooks, gap lines, a dry run of the
+original tick). Sean flew a supercruise entry and exit and one low wake;
+all three flashed.
+
+- **Every event DECLINED, nothing patched:** 15029 `noPatch:poolLate` (cam=0
+  pool=0), 15117 `noPatch:thin` (live=RESET), 17128 (the entry) `noPatch:thin`
+  (cam=299.8 pool=118.9, ratio 0.40), 17970 (the exit) `noPatch:thin`
+  (boundary selector scene-new, latch thin). 18561 is the quit.
+- **The live base, the first refill after the skip, equals the next frame's
+  eye on every event:** 17130 `live->(+0.770 +13.074 +3.377)` = 17131 P;
+  17972 `live->(-0.749 +19.299 +5.508)` = 17973 P; 15031 live ~ 15032 P (1 cm).
+  At 17970 the boundary read of live was ok but the fill-time read was
+  RESET: the S+1 consume had already reset the mailbox before the render's
+  fill. So the base must be read when the tick writes it, not at the render.
+- **Lifecycle at every in-flight event:** `hmdcam deactivate f=S-1`, `hmdcam
+  destroyed f=S-1` (`0x1069F40` fires every time, the same ctrl address
+  reused), a gap at the S consume with ctrl=null, then `hmdcam activate f=S
+  hstate=2(pending)` AFTER that consume. 15117 was a two-frame gap (activate
+  at 15118).
+- **Static round 8** (dumps `analysis\decomp\flash\r8\`): the camera
+  controller is class HMDCamera (vtable `0x51897D0`; destructor slot 0,
+  Activate `0x109A1D0` slot 12, Deactivate `0x1088B10` slot 13). Its tick
+  `0x10730A0` is not a slot of it: the job system calls it through a
+  function pointer, and only while the handle at `ctrl+0x150` is subscribed.
+  Handle word: bits 1-3 the state (0 none, 1 active, 2 pending), the
+  generation in the high dword. Activate sets `ctrl+0x1E0 = 1` and
+  subscribes (pending); Deactivate and the destructor unsubscribe. Deferral
+  past the consume is refuted: writer, mode-1 peek and mode-2 consume all run
+  on the main thread, in that order. The tick takes its base from the
+  entity named by `(ctrl+0x1A8)->vtable[0x18]()`, falling back to its own
+  previous product at `ctrl+0x70`, and hands it to the writer.
+- **Consequence for the fix:** the catch-up tick is dead (there is no live
+  controller to call at the gap). The base to use is the one the first tick
+  writes after the re-activation, read right after that tick returns.
 
 ## Flight 160557 (2026-09-24 16:05, Steam copy, build c321631e)
 
@@ -647,6 +786,23 @@ through `pdata_functions.csv`.
   cockpit VR camera's.
 
 ## Ruled out
+
+- **Ruled out (091951): the in-place correction.** The view write corrupted
+  a constant group (rows 64-66), and the bad frame carries at least five
+  other wrong structures (centre-camera fills, other cameras' row 275, garbage
+  in fills 8/9, rows 328-330, the stale previous-pose group 229-242).
+- **Ruled out (091951): a rotation-only skybox group needing correction.**
+  Groups 64/68/85/160/287/298 are constant across the bad frame and its
+  neighbours (t = 0): writing one is the corruption, not the fix.
+- **Ruled out (060721): the engine fix's eye as the periphery flash.** The
+  patched origin matched the next frame to 1 mm; the residual was the clip
+  rows 270-274 (above), not the eye or the temporal pass.
+- **Ruled out (050558): the catch-up tick at the consume.** At every gap the
+  HMDCamera is deactivated and destroyed (`ctrl=null`, handle state 0); there
+  is no live controller to call, and the dry run never had a ctrl.
+- **Ruled out (050558): the pool selector as the act gate.** 0 of 5 events
+  decided: poolLate (no pool upload yet at the first head-only fill) or thin
+  (ratio 0.40 against a 0.5-2.0 band). The live base was exact on all of them.
 
 Each was ruled out on 2026-09-23 from existing flight data and static
 analysis, or from flight 184826 or 195435 where marked:

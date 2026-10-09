@@ -1,8 +1,12 @@
 #pragma once
 // The F2 identity passes (docs/kinematic-motion-injection-2026-09-19.md, "F2 built"; skin_join.h is their CPU twin and
-// states what they decide). One HLSL text, four entry points, compiled offline by tools/temporal_shader_build:
+// states what they decide). One HLSL text, several entry points, compiled offline by tools/temporal_shader_build:
 //
-//   join          one 256-thread group at the chain dispatch. Reads the game's t0 job table (t0), last frame's copy of it
+//   joinClear     the join's phase 0 as a pass of its own (F17): SJ_CLEAR_GROUPS groups of 256 threads clear ALL SJ_MAX_ROWS rows of the three tables (join table 0, by-base
+//                 table 0, owner table all ones), dispatched on the same context right before join. Inside the kernel the same loop ran in one group, 256 dependent
+//                 iterations a thread (0.015 ms of the join's 0.030 in the F16 flight); split across groups it is a few microseconds. It still clears every row every
+//                 frame: stale rows after the entity or job count shrinks must read as cleared, and the join below depends on it (the owner table's minima).
+//   join          one 256-thread group at the chain dispatch, after joinClear. Reads the game's t0 job table (t0), last frame's copy of it
 //                 (t1), the plan the CPU built from the hook's list (t2), last frame's by-base (bind, count) table (t3) and
 //                 pose table (t4). Writes the join table (u0, a structured buffer of uint: the vertex shader reads it as
 //                 t109: current base -> previous base, 0 = none), this frame's by-base table (u1), the persistent counters
@@ -28,6 +32,7 @@
 namespace edvr {
 constexpr char kSkinJoinCsHlsl[] = R"HLSL(
 #define SJ_MAX_ROWS 65536u
+#define SJ_CLEAR_GROUPS 64u
 #define SJ_MAX_ENTRIES 1024u
 #define SJ_MAX_JOBS 8192u
 #define SJ_PLAN_RS 8u
@@ -108,17 +113,21 @@ uint EntityOf(uint dst, uint m) {
 }
 
 [numthreads(256,1,1)]
+void joinClear(uint3 id : SV_DispatchThreadID) {
+ [loop] for (uint i = id.x; i < SJ_MAX_ROWS; i += SJ_CLEAR_GROUPS * 256u) {
+  JoinOut[i] = 0u;
+  Info.Store2(i * 8u, uint2(0u, 0u));
+  Owner.Store(i * 4u, 0xFFFFFFFFu);
+ }
+}
+
+[numthreads(256,1,1)]
 void join(uint tid : SV_GroupIndex) {
  const uint flags = PW(0u), m = PW(1u), prevM = PW(2u), endRow = PW(3u), prevRows = PW(7u);
  const uint n = min(PW(5u), SJ_MAX_JOBS), prevN = min(PW(6u), SJ_MAX_JOBS);
  const bool history = (flags & SJ_PLAN_HISTORY) != 0u, offered = (flags & SJ_PLAN_HOOK) != 0u;
  const uint prevHookOk = Stats.Load(SJ_STAT_PREV_HOOK_OK * 4u);
- // 0: clear the tables
- [loop] for (uint i = tid; i < SJ_MAX_ROWS; i += 256u) {
-  JoinOut[i] = 0u;
-  Info.Store2(i * 8u, uint2(0u, 0u));
-  Owner.Store(i * 4u, 0xFFFFFFFFu);
- }
+ // 0: (the tables were cleared by joinClear, the dispatch before this one)
  if (tid < SJ_STAT_WORDS) gStat[tid] = 0u;
  [loop] for (uint e = tid; e < SJ_MAX_ENTRIES; e += 256u) gEntSum[e] = 0u;
  if (tid == 0u) { gMismatch = (offered && (m == 0u || m > SJ_MAX_ENTRIES)) ? SJ_MM_NO_PLAN : 0u; gHeads = 0u; gSum = 0u; gPrefix = min(n, prevN); }

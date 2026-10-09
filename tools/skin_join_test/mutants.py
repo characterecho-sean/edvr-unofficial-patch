@@ -34,14 +34,20 @@ CONFIG = lib.Config(
 M = lib.M
 MUTANTS = [
     # ---- J1: the snapshot checks ----
-    M("snapshot-range-unchecked", "J1", "join", [('else if (e.dst + e.count > next) { w = "range"; ok = false; }', 'else if (false) { w = "range"; ok = false; }')],
+    M("snapshot-range-unchecked", "J1", "join", [('else if (e.dst > next || e.count > next - e.dst) { w = "range"; ok = false; }', 'else if (false) { w = "range"; ok = false; }')],
       "an entity whose primary job overruns its range is accepted"),
+    M("snapshot-range-sum-wraps", "J1", "join", [('else if (e.dst > next || e.count > next - e.dst) { w = "range"; ok = false; }', 'else if (e.dst + e.count > next) { w = "range"; ok = false; }')],
+      "the range test is the 32-bit sum again: a base near 2^32 wraps it back under the next base and the entry is accepted"),
+    M("snapshot-range-off-by-one", "J1", "join", [('else if (e.dst > next || e.count > next - e.dst) { w = "range"; ok = false; }', 'else if (e.dst > next || e.count >= next - e.dst) { w = "range"; ok = false; }')],
+      "a primary job that exactly fills its range is refused"),
+    M("snapshot-implausible-accepted", "J1", "join", [("if (s.flags & (kSnapFault | kSnapOverflow | kSnapImplausible | kSnapNodeChanged))", "if (s.flags & (kSnapFault | kSnapOverflow | kSnapNodeChanged))")],
+      "a list the walk flagged as holding a value it could not believe is accepted, though the flag's own comment says checkSnapshot refuses it"),
     M("snapshot-zero-bones-accepted", "J1", "join", [("if (!e.key || !e.mesh || e.count == 0 || e.count > kMaxBonesPerJob)", "if (!e.key || !e.mesh || e.count > kMaxBonesPerJob)")],
       "an entry with no bones is accepted"),
     M("snapshot-null-key-accepted", "J1", "join", [("if (!e.key || !e.mesh ||", "if (!e.mesh ||")], "an entry with no address is accepted"),
     M("snapshot-end-beyond-tables", "J1", "join", [('else if (s.end == 0 || s.end > kMaxRows) { w = "end row"; ok = false; }', 'else if (s.end == 0) { w = "end row"; ok = false; }')],
       "an end row beyond the tables is accepted"),
-    M("snapshot-node-change-accepted", "J1", "join", [("if (s.flags & (kSnapFault | kSnapOverflow | kSnapNodeChanged))", "if (s.flags & (kSnapFault | kSnapOverflow))")],
+    M("snapshot-node-change-accepted", "J1", "join", [("if (s.flags & (kSnapFault | kSnapOverflow | kSnapImplausible | kSnapNodeChanged))", "if (s.flags & (kSnapFault | kSnapOverflow | kSnapImplausible))")],
       "a list from another node is accepted"),
     M("snapshot-empty-accepted", "J1", "join", [("else if (s.n == 0 || s.n > kMaxEntries) { w = \"entry count\"; ok = false; }", "else if (s.n > kMaxEntries) { w = \"entry count\"; ok = false; }")],
       "an empty list is accepted"),

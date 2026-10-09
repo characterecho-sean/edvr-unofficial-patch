@@ -62,6 +62,15 @@ enum class GpuCensusSection : uint8_t {
     FrameWorldResolve,        // the route's resolve at the tone: the input copy, prep, upscaler and the finish into H
     FrameWorldMips,           // the screen texture's copy into the mipped texture and its GenerateMips
     FrameWorldLayer,          // the layer's re-issue of each eye's screen draw with the resolved, mipped screen
+    // The second skin's GPU work (F2: engine_velocity.cpp and skin_join_gpu.cpp), priced item by item (F16). Each is NESTED inside a FrameEngineVelocity span (the
+    // work was already in the engine velocity figure and still is), so they are timed on turns of their own, are NEVER added to a total, and are reported on a line
+    // of their own. Like the world route's they have no turn until called this window, so with no skinned character the census samples exactly as it did before.
+    // (A fifth item, a probe of the join's 3-table clear on scratch buffers, priced that clear at 0.015 ms in F16 and was removed: it ran every frame to measure.)
+    FrameSkinSourceClear,     // the on-foot source's target 7 clear, once at the frame's first skinned draw (68 MB at 3888x2187)
+    FrameSkinEyeClear,        // an eye's target 7 clear at the eye-frame's start (31 MB at 2016x1949)
+    FrameSkinJoinClear,       // the join's 3-table clear pass (F17: 64 groups of 256 threads over all 65,536 rows of the three tables), issued right before the join
+    FrameSkinJoin,            // the join dispatch (one 256-thread group; since F17 without the clear), the plan upload and the job-table copy
+    FrameSkinPose,            // the pose table build: instance copy, the six dispatches (clear, mark, scatter, scatter-rest, verify, finish)
     // Elite's OWN draws that EDVR alters (see AlteredDrawClass below): the game's
     // draw timed whole, so each figure holds the game's own work in it plus what
     // EDVR adds by binding its target or swapping its shader. NOT EDVR's cost,

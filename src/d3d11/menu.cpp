@@ -37,6 +37,7 @@
 #include "hotkey_capture.h"
 #include "input_gate.h"
 #include "joy_watch.h"
+#include "menu_edit_hold.h"
 #include "menu_flat_rows.h"
 #include "menu_keys.h"
 #include "menu_panel.h"
@@ -1314,7 +1315,8 @@ void writerMain() {
         {
             std::unique_lock<std::mutex> lock(g_writer.m);
             g_writer.cv.wait(lock, [] { return g_writer.quit || !g_writer.queue.empty(); });
-            if (g_writer.quit) return;
+            // A quit leaves only when the queue is empty: what was queued before it (a held edit flushed at shutdown) is still written.
+            if (g_writer.queue.empty()) return;
             jobs.swap(g_writer.queue);
         }
         // Coalesce: the last value for each key is the one that matters.
@@ -1351,6 +1353,19 @@ void enqueueWrite(const WriteJob& job) {
     g_writer.queue.push_back(job);
     g_writer.cv.notify_one();
 }
+
+// HELD NUMERIC EDITS (menu_edit_hold.h). A held Left/Right on a Number row steps every 83 ms; each step is shown at once but its write waits here, and the steps of a
+// quarter second are written together, and once more on release: about four config refreshes a second on the frame thread instead of about twelve. The writes below go to the same queue as every other change.
+void writeHeldEdit(void*, const WriteJob& job, EditFlush) { enqueueWrite(job); }
+// The burst reads as one change in the log and on the Status page: from what the file held before its first step to the value of its last.
+void mergeHeldEdit(WriteJob& pending, const WriteJob& latest) {
+    const std::string before = pending.before, fromValue = pending.fromValue, dropped = pending.dropped;
+    pending = latest;
+    pending.before = before;
+    pending.fromValue = fromValue;
+    pending.dropped = dropped;
+}
+EditCoalescer<WriteJob> g_held(&writeHeldEdit, nullptr, &mergeHeldEdit);
 
 void stopWriter() {
     {
@@ -2410,8 +2425,11 @@ void buildToastContent(MenuContent& c, const std::string& text, float widthDeg, 
 // ---------------------------------------------------------------------------
 // Editing
 
-void enqueueChange(WriteJob& job) {
+// `held`: a step of a held Number row (stepRow). Its value is shown now like any other, but the write waits in g_held for the burst to end; any other change is
+// queued at once, behind a held edit that is waiting, so the file sees them in the order they were made.
+void enqueueChange(WriteJob& job, bool held = false) {
     State& s = g_s;
+    if (!held) g_held.flush(EditFlush::Other);
     const MenuRowDef& d = kMenuRows[job.def];
     job.before = g_rows[job.def].value;
     // Show it now; the worker writes it; the reload that follows confirms it.
@@ -2423,16 +2441,17 @@ void enqueueChange(WriteJob& job) {
     s.lastWrite = job.headset.empty() ? "writing " + job.dotted + " = " + job.value
                                       : "writing " + job.headset + " = " + job.toValue;
     s.contentDirty = true;
-    perfMonitorNoteEvent(kEvIniWrite);
-    enqueueWrite(job);
+    perfMonitorNoteEvent(kEvIniWrite);   // one per STEP, held or not: the config refresh line's "menu edits queued" against its refreshes is the coalescing at work
+    if (held) g_held.hold(job, job.def, s.page, s.tickMs);
+    else enqueueWrite(job);
 }
 
-void applyChange(int defIndex, const std::string& fileValue) {
+void applyChange(int defIndex, const std::string& fileValue, bool held = false) {
     WriteJob job;
     job.def = defIndex;
     job.dotted = dottedOf(kMenuRows[defIndex]);
     job.value = fileValue;
-    enqueueChange(job);
+    enqueueChange(job, held);
 }
 
 // What one per-headset write needs to know about the row it is changing: the
@@ -2467,7 +2486,7 @@ HeadsetWrite headsetWriteOf(const ResolutionView& v) {
 // through the one-value merge. `value` 0 removes the entry. False, with the
 // reason in the last-write line, when there is no headset to key on, the
 // runtime's name yields no token, or the list is full.
-bool applyHeadsetChange(int defIndex, const HeadsetWrite& w, uint32_t value) {
+bool applyHeadsetChange(int defIndex, const HeadsetWrite& w, uint32_t value, bool held = false) {
     using namespace edvr::native_render;
     State& s = g_s;
     if (!w.headset) {
@@ -2523,12 +2542,12 @@ bool applyHeadsetChange(int defIndex, const HeadsetWrite& w, uint32_t value) {
         if (!job.dropped.empty()) job.dropped += ", ";
         job.dropped += token;
     }
-    enqueueChange(job);
+    enqueueChange(job, held);
     return true;
 }
 
-bool applyResolutionChange(int defIndex, const ResolutionView& v, uint32_t width) {
-    return applyHeadsetChange(defIndex, headsetWriteOf(v), width);
+bool applyResolutionChange(int defIndex, const ResolutionView& v, uint32_t width, bool held = false) {
+    return applyHeadsetChange(defIndex, headsetWriteOf(v), width, held);
 }
 
 // The worker's results, on the frame thread: the log line, the Status
@@ -2603,7 +2622,7 @@ void stepRow(int defIndex, int dir, int mult) {
             return;
         }
         const uint32_t next = steppedResolution(v, dir, mult);
-        if (next != v.width) applyResolutionChange(defIndex, v, next);
+        if (next != v.width) applyResolutionChange(defIndex, v, next, true);
         return;
     }
     switch (d.kind) {
@@ -2627,7 +2646,7 @@ void stepRow(int defIndex, int dir, int mult) {
         case MenuKind::Number: {
             // The step, the snap to the step grid and the bounds are menu_schema.h's, where a rig holds them.
             const double v = menuSteppedNumber(d, atof(cur.empty() ? d.shipped : cur.c_str()), dir, mult);
-            applyChange(defIndex, formatNumber(v, d.precision));
+            applyChange(defIndex, formatNumber(v, d.precision), true);   // held: a burst of steps is one write
             break;
         }
         case MenuKind::Hotkey:   // captured, not stepped
@@ -2973,7 +2992,7 @@ void cancelEdit() {
     s.contentDirty = true;
 }
 
-void applyChange(int defIndex, const std::string& fileValue);
+void applyChange(int defIndex, const std::string& fileValue, bool held);
 
 void commitEdit() {
     State& s = g_s;
@@ -3422,6 +3441,30 @@ void dispatchNav(MenuNav nav, uint64_t now) {
     }
 }
 
+// The held edit's tick (menu_edit_hold.h), once per menu tick before the keys are read, from the trackers' last poll: is a key that steps a row down (Left and Right,
+// the menu's own and Elite's adopted ones), which row is highlighted, which page is shown.
+bool stepKeyHeld() {
+    const State& s = g_s;
+    for (int i = 0; i < 12; ++i)
+        if ((kFixedNavs[i] == kNavLeft || kFixedNavs[i] == kNavRight) && s.keys[i].down) return true;
+    for (int i = 0; i < s.aliases.count; ++i)
+        if ((s.aliases.alias[i].nav == kNavLeft || s.aliases.alias[i].nav == kNavRight) && s.aliasKeys[i].down) return true;
+    return false;
+}
+
+int highlightedSettingDef() {
+    const State& s = g_s;
+    if (s.pages.empty()) return -1;
+    const Page& p = s.pages[s.page];
+    if (p.status || p.entries.empty() || p.highlight < 0 || p.highlight >= static_cast<int>(p.entries.size())) return -1;
+    return p.entries[p.highlight].kind == EntryKind::Setting ? p.entries[p.highlight].def : -1;
+}
+
+void tickHeldEdit(uint64_t now) {
+    if (!g_held.pending()) return;
+    g_held.tick(now, stepKeyHeld(), highlightedSettingDef(), g_s.page);
+}
+
 void handleKeys(uint64_t now) {
     State& s = g_s;
     // A hotkey row is waiting for its input: every key, the pad and the HOTAS are the
@@ -3746,6 +3789,7 @@ void openMenu(uint64_t now) {
 
 void closeMenu(const char* why) {
     State& s = g_s;
+    g_held.flush(EditFlush::Close);   // a held edit is written now, open or not: a close is never the end of an edit
     if (!s.open) return;
     s.open = false;
     cancelEdit();
@@ -3984,6 +4028,8 @@ void menuNoteConfigReloaded() {
     for (int i = 0; i < kRowDefCount; ++i) {
         const MenuRowDef& d = kMenuRows[i];
         RowState& r = g_rows[i];
+        // A row with a held edit shows the value of its last step, which the file does not hold yet: the reload of an earlier write must not put it back.
+        if (g_held.pending() && g_held.def() == i) continue;
         const std::string v = rowValue(d);
         const std::string dotted = dottedOf(d);
         const bool byMenu = (s.menuWroteDotted == dotted);
@@ -4066,6 +4112,7 @@ void menuTick(ID3D11Device* dev) {
     if (runtimeFlatProfile()) {
         guardedBudget(g_budget, [&] {
             const uint64_t now = nowMs();
+            tickHeldEdit(now);   // a held numeric edit whose burst has ended is written now (menu_edit_hold.h)
             s.tickMs = now;
             drainWrites();
             if (s.summon.pressed()) {
@@ -4148,6 +4195,8 @@ void menuTick(ID3D11Device* dev) {
         // samplers run only while the Monitor page is showing.
         perfMonitorFrame(dev);
         perfMonitorSetActive(s.open && s.pages[s.page].monitor);
+        // A held numeric edit whose burst has ended is written now (menu_edit_hold.h); the worker's results are drained after it.
+        tickHeldEdit(now);
         // Writes the worker finished since last frame.
         drainWrites();
 
@@ -4480,6 +4529,7 @@ void menuShutdown() {
     setMenuVisible(0.0f);
     setMenuHeadLock(false, 0.0f, 0.0f);
     inputGateShutdown();
+    g_held.flush(EditFlush::Shutdown);   // before the writer stops, which writes what was queued before it quit
     stopWriter();
     menuPanelShutdown();
     perfMonitorShutdown();
