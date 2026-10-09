@@ -3,7 +3,6 @@
 #include "flat_capture_policy.h"
 #include "flat_runtime_model.h"
 #include "flat_hdr_route.h"
-#include "holo_families.h"
 #include "flat_copy_structure.h"
 #include "flat_hdr_crumbs.h"
 #include "flat_context_isolation.h"
@@ -280,7 +279,7 @@ struct State {
     // What a SOURCE-FREE frame (selected, no pool draw: section 104) held on the scene's depth, and the 5 s window's tally of how many of
     // those frames held nothing but hologram-family draws (the loading screen's hologram ghost, docs\design-flat-ui-quality-2026-10-05.md).
     FlatMonoSourceless sourceFreeLast;
-    uint64_t sourceFreeLastFrame=0, sourceFreeSeenWindow=0, sourceFreeEmptyWindow=0, sourceFreeHoloOnlyWindow=0, sourceFreeOtherWindow=0;
+    uint64_t sourceFreeLastFrame=0, sourceFreeSeenWindow=0, sourceFreeEmptyWindow=0, sourceFreeHoloOnlyWindow=0, sourceFreeOtherWindow=0, blankSceneDeclinedWindow=0;
     bool frameSourceFree=false;   // this frame's selection took no motion source and named the world from itself (nameSourceFree)
     uint32_t admissionLines=0;uint64_t lastAdmissionMs=0;   // the overlay admission trace's line budget (see beginActualDraw)
     const void* foregroundSelectedDepth=nullptr;
@@ -780,16 +779,24 @@ static void reportForegroundNoCandidate(State& s,const FlatForegroundMotion::Cap
 // hologram family's (kHoloFamiliesBuiltIn, by vertex shader); other = something else drew (a real world: ground, sky, a settlement).
 // summarizeSourceless names only the top four pairs, so the class counts draws from those plus the total: holo-only needs the four to
 // cover every distinct pair.
+// A selected, source-free scene with no world: nothing on its depth but inert full-screen filters (flatProjectionDrawUnchanged: no
+// geometry, no projection), or nothing at all. A loading or menu screen. Ground and sky have geometry draws on that depth, so are not blank.
+static bool blankScene(const FlatMonoFrame& sel) {
+    if(!sel.selected() || !sel.sourceFree) return false;
+    const auto& n=sel.sourceless;
+    if(!n.draws) return true;
+    if(n.distinctPairs>n.topCount) return false;   // a pair beyond the named four is unclassified
+    for(uint32_t i=0;i<n.topCount;++i)
+        if(n.top[i].pool || !flatProjectionDrawUnchanged(n.top[i].vs,n.top[i].ps)) return false;
+    return true;
+}
 static void noteSourceFreeContent(State& s, const FlatMonoFrame& sel) {
     if(!sel.selected() || !sel.sourceFree) return;
     if(s.sourceFreeLastFrame==s.prefix.frame) return;   // the copy and HDR selections of one frame count once
     s.sourceFreeLast=sel.sourceless; s.sourceFreeLastFrame=s.prefix.frame; ++s.sourceFreeSeenWindow;
     const auto& n=sel.sourceless;
     if(!n.draws) { ++s.sourceFreeEmptyWindow; return; }
-    uint32_t holoDraws=0;
-    for(uint32_t i=0;i<n.topCount;++i)
-        for(uint64_t h:kHoloFamiliesBuiltIn) if(h==n.top[i].vs) { holoDraws+=n.top[i].draws; break; }
-    if(n.distinctPairs<=n.topCount && holoDraws==n.draws) ++s.sourceFreeHoloOnlyWindow; else ++s.sourceFreeOtherWindow;
+    if(blankScene(sel)) ++s.sourceFreeHoloOnlyWindow; else ++s.sourceFreeOtherWindow;   // "filter-only" in the line
 }
 static void reportSourceSpell(State& s) {
     const FlatSourceSpellWindow w=s.sourceSpell.take();
@@ -804,12 +811,12 @@ static void reportSourceSpell(State& s) {
             at+=size_t(k);
         }
         if(!at) std::snprintf(pairs,sizeof(pairs),"none");
-        Log::get().note("flat source-free content 5s: frames=%llu empty-scene-depth=%llu hologram-only=%llu other-draws=%llu; last frame=%llu: "
+        Log::get().note("flat source-free content 5s: frames=%llu empty-scene-depth=%llu filter-only=%llu other-draws=%llu blank-scene-declined=%llu; last frame=%llu: "
             "records-on-scene-depth=%u draws=%u same-camera-draws=%u distinct-pairs=%u; top: %s",
             (unsigned long long)s.sourceFreeSeenWindow,(unsigned long long)s.sourceFreeEmptyWindow,(unsigned long long)s.sourceFreeHoloOnlyWindow,
-            (unsigned long long)s.sourceFreeOtherWindow,(unsigned long long)s.sourceFreeLastFrame,
+            (unsigned long long)s.sourceFreeOtherWindow,(unsigned long long)s.blankSceneDeclinedWindow,(unsigned long long)s.sourceFreeLastFrame,
             s.sourceFreeLast.records,s.sourceFreeLast.draws,s.sourceFreeLast.sameCameraDraws,s.sourceFreeLast.distinctPairs,pairs);
-        s.sourceFreeSeenWindow=s.sourceFreeEmptyWindow=s.sourceFreeHoloOnlyWindow=s.sourceFreeOtherWindow=0;
+        s.sourceFreeSeenWindow=s.sourceFreeEmptyWindow=s.sourceFreeHoloOnlyWindow=s.sourceFreeOtherWindow=s.blankSceneDeclinedWindow=0;
     }
     FlatSourcelessPairNote notes[4]{};
     for(uint32_t i=0;i<s.sourcelessLast.topCount && i<4;++i) {
@@ -5802,6 +5809,12 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
     if (s.hdrLatch.tripped) { decline("latched-off"); return; }
     if (s.observing) { decline("returned-to-observation"); return; }
     if (s.treated) { decline("already-treated-this-frame"); return; }
+    // A scene with no world (a loading or menu screen: only full-screen filters on its depth) has nothing the camera term can move, so
+    // every pixel of its rotating hologram would reach the upscaler with zero motion and keep accumulating (the loading-screen ghost).
+    // The copy route's own verdict on such a frame is no-scene: untreated, as at supersampling below 1.
+    if (blankScene(selected)) {
+        ++s.blankSceneDeclinedWindow; decline("blank-scene"); return;
+    }
     if (overlayOpen(s) && foreignWork.load(std::memory_order_acquire)) {
         overlayFail(s,"overlay-foreign-mutation",selected.hdr);
         decline("overlay-foreign-mutation"); return;

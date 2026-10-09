@@ -4,7 +4,7 @@
 
 - Symptom: flat, Epic, DLSS, SS 1.0, 3840x2160. The loading screen's hologram ghosts and smears.
   DLSS off: gone. fix.ui_quality off: remains. SS < 1: gone.
-- State: instrument built (this commit), not flown. No behaviour change yet.
+- State: fix built (blank-scene decline in the HDR route), not flown. Flat only; VR untouched. No key (Sean: no A/B).
 - Evidence so far (log 141012, build 1f27a834), loading frames: HDR route treats 410 of 410 frames;
   `flat source` window says source-free-frames=450, source-free-treated=450 (section 104: selected with
   no pool draw, every pixel on the camera term); `flat camera rows` max-err 1e-7 (camera static, so the
@@ -13,19 +13,20 @@
   Section 104 assumed a source-free scene is "ground and sky, nothing moves the producer cannot see".
 - Why SS < 1 is clean: the HDR route declines (does not evaluate at render size), the copy route's
   structure says no-scene, nothing treated, no DLSS.
-- Open hypotheses, each with its signature (new line `flat source-free content 5s`):
-  - A. the source-free frame's scene depth holds only hologram-family draws: hologram-only ~ frames.
-  - B. nothing at all drew on the depth (empty-scene-depth ~ frames): the frame is a pure 2D screen.
-  - C. a real world is present (other-draws ~ frames): A/B wrong, section 104 is not the cause.
-  - D. DLSS AutoExposure with no exposure input misjudges a near-black frame (lead from the
-    "Flat game display crash and UI smearing" session: branch claude/flat-display-crash-ui-smearing-f1d96a,
-    temporary key advanced.flat_dlss_exposure = auto|fixed, flat hdr luma line). Test on the loading
-    screen with their key; do not edit dlaa.cpp exposure here meanwhile.
-  - E. unjittered hologram drawn into a jittered frame (shimmer, not smear): `flat camera rows` pairs
-    are consistent, weak.
-- Next flight: Epic, SS 1.0, sit on the loading screen 30 s. Read `flat source-free content 5s`.
-  If A or B: fix = refuse (or reset history on) source-free frames with no world on the depth, by
-  structure, not a threshold. If D: the exposure session's fix.
+- Flight 151608 (0ce61cb5, FSR3 then DLAA; FSR3 ghosts worse than DLAA): source-free frames 215..449 per 5 s,
+  empty-scene-depth=0, other-draws=100%. The depth holds ONE pair: VS 525D47E3D5E2EFF4 / PS 0D617929FED842F0, a
+  full-screen texture filter with no projection (flat_projection_recipes.h: unchanged), and the camera origin reads
+  (0,0,0). So: no world, only a screen filter; section 104 took it for ground and sky and gave the camera term (zero).
+- ruled out: A/B as worded (hologram-only / empty depth): the depth holds a screen filter, not hologram draws and not
+  nothing; the hologram family draws are not on that depth.
+- ruled out: D (AutoExposure) as the main cause, because FSR3, with its own exposure path, ghosts worse than DLAA.
+  Not excluded as a separate dimming cause (other session's branch).
+- Fix: a selected source-free scene whose depth holds only unchanged full-screen filters (or nothing) is blank;
+  treatHdr declines it ("blank-scene"), the copy route's no-scene verdict leaves it untreated, as at SS < 1.
+  Ground and sky have geometry draws on that depth, so they stay treated. Log: `flat source-free content 5s`
+  (filter-only, other-draws, blank-scene-declined).
+- Next flight: loading screen + Pilot's Handbook at SS 1.0 (FSR3, DLAA, DLSS): ghost gone? blank-scene-declined ~ frames?
+  Also check a settlement / open-ground walk: source-free frames still treated (other-draws high, declined 0).
 - Ruled out: the flat UI layer (idle on these frames, docs\design-flat-ui-quality-2026-10-05.md).
 
 ## Journal
