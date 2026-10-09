@@ -22,7 +22,7 @@
 #include "../../src/d3d11/transition_flash_eye_base.h"
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeTemporal")
 using Microsoft::WRL::ComPtr;
-unsigned checks=0,failures=0;
+unsigned checks=0,failures=0,dumps=0;
 void check(bool x,const char* why){++checks;if(!x){++failures;std::printf("FAIL: %s\n",why);}}
 void require(bool x,const char* why){check(x,why);if(!x)throw std::runtime_error(why);}
 bool closeFloat(float a,float b,float epsilon=1e-5f){return std::fabs(a-b)<=epsilon;}
@@ -62,6 +62,7 @@ extern "C" void* edvrTemporalAa(void* source,int eye,const float*,const float* n
   if(swapped)std::memcpy(c.swapped,swapped,12);std::memcpy(c.tanNow,now,16);std::memcpy(c.tanPrev,previous,16);
   calls.push_back(c);return passSucceeds?source:nullptr; // borrowed; provider AddRefs
 }
+extern "C" void edvrEyeCaptureUntreated(void*,int,const float*){++dumps;}
 // fix.ui_quality's door hook (src/d3d11/ui_layer.cpp): the pass tells the
 // layer which eyes it handed on, so the layer arms only behind a treated
 // frame. Recorded here, asserted below.
@@ -336,7 +337,7 @@ void run(){
   check(closeFloat(c.delta[0],0)&&closeFloat(c.delta[2],-1)&&closeFloat(c.delta[6],1)&&closeFloat(c.delta[8],0),"changing cant composes both eye rotations");
   check(closeFloat(c.translation[0],0)&&closeFloat(c.translation[2],1)&&closeFloat(c.headDeg,0),"translation in previous canted eye frame");
   edvr::Config::get().set("fix.temporal_aa","off");check(treat(fresh,3,1,source.Get())==S_OK,"current pair freezes AA setting");
-  f=frame(12,4);p=begin(fresh,f);check(treat(fresh,4,0,source.Get())==S_FALSE,"next frame AA off passes the eye through");check(p.tangentShift[0][0]==0,"AA off zeros jitter");check(fresh.close(fresh.context)==S_OK,"fresh close");
+  f=frame(12,4);p=begin(fresh,f);const auto before=dumps;check(treat(fresh,4,0,source.Get())==S_FALSE&&dumps==before+1,"next frame AA off captures untreated eyes");check(p.tangentShift[0][0]==0,"AA off zeros jitter");check(fresh.close(fresh.context)==S_OK,"fresh close");
   auto dlss=acquire(d,13,"dlss");f=frame(13,1);begin(dlss,f);check(treat(dlss,1,0,source.Get())==S_OK,"DLSS call");c=calls.back();check(c.outW==480&&c.outH==360&&(c.flags&2),"DLSS requests recommended size");
   f=frame(13,2);begin(dlss,f);passSucceeds=false;const unsigned notesBefore=uiLayerNotes;check(treat(dlss,2,0,source.Get())==S_FALSE,"filter refusal preserves raw pixels");passSucceeds=true;
   check(uiLayerNotes==notesBefore,"a refused eye is not noted to the UI layer (it must not arm behind raw pixels)");

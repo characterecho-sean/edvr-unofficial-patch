@@ -94,10 +94,16 @@ void temporalPassFrameBoundary();
 // write was the block bound at the scene's first draw. Valid at any boundary that runs before temporalPassFrameBoundary (the census's does); render thread.
 bool temporalPassChosenRows(float rows[12], bool* bound);
 
-// hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": arms the
-// diagnostics that ride one armed frame (the draw census, the object ledger,
-// the pixel probe). No eye images are written.
+// hotkey.dump_eyes, and the settings menu's "Dump both eyes as seen": the
+// sixteen paired raw/treated left-eye crops, a whole treated overview,
+// the NVIDIA decision trace, the final-eye (after the interface layer) crops
+// and per-eye motion metadata in edvr_logs\eyes; the diagnostics that ride one
+// armed frame (the draw census, the object ledger, the pixel probe) arm with it.
 void temporalPassArmEyeDump();
+// Active eye-run diagnostic only, after the final crisp composition and before
+// the runtime's menu. region is the actual returned texture's unflipped bounds.
+void temporalPassCaptureFinalEye(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture,
+                                 const uint32_t region[4], bool composite, bool flipU, bool flipV);
 
 // The pass wants the scanner-chrome tracker (vscreen.cpp, beginPanelOverride)
 // running whenever it is on: the FSS's interface takes the head's path

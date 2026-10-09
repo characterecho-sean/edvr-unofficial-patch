@@ -328,6 +328,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_graphics_bridge ^
     --extra-export edvrFssHealLeft ^
     --extra-export edvrTemporalAa ^
+    --extra-export edvrEyeCaptureUntreated ^
     --extra-export edvrTemporalAaNoteHead ^
     --extra-export edvrSharpen ^
     --extra-export edvrDepthProbeSelftest ^
@@ -2864,6 +2865,7 @@ python "tools\dxbc_disasm.py" --self-test || exit /b 1
 python "tools\eye_bmp_to_png.py" --self-test || exit /b 1
 python "tools\diff_eye_dump.py" --self-test || exit /b 1
 python "tools\eye_run_fit.py" --self-test || exit /b 1
+python "tools\eye_run_shimmer.py" --self-test || exit /b 1
 python "tools\eye_run_spin.py" --self-test || exit /b 1
 exit /b 0
 

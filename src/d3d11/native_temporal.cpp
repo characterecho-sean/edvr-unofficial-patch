@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <mutex>
 
+extern "C" void edvrEyeCaptureUntreated(void*, int, const float*);
 
 namespace {
 
@@ -393,7 +394,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     if(!s->flippedNoted){s->flippedNoted=true;edvr::Log::get().note("native temporal: flipped eye bounds pass through; temporal reprojection for flipped inputs remains pending.");}
     s->history[eye]={};
   }
-  if(!s->currentSettings.on||s->standDown||flipU||flipV){s->treated[eye]=true;return S_FALSE;}
+  if(!s->currentSettings.on||s->standDown||flipU||flipV){edvrEyeCaptureUntreated(source,int(eye),b);s->treated[eye]=true;return S_FALSE;}
   if(!s->projectionKnown[eye]||s->projectionSequence[eye]!=seq){
     if(s->missingProjections++<4)edvr::Log::get().note("native temporal: eye %u sequence %llu has no matrix query for this frame; history invalidated.",eye,(unsigned long long)seq);
     s->treated[eye]=true;s->history[eye]={};
