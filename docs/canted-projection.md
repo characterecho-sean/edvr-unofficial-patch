@@ -53,17 +53,21 @@ Elite as +10.00° with the fix on, -10.00° with it off). The caller census saw
   because handing Elite `S*E*S` fused the canted pair and the raw matrix split
   it. The fix needs no engine patch.
 
-**Temporary keys (remove when the arc closes)**, `edvr.ini` `[advanced]`:
-`canted_eye_fix` (default on, live) answers Elite's eye-to-head query with
-`S*E*S`; `simulate_cant` (degrees, 0 off, live) gives a parallel-panel headset
-a synthetic outward cant at the geometry source.
+**SHIPPED as behaviour (2026-10-09).** `GetEyeToHeadTransform` always answers
+`S*E*S`. On parallel panels that is the located matrix to the bit (the identity),
+so there is no key: both temporary keys, `advanced.canted_eye_fix` and
+`advanced.simulate_cant`, and the synthetic-cant instrument are removed (they
+never reached main or a release). The synthetic-cant flight above is the
+evidence; `canted_display.h` keeps `gameHandedness` with its cells. The frame
+ABI's version 6 carried only the two keys and never left the branch, so it is
+deleted (a half built from the test build steps down to version 5 through the
+ladder).
 
-**Next:** a real canted flight (Pimax 8KX, parallel projection OFF in the
-Pimax software) on this build. It shows whether the vendor runtime hands EDVR
-canted views and whether the pixel saving measured below arrives. After that,
-close the arc: ship `S*E*S` as the behaviour with no key, and propose removing
-both temporary keys (quoted, asked first). Open side question: EDVR's temporal
-AA and FSS under a real cant (FSS guards itself off on canted panels).
+**Still to come: the real canted flight** (Pimax 8KX, parallel projection OFF in
+the Pimax software, issue 24) on a build with the fix as behaviour. It shows
+whether the vendor runtime hands EDVR canted views and whether the pixel saving
+measured below arrives. Open side question: EDVR's temporal AA and FSS under a
+real cant (FSS guards itself off on canted panels).
 
 ## What OpenVR says about a canted headset
 
@@ -446,3 +450,15 @@ headset with parallel panels:
   told and the true tangents) and `canted eyes:` lines for the correction and
   for the 3x4 actually returned to Elite with the signed yaw of each eye's
   forward axis. A log without them means the instrument never ran.
+
+## 2026-10-09 — shipped; the test instruments are gone
+
+The handedness fix is the behaviour: the answer to Elite's `GetEyeToHeadTransform`
+is `S*E*S` for every eye on every headset, which changes nothing on parallel
+panels (the matrix is returned bit for bit; `tools\openxr_native_test`
+`canted_display_cases.h` pins that, and the S*E*S arithmetic against a 4x4
+product) and gives a canted headset each eye's rotation in Elite's own
+handedness. The section above describes the test build: `advanced.simulate_cant`,
+`advanced.canted_eye_fix`, the `canted test:` and `canted eyes:` log lines and
+`EdvrNativeFrameOutput` version 6 no longer exist. What a real canted headset
+does with it is not yet flown.

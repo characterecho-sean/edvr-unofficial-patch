@@ -2,6 +2,81 @@
 
 ## Status
 
+- **State (2026-10-09): CLOSED. The head-pose fix ships as behaviour, with no
+  key.** Elite's game thread asks the runtime for the head pose "now"
+  (GetDeviceToAbsoluteTrackingPose, return RVA 0x4E3881, prediction about 0 s)
+  and culls planet terrain with it, while the frame is drawn with the pose at
+  its display time. Flight 3 (Crystal Super, Pimax OpenXR, build e256e9bb,
+  `edvr_log.py --tally pose`): the "now" pose was **41 to 44 ms** older than
+  the drawn frame's display time and turned 0.9 deg on average, **up to 4.1
+  deg**, from the drawn pose, r = **+0.98** against head speed. A head turn's
+  leading edge was missing: the black squares. Answering that call at the
+  drawn frame's display time (`display`) stopped the squares on gaze switches,
+  with no engine patch, no extra pixels and no tuning. See "What EDVR does now".
+- **What ships.** A call to GetDeviceToAbsoluteTrackingPose is answered at the
+  latest frame's predictedDisplayTime when its return address is inside the
+  game's own image and its prediction is under 5 ms either way (a real
+  prediction, or any other caller, is located as it always was). No build gate:
+  it holds across a game update. The first such call logs once, `head pose:
+  Elite's "now" requests are answered at the drawn frame's display time (first
+  from exe+0x...)`, and up to 8 further callers are named the same way. The
+  `pose gap:` line, once per caller per 60 s in the runtime log, stays as a
+  diagnostic (`python tools\edvr_log.py --tally pose`): for Elite's "now" caller
+  it now reads a gap of 0.00 ms and an angle of 0.000 deg; a caller outside the
+  image, or with a real prediction, shows the true lag.
+- **Removed (2026-10-09, five commits):** the terrain guard, with all six keys
+  (`fix.cull_guard`, `_percent`, `_fraction_h`, `_fraction_v`, `_headsets`,
+  `advanced.cull_guard_channel`; an old line is carried by the installer as
+  "no longer used"); the temporary instruments `advanced.cull_probe` (caller
+  census, selective lies, cycle and measure, terrain-draw counter, mono camera
+  hooks, `--tally cull`) and `advanced.cull_pose` (and its latch-bypass patch,
+  which was never needed). The FOV trim that shared the guard's stage machine is
+  untouched; its engine is now `native_fov_trim.h`.
+- **Frame ABI.** `EdvrNativeFrameOutput` keeps every shape's size and layout:
+  the guard's slots in versions 1 and 4 stay as zeroed reserved words (an older
+  runtime reads a guard that is off); versions 6, 7 and 8 existed only on this
+  branch and are deleted, so the struct is main's version 5 again and the ladder
+  steps a half built from a test build down to it.
+- **Ruled out** (evidence under "Status detail"): a static frustum deficit (a
+  steady head shows no squares), the fov getter as the culler's input, the
+  09-23 "same +19.4% ask" premise, H3, the union model, H2, FUN_13ACC40 as the
+  consumer. **UNRELIABLE:** the 09-23 verdict "the culler follows
+  `GetProjectionRaw`, not the matrix" (a pilot's judgement under periphery
+  flicker, a 10-degree trim and a 1.6% difference).
+- **Next (nothing is blocked):** one more flight on the cleaned build, ideally on
+  the Quest 3 too, to confirm the squares stay gone with no key set. The
+  pilot's one unreproduced sighting (under `next_direct`, one frame of
+  over-lead) is moot: `next` is not a shipped mode.
+
+## The bug in short
+
+*Frontier issue [72609](https://issues.frontierstore.net/issue-detail/72609) —
+"Culling of planet surface in VR too aggressive", a recurrence of
+[37119](https://issues.frontierstore.net/issue-detail/37119), which was
+fixed once and marked so.*
+
+This is a write-up of what the bug actually does, measured rather than
+guessed, and what EDVR does about it from outside the game. It is written for
+whoever might fix it properly, inside the game, where it can be fixed at zero
+rendering cost.
+
+**Short version: Elite culls planet terrain against a frustum narrower than
+the one it renders, in the way a culler behaves when it treats the per-eye
+frustum as symmetric.** VR eye frusta are strongly asymmetric, so terrain
+tiles inside the visible outer edges are never drawn, and the player sees
+black squares where ground should be. Report a *symmetrized* frustum to the
+game — while showing the player exactly what was shown before — and the
+missing tiles come back. Report the truth again and they vanish again. The
+culler follows the report, not the optics.
+
+---
+
+## Status detail (moved out of Status 2026-09-29)
+
+**The Status block as it stood at the flight-3 result, moved verbatim
+2026-10-09** (it names the temporary instruments, `advanced.cull_probe` and
+`advanced.cull_pose`, which no longer exist, and the old guard):
+
 - **State (2026-10-09, flight 3): ROOT CAUSE CONFIRMED, FIX FOUND.** Elite's
   game thread asks for the head pose "now" (GetDeviceToAbsoluteTrackingPose,
   return RVA 0x4E3881, prediction ~0 s) and selects terrain with it; the frame is
@@ -56,30 +131,7 @@
   off and build 332841): the caller census, the selective lie, the terrain-draw
   counter, the mono camera hooks; their eliminations are in the rounds 3-5 entry.
 
-## The bug in short
-
-*Frontier issue [72609](https://issues.frontierstore.net/issue-detail/72609) —
-"Culling of planet surface in VR too aggressive", a recurrence of
-[37119](https://issues.frontierstore.net/issue-detail/37119), which was
-fixed once and marked so.*
-
-This is a write-up of what the bug actually does, measured rather than
-guessed, and what EDVR does about it from outside the game. It is written for
-whoever might fix it properly, inside the game, where it can be fixed at zero
-rendering cost.
-
-**Short version: Elite culls planet terrain against a frustum narrower than
-the one it renders, in the way a culler behaves when it treats the per-eye
-frustum as symmetric.** VR eye frusta are strongly asymmetric, so terrain
-tiles inside the visible outer edges are never drawn, and the player sees
-black squares where ground should be. Report a *symmetrized* frustum to the
-game — while showing the player exactly what was shown before — and the
-missing tiles come back. Report the truth again and they vanish again. The
-culler follows the report, not the optics.
-
----
-
-## Status detail (moved out of Status 2026-09-29)
+**Earlier moves out of Status:**
 
 **Ruled out** (moved verbatim from the Status block; do not re-propose):
 
@@ -257,7 +309,50 @@ collected on two headsets in one afternoon.
 
 ---
 
+## What EDVR does now
+
+The culler's input was a head pose Elite asks for on its game thread, 41 to 44
+ms older than the pose the frame is drawn with. The runtime now answers that
+one request at the drawn frame's display time. Nothing is widened, nothing is
+cropped, no pixels are added, and there is no key.
+
+**Measured (flight 3, 2026-10-09, Crystal Super via Pimax OpenXR, build
+e256e9bb, `edvr_openxr_20261009_144149_193_26440.log`, `edvr_log.py --tally
+pose`).** Under `off` the call returning to exe+0x4E3881 was located
+**-41 to -44 ms** from the drawn frame's display time, its pose turned **0.9
+deg mean and up to 4.1 deg** from the drawn pose, and that angle correlated
+**r = +0.98** with head speed. Under `display` the gap is 0 by construction and
+the angle 0; `display`, `next` and `display_direct` all stopped the squares on
+gaze switches, and the shipped behaviour is `display`.
+
+**Which calls.** The filter (src/openxr/head_pose_time.h) is a return address
+inside the game's mapped image and a prediction under 5 ms either way
+(exclusive, both signs). It names no build, so a game update does not turn it
+off; if an update moves the caller, the first-sight line names the new return
+address. The instant is the latest frame's predictedDisplayTime, taken at the
+WaitGetPoses publish point; with no frame yet (or a display time that is not
+positive) the call falls back to now + prediction and is counted in `fallback`.
+A call that does not reach the owner thread (no live session, a bad origin) is
+counted in `failed`.
+
+**Why this and not the guard.** The guard (below, kept as history) covered the
+missing tiles with a margin: it told the game a wider frustum, cost about 6% GPU
+at h=0.25/v=0 and cropped the extra away. The squares were a lag, not a
+frustum: they need head motion, and a steady head shows none. Fixing the lag at
+its source costs nothing.
+
+**Reading a log.** `python tools\edvr_log.py --target <store> --tally pose`
+tables the `pose gap:` lines by (thread, return address). Elite's game-thread
+caller should read a gap of 0.00 ms and an angle of 0.000 deg; a caller that
+passes a real prediction, or is outside the image, shows its true lag.
+
 ## What EDVR does about it — the cull guard
+
+> **Historical. The terrain guard was removed 2026-10-09** (Sean's decision after
+> flight 3); none of its keys exist, and an old line in an `edvr.ini` is carried
+> by the installer as "no longer used by this version" and does nothing. This
+> section and "Reading the log" below describe the code as it was. The FOV trim
+> that rode the guard's stage machine still exists, as `native_fov_trim.h`.
 
 `cull_guard = symmetric` under `[fix]` in `edvr.ini`, **off by default**,
 and it must be set before launch (turning it *off*, or changing mode or
