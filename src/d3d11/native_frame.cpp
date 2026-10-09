@@ -99,12 +99,6 @@ bool rigidPose(const float* m) {
     return std::fabs(determinant - 1.0f) <= 0.004f;
 }
 
-// advanced.simulate_cant: degrees of outward cant, 0 (off) to 15.
-float clampCantDegrees(float value) {
-    if (!std::isfinite(value) || value < 0.0f) return 0.0f;
-    return value > 15.0f ? 15.0f : value;
-}
-
 // ---------------------------------------------------------------------------
 // The field-of-view trim, per headset.
 //
@@ -243,45 +237,39 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1, 2, 3, 4 or 5 caller is an openvr_api.dll from before the
-    // canted-display test keys (or, earlier, the comfort fade, the channel
-    // probe, turbo pacing or the field-of-view trim) existed. Each gets
-    // exactly the fields it knows about, and whatever it cannot carry stays
-    // out of its struct entirely.
-    const bool wantsCant = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
-        output->size == sizeof(*output);
-    const bool wantsFade = output && !wantsCant &&
+    // A version 1, 2, 3 or 4 caller is an openvr_api.dll from before the
+    // comfort fade (or, earlier, the channel probe, turbo pacing or the
+    // field-of-view trim) existed. Each gets exactly the fields it knows
+    // about, and whatever it cannot carry stays out of its struct entirely.
+    const bool wantsFade = output &&
         output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
-        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_5;
-    const bool wantsChannel = output && !wantsCant && !wantsFade &&
+        output->size == sizeof(*output);
+    const bool wantsChannel = output && !wantsFade &&
         output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4;
-    const bool wantsPacing = output && !wantsCant && !wantsFade && !wantsChannel &&
+    const bool wantsPacing = output && !wantsFade && !wantsChannel &&
         output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3;
-    const bool wantsTrim = output && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing &&
+    const bool wantsTrim = output && !wantsFade && !wantsChannel && !wantsPacing &&
         output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
-    const bool legacy = output && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
+    const bool legacy = output && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
+        (!wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsCant ? sizeof(result)
-                 : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
+    result.size = wantsFade ? sizeof(result)
                  : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsCant ? EDVR_NATIVE_FRAME_VERSION_6
-                    : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
+    result.version = wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
                     : wantsTrim  ? EDVR_NATIVE_FRAME_VERSION_2
@@ -295,12 +283,6 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     // runtime built before 2026-10-07 reads "no offset" and applies none.
     const bool physicalValid = input->valid != 0;
 
-    // The canted-display arc's two temporary test keys (docs\canted-projection.md):
-    // only a version 6 caller has the slots, every older shape never learns of them.
-    result.cantedEyeFix = edvr::Config::get().getBool(
-        "advanced.canted_eye_fix", true) ? 1u : 0u;
-    result.simulateCantDeg = clampCantDegrees(edvr::Config::get().getFloat(
-        "advanced.simulate_cant", 0.0f));
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
     uint32_t trim[kTrimCount] = {0, 0, 0};

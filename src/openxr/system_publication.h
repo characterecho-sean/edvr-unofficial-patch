@@ -14,7 +14,7 @@ class SystemPublication {
     if(active_||generation_==(std::numeric_limits<uint64_t>::max)())return 0;
     metadata.generation=++generation_;metadata.geometry={};metadata.geometryValid=false;
     metadata.optics={};metadata.opticsValid=false;
-    metadata.hiddenMasks.reset();metadata.hiddenMasksCompatible=true;metadata.cantedEyeFix=false;
+    metadata.hiddenMasks.reset();metadata.hiddenMasksCompatible=true;
     // The game may query this metadata before any valid pose is available.
     // Normalize here as well as on live updates so startup cannot cache an
     // odd size while temporal rendering later uses an even output target.
@@ -62,13 +62,6 @@ class SystemPublication {
     for(unsigned eye=0;eye<2;++eye)for(unsigned axis=0;axis<2;++axis)
       state_.tangentShift[eye][axis]=tangentShift?tangentShift[eye][axis]:0.0f;
     return true;
-  }
-  // advanced.canted_eye_fix, as of the frame being published. It is a property
-  // of the answer to GetEyeToHeadTransform alone, so it travels beside the
-  // geometry and never inside it.
-  void setCantedEyeFix(bool on) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    state_.cantedEyeFix=on;
   }
   void invalidate(uint64_t generation) {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -221,13 +221,15 @@ HmdMatrix34_t OpenVRSystem::GetEyeToHeadTransform(EVREye e) {
   const auto s=source_.read();source_.noteGeometryQuery(4,s);
   const bool liveGeometry=geometryValid(s);
   if(!opticsAvailable(s)||!eyeValid(e))return HmdMatrix34_t{};
-  // The located transform stays what the snapshot holds: the native frame
-  // tables and the layer read it there. Only this answer to the game changes,
-  // and nothing reads it back.
+  // Elite composes this matrix with its head pose in a z-negated space but takes
+  // it raw, so a canted headset's per-eye yaw and pitch would arrive inverted:
+  // the game is given S*E*S, S = diag(1,1,-1), each eye's rotation in its own
+  // handedness (canted_display.h, docs/canted-projection.md). On parallel panels
+  // that is the located transform to the bit. The located transform itself stays
+  // what the snapshot holds: the native frame tables and the layer read it there.
+  // Only this answer to the game changes, and nothing reads it back.
   const HmdMatrix34_t located=liveGeometry?s.geometry.eyeToHead[unsigned(e)]:s.optics.eyeToHead[unsigned(e)];
-  const HmdMatrix34_t given=s.cantedEyeFix?gameHandedness(located):located;
-  source_.noteEyeToHead(s,unsigned(e),given,located);
-  return given;
+  return gameHandedness(located);
 }
 bool OpenVRSystem::GetTimeSinceLastVsync(float* seconds,uint64_t* frame) {
   NativeCpuTraceSpan trace(EdvrCpuGetTimeSinceLastVsync);

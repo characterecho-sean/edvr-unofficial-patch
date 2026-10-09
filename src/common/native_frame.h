@@ -26,12 +26,6 @@
 // d3d11.dll that refuses the shape steps down and reads "no fade" (0), never
 // black.
 #define EDVR_NATIVE_FRAME_VERSION_5 5u
-// Version 6 adds cantedEyeFix and simulateCantDeg to the END and nothing else
-// (the canted-display arc's two temporary test keys, docs\canted-projection.md),
-// under the same hand-copied-DLLs rule: a version 1 to 5 caller never learns of
-// them, and a runtime that asks version 6 of a d3d11.dll that refuses the shape
-// steps down and reads both as off (no correction, no simulated cant).
-#define EDVR_NATIVE_FRAME_VERSION_6 6u
 
 // The game producer owns the device and generation passed at acquire. The
 // methods in the table are CPU-only and are called by the XR owner after the
@@ -64,7 +58,7 @@ struct EdvrNativeFrameOutput {
     // RETIRED 2026-10-09 with the terrain guard (a mode, three margins, a count
     // and up to eight headset signatures: 21 words). Always zero now: the provider
     // writes nothing here and the runtime reads nothing. The slots stay so the
-    // struct, and the six versions that name its prefixes, keep their layout --
+    // struct, and the versions that name its prefixes, keep their layout --
     // the two DLLs are copied apart by hand, and a runtime from before the
     // removal then reads a guard that is off.
     uint32_t reservedTerrainGuard[21];
@@ -89,13 +83,6 @@ struct EdvrNativeFrameOutput {
     // freshness-checked by the provider (comfort_fade.h): a signal that went
     // stale reads 0.
     float fadeAlpha;
-    // Version 6 and later (TEMPORARY, the canted-display arc). 1: the runtime
-    // hands Elite each eye's rotation in Elite's own handedness
-    // (advanced.canted_eye_fix); 0: as the runtime located it.
-    uint32_t cantedEyeFix;
-    // Version 6 and later (TEMPORARY). Degrees of outward cant the runtime
-    // gives the located eyes (advanced.simulate_cant), 0..15; 0 is off.
-    float simulateCantDeg;
 };
 
 // The size the fields through resubmitEnabled occupy, which is what a
@@ -117,10 +104,6 @@ struct EdvrNativeFrameOutput {
 // caller's struct is, with no tail padding before fadeAlpha.
 #define EDVR_NATIVE_FRAME_OUTPUT_SIZE_4 \
     ((uint32_t)offsetof(EdvrNativeFrameOutput, fadeAlpha))
-// The size the fields through fadeAlpha occupy, which is what a version 5
-// caller's struct is, with no tail padding before cantedEyeFix.
-#define EDVR_NATIVE_FRAME_OUTPUT_SIZE_5 \
-    ((uint32_t)offsetof(EdvrNativeFrameOutput, cantedEyeFix))
 
 struct EdvrNativeFrameDecision {
     uint32_t size, version;
