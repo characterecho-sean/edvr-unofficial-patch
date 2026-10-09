@@ -529,7 +529,7 @@ struct Slot {
     bool          totalValid = false;
 };
 constexpr int kSlots = 16;
-constexpr int kStatCount = 56;   // 0-28 and 30-38 used; 29 and 39-49 free since the estimated body, ship and stepped-part paths retired (2026-09-23), the rest keeping their numbers; 50-55 engine-record velocity's pixel counts (the sixth, 55, the stale-stamp decline of 2026-09-25); a 224-byte buffer
+constexpr int kStatCount = 90;   // 0-28 and 30-38 used; 29 and 39-49 free since the estimated body, ship and stepped-part paths retired (2026-09-23), the rest keeping their numbers; 50-55 engine-record velocity's pixel counts (the sixth, 55, the stale-stamp decline of 2026-09-25); 56 and 57 the second skin's skinned pixels joined and masked, 58..89 the joined |E| in 32 log bins (F2); a 360-byte buffer
 Slot g_slots[kSlots];
 
 // Bumped on every temporalPassConfigure call (both its call sites in
@@ -1085,7 +1085,12 @@ void pollSlots(ID3D11DeviceContext* ctx) {
                                         D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
             if (SUCCEEDED(hr) && m.pData) {
                 const uint32_t* v = static_cast<const uint32_t*>(m.pData);
-                if (q.engineStats) engineVelocityNotePixels(v[50], v[51], v[52], v[53], v[54], v[55]);
+                if (q.engineStats) {
+                    engineVelocityNotePixels(v[50], v[51], v[52], v[53], v[54], v[55]);
+                    uint32_t skinHistogram[32];
+                    for (int k = 0; k < 32; ++k) skinHistogram[k] = v[58 + k];
+                    engineVelocityNoteSkinPixels(v[56], v[57], skinHistogram);
+                }
                 g_rejected += v[0];
                 g_clipped += v[1];
                 g_pixelsSeen += q.pixels;
@@ -1474,11 +1479,11 @@ bool             g_eyeTreatedTaken[kEyeRun] = {};
 bool             g_eyeRawWritten[kEyeRun] = {};
 // Preserve the original input numbers; 16/17 append ownership snapshots. Inputs 5 and 6 were the terrain
 // patch index and depth (retired 2026-10-01 with terrain motion): nothing stages them now, the numbers stay.
-constexpr int kEyeInputs=18;
+constexpr int kEyeInputs=19;
 ID3D11Texture2D*  g_eyeInputs[kEyeInputs] = {};
 uint32_t         g_eyeInputsFrame=0,g_eyeInputsUiBound=0,g_eyeInputsUiFlags=0;
-const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"(retired 5)",L"(retired 6)",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"HoloContribution",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext",L"EngineSlots",L"GameG6"};
-edvr::eye_engine_capture::Result g_eyeEngineInputStatus[2] = {};
+const wchar_t* const kEyeInputNames[kEyeInputs]={L"MV",L"Z",L"UI",L"Bias",L"SceneZ",L"(retired 5)",L"(retired 6)",L"HoloCoverage",L"UiEdits",L"ScreenMotion",L"WeaponMotion",L"HoloContribution",L"PrevZ",L"DlssBeforeUi",L"UiPrevious",L"UiNext",L"EngineSlots",L"GameG6",L"SkinE"};
+edvr::eye_engine_capture::Result g_eyeEngineInputStatus[3] = {};   // EngineSlots, GameG6, SkinE (F2: target 7, the skinned characters' E in centimetres, valid in w; R16G16B16A16_FLOAT)
 ID3D11Buffer* g_eyeEngineBuffers[2]={};
 edvr::eye_engine_capture::Result g_eyeEngineBufferStatus[2]={};
 const wchar_t* const kEyeEngineBufferNames[2]={L"EnginePool",L"EngineNow"};
@@ -1848,7 +1853,7 @@ struct TemporalHistoryScope {
 // Preserve the actual first-frame inputs before the next eye overwrites them.
 void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceView* scene,
                     ID3D11Texture2D* ui,float uiBound,float uiFlags,
-                    bool engineBound,const EngineVelocityViews& engineViews) {
+                    bool engineBound,const EngineVelocityViews& engineViews,ID3D11ShaderResourceView* skinView) {
     if(g_eyeRunLeft<=0 || g_eyeRunTaken!=0 || g_eyeInputCaptureAttempted)return;
     ID3D11Texture2D* textures[kEyeInputs]={e.dlMv,e.dlDepth,ui,e.dlMask};
     if(e.dlMv) {
@@ -1891,6 +1896,7 @@ void stageEyeInputs(ID3D11DeviceContext* ctx,EyeState& e,ID3D11ShaderResourceVie
     // even though its CS bindings have already been restored here.
     g_eyeEngineInputStatus[0]=edvr::eye_engine_capture::stage(ctx,engineBound,engineViews.slots,&g_eyeInputs[16]);
     g_eyeEngineInputStatus[1]=edvr::eye_engine_capture::stage(ctx,engineBound,engineViews.gameMark,&g_eyeInputs[17]);
+    g_eyeEngineInputStatus[2]=edvr::eye_engine_capture::stage(ctx,engineBound,skinView,&g_eyeInputs[18]);
     Microsoft::WRL::ComPtr<ID3D11Resource> poolResource;
     Microsoft::WRL::ComPtr<ID3D11Buffer> poolBuffer;
     D3D11_SHADER_RESOURCE_VIEW_DESC poolView{};
@@ -1945,7 +1951,7 @@ void writeEyeInputs(ID3D11DeviceContext* ctx,const std::wstring& dir) {
         if(meta)fprintf(meta,"%s{\"name\":\"%ls\",\"status\":\"%s\",\"bytes\":%u,\"stride\":%u,\"format\":%u,\"first_element\":%u,\"num_elements\":%u}",k?",":"",kEyeEngineBufferNames[k],outcome,m[0],m[1],m[2],m[3],m[4]);
     }
     if(meta){fprintf(meta,"]}\n");fclose(meta);}else Log::get().note("eye capture: engine buffer availability manifest file creation failed.");
-    for(int k=0;k<2;++k)
+    for(int k=0;k<3;++k)
         Log::get().note("eye capture: %ls input %ls availability: %s, scene frame %u; a written all-clear texture is available ownership data.",
             g_eyeRunStamp,kEyeInputNames[16+k],edvr::eye_engine_capture::name(g_eyeEngineInputStatus[k]),g_eyeInputsFrame);
     for(int k=0;k<kEyeInputs;++k) {
@@ -3511,6 +3517,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
     EngineVelocityViews engineViews{};
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> engineHeldSrv[3];
     Microsoft::WRL::ComPtr<ID3D11Buffer> engineHeldCb[2];
+    // F2 (the second skin): this eye's target 7 (E in centimetres, valid in w) when a skinned pair's draw wrote it this eye-frame, else null
+    // and every skinned record is exactly as it was. Bound at t23 with probe.w bit 16384 beside the engine inputs.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> engineSkinSrv;
     // Named apart from the trained block's `engineAvailable` (the upscaler's
     // availability, declared in an inner scope): the flight of 2026-09-23
     // bound these inputs, unbound, on every DLSS dispatch because that inner
@@ -3544,6 +3553,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             engineHeldSrv[2].Attach(engineViews.gameMark);   // the game's own self-marked target 6, or null
             engineHeldCb[0].Attach(engineViews.sceneNow);
             engineHeldCb[1].Attach(engineViews.scenePrev);
+            if (engineViewsGiven) engineSkinSrv.Attach(engineVelocitySkinView(eye, scene));
             scene->Release();
         }
     }
@@ -4065,10 +4075,11 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         }
 
         // Every compute slot the dispatches below touch, put back after them
-        // (cs_stage_save.h): t0..t22, u0..u6, b0..b2, s0 and the shader.
-        static_assert(CsStageSave::kSrvs >= 23 && CsStageSave::kCbs >= 3,
-                      "the save covers every slot the dispatches bind: t0..t22 (engine-record velocity's "
-                      "t21/t22 included) and b0..b2");
+        // (cs_stage_save.h): t0..t23, u0..u6, b0..b2, s0 and the shader.
+        static_assert(CsStageSave::kSrvs >= 24 && CsStageSave::kCbs >= 3,
+                      "the save covers every slot the dispatches bind: t0..t23 (engine-record velocity's "
+                      "t21/t22 and the second skin's t23 included) and b0..b2");
+        static_assert(CsStageSave::kSrvs > kEngineVelocitySkinSrv, "the second skin's compute slot is inside the save");
         static_assert(CsStageSave::kSrvs > kEngineVelocityPoolSrv && CsStageSave::kSrvs > kEngineVelocitySlotsSrv &&
                       CsStageSave::kCbs > kEngineVelocityScenePrevCb && CsStageSave::kCbs > kEngineVelocitySceneNowCb,
                       "engine-record velocity's compute slots are inside the save");
@@ -4878,22 +4889,25 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // natively), a fallback beside the slot target.
                     if (engineBound && engineViews.gameMark)
                         p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 4096u);
+                    // Bit 16384 and t23: the skinned characters' exact previous position (the second skin).
+                    if (engineBound && engineSkinSrv)
+                        p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 16384u);
                     engineCounted = engineBound && diagnostics;
                     // A masked engine pixel sets the bias mask too, for the
                     // presets and FSR that read it (modern DLSS honours the
                     // history-invalidate vector the same pixel also gets).
                     if (uiTrack || engineBound) ensureBiasMask(dev,e,w,h);
                     setParams(ctx, p);
-                    ID3D11ShaderResourceView* nullSrvM[23] = {};
-                    // t19..t22 are touched only while engine-record velocity is bound.
-                    const UINT srvCountM = engineBound ? 23u : 19u;
+                    ID3D11ShaderResourceView* nullSrvM[24] = {};
+                    // t19..t23 are touched only while engine-record velocity is bound.
+                    const UINT srvCountM = engineBound ? 24u : 19u;
                     ID3D11UnorderedAccessView* nullUavM[8] = {};
                     ID3D11UnorderedAccessView* savedTraceUav = nullptr;
                     if (traceReady) ctx->CSGetUnorderedAccessViews(7, 1, &savedTraceUav);
                     ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, traceReady ? 8 : 7, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[23] = {inSrv,
+                    ID3D11ShaderResourceView* srvsM[24] = {inSrv,
                                                           probeNv ? e.dlOutSrv : e.histSrv[e.histRead],
                                                           depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
@@ -4903,7 +4917,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, celestial.srv, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15: the planet patch records (probe.w bit 8192); t16..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
-                                                          engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr};
+                                                          engineBound ? engineViews.slots : nullptr, engineBound ? engineViews.pool : nullptr,
+                                                          engineBound ? engineSkinSrv.Get() : nullptr};   // t23: target 7, the skinned characters' E (probe.w 16384)
                     ID3D11UnorderedAccessView* uavsM[8] = {debugPaint ? e.dlOutUav : nullptr,
                                                            nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
@@ -4948,7 +4963,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     endRegion(qs, Region::Prep, ctx);
                     if (haveDepth && e.zPrev) zcWritten = true;
                     if (uiTrack && !uiResolve) uiEvidenceWritten = true;
-                    if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],engineBound,engineViews);
+                    if(eye==0)stageEyeInputs(ctx,e,depthSrv,coverageMask,p.probe[2],p.probe[3],engineBound,engineViews,engineSkinSrv.Get());
                     // What NVIDIA is handed: the union when the mover mask
                     // ran this frame, else the interface's alone (as before
                     // the mover mask existed), else nothing. Engine-record
@@ -5189,6 +5204,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             p.probe[3] = uiFlags();
             engineOwn = engineViewsGiven && depthSrv;
             if (engineOwn) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 2048u);
+            if (engineOwn && engineSkinSrv) p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 16384u);   // t23: the second skin
             if (engineOwn && engineViews.gameMark)
                 p.probe[3] = static_cast<float>(static_cast<uint32_t>(p.probe[3]) | 4096u);   // t19: the game's self-marked target 6
         }
@@ -5395,13 +5411,13 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     // own copy of the vectors, and this is the ONE dispatch
                     // that binds it -- everywhere else the slot stays null and
                     // the shader's store there is dropped.
-                    ID3D11ShaderResourceView* nullSrvM[23] = {};
-                    const UINT srvCountM = engineOwn ? 23u : 19u;
+                    ID3D11ShaderResourceView* nullSrvM[24] = {};
+                    const UINT srvCountM = engineOwn ? 24u : 19u;
                     ID3D11UnorderedAccessView* nullUavM[8] = {};
                     ctx->CSSetShaderResources(0, srvCountM, nullSrvM);
                     ctx->CSSetUnorderedAccessViews(0, 8, nullUavM, nullptr);
                     ctx->CSSetShader(mvCs, nullptr, 0);
-                    ID3D11ShaderResourceView* srvsM[23] = {inSrv, e.histSrv[readIdx], depthSrv,
+                    ID3D11ShaderResourceView* srvsM[24] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                           (p.movers[0] != 0.0f || p.holoJitter[3] != 0.0f) ? e.zPrevSrv : nullptr,
                                                           p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                           nullptr,   // t5: free since the body path retired (2026-09-23)
@@ -5409,7 +5425,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                           uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, celestial.srv, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15: the planet patch records (probe.w bit 8192); t16..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
-                                                          engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
+                                                          engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr,
+                                                          engineOwn ? engineSkinSrv.Get() : nullptr};   // t23: the second skin
                     // u2 (the stats buffer) is left UNBOUND here: the own pass
                     // writes its stats when it runs, and the mv entry writes
                     // the same slots (15-17), so binding it would double them
@@ -5688,8 +5705,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     }
                 }
                 setParams(ctx, p);
-                ID3D11ShaderResourceView* nullSrv[23] = {};
-                const UINT srvCount = engineOwn ? 23u : 19u;
+                ID3D11ShaderResourceView* nullSrv[24] = {};
+                const UINT srvCount = engineOwn ? 24u : 19u;
                 ID3D11UnorderedAccessView* nullUav[7] = {};
                 ctx->CSSetShaderResources(0, srvCount, nullSrv);
                 ctx->CSSetUnorderedAccessViews(0, 7, nullUav, nullptr);
@@ -5703,7 +5720,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         "compiled out; advanced.temporal_aa_diagnostics = 1 runs the "
                         "instrumented one, live, and the price line names which ran.");
                 }
-                ID3D11ShaderResourceView* srvs[23] = {inSrv, e.histSrv[readIdx], depthSrv,
+                ID3D11ShaderResourceView* srvs[24] = {inSrv, e.histSrv[readIdx], depthSrv,
                                                      (carry && p.movers[0] != 0.0f) ? e.zPrevSrv : nullptr,
                                                      p.probe[2] != 0.0f ? e.uiMaskSrv : nullptr,
                                                      nullptr,   // t5: free since the body path retired (2026-09-23)
@@ -5711,7 +5728,8 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                                      uiTrack && e.uiHistoryValid ? e.uiHistorySrv[e.uiHistoryRead] : nullptr,
                                                           nullptr, nullptr, nullptr, holoSrvs[0], holoSrvs[1], screenSrv, celestial.srv, nullptr, nullptr, nullptr,   // t9..t11: free since 2026-10-01 (the terrain's); t15: the planet patch records (probe.w bit 8192); t16..t18: free since 2026-09-23 (the mesh records, the static owner's promotion)
                                                           engineViews.gameMark, nullptr,   // t19: the game's self-marked slot+depth channel (probe.w 4096); t20: free since stage B's removal
-                                                          engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr};
+                                                          engineOwn ? engineViews.slots : nullptr, engineOwn ? engineViews.pool : nullptr,
+                                                          engineOwn ? engineSkinSrv.Get() : nullptr};   // t23: the second skin
                 ID3D11UnorderedAccessView* uavs[7] = {e.outUav, e.histUav[writeIdx],
                                                       g_statsUav, nullptr,
                                                       carry ? e.dlDepthUav : nullptr, nullptr,

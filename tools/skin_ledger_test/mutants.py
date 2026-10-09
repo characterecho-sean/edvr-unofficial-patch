@@ -79,7 +79,7 @@ A_JOINTS_SHARE = "if (fr.d[k].jointsFrom == k && fr.d[k].info.t2 == info.t2 && i
 A_BIND_FIND = "if (binds_[k].id == info.t1) plan.bind = static_cast<int>(k);"
 A_CAP = "if (fr.d.size() >= kMaxDispatches) {"
 A_GAP = "if (jobs[k].first > end) ++s.gaps;"
-A_NOTDST = "if (!std::binary_search(dsts.begin(), dsts.end(), b)) ++s.poolNotDst;"
+A_NOTDST = "if (!dsts.empty() && !std::binary_search(dsts.begin(), dsts.end(), b)) ++s.poolNotDst;"
 A_ZERO = "                if (count == 0) continue;\n"
 A_POOLKNOWN = "s.poolKnown ? \"\" : \"? \", s.poolSkinned,"
 A_BROKEN = "} else if (lost || declined || skipped_ || jobsMissing || dataFrames < chainFrames || palFrames == 0) {"
@@ -130,6 +130,8 @@ MUTANTS = [
     M("gap-counted-as-overlap", "S5", "ledger", [(A_GAP, "if (jobs[k].first > end) ++s.overlaps;")], "a late-starting job is called an overlap"),
     M("pool-bases-never-mismatch", "S5", "ledger", [(A_NOTDST, "if (false) ++s.poolNotDst;")], "a t33 base that is no job's dst is not counted"),
     M("empty-job-counted", "S5", "ledger", [(A_ZERO, "")], "a job with no bones takes part in the running sum"),
+    M("no-job-table-compared", "S5", "ledger", [(A_NOTDST, "if (!std::binary_search(dsts.begin(), dsts.end(), b)) ++s.poolNotDst;")],
+      "a frame with no job table calls every one of its t33 bases not a job dst"),
     # S6 whole run
     M("finished-before-the-lines", "S6", "ledger", [(A_REPORT_TOP, "        if (!armed_ || finished_) return;\n        finished_ = true;\n        uint32_t anyDispatch = 0,")],
       "the finished flag is set before the report has said anything"),

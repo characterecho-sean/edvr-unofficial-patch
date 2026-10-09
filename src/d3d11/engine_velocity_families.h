@@ -12,6 +12,9 @@ struct Family {
     bool flatOnly = false;
     uint64_t flatPs = 0;
     bool vrOnly = false;   // keyed in the VR profiles alone (see the 2026-10-08 rows below)
+    // F2 (dxbc_skin_clone.h): the vertex shader has the game's skinning chain and takes the second skin in VR; the pairs that also
+    // export E to target 7 are kSkinPairs below. Never in the flat profile.
+    bool skinned = false;
 };
 constexpr Family kFamilies[] = {
     // 054658: both additional PSs draw certified moving station records;
@@ -37,7 +40,7 @@ constexpr Family kFamilies[] = {
     // AACFDCF2/CAD1F585 (EDHM-patched, reads t120) and BBE58E40/7311054A (an
     // SV_Position input); the flat census names them when they draw.
     {0x66DE2CADB1F4AE6Bull, "vs_66DE2CADB1F4AE6B", {0x864F1F949851B8DEull, 0xBBDE4E71FB78528Aull, 0, 0}, false, 0x235567BE2840B3EDull},
-    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0x4504BC268E109C31ull, 0}},
+    {0x61AE8EB05FDC18DDull, "vs_61AE8EB05FDC18DD", {0xFC43E42710010343ull, 0x451A82D4DD1BA254ull, 0x4504BC268E109C31ull, 0}, false, 0, false, true},
     {0x436193B352A2897Eull, "vs_436193B352A2897E", {0x16940F576006BE65ull, 0x51EE1F922FD220B0ull, 0, 0}},
     {0x889A5279E68F0672ull, "vs_889A5279E68F0672", {0xB46E52A1E0B2F39Cull, 0xEBA95E15B0A66102ull, 0xD31DCAFA7C05CB47ull, 0}},
     // Epic flat cockpit shell: the real shader corpus proves the exported
@@ -55,12 +58,27 @@ constexpr Family kFamilies[] = {
     // VR only: these vertex shaders are also weapon_motion's first-person families (weapon_motion.cpp:92), and
     // flat's foreground and source routing (flat_runtime.cpp, d.supported && weaponMotionFamilyVs) is qualified
     // with them unkeyed. A flat key waits for a flat dump with an NPC.
-    {0x8B589D25B2A0ADDCull, "vs_8B589D25B2A0ADDC", {0x7268762D11A610F2ull, 0, 0, 0}, false, 0, true},
-    {0x7B0DC42D383F694Cull, "vs_7B0DC42D383F694C", {0x0DF03E64DF9DBEF1ull, 0, 0, 0}, false, 0, true},
-    {0x114AF608F86D9ED8ull, "vs_114AF608F86D9ED8", {0xA17504A2627767F2ull, 0, 0, 0}, false, 0, true},
-    {0xD99AFDC250D19A3Full, "vs_D99AFDC250D19A3F", {0xE86271E464CCDC1Dull, 0, 0, 0}, false, 0, true},
+    {0x8B589D25B2A0ADDCull, "vs_8B589D25B2A0ADDC", {0x7268762D11A610F2ull, 0, 0, 0}, false, 0, true, true},
+    {0x7B0DC42D383F694Cull, "vs_7B0DC42D383F694C", {0x0DF03E64DF9DBEF1ull, 0, 0, 0}, false, 0, true, true},
+    {0x114AF608F86D9ED8ull, "vs_114AF608F86D9ED8", {0xA17504A2627767F2ull, 0, 0, 0}, false, 0, true, true},
+    {0xD99AFDC250D19A3Full, "vs_D99AFDC250D19A3F", {0xE86271E464CCDC1Dull, 0, 0, 0}, false, 0, true, true},
 };
 constexpr int kFamilyCount = static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]));
+// F2: the five measured skinned pairs (the NPC's shading pairs, 2026-10-08 F10/F11): the pixel shader exports the vertex shader's E to
+// target 7. A skinned family's other keyed pixel shaders (61AE with FC43 and 4504) keep their slot export and write nothing to target 7.
+struct SkinPair { uint64_t vs, ps; };
+constexpr SkinPair kSkinPairs[] = {
+    {0xD99AFDC250D19A3Full, 0xE86271E464CCDC1Dull},
+    {0x61AE8EB05FDC18DDull, 0x451A82D4DD1BA254ull},
+    {0x114AF608F86D9ED8ull, 0xA17504A2627767F2ull},
+    {0x7B0DC42D383F694Cull, 0x0DF03E64DF9DBEF1ull},
+    {0x8B589D25B2A0ADDCull, 0x7268762D11A610F2ull},
+};
+constexpr bool skinPair(uint64_t vs, uint64_t ps) noexcept {
+    for (const SkinPair& p : kSkinPairs)
+        if (p.vs == vs && p.ps == ps) return true;
+    return false;
+}
 // Historical marker-bearing pairs retained for compatibility. PROVENANCE
 // CORRECTION, 2026-09-28: every PS below is EDVR's generated substitution,
 // not a native game shader. Re-running engineVelocityPatchPs on the captured

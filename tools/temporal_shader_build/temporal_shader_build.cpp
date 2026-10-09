@@ -16,6 +16,7 @@
 #include "../../src/d3d11/temporal_shader_source.h"
 #include "../../src/d3d11/flat_mono_shader_source.h"
 #include "../../src/d3d11/engine_velocity_primary_copy_shader.h"
+#include "../../src/d3d11/skin_join_shader.h"
 #include "../../src/d3d11/fixed_shader_source.h"
 #include "../../src/d3d11/flat_foreground_motion_shader.h"
 #include "../../src/d3d11/flat_domain_marker_shader.h"
@@ -371,6 +372,11 @@ static int generateTemporal(const Options& o) {
     static const D3D_SHADER_MACRO trace[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {"EDVR_TEMPORAL_TRACE", "1"}, {nullptr, nullptr}};
     std::vector<Variant> variants = {
         {"kEnginePrimaryCopyScatterBytecode", "engine_primary_copy_scatter_cs", "main", nullptr, {}, false, edvr::kEnginePrimaryCopyScatterCsHlsl},
+        // F2 (skin_join_shader.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"): the identity join and the pose table passes, one HLSL text.
+        {"kSkinJoinBytecode", "skin_join_cs", "join", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseClearBytecode", "skin_pose_clear_cs", "poseClear", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseScatterBytecode", "skin_pose_scatter_cs", "poseScatter", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseVerifyBytecode", "skin_pose_verify_cs", "poseVerify", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kTemporalMvFastBytecode", "temporal_mv_fast_cs", "mv", fast, {}},
         {"kTemporalMvBytecode", "temporal_mv_cs", "mv", diagnostic, {}},
         {"kTemporalMvTraceBytecode", "temporal_mv_trace_cs", "mv", trace, {}},
@@ -393,7 +399,7 @@ static int generateTemporal(const Options& o) {
     const auto fixed = fixedVariants(core);
     variants.insert(variants.end(), fixed.begin(), fixed.end());
     const std::string flat = core + edvr::kFlatMonoShaderSource;
-    const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat + edvr::kEnginePrimaryCopyScatterCsHlsl;
+    const std::string allSources = std::string(edvr::kTemporalCsHlsl) + flat + edvr::kEnginePrimaryCopyScatterCsHlsl + edvr::kSkinJoinCsHlsl;
     const std::string key = sourceKey(allSources.c_str(), variants, compilerPath());
     if (outputCurrent(o.output, key)) {
         std::printf("temporal shaders: unchanged (key %s), reusing %ls\n", key.c_str(), o.output.c_str());
@@ -535,7 +541,13 @@ static void selfTest() {
     for (size_t i = 0; i < coreFixed.size() && i < coreLegacy.size(); ++i) {
         auto& shader = coreFixed[i]; const auto& legacy = coreLegacy[i];
         Fnv1a64 sourceFingerprint; sourceFingerprint.add(shader.alternate, std::strlen(shader.alternate));
-        check(legacy.sourceHash && sourceFingerprint.hash == legacy.sourceHash, "fixed HLSL remains exact to the original assembled source");
+        {
+            // A changed pinned shader names itself and its new hash, so a deliberate re-pin is one edit and an accidental one is seen.
+            static char pinned[256];
+            std::snprintf(pinned, sizeof(pinned), "fixed HLSL remains exact to the original assembled source (%s [%zu], %s: now 0x%016llX, pinned 0x%016llX)",
+                          legacy.sourceName, i, legacy.profile, static_cast<unsigned long long>(sourceFingerprint.hash), static_cast<unsigned long long>(legacy.sourceHash));
+            check(legacy.sourceHash && sourceFingerprint.hash == legacy.sourceHash, pinned);
+        }
         check(!std::strcmp(shader.sourceName, legacy.sourceName) && !std::strcmp(shader.entry, legacy.entry) &&
             !std::strcmp(shader.profile, legacy.profile) && sameMacros(shader.macros,legacy.macros) && shader.flags1 == 0 && shader.flags2 == 0,
             "fixed original source-name, entry, stage and flags are preserved");

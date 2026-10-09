@@ -15,7 +15,7 @@
 namespace edvr {
 
 struct CsStageSave {
-    static constexpr UINT kSrvs = 23;      // t0..t22 (t21/t22: engine-record velocity)
+    static constexpr UINT kSrvs = 24;      // t0..t23 (t21/t22: engine-record velocity; t23: the second skin's target 7)
     static constexpr UINT kUavs = 7;       // u0..u6 (u7, the trace target, is saved at its own site)
     static constexpr UINT kCbs = 3;        // b0 the pass's own, b1/b2 engine-record velocity
     static constexpr UINT kSamplers = 1;

@@ -12,11 +12,15 @@ This reads them and answers the F2 questions with numbers, no judgement in the m
   recompute Is each palette row the compute's own arithmetic on the captured inputs, palette[dst+i] = joint[src+i] o invBind[bind+i]
             (S o M: M's 3x3 first, then S's)?  Float32, so a tolerance, and the count of rows that are exactly equal too.
   runsum    Do the frame's jobs, by dst, each start where the last ended (dst = running sum of bone counts)?
-  bases     Is every nonzero word 0 of the frame's t33 records some job's dst, and which jobs are not drawn?
+  bases     Is every nonzero word 0 of the frame's t33 records some job's dst, and which jobs are not drawn? (A frame with no job table is not
+            compared: it has no dst to compare with. Run 154827's FAIL on this check was those frames.)
   list      Between consecutive frames, which jobs persisted, moved (same size and bind pose, another dst), appeared or went;
             and of the persisted dst values, which now belong to a record that jumped more than 0.5 m (a base reused by another
-            character), told apart: swaps in a frame whose list changed, and swaps in a frame whose list did NOT (the one
-            that would break a join by base).
+            character) in a frame whose list changed (explained). In a frame whose list did NOT change a jump is judged by COHERENCE: the
+            records of one character share a previous position, so the persisted bases are grouped by it, and a group whose members
+            moved differently (more than 0.1 mm apart) is an identity swap (the one that would break a join by base); a group that moved
+            together, even far, is a pacing hitch of that character and is only counted. Run 154827's FAIL on this check was two characters
+            stepping 0.3-0.6 m in one frame pair.
   views     The views the compute ran through (FirstElement of t0 t1 t2 u0), and whether u0 is the buffer bound at t38.
 
   python tools\skin_palette_check.py <dir> [stamp]       dir is edvr_logs\pool; the newest skin_*.bin when no stamp
@@ -49,6 +53,7 @@ assert HEADER.size == 104 and FRAMEHDR.size == 64 and DISP.size == 128 and BIND.
 TOL_ABS = 2e-5
 TOL_REL = 1e-5
 JUMP_M = 0.5
+COHERENT_M = 1e-4   # records of one character share a previous position and must share a displacement to within 0.1 mm
 
 
 # ---- reading ----------------------------------------------------------------------------------------------------------------
@@ -290,26 +295,30 @@ def run_checks(dirpath, stamp):
         path = os.path.join(dirpath, "pool_%s_%d.bin" % (stamp, fr["frame"]))
         if os.path.exists(path):
             pool[fr["frame"]] = read_pool(path)
-    not_dst = skinned = undrawn = frames_pool = 0
+    not_dst = skinned = undrawn = frames_pool = frames_nojobs = 0
     for fr in frames:
         raw = pool.get(fr["frame"])
         if raw is None:
             continue
+        jf = frame_jobs(fr)
+        if not len(jf):
+            frames_nojobs += 1   # no job table in this frame (the chain was not dispatched, or its tables never arrived): nothing to compare the bases with
+            continue
         frames_pool += 1
         w0 = np.ascontiguousarray(raw[:, :4]).view("<u4").ravel()
         bases = set(int(x) for x in w0 if x)
-        jf = frame_jobs(fr)
-        dsts = set(int(x) for x in jf[:, 1]) if len(jf) else set()
+        dsts = set(int(x) for x in jf[:, 1])
         skinned += len(bases)
         not_dst += len(bases - dsts)
         undrawn += len(dsts - bases)
     check("bases", frames_pool > 0 and not_dst == 0,
-          "t33 records' nonzero word 0 that is not a job's dst: %d of %d distinct bases over %d frames (jobs with no record in the pool: %d, expected for characters not drawn)" %
-          (not_dst, skinned, frames_pool, undrawn))
+          "t33 records' nonzero word 0 that is not a job's dst: %d of %d distinct bases over %d frames (jobs with no record in the pool: %d, expected for characters not drawn; "
+          "%d frames with a pool copy and no job table were not compared)" %
+          (not_dst, skinned, frames_pool, undrawn, frames_nojobs))
 
     # ---- list changes and identity swaps
     changed_frames = []
-    swaps_explained = swaps_unexplained = pairs_l = 0
+    swaps_explained = swaps_unexplained = pairs_l = hitches = lone = 0
     detail_swaps = []
     for n in range(1, len(frames)):
         a, b = frame_jobs(frames[n - 1]), frame_jobs(frames[n])
@@ -350,20 +359,39 @@ def run_checks(dirpath, stamp):
             return out
 
         pa, pb = first_pos(ra), first_pos(rb)
-        sw = [bse for bse in set(pa) & set(pb) if float(np.linalg.norm(pa[bse].astype(np.float64) - pb[bse])) > JUMP_M]
-        if sw:
-            if changed:
-                swaps_explained += len(sw)
-            else:
-                swaps_unexplained += len(sw)
-            detail_swaps.append((frames[n]["frame"], len(sw), "list changed" if changed else "LIST UNCHANGED"))
+        common = set(pa) & set(pb)
+        jumped = [bse for bse in common if float(np.linalg.norm(pa[bse].astype(np.float64) - pb[bse])) > JUMP_M]
+        if changed:
+            if jumped:
+                swaps_explained += len(jumped)
+                detail_swaps.append((frames[n]["frame"], len(jumped), "list changed"))
+        else:
+            # the list is the same: judge by coherence. One character's records share a previous position; a base that moved differently from
+            # its record-mates has taken another character's place. A group that moved together did not swap, however far it stepped.
+            groups = {}
+            for bse in common:
+                groups.setdefault(tuple(np.round(pa[bse].astype(np.float64), 3)), []).append(bse)
+            incoherent = 0
+            for ks in groups.values():
+                d = np.array([pb[k].astype(np.float64) - pa[k].astype(np.float64) for k in ks])
+                if len(ks) > 1 and float(np.abs(d - d[0]).max()) > COHERENT_M:
+                    incoherent += len(ks)
+                elif float(np.linalg.norm(d[0])) > JUMP_M:
+                    if len(ks) > 1:
+                        hitches += len(ks)
+                    else:
+                        lone += 1
+            if incoherent:
+                swaps_unexplained += incoherent
+                detail_swaps.append((frames[n]["frame"], incoherent, "LIST UNCHANGED, GROUP INCOHERENT"))
     check("list_identity", pairs_l > 0 and swaps_unexplained == 0,
-          "%d frame pairs: list changed in %d (frame, same, moved, new, gone): %s; persisted bases whose record jumped over %.1f m: %d in a changed-list frame, "
-          "%d with the list UNCHANGED (the case a join by base cannot survive)%s" %
-          (pairs_l, len(changed_frames), changed_frames[:8], JUMP_M, swaps_explained, swaps_unexplained,
+          "%d frame pairs: list changed in %d (frame, same, moved, new, gone): %s; persisted bases whose record jumped over %.1f m: %d in a changed-list frame; "
+          "with the list UNCHANGED: %d bases that moved differently from their record-mates (an identity swap, the case a join by base cannot survive), "
+          "%d bases of groups that stepped over %.1f m together (a pacing hitch, not a swap), %d lone records that did%s" %
+          (pairs_l, len(changed_frames), changed_frames[:8], JUMP_M, swaps_explained, swaps_unexplained, hitches, JUMP_M, lone,
            "" if not detail_swaps else "; at %s" % detail_swaps[:6]))
     res["changed_frames"] = changed_frames
-    res["swaps"] = dict(explained=swaps_explained, unexplained=swaps_unexplained)
+    res["swaps"] = dict(explained=swaps_explained, unexplained=swaps_unexplained, hitches=hitches, lone=lone)
 
     # ---- views and u0
     firsts = {}
@@ -449,12 +477,13 @@ def synth_run(dirpath, stamp="777777", frame0=300, mutate=None):
         for eid, cnt, bb, alive in ents:
             if not alive:
                 continue
-            jobs.append((src, dst, bb, cnt))
-            ids_.append(eid)
-            src += cnt
-            dst += cnt
+            for pcnt, pbb in ([(3, 0), (2, 9)] if eid == 0 else [(cnt, 0)]):   # the first character is two jobs: a primary and a child at one position
+                jobs.append((src, dst, bb + pbb, pcnt))
+                ids_.append(eid)
+                src += pcnt
+                dst += pcnt
         if mutate == "gap" and k == 6:
-            jobs[2] = (jobs[2][0], jobs[2][1] + 3, jobs[2][2], jobs[2][3])
+            jobs[3] = (jobs[3][0], jobs[3][1] + 3, jobs[3][2], jobs[3][3])   # the last job starts late: a gap
         joints = np.array([rot(0.05 * k + 0.02 * r, (0.1 * r, 0.03 * k, 0.2)) for r in range(src)], dtype=np.float32)
         b = k % 2
         cur = pal[b].copy()
@@ -470,11 +499,14 @@ def synth_run(dirpath, stamp="777777", frame0=300, mutate=None):
         for (s_, d_, bb, cnt), eid in zip(jobs, ids_):
             bases.append(d_)
             pos.append((10 + 3 * eid + 0.01 * k, 2, -5))
-            if cnt == 5:
+            if cnt == 3:   # the first character's primary job has a duplicate record at its base, as the game's pool does
                 bases.append(d_)
                 pos.append((10 + 3 * eid + 0.01 * k, 2, -5))
-        if mutate == "swap" and k == 8:   # a record at an unchanged list jumps: identity swap with the list UNCHANGED
-            pos[3] = (40.0, 2, -5)
+        if mutate == "swap" and k == 8:   # one record of a character jumps and its record-mate does not, the list UNCHANGED: an identity swap
+            pos[5] = (40.0, 2, -5)
+        if mutate == "hitch" and k == 8:  # the whole character steps 0.8 m at once, the list UNCHANGED: a pacing hitch, not a swap
+            for r in (3, 4, 5):
+                pos[r] = (pos[r][0] + 0.8, pos[r][1], pos[r][2])
         if mutate == "notdst" and k == 4:
             bases.append(9999)
             pos.append((1, 1, 1))
@@ -486,7 +518,7 @@ def synth_run(dirpath, stamp="777777", frame0=300, mutate=None):
         open(os.path.join(dirpath, "pool_%s_%d.bin" % (stamp, f)), "wb").write(hdr + bytes(poolrec))
         jb = b"".join(struct.pack("<4I", *j) for j in jobs)
         runs.append(dict(pool=True, bound=b, boundId=0xA0A0 if b == 0 else 0xB0B0, palIssued=2 if k else 1, palGot=2 if k else 1,
-                         dispatches=[dict(jobs=jb, joints=joints.tobytes(), bind=0, jointsFrom=0, u0=0xA0A0 if b == 0 else 0xB0B0)]))
+                         dispatches=[] if (mutate == "nojobs" and k == 10) else [dict(jobs=jb, joints=joints.tobytes(), bind=0, jointsFrom=0, u0=0xA0A0 if b == 0 else 0xB0B0)]))
         for p in range(2):
             if k == 0 and p != b:
                 continue
@@ -535,6 +567,12 @@ def self_test():
         expect(want in v["fails"], "%s (fails: %s)" % (why, v["fails"]))
         others = [f for f in v["fails"] if f != want]
         expect(not others, "%s trips nothing else (also failed: %s)" % (name, others))
+    v = verdict("hitch")
+    expect(not v["fails"], "a whole character stepping 0.8 m with the list unchanged is a pacing hitch, not a swap: %s" % v["fails"])
+    expect(v["swaps"]["hitches"] >= 3 and v["swaps"]["unexplained"] == 0, "...and is counted as a hitch: %s" % v["swaps"])
+    v = verdict("nojobs")
+    expect("bases" not in v["fails"] and "1 frames with a pool copy and no job table were not compared" in v["checks"]["bases"]["detail"],
+           "a frame with a pool copy and no job table is not compared by the bases check, and says so: %s" % v["checks"]["bases"]["detail"])
     v = verdict("nofile")
     expect("prev" not in v["fails"], "a missing bones file skips its pair, it does not fail the run: %s" % v["fails"])
     expect("18 of 18 frame pairs" in v["checks"]["prev"]["detail"], "...and the pair count shows it: %s" % v["checks"]["prev"]["detail"])
@@ -563,7 +601,7 @@ def self_test():
         for f in failures:
             print("FAIL: " + f, file=sys.stderr)
         return 1
-    print("PASS: skin_palette_check self-test (a healthy synthetic run passes; six injected faults are each caught by their own check and no other)")
+    print("PASS: skin_palette_check self-test (a healthy synthetic run passes; five injected faults are each caught by their own check and no other; a hitch and a frame with no job table are not faults)")
     return 0
 
 
