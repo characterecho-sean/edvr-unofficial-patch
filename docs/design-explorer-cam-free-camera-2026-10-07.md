@@ -2,19 +2,23 @@
 
 ## Status
 
-- **State: F0-F8 FLOWN (2026-10-07/08).** F8 (Phase 3): "It works so
-  well!" -- the eye follows the head joint, the camera suite is isolated, F5
-  works from first person. BUILT, not flown (Phase 4): the COMFORT FADE
-  (black while the mode is not locked and stable, on and off). Armed by
-  `hotkey.explorer_cam` alone; `[fix] explorer_cam` is REMOVED. The d66271df
-  review (2026-10-08) is answered, built not flown: the frame tick is
-  device_hook.cpp's, the probe's fault count, a pose not built yet retries.
-- **Branch and scope (Sean, 2026-10-07):** this stays on
-  `claude/explorer-cam-redesign-86b9b4` until it ships, and it REPLACES the
-  old Explorer Cam route entirely; deleting the old route is authorized.
-- **Decision for Sean (D1):** phase 1 writes the free-camera state, the
-  first EDVR write into game-side camera memory; it retires explorer-cam.md's
-  "never writes" and must not touch anything replicated.
+- **State: SHIPPED -- merged to main 2026-10-09** from
+  `claude/explorer-cam-redesign-86b9b4`; it REPLACES the old route. Flown on
+  Frontier F0-F15. F8: "It works so well!" (head-joint eye, isolated suite, F5
+  from first person); the comfort fade "looks great"; the Hotkeys page
+  (keyboard, pad, HOTAS) "worked great"; the Explorer Cam page "looks good".
+  Armed by `hotkey.explorer_cam` alone (`[fix] explorer_cam` REMOVED).
+- **NPC motion, shipped with it** (detail and journal:
+  docs\kinematic-motion-injection-2026-09-19.md, F10-F15): fix A (a 0x10
+  texel is the weapon only where the map covers it), F1 (the walker's four
+  pool pairs keyed, VR), F2 (skinned characters: the game's previous palette,
+  a read-only job-list hook, a cloned second skin) in Explorer Cam AND on the
+  first-person panel. Sean: "NPCs looked good"; panel "sharp, like Explorer
+  Cam". Cost about +0.1-0.2 ms a frame; target 7 +62-68 MB VRAM.
+- **Decisions (Sean):** D1 (write the free camera's pose, press its lock),
+  calling game functions, the fade global, the read-only skinning-job hook.
+- **Open:** C (VR weapon refusals, three world-route releases; predates the
+  branch) for a diagnosis flight; the fade hold's 1 s cap never fired.
 - **Hypotheses** (RVAs are build 332841, exe SHA-256 e6be8bbe...e988, all
   three installs; static evidence in `analysis\decomp\explorer_cam\`):
   - H1 **READ + FLOWN F0:** `FreeCameraActivity`'s update (0x1071980)
@@ -48,16 +52,12 @@
   `+0x592200`; the culling view is built upstream (6s.9 saw holes from it).
 - **Flown** on Frontier: F0 172543, F1 194702, F2 211908, F3 94c467d3, F4
   20764688, F5 60dd0eb2, F6 d0707af3, F7 e42e90dd, F8 (Phase 3); below.
-- **Next:** flight F9, comfort fade: F5 in, the view fades to black in 200
-  ms BEFORE the camera opens and back in once placed and steady (check the
-  `comfort fade:` lines, "black lasted"); F5 out the same; a stall; the 3 s
-  cap. Also F5 with the minimal config (black_void off, panel_distance 1).
 - **Temporary keys:** none. `[advanced] explorer_cam_probe` is REMOVED
   (2026-10-09, below). The trims and the smoothing are PERMANENT user settings (Sean,
   2026-10-08), shipped at his tuning: `[fix] explorer_cam_eye_trim_up` 0.15,
   `_forward` -0.08, `_right` 0.0 (m, commander axes, held to +-0.5, was +-0.3)
   and `explorer_cam_follow_smoothing_ms` 0, tuned on the F8 menu's Explorer Cam
-  page (built, not flown). `explorer_cam_eye_up/_forward/_right` are FALLBACK
+  page (flown). `explorer_cam_eye_up/_forward/_right` are FALLBACK
   only, ini-only. The comfort fade has NO key.
 
 ## Why today's Explorer Cam is half-baked
