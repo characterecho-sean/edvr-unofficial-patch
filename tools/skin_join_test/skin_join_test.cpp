@@ -14,6 +14,7 @@
 //   J8  the tables' limits: pose, cap, duplicate base, no history
 //   J9  the documented residuals, pinned so a change to them is a decision
 //   J10 the periodic line
+//   J11 the hook's reading of the game's list (skin_entity_walk.h) over a fake heap with faults in it
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "skin_entity_walk.h"
 #include "skin_join.h"
 #include "skin_join_world.h"
 
@@ -166,6 +168,12 @@ void caseProtocol() {
         r2.frame(build(a, 1));
         r2.frame(build(c, 2));
         check(r2.plan.prevIdx[0] == kNone && r2.plan.prevIdx[2] == kNone, "J2.q a key listed twice joins neither entry");
+        World twiceBefore = steady();
+        twiceBefore[2].key = twiceBefore[0].key;   // the PREVIOUS list names one key twice
+        Run r5;
+        r5.frame(build(twiceBefore, 1));
+        r5.frame(build(a, 2));
+        check(r5.plan.prevIdx[0] == kNone && r5.plan.prevIdx[1] == 1, "J2.w a key the previous list names twice joins neither entry, and the others are unaffected");
         World d = steady();
         d[0].jobs[0].second = 41; d[0].jobs[1].second = 11;   // same entity, primary bone count changed
         Run r3;
@@ -285,6 +293,17 @@ void caseInsertRemove() {
         check(s[kStatPrefixUsed] == 1 && s[kStatJoined] == 0 && s[kStatFailPrefix] == 3, "J5.e the prefix join loses every job after the change");
     }
     {
+        // a primary job whose bind changed and whose bone count did not: the prefix ends there (job 3 of 6)
+        World bound = a;
+        bound[1].jobs[0].first = 2999;
+        Run r;
+        r.frame(build(a, 1));
+        r.frame(build(a, 2));
+        r.frame(build(bound, 3), true, true, false);
+        const uint32_t* s = r.result.stats;
+        check(s[kStatPrefixUsed] == 1 && s[kStatJoined] == 3 && s[kStatFailPrefix] == 3, "J5.j the prefix compares the bind as well as the bone count");
+    }
+    {
         // insert at the front
         World inserted;
         inserted.push_back(Ent{150, 0xA11CE, 0, {{5000, 25}}});
@@ -336,6 +355,16 @@ void caseChildren() {
         warm(r, a);
         r.frame(build(b, 4));
         check(r.result.stats[kStatFailLayout] == 2 && r.result.stats[kStatJoined] == 4, "J6.c two children that traded places fail on the layout; the primary job and the others join");
+    }
+    {
+        World same = a;
+        same[0].jobs = {{1000, 40}, {1001, 12}, {1001, 6}};   // two children with one bind and two sizes
+        World b = same;
+        std::swap(b[0].jobs[1], b[0].jobs[2]);                // ... that trade places: the bind matches, the bone count does not
+        Run r;
+        warm(r, same);
+        r.frame(build(b, 4));
+        check(r.result.stats[kStatFailLayout] == 2 && r.result.stats[kStatJoined] == 4, "J6.e two children of one bind that traded sizes fail on the layout");
     }
     {
         World b = a;
@@ -523,6 +552,128 @@ void caseLine() {
     uint32_t z[kStatWords]{};
     check(joinLine(z, WindowCpu{}, true, "armed").find("source=none") != std::string::npos, "J10.d a window with no frames has no source");
 }
+// ---- J11 -----------------------------------------------------------------------------------------------------------------
+// A fake heap: blocks of bytes at addresses; a read that is not wholly inside one fails, as an unmapped page would.
+struct FakeHeap {
+    std::vector<std::pair<uint64_t, std::vector<uint8_t>>> blocks;
+    uint64_t next = 0x100000;
+    mutable unsigned reads = 0;
+    uint64_t alloc(size_t n) {
+        const uint64_t at = next;
+        blocks.push_back({at, std::vector<uint8_t>(n, 0)});
+        next += (n + 15) & ~size_t(15);
+        next += 64;
+        return at;
+    }
+    bool read(uint64_t address, void* out, size_t n) const {
+        ++reads;
+        for (const auto& b : blocks)
+            if (address >= b.first && address + n <= b.first + b.second.size()) { std::memcpy(out, &b.second[address - b.first], n); return true; }
+        return false;
+    }
+    void put(uint64_t address, const void* data, size_t n) {
+        for (auto& b : blocks)
+            if (address >= b.first && address + n <= b.first + b.second.size()) { std::memcpy(&b.second[address - b.first], data, n); return; }
+    }
+    template <class T> void set(uint64_t address, T v) { put(address, &v, sizeof(T)); }
+};
+// A node with n entries (counts, bases from `first`), as the decompile says they are laid out.
+struct FakeNode {
+    uint64_t node = 0;
+    std::vector<uint64_t> entries, meshes;
+};
+FakeNode fakeList(FakeHeap& h, const std::vector<uint16_t>& counts, uint32_t first) {
+    FakeNode f;
+    f.node = h.alloc(0x200);
+    uint32_t dst = first;
+    uint64_t previous = 0;
+    for (size_t i = 0; i < counts.size(); ++i) {
+        const uint64_t e = h.alloc(0x100), mesh = h.alloc(0x50);
+        h.set<uint64_t>(e, 0x140001000ull + (i & 1));
+        h.set<uint64_t>(e + 0x38, mesh);
+        h.set<uint16_t>(mesh, counts[i]);
+        h.set<uint32_t>(e + 0xA8, dst);
+        dst += counts[i];
+        if (previous) h.set<uint64_t>(previous + 8, e); else h.set<uint64_t>(f.node + 0xA8, e);
+        previous = e;
+        f.entries.push_back(e);
+        f.meshes.push_back(mesh);
+    }
+    h.set<uint32_t>(f.node + 0xC4, dst);
+    return f;
+}
+
+void caseWalk() {
+    auto walk = [](FakeHeap& h, uint64_t node, Snapshot& s) { walkNode([&h](uint64_t a, void* o, size_t n) { return h.read(a, o, n); }, node, s); };
+    static Snapshot s;   // 33 KB: not on the stack
+    {
+        FakeHeap h;
+        const FakeNode f = fakeList(h, {40, 50, 30}, 1);
+        walk(h, f.node, s);
+        check(s.n == 3 && s.flags == 0 && s.end == 121 && s.node == f.node, "J11.a a list laid out as the decompile says is read whole, with the node and its end row");
+        check(s.e[0].key == f.entries[0] && s.e[0].mesh == f.meshes[0] && s.e[0].dst == 1 && s.e[0].count == 40 && s.e[1].dst == 41 && s.e[2].dst == 91 && s.e[2].count == 30,
+              "J11.b each entry carries its address, mesh, base and bone count");
+        check(s.e[0].vtable == 0x140001000ull && s.e[1].vtable == 0x140001001ull, "J11.c and its vtable");
+        check(checkSnapshot(s), "J11.d and a list so read passes the snapshot checks");
+    }
+    {
+        FakeHeap h;
+        const FakeNode f = fakeList(h, {40, 50}, 1);
+        walk(h, 0x7000000, s);
+        check((s.flags & kSnapFault) && s.n == 0, "J11.e a node that is not mapped faults and reads nothing");
+        h.reads = 0;
+        walk(h, 0x500, s);
+        check((s.flags & kSnapFault) && s.n == 0 && h.reads == 0, "J11.f a node address that cannot be a user object is refused before any read");
+        h.set<uint64_t>(f.entries[0] + 8, 0x7100000);
+        walk(h, f.node, s);
+        check((s.flags & kSnapFault) && s.n == 1, "J11.g a next pointer into unmapped memory faults after the entries before it");
+    }
+    {
+        FakeHeap h;
+        const FakeNode f = fakeList(h, {40, 50, 30}, 1);
+        h.set<uint64_t>(f.entries[1] + 8, 0x1235);
+        walk(h, f.node, s);
+        check((s.flags & kSnapImplausible) && s.n == 2, "J11.h a next pointer that cannot be an object is implausible, not a fault");
+        h.set<uint64_t>(f.entries[1] + 8, f.entries[2]);
+        h.set<uint64_t>(f.entries[2] + 0x38, 0);
+        walk(h, f.node, s);
+        check((s.flags & kSnapImplausible) && s.n == 2, "J11.i an entry without mesh data is implausible");
+        h.set<uint64_t>(f.entries[2] + 0x38, f.meshes[2]);
+        h.set<uint64_t>(f.entries[2] + 0x38, 0x7200000);
+        walk(h, f.node, s);
+        check((s.flags & kSnapFault) && s.n == 2, "J11.j mesh data that is not mapped faults on the bone count");
+        h.set<uint64_t>(f.entries[2] + 0x38, f.meshes[2]);
+        h.set<uint64_t>(f.entries[0] + 8, f.entries[0] + 4);
+        walk(h, f.node, s);
+        check((s.flags & kSnapImplausible) && s.n == 1, "J11.k an unaligned entry pointer is implausible");
+    }
+    {
+        FakeHeap h;
+        const FakeNode f = fakeList(h, {10, 20}, 5);
+        h.set<uint64_t>(f.entries[1] + 8, f.entries[0]);
+        walk(h, f.node, s);
+        check((s.flags & kSnapOverflow) && s.n == kMaxEntries, "J11.l a list that points back into itself ends at the snapshot's capacity");
+    }
+    {
+        FakeHeap h;
+        std::vector<uint16_t> counts(kMaxEntries + 1, 1);
+        const FakeNode f = fakeList(h, counts, 1);
+        walk(h, f.node, s);
+        check((s.flags & kSnapOverflow) && s.n == kMaxEntries, "J11.m more entries than a snapshot holds are an overflow, the first 1024 kept");
+    }
+    {
+        FakeHeap h;
+        const FakeNode f = fakeList(h, {10, 20}, 5);
+        h.set<uint64_t>(f.node + 0xA8, 0);
+        walk(h, f.node, s);
+        check(s.n == 0 && s.flags == 0 && s.end == 35 && !checkSnapshot(s), "J11.n an empty list is read as empty (and refused by the snapshot checks)");
+    }
+    {
+        // the offsets are the decompile's and nothing else
+        check(kOffNodeList == 0xA8 && kOffNodeEnd == 0xC4 && kOffEntryNext == 0x08 && kOffEntryMesh == 0x38 && kOffEntryDst == 0xA8, "J11.o the offsets are the decompile's: node +A8 and +C4, entry +08, +38 and +A8");
+        check(userPointer(0x10000) && !userPointer(0xFFFF) && !userPointer(0x7FFFFFFE0000ull) && !userPointer(0x10001) && userPointer(0x7FFFFFFD0000ull), "J11.p the pointer test: aligned, above 64 KB, below the user ceiling");
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -550,6 +701,7 @@ int main(int argc, char** argv) {
     caseLimits();
     caseResiduals();
     caseLine();
+    caseWalk();
     if (g_failures) {
         std::printf("FAIL: skin join: %u of %u checks failed\n", g_failures, g_checks);
         return 1;

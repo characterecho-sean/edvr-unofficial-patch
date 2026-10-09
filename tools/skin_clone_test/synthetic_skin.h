@@ -81,6 +81,7 @@ SQRTLINE
  precise float qd = dot(q.xyz, local);
  precise float w2 = q.w * (q.w + q.w);
  precise float3 rot = (-local + local * w2) + (q.xyz + q.xyz) * qd + (q.w + q.w) * cr;
+ o.n = float4(rot, 1.0) + EXTRA;   // written before the position: inside the range the clone copies, as the real shaders' varyings are
  precise float3 rel = POSELINE - CAMERA;
  rel = rel + asfloat(head.y) * rot;
 )HLSL";
@@ -88,13 +89,13 @@ SQRTLINE
  [branch] if (M[3].w != 0.0) {
   precise float3 world = rel + S[275].xyz;
   precise float d = dot(world, M[6].xyz) - M[6].w;
-  rel = rel + rot * (saturate(d * 0.1) * 0.05);
+  rel = rel + rot * (saturate(d * 0.1 + 0.5) * 0.05);   // inside the linear part of the saturate for the test positions
  }
+ rel = rel + M[7].xyz;   // a top-level add after the branch: an anchor placed past the branch would carry the displacement into E
 )HLSL";
     s += R"HLSL(
 MATRIXLINES
  o.id = idx | 0x80000000u;
- o.n = float4(rot, 1.0) + EXTRA;
  return o;
 }
 )HLSL";

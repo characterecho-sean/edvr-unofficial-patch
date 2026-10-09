@@ -62,6 +62,7 @@
 #include "../../src/d3d11/engine_velocity.h"
 #include "../../src/d3d11/gpu_census.h"
 #include "../../src/d3d11/kinematic_eval_hook.h"
+#include "../../src/d3d11/skin_entity_hook.h"
 #include "../../src/d3d11/vscreen.h"
 
 namespace lifecycle_fake {
@@ -77,6 +78,10 @@ std::vector<std::string> g_log;
 uint64_t g_clock = 1000;
 uint64_t fakeClock() { return g_clock; }
 std::unordered_map<void*, uint64_t> g_objectHash;   // the registry's stand-in, for the shadow probe
+// The F2 entity hook (skin_entity_hook.cpp is not linked here; its own rig drives it): never armed, no list ever read, so the join takes the
+// job table's prefix -- the fallback the DLL uses when the hook stands down. g_hookGate is what the engine path last asked of the gate.
+unsigned g_hookArms = 0;
+bool g_hookGate = false;
 }  // namespace lifecycle_fake
 
 // --- The stubs engine_velocity.cpp links against -------------------------------
@@ -139,6 +144,16 @@ void Log::note(const char* fmt, ...) {
     va_end(args);
     lifecycle_fake::g_log.push_back(text);
 }
+SkinHookState skinEntityHookArm(char* why, size_t cap) {
+    ++lifecycle_fake::g_hookArms;
+    if (why && cap) std::snprintf(why, cap, "rig: the entity hook is not linked into this rig");
+    return SkinHookState::StoodDown;
+}
+SkinHookState skinEntityHookState() { return SkinHookState::StoodDown; }
+void skinEntityHookSetGate(bool open) { lifecycle_fake::g_hookGate = open; }
+bool skinEntityHookLatest(skinjoin::Snapshot&) { return false; }
+SkinHookStats skinEntityHookStats() { SkinHookStats r; r.state = SkinHookState::StoodDown; return r; }
+bool skinEntityHookNextEvent(char*, size_t) { return false; }
 int64_t qpcNow() { LARGE_INTEGER t{}; QueryPerformanceCounter(&t); return t.QuadPart; }
 int64_t qpcFrequency() { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }
 // The GPU census (issue #38) is cross-cutting; this rig is about the draw

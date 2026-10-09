@@ -66,6 +66,7 @@ constexpr unsigned kEngineVelocityPoolSlot = 33;
 constexpr unsigned kEngineVelocitySceneSlot = 1;
 constexpr unsigned kEngineVelocitySlotsSrv = 21;
 constexpr unsigned kEngineVelocityPoolSrv = 22;
+constexpr unsigned kEngineVelocitySkinSrv = 23;   // F2: target 7, the skinned characters' E (temporal_shader_source.h SK)
 constexpr unsigned kEngineVelocitySceneNowCb = 1;
 constexpr unsigned kEngineVelocityScenePrevCb = 2;
 
@@ -336,6 +337,16 @@ bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out);
 // camera term).
 void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
                               uint32_t stamped);
+// F2 (the second skin; skin_join.h, dxbc_skin_clone.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"). VR only.
+// engineVelocityNoteChainDispatch: the game's palette chain dispatch (exposure_fix.cpp's Dispatch hook, owner context, BEFORE the
+// game's dispatch; `groups` is its x): the join runs here. engineVelocitySkinView: the eye's target 7 (E = previous - current position
+// in centimetres, valid in w; R16G16B16A16_FLOAT, the scene depth's size), AddRef'd, or null when no draw wrote it this eye-frame -
+// then the compose keeps every skinned record's answer as it was. engineVelocityNoteSkinPixels: the compose's counts of skinned
+// pixels it took as joined / masked (Stats 56, 57) and the joined |E| in 32 log bins (Stats 58..89).
+bool engineVelocitySkinWanted() noexcept;
+void engineVelocityNoteChainDispatch(ID3D11DeviceContext* ctx, uint32_t groups);
+ID3D11ShaderResourceView* engineVelocitySkinView(int eye, ID3D11Texture2D* sceneDepth);
+void engineVelocityNoteSkinPixels(uint32_t joined, uint32_t masked, const uint32_t (&histogram)[32]);
 // vscreen's PS hook calls this with the bound shader's content hash: counts
 // binds of the self-marking detail shaders, so the draw-path census can tell
 // "never bound through the hook" from "bound but never drawn through it".

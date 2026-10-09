@@ -36,6 +36,7 @@
 namespace edvr {
 namespace skinjoin {
 
+constexpr uint64_t kChainHash = 0x6FE04AF836BB1DBAull;   // cs_6FE04AF836BB1DBA, APPLY_BIND_POSE_TRANSFORMS_CS: one group per job (skin_ledger.h's kChainHash)
 constexpr uint32_t kMaxEntries = 1024;     // entries one snapshot can hold
 constexpr uint32_t kMaxRows = 65536;       // palette rows the tables cover (the ledger's kept rows)
 constexpr uint32_t kMaxJobs = 8192;        // dispatch groups the join reads
@@ -71,8 +72,8 @@ struct Snapshot {
     Entry e[kMaxEntries];
 };
 
-// Does the list look like what the game's assembly makes? Strictly increasing bases, each entity's primary job inside
-// its own range, the last range ending at `end`.
+// Does the list look like what the game's assembly makes? Each entity's primary job inside its own range (which also forces the bases to
+// increase: a base at or below its predecessor's leaves that primary job no room), the last range ending at `end`.
 inline bool checkSnapshot(const Snapshot& s, const char** why = nullptr) {
     const char* w = "";
     bool ok = true;
@@ -85,7 +86,6 @@ inline bool checkSnapshot(const Snapshot& s, const char** why = nullptr) {
             const uint32_t next = i + 1 < s.n ? s.e[i + 1].dst : s.end;
             if (!e.key || !e.mesh || e.count == 0 || e.count > kMaxBonesPerJob) { w = "entry fields"; ok = false; }
             else if (e.dst + e.count > next) { w = "range"; ok = false; }
-            else if (i + 1 < s.n && next <= e.dst) { w = "order"; ok = false; }
         }
         if (ok && s.e[0].dst > s.end) { w = "first base"; ok = false; }
     }

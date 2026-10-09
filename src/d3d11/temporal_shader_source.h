@@ -149,9 +149,13 @@ bool engineRecordMoved(EnginePoolRecord r) {
 // and 275 of the scene constants the pool draw read, b0..b3 and bCam last
 // frame's. False when either frame's rows are not the pool families'
 // encoding (constant clip z, zero z column) or are degenerate.
-bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
-                         float4 n0, float4 n1, float4 n2, float4 n3, float3 nCam,
-                         float4 b0, float4 b1, float4 b2, float4 b3, float3 bCam, out float4 before) {
+// skinned (F2, the second skin): the record is a skinned character's and its own motion is NOT the two pose blocks' (it has none): the vertex
+// shader computed the surface's exact previous position from last frame's palette and pose and exported its difference from the current one,
+// skinMove = previous - current, in metres, both relative to this frame's camera origin. The point under the pixel then goes back to
+// world + (nCam - bCam) + skinMove: the camera term of a point that did not move, plus the point's own motion. Everything else is shared.
+bool engineReprojectRowsE(EnginePoolRecord r, bool skinned, float3 skinMove, float2 ndc, float zr,
+                          float4 n0, float4 n1, float4 n2, float4 n3, float3 nCam,
+                          float4 b0, float4 b1, float4 b2, float4 b3, float3 bCam, out float4 before) {
     before = 0;
     if (n0.z != 0.0 || n1.z != 0.0 || n2.z != 0.0 || n3.w != 0.0 || !(n3.z > 0.0) ||
         b0.z != 0.0 || b1.z != 0.0 || b2.z != 0.0 || b3.w != 0.0 || !(zr > 0.0))
@@ -168,7 +172,9 @@ bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
     const float3 rhs = float3(ndc * z - n3.xy, z);
     const float3 world = (ca * rhs.x + cb * rhs.y + cc * rhs.z) / det;   // less nCam
     float3 prevWorld;                                                    // less bCam
-    if (!engineRecordMoved(r)) {
+    if (skinned) {
+        prevWorld = world + (nCam - bCam) + skinMove;                    // the exact motion of the skinned surface
+    } else if (!engineRecordMoved(r)) {
         prevWorld = world + (nCam - bCam);                               // did not move: the camera term
     } else {
         const float scaleNow = asfloat(r.data[0].y), scalePrev = asfloat(r.data[19].y);
@@ -185,6 +191,11 @@ bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
     }
     before = prevWorld.x * b0 + prevWorld.y * b1 + prevWorld.z * b2 + b3;
     return before.w > 0.0 && all(isfinite(before));
+}
+bool engineReprojectRows(EnginePoolRecord r, float2 ndc, float zr,
+                         float4 n0, float4 n1, float4 n2, float4 n3, float3 nCam,
+                         float4 b0, float4 b1, float4 b2, float4 b3, float3 bCam, out float4 before) {
+    return engineReprojectRowsE(r, false, float3(0, 0, 0), ndc, zr, n0, n1, n2, n3, nCam, b0, b1, b2, b3, bCam, before);
 }
 // ENGINE_MOTION_CORE_END
 Texture2D<float2> ES : register(t21);
@@ -205,6 +216,11 @@ cbuffer EngineBefore : register(b2) { float4 EB[276]; };
 bool engineReproject(EnginePoolRecord r, float2 ndc, float zr, out float4 before) {
     return engineReprojectRows(r, ndc, zr, EN[270], EN[271], EN[272], EN[273], EN[275].xyz,
                                EB[270], EB[271], EB[272], EB[273], EB[275].xyz, before);
+}
+// F2: a skinned record's own motion, centimetres in, from the pixel's target-7 texel (see engineReprojectRowsE).
+bool engineReprojectSkinned(EnginePoolRecord r, float3 skinCm, float2 ndc, float zr, out float4 before) {
+    return engineReprojectRowsE(r, true, skinCm * 0.01, ndc, zr, EN[270], EN[271], EN[272], EN[273], EN[275].xyz,
+                                EB[270], EB[271], EB[272], EB[273], EB[275].xyz, before);
 }
 // ENGINE_MOTION_HLSL_END
 )HLSL"
@@ -576,8 +592,16 @@ R"HLSL(
 // read from its depth tile at region.xy + id, which is q -- so it is not
 // loaded again (the performance review's conditional shader change);
 // jittered callers load it here.
+// F2 (the second skin, probe.w bit 16384): SK t23 is target 7 of the substituted pool draws (xyz = the skinned surface's previous - current
+// position in centimetres, w = 1 valid / 0 none), cleared to zero each eye-frame. The two statics tell the caller what the call took (per
+// thread): gSkinKind 0 not a skinned record, 1 its exact motion was taken, 2 masked (no valid E); gSkinMagnitudeCm the |E| of kind 1.
+Texture2D<float4> SK : register(t23);
+static uint gSkinKind = 0u;
+static float gSkinMagnitudeCm = -1.0;
 uint enginePixelZ(float2 p, float2 offset, bool haveZ, float knownZ, out float2 pp, out float zp) {
     pp = 0; zp = 0;
+    gSkinKind = 0u;
+    gSkinMagnitudeCm = -1.0;
     if ((uint(probe.w + 0.5) & 2048u) == 0u || holoJitter.z == 0) return 0u;
     const int2 q = region.xy + int2(round(p + offset));
     const float zr = haveZ ? knownZ : zSceneAt(q);
@@ -609,6 +633,26 @@ uint enginePixelZ(float2 p, float2 offset, bool haveZ, float knownZ, out float2 
     if (slot >= count) return 0u;
     const EnginePoolRecord r = EP[slot];
     const uint token = asuint(EN[276].x);
+    if ((uint(probe.w + 0.5) & 16384u) != 0u && r.data[0].x != 0u) {
+        // A skinned record (a nonzero palette base): it has no pose blocks to carry, but its vertex shader computed the surface's exact
+        // previous position from last frame's palette and pose. A pixel with no valid E (no joined history, a pair that exports none)
+        // keeps no history, the same answer a rigid record EDVR could not follow gets.
+        gSkinKind = 2u;
+        const float4 sk = SK.Load(int3(q, 0));
+        if (!(sk.w > 0.5) || !all(isfinite(sk.xyz))) return 2u;
+        uint skw, skh;
+        ES.GetDimensions(skw, skh);
+        const float2 skDims = float2(skw, skh);
+        const float2 skNdc = (p + offset + region.xy + 0.5) / skDims * float2(2, -2) + float2(-1, 1);
+        float4 skBefore;
+        if (!engineReprojectSkinned(r, sk.xyz, skNdc, zr, skBefore)) return 2u;
+        pp = (skBefore.xy / skBefore.w * float2(0.5, -0.5) + 0.5) * skDims - 0.5 - region.xy + holoJitter.xy - offset;
+        zp = skBefore.w;
+        if (!all(isfinite(pp))) return 2u;
+        gSkinKind = 1u;
+        gSkinMagnitudeCm = length(sk.xyz);
+        return 1u;
+    }
     const uint kind = engineRecordKind(r, token);
     if (kind == 2u) return 2u;
     if (kind != 1u) return engineStaleStampKind(r, token);
@@ -828,7 +872,9 @@ R"HLSL(
 // counts (joined, masked, a pool record that is not a rig record, stale
 // slot, corrupt slot code, stale stamp), flushed to Stats 50..55 (48/49 were
 // the stepped-part path's, retired 2026-09-23).
-groupshared uint gCount[54];
+groupshared uint gCount[88];
+// 54 and 55 are F2's skinned pixels the compose took as joined and as masked, 56..87 the joined |E| in 32 log bins (bin 0 exactly zero,
+// bin 1 under 0.0178 cm, bin k from 0.01 * 10^((k - 1) / 4) cm; clamped at 31), flushed to Stats 56..89.
 #endif
 // A debug view's pixel, painted into the OUTPUT rather than at this
 // thread's own index.
@@ -883,7 +929,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     }
     GroupMemoryBarrierWithGroupSync();
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 54) gCount[gi] = 0;
+    for (uint zeroed = gi; zeroed < 88u; zeroed += 64u) gCount[zeroed] = 0;
     GroupMemoryBarrierWithGroupSync();
 #endif
     // Three counters, not forty. This pass writes 15, 16 and 17 and no
@@ -1004,6 +1050,14 @@ R"HLSL(
         const uint engineKind = enginePixelZ(p, 0, true, sceneZraw, engineP, engineZ);
 #if EDVR_TEMPORAL_DIAGNOSTICS
         if (engineKind != 0u) InterlockedAdd(gCount[47u + engineKind], 1u);
+        if (gSkinKind == 1u) {
+            InterlockedAdd(gCount[54], 1u);
+            uint skinBin = 0u;
+            if (gSkinMagnitudeCm > 0.0) skinBin = uint(clamp(1.0 + floor(4.0 * log10(max(gSkinMagnitudeCm, 1e-6) / 0.01)), 1.0, 31.0));
+            InterlockedAdd(gCount[56u + skinBin], 1u);
+        } else if (gSkinKind == 2u) {
+            InterlockedAdd(gCount[55], 1u);
+        }
 #endif
         if (engineKind == 1u) {
             motion = engineP - p; zPred = engineZ;
@@ -1204,7 +1258,8 @@ R"HLSL(
     // a set of numbers that only a log line reads. 48..53 are engine-record
     // motion's, at Stats 50..55.
 #if EDVR_TEMPORAL_DIAGNOSTICS
-    if (gi < 54 && gCount[gi] != 0) InterlockedAdd(Stats[gi < 48u ? gi : gi + 2u], gCount[gi]);
+    for (uint flushed = gi; flushed < 88u; flushed += 64u)
+        if (gCount[flushed] != 0) InterlockedAdd(Stats[flushed < 48u ? flushed : flushed + 2u], gCount[flushed]);
 #endif
 }
 )HLSL"

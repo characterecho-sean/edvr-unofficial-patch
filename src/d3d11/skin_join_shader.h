@@ -4,9 +4,9 @@
 //
 //   join          one 256-thread group at the chain dispatch. Reads the game's t0 job table (t0), last frame's copy of it
 //                 (t1), the plan the CPU built from the hook's list (t2), last frame's by-base (bind, count) table (t3) and
-//                 pose table (t4). Writes the join table (u0: current base -> previous base, 0 = none), this frame's
-//                 by-base table (u1), the persistent counters (u2). u3 is scratch (the lowest job per base, so two jobs
-//                 with one base resolve the way the CPU reference does).
+//                 pose table (t4). Writes the join table (u0, a structured buffer of uint: the vertex shader reads it as
+//                 t109: current base -> previous base, 0 = none), this frame's by-base table (u1), the persistent counters
+//                 (u2). u3 is scratch (the lowest job per base, so two jobs with one base resolve the way the CPU reference does).
 //   poseClear     zeroes a pose table (one thread per element).
 //   poseScatter   one thread per pool record: record bytes 0..31 -> pose[word0] when word0 != 0.
 //   poseVerify    one thread per pool record: words 0..6 must equal the table's; a record that disagrees with another of the
@@ -62,7 +62,7 @@ StructuredBuffer<uint4> PrevJobs : register(t1);
 ByteAddressBuffer Plan : register(t2);
 ByteAddressBuffer PrevInfo : register(t3);
 StructuredBuffer<Pose> PrevPose : register(t4);
-RWByteAddressBuffer JoinOut : register(u0);
+RWStructuredBuffer<uint> JoinOut : register(u0);
 RWByteAddressBuffer Info : register(u1);
 RWByteAddressBuffer Stats : register(u2);
 RWByteAddressBuffer Owner : register(u3);
@@ -92,7 +92,7 @@ void join(uint tid : SV_GroupIndex) {
  const uint prevHookOk = Stats.Load(SJ_STAT_PREV_HOOK_OK * 4u);
  // 0: clear the tables
  [loop] for (uint i = tid; i < SJ_MAX_ROWS; i += 256u) {
-  JoinOut.Store(i * 4u, 0u);
+  JoinOut[i] = 0u;
   Info.Store2(i * 8u, uint2(0u, 0u));
   Owner.Store(i * 4u, 0xFFFFFFFFu);
  }
@@ -181,7 +181,7 @@ void join(uint tid : SV_GroupIndex) {
     prevDst = PrevJobs[jd].y;
    }
    if (prevDst == 0u || prevDst >= SJ_MAX_ROWS || PrevPose[prevDst].a.x != prevDst) { fPose += 1u; continue; }
-   JoinOut.Store(row.y * 4u, prevDst);
+   JoinOut[row.y] = prevDst;
    nJoined += 1u;
   }
  }

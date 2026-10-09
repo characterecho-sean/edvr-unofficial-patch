@@ -22,7 +22,9 @@
 //  5. NO HISTORY: join entry zero, or a base beyond the join table, gives E = 0
 //     and valid = 0;
 //  6. TEETH: pointing the join at a different palette block makes E nonzero,
-//     so (2) was not satisfied vacuously.
+//     so (2) was not satisfied vacuously;
+//  7. LIMIT: a previous position a million metres away gives E zero and valid
+//     zero; one 400 m away gives the exact E, valid.
 
 #include <cmath>
 #include <cstdint>
@@ -439,8 +441,7 @@ inline unsigned run(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::vect
         Scene sc;
         makeVertices(rng, bones, sc.verts);
         sc.cur = makeState(rng, bones, 3);
-        sc.prev = sc.cur;
-        sc.prev.base = 9;
+        sc.prev = makeState(rng, bones, 9);   // a DIFFERENT previous state: the patched pair writes the game's targets whatever the previous frame was
         sc.dataSeed = (seed & 1u) ? 1u : 0u;   // set 1 has zeros and small integers in the buffers; it may discard everything
         sc.patched = false;
         const Draw stock = draw(r, sc);
@@ -590,7 +591,24 @@ inline unsigned run(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::vect
         std::snprintf(label, sizeof(label), "skin %s: TEETH -- a different previous state gives a nonzero E (%u of %u pixels)", name, nonzero, pixels);
         emit(d.ok && pixels > 10 && nonzero == pixels, "teeth");
     }
-    std::printf("  skin clone: %s -- %u covered pixels in the identity test, E exactly zero; pose, palette, swap, no-history, teeth\n", name, examined);
+    // 7. the limit: a previous position a million metres away is not a motion (E zero, invalid); one 400 m away is (E exact, valid)
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        Rng rng(97531u + mode);
+        Scene sc;
+        makeVertices(rng, 3, sc.verts);
+        sc.cur = makeState(rng, 3, 3);
+        sc.prev = sc.cur;
+        sc.prev.base = 11;
+        const float jump = mode ? 400.0f : 1.0e6f;
+        sc.prev.pos[0] += jump;
+        const Draw d = draw(r, sc);
+        const float zero[3] = {0, 0, 0}, distant[3] = {100.0f * jump, 0, 0};
+        const Totals t = judge(d, mode ? distant : zero, mode ? 5.0 : 0.0, mode ? 1e-3 : 0.0, mode != 0);
+        std::snprintf(label, sizeof(label), "skin %s: LIMIT (%s) -- %s", name, mode ? "400 m" : "a million metres",
+                      mode ? "a jump under the limit is E, valid" : "a jump past the limit is E zero and valid zero");
+        emit(d.ok && t.pixels > 10 && t.bad == 0, "limit");
+    }
+    std::printf("  skin clone: %s -- %u covered pixels in the identity test, E exactly zero; pose, palette, swap, no-history, teeth, limit\n", name, examined);
     ctx->ClearState();
     return examined;
 }

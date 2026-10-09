@@ -47,7 +47,7 @@ class Config:
 
     def __init__(self, here, files, header_keys, pin_keys, rig, rig_label, rig_source_in_bat, rig_exe_in_bat, case_prefix,
                  include_dirs=("src/d3d11",), units=(), cl_flags=None, defines=(), link_args=(), min_mutants=1, run_timeout=180.0,
-                 rig_args=lambda root: ["--self-test", str(root)], bat_run_checks=None, tree_extra=()):
+                 rig_args=lambda root: ["--self-test", str(root)], bat_run_checks=None, tree_extra=(), rig_in_tree=False, ignore_cases=()):
         self.here = Path(here).resolve().parent
         self.root = self.here.parents[1]
         self.files = files                       # key -> absolute Path
@@ -67,6 +67,8 @@ class Config:
         self.rig_args = rig_args
         self.bat_run_checks = bat_run_checks     # extra strings the rig's build.bat block must contain
         self.tree_extra = tuple(tree_extra)      # (relative path, source) copied into the tree unmutated (headers the rig includes)
+        self.ignore_cases = tuple(ignore_cases)  # case ids in the rig that no run can reach (a local-only mode), exempt from the coverage rule
+        self.rig_in_tree = rig_in_tree           # compile the rig from its copy in the tree: its own includes are relative (../../src/...) and must find the mutated headers
         self.build_bat = self.root / "build.bat"
         self.tree = [(rel, p) for rel, p in self.tree_extra]
 
@@ -150,7 +152,7 @@ class Toolchain:
 
 def build_rig(cfg, tc, tree, exe):
     cmd = [tc.cl] + cfg.cl_flags + ["/I" + str(tree / d) for d in cfg.include_dirs] + ["/I" + str(tree)] + [
-        "/Fo" + str(exe.parent) + "\\", "/Fe" + str(exe), str(cfg.rig)] + [str(tree / rel) for rel, _ in cfg.units] + ["/link", "/INCREMENTAL:NO"] + cfg.link_args
+        "/Fo" + str(exe.parent) + "\\", "/Fe" + str(exe), str(tree / cfg.rig.relative_to(cfg.root) if cfg.rig_in_tree else cfg.rig)] + [str(tree / rel) for rel, _ in cfg.units] + ["/link", "/INCREMENTAL:NO"] + cfg.link_args
     done = subprocess.run(cmd, capture_output=True, text=True, env=tc.env, errors="replace", cwd=str(exe.parent))
     return done.returncode, done.stdout + done.stderr
 
@@ -301,7 +303,7 @@ def self_test(cfg, mutants_all, build_bat=None):
 
     sources = {k: read_source(p) for k, p in cfg.files.items()}
     rig = read_source(cfg.rig)
-    cases = rig_cases(rig, cfg.case_prefix)
+    cases = rig_cases(rig, cfg.case_prefix) - set(cfg.ignore_cases)
     names = [m.name for m in mutants_all]
     check(len(names) == len(set(names)), "mutation names are unique")
     check(len(mutants_all) >= cfg.min_mutants, "the mutation list did not shrink below %d (%d)" % (cfg.min_mutants, len(mutants_all)))

@@ -123,10 +123,13 @@ void caseTokens() {
     {
         const auto vs = compile(skin_clone_synthetic::vertexSource(false), "vs_5_0");
         const auto words = programOf(vs);
-        const Plan plan = analyse(words);
-        check(plan.temps > 0 && plan.baseLoadAt != plan.posLoadAt && plan.anchorEnd > plan.posLoadAt && plan.firstExec < plan.baseLoadAt && plan.firstDclInput && plan.lastOutputEnd,
+        Plan plan;
+        bool analysed = true;
+        try { plan = analyse(words); } catch (const std::exception&) { analysed = false; }
+        check(analysed, "K1.k the plain shape is analysed without a refusal");
+        check(analysed && plan.temps > 0 && plan.baseLoadAt != plan.posLoadAt && plan.anchorEnd > plan.posLoadAt && plan.firstExec < plan.baseLoadAt && plan.firstDclInput && plan.lastOutputEnd,
               "K1.k the analysis finds the declarations, the two pose loads and an anchor after them");
-        check(plan.comp[0] == 0 && plan.comp[1] == 1 && plan.comp[2] == 2, "K1.l the position components are named from the matrix multiplies (x, y, z)");
+        check(analysed && plan.comp[0] == 0 && plan.comp[1] == 1 && plan.comp[2] == 2, "K1.l the position components are named from the matrix multiplies (x, y, z)");
         check(isDeclaration(104) && isDeclaration(162) && !isDeclaration(0) && !isDeclaration(167), "K1.m declarations are told from instructions");
     }
 }
@@ -140,7 +143,9 @@ void caseStructure() {
     check(edvr::engineVelocityDeriveInputs(vs.data(), vs.size(), in, why), "K2.a the pair derives");
     check(in.skinRegister == 3 && !in.slotFromVsPatch && in.identityRegister == 0, "K2.b the skin register is the one after the last output; the game's own identity output is kept");
     std::vector<BYTE> patched;
-    check(edvr::engineVelocityPatchVsSkin(vs.data(), vs.size(), in.skinRegister, patched, why), "K2.c the vertex shader is patched");
+    const bool patchedOk = edvr::engineVelocityPatchVsSkin(vs.data(), vs.size(), in.skinRegister, patched, why);
+    check(patchedOk, ("K2.c the vertex shader is patched" + (patchedOk ? std::string() : " -- declined: " + why)).c_str());
+    if (!patchedOk) return;   // nothing below can be said of a shader that was not patched
     const std::string before = disassemble(vs), after = disassemble(patched);
     check(has(after, "dcl_resource_structured t108, 48") && has(after, "dcl_resource_structured t109, 4") && has(after, "dcl_resource_structured t110, 32"),
           "K2.d the three resources are declared with their strides");
@@ -174,16 +179,60 @@ void caseStructure() {
     check(changed.size() > original.size() + prefix / 2, "K2.j the clone is there (the program grew by about the cloned range)");
     // every instruction of the original after the anchor survives, in order, with only the export inserted
     const size_t tailOriginal = original.size() - plan.anchorEnd;
-    check(changed.size() >= tailOriginal && std::equal(original.end() - tailOriginal, original.end() - 1, changed.end() - 1 - 5 - (tailOriginal - 1)) == false || true,
-          "K2.k (the tail follows the new code)");
+    check(changed.size() >= tailOriginal + 6 && std::equal(original.end() - tailOriginal, original.end() - 1, changed.end() - 1 - 5 - (tailOriginal - 1)),
+          "K2.k every instruction after the anchor survives in order, the export inserted before the return");
     const size_t retAt = changed.size() - 1;
     check((changed[retAt] & 0x7ff) == 62 && changed[retAt - 5] == 0x05000036u, "K2.l the export sits immediately before the return");
+    // the cloned pose loads read the previous pose table: t110, and the load's own stride token says 32 bytes
+    {
+        using namespace edvr::dxbc_skin_detail;
+        unsigned poseLoads = 0, strideOk = 0;
+        for (size_t at = newExec; at < changed.size(); at += edvr::dxbc_container::instructionLength(changed, at)) {
+            if ((changed[at] & 0x7ff) != kLdStructured) continue;
+            const Instr load = parseInstr(changed, at);
+            if (changed[indexWordAt(changed, load.operand[3])] != edvr::kSkinPoseSlot) continue;
+            ++poseLoads;
+            uint32_t bytes = 0;
+            size_t pos = at + 1;
+            for (bool more = (changed[at] >> 31) != 0; more; ++pos) {
+                if ((changed[pos] & 0x3Fu) == 2u) bytes = (changed[pos] >> 11) & 0xFFFu;
+                more = (changed[pos] >> 31) != 0;
+            }
+            strideOk += bytes == edvr::kSkinPoseStrideBytes ? 1u : 0u;
+        }
+        check(poseLoads == 2 && strideOk == 2, "K2.z the two cloned pose loads read t110 and name its 32-byte stride");
+    }
+    // an output the game writes inside the cloned range is not written again by the clone: the patched program has that write and the export, no more
+    {
+        using namespace edvr::dxbc_skin_detail;
+        const auto outputWrites = [](const std::vector<uint32_t>& t) {
+            unsigned n = 0;
+            for (size_t at = 2; at < t.size(); at += edvr::dxbc_container::instructionLength(t, at)) {
+                const uint32_t op = t[at] & 0x7ffu;
+                if (isDeclaration(op) || op == 62) continue;
+                const Instr in = parseInstr(t, at);
+                const OpcodeShape* shape = shapeOf(in.opcode);
+                if (shape && shape->dst && typeOf(t[in.operand[0]]) == kTypeOutput) ++n;
+            }
+            return n;
+        };
+        auto inserted = original;
+        const Plan insertedPlan = analyse(inserted);
+        const uint32_t write[5] = {0x05000036u, 0x001020F2u, 1u, 0x00100E46u, 0u};   // mov o1.xyzw, r0.xyzw, ahead of the anchor
+        inserted.insert(inserted.begin() + insertedPlan.firstExec, write, write + 5);
+        inserted[1] += 5;
+        const unsigned original1 = outputWrites(inserted);
+        unsigned patchedWrites = 0;
+        bool patchedOk = true;
+        try { patchedWrites = outputWrites(patchProgram(inserted, 3)); } catch (const std::exception&) { patchedOk = false; }
+        check(patchedOk && patchedWrites == original1 + 1, "K2.zz an output written inside the cloned range is not written again by the clone (the export is the only new write)");
+    }
     // signatures
     bool osgn = false;
     for (const auto& chunk : edvr::dxbc_container::parseContainer(patched.data(), patched.size(), 0x00010050u))
         if (chunk.tag == 0x4e47534fu) {
             for (const auto& e : edvr::dxbc_container::parseSignature(chunk.bytes))
-                if (edvr::dxbc_container::equalName(e.name, edvr::kSkinSemantic)) osgn = e.registerIndex == 3 && e.componentType == 3 && (e.masks & 15u) == 15u;
+                if (edvr::dxbc_container::equalName(e.name, "EDVRSKINPREV")) osgn = e.registerIndex == 3 && e.componentType == 3 && (e.masks & 15u) == 15u;
         }
     check(osgn, "K2.m the output signature names EDVRSKINPREV: register 3, float, xyzw");
     // the pixel half

@@ -140,7 +140,7 @@ struct Gpu {
         jobs = buffer(kMaxJobs * 16, D3D11_BIND_SHADER_RESOURCE, structured, 16);
         prevJobs = buffer(kMaxJobs * 16, D3D11_BIND_SHADER_RESOURCE, structured, 16);
         plan = buffer(kPlanWords * 4, D3D11_BIND_SHADER_RESOURCE, raw);
-        joinTable = buffer(kMaxRows * 4, D3D11_BIND_UNORDERED_ACCESS, raw);
+        joinTable = buffer(kMaxRows * 4, srvUav, structured, 4);
         stats = buffer(kStatWords * 4, D3D11_BIND_UNORDERED_ACCESS, raw);
         owner = buffer(kMaxRows * 4, D3D11_BIND_UNORDERED_ACCESS, raw);
         for (int i = 0; i < 2; ++i) {
@@ -154,7 +154,7 @@ struct Gpu {
         prevJobsSrv = structuredSrv(prevJobs.Get(), kMaxJobs);
         planSrv = rawSrv(plan.Get(), kPlanWords);
         poolSrv = structuredSrv(pool.Get(), poolCapacity);
-        joinUav = rawUav(joinTable.Get(), kMaxRows);
+        joinUav = structuredUav(joinTable.Get(), kMaxRows);
         statsUav = rawUav(stats.Get(), kStatWords);
         ownerUav = rawUav(owner.Get(), kMaxRows);
         for (int i = 0; i < 2; ++i) {
@@ -411,12 +411,18 @@ void caseScripted(Pair& p) {
     std::swap(swapped[0].jobs[1], swapped[0].jobs[2]);
     World replaced = a;
     replaced[1].key = 999;
+    World rebound = a;
+    rebound[0].jobs[1].first = 1111;           // a child replaced by another mesh of the same size
+    World primaryRebound = a;
+    primaryRebound[1].jobs[0].first = 2999;    // a primary job of another bind and the same size
     struct Step { const World* w; bool history, pose, offer; };
     const Step script[] = {
         {&a, true, true, true},       {&a, true, true, true},        {&a, true, true, true},       {&removed, true, true, true},   {&a, true, true, true},
         {&a, true, true, true},       {&inserted, true, true, true}, {&inserted, true, true, true}, {&grown, true, true, true},      {&a, true, true, true},
         {&swapped, true, true, true}, {&a, true, true, true},        {&replaced, true, true, true}, {&a, true, true, false},        {&a, true, true, true},
         {&a, false, true, true},      {&a, true, true, true},        {&a, true, false, true},       {&a, true, true, true},         {&a, true, true, true},
+        {&a, true, true, true},       {&rebound, true, true, true},  {&a, true, true, true},        {&a, true, true, false},        {&primaryRebound, true, true, false},
+        {&a, true, true, true},
     };
     std::string bad;
     unsigned seq = 100;
@@ -426,7 +432,7 @@ void caseScripted(Pair& p) {
         bad = p.frame(build(*s.w, ++seq), s.history, s.pose, s.offer);
         if (!bad.empty()) { std::printf("    scripted step %u: %s\n", index, bad.c_str()); break; }
     }
-    check(bad.empty(), "G3.a twenty scripted frames (insert, remove, children grown and traded, a replaced entity, a missing list, no history, no pose): equal to the CPU's");
+    check(bad.empty(), "G3.a twenty-six scripted frames (insert, remove, children grown, traded and rebound, a replaced entity, a missing list, no history, no pose, a primary job rebound under the prefix): equal to the CPU's");
     // faults in the table itself
     Pair q;
     check(q.init(), "G3.b a second device");
@@ -449,6 +455,18 @@ void caseScripted(Pair& p) {
     check(t.empty() && q.cpu.result.stats[kStatJoined] == 0 ? true : t.empty(), "G3.e (a frame whose pose table lacks every second job)");
     if (t.empty()) t = q.frame(build(a, 10));
     check(t.empty() && q.cpu.result.stats[kStatFailPose] > 0, "G3.f the frame after it fails the missing bases on the pose, the same on both sides");
+    // a primary job whose count differs from its entry's with the entity's total unchanged, and a job outside every entity's range
+    for (unsigned i = 11; i <= 13 && t.empty(); ++i) t = q.frame(build(a, i));
+    Built headCount = build(a, 14);
+    headCount.jobs[0].count += 1;
+    headCount.jobs[1].count -= 1;
+    if (t.empty()) t = q.frame(headCount);
+    check(t.empty() && q.cpu.result.stats[kStatHookDisagree] == 1 && q.cpu.result.stats[kStatMismatchBits] == kMmHeadCount, "G3.g a primary job with another count than its entry (the entity's total unchanged) is a disagreement on the GPU as on the CPU");
+    for (unsigned i = 15; i <= 17 && t.empty(); ++i) t = q.frame(build(a, i));
+    Built outside = build(a, 18);
+    outside.jobs.push_back(JobRow{0, 300, 77, 5});
+    if (t.empty()) t = q.frame(outside);
+    check(t.empty() && q.cpu.result.stats[kStatHookDisagree] == 1 && q.cpu.result.stats[kStatMismatchBits] == kMmNotInRange, "G3.h a job outside every entity's range is a disagreement on the GPU as on the CPU");
     if (!t.empty()) std::printf("    %s\n", t.c_str());
 }
 
@@ -510,6 +528,7 @@ void casePose(Pair& p) {
     add(40, 0); add(40, 0); add(40, 0);
     // word 7 differs only: not a conflict (nothing reads it)
     { std::vector<uint32_t> r(84, 0); r[0] = 60; r[7] = 1; records.insert(records.end(), r.begin(), r.end()); r[7] = 2; records.insert(records.end(), r.begin(), r.end()); }
+    const auto statsBefore = p.gpu.read(p.gpu.stats.Get(), kStatWords * 4);
     p.gpu.runPose(1, records);
     const auto got = p.gpu.read(p.gpu.pose[1].Get(), kMaxRows * 32);
     uint32_t sc = 0, cf = 0;
@@ -519,11 +538,12 @@ void casePose(Pair& p) {
     check(g[12].a[0] == 0, "G5.b two records of one base that disagree kill it");
     check(g[60].a[0] == 60, "G5.c a difference in word 7 alone is not a conflict");
     check(g[0].a[0] == 0 && g[1].a[0] == 0, "G5.d base 0 is never written");
-    check(std::memcmp(got.data(), expect.data(), kMaxRows * 32) == 0 || (g[60].a[7 - 4 + 0] == expect[60].b[3] || true), "G5.e (the table matches the CPU twin except which word-7 survives)");
+    check(expect[12].a[0] == 0 && expect[60].a[0] == 60 && expect[5].a[0] == 5, "G5.e (the CPU twin agrees: base 12 dead, bases 5 and 60 live)");
     const auto stats = p.gpu.read(p.gpu.stats.Get(), kStatWords * 4);
     const uint32_t* s = reinterpret_cast<const uint32_t*>(stats.data());
-    check(s[kStatPoseConflicts] >= 1, "G5.f the conflict is counted");
-    check(s[kStatPoseRecords] >= sc, "G5.g the records are counted");
+    const uint32_t* before = reinterpret_cast<const uint32_t*>(statsBefore.data());
+    check(s[kStatPoseConflicts] - before[kStatPoseConflicts] >= 1, "G5.f the conflict is counted");
+    check(s[kStatPoseRecords] - before[kStatPoseRecords] == sc, "G5.g the records are counted, one each");
     // word 7 may be either writer's; compare everything else exactly
     bool same = true;
     for (uint32_t i = 0; i < kMaxRows && same; ++i) same = std::memcmp(&g[i], &expect[i], 28) == 0;

@@ -539,7 +539,7 @@ cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\scheduler_stack_probe.cpp" "src\d3d11\scheduler_stack_hook.cpp" ^
     "src\d3d11\cull_gate_probe.cpp" ^
-    "src\d3d11\engine_velocity.cpp" ^
+    "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" "src\d3d11\skin_entity_hook.cpp" ^
     "src\d3d11\celestial_motion.cpp" ^
     "src\d3d11\fss_res.cpp" ^
     "src\d3d11\fss_panel.cpp" ^
@@ -1247,6 +1247,84 @@ if not exist "%OBJ%\skinledger\fixture" mkdir "%OBJ%\skinledger\fixture"
 python "tools\skin_palette_check.py" --self-test || exit /b 1
 python "tools\skin_palette_check.py" --verify-fixture "%OBJ%\skinledger\fixture" || exit /b 1
 python "tools\skin_ledger_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_skin_join_test
+echo [edvr] === skin_join_test.exe ===
+REM Build gate for the second skin's join (src\d3d11\skin_join.h, skin_entity_walk.h; docs\kinematic-motion-injection-2026-09-19.md, "F2 built"): the
+REM CPU half of the identity of a skinned character from one frame to the next. The hook's reading of the game's entry list over a fake heap with
+REM faults in it (J11), the job table's prefix join and the hook's entity join against a scripted world (spawn, despawn, reorder, a character that
+REM changes its bone count, a swap, the hook disagreeing with the table, a gap in the frames, no history), the palette history's certificates, the
+REM plan the GPU is handed, and the periodic line. A failed join is no history, never a guess: the cases pin it. No device needed.
+REM tools\skin_join_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\skinjoin" mkdir "%OBJ%\skinjoin"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\skinjoin"\ /Fe"%OBJ%\skinjoin\skin_join_test.exe" ^
+    "tools\skin_join_test\skin_join_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: skin_join_test build failed & exit /b 1 )
+"%OBJ%\skinjoin\skin_join_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinjoin\skin_join_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_join_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_skin_join_gpu_test
+echo [edvr] === skin_join_gpu_test.exe ===
+REM Build gate for the second skin's GPU join (src\d3d11\skin_join_shader.h: JoinCS and the pose table's clear, scatter and verify passes) on WARP.
+REM The shipped HLSL is compiled and run beside the CPU model (skin_join.h) on scripted and random worlds and must agree with it word for word:
+REM the join and info tables, the pose table, the hook cross-check bits, the statistics. The fxc trap that cost a build once is pinned (atomics
+REM counted after the loops, not inside branches that `continue`). Needs no real GPU.
+if not exist "%OBJ%\skinjoingpu" mkdir "%OBJ%\skinjoingpu"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\skinjoingpu"\ /Fe"%OBJ%\skinjoingpu\skin_join_gpu_test.exe" ^
+    "tools\skin_join_gpu_test\skin_join_gpu_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: skin_join_gpu_test build failed & exit /b 1 )
+"%OBJ%\skinjoingpu\skin_join_gpu_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinjoingpu\skin_join_gpu_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_join_gpu_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_skin_clone_test
+echo [edvr] === skin_clone_test.exe ===
+REM Build gate for the second skin's vertex shader patch (src\d3d11\dxbc_skin_clone.h, through dxbc_engine_velocity.h; docs\kinematic-motion-injection-
+REM 2026-09-19.md, "F2 built"): the token-level clone that computes last frame's position from last frame's palette and pose. Tokens and structure
+REM (the new resources, the temp renaming, the single export), every refusal (displacement before the anchor, no pose, a square root in the chain,
+REM relative cb addressing, occupied slots), and on WARP the properties that make E exact: E is exactly zero when the previous state equals the
+REM current, equals the CPU reference within 1e-6 when it does not, is zero and invalid without a join, and is the same for a swapped palette
+REM buffer pair. --corpus DIR adds the game's own five skinned shaders from a log dump (local only, not run here).
+if not exist "%OBJ%\skinclone" mkdir "%OBJ%\skinclone"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
+    /Fo"%OBJ%\skinclone"\ /Fe"%OBJ%\skinclone\skin_clone_test.exe" ^
+    "tools\skin_clone_test\skin_clone_test.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
+if errorlevel 1 ( echo [edvr] ERROR: skin_clone_test build failed & exit /b 1 )
+"%OBJ%\skinclone\skin_clone_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinclone\skin_clone_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_clone_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
+:rig_skin_entity_hook_test
+echo [edvr] === skin_entity_hook_test.exe ===
+REM Build gate for the read-only hook on the game's skinning-job assembly (src\d3d11\skin_entity_hook.cpp, EDVR_SKIN_HOOK_TEST; docs\kinematic-motion-
+REM injection-2026-09-19.md, "F2 built"). The production source carries its own test: the real CodeHook patches a synthetic function that begins with the
+REM real 28-byte prologue, the real relay runs, the real guarded reads walk a heap laid out as the decompile says the list is. The original runs first,
+REM the list is read whole, a wrong prologue stands the hook down with no patch, a fault or a wild pointer is counted and the game is unharmed, a second
+REM node stands it down, a gate shut observes nothing, and a reader against the game's thread never gets a torn copy.
+if not exist "%OBJ%\skinentityhook" mkdir "%OBJ%\skinentityhook"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /DEDVR_SKIN_HOOK_TEST /I"src\d3d11" ^
+    /Fo"%OBJ%\skinentityhook"\ /Fe"%OBJ%\skinentityhook\skin_entity_hook_test.exe" ^
+    "tools\skin_entity_hook_test\skin_entity_hook_test.cpp" "src\d3d11\skin_entity_hook.cpp" ^
+    "src\common\code_hook.cpp" "src\common\guard.cpp" "src\common\log.cpp" "src\common\config.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib user32.lib
+if errorlevel 1 ( echo [edvr] ERROR: skin_entity_hook_test build failed & exit /b 1 )
+"%OBJ%\skinentityhook\skin_entity_hook_test.exe" --dry-run || exit /b 1
+"%OBJ%\skinentityhook\skin_entity_hook_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\skin_entity_hook_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_slow_regime_test
@@ -2801,7 +2879,7 @@ cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /utf-8 ^
     /DEDVR_ENGINE_VELOCITY_RIG /DEDVR_BINDING_SHADOW_EXTERNAL /I"%GEN%" ^
     /Fo"%OBJ%\enginevelocity\\" /Fe"%OBJ%\enginevelocity\engine_velocity_test.exe" ^
-    "tools\engine_velocity_test\engine_velocity_test.cpp" "src\d3d11\engine_velocity.cpp" ^
+    "tools\engine_velocity_test\engine_velocity_test.cpp" "src\d3d11\engine_velocity.cpp" "src\d3d11\skin_join_gpu.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     /link /INCREMENTAL:NO d3d11.lib d3dcompiler.lib dxguid.lib
 if errorlevel 1 ( echo [edvr] ERROR: engine velocity test build failed & exit /b 1 )
