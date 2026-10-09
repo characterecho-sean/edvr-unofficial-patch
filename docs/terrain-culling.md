@@ -39,25 +39,13 @@
   camera, so its tiles are chosen with a pose at least a frame older than the
   drawn one and a head turn's leading edge goes missing. (Census: eye cameras
   are built twice a frame, via wrapper slot 16 and a second thread via slot 26.)
-- **Instrument (always on):** one `pose gap:` line per caller (thread, return
-  RVA) every 2.0 s in the RUNTIME log: calls, prediction, target-minus-display
-  (the located instant less the latest frame's display time), angle-to-drawn
-  (the pose handed back against the drawn pose), head speed, WaitGetPoses, failed.
-- **Switch (live, temporary):** `advanced.cull_pose` = off | display | next |
-  display_direct | next_direct. `display` / `next` locate ONLY the call returning
-  to 0x4E3881 at the display time / one period later (the arithmetic of the
-  game-pose array); every other caller is answered as ever. `_direct` also writes
-  `90 E9` over `0F 84` at 0x4E36EE (one atomic eight-byte store at a frame
-  boundary, gated on the PE stamp and the six bytes, restored on leaving): the
-  game thread never takes the latched pose. Build 332841 only.
-- **Next flight** (Crystal Super or Quest 3): on a descent where squares show,
-  `fix.cull_guard` off, deliberate left-right gaze switches. Walk `cull_pose`
-  off -> display -> next -> display_direct -> next_direct -> off, about 30 s
-  each, live; note when squares appear. Read it with `edvr_log.py --tally pose`
-  (the runtime log; the `cull pose:` change lines are in the graphics log).
-  **The decisive numbers:** target-minus-display under `off` together with
-  angle-to-drawn against head speed; display should read 0 ms and next one
-  period, with the angle falling.
+- **Instruments on e256e9bb (temporary):** a `pose gap:` line per caller every
+  2 s in the runtime log (`edvr_log.py --tally pose`), and `advanced.cull_pose`
+  = off | display | next | display_direct | next_direct (`_direct` adds a 2-byte
+  latch-bypass hot patch at 0x4E36EE). Build 332841 only.
+- **Next:** ship `display` as the behaviour with no key, propose removing the
+  old guard's keys and every temporary instrument (quoted, asked first), then
+  fly once more on the cleaned build, ideally on the Quest 3 too.
 - **Ruled out** (evidence under "Status detail"): the getter as the culler's
   input, the 09-23 "same +19.4% ask" premise, H3, the union model, H2, FUN_13ACC40
   as the consumer. **UNRELIABLE:** the 09-23 verdict "the culler follows
