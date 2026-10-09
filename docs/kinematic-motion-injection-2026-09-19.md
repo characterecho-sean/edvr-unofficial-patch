@@ -47,8 +47,8 @@
 - **Validation / delivery:** build.bat --jobs 4 passed all gates (82 pooled jobs
   + 4 quiet, 262-key contract, installer); engine rig 1686 checks, real corpus
   2398. Fix 4118ae84 merged, pushed, remote main verified.
-- **0.19.0 review (10-09):** chain verdict vs shader registry FIXED (end entry,
-  NOT FLOWN); mixed-palette history still open.
+- **0.19.0 review (10-09):** chain verdict vs shader registry, and history out of
+  a mixed-palette frame, FIXED (two end entries, NOT FLOWN).
 - **Next:** rotating-station capture on the installed repair, after clean
   promotion/deployment is verified by the installer and delivery report.
   Require hooked primary/copier/merge/clear statuses, nonzero joined private
@@ -4431,3 +4431,10 @@ The release review (reviewed main 824972e8; still present on b259e6bf) found `sk
 - Fix: `skinjoin::ChainVerdicts` (skin_join.h) keeps each verdict WITH the registry generation it was asked at (read before the lookup, `shaderRegistryGeneration()`, an inline atomic load) and asks the registry again when the generation has moved. A steady dispatch is a map hit and the load, never the registry's lock; an unrelated registration costs each dispatched address one lookup.
 - Tests: skin_join_test J14 (false to true, true to false, hash 0 registered later, a replaced device, a shader destroyed and re-created on the same device, an unrelated registration, a registration landing between the generation read and the lookup, the 1,024-address cap, and source pins that skinChainBound passes the generation and the hook is gated by it); seven mutants in tools\skin_join_test\mutants.py, each caught by J14.
 - Observable only when an address is reused; nothing to fly for it alone.
+
+### 2026-10-09 0.19.0 review, finding 2: the frame after a mixed-palette frame has no history (VR, built, NOT FLOWN)
+
+The release review found (still present on b259e6bf) that after a frame whose chain dispatches wrote two palette buffers (`noteChain`'s `pendingMixed`), `runJoin` refused history for that frame but still recorded the first buffer as `curPalette`, advanced `PaletteHistory` and stored the union job table as the next frame's jobs. The next single-palette frame passed every certificate with the first buffer as its previous palette, so a job the mixed frame wrote only into the SECOND buffer was joined against rows that buffer never held (the review's helper: row 20, history 0 then 1, join[20] = 20). L12.h/i missed it: its drawn character was in the first dispatch's buffer.
+- Fix (the review's conservative option), skin_join_gpu.cpp: `prevMixed`. `runJoin` refuses history while the previous join's frame was mixed and sets the flag from its own frame, so a complete single-palette frame is the recovery: the frame after a mixed one has no history, the one after that has it. A character that was in the first dispatch's buffer also loses that one frame (L12.i now says so; L12.i2 is the recovery).
+- Tests: skin_engine_test L15 (the review's case: a character written only to the second buffer, retained in the next frame, none there and history on the frame after; two mixed frames in a row; reordered dispatches; overlapping rows; unequal palette sizes in both orders) and L12.i/i2. Mutants frame-after-mixed-joined, mixed-flag-not-kept and mixed-flag-never-cleared are each caught by L15; mixed-palette-joined is re-anchored.
+- Cost: one frame without NPC motion after a mixed frame. The cited flights used one palette buffer for all dispatches, so the trigger has not been seen in play. Nothing counts the refused frame separately: it shows as a `no history` frame in the join line beside `on another palette buffer` in the chain line.

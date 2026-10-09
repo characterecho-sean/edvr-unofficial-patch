@@ -63,6 +63,11 @@ struct SkinJoinGpu::Impl {
     ComPtr<ID3D11ShaderResourceView> frameJobsSrv;
     // The chain dispatches of one present frame, waiting for their join (noteChain accumulates, runJoin runs it once).
     bool pending = false, pendingMixed = false;
+    // The last join's frame was a mixed one (its dispatches wrote two palette buffers). What a join keeps of its frame for the next one -- the first dispatch's
+    // buffer as "last frame's palette", the union of the job tables as last frame's jobs, their by-base layout, the pose table -- describes ONE buffer's rows for the
+    // jobs of BOTH, so the frame after a mixed one is refused history (0.19.0 review, finding 2); the frame after THAT one, which follows a complete single-palette
+    // frame, has it again.
+    bool prevMixed = false;
     uint32_t pendingPresent = 0;
     uint32_t pendingJobs = 0;                        // rows copied into frameJobs
     uint32_t pendingGroups = 0;                      // the dispatches' groups in all (uncapped)
@@ -372,7 +377,10 @@ void SkinJoinGpu::runJoin(ID3D11DeviceContext* ctx) {
     const uint32_t verdict = s.history.note(present, reinterpret_cast<uint64_t>(paletteBuffer.Get()), s.pendingPaletteBytes, rowsInUse, poseLast);
     s.prevPalette = s.curPalette;
     s.curPalette = paletteBuffer;
-    const bool history = verdict == kHistoryOk && groups <= kMaxJobs && !s.pendingMixed;
+    // A mixed frame has no history, and neither has the frame after it: its tables are the union of two buffers' jobs and its "previous palette" is the first of them
+    // (a job written only to the second would be joined against rows that buffer never held). The flag is this frame's own, so the second frame recovers.
+    const bool history = verdict == kHistoryOk && groups <= kMaxJobs && !s.pendingMixed && !s.prevMixed;
+    s.prevMixed = s.pendingMixed;
     s.parity ^= 1u;
     Plan& plan = *s.plan_;
     s.feeder.step(haveSnap ? &snap : nullptr, GetCurrentThreadId(), history, jobs, s.parity, plan);
