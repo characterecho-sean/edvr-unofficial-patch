@@ -219,6 +219,8 @@ struct SkinStats {
     uint64_t eyeFrames = 0;        // eye-frames with target 7 bound
     uint64_t slotTaken = 0;        // pass bindings where target 7 already held the game's own target
     uint64_t viewsGiven = 0, viewsLive = 0;   // compose requests that got the skin view, and of those the ones with a live join
+    uint64_t sourceViews = 0, sourceLive = 0; // the on-foot source's views handed out with target 7 (the world route's, the screen motion's), and with a live join
+    uint64_t sourceClears = 0;                // the source's target 7 cleared (once, at the frame's first skinned draw)
     uint64_t notLive = 0;          // draws made without a live join (valid 0 everywhere)
     uint64_t vsCreateFailed = 0;
     uint64_t composeJoined = 0, composeMasked = 0;   // skinned pixels the compose took as joined / masked (Stats 56, 57)
@@ -315,6 +317,7 @@ struct Eye {
     bool skinBound = false;            // target 7 is bound with the slot target in the pass binding now in force
     bool skinFailed = false;           // its creation failed at this size
     uint32_t skinWrittenFrame = ~0u;   // the present frame a draw with target 7's write mask on was issued
+    uint32_t skinClearedFrame = ~0u;   // the present frame the source's target 7 was cleared (the source clears at its first skinned draw, not at the eye-frame's start)
     Ptr<ID3D11Texture2D> overlayBase;
     Ptr<ID3D11ShaderResourceView> overlayBaseSrv;
     bool overlayGroup = false;
@@ -501,7 +504,7 @@ struct DrawStats {
     // frame (diagnostics or motion_source), [1] sampled (one frame in
     // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared). The
     // kinds are the compose's six (stale stamp last; see enginePixelZ).
-    uint64_t panel[2][6] = {}, panelDraws[2] = {};
+    uint64_t panel[2][7] = {}, panelDraws[2] = {};   // [6]: F2 on foot, the skinned characters' joined pixels (inside [0])
     uint64_t burstFrames = 0, burstGaps = 0;
     // The flat lazy bracket (engineVelocityFlatBeginDraw): the runs of substituted draws EDVR's state was
     // bound for, the draws that found it still bound from the one before, and why the game's was put back.
@@ -1143,8 +1146,13 @@ void makeSkinTarget(ID3D11DeviceContext* ctx, Eye& e, int eye, unsigned width, u
         Log::get().note("skin join: eye %d target 7 could not be created (%ux%u R16G16B16A16_FLOAT); this eye goes on without the second skin.", eye, width, height);
         return;
     }
-    Log::get().note("skin join: eye %d target 7 created %ux%u R16G16B16A16_FLOAT (%.1f MB) at present frame %u: the skinned characters' previous position, "
-                    "in centimetres beside a valid flag.", eye, width, height, double(width) * height * 8.0 / 1e6, frameNow());
+    if (eye == kEngineVelocitySourceEye)
+        Log::get().note("skin join: on-foot source target 7 created %ux%u R16G16B16A16_FLOAT (%.1f MB) at present frame %u: the skinned characters' previous "
+                        "position seen on foot, in centimetres beside a valid flag, read by the world route and the screen motion map.",
+                        width, height, double(width) * height * 8.0 / 1e6, frameNow());
+    else
+        Log::get().note("skin join: eye %d target 7 created %ux%u R16G16B16A16_FLOAT (%.1f MB) at present frame %u: the skinned characters' previous position, "
+                        "in centimetres beside a valid flag.", eye, width, height, double(width) * height * 8.0 / 1e6, frameNow());
 }
 
 bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* depth) {
@@ -1166,16 +1174,16 @@ bool ensureSlots(ID3D11DeviceContext* ctx, Eye& e, int eye, ID3D11Texture2D* dep
     }
     const DXGI_FORMAT slotFormat=runtimeFlatProfile() && eye==kEngineVelocitySourceEye?
         DXGI_FORMAT_R32G32B32A32_FLOAT:DXGI_FORMAT_R32G32_FLOAT;
-    // F2: target 7 beside the slot target, on the VR eyes only, once the feature wants it (a failure to make it is remembered for
-    // this size: the eye goes on without it).
-    const bool wantSkin = !runtimeFlatProfile() && eye != kEngineVelocitySourceEye && g_skinWanted.load(std::memory_order_acquire);
+    // F2: target 7 beside the slot target, in VR (the eyes and the on-foot source; never in the flat profile) once the feature wants it (a failure to
+    // make it is remembered for this size: the eye goes on without it).
+    const bool wantSkin = !runtimeFlatProfile() && g_skinWanted.load(std::memory_order_acquire);
     if (e.depth.Get() == depth && e.slots && e.width == dd.Width && e.height == dd.Height && e.slotFormat==slotFormat) {
         if (wantSkin && !e.skin && !e.skinFailed) makeSkinTarget(ctx, e, eye, dd.Width, dd.Height);
         return true;
     }
     const void* wasDepth = e.depth.Get();
     const unsigned wasW = e.width, wasH = e.height;
-    e.skin.Reset(); e.skinRtv.Reset(); e.skinSrv.Reset(); e.skinBound = false; e.skinFailed = false; e.skinWrittenFrame = ~0u;
+    e.skin.Reset(); e.skinRtv.Reset(); e.skinSrv.Reset(); e.skinBound = false; e.skinFailed = false; e.skinWrittenFrame = ~0u; e.skinClearedFrame = ~0u;
     e.slots.Reset(); e.slotsRtv.Reset(); e.slotsSrv.Reset();
     e.overlayBase.Reset(); e.overlayBaseSrv.Reset(); e.overlayGroup = false;
     // The latched game channel was latched for the old depth's size: it goes
@@ -1299,7 +1307,7 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
         if(timedApply(ctx,e.pool.Get(),poolBuf.Get(),frame,e.poolOutput))++g_primaryApplied;
         // F2: this present frame owes a pose table (record bytes 0..31 by palette base) from the first eye's private copy, built at the frame boundary
         // (skinBuildPoseLocked) once every draw has told which records it read. It is next frame's "previous pose".
-        if (g_skinWanted.load(std::memory_order_relaxed) && eye != kEngineVelocitySourceEye && g_skinPoseFrame != frame) {
+        if (g_skinWanted.load(std::memory_order_relaxed) && !runtimeFlatProfile() && g_skinPoseFrame != frame) {
             g_skinPoseFrame = frame;
             g_skinPoseEye = eye;
         }
@@ -1766,8 +1774,9 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
             // pre-world foreign marker must survive the source's first draw.
             if(!runtimeFlatProfile())ctx->ClearRenderTargetView(e.slotsRtv.Get(), cleared);
             engineVelocityNoteStateCalls(1);
-            // F2: target 7 starts the eye-frame at zero: valid 0 everywhere, so a pixel no skinned draw wrote is "no history".
-            if (e.skinRtv) {
+            // F2: target 7 starts the eye-frame at zero: valid 0 everywhere, so a pixel no skinned draw wrote is "no history". The on-foot source's
+            // (3808x2142 in the F14 flight, 65 MB) is cleared at its first skinned draw instead (below): most frames on foot draw no character.
+            if (e.skinRtv && eye != kEngineVelocitySourceEye) {
                 const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                 ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
                 engineVelocityNoteStateCalls(1);
@@ -1968,6 +1977,14 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         if (!sv.live) ++g_skinStats.notLive;
     }
     if (skinDraw && e.skinBound) {
+        if (eye == kEngineVelocitySourceEye && e.skinClearedFrame != frame && e.skinRtv) {
+            const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
+            ctx->ClearRenderTargetView(e.skinRtv.Get(), zero);
+            engineVelocityNoteStateCalls(1);
+            e.skinClearedFrame = frame;
+            ++g_skinStats.sourceClears;
+        }
         if (exportsE) { e.skinWrittenFrame = frame; ++g_skinStats.draws; }
         else ++g_skinStats.drawsOff;   // (it wrote "no history": zeroes)
     }
@@ -1975,7 +1992,7 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     cache.family = f;
     // F2: the draws of this run (same state, no rebind) list their instance windows (engineVelocityNoteSkinDraw): a skinned family's patched draw into an
     // eye whose target 7 is bound -- the draws whose E is exported, and so the ones whose record is the live one.
-    cache.skin = skinDraw && e.skinBound && eye != kEngineVelocitySourceEye;
+    cache.skin = skinDraw && e.skinBound;
     ++fam.binds;
     // The eye is usable only now: a draw that exports ownership is about to
     // be issued (MRT6 bound alone once counted as written).
@@ -2052,10 +2069,11 @@ void skinSummaryLocked(ID3D11DeviceContext* ctx) {
     Log::get().note("skin join: second skin this window: binds writing E %llu, writing no history %llu (a skinned pixel shader that exports no E: valid 0), not substituted %llu, "
                     "eye-frames with target 7 %llu, target 7 taken by the game %llu, "
                     "binds without a live join %llu, vertex patches refused %llu | compose: skinned pixels on the trained path (joined %llu, masked %llu), "
-                    "|E| over the joined ones: median >= %s cm, p99 >= %s cm | views given %llu (live %llu).",
+                    "|E| over the joined ones: median >= %s cm, p99 >= %s cm | views given %llu (live %llu) | on-foot source (F2 on foot): target 7 handed to the screen shader "
+                    "and the world route %llu times (live %llu), cleared %llu times.",
                     u(g_skinStats.draws), u(g_skinStats.drawsOff), u(g_skinStats.unsafeDeclined), u(g_skinStats.eyeFrames), u(g_skinStats.slotTaken), u(g_skinStats.notLive),
                     u(g_skinStats.vsCreateFailed), u(g_skinStats.composeJoined), u(g_skinStats.composeMasked), medText, p99Text,
-                    u(g_skinStats.viewsGiven), u(g_skinStats.viewsLive));
+                    u(g_skinStats.viewsGiven), u(g_skinStats.viewsLive), u(g_skinStats.sourceViews), u(g_skinStats.sourceLive), u(g_skinStats.sourceClears));
     Log::get().note("skin join: hook window: %s, calls %llu, lists usable %llu (faulted %llu, overflowed %llu, implausible %llu, other %llu), lists of no entries %llu "
                     "(a chain dispatch with jobs found one %llu times; only those can stand the hook down), node changes %llu, "
                     "threads %u (first %u, last %u; the chain dispatch runs on %u), last list %u entries to row %u%s%s.",
@@ -2067,6 +2085,7 @@ void skinSummaryLocked(ID3D11DeviceContext* ctx) {
     while (skinEntityHookNextEvent(event, sizeof(event))) Log::get().note("%s", event);
     g_skinStats.draws = g_skinStats.drawsOff = g_skinStats.unsafeDeclined = g_skinStats.eyeFrames = g_skinStats.slotTaken = g_skinStats.notLive = g_skinStats.vsCreateFailed = 0;
     g_skinStats.composeJoined = g_skinStats.composeMasked = g_skinStats.viewsGiven = g_skinStats.viewsLive = 0;
+    g_skinStats.sourceViews = g_skinStats.sourceLive = g_skinStats.sourceClears = 0;
     std::memset(g_skinStats.hist, 0, sizeof(g_skinStats.hist));
 }
 
@@ -2076,7 +2095,7 @@ void skinSummaryLocked(ID3D11DeviceContext* ctx) {
 void skinBuildPoseLocked(ID3D11DeviceContext* ctx) {
     SkinRefCollector& c = g_skinRefs;
     const uint32_t ended = g_skinPoseFrame;
-    if (ctx && g_skinWanted.load(std::memory_order_relaxed) && ended != ~0u && g_skinPoseEye >= 0 && g_skinPoseEye < int(kEngineVelocitySourceEye)) {
+    if (ctx && g_skinWanted.load(std::memory_order_relaxed) && ended != ~0u && g_skinPoseEye >= 0 && g_skinPoseEye <= int(kEngineVelocitySourceEye)) {
         Eye& e = g_eyes[g_skinPoseEye];
         if (e.frame == ended && e.poolSrv && e.poolBytes >= emit::kItemBytes) {
             const bool listed = c.frame == ended;   // no skinned draw this frame: an empty list, which is complete
@@ -2309,10 +2328,11 @@ void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
                             "counts, not scaled)", kPanelSampleFrames, kPanelSampleStride * kPanelSampleStride,
                             kPanelSampleStride, kPanelSampleStride);
             _snprintf_s(pixels, _TRUNCATE, "panel pixels per %s eye draw: engine-joined %.0f (a rig record's certified "
-                        "exact motion, carried through the panel), masked %.0f (no history), pool surface not a rig "
+                        "exact motion, carried through the panel; %.0f of them a skinned character's, from the source's target 7), "
+                        "masked %.0f (no history), pool surface not a rig "
                         "record %.0f (camera term), stale slot %.0f, corrupt slot code %.0f (declined; must be 0), "
                         "stale stamp %.0f over %llu counted eye draws%s", mode ? "sampled" : "counted",
-                        double(p[0]) / draws, double(p[1]) / draws, double(p[2]) / draws, double(p[3]) / draws,
+                        double(p[0]) / draws, double(p[6]) / draws, double(p[1]) / draws, double(p[2]) / draws, double(p[3]) / draws,
                         double(p[4]) / draws, double(p[5]) / draws, u(g_draw.panelDraws[mode]), sampleNote);
         } else {
             _snprintf_s(pixels, _TRUNCATE, "panel pixels: none counted this window (sampled one frame in %u while the "
@@ -3129,7 +3149,7 @@ namespace engine_velocity_detail {
 struct ViewCounts {
     uint64_t &asked, &given, &noEmit, &depth, &frame, &invalid, &unwritten, &previous;
 };
-bool giveViewsLocked(Eye& e, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out, ViewCounts c) {
+bool giveViewsLocked(Eye& e, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out, ViewCounts c, bool withSkin) {
     ++c.asked;
     if (!g_emitLive.load(std::memory_order_acquire)) { ++c.noEmit; return false; }
     const uint32_t frame = frameNow();
@@ -3153,6 +3173,14 @@ bool giveViewsLocked(Eye& e, ID3D11Texture2D* sceneDepth, EngineVelocityViews* o
         out->gameMark = e.gameMarkSrv.Get();
         out->gameMark->AddRef();
     }
+    // F2 on foot: the source's target 7, once a skinned draw wrote it this frame (a skinned pixel then takes its exact motion, or none: a view of nothing would
+    // hand the consumers a texture of zeros they would read as "masked"). Never in the flat profile: it has no target 7, so this stays null.
+    if (withSkin && e.skinSrv && e.skinWrittenFrame == frame) {
+        out->skin = e.skinSrv.Get();
+        out->skin->AddRef();
+        ++g_skinStats.sourceViews;
+        if (g_skin.liveNow(frame)) ++g_skinStats.sourceLive;
+    }
     ++c.given;
     return true;
 }
@@ -3166,7 +3194,7 @@ bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDe
     ++g_motion.asked;
     const bool given = giveViewsLocked(g_eyes[eye], sceneDepth, out,
                                        {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
-                                        g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious});
+                                        g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious}, false);
     if (given) ++g_motion.viewsGiven[eye];
     return given;
 }
@@ -3251,7 +3279,7 @@ bool engineVelocitySourceViews(ID3D11Texture2D* sourceDepth, EngineVelocityViews
     return giveViewsLocked(g_eyes[kEngineVelocitySourceEye], sourceDepth, out,
                            {g_draw.sourceViewsAsked, g_draw.sourceViewsGiven, g_draw.sourceRefusedNoEmit,
                             g_draw.sourceRefusedDepth, g_draw.sourceRefusedFrame, g_draw.sourceRefusedInvalid,
-                            g_draw.sourceRefusedUnwritten, g_draw.sourceRefusedPrevious});
+                            g_draw.sourceRefusedUnwritten, g_draw.sourceRefusedPrevious}, true);
 }
 
 bool engineVelocityPrepareSourceFree(ID3D11DeviceContext* ctx, ID3D11Texture2D* sceneDepth, ID3D11Buffer* sceneConstants,
@@ -3360,12 +3388,12 @@ bool engineVelocitySourceCameraRows(float (&rows)[6][4]) {
 }
 
 void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
-                                   uint32_t stamped, uint32_t eyeDraws, uint32_t pixelStride) {
+                                   uint32_t stamped, uint32_t eyeDraws, uint32_t pixelStride, uint32_t skinned) {
     if (!live.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     const int mode = pixelStride > 1u ? 1 : 0;
-    const uint32_t k[6] = {joined, masked, camera, stale, corrupt, stamped};
-    for (int i = 0; i < 6; ++i) g_draw.panel[mode][i] += k[i];
+    const uint32_t k[7] = {joined, masked, camera, stale, corrupt, stamped, skinned};
+    for (int i = 0; i < 7; ++i) g_draw.panel[mode][i] += k[i];
     g_draw.panelDraws[mode] += eyeDraws;
 }
 

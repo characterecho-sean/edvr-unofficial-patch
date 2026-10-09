@@ -213,6 +213,7 @@ bool fsr3Evaluate(ID3D11DeviceContext* c,unsigned slot,ID3D11Texture2D* colour,I
 #include "flat_first_person_phase_gpu_tests.h"
 #include "flat_refusal_gpu_tests.h"
 #include "flat_steady_depth_gpu_tests.h"
+#include "flat_skin_gpu_tests.h"
 #include "flat_taa_history_depth_gpu_tests.h"
 #include "flat_context_isolation_gpu_tests.h"
 #include "flat_sdk_foreground_gpu_tests.h"
@@ -841,6 +842,7 @@ int main(int argc,char** argv) {
     // The stage 2 experiment build's refusal census and view: the prep's class byte, the counting pass and its read-back, the steady-detail
     // rule's effect on the counts, and the HDR finish's paint.
     refusalGpuTests(device.Get(),context.Get());
+    skinGpuTests(device.Get(),context.Get());
     // The same view on the copy route (hdr off): the compute finish paints it for the SDK backends, EDVR's own TAA there asks for nothing.
     copyRefusalViewGpuTests(device.Get(),context.Get());
     // The first-person contract on the copy route (the weapon support below the output): a qualified map reaches the DLSS and FSR stubs, the

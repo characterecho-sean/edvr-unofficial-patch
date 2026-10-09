@@ -501,16 +501,21 @@ inline int flatHdrCrumbWiringTests() {
     ordered(solve, {"context->CopyResource(g.color.texture.Get(),overlay?cleanColor.Get():color.Get());",
                     "if(overlay) context->CopyResource(g.rawOverlay.texture.Get(),color.Get());",
                     "if(hdr)++stats.hdrCopied;", "copyStep.close();",
-                    "context->CSSetShaderResources(0,foreground?16:14,prepViews);",
+                    "const UINT prepViewCount=skin?18:(foreground?16:14);",
+                    "context->CSSetShaderResources(0,prepViewCount,prepViews);",
                     "context->Dispatch((f.renderWidth+7)/8,(f.renderHeight+7)/8,1);",
-                    "ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[16]={};",
+                    "ID3D11UnorderedAccessView* nullUavs[6]={};ID3D11ShaderResourceView* nullViews[18]={};",
                     "context->CSSetUnorderedAccessViews(0,6,nullUavs,nullptr);",
-                    "context->CSSetShaderResources(0,foreground?16:14,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
+                    "context->CSSetShaderResources(0,prepViewCount,nullViews);", "if(hdr)++stats.hdrPrepped;", "prepStep.close();",
                     "backendStep.close();", "if(hdr && ok)++stats.hdrBackend;", "if(!ok) {"},
             "the resolve counts its copy, prep and backend for the 5 s line as each completes");
-    expect(count(solve,"context->CSSetShaderResources(0,foreground?16:14,prepViews);")==1 &&
-           count(solve,"context->CSSetShaderResources(0,foreground?16:14,nullViews);")==1,
-           "prep binds and clears exactly the same fourteen legacy or sixteen foreground SRV slots once");
+    // F2 on foot: the VR world route's target 7 rides at t17, so a frame that carries it binds and clears eighteen; every other frame (the flat profile's, whose
+    // engine views never carry one) is the fourteen or sixteen it always was.
+    expect(count(solve,"context->CSSetShaderResources(0,prepViewCount,prepViews);")==1 &&
+           count(solve,"context->CSSetShaderResources(0,prepViewCount,nullViews);")==1 &&
+           count(solve,"const UINT prepViewCount=skin?18:(foreground?16:14);")==1 &&
+           count(solve,"const bool skin=engine && f.engine.skin!=nullptr;")==1,
+           "prep binds and clears exactly the same fourteen legacy, sixteen foreground or eighteen skinned-source SRV slots once");
     ordered(spatial, {"context->CopyResource(g.color.texture.Get(),color.Get());", "if(hdr)++stats.hdrCopied;"},
             "the spatial recovery counts its copy too");
     ordered(resolve, {"\"create-context-state\"", "d1->CreateDeviceContextState(", "\"create-compute-shaders\"", "device->CreateComputeShader(kFlatMonoPrepBytecode",

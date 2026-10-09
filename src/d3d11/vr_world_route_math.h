@@ -633,6 +633,7 @@ struct VrWorldRefusalWindow {
     uint32_t width = 0, height = 0;       // the render size of the last sample read back
     uint64_t pixels = 0;                  // what the read-back samples examined
     uint64_t counts[kFlatMonoRefusalSlots] = {};
+    uint64_t skinned = 0;                 // ACCEPTED skinned pixels that took their exact motion from target 7 (F2 on foot): the proof the route read E
     uint64_t checked = 0, skipped = 0;    // the resolver's depth-check frames this window (FlatMonoRefusalCensus::checked, skipped)
     const char* steady = "on";            // always on in this build; only a rig that models an older log sets "off"
     const char* view = "off";             // "on" while the refusal view is painting
@@ -651,7 +652,7 @@ inline int vrWorldFormatRefusalWindow(char* out, size_t size, const VrWorldRefus
     return std::snprintf(out, size,
         "vr world route refusal 5s: census=%s every=%u treated=%llu asked=%llu sampled=%llu read=%llu dropped=%llu size=%ux%u "
         "pixels=%llu refused=%llu refused-pct=%.3f stale-refused=%llu masked=%llu corrupt=%llu sentinel=%llu unreprojectable=%llu camera=%llu "
-        "range=%llu depth=%llu weapon=%llu other=%llu stale-kept=%llu depth-check=%llu/%llu steady-detail=%s view=%s",
+        "range=%llu depth=%llu weapon=%llu other=%llu stale-kept=%llu depth-check=%llu/%llu steady-detail=%s view=%s skinned-joined=%llu",
         w.census ? "on" : "off", w.every, static_cast<unsigned long long>(w.treated), static_cast<unsigned long long>(w.asked),
         static_cast<unsigned long long>(w.sampled), static_cast<unsigned long long>(w.read), static_cast<unsigned long long>(w.dropped),
         w.width, w.height, static_cast<unsigned long long>(w.pixels), static_cast<unsigned long long>(refused), pct,
@@ -661,7 +662,7 @@ inline int vrWorldFormatRefusalWindow(char* out, size_t size, const VrWorldRefus
         static_cast<unsigned long long>(w.counts[kFlatMonoClassRange]), static_cast<unsigned long long>(w.counts[kFlatMonoClassDepth]),
         static_cast<unsigned long long>(w.counts[kFlatMonoClassWeaponRefused]), static_cast<unsigned long long>(refused - named),
         static_cast<unsigned long long>(w.counts[kFlatMonoRefusalStaleKept]), static_cast<unsigned long long>(w.checked),
-        static_cast<unsigned long long>(w.skipped), w.steady, w.view);
+        static_cast<unsigned long long>(w.skipped), w.steady, w.view, static_cast<unsigned long long>(w.skinned));
 }
 
 // The decline log. Flight 1 capped it per SESSION (twelve lines) and spent all twelve on the entry and the first seconds of one
