@@ -41,18 +41,21 @@
   the mono camera's aspect getter (RVA 0x2841190; only its call returning to
   0x2871D89, the mono filler, is lied to, by 1.30) and an observe-only one on
   the aspect writer (0x28634E0).
-- **Next flight** (Quest 3 or Crystal Super): landed where squares show at the
-  edges, head still and forward, every fov trim 0. A, the positive control:
-  `cull_probe = measure`, `cull_guard = off` 60 s, then `symmetric` (it arms
-  live, no relaunch: native_cull_guard.h re-arms on the key's change, the game
-  rebuilds its targets in about 14 s) and 60 s more once the log says live. B:
-  `cull_guard = off`, `cull_probe = cycle` about 4 minutes (14 windows of 2.0 s,
-  the last one `mono`), then `off`. Read both with `edvr_log.py --tally cull`:
-  A must show live above off, or the counter is blind; in B the group that
-  rises names the culler's input, `mono` included. The log's mono lines say
-  whether the hooks went in and who calls the aspect getter and writer; a mono
-  window with `mono reads` 0 means the filler was not reached and says nothing.
-  C, by eye: `cull_probe = mono` held for a minute against `off`.
+- **Pilot report 2026-10-09 (Crystal Super, Pimax OpenXR) — reframes the
+  arc:** the squares show only on descent into a landable planet, come and go
+  with head movement as the gaze switches, and fill in quickly once the head
+  is steady. So the defect is temporal: culling (or tile readiness) lags the
+  head, and the old guard's margin worked by covering a typical head-turn
+  speed. **Ruled out on this rig:** a static frustum deficit (the centred-cull
+  models), because a steady head shows no squares. Leading hypothesis
+  **H-lag:** Elite builds eye cameras twice a frame (census: render thread via
+  wrapper slot 16; a second thread via slot 26, which takes a time offset), and
+  culls with the predicted second-thread pose while drawing with a later one.
+  EDVR's runtime answers both pose queries, so the gap may be set, and fixed,
+  there. Under investigation (round 6 + runtime pose survey).
+- **The steady-view protocol (447de48f: `cull_probe = measure | cycle | mono`,
+  `edvr_log.py --tally cull`) cannot see a lag and was NOT flown.** Its
+  counter, census and mono observers stay available for the next instrument.
 
 ## The bug in short
 
