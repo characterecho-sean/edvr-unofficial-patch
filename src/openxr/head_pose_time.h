@@ -41,6 +41,27 @@ inline bool displayTimeTarget(int64_t latestDisplayTime, int64_t* out) {
   return true;
 }
 
+// HOW LONG A DISPLAY TIME STAYS GOOD. The latest frame's display time is the instant of the frame being drawn, and a real one is always
+// ahead of now (flight 3 measured now about 42 ms before it). It stops being usable when it is behind now by more than one display period:
+// by then the display has moved on to a later frame, so the instant belongs to a frame that is no longer the one being drawn. That
+// is what a session that has stopped, a recenter, a loading screen where WaitGetPoses does not run, or a frame that was never replaced
+// look like to this cache, and a runtime may answer such a time with stale tracking or reject it. The tolerance is the frame's own period
+// (its predictedDisplayPeriod), capped at 50 ms so a period that is not a display period cannot stretch it; with no period it is 0, and the
+// display time must not be behind now at all.
+constexpr int64_t kPoseFrameMaxToleranceNs = 50000000;
+
+inline int64_t poseFrameTolerance(int64_t periodNs) {
+  if (periodNs <= 0) return 0;
+  return periodNs > kPoseFrameMaxToleranceNs ? kPoseFrameMaxToleranceNs : periodNs;
+}
+
+// Is `displayTime` (positive: displayTimeTarget has accepted it) still good at `now`? Both are runtime times in ns.
+inline bool displayTimeFresh(int64_t displayTime, int64_t periodNs, int64_t now) {
+  if (displayTime >= now) return true;                               // ahead of now, or exactly now: the normal case
+  if (displayTime <= 0 || now <= 0) return false;                    // not a time this comparison can judge; the caller falls back
+  return now - displayTime <= poseFrameTolerance(periodNs);          // both positive, so the difference cannot overflow
+}
+
 // The log lines that say the fix is acting, and for whom. The first caller to qualify writes one line; each further DISTINCT return RVA that
 // qualifies writes one more, up to kFurtherCap, so a caller that turns up after a game update is named. One more line says the cap was reached.
 //   head pose: Elite's "now" requests are answered at the drawn frame's display time (first from exe+0x...)

@@ -32,6 +32,10 @@
   hooks, `--tally cull`) and `advanced.cull_pose` (and its latch-bypass patch,
   which was never needed). The FOV trim that shared the guard's stage machine is
   untouched; its engine is now `native_fov_trim.h`.
+- **2026-10-09, release review finding 1:** the cached display time is dropped wherever the origin, the session or the geometry
+  publication is invalidated (recenter, session stop and restart, a failed wait or reset, a fatal failure), is not used once it is more
+  than one display period (at most 50 ms) behind now, and a display-time locate the runtime refuses (TIME_INVALID) is retried once at
+  now + prediction. Until the next wait publishes a frame, a qualifying call is located at now + prediction.
 - **Frame ABI.** `EdvrNativeFrameOutput` keeps every shape's size and layout:
   the guard's slots in versions 1 and 4 stay as zeroed reserved words (an older
   runtime reads a guard that is off); versions 6, 7 and 8 existed only on this

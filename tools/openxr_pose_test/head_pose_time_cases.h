@@ -50,6 +50,31 @@ void runHeadPoseTimeCases(Check&& check) {
     t=-7;
     check(!displayTimeTarget(0,&t)&&!displayTimeTarget(-1,&t)&&!displayTimeTarget(INT64_MIN,&t)&&t==-7,"with no frame yet (a display time that is not positive) there is none, and the output is left alone");
   }
+  // ---- how long a display time stays good ----------------------------------------------------------------------------------------------------
+  {
+    constexpr int64_t period = 11111111, display = 5000000000;
+    check(kPoseFrameMaxToleranceNs == 50000000, "the cap on the tolerance is 50 ms");
+    check(poseFrameTolerance(period) == period && poseFrameTolerance(1) == 1 && poseFrameTolerance(kPoseFrameMaxToleranceNs) == kPoseFrameMaxToleranceNs,
+          "the tolerance is one display period, as the frame reports it");
+    check(poseFrameTolerance(kPoseFrameMaxToleranceNs + 1) == kPoseFrameMaxToleranceNs && poseFrameTolerance(INT64_MAX) == kPoseFrameMaxToleranceNs,
+          "...capped at 50 ms, so a period that is not a display period cannot stretch it");
+    check(poseFrameTolerance(0) == 0 && poseFrameTolerance(-1) == 0 && poseFrameTolerance(INT64_MIN) == 0, "...and no period (zero, negative) is no tolerance");
+    check(displayTimeFresh(display, period, display - 42000000) && displayTimeFresh(display, period, display - 1) && displayTimeFresh(display, period, display),
+          "a display time ahead of now, or exactly now, is good (the real case: now is about 42 ms before it)");
+    check(displayTimeFresh(display, period, display + 1) && displayTimeFresh(display, period, display + period),
+          "...and stays good until it is one display period behind now, inclusive");
+    check(!displayTimeFresh(display, period, display + period + 1) && !displayTimeFresh(display, period, display + 2 * period) &&
+              !displayTimeFresh(display, period, display + 5000000000),
+          "...one nanosecond past that, or a second later, it is not");
+    check(displayTimeFresh(display, 0, display) && !displayTimeFresh(display, 0, display + 1) && !displayTimeFresh(display, -5, display + 1),
+          "with no period the display time must not be behind now at all");
+    check(displayTimeFresh(display, INT64_MAX, display + kPoseFrameMaxToleranceNs) && !displayTimeFresh(display, INT64_MAX, display + kPoseFrameMaxToleranceNs + 1),
+          "a huge period is held to the 50 ms cap");
+    check(!displayTimeFresh(0, period, 1) && !displayTimeFresh(-7, period, 1) && displayTimeFresh(1, period, 1 + period) && !displayTimeFresh(1, period, 2 + period),
+          "a display time that is not positive is never judged good once now is ahead of it; the smallest positive one follows the same rule as any other");
+    check(displayTimeFresh(INT64_MAX, period, INT64_MAX) && displayTimeFresh(INT64_MAX, period, INT64_MAX - 1) && !displayTimeFresh(INT64_MAX - 3 * period, period, INT64_MAX),
+          "the comparison does not overflow at the ends of the range");
+  }
   // ---- the lines -----------------------------------------------------------------------------------------------------------------------------
   {
     HeadPoseSightings s;

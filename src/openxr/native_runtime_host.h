@@ -384,13 +384,20 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   XrResult lastHeadResult=XR_SUCCESS;XrTime lastHeadTime=0;
   // The head-pose answer and its diagnostic (head_pose_time.h, pose_gap.h; docs\terrain-culling.md). `latestPoseFrame` is the frame the game
   // was last given by WaitGetPoses -- the pose that is drawn -- kept for Elite's "now" pose calls to be located at and measured against.
-  // Written and read on the owner thread only.
+  // Written and read on the owner thread only. It is the frame of the CURRENT session and origin: every place that invalidates the origin, the
+  // session or the geometry publication drops it (dropPoseFrame), and a display time that has fallen more than one period behind now is not
+  // used (displayTimeFresh), so nothing the game was told earlier outlives the state it was told in.
   struct PoseFrame {
     bool valid=false,orientationKnown=false,speedKnown=false;
     XrTime displayTime=0;XrDuration period=0;
     float orientation[4]{0,0,0,1};
     double speedDegPerSec=0;
   } latestPoseFrame;
+  void dropPoseFrame() {latestPoseFrame=PoseFrame{};}
+  // The clock Elite's "now" pose calls read (a rig substitutes its own so "now" is a number it chooses), and the display-time locates the runtime
+  // refused with XR_ERROR_TIME_INVALID and that were located at now + prediction instead.
+  CounterNow headClock=counterNow;
+  uint64_t displayTimeRefusals=0;
   HeadPoseSightings poseSightings;
   PoseGapStats poseGap;
   // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md).
@@ -835,7 +842,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       serviceStopped=r==XR_SUCCESS;
       if(XR_FAILED(r)||state.terminal())publishFatalFailure(r,"service_xrEndSession");
       else {
-        geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
+        geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame();
         menu.invalidate();invalidateEyeTreatments();timingInvalidate();
       }
       result("service_xrEndSession",r);
@@ -968,6 +975,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     features.invalidate();previousPairValid=false;
     timingInvalidate();
     geometry.invalidate(geometryGeneration);frameGeometryAvailable=false;
+    dropPoseFrame();
     if(originInvalidationNotes++<16)nativeTracePrintf("geometry_invalidated,reason=%s,generation=%llu,recenters=%llu,reference_changes=%llu\n",
       reason,(unsigned long long)geometryGeneration,(unsigned long long)recenters,(unsigned long long)referenceChanges);
     return poses.resetOrigin(compositorGeneration);
@@ -1078,7 +1086,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     frameWithheld=false;frameDecisionReady=false;
     ++compositorWaits;frameGeometryAvailable=false;frameGeometry={};
     auto fail=[&](XrResult error){timingInvalidate();lastCompositorResult=error;poses.invalidate(generation);menu.invalidate();invalidateEyeTreatments();
-      geometry.invalidate(geometryGeneration);
+      geometry.invalidate(geometryGeneration);dropPoseFrame();
       if(boundary.failed())publishFatalFailure(boundary.lastResult(),"pose_boundary");
       if(poseFailures++<8)nativeTracePrintf("pose_failure,result=%d,sequence=%llu\n",int(error),(unsigned long long)boundary.frame().sequence);
       return vr::VRCompositorError_InvalidTexture;};
@@ -2241,12 +2249,14 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     poseGap.note(sample);
     return located;
   }
-  // The instant an Elite "now" call is located at: the latest frame's display time; false when there is none yet (no frame waited, a display
-  // time that is not positive), and the call is located at now + prediction as it always was.
-  bool poseTargetFor(bool display,XrTime& target) {
+  // The instant an Elite "now" call is located at: the latest frame's display time; false when there is none (no frame waited since the origin,
+  // session or geometry was last invalidated, a display time that is not positive) or when it has fallen more than one display period behind
+  // `now` (displayTimeFresh), and the call is located at now + prediction as it always was.
+  bool poseTargetFor(bool display,XrTime now,XrTime& target) {
     if(!display||!latestPoseFrame.valid)return false;
     int64_t at=0;
     if(!displayTimeTarget(latestPoseFrame.displayTime,&at))return false;
+    if(!displayTimeFresh(at,latestPoseFrame.period,now))return false;
     target=at;return true;
   }
   bool locateHeadOwned(uint64_t generation,vr::ETrackingUniverseOrigin origin,float prediction,const HeadCall& call,vr::TrackedDevicePose_t& out,
@@ -2260,12 +2270,32 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     HeadLocatorStage headLocateStage=HeadLocatorStage::None;
     XrTime explicitTarget=0;
-    const bool explicitTime=poseTargetFor(call.display,explicitTarget);
-    sample.fallback=call.display&&!explicitTime;
     const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
-    lastHeadResult=explicitTime
-      ?HeadLocator{}.locateAt(dispatch,view,seated.space(),explicitTarget,head,&lastHeadTime,&headLocateStage)
-      :HeadLocator{}.locate(dispatch,instance,view,seated.space(),prediction,head,&lastHeadTime,counterNow,&headLocateStage,boundary.estimateNow());
+    // "Now" is read once, and only for a call the display time could answer: it decides whether the cached display time is still good, and if
+    // it is not (or the runtime refuses it) it is the instant the call falls back to. A clock that cannot be read leaves the plain path, which
+    // reads it again and fails the way it always did.
+    XrTime now=0;
+    const bool nowKnown=call.display&&latestPoseFrame.valid&&
+      HeadLocator{}.currentTime(dispatch,instance,headClock,&headLocateStage,boundary.estimateNow(),now)==XR_SUCCESS;
+    bool explicitTime=nowKnown&&poseTargetFor(call.display,now,explicitTarget);
+    const auto locatePlain=[&]{
+      return nowKnown
+        ?HeadLocator{}.locateFrom(dispatch,view,seated.space(),now,prediction,head,&lastHeadTime,&headLocateStage)
+        :HeadLocator{}.locate(dispatch,instance,view,seated.space(),prediction,head,&lastHeadTime,headClock,&headLocateStage,boundary.estimateNow());
+    };
+    if(explicitTime) {
+      lastHeadResult=HeadLocator{}.locateAt(dispatch,view,seated.space(),explicitTarget,head,&lastHeadTime,&headLocateStage);
+      if(lastHeadResult==XR_ERROR_TIME_INVALID) {
+        // The runtime will not locate at that instant (it is no longer one it knows). Only for this answer: located at now + prediction instead
+        // of handing the game an invalid pose, once.
+        ++displayTimeRefusals;
+        if(displayTimeRefusals<=3||displayTimeRefusals%300==0)
+          nativeTracePrintf("head_pose_display_time_refused,target=%lld,total=%llu\n",(long long)explicitTarget,(unsigned long long)displayTimeRefusals);
+        explicitTime=false;head=XrSpaceLocation{XR_TYPE_SPACE_LOCATION};
+        lastHeadResult=locatePlain();
+      }
+    } else lastHeadResult=locatePlain();
+    sample.fallback=call.display&&!explicitTime;
     if(lastHeadResult!=XR_SUCCESS) {
       // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md):
       // this per-frame path was silent before this build. Rate-limited so a
@@ -2325,7 +2355,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     XrPosef origin{};
     if(!seatedOriginFromHead(head.pose,head.locationFlags,origin)){lastResetResult=XR_ERROR_POSE_INVALID;return false;}
     lastResetResult=seated.replace(origin);
-    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);return false;}
+    if(lastResetResult!=XR_SUCCESS){geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame();return false;}
     if(!invalidateOrigin(reason)){lastResetResult=XR_ERROR_LIMIT_REACHED;return false;}
     // Verify and attach an event-time sample, not a later cached render pose.
     TimedHeadPose atReset{};
@@ -2429,7 +2459,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     serviceFailed=true;
     serviceStopped=false;
     if(runtimeGeneration)gate.requestStop(runtimeGeneration);
-    geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);
+    geometry.invalidate(geometryGeneration);poses.invalidate(compositorGeneration);dropPoseFrame();
     poses.focus(compositorGeneration,true,false);
     frameGeometryAvailable=false;frameGeometry={};previousPairValid=false;
     menu.invalidate();invalidateEyeTreatments();timingInvalidate();
