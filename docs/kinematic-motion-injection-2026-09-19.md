@@ -57,8 +57,8 @@
   Visual verification is open. Native primary records stay unchanged; no bones,
   estimation or generic pool matching. NPC (Explorer Cam, VR): F1, F2 and the
   one-join-per-frame fix are FLOWN OK (F14, 7d0e052e; Sean: "NPCs looked
-  good"; cost +0.1-0.2 ms a frame). Open: the first-person panel does not use
-  E (only if Sean asks); the 1 s fade-hold cap is unexercised. F14 is last.
+  good"; cost +0.1-0.2 ms a frame). F15 (built, NOT FLOWN): E for the first-
+  person panel; fly it before merging. Open: 1 s fade-hold cap. F15 is last.
 
 ## Premise
 
@@ -4365,3 +4365,27 @@ Sean: "NPCs looked good, didn't see any reset." Build matched (`v0.18.3-75-g7d0e
 
 ruled out: the double dispatch as a remaining cause of masked frames, because K frames with two dispatches ran (36, 126, 69 in three windows) with no history 0, gap 0 and disagreements 0 beside them.
 ruled out: the idle bases as damage, because `unresolved` is 0 and Sean saw no pulse; they are the characters no draw reads.
+
+### 2026-10-09 F15 built (branch claude/explorer-cam-npc-motion, on 7cee4ced): F2 on foot -- the first-person panel and the screen motion map take a skinned character's exact motion from the source's own target 7 (VR, built, NOT FLOWN)
+
+F14's open (1): a skinned character seen through the first-person panel (the VR world route, the resolver's prep) kept the camera term, because target 7 existed for the two eyes only and the on-foot source pass, where the panel's scene is drawn, had none. Sean chose to extend F2 to it before merging to main. The size came in under the estimate; no second resource path and no new camera plumbing were needed (the world route's camera term already came from the source Eye's own scene snapshots EN/EB, rows 270..275, which the joined-record branch has always used).
+
+What changed (every item is VR; the flat profile's views, bindings and shader path are the old ones):
+- engine_velocity.cpp: the source Eye gets its own target 7, R16G16B16A16F at the source depth's size (3808x2142 in the F14 flight, 65.3 MB), beside its slot target; a source draw of the exporting pair writes it; it is cleared at the frame's FIRST skinned draw, not at the frame's start (most frames on foot draw no character); the pose table and the pool scatter run for the source's pool snapshot as for an eye's (`g_skinPoseEye <= kEngineVelocitySourceEye`). `EngineVelocityViews::skin` (new, AddRef'd, released at every call site) is set by `engineVelocitySourceViews` only while a skinned draw wrote it this frame, never by `engineVelocityViews` (the eyes' own view is the compose's `engineVelocitySkinView`), and never in the flat profile.
+- flat_mono_shader_source.h / flat_mono_resolve.cpp: the prep binds the view at t17 and sets bit 2 (value 4) of `debug.w` only when the frame carries one. A record with a palette base (`data[0].x != 0`) then takes `prev = world + (EN[275] - EB[275]) + E/100` through the shared `engineReprojectRowsE` (skinned) with the SOURCE pass's rows, class 15 `skinned` (accepted, so it gets its own census slot 24, the stripe is 25 counters); a texel with no valid flag or a non-finite E is class `masked` (kind 2: no history, as Explorer Cam). The TAA kernel's three `debug.w != 0` tests are now `(debug.w & 3) != 0`: the first draft shared the constants and would have read bit 2 as "alternate-camera coverage present" and shown every pixel's current colour (the TAA case F of flat_skin_gpu_tests.h failed on it before the fix, and fails again with the fix reverted).
+- fixed_shader_source.h (`kScreenMotionPs`) / screen_motion.cpp: the same branch as the eye-route fallback (t15, `engine.w`), kind 7 counted as joined and in its own slot, painted as joined (17).
+- Logs: `vr world route refusal 5s:` ends `skinned-joined=N`; `skin join: on-foot source target 7 created WxH ...`; the second-skin line ends `on-foot source ... handed ... N times (live M), cleared K times`; the on-foot pixels line says how many joined pixels were a skinned character's. tools\edvr_log.py parses and prints `skinned-joined`.
+
+Flat-profile proof: the flat resolver's engine views carry no `skin` (a flat source has no target 7), so bit 2 is never set, the prep binds the fourteen or sixteen slots it always did, and the skinned branch is not taken. Held by: flat_mono_resolve_test (a record with a base and a joined marker, no view: the whole output bit for bit the base-0 record's; a base with no marker, no view: bit for bit a not-rig surface; a rigid record with the view bound: unchanged; EDVR's TAA with the view bound blends as without it; 14 prep mutants, each caught, including the view bit ignored and a rigid record taking the branch); skin_engine_test L13.j-l (skinned shaders in the flat profile make no target 7, bind none, patch no vertex shader) and the mutant that removes ALL the flat layers (the vrOnly families, the skinDraw guard, the flat source's early return, the wantSkin guard; any one alone is equivalent by design) is caught. The prep's binding pins in flat_temporal_test were re-pinned on purpose (18 slots when skinned).
+
+Not live: a source frame whose job table changed shape has valid 0 and E 0 at every drawn pixel (L13.g), which the prep reads as masked (no history), exactly as Explorer Cam; a frame whose skinned draws wrote nothing hands out no view, so the bit is clear and the record is a not-rig surface (the camera term), as before F15.
+
+Rigs: skin_engine_test 1647 checks (L13 new, 9 new engine mutants, 69 in all), engine_velocity_test 15462 (panel K/L/R/P cases, 11 screen-shader mutants), flat_mono_resolve_test (skin scenario), vr_world_route_test (token, class 15, a mutant), flat_temporal_test (log gate: 0 failures), edvr_log --self-test.
+
+What to look for in the F15 flight (VR, a skinned NPC in view on foot in the first-person panel, then Explorer Cam):
+- First person: `skin join: on-foot source target 7 created ...` once; `vr world route refusal 5s: ... skinned-joined=N` with N > 0 while the character is in view (N = 0 with the character in view means the route did not read E; the line before it, the second-skin line, shows whether target 7 was handed out); `masked` in the same line is the skinned pixels with no valid texel. Cost: the second-skin line's `cleared` count and `engine velocity` in-frame ms.
+- Explorer Cam: the F14 lines unchanged (the eyes' views carry no `skin`; `eye-frames with target 7`, `views given`).
+
+Doubts: (1) a non-exporting skinned family's pixel (the FC43 draws) now has valid 0 under the bit, so it is refused where before F15 it took the camera term (Explorer Cam made the same call in L11); (2) the target is allocated whenever the second skin is armed, not only when a character appears (+65 MB on the F14 rig); (3) the 65 MB clear is 3808x2142x8 bytes written on every frame with a skinned draw, not measured; (4) not flown.
+
+ruled out: sharing `debug.w`'s bit pattern with the TAA kernel's tests, because the TAA kernel read any nonzero `debug.w` as alternate-camera coverage and the TAA case F of flat_skin_gpu_tests.h (a hot pixel blended near 111) failed with it.

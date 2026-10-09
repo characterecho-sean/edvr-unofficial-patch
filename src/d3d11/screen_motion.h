@@ -65,7 +65,8 @@ ID3D11ShaderResourceView* screenMotionView(int eye,unsigned width,unsigned heigh
 // record EDVR cannot follow keeps no history (code 2); a pool surface that is
 // not a rig record, a stale slot and a corrupt code keep the camera term.
 // engine.y (the motion_source view): the validity carries 16 + that source
-// kind instead, for the compose to paint through the panel. engine.z: count
+// kind instead, for the compose to paint through the panel. engine.w (F2 on foot): the source's target 7 is bound at t15, and a skinned record
+// (a nonzero palette base) takes its exact motion from the texel (kind 7, painted and counted as joined) or keeps no history (2). engine.z: count
 // the kinds into PanelCounts on the eye pixels of a grid of that stride -- 1,
 // every pixel, with diagnostics or motion_source; kPanelSampleStride on the
 // sampled frames otherwise (engine_velocity.h); 0, not counted.

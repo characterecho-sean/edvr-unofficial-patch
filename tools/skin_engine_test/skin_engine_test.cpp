@@ -43,7 +43,7 @@ namespace edvr { thread_local bool g_flatComputeInternal = false; }
 // The case ids the suites label their checks with (tools\skin_engine_test\mutants.py reads this list to hold each case to a mutation).
 static const char* const kCases[] = {"C1.arithmetic", "C2.production-mv", "C3.blend",      "L1.arming",    "L2.first-frame", "L3.steady",
                                      "L4.moving",     "L5.job-table",     "L6.bindings",   "L7.hook-list", "L8.periodic-lines", "L9.small-buffer",
-                                     "L10.live-record", "L11.no-history-write", "L12.chain-dispatches"};
+                                     "L10.live-record", "L11.no-history-write", "L12.chain-dispatches", "L13.on-foot-source"};
 
 namespace {
 unsigned g_checks = 0, g_failures = 0;

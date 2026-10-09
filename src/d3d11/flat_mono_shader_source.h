@@ -17,7 +17,8 @@ cbuffer Mono : register(b0) {
                  // All zero on the copy route without them.
     uint4 debug; // x/y: refusal census/view, z: late overlay. w: flat HDR TAA has a conservative alternate-camera
                  // fragment union at t13 and output-domain history at t14/u7 (bit 0).
-                 // Bit 1: qualified flat SDK foreground map at t15. Zero leaves the old shader path unchanged.
+                 // Bit 1: qualified flat SDK foreground map at t15. Bit 2 (value 4): the VR on-foot source's target 7 is bound at t17 (F2; only
+                 // the VR world route sets it, never the flat profile). Zero leaves the old shader path unchanged.
     float4 foregroundDepth; // SDK common-near/world-near scale, only read with debug.w bit 1
 };
 cbuffer EngineNow : register(b1) { float4 EN[277]; };   // EN[276].x: the frame stamp
@@ -39,6 +40,8 @@ Texture2D<float> OverlayCoverage : register(t12);   // HDR finish only: fragment
 Texture2D<float> UntrustedCameraCoverage : register(t13); // prep/TAA only: conservative R8_UNORM fragment union
 Texture2D<float> HistoryOutputDomain : register(t14);    // TAA only: last output's trusted-world sampling footprint
 Texture2D<float4> FlatForegroundMotion : register(t15); // SDK prep only: exact final foreground motion and canonical depth
+Texture2D<float4> SkinE : register(t17);                // prep only, bound when debug.w bit 2: the VR on-foot source's target 7 (F2): xyz a skinned character's previous - current
+                                                         // position in centimetres, w 1 valid / 0 none, at the slot target's size; read at the pixel's own texel
 Texture2D<float4> OverlayColor : register(t16);         // HDR finish only, bound in overlay frames: the raw H with the protected late overlays
                                                          // drawn (t0 is then the CLEAN H, the image the backend was handed)
 SamplerState LinearClamp : register(s0);
@@ -48,7 +51,7 @@ RWTexture2D<float> OutRejection : register(u2);
 RWTexture2D<float> OutExpected : register(u3);
 RWTexture2D<float4> OutColor : register(u4);
 RWTexture2D<uint> OutClass : register(u5);            // prep only, bound when debug.x or debug.y: what the pixel is and whether its history was refused
-RWByteAddressBuffer RefusalCounts : register(u6);     // the census kernel's: 16 stripes of 24 counters, 16 by class and 8 by weapon-refused reason (flat_mono_refusal.h)
+RWByteAddressBuffer RefusalCounts : register(u6);     // the census kernel's: 16 stripes of 25 counters, 16 by class, 8 by weapon-refused reason and the accepted skinned pixels (flat_mono_refusal.h)
 RWTexture2D<float> OutOutputDomain : register(u7);    // TAA only: 1 when all current colour taps are trusted world
 
 // The pixel classes (flat_mono_refusal.h kFlatMonoClass*, which tools\flat_mono_resolve_test holds these to). The byte the prep writes is the
@@ -57,7 +60,7 @@ RWTexture2D<float> OutOutputDomain : register(u7);    // TAA only: 1 when all cu
 // census, the view's colour and the view's choice among the four taps read the class with 0x0F (and the choice the refused bit with it).
 static const uint kClassNone=0, kClassJoined=1, kClassMasked=2, kClassNotRig=3, kClassStale=4, kClassCorrupt=5, kClassStaleStamp=6,
     kClassSentinel=7, kClassUnreprojectable=8, kClassCamera=9, kClassRange=10, kClassDepth=11, kClassWeapon=12,
-    kClassWeaponRefused=13, kClassReset=14;
+    kClassWeaponRefused=13, kClassReset=14, kClassSkinned=15;
 
 // First-person reach, as the raw depth the depth texture holds (reversed-Z, d = near / z). The game's first-person draws use their own
 // camera, near plane 0.0675 m against the world camera's 0.025 m, so one raw depth is two distances: .075 is 0.9 m for a first-person draw
@@ -143,6 +146,23 @@ uint engineBefore(int2 q,float2 uv,float depth,out float4 before,out uint cls) {
     uint slot=code>>1;
     if(slot>=count || stride!=336){cls=kClassCorrupt;return 2;}
     EnginePoolRecord r=Pool[slot];
+    // F2 on foot (debug.w bit 2: target 7 is bound; a nonzero palette base is a skinned character's record). A skinned record has no pose blocks and
+    // no marker: its vertex shader computed the surface's exact previous position from last frame's palette and pose and exported previous - current
+    // (centimetres, relative to this frame's camera origin) to target 7. The point under the pixel goes back to world + this route's camera term
+    // (EN[275] - EB[275], the source pass's own scene constants this frame and last) + that motion; a pixel with no valid texel (no joined history,
+    // a pair that exports none) keeps no history, as a rigid record EDVR could not follow does. With the bit clear this block is not taken and
+    // the arithmetic below is what it was.
+    if((debug.w&4)!=0 && r.data[0].x!=0u) {
+        const float4 sk=SkinE.Load(int3(q,0));
+        if(!(sk.w>0.5) || !all(isfinite(sk.xyz))){cls=kClassMasked;return 2;}
+        if(!engineReprojectRowsE(r,true,sk.xyz*.01,uv*float2(2,-2)+float2(-1,1),depth,
+            unjitterRow(EN[270],rowsJitter.xy),unjitterRow(EN[271],rowsJitter.xy),
+            unjitterRow(EN[272],rowsJitter.xy),unjitterRow(EN[273],rowsJitter.xy),EN[275].xyz,
+            unjitterRow(EB[270],rowsJitter.zw),unjitterRow(EB[271],rowsJitter.zw),
+            unjitterRow(EB[272],rowsJitter.zw),unjitterRow(EB[273],rowsJitter.zw),EB[275].xyz,before)){cls=kClassUnreprojectable;return 2;}
+        cls=kClassSkinned;
+        return 1;
+    }
     uint kind=engineRecordKind(r,asuint(EN[276].x));
     if(kind==2){cls=kClassMasked;return 2;}
     if(kind==3)kind=engineStaleStampKind(r,asuint(EN[276].x));
@@ -282,13 +302,14 @@ R"HLSL(
 // group column, so the atomics of 220 000 groups do not queue on sixteen addresses). Slot 15 counts a stale pixel the prep did NOT
 // refuse (the steady-detail rule kept it: the camera term, confirmed by last frame's depth); a stale pixel it did refuse stays in the
 // stale slot. Accepted pixels are not counted. No early return: every thread reaches both barriers.
+// Slot 24 counts the ACCEPTED skinned pixels (class kClassSkinned: F2 on foot, exact motion from target 7), the one accepted class counted.
 // Slots 16..23 count the refused first-person pixels (class kClassWeaponRefused) by the reason in bits 4-6 of their byte, so the 24
-// counters of a stripe are the class counters and then the reasons'. The weapon-refused pixels are in slot 13 as well: a reason slot is a
+// counters of a stripe are the class counters and then the reasons' (and the skinned slot, 25 in all). The weapon-refused pixels are in slot 13 as well: a reason slot is a
 // split of that one, never an addition to the refused total.
-groupshared uint gRefusal[24];
+groupshared uint gRefusal[25];
 [numthreads(8,8,1)]
 void census(uint3 id:SV_DispatchThreadID,uint3 gid:SV_GroupID,uint gi:SV_GroupIndex) {
-    if(gi<24)gRefusal[gi]=0;
+    if(gi<25)gRefusal[gi]=0;
     GroupMemoryBarrierWithGroupSync();
     if(all(id.xy<size.xy)) {
         const uint v=ClassMap.Load(int3(id.xy,0));
@@ -298,9 +319,10 @@ void census(uint3 id:SV_DispatchThreadID,uint3 gid:SV_GroupID,uint gi:SV_GroupIn
             if(kind==kClassWeaponRefused)InterlockedAdd(gRefusal[16+((v>>4)&7u)],1u);
         }
         else if(kind==kClassStale)InterlockedAdd(gRefusal[15],1u);
+        else if(kind==kClassSkinned)InterlockedAdd(gRefusal[24],1u);
     }
     GroupMemoryBarrierWithGroupSync();
-    if(gi<24 && gRefusal[gi]!=0)RefusalCounts.InterlockedAdd(((gid.x&15u)*24u+gi)*4u,gRefusal[gi]);
+    if(gi<25 && gRefusal[gi]!=0)RefusalCounts.InterlockedAdd(((gid.x&15u)*25u+gi)*4u,gRefusal[gi]);
 }
 
 // The HDR route accumulates in a bounded space, c / (1 + max3(c)), and inverts it on output: a sun disc or a hot
@@ -317,7 +339,7 @@ void taa(uint3 id:SV_DispatchThreadID) {
     float4 current=Color.SampleLevel(LinearClamp,rasterUv,0);
     float2 previous=uv+Motion.Load(int3(q,0))/float2(size.xy);
     float weight=0;
-    if(debug.w!=0) {
+    if((debug.w&3)!=0) {   // bits 0 and 1 only: bit 2 (value 4) is the prep's target 7, which this kernel never binds
         // Match the four texels read by Color.SampleLevel at the current
         // raster position, including the sampler's edge clamp. One marked
         // source tap makes the whole output pixel untrusted.
@@ -334,7 +356,7 @@ void taa(uint3 id:SV_DispatchThreadID) {
         // sky the next, and the edge pixels lost their history on the alternate frames (design doc section 104).
         if(historyDepthMatches(previous,ExpectedDepth.Load(int3(q,0))))weight=.9;
     }
-    if(weight!=0 && debug.w!=0) {
+    if(weight!=0 && (debug.w&3)!=0) {
         // History uses linear filtering on the output grid. Depth's one
         // matching texel cannot authorize a different camera in any of its
         // four colour taps, even when both cameras wrote identical depth.
@@ -348,7 +370,7 @@ void taa(uint3 id:SV_DispatchThreadID) {
     float3 lo=cur,hi=cur;
     [unroll]for(int y=-1;y<=1;++y)[unroll]for(int x=-1;x<=1;++x) {
         int2 neighbor=clamp(q+int2(x,y),0,int2(size.xy)-1);
-        if(debug.w!=0) {
+        if((debug.w&3)!=0) {
             // Do not let a bright alternate-camera fragment widen the world
             // colour clamp and admit unrelated history.
             if(UntrustedCameraCoverage.Load(int3(neighbor,0))>0)continue;
@@ -371,7 +393,7 @@ void taa(uint3 id:SV_DispatchThreadID) {
 float3 refusalPaint(float3 c,uint v) {
     const uint kind=v&0x0Fu;   // the class: bits 4-6 are a first-person pixel's reason and do not change its colour
     const float y=max(dot(c,float3(.2126,.7152,.0722)),.02)*2;
-    return kind==kClassJoined?float3(0,y,0):kind==kClassMasked?float3(y,0,0)
+    return kind==kClassJoined?float3(0,y,0):kind==kClassSkinned?float3(0,y,.5*y):kind==kClassMasked?float3(y,0,0)
          :kind==kClassNotRig?float3(0,.3*y,y):kind==kClassStale?((v&0x80u)!=0?float3(y,.4*y,.7*y):float3(y,y,0))
          :kind==kClassCorrupt?float3(y,0,y):kind==kClassStaleStamp?float3(y,.5*y,0)
          :kind==kClassWeapon?float3(0,y,y):(kind>=kClassSentinel && kind<=kClassWeaponRefused)?float3(y,y,y):c*.25;

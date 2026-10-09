@@ -99,7 +99,9 @@ static std::vector<LegacyContract> coreLegacyContracts() {
         // Re-pinned again 2026-10-08 on purpose (F2): this pixel shader is the engine core text plus its own tail, and the core gained the
         // second skin's reprojection (engineReprojectRowsE, the skinned branch of enginePixelZ, the gCount bins). Nothing in this shader
         // calls them; the pin moves because the text it is assembled from did. Was 0x8C2F828BE3751ABB.
-        {"screen motion", "main", "ps_5_0", nullptr, 0xAA505601226395B7ull},
+        // Re-pinned 2026-10-09 on purpose (F2 on foot, F15): the on-foot eye-route fallback now takes a skinned character's exact motion from the source's
+        // target 7 (SourceSkin at t15, engine.w, kind 7 counted as joined and in its own slot, painted as joined). Was 0xAA505601226395B7.
+        {"screen motion", "main", "ps_5_0", nullptr, 0x47B44C452FE3B59Bull},
         {"weapon motion", "main", "vs_5_0", nullptr, 0x7232767DAC4ADBD4ull},
         {"weapon motion", "main", "ps_5_0", nullptr, 0xF948E51A2E036952ull},
         {"weapon identity", "main", "cs_5_0", nullptr, 0x10E05DE79500471Dull},

@@ -622,6 +622,7 @@ Texture2D<uint2> SourceStencil:register(t11);
 Texture2D<float4> WeaponMotion:register(t12);
 Texture2D<float2> SourceSlots:register(t13);
 StructuredBuffer<EnginePoolRecord> SourcePool:register(t14);
+Texture2D<float4> SourceSkin:register(t15);   // bound when engine.w != 0: the VR on-foot source's target 7 (F2): xyz a skinned character's previous - current position in cm, w 1 valid / 0 none
 cbuffer SourceNow:register(b2){float4 src[276];}
 cbuffer SourceBefore:register(b3){float4 old[276];}
 cbuffer ScreenBefore:register(b4){float4 model[12];}
@@ -636,7 +637,10 @@ static const float kFirstPersonReachDepth=.075;
 // enginePixel's kinds for the source texel q: 0 no engine data, 1 joined
 // (prev = the surface's previous source UV), 2 masked, 3 not a rig record,
 // 4 stale slot, 5 corrupt slot code, 6 stale stamp (a joined marker from an
-// older frame: the camera term) -- the same tests in the same order.
+// older frame: the camera term) -- the same tests in the same order. 7 (F2 on
+// foot, engine.w != 0 with a nonzero palette base): a skinned character whose
+// target-7 texel is valid, joined by that texel (the counts add it to joined and
+// to their own slot, the view paints it as joined); the texel invalid: masked.
 uint sourceEngine(int2 q,float2 uv,float z,out float2 prev) {
     prev=uv;
     if(engine.x==0)return 0u;
@@ -652,6 +656,19 @@ uint sourceEngine(int2 q,float2 uv,float z,out float2 prev) {
     if(slot>=count)return 0u;
     const EnginePoolRecord r=SourcePool[slot];
     const uint token=asuint(SEN[276].x);
+    if(engine.w!=0 && r.data[0].x!=0u) {
+        // A skinned record has no pose blocks and no marker: the surface's exact previous position is in target 7, previous - current in centimetres,
+        // relative to this frame's camera origin. The point under the pixel goes back to world + the source camera term + that motion.
+        const float4 sk=SourceSkin.Load(int3(q,0));
+        if(!(sk.w>0.5) || !all(isfinite(sk.xyz)))return 2u;
+        float4 before;
+        if(!engineReprojectRowsE(r,true,sk.xyz*0.01,uv*float2(2,-2)+float2(-1,1),z,SEN[270],SEN[271],SEN[272],SEN[273],SEN[275].xyz,
+                                 SEB[270],SEB[271],SEB[272],SEB[273],SEB[275].xyz,before))return 2u;
+        prev=before.xy/before.w*float2(.5,-.5)+.5;
+        if(all(isfinite(prev)))return 7u;
+        prev=uv;
+        return 2u;
+    }
     uint kind=engineRecordKind(r,token);
     if(kind==3u)kind=engineStaleStampKind(r,token);   // 6 stale stamp, 2 an older masked marker, 3 neither
     if(kind!=1u)return kind;
@@ -669,7 +686,7 @@ uint sourceEngine(int2 q,float2 uv,float z,out float2 prev) {
     return engineRecordMoved(r)?2u:0u;
 }
 // Under the motion_source view the validity carries the source kind.
-float4 tagged(float4 v,uint kind){return engine.y!=0 && kind!=0u?float4(v.xyz,16.0+kind):v;}
+float4 tagged(float4 v,uint kind){return engine.y!=0 && kind!=0u?float4(v.xyz,16.0+(kind==7u?1u:kind)):v;}
 float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Target {
     uint w,h;Depth.GetDimensions(w,h);
     const int2 texel=clamp(int2(uv*float2(w,h)),0,int2(w,h)-1);
@@ -702,10 +719,13 @@ float4 main(float2 uv:__USER_VERTEX_M_TEXCOORD0,float4 pos:SV_Position):SV_Targe
     if(!ui && !attached) {
     float2 carried;
     sk=sourceEngine(texel,uv,z,carried);
-    if(engine.z!=0 && sk!=0u && all(uint2(pos.xy)%uint(engine.z)==0u))InterlockedAdd(PanelCounts[sk-1u],1u);
+    if(engine.z!=0 && sk!=0u && all(uint2(pos.xy)%uint(engine.z)==0u)) {
+        InterlockedAdd(PanelCounts[sk==7u?0u:sk-1u],1u);   // a skinned character's exact motion is counted as joined, and in its own slot
+        if(sk==7u)InterlockedAdd(PanelCounts[6],1u);
+    }
     // A rig record EDVR cannot follow keeps no history, as in the eye.
     if(sk==2u)return tagged(float4(0,0,z,2),sk);
-    if(sk==1u) {
+    if(sk==1u || sk==7u) {
         prev=carried;
         if(any(prev<0) || any(prev>1))return tagged(float4(0,0,z,2),sk);
     } else {

@@ -26,6 +26,9 @@
 //       job tables in dispatch order, whichever job table the drawn character is in, one buffer rewritten between the dispatches, a one-two-one sequence, a
 //       second dispatch after a skinned draw has needed the join (late), one on another palette buffer, a frame whose chain no skinned draw needed, the hook's
 //       one list per frame judged against the union, and the counters that say so
+//   L13 the on-foot source (F2 on foot, the first-person panel): the source pass's skinned draws write the source's own target 7, handed to the screen shader and
+//       the world route (EngineVelocityViews::skin) only while a skinned draw wrote it this frame, cleared at each frame's first skinned draw, E exact, no history
+//       as valid 0 and E 0, never in the eyes' views, and never in the flat profile (no target 7 is created there)
 
 #include <algorithm>
 #include <cmath>
@@ -273,12 +276,24 @@ struct Fixture {
 
     // One eye's pass with the skinned pair (or the plain skinned family): the game's state, the engine's call, what it bound, the draw. `start` is the draw's
     // StartInstanceLocation (the stream entry it reads); the draw hook's second call (the draw's instance window) is made as vscreen's thunk makes it.
+    // eye == kSource (L13) is the on-foot source's pass: the same draws into the source's own targets (a depth the screen shader named, no eye RTV), the
+    // way Game::sourcePass draws the rigid ones.
     static constexpr UINT kDefaultEntry = 0xFFFFFFFFu;
+    static constexpr int kSource = 2;
+    void sourceTargets() {
+        const float black[4] = {};
+        for (auto& r : g.sourceRtv) ctx->ClearRenderTargetView(r.Get(), black);
+        ctx->ClearDepthStencilView(g.sourceDsv.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 0.0f, 0);
+        ID3D11RenderTargetView* r[4] = {g.sourceRtv[0].Get(), g.sourceRtv[1].Get(), g.sourceRtv[2].Get(), g.sourceRtv[3].Get()};
+        ctx->OMSetRenderTargets(4, r, g.sourceDsv.Get());
+        g.shadow(lt::BindSlot::Rtv0, r[0]);
+        g.shadow(lt::BindSlot::Dsv0, g.sourceDsv.Get());
+    }
     void pass(int eye, bool pair = true, bool observe = false, UINT startEntry = kDefaultEntry, ID3D11DepthStencilState* depthOverride = nullptr) {
         const UINT start = startEntry == kDefaultEntry ? drawEntry : startEntry;
-        g.setTargets(eye);
+        if (eye == kSource) sourceTargets(); else g.setTargets(eye);
         ctx->OMSetDepthStencilState(depthOverride ? depthOverride : g.depthState.Get(), 0);
-        D3D11_VIEWPORT vp{0, 0, float(lt::kW), float(lt::kH), 0, 1};
+        D3D11_VIEWPORT vp{0, 0, float(eye == kSource ? g.sourceW : lt::kW), float(eye == kSource ? g.sourceH : lt::kH), 0, 1};
         ctx->RSSetViewports(1, &vp);
         ctx->RSSetState(g.raster.Get());
         ctx->IASetInputLayout(layout.Get());
@@ -290,7 +305,7 @@ struct Fixture {
         ctx->VSSetShaderResources(38, 1, &t38);
         if (pair) { g.setVs(vsPair.Get(), kPairVs); g.setPs(psPair.Get(), kPairPs); }
         else { g.setVs(vsPlain.Get(), kPlainVs); g.setPs(psPlain.Get(), kPlainPs); }
-        edvr::engineVelocityBeforeDraw(ctx, true);
+        edvr::engineVelocityBeforeDraw(ctx, eye != kSource);
         edvr::engineVelocityNoteSkinDraw(ctx, start, 1);
         if (observe) look();
         ctx->DrawInstanced(3, 1, 0, start);
@@ -372,6 +387,39 @@ struct Fixture {
     }
     edvr::skinjoin::Snapshot hookSnapshot;
 
+    // An on-foot frame whose pool draw is the skinned pair (L13): the chain, the pool, the source's rows, the screen shader naming the source depth, then
+    // the pass into the source's targets. `after` runs before the boundary (the screen shader's views are asked there).
+    template <class After> void sourceFrame(bool pair, After after, bool summary = false, bool observe = false) {
+        g.beginFrame();
+        writeSceneRows();
+        chain(count);
+        lifecycle_fake::g_hookSnap = nullptr;
+        writePool();
+        g.writeScene(g.sceneA.Get(), rows[0]);
+        edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+        pass(kSource, pair, observe);
+        after();
+        g.endFrame(summary);
+        ctx->Flush();
+        ++count;
+    }
+    template <class After> void sourceFrame(After after) { sourceFrame(true, after); }
+    // The same frame with a RIGID pool draw in the source pass and no skinned draw at all.
+    template <class After> void sourceRigidFrame(After after) {
+        g.beginFrame();
+        writeSceneRows();
+        chain(count);
+        lifecycle_fake::g_hookSnap = nullptr;
+        writePool();
+        g.writeScene(g.sceneA.Get(), rows[0]);
+        edvr::engineVelocityNoteSource(g.sourceDepth.Get(), g.sceneA.Get());
+        g.sourcePass();
+        after();
+        g.endFrame();
+        ctx->Flush();
+        ++count;
+    }
+
     // Target 7 of `eye` as the compose gets it (null view: nothing was written this frame), as floats, and the drawn pixels from the eye's depth.
     struct Eye { bool given = false; std::vector<float> e; std::vector<float> depth; UINT w = 0; };
     Eye read(int eye) {
@@ -379,9 +427,40 @@ struct Fixture {
         ID3D11ShaderResourceView* view = edvr::engineVelocitySkinView(eye, g.depth[eye].Get());
         out.given = view != nullptr;
         if (!view) return out;
+        fillFrom(view, out);
+        view->Release();
+        UINT dw = 0;
+        out.depth = lt::readTexture(h, g.depth[eye].Get(), 1, &dw);
+        return out;
+    }
+    // Target 7 of the on-foot source as the screen shader gets it: the source's views (EngineVelocityViews::skin), or `views` true and `given` false when the
+    // views came without one (no skinned draw wrote it this frame), as floats, and the drawn pixels from the source depth.
+    struct SourceEye : Eye { bool views = false; edvr::EngineVelocityViews v{}; };
+    SourceEye readSource() {
+        SourceEye out;
+        edvr::EngineVelocityViews v{};
+        out.views = edvr::engineVelocitySourceViews(g.sourceDepth.Get(), &v);
+        out.v = v;
+        out.given = v.skin != nullptr;
+        if (v.slots) v.slots->Release();
+        if (v.pool) v.pool->Release();
+        if (v.sceneNow) v.sceneNow->Release();
+        if (v.scenePrev) v.scenePrev->Release();
+        if (v.gameMark) v.gameMark->Release();
+        if (v.skin) {
+            fillFrom(v.skin, out);
+            v.skin->Release();
+            UINT dw = 0;
+            const std::vector<float> d2 = lt::readTexture(h, g.sourceDepth.Get(), 2, &dw);   // D32_FLOAT_S8X24: eight bytes a texel, the depth first
+            out.depth.resize(d2.size() / 2);
+            for (size_t p = 0; p < out.depth.size(); ++p) out.depth[p] = d2[p * 2];
+        }
+        out.v = {};
+        return out;
+    }
+    void fillFrom(ID3D11ShaderResourceView* view, Eye& out) {
         ComPtr<ID3D11Resource> res;
         view->GetResource(&res);
-        view->Release();
         ComPtr<ID3D11Texture2D> tex;
         res.As(&tex);
         D3D11_TEXTURE2D_DESC d{};
@@ -400,9 +479,6 @@ struct Fixture {
             for (UINT x = 0; x < d.Width * 4; ++x) out.e[size_t(y) * d.Width * 4 + x] = halfToFloat(row[x]);
         }
         ctx->Unmap(staging.Get(), 0);
-        UINT dw = 0;
-        out.depth = lt::readTexture(h, g.depth[eye].Get(), 1, &dw);
-        return out;
     }
 };
 
@@ -957,6 +1033,126 @@ inline void run(const lt::Harness& h) {
     }
     single();
     f.frame([&] {});
+
+    // L13: the on-foot source (F2 on foot, the VR first-person panel). The source pass draws the same skinned pair into the source's own targets (a depth the
+    // screen shader names, no eye RTV). The engine makes the source's own target 7 beside its slot target, clears it at the frame's first skinned draw, runs the
+    // join and the pose table for it, and hands it to the screen shader and the world route as EngineVelocityViews::skin: only while a skinned draw wrote it this
+    // frame, never in the eyes' views (their target 7 is the compose's engineVelocitySkinView), and never in the flat profile (it has no target 7).
+    lifecycle_fake::g_hookSnap = nullptr;
+    f.useHookList = false;
+    lifecycle_fake::g_hookArmed = false;
+    f.staleSlot = -1; f.drawEntry = 0; f.readStale = false; f.secondStream = false; f.overdrawPlain = false;
+    single();
+    {
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 3, scratch);
+        f.state = sct::makeState(rng, 3, f.base);
+    }
+    settle();
+    g.makeSource(64, 40);
+    const size_t mark13 = lt::g_log.size();
+    Fixture::SourceEye first13, steady13;
+    f.sourceFrame([&] { first13 = f.readSource(); });
+    h.check(!first13.views && !first13.given, "L13.a the first source frame has no previous scene constants: the screen shader is given no views, so no target 7");
+    f.sourceFrame([&] { steady13 = f.readSource(); });
+    const Judged st13 = judge(steady13, zero);
+    h.check(steady13.views && steady13.given && st13.drawn > 20 && st13.valid == st13.drawn && st13.worst == 0.0 && st13.outside == 0.0,
+            "L13.b a steady source frame: the screen shader's views carry the source's target 7, valid 1 at every drawn pixel, E exactly zero, zero outside the drawn pixels");
+    h.check(lt::logged("skin join: on-foot source target 7 created 64x40 R16G16B16A16_FLOAT", mark13),
+            "L13.c the log says the source's target 7 was created, at the source depth's size");
+    f.sourceFrame([&] {});
+    {
+        const sct::State was = f.state;
+        for (int c = 0; c < 3; ++c) f.state.pos[c] += (c == 0 ? 0.15f : c == 1 ? -0.1f : 0.05f);
+        Fixture::SourceEye moved;
+        f.sourceFrame([&] { moved = f.readSource(); });
+        const float expect[3] = {100.0f * (was.pos[0] - f.state.pos[0]), 100.0f * (was.pos[1] - f.state.pos[1]), 100.0f * (was.pos[2] - f.state.pos[2])};
+        const Judged a = judge(moved, expect);
+        if (a.worst > 0.1) std::fprintf(stderr, "  L13.d: worst deviation %.4f cm from (%.2f %.2f %.2f)\n", a.worst, expect[0], expect[1], expect[2]);
+        h.check(moved.given && a.drawn > 20 && a.valid == a.drawn && a.worst <= 0.1 && std::fabs(expect[0]) > 10.0,
+                "L13.d a moving character seen on foot: E = 100 x (previous - current position) in centimetres at every drawn pixel of the source, valid 1");
+    }
+    f.sourceFrame([&] {});   // steady again
+    // a frame whose source pass draws only a rigid record: the views come, with no target 7 (a skinned draw wrote none: a view of nothing would read as masked)
+    {
+        Fixture::SourceEye rigid;
+        f.sourceRigidFrame([&] { rigid = f.readSource(); });
+        h.check(rigid.views && !rigid.given, "L13.e a source frame with only a rigid pool draw: the screen shader gets its views but no target 7");
+    }
+    // a smaller triangle after it: target 7 was cleared at this frame's first skinned draw, so the pixels the larger one wrote two frames ago are zero again
+    {
+        f.setTriangleScale(0.5f);
+        Fixture::SourceEye smaller;
+        f.sourceFrame([&] { smaller = f.readSource(); });
+        f.setTriangleScale(1.0f);
+        const Judged a = judge(smaller, zero);
+        h.check(smaller.given && a.drawn > 5 && a.drawn < st13.drawn && a.valid == a.drawn && a.outside == 0.0,
+                "L13.f a smaller triangle seen on foot: its pixels are valid and the pixels the larger one wrote are zero again (target 7 is cleared at each frame's first skinned draw)");
+    }
+    f.sourceFrame([&] {});
+    // the character's job table changes shape: no history for that frame (valid 0, E exactly zero: the consumers keep no history there), then it has it again
+    f.setWorld(4);
+    {
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 4, scratch);
+        f.state = sct::makeState(rng, 4, f.base);
+    }
+    {
+        Fixture::SourceEye changed, again;
+        f.sourceFrame([&] { changed = f.readSource(); });
+        const Judged a = judge(changed, zero);
+        h.check(changed.given && a.drawn > 20 && a.valid == 0 && a.worst == 0.0,
+                "L13.g a source frame whose job table changed shape has no history: valid 0 and E exactly zero at every drawn pixel (the consumers read it as no history, never as garbage)");
+        f.sourceFrame([&] {});
+        f.sourceFrame([&] { again = f.readSource(); });
+        const Judged b = judge(again, zero);
+        h.check(again.given && b.drawn > 20 && b.valid == b.drawn && b.worst == 0.0, "L13.h ...and two frames on the character has history again");
+    }
+    single();
+    {
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 3, scratch);
+        f.state = sct::makeState(rng, 3, f.base);
+    }
+    settle();
+    // the eyes' views never carry the source's kind of target 7: their own is the compose's engineVelocitySkinView
+    {
+        edvr::EngineVelocityViews ev{};
+        Fixture::Eye e13;
+        f.frame([&] { e13 = f.read(0); f.g.views(0, &ev); });
+        h.check(e13.given && ev.slots && ev.skin == nullptr, "L13.i the eyes' EngineVelocityViews carry no target 7 (the compose has its own view of it)");
+        lt::release(ev);
+    }
+    // the flat profile has no target 7: skinned draws in it, on foot or in an eye pass, create none, the views carry none and the log says nothing of one
+    {
+        const auto previous = edvr::g_runtimeProfile;
+        edvr::g_runtimeProfile = edvr::RuntimeProfile::Flat;
+        const size_t flatMark = lt::g_log.size();
+        Fixture::SourceEye flatSource;
+        bool flatViews = false;
+        for (int i = 0; i < 4; ++i) f.sourceFrame(true, [&] { flatSource = f.readSource(); flatViews = flatViews || flatSource.views; }, false, true);
+        const Seen flatSeen = f.seen;
+        Fixture::Eye flatEye;
+        for (int i = 0; i < 4; ++i) f.frame([&] { flatEye = f.read(0); });
+        edvr::g_runtimeProfile = previous;
+        h.check(!flatSource.given && !flatEye.given, "L13.j in the flat profile neither the source's views nor an eye give a target 7");
+        h.check(!lt::logged("target 7 created", flatMark), "L13.k in the flat profile no target 7 is created, for the source or an eye");
+        h.check(!flatSeen.rt7 && !flatSeen.vsPatched && !flatSeen.srv[0] && !flatSeen.srv[1] && !flatSeen.srv[2],
+                "L13.l in the flat profile a skinned family's draw is the game's own: no target 7 bound, no patched vertex shader, none of the three skin views");
+        if (lt::logged("target 7 created", flatMark)) std::fprintf(stderr, "  flat profile made a target 7\n");
+        (void)flatViews;
+    }
+    single();
+    {
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 3, scratch);
+        f.state = sct::makeState(rng, 3, f.base);
+    }
+    for (int i = 0; i < 3; ++i) f.frame([&] {});
 
     // L9: a small previous palette buffer, no list: the job at a row near the end of the 64-row buffer
     lifecycle_fake::g_hookSnap = nullptr;

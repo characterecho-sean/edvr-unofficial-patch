@@ -654,8 +654,10 @@ def print_vh_tally(text, frame):
 # the steady-detail key on, a third line follows the two (src/d3d11/vr_world_route_math.h vrWorldFormatRefusalWindow):
 #   vr world route refusal 5s: census=on|off every=N treated=N asked=N sampled=N read=N dropped=N size=WxH pixels=N refused=N
 #       refused-pct=X stale-refused=N masked=N corrupt=N sentinel=N unreprojectable=N camera=N range=N depth=N weapon=N other=N
-#       stale-kept=N depth-check=RAN/SKIPPED steady-detail=on|off view=on|off
-# (`pixels` is what the read-back samples examined, `refused` the pixels whose history the prep refused, by cause. The stale pixels are
+#       stale-kept=N depth-check=RAN/SKIPPED steady-detail=on|off view=on|off skinned-joined=N
+# (`skinned-joined` is F2 on foot, the only ACCEPTED class the census counts: the skinned pixels the prep took an exact motion for from the on-foot
+# source's target 7. It is not part of `refused`. 0 with a character in view means the route never read E; absent in a build before F2 on foot.
+# `pixels` is what the read-back samples examined, `refused` the pixels whose history the prep refused, by cause. The stale pixels are
 # two numbers: `stale-refused`, refused (with the steady-detail key off every stale pixel, with it on the ones last frame's depth did
 # not confirm), and `stale-kept`, not refused (the camera term, confirmed by last frame's depth). `depth-check` is the resolves with
 # the key on whose prep ran the depth check and those that could not (a reset frame is neither). The flight-3 build's `stale=` and
@@ -1288,6 +1290,7 @@ def parse_refusal_windows(text):
         for key in ("every", "treated", "asked", "sampled", "read", "dropped", "pixels", "refused"):
             w[key] = _cint(kv.get(key))
         w["kept"] = _cint(kv.get("stale-kept", kv.get("forgiven")))
+        w["skinned"] = _cint(kv.get("skinned-joined"))   # None in a build before F2 on foot
         check = re.match(r"^(\d+)/(\d+)$", kv.get("depth-check", ""))
         w["check_ran"], w["check_skipped"] = (int(check.group(1)), int(check.group(2))) if check else (None, None)
         w["causes"] = {name: _cint(kv.get(name)) for name, _ in REFUSAL_CAUSES}
@@ -1441,11 +1444,13 @@ def print_refusal_census(windows, events=None):
         if s == "measured":
             named = [(name, w["causes"][name]) for name, _ in REFUSAL_CAUSES if w["causes"][name]]
             mix = ", ".join("%s %s" % (name, _pct(n, w["pixels"])) for name, n in named) if named else "none refused"
+            # (printed only when a skinned pixel took its motion from target 7: a zero depends on whether a character was in view)
+            skinned = "" if not w.get("skinned") else "; skinned-joined %d (F2 on foot: pixels that took their exact motion from target 7)" % w["skinned"]
             print("%s: MEASURED %d sample(s) of %dx%d (%d asked, %d dispatched, %d dropped), treated %d; pixels %d; refused %s (%d): %s; "
-                  "stale-kept %s%s | %s"
+                  "stale-kept %s%s%s | %s"
                   % (head, w["read"], w["w"] or 0, w["h"] or 0, w["asked"], w["sampled"], w["dropped"] or 0, w["treated"], w["pixels"],
                      _pct(w["refused"], w["pixels"]), w["refused"], mix, _pct(w["kept"] or 0, w["pixels"]),
-                     _stale_tail(w["steady"], w["kept"], w["causes"]["stale-refused"], w["check_ran"], w["check_skipped"]), context))
+                     _stale_tail(w["steady"], w["kept"], w["causes"]["stale-refused"], w["check_ran"], w["check_skipped"]), skinned, context))
         else:
             reason = {
                 "idle": "the route treated no frame in this window (nothing was measured)",
@@ -11753,15 +11758,29 @@ def self_test_camera_census():
         """One refusal line of the fixture's measured window, with some tokens changed."""
         v = dict(census="on", every=4, treated=450, asked=450, sampled=113, read=112, dropped=0, size="5040x2835", pixels=1600300800,
                  refused=58410978, pct="3.650", stale=40007520, masked=800150, corrupt=0, sentinel=16003008, unreprojectable=0, camera=0,
-                 range=1600300, depth=0, weapon=0, other=0, kept=0, ran=0, skipped=0, steady="off", view="off")
+                 range=1600300, depth=0, weapon=0, other=0, kept=0, ran=0, skipped=0, steady="off", view="off", skinned=None)
         v.update(kw)
-        return ("[12:00:09.000] vr world route refusal 5s: census=%(census)s every=%(every)d treated=%(treated)d asked=%(asked)d "
+        line = ("[12:00:09.000] vr world route refusal 5s: census=%(census)s every=%(every)d treated=%(treated)d asked=%(asked)d "
                 "sampled=%(sampled)d read=%(read)d dropped=%(dropped)d size=%(size)s pixels=%(pixels)d refused=%(refused)d "
                 "refused-pct=%(pct)s stale-refused=%(stale)d masked=%(masked)d corrupt=%(corrupt)d sentinel=%(sentinel)d "
                 "unreprojectable=%(unreprojectable)d camera=%(camera)d range=%(range)d depth=%(depth)d weapon=%(weapon)d other=%(other)d "
-                "stale-kept=%(kept)d depth-check=%(ran)d/%(skipped)d steady-detail=%(steady)s view=%(view)s\n") % v
+                "stale-kept=%(kept)d depth-check=%(ran)d/%(skipped)d steady-detail=%(steady)s view=%(view)s") % v
+        return line + ((" skinned-joined=%d" % v["skinned"]) if v["skinned"] is not None else "") + "\n"
 
     nothing = dict(refused=0, pct="0.000", stale=0, masked=0, sentinel=0, range=0)
+    # F2 on foot: `skinned-joined=N` ends the line of a build that has it. It parses (None for a build that predates it), it is printed in the MEASURED line and it is
+    # not part of the refused total (those pixels took their exact motion).
+    with_skin = text + refusal_line(skinned=19, **nothing)
+    wins = parse_refusal_windows(with_skin)
+    _, out = report(with_skin)
+    if wins[-1]["skinned"] != 19 or wins[0]["skinned"] != 0 or "skinned-joined 19 (F2 on foot" not in squash(out) or "!! " in out or \
+            "refused 1.825% (58410978)" not in squash(out):
+        fail("skinned-joined=N did not parse, print in the measured line, or stay out of the refused total:\n%s" % out)
+    # (the fixture's own lines are the formatter's: they end skinned-joined=0; a log from a build before F2 on foot has no token at all)
+    before_f2 = text.replace(" skinned-joined=0", "")
+    if any(w["skinned"] is not None for w in parse_refusal_windows(before_f2 + refusal_line(**nothing))) or \
+            "skinned-joined" in report(before_f2 + refusal_line(**nothing))[1]:
+        fail("a build without the token printed a skinned-joined count")
     # "Ran, 0 refused" (pixels > 0, refused=0) is never the same text as "never ran" (treated=0, asked=0, read=0).
     _, out = report(text + refusal_line(**nothing))
     if "refused 0.000% (0): none refused; stale-kept 0.000%" not in squash(out) or "!! " in out or \

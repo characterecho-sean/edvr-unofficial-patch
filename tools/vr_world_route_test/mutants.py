@@ -164,6 +164,8 @@ MUTANTS = [
     M("curve-pending-lost", "pure", "curve: asked for and no strip drawn yet",
       [('    if (!ready) return std::snprintf(out, size, "pending");\n', "")], "a strip not drawn yet no longer reads pending"),
     M("curve-two-decimals", "pure", "curve: a strip in hand reads", [('"%.3f/%d/%.3f"', '"%.2f/%d/%.2f"')], "the strip's numbers print two decimals"),
+    M("refusal-skinned-token-zero", "pure", "refusal line: the skinned pixels the census counted are skinned-joined=N",
+      [("w.view, static_cast<unsigned long long>(w.skinned));", "w.view, 0ull);")], "the refusal line prints skinned-joined=0 whatever the census counted: a flight could not tell the route read E"),
     M("curve-order-swapped", "pure", "curve: a substitution that stood itself down",
       [('    if (standDown) return std::snprintf(out, size, "stood-down");\n    if (!ready) return std::snprintf(out, size, "pending");\n',
         '    if (!ready) return std::snprintf(out, size, "pending");\n    if (standDown) return std::snprintf(out, size, "stood-down");\n')],
