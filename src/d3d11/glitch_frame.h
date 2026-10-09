@@ -20,11 +20,70 @@
 
 #include "glitch_scene.h"
 
+#include <cstddef>
 #include <cstdint>
 
 namespace edvr {
 
 void installGlitchFrameFix();
+
+// The fallback detector's tuning (Build 2d). These were twelve
+// advanced.transition_flash_* keys; the detector now runs only when the engine
+// fix is not armed, on the values below, which are the defaults the keys had.
+struct GlitchTuning {
+    float units = 2000.0f;            // jump threshold, world units
+    float speedFactor = 8.0f;         // or this many times the camera's own speed
+    uint32_t maxConsecutive = 2;      // longest run of withheld frames
+    float repeatPercent = 2.0f;       // how close two jump sizes must be to be "the same separation"
+    float radiusTolerance = 0.005f;   // a FRACTION: how close two camera distances are the same orbit
+    float parkUnits = 64.0f;          // how still a camera must hold to count as parked
+    uint32_t dwellFrames = 20;        // frames on a radius before it is the view's
+    uint32_t burstLimit = 3;          // withholds inside burstWindow that spend the budget
+    uint32_t burstWindow = 60;        // frames
+    uint32_t separationMode = 2;      // 0 off, 1 log, 2 act
+    float driftPct = 10.0f;           // per cent
+};
+// FOR TESTS: the tuning the next installGlitchFrameFix() uses.
+void glitchFrameSetTuningForTest(const GlitchTuning& tuning);
+
+// The engine fix's handshake with this detector (transition_flash_eye_base.cpp
+// reports; docs/design-transition-flash-engine-fix-2026-09-23.md, Build 2a).
+// ARMED: the engine fix is live and the detector goes dormant -- it judges,
+// marks and un-marks nothing (an un-mark would cancel the engine fix's
+// withhold) and records no camera history while no event window is open (so
+// the camera-history dump key says so instead of printing a stale ring). Not armed -- the default,
+// and what a stand-down or a failed hook reports -- the detector runs exactly
+// as it does with no engine fix at all. Dormant, the per-draw and per-Map
+// pool and scene-draw reads are skipped.
+void glitchFrameNoteEngineFix(bool armed);
+
+// Can the engine fix's camera-buffer tap deliver (the detector observes a
+// 5376-byte buffer)? Checked before Armed is reported; `why` says what is
+// missing when not. glitchFrameDetectorRuns: would the fallback detector watch
+// anything (it needs the same buffer)?
+bool glitchFrameEngineTapAvailable(char* why, size_t whySize);
+bool glitchFrameDetectorRuns();
+
+// The engine fix acted on a frame it found bad. Always notes the camera jump
+// (the FSS arrival trigger keys on it). `withhold`: mark the frame so the
+// compositor does not show it, with the verdict the detector itself uses for
+// a scene-judged eye-camera reset (kVerdictSceneReset). Returns whether a
+// compositor was in a position to honour the mark (frame_flag.h's
+// glitchConsumerPresent); a patched frame (withhold false) returns true.
+bool glitchFrameEngineFixEvent(bool withhold);
+
+// The temporal pass's verdict for an engine withhold: "the camera stayed".
+// Call it AFTER the withheld frame's eyes were handed to the compositor (the
+// frame boundary after the mark), never at the mark itself: the pass latches
+// the verdict word when the eye is withheld and reads a CHANGE since as the
+// verdict, so a word published before the latch reads as no verdict at all
+// and ends in a history reset (flight 091951).
+void glitchFrameEngineFixVerdict();
+
+// The engine fix's event window (armed event .. its two bad renders): while
+// open, the camera-CB tap runs; closed, glitchFrameObserve returns at once
+// unless the detector is awake.
+void glitchFrameEngineWindow(bool open);
 
 // glitchFrameInvalidatePool's own and only test (glitch_frame.cpp): the fix
 // is installed at all. Necessary and sufficient -- unlike the functions
@@ -39,9 +98,6 @@ extern bool g_glitchFrameObserving;
 }  // namespace detail
 inline bool glitchFrameInstalled() { return detail::g_glitchFrameInstalled; }
 inline bool glitchFrameObserving() { return detail::g_glitchFrameObserving; }
-// The camera validation behind "transition flash fix ACTIVE" has passed: the
-// scene camera moved through its first rendered frames (flight, not the menu).
-bool glitchFrameCameraValidated();
 
 // Called from the Map/Unmap hooks. The detector picks out the buffers it cares
 // about by size, so passing it everything is intended.
@@ -79,22 +135,6 @@ void glitchFrameObservePool(const void* resource, const void* data, uint32_t byt
 void glitchFrameInvalidatePool(const void* resource);
 GlitchSceneGeometry glitchFrameSceneGeometry();
 
-// advanced.transition_flash_eye_base's per-bad-frame latch asks, at a
-// head-only fill, whether the pool's OWN upload for this counter frame is
-// already in the store, and if so gets the detector's own comparison run on
-// a COPY of that upload with its camera lane set to `camera` (the fill's row
-// 275 -- the same value s->sceneDrawPos will get at the draw). READ-ONLY
-// with respect to the store: never advances p.prev/p.older (only
-// glitchFrameNoteScenePool owns that) and never touches p.write. Returns
-// false when no pool slot holds this frame's upload -- the caller reads
-// that as "no evidence yet". `snapshot`, when non-null, receives the
-// triple the comparison used -- [0] the (camera-replaced) frame upload,
-// [1] p.prev, [2] p.older, all COPIES -- so the caller can re-evaluate
-// later fills against the LATCH-TIME history instead of the live store
-// (which NoteScenePool advances; comparing against it measures the upload
-// against itself, the 151942 wouldDiffer artifact).
-bool glitchFrameScenePoolEvidence(uint32_t frame, const float camera[3], GlitchSceneGeometry* out,
-                                  glitch_scene_detail::Sample snapshot[3]);
 
 // Called once per frame, after Present. eyeDraws is the number of draws that
 // reached the eye textures in the frame just finished -- used to tell a rendered
