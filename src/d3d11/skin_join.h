@@ -51,6 +51,34 @@ constexpr uint32_t kMaxRanges = 16384;
 constexpr uint32_t kMaxRangeInstances = 1024;
 constexpr uint32_t kInstanceStride = 8;    // the instance stream's entry: the pool record index, then a second word
 
+// Is the bound compute shader the palette chain (kChainHash)? The dispatch hook asks it of every owner dispatch while the second skin is wanted, so the
+// answer is kept per shader address. An address is not an identity, though: a destroyed shader's address comes back as another shader's, and the shader
+// registry (exposure_fix.cpp, registerShaderHash) replaces its hash and advances its generation at every registration. A verdict is therefore kept WITH the
+// generation it was asked at and is asked again when the generation has moved: false at an address that becomes the chain, true at an address that stops
+// being it, and "not registered yet" (hash 0) at an address registered later all follow, with no device-replacement special case (a new device registers
+// new shaders). A steady dispatch is one map hit and one atomic load; the registry (a lock) is asked once per address per generation.
+// `generation` must be read BEFORE bound() asks the registry: a registration that lands in between is then seen as a move at the next dispatch.
+class ChainVerdicts {
+public:
+    static constexpr size_t kCap = 1024;           // distinct addresses kept; more clears the table (it only costs the lookups again)
+    template <class HashOf>
+    bool bound(const void* cs, uint32_t generation, HashOf&& hashOf) {
+        if (!cs) return false;
+        const auto found = verdicts_.find(cs);
+        if (found != verdicts_.end() && found->second.generation == generation) return found->second.chain;
+        const bool chain = hashOf(cs) == kChainHash;
+        if (verdicts_.size() > kCap) verdicts_.clear();
+        verdicts_[cs] = Verdict{generation, chain};
+        return chain;
+    }
+    size_t size() const { return verdicts_.size(); }
+    void reset() { verdicts_.clear(); }
+
+private:
+    struct Verdict { uint32_t generation; bool chain; };
+    std::unordered_map<const void*, Verdict> verdicts_;
+};
+
 struct JobRow {                            // the game's t0 row: structured, stride 16
     uint32_t src, dst, bind, count;
 };

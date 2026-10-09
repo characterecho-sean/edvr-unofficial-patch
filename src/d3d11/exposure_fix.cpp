@@ -742,17 +742,13 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
 }
 
 // F2: is the bound compute shader the skinning palette chain (skin_join.h kChainHash)? Asked of every owner dispatch while the second skin
-// is wanted, so the verdict is kept by shader object: one registry lookup per distinct shader, ever. Owner context only.
+// is wanted, so the verdict is kept by shader object AND by the registry's generation (skinjoin::ChainVerdicts): an address a registration has since
+// re-used is asked again, and a steady dispatch is a map hit and an atomic load, never the registry's lock. Owner context only.
 bool skinChainBound() {
     void* cs = bindingGet(BindSlot::Cs);
     if (!cs) return false;
-    static std::unordered_map<void*, bool> verdicts;
-    const auto found = verdicts.find(cs);
-    if (found != verdicts.end()) return found->second;
-    const bool chain = hashOf(cs) == skinjoin::kChainHash;
-    if (verdicts.size() > 1024) verdicts.clear();
-    verdicts.emplace(cs, chain);
-    return chain;
+    static skinjoin::ChainVerdicts verdicts;
+    return verdicts.bound(cs, shaderRegistryGeneration(), [](const void* shader) { return hashOf(const_cast<void*>(shader)); });
 }
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
