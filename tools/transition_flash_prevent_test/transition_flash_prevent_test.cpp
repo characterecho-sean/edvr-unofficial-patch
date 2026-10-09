@@ -1658,6 +1658,115 @@ void caseEngineFillMatches() {
     check(!tfeb::engineFillMatches(nan3, p), "engineFillMatches: NaN never matches");
 }
 
+// --- Build 2b: the clip rows 270-274, against the real numbers of flight
+// 060721's fill 3 of tap frame f15527 (dump eyebase_060955_f15525.txt):
+// rows 272-279 of the scene CB BEFORE the patch, the engine's own NEXT frame,
+// and the base's 3x3 recovered from the pilot basis (R(B) = Pb^T Pa). The
+// dump prints four decimals, so a row compared against the next frame is
+// good to ~1e-3 plus the head's motion in one frame (0.0008 measured).
+
+void caseClipRowsAgainstRealDump() {
+    const float kRB[9] = {0.259219f, -0.255631f, 0.931396f, 0.946098f, 0.260904f, -0.191689f,
+                          -0.194046f, 0.930903f, 0.309425f};
+    const float kT[3] = {0.784932f, 13.0624f, 3.3662f};
+    // Rows 272..279, four floats each.
+    const float kBefore[32] = {0.188f, 0.0436f, 0.f, 0.9989f, 0.f, 0.f, 0.025f, 0.f,
+                               -0.0096f, -0.0449f, 0.9989f, 0.f, -0.0131f, -0.0037f, 0.0074f, 0.f,
+                               -0.0131f, -0.0037f, 0.0074f, 0.f, 0.9998f, 0.0182f, 0.0104f, 0.f,
+                               -0.0187f, 0.9988f, 0.0447f, 0.f, -0.0096f, -0.0449f, 0.9989f, 0.f};
+    const float kNext[32] = {0.9295f, -0.1901f, 0.f, 0.308f, 0.f, 0.f, 0.025f, 0.f,
+                             -0.2402f, 0.9206f, 0.308f, 0.f, 0.7763f, 13.0718f, 3.3568f, 0.f,
+                             0.7763f, 13.0718f, 3.3568f, 0.f, 0.2751f, -0.2398f, 0.9311f, 0.f,
+                             0.9309f, 0.3084f, -0.1956f, 0.f, -0.2402f, 0.9206f, 0.308f, 0.f};
+    float B[16] = {};
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) B[r * 4 + c] = kRB[r * 3 + c];
+    B[12] = kT[0]; B[13] = kT[1]; B[14] = kT[2]; B[15] = 1.0f;
+
+    // The fit's own facts, on the real before/next rows.
+    check(std::fabs(kBefore[8] - kBefore[28]) < 1e-4f && std::fabs(kBefore[9] - kBefore[29]) < 1e-4f &&
+              std::fabs(kBefore[10] - kBefore[30]) < 1e-4f,
+          "clip rows: row 274.xyz == row 279.xyz on the bad frame (dump)");
+    check(std::fabs(kNext[8] - kNext[28]) < 1e-4f && std::fabs(kNext[9] - kNext[29]) < 1e-4f &&
+              std::fabs(kNext[10] - kNext[30]) < 1e-4f,
+          "clip rows: row 274.xyz == row 279.xyz on the next frame (dump)");
+
+    // Rows 270 and 271 were never printed: build them from the model the fit
+    // verified on row 272 (fx 0.9394, fy 0.9715, sx/sy solved from row 272).
+    const float fx = 0.9394f, fy = 0.9715f;
+    float P[3][3];
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) P[r][c] = kBefore[(5 + r) * 4 + c];   // rows 277-279
+    const float sx = (kBefore[0] - fx * P[0][2]) / P[2][2];
+    const float sy = (kBefore[1] - fy * P[1][2]) / P[2][2];
+    auto clipRow = [&](const float Pm[3][3], int i, float out[4]) {
+        out[0] = fx * Pm[0][i] + sx * Pm[2][i];
+        out[1] = fy * Pm[1][i] + sy * Pm[2][i];
+        out[2] = 0.0f;
+        out[3] = Pm[2][i];
+    };
+    float clip[20];
+    clipRow(P, 0, &clip[0]);
+    clipRow(P, 1, &clip[4]);
+    std::memcpy(&clip[8], &kBefore[0], 4 * sizeof(float));      // row 272 as dumped
+    std::memcpy(&clip[12], &kBefore[4], 4 * sizeof(float));     // row 273
+    std::memcpy(&clip[16], &kBefore[8], 4 * sizeof(float));     // row 274
+    float modelRow272[4];
+    clipRow(P, 2, modelRow272);
+    float modelErr = 0.0f;
+    for (int k = 0; k < 4; ++k) modelErr = std::fmax(modelErr, std::fabs(modelRow272[k] - kBefore[k]));
+    check(modelErr < 1e-3f, "clip rows: the clip-column model reproduces the dumped row 272");
+
+    // The pilot basis, patched the way the act does (rotateByBase on each row).
+    float p277[3], p278[3], p279[3];
+    tfeb::rotateByBase(B, &kBefore[20], p277);
+    tfeb::rotateByBase(B, &kBefore[24], p278);
+    tfeb::rotateByBase(B, &kBefore[28], p279);
+    float out[20];
+    tfeb::patchClipRows(B, clip, p279, out);
+
+    // Row 272 against the engine's own next frame: the proof of the rotation
+    // convention (v . R(B), the pilot basis' own).
+    float err272 = 0.0f, errUnpatched = 0.0f;
+    for (int k = 0; k < 4; ++k) {
+        err272 = std::fmax(err272, std::fabs(out[8 + k] - kNext[k]));
+        errUnpatched = std::fmax(errUnpatched, std::fabs(kBefore[k] - kNext[k]));
+    }
+    check(err272 < 3e-3f, "clip rows: patched row 272 matches the next frame (|d| < 3e-3)");
+    check(errUnpatched > 0.5f, "clip rows: the unpatched row 272 was 0.74 off (the test discriminates)");
+    // The transposed convention must NOT fit.
+    float Bt[16];
+    std::memcpy(Bt, B, sizeof(Bt));
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) Bt[r * 4 + c] = B[c * 4 + r];
+    float outT[20];
+    tfeb::patchClipRows(Bt, clip, p279, outT);
+    float errT = 0.0f;
+    for (int k = 0; k < 4; ++k) errT = std::fmax(errT, std::fabs(outT[8 + k] - kNext[k]));
+    check(errT > 0.1f, "clip rows: R(B)^T (the other convention) does not fit the next frame");
+
+    // Row 274: equal to the patched row 279, and to the next frame's.
+    check(out[16] == p279[0] && out[17] == p279[1] && out[18] == p279[2], "clip rows: row 274.xyz := patched row 279.xyz");
+    check(out[19] == kBefore[11], "clip rows: row 274.w kept");
+    check(std::fabs(out[16] - kNext[8]) < 3e-3f && std::fabs(out[17] - kNext[9]) < 3e-3f &&
+              std::fabs(out[18] - kNext[10]) < 3e-3f,
+          "clip rows: patched row 274 matches the next frame's");
+    // Untouched: row 273 and every z lane.
+    bool untouched = true;
+    for (int k = 0; k < 4; ++k) untouched = untouched && out[12 + k] == clip[12 + k];
+    for (int i = 0; i < 3; ++i) untouched = untouched && out[i * 4 + 2] == clip[i * 4 + 2];
+    check(untouched, "clip rows: row 273 and the z lanes of 270-272 are untouched");
+
+    // Rows 270 and 271 (structure only): rotating the lane vectors equals
+    // rebuilding the model from the patched basis, to float precision.
+    float Pn[3][3];
+    for (int c = 0; c < 3; ++c) { Pn[0][c] = p277[c]; Pn[1][c] = p278[c]; Pn[2][c] = p279[c]; }
+    float worst = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        float want[4];
+        clipRow(Pn, i, want);
+        for (int k = 0; k < 4; ++k) worst = std::fmax(worst, std::fabs(out[i * 4 + k] - want[k]));
+    }
+    check(worst < 1e-4f, "clip rows: 270/271/272 rotated by R(B) = the clip model of the patched basis");
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1734,6 +1843,7 @@ int wmain(int argc, wchar_t** argv) {
     caseEngineBaseUsable();
     caseEngineActFrame();
     caseEngineFillMatches();
+    caseClipRowsAgainstRealDump();
     std::printf("transition_flash_prevent_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

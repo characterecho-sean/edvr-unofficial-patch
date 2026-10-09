@@ -502,11 +502,15 @@ inline constexpr uint32_t kSceneCBSimBytes = 5376;
 inline constexpr int kSceneCBSimFloat4Rows = 5376 / 16;   // 336 float4 rows
 inline constexpr int kSceneCBSimOriginFloat = 1100;       // cb1[275] = floats [1100..1102]
 inline constexpr int kSceneCBSimBasisFloat = 1104;        // cb1[276..279] = floats [1104..1119]
-// CHANGE 16: the widened basis survey covers rows 272-285 (floats
-// [1088..1143]) -- the 151942 dump showed 276-279 are base-derived;
-// the neighbours answer whether anything else nearby is.
-inline constexpr int kSceneCBSimSurveyFloat = 1088;
-inline constexpr int kSceneCBSimSurveyFloats = 56;   // 14 float4 rows
+// CHANGE 16: the widened basis survey covers rows 268-285 (floats
+// [1072..1143]; Build 2b widened it from 272 -- the clip rows 270-274 turned
+// out to be base-derived too) -- the 151942 dump showed 276-279 are
+// base-derived; the neighbours answer whether anything else nearby is.
+inline constexpr int kSceneCBSimSurveyFloat = 1072;
+inline constexpr int kSceneCBSimSurveyFloats = 72;   // 18 float4 rows
+// Build 2b: the camera-relative clip rows 270-274 (floats [1080..1099]).
+inline constexpr int kSceneCBSimClipFloat = 1080;
+inline constexpr int kSceneCBSimClipFloats = 20;     // 5 float4 rows
 
 // A 4x4 group is a view-matrix candidate when its 3x3 (storage [r*4+c]) is
 // orthonormal: unit-length, mutually perpendicular columns. The test is
@@ -881,6 +885,46 @@ inline constexpr float kEngineFillMatchMeters = 0.10f;
 inline bool engineFillMatches(const float row275[3], const float firstP[3]) noexcept {
     const float dx = row275[0] - firstP[0], dy = row275[1] - firstP[1], dz = row275[2] - firstP[2];
     return std::sqrt(dx * dx + dy * dy + dz * dz) <= kEngineFillMatchMeters;
+}
+
+// ---------------------------------------------------------------------------
+// BUILD 2b (2026-10-09, flight 060721): the clip rows. Build 2a left a brief
+// flash in the periphery on a supercruise entry although the eye matched the
+// next frame to 1 mm: rows 270-274 of the scene CB are camera-relative and
+// were still head-only on the bad frame. The fit over the 7 act fills that
+// have a next frame (scratchpad fit_rows.py, dumps eyebase_060955/061024/
+// 174848/174929):
+//   * row 274.xyz == row 279.xyz on all 14 frames, to 1e-4; w stays 0. So
+//     after the pilot block is patched, row 274.xyz := patched row 279.xyz.
+//   * rows 270-272 are the clip columns (the flat camera code reads them that
+//     way): row 270+i = (fx*P0i + sx*P2i, fy*P1i + sy*P2i, 0, P2i) for the
+//     head basis P (rows 277-279 xyz), constants identical across flights
+//     (fx 0.9394, fy 0.9715, sx 0.1784). The model is LINEAR in column i of P,
+//     and the patch replaces P by P.R(B) (the pilot basis rotation,
+//     rotateByBase on each ROW of 277-279), so column i becomes
+//     sum_j R(B)[j][i] * column j: three vectors over (row 270, 271, 272),
+//     one per lane c in {x, y, w}, each rotated by rotateByBase(B, .)
+//     (v . R(B)), the z lane (0 by the model) untouched. Row 272 patched this
+//     way matches the engine's next frame to 0.0008 over 7 fills where the
+//     unpatched row is 0.67-0.86 off.
+//   Row 273 (0, 0, 0.025, 0) is constant and untouched. Rows 270 and 271 were
+//   never printed by a dump; their fix rests on the structure above.
+// Reads every input row before the caller writes any.
+inline void patchClipRows(const float B[16], const float clip[20], const float patched279[3],
+                          float out[20]) noexcept {
+    std::memcpy(out, clip, sizeof(float) * 20);          // row 273 and every z lane stay as read
+    const int lanes[3] = {0, 1, 3};
+    for (int c : lanes) {
+        const float v[3] = {clip[0 * 4 + c], clip[1 * 4 + c], clip[2 * 4 + c]};   // rows 270, 271, 272
+        float r[3];
+        rotateByBase(B, v, r);
+        out[0 * 4 + c] = r[0];
+        out[1 * 4 + c] = r[1];
+        out[2 * 4 + c] = r[2];
+    }
+    out[4 * 4 + 0] = patched279[0];                       // row 274.xyz := patched row 279.xyz, w kept
+    out[4 * 4 + 1] = patched279[1];
+    out[4 * 4 + 2] = patched279[2];
 }
 
 }  // namespace tfeb
