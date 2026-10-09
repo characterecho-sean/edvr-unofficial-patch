@@ -1,4 +1,5 @@
 #include "perf_monitor.h"
+#include "config_refresh_line.h"
 #include "engine_motion_cpu.h"
 #include "frame_ticks.h"
 #include "gpu_frame_timing.h"
@@ -1152,8 +1153,9 @@ void perfMonitorFrame(ID3D11Device* dev) {
         const uint32_t edits = s.cfgEdits.exchange(0, std::memory_order_relaxed);
         const double reloadMs = static_cast<double>(s.cfgReloadUs.exchange(0, std::memory_order_relaxed)) / 1000.0;
         const double reloadMaxMs = static_cast<double>(s.cfgReloadMaxUs.exchange(0, std::memory_order_relaxed)) / 1000.0;
-        Log::get().note("config refresh: 1800-frame window ending %u; %u refreshes on the frame thread (the settings file re-read and every module reconfigured), %.1f ms in all, %.2f ms mean, %.2f ms max; %u menu edits queued for the settings file. All zero: no refresh in the window.",
-            s.frameNo, reloads, reloadMs, reloads ? reloadMs / reloads : 0.0, reloadMaxMs, edits);
+        char refreshLine[320];
+        formatConfigRefreshWindow(refreshLine, sizeof(refreshLine), s.frameNo, reloads, reloadMs, reloadMaxMs, edits);
+        Log::get().note("%s", refreshLine);
     }
     f.cpuDrawsMs = s.drawsMsRunning;
     s.drawWholeTicks = s.drawRealTicks = 0;

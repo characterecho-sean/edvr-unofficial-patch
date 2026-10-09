@@ -3028,6 +3028,26 @@ if errorlevel 1 ( echo [edvr] ERROR: explorer_cam_fade_test build failed & exit 
 python "tools\explorer_cam_fade_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
+:rig_menu_edit_hold_test
+echo [edvr] === menu_edit_hold_test.exe ===
+REM Build gate for the F8 menu's held numeric edits (src\d3d11\menu_edit_hold.h) and the config refresh window line (config_refresh_line.h). Holding a Number row steps
+REM it every 83 ms; each step is shown at once, and a burst of steps is one write and so one config refresh on the frame thread (F16 priced the hold at 100 refreshes in
+REM five seconds). The rig drives the coalescer with a frame clock and the tracker's repeat: a tap writes once on release, a long hold a bounded few, a row or page
+REM switch, a close, a shutdown and any other change write what is held, nothing is written twice, a failed write puts the row back; menu.cpp's wiring and the monitor's
+REM use of the formatter are read as text. No device needed.
+REM tools\menu_edit_hold_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\menueditHold" mkdir "%OBJ%\menueditHold"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\menueditHold"\ /Fe"%OBJ%\menueditHold\menu_edit_hold_test.exe" ^
+    "tools\menu_edit_hold_test\menu_edit_hold_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: menu_edit_hold_test build failed & exit /b 1 )
+"%OBJ%\menueditHold\menu_edit_hold_test.exe" --dry-run || exit /b 1
+"%OBJ%\menueditHold\menu_edit_hold_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\menu_edit_hold_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_scheduler_stack_json_test
 echo [edvr] === scheduler_stack_json_test.exe ===
 REM Build gate for the production SchedulerStackProbe JSON writer: the
