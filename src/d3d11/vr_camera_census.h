@@ -44,13 +44,6 @@ namespace edvr {
 namespace detail {
 using VrCensusJoinDrawFn = void (*)(ID3D11DeviceContext* ctx, uint32_t drawOrdinal);
 inline VrCensusJoinDrawFn g_vrCensusJoinDraw = nullptr;
-
-// advanced.explorer_cam_probe's I1 (explorer_cam_probe.h): the refresh observer's post half hands each call's camera snapshot
-// (camera+0x20 onwards, kVrCensusSnapBytes of it, read AFTER the game's body ran) to this function, which only tallies it per
-// camera kind and call site. Null always except while that probe is on, so with the key off the cost is one load of a null
-// pointer and the census behaves exactly as it did. Read only; the owner (render) thread.
-using VrCensusCameraNoteFn = void (*)(uint64_t frame, uint64_t camera, uint64_t callerRva, const uint8_t* snapFromCamera20) noexcept;
-inline VrCensusCameraNoteFn g_vrCensusCameraNote = nullptr;
 }  // namespace detail
 
 // The key is on in the VR profile (read at the last boundary). Render thread. The world route's detector watches draws while

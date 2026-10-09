@@ -225,8 +225,6 @@ void observePost(uintptr_t camera, uintptr_t /*ctx*/) noexcept {
     first.view = p.view;
     first.ctx = p.ctx;
     s->cameras.note(camera, sig, tangents, tangentsValid, first);
-    // advanced.explorer_cam_probe I1: the same snapshot, tallied per kind and call site by the probe (null with the probe off).
-    if (const auto note = detail::g_vrCensusCameraNote) note(s->frame, camera, p.callerRva, snap.bytes);
 }
 
 // Any thread but the owner's: counted into the lock-free table, nothing more.
@@ -261,10 +259,7 @@ VrCensusPhase readPhase() {
 bool readWanted() {
     if (!runtimeVrProfile()) return false;   // a flat profile reads the key off already (Config refuses it); asked twice
     const std::string text = Config::get().getString("advanced.vr_camera_census", "off");
-    // advanced.explorer_cam_probe (Phase 0b, flight F0) needs the census's refresh observer as its I1 source, so that key
-    // turns the census on implicitly. Both keys off: the census is off exactly as before.
-    return vrCameraCensusWantedFor(true, vrCameraCensusKeyFromText(text.c_str())) ||
-           Config::get().getBool("advanced.explorer_cam_probe", false);
+    return vrCameraCensusWantedFor(true, vrCameraCensusKeyFromText(text.c_str()));
 }
 
 // ---- the boundary's work ------------------------------------------------------------------------------------------

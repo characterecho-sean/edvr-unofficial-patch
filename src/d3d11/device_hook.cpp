@@ -43,7 +43,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "fss_res.h"
 #include "journal_watch.h"
 #include "explorer_cam.h"   // explorerCamFrameBoundary (the frame tick) and explorerCamShutdown (the avatar dither-fade global goes back at an unload)
-#include "explorer_cam_probe.h"   // explorerCamProbeFrameBoundary (temporary)
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
@@ -1149,8 +1148,6 @@ EDVR_BOUNDARY_TICK(tkCelestialStatus, "celestial_status");
 // boundary until 2026-10-08, which only exists when vScreen installs a State: with fix.black_void off, fix.panel_distance 1, no flash observation,
 // advanced.app_gpu_timing off and advanced.panel_hooks_always off it installs transport-only and F5 did nothing. Here it runs every owned Present.
 EDVR_BOUNDARY_TICK(tkExplorerCam, "explorer_cam");
-// advanced.explorer_cam_probe (explorer_cam_probe.h), a temporary log-only instrument: its own budget, so a fault in it stands it down alone.
-EDVR_BOUNDARY_TICK(tkExplorerCamProbe, "explorer_cam_probe");
 EDVR_BOUNDARY_TICK(tkFssModeLatch, "fss_mode_latch");
 EDVR_BOUNDARY_TICK(tkMenu, "menu");
 EDVR_BOUNDARY_TICK(tkBindingBoundary, "binding_boundary");
@@ -1491,12 +1488,9 @@ void presentFrameBoundary() {
     // on-foot sessions beginning (Disembark).
     tkJournalWatch.run([] { journalWatchTick(); });
     tkCelestialStatus.run(tickCelestialStatus);
-    // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay) and before the probe below, which attaches to the free-camera hook
-    // this installs. Unconditional: an EMPTY hotkey.explorer_cam is read here every frame too, so binding it live arms the feature on the next one.
+    // Explorer Cam (Phase 1), after the journal's tick it reads (on foot, GuiFocus, gameplay). Unconditional: an EMPTY hotkey.explorer_cam is read here
+    // every frame too, so binding it live arms the feature on the next one.
     tkExplorerCam.run([] { explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
-    // advanced.explorer_cam_probe (Phase 0b, flight F0; temporary): reads the key, attaches to the free-camera hook when it is on, and prints the 5 s heartbeats,
-    // the change lines and the 1 Hz detail lines. Log only; with the key off it reads the key and returns.
-    tkExplorerCamProbe.run([] { explorerCamProbeFrameBoundary(static_cast<uint32_t>(g_state->frameCounter)); });
     tkFssModeLatch.run(tickFssModeLatch);
     // The settings menu (docs/settings-menu.md): its summon key, its
     // navigation keys and head-aim, its fade, the keyboard gate that

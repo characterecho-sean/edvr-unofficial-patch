@@ -12,7 +12,7 @@
 //
 // THE HOOKS (build 332841 only; any PE or prologue mismatch stands the feature down with one line and patches nothing):
 //   +0x1071980  the free camera's update. Placement runs BEFORE the original (the pose write and the lock press), the lock's
-//               pressed-int is restored AFTER it returns, then the observers.
+//               pressed-int is restored AFTER it returns.
 //   +0x1091140  the camera's collision sweep, only ever called by that update.     } relays in machine code: return 0
 //   +0x108F1B0  the commander's box push, only ever called by that update.        } when rcx is the placed activity
 //   +0x47C7640  the camera UI's update: FreeCamToggleHUD pressed once per placement, and again to give the UI back.
@@ -31,46 +31,25 @@
 
 namespace edvr {
 
-// Once a frame at the Present boundary (device_hook.cpp's own tick, tkExplorerCam: it must run whatever vScreen installed, including transport-only), before explorerCamProbeFrameBoundary. Reads hotkey.explorer_cam (Explorer Cam is
+// Once a frame at the Present boundary (device_hook.cpp's own tick, tkExplorerCam: it must run whatever vScreen installed, including transport-only). Reads hotkey.explorer_cam (Explorer Cam is
 // armed exactly when it is non-empty), the eye keys, polls F5, installs the hooks the first time they are wanted, publishes the settings to the hook threads,
 // drains their events into the log, ends a session whose controller went silent, and writes the 5 s heartbeat while a session is on.
 // Render thread. Never call it from inside a game hook.
 void explorerCamFrameBoundary(uint32_t frameNo);
-
-// ---- diagnostic observers (advanced.explorer_cam_probe, temporary) ----------------------------------------------------------------
-// One target gets one CodeHook, so a diagnostic's observation of the same function rides this file's hook instead of installing its
-// own. A hook can carry several observers (kMaxObservers); the next instrument -- the neck -- adds its own the same way.
-enum class ExplorerCamHook : int { FreeCamera = 0, Controller = 1, AvatarFade = 2 };
-struct ExplorerCamHookStatus {
-    enum State : int { NotTried = 0, Armed = 1, StoodDown = 2 };
-    int state = NotTried;
-    size_t stolen = 0;       // Armed: the bytes of the prologue CodeHook moved
-    uintptr_t target = 0;    // Armed: the hooked address
-    uintptr_t relay = 0;     // Armed: the relay's address
-    char why[400] = {};      // StoodDown: one sentence
-};
-// Called by the probe's own boundary (the frame thread). The observer runs after the original returns and after every press has
-// been restored, with the object (rcx). `attach` false removes it. Installs the hook the first time anyone wants it. Returns the
-// hook's status.
-using ExplorerCamActivityObserver = void (*)(void* object) noexcept;
-constexpr int kExplorerCamMaxObservers = 4;
-ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivityObserver observer, bool attach);
 
 // The skeleton interface's FindJoint(name) (EliteDangerous64.exe+0xFDDB10, called by many systems). Explorer Cam hooks it (the original first, its result
 // unchanged) to learn which skeleton interfaces the game attaches the local player's two avatars to: FUN 0x19B1240 calls FindJoint("def_c_povCamera_joint")
 // from two sites for EVERY humanoid (F6: the last site-1 attach is usually an NPC's). Site 1 (returning to +0x19B12D5) is a humanoid's third-person avatar,
 // site 2 its first-person avatar, which only the local player has. So the hook LATCHES a pair only when one thread makes a site-1 attach and then a site-2
 // attach at the same stack location (one invocation of 0x19B1240 does both); sites 0 and 1 below are the latched local third-person and first-person
-// skeletons. Head hiding and the probe's H use the latched pair only. The hook is installed when Explorer Cam is on or the probe asks.
+// skeletons. Head hiding and the head-joint eye use the latched pair only. The hook is installed when Explorer Cam is on.
 struct ExplorerCamSkeleton {
-    uint64_t iface = 0;       // the LATCHED local avatar's skeleton for this site (0 = none latched yet, or dropped as stale)
+    uint64_t iface = 0;       // the LATCHED local avatar's skeleton for this site (0 = none latched yet)
     uint32_t index = 0xFFFF;  // the povCamera joint index the original returned for it
     uint32_t captures = 0;    // RAW attaches seen at this site since launch: EVERY humanoid's, not only the local one
     uint32_t latches = 0;     // times a local pair was latched
 };
-ExplorerCamHookStatus explorerCamWantFindJoint(bool want);   // the probe's request: installs the hook the first time, opens or closes its share of the gate
 ExplorerCamSkeleton explorerCamSkeleton(int site);
-void explorerCamSkeletonDrop(int site, uint64_t iface);      // a captured interface that went stale: forgotten unless a newer capture replaced it
 uint64_t explorerCamFindJointSeen();                         // every FindJoint call the hook has seen (proof it is alive)
 
 // Is an Explorer Cam session on? True from F5's request until the session ends (the camera closed, F5 pressed again, or Explorer Cam stood down). An atomic read,
@@ -80,15 +59,12 @@ bool explorerCamSessionActive();
 // An unload (FreeLibrary): puts the avatar dither-fade global back to -1 if EDVR still holds it at 0. Frame-thread context; SEH-guarded.
 void explorerCamShutdown();
 
-// Where the avatar dither-fade mode global is (null when the build is not known): for the probe's fade counter, which reads it.
-const int32_t* explorerCamFadeGlobalAddress();
-
 // The game image base, when its PE identity (timestamp and size) is build 332841's; false, with a sentence in `why`, otherwise. The
-// answer is cached for the session. For the F2 instruments, which patch a vtable slot instead of a function.
+// answer is cached for the session. The fade global and the follow's head-joint reads resolve their addresses from it.
 bool explorerCamBuildKnown(uintptr_t* base, char* why, size_t whyCap);
 
 #ifdef EDVR_EXPLORER_CAM_TEST
-// The rigs' seam (tools\explorer_cam_test, tools\explorer_cam_probe_test): the same boundary with a scripted clock and scripted
+// The rig's seam (tools\explorer_cam_test): the same boundary with a scripted clock and scripted
 // inputs, synthetic functions in place of the game's, and the shared state to look at.
 using ExplorerCamSinkFn = void (*)(void* ctx, const char* line);
 struct ExplorerCamTestTargets {

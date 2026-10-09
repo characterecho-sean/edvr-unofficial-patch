@@ -1190,7 +1190,7 @@ int main() {
               "(no hook) or stolen at the wrong length (a corrupted trampoline)");
 
         // FreeCameraActivity's update (EliteDangerous64.exe+0x1071980, build 332841), the
-        // Explorer Cam probe's target (advanced.explorer_cam_probe, explorer_cam_probe.cpp
+        // Explorer Cam placement's first target (hotkey.explorer_cam, explorer_cam.cpp
         // in the d3d11 half): `mov [rsp+20h], rbx` is its first instruction, FIVE
         // bytes with no rip-relative displacement, so CodeHook steals exactly five and
         // the 28-byte prologue's later instructions (pushes, a SIB lea, a sub with an
@@ -1200,7 +1200,7 @@ int main() {
         check(codeInstructionLength(freeCamera, sizeof(freeCamera), &disp) == 5 && disp == 0,
               "...and FreeCameraActivity's update prologue: its first instruction is 5 bytes, "
               "no displacement, so 5 are stolen",
-              "the Explorer Cam probe's hook target would be refused or stolen at the "
+              "Explorer Cam's free-camera hook target would be refused or stolen at the "
               "wrong length");
 
         // The free camera's collision step (EliteDangerous64.exe+0x1091140, build 332841), Explorer
@@ -1243,16 +1243,16 @@ int main() {
         check(codeInstructionLength(cameraController, sizeof(cameraController), &disp) == 5 && disp == 0,
               "...and the camera controller's update: `mov [rsp+8],rbx` is 5 bytes, no displacement",
               "Explorer Cam's controller hook would be refused or stolen at the wrong length");
-        // AvatarModelComponent's dither-fade update (+0x3DD6040, the fade counter's target under advanced.explorer_cam_probe): `4C 8B DC` is
+        // AvatarModelComponent's dither-fade update (+0x3DD6040, the head hiding's target): `4C 8B DC` is
         // `mov r11,rsp` (REX.WR 8B /r, register ModRM, three bytes, no displacement), then `push rbx` and `push rsi`: 3+1+1 = five bytes. The
         // `mov rax,[rip+d32]` that ends the 16-byte prologue lies beyond the patch, so the rip-relative displacement is never rewritten.
         const uint8_t avatarFade[] = {0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
         check(codeInstructionLength(avatarFade, sizeof(avatarFade), &disp) == 3 && disp == 0 &&
                   codeInstructionLength(avatarFade + 3, sizeof(avatarFade) - 3, &disp) == 1 && codeInstructionLength(avatarFade + 4, sizeof(avatarFade) - 4, &disp) == 1,
               "...and the avatar dither-fade update: `mov r11,rsp` is 3 bytes, no displacement, then two pushes: five bytes stolen",
-              "the fade counter's hook would be refused or stolen at the wrong length");
+              "Explorer Cam's avatar-fade hook would be refused or stolen at the wrong length");
 
-        // The skeleton interface's FindJoint (+0xFDDB10, shared by RuntimeRigComponent and AnimatedObject; the H instrument's route-B hook): `mov [rsp+8],rbx`
+        // The skeleton interface's FindJoint (+0xFDDB10, shared by RuntimeRigComponent and AnimatedObject; Explorer Cam's skeleton capture): `mov [rsp+8],rbx`
         // is its first instruction, five bytes with no rip-relative displacement, so CodeHook steals exactly five.
         const uint8_t findJoint[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x01, 0x48, 0x8B, 0xFA};
         check(codeInstructionLength(findJoint, sizeof(findJoint), &disp) == 5 && disp == 0,

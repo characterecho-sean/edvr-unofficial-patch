@@ -52,8 +52,8 @@
   ms BEFORE the camera opens and back in once placed and steady (check the
   `comfort fade:` lines, "black lasted"); F5 out the same; a stall; the 3 s
   cap. Also F5 with the minimal config (black_void off, panel_distance 1).
-- **Temporary keys:** only `[advanced] explorer_cam_probe` (removed at arc
-  close). The trims and the smoothing are PERMANENT user settings (Sean,
+- **Temporary keys:** none. `[advanced] explorer_cam_probe` is REMOVED
+  (2026-10-09, below). The trims and the smoothing are PERMANENT user settings (Sean,
   2026-10-08), shipped at his tuning: `[fix] explorer_cam_eye_trim_up` 0.15,
   `_forward` -0.08, `_right` 0.0 (m, commander axes, held to +-0.5, was +-0.3)
   and `explorer_cam_follow_smoothing_ms` 0, tuned on the F8 menu's Explorer Cam
@@ -863,3 +863,32 @@ Findings 3 to 5 and the first conditional concern, from `reviews\explorer-cam-ho
 - **Conditional 1, a pose not built yet (P3), fixed as insurance.** `followDerive` cached a null pose or a zero joint count as a failure for the latched interface for
   good. Those two (only) are retried every 60 placing updates, silently (the line is said once), until the read works; no head joint, too many joints and a fault are
   unchanged. No flight evidence shows this lifecycle happens; a synthetic null/zero-then-valid skeleton proves the recovery.
+
+## 2026-10-09 The probe is removed
+
+`[advanced] explorer_cam_probe` is gone (Sean approved, 2026-10-09). It was the
+arc's promised temporary key, log only, default `off`. The key, its `edvr.ini`
+block, its config read and every instrument behind it are deleted, with its rig
+(`tools\explorer_cam_probe_test`) and its `build.bat` entries: the free-camera
+observer I3 and its pressed-int lines, the camera census tally I1 (the census
+no longer turns on for it; `advanced.vr_camera_census` is unchanged), the
+scene-block fingerprint I2 (vscreen.cpp's second tee and its fault budget), and
+the later F2 instruments behind the same key (the controller observer I4, the
+neck's vtable-slot swap N, the fade counter F, the skeleton instruments H and
+H2). The `tkExplorerCamProbe` frame tick is gone from device_hook.cpp, and
+gate_test no longer pins it.
+
+Production is unchanged. Explorer Cam's own hooks (free camera, collision, box
+push, camera UI, controller, avatar fade for the head hide, FindJoint for the
+local-avatar latch, zoom/DOF) keep their roles and their gates. The observer
+list the probe rode (`explorerCamObserve`, `runObservers`) is deleted with the
+callers; with the key off at the shipped default it was empty, so each gate is
+the same expression minus a term that was zero: free camera and controller open
+while a placement is active (the controller also while the fade global is held),
+the fade hook while the head hide is on, FindJoint while active. The hooks'
+"armed" lines no longer say "LOG ONLY ... advanced.explorer_cam_probe": the fade
+hook's line now says what it does (head hiding), the FindJoint line says capture.
+The key is a retired name in `tools\config_test` (`kRetiredKeys`): an old line in
+a user's ini is carried over by the installer as "no longer used by this
+version" and the DLL never reads it. The sections above describe the instruments
+as they were flown and stay as history.

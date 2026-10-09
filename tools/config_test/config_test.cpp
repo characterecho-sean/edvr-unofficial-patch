@@ -1053,6 +1053,11 @@ static void iniNameScan(const std::wstring& root) {
 // different reason: the behaviour is gone with them (the game's own detail and its own prop updates are what run), so there is
 // nothing to keep permanent. "settlement_detail" is also a prefix of the governor's two [advanced] keys, settlement_detail_max
 // and settlement_detail_observe, so the one name holds all three.
+//
+// advanced.explorer_cam_probe, the temporary log-only instruments of the Explorer Cam redesign (the free-camera observer, the camera census's
+// implicit tally, the scene-block fingerprint and the later controller, neck, fade and skeleton instruments behind the same key), was removed
+// 2026-10-09 when the arc's flights were done. No live key contains its name, so the bare name holds. An old line in a user's ini is carried over by
+// the installer under "no longer used by this version" and is never read by the DLL.
 static const char* const kRetiredKeys[] = {
     "temporal_aa_on_foot_world_jitter",
     "temporal_aa_on_foot_world_steady_detail",
@@ -1074,6 +1079,8 @@ static const char* const kRetiredKeys[] = {
     "dump_camera_on_external_cam",
     "keyless_camera",
     "hold_frames_on_external_cam",
+    // The Explorer Cam redesign's temporary probe, 2026-10-09.
+    "explorer_cam_probe",
 };
 static const int kRetiredKeyCount = int(sizeof(kRetiredKeys) / sizeof(kRetiredKeys[0]));
 
@@ -1146,14 +1153,13 @@ static void retiredKeyScan(const std::wstring& root) {
             "fix.explorer_cam_eye_forward fix.explorer_cam_eye_right",
             "fix.explorer_cam_eye_trim_right, _up, _forward",
             "fix.explorer_cam_follow_smoothing_ms",
-            "advanced.explorer_cam_probe = on\n",
         };
         bool foundAll = true, passedAll = true;
         for (const std::string& t : retired) foundAll = foundAll && spellsRetiredKey(t) != nullptr && std::strcmp(spellsRetiredKey(t), kRetiredExactKeys[0]) == 0;
         for (const std::string& t : liveKeys) passedAll = passedAll && spellsRetiredKey(t) == nullptr;
         if (foundAll && passedAll && kRetiredExactKeyCount == 1)
             ok("the exact-name scan finds fix.explorer_cam in a read, a message, a comment and at the end of a sentence, and passes hotkey.explorer_cam, "
-               "fix.explorer_cam_eye_*, the trims, the smoothing and advanced.explorer_cam_probe beside it");
+               "fix.explorer_cam_eye_*, the trims and the smoothing beside it");
         else
             fail("the exact-name scan's own control", std::string(foundAll ? "" : "a retired spelling was missed; ") + (passedAll ? "" : "a live key was flagged"));
     }
@@ -1512,6 +1518,7 @@ int main(int argc, char** argv) {
     expectFloat("fix.explorer_cam_eye_trim_forward", -0.08f, "...forward -0.08,");
     expectFloat("fix.explorer_cam_eye_trim_right", 0.0f, "...right 0.0,");
     expectFloat("fix.explorer_cam_follow_smoothing_ms", 0.0f, "...and the follow smoothing at 0 (exact follow)");
+    expectStr("advanced.explorer_cam_probe", "<unset>", "the retired Explorer Cam probe key is absent from the shipped file (removed 2026-10-09; kRetiredKeys holds its name out of every source)");
     expectFloat("fix.explorer_cam_eye_trim_up", ecm::kTrimUpDefault, "the shipped up trim is the code constant ecm::kTrimUpDefault");
     expectFloat("fix.explorer_cam_eye_trim_forward", ecm::kTrimForwardDefault, "...the shipped forward trim is ecm::kTrimForwardDefault");
     expectFloat("fix.explorer_cam_eye_trim_right", ecm::kTrimRightDefault, "...the shipped right trim is ecm::kTrimRightDefault");

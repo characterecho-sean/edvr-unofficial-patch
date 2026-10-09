@@ -23,8 +23,8 @@
 - **Your settings (2026-10-08):** `fix.explorer_cam_eye_trim_up`, `_forward`
   and `_right` and `fix.explorer_cam_follow_smoothing_ms` are permanent personal
   preferences, shipped at Sean's own tuning (0.15, -0.08, 0.0 m; 0 ms) and
-  set on the F8 menu's Explorer Cam page (built, not flown). The one
-  temporary key left is `advanced.explorer_cam_probe` (a log-only instrument).
+  set on the F8 menu's Explorer Cam page (built, not flown). No temporary key
+  is left: the log-only `advanced.explorer_cam_probe` was removed 2026-10-09.
   The comfort fade has no key.
 
 Explorer Cam puts your viewpoint at your commander's head while you are on foot

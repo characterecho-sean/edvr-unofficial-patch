@@ -901,15 +901,11 @@ int boundarySourceChecks(const std::string& root) {
     verify(withoutSpaces(hookText).find("EDVR_BOUNDARY_TICK(tkExplorerCam,\"explorer_cam\");") != std::string::npos &&
                flatTicks.find("tkExplorerCam.run([]{explorerCamFrameBoundary(static_cast<uint32_t>(g_state->frameCounter));});") != std::string::npos,
            "Explorer Cam's frame tick is declared in device_hook.cpp and run at the top level of presentFrameBoundary(), with the frame counter");
-    verify(withoutSpaces(hookText).find("EDVR_BOUNDARY_TICK(tkExplorerCamProbe,\"explorer_cam_probe\");") != std::string::npos &&
-               flatTicks.find("tkExplorerCamProbe.run([]{explorerCamProbeFrameBoundary(static_cast<uint32_t>(g_state->frameCounter));});") != std::string::npos,
-           "...and so is the probe's, with a budget of its own");
-    verify(flatTicks.find("tkExplorerCam.run(") < flatTicks.find("tkExplorerCamProbe.run(") && flatTicks.find("tkEliteBinds.run(") < flatTicks.find("tkExplorerCam.run(") &&
+    verify(flatTicks.find("tkEliteBinds.run(") < flatTicks.find("tkExplorerCam.run(") &&
                flatTicks.find("tkExplorerCam.run(") < flatTicks.find("tkMenu.run(") && flatTicks.find("tkExplorerCam.run(") < flatTicks.find("tkVscreenRest.run("),
-           "...after the Elite binds it reads, before the probe that attaches to its hook, and before the menu and vScreen's boundary");
-    verify(screenText.find("explorerCamFrameBoundary") == std::string::npos && screenText.find("explorerCamProbeFrameBoundary") == std::string::npos &&
-               screenText.find("tkExplorerCam") == std::string::npos,
-           "vscreen.cpp does not carry either of them: nothing about Explorer Cam depends on vScreen having installed");
+           "...after the Elite binds it reads, and before the menu and vScreen's boundary");
+    verify(screenText.find("explorerCamFrameBoundary") == std::string::npos && screenText.find("tkExplorerCam") == std::string::npos,
+           "vscreen.cpp does not carry it: nothing about Explorer Cam depends on vScreen having installed");
     {
         // The ini's reload lives in vScreenRefreshConfig, the only place it is re-read. It must come BEFORE the State check: with vScreen transport-only there is no State, and a
         // reload that waited for one never happened -- a hotkey.explorer_cam bound while the game runs (or any live edit, the F8 menu's writes) would never apply.

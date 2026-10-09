@@ -6,7 +6,7 @@
 // commander-local pose is written before every update, so the eye is
 //     eye = head joint position + head joint rotation x offset,   then + the trims,
 // where the offset is the povCamera joint's place relative to the head in the REST pose, expressed in the head joint's own axes: derived ONCE per skeleton
-// from the animated pose's local transforms (the pose walk H2 proved: P+0x48 locals, P+0x50 parents), because that pose is the bind pose and never moves.
+// from the animated pose's local transforms (the pose walk the F5 flight proved: P+0x48 locals, P+0x50 parents), because that pose is the bind pose and never moves.
 // Everything here is arithmetic, tables and text; the glue (explorer_cam.cpp) does the guarded reads and the game calls.
 //
 // ISOLATION. While a session has placed the view, the camera suite's own input actions are cleared before each camera update reads them and put back after,
@@ -26,7 +26,7 @@ namespace edvr {
 namespace ecm {
 
 // ---- A. the skeleton interface, the pose walk and the slot checks (build 332841) -----------------------------------------------------------------------
-// Moved here from explorer_cam_f2_core.h so the feature and the probe share one set of verified addresses; the probe's H and H2 use them unchanged.
+// The verified addresses of the build the head-joint eye reads (found by the flights' skeleton instruments, since retired; the arc doc has the evidence).
 constexpr uintptr_t kRrVtableRva = 0x559CF90, kAoVtableRva = 0x517DC20;
 constexpr uint32_t kHeadSlots = 4;                                                    // the slots used: +0x18, +0x30, +0x48, +0x58
 constexpr uint32_t kHeadSlotIndex[kHeadSlots] = {3, 6, 9, 11};
@@ -42,9 +42,9 @@ constexpr uint32_t kNoJoint = 0xFFFF;
 
 enum class HeadKind : uint8_t { None = 0, Runtime = 1, Animated = 2 };
 
-// ---- H2: the joints by WALKING THE ANIMATED POSE ---------------------------------------------------------------------------------------------------
+// ---- the joints by WALKING THE ANIMATED POSE ---------------------------------------------------------------------------------------------------
 // F5: the cached +0x58 head did not drop when the commander crouched, and +0x48 drifted 12 m (a frame that is not the free camera's). The cached matrices
-// are only maintained for joints the game asked for (SetAttachJoint marks a joint and its ancestors), so H2 composes the joints from the animated pose
+// are only maintained for joints the game asked for (SetAttachJoint marks a joint and its ancestors), so the walk composes the joints from the animated pose
 // itself, exactly as the game's uncached path does (FUN 0xFDE0D0, read and its quaternion constants evaluated against the exe's own data):
 //   P = GetPoseData(): the u16 at P+0 is the joint count; *(P+0x48) -> the local transforms, 32 bytes a joint: position vec4 at +0 (x,y,z,w), rotation
 //   quaternion (x,y,z,w) at +0x10; *(P+0x50) -> the u16 parent of each joint (0xFFFF = root); *(P+0x18) -> the u16 name hashes.

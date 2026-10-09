@@ -40,7 +40,7 @@ constexpr uintptr_t kCollisionRva = 0x1091140;    // the camera's sweep/ray coll
 constexpr uintptr_t kBoxPushRva = 0x108F1B0;      // pushes the point out of the commander's box (+0.25); one caller, 0x10728B6
 constexpr uintptr_t kCameraUiRva = 0x47C7640;     // VanityCameraUIActivity's update (rcx = the object), reached by a job thunk
 constexpr uintptr_t kControllerRva = 0x2DF14C0;   // VesselCameraMountControl's update (rcx = the controller), vtable only
-constexpr uintptr_t kAvatarFadeRva = 0x3DD6040;   // AvatarModelComponent's per-frame dither fade (rcx = the component, void): the F fade counter's hook
+constexpr uintptr_t kAvatarFadeRva = 0x3DD6040;   // AvatarModelComponent's per-frame dither fade (rcx = the component, void): the head hiding's hook
 constexpr uintptr_t kFadeModeRva = 0x5E9DC28;     // int, .data: the dither fade's mode, -1 = auto (the game's own); when not -1 every avatar gets
                                                   // enabled = (mode != 0) and amount = the float at kFadeAmountRva
 constexpr uintptr_t kFadeAmountRva = 0x601E088;   // float, .data (zero-initialised, so 0)
@@ -88,7 +88,7 @@ inline constexpr uint8_t kAvatarFadePrologue[kAvatarFadePrologueBytes] = {
     0x4C, 0x8B, 0xDC, 0x53, 0x56, 0x57, 0x48, 0x81, 0xEC, 0x10, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x05};
 
 // The skeleton interface's FindJoint(const char* name) -> u16 (0xFFFF = none), shared by RuntimeRigComponent and AnimatedObject (rcx = the
-// interface, rdx = the name): the probe's H instrument hooks it (callback relay, original first) to learn which interfaces the game attaches the local
+// interface, rdx = the name): Explorer Cam hooks it (callback relay, original first) to learn which interfaces the game attaches the local
 // player's avatars to. `mov [rsp+8],rbx` is the first instruction, five bytes with no rip-relative displacement: CodeHook steals exactly five.
 constexpr uintptr_t kFindJointRva = 0xFDDB10;
 constexpr size_t kFindJointPrologueBytes = 16;
@@ -109,7 +109,7 @@ constexpr uint32_t kOffRelative = 0x470;       // 1 = relative to the commander'
 constexpr uint32_t kOffRotationLock = 0x471;   // 1 = follow the live frame
 constexpr uint32_t kOffPresetPending = 0x473;  // 1 only on the first update, which seeds the pose from the preset
 constexpr uint32_t kOffState = 0x48C;          // a byte, mirrored from a shared record every update: NEVER written here
-constexpr uint32_t kOffToggleRotationAction = 0x4F8;   // qwords: action objects (the F2 probe reads their pressed ints)
+constexpr uint32_t kOffToggleRotationAction = 0x4F8;   // qwords: action objects
 constexpr uint32_t kOffWorldFixAction = 0x500;
 constexpr uint32_t kOffLockAction = 0x508;     // the relative-lock action object
 constexpr uint32_t kOffActionPressed = 0x1C;   // in any action object: an int, nonzero on a press
@@ -121,7 +121,7 @@ constexpr uint32_t kOffUiHidden = 0x1A0;       // a byte; the update toggles it 
 constexpr uint32_t kOffUiHideAction = 0x1D8;   // a qword, NULL unless the game stored FreeCamToggleHUD's handle
 constexpr uint32_t kUiBytes = 0x1E0;
 
-// The avatar component's dither block (read by the fade counter): comp+0x378 -> a shader-parameter block (+0x90 the enabled byte, +0x120 the
+// The avatar component's dither block (offsets from the flights, pinned by the rig): comp+0x378 -> a shader-parameter block (+0x90 the enabled byte, +0x120 the
 // amount float), comp+0x380 the eased level.
 constexpr uint32_t kOffAvatarFadeBlock = 0x378, kOffAvatarFadeEased = 0x380, kOffFadeBlockEnabled = 0x90, kOffFadeBlockAmount = 0x120;
 constexpr uint32_t kAvatarBytes = 0x388;
@@ -1061,8 +1061,7 @@ template <size_t N>
 using EventRing = Ring<Event, N>;
 
 // ---- text ----------------------------------------------------------------------------------------------------------------
-// Every line this feature writes starts with this, so a flight log is read with one grep. (The probe's lines start "explorer cam
-// probe", which this does not match.)
+// Every line this feature writes starts with this, so a flight log is read with one grep.
 inline const char* prefix() { return "explorer cam:"; }
 constexpr size_t kLineBytes = 1100;   // under Log's 1200-byte line
 

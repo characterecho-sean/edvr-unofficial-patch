@@ -1276,10 +1276,6 @@ void testText() {
               has(line, "collision_forwarded=3(+3)") && has(line, "box_bypassed=449(+449)") && has(line, "box_forwarded=2(+2)") && has(line, "hook_calls=460(+460)") &&
               has(line, "controller_calls=900(+450)") && has(line, "controller_mode=4") && has(line, "ui_hidden_by_edvr=yes") && has(line, "faults=1"),
           "the heartbeat names updates placed, collision and box-push calls bypassed and forwarded, hook calls, the controller's calls and mode, the UI, faults");
-    Capture cap;
-    cap.lines.push_back("explorer cam probe I3 heartbeat: x");
-    cap.lines.push_back("explorer cam probe: on");
-    check(cap.prefixed() == 0, "the probe's lines do not match this feature's 'explorer cam:' prefix");
 }
 
 void testRelayBytes() {
@@ -2413,44 +2409,6 @@ void testFaults(const Pages& p) {
     t::reset();
 }
 
-void testObservers(const Pages& p) {
-    std::printf("glue: observers ride the hooks after the restore\n");
-    namespace t = edvr::explorercamtest;
-    static Game g;
-    g.init();
-    Rig rig;
-    installAll(p, rig, g);
-    static std::atomic<int> freeSeen, ctlSeen;
-    static std::atomic<int32_t> lockAtObserver, photoAtObserver;
-    static Game* world;
-    world = &g;
-    freeSeen = 0; ctlSeen = 0;
-    auto freeObs = [](void*) noexcept { freeSeen.fetch_add(1); lockAtObserver = Game::pressed(world->lockAction); };
-    auto ctlObs = [](void*) noexcept { ctlSeen.fetch_add(1); photoAtObserver = Game::pressed(world->photoAction); };
-    const ExplorerCamHookStatus fs = explorerCamObserve(ExplorerCamHook::FreeCamera, freeObs, true);
-    const ExplorerCamHookStatus cs = explorerCamObserve(ExplorerCamHook::Controller, ctlObs, true);
-    check(fs.state == ExplorerCamHookStatus::Armed && fs.stolen == 5 && cs.state == ExplorerCamHookStatus::Armed && cs.stolen == 5, "OBSERVE: both hooks report armed, 5 stolen bytes");
-    g.ctlFrame();
-    check(ctlSeen.load() == 1, "the controller observer ran after the original");
-    g.setMode(3);
-    g.free[0x473] = 0;
-    rig.boundary(true);
-    g.ctlFrame();   // session on
-    g.freeFrame();  // places and presses the lock
-    check(freeSeen.load() == 1 && lockAtObserver.load() == 0, "the free-camera observer ran after the original, and the lock's int was already restored (0) when it ran");
-    // A second observer on the same hook: the slot list takes up to four.
-    static std::atomic<int> second;
-    second = 0;
-    auto secondObs = [](void*) noexcept { second.fetch_add(1); };
-    explorerCamObserve(ExplorerCamHook::FreeCamera, secondObs, true);
-    g.freeFrame();
-    check(second.load() == 1 && freeSeen.load() == 2, "A SECOND OBSERVER attaches to the same hook (the neck's place): both run");
-    explorerCamObserve(ExplorerCamHook::FreeCamera, secondObs, false);
-    g.freeFrame();
-    check(second.load() == 1 && freeSeen.load() == 3, "...and detaches without touching the first");
-    t::reset();
-}
-
 // ---- the hotkey against the player's Elite bindings ---------------------------------------------------------------------------
 bool writeTextFile(const std::wstring& path, const char* text) {
     HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -3438,11 +3396,11 @@ void testHeadHideGlue(const Pages& p) {
         rig.boundary();
     };
 
-    // ---- the hooks are installed because Explorer Cam is on (no probe), and the names are checked ------------------------------------------------
+    // ---- the hooks are installed because Explorer Cam is on, and the names are checked ------------------------------------------------
     begin();
     fresh();
     check(t::stolenBytes(5) == 5 && t::stolenBytes(6) == 5 && g_cimg[ecm::kAvatarFadeRva] == 0xE9 && g_cimg[ecm::kFindJointRva] == 0xE9,
-          "BOTH HOOKS ARE INSTALLED because Explorer Cam is on, with no probe: the avatar fade and FindJoint each stole 5 bytes");
+          "BOTH HOOKS ARE INSTALLED because Explorer Cam is on: the avatar fade and FindJoint each stole 5 bytes");
     check(rig.cap.count("avatar-fade hook armed") == 1 && rig.cap.count("find-joint hook armed") == 1, "...each said once");
     check(t::partNamesState() == 1 && rig.cap.count("explorer cam head hide: the part-name table at EliteDangerous64.exe+0x5E9C7D0 holds the 54 names") == 1 &&
               has(rig.cap.nth("the part-name table at", 0), "Head Eyes Helmet SkullCap Hair Beard Teeth Hat EyeWear EVASuit_Helmet EVASuit_Eyewear EVASuit_Gear_Head"),
@@ -3454,7 +3412,7 @@ void testHeadHideGlue(const Pages& p) {
     imgInvoke(skelA, skelB, pov);
     check(explorerCamSkeleton(0).iface == reinterpret_cast<uint64_t>(skelA) && explorerCamSkeleton(0).index == 3 && explorerCamSkeleton(1).iface == reinterpret_cast<uint64_t>(skelB) &&
               explorerCamFindJointSeen() == 2,
-          "THE CAPTURE (explorer_cam.cpp's own, no probe): one invocation that attached both avatars latched its third-person and first-person skeletons with their indexes");
+          "THE CAPTURE (explorer_cam.cpp's own): one invocation that attached both avatars latched its third-person and first-person skeletons with their indexes");
 
     // ---- not placed: the census and the match line, nothing hidden ------------------------------------------------------------------------------------
     imgFade(local.b);
@@ -5928,7 +5886,6 @@ void testGlue() {
     testComfortGlue(p);
     testSessionEnds(p);
     testFaults(p);
-    testObservers(p);
     testHotkeyClash(p);
     testConfigPath(p);
     namespace t = edvr::explorercamtest;

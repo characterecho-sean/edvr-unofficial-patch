@@ -54,7 +54,6 @@
 #include "glitch_frame.h"
 #include "pose_reader_watch.h"
 #include "explorer_cam.h"        // Explorer Cam (hotkey.explorer_cam): the free camera placed at the commander's head and locked (the Explorer Cam redesign)
-#include "explorer_cam_probe.h"  // advanced.explorer_cam_probe: the Explorer Cam redesign's log-only F0 instruments (temporary)
 #include "transition_flash_eye_base.h"
 #include "holo_fix.h"
 #include "target_sharp.h"
@@ -731,11 +730,6 @@ struct State {
     void*    camResource = nullptr;
     void*    camData = nullptr;
     uint32_t camBytes = 0;
-    // advanced.explorer_cam_probe's I2: the same 5376-byte scene block, on a pointer pair of its own so the camera tee above
-    // (and the temporal pass it feeds) is untouched whether the probe is on or off. Set only while the probe is on.
-    void*    probeCamResource = nullptr;
-    void*    probeCamData = nullptr;
-    uint32_t probeCamBytes = 0;
     void* scenePoolResource = nullptr;
     void* scenePoolData = nullptr;
     uint32_t scenePoolBytes = 0;
@@ -1003,7 +997,6 @@ FaultBudget g_glitchPoolBudget("vScreen.glitchPool", 5);              // ...and 
 FaultBudget g_sunglareDumpBudget("vScreen.sunglareDump", 5);          // the world shader's desk-side buffer dump
 FaultBudget g_sunglareRowsBudget("vScreen.sunglareRows", 5);          // ...and its live true-camera feed
 FaultBudget g_temporalCameraBudget("vScreen.temporalCamera", 5);      // the temporal pass's camera rows
-FaultBudget g_explorerCamProbeBudget("vScreen.explorerCamProbe", 5);  // advanced.explorer_cam_probe I2: the scene block's skinned-object fingerprint
 FaultBudget g_particleCaptureBudget("vScreen.particleCapture", 5);    // the particle billboards' constants
 FaultBudget g_billboardCaptureBudget("vScreen.billboardCapture", 5);  // the glare billboards' constants
 
@@ -3383,12 +3376,6 @@ HRESULT STDMETHODCALLTYPE hookedMap(ID3D11DeviceContext* self, ID3D11Resource* r
             s->camData = mapped->pData;
             s->camBytes = mm.byteWidth;
         }
-        // advanced.explorer_cam_probe I2: the scene block again, for the probe alone. One compare per Map when the key is off.
-        if (mm.byteWidth == kExplorerCamProbeSceneBlockBytes && mapped->pData && explorerCamProbeWantsSceneBlocks()) {
-            s->probeCamResource = res;
-            s->probeCamData = mapped->pData;
-            s->probeCamBytes = mm.byteWidth;
-        }
     }
     // glitchFrameObserving() (glitch_frame.h): glitchFrameWantsPool's own
     // necessary first test is installed-and-observing; with either false it
@@ -3494,15 +3481,6 @@ void STDMETHODCALLTYPE hookedUnmap(ID3D11DeviceContext* self, ID3D11Resource* re
         s->mappedResource = nullptr;
         s->mappedData = nullptr;
         s->mappedBytes = 0;
-    }
-    if (res == s->probeCamResource && s->probeCamData) {
-        // Same rule: read before forwarding. Read only; the camera tee below is not involved.
-        guardedBudget(g_explorerCamProbeBudget, [&] {
-            explorerCamProbeNoteSceneBlock(res, s->probeCamData, s->probeCamBytes);
-        });
-        s->probeCamResource = nullptr;
-        s->probeCamData = nullptr;
-        s->probeCamBytes = 0;
     }
     if (res == s->camResource && s->camData) {
         // Same rule as above: read before forwarding, because after the real

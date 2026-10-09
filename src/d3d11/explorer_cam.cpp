@@ -5,7 +5,7 @@
 //   free camera   freeCameraHooked, on whichever thread the game's job system calls the free camera's update from:
 //                   pre   (preFree)  decide from the activity's flag bytes, write the pose, set the lock's pressed-int
 //                   the original update
-//                   post  (postFor)  restore the pressed-int, then the observers
+//                   post  (postFor)  restore the pressed-int
 //   camera UI     cameraUiHooked: pre presses FreeCamToggleHUD once per placement (and again to give the UI back), post restores.
 //   controller    controllerHooked: pre runs F5's sequence (PhotoCameraToggle, ToggleFreeCam, again PhotoCameraToggle to leave), post
 //                 restores the press. The mode byte is read on every call.
@@ -82,7 +82,6 @@ alignas(8) std::atomic<uint64_t> g_bypassed[2];         // [0] collision, [1] bo
 alignas(8) std::atomic<uint64_t> g_forwarded[2];        // ...and calls passed to the original
 alignas(8) std::atomic<uintptr_t> g_gate[kHkCount];     // a callback relay's gate: open = the callback runs, closed = straight on
 std::atomic<uintptr_t> g_forward[kHkCount];             // a callback relay's trampoline
-std::atomic<ExplorerCamActivityObserver> g_observers[3][kExplorerCamMaxObservers];   // free camera, controller, avatar fade
 // The FindJoint hook's capture. 0x19B1240 attaches EVERY humanoid's avatars (F6: site 1 alone is whichever humanoid ran last, usually an NPC). Only the
 // local player has a first-person avatar, so a pair is latched as THE local avatar when one thread makes a site-1 attach and then a site-2 attach at the same
 // stack location (one invocation does both, from one frame, with no other site-1 attach on that thread between). Everything that wants "the local
@@ -100,7 +99,6 @@ struct Site1Seen {                                   // this thread's last site-
 };
 thread_local Site1Seen t_site1;
 std::atomic<uintptr_t> g_findSite[2], g_findPov{0};   // the two return addresses and the literal's address; set before the gate can open
-std::atomic<uint32_t> g_findWant{0};                   // bit 0 the probe, bit 1 Explorer Cam (placement active)
 
 // Phase 2: head hiding (hook threads write; the frame thread reads and logs).
 std::atomic<bool> g_hideOn{false};                     // the fade hook's post-call hides: active, both hooks armed, the part names verified
@@ -595,13 +593,6 @@ void postFor(PreState& ps) noexcept {
     g_busy[ps.hook].store(false, std::memory_order_release);
 }
 
-void runObservers(int which, void* object) noexcept {
-    for (int i = 0; i < kExplorerCamMaxObservers; ++i) {
-        const auto fn = g_observers[which][i].load(std::memory_order_acquire);
-        if (fn) fn(object);
-    }
-}
-
 // ---- Phase 3: the eye follows the head joint -------------------------------------------------------------------------------------------
 // Read on the camera-job thread, inside the free-camera hook's pre-call (H proved the calls safe there and under 1 us). Before EVERY call into the game the
 // interface's vtable is RR's or AO's and every slot used holds exactly the build's function; an interface that no longer has such a vtable is stale (the avatar
@@ -1074,7 +1065,6 @@ __declspec(noinline) uint64_t __fastcall freeCameraHooked(void* a, void* b, void
     PreState ps = preFree(a);
     const uint64_t result = forward(a, b, c, d);
     postFor(ps);
-    runObservers(0, a);
     return result;
 }
 
@@ -1205,7 +1195,6 @@ __declspec(noinline) uint64_t __fastcall controllerHooked(void* a, void* b, void
     PreState ps = preCtl(a);
     const uint64_t result = forward(a, b, c, d);
     postFor(ps);
-    runObservers(1, a);
     return result;
 }
 
@@ -1227,10 +1216,9 @@ __declspec(noinline) uint64_t __fastcall zoomDofHooked(void* a, void* b, void* c
     return result;
 }
 
-// ---- the FindJoint hook (the probe's H rides it; nothing here writes) -------------------------------------------------------------
-// FindJoint is called by many systems, so this stays trivial: the original FIRST (its result is what the observer is told, and it is returned
-// unchanged), then one observer call carrying rcx, rdx, the result and the caller's return address. The callback relay JUMPS here, so the
-// return address on entry is the caller's own.
+// ---- the FindJoint hook (nothing here writes) --------------------------------------------------------------------------------------
+// FindJoint is called by many systems, so this stays trivial: the original FIRST (its result is returned unchanged), then the capture, which
+// looks at rcx, rdx, the result and the caller's return address. The callback relay JUMPS here, so the return address on entry is the caller's own.
 __declspec(noinline) uint64_t __fastcall findJointHooked(void* a, void* b, void* c, void* d) noexcept {
     const uintptr_t returnAddress = reinterpret_cast<uintptr_t>(_ReturnAddress());
     const uintptr_t where = reinterpret_cast<uintptr_t>(_AddressOfReturnAddress());   // the relay JUMPS here, so this is the caller's own stack slot
@@ -1453,13 +1441,12 @@ void headHideStep(void* amcPtr) noexcept {
     g_hideZeroed.fetch_add(zeroed, std::memory_order_relaxed);
 }
 
-// ---- the avatar-fade hook (the probe's fade counter rides it; nothing here writes) ---------------------------------------------
+// ---- the avatar-fade hook (the head hiding's post-call) ------------------------------------------------------------------------
 __declspec(noinline) uint64_t __fastcall avatarFadeHooked(void* a, void* b, void* c, void* d) noexcept {
     const auto forward = reinterpret_cast<ForwardFn>(g_forward[kHkFade].load(std::memory_order_acquire));
     if (!forward) return 0;
-    const uint64_t result = forward(a, b, c, d);   // the original FIRST: the observers read what it left, and the hide follows it
+    const uint64_t result = forward(a, b, c, d);   // the original FIRST: the hide follows what it left
     if (g_hideOn.load(std::memory_order_acquire)) headHideStep(a);
-    runObservers(2, a);
     return result;
 }
 
@@ -1496,12 +1483,13 @@ uint8_t* allocateRelay(uintptr_t target) noexcept {
     return nullptr;
 }
 
+enum HookState : int { kHookStateNotTried = 0, kHookStateArmed = 1, kHookStateStoodDown = 2 };
 struct HookEntry {
     CodeHook hook;
     uint8_t* relay = nullptr;
     uintptr_t target = 0;
     int id = 0;
-    int state = ExplorerCamHookStatus::NotTried;
+    int state = kHookStateNotTried;
     size_t stolen = 0;
     char why[400] = {};
 };
@@ -1612,8 +1600,7 @@ void logSink(void*, const char* line) { Log::get().note("%s", line); }
 const char* armedRole(int id) {
     switch (id) {
         case kHkFree:
-            return "Explorer Cam and advanced.explorer_cam_probe share this hook: the placement runs before the original, the lock press is "
-                   "restored after it, then the observers";
+            return "the placement runs before the original and the lock press is restored after it";
         case kHkCollision:
             return "it answers 0 (no collision edit) for the placed activity only and hands every other call, all five arguments intact, to the "
                    "original";
@@ -1621,10 +1608,11 @@ const char* armedRole(int id) {
             return "it answers 0 (no box push: the point is left alone) for the placed activity only and hands every other call to the "
                    "original";
         case kHkFade:
-            return "LOG ONLY, for advanced.explorer_cam_probe's fade counter: the original runs first, then the component's dither block is read";
+            return "HEAD HIDING: the original runs first, then, while a placement stands, the view masks of the local third-person avatar's head parts "
+                   "are zeroed";
         case kHkFind:
-            return "LOG ONLY: the original runs first and its result is returned unchanged; a call from one of the two avatar-attach sites with the "
-                   "povCamera literal stores the skeleton interface (rcx) and the index, for head hiding and the probe's H";
+            return "CAPTURE only: the original runs first and its result is returned unchanged; a call from one of the two avatar-attach sites with the "
+                   "povCamera literal stores the skeleton interface (rcx) and the index, for head hiding and the head-joint eye";
         case kHkZoom:
             return "ISOLATION only: while a session has placed the view, the zoom, aperture and focus action objects (+0x250..+0x280) are cleared before the "
                    "original and put back after it";
@@ -1638,12 +1626,12 @@ const char* armedRole(int id) {
 }
 const char* downConsequence(int id) {
     switch (id) {
-        case kHkFree: return "Explorer Cam placement and advanced.explorer_cam_probe's I3 do not run.";
+        case kHkFree: return "Explorer Cam placement does not run.";
         case kHkCollision: return "Explorer Cam placement does not run (without it the free camera would stop 0.70 m from the face).";
         case kHkBox: return "Explorer Cam placement does not run (without it the free camera would be lifted onto the helmet).";
         case kHkCtl: return "Explorer Cam does not run: F5 has nothing to press.";
-        case kHkFade: return "head hiding does not run, and advanced.explorer_cam_probe's fade counter does not either.";
-        case kHkFind: return "head hiding and the head-joint eye do not run (the fixed eye keys place the view), and advanced.explorer_cam_probe's H does not either.";
+        case kHkFade: return "head hiding does not run.";
+        case kHkFind: return "head hiding and the head-joint eye do not run (the fixed eye keys place the view).";
         case kHkZoom: return "the zoom, aperture and focus keys are not blocked while the view is placed; everything else runs.";
         default: return "the camera UI stays up while placed; everything else runs.";
     }
@@ -1654,7 +1642,7 @@ void tryHook(int id, const ecm::Sink& sink) {
     HookEntry& entry = g_hooks[id];
     char why[400] = {};
     if (installHook(id, why, sizeof(why))) {
-        entry.state = ExplorerCamHookStatus::Armed;
+        entry.state = kHookStateArmed;
         if (id == kHkFind) {
             // The image base is the target minus its RVA (production: target = base + RVA; the rigs place their synthetic functions the same way).
             const uintptr_t base = entry.target - ecm::kFindJointRva;
@@ -1668,33 +1656,24 @@ void tryHook(int id, const ecm::Sink& sink) {
             entry.stolen, spec.prologueBytes, spec.prologueBytes, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(entry.relay)),
             armedRole(id));
     } else {
-        entry.state = ExplorerCamHookStatus::StoodDown;
+        entry.state = kHookStateStoodDown;
         std::snprintf(entry.why, sizeof(entry.why), "%s", why);
         say(sink, "%s %s hook stood down: %s. %s", ecm::prefix(), spec.label, why, downConsequence(id));
     }
 }
 
-bool armed(int id) { return g_hooks[id].state == ExplorerCamHookStatus::Armed; }
-
-int observerCount(int which) {   // 0 free camera, 1 controller, 2 avatar fade
-    int n = 0;
-    for (int i = 0; i < kExplorerCamMaxObservers; ++i) n += g_observers[which][i].load(std::memory_order_relaxed) != nullptr ? 1 : 0;
-    return n;
-}
+bool armed(int id) { return g_hooks[id].state == kHookStateArmed; }
 
 void updateGates() {
     const bool active = g_placeActive.load(std::memory_order_relaxed);
-    g_gate[kHkFree].store(armed(kHkFree) && (active || observerCount(0) > 0) ? 1u : 0u, std::memory_order_release);
-    g_gate[kHkCtl].store(armed(kHkCtl) && (active || observerCount(1) > 0 || g_fadeOurs.load(std::memory_order_relaxed)) ? 1u : 0u,
-                         std::memory_order_release);
+    g_gate[kHkFree].store(armed(kHkFree) && active ? 1u : 0u, std::memory_order_release);
+    g_gate[kHkCtl].store(armed(kHkCtl) && (active || g_fadeOurs.load(std::memory_order_relaxed)) ? 1u : 0u, std::memory_order_release);
     // Head hiding needs both optional hooks, the part names verified, and a placement-capable Explorer Cam; it also needs the FindJoint capture from
     // launch (the attach runs every frame, but the hook must be in place), so the capture's share of the gate is open whenever Explorer Cam is active.
     const bool hideOn = active && armed(kHkFade) && armed(kHkFind) && g_partNames.load(std::memory_order_relaxed) == 1 && !g_hideDown.load(std::memory_order_relaxed);
     g_hideOn.store(hideOn, std::memory_order_release);
-    if (active) g_findWant.fetch_or(2u, std::memory_order_relaxed);
-    else g_findWant.fetch_and(~2u, std::memory_order_relaxed);
-    g_gate[kHkFade].store(armed(kHkFade) && (observerCount(2) > 0 || hideOn) ? 1u : 0u, std::memory_order_release);
-    g_gate[kHkFind].store(armed(kHkFind) && g_findWant.load(std::memory_order_relaxed) != 0 ? 1u : 0u, std::memory_order_release);
+    g_gate[kHkFade].store(armed(kHkFade) && hideOn ? 1u : 0u, std::memory_order_release);
+    g_gate[kHkFind].store(armed(kHkFind) && active ? 1u : 0u, std::memory_order_release);
     g_gate[kHkUi].store(armed(kHkUi) && (active || g_uiHeld.load(std::memory_order_relaxed)) ? 1u : 0u, std::memory_order_release);
     g_gate[kHkZoom].store(armed(kHkZoom) && active ? 1u : 0u, std::memory_order_release);
 }
@@ -2101,11 +2080,11 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
 
     // 2. The hooks, the first time they are wanted. The free camera first; the rest only once it is armed, and each required one only
     // once the one before it is, so a stand-down leaves nothing half installed that did not have to be.
-    if (on && g_hooks[kHkFree].state == ExplorerCamHookStatus::NotTried) tryHook(kHkFree, sink);
+    if (on && g_hooks[kHkFree].state == kHookStateNotTried) tryHook(kHkFree, sink);
     if (on) {
         static const int kOrder[] = {kHkCollision, kHkBox, kHkCtl};
         bool allArmed = armed(kHkFree);
-        if (!allArmed && g_hooks[kHkFree].state == ExplorerCamHookStatus::StoodDown && !fs.skippedNoted) {
+        if (!allArmed && g_hooks[kHkFree].state == kHookStateStoodDown && !fs.skippedNoted) {
             fs.skippedNoted = true;
             say(sink, "%s the collision, box-push, camera-UI and controller hooks are not installed: the free-camera hook stood down, so "
                       "Explorer Cam does not run.",
@@ -2113,7 +2092,7 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         }
         for (int id : kOrder) {
             if (!allArmed) break;
-            if (g_hooks[id].state == ExplorerCamHookStatus::NotTried) tryHook(id, sink);
+            if (g_hooks[id].state == kHookStateNotTried) tryHook(id, sink);
             allArmed = armed(id);
             if (!allArmed && !fs.skippedNoted) {
                 fs.skippedNoted = true;
@@ -2121,13 +2100,13 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
                     kSpec[id].label);
             }
         }
-        if (allArmed && g_hooks[kHkUi].state == ExplorerCamHookStatus::NotTried) tryHook(kHkUi, sink);
+        if (allArmed && g_hooks[kHkUi].state == kHookStateNotTried) tryHook(kHkUi, sink);
         // Head hiding's two hooks, at launch like the rest: the FindJoint capture must be in place before the on-foot avatars attach. Optional: a stand-down
         // here costs the head hiding (said once, with its consequence) and never placement.
-        if (allArmed && g_hooks[kHkFind].state == ExplorerCamHookStatus::NotTried) tryHook(kHkFind, sink);
-        if (allArmed && g_hooks[kHkFade].state == ExplorerCamHookStatus::NotTried) tryHook(kHkFade, sink);
+        if (allArmed && g_hooks[kHkFind].state == kHookStateNotTried) tryHook(kHkFind, sink);
+        if (allArmed && g_hooks[kHkFade].state == kHookStateNotTried) tryHook(kHkFade, sink);
         // The zoom/DOF update, for the isolation of the zoom, aperture and focus keys. Optional: a stand-down leaves those keys unblocked, never the placement.
-        if (allArmed && g_hooks[kHkZoom].state == ExplorerCamHookStatus::NotTried) tryHook(kHkZoom, sink);
+        if (allArmed && g_hooks[kHkZoom].state == kHookStateNotTried) tryHook(kHkZoom, sink);
         checkPartNames(sink);
     }
 
@@ -2506,8 +2485,6 @@ void explorerCamShutdown() {
     g_fadeOurs.store(g_fade.ours(), std::memory_order_release);
 }
 
-const int32_t* explorerCamFadeGlobalAddress() { return fadeResolve() ? g_fadeMode : nullptr; }
-
 bool explorerCamBuildKnown(uintptr_t* baseOut, char* why, size_t whyCap) {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (!base) {
@@ -2527,49 +2504,6 @@ bool explorerCamBuildKnown(uintptr_t* baseOut, char* why, size_t whyCap) {
     return true;
 }
 
-ExplorerCamHookStatus explorerCamObserve(ExplorerCamHook hook, ExplorerCamActivityObserver observer, bool attach) {
-    const int which = hook == ExplorerCamHook::AvatarFade ? 2 : hook == ExplorerCamHook::Controller ? 1 : 0;
-    const int id = which == 2 ? kHkFade : which == 1 ? kHkCtl : kHkFree;
-    if (attach && g_hooks[id].state == ExplorerCamHookStatus::NotTried) tryHook(id, ecm::Sink{&logSink, nullptr});
-    if (attach) {
-        if (armed(id) && observer) {
-            bool present = false;
-            for (int i = 0; i < kExplorerCamMaxObservers; ++i) present = present || g_observers[which][i].load() == observer;
-            for (int i = 0; i < kExplorerCamMaxObservers && !present; ++i) {
-                ExplorerCamActivityObserver empty = nullptr;
-                if (g_observers[which][i].compare_exchange_strong(empty, observer)) present = true;
-            }
-        }
-    } else {
-        for (int i = 0; i < kExplorerCamMaxObservers; ++i) {
-            ExplorerCamActivityObserver current = g_observers[which][i].load();
-            if (current && (!observer || current == observer)) g_observers[which][i].store(nullptr);
-        }
-    }
-    updateGates();
-    ExplorerCamHookStatus status;
-    status.state = g_hooks[id].state;
-    status.stolen = g_hooks[id].stolen;
-    status.target = g_hooks[id].target;
-    status.relay = reinterpret_cast<uintptr_t>(g_hooks[id].relay);
-    std::snprintf(status.why, sizeof(status.why), "%s", g_hooks[id].why);
-    return status;
-}
-
-ExplorerCamHookStatus explorerCamWantFindJoint(bool want) {
-    if (want && g_hooks[kHkFind].state == ExplorerCamHookStatus::NotTried) tryHook(kHkFind, ecm::Sink{&logSink, nullptr});
-    if (want) g_findWant.fetch_or(1u, std::memory_order_relaxed);
-    else g_findWant.fetch_and(~1u, std::memory_order_relaxed);
-    updateGates();
-    ExplorerCamHookStatus status;
-    status.state = g_hooks[kHkFind].state;
-    status.stolen = g_hooks[kHkFind].stolen;
-    status.target = g_hooks[kHkFind].target;
-    status.relay = reinterpret_cast<uintptr_t>(g_hooks[kHkFind].relay);
-    std::snprintf(status.why, sizeof(status.why), "%s", g_hooks[kHkFind].why);
-    return status;
-}
-
 ExplorerCamSkeleton explorerCamSkeleton(int site) {
     ExplorerCamSkeleton s;
     if (site < 0 || site > 1) return s;
@@ -2578,11 +2512,6 @@ ExplorerCamSkeleton explorerCamSkeleton(int site) {
     s.captures = g_skelCaptures[site].load(std::memory_order_relaxed);
     s.latches = g_skelLatches.load(std::memory_order_relaxed);
     return s;
-}
-void explorerCamSkeletonDrop(int site, uint64_t iface) {
-    if (site < 0 || site > 1) return;
-    uint64_t expected = iface;
-    g_skelIface[site].compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
 }
 uint64_t explorerCamFindJointSeen() { return g_findSeen.load(std::memory_order_relaxed); }
 bool explorerCamSessionActive() { return g_sessionActive.load(std::memory_order_acquire); }
@@ -2726,7 +2655,7 @@ void reset() {
         entry.hook.uninstall();
         entry.relay = nullptr;
         entry.target = 0;
-        entry.state = ExplorerCamHookStatus::NotTried;
+        entry.state = kHookStateNotTried;
         entry.stolen = 0;
         entry.why[0] = 0;
     }
@@ -2735,8 +2664,6 @@ void reset() {
         g_gate[i].store(0);
         g_testTargets[i] = 0;
     }
-    for (int w = 0; w < 3; ++w)
-        for (int i = 0; i < kExplorerCamMaxObservers; ++i) g_observers[w][i].store(nullptr);
     for (int i = 0; i < 2; ++i) {
         g_skelIface[i].store(0);
         g_skelIndex[i].store(0xFFFF);
@@ -2756,7 +2683,6 @@ void reset() {
     }
     g_findPov.store(0);
     g_findSeen.store(0);
-    g_findWant.store(0);
     g_hideOn.store(false);
     g_hideDown.store(false);
     g_hideFaults.store(0);
