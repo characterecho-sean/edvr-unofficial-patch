@@ -508,9 +508,6 @@ inline constexpr int kSceneCBSimBasisFloat = 1104;        // cb1[276..279] = flo
 // base-derived; the neighbours answer whether anything else nearby is.
 inline constexpr int kSceneCBSimSurveyFloat = 1072;
 inline constexpr int kSceneCBSimSurveyFloats = 72;   // 18 float4 rows
-// Build 2b: the camera-relative clip rows 270-274 (floats [1080..1099]).
-inline constexpr int kSceneCBSimClipFloat = 1080;
-inline constexpr int kSceneCBSimClipFloats = 20;     // 5 float4 rows
 
 // A 4x4 group is a view-matrix candidate when its 3x3 (storage [r*4+c]) is
 // orthonormal: unit-length, mutually perpendicular columns. The test is
@@ -832,38 +829,17 @@ inline GapEdge updateGapStretch(GapStretch& s, bool gap, uint32_t frame, uint32_
 }
 
 // ---------------------------------------------------------------------------
-// CHANGE 19 (2026-10-09, Build 2a "the supercruise fix"). Flight 050558
-// (design doc, "Flight 050558") settled the mechanism: the HMDCamera is
-// deactivated at S-1 and re-activated AFTER the S consume, so the controller
-// tick is absent exactly on the frame whose mailbox the consume reads, and the
-// first tick that follows writes the base the engine meant (it equals the next
-// frame's eye, to the centimetre, on every event). The render-time patch now
-// takes that base instead of choosing between the live and held candidates
-// with the pool selector (which declined all five events), and a frame it has
-// no base for is withheld.
-
-// The base the first tick after the skip wrote: a base, not a leftover -- not
-// the reset identity, finite and plausible, and a rotation (orthonormal 3x3;
-// the engine's own mailbox is, and a half-written or stale block is not).
-inline constexpr float kEngineBaseOrthoTol = 0.01f;
-inline bool engineBaseUsable(const float m[16]) noexcept {
-    return !isResetMailbox(m) && mailboxPlausible(m) && isOrtho3x3(m, kEngineBaseOrthoTol);
-}
-
-// Where the event's base stands when a render asks for it.
-enum class EngineBase : uint8_t {
-    NoTickYet,      // the controller has not ticked since the skip
-    TickUnusable,   // it ticked, and the mailbox it left was not a usable base
-    Have            // B_new is held
-};
-inline const char* engineBaseReason(EngineBase b) noexcept {
-    switch (b) {
-    case EngineBase::NoTickYet:    return "no controller tick since the skip";
-    case EngineBase::TickUnusable: return "the first tick left an unusable mailbox";
-    case EngineBase::Have:         return "base held";
-    }
-    return "?";
-}
+// CHANGE 19 (2026-10-09, Build 2a "the supercruise fix"), as shipped by
+// BUILD 2c: an EXACT WITHHOLD. Flight 050558 settled the mechanism: the
+// HMDCamera is deactivated at S-1 and re-activated AFTER the S consume, so
+// the controller tick is absent exactly on the frame whose mailbox the
+// consume reads and the eye composes against the head pose alone. Builds 2a
+// and 2b corrected that frame in place (the live base, then the clip rows);
+// flight 091951 showed the patched entries still flashed -- the bad frame
+// carries at least five other wrong structures (the view group, centre-camera
+// fills, other cameras' row 275, garbage in fills the head-only gate misses,
+// rows 328-330, the previous-pose group) -- so the shipped fix holds the
+// frame instead, and the corrections are gone.
 
 // At most two bad renders per event, and only while the gap lasts. The render
 // whose tap frame is T drew from the consume of frame T-1 (the skew the
@@ -874,57 +850,6 @@ inline constexpr uint32_t kEngineMaxFrames = 2;
 inline bool engineActFrame(uint32_t tapFrame, uint32_t skipFrame, uint32_t gapLastConsume) noexcept {
     if (tapFrame < skipFrame + 1u || tapFrame > skipFrame + kEngineMaxFrames) return false;
     return gapLastConsume >= skipFrame && tapFrame - 1u <= gapLastConsume;
-}
-
-// The fills of the bad frame carry the head-only eye P; only a fill whose row
-// 275 is within 0.10 m of the first one is rewritten. 0.10 m, not float noise:
-// if row 275 is per eye, the two eyes differ by the IPD (up to ~7.5 cm), and
-// patching one eye alone would be a stereo flash of its own. Every other view
-// on record sits metres away (a world-space row 275, 13 m+).
-inline constexpr float kEngineFillMatchMeters = 0.10f;
-inline bool engineFillMatches(const float row275[3], const float firstP[3]) noexcept {
-    const float dx = row275[0] - firstP[0], dy = row275[1] - firstP[1], dz = row275[2] - firstP[2];
-    return std::sqrt(dx * dx + dy * dy + dz * dz) <= kEngineFillMatchMeters;
-}
-
-// ---------------------------------------------------------------------------
-// BUILD 2b (2026-10-09, flight 060721): the clip rows. Build 2a left a brief
-// flash in the periphery on a supercruise entry although the eye matched the
-// next frame to 1 mm: rows 270-274 of the scene CB are camera-relative and
-// were still head-only on the bad frame. The fit over the 7 act fills that
-// have a next frame (scratchpad fit_rows.py, dumps eyebase_060955/061024/
-// 174848/174929):
-//   * row 274.xyz == row 279.xyz on all 14 frames, to 1e-4; w stays 0. So
-//     after the pilot block is patched, row 274.xyz := patched row 279.xyz.
-//   * rows 270-272 are the clip columns (the flat camera code reads them that
-//     way): row 270+i = (fx*P0i + sx*P2i, fy*P1i + sy*P2i, 0, P2i) for the
-//     head basis P (rows 277-279 xyz), constants identical across flights
-//     (fx 0.9394, fy 0.9715, sx 0.1784). The model is LINEAR in column i of P,
-//     and the patch replaces P by P.R(B) (the pilot basis rotation,
-//     rotateByBase on each ROW of 277-279), so column i becomes
-//     sum_j R(B)[j][i] * column j: three vectors over (row 270, 271, 272),
-//     one per lane c in {x, y, w}, each rotated by rotateByBase(B, .)
-//     (v . R(B)), the z lane (0 by the model) untouched. Row 272 patched this
-//     way matches the engine's next frame to 0.0008 over 7 fills where the
-//     unpatched row is 0.67-0.86 off.
-//   Row 273 (0, 0, 0.025, 0) is constant and untouched. Rows 270 and 271 were
-//   never printed by a dump; their fix rests on the structure above.
-// Reads every input row before the caller writes any.
-inline void patchClipRows(const float B[16], const float clip[20], const float patched279[3],
-                          float out[20]) noexcept {
-    std::memcpy(out, clip, sizeof(float) * 20);          // row 273 and every z lane stay as read
-    const int lanes[3] = {0, 1, 3};
-    for (int c : lanes) {
-        const float v[3] = {clip[0 * 4 + c], clip[1 * 4 + c], clip[2 * 4 + c]};   // rows 270, 271, 272
-        float r[3];
-        rotateByBase(B, v, r);
-        out[0 * 4 + c] = r[0];
-        out[1 * 4 + c] = r[1];
-        out[2 * 4 + c] = r[2];
-    }
-    out[4 * 4 + 0] = patched279[0];                       // row 274.xyz := patched row 279.xyz, w kept
-    out[4 * 4 + 1] = patched279[1];
-    out[4 * 4 + 2] = patched279[2];
 }
 
 }  // namespace tfeb

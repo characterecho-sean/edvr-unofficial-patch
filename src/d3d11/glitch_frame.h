@@ -45,6 +45,19 @@ void glitchFrameNoteEngineFix(bool armed, bool diagnostics);
 // glitchConsumerPresent); a patched frame (withhold false) returns true.
 bool glitchFrameEngineFixEvent(bool withhold);
 
+// The temporal pass's verdict for an engine withhold: "the camera stayed".
+// Call it AFTER the withheld frame's eyes were handed to the compositor (the
+// frame boundary after the mark), never at the mark itself: the pass latches
+// the verdict word when the eye is withheld and reads a CHANGE since as the
+// verdict, so a word published before the latch reads as no verdict at all
+// and ends in a history reset (flight 091951).
+void glitchFrameEngineFixVerdict();
+
+// The engine fix's event window (armed event .. its two bad renders): while
+// open, the camera-CB tap runs; closed, glitchFrameObserve returns at once
+// unless the detector is awake or diagnostics are on.
+void glitchFrameEngineWindow(bool open);
+
 // glitchFrameInvalidatePool's own and only test (glitch_frame.cpp): the fix
 // is installed at all. Necessary and sufficient -- unlike the functions
 // below, it does not also ask State::observing.

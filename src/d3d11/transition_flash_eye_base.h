@@ -22,22 +22,24 @@
 // offeredSubstituteUsable and heldBaseRefusal. ship+0x130 is still read and
 // logged, for the record, but no longer gates or supplies the write.
 //
-// BUILD 2a (2026-10-09, "the supercruise fix"; docs/design-transition-flash-
-// engine-fix-2026-09-23.md, "Flight 050558"): this module is now the fix
-// itself, armed by fix.transition_flash (on by default), and the old
-// advanced.transition_flash_eye_base switch (off | watch | on | alternate) is
-// no longer read. Flight 050558 settled the mechanism: the HMDCamera is
-// deactivated at S-1 and re-activated after the S consume, so the controller
-// tick is absent exactly on the frame whose mailbox the consume reads, and the
-// first tick that follows writes the base the engine meant. So:
+// BUILD 2c (2026-10-09, "the exact withhold"; docs/design-transition-flash-
+// engine-fix-2026-09-23.md, "Flight 091951"): this module is the fix itself,
+// armed by fix.transition_flash (on by default), and the old
+// advanced.transition_flash_eye_base switch is no longer read. Flight 050558
+// settled the mechanism: the HMDCamera is deactivated at S-1 and
+// re-activated after the S consume, so the controller tick is absent on the
+// frame whose mailbox the consume reads and the eye composes against the head
+// pose alone. Builds 2a/2b corrected that frame in place; flight 091951 showed
+// it still flashed (the bad frame carries at least five other wrong
+// structures), so the shipped fix HOLDS the frame:
 //   * the consumer hook arms an event at the mode-2 ENTRY edge;
-//   * the controller hook, right AFTER the original tick returns, reads the
-//     mailbox as the event's base B_new (race-free with the consume's reset);
 //   * at the render tap (bad frames skip+1, and skip+2 while the gap lasted),
-//     B_new present -> the fills whose row 275 is the frame's head-only eye
-//     get the eye-origin/view correction; B_new absent -> the frame is
-//     WITHHELD (glitchFrameEngineFixEvent). The pool selector is not asked.
-//   * one always-on log line per bad frame acted on.
+//     at the frame's first camera-CB fill whose row 275 is head-only, the
+//     frame is WITHHELD (glitchFrameEngineFixEvent) -- nothing is written to
+//     the buffer, no base is captured, no game function is called;
+//   * the frame boundary after the mark tells the temporal pass the camera
+//     stayed (glitchFrameEngineFixVerdict), so its history is kept;
+//   * one always-on log line per held frame.
 // While the fix is armed the transition-flash DETECTOR (glitch_frame.cpp) is
 // dormant; when identity or a hook fails, doInstall reports Lost
 // (glitchFrameNoteEngineFix) and the detector runs exactly as before.
@@ -45,7 +47,7 @@
 //   advanced.transition_flash_diagnostics = off | on   (TEMPORARY, default off)
 //     on         the instrument: the writer watch (DR0/DR1), the call and
 //                frame rings and their dumps, the passive patch-sim lines
-//                (base1-> beside held-> new-> live->), the HMDCamera
+//                (held-> new-> live->), the HMDCamera
 //                lifecycle hooks and gap lines, and the pool comparison
 //                logged as pool=<choice> beside each act. Off, none of it
 //                runs and none of its storage is allocated.

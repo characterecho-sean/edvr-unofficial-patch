@@ -1469,6 +1469,18 @@ static inline bool engineFixDormant() {
 // verdict, and (advanced.transition_flash_diagnostics) the engine fix's
 // pool=<choice> comparison. Dormant without diagnostics, nothing reads it, so
 // the per-draw and per-Map reads are skipped.
+// The engine fix's event window is open (armPatchSim .. skip+3): the camera
+// CB's Unmap tap is the one place the fix looks at a frame. Outside it, and
+// with the detector dormant and diagnostics off, glitchFrameObserve returns
+// on its first line.
+static std::atomic<bool> g_engineWindowOpen{false};
+static inline bool engineObserveIdle() {
+    return engineFixDormant() && !g_engineFixDiagnostics.load(std::memory_order_relaxed) &&
+           !g_engineWindowOpen.load(std::memory_order_relaxed);
+}
+void glitchFrameEngineWindow(bool open) {
+    g_engineWindowOpen.store(open, std::memory_order_relaxed);
+}
 static inline bool poolRecordingWanted() {
     return !engineFixDormant() || g_engineFixDiagnostics.load(std::memory_order_relaxed);
 }
@@ -1492,11 +1504,14 @@ bool glitchFrameEngineFixEvent(bool withhold) {
     if (!withhold) return true;
     if (s) s->verdictThisFrame = kVerdictSceneReset;
     markGlitchFrame();
-    // The camera STAYED at the new base (a change of reference frame, the
-    // next frame is coherent): the temporal pass keeps its history instead
-    // of waiting for a verdict that nothing else will publish.
-    noteJumpVerdict(2);
+    // The jump verdict is NOT published here: see glitchFrameEngineFixVerdict.
     return glitchConsumerPresent();
+}
+
+void glitchFrameEngineFixVerdict() {
+    // "Stayed": a change of reference frame, the next frame is coherent, so
+    // the temporal pass keeps its history.
+    noteJumpVerdict(2);
 }
 
 static void syncGlitchFrameDetail() {
@@ -1769,7 +1784,9 @@ bool glitchFrameNeedsEyeDraws() {
     // detector has given up -- no buffer, validation failed, runaway guard --
     // vScreen would go on resolving a view per render-target rebind, every
     // frame, for a consumer that will never look at the count again.
-    return s && s->observing && !s->disabledForSession;
+    // Dormant, the detector judges nothing and counts nothing: the draw gate
+    // need not carry it (vscreen re-asks this every frame).
+    return s && s->observing && !s->disabledForSession && !engineFixDormant();
 }
 
 bool glitchFrameWantsBuffer(uint32_t bytes) {
@@ -1787,6 +1804,7 @@ void glitchFrameObserve(const void* data, uint32_t bytes, const void* resource) 
     // rather than the moment the fix gave up. The gate that matters -- never
     // acting -- is below, after the tracking.
     if (!s || !s->observing) return;
+    if (engineObserveIdle()) return;   // the engine fix's cost when armed and idle: this one load
     if (bytes != s->bufferBytes) return;
     // Widened deliberately. posOffset comes from the ini through getInt and is
     // stored unsigned, so a negative or very large value becomes something near

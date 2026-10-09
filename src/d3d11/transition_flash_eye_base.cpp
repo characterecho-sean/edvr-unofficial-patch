@@ -418,15 +418,11 @@ struct PatchSimPending {
     float prevCorrOrigin[3] = {NAN, NAN, NAN};
     float prevCorrViewT[3] = {NAN, NAN, NAN};
     bool havePrevCorr = false;
-    // CHANGE 19 (Build 2a): the event's base. B_new is the mailbox the FIRST
-    // controller tick after the skip left (controllerObserved reads it right
-    // after the original returns -- before the next consume can reset it);
-    // baseState says why it is absent when it is (tfeb::EngineBase).
-    tfeb::EngineBase baseState = tfeb::EngineBase::NoTickYet;
-    float baseNew[16] = {};
-    uint32_t baseTickFrame = 0;   // g_frame when the tick that left it ran
-    uint32_t baseTicksSeen = 0;   // ticks since the skip (the base tick is the first usable one)
-    bool engineOpen = false;      // the event has not yet been closed by serviceEngineEvent
+    // CHANGE 19: engineOpen: the event has not yet been closed by
+    // serviceEngineEvent; windowOpen: the camera-CB tap window
+    // (glitchFrameEngineWindow) has not yet been closed.
+    bool engineOpen = false;
+    bool windowOpen = false;
 };
 std::mutex g_patchSimMutex;
 PatchSimPending g_patchSim;
@@ -439,32 +435,27 @@ std::atomic<uint64_t> g_patchSimExpired{0};    // windows that passed with no co
 std::atomic<bool> g_patchSimPending{false};
 std::atomic<uint32_t> g_patchSimPendingSkip{0};
 
-// CHANGE 19 (Build 2a): the engine fix's event plumbing, outside the diag sim.
-// gapLastConsume: the last gap (un-refilled mode-2) consume of the armed
+// CHANGE 19 (Build 2a/2c): the engine fix's event plumbing, outside the diag
+// sim. gapLastConsume: the last gap (un-refilled mode-2) consume of the armed
 // event's run, so a render tap knows whether its consume was still a gap.
-// waitingForBase: an armed event has no base yet (the controller hook reads
-// the mailbox after its next tick). outstanding: an event, or an unlogged act
-// record, is live (the per-frame service takes its lock only then).
+// outstanding: an event, or an unlogged held-frame record, is live (the
+// per-frame service takes its lock only then). verdictDue: a frame was held
+// and the temporal pass's verdict is owed after its eyes were handed over.
 std::atomic<uint32_t> g_engineGapLastConsume{0};
-std::atomic<bool> g_engineWaitingForBase{false};
 std::atomic<bool> g_engineEventOutstanding{false};
-std::atomic<uint64_t> g_engineEvents{0}, g_engineFramesPatched{0}, g_engineFramesWithheld{0};
-std::atomic<uint64_t> g_engineWithheldNoTick{0}, g_engineWithheldUnusable{0};
-std::atomic<uint64_t> g_engineFramesNoFill{0}, g_engineEventsNoHeadOnly{0}, g_engineNotHonoured{0};
+std::atomic<bool> g_engineVerdictDue{false};
+std::atomic<uint64_t> g_engineEvents{0}, g_engineFramesHeld{0};
+std::atomic<uint64_t> g_engineEventsNoHeadOnly{0}, g_engineNotHonoured{0};
 
-// One bad frame the fix acted on (two slots per event, indexed by tapFrame -
+// One bad frame the fix held (two slots per event, indexed by tapFrame -
 // skipFrame - 1), written by the render-tap path under g_patchSimMutex and
-// logged by serviceEngineEvent a frame after its fills closed. outcome: 0
-// had a base but no fill matched, 1 patched, 2 withheld.
+// logged by serviceEngineEvent a frame later.
 struct EngineActRecord {
     bool used = false;
     bool logged = false;
-    uint8_t outcome = 0;
     uint8_t poolChoice = 0;        // diagnostics only: 0 not asked, 1 new, 2 old, 3 unclear, 4 no evidence
     bool consumerPresent = true;
-    tfeb::EngineBase baseState = tfeb::EngineBase::NoTickYet;
-    uint32_t skipFrame = 0, tapFrame = 0, baseTickFrame = 0, baseTicksSeen = 0;
-    uint32_t fillsHeadOnly = 0, fillsPatched = 0, fillsViewWritten = 0, fillsClip = 0;
+    uint32_t skipFrame = 0, tapFrame = 0;
 };
 EngineActRecord g_actRecords[tfeb::kEngineMaxFrames];
 void logEngineRecord(const EngineActRecord& r) noexcept;   // Part C3
@@ -615,7 +606,6 @@ struct PatchSimCBAccum {
     uint32_t fillsPoolLate = 0;
     uint32_t fillsViewWritten = 0;     // CHANGE 17: gated fills that also wrote the located view group
     uint32_t fillsGuardFail = 0;       // CHANGE 17: view writes the orthonormality guard refused
-    uint32_t fillsClip = 0;            // BUILD 2b: gated fills whose rows 270-274 were rewritten
     uint8_t baseUsed = 0;
     uint8_t vpStatus = 0;
     uint8_t actChoice = 2;
@@ -716,13 +706,11 @@ void armPatchSim(uint32_t frame, const float heldM[16], bool haveHeldBase, uint6
         if (replaced) replacedSkip = g_patchSim.skipFrame;
         g_patchSim.active = true;
         g_patchSim.skipFrame = frame;
-        g_patchSim.baseState = tfeb::EngineBase::NoTickYet;
-        g_patchSim.baseTickFrame = 0;
-        g_patchSim.baseTicksSeen = 0;
         g_patchSim.engineOpen = true;
+        g_patchSim.windowOpen = true;
+        glitchFrameEngineWindow(true);
         g_engineGapLastConsume.store(frame, std::memory_order_relaxed);
         for (EngineActRecord& r : g_actRecords) r = EngineActRecord{};
-        g_engineWaitingForBase.store(true, std::memory_order_release);
         g_engineEventOutstanding.store(true, std::memory_order_release);
         g_engineEvents.fetch_add(1, std::memory_order_relaxed);
         if (g_diag.load(std::memory_order_relaxed)) cbDumpArm(frame);
@@ -1352,10 +1340,7 @@ void performDump(const PendingDump& due) noexcept {
                     // frame's rows at the SAME fill index (the fills are
                     // per-view/per-pass; index-matched or nothing).
                     if (d.basisRecorded) {
-                        for (uint32_t side = 0; side < 2; ++side) {
-                            appendSurveyLines(simText, r.frame, i, d.index, side == 0 ? "before" : "after ",
-                                              side == 0 ? d.basisBefore : d.basisAfter);
-                        }
+                        appendSurveyLines(simText, r.frame, i, d.index, "before", d.basisBefore);
                         if (nextBasisRecord) for (uint32_t q = 0; q < kCBAccumDetailMax; ++q) {
                             if (!nextBasisRecord->patchSimCBBasisNext[q].valid ||
                                 nextBasisRecord->patchSimCBBasisNext[q].index != d.index)
@@ -1946,47 +1931,18 @@ void noteControllerTick(uintptr_t ctrl) noexcept {
     else g_otherTicksSinceConsume.fetch_add(1, std::memory_order_relaxed);
 }
 
-// CHANGE 19 (Build 2a), the engine fix's base: called right AFTER the original
-// tick returns, on the thread that ran it, while an armed event waits for its
-// base. The tick has just written the mailbox (ship+0x3330) and nothing else
-// has run on that thread since, so the next consume's reset cannot have
-// happened yet (flight 050558: that reset is what made the render-time read
-// RESET on the exit). Usable = a base, not a leftover (tfeb::engineBaseUsable).
-// The FIRST tick after the skip normally leaves it; a tick that left nothing
-// usable (another camera class, a writer that refused) is counted and the
-// next tick tries again until the event's window closes.
-void noteBaseTick() noexcept {
-    std::lock_guard<std::mutex> lock(g_patchSimMutex);
-    if (!g_patchSim.active) { g_engineWaitingForBase.store(false, std::memory_order_release); return; }
-    if (g_patchSim.baseState == tfeb::EngineBase::Have) {
-        g_engineWaitingForBase.store(false, std::memory_order_release);
-        return;
-    }
-    ++g_patchSim.baseTicksSeen;
-    float m[16] = {};
-    if (g_patchSim.ship != 0 &&
-        sehReadBlock64(static_cast<uintptr_t>(g_patchSim.ship) + 0x3330, m) && tfeb::engineBaseUsable(m)) {
-        std::memcpy(g_patchSim.baseNew, m, sizeof(m));
-        g_patchSim.baseState = tfeb::EngineBase::Have;
-        g_patchSim.baseTickFrame = g_frame.load(std::memory_order_relaxed);
-        g_engineWaitingForBase.store(false, std::memory_order_release);
-    } else {
-        g_patchSim.baseState = tfeb::EngineBase::TickUnusable;
-    }
-}
-
 uint64_t __fastcall controllerObserved(uintptr_t param1) noexcept {
     const auto forward = reinterpret_cast<ControllerFn>(g_controllerEntry.forward.load(std::memory_order_acquire));
     if (!forward) return 0;  // stood down at install; the relay is unreachable then
     const bool on = static_cast<tfp::Mode>(g_fixMode.load(std::memory_order_relaxed)) != tfp::Mode::Off;
+    // Diagnostics only (CHANGE 19, Build 2c): the shipped fix reads nothing
+    // from the tick, so armed and idle this hook is a counter test and the call.
     if (on && g_diag.load(std::memory_order_relaxed)) {
         g_controllerCallsTotal.fetch_add(1, std::memory_order_relaxed);
         g_controllerCallsThisFrame.fetch_add(1, std::memory_order_relaxed);
         noteControllerTick(param1);
     }
-    const uint64_t result = forward(param1);
-    if (on && g_engineWaitingForBase.load(std::memory_order_acquire)) noteBaseTick();
-    return result;
+    return forward(param1);
 }
 
 // =====================================================================
@@ -2208,45 +2164,31 @@ constexpr uint32_t kMaxEngineLines = 60;
 constexpr uint32_t kMaxEngineNoFillLines = 8;
 std::atomic<uint32_t> g_engineLines{0}, g_engineNoFillLines{0};
 
-// Logs one finished record.
+// Logs one held frame: `transition flash: frame T held (event skip S)`, with
+// pool=<choice> (diagnostics) and, when no compositor was in a position to
+// honour the mark, a NOT-held notice.
 void logEngineRecord(const EngineActRecord& r) noexcept {
     const uint32_t already = g_engineLines.fetch_add(1, std::memory_order_relaxed);
     if (already >= kMaxEngineLines) return;
     char pool[24] = "";
     if (r.poolChoice != 0) {
-        std::snprintf(pool, sizeof(pool), " pool=%s",
+        std::snprintf(pool, sizeof(pool), ", pool=%s",
                       r.poolChoice == 1 ? "new" : r.poolChoice == 2 ? "old" : r.poolChoice == 3 ? "unclear" : "none");
     }
-    const char* tail = already + 1 == kMaxEngineLines ? " (line cap reached; counts continue)" : "";
-    if (r.outcome == 2) {
-        Log::get().note(
-            "transition flash: frame %u withheld (no base by the render: %s) (event skip %u, ticks seen %u%s)%s%s",
-            r.tapFrame, tfeb::engineBaseReason(r.baseState), r.skipFrame, r.baseTicksSeen, pool,
-            r.consumerPresent ? "" : " -- NOT held: no compositor was in a position to hold it", tail);
-    } else if (r.outcome == 1) {
-        Log::get().note(
-            "transition flash: frame %u patched (base first tick f=%u, fills %u/%u, view %u, clip %u) (event skip %u%s)%s",
-            r.tapFrame, r.baseTickFrame, r.fillsPatched, r.fillsHeadOnly, r.fillsViewWritten, r.fillsClip,
-            r.skipFrame, pool, tail);
-    } else {
-        Log::get().note(
-            "transition flash: frame %u had a base but no fill matched its head-only eye (fills %u/%u, "
-            "event skip %u) -- nothing changed.%s",
-            r.tapFrame, r.fillsPatched, r.fillsHeadOnly, r.skipFrame, tail);
-    }
+    Log::get().note(
+        "transition flash: frame %u held (event skip %u%s)%s%s",
+        r.tapFrame, r.skipFrame, pool,
+        r.consumerPresent ? "" : " -- NOT held: no compositor was in a position to hold it",
+        already + 1 == kMaxEngineLines ? " (line cap reached; counts continue)" : "");
 }
 
 void engineSummaryLine(const char* prefix) noexcept {
     Log::get().note(
-        "%s engine fix %s: events=%llu frames patched=%llu withheld=%llu (no tick yet/unusable base=%llu/%llu) "
-        "base-but-no-fill=%llu events with no head-only fill=%llu withhold not honoured=%llu.",
+        "%s engine fix %s: events=%llu frames held=%llu events with no head-only fill=%llu "
+        "hold not honoured=%llu.",
         prefix, g_engineArmed.load(std::memory_order_relaxed) ? "ARMED" : "NOT armed (detector in charge)",
         (unsigned long long)g_engineEvents.load(std::memory_order_relaxed),
-        (unsigned long long)g_engineFramesPatched.load(std::memory_order_relaxed),
-        (unsigned long long)g_engineFramesWithheld.load(std::memory_order_relaxed),
-        (unsigned long long)g_engineWithheldNoTick.load(std::memory_order_relaxed),
-        (unsigned long long)g_engineWithheldUnusable.load(std::memory_order_relaxed),
-        (unsigned long long)g_engineFramesNoFill.load(std::memory_order_relaxed),
+        (unsigned long long)g_engineFramesHeld.load(std::memory_order_relaxed),
         (unsigned long long)g_engineEventsNoHeadOnly.load(std::memory_order_relaxed),
         (unsigned long long)g_engineNotHonoured.load(std::memory_order_relaxed));
 }
@@ -2279,7 +2221,12 @@ void serviceEngineEvent(uint32_t nowFrame) noexcept {
             g_patchSim.engineOpen = false;
             g_patchSim.active = false;
             g_patchSimPending.store(false, std::memory_order_release);
-            g_engineWaitingForBase.store(false, std::memory_order_release);
+        }
+        // The camera-CB tap window closes once the second bad render's fills
+        // are done (tap frame skip+2 closes at boundary skip+3; one spare).
+        if (g_patchSim.windowOpen && nowFrame >= g_patchSim.skipFrame + tfeb::kEngineMaxFrames + 2u) {
+            g_patchSim.windowOpen = false;
+            glitchFrameEngineWindow(false);
         }
         bool pendingRecord = false;
         for (const EngineActRecord& r : g_actRecords) pendingRecord = pendingRecord || (r.used && !r.logged);
@@ -2290,8 +2237,8 @@ void serviceEngineEvent(uint32_t nowFrame) noexcept {
         g_engineEventsNoHeadOnly.fetch_add(1, std::memory_order_relaxed);
         if (g_engineNoFillLines.fetch_add(1, std::memory_order_relaxed) < kMaxEngineNoFillLines) {
             Log::get().note(
-                "transition flash: event at frame %u held no head-only fill in its window (frames %u..%u) -- "
-                "nothing changed.",
+                "transition flash: event at frame %u saw no head-only fill in its window (frames %u..%u) -- "
+                "nothing held.",
                 noFillSkip, noFillSkip + 1, noFillSkip + tfeb::kEngineMaxFrames);
         }
     }
@@ -2806,8 +2753,7 @@ uint64_t reportBit(uint32_t i) noexcept {
     case 5: return g_consumerResetHitsTotal.load(std::memory_order_relaxed);
     case 6: return g_shipPointerChangesTotal.load(std::memory_order_relaxed);
     case 8: return g_engineEvents.load(std::memory_order_relaxed);
-    case 9: return g_engineFramesPatched.load(std::memory_order_relaxed) +
-                   g_engineFramesWithheld.load(std::memory_order_relaxed);
+    case 9: return g_engineFramesHeld.load(std::memory_order_relaxed);
     case 10: return g_gapStarted.load(std::memory_order_relaxed) + g_hmdActivates.load(std::memory_order_relaxed);
     default: return g_wwHwArmed ? 1 : 0;
     }
@@ -2865,6 +2811,11 @@ void transitionFlashEyeBaseFrameBoundary(uint32_t frameNo) {
     g_frame.store(frameNo, std::memory_order_relaxed);
     if (!g_armed.load(std::memory_order_relaxed)) return;
     serviceEngineEvent(frameNo);
+    // A frame was held at the mark; its eyes were handed over before this
+    // boundary (Submit, Submit, Present, then here), so the temporal pass has
+    // latched its verdict word by now and a word published NOW reads as a
+    // change: "the camera stayed", history kept (glitch_frame.h).
+    if (g_engineVerdictDue.exchange(false, std::memory_order_acq_rel)) glitchFrameEngineFixVerdict();
     maybeReportPeriodic();
     if (!g_diag.load(std::memory_order_relaxed)) {
         // Diagnostics went off with the watch armed: take it down.
@@ -3106,12 +3057,6 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         }
                         a.tapFrame = 0xFFFFFFFFu;   // consumed
                     }
-                    // CHANGE 19: the engine fix's own candidate (the first tick's
-                    // base), computed exactly like held->/new->/live-> -- the
-                    // act uses it, never the three above.
-                    float patchBaseNew[3] = {NAN, NAN, NAN};
-                    const bool haveBaseNew = g_patchSim.baseState == tfeb::EngineBase::Have;
-                    if (haveBaseNew) tfeb::patchEyeOrigin(g_patchSim.baseNew, P, patchBaseNew);
                     char cbCrossOText[24], cbCrossVText[24];
                     if (std::isnan(cbCrossO)) std::snprintf(cbCrossOText, sizeof(cbCrossOText), "n/a");
                     else std::snprintf(cbCrossOText, sizeof(cbCrossOText), "%.3f", cbCrossO);
@@ -3141,8 +3086,7 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         "choice=%s->%s (refilled age=%d, live=%s) cb=[fills=%u match275=%u tapf=%d "
                         "view=%d corrO=(%+.3f %+.3f %+.3f) crossO=%s crossV=%s live=%s "
                         "act=[patched=%u skipNM=%u skipNV=%u skipNP=%u view=%u guard=%u base=%s "
-                        "choice=%s vp=%s latch=%s poolEarly=%s wouldDiffer=%u]] "
-                        "base1->(%s%+.3f %+.3f %+.3f) basestate=%s",
+                        "choice=%s vp=%s latch=%s poolEarly=%s wouldDiffer=%u]]",
                         frame, g_patchSim.skipFrame, P[0], P[1], P[2],
                         haveHeld ? "" : "n/a ", patchHeld[0], patchHeld[1], patchHeld[2],
                         haveNew ? "" : "n/a ", patchNew[0], patchNew[1], patchNew[2],
@@ -3161,10 +3105,7 @@ void transitionFlashEyeBaseNoteSceneCamera(uint32_t frame, const float pos[3], b
                         cbVP == 1 ? "patched" : cbVP == 2 ? "ambiguous" : "not-found",
                         latchText(cbLatchBase, cbLatchReason),
                         cbPoolEarly ? "yes" : "no",
-                        cbWouldDiffer,
-                        haveBaseNew ? "" : "n/a ",
-                        patchBaseNew[0], patchBaseNew[1], patchBaseNew[2],
-                        tfeb::engineBaseReason(g_patchSim.baseState));
+                        cbWouldDiffer);
                     r.patchSim = true;
                     r.patchSimSkipFrame = g_patchSim.skipFrame;
                     r.patchSimP[0] = P[0]; r.patchSimP[1] = P[1]; r.patchSimP[2] = P[2];
@@ -3350,202 +3291,46 @@ void transitionFlashEyeBaseNoteSceneCB(uint32_t frame, const void* mapped, size_
             a.analyzed = false;
         }
     }
-    // CHANGE 19 (Build 2a): THE ACT. Only on a patched event's bad renders
-    // (tfeb::engineActFrame: skip+1, and skip+2 while the gap lasted), only on
-    // fills whose row 275 is head-only. The frame's base is decided ONCE, at
-    // its FIRST head-only fill, and latched for every fill of the frame, so
-    // one frame can never be drawn from two cameras and a withheld frame is
-    // never half-patched:
-    //   B_new held  -> patch (the fac3d17a math, below) every fill whose row
-    //                  275 is the first fill's P to within 0.01 m;
-    //   B_new absent -> patch nothing and WITHHOLD the frame.
-    // The pool selector is not consulted (flight 050558: it declined every
-    // event); with diagnostics on it is still asked, and logged as pool=.
-    // The writes land in this same mapped buffer -- the game's own writable
-    // Map pointer at the pre-Unmap tap, so no SEH -- and the detector's own
-    // record of this fill has already taken the ORIGINAL values.
+    // CHANGE 19 (Build 2c): THE ACT IS A HOLD. On a patched event's bad renders
+    // (tfeb::engineActFrame: skip+1, and skip+2 while the gap lasted), at the
+    // frame's FIRST camera-CB fill whose row 275 is head-only (|row 275| < 1 m,
+    // the bad eye's signature), withhold the frame once. Nothing is written to
+    // the buffer: Builds 2a/2b corrected the eye, the pilot block, the clip
+    // rows and the view group in place and flight 091951 still flashed -- the
+    // bad frame carries at least five other wrong structures. No head-only fill
+    // in the window: nothing happens, and serviceEngineEvent says so.
     if (g_patchSim.eventPatched &&
         tfeb::engineActFrame(frame, g_patchSim.skipFrame,
                              g_engineGapLastConsume.load(std::memory_order_relaxed))) {
         EngineActRecord& rec = g_actRecords[frame - g_patchSim.skipFrame - 1];
-        if (o2 >= kCBHeadOnlyRadius2) {
-            // A fill of the bad frame whose row 275 is NOT the bad eye (the
-            // 4-25% "other views" the locator flight measured): leave it.
-            ++a.fillsSkippedNoMatch;
-        } else {
-            if (!a.latchDecided) {
-                // The FIRST head-only fill of the frame: decide and latch.
-                a.latchDecided = true;
-                a.latchP[0] = origin[0]; a.latchP[1] = origin[1]; a.latchP[2] = origin[2];
-                rec.used = true;
-                rec.skipFrame = g_patchSim.skipFrame;
-                rec.tapFrame = frame;
-                rec.baseState = g_patchSim.baseState;
-                rec.baseTickFrame = g_patchSim.baseTickFrame;
-                rec.baseTicksSeen = g_patchSim.baseTicksSeen;
-                if (diag) {
-                    GlitchSceneGeometry ev = {};
-                    glitch_scene_detail::Sample snapshot[3];
-                    if (glitchFrameScenePoolEvidence(frame, origin, &ev, snapshot)) {
-                        const tfeb::SceneChoice pc =
-                            tfeb::patchSceneChoice(ev.matched, ev.predicted, ev.cameraStep, ev.poolStep, true);
-                        rec.poolChoice = pc == tfeb::SceneChoice::New ? 1 : pc == tfeb::SceneChoice::Old ? 2 : 3;
-                    } else {
-                        rec.poolChoice = 4;
-                    }
-                }
-                if (g_patchSim.baseState == tfeb::EngineBase::Have) {
-                    a.latchBase = 3;                       // the first tick's base
-                    std::memcpy(a.latchB, g_patchSim.baseNew, sizeof(a.latchB));
+        if (diag && frame == g_patchSim.skipFrame + 1) {
+            std::memcpy(d.basisBefore, cb + tfeb::kSceneCBSimSurveyFloat, sizeof(d.basisBefore));
+            d.basisRecorded = true;
+        }
+        if (o2 < kCBHeadOnlyRadius2 && !rec.used) {
+            rec.used = true;
+            rec.skipFrame = g_patchSim.skipFrame;
+            rec.tapFrame = frame;
+            if (diag) {
+                // The old object-pool comparison, for the record only.
+                GlitchSceneGeometry ev = {};
+                glitch_scene_detail::Sample snapshot[3];
+                if (glitchFrameScenePoolEvidence(frame, origin, &ev, snapshot)) {
+                    const tfeb::SceneChoice pc =
+                        tfeb::patchSceneChoice(ev.matched, ev.predicted, ev.cameraStep, ev.poolStep, true);
+                    rec.poolChoice = pc == tfeb::SceneChoice::New ? 1 : pc == tfeb::SceneChoice::Old ? 2 : 3;
                 } else {
-                    a.latchBase = 0;
-                    a.latchReason = 3;                     // noPatch:noBase
-                    rec.outcome = 2;
-                    rec.consumerPresent = glitchFrameEngineFixEvent(true);
-                    g_engineFramesWithheld.fetch_add(1, std::memory_order_relaxed);
-                    (g_patchSim.baseState == tfeb::EngineBase::NoTickYet ? g_engineWithheldNoTick
-                                                                         : g_engineWithheldUnusable)
-                        .fetch_add(1, std::memory_order_relaxed);
-                    if (!rec.consumerPresent) g_engineNotHonoured.fetch_add(1, std::memory_order_relaxed);
+                    rec.poolChoice = 4;
                 }
             }
-            ++rec.fillsHeadOnly;
-            if (a.latchBase == 0) {
-                // All-or-nothing: the latch says this frame patches nothing.
-                ++a.fillsSkippedNoPatch;
-            } else if (!tfeb::engineFillMatches(origin, a.latchP)) {
-                ++a.fillsSkippedNoMatch;
-            } else {
-                // CHANGE 17 row scope: origin + pilot block are written on
-                // EVERY gated fill -- they are validated and self-consistent,
-                // and the shaders' 275-279 consumers need exactly those. The
-                // located view group is ADDITIONAL: written only when the
-                // fixed finder (w-lane translation, 3-row windows) locates
-                // the CURRENT view AND the write-time orthonormality guard
-                // passes -- never the 160557 garbage again.
-                std::memcpy(d.basisBefore, cb + tfeb::kSceneCBSimSurveyFloat, sizeof(d.basisBefore));
-                d.basisRecorded = true;
-                // ALL reads of the original buffer happen here, before any
-                // write; the VP scan skips every window overlapping the
-                // located view group, row 275, or the pilot rows 276-279.
-                const float* B = a.latchB;
-                float originPatched[3];
-                tfeb::patchEyeOrigin(B, origin, originPatched);
-                // The pilot block (CHANGE 16): 276 is position-like, the
-                // eye's own premultiply; 277-279 are the basis -- the
-                // translation-free rotateByBase twin.
-                float pilot[16] = {};
-                tfeb::patchEyeOrigin(B, cb + tfeb::kSceneCBSimBasisFloat + 0, &pilot[0]);
-                tfeb::rotateByBase(B, cb + tfeb::kSceneCBSimBasisFloat + 4, &pilot[4]);
-                tfeb::rotateByBase(B, cb + tfeb::kSceneCBSimBasisFloat + 8, &pilot[8]);
-                tfeb::rotateByBase(B, cb + tfeb::kSceneCBSimBasisFloat + 12, &pilot[12]);
-                // BUILD 2b: the camera-relative clip rows 270-274, read here with
-                // everything else (see tfeb::patchClipRows for the fit).
-                float clipOut[tfeb::kSceneCBSimClipFloats];
-                tfeb::patchClipRows(B, cb + tfeb::kSceneCBSimClipFloat, &pilot[12], clipOut);
-
-                // The current view, located fresh for this fill (the row
-                // moves per pass), in the verified float3x4 layout.
-                const tfeb::SceneCBViewFind find = tfeb::locateSceneCBView(
-                    cb, tfeb::kSceneCBSimFloat4Rows, origin, kCBViewOrthoTol, kCBViewOriginTol);
-                d.find = find;
-                int vpRow = -1;
-                int vpCandidates = 0;
-                float vpP[16] = {};
-                bool viewWritten = false;
-                float viewOut[16] = {};
-                float xNew[16] = {};
-                if (find.startRow < 0) {
-                    // No CURRENT view locatable on this fill: origin+pilot
-                    // only (the correct granularity -- a fill is never
-                    // corrupted for the lack of a view).
-                    ++a.fillsSkippedNoView;
-                } else if (!tfeb::correctViewColumnMajor(B, cb + find.startRow * 4, viewOut,
-                                                         kCBViewOrthoTol)) {
-                    // The write-time guard: a non-orthonormal result is
-                    // NEVER written (the 160557 corruption would have been
-                    // caught here).
-                    ++a.fillsGuardFail;
-                } else {
-                    // VP defense against the ORIGINAL rows: a second group
-                    // whose V_bad^-1 x X is cleanly proj-like is the
-                    // composed view-projection. The view group is float3x4
-                    // ([v, v+2]); VP windows overlapping it, row 275, or the
-                    // pilot rows 276-279 are skipped.
-                    float v4[16] = {};
-                    std::memcpy(v4, cb + find.startRow * 4, 12 * sizeof(float));
-                    v4[12] = v4[3]; v4[13] = v4[7]; v4[14] = v4[11]; v4[15] = 1.0f;
-                    v4[3] = v4[7] = v4[11] = 0.0f;
-                    float v4Inv[16];
-                    tfeb::affineInverse4x4(v4, v4Inv);
-                    const int viewLo = find.startRow - 3, viewHi = find.startRow + 2;
-                    for (int r = 0; r + 4 <= tfeb::kSceneCBSimFloat4Rows; ++r) {
-                        if (r >= viewLo && r <= viewHi) continue;   // overlaps the view group
-                        if (r >= 267 && r <= 279) continue;         // overlaps rows 270-279 (clip, origin, pilot)
-                        float pr[16];
-                        tfeb::premul4x4(v4Inv, cb + r * 4, pr);
-                        if (tfeb::projLike4x4(pr)) {
-                            ++vpCandidates;
-                            if (vpCandidates == 1) {
-                                vpRow = r;
-                                std::memcpy(vpP, pr, sizeof(vpP));
-                            }
-                        }
-                    }
-                    if (vpCandidates == 1) {
-                        // Recompose VP = V' x (V_bad^-1 x X) with the
-                        // corrected 4x4 view.
-                        float vCorr4[16] = {};
-                        std::memcpy(vCorr4, viewOut, 12 * sizeof(float));
-                        vCorr4[12] = viewOut[3]; vCorr4[13] = viewOut[7];
-                        vCorr4[14] = viewOut[11]; vCorr4[15] = 1.0f;
-                        tfeb::premul4x4(vCorr4, vpP, xNew);
-                    }
-                    viewWritten = true;
-                }
-                a.vpStatus = vpCandidates == 1 ? 1 : vpCandidates == 0 ? 0 : 2;
-                if (viewWritten) ++a.fillsViewWritten;
-
-                // One write pass, view before origin+pilot so the always-
-                // written validated rows land last: VP (4 rows), the view
-                // group (12 floats -- the 4th float4 after it is preserved),
-                // then row 275 and the pilot block.
-                float* writable = const_cast<float*>(cb);
-                if (vpCandidates == 1) std::memcpy(writable + vpRow * 4, xNew, sizeof(xNew));
-                if (viewWritten) {
-                    std::memcpy(d.groupBefore, cb + find.startRow * 4, sizeof(d.groupBefore));
-                    std::memcpy(writable + find.startRow * 4, viewOut, 12 * sizeof(float));
-                    std::memcpy(d.groupAfter, cb + find.startRow * 4, sizeof(d.groupAfter));
-                }
-                writable[tfeb::kSceneCBSimOriginFloat + 0] = originPatched[0];
-                writable[tfeb::kSceneCBSimOriginFloat + 1] = originPatched[1];
-                writable[tfeb::kSceneCBSimOriginFloat + 2] = originPatched[2];
-                writable[tfeb::kSceneCBSimBasisFloat + 0] = pilot[0];
-                writable[tfeb::kSceneCBSimBasisFloat + 1] = pilot[1];
-                writable[tfeb::kSceneCBSimBasisFloat + 2] = pilot[2];
-                writable[tfeb::kSceneCBSimBasisFloat + 4] = pilot[4];
-                writable[tfeb::kSceneCBSimBasisFloat + 5] = pilot[5];
-                writable[tfeb::kSceneCBSimBasisFloat + 6] = pilot[6];
-                writable[tfeb::kSceneCBSimBasisFloat + 8] = pilot[8];
-                writable[tfeb::kSceneCBSimBasisFloat + 9] = pilot[9];
-                writable[tfeb::kSceneCBSimBasisFloat + 10] = pilot[10];
-                writable[tfeb::kSceneCBSimBasisFloat + 12] = pilot[12];
-                writable[tfeb::kSceneCBSimBasisFloat + 13] = pilot[13];
-                writable[tfeb::kSceneCBSimBasisFloat + 14] = pilot[14];
-                std::memcpy(writable + tfeb::kSceneCBSimClipFloat, clipOut, sizeof(clipOut));
-                ++a.fillsClip;
-                std::memcpy(d.basisAfter, cb + tfeb::kSceneCBSimSurveyFloat, sizeof(d.basisAfter));
-                ++a.fillsPatched;
-                rec.fillsPatched = a.fillsPatched;
-                rec.fillsViewWritten = a.fillsViewWritten;
-                rec.fillsClip = a.fillsClip;
-                if (rec.outcome == 0) {
-                    // The frame's first patched fill: one patched frame.
-                    rec.outcome = 1;
-                    g_engineFramesPatched.fetch_add(1, std::memory_order_relaxed);
-                    glitchFrameEngineFixEvent(false);
-                }
-            }
+            a.latchDecided = true;
+            a.latchReason = 3;                       // held
+            rec.consumerPresent = glitchFrameEngineFixEvent(true);
+            g_engineFramesHeld.fetch_add(1, std::memory_order_relaxed);
+            if (!rec.consumerPresent) g_engineNotHonoured.fetch_add(1, std::memory_order_relaxed);
+            // The temporal pass's verdict is owed once this frame's eyes have
+            // been handed to the compositor: the next frame boundary.
+            g_engineVerdictDue.store(true, std::memory_order_release);
         }
     } else if (diag && frame == g_patchSim.skipFrame + 2 &&
                tfeb::patchSimWindowCovers(frame + 1, g_patchSim.skipFrame)) {

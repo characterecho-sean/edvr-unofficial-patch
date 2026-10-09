@@ -258,6 +258,24 @@ void run(){
     f=frame(17,seq);begin(omitted,f);check(treat(omitted,seq,0,source.Get())==S_OK,"deferred verdict frame");
     check(bool(calls.back().flags&1)==(seq==12),"unknown verdict resets on fourth treat only");
   }
+  // The engine fix's exact withhold (docs Build 2c, flight 091951). The verdict word is latched when the eye is withheld
+  // (native_frame passes jumpVerdictPacked() to skipEye) and a CHANGE since is the verdict. Published BEFORE the latch it is
+  // no change: the fourth treat resets the history (the unjudged blink). Published AFTER, at the frame boundary behind the
+  // withheld frame's submit, it is a change and the history is kept -- through a second withheld frame too.
+  f=frame(17,13);begin(omitted,f);edvr::noteJumpVerdict(2);
+  omitted.skipEye(omitted.context,13,0,1,edvr::jumpVerdictPacked());
+  for(unsigned seq=14;seq<=17;++seq) {
+    f=frame(17,seq);begin(omitted,f);check(treat(omitted,seq,0,source.Get())==S_OK,"verdict published before the latch: treat");
+    check(bool(calls.back().flags&1)==(seq==17),"verdict published before the latch is no verdict: history resets (the blink)");
+  }
+  f=frame(17,18);begin(omitted,f);
+  omitted.skipEye(omitted.context,18,0,1,edvr::jumpVerdictPacked());   // frame 1 held: latch the word as it stands
+  edvr::noteJumpVerdict(2);                                           // the boundary behind it
+  f=frame(17,19);begin(omitted,f);
+  omitted.skipEye(omitted.context,19,0,1,edvr::jumpVerdictPacked());   // frame 2 held (the gap lasted two frames)
+  edvr::noteJumpVerdict(2);
+  f=frame(17,20);begin(omitted,f);
+  check(treat(omitted,20,0,source.Get())==S_OK&&!(calls.back().flags&1),"verdict published after the latch keeps history across two held frames");
   omitted.close(omitted.context);
 
   // ---- the served floor (2026-09-23) ----------------------------------------
