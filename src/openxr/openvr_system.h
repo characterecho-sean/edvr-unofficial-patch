@@ -1,5 +1,6 @@
 #pragma once
 #include "system_source.h"
+#include "projection_callers.h"
 #include <atomic>
 #include <mutex>
 #include "../common/call_probe_budget.h"
@@ -57,10 +58,17 @@ class OpenVRSystem final : public vr::IVRSystem {
   vr::EVRFirmwareError PerformFirmwareUpdate( vr::TrackedDeviceIndex_t unDeviceIndex ) override;
   void AcknowledgeQuit_Exiting() override;
   void AcknowledgeQuit_UserPrompt() override;
+  // The projection-caller census (TEMPORARY, docs\terrain-culling.md); the host
+  // reads its executable and asks for a summary on a probe change.
+  ProjectionCallers& callers() { return callers_; }
+  void callerSummary(const char* reason) {
+    callers_.summary(reason, [this](const char* line) { source_.noteCallerLine(line); });
+  }
  private:
   void unavailable(unsigned slot) noexcept;
   void noteProperty(unsigned,TrackedDeviceIndex_t,ETrackedDeviceProperty,ETrackedPropertyError) noexcept;
   SystemSource& source_;
+  ProjectionCallers callers_;
   std::atomic<uint64_t> unavailable_{0};
   struct ProjectionKey { uint64_t clip=0; unsigned eye=0,api=0; bool live=false; };
   ProjectionKey projectionKeys_[2][32]{};

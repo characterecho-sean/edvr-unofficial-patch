@@ -8,6 +8,20 @@
 #include <windows.h>
 
 namespace edvr::openxr {
+ExeModule readExeModule() noexcept {
+  ExeModule out{};
+  const auto base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+  if(!base)return out;
+  const auto* dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return out;
+  const auto* nt=reinterpret_cast<const IMAGE_NT_HEADERS*>(base+dos->e_lfanew);
+  if(nt->Signature!=IMAGE_NT_SIGNATURE)return out;
+  out.base=base;
+  out.size=nt->OptionalHeader.SizeOfImage;
+  out.stamp=nt->FileHeader.TimeDateStamp;
+  out.imageSize=nt->OptionalHeader.SizeOfImage;
+  return out;
+}
 namespace {
 HmdMatrix34_t identity() { HmdMatrix34_t m{}; m.m[0][0]=m.m[1][1]=m.m[2][2]=1; return m; }
 TrackedDevicePose_t invalidPose(bool connected=false) {
@@ -124,6 +138,22 @@ ETrackedPropertyError propertyError(const SystemRead& s,TrackedDeviceIndex_t ind
   }
 }
 void error(ETrackedPropertyError* out,ETrackedPropertyError value) { if(out)*out=value; }
+// Frames 2 and 3 of the census: the callers of the game function that called us.
+// Frame 1 is that function's return address, which the caller passes in; the
+// walk finds it again and takes what follows.
+struct CaptureAbove {
+  uintptr_t frame1;
+  void operator()(ProjectionCallers::Frames& out) const {
+    void* frames[12]{};
+    const USHORT n=CaptureStackBackTrace(0,static_cast<DWORD>(sizeof(frames)/sizeof(frames[0])),frames,nullptr);
+    for(USHORT i=0;i<n;++i) {
+      if(reinterpret_cast<uintptr_t>(frames[i])!=frame1)continue;
+      if(i+1<n)out.second=reinterpret_cast<uintptr_t>(frames[i+1]);
+      if(i+2<n)out.third=reinterpret_cast<uintptr_t>(frames[i+2]);
+      break;
+    }
+  }
+};
 }
 void OpenVRSystem::unavailable(unsigned slot) noexcept {
   const uint64_t bit=uint64_t(1)<<slot;
@@ -139,6 +169,7 @@ void OpenVRSystem::GetRecommendedRenderTargetSize(uint32_t* w,uint32_t* h) {
   if(w)*w=width;if(h)*h=height;
 }
 HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,EGraphicsAPIConvention api) {
+  const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
   const auto s=source_.read();HmdMatrix44_t out{};
   source_.noteGeometryQuery(1,s);
   const unsigned eye=unsigned(e);
@@ -175,6 +206,8 @@ HmdMatrix44_t OpenVRSystem::GetProjectionMatrix(EVREye e,float nearZ,float farZ,
   }
   if(report)
     source_.noteProjectionQuery(s,eye,nearZ,farZ,api,accepted,out,_ReturnAddress());
+  callers_.note(ProjectionCallers::Matrix,eye,caller,CullProbe::Off,GetTickCount64(),GetCurrentThreadId(),CaptureAbove{caller},
+    [this](const char* line){source_.noteCallerLine(line);});
   return out;
 }
 void OpenVRSystem::noteProperty(unsigned slot,TrackedDeviceIndex_t index,ETrackedDeviceProperty property,ETrackedPropertyError e) noexcept {
@@ -190,6 +223,7 @@ void OpenVRSystem::noteProperty(unsigned slot,TrackedDeviceIndex_t index,ETracke
   if(report)source_.notePropertyQuery(slot,index,property,e);
 }
 void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b) {
+  const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
   const auto s=source_.read();RawFov out{};
   source_.noteGeometryQuery(2,s);
   const unsigned eye=unsigned(e);
@@ -202,19 +236,32 @@ void OpenVRSystem::GetProjectionRaw(EVREye e,float* l,float* r,float* t,float* b
                                    s.tangentShift[eye][1],out);
     else out=base;
   }
+  // The census (always) and the selective-lie probe (docs\terrain-culling.md): a
+  // caller the probe selects is told the symmetric superset of the answer it
+  // would have had, jitter shift included; every other caller, and every other
+  // method, is told exactly what it was.
+  if(callers_.note(ProjectionCallers::Raw,eye,caller,cullProbeFromCode(s.cullProbe),GetTickCount64(),GetCurrentThreadId(),CaptureAbove{caller},
+       [this](const char* line){source_.noteCallerLine(line);}))
+    out=widenedRaw(out);
   if(l)*l=out.left;if(r)*r=out.right;if(t)*t=out.top;if(b)*b=out.bottom;
 }
 DistortionCoordinates_t OpenVRSystem::ComputeDistortion(EVREye,float,float) { unavailable(3);return {}; }
 HmdMatrix34_t OpenVRSystem::GetEyeToHeadTransform(EVREye e) {
+  const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
   const auto s=source_.read();source_.noteGeometryQuery(4,s);
   const bool liveGeometry=geometryValid(s);
-  if(!opticsAvailable(s)||!eyeValid(e))return HmdMatrix34_t{};
+  const auto sink=[this](const char* line){source_.noteCallerLine(line);};
+  if(!opticsAvailable(s)||!eyeValid(e)) {
+    callers_.note(ProjectionCallers::EyeToHead,unsigned(e),caller,CullProbe::Off,GetTickCount64(),GetCurrentThreadId(),CaptureAbove{caller},sink);
+    return HmdMatrix34_t{};
+  }
   // The located transform stays what the snapshot holds: the native frame
   // tables and the layer read it there. Only this answer to the game changes,
   // and nothing reads it back.
   const HmdMatrix34_t located=liveGeometry?s.geometry.eyeToHead[unsigned(e)]:s.optics.eyeToHead[unsigned(e)];
   const HmdMatrix34_t given=s.cantedEyeFix?gameHandedness(located):located;
   source_.noteEyeToHead(s,unsigned(e),given,located);
+  callers_.note(ProjectionCallers::EyeToHead,unsigned(e),caller,CullProbe::Off,GetTickCount64(),GetCurrentThreadId(),CaptureAbove{caller},sink);
   return given;
 }
 bool OpenVRSystem::GetTimeSinceLastVsync(float* seconds,uint64_t* frame) {

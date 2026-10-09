@@ -114,6 +114,16 @@ uint32_t cullChannel(const std::string& value) {
     return 0;
 }
 
+// advanced.cull_probe (the terrain-culling arc, docs\terrain-culling.md): 0 off,
+// 1 all, 2 camera, 3 ui, 4 sky, 5 sizes, 6 other. Anything else is off.
+uint32_t cullProbe(const std::string& value) {
+    static const char* const kNames[] = {"off", "all", "camera", "ui", "sky", "sizes", "other"};
+    for (uint32_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i) {
+        if (_stricmp(value.c_str(), kNames[i]) == 0) return i;
+    }
+    return 0;
+}
+
 bool parseSignature(const std::string& token, uint32_t* width,
                     uint32_t* height) {
     if (!width || !height) return false;
@@ -314,44 +324,49 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                           EdvrNativeFrameOutput* output) {
     std::lock_guard<std::mutex> lock(g_mutex);
     State* state = identify(context);
-    // A version 1, 2, 3, 4 or 5 caller is an openvr_api.dll from before the
-    // canted-display test keys (or, earlier, the comfort fade, the channel
-    // probe, turbo pacing or the field-of-view trim) existed. Each gets
-    // exactly the fields it knows about, and whatever it cannot carry stays
-    // out of its struct entirely.
-    const bool wantsCant = output &&
-        output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
+    // A version 1, 2, 3, 4, 5 or 6 caller is an openvr_api.dll from before the
+    // cull probe (or, earlier, the canted-display test keys, the comfort fade,
+    // the channel probe, turbo pacing or the field-of-view trim) existed. Each
+    // gets exactly the fields it knows about, and whatever it cannot carry
+    // stays out of its struct entirely.
+    const bool wantsProbe = output &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_7 &&
         output->size == sizeof(*output);
-    const bool wantsFade = output && !wantsCant &&
+    const bool wantsCant = output && !wantsProbe &&
+        output->version == EDVR_NATIVE_FRAME_VERSION_6 &&
+        output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_6;
+    const bool wantsFade = output && !wantsProbe && !wantsCant &&
         output->version == EDVR_NATIVE_FRAME_VERSION_5 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_5;
-    const bool wantsChannel = output && !wantsCant && !wantsFade &&
+    const bool wantsChannel = output && !wantsProbe && !wantsCant && !wantsFade &&
         output->version == EDVR_NATIVE_FRAME_VERSION_4 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_4;
-    const bool wantsPacing = output && !wantsCant && !wantsFade && !wantsChannel &&
+    const bool wantsPacing = output && !wantsProbe && !wantsCant && !wantsFade && !wantsChannel &&
         output->version == EDVR_NATIVE_FRAME_VERSION_3 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_3;
-    const bool wantsTrim = output && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing &&
+    const bool wantsTrim = output && !wantsProbe && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing &&
         output->version == EDVR_NATIVE_FRAME_VERSION_2 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_2;
-    const bool legacy = output && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
+    const bool legacy = output && !wantsProbe && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim &&
         output->version == EDVR_NATIVE_FRAME_VERSION_1 &&
         output->size == EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
     if (!state || state != g_current || !state->active || !input || !output ||
         input->size != sizeof(*input) || input->version != EDVR_NATIVE_FRAME_VERSION_1 ||
-        (!wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
+        (!wantsProbe && !wantsCant && !wantsFade && !wantsChannel && !wantsPacing && !wantsTrim && !legacy) ||
         input->generation != state->generation || input->referenceGeneration == 0 ||
         input->sequence == 0 || input->sequence <= state->sequenceFloor ||
         input->valid > 1 || (input->valid && !rigidPose(input->physicalHead))) return E_INVALIDARG;
 
     EdvrNativeFrameOutput result{};
-    result.size = wantsCant ? sizeof(result)
+    result.size = wantsProbe ? sizeof(result)
+                 : wantsCant ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_6
                  : wantsFade ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_5
                  : wantsChannel ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_4
                  : wantsPacing ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_3
                  : wantsTrim  ? EDVR_NATIVE_FRAME_OUTPUT_SIZE_2
                               : EDVR_NATIVE_FRAME_OUTPUT_SIZE_1;
-    result.version = wantsCant ? EDVR_NATIVE_FRAME_VERSION_6
+    result.version = wantsProbe ? EDVR_NATIVE_FRAME_VERSION_7
+                    : wantsCant ? EDVR_NATIVE_FRAME_VERSION_6
                     : wantsFade ? EDVR_NATIVE_FRAME_VERSION_5
                     : wantsChannel ? EDVR_NATIVE_FRAME_VERSION_4
                     : wantsPacing ? EDVR_NATIVE_FRAME_VERSION_3
@@ -383,6 +398,10 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
         "advanced.canted_eye_fix", true) ? 1u : 0u;
     result.simulateCantDeg = clampCantDegrees(edvr::Config::get().getFloat(
         "advanced.simulate_cant", 0.0f));
+    // The terrain-culling arc's selective-lie probe (docs\terrain-culling.md);
+    // only a version 7 caller has the slot.
+    result.cullProbe = cullProbe(edvr::Config::get().getString(
+        "advanced.cull_probe", "off"));
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
     uint32_t trim[kTrimCount] = {0, 0, 0};

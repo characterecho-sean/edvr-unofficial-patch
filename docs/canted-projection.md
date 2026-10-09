@@ -57,6 +57,8 @@ Crystal Super via Pimax OpenXR): `simulate_cant = 10` from launch, then
 - EDVR's temporal AA artifacts under the cant are a separate observation, not
   the verdict.
 - Then a real 8KX flight with parallel projection off.
+- The same flight also carries the cull probe (`terrain-culling.md`).
+
 ## What OpenVR says about a canted headset
 
 A canted headset is described in two separate places, and this split is the

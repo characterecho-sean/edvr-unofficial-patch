@@ -16,6 +16,7 @@
 #include "steam_identity_cases.h"
 #include "comfort_fade_cases.h"
 #include "canted_display_cases.h"
+#include "cull_probe_cases.h"
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -684,6 +685,7 @@ int selfTest() {
   edvr::openxr::test::runSteamIdentityCases(check);
   edvr::openxr::test::runComfortFadeCases(check);
   edvr::openxr::test::runCantedDisplayCases(check);
+  edvr::openxr::test::runCullProbeCases(check);
   Options o;
   check(parse({L"--loader",L"C:\\runtime\\loader.dll"},o)&&o.seconds==10,"default duration");
   check(parse({L"--seconds",L"60",L"--loader",L"D:/a.dll"},o)&&o.seconds==60,"bounded duration");

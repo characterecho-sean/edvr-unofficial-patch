@@ -2,40 +2,41 @@
 
 ## Status
 
-- **State (2026-09-23):** the channel question is **answered**. The
-  terrain culler follows the **tangents channel (`GetProjectionRaw`),
-  live**, and nothing else; the matrix channel is irrelevant to culling.
-  The zero-cost memory patch — hook the game's fov getter (RVA 0x4E2F50)
-  to widen its symmetric angle sums — is confirmed as the design. Not yet
-  built. Full flight read in the 2026-09-23 entry at the bottom.
-- **The asymmetry-loss point:** the game wraps IVRSystem in a class
-  (vtable VA 0x144E245B8; instance heap-held). Every VR projection query
-  flows through exactly two wrapper methods:
-  - `FUN_1404e2f50` (RVA **0x4E2F50**, slot 25): calls `GetProjectionRaw`
-    and returns `{aspect, atan(|r|)+atan(|b|), atan(|l|)+atan(|t|)}` —
-    tangent magnitudes folded into symmetric angle sums; the per-side
-    asymmetry is discarded here (asm: analysis\decomp\cull_projection9.txt).
-    This is the culler's fov source, and the patch site.
-  - `FUN_1404e2d30` (RVA **0x4E2D30**, slot 27): calls
-    `GetProjectionMatrix` and returns the matrix with row 3 negated —
-    asymmetry (m02/m12) preserved. This is the renderer's path (the game
-    extracts the four tangent elements and builds its own projection —
-    canted-projection.md, the fold experiment).
-- **Ruled out (pointers, do not re-propose):** H3 cached-frustum, the
-  union model, H2 matrix-channel, the 2026-09-09 `raw`-inert reading, the
-  `AstroSurfaceRenderManager::Cull` chain and the shadow-cascade config
-  keys; each with its evidence is under "Status detail" below (the first
-  four are refuted by the 2026-09-23 entry at the bottom).
-- **Established:** the game loads `openvr\win64\openvr_api.dll`
-  dynamically (RVA 0x4E4870), holds `IVRSystem_012` in global
-  VA 0x145F1A860, and reaches it only via the wrapper. LibOVR impl
-  vtable at VA 0x144E243F0 with parallel slots (slot 25 -> RVA 0x4E2F30).
-- **Next:** build the fov-getter hook (code_hook relay at RVA 0x4E2F50,
-  prologue + PE-timestamp gate, inert on other builds): reimplement the
-  getter to return angle sums widened to the per-axis symmetric superset,
-  modes off/observe/widen. Because the culler follows the channel live,
-  no target rebuild is needed and the effect is immediate. Fly: guard
-  OFF, widen from launch, edges over terrain.
+- **State (2026-10-09):** the fov-getter patch this block planned (hook RVA
+  0x4E2F50, widen its output) is **WITHDRAWN** on verified disassembly, and
+  the culler's input is **unidentified**. Standing from 09-23: the terrain
+  culler reacts live to the `GetProjectionRaw` answer; the matrix channel is
+  irrelevant. Which caller of it builds the cull frustum is unknown (entry at
+  the bottom, 2026-10-09).
+- **Corrections** (Elite build 332841, FileVersion 332841 / ProductVersion
+  4.4.1.1; this doc's "332753" label was wrong):
+  - `FUN_1404e2f50` (RVA 0x4E2F50) returns `{aspect = recommended W/H (not
+    tangents), atan|t|+atan|b| (vertical), atan|l|+atan|r| (horizontal)}`;
+    the old "r+b / l+t" pairing was wrong.
+  - Only out[0] and out[1] are read: by the eye camera setter 0x2878DC0 and by
+    the UI scale at 0x2842AE3, k = tan(0.782)/tan(vFOV/2). Widening the getter
+    changes the UI, so it is not free.
+- **Ruled out** (evidence under "Status detail"): the getter as the culler's
+  input; the 09-23 "same +19.4% ask" premise; H3, the union model, H2, the
+  09-09 `raw`-inert reading, the `AstroSurfaceRenderManager::Cull` chain.
+- **Established** (`analysis\decomp\verify_20261009_cull2_*`): six
+  `GetProjectionRaw` call sites in three wrappers: slot 25 at 0x4E2F50
+  (0x4E2FA5); slot 28 via 0x4E3C50 (0x4E3C93; fx = W/(|l|+|r|), fy, read by
+  0x28219D0 -> 0x2860FA0, a full-screen quad pass, INFERRED sky or
+  background); slot 24 at 0x4E4270 (0x4E42FA, 0x4E4351, 0x4E43A6, 0x4E43F4;
+  sizes for the UI). Static analysis found no culler. The only model that fits
+  the 09-23 windows is a frustum centred on the eye axis with half-width
+  (|l|+|r|)/2 from Raw. INFERRED.
+- **Temporary key:** `advanced.cull_probe` = off | all | camera | ui | sky |
+  sizes | other, live; only with `fix.cull_guard` off, only on build 332841.
+  A census of callers (`projection callers:` log lines) always runs.
+- **Next flight** (Quest 3 or Crystal Super), parked-spot method:
+  `fix.cull_guard` off, every fov trim 0, parked over terrain with squares at
+  the outer edge; `cull_probe` off, all, camera, ui, sky, sizes, other, off,
+  about 30 s each; note squares yes/no and any other change (UI size, sky).
+  If `all` clears the squares, a raw-only answer with no render cost exists;
+  the group that clears them names the culler's input, and the census names
+  any caller missed.
 
 *Frontier issue [72609](https://issues.frontierstore.net/issue-detail/72609) —
 "Culling of planet surface in VR too aggressive", a recurrence of
@@ -82,6 +83,27 @@ culler follows the report, not the optics.
   window test. Decompiles in `analysis\decomp\cull_round3*.txt`. Also
   ruled out: `EnableFrustum0Override` / `CullingBias` are shadow-cascade
   config (`FUN_1428555A0`), unrelated to terrain tile culling.
+- The fov-getter patch (hook RVA 0x4E2F50, return angle sums widened to the
+  per-axis superset, modes off/observe/widen) — WITHDRAWN 2026-10-09: the
+  getter is not the culler's input.
+- The getter as "the culler's fov source" and "the asymmetry-loss point" —
+  refuted 2026-10-09: its outputs are read only by the eye camera setter and
+  the UI scale, and its read outputs were identical in the 09-23 windows.
+- The 09-23 "raw and matrix windows asked for the same +19.4%" premise —
+  refuted 2026-10-09: from 05:16:29 a 10-degree outer trim was on, the ask was
+  2554x3032 in both modes, and raw differed from matrix only on the inner
+  edge, 1.6% of span.
+- The getter's "r+b / l+t" output pairing — wrong: atan|t|+atan|b| vertical,
+  atan|l|+atan|r| horizontal, aspect first (2026-10-09).
+
+**Established, moved from Status 2026-10-09:** the game wraps IVRSystem in a
+class (vtable VA 0x144E245B8; instance heap-held), loads
+`openvr\win64\openvr_api.dll` dynamically (RVA 0x4E4870) and holds
+`IVRSystem_012` in global VA 0x145F1A860. The matrix wrapper is `FUN_1404e2d30`
+(RVA 0x4E2D30, slot 27): it calls `GetProjectionMatrix` and returns the matrix
+with row 3 negated, asymmetry (m02/m12) preserved; the renderer's path
+(canted-projection.md, the fold experiment). The LibOVR implementation's
+vtable is at VA 0x144E243F0 with parallel slots (slot 25 -> RVA 0x4E2F30).
 
 ---
 
@@ -490,3 +512,65 @@ One caution carried forward: the only other known consumer of the
 getter's outputs is fov-priced LOD (the AstroSurface screen-size gate);
 widening shifts subdivision thresholds slightly. Compare LOD/pop against
 a guard-off baseline on the patch's first flight.
+
+## 2026-10-09 — the fov getter is not the culler's input
+
+Offline disassembly of Elite build 332841 (FileVersion 332841 / ProductVersion
+4.4.1.1; the "332753" label in the entries above is wrong); dumps in
+`analysis\decomp\verify_20261009_cull2_*`. **READ** is what the instructions
+and the 09-23 logs say; **INFERRED** is what follows from them.
+
+**READ**
+
+- 0x4E2F50 (wrapper slot 25) calls `GetProjectionRaw` at 0x4E2FA2
+  (`call [rax+0x10]`, return RVA 0x4E2FA5) and returns `{aspect = recommended
+  W/H, atan|t| + atan|b|, atan|l| + atan|r|}`. The first number is an aspect,
+  not a tangent, and the vertical sum pairs t with b and the horizontal sum l
+  with r; the "r+b / l+t" pairing above was wrong.
+- Only out[0] and out[1] are read: by the eye camera setter 0x2878DC0, and by
+  the UI scale at 0x2842AE3, k = tan(0.782) / tan(vFOV/2). Widening the getter
+  would therefore resize the UI.
+- Six `GetProjectionRaw` call sites in three wrappers: slot 25 (0x4E2F50) at
+  0x4E2FA5; slot 28 (0x4E29B0) through its helper 0x4E3C50 at 0x4E3C93; slot 24
+  (0x4E4270) at 0x4E42FA, 0x4E4351, 0x4E43A6 and 0x4E43F4, which return sizes
+  for the UI.
+- The slot 28 helper returns fx = W/(|l|+|r|) and fy. They are read by
+  0x28219D0 -> 0x2860FA0, a full-screen quad pass.
+- From the 09-23 logs, re-read: the getter's read outputs were identical in the
+  raw window and the matrix window, so the getter cannot be what changed
+  between the squares being absent and present. And the windows did not ask the
+  same +19.4%: from 05:16:29 a 10-degree outer trim was on, the ask was
+  2554x3032 in both modes, and raw differed from matrix only on the inner edge,
+  1.6% of span.
+
+**INFERRED**
+
+- The quad pass behind slot 28 is sky or background.
+- The only model that fits the 09-23 windows is a frustum centred on the eye
+  axis with half-width (|l|+|r|)/2 taken from Raw, built by a caller not yet
+  identified. Static analysis found no culler.
+
+**Ruled out:** the getter as the culler's input, and with it the withdrawn
+patch; the "same +19.4% ask" premise. Nothing else is newly ruled out.
+
+**What the test build does.** The runtime sees who calls, because EDVR
+implements `GetProjectionRaw` itself and the game's `call [rax+0x10]` lands in
+it directly.
+
+- A census, always on, records the game's return address (frame 1, as an RVA in
+  the game's image, or "outside") for `GetProjectionRaw`, `GetProjectionMatrix`
+  and `GetEyeToHeadTransform`. Frames 2 and 3 come from a stack capture taken on
+  the first sight of a new frame 1, and on every call of the first site while
+  the probe needs it. The log has a `projection callers:` line on first sight
+  of each distinct (method, frame 1, frame 2), and count summaries at 30 s,
+  every 5 minutes and before every probe change.
+- `advanced.cull_probe` answers the selected callers of `GetProjectionRaw` with
+  the per-axis symmetric superset of what they would have been told, jitter
+  shift included. Groups: camera is frame 1 0x4E2FA5 with frame 2 0x2878E1B; ui
+  is 0x4E2FA5 with frame 2 0x8D269A; sky is 0x4E3C93; sizes is 0x4E42FA,
+  0x4E4351, 0x4E43A6 or 0x4E43F4; other is anything not matched, including
+  0x4E2FA5 with any other frame 2; all is every caller. Nothing else changes:
+  not the matrix, not the render size, not a crop. It acts only with the cull
+  guard off and only on build 332841 (PE stamp 1788384820, image 104894464),
+  and the log says when it does not.
+- The same flight carries the canted-display test keys (canted-projection.md).
