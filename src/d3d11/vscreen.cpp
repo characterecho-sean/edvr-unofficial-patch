@@ -4893,7 +4893,10 @@ void STDMETHODCALLTYPE hookedDrawInstanced(ID3D11DeviceContext* self, UINT perIn
     args.base = static_cast<int32_t>(startVertex);
     args.startInstance = startInstance;
     const DrawVerdict v = beginPanelOverride(self, 'N', perInstance, instances, args);
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
+        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
+    }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);   // the tone is a DrawInstanced triangle: the route's trigger
     // The draw's instance window, for the glare telemetry: the trains
@@ -4964,7 +4967,10 @@ void STDMETHODCALLTYPE hookedDrawIndexedInstanced(ID3D11DeviceContext* self,
     // compares; the pool families' substituted shaders and MRT6 are bound
     // only when the game has rebound something since the last look. After the
     // verdict, which refreshes rtv0Eye; a draw a verdict claims is left alone.
-    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+    if (v == DrawVerdict::kNone && self == g_state->ownerCtx) {
+        engineVelocityBeforeDraw(self, g_state->rtv0Eye);
+        engineVelocityNoteSkinDraw(self, startInstance, instances);   // F2: a skinned family's draw lists the instance entries it reads
+    }
     if (self == g_state->ownerCtx) pixelProbeBefore(g_state, self);
     if (g_vrWorldWants && self == g_state->ownerCtx) vrWorldRouteDraw(self);
     forwardWithVerdict(self, v, 'X', perInstance, instances, args, [&](AlteredDraw altered) {

@@ -3026,6 +3026,27 @@ if errorlevel 1 ( echo [edvr] ERROR: explorer cam test build failed & exit /b 1 
 "%BUILD%\explorer_cam_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_explorer_cam_fade_test
+echo [edvr] === explorer_cam_fade_test.exe ===
+REM Build gate for the entry fade's wait for the engine's motion (src\d3d11\explorer_cam_fade_core.h, "MOTION"; docs\kinematic-motion-injection-2026-09-19.md,
+REM "F12 fixes built"): the pure comfort timeline driven with the facts the glue feeds it from the engine (engine_motion_ready.h). An entry that is otherwise
+REM ready fades in at once when the engine's motion is live (the eye path's views for three frames in a row, and the second skin's join when the frame has
+REM skinned jobs), holds black until it is, gives up one second after it was otherwise ready and says which condition was missing, does not wait for a join
+REM in a scene with no characters, waits for nothing when the engine's motion is not armed, never delays an exit, waits on a re-attach like an entry, starts
+REM the hold over when the entry stops being ready, and leaves the 3 s cap from the press as it was. The lines. No device needed.
+REM tools\explorer_cam_fade_test\mutants.py --self-test holds the mutation list to the sources as they are; --run builds the rig against each edit.
+if not exist "%OBJ%\explorercamfade" mkdir "%OBJ%\explorercamfade"
+cl.exe /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\explorercamfade"\ /Fe"%OBJ%\explorercamfade\explorer_cam_fade_test.exe" ^
+    "tools\explorer_cam_fade_test\explorer_cam_fade_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: explorer_cam_fade_test build failed & exit /b 1 )
+"%OBJ%\explorercamfade\explorer_cam_fade_test.exe" --dry-run || exit /b 1
+"%OBJ%\explorercamfade\explorer_cam_fade_test.exe" --self-test "%ROOT%" || exit /b 1
+python "tools\explorer_cam_fade_test\mutants.py" --self-test || exit /b 1
+exit /b 0
+
 :rig_scheduler_stack_json_test
 echo [edvr] === scheduler_stack_json_test.exe ===
 REM Build gate for the production SchedulerStackProbe JSON writer: the

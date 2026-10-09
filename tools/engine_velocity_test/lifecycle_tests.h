@@ -83,6 +83,7 @@ std::unordered_map<void*, uint64_t> g_objectHash;   // the registry's stand-in, 
 // the stub hands the join, whose seq the test advances once per frame) and g_hookArmed. g_hookGate is what the engine path last asked of the gate.
 unsigned g_hookArms = 0;
 bool g_hookGate = false;
+std::vector<uint32_t> g_hookChainJobs;   // the job counts the chain dispatches told the (stubbed) hook, one per chain dispatch the join took
 bool g_hookArmed = false;
 const edvr::skinjoin::Snapshot* g_hookSnap = nullptr;
 }  // namespace lifecycle_fake
@@ -154,6 +155,7 @@ SkinHookState skinEntityHookArm(char* why, size_t cap) {
 }
 SkinHookState skinEntityHookState() { return lifecycle_fake::g_hookArmed ? SkinHookState::Armed : SkinHookState::StoodDown; }
 void skinEntityHookSetGate(bool open) { lifecycle_fake::g_hookGate = open; }
+void skinEntityHookNoteChain(uint32_t jobs) { lifecycle_fake::g_hookChainJobs.push_back(jobs); }
 bool skinEntityHookLatest(skinjoin::Snapshot& out) {
     if (!lifecycle_fake::g_hookSnap) return false;
     out = *lifecycle_fake::g_hookSnap;

@@ -15,6 +15,8 @@
 //   J9  the documented residuals, pinned so a change to them is a decision
 //   J10 the periodic line
 //   J11 the hook's reading of the game's list (skin_entity_walk.h) over a fake heap with faults in it
+//   J12 which record of a base is the live one: the records the frame's skinned draws read decide (a stale second set before and after the live
+//       record, both read, none read, an incomplete list, unreadable entries), and the pose witness line
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -698,6 +700,94 @@ void caseWalk() {
         check(userPointer(0x10000) && !userPointer(0xFFFF) && !userPointer(0x7FFFFFFE0000ull) && !userPointer(0x10001) && userPointer(0x7FFFFFFD0000ull), "J11.p the pointer test: aligned, above 64 KB, below the user ceiling");
     }
 }
+
+// ---- J12 -----------------------------------------------------------------------------------------------------------------
+// Which record of a base is the live one: the records the frame's skinned draws read, through the instance stream's entries at their windows.
+// The twin's table is read by word 4 (17 + the record's salt: the live record of every base here has salt 0, a stale one never).
+void casePoseRule() {
+    const auto word4 = [](const PoseResult& r, uint32_t base) { return r.table[base].w[4]; };
+    const PoseWorld w = frameWorld();
+    const PoseResult r = cpuPose(w.words(), w.refs);
+    check(r.listExact && r.listsExact == 1 && r.listsBad == 0, "J12.a a complete list whose entries are all readable is exact");
+    check(r.table[21].w[0] == 21 && word4(r, 21) == 17, "J12.b the record a draw read is the live one; the stale second record after it is overruled (the F12 flight's shape)");
+    check(r.table[22].w[0] == 22 && word4(r, 22) == 17, "J12.c ...also when the stale record comes FIRST in the pool (the first writer is not the live one)");
+    check(r.table[28].w[0] == 28 && word4(r, 28) == 17 && r.table[29].w[0] == 29 && word4(r, 29) == 17, "J12.d ...and when it comes last (the last writer is not the live one), against two stale records, and for a record two draws read");
+    check(r.table[23].w[0] == 0 && r.table[24].w[0] == 0, "J12.e two records that disagree and BOTH were read by draws, or NEITHER was: the base has no history");
+    check(r.table[23].w[4] == 0 && r.table[24].w[1] == 0, "J12.f ...and its table entry is zeroed whole");
+    check(r.table[25].w[0] == 25 && r.table[26].w[0] == 26 && r.table[27].w[0] == 27, "J12.g a single record is kept, read or not, and a read record with an unread twin of the same pose is no conflict");
+    check(r.resolved == 5 && r.conflicts == 2 && r.dropped == 2, "J12.h five stale records overruled, two disagreeing records among the deciding ones, two bases dropped");
+    check(r.records == 17, "J12.i every record that carries a base is counted");
+    // the stream's stale entries do not count: only the draws' windows (record 17's entry names stale records and no window covers it)
+    check(w.refs.stream.size() / 2 > 7 + 6, "J12.j (the stream holds entries beyond the draws' windows)");
+    // a list that is not complete is not used: every record decides, so a stale second record kills its base
+    {
+        PoseWorld inc = frameWorld();
+        inc.finish(false);
+        const PoseResult q = cpuPose(inc.words(), inc.refs);
+        check(!q.listExact && q.listsExact == 0 && q.listsBad == 0 && q.resolved == 0, "J12.k an incomplete list resolves nothing and counts as neither exact nor unreadable");
+        check(q.table[21].w[0] == 0 && q.table[22].w[0] == 0 && q.table[28].w[0] == 0 && q.table[29].w[0] == 0 && q.table[25].w[0] == 25, "J12.l ...so every base with a stale second record has no history, and a single record is kept");
+    }
+    // a draw naming an entry outside the copied span, a record the pool does not hold, or too many instances: the list cannot be read, nothing is resolved
+    {
+        PoseWorld a = frameWorld();
+        a.refs.ranges.push_back(a.entryBase + 5000);
+        a.refs.ranges.push_back(1);
+        PoseWorld b = frameWorld();
+        b.draw(uint32_t(b.records.size() / 84) + 50);
+        PoseWorld c = frameWorld();
+        for (uint32_t k = 0; k < kMaxRangeInstances + 100; ++k) c.entry(0);
+        c.refs.ranges.push_back(c.entryBase);
+        c.refs.ranges.push_back(kMaxRangeInstances + 1);
+        bool all = true;
+        for (const PoseWorld* x : {&a, &b, &c}) {
+            const PoseResult q = cpuPose(x->words(), x->refs);
+            all = all && !q.listExact && q.listsBad == 1 && q.listsExact == 0 && q.resolved == 0 && q.table[21].w[0] == 0 && q.table[22].w[0] == 0;
+        }
+        check(all, "J12.m an entry outside the span, a record outside the pool and a draw of too many instances each make the list unreadable: nothing is resolved");
+    }
+    // a complete list of no draws (a frame with no skinned draw): no record is live, every record decides
+    {
+        PoseWorld none = frameWorld();
+        none.refs.ranges.clear();
+        const PoseResult q = cpuPose(none.words(), none.refs);
+        check(q.listExact && q.resolved == 0 && q.table[21].w[0] == 0 && q.table[25].w[0] == 25, "J12.n a complete list of no draws is exact and resolves nothing");
+    }
+    // the same pool with the draws' windows listed in another order and twice: the same table
+    {
+        PoseWorld v = frameWorld();
+        const std::vector<uint32_t> once = v.refs.ranges;
+        for (size_t i = 0; i + 1 < once.size(); i += 2) { v.refs.ranges.push_back(once[once.size() - 2 - i]); v.refs.ranges.push_back(once[once.size() - 1 - i]); }
+        const PoseResult q = cpuPose(v.words(), v.refs);
+        bool same = q.resolved == r.resolved && q.dropped == r.dropped;
+        for (uint32_t b = 0; b < kMaxRows && same; ++b) same = poseSame(q.table[b], r.table[b]);
+        check(same, "J12.o the order of the draws, and a draw listed twice (both eyes), change nothing");
+    }
+    // records with no base, or a base past the table, are not part of any table
+    {
+        PoseWorld z = frameWorld();
+        z.record(0, 0);
+        z.record(kMaxRows, 0);
+        z.record(kMaxRows + 9, 3);
+        const PoseResult q = cpuPose(z.words(), z.refs);
+        check(q.records == r.records && q.table[0].w[0] == 0, "J12.p a record with base 0 or past the table is not counted and not written");
+    }
+    // the witness line
+    {
+        uint32_t d[kStatWords]{};
+        WindowCpu c;
+        d[kStatPoseRecords] = 4000; d[kStatPoseResolved] = 120; d[kStatPoseConflicts] = 7; d[kStatPoseDropped] = 5; d[kStatPoseListsExact] = 118; d[kStatPoseListsBad] = 2;
+        c.poseBuilds = 120; c.poseIncomplete = 3;
+        const std::string line = poseLine(d, c);
+        check(line.find("skin join: pose witness:") == 0 && line.find("tables built 120") != std::string::npos && line.find("records 4000") != std::string::npos &&
+              line.find("conflicts resolved 120, unresolved 7, bases dropped 5") != std::string::npos && line.find("reference lists exact 118, unreadable 2, not complete 3") != std::string::npos,
+              "J12.q the witness line names the tables built, the records, the conflicts resolved and unresolved, the bases dropped and the lists' verdicts");
+        uint32_t big[kStatWords];
+        for (uint32_t& v : big) v = 4294967295u;
+        WindowCpu bigCpu;
+        bigCpu.poseBuilds = bigCpu.poseIncomplete = ~0ull;
+        check(poseLine(big, bigCpu).size() < 400, "J12.r the witness line fits the log's limit at the largest numbers");
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -726,6 +816,7 @@ int main(int argc, char** argv) {
     caseResiduals();
     caseLine();
     caseWalk();
+    casePoseRule();
     if (g_failures) {
         std::printf("FAIL: skin join: %u of %u checks failed\n", g_failures, g_checks);
         return 1;

@@ -5,8 +5,10 @@
 // created, cleared, bound and read back through the view the compose gets. Nothing here is a model of the engine: the engine runs. Cases (every
 // check carries a label "L<case>.<what>"; tools\skin_engine_test\mutants.py names the case that must catch each mutation):
 //   L1  arming: configure arms the second skin (the hook asked once, its gate opened), and before any frame nothing is bound
-//   L2  the first frame has no history: the drawn pixels carry valid 0 and E 0, never a stale answer; target 7 is zero outside the drawn pixels
-//   L3  a steady second frame (the prefix join, the hook stood down): E is EXACTLY zero and valid 1 at every drawn pixel, in both eyes
+//   L2  the first frame has no history: the drawn pixels carry valid 0 and E 0, never a stale answer; target 7 is zero outside the drawn pixels; the entry
+//       fade's signal (engineMotionReady) says skinned jobs with the join not live
+//   L3  a steady second frame (the prefix join, the hook stood down): E is EXACTLY zero and valid 1 at every drawn pixel, in both eyes; the signal says the
+//       join is live
 //   L4  the character moves: E = 100 x (previous - current position) in centimetres
 //   L5  the job table changes shape: no history for that frame, then the next frame has it again
 //   L6  what the draw binds and what is put back: target 7 and the three views while the patched pair draws, the blend state's mask for target 7
@@ -14,8 +16,12 @@
 //       bound at the frame boundary; a game that binds its own target 7 keeps it
 //   L7  the hook's list as the identity (the stubbed hook hands the join the entry list): the same frames join by the hook, a list that disagrees
 //       with the job table falls back to the prefix and says so
-//   L8  the periodic lines: the join's counters read back from the GPU, the second-skin line, the hook's line
+//   L8  the periodic lines: the join's counters read back from the GPU, the second-skin line, the hook's line; the two halves of the join line describe the
+//       same frames; the entry fade's signal (armed only while the compose asks for the views, a run needs both eyes)
 //   L9  a previous palette buffer too small to hold a job's previous rows: no history for those jobs, with no list at all
+//   L10 which record of the character's base is the live one: the pool also holds a stale second record (above or below the live one, read by no draw),
+//       both records read, a draw list that cannot be exact; the instance stream at an IA offset; the pose witness line
+//   L11 a skinned family's pixel shader that exports no E draws over an exporting one's pixels: it writes no history there, not the E beneath
 
 #include <algorithm>
 #include <cmath>
@@ -26,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "engine_motion_ready.h"
 #include "lifecycle_tests.h"
 #include "skin_clone_tests.h"
 #include "../skin_clone_test/synthetic_skin.h"
@@ -80,6 +87,16 @@ struct Fixture {
     bool useHookList = false;
     uint32_t paletteRows = 64;
     Seen seen;
+    // The pose table's live record (L10): the pool can hold a stale second record of the character's base with another pose (the F12 flight's shape),
+    // at a slot above the live one (11) or below it (2). The instance stream is {junk, live 5, 11, 2} read from an IA offset of 8 (entry 0 = the live
+    // record, entry 1 = slot 11, entry 2 = slot 2); the draws read entry 0 and, when a test says so, the stale record's entry too.
+    int staleSlot = -1;                  // the slot the stale record is written at (-1: none)
+    uint32_t staleEntry = 1;             // the stream entry that names it
+    float staleShift = 0.12f;            // how far its pose is from the live one (m)
+    bool readStale = false;              // a second draw per eye reads the stale record (both records are read)
+    bool secondStream = false;           // a second vertex buffer of stride 8 is bound: the draws' stream is ambiguous
+    bool overdrawPlain = false;          // after each eye's pair draw, a skinned family's pixel shader that exports no E draws over the same pixels (L11)
+    ComPtr<ID3D11DepthStencilState> alwaysDepth;
 
     Fixture(const lt::Harness& harness, lt::Game& game) : h(harness), g(game), dev(harness.device), ctx(harness.context) {}
 
@@ -122,10 +139,15 @@ struct Fixture {
         vd.ByteWidth = sizeof(tri); vd.Usage = D3D11_USAGE_DEFAULT; vd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
         D3D11_SUBRESOURCE_DATA vinit{tri, 0, 0};
         h.check(SUCCEEDED(dev->CreateBuffer(&vd, &vinit, &verts)), "L: the vertices");
-        const uint32_t instance[2] = {slot, 0};
+        const uint32_t instance[8] = {0xFFFFu, 0xFFFFu, slot, 0, 11, 0, 2, 0};   // one junk entry, then the live record's and the two stale slots'; bound at an offset of 8
         vd.ByteWidth = sizeof(instance);
         D3D11_SUBRESOURCE_DATA iinit{instance, 0, 0};
         h.check(SUCCEEDED(dev->CreateBuffer(&vd, &iinit, &instances)), "L: the instance");
+        {
+            D3D11_DEPTH_STENCIL_DESC dsd{};
+            dsd.DepthEnable = TRUE; dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; dsd.DepthFunc = D3D11_COMPARISON_ALWAYS;
+            h.check(SUCCEEDED(dev->CreateDepthStencilState(&dsd, &alwaysDepth)), "L: a depth state that always passes");
+        }
         jobs = structured(nullptr, 16, 8, D3D11_BIND_SHADER_RESOURCE);
         h.check(SUCCEEDED(dev->CreateShaderResourceView(jobs.Get(), nullptr, &jobsSrv)), "L: the job table's view");
         for (int i = 0; i < 2; ++i) {
@@ -194,28 +216,39 @@ struct Fixture {
         uint8_t rec[336];
         sct::writeRecord(state, 99u, rec);
         std::memcpy(g.pool[slot].words, rec, 336);
+        // the stale second record of the same base: another pose, written at the stale slot; the other stale slot holds nothing
+        for (const uint32_t s : {11u, 2u}) std::memset(g.pool[s].words, 0, 336);
+        if (staleSlot >= 0) {
+            sct::State shifted = state;
+            shifted.pos[0] += staleShift;
+            uint8_t stale[336];
+            sct::writeRecord(shifted, 99u, stale);
+            std::memcpy(g.pool[uint32_t(staleSlot)].words, stale, 336);
+        }
         g.writePool(g.poolA.Get(), D3D11_MAP_WRITE_DISCARD);
     }
 
-    // One eye's pass with the skinned pair (or the plain skinned family): the game's state, the engine's call, what it bound, the draw.
-    void pass(int eye, bool pair = true, bool observe = false) {
+    // One eye's pass with the skinned pair (or the plain skinned family): the game's state, the engine's call, what it bound, the draw. `start` is the draw's
+    // StartInstanceLocation (the stream entry it reads); the draw hook's second call (the draw's instance window) is made as vscreen's thunk makes it.
+    void pass(int eye, bool pair = true, bool observe = false, UINT start = 0, ID3D11DepthStencilState* depthOverride = nullptr) {
         g.setTargets(eye);
-        ctx->OMSetDepthStencilState(g.depthState.Get(), 0);
+        ctx->OMSetDepthStencilState(depthOverride ? depthOverride : g.depthState.Get(), 0);
         D3D11_VIEWPORT vp{0, 0, float(lt::kW), float(lt::kH), 0, 1};
         ctx->RSSetViewports(1, &vp);
         ctx->RSSetState(g.raster.Get());
         ctx->IASetInputLayout(layout.Get());
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ID3D11Buffer* vbs[2] = {verts.Get(), instances.Get()};
-        UINT strides[2] = {sizeof(sct::Vertex), 8}, offsets[2] = {0, 0};
-        ctx->IASetVertexBuffers(0, 2, vbs, strides, offsets);
+        ID3D11Buffer* vbs[3] = {verts.Get(), instances.Get(), secondStream ? instances.Get() : nullptr};
+        UINT strides[3] = {sizeof(sct::Vertex), 8, secondStream ? 8u : 0u}, offsets[3] = {0, 8, 0};
+        ctx->IASetVertexBuffers(0, 3, vbs, strides, offsets);
         ID3D11ShaderResourceView* t38 = paletteSrv[count & 1u].Get();
         ctx->VSSetShaderResources(38, 1, &t38);
         if (pair) { g.setVs(vsPair.Get(), kPairVs); g.setPs(psPair.Get(), kPairPs); }
         else { g.setVs(vsPlain.Get(), kPlainVs); g.setPs(psPlain.Get(), kPlainPs); }
         edvr::engineVelocityBeforeDraw(ctx, true);
+        edvr::engineVelocityNoteSkinDraw(ctx, start, 1);
         if (observe) look();
-        ctx->DrawInstanced(3, 1, 0, 0);
+        ctx->DrawInstanced(3, 1, 0, start);
     }
 
     // What the engine bound for the draw about to be issued.
@@ -261,8 +294,12 @@ struct Fixture {
         writePool();
         g.writeScene(g.sceneA.Get(), rows[0]);
         pass(0, pair, observe);
+        if (readStale) pass(0, pair, false, staleEntry);
+        if (overdrawPlain) pass(0, false, false, 0, alwaysDepth.Get());
         g.writeScene(g.sceneA.Get(), rows[1]);
         pass(1, pair, false);
+        if (readStale) pass(1, pair, false, staleEntry);
+        if (overdrawPlain) pass(1, false, false, 0, alwaysDepth.Get());
         after();
         g.endFrame(summary);
         ctx->Flush();   // (a present would: the counters' staging copies finish)
@@ -330,6 +367,13 @@ inline std::string firstLine(const char* prefix, size_t from) {
     return {};
 }
 
+// The last line since `from` that starts with prefix.
+inline std::string lastLine(const char* prefix, size_t from) {
+    for (size_t i = lt::g_log.size(); i > from; --i)
+        if (lt::g_log[i - 1].rfind(prefix, 0) == 0) return lt::g_log[i - 1];
+    return {};
+}
+
 inline void run(const lt::Harness& h) {
     edvr::g_clockForTest = &lifecycle_fake::fakeClock;
     const size_t mark = lt::g_log.size();
@@ -351,7 +395,7 @@ inline void run(const lt::Harness& h) {
 
     // L2: the first frame
     Fixture::Eye first0, first1;
-    f.frame([&] { first0 = f.read(0); first1 = f.read(1); });
+    f.frame([&] { first0 = f.read(0); first1 = f.read(1); f.g.views(0); f.g.views(1); });   // (the compose asks for both eyes' views: the entry fade's signal is armed from here)
     h.check(f.seen.rt7 && f.seen.vsPatched, "L6.a the first skinned draw has target 7 bound and its patched vertex shader");
     h.check(first0.given && first1.given, "L2.a both eyes give the compose a target-7 view after a frame that wrote E");
     {
@@ -359,16 +403,21 @@ inline void run(const lt::Harness& h) {
         h.check(a.drawn > 20 && b.drawn > 20, "L2.b the triangle is drawn in both eyes");
         h.check(a.valid == 0 && b.valid == 0 && a.worst == 0.0 && b.worst == 0.0, "L2.c with no history every drawn pixel carries valid 0 and E 0 (no stale answer)");
         h.check(a.outside == 0.0 && b.outside == 0.0, "L2.d target 7 is zero where nothing was drawn (cleared with the eye-frame)");
+        const edvr::EngineMotionReady m = edvr::engineMotionReady();
+        h.check(m.armed && m.skinJobs && !m.skinLive, "L2.e the entry fade's signal for that frame: skinned jobs, the join not live (no history yet: the fade waits for it)");
+        if (!(m.armed && m.skinJobs && !m.skinLive)) std::fprintf(stderr, "  signal: armed %d views run %u skin jobs %d live %d\n", int(m.armed), m.viewsRun, int(m.skinJobs), int(m.skinLive));
     }
 
     // L3: a steady second frame, the prefix join
     Fixture::Eye steady0, steady1;
-    f.frame([&] { steady0 = f.read(0); steady1 = f.read(1); });
+    f.frame([&] { steady0 = f.read(0); steady1 = f.read(1); f.g.views(0); f.g.views(1); });
     {
         const Judged a = judge(steady0, zero), b = judge(steady1, zero);
         h.check(a.drawn > 20 && a.valid == a.drawn && b.valid == b.drawn, "L3.a a steady frame: valid 1 at every drawn pixel in both eyes");
         h.check(a.worst == 0.0 && b.worst == 0.0, "L3.b and E is exactly zero (previous state = current state through the whole engine path)");
         h.check(a.outside == 0.0, "L3.c and still zero outside the drawn pixels");
+        const edvr::EngineMotionReady m = edvr::engineMotionReady();
+        h.check(m.armed && m.skinJobs && m.skinLive && m.viewsRun >= 1, "L3.d the entry fade's signal for that frame: skinned jobs, the join live, the views given to both eyes");
     }
     // a smaller triangle: the pixels the larger one wrote are zero again (target 7 is cleared with every eye-frame)
     {
@@ -431,7 +480,8 @@ inline void run(const lt::Harness& h) {
                 "L6.d its derived blend state writes target 7's four channels and target 6's R and G");
         f.frame(false, [&] {}, false, true);
         const Seen plain = f.seen;
-        h.check(plain.rt7 && plain.vsPatched && plain.derived && plain.blend7 == 0, "L6.e a skinned family's other pixel shader draws with target 7 write-masked off");
+        h.check(plain.rt7 && plain.vsPatched && plain.derived && plain.blend7 == D3D11_COLOR_WRITE_ENABLE_ALL,
+                "L6.e a skinned family's other pixel shader draws with target 7 written (it writes no history there: all four channels, never left to an earlier draw's E)");
         // a rigid family's draw: target 7 bound for the eye, its writes off
         g.beginFrame();
         f.writeSceneRows();
@@ -484,7 +534,7 @@ inline void run(const lt::Harness& h) {
         h.context->IASetInputLayout(f.layout.Get());
         h.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ID3D11Buffer* vbs[2] = {f.verts.Get(), f.instances.Get()};
-        UINT strides[2] = {sizeof(sct::Vertex), 8}, offsets[2] = {0, 0};
+        UINT strides[2] = {sizeof(sct::Vertex), 8}, offsets[2] = {0, 8};
         h.context->IASetVertexBuffers(0, 2, vbs, strides, offsets);
         ID3D11ShaderResourceView* t38 = f.paletteSrv[f.count & 1u].Get();
         h.context->VSSetShaderResources(38, 1, &t38);
@@ -536,6 +586,9 @@ inline void run(const lt::Harness& h) {
         const Judged a = judge(recovered0, zero);
         h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L7.c and the frames after it join by the hook again");
     }
+    h.check(!lifecycle_fake::g_hookChainJobs.empty() && lifecycle_fake::g_hookChainJobs.back() == uint32_t(f.built.jobs.size()) &&
+                lifecycle_fake::g_hookChainJobs.size() >= 10,
+            "L7.d every chain dispatch the join takes tells the hook how many jobs its table has (an empty list is judged only against a table with jobs)");
 
     // L8: the periodic lines (the counters come back from the GPU after 120 chain frames, never waited for; the summary is due every 30 s)
     // (WARP runs behind the CPU: each frame reads target 7 back, which waits for everything queued, the counters' staging copy included)
@@ -551,11 +604,135 @@ inline void run(const lt::Harness& h) {
         const std::string second = firstLine("skin join: second skin this window:", mark);
         h.check(!second.empty() && lt::number(second, "binds writing E ") > 0, "L8.e the second-skin line counts the binds that wrote E");
         h.check(!firstLine("skin join: hook window:", mark).empty(), "L8.f the hook's line says what the hook saw in the window");
+        const std::string witness = firstLine("skin join: pose witness:", mark);
+        h.check(!witness.empty() && witness.find("conflicts resolved ") != std::string::npos && witness.find("reference lists exact ") != std::string::npos &&
+                    lt::number(witness, "tables built ") >= 100 && lt::number(witness, "reference lists exact ") >= 100,
+                "L8.g the pose witness line follows the join line: the tables built and the draw lists that were exact");
         if (join.empty() || join.find("hook=armed") == std::string::npos || lt::number(join, "hook/t0 disagreements ") < 1)
             std::fprintf(stderr, "  join line: %s\n", join.c_str());
         if (join.empty())
             for (size_t i = mark; i < lt::g_log.size(); ++i)
                 if (lt::g_log[i].rfind("skin join:", 0) == 0) std::fprintf(stderr, "  log: %.300s\n", lt::g_log[i].c_str());
+    }
+
+    // L8.h: the join line's two halves are the same frames. A summary frame that waits for nothing (no read-back of target 7): the newest finished
+    // counter read-back is then older than the CPU's own counters, and a CPU half taken at the summary instead of with the GPU's copy would count a
+    // frame the GPU half does not.
+    // (Frames that read target 7 back come first, so the window the summary closes holds several finished GPU frames: a window of none would pass the
+    // equality below for any CPU half that counted nothing.)
+    for (int i = 0; i < 5; ++i) f.frame(true, [&] { f.read(0); }, false, false);
+    f.frame(true, [&] {}, true, false);
+    {
+        const std::string last = lastLine("skin join: source=", mark);
+        const auto n = [&](const char* label) { return lt::number(last, label); };
+        const unsigned long long declined = n("declined [no history ") + n(", no snapshot ") + n(", stale ") + n(", gap ") + n(", unusable ") + n(", no previous ");
+        h.check(!last.empty() && n("frames=") >= 3 && n("frames=") == n("offered ") + declined,
+                "L8.h the join line's GPU half (frames the join ran) equals its CPU half (frames the feeder offered the hook or declined): the same frames");
+        if (!last.empty() && (n("frames=") < 3 || n("frames=") != n("offered ") + declined)) std::fprintf(stderr, "  join line: %s\n", last.c_str());
+    }
+
+    // L8.i-k: the signals the entry fade waits on (engineMotionReady). The compose asks for the views of both eyes each frame: after a few such frames the
+    // engine's motion is armed with a run of live views and the join live for the skinned jobs. A temporal pass that asks for one eye only never builds a
+    // run, and one that never asks leaves the signal unarmed (there is nothing to wait for; a pass that does not consume the views would never satisfy it).
+    for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.g.views(0); f.g.views(1); }, false, false);
+    {
+        const edvr::EngineMotionReady m = edvr::engineMotionReady();
+        h.check(m.armed && m.viewsRun >= 3 && m.skinJobs && m.skinLive,
+                "L8.i the entry fade's signal after four frames in which both eyes were given the views: armed, a run of at least 3 frames, skinned jobs, the join live");
+    }
+    for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.g.views(0); }, false, false);
+    {
+        const edvr::EngineMotionReady m = edvr::engineMotionReady();
+        h.check(m.armed && m.viewsRun == 0, "L8.j a pass that asks for one eye's views only never builds a run (armed: it consumes them, but both eyes are needed)");
+    }
+    for (int i = 0; i < 34; ++i) f.frame(true, [&] {}, false, false);
+    {
+        const edvr::EngineMotionReady m = edvr::engineMotionReady();
+        h.check(!m.armed && m.viewsRun == 0 && !m.skinJobs && !m.skinLive, "L8.k a pass that has not asked for the views in 34 frames leaves the signal unarmed: nothing is waited for");
+    }
+
+    // L10: which record of the character's base is the live one. The pool also holds a stale second record of the same base and another pose (the F12
+    // flight's shape); the draws' own instance-stream entries say which record they read, and nothing else does. The stream is bound at an IA offset of
+    // 8 (entry 0 is the live record), and holds entries naming the stale slots that no draw's window covers.
+    lifecycle_fake::g_hookSnap = nullptr;
+    f.useHookList = false;
+    lifecycle_fake::g_hookArmed = false;
+    f.setWorld(3);
+    {
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 3, scratch);
+        f.state = sct::makeState(rng, 3, f.base);
+    }
+    const auto settle = [&] { for (int i = 0; i < 4; ++i) f.frame([&] {}); };
+    const auto seen0 = [&] { Fixture::Eye e0; f.frame([&] { e0 = f.read(0); }); return e0; };
+    settle();
+    {
+        const Judged a = judge(seen0(), zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L10.a (control) with no stale record the character has history and E is exactly zero");
+    }
+    f.staleSlot = 11; f.staleEntry = 1;
+    settle();
+    {
+        const Judged a = judge(seen0(), zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L10.b a stale second record of the base at a HIGHER slot, read by no draw (its pose 0.12 m off): the live one is kept, valid 1 and E exactly zero");
+    }
+    f.staleSlot = 2; f.staleEntry = 2;
+    settle();
+    {
+        const Judged a = judge(seen0(), zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L10.c ...and at a LOWER slot (the first writer is not the live record)");
+    }
+    f.staleSlot = 11; f.staleEntry = 1; f.readStale = true;
+    settle();
+    {
+        const Judged a = judge(seen0(), zero);
+        h.check(a.drawn > 20 && a.valid == 0 && a.worst == 0.0, "L10.d both records read by draws: no history for the base (valid 0, E 0), never a guess between them");
+    }
+    f.readStale = false;
+    settle();
+    {
+        const Judged a = judge(seen0(), zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L10.e the frames after the draws stop reading the stale record have history again");
+    }
+    f.secondStream = true;
+    settle();
+    {
+        const Judged a = judge(seen0(), zero);
+        h.check(a.drawn > 20 && a.valid == 0 && a.worst == 0.0, "L10.f a frame whose draw list cannot be exact (a second vertex buffer of stride 8 is bound) lets every record decide: the stale record kills the base");
+    }
+    f.secondStream = false;
+    settle();
+    {
+        const Judged a = judge(seen0(), zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L10.g ...and with the list exact again the base has history");
+    }
+    f.staleSlot = -1;
+    settle();
+    f.frame(true, [&] {}, true, false);
+    {
+        const std::string pw = lastLine("skin join: pose witness:", mark);
+        h.check(!pw.empty() && lt::number(pw, "conflicts resolved ") >= 5 && lt::number(pw, "bases dropped ") >= 5 && lt::number(pw, "unresolved ") >= 5 && lt::number(pw, "not complete ") >= 3,
+                "L10.h the witness line counts the stale records overruled, the conflicts that decided, the bases dropped and the lists that were not complete");
+        if (pw.empty() || lt::number(pw, "conflicts resolved ") < 5) std::fprintf(stderr, "  pose witness: %s\n", pw.c_str());
+    }
+
+    // L11: a skinned family's pixel shader that exports no E draws over pixels an exporting one has just written. It writes no history there (valid 0,
+    // exactly zero): masked off instead, those pixels would keep the E under the surface it draws, which is another surface's answer.
+    settle();
+    f.overdrawPlain = true;
+    Fixture::Eye over0, over1;
+    f.frame([&] { over0 = f.read(0); over1 = f.read(1); });
+    f.overdrawPlain = false;
+    {
+        const Judged a = judge(over0, zero), b = judge(over1, zero);
+        h.check(over0.given && over1.given && a.drawn > 20 && a.valid == 0 && b.valid == 0 && a.worst == 0.0 && b.worst == 0.0 && a.outside == 0.0,
+                "L11.a pixels an E-exporting draw wrote and a skinned family's other pixel shader then drew over carry valid 0 and E 0 (it writes no history), not the E beneath");
+    }
+    settle();
+    {
+        const Judged a = judge(seen0(), zero);
+        h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L11.b the frame after it, with the exporting pair alone, is whole again");
     }
 
     // L9: a small previous palette buffer, no list: the job at a row near the end of the 64-row buffer

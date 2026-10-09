@@ -22,6 +22,7 @@
 // g_phase, g_sessionActive) itself whenever placement is not active, every frame, so an end never depends on a hook being called
 // again.
 #include "explorer_cam.h"
+#include "engine_motion_ready.h"
 #include "explorer_cam_core.h"
 #include "explorer_cam_fade_core.h"
 #include "explorer_cam_follow_core.h"
@@ -1717,6 +1718,7 @@ struct FrameInput {
     const wchar_t* bindsDir = nullptr;   // null: the live Elite bindings directory
     bool comfortFade = true;             // production: always (no key). The legacy rig cells run without it, so F5's request goes out at once
     uint64_t nowUs = 0;                  // a finer clock for the fade's ramps (0: nowMs)
+    EngineMotionReady motion;            // the engine's motion for the eye path (production: engineMotionReady(); the rig scripts it; default: not armed, nothing to wait for)
 };
 
 uint64_t fingerprintOf(const wchar_t* dir) { return dir ? eliteBindsFingerprintDir(dir) : eliteBindsFingerprint(); }
@@ -2218,6 +2220,10 @@ void boundaryAt(uint32_t frame, uint64_t nowMs, const FrameInput& in, const ecm:
         fin.ctlCalls = g_ctlCalls.load(std::memory_order_relaxed);
         fin.pressEnter = fadePressEnter;
         fin.pressExit = fadePressExit;
+        fin.motionArmed = in.motion.armed;
+        fin.viewsRun = in.motion.viewsRun;
+        fin.skinJobs = in.motion.skinJobs;
+        fin.skinLive = in.motion.skinLive;
         const ecm::ComfortStep st = fs.fade.step(fin);
         if (st.releaseEnter || st.releaseExit) {
             g_f5Request.store(static_cast<uint32_t>(st.releaseEnter ? ecm::F5Req::Enter : ecm::F5Req::Exit), std::memory_order_release);
@@ -2488,6 +2494,7 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
         QueryPerformanceCounter(&t);
         in.nowUs = static_cast<uint64_t>(t.QuadPart) * 1000000ull / freq;
     }
+    in.motion = engineMotionReady();   // what the entry fade waits for besides the placement (the engine's motion for the eye path)
     boundaryAt(frameNo, GetTickCount64(), in, sink);
 }
 
@@ -2636,6 +2643,10 @@ void boundary(uint32_t frame, uint64_t nowMs, const ExplorerCamTestFrame& t, Exp
     in.readBindings = t.readBindings;
     in.comfortFade = t.comfortFade;
     in.nowUs = t.nowUs;
+    in.motion.armed = t.motionArmed;
+    in.motion.viewsRun = t.viewsRun;
+    in.motion.skinJobs = t.skinJobs;
+    in.motion.skinLive = t.skinLive;
     // Hermetic: a rig with no fixture directory must not read the real player's Elite bindings.
     in.bindsDir = t.bindsDir ? t.bindsDir : L"C:\\edvr_explorer_cam_test_no_such_bindings_dir";
     boundaryAt(frame, nowMs, in, ecm::Sink{fn, ctx});

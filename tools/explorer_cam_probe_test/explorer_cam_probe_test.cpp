@@ -27,6 +27,7 @@
 #include <thread>
 #include <vector>
 
+#include "../../src/d3d11/engine_motion_ready.h"
 #include "../../src/d3d11/explorer_cam.h"
 #include "../../src/d3d11/explorer_cam_f2.h"
 #include "../../src/d3d11/explorer_cam_f2_core.h"
@@ -50,6 +51,7 @@ bool journalGuiFocus(uint32_t* focus) {
     if (focus) *focus = 0;
     return false;
 }
+EngineMotionReady engineMotionReady() { return EngineMotionReady{}; }   // explorer_cam.cpp asks the engine's motion for the entry fade; this rig has none
 bool vrCameraCensusWanted() { return true; }
 const char* flatCameraInjectObserveStatus() { return "installed"; }
 namespace explorercamprobetest {

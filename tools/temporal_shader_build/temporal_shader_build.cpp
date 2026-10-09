@@ -375,8 +375,11 @@ static int generateTemporal(const Options& o) {
         // F2 (skin_join_shader.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"): the identity join and the pose table passes, one HLSL text.
         {"kSkinJoinBytecode", "skin_join_cs", "join", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinPoseClearBytecode", "skin_pose_clear_cs", "poseClear", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseRefMarkBytecode", "skin_pose_refmark_cs", "poseRefMark", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinPoseScatterBytecode", "skin_pose_scatter_cs", "poseScatter", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseScatterRestBytecode", "skin_pose_scatter_rest_cs", "poseScatterRest", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kSkinPoseVerifyBytecode", "skin_pose_verify_cs", "poseVerify", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
+        {"kSkinPoseFinishBytecode", "skin_pose_finish_cs", "poseFinish", nullptr, {}, false, edvr::kSkinJoinCsHlsl},
         {"kTemporalMvFastBytecode", "temporal_mv_fast_cs", "mv", fast, {}},
         {"kTemporalMvBytecode", "temporal_mv_cs", "mv", diagnostic, {}},
         {"kTemporalMvTraceBytecode", "temporal_mv_trace_cs", "mv", trace, {}},

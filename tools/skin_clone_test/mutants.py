@@ -116,6 +116,23 @@ MUTANTS = [
       "E is exported to target 5"),
     M("semantic-renamed", "K2", "clone", [("constexpr char kSkinSemantic[] = \"EDVRSKINPREV\";", "constexpr char kSkinSemantic[] = \"EDVRSKINPREX\";")],
       "the output signature names another semantic"),
+    # the "no history" variant of the pixel half (a skinned family's pixel shader that exports no E)
+    M("zero-writes-a-value", "K2", "ev", [("const uint32_t skinZeroTail[] = {0x08000036u, 0x001020F2u, kSkinTarget, 0x00004002u, 0u, 0u, 0u, 0u};",
+                                          "const uint32_t skinZeroTail[] = {0x08000036u, 0x001020F2u, kSkinTarget, 0x00004002u, 0x3F800000u, 0u, 0u, 0u};")],
+      "the no-history write puts a value in E's x"),
+    M("zero-writes-valid-one", "K2", "ev", [("const uint32_t skinZeroTail[] = {0x08000036u, 0x001020F2u, kSkinTarget, 0x00004002u, 0u, 0u, 0u, 0u};",
+                                            "const uint32_t skinZeroTail[] = {0x08000036u, 0x001020F2u, kSkinTarget, 0x00004002u, 0u, 0u, 0u, 0x3F800000u};")],
+      "the no-history write sets the valid flag"),
+    M("zero-tail-skipped", "K2", "ev", [("else if (in.skinZero) out.insert(out.end(), skinZeroTail, skinZeroTail + 8);", "else if (false) out.insert(out.end(), skinZeroTail, skinZeroTail + 8);")],
+      "the no-history pixel shader never writes target 7"),
+    M("zero-output-undeclared", "K2", "ev", [("            out.insert(out.end(), outDecl, outDecl + 3);\n            if (in.skinExport || in.skinZero) out.insert(out.end(), skinOutDecl, skinOutDecl + 3);",
+                                              "            out.insert(out.end(), outDecl, outDecl + 3);\n            if (in.skinExport) out.insert(out.end(), skinOutDecl, skinOutDecl + 3);")],
+      "the no-history pixel shader writes target 7 without declaring it"),
+    M("zero-signature-missing", "K2", "ev", [("                if (psInputs.skinExport || psInputs.skinZero) {\n                    SignatureElement skin;\n                    skin.name = \"SV_TARGET\";",
+                                              "                if (psInputs.skinExport) {\n                    SignatureElement skin;\n                    skin.name = \"SV_TARGET\";")],
+      "the output signature of the no-history pixel shader lacks target 7"),
+    M("zero-and-export-allowed", "K2", "ev", [("if (inputs.skinZero && (inputs.skinExport || guardOverlayDepth", "if (false && (inputs.skinExport || guardOverlayDepth")],
+      "E and the no-history write are asked for together, or with a guard or marker, and accepted"),
 ]
 
 if __name__ == "__main__":

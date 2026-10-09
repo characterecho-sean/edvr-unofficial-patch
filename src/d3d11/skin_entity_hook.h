@@ -8,8 +8,8 @@
 // game memory. It is gated: with the gate shut the relay jumps straight to the original and no C++ runs.
 //
 // It stands down, with one line saying why and the prefix join of the job table taking over, when: the game build is not 332841,
-// the 28 prologue bytes are not the ones read from that build's executable, CodeHook refuses, the first 120 lists are all
-// unusable, or a second processor node appears. A fault while reading is caught per call and flags that one snapshot; it never
+// the 28 prologue bytes are not the ones read from that build's executable, CodeHook refuses, the first 120 lists with something to read are all
+// unusable (a list of no entries is judged only when a chain dispatch with jobs finds it the newest: 120 of those), or a second processor node appears. A fault while reading is caught per call and flags that one snapshot; it never
 // reaches the game.
 //
 // The calling thread is recorded with every snapshot (and the first call is reported), because nothing says statically which
@@ -32,6 +32,9 @@ struct SkinHookStats {
     uint64_t usable = 0;            // lists that passed skinjoin::checkSnapshot
     uint64_t faulted = 0, overflowed = 0, implausible = 0, otherUnusable = 0;
     uint64_t nodeChanges = 0;       // calls whose node differs from the first one seen
+    uint64_t judged = 0;            // lists the stand-down counts: every one that was not a clean empty list
+    uint64_t emptyLists = 0;        // clean empty lists (no entries, end row 1): the assembler had nobody to skin; judged only by a dispatch with jobs (below)
+    uint64_t emptyWithJobs = 0;     // chain dispatches with jobs whose newest list was a clean empty one (the evidence an empty list can give)
     uint32_t firstTid = 0, lastTid = 0, threads = 0;   // threads seen (up to 4 distinct)
     uint32_t lastEntries = 0, lastEnd = 0;
     char why[320] = {};             // why it stood down, when it did
@@ -42,6 +45,9 @@ SkinHookState skinEntityHookArm(char* why, size_t cap);
 SkinHookState skinEntityHookState();
 // Shut the gate (the relay then forwards straight to the original) or open it again. No-ops unless armed.
 void skinEntityHookSetGate(bool open);
+// One chain dispatch with `jobs` rows in its job table, told before the newest snapshot is asked for. An empty list is judged only here, and only
+// when the table has jobs; no-ops unless armed.
+void skinEntityHookNoteChain(uint32_t jobs);
 // A copy of the newest snapshot; false when there is none yet or the hook stood down.
 bool skinEntityHookLatest(skinjoin::Snapshot& out);
 SkinHookStats skinEntityHookStats();

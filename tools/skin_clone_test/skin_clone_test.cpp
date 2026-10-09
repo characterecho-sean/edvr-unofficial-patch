@@ -251,6 +251,29 @@ void caseStructure() {
     in.skinExport = false;
     std::vector<BYTE> plain;
     check(edvr::engineVelocityPatchPs(ps.data(), ps.size(), in, plain, why) && !has(disassemble(plain), "o7"), "K2.q without the export the pixel patch is what it was: no target 7");
+    // the "no history" variant: a skinned family's pixel shader that exports no E writes exactly zero (valid 0) to target 7 -- nothing else, and nothing read from the vertex shader
+    {
+        edvr::EngineVelocityInputs zero = in;
+        zero.skinExport = false;
+        zero.skinZero = true;
+        std::vector<BYTE> zeroed;
+        check(edvr::engineVelocityPatchPs(ps.data(), ps.size(), zero, zeroed, why), "K2.q1 the pixel shader is patched with the no-history write");
+        const std::string zeroText = disassemble(zeroed);
+        check(has(zeroText, "dcl_output o7.xyzw") && has(zeroText, "mov o7.xyzw, l(0,0,0,0)") && has(zeroText, "dcl_output o6.xy") && !has(zeroText, "EDVRSKINPREV"),
+              "K2.q2 it declares target 7 and writes it l(0, 0, 0, 0) beside the slot's target 6, and reads no E varying");
+        bool zeroTarget7 = false, zeroInput = false;
+        for (const auto& chunk : edvr::dxbc_container::parseContainer(zeroed.data(), zeroed.size(), 0x00000050u)) {
+            if (chunk.tag == 0x4e47534fu) for (const auto& e : edvr::dxbc_container::parseSignature(chunk.bytes)) zeroTarget7 = zeroTarget7 || (edvr::dxbc_container::equalName(e.name, "SV_TARGET") && e.registerIndex == 7);
+            if (chunk.tag == 0x4e475349u) for (const auto& e : edvr::dxbc_container::parseSignature(chunk.bytes)) zeroInput = zeroInput || edvr::dxbc_container::equalName(e.name, edvr::kSkinSemantic);
+        }
+        check(zeroTarget7 && !zeroInput, "K2.q3 its output signature carries target 7 and its input signature no E");
+        std::vector<BYTE> refused;
+        edvr::EngineVelocityInputs both = zero;
+        both.skinExport = true;
+        check(!edvr::engineVelocityPatchPs(ps.data(), ps.size(), both, refused, why) && has(why, "skin zero"), "K2.q4 exporting E and writing zero are exclusive");
+        check(!edvr::engineVelocityPatchPs(ps.data(), ps.size(), zero, refused, why, true), "K2.q5 the no-history write refuses the overlay depth guard");
+        check(!edvr::engineVelocityPatchPs(ps.data(), ps.size(), zero, refused, why, false, edvr::dxbc_engine_velocity_detail::FlatMarkerKind::World), "K2.q6 ...and the flat marker kinds");
+    }
     in.skinExport = true;
     edvr::EngineVelocityInputs bad = in;
     bad.skinRegister = in.identityRegister;

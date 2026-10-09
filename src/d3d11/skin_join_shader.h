@@ -7,10 +7,22 @@
 //                 pose table (t4). Writes the join table (u0, a structured buffer of uint: the vertex shader reads it as
 //                 t109: current base -> previous base, 0 = none), this frame's by-base table (u1), the persistent counters
 //                 (u2). u3 is scratch (the lowest job per base, so two jobs with one base resolve the way the CPU reference does).
-//   poseClear     zeroes a pose table (one thread per element).
-//   poseScatter   one thread per pool record: record bytes 0..31 -> pose[word0] when word0 != 0.
-//   poseVerify    one thread per pool record: words 0..6 must equal the table's; a record that disagrees with another of the
-//                 same base kills the base (word 0 = 0) and counts a conflict.
+//   The pose table, built once a present frame at the frame boundary (engine_velocity.cpp, after every draw of the frame has been issued), from
+//   the pool's private copy and the list of the instance-stream entries the frame's skinned draws read. WHICH RECORD OF A BASE IS THE LIVE ONE is
+//   decided by that list and nothing else: a record is live when a skinned draw of this frame read it (the instance stream's entry at the draw's
+//   StartInstanceLocation names the record). The pool also holds records no draw reads this frame (the F12 flight's 154827 copies: a second set of
+//   every character's records, left from two frames earlier, byte-identical to that frame's, a walker's pose 0.1-0.2 m off); the game's instance stream
+//   holds stale entries as well, so only the draws' own entries count.
+//   poseClear     zeroes the pose table, the per-base state and the reference bitmap with its "bad" word (one thread per element).
+//   poseRefMark   one thread per listed draw: the record each instance entry names gets its bit in the bitmap; an entry that cannot be read or names
+//                 a record outside the pool, or a draw naming too many instances, sets the bad word (no exact reference list: every record decides).
+//   poseScatter   one thread per pool record: counts it; when the reference list is exact and the record is read by a draw, record bytes 0..31 ->
+//                 pose[word0] and the base is marked as having a live record.
+//   poseScatterRest  the same for the records of bases with no live record (the unreferenced bases and, with no exact list, every base).
+//   poseVerify    one thread per pool record: words 0..6 must equal the table's. A base with live records is decided by them alone: a live record that
+//                 disagrees marks the base (counted a conflict), an unreferenced one that disagrees is overruled (counted resolved). A base without
+//                 live records is decided by all its records.
+//   poseFinish    one thread per base: a marked base is zeroed whole (word 0 = 0: no history, never a guess) and counted dropped.
 //
 // The numbers below must equal skin_join.h's; skin_join_gpu_test reads them back out of this text and compares.
 namespace edvr {
@@ -47,7 +59,15 @@ constexpr char kSkinJoinCsHlsl[] = R"HLSL(
 #define SJ_STAT_LAST_JOBS 19u
 #define SJ_STAT_LAST_ENTITIES 20u
 #define SJ_STAT_FAIL_PREV_ROWS 21u
-#define SJ_STAT_WORDS 24u
+#define SJ_STAT_POSE_RESOLVED 22u
+#define SJ_STAT_POSE_DROPPED 23u
+#define SJ_STAT_POSE_LISTS_EXACT 24u
+#define SJ_STAT_POSE_LISTS_BAD 25u
+#define SJ_STAT_WORDS 28u
+#define SJ_REF_WORDS 2048u
+#define SJ_MAX_RANGE_INSTANCES 1024u
+#define SJ_POSE_LIVE 1u
+#define SJ_POSE_CONFLICT 2u
 #define SJ_MM_NOT_IN_RANGE 1u
 #define SJ_MM_HEAD_COUNT 2u
 #define SJ_MM_HEADS 4u
@@ -221,15 +241,47 @@ void join(uint tid : SV_GroupIndex) {
 }
 
 // ---- the pose table ----
-cbuffer PoseCb : register(b0) { uint records; uint rows; uint pad0; uint pad1; };
+// b0: records (the pool copy's), rows, nRanges (listed draws), instFirst (the entry index the copied span starts at), flags (bit 0: the CPU says
+// the draw list is complete), instEntries (entries in the copied span).
+cbuffer PoseCb : register(b0) { uint records; uint rows; uint nRanges; uint instFirst; uint poseFlags; uint instEntries; uint pad0; uint pad1; };
 StructuredBuffer<Rec> Pool : register(t5);
+ByteAddressBuffer InstCopy : register(t6);
+StructuredBuffer<uint2> Ranges : register(t7);
 RWStructuredBuffer<Pose> PoseOut : register(u4);
+RWByteAddressBuffer RefBits : register(u5);
+RWByteAddressBuffer BaseState : register(u6);
+
+bool RefValid() { return (poseFlags & 1u) != 0u && RefBits.Load(SJ_REF_WORDS * 4u) == 0u; }
+bool Referenced(uint rec) { return (RefBits.Load((rec >> 5u) * 4u) & (1u << (rec & 31u))) != 0u; }
+bool SamePose(Pose t, Pose p) {
+ return t.a.x == p.a.x && t.a.y == p.a.y && t.a.z == p.a.z && t.a.w == p.a.w && t.b.x == p.b.x && t.b.y == p.b.y && t.b.z == p.b.z;
+}
 
 [numthreads(64,1,1)]
 void poseClear(uint3 id : SV_DispatchThreadID) {
- if (id.x >= rows) return;
- Pose z; z.a = uint4(0u,0u,0u,0u); z.b = uint4(0u,0u,0u,0u);
- PoseOut[id.x] = z;
+ if (id.x < rows) {
+  Pose z; z.a = uint4(0u,0u,0u,0u); z.b = uint4(0u,0u,0u,0u);
+  PoseOut[id.x] = z;
+  BaseState.Store(id.x * 4u, 0u);
+ }
+ if (id.x <= SJ_REF_WORDS) RefBits.Store(id.x * 4u, 0u);
+}
+
+[numthreads(64,1,1)]
+void poseRefMark(uint3 id : SV_DispatchThreadID) {
+ if (id.x >= nRanges) return;
+ uint2 r = Ranges[id.x];
+ bool bad = r.y > SJ_MAX_RANGE_INSTANCES;
+ const uint count = bad ? 0u : r.y;
+ [loop] for (uint k = 0u; k < count; ++k) {
+  const uint entry = r.x + k;
+  if (entry >= instFirst && entry - instFirst < instEntries) {
+   const uint rec = InstCopy.Load((entry - instFirst) * 8u);
+   if (rec < records && rec < SJ_REF_WORDS * 32u) { uint o; RefBits.InterlockedOr((rec >> 5u) * 4u, 1u << (rec & 31u), o); }
+   else bad = true;
+  } else bad = true;
+ }
+ if (bad) RefBits.Store(SJ_REF_WORDS * 4u, 1u);
 }
 
 [numthreads(64,1,1)]
@@ -238,8 +290,20 @@ void poseScatter(uint3 id : SV_DispatchThreadID) {
  Pose p = Pool[id.x].p;
  uint base = p.a.x;
  if (base == 0u || base >= rows) return;
- PoseOut[base] = p;
  uint o; Stats.InterlockedAdd(SJ_STAT_POSE_RECORDS * 4u, 1u, o);
+ if (RefValid() && Referenced(id.x)) {
+  PoseOut[base] = p;
+  BaseState.InterlockedOr(base * 4u, SJ_POSE_LIVE, o);
+ }
+}
+
+[numthreads(64,1,1)]
+void poseScatterRest(uint3 id : SV_DispatchThreadID) {
+ if (id.x >= records) return;
+ Pose p = Pool[id.x].p;
+ uint base = p.a.x;
+ if (base == 0u || base >= rows) return;
+ if ((BaseState.Load(base * 4u) & SJ_POSE_LIVE) == 0u) PoseOut[base] = p;
 }
 
 [numthreads(64,1,1)]
@@ -248,12 +312,29 @@ void poseVerify(uint3 id : SV_DispatchThreadID) {
  Pose p = Pool[id.x].p;
  uint base = p.a.x;
  if (base == 0u || base >= rows) return;
- Pose t = PoseOut[base];
- if (t.a.x != p.a.x || t.a.y != p.a.y || t.a.z != p.a.z || t.a.w != p.a.w || t.b.x != p.b.x || t.b.y != p.b.y || t.b.z != p.b.z) {
-  uint4 dead = t.a; dead.x = 0u;
-  PoseOut[base].a = dead;
-  uint o; Stats.InterlockedAdd(SJ_STAT_POSE_CONFLICTS * 4u, 1u, o);
+ const bool hasLive = (BaseState.Load(base * 4u) & SJ_POSE_LIVE) != 0u;
+ const bool decisive = !hasLive || Referenced(id.x);
+ if (SamePose(PoseOut[base], p)) return;
+ uint o;
+ if (decisive) {
+  BaseState.InterlockedOr(base * 4u, SJ_POSE_CONFLICT, o);
+  Stats.InterlockedAdd(SJ_STAT_POSE_CONFLICTS * 4u, 1u, o);
+ } else {
+  Stats.InterlockedAdd(SJ_STAT_POSE_RESOLVED * 4u, 1u, o);
  }
+}
+
+[numthreads(64,1,1)]
+void poseFinish(uint3 id : SV_DispatchThreadID) {
+ if (id.x == 0u && (poseFlags & 1u) != 0u) {
+  uint q;
+  Stats.InterlockedAdd((RefBits.Load(SJ_REF_WORDS * 4u) == 0u ? SJ_STAT_POSE_LISTS_EXACT : SJ_STAT_POSE_LISTS_BAD) * 4u, 1u, q);
+ }
+ if (id.x >= rows) return;
+ if ((BaseState.Load(id.x * 4u) & SJ_POSE_CONFLICT) == 0u) return;
+ Pose z; z.a = uint4(0u,0u,0u,0u); z.b = uint4(0u,0u,0u,0u);
+ PoseOut[id.x] = z;
+ uint o; Stats.InterlockedAdd(SJ_STAT_POSE_DROPPED * 4u, 1u, o);
 }
 )HLSL";
 }

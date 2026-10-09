@@ -59,6 +59,10 @@ struct EngineVelocityInputs {
     // writes it to target 7. Derived for every capable VS; skinExport is the caller's, per keyed pair.
     uint32_t skinRegister = ~0u;
     bool skinExport = false;
+    // A skinned family's pixel shader that exports no E writes "no history" to target 7 instead: exactly (0, 0, 0, 0), its valid flag 0. Left unwritten
+    // (write-masked), its pixels would keep the E an earlier skinned draw wrote at the same pixel of the eye-frame, and the compose would read that as
+    // this surface's answer. Exclusive with skinExport; nothing is read from the vertex shader.
+    bool skinZero = false;
 };
 
 namespace dxbc_engine_velocity_detail {
@@ -289,6 +293,8 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
     const uint32_t skinInDecl[] = {0x03001062u, 0x001010F2u, in.skinRegister};
     const uint32_t skinOutDecl[] = {0x03000065u, 0x001020F2u, kSkinTarget};
     const uint32_t skinTail[] = {0x05000036u, 0x001020F2u, kSkinTarget, 0x00101E46u, in.skinRegister};
+    // mov o7.xyzw, l(0, 0, 0, 0): the no-history answer of a skinned pair that exports no E
+    const uint32_t skinZeroTail[] = {0x08000036u, 0x001020F2u, kSkinTarget, 0x00004002u, 0u, 0u, 0u, 0u};
     const uint32_t primitiveDecl[] = {0x04000863u,0x00101012u,primitiveRegister,7u};
     const uint32_t tokenDecl[] = {0x04000059u,0x00208e46u,tokenSlot,1u};
     const uint32_t provenanceTail[] = {
@@ -358,14 +364,14 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
         }
         if (tempAt && at == tempAt) {
             out.insert(out.end(), outDecl, outDecl + 3);
-            if (in.skinExport) out.insert(out.end(), skinOutDecl, skinOutDecl + 3);
+            if (in.skinExport || in.skinZero) out.insert(out.end(), skinOutDecl, skinOutDecl + 3);
             outputDeclared = true;
             out.push_back(t[at]);
             out.push_back(tempCount + (guardOverlayDepth ? 2u : 1u));
         } else {
             if (!tempAt && at == firstExecutable) {
                 out.insert(out.end(), outDecl, outDecl + 3);
-                if (in.skinExport) out.insert(out.end(), skinOutDecl, skinOutDecl + 3);
+                if (in.skinExport || in.skinZero) out.insert(out.end(), skinOutDecl, skinOutDecl + 3);
                 out.push_back(0x02000068u);
                 out.push_back(guardOverlayDepth ? 2u : 1u);
                 outputDeclared = true;
@@ -378,6 +384,7 @@ inline std::vector<BYTE> patchPsProgram(const std::vector<BYTE>& bytes, const En
                 if(provenance)out.insert(out.end(),provenanceTail,provenanceTail+11);
                 else if(rgba)out.insert(out.end(),clearProvenanceTail,clearProvenanceTail+5);
                 if (in.skinExport) out.insert(out.end(), skinTail, skinTail + 5);
+                else if (in.skinZero) out.insert(out.end(), skinZeroTail, skinZeroTail + 8);
             }
             out.insert(out.end(), t.begin() + at, t.begin() + at + length);
         }
@@ -514,6 +521,10 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                               inputs.skinRegister == inputs.positionRegister || guardOverlayDepth ||
                               flatMarker != dxbc_engine_velocity_detail::FlatMarkerKind::None)) {
         reason = "invalid skin export inputs";
+        return false;
+    }
+    if (inputs.skinZero && (inputs.skinExport || guardOverlayDepth || flatMarker != dxbc_engine_velocity_detail::FlatMarkerKind::None)) {
+        reason = "invalid skin zero inputs";
         return false;
     }
     try {
@@ -662,7 +673,7 @@ inline bool engineVelocityPatchPs(const void* data, size_t bytes, const EngineVe
                 velocity.registerIndex = kEngineVelocityTarget;
                 velocity.masks = rgba?0x000fu:0x0C03u;
                 elements.push_back(std::move(velocity));
-                if (psInputs.skinExport) {
+                if (psInputs.skinExport || psInputs.skinZero) {
                     SignatureElement skin;
                     skin.name = "SV_TARGET";
                     skin.semanticIndex = kSkinTarget;
