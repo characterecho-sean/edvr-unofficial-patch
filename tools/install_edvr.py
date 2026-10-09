@@ -1372,6 +1372,113 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     return 0
 
 
+SUSPENDED_SUFFIX = ".edvr-suspended"
+
+
+def _is_edvr_graphics(path):
+    """True when the d3d11.dll at `path` is one of EDVR's own builds (it
+    exports edvr-prefixed names), false for any other graphics mod."""
+    import openxr_pe
+    names, _ = openxr_pe._exports(openxr_pe.Image(Path(path).read_bytes()))
+    return any(name.startswith("edvr") for name in names.values())
+
+
+def suspend_resume(target, resume=False, dry_run=False):
+    """Take EDVR's d3d11.dll out of the game directory for a no-EDVR baseline
+    run (--suspend), or put it back (--resume). One rename each way: nothing
+    is copied, the bytes are hashed before and after, and the settings,
+    receipts and backups stay where they are. Elite then loads Windows' own
+    d3d11.dll. Refused while the game runs, and for a d3d11.dll that is not
+    EDVR's."""
+    live = os.path.join(target, "d3d11.dll")
+    parked = live + SUSPENDED_SUFFIX
+    src, dst = (parked, live) if resume else (live, parked)
+    verb = "resume" if resume else "suspend"
+    if not os.path.isfile(src):
+        print("[edvr] %s: nothing to do, %s is absent%s" % (
+            verb, src, "" if resume else
+            (" (already suspended)" if os.path.isfile(parked) else "")))
+        return 1
+    if os.path.exists(dst):
+        print("[edvr] %s refused: %s already exists" % (verb, dst))
+        return 1
+    try:
+        if not _is_edvr_graphics(src):
+            print("[edvr] %s refused: %s is not an EDVR build" % (verb, src))
+            return 1
+    except (OSError, ValueError) as exc:
+        print("[edvr] %s refused: cannot read %s as a PE image: %s" % (verb, src, exc))
+        return 1
+    before = sha256(src)
+    print("[edvr] %s%s: %s -> %s (sha256 %s)" % (
+        verb, " (DRY RUN -- nothing will be written)" if dry_run else "", src, dst, before))
+    if dry_run:
+        print("[edvr] dry run: wrote nothing."); return 0
+    known, running = strict_game_running(target)
+    if not known or running:
+        print("[edvr] ERROR: %s requires a proven stopped game" % verb)
+        return 1
+    try:
+        os.rename(src, dst)
+    except OSError as exc:
+        print("[edvr] ERROR: %s failed: %s" % (verb, exc)); return 1
+    if sha256(dst) != before or os.path.exists(src):
+        print("[edvr] ERROR: %s verification failed for %s" % (verb, dst)); return 1
+    print("[edvr] %s done and verified. %s" % (verb,
+          "EDVR is OFF: Elite will load Windows' d3d11.dll. Run --resume afterwards." if not resume
+          else "EDVR is back in place; run --verify-only against the build to confirm it."))
+    return 0
+
+
+def _suspend_self_test():
+    ok = True
+    tmp = tempfile.mkdtemp(prefix="edvr_suspend_test_")
+    saved_graphics, saved_probe = globals()["_is_edvr_graphics"], globals()["strict_game_running"]
+    try:
+        game = os.path.join(tmp, "game"); os.makedirs(game)
+        Path(game, GAME_EXE).write_bytes(b"GAME")
+        live = Path(game, "d3d11.dll"); parked = Path(game, "d3d11.dll" + SUSPENDED_SUFFIX)
+        live.write_bytes(b"EDVR-GRAPHICS"); Path(game, "edvr-flat.ini").write_bytes(b"[x]\n")
+        globals()["_is_edvr_graphics"] = lambda p: Path(p).read_bytes().startswith(b"EDVR")
+        globals()["strict_game_running"] = lambda *a: (True, False)
+
+        def snap():
+            return sorted((p.name, p.read_bytes()) for p in Path(game).iterdir())
+        def check(cond, what):
+            nonlocal ok
+            if not cond: print("suspend self-test: %s" % what); ok = False
+        before = snap()
+        check(main(["--target", game, "--suspend", "--dry-run"]) == 0, "dry-run suspend failed")
+        check(snap() == before, "suspend --dry-run wrote files")
+        check(main(["--target", game, "--resume"]) == 1, "resume with nothing parked succeeded")
+        check(main(["--target", game, "--suspend"]) == 0, "suspend failed")
+        check(not live.exists() and parked.read_bytes() == b"EDVR-GRAPHICS", "suspend left the wrong files")
+        check(Path(game, "edvr-flat.ini").read_bytes() == b"[x]\n", "suspend touched the ini")
+        check(main(["--target", game, "--suspend"]) == 1, "second suspend succeeded")
+        live.write_bytes(b"EDVR-OTHER")
+        check(main(["--target", game, "--resume"]) == 1, "resume overwrote a live d3d11.dll")
+        check(parked.read_bytes() == b"EDVR-GRAPHICS" and live.read_bytes() == b"EDVR-OTHER",
+              "refused resume changed files")
+        live.unlink()
+        before = snap()
+        check(main(["--target", game, "--resume", "--dry-run"]) == 0, "dry-run resume failed")
+        check(snap() == before, "resume --dry-run wrote files")
+        globals()["strict_game_running"] = lambda *a: (True, True)
+        check(main(["--target", game, "--resume"]) == 1, "resume ran with the game running")
+        check(snap() == before, "refused resume changed files")
+        globals()["strict_game_running"] = lambda *a: (True, False)
+        check(main(["--target", game, "--resume"]) == 0, "resume failed")
+        check(live.read_bytes() == b"EDVR-GRAPHICS" and not parked.exists(), "resume left the wrong files")
+        live.write_bytes(b"FOREIGN-MOD")
+        before = snap()
+        check(main(["--target", game, "--suspend"]) == 1, "suspended a foreign d3d11.dll")
+        check(snap() == before, "refused suspend changed files")
+    finally:
+        globals()["_is_edvr_graphics"], globals()["strict_game_running"] = saved_graphics, saved_probe
+        shutil.rmtree(tmp, ignore_errors=True)
+    return ok
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Install a built EDVR into a game directory, verified.")
@@ -1405,6 +1512,12 @@ def main(argv=None):
     ap.add_argument("--native-runtime", default=None)
     ap.add_argument("--restore-native", default=None, metavar="RECEIPT",
                     help="restore files recorded by a native or flat receipt")
+    ap.add_argument("--suspend", action="store_true",
+                    help="no-EDVR baseline: park the game directory's EDVR "
+                         "d3d11.dll as d3d11.dll.edvr-suspended (one rename, "
+                         "hash-checked); undo with --resume")
+    ap.add_argument("--resume", action="store_true",
+                    help="put the suspended d3d11.dll back")
     ap.add_argument("--tag", default=None,
                     help="word for the backup name; defaults to the short "
                          "git hash of this tree")
@@ -1441,6 +1554,16 @@ def main(argv=None):
         if not os.path.isabs(args.restore_native):
             ap.error("--restore-native requires an absolute receipt path")
         return restore_native(args.restore_native, args.dry_run)
+
+    if args.suspend or args.resume:
+        if args.suspend and args.resume:
+            ap.error("--suspend and --resume are exclusive")
+        if any((args.native_openxr, args.native_receipt, args.dll, args.openvr,
+                args.dlss, args.ini, args.all, args.verify_only, args.force,
+                args.no_backup, args.tag)):
+            ap.error("--suspend/--resume take only --target and --dry-run")
+        return suspend_resume(resolve_target(args.target), resume=args.resume,
+                              dry_run=args.dry_run)
 
     if args.native_receipt and not args.native_openxr:
         ap.error("--native-receipt requires --native-openxr")
@@ -2664,6 +2787,8 @@ def self_test():
         shutil.rmtree(tmp, ignore_errors=True)
 
     if not _prune_self_test():
+        ok = False
+    if not _suspend_self_test():
         ok = False
 
     print("self-test: %s" % ("ok" if ok else "FAILED"))
