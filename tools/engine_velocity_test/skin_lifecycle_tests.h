@@ -29,8 +29,8 @@
 //   L13 the on-foot source (F2 on foot, the first-person panel): the source pass's skinned draws write the source's own target 7, handed to the screen shader and
 //       the world route (EngineVelocityViews::skin) only while a skinned draw wrote it this frame, cleared at each frame's first skinned draw, E exact, no history
 //       as valid 0 and E 0, never in the eyes' views, and never in the flat profile (no target 7 is created there)
-//   L14 the GPU census slots the second skin fills (F16): the source's and the eyes' target 7 clears, the join and the pose table are each begun by the work they price
-//       and by nothing else
+//   L14 the GPU census slots the second skin fills (F16, F17): the source's and the eyes' target 7 clears, the join's clear pass, the join and the pose table are each begun
+//       by the work they price and by nothing else
 
 #include <algorithm>
 #include <cmath>
@@ -1161,8 +1161,8 @@ inline void run(const lt::Harness& h) {
     {
         using CS = edvr::GpuCensusSection;
         const auto begun = [](CS s) { return lifecycle_fake::g_censusBegins[static_cast<unsigned>(s)]; };
-        struct Seen4 { unsigned src, eye, join, pose; };
-        const auto take = [&] { return Seen4{begun(CS::FrameSkinSourceClear), begun(CS::FrameSkinEyeClear), begun(CS::FrameSkinJoin), begun(CS::FrameSkinPose)}; };
+        struct Seen5 { unsigned src, eye, clear, join, pose; };
+        const auto take = [&] { return Seen5{begun(CS::FrameSkinSourceClear), begun(CS::FrameSkinEyeClear), begun(CS::FrameSkinJoinClear), begun(CS::FrameSkinJoin), begun(CS::FrameSkinPose)}; };
         single();
         {
             sct::Rng rng(31);
@@ -1172,29 +1172,29 @@ inline void run(const lt::Harness& h) {
         }
         settle();
         // a frame with no pool draw and no chain dispatch does none of the second skin's work: nothing is begun
-        Seen4 a = take();
+        Seen5 a = take();
         g.beginFrame();
         g.endFrame();
-        Seen4 b = take();
-        h.check(b.src == a.src && b.eye == a.eye && b.join == a.join && b.pose == a.pose,
+        Seen5 b = take();
+        h.check(b.src == a.src && b.eye == a.eye && b.clear == a.clear && b.join == a.join && b.pose == a.pose,
                 "L14.a a frame with no pool draw and no chain dispatch begins none of the second skin's census slots");
         // an eye frame with the skinned pair in both eyes: each eye's target 7 clear, the join once, the pose table once; never the source's clear
         a = take();
         f.frame([&] {});
         b = take();
-        h.check(b.eye - a.eye == 2 && b.join - a.join == 1 && b.pose - a.pose == 1 && b.src == a.src,
-                "L14.b an eye frame begins the eye clear once for each eye, and the join and the pose table once; the source's clear not at all");
-        if (!(b.eye - a.eye == 2 && b.join - a.join == 1 && b.pose - a.pose == 1 && b.src == a.src))
-            std::fprintf(stderr, "  L14.b: eye %u join %u pose %u src %u\n", b.eye - a.eye, b.join - a.join, b.pose - a.pose, b.src - a.src);
+        h.check(b.eye - a.eye == 2 && b.clear - a.clear == 1 && b.join - a.join == 1 && b.pose - a.pose == 1 && b.src == a.src,
+                "L14.b an eye frame begins the eye clear once for each eye, and the join's clear pass, the join and the pose table once each; the source's clear not at all");
+        if (!(b.eye - a.eye == 2 && b.clear - a.clear == 1 && b.join - a.join == 1 && b.pose - a.pose == 1 && b.src == a.src))
+            std::fprintf(stderr, "  L14.b: eye %u clear %u join %u pose %u src %u\n", b.eye - a.eye, b.clear - a.clear, b.join - a.join, b.pose - a.pose, b.src - a.src);
         // a source frame with the skinned pair: the source's clear once, no eye clear
         a = take();
         f.sourceFrame([&] {});
         f.sourceFrame([&] {});
         b = take();
-        h.check(b.src - a.src == 2 && b.eye == a.eye && b.join - a.join == 2,
-                "L14.c two source frames begin the source's target 7 clear once each, the join once each, and no eye's clear");
-        if (!(b.src - a.src == 2 && b.eye == a.eye && b.join - a.join == 2))
-            std::fprintf(stderr, "  L14.c: src %u eye %u join %u\n", b.src - a.src, b.eye - a.eye, b.join - a.join);
+        h.check(b.src - a.src == 2 && b.eye == a.eye && b.clear - a.clear == 2 && b.join - a.join == 2,
+                "L14.c two source frames begin the source's target 7 clear once each, the join's clear pass and the join once each, and no eye's clear");
+        if (!(b.src - a.src == 2 && b.eye == a.eye && b.clear - a.clear == 2 && b.join - a.join == 2))
+            std::fprintf(stderr, "  L14.c: src %u eye %u clear %u join %u\n", b.src - a.src, b.eye - a.eye, b.clear - a.clear, b.join - a.join);
         // a source frame that draws only a rigid record: no skinned draw, so the source's clear is not begun
         a = take();
         f.sourceRigidFrame([&] {});

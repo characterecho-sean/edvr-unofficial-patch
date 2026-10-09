@@ -69,18 +69,18 @@ static_assert(kAlteredClassSections == 2, "one name for each altered-draw class"
 // before they existed.
 constexpr size_t kWorldFirst = static_cast<size_t>(GpuCensusSection::FrameWorldResolve);
 constexpr size_t kWorldSections = static_cast<size_t>(GpuCensusSection::FrameWorldLayer) - kWorldFirst + 1;
-// The second skin's four items (gpu_census.h) come right after the world route's and are the last in-frame sections. Each is nested inside an engine velocity
+// The second skin's five items (gpu_census.h) come right after the world route's and are the last in-frame sections. Each is nested inside an engine velocity
 // span, so none is in kFrameBreakdownNames or in any total: they are priced on a line of their own (logAndResetWindow), and, like the world route's, have no turn
 // in the rotation until called this window.
 constexpr size_t kSkinFirst = static_cast<size_t>(GpuCensusSection::FrameSkinSourceClear);
 constexpr size_t kSkinSections = static_cast<size_t>(GpuCensusSection::FrameSkinPose) - kSkinFirst + 1;
 constexpr const char* kSkinNames[] = {
-    "source target 7 clear", "eye target 7 clear", "join dispatch (3-table clear included)", "pose table"
+    "source target 7 clear", "eye target 7 clear", "join 3-table clear pass", "join dispatch (clear pass not included)", "pose table"
 };
 static_assert(kAlteredFirst == kDoorSections + kFrameSections + kSkinSections, "one name for each in-frame section, and the altered sections follow them");
 static_assert(kSeedSection + 1 == kWorldFirst && kWorldFirst + kWorldSections == kSkinFirst && kSkinFirst + kSkinSections == kAlteredFirst && kWorldSections == 3 &&
-                  kSkinSections == 4 && sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
-              "the seed is followed by the three world-route sections and the second skin's four, which are the last in-frame ones");
+                  kSkinSections == 5 && sizeof(kSkinNames) / sizeof(kSkinNames[0]) == kSkinSections,
+              "the seed is followed by the three world-route sections and the second skin's five, which are the last in-frame ones");
 static_assert(kAlteredFixFirst + kAlteredFixCount == kSections, "the fix sections are the last ones");
 
 struct SectionState {
@@ -293,7 +293,8 @@ void formatSkinDetail(char* out, size_t n, const Snapshot (&items)[kSkinSections
     for (size_t i = 0; i < kSkinSections; ++i) appendItem(list, kSkinNames[i], items[i]);
     std::snprintf(out, n,
                   "EDVR GPU census, the second skin's GPU work (F2); each item is already inside the engine velocity figure above, so none of it is added to EDVR ~%.3f: "
-                  "%s; the join dispatch holds its 3-table clear as the first phase of it; \"-\" means that work did not run this window.",
+                  "%s; the clear pass is issued right before the join dispatch and is not part of it (before F17 the join's first phase was the clear: 0.015 of its 0.030 ms); "
+                  "\"-\" means that work did not run this window.",
                   edvrTotal, list.c_str());
 }
 

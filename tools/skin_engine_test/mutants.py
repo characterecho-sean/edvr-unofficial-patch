@@ -222,6 +222,17 @@ MUTANTS = [
       "the join dispatch is not begun in the census"),
     M("pose-uncensused", "L14", "gpu", [("    GpuCensusScope poseCensus(ctx, GpuCensusSection::FrameSkinPose);   // (F16: nested in the engine velocity span; priced on the second skin's line)\n", "")],
       "the pose table build is not begun in the census"),
+    # ---- L14, L3, L5: the join's clear pass (F17) ----
+    M("join-clear-pass-uncensused", "L14", "gpu", [("            GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinJoinClear);   // (nested in the engine velocity span; priced on the second skin's line)\n", "")],
+      "the join's clear pass is not begun in the census: F17 could not see the clear apart from the join"),
+    M("join-clear-pass-not-dispatched", ("L3", "L5"), "gpu", [("            ctx->Dispatch(kClearGroups, 1, 1);\n", "")],
+      "the join's tables are never cleared: a job that fails its checks keeps last frame's join entry, and a changed job table still has history"),
+    # (a clear pass of one group instead of kClearGroups is not an engine-rig mutant: this rig's palette has 64 rows and one group covers rows 0..255. It is held where the rows
+    # are: tools\gpu_census_test's scan of the call site ("fewer groups") and skin_join_gpu_test G1.g / G8, which use the same constant.)
+    M("join-clear-pass-after-the-join", ("L3", "L5"), "gpu",
+      [("            ctx->CSSetShader(s.joinClear.Get(), nullptr, 0);\n            ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);\n            ctx->Dispatch(kClearGroups, 1, 1);\n", ""),
+       ("        ctx->Dispatch(1, 1, 1);\n        ID3D11UnorderedAccessView* none[4] = {};", "        ctx->Dispatch(1, 1, 1);\n        ctx->CSSetShader(s.joinClear.Get(), nullptr, 0);\n        ctx->Dispatch(kClearGroups, 1, 1);\n        ID3D11UnorderedAccessView* none[4] = {};")],
+      "the join reads the tables before the clear pass clears them, and the clear then wipes what the join wrote: every character seen has no history"),
 ]
 
 if __name__ == "__main__":

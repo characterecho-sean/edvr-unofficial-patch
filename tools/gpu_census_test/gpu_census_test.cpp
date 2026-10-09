@@ -1185,9 +1185,9 @@ void skinRan(size_t i, unsigned occurrences, double ms, unsigned samples) {
 void skinTableCases() {
     using S = GpuCensusSection;
     check(S::FrameSkinSourceClear == static_cast<S>(kSkinFirst) && S::FrameSkinEyeClear == static_cast<S>(kSkinFirst + 1) &&
-              S::FrameSkinJoin == static_cast<S>(kSkinFirst + 2) && S::FrameSkinPose == static_cast<S>(kSkinFirst + 3) &&
-              kSkinSections == 4 && kSkinFirst == kWorldFirst + kWorldSections,
-          "second skin: four sections in a row, the source's clear, the eyes' clear, the join and the pose table, right after the world route's three");
+              S::FrameSkinJoinClear == static_cast<S>(kSkinFirst + 2) && S::FrameSkinJoin == static_cast<S>(kSkinFirst + 3) &&
+              S::FrameSkinPose == static_cast<S>(kSkinFirst + 4) && kSkinSections == 5 && kSkinFirst == kWorldFirst + kWorldSections,
+          "second skin: five sections in a row, the source's clear, the eyes' clear, the join's clear pass, the join and the pose table, right after the world route's three");
     bool filled = true, distinct = true;
     for (size_t i = 0; i < kSkinSections; ++i) {
         filled = filled && kSkinNames[i] && kSkinNames[i][0];
@@ -1195,7 +1195,7 @@ void skinTableCases() {
         const S section = static_cast<S>(kSkinFirst + i);
         filled = filled && !isDoorSection(section) && occurrenceCapFor(section) == 8 && turnOwnerOf(section) == section;
     }
-    check(filled && distinct, "second skin: four names, none alike, each an in-frame section of its own (per draw, K = 8, its own owner of a turn)");
+    check(filled && distinct, "second skin: five names, none alike, each an in-frame section of its own (per draw, K = 8, its own owner of a turn)");
     // none of them is in the in-frame breakdown the main line sums
     bool inBreakdown = false;
     for (size_t i = 0; i < kFrameSections; ++i)
@@ -1207,8 +1207,8 @@ void skinLineCases() {
     const uint64_t start = GetTickCount64() - 30000;
 
     // Engine velocity 5.000 ms a frame (1000 calls in 200 frames, 8 timed for 8 ms) with the second skin's items INSIDE it: the main line is what it was and the new line
-    // follows it. 200 frames: the source's clear 1 a frame (200, 8 timed for 0.4 ms), the eyes' 2 a frame (400, 8 timed for 0.04 ms), the join 1 a frame (200, 8 timed for
-    // 1.6 ms), the pose table 1 a frame (200, 8 timed for 0.4 ms); the null pairs 0.
+    // follows it. 200 frames: the source's clear 1 a frame (200, 8 timed for 0.4 ms), the eyes' 2 a frame (400, 8 timed for 0.04 ms), the join's clear pass 1 a frame (200, 8
+    // timed for 0.2 ms), the join 1 a frame (200, 8 timed for 0.8 ms), the pose table 1 a frame (200, 8 timed for 0.4 ms); the null pairs 0.
     freshWindow(start);
     auto& engine = g_section[static_cast<size_t>(GpuCensusSection::FrameEngineVelocity)];
     engine.occurrences = 1000;
@@ -1216,8 +1216,9 @@ void skinLineCases() {
     engine.sampler.totals.samples = 8;   // 1.0 ms a call, 5.0 a frame: 5.000 ms/frame
     skinRan(0, 200, 0.4, 8);
     skinRan(1, 400, 0.04, 8);
-    skinRan(2, 200, 1.6, 8);
-    skinRan(3, 200, 0.4, 8);
+    skinRan(2, 200, 0.2, 8);
+    skinRan(3, 200, 0.8, 8);
+    skinRan(4, 200, 0.4, 8);
     logAndResetWindow(start + 30000);
     check(g_lastLog.find("engine velocity 5.000 (5.00/frame)") != std::string::npos && g_lastLog.find("in-frame 5.000 (") != std::string::npos &&
               g_lastLog.find("EDVR ~5.000 ms/frame = door 0.000 (") != std::string::npos,
@@ -1229,12 +1230,13 @@ void skinLineCases() {
     if (line) {
         check(line->find("source target 7 clear 0.050 (1.00/frame)") != std::string::npos &&
                   line->find("eye target 7 clear 0.010 (2.00/frame)") != std::string::npos &&
-                  line->find("join dispatch (3-table clear included) 0.200 (1.00/frame)") != std::string::npos &&
+                  line->find("join 3-table clear pass 0.025 (1.00/frame)") != std::string::npos &&
+                  line->find("join dispatch (clear pass not included) 0.100 (1.00/frame)") != std::string::npos &&
                   line->find("pose table 0.050 (1.00/frame)") != std::string::npos,
-              "second skin line: each item its own figure and per-frame count: (mean ms a call) x (calls a frame), 0.050, 0.010, 0.200 and 0.050");
-        check(line->find("none of it is added to EDVR ~5.000") != std::string::npos && line->find("3-table clear as the first phase") != std::string::npos &&
+              "second skin line: each item its own figure and per-frame count: (mean ms a call) x (calls a frame), 0.050, 0.010, 0.025, 0.100 and 0.050");
+        check(line->find("none of it is added to EDVR ~5.000") != std::string::npos && line->find("clear pass is issued right before the join dispatch and is not part of it") != std::string::npos &&
                   line->find("probe") == std::string::npos,
-              "second skin line: it says the items are inside the engine velocity figure and that the join holds its 3-table clear; no probe is mentioned");
+              "second skin line: it says the items are inside the engine velocity figure and that the clear pass is not part of the join dispatch; no probe is mentioned");
     }
 
     // Only the source's clear ran (an on-foot window with a character and no eye frame): the others are '-', not 0.000.
@@ -1242,7 +1244,7 @@ void skinLineCases() {
     skinRan(0, 200, 0.4, 8);
     logAndResetWindow(start + 30000);
     line = lineWith(kSkinLinePrefix);
-    check(line && line->find("source target 7 clear 0.050 (1.00/frame), eye target 7 clear -, join dispatch (3-table clear included) -, pose table -;") != std::string::npos,
+    check(line && line->find("source target 7 clear 0.050 (1.00/frame), eye target 7 clear -, join 3-table clear pass -, join dispatch (clear pass not included) -, pose table -;") != std::string::npos,
           "second skin line: an item that did not run is '-', never 0.000");
 
     // NEGATIVE CONTROL: none of it ran. No line at all, the main line as before, and nothing left over from the window before.
@@ -1251,7 +1253,7 @@ void skinLineCases() {
     check(lineWith(kSkinLinePrefix) == nullptr && g_lastLog.find("EDVR GPU census:") == 0,
           "second skin line (nothing ran): no line, so a window with no skinned character reads exactly as before");
     freshWindow(start);
-    skinRan(2, 200, 1.6, 8);
+    skinRan(3, 200, 1.6, 8);
     logAndResetWindow(start + 30000);
     g_lines.clear();
     g_lastLog.clear();
@@ -1262,7 +1264,7 @@ void skinLineCases() {
 
     // Counted, none timed (the item's turn came when the timer was busy): 0.000 with its count, not '-'.
     freshWindow(start);
-    skinRan(3, 200, 0.0, 0);
+    skinRan(4, 200, 0.0, 0);
     logAndResetWindow(start + 30000);
     line = lineWith(kSkinLinePrefix);
     check(line && line->find("pose table 0.000 (1.00/frame)") != std::string::npos,
@@ -1271,7 +1273,7 @@ void skinLineCases() {
     // The items are in no total: only second-skin items occurred, so the in-frame total is 0.000 however much they cost.
     freshWindow(start);
     skinRan(0, 200, 4.0, 8);
-    skinRan(2, 200, 16.0, 8);
+    skinRan(3, 200, 16.0, 8);
     logAndResetWindow(start + 30000);
     check(g_lastLog.find("EDVR ~0.000 ms/frame = door 0.000 (") != std::string::npos && g_lastLog.find("in-frame 0.000 (") != std::string::npos,
           "second skin line: the nested items are in no total (EDVR ~0.000 with only they running)");
@@ -1289,7 +1291,7 @@ void skinTurnCases() {
         const size_t a = static_cast<size_t>(at);
         if (a >= kSkinFirst && a < kSkinFirst + kSkinSections) skinVisited[a - kSkinFirst] = true;
     } while (at != 0 && cycle < 200);
-    check(cycle == 20 && !skinVisited[0] && !skinVisited[1] && !skinVisited[2] && !skinVisited[3],
+    check(cycle == 20 && !skinVisited[0] && !skinVisited[1] && !skinVisited[2] && !skinVisited[3] && !skinVisited[4],
           "second skin turns: with none called this window the rotation gives them no turn (the cycle is the 20 it was before they existed)");
     for (size_t i = 0; i < kSkinSections; ++i) skinSection(i).occurrences = 1;
     at = 0;
@@ -1301,11 +1303,11 @@ void skinTurnCases() {
         const size_t a = static_cast<size_t>(at);
         if (a >= kSkinFirst && a < kSkinFirst + kSkinSections) skinVisited[a - kSkinFirst] = true;
     } while (at != 0 && cycle < 200);
-    check(cycle == 24 && skinVisited[0] && skinVisited[1] && skinVisited[2] && skinVisited[3],
-          "second skin turns: once called this window each takes its turn (24: the 20 and the four)");
+    check(cycle == 25 && skinVisited[0] && skinVisited[1] && skinVisited[2] && skinVisited[3] && skinVisited[4],
+          "second skin turns: once called this window each takes its turn (25: the 20 and the five)");
     // one of them alone
     for (size_t i = 0; i < kSkinSections; ++i) skinSection(i).occurrences = 0;
-    skinSection(2).occurrences = 1;
+    skinSection(3).occurrences = 1;
     at = 0;
     cycle = 0;
     unsigned joinTurns = 0, otherSkin = 0;
@@ -1313,7 +1315,7 @@ void skinTurnCases() {
         at = nextTurnOwner(at);
         ++cycle;
         const size_t a = static_cast<size_t>(at);
-        if (a == kSkinFirst + 2) ++joinTurns;
+        if (a == kSkinFirst + 3) ++joinTurns;
         else if (a >= kSkinFirst && a < kSkinFirst + kSkinSections) ++otherSkin;
     } while (at != 0 && cycle < 200);
     check(cycle == 21 && joinTurns == 1 && otherSkin == 0, "second skin turns: the join called alone has one turn a cycle and the others none");
@@ -1339,6 +1341,18 @@ const char* skinWiringProblem(const std::string& engine, const std::string& join
     if (!insideEngineSpan(engine, "FrameSkinSourceClear") || !insideEngineSpan(engine, "FrameSkinEyeClear")) return "a target 7 clear is not inside the engine velocity span";
     if (engine.find("GpuCensusSection::FrameSkinJoin") != std::string::npos || engine.find("GpuCensusSection::FrameSkinPose") != std::string::npos) return "the join or the pose table is begun outside skin_join_gpu.cpp";
     if (count(join, "GpuCensusScope joinCensus(ctx, GpuCensusSection::FrameSkinJoin);") != 1) return "the join is not begun exactly once in skin_join_gpu.cpp";
+    if (count(join, "GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinJoinClear);") != 1) return "the join's clear pass is not begun exactly once in skin_join_gpu.cpp";
+    if (!insideEngineSpan(join, "FrameSkinJoinClear);")) return "the join's clear pass is not inside the engine velocity span";
+    // the pass is issued before the join, on the same context: its dispatch of kClearGroups groups sits between its census scope and the join's, and nothing dispatches the clear twice
+    {
+        const size_t clearScope = join.find("GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinJoinClear);");
+        const size_t clearDispatch = join.find("ctx->Dispatch(kClearGroups, 1, 1);");
+        const size_t joinScope = join.find("GpuCensusScope joinCensus(ctx, GpuCensusSection::FrameSkinJoin);");
+        const size_t joinDispatch = join.find("ctx->Dispatch(1, 1, 1);", joinScope == std::string::npos ? 0 : joinScope);
+        if (count(join, "ctx->Dispatch(kClearGroups, 1, 1);") != 1 || count(join, "ctx->CSSetShader(s.joinClear.Get(), nullptr, 0);") != 1)
+            return "the join's clear pass is not dispatched exactly once with kClearGroups groups";
+        if (!(clearScope < clearDispatch && clearDispatch < joinScope && joinScope < joinDispatch)) return "the join's clear pass is not issued before the join dispatch";
+    }
     if (count(join, "GpuCensusScope poseCensus(ctx, GpuCensusSection::FrameSkinPose);") != 1) return "the pose table is not begun exactly once in skin_join_gpu.cpp";
     if (!insideEngineSpan(join, "FrameSkinJoin);") || !insideEngineSpan(join, "FrameSkinPose);")) return "the join or the pose table is not inside the engine velocity span";
     if (join.find("ClearProbe") != std::string::npos || engine.find("ClearProbe") != std::string::npos) return "a probe of the join's clear is back in the call sites";
@@ -1368,6 +1382,23 @@ void skinWiringCases() {
     mutants.push_back({"the join not begun", engine, without(join, "GpuCensusScope joinCensus(ctx, GpuCensusSection::FrameSkinJoin);"), "join is not begun"});
     mutants.push_back({"the pose table not begun", engine, without(join, "GpuCensusScope poseCensus(ctx, GpuCensusSection::FrameSkinPose);"), "pose table is not begun"});
     mutants.push_back({"a probe of the join's clear back in the join", engine, join + "\n// GpuCensusSection::FrameSkinJoinClearProbe", "back in the call sites"});
+    mutants.push_back({"the join's clear pass not begun", engine, without(join, "GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinJoinClear);"), "clear pass is not begun exactly once"});
+    mutants.push_back({"the join's clear pass not dispatched", engine, without(join, "ctx->Dispatch(kClearGroups, 1, 1);"), "not dispatched exactly once"});
+    mutants.push_back({"the join's clear pass fewer groups", engine,
+                       [&] { std::string s = join; const size_t at = s.find("ctx->Dispatch(kClearGroups, 1, 1);"); if (at != std::string::npos) s.replace(at, 34, "ctx->Dispatch(1, 1, 1);"); return s; }(),
+                       "not dispatched exactly once"});
+    mutants.push_back({"the join's clear pass issued after the join", engine,
+                       [&] {
+                           std::string s = join;
+                           const std::string pass = "ctx->Dispatch(kClearGroups, 1, 1);";
+                           const size_t at = s.find(pass);
+                           if (at == std::string::npos) return s;
+                           s.erase(at, pass.size());
+                           const size_t joinDispatch = s.find("ctx->Dispatch(1, 1, 1);", s.find("GpuCensusScope joinCensus("));
+                           if (joinDispatch != std::string::npos) s.insert(joinDispatch + 23, "\n        " + pass);
+                           return s;
+                       }(),
+                       "not issued before the join dispatch"});
     {
         std::string moved = engine;
         const std::string scope = "GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);";

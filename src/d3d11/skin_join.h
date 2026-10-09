@@ -39,6 +39,7 @@ namespace skinjoin {
 constexpr uint64_t kChainHash = 0x6FE04AF836BB1DBAull;   // cs_6FE04AF836BB1DBA, APPLY_BIND_POSE_TRANSFORMS_CS: one group per job (skin_ledger.h's kChainHash)
 constexpr uint32_t kMaxEntries = 1024;     // entries one snapshot can hold
 constexpr uint32_t kMaxRows = 65536;       // palette rows the tables cover (the ledger's kept rows)
+constexpr uint32_t kClearGroups = 64;      // groups of 256 threads in the join's clear pass (skin_join_shader.h SJ_CLEAR_GROUPS): all kMaxRows rows of all three tables, every frame
 constexpr uint32_t kMaxJobs = 8192;        // dispatch groups the join reads
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 constexpr uint32_t kMaxBonesPerJob = 4096;
