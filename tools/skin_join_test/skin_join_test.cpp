@@ -716,6 +716,7 @@ void casePoseRule() {
     check(r.table[23].w[4] == 0 && r.table[24].w[1] == 0, "J12.f ...and its table entry is zeroed whole");
     check(r.table[25].w[0] == 25 && r.table[26].w[0] == 26 && r.table[27].w[0] == 27, "J12.g a single record is kept, read or not, and a read record with an unread twin of the same pose is no conflict");
     check(r.resolved == 5 && r.conflicts == 2 && r.dropped == 2, "J12.h five stale records overruled, two disagreeing records among the deciding ones, two bases dropped");
+    check(r.idle == 1 && r.unresolved == 1 && r.idle + r.unresolved == r.dropped, "J12.s of the two dropped bases, the one NO draw read is idle (24) and the one whose read records disagree is unresolved (23)");
     check(r.records == 17, "J12.i every record that carries a base is counted");
     // the stream's stale entries do not count: only the draws' windows (record 17's entry names stale records and no window covers it)
     check(w.refs.stream.size() / 2 > 7 + 6, "J12.j (the stream holds entries beyond the draws' windows)");
@@ -726,6 +727,7 @@ void casePoseRule() {
         const PoseResult q = cpuPose(inc.words(), inc.refs);
         check(!q.listExact && q.listsExact == 0 && q.listsBad == 0 && q.resolved == 0, "J12.k an incomplete list resolves nothing and counts as neither exact nor unreadable");
         check(q.table[21].w[0] == 0 && q.table[22].w[0] == 0 && q.table[28].w[0] == 0 && q.table[29].w[0] == 0 && q.table[25].w[0] == 25, "J12.l ...so every base with a stale second record has no history, and a single record is kept");
+        check(q.dropped >= 4 && q.idle == 0 && q.unresolved == 0, "J12.t ...and with no exact list a dropped base is neither idle nor unresolved: nobody's reading decided it");
     }
     // a draw naming an entry outside the copied span, a record the pool does not hold, or too many instances: the list cannot be read, nothing is resolved
     {
@@ -776,17 +778,36 @@ void casePoseRule() {
         uint32_t d[kStatWords]{};
         WindowCpu c;
         d[kStatPoseRecords] = 4000; d[kStatPoseResolved] = 120; d[kStatPoseConflicts] = 7; d[kStatPoseDropped] = 5; d[kStatPoseListsExact] = 118; d[kStatPoseListsBad] = 2;
+        d[kStatPoseIdle] = 3; d[kStatPoseUnresolved] = 1;
         c.poseBuilds = 120; c.poseIncomplete = 3;
         const std::string line = poseLine(d, c);
         check(line.find("skin join: pose witness:") == 0 && line.find("tables built 120") != std::string::npos && line.find("records 4000") != std::string::npos &&
-              line.find("conflicts resolved 120, unresolved 7, bases dropped 5") != std::string::npos && line.find("reference lists exact 118, unreadable 2, not complete 3") != std::string::npos,
-              "J12.q the witness line names the tables built, the records, the conflicts resolved and unresolved, the bases dropped and the lists' verdicts");
+              line.find("conflicts resolved 120 | bases dropped 5: idle 3 (no draw read the base), unresolved 1 (two or more read records disagree), no exact list 1") != std::string::npos &&
+              line.find("reference lists exact 118, unreadable 2, not complete 3") != std::string::npos,
+              "J12.q the witness line names the tables built, the records, the conflicts resolved, the bases dropped split into idle, unresolved and no exact list, and the lists' verdicts");
         uint32_t big[kStatWords];
         for (uint32_t& v : big) v = 4294967295u;
         WindowCpu bigCpu;
         bigCpu.poseBuilds = bigCpu.poseIncomplete = ~0ull;
-        check(poseLine(big, bigCpu).size() < 400, "J12.r the witness line fits the log's limit at the largest numbers");
+        check(poseLine(big, bigCpu).size() < 600, "J12.r the witness line fits its buffer (and the log's limit) at the largest numbers");
     }
+}
+
+// ---- J13 -----------------------------------------------------------------------------------------------------------------
+// The chain's dispatches over the joins: the game dispatches the palette chain twice in some frames and the join is one per frame.
+void caseChainLine() {
+    uint32_t d[kStatWords]{};
+    WindowCpu c;
+    d[kStatFrames] = 1769;
+    c.chainDispatches = 1856; c.chainMulti = 87; c.chainLate = 2; c.chainMixed = 1;
+    const std::string line = chainLine(d, c);
+    check(line == "skin join: chain dispatches 1856 over 1769 frames (two or more in 87, late 2, on another palette buffer 1)",
+          "J13.a the chain line says the dispatches over the joins, the frames with two or more, the late ones and the frames on two palette buffers");
+    uint32_t big[kStatWords];
+    for (uint32_t& v : big) v = 4294967295u;
+    WindowCpu bigCpu;
+    bigCpu.chainDispatches = bigCpu.chainMulti = bigCpu.chainLate = bigCpu.chainMixed = ~0ull;
+    check(chainLine(big, bigCpu).size() < 300, "J13.b the chain line fits its buffer at the largest numbers");
 }
 }  // namespace
 
@@ -812,6 +833,7 @@ int main(int argc, char** argv) {
     caseInsertRemove();
     caseChildren();
     caseDisagree();
+    caseChainLine();
     caseLimits();
     caseResiduals();
     caseLine();

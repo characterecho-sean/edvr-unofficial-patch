@@ -115,6 +115,7 @@ bool g_activeNullDone = false;
 
 uint64_t g_windowStartMs = 0;
 uint64_t g_windowFrames = 0;
+unsigned g_windowEyeRuns = 0;   // eye runs armed in this window (gpuCensusNoteEyeRun)
 
 // R (design item 3): our own cursor into gpu_frame_timing's completion
 // ring, and this window's Application-render outerMs samples. Read via
@@ -276,6 +277,10 @@ void formatSeedDetail(char* out, size_t n, const Snapshot& s, uint64_t notes, bo
 
 void logAndResetWindow(uint64_t now) {
     const uint64_t frames = g_windowFrames;
+    // A window an eye run fell in prices the run along with the features: its copies and its draw census are in the figures.
+    const char* eyeNote = g_windowEyeRuns
+        ? " An eye run was armed in this window: its ledger, draw census and copies are in these figures; price a feature from a window without this sentence."
+        : "";
     const double seconds = static_cast<double>(now - g_windowStartMs) / 1000.0;
 
     // "door D" is the wrapped whole temporalInner (both eyes) plus the
@@ -392,10 +397,10 @@ void logAndResetWindow(uint64_t now) {
     Log::get().note(
         "EDVR GPU census: %.0f s, %llu frames; EDVR ~%.3f ms/frame = door %.3f "
         "(%s) + in-frame %.3f (%s); application render p50 %s; %s; "
-        "timer floor %s; spans timed %llu, failed %llu.",
+        "timer floor %s; spans timed %llu, failed %llu.%s",
         seconds, static_cast<unsigned long long>(frames), doorTotal + frameTotal, doorTotal,
         doorItems.c_str(), frameTotal, frameItems.c_str(), rBuf, gapBrief, floorBuf,
-        static_cast<unsigned long long>(spansTimed), static_cast<unsigned long long>(spansSkipped));
+        static_cast<unsigned long long>(spansTimed), static_cast<unsigned long long>(spansSkipped), eyeNote);
     // The HDR HUD seed's own line, only when a seed ran: "-" on the main line alone means none did (the layer is
     // off, or it drew no HUD that tests the game's depth or stencil); a line here means the item above is a
     // measurement, and says which target it was taken on.
@@ -410,8 +415,8 @@ void logAndResetWindow(uint64_t now) {
     Log::get().note(
         "EDVR GPU census, Elite's own draws that EDVR alters (each is the game's draw timed whole, so a figure "
         "includes the game's own work in it, not only what EDVR adds, and none of it is in EDVR ~%.3f above): "
-        "%s; together %.3f ms/frame; \"-\" means no such draw ran this window.",
-        doorTotal + frameTotal, alteredItems.c_str(), alteredTotal);
+        "%s; together %.3f ms/frame; \"-\" means no such draw ran this window.%s",
+        doorTotal + frameTotal, alteredItems.c_str(), alteredTotal, eyeNote);
     // The "other fix-wrapped draws" above, one fix at a time: which code wraps the draws that cost.
     Log::get().note(
         "EDVR GPU census, the other fix-wrapped draws above by the fix that wraps each (the same draws, the game's own "
@@ -432,6 +437,7 @@ void logAndResetWindow(uint64_t now) {
     }
     resetSeedNotes();
     g_windowFrames = 0;
+    g_windowEyeRuns = 0;
     g_windowStartMs = now;
     g_p50Count = 0;
 }
@@ -523,6 +529,8 @@ void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept {
     if (now - g_windowStartMs < 30000) return;
     logAndResetWindow(now);
 }
+
+void gpuCensusNoteEyeRun() noexcept { ++g_windowEyeRuns; }
 
 void gpuCensusShutdown() noexcept {
     for (auto& st : g_section) { st.sampler.reset(); st.nullSampler.reset(); }

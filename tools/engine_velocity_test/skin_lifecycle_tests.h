@@ -22,6 +22,10 @@
 //   L10 which record of the character's base is the live one: the pool also holds a stale second record (above or below the live one, read by no draw),
 //       both records read, a draw list that cannot be exact; the instance stream at an IA offset; the pose witness line
 //   L11 a skinned family's pixel shader that exports no E draws over an exporting one's pixels: it writes no history there, not the E beneath
+//   L12 the palette chain dispatched twice in one present frame (the game does, in the settlement: F13): the join is ONE per present frame over the dispatches'
+//       job tables in dispatch order, whichever job table the drawn character is in, one buffer rewritten between the dispatches, a one-two-one sequence, a
+//       second dispatch after a skinned draw has needed the join (late), one on another palette buffer, a frame whose chain no skinned draw needed, the hook's
+//       one list per frame judged against the union, and the counters that say so
 
 #include <algorithm>
 #include <cmath>
@@ -74,8 +78,8 @@ struct Fixture {
     ComPtr<ID3D11VertexShader> vsPair, vsPlain;
     ComPtr<ID3D11PixelShader> psPair, psPlain;
     ComPtr<ID3D11InputLayout> layout;
-    ComPtr<ID3D11Buffer> verts, instances, jobs, palette[2];
-    ComPtr<ID3D11ShaderResourceView> jobsSrv, paletteSrv[2];
+    ComPtr<ID3D11Buffer> verts, instances, jobs, jobs2, palette[2];
+    ComPtr<ID3D11ShaderResourceView> jobsSrv, jobs2Srv, paletteSrv[2];
     ComPtr<ID3D11UnorderedAccessView> paletteUav[2];
     sct::Vertex tri[3];
     sct::State state;
@@ -96,6 +100,14 @@ struct Fixture {
     bool readStale = false;              // a second draw per eye reads the stale record (both records are read)
     bool secondStream = false;           // a second vertex buffer of stride 8 is bound: the draws' stream is ambiguous
     bool overdrawPlain = false;          // after each eye's pair draw, a skinned family's pixel shader that exports no E draws over the same pixels (L11)
+    UINT drawEntry = 0;                  // the stream entry the draws read (3 names slot 3, a record no base owns: nothing of the character is read)
+    // The palette chain in two dispatches (L12): the jobs of built.jobs listed in `secondDispatch` go in the frame's second dispatch, the rest in the first.
+    std::vector<size_t> secondDispatch;
+    bool sameJobsBuffer = false;         // the second dispatch rewrites the first's job table buffer (the join must take each table at its dispatch)
+    bool lateSecond = false;             // the second dispatch comes after the frame's first pass: a skinned draw has already needed the join
+    bool secondOnOtherPalette = false;   // the second dispatch writes the other palette buffer
+    unsigned chainK = 0;                 // the palette buffer of the frame's chain
+    std::vector<sjw::JobRow> pendingSecond;
     ComPtr<ID3D11DepthStencilState> alwaysDepth;
 
     Fixture(const lt::Harness& harness, lt::Game& game) : h(harness), g(game), dev(harness.device), ctx(harness.context) {}
@@ -139,7 +151,7 @@ struct Fixture {
         vd.ByteWidth = sizeof(tri); vd.Usage = D3D11_USAGE_DEFAULT; vd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
         D3D11_SUBRESOURCE_DATA vinit{tri, 0, 0};
         h.check(SUCCEEDED(dev->CreateBuffer(&vd, &vinit, &verts)), "L: the vertices");
-        const uint32_t instance[8] = {0xFFFFu, 0xFFFFu, slot, 0, 11, 0, 2, 0};   // one junk entry, then the live record's and the two stale slots'; bound at an offset of 8
+        const uint32_t instance[10] = {0xFFFFu, 0xFFFFu, slot, 0, 11, 0, 2, 0, 3, 0};   // one junk entry, then the live record's, the two stale slots' and an empty slot's; bound at an offset of 8
         vd.ByteWidth = sizeof(instance);
         D3D11_SUBRESOURCE_DATA iinit{instance, 0, 0};
         h.check(SUCCEEDED(dev->CreateBuffer(&vd, &iinit, &instances)), "L: the instance");
@@ -150,6 +162,8 @@ struct Fixture {
         }
         jobs = structured(nullptr, 16, 8, D3D11_BIND_SHADER_RESOURCE);
         h.check(SUCCEEDED(dev->CreateShaderResourceView(jobs.Get(), nullptr, &jobsSrv)), "L: the job table's view");
+        jobs2 = structured(nullptr, 16, 8, D3D11_BIND_SHADER_RESOURCE);
+        h.check(SUCCEEDED(dev->CreateShaderResourceView(jobs2.Get(), nullptr, &jobs2Srv)), "L: the second job table's view");
         for (int i = 0; i < 2; ++i) {
             palette[i] = structured(nullptr, 48, paletteRows, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS);
             h.check(SUCCEEDED(dev->CreateShaderResourceView(palette[i].Get(), nullptr, &paletteSrv[i])) &&
@@ -165,6 +179,16 @@ struct Fixture {
         bones = n;
         sjw::World w;
         w.push_back(sjw::Ent{900, 0xA11CE, 0, {{77, n}}});
+        built = sjw::build(w, 1);
+        base = built.jobs.front().dst;
+    }
+
+    // The same, plus an extra character after it (one entity, one job of 20 bones): the world of a frame whose chain has a second dispatch.
+    void setWorldTwo(uint32_t n) {
+        bones = n;
+        sjw::World w;
+        w.push_back(sjw::Ent{900, 0xA11CE, 0, {{77, n}}});
+        w.push_back(sjw::Ent{901, 0xA11CE, 0, {{78, 20}}});
         built = sjw::build(w, 1);
         base = built.jobs.front().dst;
     }
@@ -188,14 +212,33 @@ struct Fixture {
         std::vector<float> cur(size_t(paletteRows) * 12, 0.0f);
         for (size_t i = 0; i < state.rows.size() && size_t(base) * 12 + i < cur.size(); ++i) cur[size_t(base) * 12 + i] = state.rows[i];   // (rows past the buffer are the game's to lose)
         ctx->UpdateSubresource(palette[k].Get(), 0, nullptr, cur.data(), 0, 0);
-        std::vector<sjw::JobRow> table = built.jobs;
+        chainK = k;
+        std::vector<sjw::JobRow> first, second;
+        for (size_t i = 0; i < built.jobs.size(); ++i) {
+            const bool inSecond = std::find(secondDispatch.begin(), secondDispatch.end(), i) != secondDispatch.end();
+            (inSecond ? second : first).push_back(built.jobs[i]);
+        }
+        dispatchPart(first, false);
+        pendingSecond = second;
+        if (!second.empty() && !lateSecond) { dispatchPart(second, true); pendingSecond.clear(); }
+    }
+    // The second dispatch of a frame whose second dispatch comes late (after the first pass), if there is one.
+    void chainLate() {
+        if (pendingSecond.empty()) return;
+        dispatchPart(pendingSecond, true);
+        pendingSecond.clear();
+    }
+    // One dispatch of the chain: a job table (the game's own buffer for each dispatch, or the first's rewritten) at t0, the palette at u0, the engine told.
+    void dispatchPart(const std::vector<sjw::JobRow>& part, bool isSecond) {
+        ID3D11Buffer* buf = (isSecond && !sameJobsBuffer) ? jobs2.Get() : jobs.Get();
+        ID3D11ShaderResourceView* t0 = (isSecond && !sameJobsBuffer) ? jobs2Srv.Get() : jobsSrv.Get();
+        std::vector<sjw::JobRow> table = part;
         table.resize(8);
-        ctx->UpdateSubresource(jobs.Get(), 0, nullptr, table.data(), 0, 0);
-        ID3D11ShaderResourceView* t0 = jobsSrv.Get();
+        ctx->UpdateSubresource(buf, 0, nullptr, table.data(), 0, 0);
         ctx->CSSetShaderResources(0, 1, &t0);
-        ID3D11UnorderedAccessView* u0 = paletteUav[k].Get();
+        ID3D11UnorderedAccessView* u0 = paletteUav[(isSecond && secondOnOtherPalette) ? (chainK ^ 1u) : chainK].Get();
         ctx->CSSetUnorderedAccessViews(0, 1, &u0, nullptr);
-        edvr::engineVelocityNoteChainDispatch(ctx, uint32_t(built.jobs.size()));
+        edvr::engineVelocityNoteChainDispatch(ctx, uint32_t(part.size()));
         ID3D11ShaderResourceView* none = nullptr;
         ctx->CSSetShaderResources(0, 1, &none);
         ID3D11UnorderedAccessView* noUav = nullptr;
@@ -230,7 +273,9 @@ struct Fixture {
 
     // One eye's pass with the skinned pair (or the plain skinned family): the game's state, the engine's call, what it bound, the draw. `start` is the draw's
     // StartInstanceLocation (the stream entry it reads); the draw hook's second call (the draw's instance window) is made as vscreen's thunk makes it.
-    void pass(int eye, bool pair = true, bool observe = false, UINT start = 0, ID3D11DepthStencilState* depthOverride = nullptr) {
+    static constexpr UINT kDefaultEntry = 0xFFFFFFFFu;
+    void pass(int eye, bool pair = true, bool observe = false, UINT startEntry = kDefaultEntry, ID3D11DepthStencilState* depthOverride = nullptr) {
+        const UINT start = startEntry == kDefaultEntry ? drawEntry : startEntry;
         g.setTargets(eye);
         ctx->OMSetDepthStencilState(depthOverride ? depthOverride : g.depthState.Get(), 0);
         D3D11_VIEWPORT vp{0, 0, float(lt::kW), float(lt::kH), 0, 1};
@@ -294,6 +339,7 @@ struct Fixture {
         writePool();
         g.writeScene(g.sceneA.Get(), rows[0]);
         pass(0, pair, observe);
+        chainLate();   // (a no-op unless the test says the frame's second dispatch comes after a skinned draw)
         if (readStale) pass(0, pair, false, staleEntry);
         if (overdrawPlain) pass(0, false, false, 0, alwaysDepth.Get());
         g.writeScene(g.sceneA.Get(), rows[1]);
@@ -306,6 +352,24 @@ struct Fixture {
         ++count;
     }
     template <class After> void frame(After after) { frame(true, after); }
+    // A frame whose chain no skinned draw needed (a character out of view): the chain, the hook's list and the pool, no pass.
+    void chainOnlyFrame(bool summary = false) {
+        g.beginFrame();
+        writeSceneRows();
+        chain(count);
+        if (useHookList) {
+            sjw::Built b = built;
+            b.snap.seq = ++hookSeq;
+            hookSnapshot = b.snap;
+            lifecycle_fake::g_hookSnap = &hookSnapshot;
+        } else {
+            lifecycle_fake::g_hookSnap = nullptr;
+        }
+        writePool();
+        g.endFrame(summary);
+        ctx->Flush();
+        ++count;
+    }
     edvr::skinjoin::Snapshot hookSnapshot;
 
     // Target 7 of `eye` as the compose gets it (null view: nothing was written this frame), as floats, and the drawn pixels from the eye's depth.
@@ -712,10 +776,27 @@ inline void run(const lt::Harness& h) {
     f.frame(true, [&] {}, true, false);
     {
         const std::string pw = lastLine("skin join: pose witness:", mark);
-        h.check(!pw.empty() && lt::number(pw, "conflicts resolved ") >= 5 && lt::number(pw, "bases dropped ") >= 5 && lt::number(pw, "unresolved ") >= 5 && lt::number(pw, "not complete ") >= 3,
-                "L10.h the witness line counts the stale records overruled, the conflicts that decided, the bases dropped and the lists that were not complete");
+        h.check(!pw.empty() && lt::number(pw, "conflicts resolved ") >= 5 && lt::number(pw, "bases dropped ") >= 5 && lt::number(pw, "unresolved ") >= 5 && lt::number(pw, "no exact list ") >= 1 &&
+                    lt::number(pw, "not complete ") >= 3,
+                "L10.h the witness line counts the stale records overruled, the bases dropped and what they were (unresolved: both records read; no exact list: the second stream) and the lists that were not complete");
         if (pw.empty() || lt::number(pw, "conflicts resolved ") < 5) std::fprintf(stderr, "  pose witness: %s\n", pw.c_str());
     }
+    // L10.i: a base whose records disagree and which NO draw reads is idle (a character out of view), not unresolved: the draws read an empty slot's record
+    // (entry 3), the live record and the stale one are both unread.
+    f.staleSlot = 11; f.staleEntry = 1; f.drawEntry = 3;
+    // (frames that read target 7 back wait for the GPU, so the counters of each have come back when the summary is written)
+    for (int i = 0; i < 3; ++i) f.frame(true, [&] { f.read(0); }, false, false);
+    f.frame(true, [&] { f.read(0); }, true, false);   // closes the window the lines above were read from
+    for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.read(0); }, false, false);
+    f.frame(true, [&] { f.read(0); }, true, false);
+    {
+        const std::string pw = lastLine("skin join: pose witness:", mark);
+        h.check(!pw.empty() && lt::number(pw, "idle ") >= 2 && lt::number(pw, "unresolved ") == 0,
+                "L10.i a base whose records disagree and which no draw read is idle, not unresolved: the witness tells a character out of view from a conflict between records a draw read");
+        if (pw.empty() || lt::number(pw, "idle ") < 2 || lt::number(pw, "unresolved ") != 0) std::fprintf(stderr, "  pose witness: %s\n", pw.c_str());
+    }
+    f.drawEntry = 0; f.staleSlot = -1;
+    settle();
 
     // L11: a skinned family's pixel shader that exports no E draws over pixels an exporting one has just written. It writes no history there (valid 0,
     // exactly zero): masked off instead, those pixels would keep the E under the surface it draws, which is another surface's answer.
@@ -734,6 +815,148 @@ inline void run(const lt::Harness& h) {
         const Judged a = judge(seen0(), zero);
         h.check(a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0, "L11.b the frame after it, with the exporting pair alone, is whole again");
     }
+
+    // L12: the palette chain dispatched twice in one present frame. The game does (F13, the settlement: dispatch 0 the characters it always had, dispatch 1 a few
+    // more into the same palette buffer, each dispatch its own job table). The join is ONE per present frame over the union of the dispatches' job tables in
+    // dispatch order, so the character in either dispatch keeps its history, on the double frame and on the frame after it.
+    lifecycle_fake::g_hookSnap = nullptr;
+    f.useHookList = false;
+    lifecycle_fake::g_hookArmed = false;
+    f.staleSlot = -1; f.drawEntry = 0; f.readStale = false; f.secondStream = false; f.overdrawPlain = false;
+    const auto single = [&] { f.setWorld(3); f.secondDispatch.clear(); f.sameJobsBuffer = false; f.lateSecond = false; f.secondOnOtherPalette = false; };
+    const auto doubled = [&] { f.setWorldTwo(3); f.secondDispatch = {1}; f.sameJobsBuffer = false; f.lateSecond = false; f.secondOnOtherPalette = false; };
+    single();
+    {
+        sct::Rng rng(31);
+        sct::Vertex scratch[3];
+        sct::makeVertices(rng, 3, scratch);
+        f.state = sct::makeState(rng, 3, f.base);
+    }
+    const auto judged = [&] { Fixture::Eye e0; f.frame([&] { e0 = f.read(0); }); return judge(e0, zero); };
+    const auto whole = [&](const Judged& a) { return a.drawn > 20 && a.valid == a.drawn && a.worst == 0.0; };
+    settle();
+    doubled();
+    {
+        const Judged a = judged();
+        h.check(whole(a), "L12.a a frame whose chain is dispatched twice (the drawn character in the first, another in the second): the character has history, valid 1 and E exactly zero");
+    }
+    single();
+    {
+        const Judged a = judged();
+        h.check(whole(a), "L12.b ...and the frame after it, whose previous tables are the double frame's union, has history too");
+    }
+    {
+        const int pattern[] = {1, 1, 2, 2, 2, 1, 1, 2, 1, 2, 2, 1};   // one, two, one: the F13 dump's shape
+        unsigned bad = 0, total = 0;
+        for (const int k : pattern) {
+            if (k == 2) doubled(); else single();
+            const Judged a = judged();
+            ++total;
+            bad += whole(a) ? 0u : 1u;
+        }
+        h.check(bad == 0 && total == 12, "L12.c a one-two-one sequence of frames (single, double, double, double, single ...): the character is whole in every one of them");
+    }
+    doubled();
+    f.secondDispatch = {0};   // the drawn character in the SECOND dispatch, the extra one first: the union is not in row order
+    settle();
+    {
+        const Judged a = judged();
+        h.check(whole(a), "L12.d the drawn character in the second dispatch, the first dispatch's job at a higher row: the union's order does not matter");
+    }
+    doubled();
+    f.sameJobsBuffer = true;   // the game rewrites ONE job table buffer between the dispatches: each table is taken at its own dispatch
+    settle();
+    {
+        const Judged a = judged();
+        h.check(whole(a), "L12.e one job table buffer rewritten between the two dispatches: both tables are joined (each is copied when its dispatch comes)");
+    }
+    single(); settle();
+    doubled();
+    f.lateSecond = true;   // the second dispatch comes after the frame's first skinned draw has needed the join
+    {
+        const Judged a = judged();
+        h.check(whole(a), "L12.f a second dispatch AFTER a skinned draw has needed the join: the first dispatch's character still has history (the join is not run again)");
+    }
+    f.lateSecond = false;
+    single();
+    {
+        const Judged a = judged();
+        h.check(whole(a), "L12.g ...and the frame after it has history");
+    }
+    single(); settle();
+    doubled();
+    f.secondOnOtherPalette = true;   // the second dispatch writes the other palette buffer: which is last frame's is not measured
+    {
+        const Judged a = judged();
+        h.check(a.drawn > 20 && a.valid == 0 && a.worst == 0.0, "L12.h a frame whose two dispatches wrote two palette buffers has no history (valid 0, E 0)");
+    }
+    f.secondOnOtherPalette = false;
+    single();
+    {
+        const Judged a = judged();
+        h.check(whole(a), "L12.i ...and the next frame has it again");
+    }
+    single();
+    for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.g.views(0); f.g.views(1); }, false, false);
+    {
+        const edvr::EngineMotionReady m = edvr::engineMotionReady();
+        h.check(m.armed && m.skinJobs && m.skinLive && m.viewsRun >= 3, "L12.j (control) the entry fade's signal after single-dispatch frames: skinned jobs, the join live");
+    }
+    doubled();
+    for (int i = 0; i < 4; ++i) f.frame(true, [&] { f.g.views(0); f.g.views(1); }, false, false);
+    {
+        const edvr::EngineMotionReady m = edvr::engineMotionReady();
+        h.check(m.armed && m.skinJobs && m.skinLive && m.viewsRun >= 3,
+                "L12.k the entry fade's signal after double-dispatch frames: skinned jobs and the join live (the frame's one join, not the second dispatch's)");
+    }
+    // a frame whose chain no skinned draw needed (a character out of view) is joined at the frame boundary all the same, so the signal describes THIS frame: a
+    // chain-only frame whose two dispatches wrote two palette buffers has no history, and the entry fade must not read the frame before's join as live
+    f.secondOnOtherPalette = true;
+    f.chainOnlyFrame();
+    f.secondOnOtherPalette = false;
+    {
+        const edvr::EngineMotionReady m = edvr::engineMotionReady();
+        h.check(m.armed && m.skinJobs && !m.skinLive, "L12.o a frame whose chain no skinned draw needed is joined at the frame boundary: the signal says its join has no history, not the frame before's");
+    }
+    single();
+    for (int i = 0; i < 3; ++i) f.frame([&] {});
+    // the counters, in a window of nothing else: every frame has two dispatches, the hook's one list covers both tables
+    lifecycle_fake::g_hookArmed = true;
+    f.useHookList = true;
+    doubled();
+    for (int i = 0; i < 6; ++i) f.frame(true, [&] { f.read(0); }, false, false);
+    f.frame(true, [&] { f.read(0); }, true, false);   // (closes the window before)
+    for (int i = 0; i < 12; ++i) f.frame(true, [&] { f.read(0); }, false, false);
+    f.frame(true, [&] { f.read(0); }, true, false);
+    {
+        const std::string chain = lastLine("skin join: chain dispatches", mark), join = lastLine("skin join: source=", mark);
+        const unsigned long long frames = lt::number(chain, "over "), dispatches = lt::number(chain, "dispatches "), multi = lt::number(chain, "two or more in "), late = lt::number(chain, "late ");
+        const std::string hist = join.find("history [") == std::string::npos ? std::string() : join.substr(join.find("history ["));
+        h.check(frames >= 10 && dispatches == 2 * frames && multi == frames && late == 0,
+                "L12.l the chain line: every frame of the window had two dispatches and one join (dispatches = 2 x frames, two or more in every frame, none late)");
+        h.check(join.find("source=hook") != std::string::npos && lt::number(join, "hook/t0 disagreements ") == 0 && lt::number(hist, "gap ") == 0 && lt::number(join, "no history ") == 0,
+                "L12.m ...and the join line: the hook's one list is judged against the union of the tables (no disagreement), no gap, no frame without history");
+        if (!(frames >= 10 && dispatches == 2 * frames && multi == frames && late == 0)) std::fprintf(stderr, "  chain line: %s\n", chain.c_str());
+        if (join.find("source=hook") == std::string::npos || lt::number(join, "hook/t0 disagreements ") != 0) std::fprintf(stderr, "  join line: %s\n", join.c_str());
+    }
+    f.useHookList = false;
+    lifecycle_fake::g_hookSnap = nullptr;
+    lifecycle_fake::g_hookArmed = false;
+    doubled();
+    f.lateSecond = true;
+    for (int i = 0; i < 6; ++i) f.frame(true, [&] { f.read(0); }, false, false);
+    f.frame(true, [&] { f.read(0); }, true, false);
+    for (int i = 0; i < 10; ++i) f.frame(true, [&] { f.read(0); }, false, false);
+    f.frame(true, [&] { f.read(0); }, true, false);
+    {
+        const std::string chain = lastLine("skin join: chain dispatches", mark);
+        const unsigned long long frames = lt::number(chain, "over "), dispatches = lt::number(chain, "dispatches "), multi = lt::number(chain, "two or more in "), late = lt::number(chain, "late ");
+        h.check(frames >= 8 && dispatches == 2 * frames && multi == 0 && late == frames,
+                "L12.n the chain line when every second dispatch is late: two dispatches over one join a frame, none counted as part of the frame, every one counted late");
+        if (!(frames >= 8 && dispatches == 2 * frames && multi == 0 && late == frames)) std::fprintf(stderr, "  chain line: %s\n", chain.c_str());
+    }
+    single();
+    f.frame([&] {});
 
     // L9: a small previous palette buffer, no list: the job at a row near the end of the 64-row buffer
     lifecycle_fake::g_hookSnap = nullptr;

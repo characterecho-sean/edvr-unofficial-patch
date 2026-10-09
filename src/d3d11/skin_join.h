@@ -320,6 +320,8 @@ enum Stat : uint32_t {
     kStatPoseDropped,        // bases whose table entry was zeroed (their deciding records disagree): no history for them
     kStatPoseListsExact,     // pose tables built with an exact reference list (the CPU called it complete and every entry of it was readable)
     kStatPoseListsBad,       // ...built from a list the CPU called complete but one of whose entries the GPU could not read (out of range, too many instances)
+    kStatPoseIdle,           // of the dropped bases: no draw of the frame read any of their records (the list was exact), so every record decided and they disagreed
+    kStatPoseUnresolved,     // of the dropped bases: two or more records a draw read disagreed (the F13 dumps: never)
     kStatWords = 28
 };
 enum MismatchBits : uint32_t {
@@ -456,6 +458,7 @@ struct PoseRefs {
 struct PoseResult {
     std::vector<PoseWords> table;            // kMaxRows
     uint32_t records = 0, conflicts = 0, resolved = 0, dropped = 0;
+    uint32_t idle = 0, unresolved = 0;       // of `dropped`, with an exact list: bases no draw read / bases whose read records disagree (the rest had no exact list)
     uint32_t listsExact = 0, listsBad = 0;   // 1 each at most: the list was complete and fully readable / complete but an entry of it was not
     bool listExact = false;                  // the list was complete and every entry of it was readable
 };
@@ -510,7 +513,11 @@ inline PoseResult cpuPose(const std::vector<PoseWords>& pool, const PoseRefs& re
         else ++r.resolved;
     }
     for (uint32_t b = 0; b < kMaxRows; ++b)
-        if (state[b] & 2) { r.table[b] = PoseWords{}; ++r.dropped; }
+        if (state[b] & 2) {
+            r.table[b] = PoseWords{};
+            ++r.dropped;
+            if (valid) { if (state[b] & 1) ++r.unresolved; else ++r.idle; }
+        }
     return r;
 }
 
@@ -521,6 +528,11 @@ struct WindowCpu {
     uint64_t decline[kDeclineCount]{};
     uint64_t history[kHistoryCount]{};
     uint64_t poseBuilds = 0, poseIncomplete = 0;   // pose tables built / built with no complete reference list (the CPU's verdict)
+    // The palette chain's dispatches as the CPU met them (F13: the game dispatches the chain twice in some frames; the join is one per frame).
+    uint64_t chainDispatches = 0;                  // dispatches the join took (a job table with jobs, the bindings the ledger measured)
+    uint64_t chainMulti = 0;                       // frames that took two or more
+    uint64_t chainLate = 0;                        // dispatches that came after the frame's join had run (their jobs have no join)
+    uint64_t chainMixed = 0;                       // frames whose dispatches wrote more than one palette buffer (no history for that frame)
 };
 inline std::string joinLine(const uint32_t (&d)[kStatWords], const WindowCpu& c, bool hookArmed, const char* hookState) {
     const uint32_t frames = d[kStatFrames];
@@ -545,19 +557,38 @@ inline std::string joinLine(const uint32_t (&d)[kStatWords], const WindowCpu& c,
     return b;
 }
 
+// The palette chain's dispatches (one line a window, after the join line). The game dispatches the chain once per frame, or twice (a second job table
+// with other characters' jobs, into the same palette buffer, in the same frame); the join is one per frame over the union, so `frames` above equals
+// the present frames that had a chain and the gaps and hook/t0 disagreements above are none of these dispatches' doing.
+//   "dispatches"   chain dispatches the join took, over `frames` joins
+//   "two or more"  frames whose chain was dispatched more than once (the second dispatch's jobs are joined with the first's)
+//   "late"         dispatches that came after the frame's join had run (a skinned draw had already needed it): their jobs get no join this frame
+//   "other buffer" frames whose dispatches wrote more than one palette buffer: no history that frame
+inline std::string chainLine(const uint32_t (&d)[kStatWords], const WindowCpu& c) {
+    char b[320];
+    std::snprintf(b, sizeof(b),
+        "skin join: chain dispatches %llu over %u frames (two or more in %llu, late %llu, on another palette buffer %llu)",
+        (unsigned long long)c.chainDispatches, d[kStatFrames], (unsigned long long)c.chainMulti, (unsigned long long)c.chainLate, (unsigned long long)c.chainMixed);
+    return b;
+}
+
 // The pose table's witness (one line a window, after the join line): which record of a base was taken as the live one. `d` and `c` as above.
 //   "conflicts resolved"   records of a base that disagreed with its live record and were overruled by it (the stale second set of the F12 flight)
-//   "unresolved"           records that decide a base (live ones, or all when none is live) and disagree: the base is dropped
-//   "bases dropped"        bases whose table entry was zeroed: no history for them, never a guess
+//   "bases dropped"        bases whose table entry was zeroed: no history for them, never a guess. Of them:
+//     "idle"               no draw of the frame read any record of the base (a character out of view or culled), so every record decided and they disagreed
+//     "unresolved"         two or more records a draw read disagree (the dumps of three flights: never)
+//     "no exact list"      the rest: the table was built with no exact draw list, so no draw's reading could decide
 //   "reference lists"      the draw lists the tables were built with: exact, unreadable (the GPU met an entry it could not read), not complete (the CPU did not
 //                          see every skinned draw, or the list was too large): with every list not exact, nothing is resolved and every record decides
 inline std::string poseLine(const uint32_t (&d)[kStatWords], const WindowCpu& c) {
-    char b[512];
+    char b[640];
+    const uint32_t listed = d[kStatPoseIdle] + d[kStatPoseUnresolved];
+    const uint32_t unlisted = d[kStatPoseDropped] > listed ? d[kStatPoseDropped] - listed : 0u;
     std::snprintf(b, sizeof(b),
-        "skin join: pose witness: tables built %llu, records %u | conflicts resolved %u, unresolved %u, bases dropped %u | reference lists exact %u, "
-        "unreadable %u, not complete %llu",
-        (unsigned long long)c.poseBuilds, d[kStatPoseRecords], d[kStatPoseResolved], d[kStatPoseConflicts], d[kStatPoseDropped], d[kStatPoseListsExact],
-        d[kStatPoseListsBad], (unsigned long long)c.poseIncomplete);
+        "skin join: pose witness: tables built %llu, records %u | conflicts resolved %u | bases dropped %u: idle %u (no draw read the base), unresolved %u "
+        "(two or more read records disagree), no exact list %u | reference lists exact %u, unreadable %u, not complete %llu",
+        (unsigned long long)c.poseBuilds, d[kStatPoseRecords], d[kStatPoseResolved], d[kStatPoseDropped], d[kStatPoseIdle], d[kStatPoseUnresolved], unlisted,
+        d[kStatPoseListsExact], d[kStatPoseListsBad], (unsigned long long)c.poseIncomplete);
     return b;
 }
 

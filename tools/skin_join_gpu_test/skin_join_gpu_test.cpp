@@ -331,7 +331,8 @@ struct Pair {
         std::memcpy(after, statsBytes.data(), sizeof(after));
         char msg[256];
         for (uint32_t i = 0; i < kStatWords; ++i) {
-            if (i == kStatPoseRecords || i == kStatPoseConflicts || i == kStatPoseResolved || i == kStatPoseDropped || i == kStatPoseListsExact || i == kStatPoseListsBad) continue;
+            if (i == kStatPoseRecords || i == kStatPoseConflicts || i == kStatPoseResolved || i == kStatPoseDropped || i == kStatPoseListsExact || i == kStatPoseListsBad ||
+                i == kStatPoseIdle || i == kStatPoseUnresolved) continue;
             const bool state = i == kStatPrevHookOk || i == kStatLastJobs || i == kStatLastEntities;
             const bool bits = i == kStatMismatchBits;
             const uint32_t gpuValue = state ? after[i] : bits ? (after[i] & ~statsBefore[i]) | (after[i] & cpu.result.stats[i]) : after[i] - statsBefore[i];
@@ -397,7 +398,7 @@ void caseNumbers() {
         {"SJ_STAT_MISMATCH_BITS", kStatMismatchBits}, {"SJ_STAT_POSE_RECORDS", kStatPoseRecords}, {"SJ_STAT_POSE_CONFLICTS", kStatPoseConflicts},
         {"SJ_STAT_LAST_JOBS", kStatLastJobs}, {"SJ_STAT_LAST_ENTITIES", kStatLastEntities}, {"SJ_STAT_FAIL_PREV_ROWS", kStatFailPrevRows},
         {"SJ_STAT_POSE_RESOLVED", kStatPoseResolved}, {"SJ_STAT_POSE_DROPPED", kStatPoseDropped}, {"SJ_STAT_POSE_LISTS_EXACT", kStatPoseListsExact},
-        {"SJ_STAT_POSE_LISTS_BAD", kStatPoseListsBad}, {"SJ_STAT_WORDS", kStatWords}};
+        {"SJ_STAT_POSE_LISTS_BAD", kStatPoseListsBad}, {"SJ_STAT_POSE_IDLE", kStatPoseIdle}, {"SJ_STAT_POSE_UNRESOLVED", kStatPoseUnresolved}, {"SJ_STAT_WORDS", kStatWords}};
     bool all = true;
     for (const auto& s : stats) all = all && defineOf(s.name) == s.value;
     check(all, "G1.d the counters' indices in the HLSL are the header's");
@@ -550,14 +551,15 @@ void caseRandom(Pair& p) {
 
 // ---- G5 ------------------------------------------------------------------------------------------------------------------
 // The pose passes with no reference list (the rule before the list existed: every record of a base decides).
-struct PoseStats { uint32_t records, conflicts, resolved, dropped, listsExact, listsBad; };
+struct PoseStats { uint32_t records, conflicts, resolved, dropped, listsExact, listsBad, idle, unresolved; };
 PoseStats poseStats(Gpu& g) {
     const auto stats = g.read(g.stats.Get(), kStatWords * 4);
     const uint32_t* s = reinterpret_cast<const uint32_t*>(stats.data());
-    return PoseStats{s[kStatPoseRecords], s[kStatPoseConflicts], s[kStatPoseResolved], s[kStatPoseDropped], s[kStatPoseListsExact], s[kStatPoseListsBad]};
+    return PoseStats{s[kStatPoseRecords], s[kStatPoseConflicts], s[kStatPoseResolved], s[kStatPoseDropped], s[kStatPoseListsExact], s[kStatPoseListsBad], s[kStatPoseIdle], s[kStatPoseUnresolved]};
 }
 PoseStats operator-(const PoseStats& a, const PoseStats& b) {
-    return PoseStats{a.records - b.records, a.conflicts - b.conflicts, a.resolved - b.resolved, a.dropped - b.dropped, a.listsExact - b.listsExact, a.listsBad - b.listsBad};
+    return PoseStats{a.records - b.records, a.conflicts - b.conflicts, a.resolved - b.resolved, a.dropped - b.dropped, a.listsExact - b.listsExact, a.listsBad - b.listsBad,
+                     a.idle - b.idle, a.unresolved - b.unresolved};
 }
 // Runs the passes and holds them to the twin: the whole table (a dropped base is zeroed whole) and every pose counter. Returns "" or the first difference.
 std::string runAndCompare(Pair& p, uint32_t parity, const std::vector<uint32_t>& records, const PoseRefs& refs, bool compareConflicts = true) {
@@ -573,9 +575,11 @@ std::string runAndCompare(Pair& p, uint32_t parity, const std::vector<uint32_t>&
             return msg;
         }
     if (d.records != expect.records || d.resolved != expect.resolved || d.dropped != expect.dropped || d.listsExact != expect.listsExact || d.listsBad != expect.listsBad ||
+        d.idle != expect.idle || d.unresolved != expect.unresolved ||
         (compareConflicts && d.conflicts != expect.conflicts)) {
-        std::snprintf(msg, sizeof(msg), "counters: gpu records %u conflicts %u resolved %u dropped %u exact %u bad %u | cpu %u %u %u %u %u %u", d.records, d.conflicts, d.resolved, d.dropped,
-                      d.listsExact, d.listsBad, expect.records, expect.conflicts, expect.resolved, expect.dropped, expect.listsExact, expect.listsBad);
+        std::snprintf(msg, sizeof(msg), "counters: gpu records %u conflicts %u resolved %u dropped %u exact %u bad %u idle %u unresolved %u | cpu %u %u %u %u %u %u %u %u", d.records, d.conflicts,
+                      d.resolved, d.dropped, d.listsExact, d.listsBad, d.idle, d.unresolved, expect.records, expect.conflicts, expect.resolved, expect.dropped, expect.listsExact,
+                      expect.listsBad, expect.idle, expect.unresolved);
         return msg;
     }
     return "";
@@ -610,7 +614,9 @@ void casePose(Pair& p) {
 // ---- G6: which record of a base is the live one (the reference list) ------------------------------------------------
 void caseResolve(Pair& p) {
     PoseWorld w = frameWorld();
+    const PoseStats s0 = poseStats(p.gpu);
     std::string bad = runAndCompare(p, 1, w.records, w.refs);
+    const PoseStats exactDelta = poseStats(p.gpu) - s0;
     if (!bad.empty()) std::printf("    G6 exact list: %s\n", bad.c_str());
     check(bad.empty(), "G6.a the GPU's pose table and counters equal the CPU twin's for a frame with stale records and an exact list");
     const auto got = p.gpu.read(p.gpu.pose[1].Get(), kMaxRows * 32);
@@ -625,10 +631,14 @@ void caseResolve(Pair& p) {
     check(t[28].a[0] == 28 && word4(28) == 17 && t[29].a[0] == 29 && word4(29) == 17, "G6.h a live record against two stale ones, and one read by two draws: kept");
     const PoseResult r = cpuPoseOf(w.records, w.refs);
     check(r.resolved == 5 && r.conflicts == 2 && r.dropped == 2 && r.listsExact == 1, "G6.i the counts: five stale records overruled, two bases dropped on two disagreeing records, one exact list");
+    check(exactDelta.idle == 1 && exactDelta.unresolved == 1 && exactDelta.dropped == 2, "G6.q the GPU splits the two dropped bases: the one no draw read is idle, the one whose read records disagree is unresolved");
     // the same pool with the list called incomplete: nothing is resolved, every record decides (the stale second set kills its bases)
     PoseWorld incomplete = frameWorld();
     incomplete.finish(false);
+    const PoseStats s1 = poseStats(p.gpu);
     bad = runAndCompare(p, 0, incomplete.records, incomplete.refs);
+    const PoseStats incompleteDelta = poseStats(p.gpu) - s1;
+    check(incompleteDelta.dropped >= 4 && incompleteDelta.idle == 0 && incompleteDelta.unresolved == 0, "G6.r with no exact list a dropped base is neither idle nor unresolved");
     if (!bad.empty()) std::printf("    G6 incomplete: %s\n", bad.c_str());
     check(bad.empty(), "G6.j an incomplete list: the GPU equals the twin");
     const auto got2 = p.gpu.read(p.gpu.pose[0].Get(), kMaxRows * 32);

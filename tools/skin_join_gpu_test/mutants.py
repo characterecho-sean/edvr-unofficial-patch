@@ -92,6 +92,12 @@ MUTANTS = [
     M("bitmap-not-cleared", ("G6", "G7"), "shader", [(" if (id.x <= SJ_REF_WORDS) RefBits.Store(id.x * 4u, 0u);", " if (id.x < 0u) RefBits.Store(id.x * 4u, 0u);")],
       "the records the last frame's draws read stay read"),
     # ---- G6, G7: which record of a base is the live one ----
+    M("idle-uncounted", "G6", "shader", [(" if (RefValid()) Stats.InterlockedAdd(((BaseState.Load(id.x * 4u) & SJ_POSE_LIVE) != 0u ? SJ_STAT_POSE_UNRESOLVED : SJ_STAT_POSE_IDLE) * 4u, 1u, o);", "")],
+      "the dropped bases are not split into idle (no draw read them) and unresolved (records a draw read disagree)"),
+    M("idle-and-unresolved-swapped", "G6", "shader", [("? SJ_STAT_POSE_UNRESOLVED : SJ_STAT_POSE_IDLE)", "? SJ_STAT_POSE_IDLE : SJ_STAT_POSE_UNRESOLVED)")],
+      "a base no draw read is called unresolved and one whose read records disagree is called idle"),
+    M("unlisted-called-idle", "G6", "shader", [(" if (RefValid()) Stats.InterlockedAdd(((BaseState", " Stats.InterlockedAdd(((BaseState")],
+      "with no exact draw list a dropped base is called idle or unresolved: nobody's reading decided it"),
     M("reference-test-ignored", ("G6", "G7"), "shader", [(" if (RefValid() && Referenced(id.x)) {\n  PoseOut[base] = p;", " if (false) {\n  PoseOut[base] = p;")],
       "no record is ever live: every record decides, and the stale second set kills its bases"),
     M("rest-ignores-live", ("G6", "G7"), "shader", [("if ((BaseState.Load(base * 4u) & SJ_POSE_LIVE) == 0u) PoseOut[base] = p;", "PoseOut[base] = p;")],
