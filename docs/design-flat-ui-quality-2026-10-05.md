@@ -417,3 +417,14 @@ tone-proven 12 of 1040, composites 2, back-offs escalating to 30 s.
   structure's verdict comes at the frame's final copy. The door already gates
   the next frame on this frame's resolve (door-refused-untreated), which is
   the cheap per-frame signal there is.
+- Flown 1f27a834 (log 141012): on the SS 1.0 loading screen the layer is
+  idle (holograms asked=0, tone-candidates=0, composites=0) while the HDR
+  route treats every frame (treated=410 of 410 per 5 s, scene 32x32), and the
+  ghost remains. With fix.ui_quality off the ghost is still there (Sean).
+  ruled out: the UI port as the cause of the SS 1.0 loading-screen hologram
+  ghost, because the layer is idle there and turning the key off does not
+  remove it. Open, separate from this arc: the hologram ghosts through the
+  HDR-route resolve at SS 1.0 and not on the copy route at SS < 1. The
+  split-hologram fix stays: taking one pair of seven was a defect in its own
+  right. Full captures of the loading frame expire on the 256 MiB budget
+  after 3 large draws; arm a capture on the hologram pairs instead.
