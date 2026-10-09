@@ -130,10 +130,28 @@ void refreshLive() {
 // the flight HUD, the target sprite, the holograms) stay in the game's
 // frame exactly as stock (their kHdrTarget refusal), and the LDR take is
 // untouched.
+// The flat profile backs off instead of standing down for the session (2026-10-09 11:32 flight: one missed tonemap on
+// the first take ended the session's layer, while route changes, menus and frames with no 3D scene are normal in flat).
+// The back-off lifts itself at the frame boundary after kFlatBackOffMs, with a line each way. VR is unchanged.
+constexpr uint64_t kFlatBackOffMs = 30000;
+uint64_t g_flatBackOffUntilMs = 0;
+uint32_t g_flatBackOffs = 0;
+void flatBackOff(const char* what, const char* why) {
+    g_flatBackOffUntilMs = GetTickCount64() + kFlatBackOffMs;
+    ++g_flatBackOffs;
+    Log::get().note("ui quality: flat layer: %s backs off for %llu s (back-off %u this session) -- %s. The cockpit HUD is "
+                    "drawn as it always was until it re-arms.",
+                    what, static_cast<unsigned long long>(kFlatBackOffMs / 1000), g_flatBackOffs, why ? why : "a refusal");
+}
+
 void crispStandDown(const char* why) {
     if (g_crispStoodDown) return;
     g_crispStoodDown = true;
     refreshLive();
+    if (runtimeFlatProfile()) {
+        flatBackOff("the HDR HUD path", why);
+        return;
+    }
     Log::get().note(
         "ui quality: the HDR HUD path stands down for the rest of the session -- %s. The "
         "cockpit's holo panels, flight HUD, target sprite and holograms are drawn as they always "
@@ -152,6 +170,11 @@ void standDown(const char* why) {
                         "back whichever of the two is still EDVR's (the saved original references are retained "
                         "until then) and lifts the suppression. The layer itself stays stood down for the "
                         "session.", why ? why : "a restoration fault");
+        g_flatBackOffUntilMs = 0;  // untrusted shader state: the flat profile does not re-arm from this one either
+        return;
+    }
+    if (runtimeFlatProfile()) {
+        flatBackOff("the layer", why);
         return;
     }
     Log::get().note(
@@ -1533,12 +1556,15 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             // lose the HUD every frame. The streak resets where a
             // publication lands (uiLayerCrispToneEnd). This draw still
             // completes into the layer; the NEXT HUD draw is stock.
-            if (++e.hdrMissStreak >= kCrispHdrMissFrames) {
+            // The flat profile takes only behind a proven tonemap (flat_ui_layer.cpp), so one miss is already a broken
+            // proof: it backs off at the first, losing one frame's HUD instead of thirty.
+            const uint32_t missLimit = runtimeFlatProfile() ? 1u : kCrispHdrMissFrames;
+            if (++e.hdrMissStreak >= missLimit) {
                 char why[200];
                 _snprintf_s(why, _TRUNCATE,
                             "the HUD layer's content reached no tonemap for %u consecutive frames "
                             "(the cockpit HUD was taken but never came back)",
-                            kCrispHdrMissFrames);
+                            missLimit);
                 crispStandDown(why);
             }
         }
@@ -3658,6 +3684,22 @@ bool crispCoveragePass(ID3D11DeviceContext* ctx, Eye& e, int eye, uint64_t seq) 
 // the HDR target the HUD families were taken from -- that is the point of the
 // re-issue, not a post pass to name) and brackets its issue with
 // uiLayerCrispToneBegin/End.
+namespace {
+// An admitted tonemap, pending its re-issue right after the game's own issue: VR's structural admission and the flat
+// profile's known-pair one (uiLayerCrispAdmitFlat) both arm it here.
+void crispArm(int eye, uint64_t seq, int hdrSlot, const void* rtvRes, const void* hdrRes, uint64_t vs, uint64_t ps) {
+    g_crispPending.pending = true;
+    g_crispPending.eye = eye;
+    g_crispPending.seq = seq;
+    g_crispPending.hdrSlot = hdrSlot;
+    g_crispPending.rtvRes = rtvRes;
+    g_crispPending.hdrRes = hdrRes;
+    g_crispPending.vs = vs;
+    g_crispPending.ps = ps;
+    detail::g_uiLayerCrispPending = true;
+}
+}  // namespace
+
 bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count, uint32_t instances,
                              uint32_t startInstance) {
     g_crispPending = CrispTonePending{};
@@ -3755,16 +3797,40 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
         crispToneDecline(CrispToneDecline::kSecondTonemap, vs, ps);
         return false;
     }
-    g_crispPending.pending = true;
-    g_crispPending.eye = eye;
-    g_crispPending.seq = seq;
-    g_crispPending.hdrSlot = hdrSlot;
-    g_crispPending.rtvRes = ta.rtvRes;
-    g_crispPending.hdrRes = hdrRes;
-    g_crispPending.vs = vs;
-    g_crispPending.ps = ps;
-    detail::g_uiLayerCrispPending = true;
+    crispArm(eye, seq, hdrSlot, ta.rtvRes, hdrRes, vs, ps);
     return true;
+}
+
+int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, char* why, size_t whyN) {
+    g_crispPending = CrispTonePending{};
+    detail::g_uiLayerCrispPending = false;
+    const auto say = [&](const char* text) {
+        if (why && whyN) _snprintf_s(why, whyN, _TRUNCATE, "%s", text);
+        return 0;
+    };
+    if (!runtimeFlatProfile() || !ctx) return say("not the flat profile");
+    if (!detail::g_uiLayerCrispOn) return say("the HDR HUD path is not live");
+    if (hdrSlot < 0 || hdrSlot > 3) return say("the tone pair names no HDR slot");
+    uint64_t seq = 0;
+    if (!layerDrawJitter(0, &seq, nullptr, nullptr, nullptr, nullptr)) return say("no flat frame");
+    Eye& e = g_eye[0];
+    if (!(e.hdrSeq == seq && e.hdrDraws && e.hdrSrv)) return say("no HUD was taken this frame");
+    Ptr<ID3D11ShaderResourceView> srv;
+    ctx->PSGetShaderResources(static_cast<UINT>(hdrSlot), 1, &srv);
+    Ptr<ID3D11Resource> r;
+    if (srv) srv->GetResource(&r);
+    if (!r) return say("nothing is bound at the tone's HDR slot");
+    if (r.Get() != e.hdrTarget && (!alias || r.Get() != alias))
+        return say("the tone reads neither the HUD's HDR target nor its copy");
+    Ptr<ID3D11RenderTargetView> rtv;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    Ptr<ID3D11Resource> out;
+    if (rtv) rtv->GetResource(&out);
+    if (!out) return say("the tone has no render target");
+    if (e.seq == seq && e.draws) return say("the 8-bit layer is already busy this frame");
+    if (e.hdrToneSeq == seq) return say("a second tonemap this frame");
+    crispArm(0, seq, hdrSlot, out.Get(), r.Get(), bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
+    return say(r.Get() == e.hdrTarget ? "admitted: reads the HUD's HDR target" : "admitted: reads the HUD target's copy"), 1;
 }
 
 // After the admitted draw's own issue (vscreen's forwardWithVerdict, around
@@ -4625,6 +4691,18 @@ void settleIssueFence(ID3D11DeviceContext* ctx) {
 
 void uiLayerFrameBoundary(ID3D11DeviceContext* ctx) {
     settleIssueFence(ctx);
+    // The flat profile's back-off (flatBackOff) lifts itself here.
+    if (runtimeFlatProfile() && g_flatBackOffUntilMs && !detail::g_uiLayerIssueBlocked &&
+        GetTickCount64() >= g_flatBackOffUntilMs) {
+        g_flatBackOffUntilMs = 0;
+        g_stoodDown = false;
+        g_crispStoodDown = false;
+        for (Eye& e : g_eye) e.hdrMissStreak = 0;
+        refreshLive();
+        Log::get().note("ui quality: flat layer: re-armed after its back-off (%u this session); the cockpit HUD is taken "
+                        "again from the next frame behind a proven tonemap.",
+                        g_flatBackOffs);
+    }
     detail::g_uiLayerWatching = false;
     g_watchBudget = kWatchPerFrame;
     // A tonemap admission whose draw never issued (swallowed) does not

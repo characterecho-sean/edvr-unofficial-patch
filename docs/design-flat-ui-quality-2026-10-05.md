@@ -277,6 +277,23 @@ the tonemap, the HUD is out of H either way, and the composite runs at the
 same copy. Every refusal leaves the draw in H as stock, counted by reason;
 resize releases every layer reference (none is the back buffer).
 
+**Flights 11:08 and 11:32 (2026-10-09).** 11:08 (130f62b0): the layer never
+went live; the flat gate refuses `advanced.temporal_aa_jitter_sign`, a refused
+key reads "off", so the jitter switches read as set (fixed in 2ec58b96).
+11:32 (2ec58b96): live, holograms taken at R = D on the HDR route, no tonemap
+admitted, and the session-long stand-down after 30 frames. Ruled out: (c) the
+tone pair -- VR's admission is structural plus the HDR source's identity, not
+a pair list. Holds: (b), in a different form: on the HDR route the post chain
+copies H with the game's plain copy (vs DEF19B035D5EDEDC, ps DED8796049C7BB4A,
+the route's own trigger) and the tone reads that copy, so VR's identity match
+against H never fires; (a) in part -- the flat path offered only 3-vertex,
+1-instance draws to the structural rule. Fix (built, not flown): the flat
+admission keys on flat's own known tone pairs (any vertex count) and accepts
+H or a plain copy of H; a take is made only when the previous frame's tone was
+seen reading the HUD's target or its copy (`tone-unproven` otherwise); one
+missed tonemap backs the HUD path off for 30 s, re-armed with a line, instead
+of a session stand-down; the first eight tone candidates are logged.
+
 Not done: draws after the HUD inside H (VR's known inversion applies: an
 untaken draw issued after a taken HUD draw is now under it). The after-UI take
 is not run in flat. The VR lines the shared code prints still say "left eye".

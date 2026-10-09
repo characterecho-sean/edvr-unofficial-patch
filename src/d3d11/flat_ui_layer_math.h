@@ -26,6 +26,8 @@ enum class FlatUiRefuse : uint8_t {
     kNotUpstream,     // the camera injector does not own the jitter (the legacy per-draw binding would differ per draw)
     kNoRows,          // no camera rows for the draw: its jitter cannot be read
     kOtherShift,      // its camera rows carry a shift that is neither the frame's phase nor zero
+    kToneUnproven,    // the frame before did not show the game's tone pass reading the HUD's HDR target (or a plain copy
+                      // of it): a take could not be certain to come back, so none is made (2026-10-09 11:32 flight)
     kCount
 };
 inline const char* flatUiRefuseName(FlatUiRefuse r) {
@@ -35,6 +37,7 @@ inline const char* flatUiRefuseName(FlatUiRefuse r) {
     case FlatUiRefuse::kNotUpstream: return "not-upstream";
     case FlatUiRefuse::kNoRows: return "no-camera-rows";
     case FlatUiRefuse::kOtherShift: return "other-shift";
+    case FlatUiRefuse::kToneUnproven: return "tone-unproven";
     default: return "?";
     }
 }
@@ -73,6 +76,41 @@ inline FlatUiJitterRead flatUiLayerJitterOf(bool measured, double ndcX, double n
 // The door arms the next frame when EDVR resolved this one and the picture the game's output copy reads is the
 // display's own size: the layer is then made at D x target. A frame the resolve refused, or a resolve handed on at
 // another size (an evaluation size below the display's), arms nothing, and the next frame's HUD stays in the game's frame.
+// The take's certainty (2026-10-09): a HUD draw of frame N is taken only when frame N-1's tone pass was seen reading
+// the target the HUD families drew into (or a plain copy of it). The relation, not the identity: a renderer may
+// alternate its HDR targets between frames, and the admission at the tone checks frame N's own identity again.
+struct FlatUiToneProof {
+    uint64_t frame = 0;          // the frame the proof is about (whose HUD asks and tone were seen)
+    const void* hudTarget = nullptr;  // this frame's HUD-family HDR target, from the first ask
+    const void* alias = nullptr;      // a plain copy of it this frame (the copy pass's output), or null
+    uint64_t provenFrame = 0;    // the last frame whose tone read hudTarget or alias
+};
+inline void flatUiToneProofFrame(FlatUiToneProof& p, uint64_t frame) {
+    if (p.frame == frame) return;
+    p.frame = frame;
+    p.hudTarget = nullptr;
+    p.alias = nullptr;
+}
+inline void flatUiToneProofHud(FlatUiToneProof& p, uint64_t frame, const void* target) {
+    flatUiToneProofFrame(p, frame);
+    if (!p.hudTarget) p.hudTarget = target;
+}
+// A plain copy (the game's copy pixel shader) reading the HUD's target this frame names its output as the alias.
+inline void flatUiToneProofCopy(FlatUiToneProof& p, uint64_t frame, const void* source, const void* output) {
+    flatUiToneProofFrame(p, frame);
+    if (source && output && source == p.hudTarget) p.alias = output;
+}
+// The tone pass reads `input` at its HDR slot: proven when that is the HUD's target or its copy. True when proven.
+inline bool flatUiToneProofTone(FlatUiToneProof& p, uint64_t frame, const void* input) {
+    flatUiToneProofFrame(p, frame);
+    const bool reads = input && (input == p.hudTarget || input == p.alias);
+    if (reads) p.provenFrame = frame;
+    return reads;
+}
+inline bool flatUiToneProven(const FlatUiToneProof& p, uint64_t frame) {
+    return frame > 1 && p.provenFrame + 1 == frame;
+}
+
 inline bool flatUiLayerDoorArms(bool treated, uint32_t inW, uint32_t inH, uint32_t outW, uint32_t outH) {
     return treated && outW && outH && inW == outW && inH == outH;
 }

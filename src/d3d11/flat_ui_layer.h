@@ -41,6 +41,7 @@ bool flatUiLayerOn();
 struct FlatUiLayerDraw {
     uint64_t frame = 0;                // the flat frame being drawn (the layer's sequence)
     uint64_t vs = 0, ps = 0;
+    const void* color = nullptr;       // its colour target (identity only)
     uint32_t width = 0, height = 0;    // its colour target
     uint32_t format = 0;
     bool hdrTarget = false;            // that target is the scene's HDR target (flat_ui_census.h's kHdr class)
@@ -62,7 +63,17 @@ void flatUiLayerNoteIssue(uint64_t vs, uint64_t ps, bool taken);
 bool flatUiLayerWriteBackBegin(ID3D11DeviceContext* ctx);
 void flatUiLayerWriteBackEnd(ID3D11DeviceContext* ctx);
 
-// A full-screen triangle (3 vertices, 1 instance): the game's tonemap, admitted for the re-issue when this frame's HUD
+// The game's tone pass, by its known pair (flat_mono_frame.h toneHdrSlot), whatever its vertex count: `input` is what
+// it reads at its HDR slot. Records the proof the next frame's takes need (flat_ui_layer_math.h FlatUiToneProof) and,
+// when this frame's HUD is in the HDR layer, admits it for the re-issue (uiLayerCrispAdmitFlat). True: admitted.
+// The first eight candidates of a session are each logged with their verdict.
+bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, int hdrSlot,
+                              uint64_t vs, uint64_t ps, const void* input, uint32_t outW, uint32_t outH, bool hdrRoute);
+// A plain copy (the game's copy pixel shader) from `source` into `output` this frame: when the source is the HUD's HDR
+// target, the output is the copy the tone may read instead (the HDR route's post chain does).
+void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output);
+
+// A full-screen triangle (3 vertices, 1 instance) that is no known tone pair: the game's tonemap, admitted for the re-issue when this frame's HUD
 // is in the HDR layer (uiLayerCrispNoteEyeDraw). True: after the game's own issue, re-issue it between
 // flatUiLayerToneBegin / flatUiLayerToneEnd.
 bool flatUiLayerToneAdmit(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, char kind,

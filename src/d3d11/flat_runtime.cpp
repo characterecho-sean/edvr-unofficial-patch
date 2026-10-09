@@ -5372,7 +5372,8 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             uint32_t sceneRw = 0, sceneRh = 0, sceneOw = 0, sceneOh = 0;
             flatRuntimeSceneSizes(&sceneRw, &sceneRh, &sceneOw, &sceneOh);
             FlatUiLayerDraw ui;
-            ui.frame = s.prefix.frame; ui.vs = k.vs; ui.ps = k.ps; ui.width = k.width; ui.height = k.height; ui.format = k.format;
+            ui.frame = s.prefix.frame; ui.vs = k.vs; ui.ps = k.ps; ui.color = k.color; ui.width = k.width; ui.height = k.height;
+            ui.format = k.format;
             ui.hdrTarget = flatUiTargetClass(k.color && k.color == s.prefix.output, k.width, k.height, k.format,
                                              s.prefix.width, s.prefix.height, sceneRw, sceneRh) == FlatUiTarget::kHdr;
             ui.otherWork = producer || (projection && projection->active()) || drawCaptureStarted || drawPacket ||
@@ -5385,8 +5386,18 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             ask = flatUiLayerDecide(ctx, ui);   // a cockpit HUD family's draw, or kNotAsked
             if (ask == FlatUiLayerAsk::kDecided) { uiTake = true; uiVs = k.vs; uiPs = k.ps; }
             else if (ask == FlatUiLayerAsk::kRefused) flatUiCensusLayer(uiCensusRow, false);
-            // Any other full-screen triangle may be the game's tonemap: admitted for the re-issue when this frame's HUD is
-            // in the HDR layer (the shared admission, by structure and by the HUD source it reads).
+            // The game's tone pass by its known pair, whatever its vertex count (the 11:32 flight's HDR route read a copy of
+            // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
+            else if (tone) {
+                const uint32_t slot = flat_mono_detail::toneHdrSlot(k.vs, k.ps);
+                uiTone = flatUiLayerToneCandidate(ctx, s.prefix.frame, k.width, k.height, static_cast<int>(slot), k.vs, k.ps,
+                                                  slot < 2 ? k.srvResource[slot] : nullptr, k.width, k.height, s.hdrTreated);
+            }
+            // A plain copy reading the HUD's target names the copy the tone may read (the HDR route's post chain).
+            else if (k.ps == flat_mono_detail::kCopyPs)
+                flatUiLayerNoteCopy(s.prefix.frame, view(BindSlot::PsSrv0, 2).resource, k.color);
+            // Any other full-screen triangle may be the game's tonemap under a pair the flat list does not know: VR's
+            // structural admission, by the HUD source it reads.
             else if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N'))
                 uiTone = flatUiLayerToneAdmit(ctx, s.prefix.frame, k.width, k.height, kind, count, instances, startInstance);
         }

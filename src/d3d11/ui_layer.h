@@ -374,6 +374,11 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
 // each tonemap admission: the flat frame's number, the raster phase the draw's camera carries in render pixels (right and
 // down), and the scene's render size R. Read only in the flat profile; cleared at the frame boundary.
 void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, uint32_t renderH);
+// The flat profile's tonemap admission (2026-10-09): the game's tone pass recognised by its known pair (flat_mono_frame.h
+// toneHdrSlot), whatever its vertex count, reading eye 0's HUD target -- or `alias`, a plain copy of it this frame (the
+// HDR route's post chain copies H before the tone) -- at `hdrSlot`. 1: armed, re-issue between uiLayerCrispToneBegin/End;
+// 0: not, `why` says which test refused. The ordering guards are VR's.
+int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, char* why, size_t whyN);
 // The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
 int uiLayerLastDecision();
 // A game draw the layer did not take, while watching: a write of the depth-stencil buffer a seed copied makes the seed

@@ -37,7 +37,7 @@ struct Window {
     uint64_t declined[kDecisions] = {};   // the shared decision's refusals, by UiLayerDecision
     uint64_t jitterPhase = 0, jitterZero = 0;
     uint64_t writeBacks = 0;
-    uint64_t toneAdmitted = 0, toneReissued = 0, toneDeclined = 0;
+    uint64_t toneCandidates = 0, toneProven = 0, toneAdmitted = 0, toneReissued = 0, toneDeclined = 0;
     uint64_t copies = 0, doorsArmed = 0, doorUntreated = 0, doorSize = 0;
     uint64_t composites = 0, compositeNone = 0, bindFailed = 0;
     uint32_t inW = 0, inH = 0, outW = 0, outH = 0;  // the last copy's picture and the display
@@ -45,6 +45,8 @@ struct Window {
 };
 Window g_w;
 FlatUiLayerAsk g_lastAsk = FlatUiLayerAsk::kNotAsked;
+FlatUiToneProof g_proof;
+uint32_t g_candidateLines = 0;  // the session's first eight tone candidates are logged
 
 // The view the copy samples in place of its own: over the composite's output, in the copy's own view format.
 Ptr<ID3D11ShaderResourceView> g_view;
@@ -98,6 +100,9 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     };
     if (d.otherWork) return refuse(FlatUiRefuse::kOtherWork);
     if (!d.hdrTarget || !d.width || !d.height) return refuse(FlatUiRefuse::kNotHdrTarget);
+    // The proof's subject: the target this frame's HUD families draw into, from the first ask, taken or not.
+    flatUiToneProofHud(g_proof, d.frame, d.color);
+    if (!flatUiToneProven(g_proof, d.frame)) return refuse(FlatUiRefuse::kToneUnproven);
     if (!d.upstream) return refuse(FlatUiRefuse::kNotUpstream);
     if (!d.haveRows) return refuse(FlatUiRefuse::kNoRows);
     double ndcX = 0.0, ndcY = 0.0;
@@ -170,6 +175,39 @@ bool flatUiLayerToneAdmit(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t ren
     uiLayerFlatSetDraw(frame, 0.0f, 0.0f, renderW, renderH);
     const bool admitted = uiLayerCrispNoteEyeDraw(ctx, kind, count, instances, startInstance);
     if (admitted) ++g_w.toneAdmitted;
+    return admitted;
+}
+
+void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output) {
+    if (!flatUiLayerOn()) return;
+    flatUiToneProofCopy(g_proof, frame, source, output);
+}
+
+bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, int hdrSlot,
+                              uint64_t vs, uint64_t ps, const void* input, uint32_t outW, uint32_t outH, bool hdrRoute) {
+    if (!ctx || !flatUiLayerOn()) return false;
+    ++g_w.toneCandidates;
+    const void* hudTarget = (g_proof.frame == frame) ? g_proof.hudTarget : nullptr;
+    const void* alias = (g_proof.frame == frame) ? g_proof.alias : nullptr;
+    const bool proven = flatUiToneProofTone(g_proof, frame, input);
+    if (proven) ++g_w.toneProven;
+    bool admitted = false;
+    char why[96] = "not asked: no HUD was taken this frame";
+    {
+        FlatComputeInternalScope internal;
+        uiLayerFlatSetDraw(frame, 0.0f, 0.0f, renderW, renderH);  // the sequence only
+        admitted = uiLayerCrispAdmitFlat(ctx, hdrSlot, alias, why, sizeof(why)) == 1;
+    }
+    if (admitted) ++g_w.toneAdmitted;
+    if (g_candidateLines < 8) {
+        ++g_candidateLines;
+        Log::get().note("flat ui layer: tone candidate %u: frame %llu vs %016llX ps %016llX, HDR slot t%d reads %p (the HUD's "
+                        "target %p, its copy %p), output %ux%u, route %s; proof for the next frame: %s; re-issue: %s.",
+                        g_candidateLines, static_cast<unsigned long long>(frame), static_cast<unsigned long long>(vs),
+                        static_cast<unsigned long long>(ps), hdrSlot, input, hudTarget, alias, outW, outH,
+                        hdrRoute ? "hdr" : "copy", proven ? "yes" : hudTarget ? "no (reads another resource)" : "no (no HUD ask yet)",
+                        why);
+    }
     return admitted;
 }
 
@@ -269,6 +307,7 @@ void flatUiLayerAtCopy(ID3D11DeviceContext* ctx, uint64_t frame, bool treated, u
 }
 
 void flatUiLayerRelease() {
+    g_proof = FlatUiToneProof{};  // a fresh chain proves itself again
     g_view.Reset();
     g_viewTex = nullptr;
     g_viewFmt = DXGI_FORMAT_UNKNOWN;
@@ -282,12 +321,14 @@ void flatUiLayerReport(uint64_t windowSeconds) {
     Window& w = g_w;
     Log::get().note(
         "flat ui layer: window=%llus state=%s copies=%llu door-armed=%llu door-refused-untreated=%llu "
-        "door-refused-size=%llu (last copy read %ux%u, display %ux%u) tone-admitted=%llu tone-reissued=%llu "
+        "door-refused-size=%llu (last copy read %ux%u, display %ux%u) tone-candidates=%llu tone-proven=%llu "
+        "tone-admitted=%llu tone-reissued=%llu "
         "tone-declined=%llu composites=%llu composite-none=%llu bind-failed=%llu write-backs=%llu jitter-phase=%llu "
         "jitter-zero=%llu",
         static_cast<unsigned long long>(windowSeconds), flatUiLayerState(), static_cast<unsigned long long>(w.copies),
         static_cast<unsigned long long>(w.doorsArmed), static_cast<unsigned long long>(w.doorUntreated),
         static_cast<unsigned long long>(w.doorSize), w.inW, w.inH, w.outW, w.outH,
+        static_cast<unsigned long long>(w.toneCandidates), static_cast<unsigned long long>(w.toneProven),
         static_cast<unsigned long long>(w.toneAdmitted), static_cast<unsigned long long>(w.toneReissued),
         static_cast<unsigned long long>(w.toneDeclined), static_cast<unsigned long long>(w.composites),
         static_cast<unsigned long long>(w.compositeNone), static_cast<unsigned long long>(w.bindFailed),
@@ -320,12 +361,13 @@ void flatUiLayerReport(uint64_t windowSeconds) {
     }
     Log::get().note(
         "flat ui layer refusals: other-work=%llu not-hdr-target=%llu not-upstream=%llu no-camera-rows=%llu "
-        "other-shift=%llu (last %.3f, %.3f px); the shared decision: %s",
+        "other-shift=%llu (last %.3f, %.3f px) tone-unproven=%llu; the shared decision: %s",
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kOtherWork)]),
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kNotHdrTarget)]),
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kNotUpstream)]),
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kNoRows)]),
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kOtherShift)]), w.otherX, w.otherY,
+        static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kToneUnproven)]),
         used ? declined : "none");
     g_w = Window{};
 }

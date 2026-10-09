@@ -1172,6 +1172,25 @@ void testFlatLayerRules() {
     for (size_t i = 0; i < static_cast<size_t>(FlatUiRefuse::kCount); ++i)
         check(std::strcmp(flatUiRefuseName(static_cast<FlatUiRefuse>(i)), "?") != 0, "flat layer: every refusal has a name");
 
+    // The tone proof (the 11:32 flight: the HDR route's tone read a copy of H, the take never came back).
+    {
+        int h = 0, h2 = 0, copyOut = 0, other = 0;
+        FlatUiToneProof p;
+        check(!flatUiToneProven(p, 10), "tone proof: nothing seen, nothing proven");
+        flatUiToneProofHud(p, 10, &h);
+        check(flatUiToneProofTone(p, 10, &h) && flatUiToneProven(p, 11) && !flatUiToneProven(p, 10) && !flatUiToneProven(p, 12),
+              "tone proof: the tone reading the HUD's target proves the NEXT frame only");
+        flatUiToneProofHud(p, 11, &h2);
+        flatUiToneProofCopy(p, 11, &h2, &copyOut);
+        check(flatUiToneProofTone(p, 11, &copyOut) && flatUiToneProven(p, 12),
+              "tone proof: a plain copy of the HUD's target (the HDR route) proves it, and a target alternating between frames is fine");
+        flatUiToneProofHud(p, 12, &h);
+        flatUiToneProofCopy(p, 12, &other, &copyOut);
+        check(!flatUiToneProofTone(p, 12, &copyOut) && !flatUiToneProven(p, 13),
+              "tone proof: a copy of something else proves nothing, and the next frame is refused (tone-unproven)");
+        check(!flatUiToneProofTone(p, 14, &h) && !flatUiToneProven(p, 15), "tone proof: a frame with no HUD ask proves nothing");
+    }
+
     // Live with the default config (the 2026-10-09 11:08 flight: dead because the flat gate refuses
     // advanced.temporal_aa_jitter_sign, whose refused getString answers "off", read as "not as shipped").
     const bool flatShipped = uiLayerJitterAsShippedFor(true, "off", 0.0f);
