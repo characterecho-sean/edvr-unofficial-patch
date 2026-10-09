@@ -138,6 +138,9 @@ struct PsInfo {
 std::unordered_map<ID3D11VertexShader*, VsInfo> g_vs;
 std::unordered_map<ID3D11PixelShader*, PsInfo> g_ps;
 constexpr size_t kRememberCap = 512;   // keyed shader objects kept (a few KB of bytecode each)
+// Past the cap a keyed shader object is dropped and its family never runs substituted, which a flight log shows only
+// as "not created by the game this session": the first drop of each kind is said once per session (under g_mutex).
+bool g_vsDropSaid = false, g_psDropSaid = false;
 
 struct FamilyState {
     bool derived = false, valid = false;
@@ -2567,7 +2570,16 @@ void engineVelocityRememberVs(ID3D11VertexShader* shader, uint64_t hash, const v
     if (f < 0) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     // One entry per shader OBJECT: the game may create a keyed hash many times.
-    if (g_vs.size() >= kRememberCap || g_vs.count(shader)) return;
+    if (g_vs.count(shader)) return;
+    if (g_vs.size() >= kRememberCap) {
+        if (!g_vsDropSaid) {
+            g_vsDropSaid = true;
+            Log::get().note("engine motion: vertex shader remember cap reached (%zu objects kept, the most kept): vs_%s was dropped, "
+                            "so its family cannot run substituted. Printed once per session.",
+                            kRememberCap, hex64(hash).c_str());
+        }
+        return;
+    }
     VsInfo info;
     info.object = shader;
     info.family = f;
@@ -2579,7 +2591,16 @@ void engineVelocityRememberVs(ID3D11VertexShader* shader, uint64_t hash, const v
 void engineVelocityRememberPs(ID3D11PixelShader* shader, uint64_t hash, const void* bytecode, size_t bytes, bool linked) {
     if (t_creating || !shader || !bytecode || !bytes || bytes > 1024u * 1024u || !anyKeyedPs(hash)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    if (g_ps.size() >= kRememberCap || g_ps.count(shader)) return;
+    if (g_ps.count(shader)) return;
+    if (g_ps.size() >= kRememberCap) {
+        if (!g_psDropSaid) {
+            g_psDropSaid = true;
+            Log::get().note("engine motion: pixel shader remember cap reached (%zu objects kept, the most kept): ps_%s was dropped, "
+                            "so its family cannot run substituted. Printed once per session.",
+                            kRememberCap, hex64(hash).c_str());
+        }
+        return;
+    }
     PsInfo info;
     info.object = shader;
     info.hash = hash;
@@ -2587,6 +2608,15 @@ void engineVelocityRememberPs(ID3D11PixelShader* shader, uint64_t hash, const vo
     info.bytes.assign(static_cast<const BYTE*>(bytecode), static_cast<const BYTE*>(bytecode) + bytes);
     g_ps.emplace(shader, std::move(info));
 }
+
+#ifdef EDVR_ENGINE_VELOCITY_RIG
+// remember_cap_tests.h: how many objects are kept, and the cap, so the rig fills exactly to it.
+size_t engineVelocityRememberedForRig(bool pixel) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    return pixel ? g_ps.size() : g_vs.size();
+}
+size_t engineVelocityRememberCapForRig() { return kRememberCap; }
+#endif
 
 void engineVelocityAfterFlatDraw(ID3D11DeviceContext* ctx) {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
