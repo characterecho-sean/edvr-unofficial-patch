@@ -55,10 +55,10 @@
   rows/scatter, actual EP/EN ownership exports and correct brace
   motion/coverage; inspect remaining WORLD and building pixels separately.
   Visual verification is open. Native primary records stay unchanged; no bones,
-  estimation or generic pool matching. NPC: F1 FLOWN 154553 (stale 38.7% ->
-  0.8%); F2 FLOWN 190316 (standing NPC 100%), F13 (exact while the join is
-  live, 0.19-0.26 px; a 2nd chain dispatch masked the walker 8 of 16 frames).
-  F13 fixes BUILT, NOT FLOWN (last entry): one join per present frame. F14.
+  estimation or generic pool matching. NPC (Explorer Cam, VR): F1, F2 and the
+  one-join-per-frame fix are FLOWN OK (F14, 7d0e052e; Sean: "NPCs looked
+  good"; cost +0.1-0.2 ms a frame). Open: the first-person panel does not use
+  E (only if Sean asks); the 1 s fade-hold cap is unexercised. F14 is last.
 
 ## Premise
 
@@ -4353,3 +4353,15 @@ ruled out: overlapping or restarted dst ranges for the two dispatches, because t
 ruled out: the hook seeing two calls on a double frame, because its calls equal the present frames (+1,769 against 1,856 chain dispatches).
 ruled out: a dispatch after the first pool draw in 212348, because the written buffer is already final there in all 6 double frames.
 Doubts. (a) The premise is one dump (6 double frames in 19) and one log; a third dispatch is handled by the same accumulation (the table holds 8,192 rows) but has never been seen. (b) The join now runs inside the first skinned draw's setup on the render thread, not at the chain dispatch: the same GPU work in another place; whether its cost moved is for the clean window. (c) `lastJoinLive` is the last join that ran, so a frame with jobs and no join at all (a refused dispatch) reads the frame before's; `chainRefused` says it. (d) A chain-only frame builds no pose table (no draw, no pool snapshot), so the next frame has `no pose` and no history, as in first person; the boundary join only keeps the tables and the counters in step. (e) `idle` bases are still failed jobs in `failed: pose`; the number is the culled characters', not damage.
+
+### 2026-10-09 F14 (7d0e052e, log edvr_gfx_20261009_011420, Frontier, Explorer Cam, no eye run): F2 is verified on a walking NPC; the one-join-per-frame fix holds
+
+Sean: "NPCs looked good, didn't see any reset." Build matched (`v0.18.3-75-g7d0e052e`). F5 entry 01:17:42.8. No eye run in the flight, so every census window is clean (none carries the eye-run sentence). MEASURED = a log line read for this entry; the window figures of the join, the pose witness and the GPU census are as read from the log by the coordinator.
+- The double dispatch is joined as one frame. `skin join: chain dispatches D over F frames` has D = F + K in every window: 1,147 / 1,111 (K 36) at 01:17:21, 1,933 / 1,807 (K 126) at 01:17:51, 2,058 / 1,989 (K 69) at 01:18:21, then K 0 from 01:18:51 on (2,055, 1,791, 1,941, 2,180); late 0 and on another palette buffer 0 in all of them, so the premise (both dispatches before the first skinned draw, one palette buffer) held in the field. In the windows 01:18:21-01:20:21: source=hook in every frame (1,791-2,180 frames a window), no history 0, history gap 0, hook/t0 disagreements 0, unverified-previous 0 (F13: 87 of each in a window). Joined about 87% of the jobs; `failed: pose` 34-49k a window (17-22 a frame: the jobs of characters no draw reads); new-entity 157-3,075. Pose witness: unresolved 0, drops idle only.
+- The fade hold did nothing, as in F13: `entering: ... black lasted 1.15 s; fading in over 300 ms [engine motion: views live for 22 frames in a row, skinned jobs, the second skin's join live]` at 01:17:43.965, no `held` suffix, no MotionTimedOut. The 1 s cap has not been exercised in a flight.
+- Cost, clean: `engine velocity` in-frame 0.27-0.42 ms a frame in Explorer Cam against F11's 0.21-0.24 (before F2) and F12's 0.27-0.30: F2 costs about +0.1-0.2 ms a frame. The pool-family `alters` figure, 0.18-1.05 ms, holds the game's own work in those draws and is not EDVR's cost.
+- Verdict: F2 meets Sean's bar on a walking NPC in Explorer Cam: exact motion for skinned characters (F13 measured 0.19-0.26 px on joined pairs against F11's 0.60) now with no frame without history in any window (F13: masked in 8 of 16 dump frames); no eye run was taken, so the per-frame residual is not re-measured. The F13 arc (second skin, hook, pose by draw reference, one join a frame) is closed.
+- Open: (1) the first-person panel (the world route) does not consume target 7, so a skinned character seen through it keeps the camera term; a follow-up only if Sean asks. (2) The fade hold's 1 s cap is unexercised (it needs an entry whose views never go live). (3) The non-exporting rigid FC43 draws need no E (h10, F13-era: base-0 records, not characters).
+
+ruled out: the double dispatch as a remaining cause of masked frames, because K frames with two dispatches ran (36, 126, 69 in three windows) with no history 0, gap 0 and disagreements 0 beside them.
+ruled out: the idle bases as damage, because `unresolved` is 0 and Sean saw no pulse; they are the characters no draw reads.
