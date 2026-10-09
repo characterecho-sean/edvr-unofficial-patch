@@ -19,18 +19,21 @@
   and the cockpit HUD layer need the flat anti-aliasing on.
 - **What ships:** the panel factor `f = (R/D)/T` (ui_panel_scale.cpp, "ui
   quality: panels (flat)" lines); the flat UI layer (flat_ui_layer.{h,cpp}, a
-  mono adapter over ui_layer.cpp) for the holo panels, flight HUD, target
-  sprite and holograms, its "flat ui layer" 30 s lines and refusal counters.
+  mono adapter over ui_layer.cpp) for the holo panels, flight HUD and target
+  sprite, its "flat ui layer" 30 s lines and refusal counters. The holograms
+  family is not taken (only one of its seven pairs has camera rows in flat;
+  the 13:51 loading-screen ghost): it stays in the frame as before the port.
 - **Removed:** the flat UI census (flat_ui_census.{h,cpp}), a temporary
   instrument; its target-class and family rules live on in
   flat_ui_layer_math.h.
 - **Known leftovers:**
-  - six hologram pairs carry no camera rows that flat's camera table reads
-    (9B34C331902DC1ED, DF3503CD07F9B10C, 5453D19B6D362364, A2C2D5510BF1926D,
-    9611A454527F7FEB, B932058F26B76691); they stay in the frame (`no-camera-rows`);
+  - the holograms stay in the frame, through the anti-aliasing (six of seven pairs
+    carry no camera rows flat reads: 9B34C331902DC1ED, DF3503CD07F9B10C,
+    5453D19B6D362364, A2C2D5510BF1926D, 9611A454527F7FEB, B932058F26B76691);
   - flight HUD `other-shift`: rare, a camera shift of 2x the frame's y phase;
     left in the frame;
-  - the flat resize-loop fix (771bb99a) has not been exercised (see its entry).
+  - the flat resize-loop fix (771bb99a): exercised OK by windowed resizes on
+    13:23 and 13:51 (`result=ok refs=0`).
 - **Ruled-out pointer:** the 2026-10-09 entries below; VR's retired deferred
   UI replay ([crisp-ui-handoff.md](crisp-ui-handoff.md)).
 - **Temporary config keys:** none.
@@ -392,3 +395,25 @@ tone-proven 12 of 1040, composites 2, back-offs escalating to 30 s.
   into an already consumed target refused as `after-tone`; the tone-candidate
   log re-armed for eight lines after every route, render-size or swap-chain
   change, with the route name and every HUD target and its copy.
+## 2026-10-09: f86f28df flown; the loading-screen hologram ghost (log 135155)
+
+- f86f28df flew well: the windowed mid-session change is fixed (resizes
+  `result=ok refs=0`; the windowed cockpit window copies 2649, composites 2647,
+  no back-offs). ruled out: H3/H2' distinction -- f86f28df fixed the
+  mid-session windowed case (log 135155).
+- New: the loading screen's hologram ghosts/smears (Sean: not there before the
+  port). The flat layer took one of the hologram's seven pairs (94D5C556DFD6D705
+  / 912477AEF6958379, the only one with camera rows); the other six stayed in the
+  frame (no-camera-rows). One picture split: that part unjittered over the
+  upscale, the rest jittered through DLSS, the taken part flipping in and out of
+  the layer as the route treated or refused frames (13:53:25: composites 267 of
+  1616 copies, door-refused-untreated 449). ruled out: (c) panel factor for the
+  loading ghost, factor x1.0 throughout.
+- Fix (built, not flown): a family is taken whole or not at all, so flat does
+  not take the holograms family; they stay in the game's frame as before the
+  port. The holo panels, the flight HUD and the target sprite are unchanged. VR
+  unchanged.
+- No in-frame "non-scene" signal exists before the HUD draws: the copy
+  structure's verdict comes at the frame's final copy. The door already gates
+  the next frame on this frame's resolve (door-refused-untreated), which is
+  the cheap per-frame signal there is.

@@ -39,12 +39,17 @@ inline UiLayerFamily flatUiFamilyOf(uint64_t vs, uint64_t ps) {
 }
 
 // The families the flat layer asks the shared decision for: the cockpit HUD families the 2026-10-09 09:36 census found
-// drawn into the scene's HDR target before the resolve, jittered (the holo panels, the flight HUD, the target sprite,
-// the holograms). The scene lines the VR layer also takes for density (the orbit lines, the supercruise bars, the
-// space dust) are not asked: they are scene geometry, upscaled with the world in flat as they always were.
+// drawn into the scene's HDR target before the resolve, jittered (the holo panels, the flight HUD, the target sprite).
+// The scene lines the VR layer also takes for density (the orbit lines, the supercruise bars, the space dust) are not
+// asked: they are scene geometry, upscaled with the world in flat as they always were.
+//
+// NOR THE HOLOGRAMS (2026-10-09 13:51 flight, the loading screen's ghost). A hologram is several pairs drawn together;
+// in flat only one of them (94D5C556DFD6D705 / 912477AEF6958379) carries camera rows the jitter can be read from, the
+// other six stay in the frame (no-camera-rows). Taking the one split one picture: that part unjittered over the
+// upscale, the rest jittered through it, and the taken part flipping in and out of the layer as the route treated or
+// refused each frame. A family is taken whole or not at all, so the holograms stay in the game's frame, as before the port.
 inline bool flatUiLayerTakesFamily(UiLayerFamily f) {
-    return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite ||
-           f == UiLayerFamily::kHoloGeneric;
+    return f == UiLayerFamily::kHolo || f == UiLayerFamily::kFlightHud || f == UiLayerFamily::kSprite;
 }
 
 // The adapter's own refusals, before the shared decision is asked. Each leaves the draw in the game's frame as stock.

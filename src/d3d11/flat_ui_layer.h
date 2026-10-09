@@ -3,7 +3,7 @@
 // WHAT. The flat 09:36 census (2026-10-09) found the smear: the cockpit HUD families -- the holo panels, the flight HUD,
 // the target sprite, the holograms -- are drawn into the scene's HDR target H at the render size R, jittered, before
 // EDVR's resolve, so they go through DLSS / TAA / FSR and their history. With fix.ui_quality on and the flat
-// anti-aliasing on, each such draw is taken out of H by the VR layer's own take path, as eye 0: drawn by the game's own
+// anti-aliasing on, each such draw (not the holograms: flat_ui_layer_math.h flatUiLayerTakesFamily) is taken out of H by the VR layer's own take path, as eye 0: drawn by the game's own
 // shaders into an HDR layer at the display's size D times the target (100: D, 125: 1.25 D, smoothed down by the
 // composite), unjittered (the raster phase its camera rows carry is cancelled through the viewport), tested against a
 // seeded copy of the game's depth; the game's tonemap draw is re-issued with that layer as its HDR source into an 8-bit

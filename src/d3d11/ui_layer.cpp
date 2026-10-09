@@ -2919,8 +2919,8 @@ void uiLayerConfigure(Config& cfg) {
                                               : "not live: the HDR HUD path stood down",
             flatAa ? "panels: the game's own panel formula makes every render-to-texture panel at the display's size "
                      "times the target, whatever the render size, from the next panel init or view change (the \"ui "
-                     "quality: panels (flat)\" lines give the factor); cockpit HUD: the holo panels, the flight HUD, the "
-                     "target sprite and the holograms are drawn unjittered into an HDR layer at the display's size times "
+                     "quality: panels (flat)\" lines give the factor); cockpit HUD: the holo panels, the flight HUD and the "
+                     "target sprite (not the holograms, which stay in the frame) are drawn unjittered into an HDR layer at the display's size times "
                      "the target, tonemapped by the game's own tonemap draw re-issued over it, and composited after the "
                      "resolve and the sharpening, at the game's output copy (the \"flat ui layer\" lines count them)."
                    : "waits: anti-aliasing is off, so the panels stay at the game's own size and the cockpit HUD in the "

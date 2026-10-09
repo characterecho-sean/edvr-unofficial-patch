@@ -1130,14 +1130,24 @@ void testFlatPanelScale() {
 // rows carry, the door.
 void testFlatLayerRules() {
     check(flatUiLayerTakesFamily(UiLayerFamily::kHolo) && flatUiLayerTakesFamily(UiLayerFamily::kFlightHud) &&
-              flatUiLayerTakesFamily(UiLayerFamily::kSprite) && flatUiLayerTakesFamily(UiLayerFamily::kHoloGeneric),
-          "flat layer: the four cockpit HUD families the census found in H are asked for");
+              flatUiLayerTakesFamily(UiLayerFamily::kSprite),
+          "flat layer: the holo panels, the flight HUD and the target sprite are asked for");
+    // The loading screen's ghost (2026-10-09 13:51): one of the hologram's seven pairs taken, six left (no camera rows) --
+    // a family is taken whole or not at all, so the holograms are not asked.
+    check(!flatUiLayerTakesFamily(UiLayerFamily::kHoloGeneric), "flat layer: the holograms family is not asked (taken whole or not at all)");
+    {
+        static const uint64_t kHoloVs[] = {0x94D5C556DFD6D705ull, 0xDF3503CD07F9B10Cull, 0x9B34C331902DC1EDull, 0x9611A454527F7FEBull};
+        static const uint64_t kHoloPs[] = {0x912477AEF6958379ull, 0x76BF170A625F18E3ull, 0x9FDA9FAB05B654BDull, 0x5270C41523EAF95Aull};
+        bool anyTaken = false;
+        for (int i = 0; i < 4; ++i) anyTaken = anyTaken || flatUiLayerTakesFamily(flatUiFamilyOf(kHoloVs[i], kHoloPs[i]));
+        check(!anyTaken, "flat layer: none of the census's hologram pairs (94D5 the one with camera rows among them) reaches the take");
+    }
     check(!flatUiLayerTakesFamily(UiLayerFamily::kOrbitLines) && !flatUiLayerTakesFamily(UiLayerFamily::kSupercruiseBars) &&
               !flatUiLayerTakesFamily(UiLayerFamily::kSpaceDust) && !flatUiLayerTakesFamily(UiLayerFamily::kScreen) &&
               !flatUiLayerTakesFamily(UiLayerFamily::kPanel) && !flatUiLayerTakesFamily(UiLayerFamily::kGuiDirect) &&
               !flatUiLayerTakesFamily(UiLayerFamily::kNone) && !flatUiLayerTakesFamily(UiLayerFamily::kAfterUi),
           "flat layer: the scene lines, the 2D screen, the menus, the panels' rasterisation and the after-UI take are not");
-    for (UiLayerFamily f : {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite, UiLayerFamily::kHoloGeneric})
+    for (UiLayerFamily f : {UiLayerFamily::kHolo, UiLayerFamily::kFlightHud, UiLayerFamily::kSprite})
         check(uiLayerFamilyTakesHdr(f), "flat layer: every family it asks for is one the shared HDR take draws");
     // The jitter: rows that carry the phase (0.25, -0.375) px at 1920x1080 measure ndc (2 x 0.25 / 1920, -2 x -0.375 / 1080).
     const uint32_t w = 1920, h = 1080;
