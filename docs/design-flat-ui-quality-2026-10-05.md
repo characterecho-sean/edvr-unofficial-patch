@@ -294,6 +294,22 @@ seen reading the HUD's target or its copy (`tone-unproven` otherwise); one
 missed tonemap backs the HUD path off for 30 s, re-armed with a line, instead
 of a session stand-down; the first eight tone candidates are logged.
 
+**Flight 12:04 (75cd495c).** SS 0.5, copy route: the whole chain, every
+frame (2700/2700 door, tone, composite; Sean: "works great"). SS 1.0, HDR
+route: the first HDR-route frame's re-issue was declined ("bindings at the
+re-issue are not the admitted draw's", vs/ps 0): on that route the resolve
+runs inside the tone draw's own scope (treatHdr) and the binding shadow no
+longer names the draw's bindings afterwards, so the shadow-based drift check
+failed and the path backed off for 30 s -- the HDR-route frames were never
+served. Ruled out: per-frame route alternation at R = D -- the 12:31:36
+window's hdr=1780 copy=886 straddles the SS switch at 12:31:16 (copy before,
+treated HDR route on 435-450 of 450 frames per 5 s after). Fix (built, not
+flown): in flat the drift check reads the context, the admission carries the
+pair the scope read before the resolve, and back-offs escalate 2-4-8-16-30 s.
+Left: six hologram pairs (9B34C331902DC1ED, DF3503CD07F9B10C, ...) have no
+camera rows at b1 in flat's camera table and stay in H; a flight HUD draw
+measured twice the frame's y phase (other-shift).
+
 Not done: draws after the HUD inside H (VR's known inversion applies: an
 untaken draw issued after a taken HUD draw is now under it). The after-UI take
 is not run in flat. The VR lines the shared code prints still say "left eye".

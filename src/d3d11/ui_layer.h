@@ -378,7 +378,8 @@ void uiLayerFlatSetDraw(uint64_t frame, float jx, float jy, uint32_t renderW, ui
 // toneHdrSlot), whatever its vertex count, reading eye 0's HUD target -- or `alias`, a plain copy of it this frame (the
 // HDR route's post chain copies H before the tone) -- at `hdrSlot`. 1: armed, re-issue between uiLayerCrispToneBegin/End;
 // 0: not, `why` says which test refused. The ordering guards are VR's.
-int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, char* why, size_t whyN);
+int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, uint64_t vs, uint64_t ps, char* why,
+                          size_t whyN);
 // The UiLayerDecision (as an int) the last uiLayerDecide came to: the adapter names its refusals by it.
 int uiLayerLastDecision();
 // A game draw the layer did not take, while watching: a write of the depth-stencil buffer a seed copied makes the seed

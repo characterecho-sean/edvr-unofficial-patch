@@ -136,12 +136,23 @@ void refreshLive() {
 constexpr uint64_t kFlatBackOffMs = 30000;
 uint64_t g_flatBackOffUntilMs = 0;
 uint32_t g_flatBackOffs = 0;
+// Escalating (2026-10-09 12:31 flight: one miss cost 30 s of the old smear): 2 s, 4, 8, 16, then 30 s, starting over
+// at 2 s once the layer has run five minutes clean since its last back-off.
+constexpr uint64_t kFlatBackOffFirstMs = 2000, kFlatBackOffCleanMs = 300000;
+uint64_t g_flatBackOffLastMs = 0;
+uint32_t g_flatBackOffStep = 0;
 void flatBackOff(const char* what, const char* why) {
-    g_flatBackOffUntilMs = GetTickCount64() + kFlatBackOffMs;
+    const uint64_t now = GetTickCount64();
+    if (g_flatBackOffLastMs && now - g_flatBackOffLastMs >= kFlatBackOffCleanMs) g_flatBackOffStep = 0;
+    uint64_t ms = kFlatBackOffFirstMs << (g_flatBackOffStep < 4 ? g_flatBackOffStep : 4);
+    if (ms > kFlatBackOffMs) ms = kFlatBackOffMs;
+    ++g_flatBackOffStep;
+    g_flatBackOffLastMs = now;
+    g_flatBackOffUntilMs = now + ms;
     ++g_flatBackOffs;
     Log::get().note("ui quality: flat layer: %s backs off for %llu s (back-off %u this session) -- %s. The cockpit HUD is "
                     "drawn as it always was until it re-arms.",
-                    what, static_cast<unsigned long long>(kFlatBackOffMs / 1000), g_flatBackOffs, why ? why : "a refusal");
+                    what, static_cast<unsigned long long>(ms / 1000), g_flatBackOffs, why ? why : "a refusal");
 }
 
 void crispStandDown(const char* why) {
@@ -3801,7 +3812,8 @@ bool uiLayerCrispNoteEyeDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count
     return true;
 }
 
-int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, char* why, size_t whyN) {
+int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* alias, uint64_t vs, uint64_t ps, char* why,
+                          size_t whyN) {
     g_crispPending = CrispTonePending{};
     detail::g_uiLayerCrispPending = false;
     const auto say = [&](const char* text) {
@@ -3829,7 +3841,7 @@ int uiLayerCrispAdmitFlat(ID3D11DeviceContext* ctx, int hdrSlot, const void* ali
     if (!out) return say("the tone has no render target");
     if (e.seq == seq && e.draws) return say("the 8-bit layer is already busy this frame");
     if (e.hdrToneSeq == seq) return say("a second tonemap this frame");
-    crispArm(0, seq, hdrSlot, out.Get(), r.Get(), bindingShaderHash(BindSlot::Vs), bindingShaderHash(BindSlot::Ps));
+    crispArm(0, seq, hdrSlot, out.Get(), r.Get(), vs, ps);  // the pair the draw scope read before the resolve ran
     return say(r.Get() == e.hdrTarget ? "admitted: reads the HUD's HDR target" : "admitted: reads the HUD target's copy"), 1;
 }
 
@@ -3848,14 +3860,30 @@ bool uiLayerCrispToneBegin(ID3D11DeviceContext* ctx) {
         // The bindings must still be the admitted draw's own: nothing ran
         // between its admission and here but its verdict's Begin (kNone for
         // the tonemap) and the draw itself, which changes no state.
-        void* rtv = bindingGet(BindSlot::Rtv0);
-        ResourceInfo ri;
-        bool drift = !rtv || !bindingResolve(rtv, &ri) || ri.resource != p.rtvRes;
-        if (!drift) {
-            void* srv = bindingGet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) +
-                                                         static_cast<uint32_t>(p.hdrSlot)));
-            ResourceInfo si;
-            drift = !srv || !bindingResolve(srv, &si) || si.resource != p.hdrRes;
+        bool drift = false;
+        if (runtimeFlatProfile()) {
+            // The flat profile reads the context itself: on the HDR route its resolve runs inside the tone draw's own
+            // scope (treatHdr, under FlatComputeInternalScope), and the binding shadow no longer names the draw's
+            // bindings afterwards -- the 12:31 flight's "bindings ... not the admitted draw's" with vs/ps 0 every time.
+            Ptr<ID3D11RenderTargetView> rtvNow;
+            ctx->OMGetRenderTargets(1, &rtvNow, nullptr);
+            Ptr<ID3D11Resource> outNow;
+            if (rtvNow) rtvNow->GetResource(&outNow);
+            Ptr<ID3D11ShaderResourceView> srvNow;
+            ctx->PSGetShaderResources(static_cast<UINT>(p.hdrSlot), 1, &srvNow);
+            Ptr<ID3D11Resource> hdrNow;
+            if (srvNow) srvNow->GetResource(&hdrNow);
+            drift = !outNow || outNow.Get() != p.rtvRes || !hdrNow || hdrNow.Get() != p.hdrRes;
+        } else {
+            void* rtv = bindingGet(BindSlot::Rtv0);
+            ResourceInfo ri;
+            drift = !rtv || !bindingResolve(rtv, &ri) || ri.resource != p.rtvRes;
+            if (!drift) {
+                void* srv = bindingGet(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) +
+                                                             static_cast<uint32_t>(p.hdrSlot)));
+                ResourceInfo si;
+                drift = !srv || !bindingResolve(srv, &si) || si.resource != p.hdrRes;
+            }
         }
         if (drift) {
             crispToneDecline(CrispToneDecline::kStateDrift, p.vs, p.ps);

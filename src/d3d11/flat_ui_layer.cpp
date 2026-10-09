@@ -196,7 +196,7 @@ bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t
     {
         FlatComputeInternalScope internal;
         uiLayerFlatSetDraw(frame, 0.0f, 0.0f, renderW, renderH);  // the sequence only
-        admitted = uiLayerCrispAdmitFlat(ctx, hdrSlot, alias, why, sizeof(why)) == 1;
+        admitted = uiLayerCrispAdmitFlat(ctx, hdrSlot, alias, vs, ps, why, sizeof(why)) == 1;
     }
     if (admitted) ++g_w.toneAdmitted;
     if (g_candidateLines < 8) {
