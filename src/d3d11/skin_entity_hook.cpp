@@ -26,7 +26,7 @@ constexpr size_t kPrologueBytes = 28;
 // so CodeHook steals 5 (`mov rax,rsp`, `push rbp`, `push rbx`) and the trampoline re-runs them.
 constexpr uint8_t kPrologue[kPrologueBytes] = {0x48, 0x8B, 0xC4, 0x55, 0x53, 0x41, 0x55, 0x48, 0x8D, 0x68, 0xA1, 0x48, 0x81, 0xEC,
                                                0xC0, 0x00, 0x00, 0x00, 0x4C, 0x8B, 0xA9, 0xA8, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xD9};
-constexpr uint64_t kStandDownAfter = 120;   // lists with none usable
+constexpr uint64_t kStandDownAfter = 120;   // lists that were judged (made with something to skin) with none usable
 
 // The function takes one argument (the node, rcx); the other register arguments are passed on untouched so a caller that leaves something
 // in them sees the original behave exactly as it did.
@@ -45,8 +45,12 @@ struct State {
     std::atomic<uint64_t> slotSeq[4]{};
     std::atomic<uint64_t> latest{0};
     std::atomic<uint64_t> calls{0}, usable{0}, faulted{0}, overflowed{0}, implausible{0}, otherUnusable{0}, nodeChanges{0};
+    // The stand-down judges a list only against a job table that has jobs (2026-10-08, the F12 flight: 120 empty lists made on the main menu stood the
+    // hook down before a character existed). A clean empty list is the assembler having nobody to skin: it is counted (emptyLists) and judged by
+    // nothing here; noteChain() judges it when a chain dispatch with jobs finds it the newest list (emptyWithJobs). `judged` counts every other list.
+    std::atomic<uint64_t> judged{0}, emptyLists{0}, emptyWithJobs{0};
     std::atomic<uintptr_t> firstNode{0};
-    std::atomic<uint32_t> firstTid{0}, lastTid{0}, lastEntries{0}, lastEnd{0};
+    std::atomic<uint32_t> firstTid{0}, lastTid{0}, lastEntries{0}, lastEnd{0}, lastFlags{0};
     std::atomic<uint32_t> tids[4]{};
     std::atomic<uint32_t> threads{0};
     std::mutex events;
@@ -104,6 +108,10 @@ __declspec(noinline) bool checkIdentity(uintptr_t base, const char** why) noexce
     }
 }
 
+// A list of no entries and a plain end row (the first free row, 1): the assembler had nobody to skin (a menu, a loading screen). It says nothing
+// about the offsets by itself: an empty list with a nonzero end row, or any walk flag, is not this and is judged.
+bool emptyList(const Snapshot& s) noexcept { return s.n == 0 && s.flags == 0 && s.end <= 1; }
+
 void standDown(State& s, const char* why) {
     s.gate.store(0, std::memory_order_seq_cst);
     s.latest.store(0, std::memory_order_release);
@@ -136,13 +144,17 @@ void observe(State& s, uintptr_t node) noexcept {
     }
     const char* why = "";
     const bool good = checkSnapshot(slot, &why);
+    const bool empty = !good && emptyList(slot);
     if (good) s.usable.fetch_add(1, std::memory_order_relaxed);
+    else if (empty) s.emptyLists.fetch_add(1, std::memory_order_relaxed);
     else if (slot.flags & kSnapFault) s.faulted.fetch_add(1, std::memory_order_relaxed);
     else if (slot.flags & kSnapOverflow) s.overflowed.fetch_add(1, std::memory_order_relaxed);
     else if (slot.flags & kSnapImplausible) s.implausible.fetch_add(1, std::memory_order_relaxed);
     else s.otherUnusable.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t judged = empty ? s.judged.load(std::memory_order_relaxed) : s.judged.fetch_add(1, std::memory_order_relaxed) + 1;
     s.lastEntries.store(slot.n, std::memory_order_relaxed);
     s.lastEnd.store(slot.end, std::memory_order_relaxed);
+    s.lastFlags.store(slot.flags, std::memory_order_relaxed);
     // threads
     const uint32_t tid = slot.tid;
     s.lastTid.store(tid, std::memory_order_relaxed);
@@ -167,10 +179,25 @@ void observe(State& s, uintptr_t node) noexcept {
         std::snprintf(line, sizeof(line), "a second processor node (0x%llX, the first was 0x%llX): the hook cannot say which one a dispatch belongs to",
                       static_cast<unsigned long long>(node), static_cast<unsigned long long>(first));
         standDown(s, line);
-    } else if (seq >= kStandDownAfter && s.usable.load(std::memory_order_relaxed) == 0) {
+    } else if (judged >= kStandDownAfter && s.usable.load(std::memory_order_relaxed) == 0) {
         char line[300];
-        std::snprintf(line, sizeof(line), "none of the first %llu lists was usable (the last: %s); the decompile's offsets do not describe this build's list",
-                      static_cast<unsigned long long>(seq), why);
+        std::snprintf(line, sizeof(line), "none of the first %llu lists with something to read was usable (the last: %s); the decompile's offsets do not describe this build's list",
+                      static_cast<unsigned long long>(judged), why);
+        standDown(s, line);
+    }
+}
+
+// One chain dispatch (the consumer, once a frame, before it reads the newest list). The dispatch having jobs is what makes an empty list evidence: the
+// assembler has just built a table with jobs in it and the list the hook read from the same call names nobody. Dispatches with no jobs judge nothing.
+void noteChain(State& s, uint32_t jobs) noexcept {
+    if (!jobs || s.state.load(std::memory_order_relaxed) != int(SkinHookState::Armed)) return;
+    if (!s.latest.load(std::memory_order_acquire)) return;
+    if (s.lastEntries.load(std::memory_order_relaxed) != 0 || s.lastFlags.load(std::memory_order_relaxed) != 0 || s.lastEnd.load(std::memory_order_relaxed) > 1) return;
+    const uint64_t n = s.emptyWithJobs.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n >= kStandDownAfter && s.usable.load(std::memory_order_relaxed) == 0) {
+        char line[300];
+        std::snprintf(line, sizeof(line), "the job table had jobs on %llu dispatches and the hook's list had no entries each time; the decompile's offsets do not describe this build's list",
+                      static_cast<unsigned long long>(n));
         standDown(s, line);
     }
 }
@@ -321,6 +348,11 @@ bool skinEntityHookLatest(skinjoin::Snapshot& out) {
     return false;
 }
 
+void skinEntityHookNoteChain(uint32_t jobs) {
+    State* s = g_state.load(std::memory_order_acquire);
+    if (s) noteChain(*s, jobs);
+}
+
 SkinHookStats skinEntityHookStats() {
     SkinHookStats r;
     State* s = g_state.load(std::memory_order_acquire);
@@ -333,6 +365,9 @@ SkinHookStats skinEntityHookStats() {
     r.implausible = s->implausible.load();
     r.otherUnusable = s->otherUnusable.load();
     r.nodeChanges = s->nodeChanges.load();
+    r.judged = s->judged.load();
+    r.emptyLists = s->emptyLists.load();
+    r.emptyWithJobs = s->emptyWithJobs.load();
     r.firstTid = s->firstTid.load();
     r.lastTid = s->lastTid.load();
     r.threads = s->threads.load();
@@ -546,6 +581,89 @@ unsigned skinEntityHookSelfTest(char* detail, size_t cap) {
         call(node, 0, 0, 0);   // and the original still runs
         std::memcpy(&endAfter, reinterpret_cast<void*>(node + 0xC4), 4);
         if (endAfter != 0x4D) fail("H13.d", "the original stopped running after the stand-down");
+    }
+    // H14..H17: what stands the hook down, judged on a State of its own (the real observe() and noteChain(), no patch: a hook that stood down cannot be
+    // armed again, so every case gets a fresh one). The F12 flight: 120 lists of no entries, made on the main menu, stood the hook down before a character existed.
+    {
+        const auto fresh = [] { State* t = new State; t->state.store(int(SkinHookState::Armed)); return t; };
+        const auto armedState = [](State* t) { return t->state.load() == int(SkinHookState::Armed); };
+        std::vector<uint64_t> scratch;
+        const uint32_t noCount[1] = {0};
+        const uint32_t oneBone[1] = {20};
+        const uint64_t emptyNode = layout(heap, 0, noCount, 1, scratch);       // no entries, end row 1: the assembler had nobody to skin
+        const uint64_t emptyOddNode = layout(heap, 0, noCount, 5, scratch);    // no entries but an end row of 5: not a clean empty list
+        std::vector<uint64_t> badEntry, goodEntry;
+        const uint64_t badNode = layout(heap, 1, noCount, 1, badEntry);        // one entry of no bones: something to read, and unusable
+        layout(heap, 1, oneBone, 1, goodEntry);                                // an entry of 20 bones (ending at row 21): the good list when hung on a node
+        // ONE node whose list the cases rewrite between calls (a second node would stand the hook down by itself, H13)
+        const uint64_t mixNode = layout(heap, 0, noCount, 1, scratch);
+        const auto setEmpty = [&] { put64(mixNode + 0xA8, 0); put32(mixNode + 0xC4, 1); };
+        const auto setBad = [&] { put64(mixNode + 0xA8, badEntry[0]); put32(mixNode + 0xC4, 1); };
+        const auto setGood = [&] { put64(mixNode + 0xA8, goodEntry[0]); put32(mixNode + 0xC4, 21); };
+        // H14: lists of no entries judge nothing
+        {
+            State* t = fresh();
+            for (int i = 0; i < 200; ++i) observe(*t, emptyNode);
+            if (!armedState(t)) fail("H14.a", "200 lists of no entries stood the hook down (nothing had anyone to skin)");
+            if (t->calls.load() != 200 || t->emptyLists.load() != 200 || t->judged.load() != 0 || t->usable.load() != 0)
+                fail("H14.b", "the clean empty lists were not counted as such, or were counted as judged");
+            for (int i = 0; i < 300; ++i) noteChain(*t, 0);
+            if (!armedState(t) || t->emptyWithJobs.load() != 0) fail("H14.c", "dispatches with no jobs judged an empty list");
+            delete t;
+        }
+        // H15: the bound stays for lists with something to read
+        {
+            State* t = fresh();
+            for (int i = 0; i < 119; ++i) observe(*t, badNode);
+            if (!armedState(t)) fail("H15.a", "the hook stood down before its 120th list with something to read");
+            observe(*t, badNode);
+            if (armedState(t) || !std::strstr(t->why, "none of the first 120")) fail("H15.b", "120 unusable lists with something to read did not stand the hook down");
+            delete t;
+            t = fresh();
+            for (int i = 0; i < 119; ++i) observe(*t, emptyOddNode);
+            observe(*t, emptyOddNode);
+            if (armedState(t)) fail("H15.c", "120 lists of no entries but an end row of 5 (not a clean empty list) did not stand the hook down");
+            delete t;
+            // a list the walk could not read (its head points into unmapped memory) has no entries either, and is not a clean empty one
+            {
+                auto* hole = static_cast<uint8_t*>(VirtualAlloc(nullptr, 65536, MEM_RESERVE, PAGE_NOACCESS));
+                t = fresh();
+                put64(mixNode + 0xA8, reinterpret_cast<uint64_t>(hole));
+                put32(mixNode + 0xC4, 1);
+                for (int i = 0; i < 120; ++i) observe(*t, mixNode);
+                if (armedState(t) || t->faulted.load() != 120) fail("H15.f", "120 lists whose head faulted (no entries, a walk flag) did not stand the hook down");
+                delete t;
+                VirtualFree(hole, 0, MEM_RELEASE);
+            }
+            // empty lists in between do not reset or advance the count
+            t = fresh();
+            for (int i = 0; i < 119; ++i) { setBad(); observe(*t, mixNode); setEmpty(); observe(*t, mixNode); }
+            if (!armedState(t) || t->judged.load() != 119) fail("H15.d", "empty lists between unusable ones advanced the count");
+            setBad();
+            observe(*t, mixNode);
+            if (armedState(t)) fail("H15.e", "the 120th unusable list with empty ones between did not stand the hook down");
+            delete t;
+        }
+        // H16: an empty list is judged by a dispatch that has jobs
+        {
+            State* t = fresh();
+            for (int i = 0; i < 119; ++i) { observe(*t, emptyNode); noteChain(*t, 50); }
+            if (!armedState(t) || t->emptyWithJobs.load() != 119) fail("H16.a", "the hook stood down early, or the empty lists a dispatch with jobs met were not counted");
+            observe(*t, emptyNode);
+            noteChain(*t, 50);
+            if (armedState(t) || !std::strstr(t->why, "had jobs on 120")) fail("H16.b", "120 dispatches with jobs that met an empty list did not stand the hook down");
+            delete t;
+        }
+        // H17: one usable list ends the judging for good
+        {
+            State* t = fresh();
+            setGood();
+            observe(*t, mixNode);
+            if (t->usable.load() != 1) fail("H17.a", "the synthetic good list was not usable");
+            for (int i = 0; i < 300; ++i) { setEmpty(); observe(*t, mixNode); noteChain(*t, 50); setBad(); observe(*t, mixNode); }
+            if (!armedState(t)) fail("H17.b", "the hook stood down after it had read a usable list");
+            delete t;
+        }
     }
     return failures;
 }

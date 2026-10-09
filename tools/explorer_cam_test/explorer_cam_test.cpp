@@ -40,6 +40,7 @@
 #include "../../src/common/config.h"
 #include "../../src/common/hotkey.h"
 #include "../../src/d3d11/elite_binds.h"
+#include "../../src/d3d11/engine_motion_ready.h"
 #include "../../src/d3d11/explorer_cam.h"
 #include "../../src/d3d11/explorer_cam_core.h"
 #include "../../src/d3d11/explorer_cam_follow_core.h"
@@ -63,6 +64,8 @@ bool journalGuiFocus(uint32_t* focus) {
     if (focus) *focus = 0;
     return false;   // the rig's boundary gets its focus from ExplorerCamTestFrame, not from here
 }
+// explorerCamFrameBoundary asks the engine for its motion's readiness; the rig's boundary scripts it through ExplorerCamTestFrame instead.
+EngineMotionReady engineMotionReady() { return EngineMotionReady{}; }
 }  // namespace edvr
 
 namespace {

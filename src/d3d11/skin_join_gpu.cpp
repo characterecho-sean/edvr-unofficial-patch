@@ -18,15 +18,34 @@ namespace edvr {
 using Microsoft::WRL::ComPtr;
 using namespace skinjoin;
 
+namespace {
+constexpr uint32_t kInstCopyBytes = 1u << 22;   // the largest span of the instance stream one pose table copies (the game's whole stream is under 1 MB)
+constexpr uint32_t kStatStages = 4;             // counter read-backs in flight (a chain frame each; the GPU is a few frames behind at most)
+struct CpuAt {                                  // the CPU's counters as they stood at a chain frame
+    JoinFeeder::Counters feeder;
+    PaletteHistory::Counters history;
+    uint64_t poseBuilds = 0, poseIncomplete = 0;
+};
+}  // namespace
+
 struct SkinJoinGpu::Impl {
     // device-bound resources
     ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11ComputeShader> join, poseClear, poseScatter, poseVerify;
+    ComPtr<ID3D11ComputeShader> join, poseClear, poseRefMark, poseScatter, poseScatterRest, poseVerify, poseFinish;
     ComPtr<ID3D11Buffer> jobs, plan, info[2], joinTable, stats, owner, pose[2], poseCb, nullJoin;
-    ComPtr<ID3D11ShaderResourceView> jobsSrv, planSrv, infoSrv[2], poseSrv[2], joinSrv, nullJoinSrv;
-    ComPtr<ID3D11UnorderedAccessView> joinUav, infoUav[2], statsUav, ownerUav, poseUav[2];
-    ComPtr<ID3D11Buffer> statsStage[3];
-    uint64_t statsStageAt[3] = {};            // the chain frame count when the copy was queued (0 = free)
+    ComPtr<ID3D11Buffer> instCopy, ranges, refBits, baseState;
+    ComPtr<ID3D11ShaderResourceView> jobsSrv, planSrv, infoSrv[2], poseSrv[2], joinSrv, nullJoinSrv, instSrv, rangesSrv;
+    ComPtr<ID3D11UnorderedAccessView> joinUav, infoUav[2], statsUav, ownerUav, poseUav[2], refUav, stateUav;
+    // The counters' read-back ring: a copy of the GPU counters queued at EVERY chain frame into a free slot, tagged with that chain frame and the CPU's
+    // counters as they stood then. A window is the span between two finished slots, so its GPU and CPU halves describe the same frames.
+    struct Stage {
+        ComPtr<ID3D11Buffer> buf;
+        uint64_t at = 0;                          // the chain frame the copy was queued at (0 = free)
+        CpuAt cpu;
+    } stage[kStatStages];
+    CpuAt cpuNewest, cpuLast;
+    uint64_t framesNewest = 0;                    // the chain frame the newest finished read-back is of
+    uint64_t poseBuilds = 0, poseIncomplete = 0;  // pose tables built / built with no complete reference list
     bool created = false, failed = false;
     // state
     JoinFeeder feeder;
@@ -37,7 +56,6 @@ struct SkinJoinGpu::Impl {
     uint32_t joinPresent = ~0u;                // the present frame JoinCS last ran in
     bool joinHistory = false;                  // ...with its history certified
     uint32_t poseBuiltPresent = ~0u;           // the present frame the pose table [parity] was built for
-    uint32_t poseOwnerPresent = ~0u;           // the present frame whose first snapshot owns the scatter (a refresh of it scatters again)
     ComPtr<ID3D11Buffer> prevJobs;
     ComPtr<ID3D11ShaderResourceView> prevJobsSrv;
     ComPtr<ID3D11Buffer> curPalette, prevPalette;
@@ -45,10 +63,8 @@ struct SkinJoinGpu::Impl {
     // counters
     uint32_t chainRefused = 0, overJobs = 0, createFailed = 0;
     uint32_t statsLast[kStatWords] = {};       // the cumulative GPU counters at the last window
-    uint32_t statsNewest[kStatWords] = {};     // the newest read-back
+    uint32_t statsNewest[kStatWords] = {};     // the newest finished read-back
     bool statsHave = false;
-    JoinFeeder::Counters feederLast;
-    PaletteHistory::Counters historyLast;
     uint64_t framesLast = 0;
     bool chainRefusedNoted = false;
 };
@@ -113,8 +129,11 @@ bool create(SkinJoinGpu::Impl& s, ID3D11Device* dev) {
     const UINT srvUav = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
     if (FAILED(dev->CreateComputeShader(kSkinJoinBytecode, sizeof(kSkinJoinBytecode), nullptr, &s.join)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseClearBytecode, sizeof(kSkinPoseClearBytecode), nullptr, &s.poseClear)) ||
+        FAILED(dev->CreateComputeShader(kSkinPoseRefMarkBytecode, sizeof(kSkinPoseRefMarkBytecode), nullptr, &s.poseRefMark)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseScatterBytecode, sizeof(kSkinPoseScatterBytecode), nullptr, &s.poseScatter)) ||
-        FAILED(dev->CreateComputeShader(kSkinPoseVerifyBytecode, sizeof(kSkinPoseVerifyBytecode), nullptr, &s.poseVerify))) return false;
+        FAILED(dev->CreateComputeShader(kSkinPoseScatterRestBytecode, sizeof(kSkinPoseScatterRestBytecode), nullptr, &s.poseScatterRest)) ||
+        FAILED(dev->CreateComputeShader(kSkinPoseVerifyBytecode, sizeof(kSkinPoseVerifyBytecode), nullptr, &s.poseVerify)) ||
+        FAILED(dev->CreateComputeShader(kSkinPoseFinishBytecode, sizeof(kSkinPoseFinishBytecode), nullptr, &s.poseFinish))) return false;
     s.jobs = nullptr;
     s.prevJobs = makeBuffer(dev, kMaxJobs * 16, D3D11_BIND_SHADER_RESOURCE, structured, 16);
     s.plan = makeBuffer(dev, kPlanWords * 4, D3D11_BIND_SHADER_RESOURCE, raw, 0);
@@ -122,12 +141,27 @@ bool create(SkinJoinGpu::Impl& s, ID3D11Device* dev) {
     s.nullJoin = makeBuffer(dev, 64, D3D11_BIND_SHADER_RESOURCE, structured, 4);
     s.stats = makeBuffer(dev, kStatWords * 4, D3D11_BIND_UNORDERED_ACCESS, raw, 0);
     s.owner = makeBuffer(dev, kMaxRows * 4, D3D11_BIND_UNORDERED_ACCESS, raw, 0);
-    s.poseCb = makeBuffer(dev, 16, D3D11_BIND_CONSTANT_BUFFER, 0, 0);
+    s.poseCb = makeBuffer(dev, 32, D3D11_BIND_CONSTANT_BUFFER, 0, 0);
+    s.instCopy = makeBuffer(dev, kInstCopyBytes, D3D11_BIND_SHADER_RESOURCE, raw, 0);
+    s.refBits = makeBuffer(dev, (kRefWords + 1) * 4, D3D11_BIND_UNORDERED_ACCESS, raw, 0);
+    s.baseState = makeBuffer(dev, kMaxRows * 4, D3D11_BIND_UNORDERED_ACCESS, raw, 0);
+    {
+        // the draw list: dynamic, written whole (a boxed UpdateSubresource on a buffer is dropped by WARP) by a discarding Map
+        D3D11_BUFFER_DESC d{};
+        d.ByteWidth = kMaxRanges * 8;
+        d.Usage = D3D11_USAGE_DYNAMIC;
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        d.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        d.MiscFlags = structured;
+        d.StructureByteStride = 8;
+        if (FAILED(dev->CreateBuffer(&d, nullptr, &s.ranges))) return false;
+    }
     for (int i = 0; i < 2; ++i) {
         s.info[i] = makeBuffer(dev, kMaxRows * 8, srvUav, raw, 0);
         s.pose[i] = makeBuffer(dev, kMaxRows * 32, srvUav, structured, 32);
     }
-    if (!s.prevJobs || !s.plan || !s.joinTable || !s.nullJoin || !s.stats || !s.owner || !s.poseCb || !s.info[0] || !s.info[1] || !s.pose[0] || !s.pose[1]) return false;
+    if (!s.prevJobs || !s.plan || !s.joinTable || !s.nullJoin || !s.stats || !s.owner || !s.poseCb || !s.info[0] || !s.info[1] || !s.pose[0] || !s.pose[1] ||
+        !s.instCopy || !s.refBits || !s.baseState || !s.ranges) return false;
     s.prevJobsSrv = structuredSrv(dev, s.prevJobs.Get(), kMaxJobs);
     s.planSrv = rawSrv(dev, s.plan.Get(), kPlanWords);
     s.joinSrv = structuredSrv(dev, s.joinTable.Get(), kMaxRows);
@@ -135,20 +169,24 @@ bool create(SkinJoinGpu::Impl& s, ID3D11Device* dev) {
     s.joinUav = structuredUav(dev, s.joinTable.Get(), kMaxRows);
     s.statsUav = rawUav(dev, s.stats.Get(), kStatWords);
     s.ownerUav = rawUav(dev, s.owner.Get(), kMaxRows);
+    s.instSrv = rawSrv(dev, s.instCopy.Get(), kInstCopyBytes / 4);
+    s.rangesSrv = structuredSrv(dev, s.ranges.Get(), kMaxRanges);
+    s.refUav = rawUav(dev, s.refBits.Get(), kRefWords + 1);
+    s.stateUav = rawUav(dev, s.baseState.Get(), kMaxRows);
     for (int i = 0; i < 2; ++i) {
         s.infoSrv[i] = rawSrv(dev, s.info[i].Get(), kMaxRows * 2);
         s.infoUav[i] = rawUav(dev, s.info[i].Get(), kMaxRows * 2);
         s.poseSrv[i] = structuredSrv(dev, s.pose[i].Get(), kMaxRows);
         s.poseUav[i] = structuredUav(dev, s.pose[i].Get(), kMaxRows);
     }
-    if (!s.prevJobsSrv || !s.planSrv || !s.joinSrv || !s.nullJoinSrv || !s.joinUav || !s.statsUav || !s.ownerUav) return false;
+    if (!s.prevJobsSrv || !s.planSrv || !s.joinSrv || !s.nullJoinSrv || !s.joinUav || !s.statsUav || !s.ownerUav || !s.instSrv || !s.rangesSrv || !s.refUav || !s.stateUav) return false;
     for (int i = 0; i < 2; ++i) if (!s.infoSrv[i] || !s.infoUav[i] || !s.poseSrv[i] || !s.poseUav[i]) return false;
-    for (int i = 0; i < 3; ++i) {
+    for (uint32_t i = 0; i < kStatStages; ++i) {
         D3D11_BUFFER_DESC d{};
         d.ByteWidth = kStatWords * 4;
         d.Usage = D3D11_USAGE_STAGING;
         d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(dev->CreateBuffer(&d, nullptr, &s.statsStage[i]))) return false;
+        if (FAILED(dev->CreateBuffer(&d, nullptr, &s.stage[i].buf))) return false;
     }
     // Zero the counters and the tables once (the first frame reads them as "last frame's").
     const uint32_t zeros[kStatWords] = {};
@@ -163,6 +201,24 @@ bool create(SkinJoinGpu::Impl& s, ID3D11Device* dev) {
     const uint32_t nullData[16] = {};
     ctx->UpdateSubresource(s.nullJoin.Get(), 0, nullptr, nullData, 0, 0);
     return true;
+}
+
+// Take every finished counter read-back, oldest first, without waiting; the newest becomes the window's end. A slot still in flight ends the scan (the
+// later ones were queued after it).
+void pollStats(SkinJoinGpu::Impl& s, ID3D11DeviceContext* ctx) {
+    for (uint32_t pass = 0; pass < kStatStages; ++pass) {
+        SkinJoinGpu::Impl::Stage* oldest = nullptr;
+        for (auto& st : s.stage) if (st.at && (!oldest || st.at < oldest->at)) oldest = &st;
+        if (!oldest) return;
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(oldest->buf.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m)) || !m.pData) return;
+        std::memcpy(s.statsNewest, m.pData, sizeof(s.statsNewest));
+        ctx->Unmap(oldest->buf.Get(), 0);
+        s.cpuNewest = oldest->cpu;
+        s.framesNewest = oldest->at;
+        oldest->at = 0;
+        s.statsHave = true;
+    }
 }
 
 ComPtr<ID3D11ShaderResourceView> paletteView(SkinJoinGpu::Impl& s, ID3D11Buffer* buffer) {
@@ -226,8 +282,10 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
     ++chainFrames_;
     const uint32_t jobs = std::min<uint32_t>(groups, kMaxJobs);
     if (groups > kMaxJobs) ++s.overJobs;
-    // The hook's newest list, and what it says about the rows in use.
+    // The hook's newest list, and what it says about the rows in use. The dispatch tells the hook first that its job table has jobs: an empty list is
+    // evidence against the hook's offsets only against such a table (a stand-down it causes ends the newest list here).
     Snapshot& snap = *s.snapshot;
+    skinEntityHookNoteChain(groups);
     const bool haveSnap = skinEntityHookLatest(snap);
     // The rows the list says are in use (0 = no usable list: the plan's prevRows, checked per job on the GPU, covers that case).
     const uint32_t rowsInUse = haveSnap && checkSnapshot(snap) ? snap.end : 0;
@@ -267,42 +325,99 @@ void SkinJoinGpu::onChain(ID3D11DeviceContext* ctx, uint32_t present, uint32_t g
     }
     s.joinPresent = present;
     s.joinHistory = history;
-    // Counters back to the CPU, a few times a minute and never waited for.
-    if (chainFrames_ % 120 == 0) {
-        for (int i = 0; i < 3; ++i) if (!s.statsStageAt[i]) {
-            ctx->CopyResource(s.statsStage[i].Get(), s.stats.Get());
-            s.statsStageAt[i] = chainFrames_;
-            break;
-        }
+    // Counters back to the CPU at EVERY chain frame, never waited for: the finished read-backs are taken first, then this frame's copy goes into a free
+    // slot with this chain frame's number and the CPU's counters as they stand now (this frame's history verdict and feeder step are in them). A
+    // window is the span between two finished read-backs, so its GPU and CPU halves are the same frames (the F12 flight's line paired the GPU's counters
+    // with those of a window later and read "no history 1320 of 1320" beside "views live 2315").
+    pollStats(s, ctx);
+    for (auto& st : s.stage) {
+        if (st.at) continue;
+        ctx->CopyResource(st.buf.Get(), s.stats.Get());
+        st.at = chainFrames_;
+        st.cpu.feeder = s.feeder.counters();
+        st.cpu.history = s.history.counters();
+        st.cpu.poseBuilds = s.poseBuilds;
+        st.cpu.poseIncomplete = s.poseIncomplete;
+        break;
     }
 }
 
-void SkinJoinGpu::scatterPose(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* poolSrv, uint32_t records, uint32_t present) {
+void SkinJoinGpu::buildPose(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* poolSrv, uint32_t records, uint32_t present, const SkinRefs& refs) {
     Impl& s = *impl_;
     if (!s.created || s.failed || !ctx || !poolSrv || !records) return;
-    // Only the present frame the join ran in (the table [parity] is this frame's), once per snapshot.
+    // Only the present frame the join ran in (the table [parity] is this frame's), once.
     if (s.joinPresent != present) return;
     ++poseScatters_;
+    // Is there an exact list of what the frame's skinned draws read? Anything short of exact is "every record decides" (the rule before the list existed):
+    // never a guess about which record is live.
+    const char* why = "";
+    uint32_t minStart = 0, maxEnd = 0;
+    bool exact = refs.complete;
+    if (!refs.complete) why = refs.why && *refs.why ? refs.why : "a skinned draw was seen that the list cannot hold";
+    else if (records > kMaxPoolRecords) { exact = false; why = "the pool has more records than the bitmap covers"; }
+    else if (refs.pairs > kMaxRanges) { exact = false; why = "more skinned draws than the list holds"; }
+    else if (refs.pairs && (!refs.ranges || !refs.stream)) { exact = false; why = "no instance stream was named"; }
+    if (exact && refs.pairs) {
+        minStart = 0xFFFFFFFFu;
+        for (uint32_t i = 0; i < refs.pairs && exact; ++i) {
+            const uint32_t start = refs.ranges[i * 2], count = refs.ranges[i * 2 + 1];
+            if (count > kMaxRangeInstances || uint64_t(start) + count > 0x0FFFFFFFull) { exact = false; why = "a draw names too many instances"; break; }
+            minStart = std::min(minStart, start);
+            maxEnd = std::max(maxEnd, start + count);
+        }
+        if (exact && maxEnd <= minStart) { exact = false; why = "the listed draws name no instance"; }
+    }
+    D3D11_BOX box{};
+    if (exact && refs.pairs) {
+        D3D11_BUFFER_DESC sd{};
+        refs.stream->GetDesc(&sd);
+        const uint64_t from = uint64_t(refs.streamOffset) + uint64_t(minStart) * kInstanceStride, to = uint64_t(refs.streamOffset) + uint64_t(maxEnd) * kInstanceStride;
+        if (to > sd.ByteWidth) { exact = false; why = "the instance stream is shorter than its draws say"; }
+        else if (to - from > kInstCopyBytes) { exact = false; why = "the instance stream's span is larger than the copy"; }
+        else box = D3D11_BOX{UINT(from), 0, 0, UINT(to), 1, 1};
+    }
+    if (exact && refs.pairs) {
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (FAILED(ctx->Map(s.ranges.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) { exact = false; why = "the draw list could not be uploaded"; }
+        else {
+            std::memcpy(m.pData, refs.ranges, size_t(refs.pairs) * 8u);
+            ctx->Unmap(s.ranges.Get(), 0);
+        }
+    }
+    ++s.poseBuilds;
+    if (!refs.complete || !exact) { ++s.poseIncomplete; inexactWhy_ = why; }
+    else inexactWhy_ = "";
     GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
     CsStageSave saved;
     saved.save(ctx);
+    if (exact && refs.pairs) ctx->CopySubresourceRegion(s.instCopy.Get(), 0, 0, 0, 0, refs.stream, 0, &box);
     const uint32_t cur = s.parity & 1u;
-    const uint32_t cb[4] = {records, kMaxRows, 0, 0};
+    const uint32_t entries = exact && refs.pairs ? maxEnd - minStart : 0u;
+    const uint32_t cb[8] = {records, kMaxRows, exact ? refs.pairs : 0u, minStart, exact ? 1u : 0u, entries, 0, 0};
     ctx->UpdateSubresource(s.poseCb.Get(), 0, nullptr, cb, 0, 0);
-    ID3D11UnorderedAccessView* uavs[5] = {nullptr, nullptr, s.statsUav.Get(), nullptr, s.poseUav[cur].Get()};
-    ctx->CSSetShaderResources(5, 1, &poolSrv);
+    ID3D11UnorderedAccessView* uavs[7] = {nullptr, nullptr, s.statsUav.Get(), nullptr, s.poseUav[cur].Get(), s.refUav.Get(), s.stateUav.Get()};
+    ID3D11ShaderResourceView* srvs[3] = {poolSrv, s.instSrv.Get(), s.rangesSrv.Get()};
+    ctx->CSSetShaderResources(5, 3, srvs);
     ctx->CSSetConstantBuffers(0, 1, s.poseCb.GetAddressOf());
-    ctx->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
+    ctx->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
     ctx->CSSetShader(s.poseClear.Get(), nullptr, 0);
     ctx->Dispatch((kMaxRows + 63) / 64, 1, 1);
+    if (exact && refs.pairs) {
+        ctx->CSSetShader(s.poseRefMark.Get(), nullptr, 0);
+        ctx->Dispatch((refs.pairs + 63) / 64, 1, 1);
+    }
     ctx->CSSetShader(s.poseScatter.Get(), nullptr, 0);
+    ctx->Dispatch((records + 63) / 64, 1, 1);
+    ctx->CSSetShader(s.poseScatterRest.Get(), nullptr, 0);
     ctx->Dispatch((records + 63) / 64, 1, 1);
     ctx->CSSetShader(s.poseVerify.Get(), nullptr, 0);
     ctx->Dispatch((records + 63) / 64, 1, 1);
-    ID3D11UnorderedAccessView* none[5] = {};
-    ctx->CSSetUnorderedAccessViews(0, 5, none, nullptr);
-    ID3D11ShaderResourceView* noSrv = nullptr;
-    ctx->CSSetShaderResources(5, 1, &noSrv);
+    ctx->CSSetShader(s.poseFinish.Get(), nullptr, 0);
+    ctx->Dispatch((kMaxRows + 63) / 64, 1, 1);
+    ID3D11UnorderedAccessView* none[7] = {};
+    ctx->CSSetUnorderedAccessViews(0, 7, none, nullptr);
+    ID3D11ShaderResourceView* noSrv[3] = {};
+    ctx->CSSetShaderResources(5, 3, noSrv);
     saved.restore(ctx);
     s.poseBuiltPresent = present;
 }
@@ -327,16 +442,8 @@ SkinWindow SkinJoinGpu::takeWindow(ID3D11DeviceContext* ctx) {
     Impl& s = *impl_;
     SkinWindow w;
     if (!s.created || s.failed || !ctx) return w;
-    // The newest finished read-back becomes the window's end.
-    for (int i = 0; i < 3; ++i) {
-        if (!s.statsStageAt[i]) continue;
-        D3D11_MAPPED_SUBRESOURCE m{};
-        if (FAILED(ctx->Map(s.statsStage[i].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m)) || !m.pData) continue;
-        std::memcpy(s.statsNewest, m.pData, sizeof(s.statsNewest));
-        ctx->Unmap(s.statsStage[i].Get(), 0);
-        s.statsStageAt[i] = 0;
-        s.statsHave = true;
-    }
+    // The newest finished read-back becomes the window's end, with the CPU counters of the same chain frame.
+    pollStats(s, ctx);
     if (!s.statsHave) return w;
     for (uint32_t k = 0; k < kStatWords; ++k) {
         const bool state = k == kStatPrevHookOk || k == kStatLastJobs || k == kStatLastEntities;
@@ -344,21 +451,24 @@ SkinWindow SkinJoinGpu::takeWindow(ID3D11DeviceContext* ctx) {
         w.gpu[k] = state || bits ? s.statsNewest[k] : s.statsNewest[k] - s.statsLast[k];
     }
     std::memcpy(s.statsLast, s.statsNewest, sizeof(s.statsLast));
-    const JoinFeeder::Counters& f = s.feeder.counters();
-    w.cpu.steps = f.steps - s.feederLast.steps;
-    w.cpu.offered = f.offered - s.feederLast.offered;
-    w.cpu.sameThread = f.sameThread - s.feederLast.sameThread;
-    w.cpu.otherThread = f.otherThread - s.feederLast.otherThread;
-    for (uint32_t k = 0; k < kDeclineCount; ++k) w.cpu.decline[k] = f.decline[k] - s.feederLast.decline[k];
-    const PaletteHistory::Counters& h = s.history.counters();
-    for (uint32_t k = 0; k < kHistoryCount; ++k) w.cpu.history[k] = h.verdict[k] - s.historyLast.verdict[k];
-    s.feederLast = f;
-    s.historyLast = h;
+    const JoinFeeder::Counters& f = s.cpuNewest.feeder;
+    const JoinFeeder::Counters& fl = s.cpuLast.feeder;
+    w.cpu.steps = f.steps - fl.steps;
+    w.cpu.offered = f.offered - fl.offered;
+    w.cpu.sameThread = f.sameThread - fl.sameThread;
+    w.cpu.otherThread = f.otherThread - fl.otherThread;
+    for (uint32_t k = 0; k < kDeclineCount; ++k) w.cpu.decline[k] = f.decline[k] - fl.decline[k];
+    const PaletteHistory::Counters& h = s.cpuNewest.history;
+    const PaletteHistory::Counters& hl = s.cpuLast.history;
+    for (uint32_t k = 0; k < kHistoryCount; ++k) w.cpu.history[k] = h.verdict[k] - hl.verdict[k];
+    w.cpu.poseBuilds = s.cpuNewest.poseBuilds - s.cpuLast.poseBuilds;
+    w.cpu.poseIncomplete = s.cpuNewest.poseIncomplete - s.cpuLast.poseIncomplete;
+    s.cpuLast = s.cpuNewest;
     w.chainRefused = s.chainRefused;
     w.overJobs = s.overJobs;
     w.createFailed = s.createFailed;
-    w.frames = chainFrames_ - s.framesLast;
-    s.framesLast = chainFrames_;
+    w.frames = s.framesNewest - s.framesLast;
+    s.framesLast = s.framesNewest;
     w.valid = true;
     return w;
 }

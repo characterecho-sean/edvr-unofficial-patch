@@ -85,5 +85,72 @@ inline uint32_t baseOf(const Built& b, uint32_t bind) {
     return 0;
 }
 
+// ---- the pose table's worlds (skin_join.h, "the pose table's CPU reference") --------------------------------------------------
+// A pool record as 84 words (a base and a pose that `salt` tells apart: words 1 and 4 move with it; word 7 is not compared).
+inline std::vector<uint32_t> mkRecord(uint32_t base, uint32_t salt, uint32_t word7 = 0xFFFFFFFFu) {
+    std::vector<uint32_t> r(84, 0);
+    r[0] = base; r[1] = 0x3F800000u + salt; r[2] = 11; r[3] = 13; r[4] = 17 + salt; r[5] = 19; r[6] = 23; r[7] = word7 == 0xFFFFFFFFu ? 999 + salt : word7;
+    return r;
+}
+// A pool, the instance stream and the draws' windows into it, built the way a frame is: the stream also holds stale entries no draw reads.
+struct PoseWorld {
+    std::vector<uint32_t> records;       // 84 words each
+    PoseRefs refs;
+    uint32_t entryBase = 100;            // the stream's span starts at entry 100 (the copy's first entry)
+    uint32_t record(uint32_t base, uint32_t salt) {
+        const auto r = mkRecord(base, salt);
+        records.insert(records.end(), r.begin(), r.end());
+        return uint32_t(records.size() / 84 - 1);
+    }
+    uint32_t entry(uint32_t rec) {       // one stream entry naming `rec`; returns its absolute entry index
+        refs.stream.push_back(rec);
+        refs.stream.push_back(0);
+        return entryBase + uint32_t(refs.stream.size() / 2 - 1);
+    }
+    void draw(uint32_t rec) {            // a draw of one instance reading `rec`
+        const uint32_t e = entry(rec);
+        refs.ranges.push_back(e);
+        refs.ranges.push_back(1);
+    }
+    void drawMany(const std::vector<uint32_t>& recs) {   // a draw of several instances: consecutive entries
+        const uint32_t first = entry(recs[0]);
+        for (size_t i = 1; i < recs.size(); ++i) entry(recs[i]);
+        refs.ranges.push_back(first);
+        refs.ranges.push_back(uint32_t(recs.size()));
+    }
+    void finish(bool complete = true) { refs.complete = complete; refs.first = entryBase; }
+    std::vector<PoseWords> words() const {
+        std::vector<PoseWords> pool(records.size() / 84);
+        for (size_t i = 0; i < pool.size(); ++i) std::memcpy(pool[i].w, &records[i * 84], 32);
+        return pool;
+    }
+};
+// Bases 21..29, each a scenario of the rule (the numbers in the cases that read this are these):
+//   21 the live record first, a stale second record after it (the F12 flight's shape)   22 the stale record first, the live one after it
+//   23 two records both read by draws, disagreeing                                        24 two records disagreeing, none read
+//   25 one record, not read                                                              26 one record, read
+//   27 a read record and an unread one of the same pose                                   28 one live record and two different stale ones
+//   29 the live record read by two draws (both eyes) and one stale one
+// The stream also names stale records (entries no draw's window covers).
+inline PoseWorld frameWorld() {
+    PoseWorld w;
+    const uint32_t a = w.record(21, 0), b = w.record(21, 1);
+    const uint32_t c = w.record(22, 1), d = w.record(22, 0);
+    const uint32_t e = w.record(23, 0), f = w.record(23, 1);
+    const uint32_t g = w.record(24, 0), h = w.record(24, 1);
+    const uint32_t i = w.record(25, 0);
+    const uint32_t j = w.record(26, 0);
+    const uint32_t k = w.record(27, 0), l = w.record(27, 0);
+    const uint32_t m = w.record(28, 0), n = w.record(28, 1), o = w.record(28, 2);
+    const uint32_t pp = w.record(29, 0), q = w.record(29, 1);
+    w.entry(b); w.entry(c); w.entry(h); w.entry(n); w.entry(o); w.entry(q); w.entry(l);
+    w.draw(a); w.draw(d); w.draw(e); w.draw(f); w.draw(j); w.draw(k);
+    w.drawMany({m, pp, pp});
+    w.draw(pp);
+    w.finish(true);
+    (void)g; (void)i;
+    return w;
+}
+
 
 } // namespace skin_join_world

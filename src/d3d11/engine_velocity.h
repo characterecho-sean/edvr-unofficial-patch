@@ -109,6 +109,7 @@ struct DrawCache {
     const void* scene = nullptr;   // VS b1's buffer, likewise
     bool eye = false;
     int family = -1;   // the family whose substituted shaders are bound, -1 none
+    bool skin = false; // F2: the substituted draw is a skinned family's with target 7 bound (its instance-stream entries are listed: noteSkinDrawSlow)
 };
 constexpr int kMaxFamilies = 16;   // kFamilies must fit: the static_assert in engine_velocity.cpp
 extern std::atomic<bool> live;
@@ -121,6 +122,7 @@ extern uint64_t g_stateCalls;                  // owner thread only: the draw wr
 constexpr unsigned kWatchSlots = 6;
 extern std::atomic<const ID3D11Resource*> watch[kWatchSlots];
 void beforeDrawSlow(ID3D11DeviceContext*, bool rtv0Eye);
+void noteSkinDrawSlow(ID3D11DeviceContext*, uint32_t startInstance, uint32_t instances);
 extern uint32_t g_psShadowProbeN;   // owner thread; the header's sampling counter
 // Sampled backstop for a genuinely unobserved game bind. The seam arc's
 // original zero-bind/live-census evidence was our own generated shaders
@@ -169,6 +171,15 @@ inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         psShadowProbe(ctx);
     }
     if (cache.family >= 0) ++familyDraws[cache.family];
+}
+
+// F2: the instanced draws' arguments, told right after engineVelocityBeforeDraw (vscreen's DrawInstanced and DrawIndexedInstanced thunks). A skinned
+// family's substituted draw lists its instance window (StartInstanceLocation and count): the instance stream's entries there name the pool records the
+// draw reads, and the frame's list of them is what decides which of two records of one palette base is the live one (skin_join.h, "the pose table's CPU
+// reference"). One load and a branch for every other draw.
+inline void engineVelocityNoteSkinDraw(ID3D11DeviceContext* ctx, uint32_t startInstance, uint32_t instances) {
+    using namespace engine_velocity_detail;
+    if (cache.skin) noteSkinDrawSlow(ctx, startInstance, instances);
 }
 
 // The Map tee (vscreen's hookedMap, owner context, after the real Map): the

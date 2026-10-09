@@ -108,6 +108,9 @@ struct ExplorerCamTestFrame {
     const wchar_t* bindsDir = nullptr;    // an Elite bindings directory for the clash check (null: none, unchecked)
     bool comfortFade = false;             // the comfort fade (production: always on). Off, F5's request goes out the frame it is pressed, as the older cells expect
     uint64_t nowUs = 0;                   // the fade's clock in microseconds (0: nowMs * 1000)
+    bool motionArmed = false;             // the engine's motion for the eye path is live: an entry waits for it (default: nothing to wait for, as the older cells expect)
+    uint32_t viewsRun = 0;                // ...consecutive frames both eyes were handed its views
+    bool skinJobs = false, skinLive = false;   // ...the frame has skinned jobs, and the second skin's join is live for it
 };
 namespace explorercamtest {
 void setTargets(const ExplorerCamTestTargets& targets);

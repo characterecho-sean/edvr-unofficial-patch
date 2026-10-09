@@ -19,6 +19,11 @@
 //   H11 a call from another thread is reported
 //   H12 a reader against the game's thread: every copy is one call's list, never a mix
 //   H13 a second node stands the hook down: the stand-down is reported, no snapshot is offered, the original keeps running
+//   H14 lists of no entries (a menu, a loading screen) judge nothing, and a dispatch with no jobs judges no list
+//   H15 the bound stays for lists with something to read: 120 unusable ones (a list of no entries but an odd end row, or one that faulted, is one of
+//       those) stand the hook down, empty lists between them do not count
+//   H16 an empty list is judged by a chain dispatch that has jobs: 120 of them stand the hook down
+//   H17 one usable list ends the judging for good
 #include <windows.h>
 
 #include <cstdio>
@@ -33,7 +38,8 @@ void breadcrumb(const char*) {}   // production guard.cpp's crash-channel depend
 
 // The case ids the production self-test labels its failures with (tools\skin_entity_hook_test\mutants.py reads this list to hold each case to a mutation).
 static const char* const kCases[] = {"H1.unarmed",  "H2.prologue",   "H3.arm",         "H4.read",      "H5.first-call", "H6.gate",    "H7.fault",
-                                     "H8.implausible", "H9.cycle", "H10.recovery", "H11.thread", "H12.tear",       "H13.second-node"};
+                                     "H8.implausible", "H9.cycle", "H10.recovery", "H11.thread", "H12.tear",       "H13.second-node", "H14.empty-idle",
+                                     "H15.bound",      "H16.empty-with-jobs", "H17.usable-ends-judging"};
 
 int main(int argc, char** argv) {
     bool selfTest = false;

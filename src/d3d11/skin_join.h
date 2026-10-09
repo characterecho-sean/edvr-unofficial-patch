@@ -42,6 +42,13 @@ constexpr uint32_t kMaxRows = 65536;       // palette rows the tables cover (the
 constexpr uint32_t kMaxJobs = 8192;        // dispatch groups the join reads
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 constexpr uint32_t kMaxBonesPerJob = 4096;
+// The pose table's reference list (below): pool records its bitmap covers, the words of that bitmap (the word after it is the "bad" flag), the draws
+// one frame's list holds, and the instances one listed draw may name.
+constexpr uint32_t kMaxPoolRecords = 65536;
+constexpr uint32_t kRefWords = kMaxPoolRecords / 32;
+constexpr uint32_t kMaxRanges = 16384;
+constexpr uint32_t kMaxRangeInstances = 1024;
+constexpr uint32_t kInstanceStride = 8;    // the instance stream's entry: the pool record index, then a second word
 
 struct JobRow {                            // the game's t0 row: structured, stride 16
     uint32_t src, dst, bind, count;
@@ -304,12 +311,16 @@ enum Stat : uint32_t {
     kStatDupBase,            // two jobs with one base
     kStatPrevHookOk,         // state: the previous frame's hook verification passed (not a counter)
     kStatMismatchBits,       // OR of the disagreement causes (below) over the window
-    kStatPoseRecords,        // records scattered into a pose table
-    kStatPoseConflicts,      // records that disagreed with another record of the same base
+    kStatPoseRecords,        // records of a pose table's frame that carry a base
+    kStatPoseConflicts,      // UNRESOLVED: records that decide a base (a live record of it, or any record when none is live) and disagree with its table entry
     kStatLastJobs,           // the last frame's job count (not a counter)
     kStatLastEntities,       // the last frame's entity count (not a counter)
     kStatFailPrevRows,       // the job's previous rows run past the previous palette buffer
-    kStatWords = 24
+    kStatPoseResolved,       // RESOLVED: unreferenced records that disagreed with a base's live record and were overruled by it
+    kStatPoseDropped,        // bases whose table entry was zeroed (their deciding records disagree): no history for them
+    kStatPoseListsExact,     // pose tables built with an exact reference list (the CPU called it complete and every entry of it was readable)
+    kStatPoseListsBad,       // ...built from a list the CPU called complete but one of whose entries the GPU could not read (out of range, too many instances)
+    kStatWords = 28
 };
 enum MismatchBits : uint32_t {
     kMmNotInRange = 1,       // a job outside every entity's range
@@ -426,12 +437,90 @@ inline JoinResult cpuJoin(const Plan& plan, const std::vector<JobRow>& jobs, con
     return r;
 }
 
+// ---- the pose table's CPU reference ------------------------------------------------------------------------------------
+// WHICH RECORD OF A BASE IS THE LIVE ONE. The pool holds records no draw of the frame reads (a second set of every character's records, left from
+// two frames earlier: the F12 flight, run 154827's copies), so a base can have records that disagree. The live record is the one a skinned draw of this
+// frame read, and "read" is exact: the draw's StartInstanceLocation selects an entry of the instance stream, whose first word names the record. The
+// stream itself holds stale entries (the same copies: 66,000 nonzero entries past the last draw's), so only the draws' own entries count.
+//   * a base with live records is decided by them alone: they must agree, the unreferenced ones are overruled (counted resolved);
+//   * a base with no live record is decided by all its records, as before: they must agree;
+//   * a base whose deciding records disagree has no history (its table entry is zeroed whole, counted dropped), never a guess.
+// With no exact reference list (a draw the CPU did not see, a stream it could not name, an entry out of range) every base is of the second kind.
+struct PoseWords { uint32_t w[8]; };         // a pool record's bytes 0..31: word 0 the base, words 0..6 compared, word 7 not
+struct PoseRefs {
+    bool complete = false;                   // the CPU saw every skinned draw of the frame, all reading one stream of stride 8
+    std::vector<uint32_t> ranges;            // (StartInstanceLocation, instances) per draw, two words each
+    std::vector<uint32_t> stream;            // the copied span of the instance stream, two words an entry; its first entry is `first`
+    uint32_t first = 0;
+};
+struct PoseResult {
+    std::vector<PoseWords> table;            // kMaxRows
+    uint32_t records = 0, conflicts = 0, resolved = 0, dropped = 0;
+    uint32_t listsExact = 0, listsBad = 0;   // 1 each at most: the list was complete and fully readable / complete but an entry of it was not
+    bool listExact = false;                  // the list was complete and every entry of it was readable
+};
+inline bool poseSame(const PoseWords& a, const PoseWords& b) {
+    for (int i = 0; i < 7; ++i) if (a.w[i] != b.w[i]) return false;
+    return true;
+}
+// Mirrors poseClear, poseRefMark, poseScatter, poseScatterRest, poseVerify and poseFinish (skin_join_shader.h). Exact for worlds whose
+// disagreeing records of one base come in twos: with three or more distinct records the GPU's winner of a race decides which of them count as
+// conflicts (the base is dropped either way).
+inline PoseResult cpuPose(const std::vector<PoseWords>& pool, const PoseRefs& refs) {
+    PoseResult r;
+    r.table.assign(kMaxRows, PoseWords{});
+    std::vector<uint8_t> state(kMaxRows, 0);          // bit 0 a live record wrote it, bit 1 its deciding records disagree
+    std::vector<uint32_t> bits(kRefWords, 0);
+    bool bad = false;
+    const uint32_t records = uint32_t(pool.size());
+    const uint32_t entries = uint32_t(refs.stream.size() / 2);
+    for (size_t i = 0; i + 1 < refs.ranges.size(); i += 2) {
+        const uint32_t start = refs.ranges[i], count = refs.ranges[i + 1];
+        if (count > kMaxRangeInstances) { bad = true; continue; }
+        for (uint32_t k = 0; k < count; ++k) {
+            const uint32_t entry = start + k;
+            if (entry < refs.first || entry - refs.first >= entries) { bad = true; continue; }
+            const uint32_t rec = refs.stream[size_t(entry - refs.first) * 2];
+            if (rec >= records || rec >= kRefWords * 32u) { bad = true; continue; }
+            bits[rec >> 5] |= 1u << (rec & 31u);
+        }
+    }
+    const bool valid = refs.complete && !bad;
+    r.listExact = valid;
+    if (refs.complete) { if (bad) r.listsBad = 1; else r.listsExact = 1; }
+    const auto referenced = [&](uint32_t rec) { return rec < kRefWords * 32u && (bits[rec >> 5] & (1u << (rec & 31u))) != 0; };
+    for (uint32_t i = 0; i < records; ++i) {
+        const uint32_t base = pool[i].w[0];
+        if (base == 0 || base >= kMaxRows) continue;
+        ++r.records;
+        if (valid && referenced(i)) { r.table[base] = pool[i]; state[base] |= 1; }
+    }
+    for (uint32_t i = 0; i < records; ++i) {
+        const uint32_t base = pool[i].w[0];
+        if (base == 0 || base >= kMaxRows) continue;
+        if (!(state[base] & 1)) r.table[base] = pool[i];
+    }
+    for (uint32_t i = 0; i < records; ++i) {
+        const uint32_t base = pool[i].w[0];
+        if (base == 0 || base >= kMaxRows) continue;
+        const bool hasLive = (state[base] & 1) != 0;
+        const bool decisive = !hasLive || referenced(i);
+        if (poseSame(r.table[base], pool[i])) continue;
+        if (decisive) { state[base] |= 2; ++r.conflicts; }
+        else ++r.resolved;
+    }
+    for (uint32_t b = 0; b < kMaxRows; ++b)
+        if (state[b] & 2) { r.table[b] = PoseWords{}; ++r.dropped; }
+    return r;
+}
+
 // ---- the periodic line -----------------------------------------------------------------------------------------------
 // One line per window. `d` = the GPU counters' deltas over the window (kStatWords), `f` and `p` the CPU side's deltas.
 struct WindowCpu {
     uint64_t steps = 0, offered = 0, sameThread = 0, otherThread = 0;
     uint64_t decline[kDeclineCount]{};
     uint64_t history[kHistoryCount]{};
+    uint64_t poseBuilds = 0, poseIncomplete = 0;   // pose tables built / built with no complete reference list (the CPU's verdict)
 };
 inline std::string joinLine(const uint32_t (&d)[kStatWords], const WindowCpu& c, bool hookArmed, const char* hookState) {
     const uint32_t frames = d[kStatFrames];
@@ -441,7 +530,7 @@ inline std::string joinLine(const uint32_t (&d)[kStatWords], const WindowCpu& c,
         "skin join: source=%s hook=%s frames=%u (hook %u, prefix %u, no history %u) jobs=%u joined=%u failed: new-entity %u, range %u, layout %u, "
         "prefix %u, pose %u, cap %u, dup-base %u, prev-rows %u | hook/t0 disagreements %u (causes 0x%x), unverified-previous %u | offered %llu, declined "
         "[%s %llu, %s %llu, %s %llu, %s %llu, %s %llu, %s %llu], threads same %llu other %llu | history [%s %llu, %s %llu, %s %llu, %s %llu, %s %llu] | "
-        "pose records %u conflicts %u | last frame: %u jobs, %u entities",
+        "pose records %u | last frame: %u jobs, %u entities",
         source, hookArmed ? hookState : "off", frames, d[kStatHookUsed], d[kStatPrefixUsed], d[kStatNoHistory], d[kStatJobs], d[kStatJoined],
         d[kStatFailNoPrevEntity], d[kStatFailRange], d[kStatFailLayout], d[kStatFailPrefix], d[kStatFailPose], d[kStatFailCap], d[kStatDupBase], d[kStatFailPrevRows],
         d[kStatHookDisagree], d[kStatMismatchBits], d[kStatPrevNotVerified], (unsigned long long)c.offered,
@@ -452,7 +541,23 @@ inline std::string joinLine(const uint32_t (&d)[kStatWords], const WindowCpu& c,
         historyName(kHistoryFirst), (unsigned long long)c.history[kHistoryFirst], historyName(kHistoryGap), (unsigned long long)c.history[kHistoryGap],
         historyName(kHistorySame), (unsigned long long)c.history[kHistorySame], historyName(kHistoryShrunk), (unsigned long long)c.history[kHistoryShrunk],
         historyName(kHistoryPose), (unsigned long long)c.history[kHistoryPose],
-        d[kStatPoseRecords], d[kStatPoseConflicts], d[kStatLastJobs], d[kStatLastEntities]);
+        d[kStatPoseRecords], d[kStatLastJobs], d[kStatLastEntities]);
+    return b;
+}
+
+// The pose table's witness (one line a window, after the join line): which record of a base was taken as the live one. `d` and `c` as above.
+//   "conflicts resolved"   records of a base that disagreed with its live record and were overruled by it (the stale second set of the F12 flight)
+//   "unresolved"           records that decide a base (live ones, or all when none is live) and disagree: the base is dropped
+//   "bases dropped"        bases whose table entry was zeroed: no history for them, never a guess
+//   "reference lists"      the draw lists the tables were built with: exact, unreadable (the GPU met an entry it could not read), not complete (the CPU did not
+//                          see every skinned draw, or the list was too large): with every list not exact, nothing is resolved and every record decides
+inline std::string poseLine(const uint32_t (&d)[kStatWords], const WindowCpu& c) {
+    char b[512];
+    std::snprintf(b, sizeof(b),
+        "skin join: pose witness: tables built %llu, records %u | conflicts resolved %u, unresolved %u, bases dropped %u | reference lists exact %u, "
+        "unreadable %u, not complete %llu",
+        (unsigned long long)c.poseBuilds, d[kStatPoseRecords], d[kStatPoseResolved], d[kStatPoseConflicts], d[kStatPoseDropped], d[kStatPoseListsExact],
+        d[kStatPoseListsBad], (unsigned long long)c.poseIncomplete);
     return b;
 }
 

@@ -1,4 +1,5 @@
 #include "engine_velocity.h"
+#include "engine_motion_ready.h"
 #include "temporal_shader_bytecode.h"
 #include "dxbc_flat_overlay.h"
 
@@ -151,6 +152,7 @@ struct FamilyState {
     std::unordered_map<ID3D11PixelShader*, Ptr<ID3D11PixelShader>> guardedPs;
     std::unordered_map<ID3D11PixelShader*, std::string> psFailed;
     std::unordered_map<ID3D11PixelShader*, bool> psExports;   // F2: the patched pixel shader writes E to target 7
+    std::unordered_map<ID3D11PixelShader*, bool> psZeroes;    // F2: ...or writes "no history" there (exactly zero, valid 0): a skinned family's pixel shader that exports no E
     uint64_t binds = 0;                            // substitutions made (this window)
     uint64_t unkeyedPsDraws = 0;                   // bind events with a pixel shader outside the keyed set
     uint64_t unkeyedPsHash = 0;
@@ -197,11 +199,23 @@ std::atomic<bool> g_anyBound{false};   // EDVR state may still be bound (owner t
 // never a stale answer. Owner thread, under g_mutex.
 SkinJoinGpu g_skin;
 std::atomic<bool> g_skinWanted{false};   // VR profile with the feature live: the hook is armed and the chain dispatch feeds the join
-uint32_t g_skinPoseFrame = ~0u;          // the present frame whose first pool snapshot built the pose table, and that snapshot's eye
+uint32_t g_skinPoseFrame = ~0u;          // the present frame whose first pool snapshot owes a pose table (built at the frame boundary), and that snapshot's eye
 int g_skinPoseEye = -1;
+// The frame's list of the instance-stream entries its skinned draws read (skin_join.h, "the pose table's CPU reference"): every skinned family's substituted
+// draw with target 7 bound adds (StartInstanceLocation, instances); the stream is the vertex buffer of stride 8 the draw read. Anything the list cannot
+// take (a second stream, no stream, too many draws or instances) makes it incomplete for the frame: the pose table then lets every record decide.
+struct SkinRefCollector {
+    uint32_t frame = ~0u;                // the present frame the list is for
+    std::vector<uint32_t> ranges;        // (start, instances) pairs
+    Ptr<ID3D11Buffer> stream;
+    UINT streamOffset = 0;
+    bool complete = true;
+    const char* why = "";
+} g_skinRefs;
 struct SkinStats {
     uint64_t draws = 0;            // substituted draws that wrote target 7
-    uint64_t drawsOff = 0;         // substituted draws of a skinned family that did not (target 7 masked off)
+    uint64_t drawsOff = 0;         // substituted draws of a skinned family whose pixel shader exports no E: it writes "no history" (exactly zero) to target 7
+    uint64_t unsafeDeclined = 0;   // skinned family draws NOT substituted because their pixel shader could take neither write (patchedPsFor says which, once)
     uint64_t eyeFrames = 0;        // eye-frames with target 7 bound
     uint64_t slotTaken = 0;        // pass bindings where target 7 already held the game's own target
     uint64_t viewsGiven = 0, viewsLive = 0;   // compose requests that got the skin view, and of those the ones with a live join
@@ -212,6 +226,21 @@ struct SkinStats {
     bool hookLogged = false;
     uint32_t windowStart = 0;
 } g_skinStats;
+
+// What Explorer Cam's entry fade waits for (engine_motion_ready.h, explorer_cam_fade_core.h "MOTION"), kept at every frame boundary: whether BOTH eyes were
+// handed the engine-motion views since the boundary before (a run of such frames), and whether the palette chain ran with jobs since then and the second
+// skin's join was live for it. Under g_mutex.
+constexpr uint32_t kMotionNeverAsked = 1u << 30, kMotionAskWindow = 30;
+struct MotionReadyState {
+    uint64_t viewsGiven[2] = {0, 0}, viewsSeen[2] = {0, 0};   // views handed out per eye, ever / at the last boundary
+    uint32_t viewsRun = 0;                                    // consecutive boundaries at which both eyes had been given views since the one before
+    uint64_t chainCalls = 0, chainSeen = 0;                   // chain dispatches the join took (with jobs), ever / at the last boundary
+    bool chainLive = false;                                   // the join was live for the last of them
+    bool skinJobs = false, skinLive = false;                  // as of the last boundary
+    uint64_t asked = 0, askedSeen = 0;                        // engineVelocityViews calls (either eye), ever / at the last boundary: somebody is consuming the views
+    uint32_t sinceAsk = kMotionNeverAsked;                    // boundaries since the last one at which the views were asked for
+    bool consumer = false;                                    // asked within the last kMotionAskWindow boundaries
+} g_motion;
 
 // The derived blend states, one per game state (held, so a pointer is an
 // identity). A few in practice; cleared past the cap.
@@ -742,13 +771,17 @@ ID3D11PixelShader* patchedPsFor(ID3D11DeviceContext* ctx, int f, ID3D11PixelShad
     Ptr<ID3D11PixelShader> patched;
     std::string why = info == g_ps.end() ? "pixel shader bytecode not kept" : info->second.linked ? "class linkage" : "";
     if (why.empty()) {
-        // F2: the five skinned pairs export E to target 7 (the family's other keyed pixel shaders export the slot only). An export
-        // that cannot be made is a pair that goes on with the slot export alone, as it did before.
-        const bool wantsExport = s.skin && !runtimeFlatProfile() && engine_velocity_family::skinPair(kFamilies[f].vs, info->second.hash);
-        for (int attempt = 0; attempt < (wantsExport ? 2 : 1) && !patched; ++attempt) {
+        // F2: the five skinned pairs export E to target 7 (the family's other keyed pixel shaders export the slot only). What target 7 gets from a skinned
+        // family's pixel shader, best first: its E (a keyed pair); else "no history" written exactly (valid 0), so a pixel it covers never keeps the E an
+        // earlier draw of the eye-frame wrote there; else nothing, and then the draw is not substituted at all (the draw path says so): a write-masked
+        // draw would leave that earlier E under a surface it is not the answer for.
+        const bool skinFamily = s.skin && !runtimeFlatProfile();
+        const bool wantsExport = skinFamily && engine_velocity_family::skinPair(kFamilies[f].vs, info->second.hash);
+        for (int mode = wantsExport ? 0 : skinFamily ? 1 : 2; mode <= 2 && !patched; ++mode) {
             std::vector<BYTE> out;
             EngineVelocityInputs inputs = s.inputs;
-            inputs.skinExport = wantsExport && attempt == 0;
+            inputs.skinExport = mode == 0;
+            inputs.skinZero = mode == 1;
             why.clear();
             if (engineVelocityPatchPs(info->second.bytes.data(), info->second.bytes.size(), inputs, out, why)) {
                 Ptr<ID3D11Device> dev;
@@ -758,9 +791,12 @@ ID3D11PixelShader* patchedPsFor(ID3D11DeviceContext* ctx, int f, ID3D11PixelShad
                 t_creating = false;
                 if (FAILED(hr)) { char t[64]; _snprintf_s(t, _TRUNCATE, "CreatePixelShader 0x%08X", unsigned(hr)); why = t; patched.Reset(); }
             }
-            if (patched) s.psExports[ps] = inputs.skinExport;
-            else if (wantsExport && attempt == 0)
-                Log::get().note("skin join: %s + ps_%016llX could not export E (%s); it goes on with the slot export alone.", kFamilies[f].name,
+            if (patched) { s.psExports[ps] = inputs.skinExport; s.psZeroes[ps] = inputs.skinZero; }
+            else if (mode == 0)
+                Log::get().note("skin join: %s + ps_%016llX could not export E (%s); it goes on writing no history to target 7.", kFamilies[f].name,
+                                static_cast<unsigned long long>(info->second.hash), why.c_str());
+            else if (mode == 1)
+                Log::get().note("skin join: %s + ps_%016llX could not write no history to target 7 (%s); a draw with it is not substituted.", kFamilies[f].name,
                                 static_cast<unsigned long long>(info->second.hash), why.c_str());
         }
     }
@@ -905,6 +941,7 @@ void restore(ID3D11DeviceContext* ctx) {
     g_bound = Bound{};
     g_anyBound.store(false, std::memory_order_release);
     cache.family = -1;
+    cache.skin = false;
 }
 
 // --- The flat draw bracket, lazy form (engine_velocity.h says why) -------------------------------------
@@ -1261,12 +1298,11 @@ bool snapshot(ID3D11DeviceContext* ctx, Eye& e, int eye, uint32_t frame) {
         ctx->CopyResource(e.pool.Get(), poolBuf.Get());
         engineVelocityNoteStateCalls(1);
         if(timedApply(ctx,e.pool.Get(),poolBuf.Get(),frame,e.poolOutput))++g_primaryApplied;
-        // F2: this present frame's pose table (record bytes 0..31 by palette base), from the first eye's private copy; a refresh of
-        // that copy below builds it again. It is next frame's "previous pose".
+        // F2: this present frame owes a pose table (record bytes 0..31 by palette base) from the first eye's private copy, built at the frame boundary
+        // (skinBuildPoseLocked) once every draw has told which records it read. It is next frame's "previous pose".
         if (g_skinWanted.load(std::memory_order_relaxed) && eye != kEngineVelocitySourceEye && g_skinPoseFrame != frame) {
             g_skinPoseFrame = frame;
             g_skinPoseEye = eye;
-            g_skin.scatterPose(ctx, e.poolSrv.Get(), pd.ByteWidth / emit::kItemBytes, frame);
         }
         // The copy by region, not resource: our buffer can be a float4
         // larger than the game's (the stamp), which CopyResource would
@@ -1371,8 +1407,7 @@ void checkSources(ID3D11DeviceContext* ctx, Eye& e, int eye) {
             ctx->CopyResource(e.pool.Get(), e.poolBuffer.Get());
             engineVelocityNoteStateCalls(1);
             if(timedApply(ctx,e.pool.Get(),e.poolBuffer.Get(),e.frame,e.poolOutput))++g_primaryApplied;
-            if (g_skinWanted.load(std::memory_order_relaxed) && eye == g_skinPoseEye && e.frame == g_skinPoseFrame)
-                g_skin.scatterPose(ctx, e.poolSrv.Get(), e.poolBytes / emit::kItemBytes, e.frame);
+            // (the refreshed copy is what the boundary's pose table is built from: skinBuildPoseLocked)
         }
         endCapture(ctx, refreshTimer);
         e.poolAppendEpoch = wp.appendEpoch;
@@ -1699,6 +1734,8 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!usePs) { restore(ctx); return; }
     const auto exportFound = fam.psExports.find(ps);
     const bool exportsE = skinDraw && exportFound != fam.psExports.end() && exportFound->second;
+    const auto zeroFound = fam.psZeroes.find(ps);
+    const bool zeroes = skinDraw && zeroFound != fam.psZeroes.end() && zeroFound->second;   // writes "no history" to target 7 (valid 0)
     // The source's camera, draw by draw, before anything is prepared: the
     // frame starts at its first draw under the naming's camera.
     if (sourcePass && !sourceCameraHolds(ctx, f, frame)) { restore(ctx); return; }
@@ -1798,13 +1835,20 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         }
     }
     if (!e.bound) { e.overlayGroup = false; restore(ctx); return; }
+    // A skinned family's draw into an eye whose target 7 is bound writes E or "no history" there, or it is not substituted at all. One that wrote nothing
+    // would leave, under the surface it draws, the E an earlier skinned draw of the eye-frame wrote at the same pixel, and the compose would take that for
+    // this surface's answer: wrong motion. (A pixel shader that could not take either write is the only way here: patchedPsFor says so once.)
+    if (skinDraw && e.skinBound && !exportsE && !zeroes) {
+        ++g_skinStats.unsafeDeclined;
+        restore(ctx);
+        return;
+    }
     // The blend state MRT6 must not inherit: the derived one, unless it is
     // still bound (the game has not set another since). F2: with target 7 bound too, the derived state also says whether THIS draw
-    // writes it (a skinned pair's pixel shader that exports E) or not (any other draw of the pass, which would leave undefined values
+    // writes it (a skinned family's pixel shader: E, or "no history") or not (a rigid family's, which would leave undefined values
     // there): when only that changed under a derived state still bound, it is derived again from the game's own state it kept.
-    // Every other substituted draw of the pass (a rigid family's, or a skinned family's pixel shader that exports no E) turns target 7's writes off:
-    // it would otherwise leave undefined values there, and pay the bandwidth of writing them.
-    const int skinMode = e.skinBound ? (exportsE ? 2 : 1) : 0;
+    // A rigid family's substituted draw turns target 7's writes off: it would otherwise leave undefined values there, and pay the bandwidth of writing them.
+    const int skinMode = e.skinBound ? ((exportsE || zeroes) ? 2 : 1) : 0;
     const bool derivedBound = g_bound.derivedBlend && bindingGeneration(BindSlot::Blend) == g_bound.blendGen;
     if (!derivedBound || g_bound.skinMode != skinMode) {
         Ptr<ID3D11BlendState> game;
@@ -1925,10 +1969,13 @@ void slowPath(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     }
     if (skinDraw && e.skinBound) {
         if (exportsE) { e.skinWrittenFrame = frame; ++g_skinStats.draws; }
-        else ++g_skinStats.drawsOff;
+        else ++g_skinStats.drawsOff;   // (it wrote "no history": zeroes)
     }
     g_anyBound.store(true, std::memory_order_release);
     cache.family = f;
+    // F2: the draws of this run (same state, no rebind) list their instance windows (engineVelocityNoteSkinDraw): a skinned family's patched draw into an
+    // eye whose target 7 is bound -- the draws whose E is exported, and so the ones whose record is the live one.
+    cache.skin = skinDraw && e.skinBound && eye != kEngineVelocitySourceEye;
     ++fam.binds;
     // The eye is usable only now: a draw that exports ownership is about to
     // be issued (MRT6 bound alone once counted as written).
@@ -1980,6 +2027,13 @@ void skinSummaryLocked(ID3D11DeviceContext* ctx) {
         char text[1100];
         std::snprintf(text, sizeof(text), "%s", line.c_str());
         Log::get().note("%s", text);
+        // which record of a base was the live one (and why the draw list was not exact when it was not): the pose table's witness
+        const std::string pose = skinjoin::poseLine(w.gpu, w.cpu);
+        const char* inexact = g_skin.lastInexactWhy();
+        char poseText[1100];   // (a buffer of known size under the logger's cut, as the join line above: the log-line gate measures it)
+        if (inexact && *inexact) std::snprintf(poseText, sizeof(poseText), "%s | last list not exact: %s", pose.c_str(), inexact);
+        else std::snprintf(poseText, sizeof(poseText), "%s", pose.c_str());
+        Log::get().note("%s", poseText);
     } else {
         Log::get().note("skin join: no counters read back this window (chain dispatches seen %llu, pose tables built %llu, refused %u, hook %s): "
                         "if the chain count is zero the join never ran.",
@@ -1990,22 +2044,50 @@ void skinSummaryLocked(ID3D11DeviceContext* ctx) {
     char medText[32], p99Text[32];
     if (med < 0.0) { std::snprintf(medText, sizeof(medText), "-"); std::snprintf(p99Text, sizeof(p99Text), "-"); }
     else { std::snprintf(medText, sizeof(medText), "%.3g", med); std::snprintf(p99Text, sizeof(p99Text), "%.3g", p99); }
-    Log::get().note("skin join: second skin this window: binds writing E %llu, masked off %llu, eye-frames with target 7 %llu, target 7 taken by the game %llu, "
+    Log::get().note("skin join: second skin this window: binds writing E %llu, writing no history %llu (a skinned pixel shader that exports no E: valid 0), not substituted %llu, "
+                    "eye-frames with target 7 %llu, target 7 taken by the game %llu, "
                     "binds without a live join %llu, vertex patches refused %llu | compose: skinned pixels on the trained path (joined %llu, masked %llu), "
                     "|E| over the joined ones: median >= %s cm, p99 >= %s cm | views given %llu (live %llu).",
-                    u(g_skinStats.draws), u(g_skinStats.drawsOff), u(g_skinStats.eyeFrames), u(g_skinStats.slotTaken), u(g_skinStats.notLive),
+                    u(g_skinStats.draws), u(g_skinStats.drawsOff), u(g_skinStats.unsafeDeclined), u(g_skinStats.eyeFrames), u(g_skinStats.slotTaken), u(g_skinStats.notLive),
                     u(g_skinStats.vsCreateFailed), u(g_skinStats.composeJoined), u(g_skinStats.composeMasked), medText, p99Text,
                     u(g_skinStats.viewsGiven), u(g_skinStats.viewsLive));
-    Log::get().note("skin join: hook window: %s, calls %llu, lists usable %llu (faulted %llu, overflowed %llu, implausible %llu, other %llu), node changes %llu, "
+    Log::get().note("skin join: hook window: %s, calls %llu, lists usable %llu (faulted %llu, overflowed %llu, implausible %llu, other %llu), lists of no entries %llu "
+                    "(a chain dispatch with jobs found one %llu times; only those can stand the hook down), node changes %llu, "
                     "threads %u (first %u, last %u; the chain dispatch runs on %u), last list %u entries to row %u%s%s.",
                     hookState, u(hook.calls), u(hook.usable), u(hook.faulted), u(hook.overflowed), u(hook.implausible), u(hook.otherUnusable),
+                    u(hook.emptyLists), u(hook.emptyWithJobs),
                     u(hook.nodeChanges), hook.threads, hook.firstTid, hook.lastTid, static_cast<unsigned>(GetCurrentThreadId()), hook.lastEntries, hook.lastEnd,
                     hook.state == SkinHookState::StoodDown ? " -- " : "", hook.state == SkinHookState::StoodDown ? hook.why : "");
     char event[420];
     while (skinEntityHookNextEvent(event, sizeof(event))) Log::get().note("%s", event);
-    g_skinStats.draws = g_skinStats.drawsOff = g_skinStats.eyeFrames = g_skinStats.slotTaken = g_skinStats.notLive = g_skinStats.vsCreateFailed = 0;
+    g_skinStats.draws = g_skinStats.drawsOff = g_skinStats.unsafeDeclined = g_skinStats.eyeFrames = g_skinStats.slotTaken = g_skinStats.notLive = g_skinStats.vsCreateFailed = 0;
     g_skinStats.composeJoined = g_skinStats.composeMasked = g_skinStats.viewsGiven = g_skinStats.viewsLive = 0;
     std::memset(g_skinStats.hist, 0, sizeof(g_skinStats.hist));
+}
+
+// F2: the pose table of the frame that just ended, built at its boundary from the first eye's pool copy and the frame's list of the instance-stream
+// entries its skinned draws read. The frame is the one whose first pool snapshot owed it (g_skinPoseFrame: the present counter may already name the
+// next frame when the boundary runs). The list is exact or it is not used: see skin_join.h.
+void skinBuildPoseLocked(ID3D11DeviceContext* ctx) {
+    SkinRefCollector& c = g_skinRefs;
+    const uint32_t ended = g_skinPoseFrame;
+    if (ctx && g_skinWanted.load(std::memory_order_relaxed) && ended != ~0u && g_skinPoseEye >= 0 && g_skinPoseEye < int(kEngineVelocitySourceEye)) {
+        Eye& e = g_eyes[g_skinPoseEye];
+        if (e.frame == ended && e.poolSrv && e.poolBytes >= emit::kItemBytes) {
+            const bool listed = c.frame == ended;   // no skinned draw this frame: an empty list, which is complete
+            SkinRefs refs;
+            refs.complete = listed ? c.complete : true;
+            refs.ranges = listed ? c.ranges.data() : nullptr;
+            refs.pairs = listed ? uint32_t(c.ranges.size() / 2) : 0u;
+            refs.stream = listed ? c.stream.Get() : nullptr;
+            refs.streamOffset = listed ? c.streamOffset : 0u;
+            refs.why = listed ? c.why : "";
+            g_skin.buildPose(ctx, e.poolSrv.Get(), e.poolBytes / emit::kItemBytes, ended, refs);
+        }
+    }
+    g_skinPoseFrame = ~0u;
+    g_skinPoseEye = -1;
+    c = SkinRefCollector{};
 }
 
 void summaryLocked(uint64_t now, ID3D11DeviceContext* ctx) {
@@ -2325,11 +2407,13 @@ void clearLocked() {
     for (auto& s : g_families) {
         s.patchedVs.clear(); s.patchedPs.clear(); s.guardedPs.clear(); s.psFailed.clear();
         s.derived = s.valid = false; s.reason.clear(); s.binds = 0; s.unkeyedPsDraws = 0; s.selfMarked = 0; s.selfMarkedLatched = 0;
-        s.skin = false; s.skinWhy.clear(); s.psExports.clear();
+        s.skin = false; s.skinWhy.clear(); s.psExports.clear(); s.psZeroes.clear();
     }
     g_skin.release();
     g_skinPoseFrame = ~0u;
     g_skinPoseEye = -1;
+    g_skinRefs = SkinRefCollector{};
+    g_motion = MotionReadyState{};
     g_skinStats = SkinStats{};
     for (auto& d : familyDraws) d = 0;
     g_unkeyed.reset();
@@ -2720,6 +2804,41 @@ EngineVelocityWrapperCounts engineVelocityTakeWrapperCounts() noexcept {
 }
 
 namespace engine_velocity_detail {
+// F2: one skinned family draw's instance window, listed for the frame's pose table (skin_join.h, "the pose table's CPU reference"). The instance stream is
+// the vertex buffer of stride 8 the draw reads (the ledger's rule: the first one of the four slots; two of them is not a stream this can name).
+void noteSkinDrawSlow(ID3D11DeviceContext* ctx, uint32_t startInstance, uint32_t instances) {
+    if (!ctx || !instances) return;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if (!g_skinWanted.load(std::memory_order_relaxed)) return;
+    SkinRefCollector& c = g_skinRefs;
+    const uint32_t frame = frameNow();
+    if (c.frame != frame) { c = SkinRefCollector{}; c.frame = frame; }
+    if (!c.complete) return;   // the frame's list cannot be exact any more: more entries change nothing
+    if (c.ranges.size() / 2 >= skinjoin::kMaxRanges) { c.complete = false; c.why = "more skinned draws than the list holds"; return; }
+    if (instances > skinjoin::kMaxRangeInstances) { c.complete = false; c.why = "a skinned draw names too many instances"; return; }
+    ID3D11Buffer* vbs[4] = {};
+    UINT strides[4] = {}, offsets[4] = {};
+    ctx->IAGetVertexBuffers(0, 4, vbs, strides, offsets);
+    engineVelocityNoteStateCalls(1);
+    int pick = -1;
+    unsigned eights = 0;
+    for (int i = 0; i < 4; ++i)
+        if (vbs[i] && strides[i] == skinjoin::kInstanceStride) { ++eights; if (pick < 0) pick = i; }
+    bool ok = eights == 1;
+    if (ok) {
+        if (!c.stream) { c.stream = vbs[pick]; c.streamOffset = offsets[pick]; }
+        else if (c.stream.Get() != vbs[pick] || c.streamOffset != offsets[pick]) ok = false;
+    }
+    for (auto* b : vbs) if (b) b->Release();
+    if (!ok) {
+        c.complete = false;
+        c.why = eights == 0 ? "a skinned draw read no vertex buffer of stride 8 (no instance stream)" : "a skinned draw read two streams of stride 8, or another stream than the frame's first";
+        return;
+    }
+    c.ranges.push_back(startInstance);
+    c.ranges.push_back(instances);
+}
+
 void beforeDrawSlow(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!ctx) return;
     const int64_t t0 = qpcNow();
@@ -2736,6 +2855,7 @@ void beforeDrawSlow(ID3D11DeviceContext* ctx, bool rtv0Eye) {
     if (!g_anyBound.load(std::memory_order_acquire) &&
         familyForProfile(bindingShaderHash(BindSlot::Vs), runtimeFlatProfile()) < 0) {
         cache.family = -1;
+        cache.skin = false;
         ++g_draw.quickPaths;
         return;
     }
@@ -2954,6 +3074,21 @@ void engineVelocityFrameBoundary(ID3D11DeviceContext* ctx) {
     if (!live.load(std::memory_order_acquire)) return;
     cache = DrawCache{};
     ++g_draw.frames;
+    {
+        // The entry fade's signals for the frame that just ended (engineMotionReady): both eyes handed the views since the last boundary, and the skinned jobs.
+        const bool both = g_motion.viewsGiven[0] != g_motion.viewsSeen[0] && g_motion.viewsGiven[1] != g_motion.viewsSeen[1];
+        g_motion.viewsRun = both ? g_motion.viewsRun + 1u : 0u;
+        g_motion.viewsSeen[0] = g_motion.viewsGiven[0];
+        g_motion.viewsSeen[1] = g_motion.viewsGiven[1];
+        g_motion.skinJobs = g_motion.chainCalls != g_motion.chainSeen;
+        g_motion.skinLive = g_motion.skinJobs && g_motion.chainLive;
+        g_motion.chainSeen = g_motion.chainCalls;
+        if (g_motion.asked != g_motion.askedSeen) g_motion.sinceAsk = 0;
+        else if (g_motion.sinceAsk < kMotionNeverAsked) ++g_motion.sinceAsk;
+        g_motion.askedSeen = g_motion.asked;
+        g_motion.consumer = g_motion.sinceAsk <= kMotionAskWindow;
+    }
+    skinBuildPoseLocked(ctx);     // F2: the frame's pose table, now that every draw has said which records it read
     if (ctx) pollCaptures(ctx);   // the eye-pass capture's GPU timers, without waiting
     // The on-foot source's slot target lives only while the source is drawn:
     // kSourceIdleFrames present frames without screen_motion naming it and it
@@ -3020,9 +3155,24 @@ bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDe
     *out = EngineVelocityViews{};
     if (!live.load(std::memory_order_acquire) || eye < 0 || eye > 1 || !sceneDepth) return false;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    return giveViewsLocked(g_eyes[eye], sceneDepth, out,
-                           {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
-                            g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious});
+    ++g_motion.asked;
+    const bool given = giveViewsLocked(g_eyes[eye], sceneDepth, out,
+                                       {g_draw.viewsAsked, g_draw.viewsGiven, g_draw.refusedNoEmit, g_draw.refusedDepth,
+                                        g_draw.refusedFrame, g_draw.refusedInvalid, g_draw.refusedUnwritten, g_draw.refusedPrevious});
+    if (given) ++g_motion.viewsGiven[eye];
+    return given;
+}
+
+EngineMotionReady engineMotionReady() {
+    EngineMotionReady r;
+    if (!live.load(std::memory_order_acquire) || !g_emitLive.load(std::memory_order_acquire)) return r;   // the engine's motion is not running: nothing to wait for
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if (!g_motion.consumer) return r;   // the temporal pass is not asking for the views (it is off, or this is not a scene it runs in): nothing to wait for
+    r.armed = true;
+    r.viewsRun = g_motion.viewsRun;
+    r.skinJobs = g_skinWanted.load(std::memory_order_relaxed) && g_motion.skinJobs;
+    r.skinLive = g_motion.skinLive;
+    return r;
 }
 
 bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out) {
@@ -3229,7 +3379,12 @@ bool engineVelocitySkinWanted() noexcept { return g_skinWanted.load(std::memory_
 void engineVelocityNoteChainDispatch(ID3D11DeviceContext* ctx, uint32_t groups) {
     if (!g_skinWanted.load(std::memory_order_acquire) || !live.load(std::memory_order_acquire)) return;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const uint64_t before = g_skin.chainFrames();
     g_skin.onChain(ctx, frameNow(), groups);
+    if (g_skin.chainFrames() != before) {   // the join took this dispatch (it has jobs): the fade's "a character is loaded" and "its join is live"
+        ++g_motion.chainCalls;
+        g_motion.chainLive = g_skin.liveNow(frameNow());
+    }
 }
 
 ID3D11ShaderResourceView* engineVelocitySkinView(int eye, ID3D11Texture2D* sceneDepth) {

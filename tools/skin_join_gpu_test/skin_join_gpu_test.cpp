@@ -8,7 +8,10 @@
 //   G2  a steady world through hook and prefix: join table, by-base table, pose table and every counter, frame by frame, equal the CPU's
 //   G3  scripted changes (insert, remove, children, disagreement, pose, cap, duplicate base, no history): the same
 //   G4  two hundred frames of random worlds and random faults: the same
-//   G5  the pose passes: records to the table, conflicts killed, out-of-range bases skipped
+//   G5  the pose passes with no reference list: records to the table, conflicts zeroed whole, out-of-range bases skipped
+//   G6  which record of a base is the live one: the draws' instance-stream entries decide (the stale second set of the F12 flight, a stale record
+//       before and after the live one, both read, none read, an incomplete list, unreadable entries), the GPU against the twin
+//   G7  a hundred and fifty random pools: the same, on every element and counter
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -53,10 +56,11 @@ struct Rng {
 struct Gpu {
     ComPtr<ID3D11Device> dev;
     ComPtr<ID3D11DeviceContext> ctx;
-    ComPtr<ID3D11ComputeShader> join, poseClear, poseScatter, poseVerify;
-    ComPtr<ID3D11Buffer> jobs, prevJobs, plan, info[2], joinTable, stats, owner, pose[2], pool, poseCb;
-    ComPtr<ID3D11ShaderResourceView> jobsSrv, prevJobsSrv, planSrv, infoSrv[2], poseSrv[2], poolSrv;
-    ComPtr<ID3D11UnorderedAccessView> joinUav, infoUav[2], statsUav, ownerUav, poseUav[2];
+    ComPtr<ID3D11ComputeShader> join, poseClear, poseRefMark, poseScatter, poseScatterRest, poseVerify, poseFinish;
+    ComPtr<ID3D11Buffer> jobs, prevJobs, plan, info[2], joinTable, stats, owner, pose[2], pool, poseCb, instCopy, ranges, refBits, baseState;
+    ComPtr<ID3D11ShaderResourceView> jobsSrv, prevJobsSrv, planSrv, infoSrv[2], poseSrv[2], poolSrv, instSrv, rangesSrv;
+    ComPtr<ID3D11UnorderedAccessView> joinUav, infoUav[2], statsUav, ownerUav, poseUav[2], refUav, stateUav;
+    static constexpr uint32_t kStreamBytes = 1u << 20;   // the rig's copy of the instance stream (production's is 4 MB)
     uint32_t poolCapacity = 4096;
     bool ok = false;
     std::string why;
@@ -127,7 +131,8 @@ struct Gpu {
             return false;
         }
         struct { const char* name; ComPtr<ID3D11ComputeShader>* out; } entries[] = {
-            {"join", &join}, {"poseClear", &poseClear}, {"poseScatter", &poseScatter}, {"poseVerify", &poseVerify}};
+            {"join", &join}, {"poseClear", &poseClear}, {"poseRefMark", &poseRefMark}, {"poseScatter", &poseScatter}, {"poseScatterRest", &poseScatterRest},
+            {"poseVerify", &poseVerify}, {"poseFinish", &poseFinish}};
         for (auto& e : entries) {
             auto code = compile(e.name);
             if (!code || FAILED(dev->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, e.out->GetAddressOf()))) {
@@ -148,8 +153,16 @@ struct Gpu {
             pose[i] = buffer(kMaxRows * 32, srvUav, structured, 32);
         }
         pool = buffer(poolCapacity * 336, D3D11_BIND_SHADER_RESOURCE, structured, 336);
-        poseCb = buffer(16, D3D11_BIND_CONSTANT_BUFFER, 0);
-        if (!jobs || !prevJobs || !plan || !joinTable || !stats || !owner || !info[0] || !info[1] || !pose[0] || !pose[1] || !pool || !poseCb) return false;
+        poseCb = buffer(32, D3D11_BIND_CONSTANT_BUFFER, 0);
+        instCopy = buffer(kStreamBytes, D3D11_BIND_SHADER_RESOURCE, raw);
+        ranges = buffer(kMaxRanges * 8, D3D11_BIND_SHADER_RESOURCE, structured, 8);
+        refBits = buffer((kRefWords + 1) * 4, D3D11_BIND_UNORDERED_ACCESS, raw);
+        baseState = buffer(kMaxRows * 4, D3D11_BIND_UNORDERED_ACCESS, raw);
+        if (!jobs || !prevJobs || !plan || !joinTable || !stats || !owner || !info[0] || !info[1] || !pose[0] || !pose[1] || !pool || !poseCb || !instCopy || !ranges || !refBits || !baseState) return false;
+        instSrv = rawSrv(instCopy.Get(), kStreamBytes / 4);
+        rangesSrv = structuredSrv(ranges.Get(), kMaxRanges);
+        refUav = rawUav(refBits.Get(), kRefWords + 1);
+        stateUav = rawUav(baseState.Get(), kMaxRows);
         jobsSrv = structuredSrv(jobs.Get(), kMaxJobs);
         prevJobsSrv = structuredSrv(prevJobs.Get(), kMaxJobs);
         planSrv = rawSrv(plan.Get(), kPlanWords);
@@ -164,7 +177,7 @@ struct Gpu {
             poseUav[i] = structuredUav(pose[i].Get(), kMaxRows);
         }
         ok = why.empty() && jobsSrv && prevJobsSrv && planSrv && poolSrv && joinUav && statsUav && ownerUav && infoSrv[0] && infoSrv[1] && infoUav[0] && infoUav[1] && poseSrv[0] &&
-             poseSrv[1] && poseUav[0] && poseUav[1];
+             poseSrv[1] && poseUav[0] && poseUav[1] && instSrv && rangesSrv && refUav && stateUav;
         const uint32_t zero[kStatWords]{};
         ctx->UpdateSubresource(stats.Get(), 0, nullptr, zero, 0, 0);
         return ok;
@@ -211,8 +224,10 @@ struct Gpu {
         ctx->CopyResource(prevJobs.Get(), jobs.Get());
     }
 
-    // The pose table of `parity` from the pool records.
-    void runPose(uint32_t parity, const std::vector<uint32_t>& records) {   // records: 84 words each
+    // The pose table of `parity` from the pool records, the live record of each base chosen by `refs` (the production sequence: clear, mark the draws'
+    // records, scatter the live ones, scatter the rest, verify, finish). `refs.complete` is the CPU's verdict (the constant buffer's flag bit); the
+    // draws' entries and the stream are uploaded as given and the shader judges them.
+    void runPose(uint32_t parity, const std::vector<uint32_t>& records, const PoseRefs& refs = PoseRefs{}) {   // records: 84 words each
         const uint32_t n = uint32_t(records.size() / 84);
         if (n) {
             // a whole-buffer update reads the buffer's full size from the source
@@ -220,24 +235,43 @@ struct Gpu {
             std::memcpy(padded.data(), records.data(), std::min(records.size(), padded.size()) * 4);
             ctx->UpdateSubresource(pool.Get(), 0, nullptr, padded.data(), 0, 0);
         }
-        const uint32_t cb[4] = {n, kMaxRows, 0, 0};
+        const uint32_t pairs = uint32_t(refs.ranges.size() / 2);
+        const uint32_t entries = uint32_t(refs.stream.size() / 2);
+        {
+            std::vector<uint32_t> stream(kStreamBytes / 4, 0u);
+            std::memcpy(stream.data(), refs.stream.data(), std::min<size_t>(refs.stream.size(), stream.size()) * 4);
+            ctx->UpdateSubresource(instCopy.Get(), 0, nullptr, stream.data(), 0, 0);
+            std::vector<uint32_t> list(size_t(kMaxRanges) * 2, 0u);
+            std::memcpy(list.data(), refs.ranges.data(), std::min<size_t>(refs.ranges.size(), list.size()) * 4);
+            ctx->UpdateSubresource(ranges.Get(), 0, nullptr, list.data(), 0, 0);
+        }
+        const uint32_t cb[8] = {n, kMaxRows, pairs, refs.first, refs.complete ? 1u : 0u, entries, 0, 0};
         ctx->UpdateSubresource(poseCb.Get(), 0, nullptr, cb, 0, 0);
-        ID3D11UnorderedAccessView* uavs[5] = {nullptr, nullptr, statsUav.Get(), nullptr, poseUav[parity].Get()};
-        ctx->CSSetShaderResources(5, 1, poolSrv.GetAddressOf());
+        ID3D11UnorderedAccessView* uavs[7] = {nullptr, nullptr, statsUav.Get(), nullptr, poseUav[parity].Get(), refUav.Get(), stateUav.Get()};
+        ID3D11ShaderResourceView* srvs[3] = {poolSrv.Get(), instSrv.Get(), rangesSrv.Get()};
+        ctx->CSSetShaderResources(5, 3, srvs);
         ctx->CSSetConstantBuffers(0, 1, poseCb.GetAddressOf());
-        ctx->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
+        ctx->CSSetUnorderedAccessViews(0, 7, uavs, nullptr);
         ctx->CSSetShader(poseClear.Get(), nullptr, 0);
         ctx->Dispatch((kMaxRows + 63) / 64, 1, 1);
+        if (pairs) {
+            ctx->CSSetShader(poseRefMark.Get(), nullptr, 0);
+            ctx->Dispatch((pairs + 63) / 64, 1, 1);
+        }
         if (n) {
             ctx->CSSetShader(poseScatter.Get(), nullptr, 0);
+            ctx->Dispatch((n + 63) / 64, 1, 1);
+            ctx->CSSetShader(poseScatterRest.Get(), nullptr, 0);
             ctx->Dispatch((n + 63) / 64, 1, 1);
             ctx->CSSetShader(poseVerify.Get(), nullptr, 0);
             ctx->Dispatch((n + 63) / 64, 1, 1);
         }
-        ID3D11UnorderedAccessView* none[5]{};
-        ctx->CSSetUnorderedAccessViews(0, 5, none, nullptr);
-        ID3D11ShaderResourceView* noSrv = nullptr;
-        ctx->CSSetShaderResources(5, 1, &noSrv);
+        ctx->CSSetShader(poseFinish.Get(), nullptr, 0);
+        ctx->Dispatch((kMaxRows + 63) / 64, 1, 1);
+        ID3D11UnorderedAccessView* none[7]{};
+        ctx->CSSetUnorderedAccessViews(0, 7, none, nullptr);
+        ID3D11ShaderResourceView* noSrv[3]{};
+        ctx->CSSetShaderResources(5, 3, noSrv);
     }
 };
 
@@ -260,25 +294,13 @@ std::vector<uint32_t> poolFor(const std::vector<JobRow>& jobs, bool all, uint32_
     return records;
 }
 
-// The CPU twin of the pose passes.
-std::vector<PoseElem> cpuPose(const std::vector<uint32_t>& records, uint32_t* scattered, uint32_t* conflicts) {
-    std::vector<PoseElem> t(kMaxRows);
-    std::memset(t.data(), 0, t.size() * sizeof(PoseElem));
-    *scattered = *conflicts = 0;
-    const uint32_t n = uint32_t(records.size() / 84);
-    for (uint32_t i = 0; i < n; ++i) {
-        const uint32_t* r = &records[size_t(i) * 84];
-        if (r[0] == 0 || r[0] >= kMaxRows) continue;
-        std::memcpy(&t[r[0]], r, 32);
-        ++*scattered;
-    }
-    for (uint32_t i = 0; i < n; ++i) {
-        const uint32_t* r = &records[size_t(i) * 84];
-        if (r[0] == 0 || r[0] >= kMaxRows) continue;
-        if (std::memcmp(&t[r[0]], r, 28) != 0) { ++*conflicts; t[r[0]].a[0] = 0; }
-    }
-    return t;
+// The CPU twin of the pose passes (skin_join.h cpuPose), fed the pool as 84-word records.
+std::vector<PoseWords> poolWords(const std::vector<uint32_t>& records) {
+    std::vector<PoseWords> pool(records.size() / 84);
+    for (size_t i = 0; i < pool.size(); ++i) std::memcpy(pool[i].w, &records[i * 84], 32);
+    return pool;
 }
+PoseResult cpuPoseOf(const std::vector<uint32_t>& records, const PoseRefs& refs = PoseRefs{}) { return cpuPose(poolWords(records), refs); }
 
 // The two sides in lockstep.
 struct Pair {
@@ -295,10 +317,9 @@ struct Pair {
         // the CPU side fills its pose table from "all jobs"; skipPose makes the GPU pool and the CPU table agree on a subset
         const std::vector<uint32_t> records = poolFor(b.jobs, poseAll, skipPose);
         {
-            uint32_t sc = 0, cf = 0;
-            const auto expect = cpuPose(records, &sc, &cf);
+            const PoseResult expect = cpuPoseOf(records);
             std::fill(cpu.prevPose.begin(), cpu.prevPose.end(), 0u);
-            for (uint32_t i = 0; i < kMaxRows; ++i) cpu.prevPose[i] = expect[i].a[0];
+            for (uint32_t i = 0; i < kMaxRows; ++i) cpu.prevPose[i] = expect.table[i].w[0];
         }
         const uint32_t parity = cpu.plan.parity;
         gpu.runJoin(cpu.plan, b.jobs);
@@ -310,7 +331,7 @@ struct Pair {
         std::memcpy(after, statsBytes.data(), sizeof(after));
         char msg[256];
         for (uint32_t i = 0; i < kStatWords; ++i) {
-            if (i == kStatPoseRecords || i == kStatPoseConflicts) continue;
+            if (i == kStatPoseRecords || i == kStatPoseConflicts || i == kStatPoseResolved || i == kStatPoseDropped || i == kStatPoseListsExact || i == kStatPoseListsBad) continue;
             const bool state = i == kStatPrevHookOk || i == kStatLastJobs || i == kStatLastEntities;
             const bool bits = i == kStatMismatchBits;
             const uint32_t gpuValue = state ? after[i] : bits ? (after[i] & ~statsBefore[i]) | (after[i] & cpu.result.stats[i]) : after[i] - statsBefore[i];
@@ -349,9 +370,8 @@ struct Pair {
                 return msg;
             }
         const auto poseBytes = gpu.read(gpu.pose[parity].Get(), kMaxRows * 32);
-        uint32_t sc = 0, cf = 0;
-        const auto expect = cpuPose(records, &sc, &cf);
-        if (std::memcmp(poseBytes.data(), expect.data(), kMaxRows * 32) != 0) return "pose table differs";
+        const PoseResult expect = cpuPoseOf(records);
+        if (std::memcmp(poseBytes.data(), expect.table.data(), kMaxRows * 32) != 0) return "pose table differs";
         return "";
     }
 };
@@ -375,10 +395,14 @@ void caseNumbers() {
         {"SJ_STAT_FAIL_NO_PREV", kStatFailNoPrevEntity}, {"SJ_STAT_FAIL_RANGE", kStatFailRange}, {"SJ_STAT_FAIL_LAYOUT", kStatFailLayout}, {"SJ_STAT_FAIL_PREFIX", kStatFailPrefix},
         {"SJ_STAT_FAIL_POSE", kStatFailPose}, {"SJ_STAT_FAIL_CAP", kStatFailCap}, {"SJ_STAT_DUP_BASE", kStatDupBase}, {"SJ_STAT_PREV_HOOK_OK", kStatPrevHookOk},
         {"SJ_STAT_MISMATCH_BITS", kStatMismatchBits}, {"SJ_STAT_POSE_RECORDS", kStatPoseRecords}, {"SJ_STAT_POSE_CONFLICTS", kStatPoseConflicts},
-        {"SJ_STAT_LAST_JOBS", kStatLastJobs}, {"SJ_STAT_LAST_ENTITIES", kStatLastEntities}, {"SJ_STAT_FAIL_PREV_ROWS", kStatFailPrevRows}, {"SJ_STAT_WORDS", kStatWords}};
+        {"SJ_STAT_LAST_JOBS", kStatLastJobs}, {"SJ_STAT_LAST_ENTITIES", kStatLastEntities}, {"SJ_STAT_FAIL_PREV_ROWS", kStatFailPrevRows},
+        {"SJ_STAT_POSE_RESOLVED", kStatPoseResolved}, {"SJ_STAT_POSE_DROPPED", kStatPoseDropped}, {"SJ_STAT_POSE_LISTS_EXACT", kStatPoseListsExact},
+        {"SJ_STAT_POSE_LISTS_BAD", kStatPoseListsBad}, {"SJ_STAT_WORDS", kStatWords}};
     bool all = true;
     for (const auto& s : stats) all = all && defineOf(s.name) == s.value;
     check(all, "G1.d the counters' indices in the HLSL are the header's");
+    check(defineOf("SJ_REF_WORDS") == kRefWords && defineOf("SJ_MAX_RANGE_INSTANCES") == kMaxRangeInstances && kMaxPoolRecords == kRefWords * 32u,
+          "G1.f the reference list's limits in the HLSL are the header's");
     check(defineOf("SJ_MM_NOT_IN_RANGE") == kMmNotInRange && defineOf("SJ_MM_HEAD_COUNT") == kMmHeadCount && defineOf("SJ_MM_HEADS") == kMmHeads && defineOf("SJ_MM_SUM") == kMmSum &&
           defineOf("SJ_MM_ENTITY_SUM") == kMmEntitySum && defineOf("SJ_MM_NO_PLAN") == kMmNoPlan, "G1.e the disagreement bits in the HLSL are the header's");
 }
@@ -525,37 +549,172 @@ void caseRandom(Pair& p) {
 }
 
 // ---- G5 ------------------------------------------------------------------------------------------------------------------
+// The pose passes with no reference list (the rule before the list existed: every record of a base decides).
+struct PoseStats { uint32_t records, conflicts, resolved, dropped, listsExact, listsBad; };
+PoseStats poseStats(Gpu& g) {
+    const auto stats = g.read(g.stats.Get(), kStatWords * 4);
+    const uint32_t* s = reinterpret_cast<const uint32_t*>(stats.data());
+    return PoseStats{s[kStatPoseRecords], s[kStatPoseConflicts], s[kStatPoseResolved], s[kStatPoseDropped], s[kStatPoseListsExact], s[kStatPoseListsBad]};
+}
+PoseStats operator-(const PoseStats& a, const PoseStats& b) {
+    return PoseStats{a.records - b.records, a.conflicts - b.conflicts, a.resolved - b.resolved, a.dropped - b.dropped, a.listsExact - b.listsExact, a.listsBad - b.listsBad};
+}
+// Runs the passes and holds them to the twin: the whole table (a dropped base is zeroed whole) and every pose counter. Returns "" or the first difference.
+std::string runAndCompare(Pair& p, uint32_t parity, const std::vector<uint32_t>& records, const PoseRefs& refs, bool compareConflicts = true) {
+    const PoseStats before = poseStats(p.gpu);
+    p.gpu.runPose(parity, records, refs);
+    const PoseStats d = poseStats(p.gpu) - before;
+    const auto got = p.gpu.read(p.gpu.pose[parity].Get(), kMaxRows * 32);
+    const PoseResult expect = cpuPoseOf(records, refs);
+    char msg[256];
+    for (uint32_t i = 0; i < kMaxRows; ++i)
+        if (std::memcmp(&got[size_t(i) * 32], &expect.table[i], 32) != 0) {
+            std::snprintf(msg, sizeof(msg), "pose element %u differs (gpu word0 %u, cpu word0 %u)", i, *reinterpret_cast<const uint32_t*>(&got[size_t(i) * 32]), expect.table[i].w[0]);
+            return msg;
+        }
+    if (d.records != expect.records || d.resolved != expect.resolved || d.dropped != expect.dropped || d.listsExact != expect.listsExact || d.listsBad != expect.listsBad ||
+        (compareConflicts && d.conflicts != expect.conflicts)) {
+        std::snprintf(msg, sizeof(msg), "counters: gpu records %u conflicts %u resolved %u dropped %u exact %u bad %u | cpu %u %u %u %u %u %u", d.records, d.conflicts, d.resolved, d.dropped,
+                      d.listsExact, d.listsBad, expect.records, expect.conflicts, expect.resolved, expect.dropped, expect.listsExact, expect.listsBad);
+        return msg;
+    }
+    return "";
+}
 void casePose(Pair& p) {
     std::vector<uint32_t> records;
-    auto add = [&](uint32_t base, uint32_t salt) {
-        std::vector<uint32_t> r(84, 0);
-        r[0] = base; r[1] = 0x3F800000u + salt; r[2] = 11; r[3] = 13; r[4] = 17 + salt; r[5] = 19; r[6] = 23; r[7] = 999 + salt;
-        records.insert(records.end(), r.begin(), r.end());
-    };
+    auto add = [&](uint32_t base, uint32_t salt) { const auto r = mkRecord(base, salt); records.insert(records.end(), r.begin(), r.end()); };
     add(5, 0); add(5, 0); add(9, 0); add(0, 0); add(kMaxRows, 0); add(kMaxRows + 77, 0); add(12, 0); add(12, 1);   // base 12: two records that disagree
     add(40, 0); add(40, 0); add(40, 0);
     // word 7 differs only: not a conflict (nothing reads it)
     { std::vector<uint32_t> r(84, 0); r[0] = 60; r[7] = 1; records.insert(records.end(), r.begin(), r.end()); r[7] = 2; records.insert(records.end(), r.begin(), r.end()); }
-    const auto statsBefore = p.gpu.read(p.gpu.stats.Get(), kStatWords * 4);
+    const PoseStats before = poseStats(p.gpu);
     p.gpu.runPose(1, records);
     const auto got = p.gpu.read(p.gpu.pose[1].Get(), kMaxRows * 32);
-    uint32_t sc = 0, cf = 0;
-    const auto expect = cpuPose(records, &sc, &cf);
+    const PoseResult expect = cpuPoseOf(records);
     const PoseElem* g = reinterpret_cast<const PoseElem*>(got.data());
     check(g[5].a[0] == 5 && g[9].a[0] == 9 && g[40].a[0] == 40, "G5.a records land at their base");
-    check(g[12].a[0] == 0, "G5.b two records of one base that disagree kill it");
+    check(g[12].a[0] == 0 && g[12].a[1] == 0 && g[12].b[0] == 0, "G5.b two records of one base that disagree zero it whole (no history for the base, and a table that is the same every run)");
     check(g[60].a[0] == 60, "G5.c a difference in word 7 alone is not a conflict");
     check(g[0].a[0] == 0 && g[1].a[0] == 0, "G5.d base 0 is never written");
-    check(expect[12].a[0] == 0 && expect[60].a[0] == 60 && expect[5].a[0] == 5, "G5.e (the CPU twin agrees: base 12 dead, bases 5 and 60 live)");
-    const auto stats = p.gpu.read(p.gpu.stats.Get(), kStatWords * 4);
-    const uint32_t* s = reinterpret_cast<const uint32_t*>(stats.data());
-    const uint32_t* before = reinterpret_cast<const uint32_t*>(statsBefore.data());
-    check(s[kStatPoseConflicts] - before[kStatPoseConflicts] >= 1, "G5.f the conflict is counted");
-    check(s[kStatPoseRecords] - before[kStatPoseRecords] == sc, "G5.g the records are counted, one each");
+    check(expect.table[12].w[0] == 0 && expect.table[60].w[0] == 60 && expect.table[5].w[0] == 5, "G5.e (the CPU twin agrees: base 12 dead, bases 5 and 60 live)");
+    const PoseStats d = poseStats(p.gpu) - before;
+    check(d.conflicts == 1 && d.dropped == 1 && d.resolved == 0, "G5.f the conflict is counted once, the base dropped once, nothing resolved");
+    check(d.records == expect.records, "G5.g the records are counted, one each");
     // word 7 may be either writer's; compare everything else exactly
     bool same = true;
-    for (uint32_t i = 0; i < kMaxRows && same; ++i) same = std::memcmp(&g[i], &expect[i], 28) == 0;
+    for (uint32_t i = 0; i < kMaxRows && same; ++i) same = std::memcmp(&g[i], &expect.table[i], 28) == 0;
     check(same, "G5.h every element's words 0..6 equal the CPU twin's");
+    check(d.listsExact == 0 && d.listsBad == 0, "G5.i with no list claimed complete neither list counter moves");
+}
+
+// ---- G6: which record of a base is the live one (the reference list) ------------------------------------------------
+void caseResolve(Pair& p) {
+    PoseWorld w = frameWorld();
+    std::string bad = runAndCompare(p, 1, w.records, w.refs);
+    if (!bad.empty()) std::printf("    G6 exact list: %s\n", bad.c_str());
+    check(bad.empty(), "G6.a the GPU's pose table and counters equal the CPU twin's for a frame with stale records and an exact list");
+    const auto got = p.gpu.read(p.gpu.pose[1].Get(), kMaxRows * 32);
+    const PoseElem* t = reinterpret_cast<const PoseElem*>(got.data());
+    const auto word4 = [&](uint32_t base) { return t[base].b[0]; };   // word 4: the pose's first position word, 17 + salt
+    check(t[21].a[0] == 21 && word4(21) == 17, "G6.b the live record read by a draw is the one kept, the stale one after it overruled");
+    check(t[22].a[0] == 22 && word4(22) == 17, "G6.c ...also when the stale record has the LOWER index (the first writer is not the live one)");
+    check(t[23].a[0] == 0 && t[23].a[1] == 0, "G6.d two records both read by draws that disagree: no history for the base");
+    check(t[24].a[0] == 0 && t[24].a[1] == 0, "G6.e two records that disagree and neither read: no history for the base");
+    check(t[25].a[0] == 25 && t[26].a[0] == 26, "G6.f a single record is kept, read or not (it conflicts with nobody)");
+    check(t[27].a[0] == 27 && word4(27) == 17, "G6.g a read record and an unread one of the same pose agree");
+    check(t[28].a[0] == 28 && word4(28) == 17 && t[29].a[0] == 29 && word4(29) == 17, "G6.h a live record against two stale ones, and one read by two draws: kept");
+    const PoseResult r = cpuPoseOf(w.records, w.refs);
+    check(r.resolved == 5 && r.conflicts == 2 && r.dropped == 2 && r.listsExact == 1, "G6.i the counts: five stale records overruled, two bases dropped on two disagreeing records, one exact list");
+    // the same pool with the list called incomplete: nothing is resolved, every record decides (the stale second set kills its bases)
+    PoseWorld incomplete = frameWorld();
+    incomplete.finish(false);
+    bad = runAndCompare(p, 0, incomplete.records, incomplete.refs);
+    if (!bad.empty()) std::printf("    G6 incomplete: %s\n", bad.c_str());
+    check(bad.empty(), "G6.j an incomplete list: the GPU equals the twin");
+    const auto got2 = p.gpu.read(p.gpu.pose[0].Get(), kMaxRows * 32);
+    const PoseElem* t2 = reinterpret_cast<const PoseElem*>(got2.data());
+    check(t2[21].a[0] == 0 && t2[22].a[0] == 0 && t2[28].a[0] == 0 && t2[29].a[0] == 0 && t2[25].a[0] == 25 && t2[26].a[0] == 26,
+          "G6.k with no complete list a base with a stale second record has no history (the F12 behaviour, kept for the frames the draws cannot be listed)");
+    // a draw naming an entry outside the copied span: the list is not readable, nothing is resolved
+    PoseWorld outside = frameWorld();
+    outside.refs.ranges.push_back(outside.entryBase + 5000);
+    outside.refs.ranges.push_back(1);
+    bad = runAndCompare(p, 1, outside.records, outside.refs);
+    check(bad.empty() && cpuPoseOf(outside.records, outside.refs).listsBad == 1 && cpuPoseOf(outside.records, outside.refs).resolved == 0, "G6.l a draw naming an entry outside the copied span: the list counts as unreadable and resolves nothing, alike on both sides");
+    // an entry naming a record the pool does not have
+    PoseWorld beyond = frameWorld();
+    beyond.draw(uint32_t(beyond.records.size() / 84) + 50);
+    bad = runAndCompare(p, 0, beyond.records, beyond.refs);
+    if (!bad.empty()) std::printf("    G6 beyond: %s\n", bad.c_str());
+    check(bad.empty() && cpuPoseOf(beyond.records, beyond.refs).listsBad == 1 && cpuPoseOf(beyond.records, beyond.refs).resolved == 0, "G6.m an entry naming a record the pool does not hold: unreadable list, nothing resolved");
+    // a draw of more instances than the limit
+    PoseWorld many = frameWorld();
+    for (uint32_t k = 0; k < kMaxRangeInstances + 100; ++k) many.entry(0);   // a stream long enough that the draw's window lies inside the span
+    many.refs.ranges.push_back(many.entryBase);
+    many.refs.ranges.push_back(kMaxRangeInstances + 1);
+    bad = runAndCompare(p, 1, many.records, many.refs);
+    check(bad.empty() && cpuPoseOf(many.records, many.refs).listsBad == 1, "G6.n a draw naming more instances than the limit: unreadable list");
+    // an exact list that names no draw at all (a frame with no skinned draw): every record decides, and the list is exact
+    PoseWorld none = frameWorld();
+    none.refs.ranges.clear();
+    bad = runAndCompare(p, 0, none.records, none.refs);
+    check(bad.empty() && cpuPoseOf(none.records, none.refs).listsExact == 1 && cpuPoseOf(none.records, none.refs).resolved == 0, "G6.o an exact list of no draws resolves nothing (no live record: every record decides)");
+    check(bad.empty(), "G6.p (and the GPU agrees)");
+}
+
+// ---- G7: random frames ---------------------------------------------------------------------------------------------
+void caseRandomPose(Pair& p) {
+    Rng r(555);
+    unsigned worlds = 0, resolvedTotal = 0, droppedTotal = 0, inexact = 0;
+    std::string bad;
+    for (unsigned iter = 0; iter < 150 && bad.empty(); ++iter) {
+        PoseWorld w;
+        const bool badList = r.chance(10), complete = !r.chance(12);
+        const bool legacy = !complete || badList;
+        struct Rec { uint32_t base, salt; bool read; };
+        std::vector<Rec> recs;
+        const uint32_t bases = 4 + r.below(30);
+        for (uint32_t b = 0; b < bases; ++b) {
+            const uint32_t base = 10 + b * 3;
+            uint32_t scenario = r.below(8);
+            if (legacy && scenario == 7) scenario = 3;   // (two equal records and a stale one: the race decides the legacy conflict COUNT, not the table)
+            switch (scenario) {
+            case 0: recs.push_back({base, 0, false}); break;
+            case 1: recs.push_back({base, 0, true}); break;
+            case 2: recs.push_back({base, 0, true}); recs.push_back({base, 0, false}); break;
+            case 3: recs.push_back({base, 0, true}); recs.push_back({base, 1 + r.below(3), false}); break;
+            case 4: recs.push_back({base, 0, true}); recs.push_back({base, 1, true}); break;
+            case 5: recs.push_back({base, 0, false}); recs.push_back({base, 1, false}); break;
+            case 6: recs.push_back({base, 0, true}); recs.push_back({base, 1, false}); recs.push_back({base, 2, false}); break;
+            default: recs.push_back({base, 0, true}); recs.push_back({base, 0, true}); recs.push_back({base, 1, false}); break;
+            }
+        }
+        // a random order: the live record may come before or after its stale ones
+        for (size_t i = recs.size(); i > 1; --i) std::swap(recs[i - 1], recs[r.below(uint32_t(i))]);
+        std::vector<uint32_t> readIdx;
+        for (const Rec& rc : recs) { const uint32_t at = w.record(rc.base, rc.salt); if (rc.read) readIdx.push_back(at); }
+        // stale entries in the stream no draw reads
+        for (const Rec& rc : recs) if (!rc.read && r.chance(60)) w.entry(uint32_t(&rc - recs.data()));
+        // the draws: runs of one to three read records, some read twice (both eyes)
+        for (size_t i = 0; i < readIdx.size();) {
+            const size_t run = std::min<size_t>(readIdx.size() - i, 1 + r.below(3));
+            std::vector<uint32_t> part(readIdx.begin() + i, readIdx.begin() + i + run);
+            if (run == 1) w.draw(part[0]); else w.drawMany(part);
+            if (r.chance(40)) w.draw(part[0]);
+            i += run;
+        }
+        if (badList) { w.refs.ranges.push_back(w.entryBase + 9000 + r.below(100)); w.refs.ranges.push_back(1); }
+        w.finish(complete);
+        // some pools with a record of base 0 and one past the table
+        if (r.chance(30)) { const auto z = mkRecord(0, 0); w.records.insert(w.records.end(), z.begin(), z.end()); }
+        bad = runAndCompare(p, iter & 1u, w.records, w.refs);
+        const PoseResult res = cpuPoseOf(w.records, w.refs);
+        ++worlds; resolvedTotal += res.resolved; droppedTotal += res.dropped; inexact += legacy ? 1u : 0u;
+        if (!bad.empty()) std::printf("    random pose frame %u: %s\n", iter, bad.c_str());
+    }
+    check(bad.empty(), "G7.a a hundred and fifty random pools (live records among stale ones, both-read and none-read bases, incomplete and unreadable lists): the GPU equals the twin on every element and counter");
+    check(worlds == 150 && resolvedTotal > 100 && droppedTotal > 50 && inexact > 5, "G7.b (the run resolved many stale records, dropped bases, and met inexact lists)");
+    std::printf("  skin join gpu: random pose run %u pools, %u stale records overruled, %u bases dropped, %u pools with an inexact list\n", worlds, resolvedTotal, droppedTotal, inexact);
 }
 }  // namespace
 
@@ -584,6 +743,8 @@ int main(int argc, char** argv) {
     caseScripted(scriptPair);
     caseRandom(randomPair);
     casePose(posePair);
+    caseResolve(posePair);
+    caseRandomPose(posePair);
     if (g_failures) {
         std::printf("FAIL: skin join gpu: %u of %u checks failed\n", g_failures, g_checks);
         return 1;
