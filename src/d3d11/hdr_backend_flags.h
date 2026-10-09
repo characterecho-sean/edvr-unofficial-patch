@@ -19,11 +19,17 @@ constexpr uint32_t kDlssFlagDepthInverted = 1u << 3;
 constexpr uint32_t kDlssFlagAutoExposure = 1u << 6;
 
 // DLSS: motion vectors at the render size and unjittered (the prep pass computes them on the unjittered grid),
-// reversed-Z depth. The HDR route adds IsHDR and AutoExposure (Sean's decision (b): take the game's own exposure
-// later, only if highlights look wrong). MVJittered stays off in both: the vectors exclude the raster phase.
-inline constexpr uint32_t flatDlssCreateFlags(bool hdr) {
-    return kDlssFlagMvLowRes | kDlssFlagDepthInverted | (hdr ? (kDlssFlagIsHdr | kDlssFlagAutoExposure) : 0u);
+// reversed-Z depth. The HDR route adds IsHDR. MVJittered stays off in both: the vectors exclude the raster phase.
+// Exposure on the HDR route (docs/design-flat-temporal-aa-2026-09-23.md, section 106): the flat profile's input H is
+// pre-tonemap radiance the game's own tone pass exposes later, so it is evaluated with a fixed exposure of 1.0 (a 1x1
+// exposure texture, dlaa.cpp) and no AutoExposure; NVIDIA's automatic exposure dimmed the picture and lost stars (flown
+// 2026-10-09). The VR world route, the other caller with hdr true, keeps AutoExposure: flatProfile false.
+inline constexpr uint32_t flatDlssCreateFlags(bool hdr, bool flatProfile) {
+    return kDlssFlagMvLowRes | kDlssFlagDepthInverted |
+           (hdr ? (kDlssFlagIsHdr | (flatProfile ? 0u : kDlssFlagAutoExposure)) : 0u);
 }
+// Whether the HDR route's evaluation hands NVIDIA the fixed exposure texture: exactly when the feature lacks AutoExposure.
+inline constexpr bool flatDlssFixedExposure(bool hdr, bool flatProfile) { return hdr && flatProfile; }
 
 // FfxFsr3UpscalerInitializationFlagBits (FidelityFX-SDK-DX11 fork, ffx_fsr3upscaler.h).
 constexpr uint32_t kFsrFlagHighDynamicRange = 1u << 0;
