@@ -57,8 +57,8 @@
   Visual verification is open. Native primary records stay unchanged; no bones,
   estimation or generic pool matching. NPC (Explorer Cam, VR): F1, F2 and the
   one-join-per-frame fix are FLOWN OK (F14, 7d0e052e; Sean: "NPCs looked
-  good"; cost +0.1-0.2 ms a frame). F15 (built, NOT FLOWN): E for the first-
-  person panel; fly it before merging. Open: 1 s fade-hold cap. F15 is last.
+  good"; cost +0.1-0.2 ms a frame). F15 (E for the first-person panel) is
+  FLOWN OK (050026, bd003185; no leak). Open: 1 s fade-hold cap. F15 is last.
 
 ## Premise
 
@@ -4389,3 +4389,13 @@ What to look for in the F15 flight (VR, a skinned NPC in view on foot in the fir
 Doubts: (1) a non-exporting skinned family's pixel (the FC43 draws) now has valid 0 under the bit, so it is refused where before F15 it took the camera term (Explorer Cam made the same call in L11); (2) the target is allocated whenever the second skin is armed, not only when a character appears (+65 MB on the F14 rig); (3) the 65 MB clear is 3808x2142x8 bytes written on every frame with a skinned draw, not measured; (4) not flown.
 
 ruled out: sharing `debug.w`'s bit pattern with the TAA kernel's tests, because the TAA kernel read any nonzero `debug.w` as alternate-camera coverage and the TAA case F of flat_skin_gpu_tests.h (a hot pixel blended near 111) failed with it.
+
+### 2026-10-09 F15 flown (log edvr_gfx_20261009_050026, Frontier, bd003185 installed, no eye run): the first-person panel reads E; target 7 does not leak; the cost is the clear
+
+Build `v0.18.3-79-gbd003185`. MEASURED = a number or line read from this log; INFERRED = reasoned from it.
+- The panel works (MEASURED). `vr world route refusal 5s: ... skinned-joined=` was 0 until 05:02:27, then 187, 2,113, 1,121, 10,508, 168,638, 555,865, 1,325,160, 978,871, 1,175,295, 1,340,442 and 1,165,313 per 5 s in first person; `masked` was 2,958 and 1,970 in the first two windows with a character in view and 0 after. The window with the route released for Explorer Cam (05:03:27) reads 0; after the exit 2,638,871, 11,563,990 and 15,297,874. The join was `source=hook` (2,161 of 2,161 frames in the 05:02:57 window), hook/t0 disagreements 0, every declined class 0. Source views handed out 2,161 (live 2,161) in that window; Explorer Cam's eye views 939 (live 939).
+- Release (MEASURED lifecycle, code answer): not a leak. Created 05:02:20.377 (3888x2187, 68.0 MB, present frame 12286); `on-foot source slot target released ... no on-foot source for 120 frames` at 05:03:22.304 (frame 16716), which runs `source = Eye{}` (engine_velocity.cpp:3130, idle ceiling kSourceIdleFrames = 120, engine_velocity.h:390) and drops the slot target, target 7 and both views with the Eye; created again 05:03:30.097 (frame 17266) for a NEW source depth (00000224D10BF620 against 00000224A4B30B20: the game re-made it on the F5 exit); released again 05:03:44.854. Every create has a release. The AddRef'd views are dropped inside the frame by their consumers (vr_world_route.cpp:296 RAII, screen_motion.cpp:503), and a rebuild on a new depth resets the old target first (engine_velocity.cpp:1186, :1133). The vram lines (local_used 14,435 then 13,350 MB across the release) are the whole game, so they do not isolate 68 MB.
+- Re-creating on a return is right: in Explorer Cam the scene is drawn in the eyes, so the source is idle and a persistent 68 MB target would sit unused for the session; and the depth it matched is re-made on exit, so it would be rebuilt anyway. Nothing changed in code.
+- Cost. World resolve (MEASURED): 1.103 ms a frame at 1.00 resolves a frame and 0.877 at 0.78, against F14's 0.669 at 0.60, which is 1.103, 1.124 and 1.115 ms PER RESOLVE: unchanged, so the t17 read costs nothing measurable and the rise is the route resolving more frames (INFERRED: F14's window held more non-panel frames). Engine velocity (MEASURED): 0.170 and 0.194 ms a frame (5.00 and 5.21 spans) against F14's 0.077 (1.79). The target is cleared once a frame (2,161 clears in 2,162 frames), inside that section; 68 MB is about 0.04-0.07 ms at 1-1.8 TB/s (INFERRED), so the clear is most of the +0.09-0.12 and the rest is the scene (spans a frame 5.0 against 1.8). The two are not separable in this log.
+- Doubt (1) of the F15 entry: skinned binds that write no history were 22, 0 and 8,499 in the three windows (the last is Explorer Cam's eyes), so the first-person panel did not meet the non-exporting family in this flight.
+- Open: nothing new for F15; the 1 s fade-hold cap is still unexercised.
