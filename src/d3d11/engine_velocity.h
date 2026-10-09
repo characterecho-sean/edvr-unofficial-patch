@@ -66,6 +66,7 @@ constexpr unsigned kEngineVelocityPoolSlot = 33;
 constexpr unsigned kEngineVelocitySceneSlot = 1;
 constexpr unsigned kEngineVelocitySlotsSrv = 21;
 constexpr unsigned kEngineVelocityPoolSrv = 22;
+constexpr unsigned kEngineVelocitySkinSrv = 23;   // F2: target 7, the skinned characters' E (temporal_shader_source.h SK)
 constexpr unsigned kEngineVelocitySceneNowCb = 1;
 constexpr unsigned kEngineVelocityScenePrevCb = 2;
 
@@ -108,8 +109,9 @@ struct DrawCache {
     const void* scene = nullptr;   // VS b1's buffer, likewise
     bool eye = false;
     int family = -1;   // the family whose substituted shaders are bound, -1 none
+    bool skin = false; // F2: the substituted draw is a skinned family's with target 7 bound (its instance-stream entries are listed: noteSkinDrawSlow)
 };
-constexpr int kMaxFamilies = 10;
+constexpr int kMaxFamilies = 16;   // kFamilies must fit: the static_assert in engine_velocity.cpp
 extern std::atomic<bool> live;
 extern DrawCache cache;                        // owner thread only
 extern uint64_t familyDraws[kMaxFamilies];     // owner thread only: draws that ran substituted
@@ -120,6 +122,7 @@ extern uint64_t g_stateCalls;                  // owner thread only: the draw wr
 constexpr unsigned kWatchSlots = 6;
 extern std::atomic<const ID3D11Resource*> watch[kWatchSlots];
 void beforeDrawSlow(ID3D11DeviceContext*, bool rtv0Eye);
+void noteSkinDrawSlow(ID3D11DeviceContext*, uint32_t startInstance, uint32_t instances);
 extern uint32_t g_psShadowProbeN;   // owner thread; the header's sampling counter
 // Sampled backstop for a genuinely unobserved game bind. The seam arc's
 // original zero-bind/live-census evidence was our own generated shaders
@@ -168,6 +171,15 @@ inline void engineVelocityBeforeDraw(ID3D11DeviceContext* ctx, bool rtv0Eye) {
         psShadowProbe(ctx);
     }
     if (cache.family >= 0) ++familyDraws[cache.family];
+}
+
+// F2: the instanced draws' arguments, told right after engineVelocityBeforeDraw (vscreen's DrawInstanced and DrawIndexedInstanced thunks). A skinned
+// family's substituted draw lists its instance window (StartInstanceLocation and count): the instance stream's entries there name the pool records the
+// draw reads, and the frame's list of them is what decides which of two records of one palette base is the live one (skin_join.h, "the pose table's CPU
+// reference"). One load and a branch for every other draw.
+inline void engineVelocityNoteSkinDraw(ID3D11DeviceContext* ctx, uint32_t startInstance, uint32_t instances) {
+    using namespace engine_velocity_detail;
+    if (cache.skin) noteSkinDrawSlow(ctx, startInstance, instances);
 }
 
 // The Map tee (vscreen's hookedMap, owner context, after the real Map): the
@@ -316,6 +328,11 @@ struct EngineVelocityViews {
     ID3D11Buffer* sceneNow = nullptr;
     ID3D11Buffer* scenePrev = nullptr;
     ID3D11ShaderResourceView* gameMark = nullptr;
+    // F2 on foot (VR, engineVelocitySourceViews only): the source pass's target 7, R16G16B16A16_FLOAT at the source depth's size, xyz = a skinned
+    // character's previous - current position in centimetres and w = 1 valid / 0 none, cleared to zero at the first skinned draw of the frame. Null when
+    // no skinned draw wrote it this frame and ALWAYS in the flat profile (it has no target 7): the consumers then keep what they had. The eyes' own is
+    // engineVelocitySkinView. AddRef'd like the rest; every consumer that releases the others releases this.
+    ID3D11ShaderResourceView* skin = nullptr;
 };
 bool engineVelocityViews(ID3D11DeviceContext*, int eye, ID3D11Texture2D* sceneDepth, EngineVelocityViews* out);
 // The eye-pass capture's GPU time since the last take (the performance
@@ -336,6 +353,16 @@ bool engineVelocityTakeCaptureGpu(EngineVelocityCaptureGpu* out);
 // camera term).
 void engineVelocityNotePixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
                               uint32_t stamped);
+// F2 (the second skin; skin_join.h, dxbc_skin_clone.h, docs/kinematic-motion-injection-2026-09-19.md "F2 built"). VR only.
+// engineVelocityNoteChainDispatch: the game's palette chain dispatch (exposure_fix.cpp's Dispatch hook, owner context, BEFORE the
+// game's dispatch; `groups` is its x): the join runs here. engineVelocitySkinView: the eye's target 7 (E = previous - current position
+// in centimetres, valid in w; R16G16B16A16_FLOAT, the scene depth's size), AddRef'd, or null when no draw wrote it this eye-frame -
+// then the compose keeps every skinned record's answer as it was. engineVelocityNoteSkinPixels: the compose's counts of skinned
+// pixels it took as joined / masked (Stats 56, 57) and the joined |E| in 32 log bins (Stats 58..89).
+bool engineVelocitySkinWanted() noexcept;
+void engineVelocityNoteChainDispatch(ID3D11DeviceContext* ctx, uint32_t groups);
+ID3D11ShaderResourceView* engineVelocitySkinView(int eye, ID3D11Texture2D* sceneDepth);
+void engineVelocityNoteSkinPixels(uint32_t joined, uint32_t masked, const uint32_t (&histogram)[32]);
 // vscreen's PS hook calls this with the bound shader's content hash: counts
 // binds of the self-marking detail shaders, so the draw-path census can tell
 // "never bound through the hook" from "bound but never drawn through it".
@@ -396,7 +423,8 @@ bool engineVelocitySourceCameraRows(float (&rows)[6][4]);
 // kPanelSampleFrames, one eye pixel in kPanelSampleStride squared (a grid on
 // the eye pixel), raw; pixelStride 1 = every pixel (diagnostics, motion_source).
 constexpr uint32_t kPanelSampleFrames = 300, kPanelSampleStride = 4;
+// `skinned` (F2 on foot) is inside `joined`: the skinned characters' pixels that took their exact motion from the source's target 7.
 void engineVelocityNotePanelPixels(uint32_t joined, uint32_t masked, uint32_t camera, uint32_t stale, uint32_t corrupt,
-                                   uint32_t stamped, uint32_t eyeDraws, uint32_t pixelStride);
+                                   uint32_t stamped, uint32_t eyeDraws, uint32_t pixelStride, uint32_t skinned = 0);
 
 }  // namespace edvr

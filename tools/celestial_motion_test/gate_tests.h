@@ -13,7 +13,7 @@
 //      also when the gate shut and opened within one frame, where the stamps alone would pair the stale list;
 //   3. the 5 s line carries the frames gated off, a window the gate held shut entirely is one short line, and every line is under the
 //      1000-character budget at 20-digit counters;
-//   4. device_hook.cpp's tickJournalGate pushes the journal's word, held to its text with a mutation that must fail the pin;
+//   4. device_hook.cpp's tickCelestialStatus pushes the journal's word and its boundary tick runs it, held to the text with mutations;
 //   5. the decision table, with mutants (the gate dropped, unknown read as supercruise, unknown read as on, inverted) that must fail it;
 //   6. each distinct body radius is named once per session, 16 at most.
 #pragma once
@@ -86,9 +86,11 @@ std::string slurp(const char* path) {
     ss << f.rdbuf();
     return ss.str();
 }
-// device_hook.cpp's tickJournalGate pushes the journal's word to the module, known and flag both, once a frame.
+// device_hook.cpp's tickCelestialStatus pushes the journal's word to the module, known and flag both, and the frame boundary RUNS it (the
+// call site is pinned too: the 2026-10-08 merge deleted the tick this push used to ride, which a body-only pin would not have noticed).
 bool tickPushesStatus(const std::string& text) {
-    const size_t at = text.find("void tickJournalGate() {");
+    if (text.find("tkCelestialStatus.run(tickCelestialStatus);") == std::string::npos) return false;
+    const size_t at = text.find("void tickCelestialStatus() {");
     if (at == std::string::npos) return false;
     const size_t end = text.find("\n}", at);   // the function's closing brace at column 0 (either line ending)
     if (end == std::string::npos) return false;
@@ -327,7 +329,7 @@ void all(const Fixture& fx) {
         }
         // the wiring from the journal to the module, held to its text, and the mutants of the pin
         const std::string src = slurp("src/d3d11/device_hook.cpp");
-        check(tickPushesStatus(src), "wiring: tickJournalGate pushes journalSupercruiseKnown() and journalSupercruise() to celestialMotionNoteStatus");
+        check(tickPushesStatus(src), "wiring: tickCelestialStatus pushes journalSupercruiseKnown() and journalSupercruise() to celestialMotionNoteStatus, and the boundary runs it");
         const std::string call = "celestialMotionNoteStatus(journalSupercruiseKnown(), journalSupercruise());";
         struct W { const char* what; std::string replacement; };
         const W wires[] = {{"the push removed", ""},
@@ -340,6 +342,15 @@ void all(const Fixture& fx) {
             mutated.replace(at, call.size(), w.replacement);
             check(!tickPushesStatus(mutated), fmt("mutation control: %s fails the wiring pin", w.what));
             std::printf("    control 'wiring: %s': caught\n", w.what);
+        }
+        {   // the tick's run removed: the push is intact but nothing calls it
+            std::string mutated = src;
+            const std::string run = "tkCelestialStatus.run(tickCelestialStatus);";
+            const size_t at = mutated.find(run);
+            check(at != std::string::npos, "wiring: the boundary runs tickCelestialStatus");
+            mutated.replace(at, run.size(), "");
+            check(!tickPushesStatus(mutated), "mutation control: the tick's run removed fails the wiring pin");
+            std::printf("    control 'wiring: the tick's run removed': caught\n");
         }
         ++cases;
     }

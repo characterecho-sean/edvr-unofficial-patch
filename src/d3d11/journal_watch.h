@@ -99,18 +99,16 @@ bool journalGameplay();
 // authoritative new-on-foot-session boundary.
 uint32_t journalDisembarks();
 
-// ...and boarded. A change while the gate believes the player is in the
-// external camera means they left it for a vehicle.
+// ...and boarded.
 uint32_t journalEmbarks();
 
 // The live on-foot state from Status.json, updated by the game about once a
 // second. 6bb measured the flags HOLDING through the entire external-camera
-// window (Flags2 0x8011, frozen, across eight view changes) -- which is what
-// makes keyless camera detection sound: on foot per the game itself, with the
-// on-foot screen gone and a stereo scene rendering, is the external camera,
-// because boarding drops these flags and announces itself as Embark.
+// window (Flags2 0x8011, frozen, across eight view changes); boarding drops
+// them and announces itself as Embark.
 // `known` is false at menus (no Flags2 in the file), when the file is
-// missing, or when the watcher is off -- callers then fall back to keys.
+// missing, or when the watcher is off -- callers then fall back to their own
+// heuristics.
 bool journalOnFootKnown();
 bool journalOnFoot();
 
@@ -127,11 +125,8 @@ constexpr bool journalSeatedFromFlags(uint32_t flags, uint32_t flags2) {
 bool journalSeatedKnown();
 bool journalSeated();
 
-// How many Status.json samples have been read. The gate uses it to require
-// an on-foot sample taken AFTER the panel stopped before arming keylessly:
-// boarding from the camera stops the panel while the previous sample still
-// says on-foot, and one stale second of that must not put the offset in a
-// boarding animation.
+// How many Status.json samples have been read: lets a caller require a sample
+// taken AFTER some event, since the previous one can be a second stale.
 uint32_t journalStatusSamples();
 
 // Is a jump tunnel plausibly on screen? Armed by StartJump, narrowed to the

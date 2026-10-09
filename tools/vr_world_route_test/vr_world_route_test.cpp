@@ -980,6 +980,15 @@ void experimentCases() {
                               "weapon=2000 other=7 stale-kept=0 depth-check=0/0 steady-detail=off view=on"),
           "refusal line: a sampled window prints its size, the pixels examined, the refused total and its share, each cause, the unnamed remainder as other, "
           "the steady-detail token and the view");
+    // F2 on foot: the accepted skinned pixels are the line's last token, zero when the route never read E and the count when it did (never part of the refused
+    // total: they took their exact motion). This is the line a flight reads to know the first-person route used target 7.
+    check(std::strstr(rl, "steady-detail=off view=on skinned-joined=0") != nullptr && std::strstr(rl, "refused=1206218 ") != nullptr,
+          "refusal line: skinned-joined=0 ends the line while no skinned pixel took its motion from target 7");
+    r.skinned = 19;
+    n = vrWorldFormatRefusalWindow(rl, sizeof(rl), r);
+    check(n > 0 && std::strstr(rl, "steady-detail=off view=on skinned-joined=19") != nullptr && std::strstr(rl, "refused=1206218 refused-pct=0.075 ") != nullptr,
+          "refusal line: the skinned pixels the census counted are skinned-joined=N, and they are not in the refused total");
+    r.skinned = 0;
     // The steady detail on, as this build always runs it (the depth-validated form): the stale pixels are two numbers, the ones last frame's
     // depth confirmed (stale-kept: not refused, not in the refused total) and the ones it did not (stale-refused: refused, in the total), and
     // the line says how many frames ran the check.
@@ -1006,6 +1015,7 @@ void experimentCases() {
     VrWorldRefusalWindow big;
     big.census = true; big.every = ~0u; big.treated = big.asked = big.sampled = big.read = big.dropped = ~0ull; big.width = big.height = ~0u; big.pixels = ~0ull;
     big.checked = big.skipped = ~0ull;
+    big.skinned = ~0ull;
     for (uint32_t i = 0; i < kFlatMonoRefusalSlots; ++i) big.counts[i] = ~0ull;
     big.steady = "off"; big.view = "off";
     n = vrWorldFormatRefusalWindow(rl, sizeof(rl), big);
@@ -1033,10 +1043,11 @@ void experimentCases() {
               kFlatMonoClassWeaponRefused == 13,
           "classes: 1..6 are the eye path's source kinds (the same numbers and colours), 7..13 are the resolver's own");
     bool namesOk = true;
-    for (uint32_t c = 0; c <= kFlatMonoClassReset; ++c) namesOk = namesOk && std::strcmp(flatMonoClassName(c), "?") != 0;
-    check(namesOk && std::strcmp(flatMonoClassName(15), "?") == 0 && std::strcmp(flatMonoClassName(kFlatMonoClassStale), "stale") == 0 &&
-              std::strcmp(flatMonoClassName(kFlatMonoClassMasked), "masked") == 0,
-          "classes: every class 0..14 has a name and nothing else does");
+    for (uint32_t c = 0; c <= kFlatMonoClassSkinned; ++c) namesOk = namesOk && std::strcmp(flatMonoClassName(c), "?") != 0;
+    check(namesOk && std::strcmp(flatMonoClassName(16), "?") == 0 && std::strcmp(flatMonoClassName(kFlatMonoClassStale), "stale") == 0 &&
+              std::strcmp(flatMonoClassName(kFlatMonoClassMasked), "masked") == 0 && kFlatMonoClassSkinned == 15 &&
+              std::strcmp(flatMonoClassName(kFlatMonoClassSkinned), "skinned") == 0,
+          "classes: every class 0..15 has a name and nothing else does (15 is the skinned pixel F2 on foot joined, accepted and counted in its own census slot)");
 }
 
 // ---- 6. the source pins --------------------------------------------------------------------------------------------------
@@ -1373,8 +1384,10 @@ void sourcePins() {
                   before(boundary, "vrWorldFormatInjectWindow(", "flatMonoResolveTakeRefusalCensus()") &&
                   before(boundary, "flatMonoResolveTakeRefusalCensus()", "vrWorldFormatRefusalWindow(") &&
                   before(boundary, "vrWorldFormatRefusalWindow(", "g_win.reset();") && boundary.find("if (g_census || rc.asked || rc.sampled || rc.frames || rc.checked || rc.skipped) {") != std::string::npos &&
-                  boundary.find("rw.checked = rc.checked; rw.skipped = rc.skipped;") != std::string::npos,
-              "experiment: the census's sums are taken once, in the 5 s window, and its line is printed only while the census key is on, samples are still in flight, or the steady detail's depth check counted frames");
+                  boundary.find("rw.checked = rc.checked; rw.skipped = rc.skipped;") != std::string::npos &&
+                  boundary.find("rw.skinned = rc.skinned;") != std::string::npos && count(rt, "rw.skinned") == 1,
+              "experiment: the census's sums are taken once, in the 5 s window, and its line is printed only while the census key is on, samples are still in flight, or the steady detail's depth check counted frames; "
+              "the skinned pixels that took their motion from target 7 (F2 on foot) reach the line's skinned-joined= token from the same read");
         check(boundary.find("g_viewOn = g_viewReported = false;") != std::string::npos &&
                   before(boundary, "g_viewOn = g_viewReported = false;", "windDownInjector();"),
               "key off live: the view's state is cleared with the route's, so a later episode logs its state again");

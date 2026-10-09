@@ -62,6 +62,15 @@ enum class GpuCensusSection : uint8_t {
     FrameWorldResolve,        // the route's resolve at the tone: the input copy, prep, upscaler and the finish into H
     FrameWorldMips,           // the screen texture's copy into the mipped texture and its GenerateMips
     FrameWorldLayer,          // the layer's re-issue of each eye's screen draw with the resolved, mipped screen
+    // The second skin's GPU work (F2: engine_velocity.cpp and skin_join_gpu.cpp), priced item by item for F16. Each is NESTED inside a FrameEngineVelocity span (the
+    // work was already in the engine velocity figure and still is), so they are timed on turns of their own, are NEVER added to a total, and are reported on a line
+    // of their own. Like the world route's they have no turn until called this window, so with no skinned character the census samples exactly as it did before.
+    FrameSkinSourceClear,     // the on-foot source's target 7 clear, once at the frame's first skinned draw (68 MB at 3888x2187)
+    FrameSkinEyeClear,        // an eye's target 7 clear at the eye-frame's start (31 MB at 2016x1949)
+    FrameSkinJoin,            // the join dispatch (one 256-thread group; its 3-table clear is the first phase of it), the plan upload and the job-table copy
+    FrameSkinJoinClearProbe,  // the join's 3-table clear loop ALONE, run on scratch buffers on this section's turn only (it cannot be timed inside the kernel);
+                              // join minus this is the rest of the join. It writes nothing the join reads.
+    FrameSkinPose,            // the pose table build: instance copy, the six dispatches (clear, mark, scatter, scatter-rest, verify, finish)
     // Elite's OWN draws that EDVR alters (see AlteredDrawClass below): the game's
     // draw timed whole, so each figure holds the game's own work in it plus what
     // EDVR adds by binding its target or swapping its shader. NOT EDVR's cost,
@@ -242,6 +251,10 @@ private:
 // and -- every 30 s of wall clock -- logs one summary line and resets the
 // window. No ini key: this is always on.
 void gpuCensusFrame(ID3D11DeviceContext* ctx) noexcept;
+
+// An eye run (the ledger, the draw census, the pool and palette copies) was armed: the window it falls in carries its extra GPU copies and its census, and
+// its summary lines say so, so a window without that sentence is the one to price a feature from (F13: both windows after the entry held a run).
+void gpuCensusNoteEyeRun() noexcept;
 
 // Quiescent cleanup, alongside the other feature modules' Shutdown().
 void gpuCensusShutdown() noexcept;

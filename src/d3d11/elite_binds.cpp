@@ -8,7 +8,9 @@
 #include <string>
 #include <vector>
 
+#include "../common/hotkey.h"
 #include "../common/log.h"
+#include "../common/pad_names.h"
 
 namespace edvr {
 namespace {
@@ -190,6 +192,134 @@ bool collectActiveBindsFiles(const std::wstring& dir, std::vector<Cand>* out) {
         return CompareFileTime(&a.wt, &b.wt) > 0;
     });
     return true;
+}
+
+// Every slot in one file's text, with the element it belongs to. A small tag walker rather than a search per element: the
+// elements are unknown here. An element is a tag with no attributes (<HeadlookToggle>), its slots are <Primary ...> and <Secondary
+// ...> inside it, and a slot's <Modifier ...> tags follow it before the next slot or the element's close. `emit(element, device,
+// key, prefix)` is called once per slot with a device and a key: `device` is the Device attribute as written ("Keyboard",
+// "GamePad", "Mouse", "231D0200"), `prefix` the keyboard modifiers in EDVR's spelling ("CTRL+").
+template <class Emit>
+void walkSlots(const std::string& text, Emit emit) {
+    std::string element;
+    struct Slot {
+        bool open = false;
+        std::string device;
+        std::string key;
+        std::string prefix;
+    } slot;
+    auto flush = [&]() {
+        if (slot.open && !slot.device.empty() && !slot.key.empty() && !element.empty()) {
+            emit(element, slot.device, slot.key, slot.prefix);
+        }
+        slot = Slot();
+    };
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t lt = text.find('<', pos);
+        if (lt == std::string::npos) break;
+        const size_t gt = text.find('>', lt);
+        if (gt == std::string::npos) break;
+        pos = gt + 1;
+        const char first = lt + 1 < text.size() ? text[lt + 1] : '\0';
+        if (first == '?' || first == '!') continue;
+        size_t nameStart = lt + 1;
+        const bool closing = first == '/';
+        if (closing) ++nameStart;
+        size_t nameEnd = nameStart;
+        while (nameEnd < gt && text[nameEnd] != ' ' && text[nameEnd] != '\t' && text[nameEnd] != '\r' && text[nameEnd] != '\n' &&
+               text[nameEnd] != '/' && text[nameEnd] != '>') {
+            ++nameEnd;
+        }
+        const std::string name = text.substr(nameStart, nameEnd - nameStart);
+        if (closing) {
+            if (name == element) {
+                flush();
+                element.clear();
+            }
+            continue;
+        }
+        const bool selfClosing = gt > lt && text[gt - 1] == '/';
+        const bool hasAttrs = nameEnd < gt && text[nameEnd] != '/' && text[nameEnd] != '>';
+        if (name == "Primary" || name == "Secondary") {
+            flush();
+            std::string device, key;
+            slot.open = true;
+            if (attrAfter(text, lt, gt - lt, "Device", &device)) slot.device = device;
+            if (attrAfter(text, lt, gt - lt, "Key", &key)) slot.key = key;
+            // A self-closing slot has no modifiers to wait for.
+            if (selfClosing) flush();
+        } else if (name == "Modifier") {
+            std::string mdev, mkey;
+            if (slot.open && attrAfter(text, lt, gt - lt, "Device", &mdev) && _stricmp(mdev.c_str(), "Keyboard") == 0 &&
+                attrAfter(text, lt, gt - lt, "Key", &mkey)) {
+                const char* mn = mkey.c_str();
+                if (strncmp(mn, "Key_", 4) == 0) mn += 4;
+                for (const KeyMap& mm : kModMap) {
+                    if (_stricmp(mn, mm.elite) == 0) {
+                        slot.prefix += mm.ours;
+                        slot.prefix += "+";
+                        break;
+                    }
+                }
+            }
+        } else if (!hasAttrs && !selfClosing && !name.empty()) {
+            flush();
+            element = name;
+        }
+    }
+    flush();
+}
+
+// The keyboard bindings alone (Explorer Cam's launch-time clash check reads these).
+int scanKeyboardUsesIn(const std::string& text, EliteKeyboardUse* out, int max) {
+    int n = 0;
+    walkSlots(text, [&](const std::string& element, const std::string& device, const std::string& key,
+                        const std::string& prefix) {
+        if (n >= max || _stricmp(device.c_str(), "Keyboard") != 0) return;
+        char keyName[32];
+        if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName))) return;
+        snprintf(out[n].element, sizeof(out[n].element), "%s", element.c_str());
+        snprintf(out[n].binding, sizeof(out[n].binding), "%s%s", prefix.c_str(), keyName);
+        ++n;
+    });
+    return n;
+}
+
+// Every binding a hotkey could share a press with: the keyboard, the XInput pad, and the joysticks (a device written as eight
+// hex digits, a Joy_N button or a Joy_POV hat). An axis, the mouse and a key this build has no name for are left out.
+int scanAllUsesIn(const std::string& text, EliteBindUse* out, int max) {
+    int n = 0;
+    walkSlots(text, [&](const std::string& element, const std::string& device, const std::string& key,
+                        const std::string& prefix) {
+        if (n >= max) return;
+        HotkeyBinding b;
+        if (_stricmp(device.c_str(), "Keyboard") == 0) {
+            char keyName[32];
+            if (!eliteBindsTranslateKey(key.c_str(), keyName, sizeof(keyName))) return;
+            if (!hotkeyParseBinding((prefix + keyName).c_str(), &b, /*quiet=*/true)) return;
+        } else if (_stricmp(device.c_str(), "GamePad") == 0) {
+            const PadName* p = padNameFind(key.c_str());
+            if (!p) return;
+            b.kind = HotkeyKind::Pad;
+            b.padButtons = p->buttons;
+            b.padTrigger = p->trigger;
+        } else {
+            uint32_t id = 0;
+            uint16_t input = 0;
+            if (!hotkeyJoyDeviceFromText(device.c_str(), &id) || device.size() != 8 ||
+                !hotkeyJoyInputFromEliteKey(key.c_str(), &input)) {
+                return;
+            }
+            b.kind = HotkeyKind::Joy;
+            b.joyDevice = id;
+            b.joyInput = input;
+        }
+        snprintf(out[n].element, sizeof(out[n].element), "%s", element.c_str());
+        out[n].binding = b;
+        ++n;
+    });
+    return n;
 }
 
 }  // namespace
@@ -392,15 +522,10 @@ bool parseElementSlotsIn(const std::string& text, const char* element,
 // The GamePad slots of one element: the raw Elite key name, no
 // translation (the xinput watcher owns that table).
 //
-// A slot with a Modifier chord is skipped -- UNLESS the caller passes
-// modOut, in which case the chord is reported instead of hidden. Two
-// different questions share this walk: "which gamepad key fires this" wants
-// the unchorded slot only, and "does this element chord on a key somebody
-// else watches" wants exactly the ones the first question drops.
+// A slot with a Modifier chord is skipped: watching half a chord would fire
+// on a bare button the game ignores.
 bool parsePadIn(const std::string& text, const char* element, char* out,
-                size_t outLen, bool* present, char* modOut = nullptr,
-                size_t modLen = 0) {
-    if (modOut && modLen) modOut[0] = '\0';
+                size_t outLen, bool* present) {
     const size_t el = text.find(std::string("<") + element + ">");
     if (present) *present = el != std::string::npos;
     if (el == std::string::npos) return false;
@@ -422,15 +547,7 @@ bool parsePadIn(const std::string& text, const char* element, char* out,
         }
         const size_t mod = text.find("<Modifier ", s);
         const bool chorded = mod != std::string::npos && mod < slotEnd;
-        if (chorded && !modOut) continue;
-        if (chorded) {
-            std::string modKey;
-            if (!attrAfter(text, mod, 160, "Key", &modKey)) continue;
-            snprintf(modOut, modLen, "%s", modKey.c_str());
-        } else if (modOut) {
-            // Asked for a chord and this slot has none: not an answer.
-            continue;
-        }
+        if (chorded) continue;
         snprintf(out, outLen, "%s", key.c_str());
         return true;
     }
@@ -463,35 +580,6 @@ bool eliteBindsLookupPadDir(const wchar_t* dirC, const char* element,
 bool eliteBindsLookupPad(const char* element, char* out, size_t outLen) {
     return eliteBindsLookupPadDir(bindingsDir().c_str(), element, out,
                                   outLen);
-}
-
-bool eliteBindsLookupPadMod(const char* element, char* out, size_t outLen) {
-    if (!element || !out || outLen == 0) return false;
-    out[0] = '\0';
-    const std::wstring dir = bindingsDir();
-    if (dir.empty()) return false;
-    // The same file walk as the lookups above, kept short because it wants
-    // only the newest maintained preset -- a stale file naming a chord that
-    // is no longer bound would veto a press for no reason.
-    WIN32_FIND_DATAW fd{};
-    HANDLE find = FindFirstFileW((dir + L"\\*.binds").c_str(), &fd);
-    if (find == INVALID_HANDLE_VALUE) return false;
-    std::wstring best;
-    FILETIME bestTime{};
-    do {
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (best.empty() || CompareFileTime(&fd.ftLastWriteTime, &bestTime) > 0) {
-            best = fd.cFileName;
-            bestTime = fd.ftLastWriteTime;
-        }
-    } while (FindNextFileW(find, &fd));
-    FindClose(find);
-    if (best.empty()) return false;
-    std::string text;
-    if (!readWholeFile(dir + L"\\" + best, &text)) return false;
-    char key[48];
-    bool present = false;
-    return parsePadIn(text, element, key, sizeof(key), &present, out, outLen);
 }
 
 bool eliteBindsLookupDir(const wchar_t* dirC, const char* element, char* out,
@@ -581,6 +669,44 @@ bool eliteBindsLookupSlots(const char* element, unsigned flags,
                            EliteKeySlots* out) {
     return eliteBindsLookupSlotsDir(bindingsDir().c_str(), element, flags,
                                     out);
+}
+
+int eliteBindsKeyboardUsesDir(const wchar_t* dirC, EliteKeyboardUse* out, int max, char* file, size_t fileLen) {
+    if (file && fileLen) file[0] = '\0';
+    if (!dirC || !dirC[0] || !out || max <= 0) return -1;
+    const std::wstring dir(dirC);
+    std::vector<Cand> cands;
+    if (!collectActiveBindsFiles(dir, &cands)) return -1;
+    for (const Cand& c : cands) {
+        std::string text;
+        if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
+        if (file && fileLen) snprintf(file, fileLen, "%s", c.utf8);
+        return scanKeyboardUsesIn(text, out, max);
+    }
+    return -1;
+}
+
+int eliteBindsKeyboardUses(EliteKeyboardUse* out, int max, char* file, size_t fileLen) {
+    return eliteBindsKeyboardUsesDir(bindingsDir().c_str(), out, max, file, fileLen);
+}
+
+int eliteBindsAllUsesDir(const wchar_t* dirC, EliteBindUse* out, int max, char* file, size_t fileLen) {
+    if (file && fileLen) file[0] = '\0';
+    if (!dirC || !dirC[0] || !out || max <= 0) return -1;
+    const std::wstring dir(dirC);
+    std::vector<Cand> cands;
+    if (!collectActiveBindsFiles(dir, &cands)) return -1;
+    for (const Cand& c : cands) {
+        std::string text;
+        if (!readWholeFile(dir + L"\\" + c.name, &text)) continue;
+        if (file && fileLen) snprintf(file, fileLen, "%s", c.utf8);
+        return scanAllUsesIn(text, out, max);
+    }
+    return -1;
+}
+
+int eliteBindsAllUses(EliteBindUse* out, int max, char* file, size_t fileLen) {
+    return eliteBindsAllUsesDir(bindingsDir().c_str(), out, max, file, fileLen);
 }
 
 unsigned long long eliteBindsFingerprintDir(const wchar_t* dir) {

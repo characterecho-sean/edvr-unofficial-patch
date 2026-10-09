@@ -45,7 +45,7 @@ void celestialMotionConfigure(bool enabled);
 // a grainy mess). Not known counts as not supercruise. Gated off, celestialMotionLive() is false (the draw path's one load), the
 // write tees are unwatched, celestialMotionRecords returns no SRV (probe.w bit 8192 clear, zero path-12 pixels), and what was
 // captured is dropped, so the first frame after the gate opens again has no previous frame and takes that fallback.
-// Render thread, once a frame, from the journal tick (device_hook.cpp's tickJournalGate): known = Status.json carried Flags.
+// Render thread, once a frame, from device_hook.cpp's tickCelestialStatus: known = Status.json carried Flags.
 // One log line per change of state. Not tracked while the module is configured off.
 void celestialMotionNoteStatus(bool known, bool supercruise);
 

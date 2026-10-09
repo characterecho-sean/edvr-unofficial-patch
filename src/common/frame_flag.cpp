@@ -17,36 +17,13 @@ namespace {
 struct Shared {
     volatile LONG flag;
     volatile LONG consumer;
-    // externalCam  the player is on foot in the external camera, having come
-    //              there from the flat panel
-    //
-    // Same shape of problem as `flag` and so the same channel: d3d11.dll is the
-    // only half that can tell the modes apart -- it watches the panel composite
-    // -- and openvr_api.dll is the only half that can act on the answer, because
-    // the head pose passes through it. Neither can do the other's job.
-    volatile LONG externalCam;
-    // externalCamStamp  bumped on every write of externalCam, including the
-    //                   writes that do not change it
-    //
-    // externalCam alone cannot distinguish "d3d11 says no" from "d3d11 has
-    // stopped saying anything", and the difference decides whether a player's
-    // viewpoint is still being moved in the cockpit. The writer sits inside a
-    // fault-budgeted guard that stops running permanently after a few faults,
-    // so "stopped saying anything" is a reachable state and not a theoretical
-    // one.
-    //
-    // A counter rather than a timestamp: no clock, no wraparound handling worth
-    // the name (2^32 frames is over a year at 90 Hz), and it compares with a
-    // plain !=.
-    volatile LONG externalCamStamp;
     // holdFrames  frames the openvr half should decline to submit, counting
-    //             down, set by d3d11 when the player presses a key that starts
-    //             a transition
+    //             down, set by d3d11 when a transition is known to be starting
     //
     // NOT a detection. Every other route in this file is one half telling the
-    // other what it INFERRED; this is the player telling us directly. They
-    // pressed the external-camera key, so a transition is starting -- there is
-    // nothing to detect and nothing to get wrong about which mode we are in.
+    // other what it INFERRED; this is a request made on a known event.
+    // (Its only caller was the old Explorer Cam's key press, deleted
+    // 2026-10-07; see requestSubmitHold in frame_flag.h.)
     //
     // It exists because during that transition Elite draws several frames from
     // somewhere the player is not, and no amount of detection helps: withholding
@@ -83,10 +60,9 @@ struct Shared {
     // Zero is "nobody has published", the eyeSize discipline.
     volatile LONG64 submitTex[2];
     // fssChromeStamp  bumped by d3d11 on every frame that draws the
-    //                 scanner's chrome -- externalCamStamp's discipline:
-    //                 a counter, compared with !=, staleness judged by
-    //                 the reader against its own frame count. The eye
-    //                 heal's gate.
+    //                 scanner's chrome: a counter, compared with !=,
+    //                 staleness judged by the reader against its own
+    //                 frame count. The eye heal's gate.
     volatile LONG fssChromeStamp;
     // The scanner screen's rectangle in the (left) eye, derived by d3d11
     // once per theater engage from the composite's own constants; the
@@ -196,7 +172,7 @@ struct Shared {
     volatile LONG     introRecentre;
     // UNUSED since advanced.eye_origin_readers was removed (2026-10-09): the
     // pose-reader hunt's request flag and per-call snapshot. Kept as padding
-    // so the layout -- and the v36 mapping name the two halves agree on -- does
+    // so the layout -- and the mapping name the two halves agree on -- does
     // not change; nothing reads or writes them.
     volatile LONG     reservedPoseReader0;
     volatile LONG     reservedPoseReader1;
@@ -227,6 +203,10 @@ struct Shared {
 // The name is built once, at first use. The two DLLs are in the same process,
 // so the channel between them is unaffected.
 //
+// _v37 because the external-camera pair left the layout (externalCam and
+// externalCamStamp) with the old Explorer Cam route, whose gate wrote them
+// and whose pose offset read them; Explorer Cam is now the free-camera
+// placement (explorer_cam.cpp), which uses no channel.
 // _v36 because the end-frame hold joined (endFrameHold), the test trigger of
 // the end-frame episode and slow-regime instruments (advanced.slow_test_ms,
 // docs/headset-lock-vdxr-2026-10-02.md).
@@ -300,7 +280,7 @@ const wchar_t* mappingName() {
     static wchar_t name[64];
     static bool built = false;
     if (!built) {
-        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v36_%lu",
+        _snwprintf_s(name, _TRUNCATE, L"Local\\edvr_glitch_frame_v37_%lu",
                      GetCurrentProcessId());
         built = true;
     }
@@ -543,28 +523,6 @@ void noteJumpVerdict(uint32_t verdict) {
 uint32_t jumpVerdictPacked() {
     Shared* s = map();
     return s ? static_cast<uint32_t>(InterlockedCompareExchange(&s->jumpVerdict, 0, 0)) : 0u;
-}
-
-void setExternalCameraOnFoot(bool on) {
-    Shared* s = map();
-    if (!s) return;
-    InterlockedExchange(&s->externalCam, on ? 1 : 0);
-    // The stamp moves on every call, not on every change. A gate that has
-    // settled on "no" is publishing just as actively as one that is toggling,
-    // and a reader that could not tell those apart would have to treat silence
-    // as consent.
-    InterlockedIncrement(&s->externalCamStamp);
-}
-
-bool externalCameraOnFoot() {
-    Shared* s = map();
-    // FALSE when the mapping could not be made, which is the safe direction: a
-    // head offset that fails to apply leaves the game exactly as it was, while
-    // one that fails to STOP applying moves the player's viewpoint in the
-    // cockpit. Unlike the glitch flag, this one persists across frames, so a
-    // wrong answer here does not expire on its own -- which is what
-    // externalCameraOnFootLive is for.
-    return s && InterlockedCompareExchange(&s->externalCam, 0, 0) != 0;
 }
 
 void requestSubmitHold(uint32_t frames) {
@@ -826,35 +784,6 @@ uint32_t endFrameHoldMs() {
     if (!s) return 0;
     const LONG v = InterlockedCompareExchange(&s->endFrameHold, 0, 0);
     return v > 0 ? static_cast<uint32_t>(v) : 0u;
-}
-
-bool externalCameraOnFootLive(uint32_t maxAgeFrames) {
-    Shared* s = map();
-    if (!s) return false;
-    const LONG stamp = InterlockedCompareExchange(&s->externalCamStamp, 0, 0);
-
-    // Reader-side state, so the writer needs no cooperation beyond bumping the
-    // stamp. Function-local statics: each DLL has its own copy, and only the
-    // openvr half calls this, once per frame from WaitGetPoses.
-    static LONG lastStamp = 0;
-    static uint32_t sinceMoved = 0;
-    static bool everMoved = false;
-
-    if (stamp != lastStamp) {
-        lastStamp = stamp;
-        sinceMoved = 0;
-        everMoved = true;
-    } else if (everMoved && sinceMoved < 0xFFFFFFFFu) {
-        ++sinceMoved;
-    }
-
-    // Never moved means d3d11.dll has not published once -- not installed, or
-    // its hooks never committed. That is not a "no" that has gone stale, it is
-    // an absence of anybody to ask, and guessing "yes" would apply the offset
-    // in every mode with no gate at all.
-    if (!everMoved) return false;
-    if (sinceMoved > maxAgeFrames) return false;
-    return InterlockedCompareExchange(&s->externalCam, 0, 0) != 0;
 }
 
 }  // namespace edvr

@@ -3,7 +3,7 @@
 // I/O, so the route's rig and the resolver's rig read the same numbers the shader writes.
 //
 // WHAT THE CLASS IS. Every render pixel the prep treats gets one byte, written to a private texture only on a frame that needs
-// it (a census sample, or the route's refusal view): the low four bits say what the pixel IS (0..14), bits 4-6 say WHY a refused
+// it (a census sample, or the route's refusal view): the low four bits say what the pixel IS (0..15), bits 4-6 say WHY a refused
 // first-person pixel has no history (0..7, set only with kFlatMonoClassWeaponRefused), bit 7 says the prep REFUSED its
 // history (rejection 1: the finish shows the raw input, which under a jittered world is a different sample every frame, so a
 // fine pattern on a refused pixel shimmers). Every reader of the byte masks what it reads: the class with kFlatMonoClassMask, the
@@ -30,8 +30,10 @@ constexpr uint32_t kFlatMonoClassDepth = 11;          // the pixel's own depth i
 constexpr uint32_t kFlatMonoClassWeapon = 12;         // an attached first-person pixel with a valid map: the map's motion
 constexpr uint32_t kFlatMonoClassWeaponRefused = 13;  // an attached first-person pixel the map cannot place: REFUSED
 constexpr uint32_t kFlatMonoClassReset = 14;          // a reset frame, every pixel refused: never sampled, never painted
+constexpr uint32_t kFlatMonoClassSkinned = 15;        // F2 on foot (VR world route only): a skinned character's pixel whose target-7 texel is valid: its exact motion. ACCEPTED, so it
+                                                       // is counted in its own census slot (kFlatMonoRefusalSkinned), never among the refused; a skinned pixel with no valid texel is kFlatMonoClassMasked
 constexpr uint32_t kFlatMonoClassRefusedBit = 0x80u;  // the prep refused this pixel's history
-constexpr uint32_t kFlatMonoClassMask = 0x0Fu;        // the class, bits 0-3: the highest is 14, so the next bits are free
+constexpr uint32_t kFlatMonoClassMask = 0x0Fu;        // the class, bits 0-3: the highest is 15, so the next bits are free
 constexpr uint32_t kFlatMonoClassReasonShift = 4;
 constexpr uint32_t kFlatMonoClassReasonMask = 0x70u;  // bits 4-6: kFlatMonoWeaponReason*, only ever with kFlatMonoClassWeaponRefused
 
@@ -61,7 +63,10 @@ constexpr uint32_t kFlatMonoRefusalStaleKept = 15;
 constexpr uint32_t kFlatMonoRefusalEvery = 4;
 constexpr uint32_t kFlatMonoRefusalStripes = 16;     // the counter buffer's stripes (spreads the atomics); the host sums them
 // Each stripe holds kFlatMonoRefusalSlots class counters, then kFlatMonoWeaponReasons counters of the refused first-person pixels by reason.
-constexpr uint32_t kFlatMonoRefusalCounters = kFlatMonoRefusalSlots + kFlatMonoWeaponReasons;
+// After them one more, the only ACCEPTED pixels the census counts: the skinned pixels that took their exact motion from target 7 (class kFlatMonoClassSkinned),
+// which is how a log shows the world route read E. Always 0 in the flat profile (it has no target 7).
+constexpr uint32_t kFlatMonoRefusalSkinned = kFlatMonoRefusalSlots + kFlatMonoWeaponReasons;
+constexpr uint32_t kFlatMonoRefusalCounters = kFlatMonoRefusalSlots + kFlatMonoWeaponReasons + 1;
 
 // The steady-detail depth check's tolerance (flat_mono_shader_source.h, kStaleDepthRel and kStaleDepthFloor, which the resolver's rig
 // holds to these): a stale pixel keeps its camera-term history only where last frame's depth, in the best of the four texels around the
@@ -88,6 +93,7 @@ inline const char* flatMonoClassName(uint32_t cls) {
         case kFlatMonoClassWeapon: return "weapon";
         case kFlatMonoClassWeaponRefused: return "weapon-refused";
         case kFlatMonoClassReset: return "reset";
+        case kFlatMonoClassSkinned: return "skinned";
     }
     return "?";
 }
@@ -115,6 +121,7 @@ struct FlatMonoRefusalCensus {
     uint64_t pixels = 0;       // pixels those samples examined (render width x height each)
     uint64_t counts[kFlatMonoRefusalSlots] = {};   // refused pixels by class; [kFlatMonoRefusalStaleKept] stale pixels the steady-detail rule kept
     uint64_t weaponReasons[kFlatMonoWeaponReasons] = {};   // the refused first-person pixels (counts[kFlatMonoClassWeaponRefused]) by reason
+    uint64_t skinned = 0;      // ACCEPTED skinned pixels that took their exact motion from target 7 (F2 on foot); not part of refused()
     // The steady-detail rule's own frames since the last take, whatever the census asked: resolves with the key on whose prep ran the
     // depth check (last frame's depth was there to check against) and resolves with the key on that could not (a reset frame is neither:
     // it refuses every pixel anyway). "Key on and checked=0" is the check never having run.

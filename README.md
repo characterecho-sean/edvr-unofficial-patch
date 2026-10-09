@@ -164,7 +164,7 @@ instead of standing in the world, or sized for a screen you are not looking at.
   and costs about 6% GPU at the tested values.
 - On foot, the grey surround is made properly black, the screen is moved, bent
   and raised above its forced 1920x1080, and Explorer Cam gives you a real
-  stereo view of your commander in the external camera.
+  stereo view from your commander's head in the free camera.
 
 [docs/fixes.md](docs/fixes.md) covers each fix in full: what it costs, what it
 is measured at, and which setting turns it off. The defaults are what most
@@ -174,14 +174,22 @@ menu.
 ## Explorer Cam
 
 On foot, Elite renders the world once, flat, and shows that image to both eyes.
-There is no depth because none is drawn. The external camera renders in proper
-stereo, and that is where Explorer Cam works: while you are in that camera, it
-moves your viewpoint to your commander's head. **It cannot make first person
-3D** and does not try; the flat screen stays flat.
+There is no depth because none is drawn. The game's free camera renders in
+proper stereo, and that is where Explorer Cam works. Press F5 on foot: the view
+fades to black, EDVR opens the camera, puts it at your commander's eyes facing
+their way, locks it to them so you walk with it, hides their head and the
+camera's on-screen controls, and fades back in. The view follows your
+commander's head, so it crouches and drops into a weapon stance with you. F5
+again takes you back to first person. While you are in it, the camera's own
+keys do nothing, so it behaves as a mode of its own. The key is on the menu's
+Hotkeys page, and leaving it empty turns Explorer Cam off. **It cannot make
+first person 3D** and does not try; the flat screen stays flat.
 
-It takes over one camera preset, Commander Right Shoulder, and gives you no
-capability you do not already have: inside the external camera you cannot act,
-and Explorer Cam changes only where the camera is.
+It gives you no capability you do not already have: inside the camera you
+cannot act, and Explorer Cam changes only where the camera is and what you see
+from it. While it is on, it writes the free camera's pose, the camera's own
+key presses, and how your commander's avatar is drawn, on your machine only,
+and gives them back when you leave; it touches nothing shared.
 [docs/explorer-cam.md](docs/explorer-cam.md) covers setting it up and what it
 does under the hood, safeguards included.
 
@@ -209,6 +217,16 @@ bindings (`hotkey.read_game_bindings`), and the panel's bottom line names them.
 While the menu is open the game sees no keyboard at all, though your HOTAS and
 mouse still do. Every change is written to `edvr.ini` and applies the way a
 hand edit would, and a row that only takes effect at the next launch says so.
+
+EDVR's own keys have a page of their own, **Hotkeys**: the menu key, Explorer
+Cam's key (clear it and Explorer Cam is off), the brightness-fix key and the
+camera-history key. Pick a row, press Enter, then press the key you want, with
+Ctrl, Shift or Alt for a chord, a gamepad button, or a button or hat on your
+HOTAS. Escape cancels and Delete clears (the menu key can be changed but never
+cleared from the menu). A choice that Elite also binds is flagged "also in
+Elite", because EDVR watches these keys and never takes them from the game. In
+`edvr.ini` they read `F5`, `CTRL+SHIFT+F9`, `GamePad_Back` or `231D0200:Joy_12`
+(the device is the vendor and product, as Elite's own bindings file spells it).
 
 The Monitor page is fpsVR's readout with a frame-time strip, and
 `menu.fps_overlay = on` pins a one-line version of it to your view while the

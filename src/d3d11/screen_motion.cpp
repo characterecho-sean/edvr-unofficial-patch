@@ -92,7 +92,7 @@ constexpr unsigned kUnnamedNoteFrames=90;    // screen frames with no naming bef
 // the motion_source view) and hand them to the view (motion_source). Outside
 // State: State resets must not forget a setting until the next config poll.
 bool g_countKinds=false,g_paintKinds=false;
-constexpr unsigned kPanelKinds=6;   // joined, masked, not a rig record, stale, corrupt, stale stamp
+constexpr unsigned kPanelKinds=7;   // joined, masked, not a rig record, stale, corrupt, stale stamp, and (inside joined) the skinned characters' exact motion
 
 constexpr uint64_t kGpuWindowFrames=1800;
 constexpr unsigned kGpuDrainFrames=120;
@@ -441,6 +441,7 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         // nothing -- the shader then keeps today's camera term everywhere.
         EngineVelocityViews ev{};
         const bool engine=engineVelocitySourceViews(g.depth.Get(),&ev);
+        const bool skin=engine && ev.skin;   // F2 on foot: the source's target 7, once a skinned draw wrote it this frame
         // The kinds counted: every eye pixel of every frame with diagnostics
         // or motion_source; otherwise a sample -- one frame in
         // kPanelSampleFrames, one eye pixel in kPanelSampleStride^2 (engine.z
@@ -449,7 +450,7 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         const bool counting=engine && (g_countKinds || g.frame%kPanelSampleFrames==0) &&
                             (g.countFrame!=g.frame || g.countStride==countGrid) && prepareCounts(dev.Get());
         float data[12]={e.shape[0],e.shape[1],e.shape[2],e.shape[3],float(e.width),float(e.height),ui?1.0f:0.0f,weapon?1.0f:0.0f,
-                        engine?1.0f:0.0f,engine && g_paintKinds?1.0f:0.0f,counting?float(countGrid):0.0f,0.0f};
+                        engine?1.0f:0.0f,engine && g_paintKinds?1.0f:0.0f,counting?float(countGrid):0.0f,skin?1.0f:0.0f};
         {
             GpuCensusScope census(ctx,GpuCensusSection::FrameScreenMotion);
             ctx->UpdateSubresource(e.settings.Get(),0,nullptr,data,0,0);
@@ -459,13 +460,13 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
         Ptr<ID3D11DepthStencilState> savedDs;UINT stencil;ctx->OMGetDepthStencilState(&savedDs,&stencil);
         Ptr<ID3D11PixelShader> savedPs;ID3D11ClassInstance* classes[256]{};UINT nc=256;ctx->PSGetShader(&savedPs,classes,&nc);
         ID3D11Buffer* savedCb[7]{};ctx->PSGetConstantBuffers(2,7,savedCb);
-        ID3D11ShaderResourceView* savedSrv[7]{};ctx->PSGetShaderResources(8,7,savedSrv);
+        ID3D11ShaderResourceView* savedSrv[8]{};ctx->PSGetShaderResources(8,8,savedSrv);
         ID3D11Buffer* cb[7]={g.camera[g.sourceWrite].Get(),g.camera[1-g.sourceWrite].Get(),e.model[e.write].Get(),e.camera[e.write].Get(),e.settings.Get(),
                              engine?ev.sceneNow:nullptr,engine?ev.scenePrev:nullptr};
-        ID3D11ShaderResourceView* srvs[7]={g.depthSrv.Get(),e.sizeSrv[e.write].Get(),ui?g.uiSrv.Get():nullptr,weapon?g.stencilSrv.Get():nullptr,weapon?weaponMotionView():nullptr,
-                                           engine?ev.slots:nullptr,engine?ev.pool:nullptr};
+        ID3D11ShaderResourceView* srvs[8]={g.depthSrv.Get(),e.sizeSrv[e.write].Get(),ui?g.uiSrv.Get():nullptr,weapon?g.stencilSrv.Get():nullptr,weapon?weaponMotionView():nullptr,
+                                           engine?ev.slots:nullptr,engine?ev.pool:nullptr,skin?ev.skin:nullptr};
         vScreenSetRenderTargetsRaw(ctx,1,e.rtv.GetAddressOf(),nullptr);ctx->OMSetBlendState(g.blend.Get(),nullptr,~0u);ctx->OMSetDepthStencilState(g.ds.Get(),0);
-        ctx->PSSetConstantBuffers(2,7,cb);ctx->PSSetShaderResources(8,7,srvs);ctx->PSSetShader(g.ps.Get(),nullptr,0);
+        ctx->PSSetConstantBuffers(2,7,cb);ctx->PSSetShaderResources(8,8,srvs);ctx->PSSetShader(g.ps.Get(),nullptr,0);
         // The counts' UAV at u1, beside the one render target. Bound and
         // unbound with the render targets kept (0xFFFFFFFF): the binding
         // hook leaves the shadow alone for exactly that call.
@@ -494,14 +495,15 @@ void screenMotionDraw(ID3D11DeviceContext* ctx,PanelCurveDrawFn draw,unsigned co
             ctx->OMSetRenderTargetsAndUnorderedAccessViews(kKeepTargets,nullptr,nullptr,1,1,&none,nullptr);
             ++g.countDraws;
         }
-        ID3D11ShaderResourceView* nulls[7]{};ctx->PSSetShaderResources(8,7,nulls);
+        ID3D11ShaderResourceView* nulls[8]{};ctx->PSSetShaderResources(8,8,nulls);
         vScreenSetRenderTargetsRaw(ctx,8,savedRt,savedDepth.Get());ctx->OMSetBlendState(savedBlend.Get(),factors,mask);ctx->OMSetDepthStencilState(savedDs.Get(),stencil);
-        ctx->PSSetConstantBuffers(2,7,savedCb);ctx->PSSetShaderResources(8,7,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
+        ctx->PSSetConstantBuffers(2,7,savedCb);ctx->PSSetShaderResources(8,8,savedSrv);ctx->PSSetShader(savedPs.Get(),classes,nc);
         for(auto* p:savedRt)if(p)p->Release();for(auto* p:savedCb)if(p)p->Release();for(auto* p:savedSrv)if(p)p->Release();for(UINT i=0;i<nc;++i)classes[i]->Release();
         if(ev.slots)ev.slots->Release();if(ev.pool)ev.pool->Release();if(ev.sceneNow)ev.sceneNow->Release();if(ev.scenePrev)ev.scenePrev->Release();
+        if(ev.gameMark)ev.gameMark->Release();if(ev.skin)ev.skin->Release();
         if(engine && !g.engineNoted){g.engineNoted=true;Log::get().note("screen motion: the source pass's engine data is bound: certified rig records carry their own engine motion to their previous source UV before the panel mapping; masked ones keep no history%s.",g_countKinds?", counted per eye pixel":", counted on a sample (one frame in 300, one eye pixel in 16)");}
         e.written=true;
-        if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil selects original-vertex weapon motion; uncovered or invalid history rejected.");}
+        if(weapon && !g.weaponNoted){g.weaponNoted=true;Log::get().note("screen motion: first-person stencil selects original-vertex weapon motion where the weapon map covers a texel or it is within first-person reach; uncovered or invalid history there is rejected, and a stencil texel beyond reach that the map does not cover (a character) takes the world path.");}
         if(!g.noted){g.noted=true;Log::get().note("screen motion: source camera/depth projected through the actual screen mesh at %ux%u per eye; GPU-only history, no source colour copies.",e.width,e.height);}
     }
     for(int i=0;i<4;++i)e.shape[i]=curve?curve[i]:0;
@@ -535,7 +537,7 @@ static void flushPanelCounts(ID3D11DeviceContext* ctx) {
         D3D11_MAPPED_SUBRESOURCE m{};
         if(ctx->Map(g.countsStaging[i].Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&m)!=S_OK)break;
         uint32_t c[kPanelKinds]{};std::memcpy(c,m.pData,sizeof(c));ctx->Unmap(g.countsStaging[i].Get(),0);
-        engineVelocityNotePanelPixels(c[0],c[1],c[2],c[3],c[4],c[5],g.countsDraws[i],g.countsStride[i]);
+        engineVelocityNotePanelPixels(c[0],c[1],c[2],c[3],c[4],c[5],g.countsDraws[i],g.countsStride[i],c[6]);
         g.countsPending[i]=false;
     }
 }

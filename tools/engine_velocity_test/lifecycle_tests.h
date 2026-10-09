@@ -62,6 +62,7 @@
 #include "../../src/d3d11/engine_velocity.h"
 #include "../../src/d3d11/gpu_census.h"
 #include "../../src/d3d11/kinematic_eval_hook.h"
+#include "../../src/d3d11/skin_entity_hook.h"
 #include "../../src/d3d11/vscreen.h"
 
 namespace lifecycle_fake {
@@ -77,6 +78,18 @@ std::vector<std::string> g_log;
 uint64_t g_clock = 1000;
 uint64_t fakeClock() { return g_clock; }
 std::unordered_map<void*, uint64_t> g_objectHash;   // the registry's stand-in, for the shadow probe
+// The F2 entity hook (skin_entity_hook.cpp is not linked here; its own rig drives it). By default it stands down and no list is ever read, so the join
+// takes the job table's prefix -- the fallback the DLL uses when the hook stands down. A test that wants the hook's list sets g_hookSnap (the list
+// the stub hands the join, whose seq the test advances once per frame) and g_hookArmed. g_hookGate is what the engine path last asked of the gate.
+unsigned g_hookArms = 0;
+bool g_hookGate = false;
+std::vector<uint32_t> g_hookChainJobs;   // the job counts the chain dispatches told the (stubbed) hook, one per chain dispatch the join took
+bool g_hookArmed = false;
+const edvr::skinjoin::Snapshot* g_hookSnap = nullptr;
+// The GPU census stub (below) records every Begin per section: the F16 census slots (gpu_census.h, FrameSkin*) are read from here, to see which the engine path
+// fills and which stay empty. g_censusTimeProbe makes the stub answer "timed" for the join-clear probe's section, so the production probe dispatch runs on WARP.
+unsigned g_censusBegins[static_cast<unsigned>(edvr::GpuCensusSection::Count)] = {};
+bool g_censusTimeProbe = false;
 }  // namespace lifecycle_fake
 
 // --- The stubs engine_velocity.cpp links against -------------------------------
@@ -139,12 +152,40 @@ void Log::note(const char* fmt, ...) {
     va_end(args);
     lifecycle_fake::g_log.push_back(text);
 }
+SkinHookState skinEntityHookArm(char* why, size_t cap) {
+    ++lifecycle_fake::g_hookArms;
+    if (why && cap) std::snprintf(why, cap, "rig: the entity hook is not linked into this rig");
+    return SkinHookState::StoodDown;
+}
+SkinHookState skinEntityHookState() { return lifecycle_fake::g_hookArmed ? SkinHookState::Armed : SkinHookState::StoodDown; }
+void skinEntityHookSetGate(bool open) { lifecycle_fake::g_hookGate = open; }
+void skinEntityHookNoteChain(uint32_t jobs) { lifecycle_fake::g_hookChainJobs.push_back(jobs); }
+bool skinEntityHookLatest(skinjoin::Snapshot& out) {
+    if (!lifecycle_fake::g_hookSnap) return false;
+    out = *lifecycle_fake::g_hookSnap;
+    return true;
+}
+SkinHookStats skinEntityHookStats() {
+    SkinHookStats r;
+    r.state = skinEntityHookState();
+    if (lifecycle_fake::g_hookSnap) {
+        r.calls = r.usable = lifecycle_fake::g_hookSnap->seq;
+        r.threads = 1;
+        r.lastEntries = lifecycle_fake::g_hookSnap->n;
+        r.lastEnd = lifecycle_fake::g_hookSnap->end;
+    }
+    return r;
+}
+bool skinEntityHookNextEvent(char*, size_t) { return false; }
 int64_t qpcNow() { LARGE_INTEGER t{}; QueryPerformanceCounter(&t); return t.QuadPart; }
 int64_t qpcFrequency() { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }
 // The GPU census (issue #38) is cross-cutting; this rig is about the draw
 // half's own state machine, not the census's rotation or its calibration
-// (tools/gpu_census_test covers those), so it is stubbed out.
-bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
+// (tools/gpu_census_test covers those), so it is stubbed out -- except that it counts the Begins per section and can answer "timed" for the join-clear probe.
+bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection section) noexcept {
+    if (section < GpuCensusSection::Count) ++lifecycle_fake::g_censusBegins[static_cast<unsigned>(section)];
+    return lifecycle_fake::g_censusTimeProbe && section == GpuCensusSection::FrameSkinJoinClearProbe;
+}
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 }  // namespace edvr
 

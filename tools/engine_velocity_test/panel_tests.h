@@ -25,6 +25,9 @@
 // coordinates on its grid (the sampled count without diagnostics, flight 5);
 // engine.y (the motion_source view) puts 16 + the kind in the validity for the
 // compose to paint.
+// F2 on foot: engine.w with the source's target 7 at t15 -- a record with a palette base (a skinned character) takes world + the source camera term + E from
+// its texel (kind 7: counted as joined and in its own slot, painted as joined) or, with the texel invalid, keeps no history; without the view it is not a rig
+// record. Cases K, L and R below; the shader is also run with one rule flipped at a time (the mutants at the foot of the file).
 //
 // The panel mapping is made trivial on purpose -- a flat screen of half-size
 // 1 at the origin, an identity model and eye rows that pass x, y through --
@@ -94,17 +97,19 @@ inline bool toUv(const std::array<float, 277 * 4>& rows, V3 rel, double& u, doub
     return true;
 }
 
-inline void run(const Harness& h) {
+// Runs every case against `source` (the production screen shader, or one with a rule flipped: `quiet` then keeps the run's lines off the log). False when the
+// shader does not compile.
+inline bool runWith(const Harness& h, const std::string& source, bool quiet) {
     ID3D11Device* dev = h.device;
     ID3D11DeviceContext* ctx = h.context;
 
     // --- the production shader, as screen_motion.cpp builds it ---------------
-    const std::string source = edvr::screenMotionPsSource(edvr::kEngineMotionCoreHlsl);
     ComPtr<ID3DBlob> psCode, errors;
     HRESULT hr = D3DCompile(source.c_str(), source.size(), "screen_motion", nullptr, nullptr, "main", "ps_5_0",
                             D3DCOMPILE_ENABLE_STRICTNESS, 0, &psCode, &errors);
-    if (FAILED(hr) && errors) std::fprintf(stderr, "%s\n", static_cast<const char*>(errors->GetBufferPointer()));
-    h.check(SUCCEEDED(hr), "panel: the production screen shader compiles with the engine-motion core in front");
+    if (FAILED(hr) && errors && !quiet) std::fprintf(stderr, "%s\n", static_cast<const char*>(errors->GetBufferPointer()));
+    if (FAILED(hr)) { if (!quiet) h.check(false, "panel: the production screen shader compiles with the engine-motion core in front"); return false; }
+    if (!quiet) h.check(true, "panel: the production screen shader compiles with the engine-motion core in front");
     const char* vsText = R"HLSL(
 struct O { float2 t : __USER_VERTEX_M_TEXCOORD0; float4 p : SV_Position; };
 O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o.p = float4(p * float2(2, -2) + float2(-1, 1), 0, 1); o.t = p; return o; }
@@ -129,7 +134,7 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
         texelNdc(p.x, p.y, nx, ny);
         return consumer_tests::solveRel(rowsNow, nx, ny, kZView);
     };
-    std::vector<Record> pool(6);
+    std::vector<Record> pool(7);
     const uint16_t* ident = consumer_tests::identLanes();
     // A: moving -- translated and turned 12 degrees about y; the surface point
     // is 0.3/-0.2/0.1 from the record's origin, so the turn moves it.
@@ -159,6 +164,8 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     // frame's stamp: the cull case declines to the camera term (kind 6).
     pool[4] = pool[0];
     pool[4].mark(ev::kJoined, math_tests::kStampFrame - 1);
+    // K/L (F2 on foot): a skinned character's record: a nonzero palette base, no pose blocks and no marker.
+    pool[5].w[0] = 7u;
 
     // --- resources ------------------------------------------------------------
     auto texture = [&](DXGI_FORMAT fmt, UINT bind, const void* init, UINT pitch, ComPtr<ID3D11Texture2D>& t) {
@@ -233,10 +240,10 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     ComPtr<ID3D11UnorderedAccessView> countsUav;
     {
         D3D11_BUFFER_DESC d{};
-        d.ByteWidth = 6 * 4; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        d.ByteWidth = 7 * 4; d.Usage = D3D11_USAGE_DEFAULT; d.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
         d.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; d.StructureByteStride = 4;
         D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
-        ud.Format = DXGI_FORMAT_UNKNOWN; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER; ud.Buffer.NumElements = 6;
+        ud.Format = DXGI_FORMAT_UNKNOWN; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER; ud.Buffer.NumElements = 7;
         D3D11_BUFFER_DESC s = d;
         s.Usage = D3D11_USAGE_STAGING; s.BindFlags = 0; s.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         h.check(SUCCEEDED(dev->CreateBuffer(&d, nullptr, &counts)) && SUCCEEDED(dev->CreateUnorderedAccessView(counts.Get(), &ud, &countsUav)) &&
@@ -244,8 +251,8 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     }
 
     // --- one draw, read back --------------------------------------------------
-    auto drawWith = [&](float engineOn, float paint, float count) {
-        settings[8] = engineOn; settings[9] = paint; settings[10] = count;
+    auto drawWith = [&](float engineOn, float paint, float count, ID3D11ShaderResourceView* slotsOverride = nullptr, ID3D11ShaderResourceView* skinView = nullptr) {
+        settings[8] = engineOn; settings[9] = paint; settings[10] = count; settings[11] = skinView ? 1.0f : 0.0f;
         ctx->UpdateSubresource(settingsCb.Get(), 0, nullptr, settings, 0, 0);
         const UINT zeros[4] = {};
         ctx->ClearUnorderedAccessViewUint(countsUav.Get(), zeros);
@@ -261,12 +268,13 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
         ctx->PSSetShader(ps.Get(), nullptr, 0);
         ID3D11Buffer* cbs[7] = {srcCb.Get(), oldCb.Get(), modelCb.Get(), eyeCb.Get(), settingsCb.Get(), senCb.Get(), sebCb.Get()};
         ctx->PSSetConstantBuffers(2, 7, cbs);
-        ID3D11ShaderResourceView* srvs[7] = {depthSrv.Get(), sizeSrv.Get(), nullptr, nullptr, nullptr,
-                                             engineOn != 0 ? slotSrv.Get() : nullptr, engineOn != 0 ? poolSrv.Get() : nullptr};
-        ctx->PSSetShaderResources(8, 7, srvs);
+        ID3D11ShaderResourceView* srvs[8] = {depthSrv.Get(), sizeSrv.Get(), nullptr, nullptr, nullptr,
+                                             engineOn != 0 ? (slotsOverride ? slotsOverride : slotSrv.Get()) : nullptr, engineOn != 0 ? poolSrv.Get() : nullptr,
+                                             engineOn != 0 ? skinView : nullptr};
+        ctx->PSSetShaderResources(8, 8, srvs);
         ctx->Draw(3, 0);
-        ID3D11ShaderResourceView* nulls[7] = {};
-        ctx->PSSetShaderResources(8, 7, nulls);
+        ID3D11ShaderResourceView* nulls[8] = {};
+        ctx->PSSetShaderResources(8, 8, nulls);
         ctx->OMSetRenderTargets(0, nullptr, nullptr);   // unbinds the UAV too
         D3D11_TEXTURE2D_DESC d{};
         target->GetDesc(&d);
@@ -285,9 +293,9 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
     auto readCounts = [&]() {
         ctx->CopyResource(countsStaging.Get(), counts.Get());
         D3D11_MAPPED_SUBRESOURCE m{};
-        std::array<uint32_t, 6> c{};
+        std::array<uint32_t, 7> c{};
         h.check(SUCCEEDED(ctx->Map(countsStaging.Get(), 0, D3D11_MAP_READ, 0, &m)), "panel: map counts");
-        std::memcpy(c.data(), m.pData, sizeof(uint32_t) * 6);
+        std::memcpy(c.data(), m.pData, sizeof(uint32_t) * 7);
         ctx->Unmap(countsStaging.Get(), 0);
         return c;
     };
@@ -341,7 +349,7 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
         h.check(toUv(rowsPrev, prevRel, u, v), "panel A: the record's previous point is in front of last frame's camera");
         const double ex = u * kDim - (pxA.x + 0.5), ey = v * kDim - (pxA.y + 0.5);
         const auto got = at(on, pxA);
-        if (!within(got, ex, ey, 1e-3))
+        if (!quiet && !within(got, ex, ey, 1e-3))
             std::fprintf(stderr, "  panel A: GPU motion (%.6f %.6f) vs double reference (%.6f %.6f)\n", got[0], got[1], ex, ey);
         h.check(got[3] == 1.0f && within(got, ex, ey, 1e-3),
                 "panel A: a moving rig record's source pixel carries its own engine motion to the previous eye pixel (1e-3 px)");
@@ -349,8 +357,9 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
         cameraTerm(pxA, cx, cy);
         h.check(std::fabs(ex - cx) + std::fabs(ey - cy) > 0.5,
                 "panel A: and that is not the camera term the panel gave it before (the lookup changes the motion)");
-        std::printf("  panel: moving record's texel: engine motion (%.3f, %.3f) px against the camera term (%.3f, %.3f) px\n",
-                    got[0], got[1], cx, cy);
+        if (!quiet)
+            std::printf("  panel: moving record's texel: engine motion (%.3f, %.3f) px against the camera term (%.3f, %.3f) px\n",
+                        got[0], got[1], cx, cy);
     }
     // B: masked -> no history.
     {
@@ -393,8 +402,153 @@ O main(uint id : SV_VertexID) { O o; float2 p = float2((id << 1) & 2, id & 2); o
             at(painted, pxN)[3] == 19.0f && at(painted, pxS)[3] == 20.0f && at(painted, pxX)[3] == 21.0f &&
             at(painted, pxH)[3] == 22.0f && at(painted, pxZ)[3] == 1.0f,
             "panel: under the motion_source view the validity carries 16 + the source kind (no slot: unchanged)");
-    std::printf("  panel: production screen shader on WARP -- joined exact (worst %.2e px), masked no-history, "
-                "declined kinds on the camera term, counts and the view's encoding as specified\n", worst);
+
+    // ---- F2 on foot: a skinned character's exact motion from the source's target 7 (engine.w, t15) -----------------------------------
+    // The same source pass and the same pool, with three more pixels: K a skinned record (a nonzero palette base, no pose blocks, no marker) whose target-7 texel
+    // is valid with E = (-80, 30, 50) cm (the texel's interpolated flag 0.9995117); L the same record whose texel has no valid flag; R the MOVING joined record
+    // of case A at another pixel, with every texel of target 7 invalid. With the skin view bound K takes world + the source camera term + E, L keeps no history,
+    // R is exactly what it is without the view. Without the view (the flat profile's frame, which has none) K and L are not rig records: the camera term.
+    {
+        const Px pxK{6, 6}, pxL{6, 10}, pxR{10, 6}, pxP{10, 10};
+        std::vector<float> slots2 = slots;
+        auto put2 = [&](Px p, float code, float z) { const size_t i = size_t(p.y) * kDim + p.x; slots2[i * 2] = code; slots2[i * 2 + 1] = z; };
+        put2(pxK, 11.0f, zr);   // 2*5+1: the skinned record
+        put2(pxL, 11.0f, zr);
+        put2(pxR, 1.0f, zr);    // A's moving joined record
+        put2(pxP, 11.0f, zr);   // the skinned record again, with an infinite E
+        ComPtr<ID3D11Texture2D> slotTex2, skinTex;
+        texture(DXGI_FORMAT_R32G32_FLOAT, D3D11_BIND_SHADER_RESOURCE, slots2.data(), kDim * 8, slotTex2);
+        std::vector<uint16_t> skin(size_t(kDim) * kDim * 4, 0);
+        auto toHalf = [](float f) {
+            uint32_t x; std::memcpy(&x, &f, 4);
+            const uint32_t sign = (x >> 16) & 0x8000u;
+            int32_t exp = int32_t((x >> 23) & 0xFF) - 127 + 15;
+            const uint32_t mant = x & 0x007FFFFFu;
+            if (exp <= 0) return uint16_t(sign);
+            if (exp >= 31) return uint16_t(sign | 0x7C00u);
+            uint32_t hv = (uint32_t(exp) << 10) | (mant >> 13);
+            const uint32_t rem = mant & 0x1FFFu;
+            if (rem > 0x1000u || (rem == 0x1000u && (hv & 1u))) ++hv;
+            return uint16_t(sign | hv);
+        };
+        const float ek[3] = {-80.0f, 30.0f, 50.0f};
+        {
+            uint16_t* t = &skin[(size_t(pxK.y) * kDim + pxK.x) * 4];
+            t[0] = toHalf(ek[0]); t[1] = toHalf(ek[1]); t[2] = toHalf(ek[2]); t[3] = toHalf(0.99951171875f);
+            uint16_t* u = &skin[(size_t(pxL.y) * kDim + pxL.x) * 4];
+            u[0] = toHalf(ek[0]); u[1] = toHalf(ek[1]); u[2] = toHalf(ek[2]); u[3] = 0;   // E set, no valid flag
+            uint16_t* q = &skin[(size_t(pxP.y) * kDim + pxP.x) * 4];
+            q[0] = 0x7C00; q[1] = 0; q[2] = 0; q[3] = toHalf(1.0f);   // E infinite, valid flag set
+        }
+        texture(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_SHADER_RESOURCE, skin.data(), kDim * 8, skinTex);
+        ComPtr<ID3D11ShaderResourceView> slotSrv2, skinSrv;
+        h.check(SUCCEEDED(dev->CreateShaderResourceView(slotTex2.Get(), nullptr, &slotSrv2)) &&
+                SUCCEEDED(dev->CreateShaderResourceView(skinTex.Get(), nullptr, &skinSrv)), "panel skin: views");
+        const auto without = drawWith(1, 0, 1, slotSrv2.Get(), nullptr);
+        const auto withoutCounts = readCounts();
+        const auto bound = drawWith(1, 0, 1, slotSrv2.Get(), skinSrv.Get());
+        const auto boundCounts = readCounts();
+        const auto boundPainted = drawWith(1, 1, 0, slotSrv2.Get(), skinSrv.Get());
+        // K's reference: the surface point under the texel, this frame's camera against last frame's, plus E (centimetres) moved by the surface itself.
+        {
+            const V3 rel = consumer_tests::add(consumer_tests::add(surface(pxK), consumer_tests::sub(camNow.origin, camPrev.origin)),
+                                               V3{ek[0] * 0.01, ek[1] * 0.01, ek[2] * 0.01});
+            double u = 0, v = 0;
+            h.check(toUv(rowsPrev, rel, u, v), "panel K: the skinned surface's previous point is in front of last frame's camera");
+            const double ex = u * kDim - (pxK.x + 0.5), ey = v * kDim - (pxK.y + 0.5);
+            const auto got = at(bound, pxK);
+            if (!quiet && !within(got, ex, ey, 2e-3))
+                std::fprintf(stderr, "  panel K: GPU motion (%.6f %.6f) vs double reference (%.6f %.6f)\n", got[0], got[1], ex, ey);
+            h.check(got[3] == 1.0f && within(got, ex, ey, 2e-3),
+                    "panel K: a skinned character's source pixel carries its exact motion (world + the source camera term + E) to the previous eye pixel (2e-3 px)");
+            double cx, cy;
+            cameraTerm(pxK, cx, cy);
+            h.check(std::fabs(ex - cx) + std::fabs(ey - cy) > 0.3, "panel K: and that is not the camera term (E moved it)");
+        }
+        h.check(at(bound, pxL)[0] == 0.0f && at(bound, pxL)[1] == 0.0f && at(bound, pxL)[3] == 2.0f && at(bound, pxL)[2] == zr,
+                "panel L: a skinned pixel whose target-7 texel has no valid flag keeps no history (0, 0, z, 2)");
+        // (the explicit finiteness test is the earlier exit: the reprojection refuses a non-finite point and answers 2 as well, so this case is a behaviour, not a discriminator)
+        h.check(at(bound, pxP)[0] == 0.0f && at(bound, pxP)[1] == 0.0f && at(bound, pxP)[3] == 2.0f && at(bound, pxP)[2] == zr,
+                "panel P: a skinned pixel whose E is infinite keeps no history (0, 0, z, 2)");
+        {
+            const auto a = at(bound, pxR), b = at(without, pxR);
+            h.check(a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[3] == 1.0f,
+                    "panel R: a RIGID joined record is the same with the skin view bound as without it (target 7 is for a palette base only), whatever its texels say");
+        }
+        {
+            bool same = true;
+            for (const Px p : {pxA, pxB, pxC, pxN, pxS, pxX, pxZ, pxH}) {
+                const auto a = at(bound, p), b = at(without, p);
+                same = same && a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
+            }
+            h.check(same, "panel: every pixel of the earlier cases is the same with the skin view bound as without it");
+        }
+        for (const Px p : {pxK, pxL, pxP}) {
+            double ex, ey;
+            cameraTerm(p, ex, ey);
+            h.check(at(without, p)[3] == 1.0f && within(at(without, p), ex, ey, 1e-3),
+                    "panel K/L: with no skin view (the flat profile's frame) a record with a palette base and no marker is not a rig record: the camera term, as before");
+        }
+        // joined: A, C, R; K counts as joined too; masked: B, L; the others as in the earlier cases; skinned (inside joined): K
+        h.check(withoutCounts[0] == 3 && withoutCounts[1] == 1 && withoutCounts[2] == 4 && withoutCounts[3] == 1 && withoutCounts[4] == 1 &&
+                    withoutCounts[5] == 1 && withoutCounts[6] == 0,
+                "panel, no skin view: the counts are joined 3 (A, C and R), masked 1, not a rig record 4 (N, K, L and P), stale 1, corrupt 1, stale stamp 1, skinned 0");
+        h.check(boundCounts[0] == 4 && boundCounts[1] == 3 && boundCounts[2] == 1 && boundCounts[3] == 1 && boundCounts[4] == 1 && boundCounts[5] == 1 &&
+                    boundCounts[6] == 1,
+                "panel, skin view bound: K is counted as joined AND in its own slot (joined 4, masked 3 with L and P, not a rig record 1, skinned 1)");
+        h.check(at(boundPainted, pxK)[3] == 17.0f && at(boundPainted, pxL)[3] == 18.0f && at(boundPainted, pxR)[3] == 17.0f,
+                "panel: under the motion_source view a skinned pixel with a valid texel paints as joined (17), one without keeps no history (18)");
+    }
+    if (!quiet)
+        std::printf("  panel: production screen shader on WARP -- joined exact (worst %.2e px), masked no-history, "
+                    "declined kinds on the camera term, skinned characters from target 7, counts and the view's encoding as specified\n", worst);
+    return true;
+}
+
+// The production shader, then the same cases against it with one rule flipped at a time: each flip must fail a check.
+inline void run(const Harness& h) {
+    const std::string production = edvr::screenMotionPsSource(edvr::kEngineMotionCoreHlsl);
+    runWith(h, production, false);
+    struct Mutant { const char* name; const char* from; const char* to; };
+    static const Mutant mutants[] = {
+        {"the skin view's flag is ignored (no view: a skinned record reads an unbound texture)", "if(engine.w!=0 && r.data[0].x!=0u) {", "if(r.data[0].x!=0u) {"},
+        {"a rigid record takes the skinned branch", "if(engine.w!=0 && r.data[0].x!=0u) {", "if(engine.w!=0) {"},
+        {"a texel without the valid flag is accepted", "if(!(sk.w>0.5) || !all(isfinite(sk.xyz)))return 2u;", "if(!all(isfinite(sk.xyz)))return 2u;"},
+        {"E is taken as metres", "engineReprojectRowsE(r,true,sk.xyz*0.01,", "engineReprojectRowsE(r,true,sk.xyz,"},
+        {"E is previous - current the wrong way round", "engineReprojectRowsE(r,true,sk.xyz*0.01,", "engineReprojectRowsE(r,true,-sk.xyz*0.01,"},
+        {"the pose blocks decide, not E", "engineReprojectRowsE(r,true,sk.xyz*0.01,", "engineReprojectRowsE(r,false,sk.xyz*0.01,"},
+        {"the previous position is not carried to the panel", "if(sk==1u || sk==7u) {", "if(sk==1u) {"},
+        {"a skinned pixel is painted with its own kind", "16.0+(kind==7u?1u:kind)", "16.0+kind"},
+        {"a skinned pixel is not counted as joined", "PanelCounts[sk==7u?0u:sk-1u]", "PanelCounts[sk==7u?5u:sk-1u]"},
+        {"a skinned pixel is not counted in its own slot", "if(sk==7u)InterlockedAdd(PanelCounts[6],1u);", ""},
+        {"a masked skinned pixel is called joined", "if(!(sk.w>0.5) || !all(isfinite(sk.xyz)))return 2u;", "if(!(sk.w>0.5) || !all(isfinite(sk.xyz)))return 1u;"},
+    };
+    int caught = 0;
+    for (const Mutant& m : mutants) {
+        const size_t at = production.find(m.from);
+        char what[256];
+        std::snprintf(what, sizeof(what), "panel mutations: \"%.100s\": its anchor is in the shader exactly once", m.name);
+        h.check(at != std::string::npos && production.find(m.from, at + 1) == std::string::npos, what);
+        if (at == std::string::npos) continue;
+        std::string mutated = production;
+        mutated.replace(at, std::strlen(m.from), m.to);
+        int failed = 0;
+        std::string first;
+        struct Count { int* failed; std::string* first; };
+        static thread_local Count* active = nullptr;
+        Count count{&failed, &first};
+        active = &count;
+        Harness quiet{h.device, h.context, [](bool ok, const char* text) { if (!ok) { ++*active->failed; if (active->first->empty()) *active->first = text; } }};
+        const bool compiled = runWith(quiet, mutated, true);
+        active = nullptr;
+        std::snprintf(what, sizeof(what), "panel mutations: \"%.100s\" compiles", m.name);
+        h.check(compiled, what);
+        std::snprintf(what, sizeof(what), "panel mutations: \"%.100s\" is caught by the cases", m.name);
+        h.check(failed > 0, what);
+        if (failed > 0) ++caught;
+        std::printf("  panel mutation \"%s\": %d checks fail; first: %s\n", m.name, failed, first.c_str());
+    }
+    std::printf("  panel: %d of %zu mutations caught\n", caught, sizeof(mutants) / sizeof(mutants[0]));
 }
 
 }  // namespace panel_tests

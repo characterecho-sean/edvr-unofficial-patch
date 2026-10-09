@@ -21,8 +21,8 @@
 namespace edvr {
 namespace {
 
-// Every half second. Halved from once a second on 2026-08-16: the keyless
-// entry latch waits on this cadence -- measured sample arrivals landed +53 and
+// Every half second. Halved from once a second on 2026-08-16: consumers of the
+// on-foot flag wait on this cadence -- measured sample arrivals landed +53 and
 // +90 frames after a panel stop -- and a 2 KB Status read plus a bounded
 // journal slice at this rate costs nothing measurable.
 //

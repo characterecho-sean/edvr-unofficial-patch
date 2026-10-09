@@ -6,7 +6,7 @@
 // fifty module ticks, the hotkeys, the menu and the config reload together. A
 // fault in any of them was charged to the block, so eight faulting frames in one
 // diagnostic probe stopped every other tick for the session -- the menu, the
-// hotkeys, the config reload, the head-offset gate's inputs -- and the notes named
+// hotkeys, the config reload, the journal's inputs -- and the notes named
 // only the block. guard.h's note now says WHERE a fault happened (module and
 // offset); this says WHICH tick, in the name the budget carries.
 //

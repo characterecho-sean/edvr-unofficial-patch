@@ -1298,9 +1298,9 @@ void sourcePins(const std::string& root) {
   check(at(perf, "Config::get().getIntInRange(\"advanced.slow_test_ms\", 0, 0, 500)") != none && at(perf, "requestEndFrameHold(s.slowTest.holdNowMs());") != none &&
             at(perf, "requestEndFrameHold(0);") != none && at(perf, "    freezeTestTick();\n    slowTestTick();\n") != none,
         "G1.trigger: perf_monitor.cpp reads advanced.slow_test_ms, begins and ends the request on the schedule, every frame");
-  check(at(flagHeader, "constexpr uint32_t kFrameFlagVersion = 36;") != none && at(flag, "L\"Local\\\\edvr_glitch_frame_v36_%lu\"") != none && at(flag, "volatile LONG     endFrameHold;") != none &&
+  check(at(flagHeader, "constexpr uint32_t kFrameFlagVersion = 37;") != none && at(flag, "L\"Local\\\\edvr_glitch_frame_v37_%lu\"") != none && at(flag, "volatile LONG     endFrameHold;") != none &&
             at(flag, "ms > 5000u ? 5000u : ms") != none,
-        "G1.flag: the request crosses frame_flag: layout v36, the field, and the runtime never holds longer than 5 s");
+        "G1.flag: the request crosses frame_flag: layout v37, the field, and the runtime never holds longer than 5 s");
   check(at(bat, "tools\\slow_regime_test\\slow_regime_test.cpp") != none, "G1.build: build.bat compiles this rig");
   check(at(ini, "#slow_test_ms = 0") != none && at(ini, "# TEST ONLY. 0 (the default) does nothing. A value from 1 to 500 makes the") != none,
         "G1.ini: advanced.slow_test_ms is documented in edvr.ini as test only, default 0");

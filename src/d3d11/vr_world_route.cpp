@@ -296,7 +296,7 @@ void treatWorld(ID3D11DeviceContext* ctx) {
     struct Release {
         EngineVelocityViews& v;
         ~Release() { if (v.slots) v.slots->Release(); if (v.pool) v.pool->Release(); if (v.sceneNow) v.sceneNow->Release();
-                     if (v.scenePrev) v.scenePrev->Release(); if (v.gameMark) v.gameMark->Release(); }
+                     if (v.scenePrev) v.scenePrev->Release(); if (v.gameMark) v.gameMark->Release(); if (v.skin) v.skin->Release(); }
     } release{ev};
     if (sel != VrWorldSelect::Selected) { declineLine(vrWorldSelectName(sel)); return; }
 
@@ -854,6 +854,7 @@ void vrWorldRouteFrameBoundary() {
                 rw.every = rc.every;
                 rw.width = rc.width; rw.height = rc.height; rw.pixels = rc.pixels;
                 for (uint32_t i = 0; i < kFlatMonoRefusalSlots; ++i) rw.counts[i] = rc.counts[i];
+                rw.skinned = rc.skinned;
                 rw.checked = rc.checked; rw.skipped = rc.skipped;
                 rw.view = g_viewOn ? "on" : "off";
                 char refusalLine[1024];

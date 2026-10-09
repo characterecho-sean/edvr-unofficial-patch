@@ -230,7 +230,7 @@ H_ENDMS = "    frame.vendorEndMs=info.ms;\n"
 H_OVERLAP = "    finishingOverlapped=true; // endFrameReturned names the path\n"
 H_FINISH = "    if(tracing)finishInstruments();\n"
 H_PERIODIC = "writeInstrumentSummaries(\"periodic\");}\n"
-H_WALL = "      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement);"
+H_WALL = "      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,&wall,framePlacement,fade);"
 H_MEASURE = "    const bool measure=counterNow(&dispatchBegan);\n"
 H_VRAM = "    {const char* why=nullptr;vramAdapter.Attach(vramAdapterOf(graphics.device(),&why));vramWhy=why?why:\"\";}\n"
 H_COPY = "    const double copy=scene?transferWall.producerDispatch+submitSample.receiveMs:0.0;\n"
@@ -240,7 +240,7 @@ H_LAG = "XR_SUCCEEDED(host.api.convertTime(host.instance,&counter,&now))"
 P_SLOWTICK = "    freezeTestTick();\n    slowTestTick();\n"
 P_END = "            requestEndFrameHold(0);\n"
 P_KEY = "Config::get().getIntInRange(\"advanced.slow_test_ms\", 0, 0, 500)"
-FF_VERSION = "constexpr uint32_t kFrameFlagVersion = 36;"
+FF_VERSION = "constexpr uint32_t kFrameFlagVersion = 37;"
 FF_CLAMP = "ms > 5000u ? 5000u : ms"
 FF_FIELD = "    volatile LONG     endFrameHold;\n"
 B_RIG = "\"tools\\slow_regime_test\\slow_regime_test.cpp\""
@@ -433,7 +433,7 @@ MUTANTS = [
       "every call without a loading frame's flags is an empty end"),
     M("glue-close-unfinished", "G1", "host", [(H_FINISH, "")], "an open episode and regime are not ended at close"),
     M("glue-no-periodic-summary", "G1", "host", [(H_PERIODIC, "}\n")], "the summaries are never written while the session runs"),
-    M("glue-wall-only-while-open", "G1", "host", [(H_WALL, "      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,submitStats.full()?nullptr:&wall,framePlacement);")],
+    M("glue-wall-only-while-open", "G1", "host", [(H_WALL, "      stereo.renderCaptured(frameViews,frameSpace,captured,layer,observer,submitStats.full()?nullptr:&wall,framePlacement,fade);")],
       "the swapchain calls are timed only while the submit window has room"),
     M("glue-treatments-only-while-open", "G1", "host", [(H_MEASURE, "    const bool measure=!submitStats.full()&&counterNow(&dispatchBegan);\n")], "the treatments are timed only while the submit window has room"),
     M("glue-no-vram", "G1", "host", [(H_VRAM, "")], "the SLOW line has no adapter to read"),
@@ -441,7 +441,7 @@ MUTANTS = [
     M("glue-trigger-never-ends", "G1", "perf", [(P_END, "")], "the hold request is never withdrawn"),
     M("glue-trigger-not-ticked", "G1", "perf", [(P_SLOWTICK, "    freezeTestTick();\n")], "the test trigger is never ticked"),
     M("glue-trigger-wrong-key", "G1", "perf", [(P_KEY, "Config::get().getIntInRange(\"advanced.slow_hold_ms\", 0, 0, 500)")], "the key read is not the one documented"),
-    M("glue-flag-version", "G1", "flagh", [(FF_VERSION, "constexpr uint32_t kFrameFlagVersion = 35;")], "the layout grew without a new version"),
+    M("glue-flag-version", "G1", "flagh", [(FF_VERSION, "constexpr uint32_t kFrameFlagVersion = 36;")], "the layout grew without a new version"),
     M("glue-flag-unclamped", "G1", "flagcpp", [(FF_CLAMP, "ms")], "the runtime may be asked to hold a call for any time"),
     M("glue-flag-no-field", "G1", "flagcpp", [(FF_FIELD, "")], "the shared block has no room for the hold"),
     M("glue-not-in-the-build", "G1", "bat", [(B_RIG, "\"tools\\slow_regime_test\\other.cpp\"")], "build.bat does not compile this rig"),

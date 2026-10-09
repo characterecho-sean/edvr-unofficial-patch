@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <cmath>
 #include <vector>
+#include <string>
+#include <process.h>
 #include <fstream>
 using Microsoft::WRL::ComPtr;
 unsigned checks=0;
@@ -21,8 +23,38 @@ ComPtr<ID3DBlob> compile(const char* s,const char* profile,const char* entry="ma
     if(FAILED(h)&&e)std::puts(static_cast<const char*>(e->GetBufferPointer()));hr(h);return c;
 }
 namespace edvr {
+// The character rule's mutation checks (the main's tail runs this exe again once per mutant with EDVR_SCREEN_MUTANT set): the production
+// screen shader's bytes are replaced by the same source compiled here with one rule flipped, and the whole rig must FAIL. Mutant 0 is the
+// control, the unmutated source compiled here, which must pass: without it a failing mutant could be this harness and not the rule.
+struct ScreenMutant{const char* name;const char* from;const char* to;};
+const ScreenMutant kScreenMutants[]={
+    {"control: the shipped source, compiled here","",""},
+    {"every stencil texel is first-person again (the character rule removed)","if(attached && WeaponMotion.Load(int3(texel,0)).w==0 && z<kFirstPersonReachDepth)attached=false;",""},
+    {"an uncovered stencil texel is always a character (no reach)"," && z<kFirstPersonReachDepth)attached=false;",")attached=false;"},
+    {"the reach test is inclusive","z<kFirstPersonReachDepth","z<=kFirstPersonReachDepth"},
+    {"the reach bound is 1% nearer","kFirstPersonReachDepth=.075;","kFirstPersonReachDepth=.07425;"},
+    {"the reach bound is 1% farther","kFirstPersonReachDepth=.075;","kFirstPersonReachDepth=.07575;"},
+    {"a new (w 2) texel counts as uncovered","WeaponMotion.Load(int3(texel,0)).w==0","WeaponMotion.Load(int3(texel,0)).w!=1"},
+    {"every texel counts as uncovered (coverage ignored)","WeaponMotion.Load(int3(texel,0)).w==0","true"},
+};
+constexpr int kScreenMutantCount=int(sizeof(kScreenMutants)/sizeof(kScreenMutants[0]));
+int screenMutantIndex(){const char* e=std::getenv("EDVR_SCREEN_MUTANT");return e?std::atoi(e):-1;}
 ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytes,size_t size,const char*,const char*) {
     ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11PixelShader* shader=nullptr;
+    const int mutant=screenMutantIndex();
+    if(mutant>=0 && mutant<kScreenMutantCount && bytes==static_cast<const void*>(kScreenMotionBytecode)) {
+        std::string source=screenMotionPsSource(kEngineMotionCoreHlsl);
+        const ScreenMutant& m=kScreenMutants[mutant];
+        if(m.from[0]) {
+            const size_t at=source.find(m.from);
+            if(at==std::string::npos || source.find(m.from,at+1)!=std::string::npos){std::printf("MUTANT ANCHOR NOT UNIQUE: %s\n",m.name);std::exit(2);}
+            source.replace(at,std::strlen(m.from),m.to);
+        }
+        ComPtr<ID3DBlob> code,errors;
+        const HRESULT made=D3DCompile(source.c_str(),source.size(),"screen motion",nullptr,nullptr,"main","ps_5_0",0,0,&code,&errors);
+        if(FAILED(made)||!code){std::printf("MUTANT COMPILE FAILED: %s: %s\n",m.name,errors?static_cast<const char*>(errors->GetBufferPointer()):"no message");std::exit(2);}
+        if(FAILED(dev->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader)))return nullptr;return shader;
+    }
     if(FAILED(dev->CreatePixelShader(bytes,size,nullptr,&shader)))return nullptr;return shader;
 }
 
@@ -46,7 +78,7 @@ unsigned testSourceNotes=0;ID3D11Buffer* testSourceScene=nullptr;
 EngineVelocitySourceSignal testSourceSignal=EngineVelocitySourceSignal::Terrain;
 void engineVelocityNoteSource(ID3D11Texture2D*,ID3D11Buffer* scene,EngineVelocitySourceSignal signal){++testSourceNotes;testSourceScene=scene;testSourceSignal=signal;}
 bool engineVelocitySourceViews(ID3D11Texture2D*,EngineVelocityViews* out){if(out)*out=EngineVelocityViews{};return false;}
-void engineVelocityNotePanelPixels(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t){}
+void engineVelocityNotePanelPixels(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t){}
 // The hangar cases: vs_EB52 stands for a pool family, vs_AACF for a pool
 // family that is also a first-person weapon or tool shader.
 constexpr uint64_t testPoolVs=0xEB5234DB6ADB491Dull,testWeaponVs=0xAACFDCF2FB9AD809ull;
@@ -232,8 +264,45 @@ int main(int argc,char** argv){
             }check(pass==0 || valid>W*H/2,"weapon vectors actually reach both eye maps");}
             ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(11,1,&none);
         }
+        // The stencil bit is the game's characters' as well as the weapon's (a walking NPC and the commander's own body read 0x10 in the eye
+        // depth stencil, 2026-10-08). The same rule as the flat prep's (flat_mono_shader_source.h, kFirstPersonReachDepth = .075, raw depth,
+        // reversed-Z): a stencil texel is first-person only where the weapon map covers it (w 1 or 2) or the surface is within reach; an
+        // uncovered one beyond reach is a world character and is treated exactly as without the stencil. The weapon map is unbound
+        // (testWeaponMotion = null, w 0 everywhere) except where a case needs it; the world motion depends on the depth, so every
+        // comparison is against the same depth with no stencil.
+        {
+            model[9][3]=0;
+            std::vector<float> motionNew(W*H*4);for(UINT i=0;i<W*H;++i){motionNew[i*4]=2;motionNew[i*4+2]=.0025f;motionNew[i*4+3]=2;}
+            D3D11_SUBRESOURCE_DATA ni{};ni.pSysMem=motionNew.data();ni.SysMemPitch=W*16;
+            ComPtr<ID3D11Texture2D> nt;ComPtr<ID3D11ShaderResourceView> nv;hr(dev->CreateTexture2D(&motionDesc,&ni,&nt));hr(dev->CreateShaderResourceView(nt.Get(),nullptr,&nv));
+            auto eyeMap=[&](float depthValue,unsigned stencil,ID3D11ShaderResourceView* weaponMap){
+                testWeaponMotion=weaponMap;screenMotionFrameBoundary(ctx.Get());source[275][0]+=.1f;sourceDraw();
+                ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,depthValue,UINT8(stencil));
+                g.weapon=true;screenDraw(0);
+                ID3D11ShaderResourceView* unbind=nullptr;ctx->PSSetShaderResources(11,1,&unbind);
+                return read(dev.Get(),ctx.Get(),g.eyes[0].map.Get());
+            };
+            auto liveCount=[&](const std::vector<float>& a){UINT n=0;for(UINT i=0;i<W*H;++i)n+=a[i*4+3]==1;return n;};
+            auto sameAs=[&](const std::vector<float>& a,const std::vector<float>& b){for(UINT i=0;i<W*H*4;++i)if(a[i]!=b[i])return false;return true;};
+            auto allRejected=[&](const std::vector<float>& a){for(UINT i=0;i<W*H;++i)if(a[i*4+3]==1)return false;return true;};
+            constexpr float reach=.075f,farDepth=.0025f,nearDepth=.15f,below=.0749f,above=.0751f;
+            // One frame to settle: the previous passes left the screen's model at another offset, which the first frame here would carry.
+            eyeMap(farDepth,0,nullptr);
+            const auto bareFar=eyeMap(farDepth,0,nullptr);
+            check(liveCount(bareFar)>W*H/2,"eye character cells: the world run (no stencil) is live, so equality below is not two rejections");
+            check(sameAs(eyeMap(farDepth,20,nullptr),bareFar),"a stencil texel the weapon map does not cover, beyond reach (a character), is treated exactly as without the stencil");
+            check(sameAs(eyeMap(farDepth,0x10,nullptr),bareFar),"...whatever else the stencil holds (0x10 alone)");
+            const auto bareBelow=eyeMap(below,0,nullptr);
+            check(liveCount(bareBelow)>W*H/2,"eye character cells: the world run just below the bound is live");
+            check(sameAs(eyeMap(below,20,nullptr),bareBelow),"an uncovered stencil texel just below the reach bound is a character");
+            check(allRejected(eyeMap(reach,20,nullptr)),"an uncovered stencil texel at the reach bound is first-person and keeps no history");
+            check(allRejected(eyeMap(above,20,nullptr)),"an uncovered stencil texel just above the reach bound is first-person and keeps no history");
+            check(allRejected(eyeMap(nearDepth,20,nullptr)),"an uncovered stencil texel within reach (an arm or weapon the matcher missed) keeps no history, never the camera term");
+            check(allRejected(eyeMap(farDepth,20,nv.Get())),"a texel the weapon map covers with w 2 (a weapon mesh the matcher saw but could not place) keeps no history at any depth");
+            check(!allRejected(eyeMap(farDepth,20,mv.Get())) && liveCount(eyeMap(farDepth,20,mv.Get()))>W*H/2,"a texel the weapon map covers with a valid motion takes it, far beyond reach");
+        }
         // Keep default fixture path unchanged, including missing-stencil fallback.
-        testWeaponMotion=nullptr;screenMotionFrameBoundary(ctx.Get());sourceDraw();ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_STENCIL,1,20);screenDraw(0);
+        testWeaponMotion=nullptr;screenMotionFrameBoundary(ctx.Get());sourceDraw();ctx->ClearDepthStencilView(ds.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,.15f,20);screenDraw(0);
         auto rejected=read(dev.Get(),ctx.Get(),g.eyes[0].map.Get());for(UINT i=0;i<W*H;++i)check(rejected[i*4+3]!=1,"missing weapon motion rejects history instead of assuming fixed UV");
         ID3D11ShaderResourceView* none=nullptr;ctx->PSSetShaderResources(11,1,&none);
         model[9][3]=0;td.Format=DXGI_FORMAT_R32_TYPELESS;depth.Reset();ds.Reset();hr(dev->CreateTexture2D(&td,nullptr,&depth));dd.Format=DXGI_FORMAT_D32_FLOAT;hr(dev->CreateDepthStencilView(depth.Get(),&dd,&ds));
@@ -436,6 +505,19 @@ int main(int argc,char** argv){
     {auto d=screenMotionGpuDiagnostics();check(!d.collecting&&!d.draining&&!d.sourceFrames&&!d.uiClearCalls&&!d.uiDrawCalls&&!d.eyeClearCalls&&!d.projectionCalls,"screen GPU diagnostics reset on shutdown");}
     testScreenConsumers(dev.Get(),ctx.Get());
     if(queue)for(UINT64 i=0;i<queue->GetNumStoredMessages();++i){SIZE_T messageBytes=0;queue->GetMessage(i,nullptr,&messageBytes);std::vector<unsigned char> b(messageBytes);auto* m=reinterpret_cast<D3D11_MESSAGE*>(b.data());queue->GetMessage(i,m,&messageBytes);if(m->Severity<=D3D11_MESSAGE_SEVERITY_WARNING){std::puts(m->pDescription);check(false,"D3D debug layer clean");}}
+    if(screenMutantIndex()<0) {
+        // The character rule's mutation checks: this exe again, once per mutant, with EDVR_SCREEN_MUTANT naming it. The control must pass
+        // (exit 0); every mutant must fail a check (exit 1); anything else (2: an anchor that moved or a source that no longer compiles)
+        // is the harness, not the rule.
+        char self[MAX_PATH]{};GetModuleFileNameA(nullptr,self,MAX_PATH);
+        for(int i=0;i<kScreenMutantCount;++i){
+            _putenv_s("EDVR_SCREEN_MUTANT",std::to_string(i).c_str());
+            const intptr_t code=_spawnl(_P_WAIT,self,self,"--self-test",nullptr);
+            _putenv_s("EDVR_SCREEN_MUTANT","");
+            std::printf("screen motion character-rule mutation %d \"%s\": exit %d (%s)\n",i,kScreenMutants[i].name,int(code),i==0?"the control must pass":"the rig must fail it");
+            check(i==0?code==0:code==1,i==0?"character-rule mutations: the control (the shipped source compiled here) passes the whole rig":"character-rule mutations: the mutant is caught by the rig");
+        }
+    }
     std::printf("PASS: %u screen motion checks.\n",checks);
     return 0;
 }

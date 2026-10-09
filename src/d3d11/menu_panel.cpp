@@ -514,11 +514,12 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             if (l.style == kMenuRowEdit) right.rect.right -= cap / 3;
             if (l.toggle) right.rect.right -= switchW + cap / 2;
             ops.push_back(right);
-            if (l.badge == kBadgeRestart || l.badge == kBadgeUnknown || l.badge == kBadgePending) {
+            if (l.badge == kBadgeRestart || l.badge == kBadgeUnknown || l.badge == kBadgePending || l.badge == kBadgeClash) {
                 Op b;
                 b.text = true;
                 b.str = l.badge == kBadgeRestart ? L"restart"
                         : l.badge == kBadgePending ? L"at next launch"
+                        : l.badge == kBadgeClash   ? L"also in Elite"
                                                    : L"?";
                 b.rect = {split, y + rowPitch * 62 / 100, cardW - pad, y + rowPitch};
                 b.align = DT_RIGHT;

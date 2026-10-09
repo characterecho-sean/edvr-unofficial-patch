@@ -1,11 +1,11 @@
 // The player's own Elite keybindings, read from where the game keeps them.
 //
 // Elite stores bindings as XML in Options\Bindings\*.binds under its local
-// appdata, with StartPreset.start naming the active preset. The two bindings
-// EDVR watches for -- the external-camera toggle and the next-vanity-view
-// cycle -- are in there, already answered, for every player who has ever
-// bound them in the game. Reading them removes the last piece of manual
-// setup: no ini editing at all for keyboard players.
+// appdata, with StartPreset.start naming the active preset. The bindings
+// EDVR watches for -- the FSS enter, quit and zoom keys -- are in there,
+// already answered, for every player who has ever bound them in the game.
+// Reading them removes the last piece of manual setup: no ini editing at all
+// for keyboard players.
 //
 // Read at startup and RE-READ when the files change: Elite rewrites this
 // directory the moment a rebind or preset switch is applied, so a slow stat
@@ -21,30 +21,31 @@
 // uses in the cockpit. That reader wants every slot of an element, not the
 // first watchable one, and it is the only caller allowed to see a modifier
 // key (Key_LeftControl...) as a MAIN key: under kEliteKeyAllowModifierMain
-// the translation answers "0xA2" where the camera path refuses. The camera
-// path never passes the flag -- a bare Ctrl as a camera watch would fire on
-// every chord the player types. The slot parser also bounds each slot's
-// <Modifier> by the NEXT slot's tag, while parseElementIn (the camera's)
-// deliberately scans to the element's end: changing the camera parser would
-// change its answer for a bare-Primary/chorded-Secondary element, and that
-// answer is pinned by the smoke fixtures.
+// the translation answers "0xA2" where the watched-key path refuses. That
+// path never passes the flag -- a bare Ctrl watch would fire on every chord
+// the player types. The slot parser also bounds each slot's <Modifier> by the
+// NEXT slot's tag, while parseElementIn deliberately scans to the element's
+// end: changing parseElementIn would change its answer for a
+// bare-Primary/chorded-Secondary element, and that answer is pinned by the
+// smoke fixtures.
 #pragma once
 
 #include <cstddef>
 
+#include "../common/hotkey.h"
+
 namespace edvr {
 
-// Look up an Elite binding element (e.g. "PhotoCameraToggle_Humanoid",
-// "VanityCameraScrollRight") in the active preset's files and translate it
+// Look up an Elite binding element (e.g. "ExplorationFSSEnter",
+// "ExplorationFSSQuit") in the active preset's files and translate it
 // to an EDVR binding string ("F11", "SHIFT+RIGHT", "["). Returns true and
 // fills `out` when a keyboard binding was found; false when the element is
 // unbound, bound to a non-keyboard device, or the files cannot be read.
 //
 // `fallbackElement`, when given, is consulted ONLY where the primary
-// element is entirely ABSENT from the chosen file. On foot the game acts
-// on PhotoCameraToggle_Humanoid exclusively -- a Humanoid entry bound to a
-// controller must NOT fall through to the ship element's keyboard key,
-// because that key does nothing on foot and watching it is the
+// element is entirely ABSENT from the chosen file. A primary element bound
+// to a controller must NOT fall through to the fallback's keyboard key,
+// because the game does not act on that key there and watching it is the
 // missed-press desync class.
 bool eliteBindsLookup(const char* element, char* out, size_t outLen,
                       const char* fallbackElement = nullptr);
@@ -56,14 +57,6 @@ bool eliteBindsLookup(const char* element, char* out, size_t outLen,
 // ignores. Same preset/file selection rules as the keyboard lookup.
 bool eliteBindsLookupPad(const char* element, char* out, size_t outLen);
 
-// The MODIFIER of an element's gamepad slot, when it has one -- the half
-// eliteBindsLookupPad throws away by skipping chorded slots.
-//
-// Wanted by a binding that shares a button with a chord and has to know when
-// to stand aside: watching DPad-Right for the view cycle means nothing unless
-// you can also tell that this particular DPad-Right came with Face-Right and
-// belongs to the camera toggle.
-bool eliteBindsLookupPadMod(const char* element, char* out, size_t outLen);
 bool eliteBindsLookupPadDir(const wchar_t* dir, const char* element,
                             char* out, size_t outLen);
 
@@ -133,6 +126,34 @@ bool eliteBindsLookupSlots(const char* element, unsigned flags,
                            EliteKeySlots* out);
 bool eliteBindsLookupSlotsDir(const wchar_t* dir, const char* element,
                               unsigned flags, EliteKeySlots* out);
+
+// EVERY keyboard binding in the active preset, for a clash check. Explorer Cam's own hotkey (hotkey.explorer_cam) is checked
+// against the player's live bindings at launch and on every rebind, and a key the game also acts on is named in the log. The
+// maintained file (the newest candidate that can be read) answers alone, as for every other lookup here. `binding` is the EDVR
+// form the other lookups produce ("F5", "SHIFT+E"); a slot that is not on the keyboard, is empty, or is a key this build has no
+// name for is left out. Returns the number of uses written (at most `max`), or -1 when there is no preset or no readable file.
+// `file` (optional) receives the UTF-8 basename of the answering file.
+struct EliteKeyboardUse {
+    char element[64];    // the binding's name in the file: "ExplorationFSSEnter", "ToggleFreeCam"
+    char binding[40];    // "F5", "CTRL+F5", "0xA2" is never produced here
+};
+int eliteBindsKeyboardUses(EliteKeyboardUse* out, int max, char* file, size_t fileLen);
+int eliteBindsKeyboardUsesDir(const wchar_t* dir, EliteKeyboardUse* out, int max, char* file, size_t fileLen);
+
+// The same walk for EVERY kind of binding a hotkey can share a press with (2026-10-08, the settings menu's Hotkeys page): the
+// keyboard (with its modifiers), the XInput pad ("GamePad_Back"), and the joysticks and HOTAS -- a Device written as eight hex
+// digits, vendor then product ("231D0200"), with a Key of Joy_N or Joy_POV1Up. Each use is returned as the parsed HotkeyBinding,
+// so a captured binding is compared with it field by field and never as text. Axes (Joy_XAxis), the mouse, a slot with no key and
+// a key this build has no name for are left out; a slot's own <Modifier> is read for the keyboard only (a pad or joystick
+// button that Elite acts on with a modifier held is still that button, and still shares the press). Same file rule as every
+// lookup here: the maintained file answers alone. Returns the number written (at most `max`), or -1 with no preset or no
+// readable file; `file` (optional) receives the answering basename.
+struct EliteBindUse {
+    char          element[64];   // the binding's name in the file: "HumanoidJumpButton", "ToggleFreeCam"
+    HotkeyBinding binding;
+};
+int eliteBindsAllUses(EliteBindUse* out, int max, char* file, size_t fileLen);
+int eliteBindsAllUsesDir(const wchar_t* dir, EliteBindUse* out, int max, char* file, size_t fileLen);
 
 // A cheap stamp over the bindings directory: names, sizes and write times of
 // its files, folded together. It changes when the player applies a rebind or

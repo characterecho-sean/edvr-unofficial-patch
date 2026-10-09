@@ -213,8 +213,15 @@ inline void runPrimary(Harness h) {
     ev::primaryIdentity(reinterpret_cast<uintptr_t>(ctxA),a->rec()+0x210,ia);observe(ia,ctxA,0,1,105);
     h.check(stats.identityResets==1,"primary reused node resets canonical shared history");
     reset();append(*a);const uintptr_t item=a->tail()+ev::kNodeRecords;
-    Fake::put<uint32_t>(item,1u);const auto skinned=a->copier()[0];observe(ia,ctxA,0,1,106);
+    // F10 (2026-10-08): the walking NPC's skinned body is 20 base != 0 records, and the plan keys their pairs, so the
+    // emit must make NO emission for one -- not joined, not masked. The native copy staying put proves nothing here (a
+    // primary sink never writes it), so the counters are the check: a mutant that drops the base test emits a masked or
+    // joined item for the record, and only these two lines see it.
+    Fake::put<uint32_t>(item,1u);const auto skinned=a->copier()[0];
+    const uint64_t emittedBefore=stats.itemsMasked.load()+stats.itemsJoined.load();observe(ia,ctxA,0,1,106);
     h.check(a->copier()[0]==skinned,"primary bones remain native and cannot certify rigid history");
+    h.check(stats.itemsMasked.load()+stats.itemsJoined.load()==emittedBefore,
+            "a base != 0 (skinned) primary record is never emitted, joined or masked: it carries no marker and no previous pose");
     Fake::put<uint32_t>(item,0u);Fake::put<uint32_t>(item+4,0x40000000u);const auto scaled=a->copier()[0];observe(ia,ctxA,0,1,106);
     h.check(a->copier()[0]==scaled,"primary nonunit scale remains native");
     Fake::put<uint32_t>(item+4,0x3F800000u);Fake::put<uint32_t>(item+ev::kItemPrevPos,pa.w[0]^1u);

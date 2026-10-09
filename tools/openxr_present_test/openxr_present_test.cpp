@@ -657,6 +657,36 @@ int selfTest(const std::wstring& supplied, HookExpectation expectation=HookExpec
   }
   return failures?1:0;
 }
+
+// Explorer Cam's frame tick through the real proxy in the MINIMAL configuration (review 2026-10-08, finding 3). With fix.black_void off, fix.panel_distance 1,
+// transition_flash 0, app_gpu_timing off and panel_hooks_always off vScreen installs transport-only: it has no State and vScreenFrameBoundary never runs, so a tick
+// carried by it never ran and F5 did nothing, whatever hotkey.explorer_cam held. This presents ordinary frames and leaves the DLL's own log to the driver
+// (tools\test_openxr_transport.py), which asks for the tick's lines. With a replacement ini, edvr.ini beside the proxy is rewritten with a fresh timestamp
+// after the first phase: hotkey.explorer_cam starting EMPTY and bound while the game runs.
+int explorerLive(const std::wstring& proxyPath,const std::wstring& replacement) {
+  Watchdog watchdog;
+  check(edvr::reportNoD3D11Mapped("openxr_present_test"),"no d3d11.dll is mapped before the rig loads the proxy");
+  HMODULE proxy=LoadLibraryExW(proxyPath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS); check(proxy!=nullptr,"load built graphics proxy"); if (!proxy) return 1;
+  PresentDevice present; check(SUCCEEDED(present.initialize(proxy,D3D_DRIVER_TYPE_WARP)),"initialize real WARP proxy device"); if (!present.swapchain()) return 1;
+  const auto frames=[&](unsigned count){ for (unsigned i=0;i<count;++i) { check(SUCCEEDED(present.present()),"Present"); Sleep(20); } };
+  frames(40);   // the first second: the configuration as the driver wrote it
+  if (!replacement.empty()) {
+    char text[4096]{}; DWORD got=0;
+    HANDLE in=CreateFileW(replacement.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    check(in!=INVALID_HANDLE_VALUE&&ReadFile(in,text,sizeof(text)-1,&got,nullptr)&&got>0,"read the replacement edvr.ini");
+    if (in!=INVALID_HANDLE_VALUE) CloseHandle(in);
+    const std::wstring target=proxyPath.substr(0,proxyPath.find_last_of(L"\\/")+1)+L"edvr.ini";
+    HANDLE out=CreateFileW(target.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    DWORD put=0; check(out!=INVALID_HANDLE_VALUE&&WriteFile(out,text,got,&put,nullptr)&&put==got,"rewrite edvr.ini while presenting");
+    if (out!=INVALID_HANDLE_VALUE) CloseHandle(out);
+  }
+  frames(150);  // three seconds: the config poll (one second) sees the rewrite and the tick acts on it
+  Sleep(700);   // the log's flusher (250 ms)
+  const auto hooks=reinterpret_cast<unsigned(__cdecl*)()>(GetProcAddress(proxy,"edvr_selftest_hooks"));
+  check(hooks&&hooks()==0,"vScreen installed no optional hooks: its frame boundary does not exist in this configuration");
+  if (!failures) std::puts("explorer_live: PASS (real WARP graphics, vScreen transport-only)");
+  return failures?1:0;
+}
 }
 int wmain(int argc, wchar_t** argv) {
   if (argc==2 && !std::wcscmp(argv[1],L"--dry-run")) { std::puts("Would test the actual WARP Present render-boundary hook; no windows, device, threads or writes created."); return 0; }
@@ -667,5 +697,8 @@ int wmain(int argc, wchar_t** argv) {
     const auto mode=!std::wcscmp(argv[3],L"--transport-only")?HookExpectation::TransportOnly:HookExpectation::Unavailable;
     const int r=selfTest(argv[2],mode); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load());return r;
   }
-  std::fputs("usage: openxr_present_test --dry-run|--self-test|--graphics-proxy ABSOLUTE_DLL [--transport-only|--unavailable]\n",stderr); return 2;
+  if ((argc==4||argc==5) && !std::wcscmp(argv[1],L"--graphics-proxy") && absolute(argv[2]) && !std::wcscmp(argv[3],L"--explorer-live") && (argc==4||absolute(argv[4]))) {
+    const int r=explorerLive(argv[2],argc==5?std::wstring(argv[4]):std::wstring()); std::printf("openxr_present_test: %u checks, %u failures\n",checks.load(),failures.load());return r;
+  }
+  std::fputs("usage: openxr_present_test --dry-run|--self-test|--graphics-proxy ABSOLUTE_DLL [--transport-only|--unavailable|--explorer-live [ABSOLUTE_REPLACEMENT_INI]]\n",stderr); return 2;
 }
