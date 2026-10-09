@@ -1646,11 +1646,13 @@ void caseEngineFillMatches() {
     const float p[3] = {0.0512f, -0.0163f, 0.0159f};
     const float same[3] = {0.0512f, -0.0163f, 0.0159f};
     const float near3[3] = {0.0572f, -0.0163f, 0.0159f};   // 6 mm
-    const float far3[3] = {0.0712f, -0.0163f, 0.0159f};    // 2 cm
+    const float otherEye[3] = {-0.0238f, -0.0163f, 0.0159f};  // 7.5 cm: the other eye at a wide IPD
+    const float far3[3] = {0.2512f, -0.0163f, 0.0159f};    // 20 cm
     const float world[3] = {6.119f, -3.432f, 11.511f};
     check(tfeb::engineFillMatches(same, p), "engineFillMatches: the same P matches");
-    check(tfeb::engineFillMatches(near3, p), "engineFillMatches: 6 mm matches (within 0.01 m)");
-    check(!tfeb::engineFillMatches(far3, p), "engineFillMatches: 2 cm does not");
+    check(tfeb::engineFillMatches(near3, p), "engineFillMatches: 6 mm matches");
+    check(tfeb::engineFillMatches(otherEye, p), "engineFillMatches: the other eye (7.5 cm) matches");
+    check(!tfeb::engineFillMatches(far3, p), "engineFillMatches: 20 cm does not");
     check(!tfeb::engineFillMatches(world, p), "engineFillMatches: another view's world-space row 275 does not");
     const float nan3[3] = {NAN, 0, 0};
     check(!tfeb::engineFillMatches(nan3, p), "engineFillMatches: NaN never matches");

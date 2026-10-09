@@ -872,9 +872,12 @@ inline bool engineActFrame(uint32_t tapFrame, uint32_t skipFrame, uint32_t gapLa
     return gapLastConsume >= skipFrame && tapFrame - 1u <= gapLastConsume;
 }
 
-// The fills of the bad frame all carry one head-only eye P; only a fill whose
-// row 275 is that P (to float noise) is rewritten.
-inline constexpr float kEngineFillMatchMeters = 0.01f;
+// The fills of the bad frame carry the head-only eye P; only a fill whose row
+// 275 is within 0.10 m of the first one is rewritten. 0.10 m, not float noise:
+// if row 275 is per eye, the two eyes differ by the IPD (up to ~7.5 cm), and
+// patching one eye alone would be a stereo flash of its own. Every other view
+// on record sits metres away (a world-space row 275, 13 m+).
+inline constexpr float kEngineFillMatchMeters = 0.10f;
 inline bool engineFillMatches(const float row275[3], const float firstP[3]) noexcept {
     const float dx = row275[0] - firstP[0], dy = row275[1] - firstP[1], dz = row275[2] - firstP[2];
     return std::sqrt(dx * dx + dy * dy + dz * dz) <= kEngineFillMatchMeters;
