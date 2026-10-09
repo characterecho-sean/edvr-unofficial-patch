@@ -560,8 +560,10 @@ it directly.
 - A census, always on, records the game's return address (frame 1, as an RVA in
   the game's image, or "outside") for `GetProjectionRaw`, `GetProjectionMatrix`
   and `GetEyeToHeadTransform`. Frames 2 and 3 come from a stack capture taken on
-  the first sight of a new frame 1, and on every call of the first site while
-  the probe needs it. The log has a `projection callers:` line on first sight
+  the first sight of a new frame 1, on every 16th call of each frame 1 (so a
+  caller that turns up later behind a known frame 1 is named within moments;
+  calls not captured are counted as unsampled), and on every call of the first
+  site while the probe needs it. The log has a `projection callers:` line on first sight
   of each distinct (method, frame 1, frame 2), and count summaries at 30 s,
   every 5 minutes and before every probe change.
 - `advanced.cull_probe` answers the selected callers of `GetProjectionRaw` with

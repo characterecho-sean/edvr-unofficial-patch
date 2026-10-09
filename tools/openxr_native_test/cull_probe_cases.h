@@ -194,6 +194,50 @@ template<class Check> void runCullProbeCases(Check&& check) {
           !census2.note(ProjectionCallers::Raw, 0, at(kEyeFov), CullProbe::Off, 11, 1, quiet, sink),
           "GetProjectionMatrix and GetEyeToHeadTransform are never answered, whatever the probe, and off answers nobody");
   }
+  // ---- a caller that turns up behind a frame 1 already seen ------------------------------------------------------------------------------------------
+  {
+    // All six GetProjectionRaw sites sit in three wrappers, so a caller the static analysis missed has to arrive through a frame 1 that is already known.
+    ProjectionCallers census(build332841());
+    Capture capture;capture.second = at(kCameraSetter);Lines sink;
+    census.note(ProjectionCallers::Raw, 0, at(kEyeFov), CullProbe::Off, 1, 1, capture, sink);
+    check(sink.lines.size() == 1 && capture.calls == 1, "call 1 from a frame 1 is its first sight: one capture, one line");
+    capture.second = at(0x2222222);   // a second caller, behind the same site
+    bool early = false;
+    for (unsigned call = 2; call < ProjectionCallers::kSampleEvery; ++call) {
+      census.note(ProjectionCallers::Raw, 0, at(kEyeFov), CullProbe::Off, 1, 1, capture, sink);
+      early = early || capture.calls != 1 || sink.lines.size() != 1;
+    }
+    check(!early && ProjectionCallers::kSampleEvery == 16, "calls 2 to 15 take no capture and make no line: the second caller is not seen before the sampling point");
+    census.note(ProjectionCallers::Raw, 0, at(kEyeFov), CullProbe::Off, 1, 1, capture, sink);
+    check(capture.calls == 2 && sink.lines.size() == 2 &&
+          sink.lines[1] == "projection callers: GetProjectionRaw exe+0x4E2FA5 <- exe+0x2222222 <- ? eye 0 tid 1",
+          "the 16th call is captured, and the second caller gets its own first-sight line");
+    check(countOf(census, ProjectionCallers::Raw, 0, kEyeFov, 0x2222222) == 1 && countOf(census, ProjectionCallers::Raw, 0, kEyeFov, unknown) == 14 &&
+          countOf(census, ProjectionCallers::Raw, 0, kEyeFov, kCameraSetter) == 1,
+          "...the sampled call is counted under its real frame 2, the 14 before it under unsampled, the first sight under its own");
+    // The original caller carries on for 10,000 calls: about one in 16 is captured, none makes a line, and then a third caller appears.
+    capture.second = at(kCameraSetter);
+    const unsigned before = capture.calls;
+    for (unsigned call = 0; call < 10000; ++call) census.note(ProjectionCallers::Raw, 0, at(kEyeFov), CullProbe::Off, 1, 1, capture, sink);
+    const unsigned sampled = capture.calls - before;
+    check(sink.lines.size() == 2 && sampled >= 624 && sampled <= 627,
+          "10,000 more calls from the known callers cost about 10000 / 16 stack captures and make no new line");
+    capture.second = at(0x3333333);
+    unsigned until = 0;
+    while (sink.lines.size() == 2 && until < 64) { census.note(ProjectionCallers::Raw, 0, at(kEyeFov), CullProbe::Off, 1, 1, capture, sink); ++until; }
+    check(sink.lines.size() == 3 && until >= 1 && until <= ProjectionCallers::kSampleEvery && sink.lines[2].find("<- exe+0x3333333 <-") != std::string::npos,
+          "a third caller that first appears after 10,000 calls is still named, within 16 calls");
+    // Each (method, frame 1) is counted on its own, and the other eye is the same frame 1.
+    Capture other;other.second = at(0x4444444);
+    for (unsigned call = 0; call < 15; ++call) census.note(ProjectionCallers::Matrix, 1, at(kEyeFov), CullProbe::Off, 1, 1, other, sink);
+    check(other.calls == 1, "GetProjectionMatrix from the same address is its own frame 1: first sight once, then 14 calls without a capture");
+    census.note(ProjectionCallers::Matrix, 0, at(kEyeFov), CullProbe::Off, 1, 1, other, sink);
+    check(other.calls == 2 && countOf(census, ProjectionCallers::Matrix, 0, kEyeFov, 0x4444444) == 1, "...and the 16th, whichever eye makes it, is sampled");
+    Lines out;
+    census.summary("test", out);
+    check(out.contains("GetProjectionRaw exe+0x4E2FA5 <- unsampled eye 0 x") && !out.contains("exe+0x4E2FA5 eye"),
+          "a summary labels the calls that were not captured as unsampled");
+  }
   // ---- the table is fixed, and full is counted, not grown -----------------------------------------------------------------------------
   {
     ProjectionCallers census(build332841());
@@ -213,6 +257,12 @@ template<class Check> void runCullProbeCases(Check&& check) {
     capture.second = at(kCameraSetter);
     const bool camera = census.note(ProjectionCallers::Raw, 0, at(kEyeFov), CullProbe::Camera, 4, 1, capture, sink);
     check(camera && capture.calls == before + 1, "...and a full table still captures a frame 2 the probe needs, so the answer is right");
+    const unsigned fullCaptures = capture.calls;
+    const uint64_t fullOverflow = census.overflowTotal();
+    for (unsigned call = 0; call < 3 * ProjectionCallers::kSampleEvery; ++call)
+      census.note(ProjectionCallers::Matrix, 0, at(0x100000), CullProbe::Off, 5, 1, capture, sink);
+    check(capture.calls == fullCaptures && census.overflowTotal() == fullOverflow,
+          "...a full table takes no sampled capture either (a known caller keeps counting)");
     Lines out;
     census.summary("test", out);
     unsigned items = 0;
@@ -235,7 +285,7 @@ template<class Check> void runCullProbeCases(Check&& check) {
     Lines out;
     census.summary("by hand", out);
     check(out.lines.size() == 1 && out.lines[0].rfind("projection callers: counts by hand:", 0) == 0 &&
-          out.contains("GetProjectionRaw exe+0x4E2FA5 <- exe+0x2878E1B eye 0 x1;") && out.contains("GetProjectionRaw exe+0x4E2FA5 eye 0 x1;") &&
+          out.contains("GetProjectionRaw exe+0x4E2FA5 <- exe+0x2878E1B eye 0 x1;") && out.contains("GetProjectionRaw exe+0x4E2FA5 <- unsampled eye 0 x1;") &&
           out.contains("GetProjectionRaw exe+0x4E3C93 <- ") ,
           "a summary lists each entry as method, frames, eye and its count");
     Lines again;
@@ -244,7 +294,7 @@ template<class Check> void runCullProbeCases(Check&& check) {
     census.note(ProjectionCallers::Raw, 0, at(kEyeFov), CullProbe::Off, 1003, 1, capture, sink);
     Lines third;
     census.summary("by hand", third);
-    check(third.contains("GetProjectionRaw exe+0x4E2FA5 eye 0 x1;") && !third.contains("exe+0x2878E1B"), "...and counting resumes from zero");
+    check(third.contains("GetProjectionRaw exe+0x4E2FA5 <- unsampled eye 0 x1;") && !third.contains("exe+0x2878E1B"), "...and counting resumes from zero; a call that was not captured is labelled unsampled, not unknown");
   }
   {
     // The clock: a first summary 30 s after the first call, then every 5 minutes.

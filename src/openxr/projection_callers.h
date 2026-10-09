@@ -139,21 +139,29 @@ inline RawFov widenedRaw(const RawFov& raw) {
 // Who calls GetProjectionRaw, GetProjectionMatrix and GetEyeToHeadTransform, in a
 // fixed table. Frame 1 is the game's own return address (the vtable call lands
 // directly in OpenVRSystem, no adapter in between); frames 2 and 3 come from a
-// stack capture taken on the first sight of a new frame 1, and whenever the
-// probe needs frame 2, never on every call otherwise. Counts are kept per
-// (method, frame 1, frame 2, eye) and reported as the change since the last
-// summary; a call that could not be recorded for want of room is counted as an
-// overflow and nothing is ever allocated.
+// stack capture taken on the first sight of a new frame 1, on every 16th call of
+// each (method, frame 1) so a caller that turns up behind a known frame 1 later
+// is named within moments, and whenever the probe needs frame 2 -- never on every
+// call otherwise. A call that was not captured has no frame 2 and is counted
+// apart as unsampled. Counts are kept per (method, frame 1, frame 2, eye) and
+// reported as the change since the last summary; a call that could not be
+// recorded for want of room is counted as an overflow and nothing is ever
+// allocated.
 class ProjectionCallers {
  public:
   enum Method : uint8_t { Raw = 0, Matrix = 1, EyeToHead = 2 };
   static constexpr unsigned kCapacity = 128;
   static constexpr uint64_t kFirstSummaryMs = 30000, kSummaryIntervalMs = 300000;
+  // Every this-many-th call of a (method, frame 1) takes a stack capture.
+  static constexpr unsigned kSampleEvery = 16;
   struct Frames { uintptr_t second = 0, third = 0; };
   struct Entry {
     uint64_t count = 0;
     uint32_t rva1 = 0, rva2 = 0;
     uint8_t method = 0, eye = 0;
+    // On the first entry made for a (method, frame 1) only: the calls made from
+    // that frame 1, whichever entry they were counted under. Never reset.
+    uint32_t calls = 0;
   };
 
   explicit ProjectionCallers(const ExeModule& module = readExeModule()) : module_(module) {}
@@ -176,12 +184,14 @@ class ProjectionCallers {
             uint32_t tid, Capture&& capture, Sink&& sink) {
     const uint8_t eye = eyeIndex > 1 ? uint8_t(255) : static_cast<uint8_t>(eyeIndex);
     const uint32_t rva1 = frameRva(module_, frame1);
-    const bool needsFrame2 = method == Raw && probeNeedsFrame2(probe, rva1);
-    bool attempt = needsFrame2;
-    if (!attempt) {
-      // First sight of this frame 1, and room to remember it.
+    bool attempt = method == Raw && probeNeedsFrame2(probe, rva1);
+    {
+      // A capture on the first sight of this frame 1 and on every kSampleEvery-th
+      // call from it, while there is room to remember what it finds.
       Guard guard(lock_);
-      attempt = !hasFrame1(method, rva1) && used_ < kCapacity;
+      Entry* anchor = findFrame1(method, rva1);
+      const bool sampled = anchor && ++anchor->calls % kSampleEvery == 0;
+      if (!attempt) attempt = (!anchor || sampled) && used_ < kCapacity;
     }
     Frames frames{};
     if (attempt) capture(frames);
@@ -193,8 +203,9 @@ class ProjectionCallers {
       if (!entry) {
         if (used_ < kCapacity) {
           first = attempt && !hasTriple(method, rva1, rva2);
+          const bool anchored = hasFrame1(method, rva1);
           entry = &entries_[used_++];
-          *entry = Entry{0, rva1, rva2, static_cast<uint8_t>(method), eye};
+          *entry = Entry{0, rva1, rva2, static_cast<uint8_t>(method), eye, anchored ? 0u : 1u};
         } else {
           ++overflowWindow_;
           ++overflowTotal_;
@@ -253,7 +264,7 @@ class ProjectionCallers {
       char item[160], a[24], b[24];
       const Entry& e = window[i];
       if (e.rva2 == kFrameUnknown)
-        std::snprintf(item, sizeof(item), "%s %s eye %u x%llu", methodName(e.method), frameText(a, e.rva1),
+        std::snprintf(item, sizeof(item), "%s %s <- unsampled eye %u x%llu", methodName(e.method), frameText(a, e.rva1),
                       unsigned(e.eye), static_cast<unsigned long long>(e.count));
       else
         std::snprintf(item, sizeof(item), "%s %s <- %s eye %u x%llu", methodName(e.method), frameText(a, e.rva1),
@@ -294,9 +305,12 @@ class ProjectionCallers {
     ~Guard() { flag_.clear(std::memory_order_release); }
     std::atomic_flag& flag_;
   };
-  bool hasFrame1(unsigned method, uint32_t rva1) const {
-    for (unsigned i = 0; i < used_; ++i) if (entries_[i].method == method && entries_[i].rva1 == rva1) return true;
-    return false;
+  bool hasFrame1(unsigned method, uint32_t rva1) { return findFrame1(method, rva1) != nullptr; }
+  // The first entry made for a (method, frame 1): it carries the call counter.
+  Entry* findFrame1(unsigned method, uint32_t rva1) {
+    for (unsigned i = 0; i < used_; ++i)
+      if (entries_[i].method == method && entries_[i].rva1 == rva1) return &entries_[i];
+    return nullptr;
   }
   bool hasTriple(unsigned method, uint32_t rva1, uint32_t rva2) const {
     for (unsigned i = 0; i < used_; ++i)
