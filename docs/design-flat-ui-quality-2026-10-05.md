@@ -364,3 +364,31 @@ reference was the draw-packet capture's `s.drawPacketOutput`; it is released
 in flatRuntimeResize, and the loop's reports are rate-limited (771bb99a). Not
 yet exercised: a borderless resolution change does not call ResizeBuffers. The
 exit crash at +0x4d78c51 is tracked separately.
+## 2026-10-09: device change, and the windowed SS 0.5 smear (13:23 flight, ea04a8a5)
+
+Device change (review P2): the shared layer's device-owned caches (blend cache,
+seeder and coverage deferred contexts, coverage and composite shaders, parameter
+buffer, format answers) survived a device change. Fixed in eff0f8a6:
+uiLayerDeviceReset on a device the flat layer has not seen; a same-device resize
+rebuilds nothing; tools\ui_layer_device_test gates it on two WARP devices.
+
+Smear at windowed 1920x1200, SS 0.5 (trained-upscale R 960x600), reached by a
+resize from 4K and then the SS change; the 30 s window: tone-unproven 1005,
+tone-proven 12 of 1040, composites 2, back-offs escalating to 30 s.
+
+- ruled out: H1 (eced5813 broke copy-route proof), because fullscreen 4K SS 0.5
+  is sharp on ea04a8a5.
+- ruled out by code: H3 (stale identity after a resize or render-size change) as
+  the cause: the proof was reset on resize and keyed by frame; a new H costs one
+  unproven frame.
+- Found in code and in the same log (the fullscreen SS 1.0 window before the
+  resize: only holograms asked, tone-unproven 894, candidates 7-8 "its copy 0"):
+  (a) the HDR-route trigger copy's source was read from the binding shadow,
+  which is stale after treatHdr ran in that scope, so the copy alias was never
+  recorded; (b) one target -- the frame's first ask, here a hologram -- stood for
+  every HUD target; (c) a draw into a target the frame had already copied or
+  tonemapped was still taken, and lost (the back-offs). Fixed (built, not
+  flown): the copy source read from the context; the proof per target; a draw
+  into an already consumed target refused as `after-tone`; the tone-candidate
+  log re-armed for eight lines after every route, render-size or swap-chain
+  change, with the route name and every HUD target and its copy.

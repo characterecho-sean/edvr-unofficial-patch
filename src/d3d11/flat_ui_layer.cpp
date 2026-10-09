@@ -45,7 +45,11 @@ struct Window {
 Window g_w;
 FlatUiLayerAsk g_lastAsk = FlatUiLayerAsk::kNotAsked;
 FlatUiToneProof g_proof;
-uint32_t g_candidateLines = 0;  // the session's first eight tone candidates are logged
+uint32_t g_candidateLines = 0;  // eight tone candidates logged, re-armed after a route, render-size or swap-chain change
+char g_candidateRoute[48] = "";
+uint32_t g_candidateW = 0, g_candidateH = 0;
+uint64_t g_takenFrame = 0;          // the frame the shared decision last took a HUD draw in...
+const void* g_takenTarget = nullptr;  // ...and its target (the admission's copy is that target's)
 
 // The view the copy samples in place of its own: over the composite's output, in the copy's own view format.
 Ptr<ID3D11ShaderResourceView> g_view;
@@ -101,7 +105,8 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
     if (!d.hdrTarget || !d.width || !d.height) return refuse(FlatUiRefuse::kNotHdrTarget);
     // The proof's subject: the target this frame's HUD families draw into, from the first ask, taken or not.
     flatUiToneProofHud(g_proof, d.frame, d.color);
-    if (!flatUiToneProven(g_proof, d.frame)) return refuse(FlatUiRefuse::kToneUnproven);
+    if (flatUiToneConsumed(g_proof, d.frame, d.color)) return refuse(FlatUiRefuse::kAfterTone);
+    if (!flatUiToneProven(g_proof, d.frame, d.color)) return refuse(FlatUiRefuse::kToneUnproven);
     if (!d.upstream) return refuse(FlatUiRefuse::kNotUpstream);
     if (!d.haveRows) return refuse(FlatUiRefuse::kNoRows);
     double ndcX = 0.0, ndcY = 0.0;
@@ -132,6 +137,10 @@ FlatUiLayerAsk flatUiLayerDecide(ID3D11DeviceContext* ctx, const FlatUiLayerDraw
         return g_lastAsk;
     }
     ++g_w.decided[fi];
+    if (g_takenFrame != d.frame) {
+        g_takenFrame = d.frame;
+        g_takenTarget = d.color;
+    }
     g_lastAsk = FlatUiLayerAsk::kDecided;
     return g_lastAsk;
 }
@@ -183,33 +192,52 @@ void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output)
 }
 
 bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, int hdrSlot,
-                              uint64_t vs, uint64_t ps, const void* input, uint32_t outW, uint32_t outH, bool hdrRoute) {
+                              uint64_t vs, uint64_t ps, const void* input, uint32_t outW, uint32_t outH, const char* route) {
     if (!ctx || !flatUiLayerOn()) return false;
     ++g_w.toneCandidates;
-    const void* hudTarget = (g_proof.frame == frame) ? g_proof.hudTarget : nullptr;
-    const void* alias = (g_proof.frame == frame) ? g_proof.alias : nullptr;
-    const bool proven = flatUiToneProofTone(g_proof, frame, input);
+    // The candidate log re-arms for eight more lines after a route change or a render-size change (a resize re-arms it in
+    // flatUiLayerRelease), so the first candidates after any change are always on record.
+    if (!route) route = "?";
+    if (std::strcmp(route, g_candidateRoute) != 0 || renderW != g_candidateW || renderH != g_candidateH) {
+        std::snprintf(g_candidateRoute, sizeof(g_candidateRoute), "%s", route);
+        g_candidateW = renderW;
+        g_candidateH = renderH;
+        g_candidateLines = 0;
+    }
+    flatUiToneProofFrame(g_proof, frame);
+    char targets[200] = "";
+    size_t used = 0;
+    for (uint32_t i = 0; i < g_proof.count && used < sizeof(targets); ++i) {
+        const int n = std::snprintf(targets + used, sizeof(targets) - used, "%s%p (copy %p)", i ? ", " : "", g_proof.hud[i],
+                                    g_proof.alias[i]);
+        if (n < 0) break;
+        used += static_cast<size_t>(n);
+    }
+    // The alias the admission may accept: the copy of the target this frame's HUD was taken from.
+    const void* takenAlias = nullptr;
+    for (uint32_t i = 0; i < g_proof.count; ++i)
+        if (g_takenFrame == frame && g_proof.hud[i] == g_takenTarget) takenAlias = g_proof.alias[i];
+    const bool proven = flatUiToneProofTone(g_proof, frame, input) != nullptr;
     if (proven) ++g_w.toneProven;
     bool admitted = false;
     char why[96] = "not asked: no HUD was taken this frame";
     {
         FlatComputeInternalScope internal;
         uiLayerFlatSetDraw(frame, 0.0f, 0.0f, renderW, renderH);  // the sequence only
-        admitted = uiLayerCrispAdmitFlat(ctx, hdrSlot, alias, vs, ps, why, sizeof(why)) == 1;
+        admitted = uiLayerCrispAdmitFlat(ctx, hdrSlot, takenAlias, vs, ps, why, sizeof(why)) == 1;
     }
     if (admitted) ++g_w.toneAdmitted;
     if (g_candidateLines < 8) {
         ++g_candidateLines;
-        Log::get().note("flat ui layer: tone candidate %u: frame %llu vs %016llX ps %016llX, HDR slot t%d reads %p (the HUD's "
-                        "target %p, its copy %p), output %ux%u, route %s; proof for the next frame: %s; re-issue: %s.",
+        Log::get().note("flat ui layer: tone candidate %u: frame %llu vs %016llX ps %016llX, HDR slot t%d reads %p, output %ux%u, "
+                        "render %ux%u, route %s; this frame's HUD targets: %s; proof for the next frame: %s; re-issue: %s.",
                         g_candidateLines, static_cast<unsigned long long>(frame), static_cast<unsigned long long>(vs),
-                        static_cast<unsigned long long>(ps), hdrSlot, input, hudTarget, alias, outW, outH,
-                        hdrRoute ? "hdr" : "copy", proven ? "yes" : hudTarget ? "no (reads another resource)" : "no (no HUD ask yet)",
+                        static_cast<unsigned long long>(ps), hdrSlot, input, outW, outH, renderW, renderH, route,
+                        used ? targets : "none asked yet", proven ? "yes" : used ? "no (reads none of them)" : "no (no HUD ask yet)",
                         why);
     }
     return admitted;
 }
-
 bool flatUiLayerToneBegin(ID3D11DeviceContext* ctx) {
     FlatComputeInternalScope internal;
     const bool ok = uiLayerCrispToneBegin(ctx);
@@ -329,6 +357,9 @@ void flatUiLayerNoteDevice(ID3D11Device* device) {
 
 void flatUiLayerRelease() {
     g_proof = FlatUiToneProof{};  // a fresh chain proves itself again
+    g_candidateLines = 0;         // and its first tone candidates are logged
+    g_takenFrame = 0;
+    g_takenTarget = nullptr;
     g_view.Reset();
     g_viewTex = nullptr;
     g_viewFmt = DXGI_FORMAT_UNKNOWN;
@@ -392,13 +423,14 @@ void flatUiLayerReport(uint64_t windowSeconds) {
     }
     Log::get().note(
         "flat ui layer refusals: other-work=%llu not-hdr-target=%llu not-upstream=%llu no-camera-rows=%llu "
-        "other-shift=%llu (last %.3f, %.3f px) tone-unproven=%llu; the shared decision: %s",
+        "other-shift=%llu (last %.3f, %.3f px) tone-unproven=%llu after-tone=%llu; the shared decision: %s",
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kOtherWork)]),
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kNotHdrTarget)]),
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kNotUpstream)]),
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kNoRows)]),
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kOtherShift)]), w.otherX, w.otherY,
         static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kToneUnproven)]),
+        static_cast<unsigned long long>(w.refused[static_cast<size_t>(FlatUiRefuse::kAfterTone)]),
         used ? declined : "none");
     g_w = Window{};
 }

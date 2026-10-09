@@ -67,9 +67,10 @@ void flatUiLayerWriteBackEnd(ID3D11DeviceContext* ctx);
 // The game's tone pass, by its known pair (flat_mono_frame.h toneHdrSlot), whatever its vertex count: `input` is what
 // it reads at its HDR slot. Records the proof the next frame's takes need (flat_ui_layer_math.h FlatUiToneProof) and,
 // when this frame's HUD is in the HDR layer, admits it for the re-issue (uiLayerCrispAdmitFlat). True: admitted.
-// The first eight candidates of a session are each logged with their verdict.
+// Eight candidates are logged with their verdict, and eight more after every route, render-size or swap-chain change;
+// `route` names the frame's route so far ("hdr" once the HDR route treated, else the resolve plan's route name).
 bool flatUiLayerToneCandidate(ID3D11DeviceContext* ctx, uint64_t frame, uint32_t renderW, uint32_t renderH, int hdrSlot,
-                              uint64_t vs, uint64_t ps, const void* input, uint32_t outW, uint32_t outH, bool hdrRoute);
+                              uint64_t vs, uint64_t ps, const void* input, uint32_t outW, uint32_t outH, const char* route);
 // A plain copy (the game's copy pixel shader) from `source` into `output` this frame: when the source is the HUD's HDR
 // target, the output is the copy the tone may read instead (the HDR route's post chain does).
 void flatUiLayerNoteCopy(uint64_t frame, const void* source, const void* output);

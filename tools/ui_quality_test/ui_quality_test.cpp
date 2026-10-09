@@ -1172,25 +1172,52 @@ void testFlatLayerRules() {
     for (size_t i = 0; i < static_cast<size_t>(FlatUiRefuse::kCount); ++i)
         check(std::strcmp(flatUiRefuseName(static_cast<FlatUiRefuse>(i)), "?") != 0, "flat layer: every refusal has a name");
 
-    // The tone proof (the 11:32 flight: the HDR route's tone read a copy of H, the take never came back).
+    // The tone proof, per target, on every route the flat runtime chooses (2026-10-09: 11:32 the HDR route's tone read
+    // a copy of H; 13:23 a hologram's own target stood for every HUD target, and draws were taken after the tone).
     {
-        int h = 0, h2 = 0, copyOut = 0, other = 0;
+        int h = 0, h2 = 0, copyOut = 0, holo = 0, other = 0, hNew = 0;
+        // copy route (trained-native at R = D, trained-upscale at R < D: the tone reads H itself)
         FlatUiToneProof p;
-        check(!flatUiToneProven(p, 10), "tone proof: nothing seen, nothing proven");
+        check(!flatUiToneProven(p, 10, &h), "tone proof: nothing seen, nothing proven");
         flatUiToneProofHud(p, 10, &h);
-        check(flatUiToneProofTone(p, 10, &h) && flatUiToneProven(p, 11) && !flatUiToneProven(p, 10) && !flatUiToneProven(p, 12),
-              "tone proof: the tone reading the HUD's target proves the NEXT frame only");
-        flatUiToneProofHud(p, 11, &h2);
-        flatUiToneProofCopy(p, 11, &h2, &copyOut);
-        check(flatUiToneProofTone(p, 11, &copyOut) && flatUiToneProven(p, 12),
-              "tone proof: a plain copy of the HUD's target (the HDR route) proves it, and a target alternating between frames is fine");
+        check(flatUiToneProofTone(p, 10, &h) == &h, "copy / trained-native / trained-upscale route: the tone reading H proves H");
+        flatUiToneProofHud(p, 11, &h);
+        check(flatUiToneProven(p, 11, &h) && !flatUiToneProven(p, 11, &other), "...for the next frame, and for H only");
+        check(!flatUiToneConsumed(p, 11, &h), "...and a draw into H before this frame's tone is not after-tone");
+        // HDR route: the trigger copies H to C and the tone reads C
+        flatUiToneProofCopy(p, 11, &h, &copyOut);
+        check(flatUiToneConsumed(p, 11, &h), "hdr route: once H is copied, a draw into H is after-tone (it would never be tonemapped)");
+        check(flatUiToneProofTone(p, 11, &copyOut) == &copyOut, "hdr route: the tone reading H's copy proves H");
         flatUiToneProofHud(p, 12, &h);
-        flatUiToneProofCopy(p, 12, &other, &copyOut);
-        check(!flatUiToneProofTone(p, 12, &copyOut) && !flatUiToneProven(p, 13),
-              "tone proof: a copy of something else proves nothing, and the next frame is refused (tone-unproven)");
-        check(!flatUiToneProofTone(p, 14, &h) && !flatUiToneProven(p, 15), "tone proof: a frame with no HUD ask proves nothing");
+        check(flatUiToneProven(p, 12, &h), "...for the next frame");
+        // a hologram's own target asked first (13:23): it does not stand for H, nor H for it
+        flatUiToneProofHud(p, 12, &holo);
+        check(!flatUiToneProven(p, 12, &holo), "a target the last frame's tone never read is tone-unproven, whatever was asked first");
+        flatUiToneProofTone(p, 12, &h);
+        flatUiToneProofHud(p, 13, &holo);
+        flatUiToneProofHud(p, 13, &h);
+        check(flatUiToneProven(p, 13, &h) && !flatUiToneProven(p, 13, &holo),
+              "with a hologram target asked first, H is still proven and the hologram target still is not");
+        check(flatUiToneProofTone(p, 13, &h) && flatUiToneConsumed(p, 13, &h) && !flatUiToneConsumed(p, 13, &holo),
+              "after the tone read H, a draw into H is after-tone; one into an unread target is not");
+        // a render-size change: a new H is unproven for one frame, then proven
+        flatUiToneProofHud(p, 14, &hNew);
+        check(!flatUiToneProven(p, 14, &hNew), "render-size change: the new H is unproven on its first frame");
+        flatUiToneProofTone(p, 14, &hNew);
+        flatUiToneProofHud(p, 15, &hNew);
+        check(flatUiToneProven(p, 15, &hNew), "...and proven from the next");
+        // a copy of something else proves nothing; a frame with no tone proves nothing for the next
+        flatUiToneProofCopy(p, 15, &other, &copyOut);
+        check(flatUiToneProofTone(p, 15, &copyOut) == nullptr, "a copy of something else proves nothing");
+        flatUiToneProofHud(p, 17, &hNew);
+        check(!flatUiToneProven(p, 17, &hNew), "a frame without a proof (16 never seen) leaves the next unproven");
+        // targets alternating between frames (a ping-pong H): every frame unproven, counted, never taken
+        FlatUiToneProof q;
+        flatUiToneProofHud(q, 20, &h);
+        flatUiToneProofTone(q, 20, &h);
+        flatUiToneProofHud(q, 21, &h2);
+        check(!flatUiToneProven(q, 21, &h2), "an H alternating between frames is unproven (identity, not relation: safe, never swallowed)");
     }
-
     // Live with the default config (the 2026-10-09 11:08 flight: dead because the flat gate refuses
     // advanced.temporal_aa_jitter_sign, whose refused getString answers "off", read as "not as shipped").
     const bool flatShipped = uiLayerJitterAsShippedFor(true, "off", 0.0f);

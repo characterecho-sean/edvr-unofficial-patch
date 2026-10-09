@@ -5380,12 +5380,26 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
             // H, which the structural rule below never matched): the next frame's proof, and this frame's admission.
             else if (tone) {
                 const uint32_t slot = flat_mono_detail::toneHdrSlot(k.vs, k.ps);
-                uiTone = flatUiLayerToneCandidate(ctx, s.prefix.frame, k.width, k.height, static_cast<int>(slot), k.vs, k.ps,
-                                                  slot < 2 ? k.srvResource[slot] : nullptr, k.width, k.height, s.hdrTreated);
+                // The route so far: the HDR route once it treated this frame, else the resolve plan's (trained-native,
+                // trained-upscale, ...), or none yet.
+                const char* route = s.hdrTreated ? "hdr"
+                    : s.haveResolvePlan ? flatResolveRoute(s.plannedResolve.mode, s.plannedResolve.renderWidth, s.plannedResolve.renderHeight,
+                                                           s.plannedResolve.outputWidth, s.plannedResolve.outputHeight).name
+                                        : "no-plan";
+                uiTone = flatUiLayerToneCandidate(ctx, s.prefix.frame, sceneRw, sceneRh, static_cast<int>(slot), k.vs, k.ps,
+                                                  slot < 2 ? k.srvResource[slot] : nullptr, k.width, k.height, route);
             }
             // A plain copy reading the HUD's target names the copy the tone may read (the HDR route's post chain).
-            else if (k.ps == flat_mono_detail::kCopyPs)
-                flatUiLayerNoteCopy(s.prefix.frame, view(BindSlot::PsSrv0, 2).resource, k.color);
+            // Its source is read from the context, not the binding shadow: when this copy is the HDR route's trigger, the
+            // resolve ran inside this scope (treatHdr) and the shadow no longer names the draw's bindings (13:23 flight).
+            else if (k.ps == flat_mono_detail::kCopyPs) {
+                FlatComputeInternalScope readGuard;
+                Ptr<ID3D11ShaderResourceView> copySrv;
+                ctx->PSGetShaderResources(0, 1, &copySrv);
+                Ptr<ID3D11Resource> copySource;
+                if (copySrv) copySrv->GetResource(&copySource);
+                flatUiLayerNoteCopy(s.prefix.frame, copySource.Get(), k.color);
+            }
             // Any other full-screen triangle may be the game's tonemap under a pair the flat list does not know: VR's
             // structural admission, by the HUD source it reads.
             else if (count == 3 && instances == 1 && (kind == 'D' || kind == 'N'))
