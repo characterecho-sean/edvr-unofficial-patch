@@ -96,6 +96,12 @@ constexpr uint32_t kSkyFov = 0x4E3C93;       // wrapper slot 28 (via 0x4E3C50)
 constexpr uint32_t kSizes[4] = {0x4E42FA, 0x4E4351, 0x4E43A6, 0x4E43F4};   // wrapper slot 24 (0x4E4270)
 constexpr uint32_t kCameraSetter = 0x2878E1B;   // frame 2 of the eye camera
 constexpr uint32_t kUiScale = 0x8D269A;         // frame 2 of the UI scale
+// The fov getter (0x4E2F50) calls GetRecommendedRenderTargetSize itself for the aspect it returns first, and the eye camera takes its
+// HORIZONTAL extent from that (the getter takes only its vertical extent from GetProjectionRaw). This is that call's return RVA:
+// `call qword ptr [rax]` at 0x4E2FBC is two bytes. EXPECTED from the 2026-10-09 disassembly, to be confirmed by the census: the
+// first-sight line for GetRecommendedRenderTargetSize shows the real frame 1 in flight, and one inside 0x4E2F50..0x4E3060 that is not
+// this value is a bug in this constant to be reported, not papered over.
+constexpr uint32_t kAspectCall = 0x4E2FBE;
 }
 
 enum class CallerGroup { Camera, Ui, Sky, Sizes, Other };
@@ -128,6 +134,26 @@ inline bool probeNeedsFrame2(CullProbe probe, uint32_t rva1) {
   return rva1 == cull_rva::kEyeFov &&
          (probe == CullProbe::Camera || probe == CullProbe::Ui || probe == CullProbe::Other);
 }
+
+// GetRecommendedRenderTargetSize, asked at the fov getter's aspect call (kAspectCall), is told a width that makes the eye camera's
+// centred frustum the symmetric superset (below) when the probe selects the getter's caller: the same frame-2 table as the getter's
+// GetProjectionRaw site -- camera is 0x2878E1B, ui 0x8D269A, other is anything else (the controller tick included) -- and `all` every
+// such call. The sky and sizes groups are about GetProjectionRaw sites and never touch it. Every other caller of
+// GetRecommendedRenderTargetSize, the render-target allocation among them, is never selected.
+inline bool probeSelectsRenderSize(CullProbe probe, uint32_t rva1, uint32_t rva2) {
+  if (rva1 != cull_rva::kAspectCall) return false;
+  switch (probe) {
+    case CullProbe::All: return true;
+    case CullProbe::Camera: return rva2 == cull_rva::kCameraSetter;
+    case CullProbe::Ui: return rva2 == cull_rva::kUiScale;
+    case CullProbe::Other: return rva2 != cull_rva::kCameraSetter && rva2 != cull_rva::kUiScale;
+    default: return false;
+  }
+}
+inline bool probeNeedsFrame2RenderSize(CullProbe probe, uint32_t rva1) {
+  return rva1 == cull_rva::kAspectCall &&
+         (probe == CullProbe::Camera || probe == CullProbe::Ui || probe == CullProbe::Other);
+}
 // The per-axis symmetric superset of a raw frustum: l' = -max(|l|,|r|),
 // r' = +max(|l|,|r|), t' = -max(|t|,|b|), b' = +max(|t|,|b|). 0 - x keeps a zero +0.
 inline RawFov widenedRaw(const RawFov& raw) {
@@ -135,8 +161,33 @@ inline RawFov widenedRaw(const RawFov& raw) {
   const float vertical = std::fmax(std::fabs(raw.top), std::fabs(raw.bottom));
   return {0.0f - horizontal, horizontal, 0.0f - vertical, vertical};
 }
+// The aspect that makes a centred (aspect, vertical fov) frustum the per-axis symmetric superset of both eyes' true frusta:
+// A = the larger over the eyes of max(|l|,|r|) / max(|t|,|b|), so aspect' * tan(vFOV/2) = max(|l|,|r|) for the eye that sets it.
+// 0 when a frustum is unusable. Tangents are the located ones, before any lie or jitter.
+inline double symmetricAspect(const RawFov (&eyes)[2]) {
+  double aspect = 0.0;
+  for (const RawFov& f : eyes) {
+    if (!std::isfinite(f.left) || !std::isfinite(f.right) || !std::isfinite(f.top) || !std::isfinite(f.bottom)) return 0.0;
+    const double horizontal = std::fmax(std::fabs(double(f.left)), std::fabs(double(f.right)));
+    const double vertical = std::fmax(std::fabs(double(f.top)), std::fabs(double(f.bottom)));
+    if (!(horizontal > 0.0) || !(vertical > 0.0) || !std::isfinite(horizontal) || !std::isfinite(vertical)) return 0.0;
+    const double a = horizontal / vertical;
+    if (a > aspect) aspect = a;
+  }
+  return aspect;
+}
+// The width GetRecommendedRenderTargetSize is told at the aspect call: the height kept, the width height * A to the nearest even
+// number. False (and the honest answer stands) when A or the result is not usable.
+inline bool widenedRenderWidth(uint32_t height, const RawFov (&eyes)[2], uint32_t& width) {
+  const double aspect = symmetricAspect(eyes);
+  if (!(aspect > 0.0) || !height) return false;
+  const double exact = double(height) * aspect;
+  if (!(exact >= 2.0) || exact > 65534.0) return false;
+  width = static_cast<uint32_t>(2.0 * std::floor(exact * 0.5 + 0.5));
+  return true;
+}
 
-// Who calls GetProjectionRaw, GetProjectionMatrix and GetEyeToHeadTransform, in a
+// Who calls GetProjectionRaw, GetProjectionMatrix, GetEyeToHeadTransform and GetRecommendedRenderTargetSize, in a
 // fixed table. Frame 1 is the game's own return address (the vtable call lands
 // directly in OpenVRSystem, no adapter in between); frames 2 and 3 come from a
 // stack capture taken on the first sight of a new frame 1, on every 16th call of
@@ -149,7 +200,7 @@ inline RawFov widenedRaw(const RawFov& raw) {
 // allocated.
 class ProjectionCallers {
  public:
-  enum Method : uint8_t { Raw = 0, Matrix = 1, EyeToHead = 2 };
+  enum Method : uint8_t { Raw = 0, Matrix = 1, EyeToHead = 2, RenderSize = 3 };
   static constexpr unsigned kCapacity = 128;
   static constexpr uint64_t kFirstSummaryMs = 30000, kSummaryIntervalMs = 300000;
   // Every this-many-th call of a (method, frame 1) takes a stack capture.
@@ -173,18 +224,21 @@ class ProjectionCallers {
   void useModule(const ExeModule& module) { module_ = module; }
 
   static const char* methodName(unsigned method) {
-    return method == Raw ? "GetProjectionRaw" : method == Matrix ? "GetProjectionMatrix" : "GetEyeToHeadTransform";
+    return method == Raw ? "GetProjectionRaw" : method == Matrix ? "GetProjectionMatrix" : method == EyeToHead ? "GetEyeToHeadTransform"
+                                                                                                        : "GetRecommendedRenderTargetSize";
   }
 
   // Record one call. `capture(Frames&)` fills frames 2 and 3 (0 where it cannot),
   // `sink(const char*)` takes a finished log line. Returns whether `probe`
-  // answers this caller wide (only GetProjectionRaw is ever answered).
+  // answers this caller wide (only GetProjectionRaw, and GetRecommendedRenderTargetSize at the fov getter's aspect call, are
+  // ever answered).
   template <class Capture, class Sink>
   bool note(Method method, unsigned eyeIndex, uintptr_t frame1, CullProbe probe, uint64_t nowMs,
             uint32_t tid, Capture&& capture, Sink&& sink) {
     const uint8_t eye = eyeIndex > 1 ? uint8_t(255) : static_cast<uint8_t>(eyeIndex);
     const uint32_t rva1 = frameRva(module_, frame1);
-    bool attempt = method == Raw && probeNeedsFrame2(probe, rva1);
+    bool attempt = (method == Raw && probeNeedsFrame2(probe, rva1)) ||
+                   (method == RenderSize && probeNeedsFrame2RenderSize(probe, rva1));
     {
       // A capture on the first sight of this frame 1 and on every kSampleEvery-th
       // call from it, while there is room to remember what it finds.
@@ -228,7 +282,7 @@ class ProjectionCallers {
     } else if (nowMs >= due && nextSummaryMs_.compare_exchange_strong(due, nowMs + kSummaryIntervalMs)) {
       summary(summaries_.fetch_add(1, std::memory_order_relaxed) == 0 ? "at 30 s" : "every 5 min", sink);
     }
-    return method == Raw && probeSelects(probe, rva1, rva2);
+    return method == Raw ? probeSelects(probe, rva1, rva2) : method == RenderSize && probeSelectsRenderSize(probe, rva1, rva2);
   }
 
   // The counts since the last summary, as log lines (a window that saw nothing

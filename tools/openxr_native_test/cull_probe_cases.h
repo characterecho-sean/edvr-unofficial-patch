@@ -119,7 +119,79 @@ template<class Check> void runCullProbeCases(Check&& check) {
     check(w3.left == -horizontal && w3.right == horizontal && w3.top == -vertical && w3.bottom == vertical && horizontal == std::fabs(shifted.left) && vertical == std::fabs(shifted.bottom),
           "...the shift is part of what is widened");
   }
-  // ---- the census -------------------------------------------------------------------------------------------------------------------------------------------
+  // ---- the second lie: the aspect the fov getter asks for ------------------------------------------------------------------------------
+  {
+    // The constant: the getter's GetRecommendedRenderTargetSize call (`call qword ptr [rax]` at 0x4E2FBC, two bytes) returns to 0x4E2FBE,
+    // inside the getter (0x4E2F50..0x4E3060). The census confirms it in flight; this pins what the code is built on.
+    check(kAspectCall == 0x4E2FBE && kAspectCall > 0x4E2F50 && kAspectCall < 0x4E3060, "kAspectCall is 0x4E2FBE, the fov getter's GetRecommendedRenderTargetSize return site");
+    const uint32_t unknownOutside[2] = {unknown, kFrameOutside};
+    struct Frame2 { uint32_t rva2; bool camera, ui, other; };
+    const Frame2 frame2s[] = {{kCameraSetter, true, false, false}, {kUiScale, false, true, false}, {0x1073470, false, false, true},
+                              {0x1234, false, false, true}, {unknownOutside[0], false, false, true}, {unknownOutside[1], false, false, true}};
+    bool table = true;
+    for (const Frame2& f : frame2s) {
+      table = table && probeSelectsRenderSize(CullProbe::All, kAspectCall, f.rva2) && !probeSelectsRenderSize(CullProbe::Off, kAspectCall, f.rva2) &&
+              probeSelectsRenderSize(CullProbe::Camera, kAspectCall, f.rva2) == f.camera && probeSelectsRenderSize(CullProbe::Ui, kAspectCall, f.rva2) == f.ui &&
+              probeSelectsRenderSize(CullProbe::Other, kAspectCall, f.rva2) == f.other &&
+              !probeSelectsRenderSize(CullProbe::Sky, kAspectCall, f.rva2) && !probeSelectsRenderSize(CullProbe::Sizes, kAspectCall, f.rva2);
+    }
+    check(table, "at the aspect call: all answers every caller, camera and ui their own frame 2, other anything else (the controller tick 0x1073470 among it); sky, sizes and off none");
+    bool nearMiss = true;
+    const CullProbe every[] = {CullProbe::Off, CullProbe::All, CullProbe::Camera, CullProbe::Ui, CullProbe::Sky, CullProbe::Sizes, CullProbe::Other};
+    for (const uint32_t rva1 : {kAspectCall - 1, kAspectCall + 1, kAspectCall - 2, kEyeFov, kSkyFov, kSizes[0], 0x1000u, 0u, kFrameOutside, kFrameUnknown})
+      for (const CullProbe p : every)
+        for (const Frame2& f : frame2s) nearMiss = nearMiss && !probeSelectsRenderSize(p, rva1, f.rva2);
+    check(nearMiss, "RVA +-1 of the aspect call, the other known sites and anything else (the render-target allocation among them) are never answered, whatever the probe and frame 2");
+    check(probeNeedsFrame2RenderSize(CullProbe::Camera, kAspectCall) && probeNeedsFrame2RenderSize(CullProbe::Ui, kAspectCall) && probeNeedsFrame2RenderSize(CullProbe::Other, kAspectCall) &&
+          !probeNeedsFrame2RenderSize(CullProbe::All, kAspectCall) && !probeNeedsFrame2RenderSize(CullProbe::Sky, kAspectCall) && !probeNeedsFrame2RenderSize(CullProbe::Off, kAspectCall) &&
+          !probeNeedsFrame2RenderSize(CullProbe::Camera, kAspectCall + 1) && !probeNeedsFrame2RenderSize(CullProbe::Camera, kAspectCall - 1),
+          "only the aspect call, and only under camera, ui or other, takes a frame 2 on every call");
+    // ---- the aspect math: aspect' * tan(vFOV/2) = max(|l|,|r|), the height kept, the width to the nearest even number ----
+    const RawFov two[2] = {{-1.5f, 1.0f, -1.0f, 0.75f}, {-0.8f, 2.0f, -1.0f, 1.0f}};   // eye 0: 1.5 / 1.0, eye 1: 2.0 / 1.0: the larger sets it
+    uint32_t width = 0;
+    check(symmetricAspect(two) == 2.0 && widenedRenderWidth(1000, two, width) && width == 2000, "hand case: eyes 1.5/1.0 and 2.0/1.0 give A = 2.0, and a height of 1000 a width of 2000");
+    const RawFov even[2] = {{-1.5f, 1.0f, -1.0f, 0.75f}, {-1.0f, 1.5f, -1.0f, 0.75f}};
+    check(symmetricAspect(even) == 1.5 && widenedRenderWidth(3000, even, width) && width == 4500 && widenedRenderWidth(1001, even, width) && width == 1502,
+          "...A = 1.5: 3000 gives 4500 and 1001 gives 1501.5, which is 1502 (the nearest even)");
+    const RawFov unit[2] = {{-1.0f, 1.0f, -1.0f, 1.0f}, {-1.0f, 1.0f, -1.0f, 1.0f}};
+    check(widenedRenderWidth(1001, unit, width) && width == 1002 && widenedRenderWidth(1000, unit, width) && width == 1000, "...an exact odd number rounds up to the even one above it, an even one stays");
+    const RawFov crystal[2] = {{-1.5293f, 1.0324f, -1.2648f, 1.2648f}, {-1.0324f, 1.5293f, -1.2648f, 1.2648f}};
+    check(widenedRenderWidth(3032, crystal, width) && width == 3666 && std::fabs(symmetricAspect(crystal) - 1.5293 / 1.2648) < 1e-6,
+          "...the Crystal Super's frusta (1.5293 / 1.2648) at a height of 3032 read 3666");
+    // The told aspect makes a centred frustum the superset: aspect' * tan(vFOV'/2) with vFOV' from the vertical extent is the larger horizontal tangent.
+    check(std::fabs(double(width) / 3032.0 * 1.2648 - 1.5293) < 1.5293 / 3666.0, "...and aspect' * (the vertical tangent) is the larger horizontal one, to the rounding of the width");
+    const RawFov flat[2] = {{-1.0f, 1.0f, 0.0f, 0.0f}, {-1.0f, 1.0f, -1.0f, 1.0f}};
+    const RawFov nan[2] = {{-1.0f, std::numeric_limits<float>::quiet_NaN(), -1.0f, 1.0f}, {-1.0f, 1.0f, -1.0f, 1.0f}};
+    check(!widenedRenderWidth(1000, flat, width) && !widenedRenderWidth(1000, nan, width) && !widenedRenderWidth(0, unit, width) && !widenedRenderWidth(40000, two, width) &&
+              symmetricAspect(flat) == 0.0,
+          "...a frustum with no vertical extent, a NaN, a zero height or a width that does not fit is refused, and the honest answer stands");
+    // The census and the selection through note(), with the capture the sampler would take.
+    ProjectionCallers census(build332841());
+    Capture capture;capture.second = at(kCameraSetter);capture.third = at(0x283D744);Lines sink;
+    check(census.note(ProjectionCallers::RenderSize, 0, at(kAspectCall), CullProbe::Camera, 1, 7, capture, sink) && capture.calls == 1 && sink.lines.size() == 1 &&
+          sink.lines[0] == "projection callers: GetRecommendedRenderTargetSize exe+0x4E2FBE <- exe+0x2878E1B <- exe+0x283D744 eye 0 tid 7",
+          "GetRecommendedRenderTargetSize is a fourth method of the census, and camera answers the camera's call at the aspect site");
+    check(census.note(ProjectionCallers::RenderSize, 0, at(kAspectCall), CullProbe::Camera, 2, 7, capture, sink) && capture.calls == 2,
+          "...a stack is captured on every such call while camera is on");
+    capture.second = at(kUiScale);
+    check(!census.note(ProjectionCallers::RenderSize, 0, at(kAspectCall), CullProbe::Camera, 3, 7, capture, sink) && census.note(ProjectionCallers::RenderSize, 0, at(kAspectCall), CullProbe::Ui, 4, 7, capture, sink),
+          "...the ui scale's call is not a camera call, and is a ui one");
+    capture.second = at(0x1073470);
+    check(census.note(ProjectionCallers::RenderSize, 0, at(kAspectCall), CullProbe::Other, 5, 24212, capture, sink) && !census.note(ProjectionCallers::RenderSize, 0, at(kAspectCall), CullProbe::Camera, 6, 24212, capture, sink),
+          "...the controller tick (0x1073470) is other");
+    const unsigned beforeAll = capture.calls;
+    bool all = true;
+    for (unsigned i = 0; i < 6; ++i) all = all && census.note(ProjectionCallers::RenderSize, 0, at(kAspectCall), CullProbe::All, 7, 1, capture, sink);
+    check(all && capture.calls == beforeAll, "all answers every call at the aspect site and takes no extra capture for it");
+    bool others = true;
+    for (const uint32_t rva : {kAspectCall - 1, kAspectCall + 1, 0x4E2F50u, 0x5000u})
+      others = others && !census.note(ProjectionCallers::RenderSize, 0, at(rva), CullProbe::All, 8, 1, capture, sink);
+    check(others, "any other GetRecommendedRenderTargetSize caller -- the allocation among them -- is never answered, not even under all");
+    check(!census.note(ProjectionCallers::Raw, 0, at(kAspectCall), CullProbe::Camera, 9, 1, capture, sink) && ProjectionCallers::RenderSize == 3 &&
+          std::strcmp(ProjectionCallers::methodName(ProjectionCallers::RenderSize), "GetRecommendedRenderTargetSize") == 0,
+          "the aspect rule is the size method's alone: GetProjectionRaw from the same address is classified by its own table");
+  }
+  // ---- the census ---------------------------------------------------------------------------------------------------------------------------
   {
     ProjectionCallers census(build332841());
     Capture capture;capture.second = at(kCameraSetter);capture.third = at(0x283D744);

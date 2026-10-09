@@ -27,3 +27,7 @@ extern "C" __declspec(noinline) int openxrAbiOuterRaw(vr::IVRSystem* system, vr:
   const int answered = openxrAbiCallRaw(system, eye, out);
   return answered + 1;
 }
+extern "C" __declspec(noinline) int openxrAbiCallSize(vr::IVRSystem* system, unsigned* width, unsigned* height) {
+  system->GetRecommendedRenderTargetSize(width, height);
+  return *width != 0;
+}

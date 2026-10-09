@@ -3,41 +3,41 @@
 ## Status
 
 - **State (2026-10-09):** the fov-getter patch this block planned (hook RVA
-  0x4E2F50, widen its output) is **WITHDRAWN** on verified disassembly, and
-  the culler's input is **unidentified**. Standing from 09-23: the terrain
-  culler reacts live to the `GetProjectionRaw` answer; the matrix channel is
-  irrelevant. Which caller of it builds the cull frustum is unknown (entry at
-  the bottom, 2026-10-09).
+  0x4E2F50, widen its output) is **WITHDRAWN** on verified disassembly; the
+  culler's input is **unidentified**. Standing from 09-23: the culler reacts
+  live to the `GetProjectionRaw` answer, not the matrix. Entry at the bottom.
+- **H-cam (leading, INFERRED):** the culler is a centred frustum from the eye
+  camera's aspect (recommended W/H, out[0]) and vFOV (Raw t+b). It explains the
+  old guard working with v=0: its horizontal widening came in as render-size
+  inflation, i.e. aspect. Candidate consumer: FUN_13ACC40 (double-precision VP).
 - **Corrections** (Elite build 332841, FileVersion 332841 / ProductVersion
-  4.4.1.1; this doc's "332753" label was wrong):
-  - `FUN_1404e2f50` (RVA 0x4E2F50) returns `{aspect = recommended W/H (not
-    tangents), atan|t|+atan|b| (vertical), atan|l|+atan|r| (horizontal)}`;
-    the old "r+b / l+t" pairing was wrong.
-  - Only out[0] and out[1] are read: by the eye camera setter 0x2878DC0 and by
-    the UI scale at 0x2842AE3, k = tan(0.782)/tan(vFOV/2). Widening the getter
-    changes the UI, so it is not free.
+  4.4.1.1; the "332753" label was wrong): `FUN_1404e2f50` (RVA 0x4E2F50) returns
+  `{aspect = recommended W/H (not tangents), atan|t|+atan|b| (vertical),
+  atan|l|+atan|r| (horizontal)}`, not the old "r+b / l+t"; only out[0] and out[1]
+  are read, by the eye camera setter 0x2878DC0 and the UI scale at 0x2842AE3
+  (k = tan(0.782)/tan(vFOV/2)), so widening the getter resizes the UI.
 - **Ruled out** (evidence under "Status detail"): the getter as the culler's
-  input; the 09-23 "same +19.4% ask" premise; H3, the union model, H2, the
-  09-09 `raw`-inert reading, the `AstroSurfaceRenderManager::Cull` chain.
+  input, the 09-23 "same +19.4% ask" premise, H3, the union model, H2.
 - **Established** (`analysis\decomp\verify_20261009_cull2_*`): six
-  `GetProjectionRaw` call sites in three wrappers: slot 25 at 0x4E2F50
-  (0x4E2FA5); slot 28 via 0x4E3C50 (0x4E3C93; fx = W/(|l|+|r|), fy, read by
-  0x28219D0 -> 0x2860FA0, a full-screen quad pass, INFERRED sky or
-  background); slot 24 at 0x4E4270 (0x4E42FA, 0x4E4351, 0x4E43A6, 0x4E43F4;
-  sizes for the UI). Static analysis found no culler. The only model that fits
-  the 09-23 windows is a frustum centred on the eye axis with half-width
-  (|l|+|r|)/2 from Raw. INFERRED.
+  `GetProjectionRaw` call sites in three wrappers (0x4E2FA5 in the getter;
+  0x4E3C93 via 0x4E3C50, a quad pass, INFERRED sky; 0x4E42FA, 0x4E4351,
+  0x4E43A6, 0x4E43F4 in 0x4E4270, UI sizes); the getter's aspect comes from its
+  own GetRecommendedRenderTargetSize call, expected to return at 0x4E2FBE (the
+  census confirms). Static analysis found no culler.
+- **Flown 2026-10-09:** the manual probe cycle was unreadable by eye (squares
+  flicker with head motion); the census found a caller, 0x1073470, off-thread.
 - **Temporary key:** `advanced.cull_probe` = off | all | camera | ui | sky |
-  sizes | other, live; only with `fix.cull_guard` off, only on build 332841.
-  A census of callers (`projection callers:` log lines) always runs.
-- **Next flight** (Quest 3 or Crystal Super), parked-spot method:
-  `fix.cull_guard` off, every fov trim 0, parked over terrain with squares at
-  the outer edge; `cull_probe` off, all, camera, ui, sky, sizes, other, off,
-  about 30 s each; note squares yes/no and any other change (UI size, sky).
-  If `all` clears the squares, a raw-only answer with no render cost exists;
-  the group that clears them names the culler's input, and the census names
-  any caller missed.
-
+  sizes | other | cycle | measure, live. Lies need `fix.cull_guard` off and build
+  332841; a selected group also widens the aspect call's width. `measure` counts
+  with no lie, guard running or not.
+- **Next flight** (Quest 3 or Crystal Super): landed where squares show at the
+  edges, head still and forward, every fov trim 0. A, the positive control:
+  `cull_probe = measure`, `cull_guard = off` 60 s, then `symmetric` (it arms
+  live, no relaunch: native_cull_guard.h re-arms on the key's change, the game
+  rebuilds its targets in about 14 s) and 60 s more once the log says live. B:
+  `cull_guard = off`, `cull_probe = cycle` about 4 minutes, then `off`. Read
+  both with `edvr_log.py --tally cull`: A must show live above off, or the
+  counter is blind; in B the group that rises names the culler's input.
 *Frontier issue [72609](https://issues.frontierstore.net/issue-detail/72609) —
 "Culling of planet surface in VR too aggressive", a recurrence of
 [37119](https://issues.frontierstore.net/issue-detail/37119), which was
@@ -571,8 +571,60 @@ it directly.
   shift included. Groups: camera is frame 1 0x4E2FA5 with frame 2 0x2878E1B; ui
   is 0x4E2FA5 with frame 2 0x8D269A; sky is 0x4E3C93; sizes is 0x4E42FA,
   0x4E4351, 0x4E43A6 or 0x4E43F4; other is anything not matched, including
-  0x4E2FA5 with any other frame 2; all is every caller. Nothing else changes:
-  not the matrix, not the render size, not a crop. It acts only with the cull
-  guard off and only on build 332841 (PE stamp 1788384820, image 104894464),
-  and the log says when it does not.
+  0x4E2FA5 with any other frame 2; all is every caller. It acts only with the
+  cull guard off and only on build 332841 (PE stamp 1788384820, image
+  104894464), and the log says when it does not.
+- The getter's other half (READ, 2026-10-09, new disassembly): the eye camera
+  takes its HORIZONTAL extent from out[0], the aspect, which the getter gets
+  from its own GetRecommendedRenderTargetSize call (`call qword ptr [rax]` at
+  0x4E2FBC, two bytes, so the return is expected at 0x4E2FBE; the census shows
+  the real value) and only its VERTICAL extent from `GetProjectionRaw` (out[1]).
+  So on a vertically symmetric headset a `GetProjectionRaw` lie cannot widen a
+  centred (aspect, vFOV) frustum at all, and a probe that touched only
+  `GetProjectionRaw` would read "no group matters" whatever the culler does.
+  The probe therefore also answers that one call: under a selected group (all,
+  camera, ui, other; the same frame-2 table as the getter's raw site) it is told
+  the height kept and the width height * A to the nearest even number, with A
+  the larger over the eyes of max(|l|,|r|) / max(|t|,|b|) from the true located
+  tangents (before any lie or jitter), which makes the camera's centred frustum
+  the per-axis symmetric superset. Every other asker, the render-target
+  allocation first, is told what it was, bit for bit. The log says it once per
+  change: `cull probe: <group> also told aspect A' (true A) at the fov getter`.
+- H-cam (INFERRED): the culler is a centred frustum built from the camera's
+  (aspect, vFOV) fields. It fits the old guard flying with v=0: that guard's
+  horizontal widening reached the game as a bigger render size, i.e. aspect.
+  FUN_13ACC40, which builds a double-precision view-projection from those
+  fields, is the candidate consumer.
+- `advanced.cull_probe = cycle` drives the groups itself so the result is a
+  number and not an impression (the black squares flicker as the head moves, so
+  20 s windows cannot be judged by eye): off, all, off, camera, off, ui, off,
+  sky, off, sizes, off, other, in 2.0 s windows, the first 30 frames of each
+  dropped, counting the planet-terrain draws each eye gets (the colour pass's
+  patch VS, 72BDD292154158AD, the draws the planet patch motion already keys
+  on) and their summed index counts, since tile LOD varies. A culler whose
+  frustum widens admits more tiles at the edges, so the group that feeds it
+  should show more draws and indices than its neighbouring off windows.
+  `edvr_log.py --tally cull` tables the windows and the paired differences,
+  leaving out windows in which the head moved faster than 20 deg/s.
+- `advanced.cull_probe = measure` is the positive control. The old guard
+  (`fix.cull_guard = symmetric`) is proven to remove the squares, and a counter
+  that cannot see its terrain draws rise when the guard goes live is blind: its
+  silence under the lie probe would mean nothing. Measure is the same windows
+  and counting with no lie, each window labelled by the guard's stage as the
+  runtime last told this half (off when not configured, otherwise waiting,
+  adopting, live; the channel does not separate waiting from inert), and a
+  window dropped when the stage changes under it. It keeps counting while the
+  guard runs: only the lying stands down. `--tally cull` prints live minus off
+  (the difference of the stage means, with the standard error of the
+  difference), leaving out the staging windows and those the head moved in.
+  Lines: `cull cycle: measure[guard live] window N: frames F, terrain draws L/R
+  mean a/b, indices L/R mean c/d, head x.x deg/s`.
+- The guard arms live (READ, native_cull_guard.h `beginFrame`): any change of
+  its settings, off to symmetric included, resets it to Off, and from Off it goes
+  to Adopting as soon as the scene is ready (it asks the game for bigger render
+  targets while still telling the truth), then to Live once both eyes submit at
+  the new size; terrain-culling.md measured the game's rebuild at about 14 s
+  mid-session. So the positive control needs no relaunch, and an empty
+  `cull_guard_headsets` runs it everywhere. Not yet flown on the native runtime:
+  if the log has not said live 60 s after the switch, relaunch with the guard on.
 - The same flight carries the canted-display test keys (canted-projection.md).

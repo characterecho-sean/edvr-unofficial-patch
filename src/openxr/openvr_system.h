@@ -69,6 +69,8 @@ class OpenVRSystem final : public vr::IVRSystem {
   void noteProperty(unsigned,TrackedDeviceIndex_t,ETrackedDeviceProperty,ETrackedPropertyError) noexcept;
   SystemSource& source_;
   ProjectionCallers callers_;
+  // The probe group the aspect line was last written for, so it is said once per change.
+  std::atomic<uint32_t> aspectNoted_{0xFFFFFFFFu};
   std::atomic<uint64_t> unavailable_{0};
   struct ProjectionKey { uint64_t clip=0; unsigned eye=0,api=0; bool live=false; };
   ProjectionKey projectionKeys_[2][32]{};

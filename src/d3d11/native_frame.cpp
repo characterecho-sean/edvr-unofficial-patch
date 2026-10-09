@@ -1,5 +1,6 @@
 #include "../common/native_frame.h"
 
+#include "cull_cycle.h"
 #include "../common/comfort_fade.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
@@ -178,6 +179,34 @@ float clampFraction(float value) {
     if (!std::isfinite(value)) return 1.0f;
     if (value < 0.0f) return 0.0f;
     return value > 1.0f ? 1.0f : value;
+}
+
+// The cull cycle's clock, microseconds of QPC (a rig sets the override), and whether
+// the executable is build 332841 (a rig sets the override), read once.
+uint64_t cycleClockUs() {
+    const uint64_t forced = edvr::cullcycle::g_clockOverrideUs.load(std::memory_order_relaxed);
+    if (forced) return forced;
+    LARGE_INTEGER frequency{}, counter{};
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    const uint64_t f = static_cast<uint64_t>(frequency.QuadPart), c = static_cast<uint64_t>(counter.QuadPart);
+    return (c / f) * 1000000ull + (c % f) * 1000000ull / f;
+}
+
+bool eliteIsBuild332841() {
+    const int forced = edvr::cullcycle::g_buildOverride.load(std::memory_order_relaxed);
+    if (forced >= 0) return forced == 1;
+    static const bool known = [] {
+        const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if (!base) return false;
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        return nt->Signature == IMAGE_NT_SIGNATURE &&
+               nt->FileHeader.TimeDateStamp == edvr::cullcycle::kBuildStamp &&
+               nt->OptionalHeader.SizeOfImage == edvr::cullcycle::kBuildImageSize;
+    }();
+    return known;
 }
 
 // advanced.simulate_cant: degrees of outward cant, 0 (off) to 15.
@@ -399,9 +428,23 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     result.simulateCantDeg = clampCantDegrees(edvr::Config::get().getFloat(
         "advanced.simulate_cant", 0.0f));
     // The terrain-culling arc's selective-lie probe (docs\terrain-culling.md);
-    // only a version 7 caller has the slot.
-    result.cullProbe = cullProbe(edvr::Config::get().getString(
-        "advanced.cull_probe", "off"));
+    // only a version 7 caller has the slot. `cycle` is this half's own: it
+    // drives the groups on a schedule (cull_cycle.h) and sends the active one
+    // here, the same field, the same frame; it parses as off to cullProbe().
+    const std::string probeText = edvr::Config::get().getString(
+        "advanced.cull_probe", "off");
+    result.cullProbe = cullProbe(probeText);
+    const bool cycleRequested = wantsProbe && _stricmp(probeText.c_str(), "cycle") == 0;
+    // `measure` is the same counting with no lies, labelled by the cull guard's stage: 0 off (not configured), then what the
+    // runtime last told this half through setCullState -- 0 waiting, 1 adopting, 2 live.
+    const bool measureRequested = wantsProbe && _stricmp(probeText.c_str(), "measure") == 0;
+    const uint32_t guardState = edvr::decodeCullGuardState(edvr::cullGuardStatePacked()).stage;
+    const uint32_t guardStage = result.cullMode == 0 ? 0u : 1u + (guardState > 2u ? 2u : guardState);
+    const uint32_t cycleGroup = edvr::cullcycle::g_driver.frame(
+        cycleRequested, measureRequested, result.cullMode != 0, eliteIsBuild332841(), guardStage, cycleClockUs(),
+        physicalValid ? input->physicalHead : nullptr,
+        [](const char* line) { edvr::Log::get().note("%s", line); });
+    if (cycleRequested) result.cullProbe = cycleGroup;
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
     uint32_t trim[kTrimCount] = {0, 0, 0};

@@ -3,6 +3,7 @@
 #include "native_cpu_trace.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <intrin.h>
 #include <windows.h>
@@ -160,11 +161,30 @@ void OpenVRSystem::unavailable(unsigned slot) noexcept {
   if(!(unavailable_.fetch_or(bit,std::memory_order_relaxed)&bit))source_.unsupported(slot);
 }
 void OpenVRSystem::GetRecommendedRenderTargetSize(uint32_t* w,uint32_t* h) {
+  const auto caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
   const auto s=source_.read();uint32_t width=0,height=0;
   source_.noteGeometryQuery(0,s);
   if(live(s)) {
     width=(std::max)(s.recommendedWidth[0],s.recommendedWidth[1]);
     height=(std::max)(s.recommendedHeight[0],s.recommendedHeight[1]);
+  }
+  // The census (always) and the probe's second lie (docs\terrain-culling.md): the fov getter asks for the aspect the eye camera's
+  // horizontal extent comes from, so a selected caller there is told the width that makes the camera's centred frustum the symmetric
+  // superset of the true frusta, the height kept. Every other caller -- the render-target allocation first -- is told what it was.
+  if(callers_.note(ProjectionCallers::RenderSize,0,caller,cullProbeFromCode(s.cullProbe),GetTickCount64(),GetCurrentThreadId(),CaptureAbove{caller},
+       [this](const char* line){source_.noteCallerLine(line);}) && live(s) && opticsAvailable(s) && height) {
+    const bool liveGeometry=geometryValid(s);
+    const RawFov truth[2]={liveGeometry?s.geometry.raw[0]:s.optics.raw[0],liveGeometry?s.geometry.raw[1]:s.optics.raw[1]};
+    uint32_t told=0;
+    if(widenedRenderWidth(height,truth,told)) {
+      if(aspectNoted_.exchange(s.cullProbe,std::memory_order_relaxed)!=s.cullProbe) {
+        char line[160];
+        std::snprintf(line,sizeof(line),"cull probe: %s also told aspect %.4f (true %.4f) at the fov getter",
+          cullProbeName(cullProbeFromCode(s.cullProbe)),double(told)/double(height),width?double(width)/double(height):0.0);
+        source_.noteCallerLine(line);
+      }
+      width=told;
+    }
   }
   if(w)*w=width;if(h)*h=height;
 }

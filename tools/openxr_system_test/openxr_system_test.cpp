@@ -17,6 +17,7 @@
 extern "C" vr::IVRSystem* openxrAbiCaller(vr::IVRSystem*);
 extern "C" int openxrAbiCallRaw(vr::IVRSystem*, vr::EVREye, float*);   // out[0..3] = left, right, top, bottom; out[4] spare
 extern "C" int openxrAbiOuterRaw(vr::IVRSystem*, vr::EVREye, float*);   // calls openxrAbiCallRaw
+extern "C" int openxrAbiCallSize(vr::IVRSystem*, unsigned*, unsigned*);
 extern "C" int openxrAbiCallMatrix(vr::IVRSystem*, vr::EVREye, vr::HmdMatrix44_t*);
 extern "C" int openxrAbiCallEyeToHead(vr::IVRSystem*, vr::EVREye, vr::HmdMatrix34_t*);
 
@@ -570,6 +571,74 @@ __declspec(noinline) void callerCensusTests(vr::IVRSystem* system, FakeSource& s
   const float rightWant[4] = {-rh, rh, -rv, rv};
   check(sameAs(rightWide, rightWant), "the right eye is widened from its own answer");
   check(allZero(invalid, 4 * sizeof(float)), "an invalid eye still zeroes its outputs under the probe (a zero stays +0)");
+  // ---- the probe's second lie: the aspect the fov getter asks for (GetRecommendedRenderTargetSize at kAspectCall) ----
+  {
+    concrete.callers().useModule(real);   // (the probe cells above left the image remapped)
+    source.state.cullProbe = 0;   // (the jitter shift set above is still in: the told aspect is made from the true tangents, before it)
+    unsigned honestW = 0, honestH = 0;
+    const size_t sizeLinesBefore = [&] { std::lock_guard<std::mutex> lock(source.mutex); return source.callerLines.size(); }();
+    openxrAbiCallSize(system, &honestW, &honestH);
+    {
+      // A caller of GetRecommendedRenderTargetSize is a lead now: its first-sight line carries all three frames, like the others.
+      std::lock_guard<std::mutex> lock(source.mutex);
+      const std::string line = source.callerLines.size() > sizeLinesBefore ? source.callerLines[sizeLinesBefore] : std::string();
+      size_t arrows = 0;
+      for (size_t at = line.find(" <- exe+0x"); at != std::string::npos; at = line.find(" <- exe+0x", at + 1)) ++arrows;
+      check(line.rfind("projection callers: GetRecommendedRenderTargetSize exe+0x", 0) == 0 && arrows == 2 && line.find('?') == std::string::npos && line.find("outside") == std::string::npos,
+            "GetRecommendedRenderTargetSize' first-sight line carries frames 1, 2 and 3 like the other methods");
+    }
+    check(honestW == 1128 && honestH == 786, "(the honest answer is the larger eye's size)");
+    n = concrete.callers().snapshot(entries, ProjectionCallers::kCapacity);
+    const uintptr_t sizeCaller = reinterpret_cast<uintptr_t>(&openxrAbiCallSize);
+    const ProjectionCallers::Entry* sizeEntry = nullptr;
+    for (unsigned i = 0; i < n; ++i)
+      if (entries[i].method == ProjectionCallers::RenderSize && entries[i].rva1 < edvr::openxr::kFrameUnknown && real.base + entries[i].rva1 > sizeCaller &&
+          real.base + entries[i].rva1 - sizeCaller < 0x100) sizeEntry = &entries[i];
+    check(sizeEntry != nullptr, "GetRecommendedRenderTargetSize is recorded with its own caller (a fourth method), landing directly in OpenVRSystem");
+    if (sizeEntry) {
+      const uintptr_t sizeSite = real.base + sizeEntry->rva1;
+      const double aspect = std::tan(0.7) / std::tan(0.5);   // the eyes'' largest horizontal tangent over their largest vertical one, from the located fov
+      const unsigned wantWidth = unsigned(2.0 * std::floor(786.0 * aspect * 0.5 + 0.5));
+      check(wantWidth == 1212, "(by hand: tan 0.7 / tan 0.5 = 1.5418, times a height of 786 is 1211.9, which is 1212)");
+      struct At { uint32_t rva; bool wideAll, wideCamera, wideUi, wideOther; };
+      const At sites[] = {{rva::kAspectCall, true, false, false, true},   // the real chain''s frame 2 is neither the camera setter nor the ui scale: other
+                          {rva::kAspectCall - 1, false, false, false, false}, {rva::kAspectCall + 1, false, false, false, false},
+                          {0x5000, false, false, false, false}, {rva::kEyeFov, false, false, false, false}};
+      const size_t linesBefore = [&] { std::lock_guard<std::mutex> lock(source.mutex); return source.callerLines.size(); }();
+      for (const At& at : sites) {
+        concrete.callers().useModule(ExeModule{sizeSite - at.rva, 0x40000000, edvr::openxr::kBuild332841Stamp, edvr::openxr::kBuild332841ImageSize});
+        bool exact = true, honestHeight = true;
+        for (uint32_t group = 0; group <= 6; ++group) {
+          source.state.cullProbe = group;
+          const bool wide = group == 1 ? at.wideAll : group == 2 ? at.wideCamera : group == 3 ? at.wideUi : group == 6 ? at.wideOther : false;
+          for (int again = 0; again < 2; ++again) {
+            unsigned w = 0, h = 0;
+            openxrAbiCallSize(system, &w, &h);
+            exact = exact && (wide ? w == wantWidth : (w == honestW)) && h == honestH;
+            honestHeight = honestHeight && h == honestH;
+          }
+        }
+        check(exact && honestHeight,
+              at.wideAll ? "at 0x4E2FBE the real chain is answered under all and other (a width of 1212, the height kept) and bit-identically honest under camera, ui, sky, sizes and off"
+                         : "at 0x4E2FBE +-1, an unlisted RVA and the fov getter's raw site, every probe leaves GetRecommendedRenderTargetSize exactly honest, the height always");
+      }
+      source.state.cullProbe = 0;
+      unsigned back = 0, backH = 0;
+      openxrAbiCallSize(system, &back, &backH);
+      check(back == honestW && backH == honestH, "...and off is the honest answer again");
+      std::lock_guard<std::mutex> lock(source.mutex);
+      unsigned told = 0;
+      bool exactLine = false;
+      for (size_t i = linesBefore; i < source.callerLines.size(); ++i) {
+        if (source.callerLines[i].find("also told aspect") != std::string::npos) {
+          ++told;
+          exactLine = exactLine || source.callerLines[i] == "cull probe: all also told aspect 1.5420 (true 1.4351) at the fov getter";
+        }
+      }
+      check(told == 2 && exactLine, "the aspect is said once per change of group (all, then other), as 'cull probe: all also told aspect 1.5420 (true 1.4351) at the fov getter'");
+    }
+    concrete.callers().useModule(real);
+  }
   // Nothing else changes: not the matrix, not the eye transform.
   vr::HmdMatrix44_t matrixWide{};
   vr::HmdMatrix34_t headWide{};

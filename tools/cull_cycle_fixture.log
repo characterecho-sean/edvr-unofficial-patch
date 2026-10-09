@@ -1,0 +1,62 @@
+[00:00:00.000] cull cycle: running -- 2.0 s windows, off, all, off, camera, off, ui, off, sky, off, sizes, off, other; the first 30 frames of each discarded; planet-terrain draws counted per eye
+[00:00:00.000] cull cycle: off window 1: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: all window 2: frames 170, terrain draws L/R mean 16.00/13.00, indices L/R mean 36864.0/29952.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 3: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: camera window 4: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 5: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: ui window 6: frames 170, terrain draws L/R mean 12.00/9.00, indices L/R mean 27648.0/20736.0, head 40.0 deg/s
+[00:00:00.000] cull cycle: off window 7: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: sky window 8: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 9: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: sizes window 10: frames 170, terrain draws L/R mean 14.00/12.00, indices L/R mean 32256.0/27648.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 11: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: other window 12: frames 170, terrain draws L/R mean 11.00/9.00, indices L/R mean 25344.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 13: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: cycle 1, all vs off: draws L/R +6.00/+4.00, indices L/R +13824.0/+9216.0 (windows 1, 2, 3)
+[00:00:00.000] cull cycle: cycle 1, camera vs off: draws L/R +0.00/+0.00, indices L/R +0.0/+0.0 (windows 3, 4, 5)
+[00:00:00.000] cull cycle: cycle 1, ui vs off: draws L/R +2.00/+0.00, indices L/R +4608.0/+0.0 (windows 5, 6, 7)
+[00:00:00.000] cull cycle: cycle 1, sky vs off: draws L/R +0.00/+0.00, indices L/R +0.0/+0.0 (windows 7, 8, 9)
+[00:00:00.000] cull cycle: cycle 1, sizes vs off: draws L/R +4.00/+3.00, indices L/R +9216.0/+6912.0 (windows 9, 10, 11)
+[00:00:00.000] cull cycle: cycle 1, other vs off: draws L/R +1.00/+0.00, indices L/R +2304.0/+0.0 (windows 11, 12, 13)
+[00:00:00.000] cull cycle: all window 14: frames 170, terrain draws L/R mean 18.00/13.00, indices L/R mean 41472.0/29952.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 15: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: camera window 16: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 17: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: ui window 18: frames 170, terrain draws L/R mean 12.00/9.00, indices L/R mean 27648.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 19: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: sky window 20: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 21: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: sizes window 22: frames 170, terrain draws L/R mean 14.00/12.00, indices L/R mean 32256.0/27648.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 23: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: other window 24: frames 170, terrain draws L/R mean 11.00/9.00, indices L/R mean 25344.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: off window 25: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: cycle 2, all vs off: draws L/R +8.00/+4.00, indices L/R +18432.0/+9216.0 (windows 13, 14, 15)
+[00:00:00.000] cull cycle: cycle 2, camera vs off: draws L/R +0.00/+0.00, indices L/R +0.0/+0.0 (windows 15, 16, 17)
+[00:00:00.000] cull cycle: cycle 2, ui vs off: draws L/R +2.00/+0.00, indices L/R +4608.0/+0.0 (windows 17, 18, 19)
+[00:00:00.000] cull cycle: cycle 2, sky vs off: draws L/R +0.00/+0.00, indices L/R +0.0/+0.0 (windows 19, 20, 21)
+[00:00:00.000] cull cycle: cycle 2, sizes vs off: draws L/R +4.00/+3.00, indices L/R +9216.0/+6912.0 (windows 21, 22, 23)
+[00:00:00.000] cull cycle: cycle 2, other vs off: draws L/R +1.00/+0.00, indices L/R +2304.0/+0.0 (windows 23, 24, 25)
+[00:00:00.000] cull cycle: stopped after 25 windows
+[00:00:00.000] cull cycle: measuring -- 2.0 s windows labelled by the cull guard's stage (off, waiting, adopting, live), the first 30 frames of each discarded, a window dropped when the stage changes under it; no probe lies are told; planet-terrain draws counted per eye
+[00:00:00.000] cull cycle: measure[guard off] window 1: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard off] window 2: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard off] window 3: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard off] window 4: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard off] window 5: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard off] window 6: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard off] window 7: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard off] window 8: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: the cull guard went from off to waiting (the window in progress is dropped)
+[00:00:00.000] cull cycle: measure[guard waiting] window 9: frames 170, terrain draws L/R mean 10.00/9.00, indices L/R mean 23040.0/20736.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: the cull guard went from waiting to adopting (the window in progress is dropped)
+[00:00:00.000] cull cycle: measure[guard adopting] window 10: frames 170, terrain draws L/R mean 12.00/10.00, indices L/R mean 27648.0/23040.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: the cull guard went from adopting to live (the window in progress is dropped)
+[00:00:00.000] cull cycle: measure[guard live] window 11: frames 170, terrain draws L/R mean 16.00/14.00, indices L/R mean 36864.0/32256.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard live] window 12: frames 170, terrain draws L/R mean 18.00/14.00, indices L/R mean 41472.0/32256.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard live] window 13: frames 170, terrain draws L/R mean 16.00/14.00, indices L/R mean 36864.0/32256.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard live] window 14: frames 170, terrain draws L/R mean 18.00/14.00, indices L/R mean 41472.0/32256.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard live] window 15: frames 170, terrain draws L/R mean 16.00/14.00, indices L/R mean 36864.0/32256.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard live] window 16: frames 170, terrain draws L/R mean 18.00/14.00, indices L/R mean 41472.0/32256.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard live] window 17: frames 170, terrain draws L/R mean 16.00/14.00, indices L/R mean 36864.0/32256.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: measure[guard live] window 18: frames 170, terrain draws L/R mean 18.00/14.00, indices L/R mean 41472.0/32256.0, head 3.0 deg/s
+[00:00:00.000] cull cycle: stopped after 18 windows

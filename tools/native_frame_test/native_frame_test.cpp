@@ -5,8 +5,11 @@
 #include "../../src/common/native_render_settings.h"
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/journal_watch.h"
+#include "cull_cycle_cases.h"
 
 #include <d3d11.h>
+#include <fcntl.h>
+#include <io.h>
 #include <wrl/client.h>
 
 #include <cmath>
@@ -47,6 +50,12 @@ int wmain(int argc, wchar_t** argv) {
         std::puts("native_frame_test: dry-run (no provider calls)");
         return 0;
     }
+    if (!std::wcscmp(argv[1], L"--print-cull-fixture")) {
+        const std::string text = cull_cases::fixtureLog();
+        _setmode(_fileno(stdout), _O_BINARY);                 // LF only: tools\cull_cycle_fixture.log is this, byte for byte
+        std::fwrite(text.data(), 1, text.size(), stdout);
+        return 0;
+    }
     if (std::wcscmp(argv[1], L"--self-test")) return 2;
 
     unsigned checks = 0, failures = 0;
@@ -57,6 +66,8 @@ int wmain(int argc, wchar_t** argv) {
             std::printf("FAIL: %s\n", name);
         }
     };
+
+    cull_cases::runCullCycleCases(check);   // the probe cycle's own logic: schedule, windows, discard, pairs, statuses, the log tool's fixture
 
     // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
     const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -547,7 +558,90 @@ int wmain(int argc, wchar_t** argv) {
             probesParse = probesParse && ask7(&probe) == S_OK && probe == c.code;
         }
         check(probesParse, "cull_probe parses off, all, camera, ui, sky, sizes, other (any case) to 0..6; a near miss, a number and junk read 0 (off)");
-        edvr::Config::get().set("advanced.cull_probe", "");
+        // ---- advanced.cull_probe = cycle (cull_cycle.h): this half drives the groups and sends the active one in the same field ----
+        {
+            using namespace edvr::cullcycle;
+            g_buildOverride.store(1);
+            edvr::Config::get().set("fix.cull_guard", "off");
+            edvr::Config::get().set("advanced.cull_probe", "cycle");
+            uint64_t t = 5000000;
+            auto askAt = [&](uint64_t us) { g_clockOverrideUs.store(us); return ask7(&probe); };
+            probe = 99;
+            check(askAt(t) == S_OK && probe == 0u && g_driver.status() == Status::Running && counting(),
+                  "cull_probe = cycle on build 332841 with no guard: the cycle runs, counts, and the first window is off (group 0)");
+            bool zeroUntil = true;
+            for (int i = 1; i < 200; ++i) {
+                t += 10000;
+                noteTerrainDraw(0, 2304u, 1u);
+                zeroUntil = zeroUntil && askAt(t) == S_OK && probe == 0u;
+            }
+            check(zeroUntil && g_driver.cycle().windowsClosed() == 0, "...it tells the runtime off for the 199 frames of the first 1.99 s");
+            t += 10000;
+            check(askAt(t) == S_OK && probe == 1u && g_driver.cycle().windowsClosed() == 1 && g_draws[0].load() == 0u,
+                  "...and group 1 (all) from the frame 2.0 s in, the boundary having taken the render thread''s counts");
+            for (int i = 0; i < 200; ++i) { t += 10000; askAt(t); }
+            check(probe == 0u && g_driver.cycle().windowsClosed() == 2, "...then off again for the next window: the schedule alternates off with each group");
+            // A caller whose struct cannot carry the field gets no cycle.
+            EdvrNativeFrameOutput v6c{EDVR_NATIVE_FRAME_OUTPUT_SIZE_6, EDVR_NATIVE_FRAME_VERSION_6};
+            v6c.cullProbe = 0xA5A5A5A5u;
+            EdvrNativeFrameInput v6cFrame = input(41, 7, ++seq);
+            g_clockOverrideUs.store(t + 10000);
+            check(table.beginFrame(table.context, &v6cFrame, &v6c) == S_OK && v6c.cullProbe == 0xA5A5A5A5u && g_driver.status() == Status::Idle && !counting(),
+                  "a version 6 caller, which has no cull probe slot, stops the cycle rather than running it unseen");
+            // The gates, as the runtime''s probe has them, reported in the log by the cycle itself.
+            g_buildOverride.store(0);
+            t += 20000;
+            check(askAt(t) == S_OK && probe == 0u && g_driver.status() == Status::StoodDownBuild && !counting(),
+                  "on another build the cycle stands down: group 0, nothing counted, status StoodDownBuild");
+            g_buildOverride.store(1);
+            edvr::Config::get().set("fix.cull_guard", "symmetric");
+            t += 10000;
+            check(askAt(t) == S_OK && probe == 0u && g_driver.status() == Status::IgnoredGuard && !counting(), "with a cull guard configured it is ignored: group 0, status IgnoredGuard (a guard wins over a wrong build too)");
+            g_buildOverride.store(0);
+            t += 10000;
+            check(askAt(t) == S_OK && g_driver.status() == Status::IgnoredGuard, "...");
+            g_buildOverride.store(1);
+            edvr::Config::get().set("fix.cull_guard", "off");
+            edvr::Config::get().set("advanced.cull_probe", "CYCLE");
+            t += 10000;
+            check(askAt(t) == S_OK && g_driver.status() == Status::Running && probe == 0u && g_driver.cycle().windowsClosed() == 0,
+                  "the guard off again: the key is case-insensitive and the cycle starts over from window 1");
+            edvr::Config::get().set("advanced.cull_probe", "cycles");
+            t += 10000;
+            check(askAt(t) == S_OK && probe == 0u && g_driver.status() == Status::Idle && !counting(), "a near miss (cycles) is not the cycle: it parses as off");
+            edvr::Config::get().set("advanced.cull_probe", "camera");
+            t += 10000;
+            check(askAt(t) == S_OK && probe == 2u && g_driver.status() == Status::Idle, "and a fixed group (camera) is sent as itself, with no cycle");
+            // measure: the same counting with no lies, labelled by the cull guard's stage as the runtime last told this half (setCullState).
+            edvr::Config::get().set("advanced.cull_probe", "measure");
+            edvr::Config::get().set("fix.cull_guard", "symmetric");
+            check(table.setCullState(table.context, 2, 1.1f, 1.0f) == S_OK, "(the runtime tells the guard's stage: live)");
+            g_buildOverride.store(0);   // another build: measure has no lie to stand down
+            t = 90000000;
+            check(askAt(t) == S_OK && probe == 0u && g_driver.status() == Status::Measuring && counting() && g_driver.cycle().measuring() && g_driver.cycle().stage() == 3u,
+                  "cull_probe = measure with a cull guard configured and live, on another build: it measures (stage live), tells group 0, and does not stand down");
+            bool silent = true;
+            for (int i = 0; i < 200; ++i) { t += 10000; silent = silent && askAt(t) == S_OK && probe == 0u; }
+            check(silent && g_driver.cycle().windowsClosed() == 1, "...a window of 2.0 s closes while the guard runs, and nothing was ever told to the runtime");
+            check(table.setCullState(table.context, 1, 1.1f, 1.0f) == S_OK, "(the guard goes back to adopting)");
+            t += 10000;
+            check(askAt(t) == S_OK && g_driver.cycle().stage() == 2u && g_driver.cycle().windowsClosed() == 1, "the stage becomes adopting and the window in progress is dropped");
+            table.setCullState(table.context, 0, 1.0f, 1.0f);
+            t += 10000;
+            check(askAt(t) == S_OK && g_driver.cycle().stage() == 1u, "stage 0 with the guard configured is waiting");
+            edvr::Config::get().set("fix.cull_guard", "off");
+            t += 10000;
+            check(askAt(t) == S_OK && g_driver.cycle().stage() == 0u && g_driver.status() == Status::Measuring, "with the guard off it is off");
+            edvr::Config::get().set("advanced.cull_probe", "MEASURE");
+            t += 10000;
+            check(askAt(t) == S_OK && g_driver.status() == Status::Measuring, "the key is case-insensitive");
+            edvr::Config::get().set("advanced.cull_probe", "measures");
+            t += 10000;
+            check(askAt(t) == S_OK && probe == 0u && g_driver.status() == Status::Idle && !counting(), "a near miss (measures) is not measure");
+            table.setCullState(table.context, 0, 1.0f, 1.0f);            g_clockOverrideUs.store(0);
+            g_buildOverride.store(-1);
+            edvr::Config::get().set("fix.cull_guard", "PeRcEnT");
+        }        edvr::Config::get().set("advanced.cull_probe", "");
         edvr::Config::get().set("advanced.canted_eye_fix", "");
         edvr::Config::get().set("advanced.simulate_cant", "");
     }

@@ -65,6 +65,7 @@
 #include "vr_world_route.h"  // VrWorldInternalScope: the world route's own D3D calls step past these hooks
 #include "ui_surfaces.h"  // uiAtlasNoteWrite: the glyph atlas instrument's write count
 #include "celestial_motion.h"   // the planet patch constants' CPU shadow: the write tees, the draw capture, the boundary tick
+#include "cull_cycle.h"         // advanced.cull_probe = cycle: the per-eye planet-terrain draw counters
 #include "orbital_width.h"      // fix.ui_quality: the orbit lines' half-width, scaled in the game's own draw of their shader
 #include "supercruise_bars.h"   // fix.ui_quality: the supercruise bars' private geometry-shader pass, bound around the layered issue
 #include "engine_velocity.h"
@@ -4154,6 +4155,14 @@ void forwardWithVerdict(ID3D11DeviceContext* self, DrawVerdict v,
     // Planet patch motion (celestial_motion.h): a colour-pass patch draw's constants are read from the CPU shadow here, before the game's
     // own issue -- no GPU copy, no reissue. celestialMotionLive() first, one load; then the VS hash the draw path already holds.
     if (owner && celestialMotionLive() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) celestialMotionNoteDraw(self);
+    // The terrain-culling arc's cull cycle (cull_cycle.h): the same patch VS, counted per eye and by index count while a cycle runs,
+    // outside the supercruise gate above (the culler matters landed). One relaxed load for any other draw, and for every draw when
+    // no cycle runs. The eye is the scene depth pair's, read as celestial_motion.cpp reads it.
+    if (owner && cullcycle::counting() && bindingShaderHash(BindSlot::Vs) == kCelestialPatchVs) {
+        int terrainEye = -1, terrainTarget = -1;
+        auto* terrainDsv = static_cast<ID3D11DepthStencilView*>(bindingGet(BindSlot::Dsv0));
+        if (terrainDsv && depthProbeCurrentSceneEyeOf(terrainDsv, &terrainEye, &terrainTarget)) cullcycle::noteTerrainDraw(terrainEye, count, instances);
+    }
     if (effectCaptureScope.ctx) objectProbePanelDrawBegin(self);
     // The orbit lines (orbital_width.h; fix.ui_quality): the game's own draw of their vertex shader into an eye target is
     // issued with the half-width scaled by the panel patch's factor -- a patched copy of that shader and a private b13
