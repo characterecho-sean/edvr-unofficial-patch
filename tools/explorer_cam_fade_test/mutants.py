@@ -27,13 +27,15 @@ import rig_mutants_lib as lib  # noqa: E402
 ROOT = HERE.parents[1]
 FILES = {
     "fade": ROOT / "src" / "d3d11" / "explorer_cam_fade_core.h",
-    "glue": ROOT / "src" / "d3d11" / "explorer_cam.cpp",   # read by the rig as text (M11.p): the two places that convert the counter
+    "settings": ROOT / "src" / "d3d11" / "explorer_cam_settings_core.h",
+    "glue": ROOT / "src" / "d3d11" / "explorer_cam.cpp",   # read by the rig as text (M11.p, M13.p, M14.p): the conversion of the counter, the settings cache, the motion gate
 }
-TREE_EXTRA = [("src/d3d11/explorer_cam_core.h", ROOT / "src" / "d3d11" / "explorer_cam_core.h")]
+TREE_EXTRA = [("src/d3d11/explorer_cam_core.h", ROOT / "src" / "d3d11" / "explorer_cam_core.h"),
+              ("src/d3d11/explorer_cam_follow_core.h", ROOT / "src" / "d3d11" / "explorer_cam_follow_core.h")]
 CONFIG = lib.Config(
-    here=__file__, files=FILES, header_keys=("fade",), pin_keys=("glue",), rig=HERE / "explorer_cam_fade_test.cpp",
+    here=__file__, files=FILES, header_keys=("fade", "settings"), pin_keys=("glue",), rig=HERE / "explorer_cam_fade_test.cpp",
     rig_label=":rig_explorer_cam_fade_test", rig_source_in_bat="tools\\explorer_cam_fade_test\\explorer_cam_fade_test.cpp", rig_exe_in_bat="explorer_cam_fade_test.exe",
-    case_prefix="M", include_dirs=("src/d3d11",), min_mutants=28, run_timeout=120.0, tree_extra=TREE_EXTRA)
+    case_prefix="M", include_dirs=("src/d3d11",), min_mutants=40, run_timeout=120.0, tree_extra=TREE_EXTRA)
 
 KIND_GATE = "if (m_kind != ComfortKind::Exit && in.motionArmed) {"
 FADE_IN_NOW = "if (motionUnmet == 0) {\n                beginIn(ComfortEv::FadeIn, ComfortWhy::None, 0, in, out);"
@@ -43,6 +45,8 @@ QPC_FN = "return (ticks / freq) * 1000000ull + (ticks % freq) * 1000000ull / fre
 REBASE = "if (m_have && raw.nowUs + m_shiftUs < m_lastUs) m_shiftUs = m_lastUs - raw.nowUs;"
 REALNOW = "return ecm::qpcTicksToUs(qpcNow(), freq);"
 BOUNDARY = "in.nowUs = ecm::qpcTicksToUs(static_cast<uint64_t>(t.QuadPart), freq);"
+REREAD = "if (!m_have || generation != m_generation) {"
+WANTS = ("bool wantsMotion() const {\n        return (m_kind == ComfortKind::Enter || m_kind == ComfortKind::Reattach) && (m_phase == ComfortPhase::Out || m_phase == ComfortPhase::Black);\n    }")
 
 M = lib.M
 MUTANTS = [
@@ -107,6 +111,40 @@ MUTANTS = [
       "the frame boundary's input to the comfort fade is left on the multiply-first arithmetic: the review's black screen"),
     M("backwards-clock-not-rebased", "M12", "fade", [(REBASE, "(void)0;")],
       "a clock that steps back leaves the press and the hold in the future of now: the 3 s cap and the motion hold stop firing"),
+    # ---- the frame settings, parsed once per configuration change ----
+    M("settings-reread-every-frame", "M13", "settings", [(REREAD, "if (true) {")],
+      "the generation is ignored: nine questions and seven parses a frame, as before"),
+    M("settings-never-reread", "M13", "settings", [(REREAD, "if (!m_have) {")],
+      "the settings are read once and never again: a changed trim does not apply until the next launch"),
+    M("settings-reread-only-when-newer", "M13", "settings", [(REREAD, "if (!m_have || generation > m_generation) {")],
+      "a generation that wrapped, or went down, is taken for old"),
+    M("settings-generation-not-kept", "M13", "settings", [("            m_generation = generation;\n", "")],
+      "the generation the settings were read under is not remembered: every frame after the first at a new number reads again"),
+    M("settings-eye-up-misnamed", "M13", "settings", [('"fix.explorer_cam_eye_up"', '"fix.explorer_cam_eye_upp"')],
+      "the eye height is read from a key nobody sets"),
+    M("settings-trim-default-wrong", "M13", "settings", [('"fix.explorer_cam_eye_trim_up", kTrimUpDefault', '"fix.explorer_cam_eye_trim_up", 0.0f')],
+      "a trim that is not set reads 0, not the shipped value"),
+    M("settings-hotkey-default-wrong", "M13", "settings", [('src.getString("hotkey.explorer_cam", "F5")', 'src.getString("hotkey.explorer_cam", "")')],
+      "an ini without hotkey.explorer_cam turns Explorer Cam off"),
+    M("settings-glue-reads-every-frame", "M13", "glue", [("g_settings.get(cfg.generation(), ConfigSource(cfg))", "g_settings.get(frameNo, ConfigSource(cfg))")],
+      "the frame boundary hands the cache a number that changes every frame"),
+    M("settings-glue-reads-config-itself", "M13", "glue", [("in.up = st.up;", 'in.up = cfg.getFloat("fix.explorer_cam_eye_up", ecm::kEyeUpDefault);')],
+      "one key is still read from Config on every frame"),
+    # ---- the engine's motion, asked for only while a fade can use it ----
+    M("wants-motion-always", "M14", "fade", [(WANTS, "bool wantsMotion() const { return true; }")],
+      "the glue asks the engine for its motion on every frame, idle or not"),
+    M("wants-motion-never", "M14", "fade", [(WANTS, "bool wantsMotion() const { return false; }")],
+      "an entry is never told the engine's motion: it fades in at once, or waits on nothing"),
+    M("wants-motion-skips-out", "M14", "fade", [("(m_phase == ComfortPhase::Out || m_phase == ComfortPhase::Black);", "(m_phase == ComfortPhase::Black);")],
+      "a re-attach placed again while it fades out reaches black and fades in on motion it was not given"),
+    M("wants-motion-skips-reattach", "M14", "fade", [("(m_kind == ComfortKind::Enter || m_kind == ComfortKind::Reattach) &&", "(m_kind == ComfortKind::Enter) &&")],
+      "a re-attach is not given the motion"),
+    M("wants-motion-in-exit", "M14", "fade", [("(m_kind == ComfortKind::Enter || m_kind == ComfortKind::Reattach) &&", "(m_kind != ComfortKind::None) &&")],
+      "an exit asks the engine for motion it never reads"),
+    M("wants-motion-in-fade-in", "M14", "fade", [("(m_phase == ComfortPhase::Out || m_phase == ComfortPhase::Black);", "(m_phase != ComfortPhase::Clear);")],
+      "a fade in keeps asking the engine for motion it has already used"),
+    M("motion-glue-ungated", "M14", "glue", [("in.motion = g_frame.fade.wantsMotion() ? engineMotionReady() : EngineMotionReady{};", "in.motion = engineMotionReady();")],
+      "the frame boundary takes the engine's mutex on every frame again"),
 ]
 
 if __name__ == "__main__":

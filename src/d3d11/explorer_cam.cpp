@@ -26,6 +26,7 @@
 #include "explorer_cam_core.h"
 #include "explorer_cam_fade_core.h"
 #include "explorer_cam_follow_core.h"
+#include "explorer_cam_settings_core.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -2404,6 +2405,17 @@ int g_f5Missed = 0;
 ecm::HotkeyKeeper g_hotkeyKeeper;
 ecm::Sink g_frameSink{&logSink, nullptr};   // the production wrapper's lines (the rig points it at a capture)
 
+// The frame settings (ecm::SettingsCache): parsed from Config once per configuration change, not on every frame. Config answers the cache's four questions.
+struct ConfigSource final : ecm::SettingsSource {
+    explicit ConfigSource(const Config& c) : cfg(c) {}
+    float getFloat(const char* key, float def) const override { return cfg.getFloat(key, def); }
+    int getInt(const char* key, int def) const override { return cfg.getInt(key, def); }
+    bool getBool(const char* key, bool def) const override { return cfg.getBool(key, def); }
+    std::string getString(const char* key, const char* def) const override { return cfg.getString(key, def); }
+    const Config& cfg;
+};
+ecm::SettingsCache g_settings;
+
 void applyHotkey(const std::string& name, const ecm::Sink& sink) {
     if (g_f5Configured && name == g_f5Name) return;
     g_f5Configured = true;
@@ -2426,18 +2438,21 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
     const ecm::Sink sink = g_frameSink;
     const Config& cfg = Config::get();
     FrameInput in;
-    in.up = cfg.getFloat("fix.explorer_cam_eye_up", ecm::kEyeUpDefault);
-    in.forward = cfg.getFloat("fix.explorer_cam_eye_forward", ecm::kEyeForwardDefault);
-    in.right = cfg.getFloat("fix.explorer_cam_eye_right", ecm::kEyeRightDefault);
-    in.trimRight = cfg.getFloat("fix.explorer_cam_eye_trim_right", ecm::kTrimRightDefault);
-    in.trimUp = cfg.getFloat("fix.explorer_cam_eye_trim_up", ecm::kTrimUpDefault);
-    in.trimForward = cfg.getFloat("fix.explorer_cam_eye_trim_forward", ecm::kTrimForwardDefault);
-    in.smoothingMs = static_cast<float>(cfg.getInt("fix.explorer_cam_follow_smoothing_ms", ecm::kSmoothingMsDefault));
+    // The settings are parsed once per configuration change: Config::generation() moves with every re-read of the ini (a hand edit, or the menu's write and the refresh it
+    // asks for) and every set(), so a changed trim still applies on the next frame. It is read before the values (ecm::SettingsCache::get).
+    const ecm::FrameSettings& st = g_settings.get(cfg.generation(), ConfigSource(cfg));
+    in.up = st.up;
+    in.forward = st.forward;
+    in.right = st.right;
+    in.trimRight = st.trimRight;
+    in.trimUp = st.trimUp;
+    in.trimForward = st.trimForward;
+    in.smoothingMs = st.smoothingMs;
     static std::string hotkeyName;
     {
+        // The keeper still sees the configured key EVERY frame, with the session state: a change made during a session waits for it to end.
         bool deferred = false;
-        const std::string desired = cfg.getString("hotkey.explorer_cam", "F5");
-        hotkeyName = g_hotkeyKeeper.step(desired, g_sessionActive.load(std::memory_order_acquire), &deferred);
+        hotkeyName = g_hotkeyKeeper.step(st.hotkey, g_sessionActive.load(std::memory_order_acquire), &deferred);
         if (deferred)
             say(sink, "%s hotkey.explorer_cam changed during Explorer Cam: %s stays the exit until you leave; the new value (%s) applies when the session ends", ecm::prefix(),
                 hotkeyName.c_str(), g_hotkeyKeeper.pending().empty() ? "empty: Explorer Cam turns off" : g_hotkeyKeeper.pending().c_str());
@@ -2461,7 +2476,7 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
         in.focusKnown = journalGuiFocus(&focus);
         in.focus = focus;
     }
-    in.readBindings = cfg.getBool("hotkey.read_game_bindings", true);
+    in.readBindings = st.readBindings;
     {
         // The fade's ramps want a finer clock than GetTickCount64's 15 ms.
         static const uint64_t freq = [] {
@@ -2473,7 +2488,9 @@ void explorerCamFrameBoundary(uint32_t frameNo) {
         QueryPerformanceCounter(&t);
         in.nowUs = ecm::qpcTicksToUs(static_cast<uint64_t>(t.QuadPart), freq);   // the one overflow-safe conversion (explorer_cam_fade_core.h), as realNowUs uses
     }
-    in.motion = engineMotionReady();   // what the entry fade waits for besides the placement (the engine's motion for the eye path)
+    // What the entry fade waits for besides the placement (the engine's motion for the eye path), asked of the engine only when the timeline can read it this frame:
+    // the answer takes the engine's mutex, and an idle fade, an exit and a fade in never look at it.
+    in.motion = g_frame.fade.wantsMotion() ? engineMotionReady() : EngineMotionReady{};
     boundaryAt(frameNo, GetTickCount64(), in, sink);
 }
 
@@ -2602,6 +2619,7 @@ bool sessionActive() { return g_sessionActive.load(); }
 bool exiting() { return g_exiting.load(); }
 uint32_t f5Request() { return g_f5Request.load(); }
 int hotkeyVk() { return g_f5.key(); }
+uint32_t settingsReads() { return g_settings.reads(); }
 void preThenPost(void* activity) {
     PreState ps = preFree(activity);
     postFor(ps);
@@ -2797,6 +2815,7 @@ void reset() {
     g_f5 = Hotkey();
     g_f5Missed = 0;
     g_hotkeyKeeper = ecm::HotkeyKeeper();
+    g_settings.reset();
     g_frameSink = ecm::Sink{&logSink, nullptr};
 }
 }  // namespace explorercamtest

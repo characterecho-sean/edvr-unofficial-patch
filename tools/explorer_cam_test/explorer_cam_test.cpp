@@ -64,8 +64,10 @@ bool journalGuiFocus(uint32_t* focus) {
     if (focus) *focus = 0;
     return false;   // the rig's boundary gets its focus from ExplorerCamTestFrame, not from here
 }
-// explorerCamFrameBoundary asks the engine for its motion's readiness; the rig's boundary scripts it through ExplorerCamTestFrame instead.
-EngineMotionReady engineMotionReady() { return EngineMotionReady{}; }
+// explorerCamFrameBoundary asks the engine for its motion's readiness; the rig's boundary scripts it through ExplorerCamTestFrame instead. The calls are counted: the
+// wrapper must ask only while the comfort fade can read the answer.
+unsigned g_motionAsked = 0;
+EngineMotionReady engineMotionReady() { ++g_motionAsked; return EngineMotionReady{}; }
 }  // namespace edvr
 
 namespace {
@@ -2660,6 +2662,35 @@ void testConfigPath(const Pages& p) {
     t::setFrameSink(nullptr, nullptr);
     t::reset();
     for (const char* key : {"hotkey.explorer_cam", "fix.explorer_cam_eye_up", "fix.explorer_cam_eye_forward", "fix.explorer_cam_eye_right"}) cfg.set(key, "");
+}
+
+// The frame settings are parsed once per configuration change (Config::generation()), and the engine's motion is asked for only while the comfort fade can read it.
+void testSettingsCacheGlue() {
+    std::printf("glue: the frame settings are read once per configuration change; the engine's motion is not asked for while no fade waits\n");
+    namespace t = edvr::explorercamtest;
+    Config& cfg = Config::get();
+    t::reset();
+    check(t::settingsReads() == 0, "after a reset nothing has been read");
+    g_motionAsked = 0;
+    explorerCamFrameBoundary(1);
+    check(t::settingsReads() == 1, "the first frame reads the settings once");
+    for (uint32_t frame = 2; frame <= 8; ++frame) explorerCamFrameBoundary(frame);
+    check(t::settingsReads() == 1, "SEVEN MORE FRAMES with the configuration untouched read nothing (nine lock/map reads and seven parses a frame before)");
+    cfg.set("fix.explorer_cam_eye_trim_up", "0.31");
+    explorerCamFrameBoundary(9);
+    check(t::settingsReads() == 2 && closeTo(t::followTrimUp(), 0.31f), "a key set: the very next frame re-reads once, and the new trim is the one published (live reload)");
+    explorerCamFrameBoundary(10);
+    explorerCamFrameBoundary(11);
+    check(t::settingsReads() == 2 && closeTo(t::followTrimUp(), 0.31f), "...and the frames after it read nothing again");
+    cfg.set("fix.explorer_cam_follow_smoothing_ms", "25");
+    cfg.set("fix.explorer_cam_eye_trim_forward", "-0.2");
+    explorerCamFrameBoundary(12);
+    check(t::settingsReads() == 3 && t::followSmoothingMs() == 25.0f && closeTo(t::followTrimForward(), -0.2f), "two keys set before one frame: one re-read picks both up");
+    check(g_motionAsked == 0, "eleven idle frames never asked the engine for its motion (no entry or re-attach is fading)");
+    for (const char* key : {"fix.explorer_cam_eye_trim_up", "fix.explorer_cam_follow_smoothing_ms", "fix.explorer_cam_eye_trim_forward"}) cfg.set(key, "");
+    explorerCamFrameBoundary(13);
+    check(t::settingsReads() == 4 && closeTo(t::followTrimUp(), 0.15f) && t::followSmoothingMs() == 0.0f, "keys cleared again: back to the defaults on the next frame");
+    t::reset();
 }
 
 // ToggleFreeCam waits for the suite to be ready (F2: pressed the update after opening, it was lost and the sequence aborted).
@@ -5887,6 +5918,7 @@ void testGlue() {
     testSessionEnds(p);
     testFaults(p);
     testHotkeyClash(p);
+    testSettingsCacheGlue();
     testConfigPath(p);
     namespace t = edvr::explorercamtest;
     t::reset();

@@ -127,6 +127,12 @@ public:
     ComfortKind kind() const { return m_kind; }
     float alpha() const { return m_phase == ComfortPhase::Clear ? 0.0f : comfortSmooth(m_x); }
     bool busy() const { return m_kind != ComfortKind::None || m_phase != ComfortPhase::Clear; }
+    // Can the next step() read the engine's motion inputs (ComfortInputs::motionArmed, viewsRun, skinJobs, skinLive)? Only an entry or a re-attach that is already fading
+    // out or black can fade in on them (an F5 that starts one this step releases nothing yet, and a re-attach starts unplaced); idle, an exit and a fade in never
+    // look at them. The glue asks the engine for them only when this is true: engineMotionReady() takes the engine's mutex.
+    bool wantsMotion() const {
+        return (m_kind == ComfortKind::Enter || m_kind == ComfortKind::Reattach) && (m_phase == ComfortPhase::Out || m_phase == ComfortPhase::Black);
+    }
     void reset() { *this = ComfortTimeline(); }
 
     ComfortStep step(const ComfortInputs& raw) {

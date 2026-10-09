@@ -1534,20 +1534,21 @@ int main(int argc, char** argv) {
     }
     {
         // The code's fallback must be the constant, not a number that happens to match today. The control rewrites each call to a literal that
-        // differs and must be caught.
-        const std::string source = readRepoFile(dir, L"src\\d3d11\\explorer_cam.cpp");
+        // differs and must be caught. The reads are in the settings cache (explorer_cam_settings_core.h), which explorerCamFrameBoundary reads them through once per
+        // configuration change; explorer_cam_fade_test pins that the frame boundary reads none of these keys itself.
+        const std::string source = readRepoFile(dir, L"src\\d3d11\\explorer_cam_settings_core.h");
         struct Read { const char* key; const char* call; const char* expr; };
         const Read reads[] = {
-            {"fix.explorer_cam_eye_trim_up", "getFloat", "ecm::kTrimUpDefault"},
-            {"fix.explorer_cam_eye_trim_forward", "getFloat", "ecm::kTrimForwardDefault"},
-            {"fix.explorer_cam_eye_trim_right", "getFloat", "ecm::kTrimRightDefault"},
-            {"fix.explorer_cam_follow_smoothing_ms", "getInt", "ecm::kSmoothingMsDefault"},
+            {"fix.explorer_cam_eye_trim_up", "getFloat", "kTrimUpDefault"},
+            {"fix.explorer_cam_eye_trim_forward", "getFloat", "kTrimForwardDefault"},
+            {"fix.explorer_cam_eye_trim_right", "getFloat", "kTrimRightDefault"},
+            {"fix.explorer_cam_follow_smoothing_ms", "getInt", "kSmoothingMsDefault"},
         };
         auto usesConstant = [](const std::string& text, const Read& r) {
             return text.find(std::string(r.call) + "(\"" + r.key + "\", " + r.expr + ")") != std::string::npos;
         };
         if (source.empty()) {
-            fail("explorer_cam.cpp is readable from the repo root", "could not read it");
+            fail("explorer_cam_settings_core.h is readable from the repo root", "could not read it");
         } else {
             bool all = true, controlsCaught = true;
             for (const Read& r : reads) {
@@ -1558,8 +1559,8 @@ int main(int argc, char** argv) {
                 if (at != std::string::npos) flipped.replace(at, from.size(), std::string(r.call) + "(\"" + r.key + "\", 0.0f)");
                 controlsCaught = controlsCaught && at != std::string::npos && !usesConstant(flipped, r);
             }
-            if (all) ok("explorer_cam.cpp reads each trim and the smoothing with the code constant as its fallback (the shipped value, not a copy of it)");
-            else fail("explorer_cam.cpp reads each trim and the smoothing with the code constant as its fallback", "a read uses another fallback");
+            if (all) ok("explorer_cam_settings_core.h reads each trim and the smoothing with the code constant as its fallback (the shipped value, not a copy of it)");
+            else fail("explorer_cam_settings_core.h reads each trim and the smoothing with the code constant as its fallback", "a read uses another fallback");
             if (controlsCaught) ok("control: a read rewritten to a literal fallback is caught");
             else fail("control: a read rewritten to a literal fallback is caught", "the rewritten source still passed, or the call was not found");
         }
