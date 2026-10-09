@@ -56,7 +56,7 @@ struct Rng {
 struct Gpu {
     ComPtr<ID3D11Device> dev;
     ComPtr<ID3D11DeviceContext> ctx;
-    ComPtr<ID3D11ComputeShader> join, poseClear, poseRefMark, poseScatter, poseScatterRest, poseVerify, poseFinish;
+    ComPtr<ID3D11ComputeShader> join, joinClear, poseClear, poseRefMark, poseScatter, poseScatterRest, poseVerify, poseFinish;
     ComPtr<ID3D11Buffer> jobs, prevJobs, plan, info[2], joinTable, stats, owner, pose[2], pool, poseCb, instCopy, ranges, refBits, baseState;
     ComPtr<ID3D11ShaderResourceView> jobsSrv, prevJobsSrv, planSrv, infoSrv[2], poseSrv[2], poolSrv, instSrv, rangesSrv;
     ComPtr<ID3D11UnorderedAccessView> joinUav, infoUav[2], statsUav, ownerUav, poseUav[2], refUav, stateUav;
@@ -131,7 +131,7 @@ struct Gpu {
             return false;
         }
         struct { const char* name; ComPtr<ID3D11ComputeShader>* out; } entries[] = {
-            {"join", &join}, {"poseClear", &poseClear}, {"poseRefMark", &poseRefMark}, {"poseScatter", &poseScatter}, {"poseScatterRest", &poseScatterRest},
+            {"join", &join}, {"joinClear", &joinClear}, {"poseClear", &poseClear}, {"poseRefMark", &poseRefMark}, {"poseScatter", &poseScatter}, {"poseScatterRest", &poseScatterRest},
             {"poseVerify", &poseVerify}, {"poseFinish", &poseFinish}};
         for (auto& e : entries) {
             auto code = compile(e.name);
@@ -213,6 +213,10 @@ struct Gpu {
         const uint32_t cur = plan_.parity & 1u, prev = cur ^ 1u;
         ID3D11ShaderResourceView* srvs[5] = {jobsSrv.Get(), prevJobsSrv.Get(), planSrv.Get(), infoSrv[prev].Get(), poseSrv[prev].Get()};
         ID3D11UnorderedAccessView* uavs[4] = {joinUav.Get(), infoUav[cur].Get(), statsUav.Get(), ownerUav.Get()};
+        // the production order (skin_join_gpu.cpp runJoin): the clear pass of kClearGroups groups over all the rows, then the join, on the same views
+        ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
+        ctx->CSSetShader(joinClear.Get(), nullptr, 0);
+        ctx->Dispatch(kClearGroups, 1, 1);
         ctx->CSSetShader(join.Get(), nullptr, 0);
         ctx->CSSetShaderResources(0, 5, srvs);
         ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
@@ -387,6 +391,24 @@ unsigned defineOf(const char* name) {
 }
 void caseNumbers() {
     check(defineOf("SJ_MAX_ROWS") == kMaxRows && defineOf("SJ_MAX_ENTRIES") == kMaxEntries && defineOf("SJ_MAX_JOBS") == kMaxJobs, "G1.a the table limits in the HLSL are the header's");
+    check(defineOf("SJ_CLEAR_GROUPS") == kClearGroups && kClearGroups * 256u * (kMaxRows / (kClearGroups * 256u)) == kMaxRows,
+          "G1.g the clear pass's group count in the HLSL is the header's, and its stride (groups x 256) divides the rows: 64 groups x 256 threads x 4 rows each");
+    // The join kernel no longer clears the tables itself (the pass before it does): a second clear in the kernel would be correct and a performance bug (one group of
+    // 256 threads, 256 dependent iterations, half the join's cost in the F16 flight), so it is held by the kernel's text, not by its results: no whole-table loop in it.
+    {
+        const std::string text = edvr::kSkinJoinCsHlsl;
+        const size_t joinAt = text.find("void join(uint tid : SV_GroupIndex) {"), clearAt = text.find("void joinClear(");
+        const size_t end = text.find("// ---- the pose table ----");
+        const std::string joinBody = joinAt != std::string::npos && end != std::string::npos && end > joinAt ? text.substr(joinAt, end - joinAt) : std::string();
+        const std::string clearBody = clearAt != std::string::npos && joinAt != std::string::npos && joinAt > clearAt ? text.substr(clearAt, joinAt - clearAt) : std::string();
+        check(!joinBody.empty() && joinBody.find("i < SJ_MAX_ROWS") == std::string::npos && joinBody.find("JoinOut[i] = 0u") == std::string::npos &&
+                  joinBody.find("0xFFFFFFFFu);") == std::string::npos,
+              "G1.h the join kernel has no whole-table loop and no clearing store of its own (the join table to 0, the owner table to all ones): its first phase is the clear pass's now");
+        check(!clearBody.empty() && clearBody.find("i < SJ_MAX_ROWS") != std::string::npos && clearBody.find("SJ_CLEAR_GROUPS * 256u") != std::string::npos &&
+                  clearBody.find("JoinOut[i] = 0u") != std::string::npos && clearBody.find("Info.Store2(i * 8u, uint2(0u, 0u))") != std::string::npos &&
+                  clearBody.find("Owner.Store(i * 4u, 0xFFFFFFFFu)") != std::string::npos,
+              "G1.i the clear pass clears every row (to SJ_MAX_ROWS) of all three tables: the join table to 0, the by-base table to 0, the owner table to all ones");
+    }
     check(defineOf("SJ_PLAN_RS") == kPlanRsAt && defineOf("SJ_PLAN_COUNT") == kPlanCountAt && defineOf("SJ_PLAN_PREVIDX") == kPlanPrevIdxAt && defineOf("SJ_PLAN_PREVRS") == kPlanPrevRsAt,
           "G1.b the plan's word offsets in the HLSL are the header's");
     check(defineOf("SJ_PLAN_HISTORY") == kPlanHistory && defineOf("SJ_PLAN_HOOK") == kPlanHook, "G1.c the plan's flags are the header's");
@@ -728,42 +750,51 @@ void caseRandomPose(Pair& p) {
 }
 }  // namespace
 
-// ---- G8: the census probe of the join's 3-table clear (F16: gpu_census.h FrameSkinJoinClearProbe) ---------------------------------
-// The kernel joinClearProbe is the join's phase-0 loop alone. Bound to scratch tables it must leave them in the join's cleared state (JoinOut 0, Info 0, Owner all ones)
-// and touch nothing else: a table the join reads or the pose table, bound to nothing here, keeps what it held.
-void caseClearProbe(Pair& p) {
-    Gpu& g = p.gpu;
-    auto code = g.compile("joinClearProbe");
-    ComPtr<ID3D11ComputeShader> probe;
-    check(code && SUCCEEDED(g.dev->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &probe)), "G8.a the probe kernel compiles and makes a compute shader");
-    if (!probe) return;
-    const std::vector<uint32_t> scratch(kMaxRows * 2, 0xA5A5A5A5u), bystander(kMaxRows * 8, 0x5A5A5A5Au);   // (a row of the pose table is 32 bytes)
-    g.ctx->UpdateSubresource(g.joinTable.Get(), 0, nullptr, scratch.data(), 0, 0);
-    g.ctx->UpdateSubresource(g.info[0].Get(), 0, nullptr, scratch.data(), 0, 0);
-    g.ctx->UpdateSubresource(g.owner.Get(), 0, nullptr, scratch.data(), 0, 0);
-    g.ctx->UpdateSubresource(g.info[1].Get(), 0, nullptr, bystander.data(), 0, 0);
-    g.ctx->UpdateSubresource(g.pose[0].Get(), 0, nullptr, bystander.data(), 0, 0);
-    ID3D11UnorderedAccessView* uavs[4] = {g.joinUav.Get(), g.infoUav[0].Get(), nullptr, g.ownerUav.Get()};
-    g.ctx->CSSetShader(probe.Get(), nullptr, 0);
-    g.ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
-    g.ctx->Dispatch(1, 1, 1);
-    ID3D11UnorderedAccessView* none[4] = {};
-    g.ctx->CSSetUnorderedAccessViews(0, 4, none, nullptr);
-    const auto joinBytes = g.read(g.joinTable.Get(), kMaxRows * 4), infoBytes = g.read(g.info[0].Get(), kMaxRows * 8), ownerBytes = g.read(g.owner.Get(), kMaxRows * 4);
-    const auto otherInfo = g.read(g.info[1].Get(), kMaxRows * 8);
-    const auto words = [](const std::vector<uint8_t>& b, uint32_t want) {
-        if (b.empty()) return false;
-        const uint32_t* w = reinterpret_cast<const uint32_t*>(b.data());
-        for (size_t i = 0; i < b.size() / 4; ++i) if (w[i] != want) return false;
-        return true;
-    };
-    check(words(joinBytes, 0u) && words(infoBytes, 0u) && words(ownerBytes, 0xFFFFFFFFu),
-          "G8.b the probe leaves the three tables as the join's own phase 0 does: the join table 0, the by-base table 0, the owner table all ones, every row");
-    check(words(otherInfo, 0x5A5A5A5Au), "G8.c and a table it was not bound to is untouched");
-    const auto poseBytes = g.read(g.pose[0].Get(), kMaxRows * 32);
-    bool poseSame = !poseBytes.empty();
-    for (size_t i = 0; poseSame && i < poseBytes.size() / 4 && i < kMaxRows * 2; ++i) poseSame = reinterpret_cast<const uint32_t*>(poseBytes.data())[i] == 0x5A5A5A5Au;
-    check(poseSame, "G8.d nor is the pose table");
+// ---- G8: the clear pass (F17: joinClear, 64 groups before the join) ---------------------------------------------------------------------------
+// The join no longer clears its three tables itself; a pass of kClearGroups groups does, every frame, over ALL kMaxRows rows. The rows that matter are the stale ones: a world of
+// sixty big entities fills rows to about 60,000 in the join table, the by-base table and the owner table, then the world shrinks to two. Every row above the new end must read
+// as cleared on the very next frame (the CPU twin clears whole tables each frame, so frame() compares every row), and the owner table must be all ones outside the live bases.
+World bigWorld(unsigned entities) {
+    World w;
+    for (unsigned i = 0; i < entities; ++i) w.push_back(Ent{1000 + i, 0xA11CE, 0, {{500 + i, 1000}}});
+    return w;
+}
+void caseClearPass(Pair& p) {
+    const World big = bigWorld(60), few = bigWorld(2);
+    std::string first;
+    for (unsigned i = 1; i <= 4 && first.empty(); ++i) first = p.frame(build(big, i));
+    check(first.empty(), "G8.a sixty entities of a thousand rows each (rows to about 60,000): the GPU's tables equal the CPU's, every row, for four frames");
+    if (!first.empty()) std::printf("    %s\n", first.c_str());
+    const auto highBefore = p.gpu.read(p.gpu.joinTable.Get(), kMaxRows * 4);
+    unsigned live = 0;
+    for (uint32_t i = 40000; i < kMaxRows; ++i) live += reinterpret_cast<const uint32_t*>(highBefore.data())[i] != 0;
+    check(live > 0, "G8.b (the big world joined something above row 40,000, so the shrink below has stale rows up there to clear)");
+    std::string shrunk;
+    for (unsigned i = 5; i <= 7 && shrunk.empty(); ++i) shrunk = p.frame(build(few, i));
+    check(shrunk.empty(), "G8.c the world shrinks to two entities: for three frames every row of the join table and the by-base table equals the CPU's, which clears whole tables");
+    if (!shrunk.empty()) std::printf("    %s\n", shrunk.c_str());
+    const uint32_t parity = p.cpu.plan.parity;
+    const auto join = p.gpu.read(p.gpu.joinTable.Get(), kMaxRows * 4);
+    const auto info = p.gpu.read(p.gpu.info[parity].Get(), kMaxRows * 8);
+    const auto owner = p.gpu.read(p.gpu.owner.Get(), kMaxRows * 4);
+    const uint32_t* jw = reinterpret_cast<const uint32_t*>(join.data());
+    const uint32_t* iw = reinterpret_cast<const uint32_t*>(info.data());
+    const uint32_t* ow = reinterpret_cast<const uint32_t*>(owner.data());
+    unsigned staleJoin = 0, staleInfo = 0, staleOwner = 0, rowsWithOwner = 0;
+    for (uint32_t i = 2100; i < kMaxRows; ++i) {   // the two entities end at row 2,001
+        staleJoin += jw[i] != 0;
+        staleInfo += iw[2 * i] != 0 || iw[2 * i + 1] != 0;
+        staleOwner += ow[i] != 0xFFFFFFFFu;
+    }
+    for (uint32_t i = 0; i < 2100; ++i) rowsWithOwner += ow[i] != 0xFFFFFFFFu;
+    check(staleJoin == 0 && staleInfo == 0 && staleOwner == 0, "G8.d above the two entities' rows (2,100 up to 65,535) the join table and the by-base table read 0 and the owner table all ones, read straight off the GPU");
+    check(rowsWithOwner == 2, "G8.e and the two live bases hold their owners (the join ran on cleared tables)");
+    // all of it again, the other way: the world grows back, then the two-entity world once more
+    std::string grow;
+    for (unsigned i = 8; i <= 9 && grow.empty(); ++i) grow = p.frame(build(big, i));
+    for (unsigned i = 10; i <= 11 && grow.empty(); ++i) grow = p.frame(build(few, i));
+    check(grow.empty(), "G8.f growing back to sixty entities and shrinking to two again: still equal row for row");
+    if (!grow.empty()) std::printf("    %s\n", grow.c_str());
 }
 
 int main(int argc, char** argv) {
@@ -793,7 +824,12 @@ int main(int argc, char** argv) {
     casePose(posePair);
     caseResolve(posePair);
     caseRandomPose(posePair);
-    caseClearProbe(posePair);
+    static Pair clearPair;
+    if (!clearPair.init()) {
+        std::printf("FAIL: G8.init the GPU rig could not start: %s\n", clearPair.gpu.why.c_str());
+        return 1;
+    }
+    caseClearPass(clearPair);
     if (g_failures) {
         std::printf("FAIL: skin join gpu: %u of %u checks failed\n", g_failures, g_checks);
         return 1;

@@ -32,13 +32,7 @@ struct CpuAt {                                  // the CPU's counters as they st
 struct SkinJoinGpu::Impl {
     // device-bound resources
     ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11ComputeShader> join, poseClear, poseRefMark, poseScatter, poseScatterRest, poseVerify, poseFinish;
-    // F16: the census probe of the join's 3-table clear (gpu_census.h, FrameSkinJoinClearProbe): its kernel, made at create (a failure costs the probe only), and
-    // scratch tables of the join's sizes, made on the probe's first turn. Nothing the join reads or writes is in them.
-    ComPtr<ID3D11ComputeShader> joinClearProbe;
-    ComPtr<ID3D11Buffer> probeJoin, probeInfo, probeOwner;
-    ComPtr<ID3D11UnorderedAccessView> probeJoinUav, probeInfoUav, probeOwnerUav;
-    bool probeFailed = false;
+    ComPtr<ID3D11ComputeShader> join, joinClear, poseClear, poseRefMark, poseScatter, poseScatterRest, poseVerify, poseFinish;
     ComPtr<ID3D11Buffer> jobs, plan, info[2], joinTable, stats, owner, pose[2], poseCb, nullJoin;
     ComPtr<ID3D11Buffer> instCopy, ranges, refBits, baseState;
     ComPtr<ID3D11ShaderResourceView> jobsSrv, planSrv, infoSrv[2], poseSrv[2], joinSrv, nullJoinSrv, instSrv, rangesSrv;
@@ -147,14 +141,13 @@ bool create(SkinJoinGpu::Impl& s, ID3D11Device* dev) {
     const UINT raw = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, structured = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     const UINT srvUav = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
     if (FAILED(dev->CreateComputeShader(kSkinJoinBytecode, sizeof(kSkinJoinBytecode), nullptr, &s.join)) ||
+        FAILED(dev->CreateComputeShader(kSkinJoinClearBytecode, sizeof(kSkinJoinClearBytecode), nullptr, &s.joinClear)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseClearBytecode, sizeof(kSkinPoseClearBytecode), nullptr, &s.poseClear)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseRefMarkBytecode, sizeof(kSkinPoseRefMarkBytecode), nullptr, &s.poseRefMark)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseScatterBytecode, sizeof(kSkinPoseScatterBytecode), nullptr, &s.poseScatter)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseScatterRestBytecode, sizeof(kSkinPoseScatterRestBytecode), nullptr, &s.poseScatterRest)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseVerifyBytecode, sizeof(kSkinPoseVerifyBytecode), nullptr, &s.poseVerify)) ||
         FAILED(dev->CreateComputeShader(kSkinPoseFinishBytecode, sizeof(kSkinPoseFinishBytecode), nullptr, &s.poseFinish))) return false;
-    // (the census probe's kernel: its failure leaves the join whole and the probe off)
-    if (FAILED(dev->CreateComputeShader(kSkinJoinClearProbeBytecode, sizeof(kSkinJoinClearProbeBytecode), nullptr, &s.joinClearProbe))) s.probeFailed = true;
     s.jobs = nullptr;
     s.prevJobs = makeBuffer(dev, kMaxJobs * 16, D3D11_BIND_SHADER_RESOURCE, structured, 16);
     s.frameJobs = makeBuffer(dev, kMaxJobs * 16, D3D11_BIND_SHADER_RESOURCE, structured, 16);
@@ -350,30 +343,6 @@ bool SkinJoinGpu::lastJoinLive() const {
 }
 
 // The join of the pending present frame's dispatches: once, over the union of their job tables.
-// F16: the join's 3-table clear loop alone (the kernel joinClearProbe: the same loop over 65,536 rows of the three tables, one 256-thread group) on scratch tables
-// of the join's own sizes, made on the first turn. Called only inside a timed span of the census's probe section, with the join's compute state saved.
-static void runClearProbe(SkinJoinGpu::Impl& s, ID3D11DeviceContext* ctx) {
-    if (s.probeFailed || !s.joinClearProbe || !s.device) return;
-    if (!s.probeJoinUav) {
-        const UINT raw = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, structured = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        s.probeJoin = makeBuffer(s.device.Get(), kMaxRows * 4, D3D11_BIND_UNORDERED_ACCESS, structured, 4);
-        s.probeInfo = makeBuffer(s.device.Get(), kMaxRows * 8, D3D11_BIND_UNORDERED_ACCESS, raw, 0);
-        s.probeOwner = makeBuffer(s.device.Get(), kMaxRows * 4, D3D11_BIND_UNORDERED_ACCESS, raw, 0);
-        if (s.probeJoin && s.probeInfo && s.probeOwner) {
-            s.probeJoinUav = structuredUav(s.device.Get(), s.probeJoin.Get(), kMaxRows);
-            s.probeInfoUav = rawUav(s.device.Get(), s.probeInfo.Get(), kMaxRows * 2);
-            s.probeOwnerUav = rawUav(s.device.Get(), s.probeOwner.Get(), kMaxRows);
-        }
-        if (!s.probeJoinUav || !s.probeInfoUav || !s.probeOwnerUav) { s.probeJoinUav.Reset(); s.probeFailed = true; return; }
-    }
-    ID3D11UnorderedAccessView* uavs[4] = {s.probeJoinUav.Get(), s.probeInfoUav.Get(), nullptr, s.probeOwnerUav.Get()};
-    ctx->CSSetShader(s.joinClearProbe.Get(), nullptr, 0);
-    ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
-    ctx->Dispatch(1, 1, 1);
-    ID3D11UnorderedAccessView* none[4] = {};
-    ctx->CSSetUnorderedAccessViews(0, 4, none, nullptr);
-}
-
 void SkinJoinGpu::runJoin(ID3D11DeviceContext* ctx) {
     Impl& s = *impl_;
     s.pending = false;
@@ -413,13 +382,22 @@ void SkinJoinGpu::runJoin(ID3D11DeviceContext* ctx) {
     // The pass.
     {
         GpuCensusScope census(ctx, GpuCensusSection::FrameEngineVelocity);
-        GpuCensusScope joinCensus(ctx, GpuCensusSection::FrameSkinJoin);   // (F16: nested in the engine velocity span; priced on the second skin's line)
-        ctx->UpdateSubresource(s.plan.Get(), 0, nullptr, words.data(), 0, 0);
         CsStageSave saved;
         saved.save(ctx);
         const uint32_t cur = s.parity & 1u, prev = cur ^ 1u;
         ID3D11ShaderResourceView* srvs[5] = {s.frameJobsSrv.Get(), s.prevJobsSrv.Get(), s.planSrv.Get(), s.infoSrv[prev].Get(), s.poseSrv[prev].Get()};
         ID3D11UnorderedAccessView* uavs[4] = {s.joinUav.Get(), s.infoUav[cur].Get(), s.statsUav.Get(), s.ownerUav.Get()};
+        {
+            // F17: the join's three tables, ALL kMaxRows rows of them, cleared by a pass of kClearGroups groups of their own, issued on this context right before the join
+            // on the same views: D3D11 orders the two dispatches (the join's owner minima and by-base writes need the cleared tables), and the stale rows of a frame
+            // whose entity or job count shrank read as cleared. (F16 priced the in-kernel clear at 0.015 ms, half the join, one group of 256 threads.)
+            GpuCensusScope clearCensus(ctx, GpuCensusSection::FrameSkinJoinClear);   // (nested in the engine velocity span; priced on the second skin's line)
+            ctx->CSSetShader(s.joinClear.Get(), nullptr, 0);
+            ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
+            ctx->Dispatch(kClearGroups, 1, 1);
+        }
+        GpuCensusScope joinCensus(ctx, GpuCensusSection::FrameSkinJoin);   // (F16: nested in the engine velocity span; priced on the second skin's line)
+        ctx->UpdateSubresource(s.plan.Get(), 0, nullptr, words.data(), 0, 0);
         ctx->CSSetShader(s.join.Get(), nullptr, 0);
         ctx->CSSetShaderResources(0, 5, srvs);
         ctx->CSSetUnorderedAccessViews(0, 4, uavs, nullptr);
@@ -428,9 +406,6 @@ void SkinJoinGpu::runJoin(ID3D11DeviceContext* ctx) {
         ctx->CSSetUnorderedAccessViews(0, 4, none, nullptr);
         ID3D11ShaderResourceView* noSrv[5] = {};
         ctx->CSSetShaderResources(0, 5, noSrv);
-        // F16: the join's 3-table clear loop alone, on scratch tables, on the census section's turn only (gpuCensusBegin is true on no other frame)
-        if (gpuCensusBegin(ctx, GpuCensusSection::FrameSkinJoinClearProbe)) runClearProbe(s, ctx);
-        gpuCensusEnd(ctx, GpuCensusSection::FrameSkinJoinClearProbe);
         saved.restore(ctx);
         // this frame's job table (the union) for the next frame's prefix compare (a boxed copy: a whole number of 16-byte rows)
         const D3D11_BOX box{0, 0, 0, jobs * 16u, 1, 1};
