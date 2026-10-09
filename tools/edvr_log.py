@@ -9525,9 +9525,11 @@ def main(argv=None):
     ap.add_argument("--dir", default=None,
                     help="read this log directory directly, ignoring --target")
     ap.add_argument("--file", default=None, help="read exactly this log file")
-    ap.add_argument("--tag", default="gfx",
+    ap.add_argument("--tag", default=None,
                     help="gfx (d3d11), vr (legacy OpenVR proxy, retired 2026-09-16), "
-                         "openxr (native OpenXR), or all")
+                         "openxr (native OpenXR), or all. Omitted, it is gfx, except "
+                         "for --tally pose, whose lines are in the runtime log (openxr); "
+                         "a tag you name is always the one read")
     ap.add_argument("--nth", type=int, default=0,
                     help="0 is the newest log, 1 the one before it")
     ap.add_argument("--list", action="store_true",
@@ -9660,9 +9662,10 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
-    # The pose-gap lines are written by the runtime, not the graphics half: --tally pose reads its log unless a tag was named.
-    if args.tally == "pose" and args.tag.lower() == "gfx":
-        args.tag = "openxr"
+    # The pose-gap lines are written by the runtime, not the graphics half: --tally pose reads its log when no tag was named. The default is
+    # None rather than "gfx" so that a tag named on the command line, gfx included, is never mistaken for the default and overridden.
+    if args.tag is None:
+        args.tag = "openxr" if args.tally == "pose" else "gfx"
 
     if args.tally == "periodic":
         if not args.file and args.tag.lower() != "gfx":
@@ -10337,8 +10340,59 @@ def self_test_pose():
         if rc != 1 or "no `pose gap:` lines" not in out:
             fail("a log with no pose gap line -> rc %d:\n%s" % (rc, out))
         rc, out = run(["--dir", logs, "--tally", "pose", "--tag", "gfx"])
-        if rc != 1 or "no `pose gap:` lines" not in out:
+        if rc != 1 or "no `pose gap:` lines" not in out or "edvr_gfx_20261009_120001.log" not in out or "edvr_openxr_" in out:
             fail("an explicit --tag gfx reads the graphics log, which has none -> rc %d:\n%s" % (rc, out))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # Which log is read, from what each carries: an older runtime log and a NEWER graphics log, each with a pose row of its own (+0.00 ms and
+    # +123.00 ms), so the file that was read shows in the output twice over, by name and by content. The tag defaults to the runtime log for
+    # --tally pose only when it was omitted; a tag that was named, gfx included, is honoured; --file controls whatever the tag says.
+    tmp = tempfile.mkdtemp(prefix="edvr_pose_selftest_tag_")
+    try:
+        logs = os.path.join(tmp, "edvr_logs")
+        os.makedirs(logs)
+        head = "[00:00:00.001] version 0.18.3-1-gabcdef0 (build 68C0A1F2) -- this DLL was linked 2026-10-09 12:00:00 UTC\n"
+
+        def row(gap):
+            return ("[00:01:00.000] pose gap: tid 24212 calls 120 from exe+0x4E3881 prediction 0.0 ms target-minus-display mean %.2f ms "
+                    "(min %.2f max %.2f) angle-to-drawn mean 0.050 max 0.050 deg head 10.0 deg/s waitgetposes 5400 failed 0\n" % (gap, gap, gap))
+
+        runtime_name, gfx_name = "edvr_openxr_20261009_120000_123_77.log", "edvr_gfx_20261009_120001.log"
+        runtime_path, gfx_path = os.path.join(logs, runtime_name), os.path.join(logs, gfx_name)
+        with open(runtime_path, "wb") as f:
+            f.write((head + row(0.0)).encode("utf-8"))
+        with open(gfx_path, "wb") as f:
+            f.write((head + row(123.0)).encode("utf-8"))
+
+        def run_tag(argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = main(argv)
+            return rc, buf.getvalue()
+
+        def reads(label, argv, name, gap, other_name, other_gap):
+            rc, out = run_tag(argv)
+            read_line = [l for l in out.splitlines() if l.startswith("[edvr] ") and ".log" in l and "lines" in l]
+            if (rc != 0 or len(read_line) != 1 or name not in read_line[0] or other_name in out
+                    or ("is located %+.2f ms from the drawn frame's display time" % gap) not in out
+                    or ("is located %+.2f ms" % other_gap) in out):
+                fail("%s: expected %s at %+.2f ms, not %s at %+.2f ms -> rc %d:\n%s" % (label, name, gap, other_name, other_gap, rc, out))
+
+        reads("--tally pose with no tag reads the runtime log", ["--dir", logs, "--tally", "pose"], runtime_name, 0.0, gfx_name, 123.0)
+        reads("--tally pose --tag gfx reads the graphics log it was told to", ["--dir", logs, "--tally", "pose", "--tag", "gfx"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--tally pose --tag openxr reads the runtime log", ["--dir", logs, "--tally", "pose", "--tag", "openxr"], runtime_name, 0.0, gfx_name, 123.0)
+        reads("--tally pose --tag GFX is the same tag in any case", ["--dir", logs, "--tally", "pose", "--tag", "GFX"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--tally pose --tag all reads the newest log of any tag", ["--dir", logs, "--tally", "pose", "--tag", "all"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--tally pose --nth 0 with no tag still reads the runtime log", ["--dir", logs, "--tally", "pose", "--nth", "0"], runtime_name, 0.0, gfx_name, 123.0)
+        reads("--file controls with no tag", ["--file", gfx_path, "--tally", "pose"], gfx_name, 123.0, runtime_name, 0.0)
+        reads("--file controls over a tag that disagrees", ["--file", runtime_path, "--tally", "pose", "--tag", "gfx"], runtime_name, 0.0, gfx_name, 123.0)
+        # The other tallies keep their default: with no tag the graphics log is read (here, the tally finds nothing in it, which says which one it was).
+        rc, out = run_tag(["--dir", logs, "--tally", "vh"])
+        if gfx_name not in out or runtime_name in out:
+            fail("--tally vh with no tag no longer defaults to the graphics log -> rc %d:\n%s" % (rc, out))
+        rc, out = run_tag(["--dir", logs, "--list"])
+        if gfx_name not in out or runtime_name in out:
+            fail("--list with no tag no longer defaults to the graphics logs -> rc %d:\n%s" % (rc, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return ok
