@@ -1354,8 +1354,8 @@ void enqueueWrite(const WriteJob& job) {
     g_writer.cv.notify_one();
 }
 
-// HELD NUMERIC EDITS (menu_edit_hold.h). A held Left/Right on a Number row steps every 83 ms; each step is shown at once but its write waits here, and a burst of steps
-// is one write, so one config refresh on the frame thread instead of about twelve a second. The writes below go to the same queue as every other change.
+// HELD NUMERIC EDITS (menu_edit_hold.h). A held Left/Right on a Number row steps every 83 ms; each step is shown at once but its write waits here, and the steps of a
+// quarter second are written together, and once more on release: about four config refreshes a second on the frame thread instead of about twelve. The writes below go to the same queue as every other change.
 void writeHeldEdit(void*, const WriteJob& job, EditFlush) { enqueueWrite(job); }
 // The burst reads as one change in the log and on the Status page: from what the file held before its first step to the value of its last.
 void mergeHeldEdit(WriteJob& pending, const WriteJob& latest) {

@@ -6,13 +6,14 @@
 //                mutation tool hands it a temp root holding an edited copy)
 //
 // F16 priced a five-second hold on a numeric row at 100 refreshes of the config on the frame thread (93.4 ms in all, 1.17 ms at the worst, against an 11.1 ms frame).
+// Sean chose (2026-10-09) to write and reload every 250 ms while a number is held, and once on release: about four a second, a preview that moves in quarter-second steps.
 // The rig drives the coalescer the way the menu tick does -- a frame clock, the tracker's edge-and-repeat (400 ms, then every 83 ms), the key state of the last poll --
-// and holds it to: a tap writes once, a long hold writes a bounded few and none of its steps waits longer than the bound, a row or page switch writes first, a close,
+// and holds it to: a tap writes once, a long hold writes about every 250 ms and none of its steps waits longer than that, a row or page switch writes first, a close,
 // a shutdown and any other change flush, nothing is written twice or lost, and a failed write puts the row back. Cases ("H<case>.<what>"; mutants.py names the case
 // that must catch each mutation):
 //   H1  a tap writes once, on release
-//   H2  a long hold writes a bounded few; every step is written within the bound; the last write is the value shown
-//   H3  a key held with no step coming writes after the still time, not before the first repeat
+//   H2  a long hold writes about every 250 ms (about 20 writes in five seconds, not 100, not 3); every step is written within the bound; the last write is the value shown
+//   H3  a key held with no step coming (a row at its limit) is written by the bound, once, and not again while it stays down
 //   H4  a step of another row, a highlight on another row: the first row is written first, in order
 //   H5  a page switch writes
 //   H6  a close and a shutdown write what is held, and nothing when nothing is
@@ -21,7 +22,7 @@
 //   H9  a failed write rolls the row back to what the file holds, and the next burst starts from there
 //   H10 the burst is one change from its first step's old value to its last step's
 //   H11 the glue (menu.cpp) is wired: held steps, flushes, the reload that must not put a held value back, the worker that writes what was queued before a quit (read as text)
-//   H12 the refresh budget: a five-second hold is at most three writes at any frame rate
+//   H12 the refresh budget: a five-second hold is 12 to 22 writes at any frame rate, a third of the old cost or less
 //   H13 the config refresh window line: counts as counted, the closing sentence only for a window with nothing in it; the glue prints it through the formatter (read as text)
 #include <cstdio>
 #include <cstring>
@@ -165,27 +166,28 @@ void caseTap() {
 
 // ---- H2 ---------------------------------------------------------------------------------------------------------------------------
 void caseLongHold() {
-    check(kEditStillMs == 500 && kEditMaxWaitMs == 2000, "H2.z the constants: a pause is 500 ms (longer than the 400 ms before the first repeat), a burst waits 2000 ms for its write at the most");
+    check(kEditMaxWaitMs == 250, "H2.z the constant: a burst waits 250 ms for its write at the most (Sean, 2026-10-09; the first choice was 2000)");
     for (uint32_t dt : {8u, 11u, 16u, 33u}) {
         Sim s;
         s.run(5000, dt, true);
         const uint64_t releaseAt = s.now;
         s.run(4 * dt, dt, false);
         check(s.steps >= 40, labelf("H2.pre a five-second hold makes the steps (%u at %u ms frames)", s.steps, dt));
-        check(s.writes.size() >= 2 && s.writes.size() <= 3, labelf("H2.a a five-second hold writes two or three times, not once a step (%u writes, frame %u ms)", unsigned(s.writes.size()), dt));
+        check(s.writes.size() >= 12 && s.writes.size() <= 22,
+              labelf("H2.a a five-second hold writes about every 250 ms, once more on release: %u writes (a write per step would be 50 or more, one burst for the hold 1 to 3; frame %u ms)", unsigned(s.writes.size()), dt));
         bool bounded = true;
         for (size_t i = 0; i < s.stepAt.size(); ++i) {
             // the first write that carries step i + 1 (a write carries every step up to its job's)
             uint64_t written = UINT64_MAX;
             for (const Write& w : s.writes)
                 if (w.job.step >= i + 1) { written = w.at; break; }
-            bounded = bounded && written != UINT64_MAX && written - s.stepAt[i] <= 2000 + 2 * dt;
+            bounded = bounded && written != UINT64_MAX && written - s.stepAt[i] <= 250 + 2 * dt;
         }
-        check(bounded, labelf("H2.b ...no step waits more than the bound for its write (%u ms), so the live effect of a long hold shows up about every two seconds (frame %u ms)", 2000u, dt));
-        check(!s.writes.empty() && s.writes.front().why == EditFlush::MaxWait && s.writes.front().at - s.stepAt.front() >= 2000 - dt,
+        check(bounded, labelf("H2.b ...no step waits more than the bound for its write (%u ms), so the live effect of a held number moves in quarter-second steps (frame %u ms)", 250u, dt));
+        check(!s.writes.empty() && s.writes.front().why == EditFlush::MaxWait && s.writes.front().at - s.stepAt.front() >= 250 - dt,
               labelf("H2.c ...the first of them is the bound, not an early write (frame %u ms)", dt));
-        check(!s.writes.empty() && s.writes.back().why == EditFlush::Release && s.writes.back().job.value == s.shown && s.writes.back().at <= releaseAt + 2 * dt,
-              labelf("H2.d ...the last is the release, with the value shown (frame %u ms)", dt));
+        check(!s.writes.empty() && s.writes.back().job.value == s.shown && s.writes.back().at <= releaseAt + 2 * dt,
+              labelf("H2.d ...the last carries the value shown, no later than a frame after the key comes up (frame %u ms)", dt));
         unsigned last = 0;
         bool ordered = true;
         for (const Write& w : s.writes) {
@@ -197,24 +199,23 @@ void caseLongHold() {
 }
 
 // ---- H3 ---------------------------------------------------------------------------------------------------------------------------
-void caseStill() {
+// There is no still time: a held edit is written within the bound of its first step whether or not steps keep coming, so a key held with no step coming (a row at its
+// limit) is written promptly by the bound, and a pause long enough to be told from the 83 ms repeat would be longer than the bound anyway.
+void caseNoStepsComing() {
     for (uint32_t dt : {8u, 16u, 33u}) {
         Sim s;
-        s.run(1000, dt, true);   // the first repeat comes at 400 ms: that gap is no pause
-        check(s.writes.empty(), labelf("H3.a the 400 ms before the first repeat is not a pause: nothing written in the first second (frame %u ms)", dt));
-        s.limited = true;        // the row reached its limit: the key stays down, no step comes
-        const uint64_t lastStep = s.stepAt.back();
-        s.run(1200, dt, true);
-        check(s.writes.size() == 1 && s.writes[0].why == EditFlush::Still && s.writes[0].at - lastStep >= 500 && s.writes[0].at - lastStep <= 500 + 2 * dt,
-              labelf("H3.b a key held with no step for the still time writes then (frame %u ms)", dt));
+        s.frame(dt, true);       // the press: the one step
+        s.limited = true;        // the row is at its limit: the key stays down, no step comes
+        s.run(1000, dt, true);
+        check(s.writes.size() == 1 && s.writes[0].why == EditFlush::MaxWait && s.writes[0].at - s.stepAt[0] >= 250 && s.writes[0].at - s.stepAt[0] <= 250 + 2 * dt,
+              labelf("H3.a a key held with no step coming is written by the bound, 250 ms after the step, and once while the key stays down (frame %u ms)", dt));
     }
 }
-
 // ---- H4 ---------------------------------------------------------------------------------------------------------------------------
 void caseRowSwitch() {
     {
         Sim s;
-        s.run(300, 16, true);                 // steps on row 7 (the first at the press)
+        s.run(160, 16, true);                 // the step on row 7 (the first at the press), before the bound
         const int shownA = s.shown;
         s.def = 9;
         s.highlight = 9;
@@ -228,7 +229,7 @@ void caseRowSwitch() {
     }
     {
         Sim s;
-        s.run(300, 16, true);
+        s.run(160, 16, true);
         s.highlight = 3;                       // the highlight moved off the row with the key still down
         s.frame(16, true);
         check(s.writes.size() == 1 && s.writes[0].why == EditFlush::RowSwitch && s.writes[0].job.def == 7, "H4.c a highlight on another row writes the held edit on that tick, key down or not");
@@ -238,7 +239,7 @@ void caseRowSwitch() {
 // ---- H5 ---------------------------------------------------------------------------------------------------------------------------
 void casePageSwitch() {
     Sim s;
-    s.run(300, 16, true);
+    s.run(160, 16, true);
     s.page = 2;
     s.frame(16, true);
     check(s.writes.size() == 1 && s.writes[0].why == EditFlush::PageSwitch, "H5.a another page shown writes the held edit on that tick");
@@ -250,7 +251,7 @@ void casePageSwitch() {
 void caseCloseShutdown() {
     {
         Sim s;
-        s.run(200, 16, true);
+        s.run(160, 16, true);
         const bool wrote = s.held.flush(EditFlush::Close);
         check(wrote && s.writes.size() == 1 && s.writes[0].why == EditFlush::Close && s.writes[0].job.value == s.shown && !s.held.pending(), "H6.a a close writes what is held, with the value shown");
         check(!s.held.flush(EditFlush::Close) && s.writes.size() == 1, "H6.b ...and a close with nothing held writes nothing");
@@ -277,7 +278,7 @@ void caseOther() {
 // ---- H8 ---------------------------------------------------------------------------------------------------------------------------
 void caseNoDouble() {
     Sim s;
-    s.run(300, 16, true);
+    s.run(160, 16, true);
     s.held.flush(EditFlush::Close);
     s.run(500, 16, false);
     s.held.flush(EditFlush::Shutdown);
@@ -289,20 +290,21 @@ void caseNoDouble() {
 // menu.cpp's drainWrites on a failed write: the row is put back to what the file holds (rowValue), and menuNoteConfigReloaded leaves a row with a held edit alone.
 void caseRollback() {
     Sim s;
-    s.run(1000, 16, true);
+    s.run(700, 16, true);    // several steps and several bounds
     s.run(100, 16, false);
-    check(s.writes.size() == 1, "H9.pre a burst of steps was written once");
-    const Write failed = s.writes[0];
-    // The write fails: the file keeps `file`, the row goes back to it.
+    check(s.writes.size() >= 2, "H9.pre a hold of 700 ms was written more than once");
+    const Write failed = s.writes.back();
+    // Every write but the last landed; the last fails: the file keeps what the one before it wrote, and the row goes back to that.
+    s.file = s.writes[s.writes.size() - 2].job.value;
     s.shown = s.file;
-    check(s.shown == 100 && !s.held.pending(), "H9.a the failed write puts the row back to what the file holds, and nothing is held");
-    s.run(0, 16, false);
+    check(s.shown < failed.job.value && !s.held.pending(), "H9.a the failed write puts the row back to what the file holds, and nothing is held");
     s.key = KeyRepeat();
+    const size_t before = s.writes.size();
     s.frame(16, true);
-    check(s.shown == 101 && s.writes.size() == 1, "H9.b the next step starts from the file's value (101, not past the failed burst's)");
+    check(s.shown == s.file + 1 && s.writes.size() == before, "H9.b the next step starts from the file's value, not from the failed burst's");
     s.frame(16, false);
     s.frame(16, false);
-    check(s.writes.size() == 2 && s.writes[1].job.before == 100 && s.writes[1].job.value == 101 && failed.job.value > 101, "H9.c ...and is written as a burst of its own (100 -> 101)");
+    check(s.writes.size() == before + 1 && s.writes.back().job.before == s.file && s.writes.back().job.value == s.file + 1, "H9.c ...and is written as a burst of its own");
 }
 
 // ---- H10 --------------------------------------------------------------------------------------------------------------------------
@@ -310,20 +312,24 @@ void caseMerge() {
     Sim s;
     s.run(1000, 16, true);
     s.run(100, 16, false);
-    check(s.writes.size() == 1 && s.writes[0].job.before == 100 && s.writes[0].job.value == s.shown && s.writes[0].job.value > 105,
-          "H10.a a burst is one change: from the value before its first step to the value of its last (the log and the Status page say 100 -> N once)");
+    bool chained = !s.writes.empty() && s.writes[0].job.before == 100 && s.writes.back().job.value == s.shown;
+    bool multi = false;
+    for (size_t i = 0; i < s.writes.size(); ++i) {
+        if (i) chained = chained && s.writes[i].job.before == s.writes[i - 1].job.value;
+        multi = multi || s.writes[i].job.value - s.writes[i].job.before >= 2;
+    }
+    check(chained && multi, "H10.a a burst is one change: each write goes from the value before its first step to the value of its last, the next from there (the log and the Status page say A -> B once per write)");
 }
-
 // ---- H12 --------------------------------------------------------------------------------------------------------------------------
 void caseBudget() {
     for (uint32_t dt : {6u, 11u, 16u, 25u, 33u}) {
         Sim s;
         s.run(5000, dt, true);
         s.run(3 * dt, dt, false);
-        check(s.steps >= 40 && s.writes.size() <= 3, labelf("H12.a five seconds of hold: %u steps, at most three writes (one refresh each) -- the F16 hold was 100 (frame %u ms)", s.steps, dt));
+        check(s.steps >= 40 && s.writes.size() >= 12 && s.writes.size() <= 22,
+              labelf("H12.a five seconds of hold: %u writes, one refresh each -- the F16 hold was 100 (frame %u ms)", unsigned(s.writes.size()), dt));
     }
 }
-
 // ---- H13 --------------------------------------------------------------------------------------------------------------------------
 void caseLine() {
     char buf[400];
@@ -384,7 +390,7 @@ int main(int argc, char** argv) {
     }
     caseTap();
     caseLongHold();
-    caseStill();
+    caseNoStepsComing();
     caseRowSwitch();
     casePageSwitch();
     caseCloseShutdown();

@@ -2,10 +2,10 @@
 """The mutation proof for tools\\menu_edit_hold_test: the rig fails when a rule of the held numeric edits is broken.
 
 The rig (menu_edit_hold_test.cpp) drives the coalescer of src\\d3d11\\menu_edit_hold.h the way the menu tick does -- a frame clock, the tracker's edge-and-repeat, the key
-state of the last poll -- and holds it to: a tap writes once (H1), a long hold writes a bounded few and none of its steps waits more than the bound (H2), a key held with
-no step coming writes after the still time and not before the first repeat (H3), a row or page switch writes first (H4, H5), a close and a shutdown write what is held
+state of the last poll -- and holds it to: a tap writes once (H1), a long hold writes about every 250 ms (about 20 times in five seconds) and none of its steps waits more than that (H2), a key held with
+no step coming (a row at its limit) is written by the bound, once (H3), a row or page switch writes first (H4, H5), a close and a shutdown write what is held
 (H6), any other change goes behind it (H7), nothing is written twice (H8), a failed write puts the row back (H9), a burst is one change in the log (H10), the glue in
-menu.cpp is wired (H11, read as text), five seconds of hold are at most three writes (H12), and the config refresh window line says what it counted (H13). Every failure
+menu.cpp is wired (H11, read as text), five seconds of hold are 12 to 22 writes (H12), and the config refresh window line says what it counted (H13). Every failure
 carries a label "H<case>.<what>". A rig that passes proves little until it is seen to FAIL on a source that breaks the rule it pins: for each mutation below the machinery
 (tools\\rig_mutants_lib.py) copies the header (or the glue, which the rig reads as text) into a temp directory OUTSIDE the repo, applies the edit, rebuilds or reruns the rig
 against the copy and requires a FAIL on a check of the case that belongs to the rule.
@@ -36,29 +36,25 @@ CONFIG = lib.Config(
     rig_label=":rig_menu_edit_hold_test", rig_source_in_bat="tools\\menu_edit_hold_test\\menu_edit_hold_test.cpp", rig_exe_in_bat="menu_edit_hold_test.exe",
     case_prefix="H", include_dirs=("src/d3d11",), min_mutants=30, run_timeout=120.0, tree_extra=TREE_EXTRA)
 
-STILL = "else if (now - m_lastMs >= kEditStillMs) why = EditFlush::Still;"
-MAXWAIT = "else if (now - m_firstMs >= kEditMaxWaitMs) why = EditFlush::MaxWait;"
+BOUND = "else if (now - m_firstMs >= kEditMaxWaitMs) why = EditFlush::MaxWait;"
 SENTENCE = 'reloads == 0 && edits == 0 ? " No refresh and no menu edit in this window." : ""'
 FORMAT_CALL = "formatConfigRefreshWindow(refreshLine, sizeof(refreshLine), s.frameNo, reloads, reloadMs, reloadMaxMs, edits);"
 
 M = lib.M
 MUTANTS = [
     # ---- the coalescer ----
-    M("tap-waits-for-the-still-time", "H1", "hold", [("else if (!held) why = EditFlush::Release;", "else if (false) why = EditFlush::Release;")],
-      "a key coming up is not a reason to write: a tap waits half a second, and a hold's last steps with it"),
-    M("every-step-written", ("H2", "H12"), "hold", [("        m_lastMs = now;\n    }", "        m_lastMs = now;\n        flush(EditFlush::Other);\n    }")],
+    M("tap-waits-for-the-bound", "H1", "hold", [("else if (!held) why = EditFlush::Release;", "else if (false) why = EditFlush::Release;")],
+      "a key coming up is not a reason to write: a tap waits out the bound, and a hold's last steps with it"),
+    M("every-step-written", ("H2", "H12"), "hold", [("            m_merge(m_job, job);\n        }\n    }", "            m_merge(m_job, job);\n        }\n        flush(EditFlush::Other);\n    }")],
       "no coalescing: every step is written, about twelve a second, as before"),
-    M("no-bound-on-a-hold", ("H2", "H12"), "hold", [(MAXWAIT, "else if (false) why = EditFlush::MaxWait;")],
-      "a long hold writes nothing until it ends: the live effect of the setting never shows while the key is down"),
-    M("bound-counted-from-the-last-step", "H2", "hold", [(MAXWAIT, MAXWAIT.replace("m_firstMs", "m_lastMs"))],
+    M("no-bound-on-a-hold", ("H2", "H3", "H12"), "hold", [(BOUND, "else if (false) why = EditFlush::MaxWait;")],
+      "a long hold writes nothing until it ends, and a key held at a row's limit never: the live effect of the setting does not show while the key is down"),
+    M("bound-restarted-by-every-step", ("H2", "H12"), "hold", [("            m_merge(m_job, job);\n", "            m_merge(m_job, job);\n            m_firstMs = now;\n")],
       "the bound is measured from the last step, which a hold renews every 83 ms: it never comes"),
-    M("bound-doubled", "H2", "hold", [("constexpr uint64_t kEditMaxWaitMs = 2000;", "constexpr uint64_t kEditMaxWaitMs = 4000;")],
-      "a hold's live effect lags four seconds"),
-    M("still-ignored", "H3", "hold", [(STILL, "else if (false) why = EditFlush::Still;")],
-      "a key held at a row's limit, with no step coming, is never written"),
-    M("still-too-short", "H3", "hold", [("constexpr uint64_t kEditStillMs = 500;", "constexpr uint64_t kEditStillMs = 100;")],
-      "the 400 ms before the first repeat is taken for a pause: a hold writes after its first step"),
-    M("row-switch-by-highlight-ignored", "H4", "hold", [("if (m_def != highlightDef) why = EditFlush::RowSwitch;", "if (false) why = EditFlush::RowSwitch;")],
+    M("bound-back-to-two-seconds", ("H2", "H12"), "hold", [("constexpr uint64_t kEditMaxWaitMs = 250;", "constexpr uint64_t kEditMaxWaitMs = 2000;")],
+      "the first choice, 2000 ms: a hold writes three times in five seconds and its live effect lags two seconds"),
+    M("bound-doubled", ("H2", "H12"), "hold", [("constexpr uint64_t kEditMaxWaitMs = 250;", "constexpr uint64_t kEditMaxWaitMs = 500;")],
+      "a hold writes twice a second, not four times: the preview moves in half-second steps"),    M("row-switch-by-highlight-ignored", "H4", "hold", [("if (m_def != highlightDef) why = EditFlush::RowSwitch;", "if (false) why = EditFlush::RowSwitch;")],
       "moving the highlight to another row with the key down leaves the first row's edit held"),
     M("row-switch-by-step-ignored", "H4", "hold", [("        if (m_pending && m_def != def) flush(EditFlush::RowSwitch);\n", "")],
       "a step of another row is folded into the first row's edit: the wrong row is written"),
