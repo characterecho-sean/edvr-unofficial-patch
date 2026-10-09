@@ -1187,12 +1187,6 @@ int main(int argc, char** argv) {
     expectBool("fix.transition_flash", true, "...and another beside it");
     expectStr("hotkey.toggle_exposure", "SCROLLLOCK",
               "a key in the first [hotkey] reads");
-    // The sensitivity pair under [advanced]: users are directed to these by
-    // name in the log, so they stay ACTIVE rather than commented-out.
-    expectFloat("advanced.transition_flash_units", 2000.0f,
-                "the flash threshold reads from [advanced]");
-    expectFloat("advanced.transition_flash_speed_factor", 8.0f,
-                "...and its speed factor");
     // The eye-run depth instrument ships as a commented template like the
     // other developer instruments: the compiled default is what a user gets.
     if (Config::get().getBool("advanced.eye_depth_capture", false) == false &&

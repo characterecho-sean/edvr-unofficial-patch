@@ -2,25 +2,29 @@
 
 ## Status
 
-- **State: the in-engine fix retired 2026-09-29 (code removed, 68bddaaa).**
-  `advanced.transition_flash_prevent` and its module are deleted (see the
-  Status block of the design doc named below). The shipped fix is still the
-  trap below; `fix.transition_flash`, its detector and the other flash keys are
-  untouched.
-- **State (2026-09-23):** the shipped fix is still the trap below: detect the
-  bad frame, resubmit the previous one. An in-engine fix was built and flown
-  the same day (flight 184826). The flight REFUTED the engine chain it hooked;
-  that chain attaches system-scale objects, not the eye. See
-  `docs\design-transition-flash-engine-fix-2026-09-23.md`; read its Status
-  block first.
-- **What the bad frame is:** the eye origin `cb1[275]` collapses to the head
-  pose alone while the objects stay in a frame that is not seat-centred. The
-  ship/seat transform is missing for one frame. The code that composes it is
-  not found yet.
-- **Next:** re-anchor on the render side, with a call stack where the game
-  writes the eye origin's constant buffer.
+- **State (2026-10-09): the flash is fixed in the engine's own frame order.**
+  `fix.transition_flash` (on by default) arms an exact withhold: the camera
+  driver's consume that reads a reset mailbox arms an event, and the one frame
+  drawn from it is held back (the compositor keeps the previous frame) instead
+  of shown. Flight 095137: every transition flown, no flash seen; 12 events, 13
+  frames held, no misses and no false holds, DLSS history kept every time. The
+  old detector described below is only the FALLBACK, used when the game build
+  is not the one EDVR knows or the camera-buffer tap cannot deliver (the log
+  says which, and whether any protection runs). Full story: `docs\design-transition-flash-engine-
+  fix-2026-09-23.md` (read its Status block first).
+- **What the bad frame is:** the HMDCamera (the head camera) is deactivated one
+  frame and re-activated after the camera driver's consume, so the mailbox the
+  driver composes the eyes from is still its reset value; the eye origin
+  `cb1[275]` collapses to the head pose alone for that one frame. Correcting the
+  frame in place was tried and flashed (the bad frame carries at least five
+  other wrong structures); holding it does not.
+- **Cost:** an estimate, not an A/B measurement: the old detector ran every
+  frame even with the fix off; the engine fix is a 64-byte compare per consume
+  and the idle path of the camera-buffer Unmap (shared Map memo, guarded dispatch, one idle
+  test), about 0.1-0.4 ms of render-thread
+  CPU a frame less.
 - **Open:** issue #34 (second and later jumps) was closed on timing and never
-  re-measured; false replacements in smooth forward flight.
+  re-measured on the engine fix.
 - **Ruled out:** listed at the end of the design doc.
 
 *Frontier issue [37825](https://issues.frontierstore.net/issue-detail/37825) —
@@ -154,19 +158,29 @@ game build. It is a reproduction, not a survey.
 
 ## What EDVR does about it
 
-Nothing that should be mistaken for a proper fix. It **detects the bad frame
-while it is still being drawn and hands SteamVR a copy of the previous frame in
-its place** — EDVR keeps a copy of the last frame it actually forwarded, and a
-caught frame becomes an on-time submit of that copy at the current pose. One
-repeated frame, no stall, always the game's own picture; EDVR draws nothing.
+**The shipped fix (since 2026-10-09) holds the one bad frame, exactly.** It does
+not look at the picture. The game's camera driver reads a small matrix before it
+composes the eye views; on the bad frame that matrix is still its reset value,
+and EDVR sees that read, waits for the frame drawn from it (the camera buffer
+for the first eye draw with a head-only eye origin) and withholds it. SteamVR
+shows the previous frame in its place; EDVR tells the temporal pass the camera
+stayed, so its history is kept. One held frame per transition, nothing written
+into the game, no guessing from camera distances.
 
-When no copy is usable — the first frames of a session, or the eye textures
-changing size — it falls back to the old mechanism: declining the submit
+**The rest of this section describes the older DETECTOR**, which is now only the
+fallback when the engine fix cannot arm (an Elite build EDVR does not know). It
+**detects the bad frame while it is still being drawn and hands SteamVR a copy of
+the previous frame in its place** -- EDVR keeps a copy of the last frame it
+actually forwarded, and a caught frame becomes an on-time submit of that copy at
+the current pose. One repeated frame, no stall, always the game's own picture;
+EDVR draws nothing.
+
+When no copy is usable -- the first frames of a session, or the eye textures
+changing size -- it falls back to the old mechanism: declining the submit
 entirely, which SteamVR answers by reprojecting the previous frame itself. That
 fallback costs about 80 ms while the compositor waits for a frame that never
 comes, which was the price of *every* caught frame before 0.7.0 and the source
-of the judder some configurations felt. `transition_flash_resubmit = 0`
-restores it as the only behaviour.
+of the judder some configurations felt.
 
 Detection works by watching the viewpoint the game is drawing from and comparing
 it against a straight-line prediction from the previous two frames. Ordinary
@@ -209,20 +223,20 @@ principle covers, and each is recognised separately:
 - **A repeating jump size** is a fixed gap between two passes — but a jump size
   can also repeat across two *transitions* to the same reset point, so this rule
   only acts after a size has cost three frames inside a minute
-  (`transition_flash_repeat_percent`).
+  (a fixed 2% tolerance).
 - **A recurring distance** is a camera orbiting the view at a fixed radius; a
   camera that *sits* on a distance for a third of a second is the view itself,
   and that distance is never excused — or stops being excused, if it was
-  (`transition_flash_radius_tolerance`, `transition_flash_dwell_frames`).
+  (0.5% radius tolerance, 20 frames).
 - **A recurring landing point** is a parked camera being resampled
-  (`transition_flash_park_units`).
+  (64 world units).
 - **A steadily climbing size, landing near its last landing,** is one camera
-  drifting away from the view (`transition_flash_drift_pct`).
+  drifting away from the view (10%).
 
 Above all of them sits a **burst governor**: more than three caught frames
 inside sixty stands the fix down for two seconds, whatever the cause — the fix
 may never cost more than the thing it hides, including for storm shapes nothing
-above recognises yet (`transition_flash_burst_limit`).
+above recognises yet (three catches in sixty frames).
 
 The counts are reported, split by rule, in a `transition flash so far:` line,
 printed roughly every twenty seconds and only when one of them has moved — so no

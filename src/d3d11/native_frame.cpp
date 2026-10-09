@@ -398,8 +398,10 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
                         sameDevice(state->device, edvr::gameDevice()) ? 1u : 0u;
     result.transitionEnabled = edvr::Config::get().getBool(
         "fix.transition_flash", true) ? 1u : 0u;
-    result.resubmitEnabled = edvr::Config::get().getBool(
-        "advanced.transition_flash_resubmit", true) ? 1u : 0u;
+    // The key that switched the compositor's re-submit of a withheld frame
+    // (advanced.transition_flash_resubmit) is gone; the field stays in the ABI
+    // (native_frame.h) and is always on.
+    result.resubmitEnabled = 1u;
 
     // fix.weapon_stability: while the journal watcher says Status.json
     // reports on foot, the frame wait moves from WaitGetPoses to the second

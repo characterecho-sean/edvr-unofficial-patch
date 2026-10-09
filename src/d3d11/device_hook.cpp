@@ -78,7 +78,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "boundary_tick.h"   // one fault budget per frame-boundary tick
 #include "vscreen.h"
 #include "glitch_frame.h"
-#include "pose_reader_watch.h"
 #include "transition_flash_eye_base.h"
 #include "vscreen_res.h"
 #include "celestial_motion.h"
@@ -3308,7 +3307,6 @@ void shutdownDeviceHooks() {
     revertVScreenModeResolution();
     uiPanelScaleShutdown();  // fix.ui_quality's four operands, back to the game's
     shutdownGlitchFrameFix();
-    poseReaderWatchShutdown();
     transitionFlashEyeBaseShutdown();
     shutdownVScreenFixes();
     shutdownExposureFix();

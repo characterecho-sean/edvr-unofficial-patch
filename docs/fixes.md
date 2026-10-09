@@ -328,9 +328,9 @@ recurring for eight minutes, each withhold felt as judder). A jump that keeps
 recurring at the same size is a distance between render passes, not a
 transition, because real transitions vary as real motion does. So the first
 jump of a size is withheld and matching ones are left alone.
-`transition_flash_repeat_percent` controls this. Raising
-`transition_flash_units` cannot help, because the false jumps are *larger* than
-real ones. Both eyes of a frame follow one verdict, decided at whichever eye
+Raising the jump threshold cannot help, because the false jumps are *larger*
+than real ones. (This detector is now only the fallback when the engine fix
+cannot arm; the tuning keys are gone and it runs on fixed values.) Both eyes of a frame follow one verdict, decided at whichever eye
 submits first. When something changes, a `transition flash so far:` line counts
 withheld and recognised jumps separately; if there is no such line, the fix
 never fired.

@@ -53,7 +53,6 @@
 #include "boundary_tick.h"     // one fault budget per boundary tick
 #include "temporal_pass.h"     // and the temporal pass: warm-up, the camera capture, totals
 #include "glitch_frame.h"
-#include "pose_reader_watch.h"
 #include "transition_flash_eye_base.h"
 #include "holo_fix.h"
 #include "target_sharp.h"
@@ -5665,20 +5664,9 @@ void vScreenRefreshConfig() {
     fssRevealConfigure(cfg);
     fssDumpConfigure(cfg);
     resolveBindConfigure(cfg);
-    // advanced.eye_origin_readers: the engine-side fix design doc's
-    // (docs/design-transition-flash-engine-fix-2026-09-23.md) parts A2/B (who
-    // reads the pose, and the positioner swap). Off leaves this line as
-    // the only thing it does; a non-off value installs its two CodeHooks
-    // the first time this is reached, then only moves the live on/off bit
-    // -- the hardware breakpoint itself arms and disarms on its own
-    // schedule from poseReaderWatchFrameBoundary, not from here.
-    poseReaderWatchConfigure(cfg);
-    // advanced.transition_flash_eye_base: the same design doc's "Static
-    // round 6" (the mailbox consumer, and its own writer watch). Off leaves
-    // this line as the only thing it does; a non-off value installs the
-    // consumer hook the first time this is reached, then only moves the
-    // live mode -- the writer watch arms/re-arms/disarms on its own
-    // schedule from transitionFlashEyeBaseFrameBoundary, not from here.
+    // fix.transition_flash: the engine fix (transition_flash_eye_base.cpp). The
+    // first call installs its consumer hook when the key is on and reports
+    // Armed or Lost to the detector; later calls do nothing.
     transitionFlashEyeBaseConfigure(cfg);
     // The settings menu: its own keys, then the reload's diff -- every row's
     // value, the restart snapshot, and a toast for what changed from outside.
@@ -6811,22 +6799,12 @@ void vScreenFrameBoundary() {
     // The flash detector needs the count for the frame that just ended, to tell
     // a rendered scene from a menu. It has to be told before the counter resets.
     glitchFrameBoundary(sceneDraws);
-    // Publishes the frame number the consumer hook reads (also, possibly, a
-    // scheduler job thread), runs the writer watch's own ship-pointer
-    // stability gate / arms, re-arms or sweeps it, and services one
-    // deferred dump. Deliberately AFTER glitchFrameBoundary, same reason as
-    // poseReaderWatchFrameBoundary below: that call already read this
-    // frame's eye-base snapshot (read-and-reset, transitionFlashEyeBase
-    // FrameSnapshot's own comment) for its own ring entry.
+    // The engine fix's per-frame service: publishes the frame number its
+    // consumer hook reads (that hook can run on a scheduler job thread), logs
+    // a held frame, closes its event window, and owes the temporal pass its
+    // verdict once a held frame's eyes have been handed over. After
+    // glitchFrameBoundary, which closes the same frame.
     transitionFlashEyeBaseFrameBoundary(s->frameNo);
-    // Publishes the frame number the positioner hooks read (also, possibly,
-    // a scheduler job thread) and runs the 60-frame stability gate / arms
-    // or sweeps the hardware breakpoint. Deliberately AFTER glitchFrameBoundary:
-    // that call already read this frame's pose-reader snapshot (read-and-
-    // reset, poseReaderWatchFrameSnapshot's own comment) for its own ring
-    // entry, so the accumulators this call would otherwise finalise are
-    // already clear.
-    poseReaderWatchFrameBoundary(s->frameNo);
     // The gate decides on the counts for the frame that just ended, so it is
     // told before they reset -- same rule as the flash detector above.
     headOffsetGateFrame(s->frameNo, s->panelCompositeDraws, sceneDraws);
@@ -6930,11 +6908,7 @@ void installVScreenFixes(ID3D11Device* device, HookMode mode) {
     fssRevealConfigure(cfg);
     fssDumpConfigure(cfg);
     resolveBindConfigure(cfg);
-    // advanced.eye_origin_readers: the same design doc's parts A2/B. See
-    // the other call site's comment above.
-    poseReaderWatchConfigure(cfg);
-    // advanced.transition_flash_eye_base: the same design doc's "Static
-    // round 6". See the other call site's comment above.
+    // The engine fix. See the other call site's comment above.
     transitionFlashEyeBaseConfigure(cfg);
     {
         g_state->censusFssJump =
