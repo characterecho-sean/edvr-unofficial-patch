@@ -623,7 +623,7 @@ bool dlaaAvailable(ID3D11Device* dev, const char** reason) {
 // ensureFeature walks, answered and logged the same way; nothing is chosen
 // here, and ensureFeature's own walk and selection are untouched.
 bool dlssModeRanges(ID3D11Device* dev, uint32_t outW, uint32_t outH,
-                    DlssModeRange modes[kDlssModeCount]) {
+                    DlssModeRange modes[kDlssModeCount], bool quiet) {
     for (int k = 0; k < kDlssModeCount; ++k) modes[k] = DlssModeRange{};
 #ifndef EDVR_HAVE_NGX
     (void)dev;
@@ -648,7 +648,7 @@ bool dlssModeRanges(ID3D11Device* dev, uint32_t outW, uint32_t outH,
         modes[k].maxW = mxW; modes[k].maxH = mxH;
         modes[k].sharpness = sh;
     }
-    logDlssModesOnce(outW, outH, modes, errCodes);
+    if (!quiet) logDlssModesOnce(outW, outH, modes, errCodes);
     return any;
 #endif
 }
@@ -677,6 +677,13 @@ bool dlaaWarm(ID3D11DeviceContext* ctx, uint32_t w, uint32_t h, bool features,
                       ? static_cast<double>(qpcNow() - t0) * 1000.0 /
                             static_cast<double>(qpcFrequency())
                       : 0.0;
+    }
+    // NVIDIA's ceiling (dlss_floor.h): a size it names no usable range for has no 1:1 feature either -- the 2026-10-09 flight's
+    // 8268x3948 failed its create -- so the warm-up stands aside there, quietly. The first upscaled frame cuts its output to the
+    // ceiling and makes its own feature; the loading frames at this size stand aside too (temporal_pass.cpp).
+    if (ok && features && dev) {
+        DlssModeRange modes[kDlssModeCount];
+        if (!dlssModeRanges(dev, w, h, modes) || !dlssRangesAnswered(modes)) features = false;
     }
     if (dev) dev->Release();
     if (!ok) return false;
