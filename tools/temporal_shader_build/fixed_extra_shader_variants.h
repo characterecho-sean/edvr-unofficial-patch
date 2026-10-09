@@ -2,7 +2,6 @@
 // Build-only registry and independent original call contracts.
 #include "../../src/d3d11/fixed_extra_shader_source.h"
 #include "../../src/d3d11/flat_foreground_ownership.h"
-#include "../../src/d3d11/flat_hdr_luma_shader.h"
 static const D3D_SHADER_MACRO sunNoGate[]={{"NOGATE","1"},{nullptr,nullptr}};
 static const D3D_SHADER_MACRO sunAllWorld[]={{"ALLWORLD","1"},{nullptr,nullptr}};
 static const D3D_SHADER_MACRO sunAllFlat[]={{"ALLFLAT","1"},{nullptr,nullptr}};
@@ -28,8 +27,6 @@ static std::vector<Variant> extraVariants() { return {
     {"kFlatForegroundOwnershipBytecode","flat_foreground_ownership_cs","main",nullptr,{},false,edvr::kFlatForegroundOwnershipCs,"cs_5_0"},
     {"kFlatForegroundMergeBytecode","flat_foreground_merge_cs","main",nullptr,{},false,edvr::kFlatForegroundMergeCs,"cs_5_0"},
     {"kWeaponFootprintBytecode","weapon_footprint_cs","main",nullptr,{},false,edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl,"cs_5_0"},
-    // TEMPORARY: the flat HDR route's luminance census (flat_hdr_luma.h, the 2026-10-09 DLAA dimming entry).
-    {"kFlatHdrLumaBytecode","flat_hdr_luma_cs","main",nullptr,{},false,edvr::kFlatHdrLumaCsHlsl,"cs_5_0"},
 }; }
 static std::vector<LegacyContract> extraLegacyContracts() { return {
     {"backdrop deband","main","cs_5_0",nullptr,0x6D209E9C37D3C19Bull},

@@ -23,8 +23,8 @@
   Defer broad core extraction until flat capture establishes the boundary.
 - **Recommendation:** two installers, one graphics implementation, one temporal
   pipeline, separate VR/mono adapters; flat enables only temporal AA + support.
-- **106 (10-09, NOT FLOWN), TEMPORARY until it closes:** `advanced.flat_dlss_exposure`
-  (auto|fixed) and the `flat hdr luma:` probe (flat_hdr_luma.cpp). A-D open.
+- **106 (10-09):** fixed exposure 1.0 SHIPS on the flat HDR route (flown by eye:
+  brighter, stars back); temporary key and luma probe REMOVED. VR keeps auto.
 - **Open:** station/on-foot projection coverage and mixed-camera HDR ownership,
   corona-smear regression and mod effect ordering. Scene/depth identity, camera
   encoding and handoff have flight evidence; correct motion for every rendered
@@ -14517,4 +14517,27 @@ brings the ratio to about 1; B, peaks-out well below peaks-in on both
 routes and both exposures, ratio near 1; C, the deficit changes with K/J;
 D, peaks-out falls under motion and recovers on a static view, and TAA on
 the same route shows no deficit.
+
+### 2026-10-09: flown (log edvr_gfx_20261009_144917, build 9340ab83); fixed ships
+
+Sean, by eye: with `fixed` the picture is brighter and the stars come back.
+Probe: out/in mean ratio 0.87 with auto, 0.91-0.92 with fixed; K, J and L
+alike; TAA 0.88. The probe's star and peak counters scored fewer stars under
+fixed, against what Sean saw.
+- Confirmed by eye: A, NVIDIA's AutoExposure with no exposure input dimmed
+  the HDR route's output and lost the stars.
+- ruled out: preset dependence, because K, J and L behaved the same.
+- ruled out: the luma probe's star counter as a measure of visible stars,
+  because it scored fewer stars under fixed while the stars visibly returned.
+- Unexplained: TAA's 0.88 ratio. EDVR's TAA has no exposure stage, so the
+  figure points at the probe (its before/after sampling), not at TAA.
+- Shipped (Sean, "remove the key and ship fixed"): the flat HDR route makes
+  NVIDIA's feature with IsHDR and no AutoExposure and evaluates it with a 1x1
+  R32_FLOAT exposure texture of 1.0 and pre-exposure 1
+  (`flatDlssCreateFlags(hdr, flatProfile)`, `flatDlssFixedExposure`). The
+  copy route is unchanged (no IsHDR). The VR world route, the other caller
+  with hdr true, is unchanged: IsHDR | AutoExposure, no exposure texture. The
+  feature-creation line names the exposure mode.
+- Temporary debt closed: `advanced.flat_dlss_exposure` and the
+  `flat hdr luma:` probe (flat_hdr_luma.*, its shader and hooks) are removed.
 

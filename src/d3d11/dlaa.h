@@ -256,9 +256,6 @@ bool dlaaEvaluatePeriphery(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* c
 // under motion L softens least and converges fastest from fresh content,
 // which is what a crop needs; on the full frame the models cost the same.
 void dlaaSetPreset(unsigned preset, unsigned foveaPreset);
-// Temporary A/B (advanced.flat_dlss_exposure): true = the flat HDR route's feature is made without AutoExposure and
-// evaluated with a 1x1 exposure texture of 1.0; false = auto (the shipped flags). A change remakes that feature.
-void dlaaSetHdrExposureFixed(bool fixed);
 
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the

@@ -51,7 +51,6 @@
 #include "exposure_fix.h"
 #include "device_hook.h"
 #include "dlaa.h"
-#include "flat_hdr_luma.h"   // TEMPORARY: the luminance probe of the 2026-10-09 DLAA dimming entry
 #include "flat_sharpen.h"
 #include "flat_ui_layer_math.h"   // fix.ui_quality's flat layer: the target class and family rule its decision asks
 #include "../common/config.h"
@@ -303,7 +302,6 @@ struct State {
     // (NumLock), so the per-class line names what the finish shows raw instead of the backend's result.
     bool motionSourceView = false;
     bool debugKeysRead = false;  // the view's key has been read once (and said once)
-    bool dlssExposureFixed = false;  // advanced.flat_dlss_exposure = fixed (temporary A/B; dlaaSetHdrExposureFixed)
     uint32_t refusalCensusFrames = 0;
     // The camera term's translation precision (design doc section 104): row 275 is the render origin the camera term subtracts
     // frame to frame (cameraBefore, flat_mono_shader_source.h). One 5 s window over the non-reset frames handed to the resolver.
@@ -3272,21 +3270,6 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         Log::get().note("flat runtime: DLSS model=%s preset=%u; applied at frame boundary%s",
             model.c_str(),preset.full,preset.known?"":" (unknown model; using K)");
     }
-    // Temporary A/B (the 2026-10-09 DLAA dimming entry, design doc Status): advanced.flat_dlss_exposure = auto | fixed. fixed makes
-    // the HDR route's NVIDIA feature without AutoExposure and hands it a 1x1 exposure of 1.0; live, the feature is remade on change.
-    const bool dlssExposureFixed = _stricmp(Config::get().getString("advanced.flat_dlss_exposure", "auto").c_str(), "fixed") == 0;
-    if (dlssExposureFixed != s.dlssExposureFixed || firstDebugRead) {
-        const bool changed = dlssExposureFixed != s.dlssExposureFixed;
-        s.dlssExposureFixed = dlssExposureFixed;
-        dlaaSetHdrExposureFixed(dlssExposureFixed);
-        if (changed && temporalEngineFor(mode) == TemporalEngine::Nvidia) {
-            s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
-            reset();s.phase.resetHistory();
-        }
-        Log::get().note("flat runtime: advanced.flat_dlss_exposure=%s at frame=%llu (%s); the HDR route's NVIDIA feature is %s",
-            dlssExposureFixed ? "fixed" : "auto", (unsigned long long)frame, changed ? "changed" : "first read",
-            dlssExposureFixed ? "made without AutoExposure, exposure texture 1.0" : "made with AutoExposure, no exposure texture");
-    }
     if (mode != s.mode) {
         s.haveResolvePlan=false;s.resolvePreflight={};s.resolvePreflightRetryMs=0;
         s.mode = mode; reset();
@@ -5964,11 +5947,7 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         }
     }
     reach("resolve");   // the frame is the resolver's from here
-    // TEMPORARY luminance probe (flat_hdr_luma.h, the 2026-10-09 DLAA dimming entry): H as the backend is handed it, once a second.
-    flatHdrLumaPoll(ctx);
-    const bool lumaSample = flatHdrLumaBegin(ctx, hdrView.Get(), f.renderWidth, f.renderHeight);
     if (!flatMonoResolve(s.device.Get(), ctx, f, &outputView, &s.reason)) {
-        if (lumaSample) flatHdrLumaAbandon();
         const char* temporalReason = s.reason;
         // The backend (or the route's own guard) refused before H was written. Recover the jitter into H, or decline.
         if (recoverHdr(temporalReason, f)) { refuse(s); s.reason = "spatial-fallback"; }
@@ -5976,8 +5955,6 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return;
     }
     s.reason = nonzeroPhase(s) ? "treated-jittered-hdr" : "treated-zero-jitter-hdr";
-    // ... and H again now the resolve has written the backend's output back into it (finishHdr).
-    if (lumaSample) flatHdrLumaEnd(ctx, hdrView.Get(), flatMonoResolveModeName(effectiveMode), s.preset, s.dlssExposureFixed);
     if(protectedOverlay) ++s.overlayIsolatedWindow;
     if(selected.mixedCamera) {
         ++s.untrustedTreated;

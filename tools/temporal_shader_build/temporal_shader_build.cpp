@@ -535,8 +535,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 70 && coreLegacy.size() + 15 == coreFixed.size(),
-          "all original fixed shader contracts, four bounded diagnostics (the fourth the temporary flat HDR luma probe), six flat foreground shaders, the supercruise bars' geometry shader and the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two) are registered");
+    check(originalCore.size() == 30 && originalExtra.size() == 18 && coreFixed.size() == 69 && coreLegacy.size() + 14 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader and the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two) are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -576,9 +576,8 @@ static void selfTest() {
         {"kFlatForegroundOwnershipBytecode","flat_foreground_ownership_cs",edvr::kFlatForegroundOwnershipCs},
         {"kFlatForegroundMergeBytecode","flat_foreground_merge_cs",edvr::kFlatForegroundMergeCs},
         {"kWeaponFootprintBytecode","weapon_footprint_cs",edvr::fixed_extra_source::weapon_footprint::kExtractCsHlsl},
-        {"kFlatHdrLumaBytecode","flat_hdr_luma_cs",edvr::kFlatHdrLumaCsHlsl},
     };
-    for(size_t i=0;i<4;++i) {
+    for(size_t i=0;i<3;++i) {
         auto& diagnostic=coreFixed[coreLegacy.size()+i];
         check(!std::strcmp(diagnostic.symbol,diagnostics[i].symbol) &&
               !std::strcmp(diagnostic.sourceName,diagnostics[i].name) &&
@@ -626,7 +625,7 @@ static void selfTest() {
         {"kFlatNullPoolMarkerPsBytecode","flat null pool marker",edvr::kFlatNullPoolMarkerPs,"ps_5_0"},
     };
     for(size_t i=0;i<5;++i) {
-        auto& shader=coreFixed[coreLegacy.size()+4+i];
+        auto& shader=coreFixed[coreLegacy.size()+3+i];
         check(!std::strcmp(shader.symbol,foreground[i].symbol) &&
               !std::strcmp(shader.sourceName,foreground[i].name) &&
               !std::strcmp(shader.entry,"main") && !std::strcmp(shader.profile,foreground[i].profile) &&
@@ -650,7 +649,7 @@ static void selfTest() {
     // DXBC reflects: a Shader Model 5 geometry shader that takes lines, emits at most six vertices as a triangle strip, and reads one
     // 16-byte constant buffer, Strip at b0 (supercruise_bars_binding.h's StripParams). A change to any of them fails here, in the build.
     {
-        auto& shader = coreFixed[coreLegacy.size() + 10];
+        auto& shader = coreFixed[coreLegacy.size() + 9];
         check(!std::strcmp(shader.symbol, "kSupercruiseBarsGsBytecode") && !std::strcmp(shader.sourceName, "supercruise bars strip") &&
               !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "gs_5_0") && shader.alternate == edvr::kSupercruiseBarsGs &&
               shader.macros == nullptr && !shader.flags1 && !shader.flags2,
@@ -690,7 +689,7 @@ static void selfTest() {
             {"kFlatForegroundShadowEvalBytecode", "flat foreground shadow evaluation", edvr::kFlatForegroundShadowEvalCs, 256},
         };
         for (size_t i = 0; i < 4; ++i) {
-            auto& shader = coreFixed[coreLegacy.size() + 11 + i];
+            auto& shader = coreFixed[coreLegacy.size() + 10 + i];
             check(!std::strcmp(shader.symbol, contracts[i].symbol) && !std::strcmp(shader.sourceName, contracts[i].name) &&
                   !std::strcmp(shader.entry, "main") && !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == contracts[i].source &&
                   shader.macros == nullptr && !shader.flags1 && !shader.flags2,

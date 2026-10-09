@@ -428,3 +428,6 @@ tone-proven 12 of 1040, composites 2, back-offs escalating to 30 s.
   split-hologram fix stays: taking one pair of seven was a defect in its own
   right. Full captures of the loading frame expire on the 256 MiB budget
   after 3 large draws; arm a capture on the hologram pairs instead.
+- 2026-10-09: the HDR-route loading-hologram ghost may share the cause of
+  design-flat-temporal-aa section 106 (NVIDIA's AutoExposure on the HDR
+  route, now fixed exposure 1.0); re-check it on that build.

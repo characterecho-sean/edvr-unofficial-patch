@@ -123,9 +123,6 @@ inline bool runtimeProfileAllowsKey(const char* key) {
         // tier, no flat panel row. The other readers of temporal_aa_debug (the eye pass, screen motion, the UI layer) stay inert in
         // flat: each is gated on a key this function refuses.
         std::strcmp(key, "advanced.temporal_aa_debug") == 0 ||
-        // TEMPORARY A/B (the 2026-10-09 DLAA dimming entry in docs/design-flat-temporal-aa-2026-09-23.md, listed in its Status):
-        // auto | fixed exposure for the HDR route's NVIDIA feature. Developer tier, no flat panel row; removed when the arc closes.
-        std::strcmp(key, "advanced.flat_dlss_exposure") == 0 ||
         // The flat jitter cycle's length (flat_runtime.cpp, FlatLivePhase::phaseCount; temporal_math.h). Developer tier, no flat panel
         // row. Unlisted, getInt answers 0 here whatever the file says, which the reader takes for out of range and reads as 8.
         std::strcmp(key, "advanced.temporal_aa_jitter_phases") == 0);
