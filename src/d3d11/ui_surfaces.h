@@ -38,6 +38,12 @@ void uiSurfacesSetTarget(float target);
 // pool thread.
 void uiSurfacesFrameBoundary();
 
+// The flat profile's OBSERVATION of the same two instruments (flat_ui_census.h): with the key off, the chain and atlas
+// asks answer yes in the flat profile, and the chain line is the census's own ("flat ui census: panel ...", with D, R and
+// Supersampling) -- no patch, no resize, nothing returned to the create but what the game made. Called by the census
+// every 30 s: Supersampling's refresh (a pool thread) and the atlas's write counts.
+void uiSurfacesObserveTick();
+
 // THE CONFIRMATION INSTRUMENT (docs/ui-sizing-owner-2026-09-23.md section 8;
 // ui_sizing_math.h), the record a new game build is re-keyed against. Every
 // render or depth target the game creates in an interface panel's shape --

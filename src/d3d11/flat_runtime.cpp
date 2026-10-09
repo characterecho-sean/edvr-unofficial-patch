@@ -52,6 +52,7 @@
 #include "device_hook.h"
 #include "dlaa.h"
 #include "flat_sharpen.h"
+#include "flat_ui_census.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/runtime_profile.h"
@@ -3656,6 +3657,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
     const auto now = GetTickCount64();
     if (now - s.lastReport >= 5000) {
         reportDrawIngress("progress", false);
+    {   // The interface census (flat_ui_census.h): observation only. s.treated / s.hdrTreated still hold the frame that ended.
+        uint32_t censusRw = 0, censusRh = 0, censusOw = 0, censusOh = 0;
+        flatRuntimeSceneSizes(&censusRw, &censusRh, &censusOw, &censusOh);
+        flatUiCensusFrame(frame + 1, s.work == FlatWork::Paused, d.Width, d.Height, censusRw, censusRh,
+            flatMonoResolveModeName(s.engine), flatCameraInjectUpstreamOwns(), s.hdrTreated, s.treated && !s.hdrTreated);
+    }
         reportMapBounce(frame,now,true);
         reportPhaseCensus(s,"5s");
         if(s.projectionFrames)reportProjection(s,"progress");
@@ -4884,6 +4891,14 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         flatcpu::Scope hdrScope(flatcpu::kHdrRoute);
         if (flatHdrCouldConsume(s.hdr, k)) {
             for (uint32_t slot = 0; slot < 4; ++slot)
+    {   // The interface census (flat_ui_census.h): observation only, before this draw's own resolve work.
+        FlatUiDrawFacts census;
+        census.vs = k.vs; census.ps = k.ps; census.color = k.color; census.output = s.prefix.output;
+        census.width = k.width; census.height = k.height; census.format = k.format; census.hasDepth = k.depth != nullptr;
+        census.tone = tone; census.copy = copy; census.resolved = s.treated || s.hdrTreated;
+        census.jittered = nonzeroPhase(s); census.overlayProtected = overlayPlanned;
+        flatUiCensusDraw(ctx, census);
+    }
                 hdrSrv[slot] = view(static_cast<BindSlot>(static_cast<uint32_t>(BindSlot::PsSrv0) + slot), 2 + slot).resource;
             hdrSrvKnown = true;
         }

@@ -10,7 +10,9 @@
 #include "device_hook.h"      // deviceHookHmdQuality: the .fxcfg's HMD Quality
 #include "ui_panel_scale.h"   // uiPanelScaleLive/Factor: a chain's stage under the engine's sizing
 
+#include "flat_ui_census.h"   // the flat profile's observation of the chain lines: frame, D and R
 #include "../common/log.h"
+#include "../common/runtime_profile.h"
 
 #include <windows.h>
 
@@ -206,12 +208,57 @@ void uiSurfacesSetTarget(float target) {
     g_on.store(target > 0.0f, std::memory_order_release);
 }
 
+namespace {
+// The flat profile watches without the key (the key is off there): see uiSurfacesObserveTick.
+bool observing() { return runtimeFlatProfile() && !g_on.load(std::memory_order_acquire); }
+
+// The census's chain line: one per distinct size and kind, no render-size filter (the flat profile has no native
+// temporal sizes) and none of the VR formulas -- the size the game made, who made it, and what D, R and Supersampling were.
+void noteChainObserve(const D3D11_TEXTURE2D_DESC& d) {
+    const bool depth = (d.BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
+    Lock lock;
+    if (chainFor(d.Width, d.Height, depth)) return;
+    if (g_s.chainCount >= kChainLines) {
+        if (!g_s.chainOverflowNoted) {
+            g_s.chainOverflowNoted = true;
+            Log::get().note("flat ui census: panel sizes: %u sizes logged; further sizes are not logged.", kChainLines);
+        }
+        return;
+    }
+    ChainSeen& c = g_s.chains[g_s.chainCount++];
+    c.w = d.Width;
+    c.h = d.Height;
+    c.depth = depth;
+    c.chain = captureChain();
+    c.verdict = uiChainVerdict(c.chain);
+    uint32_t dw = 0, dh = 0, rw = 0, rh = 0;
+    flatUiCensusSizes(&dw, &dh, &rw, &rh);
+    if (uiSurfacesSupersampling() <= 0.0f) hmdRefreshOffThread();
+    char rvas[160], verdict[320];
+    uiChainFormat(c.chain, rvas, sizeof(rvas));
+    uiChainVerdictText(c.verdict, verdict, sizeof(verdict));
+    Log::get().note(
+        "flat ui census: panel %u: frame %llu, a %ux%u %s surface (DXGI format %u, bind 0x%X), D %ux%u R %ux%u, "
+        "Supersampling %.2f (0 = not read yet), HMD Quality %.2f; %u game frames, innermost first: %s; verdict %s.",
+        g_s.chainCount, static_cast<unsigned long long>(flatUiCensusFrameNo()), d.Width, d.Height,
+        depth ? "depth" : "colour", static_cast<unsigned>(d.Format), d.BindFlags, dw, dh, rw, rh,
+        static_cast<double>(uiSurfacesSupersampling()), static_cast<double>(hmdCached()), c.chain.n,
+        c.chain.n ? rvas : "none", verdict);
+}
+}  // namespace
+
+void uiSurfacesObserveTick() {
+    if (!observing()) return;
+    hmdRefreshOffThread();
+    uiSurfacesLogAtlas();
+}
+
 bool uiSurfacesWantsChain(const D3D11_TEXTURE2D_DESC& d, bool initialData) {
     // The shape an interface panel's colour or depth target has, less the
     // render size (read only past this): single mip, no MSAA, no initial
     // data, and neither side a power of two (atlases, icon caches and
     // shadow maps are) or a sliver.
-    return g_on.load(std::memory_order_acquire) && !initialData && d.ArraySize == 1 &&
+    return (g_on.load(std::memory_order_acquire) || runtimeFlatProfile()) && !initialData && d.ArraySize == 1 &&
            d.SampleDesc.Count == 1 && d.MipLevels <= 1 &&
            (d.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) != 0 && d.Width >= 16 &&
            d.Height >= 16 && (d.Width & (d.Width - 1)) != 0 && (d.Height & (d.Height - 1)) != 0;
@@ -220,6 +267,7 @@ bool uiSurfacesWantsChain(const D3D11_TEXTURE2D_DESC& d, bool initialData) {
 // Inside the game's create: the line for a panel-shaped create of a size and
 // kind not seen yet this session -- a hit and a miss read alike.
 void uiSurfacesNoteChain(const D3D11_TEXTURE2D_DESC& d) {
+    if (observing()) { noteChainObserve(d); return; }
     const Basis b = readBasis();
     // Smaller than the render size on both axes (the eye targets and the
     // 3840x2160 2D screen are not), when the render size is known.
@@ -343,7 +391,7 @@ bool g_uiAtlasWatching = false;
 }
 
 bool uiSurfacesWantsAtlas(const D3D11_TEXTURE2D_DESC& d) {
-    return g_on.load(std::memory_order_acquire) && d.Format == DXGI_FORMAT_A8_UNORM &&
+    return (g_on.load(std::memory_order_acquire) || runtimeFlatProfile()) && d.Format == DXGI_FORMAT_A8_UNORM &&
            (d.Width >= 1024 || d.Height >= 1024);
 }
 
