@@ -2,11 +2,21 @@
 
 ## Status
 
-- **State (2026-10-09, round 6):** the culler's input is **unidentified** and the
-  squares are **temporal** (next bullet). Round 6 is built, **NOT FLOWN**: an
-  always-on pose-gap instrument and the live switch `advanced.cull_pose`. The
-  fov-getter patch (RVA 0x4E2F50) is **WITHDRAWN**; the old guard (h=0.25, v=0)
-  removes about 6% of the squares. Dated entries at the bottom.
+- **State (2026-10-09, flight 3): ROOT CAUSE CONFIRMED, FIX FOUND.** Elite's
+  game thread asks for the head pose "now" (GetDeviceToAbsoluteTrackingPose,
+  return RVA 0x4E3881, prediction ~0 s) and selects terrain with it; the frame is
+  drawn with the display-time pose. Measured on the Crystal Super / Pimax
+  OpenXR, build e256e9bb, `edvr_log.py --tally pose` on
+  `edvr_openxr_20261009_144149_193_26440.log`: under `off` that pose is
+  **-41 to -44 ms** from the drawn frame's display time and turned 0.9 deg mean,
+  up to 4.1 deg, from the drawn pose, r = +0.98 against head speed. Pilot:
+  `display`, `next` and `display_direct` all stopped the squares on gaze
+  switches; one unreproduced possible sighting under `next_direct` (one frame
+  of over-lead, 0.65 deg mean). **Fix: answer that call at the drawn frame's
+  display time (`display`); no engine patch, no extra pixels, no tuning.** The
+  latched-pose bypass is not needed. The old guard (render inflation + crop,
+  ~6% GPU at h=0.25/v=0) was a margin covering this lag. Ruled out: a static
+  frustum deficit (squares need head motion). Dated entries at the bottom.
 - **Pilot report 2026-10-09 (Crystal Super, Pimax OpenXR):** the squares show
   only on descent into a landable planet, come and go with head movement as the
   gaze switches, and fill in quickly once the head is steady. **Ruled out on this
