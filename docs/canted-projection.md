@@ -38,26 +38,32 @@ The 2026-09-12 closure assumed a dropped rotation. The field symptoms fit an
 inverted rotation equally well. The fold experiment and the remap arithmetic
 below still stand.
 
-**Open hypotheses.** *H-inv* (handedness): fix is the runtime returning `S*E*S`,
-no engine patch. *H-drop*: the rotation is lost somewhere the disassembly
-missed (the cull-plane writer and the renderer's tangent extraction were not
-found). **Ruled out:** nothing yet; *What was tried* stands as measured.
+**H-inv CONFIRMED 2026-10-09 by the synthetic-cant flight.** Pimax Crystal
+Super via Pimax OpenXR, EDVR native runtime v0.18.3-90-gbbca39a6, per-eye
+4032x3898, true tangents l=-1.2543 r=+0.8746 t/b=±1.0293, simulated 10° outward
+cant per eye (told l=-0.8828 r=+1.2425 t/b=±1.2358 for the left eye). With
+`canted_eye_fix` on the canted pair fused; off, it split (runtime log
+`edvr_openxr_20261009_115451_577_19872.log`: on 17:54:54, off 17:56:45, on
+17:56:50 UTC; the log shows the left eye located at -10.00° and handed to
+Elite as +10.00° with the fix on, -10.00° with it off). The caller census saw
+`GetEyeToHeadTransform` called from exactly the three disassembled sites
+(exe+0x4E25FE, 0x4E23B2, 0x4E2A5F).
+
+- **Ruled out:** H-drop (the rotation lost somewhere the disassembly missed),
+  because handing Elite `S*E*S` fused the canted pair and the raw matrix split
+  it. The fix needs no engine patch.
 
 **Temporary keys (remove when the arc closes)**, `edvr.ini` `[advanced]`:
 `canted_eye_fix` (default on, live) answers Elite's eye-to-head query with
 `S*E*S`; `simulate_cant` (degrees, 0 off, live) gives a parallel-panel headset
 a synthetic outward cant at the geometry source.
 
-**Next flight**, on a parallel headset (Quest 3 via Virtual Desktop, Pimax
-Crystal Super via Pimax OpenXR): `simulate_cant = 10` from launch, then
-`canted_eye_fix` on, off, on, live.
-
-- A fused, stable world with on and a split with off confirms H-inv.
-- Neither fusing means H-drop.
-- EDVR's temporal AA artifacts under the cant are a separate observation, not
-  the verdict.
-- Then a real 8KX flight with parallel projection off.
-- The same flight also carries the cull probe (`terrain-culling.md`).
+**Next:** a real canted flight (Pimax 8KX, parallel projection OFF in the
+Pimax software) on this build. It shows whether the vendor runtime hands EDVR
+canted views and whether the pixel saving measured below arrives. After that,
+close the arc: ship `S*E*S` as the behaviour with no key, and propose removing
+both temporary keys (quoted, asked first). Open side question: EDVR's temporal
+AA and FSS under a real cant (FSS guards itself off on canted panels).
 
 ## What OpenVR says about a canted headset
 
