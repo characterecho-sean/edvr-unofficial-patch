@@ -36,6 +36,8 @@
     13:23 and 13:51 (`result=ok refs=0`).
 - **Ruled-out pointer:** the 2026-10-09 entries below; VR's retired deferred
   UI replay ([crisp-ui-handoff.md](crisp-ui-handoff.md)).
+- **0.19.0 review (10-09), finding 3:** the Supersampling setter's panel factor is
+  held until the scene's size follows it (last entry; built, not flown).
 - **Temporary config keys:** none.
 - **Next:** fly SS 0.5 on the shipped build (the copy route under eced5813's
   admission change) and 100% at SS 1.0.
@@ -431,3 +433,23 @@ tone-proven 12 of 1040, composites 2, back-offs escalating to 30 s.
 - 2026-10-09: the HDR-route loading-hologram ghost may share the cause of
   design-flat-temporal-aa section 106 (NVIDIA's AutoExposure on the HDR
   route, now fixed exposure 1.0); re-check it on that build.
+
+## 2026-10-09: the setter's panel factor is held until the scene follows it (0.19.0 review, finding 3; built, not flown)
+
+The release review found (still present on b259e6bf) that `flatFrameBoundary` made its plan from the last published scene size. The game's Supersampling setter writes
+the new factor first (`moveFactorTo`, through `uiFlatPanelMove`), and a boundary that ran after the last old-size copy and before the new size's wrote the settled
+old plan back over it: 3840x2160, UI 125, Supersampling 1.0 -> 0.5 was 0.800, setter 0.400, boundary 0.800, and the new size's plan then waited the 11-boundary settle
+for the right factor. The review's scratch check shows the reversed factor; it did not show a mis-sized panel (that needs a panel created in the interval).
+- Fix: the decision after the refusal check moved into `UiFlatPanelSettle` (ui_sizing_math.h). The setter thunk records a count and the scene's size when it moves a
+  flat factor. The boundary holds that factor, writing and publishing nothing, until the scene's size differs from the recorded one, then accepts the new size's plan
+  at once, without settling, and writes it only if it is not the factor already there. A second setter restarts the wait. A size that never follows ends the hold
+  after `kUiPanelTransitionFrames` = 120 boundaries (a guess; nothing measured says how long Elite takes) and the plan for the size there stands. A refused frame
+  restarts the settle and leaves the hold; the key off and the anti-aliasing off forget it. Plain resizes settle as before.
+- Log: "the scene is now WxH, N boundary(ies) after the game's Supersampling setter moved the factor ... accepted without settling" and "the scene stayed WxH for N
+  boundaries ... the plan for that size stands"; the flat 30 s line counts the boundaries held and the waits that followed or gave up. Absent means the setter never
+  ran in a flat session.
+- Tests: ui_quality_test `flatsettle` (ui_flat_panel_settle_test.h): the review's case, setter before the copy, unchanged dimensions, a setter that moves nothing, rapid
+  changes (before the first copy, after it, between its copy and its boundary), the cap and the floor, refused frames, the key off, and source pins on the glue with
+  controls. Fifteen one-edit mutants of the class and the glue, run by hand against the rig, are each caught (hold ignored, epoch ignored, arrival through the settle,
+  arrival unsettled, no timeout, timeout off by one, no restart, hold publishes, forget keeps the hold, keep tolerance zero, refused frame does not unsettle, arrival
+  ignores the size, and three glue edits).

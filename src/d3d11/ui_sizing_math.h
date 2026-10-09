@@ -418,6 +418,94 @@ inline bool uiFlatPanelMove(double formula, double base, float ssFrom, float ssT
     uiPanelSolve(formula * r, base * r, UiPanelBase::kScene, 1.0f, out);
     return true;
 }
+// The flat frame boundary's decision about the plan it just made (ui_panel_scale.cpp's flatFrameBoundary; the 0.19.0 release review, finding 3).
+//
+// A plan is written only once the inputs have held it for kUiPanelSettleFrames boundaries (the two runs of one view change read one factor). The game's Supersampling
+// setter is the exception: it writes the NEW factor (uiFlatPanelMove) before the game reconfigures, and the scene's size follows later. Until it does, the plan the
+// boundary makes is still the OLD size's, which, settled long ago, would have been written straight back over the setter's factor -- and the panels the reconfigure makes in
+// between would be sized for the render the game is leaving -- and the new size's plan, once it arrived, would then wait the whole settle again for the right one. So a
+// factor the setter wrote is HELD (nothing is written, nothing is published) until the scene's size differs from the size it had when the setter ran; the new size's plan is
+// then accepted at once, without settling through the old value, and written if it is not the factor already there. A size that never follows (the setter moved a value that
+// leaves the render as it was) ends the hold after kUiPanelTransitionFrames boundaries, and the plan from the size there is stands.
+constexpr uint32_t kUiPanelSettleFrames = 10;      // the inputs steady this long before a write
+constexpr uint32_t kUiPanelTransitionFrames = 120; // the longest a setter's factor is held for the scene's size to follow
+class UiFlatPanelSettle {
+public:
+    enum class Act : uint8_t {
+        kWait,    // the plan has not held long enough: nothing written, nothing published
+        kHold,    // a setter's factor stands until the scene's size follows: nothing written, nothing published
+        kKeep,    // settled and published; the factor already there is the plan's (within 0.1%)
+        kWrite    // settled and published; write the plan
+    };
+    struct Step {
+        Act act = Act::kWait;
+        bool publish = false;     // the plan is settled: publish it for the setter thunk (the believable-live-value rule is the caller's)
+        bool arrived = false;     // this boundary saw the scene's size follow a setter: the plan was accepted without settling
+        bool timedOut = false;    // this boundary gave up waiting for it
+        uint32_t waited = 0;      // boundaries a held factor waited (on arrived or timedOut)
+    };
+    // `planF` this boundary's plan; `live` a factor has been written; `floatsF` the factor in the floats now (the setter may have moved it); `epoch` the number of
+    // factor moves the setter has made and `atW`/`atH` the scene's size when the last one ran; `nowW`/`nowH` the scene's size now.
+    Step step(double planF, bool live, double floatsF, uint32_t epoch, uint32_t atW, uint32_t atH, uint32_t nowW, uint32_t nowH) {
+        Step r;
+        if (epoch != seenEpoch_) {   // the setter moved the factor since the last boundary (again, if one was held already: the wait starts over)
+            seenEpoch_ = epoch;
+            holding_ = true;
+            atW_ = atW;
+            atH_ = atH;
+            waited_ = 0;
+        }
+        if (holding_) {
+            if (nowW != atW_ || nowH != atH_) {
+                holding_ = false;
+                r.arrived = true;
+                r.waited = waited_;
+            } else if (++waited_ <= kUiPanelTransitionFrames) {
+                r.act = Act::kHold;
+                return r;
+            } else {
+                holding_ = false;
+                r.timedOut = true;
+                r.waited = waited_ - 1;
+            }
+        }
+        if (r.arrived) {
+            pending_ = planF;
+            settle_ = kUiPanelSettleFrames;
+        } else {
+            if (std::fabs(planF - pending_) > 1e-6) {
+                pending_ = planF;
+                settle_ = 0;
+                r.act = Act::kWait;
+                return r;
+            }
+            if (++settle_ < kUiPanelSettleFrames) {
+                r.act = Act::kWait;
+                return r;
+            }
+        }
+        r.publish = true;
+        r.act = (live && std::fabs(planF / floatsF - 1.0) <= 0.001) ? Act::kKeep : Act::kWrite;
+        return r;
+    }
+    // A frame with no plan (a loading screen, a 512x512 preview): the settle starts over, the held factor stays.
+    void unsettle() { settle_ = 0; }
+    // The key off, or the anti-aliasing: the game's own sizes, and nothing held or half-settled.
+    void forget() {
+        pending_ = -1.0;
+        settle_ = 0;
+        holding_ = false;
+    }
+    bool holding() const { return holding_; }
+
+private:
+    double pending_ = -1.0;
+    uint32_t settle_ = 0;
+    uint32_t seenEpoch_ = 0;
+    bool holding_ = false;
+    uint32_t atW_ = 0, atH_ = 0, waited_ = 0;
+};
+
 // The panel the game makes from a stage on the height axis: trunc(stage x (R_h / 1080 x f)), its own arithmetic.
 inline uint32_t uiFlatPanelSizeHeightAxis(uint32_t stage, uint32_t renderH, float divisor1080) {
     if (!(divisor1080 > 0.0f)) return 0;
