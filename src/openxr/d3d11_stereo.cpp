@@ -318,29 +318,34 @@ XrResult D3D11Stereo::renderCaptured(const XrView (&views)[2],XrSpace space,cons
     }
     // Runtime calls may change state even on our device; bind the full pass.
     drawContext->ClearState();
-    drawContext->OMSetBlendState(nullptr,nullptr,~0u);drawContext->OMSetDepthStencilState(depth_.Get(),0);
-    drawContext->RSSetState(rasterizer_.Get());
-    drawContext->IASetInputLayout(nullptr);drawContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    drawContext->VSSetShader(blitVertexShader_.Get(),nullptr,0);drawContext->PSSetShader(blitPixelShader_.Get(),nullptr,0);
-    drawContext->PSSetSamplers(0,1,blitSampler_.GetAddressOf());
-    drawContext->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
-    // This scene shader writes every pixel with no discard. Partial rendering
-    // still clears its target where coverage requires it.
-    auto* rtv=eyes_[i].rtvs[index].Get();drawContext->OMSetRenderTargets(1,&rtv,nullptr);
-    if(clearFirst[i]){const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);}
-    drawContext->RSSetViewports(1,&viewports[i]);
-    drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
-    drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
+    auto* rtv=eyes_[i].rtvs[index].Get();
     if(fade>=1.f) {
-      // Black: the whole image, not just the placed part.
+      // FULLY BLACK (this is EDVR's native OpenXR runtime only: nothing of the game's own VR path runs through here). The whole image is black, so the captured eye is
+      // not bound or sampled, no constants are uploaded and no triangle is drawn: the image is cleared and that is all. The capture was consumed above (validated, its
+      // view taken), the swapchain image is acquired, waited on and released around this, and the GPU work is submitted and observed as for any frame.
       const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);
-    } else if(fade>0.f) {
-      // The same triangle again under the fade blend: the source is multiplied by zero, so what it samples does not matter, and the destination keeps 1-fade.
-      const float factor[4]={fade,fade,fade,fade};
-      drawContext->OMSetBlendState(fadeBlend_.Get(),factor,~0u);drawContext->Draw(3,0);
-      drawContext->OMSetBlendState(nullptr,nullptr,~0u);
+    } else {
+      drawContext->OMSetBlendState(nullptr,nullptr,~0u);drawContext->OMSetDepthStencilState(depth_.Get(),0);
+      drawContext->RSSetState(rasterizer_.Get());
+      drawContext->IASetInputLayout(nullptr);drawContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      drawContext->VSSetShader(blitVertexShader_.Get(),nullptr,0);drawContext->PSSetShader(blitPixelShader_.Get(),nullptr,0);
+      drawContext->PSSetSamplers(0,1,blitSampler_.GetAddressOf());
+      drawContext->PSSetConstantBuffers(0,1,blitConstants_.GetAddressOf());
+      // This scene shader writes every pixel with no discard. Partial rendering
+      // still clears its target where coverage requires it.
+      drawContext->OMSetRenderTargets(1,&rtv,nullptr);
+      if(clearFirst[i]){const float black[]={0,0,0,1};drawContext->ClearRenderTargetView(rtv,black);}
+      drawContext->RSSetViewports(1,&viewports[i]);
+      drawContext->PSSetShaderResources(0,1,srvs[i].GetAddressOf());
+      drawContext->UpdateSubresource(blitConstants_.Get(),0,nullptr,&constants[i],0,0);drawContext->Draw(3,0);
+      if(fade>0.f) {
+        // The same triangle again under the fade blend: the source is multiplied by zero, so what it samples does not matter, and the destination keeps 1-fade.
+        const float factor[4]={fade,fade,fade,fade};
+        drawContext->OMSetBlendState(fadeBlend_.Get(),factor,~0u);drawContext->Draw(3,0);
+        drawContext->OMSetBlendState(nullptr,nullptr,~0u);
+      }
+      ID3D11ShaderResourceView* nullSrv=nullptr;drawContext->PSSetShaderResources(0,1,&nullSrv);
     }
-    ID3D11ShaderResourceView* nullSrv=nullptr;drawContext->PSSetShaderResources(0,1,&nullSrv);
     drawContext->OMSetRenderTargets(0,nullptr,nullptr);
     if(ownedImmediateScene_) {
       if(observer)observer->endGpuWork(2u+i,drawContext);
@@ -383,7 +388,8 @@ XrResult D3D11Stereo::renderSkybox(const XrView (&views)[2], XrSpace space,
     if(td.Format==DXGI_FORMAT_B8G8R8A8_TYPELESS)f=gamma?DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:DXGI_FORMAT_B8G8R8A8_UNORM;
     if(f==DXGI_FORMAT_UNKNOWN)return XR_ERROR_VALIDATION_FAILURE;
     D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=f;sd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;sd.Texture2D.MipLevels=1;
-    if(FAILED(device_->CreateShaderResourceView(texture,&sd,&faces[i])))return XR_ERROR_RUNTIME_FAILURE;
+    // Fully black (below): the faces are validated above, and nothing samples them, so no view of them is made.
+    if(fade<1.f&&FAILED(device_->CreateShaderResourceView(texture,&sd,&faces[i])))return XR_ERROR_RUNTIME_FAILURE;
   }
   SkyConstants constants[2]{};
   for(unsigned eye=0;eye<2;++eye) {
@@ -410,28 +416,33 @@ XrResult D3D11Stereo::renderSkybox(const XrView (&views)[2], XrSpace space,
     r=dispatch_.waitSwapchainImage(e.swapchain,&wi);
     if(r!=XR_SUCCESS)return failed(r); // timeout does not permit drawing/release
     context_->ClearState();
-    context_->VSSetShader(skyboxVertexShader_.Get(),nullptr,0);
-    context_->PSSetShader(skyboxPixelShader_.Get(),nullptr,0);
-    context_->PSSetSamplers(0,1,skyboxSampler_.GetAddressOf());
-    context_->PSSetConstantBuffers(0,1,skyboxConstants_.GetAddressOf());
-    context_->IASetInputLayout(nullptr);
-    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context_->RSSetState(rasterizer_.Get());
-    context_->OMSetBlendState(nullptr,nullptr,~0u);
-    context_->OMSetDepthStencilState(depth_.Get(),0);
-    auto* rtv=e.rtvs[index].Get();context_->OMSetRenderTargets(1,&rtv,nullptr);
-    D3D11_VIEWPORT viewport{0,0,float(e.width),float(e.height),0,1};context_->RSSetViewports(1,&viewport);
-    context_->PSSetShaderResources(0,6,faceRaw);
-    context_->UpdateSubresource(skyboxConstants_.Get(),0,nullptr,&constants[eye],0,0);
-    context_->Draw(3,0);
+    auto* rtv=e.rtvs[index].Get();
     if(fade>=1.f) {
+      // FULLY BLACK (EDVR's native OpenXR runtime only): no faces bound or sampled, no constants uploaded, no triangle drawn; the image is cleared. The swapchain image
+      // is acquired, waited on and released around this, and the commands are submitted, as for any frame.
       const float black[]={0,0,0,1};context_->ClearRenderTargetView(rtv,black);
-    } else if(fade>0.f) {
-      const float factor[4]={fade,fade,fade,fade};
-      context_->OMSetBlendState(fadeBlend_.Get(),factor,~0u);context_->Draw(3,0);
+    } else {
+      context_->VSSetShader(skyboxVertexShader_.Get(),nullptr,0);
+      context_->PSSetShader(skyboxPixelShader_.Get(),nullptr,0);
+      context_->PSSetSamplers(0,1,skyboxSampler_.GetAddressOf());
+      context_->PSSetConstantBuffers(0,1,skyboxConstants_.GetAddressOf());
+      context_->IASetInputLayout(nullptr);
+      context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      context_->RSSetState(rasterizer_.Get());
       context_->OMSetBlendState(nullptr,nullptr,~0u);
+      context_->OMSetDepthStencilState(depth_.Get(),0);
+      context_->OMSetRenderTargets(1,&rtv,nullptr);
+      D3D11_VIEWPORT viewport{0,0,float(e.width),float(e.height),0,1};context_->RSSetViewports(1,&viewport);
+      context_->PSSetShaderResources(0,6,faceRaw);
+      context_->UpdateSubresource(skyboxConstants_.Get(),0,nullptr,&constants[eye],0,0);
+      context_->Draw(3,0);
+      if(fade>0.f) {
+        const float factor[4]={fade,fade,fade,fade};
+        context_->OMSetBlendState(fadeBlend_.Get(),factor,~0u);context_->Draw(3,0);
+        context_->OMSetBlendState(nullptr,nullptr,~0u);
+      }
+      ID3D11ShaderResourceView* nulls[6]{};context_->PSSetShaderResources(0,6,nulls);
     }
-    ID3D11ShaderResourceView* nulls[6]{};context_->PSSetShaderResources(0,6,nulls);
     context_->OMSetRenderTargets(0,nullptr,nullptr);
     r=submitCommands();if(r!=XR_SUCCESS)return failed(r);
     if(FAILED(device_->GetDeviceRemovedReason()))return failed(XR_ERROR_GRAPHICS_DEVICE_INVALID);

@@ -2309,6 +2309,9 @@ for %%T in (native stereo) do (
     "%BUILD%\openxr_%%T_test.exe" --dry-run || exit /b 1
     "%BUILD%\openxr_%%T_test.exe" --self-test || exit /b 1
 )
+REM tools\openxr_stereo_test\mutants.py --self-test holds the mutation list to d3d11_stereo.cpp as it is (a fully black frame draws nothing: case B1); --run builds the
+REM rig against each edit.
+python "tools\openxr_stereo_test\mutants.py" --self-test || exit /b 1
 exit /b 0
 
 :rig_openxr_capture_test

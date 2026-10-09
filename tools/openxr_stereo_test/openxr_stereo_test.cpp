@@ -10,6 +10,8 @@
 #include <cmath>
 #include <limits>
 #include <thread>
+#include <chrono>
+#include <functional>
 #include <algorithm>
 #include <d3dcompiler.h>
 #include "../../src/openxr/stereo_shader_source.h"
@@ -444,6 +446,101 @@ void fadeSelfTest(bool owned) {
   }
 }
 
+// ---- B1: a fully black frame does no scene work -------------------------------------------------------------------------------------------------------------------
+// The pixels cannot tell a clear-only pass from one that drew the scene and cleared over it (fadeSelfTest checks them and both pass), so the work is counted: a
+// pipeline-statistics query on the device's immediate context around the render call sees the vertex and pixel shader invocations of everything executed in it,
+// the deferred command list's included. A fade of 1 or more is a clear and nothing else; every other level is drawn as it was (one triangle an eye, two under a
+// fractional fade). The per-frame accounting must not notice: the runtime calls, the observer's begin/end per eye, the layer, and a clean shutdown with the GPU done.
+struct PassWork {bool ok=false;UINT64 vs=0,ps=0,primitives=0;};
+PassWork measurePass(Fixture& f,const std::function<void()>& render) {
+  PassWork w;D3D11_QUERY_DESC qd{D3D11_QUERY_PIPELINE_STATISTICS,0};ComPtr<ID3D11Query> q;
+  if(FAILED(f.runtime.device->CreateQuery(&qd,&q))){render();return w;}
+  f.runtime.context->Begin(q.Get());render();f.runtime.context->End(q.Get());
+  D3D11_QUERY_DATA_PIPELINE_STATISTICS d{};
+  for(unsigned spin=0;spin<5000;++spin) {
+    f.runtime.context->Flush();
+    if(f.runtime.context->GetData(q.Get(),&d,sizeof(d),0)==S_OK){w.ok=true;w.vs=d.VSInvocations;w.ps=d.PSInvocations;w.primitives=d.IAPrimitives;break;}
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return w;
+}
+struct Accounting {
+  std::vector<std::string> trace;std::vector<RecordingObserver::Event> events;uint32_t viewCount=0;
+  bool operator==(const Accounting& o) const {
+    if(trace!=o.trace||viewCount!=o.viewCount||events.size()!=o.events.size())return false;
+    for(size_t i=0;i<events.size();++i)if(events[i].phase!=o.events[i].phase||events[i].begin!=o.events[i].begin||events[i].context!=o.events[i].context)return false;
+    return true;
+  }
+};
+void blackPassSelfTest(bool owned) {
+  const char* mode=owned?"owned immediate":"deferred";
+  char what[200];
+  for(bool unorm:{false,true}) {
+    Fixture f;f.runtime.unorm=unorm;check(f.init(owned)==XR_SUCCESS,"black pass initialize");
+    EyeCapture capture;check(SUCCEEDED(capture.initialize(f.runtime.device.Get())),"black pass capture owner");
+    auto source=pattern(f,false);const vr::Texture_t texture{source.Get(),vr::API_DirectX,vr::ColorSpace_Auto};
+    check(capture.capture(vr::Eye_Left,&texture)==vr::VRCompositorError_None&&capture.capture(vr::Eye_Right,&texture)==vr::VRCompositorError_None,"black pass capture");
+    SkyboxCapture sky;captureSky(f,sky);
+    RecordingObserver observer;
+    struct Run {PassWork work;Accounting accounting;bool black=true;};
+    const auto allBlack=[&](unsigned image){
+      bool black=true;for(unsigned eye=0;eye<2;++eye)for(unsigned y:{0u,64u,127u})for(unsigned x:{0u,64u,127u})black=black&&f.pixel(eye,image,x,y)==0xff000000u;
+      return black;
+    };
+    const auto captured=[&](float fade) {
+      Run run;XrCompositionLayerProjection layer{};observer.events.clear();f.runtime.trace.clear();const unsigned image=f.runtime.eyes[0].calls%2;
+      run.work=measurePass(f,[&]{check(f.renderer.renderCaptured(f.views,space,capture,layer,&observer,nullptr,nullptr,fade)==XR_SUCCESS,"B1 captured render");});
+      run.accounting={f.runtime.trace,observer.events,layer.viewCount};run.black=allBlack(image);return run;
+    };
+    const auto skybox=[&](float fade) {
+      Run run;XrCompositionLayerProjection layer{};f.runtime.trace.clear();const unsigned image=f.runtime.eyes[0].calls%2;
+      run.work=measurePass(f,[&]{check(f.renderer.renderSkybox(f.views,space,sky,layer,fade)==XR_SUCCESS,"B1 skybox render");});
+      run.accounting={f.runtime.trace,{},layer.viewCount};run.black=allBlack(image);return run;
+    };
+    const Run base=captured(0.0f);
+    std::snprintf(what,sizeof(what),"B1.a (%s) the plain frame draws the scene: the query is answered, and counts vertex and pixel shader work (one triangle an eye)",mode);
+    check(base.work.ok&&base.work.vs>=6&&base.work.ps>0&&!base.black,what);
+    const Run half=captured(0.5f);
+    std::snprintf(what,sizeof(what),"B1.b (%s) a fractional fade draws the scene and the fade pass over it: twice the vertex work",mode);
+    check(half.work.ok&&half.work.vs==2*base.work.vs&&half.work.ps>base.work.ps,what);
+    bool clearOnly=true,sameAccounting=true,blackPixels=true;
+    for(float level:{1.0f,1.0001f,2.0f,1e9f,std::numeric_limits<float>::infinity()}) {
+      const Run run=captured(level);
+      clearOnly=clearOnly&&run.work.ok&&run.work.vs==0&&run.work.ps==0&&run.work.primitives==0;
+      sameAccounting=sameAccounting&&run.accounting==base.accounting;
+      blackPixels=blackPixels&&run.black;
+    }
+    std::snprintf(what,sizeof(what),"B1.c (%s) A FULLY BLACK FRAME DRAWS NOTHING: zero vertex, pixel and primitive work for fade 1, 1.0001, 2, 1e9 and infinity",mode);
+    check(clearOnly,what);
+    std::snprintf(what,sizeof(what),"B1.d (%s) ...and its output is pure black on both eyes",mode);
+    check(blackPixels,what);
+    std::snprintf(what,sizeof(what),"B1.e (%s) ...with the per-frame accounting unchanged: the same runtime calls (acquire, wait, release an eye), the same observer begin/end on the same context, the same layer",mode);
+    check(sameAccounting&&base.accounting.events.size()>=4u&&base.accounting.trace==std::vector<std::string>({"A0","W0","R0","A1","W1","R1"}),what);
+    const Run after=captured(0.0f);
+    std::snprintf(what,sizeof(what),"B1.f (%s) the next plain frame draws the scene again, as before",mode);
+    check(after.work.ok&&after.work.vs==base.work.vs&&after.work.ps==base.work.ps&&!after.black&&after.accounting==base.accounting,what);
+
+    const Run skyBase=skybox(0.0f);
+    std::snprintf(what,sizeof(what),"B1.g (%s) the plain skybox frame draws the scene",mode);
+    check(skyBase.work.ok&&skyBase.work.vs>=6&&skyBase.work.ps>0,what);
+    const Run skyHalf=skybox(0.5f);
+    std::snprintf(what,sizeof(what),"B1.h (%s) a fractional fade over the skybox draws it and the fade pass",mode);
+    check(skyHalf.work.ok&&skyHalf.work.vs==2*skyBase.work.vs,what);
+    bool skyClear=true,skySame=true,skyBlack=true;
+    for(float level:{1.0f,2.0f,std::numeric_limits<float>::infinity()}) {
+      const Run run=skybox(level);
+      skyClear=skyClear&&run.work.ok&&run.work.vs==0&&run.work.ps==0&&run.work.primitives==0;
+      skySame=skySame&&run.accounting==skyBase.accounting;skyBlack=skyBlack&&run.black;
+    }
+    std::snprintf(what,sizeof(what),"B1.i (%s) A FULLY BLACK SKYBOX FRAME DRAWS NOTHING, is pure black, and acquires/waits/releases an eye as the plain one does",mode);
+    check(skyClear&&skyBlack&&skySame,what);
+    const Run skyAfter=skybox(0.0f);
+    std::snprintf(what,sizeof(what),"B1.j (%s) the next plain skybox frame draws again",mode);
+    check(skyAfter.work.ok&&skyAfter.work.vs==skyBase.work.vs&&!skyAfter.black,what);
+    std::snprintf(what,sizeof(what),"B1.k (%s) the GPU work of the black frames is complete at shutdown: the renderer shuts down cleanly and destroys both chains",mode);
+    check(f.renderer.shutdown()==XR_SUCCESS&&f.runtime.destroys==2,what);
+  }
+}
 
 // The renderer is a diagnostic pass which must borrow the game's immediate
 // context without changing it.  Keep this probe deliberately independent of
@@ -805,6 +902,8 @@ int selfTest(){
   skyboxSelfTest();
   fadeSelfTest(false);
   fadeSelfTest(true);
+  blackPassSelfTest(false);
+  blackPassSelfTest(true);
   desktopStateSelfTest();
   embeddedShaderPin();
   std::printf("openxr_stereo_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
