@@ -6,6 +6,7 @@
 #include "../../src/common/system_d3d11.h"
 #include "../../src/d3d11/journal_watch.h"
 #include "cull_cycle_cases.h"
+#include "mono_camera_cases.h"
 
 #include <d3d11.h>
 #include <fcntl.h>
@@ -25,6 +26,8 @@ namespace edvr {
 bool journalWatchActive() { return g_journalActive; }
 bool journalOnFootKnown() { return g_onFootKnown; }
 bool journalOnFoot() { return g_onFoot; }
+// production guard.cpp's crash-channel dependency (proxy.cpp), which the code hook the mono camera hooks use pulls in; as the other rigs stub it
+void breadcrumb(const char*) {}
 }
 
 using Microsoft::WRL::ComPtr;
@@ -68,6 +71,7 @@ int wmain(int argc, wchar_t** argv) {
     };
 
     cull_cases::runCullCycleCases(check);   // the probe cycle's own logic: schedule, windows, discard, pairs, statuses, the log tool's fixture
+    mono_cases::runMonoCameraCases(check);  // the mono camera hooks: the detour's decision, the gate, the lazy install, the observer, the real hooks
 
     // System32's d3d11 through common/system_d3d11.h, never an import: EDVR's proxy sits beside this exe.
     const auto createDevice = edvr::systemD3D11CreateDevice();
@@ -551,13 +555,14 @@ int wmain(int argc, wchar_t** argv) {
         check(ask7(&probe) == S_OK && probe == 0u, "cull_probe unset reads 0 (off), and the sentinel is overwritten");
         struct ProbeCase { const char* text; uint32_t code; };
         const ProbeCase probeCases[] = {{"off", 0}, {"all", 1}, {"camera", 2}, {"ui", 3}, {"sky", 4}, {"sizes", 5}, {"other", 6},
-                                        {"ALL", 1}, {"Camera", 2}, {"UI", 3}, {"Sizes", 5}, {"cameras", 0}, {"6", 0}, {"junk", 0}};
+                                        {"ALL", 1}, {"Camera", 2}, {"UI", 3}, {"Sizes", 5}, {"cameras", 0}, {"6", 0}, {"junk", 0},
+                                        {"mono", 0}, {"MONO", 0}, {"7", 0}};
         bool probesParse = true;
         for (const ProbeCase& c : probeCases) {
             edvr::Config::get().set("advanced.cull_probe", c.text);
             probesParse = probesParse && ask7(&probe) == S_OK && probe == c.code;
         }
-        check(probesParse, "cull_probe parses off, all, camera, ui, sky, sizes, other (any case) to 0..6; a near miss, a number and junk read 0 (off)");
+        check(probesParse, "cull_probe parses off, all, camera, ui, sky, sizes, other (any case) to 0..6; a near miss, a number and junk read 0 (off), and mono (this half's own, a seventh group) is never sent to the runtime: it reads 0 too");
         // ---- advanced.cull_probe = cycle (cull_cycle.h): this half drives the groups and sends the active one in the same field ----
         {
             using namespace edvr::cullcycle;
@@ -638,6 +643,73 @@ int wmain(int argc, wchar_t** argv) {
             edvr::Config::get().set("advanced.cull_probe", "measures");
             t += 10000;
             check(askAt(t) == S_OK && probe == 0u && g_driver.status() == Status::Idle && !counting(), "a near miss (measures) is not measure");
+            // The hooks go in lazily, on the first frame cycle, measure or mono is set, and not before.
+            edvr::monocam::uninstallForTest();
+            g_buildOverride.store(1);
+            edvr::Config::get().set("fix.cull_guard", "off");
+            edvr::Config::get().set("advanced.cull_probe", "off");
+            t += 10000;
+            check(askAt(t) == S_OK && !edvr::monocam::g_lazy.attempted(), "with cull_probe off the mono camera hooks are not touched (not even read)");
+            edvr::Config::get().set("advanced.cull_probe", "measure");
+            t += 10000;
+            check(askAt(t) == S_OK && edvr::monocam::g_lazy.attempted() && !edvr::monocam::g_lie.load(), "cull_probe = measure installs the observe side on its first frame, and tells no lie");
+            edvr::monocam::uninstallForTest();
+            edvr::Config::get().set("advanced.cull_probe", "cycle");
+            t += 10000;
+            check(askAt(t) == S_OK && edvr::monocam::g_lazy.attempted(), "cull_probe = cycle installs them on its first frame");
+            edvr::monocam::uninstallForTest();
+            edvr::Config::get().set("advanced.cull_probe", "camera");
+            t += 10000;
+            check(askAt(t) == S_OK && !edvr::monocam::g_lazy.attempted(), "a fixed runtime group (camera) does not touch the mono camera hooks");
+            edvr::monocam::uninstallForTest();            // mono: the steady form, and the cycle's seventh group. The runtime is never told 7; this half switches the mono camera's lie.
+            g_buildOverride.store(1);
+            edvr::Config::get().set("fix.cull_guard", "off");
+            edvr::Config::get().set("advanced.cull_probe", "mono");
+            t += 10000;
+            probe = 99;
+            check(askAt(t) == S_OK && probe == 0u && g_steadyMono.status() == Status::Running && edvr::monocam::g_lie.load() && g_driver.status() == Status::Idle && !counting(),
+                  "cull_probe = mono on build 332841 with no guard: the runtime is told off, the mono lie is on, and nothing is counted");
+            check(edvr::monocam::g_lazy.attempted() && !edvr::monocam::g_lazy.live() && (edvr::monocam::g_lazy.reason() != nullptr && std::strcmp(edvr::monocam::g_lazy.reason(), "not build 332841") == 0) && !g_monoHookLive.load(),
+                  "...the first such frame tried the hooks (this rig is not Elite, so they are inert, and no ', mono reads' field would be written)");
+            edvr::Config::get().set("fix.cull_guard", "symmetric");
+            t += 10000;
+            check(askAt(t) == S_OK && probe == 0u && g_steadyMono.status() == Status::IgnoredGuard && !edvr::monocam::g_lie.load(), "mono with a cull guard configured: the lie is off, status IgnoredGuard");
+            edvr::Config::get().set("fix.cull_guard", "off");
+            g_buildOverride.store(0);
+            t += 10000;
+            check(askAt(t) == S_OK && g_steadyMono.status() == Status::StoodDownBuild && !edvr::monocam::g_lie.load(), "mono on another build: the lie is off, status StoodDownBuild");
+            g_buildOverride.store(1);
+            edvr::Config::get().set("advanced.cull_probe", "MONO");
+            t += 10000;
+            check(askAt(t) == S_OK && g_steadyMono.status() == Status::Running && edvr::monocam::g_lie.load(), "the key is case-insensitive");
+            edvr::Config::get().set("advanced.cull_probe", "monos");
+            t += 10000;
+            check(askAt(t) == S_OK && probe == 0u && g_steadyMono.status() == Status::Idle && !edvr::monocam::g_lie.load(), "a near miss (monos) is not mono: the lie goes off");
+            edvr::Config::get().set("advanced.cull_probe", "all");
+            t += 10000;
+            check(askAt(t) == S_OK && probe == 1u && !edvr::monocam::g_lie.load(), "`all` keeps its meaning: the runtime's group 1, and no mono lie");
+            // The cycle: the seventh group is a mono window. The runtime is told 0 in it and the lie flag is on exactly there.
+            edvr::Config::get().set("advanced.cull_probe", "cycle");
+            t += 10000;
+            bool sequenceOk = true;
+            unsigned monoFrames = 0, allFrames = 0, otherFrames = 0;
+            for (unsigned i = 0; i < 14 * 200 + 400; ++i) {
+                t += 10000;
+                const bool answered = askAt(t) == S_OK;
+                const uint32_t scheduled = kSchedule[g_driver.cycle().slot()];
+                sequenceOk = sequenceOk && answered && probe == (scheduled == kMonoGroup ? 0u : scheduled) &&
+                             edvr::monocam::g_lie.load() == (scheduled == kMonoGroup);
+                monoFrames += scheduled == kMonoGroup;
+                allFrames += scheduled == 1u;
+                otherFrames += scheduled == 6u;
+            }
+            check(sequenceOk && g_driver.cycle().cyclesDone() >= 1 && monoFrames > 150 && allFrames > 150 && otherFrames > 150,
+                  "the cycle through beginFrame: a mono window tells the runtime group 0 and switches the lie on, every other window tells the runtime its own group with the lie off");
+            edvr::Config::get().set("advanced.cull_probe", "off");
+            t += 10000;
+            check(askAt(t) == S_OK && probe == 0u && !edvr::monocam::g_lie.load() && g_driver.status() == Status::Idle && g_steadyMono.status() == Status::Idle,
+                  "the key back at off: the lie flag is down and both statuses are idle");
+            edvr::monocam::uninstallForTest();
             table.setCullState(table.context, 0, 1.0f, 1.0f);            g_clockOverrideUs.store(0);
             g_buildOverride.store(-1);
             edvr::Config::get().set("fix.cull_guard", "PeRcEnT");

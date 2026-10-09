@@ -1259,6 +1259,44 @@ int main() {
               "...and the skeleton FindJoint: `mov [rsp+8],rbx` is 5 bytes, no displacement",
               "the FindJoint hook would be refused or stolen at the wrong length");
 
+        // The mono camera hooks (EliteDangerous64.exe+0x2841190 and +0x28634E0, build 332841; mono_camera_hook.cpp, advanced.cull_probe).
+        // The aspect getter is `movss xmm0,[rcx+70h]` and a return: F3 0F 10 41 70 is a FIVE-byte instruction with no rip-relative
+        // displacement, so CodeHook steals exactly five and the C3 after it is never touched.
+        const uint8_t aspectGetter[] = {0xF3, 0x0F, 0x10, 0x41, 0x70, 0xC3, 0xCC, 0xCC};
+        check(codeInstructionLength(aspectGetter, sizeof(aspectGetter), &disp) == 5 && disp == 0,
+              "...and the mono camera's aspect getter: `movss xmm0,[rcx+70h]` is 5 bytes, no displacement, so 5 are stolen",
+              "the mono aspect hook would be refused or stolen at the wrong length");
+        // The aspect writer (+0x28634E0): `40 53` is `push rbx` with a REX prefix, `48 83 EC 50` is `sub rsp,50h`: 2+4 = six bytes, the
+        // patch lands inside the third instruction (a movaps, which is never decoded), and six are stolen.
+        const uint8_t aspectWriter[] = {0x40, 0x53, 0x48, 0x83, 0xEC, 0x50, 0x0F, 0x29, 0x74, 0x24, 0x40, 0x48, 0x8B, 0xD9,
+                                        0x44, 0x0F, 0x29, 0x44, 0x24, 0x20, 0x44, 0x0F, 0x28, 0xC3};
+        check(codeInstructionLength(aspectWriter, sizeof(aspectWriter), &disp) == 2 && disp == 0 &&
+                  codeInstructionLength(aspectWriter + 2, sizeof(aspectWriter) - 2, &disp) == 4 && disp == 0,
+              "...and the aspect writer: `push rbx` with REX (2) and `sub rsp,50h` (4), six bytes stolen",
+              "the aspect-writer hook would be refused or stolen at the wrong length");
+        // movss is understood and nothing else with an F3 prefix is: the store form, a REX-prefixed form, a rip-relative load whose
+        // displacement must be reported, a register-register form, and the F3 forms that must be refused.
+        const uint8_t movssStore[] = {0xF3, 0x0F, 0x11, 0x41, 0x70};
+        const uint8_t movssRex[] = {0xF3, 0x41, 0x0F, 0x10, 0x41, 0x70};
+        const uint8_t movssRip[] = {0xF3, 0x0F, 0x10, 0x05, 0x10, 0x20, 0x30, 0x40};
+        const uint8_t movssReg[] = {0xF3, 0x0F, 0x10, 0xC1};
+        check(codeInstructionLength(movssStore, sizeof(movssStore), &disp) == 5 && disp == 0 &&
+                  codeInstructionLength(movssRex, sizeof(movssRex), &disp) == 6 && disp == 0 &&
+                  codeInstructionLength(movssRip, sizeof(movssRip), &disp) == 8 && disp == 4 &&
+                  codeInstructionLength(movssReg, sizeof(movssReg), &disp) == 4 && disp == 0,
+              "movss: the store form (5), a REX form (6), a rip-relative load (8, its displacement at offset 4) and a register form (4) are decoded",
+              "the movss forms of a getter prologue would be refused or mis-measured");
+        const uint8_t addss[] = {0xF3, 0x0F, 0x58, 0xC1};
+        const uint8_t pause[] = {0xF3, 0x90};
+        const uint8_t repPush[] = {0xF3, 0x53};
+        const uint8_t movssTruncated[] = {0xF3, 0x0F, 0x10};
+        const uint8_t movssNear[] = {0xF3, 0x0F, 0x0F, 0x41, 0x70};
+        check(codeInstructionLength(addss, sizeof(addss), &disp) == 0 && codeInstructionLength(pause, sizeof(pause), &disp) == 0 &&
+                  codeInstructionLength(repPush, sizeof(repPush), &disp) == 0 && codeInstructionLength(movssTruncated, sizeof(movssTruncated), &disp) == 0 &&
+                  codeInstructionLength(movssNear, sizeof(movssNear), &disp) == 0,
+              "...and every other F3 form is refused: addss, pause, a rep-prefixed push, a truncated movss, a neighbouring opcode",
+              "an F3 prefix would let an unknown SSE or rep instruction be relocated");
+
         // jmp rel32 -- a function that begins with a jump is a linker thunk or
         // somebody else's hook; following it would cut them out.
         const uint8_t jump[] = {0xE9, 0x00, 0x00, 0x00, 0x00};

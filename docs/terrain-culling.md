@@ -2,42 +2,60 @@
 
 ## Status
 
-- **State (2026-10-09):** the fov-getter patch this block planned (hook RVA
-  0x4E2F50, widen its output) is **WITHDRAWN** on verified disassembly; the
-  culler's input is **unidentified**. Standing from 09-23: the culler reacts
-  live to the `GetProjectionRaw` answer, not the matrix. Entry at the bottom.
-- **H-cam (leading, INFERRED):** the culler is a centred frustum from the eye
-  camera's aspect (recommended W/H, out[0]) and vFOV (Raw t+b). It explains the
-  old guard working with v=0: its horizontal widening came in as render-size
-  inflation, i.e. aspect. Candidate consumer: FUN_13ACC40 (double-precision VP).
-- **Corrections** (Elite build 332841, FileVersion 332841 / ProductVersion
-  4.4.1.1; the "332753" label was wrong): `FUN_1404e2f50` (RVA 0x4E2F50) returns
-  `{aspect = recommended W/H (not tangents), atan|t|+atan|b| (vertical),
-  atan|l|+atan|r| (horizontal)}`, not the old "r+b / l+t"; only out[0] and out[1]
-  are read, by the eye camera setter 0x2878DC0 and the UI scale at 0x2842AE3
-  (k = tan(0.782)/tan(vFOV/2)), so widening the getter resizes the UI.
+- **State (2026-10-09, round 5):** the culler's input is **unidentified**. The
+  fov-getter patch (hook RVA 0x4E2F50) is **WITHDRAWN**; the old guard (h=0.25,
+  v=0) removes about 6% of the squares. Round 5 is built, **NOT FLOWN**: a lie
+  on the MONO camera's aspect (`cull_probe = mono`, and the cycle's last window)
+  with observe-only hooks on who reads and who writes camera aspects. Dated
+  entry at the bottom.
+- **H-cam (INFERRED):** the culler is a centred frustum from some camera's
+  aspect and vFOV; it explains the old guard working with v=0 (its horizontal
+  widening came in as render-size inflation, i.e. aspect). It was written for
+  the eye camera, which round 4 contradicts (next bullet): the carrier, if H-cam
+  holds, is another camera, and the mono camera is the one found.
+- **Static eliminations, rounds 3-5** (READ, build 332841, nothing flown; dumps
+  in `analysis\decomp\`): the controller tick 0x107346A reads only out[1] of
+  `GetProjectionRaw`, into controller+0x30. Eye cameras build their frustum from
+  the kind-5 matrix (4F3770 inverts +0x1B0), so it is exact, not a centred
+  (aspect, vFOV) one. FUN_13ACC40 is "FSSRenderingComponent", not a culler. A
+  mono camera exists (2871D30, kind 0/3): its aspect is B+0x80, written only by
+  FUN_28634E0, default 16/9, and no terrain reader of it was found. The
+  AstroSurface chain uses camera 0's pose, a fov setting in degrees and the
+  viewport height (a LOD gate).
+- **UNRELIABLE (demoted 2026-10-09):** the 09-23 verdict "the culler follows
+  `GetProjectionRaw`, not the matrix". It rests on a pilot's judgement of
+  squares flickering at the periphery, in windows with a 10-degree outer trim
+  on and a 1.6% raw-versus-matrix difference. Do not build on it.
 - **Ruled out** (evidence under "Status detail"): the getter as the culler's
-  input, the 09-23 "same +19.4% ask" premise, H3, the union model, H2.
-- **Established** (`analysis\decomp\verify_20261009_cull2_*`): six
-  `GetProjectionRaw` call sites in three wrappers (0x4E2FA5 in the getter;
-  0x4E3C93 via 0x4E3C50, a quad pass, INFERRED sky; 0x4E42FA, 0x4E4351,
-  0x4E43A6, 0x4E43F4 in 0x4E4270, UI sizes); the getter's aspect comes from its
-  own GetRecommendedRenderTargetSize call, expected to return at 0x4E2FBE (the
-  census confirms). Static analysis found no culler.
+  input, the 09-23 "same +19.4% ask" premise, H3, the union model, H2,
+  FUN_13ACC40 as the consumer. Corrections to the old getter notes and the
+  established call sites moved to "Status detail" (2026-10-09, round 5).
 - **Flown 2026-10-09:** the manual probe cycle was unreadable by eye (squares
   flicker with head motion); the census found a caller, 0x1073470, off-thread.
 - **Temporary key:** `advanced.cull_probe` = off | all | camera | ui | sky |
-  sizes | other | cycle | measure, live. Lies need `fix.cull_guard` off and build
-  332841; a selected group also widens the aspect call's width. `measure` counts
-  with no lie, guard running or not.
+  sizes | other | mono | cycle | measure, live. Lies need `fix.cull_guard` off
+  and build 332841; a selected group also widens the aspect call's width. `all`
+  is GetProjectionRaw plus the aspect lie only: it does not include `mono`.
+  `measure` counts with no lie, guard running or not. With cycle, measure or
+  mono set, two hooks go in once (build 332841 only, one log line says whether):
+  the mono camera's aspect getter (RVA 0x2841190; only its call returning to
+  0x2871D89, the mono filler, is lied to, by 1.30) and an observe-only one on
+  the aspect writer (0x28634E0).
 - **Next flight** (Quest 3 or Crystal Super): landed where squares show at the
   edges, head still and forward, every fov trim 0. A, the positive control:
   `cull_probe = measure`, `cull_guard = off` 60 s, then `symmetric` (it arms
   live, no relaunch: native_cull_guard.h re-arms on the key's change, the game
   rebuilds its targets in about 14 s) and 60 s more once the log says live. B:
-  `cull_guard = off`, `cull_probe = cycle` about 4 minutes, then `off`. Read
-  both with `edvr_log.py --tally cull`: A must show live above off, or the
-  counter is blind; in B the group that rises names the culler's input.
+  `cull_guard = off`, `cull_probe = cycle` about 4 minutes (14 windows of 2.0 s,
+  the last one `mono`), then `off`. Read both with `edvr_log.py --tally cull`:
+  A must show live above off, or the counter is blind; in B the group that
+  rises names the culler's input, `mono` included. The log's mono lines say
+  whether the hooks went in and who calls the aspect getter and writer; a mono
+  window with `mono reads` 0 means the filler was not reached and says nothing.
+  C, by eye: `cull_probe = mono` held for a minute against `off`.
+
+## The bug in short
+
 *Frontier issue [72609](https://issues.frontierstore.net/issue-detail/72609) —
 "Culling of planet surface in VR too aggressive", a recurrence of
 [37119](https://issues.frontierstore.net/issue-detail/37119), which was
@@ -95,6 +113,11 @@ culler follows the report, not the optics.
   edge, 1.6% of span.
 - The getter's "r+b / l+t" output pairing — wrong: atan|t|+atan|b| vertical,
   atan|l|+atan|r| horizontal, aspect first (2026-10-09).
+- FUN_13ACC40 as H-cam's consumer — refuted 2026-10-09 (round 4): it is
+  "FSSRenderingComponent".
+- The 09-23 verdict "the culler follows `GetProjectionRaw`, not the matrix" —
+  demoted to UNRELIABLE 2026-10-09 (not ruled out): a pilot's judgement under
+  periphery flicker, with a 10-degree outer trim on and a 1.6% difference.
 
 **Established, moved from Status 2026-10-09:** the game wraps IVRSystem in a
 class (vtable VA 0x144E245B8; instance heap-held), loads
@@ -104,6 +127,21 @@ class (vtable VA 0x144E245B8; instance heap-held), loads
 with row 3 negated, asymmetry (m02/m12) preserved; the renderer's path
 (canted-projection.md, the fold experiment). The LibOVR implementation's
 vtable is at VA 0x144E243F0 with parallel slots (slot 25 -> RVA 0x4E2F30).
+
+**Corrections and established, moved from Status 2026-10-09 (round 5):**
+
+- **Corrections** (Elite build 332841, FileVersion 332841 / ProductVersion
+  4.4.1.1; the "332753" label was wrong): `FUN_1404e2f50` (RVA 0x4E2F50) returns
+  `{aspect = recommended W/H (not tangents), atan|t|+atan|b| (vertical),
+  atan|l|+atan|r| (horizontal)}`, not the old "r+b / l+t"; only out[0] and out[1]
+  are read, by the eye camera setter 0x2878DC0 and the UI scale at 0x2842AE3
+  (k = tan(0.782)/tan(vFOV/2)), so widening the getter resizes the UI.
+- **Established** (`analysis\decomp\verify_20261009_cull2_*`): six
+  `GetProjectionRaw` call sites in three wrappers (0x4E2FA5 in the getter;
+  0x4E3C93 via 0x4E3C50, a quad pass, INFERRED sky; 0x4E42FA, 0x4E4351,
+  0x4E43A6, 0x4E43F4 in 0x4E4270, UI sizes); the getter's aspect comes from its
+  own GetRecommendedRenderTargetSize call, expected to return at 0x4E2FBE (the
+  census confirms). Static analysis found no culler.
 
 ---
 
@@ -594,7 +632,8 @@ it directly.
   (aspect, vFOV) fields. It fits the old guard flying with v=0: that guard's
   horizontal widening reached the game as a bigger render size, i.e. aspect.
   FUN_13ACC40, which builds a double-precision view-projection from those
-  fields, is the candidate consumer.
+  fields, is the candidate consumer (struck later the same day, round 4: it is
+  "FSSRenderingComponent"; see the rounds 3-5 entry below).
 - `advanced.cull_probe = cycle` drives the groups itself so the result is a
   number and not an impression (the black squares flicker as the head moves, so
   20 s windows cannot be judged by eye): off, all, off, camera, off, ui, off,
@@ -628,3 +667,75 @@ it directly.
   `cull_guard_headsets` runs it everywhere. Not yet flown on the native runtime:
   if the log has not said live 60 s after the switch, relaunch with the guard on.
 - The same flight carries the canted-display test keys (canted-projection.md).
+
+## 2026-10-09, rounds 3-5 — static eliminations, and the mono camera
+
+Offline disassembly of Elite build 332841 again (dumps in `analysis\decomp\`),
+then a test build. Nothing here is flown. **READ** is what the instructions say;
+**INFERRED** is what follows.
+
+**READ**
+
+- The controller tick 0x107346A (the census's off-thread caller, 0x1073470)
+  reads only out[1] of `GetProjectionRaw`, into controller+0x30.
+- Eye cameras build their frustum from the kind-5 matrix; 4F3770 inverts
+  +0x1B0. It is exact, not a centred (aspect, vFOV) frustum.
+- FUN_13ACC40, the double-precision view-projection builder named as H-cam's
+  candidate consumer, is "FSSRenderingComponent".
+- A mono camera exists, built at 2871D30 (kind 0/3). Its aspect field is B+0x80,
+  written only by FUN_28634E0 (rcx = B, edx = width, r8d = height, xmm3 = the
+  minimum aspect, a float* out at [rsp+0x28] at entry, written conditionally),
+  and defaults to 16/9. The getter at 0x2841190 reads a camera's aspect
+  (`F3 0F 10 41 70 C3`, `movss xmm0,[rcx+70h]`, `ret`); the mono filler calls it at
+  0x2871D86 (`call qword ptr [rax+0x40]`), which returns to 0x2871D89 and stores
+  the result at 0x2871D92. No terrain reader of the mono camera was found.
+- The AstroSurface chain uses camera 0's pose, a fov setting in degrees and the
+  viewport height (a LOD gate), as the earlier entry said.
+**Demoted, not ruled out:** the 09-23 verdict that the culler follows
+`GetProjectionRaw` and not the matrix. It was a pilot's judgement of flickering
+squares at the periphery, with a 10-degree outer trim on and a 1.6% difference
+between the windows (the 10-09 entry above). UNRELIABLE: nothing is built on it.
+
+**INFERRED**
+
+- The probe's eye groups (all, camera, ui, and the aspect lie with them) cannot
+  be expected to move an eye camera's frustum, which does not use those values.
+  If H-cam holds, the carrier is another camera, and the mono camera is the one
+  that exists.
+
+**What the test build does.** `advanced.cull_probe = mono` and the cycle's last
+window multiply the mono camera's aspect by 1.30. `all` keeps its meaning
+(`GetProjectionRaw` and the aspect lie only).
+
+- The hook is on the getter at 0x2841190. It goes in lazily, on the first frame
+  `cull_probe` is cycle, measure or mono, once, through a gate: PE stamp
+  1788384820, image size 104894464 and the bytes of both functions. On any
+  mismatch nothing is patched and one line says why: `cull probe: mono windows
+  multiply the mono camera's aspect by 1.30 (hook live | hook inert: <why>)`.
+- The detour calls the original and returns its value untouched, except when the
+  game's return address is 0x2871D89 AND a mono window is active: then
+  aspect * 1.30. It reads the return address because the relay jumps into the
+  detour. Every other caller, and every call while no window is active or the
+  key is off, gets the original bit for bit (with the key off the relay does not
+  enter the detour at all).
+- Two observe-only records, written at the frame boundary: the first sight of
+  each distinct return address that calls the getter (16 at most; the line
+  names the mono filler), and one line per call of FUN_28634E0 (50 at most:
+  width, height, the minimum aspect, `*out` before and after, the return
+  address). The writer's hook calls the original with its arguments and returns
+  its result.
+- The cycle is now 14 windows: off, all, off, camera, off, ui, off, sky, off,
+  sizes, off, other, off, mono. `mono` is paired with the next cycle's first off
+  window like any group. With the hook live every window line ends `, mono reads
+  N`, the calls from 0x2871D89 over its counted frames; `--tally cull` tables
+  it by group and prints the hooks' own lines. A steady `mono` run writes no
+  windows, only the hooks' lines.
+
+**Reading it.** A mono window whose terrain draws and indices rise against its
+two off neighbours names the mono camera's frustum as the culler's input. A
+mono window with `mono reads` above zero and no rise retires the aspect read
+through that one call, not the mono camera: the observe lines list every other
+caller of the getter and every call of the writer, which is where to look next.
+A mono window with `mono reads` 0 says nothing (the filler was not reached in
+that scene). The positive control (`measure`, flight A) still has to show live
+above off first.

@@ -13,12 +13,15 @@
 //   index counts vary with tile LOD. vscreen.cpp's draw path already holds that VS hash; counting is one relaxed add there, and
 //   only while a cycle runs. The eye is the scene depth pair's (depthProbeCurrentSceneEyeOf, as celestial_motion.cpp reads it).
 //
-//   THE SCHEDULE (kSchedule, CullProbe codes): off, all, off, camera, off, ui, off, sky, off, sizes, off, other; 2.0 s windows by
-//   QPC. The first 30 frames of every window are discarded: the runtime applies the group it was told and a culler on another
-//   thread may lag several frames. A window logs its mean draws and indices per eye per frame and the mean head angular speed
-//   over its counted frames, so windows with head motion can be excluded (tools\edvr_log.py --tally cull). When a cycle's last
-//   window has been followed by the next cycle's first off window, each group's mean less the mean of its two neighbouring off
-//   windows is logged.
+//   THE SCHEDULE (kSchedule, CullProbe codes): off, all, off, camera, off, ui, off, sky, off, sizes, off, other, off, mono; 2.0 s
+//   windows by QPC. `mono` (code 7) is this half's own and is not a runtime group: its window multiplies the MONO camera's aspect
+//   by 1.30 through the hook in mono_camera_hook.cpp (the runtime is told group 0). The first 30 frames of every window are
+//   discarded: the runtime applies the group it was told and a culler on another thread may lag several frames. A window logs its
+//   mean draws and indices per eye per frame and the mean head angular speed over its counted frames, so windows with head motion
+//   can be excluded (tools\edvr_log.py --tally cull); with the mono hook live it also logs how many times the mono filler read the
+//   mono camera's aspect over its counted frames (", mono reads N"; the line is without it when the hook is not live). When a
+//   cycle's last window has been followed by the next cycle's first off window, each group's mean less the mean of its two
+//   neighbouring off windows is logged.
 //
 //   MEASURE (`advanced.cull_probe = measure`): the same windows and the same counting with NO lies, and each window labelled by the
 //   cull guard's stage instead of a probe group (off, waiting, adopting, live): the positive control. The old guard
@@ -35,17 +38,21 @@
 
 namespace edvr::cullcycle {
 
-constexpr unsigned kWindows = 12;
+constexpr unsigned kWindows = 14;
 constexpr unsigned kDiscardFrames = 30;
 constexpr uint64_t kWindowUs = 2000000;
-// advanced.cull_probe codes (EdvrNativeFrameOutput::cullProbe): 0 off, 1 all, 2 camera, 3 ui, 4 sky, 5 sizes, 6 other.
-constexpr uint32_t kSchedule[kWindows] = {0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6};
+// advanced.cull_probe codes (EdvrNativeFrameOutput::cullProbe): 0 off, 1 all, 2 camera, 3 ui, 4 sky, 5 sizes, 6 other; and this
+// half's own 7, mono, which the runtime is never told (native_frame.cpp sends 0 and switches the mono camera hook's lie instead).
+constexpr uint32_t kMonoGroup = 7;
+constexpr uint32_t kSchedule[kWindows] = {0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, kMonoGroup};
+// What a mono window multiplies the mono camera's aspect by.
+constexpr float kMonoFactor = 1.30f;
 // Build 332841, the pair every build-keyed hook checks (and the runtime's probe is gated on).
 constexpr uint32_t kBuildStamp = 1788384820u, kBuildImageSize = 104894464u;
 
 inline const char* groupName(uint32_t group) {
-    static const char* const kNames[] = {"off", "all", "camera", "ui", "sky", "sizes", "other"};
-    return group < 7 ? kNames[group] : "?";
+    static const char* const kNames[] = {"off", "all", "camera", "ui", "sky", "sizes", "other", "mono"};
+    return group < 8 ? kNames[group] : "?";
 }
 // The cull guard's stage as this half can tell it: 0 off (not configured), 1 waiting (configured, nothing asked of the game yet, or
 // inert -- the channel carries stage 0 for both), 2 adopting (the game is asked for bigger targets, still told the truth), 3 live.
@@ -64,6 +71,12 @@ inline void noteTerrainDraw(int eye, uint32_t count, uint32_t instances) noexcep
     g_draws[eye].fetch_add(1, std::memory_order_relaxed);
     g_indices[eye].fetch_add(static_cast<uint64_t>(count) * (instances ? instances : 1u), std::memory_order_relaxed);
 }
+// The mono camera hook's read counter (mono_camera_core.h counts, the frame boundary takes) and whether that hook is live; when it
+// is not, a window carries no ", mono reads" field. kNoMonoReads is "the hook is not live" as the argument of Cycle::beginFrame.
+constexpr uint32_t kNoMonoReads = 0xFFFFFFFFu;
+inline std::atomic<uint32_t> g_monoReads{0};
+inline std::atomic<bool> g_monoHookLive{false};
+inline void noteMonoRead() noexcept { g_monoReads.fetch_add(1, std::memory_order_relaxed); }
 // Rig only: a nonzero value is "now" in microseconds, and 0 or 1 says whether the executable is build 332841 (-1 reads it).
 inline std::atomic<uint64_t> g_clockOverrideUs{0};
 inline std::atomic<int> g_buildOverride{-1};
@@ -89,7 +102,8 @@ inline double rotationDegrees(const float* a, const float* b) {
 struct Window {
     uint64_t number = 0;
     uint32_t group = 0, frames = 0, stage = 0;
-    bool measure = false;
+    bool measure = false, haveReads = false;
+    uint64_t monoReads = 0;
     double draws[2] = {}, indices[2] = {}, head = 0.0;
 };
 
@@ -98,10 +112,12 @@ public:
     explicit Cycle(bool measure = false) : measure_(measure) {}
     // One frame boundary. `draws` and `indices` are what the frame that just ended counted, per eye; `head` is the head pose at
     // this boundary (row-major 3x4) or null; `stage` is the cull guard's (stageName), which only a measure run reads. Returns the
-    // CullProbe code to tell the runtime for the frame now beginning: the schedule's, or always 0 when measuring.
+    // CullProbe code to tell the runtime for the frame now beginning: the schedule's, or always 0 when measuring. `monoReads` is
+    // how many times the mono filler read the mono camera's aspect in the frame that just ended, or kNoMonoReads when the hook is
+    // not live (a window that saw any frame with a count writes ", mono reads N", the total over its counted frames).
     template <class Sink>
     uint32_t beginFrame(uint64_t nowUs, const float* head, const uint32_t draws[2], const uint64_t indices[2], Sink&& sink,
-                        uint32_t stage = 0) {
+                        uint32_t stage = 0, uint32_t monoReads = kNoMonoReads) {
         if (!started_) {
             started_ = true;
             slot_ = 0;
@@ -127,12 +143,14 @@ public:
         if (head && prevHeadValid_ && nowUs > prevUs_ && nowUs - prevUs_ <= 1000000ull)
             speed = rotationDegrees(prevHead_, head) / (static_cast<double>(nowUs - prevUs_) * 1e-6);
         ++seen_;
+        if (monoReads != kNoMonoReads) haveReads_ = true;
         if (seen_ > kDiscardFrames) {
             ++counted_;
             for (int e = 0; e < 2; ++e) {
                 sumDraws_[e] += draws[e];
                 sumIndices_[e] += static_cast<double>(indices[e]);
             }
+            if (monoReads != kNoMonoReads) sumReads_ += monoReads;
             if (speed >= 0.0) { sumHead_ += speed; ++headSamples_; }
         }
         setPrevious(nowUs, head);
@@ -150,6 +168,8 @@ private:
         seen_ = counted_ = headSamples_ = 0;
         for (int e = 0; e < 2; ++e) sumDraws_[e] = sumIndices_[e] = 0.0;
         sumHead_ = 0.0;
+        sumReads_ = 0;
+        haveReads_ = false;
     }
     void setPrevious(uint64_t nowUs, const float* head) {
         prevUs_ = nowUs;
@@ -171,13 +191,16 @@ private:
             }
         }
         w.head = headSamples_ ? sumHead_ / headSamples_ : 0.0;
-        char line[256], label[48];
+        w.haveReads = haveReads_;
+        w.monoReads = sumReads_;
+        char line[320], label[48], reads[40] = "";
         if (measure_) std::snprintf(label, sizeof(label), "measure[guard %s]", stageName(w.stage));
         else std::snprintf(label, sizeof(label), "%s", groupName(w.group));
+        if (w.haveReads) std::snprintf(reads, sizeof(reads), ", mono reads %llu", static_cast<unsigned long long>(w.monoReads));
         std::snprintf(line, sizeof(line),
-                      "cull cycle: %s window %llu: frames %u, terrain draws L/R mean %.2f/%.2f, indices L/R mean %.1f/%.1f, head %.1f deg/s",
+                      "cull cycle: %s window %llu: frames %u, terrain draws L/R mean %.2f/%.2f, indices L/R mean %.1f/%.1f, head %.1f deg/s%s",
                       label, static_cast<unsigned long long>(w.number), w.frames, w.draws[0], w.draws[1],
-                      w.indices[0], w.indices[1], w.head);
+                      w.indices[0], w.indices[1], w.head, reads);
         sink(line);
         if (measure_) {
             ++closed_;
@@ -186,7 +209,7 @@ private:
             return;
         }
         current_[slot_] = w;
-        // A cycle's last group ('other') is paired with the NEXT cycle's first off window, so its pairs are written when
+        // A cycle's last group ('mono') is paired with the NEXT cycle's first off window, so its pairs are written when
         // that window closes.
         if (slot_ == 0 && haveDone_) { writePairs(w, sink); haveDone_ = false; }
         if (slot_ == kWindows - 1) {
@@ -233,11 +256,11 @@ private:
         }
     }
 
-    bool measure_ = false, started_ = false, prevHeadValid_ = false, haveDone_ = false;
+    bool measure_ = false, started_ = false, prevHeadValid_ = false, haveDone_ = false, haveReads_ = false;
     unsigned slot_ = 0, seen_ = 0, counted_ = 0, headSamples_ = 0;
     uint32_t stage_ = 0;
     uint32_t cycles_ = 0;
-    uint64_t closed_ = 0, startUs_ = 0, prevUs_ = 0;
+    uint64_t closed_ = 0, startUs_ = 0, prevUs_ = 0, sumReads_ = 0;
     double sumDraws_[2] = {}, sumIndices_[2] = {}, sumHead_ = 0.0;
     float prevHead_[12] = {};
     Window current_[kWindows], done_[kWindows];
@@ -276,10 +299,11 @@ public:
                 g_draws[e].store(0, std::memory_order_relaxed);
                 g_indices[e].store(0, std::memory_order_relaxed);
             }
+            g_monoReads.store(0, std::memory_order_relaxed);
             switch (want) {
                 case Status::Running:
-                    sink("cull cycle: running -- 2.0 s windows, off, all, off, camera, off, ui, off, sky, off, sizes, off, other; the first 30 frames of each "
-                         "discarded; planet-terrain draws counted per eye");
+                    sink("cull cycle: running -- 2.0 s windows, off, all, off, camera, off, ui, off, sky, off, sizes, off, other, off, mono; the first 30 "
+                         "frames of each discarded; planet-terrain draws counted per eye");
                     break;
                 case Status::Measuring:
                     sink("cull cycle: measuring -- 2.0 s windows labelled by the cull guard's stage (off, waiting, adopting, live), the first 30 frames of each "
@@ -297,7 +321,9 @@ public:
             draws[e] = g_draws[e].exchange(0, std::memory_order_relaxed);
             indices[e] = g_indices[e].exchange(0, std::memory_order_relaxed);
         }
-        return cycle_.beginFrame(nowUs, head, draws, indices, sink, guardStage);
+        const uint32_t reads = g_monoReads.exchange(0, std::memory_order_relaxed);
+        return cycle_.beginFrame(nowUs, head, draws, indices, sink, guardStage,
+                                 g_monoHookLive.load(std::memory_order_relaxed) ? reads : kNoMonoReads);
     }
     Status status() const { return status_; }
     const Cycle& cycle() const { return cycle_; }
@@ -308,5 +334,34 @@ private:
 };
 
 inline Driver g_driver;
+
+// `advanced.cull_probe = mono`: the steady one-group mode. The mono camera's aspect is multiplied by kMonoFactor on every frame, with the
+// same two gates the cycle has, in the same order (a cull guard wins over a wrong build). No windows and nothing counted: the
+// manual flight reads the squares by eye, as the other fixed groups do. Every change of status is logged once.
+class SteadyMono {
+public:
+    template <class Sink>
+    bool frame(bool requested, bool guardConfigured, bool build332841, Sink&& sink) {
+        const Status want = statusFor(requested, guardConfigured, build332841);
+        if (want != status_) {
+            switch (want) {
+                case Status::Running: sink("cull probe: mono -- the mono camera's aspect is multiplied by 1.30 on every frame"); break;
+                case Status::IgnoredGuard: sink("cull probe: mono ignored while the cull guard runs"); break;
+                case Status::StoodDownBuild: sink("cull probe: mono standing down -- not build 332841"); break;
+                default:
+                    if (status_ == Status::Running) sink("cull probe: mono stopped");
+                    break;
+            }
+            status_ = want;
+        }
+        return status_ == Status::Running;
+    }
+    Status status() const { return status_; }
+
+private:
+    Status status_ = Status::Idle;
+};
+
+inline SteadyMono g_steadyMono;
 
 }  // namespace edvr::cullcycle

@@ -1,6 +1,8 @@
 #include "../common/native_frame.h"
 
 #include "cull_cycle.h"
+#include "mono_camera_core.h"
+#include "mono_camera_hook.h"
 #include "../common/comfort_fade.h"
 #include "../common/config.h"
 #include "../common/frame_flag.h"
@@ -116,7 +118,9 @@ uint32_t cullChannel(const std::string& value) {
 }
 
 // advanced.cull_probe (the terrain-culling arc, docs\terrain-culling.md): 0 off,
-// 1 all, 2 camera, 3 ui, 4 sky, 5 sizes, 6 other. Anything else is off.
+// 1 all, 2 camera, 3 ui, 4 sky, 5 sizes, 6 other. Anything else is off: cycle,
+// measure and mono are this half's own (cull_cycle.h, mono_camera_core.h) and the
+// runtime is never told them.
 uint32_t cullProbe(const std::string& value) {
     static const char* const kNames[] = {"off", "all", "camera", "ui", "sky", "sizes", "other"};
     for (uint32_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i) {
@@ -440,11 +444,22 @@ HRESULT WINAPI beginFrame(void* context, const EdvrNativeFrameInput* input,
     const bool measureRequested = wantsProbe && _stricmp(probeText.c_str(), "measure") == 0;
     const uint32_t guardState = edvr::decodeCullGuardState(edvr::cullGuardStatePacked()).stage;
     const uint32_t guardStage = result.cullMode == 0 ? 0u : 1u + (guardState > 2u ? 2u : guardState);
+    // `mono` is the steady form of the cycle's seventh group: the mono camera's aspect is multiplied by 1.30 on every frame
+    // (mono_camera_core.h). It is this half's own, never sent to the runtime, which reads it as off.
+    const bool monoRequested = wantsProbe && _stricmp(probeText.c_str(), "mono") == 0;
+    const auto logLine = [](const char* line) { edvr::Log::get().note("%s", line); };
+    // The mono camera hooks go in on the first frame any of the three keys is set (and only then), before the driver reads their
+    // counter; their relay gate follows the key afterwards.
+    edvr::monocam::frame(cycleRequested || measureRequested || monoRequested, logLine);
     const uint32_t cycleGroup = edvr::cullcycle::g_driver.frame(
         cycleRequested, measureRequested, result.cullMode != 0, eliteIsBuild332841(), guardStage, cycleClockUs(),
-        physicalValid ? input->physicalHead : nullptr,
-        [](const char* line) { edvr::Log::get().note("%s", line); });
-    if (cycleRequested) result.cullProbe = cycleGroup;
+        physicalValid ? input->physicalHead : nullptr, logLine);
+    const bool steadyMono = edvr::cullcycle::g_steadyMono.frame(
+        monoRequested, result.cullMode != 0, eliteIsBuild332841(), logLine);
+    const bool cycleMono = cycleRequested && cycleGroup == edvr::cullcycle::kMonoGroup;
+    // The runtime is told group 0 for a mono window; the mono camera's lie is this half's switch.
+    if (cycleRequested) result.cullProbe = cycleMono ? 0u : cycleGroup;
+    edvr::monocam::g_lie.store(cycleMono || steadyMono, std::memory_order_relaxed);
     // The worn headset's entry in each of the three lists, resolved from the
     // last render-settings query's labels and cached between changes.
     uint32_t trim[kTrimCount] = {0, 0, 0};
