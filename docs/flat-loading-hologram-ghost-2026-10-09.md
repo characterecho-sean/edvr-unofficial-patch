@@ -4,7 +4,7 @@
 
 - Symptom: flat, Epic, DLSS, SS 1.0, 3840x2160. The loading screen's hologram ghosts and smears.
   DLSS off: gone. fix.ui_quality off: remains. SS < 1: gone.
-- State: fix built (blank-scene decline in the HDR route), not flown. Flat only; VR untouched. No key (Sean: no A/B).
+- State: FIXED, FLOWN OK 2026-10-09 (Sean: "Fixed") on b0f4020c: blank-scene decline in the HDR route. Settlement/open-ground walk not separately reported. Flat only; VR untouched. No key (Sean: no A/B).
 - Evidence so far (log 141012, build 1f27a834), loading frames: HDR route treats 410 of 410 frames;
   `flat source` window says source-free-frames=450, source-free-treated=450 (section 104: selected with
   no pool draw, every pixel on the camera term); `flat camera rows` max-err 1e-7 (camera static, so the
@@ -32,3 +32,4 @@
 ## Journal
 
 - 2026-10-09: log read, instrument added (flat_runtime.cpp noteSourceFreeContent, log only; flat only).
+- 2026-10-09: b0f4020c flown, ghost gone (Sean). Open: confirm source-free frames in a settlement/open ground are still treated (blank-scene-declined ~ 0 there).
